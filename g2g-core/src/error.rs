@@ -64,6 +64,8 @@ pub enum G2gError {
     RtspStream,
     // a path an element opens does not exist, with the path logged by the element
     FileNotFound,
+    // the user closed the window a display sink presents to
+    WindowClosed,
 }
 
 // the stage of a network session that failed

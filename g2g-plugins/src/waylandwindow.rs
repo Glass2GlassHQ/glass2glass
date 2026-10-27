@@ -12,7 +12,7 @@
 //! The first `xdg` configure signals the sink's readiness handshake, and a frame
 //! that arrives before the surface is mappable is held and drawn then.
 
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -25,7 +25,7 @@ use smithay_client_toolkit::{
     delegate_xdg_window,
     output::{OutputHandler, OutputState},
     reexports::calloop::{
-        channel::{Channel, Event as ChanEvent},
+        channel::{Channel, Event as ChanEvent, Sender},
         EventLoop,
     },
     reexports::calloop_wayland_source::WaylandSource,
@@ -50,7 +50,7 @@ use g2g_core::log::Target;
 use g2g_core::metrics::{monotonic_ns, LatencyHistogram};
 #[cfg(feature = "wgpu-present")]
 use g2g_core::Caps;
-use g2g_core::G2gError;
+use g2g_core::{G2gError, HardwareError};
 
 pub(crate) enum WorkerCmd<F> {
     Frame {
@@ -113,6 +113,36 @@ pub(crate) struct WorkerChannels<F> {
     pub(crate) presented: Arc<AtomicU64>,
     pub(crate) latency: Arc<LatencyHistogram>,
     pub(crate) ready: Arc<Handshake>,
+    pub(crate) window_closed: Arc<AtomicBool>,
+}
+
+pub(crate) async fn present_on_worker<F>(
+    tx: &Sender<WorkerCmd<F>>,
+    frame: F,
+    arrival_ns: u64,
+    window_closed: &AtomicBool,
+) -> Result<(), G2gError> {
+    let (ack, presented) = tokio::sync::oneshot::channel();
+    if tx
+        .send(WorkerCmd::Frame {
+            frame,
+            arrival_ns,
+            ack,
+        })
+        .is_err()
+        || presented.await.is_err()
+    {
+        return Err(worker_gone(window_closed));
+    }
+    Ok(())
+}
+
+pub(crate) fn worker_gone(window_closed: &AtomicBool) -> G2gError {
+    if window_closed.load(Ordering::Acquire) {
+        G2gError::WindowClosed
+    } else {
+        G2gError::Hardware(HardwareError::Other)
+    }
 }
 
 /// Open the Wayland window, build the sink's renderer over its surface, and run
@@ -173,6 +203,7 @@ pub(crate) fn run_window<R: WindowRenderer>(
         ready: Some(channels.ready),
         presented: channels.presented,
         latency: channels.latency,
+        window_closed: channels.window_closed,
         pending: None,
     };
 
@@ -226,6 +257,7 @@ struct WindowWorker<R: WindowRenderer> {
     ready: Option<Arc<Handshake>>,
     presented: Arc<AtomicU64>,
     latency: Arc<LatencyHistogram>,
+    window_closed: Arc<AtomicBool>,
     /// Frame that arrived before the surface was mappable.
     pending: Option<(R::Frame, u64, tokio::sync::oneshot::Sender<()>)>,
 }
@@ -325,6 +357,7 @@ impl<R: WindowRenderer> CompositorHandler for WindowWorker<R> {
 
 impl<R: WindowRenderer> WindowHandler for WindowWorker<R> {
     fn request_close(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &Window) {
+        self.window_closed.store(true, Ordering::Release);
         self.exit = true;
     }
 
@@ -373,3 +406,26 @@ delegate_output!(@<R: WindowRenderer> WindowWorker<R>);
 delegate_xdg_shell!(@<R: WindowRenderer> WindowWorker<R>);
 delegate_xdg_window!(@<R: WindowRenderer> WindowWorker<R>);
 delegate_registry!(@<R: WindowRenderer> WindowWorker<R>);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use g2g_core::runtime::block_on;
+    use smithay_client_toolkit::reexports::calloop::channel::channel;
+
+    #[test]
+    fn a_frame_for_a_window_the_user_closed_fails_with_window_closed() {
+        let (tx, rx) = channel::<WorkerCmd<()>>();
+        drop(rx);
+        let window_closed = AtomicBool::new(true);
+        assert_eq!(
+            block_on(present_on_worker(&tx, (), 0, &window_closed)),
+            Err(G2gError::WindowClosed)
+        );
+        window_closed.store(false, Ordering::Release);
+        assert_eq!(
+            block_on(present_on_worker(&tx, (), 0, &window_closed)),
+            Err(G2gError::Hardware(HardwareError::Other))
+        );
+    }
+}

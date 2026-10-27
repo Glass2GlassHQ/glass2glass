@@ -55,7 +55,7 @@
 
 use core::future::Future;
 use core::pin::Pin;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -83,7 +83,7 @@ use crate::cudadeviceid::{
 };
 use crate::glnv12::{GlMode, GlState};
 use crate::glwindow::{open_cuda_display, run_gl_window, FramePresenter};
-use crate::waylandwindow::{WindowParams, WorkerChannels, WorkerCmd};
+use crate::waylandwindow::{present_on_worker, WindowParams, WorkerChannels, WorkerCmd};
 use g2g_core::log::Target;
 
 /// Device-buffer pool headroom the sink asks the producer to keep resident:
@@ -121,6 +121,7 @@ pub struct CudaGlSink {
     /// Colorimetry the worker built its convert program for.
     colorimetry: Colorimetry,
     frames_presented: Arc<AtomicU64>,
+    window_closed: Arc<AtomicBool>,
     latency: Arc<LatencyHistogram>,
     /// PTS pacing + QoS late-drop, on top of the worker's swap-paced ack: idle
     /// until the runner hands over a clock, and the default lateness bound never
@@ -160,6 +161,7 @@ impl CudaGlSink {
             height: 0,
             colorimetry: Colorimetry::UNKNOWN,
             frames_presented: Arc::new(AtomicU64::new(0)),
+            window_closed: Arc::default(),
             latency: Arc::new(LatencyHistogram::new()),
             pacer: PresentationPacer::for_video_sink(),
             cuda_device_id: DEFAULT_CUDA_DEVICE_ID,
@@ -373,6 +375,7 @@ impl AsyncElement for CudaGlSink {
 
         let (tx, rx) = channel::<WorkerCmd<OwnedCudaBuffer>>();
         let presented = Arc::clone(&self.frames_presented);
+        let window_closed = Arc::clone(&self.window_closed);
         let latency = Arc::clone(&self.latency);
         let params = WindowParams {
             width: w,
@@ -395,6 +398,7 @@ impl AsyncElement for CudaGlSink {
                     presented,
                     latency,
                     ready: ready_for_worker,
+                    window_closed,
                 };
                 let presenter = CudaPresenter {
                     colorimetry,
@@ -451,18 +455,9 @@ impl AsyncElement for CudaGlSink {
                         return Ok(());
                     }
                     let tx = self.cmd_tx.as_ref().ok_or(G2gError::NotConfigured)?;
-                    let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
-                    tx.send(WorkerCmd::Frame {
-                        frame: buf,
-                        arrival_ns: timing.arrival_ns,
-                        ack: ack_tx,
-                    })
-                    .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
                     // Block until the worker presents this frame (vsync-paced
                     // by the compositor's release of the EGL back buffer).
-                    ack_rx
-                        .await
-                        .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
+                    present_on_worker(tx, buf, timing.arrival_ns, &self.window_closed).await?;
                     Ok(())
                 }
                 PipelinePacket::CapsChanged(_) => Ok(()),

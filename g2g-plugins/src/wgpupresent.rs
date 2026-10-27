@@ -35,7 +35,7 @@
 use core::future::Future;
 use core::pin::Pin;
 use core::ptr::NonNull;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -52,7 +52,10 @@ use smithay_client_toolkit::reexports::client::{protocol::wl_surface, Connection
 
 use crate::clock::wait_to_present;
 use crate::gpu::GpuContext;
-use crate::waylandwindow::{run_window, WindowParams, WindowRenderer, WorkerChannels, WorkerCmd};
+use crate::waylandwindow::{
+    present_on_worker, run_window, worker_gone, WindowParams, WindowRenderer, WorkerChannels,
+    WorkerCmd,
+};
 use crate::wgpusink::WgpuSink;
 use crate::worker_ready::Handshake;
 use g2g_core::element::{PresentationStats, QosMessage};
@@ -109,6 +112,7 @@ pub struct WgpuPresentSink {
     width: u32,
     height: u32,
     frames_presented: Arc<AtomicU64>,
+    window_closed: Arc<AtomicBool>,
     latency: Arc<LatencyHistogram>,
     /// Why the worker could not bring its window up, sent once by the worker and
     /// read while waiting for the readiness handshake, so a setup failure is
@@ -156,6 +160,7 @@ impl WgpuPresentSink {
             width: 0,
             height: 0,
             frames_presented: Arc::new(AtomicU64::new(0)),
+            window_closed: Arc::default(),
             latency: Arc::new(LatencyHistogram::new()),
             startup_error: None,
             log_name: LogName::new(),
@@ -274,6 +279,7 @@ impl WgpuPresentSink {
         let caps = self.caps.clone().ok_or(G2gError::NotConfigured)?;
         let (tx, rx) = channel::<WorkerCmd<MemoryDomain>>();
         let presented = Arc::clone(&self.frames_presented);
+        let window_closed = Arc::clone(&self.window_closed);
         let latency = Arc::clone(&self.latency);
         let params = WindowParams {
             width: self.window_width(self.width),
@@ -296,6 +302,7 @@ impl WgpuPresentSink {
                     presented,
                     latency,
                     ready: ready_for_worker,
+                    window_closed,
                 };
                 let build = |conn: &Connection,
                              surface: &wl_surface::WlSurface,
@@ -503,7 +510,7 @@ impl AsyncElement for WgpuPresentSink {
                     width: self.window_width(width),
                     height: self.window_height(height),
                 })
-                .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
+                .map_err(|_| worker_gone(&self.window_closed))?;
             }
         }
         self.caps = Some(absolute_caps.clone());
@@ -530,18 +537,9 @@ impl AsyncElement for WgpuPresentSink {
                         return Ok(());
                     }
                     let tx = self.cmd_tx.as_ref().ok_or(G2gError::NotConfigured)?;
-                    let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
-                    tx.send(WorkerCmd::Frame {
-                        frame: domain,
-                        arrival_ns: timing.arrival_ns,
-                        ack: ack_tx,
-                    })
-                    .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
                     // Block until the worker presents this frame (paced by the
                     // compositor's release of the swapchain image).
-                    ack_rx
-                        .await
-                        .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
+                    present_on_worker(tx, domain, timing.arrival_ns, &self.window_closed).await?;
                     Ok(())
                 }
                 PipelinePacket::CapsChanged(_) => Ok(()),

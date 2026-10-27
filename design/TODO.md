@@ -208,6 +208,10 @@ Highest leverage first:
 - `pipewiresink_disciplines_its_clock_from_the_stream` fails about half the
   time on hercules with a playout-rate estimate near 0.78. Find whether the
   sink or the test's half-second window is wrong.
+- Let a sink end the run cleanly. Closing a display sink's window fails the run
+  with `WindowClosed`. Add a reverse signal the sink sends upstream, relayed
+  through transforms like a QoS report, that makes the source emit `Eos`, so the
+  run drains and returns its stats.
 
 ## Containers
 
