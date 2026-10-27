@@ -481,6 +481,9 @@ struct PidContinuity {
     pid: u16,
     counter: u8,
     duplicate_seen: bool,
+    // a duplicate repeats its packet's payload, a spliced stream can repeat only the counter
+    payload: [u8; TS_PACKET_LEN],
+    payload_len: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -693,9 +696,10 @@ impl TsDemuxer {
 
     /// Feed one TS packet (must be [`TS_PACKET_LEN`] bytes starting at the sync
     /// byte). Malformed or short packets are ignored, a packet repeating its
-    /// PID's continuity counter once is a duplicate and skipped, and a gap in the
-    /// counter drops that PID's partial PES or section. Completed access units
-    /// accumulate; drain them with [`take_units`](Self::take_units).
+    /// PID's continuity counter and payload once is a duplicate and skipped, and
+    /// a gap in the counter drops that PID's partial section, and its partial PES
+    /// unless the packet starts the next one. Completed access units accumulate;
+    /// drain them with [`take_units`](Self::take_units).
     pub fn push_packet(&mut self, pkt: &[u8]) {
         let Some(pkt) = pkt.first_chunk::<TS_PACKET_LEN>() else {
             return;
@@ -722,11 +726,6 @@ impl TsDemuxer {
             }
             return; // an adaptation-field-only packet does not advance the counter
         }
-        match self.check_continuity(pid, continuity_counter, discontinuity) {
-            Continuity::Duplicate => return,
-            Continuity::Lost => self.discard_partial(pid),
-            Continuity::InSequence => {}
-        }
 
         // Locate the payload after any adaptation field.
         let mut off = 4;
@@ -735,10 +734,17 @@ impl TsDemuxer {
             let af_len = pkt[4] as usize;
             off = 5 + af_len;
         }
-        if off >= TS_PACKET_LEN {
+        let payload = pkt.get(off..).unwrap_or_default();
+        match self.check_continuity(pid, continuity_counter, discontinuity, payload) {
+            Continuity::Duplicate => return,
+            // a unit start after the gap ends the PES before it, which is whole at a splice of two muxers
+            Continuity::Lost if pusi => self.discard_partial_section(pid),
+            Continuity::Lost => self.discard_partial(pid),
+            Continuity::InSequence => {}
+        }
+        if payload.is_empty() {
             return; // no payload
         }
-        let payload = &pkt[off..TS_PACKET_LEN];
 
         if let Some(table) = table {
             let pmt_was_missing = self.streams().is_empty();
@@ -770,27 +776,31 @@ impl TsDemuxer {
         self.packets_before_pmt.push_back(*pkt);
     }
 
-    fn check_continuity(&mut self, pid: u16, counter: u8, discontinuity: bool) -> Continuity {
+    fn check_continuity(
+        &mut self,
+        pid: u16,
+        counter: u8,
+        discontinuity: bool,
+        payload: &[u8],
+    ) -> Continuity {
+        let mut current = PidContinuity {
+            pid,
+            counter,
+            duplicate_seen: false,
+            payload: [0; TS_PACKET_LEN],
+            payload_len: payload.len(),
+        };
+        current.payload[..payload.len()].copy_from_slice(payload);
         let Some(state) = self.continuity.iter_mut().find(|state| state.pid == pid) else {
-            self.continuity.push(PidContinuity {
-                pid,
-                counter,
-                duplicate_seen: false,
-            });
+            self.continuity.push(current);
             return Continuity::InSequence;
         };
-        let previous = core::mem::replace(
-            state,
-            PidContinuity {
-                pid,
-                counter,
-                duplicate_seen: false,
-            },
-        );
+        let previous = core::mem::replace(state, current);
         if discontinuity || counter == (previous.counter + 1) % CONTINUITY_COUNTER_MODULUS {
             return Continuity::InSequence;
         }
-        if counter == previous.counter && !previous.duplicate_seen {
+        let repeats_payload = previous.payload[..previous.payload_len] == *payload;
+        if counter == previous.counter && repeats_payload && !previous.duplicate_seen {
             state.duplicate_seen = true;
             return Continuity::Duplicate;
         }
@@ -799,6 +809,10 @@ impl TsDemuxer {
 
     fn discard_partial(&mut self, pid: u16) {
         self.pending.retain(|pes| pes.pid != pid);
+        self.discard_partial_section(pid);
+    }
+
+    fn discard_partial_section(&mut self, pid: u16) {
         if let Some((_, section)) = self
             .pending_sections
             .iter_mut()
@@ -4742,6 +4756,45 @@ pub(crate) mod tests {
         expected.extend_from_slice(&continuation);
         assert_eq!(units.len(), 2);
         assert_eq!(units[0].data, expected, "the duplicate is not appended");
+    }
+
+    // two segments from different muxers joined as hlssrc emits them on a variant switch
+    #[test]
+    fn a_spliced_stream_keeps_the_access_units_on_both_sides() {
+        let pmt_pid = 0x1000;
+        let es_pid = 0x0100;
+        let with_counter = |mut packet: Vec<u8>, counter: u8| {
+            packet[3] = (packet[3] & 0xF0) | counter;
+            packet
+        };
+        let old_tail = [0x00, 0x00, 0x00, 0x01, 0x41, 0xAA];
+        let new_head = [0x00, 0x00, 0x00, 0x01, 0x67, 0xBB];
+        let continuation = [0xCC, 0xDD];
+        // the new muxer's counter repeats the old one's last, or skips ahead of it
+        for new_counter in [6, 9] {
+            let mut d = TsDemuxer::new();
+            d.push_packet(&psi_packet(PID_PAT, 0x00, &pat_body(1, pmt_pid)));
+            d.push_packet(&psi_packet(
+                pmt_pid,
+                0x02,
+                &pmt_body(es_pid, STREAM_TYPE_H264),
+            ));
+            let old = ts_packet(es_pid, true, &pes(Some(0), &old_tail));
+            d.push_packet(&with_counter(old, 6));
+            let new = ts_packet(es_pid, true, &pes(Some(3000), &new_head));
+            d.push_packet(&with_counter(new, new_counter));
+            let next = ts_packet(es_pid, false, &continuation);
+            d.push_packet(&with_counter(next, (new_counter + 1) % 16));
+            d.flush();
+            let units: Vec<Vec<u8>> = d.take_units().into_iter().map(|unit| unit.data).collect();
+            let mut new_unit = new_head.to_vec();
+            new_unit.extend_from_slice(&continuation);
+            assert_eq!(
+                units,
+                [old_tail.to_vec(), new_unit],
+                "counter {new_counter} after 6"
+            );
+        }
     }
 
     #[test]
