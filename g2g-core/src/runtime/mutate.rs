@@ -17,6 +17,7 @@
 //! elements sitting on them are replaceable in place.
 
 use alloc::boxed::Box;
+use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -835,6 +836,8 @@ pub(crate) struct MutationService<'a, 'f, 's> {
     /// is what sleeps on a deadline. `None` leaves every wait unbounded.
     ticker: Option<&'s dyn DynAsyncClock>,
     visit_recorder: Option<Arc<dyn VisitRecorder>>,
+    /// Per element category, the lowest `<category>N` suffix not known to be taken.
+    name_floors: BTreeMap<String, usize>,
 }
 
 impl<'a, 'f, 's> MutationService<'a, 'f, 's> {
@@ -867,6 +870,7 @@ impl<'a, 'f, 's> MutationService<'a, 'f, 's> {
             link_capacity,
             ticker,
             visit_recorder,
+            name_floors: BTreeMap::new(),
         }
     }
 
@@ -1150,17 +1154,23 @@ impl<'a, 'f, 's> MutationService<'a, 'f, 's> {
 
     /// `<category>N`, counting past every name the graph already carries, so a
     /// spliced element is addressable the way a negotiated one is.
-    fn unique_name(&self, category: &str) -> String {
+    fn unique_name(&mut self, category: &str) -> String {
         self.unique_name_among(category, &[])
     }
 
     /// [`unique_name`](Self::unique_name) counting past `taken` too: the names
     /// one operation has given elements it has not put in the table yet.
-    fn unique_name_among(&self, category: &str, taken: &[String]) -> String {
-        for n in 0.. {
+    fn unique_name_among(&mut self, category: &str, taken: &[String]) -> String {
+        // every name below the floor is in the table, which never drops a node
+        let mut floor = self.name_floors.get(category).copied().unwrap_or(0);
+        for n in floor.. {
             let candidate = alloc::format!("{category}{n}");
             let in_graph = self.nodes.iter().any(|node| node.name == candidate);
+            if in_graph && n == floor {
+                floor = n + 1;
+            }
             if !in_graph && !taken.contains(&candidate) {
+                self.name_floors.insert(category.to_string(), floor);
                 return candidate;
             }
         }

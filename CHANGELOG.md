@@ -45,6 +45,7 @@ Breaking: `QosMessage` gains `downstream_proc_ns`, `ElementProbe` is no longer `
 - M1950: `set_state(Null)` on a running graph ends the run with its stats instead of `Shutdown`.
 - M1951: `examples/g2g-api-soak` rebuilds or mutates a live RTSP decode graph forever through the Rust API, for the calliope canary.
 - M1952: elements the `GraphMutator` starts get the run's bus, so a `checksumsink` added with `add_branch` posts its digests.
+- M1953: naming an element the `GraphMutator` starts no longer rescans every name the run has given out.
 - M1955: `g2g-core` with `alloc` builds for targets without 64-bit atomics.
 - M1956: the heap-free, panic-free proof also runs on the ESP32-S3 (Xtensa).
 
