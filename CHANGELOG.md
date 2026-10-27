@@ -50,6 +50,7 @@ Breaking: `QosMessage` gains `downstream_proc_ns`, `ElementProbe` is no longer `
 - M1945: `splitmuxsink` repeats the stream's parameter sets at the start of each file, so `qtdemux ! h264parse ! splitmuxsink` writes a playable second file.
 - M1955: `g2g-core` with `alloc` builds for targets without 64-bit atomics.
 - M1956: the heap-free, panic-free proof also runs on the ESP32-S3 (Xtensa).
+- M1958: `rtspsrc` keeps frame timestamps when a server's RTP-Info `rtptime` is ahead of its first packets.
 
 ## 0.10.0
 

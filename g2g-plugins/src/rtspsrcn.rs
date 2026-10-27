@@ -1296,7 +1296,7 @@ async fn run_session(
     // parameter set ("non-existing PPS referenced") until the next IDR.
     let mut seen_keyframe = false;
     let mut skipped_before_keyframe = 0u64;
-    let mut origin_ns: Option<u64> = None;
+    let mut origin_ns: Option<i128> = None;
     let limit = src.frame_limit;
 
     let stall_timeout =
@@ -1446,10 +1446,12 @@ async fn run_session(
             _ if Some(port) == metadata_port => metadata_idx.unwrap_or(video_idx),
             _ => audio_idx.unwrap_or(video_idx),
         };
-        let clock_rate = u64::from(demuxed.streams()[stream_idx].clock_rate_hz()).max(1);
-        let raw_ns = (timestamp.elapsed().max(0) as u64).saturating_mul(1_000_000_000) / clock_rate;
-        let origin = *origin_ns.get_or_insert(raw_ns);
-        let pts_ns = pts_base_ns.saturating_add(raw_ns.saturating_sub(origin));
+        let pts_ns = session_pts_ns(
+            timestamp.elapsed(),
+            demuxed.streams()[stream_idx].clock_rate_hz(),
+            &mut origin_ns,
+            pts_base_ns,
+        );
         *session_max_pts = (*session_max_pts).max(pts_ns);
 
         let mut frame = Frame {
@@ -1501,9 +1503,31 @@ fn attach_wall_clock(frame: &mut Frame, unix_nanos: i64) {
 #[cfg(not(feature = "metadata"))]
 fn attach_wall_clock(_frame: &mut Frame, _unix_nanos: i64) {}
 
+// `elapsed` is signed because a server's RTP-Info rtptime can be ahead of its first packets
+fn session_pts_ns(
+    elapsed: i64,
+    clock_rate_hz: u32,
+    origin_ns: &mut Option<i128>,
+    pts_base_ns: u64,
+) -> u64 {
+    let raw_ns = i128::from(elapsed) * 1_000_000_000 / i128::from(clock_rate_hz.max(1));
+    let origin = *origin_ns.get_or_insert(raw_ns);
+    pts_base_ns.saturating_add(u64::try_from(raw_ns - origin).unwrap_or(0))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn frames_before_the_rtp_info_origin_keep_their_spacing() {
+        let mut origin = None;
+        let ticks_per_frame = 9_000;
+        let pts: Vec<u64> = (0..3)
+            .map(|frame| session_pts_ns(-900_000 + frame * ticks_per_frame, 90_000, &mut origin, 0))
+            .collect();
+        assert_eq!(pts, [0, 100_000_000, 200_000_000]);
+    }
 
     #[test]
     fn frame_rate_unset_yields_rate_any() {
