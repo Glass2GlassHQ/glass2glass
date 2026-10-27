@@ -43,6 +43,7 @@ Breaking: `QosMessage` gains `downstream_proc_ns`, `ElementProbe` is no longer `
 - M1934: closing the window of `cudaglsink`, `glsink` or `wgpusink` fails the run with the new `G2gError::WindowClosed` instead of `Hardware(Other)`.
 - M1945: `splitmuxsink` repeats the stream's parameter sets at the start of each file, so `qtdemux ! h264parse ! splitmuxsink` writes a playable second file.
 - M1950: `set_state(Null)` on a running graph ends the run with its stats instead of `Shutdown`.
+- M1951: `examples/g2g-api-soak` rebuilds or mutates a live RTSP decode graph forever through the Rust API, for the calliope canary.
 - M1955: `g2g-core` with `alloc` builds for targets without 64-bit atomics.
 - M1956: the heap-free, panic-free proof also runs on the ESP32-S3 (Xtensa).
 

@@ -35,6 +35,9 @@ exclude = [
     # a Wayland session), so it stays out of the workspace's default-feature
     # build. Standalone, own Cargo.lock. See its README.
     "examples/g2g-mutate-demo",
+    # Rust API soak for the calliope canary: needs rtsp + ffmpeg + observe
+    # (libavcodec). Standalone, own Cargo.lock. See its README.
+    "examples/g2g-api-soak",
     # Cortex-M footprint-measurement harness (M268): a no_std staticlib measured
     # with size+gc-sections, kept out of the normal build.
     "examples/g2g-size",
