@@ -42,6 +42,7 @@ Breaking: `QosMessage` gains `downstream_proc_ns`, `ElementProbe` is no longer `
 - M1933: `cudaglsink` opens its EGL display on the EGL device of its new `cuda-device-id`, so it presents on a hybrid iGPU and NVIDIA laptop without `__NV_PRIME_RENDER_OFFLOAD`, and refuses a frame from another CUDA device.
 - M1934: closing the window of `cudaglsink`, `glsink` or `wgpusink` fails the run with the new `G2gError::WindowClosed` instead of `Hardware(Other)`.
 - M1940: `x264enc` gains gst's `pass` (`cbr` / `quant`) and `quantizer` properties, and `pass=quant quantizer=0` encodes losslessly.
+- M1941: a keyframe request no longer drops the encoded frame the encoder was pushing when it arrived.
 
 ## 0.10.0
 
