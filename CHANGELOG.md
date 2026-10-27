@@ -42,6 +42,7 @@ Breaking: `QosMessage` gains `downstream_proc_ns`, `ElementProbe` is no longer `
 - M1933: `cudaglsink` opens its EGL display on the EGL device of its new `cuda-device-id`, so it presents on a hybrid iGPU and NVIDIA laptop without `__NV_PRIME_RENDER_OFFLOAD`, and refuses a frame from another CUDA device.
 - M1934: closing the window of `cudaglsink`, `glsink` or `wgpusink` fails the run with the new `G2gError::WindowClosed` instead of `Hardware(Other)`.
 - M1935: `hlssrc` and `dashsrc` ABR average the download time per bit instead of the rate, so the first slow segment after fast ones switches down.
+- M1936: an `hlssrc` ABR switch resumes at the next media sequence when the new variant's live window has moved on, instead of skipping segments.
 - M1937: `tsdemux` keeps both access units at a splice whose continuity counter repeats or jumps, as at an HLS variant switch.
 - M1945: `splitmuxsink` repeats the stream's parameter sets at the start of each file, so `qtdemux ! h264parse ! splitmuxsink` writes a playable second file.
 - M1955: `g2g-core` with `alloc` builds for targets without 64-bit atomics.

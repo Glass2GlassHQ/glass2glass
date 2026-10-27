@@ -796,6 +796,30 @@ async fn abr_downswitches_on_the_first_slow_segment_after_fast_ones() {
     );
 }
 
+#[tokio::test]
+async fn abr_switch_resumes_at_the_next_sequence_when_the_new_window_has_moved() {
+    const SLOW_FROM: usize = 1;
+    // a live playlist fetched later than the old one starts further on
+    const LOW_WINDOW_START: usize = 1;
+    let (high, low) = abr_variants();
+    let url = serve_abr(
+        high.clone(),
+        low.clone(),
+        LOW_WINDOW_START,
+        high_slow_from(SLOW_FROM),
+    );
+    let expected: Vec<u8> = high[..=SLOW_FROM]
+        .iter()
+        .chain(&low[SLOW_FROM + 1..])
+        .flatten()
+        .copied()
+        .collect();
+    assert!(
+        abr_body(url).await == expected,
+        "the switch to low neither repeats nor skips a media sequence"
+    );
+}
+
 // --- fMP4 / CMAF over HLS (EXT-X-MAP) -------------------------------------
 
 fn au_frame(bytes: Vec<u8>, pts_ns: u64, seq: u64) -> Frame {
