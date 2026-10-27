@@ -431,7 +431,30 @@ impl RtspServerSink {
         let (rtp_socket, rtcp_socket) = bind_rtp_pair().await?;
         let server_rtp_port = rtp_socket.local_addr().map_err(io_err)?.port();
 
-        let (mut control, peer) = listener.accept().await.map_err(io_err)?;
+        // a player that leaves before PLAY is dropped and the next one is accepted
+        let client = loop {
+            let (control, peer) = listener.accept().await.map_err(io_err)?;
+            match self.handshake_to_play(control, peer, server_rtp_port).await {
+                Ok(client) => break client,
+                Err(error) => g2g_core::g2g_warn!(
+                    g2g_core::log::Target::category(g2g_core::log::short_type_name::<Self>()),
+                    "player {peer} left before PLAY: {error:?}"
+                ),
+            }
+        };
+        self.clients.push(client);
+        self.tcp = Some(listener);
+        self.rtp_socket = Some(rtp_socket);
+        self.rtcp_socket = Some(rtcp_socket);
+        Ok(())
+    }
+
+    async fn handshake_to_play(
+        &self,
+        mut control: tokio::net::TcpStream,
+        peer: SocketAddr,
+        server_rtp_port: u16,
+    ) -> Result<Client, G2gError> {
         let mut responder = self.responder(server_rtp_port);
         let mut pending: Vec<u8> = Vec::new();
         let mut buf = [0u8; CTRL_BUF];
@@ -477,11 +500,7 @@ impl RtspServerSink {
         client.interleaved = interleaved;
         client.rtcp_channel = rtcp_channel;
         client.next_sequence = Some(0);
-        self.clients.push(client);
-        self.tcp = Some(listener);
-        self.rtp_socket = Some(rtp_socket);
-        self.rtcp_socket = Some(rtcp_socket);
-        Ok(())
+        Ok(client)
     }
 
     /// Accept every player whose TCP connection is already queued (non-blocking),

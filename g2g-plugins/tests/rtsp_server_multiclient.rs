@@ -140,6 +140,32 @@ fn assert_contiguous(tags: &[u8], who: &str) {
     }
 }
 
+// the first frame blocks until a player PLAYs, the rest also accept new players and broadcast
+async fn serve(listener: StdTcpListener, count: u8) -> u64 {
+    let mut sink = RtspServerSink::from_listener(listener)
+        .unwrap()
+        .with_rtp(96, 0x1111_1111);
+    sink.configure_pipeline(&h264_caps()).expect("configure");
+    let mut null = NullOut;
+    for i in 0u8..count {
+        let au = access_unit(i);
+        let frame = Frame {
+            domain: MemoryDomain::System(SystemSlice::from_boxed(au.into_boxed_slice())),
+            timing: FrameTiming {
+                pts_ns: i as u64 * 33_000_000,
+                ..FrameTiming::default()
+            },
+            sequence: i as u64,
+            meta: Default::default(),
+        };
+        sink.process(PipelinePacket::DataFrame(frame), &mut null)
+            .await
+            .expect("process");
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    sink.frames_sent()
+}
+
 #[tokio::test]
 async fn two_players_each_receive_an_ordered_stream() {
     const COUNT: u8 = 60;
@@ -155,34 +181,7 @@ async fn two_players_each_receive_an_ordered_stream() {
         run_player(rtsp_addr, 10).await
     };
 
-    // The server streams COUNT tagged frames; the first blocks until a player
-    // PLAYs, the rest also accept + advance new players and broadcast.
-    let server = async move {
-        let mut sink = RtspServerSink::from_listener(listener)
-            .unwrap()
-            .with_rtp(96, 0x1111_1111);
-        sink.configure_pipeline(&h264_caps()).expect("configure");
-        let mut null = NullOut;
-        for i in 0u8..COUNT {
-            let au = access_unit(i);
-            let frame = Frame {
-                domain: MemoryDomain::System(SystemSlice::from_boxed(au.into_boxed_slice())),
-                timing: FrameTiming {
-                    pts_ns: i as u64 * 33_000_000,
-                    ..FrameTiming::default()
-                },
-                sequence: i as u64,
-                meta: Default::default(),
-            };
-            sink.process(PipelinePacket::DataFrame(frame), &mut null)
-                .await
-                .expect("process");
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-        sink.frames_sent()
-    };
-
-    let (tags1, tags2, frames_sent) = tokio::join!(p1, p2, server);
+    let (tags1, tags2, frames_sent) = tokio::join!(p1, p2, serve(listener, COUNT));
 
     assert_eq!(frames_sent, COUNT as u64, "server streamed every frame");
     assert_contiguous(&tags1, "player 1");
@@ -197,5 +196,42 @@ async fn two_players_each_receive_an_ordered_stream() {
         tags2[0] > 0,
         "the late player joined mid-stream (saw {:?})",
         tags2
+    );
+}
+
+async fn leave_after_describe(rtsp_addr: SocketAddr, reset: bool) {
+    let mut ctrl = tokio::net::TcpStream::connect(rtsp_addr)
+        .await
+        .expect("connect rtsp");
+    ctrl.write_all(
+        b"DESCRIBE rtsp://127.0.0.1/stream RTSP/1.0\r\nCSeq: 1\r\nAccept: application/sdp\r\n\r\n",
+    )
+    .await
+    .unwrap();
+    assert!(read_response(&mut ctrl).await.contains("m=video"));
+    if reset {
+        ctrl.set_zero_linger().unwrap();
+    }
+}
+
+#[tokio::test]
+async fn players_leaving_before_play_do_not_end_the_stream() {
+    const COUNT: u8 = 40;
+
+    let listener = StdTcpListener::bind("127.0.0.1:0").expect("bind rtsp");
+    let rtsp_addr = listener.local_addr().unwrap();
+
+    let players = async move {
+        leave_after_describe(rtsp_addr, false).await;
+        leave_after_describe(rtsp_addr, true).await;
+        run_player(rtsp_addr, 10).await
+    };
+    let (tags, frames_sent) = tokio::join!(players, serve(listener, COUNT));
+
+    assert_eq!(frames_sent, COUNT as u64, "server streamed every frame");
+    assert_contiguous(&tags, "the player after two that left");
+    assert_eq!(
+        tags[0], 0,
+        "the first player to PLAY receives the first frame"
     );
 }
