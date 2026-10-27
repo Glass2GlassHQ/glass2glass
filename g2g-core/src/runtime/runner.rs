@@ -34,6 +34,8 @@ use crate::runtime::solver::{solve_linear, NegotiationFailure};
 use crate::runtime::state::StateController;
 #[cfg(feature = "std")]
 use crate::segment::Segment;
+#[cfg(feature = "std")]
+use crate::state::PipelineState;
 
 /// Startup negotiation passes before a runner gives up with `FixationFailed`:
 /// enough for a source, sink, source counter-proposal chain.
@@ -756,21 +758,31 @@ where
     };
     let sink_io = SinkArmIo {
         bus: bus.cloned(),
-        state,
+        state: state.clone(),
         ..SinkArmIo::standalone(link_rx, Some(sink_probe.clone()))
     };
     let (src_res, snk_res) =
         Join2::new(run_source(source, source_io), sink_arm_on(sink, sink_io)).await;
+    // `set_state(Null)` ends the sink arm, and the source ends on the closed link
+    let null_stop = state.is_some_and(|state| state.state() == PipelineState::Null)
+        && snk_res.is_ok()
+        && src_res
+            .as_ref()
+            .err()
+            .is_none_or(|e| *e == G2gError::Shutdown);
     // M81: a closed-link `Shutdown` on the source arm can be the consequence of
     // the sink arm's real error (it dropped the link), so surface the
     // substantive one rather than whichever arm we check first.
-    if let Some(e) = substantive_error([
-        (source_name.as_str(), src_res.as_ref().err()),
-        (sink_name.as_str(), snk_res.as_ref().err()),
-    ]) {
-        return Err(e);
+    if !null_stop {
+        if let Some(e) = substantive_error([
+            (source_name.as_str(), src_res.as_ref().err()),
+            (sink_name.as_str(), snk_res.as_ref().err()),
+        ]) {
+            return Err(e);
+        }
     }
-    let emitted = src_res?;
+    // a source a Null stop ended with `Shutdown` reports no count
+    let emitted = src_res.unwrap_or(0);
     let consumed = snk_res?;
 
     // M399: the sink arm has joined, so its probe is settled; snapshot it.
@@ -2055,13 +2067,14 @@ mod run_tests {
 
         let mut sink = TestSink::default();
         let null = StateController::new(PipelineState::Null);
-        let _ = block_on(run_simple_pipeline_stateful(
+        block_on(run_simple_pipeline_stateful(
             &mut TestSource::default(),
             &mut sink,
             &ZeroClock,
             LINK_CAPACITY,
             &null,
-        ));
+        ))
+        .expect("a Null stop is not a pipeline failure");
         assert!(sink.seen.lock().is_empty());
     }
 

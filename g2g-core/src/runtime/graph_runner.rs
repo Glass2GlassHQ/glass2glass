@@ -106,6 +106,7 @@ use crate::runtime::state::{Flow, StateController};
 use crate::runtime::FlightRecorder;
 use crate::runtime::Observer;
 use crate::segment::Segment;
+use crate::state::PipelineState;
 
 /// Element payload for a [`Graph`] driven by [`run_graph`]. Sources,
 /// transforms/sinks, and muxers implement different traits (a source has no
@@ -2759,6 +2760,9 @@ pub(crate) async fn run_graph_inner<'a: 'c, 'c, Clk: PipelineClock>(
         clock_priority,
         base_time_ns,
         bus,
+        state
+            .as_ref()
+            .is_some_and(|state| state.state() == PipelineState::Null),
     )
 }
 
@@ -2812,6 +2816,7 @@ fn fold_run_stats(
     clock_priority: ClockPriority,
     base_time_ns: u64,
     bus: Option<&BusHandle>,
+    stopped_at_null: bool,
 ) -> Result<RunStats, G2gError> {
     // M81: surface a substantive arm error over a secondary `Shutdown` (a real
     // error in one node closes links, which surfaces as `Shutdown` on the
@@ -2824,7 +2829,12 @@ fn fold_run_stats(
             .filter_map(|(i, r)| r.as_ref().err().map(|e| (i, e)))
             .find(|(_, e)| !only_substantive || **e != G2gError::Shutdown)
     };
-    if let Some((arm, e)) = failed(true).or_else(|| failed(false)) {
+    // `set_state(Null)` ends the sink arms, and the arms feeding them end on the closed links
+    let null_stop = stopped_at_null && failed(true).is_none();
+    if let Some((arm, e)) = failed(true)
+        .or_else(|| failed(false))
+        .filter(|_| !null_stop)
+    {
         let name = arm_names.get(arm).map(|n| n.as_str());
         crate::log::report_element_failure(name, e);
         // Named on the bus too: the returned error carries no element identity,
@@ -2837,12 +2847,10 @@ fn fold_run_stats(
         }
         return Err(e.clone());
     }
-    let mut counts = Vec::with_capacity(results.len());
-    for r in results {
-        counts.push(r?);
-    }
+    // an arm a Null stop ended with `Shutdown` reports no count
+    let counts: Vec<u64> = results.into_iter().map(|r| r.unwrap_or(0)).collect();
     // every arm ended without error, so every sink has taken its EOS
-    if let Some(bus) = bus {
+    if let (Some(bus), false) = (bus, null_stop) {
         bus.try_post(crate::bus::BusMessage::Eos);
     }
     let coordinator_events = counts[coord_arm_index];
@@ -3205,6 +3213,9 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
         clock_priority,
         base_time_ns,
         bus,
+        state
+            .as_ref()
+            .is_some_and(|state| state.state() == PipelineState::Null),
     )
 }
 
