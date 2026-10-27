@@ -39,7 +39,8 @@
 #[cfg(feature = "std")]
 extern crate std;
 
-use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, Ordering};
+use portable_atomic::AtomicU64;
 
 use alloc::borrow::Cow;
 use alloc::boxed::Box;

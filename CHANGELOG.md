@@ -41,6 +41,7 @@ Breaking: `QosMessage` gains `downstream_proc_ns`, `ElementProbe` is no longer `
 - M1932: a QoS report sums the processing time of the elements it crosses, and `pyelement` counts it, so a chain of slow hosted elements drops frames ahead of the slow stages instead of freezing the display.
 - M1933: `cudaglsink` opens its EGL display on the EGL device of its new `cuda-device-id`, so it presents on a hybrid iGPU and NVIDIA laptop without `__NV_PRIME_RENDER_OFFLOAD`, and refuses a frame from another CUDA device.
 - M1934: closing the window of `cudaglsink`, `glsink` or `wgpusink` fails the run with the new `G2gError::WindowClosed` instead of `Hardware(Other)`.
+- M1955: `g2g-core` with `alloc` builds for targets without 64-bit atomics.
 
 ## 0.10.0
 
