@@ -9,12 +9,11 @@
 //! channel + the RTP transport around it, reusing the
 //! [`RtpH264Packetizer`](crate::rtppay) the UDP sink uses.
 //!
-//! Multi-client: the listener is bound in `configure_pipeline`; the first buffer
-//! blocks until one player has connected and PLAYed (so a stream that is only
-//! watched by one viewer behaves predictably), and from then on every buffer
-//! also opportunistically accepts new players and advances their handshakes
-//! without blocking, broadcasting each frame to every PLAYing player on its own
-//! RTP session. Players that disconnect are reaped. One shared RTP UDP socket
+//! Multi-client: the listener is bound in `configure_pipeline`; every buffer
+//! accepts new players and advances their handshakes without blocking, then
+//! broadcasts the frame to every PLAYing player on its own RTP session. A
+//! buffer with no PLAYing player is dropped, so a player starts at the current
+//! frame instead of a backlog held while nobody watched. Players that disconnect are reaped. One shared RTP UDP socket
 //! sends to each player's negotiated address. ANNOUNCE/RECORD ingest is the
 //! separate [`RtspServerSrc`](crate::rtspserversrc).
 //!
@@ -35,12 +34,12 @@ use alloc::vec::Vec;
 
 use std::net::{IpAddr, SocketAddr, TcpListener as StdTcpListener};
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError,
-    HardwareError, NetworkFailure, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
-    PropError, PropKind, PropValue, PropertySpec, Rate, VideoCodec,
+    HardwareError, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
+    PropValue, PropertySpec, Rate, VideoCodec,
 };
 
 use crate::filesink::io_err;
@@ -420,87 +419,16 @@ impl RtspServerSink {
         crate::rtpklv::rtp_timestamp_from_pts(pts_ns)
     }
 
-    /// Bind the shared RTP socket, promote the listener to tokio, then accept one
-    /// player and drive its handshake to PLAY (blocking), so the first buffer is
-    /// not dropped before anyone is watching. Subsequent players join without
-    /// blocking via [`accept_new`](Self::accept_new).
-    async fn bootstrap(&mut self) -> Result<(), G2gError> {
+    /// Bind the shared RTP socket and promote the listener to tokio, on the
+    /// first buffer.
+    async fn start(&mut self) -> Result<(), G2gError> {
         let std_listener = self.listener.take().ok_or(G2gError::NotConfigured)?;
         std_listener.set_nonblocking(true).map_err(io_err)?;
-        let listener = tokio::net::TcpListener::from_std(std_listener).map_err(io_err)?;
+        self.tcp = Some(tokio::net::TcpListener::from_std(std_listener).map_err(io_err)?);
         let (rtp_socket, rtcp_socket) = bind_rtp_pair().await?;
-        let server_rtp_port = rtp_socket.local_addr().map_err(io_err)?.port();
-
-        // a player that leaves before PLAY is dropped and the next one is accepted
-        let client = loop {
-            let (control, peer) = listener.accept().await.map_err(io_err)?;
-            match self.handshake_to_play(control, peer, server_rtp_port).await {
-                Ok(client) => break client,
-                Err(error) => g2g_core::g2g_warn!(
-                    g2g_core::log::Target::category(g2g_core::log::short_type_name::<Self>()),
-                    "player {peer} left before PLAY: {error:?}"
-                ),
-            }
-        };
-        self.clients.push(client);
-        self.tcp = Some(listener);
         self.rtp_socket = Some(rtp_socket);
         self.rtcp_socket = Some(rtcp_socket);
         Ok(())
-    }
-
-    async fn handshake_to_play(
-        &self,
-        mut control: tokio::net::TcpStream,
-        peer: SocketAddr,
-        server_rtp_port: u16,
-    ) -> Result<Client, G2gError> {
-        let mut responder = self.responder(server_rtp_port);
-        let mut pending: Vec<u8> = Vec::new();
-        let mut buf = [0u8; CTRL_BUF];
-        let mut dest = None;
-        let mut rtcp_dest = None;
-        let mut interleaved = None;
-        let mut rtcp_channel = None;
-        'handshake: loop {
-            let n = control.read(&mut buf).await.map_err(io_err)?;
-            if n == 0 {
-                return Err(G2gError::Network(NetworkFailure::Connect)); // closed before PLAY
-            }
-            pending.extend_from_slice(&buf[..n]);
-            while let Some((req, consumed)) = RtspRequest::parse(&pending) {
-                pending.drain(..consumed);
-                let (response, event) = responder.handle_request(&req);
-                control.write_all(&response).await.map_err(io_err)?;
-                match event {
-                    RtspEvent::Setup { client_rtp_port } => {
-                        dest = Some(SocketAddr::new(peer.ip(), client_rtp_port));
-                        rtcp_dest = Some(SocketAddr::new(
-                            peer.ip(),
-                            client_rtp_port.saturating_add(1),
-                        ));
-                    }
-                    RtspEvent::SetupInterleaved {
-                        rtp_channel,
-                        rtcp_channel: rtcp_ch,
-                    } => {
-                        interleaved = Some(rtp_channel);
-                        rtcp_channel = Some(rtcp_ch);
-                    }
-                    RtspEvent::Play => break 'handshake,
-                    RtspEvent::Teardown => return Err(G2gError::Shutdown),
-                    _ => {}
-                }
-            }
-        }
-        let mut client = Client::new(control, responder, peer.ip());
-        client.pending = pending;
-        client.dest = dest;
-        client.rtcp_dest = rtcp_dest;
-        client.interleaved = interleaved;
-        client.rtcp_channel = rtcp_channel;
-        client.next_sequence = Some(0);
-        Ok(client)
     }
 
     /// Accept every player whose TCP connection is already queued (non-blocking),
@@ -787,18 +715,15 @@ impl AsyncElement for RtspServerSink {
                         .domain
                         .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
                     // Before any handshake: the SDP a DESCRIBE gets back has to
-                    // describe this stream, and the first DESCRIBE is answered
-                    // while the first buffer blocks below.
+                    // describe this stream.
                     self.latch_parameter_sets(slice);
-                    // Block on the first buffer until one player connects + PLAYs,
-                    // then serve every connected player without blocking.
                     if !self.started {
-                        self.bootstrap().await?;
+                        self.start().await?;
                         self.started = true;
-                    } else {
-                        self.accept_new().await;
-                        self.advance_handshakes().await;
                     }
+                    // a buffer never waits for a player, so a player starts at the current frame
+                    self.accept_new().await;
+                    self.advance_handshakes().await;
                     let timestamp = Self::rtp_timestamp(frame.timing.pts_ns);
                     let bytes = slice;
                     self.broadcast(bytes, timestamp).await?;

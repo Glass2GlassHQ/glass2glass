@@ -145,14 +145,13 @@ async fn rtsp_player_handshakes_then_receives_rtp() {
         tags
     };
 
-    // Drive the sink: the first frame blocks until the player connects + PLAYs.
-    // Stream more than N so the player reliably drains N even if it starts its
-    // recv loop a beat after PLAY; once the player leaves, a send may fail with
-    // ECONNREFUSED, which (after N) just means it is done.
+    // Drive the sink: frames before the player PLAYs are dropped. Stream more
+    // than N so the player drains N after its handshake; once the player leaves,
+    // a send may fail with ECONNREFUSED, which (after N) just means it is done.
     let server = async move {
         let mut null = NullOut;
-        for i in 0u8..(N * 3) {
-            let au = access_unit(i % N);
+        for i in 0u8..(N * 6) {
+            let au = access_unit(i);
             let frame = Frame {
                 domain: MemoryDomain::System(SystemSlice::from_boxed(au.into_boxed_slice())),
                 timing: FrameTiming {
@@ -177,11 +176,14 @@ async fn rtsp_player_handshakes_then_receives_rtp() {
 
     let (tags, frames_sent) = tokio::join!(client, server);
     assert!(frames_sent >= N as u64, "server streamed frames after PLAY");
-    let expected: Vec<u8> = (0..N).collect();
-    assert_eq!(
-        tags, expected,
-        "player received and depayloaded every AU in order"
-    );
+    assert_consecutive(&tags, "player received and depayloaded every AU in order");
+}
+
+// a player starts at the frame current at its PLAY, then misses none
+fn assert_consecutive(tags: &[u8], what: &str) {
+    for pair in tags.windows(2) {
+        assert_eq!(pair[1], pair[0] + 1, "{what}: {tags:?}");
+    }
 }
 
 /// Bind an RTP/RTCP client socket pair on adjacent ports (the `client_port`
@@ -477,8 +479,8 @@ async fn rtsp_player_receives_interleaved_rtp_over_control() {
 
     let server = async move {
         let mut null = NullOut;
-        for i in 0u8..(N * 3) {
-            let au = access_unit(i % N);
+        for i in 0u8..(N * 6) {
+            let au = access_unit(i);
             let frame = Frame {
                 domain: MemoryDomain::System(SystemSlice::from_boxed(au.into_boxed_slice())),
                 timing: FrameTiming {
@@ -503,9 +505,8 @@ async fn rtsp_player_receives_interleaved_rtp_over_control() {
 
     let (tags, frames_sent) = tokio::join!(client, server);
     assert!(frames_sent >= N as u64, "server streamed frames after PLAY");
-    let expected: Vec<u8> = (0..N).collect();
-    assert_eq!(
-        tags, expected,
-        "player received every AU in order over the interleaved channel"
+    assert_consecutive(
+        &tags,
+        "player received every AU in order over the interleaved channel",
     );
 }

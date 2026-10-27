@@ -140,7 +140,7 @@ fn assert_contiguous(tags: &[u8], who: &str) {
     }
 }
 
-// the first frame blocks until a player PLAYs, the rest also accept new players and broadcast
+// each frame accepts new players, advances their handshakes and goes to every PLAYing one
 async fn serve(listener: StdTcpListener, count: u8) -> u64 {
     let mut sink = RtspServerSink::from_listener(listener)
         .unwrap()
@@ -173,8 +173,8 @@ async fn two_players_each_receive_an_ordered_stream() {
     let listener = StdTcpListener::bind("127.0.0.1:0").expect("bind rtsp");
     let rtsp_addr = listener.local_addr().unwrap();
 
-    // Player 1 connects immediately (it bootstraps the server); player 2 joins
-    // mid-stream and must still get a clean ordered session.
+    // Player 1 connects immediately; player 2 joins mid-stream and must still
+    // get a clean ordered session.
     let p1 = run_player(rtsp_addr, 12);
     let p2 = async move {
         tokio::time::sleep(std::time::Duration::from_millis(80)).await;
@@ -186,16 +186,12 @@ async fn two_players_each_receive_an_ordered_stream() {
     assert_eq!(frames_sent, COUNT as u64, "server streamed every frame");
     assert_contiguous(&tags1, "player 1");
     assert_contiguous(&tags2, "player 2");
-    // Player 1 bootstraps the server, so it sees the stream from the very start.
-    assert_eq!(
-        tags1[0], 0,
-        "the bootstrapping player receives from the first frame"
-    );
     // Player 2 joined later, so its first frame is strictly after player 1's.
     assert!(
-        tags2[0] > 0,
-        "the late player joined mid-stream (saw {:?})",
-        tags2
+        tags2[0] > tags1[0],
+        "the late player joined mid-stream (saw {:?} after {:?})",
+        tags2,
+        tags1
     );
 }
 
@@ -230,8 +226,25 @@ async fn players_leaving_before_play_do_not_end_the_stream() {
 
     assert_eq!(frames_sent, COUNT as u64, "server streamed every frame");
     assert_contiguous(&tags, "the player after two that left");
-    assert_eq!(
-        tags[0], 0,
-        "the first player to PLAY receives the first frame"
+}
+
+#[tokio::test]
+async fn a_player_starts_at_the_current_frame() {
+    const COUNT: u8 = 60;
+
+    let listener = StdTcpListener::bind("127.0.0.1:0").expect("bind rtsp");
+    let rtsp_addr = listener.local_addr().unwrap();
+
+    let player = async move {
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        run_player(rtsp_addr, 10).await
+    };
+    let (tags, frames_sent) = tokio::join!(player, serve(listener, COUNT));
+
+    assert_eq!(frames_sent, COUNT as u64, "server streamed every frame");
+    assert_contiguous(&tags, "the player");
+    assert!(
+        tags[0] > 0,
+        "frames from before the player connected were dropped, not held for it (saw {tags:?})"
     );
 }

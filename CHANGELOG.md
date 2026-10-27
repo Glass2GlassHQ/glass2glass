@@ -43,6 +43,7 @@ Breaking: `QosMessage` gains `downstream_proc_ns`, `ElementProbe` is no longer `
 - M1934: closing the window of `cudaglsink`, `glsink` or `wgpusink` fails the run with the new `G2gError::WindowClosed` instead of `Hardware(Other)`.
 - M1948: `rtspserversink` drops a player that leaves before PLAY and waits for the next one, instead of failing the stream.
 - M1949: `h264parse` / `h265parse` keep a slice that follows repeated parameter sets in the picture before it, so an RTSP stream that marks every slice as a picture end decodes whole pictures.
+- M1957: `rtspserversink` drops frames while no player is playing instead of holding the first one, so a player starts at the current frame.
 
 ## 0.10.0
 

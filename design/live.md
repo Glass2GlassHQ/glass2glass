@@ -630,7 +630,9 @@ on. It also speaks the publisher path, ANNOUNCE and RECORD, served by the
 receive-side `RtspServerSrc`.
 
 The sink is multi-client, each player getting its own RTP session broadcast per
-frame, on either transport: unicast UDP or TCP-interleaved, `$`-framed on the
+frame. A frame with no PLAYing player is dropped, so a player starts at the frame
+current at its PLAY, as gst-rtsp-server does for a live source. Either transport
+works: unicast UDP or TCP-interleaved, `$`-framed on the
 control connection and validated against `ffmpeg -rtsp_transport tcp`. During
 PLAY the sink runs RTCP and keepalive: periodic RFC 3550 sender reports per
 player, over UDP from the socket adjacent to the RTP one so the advertised
