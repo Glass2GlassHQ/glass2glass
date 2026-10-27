@@ -3,9 +3,11 @@
 //!
 //! A source times each segment download (bytes over elapsed time) and feeds it
 //! to a [`BandwidthEstimator`], which keeps an exponentially-weighted moving
-//! average of measured throughput. Before fetching the next segment the source
-//! asks for an [`effective_cap`](BandwidthEstimator::effective_cap): the smoothed
-//! estimate scaled by a safety factor, further bounded by the user's
+//! average of the download time per bit, so one slow segment after fast ones
+//! brings the estimate down to at most twice its rate. Before fetching the next
+//! segment the source asks for an
+//! [`effective_cap`](BandwidthEstimator::effective_cap): the smoothed estimate
+//! scaled by a safety factor, further bounded by the user's
 //! `max-bandwidth`. That cap drives the *existing* variant / Representation
 //! selection (`MasterPlaylist::select` / `Mpd::select`), so ABR reduces to
 //! "re-pick the rendition whose declared bitrate fits the measured bandwidth"
@@ -23,18 +25,22 @@ const ALPHA: f64 = 0.5;
 /// selected at the estimate does not immediately rebuffer.
 const SAFETY: f64 = 0.8;
 
-/// An exponentially-weighted moving average of measured download throughput, in
-/// bits per second, plus the selection rule that turns it into a bandwidth cap.
+/// An exponentially-weighted moving average of measured download time per bit,
+/// plus the selection rule that turns it into a bandwidth cap.
 #[derive(Debug, Clone)]
 pub(crate) struct BandwidthEstimator {
-    /// Smoothed estimate in bits/sec; `None` until the first usable sample.
-    estimate_bps: Option<f64>,
+    /// Smoothed nanoseconds per bit; `None` until the first usable sample. A
+    /// mean of rates would let a loopback-speed download outweigh slow ones for
+    /// many segments after the link drops.
+    nanos_per_bit: Option<f64>,
 }
 
 impl BandwidthEstimator {
     /// A fresh estimator with no samples.
     pub(crate) fn new() -> Self {
-        Self { estimate_bps: None }
+        Self {
+            nanos_per_bit: None,
+        }
     }
 
     /// Record a completed download of `bytes` that took `elapsed_ns`. A zero (or
@@ -44,10 +50,10 @@ impl BandwidthEstimator {
         if elapsed_ns == 0 || bytes == 0 {
             return;
         }
-        let bps = (bytes as f64) * 8.0 * 1.0e9 / (elapsed_ns as f64);
-        self.estimate_bps = Some(match self.estimate_bps {
-            Some(prev) => ALPHA * bps + (1.0 - ALPHA) * prev,
-            None => bps,
+        let nanos_per_bit = (elapsed_ns as f64) / ((bytes as f64) * 8.0);
+        self.nanos_per_bit = Some(match self.nanos_per_bit {
+            Some(prev) => ALPHA * nanos_per_bit + (1.0 - ALPHA) * prev,
+            None => nanos_per_bit,
         });
     }
 
@@ -56,7 +62,7 @@ impl BandwidthEstimator {
     /// (`0` = no user cap). `None` until the first sample, so the initial pick
     /// uses only the user cap (the prior fixed-variant behaviour).
     pub(crate) fn effective_cap(&self, user_cap: u64) -> Option<u64> {
-        let est = self.estimate_bps?;
+        let est = 1.0e9 / self.nanos_per_bit?;
         let abr_cap = (est * SAFETY).max(0.0) as u64;
         Some(match user_cap {
             0 => abr_cap,
@@ -91,11 +97,11 @@ mod tests {
     #[test]
     fn ewma_smooths_toward_a_dropped_rate() {
         let mut est = BandwidthEstimator::new();
-        est.sample(10_000_000, 1_000_000_000); // 80 Mbit/s
-                                               // Bandwidth collapses to 8 Mbit/s; the EWMA (alpha 0.5) moves halfway to
-                                               // 44 Mbit/s, so the cap is 0.8 * 44 = 35.2 Mbit/s.
+        est.sample(10_000_000, 1_000_000_000); // 80 Mbit/s, 12.5 ns per bit
+                                               // Bandwidth collapses to 8 Mbit/s, 125 ns per bit; the EWMA (alpha 0.5)
+                                               // moves halfway to 68.75 ns per bit, 14.5 Mbit/s, so the cap is 11.6 Mbit/s.
         est.sample(1_000_000, 1_000_000_000);
-        assert_eq!(est.effective_cap(0), Some(35_200_000));
+        assert_eq!(est.effective_cap(0), Some(11_636_363));
     }
 
     #[test]

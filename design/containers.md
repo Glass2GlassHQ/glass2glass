@@ -1353,9 +1353,10 @@ skipped media, as for an `#EXT-X-GAP` segment. A playlist with `#EXT-X-ENDLIST`
 still fails the run on the same answer.
 
 `with_abr()` makes it throughput-adaptive. A shared `abr::BandwidthEstimator`
-keeps an EWMA of measured download throughput, bytes over elapsed
-`monotonic_ns`, and yields an effective bandwidth cap, the estimate scaled by a
-safety factor and bounded by `max-bandwidth`. The run loop feeds that cap to the
+keeps an EWMA of the download time per bit, elapsed `monotonic_ns` over the
+bits fetched, so one slow segment after loopback-speed ones brings the estimate
+down to at most twice the slow rate. It yields an effective bandwidth cap, the
+estimate scaled by a safety factor and bounded by `max-bandwidth`. The run loop feeds that cap to the
 existing `MasterPlaylist` selection, re-picks the best-fitting variant after each
 segment, and on a change swaps the active media playlist and re-emits the init,
 keeping the time-aligned segment index. It is off by default, which is a fixed
