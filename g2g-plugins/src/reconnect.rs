@@ -125,11 +125,10 @@ pub(crate) const RECONNECT_BACKOFF_MAX_PROP: PropertySpec = PropertySpec::new(
 )
 .with_default("5000");
 
-#[cfg(test)]
+#[cfg(all(test, feature = "rtsp"))]
 mod tests {
     use super::*;
 
-    #[cfg(feature = "rtsp")]
     #[test]
     fn each_recovered_loss_gets_the_whole_reconnect_budget() {
         let policy = ReconnectPolicy {
