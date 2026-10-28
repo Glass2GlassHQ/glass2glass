@@ -26,6 +26,8 @@ use g2g_core::time::ticks_to_ns;
 use roxmltree::{Document, Node};
 
 use crate::bereader::{take_be_u16, take_be_u32, take_be_u64};
+use crate::hls::select_by_bandwidth;
+pub use crate::hls::ByteRange;
 use crate::xmlutil::days_from_civil;
 
 /// One selectable Representation (a single quality rendition).
@@ -39,15 +41,6 @@ pub struct Representation {
     pub mime_type: Option<String>,
     /// How this Representation's segments are addressed.
     pub source: SegmentSource,
-}
-
-/// A byte sub-range of a resource (`mediaRange` / `range` / `indexRange`):
-/// `length` bytes from `offset`. The DASH analog of HLS `#EXT-X-BYTERANGE`; the
-/// MPD spells it `"start-end"` (inclusive end), parsed by [`parse_dash_range`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ByteRange {
-    pub offset: u64,
-    pub length: u64,
 }
 
 /// How a Representation addresses its segments.
@@ -848,14 +841,9 @@ pub fn parse_sidx(data: &[u8]) -> Option<Sidx> {
 
 impl Period {
     /// Pick the highest-bandwidth Representation at or below `max_bandwidth`
-    /// (or the overall highest when `None` / nothing fits).
+    /// (the overall highest when `None`, the lowest when nothing fits).
     pub fn select(&self, max_bandwidth: Option<u64>) -> Option<&Representation> {
-        let under = |r: &&Representation| max_bandwidth.is_none_or(|cap| r.bandwidth <= cap);
-        self.representations
-            .iter()
-            .filter(under)
-            .max_by_key(|r| r.bandwidth)
-            .or_else(|| self.representations.iter().min_by_key(|r| r.bandwidth))
+        select_by_bandwidth(&self.representations, |r| r.bandwidth, max_bandwidth)
     }
 }
 

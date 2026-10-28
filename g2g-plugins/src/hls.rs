@@ -106,9 +106,10 @@ pub struct SegmentKey {
     pub key_id: Option<[u8; 16]>,
 }
 
-/// A byte sub-range of a resource (`#EXT-X-BYTERANGE` / `#EXT-X-MAP:BYTERANGE`):
-/// `length` bytes starting at `offset`. Single-file CMAF/fMP4 packs the init
-/// segment and every media fragment into one resource addressed by range.
+/// A byte sub-range of a resource: HLS `#EXT-X-BYTERANGE` /
+/// `#EXT-X-MAP:BYTERANGE`, DASH `mediaRange` / `range` / `indexRange`. `length`
+/// bytes starting at `offset`. Single-file CMAF/fMP4 packs the init segment and
+/// every media fragment into one resource addressed by range.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ByteRange {
     pub offset: u64,
@@ -261,17 +262,24 @@ pub enum HlsError {
     MalformedPart,
 }
 
+// the lowest is the fallback when every entry exceeds the cap
+pub(crate) fn select_by_bandwidth<T>(
+    entries: &[T],
+    bandwidth: impl Fn(&T) -> u64,
+    max_bandwidth: Option<u64>,
+) -> Option<&T> {
+    entries
+        .iter()
+        .filter(|entry| max_bandwidth.is_none_or(|cap| bandwidth(entry) <= cap))
+        .max_by_key(|entry| bandwidth(entry))
+        .or_else(|| entries.iter().min_by_key(|entry| bandwidth(entry)))
+}
+
 impl MasterPlaylist {
-    /// Pick the highest-bandwidth variant at or below `max_bandwidth` (or the
-    /// overall highest when `None` / nothing fits). The simplest ABR rule; a
-    /// real rate adaptor would track throughput across segments.
+    /// Pick the highest-bandwidth variant at or below `max_bandwidth` (the
+    /// overall highest when `None`, the lowest when nothing fits).
     pub fn select(&self, max_bandwidth: Option<u64>) -> Option<&Variant> {
-        let under = |v: &&Variant| max_bandwidth.is_none_or(|cap| v.bandwidth <= cap);
-        self.variants
-            .iter()
-            .filter(under)
-            .max_by_key(|v| v.bandwidth)
-            .or_else(|| self.variants.iter().min_by_key(|v| v.bandwidth))
+        select_by_bandwidth(&self.variants, |v| v.bandwidth, max_bandwidth)
     }
 
     /// Pick a rendition from `group_id` of `media_type` by `language` preference:

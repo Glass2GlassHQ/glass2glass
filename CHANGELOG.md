@@ -60,6 +60,7 @@ Breaking: `QosMessage` gains `downstream_proc_ns`, `ElementProbe` is no longer `
 - M1957: `rtspserversink` drops frames while no player is playing instead of holding the first one, so a player starts at the current frame.
 - M1958: `rtspsrc` keeps frame timestamps when a server's RTP-Info `rtptime` is ahead of its first packets.
 - M1959: `whipsink` posts a new offer after it loses its session when `reconnect` is set.
+- M1960: `hlssrc` keeps `max-bandwidth` when its first ABR sample is unusable, and HLS and DASH share one byte range type and variant pick.
 
 ## 0.10.0
 

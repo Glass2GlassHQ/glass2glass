@@ -59,10 +59,13 @@ impl BandwidthEstimator {
 
     /// The bandwidth cap to feed variant / Representation selection: the estimate
     /// scaled by the safety factor, then bounded by the user's `user_cap`
-    /// (`0` = no user cap). `None` until the first sample, so the initial pick
-    /// uses only the user cap (the prior fixed-variant behaviour).
+    /// (`0` = no user cap). Before the first usable sample it is the user cap
+    /// alone, `None` when that is `0` too.
     pub(crate) fn effective_cap(&self, user_cap: u64) -> Option<u64> {
-        let est = 1.0e9 / self.nanos_per_bit?;
+        let Some(nanos_per_bit) = self.nanos_per_bit else {
+            return (user_cap != 0).then_some(user_cap);
+        };
+        let est = 1.0e9 / nanos_per_bit;
         let abr_cap = (est * SAFETY).max(0.0) as u64;
         Some(match user_cap {
             0 => abr_cap,
@@ -78,12 +81,8 @@ mod tests {
     #[test]
     fn no_sample_means_no_cap_so_initial_pick_uses_user_cap() {
         let est = BandwidthEstimator::new();
-        assert_eq!(
-            est.effective_cap(0),
-            None,
-            "no estimate yet -> caller uses its own cap"
-        );
-        assert_eq!(est.effective_cap(5_000_000), None);
+        assert_eq!(est.effective_cap(0), None, "no estimate and no user cap");
+        assert_eq!(est.effective_cap(5_000_000), Some(5_000_000));
     }
 
     #[test]
@@ -120,5 +119,10 @@ mod tests {
         est.sample(0, 1_000_000_000);
         est.sample(1_000_000, 0);
         assert_eq!(est.effective_cap(0), None, "no usable sample recorded");
+        assert_eq!(
+            est.effective_cap(5_000_000),
+            Some(5_000_000),
+            "an ignored sample leaves the user cap in force"
+        );
     }
 }

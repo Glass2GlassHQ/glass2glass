@@ -501,7 +501,7 @@ impl SourceLoop for DashSrc {
             let mut estimator = BandwidthEstimator::new();
             let sel_cap = |est: &BandwidthEstimator| {
                 if self.abr {
-                    est.effective_cap(self.max_bandwidth).or(cap)
+                    est.effective_cap(self.max_bandwidth)
                 } else {
                     cap
                 }
