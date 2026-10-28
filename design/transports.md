@@ -255,6 +255,11 @@ down cleanly sends a DTLS close_notify, and the task replaces that session at
 once. str0m takes about 22 s to call a silent peer disconnected, so that is the
 floor on detecting a server that died without one.
 
+After a close_notify str0m runs no more timers, so every str0m poll loop checks
+`Rtc::is_alive` when it reaches a timeout and ends that session the way it ends
+one on an ICE disconnect: `whipserversrc` frees the publisher's slot and the
+sources push EOS.
+
 WHIP and WHEP are unidirectional by spec, so sendrecv cannot use them. The
 duplex session exchanges SDP directly between two peers over an `SdpChannel`, an
 in-process offer/answer transport for a P2P loopback, and a real SFU signaller

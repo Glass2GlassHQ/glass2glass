@@ -346,6 +346,8 @@ impl MultiOutputSource for WebRtcWhepSessionSrc {
                 let mut frames: Vec<(usize, MediaData)> = Vec::new();
                 let deadline = loop {
                     match rtc.poll_output() {
+                        // after a DTLS close_notify str0m returns a timeout that never fires
+                        Ok(Output::Timeout(_)) if !rtc.is_alive() => finish!(),
                         Ok(Output::Timeout(t)) => break t,
                         Ok(Output::Transmit(t)) => send_transmit(&socket, &mut turn, &t).await,
                         Ok(Output::Event(Event::MediaData(d))) => {

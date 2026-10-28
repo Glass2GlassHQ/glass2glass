@@ -744,6 +744,8 @@ impl MultiDuplexSession for WebRtcDuplexSession {
                 let mut frames: Vec<(usize, u64, Vec<u8>)> = Vec::new();
                 let deadline = loop {
                     match rtc.poll_output() {
+                        // after a DTLS close_notify str0m returns a timeout that never fires
+                        Ok(Output::Timeout(_)) if !rtc.is_alive() => finish!(),
                         Ok(Output::Timeout(t)) => break t,
                         Ok(Output::Transmit(t)) => send_transmit(&socket, &mut turn, &t).await,
                         // A remote-created m-line: the answerer learns its initial

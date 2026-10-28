@@ -13,16 +13,18 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use str0m::change::SdpOffer;
+use str0m::change::{SdpAnswer, SdpOffer};
 use str0m::crypto::from_feature_flags;
+use str0m::media::{Direction, MediaKind};
 use str0m::net::{Protocol, Receive};
-use str0m::{Candidate, Event, Input, Output, RtcConfig};
+use str0m::{Candidate, Event, Input, Output, Rtc, RtcConfig};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::mpsc;
 
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
+use g2g_core::runtime::SourceLoop;
 use g2g_core::{
     AsyncElement, AudioFormat, Caps, FrameTiming, G2gError, MemoryDomain, MultiOutputSink,
     MultiOutputSource, OutputSink, PipelinePacket, PropValue, PushOutcome, Reconfigure,
@@ -30,6 +32,7 @@ use g2g_core::{
 use g2g_plugins::webrtc_codec::WebRtcVideoCodec;
 use g2g_plugins::webrtc_stats::WebRtcStats;
 use g2g_plugins::webrtcsink::WebRtcSink;
+use g2g_plugins::webrtcwhepsrc::WebRtcWhepSrc;
 use g2g_plugins::whipserversrc::WhipServerSrc;
 use webrtc_streams_common::{fixed_caps, payload, synthetic_stream, FPS};
 
@@ -580,39 +583,10 @@ async fn read_request_body(stream: &mut TcpStream) -> String {
     String::from_utf8(request[header_end..].to_vec()).unwrap()
 }
 
-/// Answer one WHIP offer on `listener`, wait for DTLS to connect, then stop
-/// listening and close the session with a DTLS close_notify, the way mediamtx
-/// ends its sessions on SIGTERM.
-async fn answer_then_close(listener: TcpListener) {
-    let (mut stream, _) = listener.accept().await.unwrap();
-    let offer = read_request_body(&mut stream).await;
-    let candidate_ip: IpAddr = offer
-        .lines()
-        .find(|l| l.starts_with("a=candidate:"))
-        .and_then(|l| l.split_whitespace().nth(4))
-        .expect("the offer carries a host candidate")
-        .parse()
-        .unwrap();
-    let socket = UdpSocket::bind((candidate_ip, 0)).await.unwrap();
+/// Drive `rtc` until DTLS connects, then close the session with a DTLS
+/// close_notify and drive it until the close is sent.
+async fn close_once_connected(mut rtc: Rtc, socket: UdpSocket) {
     let local = socket.local_addr().unwrap();
-    let mut rtc = RtcConfig::new()
-        .set_crypto_provider(Arc::new(from_feature_flags()))
-        .build(Instant::now());
-    rtc.add_local_candidate(Candidate::host(local, "udp").unwrap());
-    let answer = rtc
-        .sdp_api()
-        .accept_offer(SdpOffer::from_sdp_string(&offer).unwrap())
-        .unwrap()
-        .to_sdp_string();
-    let response = format!(
-        "HTTP/1.1 201 Created\r\nContent-Type: application/sdp\r\n\
-         Location: /whip/closing\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}",
-        answer.len()
-    );
-    stream.write_all(response.as_bytes()).await.unwrap();
-    drop(stream);
-    drop(listener);
-
     let mut buf = vec![0u8; 2048];
     loop {
         let deadline = loop {
@@ -647,6 +621,41 @@ async fn answer_then_close(listener: TcpListener) {
     }
 }
 
+/// Answer one WHIP or WHEP offer on `listener`, wait for DTLS to connect, then
+/// stop listening and close the session with a DTLS close_notify, the way
+/// mediamtx ends its sessions on SIGTERM.
+async fn answer_then_close(listener: TcpListener) {
+    let (mut stream, _) = listener.accept().await.unwrap();
+    let offer = read_request_body(&mut stream).await;
+    let candidate_ip: IpAddr = offer
+        .lines()
+        .find(|l| l.starts_with("a=candidate:"))
+        .and_then(|l| l.split_whitespace().nth(4))
+        .expect("the offer carries a host candidate")
+        .parse()
+        .unwrap();
+    let socket = UdpSocket::bind((candidate_ip, 0)).await.unwrap();
+    let local = socket.local_addr().unwrap();
+    let mut rtc = RtcConfig::new()
+        .set_crypto_provider(Arc::new(from_feature_flags()))
+        .build(Instant::now());
+    rtc.add_local_candidate(Candidate::host(local, "udp").unwrap());
+    let answer = rtc
+        .sdp_api()
+        .accept_offer(SdpOffer::from_sdp_string(&offer).unwrap())
+        .unwrap()
+        .to_sdp_string();
+    let response = format!(
+        "HTTP/1.1 201 Created\r\nContent-Type: application/sdp\r\n\
+         Location: /whip/closing\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}",
+        answer.len()
+    );
+    stream.write_all(response.as_bytes()).await.unwrap();
+    drop(stream);
+    drop(listener);
+    close_once_connected(rtc, socket).await;
+}
+
 /// A server that shuts down cleanly sends the sink a DTLS close_notify: the sink
 /// POSTs a new offer, and the server that takes over the port gets a keyframe.
 #[tokio::test]
@@ -673,4 +682,96 @@ async fn sink_republishes_after_the_server_closes_the_session() {
 
     assert_eq!(bytes(&frame), &keyframe[..]);
     assert!(frame.timing.keyframe);
+}
+
+/// Publish one video m-line to `whip_url`, wait for DTLS to connect, then close
+/// the session with a DTLS close_notify and no DELETE.
+async fn publish_then_close(whip_url: String) {
+    let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let mut rtc = RtcConfig::new()
+        .set_crypto_provider(Arc::new(from_feature_flags()))
+        .build(Instant::now());
+    rtc.add_local_candidate(Candidate::host(socket.local_addr().unwrap(), "udp").unwrap());
+    let mut change = rtc.sdp_api();
+    change.add_media(MediaKind::Video, Direction::SendOnly, None, None, None);
+    let (offer, pending) = change.apply().unwrap();
+    let answer = reqwest::Client::new()
+        .post(&whip_url)
+        .header("Content-Type", "application/sdp")
+        .body(offer.to_sdp_string())
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    rtc.sdp_api()
+        .accept_answer(pending, SdpAnswer::from_sdp_string(&answer).unwrap())
+        .unwrap();
+    close_once_connected(rtc, socket).await;
+}
+
+/// A publisher that leaves with a DTLS close_notify instead of a DELETE frees
+/// its slot, so the run ends once it was the last publisher.
+#[tokio::test]
+async fn server_releases_a_publisher_that_closes_the_session() {
+    let host_addr = format!("http://127.0.0.1:{}", free_port());
+    let mut server = WhipServerSrc::new(host_addr.clone());
+    let (packets, mut received) = mpsc::unbounded_channel();
+    let mut collector = Collector { packets, ports: 2 };
+    let run = server.run(&mut collector);
+    let client = async {
+        // both caps announcements follow the bind, so the server is listening
+        for _ in 0..2 {
+            received.recv().await.unwrap();
+        }
+        publish_then_close(format!("{host_addr}/whip")).await;
+    };
+    let (result, ()) = tokio::time::timeout(RUN_TIMEOUT, async { tokio::join!(run, client) })
+        .await
+        .expect("the server kept the closed session");
+    result.expect("server run failed");
+
+    let mut ports: [Vec<PipelinePacket>; 2] = [Vec::new(), Vec::new()];
+    while let Ok((port, packet)) = received.try_recv() {
+        ports[port].push(packet);
+    }
+    assert_ends_with_eos(&ports);
+}
+
+/// Every packet a single-output source pushed.
+struct Recorder(Vec<PipelinePacket>);
+
+impl OutputSink for Recorder {
+    fn poll_push(
+        &mut self,
+        _cx: &mut Context<'_>,
+        packet: &mut Option<PipelinePacket>,
+    ) -> Poll<Result<PushOutcome, G2gError>> {
+        self.0.push(packet.take().expect("push without a packet"));
+        Poll::Ready(Ok(PushOutcome::Accepted))
+    }
+}
+
+/// A WHEP server that closes the session with a DTLS close_notify ends the
+/// source's run with EOS.
+#[tokio::test]
+async fn whep_source_ends_when_the_server_closes_the_session() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut source = WebRtcWhepSrc::new(format!("http://{}/whep", listener.local_addr().unwrap()));
+    source
+        .configure_pipeline(&fixed_caps(WebRtcVideoCodec::default()))
+        .unwrap();
+    let closed = tokio::spawn(answer_then_close(listener));
+    let mut recorder = Recorder(Vec::new());
+
+    tokio::time::timeout(RUN_TIMEOUT, source.run(&mut recorder))
+        .await
+        .expect("the source kept the closed session")
+        .expect("source run failed");
+    closed.await.unwrap();
+
+    assert!(matches!(recorder.0.last(), Some(PipelinePacket::Eos)));
 }

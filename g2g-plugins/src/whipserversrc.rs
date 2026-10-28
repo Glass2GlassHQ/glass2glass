@@ -557,6 +557,11 @@ impl MultiOutputSource for WhipServerSrc {
                     let first_port = slot * PORTS_PER_PUBLISHER;
                     let session_deadline = loop {
                         match s.rtc.poll_output() {
+                            // after a DTLS close_notify str0m returns a timeout that never fires
+                            Ok(Output::Timeout(_)) if !s.rtc.is_alive() => {
+                                ended.push((slot, "publisher closed the session"));
+                                break Instant::now();
+                            }
                             Ok(Output::Timeout(t)) => break t,
                             Ok(Output::Transmit(t)) => {
                                 send_transmit(&s.socket, &mut turn, &t).await

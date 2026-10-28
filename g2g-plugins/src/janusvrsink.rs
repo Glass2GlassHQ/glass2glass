@@ -306,6 +306,8 @@ async fn run_session(mut a: SessionArgs) {
     loop {
         let deadline = loop {
             match a.rtc.poll_output() {
+                // after a DTLS close_notify str0m returns a timeout that never fires
+                Ok(Output::Timeout(_)) if !a.rtc.is_alive() => return leave(&mut a).await,
                 Ok(Output::Timeout(t)) => break t,
                 Ok(Output::Transmit(t)) => send_transmit(&a.socket, &mut turn, &t).await,
                 Ok(Output::Event(Event::KeyframeRequest(_))) => {

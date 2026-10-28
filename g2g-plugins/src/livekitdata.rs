@@ -181,9 +181,10 @@ impl DataSession {
                 Ok(Output::Timeout(deadline)) => {
                     return Drained {
                         messages,
-                        ended: false,
+                        // after a DTLS close_notify str0m returns a timeout that never fires
+                        ended: !self.rtc.is_alive(),
                         deadline,
-                    }
+                    };
                 }
                 Ok(Output::Transmit(transmit)) => {
                     send_transmit(&self.socket, &mut self.turn, &transmit).await

@@ -453,6 +453,11 @@ impl MultiOutputSource for JanusVrSrc {
                 let mut frames: Vec<(usize, ReceivedUnit)> = Vec::new();
                 let deadline = loop {
                     match s.rtc.poll_output() {
+                        // after a DTLS close_notify str0m returns a timeout that never fires
+                        Ok(Output::Timeout(_)) if !s.rtc.is_alive() => {
+                            g2g_info!(self, "the server closed the session, ending run");
+                            finish!()
+                        }
                         Ok(Output::Timeout(t)) => break t,
                         Ok(Output::Transmit(t)) => send_transmit(&s.socket, &mut turn, &t).await,
                         Ok(Output::Event(Event::MediaAdded(m))) => {
