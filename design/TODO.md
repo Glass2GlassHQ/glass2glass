@@ -170,11 +170,6 @@ Highest leverage first:
   - FEC is blocked upstream (str0m has no FEC payload; loss recovery is
     NACK/RTX).
   - A data channel signalled through a WHIP / WHEP session.
-  - `whipsink` cannot replace a session it loses. After a long outage its
-    trickle PATCH gets 404 and the next frame ends the run with `Shutdown`.
-    After a server restart it keeps sending into the dead session until the
-    canary kills it. Detect the dead session and POST a new offer, then put the
-    calliope `egress-faulted-whip-*` rows back.
   - Move the bevy-g2g input backchannel from its WebSocket side channel to
     `livekitdatasink` / `livekitdatasrc`.
 - **SRT:**

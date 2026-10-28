@@ -59,6 +59,7 @@ Breaking: `QosMessage` gains `downstream_proc_ns`, `ElementProbe` is no longer `
 - M1956: the heap-free, panic-free proof also runs on the ESP32-S3 (Xtensa).
 - M1957: `rtspserversink` drops frames while no player is playing instead of holding the first one, so a player starts at the current frame.
 - M1958: `rtspsrc` keeps frame timestamps when a server's RTP-Info `rtptime` is ahead of its first packets.
+- M1959: `whipsink` posts a new offer after it loses its session when `reconnect` is set.
 
 ## 0.10.0
 

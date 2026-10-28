@@ -57,9 +57,10 @@ use g2g_core::{
 };
 
 use crate::g711::{G711_CLOCK_RATE_HZ, G711_DEFAULT_CHANNELS};
-use crate::rtspclient::{
-    transports_from_flags, transports_to_flags, LowerTransport, ReconnectPolicy, ReconnectState,
+use crate::reconnect::{
+    ReconnectPolicy, ReconnectState, RECONNECT_BACKOFF_MAX_PROP, RECONNECT_BACKOFF_PROP,
 };
+use crate::rtspclient::{transports_from_flags, transports_to_flags, LowerTransport};
 
 /// User-Agent sent on DESCRIBE / SETUP unless `user-agent` overrides it. Also
 /// what [`blocking_probe_tracks`] identifies as, so a server sees one client.
@@ -868,18 +869,8 @@ const RTSPSRCN_PROPS: &[PropertySpec] = &[
         "max reconnect attempts after each loss of a session that carried media (0 = no reconnect)",
     )
     .with_default("0"),
-    PropertySpec::new(
-        "reconnect-backoff",
-        PropKind::Uint,
-        "wait before the first reconnect attempt, milliseconds (doubles per retry)",
-    )
-    .with_default("250"),
-    PropertySpec::new(
-        "reconnect-backoff-max",
-        PropKind::Uint,
-        "cap on the doubling reconnect backoff, milliseconds",
-    )
-    .with_default("5000"),
+    RECONNECT_BACKOFF_PROP,
+    RECONNECT_BACKOFF_MAX_PROP,
     PropertySpec::new(
         "stall-timeout",
         PropKind::Uint,
@@ -960,6 +951,9 @@ impl MultiOutputSource for RtspSrcN {
     }
 
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        if let Some(result) = self.reconnect.set_property(name, &value) {
+            return result;
+        }
         match name {
             "location" => {
                 self.url = value.as_str().ok_or(PropError::Type)?.to_string();
@@ -1017,20 +1011,6 @@ impl MultiOutputSource for RtspSrcN {
                 self.fill_audio_pad();
                 Ok(())
             }
-            "reconnect" => {
-                let n = value.as_uint().ok_or(PropError::Type)?;
-                self.reconnect.max_attempts = n.min(u32::MAX as u64) as u32;
-                self.reconnect.fill_backoff_defaults();
-                Ok(())
-            }
-            "reconnect-backoff" => {
-                self.reconnect.initial_backoff_ms = value.as_uint().ok_or(PropError::Type)?;
-                Ok(())
-            }
-            "reconnect-backoff-max" => {
-                self.reconnect.max_backoff_ms = value.as_uint().ok_or(PropError::Type)?;
-                Ok(())
-            }
             "stall-timeout" => {
                 self.stall_timeout_ms = value.as_uint().ok_or(PropError::Type)?;
                 Ok(())
@@ -1044,6 +1024,9 @@ impl MultiOutputSource for RtspSrcN {
     }
 
     fn get_property(&self, name: &str) -> Option<PropValue> {
+        if let Some(value) = self.reconnect.get_property(name) {
+            return Some(value);
+        }
         match name {
             "location" => Some(PropValue::Str(self.url.clone())),
             "user-agent" => Some(PropValue::Str(self.user_agent.clone())),
@@ -1070,9 +1053,6 @@ impl MultiOutputSource for RtspSrcN {
                 audio_format_nick(self.audio_format()?).to_string(),
             )),
             "onvif-metadata" => Some(PropValue::Bool(self.onvif_metadata)),
-            "reconnect" => Some(PropValue::Uint(self.reconnect.max_attempts as u64)),
-            "reconnect-backoff" => Some(PropValue::Uint(self.reconnect.initial_backoff_ms)),
-            "reconnect-backoff-max" => Some(PropValue::Uint(self.reconnect.max_backoff_ms)),
             "stall-timeout" => Some(PropValue::Uint(self.stall_timeout_ms)),
             "protocols" => Some(transports_to_flags(&self.transports)),
             _ => None,

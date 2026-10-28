@@ -246,6 +246,14 @@ WHIP for egress and WHEP for ingress are the same wire move: an
 reqwest in `webrtc_util::post_sdp`. The media server is the relay in the middle,
 so there is no peer-to-peer mode for WHIP/WHEP.
 
+`WebRtcSink` replaces a session it loses when `reconnect` is set. After ICE stays
+disconnected, the task PATCHes an ICE restart to the resource. A server that
+restarted answers 404, and then the task POSTs a fresh offer with the doubling
+backoff the RTSP elements use (`reconnect.rs`), dropping access units until the
+new session is up and asking the encoder for a keyframe. str0m takes about 22 s
+to call a silent peer disconnected, so that is the floor on detecting a lost
+session.
+
 WHIP and WHEP are unidirectional by spec, so sendrecv cannot use them. The
 duplex session exchanges SDP directly between two peers over an `SdpChannel`, an
 in-process offer/answer transport for a P2P loopback, and a real SFU signaller

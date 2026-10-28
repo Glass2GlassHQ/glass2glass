@@ -18,7 +18,7 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, AudioFormat, Caps, FrameTiming, G2gError, MemoryDomain, MultiOutputSink,
-    MultiOutputSource, OutputSink, PipelinePacket, PropValue, PushOutcome,
+    MultiOutputSource, OutputSink, PipelinePacket, PropValue, PushOutcome, Reconfigure,
 };
 use g2g_plugins::webrtc_codec::WebRtcVideoCodec;
 use g2g_plugins::webrtc_stats::WebRtcStats;
@@ -443,4 +443,97 @@ async fn publishers_land_on_their_own_pad_pairs() {
             "port {port} did not end with EOS"
         );
     }
+}
+
+const RECONNECT_ATTEMPTS: u64 = 5;
+// str0m takes about 22 s to call the lost session disconnected
+const RESTART_TIMEOUT: Duration = Duration::from_secs(60);
+// the stopped server's port frees once the runtime drops its aborted listener task
+const RESTART_GAP: Duration = Duration::from_millis(100);
+
+/// Publish `inter` until the server emits a frame, sending `keyframe` whenever
+/// the sink asks the encoder for one. Returns the server's first frame.
+async fn publish_until_received(
+    sink: &mut WebRtcSink,
+    received: &mut mpsc::UnboundedReceiver<(usize, PipelinePacket)>,
+    keyframe: &[u8],
+    inter: &[u8],
+) -> Frame {
+    let interval = Duration::from_secs(1) / FPS;
+    for sequence in 0u64.. {
+        let unit = match sink.take_reconfigure() {
+            Some(Reconfigure::ForceKeyframe) => keyframe,
+            _ => inter,
+        };
+        let timing = FrameTiming {
+            pts_ns: sequence * interval.as_nanos() as u64,
+            ..FrameTiming::default()
+        };
+        let frame = Frame::new(
+            MemoryDomain::System(SystemSlice::from_boxed(unit.to_vec().into_boxed_slice())),
+            timing,
+            sequence,
+        );
+        sink.process(PipelinePacket::DataFrame(frame), &mut Discard)
+            .await
+            .unwrap();
+        tokio::time::sleep(interval).await;
+        while let Ok((_, packet)) = received.try_recv() {
+            if let PipelinePacket::DataFrame(frame) = packet {
+                return frame;
+            }
+        }
+    }
+    unreachable!("the sequence counter never runs out")
+}
+
+/// Run a server on `host_addr` while `sink` publishes into it, and return the
+/// first frame it emits. Dropping the run on return stops the server.
+async fn first_frame_of_a_server(
+    host_addr: &str,
+    sink: &mut WebRtcSink,
+    keyframe: &[u8],
+    inter: &[u8],
+) -> Frame {
+    let mut server = WhipServerSrc::new(host_addr);
+    let (packets, mut received) = mpsc::unbounded_channel();
+    let mut collector = Collector { packets, ports: 2 };
+    let run = server.run(&mut collector);
+    let client = async {
+        // both caps announcements follow the bind, so the server is listening
+        for _ in 0..2 {
+            received.recv().await.unwrap();
+        }
+        publish_until_received(sink, &mut received, keyframe, inter).await
+    };
+    tokio::time::timeout(RESTART_TIMEOUT, async {
+        tokio::select! {
+            result = run => panic!("server ended early: {result:?}"),
+            frame = client => frame,
+        }
+    })
+    .await
+    .expect("no frame reached the server")
+}
+
+/// A server that restarts on the same port has forgotten the sink's session:
+/// the sink POSTs a new offer, asks the encoder for a keyframe, and the new
+/// server's first frame is that keyframe.
+#[tokio::test]
+async fn sink_republishes_into_a_restarted_server() {
+    let codec = WebRtcVideoCodec::H264;
+    let units = synthetic_stream(codec, 2);
+    let (keyframe, inter) = (&units[0], &units[1]);
+    let host_addr = format!("http://127.0.0.1:{}", free_port());
+    let mut sink = WebRtcSink::new(format!("{host_addr}/whip"));
+    sink.set_property("reconnect", PropValue::Uint(RECONNECT_ATTEMPTS))
+        .unwrap();
+    sink.configure_pipeline(&fixed_caps(codec)).unwrap();
+
+    first_frame_of_a_server(&host_addr, &mut sink, keyframe, keyframe).await;
+    tokio::time::sleep(RESTART_GAP).await;
+    let frame = first_frame_of_a_server(&host_addr, &mut sink, keyframe, inter).await;
+
+    assert_eq!(bytes(&frame), &keyframe[..]);
+    assert!(frame.timing.keyframe);
 }

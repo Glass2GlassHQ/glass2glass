@@ -904,6 +904,9 @@ pub mod rtspserversrcn;
 // Sans-IO RTSP publishing client (always compiled) and the tokio sink that
 // publishes a pipeline's streams to an RTSP server with ANNOUNCE and RECORD.
 pub mod rtspclient;
+// reconnect policy and backoff shared by the RTSP and WHIP elements
+#[cfg(any(feature = "rtsp", feature = "rtsp-client-sink", feature = "webrtc"))]
+mod reconnect;
 #[cfg(feature = "rtsp-client-sink")]
 pub mod rtspclientsink;
 

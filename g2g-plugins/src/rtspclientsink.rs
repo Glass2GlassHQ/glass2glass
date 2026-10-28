@@ -31,6 +31,10 @@ use crate::aacparse::{
 };
 use crate::annexb::{au_is_keyframe, parameter_sets, split_annexb};
 use crate::opusparse::{is_opus_config, parse_opus_head, parse_toc};
+use crate::reconnect::{
+    ReconnectPolicy, ReconnectState, DEFAULT_INITIAL_BACKOFF_MS, DEFAULT_MAX_BACKOFF_MS,
+    PUBLISHER_RECONNECT_PROP, RECONNECT_BACKOFF_MAX_PROP, RECONNECT_BACKOFF_PROP,
+};
 use crate::rtcp::{build_sdes_cname, SenderCounters};
 use crate::rtpcapturetime::{
     get_capture_time_prop, set_capture_time_prop, ABS_CAPTURE_TIME_ID_PROPERTY, NTP_64_ID_PROPERTY,
@@ -39,9 +43,8 @@ use crate::rtpklv::rtp_timestamp_at_clock;
 use crate::rtppay::{RtpAacPacketizer, RtpH264Packetizer, RtpH265Packetizer, RtpOpusPacketizer};
 use crate::rtspclient::{
     keepalive_interval_s, record_transport_tcp, record_transport_udp, transports_from_flags,
-    transports_to_flags, Credentials, LowerTransport, ReconnectPolicy, ReconnectState,
-    RtspClientError, RtspPublishRequests, RtspResponse, DEFAULT_INITIAL_BACKOFF_MS,
-    DEFAULT_MAX_BACKOFF_MS, STATUS_OK, STATUS_UNAUTHORIZED,
+    transports_to_flags, Credentials, LowerTransport, RtspClientError, RtspPublishRequests,
+    RtspResponse, STATUS_OK, STATUS_UNAUTHORIZED,
 };
 use crate::rtspserver::{
     interleaved_frame, parse_interleaved_channels, parse_rtp_port, push_interleaved,
@@ -1044,24 +1047,9 @@ static RTSP_CLIENT_SINK_PROPS: &[PropertySpec] = &[
     )
     .with_default("5000")
     .with_range("1", "60000"),
-    PropertySpec::new(
-        "reconnect",
-        PropKind::Uint,
-        "max reconnect attempts after each loss of the session, frames are dropped meanwhile (0 = no reconnect)",
-    )
-    .with_default("0"),
-    PropertySpec::new(
-        "reconnect-backoff",
-        PropKind::Uint,
-        "wait before the first reconnect attempt, milliseconds (doubles per retry)",
-    )
-    .with_default("250"),
-    PropertySpec::new(
-        "reconnect-backoff-max",
-        PropKind::Uint,
-        "cap on the doubling reconnect backoff, milliseconds",
-    )
-    .with_default("5000"),
+    PUBLISHER_RECONNECT_PROP,
+    RECONNECT_BACKOFF_PROP,
+    RECONNECT_BACKOFF_MAX_PROP,
     ABS_CAPTURE_TIME_ID_PROPERTY,
     NTP_64_ID_PROPERTY,
 ];
@@ -1571,6 +1559,9 @@ impl MultiInputElement for RtspClientSink {
         {
             return result;
         }
+        if let Some(result) = self.settings.reconnect.set_property(name, &value) {
+            return result;
+        }
         let text = || value.as_str().map(str::to_string).ok_or(PropError::Type);
         match name {
             "location" => self.settings.location = text()?,
@@ -1591,18 +1582,6 @@ impl MultiInputElement for RtspClientSink {
                 }
                 self.settings.report_interval_ms = ms;
             }
-            "reconnect" => {
-                let attempts = value.as_uint().ok_or(PropError::Type)?;
-                self.settings.reconnect.max_attempts =
-                    u32::try_from(attempts).map_err(|_| PropError::Value)?;
-            }
-            "reconnect-backoff" => {
-                self.settings.reconnect.initial_backoff_ms =
-                    value.as_uint().ok_or(PropError::Type)?
-            }
-            "reconnect-backoff-max" => {
-                self.settings.reconnect.max_backoff_ms = value.as_uint().ok_or(PropError::Type)?
-            }
             _ => return Err(PropError::Unknown),
         }
         Ok(())
@@ -1610,6 +1589,9 @@ impl MultiInputElement for RtspClientSink {
 
     fn get_property(&self, name: &str) -> Option<PropValue> {
         if let Some(value) = get_capture_time_prop(&self.settings.capture_time_ids, name) {
+            return Some(value);
+        }
+        if let Some(value) = self.settings.reconnect.get_property(name) {
             return Some(value);
         }
         let text = |s: &str| Some(PropValue::Str(s.to_string()));
@@ -1622,15 +1604,6 @@ impl MultiInputElement for RtspClientSink {
             "tcp-timeout" => Some(PropValue::Uint(self.settings.tcp_timeout_us)),
             "do-rtsp-keep-alive" => Some(PropValue::Bool(self.settings.keep_alive)),
             "rtcp-sr-interval" => Some(PropValue::Uint(self.settings.report_interval_ms)),
-            "reconnect" => Some(PropValue::Uint(u64::from(
-                self.settings.reconnect.max_attempts,
-            ))),
-            "reconnect-backoff" => {
-                Some(PropValue::Uint(self.settings.reconnect.initial_backoff_ms))
-            }
-            "reconnect-backoff-max" => {
-                Some(PropValue::Uint(self.settings.reconnect.max_backoff_ms))
-            }
             _ => None,
         }
     }

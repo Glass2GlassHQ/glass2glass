@@ -15,6 +15,9 @@
 //!   the task feeds it to str0m's writer for the codec, which packetizes + SRTP-encrypts
 //!   and emits the UDP datagrams. The element itself never touches the `Rtc`
 //!   (it lives on the task), so `WebRtcSink` is naturally `Send`.
+//! - With `reconnect` set, a session the task loses (the server rejects the ICE
+//!   restart, or the socket fails) is replaced: the task POSTs a new offer with
+//!   backoff, drops access units meanwhile, then asks the encoder for a keyframe.
 //!
 //! str0m is sans-IO, so g2g owns the socket and the timer, exactly the contract
 //! the `srt` / `rtspserver` modules already follow. The pure-Rust `rust-crypto`
@@ -35,12 +38,13 @@ use core::pin::Pin;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use alloc::boxed::Box;
+use alloc::format;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use std::net::SocketAddr;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
@@ -54,12 +58,16 @@ use str0m::{Event, IceConnectionState, Input, Output, Rtc, RtcConfig};
 
 use g2g_core::log::{short_type_name, LogName, LogSource};
 use g2g_core::{
-    g2g_warn, AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata,
-    G2gError, HardwareError, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError,
-    PropKind, PropValue, PropertySpec, Reconfigure,
+    g2g_info, g2g_warn, AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
+    ElementMetadata, G2gError, HardwareError, OutputSink, PadTemplate, PadTemplates,
+    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Reconfigure,
 };
 
 use crate::filesink::io_err;
+use crate::reconnect::{
+    ReconnectPolicy, ReconnectState, DEFAULT_INITIAL_BACKOFF_MS, DEFAULT_MAX_BACKOFF_MS,
+    PUBLISHER_RECONNECT_PROP, RECONNECT_BACKOFF_MAX_PROP, RECONNECT_BACKOFF_PROP,
+};
 use crate::turn::{self, TurnSet};
 use crate::webrtc_codec::{
     enable_tracks, frame_capture_time, sink_caps_alternatives, stamp_capture_time, Track,
@@ -101,6 +109,21 @@ pub(crate) struct MediaUnit {
 ///     .with_stun_server("stun.l.google.com:19302");
 /// ```
 pub struct WebRtcSink {
+    settings: SessionSettings,
+    queue_depth: usize,
+    configured: bool,
+    /// Set on the first frame, after the WHIP handshake spawns the session task.
+    tx: Option<mpsc::Sender<MediaUnit>>,
+    shared: SessionShared,
+    /// Last estimate `take_bitrate` forwarded, so it only reports changes (it is
+    /// polled every frame; the encoder need not see the same value repeatedly).
+    last_bitrate_sent: u64,
+    frames_sent: u64,
+}
+
+// what the first WHIP session and every reconnect are built from
+#[derive(Debug, Clone)]
+struct SessionSettings {
     whip_url: String,
     bearer: Option<String>,
     /// STUN server (`host:port`) for ICE NAT traversal toward a cloud SFU.
@@ -111,40 +134,38 @@ pub struct WebRtcSink {
     turn_server: Option<String>,
     turn_user: String,
     turn_pass: String,
-    queue_depth: usize,
-    configured: bool,
     /// The track, decided from the configured caps. Defaults to H.264 video
     /// until `configure_pipeline` runs.
     track: Track,
-    /// Set on the first frame, after the WHIP handshake spawns the session task.
-    tx: Option<mpsc::Sender<MediaUnit>>,
+    reconnect: ReconnectPolicy,
+    log_name: LogName,
+}
+
+// state the element and its session task both read or write
+#[derive(Debug, Clone, Default)]
+struct SessionShared {
     /// The WHIP resource URL (from the handshake), so the element can DELETE it
     /// synchronously on EOS (RFC 9725 teardown). The detached session task cannot
     /// reliably complete a DELETE on clean end, since the runtime may tear it down
     /// first; the element owns the clean-EOS teardown. Shared with the task, which
     /// tears down instead when the session ends first, so exactly one DELETE goes
-    /// out either way.
+    /// out either way. A reconnect replaces the URL with the new session's.
     resource: ResourceHandle,
-    /// Set by the session task when the remote sends a PLI (keyframe request);
-    /// read + cleared by `take_reconfigure`, which forwards a
-    /// `Reconfigure::ForceKeyframe` up the reverse channel to the encoder. Shared
-    /// because the str0m loop lives on a separate task.
+    /// Set by the session task when the remote sends a PLI (keyframe request) or
+    /// a reconnect opens a new session; read + cleared by `take_reconfigure`,
+    /// which forwards a `Reconfigure::ForceKeyframe` up the reverse channel to the
+    /// encoder. Shared because the str0m loop lives on a separate task.
     keyframe_requested: Arc<AtomicBool>,
     /// Latest congestion-control / BWE estimate (bits/second, 0 = none yet),
     /// written by the session task from `Event::EgressBitrateEstimate`. Shared
     /// with the task; `take_bitrate` forwards changes up the reverse channel.
     bitrate_estimate: Arc<AtomicU64>,
-    /// Last estimate `take_bitrate` forwarded, so it only reports changes (it is
-    /// polled every frame; the encoder need not see the same value repeatedly).
-    last_bitrate_sent: u64,
-    frames_sent: u64,
     stats: WebRtcStatsHandle,
-    log_name: LogName,
 }
 
-impl LogSource for WebRtcSink {
+impl LogSource for SessionSettings {
     fn log_category(&self) -> &'static str {
-        short_type_name::<Self>()
+        short_type_name::<WebRtcSink>()
     }
     fn log_instance(&self) -> Option<&str> {
         self.log_name.instance()
@@ -154,10 +175,22 @@ impl LogSource for WebRtcSink {
     }
 }
 
+impl LogSource for WebRtcSink {
+    fn log_category(&self) -> &'static str {
+        self.settings.log_category()
+    }
+    fn log_instance(&self) -> Option<&str> {
+        self.settings.log_instance()
+    }
+    fn log_category_override(&self) -> Option<&str> {
+        self.settings.log_category_override()
+    }
+}
+
 impl core::fmt::Debug for WebRtcSink {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("WebRtcSink")
-            .field("whip_url", &self.whip_url)
+            .field("whip_url", &self.settings.whip_url)
             .field("configured", &self.configured)
             .field("frames_sent", &self.frames_sent)
             .finish()
@@ -169,35 +202,39 @@ impl WebRtcSink {
     /// `http://localhost:8889/mystream/whip` on a mediamtx server).
     pub fn new(whip_url: impl Into<String>) -> Self {
         Self {
-            whip_url: whip_url.into(),
-            bearer: None,
-            stun_server: None,
-            turn_server: None,
-            turn_user: String::new(),
-            turn_pass: String::new(),
+            settings: SessionSettings {
+                whip_url: whip_url.into(),
+                bearer: None,
+                stun_server: None,
+                turn_server: None,
+                turn_user: String::new(),
+                turn_pass: String::new(),
+                track: Track::Video(WebRtcVideoCodec::default()),
+                reconnect: ReconnectPolicy {
+                    max_attempts: 0,
+                    initial_backoff_ms: DEFAULT_INITIAL_BACKOFF_MS,
+                    max_backoff_ms: DEFAULT_MAX_BACKOFF_MS,
+                },
+                log_name: LogName::new(),
+            },
             queue_depth: DEFAULT_QUEUE_DEPTH,
             configured: false,
-            track: Track::Video(WebRtcVideoCodec::default()),
             tx: None,
-            resource: ResourceHandle::default(),
-            keyframe_requested: Arc::new(AtomicBool::new(false)),
-            bitrate_estimate: Arc::new(AtomicU64::new(0)),
+            shared: SessionShared::default(),
             last_bitrate_sent: 0,
             frames_sent: 0,
-            stats: WebRtcStatsHandle::default(),
-            log_name: LogName::new(),
         }
     }
 
     /// Live counters of the WHIP session, readable while it runs.
     pub fn stats_handle(&self) -> WebRtcStatsHandle {
-        self.stats.clone()
+        self.shared.stats.clone()
     }
 
     /// Attach a bearer token, sent as `Authorization: Bearer <token>` on the
     /// WHIP POST (some servers require it).
     pub fn with_bearer(mut self, token: impl Into<String>) -> Self {
-        self.bearer = Some(token.into());
+        self.settings.bearer = Some(token.into());
         self
     }
 
@@ -211,7 +248,7 @@ impl WebRtcSink {
     /// NAT traversal. Required to reach a cloud SFU (LiveKit Cloud, etc.) from
     /// behind NAT; unset means host candidate only (works on a LAN).
     pub fn with_stun_server(mut self, server: impl Into<String>) -> Self {
-        self.stun_server = Some(server.into());
+        self.settings.stun_server = Some(server.into());
         self
     }
 
@@ -227,9 +264,9 @@ impl WebRtcSink {
         username: impl Into<String>,
         password: impl Into<String>,
     ) -> Self {
-        self.turn_server = Some(server.into());
-        self.turn_user = username.into();
-        self.turn_pass = password.into();
+        self.settings.turn_server = Some(server.into());
+        self.settings.turn_user = username.into();
+        self.settings.turn_pass = password.into();
         self
     }
 
@@ -238,100 +275,203 @@ impl WebRtcSink {
         self.frames_sent
     }
 
-    /// Build the `Rtc`, do the WHIP offer/answer exchange, and spawn the session
-    /// task. Runs on the first frame because it is async (the runner drives
-    /// `process` inside a tokio runtime, as for the other network sinks).
-    async fn start_session(&mut self) -> Result<(), G2gError> {
-        // ICE needs a routable host candidate; pick the route-local IP via the
-        // UDP connect trick (no packet is sent, the OS just resolves the source
-        // address for the route). Falls back to loopback for offline use.
-        let host_ip = select_host_ip();
-        let socket = UdpSocket::bind((host_ip, 0)).await.map_err(io_err)?;
-        let local = socket.local_addr().map_err(io_err)?;
-
-        // rust-crypto backend (pure Rust, no OpenSSL); offer only this track's
-        // codec so the answer's payload type is unambiguous.
-        let config = RtcConfig::new()
-            .set_crypto_provider(Arc::new(from_feature_flags()))
-            // Congestion control: str0m runs the TWCC/REMB estimator and emits
-            // `EgressBitrateEstimate`; the sink relays it to the encoder (BWE).
-            .enable_bwe(Some(Bitrate::bps(INITIAL_BITRATE_BPS)))
-            .set_stats_interval(Some(STATS_INTERVAL))
-            .clear_codecs();
-        let config = enable_tracks(config, [self.track]);
-        let mut rtc = config.build(Instant::now());
-
-        // Trickle ICE: the offer carries the host candidate only; reflexive /
-        // relay candidates are gathered after the POST and trickled by PATCH.
-        add_host_candidate(&mut rtc, &socket)?;
-
-        // Offer a single send-only m-line for the configured track.
-        let (offer_sdp, pending, mid): (String, SdpPendingOffer, Mid) = {
-            let mut api = rtc.sdp_api();
-            let mid = api.add_media(
-                self.track.media_kind(),
-                Direction::SendOnly,
-                None,
-                None,
-                None,
-            );
-            let (offer, pending) = api.apply().ok_or_else(|| {
-                g2g_warn!(self, "offer creation failed");
-                G2gError::Hardware(HardwareError::Other)
-            })?;
-            (offer.to_sdp_string(), pending, mid)
+    /// Connect the first WHIP session and spawn the task that publishes over it.
+    /// Runs on the first frame because it is async (the runner drives `process`
+    /// inside a tokio runtime, as for the other network sinks).
+    async fn start_publishing(&mut self) -> Result<(), G2gError> {
+        let settings = Arc::new(self.settings.clone());
+        let first = match connect(settings.clone(), self.shared.resource.clone()).await {
+            Ok(connection) => Ok(connection),
+            Err(error) if settings.reconnect.max_attempts == 0 => return Err(error),
+            Err(error) => Err(format!("{error:?}")),
         };
-
-        // WHIP: POST the offer, receive the answer SDP + resource URL, apply it.
-        let session = negotiate_over_http(
-            &mut rtc,
-            pending,
-            &self.whip_url,
-            self.bearer.as_deref(),
-            &offer_sdp,
-        )
-        .await?;
-
-        // Gather reflexive / relay candidates and trickle them to the resource.
-        let turn: TurnSet = trickle_candidates(
-            &mut rtc,
-            &socket,
-            &offer_sdp,
-            &session,
-            self.bearer.as_deref(),
-            self.stun_server.as_deref(),
-            TurnConfig {
-                server: self.turn_server.as_deref(),
-                user: &self.turn_user,
-                pass: &self.turn_pass,
-            },
-        )
-        .await;
-
-        // One handle for the resource, shared by the element (clean-EOS DELETE)
-        // and the session task (disconnect / error teardown).
-        self.resource = ResourceHandle::new(session.resource);
         let (tx, rx) = mpsc::channel::<MediaUnit>(self.queue_depth);
-        let keyframe_requested = Arc::clone(&self.keyframe_requested);
-        let bitrate_estimate = Arc::clone(&self.bitrate_estimate);
-        tokio::spawn(run_session(
-            rtc,
-            socket,
-            local,
-            mid,
-            self.track,
-            turn,
-            self.resource.clone(),
-            session.etag,
-            self.bearer.clone(),
-            keyframe_requested,
-            bitrate_estimate,
-            self.stats.clone(),
-            rx,
-        ));
+        tokio::spawn(publish(settings, self.shared.clone(), first, rx));
         self.tx = Some(tx);
         Ok(())
     }
+}
+
+// one connected WHIP session, handed from `connect` to `run_session`
+#[derive(Debug)]
+struct Connection {
+    rtc: Rtc,
+    socket: UdpSocket,
+    local: SocketAddr,
+    mid: Mid,
+    turn: TurnSet,
+    etag: Option<String>,
+}
+
+/// Build the `Rtc`, do the WHIP offer/answer exchange and trickle the gathered
+/// candidates.
+async fn connect(
+    settings: Arc<SessionSettings>,
+    resource: ResourceHandle,
+) -> Result<Connection, G2gError> {
+    // ICE needs a routable host candidate; pick the route-local IP via the
+    // UDP connect trick (no packet is sent, the OS just resolves the source
+    // address for the route). Falls back to loopback for offline use.
+    let host_ip = select_host_ip();
+    let socket = UdpSocket::bind((host_ip, 0)).await.map_err(io_err)?;
+    let local = socket.local_addr().map_err(io_err)?;
+
+    // rust-crypto backend (pure Rust, no OpenSSL); offer only this track's
+    // codec so the answer's payload type is unambiguous.
+    let config = RtcConfig::new()
+        .set_crypto_provider(Arc::new(from_feature_flags()))
+        // Congestion control: str0m runs the TWCC/REMB estimator and emits
+        // `EgressBitrateEstimate`; the sink relays it to the encoder (BWE).
+        .enable_bwe(Some(Bitrate::bps(INITIAL_BITRATE_BPS)))
+        .set_stats_interval(Some(STATS_INTERVAL))
+        .clear_codecs();
+    let config = enable_tracks(config, [settings.track]);
+    let mut rtc = config.build(Instant::now());
+
+    // Trickle ICE: the offer carries the host candidate only; reflexive /
+    // relay candidates are gathered after the POST and trickled by PATCH.
+    add_host_candidate(&mut rtc, &socket)?;
+
+    // Offer a single send-only m-line for the configured track.
+    let (offer_sdp, pending, mid): (String, SdpPendingOffer, Mid) = {
+        let mut api = rtc.sdp_api();
+        let mid = api.add_media(
+            settings.track.media_kind(),
+            Direction::SendOnly,
+            None,
+            None,
+            None,
+        );
+        let (offer, pending) = api.apply().ok_or_else(|| {
+            g2g_warn!(&*settings, "offer creation failed");
+            G2gError::Hardware(HardwareError::Other)
+        })?;
+        (offer.to_sdp_string(), pending, mid)
+    };
+
+    // WHIP: POST the offer, receive the answer SDP + resource URL, apply it.
+    let session = negotiate_over_http(
+        &mut rtc,
+        pending,
+        &settings.whip_url,
+        settings.bearer.as_deref(),
+        &offer_sdp,
+    )
+    .await?;
+
+    // Gather reflexive / relay candidates and trickle them to the resource.
+    let turn: TurnSet = trickle_candidates(
+        &mut rtc,
+        &socket,
+        &offer_sdp,
+        &session,
+        settings.bearer.as_deref(),
+        settings.stun_server.as_deref(),
+        TurnConfig {
+            server: settings.turn_server.as_deref(),
+            user: &settings.turn_user,
+            pass: &settings.turn_pass,
+        },
+    )
+    .await;
+
+    resource.set(session.resource);
+    Ok(Connection {
+        rtc,
+        socket,
+        local,
+        mid,
+        turn,
+        etag: session.etag,
+    })
+}
+
+// publishes over `first`, then over each reconnected session
+async fn publish(
+    settings: Arc<SessionSettings>,
+    shared: SessionShared,
+    first: Result<Connection, String>,
+    mut rx: mpsc::Receiver<MediaUnit>,
+) {
+    let mut next = first;
+    loop {
+        let connection = match next {
+            Ok(connection) => connection,
+            Err(loss) => match reconnect(&settings, &shared, &mut rx, loss).await {
+                Some(connection) => connection,
+                None => return,
+            },
+        };
+        match run_session(connection, settings.clone(), shared.clone(), &mut rx).await {
+            SessionEnd::ElementGone => return,
+            SessionEnd::Lost(loss) => next = Err(loss),
+        }
+    }
+}
+
+// the budget of `reconnect` attempts starts again with each loss
+async fn reconnect(
+    settings: &Arc<SessionSettings>,
+    shared: &SessionShared,
+    rx: &mut mpsc::Receiver<MediaUnit>,
+    mut loss: String,
+) -> Option<Connection> {
+    let mut retry = ReconnectState::new(&settings.reconnect);
+    loop {
+        let Some(delay_ms) = retry.next_delay_ms(&settings.reconnect) else {
+            g2g_warn!(
+                &**settings,
+                "publishing to {} failed: {loss}, no reconnect attempt left",
+                settings.whip_url
+            );
+            return None;
+        };
+        g2g_warn!(
+            &**settings,
+            "publishing to {} failed: {loss}, reconnect {}/{} in {delay_ms} ms",
+            settings.whip_url,
+            retry.attempt,
+            settings.reconnect.max_attempts
+        );
+        dropping_units(rx, tokio::time::sleep(Duration::from_millis(delay_ms))).await?;
+        match dropping_units(rx, connect(settings.clone(), shared.resource.clone())).await? {
+            Ok(connection) => {
+                g2g_info!(
+                    &**settings,
+                    "republishing to {} after {} attempts",
+                    settings.whip_url,
+                    retry.attempt
+                );
+                shared.keyframe_requested.store(true, Ordering::Relaxed);
+                return Some(connection);
+            }
+            Err(error) => loss = format!("{error:?}"),
+        }
+    }
+}
+
+// runs `work` while dropping the element's units, `None` once the element is gone
+async fn dropping_units<T>(
+    rx: &mut mpsc::Receiver<MediaUnit>,
+    work: impl Future<Output = T>,
+) -> Option<T> {
+    let mut work = core::pin::pin!(work);
+    loop {
+        tokio::select! {
+            output = &mut work => return Some(output),
+            unit = rx.recv() => {
+                unit?;
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+enum SessionEnd {
+    // the element dropped its sender
+    ElementGone,
+    // the server or the network ended the session, with the reason for the log
+    Lost(String),
 }
 
 /// `WebRtcSink`'s settable properties: the WHIP endpoint URL and an optional
@@ -347,6 +487,9 @@ static WEBRTCSINK_PROPS: &[PropertySpec] = &[
     TURN_SERVER_PROP,
     TURN_USER_PROP,
     TURN_PASS_PROP,
+    PUBLISHER_RECONNECT_PROP,
+    RECONNECT_BACKOFF_PROP,
+    RECONNECT_BACKOFF_MAX_PROP,
 ];
 
 fn accepted_caps() -> CapsSet {
@@ -366,11 +509,11 @@ impl AsyncElement for WebRtcSink {
         Self: 'a;
 
     fn set_instance_name(&mut self, name: String) {
-        self.log_name.set_instance(name);
+        self.settings.log_name.set_instance(name);
     }
 
     fn set_log_category(&mut self, category: String) {
-        self.log_name.set_category(category);
+        self.settings.log_name.set_category(category);
     }
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
@@ -385,7 +528,7 @@ impl AsyncElement for WebRtcSink {
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        self.track = Track::from_caps(absolute_caps).ok_or(G2gError::CapsMismatch)?;
+        self.settings.track = Track::from_caps(absolute_caps).ok_or(G2gError::CapsMismatch)?;
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
     }
@@ -404,15 +547,18 @@ impl AsyncElement for WebRtcSink {
     }
 
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        if let Some(result) = self.settings.reconnect.set_property(name, &value) {
+            return result;
+        }
         match name {
             // `location` is the gst-canonical name; `whip-url` is accepted too.
             "location" | "whip-url" => {
-                self.whip_url = value.as_str().ok_or(PropError::Type)?.into();
+                self.settings.whip_url = value.as_str().ok_or(PropError::Type)?.into();
                 Ok(())
             }
             "auth-token" => {
                 let token = value.as_str().ok_or(PropError::Type)?;
-                self.bearer = if token.is_empty() {
+                self.settings.bearer = if token.is_empty() {
                     None
                 } else {
                     Some(token.into())
@@ -421,20 +567,20 @@ impl AsyncElement for WebRtcSink {
             }
             "stun-server" => {
                 let s = value.as_str().ok_or(PropError::Type)?;
-                self.stun_server = if s.is_empty() { None } else { Some(s.into()) };
+                self.settings.stun_server = if s.is_empty() { None } else { Some(s.into()) };
                 Ok(())
             }
             "turn-server" => {
                 let s = value.as_str().ok_or(PropError::Type)?;
-                self.turn_server = if s.is_empty() { None } else { Some(s.into()) };
+                self.settings.turn_server = if s.is_empty() { None } else { Some(s.into()) };
                 Ok(())
             }
             "turn-user" => {
-                self.turn_user = value.as_str().ok_or(PropError::Type)?.into();
+                self.settings.turn_user = value.as_str().ok_or(PropError::Type)?.into();
                 Ok(())
             }
             "turn-pass" => {
-                self.turn_pass = value.as_str().ok_or(PropError::Type)?.into();
+                self.settings.turn_pass = value.as_str().ok_or(PropError::Type)?.into();
                 Ok(())
             }
             _ => Err(PropError::Unknown),
@@ -442,21 +588,34 @@ impl AsyncElement for WebRtcSink {
     }
 
     fn get_property(&self, name: &str) -> Option<PropValue> {
+        if let Some(value) = self.settings.reconnect.get_property(name) {
+            return Some(value);
+        }
         match name {
-            "location" | "whip-url" => Some(PropValue::Str(self.whip_url.clone())),
-            "auth-token" => Some(PropValue::Str(self.bearer.clone().unwrap_or_default())),
-            "stun-server" => Some(PropValue::Str(self.stun_server.clone().unwrap_or_default())),
-            "turn-server" => Some(PropValue::Str(self.turn_server.clone().unwrap_or_default())),
-            "turn-user" => Some(PropValue::Str(self.turn_user.clone())),
-            "turn-pass" => Some(PropValue::Str(self.turn_pass.clone())),
+            "location" | "whip-url" => Some(PropValue::Str(self.settings.whip_url.clone())),
+            "auth-token" => Some(PropValue::Str(
+                self.settings.bearer.clone().unwrap_or_default(),
+            )),
+            "stun-server" => Some(PropValue::Str(
+                self.settings.stun_server.clone().unwrap_or_default(),
+            )),
+            "turn-server" => Some(PropValue::Str(
+                self.settings.turn_server.clone().unwrap_or_default(),
+            )),
+            "turn-user" => Some(PropValue::Str(self.settings.turn_user.clone())),
+            "turn-pass" => Some(PropValue::Str(self.settings.turn_pass.clone())),
             _ => None,
         }
     }
 
     fn take_reconfigure(&mut self) -> Option<Reconfigure> {
-        // The session task set this on a remote PLI; clear and forward it as a
-        // keyframe request to the upstream encoder.
-        if self.keyframe_requested.swap(false, Ordering::Relaxed) {
+        // The session task set this on a remote PLI or a reconnect; clear and
+        // forward it as a keyframe request to the upstream encoder.
+        if self
+            .shared
+            .keyframe_requested
+            .swap(false, Ordering::Relaxed)
+        {
             Some(Reconfigure::ForceKeyframe)
         } else {
             None
@@ -466,7 +625,7 @@ impl AsyncElement for WebRtcSink {
     fn take_bitrate(&mut self) -> Option<u32> {
         // Forward the session task's latest BWE estimate, but only when it
         // changed (this is polled every frame; the encoder need not re-see it).
-        let cur = self.bitrate_estimate.load(Ordering::Relaxed);
+        let cur = self.shared.bitrate_estimate.load(Ordering::Relaxed);
         if cur != 0 && cur != self.last_bitrate_sent {
             self.last_bitrate_sent = cur;
             Some(cur.min(u32::MAX as u64) as u32)
@@ -495,12 +654,12 @@ impl AsyncElement for WebRtcSink {
                         data: slice.to_vec(),
                     };
                     if self.tx.is_none() {
-                        self.start_session().await?;
+                        self.start_publishing().await?;
                     }
                     if let Some(tx) = &self.tx {
                         // Bounded send: backpressures the pipeline if the session
-                        // task is behind. A closed channel means the session ended
-                        // (ICE disconnect); surface it as shutdown.
+                        // task is behind. A closed channel means the session was
+                        // lost with no reconnect attempt left.
                         tx.send(unit).await.map_err(|_| G2gError::Shutdown)?;
                     }
                     self.frames_sent += 1;
@@ -510,7 +669,10 @@ impl AsyncElement for WebRtcSink {
                 // channel closes on element drop. Done in the element (not the
                 // task) so it completes before the runtime tears the task down.
                 PipelinePacket::Eos => {
-                    self.resource.delete_once(self.bearer.as_deref()).await;
+                    self.shared
+                        .resource
+                        .delete_once(self.settings.bearer.as_deref())
+                        .await;
                 }
                 // Geometry refinement lives in the in-band SPS, not the m-line.
                 PipelinePacket::CapsChanged(_) => {}
@@ -527,22 +689,23 @@ impl AsyncElement for WebRtcSink {
 /// The sans-IO driving loop: owns the `Rtc` and the UDP socket, drains
 /// `poll_output` to a deadline, then waits on incoming UDP, an outgoing access
 /// unit, or the str0m timeout, whichever comes first.
-#[allow(clippy::too_many_arguments)]
 async fn run_session(
-    mut rtc: Rtc,
-    socket: UdpSocket,
-    local: SocketAddr,
-    mid: Mid,
-    track: Track,
-    mut turn: TurnSet,
-    resource: ResourceHandle,
-    etag: Option<String>,
-    bearer: Option<String>,
-    keyframe_requested: Arc<AtomicBool>,
-    bitrate_estimate: Arc<AtomicU64>,
-    stats: WebRtcStatsHandle,
-    mut rx: mpsc::Receiver<MediaUnit>,
-) {
+    connection: Connection,
+    settings: Arc<SessionSettings>,
+    shared: SessionShared,
+    rx: &mut mpsc::Receiver<MediaUnit>,
+) -> SessionEnd {
+    let Connection {
+        mut rtc,
+        socket,
+        local,
+        mid,
+        mut turn,
+        etag,
+    } = connection;
+    let track = settings.track;
+    let bearer = settings.bearer.as_deref();
+    let resource = &shared.resource;
     let mut buf = alloc::vec![0u8; UDP_RECV_BYTES];
     // The negotiated payload type for this track's codec, discovered once the
     // writer exists.
@@ -572,7 +735,7 @@ async fn run_session(
                 // Flag it; the element's `take_reconfigure` forwards a
                 // `ForceKeyframe` up the reverse channel to the encoder.
                 Ok(Output::Event(Event::KeyframeRequest(_))) => {
-                    keyframe_requested.store(true, Ordering::Relaxed);
+                    shared.keyframe_requested.store(true, Ordering::Relaxed);
                 }
                 // Congestion-control estimate: stash the latest target bitrate
                 // (TWCC or REMB carry a `Bitrate`); `take_bitrate` relays changes.
@@ -583,33 +746,33 @@ async fn run_session(
                         _ => None,
                     };
                     if let Some(bps) = bps {
-                        bitrate_estimate.store(bps, Ordering::Relaxed);
+                        shared.bitrate_estimate.store(bps, Ordering::Relaxed);
                     }
                 }
-                Ok(Output::Event(event)) => stats.record(&event),
-                Err(_) => {
-                    resource.delete_once(bearer.as_deref()).await;
-                    return;
+                Ok(Output::Event(event)) => shared.stats.record(&event),
+                Err(error) => {
+                    resource.delete_once(bearer).await;
+                    return SessionEnd::Lost(format!("str0m output failed: {error}"));
                 }
             }
         };
 
         // Sustained ICE disconnect: attempt an ICE restart against the resource.
-        // A server that rejects the restart PATCH ends the session (the fresh
-        // re-POST reconnect is owned by the element restarting the pipeline).
+        // A server that rejects the restart PATCH, such as one that restarted and
+        // forgot the session, ends the session.
         if disconnected_since.is_some_and(|t| t.elapsed() >= ICE_RESTART_TIMEOUT) {
             disconnected_since = None;
-            match resource.url().as_deref() {
-                Some(res) => {
-                    if !matches!(
-                        ice_restart(&mut rtc, res, bearer.as_deref(), etag.as_deref()).await,
-                        TricklePatch::Accepted
-                    ) {
-                        resource.delete_once(bearer.as_deref()).await;
-                        return;
-                    }
-                }
-                None => return,
+            let Some(url) = resource.url() else {
+                return SessionEnd::Lost(
+                    "ICE disconnected and the session has no resource URL".into(),
+                );
+            };
+            let restart = ice_restart(&mut rtc, &url, bearer, etag.as_deref()).await;
+            if restart != TricklePatch::Accepted {
+                resource.delete_once(bearer).await;
+                return SessionEnd::Lost(format!(
+                    "ICE disconnected and the restart PATCH got {restart:?}"
+                ));
             }
         }
 
@@ -619,13 +782,16 @@ async fn run_session(
             // Incoming UDP (STUN / DTLS / RTCP from the peer, or TURN-framed
             // traffic from the relay server).
             r = socket.recv_from(&mut buf) => {
-                let Ok((n, source)) = r else {
-                    resource.delete_once(bearer.as_deref()).await;
-                    return;
+                let (n, source) = match r {
+                    Ok(received) => received,
+                    Err(error) => {
+                        resource.delete_once(bearer).await;
+                        return SessionEnd::Lost(format!("UDP receive failed: {error}"));
+                    }
                 };
                 if !feed_datagram(&mut rtc, &mut turn, local, &buf[..n], source) {
-                    resource.delete_once(bearer.as_deref()).await;
-                    return;
+                    resource.delete_once(bearer).await;
+                    return SessionEnd::Lost("str0m rejected a datagram".into());
                 }
             }
             // Keep the TURN allocation + permissions alive.
@@ -640,8 +806,8 @@ async fn run_session(
                 let Some(unit) = unit else {
                     // Clean end: flush the pacer tail before dropping the socket.
                     drain_pacer(&mut rtc, &socket, &mut turn).await;
-                    resource.delete_once(bearer.as_deref()).await;
-                    return;
+                    resource.delete_once(bearer).await;
+                    return SessionEnd::ElementGone;
                 };
                 if pt.is_none() {
                     if let Some(writer) = rtc.writer(mid) {
@@ -661,9 +827,9 @@ async fn run_session(
             }
             // str0m's timer fired.
             _ = tokio::time::sleep(timeout) => {
-                if rtc.handle_input(Input::Timeout(Instant::now())).is_err() {
-                    resource.delete_once(bearer.as_deref()).await;
-                    return;
+                if let Err(error) = rtc.handle_input(Input::Timeout(Instant::now())) {
+                    resource.delete_once(bearer).await;
+                    return SessionEnd::Lost(format!("str0m timeout handling failed: {error}"));
                 }
             }
         }
@@ -686,7 +852,7 @@ mod tests {
             let mut sink = WebRtcSink::new("http://localhost:8889/s/whip");
             assert!(sink.intercept_caps(&codec.caps_any()).is_ok());
             assert!(sink.configure_pipeline(&codec.caps_any()).is_ok());
-            assert_eq!(sink.track, Track::Video(codec));
+            assert_eq!(sink.settings.track, Track::Video(codec));
         }
     }
 
@@ -730,11 +896,11 @@ mod tests {
             .with_bearer("tok")
             .with_queue_depth(8)
             .with_turn_server("turn:3478", "u", "p");
-        assert_eq!(sink.bearer.as_deref(), Some("tok"));
+        assert_eq!(sink.settings.bearer.as_deref(), Some("tok"));
         assert_eq!(sink.queue_depth, 8);
-        assert_eq!(sink.turn_server.as_deref(), Some("turn:3478"));
-        assert_eq!(sink.turn_user, "u");
-        assert_eq!(sink.turn_pass, "p");
+        assert_eq!(sink.settings.turn_server.as_deref(), Some("turn:3478"));
+        assert_eq!(sink.settings.turn_user, "u");
+        assert_eq!(sink.settings.turn_pass, "p");
         assert_eq!(sink.frames_sent(), 0);
     }
 
@@ -743,7 +909,7 @@ mod tests {
         let mut sink = WebRtcSink::new("http://h/whip");
         sink.set_property("location", PropValue::Str("http://srv:8889/s/whip".into()))
             .unwrap();
-        assert_eq!(sink.whip_url, "http://srv:8889/s/whip");
+        assert_eq!(sink.settings.whip_url, "http://srv:8889/s/whip");
         assert_eq!(
             sink.get_property("location"),
             Some(PropValue::Str("http://srv:8889/s/whip".into()))
@@ -751,23 +917,26 @@ mod tests {
         // `whip-url` is an accepted alias for the same field.
         sink.set_property("whip-url", PropValue::Str("http://x/whip".into()))
             .unwrap();
-        assert_eq!(sink.whip_url, "http://x/whip");
+        assert_eq!(sink.settings.whip_url, "http://x/whip");
         sink.set_property("auth-token", PropValue::Str("secret".into()))
             .unwrap();
-        assert_eq!(sink.bearer.as_deref(), Some("secret"));
+        assert_eq!(sink.settings.bearer.as_deref(), Some("secret"));
         sink.set_property(
             "stun-server",
             PropValue::Str("stun.l.google.com:19302".into()),
         )
         .unwrap();
-        assert_eq!(sink.stun_server.as_deref(), Some("stun.l.google.com:19302"));
+        assert_eq!(
+            sink.settings.stun_server.as_deref(),
+            Some("stun.l.google.com:19302")
+        );
         sink.set_property("turn-server", PropValue::Str("relay:3478".into()))
             .unwrap();
         sink.set_property("turn-user", PropValue::Str("u".into()))
             .unwrap();
         sink.set_property("turn-pass", PropValue::Str("p".into()))
             .unwrap();
-        assert_eq!(sink.turn_server.as_deref(), Some("relay:3478"));
+        assert_eq!(sink.settings.turn_server.as_deref(), Some("relay:3478"));
         assert_eq!(
             sink.get_property("turn-user"),
             Some(PropValue::Str("u".into()))
@@ -775,11 +944,11 @@ mod tests {
         // Empty turn-server clears the relay.
         sink.set_property("turn-server", PropValue::Str(String::new()))
             .unwrap();
-        assert_eq!(sink.turn_server, None);
+        assert_eq!(sink.settings.turn_server, None);
         // Empty bearer clears it; unknown name and wrong type are distinct errors.
         sink.set_property("auth-token", PropValue::Str(String::new()))
             .unwrap();
-        assert_eq!(sink.bearer, None);
+        assert_eq!(sink.settings.bearer, None);
         assert_eq!(
             sink.set_property("nope", PropValue::Str("x".into())),
             Err(PropError::Unknown)
@@ -797,7 +966,7 @@ mod tests {
         let mut s = sink;
         assert_eq!(s.take_reconfigure(), None);
         // Session task observed a remote PLI -> sets the shared flag.
-        s.keyframe_requested.store(true, Ordering::Relaxed);
+        s.shared.keyframe_requested.store(true, Ordering::Relaxed);
         assert_eq!(s.take_reconfigure(), Some(Reconfigure::ForceKeyframe));
         // Consumed: a second poll yields nothing until the next PLI.
         assert_eq!(s.take_reconfigure(), None);
@@ -809,12 +978,14 @@ mod tests {
         // No estimate yet.
         assert_eq!(s.take_bitrate(), None);
         // Session task stored a BWE estimate.
-        s.bitrate_estimate.store(1_500_000, Ordering::Relaxed);
+        s.shared
+            .bitrate_estimate
+            .store(1_500_000, Ordering::Relaxed);
         assert_eq!(s.take_bitrate(), Some(1_500_000));
         // Same value again: not re-reported (the encoder need not re-see it).
         assert_eq!(s.take_bitrate(), None);
         // A new estimate is reported.
-        s.bitrate_estimate.store(900_000, Ordering::Relaxed);
+        s.shared.bitrate_estimate.store(900_000, Ordering::Relaxed);
         assert_eq!(s.take_bitrate(), Some(900_000));
     }
 
@@ -824,6 +995,6 @@ mod tests {
         assert!(sink.intercept_caps(&opus_caps(2)).is_ok());
         let mut s = WebRtcSink::new("http://h/whip");
         assert!(s.configure_pipeline(&opus_caps(2)).is_ok());
-        assert_eq!(s.track, Track::Audio);
+        assert_eq!(s.settings.track, Track::Audio);
     }
 }

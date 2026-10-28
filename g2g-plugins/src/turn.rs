@@ -451,6 +451,11 @@ pub(crate) async fn setup(
     Some(client)
 }
 
+// a closure returning these borrows makes a spawned setup future fail the Send check
+fn borrowed_entry((server, user, pass): &(String, String, String)) -> (&str, &str, &str) {
+    (server, user, pass)
+}
+
 /// The TURN client-to-server leg's transport (RFC 7065 URI schemes).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TurnTransport {
@@ -500,14 +505,7 @@ impl TurnSet {
                 )
             })
             .collect();
-        Self::setup_each(
-            rtc,
-            socket,
-            entries
-                .iter()
-                .map(|(s, u, p)| (s.as_str(), u.as_str(), p.as_str())),
-        )
-        .await
+        Self::setup_each(rtc, socket, entries.iter().map(borrowed_entry)).await
     }
 
     /// Allocate on every `(server, username, password)` entry, credentials kept

@@ -489,6 +489,10 @@ impl ResourceHandle {
         Self(alloc::sync::Arc::new(std::sync::Mutex::new(url)))
     }
 
+    pub(crate) fn set(&self, url: Option<String>) {
+        *self.0.lock().unwrap() = url;
+    }
+
     /// The URL a `PATCH` (trickle / ICE restart) targets, `None` once torn down.
     pub(crate) fn url(&self) -> Option<String> {
         self.0.lock().unwrap().clone()

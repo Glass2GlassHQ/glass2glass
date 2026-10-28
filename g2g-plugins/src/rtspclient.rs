@@ -369,84 +369,6 @@ impl RtspPublishRequests {
     }
 }
 
-/// Reconnect policy of the RTSP elements. Off by default: a session failure
-/// surfaces as an error and the element ends. When enabled, the element
-/// retries up to `max_attempts` times with exponential backoff between
-/// `initial_backoff_ms` and `max_backoff_ms`.
-#[cfg(any(feature = "rtsp", feature = "rtsp-client-sink"))]
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct ReconnectPolicy {
-    pub(crate) max_attempts: u32,
-    pub(crate) initial_backoff_ms: u64,
-    pub(crate) max_backoff_ms: u64,
-}
-
-#[cfg(feature = "rtsp")]
-impl ReconnectPolicy {
-    pub(crate) const DISABLED: Self = Self {
-        max_attempts: 0,
-        initial_backoff_ms: 0,
-        max_backoff_ms: 0,
-    };
-
-    /// Fill the backoff bounds a bare `with_reconnect(n)` / `reconnect=n`
-    /// leaves at zero, so a caller that only asks for retries gets the
-    /// documented 250 ms .. 5 s doubling.
-    pub(crate) fn fill_backoff_defaults(&mut self) {
-        if self.initial_backoff_ms == 0 {
-            self.initial_backoff_ms = DEFAULT_INITIAL_BACKOFF_MS;
-        }
-        if self.max_backoff_ms == 0 {
-            self.max_backoff_ms = DEFAULT_MAX_BACKOFF_MS;
-        }
-    }
-}
-
-/// Wait before the first retry when only an attempt count was asked for.
-#[cfg(any(feature = "rtsp", feature = "rtsp-client-sink"))]
-pub(crate) const DEFAULT_INITIAL_BACKOFF_MS: u64 = 250;
-/// Cap on the doubling retry backoff.
-#[cfg(any(feature = "rtsp", feature = "rtsp-client-sink"))]
-pub(crate) const DEFAULT_MAX_BACKOFF_MS: u64 = 5_000;
-
-/// Retry counter for one [`ReconnectPolicy`], shared by the RTSP elements so
-/// all of them count attempts and double the backoff the same way.
-#[cfg(any(feature = "rtsp", feature = "rtsp-client-sink"))]
-#[derive(Debug, Clone)]
-pub(crate) struct ReconnectState {
-    /// Retries taken so far, for the log line.
-    pub(crate) attempt: u32,
-    backoff_ms: u64,
-}
-
-#[cfg(any(feature = "rtsp", feature = "rtsp-client-sink"))]
-impl ReconnectState {
-    pub(crate) fn new(policy: &ReconnectPolicy) -> Self {
-        Self {
-            attempt: 0,
-            backoff_ms: policy.initial_backoff_ms.max(1),
-        }
-    }
-
-    // a session that carried media again ends the loss, so the next loss gets every attempt
-    #[cfg(feature = "rtsp")]
-    pub(crate) fn recovered(&mut self, policy: &ReconnectPolicy) {
-        *self = Self::new(policy);
-    }
-
-    /// Milliseconds to wait before the next attempt, or `None` once
-    /// `max_attempts` retries have been handed out.
-    pub(crate) fn next_delay_ms(&mut self, policy: &ReconnectPolicy) -> Option<u64> {
-        if self.attempt >= policy.max_attempts {
-            return None;
-        }
-        self.attempt += 1;
-        let wait = self.backoff_ms;
-        self.backoff_ms = wait.saturating_mul(2).min(policy.max_backoff_ms.max(wait));
-        Some(wait)
-    }
-}
-
 pub fn record_transport_tcp(rtp_channel: u8) -> String {
     format!(
         "RTP/AVP/TCP;unicast;interleaved={rtp_channel}-{};mode=record",
@@ -534,32 +456,6 @@ mod tests {
             ))
             .expect("session present");
         assert_eq!(requests.session_timeout_s(), 30);
-    }
-
-    #[cfg(feature = "rtsp")]
-    #[test]
-    fn each_recovered_loss_gets_the_whole_reconnect_budget() {
-        let policy = ReconnectPolicy {
-            max_attempts: 1,
-            initial_backoff_ms: DEFAULT_INITIAL_BACKOFF_MS,
-            max_backoff_ms: DEFAULT_MAX_BACKOFF_MS,
-        };
-        let mut retry = ReconnectState::new(&policy);
-        assert_eq!(
-            retry.next_delay_ms(&policy),
-            Some(DEFAULT_INITIAL_BACKOFF_MS)
-        );
-        retry.recovered(&policy);
-        assert_eq!(
-            retry.next_delay_ms(&policy),
-            Some(DEFAULT_INITIAL_BACKOFF_MS),
-            "the second loss retries from the first backoff"
-        );
-        assert_eq!(
-            retry.next_delay_ms(&policy),
-            None,
-            "within one loss the budget holds"
-        );
     }
 
     #[test]
