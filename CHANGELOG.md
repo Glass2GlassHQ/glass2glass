@@ -62,6 +62,7 @@ Breaking: `QosMessage` gains `downstream_proc_ns`, `ElementProbe` is no longer `
 - M1959: `whipsink` posts a new offer after it loses its session when `reconnect` is set.
 - M1960: `hlssrc` keeps `max-bandwidth` when its first ABR sample is unusable, and HLS and DASH share one byte range type and variant pick.
 - M1961: `dashsrc` skips a live segment that still fails after its retries.
+- M1962: `hlssrc` and `dashsrc` restart at the live edge when a live origin starts its numbering or timeline over.
 
 ## 0.10.0
 

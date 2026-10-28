@@ -1285,8 +1285,9 @@ impl SourceLoop for HlsSrc {
                 } else {
                     None
                 };
-                let text = match held {
-                    Some(text) => text,
+                // `None` once a lost session has been resolved again into `media`
+                let reloaded_text = match held {
+                    Some(text) => Some(text),
                     None => {
                         if ll {
                             // The held request failed or ran past its deadline.
@@ -1318,7 +1319,7 @@ impl SourceLoop for HlsSrc {
                         )
                         .await;
                         match reloaded {
-                            Ok(text) => text,
+                            Ok(text) => Some(text),
                             // a restarted server forgets the session its master put in the media playlist URL
                             Err(G2gError::Hardware(HardwareError::Http(status)))
                                 if is_client_error(status) && media_url != self.url =>
@@ -1353,28 +1354,46 @@ impl SourceLoop for HlsSrc {
                                         resolve_media(&client, &self.url, &text, self.cap())
                                             .await?;
                                 }
-                                // the new session's stream restarts, like the re-read stream after a seek
-                                emitted_bytes = 0;
-                                if let Some(handle) = &self.sample_aes_key {
-                                    handle.lock().expect("key handle poisoned").reset_timeline();
-                                }
-                                out.push(PipelinePacket::Flush).await?;
-                                ll = self.low_latency && !text_mode && media.low_latency();
-                                blocking_misses = 0;
-                                (next_seq, next_part) =
-                                    start_position(&media, self.full_replay, ll);
-                                init_emitted = false;
-                                next_reload = None;
-                                continue;
+                                None
                             }
                             Err(error) => return Err(error),
                         }
                     }
                 };
-                media = match parse(&text).map_err(|_| G2gError::CapsMismatch)? {
-                    Playlist::Media(m) => m,
-                    Playlist::Master(_) => return Err(G2gError::CapsMismatch),
+                let origin_restarted = match reloaded_text {
+                    Some(text) => {
+                        media = match parse(&text).map_err(|_| G2gError::CapsMismatch)? {
+                            Playlist::Media(m) => m,
+                            Playlist::Master(_) => return Err(G2gError::CapsMismatch),
+                        };
+                        // a restarted origin numbers its segments from the start again
+                        let numbering_went_back =
+                            next_seq > media.media_sequence + media.segments.len() as u64;
+                        if numbering_went_back {
+                            g2g_warn!(
+                                self,
+                                "{media_url} went back to media sequence {} from {next_seq}, restarting at its live edge",
+                                media.media_sequence
+                            );
+                        }
+                        numbering_went_back
+                    }
+                    None => true,
                 };
+                if origin_restarted {
+                    // the restarted stream starts over, like the re-read stream after a seek
+                    emitted_bytes = 0;
+                    if let Some(handle) = &self.sample_aes_key {
+                        handle.lock().expect("key handle poisoned").reset_timeline();
+                    }
+                    out.push(PipelinePacket::Flush).await?;
+                    ll = self.low_latency && !text_mode && media.low_latency();
+                    blocking_misses = 0;
+                    (next_seq, next_part) = start_position(&media, self.full_replay, ll);
+                    init_emitted = false;
+                    next_reload = None;
+                    continue;
+                }
                 if ll {
                     if has_media_from(&media, next_seq, next_part) {
                         blocking_misses = 0;

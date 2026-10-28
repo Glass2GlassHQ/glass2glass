@@ -1345,6 +1345,11 @@ session, waits through the restarted origin's 404s with the not-yet-published
 retry, starts at the new playlist's live edge and sends a `Flush` ahead of the
 new stream. gst's hlsdemux fails on the same restart.
 
+A reloaded live playlist that ends before the next media sequence to play comes
+from an origin that numbered its segments from the start again. The source sends
+a `Flush` and starts at the new playlist's live edge, as gst's hlsdemux2 does
+when a reloaded playlist no longer overlaps the one before it.
+
 A live segment, part or byte range that still answers 4xx or 5xx, or drops the
 connection, after its retries is skipped and the run goes to the playlist reload,
 as gst's adaptivedemux2 does for 4xx and 5xx, so a lost session reaches the
@@ -1509,6 +1514,10 @@ duration. Startup manifest and playlist fetches do not retry. A live DASH
 segment that still answers 4xx or 5xx, or drops the connection, after its retries
 is skipped and the run goes to the manifest reload, as `HlsSrc` does. A static
 MPD still fails the run on the same answer.
+
+A reloaded live MPD whose newest segment starts before the last one played comes
+from an origin that started its timeline over. The source sends a `Flush` and
+starts again at the live edge of the Period now playing.
 
 A multi-Period live MPD is played as gst's `dashdemux2` plays it. Playback joins
 the Period holding now minus the presentation delay. A Period with an end, its

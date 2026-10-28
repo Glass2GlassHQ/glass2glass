@@ -557,6 +557,27 @@ impl SourceLoop for DashSrc {
                 };
                 let mut period_listed_whole = lists_period_end(rep, loaded_unix);
 
+                // a restarted origin starts its timeline over
+                let timeline_went_back = mpd.dynamic
+                    && last_time.is_some_and(|played| {
+                        segs.last().is_some_and(|newest| newest.time < played)
+                    });
+                if timeline_went_back {
+                    g2g_warn!(
+                        self,
+                        "{} went back before the last segment played, restarting at its live edge",
+                        self.url
+                    );
+                    out.push(PipelinePacket::Flush).await?;
+                    period_idx = mpd.live_period_index(clock.now_unix(), delay_secs);
+                    last_time = None;
+                    last_dur_ns = 0;
+                    period_played_ns = 0;
+                    init_emitted = false;
+                    positioned = false;
+                    continue 'manifest;
+                }
+
                 // A new Period restarts stream time at its own first segment
                 // while running time carries on where the previous one ended.
                 if boundary_pending && !segs.is_empty() {

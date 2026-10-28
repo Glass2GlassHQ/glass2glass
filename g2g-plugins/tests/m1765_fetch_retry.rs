@@ -443,6 +443,110 @@ async fn a_live_dash_segment_answering_5xx_past_the_retry_budget_is_skipped() {
     );
 }
 
+// what the origin publishes before its restart
+const HLS_LIVE_BEFORE_RESTART: &str = "#EXTM3U\n\
+    #EXT-X-TARGETDURATION:1\n\
+    #EXT-X-MEDIA-SEQUENCE:10\n\
+    #EXTINF:1.0,\n\
+    seg10.ts\n\
+    #EXTINF:1.0,\n\
+    seg11.ts\n";
+// the restarted origin numbers from zero again
+const HLS_ENDED_AFTER_RESTART: &str = "#EXTM3U\n\
+    #EXT-X-TARGETDURATION:1\n\
+    #EXT-X-MEDIA-SEQUENCE:0\n\
+    #EXTINF:1.0,\n\
+    seg0.ts\n\
+    #EXTINF:1.0,\n\
+    seg1.ts\n\
+    #EXT-X-ENDLIST\n";
+
+fn flush_count(sink: &CollectSink) -> usize {
+    sink.packets
+        .iter()
+        .filter(|packet| matches!(packet, PipelinePacket::Flush))
+        .count()
+}
+
+#[tokio::test]
+async fn an_hls_origin_restarting_its_media_sequence_is_played_from_the_restart() {
+    let counts = RequestCounts::default();
+    let seen = Arc::clone(&counts);
+    let origin = serve_answers(move |path| {
+        let attempt = count_request(&seen, path);
+        if path == HLS_PLAYLIST_PATH {
+            let playlist = if attempt == 0 {
+                HLS_LIVE_BEFORE_RESTART
+            } else {
+                HLS_ENDED_AFTER_RESTART
+            };
+            return Answer::Body(playlist.as_bytes().to_vec());
+        }
+        match segment_index(path, "ts") {
+            Some(index) => Answer::Body(segment_body(index)),
+            None => Answer::Status(NOT_FOUND),
+        }
+    });
+    let mut src = HlsSrc::new(format!("{origin}{HLS_PLAYLIST_PATH}"))
+        .with_reload_interval_ms(RELOAD_INTERVAL_MS);
+    src.configure_pipeline(&mpeg_ts()).unwrap();
+    let mut sink = CollectSink::default();
+    src.run(&mut sink).await.unwrap();
+
+    let expected: Vec<u8> = [10, 11, 0, 1].into_iter().flat_map(segment_body).collect();
+    assert_eq!(delivered_bytes(&sink), expected);
+    assert_eq!(
+        flush_count(&sink),
+        1,
+        "the restarted stream follows a flush"
+    );
+}
+
+// the restarted origin has published one segment when it is reloaded
+const RESTARTED_PRESENTATION_AGE_SECS: f64 = 4.2;
+
+#[tokio::test]
+async fn a_dash_origin_restarting_its_timeline_is_played_from_the_restart() {
+    let before_restart = live_mpd(now_unix() - LIVE_PRESENTATION_AGE_SECS);
+    let after_restart = live_mpd(now_unix() - RESTARTED_PRESENTATION_AGE_SECS);
+    let counts = RequestCounts::default();
+    let seen = Arc::clone(&counts);
+    let origin = serve_answers(move |path| {
+        let attempt = count_request(&seen, path);
+        if path == DASH_MANIFEST_PATH {
+            let manifest = match attempt {
+                0 => before_restart.clone(),
+                1 => after_restart.clone(),
+                _ => String::from(DASH_ENDED_MPD),
+            };
+            return Answer::Body(manifest.into_bytes());
+        }
+        if path == INIT_PATH {
+            return Answer::Body(INIT_BODY.to_vec());
+        }
+        match segment_index(path, "m4s") {
+            Some(index) => Answer::Body(segment_body(index)),
+            None => Answer::Status(NOT_FOUND),
+        }
+    });
+    let mut src = DashSrc::new(format!("{origin}{DASH_MANIFEST_PATH}"))
+        .with_reload_interval_ms(RELOAD_INTERVAL_MS);
+    src.configure_pipeline(&iso_bmff()).unwrap();
+    let mut sink = CollectSink::default();
+    src.run(&mut sink).await.unwrap();
+
+    let mut expected = INIT_BODY.to_vec();
+    expected.extend([0, 1].into_iter().flat_map(segment_body));
+    expected.extend(INIT_BODY);
+    expected.extend([0, 1, 2].into_iter().flat_map(segment_body));
+    assert_eq!(delivered_bytes(&sink), expected);
+    assert_eq!(
+        flush_count(&sink),
+        1,
+        "the restarted stream follows a flush"
+    );
+}
+
 #[tokio::test]
 async fn a_vod_hls_segment_failing_past_the_retry_budget_ends_the_run_with_its_status() {
     let (url, counts) = serve_segments(HLS_PLAYLIST_PATH, HLS_VOD_PLAYLIST, "ts", |index, _| {
