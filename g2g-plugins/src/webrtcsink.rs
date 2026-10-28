@@ -58,7 +58,7 @@ use str0m::{Event, IceConnectionState, Input, Output, Rtc, RtcConfig};
 
 use g2g_core::log::{short_type_name, LogName, LogSource};
 use g2g_core::{
-    g2g_info, g2g_warn, AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
+    g2g_debug, g2g_info, g2g_warn, AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
     ElementMetadata, G2gError, HardwareError, OutputSink, PadTemplate, PadTemplates,
     PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Reconfigure,
 };
@@ -722,15 +722,18 @@ async fn run_session(
             match rtc.poll_output() {
                 Ok(Output::Timeout(t)) => break t,
                 Ok(Output::Transmit(t)) => send_transmit(&socket, &mut turn, &t).await,
-                Ok(Output::Event(Event::IceConnectionStateChange(state))) => match state {
-                    IceConnectionState::Disconnected => {
-                        disconnected_since.get_or_insert_with(Instant::now);
+                Ok(Output::Event(Event::IceConnectionStateChange(state))) => {
+                    g2g_debug!(&*settings, "ICE connection state {state:?}");
+                    match state {
+                        IceConnectionState::Disconnected => {
+                            disconnected_since.get_or_insert_with(Instant::now);
+                        }
+                        IceConnectionState::Connected | IceConnectionState::Completed => {
+                            disconnected_since = None;
+                        }
+                        _ => {}
                     }
-                    IceConnectionState::Connected | IceConnectionState::Completed => {
-                        disconnected_since = None;
-                    }
-                    _ => {}
-                },
+                }
                 // Remote PLI: the peer lost data and needs a fresh keyframe.
                 // Flag it; the element's `take_reconfigure` forwards a
                 // `ForceKeyframe` up the reverse channel to the encoder.
@@ -756,6 +759,12 @@ async fn run_session(
                 }
             }
         };
+
+        // a server that shuts down cleanly sends a DTLS close_notify, after which str0m runs no timers
+        if !rtc.is_alive() {
+            resource.delete_once(bearer).await;
+            return SessionEnd::Lost("the server closed the session".into());
+        }
 
         // Sustained ICE disconnect: attempt an ICE restart against the resource.
         // A server that rejects the restart PATCH, such as one that restarted and

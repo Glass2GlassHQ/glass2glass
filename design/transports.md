@@ -250,9 +250,10 @@ so there is no peer-to-peer mode for WHIP/WHEP.
 disconnected, the task PATCHes an ICE restart to the resource. A server that
 restarted answers 404, and then the task POSTs a fresh offer with the doubling
 backoff the RTSP elements use (`reconnect.rs`), dropping access units until the
-new session is up and asking the encoder for a keyframe. str0m takes about 22 s
-to call a silent peer disconnected, so that is the floor on detecting a lost
-session.
+new session is up and asking the encoder for a keyframe. A server that shuts
+down cleanly sends a DTLS close_notify, and the task replaces that session at
+once. str0m takes about 22 s to call a silent peer disconnected, so that is the
+floor on detecting a server that died without one.
 
 WHIP and WHEP are unidirectional by spec, so sendrecv cannot use them. The
 duplex session exchanges SDP directly between two peers over an `SdpChannel`, an

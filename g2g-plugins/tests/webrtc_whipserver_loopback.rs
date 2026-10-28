@@ -9,9 +9,16 @@ mod webrtc_streams_common;
 use core::future::Future;
 use core::pin::Pin;
 use core::task::{Context, Poll};
-use std::time::Duration;
+use std::net::IpAddr;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
+use str0m::change::SdpOffer;
+use str0m::crypto::from_feature_flags;
+use str0m::net::{Protocol, Receive};
+use str0m::{Candidate, Event, Input, Output, RtcConfig};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::mpsc;
 
 use g2g_core::frame::Frame;
@@ -451,6 +458,25 @@ const RESTART_TIMEOUT: Duration = Duration::from_secs(60);
 // the stopped server's port frees once the runtime drops its aborted listener task
 const RESTART_GAP: Duration = Duration::from_millis(100);
 
+/// Send `unit` as frame `sequence` of a stream at `FPS`, then wait one frame
+/// interval.
+async fn send_unit(sink: &mut WebRtcSink, sequence: u64, unit: &[u8]) {
+    let interval = Duration::from_secs(1) / FPS;
+    let timing = FrameTiming {
+        pts_ns: sequence * interval.as_nanos() as u64,
+        ..FrameTiming::default()
+    };
+    let frame = Frame::new(
+        MemoryDomain::System(SystemSlice::from_boxed(unit.to_vec().into_boxed_slice())),
+        timing,
+        sequence,
+    );
+    sink.process(PipelinePacket::DataFrame(frame), &mut Discard)
+        .await
+        .unwrap();
+    tokio::time::sleep(interval).await;
+}
+
 /// Publish `inter` until the server emits a frame, sending `keyframe` whenever
 /// the sink asks the encoder for one. Returns the server's first frame.
 async fn publish_until_received(
@@ -459,25 +485,12 @@ async fn publish_until_received(
     keyframe: &[u8],
     inter: &[u8],
 ) -> Frame {
-    let interval = Duration::from_secs(1) / FPS;
     for sequence in 0u64.. {
         let unit = match sink.take_reconfigure() {
             Some(Reconfigure::ForceKeyframe) => keyframe,
             _ => inter,
         };
-        let timing = FrameTiming {
-            pts_ns: sequence * interval.as_nanos() as u64,
-            ..FrameTiming::default()
-        };
-        let frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(unit.to_vec().into_boxed_slice())),
-            timing,
-            sequence,
-        );
-        sink.process(PipelinePacket::DataFrame(frame), &mut Discard)
-            .await
-            .unwrap();
-        tokio::time::sleep(interval).await;
+        send_unit(sink, sequence, unit).await;
         while let Ok((_, packet)) = received.try_recv() {
             if let PipelinePacket::DataFrame(frame) = packet {
                 return frame;
@@ -532,6 +545,130 @@ async fn sink_republishes_into_a_restarted_server() {
 
     first_frame_of_a_server(&host_addr, &mut sink, keyframe, keyframe).await;
     tokio::time::sleep(RESTART_GAP).await;
+    let frame = first_frame_of_a_server(&host_addr, &mut sink, keyframe, inter).await;
+
+    assert_eq!(bytes(&frame), &keyframe[..]);
+    assert!(frame.timing.keyframe);
+}
+
+// read one HTTP request from `stream` and return its body
+async fn read_request_body(stream: &mut TcpStream) -> String {
+    let mut request = Vec::new();
+    let mut buf = [0u8; 4096];
+    let header_end = loop {
+        let n = stream.read(&mut buf).await.unwrap();
+        assert_ne!(n, 0, "the client closed before sending a request");
+        request.extend_from_slice(&buf[..n]);
+        if let Some(at) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+            break at + 4;
+        }
+    };
+    let headers = String::from_utf8(request[..header_end].to_vec()).unwrap();
+    let content_length: usize = headers
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().parse().unwrap())
+        })
+        .expect("the request has a Content-Length");
+    while request.len() < header_end + content_length {
+        let n = stream.read(&mut buf).await.unwrap();
+        assert_ne!(n, 0, "the client closed mid-body");
+        request.extend_from_slice(&buf[..n]);
+    }
+    String::from_utf8(request[header_end..].to_vec()).unwrap()
+}
+
+/// Answer one WHIP offer on `listener`, wait for DTLS to connect, then stop
+/// listening and close the session with a DTLS close_notify, the way mediamtx
+/// ends its sessions on SIGTERM.
+async fn answer_then_close(listener: TcpListener) {
+    let (mut stream, _) = listener.accept().await.unwrap();
+    let offer = read_request_body(&mut stream).await;
+    let candidate_ip: IpAddr = offer
+        .lines()
+        .find(|l| l.starts_with("a=candidate:"))
+        .and_then(|l| l.split_whitespace().nth(4))
+        .expect("the offer carries a host candidate")
+        .parse()
+        .unwrap();
+    let socket = UdpSocket::bind((candidate_ip, 0)).await.unwrap();
+    let local = socket.local_addr().unwrap();
+    let mut rtc = RtcConfig::new()
+        .set_crypto_provider(Arc::new(from_feature_flags()))
+        .build(Instant::now());
+    rtc.add_local_candidate(Candidate::host(local, "udp").unwrap());
+    let answer = rtc
+        .sdp_api()
+        .accept_offer(SdpOffer::from_sdp_string(&offer).unwrap())
+        .unwrap()
+        .to_sdp_string();
+    let response = format!(
+        "HTTP/1.1 201 Created\r\nContent-Type: application/sdp\r\n\
+         Location: /whip/closing\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}",
+        answer.len()
+    );
+    stream.write_all(response.as_bytes()).await.unwrap();
+    drop(stream);
+    drop(listener);
+
+    let mut buf = vec![0u8; 2048];
+    loop {
+        let deadline = loop {
+            match rtc.poll_output().unwrap() {
+                Output::Timeout(t) => break t,
+                Output::Transmit(t) => {
+                    socket.send_to(&t.contents, t.destination).await.unwrap();
+                }
+                Output::Event(Event::Connected) => rtc.close().unwrap(),
+                Output::Event(_) => {}
+            }
+        };
+        if !rtc.is_alive() {
+            return;
+        }
+        let timeout = deadline.saturating_duration_since(Instant::now());
+        tokio::select! {
+            received = socket.recv_from(&mut buf) => {
+                let (n, source) = received.unwrap();
+                let receive = Receive {
+                    proto: Protocol::Udp,
+                    source,
+                    destination: local,
+                    contents: buf[..n].try_into().unwrap(),
+                };
+                rtc.handle_input(Input::Receive(Instant::now(), receive)).unwrap();
+            }
+            _ = tokio::time::sleep(timeout) => {
+                rtc.handle_input(Input::Timeout(Instant::now())).unwrap();
+            }
+        }
+    }
+}
+
+/// A server that shuts down cleanly sends the sink a DTLS close_notify: the sink
+/// POSTs a new offer, and the server that takes over the port gets a keyframe.
+#[tokio::test]
+async fn sink_republishes_after_the_server_closes_the_session() {
+    let codec = WebRtcVideoCodec::H264;
+    let units = synthetic_stream(codec, 2);
+    let (keyframe, inter) = (&units[0], &units[1]);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let host_addr = format!("http://{}", listener.local_addr().unwrap());
+    let mut sink = WebRtcSink::new(format!("{host_addr}/whip"));
+    sink.set_property("reconnect", PropValue::Uint(RECONNECT_ATTEMPTS))
+        .unwrap();
+    sink.configure_pipeline(&fixed_caps(codec)).unwrap();
+
+    let closed = tokio::spawn(answer_then_close(listener));
+    for sequence in 0u64.. {
+        if closed.is_finished() {
+            break;
+        }
+        send_unit(&mut sink, sequence, keyframe).await;
+    }
+    closed.await.unwrap();
     let frame = first_frame_of_a_server(&host_addr, &mut sink, keyframe, inter).await;
 
     assert_eq!(bytes(&frame), &keyframe[..]);
