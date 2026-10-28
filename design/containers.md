@@ -1505,7 +1505,10 @@ A media segment or live reload that fails with a transport error, 5xx, 404 or 42
 is retried three times with a 250 ms doubling backoff, gst adaptivedemux2's
 `max-retries` default, in both `DashSrc` and `HlsSrc`. On a live DASH segment,
 repeated 404 or 425 answers count against that budget at most once per segment
-duration. Startup manifest and playlist fetches do not retry.
+duration. Startup manifest and playlist fetches do not retry. A live DASH
+segment that still answers 4xx or 5xx, or drops the connection, after its retries
+is skipped and the run goes to the manifest reload, as `HlsSrc` does. A static
+MPD still fails the run on the same answer.
 
 A multi-Period live MPD is played as gst's `dashdemux2` plays it. Playback joins
 the Period holding now minus the presentation delay. A Period with an end, its

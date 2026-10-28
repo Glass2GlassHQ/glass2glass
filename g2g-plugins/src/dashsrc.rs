@@ -62,16 +62,17 @@ use g2g_core::log::LogSource;
 use g2g_core::runtime::{SeekController, SourceLoop};
 use g2g_core::time::ticks_to_ns;
 use g2g_core::{
-    g2g_debug, BusHandle, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
-    ElementMetadata, G2gError, OutputSink, PipelinePacket, PropError, PropKind, PropValue,
-    PropertySpec, Seek, Segment,
+    g2g_debug, g2g_warn, BusHandle, ByteStreamEncoding, Caps, CapsConstraint, CapsSet,
+    ConfigureOutcome, ElementMetadata, G2gError, OutputSink, PipelinePacket, PropError, PropKind,
+    PropValue, PropertySpec, Seek, Segment,
 };
 
 use crate::abr::BandwidthEstimator;
 use crate::dashclock::{local_now_unix, RequestSpan, ServerClock};
 use crate::fetch::{
     body_read_err, byte_frame, get_bytes_retrying, get_range_bytes_retrying, get_response_retrying,
-    get_text, get_text_retrying, resolve_url, FetchRetry, MAX_MANIFEST_BYTES, MAX_SEGMENT_BYTES,
+    get_text, get_text_retrying, is_origin_failure, resolve_url, FetchRetry, MAX_MANIFEST_BYTES,
+    MAX_SEGMENT_BYTES,
 };
 use crate::fmp4::CmafChunker;
 use crate::mpd::{
@@ -652,27 +653,42 @@ impl SourceLoop for DashSrc {
                                 // each CMAF chunk as it lands. The prebuffer window
                                 // is empty here whenever it is disabled, so pushing
                                 // from inside the fetch keeps emission ordered.
-                                let len = if self.low_latency
+                                let fetched = if self.low_latency
                                     && self.prebuffer_ms == 0
                                     && seg.byte_range.is_none()
                                 {
                                     stream_segment_chunks(&client, &url, out, &mut sequence, retry)
-                                        .await?
+                                        .await
                                 } else {
-                                    let bytes =
-                                        fetch_segment(&client, &url, seg.byte_range, retry).await?;
-                                    let len = bytes.len();
-                                    if !bytes.is_empty() {
-                                        window.admit(bytes, duration_ns);
-                                    }
-                                    len
+                                    fetch_segment(&client, &url, seg.byte_range, retry)
+                                        .await
+                                        .map(|bytes| {
+                                            let len = bytes.len();
+                                            if !bytes.is_empty() {
+                                                window.admit(bytes, duration_ns);
+                                            }
+                                            len
+                                        })
                                 };
-                                measured = Some((
-                                    len,
-                                    g2g_core::metrics::monotonic_ns().saturating_sub(t0),
-                                ));
                                 last_time = Some(seg.time);
                                 period_played_ns = period_played_ns.saturating_add(duration_ns);
+                                match fetched {
+                                    Ok(len) => {
+                                        measured = Some((
+                                            len,
+                                            g2g_core::metrics::monotonic_ns().saturating_sub(t0),
+                                        ))
+                                    }
+                                    Err(error) if mpd.dynamic && is_origin_failure(&error) => {
+                                        g2g_warn!(
+                                            self,
+                                            "{url} failed with {error:?}, skipping it and reloading the manifest"
+                                        );
+                                        idx = segs.len();
+                                        continue;
+                                    }
+                                    Err(error) => return Err(error),
+                                }
                             }
                         }
                         idx += 1;

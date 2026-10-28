@@ -61,15 +61,16 @@ use g2g_core::log::LogSource;
 use g2g_core::runtime::{SeekController, SourceLoop};
 use g2g_core::{
     g2g_debug, g2g_warn, AudioFormat, BusHandle, ByteStreamEncoding, Caps, CapsConstraint, CapsSet,
-    ConfigureOutcome, Dim, ElementMetadata, G2gError, HardwareError, HttpTransportFailure,
-    OutputSink, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, Seek, Segment,
-    StreamType, TextFormat, VideoCodec,
+    ConfigureOutcome, Dim, ElementMetadata, G2gError, HardwareError, OutputSink, PipelinePacket,
+    PropError, PropKind, PropValue, PropertySpec, Rate, Seek, Segment, StreamType, TextFormat,
+    VideoCodec,
 };
 
 use crate::abr::BandwidthEstimator;
 use crate::fetch::{
     byte_frame, get_bytes, get_bytes_retrying, get_range_bytes_retrying, get_text, get_text_query,
-    get_text_retrying, resolve_url, FetchRetry, MAX_MANIFEST_BYTES, MAX_SEGMENT_BYTES,
+    get_text_retrying, is_origin_failure, resolve_url, FetchRetry, MAX_MANIFEST_BYTES,
+    MAX_SEGMENT_BYTES,
 };
 use crate::fmp4::{TrackHeader, TrackKind};
 use crate::hls::{
@@ -600,22 +601,6 @@ async fn media_bytes(
 
 fn is_client_error(status: u16) -> bool {
     reqwest::StatusCode::from_u16(status).is_ok_and(|code| code.is_client_error())
-}
-
-// a restarting origin answers 4xx or 5xx, or drops the connection
-fn is_origin_failure(error: &G2gError) -> bool {
-    match error {
-        G2gError::Hardware(HardwareError::Http(status)) => reqwest::StatusCode::from_u16(*status)
-            .is_ok_and(|code| code.is_client_error() || code.is_server_error()),
-        G2gError::Hardware(HardwareError::HttpTransport(failure)) => matches!(
-            failure,
-            HttpTransportFailure::Timeout
-                | HttpTransportFailure::Connect
-                | HttpTransportFailure::Request
-                | HttpTransportFailure::Body
-        ),
-        _ => false,
-    }
 }
 
 // SAMPLE-AES leaves the container clear, so only AES-128 is undone here

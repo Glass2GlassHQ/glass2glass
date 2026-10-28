@@ -12,7 +12,7 @@ use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
-use g2g_core::{FrameTiming, G2gError, HardwareError, MemoryDomain};
+use g2g_core::{FrameTiming, G2gError, HardwareError, HttpTransportFailure, MemoryDomain};
 
 /// Body-size cap for manifests and keys (playlists, MPDs, AES-128 keys). These
 /// are small by construction; 16 MiB is generous headroom for the largest live
@@ -170,6 +170,22 @@ where
             delay.as_millis()
         );
         tokio::time::sleep(delay).await;
+    }
+}
+
+// a restarting origin answers 4xx or 5xx, or drops the connection
+pub(crate) fn is_origin_failure(error: &G2gError) -> bool {
+    match error {
+        G2gError::Hardware(HardwareError::Http(status)) => reqwest::StatusCode::from_u16(*status)
+            .is_ok_and(|code| code.is_client_error() || code.is_server_error()),
+        G2gError::Hardware(HardwareError::HttpTransport(failure)) => matches!(
+            failure,
+            HttpTransportFailure::Timeout
+                | HttpTransportFailure::Connect
+                | HttpTransportFailure::Request
+                | HttpTransportFailure::Body
+        ),
+        _ => false,
     }
 }
 
