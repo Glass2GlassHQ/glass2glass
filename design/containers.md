@@ -1531,9 +1531,11 @@ manifest may list a Period before the one playing has ended.
 Representation, Template, List or `sidx`-fetched SegmentBase, into the run loop's
 segment, timescale and init working set, and the estimate-derived cap drives both
 the per-reload pick and a per-segment re-selection, so a static VOD adapts within
-one pass, re-emitting the init on a switch. After a switch the walk resumes
-after the last segment played, its start time rescaled to the new timescale,
-since a live list resolved at the switch can start later than the old one.
+one pass, re-emitting the init on a switch. A switch is any change of the
+Representation playing, the per-segment re-selection or the pick after a
+manifest reload. After it the walk resumes after the last segment played, whose
+start time is kept with its own timescale and rescaled to the new one, since a
+live list resolved at the switch can start later than the old one.
 
 `low-latency=true` changes how a segment is consumed, not when it is fetched. The
 response body is read as a stream and each complete CMAF chunk, `styp` or `moof`

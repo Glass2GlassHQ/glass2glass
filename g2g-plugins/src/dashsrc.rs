@@ -119,6 +119,21 @@ fn to_ns(time: u64, timescale: u32) -> u64 {
     ticks_to_ns(time, timescale.max(1))
 }
 
+#[derive(Debug, Clone, Copy)]
+struct PlayedSegment {
+    time: u64,
+    timescale: u32,
+}
+
+impl PlayedSegment {
+    // rounded up, so the segment just played stays played in a finer timescale
+    fn time_in(self, timescale: u32) -> u64 {
+        let rescaled =
+            (u128::from(self.time) * u128::from(timescale)).div_ceil(u128::from(self.timescale));
+        u64::try_from(rescaled).unwrap_or(u64::MAX)
+    }
+}
+
 /// Resolve a segment / init URL against the base. An empty URL means the piece
 /// is a byte range of the `BaseURL` resource itself (a pure byte-range
 /// `SegmentList` / `Initialization`), so the base is fetched directly.
@@ -495,7 +510,8 @@ impl SourceLoop for DashSrc {
             let mut init_emitted = false;
             // Largest segment start time already played; on a live reload only
             // segments past it are new (SegmentTimeline times are monotonic).
-            let mut last_time: Option<u64> = None;
+            let mut last_played: Option<PlayedSegment> = None;
+            let mut playing_rep_id: Option<String> = None;
             // ABR throughput estimate, persisted across live reloads. The effective
             // selection cap is the estimate (when ABR is on and a sample exists),
             // else the user `max_bandwidth` cap.
@@ -518,7 +534,7 @@ impl SourceLoop for DashSrc {
             // by a `Segment` carrying the running-time offset.
             let mut boundary_pending = false;
             // Live playback positions itself once per Period, not on every
-            // manifest reload (a reload continues from `last_time`).
+            // manifest reload (a reload continues from `last_played`).
             let mut positioned = false;
             if mpd.dynamic {
                 period_idx =
@@ -544,7 +560,11 @@ impl SourceLoop for DashSrc {
                 let rep = period
                     .select(sel_cap(&estimator))
                     .ok_or(G2gError::CapsMismatch)?;
-                let mut cur_rep_id = rep.id.clone();
+                // a reload can pick another Representation than the one playing
+                if playing_rep_id.as_deref() != Some(rep.id.as_str()) {
+                    playing_rep_id = Some(rep.id.clone());
+                    init_emitted = false;
+                }
                 let span_secs = period_span_secs(&mpd, period_idx);
                 let loaded_unix = clock.now_unix();
                 let (mut segs, mut timescale, mut init) =
@@ -559,8 +579,9 @@ impl SourceLoop for DashSrc {
 
                 // a restarted origin starts its timeline over
                 let timeline_went_back = mpd.dynamic
-                    && last_time.is_some_and(|played| {
-                        segs.last().is_some_and(|newest| newest.time < played)
+                    && last_played.is_some_and(|played| {
+                        segs.last()
+                            .is_some_and(|newest| newest.time < played.time_in(timescale))
                     });
                 if timeline_went_back {
                     g2g_warn!(
@@ -570,7 +591,7 @@ impl SourceLoop for DashSrc {
                     );
                     out.push(PipelinePacket::Flush).await?;
                     period_idx = mpd.live_period_index(clock.now_unix(), delay_secs);
-                    last_time = None;
+                    last_played = None;
                     last_dur_ns = 0;
                     period_played_ns = 0;
                     init_emitted = false;
@@ -617,7 +638,7 @@ impl SourceLoop for DashSrc {
                             idx = target_idx;
                             // Jumped by index; clear the reload-dedup watermark so
                             // the target segment is not skipped as "already played".
-                            last_time = None;
+                            last_played = None;
                             init_emitted = false;
                             out.push(PipelinePacket::Segment(Segment::for_flush_seek(
                                 &Seek::flush_to(start_ns),
@@ -650,7 +671,8 @@ impl SourceLoop for DashSrc {
                         let mut measured: Option<(usize, u64)> = None;
                         {
                             let seg = &segs[idx];
-                            if last_time.is_none_or(|lt| seg.time > lt) {
+                            if last_played.is_none_or(|played| seg.time > played.time_in(timescale))
+                            {
                                 // Play time of this segment: the start-time delta to
                                 // its successor; the last segment reuses the previous
                                 // duration (no successor to diff against).
@@ -691,7 +713,10 @@ impl SourceLoop for DashSrc {
                                             len
                                         })
                                 };
-                                last_time = Some(seg.time);
+                                last_played = Some(PlayedSegment {
+                                    time: seg.time,
+                                    timescale,
+                                });
                                 period_played_ns = period_played_ns.saturating_add(duration_ns);
                                 match fetched {
                                     Ok(len) => {
@@ -718,7 +743,7 @@ impl SourceLoop for DashSrc {
                         // Representation changed, switch to it (re-resolve its segments
                         // / init, re-emit the init). A live list resolved now can start
                         // later than the old one, so the walk restarts at its front and
-                        // `last_time` skips what was played. The `seg` borrow above has
+                        // `last_played` skips what was played. The `seg` borrow above has
                         // ended, so reassigning is safe.
                         if self.abr {
                             if let Some((len, elapsed)) = measured {
@@ -726,8 +751,8 @@ impl SourceLoop for DashSrc {
                                 if let Some(best) =
                                     mpd.periods[period_idx].select(sel_cap(&estimator))
                                 {
-                                    if best.id != cur_rep_id {
-                                        cur_rep_id = best.id.clone();
+                                    if playing_rep_id.as_deref() != Some(best.id.as_str()) {
+                                        playing_rep_id = Some(best.id.clone());
                                         let switched_unix = clock.now_unix();
                                         let (s, ts, ini) = load_rep(
                                             &client,
@@ -739,12 +764,6 @@ impl SourceLoop for DashSrc {
                                         )
                                         .await?;
                                         period_listed_whole = lists_period_end(best, switched_unix);
-                                        // rounded up, so the segment just played stays played
-                                        last_time = last_time.map(|time| {
-                                            let rescaled = (u128::from(time) * u128::from(ts))
-                                                .div_ceil(u128::from(timescale));
-                                            u64::try_from(rescaled).unwrap_or(u64::MAX)
-                                        });
                                         segs = s;
                                         timescale = ts;
                                         init = ini;
@@ -780,7 +799,7 @@ impl SourceLoop for DashSrc {
                     ));
                     period_idx += 1;
                     period_played_ns = 0;
-                    last_time = None;
+                    last_played = None;
                     last_dur_ns = 0;
                     init_emitted = false;
                     positioned = false;
