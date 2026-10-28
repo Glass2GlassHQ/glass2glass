@@ -1951,6 +1951,7 @@ fn live_topology<'a>(
         pad_adds.push(pad_rx);
         nodes.push(LiveNode {
             name: name.clone(),
+            named_at_startup: true,
             out_edges: Vec::new(),
             in_edges: Vec::new(),
             total_out_edges: vg.out_edges(node).len(),
@@ -2773,7 +2774,7 @@ pub(crate) const MUTATION_QUEUE_DEPTH: usize = 4;
 /// Join the arms, growably when the run can be mutated: a spliced
 /// element's arm arrives on `new_arms` and is folded in mid-run. Results keep
 /// arm order, so the per-arm bookkeeping [`fold_run_stats`] indexes by position
-/// still lines up and a spliced arm's result lands past it.
+/// still lines up and a spliced arm's error lands past it.
 async fn join_arms<'f>(
     arms: Vec<BoxFuture<'f, Result<u64, G2gError>>>,
     new_arms: Option<Receiver<BoxFuture<'f, Result<u64, G2gError>>>>,

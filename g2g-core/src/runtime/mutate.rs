@@ -642,6 +642,9 @@ pub(crate) enum Growth {
 #[allow(missing_debug_implementations)]
 pub(crate) struct LiveNode<'a> {
     pub(crate) name: String,
+    /// Named by the runner, so the name need not be `<category>N` of a
+    /// category the mutator has counted.
+    pub(crate) named_at_startup: bool,
     /// Mutable edges leaving this node, as indices into
     /// [`LiveTopology::edges`]. A tee has several, so it cannot be addressed
     /// from above; a sink has none.
@@ -797,6 +800,79 @@ pub(crate) async fn lent_source_arm<'a>(
     }
 }
 
+// a removed entry leaves a slot the next insert takes, so the indices of the others never move
+#[allow(missing_debug_implementations)]
+struct Slots<T> {
+    entries: Vec<Option<T>>,
+}
+
+impl<T> Slots<T> {
+    fn new(values: Vec<T>) -> Self {
+        Self {
+            entries: values.into_iter().map(Some).collect(),
+        }
+    }
+
+    // the indices the next `count` calls to `fill` take, lowest first
+    fn vacant(&self, count: usize) -> Vec<usize> {
+        let free = self.entries.iter().enumerate().filter(|(_, e)| e.is_none());
+        free.map(|(index, _)| index)
+            .chain(self.entries.len()..)
+            .take(count)
+            .collect()
+    }
+
+    fn fill(&mut self, index: usize, value: T) {
+        if index == self.entries.len() {
+            self.entries.push(Some(value));
+            return;
+        }
+        assert!(self.entries[index].is_none(), "slot {index} is taken");
+        self.entries[index] = Some(value);
+    }
+
+    fn insert(&mut self, value: T) -> usize {
+        let index = self
+            .entries
+            .iter()
+            .position(Option::is_none)
+            .unwrap_or(self.entries.len());
+        self.fill(index, value);
+        index
+    }
+
+    fn remove(&mut self, index: usize) -> T {
+        self.entries[index]
+            .take()
+            .expect("a removed slot is never removed again")
+    }
+
+    fn iter(&self) -> impl Iterator<Item = (usize, &T)> {
+        self.entries
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entry)| entry.as_ref().map(|value| (index, value)))
+    }
+}
+
+impl<T> core::ops::Index<usize> for Slots<T> {
+    type Output = T;
+
+    fn index(&self, index: usize) -> &T {
+        self.entries[index]
+            .as_ref()
+            .expect("an index into a removed slot")
+    }
+}
+
+impl<T> core::ops::IndexMut<usize> for Slots<T> {
+    fn index_mut(&mut self, index: usize) -> &mut T {
+        self.entries[index]
+            .as_mut()
+            .expect("an index into a removed slot")
+    }
+}
+
 /// A spliced chain, negotiated and configured but not yet in the graph: the
 /// edge it goes on, the shape that edge carries, and what each element emits.
 struct ChainPlan {
@@ -810,8 +886,8 @@ struct ChainPlan {
 #[allow(missing_debug_implementations)]
 pub(crate) struct MutationService<'a, 'f, 's> {
     rx: Receiver<MutationRequest<'a>>,
-    nodes: Vec<LiveNode<'a>>,
-    edges: Vec<LiveEdge>,
+    nodes: Slots<LiveNode<'a>>,
+    edges: Slots<LiveEdge>,
     /// Sends a spliced element's arm into the run's growable join set.
     arms: Sender<BoxFuture<'f, Result<u64, G2gError>>>,
     spawn: MutationSpawn<'a, 'f, 's>,
@@ -858,8 +934,8 @@ impl<'a, 'f, 's> MutationService<'a, 'f, 's> {
     ) -> Self {
         Self {
             rx,
-            nodes: topology.nodes,
-            edges: topology.edges,
+            nodes: Slots::new(topology.nodes),
+            edges: Slots::new(topology.edges),
             arms,
             spawn,
             bus,
@@ -1141,8 +1217,34 @@ impl<'a, 'f, 's> MutationService<'a, 'f, 's> {
     fn find(&self, name: &str) -> Result<usize, MutationError> {
         self.nodes
             .iter()
-            .position(|n| n.name == name)
+            .find(|(_, n)| n.name == name)
+            .map(|(index, _)| index)
             .ok_or_else(|| MutationError::UnknownNode(name.to_string()))
+    }
+
+    // the floors move past the name so it is never handed out again
+    fn retire_node(&mut self, node: usize) {
+        let LiveNode {
+            name,
+            named_at_startup,
+            ..
+        } = self.nodes.remove(node);
+        for (split, _) in name.char_indices() {
+            let (category, number) = name.split_at(split);
+            let Ok(n) = number.parse::<usize>() else {
+                continue;
+            };
+            // "05" or "+5" is no name `unique_name_among` builds
+            if n.to_string() != number {
+                continue;
+            }
+            // a name the mutator gave already has a floor for its category
+            if !named_at_startup && !self.name_floors.contains_key(category) {
+                continue;
+            }
+            let floor = self.name_floors.entry(category.to_string()).or_insert(0);
+            *floor = (*floor).max(n + 1);
+        }
     }
 
     // the runner hands its bus to every element it starts, so one started here gets it too
@@ -1161,11 +1263,11 @@ impl<'a, 'f, 's> MutationService<'a, 'f, 's> {
     /// [`unique_name`](Self::unique_name) counting past `taken` too: the names
     /// one operation has given elements it has not put in the table yet.
     fn unique_name_among(&mut self, category: &str, taken: &[String]) -> String {
-        // every name below the floor is in the table, which never drops a node
+        // every name below the floor is in the table or retired
         let mut floor = self.name_floors.get(category).copied().unwrap_or(0);
         for n in floor.. {
             let candidate = alloc::format!("{category}{n}");
-            let in_graph = self.nodes.iter().any(|node| node.name == candidate);
+            let in_graph = self.nodes.iter().any(|(_, node)| node.name == candidate);
             if in_graph && n == floor {
                 floor = n + 1;
             }
@@ -1234,7 +1336,8 @@ impl<'a, 'f, 's> MutationService<'a, 'f, 's> {
     fn producer_of(&self, edge: usize) -> Option<usize> {
         self.nodes
             .iter()
-            .position(|node| node.out_edges.contains(&edge))
+            .find(|(_, node)| node.out_edges.contains(&edge))
+            .map(|(index, _)| index)
     }
 
     /// A link for a hop the mutator adds, carrying the policy and depth of the
@@ -1425,6 +1528,7 @@ impl<'a, 'f, 's> MutationService<'a, 'f, 's> {
         let mut outputs: Vec<LinkSender> = feeds.iter().skip(1).map(|(tx, _)| tx.clone()).collect();
         outputs.push(original);
         let mut inputs: Vec<LinkReceiver> = feeds.into_iter().map(|(_, rx)| rx).collect();
+        let node_slots = self.nodes.vacant(count);
         for (i, mut element) in elements.into_iter().enumerate() {
             element.configure_liveness(self.path_is_live);
             let name = self.unique_name_among(element.log_category(), &names);
@@ -1434,7 +1538,7 @@ impl<'a, 'f, 's> MutationService<'a, 'f, 's> {
             if i + 1 < count {
                 out_tx.set_mutation(Some(endpoints[i].clone()));
             }
-            let node = self.nodes.len() + i;
+            let node = node_slots[i];
             let (done_tx, done_rx) = bounded(1);
             // A spliced element takes live property operations the way a
             // negotiated transform does.
@@ -1476,16 +1580,13 @@ impl<'a, 'f, 's> MutationService<'a, 'f, 's> {
         // The edge the producer kept now ends at the first spliced element, and
         // a new edge carries each element's output onward, the last one to the
         // consumer.
-        let first_node = self.nodes.len();
         let mut above = edge;
         for (i, ((done_rx, properties), hop)) in spliced.into_iter().zip(endpoints).enumerate() {
-            let node = first_node + i;
-            let below = self.edges.len();
-            self.edges.push(LiveEdge {
+            let below = self.edges.insert(LiveEdge {
                 endpoint: hop,
                 consumer: match i + 1 == count {
                     true => consumer,
-                    false => node + 1,
+                    false => node_slots[i + 1],
                 },
                 feasible: match i + 1 == count {
                     true => self.edges[edge].feasible.clone(),
@@ -1495,20 +1596,24 @@ impl<'a, 'f, 's> MutationService<'a, 'f, 's> {
                 capacity,
                 mode,
             });
-            self.nodes.push(LiveNode {
-                name: names[i].clone(),
-                out_edges: alloc::vec![below],
-                in_edges: alloc::vec![above],
-                total_out_edges: 1,
-                total_in_edges: 1,
-                done: Some(Handback::Element(done_rx)),
-                removable: true,
-                properties: Some(properties),
-                growth: Growth::Fixed,
-            });
+            self.nodes.fill(
+                node_slots[i],
+                LiveNode {
+                    name: names[i].clone(),
+                    named_at_startup: false,
+                    out_edges: alloc::vec![below],
+                    in_edges: alloc::vec![above],
+                    total_out_edges: 1,
+                    total_in_edges: 1,
+                    done: Some(Handback::Element(done_rx)),
+                    removable: true,
+                    properties: Some(properties),
+                    growth: Growth::Fixed,
+                },
+            );
             above = below;
         }
-        self.edges[edge].consumer = first_node;
+        self.edges[edge].consumer = node_slots[0];
         // The one shape the edge above the spliced chain is known to carry: the
         // caps its first element accepted and was configured for. Nothing solved
         // what else it would take, or what the chain below would do with the
@@ -1604,14 +1709,12 @@ impl<'a, 'f, 's> MutationService<'a, 'f, 's> {
         up_endpoint.unpark(Some(output));
 
         // The producer's edge now ends at the consumer, and carries what the
-        // element's own edge was known to carry. The element's edge is left
-        // behind: nothing names it any more.
+        // element's own edge was known to carry. The element's edge and node
+        // leave the tables.
         self.edges[above].consumer = consumer;
-        self.edges[above].feasible = self.edges[below].feasible.take();
+        self.edges[above].feasible = self.edges.remove(below).feasible;
         retarget(&mut self.nodes[consumer].in_edges, below, above);
-        self.nodes[removed].in_edges.clear();
-        self.nodes[removed].out_edges.clear();
-        self.nodes[removed].removable = false;
+        self.retire_node(removed);
         Ok(element)
     }
 
@@ -1661,7 +1764,7 @@ impl<'a, 'f, 's> MutationService<'a, 'f, 's> {
         mode: BranchMode,
     ) -> Result<usize, MutationError> {
         advertise_orientation(&feed_rx, element.absorbed_orientations());
-        let node = self.nodes.len();
+        let node = self.nodes.vacant(1)[0];
         let (done_tx, done_rx) = bounded(1);
         let properties = PropertyMailbox::new();
         let io = SinkArmIo {
@@ -1688,17 +1791,21 @@ impl<'a, 'f, 's> MutationService<'a, 'f, 's> {
         if self.arms.send(arm).await.is_err() {
             return Err(MutationError::GraphEnded);
         }
-        self.nodes.push(LiveNode {
-            name,
-            out_edges: Vec::new(),
-            in_edges: alloc::vec![in_edge],
-            total_out_edges: 0,
-            total_in_edges: 1,
-            done: Some(Handback::Element(done_rx)),
-            removable: false,
-            properties: Some(properties),
-            growth: Growth::Fixed,
-        });
+        self.nodes.fill(
+            node,
+            LiveNode {
+                name,
+                named_at_startup: false,
+                out_edges: Vec::new(),
+                in_edges: alloc::vec![in_edge],
+                total_out_edges: 0,
+                total_in_edges: 1,
+                done: Some(Handback::Element(done_rx)),
+                removable: false,
+                properties: Some(properties),
+                growth: Growth::Fixed,
+            },
+        );
         Ok(node)
     }
 
@@ -1779,9 +1886,7 @@ impl<'a, 'f, 's> MutationService<'a, 'f, 's> {
 
         self.edges[edge].consumer = replacement;
         self.edges[edge].feasible = Some(feasible);
-        // The node the old sink sat on stays in the table, named and addressing
-        // nothing, so its name is never handed out again.
-        self.nodes[replaced].in_edges.clear();
+        self.retire_node(replaced);
         Ok((name, old))
     }
 
@@ -1877,8 +1982,9 @@ impl<'a, 'f, 's> MutationService<'a, 'f, 's> {
             return Err(MutationError::GraphEnded);
         }
 
-        self.nodes.push(LiveNode {
+        self.nodes.insert(LiveNode {
             name: name.clone(),
+            named_at_startup: false,
             out_edges: alloc::vec![edge],
             in_edges: Vec::new(),
             total_out_edges: 1,
@@ -1889,9 +1995,7 @@ impl<'a, 'f, 's> MutationService<'a, 'f, 's> {
             properties: None,
             growth: Growth::Fixed,
         });
-        // As in `replace_sink`: the node the old source sat on keeps its name
-        // and loses its edge.
-        self.nodes[replaced].out_edges.clear();
+        self.retire_node(replaced);
         Ok((name, old))
     }
 
@@ -1991,15 +2095,15 @@ impl<'a, 'f, 's> MutationService<'a, 'f, 's> {
         }
         let port = port.expect("one link per element, at least the sink's");
 
-        let first_node = self.nodes.len();
-        let first_edge = self.edges.len();
+        let node_slots = self.nodes.vacant(count);
+        let edge_slots = self.edges.vacant(count);
         let mut names = Vec::with_capacity(count);
         for (i, mut element) in branch.into_iter().enumerate() {
             element.configure_liveness(self.path_is_live);
             let name = self.unique_name(element.log_category());
             element.set_instance_name(name.clone());
             self.hand_bus(|bus| element.set_bus(bus));
-            let node = first_node + i;
+            let node = node_slots[i];
             let (done_tx, done_rx) = bounded(1);
             let properties = PropertyMailbox::new();
             let io = TransformArmIo {
@@ -2025,42 +2129,52 @@ impl<'a, 'f, 's> MutationService<'a, 'f, 's> {
             if self.arms.send(arm).await.is_err() {
                 return Err(MutationError::GraphEnded);
             }
-            self.edges.push(LiveEdge {
-                endpoint: endpoints[i].clone(),
-                consumer: node,
-                feasible: Some(CapsSet::one(match i {
-                    0 => sticky.clone(),
-                    _ => out_caps[i - 1].clone(),
-                })),
-                policy,
-                capacity,
-                mode,
-            });
-            self.nodes.push(LiveNode {
-                name: name.clone(),
-                out_edges: alloc::vec![first_edge + i + 1],
-                in_edges: alloc::vec![first_edge + i],
-                total_out_edges: 1,
-                total_in_edges: 1,
-                done: Some(Handback::Element(done_rx)),
-                removable: true,
-                properties: Some(properties),
-                growth: Growth::Fixed,
-            });
+            self.edges.fill(
+                edge_slots[i],
+                LiveEdge {
+                    endpoint: endpoints[i].clone(),
+                    consumer: node,
+                    feasible: Some(CapsSet::one(match i {
+                        0 => sticky.clone(),
+                        _ => out_caps[i - 1].clone(),
+                    })),
+                    policy,
+                    capacity,
+                    mode,
+                },
+            );
+            self.nodes.fill(
+                node,
+                LiveNode {
+                    name: name.clone(),
+                    named_at_startup: false,
+                    out_edges: alloc::vec![edge_slots[i + 1]],
+                    in_edges: alloc::vec![edge_slots[i]],
+                    total_out_edges: 1,
+                    total_in_edges: 1,
+                    done: Some(Handback::Element(done_rx)),
+                    removable: true,
+                    properties: Some(properties),
+                    growth: Growth::Fixed,
+                },
+            );
             names.push(name);
         }
         let sink_name = self.unique_name(sink.log_category());
         sink.set_instance_name(sink_name.clone());
         self.hand_bus(|bus| sink.set_bus(bus));
-        let sink_edge = self.edges.len();
-        self.edges.push(LiveEdge {
-            endpoint: endpoints[count - 1].clone(),
-            consumer: first_node + count - 1,
-            feasible: Some(feasible),
-            policy,
-            capacity,
-            mode,
-        });
+        let sink_edge = edge_slots[count - 1];
+        self.edges.fill(
+            sink_edge,
+            LiveEdge {
+                endpoint: endpoints[count - 1].clone(),
+                consumer: node_slots[count - 1],
+                feasible: Some(feasible),
+                policy,
+                capacity,
+                mode,
+            },
+        );
         let feed_rx = inputs.remove(0);
         self.start_sink(sink, sink_name.clone(), feed_rx, sink_edge, mode)
             .await?;
@@ -2071,7 +2185,7 @@ impl<'a, 'f, 's> MutationService<'a, 'f, 's> {
         if adds.send(port).await.is_err() {
             return Err(MutationError::GraphEnded);
         }
-        self.nodes[tee_node].out_edges.push(first_edge);
+        self.nodes[tee_node].out_edges.push(edge_slots[0]);
         self.nodes[tee_node].total_out_edges += 1;
         Ok(names)
     }
@@ -2132,9 +2246,10 @@ impl<'a, 'f, 's> MutationService<'a, 'f, 's> {
             elements.push(element);
         }
         for &node in &chain {
-            self.nodes[node].in_edges.clear();
-            self.nodes[node].out_edges.clear();
-            self.nodes[node].removable = false;
+            for edge in core::mem::take(&mut self.nodes[node].in_edges) {
+                self.edges.remove(edge);
+            }
+            self.retire_node(node);
         }
         self.nodes[tee_node].out_edges.retain(|&e| e != top_edge);
         self.nodes[tee_node].total_out_edges -= 1;
@@ -2214,8 +2329,7 @@ impl<'a, 'f, 's> MutationService<'a, 'f, 's> {
             return Err(MutationError::GraphEnded);
         }
 
-        let edge = self.edges.len();
-        self.edges.push(LiveEdge {
+        let edge = self.edges.insert(LiveEdge {
             endpoint,
             consumer: muxer_node,
             feasible: Some(CapsSet::one(fixated)),
@@ -2223,8 +2337,9 @@ impl<'a, 'f, 's> MutationService<'a, 'f, 's> {
             capacity: self.link_capacity,
             mode: BranchMode::Reconfigure,
         });
-        self.nodes.push(LiveNode {
+        self.nodes.insert(LiveNode {
             name: name.clone(),
+            named_at_startup: false,
             out_edges: alloc::vec![edge],
             in_edges: Vec::new(),
             total_out_edges: 1,

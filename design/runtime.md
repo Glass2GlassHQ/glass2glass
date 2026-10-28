@@ -218,6 +218,12 @@ Every node of a run carries an instance name, a plain broadcast tee included
 addressable and what labels it in topology dumps. Auto-generated names count past
 every explicit `name=` in the graph, so one can never shadow a user's.
 
+A removed or replaced element's node and edges leave the mutator's tables, and the
+next element added takes their slots, as the next spliced arm takes a finished one's
+slot in the run's arm set. A run mutated without end therefore keeps a flat heap
+(`m1965_mutation_memory`). A name leaves with its node but is never handed out
+again: the `<category>N` counter moves past it.
+
 A refused remove leaves nothing behind. The drain flag and the output-link claim
 are raised only once the producer's link is in hand: holding that link keeps the
 element's input open, so its arm cannot yet have read either flag, and every

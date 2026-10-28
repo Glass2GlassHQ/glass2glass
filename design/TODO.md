@@ -28,7 +28,6 @@ Highest leverage first:
 
 ## Architecture guarantees (validation-first)
 
-- **A mutated run grows with every operation.** The `GraphMutator`'s node and edge tables keep an entry for every element it ever started, and the run's arm set keeps a slot and a waker for every arm, so each splice or tee-branch cycle leaves about 2 KiB behind (about 0.5 to 0.75 MiB an hour on the calliope `api-mutate` row). Reuse the slots of removed nodes, edges and finished arms, without handing a retired name out again.
 - **CI never runs m960 or m961 with `ffmpeg`.** The conformance job runs them with `rav1d` alone and linux-full enables neither rav1d nor dav1d, so a regression that only shows with both decoders built stays invisible. Add an `ffmpeg,rav1d` run of both files to a job that has the libav packages.
 - **Grow the conformance matrix.** Persist evidence from the resource-owning
   tests still uncovered as they are validated (`ffmpegvaapidec` on Intel and AMD, the Android and

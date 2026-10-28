@@ -65,6 +65,7 @@ Breaking: `QosMessage` gains `downstream_proc_ns`, `ElementProbe` is no longer `
 - M1962: `hlssrc` and `dashsrc` restart at the live edge when a live origin starts its numbering or timeline over.
 - M1963: `dashsrc` sends the init segment and keeps its place when a manifest reload picks another Representation.
 - M1964: `whipsink` reconnects when the server closes the session with a DTLS close_notify.
+- M1965: a run mutated by `GraphMutator` reuses the slots of removed elements and finished arms, so its heap stays flat.
 
 ## 0.10.0
 

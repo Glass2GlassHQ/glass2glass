@@ -11,6 +11,8 @@ use spin::Mutex;
 
 use crate::element::BoxFuture;
 #[cfg(feature = "std")]
+use crate::error::G2gError;
+#[cfg(feature = "std")]
 use crate::runtime::channel::Receiver;
 
 const ARMS_PER_WORD: usize = u64::BITS as usize;
@@ -95,15 +97,30 @@ impl<'a, T> ArmSet<'a, T> {
     // The new arm starts woken, so the next poll reaches it.
     fn push(&mut self, arm: BoxFuture<'a, T>) {
         let index = self.arms.len();
-        self.arms.push(Some(arm));
-        self.live += 1;
+        self.arms.push(None);
         self.wakers.push(Waker::from(Arc::new(ArmWake {
             index,
             woken: self.woken.clone(),
         })));
-        let mut woken = self.woken.lock();
-        woken.bits.resize(index / ARMS_PER_WORD + 1, 0);
-        woken.mark(index);
+        self.woken.lock().bits.resize(index / ARMS_PER_WORD + 1, 0);
+        self.start(index, arm);
+    }
+
+    // Takes the slot of a finished arm at `first_reusable` or above, so it can be
+    // polled before arms pushed earlier.
+    #[cfg(feature = "std")]
+    fn push_into_finished_slot(&mut self, arm: BoxFuture<'a, T>, first_reusable: usize) {
+        let finished = self.arms[first_reusable..].iter().position(Option::is_none);
+        match finished {
+            Some(offset) => self.start(first_reusable + offset, arm),
+            None => self.push(arm),
+        }
+    }
+
+    fn start(&mut self, index: usize, arm: BoxFuture<'a, T>) {
+        self.arms[index] = Some(arm);
+        self.live += 1;
+        self.woken.lock().mark(index);
     }
 
     // In index order, and an arm woken by a lower one during the pass is polled
@@ -136,11 +153,6 @@ impl<'a, T> ArmSet<'a, T> {
                 on_done(index, output);
             }
         }
-    }
-
-    #[cfg(feature = "std")]
-    fn len(&self) -> usize {
-        self.arms.len()
     }
 
     fn all_done(&self) -> bool {
@@ -214,25 +226,7 @@ pub(crate) struct DynamicJoin<'a, T> {
     arms: ArmSet<'a, T>,
     /// `None` once the control channel has closed; no more arms can arrive.
     new_arms: Option<Receiver<BoxFuture<'a, T>>>,
-    /// Resolved outputs, in the order [`JoinMode`] keeps them.
-    outputs: Vec<Option<T>>,
-    mode: JoinMode,
-}
-
-/// When a [`DynamicJoin`] finishes and in what order its outputs come back.
-#[cfg(feature = "std")]
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum JoinMode {
-    /// Finish once the control channel has closed and every arm has resolved;
-    /// outputs in completion order. What the dynamic fan-out / fan-in runners
-    /// want: their control sender lives on the arm that ends the run, and their
-    /// arm identity rides in `T`.
-    UntilClosed,
-    /// Finish as soon as every arm has resolved, whether or not more could
-    /// arrive; outputs in arm order. What the graph mutator wants: its
-    /// control sender belongs to a handle that outlives the run, and its caller
-    /// indexes results by arm position.
-    UntilIdle,
+    outputs: Vec<T>,
 }
 
 /// Build a [`DynamicJoin`] from an initial arm set plus a control channel that
@@ -246,26 +240,28 @@ pub(crate) fn dynamic_join<'a, T: Unpin>(
         arms: ArmSet::new(initial),
         new_arms: Some(new_arms),
         outputs: Vec::new(),
-        mode: JoinMode::UntilClosed,
     }
 }
 
-/// As [`dynamic_join`], but the join ends as soon as every arm has resolved,
-/// whether or not more arms could still be sent, and outputs keep arm order (the
-/// initial arms first, in the order given, then each later arm in the order it
-/// arrived). The graph mutator holds its control sender for as long as
-/// the caller holds the handle, which is typically past the end of the run, and
-/// a graph whose every arm has ended has nothing left to splice onto.
+/// Hand each newly-arrived arm to `add`, and notice the channel closing. A
+/// fresh `recv()` future is created and polled each turn; on `Pending` it leaves
+/// the recv waker registered, so a later send / sender-drop re-wakes the join.
 #[cfg(feature = "std")]
-pub(crate) fn dynamic_join_open<'a, T: Unpin>(
-    initial: Vec<BoxFuture<'a, T>>,
-    new_arms: Receiver<BoxFuture<'a, T>>,
-) -> DynamicJoin<'a, T> {
-    DynamicJoin {
-        arms: ArmSet::new(initial),
-        new_arms: Some(new_arms),
-        outputs: Vec::new(),
-        mode: JoinMode::UntilIdle,
+fn fold_new_arms<'a, T>(
+    new_arms: &mut Option<Receiver<BoxFuture<'a, T>>>,
+    cx: &mut Context<'_>,
+    mut add: impl FnMut(BoxFuture<'a, T>),
+) {
+    while let Some(rx) = new_arms.as_ref() {
+        let polled = {
+            let mut rf = rx.recv();
+            Pin::new(&mut rf).poll(cx)
+        };
+        match polled {
+            Poll::Ready(Some(fut)) => add(fut),
+            Poll::Ready(None) => *new_arms = None,
+            Poll::Pending => return,
+        }
     }
 }
 
@@ -274,56 +270,76 @@ impl<'a, T: Unpin> Future for DynamicJoin<'a, T> {
     type Output = Vec<T>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        // `DynamicJoin` is `Unpin` (Vecs of `Pin<Box<..>>` / `Option<T>` and a
+        // `DynamicJoin` is `Unpin` (Vecs of `Pin<Box<..>>` / `T` and a
         // `Receiver`), so a plain `&mut` is sound.
         let this = self.get_mut();
-
-        // 1. Fold in any newly-arrived arms (and notice channel closure). A
-        // fresh `recv()` future is created and polled each turn; on `Pending`
-        // it leaves the recv waker registered, so a later send / sender-drop
-        // re-wakes this join.
-        if this.new_arms.is_some() {
-            loop {
-                let polled = {
-                    let rx = this.new_arms.as_ref().expect("checked is_some");
-                    let mut rf = rx.recv();
-                    Pin::new(&mut rf).poll(cx)
-                };
-                match polled {
-                    Poll::Ready(Some(fut)) => this.arms.push(fut),
-                    Poll::Ready(None) => {
-                        this.new_arms = None;
-                        break;
-                    }
-                    Poll::Pending => break,
-                }
-            }
-        }
-
-        // 2. Poll every woken arm and buffer its output. `UntilIdle` parks each
-        // one in its own arm's slot, so the initial arms keep their input order
-        // (the graph runner indexes its per-arm bookkeeping by position);
-        // `UntilClosed` appends, which is the completion order its callers have
-        // always seen.
-        if this.mode == JoinMode::UntilIdle {
-            this.outputs.resize_with(this.arms.len(), || None);
-        }
-        let mode = this.mode;
+        let arms = &mut this.arms;
+        fold_new_arms(&mut this.new_arms, cx, |arm| arms.push(arm));
         let outputs = &mut this.outputs;
-        this.arms.poll_woken(cx, |index, output| match mode {
-            JoinMode::UntilIdle => outputs[index] = Some(output),
-            JoinMode::UntilClosed => outputs.push(Some(output)),
-        });
-
-        // 3. Done once every arm has resolved, and, for `UntilClosed`, once no
-        // more can arrive. Every slot holding an output is filled by then, so
-        // flattening drops nothing.
-        let more_may_arrive = this.mode == JoinMode::UntilClosed && this.new_arms.is_some();
-        if this.arms.all_done() && !more_may_arrive {
-            Poll::Ready(mem::take(&mut this.outputs).into_iter().flatten().collect())
+        this.arms.poll_woken(cx, |_, output| outputs.push(output));
+        if this.arms.all_done() && this.new_arms.is_none() {
+            Poll::Ready(mem::take(&mut this.outputs))
         } else {
             Poll::Pending
         }
+    }
+}
+
+/// The graph mutator's growable join: it ends as soon as every arm has resolved,
+/// whether or not more arms could still be sent, since its control sender
+/// belongs to a handle that typically outlives the run and a graph whose every
+/// arm has ended has nothing left to splice onto. Returns the initial arms'
+/// results in the order given, then the error of each later arm that failed. The
+/// run's stats count only the initial arms, so a later arm that ends cleanly
+/// leaves nothing behind and its slot takes the next arm.
+#[cfg(feature = "std")]
+#[allow(missing_debug_implementations)]
+pub(crate) struct OpenJoin<'a> {
+    arms: ArmSet<'a, Result<u64, G2gError>>,
+    new_arms: Option<Receiver<BoxFuture<'a, Result<u64, G2gError>>>>,
+    initial_results: Vec<Option<Result<u64, G2gError>>>,
+    later_errors: Vec<G2gError>,
+}
+
+#[cfg(feature = "std")]
+pub(crate) fn dynamic_join_open<'a>(
+    initial: Vec<BoxFuture<'a, Result<u64, G2gError>>>,
+    new_arms: Receiver<BoxFuture<'a, Result<u64, G2gError>>>,
+) -> OpenJoin<'a> {
+    let mut outputs = Vec::with_capacity(initial.len());
+    outputs.resize_with(initial.len(), || None);
+    OpenJoin {
+        arms: ArmSet::new(initial),
+        new_arms: Some(new_arms),
+        initial_results: outputs,
+        later_errors: Vec::new(),
+    }
+}
+
+#[cfg(feature = "std")]
+impl Future for OpenJoin<'_> {
+    type Output = Vec<Result<u64, G2gError>>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.get_mut();
+        let initial_count = this.initial_results.len();
+        let arms = &mut this.arms;
+        fold_new_arms(&mut this.new_arms, cx, |arm| {
+            arms.push_into_finished_slot(arm, initial_count)
+        });
+        let (initial_results, later_errors) = (&mut this.initial_results, &mut this.later_errors);
+        this.arms
+            .poll_woken(cx, |index, output| match (index < initial_count, output) {
+                (true, output) => initial_results[index] = Some(output),
+                (false, Err(error)) => later_errors.push(error),
+                (false, Ok(_)) => {}
+            });
+        if !this.arms.all_done() {
+            return Poll::Pending;
+        }
+        let initial = mem::take(&mut this.initial_results).into_iter().flatten();
+        let later = mem::take(&mut this.later_errors).into_iter().map(Err);
+        Poll::Ready(initial.chain(later).collect())
     }
 }
 
