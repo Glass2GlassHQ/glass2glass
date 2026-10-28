@@ -77,8 +77,8 @@ async fn a_reload_picking_another_representation_resumes_after_the_last_segment(
         };
         Some(body.into_bytes())
     });
-    let mut src = DashSrc::new(format!("{url}/manifest.mpd"))
-        .with_reload_interval_ms(RELOAD_INTERVAL_MS);
+    let mut src =
+        DashSrc::new(format!("{url}/manifest.mpd")).with_reload_interval_ms(RELOAD_INTERVAL_MS);
     src.configure_pipeline(&Caps::ByteStream {
         encoding: ByteStreamEncoding::IsoBmff,
     })
