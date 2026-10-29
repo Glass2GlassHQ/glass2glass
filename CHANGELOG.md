@@ -69,6 +69,7 @@ Breaking: `QosMessage` gains `downstream_proc_ns`, `ElementProbe` is no longer `
 - M1966: every str0m element ends a session when the peer closes it with a DTLS close_notify.
 - M1967: `g2g-dotnet` C# bindings drive pipelines, edits and appsrc / appsink through the C ABI.
 - M1968: `g2g.hpp` is a header-only C++17 wrapper over the C ABI.
+- M1969: `surfacesink` copies RGBA frames into an Android app's `Surface` attached by channel name.
 
 ## 0.10.0
 

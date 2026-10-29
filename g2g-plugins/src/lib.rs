@@ -1279,6 +1279,10 @@ mod mediacodec_common;
 #[cfg(all(target_os = "android", feature = "mediacodec"))]
 pub mod mediacodecenc;
 
+// RGBA frames copied into an app's Surface, attached by channel name.
+#[cfg(all(target_os = "android", feature = "android-surface"))]
+pub mod surfacesink;
+
 // M307: Android AAudio PCM render (AAudioSink) + capture (AAudioSrc), the Android
 // analog of the WASAPI / ALSA / PulseAudio audio elements.
 #[cfg(all(target_os = "android", feature = "aaudio"))]

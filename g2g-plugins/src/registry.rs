@@ -2197,6 +2197,13 @@ fn register_autoplug_candidates(reg: &mut Registry) {
         LaunchFactory::of::<MediaCodecEnc>("mediacodecench265", || Box::new(MediaCodecEnc::h265()))
             .with_experimental(),
     );
+    #[cfg(all(target_os = "android", feature = "android-surface"))]
+    reg.register_launch(
+        LaunchFactory::of::<crate::surfacesink::SurfaceSink>("surfacesink", || {
+            Box::new(crate::surfacesink::SurfaceSink::new())
+        })
+        .with_experimental(),
+    );
     // macOS hardware video decode via VideoToolbox (M218/M534); one factory per
     // codec, like the MediaCodec pair. `vtdec` matches the gst applemedia name.
     // Registered twice like `ffmpegdec`: as an auto-plug candidate and as a

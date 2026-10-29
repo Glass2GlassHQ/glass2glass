@@ -318,6 +318,8 @@ aaudio = ["std", "dep:ndk", "ndk/audio"]
 # ImageReader and packing NV12. Android-only, implies std. The Android analog of
 # v4l2src / avfvideosrc. `ndk/api-level-24` gives ImageReader.
 camera2 = ["std", "dep:ndk", "dep:ndk-sys", "ndk/api-level-24"]
+# `surfacesink`: copies RGBA frames into an app Surface attached by channel name. Android-only.
+android-surface = ["std", "dep:ndk"]
 # Android zero-copy decode -> GPU (M304): keep MediaCodec output on the GPU by
 # importing the decoded AImage's AHardwareBuffer into wgpu/Vulkan
 # (VK_ANDROID_external_memory_android_hardware_buffer), then a device-local copy
