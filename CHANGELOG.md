@@ -67,6 +67,7 @@ Breaking: `QosMessage` gains `downstream_proc_ns`, `ElementProbe` is no longer `
 - M1964: `whipsink` reconnects when the server closes the session with a DTLS close_notify.
 - M1965: a run mutated by `GraphMutator` reuses the slots of removed elements and finished arms, so its heap stays flat.
 - M1966: every str0m element ends a session when the peer closes it with a DTLS close_notify.
+- M1967: `g2g-dotnet` C# bindings drive pipelines, edits and appsrc / appsink through the C ABI.
 
 ## 0.10.0
 

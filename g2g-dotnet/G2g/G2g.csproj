@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <G2gNativeDir Condition="'$(G2gNativeDir)' == ''">$(MSBuildThisFileDirectory)../../target/release/</G2gNativeDir>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="$(G2gNativeDir)*g2g_capi.so;$(G2gNativeDir)*g2g_capi.dylib;$(G2gNativeDir)*g2g_capi.dll" CopyToOutputDirectory="PreserveNewest" Visible="false" />
+  </ItemGroup>
+
+</Project>

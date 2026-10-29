@@ -7,3 +7,7 @@
 
 # Node deps for tools/moqt-demo (the browser MoQ player + its headless run).
 node_modules/
+
+# dotnet build output
+/g2g-dotnet/*/bin/
+/g2g-dotnet/*/obj/
