@@ -314,7 +314,7 @@ impl FlvDemux {
     ) -> Result<(), G2gError> {
         let want = Self::selected_codec(self.stream);
         for u in units {
-            self.seek.note_stream_start(u.pts_ns());
+            self.seek.note_track_unit(u.track() as u64, u.pts_ns());
             if u.codec != want {
                 continue;
             }

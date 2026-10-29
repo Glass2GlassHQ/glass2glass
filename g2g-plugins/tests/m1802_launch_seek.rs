@@ -61,6 +61,12 @@ const AUDIO_FIRST_TS_FIXTURE: &str = "h264_mp2_audio_first.ts";
 const AUDIO_FIRST_SEEK_MILLISECONDS: u64 = 410;
 // ffmpeg -ss 0.41 -copyts -i <AUDIO_FIRST_TS_FIXTURE> -map 0:v -frames:v 1 -f framemd5 -
 const AUDIO_FIRST_FRAME_AFTER_SEEK_MD5: &str = "f8be4f7e5b101f797f1fcecb3159cf25";
+// the same encode with -bf 2 -c:a aac into FLV: its AAC starts 21 ms before its video, after the video's first tag
+const AUDIO_FIRST_FLV_FIXTURE: &str = "h264_aac_audio_first.flv";
+// the keyframe at 10.4 s, one frame earlier than the target counted from the video's first pts
+const AUDIO_FIRST_FLV_SEEK_MILLISECONDS: u64 = 421;
+// ffmpeg -ss 0.421 -copyts -i <AUDIO_FIRST_FLV_FIXTURE> -map 0:v -frames:v 1 -f framemd5 -
+const AUDIO_FIRST_FLV_FRAME_AFTER_SEEK_MD5: &str = "b7d8a515f21729cd2be1368bbe822d11";
 
 fn seek_seconds(milliseconds: u64) -> String {
     format!("{}", milliseconds as f64 / 1_000.0)
@@ -197,20 +203,33 @@ fn seek_counts_the_target_from_the_start_time() {
 }
 
 #[test]
-fn ts_seek_counts_the_target_from_the_earliest_stream() {
-    let pipeline = format!(
-        "filesrc location={} ! decodebin ! checksumsink hash=md5",
-        offset_fixture(AUDIO_FIRST_TS_FIXTURE)
-    );
-    let seeked = checksum_lines(&launch_with_seek(
-        &seek_seconds(AUDIO_FIRST_SEEK_MILLISECONDS),
-        &pipeline,
-    ));
-    assert!(
-        seeked[0].ends_with(AUDIO_FIRST_FRAME_AFTER_SEEK_MD5),
-        "{} is not ffmpeg's frame after the seek",
-        seeked[0]
-    );
+fn seek_counts_the_target_from_the_earliest_stream() {
+    for (fixture, seek_milliseconds, ffmpeg_md5) in [
+        (
+            AUDIO_FIRST_TS_FIXTURE,
+            AUDIO_FIRST_SEEK_MILLISECONDS,
+            AUDIO_FIRST_FRAME_AFTER_SEEK_MD5,
+        ),
+        (
+            AUDIO_FIRST_FLV_FIXTURE,
+            AUDIO_FIRST_FLV_SEEK_MILLISECONDS,
+            AUDIO_FIRST_FLV_FRAME_AFTER_SEEK_MD5,
+        ),
+    ] {
+        let pipeline = format!(
+            "filesrc location={} ! decodebin ! checksumsink hash=md5",
+            offset_fixture(fixture)
+        );
+        let seeked = checksum_lines(&launch_with_seek(
+            &seek_seconds(seek_milliseconds),
+            &pipeline,
+        ));
+        assert!(
+            seeked[0].ends_with(ffmpeg_md5),
+            "{fixture}: {} is not ffmpeg's frame after the seek",
+            seeked[0]
+        );
+    }
 }
 
 struct ZeroClock;

@@ -144,13 +144,14 @@ enum Phase {
 }
 
 // the segment the stream runs under since the last flush
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 enum StreamSegment {
     #[default]
     Unsent,
     // a unit presenting before this start, or before the stream start, lowers both, as matroskademux does
     AtStreamStart {
         start_ns: u64,
+        sent: Segment,
     },
     // a seek's segment, or one kept across a source restart
     Fixed,
@@ -182,6 +183,7 @@ pub(crate) struct DemuxSeek<U> {
     // empty until the first keyframe after the flush, since nothing before it decodes
     kept: Vec<U>,
     stream_start_ns: Option<u64>,
+    started_tracks: Vec<u64>,
     segment: StreamSegment,
 }
 
@@ -194,6 +196,7 @@ impl<U> Default for DemuxSeek<U> {
             keep_state: false,
             kept: Vec::new(),
             stream_start_ns: None,
+            started_tracks: Vec::new(),
             segment: StreamSegment::Unsent,
         }
     }
@@ -253,6 +256,18 @@ impl<U> DemuxSeek<U> {
         self.stream_start_ns.get_or_insert(pts_ns);
     }
 
+    // ffmpeg's start time is the earliest track's first pts, and a file can carry that track second
+    pub(crate) fn note_track_unit(&mut self, track: u64, pts_ns: u64) {
+        if self.started_tracks.contains(&track) {
+            return;
+        }
+        self.started_tracks.push(track);
+        self.stream_start_ns = Some(
+            self.stream_start_ns
+                .map_or(pts_ns, |start| start.min(pts_ns)),
+        );
+    }
+
     // a seek taken before the first unit waits for the caller to report the stream start
     pub(crate) fn awaits_stream_start(&self) -> bool {
         self.stream_start_ns.is_none()
@@ -273,11 +288,13 @@ impl<U> DemuxSeek<U> {
         if self.segment != StreamSegment::Unsent {
             return None;
         }
+        let stream_start_ns = *self.stream_start_ns.get_or_insert(start_pts_ns);
+        let sent = segment_from(start_pts_ns, stream_start_ns);
         self.segment = StreamSegment::AtStreamStart {
             start_ns: start_pts_ns,
+            sent,
         };
-        let stream_start_ns = *self.stream_start_ns.get_or_insert(start_pts_ns);
-        Some(segment_from(start_pts_ns, stream_start_ns))
+        Some(sent)
     }
 
     // the stream after a source restart keeps the segment it had, and nothing lowers it
@@ -285,23 +302,22 @@ impl<U> DemuxSeek<U> {
         self.segment = StreamSegment::Fixed;
     }
 
-    // the segment to send before a unit presenting before the segment's start or the stream start, none if unchanged
+    // the segment to send before a unit presenting before the segment's start, or after another track lowered the stream start, none if unchanged
     pub(crate) fn lowered_segment(&mut self, pts_ns: u64) -> Option<Segment> {
-        let StreamSegment::AtStreamStart { start_ns } = self.segment else {
+        let StreamSegment::AtStreamStart { start_ns, sent } = self.segment else {
             return None;
         };
         let stream_start_ns = self
             .stream_start_ns
-            .expect("the opening segment set the stream start");
-        if pts_ns >= start_ns && pts_ns >= stream_start_ns {
-            return None;
-        }
-        let sent = segment_from(start_ns, stream_start_ns);
+            .expect("the opening segment set the stream start")
+            .min(pts_ns);
         let start_ns = start_ns.min(pts_ns);
-        let stream_start_ns = stream_start_ns.min(pts_ns);
-        self.segment = StreamSegment::AtStreamStart { start_ns };
         self.stream_start_ns = Some(stream_start_ns);
         let lowered = segment_from(start_ns, stream_start_ns);
+        self.segment = StreamSegment::AtStreamStart {
+            start_ns,
+            sent: lowered,
+        };
         (lowered != sent).then_some(lowered)
     }
 
@@ -575,6 +591,54 @@ mod tests {
             Some(EARLIER_NS),
             "seek targets count from the lowered start"
         );
+    }
+
+    #[test]
+    fn an_earlier_second_track_moves_the_seek_target() {
+        const VIDEO_START_NS: u64 = 1_000;
+        const AUDIO_START_NS: u64 = 400;
+        const VIDEO: u64 = 0;
+        const AUDIO: u64 = 1;
+        let app = SeekController::new();
+        let mut s = DemuxSeek::default();
+        s.with(app.clone(), SeekController::new());
+        app.seek(Seek::flush_to(TARGET_NS));
+        assert!(s.poll_request());
+        s.on_flush();
+
+        s.note_track_unit(VIDEO, VIDEO_START_NS);
+        assert_eq!(units(s.admit(VIDEO_START_NS, true, 0)), (None, vec![]));
+        s.note_track_unit(AUDIO, AUDIO_START_NS);
+        // a later unit of a started track does not move the start
+        s.note_track_unit(AUDIO, 0);
+        assert_eq!(
+            units(s.admit(TARGET_NS + VIDEO_START_NS - 1, false, 1)),
+            (Some(TARGET_NS + AUDIO_START_NS), vec![0, 1],),
+            "the target counts from the audio's start"
+        );
+    }
+
+    #[test]
+    fn an_earlier_second_track_lowers_the_opening() {
+        const VIDEO_START_NS: u64 = 1_000;
+        const AUDIO_START_NS: u64 = 400;
+        let mut s: DemuxSeek<u64> = DemuxSeek::default();
+        s.note_track_unit(0, VIDEO_START_NS);
+        let opening = s
+            .opening_segment(VIDEO_START_NS)
+            .expect("the first unit opens");
+        assert_eq!(opening.to_stream_time(VIDEO_START_NS), Some(0));
+        s.note_track_unit(1, AUDIO_START_NS);
+
+        let lowered = s
+            .lowered_segment(VIDEO_START_NS + 1)
+            .expect("the audio's start moves stream time");
+        assert_eq!(lowered.start, VIDEO_START_NS);
+        assert_eq!(
+            lowered.to_stream_time(VIDEO_START_NS),
+            Some(VIDEO_START_NS - AUDIO_START_NS)
+        );
+        assert_eq!(s.lowered_segment(VIDEO_START_NS + 2), None);
     }
 
     #[test]

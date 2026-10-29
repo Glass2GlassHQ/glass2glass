@@ -76,6 +76,7 @@ Breaking: `QosMessage` gains `downstream_proc_ns`, `ElementProbe` is no longer `
 - M1973: `g2g-uniffi` generates Swift bindings, run by an example in CI.
 - M1974: `surfacesink` presents `mediacodecdec gpu-output=true` textures to the Android `Surface` with no copy.
 - M1975: `whepsrc` subscribes again after it loses its session when `reconnect` is set.
+- M1976: an FLV seek counts its target from the earliest track's first timestamp, as `ffmpeg -ss` does.
 
 ## 0.10.0
 

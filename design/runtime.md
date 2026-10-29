@@ -588,15 +588,17 @@ the target, so decoders drop the earlier frames and the first frame out is the f
 one at or after the target, as `ffmpeg -ss` gives. Every seekable demuxer and source counts
 the target from the stream's first timestamp, as ffmpeg's `-ss` counts from the start
 time (gst counts from the first PCR in TS). `DemuxSeek` records the pts of the first
-unit of any track, a seek taken before that unit becomes a pts once it arrives, and an
+unit of any track, `flvdemux` lowers it to the earliest track's first pts as ffmpeg's FLV
+start time is, while Matroska keeps the first unit since ffmpeg drops the AAC priming
+from its start time there. A seek taken before that unit becomes a pts once it arrives, and an
 index lookup (Matroska `Cues`, the Ogg guess) waits for it and rescans from the file
 start until then. `tsdemux` holds every PID's units while a seek waits for the stream
 start, until each PMT stream has shown a stamped unit (or EOS, or 5 MB, ffmpeg's
 probesize), and counts from the earliest of those first stamps, so a file whose audio
 starts before its video seeks as ffmpeg does. `Mp4Src` counts from the first sample, `Mp4Demux` from the later of
 the edit-list start and the first sample. Positions use the same origin. Until a
-seek, a unit presenting before the segment start or the stream start lowers both, and
-the demuxer sends the lowered segment again on every port that opened, as
+seek, a unit presenting before the segment start or the stream start lowers both, as
+does another FLV track's earlier first pts, and the demuxer sends the lowered segment again on every port that opened, as
 `matroskademux` does. `tsdemux` compares by pts, so its opening at the first DTS stays.
 `PsDemuxN` lowers its first-DTS base where gst's `mpegpsdemux` opens at the first SCR.
 `Mp4DemuxN` lowers a port's start when a later fragment carries an earlier frame. A
