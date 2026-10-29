@@ -2,6 +2,7 @@ import dev.g2g.AppSink
 import dev.g2g.AppSrc
 import dev.g2g.Pipeline
 import dev.g2g.PipelineException
+import java.nio.ByteBuffer
 
 const val FRAME_BYTES = 2 * 2 * 4
 const val FRAME_COUNT = 3
@@ -18,10 +19,22 @@ fun roundTrip() {
             Pipeline(
                 "appsrc channel=in caps=video/x-raw,format=RGBA,width=2,height=2,framerate=30/1 ! appsink channel=out",
             ).use { pipeline ->
+                val direct = ByteBuffer.allocateDirect(FRAME_BYTES)
                 for (index in 0 until FRAME_COUNT) {
-                    val frame = ByteArray(FRAME_BYTES) { (index + 1).toByte() }
-                    while (!source.push(frame, index.toULong() * FRAME_PERIOD_NS)) {
-                        Thread.yield()
+                    val fill = (index + 1).toByte()
+                    val pts = index.toULong() * FRAME_PERIOD_NS
+                    if (index % 2 == 0) {
+                        val frame = ByteArray(FRAME_BYTES) { fill }
+                        while (!source.push(frame, pts)) {
+                            Thread.yield()
+                        }
+                    } else {
+                        direct.clear()
+                        repeat(FRAME_BYTES) { direct.put(fill) }
+                        direct.flip()
+                        while (!source.pushBuffer(direct, pts)) {
+                            Thread.yield()
+                        }
                     }
                 }
                 source.endOfStream()
@@ -30,7 +43,7 @@ fun roundTrip() {
                 while (true) {
                     val sample = sink.pull() ?: break
                     println("frame $pulled: ${sample.data.size} bytes, first=${sample.data[0]}, pts=${sample.ptsNs} ns")
-                    expect(sample.data[0] == (pulled + 1).toByte(), "frame $pulled carries the bytes pushed for it")
+                    expect(sample.data.all { it == (pulled + 1).toByte() }, "frame $pulled carries the bytes pushed for it")
                     pulled++
                 }
 

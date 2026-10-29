@@ -1,6 +1,7 @@
 use std::fmt;
 use std::sync::Arc;
 
+use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::block_on;
 use g2g_plugins::appsink::{register_appsink_pull, AppSinkPull, BusKind, HostFrame};
 use g2g_plugins::appsrc::{register_appsrc, AppSrcFeed};
@@ -216,7 +217,13 @@ impl AppSrc {
 
     // False when the feed is full (retry) or the pipeline is gone.
     pub fn push(&self, data: Vec<u8>, pts_ns: u64) -> bool {
-        self.feed.push(&data, pts_ns)
+        self.feed
+            .push_slice(SystemSlice::from_boxed(data.into_boxed_slice()), pts_ns)
+    }
+
+    // Kotlin passes a direct ByteBuffer, which skips the copy into a serialized buffer that push makes.
+    pub fn push_buffer(&self, data: &[u8], pts_ns: u64) -> bool {
+        self.feed.push(data, pts_ns)
     }
 
     pub fn end_of_stream(&self) -> bool {
