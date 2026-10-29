@@ -1,4 +1,4 @@
-# Sourced by the Kotlin scripts. Downloads kotlinc and JNA once into
+# Sourced by the Kotlin and Swift scripts. Downloads kotlinc and JNA once into
 # ~/.cache/g2g-kotlin, checks their sha256, and generates the g2g-uniffi bindings.
 
 KOTLIN_VERSION=2.4.21
@@ -39,12 +39,12 @@ fetch_kotlin_tools() {
     fi
 }
 
-# Builds the host library, which the JVM example also loads, and writes the bindings to $1.
+# Builds the host library, which the JVM and Swift examples also load, and writes the $2 bindings to $1.
 generate_bindings() {
-    local out="$1"
+    local out="$1" language="$2"
     (cd "$REPO" && cargo build --locked --release -p g2g-uniffi)
     rm -rf "$out"
     (cd "$REPO" && cargo run --locked --release -p g2g-uniffi --features bindgen --bin uniffi-bindgen -- \
-        generate --library "$TARGET/release/libg2g_uniffi.so" --language kotlin --no-format \
+        generate --library "$TARGET/release/libg2g_uniffi.so" --language "$language" --no-format \
         --out-dir "$out")
 }
