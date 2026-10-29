@@ -302,7 +302,7 @@ nothing checks the format for you: call `configure_pipeline` on the new element
 with the link's current caps before you swap it in.
 
 The thread-per-arm runner works the same way through `run_threaded_mutable`.
-The Python, C and C# bindings have the same operations minus the validate calls,
+The Python, C, C++ and C# bindings have the same operations minus the validate calls,
 and take launch-line text for the elements ([g2g-pyapi](https://github.com/Glass2GlassHQ/glass2glass/blob/master/g2g-pyapi/README.md),
 [g2g-capi](https://github.com/Glass2GlassHQ/glass2glass/blob/master/g2g-capi/README.md),
 [g2g-dotnet](https://github.com/Glass2GlassHQ/glass2glass/blob/master/g2g-dotnet/README.md)). The `g2g-mcp` server can edit a running
@@ -1375,7 +1375,7 @@ g2g-plugins/     # all source/sink/transform elements
 g2g-ml/          # ORT, Burn, WgpuPreprocess, batcher
 g2g-bridge/      # GStreamer C-FFI bridge (libgstglass2glass.so)
 g2g-python/      # gst-python-ml element host (embedded CPython)
-g2g-capi/        # C ABI (cdylib/staticlib + include/g2g.h)
+g2g-capi/        # C ABI (cdylib/staticlib + include/g2g.h, C++ wrapper include/g2g.hpp)
 g2g-pyapi/       # Python (pyo3) bindings
 g2g-dotnet/      # C# bindings over g2g-capi (not a cargo crate)
 xtask/           # dev-command crate (cargo xtask ci | test --here | size | wasm | bench | ffi-probe)

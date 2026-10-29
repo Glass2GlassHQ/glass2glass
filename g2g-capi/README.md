@@ -2,7 +2,9 @@
 
 C ABI for [glass2glass](https://github.com/Glass2GlassHQ/glass2glass): parse a launch
 line, run the pipeline, pump the bus, and push or pull frames through
-appsrc/appsink from any language. Ships as a cdylib / staticlib plus `g2g.h`.
+appsrc/appsink from any language. Ships as a cdylib / staticlib plus `g2g.h`, and `g2g.hpp`, a
+header-only C++17 wrapper whose handles free themselves and whose refused calls
+throw `g2g::Error` ([example](https://github.com/Glass2GlassHQ/glass2glass/tree/master/examples/g2g-cpp-example)).
 
 ## Changing a running pipeline
 

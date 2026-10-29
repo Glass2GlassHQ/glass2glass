@@ -850,7 +850,7 @@ jobs:
   # example programs (M326/M327). Guards that the bindings keep building and the
   # examples keep running, the language-neutral waist on top of g2g-capi.
   bindings:
-    name: bindings (pyapi wheel + C/Python/C# examples)
+    name: bindings (pyapi wheel + C/C++/Python/C# examples)
     runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v4
@@ -879,6 +879,8 @@ jobs:
       # round-trip.
       - name: build + run the C example
         run: make -C examples/g2g-c-example run
+      - name: build + run the C++ example
+        run: make -C examples/g2g-cpp-example run
       - uses: actions/setup-dotnet@v6
         with:
           dotnet-version: "10.0.x"
