@@ -32,6 +32,7 @@ use core::time::Duration;
 use ndk::media::image_reader::{AcquireResult, Image, ImageFormat, ImageReader};
 use ndk::native_window::NativeWindow;
 
+use g2g_core::caps::framerate_q16_from_fraction;
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
@@ -56,6 +57,8 @@ extern "C" {}
 /// Images the `ImageReader` may hold; a small queue so capture never stalls
 /// waiting for us to acquire, without hoarding camera buffers.
 const MAX_IMAGES: i32 = 4;
+
+const DEFAULT_FRAMERATE: u32 = 30;
 
 /// Bounded poll attempts per frame while the camera has not delivered one yet
 /// (v1 has no image-available callback; see the module note). At `POLL_SLEEP`
@@ -164,6 +167,7 @@ impl core::fmt::Debug for CameraSession {
 pub struct Camera2Src {
     width: u32,
     height: u32,
+    framerate: u32,
     target_buffers: u64,
     camera_id: Option<String>,
     configured: bool,
@@ -186,6 +190,7 @@ impl Camera2Src {
         Self {
             width,
             height,
+            framerate: DEFAULT_FRAMERATE,
             target_buffers,
             camera_id: None,
             configured: false,
@@ -211,7 +216,10 @@ impl Camera2Src {
             format: RawVideoFormat::Nv12,
             width: Dim::Fixed(self.width),
             height: Dim::Fixed(self.height),
-            framerate: Rate::Any,
+            framerate: Rate::Fixed(
+                framerate_q16_from_fraction(self.framerate, 1)
+                    .expect("set_property refuses a framerate with no Q16 form"),
+            ),
             interlace: g2g_core::Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }
@@ -310,6 +318,14 @@ impl Camera2Src {
                 partial.device,
                 TEMPLATE_PREVIEW,
                 &mut partial.request,
+            ))?;
+            let fps = i32::try_from(self.framerate).map_err(|_| G2gError::CapsMismatch)?;
+            let fps_range = [fps, fps];
+            ck(ndk_sys::ACaptureRequest_setEntry_i32(
+                partial.request,
+                ndk_sys::acamera_metadata_tag::ACAMERA_CONTROL_AE_TARGET_FPS_RANGE.0,
+                2,
+                fps_range.as_ptr(),
             ))?;
             ck(ndk_sys::ACameraOutputTarget_create(
                 anw,
@@ -410,6 +426,14 @@ impl SourceLoop for Camera2Src {
             }
             "width" => self.width = positive_dimension(&value)?,
             "height" => self.height = positive_dimension(&value)?,
+            "framerate" => {
+                let fps = u32::try_from(value.as_uint().ok_or(PropError::Type)?)
+                    .map_err(|_| PropError::Value)?;
+                if fps == 0 || framerate_q16_from_fraction(fps, 1).is_none() {
+                    return Err(PropError::Value);
+                }
+                self.framerate = fps;
+            }
             "num-buffers" => crate::numbuffers::set_num_buffers(&mut self.target_buffers, &value)?,
             _ => return Err(PropError::Unknown),
         }
@@ -421,6 +445,7 @@ impl SourceLoop for Camera2Src {
             "device" => Some(PropValue::Str(self.camera_id.clone().unwrap_or_default())),
             "width" => Some(PropValue::Uint(u64::from(self.width))),
             "height" => Some(PropValue::Uint(u64::from(self.height))),
+            "framerate" => Some(PropValue::Uint(u64::from(self.framerate))),
             "num-buffers" => Some(crate::numbuffers::get_num_buffers(self.target_buffers)),
             _ => None,
         }
@@ -534,6 +559,12 @@ static CAMERA2SRC_PROPS: &[PropertySpec] = &[
         "capture height in pixels; must be a YUV_420_888 size the camera supports",
     )
     .with_default("480"),
+    PropertySpec::new(
+        "framerate",
+        PropKind::Uint,
+        "capture frame rate, requested as a fixed auto-exposure target range",
+    )
+    .with_default("30"),
     PropertySpec::new(
         "num-buffers",
         PropKind::Int,
