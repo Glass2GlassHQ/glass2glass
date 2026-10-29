@@ -554,8 +554,8 @@ async fn sink_republishes_into_a_restarted_server() {
     assert!(frame.timing.keyframe);
 }
 
-// read one HTTP request from `stream` and return its body
-async fn read_request_body(stream: &mut TcpStream) -> String {
+// read one HTTP request from `stream` and return its request line and body
+async fn read_request(stream: &mut TcpStream) -> (String, String) {
     let mut request = Vec::new();
     let mut buf = [0u8; 4096];
     let header_end = loop {
@@ -574,13 +574,15 @@ async fn read_request_body(stream: &mut TcpStream) -> String {
             name.eq_ignore_ascii_case("content-length")
                 .then(|| value.trim().parse().unwrap())
         })
-        .expect("the request has a Content-Length");
+        .unwrap_or(0);
     while request.len() < header_end + content_length {
         let n = stream.read(&mut buf).await.unwrap();
         assert_ne!(n, 0, "the client closed mid-body");
         request.extend_from_slice(&buf[..n]);
     }
-    String::from_utf8(request[header_end..].to_vec()).unwrap()
+    let request_line = headers.lines().next().unwrap_or_default().to_string();
+    let body = String::from_utf8(request[header_end..].to_vec()).unwrap();
+    (request_line, body)
 }
 
 /// Drive `rtc` until DTLS connects, then close the session with a DTLS
@@ -626,7 +628,7 @@ async fn close_once_connected(mut rtc: Rtc, socket: UdpSocket) {
 /// mediamtx ends its sessions on SIGTERM.
 async fn answer_then_close(listener: TcpListener) {
     let (mut stream, _) = listener.accept().await.unwrap();
-    let offer = read_request_body(&mut stream).await;
+    let (_, offer) = read_request(&mut stream).await;
     let candidate_ip: IpAddr = offer
         .lines()
         .find(|l| l.starts_with("a=candidate:"))
@@ -774,4 +776,47 @@ async fn whep_source_ends_when_the_server_closes_the_session() {
     closed.await.unwrap();
 
     assert!(matches!(recorder.0.last(), Some(PipelinePacket::Eos)));
+}
+
+/// With `reconnect` set, a WHEP server that closes the session gets a new offer
+/// from the source on the same address instead of the run ending.
+#[tokio::test]
+async fn whep_source_resubscribes_after_the_server_closes_the_session() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let server_addr = listener.local_addr().unwrap();
+    let mut source = WebRtcWhepSrc::new(format!("http://{server_addr}/whep"));
+    source
+        .set_property("reconnect", PropValue::Uint(RECONNECT_ATTEMPTS))
+        .unwrap();
+    source
+        .configure_pipeline(&fixed_caps(WebRtcVideoCodec::default()))
+        .unwrap();
+    let mut recorder = Recorder(Vec::new());
+    let second_offer = async {
+        answer_then_close(listener).await;
+        let listener = TcpListener::bind(server_addr).await.unwrap();
+        // the source DELETEs the closed session's resource before it POSTs again
+        loop {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let (request_line, body) = read_request(&mut stream).await;
+            if request_line.starts_with("POST") {
+                return body;
+            }
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .await
+                .unwrap();
+        }
+    };
+
+    let offer = tokio::time::timeout(RUN_TIMEOUT, async {
+        tokio::select! {
+            result = source.run(&mut recorder) => panic!("the run ended instead of reconnecting: {result:?}"),
+            offer = second_offer => offer,
+        }
+    })
+    .await
+    .expect("no second offer reached the server");
+
+    assert!(offer.contains("a=recvonly"), "{offer}");
 }

@@ -59,6 +59,7 @@ use g2g_core::{
 use crate::g711::{G711_CLOCK_RATE_HZ, G711_DEFAULT_CHANNELS};
 use crate::reconnect::{
     ReconnectPolicy, ReconnectState, RECONNECT_BACKOFF_MAX_PROP, RECONNECT_BACKOFF_PROP,
+    RECONNECT_PTS_GAP_NS, SOURCE_RECONNECT_PROP,
 };
 use crate::rtspclient::{transports_from_flags, transports_to_flags, LowerTransport};
 
@@ -100,10 +101,6 @@ const MAX_PLACEHOLDER_FPS: u32 = 240;
 
 // log category shared by RtspSrc and RtspSrcN
 const LOG_CATEGORY: &str = "rtspsrc";
-
-/// Gap inserted in the emitted timeline at a reconnect boundary, so downstream
-/// sees the discontinuity as a jump rather than as overlapping timestamps.
-const RECONNECT_PTS_GAP_NS: u64 = 1_000_000_000;
 
 const NICK_AAC: &str = "aac";
 const NICK_ALAW: &str = "alaw";
@@ -863,12 +860,7 @@ const RTSPSRCN_PROPS: &[PropertySpec] = &[
         "expected frame height; with width, skips the negotiation probe (0 = probe)",
     )
     .with_default("0"),
-    PropertySpec::new(
-        "reconnect",
-        PropKind::Uint,
-        "max reconnect attempts after each loss of a session that carried media (0 = no reconnect)",
-    )
-    .with_default("0"),
+    SOURCE_RECONNECT_PROP,
     RECONNECT_BACKOFF_PROP,
     RECONNECT_BACKOFF_MAX_PROP,
     PropertySpec::new(

@@ -27,24 +27,33 @@ use core::future::Future;
 use core::pin::Pin;
 
 use alloc::boxed::Box;
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use std::time::Instant;
+use std::net::SocketAddr;
+use std::time::{Duration, Instant};
 
 use tokio::net::UdpSocket;
 
 use str0m::crypto::from_feature_flags;
 use str0m::media::Direction;
-use str0m::{Event, IceConnectionState, Input, Output, RtcConfig};
+use str0m::{Event, IceConnectionState, Input, Output, Rtc, RtcConfig};
 
+use g2g_core::log::{short_type_name, LogName, LogSource};
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
-    Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata, G2gError, HardwareError,
-    LatencyReport, OutputSink, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
+    g2g_info, g2g_warn, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata, G2gError,
+    HardwareError, LatencyReport, NetworkFailure, OutputSink, PipelinePacket, PropError, PropKind,
+    PropValue, PropertySpec,
 };
 
 use crate::filesink::io_err;
+use crate::reconnect::{
+    ReconnectPolicy, ReconnectState, ReconnectTimeline, DEFAULT_INITIAL_BACKOFF_MS,
+    DEFAULT_MAX_BACKOFF_MS, RECONNECT_BACKOFF_MAX_PROP, RECONNECT_BACKOFF_PROP,
+    SOURCE_RECONNECT_PROP,
+};
 use crate::turn::{self, TurnSet};
 use crate::webrtc_codec::{
     enable_tracks, get_video_codec_property, opus_caps, set_video_codec_property, Track,
@@ -99,8 +108,10 @@ pub struct WebRtcWhepSrc {
     /// Stop after this many access units and emit EOS (`u64::MAX` = unbounded).
     /// The bounded path is for tests / smoke runs.
     frame_limit: u64,
+    reconnect: ReconnectPolicy,
     configured: bool,
     stats: WebRtcStatsHandle,
+    log_name: LogName,
 }
 
 impl core::fmt::Debug for WebRtcWhepSrc {
@@ -126,8 +137,14 @@ impl WebRtcWhepSrc {
             media: Media::Video,
             video_codec: WebRtcVideoCodec::default(),
             frame_limit: u64::MAX,
+            reconnect: ReconnectPolicy {
+                max_attempts: 0,
+                initial_backoff_ms: DEFAULT_INITIAL_BACKOFF_MS,
+                max_backoff_ms: DEFAULT_MAX_BACKOFF_MS,
+            },
             configured: false,
             stats: WebRtcStatsHandle::default(),
+            log_name: LogName::new(),
         }
     }
 
@@ -253,7 +270,18 @@ impl SourceLoop for WebRtcWhepSrc {
         WEBRTCSRC_PROPS
     }
 
+    fn set_instance_name(&mut self, name: String) {
+        self.log_name.set_instance(name);
+    }
+
+    fn set_log_category(&mut self, category: String) {
+        self.log_name.set_category(category);
+    }
+
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        if let Some(result) = self.reconnect.set_property(name, &value) {
+            return result;
+        }
         match name {
             "location" | "whep-url" => {
                 self.whep_url = value.as_str().ok_or(PropError::Type)?.into();
@@ -302,6 +330,9 @@ impl SourceLoop for WebRtcWhepSrc {
     }
 
     fn get_property(&self, name: &str) -> Option<PropValue> {
+        if let Some(value) = self.reconnect.get_property(name) {
+            return Some(value);
+        }
         match name {
             "location" | "whep-url" => Some(PropValue::Str(self.whep_url.clone())),
             "auth-token" => Some(PropValue::Str(self.bearer.clone().unwrap_or_default())),
@@ -331,162 +362,288 @@ impl SourceLoop for WebRtcWhepSrc {
                 return Ok(0);
             }
 
-            // ICE host candidate + UDP socket (see WebRtcSink for the rationale).
-            let host_ip = select_host_ip();
-            let socket = UdpSocket::bind((host_ip, 0)).await.map_err(io_err)?;
-            let local = socket.local_addr().map_err(io_err)?;
-
-            let track = self.track();
-            let config = RtcConfig::new()
-                .set_crypto_provider(alloc::sync::Arc::new(from_feature_flags()))
-                .set_stats_interval(Some(STATS_INTERVAL))
-                .clear_codecs();
-            let mut rtc = enable_tracks(config, [track]).build(Instant::now());
-            // Trickle ICE: the offer carries the host candidate only; reflexive /
-            // relay candidates are gathered after the POST and trickled by PATCH.
-            add_host_candidate(&mut rtc, &socket)?;
-
-            // WHEP: offer a single recv-only m-line for the chosen track, POST
-            // it, apply the answer.
-            let (offer_sdp, pending, mid) = {
-                let mut api = rtc.sdp_api();
-                let mid = api.add_media(track.media_kind(), Direction::RecvOnly, None, None, None);
-                let (offer, pending) = api
-                    .apply()
-                    .ok_or(G2gError::Hardware(HardwareError::Other))?;
-                (offer.to_sdp_string(), pending, mid)
+            let mut retry = ReconnectState::new(&self.reconnect);
+            let mut session = match self.open_session().await {
+                Ok(session) => session,
+                Err(error) if self.reconnect.max_attempts == 0 => return Err(error),
+                Err(error) => self.resubscribe(&mut retry, format!("{error:?}")).await?,
             };
-            let session = negotiate_over_http(
-                &mut rtc,
-                pending,
-                &self.whep_url,
-                self.bearer.as_deref(),
-                &offer_sdp,
-            )
-            .await?;
-
-            // Gather reflexive / relay candidates and trickle them to the
-            // resource; allocation failure degrades to host/srflx.
-            let mut turn: TurnSet = trickle_candidates(
-                &mut rtc,
-                &socket,
-                &offer_sdp,
-                &session,
-                self.bearer.as_deref(),
-                self.stun_server.as_deref(),
-                TurnConfig {
-                    server: self.turn_server.as_deref(),
-                    user: &self.turn_user,
-                    pass: &self.turn_pass,
-                },
-            )
-            .await;
-            let resource = session.resource;
-            let etag = session.etag;
-            let bearer = self.bearer.clone();
-            let mut disconnected_since: Option<Instant> = None;
-            let mut refresh_at = Instant::now() + turn::REFRESH_INTERVAL;
 
             // Announce the produced caps before the first frame.
             out.push(PipelinePacket::CapsChanged(self.caps())).await?;
 
             let mut buf = alloc::vec![0u8; UDP_RECV_BYTES];
             let mut seq = 0u64;
-            // Mid-GOP join: video is dropped until the first keyframe, with a
-            // PLI asked on a coarse interval so playback starts without waiting
-            // for the next natural IDR. See [[rtsp_first_keyframe]].
-            let mut media_receiver = match track {
-                Track::Video(codec) => MediaReceiver::with_mids(codec, Some(mid), None),
-                Track::Audio => MediaReceiver::with_mids(self.video_codec, None, Some(mid)),
-            };
-            // Emit EOS and DELETE the WHEP resource (RFC 9725 teardown) on a clean
-            // end.
-            macro_rules! finish {
-                () => {{
-                    if let Some(res) = resource.as_deref() {
-                        delete_resource(res, bearer.as_deref()).await;
+            let mut timeline = ReconnectTimeline::default();
+            loop {
+                let loss = match self.receive(&mut session, &mut buf).await {
+                    Ok(units) => {
+                        retry.recovered(&self.reconnect);
+                        for mut unit in units {
+                            unit.pts_ns = timeline.pts_ns(unit.pts_ns);
+                            out.push(PipelinePacket::DataFrame(unit.into_frame(seq)))
+                                .await?;
+                            seq += 1;
+                            if seq >= self.frame_limit {
+                                session.delete_resource(self.bearer.as_deref()).await;
+                                out.push(PipelinePacket::Eos).await?;
+                                return Ok(seq);
+                            }
+                        }
+                        continue;
                     }
+                    Err(loss) => loss,
+                };
+                session.delete_resource(self.bearer.as_deref()).await;
+                if self.reconnect.max_attempts == 0 {
+                    g2g_info!(self, "{loss}, ending run");
                     out.push(PipelinePacket::Eos).await?;
                     return Ok(seq);
-                }};
-            }
-            loop {
-                // Drain str0m's output to a deadline, collecting decoded access
-                // units to push after (poll_output is sync; pushes are async).
-                let mut frames: Vec<ReceivedUnit> = Vec::new();
-                let deadline = loop {
-                    match rtc.poll_output() {
-                        // after a DTLS close_notify str0m returns a timeout that never fires
-                        Ok(Output::Timeout(_)) if !rtc.is_alive() => finish!(),
-                        Ok(Output::Timeout(t)) => break t,
-                        Ok(Output::Transmit(t)) => send_transmit(&socket, &mut turn, &t).await,
-                        Ok(Output::Event(Event::MediaAdded(m))) => media_receiver.media_added(&m),
-                        Ok(Output::Event(Event::MediaData(d))) => {
-                            if let Some(unit) = media_receiver.media_data(&d) {
-                                frames.push(unit);
-                            }
-                        }
-                        Ok(Output::Event(Event::IceConnectionStateChange(state))) => match state {
-                            IceConnectionState::Disconnected => {
-                                disconnected_since.get_or_insert_with(Instant::now);
-                            }
-                            IceConnectionState::Connected | IceConnectionState::Completed => {
-                                disconnected_since = None;
-                            }
-                            _ => {}
-                        },
-                        Ok(Output::Event(event)) => self.stats.record(&event),
-                        Err(_) => finish!(),
-                    }
-                };
-
-                // Sustained ICE disconnect: attempt an ICE restart against the
-                // resource. A server that rejects it ends the source (fresh
-                // re-POST reconnect is owned by the element restarting).
-                if disconnected_since.is_some_and(|t| t.elapsed() >= ICE_RESTART_TIMEOUT) {
-                    disconnected_since = None;
-                    match resource.as_deref() {
-                        Some(res) => {
-                            if !matches!(
-                                ice_restart(&mut rtc, res, bearer.as_deref(), etag.as_deref())
-                                    .await,
-                                TricklePatch::Accepted
-                            ) {
-                                finish!();
-                            }
-                        }
-                        None => finish!(),
-                    }
                 }
-
-                media_receiver.request_keyframe_if_due(&mut rtc);
-
-                for unit in frames {
-                    let frame = unit.into_frame(seq);
-                    out.push(PipelinePacket::DataFrame(frame)).await?;
-                    seq += 1;
-                    if seq >= self.frame_limit {
-                        finish!();
-                    }
-                }
-
-                let timeout = deadline.saturating_duration_since(Instant::now());
-                tokio::select! {
-                    r = socket.recv_from(&mut buf) => {
-                        let Ok((n, source)) = r else { finish!() };
-                        let _ = feed_datagram(&mut rtc, &mut turn, local, &buf[..n], source);
-                    }
-                    // Keep the TURN allocation + permissions alive.
-                    _ = tokio::time::sleep_until(tokio::time::Instant::from_std(refresh_at)), if !turn.is_empty() => {
-                        turn.refresh_all(&socket).await;
-                        refresh_at = Instant::now() + turn::REFRESH_INTERVAL;
-                    }
-                    _ = tokio::time::sleep(timeout) => {
-                        let _ = rtc.handle_input(Input::Timeout(Instant::now()));
-                    }
-                }
+                // the flush resets the decoder, the next session starts at a keyframe
+                out.push(PipelinePacket::Flush).await?;
+                timeline.next_session();
+                session = self.resubscribe(&mut retry, loss).await?;
             }
         })
+    }
+}
+
+// one subscription to the WHEP endpoint, the first one and each reconnect build a new one
+struct WhepSession {
+    rtc: Rtc,
+    socket: UdpSocket,
+    local: SocketAddr,
+    turn: TurnSet,
+    resource: Option<String>,
+    etag: Option<String>,
+    media_receiver: MediaReceiver,
+    disconnected_since: Option<Instant>,
+    refresh_at: Instant,
+}
+
+impl WhepSession {
+    // RFC 9725 teardown
+    async fn delete_resource(&self, bearer: Option<&str>) {
+        if let Some(resource) = self.resource.as_deref() {
+            delete_resource(resource, bearer).await;
+        }
+    }
+}
+
+impl WebRtcWhepSrc {
+    async fn open_session(&self) -> Result<WhepSession, G2gError> {
+        // ICE host candidate + UDP socket (see WebRtcSink for the rationale).
+        let host_ip = select_host_ip();
+        let socket = UdpSocket::bind((host_ip, 0)).await.map_err(io_err)?;
+        let local = socket.local_addr().map_err(io_err)?;
+
+        let track = self.track();
+        let config = RtcConfig::new()
+            .set_crypto_provider(alloc::sync::Arc::new(from_feature_flags()))
+            .set_stats_interval(Some(STATS_INTERVAL))
+            .clear_codecs();
+        let mut rtc = enable_tracks(config, [track]).build(Instant::now());
+        // Trickle ICE: the offer carries the host candidate only; reflexive /
+        // relay candidates are gathered after the POST and trickled by PATCH.
+        add_host_candidate(&mut rtc, &socket)?;
+
+        // WHEP: offer a single recv-only m-line for the chosen track, POST
+        // it, apply the answer.
+        let (offer_sdp, pending, mid) = {
+            let mut api = rtc.sdp_api();
+            let mid = api.add_media(track.media_kind(), Direction::RecvOnly, None, None, None);
+            let (offer, pending) = api
+                .apply()
+                .ok_or(G2gError::Hardware(HardwareError::Other))?;
+            (offer.to_sdp_string(), pending, mid)
+        };
+        let session = negotiate_over_http(
+            &mut rtc,
+            pending,
+            &self.whep_url,
+            self.bearer.as_deref(),
+            &offer_sdp,
+        )
+        .await?;
+
+        // Gather reflexive / relay candidates and trickle them to the
+        // resource; allocation failure degrades to host/srflx.
+        let turn: TurnSet = trickle_candidates(
+            &mut rtc,
+            &socket,
+            &offer_sdp,
+            &session,
+            self.bearer.as_deref(),
+            self.stun_server.as_deref(),
+            TurnConfig {
+                server: self.turn_server.as_deref(),
+                user: &self.turn_user,
+                pass: &self.turn_pass,
+            },
+        )
+        .await;
+
+        // Mid-GOP join: video is dropped until the first keyframe, with a
+        // PLI asked on a coarse interval so playback starts without waiting
+        // for the next natural IDR. See [[rtsp_first_keyframe]].
+        let media_receiver = match track {
+            Track::Video(codec) => MediaReceiver::with_mids(codec, Some(mid), None),
+            Track::Audio => MediaReceiver::with_mids(self.video_codec, None, Some(mid)),
+        };
+        Ok(WhepSession {
+            rtc,
+            socket,
+            local,
+            turn,
+            resource: session.resource,
+            etag: session.etag,
+            media_receiver,
+            disconnected_since: None,
+            refresh_at: Instant::now() + turn::REFRESH_INTERVAL,
+        })
+    }
+
+    // drives `session` until it has access units, or returns why the session ended
+    async fn receive(
+        &self,
+        session: &mut WhepSession,
+        buf: &mut [u8],
+    ) -> Result<Vec<ReceivedUnit>, String> {
+        loop {
+            // Drain str0m's output to a deadline, collecting decoded access
+            // units to return after (poll_output is sync; pushes are async).
+            let mut frames: Vec<ReceivedUnit> = Vec::new();
+            let deadline = loop {
+                match session.rtc.poll_output() {
+                    // after a DTLS close_notify str0m returns a timeout that never fires
+                    Ok(Output::Timeout(_)) if !session.rtc.is_alive() => {
+                        return Err("the server closed the session".into());
+                    }
+                    Ok(Output::Timeout(t)) => break t,
+                    Ok(Output::Transmit(t)) => {
+                        send_transmit(&session.socket, &mut session.turn, &t).await;
+                    }
+                    Ok(Output::Event(Event::MediaAdded(m))) => {
+                        session.media_receiver.media_added(&m);
+                    }
+                    Ok(Output::Event(Event::MediaData(d))) => {
+                        if let Some(unit) = session.media_receiver.media_data(&d) {
+                            frames.push(unit);
+                        }
+                    }
+                    Ok(Output::Event(Event::IceConnectionStateChange(state))) => match state {
+                        IceConnectionState::Disconnected => {
+                            session.disconnected_since.get_or_insert_with(Instant::now);
+                        }
+                        IceConnectionState::Connected | IceConnectionState::Completed => {
+                            session.disconnected_since = None;
+                        }
+                        _ => {}
+                    },
+                    Ok(Output::Event(event)) => self.stats.record(&event),
+                    Err(error) => return Err(format!("str0m output failed: {error}")),
+                }
+            };
+
+            // Sustained ICE disconnect: attempt an ICE restart against the
+            // resource. A server that rejects it ends the session.
+            if session
+                .disconnected_since
+                .is_some_and(|t| t.elapsed() >= ICE_RESTART_TIMEOUT)
+            {
+                session.disconnected_since = None;
+                let Some(resource) = session.resource.as_deref() else {
+                    return Err(
+                        "ICE disconnected and the server gave no resource to restart".into(),
+                    );
+                };
+                let restart = ice_restart(
+                    &mut session.rtc,
+                    resource,
+                    self.bearer.as_deref(),
+                    session.etag.as_deref(),
+                )
+                .await;
+                if !matches!(restart, TricklePatch::Accepted) {
+                    return Err("ICE disconnected and the server rejected the ICE restart".into());
+                }
+            }
+
+            session
+                .media_receiver
+                .request_keyframe_if_due(&mut session.rtc);
+
+            if !frames.is_empty() {
+                return Ok(frames);
+            }
+
+            let timeout = deadline.saturating_duration_since(Instant::now());
+            tokio::select! {
+                r = session.socket.recv_from(buf) => {
+                    let (n, source) = r.map_err(|error| format!("UDP receive failed: {error}"))?;
+                    let _ = feed_datagram(&mut session.rtc, &mut session.turn, session.local, &buf[..n], source);
+                }
+                // Keep the TURN allocation + permissions alive.
+                _ = tokio::time::sleep_until(tokio::time::Instant::from_std(session.refresh_at)), if !session.turn.is_empty() => {
+                    session.turn.refresh_all(&session.socket).await;
+                    session.refresh_at = Instant::now() + turn::REFRESH_INTERVAL;
+                }
+                _ = tokio::time::sleep(timeout) => {
+                    let _ = session.rtc.handle_input(Input::Timeout(Instant::now()));
+                }
+            }
+        }
+    }
+
+    // a new session after `loss`, retried per the reconnect policy
+    async fn resubscribe(
+        &self,
+        retry: &mut ReconnectState,
+        mut loss: String,
+    ) -> Result<WhepSession, G2gError> {
+        loop {
+            let Some(delay_ms) = retry.next_delay_ms(&self.reconnect) else {
+                g2g_warn!(
+                    self,
+                    "subscribing to {} failed: {loss}, no reconnect attempt left",
+                    self.whep_url
+                );
+                return Err(G2gError::Network(NetworkFailure::Stream));
+            };
+            g2g_warn!(
+                self,
+                "subscribing to {} failed: {loss}, reconnect {}/{} in {delay_ms} ms",
+                self.whep_url,
+                retry.attempt,
+                self.reconnect.max_attempts
+            );
+            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            match self.open_session().await {
+                Ok(session) => {
+                    g2g_info!(
+                        self,
+                        "subscribed to {} again after {} attempts",
+                        self.whep_url,
+                        retry.attempt
+                    );
+                    return Ok(session);
+                }
+                Err(error) => loss = format!("{error:?}"),
+            }
+        }
+    }
+}
+
+impl LogSource for WebRtcWhepSrc {
+    fn log_category(&self) -> &'static str {
+        short_type_name::<Self>()
+    }
+    fn log_instance(&self) -> Option<&str> {
+        self.log_name.instance()
+    }
+    fn log_category_override(&self) -> Option<&str> {
+        self.log_name.category()
     }
 }
 
@@ -513,6 +670,9 @@ static WEBRTCSRC_PROPS: &[PropertySpec] = &[
         "track to subscribe to: video or audio (Opus)",
     ),
     VIDEO_CODEC_PROP,
+    SOURCE_RECONNECT_PROP,
+    RECONNECT_BACKOFF_PROP,
+    RECONNECT_BACKOFF_MAX_PROP,
     PropertySpec::new(
         "num-buffers",
         PropKind::Int,

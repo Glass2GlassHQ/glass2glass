@@ -255,6 +255,11 @@ down cleanly sends a DTLS close_notify, and the task replaces that session at
 once. str0m takes about 22 s to call a silent peer disconnected, so that is the
 floor on detecting a server that died without one.
 
+`whepsrc` with `reconnect` set POSTs a new offer after it loses its session the
+same way, and flushes downstream first. The new session's frames continue one
+second past the last timestamp of the old one (`ReconnectTimeline`), and its
+retry budget starts again once a session carries media, like `rtspsrc`.
+
 After a close_notify str0m runs no more timers, so every str0m poll loop checks
 `Rtc::is_alive` when it reaches a timeout and ends that session the way it ends
 one on an ICE disconnect: `whipserversrc` frees the publisher's slot and the
