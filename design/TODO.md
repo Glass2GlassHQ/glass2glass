@@ -327,6 +327,13 @@ Highest leverage first:
 - **ST 2110 media transport:** wire compliance of -20/-22/-30/-40 + multicast
   validated against reference gear (built from the RFCs, not yet
   interop-tested).
+- **Pace `surfacesink`.** It offers no clock, so with no other clock provider
+  in the graph nothing paces it: `videotestsrc` reaches the screen at the
+  display's 60 fps instead of 30. Offering a clock fixes the bars but blanks
+  `camera2src ! videoflip ! videoconvert ! surfacesink`, every frame consumed
+  and none drawn. `camera2src` stamps sensor time since boot, and restamping it
+  through `CaptureAnchor` with one frame of live latency did not help. Log the
+  sink's per-frame lateness on the Pixel before the next attempt.
 
 ## Properties / introspection / DSL
 
