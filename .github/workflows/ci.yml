@@ -845,6 +845,10 @@ jobs:
         run: >
           cargo check -p g2g-plugins --locked --all-targets
           --target aarch64-linux-android --features camera2
+      - name: check g2g-plugins (android-surface + mediacodec-wgpu)
+        run: >
+          cargo check -p g2g-plugins --locked --all-targets
+          --target aarch64-linux-android --features android-surface,mediacodec-wgpu
       # The Kotlin bindings' Android build pulls surfacesink and the JNI Surface attach.
       - name: check g2g-uniffi (android)
         run: cargo check -p g2g-uniffi --locked --all-targets --target aarch64-linux-android
@@ -853,7 +857,7 @@ jobs:
   # example programs (M326/M327). Guards that the bindings keep building and the
   # examples keep running, the language-neutral waist on top of g2g-capi.
   bindings:
-    name: bindings (pyapi wheel + C/C++/Python/C#/Kotlin examples)
+    name: bindings (pyapi wheel + C/C++/Python/C#/Kotlin/Swift examples)
     runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v4
@@ -897,6 +901,9 @@ jobs:
       # Generates the Kotlin bindings and runs the JVM example, which throws on any lost frame or edit.
       - name: build + run the Kotlin JVM example
         run: tools/kotlin-jvm-example.sh
+      # The Swift example exits non-zero on any frame or edit it does not get back.
+      - name: build + run the Swift example
+        run: tools/swift-example.sh
 
   # Runs the README quick start against this checkout in a container with only what the README installs.
   readme-quickstart:

@@ -373,7 +373,6 @@ impl AsyncElement for MediaCodecEnc {
                 width: Dim::Fixed(w),
                 height: Dim::Fixed(h),
                 framerate,
-                interlace: _,
                 ..
             } => (*w, *h, framerate.clone()),
             _ => return Err(G2gError::CapsMismatch),
@@ -586,7 +585,6 @@ fn derive_output_caps(codec: VideoCodec, input: &Caps) -> CapsSet {
             width,
             height,
             framerate,
-            interlace: _,
             ..
         } => CapsSet::one(Caps::CompressedVideo {
             codec,

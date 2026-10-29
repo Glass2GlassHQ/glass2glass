@@ -9,6 +9,7 @@ use alloc::vec::Vec;
 
 use g2g_core::element::QosMessage;
 use g2g_core::frame::Frame;
+use g2g_core::memory::{DomainSet, MemoryDomainKind};
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ClockSync, ConfigureOutcome, Dim, G2gError,
     HardwareError, Interlace, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
@@ -19,26 +20,65 @@ use ndk::hardware_buffer_format::HardwareBufferFormat;
 use ndk::native_window::NativeWindow;
 
 use crate::clock::wait_to_present;
+#[cfg(feature = "mediacodec-wgpu")]
+use crate::gpu::GpuContext;
+#[cfg(feature = "mediacodec-wgpu")]
+use crate::mediacodec_wgpu::{create_android_surface, WgpuRgbaTexture};
+#[cfg(feature = "mediacodec-wgpu")]
+use crate::wgpusink::WgpuSink;
+#[cfg(feature = "mediacodec-wgpu")]
+use g2g_core::memory::{MemoryDomain, OwnedWgpuTexture};
 
 const DEFAULT_CHANNEL: &str = "default";
+#[cfg(not(feature = "mediacodec-wgpu"))]
+const ACCEPTED_DOMAINS: DomainSet = DomainSet::only(MemoryDomainKind::System);
+#[cfg(feature = "mediacodec-wgpu")]
+const ACCEPTED_DOMAINS: DomainSet =
+    DomainSet::only(MemoryDomainKind::System).with(MemoryDomainKind::WgpuTexture);
 const RGBA_BYTES_PER_PIXEL: usize = 4;
 
 // Sinks draw while holding this lock, so detach_surface returns only after the last draw.
-static SURFACES: Mutex<BTreeMap<String, NativeWindow>> = Mutex::new(BTreeMap::new());
+static SURFACES: Mutex<BTreeMap<String, AttachedWindow>> = Mutex::new(BTreeMap::new());
+
+struct AttachedWindow {
+    // must drop before `window`, which the wgpu surface inside was created over
+    #[cfg(feature = "mediacodec-wgpu")]
+    mode: WindowMode,
+    window: NativeWindow,
+}
+
+// ANativeWindow_lock fails on a window that has a wgpu surface over it.
+#[cfg(feature = "mediacodec-wgpu")]
+enum WindowMode {
+    NoFrameYet,
+    CpuCopy,
+    Wgpu(Box<WgpuPresenter>),
+}
+
+#[cfg(feature = "mediacodec-wgpu")]
+struct WgpuPresenter {
+    instance: wgpu::Instance,
+    sink: WgpuSink,
+}
 
 pub fn attach_surface(channel: &str, window: NativeWindow) {
-    surfaces().insert(channel.to_string(), window);
+    let attached = AttachedWindow {
+        #[cfg(feature = "mediacodec-wgpu")]
+        mode: WindowMode::NoFrameYet,
+        window,
+    };
+    surfaces().insert(channel.to_string(), attached);
 }
 
 pub fn detach_surface(channel: &str) {
     surfaces().remove(channel);
 }
 
-fn surfaces() -> std::sync::MutexGuard<'static, BTreeMap<String, NativeWindow>> {
+fn surfaces() -> std::sync::MutexGuard<'static, BTreeMap<String, AttachedWindow>> {
     SURFACES.lock().expect("a sink panicked while drawing")
 }
 
-// Copies RGBA frames into the window attached under its channel, and drops them while none is.
+// Draws RGBA frames, from host memory or a wgpu texture, into the window attached under its channel, and drops them while none is.
 #[derive(Debug)]
 pub struct SurfaceSink {
     channel: String,
@@ -70,6 +110,10 @@ impl SurfaceSink {
     }
 
     fn present(&mut self, frame: &Frame) -> Result<(), G2gError> {
+        #[cfg(feature = "mediacodec-wgpu")]
+        if let MemoryDomain::WgpuTexture(owned) = &frame.domain {
+            return self.present_texture(&frame.domain, owned);
+        }
         let bytes = frame
             .domain
             .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
@@ -77,10 +121,18 @@ impl SurfaceSink {
         if bytes.len() != row_bytes * self.height {
             return Err(G2gError::CapsMismatch);
         }
-        let surfaces = surfaces();
-        let Some(window) = surfaces.get(&self.channel) else {
+        let mut surfaces = surfaces();
+        let Some(attached) = surfaces.get_mut(&self.channel) else {
             return Ok(());
         };
+        #[cfg(feature = "mediacodec-wgpu")]
+        {
+            if let WindowMode::Wgpu(_) = attached.mode {
+                return Err(G2gError::UnsupportedDomain);
+            }
+            attached.mode = WindowMode::CpuCopy;
+        }
+        let window = &attached.window;
         let hardware = |_| G2gError::Hardware(HardwareError::Other);
         let width = i32::try_from(self.width).map_err(|_| G2gError::CapsMismatch)?;
         let height = i32::try_from(self.height).map_err(|_| G2gError::CapsMismatch)?;
@@ -102,6 +154,71 @@ impl SurfaceSink {
         self.presented += 1;
         Ok(())
     }
+
+    #[cfg(feature = "mediacodec-wgpu")]
+    fn present_texture(
+        &mut self,
+        domain: &MemoryDomain,
+        owned: &OwnedWgpuTexture,
+    ) -> Result<(), G2gError> {
+        let mut surfaces = surfaces();
+        let Some(attached) = surfaces.get_mut(&self.channel) else {
+            return Ok(());
+        };
+        let presenter = wgpu_presenter_for(attached, owned)?;
+        let presented_before = presenter.sink.presented_count();
+        presenter.sink.present_frame(domain)?;
+        self.presented += presenter.sink.presented_count() - presented_before;
+        Ok(())
+    }
+}
+
+#[cfg(feature = "mediacodec-wgpu")]
+fn wgpu_presenter_for<'a>(
+    attached: &'a mut AttachedWindow,
+    owned: &OwnedWgpuTexture,
+) -> Result<&'a mut WgpuPresenter, G2gError> {
+    let context = owned
+        .keep_alive()
+        .as_any()
+        .downcast_ref::<WgpuRgbaTexture>()
+        .ok_or(G2gError::UnsupportedDomain)?
+        .context();
+    let needs_new_presenter = match &attached.mode {
+        WindowMode::CpuCopy => return Err(G2gError::UnsupportedDomain),
+        WindowMode::NoFrameYet => true,
+        // a texture binds only to the device that made it, which another decoder does not share
+        WindowMode::Wgpu(presenter) => presenter.instance != context.instance,
+    };
+    if needs_new_presenter {
+        // the old surface has to release the window before a new one is created over it
+        attached.mode = WindowMode::NoFrameYet;
+        attached.mode = WindowMode::Wgpu(Box::new(new_wgpu_presenter(context, &attached.window)?));
+    }
+    let WindowMode::Wgpu(presenter) = &mut attached.mode else {
+        unreachable!("the mode is Wgpu once the presenter exists")
+    };
+    Ok(presenter.as_mut())
+}
+
+// The surface takes the window's size and WgpuSink scales each frame to it.
+#[cfg(feature = "mediacodec-wgpu")]
+fn new_wgpu_presenter(
+    context: &GpuContext,
+    window: &NativeWindow,
+) -> Result<WgpuPresenter, G2gError> {
+    let side =
+        |pixels: i32| u32::try_from(pixels).map_err(|_| G2gError::Hardware(HardwareError::Other));
+    let (surface, config) = create_android_surface(
+        context,
+        window,
+        side(window.width())?,
+        side(window.height())?,
+    )?;
+    Ok(WgpuPresenter {
+        instance: context.instance.clone(),
+        sink: WgpuSink::with_surface(context.clone(), surface, config),
+    })
 }
 
 impl AsyncElement for SurfaceSink {
@@ -110,8 +227,8 @@ impl AsyncElement for SurfaceSink {
     where
         Self: 'a;
 
-    fn input_domains(&self) -> g2g_core::memory::DomainSet {
-        g2g_core::memory::DomainSet::only(g2g_core::memory::MemoryDomainKind::System)
+    fn input_domains(&self) -> DomainSet {
+        ACCEPTED_DOMAINS
     }
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {

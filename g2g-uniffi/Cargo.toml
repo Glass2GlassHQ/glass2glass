@@ -1,6 +1,6 @@
 [package]
 name = "g2g-uniffi"
-description = "Kotlin bindings to drive glass2glass pipelines, generated with UniFFI."
+description = "Kotlin and Swift bindings to drive glass2glass pipelines, generated with UniFFI."
 license.workspace = true
 version.workspace = true
 edition.workspace = true

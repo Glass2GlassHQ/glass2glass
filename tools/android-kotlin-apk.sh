@@ -23,11 +23,13 @@ EXAMPLE="$REPO/g2g-uniffi/examples/android"
 OUT="$TARGET/android-kotlin-apk/$ABI"
 
 fetch_kotlin_tools
-generate_bindings "$OUT/generated"
-(cd "$REPO" && cargo ndk --platform "$MIN_SDK" -t "$ABI" build --locked --release -p g2g-uniffi)
+generate_bindings "$OUT/generated" kotlin
+(cd "$REPO" && cargo ndk --platform "$MIN_SDK" -t "$ABI" build --locked --release -p g2g-uniffi \
+    --features g2g-plugins/camera2,g2g-plugins/mediacodec-wgpu)
 
-rm -rf "$OUT/jna" "$OUT/classes" "$OUT/dex" "$OUT/stage"
-mkdir -p "$OUT/dex" "$OUT/stage/lib/$ABI"
+rm -rf "$OUT/jna" "$OUT/classes" "$OUT/dex" "$OUT/stage" "$OUT/assets"
+mkdir -p "$OUT/dex" "$OUT/stage/lib/$ABI" "$OUT/assets"
+cp "$REPO/g2g-plugins/tests/fixtures/h264_640x480.h264" "$OUT/assets/"
 unzip -q "$JNA_AAR" classes.jar "jni/$ABI/libjnidispatch.so" -d "$OUT/jna"
 "$KOTLINC" -no-jdk -no-reflect -cp "$ANDROID_JAR:$OUT/jna/classes.jar" -d "$OUT/classes" \
     "$OUT/generated" "$REPO/g2g-uniffi/android/Surfaces.kt" "$EXAMPLE/MainActivity.kt"
@@ -38,7 +40,7 @@ find "$OUT/classes" -name '*.class' -print0 \
 cp "$TARGET/$TRIPLE/release/libg2g_uniffi.so" "$OUT/jna/jni/$ABI/libjnidispatch.so" "$OUT/stage/lib/$ABI/"
 cp "$OUT/dex/classes.dex" "$OUT/stage/"
 "$BUILD_TOOLS/aapt2" link -o "$OUT/unsigned.apk" --manifest "$EXAMPLE/AndroidManifest.xml" \
-    -I "$ANDROID_JAR" --min-sdk-version "$MIN_SDK" --target-sdk-version 35
+    -I "$ANDROID_JAR" -A "$OUT/assets" --min-sdk-version "$MIN_SDK" --target-sdk-version 35
 (cd "$OUT/stage" && zip -qr "$OUT/unsigned.apk" classes.dex lib)
 "$BUILD_TOOLS/zipalign" -f 4 "$OUT/unsigned.apk" "$OUT/aligned.apk"
 KEYSTORE="$HOME/.android/debug.keystore"

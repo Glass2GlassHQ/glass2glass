@@ -302,7 +302,7 @@ nothing checks the format for you: call `configure_pipeline` on the new element
 with the link's current caps before you swap it in.
 
 The thread-per-arm runner works the same way through `run_threaded_mutable`.
-The Python, C, C++, C# and Kotlin bindings have the same operations minus the validate calls,
+The Python, C, C++, C#, Kotlin and Swift bindings have the same operations minus the validate calls,
 and take launch-line text for the elements ([g2g-pyapi](https://github.com/Glass2GlassHQ/glass2glass/blob/master/g2g-pyapi/README.md),
 [g2g-capi](https://github.com/Glass2GlassHQ/glass2glass/blob/master/g2g-capi/README.md),
 [g2g-dotnet](https://github.com/Glass2GlassHQ/glass2glass/blob/master/g2g-dotnet/README.md),
@@ -532,7 +532,7 @@ output byte-for-byte, checked in CI for both catalogs by
 | `g2g-python` | Hosts gst-python-ml elements in-process (embedded CPython via pyo3). | `std` |
 | `g2g-capi` | C ABI (cdylib / staticlib + `g2g.h`): pipelines, bus, appsrc / appsink from any language. | `std` |
 | `g2g-pyapi` | Python (pyo3) bindings: pipelines, bus, appsrc / appsink. | `std` |
-| `g2g-uniffi` | Kotlin bindings (UniFFI): pipelines, bus, appsrc / appsink, and Android display through `surfacesink`. | `std` |
+| `g2g-uniffi` | Kotlin and Swift bindings (UniFFI): pipelines, bus, appsrc / appsink, and Android display through `surfacesink`. | `std` |
 
 ## Build
 
@@ -1379,7 +1379,7 @@ g2g-bridge/      # GStreamer C-FFI bridge (libgstglass2glass.so)
 g2g-python/      # gst-python-ml element host (embedded CPython)
 g2g-capi/        # C ABI (cdylib/staticlib + include/g2g.h, C++ wrapper include/g2g.hpp)
 g2g-pyapi/       # Python (pyo3) bindings
-g2g-uniffi/      # Kotlin bindings (UniFFI) + Android Surface attach
+g2g-uniffi/      # Kotlin and Swift bindings (UniFFI) + Android Surface attach
 g2g-dotnet/      # C# bindings over g2g-capi (not a cargo crate)
 xtask/           # dev-command crate (cargo xtask ci | test --here | size | wasm | bench | ffi-probe)
 g2g-bench/       # criterion benchmarks (excluded from the workspace)

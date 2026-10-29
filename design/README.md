@@ -105,7 +105,7 @@ standard elements, ML backends, and platform bindings.
 | `g2g-python` | Hosts gst-python-ml elements as first-class `g2g` elements (embedded CPython via pyo3). | `std` | MPL-2.0 |
 | `g2g-capi` | C ABI (cdylib/staticlib + `g2g.h`) to drive pipelines from any language: `parse_launch` + run + bus + appsrc/appsink. | `std` (`cdylib`) | MPL-2.0 |
 | `g2g-pyapi` | Python (pyo3) bindings to drive pipelines: `parse_launch` + run + bus + appsrc/appsink, the inverse of `g2g-python`. | `std` | MPL-2.0 |
-| `g2g-uniffi` | Kotlin bindings generated with UniFFI: pipelines, edits, bus, appsrc/appsink, and an Android `Surface` for `surfacesink`. | `std` (`cdylib`) | MPL-2.0 |
+| `g2g-uniffi` | Kotlin and Swift bindings generated with UniFFI: pipelines, edits, bus, appsrc/appsink, and an Android `Surface` for `surfacesink`. | `std` (`cdylib`) | MPL-2.0 |
 
 The `no_std + alloc` baseline is deliberate: it admits cooperative async
 executors, which need a heap for futures, and `Arc` reference counting, while

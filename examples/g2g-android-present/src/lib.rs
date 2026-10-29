@@ -204,7 +204,7 @@ impl Presenter {
         let dev = block_on(create_android_interop_device())?;
         let ctx = dev.gpu_context();
         let (sw, sh) = (window.width() as u32, window.height() as u32);
-        let (surface, config) = create_android_surface(&dev, &window, sw, sh)?;
+        let (surface, config) = create_android_surface(&ctx, &window, sw, sh)?;
         log::info!(
             "surface configured: {:?} {}x{}",
             config.format,

@@ -782,8 +782,8 @@ runs needs no lock.
 
 ## Language bindings
 
-The C ABI (`g2g-capi`), the Python bindings (`g2g-pyapi`) and the Kotlin bindings
-(`g2g-uniffi`) all drive a pipeline through `g2g_plugins::launched::LaunchedPipeline`.
+The C ABI (`g2g-capi`), the Python bindings (`g2g-pyapi`) and the Kotlin and Swift
+bindings (`g2g-uniffi`) all drive a pipeline through `g2g_plugins::launched::LaunchedPipeline`.
 It parses a launch line, runs it on its own thread under a current-thread tokio
 runtime, and turns each edit into a parse plus a `GraphMutator` call. The run thread
 catches its own panic and stores the outcome itself, so `is_done` and `bus_poll`
@@ -796,3 +796,12 @@ bindings, a JNI call next to the UniFFI exports). The sink copies each RGBA fram
 the window and drops frames while nothing is attached. Sinks draw while holding the
 lock on the attached windows, so `detach` returns only after the last draw, and an
 app can call it from `surfaceDestroyed` before Android releases the window.
+
+With `mediacodec-wgpu` the sink also takes the decoder's RGBA wgpu textures. On the
+first one it builds a `wgpu::Surface` over the window from the `GpuContext` the frame
+carries, sized to the window, and presents through `WgpuSink::with_surface`. That
+presenter is stored in the window's entry ahead of the window, so it drops first. It
+lives until `detach`, which keeps the last frame on screen after the run. A texture
+from another device replaces it. `ANativeWindow_lock` fails once a wgpu
+surface exists, so the first frame fixes the window to one kind, and a frame of the
+other kind fails the run with `UnsupportedDomain`.

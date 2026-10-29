@@ -71,6 +71,10 @@ Breaking: `QosMessage` gains `downstream_proc_ns`, `ElementProbe` is no longer `
 - M1968: `g2g.hpp` is a header-only C++17 wrapper over the C ABI.
 - M1969: `surfacesink` copies RGBA frames into an Android app's `Surface` attached by channel name.
 - M1970: `g2g-uniffi` Kotlin bindings drive pipelines, edits and appsrc / appsink, and attach a `Surface` on Android.
+- M1971: Kotlin `AppSrc.pushBuffer` pushes a direct `ByteBuffer` with one copy, and `push` copies once less.
+- M1972: `camera2src` requests and advertises a fixed `framerate`, so a launch line can link it to `videoflip` and `videoconvert`.
+- M1973: `g2g-uniffi` generates Swift bindings, run by an example in CI.
+- M1974: `surfacesink` presents `mediacodecdec gpu-output=true` textures to the Android `Surface` with no copy.
 
 ## 0.10.0
 

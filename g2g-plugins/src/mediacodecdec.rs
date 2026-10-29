@@ -264,18 +264,15 @@ impl MediaCodecDec {
             // SAFETY: same device; `info` is this buffer's format.
             self.converter = Some(unsafe { YcbcrToRgba::new(dev, &info, width, height)? });
         }
-        // Clone the device/queue handles before the &mut converter borrow.
-        let (wdev, wqueue) = {
-            let dev = self.interop.as_ref().unwrap();
-            (dev.device.clone(), dev.queue.clone())
-        };
+        // Clone the context handles before the &mut converter borrow.
+        let context = self.interop.as_ref().unwrap().gpu_context();
         // SAFETY: `ahb` is live (held here); the converter was built on this
         // device for this format / geometry. The conversion is pipelined (submit
         // without wait); importing `ahb` gave Vulkan its own reference, so the
         // buffer may be released as soon as `convert` returns.
         let texture = unsafe { self.converter.as_mut().unwrap().convert(ahb_ptr)? };
         drop(ahb);
-        let owner = WgpuRgbaTexture::new(wdev, wqueue, texture);
+        let owner = WgpuRgbaTexture::new(context, texture);
         Ok(MemoryDomain::WgpuTexture(g2g_core::OwnedWgpuTexture::new(
             width,
             height,

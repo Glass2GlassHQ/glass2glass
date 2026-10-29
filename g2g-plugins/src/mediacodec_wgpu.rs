@@ -154,9 +154,10 @@ impl InteropDevice {
 /// the decoder's RGBA `WgpuTexture` frames via
 /// [`WgpuSink::with_surface`](crate::wgpusink::WgpuSink::with_surface).
 ///
-/// The surface is created on `dev`'s instance and configured for `dev`'s device,
-/// the same device the decoder converts frames on (see
-/// [`InteropDevice::gpu_context`]), so the present is copy-free. The format /
+/// The surface is created on `context`'s instance and configured for its device,
+/// which must be the device the decoder converts frames on (see
+/// [`InteropDevice::gpu_context`] and [`WgpuRgbaTexture::context`]), so the
+/// present is copy-free. The format /
 /// present mode come from the surface's own capabilities
 /// (`get_default_config`); the blit in `WgpuSink` reconciles the source RGBA
 /// with whatever surface format the device prefers.
@@ -168,7 +169,7 @@ impl InteropDevice {
 /// window-ownership contract as [`WgpuSink::with_surface`]); keep the
 /// `NativeWindow` (and its backing `SurfaceView` / `ImageReader`) resident.
 pub fn create_android_surface(
-    dev: &InteropDevice,
+    context: &crate::gpu::GpuContext,
     window: &ndk::native_window::NativeWindow,
     width: u32,
     height: u32,
@@ -182,7 +183,8 @@ pub fn create_android_surface(
     // used (the surface borrows nothing, hence `'static`). The display handle is
     // the empty Android display, matching the Vulkan backend's expectation.
     let surface = unsafe {
-        dev.instance
+        context
+            .instance
             .create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
                 raw_display_handle: Some(raw_display),
                 raw_window_handle: raw_window,
@@ -190,9 +192,9 @@ pub fn create_android_surface(
     }
     .map_err(gpu_err)?;
     let config = surface
-        .get_default_config(&dev.adapter, width, height)
+        .get_default_config(&context.adapter, width, height)
         .ok_or(G2gError::Hardware(HardwareError::Other))?;
-    surface.configure(&dev.device, &config);
+    surface.configure(&context.device, &config);
     Ok((surface, config))
 }
 
@@ -740,7 +742,7 @@ pub unsafe fn ahb_to_rgba_readback(
     }
 }
 
-/// A converted RGBA frame living in a `wgpu::Texture`, with the device / queue it
+/// A converted RGBA frame living in a `wgpu::Texture`, with the GPU context it
 /// lives on. Boxed as the [`WgpuKeepAlive`](g2g_core::WgpuKeepAlive) of a
 /// [`MemoryDomain::WgpuTexture`](g2g_core::MemoryDomain::WgpuTexture): a consumer
 /// that links wgpu (e.g. a future RGBA import path in `WgpuPreprocess`) downcasts
@@ -749,8 +751,7 @@ pub unsafe fn ahb_to_rgba_readback(
 /// analog of g2g-ml's `WgpuNv12Texture`: the ycbcr conversion already happened in
 /// [`YcbcrToRgba`], so the consumer samples RGBA directly with no YUV math.
 pub struct WgpuRgbaTexture {
-    device: wgpu::Device,
-    queue: wgpu::Queue,
+    context: crate::gpu::GpuContext,
     texture: wgpu::Texture,
 }
 
@@ -763,13 +764,9 @@ impl core::fmt::Debug for WgpuRgbaTexture {
 }
 
 impl WgpuRgbaTexture {
-    /// Wrap an RGBA texture with the device / queue it lives on.
-    pub fn new(device: wgpu::Device, queue: wgpu::Queue, texture: wgpu::Texture) -> Self {
-        Self {
-            device,
-            queue,
-            texture,
-        }
+    /// Wrap an RGBA texture with the context of the device it lives on.
+    pub fn new(context: crate::gpu::GpuContext, texture: wgpu::Texture) -> Self {
+        Self { context, texture }
     }
 
     /// The backing RGBA (`Rgba8Unorm`) texture, for the importer to sample.
@@ -780,12 +777,16 @@ impl WgpuRgbaTexture {
     /// The device the texture lives on; the importer adopts it to bind the
     /// texture rather than uploading to its own device.
     pub fn device(&self) -> &wgpu::Device {
-        &self.device
+        &self.context.device
     }
 
     /// The queue paired with [`device`](Self::device).
     pub fn queue(&self) -> &wgpu::Queue {
-        &self.queue
+        &self.context.queue
+    }
+
+    pub fn context(&self) -> &crate::gpu::GpuContext {
+        &self.context
     }
 }
 

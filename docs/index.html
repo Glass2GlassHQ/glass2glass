@@ -737,11 +737,11 @@
         <p class="section-desc">
             One cargo workspace. Anything that needs an operating system, a GPU, or a
             device sits behind a cargo feature, so the baseline builds for bare metal.
-            A C ABI, with C++, Python, C# and Kotlin bindings on top, drives the same graphs from other languages.
+            A C ABI, with C++, Python, C#, Kotlin and Swift bindings on top, drives the same graphs from other languages.
         </p>
 
         <figure class="diagram">
-            <svg viewBox="0 0 400 400" role="img" aria-label="Crate map: bindings and ML crates depend on g2g-plugins, which with g2g-plugin and g2g-mcu depends on g2g-core; g2g-mcugen is a standalone host tool." style="max-width: 540px;">
+            <svg viewBox="0 0 472 400" role="img" aria-label="Crate map: bindings and ML crates depend on g2g-plugins, which with g2g-plugin and g2g-mcu depends on g2g-core; g2g-mcugen is a standalone host tool." style="max-width: 640px;">
                 <defs>
                     <marker id="d2-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
                         <path d="M0,0 L10,5 L0,10 z" fill="#38445A"/>
@@ -749,44 +749,47 @@
                 </defs>
 
                 <text x="8" y="24" font-size="14" class="d-sub">bindings, interop, ML</text>
-                <rect x="8" y="40" width="120" height="42" rx="8" class="d-box"/>
-                <rect x="140" y="40" width="120" height="42" rx="8" class="d-box"/>
-                <rect x="272" y="40" width="120" height="42" rx="8" class="d-box"/>
-                <text x="68" y="66" font-size="15" text-anchor="middle" class="d-name">g2g-capi</text>
-                <text x="200" y="66" font-size="15" text-anchor="middle" class="d-name">g2g-pyapi</text>
-                <text x="332" y="66" font-size="15" text-anchor="middle" class="d-name">g2g-bridge</text>
-                <rect x="74" y="90" width="120" height="42" rx="8" class="d-box"/>
-                <rect x="206" y="90" width="120" height="42" rx="8" class="d-box"/>
-                <text x="134" y="116" font-size="15" text-anchor="middle" class="d-name">g2g-python</text>
-                <text x="266" y="116" font-size="15" text-anchor="middle" class="d-name">g2g-ml</text>
+                <rect x="8" y="40" width="108" height="42" rx="8" class="d-box"/>
+                <rect x="124" y="40" width="108" height="42" rx="8" class="d-box"/>
+                <rect x="240" y="40" width="108" height="42" rx="8" class="d-box"/>
+                <rect x="356" y="40" width="108" height="42" rx="8" class="d-box"/>
+                <text x="62" y="66" font-size="15" text-anchor="middle" class="d-name">g2g-capi</text>
+                <text x="178" y="66" font-size="15" text-anchor="middle" class="d-name">g2g-pyapi</text>
+                <text x="294" y="66" font-size="15" text-anchor="middle" class="d-name">g2g-uniffi</text>
+                <text x="410" y="66" font-size="15" text-anchor="middle" class="d-name">g2g-bridge</text>
+                <rect x="68" y="90" width="104" height="42" rx="8" class="d-box"/>
+                <rect x="184" y="90" width="104" height="42" rx="8" class="d-box"/>
+                <text x="120" y="116" font-size="15" text-anchor="middle" class="d-name">g2g-python</text>
+                <text x="236" y="116" font-size="15" text-anchor="middle" class="d-name">g2g-ml</text>
 
-                <line x1="68" y1="82" x2="68" y2="146" class="d-line"/>
-                <line x1="200" y1="82" x2="200" y2="146" class="d-line"/>
-                <line x1="332" y1="82" x2="332" y2="146" class="d-line"/>
-                <line x1="134" y1="132" x2="134" y2="146" class="d-line d-dash"/>
-                <line x1="266" y1="132" x2="266" y2="146" class="d-line d-dash"/>
-                <line x1="68" y1="146" x2="332" y2="146" class="d-line"/>
-                <line x1="200" y1="146" x2="200" y2="170" class="d-line" marker-end="url(#d2-arrow)"/>
+                <line x1="62" y1="82" x2="62" y2="146" class="d-line"/>
+                <line x1="178" y1="82" x2="178" y2="146" class="d-line"/>
+                <line x1="294" y1="82" x2="294" y2="146" class="d-line"/>
+                <line x1="410" y1="82" x2="410" y2="146" class="d-line"/>
+                <line x1="120" y1="132" x2="120" y2="146" class="d-line d-dash"/>
+                <line x1="236" y1="132" x2="236" y2="146" class="d-line d-dash"/>
+                <line x1="62" y1="146" x2="410" y2="146" class="d-line"/>
+                <line x1="236" y1="146" x2="236" y2="170" class="d-line" marker-end="url(#d2-arrow)"/>
 
                 <text x="8" y="166" font-size="14" class="d-sub">elements and peripherals</text>
-                <rect x="8" y="172" width="120" height="42" rx="8" class="d-box"/>
-                <rect x="140" y="172" width="120" height="42" rx="8" class="d-box"/>
-                <rect x="272" y="172" width="120" height="42" rx="8" class="d-box"/>
-                <text x="68" y="198" font-size="15" text-anchor="middle" class="d-name">g2g-plugin</text>
-                <text x="200" y="198" font-size="15" text-anchor="middle" class="d-name">g2g-plugins</text>
-                <text x="332" y="198" font-size="15" text-anchor="middle" class="d-name">g2g-mcu</text>
+                <rect x="8" y="172" width="144" height="42" rx="8" class="d-box"/>
+                <rect x="164" y="172" width="144" height="42" rx="8" class="d-box"/>
+                <rect x="320" y="172" width="144" height="42" rx="8" class="d-box"/>
+                <text x="80" y="198" font-size="15" text-anchor="middle" class="d-name">g2g-plugin</text>
+                <text x="236" y="198" font-size="15" text-anchor="middle" class="d-name">g2g-plugins</text>
+                <text x="392" y="198" font-size="15" text-anchor="middle" class="d-name">g2g-mcu</text>
 
-                <line x1="68" y1="214" x2="68" y2="248" class="d-line"/>
-                <line x1="200" y1="214" x2="200" y2="248" class="d-line"/>
-                <line x1="332" y1="214" x2="332" y2="248" class="d-line"/>
-                <line x1="68" y1="248" x2="332" y2="248" class="d-line"/>
-                <line x1="200" y1="248" x2="200" y2="270" class="d-line" marker-end="url(#d2-arrow)"/>
+                <line x1="80" y1="214" x2="80" y2="248" class="d-line"/>
+                <line x1="236" y1="214" x2="236" y2="248" class="d-line"/>
+                <line x1="392" y1="214" x2="392" y2="248" class="d-line"/>
+                <line x1="80" y1="248" x2="392" y2="248" class="d-line"/>
+                <line x1="236" y1="248" x2="236" y2="270" class="d-line" marker-end="url(#d2-arrow)"/>
 
-                <rect x="8" y="272" width="384" height="58" rx="10" class="d-core"/>
-                <text x="200" y="298" font-size="16" text-anchor="middle" class="d-acc">g2g-core</text>
-                <text x="200" y="318" font-size="14" text-anchor="middle" class="d-sub">no_std + alloc-optional</text>
+                <rect x="8" y="272" width="456" height="58" rx="10" class="d-core"/>
+                <text x="236" y="298" font-size="16" text-anchor="middle" class="d-acc">g2g-core</text>
+                <text x="236" y="318" font-size="14" text-anchor="middle" class="d-sub">no_std + alloc-optional</text>
 
-                <rect x="8" y="348" width="384" height="42" rx="8" class="d-box d-dash"/>
+                <rect x="8" y="348" width="456" height="42" rx="8" class="d-box d-dash"/>
                 <text x="20" y="374" font-size="15" class="d-name">g2g-mcugen</text>
                 <text x="118" y="374" font-size="14" class="d-sub">host tool, no g2g dependencies</text>
             </svg>
@@ -866,8 +869,8 @@
             </div>
             <div class="crate-card">
                 <div class="crate-name">g2g-uniffi</div>
-                <div class="crate-tag">Kotlin bindings</div>
-                <p>The same API from Kotlin on Android or the JVM, plus showing video in an app's <code>Surface</code>.</p>
+                <div class="crate-tag">Kotlin and Swift bindings</div>
+                <p>The same API from Kotlin on Android or the JVM and from Swift, plus showing video in an app's <code>Surface</code>.</p>
             </div>
         </div>
     </div>
@@ -1036,8 +1039,8 @@ g2g-launch <span class="flag">--script</span> build.rhai</div>
             </div>
             <div class="feature-card">
                 <span class="f-icon">&#129513;</span>
-                <h3>C, C++, Python, C# and Kotlin</h3>
-                <p class="f-lead">Drive a pipeline from C, C++, Python, C# or Kotlin. Push frames in with <code>appsrc</code> and pull them out with <code>appsink</code>, without copying.</p>
+                <h3>C, C++, Python, C#, Kotlin and Swift</h3>
+                <p class="f-lead">Drive a pipeline from C, C++, Python, C#, Kotlin or Swift. Push frames in with <code>appsrc</code> and pull them out with <code>appsink</code>, without copying.</p>
                 <div class="chip-group">
                     <span class="chip-label">Crates</span>
                     <div class="chip-row"><span class="chip">g2g-capi</span><span class="chip">g2g-pyapi</span><span class="chip">g2g-uniffi</span></div>

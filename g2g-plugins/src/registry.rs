@@ -2184,6 +2184,17 @@ fn register_autoplug_candidates(reg: &mut Registry) {
         })
         .hardware(),
     );
+    // a bare name in a text pipeline resolves only through a launch factory
+    #[cfg(all(target_os = "android", feature = "mediacodec"))]
+    reg.register_launch(
+        LaunchFactory::of::<MediaCodecDec>("mediacodecdec", || Box::new(MediaCodecDec::h264()))
+            .with_experimental(),
+    );
+    #[cfg(all(target_os = "android", feature = "mediacodec"))]
+    reg.register_launch(
+        LaunchFactory::of::<MediaCodecDec>("mediacodecdech265", || Box::new(MediaCodecDec::h265()))
+            .with_experimental(),
+    );
     // Android hardware video encode via the NDK MediaCodec (M306); launch-only
     // (encoders are not auto-plug candidates), one factory per codec. The gst
     // analog is `amcvidenc-<component>`.

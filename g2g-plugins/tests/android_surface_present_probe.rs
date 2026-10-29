@@ -176,7 +176,7 @@ async fn present_decoded_frames_to_android_surface() {
         .expect("create interop device");
     let ctx = dev.gpu_context();
     let (surface, config) =
-        create_android_surface(&dev, &window, w, h).expect("create android surface");
+        create_android_surface(&ctx, &window, w, h).expect("create android surface");
     eprintln!(
         "=== M305 surface configured: {:?} {}x{} ===",
         config.format, config.width, config.height
