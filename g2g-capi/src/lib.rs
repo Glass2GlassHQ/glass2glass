@@ -12,12 +12,12 @@
 //!
 //! Lifecycle (first slice):
 //! 1. [`g2g_pipeline_launch`] parses the description against
-//!    [`default_registry`] and starts it on a background thread (the parsed
+//!    [`default_registry`](g2g_plugins::registry::default_registry) and starts it on a background thread (the parsed
 //!    graph is `'static` and, under the `multi-thread` feature, `Send`).
 //! 2. [`g2g_pipeline_bus_poll`] drains one [`g2g_core::BusMessage`] at a time, projected
 //!    into a flat [`G2gBusMessage`] (the `gst_bus_pop` analog).
 //! 3. [`g2g_pipeline_wait`] blocks for the natural end of stream and yields the
-//!    final [`RunStats`]; [`g2g_pipeline_free`] joins and releases.
+//!    final [`RunStats`](g2g_core::runtime::RunStats); [`g2g_pipeline_free`] joins and releases.
 //!
 //! There is no early-cancel channel yet (the known runner gap), so `free` on a
 //! still-running pipeline waits for its natural EOS. `appsrc` / `appsink`-style
@@ -26,42 +26,21 @@
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::os::raw::c_int;
 use std::ptr;
-use std::sync::mpsc;
-use std::thread::JoinHandle;
 
 use g2g_core::memory::SystemSlice;
-use g2g_core::runtime::{
-    block_on, parse_chain, parse_element, parse_launch, parse_source, set_property_text,
-    GraphMutator, MutationError, RunBuilder, RunStats,
-};
-use g2g_core::{Bus, G2gError};
+use g2g_core::runtime::block_on;
 use g2g_plugins::appsink::{
-    register_appsink_pull, set_appsink_callback, AppSinkPull, BusKind, FlatBusMessage, HostFrame,
-    Pull, SampleCallback,
+    register_appsink_pull, set_appsink_callback, AppSinkPull, BusKind, HostFrame, Pull,
+    SampleCallback,
 };
 use g2g_plugins::appsrc::{register_appsrc, AppSrcFeed};
-use g2g_plugins::clock::WallClock;
-use g2g_plugins::registry::{default_registry, mutator_with_defaults};
-
-/// Steady-state link depth, matching `g2g-launch` (keeps latency low without
-/// starving the source; see design/README.md on `link_capacity`).
-const LINK_CAPACITY: usize = 4;
-/// Bus backlog. Control messages are dropped (not blocked) when full, so a slow
-/// poller never stalls the data path; this only bounds how many unread messages
-/// are retained.
-const BUS_CAPACITY: usize = 64;
+use g2g_plugins::launched::{EditError, LaunchedPipeline};
 
 /// Opaque pipeline handle returned to the C caller. Never inspect its fields
 /// across the ABI; pass the pointer back to the `g2g_pipeline_*` functions.
 #[derive(Debug)]
 pub struct Pipeline {
-    /// Consumer end of the pipeline bus; the producer went to the run thread.
-    bus: Bus,
-    mutator: GraphMutator<'static>,
-    /// The background run thread, taken once [`g2g_pipeline_wait`] joins it.
-    join: Option<JoinHandle<Result<RunStats, G2gError>>>,
-    /// Captured run result after the thread is joined.
-    result: Option<Result<RunStats, G2gError>>,
+    launched: LaunchedPipeline,
     /// Backing store for the most recent bus message's text, so the `text`
     /// pointer handed out by [`g2g_pipeline_bus_poll`] stays valid until the
     /// next poll or [`g2g_pipeline_free`].
@@ -140,57 +119,16 @@ pub unsafe extern "C" fn g2g_pipeline_launch(
         }
     };
 
-    let reg = default_registry();
-    let graph = match parse_launch(&reg, desc) {
-        Ok(g) => g,
+    match LaunchedPipeline::launch(desc, "g2g-capi-run") {
+        Ok(launched) => Box::into_raw(Box::new(Pipeline {
+            launched,
+            last_text: None,
+        })),
         Err(e) => {
-            set_err(err_out, &format!("parse error: {e}"));
-            return ptr::null_mut();
+            set_err(err_out, &e.to_string());
+            ptr::null_mut()
         }
-    };
-    drop(reg);
-
-    let (bus, bus_handle) = Bus::new(BUS_CAPACITY);
-    let (mutator_sender, mutator_receiver) = mpsc::sync_channel(1);
-    let spawned = std::thread::Builder::new()
-        .name("g2g-capi-run".into())
-        .spawn(move || {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_time()
-                .build()
-                .expect("build tokio runtime");
-            let clock = WallClock::new();
-            let (mutator, run) = RunBuilder::new(graph, &clock, LINK_CAPACITY)
-                .with_bus(&bus_handle)
-                .run_mutable();
-            if mutator_sender.send(mutator).is_err() {
-                return Err(G2gError::Shutdown);
-            }
-            rt.block_on(run)
-        });
-    // Returning null (not panicking across the FFI boundary) is the documented
-    // failure contract.
-    let join = match spawned {
-        Ok(j) => j,
-        Err(e) => {
-            set_err(err_out, &format!("failed to spawn run thread: {e}"));
-            return ptr::null_mut();
-        }
-    };
-    let Ok(mutator) = mutator_receiver.recv() else {
-        let _ = join.join();
-        set_err(err_out, "pipeline run thread did not start");
-        return ptr::null_mut();
-    };
-
-    let p = Box::new(Pipeline {
-        bus,
-        mutator: mutator_with_defaults(mutator),
-        join: Some(join),
-        result: None,
-        last_text: None,
-    });
-    Box::into_raw(p)
+    }
 }
 
 /// Drain one bus message into `*out`. Returns 1 if a message was written, 0 if
@@ -208,11 +146,10 @@ pub unsafe extern "C" fn g2g_pipeline_bus_poll(p: *mut Pipeline, out: *mut G2gBu
     if out.is_null() {
         return 0;
     }
-    let Some(msg) = p.bus.try_recv() else {
+    let Some(flat) = p.launched.bus_poll() else {
         return 0;
     };
 
-    let flat = FlatBusMessage::new(&msg);
     p.last_text = flat.text.and_then(|t| CString::new(t).ok());
     let cmsg = G2gBusMessage {
         kind: G2gBusKind::from(flat.kind) as c_int,
@@ -235,10 +172,7 @@ pub unsafe extern "C" fn g2g_pipeline_is_done(p: *const Pipeline) -> c_int {
     let Some(p) = (unsafe { p.as_ref() }) else {
         return 0;
     };
-    match &p.join {
-        Some(j) => c_int::from(j.is_finished()),
-        None => 1,
-    }
+    c_int::from(p.launched.is_done())
 }
 
 /// Block until the run finishes, then write final stats to `*out` (if non-null).
@@ -254,12 +188,8 @@ pub unsafe extern "C" fn g2g_pipeline_wait(p: *mut Pipeline, out: *mut G2gStats)
     let Some(p) = (unsafe { p.as_mut() }) else {
         return -1;
     };
-    if let Some(j) = p.join.take() {
-        // A panic in the run thread surfaces as a generic shutdown error.
-        p.result = Some(j.join().unwrap_or(Err(G2gError::Shutdown)));
-    }
-    match &p.result {
-        Some(Ok(stats)) => {
+    match p.launched.wait() {
+        Ok(stats) => {
             if !out.is_null() {
                 let c = G2gStats {
                     frames_emitted: stats.frames_emitted,
@@ -271,7 +201,7 @@ pub unsafe extern "C" fn g2g_pipeline_wait(p: *mut Pipeline, out: *mut G2gStats)
             }
             0
         }
-        _ => -1,
+        Err(_) => -1,
     }
 }
 
@@ -286,10 +216,8 @@ pub unsafe extern "C" fn g2g_pipeline_free(p: *mut Pipeline) {
         return;
     }
     // SAFETY: caller contract: `p` came from `Box::into_raw` and is freed once.
-    let mut bx = unsafe { Box::from_raw(p) };
-    if let Some(j) = bx.join.take() {
-        let _ = j.join();
-    }
+    let bx = unsafe { Box::from_raw(p) };
+    let _ = bx.launched.wait();
 }
 
 /// Free a string returned by this library (e.g. the `err_out` of
@@ -327,11 +255,7 @@ pub unsafe extern "C" fn g2g_pipeline_insert_after(
     else {
         return ptr::null_mut();
     };
-    let element = match parse_element(&default_registry(), description) {
-        Ok(element) => element,
-        Err(e) => return null_with_error(err_out, &format!("parse error: {e}")),
-    };
-    name_or_refusal(block_on(p.mutator.insert_after(after, element)), err_out)
+    name_or_refusal(p.launched.insert_after(after, description), err_out)
 }
 
 /// Splice the element `description` names onto the edge above `before`.
@@ -353,11 +277,7 @@ pub unsafe extern "C" fn g2g_pipeline_insert_before(
     else {
         return ptr::null_mut();
     };
-    let element = match parse_element(&default_registry(), description) {
-        Ok(element) => element,
-        Err(e) => return null_with_error(err_out, &format!("parse error: {e}")),
-    };
-    name_or_refusal(block_on(p.mutator.insert_before(before, element)), err_out)
+    name_or_refusal(p.launched.insert_before(before, description), err_out)
 }
 
 /// Splice the chain `description` names onto the edge below `after`, as one
@@ -380,14 +300,7 @@ pub unsafe extern "C" fn g2g_pipeline_insert_chain_after(
     else {
         return ptr::null_mut();
     };
-    let chain = match parse_chain(&default_registry(), description) {
-        Ok(chain) => chain,
-        Err(e) => return null_list_with_error(err_out, &format!("parse error: {e}")),
-    };
-    names_or_refusal(
-        block_on(p.mutator.insert_chain_after(after, chain)),
-        err_out,
-    )
+    names_or_refusal(p.launched.insert_chain_after(after, description), err_out)
 }
 
 /// Splice the chain `description` names onto the edge above `before`, as one
@@ -410,14 +323,7 @@ pub unsafe extern "C" fn g2g_pipeline_insert_chain_before(
     else {
         return ptr::null_mut();
     };
-    let chain = match parse_chain(&default_registry(), description) {
-        Ok(chain) => chain,
-        Err(e) => return null_list_with_error(err_out, &format!("parse error: {e}")),
-    };
-    names_or_refusal(
-        block_on(p.mutator.insert_chain_before(before, chain)),
-        err_out,
-    )
+    names_or_refusal(p.launched.insert_chain_before(before, description), err_out)
 }
 
 /// Attach the branch `description` names under the tee `tee`, its last element
@@ -439,11 +345,7 @@ pub unsafe extern "C" fn g2g_pipeline_add_branch(
     else {
         return ptr::null_mut();
     };
-    let branch = match parse_chain(&default_registry(), description) {
-        Ok(branch) => branch,
-        Err(e) => return null_list_with_error(err_out, &format!("parse error: {e}")),
-    };
-    names_or_refusal(block_on(p.mutator.add_branch(tee, branch)), err_out)
+    names_or_refusal(p.launched.add_branch(tee, description), err_out)
 }
 
 /// Drop the branch ending at the sink `sink` from under its tee. Returns 1, or
@@ -462,7 +364,7 @@ pub unsafe extern "C" fn g2g_pipeline_remove_branch(
     let Some((p, [sink])) = (unsafe { mutation_args(p, [sink], err_out) }) else {
         return 0;
     };
-    done_or_refusal(block_on(p.mutator.remove_branch(sink)).map(drop), err_out)
+    done_or_refusal(p.launched.remove_branch(sink), err_out)
 }
 
 /// Attach the source `description` names to the next free pad of the muxer
@@ -484,11 +386,7 @@ pub unsafe extern "C" fn g2g_pipeline_add_input(
     else {
         return ptr::null_mut();
     };
-    let source = match parse_source(&default_registry(), description) {
-        Ok(source) => source,
-        Err(e) => return null_with_error(err_out, &format!("parse error: {e}")),
-    };
-    name_or_refusal(block_on(p.mutator.add_input(muxer, source)), err_out)
+    name_or_refusal(p.launched.add_input(muxer, description), err_out)
 }
 
 /// Free a null-terminated name array this library returned, and every name in
@@ -530,7 +428,7 @@ pub unsafe extern "C" fn g2g_pipeline_remove(
     let Some((p, [node])) = (unsafe { mutation_args(p, [node], err_out) }) else {
         return 0;
     };
-    done_or_refusal(block_on(p.mutator.remove(node)).map(drop), err_out)
+    done_or_refusal(p.launched.remove(node), err_out)
 }
 
 /// Take over the sink `node` with the element `description` names. Returns the
@@ -552,11 +450,7 @@ pub unsafe extern "C" fn g2g_pipeline_replace_sink(
     else {
         return ptr::null_mut();
     };
-    let element = match parse_element(&default_registry(), description) {
-        Ok(element) => element,
-        Err(e) => return null_with_error(err_out, &format!("parse error: {e}")),
-    };
-    let replaced = block_on(p.mutator.replace_sink(node, element)).map(|(name, _old)| name);
+    let replaced = p.launched.replace_sink(node, description);
     name_or_refusal(replaced, err_out)
 }
 
@@ -579,11 +473,7 @@ pub unsafe extern "C" fn g2g_pipeline_replace_source(
     else {
         return ptr::null_mut();
     };
-    let source = match parse_source(&default_registry(), description) {
-        Ok(source) => source,
-        Err(e) => return null_with_error(err_out, &format!("parse error: {e}")),
-    };
-    let replaced = block_on(p.mutator.replace_source(node, source)).map(|(name, _old)| name);
+    let replaced = p.launched.replace_source(node, description);
     name_or_refusal(replaced, err_out)
 }
 
@@ -607,10 +497,7 @@ pub unsafe extern "C" fn g2g_pipeline_set_property(
     else {
         return 0;
     };
-    done_or_refusal(
-        block_on(set_property_text(&p.mutator, node, name, value)),
-        err_out,
-    )
+    done_or_refusal(p.launched.set_property(node, name, value), err_out)
 }
 
 /// The launch-line text of property `name` on the running element `node`.
@@ -631,10 +518,10 @@ pub unsafe extern "C" fn g2g_pipeline_get_property(
     let Some((p, [node, name])) = (unsafe { mutation_args(p, [node, name], err_out) }) else {
         return ptr::null_mut();
     };
-    match block_on(p.mutator.get_property(node, name)) {
-        Ok(Some(value)) => owned_string(&value.to_string()),
+    match p.launched.get_property(node, name) {
+        Ok(Some(value)) => owned_string(&value),
         Ok(None) => ptr::null_mut(),
-        Err(e) => null_with_error(err_out, &format!("{e:?}")),
+        Err(e) => null_with_error(err_out, &e.to_string()),
     }
 }
 
@@ -665,31 +552,28 @@ unsafe fn mutation_args<'a, const N: usize>(
     Some((p, borrowed))
 }
 
-fn name_or_refusal(
-    result: Result<String, MutationError>,
-    err_out: *mut *mut c_char,
-) -> *mut c_char {
+fn name_or_refusal(result: Result<String, EditError>, err_out: *mut *mut c_char) -> *mut c_char {
     match result {
         Ok(name) => owned_string(&name),
-        Err(e) => null_with_error(err_out, &format!("{e:?}")),
+        Err(e) => null_with_error(err_out, &e.to_string()),
     }
 }
 
 fn names_or_refusal(
-    result: Result<Vec<String>, MutationError>,
+    result: Result<Vec<String>, EditError>,
     err_out: *mut *mut c_char,
 ) -> *mut *mut c_char {
     match result {
         Ok(names) => owned_strv(&names),
-        Err(e) => null_list_with_error(err_out, &format!("{e:?}")),
+        Err(e) => null_list_with_error(err_out, &e.to_string()),
     }
 }
 
-fn done_or_refusal(result: Result<(), MutationError>, err_out: *mut *mut c_char) -> c_int {
+fn done_or_refusal(result: Result<(), EditError>, err_out: *mut *mut c_char) -> c_int {
     match result {
         Ok(()) => 1,
         Err(e) => {
-            set_err(err_out, &format!("{e:?}"));
+            set_err(err_out, &e.to_string());
             0
         }
     }

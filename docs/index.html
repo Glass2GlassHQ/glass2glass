@@ -733,11 +733,11 @@
 <section id="crates">
     <div class="section-inner">
         <span class="section-label">Workspace</span>
-        <h2 class="section-title">Ten crates.</h2>
+        <h2 class="section-title">Eleven crates.</h2>
         <p class="section-desc">
             One cargo workspace. Anything that needs an operating system, a GPU, or a
             device sits behind a cargo feature, so the baseline builds for bare metal.
-            A C ABI, with C++, Python and C# bindings on top, drives the same graphs from other languages.
+            A C ABI, with C++, Python, C# and Kotlin bindings on top, drives the same graphs from other languages.
         </p>
 
         <figure class="diagram">
@@ -863,6 +863,11 @@
                 <div class="crate-name">g2g-pyapi</div>
                 <div class="crate-tag">Python bindings</div>
                 <p>The same API from Python: <code>g2g.Pipeline(desc)</code>, <code>AppSrc.push</code>, <code>AppSink.pull</code>.</p>
+            </div>
+            <div class="crate-card">
+                <div class="crate-name">g2g-uniffi</div>
+                <div class="crate-tag">Kotlin bindings</div>
+                <p>The same API from Kotlin on Android or the JVM, plus showing video in an app's <code>Surface</code>.</p>
             </div>
         </div>
     </div>
@@ -1031,11 +1036,11 @@ g2g-launch <span class="flag">--script</span> build.rhai</div>
             </div>
             <div class="feature-card">
                 <span class="f-icon">&#129513;</span>
-                <h3>C, C++, Python and C#</h3>
-                <p class="f-lead">Drive a pipeline from C, C++, Python or C#. Push frames in with <code>appsrc</code> and pull them out with <code>appsink</code>, without copying.</p>
+                <h3>C, C++, Python, C# and Kotlin</h3>
+                <p class="f-lead">Drive a pipeline from C, C++, Python, C# or Kotlin. Push frames in with <code>appsrc</code> and pull them out with <code>appsink</code>, without copying.</p>
                 <div class="chip-group">
                     <span class="chip-label">Crates</span>
-                    <div class="chip-row"><span class="chip">g2g-capi</span><span class="chip">g2g-pyapi</span></div>
+                    <div class="chip-row"><span class="chip">g2g-capi</span><span class="chip">g2g-pyapi</span><span class="chip">g2g-uniffi</span></div>
                 </div>
                 <span class="feature-tag tag-core">Core</span>
             </div>

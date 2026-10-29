@@ -35,126 +35,41 @@ mod pymod {
     use pyo3::prelude::*;
 
     use std::os::raw::c_int;
-    use std::sync::mpsc;
-    use std::thread::JoinHandle;
     use std::time::Duration;
 
     use g2g_core::frame::Frame;
-    use g2g_core::runtime::{
-        block_on, parse_chain, parse_element, parse_launch, parse_source, set_property_text,
-        GraphMutator, MutationError, ParseError, RunBuilder, RunStats,
-    };
-    use g2g_core::{Bus, G2gError};
-    use g2g_plugins::appsink::{
-        register_appsink_pull, AppSinkPull, FlatBusMessage, HostFrame, Pull,
-    };
+    use g2g_core::runtime::block_on;
+    use g2g_plugins::appsink::{register_appsink_pull, AppSinkPull, HostFrame, Pull};
     use g2g_plugins::appsrc::{register_appsrc, AppSrcFeed};
-    use g2g_plugins::clock::WallClock;
-    use g2g_plugins::registry::{default_registry, mutator_with_defaults};
-
-    const LINK_CAPACITY: usize = 4;
-    const BUS_CAPACITY: usize = 64;
+    use g2g_plugins::launched::{EditError, LaunchedPipeline};
 
     /// A running pipeline parsed from a `gst-launch`-style string. Runs on a
     /// background thread; poll the bus and `wait()` for the end of stream.
     #[pyclass]
     struct Pipeline {
-        bus: Bus,
-        mutator: GraphMutator<'static>,
-        join: Option<JoinHandle<Result<RunStats, G2gError>>>,
-        // The joined outcome, cached so a second `wait()` is idempotent. The
-        // error arm is a formatted message (not the raw `G2gError`) so it can
-        // also carry a run-thread panic, which is not a `G2gError`.
-        result: Option<Result<RunStats, String>>,
+        launched: LaunchedPipeline,
     }
 
-    /// A human-readable message for each `G2gError` variant, so `Pipeline::wait`
-    /// surfaces *why* a run failed instead of a single opaque "pipeline errored".
-    fn describe_error(e: &G2gError) -> String {
-        match e {
-            G2gError::CapsMismatch => {
-                "caps negotiation failed (no common format between linked elements)".into()
-            }
-            G2gError::NotConfigured => {
-                "an element received data before configuration completed".into()
-            }
-            G2gError::FixationFailed => "caps fixation failed".into(),
-            G2gError::PoolExhausted => "buffer pool exhausted".into(),
-            G2gError::UnsupportedDomain => {
-                "an element was handed a memory domain it cannot consume".into()
-            }
-            G2gError::AllocationConflict => "fan-out branches share no common memory domain".into(),
-            G2gError::Hardware(h) => format!("hardware/driver failure: {h:?}"),
-            G2gError::Shutdown => "pipeline shut down before completing".into(),
-            other => format!("pipeline error: {other:?}"),
-        }
-    }
-
-    fn parse_error(error: ParseError) -> PyErr {
-        PyValueError::new_err(format!("parse error: {error}"))
-    }
-
-    fn refused(error: MutationError) -> PyErr {
-        PyValueError::new_err(format!("{error:?}"))
-    }
-
-    /// Best-effort extraction of a panic payload's message (the common
-    /// `&str` / `String` cases a `panic!` / `expect` produces).
-    fn panic_message(payload: &(dyn core::any::Any + Send)) -> String {
-        if let Some(s) = payload.downcast_ref::<&str>() {
-            (*s).into()
-        } else if let Some(s) = payload.downcast_ref::<String>() {
-            s.clone()
-        } else {
-            "unknown panic".into()
-        }
+    fn refused(error: EditError) -> PyErr {
+        PyValueError::new_err(error.to_string())
     }
 
     #[pymethods]
     impl Pipeline {
         #[new]
         fn new(description: &str) -> PyResult<Self> {
-            let reg = default_registry();
-            let graph = parse_launch(&reg, description).map_err(parse_error)?;
-            let (bus, handle) = Bus::new(BUS_CAPACITY);
-            let (mutator_sender, mutator_receiver) = mpsc::sync_channel(1);
-            let join = std::thread::Builder::new()
-                .name("g2g-pyapi-run".into())
-                .spawn(move || {
-                    let rt = tokio::runtime::Builder::new_current_thread()
-                        .enable_time()
-                        .build()
-                        .expect("build tokio runtime");
-                    let clock = WallClock::new();
-                    let (mutator, run) = RunBuilder::new(graph, &clock, LINK_CAPACITY)
-                        .with_bus(&handle)
-                        .run_mutable();
-                    if mutator_sender.send(mutator).is_err() {
-                        return Err(G2gError::Shutdown);
-                    }
-                    rt.block_on(run)
-                })
-                .map_err(|e| PyValueError::new_err(format!("spawn run thread: {e}")))?;
-            let mutator = mutator_receiver
-                .recv()
-                .map_err(|_| PyValueError::new_err("pipeline run thread did not start"))?;
-            Ok(Pipeline {
-                bus,
-                mutator: mutator_with_defaults(mutator),
-                join: Some(join),
-                result: None,
-            })
+            LaunchedPipeline::launch(description, "g2g-pyapi-run")
+                .map(|launched| Pipeline { launched })
+                .map_err(|error| PyValueError::new_err(error.to_string()))
         }
 
         fn insert_after(&self, py: Python<'_>, node: &str, description: &str) -> PyResult<String> {
-            let element = parse_element(&default_registry(), description).map_err(parse_error)?;
-            py.detach(|| block_on(self.mutator.insert_after(node, element)))
+            py.detach(|| self.launched.insert_after(node, description))
                 .map_err(refused)
         }
 
         fn insert_before(&self, py: Python<'_>, node: &str, description: &str) -> PyResult<String> {
-            let element = parse_element(&default_registry(), description).map_err(parse_error)?;
-            py.detach(|| block_on(self.mutator.insert_before(node, element)))
+            py.detach(|| self.launched.insert_before(node, description))
                 .map_err(refused)
         }
 
@@ -164,8 +79,7 @@ mod pymod {
             node: &str,
             description: &str,
         ) -> PyResult<Vec<String>> {
-            let chain = parse_chain(&default_registry(), description).map_err(parse_error)?;
-            py.detach(|| block_on(self.mutator.insert_chain_after(node, chain)))
+            py.detach(|| self.launched.insert_chain_after(node, description))
                 .map_err(refused)
         }
 
@@ -175,8 +89,7 @@ mod pymod {
             node: &str,
             description: &str,
         ) -> PyResult<Vec<String>> {
-            let chain = parse_chain(&default_registry(), description).map_err(parse_error)?;
-            py.detach(|| block_on(self.mutator.insert_chain_before(node, chain)))
+            py.detach(|| self.launched.insert_chain_before(node, description))
                 .map_err(refused)
         }
 
@@ -186,33 +99,26 @@ mod pymod {
             tee: &str,
             description: &str,
         ) -> PyResult<Vec<String>> {
-            let branch = parse_chain(&default_registry(), description).map_err(parse_error)?;
-            py.detach(|| block_on(self.mutator.add_branch(tee, branch)))
+            py.detach(|| self.launched.add_branch(tee, description))
                 .map_err(refused)
         }
 
         fn remove_branch(&self, py: Python<'_>, sink: &str) -> PyResult<()> {
-            py.detach(|| block_on(self.mutator.remove_branch(sink)))
-                .map(drop)
+            py.detach(|| self.launched.remove_branch(sink))
                 .map_err(refused)
         }
 
         fn add_input(&self, py: Python<'_>, muxer: &str, description: &str) -> PyResult<String> {
-            let source = parse_source(&default_registry(), description).map_err(parse_error)?;
-            py.detach(|| block_on(self.mutator.add_input(muxer, source)))
+            py.detach(|| self.launched.add_input(muxer, description))
                 .map_err(refused)
         }
 
         fn remove(&self, py: Python<'_>, node: &str) -> PyResult<()> {
-            py.detach(|| block_on(self.mutator.remove(node)))
-                .map(drop)
-                .map_err(refused)
+            py.detach(|| self.launched.remove(node)).map_err(refused)
         }
 
         fn replace_sink(&self, py: Python<'_>, node: &str, description: &str) -> PyResult<String> {
-            let element = parse_element(&default_registry(), description).map_err(parse_error)?;
-            py.detach(|| block_on(self.mutator.replace_sink(node, element)))
-                .map(|(name, _old)| name)
+            py.detach(|| self.launched.replace_sink(node, description))
                 .map_err(refused)
         }
 
@@ -222,9 +128,7 @@ mod pymod {
             node: &str,
             description: &str,
         ) -> PyResult<String> {
-            let source = parse_source(&default_registry(), description).map_err(parse_error)?;
-            py.detach(|| block_on(self.mutator.replace_source(node, source)))
-                .map(|(name, _old)| name)
+            py.detach(|| self.launched.replace_source(node, description))
                 .map_err(refused)
         }
 
@@ -235,13 +139,12 @@ mod pymod {
             name: &str,
             value: &str,
         ) -> PyResult<()> {
-            py.detach(|| block_on(set_property_text(&self.mutator, node, name, value)))
+            py.detach(|| self.launched.set_property(node, name, value))
                 .map_err(refused)
         }
 
         fn get_property(&self, py: Python<'_>, node: &str, name: &str) -> PyResult<Option<String>> {
-            py.detach(|| block_on(self.mutator.get_property(node, name)))
-                .map(|value| value.map(|value| value.to_string()))
+            py.detach(|| self.launched.get_property(node, name))
                 .map_err(refused)
         }
 
@@ -249,42 +152,30 @@ mod pymod {
         /// bus is empty. `kind` is a lowercase string; `a`/`b` are kind-specific
         /// (see the C header).
         fn bus_poll(&self) -> Option<(String, Option<String>, u64, u64)> {
-            self.bus.try_recv().map(|message| {
-                let flat = FlatBusMessage::new(&message);
-                (flat.kind.name().to_string(), flat.text, flat.a, flat.b)
-            })
+            self.launched
+                .bus_poll()
+                .map(|flat| (flat.kind.name().to_string(), flat.text, flat.a, flat.b))
         }
 
         /// True once the run thread has finished (EOS or error).
         fn is_done(&self) -> bool {
-            self.join.as_ref().is_none_or(|j| j.is_finished())
+            self.launched.is_done()
         }
 
         /// Block until the pipeline ends; returns `(emitted, consumed, dropped)`.
         /// Raises on a pipeline error, carrying the underlying cause (a described
         /// `G2gError`, or the run-thread panic message) rather than an opaque
         /// "pipeline errored". Releases the GIL while blocking.
-        fn wait(&mut self, py: Python<'_>) -> PyResult<(u64, u64, u64)> {
-            if let Some(j) = self.join.take() {
-                // Detach the GIL while joining. A clean run returns
-                // Ok/Err(G2gError); a panic in the run thread surfaces as the
-                // join Err, which we describe rather than swallow.
-                self.result = Some(match py.detach(|| j.join()) {
-                    Ok(Ok(s)) => Ok(s),
-                    Ok(Err(e)) => Err(describe_error(&e)),
-                    Err(panic) => Err(format!(
-                        "pipeline run thread panicked: {}",
-                        panic_message(&*panic)
-                    )),
-                });
-            }
-            match &self.result {
-                Some(Ok(s)) => Ok((s.frames_emitted, s.frames_consumed, s.frames_dropped)),
-                Some(Err(msg)) => Err(PyValueError::new_err(format!("pipeline error: {msg}"))),
-                // `wait()` always sets `result` above, so this is unreachable in
-                // practice; kept as a non-panicking fallback.
-                None => Err(PyValueError::new_err("pipeline error: result unavailable")),
-            }
+        fn wait(&self, py: Python<'_>) -> PyResult<(u64, u64, u64)> {
+            py.detach(|| self.launched.wait())
+                .map(|stats| {
+                    (
+                        stats.frames_emitted,
+                        stats.frames_consumed,
+                        stats.frames_dropped,
+                    )
+                })
+                .map_err(|failure| PyValueError::new_err(format!("pipeline error: {failure}")))
         }
     }
 
@@ -775,61 +666,6 @@ assert consumed == 1, consumed
                 py.run(script.as_c_str(), Some(&globals), None)
                     .expect("stall script runs");
             });
-        }
-
-        /// `Pipeline::wait` surfaces *why* a run failed: every `G2gError` variant
-        /// maps to a distinct, non-empty message, and never the old opaque
-        /// "pipeline errored" placeholder. Guards against a regression to a lossy
-        /// error path. No interpreter needed: the formatter is a pure function.
-        #[test]
-        fn describe_error_is_specific_per_variant() {
-            use super::describe_error;
-            use g2g_core::{G2gError, HardwareError};
-
-            let cases = [
-                G2gError::CapsMismatch,
-                G2gError::NotConfigured,
-                G2gError::FixationFailed,
-                G2gError::PoolExhausted,
-                G2gError::UnsupportedDomain,
-                G2gError::AllocationConflict,
-                G2gError::Hardware(HardwareError::Cuda(2)),
-                G2gError::Shutdown,
-            ];
-            let msgs: Vec<String> = cases.iter().map(describe_error).collect();
-
-            // Every message is informative, not the discarded opaque text.
-            for m in &msgs {
-                assert!(!m.is_empty());
-                assert_ne!(m, "pipeline errored");
-            }
-            // Variants map to distinct messages (no information collapse).
-            for i in 0..msgs.len() {
-                for j in (i + 1)..msgs.len() {
-                    assert_ne!(msgs[i], msgs[j], "variants {i} and {j} share a message");
-                }
-            }
-            // The hardware arm carries the backend detail (the CUDA code).
-            assert!(
-                describe_error(&G2gError::Hardware(HardwareError::Cuda(2))).contains('2'),
-                "hardware error should carry its backend code"
-            );
-            assert!(describe_error(&G2gError::CapsMismatch).contains("caps"));
-        }
-
-        /// A run-thread panic is surfaced (not swallowed into `Shutdown`): the
-        /// `&str` / `String` payloads a `panic!` / `expect` produce come through.
-        #[test]
-        fn panic_message_extracts_common_payloads() {
-            use super::panic_message;
-            use core::any::Any;
-
-            let s: Box<dyn Any + Send> = Box::new("boom");
-            assert_eq!(panic_message(&*s), "boom");
-            let owned: Box<dyn Any + Send> = Box::new(String::from("kaboom"));
-            assert_eq!(panic_message(&*owned), "kaboom");
-            let other: Box<dyn Any + Send> = Box::new(42i32);
-            assert_eq!(panic_message(&*other), "unknown panic");
         }
     }
 }

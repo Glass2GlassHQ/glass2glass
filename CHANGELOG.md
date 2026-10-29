@@ -70,6 +70,7 @@ Breaking: `QosMessage` gains `downstream_proc_ns`, `ElementProbe` is no longer `
 - M1967: `g2g-dotnet` C# bindings drive pipelines, edits and appsrc / appsink through the C ABI.
 - M1968: `g2g.hpp` is a header-only C++17 wrapper over the C ABI.
 - M1969: `surfacesink` copies RGBA frames into an Android app's `Surface` attached by channel name.
+- M1970: `g2g-uniffi` Kotlin bindings drive pipelines, edits and appsrc / appsink, and attach a `Surface` on Android.
 
 ## 0.10.0
 

@@ -28,6 +28,7 @@ python = [
     "g2g-core/std",
     "g2g-core/runtime",
     "g2g-core/multi-thread",
+    "g2g-plugins/multi-thread",
 ]
 
 [dependencies]

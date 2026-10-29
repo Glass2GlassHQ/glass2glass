@@ -23,9 +23,7 @@ crate-type = ["lib", "cdylib", "staticlib"]
 # move to the background run thread the C API drives. This crate is inherently
 # OS-coupled (threads + C ABI), so it is off the no_std baseline by design.
 g2g-core = { workspace = true, features = ["std", "runtime", "multi-thread"] }
-g2g-plugins = { workspace = true, features = ["std"] }
-# Mirrors g2g-launch: drive the run future on a single-thread runtime.
-tokio = { version = "1", features = ["rt", "macros", "time"] }
+g2g-plugins = { workspace = true, features = ["std", "multi-thread"] }
 
 [lints]
 workspace = true

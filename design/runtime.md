@@ -779,3 +779,20 @@ from the `mdhd` box. A first duration also posts `BusMessage::DurationChanged` a
 push notification. `run_graph_with_progress` wires the handle in, and the handle is
 plain atomics behind an `Arc`, so reading it from the app thread while the pipeline
 runs needs no lock.
+
+## Language bindings
+
+The C ABI (`g2g-capi`), the Python bindings (`g2g-pyapi`) and the Kotlin bindings
+(`g2g-uniffi`) all drive a pipeline through `g2g_plugins::launched::LaunchedPipeline`.
+It parses a launch line, runs it on its own thread under a current-thread tokio
+runtime, and turns each edit into a parse plus a `GraphMutator` call. The run thread
+catches its own panic and stores the outcome itself, so `is_done` and `bus_poll`
+answer from any thread while another thread blocks in `wait`. The C# and C++ wrappers
+sit on the C ABI.
+
+An Android app shows video through `surfacesink channel=<name>`. The app attaches the
+`ANativeWindow` of its `Surface` under that name (`Surfaces.attach` in the Kotlin
+bindings, a JNI call next to the UniFFI exports). The sink copies each RGBA frame into
+the window and drops frames while nothing is attached. Sinks draw while holding the
+lock on the attached windows, so `detach` returns only after the last draw, and an
+app can call it from `surfaceDestroyed` before Android releases the window.

@@ -662,6 +662,9 @@ pub mod plugin_loader;
 mod graphthreads;
 #[cfg(all(feature = "std", feature = "multi-thread"))]
 pub use graphthreads::{PinnedThreadSpawner, TokioThreadSpawner};
+// A launch line on its own thread, the core of the C, Python and Kotlin bindings.
+#[cfg(all(feature = "std", feature = "multi-thread"))]
+pub mod launched;
 // Annex-B NAL splitting shared by rtppay (RTP) and h264util (WebCodecs).
 mod annexb;
 // Bounds-checked big-endian field reads shared by the container parsers.

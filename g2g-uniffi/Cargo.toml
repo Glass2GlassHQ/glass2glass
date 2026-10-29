@@ -1,0 +1,35 @@
+[package]
+name = "g2g-uniffi"
+description = "Kotlin bindings to drive glass2glass pipelines, generated with UniFFI."
+license.workspace = true
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+# The shipping artifact is the cdylib plus the Kotlin UniFFI generates from it.
+publish = false
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "uniffi-bindgen.rs"
+required-features = ["bindgen"]
+
+[features]
+bindgen = ["uniffi/cli"]
+
+[dependencies]
+g2g-core = { workspace = true, features = ["std", "runtime", "multi-thread"] }
+g2g-plugins = { workspace = true, features = ["std", "multi-thread"] }
+uniffi = "0.32"
+
+[target.'cfg(target_os = "android")'.dependencies]
+g2g-plugins = { workspace = true, features = ["std", "multi-thread", "android-surface"] }
+ndk = { version = "0.9", default-features = false }
+jni-sys = "0.3"
+
+[lints]
+workspace = true
