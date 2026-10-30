@@ -702,6 +702,87 @@ async fn the_caller_calls_again_after_the_listener_goes_silent() {
     );
 }
 
+fn destination_socket_id(packet: &[u8]) -> u32 {
+    u32::from_be_bytes(packet[12..16].try_into().expect("srt header"))
+}
+
+// relays caller<->listener, and on `shut_down` sends each end a SHUTDOWN as from the other
+async fn shutdown_proxy(
+    proxy: tokio::net::UdpSocket,
+    listener_addr: SocketAddr,
+    shut_down: Arc<tokio::sync::Notify>,
+) {
+    let mut caller = None;
+    let mut caller_socket_id = None;
+    let mut listener_socket_id = None;
+    let mut buf = [0u8; 2048];
+    loop {
+        let received = tokio::select! {
+            received = proxy.recv_from(&mut buf) => received,
+            () = shut_down.notified() => {
+                let (Some(caller), Some(caller_socket_id), Some(listener_socket_id)) =
+                    (caller, caller_socket_id, listener_socket_id)
+                else {
+                    panic!("shut down before both ends sent a packet");
+                };
+                let to_caller = srt::build_control(&srt::Control::Shutdown, 0, caller_socket_id);
+                let _ = proxy.send_to(&to_caller, caller).await;
+                let to_listener =
+                    srt::build_control(&srt::Control::Shutdown, 0, listener_socket_id);
+                let _ = proxy.send_to(&to_listener, listener_addr).await;
+                continue;
+            }
+        };
+        let Ok((n, from)) = received else {
+            return;
+        };
+        if from == listener_addr {
+            caller_socket_id = Some(destination_socket_id(&buf[..n]));
+            if let Some(caller) = caller {
+                let _ = proxy.send_to(&buf[..n], caller).await;
+            }
+        } else {
+            caller = Some(from);
+            listener_socket_id = Some(destination_socket_id(&buf[..n]));
+            let _ = proxy.send_to(&buf[..n], listener_addr).await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn the_caller_calls_again_after_a_peer_shutdown() {
+    let (mut src, listener_addr) = listening_source(true);
+    let proxy = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let proxy_addr = proxy.local_addr().unwrap();
+    let shut_down = Arc::new(tokio::sync::Notify::new());
+    tokio::spawn(shutdown_proxy(proxy, listener_addr, shut_down.clone()));
+    let flushed = Arc::new(tokio::sync::Notify::new());
+    let mut log = ReceivedLog {
+        events: Vec::new(),
+        flushed: flushed.clone(),
+    };
+
+    let caller = async {
+        let mut sink = caller_sending(proxy_addr, 0..PER_CALLER).await;
+        shut_down.notify_one();
+        flushed.notified().await;
+        for tag in PER_CALLER..2 * PER_CALLER {
+            send_tagged(&mut sink, tag).await.expect("send");
+        }
+        tokio::time::sleep(DELIVERY_WAIT).await;
+        sink
+    };
+    // a caller that ignores the SHUTDOWN sends data the listener drops while it waits for a call
+    let (result, _sink) = tokio::time::timeout(RUN_TIMEOUT, async {
+        tokio::join!(src.run(&mut log), caller)
+    })
+    .await
+    .expect("the caller calls again within the timeout");
+
+    assert_eq!(result.expect("run ok"), 2 * PER_CALLER as u64);
+    assert_eq!(log.events, both_callers_then_eos());
+}
+
 const PAYLOADS: u8 = 10;
 const PAYLOAD_SPACING: std::time::Duration = std::time::Duration::from_millis(10);
 const PASSPHRASE: &str = "g2g_srt_loopback_passphrase";
