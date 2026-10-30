@@ -85,8 +85,8 @@ fn launch_with_seek(seconds: &str, pipeline: &str) -> Output {
     launch(&["--seek", seconds], pipeline)
 }
 
-fn first_frame_after_seek() -> u64 {
-    (SEEK_MILLISECONDS * NANOS_PER_MILLISECOND).div_ceil(FRAME_PERIOD_NS)
+fn first_frame_at(milliseconds: u64) -> u64 {
+    (milliseconds * NANOS_PER_MILLISECOND).div_ceil(FRAME_PERIOD_NS)
 }
 
 fn checksum_lines(output: &Output) -> Vec<String> {
@@ -102,7 +102,7 @@ fn checksum_lines(output: &Output) -> Vec<String> {
 }
 
 fn assert_starts_at_the_frame_after_the_seek(lines: &[String], first_pts_ns: u64) {
-    let first_frame = first_frame_after_seek();
+    let first_frame = first_frame_at(SEEK_MILLISECONDS);
     assert_eq!(
         lines[0],
         checksum_line(
@@ -139,6 +139,35 @@ fn mp4_seek_decodes_from_the_first_frame_at_or_after_the_target() {
     for pipeline in [mp4_pipeline(), mp4_decodebin_pipeline()] {
         let output = launch_with_seek(&seek_seconds(SEEK_MILLISECONDS), &pipeline);
         assert_starts_at_the_frame_after_the_seek(&checksum_lines(&output), 0);
+    }
+}
+
+#[test]
+fn seek_during_playback_resumes_at_the_target() {
+    let pipeline = mp4_pipeline();
+    let unseeked = checksum_lines(&launch(&[], &pipeline));
+    // forward past the frames in flight, and backward
+    for (position_milliseconds, target_milliseconds) in [(200, 2_000), (2_000, 400)] {
+        let seek_at = format!(
+            "{}:{}",
+            seek_seconds(position_milliseconds),
+            seek_seconds(target_milliseconds)
+        );
+        let seeked = checksum_lines(&launch(&["--seek-at", &seek_at], &pipeline));
+        let resumed = seeked
+            .iter()
+            .zip(&unseeked)
+            .position(|(seeked, unseeked)| seeked != unseeked)
+            .unwrap_or_else(|| panic!("--seek-at {seek_at} left the output unchanged"));
+        assert!(
+            resumed as u64 >= first_frame_at(position_milliseconds),
+            "--seek-at {seek_at}: frame {resumed} came after the seek, before the sink reached the position"
+        );
+        assert_eq!(
+            seeked[resumed..],
+            unseeked[first_frame_at(target_milliseconds) as usize..],
+            "--seek-at {seek_at}: the run resumes at the target and plays to the end"
+        );
     }
 }
 
@@ -182,7 +211,7 @@ fn offset_pipelines() -> Vec<(String, &'static str)> {
 
 #[test]
 fn seek_counts_the_target_from_the_start_time() {
-    let first_frame = first_frame_after_seek() as usize;
+    let first_frame = first_frame_at(SEEK_MILLISECONDS) as usize;
     for (pipeline, ffmpeg_md5) in offset_pipelines() {
         let unseeked = checksum_lines(&launch(&[], &pipeline));
         let seeked = checksum_lines(&launch_with_seek(

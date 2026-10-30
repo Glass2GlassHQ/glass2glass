@@ -252,6 +252,12 @@ Highest leverage first:
 - **MP4 with samples in both the `moov` and fragments** (ffmpeg's `frag_keyframe`
   without `empty_moov`): decode the sample-table run, then the fragments.
   `Mp4DemuxN` fails such a file with `CapsMismatch`.
+- **Seeks during playback** (`g2g-launch --seek-at`):
+  - A seek through a byte-stream demuxer is lost once `filesrc` has read the whole
+    file: `--seek-at 0.4:2.0` on `h264_64x48_25fps_gop10.mkv` plays straight through.
+  - `--seek-at 1.0:2.5` on fate-suite `mkv/test7_cut.mkv` outputs the frames at 2.000 to
+    2.167 before the frame at 2.5.
+  - `filesrc` and the byte-stream demuxers drop a non-flushing seek.
 - **TS positions with B frames:** `tsdemux` opens its segment at the first DTS, so
   positions read high by the first PTS minus the first DTS until the first seek.
   Needs a signed `Segment` time offset in g2g-core.

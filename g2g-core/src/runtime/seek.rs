@@ -365,6 +365,22 @@ pub fn attach_seek(
     graph: &mut Graph<GraphNode>,
     first_seek: Seek,
 ) -> Result<SeekController, AttachSeekError> {
+    attach(graph, Some(first_seek))
+}
+
+// the application seeks through the controller once the run is under way
+#[cfg(feature = "std")]
+pub fn attach_seek_controller(
+    graph: &mut Graph<GraphNode>,
+) -> Result<SeekController, AttachSeekError> {
+    attach(graph, None)
+}
+
+#[cfg(feature = "std")]
+fn attach(
+    graph: &mut Graph<GraphNode>,
+    first_seek: Option<Seek>,
+) -> Result<SeekController, AttachSeekError> {
     let seekable: Vec<SeekableNode> = (0..graph.node_count())
         .filter_map(|index| seekable_node(graph, NodeId(index as u32)))
         .collect();
@@ -382,7 +398,9 @@ pub fn attach_seek(
     };
     let app = SeekController::new();
     // queued before the element gets the controller, so it lands before the first frame
-    app.seek(first_seek);
+    if let Some(seek) = first_seek {
+        app.seek(seek);
+    }
     match target {
         SeekableNode::TimeSource(node) => source_mut(graph, node).set_seek(app.clone()),
         SeekableNode::BufferedElement(node) => {

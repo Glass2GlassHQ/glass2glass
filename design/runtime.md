@@ -582,7 +582,9 @@ demuxers). A `MultiOutputElement` reports the same, but the runner seeks no demu
 node, so only `OnePortElement` reads it, for a demuxer run as its one-output
 form. `attach_seek` finds the one node that can take the time seek, gives it a
 controller with the seek already queued and a demuxer's byte source a second one,
-so the seek lands before the first frame. After a seek every seekable source and
+so the seek lands before the first frame. `attach_seek_controller` attaches the same
+controllers with nothing queued, for a seek made while the pipeline runs, which
+`g2g-launch --seek-at` issues once the sink reports a given position. After a seek every seekable source and
 demuxer restarts at the keyframe at or before the target with a segment starting at
 the target, so decoders drop the earlier frames and the first frame out is the first
 one at or after the target, as `ffmpeg -ss` gives. Every seekable demuxer and source counts

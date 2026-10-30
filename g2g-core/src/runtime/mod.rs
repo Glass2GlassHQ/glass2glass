@@ -87,7 +87,7 @@ pub use join::{join_all, select2, Either, Join2, JoinAll, Select2};
 pub use progress::PipelineProgress;
 pub use runner::{LatencyProfile, LinkCapacity, RunStats, SourceLoop};
 #[cfg(feature = "std")]
-pub use seek::{attach_seek, AttachSeekError};
+pub use seek::{attach_seek, attach_seek_controller, AttachSeekError};
 pub use seek::{ElementSeekRoute, SeekController, SeekFormat, WaitEvent};
 pub use solver::{CapsConflict, NegotiationFailure};
 pub use state::{Flow, FlowGate, PrerollGate, StateController};

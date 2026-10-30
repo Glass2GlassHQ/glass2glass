@@ -43,6 +43,9 @@
 //! --seek <seconds>    one flushing seek to that stream time before the first
 //!                     frame, then run to the end (`--help` says where the
 //!                     first frame lands)
+//! --seek-at <position>:<seconds>
+//!                     one flushing seek to <seconds> once the sink reports
+//!                     <position>, so the seek lands with frames in flight
 //! --plugin <path>     load a third-party plugin `.so` before parsing
 //!                     (repeatable; needs the `plugin-loader` build feature)
 //! --graph <file>      build the graph from a declarative JSON / YAML document
@@ -90,8 +93,9 @@ use std::time::{Duration, Instant};
 #[cfg(feature = "multi-thread")]
 use g2g_core::element::BoxFuture;
 use g2g_core::runtime::{
-    attach_seek, fallback_factory, has_live_source, parse_launch, parse_launch_avoiding,
-    FlightRecorder, GraphNode, PipelineProgress, Registry, RunBuilder,
+    attach_seek, attach_seek_controller, fallback_factory, has_live_source, parse_launch,
+    parse_launch_avoiding, FlightRecorder, GraphNode, PipelineProgress, Registry, RunBuilder,
+    SeekController,
 };
 #[cfg(any(feature = "observe", feature = "tui"))]
 use g2g_core::runtime::{run_graph_observed, run_graph_observed_recorded, Observer};
@@ -160,7 +164,7 @@ type RunFuture<'r> = core::pin::Pin<
     >,
 >;
 
-const USAGE: &str = "usage: g2g-launch [-v] [-q] [--dot] [--copy-plan] [--validate-json] [--run-json] [--threads[=pinned]] [--observe <port>] [--observe-host <addr>] [--tui] [--record-on-error <dir>] [--trace <file>] [--seek <seconds>] [--plugin <path>] [-e] [-m] [-h] [--version] \
+const USAGE: &str = "usage: g2g-launch [-v] [-q] [--dot] [--copy-plan] [--validate-json] [--run-json] [--threads[=pinned]] [--observe <port>] [--observe-host <addr>] [--tui] [--record-on-error <dir>] [--trace <file>] [--seek <seconds>] [--seek-at <position>:<seconds>] [--plugin <path>] [-e] [-m] [-h] [--version] \
 <element> [key=value ...] ! <element> ! ...\n       \
 g2g-launch [OPTIONS] --graph <file.json|.yaml>   # declarative graph\n       \
 g2g-launch [OPTIONS] --script <file.rhai>         # Rhai graph-building script";
@@ -170,7 +174,10 @@ const SEEK_HELP: &str = "\n\
 An MP4 file under uridecodebin, or a demuxer after filesrc (qtdemux, tsdemux, matroskademux,\n  \
 flvdemux, oggdemux, fmp4demux, also when decodebin plugs it), restarts at the keyframe at or before\n  \
 the target and the decoder drops the frames before it, so the first decoded frame is the first one\n  \
-at or after the target (ffmpeg -ss). A target past the end fails the run.";
+at or after the target (ffmpeg -ss). A target past the end fails the run.\n\
+--seek-at <position>:<seconds>: the same seek, issued once the sink has reported a frame at\n  \
+<position> or later. Frames already in flight still reach the sink before the seek's frames.\n  \
+A run that ends before reaching <position>, or before the pipeline takes the seek, fails.";
 
 // Printed on `--help` (not on the terse empty-invocation error): a map of the
 // rest of the dev tooling, so a `gst-launch` reflex finds the ecosystem. Full
@@ -246,6 +253,14 @@ struct Opts {
     record_on_error: Option<String>,
     trace: Option<String>,
     seek_seconds: Option<String>,
+    seek_at: Option<String>,
+}
+
+// a flushing seek to `target_ns` issued once the sink has reported `position_ns`
+#[derive(Debug, Clone, Copy)]
+struct SeekDuringPlayback {
+    position_ns: u64,
+    target_ns: u64,
 }
 
 /// Parse a `--observe` port, warning and returning `None` on a bad value.
@@ -309,6 +324,10 @@ fn parse_opts(args: impl Iterator<Item = String>) -> (Opts, Vec<String>) {
             opts.seek_seconds = Some(seconds.to_string());
             continue;
         }
+        if let Some(seek) = arg.strip_prefix("--seek-at=") {
+            opts.seek_at = Some(seek.to_string());
+            continue;
+        }
         match arg.as_str() {
             "-v" | "--verbose" => opts.verbose = true,
             "-q" | "--quiet" => opts.quiet = true,
@@ -356,6 +375,13 @@ fn parse_opts(args: impl Iterator<Item = String>) -> (Opts, Vec<String>) {
                 Some(seconds) => opts.seek_seconds = Some(seconds),
                 None => {
                     eprintln!("g2g-launch: --seek needs a time in seconds");
+                    process::exit(2);
+                }
+            },
+            "--seek-at" => match args.next() {
+                Some(seek) => opts.seek_at = Some(seek),
+                None => {
+                    eprintln!("g2g-launch: --seek-at needs <position>:<seconds>");
                     process::exit(2);
                 }
             },
@@ -568,6 +594,18 @@ fn main() {
             process::exit(2);
         }
     };
+    let seek_at = match opts
+        .seek_at
+        .as_deref()
+        .map(seek_during_playback)
+        .transpose()
+    {
+        Ok(seek_at) => seek_at,
+        Err(err) => {
+            eprintln!("g2g-launch: {err}");
+            process::exit(2);
+        }
+    };
     let skips_the_run = opts.dot
         || opts.copy_plan
         || opts.validate_json
@@ -576,6 +614,7 @@ fn main() {
         || opts.tui;
     for (flag, given) in [
         ("--seek", seek_ns.is_some()),
+        ("--seek-at", seek_at.is_some()),
         ("--trace", opts.trace.is_some()),
     ] {
         if given && skips_the_run {
@@ -832,10 +871,9 @@ fn main() {
     // to choose differently.
     let mut avoided: Vec<&'static str> = Vec::new();
     let mut graph = graph;
-    if let Some(target_ns) = seek_ns {
-        attach_launch_seek(&mut graph, target_ns);
-    }
+    let mut seek_controller = attach_launch_seeks(&mut graph, seek_ns, seek_at);
     loop {
+        let mut pending_seek = seek_at;
         let clock = WallClock::new();
         let progress = PipelineProgress::new();
         let (bus, bus_handle) = Bus::new(BUS_DEPTH);
@@ -897,6 +935,16 @@ fn main() {
             };
             let mut status_due = std::pin::pin!(tokio::time::sleep(STATUS_INTERVAL));
             std::future::poll_fn(|cx| {
+                let reached = |seek: &mut SeekDuringPlayback| {
+                    progress
+                        .position()
+                        .is_some_and(|position_ns| position_ns >= seek.position_ns)
+                };
+                if let (Some(seek), Some(controller)) =
+                    (pending_seek.take_if(reached), &seek_controller)
+                {
+                    controller.seek(Seek::flush_to(seek.target_ns));
+                }
                 while let Poll::Ready(Some(message)) = std::pin::pin!(bus.recv()).poll(cx) {
                     handle_bus_message(message, opts.verbose, &mut failed);
                 }
@@ -944,6 +992,19 @@ fn main() {
                     );
                     process::exit(1);
                 }
+                if let Some(seek) = &opts.seek_at {
+                    if pending_seek.is_some() {
+                        eprintln!(
+                            "pipeline error: the run ended before the sink reached the \
+                             --seek-at {seek} position"
+                        );
+                        process::exit(1);
+                    }
+                    if seek_controller.as_ref().is_some_and(|c| c.has_pending()) {
+                        eprintln!("pipeline error: the run ended before it took the --seek-at {seek} seek");
+                        process::exit(1);
+                    }
+                }
                 return;
             }
             Err(err) => {
@@ -963,9 +1024,7 @@ fn main() {
                             "{factory} could not decode this stream ({err:?}), retrying without it"
                         );
                         graph = next;
-                        if let Some(target_ns) = seek_ns {
-                            attach_launch_seek(&mut graph, target_ns);
-                        }
+                        seek_controller = attach_launch_seeks(&mut graph, seek_ns, seek_at);
                         continue;
                     }
                 }
@@ -1001,10 +1060,32 @@ fn seek_target_ns(seconds: &str) -> Result<u64, String> {
     u64::try_from(target.as_nanos()).map_err(|_| invalid())
 }
 
-fn attach_launch_seek(graph: &mut Graph<GraphNode>, target_ns: u64) {
-    if let Err(err) = attach_seek(graph, Seek::flush_to(target_ns)) {
-        eprintln!("g2g-launch: --seek: {err}");
-        process::exit(1);
+fn seek_during_playback(seek: &str) -> Result<SeekDuringPlayback, String> {
+    let invalid = || format!("--seek-at needs <position>:<seconds>, got '{seek}'");
+    let (position, target) = seek.split_once(':').ok_or_else(invalid)?;
+    Ok(SeekDuringPlayback {
+        position_ns: seek_target_ns(position).map_err(|_| invalid())?,
+        target_ns: seek_target_ns(target).map_err(|_| invalid())?,
+    })
+}
+
+// the controller a --seek-at seek goes through, None without one
+fn attach_launch_seeks(
+    graph: &mut Graph<GraphNode>,
+    seek_ns: Option<u64>,
+    seek_at: Option<SeekDuringPlayback>,
+) -> Option<SeekController> {
+    let (flag, attached) = match (seek_ns, seek_at) {
+        (None, None) => return None,
+        (Some(target_ns), _) => ("--seek", attach_seek(graph, Seek::flush_to(target_ns))),
+        (None, Some(_)) => ("--seek-at", attach_seek_controller(graph)),
+    };
+    match attached {
+        Ok(controller) => seek_at.map(|_| controller),
+        Err(err) => {
+            eprintln!("g2g-launch: {flag}: {err}");
+            process::exit(1);
+        }
     }
 }
 
