@@ -181,6 +181,12 @@ async fn ffmpeg_srt_aes256_caller_streams_mpegts_into_srtsrc() {
     assert_all_ts_sync(&run_interop(Some(("g2g_srt_interop_passphrase", 32))).await);
 }
 
+#[tokio::test]
+#[ignore = "needs ffmpeg built with libsrt; opens a local UDP socket"]
+async fn ffmpeg_srt_aes192_caller_streams_mpegts_into_srtsrc() {
+    assert_all_ts_sync(&run_interop(Some(("g2g_srt_interop_passphrase", 24))).await);
+}
+
 /// A do-nothing sink so `SrtSink` (a terminal egress element) can be driven.
 struct NullOut;
 impl OutputSink for NullOut {
@@ -308,9 +314,8 @@ async fn run_reverse_interop(crypto: Option<(&str, u32)>) {
     let mut sink = SrtSink::new(([127, 0, 0, 1], port).into());
     if let Some((passphrase, pbkeylen)) = crypto {
         sink = sink.with_passphrase(passphrase);
-        if pbkeylen == 32 {
-            sink = sink.with_aes256();
-        }
+        sink.set_property("pbkeylen", g2g_core::PropValue::Uint(pbkeylen.into()))
+            .expect("pbkeylen");
     }
     sink.configure_pipeline(&Caps::ByteStream {
         encoding: ByteStreamEncoding::MpegTs,
@@ -402,6 +407,12 @@ async fn srtsink_encrypted_caller_streams_mpegts_to_ffmpeg_listener() {
 #[ignore = "needs ffmpeg+ffprobe with libsrt; opens a local UDP socket + temp files"]
 async fn srtsink_aes256_caller_streams_mpegts_to_ffmpeg_listener() {
     run_reverse_interop(Some(("g2g_srt_interop_passphrase", 32))).await;
+}
+
+#[tokio::test]
+#[ignore = "needs ffmpeg+ffprobe with libsrt; opens a local UDP socket + temp files"]
+async fn srtsink_aes192_caller_streams_mpegts_to_ffmpeg_listener() {
+    run_reverse_interop(Some(("g2g_srt_interop_passphrase", 24))).await;
 }
 
 /// The `streamid` property reaches libsrt as the caller wrote it: libsrt reads

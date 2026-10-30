@@ -510,6 +510,12 @@ impl AsyncElement for SrtSink {
                 "call the listener again when the connection fails or the listener goes silent, dropping frames until it answers",
             )
             .with_default("true"),
+            PropertySpec::new(
+                "pbkeylen",
+                PropKind::Uint,
+                "AES key length in bytes, 16, 24 or 32",
+            )
+            .with_default("16"),
         ];
         PROPS
     }
@@ -541,6 +547,11 @@ impl AsyncElement for SrtSink {
                 self.auto_reconnect = value.as_bool().ok_or(PropError::Type)?;
                 Ok(())
             }
+            "pbkeylen" => {
+                let bytes = value.as_uint().ok_or(PropError::Type)?;
+                self.key_size = AesKeySize::from_bytes(bytes).ok_or(PropError::Value)?;
+                Ok(())
+            }
             _ => Err(PropError::Unknown),
         }
     }
@@ -554,6 +565,7 @@ impl AsyncElement for SrtSink {
             "passphrase" => Some(PropValue::Str(self.passphrase.clone().unwrap_or_default())),
             "streamid" => Some(PropValue::Str(self.stream_id.clone().unwrap_or_default())),
             "auto-reconnect" => Some(PropValue::Bool(self.auto_reconnect)),
+            "pbkeylen" => Some(PropValue::Uint(self.key_size.bytes() as u64)),
             _ => None,
         }
     }

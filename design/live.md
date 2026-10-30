@@ -766,7 +766,8 @@ the call and holds packets stamped minutes ahead.
 
 Validated g2g to g2g end to end over a lossy loopback: handshake, data, and a
 dropped packet recovered via NAK. The wire format follows the SRT draft so
-real-peer interop is the design target. AES-256 encryption (`with_aes256`),
+real-peer interop is the design target. AES-192 and AES-256 encryption
+(`pbkeylen`),
 mid-stream key rotation (`with_key_rotation`), the TSBPD timing model, and
 live-mode congestion control and pacing (`with_max_bandwidth`) are in place. A
 rotated key's KM message is retransmitted until the peer answers with a KMRSP,
@@ -774,7 +775,7 @@ so a rekey survives KM-packet loss. Real-peer interop with libsrt and ffmpeg is
 validated for the full matrix by the ignored `srt_ffmpeg_interop` test, which
 needs ffmpeg built with libsrt: both directions, ffmpeg caller into `SrtSrc`
 listener and `SrtSink` caller into an ffmpeg listener, across plaintext,
-AES-128 and AES-256.
+AES-128, AES-192 and AES-256.
 
 ## Fallback switching
 

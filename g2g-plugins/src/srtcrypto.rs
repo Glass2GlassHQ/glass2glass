@@ -19,7 +19,7 @@
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
-use aes::{Aes128, Aes256};
+use aes::{Aes128, Aes192, Aes256};
 use aes_kw::Kek;
 use ctr::cipher::{InnerIvInit, KeyInit, StreamCipher};
 use ctr::CtrCore;
@@ -43,22 +43,35 @@ const KM_SE_DATA: u8 = 2; // data stream element
 const KM_HDR_LEN: usize = 16;
 /// AES-CTR with a big-endian 128-bit counter (the full IV is the start block).
 type Aes128Ctr = ctr::Ctr128BE<Aes128>;
+type Aes192Ctr = ctr::Ctr128BE<Aes192>;
 type Aes256Ctr = ctr::Ctr128BE<Aes256>;
 
-/// The stream cipher key size. AES-128 stays the default; AES-256 is opt-in
+/// The stream cipher key size. AES-128 stays the default; AES-192 and AES-256 are opt-in
 /// (`SrtSink::with_aes256`) and negotiated through the KM `KLen` field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AesKeySize {
     Aes128,
     Aes256,
+    Aes192,
 }
 
 impl AesKeySize {
-    /// Key length in bytes (16 or 32).
+    /// Key length in bytes (16, 24 or 32).
     pub fn bytes(self) -> usize {
         match self {
             AesKeySize::Aes128 => 16,
+            AesKeySize::Aes192 => 24,
             AesKeySize::Aes256 => 32,
+        }
+    }
+
+    // libsrt's SRTO_PBKEYLEN values
+    pub fn from_bytes(bytes: u64) -> Option<Self> {
+        match bytes {
+            16 => Some(AesKeySize::Aes128),
+            24 => Some(AesKeySize::Aes192),
+            32 => Some(AesKeySize::Aes256),
+            _ => None,
         }
     }
 }
@@ -67,6 +80,7 @@ impl AesKeySize {
 #[derive(Clone)]
 enum Sek {
     Aes128 { key: [u8; 16], cipher: Box<Aes128> },
+    Aes192 { key: [u8; 24], cipher: Box<Aes192> },
     Aes256 { key: [u8; 32], cipher: Box<Aes256> },
 }
 
@@ -75,6 +89,13 @@ impl Sek {
         Sek::Aes128 {
             key,
             cipher: Box::new(Aes128::new(&key.into())),
+        }
+    }
+
+    fn aes192(key: [u8; 24]) -> Self {
+        Sek::Aes192 {
+            key,
+            cipher: Box::new(Aes192::new(&key.into())),
         }
     }
 
@@ -88,6 +109,7 @@ impl Sek {
     fn as_bytes(&self) -> &[u8] {
         match self {
             Sek::Aes128 { key, .. } => key,
+            Sek::Aes192 { key, .. } => key,
             Sek::Aes256 { key, .. } => key,
         }
     }
@@ -137,6 +159,11 @@ impl SrtCrypto {
                 getrandom::getrandom(&mut k).expect("OS RNG for the SRT stream key");
                 Sek::aes128(k)
             }
+            AesKeySize::Aes192 => {
+                let mut k = [0u8; 24];
+                getrandom::getrandom(&mut k).expect("OS RNG for the SRT stream key");
+                Sek::aes192(k)
+            }
             AesKeySize::Aes256 => {
                 let mut k = [0u8; 32];
                 getrandom::getrandom(&mut k).expect("OS RNG for the SRT stream key");
@@ -148,12 +175,16 @@ impl SrtCrypto {
 
     /// Encrypt or decrypt `buf` in place for packet `seq` (AES-CTR is symmetric:
     /// the same call both ways). The counter block is key-size independent (a
-    /// 128-bit CTR block); only the key schedule differs between AES-128/256.
+    /// 128-bit CTR block); only the key schedule differs between AES-128/192/256.
     pub fn process(&self, seq: u32, buf: &mut [u8]) {
         let iv = self.counter_block(seq).into();
         match &self.sek {
             Sek::Aes128 { cipher, .. } => {
                 Aes128Ctr::from_core(CtrCore::inner_iv_init(Aes128::clone(cipher), &iv))
+                    .apply_keystream(buf)
+            }
+            Sek::Aes192 { cipher, .. } => {
+                Aes192Ctr::from_core(CtrCore::inner_iv_init(Aes192::clone(cipher), &iv))
                     .apply_keystream(buf)
             }
             Sek::Aes256 { cipher, .. } => {
@@ -179,7 +210,7 @@ impl SrtCrypto {
     /// / `KM_KK_ODD`): the fixed header, the salt, and the SEK wrapped with the
     /// passphrase-derived KEK (RFC 3394). This is the payload of the KMREQ/KMRSP
     /// handshake extension and of a mid-stream rekey control packet. `KLen`
-    /// records the key size so AES-128/256 are told apart on unwrap.
+    /// records the key size so AES-128/192/256 are told apart on unwrap.
     pub fn build_km(&self, passphrase: &str, kk: u8) -> Vec<u8> {
         let key_len = self.sek.as_bytes().len();
         let wrapped = match &self.sek {
@@ -187,6 +218,11 @@ impl SrtCrypto {
                 Kek::<Aes128>::from(derive_kek::<16>(passphrase, &self.salt))
                     .wrap_vec(k)
                     .expect("AES-KW wrap of a 16-byte key always succeeds")
+            }
+            Sek::Aes192 { key: k, .. } => {
+                Kek::<Aes192>::from(derive_kek::<24>(passphrase, &self.salt))
+                    .wrap_vec(k)
+                    .expect("AES-KW wrap of a 24-byte key always succeeds")
             }
             Sek::Aes256 { key: k, .. } => {
                 Kek::<Aes256>::from(derive_kek::<32>(passphrase, &self.salt))
@@ -222,7 +258,7 @@ impl SrtCrypto {
     }
 
     /// Parse a KM message and unwrap the SEK with `passphrase`, yielding the
-    /// shared cipher state (AES-128 or AES-256 per the `KLen` field). `None` on a
+    /// shared cipher state (AES-128, 192 or 256 per the `KLen` field). `None` on a
     /// malformed message or a passphrase that fails to unwrap (the integrity
     /// check in AES key unwrap).
     pub fn from_km(km: &[u8], passphrase: &str) -> Option<Self> {
@@ -249,13 +285,19 @@ impl SrtCrypto {
                     .ok()?;
                 Sek::aes128(v.as_slice().try_into().ok()?)
             }
+            24 => {
+                let v = Kek::<Aes192>::from(derive_kek::<24>(passphrase, &salt))
+                    .unwrap_vec(wrapped)
+                    .ok()?;
+                Sek::aes192(v.as_slice().try_into().ok()?)
+            }
             32 => {
                 let v = Kek::<Aes256>::from(derive_kek::<32>(passphrase, &salt))
                     .unwrap_vec(wrapped)
                     .ok()?;
                 Sek::aes256(v.as_slice().try_into().ok()?)
             }
-            _ => return None, // only AES-128 / AES-256
+            _ => return None, // only AES-128 / 192 / 256
         };
         Some(Self { sek, salt })
     }
@@ -263,7 +305,7 @@ impl SrtCrypto {
 
 /// Derive an `N`-byte Key Encrypting Key from the passphrase via PBKDF2-HMAC-SHA1,
 /// salted by the bottom 8 bytes of the stream salt (the SRT/haicrypt rule). The
-/// KEK length matches the cipher (16 for AES-128, 32 for AES-256).
+/// KEK length matches the cipher (16, 24 or 32 bytes for AES-128, 192 or 256).
 fn derive_kek<const N: usize>(passphrase: &str, salt: &[u8; SALT_LEN]) -> [u8; N] {
     let mut kek = [0u8; N];
     pbkdf2::pbkdf2::<Hmac<Sha1>>(
@@ -380,6 +422,19 @@ mod tests {
         sender.process(3, &mut x);
         recv.process(3, &mut y);
         assert_eq!(x, y, "receiver derived the same AES-256 SEK");
+    }
+
+    #[test]
+    fn aes192_km_round_trips_a_24_byte_key() {
+        let sender = SrtCrypto::generate(AesKeySize::Aes192);
+        let km = sender.build_km("p@ss", KM_KK_EVEN);
+        assert_eq!(km[15], 24 / 4, "KLen field records the 192-bit key");
+        let recv = SrtCrypto::from_km(&km, "p@ss").expect("unwrap the AES-192 key");
+        let mut x = vec![7u8; 24];
+        let mut y = x.clone();
+        sender.process(3, &mut x);
+        recv.process(3, &mut y);
+        assert_eq!(x, y, "receiver derived the same AES-192 SEK");
     }
 
     #[test]
