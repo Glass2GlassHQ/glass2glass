@@ -104,6 +104,7 @@ Breaking: `QosMessage` gains `downstream_proc_ns`, `ElementProbe` is no longer `
 - M2001: `srtsrc` calls a listener, both SRT elements take gst's `uri`, and a listening `srtsrc` rejects callers by `streamid` and `pbkeylen`.
 - M2002: `srtsrc` takes `mode=rendezvous`.
 - M2003: `srtsink` takes `mode=listener` and `mode=rendezvous`.
+- M2004: `srtsink` delivers its last packets before its SHUTDOWN, which now reaches a libsrt peer.
 
 ## 0.10.0
 

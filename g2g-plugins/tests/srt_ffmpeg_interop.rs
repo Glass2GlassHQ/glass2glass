@@ -350,6 +350,7 @@ async fn run_reverse_interop(listening: Listening, crypto: Option<(&str, u32)>) 
     sink.process(PipelinePacket::Eos, &mut null)
         .await
         .expect("EOS closes the SRT session");
+    let eos_sent = std::time::Instant::now();
 
     let status = tokio::time::timeout(Duration::from_secs(20), ffmpeg)
         .await
@@ -360,14 +361,21 @@ async fn run_reverse_interop(listening: Listening, crypto: Option<(&str, u32)>) 
         status.success(),
         "ffmpeg listener received + finalized the stream"
     );
+    // an ignored SHUTDOWN leaves ffmpeg to wait out libsrt's 5 s peer idle timeout
+    const SHUTDOWN_EXIT_LIMIT: Duration = Duration::from_secs(1);
+    assert!(
+        eos_sent.elapsed() < SHUTDOWN_EXIT_LIMIT,
+        "the SHUTDOWN ends the call, ffmpeg took {:?} after EOS",
+        eos_sent.elapsed()
+    );
 
     let got_frames = ffprobe_video_frame_count(&out_ts);
     let _ = std::fs::remove_file(&in_ts);
     let _ = std::fs::remove_file(&out_ts);
-    // Allow a small tail loss (last partial payload); the bulk must arrive intact.
-    assert!(
-        got_frames + 2 >= want_frames && got_frames > 0,
-        "ffmpeg decoded {got_frames} frames from the g2g SRT caller (fixture had {want_frames})"
+    // srtsink holds its SHUTDOWN until the tail is delivered, as libsrt drops what TSBPD still holds
+    assert_eq!(
+        got_frames, want_frames,
+        "ffmpeg decoded every frame srtsink sent"
     );
 
     // g2g's caller-side handshake + framing (and, when encrypted, its KMREQ) were

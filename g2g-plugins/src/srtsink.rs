@@ -51,6 +51,15 @@ const HANDSHAKE_RESEND_NS: u64 = 250_000_000;
 // a call that failed is not retried sooner, frames in between are dropped
 pub(crate) const RECONNECT_INTERVAL_NS: u64 = 1_000_000_000;
 const LOG_CATEGORY: &str = "srtsink";
+// a receiver sends a full ACK every 10 ms
+const ACK_POLL_NS: u64 = 5_000_000;
+
+// the first frame sent on a connection, where its srt timestamps start
+#[derive(Debug, Clone, Copy)]
+struct ConnectionStart {
+    pts_ns: u64,
+    sent_at_ns: u64,
+}
 
 /// A mid-stream rekey KM awaiting the peer's KMRSP. Retransmitted on a timer
 /// until acknowledged (or [`KM_MAX_RETRANSMITS`] is reached).
@@ -108,8 +117,9 @@ pub struct SrtSink {
     retransmits: u64,
     eos_seen: bool,
     auto_reconnect: bool,
-    // the pts of the first frame sent on the current connection
-    connection_pts_ns: Option<u64>,
+    connection_start: Option<ConnectionStart>,
+    // how far the last frame's timestamp is ahead of the clock, which delays its delivery
+    timestamps_ahead_ns: u64,
     connected_at_ns: u64,
     last_peer_packet_ns: u64,
     // monotonic time before which a failed connection is not called again
@@ -143,7 +153,8 @@ impl SrtSink {
             retransmits: 0,
             eos_seen: false,
             auto_reconnect: true,
-            connection_pts_ns: None,
+            connection_start: None,
+            timestamps_ahead_ns: 0,
             connected_at_ns: 0,
             last_peer_packet_ns: 0,
             reconnect_at_ns: 0,
@@ -438,8 +449,14 @@ impl SrtSink {
 
     async fn send_frame(&mut self, bytes: &[u8], pts_ns: u64) -> Result<(), G2gError> {
         // srt timestamps count from the start of the connection
-        let connection_pts_ns = *self.connection_pts_ns.get_or_insert(pts_ns);
-        let timestamp = (pts_ns.saturating_sub(connection_pts_ns) / 1000) as u32;
+        let now_ns = g2g_core::metrics::monotonic_ns();
+        let start = *self.connection_start.get_or_insert(ConnectionStart {
+            pts_ns,
+            sent_at_ns: now_ns,
+        });
+        let since_start_ns = pts_ns.saturating_sub(start.pts_ns);
+        self.timestamps_ahead_ns = (start.sent_at_ns + since_start_ns).saturating_sub(now_ns);
+        let timestamp = (since_start_ns / 1000) as u32;
         // Fragment the TS byte stream into SRT payloads (7 TS packets).
         let mut sent = Vec::new();
         {
@@ -508,6 +525,29 @@ impl SrtSink {
         Ok(())
     }
 
+    // a libsrt receiver drops the packets TSBPD still holds when a SHUTDOWN arrives
+    async fn deliver_tail(&mut self) -> Result<(), G2gError> {
+        let deadline = g2g_core::metrics::monotonic_ns() + srt::PEER_IDLE_TIMEOUT_NS;
+        while !self
+            .sender
+            .as_ref()
+            .ok_or(G2gError::NotConfigured)?
+            .all_acknowledged()
+        {
+            if g2g_core::metrics::monotonic_ns() >= deadline {
+                return Err(G2gError::Network(NetworkFailure::Stream));
+            }
+            tokio::time::sleep(core::time::Duration::from_nanos(ACK_POLL_NS)).await;
+            self.service_control().await?;
+        }
+        // the receiver releases the last packet one latency after its timestamp comes due
+        let handshake = self.handshake.as_ref().ok_or(G2gError::NotConfigured)?;
+        let latency = core::time::Duration::from_millis(handshake.latency_ms().into());
+        let ahead = core::time::Duration::from_nanos(self.timestamps_ahead_ns);
+        tokio::time::sleep(latency + ahead).await;
+        Ok(())
+    }
+
     fn peer_idle(&self) -> bool {
         g2g_core::metrics::monotonic_ns().saturating_sub(self.last_peer_packet_ns)
             >= srt::PEER_IDLE_TIMEOUT_NS
@@ -526,7 +566,7 @@ impl SrtSink {
         self.handshake = None;
         self.sender = None;
         self.pending_km = None;
-        self.connection_pts_ns = None;
+        self.connection_start = None;
         Ok(())
     }
 }
@@ -785,11 +825,19 @@ impl AsyncElement for SrtSink {
                     }
                 }
                 PipelinePacket::Eos => {
+                    if self.socket.is_some() {
+                        if let Err(error) = self.deliver_tail().await {
+                            self.connection_failed(error)?;
+                        }
+                    }
                     // Signal the peer to close cleanly (RTP-style flows have no
                     // in-band end; SRT has SHUTDOWN).
-                    if let Some(socket) = self.socket.as_ref() {
-                        // TODO: libsrt ignores a SHUTDOWN to our own socket id, and the peer's id makes it drop the held tail
-                        let shutdown = srt::build_control(&srt::Control::Shutdown, 0, SOCKET_ID);
+                    if let (Some(socket), Some(handshake)) = (&self.socket, &self.handshake) {
+                        let shutdown = srt::build_control(
+                            &srt::Control::Shutdown,
+                            0,
+                            handshake.peer_socket_id(),
+                        );
                         let _ = socket.send(&shutdown).await;
                     }
                     self.eos_seen = true;

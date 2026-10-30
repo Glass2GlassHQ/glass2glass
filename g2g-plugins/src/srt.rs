@@ -713,6 +713,11 @@ impl SrtHandshake {
         self.peer_init_seq
     }
 
+    // the larger of the two sides' latencies, which both sides apply
+    pub fn latency_ms(&self) -> u16 {
+        self.latency_ms
+    }
+
     // the sequence number this side's first data packet carries
     pub fn init_seq(&self) -> u32 {
         self.init_seq
@@ -1178,6 +1183,10 @@ impl SrtSender {
             }
             _ => Vec::new(),
         }
+    }
+
+    pub fn all_acknowledged(&self) -> bool {
+        self.buffer.is_empty()
     }
 
     // everything before ack_seq is received

@@ -785,6 +785,12 @@ completes as soon as the link returns. Packet timestamps count from the first
 frame of each connection, because a listener schedules TSBPD from the start of
 the call and holds packets stamped minutes ahead.
 
+On EOS `SrtSink` waits until the peer has acknowledged every packet, then one
+latency plus however far the last timestamp ran ahead of the clock, before it
+sends SHUTDOWN to the peer's socket id. A libsrt receiver drops the packets
+TSBPD still holds when SHUTDOWN arrives, so gst's srtsink loses its tail on EOS. The
+acknowledgement wait gives up after the 5 s peer idle timeout.
+
 Validated g2g to g2g end to end over a lossy loopback: handshake, data, and a
 dropped packet recovered via NAK. The wire format follows the SRT draft so
 real-peer interop is the design target. AES-192 and AES-256 encryption
