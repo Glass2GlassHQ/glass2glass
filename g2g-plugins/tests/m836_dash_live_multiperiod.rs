@@ -1,7 +1,8 @@
 //! M836 DASH live + multi-period: the wall-clock `@duration` live profile
 //! (`type="dynamic"`, `availabilityStartTime`, `timeShiftBufferDepth`,
 //! `suggestedPresentationDelay`), live-edge start for a `SegmentTimeline`
-//! window, and consecutive `Period`s playing through with a boundary `Segment`.
+//! window, and consecutive `Period`s playing through with a boundary `Segment`
+//! and seeking across them.
 //!
 //! The live manifests are the shape ffmpeg's dash muxer writes mid-stream
 //! (`-f dash -streaming 1 -window_size N -use_template 1 -use_timeline 0`), with
@@ -18,10 +19,10 @@ use std::sync::{Arc, Mutex};
 use g2g_core::element::AsyncElement;
 use g2g_core::frame::{Frame, FrameTiming};
 use g2g_core::memory::SystemSlice;
-use g2g_core::runtime::SourceLoop;
+use g2g_core::runtime::{SeekController, SourceLoop};
 use g2g_core::{
     ByteStreamEncoding, Caps, Dim, G2gError, MemoryDomain, MultiInputElement, OutputSink,
-    PipelinePacket, PropValue, PushOutcome, Rate, Segment, VideoCodec,
+    PipelinePacket, PropValue, PushOutcome, Rate, Seek, Segment, VideoCodec,
 };
 use g2g_plugins::dashsrc::DashSrc;
 use g2g_plugins::fmp4demux::Fmp4Demux;
@@ -335,13 +336,17 @@ async fn dash_live_segment_timeline_starts_near_the_live_edge() {
 
 // --- multi-period ---------------------------------------------------------
 
+const AU_DURATION_NS: u64 = 33_333_333;
+const PERIOD_B_START_NS: u64 = 3_000_000_000;
+const SEGMENT_DURATION_NS: u64 = 1_000_000_000;
+
 fn au_frame(bytes: Vec<u8>, pts_ns: u64, seq: u64) -> Frame {
     Frame {
         domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
         timing: FrameTiming {
             pts_ns,
             dts_ns: pts_ns,
-            duration_ns: 33_333_333,
+            duration_ns: AU_DURATION_NS,
             ..FrameTiming::default()
         },
         sequence: seq,
@@ -385,7 +390,7 @@ async fn make_fmp4(aus: &[Vec<u8>]) -> Vec<u8> {
     for (i, au) in aus.iter().enumerate() {
         mux.process(
             0,
-            PipelinePacket::DataFrame(au_frame(au.clone(), i as u64 * 33_333_333, i as u64)),
+            PipelinePacket::DataFrame(au_frame(au.clone(), i as u64 * AU_DURATION_NS, i as u64)),
             &mut out,
         )
         .await
@@ -443,8 +448,17 @@ const MULTI_PERIOD_MPD: &str = "<?xml version=\"1.0\"?>\n\
       </Period>\n\
     </MPD>";
 
-#[tokio::test]
-async fn dash_multi_period_plays_through_and_emits_a_boundary_segment() {
+struct MultiPeriod {
+    url: String,
+    aus_a: Vec<Vec<u8>>,
+    aus_b: Vec<Vec<u8>>,
+    init_a: Vec<u8>,
+    segs_a: Vec<Vec<u8>>,
+    init_b: Vec<u8>,
+    segs_b: Vec<Vec<u8>>,
+}
+
+async fn serve_multi_period() -> MultiPeriod {
     let aus_a = access_units(0xA0);
     let aus_b = access_units(0xB0);
     let (init_a, segs_a) = split_fmp4(&make_fmp4(&aus_a).await);
@@ -473,7 +487,35 @@ async fn dash_multi_period_plays_through_and_emits_a_boundary_segment() {
             .and_then(|s| s.parse::<usize>().ok())
             .and_then(|i| segs.get(i).cloned())
     }) + "/manifest.mpd";
+    MultiPeriod {
+        url,
+        aus_a,
+        aus_b,
+        init_a,
+        segs_a,
+        init_b,
+        segs_b,
+    }
+}
 
+async fn run_multi_period_seek(url: &str, target_ns: u64) -> CaptureSink {
+    let seek = SeekController::new();
+    seek.seek(Seek::flush_to(target_ns));
+    let mut src = DashSrc::new(url).with_seek(seek);
+    run_dash(&mut src).await
+}
+
+#[tokio::test]
+async fn dash_multi_period_plays_through_and_emits_a_boundary_segment() {
+    let MultiPeriod {
+        url,
+        aus_a,
+        aus_b,
+        init_a,
+        segs_a,
+        init_b,
+        segs_b,
+    } = serve_multi_period().await;
     let mut src = DashSrc::new(url);
     let sink = run_dash(&mut src).await;
 
@@ -489,25 +531,28 @@ async fn dash_multi_period_plays_through_and_emits_a_boundary_segment() {
     }
     assert_eq!(sink.body, expected, "period a then period b, in order");
 
-    // One boundary Segment, before the second Period's media: running time
-    // continues where period a ended (3s), stream time restarts at 0.
+    // One boundary Segment, before the second Period's media: running time and
+    // stream time both continue where period a ended.
     assert_eq!(sink.segments.len(), 1, "one Segment, at the boundary");
     let seg = sink.segments[0];
     assert_eq!(
-        seg.base, 3_000_000_000,
+        seg.base, PERIOD_B_START_NS,
         "running time continues past period a"
     );
-    assert_eq!(seg.time, 0, "stream time restarts with period b");
-    assert_eq!(seg.start, 0, "period b's own timeline starts at 0");
+    assert_eq!(
+        seg.time, PERIOD_B_START_NS,
+        "stream time is presentation time"
+    );
+    assert_eq!(seg.start, 0, "period b's media timestamps start at 0");
     assert_eq!(
         seg.to_running_time(0),
-        Some(3_000_000_000),
+        Some(PERIOD_B_START_NS),
         "period b's first sample lands at 3s of running time"
     );
     assert_eq!(
-        seg.to_stream_time(1_000_000_000),
-        Some(1_000_000_000),
-        "1s into period b is 1s of stream time"
+        seg.to_stream_time(SEGMENT_DURATION_NS),
+        Some(PERIOD_B_START_NS + SEGMENT_DURATION_NS),
+        "1s into period b is 4s of stream time"
     );
 
     // Sample-exact: the delivered stream demuxes back to both Periods' access
@@ -528,5 +573,56 @@ async fn dash_multi_period_plays_through_and_emits_a_boundary_segment() {
     assert_eq!(
         dsink.aus, expected_aus,
         "multi-period DashSrc -> Fmp4Demux recovers every access unit of both periods"
+    );
+}
+
+#[tokio::test]
+async fn dash_seek_into_a_later_period_plays_from_the_target() {
+    let fixture = serve_multi_period().await;
+    let target_ns = PERIOD_B_START_NS + SEGMENT_DURATION_NS + SEGMENT_DURATION_NS / 2;
+    let sink = run_multi_period_seek(&fixture.url, target_ns).await;
+
+    let mut expected = fixture.init_b.clone();
+    expected.extend_from_slice(&fixture.segs_b[1]);
+    expected.extend_from_slice(&fixture.segs_b[2]);
+    assert_eq!(
+        sink.body, expected,
+        "period b's init, then its second segment onward"
+    );
+    assert_eq!(sink.segments.len(), 1, "only the seek's Segment");
+    let seg = sink.segments[0];
+    assert_eq!(seg.time, target_ns, "stream time starts at the target");
+    // the second segment's first sample is period b's second access unit
+    let target_media_ns = AU_DURATION_NS + SEGMENT_DURATION_NS / 2;
+    assert_eq!(seg.start, target_media_ns);
+    assert_eq!(seg.to_running_time(target_media_ns), Some(0));
+}
+
+#[tokio::test]
+async fn dash_seek_before_a_period_boundary_carries_running_time_over_it() {
+    let fixture = serve_multi_period().await;
+    let target_ns = SEGMENT_DURATION_NS + SEGMENT_DURATION_NS / 2;
+    let sink = run_multi_period_seek(&fixture.url, target_ns).await;
+
+    let mut expected = fixture.init_a.clone();
+    expected.extend_from_slice(&fixture.segs_a[1]);
+    expected.extend_from_slice(&fixture.segs_a[2]);
+    expected.extend_from_slice(&fixture.init_b);
+    for segment in &fixture.segs_b {
+        expected.extend_from_slice(segment);
+    }
+    assert_eq!(sink.body, expected);
+    assert_eq!(
+        sink.segments.len(),
+        2,
+        "the seek's Segment, then the boundary's"
+    );
+    assert_eq!(sink.segments[0].time, target_ns);
+    let boundary = sink.segments[1];
+    assert_eq!(boundary.time, PERIOD_B_START_NS);
+    assert_eq!(
+        boundary.to_running_time(0),
+        Some(PERIOD_B_START_NS - target_ns),
+        "period b starts after the media played since the target"
     );
 }

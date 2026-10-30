@@ -32,14 +32,15 @@
 //!
 //! Segment times are period-relative presentation times: a template's
 //! `@presentationTimeOffset` is already off them (`$Time$` URLs keep the media
-//! value), so seek targets and the boundary `Segment` are on the same timeline
-//! whatever media timestamps the Period uses.
+//! value). Seek targets and stream time are presentation time across the whole
+//! MPD, a segment's time plus its Period's `@start`, as in gst's `dashdemux`.
 //!
 //! Multi-period: the Periods play through back to back, each with its own
-//! `BaseURL` / template / Representation choice. Crossing a boundary emits a
-//! [`PipelinePacket::Segment`] whose `base` is the media played before it and
-//! whose `time` is 0: running time continues across the boundary while stream
-//! time restarts with the new Period's own timeline.
+//! `BaseURL` / template / Representation choice. The first media of a Period
+//! goes out behind a [`PipelinePacket::Segment`] that maps its timestamps onto
+//! the presentation time of the Period start, so running time and stream time
+//! both continue across the boundary. A seek finds the Period holding the target
+//! first, then the segment.
 //!
 //! CMAF chunked consumption (`low-latency`): a segment response is read as
 //! a stream and each complete chunk (`styp` / `moof`+`mdat`) is pushed downstream
@@ -66,7 +67,7 @@ use g2g_core::time::ticks_to_ns;
 use g2g_core::{
     g2g_debug, g2g_warn, BusHandle, ByteStreamEncoding, Caps, CapsConstraint, CapsSet,
     ConfigureOutcome, ElementMetadata, G2gError, OutputSink, PipelinePacket, PropError, PropKind,
-    PropValue, PropertySpec, Segment,
+    PropValue, PropertySpec,
 };
 
 use crate::abr::BandwidthEstimator;
@@ -271,18 +272,6 @@ fn period_end_secs(span_secs: f64) -> Option<f64> {
     (span_secs > 0.0).then_some(span_secs)
 }
 
-/// The running-time span of Period `idx`: its declared span, else the media
-/// actually played from it. The running-time offset the next Period's boundary
-/// `Segment` carries.
-fn period_span_ns(mpd: &Mpd, idx: usize, played_ns: u64) -> u64 {
-    let declared = period_span_secs(mpd, idx);
-    if declared > 0.0 {
-        (declared * 1_000_000_000.0) as u64
-    } else {
-        played_ns
-    }
-}
-
 /// # Example
 ///
 /// ```no_run
@@ -303,10 +292,9 @@ pub struct DashSrc {
     /// How far behind the live edge a dynamic manifest starts, in ms
     /// (0 = derive; see [`presentation_delay_secs`]).
     presentation_delay_ms: u64,
-    /// Optional time-seek channel: resolves a TIME seek to the media
-    /// segment whose start time precedes the target (the `SegmentRef.time` is
-    /// already a stream-time in `timescale` units), flushes, re-emits the init
-    /// segment, and resumes there. The CMAF/DASH segment-transition case.
+    /// Optional time-seek channel: resolves a TIME seek to the Period and
+    /// then the media segment whose start time precedes the target, flushes,
+    /// re-emits the init segment, and resumes there.
     seek: Option<SeekController>,
     /// Throughput-driven ABR: when set, the run loop measures each segment
     /// download and re-selects the Representation whose bandwidth fits the
@@ -381,10 +369,11 @@ impl DashSrc {
     }
 
     /// Make the source time-seekable: `run` polls `controller` before each
-    /// segment fetch and, on a flushing seek, selects the segment containing the
-    /// target (the last whose `$Time$` start precedes it), emits `Flush`, re-emits
-    /// the init segment for a reset downstream demuxer, emits the post-flush
-    /// `Segment`, and resumes there. The application keeps a clone to scrub.
+    /// segment fetch and, on a flushing seek, selects the Period and then the
+    /// segment containing the target (the last whose start precedes it), emits
+    /// `Flush`, re-emits the init segment for a reset downstream demuxer, emits
+    /// the post-flush `Segment`, and resumes there. The application keeps a
+    /// clone to scrub.
     pub fn with_seek(mut self, controller: SeekController) -> Self {
         self.seek = Some(controller);
         self
@@ -525,16 +514,12 @@ impl SourceLoop for DashSrc {
                     cap
                 }
             };
-            // Multi-period state. `period_base_ns` is the running time already
-            // played when the current Period starts; `period_played_ns` is what
-            // this Period has contributed so far (the span fallback for a
-            // manifest that declares neither @duration nor the next @start).
             let mut period_idx = 0usize;
-            let mut period_base_ns = 0u64;
-            let mut period_played_ns = 0u64;
             // A boundary was crossed: the next Period's first media is preceded
             // by a `Segment` carrying the running-time offset.
             let mut boundary_pending = false;
+            // the presentation time a seek moved playback to, applied once its Period is loaded
+            let mut seek_target_ns: Option<u64> = None;
             // Live playback positions itself once per Period, not on every
             // manifest reload (a reload continues from `last_played`).
             let mut positioned = false;
@@ -547,6 +532,7 @@ impl SourceLoop for DashSrc {
             }
             'manifest: loop {
                 let period = &mpd.periods[period_idx];
+                let period_start_ns = (period.start_secs * 1_000_000_000.0) as u64;
                 // Segment URIs resolve against the Period's BaseURL, itself
                 // resolved against the MPD BaseURL / the manifest URL.
                 let mut base = match &mpd.base_url {
@@ -598,54 +584,47 @@ impl SourceLoop for DashSrc {
                     period_idx = mpd.live_period_index(clock.now_unix(), delay_secs);
                     last_played = None;
                     last_dur_ns = 0;
-                    period_played_ns = 0;
                     init_emitted = false;
                     positioned = false;
                     continue 'manifest;
                 }
 
-                // A new Period restarts stream time at its own first segment
-                // while running time carries on where the previous one ended.
-                if boundary_pending && !segs.is_empty() {
-                    let start_ns = to_ns(segs[0].time, timescale);
-                    out.push(PipelinePacket::Segment(Segment {
-                        base: period_base_ns,
-                        start: start_ns,
-                        position: start_ns,
-                        time: 0,
-                        ..Segment::new()
-                    }))
-                    .await?;
-                    boundary_pending = false;
-                }
-
-                // Live: start near the live edge rather than replaying the whole
-                // available window (the wall-clock window, or every listed
-                // segment when the manifest has no availabilityStartTime).
                 let mut idx = 0usize;
-                if mpd.dynamic && !positioned && !segs.is_empty() {
+                if let Some(target_ns) = seek_target_ns.take() {
+                    idx = segment_for_time(
+                        &segs,
+                        timescale,
+                        target_ns.saturating_sub(period_start_ns),
+                    );
+                    positioned = true;
+                } else if mpd.dynamic && !positioned && !segs.is_empty() {
+                    // Live: start near the live edge rather than replaying the whole
+                    // available window (the wall-clock window, or every listed
+                    // segment when the manifest has no availabilityStartTime).
                     idx = live_start_offset(&segs, timescale, (delay_secs * 1e9) as u64);
                     positioned = true;
                 }
                 loop {
                     // Apply a pending flushing time seek before the next fetch:
-                    // jump to the segment containing the target, flush, and re-emit
+                    // flush, reload the Period containing the target, and re-emit
                     // the init segment (a downstream demuxer reset on the flush
                     // needs its moov again).
                     if let Some(seek) = self.seek.as_ref().and_then(|c| c.take_seek(flushing_only))
                     {
-                        let target_idx = segment_for_time(&segs, timescale, seek.start);
                         // Queued lookahead is pre-seek media: drop it (and
                         // re-arm the prebuffer fill) before flushing.
                         window.clear();
                         out.push(PipelinePacket::Flush).await?;
-                        idx = target_idx;
+                        period_idx = mpd.period_index_at(seek.start as f64 / 1_000_000_000.0);
+                        seek_target_ns = Some(seek.start);
                         // Jumped by index; clear the reload-dedup watermark so
                         // the target segment is not skipped as "already played".
                         last_played = None;
+                        last_dur_ns = 0;
                         init_emitted = false;
+                        boundary_pending = false;
                         timeline.seek(seek);
-                        continue; // re-evaluate from the repositioned index
+                        continue 'manifest;
                     }
 
                     if !init_emitted {
@@ -697,14 +676,20 @@ impl SourceLoop for DashSrc {
                                 // each CMAF chunk as it lands. The prebuffer window
                                 // is empty here whenever it is disabled, so pushing
                                 // from inside the fetch keeps emission ordered.
-                                let start_ns = to_ns(seg.time, timescale);
+                                let period_time_ns = to_ns(seg.time, timescale);
+                                let presentation_start_ns =
+                                    period_start_ns.saturating_add(period_time_ns);
                                 let fetched = if self.low_latency
                                     && self.prebuffer_ms == 0
                                     && seg.byte_range.is_none()
                                 {
-                                    if let Some(segment) =
-                                        timeline.segment_ahead(&*self, start_ns, false, || None)
-                                    {
+                                    // no bytes yet, so the media time is taken as the Period-relative time
+                                    if let Some(segment) = timeline.segment_ahead(
+                                        &*self,
+                                        presentation_start_ns,
+                                        core::mem::take(&mut boundary_pending),
+                                        || Some(period_time_ns),
+                                    ) {
                                         out.push(PipelinePacket::Segment(segment)).await?;
                                     }
                                     stream_segment_chunks(&client, &url, out, &mut sequence, retry)
@@ -717,8 +702,8 @@ impl SourceLoop for DashSrc {
                                             if !bytes.is_empty() {
                                                 let segment_ahead = timeline.segment_ahead(
                                                     &*self,
-                                                    start_ns,
-                                                    false,
+                                                    presentation_start_ns,
+                                                    core::mem::take(&mut boundary_pending),
                                                     || {
                                                         init_header.as_ref().and_then(|header| {
                                                             crate::fmp4::earliest_fragment_pts_ns(
@@ -738,7 +723,6 @@ impl SourceLoop for DashSrc {
                                     time: seg.time,
                                     timescale,
                                 });
-                                period_played_ns = period_played_ns.saturating_add(duration_ns);
                                 match fetched {
                                     Ok(len) => {
                                         measured = Some((
@@ -813,16 +797,10 @@ impl SourceLoop for DashSrc {
                 }
 
                 // This Period is played out. A following Period continues the
-                // presentation: carry the running time over, restart the
-                // per-Period state, and re-enter with the boundary pending.
+                // presentation: restart the per-Period state and re-enter with
+                // the boundary pending.
                 if period_idx + 1 < mpd.periods.len() && period_listed_whole {
-                    period_base_ns = period_base_ns.saturating_add(period_span_ns(
-                        &mpd,
-                        period_idx,
-                        period_played_ns,
-                    ));
                     period_idx += 1;
-                    period_played_ns = 0;
                     last_played = None;
                     last_dur_ns = 0;
                     init_emitted = false;

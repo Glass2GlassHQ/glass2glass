@@ -110,6 +110,7 @@ Breaking: `QosMessage` gains `downstream_proc_ns`, `ElementProbe` is no longer `
 - M2007: a seek resolves to served, refused or superseded, and every seekable element refuses a seek it cannot serve instead of dropping it.
 - M2008: HLS and DASH VOD streams take `g2g-launch` seeks and start at the target frame.
 - M2009: HLS plays and seeks across `#EXT-X-DISCONTINUITY` with running and stream time continuing in playlist time.
+- M2010: DASH seeks cross Period boundaries, with stream time continuing in presentation time across Periods.
 
 ## 0.10.0
 

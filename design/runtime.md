@@ -534,15 +534,16 @@ accumulating `Segment`, with no `Flush`, so the source keeps producing on a
 continuous running-time line.
 
 `HlsSrc` and `DashSrc` are time sources: a seek target is playlist time, or
-Period-relative presentation time for DASH, which the demuxer after them does not
-stamp. A TS segment's PTS carry the encoder's own start, 1.4 s for ffmpeg. So the
+presentation time across the Periods for DASH (a segment's time plus its Period's
+`@start`), which the demuxer after them does not stamp. A DASH seek finds the
+Period holding the target, then the segment. A TS segment's PTS carry the encoder's own start, 1.4 s for ffmpeg. So the
 source sends its post-flush `Segment` with the first media it fetches after the
 seek, once it has read the earliest PTS in it, with the same reader the demuxer uses
 (`tsdemux::earliest_pts_ns`, `fmp4::earliest_fragment_pts_ns`). `start` is the
 target moved onto those timestamps and `time` is the target itself, so the sink
 clips the frames before the target and reports positions in playlist time. A
 segment with no readable timestamp keeps the `Segment` on playlist time, with a
-warning. At an HLS `#EXT-X-DISCONTINUITY` the source sends a `Segment` the same way, its
+warning. At an HLS `#EXT-X-DISCONTINUITY` and a DASH Period boundary the source sends a `Segment` the same way, its
 `base` the playlist time played since the first media out or the last seek, so
 running time carries on over timestamps that jump. The source's `Segment` rides
 the prebuffer window with the bytes it precedes. `tsdemux` keeps a `Segment` that

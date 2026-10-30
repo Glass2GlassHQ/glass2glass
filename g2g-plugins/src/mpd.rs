@@ -333,9 +333,8 @@ pub struct UtcTiming {
 
 /// One `Period`: a self-contained stretch of the presentation with its own
 /// Representations, base URL and segment addressing. Consecutive Periods play
-/// through back to back; each one's segment times restart at zero, so the
-/// running-time offset of a Period is its `start_secs` (or the media played
-/// before it).
+/// through back to back; each one's segment times restart at zero, so a
+/// segment's presentation time is its time plus the Period's `start_secs`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Period {
     pub id: Option<String>,
@@ -852,10 +851,14 @@ impl Mpd {
         let Some(availability_start) = self.availability_start_unix else {
             return 0;
         };
-        let playing_secs = now_unix - presentation_delay_secs - availability_start;
+        self.period_index_at(now_unix - presentation_delay_secs - availability_start)
+    }
+
+    // a time before the first Period lands in it
+    pub fn period_index_at(&self, presentation_secs: f64) -> usize {
         self.periods
             .iter()
-            .rposition(|p| p.start_secs <= playing_secs)
+            .rposition(|p| p.start_secs <= presentation_secs)
             .unwrap_or(0)
     }
 
