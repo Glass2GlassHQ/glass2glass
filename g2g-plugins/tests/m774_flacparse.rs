@@ -308,3 +308,40 @@ async fn a_truncated_last_frame_is_dropped() {
     stream.truncate(stream.len() - 1);
     assert_eq!(parse_frames(&stream).await, frames[..1]);
 }
+
+#[tokio::test]
+async fn a_flush_restarts_timestamps_at_the_demuxer_landing() {
+    let frame_pts =
+        |number: u8| u64::from(number) * SYNTH_BLOCK as u64 * 1_000_000_000 / SYNTH_RATE;
+    let mut parse = FlacParse::new();
+    parse
+        .configure_pipeline(&Caps::Audio {
+            format: AudioFormat::Flac,
+            channels: 0,
+            sample_rate: 0,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
+        })
+        .expect("configure");
+    let mut sink = CaptureSink::default();
+    // a demuxer sends the header and then one timed frame per packet, and sends the header again after a seek
+    let mut feed = vec![chunk(&synth_stream_header(), 0)];
+    feed.extend((0..4).map(|number| chunk(&synth_frame(number), frame_pts(number))));
+    feed.push(PipelinePacket::Flush);
+    feed.push(chunk(&synth_stream_header(), 0));
+    let landing = 1..4;
+    feed.extend(
+        landing
+            .clone()
+            .map(|number| chunk(&synth_frame(number), frame_pts(number))),
+    );
+    feed.push(PipelinePacket::Eos);
+    for packet in feed {
+        let flushed = matches!(packet, PipelinePacket::Flush);
+        parse.process(packet, &mut sink).await.expect("parse");
+        if flushed {
+            sink.frames.clear();
+        }
+    }
+    let after_flush: Vec<u64> = sink.frames.iter().skip(1).map(|(pts, _)| *pts).collect();
+    assert_eq!(after_flush, landing.map(frame_pts).collect::<Vec<_>>());
+}

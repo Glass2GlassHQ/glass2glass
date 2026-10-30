@@ -34,7 +34,7 @@ use g2g_core::{
     PadTemplate, PadTemplates, PipelinePacket, Tag, TagList,
 };
 
-use crate::flactag::metadata_blocks;
+use crate::flactag::{metadata_blocks, FLAC_MARKER};
 use crate::vorbiscomment::{
     parse_comment_body, parse_flac_picture, FLAC_COMMENT_BLOCK_TYPE, FLAC_PICTURE_BLOCK_TYPE,
 };
@@ -83,6 +83,10 @@ pub struct FlacParse {
     headers_sent: u64,
     /// Per-channel samples emitted so far (the PTS accumulator).
     samples: u64,
+    // set by a Flush until the first frame data after it arrives
+    awaiting_restart_input: bool,
+    // where `samples` restarts at the first frame emitted after a Flush
+    restart_pts_ns: Option<u64>,
     sequence: u64,
     bus: Option<BusHandle>,
     tags: TagList,
@@ -112,6 +116,8 @@ impl FlacParse {
             info: None,
             headers_sent: 0,
             samples: 0,
+            awaiting_restart_input: false,
+            restart_pts_ns: None,
             sequence: 0,
             bus: None,
             tags: TagList::new(),
@@ -153,6 +159,12 @@ impl FlacParse {
                 let ns = |samples: u64| {
                     (samples as u128 * 1_000_000_000 / info.sample_rate as u128) as u64
                 };
+                if let Some(restart_pts_ns) = self.restart_pts_ns.take() {
+                    // nearest sample, so a sample-exact demuxer timestamp comes back unchanged
+                    self.samples = ((restart_pts_ns as u128 * info.sample_rate as u128
+                        + 500_000_000)
+                        / 1_000_000_000) as u64;
+                }
                 let pts = ns(self.samples);
                 let dur = ns(u64::from(h.block_size));
                 self.samples += u64::from(h.block_size);
@@ -490,6 +502,10 @@ impl AsyncElement for FlacParse {
                     let slice = frame
                         .domain
                         .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
+                    if self.awaiting_restart_input && !slice.starts_with(FLAC_MARKER) {
+                        self.awaiting_restart_input = false;
+                        self.restart_pts_ns = Some(frame.timing.pts_ns);
+                    }
                     self.buf.extend_from_slice(slice);
                     self.drain(out).await?;
                 }
@@ -502,6 +518,8 @@ impl AsyncElement for FlacParse {
                 }
                 PipelinePacket::Flush => {
                     self.buf.clear();
+                    self.awaiting_restart_input = true;
+                    self.restart_pts_ns = None;
                     out.push(PipelinePacket::Flush).await?;
                 }
                 PipelinePacket::CapsChanged(_) => {}
@@ -533,7 +551,6 @@ impl PadTemplates for FlacParse {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::flactag::FLAC_MARKER;
     use crate::testutil::{flac_block, flac_picture_body, flac_streaminfo, run, STREAMINFO_TYPE};
     use crate::vorbiscomment::vorbis_comment;
 
