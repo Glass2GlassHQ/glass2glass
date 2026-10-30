@@ -36,9 +36,9 @@ use g2g_core::frame::Frame;
 use g2g_core::log::short_type_name;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata,
-    G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError,
-    PropValue, PropertySpec, TagList,
+    AsyncElement, AudioFormat, Caps, CapsConstraint, ConfigureOutcome, ElementMetadata, G2gError,
+    MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropValue,
+    PropertySpec, TagList,
 };
 
 use crate::tagproperty::TagsProperty;
@@ -77,6 +77,8 @@ impl VorbisTag {
     }
 }
 
+const TAGGED_FORMATS: &[AudioFormat] = &[AudioFormat::Vorbis];
+
 impl AsyncElement for VorbisTag {
     type ProcessFuture<'a>
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
@@ -89,32 +91,20 @@ impl AsyncElement for VorbisTag {
     }
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
-        match upstream_caps {
-            Caps::Audio {
-                format: AudioFormat::Vorbis,
-                ..
-            } => Ok(upstream_caps.clone()),
-            _ => Err(G2gError::CapsMismatch),
-        }
+        crate::compressed_audio_passthrough::require_format(TAGGED_FORMATS, upstream_caps)?;
+        Ok(upstream_caps.clone())
     }
 
-    /// Pass-through identity over Vorbis of any channels / rate: the tags do not
-    /// touch the audio shape, which the identification header already fixed.
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
-        CapsConstraint::IdentityAny
+        CapsConstraint::Identity(crate::compressed_audio_passthrough::passthrough_caps(
+            TAGGED_FORMATS,
+        ))
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        match absolute_caps {
-            Caps::Audio {
-                format: AudioFormat::Vorbis,
-                ..
-            } => {
-                self.configured = true;
-                Ok(ConfigureOutcome::Accepted)
-            }
-            _ => Err(G2gError::CapsMismatch),
-        }
+        crate::compressed_audio_passthrough::require_format(TAGGED_FORMATS, absolute_caps)?;
+        self.configured = true;
+        Ok(ConfigureOutcome::Accepted)
     }
 
     fn metadata(&self) -> ElementMetadata {
@@ -183,17 +173,7 @@ impl AsyncElement for VorbisTag {
 
 impl PadTemplates for VorbisTag {
     fn pad_templates() -> Vec<PadTemplate> {
-        // `Caps::Audio` has no open dims; pin the common stereo / 44.1 kHz shape.
-        let vorbis = Caps::Audio {
-            format: AudioFormat::Vorbis,
-            channels: 2,
-            sample_rate: 44_100,
-            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
-        };
-        Vec::from([
-            PadTemplate::sink(CapsSet::one(vorbis.clone())),
-            PadTemplate::source(CapsSet::one(vorbis)),
-        ])
+        crate::compressed_audio_passthrough::pad_templates(TAGGED_FORMATS)
     }
 }
 

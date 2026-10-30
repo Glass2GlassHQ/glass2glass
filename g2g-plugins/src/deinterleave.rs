@@ -33,9 +33,10 @@ use g2g_core::fanout::{MultiOutputElement, MultiOutputSink};
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata,
-    G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError,
-    PropKind, PropValue, PropertySpec, ANY_CHANNELS, ANY_SAMPLE_RATE,
+    pcm_caps_any_rate_and_channels, AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet,
+    ConfigureOutcome, ElementMetadata, G2gError, MemoryDomain, OutputSink, PadTemplate,
+    PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, ANY_CHANNELS,
+    ANY_SAMPLE_RATE,
 };
 
 use crate::audioconvert::{
@@ -462,12 +463,6 @@ static DEINTERLEAVE_PROPS: &[PropertySpec] = &[PropertySpec::new(
 
 impl PadTemplates for Deinterleave {
     fn pad_templates() -> Vec<PadTemplate> {
-        let any_pcm = |format| Caps::Audio {
-            format,
-            channels: ANY_CHANNELS,
-            sample_rate: ANY_SAMPLE_RATE,
-            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
-        };
         let mono_pcm = |format| Caps::Audio {
             format,
             channels: 1,
@@ -475,9 +470,7 @@ impl PadTemplates for Deinterleave {
             channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         Vec::from([
-            PadTemplate::sink(CapsSet::from_alternatives(
-                pcm_formats().map(any_pcm).to_vec(),
-            )),
+            PadTemplate::sink(pcm_caps_any_rate_and_channels(|_| true)),
             PadTemplate::source(CapsSet::from_alternatives(
                 pcm_formats().map(mono_pcm).to_vec(),
             )),

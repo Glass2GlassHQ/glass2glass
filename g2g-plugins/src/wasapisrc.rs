@@ -42,9 +42,9 @@ use windows::Win32::System::Com::{
 
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
-    AudioFormat, Caps, CapsConstraint, CapsSet, ClockSync, ConfigureOutcome, ElementMetadata,
-    G2gError, HardwareError, OutputSink, PadTemplate, PadTemplates, PropError, PropKind, PropValue,
-    PropertySpec,
+    pcm_caps_any_rate_and_channels, AudioFormat, Caps, CapsConstraint, CapsSet, ClockSync,
+    ConfigureOutcome, ElementMetadata, G2gError, HardwareError, OutputSink, PadTemplate,
+    PadTemplates, PropError, PropKind, PropValue, PropertySpec,
 };
 
 use crate::audiocapture::{
@@ -259,18 +259,10 @@ static WASAPISRC_PROPS: &[PropertySpec] = &[
 ];
 
 impl PadTemplates for WasapiSrc {
-    /// PCM source pad. `Caps::Audio` has no open dims, so the template pins the
-    /// common shapes per PCM format, as in `AudioTestSrc` / `WavSink`.
     fn pad_templates() -> Vec<PadTemplate> {
-        let pcm = |format| Caps::Audio {
-            format,
-            channels: 2,
-            sample_rate: 48_000,
-            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
-        };
-        Vec::from([PadTemplate::source(CapsSet::from_alternatives(Vec::from(
-            [pcm(AudioFormat::PcmF32Le), pcm(AudioFormat::PcmS16Le)],
-        )))])
+        Vec::from([PadTemplate::source(pcm_caps_any_rate_and_channels(
+            |format| matches!(format, AudioFormat::PcmF32Le | AudioFormat::PcmS16Le),
+        ))])
     }
 }
 

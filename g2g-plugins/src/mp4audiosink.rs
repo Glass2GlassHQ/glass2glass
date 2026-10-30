@@ -228,12 +228,9 @@ impl AsyncElement for Mp4AudioSink {
 
 impl PadTemplates for Mp4AudioSink {
     fn pad_templates() -> Vec<PadTemplate> {
-        Vec::from([PadTemplate::sink(CapsSet::one(Caps::Audio {
-            format: AudioFormat::Aac,
-            channels: 2,
-            sample_rate: 48_000,
-            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
-        }))])
+        Vec::from([PadTemplate::sink(CapsSet::one(
+            crate::typefind::elementary_audio_caps(AudioFormat::Aac),
+        ))])
     }
 }
 

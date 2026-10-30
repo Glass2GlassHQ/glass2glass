@@ -16,9 +16,8 @@ use std::io::{BufWriter, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 
 use g2g_core::{
-    AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata,
-    G2gError, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
-    PropValue, PropertySpec,
+    AsyncElement, Caps, CapsConstraint, ConfigureOutcome, ElementMetadata, G2gError, OutputSink,
+    PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
 };
 
 use crate::filesink::{io_err, path_io_err};
@@ -218,22 +217,8 @@ static WAVSINK_PROPS: &[PropertySpec] = &[PropertySpec::new(
 )];
 
 impl PadTemplates for WavSink {
-    /// Terminal PCM sink pad. `Caps::Audio` has no open dims, so the
-    /// template pins the common shapes per PCM format.
     fn pad_templates() -> Vec<PadTemplate> {
-        let pcm = |format| Caps::Audio {
-            format,
-            channels: 2,
-            sample_rate: 48_000,
-            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
-        };
-        Vec::from([PadTemplate::sink(CapsSet::from_alternatives(Vec::from([
-            pcm(AudioFormat::PcmU8),
-            pcm(AudioFormat::PcmS16Le),
-            pcm(AudioFormat::PcmS24Le),
-            pcm(AudioFormat::PcmS32Le),
-            pcm(AudioFormat::PcmF32Le),
-        ])))])
+        Vec::from([PadTemplate::sink(linear_pcm_caps())])
     }
 }
 
@@ -241,6 +226,7 @@ impl PadTemplates for WavSink {
 mod tests {
     use super::*;
     use crate::waveformat::{WAVE_FORMAT_IEEE_FLOAT, WAVE_FORMAT_PCM};
+    use g2g_core::AudioFormat;
 
     #[test]
     fn header_is_canonical_44_bytes() {

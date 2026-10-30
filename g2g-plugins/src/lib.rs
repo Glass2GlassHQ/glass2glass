@@ -709,8 +709,8 @@ mod video_pts_synth;
 mod audioframe;
 // Trims decoded PCM to the upstream segment, shared by every audio decoder.
 mod frame_clock;
-// The caps the compressed-audio parsers share.
-mod compressed_audio_parser;
+// The caps the compressed-audio parsers and taggers share.
+mod compressed_audio_passthrough;
 mod pcmclip;
 // ID3v1 / ID3v2 tag parsing and writing (no_std), shared by id3demux,
 // mpegaudioparse and id3v2mux.

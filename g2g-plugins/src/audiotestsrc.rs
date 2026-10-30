@@ -18,9 +18,9 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::time::ticks_to_ns;
 use g2g_core::{
-    AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata, FrameTiming,
-    G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError,
-    PropKind, PropValue, PropertySpec,
+    pcm_caps_any_rate_and_channels, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
+    ElementMetadata, FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates,
+    PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
 };
 
 /// Samples per emitted buffer: 10 ms at the configured rate.
@@ -298,16 +298,10 @@ fn wave_to_str(w: Wave) -> &'static str {
 }
 
 impl PadTemplates for AudioTestSrc {
-    /// Static superset: the type produces interleaved S16LE PCM; channel
-    /// count and rate are instance configuration, but `Caps::Audio` has no
-    /// open dims, so the template pins the common 48 kHz stereo shape.
     fn pad_templates() -> Vec<PadTemplate> {
-        Vec::from([PadTemplate::source(CapsSet::one(Caps::Audio {
-            format: AudioFormat::PcmS16Le,
-            channels: 2,
-            sample_rate: 48_000,
-            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
-        }))])
+        Vec::from([PadTemplate::source(pcm_caps_any_rate_and_channels(
+            |format| format == AudioFormat::PcmS16Le,
+        ))])
     }
 }
 

@@ -30,9 +30,9 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use g2g_core::{
-    AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata,
-    G2gError, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
-    PropValue, PropertySpec, ANY_CHANNELS, ANY_SAMPLE_RATE,
+    pcm_caps_any_rate_and_channels, AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet,
+    ConfigureOutcome, ElementMetadata, G2gError, OutputSink, PadTemplate, PadTemplates,
+    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, ANY_CHANNELS, ANY_SAMPLE_RATE,
 };
 
 use crate::audioconvert::{ns_to_samples, pcm_formats, samples_to_ns};
@@ -520,14 +520,8 @@ static EBUR128_PROPS: &[PropertySpec] = &[
 
 impl PadTemplates for Ebur128 {
     fn pad_templates() -> Vec<PadTemplate> {
-        let pcm = |format| Caps::Audio {
-            format,
-            channels: ANY_CHANNELS,
-            sample_rate: ANY_SAMPLE_RATE,
-            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
-        };
-        let set = CapsSet::from_alternatives(pcm_formats().iter().copied().map(pcm).collect());
-        vec![PadTemplate::sink(set.clone()), PadTemplate::source(set)]
+        let pcm = pcm_caps_any_rate_and_channels(|_| true);
+        Vec::from([PadTemplate::sink(pcm.clone()), PadTemplate::source(pcm)])
     }
 }
 

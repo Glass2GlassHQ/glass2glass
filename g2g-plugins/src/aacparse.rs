@@ -739,16 +739,18 @@ impl AsyncElement for AacParse {
         Self: 'a;
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
-        crate::compressed_audio_parser::require_format(PARSED_FORMATS, upstream_caps)?;
+        crate::compressed_audio_passthrough::require_format(PARSED_FORMATS, upstream_caps)?;
         Ok(upstream_caps.clone())
     }
 
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
-        CapsConstraint::Identity(crate::compressed_audio_parser::parser_caps(PARSED_FORMATS))
+        CapsConstraint::Identity(crate::compressed_audio_passthrough::passthrough_caps(
+            PARSED_FORMATS,
+        ))
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        crate::compressed_audio_parser::require_format(PARSED_FORMATS, absolute_caps)?;
+        crate::compressed_audio_passthrough::require_format(PARSED_FORMATS, absolute_caps)?;
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
     }
@@ -853,7 +855,7 @@ impl LogSource for AacParse {
 
 impl PadTemplates for AacParse {
     fn pad_templates() -> Vec<PadTemplate> {
-        crate::compressed_audio_parser::pad_templates(PARSED_FORMATS)
+        crate::compressed_audio_passthrough::pad_templates(PARSED_FORMATS)
     }
 }
 

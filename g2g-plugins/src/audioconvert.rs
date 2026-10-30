@@ -36,10 +36,10 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::time::ns_to_ticks;
 use g2g_core::{
-    AsyncElement, AudioFormat, AudioShape, Caps, CapsConstraint, CapsSet, CapsTransform,
-    ChannelLayout, ChannelPosition, ConfigureOutcome, ElementMetadata, FieldTransform, G2gError,
-    MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
-    PropValue, PropertySpec, ANY_CHANNELS,
+    pcm_caps_any_rate_and_channels, AsyncElement, AudioFormat, AudioShape, Caps, CapsConstraint,
+    CapsTransform, ChannelLayout, ChannelPosition, ConfigureOutcome, ElementMetadata,
+    FieldTransform, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
+    PropError, PropKind, PropValue, PropertySpec, ANY_CHANNELS,
 };
 
 use crate::random::{next_random, XORSHIFT_BASE_STATE};
@@ -588,17 +588,9 @@ pub(crate) fn audio_format_to_str(f: AudioFormat) -> &'static str {
 }
 
 impl PadTemplates for AudioConvert {
-    /// Static superset: PCM in, PCM out. `Caps::Audio` has no open dims, so the
-    /// templates pin the common stereo/48 kHz shape per format.
     fn pad_templates() -> Vec<PadTemplate> {
-        let pcm = |format| Caps::Audio {
-            format,
-            channels: 2,
-            sample_rate: 48_000,
-            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
-        };
-        let set = CapsSet::from_alternatives(pcm_formats().map(pcm).to_vec());
-        Vec::from([PadTemplate::sink(set.clone()), PadTemplate::source(set)])
+        let pcm = pcm_caps_any_rate_and_channels(|_| true);
+        Vec::from([PadTemplate::sink(pcm.clone()), PadTemplate::source(pcm)])
     }
 }
 

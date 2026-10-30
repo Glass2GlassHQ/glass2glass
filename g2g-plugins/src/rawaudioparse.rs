@@ -27,9 +27,10 @@ use g2g_core::log::{short_type_name, LogName, LogSource};
 use g2g_core::memory::SystemSlice;
 use g2g_core::time::ticks_to_ns;
 use g2g_core::{
-    g2g_warn, AsyncElement, AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, CapsSet,
-    ConfigureOutcome, ElementMetadata, FrameTiming, G2gError, MemoryDomain, OutputSink,
-    PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
+    g2g_warn, pcm_caps_any_rate_and_channels, AsyncElement, AudioFormat, ByteStreamEncoding, Caps,
+    CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata, FrameTiming, G2gError,
+    MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
+    PropValue, PropertySpec,
 };
 
 use crate::audioconvert::{audio_format_from_str, audio_format_to_str};
@@ -377,17 +378,15 @@ impl LogSource for RawAudioParse {
 
 impl PadTemplates for RawAudioParse {
     fn pad_templates() -> Vec<PadTemplate> {
-        // `Caps::Audio` has no open fields, so the template pins the declared
-        // default shape; an instance emits its own.
-        let audio = Caps::Audio {
-            format: DEFAULT_FORMAT,
-            channels: DEFAULT_CHANNELS,
-            sample_rate: DEFAULT_SAMPLE_RATE,
-            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
-        };
+        let mut audio = pcm_caps_any_rate_and_channels(|_| true)
+            .alternatives()
+            .to_vec();
+        audio.extend(
+            [AudioFormat::Alaw, AudioFormat::Mulaw].map(crate::typefind::elementary_audio_caps),
+        );
         Vec::from([
             PadTemplate::sink(CapsSet::one(Self::input_caps())),
-            PadTemplate::source(CapsSet::one(audio)),
+            PadTemplate::source(CapsSet::from_alternatives(audio)),
         ])
     }
 }

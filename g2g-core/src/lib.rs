@@ -161,6 +161,8 @@ pub mod slot;
 
 #[cfg(feature = "alloc")]
 pub use aggregator::InputAggregator;
+#[cfg(feature = "alloc")]
+pub use caps::pcm_caps_any_rate_and_channels;
 pub use caps::{
     pcm_formats, pcm_from_gst_format, pcm_gst_format, AudioFormat, BitstreamAlignment,
     ByteStreamEncoding, Caps, ClosedCaptionFormat, CodecTag, ColorPrimaries, ColorRange,

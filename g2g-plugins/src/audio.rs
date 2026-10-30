@@ -1,8 +1,11 @@
 //! Shared PCM helpers for the audio sinks and sources: the `WAVEFORMATEX`
-//! mapping (`WavSink`, `WasapiSink`, `WasapiSrc`) and the PCM accept set the
-//! audio sinks declare. std-gated like its callers.
+//! mapping (`WavSink`, `WasapiSink`, `WasapiSrc`) and the linear PCM accept set.
+//! std-gated like its callers.
 
-use g2g_core::{pcm_formats, AudioFormat, Caps, CapsSet, G2gError, ANY_CHANNELS, ANY_SAMPLE_RATE};
+use g2g_core::{
+    pcm_caps_any_rate_and_channels, AudioFormat, Caps, CapsSet, G2gError, ANY_CHANNELS,
+    ANY_SAMPLE_RATE,
+};
 
 use crate::waveformat::wave_format_tag;
 
@@ -35,20 +38,4 @@ fn linear_pcm_tag(format: AudioFormat) -> Option<(u16, u16)> {
 
 pub(crate) fn linear_pcm_caps() -> CapsSet {
     pcm_caps_any_rate_and_channels(|format| linear_pcm_tag(format).is_some())
-}
-
-pub(crate) fn pcm_caps_any_rate_and_channels(
-    takes_format: impl Fn(AudioFormat) -> bool,
-) -> CapsSet {
-    let alternatives = pcm_formats()
-        .into_iter()
-        .filter(|format| takes_format(*format))
-        .map(|format| Caps::Audio {
-            format,
-            channels: ANY_CHANNELS,
-            sample_rate: ANY_SAMPLE_RATE,
-            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
-        })
-        .collect();
-    CapsSet::from_alternatives(alternatives)
 }

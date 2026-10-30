@@ -42,9 +42,9 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use crate::audio::pcm_caps_any_rate_and_channels;
 use crate::audiocapture::{capture_queue, run_capture, CaptureLoopSettings, CaptureSender};
 use crate::audioworker::WorkerLink;
+use g2g_core::pcm_caps_any_rate_and_channels;
 
 /// Read / write timeout per AAudio call: 1 second in nanoseconds. Long enough to
 /// ride out a scheduling hiccup, short enough that a wedged device surfaces.
@@ -286,9 +286,7 @@ impl AsyncElement for AAudioSink {
     }
 
     fn caps_constraint_as_sink(&self) -> CapsConstraint<'_> {
-        CapsConstraint::Accepts(pcm_caps_any_rate_and_channels(|format| {
-            ndk_format(format).is_some()
-        }))
+        CapsConstraint::Accepts(accepted_pcm_caps())
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -347,18 +345,13 @@ impl AsyncElement for AAudioSink {
     }
 }
 
+fn accepted_pcm_caps() -> CapsSet {
+    pcm_caps_any_rate_and_channels(|format| ndk_format(format).is_some())
+}
+
 impl PadTemplates for AAudioSink {
     fn pad_templates() -> Vec<PadTemplate> {
-        let pcm = |format| Caps::Audio {
-            format,
-            channels: 2,
-            sample_rate: 48_000,
-            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
-        };
-        Vec::from([PadTemplate::sink(CapsSet::from_alternatives(Vec::from([
-            pcm(AudioFormat::PcmS16Le),
-            pcm(AudioFormat::PcmF32Le),
-        ])))])
+        Vec::from([PadTemplate::sink(accepted_pcm_caps())])
     }
 }
 
@@ -605,12 +598,9 @@ fn read_stream(
 
 impl PadTemplates for AAudioSrc {
     fn pad_templates() -> Vec<PadTemplate> {
-        Vec::from([PadTemplate::source(CapsSet::one(Caps::Audio {
-            format: AudioFormat::PcmS16Le,
-            channels: 2,
-            sample_rate: 48_000,
-            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
-        }))])
+        Vec::from([PadTemplate::source(pcm_caps_any_rate_and_channels(
+            |format| format == AudioFormat::PcmS16Le,
+        ))])
     }
 }
 

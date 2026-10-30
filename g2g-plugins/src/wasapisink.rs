@@ -44,9 +44,9 @@ use windows::Win32::System::Com::{
 
 use g2g_core::frame::Frame;
 use g2g_core::{
-    AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata,
-    G2gError, HardwareError, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError,
-    PropKind, PropValue, PropertySpec,
+    AsyncElement, Caps, CapsConstraint, ConfigureOutcome, ElementMetadata, G2gError, HardwareError,
+    OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue,
+    PropertySpec,
 };
 
 use crate::audio::{linear_pcm_caps, pcm_params};
@@ -301,19 +301,8 @@ static WASAPISINK_PROPS: &[PropertySpec] = &[PropertySpec::new(
 )];
 
 impl PadTemplates for WasapiSink {
-    /// Terminal PCM sink pad. `Caps::Audio` has no open dims, so the template
-    /// pins the common shapes per PCM format, as in `WavSink`.
     fn pad_templates() -> Vec<PadTemplate> {
-        let pcm = |format| Caps::Audio {
-            format,
-            channels: 2,
-            sample_rate: 48_000,
-            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
-        };
-        Vec::from([PadTemplate::sink(CapsSet::from_alternatives(Vec::from([
-            pcm(AudioFormat::PcmS16Le),
-            pcm(AudioFormat::PcmF32Le),
-        ])))])
+        Vec::from([PadTemplate::sink(linear_pcm_caps())])
     }
 }
 
@@ -500,6 +489,7 @@ fn top_up(
 mod tests {
     use super::*;
     use crate::audio::{WAVE_FORMAT_IEEE_FLOAT, WAVE_FORMAT_PCM};
+    use g2g_core::AudioFormat;
 
     #[test]
     fn pcm_params_maps_formats_and_rejects_compressed() {

@@ -24,9 +24,9 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::time::{ns_to_ticks, ticks_to_ns};
 use g2g_core::{
-    AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata,
-    FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
-    Segment, ANY_CHANNELS, ANY_SAMPLE_RATE,
+    pcm_caps_any_rate_and_channels, AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet,
+    ConfigureOutcome, ElementMetadata, FrameTiming, G2gError, MemoryDomain, OutputSink,
+    PadTemplate, PadTemplates, PipelinePacket, Segment, ANY_CHANNELS, ANY_SAMPLE_RATE,
 };
 
 use crate::pcmclip::clip_pcm_to_segment;
@@ -352,17 +352,11 @@ impl AsyncElement for VorbisDec {
 impl PadTemplates for VorbisDec {
     fn pad_templates() -> Vec<PadTemplate> {
         Vec::from([
-            PadTemplate::sink(CapsSet::one(Caps::Audio {
-                format: AudioFormat::Vorbis,
-                channels: ANY_CHANNELS,
-                sample_rate: ANY_SAMPLE_RATE,
-                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
-            })),
-            PadTemplate::source(CapsSet::one(Caps::Audio {
-                format: AudioFormat::PcmS16Le,
-                channels: 2,
-                sample_rate: 48_000,
-                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
+            PadTemplate::sink(CapsSet::one(crate::typefind::elementary_audio_caps(
+                AudioFormat::Vorbis,
+            ))),
+            PadTemplate::source(pcm_caps_any_rate_and_channels(|format| {
+                format == AudioFormat::PcmS16Le
             })),
         ])
     }

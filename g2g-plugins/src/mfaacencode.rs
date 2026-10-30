@@ -42,8 +42,9 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::time::ticks_to_ns;
 use g2g_core::{
-    AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, FrameTiming,
-    G2gError, HardwareError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
+    pcm_caps_any_rate_and_channels, AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet,
+    ConfigureOutcome, FrameTiming, G2gError, HardwareError, MemoryDomain, OutputSink, PadTemplate,
+    PadTemplates, PipelinePacket,
 };
 
 /// Samples per AAC-LC access unit.
@@ -342,24 +343,14 @@ impl AsyncElement for MfAacEncode {
 }
 
 impl PadTemplates for MfAacEncode {
-    /// S16 PCM in, AAC out; `Caps::Audio` has no open dims, so the templates
-    /// pin the common stereo/48 kHz shape.
     fn pad_templates() -> Vec<PadTemplate> {
-        let pcm = Caps::Audio {
-            format: AudioFormat::PcmS16Le,
-            channels: 2,
-            sample_rate: 48_000,
-            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
-        };
-        let aac = Caps::Audio {
-            format: AudioFormat::Aac,
-            channels: 2,
-            sample_rate: 48_000,
-            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
-        };
         Vec::from([
-            PadTemplate::sink(CapsSet::one(pcm)),
-            PadTemplate::source(CapsSet::one(aac)),
+            PadTemplate::sink(pcm_caps_any_rate_and_channels(|format| {
+                format == AudioFormat::PcmS16Le
+            })),
+            PadTemplate::source(CapsSet::one(crate::typefind::elementary_audio_caps(
+                AudioFormat::Aac,
+            ))),
         ])
     }
 }

@@ -22,10 +22,10 @@ use alloc::vec::Vec;
 
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
-    AudioFormat, Caps, CapsConstraint, CapsSet, ClockCandidate, ClockPriority, ClockSync,
-    ConfigureOutcome, DriftClock, DriftObservation, ElementMetadata, G2gError, HardwareError,
-    LatencyReport, MonotonicClock, OutputSink, PadTemplate, PadTemplates, PipelineClock, PropError,
-    PropKind, PropValue, PropertySpec,
+    pcm_caps_any_rate_and_channels, AudioFormat, Caps, CapsConstraint, CapsSet, ClockCandidate,
+    ClockPriority, ClockSync, ConfigureOutcome, DriftClock, DriftObservation, ElementMetadata,
+    G2gError, HardwareError, LatencyReport, MonotonicClock, OutputSink, PadTemplate, PadTemplates,
+    PipelineClock, PropError, PropKind, PropValue, PropertySpec,
 };
 
 use pipewire as pw;
@@ -326,17 +326,10 @@ impl SourceLoop for PipeWireSrc {
 }
 
 impl PadTemplates for PipeWireSrc {
-    /// Produces PCM; a constructed instance fixes the format / rate / channels.
     fn pad_templates() -> Vec<PadTemplate> {
-        let pcm = |format| Caps::Audio {
-            format,
-            channels: 2,
-            sample_rate: 48_000,
-            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
-        };
-        Vec::from([PadTemplate::source(CapsSet::from_alternatives(Vec::from(
-            [pcm(AudioFormat::PcmS16Le), pcm(AudioFormat::PcmF32Le)],
-        )))])
+        Vec::from([PadTemplate::source(pcm_caps_any_rate_and_channels(
+            |format| matches!(format, AudioFormat::PcmS16Le | AudioFormat::PcmF32Le),
+        ))])
     }
 }
 

@@ -16,9 +16,9 @@ use alloc::vec::Vec;
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata,
-    G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError,
-    PropKind, PropValue, PropertySpec,
+    pcm_caps_any_rate_and_channels, AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet,
+    ConfigureOutcome, ElementMetadata, G2gError, MemoryDomain, OutputSink, PadTemplate,
+    PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
 };
 
 /// # Example
@@ -217,16 +217,8 @@ static VOLUME_PROPS: &[PropertySpec] = &[
 
 impl PadTemplates for Volume {
     fn pad_templates() -> Vec<PadTemplate> {
-        let pcm = Caps::Audio {
-            format: AudioFormat::PcmS16Le,
-            channels: 2,
-            sample_rate: 48_000,
-            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
-        };
-        Vec::from([
-            PadTemplate::sink(CapsSet::one(pcm.clone())),
-            PadTemplate::source(CapsSet::one(pcm)),
-        ])
+        let pcm = pcm_caps_any_rate_and_channels(|format| format == AudioFormat::PcmS16Le);
+        Vec::from([PadTemplate::sink(pcm.clone()), PadTemplate::source(pcm)])
     }
 }
 

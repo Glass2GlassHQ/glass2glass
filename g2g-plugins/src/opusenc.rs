@@ -252,6 +252,9 @@ impl Default for OpusEnc {
     }
 }
 
+// the single-stream libopus encoder takes mono or stereo
+const ENCODABLE_CHANNELS: [u8; 2] = [1, 2];
+
 impl OpusEnc {
     pub fn new() -> Self {
         Self {
@@ -370,14 +373,17 @@ impl OpusEnc {
     }
 
     fn input_templates() -> Vec<Caps> {
-        // Audio caps carry no `Any`; pin the supported shapes (48 kHz stereo).
-        let pcm = |format| Caps::Audio {
-            format,
-            channels: 2,
-            sample_rate: OPUS_RATE_HZ,
-            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
-        };
-        Vec::from([pcm(AudioFormat::PcmS16Le), pcm(AudioFormat::PcmF32Le)])
+        [AudioFormat::PcmS16Le, AudioFormat::PcmF32Le]
+            .into_iter()
+            .flat_map(|format| {
+                ENCODABLE_CHANNELS.map(|channels| Caps::Audio {
+                    format,
+                    channels,
+                    sample_rate: OPUS_RATE_HZ,
+                    channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
+                })
+            })
+            .collect()
     }
 
     /// Whether `caps` is an encodable PCM shape: `(float input, channels)`.
@@ -388,7 +394,7 @@ impl OpusEnc {
                 channels,
                 sample_rate,
                 ..
-            } if (*channels == 1 || *channels == 2) && *sample_rate == OPUS_RATE_HZ => {
+            } if ENCODABLE_CHANNELS.contains(channels) && *sample_rate == OPUS_RATE_HZ => {
                 Some((*format == AudioFormat::PcmF32Le, *channels))
             }
             _ => None,
@@ -785,15 +791,11 @@ impl AsyncElement for OpusEnc {
 
 impl PadTemplates for OpusEnc {
     fn pad_templates() -> Vec<PadTemplate> {
-        let out = Caps::Audio {
-            format: AudioFormat::Opus,
-            channels: 2,
-            sample_rate: OPUS_RATE_HZ,
-            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
-        };
         Vec::from([
             PadTemplate::sink(CapsSet::from_alternatives(Self::input_templates())),
-            PadTemplate::source(CapsSet::one(out)),
+            PadTemplate::source(CapsSet::one(crate::typefind::elementary_audio_caps(
+                AudioFormat::Opus,
+            ))),
         ])
     }
 }

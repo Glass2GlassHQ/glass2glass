@@ -18,7 +18,7 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata,
     G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError,
-    PropKind, PropValue, PropertySpec,
+    PropKind, PropValue, PropertySpec, ANY_SAMPLE_RATE,
 };
 
 /// # Example
@@ -197,15 +197,15 @@ static AUDIOPANORAMA_PROPS: &[PropertySpec] = &[PropertySpec::new(
 
 impl PadTemplates for AudioPanorama {
     fn pad_templates() -> Vec<PadTemplate> {
-        let stereo = Caps::Audio {
+        let stereo = CapsSet::one(Caps::Audio {
             format: AudioFormat::PcmS16Le,
             channels: 2,
-            sample_rate: 48_000,
+            sample_rate: ANY_SAMPLE_RATE,
             channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
-        };
+        });
         Vec::from([
-            PadTemplate::sink(CapsSet::one(stereo.clone())),
-            PadTemplate::source(CapsSet::one(stereo)),
+            PadTemplate::sink(stereo.clone()),
+            PadTemplate::source(stereo),
         ])
     }
 }

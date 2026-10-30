@@ -37,12 +37,12 @@ use g2g_core::{
     ANY_SAMPLE_RATE,
 };
 
-use crate::audio::pcm_caps_any_rate_and_channels;
 use crate::filesink::io_err;
 use crate::rtpjitter::RtpPtsRebase;
 use crate::st2110audio::{SampleDepth, St2110AudioDepacketizer, St2110AudioPacketizer};
 use crate::st2110dup::spawn_rtp_receiver;
 use crate::st2110sdp::{St2110Essence, St2110Sdp};
+use g2g_core::pcm_caps_any_rate_and_channels;
 
 const NANOS_PER_MICROSECOND: u64 = 1_000;
 
@@ -235,9 +235,7 @@ impl AsyncElement for St2110AudioSink {
     }
 
     fn caps_constraint_as_sink(&self) -> CapsConstraint<'_> {
-        CapsConstraint::Accepts(pcm_caps_any_rate_and_channels(|format| {
-            wire_depth(format).is_some()
-        }))
+        CapsConstraint::Accepts(accepted_pcm_caps())
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -362,21 +360,13 @@ impl AsyncElement for St2110AudioSink {
     }
 }
 
+fn accepted_pcm_caps() -> CapsSet {
+    pcm_caps_any_rate_and_channels(|format| wire_depth(format).is_some())
+}
+
 impl PadTemplates for St2110AudioSink {
     fn pad_templates() -> Vec<PadTemplate> {
-        let alts = [
-            AudioFormat::PcmS16Le,
-            AudioFormat::PcmF32Le,
-            AudioFormat::PcmS24Le,
-        ]
-        .map(|format| Caps::Audio {
-            format,
-            channels: 2,
-            sample_rate: 48_000,
-            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
-        })
-        .to_vec();
-        Vec::from([PadTemplate::sink(CapsSet::from_alternatives(alts))])
+        Vec::from([PadTemplate::sink(accepted_pcm_caps())])
     }
 }
 

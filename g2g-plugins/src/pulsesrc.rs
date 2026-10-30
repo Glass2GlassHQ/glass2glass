@@ -37,9 +37,10 @@ use libpulse_simple_binding::Simple;
 
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
-    AudioFormat, Caps, CapsConstraint, CapsSet, ClockSync, ConfigureOutcome, ElementMetadata,
-    G2gError, HardwareError, LatencyReport, OutputSink, PadTemplate, PadTemplates, PropError,
-    PropKind, PropValue, PropertySpec, ANY_CHANNELS, ANY_SAMPLE_RATE,
+    pcm_caps_any_rate_and_channels, AudioFormat, Caps, CapsConstraint, CapsSet, ClockSync,
+    ConfigureOutcome, ElementMetadata, G2gError, HardwareError, LatencyReport, OutputSink,
+    PadTemplate, PadTemplates, PropError, PropKind, PropValue, PropertySpec, ANY_CHANNELS,
+    ANY_SAMPLE_RATE,
 };
 
 use crate::audiocapture::{
@@ -430,18 +431,9 @@ impl SourceLoop for PulseSrc {
 }
 
 impl PadTemplates for PulseSrc {
-    /// Produces PCM; a constructed instance narrows to its format / rate / channels.
-    /// `Caps::Audio` has no open dims, so the template pins the common stereo /
-    /// 48 kHz shape per format, as in `PulseSink`.
     fn pad_templates() -> Vec<PadTemplate> {
-        let pcm = |(format, _)| Caps::Audio {
-            format,
-            channels: 2,
-            sample_rate: 48_000,
-            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
-        };
-        Vec::from([PadTemplate::source(CapsSet::from_alternatives(
-            FORMATS.map(pcm).to_vec(),
+        Vec::from([PadTemplate::source(pcm_caps_any_rate_and_channels(
+            |format| FORMATS.iter().any(|(opened, _)| *opened == format),
         ))])
     }
 }

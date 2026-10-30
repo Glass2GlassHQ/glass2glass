@@ -870,7 +870,7 @@ impl PadTemplates for OpusDec {
     fn pad_templates() -> Vec<PadTemplate> {
         let out = |format| Caps::Audio {
             format,
-            channels: 2,
+            channels: ANY_CHANNELS,
             sample_rate: OPUS_RATE_HZ,
             channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };

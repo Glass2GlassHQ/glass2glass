@@ -50,11 +50,11 @@ use g2g_core::{
     PipelinePacket, PropError, PropKind, PropValue, PropertySpec, ANY_CHANNELS, ANY_SAMPLE_RATE,
 };
 
-use crate::audio::pcm_caps_any_rate_and_channels;
 use crate::audiocapture::{
     capture_queue, run_capture, CaptureLoopSettings, CaptureReceiver, CaptureSender,
 };
 use crate::audioworker::WorkerLink;
+use g2g_core::pcm_caps_any_rate_and_channels;
 
 use alloc::boxed::Box;
 use alloc::string::{String, ToString};
@@ -510,9 +510,7 @@ impl AsyncElement for CoreAudioSink {
     }
 
     fn caps_constraint_as_sink(&self) -> CapsConstraint<'_> {
-        CapsConstraint::Accepts(pcm_caps_any_rate_and_channels(|format| {
-            asbd(format, ANY_CHANNELS, ANY_SAMPLE_RATE).is_some()
-        }))
+        CapsConstraint::Accepts(accepted_pcm_caps())
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -600,18 +598,13 @@ impl AsyncElement for CoreAudioSink {
     }
 }
 
+fn accepted_pcm_caps() -> CapsSet {
+    pcm_caps_any_rate_and_channels(|format| asbd(format, ANY_CHANNELS, ANY_SAMPLE_RATE).is_some())
+}
+
 impl PadTemplates for CoreAudioSink {
     fn pad_templates() -> Vec<PadTemplate> {
-        let pcm = |format| Caps::Audio {
-            format,
-            channels: 2,
-            sample_rate: 48_000,
-            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
-        };
-        Vec::from([PadTemplate::sink(CapsSet::from_alternatives(Vec::from([
-            pcm(AudioFormat::PcmS16Le),
-            pcm(AudioFormat::PcmF32Le),
-        ])))])
+        Vec::from([PadTemplate::sink(accepted_pcm_caps())])
     }
 }
 

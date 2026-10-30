@@ -51,9 +51,9 @@ use g2g_core::log::{short_type_name, Target};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::time::ticks_to_ns;
 use g2g_core::{
-    g2g_warn, AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
-    ElementMetadata, G2gError, HardwareError, OutputSink, PadTemplate, PadTemplates,
-    PipelinePacket, Segment, ANY_CHANNELS, ANY_SAMPLE_RATE,
+    g2g_warn, pcm_caps_any_rate_and_channels, AsyncElement, AudioFormat, Caps, CapsConstraint,
+    CapsSet, ConfigureOutcome, ElementMetadata, G2gError, HardwareError, OutputSink, PadTemplate,
+    PadTemplates, PipelinePacket, Segment, ANY_CHANNELS, ANY_SAMPLE_RATE,
 };
 
 use crate::pcmclip::clip_pcm_to_segment;
@@ -576,27 +576,19 @@ impl AsyncElement for FfmpegAudioDec {
 
 impl PadTemplates for FfmpegAudioDec {
     fn pad_templates() -> Vec<PadTemplate> {
-        let compressed = |format| Caps::Audio {
-            format,
-            channels: ANY_CHANNELS,
-            sample_rate: 0,
-            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
-        };
-        let pcm = Caps::Audio {
-            format: AudioFormat::PcmS16Le,
-            channels: ANY_CHANNELS,
-            sample_rate: ANY_SAMPLE_RATE,
-            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
-        };
+        let compressed = [
+            AudioFormat::Aac,
+            AudioFormat::Mp2,
+            AudioFormat::Mp3,
+            AudioFormat::Ac3,
+            AudioFormat::Flac,
+        ]
+        .map(crate::typefind::elementary_audio_caps);
         Vec::from([
-            PadTemplate::sink(CapsSet::from_alternatives(Vec::from([
-                compressed(AudioFormat::Aac),
-                compressed(AudioFormat::Mp2),
-                compressed(AudioFormat::Mp3),
-                compressed(AudioFormat::Ac3),
-                compressed(AudioFormat::Flac),
-            ]))),
-            PadTemplate::source(CapsSet::one(pcm)),
+            PadTemplate::sink(CapsSet::from_alternatives(compressed.to_vec())),
+            PadTemplate::source(pcm_caps_any_rate_and_channels(|format| {
+                format == AudioFormat::PcmS16Le
+            })),
         ])
     }
 }

@@ -27,15 +27,15 @@ use core::future::Future;
 use core::pin::Pin;
 
 use alloc::boxed::Box;
-use alloc::vec;
 use alloc::vec::Vec;
 
 use g2g_core::frame::{Frame, FrameTiming};
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata,
-    G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError,
-    PropKind, PropValue, PropertySpec, ANY_CHANNELS, ANY_SAMPLE_RATE,
+    pcm_caps_any_rate_and_channels, AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet,
+    ConfigureOutcome, ElementMetadata, G2gError, MemoryDomain, OutputSink, PadTemplate,
+    PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, ANY_CHANNELS,
+    ANY_SAMPLE_RATE,
 };
 
 use crate::audioconvert::{frame_bytes, ns_to_samples, pcm_formats, samples_to_ns, silence_byte};
@@ -715,14 +715,8 @@ static AUDIOBUFFERSPLIT_PROPS: &[PropertySpec] = &[
 
 impl PadTemplates for AudioBufferSplit {
     fn pad_templates() -> Vec<PadTemplate> {
-        let pcm = |format| Caps::Audio {
-            format,
-            channels: ANY_CHANNELS,
-            sample_rate: ANY_SAMPLE_RATE,
-            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
-        };
-        let set = CapsSet::from_alternatives(pcm_formats().iter().copied().map(pcm).collect());
-        vec![PadTemplate::sink(set.clone()), PadTemplate::source(set)]
+        let pcm = pcm_caps_any_rate_and_channels(|_| true);
+        Vec::from([PadTemplate::sink(pcm.clone()), PadTemplate::source(pcm)])
     }
 }
 

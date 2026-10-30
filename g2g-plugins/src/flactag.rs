@@ -36,9 +36,9 @@ use g2g_core::frame::Frame;
 use g2g_core::log::short_type_name;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata,
-    G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError,
-    PropValue, PropertySpec, TagList,
+    AsyncElement, AudioFormat, Caps, CapsConstraint, ConfigureOutcome, ElementMetadata, G2gError,
+    MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropValue,
+    PropertySpec, TagList,
 };
 
 use crate::flacparse::complete_header_len;
@@ -191,6 +191,8 @@ fn rewrite_header(header: &[u8], tags: &TagList) -> Option<Vec<u8>> {
     Some(out)
 }
 
+const TAGGED_FORMATS: &[AudioFormat] = &[AudioFormat::Flac];
+
 impl AsyncElement for FlacTag {
     type ProcessFuture<'a>
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
@@ -203,32 +205,20 @@ impl AsyncElement for FlacTag {
     }
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
-        match upstream_caps {
-            Caps::Audio {
-                format: AudioFormat::Flac,
-                ..
-            } => Ok(upstream_caps.clone()),
-            _ => Err(G2gError::CapsMismatch),
-        }
+        crate::compressed_audio_passthrough::require_format(TAGGED_FORMATS, upstream_caps)?;
+        Ok(upstream_caps.clone())
     }
 
-    /// Pass-through identity over FLAC of any channels / rate: the tags do not
-    /// touch the audio shape, which STREAMINFO already fixed.
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
-        CapsConstraint::IdentityAny
+        CapsConstraint::Identity(crate::compressed_audio_passthrough::passthrough_caps(
+            TAGGED_FORMATS,
+        ))
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        match absolute_caps {
-            Caps::Audio {
-                format: AudioFormat::Flac,
-                ..
-            } => {
-                self.configured = true;
-                Ok(ConfigureOutcome::Accepted)
-            }
-            _ => Err(G2gError::CapsMismatch),
-        }
+        crate::compressed_audio_passthrough::require_format(TAGGED_FORMATS, absolute_caps)?;
+        self.configured = true;
+        Ok(ConfigureOutcome::Accepted)
     }
 
     fn metadata(&self) -> ElementMetadata {
@@ -291,17 +281,7 @@ impl AsyncElement for FlacTag {
 
 impl PadTemplates for FlacTag {
     fn pad_templates() -> Vec<PadTemplate> {
-        // `Caps::Audio` has no open dims; pin the common stereo / 44.1 kHz shape.
-        let flac = Caps::Audio {
-            format: AudioFormat::Flac,
-            channels: 2,
-            sample_rate: 44_100,
-            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
-        };
-        Vec::from([
-            PadTemplate::sink(CapsSet::one(flac.clone())),
-            PadTemplate::source(CapsSet::one(flac)),
-        ])
+        crate::compressed_audio_passthrough::pad_templates(TAGGED_FORMATS)
     }
 }
 

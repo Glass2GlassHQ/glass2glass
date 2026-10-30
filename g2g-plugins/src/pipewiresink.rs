@@ -45,14 +45,13 @@ use pipewire as pw;
 use pw::spa;
 
 use g2g_core::{
-    AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ClockCandidate, ClockPriority,
-    ConfigureOutcome, DriftClock, ElementMetadata, G2gError, HardwareError, MonotonicClock,
-    OutputSink, PadTemplate, PadTemplates, PipelineClock, PipelinePacket, PropError, PropKind,
-    PropValue, PropertySpec,
+    AsyncElement, Caps, CapsConstraint, CapsSet, ClockCandidate, ClockPriority, ConfigureOutcome,
+    DriftClock, ElementMetadata, G2gError, HardwareError, MonotonicClock, OutputSink, PadTemplate,
+    PadTemplates, PipelineClock, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
 };
 
-use crate::audio::pcm_caps_any_rate_and_channels;
 use crate::pwaudio::{format_pod_bytes, frame_bytes, pw_params, FORMATS};
+use g2g_core::pcm_caps_any_rate_and_channels;
 
 /// How often the clock-discipline trace prints, out of the once-per-quantum
 /// stream of observations.
@@ -242,9 +241,7 @@ impl AsyncElement for PipeWireSink {
     }
 
     fn caps_constraint_as_sink(&self) -> CapsConstraint<'_> {
-        CapsConstraint::Accepts(pcm_caps_any_rate_and_channels(|format| {
-            FORMATS.iter().any(|(opened, _)| *opened == format)
-        }))
+        CapsConstraint::Accepts(accepted_pcm_caps())
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -405,21 +402,13 @@ impl AsyncElement for PipeWireSink {
     }
 }
 
+fn accepted_pcm_caps() -> CapsSet {
+    pcm_caps_any_rate_and_channels(|format| FORMATS.iter().any(|(opened, _)| *opened == format))
+}
+
 impl PadTemplates for PipeWireSink {
     fn pad_templates() -> Vec<PadTemplate> {
-        let pcm = |format| Caps::Audio {
-            format,
-            channels: 2,
-            sample_rate: 48_000,
-            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
-        };
-        Vec::from([PadTemplate::sink(CapsSet::from_alternatives(Vec::from([
-            pcm(AudioFormat::PcmU8),
-            pcm(AudioFormat::PcmS16Le),
-            pcm(AudioFormat::PcmS24Le),
-            pcm(AudioFormat::PcmS32Le),
-            pcm(AudioFormat::PcmF32Le),
-        ])))])
+        Vec::from([PadTemplate::sink(accepted_pcm_caps())])
     }
 }
 
@@ -579,6 +568,7 @@ fn discipline_clock(stream: &pw::stream::Stream, clock: &DriftClock, last_log_ns
 #[cfg(test)]
 mod tests {
     use super::*;
+    use g2g_core::AudioFormat;
 
     #[test]
     fn intercept_accepts_pcm_rejects_compressed() {

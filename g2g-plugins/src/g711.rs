@@ -26,9 +26,9 @@ use alloc::vec::Vec;
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata,
-    G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, Segment,
-    ANY_CHANNELS, ANY_SAMPLE_RATE,
+    pcm_caps_any_rate_and_channels, AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet,
+    ConfigureOutcome, ElementMetadata, G2gError, MemoryDomain, OutputSink, PadTemplate,
+    PadTemplates, PipelinePacket, Segment, ANY_CHANNELS, ANY_SAMPLE_RATE,
 };
 
 use g2g_mcu::g711::Law;
@@ -321,11 +321,8 @@ impl<L: G711Law> AsyncElement for G711Enc<L> {
 impl<L: G711Law> PadTemplates for G711Enc<L> {
     fn pad_templates() -> Vec<PadTemplate> {
         Vec::from([
-            PadTemplate::sink(CapsSet::one(Caps::Audio {
-                format: AudioFormat::PcmS16Le,
-                channels: ANY_CHANNELS,
-                sample_rate: ANY_SAMPLE_RATE,
-                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
+            PadTemplate::sink(pcm_caps_any_rate_and_channels(|format| {
+                format == AudioFormat::PcmS16Le
             })),
             PadTemplate::source(CapsSet::one(coded_template::<L>())),
         ])
@@ -543,11 +540,8 @@ impl<L: G711Law> PadTemplates for G711Dec<L> {
                     channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
                 },
             ])),
-            PadTemplate::source(CapsSet::one(Caps::Audio {
-                format: AudioFormat::PcmS16Le,
-                channels: G711_DEFAULT_CHANNELS,
-                sample_rate: G711_CLOCK_RATE_HZ,
-                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
+            PadTemplate::source(pcm_caps_any_rate_and_channels(|format| {
+                format == AudioFormat::PcmS16Le
             })),
         ])
     }

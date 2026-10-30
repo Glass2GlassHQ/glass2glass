@@ -49,7 +49,7 @@ use g2g_core::{
 };
 
 use crate::alsapcm::{alsa_params, device_permutation, permute, PcmConfig, FORMATS};
-use crate::audio::pcm_caps_any_rate_and_channels;
+use g2g_core::pcm_caps_any_rate_and_channels;
 
 fn alsa_err(code: i32) -> G2gError {
     G2gError::Hardware(HardwareError::Alsa(code))
@@ -175,9 +175,7 @@ impl AsyncElement for AlsaSink {
     }
 
     fn caps_constraint_as_sink(&self) -> CapsConstraint<'_> {
-        CapsConstraint::Accepts(pcm_caps_any_rate_and_channels(|format| {
-            FORMATS.iter().any(|(opened, _)| *opened == format)
-        }))
+        CapsConstraint::Accepts(accepted_pcm_caps())
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -322,19 +320,13 @@ impl AsyncElement for AlsaSink {
     }
 }
 
+fn accepted_pcm_caps() -> CapsSet {
+    pcm_caps_any_rate_and_channels(|format| FORMATS.iter().any(|(opened, _)| *opened == format))
+}
+
 impl PadTemplates for AlsaSink {
-    /// Terminal PCM sink pad. `Caps::Audio` has no open dims, so the template
-    /// pins the common shapes per PCM format, as in `WasapiSink`.
     fn pad_templates() -> Vec<PadTemplate> {
-        let pcm = |(format, _)| Caps::Audio {
-            format,
-            channels: 2,
-            sample_rate: 48_000,
-            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
-        };
-        Vec::from([PadTemplate::sink(CapsSet::from_alternatives(
-            FORMATS.map(pcm).to_vec(),
-        ))])
+        Vec::from([PadTemplate::sink(accepted_pcm_caps())])
     }
 }
 

@@ -1617,6 +1617,21 @@ pub fn pcm_formats() -> [AudioFormat; 5] {
     PCM_FORMATS.map(|(format, _)| format)
 }
 
+#[cfg(feature = "alloc")]
+pub fn pcm_caps_any_rate_and_channels(takes_format: impl Fn(AudioFormat) -> bool) -> CapsSet {
+    let alternatives = pcm_formats()
+        .into_iter()
+        .filter(|format| takes_format(*format))
+        .map(|format| Caps::Audio {
+            format,
+            channels: ANY_CHANNELS,
+            sample_rate: ANY_SAMPLE_RATE,
+            channel_layout: ChannelLayout::UNSPECIFIED,
+        })
+        .collect();
+    CapsSet::from_alternatives(alternatives)
+}
+
 /// The gst `format=` name of a raw PCM format, `None` for an encoded one.
 pub fn pcm_gst_format(f: AudioFormat) -> Option<&'static str> {
     PCM_FORMATS

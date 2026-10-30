@@ -480,15 +480,11 @@ static AAC_ENC_PROPS: &[PropertySpec] = &[PropertySpec::new(
 
 impl PadTemplates for FfmpegAacEnc {
     fn pad_templates() -> Vec<PadTemplate> {
-        let aac = Caps::Audio {
-            format: AudioFormat::Aac,
-            channels: 0,
-            sample_rate: 0,
-            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
-        };
         Vec::from([
             PadTemplate::sink(Self::input_template()),
-            PadTemplate::source(CapsSet::one(aac)),
+            PadTemplate::source(CapsSet::one(crate::typefind::elementary_audio_caps(
+                AudioFormat::Aac,
+            ))),
         ])
     }
 }

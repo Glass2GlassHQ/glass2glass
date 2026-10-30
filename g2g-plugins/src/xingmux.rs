@@ -36,8 +36,8 @@ use g2g_core::frame::Frame;
 use g2g_core::log::{short_type_name, LogName, LogSource};
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    g2g_warn, AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
-    ElementMetadata, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
+    g2g_warn, AsyncElement, AudioFormat, Caps, CapsConstraint, ConfigureOutcome, ElementMetadata,
+    G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
 };
 
 use crate::audioframe::{
@@ -210,6 +210,8 @@ impl XingMux {
     }
 }
 
+const TAGGED_FORMATS: &[AudioFormat] = &[AudioFormat::Mp3];
+
 impl AsyncElement for XingMux {
     type ProcessFuture<'a>
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
@@ -222,33 +224,20 @@ impl AsyncElement for XingMux {
     }
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
-        match upstream_caps {
-            Caps::Audio {
-                format: AudioFormat::Mp3,
-                ..
-            } => Ok(upstream_caps.clone()),
-            _ => Err(G2gError::CapsMismatch),
-        }
+        crate::compressed_audio_passthrough::require_format(TAGGED_FORMATS, upstream_caps)?;
+        Ok(upstream_caps.clone())
     }
 
-    /// Pass-through identity over MP3 of any channels / rate: the frame header
-    /// carries them and `Caps::Audio` cannot express "MP3 at any channels/rate",
-    /// the same reason `mpegaudioparse` gives.
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
-        CapsConstraint::IdentityAny
+        CapsConstraint::Identity(crate::compressed_audio_passthrough::passthrough_caps(
+            TAGGED_FORMATS,
+        ))
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        match absolute_caps {
-            Caps::Audio {
-                format: AudioFormat::Mp3,
-                ..
-            } => {
-                self.configured = true;
-                Ok(ConfigureOutcome::Accepted)
-            }
-            _ => Err(G2gError::CapsMismatch),
-        }
+        crate::compressed_audio_passthrough::require_format(TAGGED_FORMATS, absolute_caps)?;
+        self.configured = true;
+        Ok(ConfigureOutcome::Accepted)
     }
 
     fn metadata(&self) -> ElementMetadata {
@@ -312,17 +301,7 @@ impl LogSource for XingMux {
 
 impl PadTemplates for XingMux {
     fn pad_templates() -> Vec<PadTemplate> {
-        // `Caps::Audio` has no open dims; pin the common stereo / 44.1 kHz shape.
-        let mp3 = Caps::Audio {
-            format: AudioFormat::Mp3,
-            channels: 2,
-            sample_rate: 44_100,
-            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
-        };
-        Vec::from([
-            PadTemplate::sink(CapsSet::one(mp3.clone())),
-            PadTemplate::source(CapsSet::one(mp3)),
-        ])
+        crate::compressed_audio_passthrough::pad_templates(TAGGED_FORMATS)
     }
 }
 

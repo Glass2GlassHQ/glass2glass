@@ -55,8 +55,8 @@ use g2g_core::{
     PadTemplates, PipelineClock, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
 };
 
-use crate::audio::pcm_caps_any_rate_and_channels;
 use crate::pulsepcm::{pulse_map, pulse_spec, FORMATS};
+use g2g_core::pcm_caps_any_rate_and_channels;
 
 /// Target server-side buffer, in playout time. Bounds it the way `AlsaSink`
 /// bounds its ALSA ring: pulse's default target is a couple of seconds, so a
@@ -199,9 +199,7 @@ impl AsyncElement for PulseSink {
 
     // channel and rate bounds are left to `pulse_spec` in configure
     fn caps_constraint_as_sink(&self) -> CapsConstraint<'_> {
-        CapsConstraint::Accepts(pcm_caps_any_rate_and_channels(|format| {
-            FORMATS.iter().any(|(opened, _)| *opened == format)
-        }))
+        CapsConstraint::Accepts(accepted_pcm_caps())
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -346,19 +344,13 @@ impl AsyncElement for PulseSink {
     }
 }
 
+fn accepted_pcm_caps() -> CapsSet {
+    pcm_caps_any_rate_and_channels(|format| FORMATS.iter().any(|(opened, _)| *opened == format))
+}
+
 impl PadTemplates for PulseSink {
-    /// Terminal PCM sink pad. `Caps::Audio` has no open dims, so the template
-    /// pins the common shapes per PCM format, as in `WasapiSink`.
     fn pad_templates() -> Vec<PadTemplate> {
-        let pcm = |(format, _)| Caps::Audio {
-            format,
-            channels: 2,
-            sample_rate: 48_000,
-            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
-        };
-        Vec::from([PadTemplate::sink(CapsSet::from_alternatives(
-            FORMATS.map(pcm).to_vec(),
-        ))])
+        Vec::from([PadTemplate::sink(accepted_pcm_caps())])
     }
 }
 
