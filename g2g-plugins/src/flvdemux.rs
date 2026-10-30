@@ -505,11 +505,7 @@ impl AsyncElement for FlvDemux {
                     self.sync_configs();
                     let units = self.demux.take_units();
                     self.emit_units(units, out).await?;
-                    if self.seek.takes_seeks_after_end() {
-                        out.push(PipelinePacket::Eos).await?;
-                        self.seek.wait_for_seek_or_shutdown().await;
-                        self.seek.poll_request();
-                    }
+                    self.seek.end_and_wait_for_seek(out).await?;
                 }
                 // ByteStream caps don't carry geometry; nothing to forward.
                 PipelinePacket::CapsChanged(_) => {}

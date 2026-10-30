@@ -438,11 +438,7 @@ impl AsyncElement for Fmp4Demux {
                     if self.seek.eos_before_flush(self.seek.dropping_input())? {
                         return Ok(());
                     }
-                    if self.seek.takes_seeks_after_end() {
-                        out.push(PipelinePacket::Eos).await?;
-                        self.seek.wait_for_seek_or_shutdown().await;
-                        self.seek.poll_request();
-                    }
+                    self.seek.end_and_wait_for_seek(out).await?;
                 }
                 PipelinePacket::CapsChanged(_) => {}
                 other => {

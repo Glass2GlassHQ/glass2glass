@@ -194,7 +194,22 @@ fn seek_during_playback_resumes_at_the_target() {
 #[test]
 fn seek_after_the_end_resumes_at_the_target() {
     let last_frame_milliseconds = (FRAME_COUNT - 1) * FRAME_PERIOD_NS / NANOS_PER_MILLISECOND;
-    for pipeline in [mp4_pipeline(), mkv_pipeline(), mp4_decodebin_pipeline()] {
+    // decodebin picks mp4demux for a fragmented file, so fmp4demux is named
+    let fmp4demux_pipeline = format!(
+        "filesrc location={} ! fmp4demux ! decodebin ! checksumsink hash=md5",
+        offset_fixture("h264_64x48_25fps_gop10_bframes_offset_frag.mp4")
+    );
+    let flv_pipeline = format!(
+        "filesrc location={} ! decodebin ! checksumsink hash=md5",
+        offset_fixture("h264_64x48_25fps_gop10_bframes_offset.flv")
+    );
+    for pipeline in [
+        mp4_pipeline(),
+        mkv_pipeline(),
+        mp4_decodebin_pipeline(),
+        fmp4demux_pipeline,
+        flv_pipeline,
+    ] {
         let unseeked = checksum_lines(&launch(&[], &pipeline));
         // the sink has every frame before the seek goes out
         let resumed = seek_at_resume_frame(&pipeline, &unseeked, last_frame_milliseconds, 400);

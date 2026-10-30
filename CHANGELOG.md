@@ -94,6 +94,7 @@ Breaking: `QosMessage` gains `downstream_proc_ns`, `ElementProbe` is no longer `
 - M1991: demuxers, parsers and network sources share one video placeholder of 16 to 65535 pixels at 1 to 240 fps.
 - M1992: `flacparse` timestamps its frames with the sample clock the other audio parsers use.
 - M1993: bare `.mp3`, `.aac` and `.ac3` files seek through their parsers, matching ffmpeg's decode from the target.
+- M1994: `fmp4demux` and `flvdemux` end the stream before a seek after the end through the same call as the audio parsers.
 
 ## 0.10.0
 
