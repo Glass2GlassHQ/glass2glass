@@ -119,6 +119,8 @@ pub enum MkvStream {
     TaggedVideo(CodecTag),
     // the first `A_MS/ACM` track of this tag, its `CodecPrivate` leading it
     TaggedAudio(CodecTag),
+    Mp2,
+    Mp3,
 }
 
 /// A Matroska `Cues` prefetch in flight: an end-of-file `Cues` index
@@ -352,6 +354,8 @@ impl MkvDemux {
                 sample_rate: 0,
                 channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
             },
+            MkvStream::Mp2 => crate::typefind::elementary_audio_caps(AudioFormat::Mp2),
+            MkvStream::Mp3 => crate::typefind::elementary_audio_caps(AudioFormat::Mp3),
             // Every subtitle stream is de-framed to plain UTF-8 cue text at emit
             // (the source syntax, `S_TEXT/UTF8` / `ASS` / `WEBVTT`, only selects the
             // de-framing), so the forwarded caps is always `Text { Utf8 }`.
@@ -560,6 +564,8 @@ impl MkvDemux {
             MkvCodec::Ac3 => (StreamType::Audio, audio(AudioFormat::Ac3)),
             MkvCodec::Flac => (StreamType::Audio, audio(AudioFormat::Flac)),
             MkvCodec::Vorbis => (StreamType::Audio, audio(AudioFormat::Vorbis)),
+            MkvCodec::Mp2 => (StreamType::Audio, audio(AudioFormat::Mp2)),
+            MkvCodec::Mp3 => (StreamType::Audio, audio(AudioFormat::Mp3)),
             MkvCodec::Pcm { format, .. } => (StreamType::Audio, audio(format)),
             MkvCodec::RawVideo(format) => (
                 StreamType::Video,
@@ -927,7 +933,7 @@ static MKVDEMUX_PROPS: &[PropertySpec] = &[
     PropertySpec::new(
         "stream",
         PropKind::Str,
-        "elementary stream to emit: h264 | h265 | vp8 | vp9 | av1 | mjpeg | theora | prores-proxy | prores-lt | prores-standard | prores-hq | prores-4444 | prores-4444xq | aac | opus | ac3 | flac | vorbis | vobsub | dvbsub | pgs | a raw PCM format (U8 | S16LE | S24LE | S32LE | F32LE) | uncompressed video by layout (raw-i420 | raw-yuy2 | raw-uyvy | raw-v210) | video-riff-<fourcc> | video-mov-<fourcc> | audio-riff-0x<tag> (a codec known only by its tag, with ffmpeg-long-tail)",
+        "elementary stream to emit: h264 | h265 | vp8 | vp9 | av1 | mjpeg | theora | prores-proxy | prores-lt | prores-standard | prores-hq | prores-4444 | prores-4444xq | aac | opus | ac3 | flac | vorbis | mp2 | mp3 | vobsub | dvbsub | pgs | a raw PCM format (U8 | S16LE | S24LE | S32LE | F32LE) | uncompressed video by layout (raw-i420 | raw-yuy2 | raw-uyvy | raw-v210) | video-riff-<fourcc> | video-mov-<fourcc> | audio-riff-0x<tag> (a codec known only by its tag, with ffmpeg-long-tail)",
     ),
     PropertySpec::new(
         "track-number",
@@ -953,6 +959,8 @@ fn codec_to_stream(codec: MkvCodec) -> Option<MkvStream> {
         MkvCodec::Ac3 => Some(MkvStream::Ac3),
         MkvCodec::Flac => Some(MkvStream::Flac),
         MkvCodec::Vorbis => Some(MkvStream::Vorbis),
+        MkvCodec::Mp2 => Some(MkvStream::Mp2),
+        MkvCodec::Mp3 => Some(MkvStream::Mp3),
         MkvCodec::Subtitle(format) => Some(MkvStream::Subtitle(format)),
         MkvCodec::VobSub => Some(MkvStream::VobSub),
         MkvCodec::DvbSub => Some(MkvStream::DvbSub),
@@ -1471,6 +1479,8 @@ fn mkv_stream_from_str(s: &str) -> Option<MkvStream> {
         "ac3" => Some(MkvStream::Ac3),
         "flac" => Some(MkvStream::Flac),
         "vorbis" => Some(MkvStream::Vorbis),
+        "mp2" => Some(MkvStream::Mp2),
+        "mp3" => Some(MkvStream::Mp3),
         "vobsub" | "dvdsub" => Some(MkvStream::VobSub),
         "dvbsub" => Some(MkvStream::DvbSub),
         "pgs" | "hdmvpgs" => Some(MkvStream::Pgs),
@@ -1501,6 +1511,8 @@ pub fn mkv_stream_str(stream: MkvStream) -> alloc::string::String {
         MkvStream::Ac3 => "ac3",
         MkvStream::Flac => "flac",
         MkvStream::Vorbis => "vorbis",
+        MkvStream::Mp2 => "mp2",
+        MkvStream::Mp3 => "mp3",
         MkvStream::Subtitle(_) => "text",
         MkvStream::VobSub => "vobsub",
         MkvStream::DvbSub => "dvbsub",
@@ -1533,6 +1545,8 @@ impl PadTemplates for MkvDemux {
             Self::output_caps(MkvStream::Ac3),
             Self::output_caps(MkvStream::Flac),
             Self::output_caps(MkvStream::Vorbis),
+            Self::output_caps(MkvStream::Mp2),
+            Self::output_caps(MkvStream::Mp3),
             Self::output_caps(MkvStream::Subtitle(TextFormat::Utf8)),
             Self::output_caps(MkvStream::VobSub),
             Self::output_caps(MkvStream::DvbSub),
@@ -2465,6 +2479,36 @@ mod tests {
         );
         let segment = elem(&[0x18, 0x53, 0x80, 0x67], &[tracks, cluster].concat());
         [elem(&[0x1A, 0x45, 0xDF, 0xA3], &[]), segment].concat()
+    }
+
+    #[tokio::test]
+    async fn an_mpeg_audio_layer_3_track_demuxes_as_mp3() {
+        let tracks = elem(
+            &[0x16, 0x54, 0xAE, 0x6B],
+            &audio_track(1, b"A_MPEG/L3", 2, 44_100),
+        );
+        let cluster = elem(
+            &[0x1F, 0x43, 0xB6, 0x75],
+            &[
+                elem(&[0xE7], &uint_body(0)),
+                elem(&[0xA3], &block(1, 0, &[0xFF, 0xFB])),
+            ]
+            .concat(),
+        );
+        let segment = elem(&[0x18, 0x53, 0x80, 0x67], &[tracks, cluster].concat());
+        let file = [elem(&[0x1A, 0x45, 0xDF, 0xA3], &[]), segment].concat();
+        let mut sink = CaptureSink::default();
+        run(MkvStream::Mp3, &file, &mut sink).await;
+        assert_eq!(
+            sink.caps.last(),
+            Some(&Caps::Audio {
+                format: AudioFormat::Mp3,
+                channels: 2,
+                sample_rate: 44_100,
+                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
+            })
+        );
+        assert_eq!(sink.frames, alloc::vec![alloc::vec![0xFF, 0xFB]]);
     }
 
     #[tokio::test]

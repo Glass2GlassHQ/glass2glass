@@ -6,7 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
-Breaking: `QosMessage` gains `downstream_proc_ns`, `ElementProbe` is no longer `UnwindSafe`, `SpecError::UnknownProperty` / `BadValue` are replaced by `SpecError::Property(ParseError)`, `receive_rtp_h264` is renamed `receive_rtp`, `RtpRecvConfig` gains an `encoding` field, and the `vaapi` feature with `vaapidec` / `vaapidech265` is removed.
+Breaking: `QosMessage` gains `downstream_proc_ns`, `ElementProbe` is no longer `UnwindSafe`, `SpecError::UnknownProperty` / `BadValue` are replaced by `SpecError::Property(ParseError)`, `receive_rtp_h264` is renamed `receive_rtp`, `RtpRecvConfig` gains an `encoding` field, the `vaapi` feature with `vaapidec` / `vaapidech265` is removed, and `MkvCodec` / `MkvStream` gain `Mp2` and `Mp3`.
 
 - M1900: `VelloAnalyticsOverlay` draws on RGBA wgpu textures, `WgpuColorConvert` converts NV12 wgpu textures to RGBA, and `CudaToWgpu` keeps frame metadata.
 - M1901: `VelloAnalyticsOverlay` draws the `show-label` / `show-track` / `show-score` captions.
@@ -83,6 +83,7 @@ Breaking: `QosMessage` gains `downstream_proc_ns`, `ElementProbe` is no longer `
 - M1980: `flacparse` timestamps restart at the demuxer's landing after a seek.
 - M1981: `flacparse` accepts only FLAC, so `oggdemux ! flacparse` negotiates without a `stream` choice.
 - M1982: a bare `.flac` file seeks through `flacparse`, sample-exact against ffmpeg.
+- M1983: `matroskademux` reads MP2 and MP3 tracks (`A_MPEG/L2`, `A_MPEG/L3`).
 
 ## 0.10.0
 

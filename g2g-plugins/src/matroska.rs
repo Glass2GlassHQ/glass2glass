@@ -214,6 +214,10 @@ pub enum MkvCodec {
     TaggedVideo(CodecTag),
     // `A_MS/ACM` naming a codec no variant above maps, its `CodecPrivate` the WAVEFORMATEX
     TaggedAudio(CodecTag),
+    // `A_MPEG/L2`
+    Mp2,
+    // `A_MPEG/L3`
+    Mp3,
 }
 
 impl MkvCodec {
@@ -247,6 +251,10 @@ impl MkvCodec {
             MkvCodec::Ac3
         } else if id == b"A_FLAC" {
             MkvCodec::Flac
+        } else if id == b"A_MPEG/L2" {
+            MkvCodec::Mp2
+        } else if id == b"A_MPEG/L3" {
+            MkvCodec::Mp3
         } else if id == b"S_TEXT/UTF8" {
             MkvCodec::Subtitle(TextFormat::Utf8)
         } else if id == b"S_TEXT/ASS" || id == b"S_TEXT/SSA" {
@@ -290,6 +298,8 @@ impl MkvCodec {
             MkvCodec::Pgs => b"S_HDMV/PGS",
             // `A_PCM/*` is a read-side mapping only: the muxer writes no `BitDepth`.
             MkvCodec::Subtitle(_)
+            | MkvCodec::Mp2
+            | MkvCodec::Mp3
             | MkvCodec::Other
             | MkvCodec::Pcm { .. }
             | MkvCodec::RawVideo(_)
@@ -317,7 +327,9 @@ impl MkvCodec {
             | MkvCodec::Flac
             | MkvCodec::Vorbis
             | MkvCodec::Pcm { .. }
-            | MkvCodec::TaggedAudio(_) => 2,
+            | MkvCodec::TaggedAudio(_)
+            | MkvCodec::Mp2
+            | MkvCodec::Mp3 => 2,
             MkvCodec::Subtitle(_) | MkvCodec::VobSub | MkvCodec::DvbSub | MkvCodec::Pgs => 0x11,
             _ => 1,
         }
