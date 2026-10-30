@@ -61,16 +61,17 @@ use alloc::vec::Vec;
 
 use g2g_core::log::LogSource;
 use g2g_core::runtime::{
-    eos_then_wait_for_seek, flushing_only, SeekController, SeekFormat, SourceLoop,
+    eos_then_wait_for_seek, flushing_only, SeekController, SeekFormat, SeekRefusal, SourceLoop,
 };
 use g2g_core::time::ticks_to_ns;
 use g2g_core::{
     g2g_debug, g2g_warn, BusHandle, ByteStreamEncoding, Caps, CapsConstraint, CapsSet,
     ConfigureOutcome, ElementMetadata, G2gError, OutputSink, PipelinePacket, PropError, PropKind,
-    PropValue, PropertySpec,
+    PropValue, PropertySpec, Seek,
 };
 
 use crate::abr::BandwidthEstimator;
+use crate::adaptiveseek::LiveWindow;
 use crate::dashclock::{local_now_unix, RequestSpan, ServerClock};
 use crate::fetch::{
     body_read_err, byte_frame, get_bytes_retrying, get_range_bytes_retrying, get_response_retrying,
@@ -421,6 +422,43 @@ impl DashSrc {
     }
 }
 
+// the longest segment the MPD declares, else the longest gap between the listed segments, as the DASH spec defines it
+fn max_segment_duration_secs(mpd: &Mpd, segs: &[ResolvedSegment], timescale: u32) -> f64 {
+    mpd.max_segment_duration_secs.unwrap_or_else(|| {
+        let longest_gap = segs
+            .windows(2)
+            .map(|pair| pair[1].time.saturating_sub(pair[0].time))
+            .max()
+            .unwrap_or(0);
+        longest_gap as f64 / f64::from(timescale.max(1))
+    })
+}
+
+// gst dashdemux's live seek range: the time-shift buffer up to one segment before now, a segment only being available once it ends
+fn live_window(
+    mpd: &Mpd,
+    now_unix: f64,
+    segs: &[ResolvedSegment],
+    timescale: u32,
+) -> Result<LiveWindow, SeekRefusal> {
+    let availability_start_unix = mpd
+        .availability_start_unix
+        .ok_or(SeekRefusal::NoLiveWindow)?;
+    let now_secs = now_unix - availability_start_unix;
+    if now_secs <= 0.0 {
+        return Err(SeekRefusal::NoLiveWindow);
+    }
+    let start_secs = mpd
+        .time_shift_buffer_depth_secs
+        .map_or(0.0, |depth| now_secs - depth);
+    let stop_secs = now_secs - max_segment_duration_secs(mpd, segs, timescale);
+    let to_ns = |secs: f64| (secs.max(0.0) * 1_000_000_000.0) as u64;
+    Ok(LiveWindow {
+        start_ns: to_ns(start_secs),
+        stop_ns: to_ns(stop_secs),
+    })
+}
+
 /// The index of the media segment containing `target_ns` (the last whose
 /// `$Time$` start, converted from `timescale` units to ns, is at or before the
 /// target). Segments are time-ordered, so the scan stops at the first start past
@@ -609,8 +647,14 @@ impl SourceLoop for DashSrc {
                     // flush, reload the Period containing the target, and re-emit
                     // the init segment (a downstream demuxer reset on the flush
                     // needs its moov again).
-                    if let Some(seek) = self.seek.as_ref().and_then(|c| c.take_seek(flushing_only))
-                    {
+                    let accept = |seek: Seek| {
+                        let seek = flushing_only(seek)?;
+                        if !mpd.dynamic {
+                            return Ok(seek);
+                        }
+                        live_window(&mpd, clock.now_unix(), &segs, timescale)?.admit(seek)
+                    };
+                    if let Some(seek) = self.seek.as_ref().and_then(|c| c.take_seek(accept)) {
                         // Queued lookahead is pre-seek media: drop it (and
                         // re-arm the prebuffer fill) before flushing.
                         window.clear();

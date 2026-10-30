@@ -301,6 +301,45 @@ fn hls_discontinuity_pipeline() -> String {
     format!("hlssrc location={base}{PLAYLIST_PATH} ! decodebin ! checksumsink hash=md5")
 }
 
+// the fixture playlist without its end tag for its first loads, so the stream is live and still ends
+#[cfg(feature = "hls")]
+fn hls_live_pipeline() -> String {
+    const PLAYLIST_PATH: &str = "/live.m3u8";
+    const LIVE_LOADS: usize = 3;
+    let ended = std::fs::read_to_string(offset_fixture(&format!(
+        "{HLS_FIXTURE_DIRECTORY}/media.m3u8"
+    )))
+    .unwrap();
+    let live = ended
+        .trim_end()
+        .strip_suffix("#EXT-X-ENDLIST")
+        .unwrap()
+        .to_string();
+    let loads = std::sync::atomic::AtomicUsize::new(0);
+    let base = http_routes::serve(move |path| match path {
+        PLAYLIST_PATH => {
+            let load = loads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let playlist = if load < LIVE_LOADS { &live } else { &ended };
+            Some(playlist.clone().into_bytes())
+        }
+        segment => std::fs::read(offset_fixture(&format!("{HLS_FIXTURE_DIRECTORY}{segment}"))).ok(),
+    });
+    format!("hlssrc location={base}{PLAYLIST_PATH} ! decodebin ! checksumsink hash=md5")
+}
+
+#[cfg(feature = "hls")]
+#[test]
+fn hls_live_seek_outside_the_window_fails_the_run() {
+    let past_the_window = seek_seconds((FRAME_COUNT / FRAME_RATE + 1) * 1_000);
+    let output = launch_with_seek(&past_the_window, &hls_live_pipeline());
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("outside the live window"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 #[cfg(feature = "hls")]
 #[test]
 fn hls_plays_on_across_a_discontinuity() {

@@ -83,12 +83,22 @@ pub enum SeekOutcome {
 #[non_exhaustive]
 pub enum SeekRefusal {
     NonFlushing,
+    // the live window a seek can reach, in stream time
+    OutsideLiveWindow { start_ns: u64, stop_ns: u64 },
+    NoLiveWindow,
 }
 
 impl core::fmt::Display for SeekRefusal {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::NonFlushing => write!(f, "the element serves only flushing seeks"),
+            Self::OutsideLiveWindow { start_ns, stop_ns } => write!(
+                f,
+                "the target is outside the live window {} to {}",
+                ClockTime(*start_ns),
+                ClockTime(*stop_ns)
+            ),
+            Self::NoLiveWindow => write!(f, "the live stream lists no window to seek in"),
         }
     }
 }
@@ -580,8 +590,13 @@ fn element_mut(graph: &mut Graph<GraphNode>, node: NodeId) -> &mut (dyn DynAsync
 pub fn attach_seek(
     graph: &mut Graph<GraphNode>,
     first_seek: Seek,
-) -> Result<SeekController, AttachSeekError> {
-    attach(graph, Some(first_seek))
+) -> Result<(SeekController, SeekTicket), AttachSeekError> {
+    let target = seek_target(graph)?;
+    let app = SeekController::new();
+    // queued before the element gets the controller, so it lands before the first frame
+    let ticket = app.seek(first_seek);
+    give_controller(graph, target, &app);
+    Ok((app, ticket))
 }
 
 // the application seeks through the controller once the run is under way
@@ -589,7 +604,10 @@ pub fn attach_seek(
 pub fn attach_seek_controller(
     graph: &mut Graph<GraphNode>,
 ) -> Result<SeekController, AttachSeekError> {
-    attach(graph, None)
+    let target = seek_target(graph)?;
+    let app = SeekController::new();
+    give_controller(graph, target, &app);
+    Ok(app)
 }
 
 #[cfg(feature = "std")]
@@ -625,16 +643,7 @@ pub(crate) fn seek_target(
 }
 
 #[cfg(feature = "std")]
-fn attach(
-    graph: &mut Graph<GraphNode>,
-    first_seek: Option<Seek>,
-) -> Result<SeekController, AttachSeekError> {
-    let target = seek_target(graph)?;
-    let app = SeekController::new();
-    // queued before the element gets the controller, so it lands before the first frame
-    if let Some(seek) = first_seek {
-        app.seek(seek);
-    }
+fn give_controller(graph: &mut Graph<GraphNode>, target: SeekableNode, app: &SeekController) {
     match target {
         SeekableNode::TimeSource(node) => source_mut(graph, node).set_seek(app.clone()),
         SeekableNode::BufferedElement(node) => {
@@ -650,7 +659,6 @@ fn attach(
             element_mut(graph, demuxer).set_seek(app.clone(), upstream);
         }
     }
-    Ok(app)
 }
 
 #[cfg(test)]

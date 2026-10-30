@@ -319,6 +319,8 @@ pub struct Mpd {
     /// `@suggestedPresentationDelay` in seconds: how far behind the live edge
     /// the packager wants playback to sit.
     pub suggested_presentation_delay_secs: Option<f64>,
+    /// `@maxSegmentDuration` in seconds.
+    pub max_segment_duration_secs: Option<f64>,
     /// The presentation's Periods, in order. Always non-empty.
     pub periods: Vec<Period>,
     /// The `UTCTiming` elements, in manifest order.
@@ -928,6 +930,9 @@ pub fn parse(xml: &str) -> Result<Mpd, MpdError> {
             .and_then(parse_iso_duration),
         suggested_presentation_delay_secs: root
             .attribute("suggestedPresentationDelay")
+            .and_then(parse_iso_duration),
+        max_segment_duration_secs: root
+            .attribute("maxSegmentDuration")
             .and_then(parse_iso_duration),
         periods,
         utc_timings: root
@@ -1833,6 +1838,7 @@ mod tests {
         assert_eq!(mpd.availability_start_unix, Some(AST_UNIX));
         assert_eq!(mpd.time_shift_buffer_depth_secs, Some(3.0));
         assert_eq!(mpd.suggested_presentation_delay_secs, Some(1.0));
+        assert_eq!(mpd.max_segment_duration_secs, Some(1.0));
         assert_eq!(mpd.periods.len(), 1);
         assert_eq!(mpd.periods[0].start_secs, 0.0);
         let tmpl = mpd.periods[0].representations[0].template().unwrap();

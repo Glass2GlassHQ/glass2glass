@@ -95,7 +95,7 @@ use g2g_core::element::BoxFuture;
 use g2g_core::runtime::{
     attach_seek, attach_seek_controller, fallback_factory, has_live_source, parse_launch,
     parse_launch_avoiding, FlightRecorder, GraphNode, PipelineProgress, Registry, RunBuilder,
-    SeekController,
+    SeekController, SeekOutcome, SeekTicket,
 };
 #[cfg(any(feature = "observe", feature = "tui"))]
 use g2g_core::runtime::{run_graph_observed, run_graph_observed_recorded, Observer};
@@ -872,9 +872,10 @@ fn main() {
     // to choose differently.
     let mut avoided: Vec<&'static str> = Vec::new();
     let mut graph = graph;
-    let mut seek_controller = attach_launch_seeks(&mut graph, seek_ns, seek_at);
+    let mut launch_seeks = attach_launch_seeks(&mut graph, seek_ns, seek_at);
     loop {
         let mut pending_seek = seek_at;
+        let mut seek_ticket = launch_seeks.seek_ticket.take();
         let clock = WallClock::new();
         let progress = PipelineProgress::new();
         let (bus, bus_handle) = Bus::new(BUS_DEPTH);
@@ -908,7 +909,7 @@ fn main() {
             let mut run_builder = RunBuilder::new(graph, &clock, LINK_CAPACITY)
                 .with_progress(&progress)
                 .with_bus(&bus_handle);
-            if let Some(controller) = &seek_controller {
+            if let Some(controller) = &launch_seeks.seek_at_controller {
                 controller.keep_run_open();
                 run_builder = run_builder.with_seek_controller(controller);
             }
@@ -961,8 +962,23 @@ fn main() {
                     }
                 }
                 let polled = run.as_mut().poll(cx);
-                if let (Poll::Pending, Some(controller)) = (&polled, &seek_controller) {
-                    seek_at_position(controller, &progress, &mut pending_seek);
+                if let (Poll::Pending, Some(controller)) =
+                    (&polled, &launch_seeks.seek_at_controller)
+                {
+                    if let Some(ticket) = seek_at_position(controller, &progress, &mut pending_seek)
+                    {
+                        seek_ticket = Some(ticket);
+                    }
+                }
+                // a refused seek leaves playback running, which never ends on a live stream
+                if let Some(SeekOutcome::Refused(refusal)) =
+                    seek_ticket.as_ref().and_then(SeekTicket::outcome)
+                {
+                    if printed_status {
+                        eprintln!();
+                    }
+                    eprintln!("pipeline error: the pipeline refused the seek: {refusal}");
+                    process::exit(1);
                 }
                 polled
             })
@@ -999,7 +1015,11 @@ fn main() {
                         );
                         process::exit(1);
                     }
-                    if seek_controller.as_ref().is_some_and(|c| c.has_pending()) {
+                    if launch_seeks
+                        .seek_at_controller
+                        .as_ref()
+                        .is_some_and(|c| c.has_pending())
+                    {
                         eprintln!("pipeline error: the run ended before it took the --seek-at {seek} seek");
                         process::exit(1);
                     }
@@ -1023,7 +1043,7 @@ fn main() {
                             "{factory} could not decode this stream ({err:?}), retrying without it"
                         );
                         graph = next;
-                        seek_controller = attach_launch_seeks(&mut graph, seek_ns, seek_at);
+                        launch_seeks = attach_launch_seeks(&mut graph, seek_ns, seek_at);
                         continue;
                     }
                 }
@@ -1064,10 +1084,8 @@ fn seek_at_position(
     controller: &SeekController,
     progress: &PipelineProgress,
     pending_seek: &mut Option<SeekDuringPlayback>,
-) {
-    let Some(seek) = *pending_seek else {
-        return;
-    };
+) -> Option<SeekTicket> {
+    let seek = (*pending_seek)?;
     // read before the position, so the position read after a stream end is the last one
     let stream_ended = controller.stream_ended();
     if progress
@@ -1075,11 +1093,14 @@ fn seek_at_position(
         .is_some_and(|position_ns| position_ns >= seek.position_ns)
     {
         *pending_seek = None;
-        controller.seek(Seek::flush_to(seek.target_ns));
+        let ticket = controller.seek(Seek::flush_to(seek.target_ns));
         controller.let_run_end();
-    } else if stream_ended {
+        return Some(ticket);
+    }
+    if stream_ended {
         controller.let_run_end();
     }
+    None
 }
 
 fn seek_during_playback(seek: &str) -> Result<SeekDuringPlayback, String> {
@@ -1091,23 +1112,38 @@ fn seek_during_playback(seek: &str) -> Result<SeekDuringPlayback, String> {
     })
 }
 
-// the controller a --seek-at seek goes through, None without one
+#[derive(Debug, Default)]
+struct LaunchSeeks {
+    seek_at_controller: Option<SeekController>,
+    // the --seek seek, queued before the first frame
+    seek_ticket: Option<SeekTicket>,
+}
+
 fn attach_launch_seeks(
     graph: &mut Graph<GraphNode>,
     seek_ns: Option<u64>,
     seek_at: Option<SeekDuringPlayback>,
-) -> Option<SeekController> {
-    let (flag, attached) = match (seek_ns, seek_at) {
-        (None, None) => return None,
-        (Some(target_ns), _) => ("--seek", attach_seek(graph, Seek::flush_to(target_ns))),
-        (None, Some(_)) => ("--seek-at", attach_seek_controller(graph)),
+) -> LaunchSeeks {
+    let flag = match (seek_ns, seek_at) {
+        (None, None) => return LaunchSeeks::default(),
+        (Some(_), _) => "--seek",
+        (None, Some(_)) => "--seek-at",
     };
-    match attached {
-        Ok(controller) => seek_at.map(|_| controller),
+    let attached = match seek_ns {
+        Some(target_ns) => attach_seek(graph, Seek::flush_to(target_ns))
+            .map(|(controller, ticket)| (controller, Some(ticket))),
+        None => attach_seek_controller(graph).map(|controller| (controller, None)),
+    };
+    let (controller, seek_ticket) = match attached {
+        Ok(attached) => attached,
         Err(err) => {
             eprintln!("g2g-launch: {flag}: {err}");
             process::exit(1);
         }
+    };
+    LaunchSeeks {
+        seek_at_controller: seek_at.map(|_| controller),
+        seek_ticket,
     }
 }
 

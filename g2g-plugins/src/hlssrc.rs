@@ -59,16 +59,17 @@ use alloc::vec::Vec;
 
 use g2g_core::log::LogSource;
 use g2g_core::runtime::{
-    eos_then_wait_for_seek, flushing_only, SeekController, SeekFormat, SourceLoop,
+    eos_then_wait_for_seek, flushing_only, SeekController, SeekFormat, SeekRefusal, SourceLoop,
 };
 use g2g_core::{
     g2g_debug, g2g_warn, AudioFormat, BusHandle, ByteStreamEncoding, Caps, CapsConstraint, CapsSet,
     ConfigureOutcome, Dim, ElementMetadata, G2gError, HardwareError, OutputSink, PipelinePacket,
-    PropError, PropKind, PropValue, PropertySpec, Rate, Segment, StreamType, TextFormat,
+    PropError, PropKind, PropValue, PropertySpec, Rate, Seek, Segment, StreamType, TextFormat,
     VideoCodec,
 };
 
 use crate::abr::BandwidthEstimator;
+use crate::adaptiveseek::LiveWindow;
 use crate::fetch::{
     byte_frame, get_bytes, get_bytes_retrying, get_range_bytes_retrying, get_text, get_text_query,
     get_text_retrying, is_origin_failure, resolve_url, FetchRetry, MAX_MANIFEST_BYTES,
@@ -728,10 +729,10 @@ fn decrypt_aes128_cbc(
     Ok(data)
 }
 
-/// The index of the media segment containing `target_ns`, walking `#EXTINF`
-/// durations. A target past the end clamps to the last segment (GStreamer clamps
-/// a seek to the duration). Empty playlist returns `0` (the caller's bounds check
-/// breaks the loop).
+/// The index of the media segment containing `target_ns`, measured from the
+/// first listed segment, walking `#EXTINF` durations. A target past the end
+/// clamps to the last segment (GStreamer clamps a seek to the duration). Empty
+/// playlist returns `0` (the caller's bounds check breaks the loop).
 fn segment_for_time(media: &MediaPlaylist, target_ns: u64) -> usize {
     let mut start_ns = 0u64;
     for (idx, seg) in media.segments.iter().enumerate() {
@@ -744,12 +745,63 @@ fn segment_for_time(media: &MediaPlaylist, target_ns: u64) -> usize {
     media.segments.len().saturating_sub(1)
 }
 
-// the playlist time where `media.segments[index]` starts
+// how far after the first listed segment `media.segments[index]` starts
 fn segment_start_ns(media: &MediaPlaylist, index: usize) -> u64 {
     media.segments[..index]
         .iter()
         .map(|segment| (segment.duration_ms as u64).saturating_mul(1_000_000))
         .fold(0, u64::saturating_add)
+}
+
+// the playlist time of `reloaded`'s first segment, carried over the reload by media sequence as gst's hlsdemux does
+fn reloaded_window_start_ns(
+    source: &impl LogSource,
+    previous: &MediaPlaylist,
+    previous_start_ns: u64,
+    reloaded: &MediaPlaylist,
+) -> u64 {
+    let listed = previous.segments.len();
+    let Some(dropped) = reloaded.media_sequence.checked_sub(previous.media_sequence) else {
+        // a restarted origin numbers from the start again
+        return previous_start_ns.saturating_add(segment_start_ns(previous, listed));
+    };
+    let dropped_listed = usize::try_from(dropped).map_or(listed, |dropped| dropped.min(listed));
+    let unlisted = dropped.saturating_sub(listed as u64);
+    if unlisted > 0 {
+        g2g_warn!(
+            source,
+            "{unlisted} segments went by between two reloads, playlist time counts them at the target duration"
+        );
+    }
+    let target_duration_ns = u64::from(previous.target_duration_secs).saturating_mul(1_000_000_000);
+    previous_start_ns
+        .saturating_add(segment_start_ns(previous, dropped_listed))
+        .saturating_add(unlisted.saturating_mul(target_duration_ns))
+}
+
+// gst's live seek range: the first listed segment to the end of the segment, or part, a fresh join starts in
+fn live_window(
+    media: &MediaPlaylist,
+    window_start_ns: u64,
+    ll: bool,
+) -> Result<LiveWindow, SeekRefusal> {
+    if media.segments.is_empty() {
+        return Err(SeekRefusal::NoLiveWindow);
+    }
+    let (sequence, part) = start_position(media, false, ll);
+    let index = (sequence - media.media_sequence) as usize;
+    let parts_through_join = media.segments[index].parts.get(..=part).filter(|_| ll);
+    let joined_end_ns = match parts_through_join {
+        Some(parts) => parts
+            .iter()
+            .map(|part| u64::from(part.duration_ms).saturating_mul(1_000_000))
+            .fold(segment_start_ns(media, index), u64::saturating_add),
+        None => segment_start_ns(media, index + 1),
+    };
+    Ok(LiveWindow {
+        start_ns: window_start_ns,
+        stop_ns: window_start_ns.saturating_add(joined_end_ns),
+    })
 }
 
 // a fetched payload in the prebuffer window, with what goes out ahead of it
@@ -1003,6 +1055,8 @@ impl SourceLoop for HlsSrc {
                 SegmentTimestamps::MpegTs
             };
             let mut timeline = crate::adaptiveseek::AdaptiveTimeline::default();
+            // the playlist time of `media.segments[0]`, 0 in the first playlist loaded
+            let mut window_start_ns = 0u64;
             loop {
                 // Index into `media.segments`; a flushing seek repositions it. The
                 // matching HLS media-sequence number is `media.media_sequence + idx`.
@@ -1012,9 +1066,16 @@ impl SourceLoop for HlsSrc {
                     // resolve the target time to the segment containing it, flush,
                     // jump there, and re-emit the init segment (the downstream
                     // demuxer reset on the flush needs its moov again).
-                    if let Some(seek) = self.seek.as_ref().and_then(|c| c.take_seek(flushing_only))
-                    {
-                        let target_idx = segment_for_time(&media, seek.start);
+                    let accept = |seek: Seek| {
+                        let seek = flushing_only(seek)?;
+                        if media.end_list {
+                            return Ok(seek);
+                        }
+                        live_window(&media, window_start_ns, ll)?.admit(seek)
+                    };
+                    if let Some(seek) = self.seek.as_ref().and_then(|c| c.take_seek(accept)) {
+                        let target_idx =
+                            segment_for_time(&media, seek.start.saturating_sub(window_start_ns));
                         // Queued lookahead is pre-seek media: drop it (and
                         // re-arm the prebuffer fill) before flushing.
                         window.clear();
@@ -1127,7 +1188,7 @@ impl SourceLoop for HlsSrc {
                                         / 1_000_000,
                                 );
                                 if !bytes.is_empty() {
-                                    let start_ns = segment_start_ns(&media, idx);
+                                    let start_ns = window_start_ns + segment_start_ns(&media, idx);
                                     let segment_ahead = timeline.segment_ahead(
                                         &*self,
                                         start_ns,
@@ -1241,7 +1302,7 @@ impl SourceLoop for HlsSrc {
                                 bytes
                             };
                             if !bytes.is_empty() {
-                                let start_ns = segment_start_ns(&media, idx);
+                                let start_ns = window_start_ns + segment_start_ns(&media, idx);
                                 let segment_ahead = timeline.segment_ahead(
                                     &*self,
                                     start_ns,
@@ -1290,6 +1351,12 @@ impl SourceLoop for HlsSrc {
                                         // `next_seq` carries over; re-emit the init. The new
                                         // window can start later than the old one, so the walk
                                         // restarts at its front and skips what was delivered.
+                                        window_start_ns = reloaded_window_start_ns(
+                                            &*self,
+                                            &media,
+                                            window_start_ns,
+                                            &m,
+                                        );
                                         media = m;
                                         media_url = new_url;
                                         current_variant = Some(new_uri);
@@ -1435,12 +1502,26 @@ impl SourceLoop for HlsSrc {
                                         resolve_abr(&client, &self.url, &text, self.cap()).await?;
                                     master = resolved.master;
                                     current_variant = resolved.variant_uri;
+                                    window_start_ns = reloaded_window_start_ns(
+                                        &*self,
+                                        &media,
+                                        window_start_ns,
+                                        &resolved.media,
+                                    );
                                     media = resolved.media;
                                     media_url = resolved.media_url;
                                 } else {
-                                    (media, media_url) =
+                                    let (resolved, resolved_url) =
                                         resolve_media(&client, &self.url, &text, self.cap())
                                             .await?;
+                                    window_start_ns = reloaded_window_start_ns(
+                                        &*self,
+                                        &media,
+                                        window_start_ns,
+                                        &resolved,
+                                    );
+                                    media = resolved;
+                                    media_url = resolved_url;
                                 }
                                 None
                             }
@@ -1450,10 +1531,13 @@ impl SourceLoop for HlsSrc {
                 };
                 let origin_restarted = match reloaded_text {
                     Some(text) => {
-                        media = match parse(&text).map_err(|_| G2gError::CapsMismatch)? {
+                        let reloaded = match parse(&text).map_err(|_| G2gError::CapsMismatch)? {
                             Playlist::Media(m) => m,
                             Playlist::Master(_) => return Err(G2gError::CapsMismatch),
                         };
+                        window_start_ns =
+                            reloaded_window_start_ns(&*self, &media, window_start_ns, &reloaded);
+                        media = reloaded;
                         // a restarted origin numbers its segments from the start again
                         let numbering_went_back =
                             next_seq > media.media_sequence + media.segments.len() as u64;

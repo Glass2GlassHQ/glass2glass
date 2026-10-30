@@ -19,10 +19,10 @@ use std::sync::{Arc, Mutex};
 use g2g_core::element::AsyncElement;
 use g2g_core::frame::{Frame, FrameTiming};
 use g2g_core::memory::SystemSlice;
-use g2g_core::runtime::{SeekController, SourceLoop};
+use g2g_core::runtime::{SeekController, SeekOutcome, SeekRefusal, SeekTicket, SourceLoop};
 use g2g_core::{
     ByteStreamEncoding, Caps, Dim, G2gError, MemoryDomain, MultiInputElement, OutputSink,
-    PipelinePacket, PropValue, PushOutcome, Rate, Seek, Segment, VideoCodec,
+    PipelinePacket, PropValue, PushOutcome, Rate, Seek, SeekFlags, Segment, VideoCodec,
 };
 use g2g_plugins::dashsrc::DashSrc;
 use g2g_plugins::fmp4demux::Fmp4Demux;
@@ -193,6 +193,89 @@ async fn dash_live_duration_profile_starts_at_the_live_edge_and_reloads() {
         !fetched.iter().any(|p| p.contains("chunk-stream0-00006")),
         "the stale end of the window is not replayed: {fetched:?}"
     );
+}
+
+// --- live seeks (M2011) ---------------------------------------------------
+
+const LIVE_AGE_SECS: f64 = 15.0;
+const LIVE_TIME_SHIFT_SECS: f64 = 6.0;
+// segment 6 spans 10 s to 12 s, inside the 9 s to 13 s window `live_mpd` lists at 15 s
+const INSIDE_LIVE_WINDOW_NS: u64 = 10_000_000_000;
+const BEFORE_LIVE_WINDOW_NS: u64 = 2_000_000_000;
+
+// the run of `dash_live_duration_profile_starts_at_the_live_edge_and_reloads`, `seek` queued before it starts
+async fn run_live_seek(manifests: Vec<String>, seek: Seek) -> (CaptureSink, SeekTicket) {
+    let (url, _) = serve_live(manifests);
+    let controller = SeekController::new();
+    let ticket = controller.seek(seek);
+    let mut src = DashSrc::new(url)
+        .with_reload_interval_ms(20)
+        .with_seek(controller);
+    (run_dash(&mut src).await, ticket)
+}
+
+fn sliding_live_manifests() -> Vec<String> {
+    vec![
+        live_mpd(LIVE_AGE_SECS, LIVE_TIME_SHIFT_SECS, Some(2.0), None),
+        live_mpd(19.0, LIVE_TIME_SHIFT_SECS, Some(2.0), None),
+        ended_mpd(18.0),
+    ]
+}
+
+#[tokio::test]
+async fn dash_live_seek_plays_from_the_segment_holding_the_target() {
+    let (sink, ticket) = run_live_seek(
+        sliding_live_manifests(),
+        Seek::flush_to(INSIDE_LIVE_WINDOW_NS),
+    )
+    .await;
+
+    assert_eq!(ticket.outcome(), Some(SeekOutcome::Served));
+    assert_eq!(
+        sink.body,
+        expected_stream(&[6, 7, 8, 9]),
+        "the seek starts a segment before the live edge"
+    );
+    assert_eq!(sink.segments.len(), 1);
+    assert_eq!(sink.segments[0].time, INSIDE_LIVE_WINDOW_NS);
+}
+
+#[tokio::test]
+async fn dash_live_accurate_seek_before_the_time_shift_buffer_is_refused() {
+    let accurate = Seek {
+        flags: SeekFlags::FLUSH | SeekFlags::ACCURATE,
+        ..Seek::flush_to(BEFORE_LIVE_WINDOW_NS)
+    };
+    let (sink, ticket) = run_live_seek(sliding_live_manifests(), accurate).await;
+
+    assert!(
+        matches!(
+            ticket.outcome(),
+            Some(SeekOutcome::Refused(SeekRefusal::OutsideLiveWindow { .. }))
+        ),
+        "{:?}",
+        ticket.outcome()
+    );
+    assert_eq!(
+        sink.body,
+        expected_stream(&[7, 8, 9]),
+        "playback carries on from the live edge"
+    );
+}
+
+#[tokio::test]
+async fn dash_live_seek_without_an_availability_start_is_refused() {
+    let (sink, ticket) = run_live_seek(
+        vec![live_timeline_mpd(6, true), live_timeline_mpd(6, false)],
+        Seek::flush_to(BEFORE_LIVE_WINDOW_NS),
+    )
+    .await;
+
+    assert_eq!(
+        ticket.outcome(),
+        Some(SeekOutcome::Refused(SeekRefusal::NoLiveWindow))
+    );
+    assert_eq!(sink.body, expected_stream(&[5, 6]));
 }
 
 #[tokio::test]

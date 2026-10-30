@@ -552,6 +552,17 @@ its own, while the runner's opening `Segment` it still replaces.
 `attach_seek` skips a time source that feeds a buffering element (`qtdemux` behind
 `hlssrc`), since that element holds the whole stream and serves the seek.
 
+A seek on a live HLS or DASH stream has to land in the live window, gst
+adaptivedemux's seek range (`adaptiveseek::LiveWindow`). For HLS the window runs
+from the first listed segment to the end of the segment, or part, a fresh join
+starts in. Playlist time 0 is the first segment of the first playlist loaded, and
+each reload carries it over by media sequence. For DASH the window runs from now
+less `timeShiftBufferDepth` to now less `maxSegmentDuration`, on presentation time
+from `availabilityStartTime`, and a live MPD without one refuses every seek. A start
+before the window moves onto it unless the seek is accurate, an `End` start counts
+back from the window end, and a target still outside is refused with
+`SeekRefusal::OutsideLiveWindow`, which `g2g-launch` reports before exiting.
+
 Reverse playback (`Seek::reverse`, `rate < 0`) needs no sink-specific code. The
 source emits frames newest-PTS-first over `[start, stop]`, and `SyncSink` schedules
 each by `Segment::to_running_time`, which measures reverse from `stop`, and clips
@@ -618,7 +629,7 @@ seek on a LOAS or raw AAC stream, which has no ADTS headers to count samples by.
 node, so only `OnePortElement` reads it, for a demuxer run as its one-output
 form. `attach_seek` finds the one node that can take the time seek, gives it a
 controller with the seek already queued and a demuxer's byte source a second one,
-so the seek lands before the first frame. `attach_seek_controller` attaches the same
+so the seek lands before the first frame, and returns the seek's ticket. `attach_seek_controller` attaches the same
 controllers with nothing queued, for a seek made while the pipeline runs, which
 `g2g-launch --seek-at` issues once the sink reports a given position. After a seek every seekable source and
 demuxer restarts at the keyframe at or before the target with a segment starting at

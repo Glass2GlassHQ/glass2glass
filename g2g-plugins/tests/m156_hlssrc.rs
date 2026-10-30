@@ -14,17 +14,22 @@ use std::thread;
 use g2g_core::element::AsyncElement;
 use g2g_core::frame::{Frame, FrameTiming};
 use g2g_core::memory::SystemSlice;
-use g2g_core::runtime::{Registry, SeekController, SourceLoop};
+use g2g_core::runtime::{
+    Registry, SeekController, SeekOutcome, SeekRefusal, SeekTicket, SourceLoop,
+};
 use g2g_core::time::ticks_to_ns;
 use g2g_core::{
     ByteStreamEncoding, Caps, CapsConstraint, Dim, G2gError, MemoryDomain, MultiInputElement,
-    OutputSink, PipelinePacket, PushOutcome, Rate, Seek, VideoCodec,
+    OutputSink, PipelinePacket, PushOutcome, Rate, Seek, SeekFlags, VideoCodec,
 };
 use g2g_plugins::fmp4demux::Fmp4Demux;
 use g2g_plugins::hlssrc::HlsSrc;
 use g2g_plugins::mp4muxn::Mp4MuxN;
 use g2g_plugins::mpegts::{TsMuxer, STREAM_TYPE_H264};
 use g2g_plugins::uridecodebin::hls_uri_fanout;
+
+#[path = "common/http_routes.rs"]
+mod http_routes;
 
 #[derive(Default)]
 struct CaptureSink {
@@ -1285,5 +1290,147 @@ impl OutputSink for DemuxSink {
             }
             Ok(PushOutcome::Accepted)
         })
+    }
+}
+
+// --- live DVR seeks (M2011) -------------------------------------------------
+
+const LIVE_FIRST_SEQUENCE: u64 = 10;
+const LIVE_LISTED: u64 = 6;
+const LIVE_DROPPED_PER_RELOAD: u64 = 2;
+const LIVE_LAST_RELOAD: u64 = 2;
+// the playlist answer the server issues the seek with, 0 being the first load
+const LIVE_SEEK_RELOAD: u64 = 1;
+const LIVE_SEGMENT_NS: u64 = 1_000_000_000;
+// a fresh join starts three target durations from the end
+const LIVE_EDGE_SEGMENTS: u64 = 3;
+const LIVE_WINDOW_START_NS: u64 = LIVE_SEEK_RELOAD * LIVE_DROPPED_PER_RELOAD * LIVE_SEGMENT_NS;
+const LIVE_WINDOW_STOP_NS: u64 =
+    LIVE_WINDOW_START_NS + (LIVE_LISTED - LIVE_EDGE_SEGMENTS + 1) * LIVE_SEGMENT_NS;
+const LIVE_JOIN_SEQUENCE: u64 = LIVE_FIRST_SEQUENCE + LIVE_LISTED - LIVE_EDGE_SEGMENTS;
+const LIVE_SEEK_WINDOW_FIRST_SEQUENCE: u64 =
+    LIVE_FIRST_SEQUENCE + LIVE_SEEK_RELOAD * LIVE_DROPPED_PER_RELOAD;
+const LIVE_LAST_SEQUENCE: u64 =
+    LIVE_FIRST_SEQUENCE + LIVE_LAST_RELOAD * LIVE_DROPPED_PER_RELOAD + LIVE_LISTED - 1;
+
+// a window of 1 s segments sliding by two segments a reload, ended on the last
+fn sliding_live_playlist(reload: u64) -> String {
+    let first = LIVE_FIRST_SEQUENCE + reload * LIVE_DROPPED_PER_RELOAD;
+    let mut playlist = format!("#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:{first}\n");
+    for sequence in first..first + LIVE_LISTED {
+        playlist += &format!("#EXTINF:1.0,\nseg{sequence}.ts\n");
+    }
+    if reload == LIVE_LAST_RELOAD {
+        playlist += "#EXT-X-ENDLIST\n";
+    }
+    playlist
+}
+
+fn live_segment(sequence: u64) -> Vec<u8> {
+    format!("segment-{sequence:03}-").repeat(8).into_bytes()
+}
+
+fn live_stream(sequences: impl IntoIterator<Item = u64>) -> Vec<u8> {
+    sequences.into_iter().flat_map(live_segment).collect()
+}
+
+// what plays before the seek: the first load joined three segments from its end
+fn live_before_seek() -> Vec<u8> {
+    live_stream(LIVE_JOIN_SEQUENCE..LIVE_FIRST_SEQUENCE + LIVE_LISTED)
+}
+
+// plays the sliding playlist, the server issuing `seek` with the playlist of reload LIVE_SEEK_RELOAD
+async fn run_sliding_live_seek(seek: Seek) -> (CaptureSink, SeekTicket) {
+    let controller = SeekController::new();
+    let issuer = controller.clone();
+    let ticket = Arc::new(Mutex::new(None));
+    let issued = Arc::clone(&ticket);
+    let loads = AtomicUsize::new(0);
+    let url = http_routes::serve(move |path| {
+        if path == "/live.m3u8" {
+            let reload = loads.fetch_add(1, Ordering::SeqCst) as u64;
+            if reload == LIVE_SEEK_RELOAD {
+                *issued.lock().unwrap() = Some(issuer.seek(seek));
+            }
+            return Some(sliding_live_playlist(reload.min(LIVE_LAST_RELOAD)).into_bytes());
+        }
+        let sequence = path
+            .strip_prefix("/seg")?
+            .strip_suffix(".ts")?
+            .parse()
+            .ok()?;
+        Some(live_segment(sequence))
+    }) + "/live.m3u8";
+    let mut src = HlsSrc::new(url)
+        .with_reload_interval_ms(20)
+        .with_seek(controller);
+    src.configure_pipeline(&Caps::ByteStream {
+        encoding: ByteStreamEncoding::MpegTs,
+    })
+    .unwrap();
+    let mut sink = CaptureSink::default();
+    src.run(&mut sink).await.unwrap();
+    let ticket = ticket
+        .lock()
+        .unwrap()
+        .take()
+        .expect("the server issued the seek");
+    (sink, ticket)
+}
+
+#[tokio::test]
+async fn a_live_seek_finds_its_segment_on_playlist_time_carried_over_reloads() {
+    let target_ns = LIVE_WINDOW_START_NS + LIVE_SEGMENT_NS / 2;
+    let (sink, ticket) = run_sliding_live_seek(Seek::flush_to(target_ns)).await;
+
+    assert_eq!(ticket.outcome(), Some(SeekOutcome::Served));
+    assert_eq!(sink.flushes, 1);
+    assert_eq!(sink.segment_times, vec![target_ns]);
+    let mut expected = live_before_seek();
+    expected.extend(live_stream(
+        LIVE_SEEK_WINDOW_FIRST_SEQUENCE..=LIVE_LAST_SEQUENCE,
+    ));
+    assert_eq!(
+        sink.body, expected,
+        "playback restarts at the first segment of the reloaded window"
+    );
+}
+
+#[tokio::test]
+async fn a_live_seek_before_the_window_starts_at_its_front() {
+    let (sink, ticket) = run_sliding_live_seek(Seek::flush_to(LIVE_SEGMENT_NS / 2)).await;
+
+    assert_eq!(ticket.outcome(), Some(SeekOutcome::Served));
+    assert_eq!(sink.segment_times, vec![LIVE_WINDOW_START_NS]);
+    let mut expected = live_before_seek();
+    expected.extend(live_stream(
+        LIVE_SEEK_WINDOW_FIRST_SEQUENCE..=LIVE_LAST_SEQUENCE,
+    ));
+    assert_eq!(sink.body, expected);
+}
+
+#[tokio::test]
+async fn a_live_seek_outside_the_window_is_refused_and_playback_carries_on() {
+    let accurate_before_window = Seek {
+        flags: SeekFlags::FLUSH | SeekFlags::ACCURATE,
+        ..Seek::flush_to(LIVE_SEGMENT_NS / 2)
+    };
+    let past_window = Seek::flush_to(LIVE_WINDOW_STOP_NS + LIVE_SEGMENT_NS);
+    for seek in [accurate_before_window, past_window] {
+        let (sink, ticket) = run_sliding_live_seek(seek).await;
+
+        assert_eq!(
+            ticket.outcome(),
+            Some(SeekOutcome::Refused(SeekRefusal::OutsideLiveWindow {
+                start_ns: LIVE_WINDOW_START_NS,
+                stop_ns: LIVE_WINDOW_STOP_NS,
+            })),
+            "{seek:?}"
+        );
+        assert_eq!(sink.flushes, 0);
+        assert_eq!(
+            sink.body,
+            live_stream(LIVE_JOIN_SEQUENCE..=LIVE_LAST_SEQUENCE)
+        );
     }
 }
