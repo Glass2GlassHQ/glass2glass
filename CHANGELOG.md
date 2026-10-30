@@ -6,7 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
-Breaking: `QosMessage` gains `downstream_proc_ns`, `ElementProbe` is no longer `UnwindSafe`, `SpecError::UnknownProperty` / `BadValue` are replaced by `SpecError::Property(ParseError)`, `receive_rtp_h264` is renamed `receive_rtp`, `RtpRecvConfig` gains an `encoding` field, the `vaapi` feature with `vaapidec` / `vaapidech265` is removed, `MkvCodec` / `MkvStream` gain `Mp2` and `Mp3`, `srt::Handshake` gains `srt_flags`, `AesKeySize` gains `Aes192`, and `SrtReceiver::on_data` returns the sequences to NAK.
+Breaking: `QosMessage` gains `downstream_proc_ns`, `ElementProbe` is no longer `UnwindSafe`, `SpecError::UnknownProperty` / `BadValue` are replaced by `SpecError::Property(ParseError)`, `receive_rtp_h264` is renamed `receive_rtp`, `RtpRecvConfig` gains an `encoding` field, the `vaapi` feature with `vaapidec` / `vaapidech265` is removed, `MkvCodec` / `MkvStream` gain `Mp2` and `Mp3`, `srt::Handshake` gains `srt_flags`, `AesKeySize` gains `Aes192`, `srt::Role` gains `Rendezvous`, and `SrtReceiver::on_data` returns the sequences to NAK.
 
 - M1900: `VelloAnalyticsOverlay` draws on RGBA wgpu textures, `WgpuColorConvert` converts NV12 wgpu textures to RGBA, and `CudaToWgpu` keeps frame metadata.
 - M1901: `VelloAnalyticsOverlay` draws the `show-label` / `show-track` / `show-score` captions.
@@ -102,6 +102,7 @@ Breaking: `QosMessage` gains `downstream_proc_ns`, `ElementProbe` is no longer `
 - M1999: `srtsrc` answers a caller's handshake with an HSRSP block, as libsrt does.
 - M2000: SRT streams take AES-192 keys, and `srtsink` takes gst's `pbkeylen` property.
 - M2001: `srtsrc` calls a listener, both SRT elements take gst's `uri`, and a listening `srtsrc` rejects callers by `streamid` and `pbkeylen`.
+- M2002: `srtsrc` takes `mode=rendezvous`.
 
 ## 0.10.0
 

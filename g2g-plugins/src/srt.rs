@@ -34,6 +34,7 @@ pub const SRT_MAGIC: u16 = 0x4A17;
 
 // Handshake request types (the "Handshake Type" CIF field, as i32 on the wire).
 pub const URQ_INDUCTION: u32 = 1;
+pub const URQ_WAVEAHAND: u32 = 0;
 pub const URQ_CONCLUSION: u32 = 0xFFFF_FFFF; // -1
 pub const URQ_AGREEMENT: u32 = 0xFFFF_FFFE; // -2
                                             // a handshake type at or past this rejects the connection, the excess is the reason
@@ -539,6 +540,29 @@ fn parse_nak_cif(cif: &[u8]) -> Vec<u32> {
 pub enum Role {
     Caller,
     Listener,
+    Rendezvous(RendezvousState),
+}
+
+// libsrt's HSv5 rendezvous, where both sides call and a cookie contest picks the side that sends the HSREQ
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RendezvousState {
+    Waving,
+    Initiator,
+    Responder,
+    // answered the initiator's HSREQ, waiting for its agreement or its first other packet
+    ResponderAnswered,
+}
+
+// libsrt's cookie contest: the side whose cookie is larger by 32-bit signed difference sends the HSREQ, a tie decides nothing
+fn rendezvous_role(own_cookie: u32, peer_cookie: u32) -> Option<RendezvousState> {
+    let contest = i64::from(own_cookie as i32) - i64::from(peer_cookie as i32);
+    if contest & 0xFFFF_FFFF == 0 {
+        return None;
+    }
+    if contest & 0x8000_0000 != 0 {
+        return Some(RendezvousState::Responder);
+    }
+    Some(RendezvousState::Initiator)
 }
 
 /// What the handshake driver wants the I/O layer to do after a step.
@@ -613,6 +637,22 @@ impl SrtHandshake {
         }
     }
 
+    // `cookie` decides the contest for the initiator role, so it must differ from the peer's
+    pub fn new_rendezvous(
+        socket_id: u32,
+        init_seq: u32,
+        latency_ms: u16,
+        stream_id: Option<String>,
+        km: Option<Vec<u8>>,
+        cookie: u32,
+    ) -> Self {
+        Self {
+            role: Role::Rendezvous(RendezvousState::Waving),
+            cookie,
+            ..Self::new_caller(socket_id, init_seq, latency_ms, stream_id, km)
+        }
+    }
+
     /// `cookie` is the SYN cookie the listener offers in its induction reply and
     /// later validates is echoed in the conclusion. It must be an unpredictable
     /// nonzero value (the I/O layer seeds it from a clock / random source); a
@@ -682,6 +722,11 @@ impl SrtHandshake {
                 0,
             )),
             Role::Listener => None,
+            Role::Rendezvous(_) => Some(build_control(
+                &Control::Handshake(self.bare(URQ_WAVEAHAND)),
+                0,
+                0,
+            )),
         }
     }
 
@@ -692,7 +737,14 @@ impl SrtHandshake {
             established: self.established,
         };
         let Some(Control::Handshake(hs)) = parse_control(buf) else {
-            return none;
+            // the initiator sends data once connected, which stands in for a lost agreement
+            if self.role == Role::Rendezvous(RendezvousState::ResponderAnswered) {
+                self.established = true;
+            }
+            return HandshakeStep {
+                reply: None,
+                established: self.established,
+            };
         };
         // the conclusion and agreement types are negative on the wire, a rejection positive
         if i32::try_from(hs.hs_type).is_ok_and(|t| t >= URQ_FAILURE_TYPES as i32) {
@@ -789,7 +841,78 @@ impl SrtHandshake {
                     established: true,
                 }
             }
+            (Role::Rendezvous(state), _) => self.on_rendezvous_packet(state, hs),
             _ => none,
+        }
+    }
+
+    // the HSv5 rendezvous flow of libsrt's handshake document, which tolerates any packet getting lost
+    fn on_rendezvous_packet(&mut self, state: RendezvousState, hs: Handshake) -> HandshakeStep {
+        self.peer_socket_id = hs.srt_socket_id;
+        let state = match state {
+            RendezvousState::Waving => match rendezvous_role(self.cookie, hs.syn_cookie) {
+                Some(role) => role,
+                None => {
+                    return HandshakeStep {
+                        reply: None,
+                        established: false,
+                    }
+                }
+            },
+            decided => decided,
+        };
+        self.role = Role::Rendezvous(state);
+        let carries_hs_extension = hs.latency_ms.is_some();
+        let reply = match (state, hs.hs_type) {
+            (RendezvousState::Initiator, t) if t == URQ_CONCLUSION && carries_hs_extension => {
+                self.take_peer_parameters(&hs);
+                self.established = true;
+                Some(self.bare(URQ_AGREEMENT))
+            }
+            (RendezvousState::Initiator, t) if t == URQ_WAVEAHAND || t == URQ_CONCLUSION => {
+                Some(self.conclusion())
+            }
+            (RendezvousState::Responder | RendezvousState::ResponderAnswered, t)
+                if t == URQ_CONCLUSION && carries_hs_extension =>
+            {
+                self.take_peer_parameters(&hs);
+                // the KMRSP echoes the initiator's key, as a listener's does
+                self.km = hs.km;
+                self.role = Role::Rendezvous(RendezvousState::ResponderAnswered);
+                Some(self.conclusion())
+            }
+            (RendezvousState::ResponderAnswered, t) if t == URQ_AGREEMENT => {
+                self.established = true;
+                None
+            }
+            (RendezvousState::Responder, t) if t == URQ_WAVEAHAND || t == URQ_CONCLUSION => {
+                Some(self.bare(URQ_CONCLUSION))
+            }
+            _ => None,
+        };
+        HandshakeStep {
+            reply: reply.map(|hs| build_control(&Control::Handshake(hs), 0, self.peer_socket_id)),
+            established: self.established,
+        }
+    }
+
+    fn take_peer_parameters(&mut self, hs: &Handshake) {
+        self.peer_init_seq = hs.init_seq;
+        self.peer_srt_flags = hs.srt_flags;
+        self.peer_km = hs.km.clone();
+        if let Some(latency) = hs.latency_ms {
+            self.latency_ms = self.latency_ms.max(latency);
+        }
+    }
+
+    // a handshake of `hs_type` with no extensions
+    fn bare(&self, hs_type: u32) -> Handshake {
+        Handshake {
+            version: HS_VERSION_5,
+            ext_field: 0,
+            hs_type,
+            syn_cookie: self.cookie,
+            ..Handshake::induction(self.socket_id, self.init_seq)
         }
     }
 
@@ -824,11 +947,17 @@ impl SrtHandshake {
             } else {
                 0
             };
+        let responding = matches!(
+            self.role,
+            Role::Listener
+                | Role::Rendezvous(RendezvousState::Responder | RendezvousState::ResponderAnswered)
+        );
         // gosrt (mediamtx) rejects a caller whose request lacks the live-mode flags
-        let srt_flags = match self.role {
-            Role::Caller => LIVE_MODE_FLAGS,
+        let srt_flags = if responding {
             // libsrt's listener asks for the retransmit bit only from a caller that offered it
-            Role::Listener => LIVE_MODE_FLAGS & (self.peer_srt_flags | !SRT_OPT_REXMITFLG),
+            LIVE_MODE_FLAGS & (self.peer_srt_flags | !SRT_OPT_REXMITFLG)
+        } else {
+            LIVE_MODE_FLAGS
         };
         Handshake {
             version: HS_VERSION_5,
@@ -847,7 +976,7 @@ impl SrtHandshake {
             km: self.km.clone(),
             // A listener's conclusion answers the caller's request, so its
             // HSREQ/KMREQ extensions become HSRSP/KMRSP (libsrt is strict here).
-            is_response: matches!(self.role, Role::Listener),
+            is_response: responding,
         }
     }
 }
@@ -1869,6 +1998,90 @@ mod tests {
         exchange(&mut caller, &mut listener);
         assert!(!listener.is_established());
         assert_eq!(caller.rejection(), Some(REJECT_UNSECURE));
+    }
+
+    const LOW_COOKIE: u32 = 0x1000;
+    const HIGH_COOKIE: u32 = 0x2000;
+
+    fn rendezvous_side(socket_id: u32, cookie: u32) -> SrtHandshake {
+        SrtHandshake::new_rendezvous(
+            socket_id,
+            0,
+            120,
+            None,
+            Some(vec![socket_id as u8; 8]),
+            cookie,
+        )
+    }
+
+    // trades packets until both sides connect, `a_heard_first` drops b's opening wave
+    fn meet(a: &mut SrtHandshake, b: &mut SrtHandshake, a_heard_first: bool) {
+        let mut to_b = vec![a.start().unwrap()];
+        let mut to_a = if a_heard_first {
+            Vec::new()
+        } else {
+            vec![b.start().unwrap()]
+        };
+        for _ in 0..8 {
+            let from_b: Vec<_> = to_b
+                .drain(..)
+                .filter_map(|p| b.on_packet(&p).reply)
+                .collect();
+            let from_a: Vec<_> = to_a
+                .drain(..)
+                .filter_map(|p| a.on_packet(&p).reply)
+                .collect();
+            to_a = from_b;
+            to_b = from_a;
+            if a.is_established() && b.is_established() {
+                return;
+            }
+        }
+        panic!("the rendezvous did not connect");
+    }
+
+    #[test]
+    fn the_larger_cookie_sends_its_key_in_either_flow() {
+        for a_heard_first in [false, true] {
+            let mut a = rendezvous_side(1, HIGH_COOKIE);
+            let mut b = rendezvous_side(2, LOW_COOKIE);
+            meet(&mut a, &mut b, a_heard_first);
+            assert_eq!(a.role, Role::Rendezvous(RendezvousState::Initiator));
+            assert_eq!(b.peer_km(), Some(&[1u8; 8][..]), "b takes a's key");
+            assert_eq!(a.peer_km(), Some(&[1u8; 8][..]), "b echoes it back");
+            assert_eq!(b.peer_socket_id(), 1);
+            assert_eq!(a.peer_socket_id(), 2);
+            assert!(a.peer_marks_retransmissions() && b.peer_marks_retransmissions());
+        }
+        let mut a = rendezvous_side(1, LOW_COOKIE);
+        let mut b = rendezvous_side(2, HIGH_COOKIE);
+        meet(&mut a, &mut b, false);
+        assert_eq!(b.role, Role::Rendezvous(RendezvousState::Initiator));
+        assert_eq!(a.peer_km(), Some(&[2u8; 8][..]));
+    }
+
+    #[test]
+    fn equal_cookies_decide_nothing() {
+        let mut a = rendezvous_side(1, LOW_COOKIE);
+        let b = rendezvous_side(2, LOW_COOKIE);
+        let step = a.on_packet(&b.start().unwrap());
+        assert_eq!(step.reply, None);
+        assert_eq!(a.role, Role::Rendezvous(RendezvousState::Waving));
+    }
+
+    #[test]
+    fn a_responder_whose_agreement_is_lost_connects_on_data() {
+        let mut initiator = rendezvous_side(1, HIGH_COOKIE);
+        let mut responder = rendezvous_side(2, LOW_COOKIE);
+        let conclusion = initiator
+            .on_packet(&responder.start().unwrap())
+            .reply
+            .unwrap();
+        let answer = responder.on_packet(&conclusion).reply.unwrap();
+        assert!(initiator.on_packet(&answer).established);
+        assert!(!responder.is_established(), "the agreement never arrives");
+        let data = build_data_packet(0, 1, false, 0, 0, 2, b"ts");
+        assert!(responder.on_packet(&data).established);
     }
 
     #[test]

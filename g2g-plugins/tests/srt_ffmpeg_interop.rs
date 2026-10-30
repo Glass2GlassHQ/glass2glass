@@ -1082,3 +1082,81 @@ async fn srtsrc_listener_rejects_a_caller_with_another_streamid() {
     assert_eq!(result.expect("run ok"), PAYLOADS);
     assert_all_ts_sync(&cap.first_bytes);
 }
+
+// ffmpeg's rendezvous binds the address it calls, so gst's srtsink, which takes localport, is the libsrt peer
+async fn run_rendezvous_srtsrc(crypto: Option<(&str, u32)>) {
+    // the fixture is about 35 payloads, and gst's shutdown drops the ones TSBPD still holds
+    const PAYLOADS: u64 = 15;
+    let sock = StdUdpSocket::bind("127.0.0.1:0").expect("bind srt rendezvous socket");
+    let our_port = sock.local_addr().unwrap().port();
+    let their_port = free_udp_port();
+    let ts = std::env::temp_dir().join(format!(
+        "g2g_srt_rendezvous_{}_{our_port}.ts",
+        std::process::id()
+    ));
+    ffmpeg_generate_ts(&ts);
+    let mut their_uri =
+        format!("srt://127.0.0.1:{our_port}?mode=rendezvous&localport={their_port}");
+    let mut our_uri = format!("srt://127.0.0.1:{their_port}?mode=rendezvous");
+    if let Some((passphrase, pbkeylen)) = crypto {
+        let options = format!("&passphrase={passphrase}&pbkeylen={pbkeylen}");
+        their_uri.push_str(&options);
+        our_uri.push_str(&options);
+    }
+    let mut src = SrtSrc::from_socket(sock)
+        .expect("adopt socket")
+        .with_frame_limit(PAYLOADS);
+    src.set_property("uri", g2g_core::PropValue::Str(our_uri))
+        .expect("uri");
+    let mut cap = Capture::default();
+
+    // paced so the file outlasts the payloads srtsrc waits for, a burst ends the call first
+    let mut gst = Command::new("gst-launch-1.0")
+        .args([
+            "-q",
+            "filesrc",
+            &format!("location={}", ts.display()),
+            &format!("blocksize={TS_SRT_PAYLOAD_BYTES}"),
+            "!",
+            "identity",
+            "sleep-time=10000",
+            "!",
+            "srtsink",
+            &format!("uri={their_uri}"),
+        ])
+        .stdin(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn gst-launch with srtsink");
+    let result = tokio::time::timeout(Duration::from_secs(30), src.run(&mut cap)).await;
+    gst.kill().expect("kill the peer");
+    gst.wait().expect("reap the peer");
+    let _ = std::fs::remove_file(&ts);
+
+    assert_eq!(
+        result.expect("streams within the timeout").expect("run ok"),
+        PAYLOADS
+    );
+    assert_all_ts_sync(&cap.first_bytes);
+}
+
+// seven TS packets, the payload libsrt callers send
+const TS_SRT_PAYLOAD_BYTES: usize = 1316;
+
+// the cookie contest is random on both sides, so several meetings cover both roles
+const RENDEZVOUS_MEETINGS: usize = 4;
+
+#[tokio::test]
+#[ignore = "needs ffmpeg and gst-launch-1.0 with srtsink; opens a local UDP socket"]
+async fn rendezvous_srtsrc_receives_from_gst_srtsink() {
+    for _ in 0..RENDEZVOUS_MEETINGS {
+        run_rendezvous_srtsrc(None).await;
+    }
+}
+
+#[tokio::test]
+#[ignore = "needs ffmpeg and gst-launch-1.0 with srtsink; opens a local UDP socket"]
+async fn encrypted_rendezvous_srtsrc_receives_from_gst_srtsink() {
+    for _ in 0..RENDEZVOUS_MEETINGS {
+        run_rendezvous_srtsrc(Some(("g2g_srt_interop_passphrase", 32))).await;
+    }
+}

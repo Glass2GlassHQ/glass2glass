@@ -236,7 +236,7 @@ impl SourceLoop for SrtSrc {
             ),
             PropertySpec::new("mode", PropKind::Str, "SRT connection mode")
                 .with_default("listener")
-                .with_enum_values("caller | listener"),
+                .with_enum_values(SrtMode::NAMES),
             PropertySpec::new(
                 "streamid",
                 PropKind::Str,
@@ -286,10 +286,7 @@ impl SourceLoop for SrtSrc {
             "uri" => self.set_uri(value.as_str().ok_or(PropError::Type)?),
             "mode" => {
                 let name = value.as_str().ok_or(PropError::Type)?;
-                self.mode = match SrtMode::from_name(name) {
-                    Some(mode @ (SrtMode::Caller | SrtMode::Listener)) => mode,
-                    _ => return Err(PropError::Value),
-                };
+                self.mode = SrtMode::from_name(name).ok_or(PropError::Value)?;
                 Ok(())
             }
             "streamid" => {
@@ -357,7 +354,7 @@ impl SourceLoop for SrtSrc {
             loop {
                 let (mut handshake, peer) = match self.connect(&socket).await {
                     Ok(connection) => connection,
-                    Err(error) if self.mode == SrtMode::Caller && self.auto_reconnect => {
+                    Err(error) if self.mode != SrtMode::Listener && self.auto_reconnect => {
                         g2g_core::g2g_debug!(
                             Target::category(LOG_CATEGORY),
                             "call failed ({error:?}), calling again"
@@ -429,7 +426,16 @@ impl SrtSrc {
                     Some(remote),
                 )
             }
-            SrtMode::Rendezvous => return Err(PropError::Value),
+            // both sides send to each other, from localport or else the port they send to
+            SrtMode::Rendezvous => {
+                let remote = SocketAddr::new(
+                    uri.host.ok_or(PropError::Value)?,
+                    uri.port.ok_or(PropError::Value)?,
+                );
+                let ip = uri.local_address.unwrap_or(unspecified_like(remote.ip()));
+                let port = uri.local_port.unwrap_or(remote.port());
+                (SocketAddr::new(ip, port), Some(remote))
+            }
         };
         if uri
             .stream_id
@@ -470,8 +476,17 @@ impl SrtSrc {
         match (self.mode, self.remote) {
             (SrtMode::Listener, _) => self.accept_caller(socket).await,
             (SrtMode::Caller, Some(remote)) => Ok((self.call(socket, remote).await?, remote)),
-            (_, None) | (SrtMode::Rendezvous, _) => Err(G2gError::NotConfigured),
+            (SrtMode::Rendezvous, Some(remote)) => Ok((self.meet(socket, remote).await?, remote)),
+            (_, None) => Err(G2gError::NotConfigured),
         }
+    }
+
+    // a key this side makes, sent when it calls or wins the rendezvous contest
+    fn key_material(&self) -> Option<alloc::vec::Vec<u8>> {
+        let key_size = self.key_size.unwrap_or(AesKeySize::Aes128);
+        self.passphrase
+            .as_deref()
+            .map(|pass| SrtCrypto::generate(key_size).build_km(pass, KM_KK_EVEN))
     }
 
     async fn call(
@@ -479,38 +494,40 @@ impl SrtSrc {
         socket: &tokio::net::UdpSocket,
         remote: SocketAddr,
     ) -> Result<SrtHandshake, G2gError> {
-        let key_size = self.key_size.unwrap_or(AesKeySize::Aes128);
-        let km = self
-            .passphrase
-            .as_deref()
-            .map(|pass| SrtCrypto::generate(key_size).build_km(pass, KM_KK_EVEN));
         // a receiver sends no data, so its initial sequence number is never read
-        let mut handshake =
-            SrtHandshake::new_caller(SOCKET_ID, 0, self.latency_ms, self.stream_id.clone(), km);
-        if let Err(error) = complete_handshake(socket, remote, &mut handshake).await {
-            if let Some(rejection) = handshake.rejection() {
-                g2g_core::g2g_warn!(
-                    Target::category(LOG_CATEGORY),
-                    "{remote} rejected the call with handshake type {rejection}"
-                );
-            }
-            return Err(error);
-        }
-        Ok(handshake)
+        let handshake = SrtHandshake::new_caller(
+            SOCKET_ID,
+            0,
+            self.latency_ms,
+            self.stream_id.clone(),
+            self.key_material(),
+        );
+        handshake_with(socket, remote, handshake).await
+    }
+
+    async fn meet(
+        &self,
+        socket: &tokio::net::UdpSocket,
+        remote: SocketAddr,
+    ) -> Result<SrtHandshake, G2gError> {
+        let handshake = SrtHandshake::new_rendezvous(
+            SOCKET_ID,
+            0,
+            self.latency_ms,
+            self.stream_id.clone(),
+            self.key_material(),
+            unpredictable_cookie(),
+        );
+        handshake_with(socket, remote, handshake).await
     }
 
     async fn accept_caller(
         &self,
         socket: &tokio::net::UdpSocket,
     ) -> Result<(SrtHandshake, SocketAddr), G2gError> {
-        // Listener handshake: answer the caller until established. Seed the
-        // SYN cookie from the monotonic clock so an off-path attacker can't
-        // predict it from the public listener socket id (anti-spoof).
-        let cookie = {
-            let t = g2g_core::metrics::monotonic_ns();
-            ((t ^ (t >> 29)).wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 32) as u32 | 1
-        };
-        let mut handshake = SrtHandshake::new_listener(SOCKET_ID, self.latency_ms, cookie);
+        // Listener handshake: answer the caller until established.
+        let mut handshake =
+            SrtHandshake::new_listener(SOCKET_ID, self.latency_ms, unpredictable_cookie());
         handshake.admit_only(self.stream_id.clone(), self.key_size.map(AesKeySize::bytes));
         let mut buf = [0u8; RECV_BUF];
         loop {
@@ -677,6 +694,30 @@ impl SrtSrc {
             }
         }
     }
+}
+
+// Seeded from the monotonic clock so an off-path attacker can't predict it
+// from the public socket id (anti-spoof).
+fn unpredictable_cookie() -> u32 {
+    let t = g2g_core::metrics::monotonic_ns();
+    ((t ^ (t >> 29)).wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 32) as u32 | 1
+}
+
+async fn handshake_with(
+    socket: &tokio::net::UdpSocket,
+    remote: SocketAddr,
+    mut handshake: SrtHandshake,
+) -> Result<SrtHandshake, G2gError> {
+    if let Err(error) = complete_handshake(socket, remote, &mut handshake).await {
+        if let Some(rejection) = handshake.rejection() {
+            g2g_core::g2g_warn!(
+                Target::category(LOG_CATEGORY),
+                "{remote} rejected the call with handshake type {rejection}"
+            );
+        }
+        return Err(error);
+    }
+    Ok(handshake)
 }
 
 fn unspecified_like(ip: IpAddr) -> IpAddr {
