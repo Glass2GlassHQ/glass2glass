@@ -171,6 +171,8 @@ Highest leverage first:
   - A data channel signalled through a WHIP / WHEP session.
   - Move the bevy-g2g input backchannel from its WebSocket side channel to
     `livekitdatasink` / `livekitdatasrc`.
+- **SRT:** test `srtsink` answering a repeated handshake packet from a peer that
+  missed its last reply.
 - **RIST bonding test flake:** `ristsender_broadcast_bonding_feeds_ristsrc`
   failed once in 50 runs on hercules, after 2.4 s. Capture its failure output
   and fix the cause.
