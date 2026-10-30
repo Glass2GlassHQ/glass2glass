@@ -27,8 +27,8 @@ use std::path::PathBuf;
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{is_raw_audio, parse_launch, run_graph};
 use g2g_core::{
-    AsyncElement, AudioFormat, Caps, Frame, FrameTiming, MemoryDomain, PipelineClock,
-    PipelinePacket, ANY_CHANNELS, ANY_SAMPLE_RATE,
+    AsyncElement, AudioFormat, Caps, Frame, FrameTiming, MemoryDomain, PadCaps, PadDirection,
+    PadTemplates, PipelineClock, PipelinePacket, ANY_CHANNELS, ANY_SAMPLE_RATE,
 };
 use g2g_mcu::adpcm::samples_per_block_channels;
 use g2g_plugins::adpcm::DEFAULT_BLOCK_ALIGN;
@@ -285,4 +285,33 @@ fn decodebin_reaches_pcm_from_a_concrete_g711_stream() {
             .unwrap_or_else(|| panic!("{decoder} decodes {format:?}"));
         assert_eq!(chain, vec![decoder]);
     }
+}
+
+#[test]
+fn mulawdec_sink_template_takes_demuxer_and_sdp_caps() {
+    let sink = <MulawDec as PadTemplates>::pad_templates()
+        .into_iter()
+        .find(|template| template.direction == PadDirection::Sink)
+        .expect("mulawdec has a sink pad");
+    let accepted = match sink.caps {
+        PadCaps::Fixed(set) => set,
+        PadCaps::Any => panic!("mulawdec sink takes only mulaw"),
+    };
+    let audio = |format, channels, sample_rate| Caps::Audio {
+        format,
+        channels,
+        sample_rate,
+        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
+    };
+    assert!(accepted.accepts(&audio(AudioFormat::Mulaw, ANY_CHANNELS, ANY_SAMPLE_RATE)));
+    assert!(accepted.accepts(&audio(
+        AudioFormat::Mulaw,
+        G711_DEFAULT_CHANNELS,
+        G711_CLOCK_RATE_HZ
+    )));
+    assert!(!accepted.accepts(&audio(
+        AudioFormat::Alaw,
+        G711_DEFAULT_CHANNELS,
+        G711_CLOCK_RATE_HZ
+    )));
 }

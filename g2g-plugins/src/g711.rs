@@ -528,18 +528,7 @@ impl<L: G711Law> AsyncElement for G711Dec<L> {
 impl<L: G711Law> PadTemplates for G711Dec<L> {
     fn pad_templates() -> Vec<PadTemplate> {
         Vec::from([
-            // Both the sentinel layout a demuxer starts from and the concrete
-            // telephony one an SDP announces: a compressed `sample_rate` is
-            // matched for equality, so the RTSP rate needs its own alternative.
-            PadTemplate::sink(CapsSet::from_alternatives(alloc::vec![
-                coded_template::<L>(),
-                Caps::Audio {
-                    format: L::LAW.format(),
-                    channels: ANY_CHANNELS,
-                    sample_rate: G711_CLOCK_RATE_HZ,
-                    channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
-                },
-            ])),
+            PadTemplate::sink(CapsSet::one(coded_template::<L>())),
             PadTemplate::source(pcm_caps_any_rate_and_channels(|format| {
                 format == AudioFormat::PcmS16Le
             })),
