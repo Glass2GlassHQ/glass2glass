@@ -81,6 +81,7 @@ Breaking: `QosMessage` gains `downstream_proc_ns`, `ElementProbe` is no longer `
 - M1978: a flushing seek after the end of the stream restarts playback, as in GStreamer, through `RunBuilder::with_seek_controller`.
 - M1979: `dav1ddec` and `rav1ddec` drop the pictures they hold on a `Flush`.
 - M1980: `flacparse` timestamps restart at the demuxer's landing after a seek.
+- M1981: `flacparse` accepts only FLAC, so `oggdemux ! flacparse` negotiates without a `stream` choice.
 
 ## 0.10.0
 

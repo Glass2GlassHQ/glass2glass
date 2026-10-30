@@ -463,7 +463,9 @@ impl AsyncElement for FlacParse {
     /// Pass-through identity over FLAC of any channels/rate (STREAMINFO refines
     /// them mid-stream; the media type never changes).
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
-        CapsConstraint::IdentityAny
+        CapsConstraint::Identity(CapsSet::one(crate::typefind::elementary_audio_caps(
+            AudioFormat::Flac,
+        )))
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {

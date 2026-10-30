@@ -433,3 +433,20 @@ fn ogg_opus_bare_decodebin_still_plugs_opus() {
         "the Opus chain is unchanged: {names:?}"
     );
 }
+
+#[tokio::test]
+async fn oggdemux_without_a_stream_choice_feeds_flacparse() {
+    let Some((oga, _)) = encode_ogg_flac("no-stream-choice") else {
+        eprintln!("skipping: no ffmpeg");
+        return;
+    };
+    let src = temp_path("no-stream-choice", "oga");
+    std::fs::write(&src, &oga).unwrap();
+    let line = format!(
+        "filesrc location={} ! oggdemux ! flacparse ! fakesink",
+        src.display()
+    );
+    let frames = run_line(&line).await;
+    let _ = std::fs::remove_file(&src);
+    assert!(frames > 0, "{line}");
+}
