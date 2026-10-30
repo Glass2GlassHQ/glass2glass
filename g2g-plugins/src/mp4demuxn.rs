@@ -104,10 +104,6 @@ pub struct Mp4StreamInfo {
 /// convention [`TsDemux`](crate::tsdemux::TsDemux) uses. Refined at runtime by
 /// [`real_caps`] via the port's `CapsChanged`.
 fn nego_caps(kind: &TrackKind) -> (Caps, bool) {
-    let framerate_span = Rate::Range {
-        min_q16: 1 << 16,
-        max_q16: 240 << 16,
-    };
     match kind {
         TrackKind::Video {
             codec,
@@ -119,7 +115,7 @@ fn nego_caps(kind: &TrackKind) -> (Caps, bool) {
                 codec: *codec,
                 width: Dim::Fixed(*width),
                 height: Dim::Fixed(*height),
-                framerate: framerate_span,
+                framerate: crate::typefind::PLACEHOLDER_FRAMERATE,
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
                 alignment: crate::annexb::sample_alignment(*codec),
             },
@@ -135,7 +131,7 @@ fn nego_caps(kind: &TrackKind) -> (Caps, bool) {
                 *format,
                 Dim::Fixed(*width),
                 Dim::Fixed(*height),
-                framerate_span,
+                crate::typefind::PLACEHOLDER_FRAMERATE,
             ),
             true,
         ),

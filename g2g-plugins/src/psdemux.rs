@@ -1147,23 +1147,7 @@ impl PsDemux {
     /// header refines via `CapsChanged` (never `Dim::Any`, which cannot fixate).
     fn output_caps(stream: PsStream) -> Caps {
         match stream {
-            PsStream::Mpeg2 => Caps::CompressedVideo {
-                codec: VideoCodec::Mpeg2,
-                width: Dim::Range {
-                    min: 16,
-                    max: 65_535,
-                },
-                height: Dim::Range {
-                    min: 16,
-                    max: 65_535,
-                },
-                framerate: Rate::Range {
-                    min_q16: 1 << 16,
-                    max_q16: 240 << 16,
-                },
-                colorimetry: g2g_core::Colorimetry::UNKNOWN,
-                alignment: g2g_core::BitstreamAlignment::Unspecified,
-            },
+            PsStream::Mpeg2 => crate::typefind::elementary_video_caps(VideoCodec::Mpeg2),
             PsStream::Mp2 => Caps::Audio {
                 format: AudioFormat::Mp2,
                 channels: 0,

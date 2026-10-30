@@ -57,7 +57,7 @@ use crate::codectag::{tagged_stream_name, TaggedStream};
 use crate::aacparse::{adts_from_asc, is_raw_aac_config};
 use crate::demuxseek::{DemuxSeek, SharedSegment};
 use crate::matroska::{MatroskaDemuxer, MkvCodec, MkvTrack};
-use crate::typefind::{framerate_within_placeholder, with_picture_size, PLACEHOLDER_FRAMERATE};
+use crate::typefind::{container_video_caps, framerate_within_placeholder, with_picture_size};
 use crate::uncompressedvideo::{
     raw_video_caps, raw_video_formats, raw_video_frame_bytes, raw_video_placeholder_caps,
     raw_video_stream_from_str, raw_video_stream_str, warn_short_raw_video_frame,
@@ -316,14 +316,14 @@ impl MkvDemux {
     /// channels/rate, likewise refined once Tracks lands.
     fn output_caps(stream: MkvStream) -> Caps {
         match stream {
-            MkvStream::H264 => Self::compressed_video(VideoCodec::H264),
-            MkvStream::H265 => Self::compressed_video(VideoCodec::H265),
-            MkvStream::Vp8 => Self::compressed_video(VideoCodec::Vp8),
-            MkvStream::Vp9 => Self::compressed_video(VideoCodec::Vp9),
-            MkvStream::Av1 => Self::compressed_video(VideoCodec::Av1),
-            MkvStream::Mjpeg => Self::compressed_video(VideoCodec::Mjpeg),
-            MkvStream::Theora => Self::compressed_video(VideoCodec::Theora),
-            MkvStream::ProRes(variant) => Self::compressed_video(VideoCodec::ProRes { variant }),
+            MkvStream::H264 => container_video_caps(VideoCodec::H264),
+            MkvStream::H265 => container_video_caps(VideoCodec::H265),
+            MkvStream::Vp8 => container_video_caps(VideoCodec::Vp8),
+            MkvStream::Vp9 => container_video_caps(VideoCodec::Vp9),
+            MkvStream::Av1 => container_video_caps(VideoCodec::Av1),
+            MkvStream::Mjpeg => container_video_caps(VideoCodec::Mjpeg),
+            MkvStream::Theora => container_video_caps(VideoCodec::Theora),
+            MkvStream::ProRes(variant) => container_video_caps(VideoCodec::ProRes { variant }),
             MkvStream::Aac => Caps::Audio {
                 format: AudioFormat::Aac,
                 channels: 0,
@@ -378,30 +378,13 @@ impl MkvDemux {
                 channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
             },
             MkvStream::RawVideo(format) => raw_video_placeholder_caps(format),
-            MkvStream::TaggedVideo(tag) => Self::compressed_video(VideoCodec::Tagged(tag)),
+            MkvStream::TaggedVideo(tag) => container_video_caps(VideoCodec::Tagged(tag)),
             MkvStream::TaggedAudio(tag) => Caps::Audio {
                 format: AudioFormat::Tagged(tag),
                 channels: 0,
                 sample_rate: 0,
                 channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
             },
-        }
-    }
-
-    fn compressed_video(codec: VideoCodec) -> Caps {
-        Caps::CompressedVideo {
-            codec,
-            width: Dim::Range {
-                min: 16,
-                max: 65_535,
-            },
-            height: Dim::Range {
-                min: 16,
-                max: 65_535,
-            },
-            framerate: PLACEHOLDER_FRAMERATE,
-            colorimetry: g2g_core::Colorimetry::UNKNOWN,
-            alignment: crate::annexb::sample_alignment(codec),
         }
     }
 

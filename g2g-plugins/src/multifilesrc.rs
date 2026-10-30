@@ -28,7 +28,7 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
-    Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, FrameTiming, G2gError,
+    Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata, FrameTiming, G2gError,
     MemoryDomain, OutputSink, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate,
     VideoCodec,
 };
@@ -64,23 +64,7 @@ impl MultiFileSrc {
     pub fn new(location: impl Into<String>) -> Self {
         let mut src = Self {
             location: location.into(),
-            caps: Caps::CompressedVideo {
-                codec: VideoCodec::Mjpeg,
-                width: Dim::Range {
-                    min: 16,
-                    max: 65535,
-                },
-                height: Dim::Range {
-                    min: 16,
-                    max: 65535,
-                },
-                framerate: Rate::Range {
-                    min_q16: 1 << 16,
-                    max_q16: 240 << 16,
-                },
-                colorimetry: g2g_core::Colorimetry::UNKNOWN,
-                alignment: g2g_core::BitstreamAlignment::Unspecified,
-            },
+            caps: crate::typefind::elementary_video_caps(VideoCodec::Mjpeg),
             start_index: 0,
             // -1 means "until the first missing file".
             stop_index: -1,

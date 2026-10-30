@@ -72,32 +72,15 @@ impl IvfDemux {
     /// concrete one is fixed via `CapsChanged` once the `DKIF` header is read.
     fn output_alternatives() -> CapsSet {
         CapsSet::from_alternatives(Vec::from([
-            Self::compressed(VideoCodec::Vp8),
-            Self::compressed(VideoCodec::Vp9),
-            Self::compressed(VideoCodec::Av1),
+            crate::typefind::elementary_video_caps(VideoCodec::Vp8),
+            crate::typefind::elementary_video_caps(VideoCodec::Vp9),
+            crate::typefind::elementary_video_caps(VideoCodec::Av1),
         ]))
-    }
-
-    fn compressed(codec: VideoCodec) -> Caps {
-        Caps::CompressedVideo {
-            codec,
-            width: Dim::Range {
-                min: 16,
-                max: 65_535,
-            },
-            height: Dim::Range {
-                min: 16,
-                max: 65_535,
-            },
-            framerate: crate::typefind::PLACEHOLDER_FRAMERATE,
-            colorimetry: g2g_core::Colorimetry::UNKNOWN,
-            alignment: g2g_core::BitstreamAlignment::Unspecified,
-        }
     }
 
     pub fn stream_caps(file_prefix: &[u8]) -> Option<Caps> {
         let header = Self::parse_header(file_prefix)?;
-        let declared = Self::compressed(header.codec);
+        let declared = crate::typefind::elementary_video_caps(header.codec);
         let header_size = Caps::CompressedVideo {
             codec: header.codec,
             width: Dim::Fixed(header.width),

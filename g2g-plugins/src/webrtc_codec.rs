@@ -112,23 +112,7 @@ impl WebRtcVideoCodec {
     /// `Range` placeholder that fixates (a downstream parser recovers the real
     /// dimensions and re-announces them). `fixate()` rejects `Dim::Any`.
     pub(crate) fn caps_placeholder(self) -> Caps {
-        Caps::CompressedVideo {
-            codec: self.video_codec(),
-            width: Dim::Range {
-                min: PLACEHOLDER_MIN_DIM,
-                max: PLACEHOLDER_MAX_DIM,
-            },
-            height: Dim::Range {
-                min: PLACEHOLDER_MIN_DIM,
-                max: PLACEHOLDER_MAX_DIM,
-            },
-            framerate: Rate::Range {
-                min_q16: PLACEHOLDER_MIN_FPS << 16,
-                max_q16: PLACEHOLDER_MAX_FPS << 16,
-            },
-            colorimetry: g2g_core::Colorimetry::UNKNOWN,
-            alignment: g2g_core::BitstreamAlignment::Unspecified,
-        }
+        crate::typefind::elementary_video_caps(self.video_codec())
     }
 
     /// A depacketized unit in the pipeline framing. The AV1 RTP payload format
@@ -162,11 +146,6 @@ const AV1_TEMPORAL_DELIMITER: [u8; 2] = [0x12, 0x00];
 const OBU_TYPE_SHIFT: u8 = 3;
 const OBU_TYPE_MASK: u8 = 0x0f;
 const OBU_TEMPORAL_DELIMITER: u8 = 2;
-
-const PLACEHOLDER_MIN_DIM: u32 = 2;
-const PLACEHOLDER_MAX_DIM: u32 = 8192;
-const PLACEHOLDER_MIN_FPS: u32 = 1;
-const PLACEHOLDER_MAX_FPS: u32 = 240;
 
 /// The `video-codec` property of the receiving elements: which codec the source
 /// offers and emits, fixed before negotiation because a graph fixates its caps

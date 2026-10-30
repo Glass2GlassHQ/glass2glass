@@ -290,10 +290,7 @@ impl Y4mDec {
                         min: 1,
                         max: MAX_DIMENSION,
                     },
-                    framerate: Rate::Range {
-                        min_q16: 1 << 16,
-                        max_q16: 240 << 16,
-                    },
+                    framerate: crate::typefind::PLACEHOLDER_FRAMERATE,
                     interlace: Interlace::Any,
                     colorimetry: g2g_core::Colorimetry::UNKNOWN,
                 })

@@ -331,17 +331,27 @@ fn sniff_still_image(header: &[u8]) -> Option<VideoCodec> {
 /// the SPS or sequence header. Shared by content sniffing and `FileSrc`'s extension typing so
 /// the two never drift.
 pub fn elementary_video_caps(codec: VideoCodec) -> Caps {
-    /// A coded video stream is at least one macroblock.
-    const MIN_DIM: u32 = 16;
-    placeholder_video_caps(codec, MIN_DIM)
+    placeholder_video_caps(
+        codec,
+        MIN_CODED_DIM,
+        g2g_core::BitstreamAlignment::Unspecified,
+    )
 }
+
+// MP4 and Matroska tracks carry one access unit per sample
+pub(crate) fn container_video_caps(codec: VideoCodec) -> Caps {
+    placeholder_video_caps(codec, MIN_CODED_DIM, crate::annexb::sample_alignment(codec))
+}
+
+/// A coded video stream is at least one macroblock.
+const MIN_CODED_DIM: u32 = 16;
 
 /// Caps for a still image (PNG / WebP) at a fixable `Range` placeholder geometry,
 /// the same shape as [`elementary_video_caps`] but down to a single pixel.
 pub fn still_image_caps(codec: VideoCodec) -> Caps {
     /// An icon is a legitimate still, where a coded video stream has a floor.
     const MIN_DIM: u32 = 1;
-    placeholder_video_caps(codec, MIN_DIM)
+    placeholder_video_caps(codec, MIN_DIM, g2g_core::BitstreamAlignment::Unspecified)
 }
 
 // a stream's rate before its parser or demuxer reads one, fixatable unlike Rate::Any
@@ -357,7 +367,11 @@ pub(crate) fn framerate_within_placeholder(framerate_q16: Option<u32>) -> Rate {
         .unwrap_or(Rate::Any)
 }
 
-fn placeholder_video_caps(codec: VideoCodec, min_dim: u32) -> Caps {
+fn placeholder_video_caps(
+    codec: VideoCodec,
+    min_dim: u32,
+    alignment: g2g_core::BitstreamAlignment,
+) -> Caps {
     Caps::CompressedVideo {
         codec,
         width: Dim::Range {
@@ -370,7 +384,7 @@ fn placeholder_video_caps(codec: VideoCodec, min_dim: u32) -> Caps {
         },
         framerate: PLACEHOLDER_FRAMERATE,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
-        alignment: g2g_core::BitstreamAlignment::Unspecified,
+        alignment,
     }
 }
 

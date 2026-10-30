@@ -20,7 +20,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use g2g_core::{
-    AudioFormat, ByteStreamEncoding, Caps, CapsSet, Dim, PadTemplate, PadTemplates, ProResVariant,
+    AudioFormat, ByteStreamEncoding, Caps, CapsSet, PadTemplate, PadTemplates, ProResVariant,
     PropKind, PropertySpec, RawVideoFormat, VideoCodec,
 };
 
@@ -32,7 +32,7 @@ use crate::fmp4::TrackKind;
 use crate::mkvdemux::{prores_stream_from_str, prores_stream_str};
 use crate::mp4demuxn::Mp4DemuxN;
 use crate::oneport::OnePortElement;
-use crate::typefind::PLACEHOLDER_FRAMERATE;
+use crate::typefind::container_video_caps;
 use crate::uncompressedvideo::{
     raw_video_formats, raw_video_placeholder_caps, raw_video_stream_from_str, raw_video_stream_str,
 };
@@ -96,10 +96,10 @@ impl StreamSelect {
             Self::Video => CapsSet::from_alternatives(
                 VIDEO_STREAM_NAMES
                     .iter()
-                    .map(|(_, codec)| nego_caps(*codec))
+                    .map(|(_, codec)| container_video_caps(*codec))
                     .collect(),
             ),
-            Self::VideoNamed(codec) => CapsSet::one(nego_caps(codec)),
+            Self::VideoNamed(codec) => CapsSet::one(container_video_caps(codec)),
             Self::RawVideo(format) => CapsSet::one(raw_video_placeholder_caps(format)),
             Self::Audio(format) => CapsSet::from_alternatives(audio_nego_caps(format)),
         }
@@ -194,26 +194,6 @@ fn audio_nego_caps(format: AudioFormat) -> Vec<Caps> {
     }])
 }
 
-/// The negotiation placeholder: a fixatable `Range` (not `Dim::Any`, which
-/// fails Phase-2 fixate, e.g. a downstream `h264parse`), refined to the concrete
-/// moov geometry via `CapsChanged`. Mirrors `tsdemux` / `matroskademux`.
-fn nego_caps(codec: VideoCodec) -> Caps {
-    Caps::CompressedVideo {
-        codec,
-        width: Dim::Range {
-            min: 16,
-            max: 65_535,
-        },
-        height: Dim::Range {
-            min: 16,
-            max: 65_535,
-        },
-        framerate: PLACEHOLDER_FRAMERATE,
-        colorimetry: g2g_core::Colorimetry::UNKNOWN,
-        alignment: crate::annexb::sample_alignment(codec),
-    }
-}
-
 /// # Example
 ///
 /// ```no_run
@@ -254,16 +234,18 @@ pub(crate) static MP4DEMUX_PROPS: &[PropertySpec] = &[
 impl PadTemplates for Mp4Demux {
     fn pad_templates() -> Vec<PadTemplate> {
         let mut source = Vec::from([
-            nego_caps(VideoCodec::H264),
-            nego_caps(VideoCodec::H265),
-            nego_caps(VideoCodec::Av1),
-            nego_caps(VideoCodec::Mpeg4Part2),
-            nego_caps(VideoCodec::Mpeg2),
-            nego_caps(VideoCodec::Vp8),
-            nego_caps(VideoCodec::Mjpeg),
-            nego_caps(VideoCodec::DnxHd),
+            container_video_caps(VideoCodec::H264),
+            container_video_caps(VideoCodec::H265),
+            container_video_caps(VideoCodec::Av1),
+            container_video_caps(VideoCodec::Mpeg4Part2),
+            container_video_caps(VideoCodec::Mpeg2),
+            container_video_caps(VideoCodec::Vp8),
+            container_video_caps(VideoCodec::Mjpeg),
+            container_video_caps(VideoCodec::DnxHd),
         ]);
-        source.extend(ProResVariant::ALL.map(|variant| nego_caps(VideoCodec::ProRes { variant })));
+        source.extend(
+            ProResVariant::ALL.map(|variant| container_video_caps(VideoCodec::ProRes { variant })),
+        );
         source.extend(raw_video_formats().map(raw_video_placeholder_caps));
         for (_, format) in AUDIO_STREAM_NAMES {
             source.extend(audio_nego_caps(*format));

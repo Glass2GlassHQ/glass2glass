@@ -52,7 +52,7 @@ use crate::mpegts::{
     TAG_KEY_SERVICE_PROVIDER,
 };
 use crate::oneport::OnePortElement;
-use crate::typefind::sized_by_sps;
+use crate::typefind::{elementary_video_caps, sized_by_sps};
 
 const LOG_CATEGORY: &str = "tsdemux";
 
@@ -415,11 +415,11 @@ fn input_caps() -> Caps {
 /// refines from the ADTS header.
 fn output_caps(stream: TsStream) -> Caps {
     match stream {
-        TsStream::H264 => compressed_video(VideoCodec::H264),
-        TsStream::H265 => compressed_video(VideoCodec::H265),
-        TsStream::Mpeg4Part2 => compressed_video(VideoCodec::Mpeg4Part2),
-        TsStream::Av1 => compressed_video(VideoCodec::Av1),
-        TsStream::Mpeg2 => compressed_video(VideoCodec::Mpeg2),
+        TsStream::H264 => elementary_video_caps(VideoCodec::H264),
+        TsStream::H265 => elementary_video_caps(VideoCodec::H265),
+        TsStream::Mpeg4Part2 => elementary_video_caps(VideoCodec::Mpeg4Part2),
+        TsStream::Av1 => elementary_video_caps(VideoCodec::Av1),
+        TsStream::Mpeg2 => elementary_video_caps(VideoCodec::Mpeg2),
         TsStream::Aac => compressed_audio(AudioFormat::Aac),
         TsStream::Mp2 => compressed_audio(AudioFormat::Mp2),
         TsStream::Opus => compressed_audio(AudioFormat::Opus),
@@ -440,26 +440,6 @@ fn compressed_audio(format: AudioFormat) -> Caps {
         channels: 0,
         sample_rate: 0,
         channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
-    }
-}
-
-fn compressed_video(codec: VideoCodec) -> Caps {
-    Caps::CompressedVideo {
-        codec,
-        width: Dim::Range {
-            min: 16,
-            max: 65_535,
-        },
-        height: Dim::Range {
-            min: 16,
-            max: 65_535,
-        },
-        framerate: Rate::Range {
-            min_q16: 1 << 16,
-            max_q16: 240 << 16,
-        },
-        colorimetry: g2g_core::Colorimetry::UNKNOWN,
-        alignment: g2g_core::BitstreamAlignment::Unspecified,
     }
 }
 

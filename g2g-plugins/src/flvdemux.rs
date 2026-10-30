@@ -37,9 +37,9 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{ElementSeekRoute, SeekController};
 use g2g_core::{
     AsyncElement, AudioFormat, BusHandle, BusMessage, ByteStreamEncoding, Caps, CapsConstraint,
-    CapsSet, ConfigureOutcome, Dim, ElementMetadata, FrameTiming, G2gError, MemoryDomain,
-    OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue,
-    PropertySpec, Rate, Tag, TagList, VideoCodec,
+    CapsSet, ConfigureOutcome, ElementMetadata, FrameTiming, G2gError, MemoryDomain, OutputSink,
+    PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Tag,
+    TagList, VideoCodec,
 };
 
 use crate::aacparse::{adts_from_asc, audio_specific_config_info, is_raw_aac_config};
@@ -228,23 +228,7 @@ impl FlvDemux {
     /// advertises the sentinel channels/rate 0 that `aacparse` accepts
     /// pre-header; the concrete layout is announced at runtime from the ASC.
     fn output_caps(stream: FlvStream) -> Caps {
-        let video = |codec| Caps::CompressedVideo {
-            codec,
-            width: Dim::Range {
-                min: 16,
-                max: 65_535,
-            },
-            height: Dim::Range {
-                min: 16,
-                max: 65_535,
-            },
-            framerate: Rate::Range {
-                min_q16: 1 << 16,
-                max_q16: 240 << 16,
-            },
-            colorimetry: g2g_core::Colorimetry::UNKNOWN,
-            alignment: g2g_core::BitstreamAlignment::Unspecified,
-        };
+        let video = crate::typefind::elementary_video_caps;
         // The audio layout is refined at runtime, from the AAC AudioSpecificConfig
         // or the tag flags of the other codecs.
         let audio = |format| Caps::Audio {

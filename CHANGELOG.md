@@ -91,6 +91,7 @@ Breaking: `QosMessage` gains `downstream_proc_ns`, `ElementProbe` is no longer `
 - M1988: g2g-core builds with `runtime` and without `std` again.
 - M1989: `alawdec` and `mulawdec` drop their redundant 8 kHz sink template alternative.
 - M1990: the PCM filters that keep their input caps share one constraint and template set, and the audiofx templates take any channel count and rate.
+- M1991: demuxers, parsers and network sources share one video placeholder of 16 to 65535 pixels at 1 to 240 fps.
 
 ## 0.10.0
 

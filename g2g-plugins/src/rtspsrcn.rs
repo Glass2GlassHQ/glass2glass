@@ -62,6 +62,7 @@ use crate::reconnect::{
     RECONNECT_PTS_GAP_NS, SOURCE_RECONNECT_PROP,
 };
 use crate::rtspclient::{transports_from_flags, transports_to_flags, LowerTransport};
+use crate::typefind::{elementary_video_caps, PLACEHOLDER_FRAMERATE};
 
 /// User-Agent sent on DESCRIBE / SETUP unless `user-agent` overrides it. Also
 /// what [`blocking_probe_tracks`] identifies as, so a server sees one client.
@@ -91,13 +92,6 @@ const ONVIF_METADATA_EXI_ENCODINGS: &[&str] =
 /// camera's scene description is kilobytes; the bound stops a crafted few-KiB
 /// payload from inflating to gigabytes.
 const MAX_INFLATED_METADATA_LEN: usize = 4 * 1024 * 1024;
-
-/// Widest geometry the placeholder video caps accept, so `fixate` has a value
-/// to pick and the real dimensions can arrive later as a `CapsChanged`.
-const MIN_PLACEHOLDER_DIM: u32 = 2;
-const MAX_PLACEHOLDER_DIM: u32 = 8192;
-// highest frame rate the negotiation placeholder accepts
-const MAX_PLACEHOLDER_FPS: u32 = 240;
 
 // log category shared by RtspSrc and RtspSrcN
 const LOG_CATEGORY: &str = "rtspsrc";
@@ -305,13 +299,13 @@ impl RtspSrcN {
                 codec: VideoCodec::H264,
                 width: Dim::Fixed(w),
                 height: Dim::Fixed(h),
-                framerate: placeholder_framerate(),
+                framerate: PLACEHOLDER_FRAMERATE,
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
                 alignment: g2g_core::BitstreamAlignment::Unspecified,
             };
         }
         let probed = self.probed_video.clone().map(with_placeholder_framerate);
-        probed.unwrap_or_else(|| placeholder_video_caps(VideoCodec::H264))
+        probed.unwrap_or_else(|| elementary_video_caps(VideoCodec::H264))
     }
 
     /// The audio encoding this element subscribes, or `None` when video-only.
@@ -541,30 +535,6 @@ fn video_caps_for(stream: &retina::client::Stream, codec: VideoCodec) -> Option<
     })
 }
 
-fn placeholder_video_caps(codec: VideoCodec) -> Caps {
-    Caps::CompressedVideo {
-        codec,
-        width: Dim::Range {
-            min: MIN_PLACEHOLDER_DIM,
-            max: MAX_PLACEHOLDER_DIM,
-        },
-        height: Dim::Range {
-            min: MIN_PLACEHOLDER_DIM,
-            max: MAX_PLACEHOLDER_DIM,
-        },
-        framerate: placeholder_framerate(),
-        colorimetry: g2g_core::Colorimetry::UNKNOWN,
-        alignment: g2g_core::BitstreamAlignment::Unspecified,
-    }
-}
-
-fn placeholder_framerate() -> Rate {
-    Rate::Range {
-        min_q16: 1 << 16,
-        max_q16: MAX_PLACEHOLDER_FPS << 16,
-    }
-}
-
 // An SPS without VUI timing leaves the rate `Any`, which negotiation cannot fixate.
 fn with_placeholder_framerate(caps: Caps) -> Caps {
     match caps {
@@ -579,7 +549,7 @@ fn with_placeholder_framerate(caps: Caps) -> Caps {
             codec,
             width,
             height,
-            framerate: placeholder_framerate(),
+            framerate: PLACEHOLDER_FRAMERATE,
             colorimetry,
             alignment,
         },
@@ -932,7 +902,7 @@ impl MultiOutputSource for RtspSrcN {
         let stream = &prepared.session.streams()[prepared.video_idx];
         // A server that keeps the parameter sets out of the SDP still names the codec.
         let video = video_caps_for(stream, prepared.codec)
-            .unwrap_or_else(|| placeholder_video_caps(prepared.codec));
+            .unwrap_or_else(|| elementary_video_caps(prepared.codec));
         self.probed_video = Some(video);
         self.prepared = Some(prepared);
         Ok(())

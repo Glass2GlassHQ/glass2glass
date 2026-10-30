@@ -121,30 +121,9 @@ fn write_stream_of(caps: &Caps) -> Option<AviWriteStream> {
 /// The caps a video pad negotiates against: the codecs AVI names, at a fixable
 /// geometry span the encoder upstream pins.
 fn video_input_alternatives() -> Vec<Caps> {
-    /// A coded video stream is at least one macroblock.
-    const MIN_CODED_DIM: u32 = 16;
-    const MAX_CODED_DIM: u32 = 65_535;
-    const MIN_RATE_Q16: u32 = 1 << 16;
-    const MAX_RATE_Q16: u32 = 240 << 16;
     [VideoCodec::Mjpeg, VideoCodec::H264, VideoCodec::Mpeg4Part2]
         .into_iter()
-        .map(|codec| Caps::CompressedVideo {
-            codec,
-            width: Dim::Range {
-                min: MIN_CODED_DIM,
-                max: MAX_CODED_DIM,
-            },
-            height: Dim::Range {
-                min: MIN_CODED_DIM,
-                max: MAX_CODED_DIM,
-            },
-            framerate: g2g_core::Rate::Range {
-                min_q16: MIN_RATE_Q16,
-                max_q16: MAX_RATE_Q16,
-            },
-            colorimetry: g2g_core::Colorimetry::UNKNOWN,
-            alignment: g2g_core::BitstreamAlignment::Unspecified,
-        })
+        .map(crate::typefind::elementary_video_caps)
         .collect()
 }
 

@@ -29,8 +29,8 @@ use g2g_core::{
     AsyncElement, AudioFormat, BusHandle, BusMessage, ByteStreamEncoding, Caps, CapsConstraint,
     CapsSet, ConfigureOutcome, Dim, ElementMetadata, FrameMetaSet, G2gError, MultiOutputElement,
     MultiOutputSink, OutputSink, PadTemplate, PadTemplates, PropError, PropKind, PropValue,
-    PropertySpec, Rate, RawVideoFormat, Stream, StreamCollection, StreamType, VideoCodec,
-    ANY_CHANNELS, ANY_SAMPLE_RATE,
+    PropertySpec, RawVideoFormat, Stream, StreamCollection, StreamType, VideoCodec, ANY_CHANNELS,
+    ANY_SAMPLE_RATE,
 };
 
 use crate::aacparse::{adts_from_asc, is_raw_aac_config};
@@ -41,6 +41,7 @@ use crate::avi::{palette_change, parse, parse_streams, AviFile, AviStream, AviSt
 use crate::codectag::{
     audio_from_stream_name, audio_stream_name, video_from_stream_name, video_stream_name,
 };
+use crate::typefind::{elementary_video_caps, PLACEHOLDER_FRAMERATE};
 use crate::uncompressedvideo::{
     copy_raw_video_frame, raw_video_caps, raw_video_formats, raw_video_placeholder_caps,
     raw_video_stream_from_str, raw_video_stream_str, warn_short_raw_video_frame,
@@ -67,15 +68,6 @@ const AUDIO_STREAM_NAMES: &[(&str, AudioFormat)] = &[
     ("ac3", AudioFormat::Ac3),
     ("aac", AudioFormat::Aac),
 ];
-
-/// A coded video stream is at least one macroblock, and no wider than a
-/// `BITMAPINFOHEADER` dimension a decoder would accept.
-const MIN_CODED_DIM: u32 = 16;
-const MAX_CODED_DIM: u32 = 65_535;
-/// The framerate window the negotiation placeholder spans. Never `Rate::Any`,
-/// which cannot fixate; the real timing rides each frame's pts.
-const MIN_RATE_Q16: u32 = 1 << 16;
-const MAX_RATE_Q16: u32 = 240 << 16;
 
 /// Which stream [`AviDemux`] forwards. The named forms additionally pin the
 /// startup caps to that codec / format, which the bare-`decodebin` primary
@@ -127,26 +119,10 @@ fn video_caps(codec: VideoCodec, width: Dim, height: Dim) -> Caps {
         codec,
         width,
         height,
-        framerate: framerate_span(),
+        framerate: PLACEHOLDER_FRAMERATE,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
         alignment: g2g_core::BitstreamAlignment::Unspecified,
     }
-}
-
-fn framerate_span() -> Rate {
-    Rate::Range {
-        min_q16: MIN_RATE_Q16,
-        max_q16: MAX_RATE_Q16,
-    }
-}
-
-/// The startup placeholder for a stream nothing has probed yet.
-fn video_placeholder_caps(codec: VideoCodec) -> Caps {
-    let span = || Dim::Range {
-        min: MIN_CODED_DIM,
-        max: MAX_CODED_DIM,
-    };
-    video_caps(codec, span(), span())
 }
 
 /// Compressed audio negotiates on the `0/0` "unknown until parsed" layout, the
@@ -208,7 +184,7 @@ fn nego_caps(kind: &AviStreamKind) -> Option<(Caps, bool)> {
                 *format,
                 Dim::Fixed(*width),
                 Dim::Fixed(*height),
-                framerate_span(),
+                PLACEHOLDER_FRAMERATE,
             ),
             true,
         )),
@@ -585,8 +561,8 @@ impl AviDemux {
     /// The caps the current selection negotiates on, before any byte is read.
     fn nego_alternatives(&self) -> Vec<Caps> {
         match self.select {
-            AviStreamSelect::Video => Vec::from([video_placeholder_caps(VideoCodec::H264)]),
-            AviStreamSelect::VideoNamed(codec) => Vec::from([video_placeholder_caps(codec)]),
+            AviStreamSelect::Video => Vec::from([elementary_video_caps(VideoCodec::H264)]),
+            AviStreamSelect::VideoNamed(codec) => Vec::from([elementary_video_caps(codec)]),
             AviStreamSelect::RawVideo(format) => Vec::from([raw_video_placeholder_caps(format)]),
             AviStreamSelect::Audio => pcm_alternatives(AudioFormat::PcmS16Le),
             AviStreamSelect::AudioNamed(format) if is_pcm(format) => pcm_alternatives(format),
@@ -783,7 +759,7 @@ impl PadTemplates for AviDemux {
     fn pad_templates() -> Vec<PadTemplate> {
         let mut outputs: Vec<Caps> = VIDEO_STREAM_NAMES
             .iter()
-            .map(|(_, codec)| video_placeholder_caps(*codec))
+            .map(|(_, codec)| elementary_video_caps(*codec))
             .chain(raw_video_formats().map(raw_video_placeholder_caps))
             .collect();
         for (_, format) in AUDIO_STREAM_NAMES {
@@ -1331,7 +1307,7 @@ mod tests {
             RawVideoFormat::Uyvy,
             Dim::Fixed(WIDTH),
             Dim::Fixed(HEIGHT),
-            framerate_span(),
+            PLACEHOLDER_FRAMERATE,
         );
         let infos = forwardable_streams(&bytes);
         assert_eq!(infos[0].caps, want_caps);
