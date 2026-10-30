@@ -153,6 +153,9 @@ pub struct Segment {
     /// (RFC 8216bis §4.4.4.7). A live packager pads a freshly started playlist
     /// with these, so a client that loads them gets a 404 instead of a stream.
     pub gap: bool,
+    /// `#EXT-X-DISCONTINUITY`: the timestamps, encoding or codec may change from
+    /// the segment before.
+    pub discontinuity: bool,
     /// `#EXT-X-PART` partial segments, in Part Index order. Empty on a plain
     /// playlist; a low-latency one carries them for the segments near the live
     /// edge.
@@ -355,8 +358,9 @@ pub fn parse(text: &str) -> Result<Playlist, HlsError> {
     // `#EXT-X-BYTERANGE` for the next segment: (length, explicit offset). An
     // absent offset is resolved from the previous sub-range of the same URI.
     let mut pending_byterange: Option<(u64, Option<u64>)> = None;
-    // `#EXT-X-GAP` applies to the next segment.
+    // `#EXT-X-GAP` and `#EXT-X-DISCONTINUITY` apply to the next segment.
     let mut pending_gap = false;
+    let mut pending_discontinuity = false;
     let mut part_target_ms = None;
     let mut server_control = None;
     // `#EXT-X-PART`s seen since the last segment: they precede the `#EXTINF` of
@@ -415,6 +419,8 @@ pub fn parse(text: &str) -> Result<Playlist, HlsError> {
             end_list = true;
         } else if line == "#EXT-X-GAP" {
             pending_gap = true;
+        } else if line == "#EXT-X-DISCONTINUITY" {
+            pending_discontinuity = true;
         } else if line.starts_with('#') {
             // any other tag / comment: ignored
         } else if let Some(mut variant) = pending_variant.take() {
@@ -440,6 +446,7 @@ pub fn parse(text: &str) -> Result<Playlist, HlsError> {
                 key: current_key.clone(),
                 byte_range,
                 gap: core::mem::take(&mut pending_gap),
+                discontinuity: core::mem::take(&mut pending_discontinuity),
                 parts: core::mem::take(&mut pending_parts),
             });
         }
@@ -462,6 +469,7 @@ pub fn parse(text: &str) -> Result<Playlist, HlsError> {
             key: current_key.clone(),
             byte_range: None,
             gap: pending_gap,
+            discontinuity: pending_discontinuity,
             parts: pending_parts,
         });
     }
@@ -693,6 +701,9 @@ pub fn write_media(playlist: &MediaPlaylist) -> String {
             out.push_str(&key_tag(segment.key.as_ref()));
             key_in_effect = segment.key.as_ref();
         }
+        if segment.discontinuity {
+            out.push_str("#EXT-X-DISCONTINUITY\n");
+        }
         let (secs, millis) = (segment.duration_ms / 1000, segment.duration_ms % 1000);
         let _ = writeln!(out, "#EXTINF:{secs}.{millis:03},");
         if let Some(r) = segment.byte_range {
@@ -774,6 +785,7 @@ mod tests {
                 key: None,
                 byte_range: None,
                 gap: false,
+                discontinuity: false,
                 parts: Vec::new(),
             }
         );
@@ -1044,7 +1056,7 @@ mod tests {
     #[test]
     fn written_media_playlist_parses_back_identically() {
         // Every media-playlist feature the writer emits: an fMP4 init map, a
-        // rotating key, byte ranges, and a closing ENDLIST.
+        // rotating key, byte ranges, a discontinuity, and a closing ENDLIST.
         let mut iv = [0u8; 16];
         iv[15] = 0x2a;
         let key = SegmentKey {
@@ -1063,6 +1075,7 @@ mod tests {
                     key: None,
                     byte_range: None,
                     gap: false,
+                    discontinuity: false,
                     parts: Vec::new(),
                 },
                 Segment {
@@ -1074,6 +1087,7 @@ mod tests {
                         length: 250,
                     }),
                     gap: false,
+                    discontinuity: false,
                     parts: Vec::new(),
                 },
                 Segment {
@@ -1082,6 +1096,7 @@ mod tests {
                     key: Some(key),
                     byte_range: None,
                     gap: false,
+                    discontinuity: true,
                     parts: Vec::new(),
                 },
             ],

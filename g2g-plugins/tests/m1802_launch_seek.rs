@@ -283,6 +283,55 @@ fn hls_pipeline() -> String {
     format!("hlssrc location={base}/media.m3u8 ! decodebin ! checksumsink hash=md5")
 }
 
+// the fixture's segments twice, the second time after an `#EXT-X-DISCONTINUITY` that sets its timestamps back to the first PTS
+#[cfg(feature = "hls")]
+fn hls_discontinuity_pipeline() -> String {
+    const PLAYLIST_PATH: &str = "/twice.m3u8";
+    let fixture = std::fs::read_to_string(offset_fixture(&format!(
+        "{HLS_FIXTURE_DIRECTORY}/media.m3u8"
+    )))
+    .unwrap();
+    let (head, segments) = fixture.split_at(fixture.find("#EXTINF").unwrap());
+    let segments = segments.trim_end().strip_suffix("#EXT-X-ENDLIST").unwrap();
+    let playlist = format!("{head}{segments}#EXT-X-DISCONTINUITY\n{segments}#EXT-X-ENDLIST\n");
+    let base = http_routes::serve(move |path| match path {
+        PLAYLIST_PATH => Some(playlist.clone().into_bytes()),
+        segment => std::fs::read(offset_fixture(&format!("{HLS_FIXTURE_DIRECTORY}{segment}"))).ok(),
+    });
+    format!("hlssrc location={base}{PLAYLIST_PATH} ! decodebin ! checksumsink hash=md5")
+}
+
+#[cfg(feature = "hls")]
+#[test]
+fn hls_plays_on_across_a_discontinuity() {
+    let once = checksum_lines(&launch(&[], &hls_pipeline()));
+    let twice = checksum_lines(&launch(&[], &hls_discontinuity_pipeline()));
+    assert_eq!(twice, [once.clone(), once].concat());
+}
+
+#[cfg(feature = "hls")]
+#[test]
+fn hls_seek_past_a_discontinuity_counts_from_the_playlist_start() {
+    let once = checksum_lines(&launch(&[], &hls_pipeline()));
+    let stream_seconds = FRAME_COUNT / FRAME_RATE;
+    let target_milliseconds = stream_seconds * 1_000 + SEEK_MILLISECONDS;
+    let seeked = checksum_lines(&launch_with_seek(
+        &seek_seconds(target_milliseconds),
+        &hls_discontinuity_pipeline(),
+    ));
+    assert_eq!(seeked, once[first_frame_at(SEEK_MILLISECONDS) as usize..]);
+}
+
+// the position after the discontinuity counts on in playlist time, so it seeks back to the last frame
+#[cfg(feature = "hls")]
+#[tokio::test]
+async fn hls_position_counts_on_across_a_discontinuity() {
+    let pipeline = hls_discontinuity_pipeline();
+    let position_ns = final_position_ns(&pipeline).await;
+    let last_frame_ns = (2 * FRAME_COUNT - 1) * FRAME_PERIOD_NS;
+    assert_eq!(position_ns, last_frame_ns);
+}
+
 #[cfg(feature = "hls")]
 #[test]
 fn hls_seek_counts_the_target_from_the_playlist_start() {

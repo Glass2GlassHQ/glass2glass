@@ -64,7 +64,8 @@ use g2g_core::runtime::{
 use g2g_core::{
     g2g_debug, g2g_warn, AudioFormat, BusHandle, ByteStreamEncoding, Caps, CapsConstraint, CapsSet,
     ConfigureOutcome, Dim, ElementMetadata, G2gError, HardwareError, OutputSink, PipelinePacket,
-    PropError, PropKind, PropValue, PropertySpec, Rate, Seek, StreamType, TextFormat, VideoCodec,
+    PropError, PropKind, PropValue, PropertySpec, Rate, Segment, StreamType, TextFormat,
+    VideoCodec,
 };
 
 use crate::abr::BandwidthEstimator;
@@ -751,6 +752,15 @@ fn segment_start_ns(media: &MediaPlaylist, index: usize) -> u64 {
         .fold(0, u64::saturating_add)
 }
 
+// a fetched payload in the prebuffer window, with what goes out ahead of it
+#[derive(Debug)]
+struct QueuedMedia {
+    bytes: Vec<u8>,
+    // the sample-encryption key, `None` for an init segment or a clear one
+    key: Option<SampleAesKey>,
+    segment: Option<Segment>,
+}
+
 // how the demuxer after this source reads the timestamps of a media segment
 #[derive(Debug)]
 enum SegmentTimestamps {
@@ -969,11 +979,7 @@ impl SourceLoop for HlsSrc {
             );
             // AES-128 keys fetched once per URI and reused across segments.
             let mut keys: Vec<(String, [u8; 16])> = Vec::new();
-            // Sample-encryption key per queued segment, in emit order (`None` for
-            // an init segment or a clear one), and the running byte offset of the
-            // emitted stream that a published key is keyed by.
-            let mut pending_keys: alloc::collections::VecDeque<Option<SampleAesKey>> =
-                alloc::collections::VecDeque::new();
+            // the running byte offset of the emitted stream that a published key is keyed by
             let mut emitted_bytes = 0u64;
             // Next HLS media-sequence number to play, and the Part Index within it
             // (0 = the whole segment); media below that on a live reload was
@@ -996,8 +1002,7 @@ impl SourceLoop for HlsSrc {
             } else {
                 SegmentTimestamps::MpegTs
             };
-            // a flushing seek taken, its Segment goes out with the first media fetched after it
-            let mut seek_to_open: Option<Seek> = None;
+            let mut timeline = crate::adaptiveseek::AdaptiveTimeline::default();
             loop {
                 // Index into `media.segments`; a flushing seek repositions it. The
                 // matching HLS media-sequence number is `media.media_sequence + idx`.
@@ -1013,7 +1018,6 @@ impl SourceLoop for HlsSrc {
                         // Queued lookahead is pre-seek media: drop it (and
                         // re-arm the prebuffer fill) before flushing.
                         window.clear();
-                        pending_keys.clear();
                         // The byte coordinate a published key is keyed by
                         // restarts with the re-read stream, matching the
                         // demuxer's reset on this same flush.
@@ -1026,7 +1030,7 @@ impl SourceLoop for HlsSrc {
                         next_seq = media.media_sequence + target_idx as u64;
                         next_part = 0;
                         init_emitted = false;
-                        seek_to_open = Some(seek);
+                        timeline.seek(seek);
                         continue; // re-evaluate from the repositioned index
                     }
 
@@ -1042,8 +1046,14 @@ impl SourceLoop for HlsSrc {
                                     SegmentTimestamps::Fmp4WithoutVideo,
                                     SegmentTimestamps::Fmp4,
                                 );
-                                pending_keys.push_back(None);
-                                window.admit(bytes, 0);
+                                window.admit(
+                                    QueuedMedia {
+                                        bytes,
+                                        key: None,
+                                        segment: None,
+                                    },
+                                    0,
+                                );
                             }
                         }
                         init_emitted = true;
@@ -1117,19 +1127,19 @@ impl SourceLoop for HlsSrc {
                                         / 1_000_000,
                                 );
                                 if !bytes.is_empty() {
-                                    if let Some(seek) = seek_to_open.take() {
-                                        let start_ns = segment_start_ns(&media, idx);
-                                        let segment = crate::adaptiveseek::opening_segment(
-                                            &*self,
-                                            &seek,
-                                            start_ns,
-                                            segment_timestamps.earliest_pts_ns(&bytes, start_ns),
-                                        );
-                                        out.push(PipelinePacket::Segment(segment)).await?;
-                                    }
-                                    pending_keys.push_back(None);
+                                    let start_ns = segment_start_ns(&media, idx);
+                                    let segment_ahead = timeline.segment_ahead(
+                                        &*self,
+                                        start_ns,
+                                        segment.discontinuity && part_index == 0,
+                                        || segment_timestamps.earliest_pts_ns(&bytes, start_ns),
+                                    );
                                     window.admit(
-                                        bytes,
+                                        QueuedMedia {
+                                            bytes,
+                                            key: None,
+                                            segment: segment_ahead,
+                                        },
                                         u64::from(part.duration_ms).saturating_mul(1_000_000),
                                     );
                                 }
@@ -1231,18 +1241,21 @@ impl SourceLoop for HlsSrc {
                                 bytes
                             };
                             if !bytes.is_empty() {
-                                if let Some(seek) = seek_to_open.take() {
-                                    let start_ns = segment_start_ns(&media, idx);
-                                    let segment = crate::adaptiveseek::opening_segment(
-                                        &*self,
-                                        &seek,
-                                        start_ns,
-                                        segment_timestamps.earliest_pts_ns(&bytes, start_ns),
-                                    );
-                                    out.push(PipelinePacket::Segment(segment)).await?;
-                                }
-                                pending_keys.push_back(sample_key);
-                                window.admit(bytes, duration_ns);
+                                let start_ns = segment_start_ns(&media, idx);
+                                let segment_ahead = timeline.segment_ahead(
+                                    &*self,
+                                    start_ns,
+                                    segment.discontinuity,
+                                    || segment_timestamps.earliest_pts_ns(&bytes, start_ns),
+                                );
+                                window.admit(
+                                    QueuedMedia {
+                                        bytes,
+                                        key: sample_key,
+                                        segment: segment_ahead,
+                                    },
+                                    duration_ns,
+                                );
                             }
                             next_seq = seg_seq + 1;
                             next_part = 0;
@@ -1292,11 +1305,19 @@ impl SourceLoop for HlsSrc {
                     // Emit phase: push the window front downstream. An empty
                     // window with nothing left to fetch ends this pass (live
                     // reload or end of playlist).
-                    if let Some(bytes) = window.pop() {
+                    if let Some(QueuedMedia {
+                        bytes,
+                        key,
+                        segment,
+                    }) = window.pop()
+                    {
+                        if let Some(segment) = segment {
+                            out.push(PipelinePacket::Segment(segment)).await?;
+                        }
                         // Publish this segment's key against the offset its bytes
                         // start at, so a downstream demuxer decrypts each fragment
                         // with the key its own segment carried.
-                        if let Some(key) = pending_keys.pop_front().flatten() {
+                        if let Some(key) = key {
                             if let Some(handle) = &self.sample_aes_key {
                                 handle
                                     .lock()

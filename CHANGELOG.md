@@ -109,6 +109,7 @@ Breaking: `QosMessage` gains `downstream_proc_ns`, `ElementProbe` is no longer `
 - M2006: `srtsrc` delivers the packets it still holds when the peer shuts down.
 - M2007: a seek resolves to served, refused or superseded, and every seekable element refuses a seek it cannot serve instead of dropping it.
 - M2008: HLS and DASH VOD streams take `g2g-launch` seeks and start at the target frame.
+- M2009: HLS plays and seeks across `#EXT-X-DISCONTINUITY` with running and stream time continuing in playlist time.
 
 ## 0.10.0
 

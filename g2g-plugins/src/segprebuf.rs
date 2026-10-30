@@ -14,15 +14,14 @@
 //! while a fetch stalls.
 
 use alloc::collections::VecDeque;
-use alloc::vec::Vec;
 
 use g2g_core::{BusHandle, BusMessage};
 
 #[derive(Debug)]
-pub(crate) struct SegmentPrebuffer {
+pub(crate) struct SegmentPrebuffer<T> {
     target_ns: u64,
     /// Payloads in emit order, each with the play duration it contributes.
-    queue: VecDeque<(Vec<u8>, u64)>,
+    queue: VecDeque<(T, u64)>,
     buffered_ns: u64,
     /// Startup / post-seek fill in progress: admissions post Buffering percent.
     filling: bool,
@@ -30,7 +29,7 @@ pub(crate) struct SegmentPrebuffer {
     last_bucket: Option<u8>,
 }
 
-impl SegmentPrebuffer {
+impl<T> SegmentPrebuffer<T> {
     /// `target_ms` of media to hold before emitting; 0 disables prebuffering
     /// (the window passes each segment straight through).
     pub(crate) fn new(target_ms: u64, bus: Option<BusHandle>) -> Self {
@@ -52,8 +51,8 @@ impl SegmentPrebuffer {
 
     /// Queue a fetched payload. `duration_ns` is its play time (0 for an init
     /// segment).
-    pub(crate) fn admit(&mut self, bytes: Vec<u8>, duration_ns: u64) {
-        self.queue.push_back((bytes, duration_ns));
+    pub(crate) fn admit(&mut self, payload: T, duration_ns: u64) {
+        self.queue.push_back((payload, duration_ns));
         self.buffered_ns = self.buffered_ns.saturating_add(duration_ns);
         if self.filling {
             self.post_level();
@@ -66,14 +65,14 @@ impl SegmentPrebuffer {
     /// Dequeue the next payload to emit. Popping while still filling means
     /// nothing more is fetchable right now (live edge / end of playlist), which
     /// completes buffering early, like the stream ending in `HttpSrc`.
-    pub(crate) fn pop(&mut self) -> Option<Vec<u8>> {
-        let (bytes, duration_ns) = self.queue.pop_front()?;
+    pub(crate) fn pop(&mut self) -> Option<T> {
+        let (payload, duration_ns) = self.queue.pop_front()?;
         if self.filling {
             self.filling = false;
             self.post(100);
         }
         self.buffered_ns = self.buffered_ns.saturating_sub(duration_ns);
-        Some(bytes)
+        Some(payload)
     }
 
     /// Drop the window (a flushing seek discards queued media) and re-arm the

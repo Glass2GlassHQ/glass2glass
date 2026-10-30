@@ -188,8 +188,8 @@ Highest leverage first:
 - **HLS live errors:** `hlssrc` fails the run on a live `#EXT-X-MAP` init segment
   answering 4xx, where gst's adaptivedemux2 reloads the playlist.
 - **HLS / DASH seeks:** Seek in the live DVR window, with gst's range and clamping
-  rules. Seek across HLS `#EXT-X-DISCONTINUITY` (not parsed yet) and DASH Period
-  boundaries (a DASH seek resolves within the playing Period only). Take a seek while
+  rules. Seek across DASH Period boundaries (a DASH seek resolves within the
+  playing Period only). Take a seek while
   a segment download is in flight instead of after it. Seek a playlist whose audio or
   subtitles come from separate renditions: each rendition is its own `HlsSrc`, and
   `attach_seek` needs exactly one seekable node.

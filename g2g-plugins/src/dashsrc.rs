@@ -66,7 +66,7 @@ use g2g_core::time::ticks_to_ns;
 use g2g_core::{
     g2g_debug, g2g_warn, BusHandle, ByteStreamEncoding, Caps, CapsConstraint, CapsSet,
     ConfigureOutcome, ElementMetadata, G2gError, OutputSink, PipelinePacket, PropError, PropKind,
-    PropValue, PropertySpec, Seek, Segment,
+    PropValue, PropertySpec, Segment,
 };
 
 use crate::abr::BandwidthEstimator;
@@ -540,8 +540,7 @@ impl SourceLoop for DashSrc {
             let mut positioned = false;
             // the playing Representation's init, `None` when it has no video track or no init segment
             let mut init_header: Option<crate::fmp4::Header> = None;
-            // a flushing seek taken, its Segment goes out with the first media fetched after it
-            let mut seek_to_open: Option<Seek> = None;
+            let mut timeline = crate::adaptiveseek::AdaptiveTimeline::default();
             if mpd.dynamic {
                 period_idx =
                     mpd.live_period_index(clock.now_unix(), self.presentation_delay_secs(&mpd));
@@ -645,7 +644,7 @@ impl SourceLoop for DashSrc {
                         // the target segment is not skipped as "already played".
                         last_played = None;
                         init_emitted = false;
-                        seek_to_open = Some(seek);
+                        timeline.seek(seek);
                         continue; // re-evaluate from the repositioned index
                     }
 
@@ -659,7 +658,7 @@ impl SourceLoop for DashSrc {
                                     .await?;
                             init_header = crate::fmp4::parse_header(&bytes).ok();
                             if !bytes.is_empty() {
-                                window.admit(bytes, 0);
+                                window.admit((bytes, None), 0);
                             }
                         }
                         init_emitted = true;
@@ -703,10 +702,9 @@ impl SourceLoop for DashSrc {
                                     && self.prebuffer_ms == 0
                                     && seg.byte_range.is_none()
                                 {
-                                    if let Some(seek) = seek_to_open.take() {
-                                        let segment = crate::adaptiveseek::opening_segment(
-                                            &*self, &seek, start_ns, None,
-                                        );
+                                    if let Some(segment) =
+                                        timeline.segment_ahead(&*self, start_ns, false, || None)
+                                    {
                                         out.push(PipelinePacket::Segment(segment)).await?;
                                     }
                                     stream_segment_chunks(&client, &url, out, &mut sequence, retry)
@@ -715,24 +713,21 @@ impl SourceLoop for DashSrc {
                                     match fetch_segment(&client, &url, seg.byte_range, retry).await
                                     {
                                         Ok(bytes) => {
-                                            if let Some(seek) = seek_to_open.take() {
-                                                let earliest_pts_ns =
-                                                    init_header.as_ref().and_then(|header| {
-                                                        crate::fmp4::earliest_fragment_pts_ns(
-                                                            &bytes, header,
-                                                        )
-                                                    });
-                                                let segment = crate::adaptiveseek::opening_segment(
-                                                    &*self,
-                                                    &seek,
-                                                    start_ns,
-                                                    earliest_pts_ns,
-                                                );
-                                                out.push(PipelinePacket::Segment(segment)).await?;
-                                            }
                                             let len = bytes.len();
                                             if !bytes.is_empty() {
-                                                window.admit(bytes, duration_ns);
+                                                let segment_ahead = timeline.segment_ahead(
+                                                    &*self,
+                                                    start_ns,
+                                                    false,
+                                                    || {
+                                                        init_header.as_ref().and_then(|header| {
+                                                            crate::fmp4::earliest_fragment_pts_ns(
+                                                                &bytes, header,
+                                                            )
+                                                        })
+                                                    },
+                                                );
+                                                window.admit((bytes, segment_ahead), duration_ns);
                                             }
                                             Ok(len)
                                         }
@@ -805,7 +800,10 @@ impl SourceLoop for DashSrc {
                     // Emit phase: push the window front downstream. An empty
                     // window with nothing left to fetch ends this pass (live
                     // reload or end of manifest).
-                    if let Some(bytes) = window.pop() {
+                    if let Some((bytes, segment_ahead)) = window.pop() {
+                        if let Some(segment) = segment_ahead {
+                            out.push(PipelinePacket::Segment(segment)).await?;
+                        }
                         out.push(PipelinePacket::DataFrame(byte_frame(bytes, sequence)))
                             .await?;
                         sequence += 1;

@@ -1557,7 +1557,8 @@ impl MultiOutputElement for TsDemuxN {
                     }
                 }
                 PipelinePacket::Segment(seg) => {
-                    // an upstream seek
+                    // an upstream seek, or a discontinuity once the stream is open
+                    let stream_opened = self.segment.is_some();
                     let after_upstream_flush = core::mem::take(&mut self.withheld_flush);
                     if after_upstream_flush {
                         for port in 0..self.ports.len() {
@@ -1569,8 +1570,8 @@ impl MultiOutputElement for TsDemuxN {
                     for port in 0..self.ports.len() {
                         out.push_to(port, PipelinePacket::Segment(seg)).await?;
                     }
-                    // the source mapped its seek onto this stream's timestamps, the runner's opening segment it did not
-                    if after_upstream_flush {
+                    // the source mapped this segment onto the stream's timestamps, the runner's opening segment it did not
+                    if after_upstream_flush || stream_opened {
                         self.seek.keep_segment();
                         self.segment_sent.fill(true);
                     }
@@ -2127,6 +2128,37 @@ mod tests {
             );
         };
         assert_eq!(*after_seek, seek_segment);
+    }
+
+    // an HLS discontinuity: the source's segment moves running time onto the new timestamps
+    #[tokio::test]
+    async fn a_discontinuity_keeps_the_sources_segment() {
+        const DISCONTINUITY_STREAM_TIME_NS: u64 = 4_000_000_000;
+        let mut d = TsDemux::new();
+        d.configure_pipeline(&input_caps()).unwrap();
+        let mut sink = CaptureSink::default();
+        let discontinuity = Segment {
+            base: DISCONTINUITY_STREAM_TIME_NS,
+            start: session_pts_ns(SECOND_SESSION_TICKS, 1)[0],
+            time: DISCONTINUITY_STREAM_TIME_NS,
+            ..Segment::new()
+        };
+        for packet in [
+            h264_session(FIRST_SESSION_TICKS, 3),
+            PipelinePacket::Segment(discontinuity),
+            h264_session(SECOND_SESSION_TICKS, 3),
+            PipelinePacket::Eos,
+        ] {
+            d.process(packet, &mut sink).await.unwrap();
+        }
+
+        let [_opening, after] = sink.segments.as_slice() else {
+            panic!(
+                "the opening segment, then the source's, got {:?}",
+                sink.segments
+            );
+        };
+        assert_eq!(*after, discontinuity);
     }
 
     #[derive(Default)]

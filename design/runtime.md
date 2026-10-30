@@ -542,8 +542,12 @@ seek, once it has read the earliest PTS in it, with the same reader the demuxer 
 target moved onto those timestamps and `time` is the target itself, so the sink
 clips the frames before the target and reports positions in playlist time. A
 segment with no readable timestamp keeps the `Segment` on playlist time, with a
-warning. `tsdemux` keeps a `Segment` that follows an upstream `Flush` instead of
-opening its own, while the runner's opening `Segment` it still replaces.
+warning. At an HLS `#EXT-X-DISCONTINUITY` the source sends a `Segment` the same way, its
+`base` the playlist time played since the first media out or the last seek, so
+running time carries on over timestamps that jump. The source's `Segment` rides
+the prebuffer window with the bytes it precedes. `tsdemux` keeps a `Segment` that
+follows an upstream `Flush` or arrives once its stream is open, instead of opening
+its own, while the runner's opening `Segment` it still replaces.
 `attach_seek` skips a time source that feeds a buffering element (`qtdemux` behind
 `hlssrc`), since that element holds the whole stream and serves the seek.
 

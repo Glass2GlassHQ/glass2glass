@@ -254,6 +254,7 @@ impl HlsSink {
             key: None,
             byte_range: None,
             gap: false,
+            discontinuity: false,
             parts: Vec::new(),
         });
         self.open_segment.clear();
