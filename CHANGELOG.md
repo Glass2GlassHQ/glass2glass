@@ -90,6 +90,7 @@ Breaking: `QosMessage` gains `downstream_proc_ns`, `ElementProbe` is no longer `
 - M1987: audio element pad templates list the channel counts and rates the element accepts instead of a fixed stereo shape.
 - M1988: g2g-core builds with `runtime` and without `std` again.
 - M1989: `alawdec` and `mulawdec` drop their redundant 8 kHz sink template alternative.
+- M1990: the PCM filters that keep their input caps share one constraint and template set, and the audiofx templates take any channel count and rate.
 
 ## 0.10.0
 

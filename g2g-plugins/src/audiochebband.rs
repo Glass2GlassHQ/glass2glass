@@ -335,7 +335,7 @@ static AUDIOCHEBBAND_PROPS: &[PropertySpec] = &[
 
 impl PadTemplates for AudioChebBand {
     fn pad_templates() -> Vec<PadTemplate> {
-        audiofx::default_pad_templates()
+        audiofx::pad_templates(None)
     }
 }
 

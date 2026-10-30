@@ -461,7 +461,7 @@ static AUDIODYNAMIC_PROPS: &[PropertySpec] = &[
 
 impl PadTemplates for AudioDynamic {
     fn pad_templates() -> Vec<PadTemplate> {
-        audiofx::default_pad_templates()
+        audiofx::pad_templates(None)
     }
 }
 

@@ -31,7 +31,7 @@ use alloc::vec::Vec;
 use g2g_core::frame::{Frame, FrameTiming};
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    pcm_caps_any_rate_and_channels, AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet,
+    pcm_caps_any_rate_and_channels, AsyncElement, AudioFormat, Caps, CapsConstraint,
     ConfigureOutcome, ElementMetadata, G2gError, MemoryDomain, OutputSink, PadTemplate,
     PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, ANY_CHANNELS,
     ANY_SAMPLE_RATE,
@@ -39,6 +39,7 @@ use g2g_core::{
 
 use crate::audioconvert::{frame_bytes, ns_to_samples, pcm_formats, samples_to_ns};
 use crate::fifobuffer::FifoBuffer;
+use crate::pcm_passthrough;
 
 /// One second of audio per reversed buffer.
 const DEFAULT_CHUNK_DURATION_NS: u64 = 1_000_000_000;
@@ -240,12 +241,7 @@ impl AsyncElement for AudioReverse {
 
     /// Re-ordering only: the output caps equal the input.
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
-        CapsConstraint::DerivedOutput(Box::new(|input: &Caps| match input {
-            Caps::Audio { format, .. } if pcm_formats().contains(format) => {
-                CapsSet::one(input.clone())
-            }
-            _ => CapsSet::from_alternatives(Vec::new()),
-        }))
+        CapsConstraint::Identity(pcm_caps_any_rate_and_channels(|_| true))
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -341,8 +337,7 @@ static AUDIOREVERSE_PROPS: &[PropertySpec] = &[PropertySpec::new(
 
 impl PadTemplates for AudioReverse {
     fn pad_templates() -> Vec<PadTemplate> {
-        let pcm = pcm_caps_any_rate_and_channels(|_| true);
-        Vec::from([PadTemplate::sink(pcm.clone()), PadTemplate::source(pcm)])
+        pcm_passthrough::pad_templates(pcm_caps_any_rate_and_channels(|_| true))
     }
 }
 

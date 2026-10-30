@@ -15,10 +15,12 @@ use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
 
+use crate::pcm_passthrough;
+
 use g2g_core::{
-    pcm_caps_any_rate_and_channels, AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet,
-    ConfigureOutcome, ElementMetadata, G2gError, OutputSink, PadTemplate, PadTemplates,
-    PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
+    AsyncElement, AudioFormat, Caps, CapsConstraint, ConfigureOutcome, ElementMetadata, G2gError,
+    OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue,
+    PropertySpec,
 };
 
 /// # Example
@@ -118,13 +120,7 @@ impl AsyncElement for Level {
 
     /// Pure passthrough: the meter never changes the stream.
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
-        CapsConstraint::DerivedOutput(Box::new(|input: &Caps| match input {
-            Caps::Audio {
-                format: AudioFormat::PcmS16Le,
-                ..
-            } => CapsSet::one(input.clone()),
-            _ => CapsSet::from_alternatives(Vec::new()),
-        }))
+        CapsConstraint::Identity(pcm_passthrough::s16_caps())
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -200,8 +196,7 @@ static LEVEL_PROPS: &[PropertySpec] = &[PropertySpec::new(
 
 impl PadTemplates for Level {
     fn pad_templates() -> Vec<PadTemplate> {
-        let pcm = pcm_caps_any_rate_and_channels(|format| format == AudioFormat::PcmS16Le);
-        Vec::from([PadTemplate::sink(pcm.clone()), PadTemplate::source(pcm)])
+        pcm_passthrough::pad_templates(pcm_passthrough::s16_caps())
     }
 }
 

@@ -194,7 +194,7 @@ static AUDIOINVERT_PROPS: &[PropertySpec] = &[PropertySpec::new(
 
 impl PadTemplates for AudioInvert {
     fn pad_templates() -> Vec<PadTemplate> {
-        audiofx::default_pad_templates()
+        audiofx::pad_templates(None)
     }
 }
 

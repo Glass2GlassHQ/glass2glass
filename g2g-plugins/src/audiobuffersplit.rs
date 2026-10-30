@@ -32,7 +32,7 @@ use alloc::vec::Vec;
 use g2g_core::frame::{Frame, FrameTiming};
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    pcm_caps_any_rate_and_channels, AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet,
+    pcm_caps_any_rate_and_channels, AsyncElement, AudioFormat, Caps, CapsConstraint,
     ConfigureOutcome, ElementMetadata, G2gError, MemoryDomain, OutputSink, PadTemplate,
     PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, ANY_CHANNELS,
     ANY_SAMPLE_RATE,
@@ -40,6 +40,7 @@ use g2g_core::{
 
 use crate::audioconvert::{frame_bytes, ns_to_samples, pcm_formats, samples_to_ns, silence_byte};
 use crate::fifobuffer::FifoBuffer;
+use crate::pcm_passthrough;
 
 /// gst's default `output-buffer-duration`, 20 ms.
 const DEFAULT_OUTPUT_BUFFER_DURATION: (i32, i32) = (1, 50);
@@ -530,12 +531,7 @@ impl AsyncElement for AudioBufferSplit {
 
     /// Re-framing only: the output caps equal the input.
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
-        CapsConstraint::DerivedOutput(Box::new(|input: &Caps| match input {
-            Caps::Audio { format, .. } if pcm_formats().contains(format) => {
-                CapsSet::one(input.clone())
-            }
-            _ => CapsSet::from_alternatives(Vec::new()),
-        }))
+        CapsConstraint::Identity(pcm_caps_any_rate_and_channels(|_| true))
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -715,8 +711,7 @@ static AUDIOBUFFERSPLIT_PROPS: &[PropertySpec] = &[
 
 impl PadTemplates for AudioBufferSplit {
     fn pad_templates() -> Vec<PadTemplate> {
-        let pcm = pcm_caps_any_rate_and_channels(|_| true);
-        Vec::from([PadTemplate::sink(pcm.clone()), PadTemplate::source(pcm)])
+        pcm_passthrough::pad_templates(pcm_caps_any_rate_and_channels(|_| true))
     }
 }
 

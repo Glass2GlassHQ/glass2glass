@@ -291,7 +291,7 @@ static AUDIOWSINCBAND_PROPS: &[PropertySpec] = &[
 
 impl PadTemplates for AudioWsincBand {
     fn pad_templates() -> Vec<PadTemplate> {
-        audiofx::default_pad_templates()
+        audiofx::pad_templates(None)
     }
 }
 

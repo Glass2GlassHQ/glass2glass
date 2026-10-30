@@ -318,7 +318,7 @@ static AUDIOKARAOKE_PROPS: &[PropertySpec] = &[
 
 impl PadTemplates for AudioKaraoke {
     fn pad_templates() -> Vec<PadTemplate> {
-        audiofx::pad_templates(KARAOKE_CHANNELS)
+        audiofx::pad_templates(Some(KARAOKE_CHANNELS))
     }
 }
 

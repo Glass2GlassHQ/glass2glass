@@ -9,7 +9,6 @@
 //! inside the kernels) and writes the format back unchanged, so `audioconvert`
 //! is placed ahead of them for any other format.
 
-use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -18,21 +17,17 @@ use g2g_core::frame::{Frame, FrameTiming};
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AudioFormat, Caps, CapsConstraint, CapsSet, G2gError, MemoryDomain, PadTemplate, PropError,
-    PropValue,
+    PropValue, ANY_CHANNELS, ANY_SAMPLE_RATE,
 };
 
 pub(crate) use crate::audioconvert::{decode, encode};
 use crate::fft::FftPlan;
 use crate::fifobuffer::FifoBuffer;
 use crate::mathf;
+use crate::pcm_passthrough;
 
 /// The sample formats the audiofx filters handle directly.
 pub(crate) const AUDIOFX_FORMATS: [AudioFormat; 2] = [AudioFormat::PcmS16Le, AudioFormat::PcmF32Le];
-
-/// The nominal shape the pad templates advertise, matching the other audio
-/// filters' templates.
-const TEMPLATE_CHANNELS: u8 = 2;
-const TEMPLATE_RATE: u32 = 48_000;
 
 /// Interleaved PCM the audiofx filters accept: one of [`AUDIOFX_FORMATS`], a
 /// non-zero channel count, and exactly `required_channels` when the filter only
@@ -59,29 +54,22 @@ pub(crate) fn accept_audio(
 
 /// Output caps equal input caps: the filters change samples, not shape.
 pub(crate) fn passthrough_constraint(required_channels: Option<u8>) -> CapsConstraint<'static> {
-    CapsConstraint::DerivedOutput(Box::new(move |input: &Caps| {
-        match accept_audio(input, required_channels) {
-            Ok(_) => CapsSet::one(input.clone()),
-            Err(_) => CapsSet::from_alternatives(Vec::new()),
-        }
-    }))
+    CapsConstraint::Identity(passthrough_caps(required_channels))
 }
 
 /// Sink and source templates over [`AUDIOFX_FORMATS`].
-pub(crate) fn pad_templates(channels: u8) -> Vec<PadTemplate> {
-    let pcm = |format| Caps::Audio {
-        format,
-        channels,
-        sample_rate: TEMPLATE_RATE,
-        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
-    };
-    let set = CapsSet::from_alternatives(AUDIOFX_FORMATS.map(pcm).to_vec());
-    Vec::from([PadTemplate::sink(set.clone()), PadTemplate::source(set)])
+pub(crate) fn pad_templates(required_channels: Option<u8>) -> Vec<PadTemplate> {
+    pcm_passthrough::pad_templates(passthrough_caps(required_channels))
 }
 
-/// The stereo-or-any template shape the filters declare.
-pub(crate) fn default_pad_templates() -> Vec<PadTemplate> {
-    pad_templates(TEMPLATE_CHANNELS)
+fn passthrough_caps(required_channels: Option<u8>) -> CapsSet {
+    let pcm = |format| Caps::Audio {
+        format,
+        channels: required_channels.unwrap_or(ANY_CHANNELS),
+        sample_rate: ANY_SAMPLE_RATE,
+        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
+    };
+    CapsSet::from_alternatives(AUDIOFX_FORMATS.map(pcm).to_vec())
 }
 
 // f32 and encoded buffers an element reuses across frames instead of allocating per frame

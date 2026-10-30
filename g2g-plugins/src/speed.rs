@@ -293,7 +293,7 @@ static SPEED_PROPS: &[PropertySpec] = &[PropertySpec::new(
 
 impl PadTemplates for Speed {
     fn pad_templates() -> Vec<PadTemplate> {
-        audiofx::default_pad_templates()
+        audiofx::pad_templates(None)
     }
 }
 

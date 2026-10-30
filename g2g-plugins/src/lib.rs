@@ -711,6 +711,8 @@ mod audioframe;
 mod frame_clock;
 // The caps the compressed-audio parsers and taggers share.
 mod compressed_audio_passthrough;
+// The caps the PCM filters that keep their input caps share.
+mod pcm_passthrough;
 mod pcmclip;
 // ID3v1 / ID3v2 tag parsing and writing (no_std), shared by id3demux,
 // mpegaudioparse and id3v2mux.

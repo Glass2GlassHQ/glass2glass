@@ -13,12 +13,14 @@ use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
 
+use crate::pcm_passthrough;
+
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    pcm_caps_any_rate_and_channels, AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet,
-    ConfigureOutcome, ElementMetadata, G2gError, MemoryDomain, OutputSink, PadTemplate,
-    PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
+    AsyncElement, AudioFormat, Caps, CapsConstraint, ConfigureOutcome, ElementMetadata, G2gError,
+    MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
+    PropValue, PropertySpec,
 };
 
 /// # Example
@@ -97,16 +99,8 @@ impl AsyncElement for Volume {
         self.accept_input(upstream_caps)
     }
 
-    /// Native `DerivedOutput`: a gain change preserves format, channels, and rate,
-    /// so the output caps equal the input for S16LE PCM.
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
-        CapsConstraint::DerivedOutput(Box::new(|input: &Caps| match input {
-            Caps::Audio {
-                format: AudioFormat::PcmS16Le,
-                ..
-            } => CapsSet::one(input.clone()),
-            _ => CapsSet::from_alternatives(Vec::new()),
-        }))
+        CapsConstraint::Identity(pcm_passthrough::s16_caps())
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -217,8 +211,7 @@ static VOLUME_PROPS: &[PropertySpec] = &[
 
 impl PadTemplates for Volume {
     fn pad_templates() -> Vec<PadTemplate> {
-        let pcm = pcm_caps_any_rate_and_channels(|format| format == AudioFormat::PcmS16Le);
-        Vec::from([PadTemplate::sink(pcm.clone()), PadTemplate::source(pcm)])
+        pcm_passthrough::pad_templates(pcm_passthrough::s16_caps())
     }
 }
 

@@ -22,13 +22,14 @@ use alloc::vec::Vec;
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    pcm_caps_any_rate_and_channels, AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet,
+    pcm_caps_any_rate_and_channels, AsyncElement, AudioFormat, Caps, CapsConstraint,
     ConfigureOutcome, ElementMetadata, FrameTiming, G2gError, MemoryDomain, OutputSink,
     PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
     ANY_CHANNELS, ANY_SAMPLE_RATE,
 };
 
 use crate::audioconvert::{ns_to_samples, pcm_formats, samples_to_ns, silence_byte};
+use crate::pcm_passthrough;
 
 /// gst `audiorate`'s default `tolerance`, 40 ms in ns.
 const DEFAULT_TOLERANCE_NS: u64 = 40_000_000;
@@ -222,12 +223,7 @@ impl AsyncElement for AudioRate {
 
     /// Retiming only: the output caps equal the input for any PCM format.
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
-        CapsConstraint::DerivedOutput(Box::new(|input: &Caps| match input {
-            Caps::Audio { format, .. } if pcm_formats().contains(format) => {
-                CapsSet::one(input.clone())
-            }
-            _ => CapsSet::from_alternatives(Vec::new()),
-        }))
+        CapsConstraint::Identity(pcm_caps_any_rate_and_channels(|_| true))
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -389,8 +385,7 @@ static AUDIORATE_PROPS: &[PropertySpec] = &[
 
 impl PadTemplates for AudioRate {
     fn pad_templates() -> Vec<PadTemplate> {
-        let pcm = pcm_caps_any_rate_and_channels(|_| true);
-        Vec::from([PadTemplate::sink(pcm.clone()), PadTemplate::source(pcm)])
+        pcm_passthrough::pad_templates(pcm_caps_any_rate_and_channels(|_| true))
     }
 }
 

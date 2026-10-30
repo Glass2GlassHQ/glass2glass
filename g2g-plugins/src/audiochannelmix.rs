@@ -262,7 +262,7 @@ static AUDIOCHANNELMIX_PROPS: &[PropertySpec] = &[
 
 impl PadTemplates for AudioChannelMix {
     fn pad_templates() -> Vec<PadTemplate> {
-        audiofx::pad_templates(CHANNEL_MIX_CHANNELS)
+        audiofx::pad_templates(Some(CHANNEL_MIX_CHANNELS))
     }
 }
 

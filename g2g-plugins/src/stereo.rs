@@ -230,7 +230,7 @@ static STEREO_PROPS: &[PropertySpec] = &[
 
 impl PadTemplates for Stereo {
     fn pad_templates() -> Vec<PadTemplate> {
-        audiofx::pad_templates(STEREO_CHANNELS)
+        audiofx::pad_templates(Some(STEREO_CHANNELS))
     }
 }
 
