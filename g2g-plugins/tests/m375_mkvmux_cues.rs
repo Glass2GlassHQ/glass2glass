@@ -147,7 +147,7 @@ async fn mkvmux_cues_make_its_own_output_seekable() {
     let mut post = Capture::default();
     demux.process(data_frame(&[], 0), &mut post).await.unwrap(); // dropped awaiting the flush
     let requested = byte
-        .take_pending()
+        .take_seek(Ok)
         .expect("an upstream byte-seek was requested");
     assert_eq!(
         requested.start, cluster1_offset,

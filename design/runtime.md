@@ -513,10 +513,20 @@ every element forwards it, with transforms and decoders forwarding and sinks
 consuming, the same way `Flush` already flows.
 
 A `SeekController` (`runtime`) is a cloneable handle the application holds. A
-seek-aware source's run loop polls `take_pending()` between frames and, on a
+seek-aware source's run loop polls `take_seek()` between frames and, on a
 flushing seek, emits `Flush`, repositions, emits the post-flush `Segment`, and
 resumes, so a seek reaches the source GStreamer-style, upstream, without a
-back-reference. `Mp4Src` is the first real repositioning source, with a flushing
+back-reference.
+
+`seek()` returns a `SeekTicket` that resolves to `Served`, `Refused` with a
+`SeekRefusal`, or `Superseded` when a later seek replaced it before the element
+took it. The element answers inside `take_seek`, through the check it passes:
+`Ok` serves every seek, and `flushing_only` refuses a non-flushing one, which
+`FileSrc`, `DownloadBuffer`, `HlsSrc`, `DashSrc` and the byte-stream demuxers pass.
+A refused seek is logged and playback carries on, as a GStreamer seek returning
+false does. `wait_for_seek` parks an element until a seek or `shutdown` arrives,
+and `eos_then_wait_for_seek` ends a source's stream and parks it when the run
+takes seeks after the end. `Mp4Src` is the first real repositioning source, with a flushing
 seek, keyframe `SNAP_BEFORE` and re-prepended parameter sets, and `SyncSink` maps
 PTS to running time through the `Segment` and clips pre-target frames so an accurate
 seek presents the exact requested frame. A non-flushing seek emits only the

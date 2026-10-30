@@ -72,7 +72,7 @@ impl SourceLoop for SeekableSrc {
             let mut emitted = 0u64;
             while emitted < self.total {
                 // Poll for a seek before producing the next frame.
-                if let Some(seek) = self.seek_ctl.take_pending() {
+                if let Some(seek) = self.seek_ctl.take_seek(Ok) {
                     let _ = out.push(PipelinePacket::Flush).await?;
                     self.position = seek.start;
                     let seg = Segment::for_flush_seek(&seek, None);

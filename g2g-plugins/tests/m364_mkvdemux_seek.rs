@@ -14,8 +14,8 @@ use core::pin::Pin;
 use g2g_core::element::{AsyncElement, OutputSink, PushOutcome};
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
-use g2g_core::runtime::{SeekController, SourceLoop};
-use g2g_core::{ByteStreamEncoding, Caps, G2gError, Seek};
+use g2g_core::runtime::{SeekController, SeekOutcome, SeekRefusal, SourceLoop};
+use g2g_core::{ByteStreamEncoding, Caps, G2gError, Seek, SeekFlags};
 use g2g_plugins::filesrc::FileSrc;
 use g2g_plugins::mkvdemux::{MkvDemux, MkvStream};
 
@@ -220,7 +220,7 @@ async fn mkvdemux_seeks_to_the_target_keyframe_over_filesrc() {
     let time = SeekController::new();
     // Seek to 140 ms: resume from the keyframe before it, at 120 ms.
     let target_ns = 140_000_000;
-    time.seek(Seek::flush_to(target_ns));
+    let ticket = time.seek(Seek::flush_to(target_ns));
 
     let mut src = FileSrc::new(&path, Caps::ByteStream { encoding: ByteStreamEncoding::Matroska })
         .with_chunk_size(16) // small chunks: byte-seek observed mid-read
@@ -264,6 +264,62 @@ async fn mkvdemux_seeks_to_the_target_keyframe_over_filesrc() {
         vec![vec![0x04u8], vec![0x05u8]],
         "resumed from the 120 ms keyframe to the end, earlier frames discarded"
     );
+    assert_eq!(ticket.outcome(), Some(SeekOutcome::Served));
+    let _ = std::fs::remove_file(&path);
+}
+
+#[tokio::test]
+async fn mkvdemux_refuses_a_non_flushing_seek_and_plays_on() {
+    let path = temp_path("non_flushing");
+    std::fs::write(&path, webm()).unwrap();
+
+    let byte = SeekController::new();
+    let time = SeekController::new();
+    let ticket = time.seek(Seek {
+        flags: SeekFlags::NONE,
+        ..Seek::flush_to(140_000_000)
+    });
+
+    let mut src = FileSrc::new(
+        &path,
+        Caps::ByteStream {
+            encoding: ByteStreamEncoding::Matroska,
+        },
+    )
+    .with_seek(byte.clone());
+    let mut demux = MkvDemux::new()
+        .with_stream(MkvStream::Vp9)
+        .with_seek(time.clone(), byte.clone());
+    let caps = {
+        let c: Pin<Box<dyn Future<Output = _>>> = Box::pin(src.intercept_caps());
+        c.await.expect("probe")
+    };
+    src.configure_pipeline(&caps).expect("configure src");
+    demux
+        .configure_pipeline(&Caps::ByteStream {
+            encoding: ByteStreamEncoding::Matroska,
+        })
+        .expect("configure demux");
+
+    let mut capture = Capture::default();
+    {
+        let mut chain = Chain {
+            demux: &mut demux,
+            capture: &mut capture,
+        };
+        src.run(&mut chain).await.expect("filesrc runs");
+    }
+
+    assert_eq!(
+        ticket.outcome(),
+        Some(SeekOutcome::Refused(SeekRefusal::NonFlushing))
+    );
+    assert_eq!(capture.flushes, 0, "a refused seek repositions nothing");
+    assert_eq!(
+        capture.frames,
+        vec![vec![0x01u8], vec![0x02], vec![0x03], vec![0x04], vec![0x05]],
+        "playback runs on from the start"
+    );
     let _ = std::fs::remove_file(&path);
 }
 
@@ -299,7 +355,7 @@ async fn mkvdemux_idle_flush_resets_the_parser_fully() {
     let mut post = Capture::default();
     demux.process(data_frame(&[]), &mut post).await.unwrap();
     assert_eq!(
-        byte.take_pending().map(|s| s.start),
+        byte.take_seek(Ok).map(|s| s.start),
         Some(cluster1_offset),
         "the Cues index resolved the target Cluster"
     );

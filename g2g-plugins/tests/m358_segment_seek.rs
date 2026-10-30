@@ -130,7 +130,7 @@ impl SourceLoop for SegmentLoopSrc {
             let mut emitted = 0u64;
             loop {
                 // Pick up an app-requested (re)position before the next frame.
-                if let Some(seek) = self.seek_ctl.take_pending() {
+                if let Some(seek) = self.seek_ctl.take_seek(Ok) {
                     self.apply_seek(out, seek).await?;
                 }
 
@@ -141,7 +141,7 @@ impl SourceLoop for SegmentLoopSrc {
                         if self.segment_mode {
                             self.seek_ctl.notify_segment_done(stop);
                             loop {
-                                if let Some(seek) = self.seek_ctl.take_pending() {
+                                if let Some(seek) = self.seek_ctl.take_seek(Ok) {
                                     self.apply_seek(out, seek).await?;
                                     break;
                                 }

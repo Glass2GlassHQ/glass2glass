@@ -40,7 +40,7 @@ use g2g_core::caps::framerate_q16_from_fraction;
 use g2g_core::frame::Frame;
 use g2g_core::log::Target;
 use g2g_core::memory::SystemSlice;
-use g2g_core::runtime::{ElementSeekRoute, SeekController, StreamSelectController};
+use g2g_core::runtime::{flushing_only, ElementSeekRoute, SeekController, StreamSelectController};
 use g2g_core::CodecTag;
 use g2g_core::{
     g2g_error, AsyncElement, AudioFormat, BusHandle, BusMessage, ByteStreamEncoding, Caps,
@@ -239,7 +239,7 @@ impl MkvDemux {
         {
             // Index located but not parsed: prefetch it before the real seek.
             if let (Some(app), Some(upstream)) = (&self.app, &self.upstream) {
-                if let Some(seek) = app.take_pending() {
+                if let Some(seek) = app.take_seek(flushing_only) {
                     upstream.seek(Seek::flush_to(cues_off));
                     self.prefetch = CuePrefetch::Fetching {
                         target_pts_ns: seek.start.saturating_add(stream_start_ns),

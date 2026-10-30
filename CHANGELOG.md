@@ -6,7 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
-Breaking: `QosMessage` gains `downstream_proc_ns`, `ElementProbe` is no longer `UnwindSafe`, `SpecError::UnknownProperty` / `BadValue` are replaced by `SpecError::Property(ParseError)`, `receive_rtp_h264` is renamed `receive_rtp`, `RtpRecvConfig` gains an `encoding` field, the `vaapi` feature with `vaapidec` / `vaapidech265` is removed, `MkvCodec` / `MkvStream` gain `Mp2` and `Mp3`, `srt::Handshake` gains `srt_flags`, `AesKeySize` gains `Aes192`, `srt::Role` gains `Rendezvous`, and `SrtReceiver::on_data` returns the sequences to NAK.
+Breaking: `QosMessage` gains `downstream_proc_ns`, `ElementProbe` is no longer `UnwindSafe`, `SpecError::UnknownProperty` / `BadValue` are replaced by `SpecError::Property(ParseError)`, `receive_rtp_h264` is renamed `receive_rtp`, `RtpRecvConfig` gains an `encoding` field, the `vaapi` feature with `vaapidec` / `vaapidech265` is removed, `MkvCodec` / `MkvStream` gain `Mp2` and `Mp3`, `srt::Handshake` gains `srt_flags`, `AesKeySize` gains `Aes192`, `srt::Role` gains `Rendezvous`, `SrtReceiver::on_data` returns the sequences to NAK, and `SeekController::take_pending` is replaced by `take_seek` while `seek` returns a `SeekTicket`.
 
 - M1900: `VelloAnalyticsOverlay` draws on RGBA wgpu textures, `WgpuColorConvert` converts NV12 wgpu textures to RGBA, and `CudaToWgpu` keeps frame metadata.
 - M1901: `VelloAnalyticsOverlay` draws the `show-label` / `show-track` / `show-score` captions.
@@ -107,6 +107,7 @@ Breaking: `QosMessage` gains `downstream_proc_ns`, `ElementProbe` is no longer `
 - M2004: `srtsink` delivers its last packets before its SHUTDOWN, which now reaches a libsrt peer.
 - M2005: SRT elements call and meet peers by host name.
 - M2006: `srtsrc` delivers the packets it still holds when the peer shuts down.
+- M2007: a seek resolves to served, refused or superseded, and every seekable element refuses a seek it cannot serve instead of dropping it.
 
 ## 0.10.0
 

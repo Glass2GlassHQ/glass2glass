@@ -245,7 +245,7 @@ async fn mkvdemux_prefetches_cues_via_seekhead_then_seeks() {
     time.seek(Seek::flush_to(120_000_000));
     let mut post = Capture::default();
     demux.process(data_frame(&[]), &mut post).await.unwrap(); // dropped while awaiting flush
-    let to_cues = byte.take_pending().expect("byte-seek to Cues issued");
+    let to_cues = byte.take_seek(Ok).expect("byte-seek to Cues issued");
     assert_eq!(
         to_cues.start, b.cues_offset,
         "first hop targets the Cues element"
@@ -267,7 +267,7 @@ async fn mkvdemux_prefetches_cues_via_seekhead_then_seeks() {
 
     // 4. With the index parsed, the demuxer byte-seeks to the target Cluster.
     let to_target = byte
-        .take_pending()
+        .take_seek(Ok)
         .expect("byte-seek to the target Cluster issued");
     assert_eq!(
         to_target.start, b.cluster1_offset,

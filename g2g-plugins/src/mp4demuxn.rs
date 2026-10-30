@@ -997,7 +997,7 @@ impl Mp4DemuxN {
             .iter()
             .map(|track| track_framerate_q16(&self.buf, track))
             .collect::<Vec<_>>();
-        let seek = self.seek.as_ref().and_then(SeekController::take_pending);
+        let seek = self.seek.as_ref().and_then(|app| app.take_seek(Ok));
         let samples = match (seek, &forwarded[..]) {
             (None, _) => samples,
             (Some(seek), [track]) => {
@@ -1026,9 +1026,7 @@ impl Mp4DemuxN {
                 for port in 0..self.ports.len() {
                     out.push_to(port, PipelinePacket::Eos).await?;
                 }
-                while !app.has_pending() && !app.is_shutdown() {
-                    app.wait_event().await;
-                }
+                app.wait_for_seek().await;
             }
             if !app.has_pending() {
                 return Ok(());

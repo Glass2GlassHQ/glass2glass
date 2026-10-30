@@ -26,7 +26,9 @@ use std::path::PathBuf;
 
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
-use g2g_core::runtime::{SeekController, SeekFormat, SourceLoop};
+use g2g_core::runtime::{
+    eos_then_wait_for_seek, flushing_only, SeekController, SeekFormat, SourceLoop,
+};
 use g2g_core::{
     ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata,
     FrameTiming, G2gError, MemoryDomain, OutputSink, PipelinePacket, PropError, PropKind,
@@ -283,11 +285,9 @@ impl SourceLoop for FileSrc {
                 // (GStreamer BYTES-format seek: `start` is a file offset). Emit
                 // `Flush` so a downstream demuxer drops its parse buffer and
                 // re-syncs from the new position.
-                if let Some(seek) = self.seek.as_ref().and_then(|c| c.take_pending()) {
-                    if seek.is_flush() {
-                        out.push(PipelinePacket::Flush).await?;
-                        file.seek(SeekFrom::Start(seek.start)).map_err(io_err)?;
-                    }
+                if let Some(seek) = self.seek.as_ref().and_then(|c| c.take_seek(flushing_only)) {
+                    out.push(PipelinePacket::Flush).await?;
+                    file.seek(SeekFrom::Start(seek.start)).map_err(io_err)?;
                     continue; // re-evaluate from the repositioned offset
                 }
 
@@ -305,21 +305,11 @@ impl SourceLoop for FileSrc {
                 if filled == 0 {
                     // EOF: honor a seek that arrived as the read drained (a
                     // reposition before ending), else end the stream.
-                    let Some(ctl) = self.seek.as_ref() else {
-                        break;
-                    };
-                    if ctl.has_pending() {
+                    if self.seek.as_ref().is_some_and(SeekController::has_pending) {
                         continue;
                     }
-                    if !ctl.takes_seeks_after_end() {
-                        break;
-                    }
-                    out.push(PipelinePacket::Eos).await?;
-                    while !ctl.has_pending() {
-                        if ctl.is_shutdown() {
-                            return Ok(sequence);
-                        }
-                        ctl.wait_event().await;
+                    if !eos_then_wait_for_seek(self.seek.as_ref(), out).await? {
+                        return Ok(sequence);
                     }
                     continue;
                 }

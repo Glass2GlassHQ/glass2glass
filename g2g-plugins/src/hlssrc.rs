@@ -58,7 +58,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use g2g_core::log::LogSource;
-use g2g_core::runtime::{SeekController, SourceLoop};
+use g2g_core::runtime::{flushing_only, SeekController, SourceLoop};
 use g2g_core::{
     g2g_debug, g2g_warn, AudioFormat, BusHandle, ByteStreamEncoding, Caps, CapsConstraint, CapsSet,
     ConfigureOutcome, Dim, ElementMetadata, G2gError, HardwareError, OutputSink, PipelinePacket,
@@ -962,31 +962,30 @@ impl SourceLoop for HlsSrc {
                     // resolve the target time to the segment containing it, flush,
                     // jump there, and re-emit the init segment (the downstream
                     // demuxer reset on the flush needs its moov again).
-                    if let Some(seek) = self.seek.as_ref().and_then(|c| c.take_pending()) {
-                        if seek.is_flush() {
-                            let (target_idx, seg_start_ns) = segment_for_time(&media, seek.start);
-                            // Queued lookahead is pre-seek media: drop it (and
-                            // re-arm the prebuffer fill) before flushing.
-                            window.clear();
-                            pending_keys.clear();
-                            // The byte coordinate a published key is keyed by
-                            // restarts with the re-read stream, matching the
-                            // demuxer's reset on this same flush.
-                            emitted_bytes = 0;
-                            if let Some(handle) = &self.sample_aes_key {
-                                handle.lock().expect("key handle poisoned").reset_timeline();
-                            }
-                            out.push(PipelinePacket::Flush).await?;
-                            idx = target_idx;
-                            next_seq = media.media_sequence + target_idx as u64;
-                            next_part = 0;
-                            init_emitted = false;
-                            out.push(PipelinePacket::Segment(Segment::for_flush_seek(
-                                &Seek::flush_to(seg_start_ns),
-                                None,
-                            )))
-                            .await?;
+                    if let Some(seek) = self.seek.as_ref().and_then(|c| c.take_seek(flushing_only))
+                    {
+                        let (target_idx, seg_start_ns) = segment_for_time(&media, seek.start);
+                        // Queued lookahead is pre-seek media: drop it (and
+                        // re-arm the prebuffer fill) before flushing.
+                        window.clear();
+                        pending_keys.clear();
+                        // The byte coordinate a published key is keyed by
+                        // restarts with the re-read stream, matching the
+                        // demuxer's reset on this same flush.
+                        emitted_bytes = 0;
+                        if let Some(handle) = &self.sample_aes_key {
+                            handle.lock().expect("key handle poisoned").reset_timeline();
                         }
+                        out.push(PipelinePacket::Flush).await?;
+                        idx = target_idx;
+                        next_seq = media.media_sequence + target_idx as u64;
+                        next_part = 0;
+                        init_emitted = false;
+                        out.push(PipelinePacket::Segment(Segment::for_flush_seek(
+                            &Seek::flush_to(seg_start_ns),
+                            None,
+                        )))
+                        .await?;
                         continue; // re-evaluate from the repositioned index
                     }
 

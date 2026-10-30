@@ -38,7 +38,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use g2g_core::element::AsyncElement;
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
-use g2g_core::runtime::SeekController;
+use g2g_core::runtime::{flushing_only, SeekController};
 use g2g_core::{
     BusHandle, BusMessage, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
     ElementMetadata, G2gError, OutputSink, PadTemplate, PadTemplates, PropError, PropKind,
@@ -281,11 +281,9 @@ impl DownloadBuffer {
         loop {
             // A flushing byte-seek repositions the read before the next chunk.
             // `Flush` tells downstream to drop its parse buffer and re-sync.
-            if let Some(seek) = self.seek.as_ref().and_then(|c| c.take_pending()) {
-                if seek.is_flush() {
-                    out.push(PipelinePacket::Flush).await?;
-                    self.read_pos = seek.start;
-                }
+            if let Some(seek) = self.seek.as_ref().and_then(|c| c.take_seek(flushing_only)) {
+                out.push(PipelinePacket::Flush).await?;
+                self.read_pos = seek.start;
                 continue;
             }
             // `None` means the read cursor sits past the high-water mark: the

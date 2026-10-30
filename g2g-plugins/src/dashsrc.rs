@@ -59,7 +59,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use g2g_core::log::LogSource;
-use g2g_core::runtime::{SeekController, SourceLoop};
+use g2g_core::runtime::{flushing_only, SeekController, SourceLoop};
 use g2g_core::time::ticks_to_ns;
 use g2g_core::{
     g2g_debug, g2g_warn, BusHandle, ByteStreamEncoding, Caps, CapsConstraint, CapsSet,
@@ -627,25 +627,23 @@ impl SourceLoop for DashSrc {
                     // jump to the segment containing the target, flush, and re-emit
                     // the init segment (a downstream demuxer reset on the flush
                     // needs its moov again).
-                    if let Some(seek) = self.seek.as_ref().and_then(|c| c.take_pending()) {
-                        if seek.is_flush() {
-                            let (target_idx, start_ns) =
-                                segment_for_time(&segs, timescale, seek.start);
-                            // Queued lookahead is pre-seek media: drop it (and
-                            // re-arm the prebuffer fill) before flushing.
-                            window.clear();
-                            out.push(PipelinePacket::Flush).await?;
-                            idx = target_idx;
-                            // Jumped by index; clear the reload-dedup watermark so
-                            // the target segment is not skipped as "already played".
-                            last_played = None;
-                            init_emitted = false;
-                            out.push(PipelinePacket::Segment(Segment::for_flush_seek(
-                                &Seek::flush_to(start_ns),
-                                None,
-                            )))
-                            .await?;
-                        }
+                    if let Some(seek) = self.seek.as_ref().and_then(|c| c.take_seek(flushing_only))
+                    {
+                        let (target_idx, start_ns) = segment_for_time(&segs, timescale, seek.start);
+                        // Queued lookahead is pre-seek media: drop it (and
+                        // re-arm the prebuffer fill) before flushing.
+                        window.clear();
+                        out.push(PipelinePacket::Flush).await?;
+                        idx = target_idx;
+                        // Jumped by index; clear the reload-dedup watermark so
+                        // the target segment is not skipped as "already played".
+                        last_played = None;
+                        init_emitted = false;
+                        out.push(PipelinePacket::Segment(Segment::for_flush_seek(
+                            &Seek::flush_to(start_ns),
+                            None,
+                        )))
+                        .await?;
                         continue; // re-evaluate from the repositioned index
                     }
 

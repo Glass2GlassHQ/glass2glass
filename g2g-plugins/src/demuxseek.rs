@@ -33,7 +33,7 @@ use alloc::vec::Vec;
 use core::iter::Chain;
 
 use g2g_core::log::{ClockTime, Target};
-use g2g_core::runtime::SeekController;
+use g2g_core::runtime::{flushing_only, SeekController};
 use g2g_core::{G2gError, MultiOutputSink, OutputSink, PipelinePacket, Seek, Segment};
 
 // a stream without a keyframe for this many units releases them early, the segment still clips them
@@ -235,7 +235,7 @@ impl<U> DemuxSeek<U> {
         let Some(app) = &self.app else {
             return false;
         };
-        let Some(seek) = app.take_pending().filter(|seek| seek.is_flush()) else {
+        let Some(seek) = app.take_seek(flushing_only) else {
             return false;
         };
         // an index lookup needs the target as a pts, which the stream's first unit fixes
@@ -394,11 +394,8 @@ impl<U> DemuxSeek<U> {
 
     // nothing reaches the demuxer after the end, so it waits here for the app's seek or the run's end
     pub(crate) async fn wait_for_seek_or_shutdown(&self) {
-        let Some(app) = &self.app else {
-            return;
-        };
-        while !app.has_pending() && !app.is_shutdown() {
-            app.wait_event().await;
+        if let Some(app) = &self.app {
+            app.wait_for_seek().await;
         }
     }
 
@@ -580,7 +577,7 @@ mod tests {
         app.seek(Seek::flush_to(TARGET_NS));
         assert!(s.poll_request(), "a pending flushing seek starts the cycle");
         // The upstream source sees a byte-seek to offset 0.
-        assert_eq!(upstream_src.take_pending().map(|k| k.start), Some(0));
+        assert_eq!(upstream_src.take_seek(Ok).map(|k| k.start), Some(0));
         // Awaiting the flush: input is dropped and units are not emitted.
         assert!(s.dropping_input());
         assert_eq!(units(s.admit(0, true, 0)), (None, vec![]));
@@ -789,7 +786,7 @@ mod tests {
 
         app.seek(Seek::flush_to(TARGET_NS));
         assert!(s.poll_request_indexed(|_| panic!("no pts to look up yet")));
-        assert_eq!(upstream.take_pending().map(|seek| seek.start), Some(0));
+        assert_eq!(upstream.take_seek(Ok).map(|seek| seek.start), Some(0));
         assert!(!s.keeps_state(), "a re-scan from the file start");
         s.on_flush();
         s.admit(STREAM_START_NS, true, 0);
@@ -803,7 +800,7 @@ mod tests {
         }));
         assert_eq!(looked_up, Some(TARGET_NS + STREAM_START_NS));
         assert_eq!(
-            upstream.take_pending().map(|seek| seek.start),
+            upstream.take_seek(Ok).map(|seek| seek.start),
             Some(INDEXED_OFFSET)
         );
         assert!(s.keeps_state());

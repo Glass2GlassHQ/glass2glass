@@ -8,3 +8,4 @@
 # the release notes when the bump ships.
 auto_trait_impl_removed: type ElementProbe is no longer UnwindSafe
 constructible_struct_adds_field: field QosMessage.downstream_proc_ns
+inherent_method_missing: SeekController::take_pending

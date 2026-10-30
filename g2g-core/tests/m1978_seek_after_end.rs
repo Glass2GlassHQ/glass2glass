@@ -8,8 +8,8 @@ use std::sync::{Arc, Mutex};
 
 use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::runtime::{
-    attach_seek_controller, block_on, GraphNode, Join2, RunBuilder, RunStats, SeekController,
-    SeekFormat, SourceLoop,
+    attach_seek_controller, block_on, eos_then_wait_for_seek, GraphNode, Join2, RunBuilder,
+    RunStats, SeekController, SeekFormat, SourceLoop,
 };
 use g2g_core::{
     AsyncElement, Caps, ConfigureOutcome, Dim, Frame, FrameTiming, G2gError, Graph, OutputSink,
@@ -77,7 +77,7 @@ impl SourceLoop for SeekableSource {
             let mut sequence = 0;
             let mut position = 0;
             loop {
-                if let Some(taken) = seek.take_pending() {
+                if let Some(taken) = seek.take_seek(Ok) {
                     out.push(PipelinePacket::Flush).await?;
                     position = taken.start;
                 }
@@ -95,15 +95,8 @@ impl SourceLoop for SeekableSource {
                     position += FRAME_STEP_NS;
                     continue;
                 }
-                out.push(PipelinePacket::Eos).await?;
-                if !seek.takes_seeks_after_end() {
+                if !eos_then_wait_for_seek(Some(&seek), out).await? {
                     return Ok(sequence);
-                }
-                while !seek.has_pending() {
-                    if seek.is_shutdown() {
-                        return Ok(sequence);
-                    }
-                    seek.wait_event().await;
                 }
             }
         })

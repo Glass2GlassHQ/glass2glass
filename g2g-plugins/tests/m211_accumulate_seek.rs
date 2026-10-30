@@ -71,7 +71,7 @@ impl SourceLoop for SeekableSrc {
             let _ = out.push(PipelinePacket::CapsChanged(caps())).await?;
             let mut emitted = 0u64;
             while emitted < self.total {
-                if let Some(seek) = self.seek_ctl.take_pending() {
+                if let Some(seek) = self.seek_ctl.take_seek(Ok) {
                     // Record where playback has reached so the segment math is
                     // anchored to the current position.
                     self.segment.position = self.position;

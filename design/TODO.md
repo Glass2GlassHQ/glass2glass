@@ -251,8 +251,10 @@ Highest leverage first:
 - **MP4 with samples in both the `moov` and fragments** (ffmpeg's `frag_keyframe`
   without `empty_moov`): decode the sample-table run, then the fragments.
   `Mp4DemuxN` fails such a file with `CapsMismatch`.
-- **Seeks during playback** (`g2g-launch --seek-at`): `filesrc` and the byte-stream
-  demuxers drop a non-flushing seek.
+- **Non-flushing seeks through a byte-stream demuxer:** `DemuxSeek` refuses them.
+  Serve them as gst's demuxers do in pull mode: byte-seek the source without
+  forwarding its `Flush`, and send a segment that `accumulate_seek` carries on from
+  the position reached.
 - **Matroska `CodecDelay`:** `matroskademux` applies it to Opus only, so AAC, MP2 and
   MP3 tracks decode with the encoder priming ffmpeg trims (1105 samples on an ffmpeg
   MP3).

@@ -226,7 +226,7 @@ impl OutputSink for Chain<'_> {
             core::task::Poll::Pending => panic!("element future did not resolve in one poll"),
         }
         drop(fut);
-        if let Some(seek) = self.byte.take_pending() {
+        if let Some(seek) = self.byte.take_seek(Ok) {
             self.requested.push(seek.start);
             self.byte.seek(seek);
         }

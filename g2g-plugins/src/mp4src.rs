@@ -26,7 +26,7 @@ use std::path::PathBuf;
 
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
-use g2g_core::runtime::{SeekController, SeekFormat, SourceLoop};
+use g2g_core::runtime::{eos_then_wait_for_seek, SeekController, SeekFormat, SourceLoop};
 use g2g_core::{
     BusHandle, BusMessage, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, FrameTiming,
     G2gError, MemoryDomain, OutputSink, PipelinePacket, Rate, Seek, SeekFlags, SeekType, Segment,
@@ -309,7 +309,7 @@ impl SourceLoop for Mp4Src {
                 // `Flush` + a reset segment; a non-flushing one accumulates the
                 // running-time base (no flush). Both snap to the keyframe at or
                 // before the target so a decoder resumes from a clean reference.
-                if let Some(seek) = self.seek.as_ref().and_then(|c| c.take_pending()) {
+                if let Some(seek) = self.seek.as_ref().and_then(|c| c.take_seek(Ok)) {
                     let seek = seek_from_stream_start(seek, stream_start_ns);
                     let new_seg = if seek.is_flush() {
                         out.push(PipelinePacket::Flush).await?;
@@ -379,28 +379,15 @@ impl SourceLoop for Mp4Src {
                             position = done_pos;
                             ctl.notify_segment_done(done_pos.saturating_sub(stream_start_ns));
                             // Park (wakefully) until the app loops or shuts down.
-                            loop {
-                                if ctl.has_pending() {
-                                    break; // the loop top applies it
-                                }
-                                if ctl.is_shutdown() {
-                                    out.push(PipelinePacket::Eos).await?;
-                                    return Ok(sequence);
-                                }
-                                ctl.wait_event().await;
+                            if !ctl.wait_for_seek().await {
+                                out.push(PipelinePacket::Eos).await?;
+                                return Ok(sequence);
                             }
                             continue;
                         }
                     }
-                    out.push(PipelinePacket::Eos).await?;
-                    let Some(ctl) = self.seek.as_ref().filter(|c| c.takes_seeks_after_end()) else {
+                    if !eos_then_wait_for_seek(self.seek.as_ref(), out).await? {
                         return Ok(sequence);
-                    };
-                    while !ctl.has_pending() {
-                        if ctl.is_shutdown() {
-                            return Ok(sequence);
-                        }
-                        ctl.wait_event().await;
                     }
                     continue;
                 }

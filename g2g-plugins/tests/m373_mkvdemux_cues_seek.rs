@@ -187,7 +187,7 @@ async fn mkvdemux_cues_seek_jumps_straight_to_the_target_cluster() {
     let mut post = Capture::default();
     demux.process(data_frame(&[]), &mut post).await.unwrap(); // dropped while awaiting flush
     let requested = byte
-        .take_pending()
+        .take_seek(Ok)
         .expect("an upstream byte-seek was requested");
     assert_eq!(
         requested.start, cluster1_offset,

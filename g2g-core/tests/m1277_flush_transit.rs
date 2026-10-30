@@ -65,7 +65,7 @@ impl SourceLoop for SeekableSource {
         Box::pin(async move {
             let mut position = 0;
             for sequence in 0..FRAME_COUNT {
-                if let Some(seek) = self.seek.take_pending() {
+                if let Some(seek) = self.seek.take_seek(Ok) {
                     out.push(PipelinePacket::Flush).await?;
                     position = seek.start;
                     let segment = Segment::for_flush_seek(&seek, None);

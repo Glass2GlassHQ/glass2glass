@@ -1,9 +1,10 @@
 //! Seek request channel and segment-done back-channel.
 //!
 //! A cloneable handle carrying a pending [`Seek`] from the application to a
-//! seek-aware source. The app calls [`SeekController::seek`]; the source's run
-//! loop calls [`SeekController::take_pending`] between frames and, on a flushing
-//! seek, emits `Flush`, repositions, emits the post-flush
+//! seek-aware source. The app calls [`SeekController::seek`] and gets a
+//! [`SeekTicket`] that resolves to the seek's [`SeekOutcome`]; the source's run
+//! loop calls [`SeekController::take_seek`] between frames, which answers the
+//! ticket, and on a flushing seek emits `Flush`, repositions, emits the post-flush
 //! [`Segment`](crate::segment::Segment), and resumes from the new position.
 //!
 //! Seeks travel upstream to the source in GStreamer; here the app holds the
@@ -48,11 +49,14 @@ use alloc::vec::Vec;
 use crate::bus::{BusHandle, BusMessage};
 #[cfg(feature = "std")]
 use crate::element::DynAsyncElement;
+use crate::error::G2gError;
 #[cfg(feature = "std")]
 use crate::graph::{Graph, NodeId};
+use crate::log::{ClockTime, Target, RUNTIME_CATEGORY};
 #[cfg(feature = "std")]
 use crate::runtime::{DynSourceLoop, GraphNode, GraphNodeRef};
 use crate::segment::Seek;
+use crate::{OutputSink, PipelinePacket};
 
 /// Source -> app segment-done state. `count` is monotonic so the app can detect
 /// a *new* completion (e.g. spin until it advances); `fresh` is the take-once
@@ -67,9 +71,89 @@ struct SegmentDone {
     fresh: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SeekOutcome {
+    Served,
+    Refused(SeekRefusal),
+    // a later seek replaced it before the element took it
+    Superseded,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SeekRefusal {
+    NonFlushing,
+}
+
+impl core::fmt::Display for SeekRefusal {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::NonFlushing => write!(f, "the element serves only flushing seeks"),
+        }
+    }
+}
+
+// the element that serves only flushing seeks passes this to `take_seek`
+pub fn flushing_only(seek: Seek) -> Result<Seek, SeekRefusal> {
+    if seek.is_flush() {
+        Ok(seek)
+    } else {
+        Err(SeekRefusal::NonFlushing)
+    }
+}
+
+#[derive(Debug, Default)]
+struct TicketSlot {
+    outcome: Mutex<Option<SeekOutcome>>,
+    waker: Mutex<Option<Waker>>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SeekTicket {
+    slot: Arc<TicketSlot>,
+}
+
+impl SeekTicket {
+    pub fn outcome(&self) -> Option<SeekOutcome> {
+        *self.slot.outcome.lock()
+    }
+
+    pub fn wait(&self) -> WaitOutcome<'_> {
+        WaitOutcome { ticket: self }
+    }
+
+    fn answer(&self, outcome: SeekOutcome) {
+        *self.slot.outcome.lock() = Some(outcome);
+        if let Some(waker) = self.slot.waker.lock().take() {
+            waker.wake();
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct WaitOutcome<'a> {
+    ticket: &'a SeekTicket,
+}
+
+impl Future for WaitOutcome<'_> {
+    type Output = SeekOutcome;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<SeekOutcome> {
+        if let Some(outcome) = self.ticket.outcome() {
+            return Poll::Ready(outcome);
+        }
+        // registered before the second check, so an answer between the two still wakes this
+        *self.ticket.slot.waker.lock() = Some(cx.waker().clone());
+        match self.ticket.outcome() {
+            Some(outcome) => Poll::Ready(outcome),
+            None => Poll::Pending,
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 struct SeekInner {
-    pending: Mutex<Option<Seek>>,
+    pending: Mutex<Option<(Seek, SeekTicket)>>,
     /// Segment-done back-channel (source -> app), the `SEGMENT_DONE` analog.
     segment_done: Mutex<SegmentDone>,
     /// App -> source stop request: ends a segment-looping source idling between
@@ -115,20 +199,41 @@ impl SeekController {
     }
 
     /// Application side: request a seek. Replaces any prior unhandled request
-    /// (latest-wins).
-    pub fn seek(&self, seek: Seek) {
-        *self.inner.pending.lock() = Some(seek);
+    /// (latest-wins), whose ticket resolves to [`SeekOutcome::Superseded`].
+    pub fn seek(&self, seek: Seek) -> SeekTicket {
+        let ticket = SeekTicket::default();
+        let replaced = self.inner.pending.lock().replace((seek, ticket.clone()));
+        if let Some((_, replaced)) = replaced {
+            replaced.answer(SeekOutcome::Superseded);
+        }
         self.wake();
+        ticket
     }
 
-    /// Source side: take and clear the pending seek, or `None` if none is set.
-    pub fn take_pending(&self) -> Option<Seek> {
-        let mut pending = self.inner.pending.lock();
-        let seek = pending.take();
-        if seek.is_some_and(|seek| seek.is_flush()) {
-            self.inner.seek_counts.lock().flushing_seeks_taken += 1;
+    // `accept` returns the seek to apply or why the element cannot serve it, a refused seek leaves playback running
+    pub fn take_seek(
+        &self,
+        accept: impl FnOnce(Seek) -> Result<Seek, SeekRefusal>,
+    ) -> Option<Seek> {
+        let (seek, ticket) = self.inner.pending.lock().take()?;
+        match accept(seek) {
+            Ok(seek) => {
+                if seek.is_flush() {
+                    self.inner.seek_counts.lock().flushing_seeks_taken += 1;
+                }
+                ticket.answer(SeekOutcome::Served);
+                Some(seek)
+            }
+            Err(refusal) => {
+                crate::g2g_error!(
+                    Target::category(RUNTIME_CATEGORY),
+                    "refused the seek to {}: {refusal}",
+                    ClockTime(seek.start)
+                );
+                ticket.answer(SeekOutcome::Refused(refusal));
+                None
+            }
         }
-        seek
     }
 
     /// Whether a seek is currently pending (not yet taken).
@@ -213,10 +318,21 @@ impl SeekController {
     /// Source side: park until a seek is pending or shutdown is requested, then
     /// resolve. The wakeful idle for a segment-looping source between loops (the
     /// poll-free analog of pausing the source task): `seek` / `shutdown` wake the
-    /// registered waker. The caller re-checks `take_pending` / `is_shutdown`
+    /// registered waker. The caller re-checks `take_seek` / `is_shutdown`
     /// after it resolves (a spurious early resolve is harmless, just a re-poll).
     pub fn wait_event(&self) -> WaitEvent<'_> {
         WaitEvent { ctl: self }
+    }
+
+    // true once a seek is pending, false when the app shut the run down first
+    pub async fn wait_for_seek(&self) -> bool {
+        while !self.has_pending() {
+            if self.is_shutdown() {
+                return false;
+            }
+            self.wait_event().await;
+        }
+        true
     }
 
     // a source that holds this controller then parks after its Eos instead of returning
@@ -316,6 +432,18 @@ impl Future for WaitEvent<'_> {
         } else {
             Poll::Pending
         }
+    }
+}
+
+// true when a seek arrived after the Eos, the source then serves it and carries on
+pub async fn eos_then_wait_for_seek(
+    controller: Option<&SeekController>,
+    out: &mut dyn OutputSink,
+) -> Result<bool, G2gError> {
+    out.push(PipelinePacket::Eos).await?;
+    match controller.filter(|controller| controller.takes_seeks_after_end()) {
+        Some(controller) => Ok(controller.wait_for_seek().await),
+        None => Ok(false),
     }
 }
 
@@ -518,26 +646,31 @@ mod tests {
     use crate::segment::{Seek, SeekFlags, SeekType};
 
     #[test]
-    fn take_pending_clears_and_returns() {
+    fn a_taken_seek_is_served_and_clears_the_slot() {
         let c = SeekController::new();
         assert!(!c.has_pending());
-        assert_eq!(c.take_pending(), None);
+        assert_eq!(c.take_seek(Ok), None);
 
-        c.seek(Seek::flush_to(5_000));
+        let ticket = c.seek(Seek::flush_to(5_000));
         assert!(c.has_pending());
-        let s = c.take_pending().expect("a seek was pending");
+        assert_eq!(
+            ticket.outcome(),
+            None,
+            "unanswered until the element takes it"
+        );
+        let s = c.take_seek(Ok).expect("a seek was pending");
         assert_eq!(s.start, 5_000);
         assert!(s.is_flush());
-        // Taken: now empty.
+        assert_eq!(ticket.outcome(), Some(SeekOutcome::Served));
         assert!(!c.has_pending());
-        assert_eq!(c.take_pending(), None);
+        assert_eq!(c.take_seek(Ok), None);
     }
 
     #[test]
-    fn latest_seek_wins() {
+    fn latest_seek_wins_and_supersedes_the_earlier_one() {
         let c = SeekController::new();
-        c.seek(Seek::flush_to(1_000));
-        c.seek(Seek {
+        let first = c.seek(Seek::flush_to(1_000));
+        let second = c.seek(Seek {
             rate: 1.0,
             flags: SeekFlags::FLUSH,
             start_type: SeekType::Set,
@@ -545,8 +678,24 @@ mod tests {
             stop_type: SeekType::None,
             stop: 0,
         });
-        // Only the final request survives.
-        assert_eq!(c.take_pending().map(|s| s.start), Some(9_000));
+        assert_eq!(first.outcome(), Some(SeekOutcome::Superseded));
+        assert_eq!(c.take_seek(Ok).map(|s| s.start), Some(9_000));
+        assert_eq!(second.outcome(), Some(SeekOutcome::Served));
+    }
+
+    #[test]
+    fn a_refused_seek_is_answered_and_not_returned() {
+        let c = SeekController::new();
+        let ticket = c.seek(Seek {
+            flags: SeekFlags::NONE,
+            ..Seek::flush_to(2_000)
+        });
+        assert_eq!(c.take_seek(flushing_only), None);
+        assert_eq!(
+            ticket.outcome(),
+            Some(SeekOutcome::Refused(SeekRefusal::NonFlushing))
+        );
+        assert!(!c.has_pending(), "a refused seek is not retried");
     }
 
     #[test]
@@ -555,7 +704,7 @@ mod tests {
         let src = app.clone();
         app.seek(Seek::flush_to(42));
         // The source-side clone observes the app-side request.
-        assert_eq!(src.take_pending().map(|s| s.start), Some(42));
+        assert_eq!(src.take_seek(Ok).map(|s| s.start), Some(42));
         assert!(!app.has_pending());
     }
 
