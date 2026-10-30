@@ -450,3 +450,54 @@ async fn oggdemux_without_a_stream_choice_feeds_flacparse() {
     let _ = std::fs::remove_file(&src);
     assert!(frames > 0, "{line}");
 }
+
+#[test]
+fn flac_file_seeks_to_the_sample() {
+    const SAMPLE_RATE: usize = 44_100;
+    const BYTES_PER_SAMPLE_FRAME: usize = 2 * 2;
+    const SEEK_MILLISECONDS: usize = 250;
+    let src = temp_path("seek", "flac");
+    let status = Command::new("ffmpeg")
+        .args(["-y", "-loglevel", "error", "-f", "lavfi", "-i"])
+        .arg(format!(
+            "sine=frequency=440:duration=0.5:sample_rate={SAMPLE_RATE}"
+        ))
+        .args(["-ac", "2", "-c:a", "flac"])
+        .arg(&src)
+        .status();
+    if !status.is_ok_and(|status| status.success()) {
+        eprintln!("skipping: no ffmpeg");
+        return;
+    }
+    let reference = ffmpeg_pcm(&src).expect("ffmpeg decodes the fixture");
+    let out = temp_path("seek-out", "raw");
+    let _ = std::fs::remove_file(&out);
+    let line = format!(
+        "filesrc location={} ! decodebin ! audioconvert ! \
+         audio/x-raw,format=S16LE,rate={SAMPLE_RATE},channels=2 ! filesink location={}",
+        src.display(),
+        out.display()
+    );
+    let launched = Command::new(env!("CARGO_BIN_EXE_g2g-launch"))
+        .args([
+            "-q",
+            "--seek",
+            &format!("{}", SEEK_MILLISECONDS as f64 / 1_000.0),
+        ])
+        .args(line.split_whitespace())
+        .output()
+        .expect("g2g-launch starts");
+    let pcm = std::fs::read(&out);
+    let _ = std::fs::remove_file(&src);
+    let _ = std::fs::remove_file(&out);
+    assert!(
+        launched.status.success(),
+        "{line}: {}",
+        String::from_utf8_lossy(&launched.stderr)
+    );
+    let first_byte = SAMPLE_RATE * SEEK_MILLISECONDS / 1_000 * BYTES_PER_SAMPLE_FRAME;
+    assert!(
+        pcm.expect("pcm written") == reference[first_byte..],
+        "the decode after the seek is ffmpeg's decode from the target sample on"
+    );
+}

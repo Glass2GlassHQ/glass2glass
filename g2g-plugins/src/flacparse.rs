@@ -28,12 +28,14 @@ use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
+use g2g_core::runtime::{ElementSeekRoute, SeekController};
 use g2g_core::{
     AsyncElement, AudioFormat, BusHandle, BusMessage, Caps, CapsConstraint, CapsSet,
     ConfigureOutcome, ElementMetadata, FrameTiming, G2gError, MemoryDomain, OutputSink,
     PadTemplate, PadTemplates, PipelinePacket, Tag, TagList,
 };
 
+use crate::demuxseek::DemuxSeek;
 use crate::flactag::{metadata_blocks, FLAC_MARKER};
 use crate::vorbiscomment::{
     parse_comment_body, parse_flac_picture, FLAC_COMMENT_BLOCK_TYPE, FLAC_PICTURE_BLOCK_TYPE,
@@ -87,6 +89,8 @@ pub struct FlacParse {
     awaiting_restart_input: bool,
     // where `samples` restarts at the first frame emitted after a Flush
     restart_pts_ns: Option<u64>,
+    // a seek re-reads the file from its start and drops the frames before the target
+    seek: DemuxSeek<Frame>,
     sequence: u64,
     bus: Option<BusHandle>,
     tags: TagList,
@@ -118,6 +122,7 @@ impl FlacParse {
             samples: 0,
             awaiting_restart_input: false,
             restart_pts_ns: None,
+            seek: DemuxSeek::default(),
             sequence: 0,
             bus: None,
             tags: TagList::new(),
@@ -154,6 +159,7 @@ impl FlacParse {
     }
 
     async fn emit(&mut self, data: Vec<u8>, out: &mut dyn OutputSink) -> Result<(), G2gError> {
+        let is_audio_frame = !data.starts_with(FLAC_MARKER);
         let (pts_ns, duration_ns) = match (self.info, parse_frame_header(&data)) {
             (Some(info), Some(h)) if info.sample_rate > 0 => {
                 let ns = |samples: u64| {
@@ -184,7 +190,18 @@ impl FlacParse {
             self.sequence,
         );
         self.sequence += 1;
-        out.push(PipelinePacket::DataFrame(frame)).await?;
+        if !is_audio_frame {
+            out.push(PipelinePacket::DataFrame(frame)).await?;
+            return Ok(());
+        }
+        // every FLAC frame decodes on its own
+        let admitted = self.seek.admit(pts_ns, true, frame);
+        if let Some(segment) = admitted.segment {
+            out.push(PipelinePacket::Segment(segment)).await?;
+        }
+        for frame in admitted {
+            out.push(PipelinePacket::DataFrame(frame)).await?;
+        }
         Ok(())
     }
 
@@ -450,6 +467,15 @@ impl AsyncElement for FlacParse {
         g2g_core::memory::DomainSet::only(g2g_core::memory::MemoryDomainKind::System)
     }
 
+    // the runner wires it only when a byte source feeds the parser directly
+    fn seek_route(&self) -> Option<ElementSeekRoute> {
+        Some(ElementSeekRoute::UpstreamBytes)
+    }
+
+    fn set_seek(&mut self, app: SeekController, upstream: SeekController) {
+        self.seek.with(app, upstream);
+    }
+
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
         match upstream_caps {
             Caps::Audio {
@@ -499,8 +525,12 @@ impl AsyncElement for FlacParse {
             if !self.configured {
                 return Err(G2gError::NotConfigured);
             }
+            self.seek.poll_request();
             match packet {
                 PipelinePacket::DataFrame(frame) => {
+                    if self.seek.dropping_input() {
+                        return Ok(());
+                    }
                     let slice = frame
                         .domain
                         .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
@@ -511,7 +541,17 @@ impl AsyncElement for FlacParse {
                     self.buf.extend_from_slice(slice);
                     self.drain(out).await?;
                 }
-                PipelinePacket::Eos => self.flush_last_frame(out).await?,
+                PipelinePacket::Eos => {
+                    if self.seek.eos_before_flush(self.seek.dropping_input())? {
+                        return Ok(());
+                    }
+                    self.flush_last_frame(out).await?;
+                    if self.seek.takes_seeks_after_end() {
+                        out.push(PipelinePacket::Eos).await?;
+                        self.seek.wait_for_seek_or_shutdown().await;
+                        self.seek.poll_request();
+                    }
+                }
                 // The previous stream's last frame goes out ahead of a new segment
                 // (a chained Ogg link).
                 PipelinePacket::Segment(segment) => {
@@ -519,8 +559,12 @@ impl AsyncElement for FlacParse {
                     out.push(PipelinePacket::Segment(segment)).await?;
                 }
                 PipelinePacket::Flush => {
+                    let own_seek = self.seek.dropping_input();
+                    self.seek.on_flush();
                     self.buf.clear();
-                    self.awaiting_restart_input = true;
+                    // our own seek re-reads the file from its first sample
+                    self.samples = 0;
+                    self.awaiting_restart_input = !own_seek;
                     self.restart_pts_ns = None;
                     out.push(PipelinePacket::Flush).await?;
                 }
