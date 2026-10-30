@@ -15,6 +15,7 @@ use g2g_core::element::AsyncElement;
 use g2g_core::frame::{Frame, FrameTiming};
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{Registry, SeekController, SourceLoop};
+use g2g_core::time::ticks_to_ns;
 use g2g_core::{
     ByteStreamEncoding, Caps, CapsConstraint, Dim, G2gError, MemoryDomain, MultiInputElement,
     OutputSink, PipelinePacket, PushOutcome, Rate, Seek, VideoCodec,
@@ -22,6 +23,7 @@ use g2g_core::{
 use g2g_plugins::fmp4demux::Fmp4Demux;
 use g2g_plugins::hlssrc::HlsSrc;
 use g2g_plugins::mp4muxn::Mp4MuxN;
+use g2g_plugins::mpegts::{TsMuxer, STREAM_TYPE_H264};
 use g2g_plugins::uridecodebin::hls_uri_fanout;
 
 #[derive(Default)]
@@ -32,6 +34,7 @@ struct CaptureSink {
     flushes: usize,
     /// Stream-time start of each post-flush `Segment` emitted (seek observability).
     segment_starts: Vec<u64>,
+    segment_times: Vec<u64>,
 }
 
 impl OutputSink for CaptureSink {
@@ -51,7 +54,10 @@ impl OutputSink for CaptureSink {
                 }
                 PipelinePacket::Eos => self.eos = true,
                 PipelinePacket::Flush => self.flushes += 1,
-                PipelinePacket::Segment(seg) => self.segment_starts.push(seg.start),
+                PipelinePacket::Segment(seg) => {
+                    self.segment_starts.push(seg.start);
+                    self.segment_times.push(seg.time);
+                }
                 _ => {}
             }
             Ok(PushOutcome::Accepted)
@@ -610,13 +616,67 @@ async fn time_seek_jumps_to_the_segment_containing_the_target() {
     assert_eq!(sink.flushes, 1, "the flushing seek emits exactly one Flush");
     assert_eq!(
         sink.segment_starts,
-        vec![4 * 1_000_000_000],
-        "the post-flush Segment starts at seg1's cumulative time (4s)"
+        vec![5 * 1_000_000_000],
+        "with no timestamp in the segment, the post-flush Segment starts at the target on playlist time"
     );
     // Body is seg1 then seg2: the seek resumes at the target segment and plays on.
     let mut expected = segs[1].clone();
     expected.extend_from_slice(&segs[2]);
     assert_eq!(sink.body, expected, "playback starts at seg1, seg0 skipped");
+}
+
+// --- the seek Segment on the segment's own timestamps (M2008) -------------
+
+const TS_CLOCK_HZ: u32 = 90_000;
+// MEDIA_SEEK's `#EXTINF:4.0`, one frame a second
+const SEEK_SEGMENT_NS: u64 = 4_000_000_000;
+const SEEK_SEGMENT_FRAMES: u64 = 4;
+const SEEK_FRAME_TICKS: u64 = TS_CLOCK_HZ as u64;
+// an encoder that does not start its clock at zero
+const SEEK_MEDIA_START_TICKS: u64 = 10 * SEEK_FRAME_TICKS;
+const SEEK_TARGET_NS: u64 = 5_000_000_000;
+
+// MEDIA_SEEK's segments as transport stream, and the pts the first frame of each carries
+fn seek_ts_segments() -> (Vec<Vec<u8>>, Vec<u64>) {
+    let mut mux = TsMuxer::new(STREAM_TYPE_H264);
+    // each segment opens with its PAT and PMT, as a segmenter writes them
+    mux.set_table_interval_90khz(SEEK_FRAME_TICKS);
+    let idr = [0u8, 0, 0, 1, 0x65, 0x88, 0x84, 0x00];
+    let mut segments = Vec::new();
+    let mut first_pts_ns = Vec::new();
+    for segment in 0..3 {
+        let mut bytes = Vec::new();
+        for frame in 0..SEEK_SEGMENT_FRAMES {
+            let pts =
+                SEEK_MEDIA_START_TICKS + (segment * SEEK_SEGMENT_FRAMES + frame) * SEEK_FRAME_TICKS;
+            if frame == 0 {
+                first_pts_ns.push(ticks_to_ns(pts + mux.decoder_delay_90khz(), TS_CLOCK_HZ));
+            }
+            bytes.extend(mux.push_au(&idr, Some(pts), None, true));
+        }
+        segments.push(bytes);
+    }
+    (segments, first_pts_ns)
+}
+
+#[tokio::test]
+async fn a_seek_starts_at_the_target_on_the_segment_pts() {
+    let (segments, first_pts_ns) = seek_ts_segments();
+    let controller = SeekController::new();
+    controller.seek(Seek::flush_to(SEEK_TARGET_NS));
+    let mut src = HlsSrc::new(serve_seek(segments)).with_seek(controller);
+    src.configure_pipeline(&Caps::ByteStream {
+        encoding: ByteStreamEncoding::MpegTs,
+    })
+    .unwrap();
+    let mut sink = CaptureSink::default();
+    src.run(&mut sink).await.unwrap();
+
+    assert_eq!(
+        sink.segment_starts,
+        vec![first_pts_ns[1] + SEEK_TARGET_NS - SEEK_SEGMENT_NS]
+    );
+    assert_eq!(sink.segment_times, vec![SEEK_TARGET_NS]);
 }
 
 // --- throughput-driven ABR (M371) -----------------------------------------

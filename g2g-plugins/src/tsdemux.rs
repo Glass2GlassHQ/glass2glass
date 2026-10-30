@@ -271,6 +271,22 @@ fn ticks_90khz_to_ns(ticks: u64) -> u64 {
     (ticks as u128 * 1_000_000_000 / 90_000) as u64
 }
 
+// the pts tsdemux stamps on the earliest presented unit of this stretch of stream
+#[cfg(feature = "hls")]
+pub(crate) fn earliest_pts_ns(ts: &[u8]) -> Option<u64> {
+    let mut demuxer = TsDemuxer::new();
+    let mut packets = TsPacketSplitter::new();
+    packets.push(ts, &mut demuxer);
+    packets.finish(&mut demuxer);
+    demuxer.flush();
+    demuxer
+        .take_units()
+        .into_iter()
+        .filter_map(|unit| unit.pts_90khz)
+        .min()
+        .map(ticks_90khz_to_ns)
+}
+
 /// The bytes to forward for one access unit: a metadata-in-PES (0x15) payload
 /// has its ISO 13818-1 AU cells unwrapped when it carries them (a spec-strict
 /// synchronous KLV writer), and is forwarded unchanged otherwise. Every other
@@ -1542,7 +1558,8 @@ impl MultiOutputElement for TsDemuxN {
                 }
                 PipelinePacket::Segment(seg) => {
                     // an upstream seek
-                    if core::mem::take(&mut self.withheld_flush) {
+                    let after_upstream_flush = core::mem::take(&mut self.withheld_flush);
+                    if after_upstream_flush {
                         for port in 0..self.ports.len() {
                             out.push_to(port, PipelinePacket::Flush).await?;
                         }
@@ -1551,6 +1568,11 @@ impl MultiOutputElement for TsDemuxN {
                     self.segment = Some(seg);
                     for port in 0..self.ports.len() {
                         out.push_to(port, PipelinePacket::Segment(seg)).await?;
+                    }
+                    // the source mapped its seek onto this stream's timestamps, the runner's opening segment it did not
+                    if after_upstream_flush {
+                        self.seek.keep_segment();
+                        self.segment_sent.fill(true);
                     }
                 }
                 PipelinePacket::Eos => {
@@ -2074,6 +2096,37 @@ mod tests {
         expected.extend(session_pts_ns(SECOND_SESSION_TICKS, 3));
         assert_eq!(sink.pts_ns, expected);
         assert_eq!(sink.flushes, 1);
+    }
+
+    #[tokio::test]
+    async fn an_upstream_seek_keeps_its_segment() {
+        const SEEK_STREAM_TIME_NS: u64 = 4_000_000_000;
+        let mut d = TsDemux::new();
+        d.configure_pipeline(&input_caps()).unwrap();
+        let mut sink = CaptureSink::default();
+        // starts past the session's first frame, which the sink then clips
+        let seek_segment = Segment {
+            start: session_pts_ns(SECOND_SESSION_TICKS, 2)[1],
+            time: SEEK_STREAM_TIME_NS,
+            ..Segment::new()
+        };
+        for packet in [
+            h264_session(FIRST_SESSION_TICKS, 3),
+            PipelinePacket::Flush,
+            PipelinePacket::Segment(seek_segment),
+            h264_session(SECOND_SESSION_TICKS, 3),
+            PipelinePacket::Eos,
+        ] {
+            d.process(packet, &mut sink).await.unwrap();
+        }
+
+        let [_opening, after_seek] = sink.segments.as_slice() else {
+            panic!(
+                "the opening segment, then the seek's, got {:?}",
+                sink.segments
+            );
+        };
+        assert_eq!(*after_seek, seek_segment);
     }
 
     #[derive(Default)]

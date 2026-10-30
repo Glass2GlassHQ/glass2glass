@@ -2193,6 +2193,24 @@ pub(crate) use crate::annexb::parse_hvcc;
 // their import path.
 pub(crate) use crate::annexb::{parse_avcc, prepend_param_sets, starts_with_param_set};
 
+// the pts fmp4demux stamps on the earliest presented sample of these fragments
+#[cfg(any(feature = "hls", feature = "dash"))]
+pub(crate) fn earliest_fragment_pts_ns(data: &[u8], header: &Header) -> Option<u64> {
+    parse_fragments(
+        data,
+        header.timescale,
+        header.codec,
+        None,
+        0,
+        &mut FragmentStarts::default(),
+        None,
+    )
+    .ok()?
+    .iter()
+    .map(|sample| sample.pts_ns)
+    .min()
+}
+
 /// Split every sample of a single-track fMP4 out of its `mdat`, converting AVCC
 /// framing back to Annex-B. `codec` selects the IDR NAL type used to flag
 /// keyframes (the seek snap points). The first `traf`'s track is taken as this

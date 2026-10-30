@@ -23,13 +23,24 @@ use g2g_plugins::dashsrc::DashSrc;
 use g2g_plugins::fmp4demux::Fmp4Demux;
 use g2g_plugins::mp4muxn::Mp4MuxN;
 
+// the fixture access units are stamped this far apart
+const AU_DURATION_NS: u64 = 33_333_333;
+// inside seg1, which the manifest starts at 1s
+const SEEK_TARGET_NS: u64 = 1_500_000_000;
+const SEG1_START_NS: u64 = 1_000_000_000;
+// seg1's first sample is the fixture's second access unit
+const SEEK_SEGMENT: (u64, u64) = (
+    AU_DURATION_NS + SEEK_TARGET_NS - SEG1_START_NS,
+    SEEK_TARGET_NS,
+);
+
 #[derive(Default)]
 struct CaptureSink {
     body: Vec<u8>,
     aus: Vec<Vec<u8>>,
     flushes: usize,
-    /// Stream-time start of each post-flush `Segment` emitted (seek observability).
-    segment_starts: Vec<u64>,
+    /// The `(start, time)` of each post-flush `Segment` emitted (seek observability).
+    segments: Vec<(u64, u64)>,
 }
 impl OutputSink for CaptureSink {
     fn poll_push(
@@ -47,7 +58,7 @@ impl OutputSink for CaptureSink {
                     }
                 }
                 PipelinePacket::Flush => self.flushes += 1,
-                PipelinePacket::Segment(seg) => self.segment_starts.push(seg.start),
+                PipelinePacket::Segment(seg) => self.segments.push((seg.start, seg.time)),
                 _ => {}
             }
             Ok(PushOutcome::Accepted)
@@ -61,7 +72,7 @@ fn au_frame(bytes: Vec<u8>, pts_ns: u64, seq: u64) -> Frame {
         timing: FrameTiming {
             pts_ns,
             dts_ns: pts_ns,
-            duration_ns: 33_333_333,
+            duration_ns: AU_DURATION_NS,
             ..FrameTiming::default()
         },
         sequence: seq,
@@ -105,7 +116,7 @@ async fn make_fmp4(aus: &[Vec<u8>]) -> Vec<u8> {
     for (i, au) in aus.iter().enumerate() {
         mux.process(
             0,
-            PipelinePacket::DataFrame(au_frame(au.clone(), i as u64 * 33_333_333, i as u64)),
+            PipelinePacket::DataFrame(au_frame(au.clone(), i as u64 * AU_DURATION_NS, i as u64)),
             &mut out,
         )
         .await
@@ -453,7 +464,7 @@ async fn dash_time_seek_jumps_to_the_segment_containing_the_target() {
 
     let seek = SeekController::new();
     // Pre-arm before run(): deterministic, no fetch/EOF race.
-    seek.seek(Seek::flush_to(1_500_000_000));
+    seek.seek(Seek::flush_to(SEEK_TARGET_NS));
 
     let mut src = DashSrc::new(url).with_seek(seek);
     src.configure_pipeline(&Caps::ByteStream {
@@ -465,9 +476,9 @@ async fn dash_time_seek_jumps_to_the_segment_containing_the_target() {
 
     assert_eq!(sink.flushes, 1, "the flushing seek emits exactly one Flush");
     assert_eq!(
-        sink.segment_starts,
-        vec![1_000_000_000],
-        "the post-flush Segment starts at seg1's $Time$ (1s)"
+        sink.segments,
+        vec![SEEK_SEGMENT],
+        "the post-flush Segment starts at the target, counted from seg1's first sample"
     );
     // After the seek the init is re-emitted (a reset demuxer needs its moov), then
     // seg1 and seg2: playback resumes at the target segment.
@@ -516,7 +527,7 @@ async fn run_timeline_seek(
 ) -> (CaptureSink, Vec<String>) {
     let (url, requests) = serve_timeline(init, segs, pto);
     let seek = SeekController::new();
-    seek.seek(Seek::flush_to(1_500_000_000));
+    seek.seek(Seek::flush_to(SEEK_TARGET_NS));
     let mut src = DashSrc::new(url).with_seek(seek);
     src.configure_pipeline(&Caps::ByteStream {
         encoding: ByteStreamEncoding::IsoBmff,
@@ -551,11 +562,11 @@ async fn dash_presentation_time_offset_maps_media_time_to_the_period_timeline() 
         "the offset manifest seeks to the same segment index"
     );
     assert_eq!(
-        shifted.segment_starts,
-        vec![1_000_000_000],
-        "the post-flush Segment is on the period timeline, not the media one"
+        shifted.segments,
+        vec![SEEK_SEGMENT],
+        "the post-flush Segment counts from the fetched sample, its stream time on the period timeline"
     );
-    assert_eq!(plain.segment_starts, shifted.segment_starts);
+    assert_eq!(plain.segments, shifted.segments);
 
     // $Time$ still addresses the media timeline, so the fetched URLs carry the
     // offset: the target segment is seg180000, its successor seg270000.

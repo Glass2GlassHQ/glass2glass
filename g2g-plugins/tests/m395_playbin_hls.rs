@@ -11,7 +11,7 @@ use core::future::Future;
 use core::pin::Pin;
 
 use g2g_core::element::AsyncElement;
-use g2g_core::runtime::{ElementFactory, LaunchFactory, Registry};
+use g2g_core::runtime::{attach_seek_controller, ElementFactory, LaunchFactory, Registry};
 use g2g_core::{
     AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, G2gError, OutputSink,
     PadTemplate, PadTemplates, Rate, StreamType, VideoCodec,
@@ -329,6 +329,28 @@ fn fmp4_variant_fans_out_via_mp4demuxn() {
         "source, demux, video decode+deinterlace+sink, audio decode+convert+resample+sink"
     );
     assert_eq!(graph.edges().len(), 8);
+}
+
+// qtdemux holds the whole stream, so the seek goes to it and not to the HlsSrc feeding it
+#[test]
+fn qtdemux_behind_hlssrc_takes_the_seek() {
+    let line = "hlssrc location=http://127.0.0.1:1/master.m3u8 ! qtdemux ! fakesink";
+    let mut graph =
+        g2g_core::runtime::parse_launch(&g2g_plugins::registry::default_registry(), line).unwrap();
+    attach_seek_controller(&mut graph).expect("exactly one element takes the seek");
+}
+
+#[test]
+fn a_ts_variant_seeks_through_its_source() {
+    let mut graph = build_hls_ts_fanout(
+        &registry(),
+        &g2g_core::runtime::PlaybinSinks::AUTO,
+        "https://example.com/master.m3u8",
+        &ts_fixture(AV_SEGMENT),
+    )
+    .unwrap()
+    .unwrap();
+    attach_seek_controller(&mut graph).expect("the HlsSrc takes the seek");
 }
 
 // --- M1169: the open-ported siblings a lone `fallbacksrc uri=hls://...` uses ---

@@ -58,12 +58,13 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use g2g_core::log::LogSource;
-use g2g_core::runtime::{flushing_only, SeekController, SourceLoop};
+use g2g_core::runtime::{
+    eos_then_wait_for_seek, flushing_only, SeekController, SeekFormat, SourceLoop,
+};
 use g2g_core::{
     g2g_debug, g2g_warn, AudioFormat, BusHandle, ByteStreamEncoding, Caps, CapsConstraint, CapsSet,
     ConfigureOutcome, Dim, ElementMetadata, G2gError, HardwareError, OutputSink, PipelinePacket,
-    PropError, PropKind, PropValue, PropertySpec, Rate, Seek, Segment, StreamType, TextFormat,
-    VideoCodec,
+    PropError, PropKind, PropValue, PropertySpec, Rate, Seek, StreamType, TextFormat, VideoCodec,
 };
 
 use crate::abr::BandwidthEstimator;
@@ -726,23 +727,50 @@ fn decrypt_aes128_cbc(
     Ok(data)
 }
 
-/// The index of the media segment containing `target_ns` and that segment's
-/// cumulative start time (ns), walking `#EXTINF` durations. A target past the
-/// end clamps to the last segment (GStreamer clamps a seek to the duration).
-/// Empty playlist returns `(0, 0)` (the caller's bounds check breaks the loop).
-fn segment_for_time(media: &MediaPlaylist, target_ns: u64) -> (usize, u64) {
+/// The index of the media segment containing `target_ns`, walking `#EXTINF`
+/// durations. A target past the end clamps to the last segment (GStreamer clamps
+/// a seek to the duration). Empty playlist returns `0` (the caller's bounds check
+/// breaks the loop).
+fn segment_for_time(media: &MediaPlaylist, target_ns: u64) -> usize {
     let mut start_ns = 0u64;
-    let mut last_start = 0u64;
     for (idx, seg) in media.segments.iter().enumerate() {
         let dur_ns = (seg.duration_ms as u64).saturating_mul(1_000_000);
-        let end_ns = start_ns.saturating_add(dur_ns);
-        if target_ns < end_ns {
-            return (idx, start_ns);
+        start_ns = start_ns.saturating_add(dur_ns);
+        if target_ns < start_ns {
+            return idx;
         }
-        last_start = start_ns;
-        start_ns = end_ns;
     }
-    (media.segments.len().saturating_sub(1), last_start)
+    media.segments.len().saturating_sub(1)
+}
+
+// the playlist time where `media.segments[index]` starts
+fn segment_start_ns(media: &MediaPlaylist, index: usize) -> u64 {
+    media.segments[..index]
+        .iter()
+        .map(|segment| (segment.duration_ms as u64).saturating_mul(1_000_000))
+        .fold(0, u64::saturating_add)
+}
+
+// how the demuxer after this source reads the timestamps of a media segment
+#[derive(Debug)]
+enum SegmentTimestamps {
+    MpegTs,
+    Fmp4(crate::fmp4::Header),
+    // subtitle cues are timed on the playlist
+    Text,
+    // fmp4demux reads the video track only
+    Fmp4WithoutVideo,
+}
+
+impl SegmentTimestamps {
+    fn earliest_pts_ns(&self, segment: &[u8], playlist_start_ns: u64) -> Option<u64> {
+        match self {
+            Self::MpegTs => crate::tsdemux::earliest_pts_ns(segment),
+            Self::Fmp4(header) => crate::fmp4::earliest_fragment_pts_ns(segment, header),
+            Self::Text => Some(playlist_start_ns),
+            Self::Fmp4WithoutVideo => None,
+        }
+    }
 }
 
 /// The first segment index to play on the initial load of a *live* playlist:
@@ -878,6 +906,14 @@ impl SourceLoop for HlsSrc {
         Ok(ConfigureOutcome::Accepted)
     }
 
+    fn seek_format(&self) -> Option<SeekFormat> {
+        Some(SeekFormat::Time)
+    }
+
+    fn set_seek(&mut self, controller: SeekController) {
+        self.seek = Some(controller);
+    }
+
     fn run<'a>(&'a mut self, out: &'a mut dyn OutputSink) -> Self::RunFuture<'a> {
         Box::pin(async move {
             if !self.configured {
@@ -953,6 +989,15 @@ impl SourceLoop for HlsSrc {
             // fMP4 (`wvtt`) subtitle rendition needs its `moov` to de-frame the
             // cues out of the fragments that follow.
             let mut init_tracks: Option<Vec<TrackHeader>> = None;
+            let mut segment_timestamps = if text_mode {
+                SegmentTimestamps::Text
+            } else if media.map_uri.is_some() {
+                SegmentTimestamps::Fmp4WithoutVideo
+            } else {
+                SegmentTimestamps::MpegTs
+            };
+            // a flushing seek taken, its Segment goes out with the first media fetched after it
+            let mut seek_to_open: Option<Seek> = None;
             loop {
                 // Index into `media.segments`; a flushing seek repositions it. The
                 // matching HLS media-sequence number is `media.media_sequence + idx`.
@@ -964,7 +1009,7 @@ impl SourceLoop for HlsSrc {
                     // demuxer reset on the flush needs its moov again).
                     if let Some(seek) = self.seek.as_ref().and_then(|c| c.take_seek(flushing_only))
                     {
-                        let (target_idx, seg_start_ns) = segment_for_time(&media, seek.start);
+                        let target_idx = segment_for_time(&media, seek.start);
                         // Queued lookahead is pre-seek media: drop it (and
                         // re-arm the prebuffer fill) before flushing.
                         window.clear();
@@ -981,11 +1026,7 @@ impl SourceLoop for HlsSrc {
                         next_seq = media.media_sequence + target_idx as u64;
                         next_part = 0;
                         init_emitted = false;
-                        out.push(PipelinePacket::Segment(Segment::for_flush_seek(
-                            &Seek::flush_to(seg_start_ns),
-                            None,
-                        )))
-                        .await?;
+                        seek_to_open = Some(seek);
                         continue; // re-evaluate from the repositioned index
                     }
 
@@ -997,6 +1038,10 @@ impl SourceLoop for HlsSrc {
                             if text_mode {
                                 init_tracks = crate::fmp4::parse_all_tracks(&bytes).ok();
                             } else if !bytes.is_empty() {
+                                segment_timestamps = crate::fmp4::parse_header(&bytes).map_or(
+                                    SegmentTimestamps::Fmp4WithoutVideo,
+                                    SegmentTimestamps::Fmp4,
+                                );
                                 pending_keys.push_back(None);
                                 window.admit(bytes, 0);
                             }
@@ -1072,6 +1117,16 @@ impl SourceLoop for HlsSrc {
                                         / 1_000_000,
                                 );
                                 if !bytes.is_empty() {
+                                    if let Some(seek) = seek_to_open.take() {
+                                        let start_ns = segment_start_ns(&media, idx);
+                                        let segment = crate::adaptiveseek::opening_segment(
+                                            &*self,
+                                            &seek,
+                                            start_ns,
+                                            segment_timestamps.earliest_pts_ns(&bytes, start_ns),
+                                        );
+                                        out.push(PipelinePacket::Segment(segment)).await?;
+                                    }
                                     pending_keys.push_back(None);
                                     window.admit(
                                         bytes,
@@ -1176,6 +1231,16 @@ impl SourceLoop for HlsSrc {
                                 bytes
                             };
                             if !bytes.is_empty() {
+                                if let Some(seek) = seek_to_open.take() {
+                                    let start_ns = segment_start_ns(&media, idx);
+                                    let segment = crate::adaptiveseek::opening_segment(
+                                        &*self,
+                                        &seek,
+                                        start_ns,
+                                        segment_timestamps.earliest_pts_ns(&bytes, start_ns),
+                                    );
+                                    out.push(PipelinePacket::Segment(segment)).await?;
+                                }
                                 pending_keys.push_back(sample_key);
                                 window.admit(bytes, duration_ns);
                             }
@@ -1249,7 +1314,10 @@ impl SourceLoop for HlsSrc {
                 }
 
                 if media.end_list {
-                    break;
+                    if eos_then_wait_for_seek(self.seek.as_ref(), out).await? {
+                        continue;
+                    }
+                    return Ok(sequence);
                 }
                 // Live reload. Low latency holds the request open until the part
                 // the run wants next is published (`_HLS_msn` / `_HLS_part`),
@@ -1405,9 +1473,6 @@ impl SourceLoop for HlsSrc {
                     && media.low_latency()
                     && blocking_misses < BLOCKING_MISS_LIMIT;
             }
-
-            out.push(PipelinePacket::Eos).await?;
-            Ok(sequence)
         })
     }
 

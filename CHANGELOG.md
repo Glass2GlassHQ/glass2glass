@@ -108,6 +108,7 @@ Breaking: `QosMessage` gains `downstream_proc_ns`, `ElementProbe` is no longer `
 - M2005: SRT elements call and meet peers by host name.
 - M2006: `srtsrc` delivers the packets it still holds when the peer shuts down.
 - M2007: a seek resolves to served, refused or superseded, and every seekable element refuses a seek it cannot serve instead of dropping it.
+- M2008: HLS and DASH VOD streams take `g2g-launch` seeks and start at the target frame.
 
 ## 0.10.0
 

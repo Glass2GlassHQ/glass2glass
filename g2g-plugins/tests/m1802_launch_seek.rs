@@ -7,6 +7,10 @@ use g2g_core::PipelineClock;
 use g2g_plugins::checksumsink::checksum_line;
 use g2g_plugins::registry::default_registry;
 
+#[cfg(feature = "hls")]
+#[path = "common/http_routes.rs"]
+mod http_routes;
+
 // all three fixtures: ffmpeg -f lavfi -i testsrc=size=64x48:rate=25:duration=3 -c:v libx264 -g 10 -keyint_min 10 -sc_threshold 0 -bf 0
 const MP4_FIXTURE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -67,6 +71,16 @@ const AUDIO_FIRST_FLV_FIXTURE: &str = "h264_aac_audio_first.flv";
 const AUDIO_FIRST_FLV_SEEK_MILLISECONDS: u64 = 421;
 // ffmpeg -ss 0.421 -copyts -i <AUDIO_FIRST_FLV_FIXTURE> -map 0:v -frames:v 1 -f framemd5 -
 const AUDIO_FIRST_FLV_FRAME_AFTER_SEEK_MD5: &str = "b7d8a515f21729cd2be1368bbe822d11";
+
+// ffmpeg -i <TS_FIXTURE> -c copy -f hls -hls_time 1 -hls_playlist_type vod, its third segment starts at 2 s of playlist time
+#[cfg(feature = "hls")]
+const HLS_FIXTURE_DIRECTORY: &str = "hls_h264_64x48_25fps_gop10";
+// in the third segment
+#[cfg(feature = "hls")]
+const HLS_SEEK_MILLISECONDS: u64 = 2_020;
+// ffmpeg -copyts -i <TS_FIXTURE> -ss 3.42 -frames:v 1 -f framemd5 -, the frame at 2.04 s of playlist time
+#[cfg(feature = "hls")]
+const HLS_FRAME_AFTER_SEEK_MD5: &str = "fb27f06b296297026de6b636c57050df";
 
 fn seek_seconds(milliseconds: u64) -> String {
     format!("{}", milliseconds as f64 / 1_000.0)
@@ -259,6 +273,45 @@ fn mkv_seek_decodes_from_the_first_frame_at_or_after_the_target() {
 fn ts_seek_counts_the_target_from_the_first_pts() {
     let output = launch_with_seek(&seek_seconds(SEEK_MILLISECONDS), &ts_pipeline());
     assert_starts_at_the_frame_after_the_seek(&checksum_lines(&output), TS_FIRST_PTS_NS);
+}
+
+#[cfg(feature = "hls")]
+fn hls_pipeline() -> String {
+    let base = http_routes::serve(|path| {
+        std::fs::read(offset_fixture(&format!("{HLS_FIXTURE_DIRECTORY}{path}"))).ok()
+    });
+    format!("hlssrc location={base}/media.m3u8 ! decodebin ! checksumsink hash=md5")
+}
+
+#[cfg(feature = "hls")]
+#[test]
+fn hls_seek_counts_the_target_from_the_playlist_start() {
+    let output = launch_with_seek(&seek_seconds(HLS_SEEK_MILLISECONDS), &hls_pipeline());
+    let lines = checksum_lines(&output);
+    let first_frame = first_frame_at(HLS_SEEK_MILLISECONDS);
+    assert_eq!(
+        lines[0],
+        checksum_line(
+            TS_FIRST_PTS_NS + first_frame * FRAME_PERIOD_NS,
+            HLS_FRAME_AFTER_SEEK_MD5.to_string()
+        ),
+        "the first frame out is ffmpeg's first frame after the seek"
+    );
+    assert_eq!(lines.len() as u64, FRAME_COUNT - first_frame);
+}
+
+#[cfg(feature = "hls")]
+#[test]
+fn hls_seek_after_the_end_resumes_at_the_target() {
+    let last_frame_milliseconds = (FRAME_COUNT - 1) * FRAME_PERIOD_NS / NANOS_PER_MILLISECOND;
+    let pipeline = hls_pipeline();
+    let unseeked = checksum_lines(&launch(&[], &pipeline));
+    let resumed = seek_at_resume_frame(&pipeline, &unseeked, last_frame_milliseconds, 400);
+    assert_eq!(
+        resumed,
+        unseeked.len(),
+        "the whole unseeked run comes before the seek"
+    );
 }
 
 // each pipeline with the md5 ffmpeg gives for the first frame after the seek

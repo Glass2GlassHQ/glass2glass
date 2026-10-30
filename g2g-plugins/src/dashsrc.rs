@@ -59,7 +59,9 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use g2g_core::log::LogSource;
-use g2g_core::runtime::{flushing_only, SeekController, SourceLoop};
+use g2g_core::runtime::{
+    eos_then_wait_for_seek, flushing_only, SeekController, SeekFormat, SourceLoop,
+};
 use g2g_core::time::ticks_to_ns;
 use g2g_core::{
     g2g_debug, g2g_warn, BusHandle, ByteStreamEncoding, Caps, CapsConstraint, CapsSet,
@@ -432,22 +434,14 @@ impl DashSrc {
 
 /// The index of the media segment containing `target_ns` (the last whose
 /// `$Time$` start, converted from `timescale` units to ns, is at or before the
-/// target) and that segment's start time in ns. Segments are time-ordered, so
-/// the scan stops at the first start past the target. A target before the first
-/// segment clamps to it; empty input returns `(0, 0)`.
-fn segment_for_time(segs: &[ResolvedSegment], timescale: u32, target_ns: u64) -> (usize, u64) {
-    let mut chosen = 0usize;
-    let mut chosen_start = 0u64;
-    for (idx, seg) in segs.iter().enumerate() {
-        let start_ns = to_ns(seg.time, timescale);
-        if start_ns <= target_ns {
-            chosen = idx;
-            chosen_start = start_ns;
-        } else {
-            break;
-        }
-    }
-    (chosen, chosen_start)
+/// target). Segments are time-ordered, so the scan stops at the first start past
+/// the target. A target before the first segment clamps to it; empty input
+/// returns `0`.
+fn segment_for_time(segs: &[ResolvedSegment], timescale: u32, target_ns: u64) -> usize {
+    segs.iter()
+        .take_while(|seg| to_ns(seg.time, timescale) <= target_ns)
+        .count()
+        .saturating_sub(1)
 }
 
 impl LogSource for DashSrc {
@@ -482,6 +476,14 @@ impl SourceLoop for DashSrc {
     fn configure_pipeline(&mut self, _absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
+    }
+
+    fn seek_format(&self) -> Option<SeekFormat> {
+        Some(SeekFormat::Time)
+    }
+
+    fn set_seek(&mut self, controller: SeekController) {
+        self.seek = Some(controller);
     }
 
     fn run<'a>(&'a mut self, out: &'a mut dyn OutputSink) -> Self::RunFuture<'a> {
@@ -536,6 +538,10 @@ impl SourceLoop for DashSrc {
             // Live playback positions itself once per Period, not on every
             // manifest reload (a reload continues from `last_played`).
             let mut positioned = false;
+            // the playing Representation's init, `None` when it has no video track or no init segment
+            let mut init_header: Option<crate::fmp4::Header> = None;
+            // a flushing seek taken, its Segment goes out with the first media fetched after it
+            let mut seek_to_open: Option<Seek> = None;
             if mpd.dynamic {
                 period_idx =
                     mpd.live_period_index(clock.now_unix(), self.presentation_delay_secs(&mpd));
@@ -629,7 +635,7 @@ impl SourceLoop for DashSrc {
                     // needs its moov again).
                     if let Some(seek) = self.seek.as_ref().and_then(|c| c.take_seek(flushing_only))
                     {
-                        let (target_idx, start_ns) = segment_for_time(&segs, timescale, seek.start);
+                        let target_idx = segment_for_time(&segs, timescale, seek.start);
                         // Queued lookahead is pre-seek media: drop it (and
                         // re-arm the prebuffer fill) before flushing.
                         window.clear();
@@ -639,21 +645,19 @@ impl SourceLoop for DashSrc {
                         // the target segment is not skipped as "already played".
                         last_played = None;
                         init_emitted = false;
-                        out.push(PipelinePacket::Segment(Segment::for_flush_seek(
-                            &Seek::flush_to(start_ns),
-                            None,
-                        )))
-                        .await?;
+                        seek_to_open = Some(seek);
                         continue; // re-evaluate from the repositioned index
                     }
 
                     if !init_emitted {
+                        init_header = None;
                         if let Some((init_url, init_range)) = &init {
                             let url = seg_url(&base, init_url);
                             g2g_debug!(self, "init segment {url}");
                             let bytes =
                                 fetch_segment(&client, &url, *init_range, FetchRetry::BUDGETED)
                                     .await?;
+                            init_header = crate::fmp4::parse_header(&bytes).ok();
                             if !bytes.is_empty() {
                                 window.admit(bytes, 0);
                             }
@@ -694,22 +698,46 @@ impl SourceLoop for DashSrc {
                                 // each CMAF chunk as it lands. The prebuffer window
                                 // is empty here whenever it is disabled, so pushing
                                 // from inside the fetch keeps emission ordered.
+                                let start_ns = to_ns(seg.time, timescale);
                                 let fetched = if self.low_latency
                                     && self.prebuffer_ms == 0
                                     && seg.byte_range.is_none()
                                 {
+                                    if let Some(seek) = seek_to_open.take() {
+                                        let segment = crate::adaptiveseek::opening_segment(
+                                            &*self, &seek, start_ns, None,
+                                        );
+                                        out.push(PipelinePacket::Segment(segment)).await?;
+                                    }
                                     stream_segment_chunks(&client, &url, out, &mut sequence, retry)
                                         .await
                                 } else {
-                                    fetch_segment(&client, &url, seg.byte_range, retry)
-                                        .await
-                                        .map(|bytes| {
+                                    match fetch_segment(&client, &url, seg.byte_range, retry).await
+                                    {
+                                        Ok(bytes) => {
+                                            if let Some(seek) = seek_to_open.take() {
+                                                let earliest_pts_ns =
+                                                    init_header.as_ref().and_then(|header| {
+                                                        crate::fmp4::earliest_fragment_pts_ns(
+                                                            &bytes, header,
+                                                        )
+                                                    });
+                                                let segment = crate::adaptiveseek::opening_segment(
+                                                    &*self,
+                                                    &seek,
+                                                    start_ns,
+                                                    earliest_pts_ns,
+                                                );
+                                                out.push(PipelinePacket::Segment(segment)).await?;
+                                            }
                                             let len = bytes.len();
                                             if !bytes.is_empty() {
                                                 window.admit(bytes, duration_ns);
                                             }
-                                            len
-                                        })
+                                            Ok(len)
+                                        }
+                                        Err(error) => Err(error),
+                                    }
                                 };
                                 last_played = Some(PlayedSegment {
                                     time: seg.time,
@@ -805,8 +833,12 @@ impl SourceLoop for DashSrc {
                     continue 'manifest;
                 }
 
+                // static (VOD, or the final live update) ends the stream
                 if !mpd.dynamic {
-                    break; // static (VOD, or the final live update) ends the stream
+                    if eos_then_wait_for_seek(self.seek.as_ref(), out).await? {
+                        continue 'manifest;
+                    }
+                    return Ok(sequence);
                 }
                 // Live: wait the update period, then refetch the manifest.
                 let interval_ms = if self.reload_interval_ms != 0 {
@@ -829,9 +861,6 @@ impl SourceLoop for DashSrc {
                     .position(|p| p.start_secs == playing_start_secs)
                     .unwrap_or(0);
             }
-
-            out.push(PipelinePacket::Eos).await?;
-            Ok(sequence)
         })
     }
 

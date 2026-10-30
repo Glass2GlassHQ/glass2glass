@@ -596,9 +596,22 @@ pub fn attach_seek_controller(
 pub(crate) fn seek_target(
     graph: &Graph<GraphNodeRef<'_>>,
 ) -> Result<SeekableNode, AttachSeekError> {
-    let seekable: Vec<SeekableNode> = (0..graph.node_count())
+    let mut seekable: Vec<SeekableNode> = (0..graph.node_count())
         .filter_map(|index| seekable_node(graph, NodeId(index as u32)))
         .collect();
+    // a buffering element holds the whole stream, so the time source feeding it never repositions
+    let feeds_buffered = |source: NodeId| {
+        graph.edges().iter().any(|edge| {
+            edge.src.node == source
+                && matches!(
+                    seekable_node(graph, edge.dst.node),
+                    Some(SeekableNode::BufferedElement(_))
+                )
+        })
+    };
+    seekable.retain(
+        |node| !matches!(*node, SeekableNode::TimeSource(source) if feeds_buffered(source)),
+    );
     match seekable[..] {
         [target] => Ok(target),
         [] => Err(AttachSeekError::NothingSeekable),
