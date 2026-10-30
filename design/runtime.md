@@ -578,8 +578,14 @@ An application seeks a pipeline built from a launch string through
 `Mp4Src` and `Bytes` for `FileSrc`. A transform reports `seek_route()`: `Buffered`
 when it serves a time seek from the whole stream it holds (`Mp4Demux`),
 `UpstreamBytes` when it byte-seeks the source that feeds it (the byte-stream
-demuxers, and `flacparse`, which rescans a bare `.flac` from its start and restarts
-its sample count there). A `MultiOutputElement` reports the same, but the runner seeks no demux
+demuxers, and the audio parsers `flacparse`, `mpegaudioparse`, `aacparse` and `ac3parse`,
+which rescan a bare file from its start and restart their sample count there). The
+MP3, AAC and AC-3 parsers also send the frames before the target that the decoder needs
+first: one for the overlap with the previous frame, and for MP3 as many more as hold
+the bit reservoir the frame may borrow from (511 bytes in MPEG-1, 255 in MPEG-2 and
+2.5), counted from the sizes of the frames just read. An MP3 target counts from the
+first sample the LAME gapless window keeps, as `ffmpeg -ss` does. `aacparse` refuses a
+seek on a LOAS or raw AAC stream, which has no ADTS headers to count samples by. A `MultiOutputElement` reports the same, but the runner seeks no demux
 node, so only `OnePortElement` reads it, for a demuxer run as its one-output
 form. `attach_seek` finds the one node that can take the time seek, gives it a
 controller with the seek already queued and a demuxer's byte source a second one,

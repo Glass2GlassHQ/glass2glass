@@ -316,6 +316,8 @@ pub(crate) struct MpaHeader {
     /// Samples per channel this frame decodes to, the presentation-time step.
     pub(crate) samples_per_frame: u32,
     pub(crate) frame_len: usize,
+    // a 16-bit CRC follows the header
+    pub(crate) has_crc: bool,
 }
 
 impl MpaHeader {
@@ -391,6 +393,7 @@ pub(crate) fn mpa_header(buf: &[u8]) -> Option<MpaHeader> {
         bitrate,
         samples_per_frame,
         frame_len,
+        has_crc: h[1] & 1 == 0,
     })
 }
 

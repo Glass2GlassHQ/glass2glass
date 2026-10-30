@@ -186,14 +186,11 @@ impl FlacParse {
             return Ok(());
         }
         // every FLAC frame decodes on its own
-        let admitted = self.seek.admit(pts_ns, true, frame);
-        if let Some(segment) = admitted.segment {
-            out.push(PipelinePacket::Segment(segment)).await?;
-        }
-        for frame in admitted {
-            out.push(PipelinePacket::DataFrame(frame)).await?;
-        }
-        Ok(())
+        crate::compressed_audio_passthrough::push_admitted(
+            self.seek.admit(pts_ns, true, frame),
+            out,
+        )
+        .await
     }
 
     // the last frame ends at the end of the stream, not at a next sync
@@ -530,11 +527,7 @@ impl AsyncElement for FlacParse {
                         return Ok(());
                     }
                     self.flush_last_frame(out).await?;
-                    if self.seek.takes_seeks_after_end() {
-                        out.push(PipelinePacket::Eos).await?;
-                        self.seek.wait_for_seek_or_shutdown().await;
-                        self.seek.poll_request();
-                    }
+                    self.seek.end_and_wait_for_seek(out).await?;
                 }
                 // The previous stream's last frame goes out ahead of a new segment
                 // (a chained Ogg link).

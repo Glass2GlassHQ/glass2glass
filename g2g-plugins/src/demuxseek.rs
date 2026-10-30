@@ -34,7 +34,7 @@ use core::iter::Chain;
 
 use g2g_core::log::{ClockTime, Target};
 use g2g_core::runtime::SeekController;
-use g2g_core::{G2gError, MultiOutputSink, PipelinePacket, Seek, Segment};
+use g2g_core::{G2gError, MultiOutputSink, OutputSink, PipelinePacket, Seek, Segment};
 
 // a stream without a keyframe for this many units releases them early, the segment still clips them
 const KEPT_UNITS_MAX: usize = 1024;
@@ -402,6 +402,20 @@ impl<U> DemuxSeek<U> {
         }
     }
 
+    // the source stays parked after the end only when a seek can restart it, so the stream ends here first
+    pub(crate) async fn end_and_wait_for_seek(
+        &mut self,
+        out: &mut dyn OutputSink,
+    ) -> Result<(), G2gError> {
+        if !self.takes_seeks_after_end() {
+            return Ok(());
+        }
+        out.push(PipelinePacket::Eos).await?;
+        self.wait_for_seek_or_shutdown().await;
+        self.poll_request();
+        Ok(())
+    }
+
     /// Whether the demuxer should ignore input now (awaiting the upstream flush,
     /// so the in-flight pre-seek bytes must not produce output).
     pub(crate) fn dropping_input(&self) -> bool {
@@ -430,16 +444,8 @@ impl<U> DemuxSeek<U> {
     /// restarts the kept units, and the first unit at or after the target
     /// releases them with the segment start, after which the helper is idle.
     pub(crate) fn admit(&mut self, pts_ns: u64, keyframe: bool, unit: U) -> Admitted<U> {
-        let stream_start_ns = *self.stream_start_ns.get_or_insert(pts_ns);
-        let target_ns = match self.phase {
-            Phase::Idle => return Admitted::emit(unit),
-            Phase::AwaitingFlush { .. } => return Admitted::empty(),
-            Phase::Discarding {
-                target: SeekTarget::Pts(target_ns),
-            } => target_ns,
-            Phase::Discarding {
-                target: SeekTarget::FromStreamStart(target_ns),
-            } => target_ns.saturating_add(stream_start_ns),
+        let Some(target_ns) = self.discard_target_ns(pts_ns) else {
+            return self.pass(unit);
         };
         if keyframe && pts_ns <= target_ns {
             self.kept.clear();
@@ -450,10 +456,58 @@ impl<U> DemuxSeek<U> {
             self.kept.push(unit);
             return Admitted::empty();
         }
+        self.reach_target(target_ns, unit)
+    }
+
+    // for a stream of units that each decode once the decoder has seen the `preroll` units before them
+    pub(crate) fn admit_with_preroll(
+        &mut self,
+        pts_ns: u64,
+        preroll: usize,
+        unit: U,
+    ) -> Admitted<U> {
+        let Some(target_ns) = self.discard_target_ns(pts_ns) else {
+            return self.pass(unit);
+        };
+        if pts_ns >= target_ns {
+            return self.reach_target(target_ns, unit);
+        }
+        // the last unit before the target can hold it, so it stays with the units it needs
+        self.kept.push(unit);
+        let unneeded = self.kept.len().saturating_sub(preroll + 1);
+        self.kept.drain(..unneeded);
+        Admitted::empty()
+    }
+
+    fn discard_target_ns(&mut self, pts_ns: u64) -> Option<u64> {
+        let stream_start_ns = *self.stream_start_ns.get_or_insert(pts_ns);
+        match self.phase {
+            Phase::Idle | Phase::AwaitingFlush { .. } => None,
+            Phase::Discarding {
+                target: SeekTarget::Pts(target_ns),
+            } => Some(target_ns),
+            Phase::Discarding {
+                target: SeekTarget::FromStreamStart(target_ns),
+            } => Some(target_ns.saturating_add(stream_start_ns)),
+        }
+    }
+
+    // a unit outside a seek goes out, except one parsed from the bytes before the flush
+    fn pass(&self, unit: U) -> Admitted<U> {
+        if self.dropping_input() {
+            return Admitted::empty();
+        }
+        Admitted::emit(unit)
+    }
+
+    fn reach_target(&mut self, target_ns: u64, unit: U) -> Admitted<U> {
+        let stream_start_ns = self
+            .stream_start_ns
+            .expect("discard_target_ns set the stream start");
         g2g_core::g2g_debug!(
             Target::category(LOG_CATEGORY),
-            "reached the seek target at pts {}, releasing {} units from the keyframe before it",
-            ClockTime(pts_ns),
+            "reached the seek target at {}, releasing {} units from the first one it needs",
+            ClockTime(target_ns),
             self.kept.len() + 1
         );
         self.phase = Phase::Idle;
@@ -556,6 +610,26 @@ mod tests {
             units(s.admit(7_000, true, 7_000)),
             (Some(TARGET_NS), vec![7_000]),
             "a landing past the target resumes on its first keyframe"
+        );
+    }
+
+    #[test]
+    fn the_unit_holding_the_target_goes_out_with_the_units_it_needs() {
+        let mut s = discarding_to_target(0);
+        for (pts, preroll) in [(1_000, 0), (2_000, 0), (3_000, 1), (4_000, 1)] {
+            assert_eq!(
+                units(s.admit_with_preroll(pts, preroll, pts)),
+                (None, vec![])
+            );
+        }
+        assert_eq!(
+            units(s.admit_with_preroll(TARGET_NS + 500, 0, TARGET_NS + 500)),
+            (Some(TARGET_NS), vec![3_000, 4_000, TARGET_NS + 500]),
+            "the unit at 4000 holds the target and needs the one before it"
+        );
+        assert_eq!(
+            units(s.admit_with_preroll(6_000, 0, 6_000)),
+            (None, vec![6_000])
         );
     }
 

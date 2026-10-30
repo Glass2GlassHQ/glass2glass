@@ -26,6 +26,7 @@ use alloc::vec::Vec;
 use g2g_core::frame::Frame;
 use g2g_core::log::{short_type_name, LogName, LogSource};
 use g2g_core::memory::SystemSlice;
+use g2g_core::runtime::{ElementSeekRoute, SeekController};
 use g2g_core::time::ticks_to_ns;
 use g2g_core::{
     g2g_error, g2g_warn, AsyncElement, AudioFormat, Caps, CapsConstraint, ConfigureOutcome,
@@ -36,6 +37,8 @@ use g2g_core::{
 use crate::audioframe::{
     ac3_bsid, ac3_header, locate_frame, Ac3Header, Located, AC3_MAX_BSID, AC3_SAMPLES_PER_FRAME,
 };
+use crate::compressed_audio_passthrough::{push_admitted, OVERLAP_PREROLL_FRAMES};
+use crate::demuxseek::DemuxSeek;
 use crate::frame_clock::FrameClock;
 
 /// # Example
@@ -54,6 +57,8 @@ pub struct Ac3Parse {
     buf_offset: u64,
     last_caps: Option<Caps>,
     clock: FrameClock,
+    // a seek re-reads the file from its start and drops the frames before the target
+    seek: DemuxSeek<Frame>,
     sequence: u64,
     log_name: LogName,
 }
@@ -132,8 +137,12 @@ impl Ac3Parse {
             self.sequence,
         );
         self.sequence += 1;
-        out.push(PipelinePacket::DataFrame(frame)).await?;
-        Ok(())
+        push_admitted(
+            self.seek
+                .admit_with_preroll(pts_ns, OVERLAP_PREROLL_FRAMES, frame),
+            out,
+        )
+        .await
     }
 }
 
@@ -148,6 +157,14 @@ impl AsyncElement for Ac3Parse {
     /// Reads host memory, so it takes system frames only.
     fn input_domains(&self) -> g2g_core::memory::DomainSet {
         g2g_core::memory::DomainSet::only(g2g_core::memory::MemoryDomainKind::System)
+    }
+
+    fn seek_route(&self) -> Option<ElementSeekRoute> {
+        Some(ElementSeekRoute::UpstreamBytes)
+    }
+
+    fn set_seek(&mut self, app: SeekController, upstream: SeekController) {
+        self.seek.with(app, upstream);
     }
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
@@ -185,8 +202,12 @@ impl AsyncElement for Ac3Parse {
             if !self.configured {
                 return Err(G2gError::NotConfigured);
             }
+            self.seek.poll_request();
             match packet {
                 PipelinePacket::DataFrame(frame) => {
+                    if self.seek.dropping_input() {
+                        return Ok(());
+                    }
                     let slice = frame
                         .domain
                         .require_system_slice(short_type_name::<Self>())?;
@@ -205,9 +226,14 @@ impl AsyncElement for Ac3Parse {
                 // The last frame ends at the end of the stream, so it has no
                 // successor to confirm its sync against.
                 PipelinePacket::Eos => {
+                    if self.seek.eos_before_flush(self.seek.dropping_input())? {
+                        return Ok(());
+                    }
                     self.drain(true, out).await?;
+                    self.seek.end_and_wait_for_seek(out).await?;
                 }
                 PipelinePacket::Flush => {
+                    self.seek.on_flush();
                     self.buf.clear();
                     self.clock.reset();
                     out.push(PipelinePacket::Flush).await?;

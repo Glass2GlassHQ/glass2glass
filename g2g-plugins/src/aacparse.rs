@@ -45,6 +45,7 @@ use crate::annexb::{BitReader, BitWriter};
 use g2g_core::frame::Frame;
 use g2g_core::log::{short_type_name, LogName, LogSource};
 use g2g_core::memory::SystemSlice;
+use g2g_core::runtime::{ElementSeekRoute, SeekController};
 use g2g_core::{
     g2g_error, g2g_warn, AsyncElement, AudioFormat, Caps, CapsConstraint, ConfigureOutcome,
     ElementMetadata, FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates,
@@ -52,6 +53,8 @@ use g2g_core::{
 };
 
 use crate::audioframe::{locate_frame, Located, SyncFrameHeader};
+use crate::compressed_audio_passthrough::{push_admitted, OVERLAP_PREROLL_FRAMES};
+use crate::demuxseek::DemuxSeek;
 use crate::frame_clock::FrameClock;
 use crate::id3::{parse_id3v1, ID3V1_LEN};
 use g2g_core::time::ticks_to_ns;
@@ -556,6 +559,8 @@ pub struct AacParse {
     buf: Vec<u8>,
     buf_offset: u64,
     clock: FrameClock,
+    // a seek re-reads the file from its start and drops the access units before the target
+    seek: DemuxSeek<Frame>,
     sequence: u64,
     log_name: LogName,
 }
@@ -660,6 +665,14 @@ impl AacParse {
                 self.buf.extend_from_slice(bytes);
                 self.drain(false, out).await?;
             }
+            Framing::Raw | Framing::Undecided | Framing::Latm if self.seek.is_seeking() => {
+                g2g_error!(
+                    self,
+                    "a seek needs ADTS headers to count samples by, this stream is {:?}",
+                    self.framing
+                );
+                return Err(G2gError::SeekRefused);
+            }
             // raw access unit bytes can alias an ADTS or LOAS sync, so they are not scanned
             Framing::Raw => {
                 out.push(PipelinePacket::DataFrame(frame)).await?;
@@ -725,8 +738,12 @@ impl AacParse {
             self.sequence,
         );
         self.sequence += 1;
-        out.push(PipelinePacket::DataFrame(frame)).await?;
-        Ok(())
+        push_admitted(
+            self.seek
+                .admit_with_preroll(pts_ns, OVERLAP_PREROLL_FRAMES, frame),
+            out,
+        )
+        .await
     }
 }
 
@@ -737,6 +754,14 @@ impl AsyncElement for AacParse {
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
         Self: 'a;
+
+    fn seek_route(&self) -> Option<ElementSeekRoute> {
+        Some(ElementSeekRoute::UpstreamBytes)
+    }
+
+    fn set_seek(&mut self, app: SeekController, upstream: SeekController) {
+        self.seek.with(app, upstream);
+    }
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
         crate::compressed_audio_passthrough::require_format(PARSED_FORMATS, upstream_caps)?;
@@ -773,8 +798,12 @@ impl AsyncElement for AacParse {
             if !self.configured {
                 return Err(G2gError::NotConfigured);
             }
+            self.seek.poll_request();
             match packet {
                 PipelinePacket::DataFrame(frame) => {
+                    if self.seek.dropping_input() {
+                        return Ok(());
+                    }
                     if self.framing != Framing::Undecided {
                         return self.forward(frame, out).await;
                     }
@@ -789,6 +818,7 @@ impl AsyncElement for AacParse {
                     out.push(PipelinePacket::CapsChanged(c)).await?;
                 }
                 PipelinePacket::Flush => {
+                    self.seek.on_flush();
                     self.last_emitted_caps = None;
                     self.buf.clear();
                     self.undecided.clear();
@@ -802,6 +832,9 @@ impl AsyncElement for AacParse {
                 // The last access unit ends at the end of the stream, so it has
                 // no successor to confirm its sync against.
                 PipelinePacket::Eos => {
+                    if self.seek.eos_before_flush(self.seek.dropping_input())? {
+                        return Ok(());
+                    }
                     if self.framing == Framing::Undecided && !self.undecided.is_empty() {
                         self.framing = Framing::Latm;
                         self.forward_held(out).await?;
@@ -818,6 +851,7 @@ impl AsyncElement for AacParse {
                         );
                         return Err(G2gError::CapsMismatch);
                     }
+                    self.seek.end_and_wait_for_seek(out).await?;
                 }
                 other => {
                     out.push(other).await?;

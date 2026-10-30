@@ -26,12 +26,14 @@ use core::future::Future;
 use core::pin::Pin;
 
 use alloc::boxed::Box;
+use alloc::collections::VecDeque;
 use alloc::string::String;
 use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
 use g2g_core::log::{short_type_name, LogName, LogSource};
 use g2g_core::memory::SystemSlice;
+use g2g_core::runtime::{ElementSeekRoute, SeekController};
 use g2g_core::{
     g2g_error, g2g_warn, AsyncElement, AudioFormat, BusHandle, BusMessage, Caps, CapsConstraint,
     ConfigureOutcome, ElementMetadata, FrameTiming, G2gError, MemoryDomain, OutputSink,
@@ -39,9 +41,11 @@ use g2g_core::{
 };
 
 use crate::audioframe::{
-    is_vbr_header_frame, locate_frame, mp3_gapless, mpa_header, Located, Mp3Gapless, MpaHeader,
-    MpaLayer, MP3_DECODER_DELAY,
+    is_vbr_header_frame, locate_frame, mp3_gapless, mpa_header, side_info_len, Located, Mp3Gapless,
+    MpaHeader, MpaLayer, MpaVersion, MP3_DECODER_DELAY, MPA_HEADER_LEN,
 };
+use crate::compressed_audio_passthrough::OVERLAP_PREROLL_FRAMES;
+use crate::demuxseek::DemuxSeek;
 use crate::frame_clock::FrameClock;
 use crate::id3::{id3v2_len, parse_id3v1, parse_id3v2, ID3V1_LEN, ID3V2_HEADER_LEN};
 use crate::pcmclip::within_presentation;
@@ -83,6 +87,10 @@ pub struct MpegAudioParse {
     upstream_segment: Segment,
     last_caps: Option<Caps>,
     clock: FrameClock,
+    // main data bytes of the latest Layer III frames, newest last, as many as fill the bit reservoir
+    recent_main_data: VecDeque<usize>,
+    // a seek re-reads the file from its start and drops the frames before the target
+    seek: DemuxSeek<Frame>,
     sequence: u64,
     log_name: LogName,
 }
@@ -205,11 +213,49 @@ impl MpegAudioParse {
             if !self.first_frame_seen {
                 self.first_frame_seen = true;
                 if is_vbr_header_frame(&data, &header) {
-                    self.pending_gapless = mp3_gapless(&data, &header);
+                    // a rescan for a seek meets the header frame again
+                    if self.presented.is_none() {
+                        self.pending_gapless = mp3_gapless(&data, &header);
+                    }
                     continue; // a seek table, not sound
                 }
             }
             self.emit(data, &header, start_offset, out).await?;
+        }
+    }
+
+    // the frames the decoder must see first: those holding the bit reservoir this one may borrow from, and one for the overlap
+    fn preroll_frames(&self, header: &MpaHeader) -> usize {
+        if header.layer != MpaLayer::Three {
+            return OVERLAP_PREROLL_FRAMES;
+        }
+        let reservoir_len = reservoir_len(header.version);
+        let mut covered = 0;
+        let reservoir_frames = self
+            .recent_main_data
+            .iter()
+            .rev()
+            .take_while(|&&len| {
+                let short = covered < reservoir_len;
+                covered += len;
+                short
+            })
+            .count();
+        reservoir_frames + OVERLAP_PREROLL_FRAMES
+    }
+
+    fn remember_main_data(&mut self, header: &MpaHeader) {
+        if header.layer != MpaLayer::Three {
+            return;
+        }
+        self.recent_main_data.push_back(main_data_len(header));
+        let reservoir_len = reservoir_len(header.version);
+        while let Some(&oldest) = self.recent_main_data.front() {
+            let total: usize = self.recent_main_data.iter().sum();
+            if total - oldest < reservoir_len {
+                break;
+            }
+            self.recent_main_data.pop_front();
         }
     }
 
@@ -239,6 +285,8 @@ impl MpegAudioParse {
         let duration_ns = ticks_to_ns(frame_samples, header.sample_rate);
         if let Some(gapless) = self.pending_gapless.take() {
             let presented = presented_segment(gapless, pts_ns, header);
+            // ffmpeg -ss counts from the first sample the decoder keeps
+            self.seek.note_stream_start(presented.start);
             out.push(PipelinePacket::Segment(within_presentation(
                 self.upstream_segment,
                 &presented,
@@ -259,7 +307,19 @@ impl MpegAudioParse {
             self.sequence,
         );
         self.sequence += 1;
-        out.push(PipelinePacket::DataFrame(frame)).await?;
+        let preroll = self.preroll_frames(header);
+        self.remember_main_data(header);
+        let admitted = self.seek.admit_with_preroll(pts_ns, preroll, frame);
+        if let Some(segment) = admitted.segment {
+            let segment = match &self.presented {
+                Some(presented) => within_presentation(segment, presented),
+                None => segment,
+            };
+            out.push(PipelinePacket::Segment(segment)).await?;
+        }
+        for frame in admitted {
+            out.push(PipelinePacket::DataFrame(frame)).await?;
+        }
         Ok(())
     }
 }
@@ -282,6 +342,22 @@ fn presented_segment(gapless: Mp3Gapless, first_pts_ns: u64, header: &MpaHeader)
     }
 }
 
+// main_data_begin points back at most this far, nine bits in MPEG-1 and eight in MPEG-2 and 2.5
+fn reservoir_len(version: MpaVersion) -> usize {
+    match version {
+        MpaVersion::Mpeg1 => 511,
+        MpaVersion::Mpeg2 | MpaVersion::Mpeg25 => 255,
+    }
+}
+
+fn main_data_len(header: &MpaHeader) -> usize {
+    const CRC_LEN: usize = 2;
+    let crc_len = if header.has_crc { CRC_LEN } else { 0 };
+    header
+        .frame_len
+        .saturating_sub(MPA_HEADER_LEN + side_info_len(header) + crc_len)
+}
+
 /// The caps format a layer codes to. Layer I never reaches here (the parser
 /// rejects it), so it maps to the `Mp2` its header is closest to.
 fn audio_format(layer: MpaLayer) -> AudioFormat {
@@ -302,6 +378,14 @@ impl AsyncElement for MpegAudioParse {
     /// Reads host memory, so it takes system frames only.
     fn input_domains(&self) -> g2g_core::memory::DomainSet {
         g2g_core::memory::DomainSet::only(g2g_core::memory::MemoryDomainKind::System)
+    }
+
+    fn seek_route(&self) -> Option<ElementSeekRoute> {
+        Some(ElementSeekRoute::UpstreamBytes)
+    }
+
+    fn set_seek(&mut self, app: SeekController, upstream: SeekController) {
+        self.seek.with(app, upstream);
     }
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
@@ -339,8 +423,12 @@ impl AsyncElement for MpegAudioParse {
             if !self.configured {
                 return Err(G2gError::NotConfigured);
             }
+            self.seek.poll_request();
             match packet {
                 PipelinePacket::DataFrame(frame) => {
+                    if self.seek.dropping_input() {
+                        return Ok(());
+                    }
                     let slice = frame
                         .domain
                         .require_system_slice(short_type_name::<Self>())?;
@@ -359,12 +447,24 @@ impl AsyncElement for MpegAudioParse {
                 // The last frame ends at the end of the stream, and only now can
                 // a trailing `TAG` block be told from audio.
                 PipelinePacket::Eos => {
+                    if self.seek.eos_before_flush(self.seek.dropping_input())? {
+                        return Ok(());
+                    }
                     self.strip_id3v1();
                     self.drain(true, out).await?;
                     self.post_tags();
+                    self.seek.end_and_wait_for_seek(out).await?;
                 }
                 PipelinePacket::Flush => {
+                    // our own seek re-reads the file from its start, tags and header frame included
+                    if self.seek.dropping_input() {
+                        self.head_examined = false;
+                        self.id3v2_skip = 0;
+                        self.first_frame_seen = false;
+                    }
+                    self.seek.on_flush();
                     self.buf.clear();
+                    self.recent_main_data.clear();
                     self.clock.reset();
                     out.push(PipelinePacket::Flush).await?;
                 }
