@@ -525,6 +525,24 @@ impl SrtSrc {
         Ok((handshake, caller))
     }
 
+    // pushes payloads downstream until the frame limit ends the run
+    async fn deliver(
+        &self,
+        payloads: alloc::vec::Vec<alloc::vec::Vec<u8>>,
+        out: &mut dyn OutputSink,
+        emitted: &mut u64,
+    ) -> Result<Option<CallerEnd>, G2gError> {
+        for payload in payloads {
+            out.push(PipelinePacket::DataFrame(ts_frame(payload, *emitted)))
+                .await?;
+            *emitted += 1;
+            if *emitted >= self.frame_limit {
+                return Ok(Some(CallerEnd::FrameLimit));
+            }
+        }
+        Ok(None)
+    }
+
     async fn receive_caller(
         &self,
         socket: &tokio::net::UdpSocket,
@@ -577,7 +595,12 @@ impl SrtSrc {
                         last_peer_packet_ns = now;
                         if srt::is_control(&buf[..n]) {
                             match srt::parse_control(&buf[..n]) {
-                                Some(Control::Shutdown) => return Ok(CallerEnd::Shutdown),
+                                // libsrt drops what TSBPD still holds, but its senders shut down right after their last packet
+                                Some(Control::Shutdown) => {
+                                    let remaining = receiver.take_remaining();
+                                    let end = self.deliver(remaining, out, emitted).await?;
+                                    return Ok(end.unwrap_or(CallerEnd::Shutdown));
+                                }
                                 // Mid-stream rekey (KMREQ): unwrap the new key
                                 // and file it into the slot its parity names,
                                 // so packets under the new key decrypt, then
@@ -636,13 +659,9 @@ impl SrtSrc {
             }
 
             // Deliver packets whose TSBPD delivery time is due, in order.
-            for payload in receiver.take_ready_at(now_us) {
-                out.push(PipelinePacket::DataFrame(ts_frame(payload, *emitted)))
-                    .await?;
-                *emitted += 1;
-                if *emitted >= self.frame_limit {
-                    return Ok(CallerEnd::FrameLimit);
-                }
+            let due = receiver.take_ready_at(now_us);
+            if let Some(end) = self.deliver(due, out, emitted).await? {
+                return Ok(end);
             }
 
             // Re-request every open gap on libsrt's periodic NAK report schedule.

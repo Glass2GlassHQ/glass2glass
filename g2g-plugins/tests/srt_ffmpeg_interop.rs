@@ -1113,9 +1113,8 @@ async fn srtsrc_listener_rejects_a_caller_with_another_streamid() {
 }
 
 // ffmpeg's rendezvous binds the address it calls, so gst's srtsink, which takes localport, is the libsrt peer
+// gst's SHUTDOWN arrives while TSBPD still holds the last latency's worth of payloads
 async fn run_rendezvous_srtsrc(crypto: Option<(&str, u32)>) {
-    // the fixture is about 35 payloads, and gst's shutdown drops the ones TSBPD still holds
-    const PAYLOADS: u64 = 15;
     let sock = StdUdpSocket::bind("127.0.0.1:0").expect("bind srt rendezvous socket");
     let our_port = sock.local_addr().unwrap().port();
     let their_port = free_udp_port();
@@ -1124,6 +1123,7 @@ async fn run_rendezvous_srtsrc(crypto: Option<(&str, u32)>) {
         std::process::id()
     ));
     ffmpeg_generate_ts(&ts);
+    let fixture_bytes = std::fs::metadata(&ts).expect("fixture").len() as usize;
     let mut their_uri =
         format!("srt://127.0.0.1:{our_port}?mode=rendezvous&localport={their_port}");
     let mut our_uri = format!("srt://127.0.0.1:{their_port}?mode=rendezvous");
@@ -1132,14 +1132,14 @@ async fn run_rendezvous_srtsrc(crypto: Option<(&str, u32)>) {
         their_uri.push_str(&options);
         our_uri.push_str(&options);
     }
-    let mut src = SrtSrc::from_socket(sock)
-        .expect("adopt socket")
-        .with_frame_limit(PAYLOADS);
+    let mut src = SrtSrc::from_socket(sock).expect("adopt socket");
     src.set_property("uri", g2g_core::PropValue::Str(our_uri))
         .expect("uri");
+    // gst's SHUTDOWN then ends the run
+    src.set_property("auto-reconnect", g2g_core::PropValue::Bool(false))
+        .expect("auto-reconnect");
     let mut cap = Capture::default();
 
-    // paced so the file outlasts the payloads srtsrc waits for, a burst ends the call first
     let mut gst = Command::new("gst-launch-1.0")
         .args([
             "-q",
@@ -1147,6 +1147,7 @@ async fn run_rendezvous_srtsrc(crypto: Option<(&str, u32)>) {
             &format!("location={}", ts.display()),
             &format!("blocksize={TS_SRT_PAYLOAD_BYTES}"),
             "!",
+            // libsrt's close discards what a burst left in its send buffer
             "identity",
             "sleep-time=10000",
             "!",
@@ -1161,10 +1162,12 @@ async fn run_rendezvous_srtsrc(crypto: Option<(&str, u32)>) {
     gst.wait().expect("reap the peer");
     let _ = std::fs::remove_file(&ts);
 
+    let payloads = fixture_bytes.div_ceil(TS_SRT_PAYLOAD_BYTES) as u64;
     assert_eq!(
         result.expect("streams within the timeout").expect("run ok"),
-        PAYLOADS
+        payloads
     );
+    assert_eq!(cap.total_bytes, fixture_bytes);
     assert_all_ts_sync(&cap.first_bytes);
 }
 

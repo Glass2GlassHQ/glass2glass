@@ -1543,6 +1543,17 @@ impl SrtReceiver {
         out
     }
 
+    // a sender sends nothing after its SHUTDOWN, so the rest goes out now and its gaps stay empty
+    pub fn take_remaining(&mut self) -> Vec<Vec<u8>> {
+        let mut wrapped = core::mem::take(&mut self.pending);
+        let from_cursor = wrapped.split_off(&self.next_deliver);
+        from_cursor
+            .into_values()
+            .chain(wrapped.into_values())
+            .map(|(payload, _)| payload)
+            .collect()
+    }
+
     // on_data buffers nothing behind the cursor, so the wrap-order first is the smallest key at or past it
     fn first_pending(&self) -> Option<(u32, u32)> {
         self.pending
@@ -2369,6 +2380,29 @@ mod tests {
         assert!(rx.missing().is_empty(), "the dropped packet is not NAKed");
         assert_eq!(rx.ack_seq(), Some(13));
         assert_eq!(rx.take_ready_at(due_us(13)), vec![vec![13u8]]);
+    }
+
+    #[test]
+    fn the_remaining_packets_come_out_in_order_past_gaps_and_the_wrap() {
+        const LATENCY_US: u32 = 100_000;
+        const LAST_SEQUENCE: u32 = SEQUENCE_MASK;
+        let mut rx = SrtReceiver::new();
+        rx.set_tsbpd(LATENCY_US);
+        for seq in [LAST_SEQUENCE - 1, LAST_SEQUENCE, 0, 2] {
+            rx.on_data(timestamped_packet(seq, 0));
+        }
+        assert!(rx.take_ready_at(0).is_empty(), "TSBPD holds every packet");
+        let payload = |seq: u32| vec![seq as u8];
+        assert_eq!(
+            rx.take_remaining(),
+            vec![
+                payload(LAST_SEQUENCE - 1),
+                payload(LAST_SEQUENCE),
+                payload(0),
+                payload(2)
+            ]
+        );
+        assert!(rx.take_remaining().is_empty());
     }
 
     #[test]

@@ -773,6 +773,11 @@ length with libsrt's rejection codes (`SRT_REJX_NOTFOUND`, `SRT_REJ_UNSECURE`),
 so a libsrt caller fails at once. A caller that receives a rejection stops
 calling instead of waiting out its 8 s handshake deadline.
 
+On a SHUTDOWN `SrtSrc` delivers the packets TSBPD still holds at once, in
+order, skipping gaps no sender will fill. A libsrt sender shuts down right
+after its last packet, and libsrt's receiver and gst's srtsrc drop that last
+latency's worth.
+
 `SrtSrc` ends a connection after 5 s without a packet from the peer, libsrt's
 `SRTO_PEERIDLETIMEO` default, and fails the run with a network error, where gst's
 listener posts a warning and ends the stream. With `keep-listening`, a SHUTDOWN or
