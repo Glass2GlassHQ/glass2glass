@@ -15,7 +15,7 @@ use core::pin::Pin;
 use alloc::boxed::Box;
 use alloc::string::{String, ToString};
 
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket as StdUdpSocket};
+use std::net::{SocketAddr, UdpSocket as StdUdpSocket};
 
 use g2g_core::frame::Frame;
 use g2g_core::log::Target;
@@ -31,7 +31,9 @@ use crate::bytestream::mpegts_caps;
 use crate::filesink::io_err;
 use crate::srt::{self, Control, SrtHandshake, SrtReceiver};
 use crate::srtcrypto::{AesKeySize, SrtCrypto, KM_KK_EVEN};
-use crate::srtsink::{complete_handshake, RECONNECT_INTERVAL_NS};
+use crate::srtsink::{
+    accept_call, complete_handshake, unpredictable_cookie, RECONNECT_INTERVAL_NS,
+};
 use crate::srturi::{parse_srt_uri, SrtMode};
 
 /// Our SRT socket id.
@@ -406,37 +408,7 @@ impl SrtSrc {
     // gst reads the mode from the host: srt://host:port calls and srt://:port listens
     fn set_uri(&mut self, uri: &str) -> Result<(), PropError> {
         let uri = parse_srt_uri(uri)?;
-        let (bind, remote) = match uri.mode {
-            SrtMode::Listener => {
-                let port = uri.local_port.or(uri.port).ok_or(PropError::Value)?;
-                let ip = uri
-                    .local_address
-                    .or(uri.host)
-                    .unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
-                (SocketAddr::new(ip, port), None)
-            }
-            SrtMode::Caller => {
-                let remote = SocketAddr::new(
-                    uri.host.ok_or(PropError::Value)?,
-                    uri.port.ok_or(PropError::Value)?,
-                );
-                let ip = uri.local_address.unwrap_or(unspecified_like(remote.ip()));
-                (
-                    SocketAddr::new(ip, uri.local_port.unwrap_or(0)),
-                    Some(remote),
-                )
-            }
-            // both sides send to each other, from localport or else the port they send to
-            SrtMode::Rendezvous => {
-                let remote = SocketAddr::new(
-                    uri.host.ok_or(PropError::Value)?,
-                    uri.port.ok_or(PropError::Value)?,
-                );
-                let ip = uri.local_address.unwrap_or(unspecified_like(remote.ip()));
-                let port = uri.local_port.unwrap_or(remote.port());
-                (SocketAddr::new(ip, port), Some(remote))
-            }
-        };
+        let (bind, remote) = uri.endpoints()?;
         if uri
             .stream_id
             .as_ref()
@@ -525,21 +497,11 @@ impl SrtSrc {
         &self,
         socket: &tokio::net::UdpSocket,
     ) -> Result<(SrtHandshake, SocketAddr), G2gError> {
-        // Listener handshake: answer the caller until established.
         let mut handshake =
             SrtHandshake::new_listener(SOCKET_ID, self.latency_ms, unpredictable_cookie());
         handshake.admit_only(self.stream_id.clone(), self.key_size.map(AesKeySize::bytes));
-        let mut buf = [0u8; RECV_BUF];
-        loop {
-            let (n, from) = socket.recv_from(&mut buf).await.map_err(io_err)?;
-            let step = handshake.on_packet(&buf[..n]);
-            if let Some(reply) = step.reply {
-                socket.send_to(&reply, from).await.map_err(io_err)?;
-            }
-            if step.established {
-                return Ok((handshake, from));
-            }
-        }
+        let caller = accept_call(socket, &mut handshake).await?;
+        Ok((handshake, caller))
     }
 
     async fn receive_caller(
@@ -696,13 +658,6 @@ impl SrtSrc {
     }
 }
 
-// Seeded from the monotonic clock so an off-path attacker can't predict it
-// from the public socket id (anti-spoof).
-fn unpredictable_cookie() -> u32 {
-    let t = g2g_core::metrics::monotonic_ns();
-    ((t ^ (t >> 29)).wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 32) as u32 | 1
-}
-
 async fn handshake_with(
     socket: &tokio::net::UdpSocket,
     remote: SocketAddr,
@@ -718,11 +673,4 @@ async fn handshake_with(
         return Err(error);
     }
     Ok(handshake)
-}
-
-fn unspecified_like(ip: IpAddr) -> IpAddr {
-    match ip {
-        IpAddr::V4(_) => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
-        IpAddr::V6(_) => IpAddr::V6(Ipv6Addr::UNSPECIFIED),
-    }
 }

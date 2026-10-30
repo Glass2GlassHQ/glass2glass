@@ -173,11 +173,9 @@ static GST_MAP: &[(&str, GstEquivalent)] = &[
     ("mssdemux2", GstEquivalent::Unsupported(
         "no Smooth Streaming client; `hlssrc` (HLS) and `dashsrc` (DASH) are the adaptive sources",
     )),
-    // SRT: g2g has one source (always a listener) and one sink (always a caller),
-    // so the gst client/server split collapses onto the property set.
+    // SRT: gst's client/server split is the `mode` of g2g's one source and one sink.
     ("srtclientsrc", GstEquivalent::Unsupported(
-        "`srtsrc` is the only SRT source and always listens; set `address` and `port` for the \
-         listen socket (there is no caller-mode receive)",
+        "use `srtsrc uri=srt://host:port`, which calls the listener at that address",
     )),
     ("srtserversrc", GstEquivalent::Unsupported(
         "use `srtsrc`; `address` and `port` select the listen socket",
@@ -186,8 +184,7 @@ static GST_MAP: &[(&str, GstEquivalent)] = &[
         "use `srtsink`; `host` and `port` select the listener it calls",
     )),
     ("srtserversink", GstEquivalent::Unsupported(
-        "`srtsink` is the only SRT sink and always calls out to a listener (`host` / `port`); \
-         there is no listen-mode send",
+        "use `srtsink uri=srt://:port`, which listens on that port",
     )),
     // RIST: the retransmission, header extension, bonding dispatch and MP2T
     // payloading gst splits into helper elements are inside `ristsink` / `ristsrc`.
@@ -1335,7 +1332,9 @@ mod tests {
             ("dashdemux2", "dashsrc"),
             ("mssdemux", "dashsrc"),
             ("srtserversrc", "srtsrc"),
+            ("srtclientsrc", "srtsrc uri="),
             ("srtclientsink", "srtsink"),
+            ("srtserversink", "srtsink uri="),
         ] {
             let GstEquivalent::Unsupported(hint) = gst_equivalent(&reg, name) else {
                 panic!("`{name}` must carry a hint");

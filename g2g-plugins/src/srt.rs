@@ -713,6 +713,11 @@ impl SrtHandshake {
         self.peer_init_seq
     }
 
+    // the sequence number this side's first data packet carries
+    pub fn init_seq(&self) -> u32 {
+        self.init_seq
+    }
+
     /// The caller's opening induction packet (listener returns `None` and waits).
     pub fn start(&self) -> Option<Vec<u8>> {
         match self.role {
@@ -805,6 +810,8 @@ impl SrtHandshake {
                 }
                 self.peer_socket_id = hs.srt_socket_id;
                 self.peer_init_seq = hs.init_seq;
+                // a libsrt caller refuses a conclusion with another ISN, and both directions start there
+                self.init_seq = hs.init_seq;
                 self.peer_srt_flags = hs.srt_flags;
                 if let Some(l) = hs.latency_ms {
                     self.latency_ms = self.latency_ms.max(l);
@@ -1953,6 +1960,8 @@ mod tests {
             1000,
             "caller's ISN reached the listener"
         );
+        assert_eq!(listener.init_seq(), 1000, "the listener sends from it");
+        assert_eq!(caller.peer_init_seq(), 1000, "and echoes it back");
     }
 
     // runs a caller against a listener until one side stops answering

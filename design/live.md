@@ -712,7 +712,7 @@ against `RtspServerSrc` and a scripted recorder.
 
 ## SRT
 
-`SrtSink` (caller, egress) and `SrtSrc` (listener, ingress, `srt` feature) carry
+`SrtSink` (egress) and `SrtSrc` (ingress, `srt` feature) carry
 an MPEG-TS byte stream over UDP with SRT's reliable but low-latency ARQ, the
 contribution-link transport. The protocol is sans-IO (`srt.rs`): the 16-byte
 packet header plus data and control wire codec (HSv5 HANDSHAKE with the
@@ -749,9 +749,15 @@ reordered packets arrive with more than 2 packets of their wait left, and rises
 to the distance of a late packet without the retransmit bit. The periodic report
 still names a held gap.
 
-`SrtSrc` listens by default, calls with `mode=caller` and meets a peer with
+`SrtSrc` listens by default and `SrtSink` calls by default. Both call with
+`mode=caller`, listen with `mode=listener` and meet a peer with
 `mode=rendezvous`, where both sides send to each other and libsrt's cookie
-contest picks the side that sends the HSREQ. Both elements take
+contest picks the side that sends the HSREQ. A listener echoes the caller's
+initial sequence number in its conclusion and both directions start from it,
+as libsrt does. A listening `SrtSink` holds its first frame until a caller
+completes the handshake, as gst's srtsink does with `wait-for-connection`, and
+sends under the key the caller made. A rendezvous `SrtSink` sends under the
+initiator's key, its own when it wins the contest. Both elements take
 gst's `uri`: `srt://host:port` calls, `srt://:port` listens, `?mode=` overrides
 that, and the query options g2g applies (`localaddress`, `localport`,
 `latency`, `passphrase`, `pbkeylen`, `streamid`, `lossmaxttl`) set the
@@ -769,10 +775,11 @@ listener posts a warning and ends the stream. With `keep-listening`, a SHUTDOWN 
 an idle peer instead sends `Flush` downstream and returns to the listener
 handshake, and `tsdemux` continues the timeline across the next caller's stream.
 
-`SrtSink` drops its connection on a socket error or after the same 5 s without
-a packet from the listener and, with `auto-reconnect` (default on, as gst's
-srtsink), calls again on the next frame, dropping frames until a handshake
-completes and waiting 1 s after a failed one. The caller resends an unanswered
+`SrtSink` drops its connection on a socket error, a SHUTDOWN, or after the same
+5 s without a packet from the peer and, with `auto-reconnect` (default on, as
+gst's srtsink), connects again on the next frame, dropping frames until a
+handshake completes and waiting 1 s after a failed one. A listening `SrtSink`
+waits for the next caller instead. The caller resends an unanswered
 handshake packet every 250 ms, as libsrt does, so a call made during an outage
 completes as soon as the link returns. Packet timestamps count from the first
 frame of each connection, because a listener schedules TSBPD from the start of
@@ -789,7 +796,10 @@ so a rekey survives KM-packet loss. Real-peer interop with libsrt and ffmpeg is
 validated for the full matrix by the ignored `srt_ffmpeg_interop` test, which
 needs ffmpeg built with libsrt: both directions, ffmpeg caller into `SrtSrc`
 listener and `SrtSink` caller into an ffmpeg listener, across plaintext,
-AES-128, AES-192 and AES-256.
+AES-128, AES-192 and AES-256, and a listening `SrtSink` to an ffmpeg caller.
+The rendezvous tests meet gst's srtsink and srtsrc, since ffmpeg's rendezvous
+binds the address it calls and cannot run on loopback. `srt_loopback` covers a
+listening `SrtSink` and both rendezvous roles g2g to g2g in CI.
 
 ## Fallback switching
 

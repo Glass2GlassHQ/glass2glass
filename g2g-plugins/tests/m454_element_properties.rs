@@ -628,17 +628,46 @@ fn srtsink_uri_and_pbkeylen() {
         s.get_property("streamid"),
         Some(PropValue::Str("cam".into()))
     );
-    // srtsink only calls, and a receiver option means nothing to it
-    for refused in ["srt://:7001", "srt://192.0.2.7:7001?lossmaxttl=5"] {
-        assert_eq!(
-            s.set_property("uri", PropValue::Str(refused.into())),
-            Err(g2g_core::PropError::Value),
-            "{refused}"
-        );
-    }
     assert_eq!(
-        s.set_property("mode", PropValue::Str("listener".into())),
+        s.get_property("uri"),
+        Some(PropValue::Str("srt://192.0.2.7:7001?mode=caller".into()))
+    );
+
+    s.set_property("uri", PropValue::Str("srt://:7002".into()))
+        .unwrap();
+    assert_eq!(
+        s.get_property("mode"),
+        Some(PropValue::Str("listener".into()))
+    );
+    assert_eq!(
+        s.get_property("uri"),
+        Some(PropValue::Str("srt://0.0.0.0:7002?mode=listener".into()))
+    );
+    s.set_property(
+        "uri",
+        PropValue::Str("srt://192.0.2.8:7003?mode=rendezvous&localport=7004".into()),
+    )
+    .unwrap();
+    assert_eq!(
+        s.get_property("uri"),
+        Some(PropValue::Str(
+            "srt://192.0.2.8:7003?mode=rendezvous".into()
+        ))
+    );
+
+    // a receiver option means nothing to a sender
+    assert_eq!(
+        s.set_property(
+            "uri",
+            PropValue::Str("srt://192.0.2.7:7001?lossmaxttl=5".into())
+        ),
         Err(g2g_core::PropError::Value)
+    );
+    s.set_property("mode", PropValue::Str("caller".into()))
+        .unwrap();
+    assert_eq!(
+        s.get_property("mode"),
+        Some(PropValue::Str("caller".into()))
     );
 }
 

@@ -701,3 +701,95 @@ async fn the_caller_calls_again_after_the_listener_goes_silent() {
         "the second call's timestamps count from its own start"
     );
 }
+
+const PAYLOADS: u8 = 10;
+const PAYLOAD_SPACING: std::time::Duration = std::time::Duration::from_millis(10);
+const PASSPHRASE: &str = "g2g_srt_loopback_passphrase";
+// the cookie contest is random, so several meetings give each end both roles
+const RENDEZVOUS_MEETINGS: usize = 8;
+
+fn free_port() -> u16 {
+    StdUdpSocket::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+}
+
+fn sink_with_uri(uri: String) -> SrtSink {
+    let mut sink = SrtSink::new(([127, 0, 0, 1], 0).into());
+    sink.set_property("uri", PropValue::Str(uri)).expect("uri");
+    sink.configure_pipeline(&Caps::ByteStream {
+        encoding: g2g_core::ByteStreamEncoding::MpegTs,
+    })
+    .expect("configure");
+    sink
+}
+
+fn source_with_uri(uri: String) -> SrtSrc {
+    let socket = StdUdpSocket::bind("127.0.0.1:0").expect("bind source");
+    let mut src = SrtSrc::from_socket(socket)
+        .unwrap()
+        .with_frame_limit(PAYLOADS.into());
+    src.set_property("uri", PropValue::Str(uri)).expect("uri");
+    src
+}
+
+// sends tags 0, 1, 2... as a live encoder keeps sending, until the source has its payloads
+async fn received_from(src: &mut SrtSrc, mut sink: SrtSink) -> Vec<Received> {
+    let mut log = ReceivedLog {
+        events: Vec::new(),
+        flushed: Arc::default(),
+    };
+    let sending = async {
+        for tag in 0..=u8::MAX {
+            send_tagged(&mut sink, tag).await.expect("send");
+            tokio::time::sleep(PAYLOAD_SPACING).await;
+        }
+    };
+    let result = tokio::time::timeout(RUN_TIMEOUT, async {
+        tokio::select! {
+            result = src.run(&mut log) => result,
+            () = sending => panic!("the source never took {PAYLOADS} payloads"),
+        }
+    })
+    .await
+    .expect("streams within the timeout");
+    assert_eq!(result.expect("run ok"), u64::from(PAYLOADS));
+    log.events
+}
+
+fn payloads_then_eos() -> Vec<Received> {
+    (0..PAYLOADS)
+        .map(Received::Data)
+        .chain([Received::Eos])
+        .collect()
+}
+
+// the listener sends under the AES-256 key the caller made
+#[tokio::test]
+async fn a_caller_srtsrc_receives_from_a_listening_srtsink() {
+    let port = free_port();
+    let sink = sink_with_uri(format!(
+        "srt://127.0.0.1:{port}?mode=listener&passphrase={PASSPHRASE}"
+    ));
+    let mut src = source_with_uri(format!(
+        "srt://127.0.0.1:{port}?passphrase={PASSPHRASE}&pbkeylen=32"
+    ));
+    assert_eq!(received_from(&mut src, sink).await, payloads_then_eos());
+}
+
+#[tokio::test]
+async fn rendezvous_srtsink_and_srtsrc_meet_and_stream() {
+    for _ in 0..RENDEZVOUS_MEETINGS {
+        let sink_port = free_port();
+        let mut src = source_with_uri(format!(
+            "srt://127.0.0.1:{sink_port}?mode=rendezvous&passphrase={PASSPHRASE}"
+        ));
+        let src_port = src.local_port().expect("bound");
+        let sink = sink_with_uri(format!(
+            "srt://127.0.0.1:{src_port}?mode=rendezvous&localport={sink_port}&passphrase={PASSPHRASE}"
+        ));
+        assert_eq!(received_from(&mut src, sink).await, payloads_then_eos());
+    }
+}

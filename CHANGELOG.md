@@ -103,6 +103,7 @@ Breaking: `QosMessage` gains `downstream_proc_ns`, `ElementProbe` is no longer `
 - M2000: SRT streams take AES-192 keys, and `srtsink` takes gst's `pbkeylen` property.
 - M2001: `srtsrc` calls a listener, both SRT elements take gst's `uri`, and a listening `srtsrc` rejects callers by `streamid` and `pbkeylen`.
 - M2002: `srtsrc` takes `mode=rendezvous`.
+- M2003: `srtsink` takes `mode=listener` and `mode=rendezvous`.
 
 ## 0.10.0
 

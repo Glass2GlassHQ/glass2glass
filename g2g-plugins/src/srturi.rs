@@ -1,5 +1,5 @@
 use alloc::string::String;
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use g2g_core::PropError;
 
@@ -47,6 +47,48 @@ pub struct SrtUri {
     pub key_size: Option<AesKeySize>,
     pub stream_id: Option<String>,
     pub loss_max_ttl: Option<u32>,
+}
+
+impl SrtUri {
+    // the address to bind, and the peer to call or meet, which a listener has none of
+    pub fn endpoints(&self) -> Result<(SocketAddr, Option<SocketAddr>), PropError> {
+        let remote = || -> Result<SocketAddr, PropError> {
+            Ok(SocketAddr::new(
+                self.host.ok_or(PropError::Value)?,
+                self.port.ok_or(PropError::Value)?,
+            ))
+        };
+        match self.mode {
+            SrtMode::Listener => {
+                let port = self.local_port.or(self.port).ok_or(PropError::Value)?;
+                let ip = self
+                    .local_address
+                    .or(self.host)
+                    .unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+                Ok((SocketAddr::new(ip, port), None))
+            }
+            SrtMode::Caller => {
+                let remote = remote()?;
+                let ip = self.local_address.unwrap_or(unspecified_like(remote.ip()));
+                let bind = SocketAddr::new(ip, self.local_port.unwrap_or(0));
+                Ok((bind, Some(remote)))
+            }
+            // both sides send to each other, from localport or else the port they send to
+            SrtMode::Rendezvous => {
+                let remote = remote()?;
+                let ip = self.local_address.unwrap_or(unspecified_like(remote.ip()));
+                let port = self.local_port.unwrap_or(remote.port());
+                Ok((SocketAddr::new(ip, port), Some(remote)))
+            }
+        }
+    }
+}
+
+pub fn unspecified_like(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V4(_) => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+        IpAddr::V6(_) => IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+    }
 }
 
 const SCHEME: &str = "srt://";

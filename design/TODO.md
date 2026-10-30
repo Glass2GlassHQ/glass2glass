@@ -173,7 +173,10 @@ Highest leverage first:
     `livekitdatasink` / `livekitdatasrc`.
 - **SRT:**
   - Resolve host names in `srt://` URIs, gst's srt elements take them.
-  - `srtsink` listener and rendezvous modes.
+  - `srtsink` sends its SHUTDOWN to its own socket id, which libsrt ignores, so
+    a libsrt peer ends the call on its 5 s idle timeout. Sent to the peer's id,
+    libsrt drops the packets TSBPD still holds, so first wait for the tail to
+    be delivered.
 - **RIST bonding test flake:** `ristsender_broadcast_bonding_feeds_ristsrc`
   failed once in 50 runs on hercules, after 2.4 s. Capture its failure output
   and fix the cause.

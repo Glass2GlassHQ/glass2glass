@@ -1,11 +1,11 @@
-//! SRT egress sink (SrtSink, `srt` feature): the caller side. Connects out to an
-//! SRT listener over UDP, runs the HSv5 handshake, then carries an incoming
+//! SRT egress sink (SrtSink, `srt` feature). Calls an SRT listener, waits for a
+//! caller, or meets a rendezvous peer over UDP, runs the HSv5 handshake, then carries an incoming
 //! MPEG-TS byte stream (`Caps::ByteStream{MpegTs}`, as produced by `mpegtsmux`)
-//! as SRT data packets, retransmitting on the listener's NAK loss reports. The
+//! as SRT data packets, retransmitting on the receiver's NAK loss reports. The
 //! sans-IO [`srt`](crate::srt) module does the protocol work; this element is the
 //! tokio UDP I/O around it.
 //!
-//! Scope: one connection, the caller role, NAK-based ARQ, AES-128/256 encryption
+//! Scope: one connection in the caller, listener or rendezvous role, NAK-based ARQ, AES-128/256 encryption
 //! with optional mid-stream key rotation (`with_key_rotation`); a rekey KM is
 //! retransmitted until the peer returns a KMRSP, so it survives packet loss.
 //! Congestion control is a follow-up.
@@ -30,10 +30,10 @@ use crate::bytestream::{mpegts_caps, TS_DATAGRAM_PAYLOAD};
 use crate::filesink::io_err;
 use crate::srt::{self, LiveCc, SrtHandshake, SrtSender, CC_DEFAULT_OVERHEAD};
 use crate::srtcrypto::{AesKeySize, SrtCrypto, KM_KK_EVEN};
-use crate::srturi::{parse_srt_uri, SrtMode};
+use crate::srturi::{parse_srt_uri, unspecified_like, SrtMode};
 
-/// Our SRT socket id (caller).
-const CALLER_SOCKET_ID: u32 = 0x6732_7363; // "g2sc"
+/// Our SRT socket id.
+const SOCKET_ID: u32 = 0x6732_7363; // "g2sc"
 /// Initial data sequence number.
 const INIT_SEQ: u32 = 1;
 /// Send-buffer depth for retransmission.
@@ -76,7 +76,11 @@ struct PendingKm {
 /// ```
 #[derive(Debug)]
 pub struct SrtSink {
+    // the listener a caller calls, or the peer a rendezvous meets
     dest: SocketAddr,
+    mode: SrtMode,
+    // set by a uri, which is the only way to name the port a listener binds
+    bind: Option<SocketAddr>,
     latency_ms: u16,
     stream_id: Option<String>,
     passphrase: Option<String>,
@@ -96,6 +100,7 @@ pub struct SrtSink {
     /// Earliest monotonic microsecond time the next packet may go (pacing cursor).
     next_send_us: u64,
     socket: Option<tokio::net::UdpSocket>,
+    handshake: Option<SrtHandshake>,
     sender: Option<SrtSender>,
     configured: bool,
     frames_sent: u64,
@@ -116,6 +121,8 @@ impl SrtSink {
     pub fn new(dest: SocketAddr) -> Self {
         Self {
             dest,
+            mode: SrtMode::Caller,
+            bind: None,
             latency_ms: DEFAULT_LATENCY_MS,
             stream_id: None,
             passphrase: None,
@@ -128,6 +135,7 @@ impl SrtSink {
             cc: None,
             next_send_us: 0,
             socket: None,
+            handshake: None,
             sender: None,
             configured: false,
             frames_sent: 0,
@@ -218,24 +226,22 @@ impl SrtSink {
         self.eos_seen
     }
 
-    // srtsink only calls, so a URI must name the listener and carry only sender options
     fn set_uri(&mut self, uri: &str) -> Result<(), PropError> {
         let uri = parse_srt_uri(uri)?;
-        let sender_only = uri.mode == SrtMode::Caller
-            && uri.local_address.is_none()
-            && uri.local_port.is_none()
-            && uri.loss_max_ttl.is_none();
-        let (Some(host), Some(port), true) = (uri.host, uri.port, sender_only) else {
-            return Err(PropError::Value);
-        };
-        if uri
+        let (bind, remote) = uri.endpoints()?;
+        // lossmaxttl only tunes a receiver
+        let too_long_stream_id = uri
             .stream_id
             .as_ref()
-            .is_some_and(|id| id.len() > crate::srt::MAX_STREAM_ID_BYTES)
-        {
+            .is_some_and(|id| id.len() > crate::srt::MAX_STREAM_ID_BYTES);
+        if uri.loss_max_ttl.is_some() || too_long_stream_id {
             return Err(PropError::Value);
         }
-        self.dest = SocketAddr::new(host, port);
+        self.mode = uri.mode;
+        self.bind = Some(bind);
+        if let Some(remote) = remote {
+            self.dest = remote;
+        }
         self.latency_ms = uri.latency_ms.unwrap_or(self.latency_ms);
         self.key_size = uri.key_size.unwrap_or(self.key_size);
         if uri.passphrase.is_some() {
@@ -247,13 +253,54 @@ impl SrtSink {
         Ok(())
     }
 
-    /// Connect the UDP socket and run the caller handshake to established,
-    /// returning the armed sender (its destination is the peer's socket id).
+    fn uri(&self) -> String {
+        match (self.mode, self.bind) {
+            (SrtMode::Listener, Some(bind)) => alloc::format!("srt://{bind}?mode=listener"),
+            (SrtMode::Listener, None) => String::new(),
+            (mode, _) => alloc::format!("srt://{}?mode={}", self.dest, mode.name()),
+        }
+    }
+
+    // without a uri a caller binds any port, and a rendezvous the port it meets
+    fn bind_address(&self) -> Result<SocketAddr, G2gError> {
+        let any = unspecified_like(self.dest.ip());
+        match (self.mode, self.bind) {
+            (_, Some(bind)) => Ok(bind),
+            (SrtMode::Caller, None) => Ok(SocketAddr::new(any, 0)),
+            (SrtMode::Rendezvous, None) => Ok(SocketAddr::new(any, self.dest.port())),
+            (SrtMode::Listener, None) => Err(G2gError::NotConfigured),
+        }
+    }
+
+    fn new_handshake(&self, km: Option<Vec<u8>>) -> SrtHandshake {
+        let stream_id = self.stream_id.clone();
+        match self.mode {
+            SrtMode::Caller => {
+                SrtHandshake::new_caller(SOCKET_ID, INIT_SEQ, self.latency_ms, stream_id, km)
+            }
+            SrtMode::Rendezvous => SrtHandshake::new_rendezvous(
+                SOCKET_ID,
+                INIT_SEQ,
+                self.latency_ms,
+                stream_id,
+                km,
+                unpredictable_cookie(),
+            ),
+            SrtMode::Listener => {
+                let mut handshake =
+                    SrtHandshake::new_listener(SOCKET_ID, self.latency_ms, unpredictable_cookie());
+                handshake.admit_only(stream_id, None);
+                handshake
+            }
+        }
+    }
+
+    /// Bind the UDP socket and run the handshake to established, arming the
+    /// sender (its destination is the peer's socket id).
     async fn connect_and_handshake(&mut self) -> Result<(), G2gError> {
-        let socket = tokio::net::UdpSocket::bind(("0.0.0.0", 0))
+        let socket = tokio::net::UdpSocket::bind(self.bind_address()?)
             .await
             .map_err(io_err)?;
-        socket.connect(self.dest).await.map_err(io_err)?;
 
         // For an encrypted stream, generate a fresh key + salt, advertise the
         // wrapped key in the handshake KM extension, and arm the sender's cipher.
@@ -266,30 +313,48 @@ impl SrtSink {
             .zip(self.passphrase.as_ref())
             .map(|(c, pass)| c.build_km(pass, KM_KK_EVEN));
 
-        let mut hs = SrtHandshake::new_caller(
-            CALLER_SOCKET_ID,
-            INIT_SEQ,
-            self.latency_ms,
-            self.stream_id.clone(),
-            km,
-        );
-        if let Err(error) = complete_handshake(&socket, self.dest, &mut hs).await {
-            if let Some(rejection) = hs.rejection() {
-                g2g_core::g2g_warn!(
-                    Target::category(LOG_CATEGORY),
-                    "{} rejected the call with handshake type {rejection}",
-                    self.dest
-                );
-            }
-            return Err(error);
+        let mut hs = self.new_handshake(km);
+        // a caller fails at once on a refused port, a rendezvous peer may come up later
+        if self.mode == SrtMode::Caller {
+            socket.connect(self.dest).await.map_err(io_err)?;
         }
+        let peer = match self.mode {
+            SrtMode::Listener => accept_call(&socket, &mut hs).await?,
+            SrtMode::Caller | SrtMode::Rendezvous => {
+                if let Err(error) = complete_handshake(&socket, self.dest, &mut hs).await {
+                    if let Some(rejection) = hs.rejection() {
+                        g2g_core::g2g_warn!(
+                            Target::category(LOG_CATEGORY),
+                            "{} rejected the call with handshake type {rejection}",
+                            self.dest
+                        );
+                    }
+                    return Err(error);
+                }
+                self.dest
+            }
+        };
+        socket.connect(peer).await.map_err(io_err)?;
+        // the peer's KM carries the key of the caller, or of the rendezvous initiator
+        let crypto = match (self.mode, &self.passphrase) {
+            (SrtMode::Caller, _) | (_, None) => crypto,
+            (_, Some(passphrase)) => {
+                let km = hs
+                    .peer_km()
+                    .ok_or(G2gError::Network(NetworkFailure::Connect))?;
+                let crypto = SrtCrypto::from_km(km, passphrase)
+                    .ok_or(G2gError::Network(NetworkFailure::Connect))?;
+                Some(crypto)
+            }
+        };
         self.connected_at_ns = g2g_core::metrics::monotonic_ns();
         self.last_peer_packet_ns = self.connected_at_ns;
-        let mut sender = SrtSender::new(hs.peer_socket_id(), INIT_SEQ, SEND_CAPACITY);
+        let mut sender = SrtSender::new(hs.peer_socket_id(), hs.init_seq(), SEND_CAPACITY);
         if let Some(c) = crypto {
             sender.set_crypto(c);
         }
         self.sender = Some(sender);
+        self.handshake = Some(hs);
         self.socket = Some(socket);
         Ok(())
     }
@@ -305,6 +370,16 @@ impl SrtSink {
                 Ok(n) => {
                     self.last_peer_packet_ns = g2g_core::metrics::monotonic_ns();
                     if let Some(ctrl) = srt::parse_control(&buf[..n]) {
+                        if ctrl == srt::Control::Shutdown {
+                            return Err(G2gError::Network(NetworkFailure::Stream));
+                        }
+                        // a peer that missed our last handshake packet sends its own again
+                        if let srt::Control::Handshake(_) = ctrl {
+                            let handshake =
+                                self.handshake.as_mut().ok_or(G2gError::NotConfigured)?;
+                            resends.extend(handshake.on_packet(&buf[..n]).reply);
+                            continue;
+                        }
                         // A KMRSP acknowledges the outstanding rekey: stop
                         // retransmitting the KM once its blob matches.
                         if let srt::Control::KeyMaterial { rsp: true, km } = &ctrl {
@@ -448,10 +523,36 @@ impl SrtSink {
             self.dest
         );
         self.socket = None;
+        self.handshake = None;
         self.sender = None;
         self.pending_km = None;
         self.connection_pts_ns = None;
         Ok(())
+    }
+}
+
+// Seeded from the monotonic clock so an off-path attacker can't predict it
+// from the public socket id (anti-spoof).
+pub(crate) fn unpredictable_cookie() -> u32 {
+    let t = g2g_core::metrics::monotonic_ns();
+    ((t ^ (t >> 29)).wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 32) as u32 | 1
+}
+
+// answers callers until one completes the handshake, returning its address
+pub(crate) async fn accept_call(
+    socket: &tokio::net::UdpSocket,
+    handshake: &mut SrtHandshake,
+) -> Result<SocketAddr, G2gError> {
+    let mut buf = [0u8; 2048];
+    loop {
+        let (n, from) = socket.recv_from(&mut buf).await.map_err(io_err)?;
+        let step = handshake.on_packet(&buf[..n]);
+        if let Some(reply) = step.reply {
+            socket.send_to(&reply, from).await.map_err(io_err)?;
+        }
+        if step.established {
+            return Ok(from);
+        }
     }
 }
 
@@ -529,7 +630,7 @@ impl AsyncElement for SrtSink {
         ElementMetadata::new(
             "SRT sink",
             "Sink/Network",
-            "Sends an MPEG-TS byte stream over SRT (caller), NAK-retransmitting",
+            "Sends an MPEG-TS byte stream over SRT (caller, listener or rendezvous), NAK-retransmitting",
             "g2g",
         )
     }
@@ -539,10 +640,14 @@ impl AsyncElement for SrtSink {
             PropertySpec::new(
                 "host",
                 PropKind::Str,
-                "destination host (IP of the SRT listener)",
+                "IP of the listener a caller calls, or of the rendezvous peer",
             )
             .with_default("127.0.0.1"),
-            PropertySpec::new("port", PropKind::Uint, "destination SRT port")
+            PropertySpec::new(
+                "port",
+                PropKind::Uint,
+                "SRT port a caller calls, or the rendezvous peer's",
+            )
                 .with_range("0", "65535"),
             PropertySpec::new(
                 "latency",
@@ -557,28 +662,28 @@ impl AsyncElement for SrtSink {
             PropertySpec::new(
                 "streamid",
                 PropKind::Str,
-                "stream id sent in the handshake, the listener routes on it (empty = none)",
+                "stream id a caller sends, or the only one a listener accepts (empty = none)",
             ),
             PropertySpec::new(
                 "auto-reconnect",
                 PropKind::Bool,
-                "call the listener again when the connection fails or the listener goes silent, dropping frames until it answers",
+                "connect again when the connection fails, ends or goes silent, dropping frames until the peer answers (a listener waits for the next caller)",
             )
             .with_default("true"),
             PropertySpec::new(
                 "pbkeylen",
                 PropKind::Uint,
-                "AES key length in bytes, 16, 24 or 32",
+                "AES key length in bytes of the key a caller or rendezvous peer makes, 16, 24 or 32",
             )
             .with_default("16"),
             PropertySpec::new(
                 "uri",
                 PropKind::Str,
-                "srt://host:port with latency, passphrase, pbkeylen and streamid query options",
+                "srt://host:port calls, srt://:port listens, with mode, localaddress, localport, latency, passphrase, pbkeylen and streamid query options",
             ),
-            PropertySpec::new("mode", PropKind::Str, "SRT connection mode, caller only")
+            PropertySpec::new("mode", PropKind::Str, "SRT connection mode")
                 .with_default("caller")
-                .with_enum_values("caller"),
+                .with_enum_values(SrtMode::NAMES),
         ];
         PROPS
     }
@@ -617,10 +722,9 @@ impl AsyncElement for SrtSink {
             }
             "uri" => self.set_uri(value.as_str().ok_or(PropError::Type)?),
             "mode" => {
-                let mode = value.as_str().ok_or(PropError::Type)?;
-                (SrtMode::from_name(mode) == Some(SrtMode::Caller))
-                    .then_some(())
-                    .ok_or(PropError::Value)
+                let name = value.as_str().ok_or(PropError::Type)?;
+                self.mode = SrtMode::from_name(name).ok_or(PropError::Value)?;
+                Ok(())
             }
             _ => Err(PropError::Unknown),
         }
@@ -636,8 +740,8 @@ impl AsyncElement for SrtSink {
             "streamid" => Some(PropValue::Str(self.stream_id.clone().unwrap_or_default())),
             "auto-reconnect" => Some(PropValue::Bool(self.auto_reconnect)),
             "pbkeylen" => Some(PropValue::Uint(self.key_size.bytes() as u64)),
-            "uri" => Some(PropValue::Str(alloc::format!("srt://{}", self.dest))),
-            "mode" => Some(PropValue::Str(SrtMode::Caller.name().to_string())),
+            "uri" => Some(PropValue::Str(self.uri())),
+            "mode" => Some(PropValue::Str(self.mode.name().to_string())),
             _ => None,
         }
     }
@@ -681,11 +785,11 @@ impl AsyncElement for SrtSink {
                     }
                 }
                 PipelinePacket::Eos => {
-                    // Signal the listener to close cleanly (RTP-style flows have no
+                    // Signal the peer to close cleanly (RTP-style flows have no
                     // in-band end; SRT has SHUTDOWN).
                     if let Some(socket) = self.socket.as_ref() {
-                        let shutdown =
-                            srt::build_control(&srt::Control::Shutdown, 0, CALLER_SOCKET_ID);
+                        // TODO: libsrt ignores a SHUTDOWN to our own socket id, and the peer's id makes it drop the held tail
+                        let shutdown = srt::build_control(&srt::Control::Shutdown, 0, SOCKET_ID);
                         let _ = socket.send(&shutdown).await;
                     }
                     self.eos_seen = true;

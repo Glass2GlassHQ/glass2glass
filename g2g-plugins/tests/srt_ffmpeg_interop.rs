@@ -265,12 +265,12 @@ fn ffprobe_video_frame_count(path: &Path) -> u64 {
 /// reference implementation (the mirror of the caller->g2g-listener tests above),
 /// and asserts ffmpeg decoded the same number of video frames the fixture had, so
 /// the whole stream survived g2g's SRT sender -> libsrt intact.
-/// Drive the reverse direction: g2g `SrtSink` (caller) streams a generated
-/// MPEG-TS to an ffmpeg SRT *listener* (libsrt), which remuxes it to a file.
+/// Drive the reverse direction: g2g `SrtSink` streams a generated
+/// MPEG-TS to ffmpeg (libsrt), which remuxes it to a file.
 /// `crypto`, when set, is `(passphrase, pbkeylen)` enabling AES on both sides.
 /// Asserts ffmpeg decoded ~the same video frame count the fixture had, so the
 /// stream survived g2g's SRT sender -> libsrt intact.
-async fn run_reverse_interop(crypto: Option<(&str, u32)>) {
+async fn run_reverse_interop(listening: Listening, crypto: Option<(&str, u32)>) {
     let port = free_udp_port();
     let dir = std::env::temp_dir();
     let pid = std::process::id();
@@ -283,11 +283,18 @@ async fn run_reverse_interop(crypto: Option<(&str, u32)>) {
     let want_frames = ffprobe_video_frame_count(&in_ts);
     assert!(want_frames > 0, "fixture has decodable video frames");
 
-    // ffmpeg SRT listener remuxes whatever the caller sends to out_ts, finishing
-    // when the caller's SRT Shutdown (sent on EOS) closes the connection.
-    let mut url = format!("srt://127.0.0.1:{port}?mode=listener");
+    // ffmpeg remuxes whatever srtsink sends to out_ts, finishing when the
+    // connection closes.
+    let (ffmpeg_mode, sink_mode) = match listening {
+        Listening::Ffmpeg => ("listener", "caller"),
+        Listening::Srtsink => ("caller", "listener"),
+    };
+    let mut url = format!("srt://127.0.0.1:{port}?mode={ffmpeg_mode}");
+    let mut sink_uri = format!("srt://127.0.0.1:{port}?mode={sink_mode}");
     if let Some((passphrase, pbkeylen)) = crypto {
-        url.push_str(&format!("&passphrase={passphrase}&pbkeylen={pbkeylen}"));
+        let options = format!("&passphrase={passphrase}&pbkeylen={pbkeylen}");
+        url.push_str(&options);
+        sink_uri.push_str(&options);
     }
     let out_path = out_ts.clone();
     let ffmpeg = tokio::task::spawn_blocking(move || {
@@ -307,16 +314,14 @@ async fn run_reverse_interop(crypto: Option<(&str, u32)>) {
             ])
             .status()
     });
-    // Let the listener bind its UDP port before the caller (no connect retry).
+    // Let ffmpeg bind its UDP port before srtsink calls (no connect retry). A
+    // libsrt caller resends its call for 3 s, long enough to reach a srtsink listener.
     tokio::time::sleep(Duration::from_millis(1500)).await;
 
-    // Drive the g2g SRT caller: feed the TS in SRT-payload-sized chunks, then EOS.
+    // Drive srtsink: feed the TS in SRT-payload-sized chunks, then EOS.
     let mut sink = SrtSink::new(([127, 0, 0, 1], port).into());
-    if let Some((passphrase, pbkeylen)) = crypto {
-        sink = sink.with_passphrase(passphrase);
-        sink.set_property("pbkeylen", g2g_core::PropValue::Uint(pbkeylen.into()))
-            .expect("pbkeylen");
-    }
+    sink.set_property("uri", g2g_core::PropValue::Str(sink_uri))
+        .expect("uri");
     sink.configure_pipeline(&Caps::ByteStream {
         encoding: ByteStreamEncoding::MpegTs,
     })
@@ -367,14 +372,10 @@ async fn run_reverse_interop(crypto: Option<(&str, u32)>) {
 
     // g2g's caller-side handshake + framing (and, when encrypted, its KMREQ) were
     // accepted by a reference libsrt listener: persist `Oracle` evidence for srtsink.
-    let detail: String = match crypto {
-        None => "g2g caller -> ffmpeg (libsrt) listener: HSv5 handshake + data framing".into(),
-        Some((_, pbkeylen)) => {
-            format!(
-                "g2g caller -> ffmpeg (libsrt): AES-{}-encrypted KMREQ + payload",
-                pbkeylen * 8
-            )
-        }
+    let roles = format!("g2g {sink_mode} -> ffmpeg (libsrt) {ffmpeg_mode}");
+    let detail = match crypto {
+        None => format!("{roles}: HSv5 handshake + data framing"),
+        Some((_, pbkeylen)) => format!("{roles}: AES-{} key material + payload", pbkeylen * 8),
     };
     g2g_plugins::conformance::persist::record_evidence(
         "srtsink",
@@ -390,7 +391,7 @@ async fn run_reverse_interop(crypto: Option<(&str, u32)>) {
 #[tokio::test]
 #[ignore = "needs ffmpeg+ffprobe with libsrt; opens a local UDP socket + temp files"]
 async fn srtsink_caller_streams_mpegts_to_ffmpeg_listener() {
-    run_reverse_interop(None).await;
+    run_reverse_interop(Listening::Ffmpeg, None).await;
 }
 
 /// Reverse direction, AES-128: the g2g caller offers a KMREQ to the libsrt
@@ -399,20 +400,40 @@ async fn srtsink_caller_streams_mpegts_to_ffmpeg_listener() {
 #[tokio::test]
 #[ignore = "needs ffmpeg+ffprobe with libsrt; opens a local UDP socket + temp files"]
 async fn srtsink_encrypted_caller_streams_mpegts_to_ffmpeg_listener() {
-    run_reverse_interop(Some(("g2g_srt_interop_passphrase", 16))).await;
+    run_reverse_interop(Listening::Ffmpeg, Some(("g2g_srt_interop_passphrase", 16))).await;
 }
 
 /// Reverse direction, AES-256 (the larger wrapped key over the caller KM path).
 #[tokio::test]
 #[ignore = "needs ffmpeg+ffprobe with libsrt; opens a local UDP socket + temp files"]
 async fn srtsink_aes256_caller_streams_mpegts_to_ffmpeg_listener() {
-    run_reverse_interop(Some(("g2g_srt_interop_passphrase", 32))).await;
+    run_reverse_interop(Listening::Ffmpeg, Some(("g2g_srt_interop_passphrase", 32))).await;
 }
 
 #[tokio::test]
 #[ignore = "needs ffmpeg+ffprobe with libsrt; opens a local UDP socket + temp files"]
 async fn srtsink_aes192_caller_streams_mpegts_to_ffmpeg_listener() {
-    run_reverse_interop(Some(("g2g_srt_interop_passphrase", 24))).await;
+    run_reverse_interop(Listening::Ffmpeg, Some(("g2g_srt_interop_passphrase", 24))).await;
+}
+
+// which end of the reverse interop listens, the other calls
+#[derive(Clone, Copy)]
+enum Listening {
+    Ffmpeg,
+    Srtsink,
+}
+
+#[tokio::test]
+#[ignore = "needs ffmpeg+ffprobe with libsrt; opens a local UDP socket + temp files"]
+async fn srtsink_listener_streams_mpegts_to_an_ffmpeg_caller() {
+    run_reverse_interop(Listening::Srtsink, None).await;
+}
+
+// a listening srtsink sends under the key the caller made
+#[tokio::test]
+#[ignore = "needs ffmpeg+ffprobe with libsrt; opens a local UDP socket + temp files"]
+async fn srtsink_listener_streams_aes256_to_an_ffmpeg_caller() {
+    run_reverse_interop(Listening::Srtsink, Some(("g2g_srt_interop_passphrase", 32))).await;
 }
 
 /// The `streamid` property reaches libsrt as the caller wrote it: libsrt reads
@@ -1158,5 +1179,97 @@ async fn rendezvous_srtsrc_receives_from_gst_srtsink() {
 async fn encrypted_rendezvous_srtsrc_receives_from_gst_srtsink() {
     for _ in 0..RENDEZVOUS_MEETINGS {
         run_rendezvous_srtsrc(Some(("g2g_srt_interop_passphrase", 32))).await;
+    }
+}
+
+async fn run_rendezvous_srtsink(crypto: Option<(&str, u32)>) {
+    const PAYLOADS: usize = 15;
+    let sink_port = free_udp_port();
+    let their_port = free_udp_port();
+    let dir = std::env::temp_dir();
+    let pid = std::process::id();
+    let in_ts = dir.join(format!("g2g_srt_rendezvous_in_{pid}_{sink_port}.ts"));
+    let out_ts = dir.join(format!("g2g_srt_rendezvous_out_{pid}_{sink_port}.ts"));
+    ffmpeg_generate_ts(&in_ts);
+    let ts_bytes = std::fs::read(&in_ts).expect("read the input TS fixture");
+    let mut their_uri =
+        format!("srt://127.0.0.1:{sink_port}?mode=rendezvous&localport={their_port}");
+    let mut sink_uri =
+        format!("srt://127.0.0.1:{their_port}?mode=rendezvous&localport={sink_port}");
+    if let Some((passphrase, pbkeylen)) = crypto {
+        let options = format!("&passphrase={passphrase}&pbkeylen={pbkeylen}");
+        their_uri.push_str(&options);
+        sink_uri.push_str(&options);
+    }
+    let mut gst = Command::new("gst-launch-1.0")
+        .args([
+            "-q",
+            "srtsrc",
+            &format!("uri={their_uri}"),
+            &format!("num-buffers={PAYLOADS}"),
+            "!",
+            "filesink",
+            &format!("location={}", out_ts.display()),
+        ])
+        .stdin(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn gst-launch with srtsrc");
+    // gst waves until srtsink starts meeting it
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    let mut sink = SrtSink::new(([127, 0, 0, 1], their_port).into());
+    sink.set_property("uri", g2g_core::PropValue::Str(sink_uri))
+        .expect("uri");
+    sink.configure_pipeline(&Caps::ByteStream {
+        encoding: ByteStreamEncoding::MpegTs,
+    })
+    .expect("configure SrtSink");
+    for (i, chunk) in ts_bytes.chunks(TS_SRT_PAYLOAD_BYTES).enumerate() {
+        // a gone peer would make srtsink meet again
+        if gst.try_wait().expect("poll gst").is_some() {
+            break;
+        }
+        let frame = Frame {
+            domain: MemoryDomain::System(SystemSlice::from_boxed(
+                chunk.to_vec().into_boxed_slice(),
+            )),
+            timing: FrameTiming {
+                pts_ns: i as u64 * 10_000_000,
+                ..FrameTiming::default()
+            },
+            sequence: i as u64,
+            meta: Default::default(),
+        };
+        sink.process(PipelinePacket::DataFrame(frame), &mut NullOut)
+            .await
+            .expect("send TS chunk");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let status = wait_for_exit(&mut gst, Duration::from_secs(10)).await;
+    let received = std::fs::read(&out_ts).expect("read gst's output");
+    let _ = std::fs::remove_file(&in_ts);
+    let _ = std::fs::remove_file(&out_ts);
+
+    assert!(status.success(), "gst took {PAYLOADS} payloads");
+    assert!(
+        received == ts_bytes[..PAYLOADS * TS_SRT_PAYLOAD_BYTES],
+        "gst received the fixture's first {PAYLOADS} payloads, got {} bytes",
+        received.len()
+    );
+}
+
+#[tokio::test]
+#[ignore = "needs ffmpeg and gst-launch-1.0 with srtsrc; opens a local UDP socket"]
+async fn rendezvous_srtsink_streams_to_gst_srtsrc() {
+    for _ in 0..RENDEZVOUS_MEETINGS {
+        run_rendezvous_srtsink(None).await;
+    }
+}
+
+#[tokio::test]
+#[ignore = "needs ffmpeg and gst-launch-1.0 with srtsrc; opens a local UDP socket"]
+async fn encrypted_rendezvous_srtsink_streams_to_gst_srtsrc() {
+    for _ in 0..RENDEZVOUS_MEETINGS {
+        run_rendezvous_srtsink(Some(("g2g_srt_interop_passphrase", 32))).await;
     }
 }
