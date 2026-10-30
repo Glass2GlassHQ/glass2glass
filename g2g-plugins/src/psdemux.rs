@@ -1530,7 +1530,7 @@ static PSDEMUX_PROPS: &[PropertySpec] = &[
     PropertySpec::new(
         "stream",
         PropKind::Str,
-        "elementary stream to emit: mpeg2 | mp2 | ac3 | subpicture",
+        "elementary stream to emit: mpeg2 | mp2 (or mp3) | ac3 | subpicture",
     ),
     PropertySpec::new(
         "stream-id",
@@ -1543,7 +1543,8 @@ static PSDEMUX_PROPS: &[PropertySpec] = &[
 fn ps_stream_from_str(s: &str) -> Option<PsStream> {
     match s {
         "mpeg2" => Some(PsStream::Mpeg2),
-        "mp2" => Some(PsStream::Mp2),
+        // one stream id range carries every MPEG audio layer
+        "mp2" | "mp3" => Some(PsStream::Mp2),
         "ac3" => Some(PsStream::Ac3),
         "subpicture" => Some(PsStream::SubPicture),
         _ => None,

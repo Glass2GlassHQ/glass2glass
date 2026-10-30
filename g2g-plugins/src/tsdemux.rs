@@ -604,7 +604,7 @@ static ONE_PORT_PROPS: &[PropertySpec] = &[
     PropertySpec::new(
         "stream",
         PropKind::Str,
-        "elementary stream to emit: h264 | h265 | av1 | mpeg2 | mpeg4part2 | aac | mp2 | opus | ac3 | klv | dvbsub | teletext",
+        "elementary stream to emit: h264 | h265 | av1 | mpeg2 | mpeg4part2 | aac | mp2 (or mp3) | opus | ac3 | klv | dvbsub | teletext",
     ),
     PROGRAM_NUMBER_PROP,
     PropertySpec::new(
@@ -643,7 +643,8 @@ fn ts_stream_from_str(s: &str) -> Option<TsStream> {
         "av1" => Some(TsStream::Av1),
         "mpeg2" => Some(TsStream::Mpeg2),
         "aac" => Some(TsStream::Aac),
-        "mp2" => Some(TsStream::Mp2),
+        // one PMT stream type carries every MPEG audio layer
+        "mp2" | "mp3" => Some(TsStream::Mp2),
         "opus" => Some(TsStream::Opus),
         "ac3" => Some(TsStream::Ac3),
         "klv" => Some(TsStream::Klv),
@@ -2627,6 +2628,10 @@ mod tests {
             d.get_property("stream"),
             Some(PropValue::Str("h264".into()))
         );
+
+        d.set_property("stream", PropValue::Str("mp3".into()))
+            .unwrap();
+        assert_eq!(d.get_property("stream"), Some(PropValue::Str("mp2".into())));
 
         d.set_property("stream", PropValue::Str("aac".into()))
             .unwrap();
