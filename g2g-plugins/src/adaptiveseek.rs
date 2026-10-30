@@ -85,37 +85,37 @@ fn seek_segment(seek: &Seek, presentation_start_ns: u64, media_start_ns: u64) ->
 }
 
 #[derive(Debug)]
-pub(crate) enum DownloadOrSeek<T> {
-    Downloaded(T),
+pub(crate) enum FinishedOrSeek<T> {
+    Finished(T),
     Seek(Seek),
 }
 
-// a served seek drops the download in flight, a refused one lets it finish
-pub(crate) async fn download_unless_seek<T>(
+// a served seek drops the download or reload wait in flight, a refused one lets it finish
+pub(crate) async fn unless_seek<T>(
     controller: Option<&SeekController>,
     mut accept: impl FnMut(Seek) -> Result<Seek, SeekRefusal>,
-    download: impl Future<Output = T>,
-) -> DownloadOrSeek<T> {
-    let mut download = core::pin::pin!(download);
+    wait: impl Future<Output = T>,
+) -> FinishedOrSeek<T> {
+    let mut wait = core::pin::pin!(wait);
     let Some(controller) = controller else {
-        return DownloadOrSeek::Downloaded(download.await);
+        return FinishedOrSeek::Finished(wait.await);
     };
     loop {
         let mut seek_pending = core::pin::pin!(controller.wait_for_seek());
         let raced = core::future::poll_fn(|cx| {
-            if let Poll::Ready(downloaded) = download.as_mut().poll(cx) {
-                return Poll::Ready(Ok(downloaded));
+            if let Poll::Ready(finished) = wait.as_mut().poll(cx) {
+                return Poll::Ready(Ok(finished));
             }
             seek_pending.as_mut().poll(cx).map(Err)
         })
         .await;
         match raced {
-            Ok(downloaded) => return DownloadOrSeek::Downloaded(downloaded),
+            Ok(finished) => return FinishedOrSeek::Finished(finished),
             // the run is shutting down
-            Err(false) => return DownloadOrSeek::Downloaded(download.await),
+            Err(false) => return FinishedOrSeek::Finished(wait.await),
             Err(true) => {
                 if let Some(seek) = controller.take_seek(&mut accept) {
-                    return DownloadOrSeek::Seek(seek);
+                    return FinishedOrSeek::Seek(seek);
                 }
             }
         }

@@ -562,9 +562,10 @@ from `availabilityStartTime`, and a live MPD without one refuses every seek. A s
 before the window moves onto it unless the seek is accurate, an `End` start counts
 back from the window end, and a target still outside is refused with
 `SeekRefusal::OutsideLiveWindow`, which `g2g-launch` reports before exiting.
-Both sources also take a seek while a segment downloads
-(`adaptiveseek::download_unless_seek`): a served seek drops the download, and a
-refused one lets it finish, so no segment is skipped or sent twice.
+Both sources also take a seek while a segment or an HLS part downloads, and while
+they wait for the next playlist or MPD reload (`adaptiveseek::unless_seek`): a
+served seek drops the download or the wait, and a refused one lets it finish, so
+no segment is skipped or sent twice.
 
 Reverse playback (`Seek::reverse`, `rate < 0`) needs no sink-specific code. The
 source emits frames newest-PTS-first over `[start, stop]`, and `SyncSink` schedules

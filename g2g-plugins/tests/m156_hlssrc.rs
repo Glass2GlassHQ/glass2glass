@@ -32,7 +32,10 @@ use g2g_plugins::uridecodebin::hls_uri_fanout;
 mod http_faults;
 #[path = "common/http_routes.rs"]
 mod http_routes;
+#[path = "common/seek_after_frames.rs"]
+mod seek_after_frames;
 use http_faults::Answer;
+use seek_after_frames::{run_seeking_after_frames, LIVE_RUN_LIMIT};
 
 #[derive(Default)]
 struct CaptureSink {
@@ -1530,4 +1533,180 @@ async fn a_seek_refused_during_a_download_lets_it_finish() {
     );
     assert_eq!(sink.flushes, 0);
     assert_eq!(sink.body, segs.concat(), "every segment goes out once");
+}
+
+// --- a seek while waiting for a reload or downloading a part (M2013) --------
+
+// longer than LIVE_RUN_LIMIT, so only a seek taken during the wait ends it in time
+const RELOAD_WAIT_MS: u64 = 60_000;
+const LIVE_JOIN_FRAMES: usize = (LIVE_FIRST_SEQUENCE + LIVE_LISTED - LIVE_JOIN_SEQUENCE) as usize;
+
+#[tokio::test]
+async fn a_seek_during_the_reload_wait_plays_at_once() {
+    let url = http_routes::serve(|path| {
+        if path == "/live.m3u8" {
+            return Some(sliding_live_playlist(0).into_bytes());
+        }
+        let sequence = path
+            .strip_prefix("/seg")?
+            .strip_suffix(".ts")?
+            .parse()
+            .ok()?;
+        Some(live_segment(sequence))
+    }) + "/live.m3u8";
+    let controller = SeekController::new();
+    let mut src = HlsSrc::new(url)
+        .with_reload_interval_ms(RELOAD_WAIT_MS)
+        .with_seek(controller.clone());
+    src.configure_pipeline(&Caps::ByteStream {
+        encoding: ByteStreamEncoding::MpegTs,
+    })
+    .unwrap();
+    let target_ns = LIVE_SEGMENT_NS / 2;
+    let (sink, ticket) = run_seeking_after_frames::<CaptureSink>(
+        &mut src,
+        &controller,
+        Seek::flush_to(target_ns),
+        LIVE_JOIN_FRAMES,
+        LIVE_JOIN_FRAMES + LIVE_LISTED as usize,
+    )
+    .await;
+
+    assert_eq!(ticket.outcome(), Some(SeekOutcome::Served));
+    assert_eq!(sink.flushes, 1);
+    assert_eq!(sink.segment_times, vec![target_ns]);
+    let mut expected = live_before_seek();
+    expected.extend(live_stream(
+        LIVE_FIRST_SEQUENCE..LIVE_FIRST_SEQUENCE + LIVE_LISTED,
+    ));
+    assert_eq!(sink.body, expected);
+}
+
+const LL_PLAYLIST_PATH: &str = "/ll.m3u8";
+// the held reload's deadline is a target duration and a second, past LIVE_RUN_LIMIT
+const LL_TARGET_DURATION_SECS: u64 = 30;
+// two whole segments, then the one being produced, published as parts
+const LL_WHOLE_SEGMENTS: usize = 2;
+const LL_PARTS: usize = 5;
+const LL_PART_MS: u64 = 200;
+const LL_SEGMENT_MS: u64 = LL_PART_MS * LL_PARTS as u64;
+// three parts back from the last one, as PART-HOLD-BACK puts it
+const LL_JOIN_PART: usize = 2;
+const LL_HOLD_BACK_MS: u64 = (LL_PARTS - LL_JOIN_PART) as u64 * LL_PART_MS;
+// in the first segment, inside the live window
+const LL_SEEK_NS: u64 = LL_SEGMENT_MS * 1_000_000 / 2;
+
+// `ended` completes the segment in production and ends the playlist
+fn ll_playlist(ended: bool) -> String {
+    let mut playlist = format!(
+        "#EXTM3U\n#EXT-X-VERSION:9\n#EXT-X-TARGETDURATION:{LL_TARGET_DURATION_SECS}\n\
+         #EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=YES,PART-HOLD-BACK={hold_back}\n\
+         #EXT-X-PART-INF:PART-TARGET={part}\n#EXT-X-MEDIA-SEQUENCE:0\n",
+        hold_back = LL_HOLD_BACK_MS as f64 / 1000.0,
+        part = LL_PART_MS as f64 / 1000.0,
+    );
+    let segment_secs = LL_SEGMENT_MS as f64 / 1000.0;
+    for segment in 0..LL_WHOLE_SEGMENTS {
+        playlist += &format!("#EXTINF:{segment_secs},\nseg{segment}.ts\n");
+    }
+    for part in 0..LL_PARTS {
+        playlist += &format!(
+            "#EXT-X-PART:DURATION={},URI=\"part{LL_WHOLE_SEGMENTS}.{part}.ts\",INDEPENDENT=YES\n",
+            LL_PART_MS as f64 / 1000.0
+        );
+    }
+    if ended {
+        playlist +=
+            &format!("#EXTINF:{segment_secs},\nseg{LL_WHOLE_SEGMENTS}.ts\n#EXT-X-ENDLIST\n");
+    }
+    playlist
+}
+
+fn ll_media(path: &str) -> Vec<u8> {
+    format!("{path}-").repeat(16).into_bytes()
+}
+
+fn ll_whole_segments() -> Vec<u8> {
+    (0..LL_WHOLE_SEGMENTS)
+        .flat_map(|segment| ll_media(&format!("/seg{segment}.ts")))
+        .collect()
+}
+
+fn ll_parts(parts: core::ops::Range<usize>) -> Vec<u8> {
+    parts
+        .flat_map(|part| ll_media(&format!("/part{LL_WHOLE_SEGMENTS}.{part}.ts")))
+        .collect()
+}
+
+// plays the low-latency playlist, issuing `seek` when the server stalls the first request starting with `stalled`
+async fn run_ll_seek(stalled: String, seek: Seek) -> (CaptureSink, Option<SeekOutcome>) {
+    let controller = SeekController::new();
+    let issuer = controller.clone();
+    let ticket = Arc::new(Mutex::new(None));
+    let issued = Arc::clone(&ticket);
+    let url = http_faults::serve_answers(move |path| {
+        let mut issued = issued.lock().unwrap();
+        if path.starts_with(&stalled) && issued.is_none() {
+            *issued = Some(issuer.seek(seek));
+            return Answer::Stall(ll_media(path));
+        }
+        if path == LL_PLAYLIST_PATH {
+            return Answer::Body(ll_playlist(false).into_bytes());
+        }
+        if path.starts_with(LL_PLAYLIST_PATH) {
+            return Answer::Body(ll_playlist(true).into_bytes());
+        }
+        Answer::Body(ll_media(path))
+    }) + LL_PLAYLIST_PATH;
+
+    let mut src = HlsSrc::new(url).with_prebuffer_ms(0).with_seek(controller);
+    src.configure_pipeline(&Caps::ByteStream {
+        encoding: ByteStreamEncoding::MpegTs,
+    })
+    .unwrap();
+    let mut sink = CaptureSink::default();
+    tokio::time::timeout(LIVE_RUN_LIMIT, src.run(&mut sink))
+        .await
+        .expect("the run ends")
+        .unwrap();
+    let outcome = ticket
+        .lock()
+        .unwrap()
+        .as_ref()
+        .and_then(SeekTicket::outcome);
+    (sink, outcome)
+}
+
+#[tokio::test]
+async fn a_seek_drops_the_held_playlist_reload() {
+    let held_reload = format!("{LL_PLAYLIST_PATH}?");
+    let (sink, outcome) = run_ll_seek(held_reload, Seek::flush_to(LL_SEEK_NS)).await;
+
+    assert_eq!(outcome, Some(SeekOutcome::Served));
+    assert_eq!(sink.flushes, 1);
+    assert_eq!(sink.segment_times, vec![LL_SEEK_NS]);
+    let expected = [
+        ll_parts(LL_JOIN_PART..LL_PARTS),
+        ll_whole_segments(),
+        ll_parts(0..LL_PARTS),
+    ]
+    .concat();
+    assert_eq!(sink.body, expected);
+}
+
+#[tokio::test]
+async fn a_seek_drops_the_part_download_in_flight() {
+    // the part after the join, so the join part is fetched and still queued when the seek comes
+    let stalled_part = LL_JOIN_PART + 1;
+    let stalled = format!("/part{LL_WHOLE_SEGMENTS}.{stalled_part}.ts");
+    let (sink, outcome) = run_ll_seek(stalled, Seek::flush_to(LL_SEEK_NS)).await;
+
+    assert_eq!(outcome, Some(SeekOutcome::Served));
+    assert_eq!(sink.flushes, 1);
+    assert_eq!(sink.segment_times, vec![LL_SEEK_NS]);
+    assert_eq!(
+        sink.body,
+        [ll_whole_segments(), ll_parts(0..LL_PARTS)].concat(),
+        "neither the queued part nor the stalled one goes out"
+    );
 }

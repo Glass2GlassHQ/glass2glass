@@ -69,7 +69,7 @@ use g2g_core::{
 };
 
 use crate::abr::BandwidthEstimator;
-use crate::adaptiveseek::{download_unless_seek, DownloadOrSeek, LiveWindow};
+use crate::adaptiveseek::{unless_seek, FinishedOrSeek, LiveWindow};
 use crate::fetch::{
     byte_frame, get_bytes, get_bytes_retrying, get_range_bytes_retrying, get_text, get_text_query,
     get_text_retrying, is_origin_failure, resolve_url, FetchRetry, MAX_MANIFEST_BYTES,
@@ -1179,15 +1179,25 @@ impl SourceLoop for HlsSrc {
                                 }
                                 let part_url = resolve_url(&media_url, &part.uri);
                                 let t0 = g2g_core::metrics::monotonic_ns();
-                                let Some(bytes) = self
-                                    .media_bytes_skipping_live_fetch_failure(
+                                let downloaded = unless_seek(
+                                    self.seek.as_ref(),
+                                    |seek| admit_seek(&media, window_start_ns, ll, seek),
+                                    self.media_bytes_skipping_live_fetch_failure(
                                         &client,
                                         &media,
                                         &part_url,
                                         part.byte_range,
-                                    )
-                                    .await?
-                                else {
+                                    ),
+                                )
+                                .await;
+                                let downloaded = match downloaded {
+                                    FinishedOrSeek::Finished(downloaded) => downloaded?,
+                                    FinishedOrSeek::Seek(seek) => {
+                                        taken_seek = Some(seek);
+                                        break;
+                                    }
+                                };
+                                let Some(bytes) = downloaded else {
                                     parts_end = part_index + 1;
                                     skipped = true;
                                     break;
@@ -1219,6 +1229,9 @@ impl SourceLoop for HlsSrc {
                                     );
                                 }
                             }
+                            if taken_seek.is_some() {
+                                continue;
+                            }
                             if parts_end == segment.parts.len() && !segment.incomplete() {
                                 next_seq = seg_seq + 1;
                                 next_part = 0;
@@ -1243,7 +1256,7 @@ impl SourceLoop for HlsSrc {
                         } else {
                             let seg_url = resolve_url(&media_url, &segment.uri);
                             let t0 = g2g_core::metrics::monotonic_ns();
-                            let downloaded = download_unless_seek(
+                            let downloaded = unless_seek(
                                 self.seek.as_ref(),
                                 |seek| admit_seek(&media, window_start_ns, ll, seek),
                                 self.media_bytes_skipping_live_fetch_failure(
@@ -1255,8 +1268,8 @@ impl SourceLoop for HlsSrc {
                             )
                             .await;
                             let downloaded = match downloaded {
-                                DownloadOrSeek::Downloaded(downloaded) => downloaded?,
-                                DownloadOrSeek::Seek(seek) => {
+                                FinishedOrSeek::Finished(downloaded) => downloaded?,
+                                FinishedOrSeek::Seek(seek) => {
                                     taken_seek = Some(seek);
                                     continue;
                                 }
@@ -1438,20 +1451,30 @@ impl SourceLoop for HlsSrc {
                 let target_ms = u64::from(media.target_duration_secs.max(1)) * 1000;
                 let held = if ll {
                     let t0 = g2g_core::metrics::monotonic_ns();
-                    let answer = get_text_query(
-                        &client,
-                        &media_url,
-                        &[
-                            (HLS_MSN_PARAM, next_seq),
-                            (HLS_PART_PARAM, next_part as u64),
-                        ],
-                        core::time::Duration::from_millis(
-                            target_ms.saturating_add(BLOCKING_RELOAD_MARGIN_MS),
+                    let held_reload = unless_seek(
+                        self.seek.as_ref(),
+                        |seek| admit_seek(&media, window_start_ns, ll, seek),
+                        get_text_query(
+                            &client,
+                            &media_url,
+                            &[
+                                (HLS_MSN_PARAM, next_seq),
+                                (HLS_PART_PARAM, next_part as u64),
+                            ],
+                            core::time::Duration::from_millis(
+                                target_ms.saturating_add(BLOCKING_RELOAD_MARGIN_MS),
+                            ),
+                            MAX_MANIFEST_BYTES,
                         ),
-                        MAX_MANIFEST_BYTES,
                     )
-                    .await
-                    .ok();
+                    .await;
+                    let answer = match held_reload {
+                        FinishedOrSeek::Finished(answer) => answer.ok(),
+                        FinishedOrSeek::Seek(seek) => {
+                            taken_seek = Some(seek);
+                            continue;
+                        }
+                    };
                     g2g_debug!(
                         self,
                         "t={t} {stream} blocking reload for ({next_seq},{next_part}): held {ms} ms, {outcome}",
@@ -1484,7 +1507,16 @@ impl SourceLoop for HlsSrc {
                         // publisher by the work time every cycle.
                         let due =
                             next_reload.unwrap_or_else(|| tokio::time::Instant::now() + interval);
-                        tokio::time::sleep_until(due).await;
+                        let waited = unless_seek(
+                            self.seek.as_ref(),
+                            |seek| admit_seek(&media, window_start_ns, ll, seek),
+                            tokio::time::sleep_until(due),
+                        )
+                        .await;
+                        if let FinishedOrSeek::Seek(seek) = waited {
+                            taken_seek = Some(seek);
+                            continue;
+                        }
                         let now = tokio::time::Instant::now();
                         let scheduled = due + interval;
                         // A full interval behind: reload now, do not burst.

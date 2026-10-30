@@ -33,7 +33,10 @@ mod dash_live_server;
 use dash_live_server::{now_unix, xs_datetime};
 #[path = "common/http_routes.rs"]
 mod http_routes;
+#[path = "common/seek_after_frames.rs"]
+mod seek_after_frames;
 use http_routes::serve;
+use seek_after_frames::run_seeking_after_frames;
 
 #[derive(Default)]
 struct CaptureSink {
@@ -235,6 +238,46 @@ async fn dash_live_seek_plays_from_the_segment_holding_the_target() {
         sink.body,
         expected_stream(&[6, 7, 8, 9]),
         "the seek starts a segment before the live edge"
+    );
+    assert_eq!(sink.segments.len(), 1);
+    assert_eq!(sink.segments[0].time, INSIDE_LIVE_WINDOW_NS);
+}
+
+// longer than LIVE_RUN_LIMIT, so only a seek taken during the wait ends it in time
+const RELOAD_WAIT_MS: u64 = 60_000;
+
+#[tokio::test]
+async fn dash_live_seek_during_the_reload_wait_plays_at_once() {
+    let (url, _) = serve_live(vec![live_mpd(
+        LIVE_AGE_SECS,
+        LIVE_TIME_SHIFT_SECS,
+        Some(2.0),
+        None,
+    )]);
+    let controller = SeekController::new();
+    let mut src = DashSrc::new(url)
+        .with_reload_interval_ms(RELOAD_WAIT_MS)
+        .with_seek(controller.clone());
+    src.configure_pipeline(&Caps::ByteStream {
+        encoding: ByteStreamEncoding::IsoBmff,
+    })
+    .unwrap();
+    let (before_seek, after_seek): (&[usize], &[usize]) = (&[7], &[6, 7]);
+    // the init segment, then one frame per media segment
+    let frames_before_seek = 1 + before_seek.len();
+    let (sink, ticket) = run_seeking_after_frames::<CaptureSink>(
+        &mut src,
+        &controller,
+        Seek::flush_to(INSIDE_LIVE_WINDOW_NS),
+        frames_before_seek,
+        frames_before_seek + 1 + after_seek.len(),
+    )
+    .await;
+
+    assert_eq!(ticket.outcome(), Some(SeekOutcome::Served));
+    assert_eq!(
+        sink.body,
+        [expected_stream(before_seek), expected_stream(after_seek)].concat()
     );
     assert_eq!(sink.segments.len(), 1);
     assert_eq!(sink.segments[0].time, INSIDE_LIVE_WINDOW_NS);

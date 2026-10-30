@@ -71,7 +71,7 @@ use g2g_core::{
 };
 
 use crate::abr::BandwidthEstimator;
-use crate::adaptiveseek::{download_unless_seek, DownloadOrSeek, LiveWindow};
+use crate::adaptiveseek::{unless_seek, FinishedOrSeek, LiveWindow};
 use crate::dashclock::{local_now_unix, RequestSpan, ServerClock};
 use crate::fetch::{
     body_read_err, byte_frame, get_bytes_retrying, get_range_bytes_retrying, get_response_retrying,
@@ -789,7 +789,7 @@ impl SourceLoop for DashSrc {
                                         }
                                     }
                                 };
-                                let fetched = match download_unless_seek(
+                                let fetched = match unless_seek(
                                     self.seek.as_ref(),
                                     |seek| {
                                         admit_seek(&mpd, clock.now_unix(), &segs, timescale, seek)
@@ -798,8 +798,8 @@ impl SourceLoop for DashSrc {
                                 )
                                 .await
                                 {
-                                    DownloadOrSeek::Downloaded(fetched) => fetched,
-                                    DownloadOrSeek::Seek(seek) => {
+                                    FinishedOrSeek::Finished(fetched) => fetched,
+                                    FinishedOrSeek::Seek(seek) => {
                                         taken_seek = Some(seek);
                                         continue;
                                     }
@@ -907,7 +907,16 @@ impl SourceLoop for DashSrc {
                 } else {
                     (mpd.minimum_update_period_secs.unwrap_or(1.0) * 1000.0) as u64
                 };
-                tokio::time::sleep(core::time::Duration::from_millis(interval_ms.max(1))).await;
+                let waited = unless_seek(
+                    self.seek.as_ref(),
+                    |seek| admit_seek(&mpd, clock.now_unix(), &segs, timescale, seek),
+                    tokio::time::sleep(core::time::Duration::from_millis(interval_ms.max(1))),
+                )
+                .await;
+                if let FinishedOrSeek::Seek(seek) = waited {
+                    taken_seek = Some(seek);
+                    continue 'manifest;
+                }
                 let playing_start_secs = mpd.periods[period_idx].start_secs;
                 let manifest_request;
                 (mpd, manifest_request) = reload_manifest(&client, &self.url).await?;
