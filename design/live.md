@@ -733,7 +733,12 @@ delivery cursor moves the cursor past the dropped range. TSBPD times are compute
 from the 32-bit microsecond sender timestamp relative to the last released
 packet, so the 71-minute wrap does not make every later packet due at once.
 `SrtSrc` NAKs a new gap when the packet after it arrives and resends the whole
-loss list every 20 ms, libsrt's live-mode NAK report period. Its handshake reply
+loss list every half RTT plus four RTT deviations, at least 20 ms, libsrt's
+live-mode NAK report period. It measures RTT from the delay between each full
+ACK and the ACKACK that echoes its number, smoothed as libsrt does, and reports
+it in its ACKs. `SrtSink` answers each full ACK with an ACKACK stamped with the
+microseconds since the handshake, which a libsrt receiver also reads for clock
+drift. Its handshake reply
 carries libsrt's listener flags (TSBPD both ways, too-late drop, periodic NAK
 report, and the retransmit bit when the caller offers it), so a libsrt caller
 drops packets it has given up on and marks its retransmissions. With

@@ -104,6 +104,7 @@ pub struct SrtSink {
     auto_reconnect: bool,
     // the pts of the first frame sent on the current connection
     connection_pts_ns: Option<u64>,
+    connected_at_ns: u64,
     last_peer_packet_ns: u64,
     // monotonic time before which a failed connection is not called again
     reconnect_at_ns: u64,
@@ -134,6 +135,7 @@ impl SrtSink {
             eos_seen: false,
             auto_reconnect: true,
             connection_pts_ns: None,
+            connected_at_ns: 0,
             last_peer_packet_ns: 0,
             reconnect_at_ns: 0,
         }
@@ -271,7 +273,8 @@ impl SrtSink {
                 last_sent = Some(reply);
             }
         }
-        self.last_peer_packet_ns = g2g_core::metrics::monotonic_ns();
+        self.connected_at_ns = g2g_core::metrics::monotonic_ns();
+        self.last_peer_packet_ns = self.connected_at_ns;
         let mut sender = SrtSender::new(hs.peer_socket_id(), INIT_SEQ, SEND_CAPACITY);
         if let Some(c) = crypto {
             sender.set_crypto(c);
@@ -300,8 +303,11 @@ impl SrtSink {
                             }
                             continue;
                         }
+                        // control packets carry the microseconds since the connection, wrapping at 32 bits
+                        let control_timestamp =
+                            ((self.last_peer_packet_ns - self.connected_at_ns) / 1000) as u32;
                         let sender = self.sender.as_mut().ok_or(G2gError::NotConfigured)?;
-                        resends.extend(sender.on_control(&ctrl));
+                        resends.extend(sender.on_control(&ctrl, control_timestamp));
                     }
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,

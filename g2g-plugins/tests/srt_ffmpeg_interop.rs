@@ -805,3 +805,140 @@ async fn lossmaxttl_holds_the_nak_for_a_packet_reordered_from_libsrt() {
         tolerant.nacked
     );
 }
+
+// forwards both ways and records the RTT field of every full ACK the listener sends
+async fn proxy_recording_ack_rtt(
+    proxy: tokio::net::UdpSocket,
+    listener: std::net::SocketAddr,
+    ack_rtts: Arc<std::sync::Mutex<Vec<u32>>>,
+) {
+    let mut caller = None;
+    let mut buf = [0u8; 2048];
+    loop {
+        let Ok((n, from)) = proxy.recv_from(&mut buf).await else {
+            return;
+        };
+        let packet = &buf[..n];
+        if from != listener {
+            caller = Some(from);
+            let _ = proxy.send_to(packet, listener).await;
+            continue;
+        }
+        if let Some(srt::Control::Ack { rtt_us, .. }) = srt::parse_control(packet) {
+            ack_rtts.lock().unwrap().push(rtt_us);
+        }
+        if let Some(caller) = caller {
+            let _ = proxy.send_to(packet, caller).await;
+        }
+    }
+}
+
+fn measured(ack_rtts: &std::sync::Mutex<Vec<u32>>) -> bool {
+    ack_rtts
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|&rtt_us| rtt_us != srt::INITIAL_RTT_US)
+}
+
+#[tokio::test]
+#[ignore = "needs ffmpeg built with libsrt; opens a local UDP socket"]
+async fn srtsrc_measures_rtt_from_libsrt_ackacks() {
+    const PAYLOADS: u64 = 60;
+
+    let sock = StdUdpSocket::bind("127.0.0.1:0").expect("bind srt listener");
+    let listener = sock.local_addr().unwrap();
+    let proxy = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("bind proxy");
+    let url = format!("srt://{}", proxy.local_addr().unwrap());
+    let ack_rtts = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let proxy_task = tokio::spawn(proxy_recording_ack_rtt(proxy, listener, ack_rtts.clone()));
+    let mut src = SrtSrc::from_socket(sock)
+        .expect("adopt socket")
+        .with_frame_limit(PAYLOADS);
+    let mut cap = Capture::default();
+
+    let mut caller = spawn_ffmpeg_caller(&url);
+    let result = tokio::time::timeout(Duration::from_secs(30), src.run(&mut cap)).await;
+    caller.kill().expect("kill the caller");
+    caller.wait().expect("reap the caller");
+    proxy_task.abort();
+
+    assert_eq!(result.expect("streams in time").expect("run ok"), PAYLOADS);
+    assert!(
+        measured(&ack_rtts),
+        "srtsrc reports an RTT measured from libsrt's ACKACKs"
+    );
+}
+
+#[tokio::test]
+#[ignore = "needs ffmpeg built with libsrt; opens a local UDP socket"]
+async fn libsrt_measures_rtt_from_srtsink_ackacks() {
+    const CHUNKS: u64 = 400;
+    const CHUNK_SPACING_MS: u64 = 2;
+
+    let port = free_udp_port();
+    let listener: std::net::SocketAddr = ([127, 0, 0, 1], port).into();
+    let mut ffmpeg = Command::new("ffmpeg")
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-i",
+            &format!("srt://{listener}?mode=listener"),
+            "-c",
+            "copy",
+            "-f",
+            "null",
+            "-",
+        ])
+        .stdin(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn the ffmpeg SRT listener");
+    let proxy = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("bind proxy");
+    let proxy_address = proxy.local_addr().unwrap();
+    let ack_rtts = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let proxy_task = tokio::spawn(proxy_recording_ack_rtt(proxy, listener, ack_rtts.clone()));
+    // the listener has to bind before the call, the caller does not retry
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+
+    let mut sink = SrtSink::new(proxy_address);
+    sink.configure_pipeline(&Caps::ByteStream {
+        encoding: ByteStreamEncoding::MpegTs,
+    })
+    .expect("configure SrtSink");
+    let mut null = NullOut;
+    let mut chunk = vec![0xFFu8; 1316];
+    for packet in chunk.chunks_mut(188) {
+        packet[0] = MPEGTS_SYNC_BYTE;
+    }
+    for i in 0..CHUNKS {
+        let frame = Frame {
+            domain: MemoryDomain::System(SystemSlice::from_boxed(chunk.clone().into_boxed_slice())),
+            timing: FrameTiming {
+                pts_ns: i * CHUNK_SPACING_MS * 1_000_000,
+                ..FrameTiming::default()
+            },
+            sequence: i,
+            meta: Default::default(),
+        };
+        sink.process(PipelinePacket::DataFrame(frame), &mut null)
+            .await
+            .expect("send TS chunk");
+        tokio::time::sleep(Duration::from_millis(CHUNK_SPACING_MS)).await;
+    }
+    sink.process(PipelinePacket::Eos, &mut null)
+        .await
+        .expect("EOS closes the SRT session");
+    ffmpeg.kill().expect("kill the listener");
+    ffmpeg.wait().expect("reap the listener");
+    proxy_task.abort();
+
+    assert!(
+        measured(&ack_rtts),
+        "libsrt reports an RTT measured from srtsink's ACKACKs"
+    );
+}

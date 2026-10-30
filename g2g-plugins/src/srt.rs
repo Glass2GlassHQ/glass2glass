@@ -932,8 +932,9 @@ impl SrtSender {
     }
 
     /// React to a control packet from the receiver: NAK triggers retransmits
-    /// (the R flag set), ACK trims the buffer. Returns packets to resend.
-    pub fn on_control(&mut self, ctrl: &Control) -> Vec<Vec<u8>> {
+    /// (the R flag set), ACK trims the buffer and is answered with an ACKACK
+    /// stamped `control_timestamp`. Returns packets to send.
+    pub fn on_control(&mut self, ctrl: &Control, control_timestamp: u32) -> Vec<Vec<u8>> {
         match ctrl {
             Control::Nak { loss } => {
                 let mut out = Vec::new();
@@ -955,18 +956,33 @@ impl SrtSender {
                 }
                 out
             }
-            Control::Ack { ack_seq, .. } | Control::LightAck { ack_seq } => {
-                // Everything before ack_seq is received; drop it from the buffer.
-                while self
-                    .buffer
-                    .front()
-                    .is_some_and(|sent| !seq_ge(sent.seq, *ack_seq))
-                {
-                    self.buffer.pop_front();
-                }
+            Control::LightAck { ack_seq } => {
+                self.release_acknowledged(*ack_seq);
                 Vec::new()
             }
+            Control::Ack {
+                ack_no, ack_seq, ..
+            } => {
+                self.release_acknowledged(*ack_seq);
+                // libsrt's receiver measures RTT from this and tracks clock drift by its timestamp
+                alloc::vec![build_control(
+                    &Control::AckAck { ack_no: *ack_no },
+                    control_timestamp,
+                    self.dst_socket_id,
+                )]
+            }
             _ => Vec::new(),
+        }
+    }
+
+    // everything before ack_seq is received
+    fn release_acknowledged(&mut self, ack_seq: u32) {
+        while self
+            .buffer
+            .front()
+            .is_some_and(|sent| !seq_ge(sent.seq, ack_seq))
+        {
+            self.buffer.pop_front();
         }
     }
 
@@ -1377,6 +1393,77 @@ impl SrtReceiver {
     }
 }
 
+// libsrt's ACK_WND_SIZE
+const UNANSWERED_ACK_LIMIT: usize = 1024;
+// libsrt's live-mode floor on the period of the repeated loss report
+const MIN_NAK_REPORT_INTERVAL_US: u64 = 20_000;
+
+// libsrt's receiver round-trip time, from the delay between a full ACK and the ACKACK echoing its number
+#[derive(Debug)]
+pub struct AckRoundTrip {
+    // ack number and monotonic microsecond send time
+    unanswered_acks: alloc::collections::VecDeque<(u32, u64)>,
+    smoothed_rtt_us: u64,
+    rtt_variance_us: u64,
+    measured: bool,
+}
+
+impl Default for AckRoundTrip {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl AckRoundTrip {
+    pub fn new() -> Self {
+        Self {
+            unanswered_acks: alloc::collections::VecDeque::new(),
+            smoothed_rtt_us: INITIAL_RTT_US.into(),
+            rtt_variance_us: INITIAL_RTT_VARIANCE_US.into(),
+            measured: false,
+        }
+    }
+
+    pub fn on_ack_sent(&mut self, ack_no: u32, now_us: u64) {
+        if self.unanswered_acks.len() == UNANSWERED_ACK_LIMIT {
+            self.unanswered_acks.pop_front();
+        }
+        self.unanswered_acks.push_back((ack_no, now_us));
+    }
+
+    pub fn on_ackack(&mut self, ack_no: u32, now_us: u64) {
+        let Some(index) = self.unanswered_acks.iter().position(|&(n, _)| n == ack_no) else {
+            return;
+        };
+        let (_, sent_us) = self.unanswered_acks[index];
+        self.unanswered_acks.drain(..=index);
+        let rtt_us = now_us.saturating_sub(sent_us);
+        if !self.measured {
+            self.smoothed_rtt_us = rtt_us;
+            self.rtt_variance_us = rtt_us / 2;
+            self.measured = true;
+            return;
+        }
+        self.rtt_variance_us =
+            (self.rtt_variance_us * 3 + self.smoothed_rtt_us.abs_diff(rtt_us)) / 4;
+        self.smoothed_rtt_us = (self.smoothed_rtt_us * 7 + rtt_us) / 8;
+    }
+
+    // the ACK fields are 32-bit, an RTT past 71 minutes reports as the largest value
+    pub fn smoothed_rtt_us(&self) -> u32 {
+        u32::try_from(self.smoothed_rtt_us).unwrap_or(u32::MAX)
+    }
+
+    pub fn rtt_variance_us(&self) -> u32 {
+        u32::try_from(self.rtt_variance_us).unwrap_or(u32::MAX)
+    }
+
+    // libsrt live mode repeats the loss report every half of RTT plus four deviations
+    pub fn nak_report_interval_us(&self) -> u64 {
+        ((self.smoothed_rtt_us + 4 * self.rtt_variance_us) / 2).max(MIN_NAK_REPORT_INTERVAL_US)
+    }
+}
+
 /// SRT live-mode congestion control: rate-based output pacing. Rather than the
 /// window-based AIMD of file transfer, SRT live mode paces packets so the egress
 /// does not burst-flood the path and leaves headroom for retransmissions. This
@@ -1729,7 +1816,7 @@ mod tests {
         assert_eq!(missing, vec![102], "the gap is reported for NAK");
 
         // Receiver NAKs, sender retransmits, receiver recovers + drains in order.
-        let resends = sender.on_control(&Control::Nak { loss: missing });
+        let resends = sender.on_control(&Control::Nak { loss: missing }, 0);
         assert_eq!(resends.len(), 1, "exactly the lost packet resent");
         let resent = parse_data_packet(&resends[0]).unwrap();
         assert!(resent.retransmit, "resend carries the R flag");
@@ -1805,10 +1892,13 @@ mod tests {
         }
 
         // Everything before the wrap arrived, the post-wrap packets 0, 1, 2 did not.
-        sender.on_control(&Control::LightAck { ack_seq: 0 });
-        let resends = sender.on_control(&Control::Nak {
-            loss: vec![LAST_SEQUENCE, 0, 1, 2],
-        });
+        sender.on_control(&Control::LightAck { ack_seq: 0 }, 0);
+        let resends = sender.on_control(
+            &Control::Nak {
+                loss: vec![LAST_SEQUENCE, 0, 1, 2],
+            },
+            0,
+        );
         let resent: Vec<u32> = resends
             .iter()
             .map(|p| parse_data_packet(p).unwrap().seq)
@@ -2249,6 +2339,71 @@ mod tests {
         assert_eq!(
             receiver.on_data(packet(ordered + 7, false)),
             vec![ordered + 5]
+        );
+    }
+
+    #[test]
+    fn a_full_ack_is_answered_with_an_ackack_and_a_light_ack_is_not() {
+        const ACK_NO: u32 = 7;
+        const CONTROL_TIMESTAMP: u32 = 1234;
+        let mut sender = SrtSender::new(0x1234, 100, 64);
+        sender.send(b"p0", 0);
+        let light = sender.on_control(&Control::LightAck { ack_seq: 100 }, CONTROL_TIMESTAMP);
+        assert!(light.is_empty());
+        let full = Control::Ack {
+            ack_no: ACK_NO,
+            ack_seq: 101,
+            rtt_us: INITIAL_RTT_US,
+            rtt_variance_us: INITIAL_RTT_VARIANCE_US,
+            available_buffer: FLOW_WINDOW_PACKETS,
+        };
+        let replies = sender.on_control(&full, CONTROL_TIMESTAMP);
+        assert_eq!(replies.len(), 1);
+        assert_eq!(
+            parse_control(&replies[0]),
+            Some(Control::AckAck { ack_no: ACK_NO })
+        );
+        let timestamp = u32::from_be_bytes(replies[0][8..12].try_into().unwrap());
+        assert_eq!(timestamp, CONTROL_TIMESTAMP);
+    }
+
+    #[test]
+    fn round_trip_follows_libsrt_smoothing() {
+        let mut round_trip = AckRoundTrip::new();
+        assert_eq!(
+            round_trip.nak_report_interval_us(),
+            u64::from(INITIAL_RTT_US + 4 * INITIAL_RTT_VARIANCE_US) / 2,
+            "before a sample the initial estimate sets the report period"
+        );
+        round_trip.on_ack_sent(1, 0);
+        round_trip.on_ack_sent(2, 10_000);
+        round_trip.on_ackack(2, 50_000);
+        assert_eq!(
+            round_trip.smoothed_rtt_us(),
+            40_000,
+            "first sample taken whole"
+        );
+        assert_eq!(round_trip.rtt_variance_us(), 20_000);
+        round_trip.on_ackack(1, 60_000);
+        assert_eq!(
+            round_trip.smoothed_rtt_us(),
+            40_000,
+            "an ACK older than the answered one is gone"
+        );
+        round_trip.on_ack_sent(3, 100_000);
+        round_trip.on_ackack(3, 108_000);
+        assert_eq!(round_trip.smoothed_rtt_us(), (40_000 * 7 + 8_000) / 8);
+        assert_eq!(round_trip.rtt_variance_us(), (20_000 * 3 + 32_000) / 4);
+    }
+
+    #[test]
+    fn nak_report_period_has_a_floor() {
+        let mut round_trip = AckRoundTrip::new();
+        round_trip.on_ack_sent(1, 0);
+        round_trip.on_ackack(1, 100);
+        assert_eq!(
+            round_trip.nak_report_interval_us(),
+            MIN_NAK_REPORT_INTERVAL_US
         );
     }
 

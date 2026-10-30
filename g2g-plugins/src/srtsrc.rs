@@ -38,9 +38,6 @@ const LISTENER_SOCKET_ID: u32 = 0x6732_736C; // "g2sl"
 const DEFAULT_LATENCY_MS: u16 = 120;
 /// UDP receive buffer.
 const RECV_BUF: usize = 2048;
-/// Resend the whole loss list this often (ns), libsrt's live-mode minimum NAK
-/// report period. A new gap is NAKed when it is seen, not on this schedule.
-const NAK_REPORT_INTERVAL_NS: u64 = 20_000_000;
 /// The SRT full ACK period (the 10 ms SYN interval).
 const ACK_INTERVAL_NS: u64 = 10_000_000;
 /// Receive timeout (ms) so the TSBPD buffer still flushes due packets when no new
@@ -368,6 +365,7 @@ impl SrtSrc {
         let mut last_peer_packet_ns = g2g_core::metrics::monotonic_ns();
         // Full ACK numbers start at 1 (0 marks a light ACK).
         let mut ack_no = 0u32;
+        let mut round_trip = srt::AckRoundTrip::new();
         loop {
             // A short receive timeout so buffered packets still flush on their
             // TSBPD schedule when no new datagram arrives (a silent gap).
@@ -419,6 +417,9 @@ impl SrtSrc {
                                     );
                                     receiver.on_drop_request(first_sequence, last_sequence)
                                 }
+                                Some(Control::AckAck { ack_no }) => {
+                                    round_trip.on_ackack(ack_no, now_us)
+                                }
                                 // Keepalive / handshake retries: ignored.
                                 _ => {}
                             }
@@ -447,9 +448,9 @@ impl SrtSrc {
                 }
             }
 
-            // Re-request every open gap on a fixed schedule, as libsrt's periodic NAK report.
+            // Re-request every open gap on libsrt's periodic NAK report schedule.
             if now >= next_nak_report_ns {
-                next_nak_report_ns = now + NAK_REPORT_INTERVAL_NS;
+                next_nak_report_ns = now + round_trip.nak_report_interval_us() * 1000;
                 let missing = receiver.missing();
                 if !missing.is_empty() {
                     g2g_core::g2g_debug!(
@@ -469,12 +470,13 @@ impl SrtSrc {
                 let ack = Control::Ack {
                     ack_no,
                     ack_seq,
-                    rtt_us: srt::INITIAL_RTT_US,
-                    rtt_variance_us: srt::INITIAL_RTT_VARIANCE_US,
+                    rtt_us: round_trip.smoothed_rtt_us(),
+                    rtt_variance_us: round_trip.rtt_variance_us(),
                     available_buffer: receiver.available_buffer(),
                 };
                 let ack = srt::build_control(&ack, 0, peer_socket_id);
                 socket.send_to(&ack, peer).await.map_err(io_err)?;
+                round_trip.on_ack_sent(ack_no, now_us);
             }
         }
     }

@@ -6,7 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
-Breaking: `QosMessage` gains `downstream_proc_ns`, `ElementProbe` is no longer `UnwindSafe`, `SpecError::UnknownProperty` / `BadValue` are replaced by `SpecError::Property(ParseError)`, `receive_rtp_h264` is renamed `receive_rtp`, `RtpRecvConfig` gains an `encoding` field, the `vaapi` feature with `vaapidec` / `vaapidech265` is removed, `MkvCodec` / `MkvStream` gain `Mp2` and `Mp3`, `srt::Handshake` gains `srt_flags`, `SrtReceiver::on_data` returns the sequences to NAK, and `SrtSender::on_control` drops its timestamp argument.
+Breaking: `QosMessage` gains `downstream_proc_ns`, `ElementProbe` is no longer `UnwindSafe`, `SpecError::UnknownProperty` / `BadValue` are replaced by `SpecError::Property(ParseError)`, `receive_rtp_h264` is renamed `receive_rtp`, `RtpRecvConfig` gains an `encoding` field, the `vaapi` feature with `vaapidec` / `vaapidech265` is removed, `MkvCodec` / `MkvStream` gain `Mp2` and `Mp3`, `srt::Handshake` gains `srt_flags`, and `SrtReceiver::on_data` returns the sequences to NAK.
 
 - M1900: `VelloAnalyticsOverlay` draws on RGBA wgpu textures, `WgpuColorConvert` converts NV12 wgpu textures to RGBA, and `CudaToWgpu` keeps frame metadata.
 - M1901: `VelloAnalyticsOverlay` draws the `show-label` / `show-track` / `show-score` captions.
@@ -97,6 +97,7 @@ Breaking: `QosMessage` gains `downstream_proc_ns`, `ElementProbe` is no longer `
 - M1994: `fmp4demux` and `flvdemux` end the stream before a seek after the end through the same call as the audio parsers.
 - M1995: `srtsrc` answers callers with libsrt's handshake flags, NAKs a new gap at once and takes libsrt's `lossmaxttl` reorder tolerance.
 - M1996: `srtsink` resends a lost packet with its original timestamp.
+- M1997: `srtsrc` measures RTT from ACKACKs and paces its loss reports by it, and `srtsink` answers full ACKs with ACKACKs.
 
 ## 0.10.0
 
