@@ -628,24 +628,32 @@ pub(crate) fn flv_stream_to_str(stream: FlvStream) -> &'static str {
     }
 }
 
+// H.264 first: the auto-plugger prefers the leading alternative, and it is the codec a
+// modern FLV carries
+const FLV_STREAMS: [FlvStream; 7] = [
+    FlvStream::H264,
+    FlvStream::Aac,
+    FlvStream::SorensonH263,
+    FlvStream::Vp6,
+    FlvStream::Vp6Alpha,
+    FlvStream::Mp3,
+    FlvStream::Speex,
+];
+
+#[cfg(feature = "std")]
+pub(crate) fn stream_for_consumer(accepted: &CapsSet) -> Option<alloc::string::String> {
+    crate::demuxstream::stream_for_consumer(
+        &CapsSet::one(FlvDemux::output_caps(FlvStream::default())),
+        FLV_STREAMS.map(|stream| (stream, FlvDemux::output_caps(stream))),
+        accepted,
+    )
+    .map(|stream| alloc::string::String::from(flv_stream_to_str(stream)))
+}
+
 impl PadTemplates for FlvDemux {
     fn pad_templates() -> Vec<PadTemplate> {
-        // H.264 first: the auto-plugger prefers the leading alternative, and it is
-        // the codec a modern FLV carries.
-        let source = CapsSet::from_alternatives(
-            [
-                FlvStream::H264,
-                FlvStream::Aac,
-                FlvStream::SorensonH263,
-                FlvStream::Vp6,
-                FlvStream::Vp6Alpha,
-                FlvStream::Mp3,
-                FlvStream::Speex,
-            ]
-            .into_iter()
-            .map(Self::output_caps)
-            .collect(),
-        );
+        let source =
+            CapsSet::from_alternatives(FLV_STREAMS.into_iter().map(Self::output_caps).collect());
         Vec::from([
             PadTemplate::sink(CapsSet::one(Self::input_caps())),
             PadTemplate::source(source),

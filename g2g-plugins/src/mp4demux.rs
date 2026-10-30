@@ -138,6 +138,30 @@ const AUDIO_STREAM_NAMES: &[(&str, AudioFormat)] = &[
     ("vorbis", AudioFormat::Vorbis),
 ];
 
+pub(crate) fn stream_for_consumer(accepted: &CapsSet) -> Option<String> {
+    let named = VIDEO_STREAM_NAMES
+        .iter()
+        .map(|(_, codec)| StreamSelect::VideoNamed(*codec))
+        .chain(
+            AUDIO_STREAM_NAMES
+                .iter()
+                .map(|(_, format)| StreamSelect::Audio(*format)),
+        );
+    crate::demuxstream::stream_for_consumer(
+        &StreamSelect::Video.nego_caps(),
+        named.flat_map(|select| {
+            select
+                .nego_caps()
+                .alternatives()
+                .iter()
+                .map(|caps| (select, caps.clone()))
+                .collect::<Vec<_>>()
+        }),
+        accepted,
+    )
+    .map(StreamSelect::name)
+}
+
 pub(crate) fn mp4_audio_stream_str(format: AudioFormat) -> Option<String> {
     audio_stream_name(AUDIO_STREAM_NAMES, format)
 }

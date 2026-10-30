@@ -1632,6 +1632,10 @@ mod factory {
     pub type DemuxCapsSelectHook =
         fn(name: &str, wanted: &[CapsSet]) -> Option<Box<dyn DynMultiOutputElement>>;
 
+    // a single-output demux with one consumer and no `stream` set: the `stream` value
+    // for the consumer's sink caps `accepted`, `None` keeps the demux's default
+    pub type DemuxStreamHook = fn(name: &str, accepted: &CapsSet) -> Option<String>;
+
     /// A `decodebin` fan-out hook: the decode-per-port sibling of
     /// [`DemuxSelectHook`], for `filesrc location=x.mkv ! decodebin name=d
     /// d.video_0 ! ...  d.audio_0 ! ...`. Unlike the demux-select hook it is NOT
@@ -1768,6 +1772,7 @@ mod factory {
         /// demux element single-stream (its default launch registration).
         demux_select: Vec<DemuxSelectHook>,
         demux_caps_select: Vec<DemuxCapsSelectHook>,
+        demux_stream: Vec<DemuxStreamHook>,
         /// `decodebin` fan-out hooks: the decode-per-port sibling of
         /// `demux_select`. A `decodebin name=d` with several `d.` refs and a file
         /// upstream tries each until one parses the container, returning the
@@ -1951,6 +1956,15 @@ mod factory {
 
         pub fn register_demux_caps_select(&mut self, hook: DemuxCapsSelectHook) -> &mut Self {
             self.demux_caps_select.push(hook);
+            self
+        }
+
+        pub fn demux_stream_hooks(&self) -> &[DemuxStreamHook] {
+            &self.demux_stream
+        }
+
+        pub fn register_demux_stream(&mut self, hook: DemuxStreamHook) -> &mut Self {
+            self.demux_stream.push(hook);
             self
         }
 
@@ -3414,12 +3428,12 @@ mod factory {
 #[cfg(feature = "std")]
 pub use factory::{
     declared_source_caps, AutoplugError, AutoplugParams, ContainerStreams, DecodebinError,
-    DecodebinSelectHook, DemuxCapsSelectHook, DemuxFactory, DemuxSelectHook, ElementDoc,
-    ElementFactory, FallbacksrcSourceFactory, FanoutRebuild, FanoutSrcFactory, LaunchFactory,
-    MuxerFactory, PlaybinError, PlaybinGraphError, PlaybinHook, PlaybinPort, PlaybinSinks,
-    PrimaryStream, PrimaryStreamHook, PropertyDoc, RankOverride, RankSpecError, Registry,
-    RestartFanoutSourceHook, RestartPolicy, RestartSourceHook, SourceFactory, Uri, UriError,
-    UriFanout, UriFanoutHead, UriFanoutHook, UriFanoutPort, UriRebuild, UriSource,
+    DecodebinSelectHook, DemuxCapsSelectHook, DemuxFactory, DemuxSelectHook, DemuxStreamHook,
+    ElementDoc, ElementFactory, FallbacksrcSourceFactory, FanoutRebuild, FanoutSrcFactory,
+    LaunchFactory, MuxerFactory, PlaybinError, PlaybinGraphError, PlaybinHook, PlaybinPort,
+    PlaybinSinks, PrimaryStream, PrimaryStreamHook, PropertyDoc, RankOverride, RankSpecError,
+    Registry, RestartFanoutSourceHook, RestartPolicy, RestartSourceHook, SourceFactory, Uri,
+    UriError, UriFanout, UriFanoutHead, UriFanoutHook, UriFanoutPort, UriRebuild, UriSource,
     UriSourceFactory,
 };
 

@@ -1774,6 +1774,7 @@ fn register_uri_handlers(reg: &mut Registry) {
     reg.register_demux_select(crate::uridecodebin::mkv_demux_select);
     reg.register_demux_select(crate::uridecodebin::ts_demux_select);
     reg.register_demux_caps_select(crate::uridecodebin::ts_demux_caps_select);
+    reg.register_demux_stream(crate::demuxstream::demux_stream);
     reg.register_demux_select(crate::uridecodebin::mp4_demux_select);
     reg.register_demux_select(crate::uridecodebin::ogg_demux_select);
     reg.register_demux_select(crate::uridecodebin::ps_demux_select);

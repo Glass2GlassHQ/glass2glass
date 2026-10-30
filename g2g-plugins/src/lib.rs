@@ -687,6 +687,9 @@ pub mod avimux;
 // Shared seek helper for byte-stream demuxers (M362): drives an upstream
 // byte-seek (FileSrc) and re-syncs from the returned Flush.
 mod demuxseek;
+// A single-output demuxer's `stream` for the one consumer a launch line links it to.
+#[cfg(feature = "std")]
+pub mod demuxstream;
 // MPEG-TS demuxer parsing core (no_std): PAT/PMT/PES -> elementary access units.
 pub mod mpegts;
 // The CRC-32 the MPEG-2 PSI sections and Ogg pages carry.

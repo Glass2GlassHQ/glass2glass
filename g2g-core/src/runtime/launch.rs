@@ -3200,6 +3200,30 @@ fn build_graph(
             .iter()
             .find_map(|hook| hook(&specs[ei].name, &wanted));
     }
+    // a demux with one consumer and no `stream` takes the stream that consumer accepts,
+    // the way gst links a dynamic pad by caps
+    let consumer_stream: Vec<Vec<(String, String)>> = (0..specs.len())
+        .map(|ei| {
+            if out_deg[ei] != 1 || prebuilt[ei].is_some() || prop(&specs[ei], "stream").is_some() {
+                return Vec::new();
+            }
+            let Some(accepted) = links
+                .iter()
+                .find(|(s, _, _, _)| *s == ei)
+                .and_then(|(_, d, _, _)| registry.declared_input_caps(&specs[*d].name))
+            else {
+                return Vec::new();
+            };
+            let name = registry.resolve_alias(&specs[ei].name);
+            registry
+                .demux_stream_hooks()
+                .iter()
+                .find_map(|hook| hook(name, &accepted))
+                .map(|stream| (String::from("stream"), stream))
+                .into_iter()
+                .collect()
+        })
+        .collect();
     // `decodebin name=d` fan-out (M482): a `decodebin` node left unexpanded (it has
     // named refs) with a file source upstream probes the file, builds the
     // multi-output demuxer (stored like a demux-select node so it fans out on its
@@ -3526,7 +3550,8 @@ fn build_graph(
             let el = build_element(registry, &spec.name, &spec.props)?;
             graph.add_sink(GraphNodeRef::Element(el))
         } else {
-            let el = build_element(registry, &spec.name, &spec.props)?;
+            let mut el = build_element(registry, &spec.name, &spec.props)?;
+            apply_props(&mut el, &spec.name, &consumer_stream[ei])?;
             if el.metadata().is_sink() {
                 let downstream = links
                     .iter()

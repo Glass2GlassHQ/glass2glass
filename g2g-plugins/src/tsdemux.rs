@@ -359,9 +359,11 @@ impl Default for TsDemux {
     }
 }
 
+const DEFAULT_STREAM: TsStream = TsStream::H264;
+
 impl TsDemux {
     pub fn new() -> Self {
-        Self::wrap(TsDemuxN::new(Vec::from([TsStream::H264])), "TsDemux")
+        Self::wrap(TsDemuxN::new(Vec::from([DEFAULT_STREAM])), "TsDemux")
     }
 
     /// Select which elementary stream to forward (default [`TsStream::H264`]).
@@ -670,26 +672,22 @@ const TS_STREAMS: [TsStream; 12] = [
     TsStream::Teletext,
 ];
 
-// the first stream whose codec a consumer with sink caps `accepted` takes, a parser's
-// template pins a channel count and rate the stream only states once it is parsed
+// the first stream a consumer with sink caps `accepted` takes
 #[cfg(feature = "std")]
 pub(crate) fn stream_carrying(accepted: &CapsSet) -> Option<TsStream> {
-    TS_STREAMS.into_iter().find(|&stream| {
-        let carried = output_caps(stream);
-        accepted
-            .alternatives()
-            .iter()
-            .any(|caps| same_codec(caps, &carried))
-    })
+    TS_STREAMS
+        .into_iter()
+        .find(|&stream| crate::demuxstream::takes(accepted, &output_caps(stream)))
 }
 
 #[cfg(feature = "std")]
-fn same_codec(a: &Caps, b: &Caps) -> bool {
-    match (a, b) {
-        (Caps::CompressedVideo { codec: x, .. }, Caps::CompressedVideo { codec: y, .. }) => x == y,
-        (Caps::Audio { format: x, .. }, Caps::Audio { format: y, .. }) => x == y,
-        _ => a == b,
-    }
+pub(crate) fn stream_for_consumer(accepted: &CapsSet) -> Option<alloc::string::String> {
+    crate::demuxstream::stream_for_consumer(
+        &CapsSet::one(output_caps(DEFAULT_STREAM)),
+        TS_STREAMS.map(|stream| (stream, output_caps(stream))),
+        accepted,
+    )
+    .map(|stream| alloc::string::String::from(ts_stream_to_str(stream)))
 }
 
 /// The `stream` property string for a [`TsStream`].

@@ -1528,33 +1528,49 @@ pub fn mkv_stream_str(stream: MkvStream) -> alloc::string::String {
     alloc::string::String::from(name)
 }
 
+// the streams a name selects without a sample format, layout or tag
+const CODEC_STREAMS: [MkvStream; 18] = [
+    MkvStream::H264,
+    MkvStream::H265,
+    MkvStream::Vp8,
+    MkvStream::Vp9,
+    MkvStream::Av1,
+    MkvStream::Mjpeg,
+    MkvStream::Theora,
+    MkvStream::Aac,
+    MkvStream::Opus,
+    MkvStream::Ac3,
+    MkvStream::Flac,
+    MkvStream::Vorbis,
+    MkvStream::Mp2,
+    MkvStream::Mp3,
+    MkvStream::Subtitle(TextFormat::Utf8),
+    MkvStream::VobSub,
+    MkvStream::DvbSub,
+    MkvStream::Pgs,
+];
+
+fn codec_and_pcm_streams() -> impl Iterator<Item = MkvStream> {
+    CODEC_STREAMS
+        .into_iter()
+        .chain(g2g_core::pcm_formats().map(MkvStream::Pcm))
+}
+
+#[cfg(feature = "std")]
+pub(crate) fn stream_for_consumer(accepted: &CapsSet) -> Option<alloc::string::String> {
+    crate::demuxstream::stream_for_consumer(
+        &CapsSet::one(MkvDemux::output_caps(MkvStream::default())),
+        codec_and_pcm_streams().map(|stream| (stream, MkvDemux::output_caps(stream))),
+        accepted,
+    )
+    .map(mkv_stream_str)
+}
+
 impl PadTemplates for MkvDemux {
     fn pad_templates() -> Vec<PadTemplate> {
         // One sink (the Matroska byte stream); the source pad can carry any of
         // the selectable elementary streams (an instance pins one via with_stream).
-        let mut source = Vec::from([
-            Self::output_caps(MkvStream::H264),
-            Self::output_caps(MkvStream::H265),
-            Self::output_caps(MkvStream::Vp8),
-            Self::output_caps(MkvStream::Vp9),
-            Self::output_caps(MkvStream::Av1),
-            Self::output_caps(MkvStream::Mjpeg),
-            Self::output_caps(MkvStream::Theora),
-            Self::output_caps(MkvStream::Aac),
-            Self::output_caps(MkvStream::Opus),
-            Self::output_caps(MkvStream::Ac3),
-            Self::output_caps(MkvStream::Flac),
-            Self::output_caps(MkvStream::Vorbis),
-            Self::output_caps(MkvStream::Mp2),
-            Self::output_caps(MkvStream::Mp3),
-            Self::output_caps(MkvStream::Subtitle(TextFormat::Utf8)),
-            Self::output_caps(MkvStream::VobSub),
-            Self::output_caps(MkvStream::DvbSub),
-            Self::output_caps(MkvStream::Pgs),
-        ]);
-        source.extend(
-            g2g_core::pcm_formats().map(|format| Self::output_caps(MkvStream::Pcm(format))),
-        );
+        let mut source: Vec<Caps> = codec_and_pcm_streams().map(Self::output_caps).collect();
         source.extend(raw_video_formats().map(raw_video_placeholder_caps));
         source.extend(
             ProResVariant::ALL.map(|variant| Self::output_caps(MkvStream::ProRes(variant))),
