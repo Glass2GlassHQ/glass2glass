@@ -669,6 +669,20 @@ fn srtsink_uri_and_pbkeylen() {
         s.get_property("mode"),
         Some(PropValue::Str("caller".into()))
     );
+
+    // a host name is resolved on each call
+    s.set_property("host", PropValue::Str("srt.example.com".into()))
+        .unwrap();
+    assert_eq!(
+        s.get_property("uri"),
+        Some(PropValue::Str(
+            "srt://srt.example.com:7003?mode=caller".into()
+        ))
+    );
+    assert_eq!(
+        s.set_property("host", PropValue::Str("srt example".into())),
+        Err(g2g_core::PropError::Value)
+    );
 }
 
 /// M1098: `srtpenc` takes its key as hexadecimal digits, at any of the four

@@ -793,3 +793,31 @@ async fn rendezvous_srtsink_and_srtsrc_meet_and_stream() {
         assert_eq!(received_from(&mut src, sink).await, payloads_then_eos());
     }
 }
+
+// localhost resolves to ::1 or 127.0.0.1, and a socket on [::] takes either
+const ANY_FAMILY: &str = "[::]";
+
+#[tokio::test]
+async fn srtsrc_calls_a_listener_by_host_name() {
+    let port = free_port();
+    let sink = sink_with_uri(format!("srt://{ANY_FAMILY}:{port}?mode=listener"));
+    let mut src = SrtSrc::new(([127, 0, 0, 1], 0).into()).with_frame_limit(PAYLOADS.into());
+    src.set_property("uri", PropValue::Str(format!("srt://localhost:{port}")))
+        .expect("uri");
+    src.configure_pipeline(&Caps::ByteStream {
+        encoding: g2g_core::ByteStreamEncoding::MpegTs,
+    })
+    .expect("configure");
+    assert_eq!(received_from(&mut src, sink).await, payloads_then_eos());
+}
+
+#[tokio::test]
+async fn srtsink_calls_a_listener_by_host_name() {
+    let socket = StdUdpSocket::bind(format!("{ANY_FAMILY}:0")).expect("bind listener");
+    let port = socket.local_addr().unwrap().port();
+    let mut src = SrtSrc::from_socket(socket)
+        .unwrap()
+        .with_frame_limit(PAYLOADS.into());
+    let sink = sink_with_uri(format!("srt://localhost:{port}"));
+    assert_eq!(received_from(&mut src, sink).await, payloads_then_eos());
+}

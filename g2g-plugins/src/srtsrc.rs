@@ -34,7 +34,7 @@ use crate::srtcrypto::{AesKeySize, SrtCrypto, KM_KK_EVEN};
 use crate::srtsink::{
     accept_call, complete_handshake, unpredictable_cookie, RECONNECT_INTERVAL_NS,
 };
-use crate::srturi::{parse_srt_uri, SrtMode};
+use crate::srturi::{bind_toward, parse_srt_uri, SrtMode, SrtPeer};
 
 /// Our SRT socket id.
 const SOCKET_ID: u32 = 0x6732_736C; // "g2sl"
@@ -75,7 +75,7 @@ pub struct SrtSrc {
     loss_max_ttl: u32,
     mode: SrtMode,
     // the listener a caller calls
-    remote: Option<SocketAddr>,
+    remote: Option<SrtPeer>,
     stream_id: Option<String>,
     // None keeps libsrt's default, AES-128 for a key this side makes, any length from a caller
     key_size: Option<AesKeySize>,
@@ -173,7 +173,8 @@ impl SourceLoop for SrtSrc {
     }
 
     fn configure_pipeline(&mut self, _absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        if self.std_socket.is_none() {
+        // a caller or rendezvous binds once its peer resolves
+        if self.std_socket.is_none() && self.mode == SrtMode::Listener {
             let socket = StdUdpSocket::bind(self.bind).map_err(io_err)?;
             socket.set_nonblocking(true).map_err(io_err)?;
             self.std_socket = Some(socket);
@@ -347,14 +348,18 @@ impl SourceLoop for SrtSrc {
             if self.mode != SrtMode::Listener && self.remote.is_none() {
                 return Err(G2gError::NotConfigured);
             }
-            let std = self.std_socket.take().ok_or(G2gError::NotConfigured)?;
-            std.set_nonblocking(true).map_err(io_err)?;
-            let socket = tokio::net::UdpSocket::from_std(std).map_err(io_err)?;
+            let mut socket = match self.std_socket.take() {
+                Some(std) => {
+                    std.set_nonblocking(true).map_err(io_err)?;
+                    Some(tokio::net::UdpSocket::from_std(std).map_err(io_err)?)
+                }
+                None => None,
+            };
 
             let mut emitted = 0u64;
             let mut first_caller = true;
             loop {
-                let (mut handshake, peer) = match self.connect(&socket).await {
+                let (mut handshake, peer) = match self.connect(&mut socket).await {
                     Ok(connection) => connection,
                     Err(error) if self.mode != SrtMode::Listener && self.auto_reconnect => {
                         g2g_core::g2g_debug!(
@@ -372,8 +377,9 @@ impl SourceLoop for SrtSrc {
                     out.push(PipelinePacket::CapsChanged(mpegts_caps())).await?;
                     first_caller = false;
                 }
+                let connected = socket.as_ref().ok_or(G2gError::NotConfigured)?;
                 let end = self
-                    .receive_caller(&socket, &mut handshake, peer, out, &mut emitted)
+                    .receive_caller(connected, &mut handshake, peer, out, &mut emitted)
                     .await?;
                 g2g_core::g2g_debug!(
                     Target::category(LOG_CATEGORY),
@@ -434,7 +440,7 @@ impl SrtSrc {
     }
 
     fn uri(&self) -> String {
-        match (self.mode, self.remote) {
+        match (self.mode, &self.remote) {
             (SrtMode::Listener, _) => alloc::format!("srt://{}?mode=listener", self.bind),
             (_, Some(remote)) => alloc::format!("srt://{remote}?mode={}", self.mode.name()),
             (_, None) => String::new(),
@@ -443,14 +449,29 @@ impl SrtSrc {
 
     async fn connect(
         &self,
-        socket: &tokio::net::UdpSocket,
+        socket: &mut Option<tokio::net::UdpSocket>,
     ) -> Result<(SrtHandshake, SocketAddr), G2gError> {
-        match (self.mode, self.remote) {
-            (SrtMode::Listener, _) => self.accept_caller(socket).await,
-            (SrtMode::Caller, Some(remote)) => Ok((self.call(socket, remote).await?, remote)),
-            (SrtMode::Rendezvous, Some(remote)) => Ok((self.meet(socket, remote).await?, remote)),
-            (_, None) => Err(G2gError::NotConfigured),
+        let remote = match (self.mode, &self.remote) {
+            (SrtMode::Listener, _) => {
+                let listening = socket.as_ref().ok_or(G2gError::NotConfigured)?;
+                return self.accept_caller(listening).await;
+            }
+            (_, Some(remote)) => remote.resolve().await?,
+            (_, None) => return Err(G2gError::NotConfigured),
+        };
+        if socket.is_none() {
+            let bound = tokio::net::UdpSocket::bind(bind_toward(self.bind, remote))
+                .await
+                .map_err(io_err)?;
+            *socket = Some(bound);
         }
+        let socket = socket.as_ref().ok_or(G2gError::NotConfigured)?;
+        let handshake = if self.mode == SrtMode::Rendezvous {
+            self.meet(socket, remote).await?
+        } else {
+            self.call(socket, remote).await?
+        };
+        Ok((handshake, remote))
     }
 
     // a key this side makes, sent when it calls or wins the rendezvous contest

@@ -17,7 +17,7 @@ use alloc::boxed::Box;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use g2g_core::log::Target;
 use g2g_core::{
@@ -30,7 +30,7 @@ use crate::bytestream::{mpegts_caps, TS_DATAGRAM_PAYLOAD};
 use crate::filesink::io_err;
 use crate::srt::{self, LiveCc, SrtHandshake, SrtSender, CC_DEFAULT_OVERHEAD};
 use crate::srtcrypto::{AesKeySize, SrtCrypto, KM_KK_EVEN};
-use crate::srturi::{parse_srt_uri, unspecified_like, SrtMode};
+use crate::srturi::{bind_toward, parse_host, parse_srt_uri, SrtMode, SrtPeer};
 
 /// Our SRT socket id.
 const SOCKET_ID: u32 = 0x6732_7363; // "g2sc"
@@ -86,7 +86,7 @@ struct PendingKm {
 #[derive(Debug)]
 pub struct SrtSink {
     // the listener a caller calls, or the peer a rendezvous meets
-    dest: SocketAddr,
+    remote: SrtPeer,
     mode: SrtMode,
     // set by a uri, which is the only way to name the port a listener binds
     bind: Option<SocketAddr>,
@@ -130,7 +130,7 @@ impl SrtSink {
     /// Connect to an SRT listener at `dest` (e.g. `127.0.0.1:9000`).
     pub fn new(dest: SocketAddr) -> Self {
         Self {
-            dest,
+            remote: dest.into(),
             mode: SrtMode::Caller,
             bind: None,
             latency_ms: DEFAULT_LATENCY_MS,
@@ -251,7 +251,7 @@ impl SrtSink {
         self.mode = uri.mode;
         self.bind = Some(bind);
         if let Some(remote) = remote {
-            self.dest = remote;
+            self.remote = remote;
         }
         self.latency_ms = uri.latency_ms.unwrap_or(self.latency_ms);
         self.key_size = uri.key_size.unwrap_or(self.key_size);
@@ -268,19 +268,20 @@ impl SrtSink {
         match (self.mode, self.bind) {
             (SrtMode::Listener, Some(bind)) => alloc::format!("srt://{bind}?mode=listener"),
             (SrtMode::Listener, None) => String::new(),
-            (mode, _) => alloc::format!("srt://{}?mode={}", self.dest, mode.name()),
+            (mode, _) => alloc::format!("srt://{}?mode={}", self.remote, mode.name()),
         }
     }
 
-    // without a uri a caller binds any port, and a rendezvous the port it meets
-    fn bind_address(&self) -> Result<SocketAddr, G2gError> {
-        let any = unspecified_like(self.dest.ip());
-        match (self.mode, self.bind) {
-            (_, Some(bind)) => Ok(bind),
-            (SrtMode::Caller, None) => Ok(SocketAddr::new(any, 0)),
-            (SrtMode::Rendezvous, None) => Ok(SocketAddr::new(any, self.dest.port())),
-            (SrtMode::Listener, None) => Err(G2gError::NotConfigured),
-        }
+    fn bind_address(&self, remote: Option<SocketAddr>) -> Result<SocketAddr, G2gError> {
+        let any = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
+        // without a uri a caller binds any port, and a rendezvous the port it meets
+        let bind = match (self.mode, self.bind) {
+            (_, Some(bind)) => bind,
+            (SrtMode::Caller, None) => SocketAddr::new(any, 0),
+            (SrtMode::Rendezvous, None) => SocketAddr::new(any, self.remote.port),
+            (SrtMode::Listener, None) => return Err(G2gError::NotConfigured),
+        };
+        Ok(remote.map_or(bind, |remote| bind_toward(bind, remote)))
     }
 
     fn new_handshake(&self, km: Option<Vec<u8>>) -> SrtHandshake {
@@ -309,7 +310,11 @@ impl SrtSink {
     /// Bind the UDP socket and run the handshake to established, arming the
     /// sender (its destination is the peer's socket id).
     async fn connect_and_handshake(&mut self) -> Result<(), G2gError> {
-        let socket = tokio::net::UdpSocket::bind(self.bind_address()?)
+        let remote = match self.mode {
+            SrtMode::Listener => None,
+            SrtMode::Caller | SrtMode::Rendezvous => Some(self.remote.resolve().await?),
+        };
+        let socket = tokio::net::UdpSocket::bind(self.bind_address(remote)?)
             .await
             .map_err(io_err)?;
 
@@ -326,23 +331,22 @@ impl SrtSink {
 
         let mut hs = self.new_handshake(km);
         // a caller fails at once on a refused port, a rendezvous peer may come up later
-        if self.mode == SrtMode::Caller {
-            socket.connect(self.dest).await.map_err(io_err)?;
+        if let (SrtMode::Caller, Some(remote)) = (self.mode, remote) {
+            socket.connect(remote).await.map_err(io_err)?;
         }
-        let peer = match self.mode {
-            SrtMode::Listener => accept_call(&socket, &mut hs).await?,
-            SrtMode::Caller | SrtMode::Rendezvous => {
-                if let Err(error) = complete_handshake(&socket, self.dest, &mut hs).await {
+        let peer = match remote {
+            None => accept_call(&socket, &mut hs).await?,
+            Some(remote) => {
+                if let Err(error) = complete_handshake(&socket, remote, &mut hs).await {
                     if let Some(rejection) = hs.rejection() {
                         g2g_core::g2g_warn!(
                             Target::category(LOG_CATEGORY),
-                            "{} rejected the call with handshake type {rejection}",
-                            self.dest
+                            "{remote} rejected the call with handshake type {rejection}"
                         );
                     }
                     return Err(error);
                 }
-                self.dest
+                remote
             }
         };
         socket.connect(peer).await.map_err(io_err)?;
@@ -560,7 +564,7 @@ impl SrtSink {
         g2g_core::g2g_warn!(
             Target::category(LOG_CATEGORY),
             "connection to {} failed ({error:?}), calling again",
-            self.dest
+            self.remote
         );
         self.socket = None;
         self.handshake = None;
@@ -680,7 +684,7 @@ impl AsyncElement for SrtSink {
             PropertySpec::new(
                 "host",
                 PropKind::Str,
-                "IP of the listener a caller calls, or of the rendezvous peer",
+                "host name or IP of the listener a caller calls, or of the rendezvous peer",
             )
             .with_default("127.0.0.1"),
             PropertySpec::new(
@@ -729,10 +733,16 @@ impl AsyncElement for SrtSink {
     }
 
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
-        if let Some(r) = crate::netprop::set_addr_prop(&mut self.dest, "host", name, &value) {
-            return r;
-        }
         match name {
+            "host" => {
+                self.remote.host = parse_host(value.as_str().ok_or(PropError::Type)?)?;
+                Ok(())
+            }
+            "port" => {
+                let port = value.as_uint().ok_or(PropError::Type)?;
+                self.remote.port = u16::try_from(port).map_err(|_| PropError::Value)?;
+                Ok(())
+            }
             "latency" => {
                 let ms = value.as_uint().ok_or(PropError::Type)?;
                 self.latency_ms = ms.min(u16::MAX as u64) as u16;
@@ -771,10 +781,9 @@ impl AsyncElement for SrtSink {
     }
 
     fn get_property(&self, name: &str) -> Option<PropValue> {
-        if let Some(v) = crate::netprop::get_addr_prop(&self.dest, "host", name) {
-            return Some(v);
-        }
         match name {
+            "host" => Some(PropValue::Str(self.remote.host.clone())),
+            "port" => Some(PropValue::Uint(self.remote.port.into())),
             "latency" => Some(PropValue::Uint(self.latency_ms as u64)),
             "passphrase" => Some(PropValue::Str(self.passphrase.clone().unwrap_or_default())),
             "streamid" => Some(PropValue::Str(self.stream_id.clone().unwrap_or_default())),

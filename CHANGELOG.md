@@ -105,6 +105,7 @@ Breaking: `QosMessage` gains `downstream_proc_ns`, `ElementProbe` is no longer `
 - M2002: `srtsrc` takes `mode=rendezvous`.
 - M2003: `srtsink` takes `mode=listener` and `mode=rendezvous`.
 - M2004: `srtsink` delivers its last packets before its SHUTDOWN, which now reaches a libsrt peer.
+- M2005: SRT elements call and meet peers by host name.
 
 ## 0.10.0
 

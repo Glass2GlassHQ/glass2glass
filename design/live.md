@@ -762,7 +762,11 @@ gst's `uri`: `srt://host:port` calls, `srt://:port` listens, `?mode=` overrides
 that, and the query options g2g applies (`localaddress`, `localport`,
 `latency`, `passphrase`, `pbkeylen`, `streamid`, `lossmaxttl`) set the
 matching properties. Any other libsrt option fails the property set instead of
-being ignored. A calling or rendezvous `SrtSrc` with `auto-reconnect` calls again 1 s after a
+being ignored. The host a caller calls or a rendezvous meets may be a name,
+resolved again on every call, so a reconnect follows a DNS change. A calling or
+rendezvous `SrtSrc` binds its socket on the first call, in the resolved
+address's family unless `localaddress` names one. A listener binds an address,
+never a name. A calling or rendezvous `SrtSrc` with `auto-reconnect` calls again 1 s after a
 failed call or a lost connection, as `SrtSink` does. A listening `SrtSrc` with
 `streamid` or `pbkeylen` set answers a caller with another stream id or key
 length with libsrt's rejection codes (`SRT_REJX_NOTFOUND`, `SRT_REJ_UNSECURE`),
