@@ -1532,9 +1532,11 @@ impl OutputSink for SenderSink {
             }
         }
         // Past the pre-send checks the packet is committed to the link, so
-        // an Eos here is one the consumer will see (M909).
-        if matches!(packet, PipelinePacket::Eos) {
-            self.eos_forwarded = true;
+        // an Eos here is one the consumer will see (M909). A Flush after it starts a new stream.
+        match &*packet {
+            PipelinePacket::Eos => self.eos_forwarded = true,
+            PipelinePacket::Flush => self.eos_forwarded = false,
+            _ => {}
         }
         #[cfg(feature = "std")]
         if let Some(source) = &self.push_log {

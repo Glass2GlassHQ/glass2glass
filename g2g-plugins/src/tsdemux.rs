@@ -1558,6 +1558,9 @@ impl MultiOutputElement for TsDemuxN {
                     }
                 }
                 PipelinePacket::Eos => {
+                    if self.seek.eos_before_flush(self.seek.dropping_input())? {
+                        return Ok(());
+                    }
                     // Flush the final in-flight PES, route it; the runner
                     // broadcasts the merged Eos to every port.
                     self.packets.finish(&mut self.demux);
@@ -1571,6 +1574,13 @@ impl MultiOutputElement for TsDemuxN {
                         {
                             return Err(no_pinned_stream(pid, self.ports[port]));
                         }
+                    }
+                    if self.seek.takes_seeks_after_end() {
+                        for port in 0..self.ports.len() {
+                            out.push_to(port, PipelinePacket::Eos).await?;
+                        }
+                        self.seek.wait_for_seek_or_shutdown().await;
+                        self.seek.poll_request();
                     }
                 }
                 // The input's (byte-stream) CapsChanged is consumed: each port

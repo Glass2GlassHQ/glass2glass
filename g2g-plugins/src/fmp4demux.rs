@@ -434,7 +434,16 @@ impl AsyncElement for Fmp4Demux {
                 }
                 // Nothing to flush (incomplete trailing boxes are dropped); the
                 // runner's transform arm forwards the EOS itself.
-                PipelinePacket::Eos => {}
+                PipelinePacket::Eos => {
+                    if self.seek.eos_before_flush(self.seek.dropping_input())? {
+                        return Ok(());
+                    }
+                    if self.seek.takes_seeks_after_end() {
+                        out.push(PipelinePacket::Eos).await?;
+                        self.seek.wait_for_seek_or_shutdown().await;
+                        self.seek.poll_request();
+                    }
+                }
                 PipelinePacket::CapsChanged(_) => {}
                 other => {
                     out.push(other).await?;

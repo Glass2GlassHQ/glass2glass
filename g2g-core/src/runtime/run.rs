@@ -20,7 +20,7 @@ use crate::runtime::mutate::{mutation_channel, GraphMutator, MutationRequest};
 use crate::runtime::progress::PipelineProgress;
 use crate::runtime::runner::{LinkCapacity, RunStats};
 use crate::runtime::state::StateController;
-use crate::runtime::{FlightRecorder, Observer, VisitRecorder};
+use crate::runtime::{FlightRecorder, Observer, SeekController, VisitRecorder};
 
 /// A graph run being set up. `'a` is the elements' lifetime (and the
 /// [`GraphMutator`]'s), `'c` the lifetime of the clock and the handles the run
@@ -46,6 +46,7 @@ pub struct RunBuilder<'a, 'c, Clk: PipelineClock> {
     recorder: Option<&'c FlightRecorder>,
     visit_recorder: Option<Arc<dyn VisitRecorder>>,
     ticker: Option<Arc<dyn DynAsyncClock + Send + Sync>>,
+    seek: Option<SeekController>,
 }
 
 impl<'a: 'c, 'c, Clk: PipelineClock> RunBuilder<'a, 'c, Clk> {
@@ -68,6 +69,7 @@ impl<'a: 'c, 'c, Clk: PipelineClock> RunBuilder<'a, 'c, Clk> {
             recorder: None,
             visit_recorder: None,
             ticker: None,
+            seek: None,
         }
     }
 
@@ -121,6 +123,12 @@ impl<'a: 'c, 'c, Clk: PipelineClock> RunBuilder<'a, 'c, Clk> {
         self
     }
 
+    // the seekable source parks at the end of the stream and takes seeks there, the run ends once nothing more is sought
+    pub fn with_seek_controller(mut self, controller: &SeekController) -> Self {
+        self.seek = Some(controller.clone());
+        self
+    }
+
     /// Start the run on the caller's executor.
     pub fn run(self) -> impl Future<Output = Result<RunStats, G2gError>> + use<'a, 'c, Clk> {
         self.start(None)
@@ -155,6 +163,7 @@ impl<'a: 'c, 'c, Clk: PipelineClock> RunBuilder<'a, 'c, Clk> {
             self.visit_recorder,
             self.ticker.as_deref().map(|t| t as &dyn DynAsyncClock),
             mutation,
+            self.seek.as_ref(),
         )
         .await
     }
@@ -202,6 +211,7 @@ impl<'c, Clk: PipelineClock> RunBuilder<'static, 'c, Clk> {
             self.ticker,
             spawner,
             mutation,
+            self.seek.as_ref(),
         )
         .await
     }

@@ -923,6 +923,7 @@ where
         None,
         None,
         None,
+        None,
     )
     .await
 }
@@ -1476,6 +1477,7 @@ where
         None,
         None,
         None,
+        None,
     )
     .await
 }
@@ -1585,6 +1587,7 @@ where
         link_capacity,
         bus,
         state,
+        None,
         None,
         None,
         None,

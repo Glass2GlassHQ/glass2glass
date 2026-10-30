@@ -142,33 +142,96 @@ fn mp4_seek_decodes_from_the_first_frame_at_or_after_the_target() {
     }
 }
 
+// the frame where the seeked run leaves the unseeked one, checked to continue as the unseeked run from the target
+fn seek_at_resume_frame(
+    pipeline: &str,
+    unseeked: &[String],
+    position_milliseconds: u64,
+    target_milliseconds: u64,
+) -> usize {
+    let seek_at = format!(
+        "{}:{}",
+        seek_seconds(position_milliseconds),
+        seek_seconds(target_milliseconds)
+    );
+    let seeked = checksum_lines(&launch(&["--seek-at", &seek_at], pipeline));
+    assert_ne!(
+        seeked, unseeked,
+        "{pipeline} --seek-at {seek_at} left the output unchanged"
+    );
+    let resumed = seeked
+        .iter()
+        .zip(unseeked)
+        .position(|(seeked, unseeked)| seeked != unseeked)
+        .unwrap_or(unseeked.len());
+    assert!(
+        resumed as u64 >= first_frame_at(position_milliseconds),
+        "{pipeline} --seek-at {seek_at}: frame {resumed} came after the seek, before the sink reached the position"
+    );
+    assert_eq!(
+        seeked[resumed..],
+        unseeked[first_frame_at(target_milliseconds) as usize..],
+        "{pipeline} --seek-at {seek_at}: the run resumes at the target and plays to the end"
+    );
+    resumed
+}
+
 #[test]
 fn seek_during_playback_resumes_at_the_target() {
     let pipeline = mp4_pipeline();
     let unseeked = checksum_lines(&launch(&[], &pipeline));
     // forward past the frames in flight, and backward
     for (position_milliseconds, target_milliseconds) in [(200, 2_000), (2_000, 400)] {
-        let seek_at = format!(
-            "{}:{}",
-            seek_seconds(position_milliseconds),
-            seek_seconds(target_milliseconds)
-        );
-        let seeked = checksum_lines(&launch(&["--seek-at", &seek_at], &pipeline));
-        let resumed = seeked
-            .iter()
-            .zip(&unseeked)
-            .position(|(seeked, unseeked)| seeked != unseeked)
-            .unwrap_or_else(|| panic!("--seek-at {seek_at} left the output unchanged"));
-        assert!(
-            resumed as u64 >= first_frame_at(position_milliseconds),
-            "--seek-at {seek_at}: frame {resumed} came after the seek, before the sink reached the position"
-        );
-        assert_eq!(
-            seeked[resumed..],
-            unseeked[first_frame_at(target_milliseconds) as usize..],
-            "--seek-at {seek_at}: the run resumes at the target and plays to the end"
+        seek_at_resume_frame(
+            &pipeline,
+            &unseeked,
+            position_milliseconds,
+            target_milliseconds,
         );
     }
+}
+
+#[test]
+fn seek_after_the_end_resumes_at_the_target() {
+    let last_frame_milliseconds = (FRAME_COUNT - 1) * FRAME_PERIOD_NS / NANOS_PER_MILLISECOND;
+    for pipeline in [mp4_pipeline(), mkv_pipeline(), mp4_decodebin_pipeline()] {
+        let unseeked = checksum_lines(&launch(&[], &pipeline));
+        // the sink has every frame before the seek goes out
+        let resumed = seek_at_resume_frame(&pipeline, &unseeked, last_frame_milliseconds, 400);
+        assert_eq!(
+            resumed,
+            unseeked.len(),
+            "{pipeline}: the whole unseeked run comes before the seek"
+        );
+    }
+    // filesrc has read the whole mkv before the demuxer takes the seek, the mp4 source is near its end
+    for (pipeline, position_milliseconds, target_milliseconds) in
+        [(mkv_pipeline(), 400, 2_000), (mp4_pipeline(), 2_900, 400)]
+    {
+        let unseeked = checksum_lines(&launch(&[], &pipeline));
+        seek_at_resume_frame(
+            &pipeline,
+            &unseeked,
+            position_milliseconds,
+            target_milliseconds,
+        );
+    }
+}
+
+#[test]
+fn seek_after_the_source_ended_fails_in_a_muxer_pipeline() {
+    let output_location = format!("{}/m1978_remuxed.ts", env!("CARGO_TARGET_TMPDIR"));
+    // a muxer keeps the run ending at the end of the stream, filesrc has read the whole file by then
+    let pipeline = format!(
+        "filesrc location={TS_FIXTURE} ! tsdemux ! h264parse ! mpegtsmux ! filesink location={output_location}"
+    );
+    let output = launch(&["--seek-at", "2:0.4"], &pipeline);
+    assert!(!output.status.success(), "the lost seek went unreported");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("the seek is not served"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]

@@ -798,6 +798,14 @@ impl AsyncElement for FfmpegH264Enc {
                     let packets = self.flush()?;
                     self.emit(packets, out).await?;
                 }
+                // an encoder drained at Eos refuses frames, and the stream after a flush starts over
+                PipelinePacket::Flush => {
+                    if self.encoder.is_some() {
+                        self.open_encoder()?;
+                    }
+                    self.pending.clear();
+                    out.push(PipelinePacket::Flush).await?;
+                }
                 PipelinePacket::CapsChanged(_) => {}
                 other => {
                     out.push(other).await?;
@@ -999,6 +1007,41 @@ mod tests {
         }
         enc.process(PipelinePacket::Eos, &mut sink).await.ok()?;
         Some(sink)
+    }
+
+    #[tokio::test]
+    async fn encodes_again_after_eos_and_a_flush() {
+        const FRAMES: u64 = 10;
+        let mut enc = FfmpegH264Enc::new().with_backend(Backend::Software);
+        if enc.configure_pipeline(&i420_caps(W, H)).is_err() {
+            std::eprintln!("skipping: libx264 not available");
+            return;
+        }
+        let mut sink = CaptureSink::default();
+        for pass in 0..2 {
+            if pass > 0 {
+                enc.process(PipelinePacket::Flush, &mut sink).await.unwrap();
+            }
+            for i in 0..FRAMES {
+                let frame = Frame::new(
+                    MemoryDomain::System(SystemSlice::from_boxed(i420_frame(i).into_boxed_slice())),
+                    FrameTiming {
+                        pts_ns: i * 33_000_000,
+                        ..FrameTiming::default()
+                    },
+                    i,
+                );
+                enc.process(PipelinePacket::DataFrame(frame), &mut sink)
+                    .await
+                    .unwrap();
+            }
+            enc.process(PipelinePacket::Eos, &mut sink).await.unwrap();
+        }
+        assert_eq!(
+            sink.frames.len() as u64,
+            2 * FRAMES,
+            "the stream after the flush encodes as the first did"
+        );
     }
 
     /// Sink that reports a fixed downstream bitrate target on every push (the

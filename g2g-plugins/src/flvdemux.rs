@@ -511,6 +511,9 @@ impl AsyncElement for FlvDemux {
                     out.push(PipelinePacket::Flush).await?;
                 }
                 PipelinePacket::Eos => {
+                    if self.seek.eos_before_flush(self.seek.dropping_input())? {
+                        return Ok(());
+                    }
                     // Emit any final access units. The runner's transform arm
                     // forwards the EOS itself, so pushing it here would double it
                     // (the second hits a closed sink under a full link).
@@ -518,6 +521,11 @@ impl AsyncElement for FlvDemux {
                     self.sync_configs();
                     let units = self.demux.take_units();
                     self.emit_units(units, out).await?;
+                    if self.seek.takes_seeks_after_end() {
+                        out.push(PipelinePacket::Eos).await?;
+                        self.seek.wait_for_seek_or_shutdown().await;
+                        self.seek.poll_request();
+                    }
                 }
                 // ByteStream caps don't carry geometry; nothing to forward.
                 PipelinePacket::CapsChanged(_) => {}

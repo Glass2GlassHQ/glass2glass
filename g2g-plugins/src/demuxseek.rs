@@ -370,6 +370,38 @@ impl<U> DemuxSeek<U> {
         self.phase = Phase::AwaitingFlush { target };
     }
 
+    // true for an Eos that came before the flush of a seek already taken, a source that returned at that Eos never flushes
+    pub(crate) fn eos_before_flush(&self, awaiting_flush: bool) -> Result<bool, G2gError> {
+        if !awaiting_flush {
+            return Ok(false);
+        }
+        if self.takes_seeks_after_end() {
+            return Ok(true);
+        }
+        g2g_core::g2g_error!(
+            Target::category(LOG_CATEGORY),
+            "the stream ended before its source repositioned for the seek, the seek is not served"
+        );
+        Err(G2gError::SeekRefused)
+    }
+
+    // the run keeps the source parked after the end of the stream, so a seek can still restart it
+    pub(crate) fn takes_seeks_after_end(&self) -> bool {
+        self.app
+            .as_ref()
+            .is_some_and(SeekController::takes_seeks_after_end)
+    }
+
+    // nothing reaches the demuxer after the end, so it waits here for the app's seek or the run's end
+    pub(crate) async fn wait_for_seek_or_shutdown(&self) {
+        let Some(app) = &self.app else {
+            return;
+        };
+        while !app.has_pending() && !app.is_shutdown() {
+            app.wait_event().await;
+        }
+    }
+
     /// Whether the demuxer should ignore input now (awaiting the upstream flush,
     /// so the in-flight pre-seek bytes must not produce output).
     pub(crate) fn dropping_input(&self) -> bool {
@@ -458,6 +490,21 @@ mod tests {
         assert!(s.poll_request(), "a pending flushing seek starts the cycle");
         assert!(s.on_flush());
         s
+    }
+
+    #[test]
+    fn an_eos_before_the_flush_of_a_taken_seek_fails() {
+        let app = SeekController::new();
+        let mut s: DemuxSeek<u64> = DemuxSeek::default();
+        s.with(app.clone(), SeekController::new());
+        assert_eq!(s.eos_before_flush(s.dropping_input()), Ok(false));
+        app.seek(Seek::flush_to(TARGET_NS));
+        assert!(s.poll_request());
+        assert_eq!(
+            s.eos_before_flush(s.dropping_input()),
+            Err(G2gError::SeekRefused),
+            "a source that ended at this Eos never repositions"
+        );
     }
 
     #[test]

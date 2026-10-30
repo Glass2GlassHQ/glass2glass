@@ -870,8 +870,18 @@ impl AsyncElement for MkvDemux {
                     out.push(PipelinePacket::Flush).await?;
                 }
                 PipelinePacket::Eos => {
+                    let awaiting_flush =
+                        self.seek.dropping_input() || self.prefetch != CuePrefetch::Idle;
+                    if self.seek.eos_before_flush(awaiting_flush)? {
+                        return Ok(());
+                    }
                     // Emit any final frames; the runner's transform arm forwards EOS.
                     self.emit_ready(out).await?;
+                    if self.seek.takes_seeks_after_end() {
+                        out.push(PipelinePacket::Eos).await?;
+                        self.seek.wait_for_seek_or_shutdown().await;
+                        self.poll_seek();
+                    }
                 }
                 // ByteStream caps carry no geometry; nothing to forward.
                 PipelinePacket::CapsChanged(_) => {}

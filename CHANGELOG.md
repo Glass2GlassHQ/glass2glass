@@ -78,6 +78,7 @@ Breaking: `QosMessage` gains `downstream_proc_ns`, `ElementProbe` is no longer `
 - M1975: `whepsrc` subscribes again after it loses its session when `reconnect` is set.
 - M1976: an FLV seek counts its target from the earliest track's first timestamp, as `ffmpeg -ss` does.
 - M1977: `g2g-launch --seek-at <position>:<seconds>` seeks once the sink reaches a position, through the new `attach_seek_controller`.
+- M1978: a flushing seek after the end of the stream restarts playback, as in GStreamer, through `RunBuilder::with_seek_controller`.
 
 ## 0.10.0
 

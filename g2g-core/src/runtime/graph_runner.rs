@@ -98,6 +98,9 @@ use crate::runtime::runner::{
     re_solve_downstream_dyn_sink, LinkCapacity, NullSink, RunStats, SourceLoop,
     MAX_FIXATION_ATTEMPTS,
 };
+use crate::runtime::seek_after_end::{
+    shut_down_when_done, ArmFlushCount, SeekAfterEnd, SinkEndReport,
+};
 use crate::runtime::solver::{
     graph_downstream_feasibility, resolve_forward_output, solve_graph_preferred, solve_linear,
     ForwardResolve, NegotiationFailure, NodeConstraint,
@@ -105,6 +108,7 @@ use crate::runtime::solver::{
 use crate::runtime::state::{Flow, StateController};
 use crate::runtime::FlightRecorder;
 use crate::runtime::Observer;
+use crate::runtime::SeekController;
 use crate::segment::Segment;
 use crate::state::PipelineState;
 
@@ -984,6 +988,7 @@ pub async fn run_graph<'a, Clk: PipelineClock>(
         None,
         None,
         None,
+        None,
     )
     .await
 }
@@ -1021,6 +1026,7 @@ pub fn run_graph_mutable<'a, Clk: PipelineClock>(
         None,
         None,
         Some(requests),
+        None,
     );
     (mutator, run)
 }
@@ -1048,6 +1054,7 @@ pub async fn run_graph_with_copy_policy<'a, Clk: PipelineClock>(
         None,
         None,
         Some(policy),
+        None,
         None,
         None,
         None,
@@ -1174,6 +1181,7 @@ pub async fn run_graph_with_bus<'a, Clk: PipelineClock>(
         None,
         None,
         None,
+        None,
     )
     .await
 }
@@ -1201,6 +1209,7 @@ pub async fn run_graph_observed<'a, Clk: PipelineClock>(
         None,
         None,
         Some(observer),
+        None,
         None,
         None,
         None,
@@ -1236,6 +1245,7 @@ where
         None,
         None,
         Some(requests),
+        None,
     );
     (mutator, Box::pin(run))
 }
@@ -1266,6 +1276,7 @@ pub async fn run_graph_with_progress<'a, Clk: PipelineClock>(
         bus,
         None,
         Some(progress),
+        None,
         None,
         None,
         None,
@@ -1366,6 +1377,7 @@ pub async fn run_graph_stateful<'a, Clk: PipelineClock>(
         None,
         None,
         None,
+        None,
     )
     .await
 }
@@ -1400,6 +1412,7 @@ pub async fn run_graph_recorded<'a, Clk: PipelineClock>(
         None,
         None,
         None,
+        None,
     )
     .await
 }
@@ -1424,6 +1437,7 @@ pub async fn run_graph_observed_recorded<'a, Clk: PipelineClock>(
         None,
         Some(observer),
         Some(recorder),
+        None,
         None,
         None,
         None,
@@ -2202,6 +2216,7 @@ enum ArmPlan<'a> {
         out_txs: Vec<LinkSender>,
         branch_drop: bool,
         adds: Option<Receiver<LinkSender>>,
+        flush_count: Option<ArmFlushCount>,
     },
     FaninSink {
         session: Box<dyn DynMultiInputElement + 'a>,
@@ -2269,7 +2284,8 @@ impl<'a> ArmPlan<'a> {
                 out_txs,
                 branch_drop,
                 adds,
-            } => Box::pin(tee_arm(in_rx, out_txs, branch_drop, adds)),
+                flush_count,
+            } => Box::pin(tee_arm(in_rx, out_txs, branch_drop, adds, flush_count)),
             ArmPlan::FaninSink { session, io } => session.drive_fanin_sink_arm(io),
             ArmPlan::FanoutSrc {
                 source,
@@ -2287,6 +2303,7 @@ struct PlannedArm<'a> {
     kind: NodeKind,
     name: alloc::string::String,
     plan: ArmPlan<'a>,
+    seek_controller_ended_with: Option<SeekController>,
 }
 
 /// The negotiated run state [`plan_arms`] hands out to the arms.
@@ -2306,6 +2323,7 @@ struct ArmInputs<'r, 'a> {
     bus: Option<&'r BusHandle>,
     state: &'r Option<StateController>,
     progress: Option<&'r PipelineProgress>,
+    seek_after_end: Option<&'r SeekAfterEnd>,
 }
 
 /// Take each node's element and links, in topological order, and build its arm.
@@ -2330,6 +2348,7 @@ fn plan_arms<'a>(
         bus,
         state,
         progress,
+        seek_after_end,
     } = inputs;
     let mut planned = Vec::with_capacity(topo.len());
     for &node in topo {
@@ -2346,6 +2365,7 @@ fn plan_arms<'a>(
             .map(|&e| txs[e].take().expect("edge tx present"))
             .collect();
         let element = vg.take_element(node);
+        let flush_count = seek_after_end.and_then(|seek| seek.arm_flush_count(node));
         let properties = live
             .as_ref()
             .and_then(|t| t.nodes[index].properties.clone());
@@ -2431,6 +2451,7 @@ fn plan_arms<'a>(
                         probe: probes[index].clone(),
                         control: controllers[index].take(),
                         properties,
+                        flush_count,
                     },
                     done: element_done(live),
                 }
@@ -2452,6 +2473,7 @@ fn plan_arms<'a>(
                         probe: probes[index].clone(),
                         control: controllers[index].take(),
                         properties,
+                        stream_end: seek_after_end.and_then(|seek| seek.sink_report(node)),
                     },
                     done: element_done(live),
                 }
@@ -2465,6 +2487,7 @@ fn plan_arms<'a>(
                     out_txs: out_txs_by_port(vg, node, out_txs),
                     probe: probes[index].clone(),
                     latency: LatencyFold::publisher(latency_fold, node),
+                    flush_count,
                 },
             },
             // Under `AllowBranchDrop` the broadcast tolerates a branch that has
@@ -2474,6 +2497,7 @@ fn plan_arms<'a>(
                 out_txs,
                 branch_drop: vg.fanout_policy(node) == FanOutPolicy::AllowBranchDrop,
                 adds: live.as_mut().and_then(|t| t.branch_adds[index].take()),
+                flush_count,
             },
             (NodeKind::FaninSink(_), Some(GraphNodeRef::Muxer(session))) => {
                 let (pad_rxs, reverse) = fanin_sink_pads(vg, node, in_rxs, &*session);
@@ -2508,6 +2532,8 @@ fn plan_arms<'a>(
             kind,
             name: names[index].clone(),
             plan,
+            seek_controller_ended_with: seek_after_end
+                .and_then(|seek| seek.controller_ended_with(node)),
         });
     }
     Ok(planned)
@@ -2561,6 +2587,7 @@ pub(crate) async fn run_graph_inner<'a: 'c, 'c, Clk: PipelineClock>(
     visit_recorder: Option<alloc::sync::Arc<dyn VisitRecorder>>,
     ticker: Option<&'c dyn DynAsyncClock>,
     mutation: Option<Receiver<MutationRequest<'a>>>,
+    seek: Option<&SeekController>,
 ) -> Result<RunStats, G2gError> {
     let visit_recorder = run_visit_recorder(visit_recorder, observer)?;
     // A pipeline clock that can sleep on a deadline is the fan-in tick timer
@@ -2568,6 +2595,10 @@ pub(crate) async fn run_graph_inner<'a: 'c, 'c, Clk: PipelineClock>(
     // `ticker` still wins.
     let ticker = ticker.or_else(|| clock.as_ticker());
     let link_capacity: usize = link_capacity.into().get();
+    let seek_after_end = match seek {
+        Some(controller) => SeekAfterEnd::plan(&graph, controller)?,
+        None => None,
+    };
     let mut vg = finish_graph(graph)?;
     let n = vg.node_count();
     if n < 2 {
@@ -2678,14 +2709,24 @@ pub(crate) async fn run_graph_inner<'a: 'c, 'c, Clk: PipelineClock>(
             bus,
             state: &state,
             progress,
+            seek_after_end: seek_after_end.as_ref(),
         },
     )?;
     let mut arms: Vec<BoxFuture<'c, Result<u64, G2gError>>> = Vec::with_capacity(n + 1);
     let mut arm_kinds: Vec<NodeKind> = Vec::with_capacity(n);
     // Arm order, not node order: an arm index cannot index `names` directly.
     let mut arm_names: Vec<alloc::string::String> = Vec::with_capacity(n + 1);
-    for PlannedArm { kind, name, plan } in planned {
-        arms.push(plan.drive(|mux, parts| mux.drive_muxer_arm(MuxerArmIo { parts, ticker })));
+    for PlannedArm {
+        kind,
+        name,
+        plan,
+        seek_controller_ended_with,
+    } in planned
+    {
+        arms.push(shut_down_when_done(
+            plan.drive(|mux, parts| mux.drive_muxer_arm(MuxerArmIo { parts, ticker })),
+            seek_controller_ended_with,
+        ));
         arm_kinds.push(kind);
         arm_names.push(name);
     }
@@ -2740,14 +2781,22 @@ pub(crate) async fn run_graph_inner<'a: 'c, 'c, Clk: PipelineClock>(
         }
         _ => None,
     };
+    let run_end = seek_after_end
+        .as_ref()
+        .map(SeekAfterEnd::end_when_nothing_more_is_sought);
     let results = match select2(
         join_arms(arms, new_arm_rx),
-        select2(never_or(monitor), never_or(service)),
+        select2(
+            never_or(monitor),
+            select2(never_or(service), never_or(run_end)),
+        ),
     )
     .await
     {
         Either::Left(results) => results,
-        Either::Right(Either::Left(never) | Either::Right(never)) => match never {},
+        Either::Right(
+            Either::Left(never) | Either::Right(Either::Left(never) | Either::Right(never)),
+        ) => match never {},
     };
     fold_run_stats(
         results,
@@ -2982,6 +3031,7 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
     ticker: Option<alloc::sync::Arc<dyn DynAsyncClock + Send + Sync>>,
     spawner: &S,
     mutation: Option<Receiver<MutationRequest<'static>>>,
+    seek: Option<&SeekController>,
 ) -> Result<RunStats, G2gError> {
     let visit_recorder = run_visit_recorder(visit_recorder, observer)?;
     // Same rule as the cooperative runner (M880), through the shared handle the
@@ -2990,6 +3040,10 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
     // own. An explicit `ticker` still wins.
     let ticker = ticker.or_else(|| clock.shared_ticker());
     let link_capacity: usize = link_capacity.into().get();
+    let seek_after_end = match seek {
+        Some(controller) => SeekAfterEnd::plan(&graph, controller)?,
+        None => None,
+    };
     let mut vg = finish_graph(graph)?;
     let n = vg.node_count();
     if n < 2 {
@@ -3091,6 +3145,7 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
             bus,
             state: &state,
             progress,
+            seek_after_end: seek_after_end.as_ref(),
         },
     )?;
     // One `spawn_arm` handle per arm (mirrors the cooperative `arms` vec). Each
@@ -3098,7 +3153,13 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
     let mut handles: Vec<BoxFuture<'static, Result<u64, G2gError>>> = Vec::with_capacity(n + 1);
     let mut arm_kinds: Vec<NodeKind> = Vec::with_capacity(n);
     let mut arm_names: Vec<alloc::string::String> = Vec::with_capacity(n + 1);
-    for PlannedArm { kind, name, plan } in planned {
+    for PlannedArm {
+        kind,
+        name,
+        plan,
+        seek_controller_ended_with,
+    } in planned
+    {
         let mux_ticker = ticker.clone();
         let build: alloc::boxed::Box<dyn FnOnce() -> LocalArmFuture + Send> =
             alloc::boxed::Box::new(move || -> LocalArmFuture {
@@ -3109,7 +3170,10 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
                     })
                 })
             });
-        handles.push(spawner.spawn_arm(with_stream_status(bus.cloned(), build)));
+        handles.push(shut_down_when_done(
+            spawner.spawn_arm(with_stream_status(bus.cloned(), build)),
+            seek_controller_ended_with,
+        ));
         arm_kinds.push(kind);
         arm_names.push(name);
     }
@@ -3193,14 +3257,22 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
         )),
         _ => None,
     };
+    let run_end = seek_after_end
+        .as_ref()
+        .map(SeekAfterEnd::end_when_nothing_more_is_sought);
     let results = match select2(
         join_arms(handles, new_arm_rx),
-        select2(never_or(monitor), never_or(service)),
+        select2(
+            never_or(monitor),
+            select2(never_or(service), never_or(run_end)),
+        ),
     )
     .await
     {
         Either::Left(results) => results,
-        Either::Right(Either::Left(never) | Either::Right(never)) => match never {},
+        Either::Right(
+            Either::Left(never) | Either::Right(Either::Left(never) | Either::Right(never)),
+        ) => match never {},
     };
     fold_run_stats(
         results,
@@ -3251,6 +3323,7 @@ pub async fn run_graph_threaded<Clk: PipelineClock, S: GraphSpawner>(
         None,
         spawner,
         None,
+        None,
     )
     .await
 }
@@ -3284,6 +3357,7 @@ pub fn run_graph_threaded_mutable<'s, Clk: PipelineClock, S: GraphSpawner>(
         None,
         spawner,
         Some(requests),
+        None,
     );
     (mutator, run)
 }
@@ -3321,6 +3395,7 @@ pub async fn run_graph_threaded_ticked<S: GraphSpawner>(
         Some(clock.clone()),
         spawner,
         None,
+        None,
     )
     .await
 }
@@ -3351,6 +3426,7 @@ pub async fn run_graph_threaded_with_bus<Clk: PipelineClock, S: GraphSpawner>(
         None,
         spawner,
         None,
+        None,
     )
     .await
 }
@@ -3379,6 +3455,7 @@ pub async fn run_graph_threaded_with_progress<Clk: PipelineClock, S: GraphSpawne
         None,
         None,
         spawner,
+        None,
         None,
     )
     .await
@@ -3410,6 +3487,7 @@ pub async fn run_graph_threaded_observed<Clk: PipelineClock, S: GraphSpawner>(
         None,
         None,
         spawner,
+        None,
         None,
     )
     .await
@@ -3445,6 +3523,7 @@ pub async fn run_graph_threaded_recorded<Clk: PipelineClock, S: GraphSpawner>(
         None,
         None,
         spawner,
+        None,
         None,
     )
     .await
@@ -4474,6 +4553,8 @@ pub struct TransformArmIo {
     /// Where a live property set / get waits for this arm's next packet
     /// boundary. `None` unless the run was asked for a mutator.
     pub(crate) properties: Option<PropertyMailbox>,
+    // set when a seek can restart the stream after its Eos, the arm then ends only when its input closes
+    pub(crate) flush_count: Option<ArmFlushCount>,
 }
 
 /// As [`TransformArmIo`], for the sink arm.
@@ -4491,6 +4572,8 @@ pub struct SinkArmIo {
     pub(crate) probe: Probe,
     pub(crate) control: Option<ArmController>,
     pub(crate) properties: Option<PropertyMailbox>,
+    // set when a seek can restart the stream after its Eos, the arm then ends only when its input closes
+    pub(crate) stream_end: Option<SinkEndReport>,
 }
 
 impl SinkArmIo {
@@ -4509,6 +4592,7 @@ impl SinkArmIo {
             probe,
             control: None,
             properties: None,
+            stream_end: None,
         }
     }
 }
@@ -4542,6 +4626,7 @@ pub(crate) async fn transform_arm_on<E: AsyncElement>(
         probe,
         control,
         properties,
+        mut flush_count,
     } = io;
     let mut adapter = SenderSink::new(out_tx);
     // M947: charge time spent blocked on the downstream link to this element's
@@ -4618,12 +4703,19 @@ pub(crate) async fn transform_arm_on<E: AsyncElement>(
             log_received(probe.log_name(), packet);
         }
         match packet {
+            Some(PipelinePacket::Eos)
+                if flush_count
+                    .as_ref()
+                    .is_some_and(ArmFlushCount::eos_is_stale) => {}
             Some(PipelinePacket::Eos) => {
                 elem.process(PipelinePacket::Eos, &mut adapter).await?;
                 // M909: skip our push when the element's catch-all arm already
                 // forwarded the sentinel, so the sink sees exactly one `Eos`.
                 if !adapter.eos_forwarded() {
                     adapter.push(PipelinePacket::Eos).await?;
+                }
+                if flush_count.is_some() {
+                    continue;
                 }
                 // Drop our report handle so the coordinator can wind down once
                 // every arm exits, then drain any tail-end re-cascade directive
@@ -4714,6 +4806,9 @@ pub(crate) async fn transform_arm_on<E: AsyncElement>(
                 }
             }
             Some(packet) => {
+                if let (Some(flush_count), PipelinePacket::Flush) = (&mut flush_count, &packet) {
+                    flush_count.flushed();
+                }
                 // M759: if this element opts into metadata auto-application,
                 // derive the propagated set from this input frame and stash it on
                 // the adapter, which attaches it to fresh (meta-empty) outputs.
@@ -4835,6 +4930,7 @@ async fn sink_arm_loop<E: AsyncElement>(elem: &mut E, io: SinkArmIo) -> Result<u
         probe,
         control,
         properties,
+        stream_end,
     } = io;
     let mut null = NullSink;
     let mut consumed = 0u64;
@@ -4903,6 +4999,8 @@ async fn sink_arm_loop<E: AsyncElement>(elem: &mut E, io: SinkArmIo) -> Result<u
                 in_rx.pop_transit_ns();
                 continue;
             }
+            Some(PipelinePacket::Eos)
+                if stream_end.as_ref().is_some_and(SinkEndReport::eos_is_stale) => {}
             Some(PipelinePacket::Eos) => {
                 elem.process(PipelinePacket::Eos, &mut null).await?;
                 #[cfg(feature = "metadata")]
@@ -4916,7 +5014,11 @@ async fn sink_arm_loop<E: AsyncElement>(elem: &mut E, io: SinkArmIo) -> Result<u
                         sc.notify_prerolled();
                     }
                 }
-                return Ok(consumed);
+                let Some(stream_end) = &stream_end else {
+                    return Ok(consumed);
+                };
+                prerolled_self = true;
+                stream_end.ended();
             }
             Some(PipelinePacket::CapsChanged(new_caps)) => {
                 // A sink that rejects the refined caps has no solution: no
@@ -4970,6 +5072,9 @@ async fn sink_arm_loop<E: AsyncElement>(elem: &mut E, io: SinkArmIo) -> Result<u
             // DataFrame becomes the new visible preroll.
             Some(PipelinePacket::Flush) => {
                 flushing = false;
+                if let Some(stream_end) = &stream_end {
+                    stream_end.flushed();
+                }
                 elem.process(PipelinePacket::Flush, &mut null).await?;
                 #[cfg(feature = "metadata")]
                 frame_identity.restart();
@@ -5075,6 +5180,7 @@ async fn tee_arm(
     out_txs: Vec<LinkSender>,
     branch_drop: bool,
     adds: Option<Receiver<LinkSender>>,
+    mut flush_count: Option<ArmFlushCount>,
 ) -> Result<u64, G2gError> {
     let mut senders: Vec<SenderSink> = out_txs.into_iter().map(SenderSink::new).collect();
     // A branch sink's QoS report walks on past the tee onto its input link
@@ -5092,6 +5198,10 @@ async fn tee_arm(
             }
         }
         match in_rx.recv().await {
+            Some(PipelinePacket::Eos)
+                if flush_count
+                    .as_ref()
+                    .is_some_and(ArmFlushCount::eos_is_stale) => {}
             Some(PipelinePacket::Eos) => {
                 for s in senders.iter_mut() {
                     match s.push(PipelinePacket::Eos).await {
@@ -5103,9 +5213,14 @@ async fn tee_arm(
                         Err(e) => return Err(e),
                     }
                 }
-                return Ok(0);
+                if flush_count.is_none() {
+                    return Ok(0);
+                }
             }
             Some(packet) => {
+                if let (Some(flush_count), PipelinePacket::Flush) = (&mut flush_count, &packet) {
+                    flush_count.flushed();
+                }
                 if branch_drop || mutable {
                     broadcast_drop_closed(&mut senders, packet, branch_drop).await?;
                     // Every branch has dropped: the fan-out has no consumers left,
@@ -5151,6 +5266,7 @@ pub struct DemuxArmIo {
     pub(crate) out_txs: Vec<LinkSender>,
     pub(crate) probe: Probe,
     pub(crate) latency: LatencyPublisher,
+    pub(crate) flush_count: Option<ArmFlushCount>,
 }
 
 /// The demux arm: drain the single input edge and let the routing element
@@ -5172,6 +5288,7 @@ pub(crate) async fn demux_arm<E: MultiOutputElement>(
         out_txs,
         probe,
         mut latency,
+        mut flush_count,
     } = io;
     let branch_count = out_txs.len();
     let mut senders: Vec<SenderSink> = out_txs.into_iter().map(SenderSink::new).collect();
@@ -5188,6 +5305,10 @@ pub(crate) async fn demux_arm<E: MultiOutputElement>(
             log_received(probe.log_name(), packet);
         }
         match packet {
+            Some(PipelinePacket::Eos)
+                if flush_count
+                    .as_ref()
+                    .is_some_and(ArmFlushCount::eos_is_stale) => {}
             Some(PipelinePacket::Eos) => {
                 demux.process(PipelinePacket::Eos, &mut multi).await?;
                 for port in 0..branch_count {
@@ -5198,9 +5319,14 @@ pub(crate) async fn demux_arm<E: MultiOutputElement>(
                         multi.push_to(port, PipelinePacket::Eos).await?;
                     }
                 }
-                return Ok(0);
+                if flush_count.is_none() {
+                    return Ok(0);
+                }
             }
             Some(packet) => {
+                if let (Some(flush_count), PipelinePacket::Flush) = (&mut flush_count, &packet) {
+                    flush_count.flushed();
+                }
                 // M694: time the data-frame `process()` and sample input fill;
                 // control packets are excluded so the histogram reflects real work.
                 let sequence = frame_sequence(&packet);

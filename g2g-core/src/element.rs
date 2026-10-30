@@ -581,6 +581,11 @@ pub trait AsyncElement: ElementBound {
     #[cfg(feature = "runtime")]
     fn set_buffered_seek(&mut self, _app: crate::runtime::SeekController) {}
 
+    // a sink that completes its output at Eos, so a seek after the end cannot continue it
+    fn finalizes_on_eos(&self) -> bool {
+        false
+    }
+
     /// Override this instance's log category, which is otherwise the
     /// element type name. Default: ignore. An element that logs about itself
     /// stores it (in a [`LogName`](crate::log::LogName)) and returns it from
@@ -808,6 +813,10 @@ pub trait DynAsyncElement: ElementBound {
     #[cfg(feature = "runtime")]
     fn set_buffered_seek(&mut self, _app: crate::runtime::SeekController) {}
 
+    fn finalizes_on_eos(&self) -> bool {
+        false
+    }
+
     /// Dyn-safe mirror of [`AsyncElement::set_log_category`].
     fn set_log_category(&mut self, _category: alloc::string::String) {}
 
@@ -1030,6 +1039,10 @@ impl<T: AsyncElement> DynAsyncElement for T {
         AsyncElement::set_buffered_seek(self, app)
     }
 
+    fn finalizes_on_eos(&self) -> bool {
+        AsyncElement::finalizes_on_eos(self)
+    }
+
     #[cfg(feature = "runtime")]
     fn set_seek(
         &mut self,
@@ -1247,6 +1260,10 @@ impl<'b> DynAsyncElement for &'b mut (dyn DynAsyncElement + 'b) {
     #[cfg(feature = "runtime")]
     fn set_buffered_seek(&mut self, app: crate::runtime::SeekController) {
         (**self).set_buffered_seek(app)
+    }
+
+    fn finalizes_on_eos(&self) -> bool {
+        (**self).finalizes_on_eos()
     }
 
     #[cfg(feature = "runtime")]

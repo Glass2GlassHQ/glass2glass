@@ -489,6 +489,10 @@ impl AsyncElement for HlsSink {
         HLSSINK_PROPS
     }
 
+    fn finalizes_on_eos(&self) -> bool {
+        true
+    }
+
     fn metadata(&self) -> ElementMetadata {
         ElementMetadata::new(
             "HLS sink",

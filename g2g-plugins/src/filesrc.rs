@@ -305,10 +305,23 @@ impl SourceLoop for FileSrc {
                 if filled == 0 {
                     // EOF: honor a seek that arrived as the read drained (a
                     // reposition before ending), else end the stream.
-                    if self.seek.as_ref().is_some_and(|c| c.has_pending()) {
+                    let Some(ctl) = self.seek.as_ref() else {
+                        break;
+                    };
+                    if ctl.has_pending() {
                         continue;
                     }
-                    break;
+                    if !ctl.takes_seeks_after_end() {
+                        break;
+                    }
+                    out.push(PipelinePacket::Eos).await?;
+                    while !ctl.has_pending() {
+                        if ctl.is_shutdown() {
+                            return Ok(sequence);
+                        }
+                        ctl.wait_event().await;
+                    }
+                    continue;
                 }
                 buf.truncate(filled);
 

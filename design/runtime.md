@@ -557,7 +557,7 @@ element's exhaustive match. The controller carries it on the same app-to-source
 channel a seek already uses.
 
 A `SEGMENT`-flagged seek runs the source to `stop`. Instead of `Eos` the source
-calls `notify_segment_done(stop)` and parks, polling, for the app's next move. The
+calls `notify_segment_done(stop)` and parks on `wait_event` for the app's next move. The
 app observes `segment_done_count()` and `take_segment_done()` and re-arms a
 non-flushing `SEGMENT` seek to loop, so `accumulate_seek` advances `base` by one
 span per iteration, gapless with no `Flush` downstream, or calls `shutdown()` to end
@@ -610,8 +610,48 @@ sink arm's `Segment::to_stream_time` publishes a position that a seek takes back
 same frame, as GStreamer's `matroskademux` does. `tsdemux` opens at the first DTS, so a
 stream with B frames reads that much high until its first seek. A seek
 past the end gives no frames, which g2g-launch reports as an error. `Mp4Demux`
-serves only a seek queued before its EOS drain, and one that arrives once its
-samples have gone out fails the run with `G2gError::SeekRefused`.
+holds the whole file, so a seek that arrives once its samples have gone out sends
+`Flush` and the samples again from the target.
+
+### Seeks after the end of the stream
+
+A run handed the controller (`RunBuilder::with_seek_controller`) takes a flushing seek
+after the end of the stream and plays on from the target, as a GStreamer pipeline does
+after EOS. Only such a run changes, and only when the pipeline holds no muxer, no
+fan-in and no sink that finalizes its output at `Eos` (`finalizes_on_eos`: `hlssink`,
+`splitmuxsink`). There the run ends at the end of the stream as before, and a seek that
+comes after the source returned is never taken, which g2g-launch reports. A
+byte-stream demuxer that took such a seek and gets the source's `Eos` instead of its
+`Flush` fails with `SeekRefused`. `filesink` and `wavsink` keep writing after a
+`Flush`, so a seek after the end appends to their file.
+
+In a run that takes seeks after the end, the controller's `takes_seeks_after_end()` is
+set before any arm starts. `Mp4Src` and `FileSrc` push `Eos` at the end of the file and
+park on `wait_event`: a seek pushes `Flush` and plays on, `shutdown` returns. A
+byte-stream demuxer receives nothing while its source is parked, so after its `Eos` it
+pushes the `Eos` itself and waits on the app controller inside `process`, then takes
+the seek, which wakes the parked `FileSrc`. `Mp4Demux` waits the same way after its
+drain. Every transform, sink, tee and demux arm from the seekable node down hands its
+element the `Eos` and keeps reading, so a later `Flush` resets the chain, and still
+ends when its input closes. `shutdown` on the app controller also shuts down the byte
+source's controller, so the parked source returns and the chain ends through closed
+links as before. An arm in that part of the graph that ends early, on an error or a
+`Null` stop, shuts the controllers down too, so the parked source cannot hold the run
+open.
+
+The run ends the stream by counting. Every flushing seek taken from the app
+controller counts, and the element that took it always pushes a `Flush` downstream,
+`Mp4Demux` included for a seek it serves before its first sample. Each arm counts the
+`Flush` packets it has received, and an `Eos` that reaches an arm with fewer than the
+seeks taken is stale: the source sent it before the `Flush` of a seek already taken,
+so the arm drops it, and a decoder never drains frames the `Flush` would discard. Each
+sink downstream of the seekable node records its `Flush` count and whether an `Eos`
+came after its latest `Flush`. A future the runner drives next to the arms sees every
+such sink at a current `Eos` with no seek pending, marks `stream_ended()` on the
+controller, and calls `shutdown` unless the application holds the run open
+(`keep_run_open`, released by `let_run_end`). `g2g-launch --seek-at` holds it until it
+has issued the seek, or until the stream ended short of the position, so a seek near
+the end does not race the run's end.
 
 ### Re-preroll and byte-source seek
 

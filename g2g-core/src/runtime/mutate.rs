@@ -1566,6 +1566,7 @@ impl<'a, 'f, 's> MutationService<'a, 'f, 's> {
                 )),
                 control: None,
                 properties: Some(properties.clone()),
+                flush_count: None,
             };
             let arm = (self.spawn.transform)(element, io, done_tx);
             if self.arms.send(arm).await.is_err() {
@@ -1786,6 +1787,7 @@ impl<'a, 'f, 's> MutationService<'a, 'f, 's> {
             )),
             control: None,
             properties: Some(properties.clone()),
+            stream_end: None,
         };
         let arm = (self.spawn.sink)(element, io, done_tx);
         if self.arms.send(arm).await.is_err() {
@@ -2124,6 +2126,7 @@ impl<'a, 'f, 's> MutationService<'a, 'f, 's> {
                 )),
                 control: None,
                 properties: Some(properties.clone()),
+                flush_count: None,
             };
             let arm = (self.spawn.transform)(element, io, done_tx);
             if self.arms.send(arm).await.is_err() {

@@ -393,7 +393,16 @@ impl SourceLoop for Mp4Src {
                         }
                     }
                     out.push(PipelinePacket::Eos).await?;
-                    return Ok(sequence);
+                    let Some(ctl) = self.seek.as_ref().filter(|c| c.takes_seeks_after_end()) else {
+                        return Ok(sequence);
+                    };
+                    while !ctl.has_pending() {
+                        if ctl.is_shutdown() {
+                            return Ok(sequence);
+                        }
+                        ctl.wait_event().await;
+                    }
+                    continue;
                 }
 
                 let s = &samples[i];

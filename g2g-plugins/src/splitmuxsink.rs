@@ -359,6 +359,10 @@ impl AsyncElement for SplitMuxSink {
         SPLITMUXSINK_PROPS
     }
 
+    fn finalizes_on_eos(&self) -> bool {
+        true
+    }
+
     fn metadata(&self) -> ElementMetadata {
         ElementMetadata::new(
             "Split-muxer sink",

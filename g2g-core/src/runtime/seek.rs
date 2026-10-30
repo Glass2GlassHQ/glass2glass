@@ -10,9 +10,9 @@
 //! controller and a clone lives in the source, so a seek reaches the producer
 //! without a back-reference. The latest request wins: an app scrubbing fast
 //! only needs the final target, so a new `seek` replaces any prior unhandled
-//! one. Polling (rather than waking) is deliberate — a producing source checks
-//! between frames; a parked source isn't producing, so there is nothing to
-//! reposition until it resumes.
+//! one. A producing source polls between frames; a source parked at the end of
+//! the stream waits in [`wait_event`](SeekController::wait_event), which a
+//! `seek` wakes.
 //!
 //! ## Segment seeks
 //!
@@ -30,9 +30,8 @@
 //! or calls [`shutdown`](Self::shutdown) to end the loop. An app that attached a
 //! bus ([`set_bus`](Self::set_bus)) also gets each completion as
 //! [`BusMessage::SegmentDone`] at the same moment. A segment-looping
-//! source that is idle between loops polls [`is_shutdown`](Self::is_shutdown) so
-//! it can emit `Eos` and terminate (the poll-model analog of pausing the source
-//! task; a wakeful wait is a follow-up).
+//! source that is idle between loops waits in `wait_event` and checks
+//! [`is_shutdown`](Self::is_shutdown) so it can emit `Eos` and terminate.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -87,6 +86,19 @@ struct SeekInner {
     /// by `seek` / `shutdown` so an idle segment-looping source resumes without
     /// busy-polling. `None` when no source is parked.
     waker: Mutex<Option<Waker>>,
+    seek_counts: Mutex<SeekCounts>,
+    takes_seeks_after_end: AtomicBool,
+    // the byte source a demuxer repositions, it stops and seeks after the end with this controller
+    upstream: Mutex<Option<SeekController>>,
+    run_held_open: AtomicBool,
+    run_end_waker: Mutex<Option<Waker>>,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct SeekCounts {
+    flushing_seeks_taken: u64,
+    // the flushing seek count at which every sink took the end of the stream
+    stream_ended_at: Option<u64>,
 }
 
 /// Cloneable seek channel. Every clone shares one pending-seek slot, one
@@ -111,7 +123,12 @@ impl SeekController {
 
     /// Source side: take and clear the pending seek, or `None` if none is set.
     pub fn take_pending(&self) -> Option<Seek> {
-        self.inner.pending.lock().take()
+        let mut pending = self.inner.pending.lock();
+        let seek = pending.take();
+        if seek.is_some_and(|seek| seek.is_flush()) {
+            self.inner.seek_counts.lock().flushing_seeks_taken += 1;
+        }
+        seek
     }
 
     /// Whether a seek is currently pending (not yet taken).
@@ -183,6 +200,9 @@ impl SeekController {
     pub fn shutdown(&self) {
         self.inner.shutdown.store(true, Ordering::SeqCst);
         self.wake();
+        if let Some(upstream) = self.upstream() {
+            upstream.shutdown();
+        }
     }
 
     /// Source side: whether the app has requested shutdown.
@@ -197,6 +217,62 @@ impl SeekController {
     /// after it resolves (a spurious early resolve is harmless, just a re-poll).
     pub fn wait_event(&self) -> WaitEvent<'_> {
         WaitEvent { ctl: self }
+    }
+
+    // a source that holds this controller then parks after its Eos instead of returning
+    pub fn takes_seeks_after_end(&self) -> bool {
+        self.inner.takes_seeks_after_end.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn enable_seeks_after_end(&self) {
+        self.inner
+            .takes_seeks_after_end
+            .store(true, Ordering::SeqCst);
+        if let Some(upstream) = self.upstream() {
+            upstream.enable_seeks_after_end();
+        }
+    }
+
+    // the run stays up after every sink took the end of the stream, until let_run_end
+    pub fn keep_run_open(&self) {
+        self.inner.run_held_open.store(true, Ordering::SeqCst);
+    }
+
+    pub fn let_run_end(&self) {
+        self.inner.run_held_open.store(false, Ordering::SeqCst);
+        self.wake_run_end();
+    }
+
+    pub(crate) fn run_held_open(&self) -> bool {
+        self.inner.run_held_open.load(Ordering::SeqCst)
+    }
+
+    // every sink took the end of the stream of the latest flushing seek, and no seek is pending
+    pub fn stream_ended(&self) -> bool {
+        let counts = *self.inner.seek_counts.lock();
+        counts.stream_ended_at == Some(counts.flushing_seeks_taken) && !self.has_pending()
+    }
+
+    pub(crate) fn flushing_seeks_taken(&self) -> u64 {
+        self.inner.seek_counts.lock().flushing_seeks_taken
+    }
+
+    pub(crate) fn mark_stream_ended(&self, flushing_seeks_taken: u64) {
+        self.inner.seek_counts.lock().stream_ended_at = Some(flushing_seeks_taken);
+    }
+
+    pub(crate) fn register_run_end_waker(&self, waker: &Waker) {
+        *self.inner.run_end_waker.lock() = Some(waker.clone());
+    }
+
+    pub(crate) fn wake_run_end(&self) {
+        if let Some(waker) = self.inner.run_end_waker.lock().take() {
+            waker.wake();
+        }
+    }
+
+    fn upstream(&self) -> Option<SeekController> {
+        self.inner.upstream.lock().clone()
     }
 
     /// Resolve any parked [`wait_event`](Self::wait_event).
@@ -282,7 +358,7 @@ impl core::fmt::Display for AttachSeekError {
 
 #[cfg(feature = "std")]
 #[derive(Debug, Clone, Copy)]
-enum SeekableNode {
+pub(crate) enum SeekableNode {
     TimeSource(NodeId),
     BufferedElement(NodeId),
     Demuxer {
@@ -293,16 +369,23 @@ enum SeekableNode {
 
 #[cfg(feature = "std")]
 impl SeekableNode {
-    fn time_node(self) -> NodeId {
+    pub(crate) fn time_node(self) -> NodeId {
         match self {
             Self::TimeSource(node) | Self::BufferedElement(node) => node,
             Self::Demuxer { demuxer, .. } => demuxer,
         }
     }
+
+    pub(crate) fn byte_source(self) -> Option<NodeId> {
+        match self {
+            Self::TimeSource(_) | Self::BufferedElement(_) => None,
+            Self::Demuxer { byte_source, .. } => Some(byte_source),
+        }
+    }
 }
 
 #[cfg(feature = "std")]
-fn seekable_node(graph: &Graph<GraphNode>, node: NodeId) -> Option<SeekableNode> {
+fn seekable_node(graph: &Graph<GraphNodeRef<'_>>, node: NodeId) -> Option<SeekableNode> {
     match graph.element(node)? {
         GraphNodeRef::Source(source) if source.seek_format() == Some(SeekFormat::Time) => {
             Some(SeekableNode::TimeSource(node))
@@ -336,7 +419,7 @@ fn seekable_node(graph: &Graph<GraphNode>, node: NodeId) -> Option<SeekableNode>
 }
 
 #[cfg(feature = "std")]
-fn log_category(graph: &Graph<GraphNode>, node: NodeId) -> &'static str {
+fn log_category(graph: &Graph<GraphNodeRef<'_>>, node: NodeId) -> &'static str {
     match graph.element(node) {
         Some(GraphNodeRef::Source(source)) => source.log_category(),
         Some(GraphNodeRef::Element(element)) => element.log_category(),
@@ -377,25 +460,30 @@ pub fn attach_seek_controller(
 }
 
 #[cfg(feature = "std")]
+pub(crate) fn seek_target(
+    graph: &Graph<GraphNodeRef<'_>>,
+) -> Result<SeekableNode, AttachSeekError> {
+    let seekable: Vec<SeekableNode> = (0..graph.node_count())
+        .filter_map(|index| seekable_node(graph, NodeId(index as u32)))
+        .collect();
+    match seekable[..] {
+        [target] => Ok(target),
+        [] => Err(AttachSeekError::NothingSeekable),
+        _ => Err(AttachSeekError::SeveralSeekable(
+            seekable
+                .iter()
+                .map(|node| log_category(graph, node.time_node()))
+                .collect(),
+        )),
+    }
+}
+
+#[cfg(feature = "std")]
 fn attach(
     graph: &mut Graph<GraphNode>,
     first_seek: Option<Seek>,
 ) -> Result<SeekController, AttachSeekError> {
-    let seekable: Vec<SeekableNode> = (0..graph.node_count())
-        .filter_map(|index| seekable_node(graph, NodeId(index as u32)))
-        .collect();
-    let target = match seekable[..] {
-        [target] => target,
-        [] => return Err(AttachSeekError::NothingSeekable),
-        _ => {
-            return Err(AttachSeekError::SeveralSeekable(
-                seekable
-                    .iter()
-                    .map(|node| log_category(graph, node.time_node()))
-                    .collect(),
-            ))
-        }
-    };
+    let target = seek_target(graph)?;
     let app = SeekController::new();
     // queued before the element gets the controller, so it lands before the first frame
     if let Some(seek) = first_seek {
@@ -411,6 +499,7 @@ fn attach(
             byte_source,
         } => {
             let upstream = SeekController::new();
+            *app.inner.upstream.lock() = Some(upstream.clone());
             source_mut(graph, byte_source).set_seek(upstream.clone());
             element_mut(graph, demuxer).set_seek(app.clone(), upstream);
         }

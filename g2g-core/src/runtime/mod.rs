@@ -62,6 +62,9 @@ mod property_mailbox;
 mod run;
 
 #[cfg(feature = "std")]
+mod seek_after_end;
+
+#[cfg(feature = "std")]
 mod observe;
 
 #[cfg(feature = "std")]

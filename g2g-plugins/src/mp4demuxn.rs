@@ -1001,27 +1001,44 @@ impl Mp4DemuxN {
             .iter()
             .map(|track| track_framerate_q16(&self.buf, track))
             .collect::<Vec<_>>();
-        // every sample goes out in this one pass, so only a seek queued by now is served
-        let seek_target_ns = self
-            .seek
-            .as_ref()
-            .and_then(SeekController::take_pending)
-            .map(|seek| seek.start);
-        let samples = match (seek_target_ns, &forwarded[..]) {
+        let seek = self.seek.as_ref().and_then(SeekController::take_pending);
+        let samples = match (seek, &forwarded[..]) {
             (None, _) => samples,
-            (Some(target_ns), [track]) => self.seek_to(track, samples, target_ns, out).await?,
+            (Some(seek), [track]) => {
+                if seek.is_flush() {
+                    out.push_to(0, PipelinePacket::Flush).await?;
+                    self.need_config[0] = true;
+                }
+                self.seek_to(track, samples, seek.start, out).await?
+            }
             (Some(_), _) => unreachable!("only a one-port demuxer seeks"),
         };
         self.emit_samples(&forwarded, &framerates, samples, out)
-            .await?;
-        if self.seek.as_ref().is_some_and(SeekController::has_pending) {
-            g2g_error!(
-                Target::category(short_type_name::<Self>()),
-                "a seek arrived after every sample went out, it is not served"
-            );
-            return Err(G2gError::SeekRefused);
+            .await
+    }
+
+    // the whole file stays buffered, so a seek after every sample went out re-emits from the target
+    async fn serve_seeks_after_samples(
+        &mut self,
+        out: &mut dyn MultiOutputSink,
+    ) -> Result<(), G2gError> {
+        let Some(app) = self.seek.clone() else {
+            return Ok(());
+        };
+        loop {
+            if app.takes_seeks_after_end() {
+                for port in 0..self.ports.len() {
+                    out.push_to(port, PipelinePacket::Eos).await?;
+                }
+                while !app.has_pending() && !app.is_shutdown() {
+                    app.wait_event().await;
+                }
+            }
+            if !app.has_pending() {
+                return Ok(());
+            }
+            self.parse_and_emit_whole(out).await?;
         }
-        Ok(())
     }
 
     // the one port opens at the target, from the keyframe at or before it
@@ -1319,6 +1336,7 @@ impl MultiOutputElement for Mp4DemuxN {
                     self.advance(out).await?;
                     if self.emits_at_eos() {
                         self.parse_and_emit_whole(out).await?;
+                        self.serve_seeks_after_samples(out).await?;
                     }
                 }
                 // A flush discards the buffer and the parse progress (a re-read

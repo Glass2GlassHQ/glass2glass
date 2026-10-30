@@ -191,6 +191,9 @@ Highest leverage first:
   independent implementation.
 - **HLS live errors:** `hlssrc` fails the run on a live `#EXT-X-MAP` init segment
   answering 4xx, where gst's adaptivedemux2 reloads the playlist.
+- **HLS / DASH seeks:** `HlsSrc` and `DashSrc` take a seek through `with_seek` but
+  report no `seek_format`, so `attach_seek` (`g2g-launch --seek` / `--seek-at`) cannot
+  reach them. Make VOD and the live DVR window seekable.
 
 ## Capture sources
 
@@ -252,11 +255,8 @@ Highest leverage first:
 - **MP4 with samples in both the `moov` and fragments** (ffmpeg's `frag_keyframe`
   without `empty_moov`): decode the sample-table run, then the fragments.
   `Mp4DemuxN` fails such a file with `CapsMismatch`.
-- **Seeks during playback** (`g2g-launch --seek-at`):
-  - A seek made after the source has reached the end of the file is lost. Through a
-    byte-stream demuxer it is lost silently: `--seek-at 0.4:2.0` on
-    `h264_64x48_25fps_gop10.mkv` plays straight through and exits 0.
-  - `filesrc` and the byte-stream demuxers drop a non-flushing seek.
+- **Seeks during playback** (`g2g-launch --seek-at`): `filesrc` and the byte-stream
+  demuxers drop a non-flushing seek.
 - **TS positions with B frames:** `tsdemux` opens its segment at the first DTS, so
   positions read high by the first PTS minus the first DTS until the first seek.
   Needs a signed `Segment` time offset in g2g-core.

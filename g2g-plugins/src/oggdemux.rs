@@ -1240,8 +1240,16 @@ impl AsyncElement for OggDemux {
                     out.push(PipelinePacket::Flush).await?;
                 }
                 PipelinePacket::Eos => {
+                    if self.seek.eos_before_flush(self.seek.dropping_input())? {
+                        return Ok(());
+                    }
                     // Emit any final packets; the runner's transform arm forwards EOS.
                     self.emit_ready(out).await?;
+                    if self.seek.takes_seeks_after_end() {
+                        out.push(PipelinePacket::Eos).await?;
+                        self.seek.wait_for_seek_or_shutdown().await;
+                        self.poll_seek();
+                    }
                 }
                 PipelinePacket::CapsChanged(_) => {}
                 other => {

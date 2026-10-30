@@ -424,6 +424,10 @@ impl AsyncElement for FfmpegAacEnc {
                 }
                 PipelinePacket::Flush => {
                     self.pending.clear();
+                    // an encoder drained at Eos refuses frames
+                    if self.encoder.is_some() {
+                        self.open_encoder()?;
+                    }
                     out.push(PipelinePacket::Flush).await?;
                 }
                 PipelinePacket::Segment(seg) => {

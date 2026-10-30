@@ -177,6 +177,7 @@ the target and the decoder drops the frames before it, so the first decoded fram
 at or after the target (ffmpeg -ss). A target past the end fails the run.\n\
 --seek-at <position>:<seconds>: the same seek, issued once the sink has reported a frame at\n  \
 <position> or later. Frames already in flight still reach the sink before the seek's frames.\n  \
+A position at the end of the stream works too, except with a muxer, where the run ends at the end.\n  \
 A run that ends before reaching <position>, or before the pipeline takes the seek, fails.";
 
 // Printed on `--help` (not on the terse empty-invocation error): a map of the
@@ -907,6 +908,10 @@ fn main() {
             let mut run_builder = RunBuilder::new(graph, &clock, LINK_CAPACITY)
                 .with_progress(&progress)
                 .with_bus(&bus_handle);
+            if let Some(controller) = &seek_controller {
+                controller.keep_run_open();
+                run_builder = run_builder.with_seek_controller(controller);
+            }
             if let Some(recorder) = &recorder {
                 run_builder = run_builder.with_recorder(recorder);
             }
@@ -935,16 +940,6 @@ fn main() {
             };
             let mut status_due = std::pin::pin!(tokio::time::sleep(STATUS_INTERVAL));
             std::future::poll_fn(|cx| {
-                let reached = |seek: &mut SeekDuringPlayback| {
-                    progress
-                        .position()
-                        .is_some_and(|position_ns| position_ns >= seek.position_ns)
-                };
-                if let (Some(seek), Some(controller)) =
-                    (pending_seek.take_if(reached), &seek_controller)
-                {
-                    controller.seek(Seek::flush_to(seek.target_ns));
-                }
                 while let Poll::Ready(Some(message)) = std::pin::pin!(bus.recv()).poll(cx) {
                     handle_bus_message(message, opts.verbose, &mut failed);
                 }
@@ -965,7 +960,11 @@ fn main() {
                         printed_status = true;
                     }
                 }
-                run.as_mut().poll(cx)
+                let polled = run.as_mut().poll(cx);
+                if let (Poll::Pending, Some(controller)) = (&polled, &seek_controller) {
+                    seek_at_position(controller, &progress, &mut pending_seek);
+                }
+                polled
             })
             .await
         });
@@ -1058,6 +1057,29 @@ fn seek_target_ns(seconds: &str) -> Result<u64, String> {
     let parsed: f64 = seconds.parse().map_err(|_| invalid())?;
     let target = Duration::try_from_secs_f64(parsed).map_err(|_| invalid())?;
     u64::try_from(target.as_nanos()).map_err(|_| invalid())
+}
+
+// the run stays open for the seek, and may end once it is issued or once the stream ended short of the position
+fn seek_at_position(
+    controller: &SeekController,
+    progress: &PipelineProgress,
+    pending_seek: &mut Option<SeekDuringPlayback>,
+) {
+    let Some(seek) = *pending_seek else {
+        return;
+    };
+    // read before the position, so the position read after a stream end is the last one
+    let stream_ended = controller.stream_ended();
+    if progress
+        .position()
+        .is_some_and(|position_ns| position_ns >= seek.position_ns)
+    {
+        *pending_seek = None;
+        controller.seek(Seek::flush_to(seek.target_ns));
+        controller.let_run_end();
+    } else if stream_ended {
+        controller.let_run_end();
+    }
 }
 
 fn seek_during_playback(seek: &str) -> Result<SeekDuringPlayback, String> {
