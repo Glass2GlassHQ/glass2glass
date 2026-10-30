@@ -85,6 +85,7 @@ Breaking: `QosMessage` gains `downstream_proc_ns`, `ElementProbe` is no longer `
 - M1982: a bare `.flac` file seeks through `flacparse`, sample-exact against ffmpeg.
 - M1983: `matroskademux` reads MP2 and MP3 tracks (`A_MPEG/L2`, `A_MPEG/L3`).
 - M1984: `tsdemux` and `psdemux` take `stream=mp3` for their MPEG audio stream.
+- M1985: the compressed audio parsers take their format at any channel count and rate.
 
 ## 0.10.0
 

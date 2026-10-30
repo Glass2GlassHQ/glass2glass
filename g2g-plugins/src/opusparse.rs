@@ -31,8 +31,8 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use g2g_core::{
-    AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata,
-    G2gError, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
+    AsyncElement, AudioFormat, Caps, CapsConstraint, ConfigureOutcome, ElementMetadata, G2gError,
+    OutputSink, PadTemplate, PadTemplates, PipelinePacket,
 };
 
 /// Opus decodes at 48 kHz for every coded bandwidth (NB..FB), so refined caps
@@ -272,6 +272,8 @@ impl OpusParse {
     }
 }
 
+const PARSED_FORMATS: &[AudioFormat] = &[AudioFormat::Opus];
+
 impl AsyncElement for OpusParse {
     type ProcessFuture<'a>
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
@@ -279,34 +281,18 @@ impl AsyncElement for OpusParse {
         Self: 'a;
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
-        match upstream_caps {
-            Caps::Audio {
-                format: AudioFormat::Opus,
-                ..
-            } => Ok(upstream_caps.clone()),
-            _ => Err(G2gError::CapsMismatch),
-        }
+        crate::compressed_audio_parser::require_format(PARSED_FORMATS, upstream_caps)?;
+        Ok(upstream_caps.clone())
     }
 
-    /// Pass-through identity over Opus of any channel count (the parser refines
-    /// that mid-stream from the TOC but never changes media type). `IdentityAny`,
-    /// not `Identity(set)`, because audio caps cannot express "Opus at any
-    /// channels" in a single `Caps`.
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
-        CapsConstraint::IdentityAny
+        CapsConstraint::Identity(crate::compressed_audio_parser::parser_caps(PARSED_FORMATS))
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        match absolute_caps {
-            Caps::Audio {
-                format: AudioFormat::Opus,
-                ..
-            } => {
-                self.configured = true;
-                Ok(ConfigureOutcome::Accepted)
-            }
-            _ => Err(G2gError::CapsMismatch),
-        }
+        crate::compressed_audio_parser::require_format(PARSED_FORMATS, absolute_caps)?;
+        self.configured = true;
+        Ok(ConfigureOutcome::Accepted)
     }
 
     fn metadata(&self) -> ElementMetadata {
@@ -385,17 +371,7 @@ impl AsyncElement for OpusParse {
 
 impl PadTemplates for OpusParse {
     fn pad_templates() -> Vec<PadTemplate> {
-        // `Caps::Audio` has no open dims; pin the common stereo/48 kHz shape.
-        let opus = Caps::Audio {
-            format: AudioFormat::Opus,
-            channels: 2,
-            sample_rate: OPUS_RATE_HZ,
-            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
-        };
-        Vec::from([
-            PadTemplate::sink(CapsSet::one(opus.clone())),
-            PadTemplate::source(CapsSet::one(opus)),
-        ])
+        crate::compressed_audio_parser::pad_templates(PARSED_FORMATS)
     }
 }
 
@@ -843,11 +819,21 @@ mod tests {
     }
 
     #[test]
-    fn caps_constraint_is_identity_any() {
+    fn caps_constraint_passes_opus_at_any_channel_count_and_rejects_other_formats() {
         let parse = OpusParse::new();
-        assert!(matches!(
-            parse.caps_constraint_as_transform(),
-            CapsConstraint::IdentityAny
-        ));
+        let constraint = parse.caps_constraint_as_transform();
+        let audio = |format, channels, sample_rate| Caps::Audio {
+            format,
+            channels,
+            sample_rate,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
+        };
+        for channels in [1, 2, 6] {
+            assert!(
+                constraint.accepts(&audio(AudioFormat::Opus, channels, OPUS_RATE_HZ)),
+                "Opus at {channels} channels"
+            );
+        }
+        assert!(!constraint.accepts(&audio(AudioFormat::Aac, 2, 48_000)));
     }
 }

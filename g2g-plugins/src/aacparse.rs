@@ -46,9 +46,9 @@ use g2g_core::frame::Frame;
 use g2g_core::log::{short_type_name, LogName, LogSource};
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    g2g_error, g2g_warn, AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet,
-    ConfigureOutcome, ElementMetadata, FrameTiming, G2gError, MemoryDomain, OutputSink,
-    PadTemplate, PadTemplates, PipelinePacket,
+    g2g_error, g2g_warn, AsyncElement, AudioFormat, Caps, CapsConstraint, ConfigureOutcome,
+    ElementMetadata, FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates,
+    PipelinePacket,
 };
 
 use crate::audioframe::{locate_frame, Located, SyncFrameHeader};
@@ -730,6 +730,8 @@ impl AacParse {
     }
 }
 
+const PARSED_FORMATS: &[AudioFormat] = &[AudioFormat::Aac];
+
 impl AsyncElement for AacParse {
     type ProcessFuture<'a>
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
@@ -737,34 +739,18 @@ impl AsyncElement for AacParse {
         Self: 'a;
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
-        match upstream_caps {
-            Caps::Audio {
-                format: AudioFormat::Aac,
-                ..
-            } => Ok(upstream_caps.clone()),
-            _ => Err(G2gError::CapsMismatch),
-        }
+        crate::compressed_audio_parser::require_format(PARSED_FORMATS, upstream_caps)?;
+        Ok(upstream_caps.clone())
     }
 
-    /// Pass-through identity over AAC of any channel/rate (the parser refines
-    /// those mid-stream from the ADTS header but never changes media type).
-    /// `IdentityAny`, not `Identity(set)`, because audio caps cannot express
-    /// "AAC at any channels/rate" in a single `Caps`.
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
-        CapsConstraint::IdentityAny
+        CapsConstraint::Identity(crate::compressed_audio_parser::parser_caps(PARSED_FORMATS))
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        match absolute_caps {
-            Caps::Audio {
-                format: AudioFormat::Aac,
-                ..
-            } => {
-                self.configured = true;
-                Ok(ConfigureOutcome::Accepted)
-            }
-            _ => Err(G2gError::CapsMismatch),
-        }
+        crate::compressed_audio_parser::require_format(PARSED_FORMATS, absolute_caps)?;
+        self.configured = true;
+        Ok(ConfigureOutcome::Accepted)
     }
 
     fn metadata(&self) -> ElementMetadata {
@@ -867,17 +853,7 @@ impl LogSource for AacParse {
 
 impl PadTemplates for AacParse {
     fn pad_templates() -> Vec<PadTemplate> {
-        // `Caps::Audio` has no open dims; pin the common stereo/48 kHz shape.
-        let aac = Caps::Audio {
-            format: AudioFormat::Aac,
-            channels: 2,
-            sample_rate: 48_000,
-            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
-        };
-        Vec::from([
-            PadTemplate::sink(CapsSet::one(aac.clone())),
-            PadTemplate::source(CapsSet::one(aac)),
-        ])
+        crate::compressed_audio_parser::pad_templates(PARSED_FORMATS)
     }
 }
 
@@ -1846,11 +1822,21 @@ mod tests {
     }
 
     #[test]
-    fn caps_constraint_is_identity_any() {
+    fn caps_constraint_passes_aac_at_any_shape_and_rejects_other_formats() {
         let parse = AacParse::new();
-        assert!(matches!(
-            parse.caps_constraint_as_transform(),
-            CapsConstraint::IdentityAny
-        ));
+        let constraint = parse.caps_constraint_as_transform();
+        let audio = |format, channels, sample_rate| Caps::Audio {
+            format,
+            channels,
+            sample_rate,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
+        };
+        for (channels, sample_rate) in [(1, 22_050), (2, 44_100), (6, 48_000)] {
+            assert!(
+                constraint.accepts(&audio(AudioFormat::Aac, channels, sample_rate)),
+                "Aac at {channels} channels, {sample_rate} Hz"
+            );
+        }
+        assert!(!constraint.accepts(&audio(AudioFormat::Opus, 2, 48_000)));
     }
 }
