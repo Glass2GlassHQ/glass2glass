@@ -365,7 +365,7 @@ impl AsyncElement for MpegAudioParse {
                 }
                 PipelinePacket::Flush => {
                     self.buf.clear();
-                    self.clock.clear_pending();
+                    self.clock.reset();
                     out.push(PipelinePacket::Flush).await?;
                 }
                 // The refined caps this element emits replace the upstream

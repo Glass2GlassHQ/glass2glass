@@ -44,8 +44,9 @@ impl FrameClock {
         pts_ns
     }
 
-    pub(crate) fn clear_pending(&mut self) {
-        self.pending.clear();
+    // a flush restarts the count, which a seek back to the start never re-bases with a nonzero pts
+    pub(crate) fn reset(&mut self) {
+        *self = Self::default();
     }
 }
 

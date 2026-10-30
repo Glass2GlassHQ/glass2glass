@@ -792,7 +792,7 @@ impl AsyncElement for AacParse {
                     self.last_emitted_caps = None;
                     self.buf.clear();
                     self.undecided.clear();
-                    self.clock.clear_pending();
+                    self.clock.reset();
                     out.push(PipelinePacket::Flush).await?;
                 }
                 // Segment is control: forward unchanged.

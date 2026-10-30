@@ -10,6 +10,7 @@ use std::process::Command;
 
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
+use g2g_core::time::ticks_to_ns;
 use g2g_core::{AsyncElement, AudioFormat, Caps, G2gError, OutputSink, PushOutcome};
 use g2g_plugins::flacparse::FlacParse;
 
@@ -164,8 +165,11 @@ async fn frames_match_ffprobe_packets() {
     assert_eq!(media.len(), expected.len(), "frame count matches ffprobe");
     for (i, ((pts_ns, data), (ref_pts, ref_size))) in media.iter().zip(&expected).enumerate() {
         assert_eq!(data.len(), *ref_size, "frame {i} size matches ffprobe");
-        let ref_ns = *ref_pts as u128 * 1_000_000_000 / 44_100;
-        assert_eq!(*pts_ns as u128, ref_ns, "frame {i} pts matches ffprobe");
+        assert_eq!(
+            *pts_ns,
+            ticks_to_ns(*ref_pts, 44_100),
+            "frame {i} pts matches ffprobe"
+        );
     }
 }
 

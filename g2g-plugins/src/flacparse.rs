@@ -29,6 +29,7 @@ use alloc::vec::Vec;
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{ElementSeekRoute, SeekController};
+use g2g_core::time::ticks_to_ns;
 use g2g_core::{
     AsyncElement, AudioFormat, BusHandle, BusMessage, Caps, CapsConstraint, ConfigureOutcome,
     ElementMetadata, FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates,
@@ -37,6 +38,7 @@ use g2g_core::{
 
 use crate::demuxseek::DemuxSeek;
 use crate::flactag::{metadata_blocks, FLAC_MARKER};
+use crate::frame_clock::FrameClock;
 use crate::vorbiscomment::{
     parse_comment_body, parse_flac_picture, FLAC_COMMENT_BLOCK_TYPE, FLAC_PICTURE_BLOCK_TYPE,
 };
@@ -83,12 +85,8 @@ pub struct FlacParse {
     info: Option<StreamInfo>,
     /// How many `fLaC` header blocks have been emitted downstream.
     headers_sent: u64,
-    /// Per-channel samples emitted so far (the PTS accumulator).
-    samples: u64,
-    // set by a Flush until the first frame data after it arrives
-    awaiting_restart_input: bool,
-    // where `samples` restarts at the first frame emitted after a Flush
-    restart_pts_ns: Option<u64>,
+    buf_offset: u64,
+    clock: FrameClock,
     // a seek re-reads the file from its start and drops the frames before the target
     seek: DemuxSeek<Frame>,
     sequence: u64,
@@ -119,9 +117,8 @@ impl FlacParse {
             buf: Vec::new(),
             info: None,
             headers_sent: 0,
-            samples: 0,
-            awaiting_restart_input: false,
-            restart_pts_ns: None,
+            buf_offset: 0,
+            clock: FrameClock::default(),
             seek: DemuxSeek::default(),
             sequence: 0,
             bus: None,
@@ -159,22 +156,16 @@ impl FlacParse {
     }
 
     async fn emit(&mut self, data: Vec<u8>, out: &mut dyn OutputSink) -> Result<(), G2gError> {
+        let start_offset = self.buf_offset;
+        self.buf_offset += data.len() as u64;
         let is_audio_frame = !data.starts_with(FLAC_MARKER);
         let (pts_ns, duration_ns) = match (self.info, parse_frame_header(&data)) {
             (Some(info), Some(h)) if info.sample_rate > 0 => {
-                let ns = |samples: u64| {
-                    (samples as u128 * 1_000_000_000 / info.sample_rate as u128) as u64
-                };
-                if let Some(restart_pts_ns) = self.restart_pts_ns.take() {
-                    // nearest sample, so a sample-exact demuxer timestamp comes back unchanged
-                    self.samples = ((restart_pts_ns as u128 * info.sample_rate as u128
-                        + 500_000_000)
-                        / 1_000_000_000) as u64;
-                }
-                let pts = ns(self.samples);
-                let dur = ns(u64::from(h.block_size));
-                self.samples += u64::from(h.block_size);
-                (pts, dur)
+                let block_size = u64::from(h.block_size);
+                let pts = self
+                    .clock
+                    .frame_pts(start_offset, block_size, info.sample_rate);
+                (pts, ticks_to_ns(block_size, info.sample_rate))
             }
             // The header block (no frame header) rides at time zero.
             _ => (0, 0),
@@ -522,9 +513,14 @@ impl AsyncElement for FlacParse {
                     let slice = frame
                         .domain
                         .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
-                    if self.awaiting_restart_input && !slice.starts_with(FLAC_MARKER) {
-                        self.awaiting_restart_input = false;
-                        self.restart_pts_ns = Some(frame.timing.pts_ns);
+                    // A byte source stamps every chunk 0, so only a real time
+                    // (a demuxer's) re-bases the counter.
+                    if let Some(pts) = frame.timing.pts().filter(|pts| *pts != 0) {
+                        self.clock.note_chunk(
+                            self.buf_offset,
+                            self.buf_offset + self.buf.len() as u64,
+                            pts,
+                        );
                     }
                     self.buf.extend_from_slice(slice);
                     self.drain(out).await?;
@@ -547,13 +543,9 @@ impl AsyncElement for FlacParse {
                     out.push(PipelinePacket::Segment(segment)).await?;
                 }
                 PipelinePacket::Flush => {
-                    let own_seek = self.seek.dropping_input();
                     self.seek.on_flush();
                     self.buf.clear();
-                    // our own seek re-reads the file from its first sample
-                    self.samples = 0;
-                    self.awaiting_restart_input = !own_seek;
-                    self.restart_pts_ns = None;
+                    self.clock.reset();
                     out.push(PipelinePacket::Flush).await?;
                 }
                 PipelinePacket::CapsChanged(_) => {}
