@@ -732,6 +732,18 @@ and the missing packets before it are dropped. A DROPREQ that covers the
 delivery cursor moves the cursor past the dropped range. TSBPD times are computed
 from the 32-bit microsecond sender timestamp relative to the last released
 packet, so the 71-minute wrap does not make every later packet due at once.
+`SrtSrc` NAKs a new gap when the packet after it arrives and resends the whole
+loss list every 20 ms, libsrt's live-mode NAK report period. Its handshake reply
+carries libsrt's listener flags (TSBPD both ways, too-late drop, periodic NAK
+report, and the retransmit bit when the caller offers it), so a libsrt caller
+drops packets it has given up on and marks its retransmissions. With
+`lossmaxttl`, a gap from a caller that marks retransmissions waits that many
+packets for a reordered packet before its NAK. As in libsrt, the wait starts at
+`lossmaxttl`, drops by one after 50 packets in a row arrive in order or after 10
+reordered packets arrive with more than 2 packets of their wait left, and rises
+to the distance of a late packet without the retransmit bit. The periodic report
+still names a held gap.
+
 `SrtSrc` ends a connection after 5 s without a packet from the peer, libsrt's
 `SRTO_PEERIDLETIMEO` default, and fails the run with a network error, where gst's
 listener posts a warning and ends the stream. With `keep-listening`, a SHUTDOWN or

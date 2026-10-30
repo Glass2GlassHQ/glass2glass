@@ -61,13 +61,13 @@ pub const MAX_STREAM_ID_BYTES: usize = 512;
 pub const HS_EXT_FLAG_HSREQ: u16 = 0x0001;
 pub const HS_EXT_FLAG_KMREQ: u16 = 0x0002;
 pub const HS_EXT_FLAG_CONFIG: u16 = 0x0004;
-// HSREQ SRT flags (SRT_OPT_*), the set a libsrt live-mode caller sends
+// HSREQ SRT flags (SRT_OPT_*), the set libsrt sends in live mode
 const SRT_OPT_TSBPDSND: u32 = 0x01;
 const SRT_OPT_TSBPDRCV: u32 = 0x02;
 const SRT_OPT_TLPKTDROP: u32 = 0x08;
 const SRT_OPT_NAKREPORT: u32 = 0x10;
 const SRT_OPT_REXMITFLG: u32 = 0x20;
-const LIVE_CALLER_FLAGS: u32 =
+const LIVE_MODE_FLAGS: u32 =
     SRT_OPT_TSBPDSND | SRT_OPT_TSBPDRCV | SRT_OPT_TLPKTDROP | SRT_OPT_NAKREPORT | SRT_OPT_REXMITFLG;
 
 pub const FLOW_WINDOW_PACKETS: u32 = 8192;
@@ -210,6 +210,8 @@ pub struct Handshake {
     pub peer_ip: [u8; 16],
     /// HSREQ/HSRSP extension latency (ms), present in conclusion handshakes.
     pub latency_ms: Option<u16>,
+    // SRT_OPT_* flags sent beside the latency
+    pub srt_flags: u32,
     /// Stream-ID extension (the SRT `streamid`), present when set.
     pub stream_id: Option<String>,
     /// KMREQ/KMRSP extension: the Keying Material message bytes (the wrapped
@@ -239,6 +241,7 @@ impl Handshake {
             syn_cookie: 0,
             peer_ip: [0; 16],
             latency_ms: None,
+            srt_flags: 0,
             stream_id: None,
             km: None,
             is_response: false,
@@ -365,12 +368,10 @@ fn build_handshake_cif(hs: &Handshake) -> Vec<u8> {
     // switching the listener to HSRSP here regresses the plaintext caller. Only
     // the KM extension below is strict about the request/response TLV type.
     if let Some(latency) = hs.latency_ms {
-        // gosrt (mediamtx) rejects a caller whose request lacks the live-mode flags
-        let flags = if hs.is_response { 0 } else { LIVE_CALLER_FLAGS };
         cif.extend_from_slice(&EXT_HSREQ.to_be_bytes());
         cif.extend_from_slice(&3u16.to_be_bytes()); // length in 32-bit words
         cif.extend_from_slice(&SRT_VERSION.to_be_bytes());
-        cif.extend_from_slice(&flags.to_be_bytes());
+        cif.extend_from_slice(&hs.srt_flags.to_be_bytes());
         // recv TSBPD delay (high 16) | send TSBPD delay (low 16).
         cif.extend_from_slice(&((latency as u32) << 16 | latency as u32).to_be_bytes());
     }
@@ -428,6 +429,7 @@ fn parse_handshake_cif(cif: &[u8]) -> Option<Handshake> {
         syn_cookie: be32(28),
         peer_ip,
         latency_ms: None,
+        srt_flags: 0,
         stream_id: None,
         km: None,
         is_response: false,
@@ -445,6 +447,7 @@ fn parse_handshake_cif(cif: &[u8]) -> Option<Handshake> {
         }
         match ext_type {
             EXT_HSREQ | EXT_HSRSP if words >= 3 => {
+                hs.srt_flags = u32::from_be_bytes(cif[body + 4..body + 8].try_into().unwrap());
                 let tsbpd = u32::from_be_bytes(cif[body + 8..body + 12].try_into().unwrap());
                 hs.latency_ms = Some((tsbpd >> 16) as u16);
                 hs.is_response |= ext_type == EXT_HSRSP;
@@ -563,6 +566,7 @@ pub struct SrtHandshake {
     /// Keying Material received from the peer (the caller's KM, read by the
     /// listener to derive the shared key).
     peer_km: Option<Vec<u8>>,
+    peer_srt_flags: u32,
 }
 
 impl SrtHandshake {
@@ -587,6 +591,7 @@ impl SrtHandshake {
             established: false,
             km,
             peer_km: None,
+            peer_srt_flags: 0,
         }
     }
 
@@ -608,6 +613,7 @@ impl SrtHandshake {
             established: false,
             km: None,
             peer_km: None,
+            peer_srt_flags: 0,
         }
     }
 
@@ -615,6 +621,11 @@ impl SrtHandshake {
     /// The listener parses this (with its passphrase) to recover the stream key.
     pub fn peer_km(&self) -> Option<&[u8]> {
         self.peer_km.as_deref()
+    }
+
+    // the peer sets the retransmit bit on resent data packets, so a late packet without it was reordered
+    pub fn peer_marks_retransmissions(&self) -> bool {
+        self.peer_srt_flags & SRT_OPT_REXMITFLG != 0
     }
 
     pub fn is_established(&self) -> bool {
@@ -691,6 +702,7 @@ impl SrtHandshake {
                 }
                 self.peer_socket_id = hs.srt_socket_id;
                 self.peer_init_seq = hs.init_seq;
+                self.peer_srt_flags = hs.srt_flags;
                 if let Some(l) = hs.latency_ms {
                     self.latency_ms = self.latency_ms.max(l);
                 }
@@ -715,6 +727,7 @@ impl SrtHandshake {
                 // destination for our subsequent data packets.
                 self.peer_socket_id = hs.srt_socket_id;
                 self.peer_init_seq = hs.init_seq;
+                self.peer_srt_flags = hs.srt_flags;
                 if let Some(l) = hs.latency_ms {
                     self.latency_ms = self.latency_ms.max(l);
                 }
@@ -742,6 +755,12 @@ impl SrtHandshake {
             } else {
                 0
             };
+        // gosrt (mediamtx) rejects a caller whose request lacks the live-mode flags
+        let srt_flags = match self.role {
+            Role::Caller => LIVE_MODE_FLAGS,
+            // libsrt's listener asks for the retransmit bit only from a caller that offered it
+            Role::Listener => LIVE_MODE_FLAGS & (self.peer_srt_flags | !SRT_OPT_REXMITFLG),
+        };
         Handshake {
             version: HS_VERSION_5,
             encryption: if self.km.is_some() { 1 } else { 0 },
@@ -754,6 +773,7 @@ impl SrtHandshake {
             syn_cookie: self.cookie,
             peer_ip: [0; 16],
             latency_ms: Some(self.latency_ms),
+            srt_flags,
             stream_id: self.stream_id.clone(),
             km: self.km.clone(),
             // A listener's conclusion answers the caller's request, so its
@@ -975,6 +995,27 @@ pub struct SrtReceiver {
     crypto_even: Option<crate::srtcrypto::SrtCrypto>,
     #[cfg(feature = "srt")]
     crypto_odd: Option<crate::srtcrypto::SrtCrypto>,
+    // libsrt's SRTO_LOSSMAXTTL, the most packets a new gap waits for a reordered packet before its NAK
+    loss_max_ttl: u32,
+    // packets the next new gap waits, between 0 and loss_max_ttl
+    reorder_tolerance: u32,
+    held_losses: alloc::collections::VecDeque<HeldLoss>,
+    ordered_streak: u32,
+    early_reorder_streak: u32,
+}
+
+// libsrt lowers the reorder tolerance by one after this many packets in a row arrive in order
+const ORDERED_PACKETS_PER_TOLERANCE_STEP: u32 = 50;
+// or after this many reordered packets arrive with more than EARLY_REORDER_PACKETS_LEFT of their wait unused
+const EARLY_REORDERS_PER_TOLERANCE_STEP: u32 = 10;
+const EARLY_REORDER_PACKETS_LEFT: u32 = 2;
+
+// a gap whose NAK waits until packets_left more packets arrive, libsrt's CRcvFreshLoss
+#[derive(Debug, Clone, Copy)]
+struct HeldLoss {
+    first: u32,
+    last: u32,
+    packets_left: u32,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1009,7 +1050,18 @@ impl SrtReceiver {
             crypto_even: None,
             #[cfg(feature = "srt")]
             crypto_odd: None,
+            loss_max_ttl: 0,
+            reorder_tolerance: 0,
+            held_losses: alloc::collections::VecDeque::new(),
+            ordered_streak: 0,
+            early_reorder_streak: 0,
         }
+    }
+
+    // only for a peer that marks retransmissions, otherwise every retransmission looks reordered
+    pub fn set_loss_max_ttl(&mut self, packets: u32) {
+        self.loss_max_ttl = packets;
+        self.reorder_tolerance = packets;
     }
 
     /// Enable TSBPD with `latency_us` of buffering delay: [`take_ready_at`] then
@@ -1041,38 +1093,156 @@ impl SrtReceiver {
     }
 
     /// Buffer a received data packet, decrypting its payload in place (keyed by
-    /// its sequence) when the stream is encrypted.
-    pub fn on_data(&mut self, pkt: DataPacket) {
+    /// its sequence) when the stream is encrypted. Returns the sequences to NAK
+    /// now: a new gap at once, or a held gap whose wait for reordered packets ran out.
+    pub fn on_data(&mut self, pkt: DataPacket) -> Vec<u32> {
         if !self.have_base {
             self.next_deliver = pkt.seq;
-            self.max_seen = pkt.seq;
+            // libsrt starts its highest-received sequence one before the first packet
+            self.max_seen = pkt.seq.wrapping_sub(1) & SEQUENCE_MASK;
             self.have_base = true;
         }
-        if seq_ge(pkt.seq, self.next_deliver) {
-            if seq_gt(pkt.seq, self.max_seen) {
-                self.max_seen = pkt.seq;
-            }
-            let payload = pkt.payload;
-            // Decrypt in place using the key slot the packet's KK flag selects
-            // (even/odd), so a rekeyed stream stays readable across the switch.
-            // A no-op rebind for a cleartext stream (KK=0 / no installed key).
-            #[cfg(feature = "srt")]
-            let payload = {
-                let mut p = payload;
-                let slot = match pkt.kk {
-                    crate::srtcrypto::KM_KK_EVEN => self.crypto_even.as_ref(),
-                    crate::srtcrypto::KM_KK_ODD => self.crypto_odd.as_ref(),
-                    _ => None,
-                };
-                if let Some(c) = slot {
-                    c.process(pkt.seq, &mut p);
-                }
-                p
-            };
-            self.pending
-                .entry(pkt.seq)
-                .or_insert((payload, pkt.timestamp));
+        if !seq_ge(pkt.seq, self.next_deliver) {
+            return Vec::new();
         }
+        let tolerance = self.reorder_tolerance;
+        let first_gap_seq = (self.max_seen + 1) & SEQUENCE_MASK;
+        let gap = seq_gt(pkt.seq, first_gap_seq)
+            .then(|| (first_gap_seq, pkt.seq.wrapping_sub(1) & SEQUENCE_MASK));
+        let arrived_in_order = seq_gt(pkt.seq, self.max_seen);
+        if arrived_in_order {
+            self.max_seen = pkt.seq;
+        } else {
+            self.on_late_packet(pkt.seq, pkt.retransmit);
+        }
+        if self.pending.contains_key(&pkt.seq) {
+            return Vec::new();
+        }
+        let payload = pkt.payload;
+        // Decrypt in place using the key slot the packet's KK flag selects
+        // (even/odd), so a rekeyed stream stays readable across the switch.
+        // A no-op rebind for a cleartext stream (KK=0 / no installed key).
+        #[cfg(feature = "srt")]
+        let payload = {
+            let mut p = payload;
+            let slot = match pkt.kk {
+                crate::srtcrypto::KM_KK_EVEN => self.crypto_even.as_ref(),
+                crate::srtcrypto::KM_KK_ODD => self.crypto_odd.as_ref(),
+                _ => None,
+            };
+            if let Some(c) = slot {
+                c.process(pkt.seq, &mut p);
+            }
+            p
+        };
+        self.pending.insert(pkt.seq, (payload, pkt.timestamp));
+
+        let mut nak = Vec::new();
+        if let Some((first, last)) = gap {
+            if tolerance == 0 {
+                nak.extend(self.missing_in(first, last));
+            } else {
+                self.held_losses.push_back(HeldLoss {
+                    first,
+                    last,
+                    packets_left: tolerance,
+                });
+            }
+        }
+        if tolerance > 0 {
+            nak.extend(self.release_held_losses());
+        }
+        if arrived_in_order || pkt.retransmit {
+            self.count_ordered_packet();
+        }
+        nak.truncate(MAX_LOSS_LIST);
+        nak
+    }
+
+    // a late packet without the retransmit bit was reordered on the way, so later gaps wait longer
+    fn on_late_packet(&mut self, seq: u32, retransmit: bool) {
+        let reordered = !retransmit;
+        let mut tolerance_raised = false;
+        if reordered {
+            let distance = seq_distance(self.max_seen, seq);
+            if distance > self.reorder_tolerance {
+                self.reorder_tolerance = distance.min(self.loss_max_ttl);
+                tolerance_raised = true;
+            }
+        }
+        if self.reorder_tolerance == 0 {
+            return;
+        }
+        let packets_left = self.remove_held_loss(seq);
+        if !reordered {
+            return;
+        }
+        self.ordered_streak = 0;
+        if tolerance_raised {
+            self.early_reorder_streak = 0;
+            return;
+        }
+        if !packets_left.is_some_and(|left| left > EARLY_REORDER_PACKETS_LEFT) {
+            return;
+        }
+        self.early_reorder_streak += 1;
+        if self.early_reorder_streak >= EARLY_REORDERS_PER_TOLERANCE_STEP {
+            self.early_reorder_streak = 0;
+            self.reorder_tolerance = self.reorder_tolerance.saturating_sub(1);
+        }
+    }
+
+    fn count_ordered_packet(&mut self) {
+        self.ordered_streak += 1;
+        if self.ordered_streak >= ORDERED_PACKETS_PER_TOLERANCE_STEP {
+            self.ordered_streak = 0;
+            self.reorder_tolerance = self.reorder_tolerance.saturating_sub(1);
+        }
+    }
+
+    // returns the packets the held gap containing seq had left to wait
+    fn remove_held_loss(&mut self, seq: u32) -> Option<u32> {
+        let index = self
+            .held_losses
+            .iter()
+            .position(|loss| seq_ge(seq, loss.first) && seq_ge(loss.last, seq))?;
+        let loss = self.held_losses[index];
+        let before = seq.wrapping_sub(1) & SEQUENCE_MASK;
+        let after = (seq + 1) & SEQUENCE_MASK;
+        match (seq == loss.first, seq == loss.last) {
+            (true, true) => {
+                self.held_losses.remove(index);
+            }
+            (true, false) => self.held_losses[index].first = after,
+            (false, true) => self.held_losses[index].last = before,
+            (false, false) => {
+                self.held_losses[index].last = before;
+                self.held_losses.insert(
+                    index + 1,
+                    HeldLoss {
+                        first: after,
+                        ..loss
+                    },
+                );
+            }
+        }
+        Some(loss.packets_left)
+    }
+
+    // libsrt NAKs the held gaps at the front whose wait ran out and counts down the rest
+    fn release_held_losses(&mut self) -> Vec<u32> {
+        let mut nak = Vec::new();
+        while let Some(&loss) = self.held_losses.front() {
+            if loss.packets_left > 0 {
+                break;
+            }
+            self.held_losses.pop_front();
+            nak.extend(self.missing_in(loss.first, loss.last));
+        }
+        for loss in &mut self.held_losses {
+            loss.packets_left = loss.packets_left.saturating_sub(1);
+        }
+        nak
     }
 
     /// Pop every payload now deliverable in order (stops at the first gap). No
@@ -1155,18 +1325,28 @@ impl SrtReceiver {
     /// The sequence numbers between the delivery cursor and the highest seen
     /// that have not arrived (the NAK loss list).
     pub fn missing(&self) -> Vec<u32> {
-        let mut loss = Vec::new();
         if !self.have_base {
-            return loss;
+            return Vec::new();
         }
-        let mut s = self.next_deliver;
-        while seq_gt(self.max_seen, s) && loss.len() < MAX_LOSS_LIST {
-            if !self.pending.contains_key(&s) {
-                loss.push(s);
-            }
-            s = (s + 1) & 0x7FFF_FFFF;
-        }
-        loss
+        self.missing_in(self.next_deliver, self.max_seen).collect()
+    }
+
+    // sequences in first..=last at or past the delivery cursor that have not arrived
+    fn missing_in(&self, first: u32, last: u32) -> impl Iterator<Item = u32> + '_ {
+        let start = if seq_gt(self.next_deliver, first) {
+            self.next_deliver
+        } else {
+            first
+        };
+        let count = if seq_ge(last, start) {
+            seq_distance(last, start) + 1
+        } else {
+            0
+        };
+        (0..count)
+            .map(move |offset| (start + offset) & SEQUENCE_MASK)
+            .filter(|seq| !self.pending.contains_key(seq))
+            .take(MAX_LOSS_LIST)
     }
 
     /// The next-to-deliver sequence, the ACK point (everything before it is in).
@@ -1316,6 +1496,7 @@ mod tests {
             syn_cookie: 0x0BAD_F00D,
             peer_ip: [1; 16],
             latency_ms: Some(120),
+            srt_flags: LIVE_MODE_FLAGS,
             stream_id: Some("live/cam0".into()),
             km: Some(vec![0xAA, 0xBB, 0xCC, 0xDD, 0x11, 0x22, 0x33, 0x44]),
             is_response: false,
@@ -1330,6 +1511,7 @@ mod tests {
         assert_eq!(parsed.srt_socket_id, 0xDEAD_BEEF);
         assert_eq!(parsed.syn_cookie, 0x0BAD_F00D);
         assert_eq!(parsed.latency_ms, Some(120), "HSREQ latency survives");
+        assert_eq!(parsed.srt_flags, LIVE_MODE_FLAGS, "HSREQ flags survive");
         assert_eq!(
             parsed.stream_id.as_deref(),
             Some("live/cam0"),
@@ -1345,25 +1527,41 @@ mod tests {
     // gosrt (mediamtx) rejects a conclusion without these, libsrt sends them
     #[test]
     fn caller_conclusion_requests_live_mode() {
-        let flags_of = |is_response: bool| {
-            let mut hs = Handshake::induction(1, 1);
-            hs.hs_type = URQ_CONCLUSION;
-            hs.latency_ms = Some(120);
-            hs.is_response = is_response;
-            let cif = build_handshake_cif(&hs);
-            // the HSREQ TLV header follows the 48-byte fixed CIF, the flags follow the version
-            u32::from_be_bytes(cif[56..60].try_into().unwrap())
-        };
+        let caller = SrtHandshake::new_caller(1, 1, 120, None, None);
+        let cif = build_handshake_cif(&caller.conclusion());
+        // the HSREQ TLV header follows the 48-byte fixed CIF, the flags follow the version
+        let flags = u32::from_be_bytes(cif[56..60].try_into().unwrap());
         let required = SRT_OPT_TSBPDSND
             | SRT_OPT_TSBPDRCV
             | SRT_OPT_TLPKTDROP
             | SRT_OPT_NAKREPORT
             | SRT_OPT_REXMITFLG;
-        assert_eq!(flags_of(false) & required, required);
+        assert_eq!(flags & required, required);
+    }
+
+    // a libsrt caller sends periodic-NAK-aware retransmits and too-late drops only for these
+    #[test]
+    fn listener_answers_with_live_mode_flags() {
+        const COOKIE: u32 = 0x1357_9BDF;
+        let reply_flags = |caller_flags: u32| {
+            let mut listener = SrtHandshake::new_listener(2, 120, COOKIE);
+            let mut conclusion = Handshake::induction(1, 1000);
+            conclusion.version = HS_VERSION_5;
+            conclusion.hs_type = URQ_CONCLUSION;
+            conclusion.syn_cookie = COOKIE;
+            conclusion.latency_ms = Some(120);
+            conclusion.srt_flags = caller_flags;
+            let step = listener.on_packet(&build_control(&Control::Handshake(conclusion), 0, 0));
+            let Some(Control::Handshake(reply)) = parse_control(&step.reply.expect("reply")) else {
+                panic!("the listener answers with a handshake");
+            };
+            (reply.srt_flags, listener.peer_marks_retransmissions())
+        };
+        let without_retransmit_bit = LIVE_MODE_FLAGS & !SRT_OPT_REXMITFLG;
+        assert_eq!(reply_flags(LIVE_MODE_FLAGS), (LIVE_MODE_FLAGS, true));
         assert_eq!(
-            flags_of(true),
-            0,
-            "the listener response keeps the flags libsrt callers accept"
+            reply_flags(without_retransmit_bit),
+            (without_retransmit_bit, false)
         );
     }
 
@@ -1932,11 +2130,108 @@ mod tests {
             payload: vec![0],
         };
         receiver.on_data(pkt(10)); // delivery base
-        receiver.on_data(pkt(10 + 3_000_000)); // one far-ahead packet jumps max_seen
+                                   // one far-ahead packet jumps max_seen
+        assert_eq!(
+            receiver.on_data(pkt(10 + 3_000_000)).len(),
+            MAX_LOSS_LIST,
+            "the NAK for the new gap is capped"
+        );
         assert_eq!(
             receiver.missing().len(),
             MAX_LOSS_LIST,
             "loss list is capped, not the full gap"
+        );
+    }
+
+    fn packet(seq: u32, retransmit: bool) -> DataPacket {
+        DataPacket {
+            retransmit,
+            ..timestamped_packet(seq, 0)
+        }
+    }
+
+    #[test]
+    fn a_gap_is_nacked_when_it_is_seen() {
+        let mut receiver = SrtReceiver::new();
+        assert!(receiver.on_data(packet(10, false)).is_empty());
+        assert_eq!(receiver.on_data(packet(13, false)), vec![11, 12]);
+        assert!(
+            receiver.on_data(packet(14, false)).is_empty(),
+            "the periodic report repeats an open gap, on_data NAKs it once"
+        );
+    }
+
+    #[test]
+    fn a_reordered_packet_inside_the_tolerance_is_never_nacked() {
+        const LOSS_MAX_TTL: u32 = 3;
+        let mut receiver = SrtReceiver::new();
+        receiver.set_loss_max_ttl(LOSS_MAX_TTL);
+        receiver.on_data(packet(10, false));
+        assert!(receiver.on_data(packet(12, false)).is_empty());
+        assert!(receiver.on_data(packet(11, false)).is_empty());
+        for seq in 13..13 + LOSS_MAX_TTL {
+            assert!(receiver.on_data(packet(seq, false)).is_empty());
+        }
+    }
+
+    #[test]
+    fn a_lost_packet_is_nacked_once_its_wait_runs_out() {
+        const LOSS_MAX_TTL: u32 = 3;
+        let mut receiver = SrtReceiver::new();
+        receiver.set_loss_max_ttl(LOSS_MAX_TTL);
+        receiver.on_data(packet(10, false));
+        for seq in 12..12 + LOSS_MAX_TTL {
+            assert!(receiver.on_data(packet(seq, false)).is_empty());
+        }
+        assert_eq!(receiver.on_data(packet(12 + LOSS_MAX_TTL, false)), vec![11]);
+    }
+
+    #[test]
+    fn ordered_packets_shrink_the_reorder_tolerance() {
+        const LOSS_MAX_TTL: u32 = 3;
+        let mut receiver = SrtReceiver::new();
+        receiver.set_loss_max_ttl(LOSS_MAX_TTL);
+        for seq in 0..ORDERED_PACKETS_PER_TOLERANCE_STEP {
+            receiver.on_data(packet(seq, false));
+        }
+        let lost = ORDERED_PACKETS_PER_TOLERANCE_STEP;
+        let lowered_tolerance = LOSS_MAX_TTL - 1;
+        for seq in lost + 1..lost + 1 + lowered_tolerance {
+            assert!(receiver.on_data(packet(seq, false)).is_empty());
+        }
+        assert_eq!(
+            receiver.on_data(packet(lost + 1 + lowered_tolerance, false)),
+            vec![lost]
+        );
+    }
+
+    #[test]
+    fn a_reordered_packet_raises_the_tolerance_and_a_retransmission_does_not() {
+        const LOSS_MAX_TTL: u32 = 3;
+        let mut receiver = SrtReceiver::new();
+        receiver.set_loss_max_ttl(LOSS_MAX_TTL);
+        let ordered = ORDERED_PACKETS_PER_TOLERANCE_STEP * LOSS_MAX_TTL;
+        for seq in 0..ordered {
+            receiver.on_data(packet(seq, false));
+        }
+        assert_eq!(
+            receiver.on_data(packet(ordered + 1, false)),
+            vec![ordered],
+            "the tolerance is down to 0"
+        );
+        receiver.on_data(packet(ordered + 2, false));
+        receiver.on_data(packet(ordered, true));
+        assert_eq!(
+            receiver.on_data(packet(ordered + 4, false)),
+            vec![ordered + 3],
+            "a late retransmission leaves the tolerance at 0"
+        );
+        // one packet behind the highest received, without the retransmit bit
+        receiver.on_data(packet(ordered + 3, false));
+        assert!(receiver.on_data(packet(ordered + 6, false)).is_empty());
+        assert_eq!(
+            receiver.on_data(packet(ordered + 7, false)),
+            vec![ordered + 5]
         );
     }
 

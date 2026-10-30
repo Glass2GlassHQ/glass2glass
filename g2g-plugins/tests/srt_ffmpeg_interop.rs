@@ -685,3 +685,123 @@ async fn srtsrc_carries_on_past_a_packet_ffmpeg_never_delivers() {
     assert_eq!(received, PAYLOADS);
     assert_all_ts_sync(&cap.first_bytes);
 }
+
+const REORDERED_PACKETS: usize = 5;
+// the proxy holds back every this-many-th original data packet until the next one passes it
+const REORDER_SPACING: usize = 10;
+
+#[derive(Debug, Default)]
+struct ReorderLog {
+    reordered: Vec<u32>,
+    nacked: std::collections::BTreeSet<u32>,
+    retransmissions: usize,
+}
+
+async fn proxy_reordering_packets(
+    proxy: tokio::net::UdpSocket,
+    listener: std::net::SocketAddr,
+    log: Arc<std::sync::Mutex<ReorderLog>>,
+) {
+    let mut caller = None;
+    let mut originals = 0;
+    let mut held: Option<Vec<u8>> = None;
+    let mut buf = [0u8; 2048];
+    loop {
+        let Ok((n, from)) = proxy.recv_from(&mut buf).await else {
+            return;
+        };
+        let packet = &buf[..n];
+        if from == listener {
+            if let Some(srt::Control::Nak { loss }) = srt::parse_control(packet) {
+                let mut log = log.lock().unwrap();
+                let nacked: Vec<u32> = loss
+                    .into_iter()
+                    .filter(|seq| log.reordered.contains(seq))
+                    .collect();
+                log.nacked.extend(nacked);
+            }
+            if let Some(caller) = caller {
+                let _ = proxy.send_to(packet, caller).await;
+            }
+            continue;
+        }
+        caller = Some(from);
+        if let Some(data) = srt::parse_data_packet(packet) {
+            let mut log = log.lock().unwrap();
+            if data.retransmit {
+                log.retransmissions += 1;
+            } else if let Some(held_packet) = held.take() {
+                drop(log);
+                let _ = proxy.send_to(packet, listener).await;
+                let _ = proxy.send_to(&held_packet, listener).await;
+                continue;
+            } else {
+                originals += 1;
+                if originals % REORDER_SPACING == 0 && log.reordered.len() < REORDERED_PACKETS {
+                    log.reordered.push(data.seq);
+                    held = Some(packet.to_vec());
+                    continue;
+                }
+            }
+        }
+        let _ = proxy.send_to(packet, listener).await;
+    }
+}
+
+async fn run_reordered_ffmpeg_caller(loss_max_ttl: u64) -> ReorderLog {
+    const PAYLOADS: u64 = 80;
+
+    let sock = StdUdpSocket::bind("127.0.0.1:0").expect("bind srt listener");
+    let listener = sock.local_addr().unwrap();
+    let proxy = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("bind proxy");
+    let url = format!("srt://{}", proxy.local_addr().unwrap());
+    let log = Arc::new(std::sync::Mutex::new(ReorderLog::default()));
+    let proxy_task = tokio::spawn(proxy_reordering_packets(proxy, listener, log.clone()));
+    let mut src = SrtSrc::from_socket(sock)
+        .expect("adopt socket")
+        .with_frame_limit(PAYLOADS);
+    src.set_property("lossmaxttl", g2g_core::PropValue::Uint(loss_max_ttl))
+        .expect("lossmaxttl");
+    let mut cap = Capture::default();
+
+    let mut caller = spawn_ffmpeg_caller(&url);
+    let result = tokio::time::timeout(Duration::from_secs(30), src.run(&mut cap)).await;
+    caller.kill().expect("kill the caller");
+    caller.wait().expect("reap the caller");
+    proxy_task.abort();
+
+    assert_eq!(result.expect("streams in time").expect("run ok"), PAYLOADS);
+    assert_all_ts_sync(&cap.first_bytes);
+    let log = std::mem::take(&mut *log.lock().unwrap());
+    assert_eq!(log.reordered.len(), REORDERED_PACKETS);
+    log
+}
+
+/// libsrt marks its retransmissions once the listener asks for the bit, so
+/// `lossmaxttl` can tell a reordered packet from a resent one and hold its NAK.
+#[tokio::test]
+#[ignore = "needs ffmpeg built with libsrt; opens a local UDP socket"]
+async fn lossmaxttl_holds_the_nak_for_a_packet_reordered_from_libsrt() {
+    const LOSS_MAX_TTL: u64 = 10;
+
+    let immediate = run_reordered_ffmpeg_caller(0).await;
+    assert_eq!(
+        immediate.nacked.len(),
+        REORDERED_PACKETS,
+        "without lossmaxttl the packet after each held one NAKs it"
+    );
+    assert!(
+        immediate.retransmissions > 0,
+        "libsrt sets the retransmit bit on what the NAKs asked for"
+    );
+
+    let tolerant = run_reordered_ffmpeg_caller(LOSS_MAX_TTL).await;
+    // only a periodic loss report sent between the two packets of a pair names one
+    assert!(
+        tolerant.nacked.len() < REORDERED_PACKETS,
+        "lossmaxttl NAKed {:?}",
+        tolerant.nacked
+    );
+}

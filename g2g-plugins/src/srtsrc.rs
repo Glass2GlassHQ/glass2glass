@@ -38,8 +38,9 @@ const LISTENER_SOCKET_ID: u32 = 0x6732_736C; // "g2sl"
 const DEFAULT_LATENCY_MS: u16 = 120;
 /// UDP receive buffer.
 const RECV_BUF: usize = 2048;
-/// Send a NAK at most this often (ns), so a gap is not re-requested every packet.
-const NACK_MIN_INTERVAL_NS: u64 = 20_000_000;
+/// Resend the whole loss list this often (ns), libsrt's live-mode minimum NAK
+/// report period. A new gap is NAKed when it is seen, not on this schedule.
+const NAK_REPORT_INTERVAL_NS: u64 = 20_000_000;
 /// The SRT full ACK period (the 10 ms SYN interval).
 const ACK_INTERVAL_NS: u64 = 10_000_000;
 /// Receive timeout (ms) so the TSBPD buffer still flushes due packets when no new
@@ -70,6 +71,7 @@ pub struct SrtSrc {
     frame_limit: u64,
     passphrase: Option<String>,
     keep_listening: bool,
+    loss_max_ttl: u32,
     std_socket: Option<StdUdpSocket>,
     configured: bool,
 }
@@ -83,6 +85,7 @@ impl SrtSrc {
             frame_limit: u64::MAX,
             passphrase: None,
             keep_listening: false,
+            loss_max_ttl: 0,
             std_socket: None,
             configured: false,
         }
@@ -208,6 +211,13 @@ impl SourceLoop for SrtSrc {
                 "wait for a new caller when the current one disconnects or goes idle",
             )
             .with_default("false"),
+            PropertySpec::new(
+                "lossmaxttl",
+                PropKind::Uint,
+                "most packets a gap waits for a reordered packet before its NAK (0 = NAK at once)",
+            )
+            .with_default("0")
+            .with_range("0", "4294967295"),
         ];
         PROPS
     }
@@ -232,6 +242,11 @@ impl SourceLoop for SrtSrc {
                 self.keep_listening = value.as_bool().ok_or(PropError::Type)?;
                 Ok(())
             }
+            "lossmaxttl" => {
+                let packets = value.as_uint().ok_or(PropError::Type)?;
+                self.loss_max_ttl = u32::try_from(packets).map_err(|_| PropError::Value)?;
+                Ok(())
+            }
             _ => Err(PropError::Unknown),
         }
     }
@@ -245,6 +260,7 @@ impl SourceLoop for SrtSrc {
             "passphrase" => Some(PropValue::Str(self.passphrase.clone().unwrap_or_default())),
             "num-buffers" => Some(crate::numbuffers::get_num_buffers(self.frame_limit)),
             "keep-listening" => Some(PropValue::Bool(self.keep_listening)),
+            "lossmaxttl" => Some(PropValue::Uint(self.loss_max_ttl.into())),
             _ => None,
         }
     }
@@ -334,6 +350,9 @@ impl SrtSrc {
         // Hold packets back to the advertised latency (TSBPD): the negotiated
         // delay smooths network jitter into a steady output stream.
         receiver.set_tsbpd((self.latency_ms as u32) * 1000);
+        if handshake.peer_marks_retransmissions() {
+            receiver.set_loss_max_ttl(self.loss_max_ttl);
+        }
         // Derive the shared stream key from the caller's KM and our passphrase.
         if let Some(pass) = &self.passphrase {
             let km = handshake
@@ -344,7 +363,7 @@ impl SrtSrc {
             receiver.set_crypto(crypto);
         }
         let mut buf = [0u8; RECV_BUF];
-        let mut last_nack_ns = 0u64;
+        let mut next_nak_report_ns = 0u64;
         let mut last_ack_ns = 0u64;
         let mut last_peer_packet_ns = g2g_core::metrics::monotonic_ns();
         // Full ACK numbers start at 1 (0 marks a light ACK).
@@ -404,7 +423,12 @@ impl SrtSrc {
                                 _ => {}
                             }
                         } else if let Some(pkt) = srt::parse_data_packet(&buf[..n]) {
-                            receiver.on_data(pkt);
+                            let loss = receiver.on_data(pkt);
+                            if !loss.is_empty() {
+                                let nak =
+                                    srt::build_control(&Control::Nak { loss }, 0, peer_socket_id);
+                                socket.send_to(&nak, peer).await.map_err(io_err)?;
+                            }
                         }
                     }
                 }
@@ -423,8 +447,9 @@ impl SrtSrc {
                 }
             }
 
-            // Request retransmission of any open gaps, rate-limited.
-            if now.saturating_sub(last_nack_ns) >= NACK_MIN_INTERVAL_NS {
+            // Re-request every open gap on a fixed schedule, as libsrt's periodic NAK report.
+            if now >= next_nak_report_ns {
+                next_nak_report_ns = now + NAK_REPORT_INTERVAL_NS;
                 let missing = receiver.missing();
                 if !missing.is_empty() {
                     g2g_core::g2g_debug!(
@@ -435,7 +460,6 @@ impl SrtSrc {
                     let nak =
                         srt::build_control(&Control::Nak { loss: missing }, 0, peer_socket_id);
                     socket.send_to(&nak, peer).await.map_err(io_err)?;
-                    last_nack_ns = now;
                 }
             }
             let ack_due = now.saturating_sub(last_ack_ns) >= ACK_INTERVAL_NS;
