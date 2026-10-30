@@ -362,13 +362,10 @@ fn build_handshake_cif(hs: &Handshake) -> Vec<u8> {
     cif.extend_from_slice(&hs.syn_cookie.to_be_bytes());
     cif.extend_from_slice(&hs.peer_ip);
 
-    // HSREQ extension: SRT version, flags, then receiver + sender TSBPD
-    // delay. Emitted as HSREQ in both directions: libsrt accepts an HSREQ-typed
-    // block in the listener's response (it reads the TSBPD delay either way), and
-    // switching the listener to HSRSP here regresses the plaintext caller. Only
-    // the KM extension below is strict about the request/response TLV type.
+    // HSREQ / HSRSP extension: SRT version, flags, then receiver + sender TSBPD delay.
     if let Some(latency) = hs.latency_ms {
-        cif.extend_from_slice(&EXT_HSREQ.to_be_bytes());
+        let hs_cmd = if hs.is_response { EXT_HSRSP } else { EXT_HSREQ };
+        cif.extend_from_slice(&hs_cmd.to_be_bytes());
         cif.extend_from_slice(&3u16.to_be_bytes()); // length in 32-bit words
         cif.extend_from_slice(&SRT_VERSION.to_be_bytes());
         cif.extend_from_slice(&hs.srt_flags.to_be_bytes());
@@ -1657,6 +1654,10 @@ mod tests {
             let Some(Control::Handshake(reply)) = parse_control(&step.reply.expect("reply")) else {
                 panic!("the listener answers with a handshake");
             };
+            assert!(
+                reply.is_response,
+                "a plaintext reply carries an HSRSP block"
+            );
             (reply.srt_flags, listener.peer_marks_retransmissions())
         };
         let without_retransmit_bit = LIVE_MODE_FLAGS & !SRT_OPT_REXMITFLG;
