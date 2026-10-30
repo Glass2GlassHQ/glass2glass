@@ -301,7 +301,7 @@ impl SrtSink {
                             continue;
                         }
                         let sender = self.sender.as_mut().ok_or(G2gError::NotConfigured)?;
-                        resends.extend(sender.on_control(&ctrl, 0));
+                        resends.extend(sender.on_control(&ctrl));
                     }
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,

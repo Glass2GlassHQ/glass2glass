@@ -790,10 +790,10 @@ pub struct SrtSender {
     dst_socket_id: u32,
     next_seq: u32,
     msg_no: u32,
-    /// Buffered packets `(seq, kk, post-encryption bytes)`, so a NAK resends the
-    /// same ciphertext under the same sequence/IV *and the same key parity* even
-    /// after a rekey has switched the active key (the receiver keeps both slots).
-    buffer: alloc::collections::VecDeque<(u32, u8, Vec<u8>)>,
+    /// Buffered packets, so a NAK resends the same ciphertext under the same
+    /// sequence/IV *and the same key parity* even after a rekey has switched the
+    /// active key (the receiver keeps both slots).
+    buffer: alloc::collections::VecDeque<SentPacket>,
     capacity: usize,
     retransmits: u64,
     /// Which key slot stamps outgoing packets (`KK`): 0 cleartext, 1 even, 2 odd.
@@ -805,6 +805,16 @@ pub struct SrtSender {
     crypto_even: Option<crate::srtcrypto::SrtCrypto>,
     #[cfg(feature = "srt")]
     crypto_odd: Option<crate::srtcrypto::SrtCrypto>,
+}
+
+#[derive(Debug)]
+struct SentPacket {
+    seq: u32,
+    kk: u8,
+    // a receiver schedules the resent copy by this, as libsrt keeps the original
+    timestamp: u32,
+    // post-encryption bytes
+    data: Vec<u8>,
 }
 
 impl SrtSender {
@@ -912,28 +922,33 @@ impl SrtSender {
         if self.buffer.len() >= self.capacity {
             self.buffer.pop_front();
         }
-        self.buffer.push_back((seq, kk, data));
+        self.buffer.push_back(SentPacket {
+            seq,
+            kk,
+            timestamp,
+            data,
+        });
         pkt
     }
 
     /// React to a control packet from the receiver: NAK triggers retransmits
     /// (the R flag set), ACK trims the buffer. Returns packets to resend.
-    pub fn on_control(&mut self, ctrl: &Control, timestamp: u32) -> Vec<Vec<u8>> {
+    pub fn on_control(&mut self, ctrl: &Control) -> Vec<Vec<u8>> {
         match ctrl {
             Control::Nak { loss } => {
                 let mut out = Vec::new();
                 for &seq in loss {
                     // Resend with the parity the packet was originally encrypted
                     // under, not the current active key.
-                    if let Some((_, kk, payload)) = self.buffered(seq) {
+                    if let Some(sent) = self.buffered(seq) {
                         out.push(build_data_packet(
                             seq,
                             0,
                             true,
-                            *kk,
-                            timestamp,
+                            sent.kk,
+                            sent.timestamp,
                             self.dst_socket_id,
-                            payload,
+                            &sent.data,
                         ));
                         self.retransmits += 1;
                     }
@@ -945,7 +960,7 @@ impl SrtSender {
                 while self
                     .buffer
                     .front()
-                    .is_some_and(|(s, _, _)| !seq_ge(*s, *ack_seq))
+                    .is_some_and(|sent| !seq_ge(sent.seq, *ack_seq))
                 {
                     self.buffer.pop_front();
                 }
@@ -957,10 +972,10 @@ impl SrtSender {
 
     /// The buffered packet `seq`, found by its offset from the oldest one since
     /// the buffer holds consecutive sequences in send order.
-    fn buffered(&self, seq: u32) -> Option<&(u32, u8, Vec<u8>)> {
-        let (oldest, _, _) = self.buffer.front()?;
-        let entry = self.buffer.get(seq_distance(seq, *oldest) as usize)?;
-        (entry.0 == seq).then_some(entry)
+    fn buffered(&self, seq: u32) -> Option<&SentPacket> {
+        let oldest = self.buffer.front()?.seq;
+        let entry = self.buffer.get(seq_distance(seq, oldest) as usize)?;
+        (entry.seq == seq).then_some(entry)
     }
 }
 
@@ -1714,10 +1729,15 @@ mod tests {
         assert_eq!(missing, vec![102], "the gap is reported for NAK");
 
         // Receiver NAKs, sender retransmits, receiver recovers + drains in order.
-        let resends = sender.on_control(&Control::Nak { loss: missing }, 99);
+        let resends = sender.on_control(&Control::Nak { loss: missing });
         assert_eq!(resends.len(), 1, "exactly the lost packet resent");
         let resent = parse_data_packet(&resends[0]).unwrap();
         assert!(resent.retransmit, "resend carries the R flag");
+        assert_eq!(
+            resent.timestamp,
+            dropped_seq - 100,
+            "resend keeps the timestamp the receiver schedules it by"
+        );
         receiver.on_data(resent);
         assert_eq!(
             receiver.take_ready(),
@@ -1785,13 +1805,10 @@ mod tests {
         }
 
         // Everything before the wrap arrived, the post-wrap packets 0, 1, 2 did not.
-        sender.on_control(&Control::LightAck { ack_seq: 0 }, 0);
-        let resends = sender.on_control(
-            &Control::Nak {
-                loss: vec![LAST_SEQUENCE, 0, 1, 2],
-            },
-            0,
-        );
+        sender.on_control(&Control::LightAck { ack_seq: 0 });
+        let resends = sender.on_control(&Control::Nak {
+            loss: vec![LAST_SEQUENCE, 0, 1, 2],
+        });
         let resent: Vec<u32> = resends
             .iter()
             .map(|p| parse_data_packet(p).unwrap().seq)

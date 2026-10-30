@@ -720,7 +720,7 @@ HSREQ-latency and Stream-ID extensions, ACK, NAK loss report, ACKACK,
 KEEPALIVE, SHUTDOWN), the caller and listener handshake driver (`SrtHandshake`,
 induction to conclusion with a listener cookie challenge), and the ARQ pair
 `SrtSender` and `SrtReceiver`. The sender buffers and resends on NAK with the
-retransmit flag, and the receiver reorders by wrap-aware sequence, NAKs gaps,
+retransmit flag and the original timestamp, and the receiver reorders by wrap-aware sequence, NAKs gaps,
 and delivers in order, the same shape as the RTP jitter and NACK path.
 `SrtSrc` sends full ACKs that report its free receive buffer: libsrt sets its
 flow window from that field and shrinks it on every light ACK, so a caller fed
