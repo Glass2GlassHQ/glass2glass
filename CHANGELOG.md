@@ -101,6 +101,7 @@ Breaking: `QosMessage` gains `downstream_proc_ns`, `ElementProbe` is no longer `
 - M1998: `tsdemux` keeps a source restart's `Flush` from its decoders, so `srtsrc` with `keep-listening` no longer drops their frames between callers.
 - M1999: `srtsrc` answers a caller's handshake with an HSRSP block, as libsrt does.
 - M2000: SRT streams take AES-192 keys, and `srtsink` takes gst's `pbkeylen` property.
+- M2001: `srtsrc` calls a listener, both SRT elements take gst's `uri`, and a listening `srtsrc` rejects callers by `streamid` and `pbkeylen`.
 
 ## 0.10.0
 

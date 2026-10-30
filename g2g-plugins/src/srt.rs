@@ -36,6 +36,14 @@ pub const SRT_MAGIC: u16 = 0x4A17;
 pub const URQ_INDUCTION: u32 = 1;
 pub const URQ_CONCLUSION: u32 = 0xFFFF_FFFF; // -1
 pub const URQ_AGREEMENT: u32 = 0xFFFF_FFFE; // -2
+                                            // a handshake type at or past this rejects the connection, the excess is the reason
+const URQ_FAILURE_TYPES: u32 = 1000;
+// libsrt's SRT_REJ_UNSECURE, a passphrase or key the listener requires is missing or different
+const REJECT_UNSECURE: u32 = URQ_FAILURE_TYPES + 11;
+// libsrt's SRT_REJX_NOTFOUND, the listener does not serve the stream id
+const REJECT_STREAM_NOT_FOUND: u32 = URQ_FAILURE_TYPES + 1404;
+// the KM byte that holds the stream key length in 4-byte words
+const KM_KEY_LENGTH_OFFSET: usize = 15;
 
 // Control packet types (the 15-bit Control Type field).
 pub const CTRL_HANDSHAKE: u16 = 0x0000;
@@ -564,6 +572,16 @@ pub struct SrtHandshake {
     /// listener to derive the shared key).
     peer_km: Option<Vec<u8>>,
     peer_srt_flags: u32,
+    // a listener answers a caller with another stream id or key length with a rejection
+    required_stream_id: Option<String>,
+    required_key_length: Option<usize>,
+    rejection: Option<u32>,
+}
+
+// the stream key length in bytes a KM message carries
+pub fn km_key_length(km: &[u8]) -> Option<usize> {
+    km.get(KM_KEY_LENGTH_OFFSET)
+        .map(|&words| usize::from(words) * 4)
 }
 
 impl SrtHandshake {
@@ -589,6 +607,9 @@ impl SrtHandshake {
             km,
             peer_km: None,
             peer_srt_flags: 0,
+            required_stream_id: None,
+            required_key_length: None,
+            rejection: None,
         }
     }
 
@@ -611,6 +632,9 @@ impl SrtHandshake {
             km: None,
             peer_km: None,
             peer_srt_flags: 0,
+            required_stream_id: None,
+            required_key_length: None,
+            rejection: None,
         }
     }
 
@@ -618,6 +642,16 @@ impl SrtHandshake {
     /// The listener parses this (with its passphrase) to recover the stream key.
     pub fn peer_km(&self) -> Option<&[u8]> {
         self.peer_km.as_deref()
+    }
+
+    pub fn admit_only(&mut self, stream_id: Option<String>, key_length: Option<usize>) {
+        self.required_stream_id = stream_id;
+        self.required_key_length = key_length;
+    }
+
+    // the handshake type of the rejection the peer answered with
+    pub fn rejection(&self) -> Option<u32> {
+        self.rejection
     }
 
     // the peer sets the retransmit bit on resent data packets, so a late packet without it was reordered
@@ -660,6 +694,11 @@ impl SrtHandshake {
         let Some(Control::Handshake(hs)) = parse_control(buf) else {
             return none;
         };
+        // the conclusion and agreement types are negative on the wire, a rejection positive
+        if i32::try_from(hs.hs_type).is_ok_and(|t| t >= URQ_FAILURE_TYPES as i32) {
+            self.rejection = Some(hs.hs_type);
+            return none;
+        }
         match (self.role, hs.hs_type) {
             // Listener: a caller's induction -> reply induction with our cookie.
             (Role::Listener, t) if t == URQ_INDUCTION => {
@@ -696,6 +735,21 @@ impl SrtHandshake {
             (Role::Listener, t) if t == URQ_CONCLUSION => {
                 if hs.syn_cookie != self.cookie {
                     return none; // a stale / spoofed conclusion; ignore
+                }
+                if let Some(reason) = self.refusal(&hs) {
+                    let mut rejection = Handshake::induction(self.socket_id, 0);
+                    rejection.version = HS_VERSION_5;
+                    rejection.ext_field = 0;
+                    rejection.hs_type = reason;
+                    rejection.syn_cookie = self.cookie;
+                    return HandshakeStep {
+                        reply: Some(build_control(
+                            &Control::Handshake(rejection),
+                            0,
+                            hs.srt_socket_id,
+                        )),
+                        established: false,
+                    };
                 }
                 self.peer_socket_id = hs.srt_socket_id;
                 self.peer_init_seq = hs.init_seq;
@@ -737,6 +791,24 @@ impl SrtHandshake {
             }
             _ => none,
         }
+    }
+
+    fn refusal(&self, conclusion: &Handshake) -> Option<u32> {
+        if self
+            .required_stream_id
+            .as_ref()
+            .is_some_and(|id| conclusion.stream_id.as_ref() != Some(id))
+        {
+            return Some(REJECT_STREAM_NOT_FOUND);
+        }
+        let key_length = conclusion.km.as_deref().and_then(km_key_length);
+        if self
+            .required_key_length
+            .is_some_and(|required| key_length != Some(required))
+        {
+            return Some(REJECT_UNSECURE);
+        }
+        None
     }
 
     /// Build this side's conclusion handshake (carries HSREQ latency + SID).
@@ -1752,6 +1824,51 @@ mod tests {
             1000,
             "caller's ISN reached the listener"
         );
+    }
+
+    // runs a caller against a listener until one side stops answering
+    fn exchange(caller: &mut SrtHandshake, listener: &mut SrtHandshake) {
+        let mut pkt = caller.start().expect("caller opens");
+        for _ in 0..4 {
+            let Some(reply) = listener.on_packet(&pkt).reply else {
+                return;
+            };
+            let Some(next) = caller.on_packet(&reply).reply else {
+                return;
+            };
+            pkt = next;
+        }
+    }
+
+    #[test]
+    fn a_listener_rejects_a_caller_with_another_stream_id() {
+        const COOKIE: u32 = 0x1357_9BDF;
+        let mut caller = SrtHandshake::new_caller(1, 1000, 120, Some("other".into()), None);
+        let mut listener = SrtHandshake::new_listener(2, 120, COOKIE);
+        listener.admit_only(Some("live".into()), None);
+        exchange(&mut caller, &mut listener);
+        assert!(!listener.is_established());
+        assert_eq!(caller.rejection(), Some(REJECT_STREAM_NOT_FOUND));
+
+        let mut caller = SrtHandshake::new_caller(1, 1000, 120, Some("live".into()), None);
+        let mut listener = SrtHandshake::new_listener(2, 120, COOKIE);
+        listener.admit_only(Some("live".into()), None);
+        exchange(&mut caller, &mut listener);
+        assert!(caller.is_established() && listener.is_established());
+    }
+
+    #[test]
+    fn a_listener_rejects_a_caller_without_the_key_length_it_requires() {
+        const COOKIE: u32 = 0x1357_9BDF;
+        const REQUIRED_KEY_BYTES: usize = 32;
+        let mut km = vec![0u8; KM_KEY_LENGTH_OFFSET + 1];
+        km[KM_KEY_LENGTH_OFFSET] = 16 / 4;
+        let mut caller = SrtHandshake::new_caller(1, 1000, 120, None, Some(km));
+        let mut listener = SrtHandshake::new_listener(2, 120, COOKIE);
+        listener.admit_only(None, Some(REQUIRED_KEY_BYTES));
+        exchange(&mut caller, &mut listener);
+        assert!(!listener.is_established());
+        assert_eq!(caller.rejection(), Some(REJECT_UNSECURE));
     }
 
     #[test]

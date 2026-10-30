@@ -1,11 +1,11 @@
-//! SRT ingress source (SrtSrc, `srt` feature): the listener side. Binds a UDP
-//! port, accepts an SRT caller's HSv5 handshake, then receives the data packets,
+//! SRT ingress source (SrtSrc, `srt` feature). Binds a UDP port, accepts an SRT
+//! caller's HSv5 handshake or calls a listener, then receives the data packets,
 //! reorders them, NAKs gaps for retransmission, and emits the reassembled
 //! MPEG-TS byte stream downstream as `Caps::ByteStream{MpegTs}` (for `tsdemux`).
 //! The sans-IO [`srt`](crate::srt) module does the protocol work; this element is
 //! the tokio UDP I/O around it, the receive-side inverse of [`SrtSink`](crate::srtsink).
 //!
-//! Scope: one caller, the listener role, NAK-based ARQ, and TSBPD delivery
+//! Scope: one peer at a time, the listener and caller roles, NAK-based ARQ, and TSBPD delivery
 //! timing (the advertised latency holds packets back into a steady output).
 //! Congestion control is a follow-up.
 
@@ -15,7 +15,7 @@ use core::pin::Pin;
 use alloc::boxed::Box;
 use alloc::string::{String, ToString};
 
-use std::net::{SocketAddr, UdpSocket as StdUdpSocket};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket as StdUdpSocket};
 
 use g2g_core::frame::Frame;
 use g2g_core::log::Target;
@@ -30,10 +30,12 @@ use g2g_core::{
 use crate::bytestream::mpegts_caps;
 use crate::filesink::io_err;
 use crate::srt::{self, Control, SrtHandshake, SrtReceiver};
-use crate::srtcrypto::SrtCrypto;
+use crate::srtcrypto::{AesKeySize, SrtCrypto, KM_KK_EVEN};
+use crate::srtsink::{complete_handshake, RECONNECT_INTERVAL_NS};
+use crate::srturi::{parse_srt_uri, SrtMode};
 
-/// Our SRT socket id (listener).
-const LISTENER_SOCKET_ID: u32 = 0x6732_736C; // "g2sl"
+/// Our SRT socket id.
+const SOCKET_ID: u32 = 0x6732_736C; // "g2sl"
 /// Default advertised target latency (ms).
 const DEFAULT_LATENCY_MS: u16 = 120;
 /// UDP receive buffer.
@@ -69,6 +71,13 @@ pub struct SrtSrc {
     passphrase: Option<String>,
     keep_listening: bool,
     loss_max_ttl: u32,
+    mode: SrtMode,
+    // the listener a caller calls
+    remote: Option<SocketAddr>,
+    stream_id: Option<String>,
+    // None keeps libsrt's default, AES-128 for a key this side makes, any length from a caller
+    key_size: Option<AesKeySize>,
+    auto_reconnect: bool,
     std_socket: Option<StdUdpSocket>,
     configured: bool,
 }
@@ -83,6 +92,11 @@ impl SrtSrc {
             passphrase: None,
             keep_listening: false,
             loss_max_ttl: 0,
+            mode: SrtMode::Listener,
+            remote: None,
+            stream_id: None,
+            key_size: None,
+            auto_reconnect: true,
             std_socket: None,
             configured: false,
         }
@@ -170,7 +184,7 @@ impl SourceLoop for SrtSrc {
         ElementMetadata::new(
             "SRT source",
             "Source/Network",
-            "Receives an MPEG-TS byte stream over SRT (listener), NAK-recovering loss",
+            "Receives an MPEG-TS byte stream over SRT (listener or caller), NAK-recovering loss",
             "g2g",
         )
     }
@@ -215,6 +229,31 @@ impl SourceLoop for SrtSrc {
             )
             .with_default("0")
             .with_range("0", "4294967295"),
+            PropertySpec::new(
+                "uri",
+                PropKind::Str,
+                "srt://host:port calls, srt://:port listens, with mode, localaddress, localport, latency, passphrase, pbkeylen, streamid and lossmaxttl query options",
+            ),
+            PropertySpec::new("mode", PropKind::Str, "SRT connection mode")
+                .with_default("listener")
+                .with_enum_values("caller | listener"),
+            PropertySpec::new(
+                "streamid",
+                PropKind::Str,
+                "stream id a caller sends, or the only one a listener accepts (empty = none)",
+            ),
+            PropertySpec::new(
+                "pbkeylen",
+                PropKind::Uint,
+                "AES key length in bytes a caller makes, or the only one a listener accepts (0 = AES-128 / any)",
+            )
+            .with_default("0"),
+            PropertySpec::new(
+                "auto-reconnect",
+                PropKind::Bool,
+                "call the listener again when a call fails or the connection ends",
+            )
+            .with_default("true"),
         ];
         PROPS
     }
@@ -244,6 +283,34 @@ impl SourceLoop for SrtSrc {
                 self.loss_max_ttl = u32::try_from(packets).map_err(|_| PropError::Value)?;
                 Ok(())
             }
+            "uri" => self.set_uri(value.as_str().ok_or(PropError::Type)?),
+            "mode" => {
+                let name = value.as_str().ok_or(PropError::Type)?;
+                self.mode = match SrtMode::from_name(name) {
+                    Some(mode @ (SrtMode::Caller | SrtMode::Listener)) => mode,
+                    _ => return Err(PropError::Value),
+                };
+                Ok(())
+            }
+            "streamid" => {
+                let id = value.as_str().ok_or(PropError::Type)?;
+                if id.len() > srt::MAX_STREAM_ID_BYTES {
+                    return Err(PropError::Value);
+                }
+                self.stream_id = (!id.is_empty()).then(|| id.to_string());
+                Ok(())
+            }
+            "pbkeylen" => {
+                self.key_size = match value.as_uint().ok_or(PropError::Type)? {
+                    0 => None,
+                    bytes => Some(AesKeySize::from_bytes(bytes).ok_or(PropError::Value)?),
+                };
+                Ok(())
+            }
+            "auto-reconnect" => {
+                self.auto_reconnect = value.as_bool().ok_or(PropError::Type)?;
+                Ok(())
+            }
             _ => Err(PropError::Unknown),
         }
     }
@@ -258,6 +325,13 @@ impl SourceLoop for SrtSrc {
             "num-buffers" => Some(crate::numbuffers::get_num_buffers(self.frame_limit)),
             "keep-listening" => Some(PropValue::Bool(self.keep_listening)),
             "lossmaxttl" => Some(PropValue::Uint(self.loss_max_ttl.into())),
+            "uri" => Some(PropValue::Str(self.uri())),
+            "mode" => Some(PropValue::Str(self.mode.name().to_string())),
+            "streamid" => Some(PropValue::Str(self.stream_id.clone().unwrap_or_default())),
+            "pbkeylen" => Some(PropValue::Uint(
+                self.key_size.map_or(0, |size| size.bytes() as u64),
+            )),
+            "auto-reconnect" => Some(PropValue::Bool(self.auto_reconnect)),
             _ => None,
         }
     }
@@ -270,6 +344,10 @@ impl SourceLoop for SrtSrc {
             if crate::numbuffers::finished_at_zero_limit(self.frame_limit, out).await? {
                 return Ok(0);
             }
+            // only a uri names the listener to call
+            if self.mode != SrtMode::Listener && self.remote.is_none() {
+                return Err(G2gError::NotConfigured);
+            }
             let std = self.std_socket.take().ok_or(G2gError::NotConfigured)?;
             std.set_nonblocking(true).map_err(io_err)?;
             let socket = tokio::net::UdpSocket::from_std(std).map_err(io_err)?;
@@ -277,14 +355,26 @@ impl SourceLoop for SrtSrc {
             let mut emitted = 0u64;
             let mut first_caller = true;
             loop {
-                let (handshake, peer) = self.accept_caller(&socket).await?;
+                let (mut handshake, peer) = match self.connect(&socket).await {
+                    Ok(connection) => connection,
+                    Err(error) if self.mode == SrtMode::Caller && self.auto_reconnect => {
+                        g2g_core::g2g_debug!(
+                            Target::category(LOG_CATEGORY),
+                            "call failed ({error:?}), calling again"
+                        );
+                        tokio::time::sleep(core::time::Duration::from_nanos(RECONNECT_INTERVAL_NS))
+                            .await;
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                };
                 if first_caller {
                     // The MPEG-TS byte stream the depayloaded packets reconstruct.
                     out.push(PipelinePacket::CapsChanged(mpegts_caps())).await?;
                     first_caller = false;
                 }
                 let end = self
-                    .receive_caller(&socket, &handshake, peer, out, &mut emitted)
+                    .receive_caller(&socket, &mut handshake, peer, out, &mut emitted)
                     .await?;
                 g2g_core::g2g_debug!(
                     Target::category(LOG_CATEGORY),
@@ -292,8 +382,8 @@ impl SourceLoop for SrtSrc {
                 );
                 match end {
                     CallerEnd::FrameLimit => break,
-                    CallerEnd::Shutdown if !self.keep_listening => break,
-                    CallerEnd::PeerIdle if !self.keep_listening => {
+                    CallerEnd::Shutdown if !self.reconnects() => break,
+                    CallerEnd::PeerIdle if !self.reconnects() => {
                         return Err(G2gError::Network(NetworkFailure::Stream));
                     }
                     // the next caller sends a new transport stream, a source restart downstream
@@ -309,6 +399,106 @@ impl SourceLoop for SrtSrc {
 }
 
 impl SrtSrc {
+    fn reconnects(&self) -> bool {
+        match self.mode {
+            SrtMode::Listener => self.keep_listening,
+            SrtMode::Caller | SrtMode::Rendezvous => self.auto_reconnect,
+        }
+    }
+
+    // gst reads the mode from the host: srt://host:port calls and srt://:port listens
+    fn set_uri(&mut self, uri: &str) -> Result<(), PropError> {
+        let uri = parse_srt_uri(uri)?;
+        let (bind, remote) = match uri.mode {
+            SrtMode::Listener => {
+                let port = uri.local_port.or(uri.port).ok_or(PropError::Value)?;
+                let ip = uri
+                    .local_address
+                    .or(uri.host)
+                    .unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+                (SocketAddr::new(ip, port), None)
+            }
+            SrtMode::Caller => {
+                let remote = SocketAddr::new(
+                    uri.host.ok_or(PropError::Value)?,
+                    uri.port.ok_or(PropError::Value)?,
+                );
+                let ip = uri.local_address.unwrap_or(unspecified_like(remote.ip()));
+                (
+                    SocketAddr::new(ip, uri.local_port.unwrap_or(0)),
+                    Some(remote),
+                )
+            }
+            SrtMode::Rendezvous => return Err(PropError::Value),
+        };
+        if uri
+            .stream_id
+            .as_ref()
+            .is_some_and(|id| id.len() > srt::MAX_STREAM_ID_BYTES)
+        {
+            return Err(PropError::Value);
+        }
+        self.mode = uri.mode;
+        self.bind = bind;
+        self.remote = remote;
+        self.latency_ms = uri.latency_ms.unwrap_or(self.latency_ms);
+        self.loss_max_ttl = uri.loss_max_ttl.unwrap_or(self.loss_max_ttl);
+        if uri.key_size.is_some() {
+            self.key_size = uri.key_size;
+        }
+        if uri.passphrase.is_some() {
+            self.passphrase = uri.passphrase;
+        }
+        if uri.stream_id.is_some() {
+            self.stream_id = uri.stream_id;
+        }
+        Ok(())
+    }
+
+    fn uri(&self) -> String {
+        match (self.mode, self.remote) {
+            (SrtMode::Listener, _) => alloc::format!("srt://{}?mode=listener", self.bind),
+            (_, Some(remote)) => alloc::format!("srt://{remote}?mode={}", self.mode.name()),
+            (_, None) => String::new(),
+        }
+    }
+
+    async fn connect(
+        &self,
+        socket: &tokio::net::UdpSocket,
+    ) -> Result<(SrtHandshake, SocketAddr), G2gError> {
+        match (self.mode, self.remote) {
+            (SrtMode::Listener, _) => self.accept_caller(socket).await,
+            (SrtMode::Caller, Some(remote)) => Ok((self.call(socket, remote).await?, remote)),
+            (_, None) | (SrtMode::Rendezvous, _) => Err(G2gError::NotConfigured),
+        }
+    }
+
+    async fn call(
+        &self,
+        socket: &tokio::net::UdpSocket,
+        remote: SocketAddr,
+    ) -> Result<SrtHandshake, G2gError> {
+        let key_size = self.key_size.unwrap_or(AesKeySize::Aes128);
+        let km = self
+            .passphrase
+            .as_deref()
+            .map(|pass| SrtCrypto::generate(key_size).build_km(pass, KM_KK_EVEN));
+        // a receiver sends no data, so its initial sequence number is never read
+        let mut handshake =
+            SrtHandshake::new_caller(SOCKET_ID, 0, self.latency_ms, self.stream_id.clone(), km);
+        if let Err(error) = complete_handshake(socket, remote, &mut handshake).await {
+            if let Some(rejection) = handshake.rejection() {
+                g2g_core::g2g_warn!(
+                    Target::category(LOG_CATEGORY),
+                    "{remote} rejected the call with handshake type {rejection}"
+                );
+            }
+            return Err(error);
+        }
+        Ok(handshake)
+    }
+
     async fn accept_caller(
         &self,
         socket: &tokio::net::UdpSocket,
@@ -320,7 +510,8 @@ impl SrtSrc {
             let t = g2g_core::metrics::monotonic_ns();
             ((t ^ (t >> 29)).wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 32) as u32 | 1
         };
-        let mut handshake = SrtHandshake::new_listener(LISTENER_SOCKET_ID, self.latency_ms, cookie);
+        let mut handshake = SrtHandshake::new_listener(SOCKET_ID, self.latency_ms, cookie);
+        handshake.admit_only(self.stream_id.clone(), self.key_size.map(AesKeySize::bytes));
         let mut buf = [0u8; RECV_BUF];
         loop {
             let (n, from) = socket.recv_from(&mut buf).await.map_err(io_err)?;
@@ -337,7 +528,7 @@ impl SrtSrc {
     async fn receive_caller(
         &self,
         socket: &tokio::net::UdpSocket,
-        handshake: &SrtHandshake,
+        handshake: &mut SrtHandshake,
         peer: SocketAddr,
         out: &mut dyn OutputSink,
         emitted: &mut u64,
@@ -420,7 +611,13 @@ impl SrtSrc {
                                 Some(Control::AckAck { ack_no }) => {
                                     round_trip.on_ackack(ack_no, now_us)
                                 }
-                                // Keepalive / handshake retries: ignored.
+                                // a peer that missed our last handshake packet sends its own again
+                                Some(Control::Handshake(_)) => {
+                                    if let Some(reply) = handshake.on_packet(&buf[..n]).reply {
+                                        socket.send_to(&reply, peer).await.map_err(io_err)?;
+                                    }
+                                }
+                                // Keepalive: ignored.
                                 _ => {}
                             }
                         } else if let Some(pkt) = srt::parse_data_packet(&buf[..n]) {
@@ -479,5 +676,12 @@ impl SrtSrc {
                 round_trip.on_ack_sent(ack_no, now_us);
             }
         }
+    }
+}
+
+fn unspecified_like(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V4(_) => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+        IpAddr::V6(_) => IpAddr::V6(Ipv6Addr::UNSPECIFIED),
     }
 }

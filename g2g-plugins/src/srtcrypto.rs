@@ -269,7 +269,7 @@ impl SrtCrypto {
             return None;
         }
         let slen = km[14] as usize * 4;
-        let klen = km[15] as usize * 4;
+        let klen = crate::srt::km_key_length(km)?;
         if slen != SALT_LEN {
             return None; // a 16-byte salt is the only layout we emit
         }

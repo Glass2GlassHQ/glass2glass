@@ -119,7 +119,7 @@ fn decode_data_uri(uri: &str) -> Option<Vec<u8>> {
 /// Undo the `%XX` escaping of a URI's text payload. `None` on a truncated or
 /// non-hexadecimal escape, so a malformed URI fails rather than playing bytes
 /// nobody wrote.
-fn percent_decode(text: &str) -> Option<Vec<u8>> {
+pub(crate) fn percent_decode(text: &str) -> Option<Vec<u8>> {
     const ESCAPE: u8 = b'%';
     const ESCAPE_DIGITS: usize = 2;
     let raw = text.as_bytes();

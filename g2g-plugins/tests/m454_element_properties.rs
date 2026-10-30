@@ -555,6 +555,93 @@ fn srtsrc_keep_listening() {
     );
 }
 
+// gst's srt elements read the mode from the URI host and libsrt options from its query
+#[cfg(feature = "srt")]
+#[test]
+fn srtsrc_uri_sets_the_mode_and_the_options() {
+    use g2g_core::runtime::SourceLoop;
+    use g2g_plugins::srtsrc::SrtSrc;
+    let mut s = SrtSrc::new("0.0.0.0:9000".parse().unwrap());
+    s.set_property(
+        "uri",
+        PropValue::Str("srt://192.0.2.7:7001?streamid=cam&pbkeylen=32&lossmaxttl=20".into()),
+    )
+    .unwrap();
+    assert_eq!(
+        s.get_property("mode"),
+        Some(PropValue::Str("caller".into()))
+    );
+    assert_eq!(
+        s.get_property("uri"),
+        Some(PropValue::Str("srt://192.0.2.7:7001?mode=caller".into()))
+    );
+    assert_eq!(
+        s.get_property("streamid"),
+        Some(PropValue::Str("cam".into()))
+    );
+    assert_eq!(s.get_property("pbkeylen"), Some(PropValue::Uint(32)));
+    assert_eq!(s.get_property("lossmaxttl"), Some(PropValue::Uint(20)));
+
+    s.set_property("uri", PropValue::Str("srt://:7002".into()))
+        .unwrap();
+    assert_eq!(
+        s.get_property("mode"),
+        Some(PropValue::Str("listener".into()))
+    );
+    assert_eq!(s.get_property("port"), Some(PropValue::Uint(7002)));
+
+    for refused in ["srt://:7002?sndbuf=1", "srt://192.0.2.7", "udp://:7002"] {
+        assert_eq!(
+            s.set_property("uri", PropValue::Str(refused.into())),
+            Err(g2g_core::PropError::Value),
+            "{refused}"
+        );
+    }
+    assert_eq!(
+        s.set_property("pbkeylen", PropValue::Uint(20)),
+        Err(g2g_core::PropError::Value)
+    );
+    assert_eq!(
+        s.get_property("auto-reconnect"),
+        Some(PropValue::Bool(true))
+    );
+}
+
+#[cfg(feature = "srt")]
+#[test]
+fn srtsink_uri_and_pbkeylen() {
+    use g2g_plugins::srtsink::SrtSink;
+    let mut s = SrtSink::new("127.0.0.1:9000".parse().unwrap());
+    s.set_property(
+        "uri",
+        PropValue::Str("srt://192.0.2.7:7001?latency=300&pbkeylen=24&streamid=cam".into()),
+    )
+    .unwrap();
+    assert_eq!(
+        s.get_property("host"),
+        Some(PropValue::Str("192.0.2.7".into()))
+    );
+    assert_eq!(s.get_property("port"), Some(PropValue::Uint(7001)));
+    assert_eq!(s.get_property("latency"), Some(PropValue::Uint(300)));
+    assert_eq!(s.get_property("pbkeylen"), Some(PropValue::Uint(24)));
+    assert_eq!(
+        s.get_property("streamid"),
+        Some(PropValue::Str("cam".into()))
+    );
+    // srtsink only calls, and a receiver option means nothing to it
+    for refused in ["srt://:7001", "srt://192.0.2.7:7001?lossmaxttl=5"] {
+        assert_eq!(
+            s.set_property("uri", PropValue::Str(refused.into())),
+            Err(g2g_core::PropError::Value),
+            "{refused}"
+        );
+    }
+    assert_eq!(
+        s.set_property("mode", PropValue::Str("listener".into())),
+        Err(g2g_core::PropError::Value)
+    );
+}
+
 /// M1098: `srtpenc` takes its key as hexadecimal digits, at any of the four
 /// cipher lengths, and never reads it back. A length matching none of them is
 /// refused rather than silently truncated.

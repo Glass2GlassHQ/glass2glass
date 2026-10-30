@@ -30,6 +30,7 @@ use crate::bytestream::{mpegts_caps, TS_DATAGRAM_PAYLOAD};
 use crate::filesink::io_err;
 use crate::srt::{self, LiveCc, SrtHandshake, SrtSender, CC_DEFAULT_OVERHEAD};
 use crate::srtcrypto::{AesKeySize, SrtCrypto, KM_KK_EVEN};
+use crate::srturi::{parse_srt_uri, SrtMode};
 
 /// Our SRT socket id (caller).
 const CALLER_SOCKET_ID: u32 = 0x6732_7363; // "g2sc"
@@ -48,7 +49,7 @@ const KM_MAX_RETRANSMITS: u32 = 20;
 // libsrt resends an unanswered handshake packet this often
 const HANDSHAKE_RESEND_NS: u64 = 250_000_000;
 // a call that failed is not retried sooner, frames in between are dropped
-const RECONNECT_INTERVAL_NS: u64 = 1_000_000_000;
+pub(crate) const RECONNECT_INTERVAL_NS: u64 = 1_000_000_000;
 const LOG_CATEGORY: &str = "srtsink";
 
 /// A mid-stream rekey KM awaiting the peer's KMRSP. Retransmitted on a timer
@@ -217,6 +218,35 @@ impl SrtSink {
         self.eos_seen
     }
 
+    // srtsink only calls, so a URI must name the listener and carry only sender options
+    fn set_uri(&mut self, uri: &str) -> Result<(), PropError> {
+        let uri = parse_srt_uri(uri)?;
+        let sender_only = uri.mode == SrtMode::Caller
+            && uri.local_address.is_none()
+            && uri.local_port.is_none()
+            && uri.loss_max_ttl.is_none();
+        let (Some(host), Some(port), true) = (uri.host, uri.port, sender_only) else {
+            return Err(PropError::Value);
+        };
+        if uri
+            .stream_id
+            .as_ref()
+            .is_some_and(|id| id.len() > crate::srt::MAX_STREAM_ID_BYTES)
+        {
+            return Err(PropError::Value);
+        }
+        self.dest = SocketAddr::new(host, port);
+        self.latency_ms = uri.latency_ms.unwrap_or(self.latency_ms);
+        self.key_size = uri.key_size.unwrap_or(self.key_size);
+        if uri.passphrase.is_some() {
+            self.passphrase = uri.passphrase;
+        }
+        if uri.stream_id.is_some() {
+            self.stream_id = uri.stream_id;
+        }
+        Ok(())
+    }
+
     /// Connect the UDP socket and run the caller handshake to established,
     /// returning the armed sender (its destination is the peer's socket id).
     async fn connect_and_handshake(&mut self) -> Result<(), G2gError> {
@@ -243,35 +273,15 @@ impl SrtSink {
             self.stream_id.clone(),
             km,
         );
-        let mut last_sent = hs.start();
-        if let Some(first) = &last_sent {
-            socket.send(first).await.map_err(io_err)?;
-        }
-        let mut buf = [0u8; 2048];
-        // Bound the *whole* handshake, not each recv: a peer that keeps sending
-        // non-converging packets (a handshake mismatch, a flood) must not reset
-        // the deadline every datagram and hang the pipeline forever.
-        let deadline = tokio::time::Instant::now() + core::time::Duration::from_secs(8);
-        let resend = core::time::Duration::from_nanos(HANDSHAKE_RESEND_NS);
-        while !hs.is_established() {
-            if tokio::time::Instant::now() >= deadline {
-                return Err(G2gError::Network(NetworkFailure::Connect));
+        if let Err(error) = complete_handshake(&socket, self.dest, &mut hs).await {
+            if let Some(rejection) = hs.rejection() {
+                g2g_core::g2g_warn!(
+                    Target::category(LOG_CATEGORY),
+                    "{} rejected the call with handshake type {rejection}",
+                    self.dest
+                );
             }
-            let n = match tokio::time::timeout(resend, socket.recv(&mut buf)).await {
-                Ok(r) => r.map_err(io_err)?,
-                // without a resend a lost handshake packet stalls the call until the deadline
-                Err(_) => {
-                    if let Some(packet) = &last_sent {
-                        socket.send(packet).await.map_err(io_err)?;
-                    }
-                    continue;
-                }
-            };
-            let step = hs.on_packet(&buf[..n]);
-            if let Some(reply) = step.reply {
-                socket.send(&reply).await.map_err(io_err)?;
-                last_sent = Some(reply);
-            }
+            return Err(error);
         }
         self.connected_at_ns = g2g_core::metrics::monotonic_ns();
         self.last_peer_packet_ns = self.connected_at_ns;
@@ -445,6 +455,51 @@ impl SrtSink {
     }
 }
 
+// sends the handshake's packets to `peer` until it is established, resending the
+// last one every HANDSHAKE_RESEND_NS since a lost packet otherwise stalls the call
+pub(crate) async fn complete_handshake(
+    socket: &tokio::net::UdpSocket,
+    peer: SocketAddr,
+    hs: &mut SrtHandshake,
+) -> Result<(), G2gError> {
+    let mut last_sent = hs.start();
+    if let Some(first) = &last_sent {
+        socket.send_to(first, peer).await.map_err(io_err)?;
+    }
+    let mut buf = [0u8; 2048];
+    // Bound the *whole* handshake, not each recv: a peer that keeps sending
+    // non-converging packets (a handshake mismatch, a flood) must not reset
+    // the deadline every datagram and hang the pipeline forever.
+    let deadline = tokio::time::Instant::now() + core::time::Duration::from_secs(8);
+    let resend = core::time::Duration::from_nanos(HANDSHAKE_RESEND_NS);
+    while !hs.is_established() {
+        if tokio::time::Instant::now() >= deadline {
+            return Err(G2gError::Network(NetworkFailure::Connect));
+        }
+        let (n, from) = match tokio::time::timeout(resend, socket.recv_from(&mut buf)).await {
+            Ok(r) => r.map_err(io_err)?,
+            Err(_) => {
+                if let Some(packet) = &last_sent {
+                    socket.send_to(packet, peer).await.map_err(io_err)?;
+                }
+                continue;
+            }
+        };
+        if from != peer {
+            continue;
+        }
+        let step = hs.on_packet(&buf[..n]);
+        if hs.rejection().is_some() {
+            return Err(G2gError::Network(NetworkFailure::Connect));
+        }
+        if let Some(reply) = step.reply {
+            socket.send_to(&reply, peer).await.map_err(io_err)?;
+            last_sent = Some(reply);
+        }
+    }
+    Ok(())
+}
+
 impl AsyncElement for SrtSink {
     type ProcessFuture<'a>
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
@@ -516,6 +571,14 @@ impl AsyncElement for SrtSink {
                 "AES key length in bytes, 16, 24 or 32",
             )
             .with_default("16"),
+            PropertySpec::new(
+                "uri",
+                PropKind::Str,
+                "srt://host:port with latency, passphrase, pbkeylen and streamid query options",
+            ),
+            PropertySpec::new("mode", PropKind::Str, "SRT connection mode, caller only")
+                .with_default("caller")
+                .with_enum_values("caller"),
         ];
         PROPS
     }
@@ -552,6 +615,13 @@ impl AsyncElement for SrtSink {
                 self.key_size = AesKeySize::from_bytes(bytes).ok_or(PropError::Value)?;
                 Ok(())
             }
+            "uri" => self.set_uri(value.as_str().ok_or(PropError::Type)?),
+            "mode" => {
+                let mode = value.as_str().ok_or(PropError::Type)?;
+                (SrtMode::from_name(mode) == Some(SrtMode::Caller))
+                    .then_some(())
+                    .ok_or(PropError::Value)
+            }
             _ => Err(PropError::Unknown),
         }
     }
@@ -566,6 +636,8 @@ impl AsyncElement for SrtSink {
             "streamid" => Some(PropValue::Str(self.stream_id.clone().unwrap_or_default())),
             "auto-reconnect" => Some(PropValue::Bool(self.auto_reconnect)),
             "pbkeylen" => Some(PropValue::Uint(self.key_size.bytes() as u64)),
+            "uri" => Some(PropValue::Str(alloc::format!("srt://{}", self.dest))),
+            "mode" => Some(PropValue::Str(SrtMode::Caller.name().to_string())),
             _ => None,
         }
     }

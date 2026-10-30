@@ -929,6 +929,8 @@ pub mod srtcrypto;
 pub mod srtsink;
 #[cfg(feature = "srt")]
 pub mod srtsrc;
+#[cfg(feature = "srt")]
+pub mod srturi;
 
 // Sans-IO RIST (VSF TR-06-1 Simple Profile) NACK, RTT echo and retransmission
 // pieces, always compiled. The tokio sink / source need the `rist` feature.

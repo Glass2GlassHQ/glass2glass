@@ -953,3 +953,132 @@ async fn libsrt_measures_rtt_from_srtsink_ackacks() {
         "libsrt reports an RTT measured from srtsink's ACKACKs"
     );
 }
+
+fn spawn_ffmpeg_listener_sender(url: &str) -> std::process::Child {
+    Command::new("ffmpeg")
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-re",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=size=320x240:rate=15:duration=60",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-tune",
+            "zerolatency",
+            "-f",
+            "mpegts",
+            url,
+        ])
+        .stdin(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn the ffmpeg SRT listener")
+}
+
+// the call starts before ffmpeg listens, so auto-reconnect has to call again
+async fn run_caller_srtsrc(crypto: Option<(&str, u32)>) {
+    const PAYLOADS: u64 = 40;
+    let port = free_udp_port();
+    let mut listener_url = format!("srt://127.0.0.1:{port}?mode=listener");
+    let mut caller_uri = format!("srt://127.0.0.1:{port}");
+    if let Some((passphrase, pbkeylen)) = crypto {
+        listener_url.push_str(&format!("&passphrase={passphrase}"));
+        caller_uri.push_str(&format!("?passphrase={passphrase}&pbkeylen={pbkeylen}"));
+    }
+    let sock = StdUdpSocket::bind("127.0.0.1:0").expect("bind srt caller");
+    let mut src = SrtSrc::from_socket(sock)
+        .expect("adopt socket")
+        .with_frame_limit(PAYLOADS);
+    src.set_property("uri", g2g_core::PropValue::Str(caller_uri))
+        .expect("uri");
+    let mut cap = Capture::default();
+
+    let listener = async {
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        spawn_ffmpeg_listener_sender(&listener_url)
+    };
+    let (result, mut ffmpeg) = tokio::time::timeout(Duration::from_secs(30), async {
+        tokio::join!(src.run(&mut cap), listener)
+    })
+    .await
+    .expect("the caller receives within the timeout");
+    ffmpeg.kill().expect("kill the listener");
+    ffmpeg.wait().expect("reap the listener");
+
+    assert_eq!(result.expect("run ok"), PAYLOADS);
+    assert_all_ts_sync(&cap.first_bytes);
+}
+
+#[tokio::test]
+#[ignore = "needs ffmpeg built with libsrt; opens a local UDP socket"]
+async fn caller_srtsrc_receives_from_an_ffmpeg_listener() {
+    run_caller_srtsrc(None).await;
+}
+
+#[tokio::test]
+#[ignore = "needs ffmpeg built with libsrt; opens a local UDP socket"]
+async fn aes192_caller_srtsrc_receives_from_an_ffmpeg_listener() {
+    run_caller_srtsrc(Some(("g2g_srt_interop_passphrase", 24))).await;
+}
+
+async fn wait_for_exit(
+    child: &mut std::process::Child,
+    limit: Duration,
+) -> std::process::ExitStatus {
+    let deadline = tokio::time::Instant::now() + limit;
+    loop {
+        if let Some(status) = child.try_wait().expect("poll the child") {
+            return status;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            child.kill().expect("kill the child");
+            panic!("the child did not exit within {limit:?}");
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+// libsrt's SRTO_CONNTIMEO default, how long a caller waits on an unanswered call
+const LIBSRT_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+
+#[tokio::test]
+#[ignore = "needs ffmpeg built with libsrt; opens a local UDP socket"]
+async fn srtsrc_listener_rejects_a_caller_with_another_streamid() {
+    const PAYLOADS: u64 = 20;
+    const STREAM_ID: &str = "live";
+    let sock = StdUdpSocket::bind("127.0.0.1:0").expect("bind srt listener");
+    let url = format!("srt://127.0.0.1:{}", sock.local_addr().unwrap().port());
+    let mut src = SrtSrc::from_socket(sock)
+        .expect("adopt socket")
+        .with_frame_limit(PAYLOADS);
+    src.set_property("streamid", g2g_core::PropValue::Str(STREAM_ID.into()))
+        .expect("streamid");
+    let mut cap = Capture::default();
+
+    let callers = async {
+        let started = std::time::Instant::now();
+        let mut refused = spawn_ffmpeg_caller(&format!("{url}?streamid=other"));
+        let status = wait_for_exit(&mut refused, Duration::from_secs(10)).await;
+        assert!(!status.success());
+        assert!(
+            started.elapsed() < LIBSRT_CONNECT_TIMEOUT,
+            "the caller fails on the rejection, not on an unanswered call"
+        );
+        spawn_ffmpeg_caller(&format!("{url}?streamid={STREAM_ID}"))
+    };
+    let (result, mut accepted) = tokio::time::timeout(Duration::from_secs(30), async {
+        tokio::join!(src.run(&mut cap), callers)
+    })
+    .await
+    .expect("the matching caller streams within the timeout");
+    accepted.kill().expect("kill the caller");
+    accepted.wait().expect("reap the caller");
+
+    assert_eq!(result.expect("run ok"), PAYLOADS);
+    assert_all_ts_sync(&cap.first_bytes);
+}

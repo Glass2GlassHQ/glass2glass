@@ -749,6 +749,18 @@ reordered packets arrive with more than 2 packets of their wait left, and rises
 to the distance of a late packet without the retransmit bit. The periodic report
 still names a held gap.
 
+`SrtSrc` listens by default and calls with `mode=caller`. Both elements take
+gst's `uri`: `srt://host:port` calls, `srt://:port` listens, `?mode=` overrides
+that, and the query options g2g applies (`localaddress`, `localport`,
+`latency`, `passphrase`, `pbkeylen`, `streamid`, `lossmaxttl`) set the
+matching properties. Any other libsrt option fails the property set instead of
+being ignored. A calling `SrtSrc` with `auto-reconnect` calls again 1 s after a
+failed call or a lost connection, as `SrtSink` does. A listening `SrtSrc` with
+`streamid` or `pbkeylen` set answers a caller with another stream id or key
+length with libsrt's rejection codes (`SRT_REJX_NOTFOUND`, `SRT_REJ_UNSECURE`),
+so a libsrt caller fails at once. A caller that receives a rejection stops
+calling instead of waiting out its 8 s handshake deadline.
+
 `SrtSrc` ends a connection after 5 s without a packet from the peer, libsrt's
 `SRTO_PEERIDLETIMEO` default, and fails the run with a network error, where gst's
 listener posts a warning and ends the stream. With `keep-listening`, a SHUTDOWN or
