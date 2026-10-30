@@ -88,6 +88,7 @@ Breaking: `QosMessage` gains `downstream_proc_ns`, `ElementProbe` is no longer `
 - M1985: the compressed audio parsers take their format at any channel count and rate.
 - M1986: a demuxer linked to one consumer with no `stream` set picks the stream that consumer takes, so `tsdemux ! aacparse` negotiates.
 - M1987: audio element pad templates list the channel counts and rates the element accepts instead of a fixed stereo shape.
+- M1988: g2g-core builds with `runtime` and without `std` again.
 
 ## 0.10.0
 

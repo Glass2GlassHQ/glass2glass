@@ -224,6 +224,7 @@ impl SeekController {
         self.inner.takes_seeks_after_end.load(Ordering::SeqCst)
     }
 
+    #[cfg(feature = "std")]
     pub(crate) fn enable_seeks_after_end(&self) {
         self.inner
             .takes_seeks_after_end
@@ -243,6 +244,7 @@ impl SeekController {
         self.wake_run_end();
     }
 
+    #[cfg(feature = "std")]
     pub(crate) fn run_held_open(&self) -> bool {
         self.inner.run_held_open.load(Ordering::SeqCst)
     }
@@ -253,14 +255,17 @@ impl SeekController {
         counts.stream_ended_at == Some(counts.flushing_seeks_taken) && !self.has_pending()
     }
 
+    #[cfg(feature = "std")]
     pub(crate) fn flushing_seeks_taken(&self) -> u64 {
         self.inner.seek_counts.lock().flushing_seeks_taken
     }
 
+    #[cfg(feature = "std")]
     pub(crate) fn mark_stream_ended(&self, flushing_seeks_taken: u64) {
         self.inner.seek_counts.lock().stream_ended_at = Some(flushing_seeks_taken);
     }
 
+    #[cfg(feature = "std")]
     pub(crate) fn register_run_end_waker(&self, waker: &Waker) {
         *self.inner.run_end_waker.lock() = Some(waker.clone());
     }
