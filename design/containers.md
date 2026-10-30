@@ -216,8 +216,10 @@ A `Flush` with no seek behind it is a source restart, such as an HLS origin that
 came back with a new clock. The first unit after it is offset to land one frame
 interval after the last unit before it, the same offset applies to every PID,
 and every port sends the segment already in force again, so stream and running
-time both continue as gst's tsdemux keeps them. A seek's own flush, or an
-upstream `Segment` after the `Flush`, takes the new timestamps as they are.
+time both continue as gst's tsdemux keeps them. The ports do not pass that
+`Flush` on, so the decoders keep the frames they hold. A seek's own flush, or
+an upstream `Segment` after the `Flush`, takes the new timestamps as they are,
+and the ports send the `Flush` ahead of the `Segment`.
 Any flush also re-arms each port's `CapsChanged`, its in-band config and the
 MPEG-2 tune-in, so the restarted stream carries them again.
 

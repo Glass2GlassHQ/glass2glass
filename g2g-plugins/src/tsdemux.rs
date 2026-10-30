@@ -908,6 +908,8 @@ pub struct TsDemuxN {
     last_unit_dts_ns: Vec<Option<u64>>,
     held_unit_ns: Vec<Option<u64>>,
     timeline: RestartTimeline,
+    // a Flush this demuxer did not seek for, sent on only if a Segment follows it
+    withheld_flush: bool,
 }
 
 // the PID a port carries among those carrying its stream
@@ -1007,6 +1009,7 @@ impl TsDemuxN {
             last_unit_dts_ns,
             held_unit_ns,
             timeline: RestartTimeline::default(),
+            withheld_flush: false,
             bus: None,
             collection_posted: false,
             tags: TagPoster::default(),
@@ -1496,6 +1499,7 @@ impl MultiOutputElement for TsDemuxN {
             self.seek.poll_request();
             match packet {
                 PipelinePacket::DataFrame(frame) => {
+                    self.withheld_flush = false;
                     if self.seek.dropping_input() {
                         return Ok(());
                     }
@@ -1518,18 +1522,31 @@ impl MultiOutputElement for TsDemuxN {
                 // parser, then re-sync from the re-read stream. Broadcast it to
                 // every branch.
                 PipelinePacket::Flush => {
-                    if self.seek.dropping_input() {
+                    let seeking = self.seek.dropping_input();
+                    if seeking {
                         self.timeline.seek();
                     } else {
                         self.timeline.restart();
                     }
                     self.seek.on_flush();
                     self.reset_parser();
+                    // a restarted source's next stream carries on the timeline, so the
+                    // decoders keep the frames they hold, as gst's do
+                    if !seeking {
+                        self.withheld_flush = true;
+                        return Ok(());
+                    }
                     for port in 0..self.ports.len() {
                         out.push_to(port, PipelinePacket::Flush).await?;
                     }
                 }
                 PipelinePacket::Segment(seg) => {
+                    // an upstream seek
+                    if core::mem::take(&mut self.withheld_flush) {
+                        for port in 0..self.ports.len() {
+                            out.push_to(port, PipelinePacket::Flush).await?;
+                        }
+                    }
                     self.timeline.seek();
                     self.segment = Some(seg);
                     for port in 0..self.ports.len() {
@@ -1537,6 +1554,7 @@ impl MultiOutputElement for TsDemuxN {
                     }
                 }
                 PipelinePacket::Eos => {
+                    self.withheld_flush = false;
                     if self.seek.eos_before_flush(self.seek.dropping_input())? {
                         return Ok(());
                     }
@@ -1865,6 +1883,7 @@ mod tests {
         frames: Vec<Vec<u8>>,
         pts_ns: Vec<u64>,
         segments: Vec<Segment>,
+        flushes: usize,
         eos: bool,
     }
     impl OutputSink for CaptureSink {
@@ -1883,6 +1902,7 @@ mod tests {
                         self.pts_ns.push(f.timing.pts_ns);
                     }
                     PipelinePacket::Segment(seg) => self.segments.push(seg),
+                    PipelinePacket::Flush => self.flushes += 1,
                     PipelinePacket::Eos => self.eos = true,
                     _ => {}
                 }
@@ -2032,6 +2052,7 @@ mod tests {
             panic!("one segment per session, got {:?}", sink.segments);
         };
         assert_eq!(continued, opening);
+        assert_eq!(sink.flushes, 0, "the decoders keep their frames");
     }
 
     #[tokio::test]
@@ -2052,6 +2073,7 @@ mod tests {
         let mut expected = session_pts_ns(FIRST_SESSION_TICKS, 2);
         expected.extend(session_pts_ns(SECOND_SESSION_TICKS, 3));
         assert_eq!(sink.pts_ns, expected);
+        assert_eq!(sink.flushes, 1);
     }
 
     #[derive(Default)]

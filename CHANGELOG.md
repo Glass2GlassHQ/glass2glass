@@ -98,6 +98,7 @@ Breaking: `QosMessage` gains `downstream_proc_ns`, `ElementProbe` is no longer `
 - M1995: `srtsrc` answers callers with libsrt's handshake flags, NAKs a new gap at once and takes libsrt's `lossmaxttl` reorder tolerance.
 - M1996: `srtsink` resends a lost packet with its original timestamp.
 - M1997: `srtsrc` measures RTT from ACKACKs and paces its loss reports by it, and `srtsink` answers full ACKs with ACKACKs.
+- M1998: `tsdemux` keeps a source restart's `Flush` from its decoders, so `srtsrc` with `keep-listening` no longer drops their frames between callers.
 
 ## 0.10.0
 
