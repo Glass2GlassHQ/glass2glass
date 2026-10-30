@@ -187,8 +187,8 @@ Highest leverage first:
   independent implementation.
 - **HLS live errors:** `hlssrc` fails the run on a live `#EXT-X-MAP` init segment
   answering 4xx, where gst's adaptivedemux2 reloads the playlist.
-- **HLS / DASH seeks:** Take a seek while
-  a segment download is in flight instead of after it. Seek a playlist whose audio or
+- **HLS / DASH seeks:** Take a seek during an HLS partial-segment download or a
+  playlist reload wait. Seek a playlist whose audio or
   subtitles come from separate renditions: each rendition is its own `HlsSrc`, and
   `attach_seek` needs exactly one seekable node.
 

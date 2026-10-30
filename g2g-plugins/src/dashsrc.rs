@@ -71,7 +71,7 @@ use g2g_core::{
 };
 
 use crate::abr::BandwidthEstimator;
-use crate::adaptiveseek::LiveWindow;
+use crate::adaptiveseek::{download_unless_seek, DownloadOrSeek, LiveWindow};
 use crate::dashclock::{local_now_unix, RequestSpan, ServerClock};
 use crate::fetch::{
     body_read_err, byte_frame, get_bytes_retrying, get_range_bytes_retrying, get_response_retrying,
@@ -459,6 +459,20 @@ fn live_window(
     })
 }
 
+fn admit_seek(
+    mpd: &Mpd,
+    now_unix: f64,
+    segs: &[ResolvedSegment],
+    timescale: u32,
+    seek: Seek,
+) -> Result<Seek, SeekRefusal> {
+    let seek = flushing_only(seek)?;
+    if !mpd.dynamic {
+        return Ok(seek);
+    }
+    live_window(mpd, now_unix, segs, timescale)?.admit(seek)
+}
+
 /// The index of the media segment containing `target_ns` (the last whose
 /// `$Time$` start, converted from `timescale` units to ns, is at or before the
 /// target). Segments are time-ordered, so the scan stops at the first start past
@@ -558,6 +572,8 @@ impl SourceLoop for DashSrc {
             let mut boundary_pending = false;
             // the presentation time a seek moved playback to, applied once its Period is loaded
             let mut seek_target_ns: Option<u64> = None;
+            // a seek taken while a download was in flight
+            let mut taken_seek: Option<Seek> = None;
             // Live playback positions itself once per Period, not on every
             // manifest reload (a reload continues from `last_played`).
             let mut positioned = false;
@@ -647,14 +663,14 @@ impl SourceLoop for DashSrc {
                     // flush, reload the Period containing the target, and re-emit
                     // the init segment (a downstream demuxer reset on the flush
                     // needs its moov again).
-                    let accept = |seek: Seek| {
-                        let seek = flushing_only(seek)?;
-                        if !mpd.dynamic {
-                            return Ok(seek);
-                        }
-                        live_window(&mpd, clock.now_unix(), &segs, timescale)?.admit(seek)
-                    };
-                    if let Some(seek) = self.seek.as_ref().and_then(|c| c.take_seek(accept)) {
+                    let seek = taken_seek.take().or_else(|| {
+                        self.seek.as_ref().and_then(|controller| {
+                            controller.take_seek(|seek| {
+                                admit_seek(&mpd, clock.now_unix(), &segs, timescale, seek)
+                            })
+                        })
+                    });
+                    if let Some(seek) = seek {
                         // Queued lookahead is pre-seek media: drop it (and
                         // re-arm the prebuffer fill) before flushing.
                         window.clear();
@@ -723,44 +739,69 @@ impl SourceLoop for DashSrc {
                                 let period_time_ns = to_ns(seg.time, timescale);
                                 let presentation_start_ns =
                                     period_start_ns.saturating_add(period_time_ns);
-                                let fetched = if self.low_latency
-                                    && self.prebuffer_ms == 0
-                                    && seg.byte_range.is_none()
-                                {
-                                    // no bytes yet, so the media time is taken as the Period-relative time
-                                    if let Some(segment) = timeline.segment_ahead(
-                                        &*self,
-                                        presentation_start_ns,
-                                        core::mem::take(&mut boundary_pending),
-                                        || Some(period_time_ns),
-                                    ) {
-                                        out.push(PipelinePacket::Segment(segment)).await?;
-                                    }
-                                    stream_segment_chunks(&client, &url, out, &mut sequence, retry)
-                                        .await
-                                } else {
-                                    match fetch_segment(&client, &url, seg.byte_range, retry).await
+                                let download = async {
+                                    if self.low_latency
+                                        && self.prebuffer_ms == 0
+                                        && seg.byte_range.is_none()
                                     {
-                                        Ok(bytes) => {
-                                            let len = bytes.len();
-                                            if !bytes.is_empty() {
-                                                let segment_ahead = timeline.segment_ahead(
-                                                    &*self,
-                                                    presentation_start_ns,
-                                                    core::mem::take(&mut boundary_pending),
-                                                    || {
-                                                        init_header.as_ref().and_then(|header| {
+                                        // no bytes yet, so the media time is taken as the Period-relative time
+                                        if let Some(segment) = timeline.segment_ahead(
+                                            &*self,
+                                            presentation_start_ns,
+                                            core::mem::take(&mut boundary_pending),
+                                            || Some(period_time_ns),
+                                        ) {
+                                            out.push(PipelinePacket::Segment(segment)).await?;
+                                        }
+                                        stream_segment_chunks(
+                                            &client,
+                                            &url,
+                                            out,
+                                            &mut sequence,
+                                            retry,
+                                        )
+                                        .await
+                                    } else {
+                                        match fetch_segment(&client, &url, seg.byte_range, retry)
+                                            .await
+                                        {
+                                            Ok(bytes) => {
+                                                let len = bytes.len();
+                                                if !bytes.is_empty() {
+                                                    let segment_ahead = timeline.segment_ahead(
+                                                        &*self,
+                                                        presentation_start_ns,
+                                                        core::mem::take(&mut boundary_pending),
+                                                        || {
+                                                            init_header.as_ref().and_then(|header| {
                                                             crate::fmp4::earliest_fragment_pts_ns(
                                                                 &bytes, header,
                                                             )
                                                         })
-                                                    },
-                                                );
-                                                window.admit((bytes, segment_ahead), duration_ns);
+                                                        },
+                                                    );
+                                                    window
+                                                        .admit((bytes, segment_ahead), duration_ns);
+                                                }
+                                                Ok(len)
                                             }
-                                            Ok(len)
+                                            Err(error) => Err(error),
                                         }
-                                        Err(error) => Err(error),
+                                    }
+                                };
+                                let fetched = match download_unless_seek(
+                                    self.seek.as_ref(),
+                                    |seek| {
+                                        admit_seek(&mpd, clock.now_unix(), &segs, timescale, seek)
+                                    },
+                                    download,
+                                )
+                                .await
+                                {
+                                    DownloadOrSeek::Downloaded(fetched) => fetched,
+                                    DownloadOrSeek::Seek(seek) => {
+                                        taken_seek = Some(seek);
+                                        continue;
                                     }
                                 };
                                 last_played = Some(PlayedSegment {

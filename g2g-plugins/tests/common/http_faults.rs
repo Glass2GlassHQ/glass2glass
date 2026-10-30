@@ -1,3 +1,5 @@
+#![allow(dead_code)] // not every test file uses every answer here
+
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::thread;
@@ -8,6 +10,8 @@ pub(crate) enum Answer {
     Status(u16),
     // closes the connection without a response, as an origin that is restarting does
     Drop,
+    // sends the headers and the first half of the body, then holds the connection until the client closes it
+    Stall(Vec<u8>),
 }
 
 // one connection per request, `route` maps a request path to its answer
@@ -44,6 +48,19 @@ pub(crate) fn serve_answers(route: impl Fn(&str) -> Answer + Send + 'static) -> 
                     );
                 }
                 Answer::Drop => drop(stream),
+                // on its own thread, so the requests after it are answered
+                Answer::Stall(body) => {
+                    thread::spawn(move || {
+                        let header = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        );
+                        let _ = stream.write_all(header.as_bytes());
+                        let _ = stream.write_all(&body[..body.len() / 2]);
+                        let mut byte = [0u8; 1];
+                        while stream.read(&mut byte).unwrap_or(0) > 0 {}
+                    });
+                }
             }
         }
     });

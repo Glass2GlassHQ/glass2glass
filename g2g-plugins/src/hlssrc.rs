@@ -69,7 +69,7 @@ use g2g_core::{
 };
 
 use crate::abr::BandwidthEstimator;
-use crate::adaptiveseek::LiveWindow;
+use crate::adaptiveseek::{download_unless_seek, DownloadOrSeek, LiveWindow};
 use crate::fetch::{
     byte_frame, get_bytes, get_bytes_retrying, get_range_bytes_retrying, get_text, get_text_query,
     get_text_retrying, is_origin_failure, resolve_url, FetchRetry, MAX_MANIFEST_BYTES,
@@ -804,6 +804,19 @@ fn live_window(
     })
 }
 
+fn admit_seek(
+    media: &MediaPlaylist,
+    window_start_ns: u64,
+    ll: bool,
+    seek: Seek,
+) -> Result<Seek, SeekRefusal> {
+    let seek = flushing_only(seek)?;
+    if media.end_list {
+        return Ok(seek);
+    }
+    live_window(media, window_start_ns, ll)?.admit(seek)
+}
+
 // a fetched payload in the prebuffer window, with what goes out ahead of it
 #[derive(Debug)]
 struct QueuedMedia {
@@ -1057,6 +1070,8 @@ impl SourceLoop for HlsSrc {
             let mut timeline = crate::adaptiveseek::AdaptiveTimeline::default();
             // the playlist time of `media.segments[0]`, 0 in the first playlist loaded
             let mut window_start_ns = 0u64;
+            // a seek taken while a download was in flight
+            let mut taken_seek: Option<Seek> = None;
             loop {
                 // Index into `media.segments`; a flushing seek repositions it. The
                 // matching HLS media-sequence number is `media.media_sequence + idx`.
@@ -1066,14 +1081,13 @@ impl SourceLoop for HlsSrc {
                     // resolve the target time to the segment containing it, flush,
                     // jump there, and re-emit the init segment (the downstream
                     // demuxer reset on the flush needs its moov again).
-                    let accept = |seek: Seek| {
-                        let seek = flushing_only(seek)?;
-                        if media.end_list {
-                            return Ok(seek);
-                        }
-                        live_window(&media, window_start_ns, ll)?.admit(seek)
-                    };
-                    if let Some(seek) = self.seek.as_ref().and_then(|c| c.take_seek(accept)) {
+                    let seek = taken_seek.take().or_else(|| {
+                        self.seek.as_ref().and_then(|controller| {
+                            controller
+                                .take_seek(|seek| admit_seek(&media, window_start_ns, ll, seek))
+                        })
+                    });
+                    if let Some(seek) = seek {
                         let target_idx =
                             segment_for_time(&media, seek.start.saturating_sub(window_start_ns));
                         // Queued lookahead is pre-seek media: drop it (and
@@ -1229,15 +1243,25 @@ impl SourceLoop for HlsSrc {
                         } else {
                             let seg_url = resolve_url(&media_url, &segment.uri);
                             let t0 = g2g_core::metrics::monotonic_ns();
-                            let Some(bytes) = self
-                                .media_bytes_skipping_live_fetch_failure(
+                            let downloaded = download_unless_seek(
+                                self.seek.as_ref(),
+                                |seek| admit_seek(&media, window_start_ns, ll, seek),
+                                self.media_bytes_skipping_live_fetch_failure(
                                     &client,
                                     &media,
                                     &seg_url,
                                     segment.byte_range,
-                                )
-                                .await?
-                            else {
+                                ),
+                            )
+                            .await;
+                            let downloaded = match downloaded {
+                                DownloadOrSeek::Downloaded(downloaded) => downloaded?,
+                                DownloadOrSeek::Seek(seek) => {
+                                    taken_seek = Some(seek);
+                                    continue;
+                                }
+                            };
+                            let Some(bytes) = downloaded else {
                                 next_seq = seg_seq + 1;
                                 next_part = 0;
                                 // fetch nothing more from this playlist, the reload is next

@@ -28,8 +28,11 @@ use g2g_plugins::mp4muxn::Mp4MuxN;
 use g2g_plugins::mpegts::{TsMuxer, STREAM_TYPE_H264};
 use g2g_plugins::uridecodebin::hls_uri_fanout;
 
+#[path = "common/http_faults.rs"]
+mod http_faults;
 #[path = "common/http_routes.rs"]
 mod http_routes;
+use http_faults::Answer;
 
 #[derive(Default)]
 struct CaptureSink {
@@ -1433,4 +1436,98 @@ async fn a_live_seek_outside_the_window_is_refused_and_playback_carries_on() {
             live_stream(LIVE_JOIN_SEQUENCE..=LIVE_LAST_SEQUENCE)
         );
     }
+}
+
+// --- a seek while a segment downloads (M2012) -------------------------------
+
+const DOWNLOADING_SEGMENT: usize = 1;
+// in MEDIA_SEEK's third segment
+const PAST_THE_DOWNLOADING_SEGMENT_NS: u64 = 2 * SEEK_SEGMENT_NS + SEEK_SEGMENT_NS / 4;
+const STALLED_RUN_LIMIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+fn seek_segments() -> Vec<Vec<u8>> {
+    (0..3u8)
+        .map(|s| (0..1000u32).map(|i| (i as u8) ^ (s * 53)).collect())
+        .collect()
+}
+
+// plays MEDIA_SEEK, issuing `seek` when the server answers the request for DOWNLOADING_SEGMENT with `answer`
+async fn run_seek_during_download(
+    segs: Vec<Vec<u8>>,
+    seek: Seek,
+    answer: fn(Vec<u8>) -> Answer,
+) -> (CaptureSink, Option<SeekOutcome>) {
+    let controller = SeekController::new();
+    let issuer = controller.clone();
+    let ticket = Arc::new(Mutex::new(None));
+    let issued = Arc::clone(&ticket);
+    let url = http_faults::serve_answers(move |path| {
+        if path == "/media.m3u8" {
+            return Answer::Body(MEDIA_SEEK.as_bytes().to_vec());
+        }
+        let index: usize = path
+            .strip_prefix("/seg")
+            .and_then(|rest| rest.strip_suffix(".ts"))
+            .and_then(|number| number.parse().ok())
+            .expect("a segment path");
+        if index != DOWNLOADING_SEGMENT {
+            return Answer::Body(segs[index].clone());
+        }
+        *issued.lock().unwrap() = Some(issuer.seek(seek));
+        answer(segs[index].clone())
+    }) + "/media.m3u8";
+
+    let mut src = HlsSrc::new(url).with_prebuffer_ms(0).with_seek(controller);
+    src.configure_pipeline(&Caps::ByteStream {
+        encoding: ByteStreamEncoding::MpegTs,
+    })
+    .unwrap();
+    let mut sink = CaptureSink::default();
+    tokio::time::timeout(STALLED_RUN_LIMIT, src.run(&mut sink))
+        .await
+        .expect("the run ends")
+        .unwrap();
+    let outcome = ticket
+        .lock()
+        .unwrap()
+        .as_ref()
+        .and_then(SeekTicket::outcome);
+    (sink, outcome)
+}
+
+#[tokio::test]
+async fn a_seek_drops_the_segment_download_in_flight() {
+    let segs = seek_segments();
+    let (sink, outcome) = run_seek_during_download(
+        segs.clone(),
+        Seek::flush_to(PAST_THE_DOWNLOADING_SEGMENT_NS),
+        Answer::Stall,
+    )
+    .await;
+
+    assert_eq!(outcome, Some(SeekOutcome::Served));
+    assert_eq!(sink.flushes, 1);
+    assert_eq!(sink.segment_times, vec![PAST_THE_DOWNLOADING_SEGMENT_NS]);
+    assert_eq!(
+        sink.body,
+        [segs[0].clone(), segs[2].clone()].concat(),
+        "nothing of the stalled segment goes out"
+    );
+}
+
+#[tokio::test]
+async fn a_seek_refused_during_a_download_lets_it_finish() {
+    let segs = seek_segments();
+    let non_flushing = Seek {
+        flags: SeekFlags::NONE,
+        ..Seek::flush_to(PAST_THE_DOWNLOADING_SEGMENT_NS)
+    };
+    let (sink, outcome) = run_seek_during_download(segs.clone(), non_flushing, Answer::Body).await;
+
+    assert_eq!(
+        outcome,
+        Some(SeekOutcome::Refused(SeekRefusal::NonFlushing))
+    );
+    assert_eq!(sink.flushes, 0);
+    assert_eq!(sink.body, segs.concat(), "every segment goes out once");
 }

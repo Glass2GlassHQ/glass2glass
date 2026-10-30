@@ -1,5 +1,8 @@
+use core::future::Future;
+use core::task::Poll;
+
 use g2g_core::log::{ClockTime, LogSource};
-use g2g_core::runtime::SeekRefusal;
+use g2g_core::runtime::{SeekController, SeekRefusal};
 use g2g_core::{g2g_warn, Seek, SeekFlags, SeekType, Segment};
 
 // the Segments an adaptive source sends ahead of its media, so running time follows presentation time
@@ -78,6 +81,44 @@ fn seek_segment(seek: &Seek, presentation_start_ns: u64, media_start_ns: u64) ->
     Segment {
         time: position_ns,
         ..Segment::for_flush_seek(&media_seek, None)
+    }
+}
+
+#[derive(Debug)]
+pub(crate) enum DownloadOrSeek<T> {
+    Downloaded(T),
+    Seek(Seek),
+}
+
+// a served seek drops the download in flight, a refused one lets it finish
+pub(crate) async fn download_unless_seek<T>(
+    controller: Option<&SeekController>,
+    mut accept: impl FnMut(Seek) -> Result<Seek, SeekRefusal>,
+    download: impl Future<Output = T>,
+) -> DownloadOrSeek<T> {
+    let mut download = core::pin::pin!(download);
+    let Some(controller) = controller else {
+        return DownloadOrSeek::Downloaded(download.await);
+    };
+    loop {
+        let mut seek_pending = core::pin::pin!(controller.wait_for_seek());
+        let raced = core::future::poll_fn(|cx| {
+            if let Poll::Ready(downloaded) = download.as_mut().poll(cx) {
+                return Poll::Ready(Ok(downloaded));
+            }
+            seek_pending.as_mut().poll(cx).map(Err)
+        })
+        .await;
+        match raced {
+            Ok(downloaded) => return DownloadOrSeek::Downloaded(downloaded),
+            // the run is shutting down
+            Err(false) => return DownloadOrSeek::Downloaded(download.await),
+            Err(true) => {
+                if let Some(seek) = controller.take_seek(&mut accept) {
+                    return DownloadOrSeek::Seek(seek);
+                }
+            }
+        }
     }
 }
 

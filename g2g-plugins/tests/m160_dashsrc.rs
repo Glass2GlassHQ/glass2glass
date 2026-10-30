@@ -14,7 +14,7 @@ use std::thread;
 use g2g_core::element::AsyncElement;
 use g2g_core::frame::{Frame, FrameTiming};
 use g2g_core::memory::SystemSlice;
-use g2g_core::runtime::{SeekController, SourceLoop};
+use g2g_core::runtime::{SeekController, SeekOutcome, SeekTicket, SourceLoop};
 use g2g_core::{
     ByteStreamEncoding, Caps, Dim, G2gError, MemoryDomain, MultiInputElement, OutputSink,
     PipelinePacket, PushOutcome, Rate, Seek, VideoCodec,
@@ -22,6 +22,10 @@ use g2g_core::{
 use g2g_plugins::dashsrc::DashSrc;
 use g2g_plugins::fmp4demux::Fmp4Demux;
 use g2g_plugins::mp4muxn::Mp4MuxN;
+
+#[path = "common/http_faults.rs"]
+mod http_faults;
+use http_faults::Answer;
 
 // the fixture access units are stamped this far apart
 const AU_DURATION_NS: u64 = 33_333_333;
@@ -151,13 +155,11 @@ fn split_fmp4(data: &[u8]) -> (Vec<u8>, Vec<Vec<u8>>) {
     (init, segments)
 }
 
-fn serve(init: Vec<u8>, segs: Vec<Vec<u8>>) -> String {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    // 3 segments at 1s each, startNumber=0 -> seg0.m4s..seg2.m4s.
-    let mpd = format!(
+// 1 s segments, startNumber=0 -> seg0.m4s, seg1.m4s, ...
+fn numbered_mpd(segments: usize) -> String {
+    format!(
         "<?xml version=\"1.0\"?>\n\
-         <MPD mediaPresentationDuration=\"PT{}S\" type=\"static\">\n\
+         <MPD mediaPresentationDuration=\"PT{segments}S\" type=\"static\">\n\
            <Period>\n\
              <AdaptationSet mimeType=\"video/mp4\" codecs=\"avc1.4d401f\">\n\
                <SegmentTemplate initialization=\"init.mp4\" media=\"seg$Number$.m4s\" \
@@ -165,9 +167,14 @@ fn serve(init: Vec<u8>, segs: Vec<Vec<u8>>) -> String {
                <Representation id=\"v0\" bandwidth=\"1000000\" width=\"64\" height=\"48\"/>\n\
              </AdaptationSet>\n\
            </Period>\n\
-         </MPD>",
-        segs.len()
-    );
+         </MPD>"
+    )
+}
+
+fn serve(init: Vec<u8>, segs: Vec<Vec<u8>>) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let mpd = numbered_mpd(segs.len());
     thread::spawn(move || {
         for conn in listener.incoming() {
             let mut stream = match conn {
@@ -986,5 +993,63 @@ async fn dash_streams_init_then_segments_and_demuxes() {
     assert_eq!(
         dsink.aus, aus,
         "DashSrc -> Fmp4Demux recovers the original access units"
+    );
+}
+
+// --- a seek while a segment downloads (M2012) -------------------------------
+
+const STALLED_SEGMENT: usize = 1;
+// in the third 1 s segment
+const PAST_THE_STALLED_SEGMENT_NS: u64 = 2_500_000_000;
+const STALLED_RUN_LIMIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+#[tokio::test]
+async fn dash_seek_drops_the_segment_download_in_flight() {
+    let (init, segs) = split_fmp4(&make_fmp4(&access_units()).await);
+    let controller = SeekController::new();
+    let issuer = controller.clone();
+    let ticket = Arc::new(Mutex::new(None));
+    let issued = Arc::clone(&ticket);
+    let (served_init, served) = (init.clone(), segs.clone());
+    let url = http_faults::serve_answers(move |path| match path {
+        "/manifest.mpd" => Answer::Body(numbered_mpd(served.len()).into_bytes()),
+        "/init.mp4" => Answer::Body(served_init.clone()),
+        segment => {
+            let index: usize = segment
+                .strip_prefix("/seg")
+                .and_then(|rest| rest.strip_suffix(".m4s"))
+                .and_then(|number| number.parse().ok())
+                .expect("a segment path");
+            if index != STALLED_SEGMENT {
+                return Answer::Body(served[index].clone());
+            }
+            *issued.lock().unwrap() =
+                Some(issuer.seek(Seek::flush_to(PAST_THE_STALLED_SEGMENT_NS)));
+            Answer::Stall(served[index].clone())
+        }
+    }) + "/manifest.mpd";
+
+    let mut src = DashSrc::new(url).with_seek(controller);
+    src.configure_pipeline(&Caps::ByteStream {
+        encoding: ByteStreamEncoding::IsoBmff,
+    })
+    .unwrap();
+    let mut sink = CaptureSink::default();
+    tokio::time::timeout(STALLED_RUN_LIMIT, src.run(&mut sink))
+        .await
+        .expect("the seek ends the stalled download")
+        .unwrap();
+
+    let outcome = ticket
+        .lock()
+        .unwrap()
+        .as_ref()
+        .and_then(SeekTicket::outcome);
+    assert_eq!(outcome, Some(SeekOutcome::Served));
+    assert_eq!(sink.flushes, 1);
+    assert_eq!(
+        sink.body,
+        [init.clone(), segs[0].clone(), init, segs[2].clone()].concat(),
+        "nothing of the stalled segment goes out"
     );
 }

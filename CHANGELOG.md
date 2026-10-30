@@ -112,6 +112,7 @@ Breaking: `QosMessage` gains `downstream_proc_ns`, `ElementProbe` is no longer `
 - M2009: HLS plays and seeks across `#EXT-X-DISCONTINUITY` with running and stream time continuing in playlist time.
 - M2010: DASH seeks cross Period boundaries, with stream time continuing in presentation time across Periods.
 - M2011: live HLS and DASH streams take seeks inside their live window, and `g2g-launch` fails a seek a stream refuses.
+- M2012: HLS and DASH take a seek while a segment downloads instead of after it.
 
 ## 0.10.0
 
