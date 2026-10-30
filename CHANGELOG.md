@@ -79,6 +79,7 @@ Breaking: `QosMessage` gains `downstream_proc_ns`, `ElementProbe` is no longer `
 - M1976: an FLV seek counts its target from the earliest track's first timestamp, as `ffmpeg -ss` does.
 - M1977: `g2g-launch --seek-at <position>:<seconds>` seeks once the sink reaches a position, through the new `attach_seek_controller`.
 - M1978: a flushing seek after the end of the stream restarts playback, as in GStreamer, through `RunBuilder::with_seek_controller`.
+- M1979: `dav1ddec` and `rav1ddec` drop the pictures they hold on a `Flush`.
 
 ## 0.10.0
 

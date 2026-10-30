@@ -431,6 +431,15 @@ macro_rules! av1_decoder {
                             }
                             out.push(PipelinePacket::Eos).await?;
                         }
+                        PipelinePacket::Flush => {
+                            if let Some(decoder) = self.decoder.as_mut() {
+                                decoder.flush();
+                                // dav1d-rs keeps flushed pictures readable, and none of them may follow the Flush
+                                Self::drain_ready(decoder, &mut DecodedFrames::new(), self.input_colorimetry)?;
+                            }
+                            self.input_stamps = PendingInputStamps::default();
+                            out.push(PipelinePacket::Flush).await?;
+                        }
                         other => {
                             out.push(other).await?;
                         }
@@ -505,6 +514,89 @@ macro_rules! av1_decoder {
                     .filter(|packet| matches!(packet, PipelinePacket::DataFrame(_)))
                     .count();
                 assert_eq!(pictures, temporal_units, "one picture per temporal unit");
+            }
+
+            const FLUSH_FIXTURE: &[u8] = include_bytes!("../tests/fixtures/av1_321x181_10bit.ivf");
+            // frame threading holds the first picture until a later unit or a drain releases it
+            const UNITS_BEFORE_FLUSH: usize = 1;
+
+            fn decoded_pictures(packets: &[PipelinePacket]) -> Vec<(u64, Vec<u8>)> {
+                packets
+                    .iter()
+                    .filter_map(|packet| match packet {
+                        PipelinePacket::DataFrame(frame) => Some((
+                            frame.timing.pts_ns,
+                            frame.domain.require_system_slice("test").unwrap().to_vec(),
+                        )),
+                        _ => None,
+                    })
+                    .collect()
+            }
+
+            #[test]
+            fn no_picture_from_before_a_flush_follows_it() {
+                let demuxed = run(
+                    &mut IvfDemux::new(),
+                    &Caps::ByteStream { encoding: ByteStreamEncoding::Ivf },
+                    &[FLUSH_FIXTURE],
+                );
+                let coded = first_caps(&demuxed.packets).expect("the demuxer reports the stream");
+                // the packet type is not Clone, so each decode rebuilds its frames from these
+                let units: Vec<(Vec<u8>, FrameTiming)> = demuxed
+                    .packets
+                    .iter()
+                    .filter_map(|packet| match packet {
+                        PipelinePacket::DataFrame(frame) => Some((
+                            frame.domain.require_system_slice("test").unwrap().to_vec(),
+                            frame.timing,
+                        )),
+                        _ => None,
+                    })
+                    .collect();
+                let packets = |units: &[(Vec<u8>, FrameTiming)]| -> Vec<PipelinePacket> {
+                    units
+                        .iter()
+                        .map(|(bytes, timing)| {
+                            PipelinePacket::DataFrame(Frame {
+                                timing: *timing,
+                                ..crate::testutil::frame(bytes.clone())
+                            })
+                        })
+                        .collect()
+                };
+                let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+                let decode = |packets: Vec<PipelinePacket>| {
+                    let mut decoder = $ty::new();
+                    decoder.configure_pipeline(&coded).unwrap();
+                    let mut sink = CollectSink::default();
+                    for packet in packets {
+                        runtime.block_on(decoder.process(packet, &mut sink)).unwrap();
+                    }
+                    sink.packets
+                };
+                let unflushed = decode(packets(&units).into_iter().chain([PipelinePacket::Eos]).collect());
+
+                let flushed = decode(
+                    packets(&units[..UNITS_BEFORE_FLUSH])
+                        .into_iter()
+                        .chain([PipelinePacket::Flush])
+                        .chain(packets(&units))
+                        .chain([PipelinePacket::Eos])
+                        .collect(),
+                );
+                let flush = flushed
+                    .iter()
+                    .position(|packet| matches!(packet, PipelinePacket::Flush))
+                    .expect("the decoder forwards the Flush");
+                assert!(
+                    decoded_pictures(&flushed[..flush]).is_empty(),
+                    "the decoder still holds the picture of the unit before the Flush"
+                );
+                assert_eq!(
+                    decoded_pictures(&flushed[flush..]),
+                    decoded_pictures(&unflushed),
+                    "after the Flush the decoder outputs the restarted stream and nothing held from before"
+                );
             }
 
             // tools/av1-operating-point-fixture.sh: a 320x256 L2T3 stream whose operating
