@@ -505,6 +505,12 @@ reaches it, and the run drains and returns its stats. A live camera, which never
 ends its stream by itself, ends this way too. GStreamer's `waylandsink` posts an
 error instead.
 
+A finished run gives back what it took. Parsing, running and dropping pipelines
+two hundred times leaves the heap, the open file descriptors and the thread count
+where they started, through both the cooperative and the thread-per-arm runner and
+elements that open files and sockets (`m2036_teardown_leak`). A thread-per-arm
+run's arm threads exit just after the run returns its stats.
+
 ### Seek, segment and running time
 
 `g2g-core::segment` is a pure-core, ungated model. `Seek`, `SeekType` and

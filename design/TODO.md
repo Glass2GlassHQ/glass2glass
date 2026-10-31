@@ -34,8 +34,6 @@ Highest leverage first:
 
 ## Architecture guarantees (validation-first)
 
-- **Teardown leak test.** Build, run and drop a pipeline many times and check
-  that open file descriptors and memory return to their starting level.
 - **CI never runs m960 or m961 with `ffmpeg`.** The conformance job runs them with `rav1d` alone and linux-full enables neither rav1d nor dav1d, so a regression that only shows with both decoders built stays invisible. Add an `ffmpeg,rav1d` run of both files to a job that has the libav packages.
 - **Grow the conformance matrix.** Persist evidence from the resource-owning
   tests still uncovered as they are validated (`ffmpegvaapidec` on Intel and AMD, the Android and
