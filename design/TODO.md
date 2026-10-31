@@ -248,10 +248,6 @@ Highest leverage first:
 - **MP4 with samples in both the `moov` and fragments** (ffmpeg's `frag_keyframe`
   without `empty_moov`): decode the sample-table run, then the fragments.
   `Mp4DemuxN` fails such a file with `CapsMismatch`.
-- **Non-flushing seeks through a byte-stream demuxer:** `DemuxSeek` refuses them.
-  Serve them as gst's demuxers do in pull mode: byte-seek the source without
-  forwarding its `Flush`, and send a segment that `accumulate_seek` carries on from
-  the position reached.
 - **Matroska `CodecDelay`:** `matroskademux` applies it to Opus only, so AAC, MP2 and
   MP3 tracks decode with the encoder priming ffmpeg trims (1105 samples on an ffmpeg
   MP3).
@@ -260,8 +256,9 @@ Highest leverage first:
   Needs a signed `Segment` time offset in g2g-core.
 - **Corpus sweep bugs** (calliope TESTING techniques 21-23, paths under
   `~/.cache/calliope` on hercules):
-  - `h264/H264_might_overflow.mkv` seeks from 1.086 where gst uses 1.003. Recheck it
-    with the lowered stream start.
+  - `h264/H264_might_overflow.mkv` seeks from 1.086 where gst uses 1.003: a seek
+    taken before the first unit counts from that unit's pts, and the B frames
+    presenting at 1.003 and 1.044 arrive after it.
   - `mpegtsmux` writes a DTS of exactly 0 as unset, so the PES carries no DTS.
   - Demuxers drop streams gst's parsebin exposes: DTS in `filter/242_4.mkv`, TTA,
     pcm_dvd LPCM in `coolitnow-partial.vob`, and the xan_dpcm audio of

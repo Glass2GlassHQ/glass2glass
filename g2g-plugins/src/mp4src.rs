@@ -33,7 +33,7 @@ use g2g_core::{
     Stream, StreamCollection, StreamType,
 };
 
-use crate::demuxseek::{segment_from, with_stream_time};
+use crate::demuxseek::{segment_after_seek, segment_from, with_stream_time};
 use crate::filesink::path_io_err;
 use crate::fmp4::{
     clean_aperture_meta, every_sample_ends_by, fragment_framerate_q16, keyframe_index_for,
@@ -311,16 +311,13 @@ impl SourceLoop for Mp4Src {
                 // before the target so a decoder resumes from a clean reference.
                 if let Some(seek) = self.seek.as_ref().and_then(|c| c.take_seek(Ok)) {
                     let seek = seek_from_stream_start(seek, stream_start_ns);
-                    let new_seg = if seek.is_flush() {
+                    if seek.is_flush() {
                         out.push(PipelinePacket::Flush).await?;
-                        Segment::for_flush_seek(&seek, None)
-                    } else {
-                        // Anchor accumulation at the running time reached, clamped
-                        // to the segment stop (playback is clipped there).
-                        segment.position = segment.stop.map_or(position, |s| position.min(s));
-                        segment.accumulate_seek(&seek, None)
-                    };
-                    let new_seg = with_stream_time(new_seg, stream_start_ns);
+                    }
+                    let new_seg = with_stream_time(
+                        segment_after_seek(segment, position, &seek),
+                        stream_start_ns,
+                    );
                     opening_segment = None;
                     segment = new_seg;
                     segment_mode = seek.flags.contains(SeekFlags::SEGMENT);

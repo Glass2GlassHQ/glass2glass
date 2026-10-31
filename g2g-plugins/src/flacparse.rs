@@ -536,10 +536,12 @@ impl AsyncElement for FlacParse {
                     out.push(PipelinePacket::Segment(segment)).await?;
                 }
                 PipelinePacket::Flush => {
-                    self.seek.on_flush();
+                    let forward = self.seek.on_flush();
                     self.buf.clear();
                     self.clock.reset();
-                    out.push(PipelinePacket::Flush).await?;
+                    if forward {
+                        out.push(PipelinePacket::Flush).await?;
+                    }
                 }
                 PipelinePacket::CapsChanged(_) => {}
                 other => {

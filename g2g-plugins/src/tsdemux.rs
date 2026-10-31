@@ -1544,12 +1544,15 @@ impl MultiOutputElement for TsDemuxN {
                     } else {
                         self.timeline.restart();
                     }
-                    self.seek.on_flush();
+                    let forward = self.seek.on_flush();
                     self.reset_parser();
                     // a restarted source's next stream carries on the timeline, so the
                     // decoders keep the frames they hold, as gst's do
                     if !seeking {
                         self.withheld_flush = true;
+                        return Ok(());
+                    }
+                    if !forward {
                         return Ok(());
                     }
                     for port in 0..self.ports.len() {

@@ -17,7 +17,8 @@ use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::runtime::{SeekController, SourceLoop};
 use g2g_core::{
-    ByteStreamEncoding, Caps, Dim, G2gError, MultiInputElement, Rate, Seek, VideoCodec,
+    ByteStreamEncoding, Caps, Dim, G2gError, MultiInputElement, Rate, Seek, SeekFlags, Segment,
+    VideoCodec,
 };
 use g2g_plugins::filesrc::FileSrc;
 use g2g_plugins::tsdemux::TsDemux;
@@ -84,6 +85,10 @@ struct Capture {
     frame_pts_ns: Vec<u64>,
     flushes: usize,
     segment_starts: Vec<u64>,
+    // each segment with the number of frames out before it
+    segments: Vec<(usize, Segment)>,
+    // issued through the controller once this many frames are out
+    seek_after_frames: Option<(usize, SeekController, Seek)>,
 }
 impl OutputSink for Capture {
     fn poll_push(
@@ -101,9 +106,17 @@ impl OutputSink for Capture {
                 }) => {
                     self.frames.push(s.as_slice().to_vec());
                     self.frame_pts_ns.push(timing.pts_ns);
+                    if let Some((frames, controller, seek)) = &self.seek_after_frames {
+                        if self.frames.len() == *frames {
+                            controller.seek(*seek);
+                        }
+                    }
                 }
                 PipelinePacket::Flush => self.flushes += 1,
-                PipelinePacket::Segment(segment) => self.segment_starts.push(segment.start),
+                PipelinePacket::Segment(segment) => {
+                    self.segment_starts.push(segment.start);
+                    self.segments.push((self.frames.len(), segment));
+                }
                 _ => {}
             }
             Ok(PushOutcome::Accepted)
@@ -154,30 +167,31 @@ async fn make_ts(aus: &[Vec<u8>]) -> Vec<u8> {
     bytes.out
 }
 
-#[tokio::test]
-async fn tsdemux_seeks_to_the_target_keyframe_over_filesrc() {
-    // IDR access units (SPS+PPS+IDR, in-band) at AU 0 and AU 4; P slices between.
+// IDR access units (SPS+PPS+IDR, in-band) at AU 0 and AU 4; P slices between.
+fn two_gop_access_units() -> Vec<Vec<u8>> {
     let sc = &[0, 0, 0, 1][..];
     let sps = [0x67u8, 0x42, 0xC0, 0x1E, 0x11, 0x22];
     let pps = [0x68u8, 0xCE, 0x3C, 0x80];
     let idr = |tag: u8| [sc, &sps, sc, &pps, sc, &[0x65, tag]].concat();
     let p = |f: u8| [sc, &[0x41, f][..]].concat();
-    let aus = vec![idr(0xA0), p(1), p(2), p(3), idr(0xA4), p(5), p(6), p(7)];
+    vec![idr(0xA0), p(1), p(2), p(3), idr(0xA4), p(5), p(6), p(7)]
+}
 
-    let ts = make_ts(&aus).await;
-    let path = temp_path("seek");
+// 180 ms after the first PTS, between AU 5 (167 ms) and AU 6 (200 ms), so playback resumes from AU 4
+const SECOND_GOP_TARGET_NS: u64 = 180_000_000;
+const SECOND_GOP_FRAMES: usize = 4;
+
+// FileSrc -> TsDemux -> `capture` over the two-GOP clip, `time` seeking the demuxer
+async fn run_chain(name: &str, time: SeekController, capture: Capture) -> Capture {
+    let ts = make_ts(&two_gop_access_units()).await;
+    let path = temp_path(name);
     std::fs::write(&path, &ts).unwrap();
 
     let byte = SeekController::new();
-    let time = SeekController::new();
-    // Seek to 180 ms after the first PTS, between AU 5 (167 ms) and AU 6 (200 ms):
-    // resume from the keyframe before it, AU 4 (133 ms).
-    time.seek(Seek::flush_to(180_000_000));
-
     let mut src = FileSrc::new(&path, Caps::ByteStream { encoding: ByteStreamEncoding::MpegTs })
         .with_chunk_size(188) // one TS packet per chunk: byte-seek observed mid-read
         .with_seek(byte.clone());
-    let mut demux = TsDemux::new().with_seek(time.clone(), byte.clone());
+    let mut demux = TsDemux::new().with_seek(time, byte);
 
     let caps = {
         let c: Pin<Box<dyn Future<Output = _>>> = Box::pin(src.intercept_caps());
@@ -190,7 +204,7 @@ async fn tsdemux_seeks_to_the_target_keyframe_over_filesrc() {
         })
         .expect("configure demux");
 
-    let mut capture = Capture::default();
+    let mut capture = capture;
     {
         let mut chain = Chain {
             demux: &mut demux,
@@ -198,11 +212,20 @@ async fn tsdemux_seeks_to_the_target_keyframe_over_filesrc() {
         };
         src.run(&mut chain).await.expect("filesrc runs");
     }
+    let _ = std::fs::remove_file(&path);
+    capture
+}
+
+#[tokio::test]
+async fn tsdemux_seeks_to_the_target_keyframe_over_filesrc() {
+    let time = SeekController::new();
+    time.seek(Seek::flush_to(SECOND_GOP_TARGET_NS));
+    let capture = run_chain("seek", time, Capture::default()).await;
 
     // Re-synced from AU 4: the tail idr(0xA4), p5, p6, p7.
     assert_eq!(
         capture.frames.len(),
-        4,
+        SECOND_GOP_FRAMES,
         "resumed from the keyframe before the target (AU 4)"
     );
     assert!(
@@ -225,5 +248,35 @@ async fn tsdemux_seeks_to_the_target_keyframe_over_filesrc() {
             .any(|f| f.windows(2).any(|w| w == [0x65, 0xA0])),
         "the pre-target keyframe (AU 0) was discarded"
     );
-    let _ = std::fs::remove_file(&path);
+}
+
+#[tokio::test]
+async fn a_non_flushing_seek_carries_running_time_on_from_the_last_frame_out() {
+    let frames_before_seek = 2;
+    let time = SeekController::new();
+    let capture = Capture {
+        seek_after_frames: Some((
+            frames_before_seek,
+            time.clone(),
+            Seek {
+                flags: SeekFlags::NONE,
+                ..Seek::flush_to(SECOND_GOP_TARGET_NS)
+            },
+        )),
+        ..Capture::default()
+    };
+    let capture = run_chain("nonflushing", time, capture).await;
+
+    assert_eq!(capture.flushes, 0, "playback carries on through the seek");
+    let (_, opening) = capture.segments[0];
+    let &(frames_out, seek_segment) = capture.segments.last().expect("the seek sent a segment");
+    assert!(frames_out >= frames_before_seek);
+    assert_eq!(
+        seek_segment.base,
+        opening
+            .to_running_time(capture.frame_pts_ns[frames_out - 1])
+            .expect("the frame played inside the opening segment"),
+        "running time carries on from the last frame out"
+    );
+    assert_eq!(capture.frames.len() - frames_out, SECOND_GOP_FRAMES);
 }

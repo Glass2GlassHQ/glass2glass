@@ -233,10 +233,12 @@ impl AsyncElement for Ac3Parse {
                     self.seek.end_and_wait_for_seek(out).await?;
                 }
                 PipelinePacket::Flush => {
-                    self.seek.on_flush();
+                    let forward = self.seek.on_flush();
                     self.buf.clear();
                     self.clock.reset();
-                    out.push(PipelinePacket::Flush).await?;
+                    if forward {
+                        out.push(PipelinePacket::Flush).await?;
+                    }
                 }
                 // The refined caps this element emits replace the upstream
                 // declaration, so an incoming one is not forwarded.

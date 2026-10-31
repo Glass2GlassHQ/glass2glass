@@ -462,11 +462,13 @@ impl AsyncElement for MpegAudioParse {
                         self.id3v2_skip = 0;
                         self.first_frame_seen = false;
                     }
-                    self.seek.on_flush();
+                    let forward = self.seek.on_flush();
                     self.buf.clear();
                     self.recent_main_data.clear();
                     self.clock.reset();
-                    out.push(PipelinePacket::Flush).await?;
+                    if forward {
+                        out.push(PipelinePacket::Flush).await?;
+                    }
                 }
                 // The refined caps this element emits replace the upstream
                 // declaration, so an incoming one is not forwarded.

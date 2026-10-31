@@ -19,11 +19,14 @@
 //!   demuxer ignores input (the in-flight pre-seek bytes) rather than emit stale
 //!   units.
 //! - [`on_flush`](DemuxSeek::on_flush) when the source's `Flush` arrives: the
-//!   demuxer resets its parser and the helper enters `Discarding`.
+//!   demuxer resets its parser and the helper enters `Discarding`. The demuxer
+//!   forwards that `Flush` for a flushing seek only.
 //! - [`admit`](DemuxSeek::admit) per decoded unit: keeps the units from the last
 //!   keyframe at or before the target and, once a unit at or after the target
 //!   arrives, hands them back with a segment start at the target, as `Mp4Src`
-//!   does, so the decoder drops the frames before it. Then it goes idle.
+//!   does, so the decoder drops the frames before it. Then it goes idle. A
+//!   non-flushing seek's segment carries running time on from the position
+//!   reached, as gst's demuxers do in pull mode.
 //!
 //! [`Mp4Src`]: crate::mp4src
 //! [`FileSrc`]: crate::filesrc
@@ -33,8 +36,8 @@ use alloc::vec::Vec;
 use core::iter::Chain;
 
 use g2g_core::log::{ClockTime, Target};
-use g2g_core::runtime::{flushing_only, SeekController};
-use g2g_core::{G2gError, MultiOutputSink, OutputSink, PipelinePacket, Seek, Segment};
+use g2g_core::runtime::SeekController;
+use g2g_core::{G2gError, MultiOutputSink, OutputSink, PipelinePacket, Seek, SeekFlags, Segment};
 
 // a stream without a keyframe for this many units releases them early, the segment still clips them
 const KEPT_UNITS_MAX: usize = 1024;
@@ -54,6 +57,21 @@ pub(crate) fn segment_from(start_pts_ns: u64, stream_start_ns: u64) -> Segment {
         Segment::for_flush_seek(&Seek::flush_to(start_pts_ns), None),
         stream_start_ns,
     )
+}
+
+// a non-flushing seek carries running time on from `position_ns`, the last pts out, held at the segment stop
+pub(crate) fn segment_after_seek(current: Segment, position_ns: u64, seek: &Seek) -> Segment {
+    if seek.is_flush() {
+        return Segment::for_flush_seek(seek, None);
+    }
+    let position = current
+        .stop
+        .map_or(position_ns, |stop| position_ns.min(stop));
+    Segment {
+        position,
+        ..current
+    }
+    .accumulate_seek(seek, None)
 }
 
 // the segment every port of a fan-out demuxer opens with, so the ports share one running-time origin
@@ -185,6 +203,11 @@ pub(crate) struct DemuxSeek<U> {
     stream_start_ns: Option<u64>,
     started_tracks: Vec<u64>,
     segment: StreamSegment,
+    // whether the seek in flight flushes downstream, set when a seek is taken
+    seek_flushes: bool,
+    // the last segment out, the runner's opening one until this sends its own, and the latest pts out under it
+    sent_segment: Segment,
+    position_ns: Option<u64>,
 }
 
 impl<U> Default for DemuxSeek<U> {
@@ -198,6 +221,9 @@ impl<U> Default for DemuxSeek<U> {
             stream_start_ns: None,
             started_tracks: Vec::new(),
             segment: StreamSegment::Unsent,
+            seek_flushes: true,
+            sent_segment: Segment::new(),
+            position_ns: None,
         }
     }
 }
@@ -212,7 +238,7 @@ impl<U> DemuxSeek<U> {
         self.poll_request();
     }
 
-    /// Poll for a pending flushing time seek, re-scanning from the file start
+    /// Poll for a pending time seek, re-scanning from the file start
     /// (offset `0`): correct for any container without an index. A no-op without
     /// both controllers. (The default; [`poll_request_indexed`](Self::poll_request_indexed)
     /// adds an index fast path.)
@@ -232,10 +258,7 @@ impl<U> DemuxSeek<U> {
         if self.phase != Phase::Idle || self.upstream.is_none() {
             return false;
         }
-        let Some(app) = &self.app else {
-            return false;
-        };
-        let Some(seek) = app.take_seek(flushing_only) else {
+        let Some(seek) = self.take_app_seek() else {
             return false;
         };
         // an index lookup needs the target as a pts, which the stream's first unit fixes
@@ -249,6 +272,13 @@ impl<U> DemuxSeek<U> {
             None => self.begin_seek_at(target_pts_ns, 0, false),
         }
         true
+    }
+
+    // for a caller that repositions before the seek proper, as mkvdemux fetching its Cues does
+    pub(crate) fn take_app_seek(&mut self) -> Option<Seek> {
+        let seek = self.app.as_ref()?.take_seek(Ok)?;
+        self.seek_flushes = seek.is_flush();
+        Some(seek)
     }
 
     // takes the pts of a unit of any track, the first one is where seek targets count from
@@ -294,6 +324,7 @@ impl<U> DemuxSeek<U> {
             start_ns: start_pts_ns,
             sent,
         };
+        self.sent_segment = sent;
         Some(sent)
     }
 
@@ -318,6 +349,7 @@ impl<U> DemuxSeek<U> {
             start_ns,
             sent: lowered,
         };
+        self.sent_segment = lowered;
         (lowered != sent).then_some(lowered)
     }
 
@@ -419,21 +451,23 @@ impl<U> DemuxSeek<U> {
         matches!(self.phase, Phase::AwaitingFlush { .. })
     }
 
-    /// Handle a `Flush` packet. If it is the upstream flush we asked for, advance
-    /// to discarding and return `true` (the caller resets its parser). A `Flush`
-    /// while idle also returns `true` (a discontinuity always resets the parser),
-    /// without changing phase.
+    /// Handle a `Flush` packet, after which the caller resets its parser. The
+    /// upstream flush we asked for advances to discarding. Returns whether the
+    /// caller forwards the `Flush` downstream, which a non-flushing seek's
+    /// upstream flush is not, so playback carries on through it.
     pub(crate) fn on_flush(&mut self) -> bool {
+        let mut forward = true;
         if let Phase::AwaitingFlush { target } = self.phase {
             g2g_core::g2g_debug!(
                 Target::category(LOG_CATEGORY),
                 "flushed, discarding units before {target:?}"
             );
             self.phase = Phase::Discarding { target };
+            forward = self.seek_flushes;
         }
         self.kept.clear();
         self.segment = StreamSegment::Unsent;
-        true
+        forward
     }
 
     /// Classify a decoded `unit` by its `pts_ns` and whether it is a keyframe.
@@ -442,7 +476,7 @@ impl<U> DemuxSeek<U> {
     /// releases them with the segment start, after which the helper is idle.
     pub(crate) fn admit(&mut self, pts_ns: u64, keyframe: bool, unit: U) -> Admitted<U> {
         let Some(target_ns) = self.discard_target_ns(pts_ns) else {
-            return self.pass(unit);
+            return self.pass(pts_ns, unit);
         };
         if keyframe && pts_ns <= target_ns {
             self.kept.clear();
@@ -453,7 +487,7 @@ impl<U> DemuxSeek<U> {
             self.kept.push(unit);
             return Admitted::empty();
         }
-        self.reach_target(target_ns, unit)
+        self.reach_target(target_ns, pts_ns, unit)
     }
 
     // for a stream of units that each decode once the decoder has seen the `preroll` units before them
@@ -464,10 +498,10 @@ impl<U> DemuxSeek<U> {
         unit: U,
     ) -> Admitted<U> {
         let Some(target_ns) = self.discard_target_ns(pts_ns) else {
-            return self.pass(unit);
+            return self.pass(pts_ns, unit);
         };
         if pts_ns >= target_ns {
-            return self.reach_target(target_ns, unit);
+            return self.reach_target(target_ns, pts_ns, unit);
         }
         // the last unit before the target can hold it, so it stays with the units it needs
         self.kept.push(unit);
@@ -490,14 +524,18 @@ impl<U> DemuxSeek<U> {
     }
 
     // a unit outside a seek goes out, except one parsed from the bytes before the flush
-    fn pass(&self, unit: U) -> Admitted<U> {
+    fn pass(&mut self, pts_ns: u64, unit: U) -> Admitted<U> {
         if self.dropping_input() {
             return Admitted::empty();
         }
+        self.position_ns = Some(
+            self.position_ns
+                .map_or(pts_ns, |position| position.max(pts_ns)),
+        );
         Admitted::emit(unit)
     }
 
-    fn reach_target(&mut self, target_ns: u64, unit: U) -> Admitted<U> {
+    fn reach_target(&mut self, target_ns: u64, pts_ns: u64, unit: U) -> Admitted<U> {
         let stream_start_ns = self
             .stream_start_ns
             .expect("discard_target_ns set the stream start");
@@ -507,13 +545,25 @@ impl<U> DemuxSeek<U> {
             ClockTime(target_ns),
             self.kept.len() + 1
         );
+        let target = Seek {
+            flags: if self.seek_flushes {
+                SeekFlags::FLUSH
+            } else {
+                SeekFlags::NONE
+            },
+            ..Seek::flush_to(target_ns)
+        };
+        let segment = match self.position_ns {
+            Some(position_ns) => segment_after_seek(self.sent_segment, position_ns, &target),
+            // nothing went out before this seek, so running time starts at 0 either way
+            None => Segment::for_flush_seek(&target, None),
+        };
+        let segment = with_stream_time(segment, stream_start_ns);
         self.phase = Phase::Idle;
         self.segment = StreamSegment::Fixed;
-        Admitted::release(
-            Some(segment_from(target_ns, stream_start_ns)),
-            core::mem::take(&mut self.kept),
-            Some(unit),
-        )
+        self.sent_segment = segment;
+        self.position_ns = Some(pts_ns);
+        Admitted::release(Some(segment), core::mem::take(&mut self.kept), Some(unit))
     }
 }
 

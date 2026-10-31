@@ -818,12 +818,14 @@ impl AsyncElement for AacParse {
                     out.push(PipelinePacket::CapsChanged(c)).await?;
                 }
                 PipelinePacket::Flush => {
-                    self.seek.on_flush();
+                    let forward = self.seek.on_flush();
                     self.last_emitted_caps = None;
                     self.buf.clear();
                     self.undecided.clear();
                     self.clock.reset();
-                    out.push(PipelinePacket::Flush).await?;
+                    if forward {
+                        out.push(PipelinePacket::Flush).await?;
+                    }
                 }
                 // Segment is control: forward unchanged.
                 PipelinePacket::Segment(seg) => {

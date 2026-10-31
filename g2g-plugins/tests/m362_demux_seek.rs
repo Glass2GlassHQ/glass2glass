@@ -24,7 +24,8 @@ use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::runtime::{SeekController, SourceLoop};
 use g2g_core::{
-    ByteStreamEncoding, Caps, Dim, G2gError, MultiInputElement, Rate, Seek, VideoCodec,
+    ByteStreamEncoding, Caps, Dim, G2gError, MultiInputElement, Rate, Seek, SeekFlags, Segment,
+    VideoCodec,
 };
 use g2g_plugins::filesrc::FileSrc;
 use g2g_plugins::fmp4demux::Fmp4Demux;
@@ -90,9 +91,14 @@ impl OutputSink for Bytes {
 #[derive(Default)]
 struct Capture {
     frames: Vec<Vec<u8>>,
+    frame_pts: Vec<u64>,
     flushes: usize,
     segment_starts: Vec<u64>,
+    // each segment with the number of frames out before it
+    segments: Vec<(usize, Segment)>,
     caps: usize,
+    // issued through the controller once this many frames are out
+    seek_after_frames: Option<(usize, SeekController, Seek)>,
 }
 impl OutputSink for Capture {
     fn poll_push(
@@ -105,12 +111,22 @@ impl OutputSink for Capture {
             match packet {
                 PipelinePacket::DataFrame(Frame {
                     domain: MemoryDomain::System(s),
+                    timing,
                     ..
                 }) => {
                     self.frames.push(s.as_slice().to_vec());
+                    self.frame_pts.push(timing.pts_ns);
+                    if let Some((frames, controller, seek)) = &self.seek_after_frames {
+                        if self.frames.len() == *frames {
+                            controller.seek(*seek);
+                        }
+                    }
                 }
                 PipelinePacket::Flush => self.flushes += 1,
-                PipelinePacket::Segment(segment) => self.segment_starts.push(segment.start),
+                PipelinePacket::Segment(segment) => {
+                    self.segment_starts.push(segment.start);
+                    self.segments.push((self.frames.len(), segment));
+                }
                 PipelinePacket::CapsChanged(_) => self.caps += 1,
                 _ => {}
             }
@@ -167,6 +183,10 @@ async fn make_fmp4(aus: &[Vec<u8>]) -> Vec<u8> {
 
 /// Run a `FileSrc(path) -> Fmp4Demux -> Capture` chain to EOS.
 async fn run_chain(src: &mut FileSrc, demux: &mut Fmp4Demux) -> Capture {
+    run_chain_into(src, demux, Capture::default()).await
+}
+
+async fn run_chain_into(src: &mut FileSrc, demux: &mut Fmp4Demux, capture: Capture) -> Capture {
     let caps = {
         let c: Pin<Box<dyn Future<Output = _>>> = Box::pin(src.intercept_caps());
         c.await.expect("probe")
@@ -177,7 +197,7 @@ async fn run_chain(src: &mut FileSrc, demux: &mut Fmp4Demux) -> Capture {
             encoding: ByteStreamEncoding::IsoBmff,
         })
         .expect("configure demux");
-    let mut capture = Capture::default();
+    let mut capture = capture;
     {
         let mut chain = Chain {
             demux,
@@ -188,16 +208,23 @@ async fn run_chain(src: &mut FileSrc, demux: &mut Fmp4Demux) -> Capture {
     capture
 }
 
-#[tokio::test]
-async fn fmp4demux_seeks_to_the_target_keyframe_over_filesrc() {
-    // 8 AUs; keyframes (IDR, NAL type 5) at index 0 and 4.
+// 8 AUs; keyframes (IDR, NAL type 5) at index 0 and 4.
+fn two_gop_access_units() -> Vec<Vec<u8>> {
     let sps = [0x67u8, 0x42, 0xC0, 0x1E, 0x11, 0x22];
     let pps = [0x68u8, 0xCE, 0x3C, 0x80];
     let sc = &[0, 0, 0, 1][..];
     let idr0: Vec<u8> = [sc, &sps, sc, &pps, sc, &[0x65, 0xA0]].concat();
     let idr4: Vec<u8> = [sc, &[0x65, 0xA4]].concat(); // bare IDR: param sets re-prepended on resume
     let p = |f: u8| [sc, &[0x41, f][..]].concat();
-    let aus = vec![idr0, p(1), p(2), p(3), idr4, p(5), p(6), p(7)];
+    vec![idr0, p(1), p(2), p(3), idr4, p(5), p(6), p(7)]
+}
+
+// the second GOP, from AU 4
+const SECOND_GOP_FRAMES: usize = 4;
+
+#[tokio::test]
+async fn fmp4demux_seeks_to_the_target_keyframe_over_filesrc() {
+    let aus = two_gop_access_units();
 
     let fmp4 = make_fmp4(&aus).await;
     let path = temp_path("seek");
@@ -221,7 +248,7 @@ async fn fmp4demux_seeks_to_the_target_keyframe_over_filesrc() {
     // Re-synced from AU 4: exactly the tail idr4, p5, p6, p7.
     assert_eq!(
         cap.frames.len(),
-        4,
+        SECOND_GOP_FRAMES,
         "resumed from the keyframe before the target (AU 4) to the end"
     );
     assert!(
@@ -285,5 +312,51 @@ async fn no_seek_demuxes_the_whole_clip_over_filesrc() {
     assert_eq!(cap.frames.len(), 4);
     assert_eq!(cap.flushes, 0);
     assert_eq!(cap.caps, 1);
+    let _ = std::fs::remove_file(&path);
+}
+
+#[tokio::test]
+async fn a_non_flushing_seek_carries_running_time_on_from_the_last_frame_out() {
+    let fmp4 = make_fmp4(&two_gop_access_units()).await;
+    let path = temp_path("nonflushing");
+    std::fs::write(&path, &fmp4).unwrap();
+
+    // in the second GOP, as in the flushing seek above
+    let target_ns = 180_000_000;
+    let frames_before_seek = 2;
+    let byte = SeekController::new();
+    let time = SeekController::new();
+    let mut src = FileSrc::new(
+        &path,
+        Caps::ByteStream {
+            encoding: ByteStreamEncoding::IsoBmff,
+        },
+    )
+    .with_chunk_size(64)
+    .with_seek(byte.clone());
+    let mut demux = Fmp4Demux::new().with_seek(time.clone(), byte);
+    let capture = Capture {
+        seek_after_frames: Some((
+            frames_before_seek,
+            time,
+            Seek {
+                flags: SeekFlags::NONE,
+                ..Seek::flush_to(target_ns)
+            },
+        )),
+        ..Capture::default()
+    };
+    let cap = run_chain_into(&mut src, &mut demux, capture).await;
+
+    assert_eq!(cap.flushes, 0, "playback carries on through the seek");
+    let &(frames_out, seek_segment) = cap.segments.last().expect("the seek sent a segment");
+    assert!(frames_out >= frames_before_seek);
+    assert_eq!(seek_segment.start, target_ns);
+    assert_eq!(
+        seek_segment.base,
+        cap.frame_pts[frames_out - 1],
+        "running time carries on from the last frame out, which played under a segment from 0"
+    );
+    assert_eq!(cap.frames.len() - frames_out, SECOND_GOP_FRAMES);
     let _ = std::fs::remove_file(&path);
 }

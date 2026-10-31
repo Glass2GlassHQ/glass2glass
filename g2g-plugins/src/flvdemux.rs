@@ -488,11 +488,14 @@ impl AsyncElement for FlvDemux {
                     self.emit_units(units, out).await?;
                 }
                 // The upstream byte-seek's flush: reset the parser, then re-sync
-                // from the re-read stream. Forward it downstream.
+                // from the re-read stream. Forward it downstream unless the seek
+                // was non-flushing.
                 PipelinePacket::Flush => {
-                    self.seek.on_flush();
+                    let forward = self.seek.on_flush();
                     self.reset_parser();
-                    out.push(PipelinePacket::Flush).await?;
+                    if forward {
+                        out.push(PipelinePacket::Flush).await?;
+                    }
                 }
                 PipelinePacket::Eos => {
                     if self.seek.eos_before_flush(self.seek.dropping_input())? {

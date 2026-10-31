@@ -14,7 +14,7 @@ use core::pin::Pin;
 use g2g_core::element::{AsyncElement, OutputSink, PushOutcome};
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
-use g2g_core::runtime::{SeekController, SeekOutcome, SeekRefusal, SourceLoop};
+use g2g_core::runtime::{SeekController, SeekOutcome, SourceLoop};
 use g2g_core::{ByteStreamEncoding, Caps, G2gError, Seek, SeekFlags};
 use g2g_plugins::filesrc::FileSrc;
 use g2g_plugins::mkvdemux::{MkvDemux, MkvStream};
@@ -269,15 +269,17 @@ async fn mkvdemux_seeks_to_the_target_keyframe_over_filesrc() {
 }
 
 #[tokio::test]
-async fn mkvdemux_refuses_a_non_flushing_seek_and_plays_on() {
+async fn mkvdemux_serves_a_non_flushing_seek_without_a_flush() {
     let path = temp_path("non_flushing");
     std::fs::write(&path, webm()).unwrap();
 
     let byte = SeekController::new();
     let time = SeekController::new();
+    // as the flushing seek above, resuming from the 120 ms keyframe
+    let target_ns = 140_000_000;
     let ticket = time.seek(Seek {
         flags: SeekFlags::NONE,
-        ..Seek::flush_to(140_000_000)
+        ..Seek::flush_to(target_ns)
     });
 
     let mut src = FileSrc::new(
@@ -310,16 +312,13 @@ async fn mkvdemux_refuses_a_non_flushing_seek_and_plays_on() {
         src.run(&mut chain).await.expect("filesrc runs");
     }
 
+    assert_eq!(ticket.outcome(), Some(SeekOutcome::Served));
     assert_eq!(
-        ticket.outcome(),
-        Some(SeekOutcome::Refused(SeekRefusal::NonFlushing))
+        capture.flushes, 0,
+        "the source's flush stays in the demuxer"
     );
-    assert_eq!(capture.flushes, 0, "a refused seek repositions nothing");
-    assert_eq!(
-        capture.frames,
-        vec![vec![0x01u8], vec![0x02], vec![0x03], vec![0x04], vec![0x05]],
-        "playback runs on from the start"
-    );
+    assert_eq!(capture.segment_starts.last(), Some(&target_ns));
+    assert_eq!(capture.frames, vec![vec![0x04u8], vec![0x05u8]]);
     let _ = std::fs::remove_file(&path);
 }
 

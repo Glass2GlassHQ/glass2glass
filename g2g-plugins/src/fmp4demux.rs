@@ -426,11 +426,14 @@ impl AsyncElement for Fmp4Demux {
                     self.drain(out).await?;
                 }
                 // The upstream byte-seek's flush: reset the parser, then re-sync
-                // from the re-read stream. Forward it downstream.
+                // from the re-read stream. Forward it downstream unless the seek
+                // was non-flushing.
                 PipelinePacket::Flush => {
-                    self.seek.on_flush();
+                    let forward = self.seek.on_flush();
                     self.reset_parser();
-                    out.push(PipelinePacket::Flush).await?;
+                    if forward {
+                        out.push(PipelinePacket::Flush).await?;
+                    }
                 }
                 // Nothing to flush (incomplete trailing boxes are dropped); the
                 // runner's transform arm forwards the EOS itself.

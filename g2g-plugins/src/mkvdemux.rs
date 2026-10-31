@@ -40,7 +40,7 @@ use g2g_core::caps::framerate_q16_from_fraction;
 use g2g_core::frame::Frame;
 use g2g_core::log::Target;
 use g2g_core::memory::SystemSlice;
-use g2g_core::runtime::{flushing_only, ElementSeekRoute, SeekController, StreamSelectController};
+use g2g_core::runtime::{ElementSeekRoute, SeekController, StreamSelectController};
 use g2g_core::CodecTag;
 use g2g_core::{
     g2g_error, AsyncElement, AudioFormat, BusHandle, BusMessage, ByteStreamEncoding, Caps,
@@ -238,8 +238,8 @@ impl MkvDemux {
             (self.demux.cue_index_offset(), self.seek.stream_start_ns())
         {
             // Index located but not parsed: prefetch it before the real seek.
-            if let (Some(app), Some(upstream)) = (&self.app, &self.upstream) {
-                if let Some(seek) = app.take_seek(flushing_only) {
+            if let Some(upstream) = &self.upstream {
+                if let Some(seek) = self.seek.take_app_seek() {
                     upstream.seek(Seek::flush_to(cues_off));
                     self.prefetch = CuePrefetch::Fetching {
                         target_pts_ns: seek.start.saturating_add(stream_start_ns),
@@ -848,15 +848,17 @@ impl AsyncElement for MkvDemux {
                         return Ok(());
                     }
                     let ours = self.seek.dropping_input();
-                    self.seek.on_flush();
+                    let forward = self.seek.on_flush();
                     if ours && self.seek.keeps_state() {
                         self.demux.reset_keeping_tracks();
                     } else {
                         self.reset_parser();
                     }
-                    // a fresh decoder after the flush needs the header again.
-                    self.config_sent = false;
-                    out.push(PipelinePacket::Flush).await?;
+                    if forward {
+                        // a fresh decoder after the flush needs the header again.
+                        self.config_sent = false;
+                        out.push(PipelinePacket::Flush).await?;
+                    }
                 }
                 PipelinePacket::Eos => {
                     let awaiting_flush =

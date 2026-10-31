@@ -1218,10 +1218,10 @@ impl AsyncElement for OggDemux {
                 // The upstream byte-seek's flush: re-sync from the repositioned
                 // stream. A mid-file landing keeps what is known about the
                 // bitstream (M862); a re-scan from the start resets outright.
-                // Forward it downstream.
+                // Forward it downstream unless the seek was non-flushing.
                 PipelinePacket::Flush => {
                     let ours = self.seek.dropping_input();
-                    self.seek.on_flush();
+                    let forward = self.seek.on_flush();
                     if ours {
                         self.read_offset = self.guess.landing.unwrap_or(0);
                     } else {
@@ -1237,7 +1237,9 @@ impl AsyncElement for OggDemux {
                     } else {
                         self.reset_parser();
                     }
-                    out.push(PipelinePacket::Flush).await?;
+                    if forward {
+                        out.push(PipelinePacket::Flush).await?;
+                    }
                 }
                 PipelinePacket::Eos => {
                     if self.seek.eos_before_flush(self.seek.dropping_input())? {

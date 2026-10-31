@@ -522,7 +522,7 @@ back-reference.
 `SeekRefusal`, or `Superseded` when a later seek replaced it before the element
 took it. The element answers inside `take_seek`, through the check it passes:
 `Ok` serves every seek, and `flushing_only` refuses a non-flushing one, which
-`FileSrc`, `DownloadBuffer`, `HlsSrc`, `DashSrc` and the byte-stream demuxers pass.
+`FileSrc`, `DownloadBuffer`, `HlsSrc` and `DashSrc` pass.
 A refused seek is logged and playback carries on, as a GStreamer seek returning
 false does. `wait_for_seek` parks an element until a seek or `shutdown` arrives,
 and `eos_then_wait_for_seek` ends a source's stream and parks it when the run
@@ -531,7 +531,10 @@ seek, keyframe `SNAP_BEFORE` and re-prepended parameter sets, and `SyncSink` map
 PTS to running time through the `Segment` and clips pre-target frames so an accurate
 seek presents the exact requested frame. A non-flushing seek emits only the
 accumulating `Segment`, with no `Flush`, so the source keeps producing on a
-continuous running-time line.
+continuous running-time line. The byte-stream demuxers serve one through
+`DemuxSeek` as gst's demuxers do in pull mode: they byte-seek their source without
+forwarding its `Flush`, and the `Segment` at the target carries running time on from
+the last pts out (`demuxseek::segment_after_seek`, which `Mp4Src` shares).
 
 `HlsSrc` and `DashSrc` are time sources: a seek target is playlist time, or
 presentation time across the Periods for DASH (a segment's time plus its Period's
