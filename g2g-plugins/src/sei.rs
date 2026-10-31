@@ -27,6 +27,8 @@ use crate::bereader::{be_u16, be_u32};
 pub const PAYLOAD_PIC_TIMING: usize = 1;
 /// `user_data_registered_itu_t_t35`, the ATSC A/53 closed-caption carrier.
 pub const PAYLOAD_USER_DATA_REGISTERED: usize = 4;
+// `user_data_unregistered`: a 16-byte UUID, then the payload
+pub const PAYLOAD_USER_DATA_UNREGISTERED: usize = 5;
 /// `time_code`, the H.265 SMPTE 12M clock timestamps.
 pub const PAYLOAD_TIME_CODE: usize = 136;
 /// `mastering_display_colour_volume` (SMPTE ST 2086).

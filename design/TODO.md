@@ -302,8 +302,6 @@ Highest leverage first:
 
 ## Metadata (FrameMeta / AnalyticsMeta)
 
-- Insert application-supplied SEI user data (registered and unregistered) into
-  H.264 and H.265 streams.
 - `NvEnc` AV1 encode (needs RTX 40-series hardware).
 
 ## Clock-synchronised presentation

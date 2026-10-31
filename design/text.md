@@ -335,6 +335,17 @@ video pad and `input-meta-processing` says which set wins when the video frame
 already carries captions of its own. The caption meta is the `metadata` feature's
 typed container, so the element is gated on it.
 
+### SEI user data
+
+`h264seiinserter` and `h265seiinserter` (`SeiInsert`) write application data into
+an encoded stream, as gst's elements of the same names do. A frame carrying
+`meta::SeiUserDataMeta` gets one SEI NAL per message before its first slice:
+`user_data_registered_itu_t_t35` from the T.35 bytes starting at the country
+code, or `user_data_unregistered` from a 16-byte UUID and its payload. The meta
+stays on the frame. An access unit with no slice passes unchanged. ffmpeg's
+`trace_headers` reads every message back (`m2037_sei_user_data`). Captions keep
+their own path through `ccinsert`.
+
 ### Subtitle writers
 
 `SrtEnc` (`srtenc`) and `WebVttEnc` (`webvttenc`) invert `SubParse`: timed

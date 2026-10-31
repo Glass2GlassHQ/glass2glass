@@ -1311,6 +1311,32 @@ mod on {
         }
     }
 
+    // one SEI user data message an application asks an H.264 / H.265 SEI inserter to write
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum SeiUserData {
+        // `user_data_registered_itu_t_t35`: the bytes from the T.35 country code onward
+        Registered { t35: Vec<u8> },
+        Unregistered { uuid: [u8; 16], payload: Vec<u8> },
+    }
+
+    // the SEI user data messages for the access unit this frame becomes, in write order
+    #[derive(Debug, Default, Clone, PartialEq, Eq)]
+    pub struct SeiUserDataMeta {
+        pub messages: Vec<SeiUserData>,
+    }
+
+    impl FrameMeta for SeiUserDataMeta {
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+        fn as_any_mut(&mut self) -> &mut dyn Any {
+            self
+        }
+        fn clone_box(&self) -> Box<dyn FrameMeta> {
+            Box::new(self.clone())
+        }
+    }
+
     /// A CIE 1931 xy chromaticity.
     #[derive(Debug, Clone, Copy, PartialEq)]
     pub struct Chromaticity {

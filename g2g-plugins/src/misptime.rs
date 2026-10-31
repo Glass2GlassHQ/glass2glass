@@ -47,13 +47,11 @@ use crate::annexb::{
     add_emulation_prevention, h264_nal_type, h265_nal_type, nal_units_any, read_ff_extended,
     strip_emulation_prevention, vcl_start,
 };
+use crate::sei::PAYLOAD_USER_DATA_UNREGISTERED;
 use crate::subparse::{Cue, CueSettings};
 
 use core::future::Future;
 use core::pin::Pin;
-
-/// SEI `payloadType` 5, `user_data_unregistered`.
-const SEI_USER_DATA_UNREGISTERED: usize = 5;
 
 /// A MISP time SEI payload: 16-byte UUID plus the 12-byte body.
 const MISP_PAYLOAD_LEN: usize = 28;
@@ -141,7 +139,7 @@ pub fn build_misp_time_sei(micros: u64, status: u8, codec: VideoCodec) -> Vec<u8
     // payloadType and payloadSize are both under 0xFF, so neither needs the SEI
     // 0xFF run extension.
     let mut rbsp = Vec::with_capacity(MISP_PAYLOAD_LEN + 3);
-    rbsp.push(SEI_USER_DATA_UNREGISTERED as u8);
+    rbsp.push(PAYLOAD_USER_DATA_UNREGISTERED as u8);
     rbsp.push(MISP_PAYLOAD_LEN as u8);
     rbsp.extend_from_slice(&payload);
     rbsp.push(0x80); // rbsp_trailing_bits
@@ -201,7 +199,7 @@ fn misp_time_in_sei_rbsp(rbsp: &[u8]) -> Option<MispTime> {
             Some(e) if e <= rbsp.len() => e,
             _ => return None,
         };
-        if payload_type == SEI_USER_DATA_UNREGISTERED {
+        if payload_type == PAYLOAD_USER_DATA_UNREGISTERED {
             if let Some(t) = parse_misp_payload(&rbsp[i..end]) {
                 return Some(t);
             }

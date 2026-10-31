@@ -935,6 +935,16 @@ pub fn default_registry() -> Registry {
         "misptimeextract",
         || Box::new(crate::misptime::MispTimeExtract::new()),
     ));
+    #[cfg(feature = "metadata")]
+    reg.register_launch(LaunchFactory::of::<crate::seiinsert::H264SeiInserter>(
+        "h264seiinserter",
+        || Box::new(crate::seiinsert::H264SeiInserter::new()),
+    ));
+    #[cfg(feature = "metadata")]
+    reg.register_launch(LaunchFactory::of::<crate::seiinsert::H265SeiInserter>(
+        "h265seiinserter",
+        || Box::new(crate::seiinsert::H265SeiInserter::new()),
+    ));
     // KLV telemetry decoder (M800): a demuxed STANAG 4609 metadata stream's ST
     // 0601 local sets become timed text lines,
     // e.g. `tsdemux stream=klv ! klvdecode ! textoverlay name=o`.
@@ -2621,6 +2631,8 @@ pub static FEATURE_GATED_ELEMENTS: &[FeatureGatedElement] = &{
         "scriptelement" => "script-rhai";
         "scriptrouter" => "script-rhai";
         "cccombiner" => "metadata";
+        "h264seiinserter" => "metadata";
+        "h265seiinserter" => "metadata";
         "opusenc" => "opus";
         "opusdec" => "opus";
         "vorbisdec" => "vorbis";
