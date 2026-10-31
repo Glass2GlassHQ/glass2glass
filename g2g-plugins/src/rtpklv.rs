@@ -19,7 +19,7 @@
 
 use alloc::vec::Vec;
 
-use g2g_core::rtp::{RtpHeader, RTP_HEADER_LEN};
+use g2g_core::rtp::{RtpHeader, RtpTimestampExtender, RTP_HEADER_LEN};
 
 /// RFC 6597 media clock: KLV RTP timestamps tick at 90 kHz.
 pub const RTP_CLOCK_HZ: u64 = 90_000;
@@ -51,7 +51,11 @@ pub fn rtp_timestamp_at_clock(pts_ns: u64, clock_hz: u64) -> u32 {
 /// so a round trip through [`rtp_timestamp_from_pts`] lands within one 90 kHz
 /// tick (11.1 us).
 pub fn pts_ns_from_rtp(rtp_timestamp: u32) -> u64 {
-    rtp_timestamp as u64 * 1_000_000_000 / RTP_CLOCK_HZ
+    pts_ns_from_ticks(u64::from(rtp_timestamp))
+}
+
+fn pts_ns_from_ticks(ticks: u64) -> u64 {
+    (u128::from(ticks) * 1_000_000_000 / u128::from(RTP_CLOCK_HZ)) as u64
 }
 
 #[derive(Debug, Clone)]
@@ -120,12 +124,14 @@ impl RtpKlvPacketizer {
 pub struct KlvUnit {
     pub data: Vec<u8>,
     pub rtp_timestamp: u32,
+    // counts on past each 32-bit wrap, about every 13 hours at 90 kHz
+    extended_timestamp: u64,
 }
 
 impl KlvUnit {
     /// Presentation time of this unit in nanoseconds, from its RTP timestamp.
     pub fn pts_ns(&self) -> u64 {
-        pts_ns_from_rtp(self.rtp_timestamp)
+        pts_ns_from_ticks(self.extended_timestamp)
     }
 }
 
@@ -138,6 +144,7 @@ pub struct RtpKlvDepayloader {
     dropping: bool,
     /// Last RTP sequence number seen, for gap detection.
     last_seq: Option<u16>,
+    timestamp_extender: RtpTimestampExtender,
 }
 
 impl RtpKlvDepayloader {
@@ -185,9 +192,19 @@ impl RtpKlvDepayloader {
         }
         self.unit.extend_from_slice(payload);
 
-        marker.then(|| KlvUnit {
+        if !marker {
+            return None;
+        }
+        let timestamp = parsed.header.timestamp;
+        // the extender starts one wrap up, and a unit reordered before the first one counts from 0
+        let extended_timestamp = self
+            .timestamp_extender
+            .extend(timestamp)
+            .saturating_sub(1 << u32::BITS);
+        Some(KlvUnit {
             data: core::mem::take(&mut self.unit),
-            rtp_timestamp: parsed.header.timestamp,
+            rtp_timestamp: timestamp,
+            extended_timestamp,
         })
     }
 }

@@ -148,3 +148,25 @@ fn a_lost_fragment_drops_only_its_own_unit() {
         "only the damaged unit is discarded, and no half unit is emitted"
     );
 }
+
+#[test]
+fn pts_keep_counting_up_across_the_32_bit_timestamp_wrap() {
+    let wrap_ns = (1u64 << u32::BITS) * 1_000_000_000 / RTP_CLOCK_HZ;
+    let sent_pts_ns = [wrap_ns - FRAME_NS, wrap_ns + FRAME_NS];
+    let mut pay = RtpKlvPacketizer::new(98, 0x0601_0601);
+    let mut depay = RtpKlvDepayloader::new();
+    let tick_ns = 1_000_000_000 / RTP_CLOCK_HZ;
+    for (i, sent_ns) in sent_pts_ns.into_iter().enumerate() {
+        let unit = telemetry(i as u64).encode();
+        let packets = pay.packetize(&unit, rtp_timestamp_from_pts(sent_ns));
+        let received = packets
+            .iter()
+            .find_map(|packet| depay.depacketize(packet))
+            .expect("the unit comes back");
+        assert!(
+            received.pts_ns().abs_diff(sent_ns) <= tick_ns,
+            "unit {i} pts {} != {sent_ns} beyond a 90 kHz tick",
+            received.pts_ns()
+        );
+    }
+}

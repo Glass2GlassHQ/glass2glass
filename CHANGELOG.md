@@ -120,6 +120,7 @@ Breaking: `QosMessage` gains `downstream_proc_ns`, `ElementProbe` is no longer `
 - M2017: `Segment::time` is signed, so TS streams with B frames report positions from the first PTS.
 - M2020: a Matroska seek taken before the first frame counts from the earliest B frame's pts, as gst does.
 - M2021: `vtencode` and `mfencode` force a keyframe on a downstream request, and `mfencode` marks its keyframes.
+- M2022: the KLV RTP depayloader keeps timestamps counting up past the 32-bit wrap.
 
 ## 0.10.0
 
