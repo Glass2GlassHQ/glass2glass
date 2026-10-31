@@ -6,7 +6,7 @@
 //! `RistSink` / `RistSrc` (the `rist` feature) put them on sockets.
 
 use alloc::borrow::Cow;
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 #[cfg(feature = "rist")]
 use alloc::format;
 #[cfg(feature = "rist")]
@@ -250,16 +250,29 @@ impl RetransmissionHistory {
     /// Retransmissions of every packet in `ranges` still held that went out on
     /// `link`: the original bytes with the SSRC low bit set.
     pub fn retransmissions(&self, ranges: &[SequenceRange], link: usize) -> Vec<Vec<u8>> {
+        // no honest receiver asks for more than the whole sequence space, or for one sequence twice
+        let requested = ranges
+            .iter()
+            .flat_map(|range| {
+                (0..=range.additional).map(move |offset| range.start.wrapping_add(offset))
+            })
+            .take(SEQUENCE_SPACE);
+        let mut resent = BTreeSet::new();
         let mut out = Vec::new();
-        for range in ranges {
-            let sequences = (0..=range.additional).map(|offset| range.start.wrapping_add(offset));
-            let held = sequences.filter_map(|sequence| self.packets.get(sequence));
-            for sent in held.filter(|sent| sent.sent_on.includes(link)) {
-                let mut packet = sent.packet.clone();
-                // the SSRC is the last word of the fixed header, big-endian
-                packet[SSRC_LOW_BYTE] |= RETRANSMISSION_SSRC_BIT as u8;
-                out.push(packet);
+        for sequence in requested {
+            if !resent.insert(sequence) {
+                continue;
             }
+            let Some(sent) = self.packets.get(sequence) else {
+                continue;
+            };
+            if !sent.sent_on.includes(link) {
+                continue;
+            }
+            let mut packet = sent.packet.clone();
+            // the SSRC is the last word of the fixed header, big-endian
+            packet[SSRC_LOW_BYTE] |= RETRANSMISSION_SSRC_BIT as u8;
+            out.push(packet);
         }
         out
     }

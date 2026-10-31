@@ -180,6 +180,10 @@ Highest leverage first:
   than 35.8 minutes with keepalives still flowing (the TSBPD timestamp
   difference is an `i32` from the last delivered packet), and add libsrt's clock
   drift correction (`addDriftSample`).
+- **RIST SSRC change:** `ristsrc` keeps the SSRC of the first packet, so a sender
+  that restarts with a new SSRC stalls it. Follow the new SSRC as librist does.
+- **`rtprecv` NACK policy:** re-request losses through RIST's `NackScheduler`
+  (reorder wait, retry cap) instead of its own 20 ms loop.
 
 ## Adaptive streaming (HLS / DASH)
 

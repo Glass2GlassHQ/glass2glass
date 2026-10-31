@@ -378,6 +378,28 @@ fn the_history_resends_what_a_range_covers_across_the_sequence_wrap() {
 }
 
 #[test]
+fn a_nack_repeating_a_range_resends_each_held_packet_once() {
+    const HELD: u16 = 4;
+    // a 64 KiB RTCP datagram holds about this many NACK range words
+    const REPEATS: usize = 16_000;
+    let mut history = RetransmissionHistory::new(u64::MAX);
+    for sequence in 0..HELD {
+        history.record(
+            sequence,
+            packet_with_payload(sequence, sequence as u8),
+            SentOn::EveryLink,
+            0,
+        );
+    }
+    let everything = SequenceRange {
+        start: 0,
+        additional: u16::MAX,
+    };
+    let resent = history.retransmissions(&vec![everything; REPEATS], ONLY_LINK);
+    assert_eq!(resent.len(), HELD as usize);
+}
+
+#[test]
 fn the_history_forgets_packets_older_than_the_sender_buffer() {
     let keep_ns = 1_000;
     let mut history = RetransmissionHistory::new(keep_ns);

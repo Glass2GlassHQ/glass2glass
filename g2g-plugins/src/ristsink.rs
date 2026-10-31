@@ -287,15 +287,16 @@ impl RistSink {
         datagram: &[u8],
         from: SocketAddr,
     ) -> Result<(), G2gError> {
-        let mut retransmissions = Vec::new();
+        let mut requested = Vec::new();
         let mut echo_responses = Vec::new();
         for packet in rtcp::parse_compound(datagram) {
             if let Some(ranges) = rist::requested_ranges(&packet, self.ssrc) {
-                retransmissions.extend(self.history.retransmissions(&ranges, index));
+                requested.extend(ranges);
             } else if let Some(response) = rist::rtt_echo_response(&packet) {
                 echo_responses.push(response);
             }
         }
+        let retransmissions = self.history.retransmissions(&requested, index);
         let now_ns = g2g_core::metrics::monotonic_ns();
         let echo_compounds: Vec<Vec<u8>> = echo_responses
             .into_iter()
