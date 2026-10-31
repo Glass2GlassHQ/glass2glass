@@ -550,7 +550,12 @@ the prebuffer window with the bytes it precedes. `tsdemux` keeps a `Segment` tha
 follows an upstream `Flush` or arrives once its stream is open, instead of opening
 its own, while the runner's opening `Segment` it still replaces.
 `attach_seek` skips a time source that feeds a buffering element (`qtdemux` behind
-`hlssrc`), since that element holds the whole stream and serves the seek.
+`hlssrc`), since that element holds the whole stream and serves the seek. A pipeline
+with several seekable elements, such as the separate audio and subtitle renditions of
+an HLS playlist, each its own `HlsSrc`, seeks them all, as a gst pipeline seek reaches
+every source. The first one answers the app's ticket, and each other element gets its
+own controller that `SeekController::seek` passes every seek to, so each admits it by
+its own rules and a pre-run seek reaches all of them before the first frame.
 
 A seek on a live HLS or DASH stream has to land in the live window, gst
 adaptivedemux's seek range (`adaptiveseek::LiveWindow`). For HLS the window runs

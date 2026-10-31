@@ -187,9 +187,6 @@ Highest leverage first:
   independent implementation.
 - **HLS live errors:** `hlssrc` fails the run on a live `#EXT-X-MAP` init segment
   answering 4xx, where gst's adaptivedemux2 reloads the playlist.
-- **HLS / DASH seeks:** Seek a playlist whose audio or subtitles come from
-  separate renditions: each rendition is its own `HlsSrc`, and `attach_seek` needs
-  exactly one seekable node.
 
 ## Capture sources
 

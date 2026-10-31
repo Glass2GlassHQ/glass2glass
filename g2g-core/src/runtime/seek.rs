@@ -184,6 +184,8 @@ struct SeekInner {
     takes_seeks_after_end: AtomicBool,
     // the byte source a demuxer repositions, it stops and seeks after the end with this controller
     upstream: Mutex<Option<SeekController>>,
+    // the controllers of the pipeline's other seekable elements, each sent every seek made on this one
+    followers: Vec<SeekController>,
     run_held_open: AtomicBool,
     run_end_waker: Mutex<Option<Waker>>,
 }
@@ -208,6 +210,16 @@ impl SeekController {
         Self::default()
     }
 
+    #[cfg(feature = "std")]
+    fn with_followers(count: usize) -> Self {
+        Self {
+            inner: Arc::new(SeekInner {
+                followers: (0..count).map(|_| Self::new()).collect(),
+                ..SeekInner::default()
+            }),
+        }
+    }
+
     /// Application side: request a seek. Replaces any prior unhandled request
     /// (latest-wins), whose ticket resolves to [`SeekOutcome::Superseded`].
     pub fn seek(&self, seek: Seek) -> SeekTicket {
@@ -217,6 +229,9 @@ impl SeekController {
             replaced.answer(SeekOutcome::Superseded);
         }
         self.wake();
+        for follower in &self.inner.followers {
+            follower.seek(seek);
+        }
         ticket
     }
 
@@ -318,6 +333,9 @@ impl SeekController {
         if let Some(upstream) = self.upstream() {
             upstream.shutdown();
         }
+        for follower in &self.inner.followers {
+            follower.shutdown();
+        }
     }
 
     /// Source side: whether the app has requested shutdown.
@@ -357,6 +375,9 @@ impl SeekController {
             .store(true, Ordering::SeqCst);
         if let Some(upstream) = self.upstream() {
             upstream.enable_seeks_after_end();
+        }
+        for follower in &self.inner.followers {
+            follower.enable_seeks_after_end();
         }
     }
 
@@ -477,7 +498,6 @@ pub enum ElementSeekRoute {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AttachSeekError {
     NothingSeekable,
-    SeveralSeekable(Vec<&'static str>),
 }
 
 #[cfg(feature = "std")]
@@ -488,12 +508,6 @@ impl core::fmt::Display for AttachSeekError {
                 f,
                 "nothing in the pipeline can seek: a seek needs an MP4 file source \
                  (uridecodebin uri=file://...mp4), qtdemux, or a demuxer fed straight by a filesrc"
-            ),
-            Self::SeveralSeekable(elements) => write!(
-                f,
-                "{} elements can seek ({}), a seek needs exactly one",
-                elements.len(),
-                elements.join(", ")
             ),
         }
     }
@@ -562,15 +576,6 @@ fn seekable_node(graph: &Graph<GraphNodeRef<'_>>, node: NodeId) -> Option<Seekab
 }
 
 #[cfg(feature = "std")]
-fn log_category(graph: &Graph<GraphNodeRef<'_>>, node: NodeId) -> &'static str {
-    match graph.element(node) {
-        Some(GraphNodeRef::Source(source)) => source.log_category(),
-        Some(GraphNodeRef::Element(element)) => element.log_category(),
-        _ => unreachable!("a seekable node is a source or an element"),
-    }
-}
-
-#[cfg(feature = "std")]
 fn source_mut(graph: &mut Graph<GraphNode>, node: NodeId) -> &mut (dyn DynSourceLoop + 'static) {
     match graph.element_mut(node) {
         Some(GraphNodeRef::Source(source)) => source.as_mut(),
@@ -591,11 +596,11 @@ pub fn attach_seek(
     graph: &mut Graph<GraphNode>,
     first_seek: Seek,
 ) -> Result<(SeekController, SeekTicket), AttachSeekError> {
-    let target = seek_target(graph)?;
-    let app = SeekController::new();
-    // queued before the element gets the controller, so it lands before the first frame
+    let targets = seek_targets(graph)?;
+    let app = SeekController::with_followers(targets.followers.len());
+    // queued before the elements get their controllers, so it lands before the first frame
     let ticket = app.seek(first_seek);
-    give_controller(graph, target, &app);
+    give_controllers(graph, &targets, &app);
     Ok((app, ticket))
 }
 
@@ -604,19 +609,32 @@ pub fn attach_seek(
 pub fn attach_seek_controller(
     graph: &mut Graph<GraphNode>,
 ) -> Result<SeekController, AttachSeekError> {
-    let target = seek_target(graph)?;
-    let app = SeekController::new();
-    give_controller(graph, target, &app);
+    let targets = seek_targets(graph)?;
+    let app = SeekController::with_followers(targets.followers.len());
+    give_controllers(graph, &targets, &app);
     Ok(app)
 }
 
+// every element a pipeline seek repositions, as gst sends it to every source
 #[cfg(feature = "std")]
-pub(crate) fn seek_target(
+#[derive(Debug)]
+pub(crate) struct SeekTargets {
+    // answers the app's seek ticket, the followers take the same seek on their own controllers
+    pub(crate) leader: SeekableNode,
+    pub(crate) followers: Vec<SeekableNode>,
+}
+
+#[cfg(feature = "std")]
+impl SeekTargets {
+    pub(crate) fn all(&self) -> impl Iterator<Item = SeekableNode> + '_ {
+        core::iter::once(self.leader).chain(self.followers.iter().copied())
+    }
+}
+
+#[cfg(feature = "std")]
+pub(crate) fn seek_targets(
     graph: &Graph<GraphNodeRef<'_>>,
-) -> Result<SeekableNode, AttachSeekError> {
-    let mut seekable: Vec<SeekableNode> = (0..graph.node_count())
-        .filter_map(|index| seekable_node(graph, NodeId(index as u32)))
-        .collect();
+) -> Result<SeekTargets, AttachSeekError> {
     // a buffering element holds the whole stream, so the time source feeding it never repositions
     let feeds_buffered = |source: NodeId| {
         graph.edges().iter().any(|edge| {
@@ -627,18 +645,23 @@ pub(crate) fn seek_target(
                 )
         })
     };
-    seekable.retain(
-        |node| !matches!(*node, SeekableNode::TimeSource(source) if feeds_buffered(source)),
-    );
-    match seekable[..] {
-        [target] => Ok(target),
-        [] => Err(AttachSeekError::NothingSeekable),
-        _ => Err(AttachSeekError::SeveralSeekable(
-            seekable
-                .iter()
-                .map(|node| log_category(graph, node.time_node()))
-                .collect(),
-        )),
+    let mut seekable = (0..graph.node_count())
+        .filter_map(|index| seekable_node(graph, NodeId(index as u32)))
+        .filter(
+            |node| !matches!(*node, SeekableNode::TimeSource(source) if feeds_buffered(source)),
+        );
+    let leader = seekable.next().ok_or(AttachSeekError::NothingSeekable)?;
+    Ok(SeekTargets {
+        leader,
+        followers: seekable.collect(),
+    })
+}
+
+#[cfg(feature = "std")]
+fn give_controllers(graph: &mut Graph<GraphNode>, targets: &SeekTargets, app: &SeekController) {
+    give_controller(graph, targets.leader, app);
+    for (follower, controller) in targets.followers.iter().zip(&app.inner.followers) {
+        give_controller(graph, *follower, controller);
     }
 }
 
@@ -717,6 +740,32 @@ mod tests {
             Some(SeekOutcome::Refused(SeekRefusal::NonFlushing))
         );
         assert!(!c.has_pending(), "a refused seek is not retried");
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn a_seek_reaches_every_follower_and_the_leader_answers_it() {
+        let leader = SeekController::with_followers(2);
+        let seek = Seek::flush_to(1_000);
+        let ticket = leader.seek(seek);
+        for follower in &leader.inner.followers {
+            assert_eq!(follower.take_seek(Ok), Some(seek));
+        }
+        assert_eq!(
+            ticket.outcome(),
+            None,
+            "unanswered until the leader takes it"
+        );
+        assert_eq!(leader.take_seek(Ok), Some(seek));
+        assert_eq!(ticket.outcome(), Some(SeekOutcome::Served));
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn a_shutdown_reaches_the_followers() {
+        let leader = SeekController::with_followers(1);
+        leader.shutdown();
+        assert!(leader.inner.followers[0].is_shutdown());
     }
 
     #[test]

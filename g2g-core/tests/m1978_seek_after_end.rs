@@ -8,8 +8,8 @@ use std::sync::{Arc, Mutex};
 
 use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::runtime::{
-    attach_seek_controller, block_on, eos_then_wait_for_seek, GraphNode, Join2, RunBuilder,
-    RunStats, SeekController, SeekFormat, SourceLoop,
+    attach_seek, attach_seek_controller, block_on, eos_then_wait_for_seek, GraphNode, Join2,
+    RunBuilder, RunStats, SeekController, SeekFormat, SourceLoop,
 };
 use g2g_core::{
     AsyncElement, Caps, ConfigureOutcome, Dim, Frame, FrameTiming, G2gError, Graph, OutputSink,
@@ -182,6 +182,17 @@ fn seekable_graph(seen: &Arc<Mutex<Vec<Seen>>>) -> Graph<GraphNode> {
     graph
 }
 
+// two seekable sources, each playing to its own sink, as the renditions of one HLS playlist do
+fn two_seekable_chains(seen: &[Arc<Mutex<Vec<Seen>>>; 2]) -> Graph<GraphNode> {
+    let mut graph: Graph<GraphNode> = Graph::new();
+    for seen in seen {
+        let source = graph.add_source(GraphNode::source(SeekableSource::default()));
+        let sink = graph.add_sink(GraphNode::element(RecordingSink { seen: seen.clone() }));
+        graph.link(source, sink).unwrap();
+    }
+    graph
+}
+
 fn frames_from(start_ns: u64) -> impl Iterator<Item = Seen> {
     (start_ns..FRAME_COUNT * FRAME_STEP_NS)
         .step_by(FRAME_STEP_NS as usize)
@@ -282,4 +293,41 @@ fn a_run_without_the_seek_controller_ends_at_the_end_of_the_stream() {
     assert!(!controller.takes_seeks_after_end());
     let played: Vec<Seen> = frames_from(0).chain([Seen::Eos]).collect();
     assert_eq!(*seen.lock().unwrap(), played);
+}
+
+#[test]
+fn a_seek_before_the_run_reaches_every_seekable_source() {
+    let seen = [Arc::default(), Arc::default()];
+    let mut graph = two_seekable_chains(&seen);
+    let (_controller, ticket) =
+        attach_seek(&mut graph, Seek::flush_to(SEEK_TARGET_NS)).expect("both sources can seek");
+    block_on(RunBuilder::new(graph, &ZeroClock, LINK_CAPACITY).run())
+        .expect("the run ends at the end of the stream");
+    assert_eq!(
+        ticket.outcome(),
+        Some(g2g_core::runtime::SeekOutcome::Served)
+    );
+    let from_the_target: Vec<Seen> = [Seen::Flush]
+        .into_iter()
+        .chain(frames_from(SEEK_TARGET_NS))
+        .chain([Seen::Eos])
+        .collect();
+    for seen in &seen {
+        assert_eq!(*seen.lock().unwrap(), from_the_target);
+    }
+}
+
+#[test]
+fn every_seekable_source_takes_a_seek_after_the_end() {
+    let seen = [Arc::default(), Arc::default()];
+    let mut graph = two_seekable_chains(&seen);
+    let controller = attach_seek_controller(&mut graph).expect("both sources can seek");
+    controller.keep_run_open();
+    let run = RunBuilder::new(graph, &ZeroClock, LINK_CAPACITY)
+        .with_seek_controller(&controller)
+        .run();
+    run_with_a_seek_after_the_end(run, &controller);
+    for seen in &seen {
+        assert_eq!(*seen.lock().unwrap(), played_through_then_from_the_target());
+    }
 }

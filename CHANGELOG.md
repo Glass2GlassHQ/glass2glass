@@ -115,6 +115,7 @@ Breaking: `QosMessage` gains `downstream_proc_ns`, `ElementProbe` is no longer `
 - M2012: HLS and DASH take a seek while a segment downloads instead of after it.
 - M2013: HLS and DASH take a seek while a live stream waits for its next reload, and HLS while a part downloads.
 - M2014: a DASH manifest fails, as in gst, when a Period start is unknown or not after the Period before it.
+- M2015: a seek reaches every seekable element of a pipeline, so HLS plays its separate audio and subtitle renditions from the seek target.
 
 ## 0.10.0
 

@@ -11,7 +11,7 @@ use crate::element::BoxFuture;
 use crate::error::G2gError;
 use crate::graph::{Graph, NodeId, NodeKind};
 use crate::log::{Target, RUNTIME_CATEGORY};
-use crate::runtime::seek::seek_target;
+use crate::runtime::seek::seek_targets;
 use crate::runtime::{GraphNodeRef, SeekController};
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -93,7 +93,7 @@ impl SeekAfterEnd {
         graph: &Graph<GraphNodeRef<'_>>,
         controller: &SeekController,
     ) -> Result<Option<Self>, G2gError> {
-        let target = seek_target(graph).map_err(|error| {
+        let targets = seek_targets(graph).map_err(|error| {
             crate::g2g_error!(
                 Target::category(RUNTIME_CATEGORY),
                 "the run was handed a seek controller, but {error}"
@@ -120,7 +120,7 @@ impl SeekAfterEnd {
             return Ok(None);
         }
         let mut participants = alloc::vec![false; node_count];
-        let mut reached = alloc::vec![target.time_node()];
+        let mut reached: Vec<NodeId> = targets.all().map(|target| target.time_node()).collect();
         while let Some(node) = reached.pop() {
             if core::mem::replace(&mut participants[node.0 as usize], true) {
                 continue;
@@ -133,7 +133,7 @@ impl SeekAfterEnd {
                     .map(|edge| edge.dst.node),
             );
         }
-        if let Some(byte_source) = target.byte_source() {
+        for byte_source in targets.all().filter_map(|target| target.byte_source()) {
             participants[byte_source.0 as usize] = true;
         }
         let mut sink_slots = alloc::vec![None; node_count];

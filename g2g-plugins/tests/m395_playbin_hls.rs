@@ -208,6 +208,28 @@ fn separate_audio_rendition_builds_two_source_chains() {
     assert_eq!(graph.edges().len(), 9);
 }
 
+#[test]
+fn a_separate_audio_rendition_seeks_with_the_variant() {
+    let master_text = "#EXTM3U\n\
+        #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aud\",NAME=\"en\",LANGUAGE=\"en\",DEFAULT=YES,URI=\"a/en.m3u8\"\n\
+        #EXT-X-STREAM-INF:BANDWIDTH=2400000,CODECS=\"avc1.4d401e,mp4a.40.2\",AUDIO=\"aud\"\n\
+        v.m3u8\n";
+    let Playlist::Master(master) = parse(master_text).unwrap() else {
+        panic!("expected master");
+    };
+    let streams = variant_streams(&master, &master.variants[0]);
+    let mut graph = build_hls_separate_fanout(
+        &registry(),
+        &g2g_core::runtime::PlaybinSinks::AUTO,
+        "https://example.com/master.m3u8",
+        &streams,
+        "https://example.com/a/en.m3u8",
+    )
+    .unwrap()
+    .unwrap();
+    attach_seek_controller(&mut graph).expect("both HlsSrc take the seek");
+}
+
 /// The `#EXT-X-MAP` init segment of a two-track (H.264 + AAC) fragmented MP4:
 /// the `ftyp` + `moov` `Mp4MuxN` writes ahead of the first fragment, which is
 /// what an fMP4 HLS variant's tracks are discovered from.
@@ -337,7 +359,7 @@ fn qtdemux_behind_hlssrc_takes_the_seek() {
     let line = "hlssrc location=http://127.0.0.1:1/master.m3u8 ! qtdemux ! fakesink";
     let mut graph =
         g2g_core::runtime::parse_launch(&g2g_plugins::registry::default_registry(), line).unwrap();
-    attach_seek_controller(&mut graph).expect("exactly one element takes the seek");
+    attach_seek_controller(&mut graph).expect("qtdemux takes the seek");
 }
 
 #[test]
