@@ -1918,13 +1918,21 @@ mod tests {
     fn param_changed_parse_accepts_a_fixated_format_and_rejects_the_rest() {
         use crate::pwvideo::fixed_format_pod_bytes;
         use spa::param::video::VideoFormat;
+        use spa::param::ParamType;
+        use spa::utils::Fraction;
 
         let parse = |bytes: &[u8]| {
             let pod = spa::pod::Pod::from_bytes(bytes).expect("pod bytes parse");
             parse_format(pod)
         };
         assert_eq!(
-            parse(&fixed_format_pod_bytes(VideoFormat::YUY2, 640, 360, 25)),
+            parse(&fixed_format_pod_bytes(
+                ParamType::Format,
+                VideoFormat::YUY2,
+                640,
+                360,
+                Fraction { num: 25, denom: 1 }
+            )),
             Ok(VideoInfo {
                 format: RawVideoFormat::Yuyv,
                 width: 640,
@@ -1935,12 +1943,24 @@ mod tests {
         );
         // YV12 is a real SPA format the element does not carry
         assert_eq!(
-            parse(&fixed_format_pod_bytes(VideoFormat::YV12, 640, 360, 25)),
+            parse(&fixed_format_pod_bytes(
+                ParamType::Format,
+                VideoFormat::YV12,
+                640,
+                360,
+                Fraction { num: 25, denom: 1 }
+            )),
             Err(G2gError::CapsMismatch)
         );
         // and a nonsense geometry never reaches an allocation
         assert_eq!(
-            parse(&fixed_format_pod_bytes(VideoFormat::I420, 0, 360, 25)),
+            parse(&fixed_format_pod_bytes(
+                ParamType::Format,
+                VideoFormat::I420,
+                0,
+                360,
+                Fraction { num: 25, denom: 1 }
+            )),
             Err(G2gError::CapsMismatch)
         );
     }

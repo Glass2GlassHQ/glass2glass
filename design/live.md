@@ -143,6 +143,23 @@ grant without asking.
 enumerates video capture devices and drains NV12 and YUY2 frames through an
 `IMFSourceReader` on a COM/MTA worker thread.
 
+## PipeWire camera output
+
+`PipeWireVideoSink` (`pipewirevideosink`, `pipewire` feature) publishes raw
+video as a PipeWire node with `media.class=Video/Source` and
+`media.role=Camera`, named by `client-name`, so WirePlumber lists it among the
+video sources that OBS and browsers capture from. It is gst's `pipewiresink
+mode=provide` for video. The stream offers the negotiated format as its only
+`EnumFormat`, drives the graph itself and calls `trigger_process` for each
+frame, so a consumer receives frames at the source's rate. A frame goes into the
+next free buffer whole and tightly packed, and only the newest frame waiting
+is sent, so a consumer that stalls skips frames instead of holding up the
+pipeline. The `Buffers` param, one shareable memfd block per buffer, goes out
+from `param_changed` once the format settles, since the buffers are allocated
+after it. gst's `pipewiresrc` captures frames identical to the ones g2g renders
+to a file (`m2039_pipewire_camera`), and it needs `media.type=Video` in its
+`stream-properties` for WirePlumber to link it.
+
 ## Linux audio output
 
 The audible-output end of the audio path on Linux mirrors the Windows-only

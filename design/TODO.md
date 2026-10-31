@@ -229,8 +229,6 @@ Highest leverage first:
 - Run `decklinkvideosink` and `decklinkaudiosink` on a board: scheduled
   playback, the board clock and audio against video have only run against a
   mock device.
-- A video `pipewiresink` that publishes a Video/Source node, so OBS and
-  browsers see the pipeline as a camera.
 - Examples that embed `WgpuSink::with_surface` in Qt/QML, GTK4 and egui windows.
 
 ## Containers

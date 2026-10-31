@@ -2757,6 +2757,7 @@ pub static FEATURE_GATED_ELEMENTS: &[FeatureGatedElement] = &{
         "pipewiresink" => "pipewire" on "linux";
         "pipewiresrc" => "pipewire" on "linux";
         "pipewirevideosrc" => "pipewire" on "linux";
+        "pipewirevideosink" => "pipewire" on "linux";
         "aaudiosrc" => "aaudio" on "android";
         "aaudiosink" => "aaudio" on "android";
         "camera2src" => "camera2" on "android";
@@ -3686,6 +3687,15 @@ fn register_feature_gated(reg: &mut Registry) {
     reg.register_launch(
         LaunchFactory::of::<PipeWireSink>("pipewiresink", || Box::new(PipeWireSink::new()))
             .with_experimental(),
+    );
+    // publishes raw video as a PipeWire camera node, gst's `pipewiresink mode=provide` for video
+    #[cfg(all(target_os = "linux", feature = "pipewire"))]
+    reg.register_launch(
+        LaunchFactory::of::<crate::pipewirevideosink::PipeWireVideoSink>(
+            "pipewirevideosink",
+            || Box::new(crate::pipewirevideosink::PipeWireVideoSink::new()),
+        )
+        .with_experimental(),
     );
     #[cfg(all(target_os = "linux", feature = "pipewire"))]
     reg.register_source(

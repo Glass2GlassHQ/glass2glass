@@ -214,27 +214,22 @@ pub(crate) fn format_pod_bytes(
     )
 }
 
-/// A fixated `Format` param, the shape the daemon answers negotiation with.
-/// Test-only: it lets the `param_changed` parse run without a live node.
-#[cfg(test)]
+// one fixated format as `param`: the `Format` the daemon answers negotiation with, or the only `EnumFormat` an output stream offers
 pub(crate) fn fixed_format_pod_bytes(
+    param: ParamType,
     format: VideoFormat,
     width: u32,
     height: u32,
-    fps: u32,
+    framerate: Fraction,
 ) -> Vec<u8> {
     let obj = object! {
         SpaTypes::ObjectParamFormat,
-        ParamType::Format,
+        param,
         property!(FormatProperties::MediaType, Id, MediaType::Video),
         property!(FormatProperties::MediaSubtype, Id, MediaSubtype::Raw),
         property!(FormatProperties::VideoFormat, Id, format),
         property!(FormatProperties::VideoSize, Rectangle, Rectangle { width, height }),
-        property!(
-            FormatProperties::VideoFramerate,
-            Fraction,
-            Fraction { num: fps, denom: 1 }
-        ),
+        property!(FormatProperties::VideoFramerate, Fraction, framerate),
     };
     PodSerializer::serialize(std::io::Cursor::new(Vec::new()), &Value::Object(obj))
         .expect("serialize fixated SPA video format pod")
@@ -270,6 +265,8 @@ fn format_choice(preferred: VideoFormat, offer: FormatOffer) -> Property {
 /// long as downstream references the frame, so a handful of spares keeps the
 /// producer from running dry while a frame is in flight.
 const DMABUF_BUFFERS: (i32, i32, i32) = (8, 2, 16);
+// (default, min, max) buffers an output stream allocates
+const MAPPED_BUFFERS: (i32, i32, i32) = (4, 2, 16);
 
 /// Serialize the `Buffers` param that asks the producer for dma-buf memory: one
 /// block per buffer (all [`MemoryDomain::DmaBuf`](g2g_core::MemoryDomain) carries
@@ -305,6 +302,44 @@ pub(crate) fn dmabuf_buffers_pod_bytes() -> Vec<u8> {
         .expect("serialize SPA dma-buf buffers pod")
         .0
         .into_inner()
+}
+
+// the output stream's buffers: one shareable block of `size` bytes, rows `stride` apart
+pub(crate) fn mapped_buffers_pod_bytes(size: usize, stride: usize) -> Result<Vec<u8>, G2gError> {
+    let (default, min, max) = MAPPED_BUFFERS;
+    let size = i32::try_from(size).map_err(|_| G2gError::CapsMismatch)?;
+    let stride = i32::try_from(stride).map_err(|_| G2gError::CapsMismatch)?;
+    let obj = object! {
+        SpaTypes::ObjectParamBuffers,
+        ParamType::Buffers,
+        Property::new(
+            spa_sys::SPA_PARAM_BUFFERS_buffers,
+            Value::Choice(ChoiceValue::Int(Choice(
+                ChoiceFlags::empty(),
+                ChoiceEnum::Range { default, min, max },
+            ))),
+        ),
+        Property::new(spa_sys::SPA_PARAM_BUFFERS_blocks, Value::Int(1)),
+        Property::new(spa_sys::SPA_PARAM_BUFFERS_size, Value::Int(size)),
+        Property::new(spa_sys::SPA_PARAM_BUFFERS_stride, Value::Int(stride)),
+        Property::new(
+            spa_sys::SPA_PARAM_BUFFERS_dataType,
+            Value::Choice(ChoiceValue::Int(Choice(
+                ChoiceFlags::empty(),
+                ChoiceEnum::Flags {
+                    // another process reads them, so memfd leads
+                    default: (1 << spa_sys::SPA_DATA_MemFd) | (1 << spa_sys::SPA_DATA_MemPtr),
+                    flags: Vec::new(),
+                },
+            ))),
+        ),
+    };
+    Ok(
+        PodSerializer::serialize(std::io::Cursor::new(Vec::new()), &Value::Object(obj))
+            .expect("serialize SPA mapped buffers pod")
+            .0
+            .into_inner(),
+    )
 }
 
 /// The part of an `spa_data` block the dma-buf path reads.
@@ -587,7 +622,13 @@ mod tests {
     #[test]
     fn fixated_format_parses_into_negotiated_info() {
         for (g2g, spa_fmt) in FORMATS {
-            let bytes = fixed_format_pod_bytes(spa_fmt, 320, 240, 30);
+            let bytes = fixed_format_pod_bytes(
+                ParamType::Format,
+                spa_fmt,
+                320,
+                240,
+                Fraction { num: 30, denom: 1 },
+            );
             let pod = Pod::from_bytes(&bytes).expect("pod bytes parse");
             let mut parsed = VideoInfoRaw::new();
             parsed.parse(pod).expect("spa parses the fixated format");

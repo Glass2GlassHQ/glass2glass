@@ -1703,6 +1703,8 @@ pub mod pipewiresink;
 #[cfg(all(target_os = "linux", feature = "pipewire"))]
 pub mod pipewiresrc;
 #[cfg(all(target_os = "linux", feature = "pipewire"))]
+pub mod pipewirevideosink;
+#[cfg(all(target_os = "linux", feature = "pipewire"))]
 pub mod pipewirevideosrc;
 #[cfg(all(target_os = "linux", feature = "pipewire"))]
 mod pwaudio;
