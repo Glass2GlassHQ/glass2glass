@@ -121,6 +121,7 @@ Breaking: `QosMessage` gains `downstream_proc_ns`, `ElementProbe` is no longer `
 - M2020: a Matroska seek taken before the first frame counts from the earliest B frame's pts, as gst does.
 - M2021: `vtencode` and `mfencode` force a keyframe on a downstream request, and `mfencode` marks its keyframes.
 - M2022: the KLV RTP depayloader keeps timestamps counting up past the 32-bit wrap.
+- M2023: `srtsrc` drops packets past its receive buffer, reads NAK ranges across the sequence wrap and fits each loss report in one packet.
 
 ## 0.10.0
 

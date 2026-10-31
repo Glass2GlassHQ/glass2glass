@@ -80,6 +80,7 @@ const LIVE_MODE_FLAGS: u32 =
     SRT_OPT_TSBPDSND | SRT_OPT_TSBPDRCV | SRT_OPT_TLPKTDROP | SRT_OPT_NAKREPORT | SRT_OPT_REXMITFLG;
 
 pub const FLOW_WINDOW_PACKETS: u32 = 8192;
+const MSS_BYTES: u32 = 1500;
 // libsrt keeps its own RTT estimate when an ACK carries exactly these initial values.
 pub const INITIAL_RTT_US: u32 = 100_000;
 pub const INITIAL_RTT_VARIANCE_US: u32 = INITIAL_RTT_US / 2;
@@ -245,7 +246,7 @@ impl Handshake {
             encryption: 0,
             ext_field: SRT_MAGIC,
             init_seq,
-            mtu: 1500,
+            mtu: MSS_BYTES,
             flow_window: FLOW_WINDOW_PACKETS,
             hs_type: URQ_INDUCTION,
             srt_socket_id: socket_id,
@@ -492,6 +493,10 @@ fn build_nak_cif(loss: &[u32]) -> Vec<u8> {
             end += 1;
             i += 1;
         }
+        let entry_len = if end == start { 4 } else { 8 };
+        if cif.len() + entry_len > MAX_NAK_CIF_BYTES {
+            break;
+        }
         if end == start {
             cif.extend_from_slice(&(start & 0x7FFF_FFFF).to_be_bytes());
         } else {
@@ -502,6 +507,10 @@ fn build_nak_cif(loss: &[u32]) -> Vec<u8> {
     }
     cif
 }
+
+// libsrt fits a loss report in one data payload, the MSS less the IPv4 and UDP headers and the SRT header
+const MAX_NAK_CIF_BYTES: usize = MSS_BYTES as usize - IPV4_UDP_HEADER_LEN - HEADER_LEN;
+const IPV4_UDP_HEADER_LEN: usize = 28;
 
 /// Upper bound on a materialized loss list. A real NAK never exceeds the flow
 /// window (thousands of packets); the cap stops an attacker-chosen range or a
@@ -521,12 +530,13 @@ fn parse_nak_cif(cif: &[u8]) -> Vec<u32> {
             if i + 4 <= cif.len() {
                 let end = u32::from_be_bytes(cif[i..i + 4].try_into().unwrap()) & 0x7FFF_FFFF;
                 i += 4;
-                for s in start..=end {
-                    loss.push(s);
-                    if loss.len() >= MAX_LOSS_LIST {
-                        break;
-                    }
-                }
+                // libsrt sends a gap across the 31-bit wrap as one range ending below its start
+                let count = seq_distance(end, start) as usize + 1;
+                let room = MAX_LOSS_LIST - loss.len();
+                loss.extend(
+                    (0..count.min(room) as u32)
+                        .map(|offset| start.wrapping_add(offset) & SEQUENCE_MASK),
+                );
             } else {
                 loss.push(start);
             }
@@ -978,7 +988,7 @@ impl SrtHandshake {
             encryption: if self.km.is_some() { 1 } else { 0 },
             ext_field,
             init_seq: self.init_seq,
-            mtu: 1500,
+            mtu: MSS_BYTES,
             flow_window: FLOW_WINDOW_PACKETS,
             hs_type: URQ_CONCLUSION,
             srt_socket_id: self.socket_id,
@@ -1350,6 +1360,10 @@ impl SrtReceiver {
             self.have_base = true;
         }
         if !seq_ge(pkt.seq, self.next_deliver) {
+            return Vec::new();
+        }
+        // libsrt drops a packet with no room in its receive buffer, a far-ahead sequence would otherwise move delivery past every real packet
+        if seq_distance(pkt.seq, self.next_deliver) >= FLOW_WINDOW_PACKETS {
             return Vec::new();
         }
         let tolerance = self.reorder_tolerance;
@@ -1818,7 +1832,7 @@ mod tests {
             encryption: 0,
             ext_field: HS_EXT_FLAG_HSREQ | HS_EXT_FLAG_CONFIG,
             init_seq: 1000,
-            mtu: 1500,
+            mtu: MSS_BYTES,
             flow_window: FLOW_WINDOW_PACKETS,
             hs_type: URQ_CONCLUSION,
             srt_socket_id: 0xDEAD_BEEF,
@@ -2623,27 +2637,43 @@ mod tests {
     }
 
     #[test]
-    fn missing_is_bounded_by_a_far_ahead_packet() {
+    fn a_packet_past_the_receive_buffer_is_dropped() {
+        const BASE: u32 = 10;
         let mut receiver = SrtReceiver::new();
-        let pkt = |seq| DataPacket {
-            seq,
-            retransmit: false,
-            kk: 0,
-            timestamp: 0,
-            dst_socket_id: 0,
-            payload: vec![0],
-        };
-        receiver.on_data(pkt(10)); // delivery base
-                                   // one far-ahead packet jumps max_seen
-        assert_eq!(
-            receiver.on_data(pkt(10 + 3_000_000)).len(),
-            MAX_LOSS_LIST,
-            "the NAK for the new gap is capped"
+        receiver.on_data(packet(BASE, false));
+        assert!(
+            receiver
+                .on_data(packet(BASE + FLOW_WINDOW_PACKETS, false))
+                .is_empty(),
+            "no gap is reported for it"
         );
+        assert!(receiver.missing().is_empty());
+        assert!(
+            receiver.on_data(packet(BASE + 1, false)).is_empty(),
+            "the next real packet still follows on"
+        );
+        assert_eq!(receiver.available_buffer(), FLOW_WINDOW_PACKETS - 2);
+    }
+
+    #[test]
+    fn a_nak_range_across_the_sequence_wrap_expands_through_zero() {
+        const START: u32 = SEQUENCE_MASK - 1;
+        const END: u32 = 1;
+        let mut cif = Vec::new();
+        cif.extend_from_slice(&(START | 0x8000_0000).to_be_bytes());
+        cif.extend_from_slice(&END.to_be_bytes());
+        assert_eq!(parse_nak_cif(&cif), vec![START, SEQUENCE_MASK, 0, END]);
+    }
+
+    #[test]
+    fn a_loss_report_fits_one_payload() {
+        let isolated_losses: Vec<u32> = (0..MAX_LOSS_LIST as u32).map(|index| index * 2).collect();
+        let cif = build_nak_cif(&isolated_losses);
+        assert!(cif.len() <= MAX_NAK_CIF_BYTES, "{} bytes", cif.len());
         assert_eq!(
-            receiver.missing().len(),
-            MAX_LOSS_LIST,
-            "loss list is capped, not the full gap"
+            parse_nak_cif(&cif),
+            isolated_losses[..MAX_NAK_CIF_BYTES / 4],
+            "the earliest losses go first"
         );
     }
 

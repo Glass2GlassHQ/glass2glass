@@ -176,6 +176,10 @@ Highest leverage first:
 - **RIST bonding test flake:** `ristsender_broadcast_bonding_feeds_ristsrc`
   failed once in 50 runs on hercules, after 2.4 s. Capture its failure output
   and fix the cause.
+- **SRT receive timing:** check what `srtsrc` does after a pause in data longer
+  than 35.8 minutes with keepalives still flowing (the TSBPD timestamp
+  difference is an `i32` from the last delivered packet), and add libsrt's clock
+  drift correction (`addDriftSample`).
 
 ## Adaptive streaming (HLS / DASH)
 
