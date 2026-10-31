@@ -401,7 +401,8 @@ RTCP feedback rides the reverse channel of [caps.md](caps.md)
 [caps.md](caps.md). A remote PLI (`Event::KeyframeRequest`) becomes a
 `Reconfigure::ForceKeyframe` walked upstream via
 `AsyncElement::take_reconfigure` to the encoder, where `Av1Enc` forces a rav1e
-IDR. Ingress originates a PLI on a mid-GOP join. str0m's BWE
+IDR and `mediacodecenc` sets MediaCodec's `request-sync`, which needs Android API
+26, the level the `mediacodec` feature builds for. Ingress originates a PLI on a mid-GOP join. str0m's BWE
 (`Event::EgressBitrateEstimate`, TWCC/REMB) becomes `PushOutcome::Bitrate` via
 `take_bitrate`, and the encoder retargets, rav1e by a hysteresis-gated context
 rebuild. `OpusEnc` retargets live through `OPUS_SET_BITRATE` with no rebuild,

@@ -29,7 +29,7 @@
 //! Drives the codec synchronously (queue one input buffer, drain ready output),
 //! wrapping the safe `ndk` crate, the same single-thread contract as the decoder
 //! (`Send` asserted under that contract so the multi-thread runner accepts it).
-//! Built against `ndk` 0.9 MediaCodec (api-level-24); validated on a device via
+//! Built against `ndk` 0.9 MediaCodec (api-level-26); validated on a device via
 //! `tests/android_mediacodec_enc_probe.rs` / `tools/android-mediacodec-enc-smoke.sh`.
 
 use core::future::Future;
@@ -40,11 +40,13 @@ use ndk::media::media_codec::{DequeuedOutputBufferInfoResult, MediaCodec, MediaC
 use ndk::media::media_format::MediaFormat;
 
 use g2g_core::frame::Frame;
+use g2g_core::log::Target;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError,
-    HardwareError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError,
-    PropKind, PropValue, PropertySpec, Rate, RawVideoFormat, VideoCodec,
+    g2g_warn, AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, FrameTiming,
+    G2gError, HardwareError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
+    PropError, PropKind, PropValue, PropertySpec, PushOutcome, Rate, RawVideoFormat, Reconfigure,
+    VideoCodec,
 };
 
 use crate::mediacodec_common::{
@@ -117,6 +119,7 @@ pub struct MediaCodecEnc {
     csd: Vec<u8>,
     last_caps: Option<Caps>,
     emitted: u64,
+    force_keyframe: bool,
 }
 
 // SAFETY: like `MediaCodecDec`, the codec pointer is only ever touched from the
@@ -155,6 +158,7 @@ impl MediaCodecEnc {
             csd: Vec::new(),
             last_caps: None,
             emitted: 0,
+            force_keyframe: false,
         }
     }
 
@@ -245,6 +249,15 @@ impl MediaCodecEnc {
         let expected = (self.width as usize * self.height as usize * 3) / 2;
         if nv12.len() < expected {
             return Err(G2gError::CapsMismatch);
+        }
+        let st = self.state.as_ref().ok_or(G2gError::NotConfigured)?;
+        if core::mem::take(&mut self.force_keyframe) {
+            if let Err(error) = request_sync_frame(&st.codec) {
+                g2g_warn!(
+                    Target::category("mediacodecenc"),
+                    "the encoder cannot force a keyframe: {error:?}"
+                );
+            }
         }
         self.queue_input(&nv12[..expected], pts_ns / 1000, 0)?;
         self.pump_output(out, false)
@@ -345,6 +358,10 @@ impl AsyncElement for MediaCodecEnc {
     /// cascade turns that into a download demand on a GPU producer.
     fn input_domains(&self) -> g2g_core::memory::DomainSet {
         g2g_core::memory::DomainSet::only(g2g_core::memory::MemoryDomainKind::System)
+    }
+
+    fn handles_keyframe_requests(&self) -> bool {
+        true
     }
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
@@ -512,7 +529,11 @@ impl AsyncElement for MediaCodecEnc {
                     meta: Default::default(),
                 };
                 self.emitted += 1;
-                out.push(PipelinePacket::DataFrame(frame)).await?;
+                if let PushOutcome::Reconfigure(Reconfigure::ForceKeyframe) =
+                    out.push(PipelinePacket::DataFrame(frame)).await?
+                {
+                    self.force_keyframe = true;
+                }
             }
             Ok(())
         })
@@ -545,6 +566,12 @@ impl PadTemplates for MediaCodecEnc {
             ]))),
         ])
     }
+}
+
+fn request_sync_frame(codec: &MediaCodec) -> ndk::media_error::Result<()> {
+    let mut params = MediaFormat::new();
+    params.set_i32("request-sync", 0);
+    codec.set_parameters(params)
 }
 
 fn compressed_caps(codec: VideoCodec, w: u32, h: u32, framerate: &Rate) -> Caps {

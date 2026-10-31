@@ -34,9 +34,9 @@ if [ -z "$(adb devices | awk 'NR>1 && $2=="device"{print $1}')" ]; then
 fi
 
 # 2. Cross-compile just this test binary with the NDK linker (cargo-ndk).
-#    --platform 24: AImageReader (the decoder's output Surface) is API 24+.
+#    --platform 26: MediaCodec setParameters (keyframe requests) is API 26+.
 echo ">> building android_mediacodec_smoke for $ABI ($TRIPLE)"
-cargo ndk --platform 24 -t "$ABI" build --release -p g2g-plugins --features mediacodec \
+cargo ndk --platform 26 -t "$ABI" build --release -p g2g-plugins --features mediacodec \
     --test android_mediacodec_smoke
 
 # 3. Locate the freshly built test binary: the newest *executable* matching

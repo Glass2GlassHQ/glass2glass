@@ -7,7 +7,7 @@
 //! in. This is the encode mirror of `android_mediacodec_smoke` (which decodes).
 //!
 //! Runs only on `aarch64-linux-android` (et al.) with the `mediacodec` feature;
-//! compiles to nothing on the dev host. Build with cargo-ndk `--platform 24`,
+//! compiles to nothing on the dev host. Build with cargo-ndk `--platform 26`,
 //! push, run as a bare native binary. See `tools/android-mediacodec-enc-smoke.sh`.
 
 #![cfg(all(target_os = "android", feature = "mediacodec"))]
@@ -16,6 +16,10 @@
 mod collect_sink;
 use collect_sink::CollectSink;
 
+#[path = "common/keyframe_request_sink.rs"]
+mod keyframe_request_sink;
+use keyframe_request_sink::KeyframeRequestSink;
+
 #[path = "common/android_binder.rs"]
 mod android_binder;
 use android_binder::start_binder_threadpool;
@@ -23,7 +27,7 @@ use android_binder::start_binder_threadpool;
 use g2g_core::element::AsyncElement;
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
-use g2g_core::{Caps, ConfigureOutcome, Dim, Rate, RawVideoFormat};
+use g2g_core::{Caps, ConfigureOutcome, Dim, OutputSink, Rate, RawVideoFormat};
 use g2g_plugins::mediacodecenc::MediaCodecEnc;
 
 /// A `w x h` NV12 frame: a diagonal luma gradient shifted by `t` (so successive
@@ -66,15 +70,12 @@ fn nal_types(s: &[u8]) -> Vec<u8> {
     types
 }
 
-#[tokio::test]
-async fn encode_nv12_to_annexb_h264() {
-    start_binder_threadpool(1);
-    let (w, h) = (640u32, 480u32);
-    let frames_in = 30usize;
+const WIDTH: u32 = 640;
+const HEIGHT: u32 = 480;
+const FRAMES_IN: usize = 30;
 
-    let mut enc = MediaCodecEnc::h264()
-        .with_bitrate(2_000_000)
-        .with_framerate(30);
+async fn encode_into(mut enc: MediaCodecEnc, sink: &mut dyn OutputSink) {
+    let (w, h) = (WIDTH, HEIGHT);
     let caps = Caps::RawVideo {
         format: RawVideoFormat::Nv12,
         width: Dim::Fixed(w),
@@ -90,9 +91,8 @@ async fn encode_nv12_to_annexb_h264() {
         ConfigureOutcome::Accepted
     ));
 
-    let mut sink = CollectSink::default();
     let mut pts_ns = 0u64;
-    for t in 0..frames_in {
+    for t in 0..FRAMES_IN {
         let nv12 = nv12_frame(w as usize, h as usize, t);
         let frame = Frame {
             domain: MemoryDomain::System(SystemSlice::from_boxed(nv12.into_boxed_slice())),
@@ -105,14 +105,25 @@ async fn encode_nv12_to_annexb_h264() {
             sequence: t as u64,
             meta: Default::default(),
         };
-        enc.process(PipelinePacket::DataFrame(frame), &mut sink)
+        enc.process(PipelinePacket::DataFrame(frame), sink)
             .await
             .expect("encode frame");
         pts_ns += 33_366_700;
     }
-    enc.process(PipelinePacket::Eos, &mut sink)
+    enc.process(PipelinePacket::Eos, sink)
         .await
         .expect("Eos drains the encoder");
+}
+
+#[tokio::test]
+async fn encode_nv12_to_annexb_h264() {
+    start_binder_threadpool(1);
+    let frames_in = FRAMES_IN;
+    let enc = MediaCodecEnc::h264()
+        .with_bitrate(2_000_000)
+        .with_framerate(30);
+    let mut sink = CollectSink::default();
+    encode_into(enc, &mut sink).await;
 
     // Collect the encoded access units, in order.
     let aus: Vec<&Frame> = sink
@@ -185,4 +196,27 @@ async fn encode_nv12_to_annexb_h264() {
     );
     assert!(total_bytes > 0, "encoded stream is empty");
     eprintln!(">>> M306 NV12 -> Annex-B H.264 encode validated on device.");
+}
+
+#[tokio::test]
+async fn forces_a_keyframe_on_request() {
+    const REQUEST_AT: usize = 3;
+    const KEYFRAME_INTERVAL_S: i32 = 10;
+    // the Pixel encoder returns each access unit two or three inputs after it took the frame
+    const MAX_OUTPUT_DELAY: usize = 5;
+    start_binder_threadpool(1);
+    let enc = MediaCodecEnc::h264()
+        .with_bitrate(2_000_000)
+        .with_framerate(30)
+        .with_keyframe_interval(KEYFRAME_INTERVAL_S);
+    let mut sink = KeyframeRequestSink::new(REQUEST_AT);
+    encode_into(enc, &mut sink).await;
+    let keyframes = sink.keyframe_indices();
+    eprintln!(">>> keyframes at access units {keyframes:?}, requested after {REQUEST_AT}");
+    // the vendor encoder sometimes adds a keyframe of its own at the end of the stream
+    let forced = keyframes.iter().find(|&&index| index > REQUEST_AT);
+    assert!(
+        forced.is_some_and(|&index| index <= REQUEST_AT + MAX_OUTPUT_DELAY),
+        "a keyframe follows the request within {MAX_OUTPUT_DELAY} access units, the {KEYFRAME_INTERVAL_S} s interval puts none in {FRAMES_IN} frames, got {keyframes:?}"
+    );
 }

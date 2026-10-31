@@ -306,8 +306,9 @@ metal-sink = [
 # `ndk` crate. Android-only (the dep lives under [target.'cfg(target_os =
 # "android")']), implies std. The Android counterpart of vtdecode / mf-decode;
 # first element of the Android platform track. See design/TODO.md "Platform:
-# Android".
-mediacodec = ["std", "dep:ndk"]
+# Android". `ndk/api-level-26` gives MediaCodec `set_parameters` (keyframe
+# requests).
+mediacodec = ["std", "dep:ndk", "ndk/api-level-26"]
 # Android AAudio PCM render (AAudioSink) + capture (AAudioSrc) (M307), via the
 # `ndk` crate's `audio` module (AAudioStream). `ndk/audio` implies api-level-26.
 # Android-only (the ndk dep is target-gated), implies std. The Android analog of
