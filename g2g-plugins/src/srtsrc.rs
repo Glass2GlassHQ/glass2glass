@@ -632,7 +632,12 @@ impl SrtSrc {
                                     receiver.on_drop_request(first_sequence, last_sequence)
                                 }
                                 Some(Control::AckAck { ack_no }) => {
-                                    round_trip.on_ackack(ack_no, now_us)
+                                    let rtt_us = round_trip.on_ackack(ack_no, now_us);
+                                    if let (Some(rtt_us), Some(timestamp)) =
+                                        (rtt_us, srt::packet_timestamp(&buf[..n]))
+                                    {
+                                        receiver.add_drift_sample(timestamp, now_us, rtt_us);
+                                    }
                                 }
                                 // a peer that missed our last handshake packet sends its own again
                                 Some(Control::Handshake(_)) => {

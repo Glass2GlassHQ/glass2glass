@@ -150,7 +150,7 @@ pub fn parse_data_packet(buf: &[u8]) -> Option<DataPacket> {
     let word1 = u32::from_be_bytes(buf[4..8].try_into().ok()?);
     let retransmit = word1 & (1 << 26) != 0;
     let kk = ((word1 >> 27) & 0b11) as u8;
-    let timestamp = u32::from_be_bytes(buf[8..12].try_into().ok()?);
+    let timestamp = packet_timestamp(buf)?;
     let dst_socket_id = u32::from_be_bytes(buf[12..16].try_into().ok()?);
     Some(DataPacket {
         seq,
@@ -160,6 +160,11 @@ pub fn parse_data_packet(buf: &[u8]) -> Option<DataPacket> {
         dst_socket_id,
         payload: buf[HEADER_LEN..].to_vec(),
     })
+}
+
+// data and control packets carry the sender's microsecond clock at the same offset
+pub fn packet_timestamp(buf: &[u8]) -> Option<u32> {
+    Some(u32::from_be_bytes(buf.get(8..12)?.try_into().ok()?))
 }
 
 /// The control packets this implementation builds / parses.
@@ -1245,6 +1250,7 @@ pub struct SrtReceiver {
     tsbpd_latency_us: Option<u32>,
     // set by the first packet TSBPD schedules, then moved to each released one
     tsbpd_anchor: Option<TsbpdAnchor>,
+    tsbpd_drift: TsbpdDrift,
     /// The two stream-key slots, selected per packet by its `KK` flag (even/odd),
     /// so a rekey can roll the active key while packets under the previous key
     /// still decrypt. `None` is cleartext.
@@ -1282,9 +1288,47 @@ struct TsbpdAnchor {
 }
 
 impl TsbpdAnchor {
-    // the sender timestamp wraps every 71 minutes, packets in flight are seconds apart
-    fn delivery_us(&self, timestamp: u32) -> i64 {
-        self.delivery_us + i64::from(timestamp.wrapping_sub(self.timestamp) as i32)
+    // the sender timestamp wraps every 71 minutes, the local time since the anchor tells how often a pause in data crossed the wrap
+    fn delivery_us(&self, timestamp: u32, now_us: i64) -> i64 {
+        const TIMESTAMP_PERIOD_US: i64 = 1 << 32;
+        let wrapped_us = i64::from(timestamp.wrapping_sub(self.timestamp) as i32);
+        let periods = (now_us - self.delivery_us - wrapped_us + TIMESTAMP_PERIOD_US / 2)
+            .div_euclid(TIMESTAMP_PERIOD_US);
+        self.delivery_us + wrapped_us + periods * TIMESTAMP_PERIOD_US
+    }
+}
+
+// libsrt's TSBPD_DRIFT_MAX_SAMPLES and TSBPD_DRIFT_MAX_VALUE
+const DRIFT_SAMPLES_PER_UPDATE: i64 = 1000;
+const MAX_DRIFT_US: i64 = 5000;
+
+// libsrt's DriftTracer, the average lateness of ACKACKs against the TSBPD schedule
+#[derive(Debug, Default)]
+struct TsbpdDrift {
+    first_rtt_us: Option<i64>,
+    sample_sum_us: i64,
+    sample_count: i64,
+    drift_us: i64,
+}
+
+impl TsbpdDrift {
+    // returns the drift past MAX_DRIFT_US, which libsrt moves into the schedule itself
+    fn add_sample(&mut self, sample_us: i64) -> i64 {
+        self.sample_sum_us += sample_us;
+        self.sample_count += 1;
+        if self.sample_count < DRIFT_SAMPLES_PER_UPDATE {
+            return 0;
+        }
+        let average_us = self.sample_sum_us / self.sample_count;
+        self.sample_sum_us = 0;
+        self.sample_count = 0;
+        let overdrift_us = if average_us.abs() > MAX_DRIFT_US {
+            MAX_DRIFT_US * average_us.signum()
+        } else {
+            0
+        };
+        self.drift_us = average_us - overdrift_us;
+        overdrift_us
     }
 }
 
@@ -1303,6 +1347,7 @@ impl SrtReceiver {
             max_seen: 0,
             tsbpd_latency_us: None,
             tsbpd_anchor: None,
+            tsbpd_drift: TsbpdDrift::default(),
             #[cfg(feature = "srt")]
             crypto_even: None,
             #[cfg(feature = "srt")]
@@ -1328,6 +1373,21 @@ impl SrtReceiver {
     /// [`take_ready_at`]: Self::take_ready_at
     pub fn set_tsbpd(&mut self, latency_us: u32) {
         self.tsbpd_latency_us = Some(latency_us);
+    }
+
+    // an ACKACK arriving later than its timestamp's TSBPD schedule shows the clocks drifting apart, as libsrt's addDriftSample
+    pub fn add_drift_sample(&mut self, sender_timestamp: u32, arrival_us: u64, rtt_us: u64) {
+        let (Some(latency), Some(anchor)) = (self.tsbpd_latency_us, self.tsbpd_anchor.as_mut())
+        else {
+            return;
+        };
+        let arrival_us = arrival_us as i64;
+        let rtt_us = rtt_us as i64;
+        let first_rtt_us = *self.tsbpd_drift.first_rtt_us.get_or_insert(rtt_us);
+        let scheduled_arrival_us =
+            anchor.delivery_us(sender_timestamp, arrival_us) - i64::from(latency);
+        let sample_us = arrival_us - scheduled_arrival_us - (rtt_us - first_rtt_us) / 2;
+        anchor.delivery_us += self.tsbpd_drift.add_sample(sample_us);
     }
 
     /// Decrypt incoming payloads with the negotiated stream key (the even slot;
@@ -1537,8 +1597,8 @@ impl SrtReceiver {
                 timestamp,
                 delivery_us: now_us + i64::from(latency),
             });
-            let delivery_us = anchor.delivery_us(timestamp);
-            if now_us < delivery_us {
+            let delivery_us = anchor.delivery_us(timestamp, now_us);
+            if now_us < delivery_us + self.tsbpd_drift.drift_us {
                 break; // not yet this packet's scheduled delivery time
             }
             let (payload, _) = self.pending.remove(&seq).unwrap();
@@ -1672,10 +1732,12 @@ impl AckRoundTrip {
         self.unanswered_acks.push_back((ack_no, now_us));
     }
 
-    pub fn on_ackack(&mut self, ack_no: u32, now_us: u64) {
-        let Some(index) = self.unanswered_acks.iter().position(|&(n, _)| n == ack_no) else {
-            return;
-        };
+    // returns the round trip this ACKACK measured
+    pub fn on_ackack(&mut self, ack_no: u32, now_us: u64) -> Option<u64> {
+        let index = self
+            .unanswered_acks
+            .iter()
+            .position(|&(n, _)| n == ack_no)?;
         let (_, sent_us) = self.unanswered_acks[index];
         self.unanswered_acks.drain(..=index);
         let rtt_us = now_us.saturating_sub(sent_us);
@@ -1683,11 +1745,12 @@ impl AckRoundTrip {
             self.smoothed_rtt_us = rtt_us;
             self.rtt_variance_us = rtt_us / 2;
             self.measured = true;
-            return;
+            return Some(rtt_us);
         }
         self.rtt_variance_us =
             (self.rtt_variance_us * 3 + self.smoothed_rtt_us.abs_diff(rtt_us)) / 4;
         self.smoothed_rtt_us = (self.smoothed_rtt_us * 7 + rtt_us) / 8;
+        Some(rtt_us)
     }
 
     // the ACK fields are 32-bit, an RTT past 71 minutes reports as the largest value
@@ -2367,6 +2430,53 @@ mod tests {
             vec![vec![3u8], vec![4u8], vec![5u8]],
             "delivered in sequence order regardless of arrival order",
         );
+    }
+
+    #[test]
+    fn tsbpd_holds_the_first_packet_after_a_long_pause() {
+        const LATENCY_US: u32 = 100_000;
+        // past 2^31 microseconds (35.8 minutes) the timestamp difference reads as negative, past 2^32 it wraps
+        const PAUSES_US: [u64; 2] = [40 * 60 * 1_000_000, 80 * 60 * 1_000_000];
+        for pause_us in PAUSES_US {
+            let mut rx = SrtReceiver::new();
+            rx.set_tsbpd(LATENCY_US);
+            rx.on_data(timestamped_packet(1, 0));
+            assert!(rx.take_ready_at(0).is_empty());
+            assert_eq!(rx.take_ready_at(u64::from(LATENCY_US)), vec![vec![1u8]]);
+            rx.on_data(timestamped_packet(2, pause_us as u32));
+            assert!(
+                rx.take_ready_at(pause_us).is_empty(),
+                "held for the latency after a {pause_us} us pause"
+            );
+            assert_eq!(
+                rx.take_ready_at(pause_us + u64::from(LATENCY_US)),
+                vec![vec![2u8]]
+            );
+        }
+    }
+
+    #[test]
+    fn tsbpd_moves_by_the_average_drift_of_the_ackacks() {
+        const LATENCY_US: u32 = 100_000;
+        const ACKACK_INTERVAL_US: u32 = 10_000;
+        // past MAX_DRIFT_US, so both the schedule shift and the remaining drift apply
+        const LATENESS_US: u64 = 8_000;
+        const RTT_US: u64 = 20_000;
+        let mut rx = SrtReceiver::new();
+        rx.set_tsbpd(LATENCY_US);
+        rx.on_data(timestamped_packet(1, 0));
+        assert!(rx.take_ready_at(0).is_empty());
+        assert_eq!(rx.take_ready_at(u64::from(LATENCY_US)), vec![vec![1u8]]);
+        let samples = DRIFT_SAMPLES_PER_UPDATE as u32;
+        for index in 0..samples {
+            let timestamp = index * ACKACK_INTERVAL_US;
+            rx.add_drift_sample(timestamp, u64::from(timestamp) + LATENESS_US, RTT_US);
+        }
+        let timestamp = samples * ACKACK_INTERVAL_US;
+        rx.on_data(timestamped_packet(2, timestamp));
+        let drifted_due_us = u64::from(timestamp + LATENCY_US) + LATENESS_US;
+        assert!(rx.take_ready_at(drifted_due_us - 1).is_empty());
+        assert_eq!(rx.take_ready_at(drifted_due_us), vec![vec![2u8]]);
     }
 
     fn timestamped_packet(seq: u32, timestamp: u32) -> DataPacket {
