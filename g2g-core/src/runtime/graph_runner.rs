@@ -6662,6 +6662,7 @@ pub(crate) fn try_clone_packet(packet: &PipelinePacket) -> Result<PipelinePacket
             offset: *offset,
             frame: frame.share(),
         },
+        PipelinePacket::SpliceInfo(frame) => PipelinePacket::SpliceInfo(frame.share()),
         // Runner-internal (a fan-in arm's deadline), so it is never on a link to
         // begin with; trivially cloneable all the same.
         PipelinePacket::Tick => PipelinePacket::Tick,

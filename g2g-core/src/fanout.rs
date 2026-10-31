@@ -1084,7 +1084,8 @@ impl AsyncElement for Gate {
             PipelinePacket::CapsChanged(_)
             | PipelinePacket::Flush
             | PipelinePacket::Segment(_)
-            | PipelinePacket::Overwrite { .. } => true,
+            | PipelinePacket::Overwrite { .. }
+            | PipelinePacket::SpliceInfo(_) => true,
             // Runner forwards Eos after process() returns. A fan-in arm's
             // deadline tick never reaches a 1->1 element.
             PipelinePacket::Eos | PipelinePacket::Tick => false,
@@ -1242,7 +1243,8 @@ impl MultiOutputElement for Router {
             PipelinePacket::CapsChanged(_)
             | PipelinePacket::Flush
             | PipelinePacket::Segment(_)
-            | PipelinePacket::Overwrite { .. } => 0..self.ports,
+            | PipelinePacket::Overwrite { .. }
+            | PipelinePacket::SpliceInfo(_) => 0..self.ports,
             // Runner broadcasts Eos to all ports after process() returns. A
             // fan-in arm's deadline tick never reaches a 1->N element.
             PipelinePacket::Eos | PipelinePacket::Tick => 0..0,
@@ -1382,7 +1384,8 @@ mod tests {
                 | PipelinePacket::Flush
                 | PipelinePacket::Segment(_)
                 | PipelinePacket::Tick
-                | PipelinePacket::Overwrite { .. } => {}
+                | PipelinePacket::Overwrite { .. }
+                | PipelinePacket::SpliceInfo(_) => {}
             }
             core::task::Poll::Ready(Ok(PushOutcome::Accepted))
         }
@@ -1412,7 +1415,8 @@ mod tests {
                 | PipelinePacket::Flush
                 | PipelinePacket::Segment(_)
                 | PipelinePacket::Tick
-                | PipelinePacket::Overwrite { .. } => {}
+                | PipelinePacket::Overwrite { .. }
+                | PipelinePacket::SpliceInfo(_) => {}
             }
             core::task::Poll::Ready(Ok(PushOutcome::Accepted))
         }

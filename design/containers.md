@@ -403,6 +403,29 @@ Interop is validated against ffmpeg both ways: ffprobe identifies the g2g mux's
 stream as `klv` and extracts its bytes bit-exact, and a TS re-authored by
 ffmpeg's muxer demuxes back bit-exact.
 
+### SCTE-35 over TS
+
+SCTE-35 cues travel as `PipelinePacket::SpliceInfo`, one section per packet,
+beside the video rather than as a stream of their own, the way gst's
+`tsdemux send-scte35-events` and `mpegtsmux` pass them as events. A cue stream
+is sparse, minutes between sections, and a pad of its own would hold back the
+muxer's merge until the next one. The packet passes through parsers, decoders
+and encoders unchanged, so a transcode keeps its cues.
+
+`tsdemux` reassembles sections on any PMT stream of type 0x86, keeps those
+whose CRC checks out, and sends each on its video port just before the next
+access unit. A section's splice time plus its `pts_adjustment` lands on the
+stream's own PTS clock, which is the pipeline's, so the demuxer only moves
+`pts_adjustment` by the offset a restarted source's timeline adds.
+
+`mpegtsmux scte-35-pid=N` writes the sections on PID N in the first program,
+declares stream type 0x86 and the `CUEI` registration descriptor in its PMT,
+and adds the decoder delay every written PTS gets to `pts_adjustment`. With
+`scte-35-pid=0`, the default, it drops them. `scte-35-null-interval` sends a
+`splice_null` heartbeat, five minutes apart by default as in gst. TSDuck and
+ffprobe read the output: a remux and a transcode keep the splice point at the
+same distance from the first video PTS (`m2038_scte35`).
+
 ### UAS Datalink local sets
 
 `g2g-plugins::klv` is a pure `no_std` MISB ST 0601 UAS Datalink Local Set codec.

@@ -61,6 +61,9 @@ impl fmt::Display for PacketFields<'_> {
                 "event overwrite: offset {offset}, size {}",
                 frame_bytes(frame)
             ),
+            PipelinePacket::SpliceInfo(frame) => {
+                write!(f, "event splice-info: size {}", frame_bytes(frame))
+            }
             PipelinePacket::Eos => f.write_str("event eos"),
             PipelinePacket::Flush => f.write_str("event flush"),
             PipelinePacket::Tick => f.write_str("event tick"),

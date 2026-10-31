@@ -1381,7 +1381,7 @@ async fn route_packet(
             }
             Ok(false)
         }
-        Some(overwrite @ PipelinePacket::Overwrite { .. }) => {
+        Some(overwrite @ (PipelinePacket::Overwrite { .. } | PipelinePacket::SpliceInfo(_))) => {
             for p in ports.iter_mut() {
                 p.push(try_clone_packet(&overwrite)?).await?;
             }

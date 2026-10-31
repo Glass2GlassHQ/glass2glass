@@ -272,7 +272,6 @@ Highest leverage first:
     flvdemux declares `au`.
   - An MP4 audio track whose edit list replays media plays its samples once:
     replayed edits need sample-accurate clipping, as the video path lays them out.
-- SCTE-35 splice information: read it in `tsdemux` and write it in `mpegtsmux`.
 
 ## Codecs
 

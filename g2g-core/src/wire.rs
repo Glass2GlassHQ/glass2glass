@@ -84,6 +84,7 @@ const PKT_EOS: u8 = 2;
 const PKT_FLUSH: u8 = 3;
 const PKT_SEGMENT: u8 = 4;
 const PKT_OVERWRITE: u8 = 5;
+const PKT_SPLICE_INFO: u8 = 6;
 
 const DOMAIN_SYSTEM: u8 = 0;
 
@@ -1432,9 +1433,9 @@ fn get_meta(r: &mut Reader) -> Result<FrameMetaSet, WireError> {
 /// returned buffer (the codec produces the body only).
 pub fn encode_packet(packet: &PipelinePacket) -> Result<Vec<u8>, WireError> {
     let payload_len = match packet {
-        PipelinePacket::DataFrame(frame) | PipelinePacket::Overwrite { frame, .. } => {
-            domain_payload_len(&frame.domain)
-        }
+        PipelinePacket::DataFrame(frame)
+        | PipelinePacket::Overwrite { frame, .. }
+        | PipelinePacket::SpliceInfo(frame) => domain_payload_len(&frame.domain),
         _ => 0,
     };
     let mut w = Writer::with_capacity(FRAME_HEADER_LEN + payload_len);
@@ -1451,6 +1452,10 @@ pub fn encode_packet(packet: &PipelinePacket) -> Result<Vec<u8>, WireError> {
         PipelinePacket::Overwrite { offset, frame } => {
             w.u8(PKT_OVERWRITE);
             w.u64(*offset);
+            put_frame(&mut w, frame)?;
+        }
+        PipelinePacket::SpliceInfo(frame) => {
+            w.u8(PKT_SPLICE_INFO);
             put_frame(&mut w, frame)?;
         }
         PipelinePacket::Eos => w.u8(PKT_EOS),
@@ -1509,6 +1514,7 @@ pub fn decode_packet(bytes: &[u8]) -> Result<PipelinePacket, WireError> {
                 frame: get_frame(&mut r)?,
             }
         }
+        PKT_SPLICE_INFO => PipelinePacket::SpliceInfo(get_frame(&mut r)?),
         PKT_EOS => PipelinePacket::Eos,
         PKT_FLUSH => PipelinePacket::Flush,
         PKT_SEGMENT => PipelinePacket::Segment(get_segment(&mut r)?),
@@ -1804,6 +1810,26 @@ mod tests {
                 }
             }
             other => panic!("expected DataFrame, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn splice_info_round_trips_its_section() {
+        let section: Vec<u8> = (0u8..40).collect();
+        let frame = Frame::new(
+            MemoryDomain::System(SystemSlice::from_boxed(section.clone().into_boxed_slice())),
+            FrameTiming {
+                pts_ns: 1_000,
+                ..FrameTiming::default()
+            },
+            9,
+        );
+        match roundtrip(&PipelinePacket::SpliceInfo(frame)) {
+            PipelinePacket::SpliceInfo(got) => {
+                assert_eq!(got.timing.pts_ns, 1_000);
+                assert_eq!(got.domain.as_system_slice(), Some(&section[..]));
+            }
+            other => panic!("expected SpliceInfo, got {other:?}"),
         }
     }
 

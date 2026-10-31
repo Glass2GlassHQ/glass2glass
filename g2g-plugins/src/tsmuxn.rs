@@ -115,7 +115,10 @@ impl DvbSubDecl {
     }
 }
 
-const PROPERTIES: [PropertySpec; 13] = [
+// gst mpegtsmux's default, five minutes
+const DEFAULT_SCTE35_NULL_INTERVAL_90KHZ: u64 = 27_000_000;
+
+const PROPERTIES: [PropertySpec; 15] = [
     PropertySpec::new(
         "pat-interval",
         PropKind::Uint,
@@ -183,6 +186,19 @@ const PROPERTIES: [PropertySpec; 13] = [
     .with_default("0")
     .with_range("0", "31"),
     PropertySpec::new(
+        "scte-35-pid",
+        PropKind::Uint,
+        "PID that carries the SCTE-35 sections arriving with the streams (0 = drop them)",
+    )
+    .with_default("0")
+    .with_range("0", "8190"),
+    PropertySpec::new(
+        "scte-35-null-interval",
+        PropKind::Uint,
+        "SCTE-35 splice_null heartbeat interval, ticks of the 90kHz clock (0 = none)",
+    )
+    .with_default("27000000"),
+    PropertySpec::new(
         "klv-sync",
         PropKind::Bool,
         "carry KLV metadata as synchronous metadata-in-PES (stream_type 0x15) instead of asynchronous private PES",
@@ -214,6 +230,9 @@ struct TsMuxSettings {
     start_pid: u16,
     pmt_start_pid: u16,
     tables_version: u8,
+    // 0 drops SCTE-35 sections
+    scte35_pid: u16,
+    scte35_null_interval_90khz: u64,
 }
 
 impl Default for TsMuxSettings {
@@ -228,6 +247,8 @@ impl Default for TsMuxSettings {
             start_pid: MUX_ES_PID,
             pmt_start_pid: MUX_PMT_PID,
             tables_version: 0,
+            scte35_pid: 0,
+            scte35_null_interval_90khz: DEFAULT_SCTE35_NULL_INTERVAL_90KHZ,
         }
     }
 }
@@ -241,10 +262,13 @@ impl TsMuxSettings {
         mux: Option<&mut TsMuxer>,
     ) -> Option<Result<(), PropError>> {
         let result = match name {
-            "pat-interval" | "pmt-interval" | "si-interval" | "pcr-interval" => {
-                self.set_cadence(name, value, mux)
-            }
+            "pat-interval"
+            | "pmt-interval"
+            | "si-interval"
+            | "pcr-interval"
+            | "scte-35-null-interval" => self.set_cadence(name, value, mux),
             "bitrate"
+            | "scte-35-pid"
             | "transport-stream-id"
             | "original-network-id"
             | "start-pid"
@@ -271,6 +295,7 @@ impl TsMuxSettings {
         match name {
             "si-interval" => self.si_interval_90khz = ticks,
             "pcr-interval" => self.pcr_interval_90khz = ticks,
+            "scte-35-null-interval" => self.scte35_null_interval_90khz = ticks,
             _ => self.table_interval_90khz = ticks,
         }
         if let Some(mux) = mux {
@@ -292,6 +317,7 @@ impl TsMuxSettings {
             "original-network-id" => self.original_network_id = field,
             "start-pid" if pid_ok => self.start_pid = field,
             "pmt-start-pid" if pid_ok => self.pmt_start_pid = field,
+            "scte-35-pid" if pid_ok || field == 0 => self.scte35_pid = field,
             "tables-version" if number <= u64::from(MAX_TABLES_VERSION) => {
                 self.tables_version = field as u8
             }
@@ -305,6 +331,8 @@ impl TsMuxSettings {
             "pat-interval" | "pmt-interval" => self.table_interval_90khz,
             "si-interval" => self.si_interval_90khz,
             "pcr-interval" => self.pcr_interval_90khz,
+            "scte-35-null-interval" => self.scte35_null_interval_90khz,
+            "scte-35-pid" => u64::from(self.scte35_pid),
             "bitrate" => self.bitrate,
             "transport-stream-id" => u64::from(self.transport_stream_id),
             "original-network-id" => u64::from(self.original_network_id),
@@ -320,6 +348,7 @@ impl TsMuxSettings {
         mux.set_table_interval_90khz(self.table_interval_90khz);
         mux.set_si_interval_90khz(self.si_interval_90khz);
         mux.set_pcr_interval_90khz(self.pcr_interval_90khz);
+        mux.set_splice_null_interval_90khz(self.scte35_null_interval_90khz);
     }
 
     fn apply(&self, mux: &mut TsMuxer) -> Result<(), G2gError> {
@@ -328,7 +357,11 @@ impl TsMuxSettings {
         mux.set_transport_stream_id(self.transport_stream_id);
         mux.set_original_network_id(self.original_network_id);
         mux.set_tables_version(self.tables_version)?;
-        mux.set_pid_bases(self.start_pid, self.pmt_start_pid)
+        mux.set_pid_bases(self.start_pid, self.pmt_start_pid)?;
+        if self.scte35_pid != 0 {
+            mux.add_splice_stream(self.scte35_pid)?;
+        }
+        Ok(())
     }
 }
 
@@ -761,6 +794,99 @@ impl TsMux {
             mux.set_stream_subtitling(input, &language, decl.subtitling_type(), decl.ids());
         }
     }
+
+    // the PMT needs every stream type, and the runner configures every input before any process call
+    fn build_mux(&mut self) -> Result<bool, G2gError> {
+        if self.mux.is_some() {
+            return Ok(true);
+        }
+        if self.stream_types.iter().any(|s| s.is_none()) {
+            return Ok(false);
+        }
+        let streams: Vec<(u16, u8)> = self
+            .program_numbers
+            .iter()
+            .zip(&self.stream_types)
+            .map(|(&program, s)| (program, s.expect("all set")))
+            .collect();
+        let mut mux = TsMuxer::with_programs(&streams);
+        self.settings.apply(&mut mux)?;
+        if let Some((name, provider)) = service_from_tags(&self.tags) {
+            mux.set_service(&name, &provider);
+        }
+        for (program, tags) in &self.program_tags {
+            if let Some((name, provider)) = service_from_tags(tags) {
+                // The builder / property setter keep the map and these
+                // programs in step, so the program is always found.
+                let applied = mux.set_program_service(*program, &name, &provider);
+                debug_assert!(applied, "program {program} is in the program map");
+            }
+        }
+        for i in 0..self.inputs {
+            if self.av1[i] {
+                mux.set_stream_av1(i);
+            }
+            if let Some(channels) = self.opus[i] {
+                mux.set_stream_opus(i, channels);
+            }
+            if self.aac[i].as_ref().is_some_and(AacCarriage::is_loas) {
+                mux.set_stream_latm(i);
+            }
+            let effective = self.effective_tags(i);
+            let language = language_from_tags(&effective);
+            // A DVB subtitle stream's language rides its
+            // `subtitling_descriptor`, the way ffmpeg writes it, so it
+            // gets no separate language descriptor.
+            match self.dvbsub[i] {
+                Some(decl) => mux.set_stream_subtitling(
+                    i,
+                    language.unwrap_or(UNDETERMINED_LANGUAGE),
+                    decl.subtitling_type(),
+                    decl.ids(),
+                ),
+                None => {
+                    if let Some(language) = language {
+                        mux.set_stream_language(i, language);
+                    }
+                }
+            }
+        }
+        self.mux = Some(mux);
+        Ok(true)
+    }
+
+    async fn write_splice_info(
+        &mut self,
+        frame: Frame,
+        out: &mut dyn OutputSink,
+    ) -> Result<(), G2gError> {
+        if self.settings.scte35_pid == 0 {
+            return Ok(());
+        }
+        if !self.build_mux()? {
+            return Err(G2gError::NotConfigured);
+        }
+        let muxer = short_type_name::<Self>();
+        let section = frame.domain.require_system_slice(muxer)?;
+        let pts_90khz = ns_to_ticks(frame.timing.pts_ns, PES_CLOCK_HZ);
+        let ts = self
+            .mux
+            .as_mut()
+            .expect("built above")
+            .push_splice_info(section, pts_90khz)?;
+        let out_frame = Frame::new(
+            MemoryDomain::System(SystemSlice::from_boxed(ts.into_boxed_slice())),
+            FrameTiming {
+                pts_ns: frame.timing.pts_ns,
+                ..FrameTiming::default()
+            },
+            self.emitted,
+        );
+        self.emitted += 1;
+        out.push(PipelinePacket::DataFrame(out_frame))
+            .await
+            .map(|_| ())
+    }
 }
 
 fn decode_time_ns(frame: &Frame) -> u64 {
@@ -976,6 +1102,9 @@ impl MultiInputElement for TsMux {
                     }
                     self.agg.push(input, frame);
                 }
+                PipelinePacket::SpliceInfo(frame) => {
+                    return self.write_splice_info(frame, out).await
+                }
                 // M22: a per-input Eos lets the merge release AUs held waiting on
                 // this input, and flush its tail; the runner emits the merged Eos.
                 PipelinePacket::Eos => self.agg.mark_ended(input),
@@ -992,62 +1121,8 @@ impl MultiInputElement for TsMux {
                 }
             }
 
-            // The PMT needs every stream type, so build the muxer only once all
-            // inputs are configured (always true by the first frame: the runner
-            // negotiates every input pad before any process call).
-            if self.mux.is_none() {
-                if self.stream_types.iter().any(|s| s.is_none()) {
-                    return Ok(());
-                }
-                let streams: Vec<(u16, u8)> = self
-                    .program_numbers
-                    .iter()
-                    .zip(&self.stream_types)
-                    .map(|(&program, s)| (program, s.expect("all set")))
-                    .collect();
-                let mut mux = TsMuxer::with_programs(&streams);
-                self.settings.apply(&mut mux)?;
-                if let Some((name, provider)) = service_from_tags(&self.tags) {
-                    mux.set_service(&name, &provider);
-                }
-                for (program, tags) in &self.program_tags {
-                    if let Some((name, provider)) = service_from_tags(tags) {
-                        // The builder / property setter keep the map and these
-                        // programs in step, so the program is always found.
-                        let applied = mux.set_program_service(*program, &name, &provider);
-                        debug_assert!(applied, "program {program} is in the program map");
-                    }
-                }
-                for i in 0..self.inputs {
-                    if self.av1[i] {
-                        mux.set_stream_av1(i);
-                    }
-                    if let Some(channels) = self.opus[i] {
-                        mux.set_stream_opus(i, channels);
-                    }
-                    if self.aac[i].as_ref().is_some_and(AacCarriage::is_loas) {
-                        mux.set_stream_latm(i);
-                    }
-                    let effective = self.effective_tags(i);
-                    let language = language_from_tags(&effective);
-                    // A DVB subtitle stream's language rides its
-                    // `subtitling_descriptor`, the way ffmpeg writes it, so it
-                    // gets no separate language descriptor.
-                    match self.dvbsub[i] {
-                        Some(decl) => mux.set_stream_subtitling(
-                            i,
-                            language.unwrap_or(UNDETERMINED_LANGUAGE),
-                            decl.subtitling_type(),
-                            decl.ids(),
-                        ),
-                        None => {
-                            if let Some(language) = language {
-                                mux.set_stream_language(i, language);
-                            }
-                        }
-                    }
-                }
-                self.mux = Some(mux);
+            if !self.build_mux()? {
+                return Ok(());
             }
 
             let carries_video = (0..self.inputs).any(|i| self.is_video(i));

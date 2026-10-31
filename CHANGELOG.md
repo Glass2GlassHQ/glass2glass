@@ -136,6 +136,7 @@ Breaking: `QosMessage` gains `downstream_proc_ns`, `ElementProbe` is no longer `
 - M2035: `flvmux` writes the stream duration into `onMetaData`, and `filesink` applies the new `PipelinePacket::Overwrite`.
 - M2036: a test runs pipelines 200 times and checks that the heap, open file descriptors and threads return to their starting level.
 - M2037: `h264seiinserter` and `h265seiinserter` write a frame's `SeiUserDataMeta` into its access unit as registered and unregistered SEI user data.
+- M2038: `tsdemux` forwards SCTE-35 sections as the new `PipelinePacket::SpliceInfo`, and `mpegtsmux scte-35-pid` writes them.
 
 ## 0.10.0
 

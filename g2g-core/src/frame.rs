@@ -38,6 +38,8 @@ pub enum PipelinePacket {
         offset: u64,
         frame: Frame,
     },
+    // an SCTE-35 splice_info_section whose splice times count on the pipeline's 90 kHz timeline, passed on by every element until a muxer writes it
+    SpliceInfo(Frame),
 }
 
 #[derive(Debug)]

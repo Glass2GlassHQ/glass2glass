@@ -45,11 +45,11 @@ use crate::mpegts::{
     STREAM_TYPE_AAC_LATM, STREAM_TYPE_AC3, STREAM_TYPE_H264, STREAM_TYPE_H265,
     STREAM_TYPE_METADATA_PES, STREAM_TYPE_MPEG1_AUDIO, STREAM_TYPE_MPEG1_VIDEO,
     STREAM_TYPE_MPEG2_AUDIO, STREAM_TYPE_MPEG2_VIDEO, STREAM_TYPE_MPEG4P2, STREAM_TYPE_PRIVATE_PES,
-    TAG_KEY_EVENT_DURATION, TAG_KEY_EVENT_NAME, TAG_KEY_EVENT_START, TAG_KEY_EVENT_TEXT,
-    TAG_KEY_NEXT_EVENT_DURATION, TAG_KEY_NEXT_EVENT_NAME, TAG_KEY_NEXT_EVENT_START,
-    TAG_KEY_NEXT_EVENT_TEXT, TAG_KEY_SCHEDULE_EVENT_DURATION, TAG_KEY_SCHEDULE_EVENT_ID,
-    TAG_KEY_SCHEDULE_EVENT_NAME, TAG_KEY_SCHEDULE_EVENT_START, TAG_KEY_SCHEDULE_EVENT_TEXT,
-    TAG_KEY_SERVICE_PROVIDER,
+    STREAM_TYPE_SCTE35, TAG_KEY_EVENT_DURATION, TAG_KEY_EVENT_NAME, TAG_KEY_EVENT_START,
+    TAG_KEY_EVENT_TEXT, TAG_KEY_NEXT_EVENT_DURATION, TAG_KEY_NEXT_EVENT_NAME,
+    TAG_KEY_NEXT_EVENT_START, TAG_KEY_NEXT_EVENT_TEXT, TAG_KEY_SCHEDULE_EVENT_DURATION,
+    TAG_KEY_SCHEDULE_EVENT_ID, TAG_KEY_SCHEDULE_EVENT_NAME, TAG_KEY_SCHEDULE_EVENT_START,
+    TAG_KEY_SCHEDULE_EVENT_TEXT, TAG_KEY_SERVICE_PROVIDER,
 };
 use crate::oneport::OnePortElement;
 use crate::typefind::{elementary_video_caps, sized_by_sps};
@@ -926,6 +926,9 @@ pub struct TsDemuxN {
     timeline: RestartTimeline,
     // a Flush this demuxer did not seek for, sent on only if a Segment follows it
     withheld_flush: bool,
+    // SCTE-35 sections waiting for the next unit on the splice port
+    splice_sections: Vec<Vec<u8>>,
+    splice_port_pts_ns: Option<u64>,
 }
 
 // the PID a port carries among those carrying its stream
@@ -1026,6 +1029,8 @@ impl TsDemuxN {
             held_unit_ns,
             timeline: RestartTimeline::default(),
             withheld_flush: false,
+            splice_sections: Vec::new(),
+            splice_port_pts_ns: None,
             bus: None,
             collection_posted: false,
             tags: TagPoster::default(),
@@ -1188,6 +1193,7 @@ impl TsDemuxN {
         self.start_probe_bytes = 0;
         self.announced.fill(false);
         self.segment_sent.fill(false);
+        self.splice_sections.clear();
         self.mpeg2_tuned_in.fill(false);
         self.mpeg2_skipped_before_tune_in.fill(0);
         self.last_unit_dts_ns.fill(None);
@@ -1244,6 +1250,10 @@ impl TsDemuxN {
         out: &mut dyn MultiOutputSink,
     ) -> Result<(), G2gError> {
         for u in units {
+            if u.stream_type == STREAM_TYPE_SCTE35 {
+                self.splice_sections.push(u.data);
+                continue;
+            }
             let pts_ns = u.pts_90khz.map(ticks_90khz_to_ns);
             if let Some(pts_ns) = pts_ns {
                 self.seek.note_stream_start(pts_ns);
@@ -1275,6 +1285,52 @@ impl TsDemuxN {
             for u in admitted {
                 self.emit_unit(port, u, out).await?;
             }
+        }
+        Ok(())
+    }
+
+    // the first video port, else the first port, carries the program's SCTE-35 sections
+    fn splice_port(&self) -> usize {
+        self.ports
+            .iter()
+            .position(|stream| {
+                matches!(
+                    stream,
+                    TsStream::H264
+                        | TsStream::H265
+                        | TsStream::Mpeg4Part2
+                        | TsStream::Av1
+                        | TsStream::Mpeg2
+                )
+            })
+            .unwrap_or(0)
+    }
+
+    // the queued sections, their splice times moved by the restart offset the units get, once the splice port has timed a unit
+    async fn emit_splice_sections(
+        &mut self,
+        out: &mut dyn MultiOutputSink,
+    ) -> Result<(), G2gError> {
+        let Some(pts_ns) = self.splice_port_pts_ns else {
+            return Ok(());
+        };
+        let offset_ticks =
+            self.timeline.offset_ns * i128::from(crate::mpegts::PES_CLOCK_HZ) / 1_000_000_000;
+        let offset_ticks = i64::try_from(offset_ticks).map_err(|_| G2gError::CapsMismatch)?;
+        for section in core::mem::take(&mut self.splice_sections) {
+            let section = crate::scte35::shift_pts_adjustment(&section, offset_ticks)
+                .expect("the demuxer keeps only well-formed splice sections");
+            let frame = Frame::new(
+                MemoryDomain::System(SystemSlice::from_boxed(section.into_boxed_slice())),
+                FrameTiming {
+                    pts_ns,
+                    ..FrameTiming::default()
+                },
+                self.emitted,
+            );
+            self.emitted += 1;
+            out.push_to(self.splice_port(), PipelinePacket::SpliceInfo(frame))
+                .await?;
         }
         Ok(())
     }
@@ -1335,6 +1391,10 @@ impl TsDemuxN {
         }
         if holds_timed_units(stream) {
             self.learn_held_unit(port, u.pts_90khz.map(|_| dts_ns));
+        }
+        if port == self.splice_port() {
+            self.splice_port_pts_ns = Some(pts_ns);
+            self.emit_splice_sections(out).await?;
         }
         let data = unwrap_sync_klv(u.stream_type, u.data);
         let units = match stream {
@@ -1591,6 +1651,7 @@ impl MultiOutputElement for TsDemuxN {
                     let units = self.demux.take_units();
                     let units = self.past_stream_start_probe(units, true);
                     self.route_units(units, out).await?;
+                    self.emit_splice_sections(out).await?;
                     for port in 0..self.ports.len() {
                         if let (PortPid::Required(pid), None) =
                             (self.port_pids[port], self.port_pid(port)?)

@@ -169,6 +169,8 @@ pub const STREAM_TYPE_AC3: u8 = 0x81;
 /// bytes off every 0x15 PES payload on the metadata stream_id. The demux accepts
 /// a bare payload too (see `unwrap_metadata_au_cells`).
 pub const STREAM_TYPE_METADATA_PES: u8 = 0x15;
+// SCTE 35 splice information, carried as sections rather than PES
+pub const STREAM_TYPE_SCTE35: u8 = 0x86;
 
 /// PMT ES-info for a synchronous-KLV (0x15) stream: a `metadata_descriptor`
 /// (tag 0x26) naming 'KLVA' as both the application format and the metadata
@@ -499,6 +501,7 @@ enum PsiTable {
     Sdt,
     Eit,
     Pmt(usize),
+    SpliceInfo,
 }
 
 /// One program declared by the PAT: its `program_number`, the PID its PMT rides
@@ -754,6 +757,7 @@ impl TsDemuxer {
                     PsiTable::Sdt => self.parse_sdt(&section),
                     PsiTable::Eit => self.parse_eit(&section),
                     PsiTable::Pmt(program_index) => self.parse_pmt(program_index, &section),
+                    PsiTable::SpliceInfo => self.take_splice_info(pid, &section),
                 }
             }
             if pmt_was_missing && !self.streams().is_empty() {
@@ -831,8 +835,26 @@ impl TsDemuxer {
                 .programs
                 .iter()
                 .position(|p| p.pmt_pid == pid)
-                .map(PsiTable::Pmt),
+                .map(PsiTable::Pmt)
+                .or_else(|| {
+                    (self.stream_type_of(pid) == Some(STREAM_TYPE_SCTE35))
+                        .then_some(PsiTable::SpliceInfo)
+                }),
         }
+    }
+
+    // a well-formed splice_info_section joins the units in arrival order, untimed
+    fn take_splice_info(&mut self, pid: u16, section: &[u8]) {
+        let Some(section) = crate::scte35::shift_pts_adjustment(section, 0) else {
+            return;
+        };
+        self.completed.push(EsUnit {
+            pid,
+            stream_type: STREAM_TYPE_SCTE35,
+            pts_90khz: None,
+            dts_90khz: None,
+            data: section,
+        });
     }
 
     fn collect_sections(
@@ -845,6 +867,7 @@ impl TsDemuxer {
         let max_section_bytes = match table {
             PsiTable::Eit => MAX_EIT_SECTION_BYTES,
             PsiTable::Pat | PsiTable::Sdt | PsiTable::Pmt(_) => MAX_PAT_PMT_SDT_SECTION_BYTES,
+            PsiTable::SpliceInfo => crate::scte35::MAX_SPLICE_INFO_SECTION_BYTES,
         };
         let slot = match self
             .pending_sections
@@ -2065,6 +2088,10 @@ pub struct TsMuxer {
     transport_stream_id: u16,
     original_network_id: u16,
     tables_version: u8,
+    // the first program's SCTE-35 PID and its continuity counter, `None` without one
+    splice: Option<(u16, u8)>,
+    splice_null_interval_90khz: u64,
+    last_splice_27mhz: Option<u64>,
 }
 
 impl TsMuxer {
@@ -2169,6 +2196,9 @@ impl TsMuxer {
             transport_stream_id: DEFAULT_TRANSPORT_STREAM_ID,
             original_network_id: DEFAULT_ORIGINAL_NETWORK_ID,
             tables_version: 0,
+            splice: None,
+            splice_null_interval_90khz: 0,
+            last_splice_27mhz: None,
         }
     }
 
@@ -2455,6 +2485,73 @@ impl TsMuxer {
         Ok(())
     }
 
+    // carry SCTE-35 in the first program on `pid`, called once the elementary stream PIDs are final
+    pub fn add_splice_stream(&mut self, pid: u16) -> Result<(), G2gError> {
+        let taken = [PID_PAT, PID_SDT].contains(&pid)
+            || self.streams.iter().any(|s| s.pid == pid)
+            || self.programs.iter().any(|p| p.pmt_pid == pid);
+        if !MUX_PID_RANGE.contains(&pid) || taken {
+            g2g_core::g2g_error!(
+                self,
+                "SCTE-35 PID {pid:#x} is outside {MUX_PID_RANGE:#x?} or taken"
+            );
+            return Err(G2gError::NotConfigured);
+        }
+        self.splice = Some((pid, 0));
+        Ok(())
+    }
+
+    pub fn set_splice_null_interval_90khz(&mut self, ticks: u64) {
+        self.splice_null_interval_90khz = ticks;
+    }
+
+    // a splice_info_section on the SCTE-35 PID, its splice times moved by the decoder delay every written PTS gets
+    pub fn push_splice_info(
+        &mut self,
+        section: &[u8],
+        pts_90khz: u64,
+    ) -> Result<Vec<u8>, G2gError> {
+        let Some((pid, cc)) = self.splice else {
+            return Err(G2gError::NotConfigured);
+        };
+        let delay =
+            i64::try_from(self.decoder_delay_90khz()).map_err(|_| G2gError::CapsMismatch)?;
+        let Some(section) = crate::scte35::shift_pts_adjustment(section, delay) else {
+            g2g_core::g2g_error!(self, "malformed SCTE-35 splice_info_section");
+            return Err(G2gError::CapsMismatch);
+        };
+        let mut out = Vec::new();
+        let now_27mhz = pts_90khz.saturating_mul(SYSTEM_CLOCK_TICKS_PER_90KHZ);
+        if self.constant_bitrate() {
+            self.byte_clock_start_27mhz.get_or_insert(now_27mhz);
+            self.pad_until(now_27mhz, &mut out);
+        } else {
+            self.write_tables_if_due(Some(now_27mhz), &mut out);
+        }
+        self.splice = Some((pid, section_packets(pid, &section, cc, &mut out)));
+        self.last_splice_27mhz = Some(now_27mhz);
+        self.bytes_written = self.bytes_written.saturating_add(out.len() as u64);
+        Ok(out)
+    }
+
+    fn write_splice_null_if_due(&mut self, now_27mhz: Option<u64>, out: &mut Vec<u8>) {
+        let Some((pid, cc)) = self.splice else {
+            return;
+        };
+        if !cadence_due(
+            now_27mhz,
+            self.last_splice_27mhz,
+            self.splice_null_interval_90khz,
+        ) {
+            return;
+        }
+        self.splice = Some((
+            pid,
+            section_packets(pid, &crate::scte35::splice_null(), cc, out),
+        ));
+        self.last_splice_27mhz = now_27mhz;
+    }
+
     fn constant_bitrate(&self) -> bool {
         self.bitrate > 0
     }
@@ -2501,6 +2598,7 @@ impl TsMuxer {
         } else {
             self.write_tables_if_due(input_clock_27mhz, &mut out);
         }
+        self.write_splice_null_if_due(input_clock_27mhz, &mut out);
 
         let program_index = self.streams[stream_index].program;
         let on_pcr_stream = self.programs[program_index].pcr_stream == stream_index;
@@ -2757,9 +2855,14 @@ impl TsMuxer {
             0x00, // section/last
             0xE0 | (pcr_pid >> 8) as u8 & 0x1F,
             pcr_pid as u8, // PCR_PID
-            0xF0,
-            0x00, // program_info_length = 0
         ]);
+        let splice_pid = self.splice.filter(|_| prog_idx == 0).map(|(pid, _)| pid);
+        let program_info: &[u8] = match splice_pid {
+            Some(_) => crate::scte35::CUEI_REGISTRATION,
+            None => &[],
+        };
+        body.extend_from_slice(&[0xF0, program_info.len() as u8]);
+        body.extend_from_slice(program_info);
         // One ES loop entry per stream of this program: stream_type,
         // elementary_PID, ES_info_len, then any ES-info descriptors.
         for s in self.streams.iter().filter(|s| s.program == prog_idx) {
@@ -2771,6 +2874,15 @@ impl TsMuxer {
                 s.es_info.len() as u8,
             ]);
             body.extend_from_slice(&s.es_info);
+        }
+        if let Some(pid) = splice_pid {
+            body.extend_from_slice(&[
+                STREAM_TYPE_SCTE35,
+                0xE0 | (pid >> 8) as u8 & 0x1F,
+                pid as u8,
+                0xF0,
+                0x00,
+            ]);
         }
         self.programs[prog_idx].pmt_cc =
             psi_packet(pmt_pid, 0x02, &body, self.programs[prog_idx].pmt_cc, out);
@@ -3061,7 +3173,7 @@ fn write_pcr(pcr_27mhz: u64, out: &mut Vec<u8>) {
 /// PMT with more than ~33 streams). The first packet carries PUSI + the pointer
 /// field; continuations carry PUSI=0 with no new pointer. Returns the continuity
 /// counter for the next packet on this PID.
-fn psi_packet(pid: u16, table_id: u8, body: &[u8], mut cc: u8, out: &mut Vec<u8>) -> u8 {
+fn psi_packet(pid: u16, table_id: u8, body: &[u8], cc: u8, out: &mut Vec<u8>) -> u8 {
     let section_length = body.len() + 4; // body + 4-byte CRC
     let mut section = Vec::with_capacity(3 + section_length);
     section.push(table_id);
@@ -3070,8 +3182,13 @@ fn psi_packet(pid: u16, table_id: u8, body: &[u8], mut cc: u8, out: &mut Vec<u8>
     section.extend_from_slice(body);
     let crc = mpeg_crc32(&section); // over table_id .. end of body
     section.extend_from_slice(&crc.to_be_bytes());
+    section_packets(pid, &section, cc, out)
+}
+
+// a whole section as TS packets on `pid`, returning the PID's next continuity counter
+fn section_packets(pid: u16, section: &[u8], mut cc: u8, out: &mut Vec<u8>) -> u8 {
     let mut payload = alloc::vec![0u8]; // pointer_field = 0 (first packet only)
-    payload.extend_from_slice(&section);
+    payload.extend_from_slice(section);
 
     const ROOM: usize = TS_PACKET_LEN - 4;
     let mut rest = &payload[..];
@@ -3487,6 +3604,46 @@ pub(crate) mod tests {
         assert_eq!(units[0].pts_90khz, Some(900_000 + delay));
         assert_eq!(units[1].data, au1);
         assert_eq!(units[1].pts_90khz, Some(903_000 + delay));
+    }
+
+    #[test]
+    fn splice_sections_and_heartbeats_reach_the_demuxer() {
+        const SPLICE_PID: u16 = 500;
+        const HEARTBEAT_TICKS: u64 = 9_000;
+        let au = [0u8, 0, 0, 1, 0x65, 0xAA];
+        let mut mux = TsMuxer::new(STREAM_TYPE_H264);
+        mux.add_splice_stream(SPLICE_PID).expect("a free PID");
+        mux.set_splice_null_interval_90khz(HEARTBEAT_TICKS);
+        let delay = mux.decoder_delay_90khz();
+        let mut bytes = Vec::new();
+        // heartbeats fall due at 0 and 9000
+        for pts in [0, 4_500, 9_000, 13_500] {
+            bytes.extend(mux.push_au(&au, Some(pts), None, false));
+        }
+        let cue = crate::scte35::splice_null();
+        bytes.extend(mux.push_splice_info(&cue, 13_500).expect("a valid section"));
+
+        let mut d = TsDemuxer::new();
+        for pkt in bytes.chunks(TS_PACKET_LEN) {
+            d.push_packet(pkt);
+        }
+        d.flush();
+        let sections: Vec<Vec<u8>> = d
+            .take_units()
+            .into_iter()
+            .filter(|unit| unit.stream_type == STREAM_TYPE_SCTE35 && unit.pid == SPLICE_PID)
+            .map(|unit| unit.data)
+            .collect();
+        let shifted_cue =
+            crate::scte35::shift_pts_adjustment(&cue, delay as i64).expect("a valid section");
+        assert_eq!(sections, [cue.clone(), cue, shifted_cue]);
+    }
+
+    #[test]
+    fn a_splice_pid_already_in_use_is_refused() {
+        let mut mux = TsMuxer::new(STREAM_TYPE_H264);
+        assert!(mux.add_splice_stream(MUX_ES_PID).is_err());
+        assert!(mux.add_splice_stream(PID_PAT).is_err());
     }
 
     /// A DVB `service_descriptor` over the given raw provider / name field bytes.

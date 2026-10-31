@@ -480,6 +480,7 @@ pub mod batchmux;
 // MISB ST 0604 MISP time stamps in H.264 / H.265 SEI (STANAG 4609): codec +
 // misptimeinsert / misptimeextract elements (no_std).
 pub mod misptime;
+pub mod scte35;
 #[cfg(feature = "metadata")]
 pub mod seiinsert;
 // Shared pixel-format helpers: packed-RGBA layout (videobalance, alpha) and the
