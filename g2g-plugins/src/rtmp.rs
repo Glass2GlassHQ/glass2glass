@@ -24,8 +24,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::flv::{
-    file_header_len, put_file_header, put_tag_header, tag_at, write_u24, FLV_FLAG_AUDIO,
-    FLV_FLAG_VIDEO, TAG_HEADER_LEN,
+    emit_tag, file_header_len, put_file_header, tag_at, write_u24, FLV_FLAG_AUDIO, FLV_FLAG_VIDEO,
 };
 
 /// RTMP protocol version (the C0/S0 byte).
@@ -341,7 +340,6 @@ pub struct RtmpSession {
     reader: ChunkReader,
     flv: Vec<u8>,
     flv_header_written: bool,
-    flv_prev_tag_size: u32,
     publishing: bool,
     /// Window Acknowledgement Size (RFC §5.4.4): the receiver sends an
     /// Acknowledgement after receiving this many bytes. Advertised to the peer at
@@ -368,7 +366,6 @@ impl RtmpSession {
             reader: ChunkReader::new(),
             flv: Vec::new(),
             flv_header_written: false,
-            flv_prev_tag_size: 0,
             publishing: false,
             window_ack_size: DEFAULT_WINDOW_ACK_SIZE,
             bytes_received: 0,
@@ -600,11 +597,7 @@ impl RtmpSession {
             put_file_header(&mut self.flv, FLV_FLAG_AUDIO | FLV_FLAG_VIDEO);
             self.flv_header_written = true;
         }
-        self.flv
-            .extend_from_slice(&self.flv_prev_tag_size.to_be_bytes());
-        put_tag_header(&mut self.flv, tag_type, timestamp, body.len());
-        self.flv.extend_from_slice(body);
-        self.flv_prev_tag_size = (TAG_HEADER_LEN + body.len()) as u32;
+        emit_tag(&mut self.flv, tag_type, timestamp, &[body]);
     }
 }
 
@@ -1190,12 +1183,16 @@ mod tests {
         abody.extend_from_slice(&frame);
         s.push(&chunk(4, MSG_AUDIO, 1, 33, &abody));
 
+        let flv = s.take_flv();
         let mut demux = FlvDemuxer::new();
-        demux.push_data(&s.take_flv());
+        demux.push_data(&flv);
         let units = demux.take_units();
         assert_eq!(units.len(), 2);
         assert_eq!(units[0], FlvUnitView(FlvTrack::Video, au.to_vec(), 33));
         assert_eq!(units[1], FlvUnitView(FlvTrack::Audio, frame.to_vec(), 33));
+        // gst's flvdemux drops a last tag that no PreviousTagSize follows
+        let last_tag_size = (crate::flv::TAG_HEADER_LEN + abody.len()) as u32;
+        assert_eq!(flv[flv.len() - 4..], last_tag_size.to_be_bytes());
     }
 
     #[test]

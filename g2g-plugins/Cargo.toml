@@ -1283,7 +1283,7 @@ libpulse-binding = { version = "2", optional = true, default-features = false }
 libpulse-simple-binding = { version = "2", optional = true, default-features = false }
 # PipeWire src/sink (pipewire): the high-level pipewire-rs crate (re-exports spa
 # as pipewire::spa). Links libpipewire-0.3 + libspa via bindgen (needs clang).
-pipewire = { version = "0.10", optional = true }
+pipewire = { version = "0.10", optional = true, features = ["v0_3_49"] }
 # D-Bus client for the xdg-desktop-portal handshake (portal). The default
 # features are what we want: `async-io` supplies zbus's own executor (no tokio
 # runtime needed on the capture worker thread) and `blocking-api` the sync

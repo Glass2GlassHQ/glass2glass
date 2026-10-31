@@ -762,6 +762,7 @@ mod audiocapture;
 // AES-128-CTR over byte ranges, shared by Common Encryption and WebM Encryption.
 #[cfg(any(feature = "hls", feature = "mp4-cenc", feature = "matroska-decrypt"))]
 mod aes_ctr;
+mod decodetimestamper;
 // Matroska / WebM demuxer parsing core (no_std): EBML -> Tracks + Cluster frames.
 pub mod matroska;
 // Matroska / WebM demuxer element (no_std): Caps::ByteStream{Matroska} -> one

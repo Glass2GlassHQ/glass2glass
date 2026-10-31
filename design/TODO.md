@@ -26,8 +26,16 @@ Highest leverage first:
    device on wasm); it would need raw `web_sys` WebGPU + hand-rolled
    onnxruntime-web bindings.
 
+## Distribution
+
+- Prebuilt `g2g-launch` binaries for Linux, macOS and Windows on each release.
+- Publish the Python wheel to PyPI.
+- A prebuilt Android AAR for the Kotlin bindings.
+
 ## Architecture guarantees (validation-first)
 
+- **Teardown leak test.** Build, run and drop a pipeline many times and check
+  that open file descriptors and memory return to their starting level.
 - **CI never runs m960 or m961 with `ffmpeg`.** The conformance job runs them with `rav1d` alone and linux-full enables neither rav1d nor dav1d, so a regression that only shows with both decoders built stays invisible. Add an `ffmpeg,rav1d` run of both files to a job that has the libav packages.
 - **Grow the conformance matrix.** Persist evidence from the resource-owning
   tests still uncovered as they are validated (`ffmpegvaapidec` on Intel and AMD, the Android and
@@ -176,6 +184,10 @@ Highest leverage first:
 - **RIST bonding test flake:** `ristsender_broadcast_bonding_feeds_ristsrc`
   failed once in 50 runs on hercules, after 2.4 s. Capture its failure output
   and fix the cause.
+- Pass video and audio between processes on Windows. `shmsink`, `unixfdsink`
+  and the DMABUF / CUDA IPC elements are Linux only.
+- Serve HLS playlists and segments, and progressive output, over HTTP from the
+  pipeline.
 
 ## Adaptive streaming (HLS / DASH)
 
@@ -219,13 +231,9 @@ Highest leverage first:
 - Run `decklinkvideosink` and `decklinkaudiosink` on a board: scheduled
   playback, the board clock and audio against video have only run against a
   mock device.
-- `pipewiresink_disciplines_its_clock_from_the_stream` fails about half the
-  time on hercules with a playout-rate estimate near 0.78. Find whether the
-  sink or the test's half-second window is wrong.
-- Let a sink end the run cleanly. Closing a display sink's window fails the run
-  with `WindowClosed`. Add a reverse signal the sink sends upstream, relayed
-  through transforms like a QoS report, that makes the source emit `Eos`, so the
-  run drains and returns its stats.
+- A video `pipewiresink` that publishes a Video/Source node, so OBS and
+  browsers see the pipeline as a camera.
+- Examples that embed `WgpuSink::with_surface` in Qt/QML, GTK4 and egui windows.
 
 ## Containers
 
@@ -242,9 +250,6 @@ Highest leverage first:
 - **WebVTT track writing** (mkv, mp4 `wvtt`): blocked on a reference peer.
   ffmpeg reads only the WebM `D_WEBVTT/*` carriage (different block payload)
   and cannot write WebVTT into MP4 at all; reading both stays supported.
-- **Named demuxer before explicit elements:** `filesrc ! matroskademux ! h264parse ! …`
-  negotiates against the demuxer's default `stream=vp9`, so an H.264 file needs
-  `stream=h264`. The demuxer has to read the file's tracks during negotiation.
 - **MP4 with samples in both the `moov` and fragments** (ffmpeg's `frag_keyframe`
   without `empty_moov`): decode the sample-table run, then the fragments.
   `Mp4DemuxN` fails such a file with `CapsMismatch`.
@@ -253,7 +258,6 @@ Highest leverage first:
   MP3).
 - **Corpus sweep bugs** (calliope TESTING techniques 21-23, paths under
   `~/.cache/calliope` on hercules):
-  - `mpegtsmux` writes a DTS of exactly 0 as unset, so the PES carries no DTS.
   - Demuxers drop streams gst's parsebin exposes: DTS in `filter/242_4.mkv`, TTA,
     pcm_dvd LPCM in `coolitnow-partial.vob`, and the xan_dpcm audio of
     `wc4-xan` AVIs.
@@ -264,28 +268,21 @@ Highest leverage first:
     `twofields_packet.mp4` into mkv and ts, `test7_cut.mkv` into mp4, and
     `webm/opus_vp9-alpha.webm` Opus comes back 8 stereo samples longer through
     mp4mux and matroskamux.
-  - `matroskademux` sets each frame's dts to its pts, so reordered H.264 from
-    Matroska reaches mp4mux, flvmux and tsmux with no real DTS and `mp4mux` writes
-    no `ctts`. ffmpeg derives the DTS (gst's mp4mux writes the same timing as g2g).
-  - `tsdemux` (H.264), `matroskademux` (VP9), `flvdemux` (H.264) and `psdemux`
-    (MPEG-2) default to one codec and refuse a file without it, where gst exposes
-    the file's first stream. `oggdemux` behind a consumer that takes any caps
-    fixates Opus, so a video-only Ogg there fails.
-  - The FLV `rtmpsrc` writes (`flv_prev_tag_size` in `rtmp.rs`) ends without the
-    last tag's size, so gst's `flvdemux` drops the last frame.
-  - `flvmux` writes no `onMetaData` duration, where gst's does (ffprobe reports
-    the duration as N/A).
   - `mpegts/pmtchange.ts` audio 0 to 2 decode to other lengths and samples than
     ffmpeg's.
   - `flvdemux` and `avidemux` H.264/H.265 output declares no `alignment`, where gst's
     flvdemux declares `au`.
   - An MP4 audio track whose edit list replays media plays its samples once:
     replayed edits need sample-accurate clipping, as the video path lays them out.
-  - An explicit `wavparse ! ac3parse ! …` line picks `stream=mp3` unless it sets
-    `stream=ac3`: only decodebin pins the stream from the `fmt ` chunk.
+- SCTE-35 splice information: read it in `tsdemux` and write it in `mpegtsmux`.
 
 ## Codecs
 
+- **V4L2 mem2mem decode and encode**, stateful and stateless, the hardware
+  codec path on Raspberry Pi and most ARM SoCs (gst `v4l2h264dec`,
+  `v4l2h264enc`, `v4l2slh264dec`).
+- **VAAPI encode** for H.264, H.265 and AV1 (gst `vah264enc`, `vah265enc`,
+  `vaav1enc`). Decode already goes through VAAPI.
 - **Pure-Rust / wasm decode** to drop the ffmpeg FFI: VP8 / VP9 decode and a
   pure-Rust Opus path (see the roadmap for why both are blocked).
 
@@ -307,6 +304,8 @@ Highest leverage first:
 
 ## Metadata (FrameMeta / AnalyticsMeta)
 
+- Insert application-supplied SEI user data (registered and unregistered) into
+  H.264 and H.265 streams.
 - `NvEnc` AV1 encode (needs RTX 40-series hardware).
 
 ## Clock-synchronised presentation

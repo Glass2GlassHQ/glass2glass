@@ -189,12 +189,14 @@ const FLV_DATA_OFFSET_AT: usize = 5;
 /// filter flag and reserved bits.
 const TAG_TYPE_MASK: u8 = 0x1F;
 
-/// Append the FLV file header with these presence `flags`.
+/// Append the FLV file header with these presence `flags`, then
+/// `PreviousTagSize0`, the size of the tag before the first one.
 pub(crate) fn put_file_header(out: &mut Vec<u8>, flags: u8) {
     out.extend_from_slice(FLV_SIGNATURE);
     out.push(FLV_VERSION);
     out.push(flags);
     out.extend_from_slice(&(FLV_HEADER_MIN as u32).to_be_bytes());
+    out.extend_from_slice(&0u32.to_be_bytes());
 }
 
 /// The length of the FLV file header that opens `buf`, `None` until it is
@@ -234,6 +236,7 @@ pub(crate) fn tag_at(buf: &[u8], at: usize) -> Option<(FlvTagHeader, core::ops::
 
 // AMF0 markers the `onMetaData` writer emits (the inverse of the reader subset in
 // `flvdemux::amf0`).
+const AMF0_NUMBER: u8 = 0x00;
 const AMF0_STRING: u8 = 0x02;
 const AMF0_ECMA_ARRAY: u8 = 0x08;
 const AMF0_OBJECT_END: u8 = 0x09;
@@ -442,6 +445,8 @@ pub struct FlvMuxer {
     /// First byte of every audio tag: sound format + rate / size / channel flags.
     audio_flags: u8,
     header_written: bool,
+    // where the `onMetaData` duration's 8 bytes start in the output, known once the header is written
+    duration_at: Option<u64>,
 }
 
 impl FlvMuxer {
@@ -472,6 +477,7 @@ impl FlvMuxer {
             audio_config,
             audio_flags: audio.map_or(0, |codec| audio_tag_flags(codec, 2, 44_100)),
             header_written: false,
+            duration_at: None,
         }
     }
 
@@ -515,15 +521,10 @@ impl FlvMuxer {
     }
 
     /// The FLV video-tag timing of a pipeline frame: `(dts_ms, cts_ms)`. FLV tag
-    /// timestamps are decode time; a producer that leaves `dts_ns` unset (0 with
-    /// a nonzero pts) gets the legacy `dts = pts` behavior, so only a real
-    /// reordering producer yields a nonzero composition offset.
+    /// timestamps are decode time, and a frame with no DTS decodes when it
+    /// presents, so only a reordering producer yields a nonzero composition offset.
     pub fn video_tag_timing(timing: &g2g_core::FrameTiming) -> (u32, i32) {
-        let dts_ns = if timing.dts_ns == 0 && timing.pts_ns != 0 {
-            timing.pts_ns
-        } else {
-            timing.dts_ns
-        };
+        let dts_ns = timing.dts().unwrap_or(timing.pts_ns);
         let dts_ms = (dts_ns / 1_000_000) as u32;
         let cts_ms = ((timing.pts_ns as i64 - dts_ns as i64) / 1_000_000) as i32;
         (dts_ms, cts_ms)
@@ -571,9 +572,15 @@ impl FlvMuxer {
         out
     }
 
+    // the bytes and offset that write the stream's real duration over the 0 the header carries
+    pub fn duration_overwrite(&self, duration_ns: u64) -> Option<(u64, [u8; 8])> {
+        let seconds = duration_ns as f64 / 1e9;
+        Some((self.duration_at?, seconds.to_be_bytes()))
+    }
+
     /// Write the FLV file header and the leading tags (an `onMetaData` script tag
-    /// when tags are set, then each present track's sequence header) on the first
-    /// call; a no-op afterwards.
+    /// carrying the duration and any tags, then each present track's sequence
+    /// header) on the first call; a no-op afterwards.
     fn write_header(&mut self, out: &mut Vec<u8>) {
         if self.header_written {
             return;
@@ -586,14 +593,11 @@ impl FlvMuxer {
             flags |= FLV_FLAG_AUDIO;
         }
         put_file_header(out, flags);
-        // PreviousTagSize0, the size of the tag before the first one
-        out.extend_from_slice(&0u32.to_be_bytes());
         self.header_written = true;
 
-        if !self.tags.is_empty() {
-            let script = on_metadata_body(&self.tags);
-            emit_tag(out, TAG_SCRIPT, 0, &[&script]);
-        }
+        let (script, duration_in_script) = on_metadata_body(&self.tags);
+        self.duration_at = Some((out.len() + TAG_HEADER_LEN + duration_in_script) as u64);
+        emit_tag(out, TAG_SCRIPT, 0, &[&script]);
         // Sequence headers (AVC packet type 0 / AAC packet type 0) carry the
         // decoder config a player needs before the media frames. Only H.264 and
         // AAC have one: VP6's dimension byte leads each media unit instead.
@@ -617,7 +621,7 @@ impl FlvMuxer {
 }
 
 // one tag whose body is `parts` in order, followed by its PreviousTagSize
-fn emit_tag(out: &mut Vec<u8>, tag_type: u8, pts_ms: u32, parts: &[&[u8]]) {
+pub(crate) fn emit_tag(out: &mut Vec<u8>, tag_type: u8, pts_ms: u32, parts: &[&[u8]]) {
     let body_len: usize = parts.iter().map(|part| part.len()).sum();
     out.reserve(TAG_HEADER_LEN + body_len + PREV_TAG_SIZE_LEN);
     put_tag_header(out, tag_type, pts_ms, body_len);
@@ -637,18 +641,26 @@ pub(crate) fn put_tag_header(out: &mut Vec<u8>, tag_type: u8, timestamp_ms: u32,
     write_u24(out, 0); // stream id
 }
 
+const DURATION_KEY: &str = "duration";
+
 /// Serialize a [`TagList`] as an `onMetaData` script body (AMF0): the event-name
-/// string then an ECMA array of `key`/string-value properties. The typed keys
-/// write their conventional FLV names so they decode back to the same [`Tag`]
-/// variant; anything else uses `Tag::key` / `Tag::value_string`, which keeps
-/// [`Tag::Other`]'s stored key and flattens the integer / freeform variants FLV
-/// has no form for.
-fn on_metadata_body(tags: &TagList) -> Vec<u8> {
+/// string then an ECMA array of a `duration` number, 0 until the muxer writes
+/// the real one over it at the returned offset, and `key`/string-value
+/// properties. The typed keys write their conventional FLV names so they decode
+/// back to the same [`Tag`] variant; anything else uses `Tag::key` /
+/// `Tag::value_string`, which keeps [`Tag::Other`]'s stored key and flattens the
+/// integer / freeform variants FLV has no form for.
+fn on_metadata_body(tags: &TagList) -> (Vec<u8>, usize) {
     let mut b = Vec::new();
     write_amf0_string(&mut b, "onMetaData");
     b.push(AMF0_ECMA_ARRAY);
     let text_tags: Vec<&Tag> = tags.text_tags().collect();
-    b.extend_from_slice(&(text_tags.len() as u32).to_be_bytes());
+    b.extend_from_slice(&(text_tags.len() as u32 + 1).to_be_bytes());
+    b.extend_from_slice(&(DURATION_KEY.len() as u16).to_be_bytes());
+    b.extend_from_slice(DURATION_KEY.as_bytes());
+    b.push(AMF0_NUMBER);
+    let duration_at = b.len();
+    b.extend_from_slice(&0f64.to_be_bytes());
     for t in text_tags {
         let (key, value) = (t.key(), t.value_string());
         // an object/array key is a raw (unmarked) length-prefixed string.
@@ -658,7 +670,7 @@ fn on_metadata_body(tags: &TagList) -> Vec<u8> {
     }
     b.extend_from_slice(&0u16.to_be_bytes()); // empty key precedes the end marker
     b.push(AMF0_OBJECT_END);
-    b
+    (b, duration_at)
 }
 
 /// Write a marker-prefixed AMF0 string value.
@@ -969,14 +981,27 @@ mod tests {
     }
 
     #[test]
-    fn mux_without_tags_writes_no_script_tag() {
+    fn mux_writes_a_zero_duration_where_the_overwrite_points() {
         let mut mux = FlvMuxer::new(FlvCodec::H264);
         let bytes = mux.push_au(&[0x65, 0xAA], 0);
+        let (offset, duration) = mux
+            .duration_overwrite(2_500_000_000)
+            .expect("the header is written");
+        let at = offset as usize;
+        let key_end = at - 1;
+        assert_eq!(
+            &bytes[key_end - DURATION_KEY.len()..key_end],
+            DURATION_KEY.as_bytes()
+        );
+        assert_eq!(bytes[key_end], AMF0_NUMBER);
+        assert_eq!(bytes[at..at + 8], 0f64.to_be_bytes());
+        assert_eq!(duration, 2.5f64.to_be_bytes());
+
         let mut d = FlvDemuxer::new();
         d.push_data(&bytes);
         assert!(
-            d.metadata().is_none(),
-            "no script tag without attached tags"
+            d.metadata().is_some(),
+            "the script tag carries the duration"
         );
         assert_eq!(d.take_units().len(), 1);
     }
@@ -1104,7 +1129,7 @@ mod tests {
             at = body.end;
             tags += 1;
         }
-        assert_eq!(tags, 3, "the sequence header and both frames");
+        assert_eq!(tags, 4, "onMetaData, the sequence header and both frames");
         assert_eq!(stream[at..], previous_tag_size.to_be_bytes());
     }
 

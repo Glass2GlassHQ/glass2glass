@@ -269,11 +269,8 @@ pub(crate) fn shift_packet(
                 .pts_ns
                 .saturating_add(offset)
                 .saturating_sub(origin);
-            f.timing.dts_ns = f
-                .timing
-                .dts_ns
-                .saturating_add(offset)
-                .saturating_sub(origin);
+            f.timing
+                .map_dts(|dts_ns| dts_ns.saturating_add(offset).saturating_sub(origin));
             let end = f.timing.pts_ns.saturating_add(f.timing.duration_ns);
             *packet = Some(PipelinePacket::DataFrame(f));
             Shifted::Frame(end)

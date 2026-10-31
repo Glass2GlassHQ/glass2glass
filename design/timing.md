@@ -107,7 +107,9 @@ realtime process callback probes `pw_stream_get_time_n` via `pipewire-sys`, the
 through the stream rate, as `master_ns`. The tick counter is the graph driver's
 sample position, advancing at the device's real rate and independent of the sink's
 leaky byte queue, so producer-side drops never skew the fit and the constant
-graph-to-speaker delay lands in the affine offset.
+graph-to-speaker delay lands in the affine offset. Each callback fills only the
+frames the buffer's `requested` field asks for, one graph cycle, so the clock gets
+one observation per cycle and the sink adds no more than a cycle of latency.
 
 ## PTP
 

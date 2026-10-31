@@ -543,6 +543,18 @@ record's parameter sets prepended on keyframes, ffmpeg's `h264_mp4toannexb`
 discipline. The whole-block length walk is validated exactly, so a nonstandard
 Annex-B block passes through unchanged instead of being mis-framed.
 
+Matroska blocks carry presentation times only, so for an H.264 or H.265 track
+with a `DefaultDuration` the parser derives each frame's decode time the way
+gst's `h264timestamper` does. It holds frames to the track's reorder depth, the
+SPS's declared `max_num_reorder_frames` or `sps_max_num_reorder_pics`, else the
+H.264 level's DPB bound, and stamps each frame it releases with the smallest
+presentation time still pending. Every track's timestamps move later by that
+depth times `DefaultDuration`, so the first decode time is not below zero.
+Stream time and seek targets count from the stream start, so neither moves, and
+the Cues lookup subtracts the shift. `finish` releases the held frames at the
+end of the stream. A remux into `mp4mux`, `flvmux` or `mpegtsmux` then writes
+real decode times, where gst's `matroskademux` leaves them unset.
+
 ### Subtitle tracks
 
 A `S_TEXT/UTF8` subtitle track maps to `MkvCodec::Subtitle(Utf8)` and fans out
@@ -1019,7 +1031,8 @@ The decode timestamp is the frame's own. `Mp4DemuxN` reads the source's `ctts`
 and carries `dts_ns` beside `pts_ns`, so a reordered B-frame stream's
 composition offsets survive a remux. A frame with no decode timestamp of its
 own, or one past its PTS, which `ctts` version 0 cannot express, decodes when it
-presents.
+presents. A sample with no duration of its own lasts from the previous sample's
+decode time, since a reordered stream's PTS deltas skip around.
 
 Compressed audio negotiates with the `0/0` "unknown until parsed" caps, so
 `Mp4MuxN` adopts the concrete channel count and rate from the runtime
@@ -1083,7 +1096,11 @@ the IDR NAL and audio de-ADTS'd. The header flags name only the tracks the pads
 carry, so a single-track `flvmux` output is a playable FLV, which is what
 `RtmpSink` publishes. `PreviousTagSize0` follows the header and each tag is
 followed by its own size, so the file ends with the last tag's size: gst's
-`flvdemux` drops a last tag with no size after it.
+`flvdemux` drops a last tag with no size after it. The `onMetaData` tag always
+carries a `duration`, written as 0 and overwritten once every input has ended
+with a `PipelinePacket::Overwrite` that `filesink` applies by seeking back, as
+gst's `flvmux` does. The duration runs from the first frame's PTS to the latest
+frame end, so a source that leaves frame durations at 0 comes out one frame short.
 
 With MP4 through `Mp4Src` and `Mp4Sink`, MPEG-TS, Matroska/WebM, Ogg and FLV,
 the demux and mux coverage spans the major containers.

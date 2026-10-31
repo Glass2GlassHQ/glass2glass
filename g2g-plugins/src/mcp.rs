@@ -1943,7 +1943,7 @@ fn packet_json(packet: &PipelinePacket, caps: &g2g_core::Caps) -> Value {
             "kind": "frame",
             "sequence": frame.sequence,
             "pts_ns": frame.timing.pts(),
-            "dts_ns": frame.timing.dts_ns,
+            "dts_ns": frame.timing.dts(),
             "duration_ns": frame.timing.duration_ns,
             "capture_ns": frame.timing.capture_ns,
             "arrival_ns": frame.timing.arrival_ns,

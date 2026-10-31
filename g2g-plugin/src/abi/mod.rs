@@ -477,7 +477,7 @@ impl FfiFrame {
         free: None,
         free_user: core::ptr::null_mut(),
         pts_ns: 0,
-        dts_ns: 0,
+        dts_ns: g2g_core::FrameTiming::DTS_NONE,
         duration_ns: 0,
         capture_ns: 0,
         arrival_ns: 0,

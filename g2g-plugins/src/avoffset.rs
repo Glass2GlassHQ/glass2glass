@@ -98,7 +98,7 @@ impl AsyncElement for AvOffset {
                     // pass-through), so timestamps are only rewritten when set.
                     if self.offset_ns != 0 {
                         f.timing.pts_ns = self.shift(f.timing.pts_ns);
-                        f.timing.dts_ns = self.shift(f.timing.dts_ns);
+                        f.timing.map_dts(|dts_ns| self.shift(dts_ns));
                     }
                     out.push(PipelinePacket::DataFrame(f)).await?;
                 }

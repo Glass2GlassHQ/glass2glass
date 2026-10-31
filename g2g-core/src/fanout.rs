@@ -1081,9 +1081,10 @@ impl AsyncElement for Gate {
         let forward = match &packet {
             PipelinePacket::DataFrame(_) => self.open.load(Ordering::SeqCst),
             // Caps, Flush and Segment are control: forward regardless of open state.
-            PipelinePacket::CapsChanged(_) | PipelinePacket::Flush | PipelinePacket::Segment(_) => {
-                true
-            }
+            PipelinePacket::CapsChanged(_)
+            | PipelinePacket::Flush
+            | PipelinePacket::Segment(_)
+            | PipelinePacket::Overwrite { .. } => true,
             // Runner forwards Eos after process() returns. A fan-in arm's
             // deadline tick never reaches a 1->1 element.
             PipelinePacket::Eos | PipelinePacket::Tick => false,
@@ -1238,9 +1239,10 @@ impl MultiOutputElement for Router {
         let ports = match &packet {
             PipelinePacket::DataFrame(_) => selected..selected + 1,
             // CapsChanged, Flush and Segment are broadcast to every branch.
-            PipelinePacket::CapsChanged(_) | PipelinePacket::Flush | PipelinePacket::Segment(_) => {
-                0..self.ports
-            }
+            PipelinePacket::CapsChanged(_)
+            | PipelinePacket::Flush
+            | PipelinePacket::Segment(_)
+            | PipelinePacket::Overwrite { .. } => 0..self.ports,
             // Runner broadcasts Eos to all ports after process() returns. A
             // fan-in arm's deadline tick never reaches a 1->N element.
             PipelinePacket::Eos | PipelinePacket::Tick => 0..0,
@@ -1379,7 +1381,8 @@ mod tests {
                 PipelinePacket::Eos
                 | PipelinePacket::Flush
                 | PipelinePacket::Segment(_)
-                | PipelinePacket::Tick => {}
+                | PipelinePacket::Tick
+                | PipelinePacket::Overwrite { .. } => {}
             }
             core::task::Poll::Ready(Ok(PushOutcome::Accepted))
         }
@@ -1408,7 +1411,8 @@ mod tests {
                 PipelinePacket::Eos
                 | PipelinePacket::Flush
                 | PipelinePacket::Segment(_)
-                | PipelinePacket::Tick => {}
+                | PipelinePacket::Tick
+                | PipelinePacket::Overwrite { .. } => {}
             }
             core::task::Poll::Ready(Ok(PushOutcome::Accepted))
         }

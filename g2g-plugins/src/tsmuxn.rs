@@ -763,13 +763,8 @@ impl TsMux {
     }
 }
 
-// 0 is the unset DTS sentinel
 fn decode_time_ns(frame: &Frame) -> u64 {
-    if frame.timing.dts_ns != 0 {
-        frame.timing.dts_ns
-    } else {
-        frame.timing.pts_ns
-    }
+    frame.timing.dts().unwrap_or(frame.timing.pts_ns)
 }
 
 /// Parse a `prog-map` value: comma-separated program numbers, one per input in
@@ -1066,11 +1061,12 @@ impl MultiInputElement for TsMux {
                     None => Cow::Borrowed(slice),
                 };
                 let pts_90khz = ns_to_ticks(frame.timing.pts_ns, PES_CLOCK_HZ);
-                // A DTS rides the PES only for reordered video (dts_ns set and
-                // distinct from the PTS); 0 is the unset sentinel, equal adds nothing.
-                let dts_90khz = (frame.timing.dts_ns != 0
-                    && frame.timing.dts_ns != frame.timing.pts_ns)
-                    .then(|| ns_to_ticks(frame.timing.dts_ns, PES_CLOCK_HZ));
+                // a DTS equal to the PTS adds nothing to the PES
+                let dts_90khz = frame
+                    .timing
+                    .dts()
+                    .filter(|&dts_ns| dts_ns != frame.timing.pts_ns)
+                    .map(|dts_ns| ns_to_ticks(dts_ns, PES_CLOCK_HZ));
                 let ts = self.mux.as_mut().expect("built above").push_au_on(
                     stream,
                     &access_unit,
@@ -1279,8 +1275,7 @@ mod tests {
                 )),
                 FrameTiming {
                     pts_ns: i * FRAME_NS + REORDER_LAG_NS,
-                    // +1 keeps frame 0's DTS off the unset sentinel
-                    dts_ns: i * FRAME_NS + 1,
+                    dts_ns: i * FRAME_NS,
                     keyframe: key,
                     ..FrameTiming::default()
                 },
@@ -1335,6 +1330,54 @@ mod tests {
             checked += 1;
         }
         assert_eq!(checked, 60, "every AU checked");
+    }
+
+    #[tokio::test]
+    async fn a_first_decode_time_of_zero_rides_the_pes() {
+        const REORDER_LAG_NS: u64 = 80_000_000;
+        const PAYLOAD_UNIT_START: u8 = 0x40;
+        const ADAPTATION_FIELD_PRESENT: u8 = 0x20;
+        const FIRST_PMT_PID: u16 = 0x1000;
+        let mut mux = TsMux::new(1);
+        mux.configure_pipeline(0, &h264_caps()).unwrap();
+        let mut sink = CaptureSink::default();
+        let idr = PipelinePacket::DataFrame(Frame::new(
+            MemoryDomain::System(SystemSlice::from_boxed(
+                alloc::vec![0u8, 0, 0, 1, 0x65, 0xAA].into_boxed_slice(),
+            )),
+            FrameTiming {
+                pts_ns: REORDER_LAG_NS,
+                dts_ns: 0,
+                keyframe: true,
+                ..FrameTiming::default()
+            },
+            0,
+        ));
+        mux.process(0, idr, &mut sink).await.unwrap();
+        mux.process(0, PipelinePacket::Eos, &mut sink)
+            .await
+            .unwrap();
+
+        let video_pes = sink
+            .bytes
+            .chunks(crate::mpegts::TS_PACKET_LEN)
+            .find(|p| {
+                let pid = ((p[1] & 0x1F) as u16) << 8 | p[2] as u16;
+                p[1] & PAYLOAD_UNIT_START != 0 && pid != 0 && pid < FIRST_PMT_PID
+            })
+            .expect("the access unit's PES");
+        let offset = if video_pes[3] & ADAPTATION_FIELD_PRESENT != 0 {
+            5 + video_pes[4] as usize
+        } else {
+            4
+        };
+        let (pts, dts, _) = crate::mpegts::parse_pes_header(&video_pes[offset..]);
+        let lag_ticks = ns_to_ticks(REORDER_LAG_NS, PES_CLOCK_HZ);
+        assert_eq!(
+            pts.zip(dts).map(|(pts, dts)| pts - dts),
+            Some(lag_ticks),
+            "the PES carries the DTS of 0 behind its PTS"
+        );
     }
 
     #[tokio::test]

@@ -420,7 +420,7 @@ impl AsyncElement for RemoveSilence {
                     let mut timing = frame.timing;
                     if self.squash {
                         timing.pts_ns = timing.pts_ns.saturating_sub(self.timestamp_offset_ns);
-                        timing.dts_ns = timing.dts_ns.saturating_sub(self.timestamp_offset_ns);
+                        timing.map_dts(|dts_ns| dts_ns.saturating_sub(self.timestamp_offset_ns));
                     }
                     let out_frame = Frame {
                         domain: frame.domain,

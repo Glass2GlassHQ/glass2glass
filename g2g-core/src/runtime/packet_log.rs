@@ -56,6 +56,11 @@ impl fmt::Display for PacketFields<'_> {
                 ClockTime(segment.base),
                 SignedClockTime(segment.time),
             ),
+            PipelinePacket::Overwrite { offset, frame } => write!(
+                f,
+                "event overwrite: offset {offset}, size {}",
+                frame_bytes(frame)
+            ),
             PipelinePacket::Eos => f.write_str("event eos"),
             PipelinePacket::Flush => f.write_str("event flush"),
             PipelinePacket::Tick => f.write_str("event tick"),

@@ -15,7 +15,7 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use std::fs::File;
-use std::io::{BufWriter, Write};
+use std::io::{BufWriter, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 
 use g2g_core::{
@@ -133,6 +133,23 @@ impl AsyncElement for FileSink {
                 PipelinePacket::CapsChanged(_) => {}
                 // Segment is control: ignored at sink.
                 PipelinePacket::Segment(_) => {}
+                PipelinePacket::Overwrite { offset, frame } => {
+                    let bytes = frame
+                        .domain
+                        .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
+                    // an overwrite past the written end would grow the file instead
+                    let within_file = offset
+                        .checked_add(bytes.len() as u64)
+                        .is_some_and(|end| end <= self.bytes_written);
+                    if !within_file {
+                        return Err(io_err(std::io::ErrorKind::InvalidInput.into()));
+                    }
+                    writer.seek(SeekFrom::Start(offset)).map_err(io_err)?;
+                    writer.write_all(bytes).map_err(io_err)?;
+                    writer
+                        .seek(SeekFrom::Start(self.bytes_written))
+                        .map_err(io_err)?;
+                }
                 // future PipelinePacket variants: no-op (terminal sink).
                 _ => {}
             }
@@ -229,6 +246,38 @@ mod tests {
         sink.process(frame(b"second"), &mut out).await.unwrap();
         sink.process(PipelinePacket::Eos, &mut out).await.unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), b"firstsecond");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    fn overwrite(offset: u64, bytes: &[u8]) -> PipelinePacket {
+        PipelinePacket::Overwrite {
+            offset,
+            frame: Frame::new(
+                MemoryDomain::System(SystemSlice::from_boxed(bytes.to_vec().into_boxed_slice())),
+                FrameTiming::default(),
+                0,
+            ),
+        }
+    }
+
+    #[tokio::test]
+    async fn an_overwrite_patches_written_bytes_and_later_writes_append() {
+        let path = std::env::temp_dir().join("g2g_filesink_overwrite.bin");
+        let mut sink = FileSink::new(&path);
+        let caps = Caps::ByteStream {
+            encoding: ByteStreamEncoding::Flv,
+        };
+        sink.configure_pipeline(&caps).unwrap();
+        let mut out = NullSink;
+        sink.process(frame(b"header0000body"), &mut out)
+            .await
+            .unwrap();
+        sink.process(overwrite(6, b"1234"), &mut out).await.unwrap();
+        sink.process(frame(b"tail"), &mut out).await.unwrap();
+        let past_the_end = sink.process(overwrite(16, b"xxxx"), &mut out).await;
+        sink.process(PipelinePacket::Eos, &mut out).await.unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"header1234bodytail");
+        assert!(past_the_end.is_err(), "an overwrite cannot grow the file");
         let _ = std::fs::remove_file(&path);
     }
 }

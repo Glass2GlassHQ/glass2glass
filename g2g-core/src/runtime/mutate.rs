@@ -49,6 +49,7 @@ use crate::runtime::join::{select2, Either};
 use crate::runtime::mutation_error::{MutationError, MutationKind};
 use crate::runtime::progress::PipelineProgress;
 use crate::runtime::property_mailbox::{PropertyMailbox, PropertyRequest};
+use crate::runtime::run_end::RunEndRequest;
 use crate::runtime::runner::re_solve_downstream_dyn_sink;
 use crate::runtime::solver::{resolve_forward_output, ForwardResolve};
 use crate::segment::Segment;
@@ -914,6 +915,7 @@ pub(crate) struct MutationService<'a, 'f, 's> {
     visit_recorder: Option<Arc<dyn VisitRecorder>>,
     /// Per element category, the lowest `<category>N` suffix not known to be taken.
     name_floors: BTreeMap<String, usize>,
+    run_end: RunEndRequest,
 }
 
 impl<'a, 'f, 's> MutationService<'a, 'f, 's> {
@@ -931,6 +933,7 @@ impl<'a, 'f, 's> MutationService<'a, 'f, 's> {
         link_capacity: usize,
         ticker: Option<&'s dyn DynAsyncClock>,
         visit_recorder: Option<Arc<dyn VisitRecorder>>,
+        run_end: RunEndRequest,
     ) -> Self {
         Self {
             rx,
@@ -947,6 +950,7 @@ impl<'a, 'f, 's> MutationService<'a, 'f, 's> {
             ticker,
             visit_recorder,
             name_floors: BTreeMap::new(),
+            run_end,
         }
     }
 
@@ -1788,6 +1792,7 @@ impl<'a, 'f, 's> MutationService<'a, 'f, 's> {
             control: None,
             properties: Some(properties.clone()),
             stream_end: None,
+            run_end: self.run_end.clone(),
         };
         let arm = (self.spawn.sink)(element, io, done_tx);
         if self.arms.send(arm).await.is_err() {
@@ -1978,6 +1983,7 @@ impl<'a, 'f, 's> MutationService<'a, 'f, 's> {
             segment: opening,
             probe: traced_source_probe(&log_name, self.visit_recorder.as_ref()),
             log_name,
+            run_end: self.run_end.clone(),
         };
         let arm = (self.spawn.source)(source, io, done_tx);
         if self.arms.send(arm).await.is_err() {
@@ -2326,6 +2332,7 @@ impl<'a, 'f, 's> MutationService<'a, 'f, 's> {
             segment: Segment::new(),
             probe: traced_source_probe(&log_name, self.visit_recorder.as_ref()),
             log_name,
+            run_end: self.run_end.clone(),
         };
         let arm = (self.spawn.source)(source, io, done_tx);
         if self.arms.send(arm).await.is_err() {

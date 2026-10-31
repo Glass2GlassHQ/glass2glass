@@ -18,6 +18,9 @@ use ffprobe_tool::have_ffprobe;
 #[path = "common/collect_sink.rs"]
 mod collect_sink;
 use collect_sink::CollectSink;
+#[path = "common/mkv_video_start.rs"]
+mod mkv_video_start;
+use mkv_video_start::first_h264_pts_ns;
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -244,7 +247,10 @@ async fn ffmpeg_muxed_vobsub_cues_demux_and_decode_to_the_authored_rectangles() 
     author_vobsub(&idx, &sub);
     mux_mkv(&idx, &mkv);
 
-    let canvases = demux_and_decode(&std::fs::read(&mkv).expect("read mkv")).await;
+    let mkv_bytes = std::fs::read(&mkv).expect("read mkv");
+    let canvases = demux_and_decode(&mkv_bytes).await;
+    // the demuxer moves every track by the B-frame video's reorder shift
+    let shift_ns = first_h264_pts_ns(&mkv_bytes).await;
     // the opening empty canvas, then a shown / cleared pair per cue
     assert_eq!(canvases.len(), 1 + 2 * cues().len(), "canvas count");
     assert!(
@@ -255,7 +261,7 @@ async fn ffmpeg_muxed_vobsub_cues_demux_and_decode_to_the_authored_rectangles() 
     for (i, cue) in cues().iter().enumerate() {
         let shown = &canvases[1 + i * 2];
         let cleared = &canvases[2 + i * 2];
-        let pts = (cue.pts_s * 1_000_000_000.0) as u64;
+        let pts = (cue.pts_s * 1_000_000_000.0) as u64 + shift_ns;
         assert_eq!(shown.pts_ns, pts, "cue {i} shows at its block PTS");
         assert_eq!(
             shown.duration_ns, CUE_DURATION_NS,

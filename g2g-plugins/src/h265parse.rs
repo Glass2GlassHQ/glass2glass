@@ -397,6 +397,7 @@ fn parse_sps(rbsp: &[u8]) -> Option<SpsGeometry> {
         // normative SPS field the output process is specified against (C.5.2.2).
         presents_in_decode_order: max_num_reorder_pics == Some(0),
         poc,
+        declared_reorder_frames: max_num_reorder_pics.and_then(|pics| u8::try_from(pics).ok()),
     })
 }
 

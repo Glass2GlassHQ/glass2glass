@@ -69,6 +69,8 @@ pub struct SpsGeometry {
     /// put a reordering stream's access units back in display order. `None` when
     /// the parse could not read them (the geometry is still valid).
     pub poc: Option<crate::poc::SpsPocParams>,
+    // H.264's VUI `max_num_reorder_frames` or H.265's `sps_max_num_reorder_pics`, `None` when the SPS omits it
+    pub declared_reorder_frames: Option<u8>,
 }
 
 /// Codec-specific hooks for [`NalParse`]. Implemented by zero-sized markers.

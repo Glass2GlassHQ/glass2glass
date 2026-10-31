@@ -71,10 +71,10 @@ impl Concat {
                 }
                 if self.adjust_base {
                     frame.timing.pts_ns = frame.timing.pts_ns.saturating_add(self.base_offset_ns);
-                    if frame.timing.dts_ns != 0 {
-                        frame.timing.dts_ns =
-                            frame.timing.dts_ns.saturating_add(self.base_offset_ns);
-                    }
+                    let base_offset_ns = self.base_offset_ns;
+                    frame
+                        .timing
+                        .map_dts(|dts_ns| dts_ns.saturating_add(base_offset_ns));
                 }
                 PipelinePacket::DataFrame(frame)
             }

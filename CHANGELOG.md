@@ -6,7 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
-Breaking: `QosMessage` gains `downstream_proc_ns`, `ElementProbe` is no longer `UnwindSafe`, `SpecError::UnknownProperty` / `BadValue` are replaced by `SpecError::Property(ParseError)`, `receive_rtp_h264` is renamed `receive_rtp`, `RtpRecvConfig` gains an `encoding` field, the `vaapi` feature with `vaapidec` / `vaapidech265` is removed, `MkvCodec` / `MkvStream` gain `Mp2` and `Mp3`, `srt::Handshake` gains `srt_flags`, `AesKeySize` gains `Aes192`, `srt::Role` gains `Rendezvous`, `SrtReceiver::on_data` returns the sequences to NAK, `SeekController::take_pending` is replaced by `take_seek` while `seek` returns a `SeekTicket`, `attach_seek` also returns the first seek's `SeekTicket`, and `Mpd` gains `max_segment_duration_secs`.
+Breaking: `QosMessage` gains `downstream_proc_ns`, `ElementProbe` is no longer `UnwindSafe`, `SpecError::UnknownProperty` / `BadValue` are replaced by `SpecError::Property(ParseError)`, `receive_rtp_h264` is renamed `receive_rtp`, `RtpRecvConfig` gains an `encoding` field, the `vaapi` feature with `vaapidec` / `vaapidech265` is removed, `MkvCodec` / `MkvStream` gain `Mp2` and `Mp3`, `srt::Handshake` gains `srt_flags`, `AesKeySize` gains `Aes192`, `srt::Role` gains `Rendezvous`, `SrtReceiver::on_data` returns the sequences to NAK, `SeekController::take_pending` is replaced by `take_seek` while `seek` returns a `SeekTicket`, `attach_seek` also returns the first seek's `SeekTicket`, and `Mpd` gains `max_segment_duration_secs`, `FrameTiming::default()` leaves `dts_ns` unset at `FrameTiming::DTS_NONE` rather than 0, and `MkvFrame` and `SpsGeometry` gain a field.
 
 - M1900: `VelloAnalyticsOverlay` draws on RGBA wgpu textures, `WgpuColorConvert` converts NV12 wgpu textures to RGBA, and `CudaToWgpu` keeps frame metadata.
 - M1901: `VelloAnalyticsOverlay` draws the `show-label` / `show-track` / `show-score` captions.
@@ -127,6 +127,13 @@ Breaking: `QosMessage` gains `downstream_proc_ns`, `ElementProbe` is no longer `
 - M2026: `srtsrc` corrects TSBPD for clock drift from ACKACKs and keeps its schedule across pauses longer than 35 minutes.
 - M2027: `ristsrc` follows a sender that restarts with a new SSRC.
 - M2028: `udpsrc` and `rtspserversrc` wait 20 ms before requesting a lost packet and cap the retries, as gst's `rtpjitterbuffer` does.
+- M2029: a demuxer named after a local `filesrc` forwards the file's first stream the next element takes.
+- M2030: the FLV `rtmpsrc` writes ends with the last tag's size, so gst's `flvdemux` keeps the last frame.
+- M2031: `pipewiresink` fills one graph cycle per callback, so its clock gets an observation per cycle.
+- M2032: an unset decode time is `FrameTiming::DTS_NONE`, so `mpegtsmux`, `mp4mux` and `flvmux` keep a real DTS of 0.
+- M2033: closing a display window ends the run cleanly: every source sends `Eos` and the run returns its stats.
+- M2034: `matroskademux` derives H.264 and H.265 decode times from the reorder depth, so a B-frame remux into MP4 writes `ctts`.
+- M2035: `flvmux` writes the stream duration into `onMetaData`, and `filesink` applies the new `PipelinePacket::Overwrite`.
 
 ## 0.10.0
 

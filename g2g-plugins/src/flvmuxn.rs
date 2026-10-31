@@ -100,6 +100,8 @@ pub struct FlvMuxN {
     mux: Option<FlvMuxer>,
     tags: TagList,
     emitted: u64,
+    // the first presentation time and the latest end of the frames written, which span the duration
+    written_span_ns: Option<(u64, u64)>,
 }
 
 impl FlvMuxN {
@@ -114,6 +116,7 @@ impl FlvMuxN {
             mux: None,
             tags: TagList::new(),
             emitted: 0,
+            written_span_ns: None,
         }
     }
 
@@ -267,6 +270,12 @@ impl FlvMuxN {
             },
         };
 
+        let start_ns = frame.timing.pts_ns;
+        let end_ns = start_ns.saturating_add(frame.timing.duration_ns);
+        self.written_span_ns = Some(match self.written_span_ns {
+            None => (start_ns, end_ns),
+            Some((first, last)) => (first.min(start_ns), last.max(end_ns)),
+        });
         let out_frame = Frame::new(
             MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
             FrameTiming {
@@ -277,6 +286,25 @@ impl FlvMuxN {
         );
         self.emitted += 1;
         out.push(PipelinePacket::DataFrame(out_frame)).await?;
+        Ok(())
+    }
+
+    // a seekable sink writes the real duration over the header's 0, as gst's flvmux seeks back to do
+    async fn overwrite_duration(&mut self, out: &mut dyn OutputSink) -> Result<(), G2gError> {
+        let (Some(mux), Some((first_ns, end_ns))) = (self.mux.as_ref(), self.written_span_ns)
+        else {
+            return Ok(());
+        };
+        let Some((offset, bytes)) = mux.duration_overwrite(end_ns - first_ns) else {
+            return Ok(());
+        };
+        let frame = Frame::new(
+            MemoryDomain::System(SystemSlice::from_boxed(Box::new(bytes))),
+            FrameTiming::default(),
+            self.emitted,
+        );
+        out.push(PipelinePacket::Overwrite { offset, frame })
+            .await?;
         Ok(())
     }
 }
@@ -428,6 +456,9 @@ impl MultiInputElement for FlvMuxN {
             while let Some((track, frame)) = self.agg.take_earliest_by(|f| f.timing.pts_ns) {
                 self.emit_au(track, frame, out).await?;
             }
+            if self.agg.is_drained() {
+                self.overwrite_duration(out).await?;
+            }
             Ok(())
         })
     }
@@ -507,11 +538,20 @@ mod tests {
         ) -> core::task::Poll<Result<g2g_core::PushOutcome, G2gError>> {
             let packet = packet_slot.take().expect("poll_push without a packet");
             core::task::Poll::Ready({
-                if let PipelinePacket::DataFrame(f) = packet {
-                    if let Some(s) = f.domain.as_system_slice() {
-                        self.bytes.extend_from_slice(s);
-                        self.frames.push(s.to_vec());
+                match packet {
+                    PipelinePacket::DataFrame(f) => {
+                        if let Some(s) = f.domain.as_system_slice() {
+                            self.bytes.extend_from_slice(s);
+                            self.frames.push(s.to_vec());
+                        }
                     }
+                    // what a seekable sink does with it
+                    PipelinePacket::Overwrite { offset, frame } => {
+                        let s = frame.domain.as_system_slice().expect("system bytes");
+                        let at = offset as usize;
+                        self.bytes[at..at + s.len()].copy_from_slice(s);
+                    }
+                    _ => {}
                 }
                 Ok(g2g_core::PushOutcome::Accepted)
             })
@@ -561,6 +601,22 @@ mod tests {
             }
         }
         (sink.frames, posted)
+    }
+
+    #[tokio::test]
+    async fn the_metadata_duration_spans_the_written_frames() {
+        const FRAME_STEP_NS: u64 = 33_000_000;
+        let aus = [h264_idr(), h264_idr(), h264_idr(), h264_idr()];
+        let (_, flv) = mux_one_pad(FlvMuxN::new(1), &video_caps(), &aus).await;
+        let key = b"duration";
+        let at = flv
+            .windows(key.len())
+            .position(|window| window == key)
+            .expect("onMetaData carries a duration");
+        let number_at = at + key.len() + 1;
+        let duration = f64::from_be_bytes(flv[number_at..number_at + 8].try_into().unwrap());
+        let span_ns = (aus.len() as u64 - 1) * FRAME_STEP_NS;
+        assert_eq!(duration, span_ns as f64 / 1e9);
     }
 
     #[tokio::test]

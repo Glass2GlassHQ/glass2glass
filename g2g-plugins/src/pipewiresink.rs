@@ -469,6 +469,11 @@ fn build_and_run(
             let Some(mut buffer) = stream.dequeue_buffer() else {
                 return;
             };
+            // one graph cycle of frames, 0 when PipeWire suggests no amount
+            let requested_bytes = match buffer.requested() {
+                0 => usize::MAX,
+                frames => usize::try_from(frames).map_or(usize::MAX, |f| f.saturating_mul(stride)),
+            };
             let datas = buffer.datas_mut();
             if datas.is_empty() {
                 return;
@@ -477,7 +482,7 @@ fn build_and_run(
             let size = if let Some(slice) = data.data() {
                 // Fill whole-frame-aligned capacity from the queue; pad the
                 // remainder with silence so an underrun is quiet, not garbage.
-                let cap = (slice.len() / stride) * stride;
+                let cap = (slice.len().min(requested_bytes) / stride) * stride;
                 let filled = q
                     .lock()
                     .map(|mut q| q.pop_into(&mut slice[..cap]))

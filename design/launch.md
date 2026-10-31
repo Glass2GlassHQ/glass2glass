@@ -85,8 +85,11 @@ static form of gst linking a dynamic pad by caps.
 An unnamed single-output demuxer with one consumer and no `stream` property
 (`tsdemux ! aacparse`) gets its `stream` from a `DemuxStreamHook`, which matches
 the consumer's sink-pad caps by codec. The hook sets nothing when the demuxer's
-default stream already fits the consumer, so an accept-anything consumer such as
-`fakesink` keeps the default. Graphs built in code set `stream` themselves.
+default stream already fits the consumer. When the demuxer reads a local
+`filesrc`, the container's primary-stream hook lists the file's streams first
+and the demuxer takes the first one the consumer's sink pad accepts, so
+`filesrc location=audio.ts ! tsdemux ! fakesink` forwards the audio, as gst links
+the first pad that fits. Graphs built in code set `stream` themselves.
 
 The tokenizer is quote-aware: a double-quoted value is one token, so whitespace
 and `!` inside it are literal, as in `gstwrap element="x264enc bitrate=4000"` and

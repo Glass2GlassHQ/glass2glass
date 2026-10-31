@@ -498,6 +498,13 @@ unchanged. `set_state(Null)` ends a running pipeline: each sink stops at its gat
 the arms upstream end on the closed links, and the run returns its stats without
 posting `Eos`.
 
+A display sink whose window the user closes returns `WindowClosed` from `process`.
+The runner then asks every source to end its stream: each source arm stops the
+source's `run` and sends `Eos` itself, the sink drops frames until that `Eos`
+reaches it, and the run drains and returns its stats. A live camera, which never
+ends its stream by itself, ends this way too. GStreamer's `waylandsink` posts an
+error instead.
+
 ### Seek, segment and running time
 
 `g2g-core::segment` is a pure-core, ungated model. `Seek`, `SeekType` and

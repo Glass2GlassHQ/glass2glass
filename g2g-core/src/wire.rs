@@ -83,6 +83,7 @@ const PKT_DATA_FRAME: u8 = 1;
 const PKT_EOS: u8 = 2;
 const PKT_FLUSH: u8 = 3;
 const PKT_SEGMENT: u8 = 4;
+const PKT_OVERWRITE: u8 = 5;
 
 const DOMAIN_SYSTEM: u8 = 0;
 
@@ -1431,7 +1432,9 @@ fn get_meta(r: &mut Reader) -> Result<FrameMetaSet, WireError> {
 /// returned buffer (the codec produces the body only).
 pub fn encode_packet(packet: &PipelinePacket) -> Result<Vec<u8>, WireError> {
     let payload_len = match packet {
-        PipelinePacket::DataFrame(frame) => domain_payload_len(&frame.domain),
+        PipelinePacket::DataFrame(frame) | PipelinePacket::Overwrite { frame, .. } => {
+            domain_payload_len(&frame.domain)
+        }
         _ => 0,
     };
     let mut w = Writer::with_capacity(FRAME_HEADER_LEN + payload_len);
@@ -1443,10 +1446,12 @@ pub fn encode_packet(packet: &PipelinePacket) -> Result<Vec<u8>, WireError> {
         }
         PipelinePacket::DataFrame(frame) => {
             w.u8(PKT_DATA_FRAME);
-            put_timing(&mut w, &frame.timing);
-            w.u64(frame.sequence);
-            put_domain(&mut w, &frame.domain)?;
-            put_meta(&mut w, &frame.meta);
+            put_frame(&mut w, frame)?;
+        }
+        PipelinePacket::Overwrite { offset, frame } => {
+            w.u8(PKT_OVERWRITE);
+            w.u64(*offset);
+            put_frame(&mut w, frame)?;
         }
         PipelinePacket::Eos => w.u8(PKT_EOS),
         PipelinePacket::Flush => w.u8(PKT_FLUSH),
@@ -1463,6 +1468,27 @@ pub fn encode_packet(packet: &PipelinePacket) -> Result<Vec<u8>, WireError> {
     Ok(w.buf)
 }
 
+fn put_frame(w: &mut Writer, frame: &Frame) -> Result<(), WireError> {
+    put_timing(w, &frame.timing);
+    w.u64(frame.sequence);
+    put_domain(w, &frame.domain)?;
+    put_meta(w, &frame.meta);
+    Ok(())
+}
+
+fn get_frame(r: &mut Reader) -> Result<Frame, WireError> {
+    let timing = get_timing(r)?;
+    let sequence = r.u64()?;
+    let domain = get_domain(r)?;
+    let meta = get_meta(r)?;
+    Ok(Frame {
+        domain,
+        timing,
+        sequence,
+        meta,
+    })
+}
+
 /// Reconstruct a [`PipelinePacket`] from bytes produced by [`encode_packet`].
 ///
 /// Trailing bytes after the packet are ignored (the transport frames each
@@ -1475,17 +1501,13 @@ pub fn decode_packet(bytes: &[u8]) -> Result<PipelinePacket, WireError> {
     }
     Ok(match r.u8()? {
         PKT_CAPS_CHANGED => PipelinePacket::CapsChanged(get_caps(&mut r)?),
-        PKT_DATA_FRAME => {
-            let timing = get_timing(&mut r)?;
-            let sequence = r.u64()?;
-            let domain = get_domain(&mut r)?;
-            let meta = get_meta(&mut r)?;
-            PipelinePacket::DataFrame(Frame {
-                domain,
-                timing,
-                sequence,
-                meta,
-            })
+        PKT_DATA_FRAME => PipelinePacket::DataFrame(get_frame(&mut r)?),
+        PKT_OVERWRITE => {
+            let offset = r.u64()?;
+            PipelinePacket::Overwrite {
+                offset,
+                frame: get_frame(&mut r)?,
+            }
         }
         PKT_EOS => PipelinePacket::Eos,
         PKT_FLUSH => PipelinePacket::Flush,

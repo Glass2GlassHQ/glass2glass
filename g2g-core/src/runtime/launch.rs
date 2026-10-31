@@ -1474,6 +1474,25 @@ fn expand_decodebin(
                     before_upstream = None;
                 }
                 Item::Element(spec) => {
+                    let selection = match (new_chain.last(), &before_upstream) {
+                        (Some(Item::Element(demux)), Some((file, file_props)))
+                            if demux.props.is_empty() && !is_referenced(demux, &referenced) =>
+                        {
+                            named_demux_selection(
+                                registry,
+                                &demux.name,
+                                file,
+                                file_props,
+                                &spec.name,
+                            )?
+                        }
+                        _ => None,
+                    };
+                    if let (Some(props), Some(Item::Element(demux))) =
+                        (selection, new_chain.last_mut())
+                    {
+                        demux.props = props;
+                    }
                     before_upstream = upstream.replace((spec.name.clone(), spec.props.clone()));
                     new_chain.push(Item::Element(spec));
                 }
@@ -1511,6 +1530,31 @@ fn demuxed_file_streams(
     Ok(registry
         .container_streams(location, &container)
         .map(|streams| (location.clone(), streams)))
+}
+
+// the selection of the file's first stream `consumer` accepts, as gst links the pad the next element takes
+fn named_demux_selection(
+    registry: &Registry,
+    demux: &str,
+    file: &str,
+    file_props: &[(String, String)],
+    consumer: &str,
+) -> Result<Option<Vec<(String, String)>>, ParseError> {
+    let Some((_, streams)) = demuxed_file_streams(registry, file, file_props)? else {
+        return Ok(None);
+    };
+    let accepted = registry.declared_input_caps(consumer);
+    let demux = registry.resolve_alias(demux);
+    Ok(streams
+        .streams
+        .into_iter()
+        .find(|stream| {
+            stream.demux == demux
+                && accepted
+                    .as_ref()
+                    .is_none_or(|accepted| accepted.accepts(&stream.caps))
+        })
+        .map(|stream| stream.props))
 }
 
 /// `encodebin`: not an element either, but a macro that expands, at parse time,

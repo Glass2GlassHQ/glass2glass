@@ -78,8 +78,8 @@ use crate::graph::Graph;
 use crate::runtime::channel::{bounded, Sender};
 #[cfg(feature = "std")]
 use crate::runtime::graph_runner::{
-    broadcast, run_graph_inner, run_source, sink_arm_on, traced_source_probe, GraphNodeRef,
-    SinkArmIo, SourceArmIo, SourceFrameSpans,
+    broadcast, run_graph_inner, run_source, sink_arm_on, traced_source_probe, try_clone_packet,
+    GraphNodeRef, SinkArmIo, SourceArmIo, SourceFrameSpans,
 };
 #[cfg(feature = "std")]
 use crate::runtime::join::dynamic_join;
@@ -748,6 +748,11 @@ where
     // M399: measured per-element telemetry for the sink (the linear runner's one
     // interior element with a `process()`); the source's cost surfaces as fill.
     let sink_probe = ElementProbe::new(ElementLogName::new(sink_category, sink_name.clone()));
+    let sink_io = SinkArmIo {
+        bus: bus.cloned(),
+        state: state.clone(),
+        ..SinkArmIo::standalone(link_rx, Some(sink_probe.clone()))
+    };
     let source_io = SourceArmIo {
         out_tx: link_tx,
         bus: None,
@@ -755,11 +760,7 @@ where
         segment: Segment::new(),
         log_name: ElementLogName::new(source_category, source_name.clone()),
         probe: None,
-    };
-    let sink_io = SinkArmIo {
-        bus: bus.cloned(),
-        state: state.clone(),
-        ..SinkArmIo::standalone(link_rx, Some(sink_probe.clone()))
+        run_end: sink_io.run_end.clone(),
     };
     let (src_res, snk_res) =
         Join2::new(run_source(source, source_io), sink_arm_on(sink, sink_io)).await;
@@ -1377,6 +1378,12 @@ async fn route_packet(
         Some(PipelinePacket::Flush) => {
             for p in ports.iter_mut() {
                 p.push(PipelinePacket::Flush).await?;
+            }
+            Ok(false)
+        }
+        Some(overwrite @ PipelinePacket::Overwrite { .. }) => {
+            for p in ports.iter_mut() {
+                p.push(try_clone_packet(&overwrite)?).await?;
             }
             Ok(false)
         }

@@ -21,6 +21,9 @@ use ffprobe_tool::have_ffprobe;
 #[path = "common/collect_sink.rs"]
 mod collect_sink;
 use collect_sink::CollectSink;
+#[path = "common/mkv_video_start.rs"]
+mod mkv_video_start;
+use mkv_video_start::first_h264_pts_ns;
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -463,17 +466,24 @@ async fn both_carriages_decode_to_the_same_cue_canvases() {
     author_fixture(&idx, &ts, &mkv);
 
     // The Matroska remux normalizes the transport stream's start offset away, so
-    // its cue times are the authored ones and the TS's are those plus the offset.
-    let mkv_times: Vec<(u64, u64)> = Vec::from([
+    // its cue times are the authored ones plus the demuxer's reorder shift, and
+    // the TS's are the authored ones plus the offset.
+    let authored_times: Vec<(u64, u64)> = Vec::from([
         (1_500_000_000, 3_548_000_000),
         (5_500_000_000, 7_548_000_000),
     ]);
-    let ts_times: Vec<(u64, u64)> = mkv_times
+    let ts_times: Vec<(u64, u64)> = authored_times
         .iter()
         .map(|(a, b)| (a + TS_START_NS, b + TS_START_NS))
         .collect();
 
-    let from_mkv = demux_mkv(&std::fs::read(&mkv).expect("read mkv")).await;
+    let mkv_bytes = std::fs::read(&mkv).expect("read mkv");
+    let shift_ns = first_h264_pts_ns(&mkv_bytes).await;
+    let mkv_times: Vec<(u64, u64)> = authored_times
+        .iter()
+        .map(|(a, b)| (a + shift_ns, b + shift_ns))
+        .collect();
+    let from_mkv = demux_mkv(&mkv_bytes).await;
     assert_cue_canvases(&decode(from_mkv.frames).await, &mkv_times);
 
     let (from_ts, _) = demux_ts(&std::fs::read(&ts).expect("read ts")).await;

@@ -492,7 +492,7 @@ impl AsyncElement for ToggleRecord {
                         // however much never made it into a recording.
                         let eaten = pts_ns - out_pts;
                         frame.timing.pts_ns = out_pts;
-                        frame.timing.dts_ns = frame.timing.dts_ns.saturating_sub(eaten);
+                        frame.timing.map_dts(|dts_ns| dts_ns.saturating_sub(eaten));
                     }
                     self.forwarded += 1;
                     out.push(PipelinePacket::DataFrame(frame)).await?;

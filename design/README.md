@@ -56,7 +56,7 @@ The types you meet everywhere are all in `g2g-core`:
 | Type | Role |
 | :--- | :--- |
 | `Frame` | one media buffer: a `MemoryDomain` payload + `FrameTiming` + a sequence number + optional metadata. Caps live on the *link*, not the frame. |
-| `PipelinePacket` | what crosses a link: `CapsChanged` / `DataFrame` / `Segment` / `Flush` / `Eos`, plus the arm-local `Tick`. |
+| `PipelinePacket` | what crosses a link: `CapsChanged` / `DataFrame` / `Segment` / `Flush` / `Eos` / `Overwrite`, plus the arm-local `Tick`. |
 | `Caps` | the typed capability algebra (`RawVideo` / `CompressedVideo` / `Audio` / `Tensor` / `Text` / `ByteStream`), negotiated per link. |
 | `AsyncElement` / `SourceLoop` | the two element traits, transform-or-sink and source. Pads are implicit in the trait shape, not a runtime object. |
 | `MemoryDomain` | where a frame's bytes live: System, DMABUF, CUDA, Vulkan / WebGPU texture, the basis for zero-copy. |
@@ -141,6 +141,10 @@ pub enum PipelinePacket {
     /// cadence (the compositors' zero-order-hold). May fire spuriously, and
     /// never crosses a link: the runner's arm originates and consumes it.
     Tick,
+    /// Bytes for a byte-stream sink to write over its output from `offset`,
+    /// sent by a muxer that fills in a header field at the end of the stream.
+    /// `filesink` seeks back to apply it, a sink that cannot seek ignores it.
+    Overwrite { offset: u64, frame: Frame },
 }
 
 pub struct Frame {
@@ -662,6 +666,7 @@ pub struct FrameTiming {
     /// Presentation timestamp, ns relative to the pipeline reference clock.
     pub pts_ns: u64,
     /// Decode timestamp. Differs from PTS for B-frames; equals PTS otherwise.
+    /// `FrameTiming::DTS_NONE` when the producer does not time decode order.
     pub dts_ns: u64,
     /// Nominal frame duration. 0 means "until next frame arrives".
     pub duration_ns: u64,
@@ -688,6 +693,13 @@ A `pts_ns` of `FrameTiming::PTS_NONE` (`u64::MAX`, the value GStreamer spells
 `FrameTiming::pts()` reads it as `None`, and `PresentationPacer` answers
 `Pace::Now` for it without latching its anchor, so a sink presents the frame as it
 arrives rather than holding it to a deadline or counting it a late drop.
+
+A `dts_ns` of `FrameTiming::DTS_NONE` (also `u64::MAX`) marks a frame whose
+producer does not time decode order, and is what `FrameTiming::default()` sets.
+`FrameTiming::dts()` reads it as `None`, a muxer writes such a frame as decoding
+when it presents, and `map_dts` shifts a decode time only when one is set. A
+`dts_ns` of 0 is a real decode time, the first one of a reordered stream that
+starts at 0.
 
 Sink elements compare `pts_ns` against `now_ns()` to schedule presentation, and
 `capture_ns` against `now_ns()` to report true glass-to-glass latency without

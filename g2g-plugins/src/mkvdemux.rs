@@ -700,7 +700,7 @@ impl MkvDemux {
                 }
                 let timing = FrameTiming {
                     pts_ns: f.pts_ns,
-                    dts_ns: f.pts_ns,
+                    dts_ns: f.dts_ns.unwrap_or(f.pts_ns),
                     duration_ns: forwarded_duration_ns(&f),
                     ..FrameTiming::default()
                 };
@@ -868,6 +868,7 @@ impl AsyncElement for MkvDemux {
                         return Ok(());
                     }
                     // Emit any final frames; the runner's transform arm forwards EOS.
+                    self.demux.finish();
                     self.emit_ready(out).await?;
                     if self.seek.takes_seeks_after_end() {
                         out.push(PipelinePacket::Eos).await?;
@@ -1735,6 +1736,63 @@ impl MkvDemuxN {
         })
     }
 
+    async fn route_frames(&mut self, out: &mut dyn MultiOutputSink) -> Result<(), G2gError> {
+        for f in self.demux.take_frames() {
+            let Some(port) = self.port_for_track(f.codec, f.track) else {
+                continue; // a track no selected port carries
+            };
+            self.segment
+                .send_before_unit(port, f.pts_ns, Some(f.pts_ns), out)
+                .await?;
+            if !self.announced[port] {
+                let caps = MkvDemux::concrete_caps_of(
+                    &self.demux,
+                    self.ports[port],
+                    self.port_tracks[port],
+                )
+                .unwrap_or_else(|| MkvDemux::output_caps(self.ports[port]));
+                out.push_to(port, PipelinePacket::CapsChanged(caps)).await?;
+                self.announced[port] = true;
+            }
+            // The track's decoder-init bytes lead its audio on this
+            // port, once (FLAC STREAMINFO, Opus `OpusHead`).
+            if !self.config_sent[port] {
+                self.config_sent[port] = true;
+                for header in config_headers(&self.demux, f.codec, f.track) {
+                    let lead = Frame::new(
+                        MemoryDomain::System(SystemSlice::from_boxed(header.into_boxed_slice())),
+                        FrameTiming {
+                            pts_ns: f.pts_ns,
+                            dts_ns: f.pts_ns,
+                            ..FrameTiming::default()
+                        },
+                        self.emitted,
+                    );
+                    self.emitted += 1;
+                    out.push_to(port, PipelinePacket::DataFrame(lead)).await?;
+                }
+            }
+            let timing = FrameTiming {
+                pts_ns: f.pts_ns,
+                dts_ns: f.dts_ns.unwrap_or(f.pts_ns),
+                duration_ns: forwarded_duration_ns(&f),
+                ..FrameTiming::default()
+            };
+            let Some(payload) = deframe_block(&self.demux, f) else {
+                continue;
+            };
+            let out_frame = Frame::new(
+                MemoryDomain::System(SystemSlice::from_boxed(payload.into_boxed_slice())),
+                timing,
+                self.emitted,
+            );
+            self.emitted += 1;
+            out.push_to(port, PipelinePacket::DataFrame(out_frame))
+                .await?;
+        }
+        Ok(())
+    }
+
     /// Announce every container track as a [`BusMessage::StreamCollection`],
     /// once, when `Tracks` has parsed. Mirrors [`MkvDemux::post_stream_collection`]
     /// (lists all tracks, not just the ported ones, so the app can re-select).
@@ -1830,63 +1888,7 @@ impl MultiOutputElement for MkvDemuxN {
                     for (&stream, &track_number) in self.ports.iter().zip(&self.port_tracks) {
                         reject_undecodable_encoding(&self.demux, stream, track_number)?;
                     }
-                    for f in self.demux.take_frames() {
-                        let Some(port) = self.port_for_track(f.codec, f.track) else {
-                            continue; // a track no selected port carries
-                        };
-                        self.segment
-                            .send_before_unit(port, f.pts_ns, Some(f.pts_ns), out)
-                            .await?;
-                        if !self.announced[port] {
-                            let caps = MkvDemux::concrete_caps_of(
-                                &self.demux,
-                                self.ports[port],
-                                self.port_tracks[port],
-                            )
-                            .unwrap_or_else(|| MkvDemux::output_caps(self.ports[port]));
-                            out.push_to(port, PipelinePacket::CapsChanged(caps)).await?;
-                            self.announced[port] = true;
-                        }
-                        // The track's decoder-init bytes lead its audio on this
-                        // port, once (FLAC STREAMINFO, Opus `OpusHead`).
-                        if !self.config_sent[port] {
-                            self.config_sent[port] = true;
-                            for header in config_headers(&self.demux, f.codec, f.track) {
-                                let lead = Frame::new(
-                                    MemoryDomain::System(SystemSlice::from_boxed(
-                                        header.into_boxed_slice(),
-                                    )),
-                                    FrameTiming {
-                                        pts_ns: f.pts_ns,
-                                        dts_ns: f.pts_ns,
-                                        ..FrameTiming::default()
-                                    },
-                                    self.emitted,
-                                );
-                                self.emitted += 1;
-                                out.push_to(port, PipelinePacket::DataFrame(lead)).await?;
-                            }
-                        }
-                        let timing = FrameTiming {
-                            pts_ns: f.pts_ns,
-                            dts_ns: f.pts_ns,
-                            duration_ns: forwarded_duration_ns(&f),
-                            ..FrameTiming::default()
-                        };
-                        let Some(payload) = deframe_block(&self.demux, f) else {
-                            continue;
-                        };
-                        let out_frame = Frame::new(
-                            MemoryDomain::System(SystemSlice::from_boxed(
-                                payload.into_boxed_slice(),
-                            )),
-                            timing,
-                            self.emitted,
-                        );
-                        self.emitted += 1;
-                        out.push_to(port, PipelinePacket::DataFrame(out_frame))
-                            .await?;
-                    }
+                    self.route_frames(out).await?;
                 }
                 // Flush / Segment apply to every branch (the parser resets on a
                 // flush, as the single-output demuxer does).
@@ -1908,7 +1910,10 @@ impl MultiOutputElement for MkvDemuxN {
                 // defines its own caps, announced per port above.
                 PipelinePacket::CapsChanged(_) => {}
                 // The runner broadcasts the single merged Eos to every port.
-                PipelinePacket::Eos => {}
+                PipelinePacket::Eos => {
+                    self.demux.finish();
+                    self.route_frames(out).await?;
+                }
                 // future PipelinePacket variants: no-op.
                 _ => {}
             }

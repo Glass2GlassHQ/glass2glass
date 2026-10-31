@@ -12,21 +12,30 @@ use g2g_plugins::flvdemux::{FlvDemux, FlvStream};
 use g2g_plugins::flvmuxn::FlvMuxN;
 
 const TAG_VIDEO: u8 = 9;
+const TAG_SCRIPT: u8 = 18;
 const KEYFRAME: u8 = 1 << 4;
 // 300x180 coded as 304x192: four columns and twelve rows of adjustment.
 const DIMENSION_BYTE: u8 = 0x4C;
 
-// A video-only FLV holding one tag with `body`, laid out the way `flvmux` writes it.
-fn single_tag_flv(body: &[u8]) -> Vec<u8> {
-    let mut flv = b"FLV\x01\x01\x00\x00\x00\x09".to_vec();
-    flv.extend_from_slice(&0u32.to_be_bytes());
+// an `onMetaData` holding only a duration of 0, which `flvmux` overwrites at the end of the stream
+const ZERO_DURATION_METADATA: &[u8] = b"\x02\x00\x0aonMetaData\x08\x00\x00\x00\x01\x00\x08duration\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x09";
+
+fn push_tag(flv: &mut Vec<u8>, tag_type: u8, body: &[u8]) {
     let tag_start = flv.len();
-    flv.push(TAG_VIDEO);
+    flv.push(tag_type);
     flv.extend_from_slice(&(body.len() as u32).to_be_bytes()[1..]);
     flv.extend_from_slice(&[0; 7]);
     flv.extend_from_slice(body);
     let tag_len = (flv.len() - tag_start) as u32;
     flv.extend_from_slice(&tag_len.to_be_bytes());
+}
+
+// A video-only FLV holding one tag with `body`, laid out the way `flvmux` writes it.
+fn single_tag_flv(body: &[u8]) -> Vec<u8> {
+    let mut flv = b"FLV\x01\x01\x00\x00\x00\x09".to_vec();
+    flv.extend_from_slice(&0u32.to_be_bytes());
+    push_tag(&mut flv, TAG_SCRIPT, ZERO_DURATION_METADATA);
+    push_tag(&mut flv, TAG_VIDEO, body);
     flv
 }
 

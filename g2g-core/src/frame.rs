@@ -33,6 +33,11 @@ pub enum PipelinePacket {
     /// an element that declared an interval, and it never crosses a link: the arm
     /// originates and consumes it, so no encoder, queue, or transport sees one.
     Tick,
+    // bytes for a byte-stream sink to write over its output from `offset`, as a muxer patches its header at the end
+    Overwrite {
+        offset: u64,
+        frame: Frame,
+    },
 }
 
 #[derive(Debug)]
@@ -88,7 +93,7 @@ impl Frame {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FrameTiming {
     pub pts_ns: u64,
     pub dts_ns: u64,
@@ -117,6 +122,33 @@ impl FrameTiming {
     /// The presentation time, `None` when it is unset ([`Self::PTS_NONE`]).
     pub fn pts(&self) -> Option<u64> {
         (self.pts_ns != Self::PTS_NONE).then_some(self.pts_ns)
+    }
+
+    // `dts_ns` of a frame whose producer does not time decode order, so it decodes when it presents
+    pub const DTS_NONE: u64 = u64::MAX;
+
+    pub fn dts(&self) -> Option<u64> {
+        (self.dts_ns != Self::DTS_NONE).then_some(self.dts_ns)
+    }
+
+    // moves a set decode time and leaves an unset one unset
+    pub fn map_dts(&mut self, map: impl FnOnce(u64) -> u64) {
+        if let Some(dts_ns) = self.dts() {
+            self.dts_ns = map(dts_ns);
+        }
+    }
+}
+
+impl Default for FrameTiming {
+    fn default() -> Self {
+        Self {
+            pts_ns: 0,
+            dts_ns: Self::DTS_NONE,
+            duration_ns: 0,
+            capture_ns: 0,
+            arrival_ns: 0,
+            keyframe: false,
+        }
     }
 }
 
@@ -192,5 +224,16 @@ mod tests {
         };
         assert_eq!(timing(FrameTiming::PTS_NONE).pts(), None);
         assert_eq!(timing(40_000_000).pts(), Some(40_000_000));
+    }
+
+    #[test]
+    fn a_default_dts_is_unset_and_zero_is_a_real_decode_time() {
+        assert_eq!(FrameTiming::default().dts(), None);
+        let first_reordered = FrameTiming {
+            pts_ns: 80_000_000,
+            dts_ns: 0,
+            ..FrameTiming::default()
+        };
+        assert_eq!(first_reordered.dts(), Some(0));
     }
 }

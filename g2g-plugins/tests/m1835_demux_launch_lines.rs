@@ -51,34 +51,57 @@ fn fmp4demux_reads_a_fragmented_file() {
     );
 }
 
-fn assert_demux_picks_the_stream_its_parser_takes(file: &str, demux: &str) {
+fn assert_demux_picks_stream(file: &str, demux: &str, consumer: &str, stream: &str) {
     let location = fixture(file);
     let picked = checksum_lines(&format!(
-        "filesrc location={location} ! {demux} ! aacparse ! checksumsink hash=md5"
+        "filesrc location={location} ! {demux} ! {consumer}checksumsink hash=md5"
     ));
     let named = checksum_lines(&format!(
-        "filesrc location={location} ! {demux} stream=aac ! aacparse ! checksumsink hash=md5"
+        "filesrc location={location} ! {demux} stream={stream} ! {consumer}checksumsink hash=md5"
     ));
-    assert!(!named.is_empty(), "{demux} stream=aac reads {file}");
-    assert_eq!(picked, named, "{demux} ! aacparse takes the aac stream");
+    assert!(!named.is_empty(), "{demux} stream={stream} reads {file}");
+    assert_eq!(
+        picked, named,
+        "{demux} ! {consumer} takes the {stream} stream"
+    );
 }
 
 #[test]
 fn tsdemux_feeds_aacparse_without_a_stream_property() {
-    assert_demux_picks_the_stream_its_parser_takes("av_h264_aac44100.ts", "tsdemux");
+    assert_demux_picks_stream("av_h264_aac44100.ts", "tsdemux", "aacparse ! ", "aac");
 }
 
 #[test]
 fn matroskademux_feeds_aacparse_without_a_stream_property() {
-    assert_demux_picks_the_stream_its_parser_takes("multitrack_h264_aac.mkv", "matroskademux");
+    assert_demux_picks_stream(
+        "multitrack_h264_aac.mkv",
+        "matroskademux",
+        "aacparse ! ",
+        "aac",
+    );
 }
 
 #[test]
 fn qtdemux_feeds_aacparse_without_a_stream_property() {
-    assert_demux_picks_the_stream_its_parser_takes("av_h264_aac.mp4", "qtdemux");
+    assert_demux_picks_stream("av_h264_aac.mp4", "qtdemux", "aacparse ! ", "aac");
 }
 
 #[test]
 fn flvdemux_feeds_aacparse_without_a_stream_property() {
-    assert_demux_picks_the_stream_its_parser_takes("flv_h264_aac.flv", "flvdemux");
+    assert_demux_picks_stream("flv_h264_aac.flv", "flvdemux", "aacparse ! ", "aac");
+}
+
+#[test]
+fn tsdemux_forwards_an_audio_only_file_to_any_consumer() {
+    assert_demux_picks_stream("aac_44100.ts", "tsdemux", "", "aac");
+}
+
+#[test]
+fn flvdemux_forwards_a_vp6_file_to_any_consumer() {
+    assert_demux_picks_stream("vp6f_112x80.flv", "flvdemux", "", "vp6");
+}
+
+#[test]
+fn oggdemux_forwards_a_video_only_file_to_any_consumer() {
+    assert_demux_picks_stream("vp8_64x48_25fps_gop10_offset.ogg", "oggdemux", "", "vp8");
 }

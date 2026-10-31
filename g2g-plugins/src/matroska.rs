@@ -40,6 +40,7 @@ use g2g_core::{
     TagList, TextFormat,
 };
 
+use crate::decodetimestamper::DecodeTimestamper;
 use crate::dvbsub::{page_id_blob, parse_page_ids, segment_span, PageIds, DEFAULT_SUBTITLING_TYPE};
 use crate::fifobuffer::FifoBuffer;
 use crate::subparse::ASS_SCRIPT_HEADER;
@@ -893,6 +894,8 @@ pub struct MkvFrame {
     /// `SimpleBlock` (so video / audio, paced by PTS deltas, leave it `0`).
     pub duration_ns: u64,
     pub keyframe: bool,
+    // derived for a reordering H.264 / H.265 track, whose blocks store only presentation times
+    pub dts_ns: Option<u64>,
     pub data: Vec<u8>,
 }
 
@@ -949,6 +952,9 @@ pub struct MatroskaDemuxer {
     /// so the demuxer can prefetch an end-of-file `Cues` before reaching it.
     /// `None` until a `SeekHead` indexing `Cues` is parsed.
     cues_index_pos: Option<u64>,
+    decode_timestampers: Vec<(u64, DecodeTimestamper<MkvFrame>)>,
+    // every track's pts moves later by this, so a derived dts is never below 0
+    reorder_shift_ns: u64,
     completed: Vec<MkvFrame>,
 }
 
@@ -983,6 +989,8 @@ impl MatroskaDemuxer {
             segment_data_pos: None,
             cues: Vec::new(),
             cues_index_pos: None,
+            decode_timestampers: Vec::new(),
+            reorder_shift_ns: 0,
             completed: Vec::new(),
         }
     }
@@ -1043,6 +1051,7 @@ impl MatroskaDemuxer {
         if self.cues.is_empty() {
             return None;
         }
+        let target_ns = target_ns.saturating_sub(self.reorder_shift_ns);
         let cue = self
             .cues
             .iter()
@@ -1062,6 +1071,9 @@ impl MatroskaDemuxer {
         self.open_cluster_ts = None;
         self.resyncing = false;
         self.completed.clear();
+        for (_, timestamper) in &mut self.decode_timestampers {
+            timestamper.clear();
+        }
     }
 
     /// Consume `n` bytes from the front of `buf`, advancing the absolute position.
@@ -1153,6 +1165,33 @@ impl MatroskaDemuxer {
     /// Drain the frames demuxed so far.
     pub fn take_frames(&mut self) -> Vec<MkvFrame> {
         core::mem::take(&mut self.completed)
+    }
+
+    // releases the frames held for their decode time, at the end of the stream
+    pub fn finish(&mut self) {
+        for (_, timestamper) in &mut self.decode_timestampers {
+            for (dts_ns, mut frame) in timestamper.drain() {
+                frame.dts_ns = Some(dts_ns);
+                self.completed.push(frame);
+            }
+        }
+    }
+
+    fn complete(&mut self, mut frame: MkvFrame) {
+        let pts_ns = frame.pts_ns;
+        frame.pts_ns = pts_ns.saturating_add(self.reorder_shift_ns);
+        let Some((_, timestamper)) = self
+            .decode_timestampers
+            .iter_mut()
+            .find(|(track, _)| *track == frame.track)
+        else {
+            self.completed.push(frame);
+            return;
+        };
+        if let Some((dts_ns, mut frame)) = timestamper.push(pts_ns, frame) {
+            frame.dts_ns = Some(dts_ns);
+            self.completed.push(frame);
+        }
     }
 
     /// Feed container bytes. Complete top-level elements are parsed as they
@@ -1247,7 +1286,9 @@ impl MatroskaDemuxer {
                                     frame.pts_ns = shift.apply(frame.pts_ns);
                                 }
                             }
-                            self.completed.extend(frames);
+                            for frame in frames {
+                                self.complete(frame);
+                            }
                         }
                         self.consume(total);
                         continue;
@@ -1309,6 +1350,21 @@ impl MatroskaDemuxer {
                             parse_tracks(&self.buf.as_slice()[header..total], &content_key)
                         {
                             self.tracks.push(parsed.track);
+                            if let Some(reorder_depth) =
+                                reorder_depth(parsed.track.codec, &parsed.codec_private)
+                                    .filter(|_| parsed.track.default_duration_ns > 0)
+                            {
+                                self.decode_timestampers.push((
+                                    parsed.track.number,
+                                    DecodeTimestamper::new(reorder_depth),
+                                ));
+                                self.reorder_shift_ns = self.reorder_shift_ns.max(
+                                    parsed
+                                        .track
+                                        .default_duration_ns
+                                        .saturating_mul(reorder_depth as u64),
+                                );
+                            }
                             if !parsed.codec_private.is_empty() {
                                 self.codec_privates
                                     .push((parsed.track.number, parsed.codec_private));
@@ -2150,10 +2206,39 @@ fn parse_block(
             pts_ns: frame_pts,
             duration_ns,
             keyframe,
+            dts_ns: None,
             data: data.to_vec(),
         });
         frame_pts = next_pts;
     }
+}
+
+// the frames a picture may present after later-decoded ones, the depth gst's h264timestamper uses
+fn reorder_depth(codec: MkvCodec, codec_private: &[u8]) -> Option<usize> {
+    use crate::nalparse::NalCodec;
+    let record = match codec {
+        MkvCodec::H264 => crate::annexb::parse_avcc(codec_private).ok()?,
+        MkvCodec::H265 => crate::annexb::parse_hvcc(codec_private).ok()?,
+        _ => return None,
+    };
+    let nals: Vec<&[u8]> = record.parameter_sets.iter().map(Vec::as_slice).collect();
+    let declared = match codec {
+        MkvCodec::H264 => crate::h264parse::H264Codec::sps_info(&nals)?.declared_reorder_frames,
+        _ => crate::h265parse::H265Codec::sps_info(&nals)?.declared_reorder_frames,
+    };
+    let depth = match (declared, codec) {
+        (Some(declared), _) => declared,
+        (None, MkvCodec::H264) => {
+            let parameter_sets = crate::annexb::prepend_param_sets(
+                &[],
+                &record.parameter_sets,
+                g2g_core::VideoCodec::H264,
+            );
+            crate::h264parse::sps_reorder_frames(&parameter_sets)?
+        }
+        (None, _) => return None,
+    };
+    Some(usize::from(depth))
 }
 
 /// Split a laced block body (`[frame_count-1][size headers][frame data]`) into
@@ -4071,6 +4156,29 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_b_frame_track_decodes_through_its_sorted_presentation_times() {
+        let mut d = MatroskaDemuxer::new();
+        d.push_data(include_bytes!(
+            "../tests/fixtures/h264_64x48_25fps_gop10_bframes_offset.mkv"
+        ));
+        d.finish();
+        let frames = d.take_frames();
+        let shift_ns = d.reorder_shift_ns;
+        assert!(shift_ns > 0, "the track reorders, so its timeline moves");
+        let decode_times: Vec<u64> = frames
+            .iter()
+            .map(|f| {
+                f.dts_ns
+                    .expect("every frame of the track has a decode time")
+            })
+            .collect();
+        let mut presentation_times: Vec<u64> = frames.iter().map(|f| f.pts_ns - shift_ns).collect();
+        presentation_times.sort_unstable();
+        assert_eq!(decode_times, presentation_times);
+        assert!(frames.iter().all(|f| f.dts_ns <= Some(f.pts_ns)));
+    }
+
     // Python's bz2 and python-lzo compressed these, in tools/mkv-content-encoding-fixtures.sh
     #[cfg(feature = "matroska-compression")]
     const ENCODING_PAYLOAD: &[u8] = include_bytes!("../tests/fixtures/mkv_encoding_payload.txt");
@@ -4252,6 +4360,7 @@ mod tests {
                 pts_ns: 1_000 * 1_000_000,
                 duration_ns: 0,
                 keyframe: true,
+                dts_ns: None,
                 data: vec![0xDE, 0xAD]
             }
         );

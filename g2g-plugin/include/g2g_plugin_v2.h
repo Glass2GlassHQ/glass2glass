@@ -194,7 +194,7 @@ typedef struct {
     void (*free)(void *user);
     void *free_user;
     uint64_t pts_ns;
-    uint64_t dts_ns;
+    uint64_t dts_ns; /* UINT64_MAX when the producer does not time decode order */
     uint64_t duration_ns;
     uint64_t capture_ns;
     uint64_t arrival_ns;

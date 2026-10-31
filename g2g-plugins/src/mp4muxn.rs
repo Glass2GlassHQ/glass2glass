@@ -160,8 +160,8 @@ pub struct Mp4MuxN {
     agg: InputAggregator<Frame>,
     /// Per-track accumulated decode time in that track's timescale (`tfdt`).
     decode_time: Vec<u64>,
-    /// Per-track previous PTS (ns), for the sample-duration delta.
-    prev_pts_ns: Vec<Option<u64>>,
+    /// Per-track previous decode time (ns), for the sample-duration delta.
+    prev_dts_ns: Vec<Option<u64>>,
     /// Per-track first PTS (ns): media time 0 of that track in the file.
     first_pts_ns: Vec<Option<u64>>,
     /// Per-track `Segment` start (ns). Past the first PTS, the samples before it
@@ -306,7 +306,7 @@ impl Mp4MuxN {
             dims: alloc::vec![(0, 0); inputs],
             agg: InputAggregator::new(inputs),
             decode_time: alloc::vec![0; inputs],
-            prev_pts_ns: alloc::vec![None; inputs],
+            prev_dts_ns: alloc::vec![None; inputs],
             first_pts_ns: alloc::vec![None; inputs],
             segment_start_ns: alloc::vec![0; inputs],
             cdp_seq: alloc::vec![0; inputs],
@@ -757,21 +757,27 @@ impl Mp4MuxN {
             Some(PadKind::Video { frame_ns, .. }) => frame_ns,
             _ => DEFAULT_VIDEO_DURATION_NS,
         };
-        let first_sample = self.prev_pts_ns[input].is_none();
+        // `ctts` version 0 cannot say a DTS past the PTS, so such a sample decodes when it presents
+        let dts_ns = frame
+            .timing
+            .dts()
+            .filter(|&dts_ns| dts_ns <= pts_ns)
+            .unwrap_or(pts_ns);
         // The frame's own duration when upstream timed it (a demuxer knows the
-        // container's end-of-stream trim, which no PTS delta shows), else the
-        // delta from the previous sample, else the codec's nominal frame length.
-        let dur_ns = match (frame.timing.duration_ns, self.prev_pts_ns[input]) {
+        // container's end-of-stream trim, which no timestamp delta shows), else the
+        // decode-time delta from the previous sample, which a reordered stream's PTS
+        // deltas are not, else the codec's nominal frame length.
+        let dur_ns = match (frame.timing.duration_ns, self.prev_dts_ns[input]) {
             (d, _) if d > 0 => d,
-            (_, Some(prev)) if pts_ns > prev => pts_ns - prev,
+            (_, Some(prev)) if dts_ns > prev => dts_ns - prev,
             _ => default_dur_ns,
         };
-        self.prev_pts_ns[input] = Some(pts_ns);
+        self.prev_dts_ns[input] = Some(dts_ns);
         // The difference of the rounded end and start, not the rounded length:
         // a 1024-sample AAC frame is 21333333.33 ns, and converting each length
         // on its own loses a tick a frame that piles up as A/V drift.
-        let duration = (ns_to_ticks(pts_ns.saturating_add(dur_ns), timescale)
-            - ns_to_ticks(pts_ns, timescale)) as u32;
+        let duration = (ns_to_ticks(dts_ns.saturating_add(dur_ns), timescale)
+            - ns_to_ticks(dts_ns, timescale)) as u32;
 
         // A text track has no per-sample timestamp on disk: a cue presents where
         // the durations before it end, so the run between two cues (and any before
@@ -794,16 +800,6 @@ impl Mp4MuxN {
             self.text_end_ns[input] = pts_ns.saturating_add(dur_ns);
         }
 
-        // A zero `dts_ns` means upstream is not timing decode order, except on a
-        // video track's first sample, where it is also where a reordered stream
-        // really starts (audio and text never reorder, so their first sample
-        // decodes when it presents). A DTS past the PTS is not expressible in
-        // `ctts` version 0, so such a sample decodes when it presents.
-        let reorders = matches!(self.kinds[input], Some(PadKind::Video { .. }));
-        let dts_ns = match frame.timing.dts_ns {
-            d if d <= pts_ns && (d > 0 || (first_sample && reorders)) => d,
-            _ => pts_ns,
-        };
         let timed = TimedSample {
             bytes: sample,
             is_sync,
@@ -2664,6 +2660,50 @@ mod tests {
             ns_to_ticks(66_666_666, VIDEO_TIMESCALE) as u32,
             "pts - dts in the video timescale"
         );
+    }
+
+    #[tokio::test]
+    async fn a_reordered_stream_without_durations_steps_its_decode_times_evenly() {
+        const FRAME_NS: u64 = 40_000_000;
+        // I P B B P B B in decode order, presenting two frames after they decode
+        let presentation_ranks = [0u64, 3, 1, 2, 6, 4, 5];
+        let idr = annexb(&[
+            &[0x67u8, 0x42, 0x00, 0x1e, 0x88],
+            &[0x68u8, 0xce],
+            &[0x65u8, 0x88],
+        ]);
+        let mut mux = Mp4MuxN::new(1).with_fragmented(false);
+        mux.configure_pipeline(0, &h264_caps(320, 240)).unwrap();
+        let mut sink = CaptureSink::default();
+        for (decode_index, rank) in (0u64..).zip(presentation_ranks) {
+            let packet = PipelinePacket::DataFrame(Frame::new(
+                MemoryDomain::System(SystemSlice::from_boxed(idr.clone().into_boxed_slice())),
+                FrameTiming {
+                    pts_ns: (rank + 2) * FRAME_NS,
+                    dts_ns: decode_index * FRAME_NS,
+                    ..FrameTiming::default()
+                },
+                0,
+            ));
+            mux.process(0, packet, &mut sink).await.unwrap();
+        }
+        mux.process(0, PipelinePacket::Eos, &mut sink)
+            .await
+            .unwrap();
+
+        let stts = box_payload(&sink.bytes, b"stts").expect("stts written");
+        let (entries, _) = stts[8..].as_chunks::<8>();
+        let runs: Vec<(u32, u32)> = entries
+            .iter()
+            .map(|entry| {
+                let count = u32::from_be_bytes(entry[0..4].try_into().unwrap());
+                (count, u32::from_be_bytes(entry[4..8].try_into().unwrap()))
+            })
+            .collect();
+        let frame_ticks = ns_to_ticks(FRAME_NS, VIDEO_TIMESCALE) as u32;
+        let later_samples = presentation_ranks.len() as u32 - 1;
+        // the first sample has no earlier one to measure from and takes the caps' frame length
+        assert_eq!(runs[1..], [(later_samples, frame_ticks)]);
     }
 
     /// A demuxer negotiates compressed audio as `0/0` and refines at runtime;

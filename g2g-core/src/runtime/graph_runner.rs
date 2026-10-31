@@ -94,6 +94,7 @@ use crate::runtime::mutate::{
 use crate::runtime::packet_log::log_received;
 use crate::runtime::progress::PipelineProgress;
 use crate::runtime::property_mailbox::{drain_properties, PropertyMailbox};
+use crate::runtime::run_end::RunEndRequest;
 use crate::runtime::runner::{
     re_solve_downstream_dyn_sink, LinkCapacity, NullSink, RunStats, SourceLoop,
     MAX_FIXATION_ATTEMPTS,
@@ -2324,6 +2325,7 @@ struct ArmInputs<'r, 'a> {
     state: &'r Option<StateController>,
     progress: Option<&'r PipelineProgress>,
     seek_after_end: Option<&'r SeekAfterEnd>,
+    run_end: &'r RunEndRequest,
 }
 
 /// Take each node's element and links, in topological order, and build its arm.
@@ -2349,6 +2351,7 @@ fn plan_arms<'a>(
         state,
         progress,
         seek_after_end,
+        run_end,
     } = inputs;
     let mut planned = Vec::with_capacity(topo.len());
     for &node in topo {
@@ -2425,6 +2428,7 @@ fn plan_arms<'a>(
                         segment: Segment::new(),
                         probe: traced_source_probe(&log_name, visit_recorder),
                         log_name,
+                        run_end: run_end.clone(),
                     },
                     source,
                     done: live.as_mut().map(|topology| {
@@ -2474,6 +2478,7 @@ fn plan_arms<'a>(
                         control: controllers[index].take(),
                         properties,
                         stream_end: seek_after_end.and_then(|seek| seek.sink_report(node)),
+                        run_end: run_end.clone(),
                     },
                     done: element_done(live),
                 }
@@ -2690,6 +2695,7 @@ pub(crate) async fn run_graph_inner<'a: 'c, 'c, Clk: PipelineClock>(
         install_flight_recorder(rec, &vg, &txs, &solution, &names);
     }
 
+    let run_end = RunEndRequest::default();
     let planned = plan_arms(
         &mut vg,
         &topo,
@@ -2710,6 +2716,7 @@ pub(crate) async fn run_graph_inner<'a: 'c, 'c, Clk: PipelineClock>(
             state: &state,
             progress,
             seek_after_end: seek_after_end.as_ref(),
+            run_end: &run_end,
         },
     )?;
     let mut arms: Vec<BoxFuture<'c, Result<u64, G2gError>>> = Vec::with_capacity(n + 1);
@@ -2766,6 +2773,7 @@ pub(crate) async fn run_graph_inner<'a: 'c, 'c, Clk: PipelineClock>(
                 link_capacity,
                 ticker,
                 visit_recorder.clone(),
+                run_end.clone(),
             )
             .run(),
         ),
@@ -3126,6 +3134,7 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
         install_flight_recorder(rec, &vg, &txs, &solution, &names);
     }
 
+    let run_end = RunEndRequest::default();
     let planned = plan_arms(
         &mut vg,
         &topo,
@@ -3146,6 +3155,7 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
             state: &state,
             progress,
             seek_after_end: seek_after_end.as_ref(),
+            run_end: &run_end,
         },
     )?;
     // One `spawn_arm` handle per arm (mirrors the cooperative `arms` vec). Each
@@ -3239,6 +3249,7 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
                     link_capacity,
                     ticker.as_deref().map(|t| t as &dyn DynAsyncClock),
                     visit_recorder.clone(),
+                    run_end.clone(),
                 )
                 .run(),
             )
@@ -4393,6 +4404,7 @@ pub(crate) struct SourceArmIo {
     pub(crate) segment: Segment,
     pub(crate) log_name: ElementLogName,
     pub(crate) probe: Probe,
+    pub(crate) run_end: RunEndRequest,
 }
 
 pub(crate) fn traced_source_probe(
@@ -4409,6 +4421,7 @@ pub(crate) struct SourceFrameSpans<'o, S: ?Sized> {
     probe: Probe,
     span_start_ns: Option<u64>,
     pushing_sequence: Option<u64>,
+    pushed_frames: u64,
 }
 
 impl<'o, S: ?Sized> SourceFrameSpans<'o, S> {
@@ -4418,6 +4431,7 @@ impl<'o, S: ?Sized> SourceFrameSpans<'o, S> {
             span_start_ns: probe.as_ref().and_then(|_| ElementProbe::mark()),
             probe,
             pushing_sequence: None,
+            pushed_frames: 0,
         }
     }
 
@@ -4432,7 +4446,11 @@ impl<'o, S: ?Sized> SourceFrameSpans<'o, S> {
         if !matches!(outcome, core::task::Poll::Ready(Ok(_))) {
             return;
         }
-        let (Some(probe), Some(sequence)) = (&self.probe, self.pushing_sequence.take()) else {
+        let Some(sequence) = self.pushing_sequence.take() else {
+            return;
+        };
+        self.pushed_frames += 1;
+        let Some(probe) = &self.probe else {
             return;
         };
         probe.record_frame_processed(sequence, 0, self.span_start_ns);
@@ -4496,6 +4514,7 @@ pub(crate) async fn run_source(
         segment,
         log_name,
         probe,
+        run_end,
     } = io;
     // M206: announce the stream start before any data, one per source, so an
     // application can bracket each stream's lifetime (StreamStart .. Eos).
@@ -4523,8 +4542,15 @@ pub(crate) async fn run_source(
     // downstream branch maps timestamps to running time from the first frame.
     let _ = adapter.push(PipelinePacket::Segment(segment)).await?;
     adapter.set_push_wait_probe(probe.clone());
-    src.run(&mut SourceFrameSpans::new(&mut adapter, probe))
-        .await
+    let mut spans = SourceFrameSpans::new(&mut adapter, probe);
+    let ended = select2(src.run(&mut spans), run_end.requested()).await;
+    match ended {
+        Either::Left(result) => result,
+        Either::Right(()) => {
+            let _ = spans.push(PipelinePacket::Eos).await?;
+            Ok(spans.pushed_frames)
+        }
+    }
 }
 
 /// An interior transform arm. Besides forwarding data, it (D4) selects on a β
@@ -4574,6 +4600,7 @@ pub struct SinkArmIo {
     pub(crate) properties: Option<PropertyMailbox>,
     // set when a seek can restart the stream after its Eos, the arm then ends only when its input closes
     pub(crate) stream_end: Option<SinkEndReport>,
+    pub(crate) run_end: RunEndRequest,
 }
 
 impl SinkArmIo {
@@ -4593,6 +4620,7 @@ impl SinkArmIo {
             control: None,
             properties: None,
             stream_end: None,
+            run_end: RunEndRequest::default(),
         }
     }
 }
@@ -4931,7 +4959,10 @@ async fn sink_arm_loop<E: AsyncElement>(elem: &mut E, io: SinkArmIo) -> Result<u
         control,
         properties,
         stream_end,
+        run_end,
     } = io;
+    // once the user closes the window, the frames still in flight have nowhere to go
+    let mut window_closed = false;
     let mut null = NullSink;
     let mut consumed = 0u64;
     let mut prerolled_self = false;
@@ -4992,6 +5023,11 @@ async fn sink_arm_loop<E: AsyncElement>(elem: &mut E, io: SinkArmIo) -> Result<u
             log_received(probe.log_name(), packet);
         }
         match packet {
+            Some(PipelinePacket::Eos) if window_closed => return Ok(consumed),
+            Some(PipelinePacket::DataFrame(_)) if window_closed => {
+                in_rx.pop_transit_ns();
+            }
+            Some(_) if window_closed => {}
             // M360: discard stale pre-seek buffers while draining toward the
             // `Flush`; control packets fall through (the `Flush` ends drain).
             Some(PipelinePacket::DataFrame(_)) if flushing => {
@@ -5002,7 +5038,10 @@ async fn sink_arm_loop<E: AsyncElement>(elem: &mut E, io: SinkArmIo) -> Result<u
             Some(PipelinePacket::Eos)
                 if stream_end.as_ref().is_some_and(SinkEndReport::eos_is_stale) => {}
             Some(PipelinePacket::Eos) => {
-                elem.process(PipelinePacket::Eos, &mut null).await?;
+                match elem.process(PipelinePacket::Eos, &mut null).await {
+                    Err(G2gError::WindowClosed) => return Ok(consumed),
+                    result => result?,
+                }
                 #[cfg(feature = "metadata")]
                 post_frame_identity(bus.as_ref(), &probe, frame_identity.finish());
                 // Count this sink toward preroll only if it never took a real
@@ -5127,7 +5166,14 @@ async fn sink_arm_loop<E: AsyncElement>(elem: &mut E, io: SinkArmIo) -> Result<u
                 )?;
                 #[cfg(feature = "metadata")]
                 let capture_unix_ns = frame_capture_unix_ns(&packet);
-                elem.process(packet, &mut null).await?;
+                match elem.process(packet, &mut null).await {
+                    Err(G2gError::WindowClosed) => {
+                        run_end.request();
+                        window_closed = true;
+                        continue;
+                    }
+                    result => result?,
+                }
                 if let (Some(p), Some(seq)) = (timed, seq) {
                     // M851: the last hop of a frame's journey. A sink pushes
                     // nowhere, so the banked wait is always 0 here.
@@ -6612,6 +6658,10 @@ pub(crate) fn try_clone_packet(packet: &PipelinePacket) -> Result<PipelinePacket
         // detector branch and a video branch carry the same AnalyticsMeta without
         // aliasing. The frame-level fan-out primitive.
         PipelinePacket::DataFrame(frame) => PipelinePacket::DataFrame(frame.share()),
+        PipelinePacket::Overwrite { offset, frame } => PipelinePacket::Overwrite {
+            offset: *offset,
+            frame: frame.share(),
+        },
         // Runner-internal (a fan-in arm's deadline), so it is never on a link to
         // begin with; trivially cloneable all the same.
         PipelinePacket::Tick => PipelinePacket::Tick,

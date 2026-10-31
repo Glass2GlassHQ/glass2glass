@@ -10,7 +10,8 @@
 //!
 //! A host with no reachable PipeWire daemon (CI, headless) skips:
 //! `configure_pipeline` fails loud with a hardware error, treated as "no
-//! device" not a failure. Run:
+//! device" not a failure. A daemon with no audio sink skips too, since the
+//! stream then has nothing to link to and no graph cycle runs it. Run:
 //! `cargo test -p g2g-plugins --features pipewire --test m1106_pipewiresink_drift_clock`.
 #![cfg(all(target_os = "linux", feature = "pipewire"))]
 
@@ -19,12 +20,13 @@ use std::time::Duration;
 
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
-use g2g_core::runtime::block_on;
+use g2g_core::runtime::{block_on, DeviceProvider};
 use g2g_core::{
-    AsyncElement, AudioFormat, Caps, ClockPriority, FrameTiming, G2gError, MemoryDomain,
-    OutputSink, PipelineClock, PipelinePacket, PushOutcome,
+    AsyncElement, AudioFormat, Caps, ClockPriority, DriftClock, FrameTiming, G2gError,
+    MemoryDomain, OutputSink, PipelineClock, PipelinePacket, PushOutcome,
 };
 use g2g_plugins::pipewiresink::PipeWireSink;
+use g2g_plugins::pwdevice::PipeWireDeviceProvider;
 
 const RATE: u32 = 48_000;
 const FREQ: f32 = 440.0;
@@ -73,6 +75,13 @@ fn pcm_frame(bytes: Vec<u8>, seq: u64) -> Frame {
 
 #[test]
 fn pipewiresink_disciplines_its_clock_from_the_stream() {
+    let has_audio_sink = PipeWireDeviceProvider::new()
+        .probe()
+        .is_ok_and(|devices| devices.iter().any(|device| device.klass == "Audio/Sink"));
+    if !has_audio_sink {
+        eprintln!("skip m1106: PipeWire has no audio sink to play to");
+        return;
+    }
     let mut sink = PipeWireSink::new();
 
     let cand = sink
@@ -116,10 +125,11 @@ fn pipewiresink_disciplines_its_clock_from_the_stream() {
     }
     block_on(sink.process(PipelinePacket::Eos, &mut null)).expect("eos");
 
+    // one observation per graph cycle, not per buffer the sink could fill
     let obs = clock.observations();
     assert!(
-        obs >= 2,
-        "clock got only {obs} observations; discipline did not run"
+        obs >= DriftClock::MIN_SAMPLES_TO_GATE,
+        "clock got only {obs} observations over {SECONDS} s of playout"
     );
 
     let slope = clock.slope();

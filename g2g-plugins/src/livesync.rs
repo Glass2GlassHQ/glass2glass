@@ -30,9 +30,8 @@ use alloc::vec;
 
 use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{
-    Caps, CapsConstraint, ConfigureOutcome, ElementMetadata, Frame, FrameTiming, G2gError,
-    MultiInputElement, OutputSink, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
-    Rate,
+    Caps, CapsConstraint, ConfigureOutcome, ElementMetadata, Frame, G2gError, MultiInputElement,
+    OutputSink, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate,
 };
 
 use crate::audioconvert::silence_byte;
@@ -362,9 +361,7 @@ impl LiveSync {
             }
         }
         if self.single_segment && stamped_pts_ns.is_some() {
-            if frame.timing.dts_ns != FrameTiming::PTS_NONE {
-                frame.timing.dts_ns = self.translate(frame.timing.dts_ns);
-            }
+            frame.timing.map_dts(|dts_ns| self.translate(dts_ns));
             frame.timing.pts_ns = pts_ns;
         }
         let duration_ns = match frame.timing.duration_ns {
