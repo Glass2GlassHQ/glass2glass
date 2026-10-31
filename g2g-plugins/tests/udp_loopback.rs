@@ -19,8 +19,9 @@ use g2g_core::{
     PipelineClock, PipelinePacket, PushOutcome, Rate, VideoCodec,
 };
 use g2g_plugins::fakesink::FakeSink;
-use g2g_plugins::rtcp;
+use g2g_plugins::rtcp::{self, RtcpPacket};
 use g2g_plugins::rtppay::RtpH264Packetizer;
+use g2g_plugins::rtprecv::NACK_RETRY_INTERVAL_NS;
 use g2g_plugins::udpsink::UdpSink;
 use g2g_plugins::udpsrc::UdpSrc;
 
@@ -392,6 +393,116 @@ async fn nack_recovers_dropped_packets_via_retransmission() {
     assert!(
         sink.retransmits_sent() >= 3,
         "sender retransmitted the dropped packets"
+    );
+}
+
+const NACK_TEST_JITTER_MS: u64 = 200;
+// deep enough that the hold, not the depth, ends the wait for a loss
+const NACK_TEST_JITTER_DEPTH: usize = 256;
+const NACK_TEST_SEND_GAP: std::time::Duration = std::time::Duration::from_millis(2);
+
+// sends single-NAL packets in `order` (by sequence) to a UdpSrc and returns every sequence its NACKs requested
+async fn nacked_sequences(order: &[u16]) -> Vec<u16> {
+    let recv_std = StdUdpSocket::bind("127.0.0.1:0").expect("bind receiver");
+    let recv_addr = recv_std.local_addr().unwrap();
+    let mut src = UdpSrc::from_socket(recv_std)
+        .unwrap()
+        .with_jitter(NACK_TEST_JITTER_MS, NACK_TEST_JITTER_DEPTH)
+        .with_rtcp(200, true)
+        .with_frame_limit(order.len() as u64);
+    let mut sink = MarkerSink::default();
+    let packet_count = order.iter().max().map_or(0, |&last| last + 1);
+    let mut packetizer = RtpH264Packetizer::new(96, 0x1234);
+    let packets: Vec<Vec<u8>> = (0..packet_count)
+        .map(|index| {
+            let mut packet = packetizer.packetize(&alloc_au(index as u8), u32::from(index) * 3000);
+            packet.pop().expect("one packet per access unit")
+        })
+        .collect();
+    let sender = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("bind sender");
+    let (finished, mut receiver_finished) = tokio::sync::oneshot::channel::<()>();
+    let receive = async {
+        let received = tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            run_simple_pipeline(
+                &mut src,
+                &mut sink,
+                &ZeroClock,
+                LatencyProfile::Live.link_capacity(),
+            ),
+        )
+        .await;
+        finished
+            .send(())
+            .expect("the collector waits for the receiver");
+        received
+    };
+    let send = async {
+        for &sequence in order {
+            sender
+                .send_to(&packets[usize::from(sequence)], recv_addr)
+                .await
+                .expect("send media");
+            tokio::time::sleep(NACK_TEST_SEND_GAP).await;
+        }
+    };
+    let collect = async {
+        let mut requested = Vec::new();
+        let mut feedback = [0u8; 2048];
+        loop {
+            // a NACK already queued on loopback is read before the receiver's end stops collecting
+            tokio::select! {
+                biased;
+                received = sender.recv_from(&mut feedback) => {
+                    let (length, _) = received.expect("receive feedback");
+                    for packet in rtcp::parse_compound(&feedback[..length]) {
+                        if let RtcpPacket::Nack { missing, .. } = packet {
+                            requested.extend(missing);
+                        }
+                    }
+                }
+                _ = &mut receiver_finished => return requested,
+            }
+        }
+    };
+    let (received, (), requested) = tokio::join!(receive, send, collect);
+    received
+        .expect("receiver finishes within 15s")
+        .expect("udp receive pipeline succeeds");
+    requested
+}
+
+#[tokio::test]
+async fn a_briefly_reordered_packet_is_not_nacked() {
+    const PACKETS: u16 = 60;
+    // late in the stream, past any startup quiet period in the receiver
+    const REORDERED: u16 = 50;
+    let mut order: Vec<u16> = (0..PACKETS).collect();
+    order.swap(usize::from(REORDERED), usize::from(REORDERED) + 1);
+    let requested = nacked_sequences(&order).await;
+    assert!(
+        requested.is_empty(),
+        "a packet one send gap late arrives inside the reorder wait, got NACKs for {requested:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_lost_packet_is_requested_a_bounded_number_of_times() {
+    // enough traffic to outlast the jitter hold
+    const PACKETS: u16 = 150;
+    const LOST: u16 = 3;
+    let order: Vec<u16> = (0..PACKETS).filter(|&sequence| sequence != LOST).collect();
+    let requested = nacked_sequences(&order).await;
+    let requests = requested
+        .iter()
+        .filter(|&&sequence| sequence == LOST)
+        .count();
+    let most_requests = (NACK_TEST_JITTER_MS * 1_000_000 / NACK_RETRY_INTERVAL_NS) as usize;
+    assert!(
+        (1..=most_requests).contains(&requests),
+        "the loss is requested at least once and at most once per retry interval of the hold, got {requests}: {requested:?}"
     );
 }
 

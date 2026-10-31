@@ -504,8 +504,11 @@ too-late packets.
 RTCP (`rtcp.rs`) is sans-IO RFC 3550 SR, RR and BYE plus RFC 4585 Generic NACK,
 with `ReceptionStats` carrying loss fraction, cumulative loss and interarrival
 jitter. It runs RTP/RTCP-muxed on the one socket (RFC 5761). `UdpSrc` sends
-periodic receiver reports and emits a NACK for each detected gap, and `UdpSink`
-honours those NACKs from its send history. A retransmit arriving inside the
+periodic receiver reports and requests each detected gap through RIST's
+`NackScheduler` on GStreamer `rtpjitterbuffer`'s timing before it has measured
+jitter and RTT: first after 20 ms, so a reordered packet is not requested, then
+every 40 ms or more, as many times as fit in the jitter hold. `UdpSink` honours
+those NACKs from its send history. A retransmit arriving inside the
 jitter hold window heals the gap before it is declared lost, so the loop
 recovers packet loss end to end.
 

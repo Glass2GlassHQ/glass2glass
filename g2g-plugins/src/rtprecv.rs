@@ -27,6 +27,7 @@ use g2g_core::{
 use crate::filesink::io_err;
 use crate::flexfec::FlexFecDecoder;
 use crate::nalparse::NalCodec;
+use crate::rist::NackScheduler;
 use crate::rtcp::{self, ReceptionStats, RtcpPacket};
 use crate::rtpdepay::{AccessUnit, RtpDepayloader, RtpEncoding};
 use crate::rtpjitter::{JitterConfig, RtpJitterBuffer, RtpPtsRebase};
@@ -37,9 +38,9 @@ use crate::ulpfec::FecDecoder;
 const RECV_BUF: usize = 65_536;
 /// Default receiver-report cadence.
 pub const DEFAULT_RR_INTERVAL_MS: u64 = 1000;
-/// Minimum spacing between NACK feedback packets, so a persistent gap is not
-/// re-requested every datagram (give a retransmit time to arrive).
-const NACK_MIN_INTERVAL_NS: u64 = 20_000_000;
+// GStreamer's rtpjitterbuffer, before it has measured jitter and RTT, first requests a loss after 20 ms and retries every 40 ms
+const FIRST_NACK_DELAY_NS: u64 = 20_000_000;
+pub const NACK_RETRY_INTERVAL_NS: u64 = 40_000_000;
 /// Our own SSRC as the RTCP reporter (`g2g` + 1).
 const LOCAL_SSRC: u32 = 0x6732_6701;
 
@@ -308,6 +309,18 @@ impl AccessUnitEmitter {
     }
 }
 
+// the retries spread over the jitter hold, after which the buffer gives up on the loss
+fn nack_scheduler(jitter: &JitterConfig) -> NackScheduler {
+    let first_request_ns = FIRST_NACK_DELAY_NS.min(jitter.max_hold_ns);
+    let retry_window_ns = jitter.max_hold_ns - first_request_ns;
+    let max_requests = (retry_window_ns / NACK_RETRY_INTERVAL_NS).max(1);
+    NackScheduler::new(
+        first_request_ns,
+        jitter.max_hold_ns,
+        u32::try_from(max_requests).unwrap_or(u32::MAX),
+    )
+}
+
 /// Run the RTP receive loop on `socket` until `frame_limit` access units
 /// have been emitted (`u64::MAX` = run until a socket error or downstream
 /// shutdown, 0 = emit nothing), pushing each completed access unit downstream
@@ -344,7 +357,7 @@ pub async fn receive_rtp(
     let rr_interval_ns = cfg.rtcp_rr_interval_ms * 1_000_000;
     let mut peer: Option<SocketAddr> = None;
     let mut last_rr_ns = g2g_core::metrics::monotonic_ns();
-    let mut last_nack_ns = 0u64;
+    let mut nacks = nack_scheduler(&cfg.jitter);
 
     loop {
         // Drain every packet the jitter buffer will release now, turning each
@@ -486,13 +499,11 @@ pub async fn receive_rtp(
                 }
             }
 
-            // Request retransmission of any open gaps, rate-limited.
-            if cfg.nack_enabled && now.saturating_sub(last_nack_ns) >= NACK_MIN_INTERVAL_NS {
-                let missing = jitter.missing_seqs();
-                if !missing.is_empty() {
-                    let nack = rtcp::build_nack(LOCAL_SSRC, media_ssrc, &missing);
+            if cfg.nack_enabled {
+                let requests = nacks.due(&jitter.missing_seqs(), now, usize::MAX);
+                if !requests.is_empty() {
+                    let nack = rtcp::build_nack(LOCAL_SSRC, media_ssrc, &requests);
                     let _ = socket.send_to(&nack, from).await;
-                    last_nack_ns = now;
                 }
             }
         }

@@ -126,6 +126,7 @@ Breaking: `QosMessage` gains `downstream_proc_ns`, `ElementProbe` is no longer `
 - M2025: `mediacodecenc` forces a keyframe on a downstream request, and the `mediacodec` feature now needs Android API 26.
 - M2026: `srtsrc` corrects TSBPD for clock drift from ACKACKs and keeps its schedule across pauses longer than 35 minutes.
 - M2027: `ristsrc` follows a sender that restarts with a new SSRC.
+- M2028: `udpsrc` and `rtspserversrc` wait 20 ms before requesting a lost packet and cap the retries, as gst's `rtpjitterbuffer` does.
 
 ## 0.10.0
 
