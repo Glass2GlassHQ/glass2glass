@@ -43,7 +43,6 @@ use alloc::sync::Arc;
 
 use spin::Mutex;
 
-#[cfg(feature = "std")]
 use alloc::vec::Vec;
 
 use crate::bus::{BusHandle, BusMessage};
