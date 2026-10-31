@@ -651,7 +651,9 @@ the target from the stream's first timestamp, as ffmpeg's `-ss` counts from the 
 time (gst counts from the first PCR in TS). `DemuxSeek` records the pts of the first
 unit of any track, `flvdemux` lowers it to the earliest track's first pts as ffmpeg's FLV
 start time is, while Matroska keeps the first unit since ffmpeg drops the AAC priming
-from its start time there. A seek taken before that unit becomes a pts once it arrives, and an
+from its start time there. A seek taken before that unit becomes a pts once it arrives. Until
+the target, a Matroska unit of the selected track presenting earlier lowers that start, as gst
+counts from an open GOP's leading B frames, and a seek to 0 opens the stream as playback does. An
 index lookup (Matroska `Cues`, the Ogg guess) waits for it and rescans from the file
 start until then. `tsdemux` holds every PID's units while a seek waits for the stream
 start, until each PMT stream has shown a stamped unit (or EOS, or 5 MB, ffmpeg's

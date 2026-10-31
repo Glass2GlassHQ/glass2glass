@@ -118,6 +118,7 @@ Breaking: `QosMessage` gains `downstream_proc_ns`, `ElementProbe` is no longer `
 - M2015: a seek reaches every seekable element of a pipeline, so HLS plays its separate audio and subtitle renditions from the seek target.
 - M2016: byte-stream demuxers serve non-flushing seeks, carrying running time on without a `Flush`.
 - M2017: `Segment::time` is signed, so TS streams with B frames report positions from the first PTS.
+- M2020: a Matroska seek taken before the first frame counts from the earliest B frame's pts, as gst does.
 
 ## 0.10.0
 

@@ -253,9 +253,6 @@ Highest leverage first:
   MP3).
 - **Corpus sweep bugs** (calliope TESTING techniques 21-23, paths under
   `~/.cache/calliope` on hercules):
-  - `h264/H264_might_overflow.mkv` seeks from 1.086 where gst uses 1.003: a seek
-    taken before the first unit counts from that unit's pts, and the B frames
-    presenting at 1.003 and 1.044 arrive after it.
   - `mpegtsmux` writes a DTS of exactly 0 as unset, so the PES carries no DTS.
   - Demuxers drop streams gst's parsebin exposes: DTS in `filter/242_4.mkv`, TTA,
     pcm_dvd LPCM in `coolitnow-partial.vob`, and the xan_dpcm audio of

@@ -300,15 +300,29 @@ impl<U> DemuxSeek<U> {
         );
     }
 
+    // open-GOP B frames arrive after the keyframe they precede, and lower the start as they lower an opening segment
+    pub(crate) fn lower_seek_stream_start(&mut self, pts_ns: u64) {
+        if !self.seeks_from_stream_start() {
+            return;
+        }
+        self.stream_start_ns = Some(
+            self.stream_start_ns
+                .map_or(pts_ns, |start| start.min(pts_ns)),
+        );
+    }
+
     // a seek taken before the first unit waits for the caller to report the stream start
     pub(crate) fn awaits_stream_start(&self) -> bool {
-        self.stream_start_ns.is_none()
-            && matches!(
-                self.phase,
-                Phase::Discarding {
-                    target: SeekTarget::FromStreamStart(_)
-                }
-            )
+        self.stream_start_ns.is_none() && self.seeks_from_stream_start()
+    }
+
+    fn seeks_from_stream_start(&self) -> bool {
+        matches!(
+            self.phase,
+            Phase::Discarding {
+                target: SeekTarget::FromStreamStart(_)
+            }
+        )
     }
 
     pub(crate) fn stream_start_ns(&self) -> Option<u64> {
@@ -561,8 +575,20 @@ impl<U> DemuxSeek<U> {
             None => Segment::for_flush_seek(&target, None),
         };
         let segment = with_stream_time(segment, stream_start_ns);
+        // a seek to 0 before the first unit opens the stream as playback does, so a B frame presenting earlier lowers it
+        let opens_the_stream = self.phase
+            == Phase::Discarding {
+                target: SeekTarget::FromStreamStart(0),
+            };
         self.phase = Phase::Idle;
-        self.segment = StreamSegment::Fixed;
+        self.segment = if opens_the_stream {
+            StreamSegment::AtStreamStart {
+                start_ns: target_ns,
+                sent: segment,
+            }
+        } else {
+            StreamSegment::Fixed
+        };
         self.sent_segment = segment;
         self.position_ns = Some(pts_ns);
         Admitted::release(Some(segment), core::mem::take(&mut self.kept), Some(unit))

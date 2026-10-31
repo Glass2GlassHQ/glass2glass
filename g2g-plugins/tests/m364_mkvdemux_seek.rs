@@ -153,6 +153,7 @@ fn webm_with_cues() -> (Vec<u8>, u64, Vec<u8>) {
 #[derive(Default)]
 struct Capture {
     frames: Vec<Vec<u8>>,
+    pts: Vec<u64>,
     flushes: usize,
     segment_starts: Vec<u64>,
 }
@@ -167,9 +168,11 @@ impl OutputSink for Capture {
             match packet {
                 PipelinePacket::DataFrame(Frame {
                     domain: MemoryDomain::System(s),
+                    timing,
                     ..
                 }) => {
                     self.frames.push(s.as_slice().to_vec());
+                    self.pts.push(timing.pts_ns);
                 }
                 PipelinePacket::Flush => self.flushes += 1,
                 PipelinePacket::Segment(segment) => self.segment_starts.push(segment.start),
@@ -388,4 +391,80 @@ async fn mkvdemux_idle_flush_resets_the_parser_fully() {
         "a headerless cluster after a full reset decodes nothing, got {:?}",
         after.frames
     );
+}
+
+// its open-GOP I frame comes first, and the two B frames after it present earlier
+const LEADING_BFRAMES_MKV: &str = "h264_64x48_25fps_leading_bframes.mkv";
+
+async fn demux_leading_bframes(time: SeekController) -> Capture {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures")
+        .join(LEADING_BFRAMES_MKV);
+    let byte = SeekController::new();
+    let mut src = FileSrc::new(
+        &path,
+        Caps::ByteStream {
+            encoding: ByteStreamEncoding::Matroska,
+        },
+    )
+    .with_seek(byte.clone());
+    let mut demux = MkvDemux::new()
+        .with_stream(MkvStream::H264)
+        .with_seek(time, byte);
+    let caps = {
+        let c: Pin<Box<dyn Future<Output = _>>> = Box::pin(src.intercept_caps());
+        c.await.expect("probe")
+    };
+    src.configure_pipeline(&caps).expect("configure src");
+    demux
+        .configure_pipeline(&Caps::ByteStream {
+            encoding: ByteStreamEncoding::Matroska,
+        })
+        .expect("configure demux");
+    let mut capture = Capture::default();
+    {
+        let mut chain = Chain {
+            demux: &mut demux,
+            capture: &mut capture,
+        };
+        src.run(&mut chain).await.expect("filesrc runs");
+    }
+    capture
+}
+
+#[tokio::test]
+async fn a_seek_before_the_first_unit_counts_from_the_earliest_pts() {
+    let played = demux_leading_bframes(SeekController::new()).await;
+    let first_pts_ns = played.pts[0];
+    let earliest_pts_ns = *played.pts.iter().min().expect("frames");
+    assert!(
+        earliest_pts_ns < first_pts_ns,
+        "the fixture's B frames present before its first keyframe"
+    );
+
+    let time = SeekController::new();
+    let ticket = time.seek(Seek::flush_to(first_pts_ns - earliest_pts_ns));
+    let seeked = demux_leading_bframes(time).await;
+    assert_eq!(ticket.outcome(), Some(SeekOutcome::Served));
+    assert_eq!(
+        seeked.segment_starts.last(),
+        Some(&first_pts_ns),
+        "a seek to the first keyframe's position lands on it"
+    );
+}
+
+#[tokio::test]
+async fn a_seek_to_the_start_before_the_first_unit_keeps_the_earlier_b_frames() {
+    let played = demux_leading_bframes(SeekController::new()).await;
+
+    let time = SeekController::new();
+    let ticket = time.seek(Seek::flush_to(0));
+    let seeked = demux_leading_bframes(time).await;
+    assert_eq!(ticket.outcome(), Some(SeekOutcome::Served));
+    assert_eq!(
+        seeked.segment_starts.last(),
+        played.pts.iter().min(),
+        "the B frames lower the segment as in playback"
+    );
+    assert_eq!(seeked.pts, played.pts);
 }

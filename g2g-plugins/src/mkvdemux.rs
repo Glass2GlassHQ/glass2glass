@@ -661,6 +661,7 @@ impl MkvDemux {
             if Some(f.track) != selected_track {
                 continue; // a stream other than the selected one
             }
+            self.seek.lower_seek_stream_start(f.pts_ns);
             // M362 seek: hold frames from the keyframe at/before the target (the
             // Matroska block keyframe flag) until the target, then a segment and them.
             let admitted = self.seek.admit(f.pts_ns, f.keyframe, f);
