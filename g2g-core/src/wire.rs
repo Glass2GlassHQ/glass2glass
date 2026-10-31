@@ -123,6 +123,9 @@ impl Writer {
     fn u64(&mut self, v: u64) {
         self.buf.extend_from_slice(&v.to_le_bytes());
     }
+    fn i64(&mut self, v: i64) {
+        self.buf.extend_from_slice(&v.to_le_bytes());
+    }
     fn bool(&mut self, v: bool) {
         self.u8(v as u8);
     }
@@ -177,6 +180,12 @@ impl<'a> Reader<'a> {
     fn u64(&mut self) -> Result<u64, WireError> {
         let b = self.take(8)?;
         Ok(u64::from_le_bytes([
+            b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
+        ]))
+    }
+    fn i64(&mut self) -> Result<i64, WireError> {
+        let b = self.take(8)?;
+        Ok(i64::from_le_bytes([
             b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
         ]))
     }
@@ -932,7 +941,7 @@ fn put_segment(w: &mut Writer, s: &Segment) {
         }
         None => w.bool(false),
     }
-    w.u64(s.time);
+    w.i64(s.time);
     w.u64(s.position);
     w.bool(s.key_units_only);
 }
@@ -942,7 +951,7 @@ fn get_segment(r: &mut Reader) -> Result<Segment, WireError> {
     let base = r.u64()?;
     let start = r.u64()?;
     let stop = if r.bool()? { Some(r.u64()?) } else { None };
-    let time = r.u64()?;
+    let time = r.i64()?;
     let position = r.u64()?;
     let key_units_only = r.bool()?;
     Ok(Segment {

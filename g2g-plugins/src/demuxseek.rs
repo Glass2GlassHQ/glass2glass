@@ -37,7 +37,9 @@ use core::iter::Chain;
 
 use g2g_core::log::{ClockTime, Target};
 use g2g_core::runtime::SeekController;
-use g2g_core::{G2gError, MultiOutputSink, OutputSink, PipelinePacket, Seek, SeekFlags, Segment};
+use g2g_core::{
+    stream_time_ns, G2gError, MultiOutputSink, OutputSink, PipelinePacket, Seek, SeekFlags, Segment,
+};
 
 // a stream without a keyframe for this many units releases them early, the segment still clips them
 const KEPT_UNITS_MAX: usize = 1024;
@@ -47,7 +49,7 @@ const LOG_CATEGORY: &str = "demuxseek";
 // stream time counts from the stream start, as seek targets do, so a position read back seeks to itself
 pub(crate) fn with_stream_time(segment: Segment, stream_start_ns: u64) -> Segment {
     Segment {
-        time: segment.start.saturating_sub(stream_start_ns),
+        time: stream_time_ns(segment.start).saturating_sub(stream_time_ns(stream_start_ns)),
         ..segment
     }
 }

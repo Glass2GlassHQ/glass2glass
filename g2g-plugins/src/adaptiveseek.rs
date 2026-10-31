@@ -3,7 +3,7 @@ use core::task::Poll;
 
 use g2g_core::log::{ClockTime, LogSource};
 use g2g_core::runtime::{SeekController, SeekRefusal};
-use g2g_core::{g2g_warn, Seek, SeekFlags, SeekType, Segment};
+use g2g_core::{g2g_warn, stream_time_ns, Seek, SeekFlags, SeekType, Segment};
 
 // the Segments an adaptive source sends ahead of its media, so running time follows presentation time
 #[derive(Debug, Default)]
@@ -29,9 +29,15 @@ impl AdaptiveTimeline {
     ) -> Option<Segment> {
         if let Some(seek) = self.seek_to_open.take() {
             let media_start_ns = media_start_ns(source, presentation_start_ns, earliest_pts_ns());
-            let segment = seek_segment(&seek, presentation_start_ns, media_start_ns);
-            self.origin_ns = Some(segment.time);
-            return Some(segment);
+            // a target before the segment the seek landed in plays from that segment's start
+            let position_ns = seek.start.max(presentation_start_ns);
+            self.origin_ns = Some(position_ns);
+            return Some(seek_segment(
+                &seek,
+                position_ns,
+                presentation_start_ns,
+                media_start_ns,
+            ));
         }
         let Some(origin_ns) = self.origin_ns else {
             // the demuxer opens the stream
@@ -46,7 +52,7 @@ impl AdaptiveTimeline {
             base: presentation_start_ns.saturating_sub(origin_ns),
             start: media_start_ns,
             position: media_start_ns,
-            time: presentation_start_ns,
+            time: stream_time_ns(presentation_start_ns),
             ..Segment::new()
         })
     }
@@ -67,9 +73,13 @@ fn media_start_ns(
     })
 }
 
-// the seek target, on the timestamps of the segment it landed in
-fn seek_segment(seek: &Seek, presentation_start_ns: u64, media_start_ns: u64) -> Segment {
-    let position_ns = seek.start.max(presentation_start_ns);
+// the seek target at `position_ns`, on the timestamps of the segment it landed in
+fn seek_segment(
+    seek: &Seek,
+    position_ns: u64,
+    presentation_start_ns: u64,
+    media_start_ns: u64,
+) -> Segment {
     let to_media = |presentation_ns: u64| {
         media_start_ns.saturating_add(presentation_ns.saturating_sub(presentation_start_ns))
     };
@@ -79,7 +89,7 @@ fn seek_segment(seek: &Seek, presentation_start_ns: u64, media_start_ns: u64) ->
         ..*seek
     };
     Segment {
-        time: position_ns,
+        time: stream_time_ns(position_ns),
         ..Segment::for_flush_seek(&media_seek, None)
     }
 }

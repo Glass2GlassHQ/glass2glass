@@ -21,8 +21,8 @@ use g2g_core::frame::{Frame, FrameTiming};
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{SeekController, SeekOutcome, SeekRefusal, SeekTicket, SourceLoop};
 use g2g_core::{
-    ByteStreamEncoding, Caps, Dim, G2gError, MemoryDomain, MultiInputElement, OutputSink,
-    PipelinePacket, PropValue, PushOutcome, Rate, Seek, SeekFlags, Segment, VideoCodec,
+    stream_time_ns, ByteStreamEncoding, Caps, Dim, G2gError, MemoryDomain, MultiInputElement,
+    OutputSink, PipelinePacket, PropValue, PushOutcome, Rate, Seek, SeekFlags, Segment, VideoCodec,
 };
 use g2g_plugins::dashsrc::DashSrc;
 use g2g_plugins::fmp4demux::Fmp4Demux;
@@ -240,7 +240,7 @@ async fn dash_live_seek_plays_from_the_segment_holding_the_target() {
         "the seek starts a segment before the live edge"
     );
     assert_eq!(sink.segments.len(), 1);
-    assert_eq!(sink.segments[0].time, INSIDE_LIVE_WINDOW_NS);
+    assert_eq!(sink.segments[0].time, stream_time_ns(INSIDE_LIVE_WINDOW_NS));
 }
 
 // longer than LIVE_RUN_LIMIT, so only a seek taken during the wait ends it in time
@@ -280,7 +280,7 @@ async fn dash_live_seek_during_the_reload_wait_plays_at_once() {
         [expected_stream(before_seek), expected_stream(after_seek)].concat()
     );
     assert_eq!(sink.segments.len(), 1);
-    assert_eq!(sink.segments[0].time, INSIDE_LIVE_WINDOW_NS);
+    assert_eq!(sink.segments[0].time, stream_time_ns(INSIDE_LIVE_WINDOW_NS));
 }
 
 #[tokio::test]
@@ -666,7 +666,8 @@ async fn dash_multi_period_plays_through_and_emits_a_boundary_segment() {
         "running time continues past period a"
     );
     assert_eq!(
-        seg.time, PERIOD_B_START_NS,
+        seg.time,
+        stream_time_ns(PERIOD_B_START_NS),
         "stream time is presentation time"
     );
     assert_eq!(seg.start, 0, "period b's media timestamps start at 0");
@@ -717,7 +718,11 @@ async fn dash_seek_into_a_later_period_plays_from_the_target() {
     );
     assert_eq!(sink.segments.len(), 1, "only the seek's Segment");
     let seg = sink.segments[0];
-    assert_eq!(seg.time, target_ns, "stream time starts at the target");
+    assert_eq!(
+        seg.time,
+        stream_time_ns(target_ns),
+        "stream time starts at the target"
+    );
     // the second segment's first sample is period b's second access unit
     let target_media_ns = AU_DURATION_NS + SEGMENT_DURATION_NS / 2;
     assert_eq!(seg.start, target_media_ns);
@@ -743,9 +748,9 @@ async fn dash_seek_before_a_period_boundary_carries_running_time_over_it() {
         2,
         "the seek's Segment, then the boundary's"
     );
-    assert_eq!(sink.segments[0].time, target_ns);
+    assert_eq!(sink.segments[0].time, stream_time_ns(target_ns));
     let boundary = sink.segments[1];
-    assert_eq!(boundary.time, PERIOD_B_START_NS);
+    assert_eq!(boundary.time, stream_time_ns(PERIOD_B_START_NS));
     assert_eq!(
         boundary.to_running_time(0),
         Some(PERIOD_B_START_NS - target_ns),

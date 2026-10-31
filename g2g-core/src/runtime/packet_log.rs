@@ -2,7 +2,7 @@ use core::fmt;
 
 use crate::frame::{FrameTiming, PipelinePacket};
 use crate::g2g_log_at;
-use crate::log::{ClockTime, ElementLogName, LogLevel};
+use crate::log::{ClockTime, ElementLogName, LogLevel, SignedClockTime};
 use crate::runtime::channel::frame_bytes;
 
 // Each packet an arm hands to its element's `process`, under that element's name.
@@ -54,7 +54,7 @@ impl fmt::Display for PacketFields<'_> {
                 ClockTime(segment.start),
                 ClockTime(segment.stop.unwrap_or(FrameTiming::PTS_NONE)),
                 ClockTime(segment.base),
-                ClockTime(segment.time),
+                SignedClockTime(segment.time),
             ),
             PipelinePacket::Eos => f.write_str("event eos"),
             PipelinePacket::Flush => f.write_str("event flush"),

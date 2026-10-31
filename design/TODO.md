@@ -251,9 +251,6 @@ Highest leverage first:
 - **Matroska `CodecDelay`:** `matroskademux` applies it to Opus only, so AAC, MP2 and
   MP3 tracks decode with the encoder priming ffmpeg trims (1105 samples on an ffmpeg
   MP3).
-- **TS positions with B frames:** `tsdemux` opens its segment at the first DTS, so
-  positions read high by the first PTS minus the first DTS until the first seek.
-  Needs a signed `Segment` time offset in g2g-core.
 - **Corpus sweep bugs** (calliope TESTING techniques 21-23, paths under
   `~/.cache/calliope` on hercules):
   - `h264/H264_might_overflow.mkv` seeks from 1.086 where gst uses 1.003: a seek

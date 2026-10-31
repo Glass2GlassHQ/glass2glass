@@ -233,6 +233,38 @@ async fn tsdemux_opens_on_a_stream_start_segment() {
     let _ = std::fs::remove_file(path);
 }
 
+// libx264's B frames put the first frame's dts before its pts, and the segment opens at that dts
+#[tokio::test]
+async fn tsdemux_positions_count_from_the_first_pts() {
+    if !have_ffmpeg() {
+        eprintln!("skipping: ffmpeg not on PATH");
+        return;
+    }
+    let path = temp_path("bframes.ts");
+    author_ts(&path, "libx264", "3600");
+    let file = std::fs::read(&path).expect("read the fixture");
+
+    let mut el = TsDemux::new().with_stream(TsStream::H264);
+    el.configure_pipeline(&Caps::ByteStream {
+        encoding: ByteStreamEncoding::MpegTs,
+    })
+    .expect("tsdemux accepts a transport stream");
+    let sink = run_single(&mut el, &file).await;
+
+    let (seg, first_dts) = opening_segment(&sink.packets);
+    let first_pts = sink
+        .packets
+        .iter()
+        .find_map(|p| match p {
+            PipelinePacket::DataFrame(f) => Some(f.timing.pts_ns),
+            _ => None,
+        })
+        .expect("frames follow");
+    assert!(first_dts < first_pts, "the fixture reorders frames");
+    assert_eq!(seg.to_stream_time(first_pts), Some(0));
+    let _ = std::fs::remove_file(path);
+}
+
 #[tokio::test]
 async fn tsdemuxn_ports_share_one_running_time_origin() {
     if !have_ffmpeg() {

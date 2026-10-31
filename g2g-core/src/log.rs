@@ -291,6 +291,17 @@ impl core::fmt::Display for ClockTime {
     }
 }
 
+// a stream time, which can fall before the stream start, printed as gst's `GST_STIME_FORMAT` does
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SignedClockTime(pub i64);
+
+impl core::fmt::Display for SignedClockTime {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let sign = if self.0 < 0 { "-" } else { "+" };
+        write!(f, "{sign}{}", ClockTime(self.0.unsigned_abs()))
+    }
+}
+
 /// Per-category instance counter, shared by every runner so an element is named
 /// and logged the same way whichever one drives it. Hands out
 /// `<category>N` names (the GStreamer `videotestsrc0` convention) and emits the
@@ -1261,6 +1272,18 @@ pub(crate) mod tests {
     use super::*;
     use alloc::format;
     use alloc::sync::Arc;
+
+    #[test]
+    fn a_stream_time_before_the_stream_start_prints_with_a_minus() {
+        assert_eq!(
+            format!("{}", SignedClockTime(-83_000_000)),
+            "-0:00:00.083000000"
+        );
+        assert_eq!(
+            format!("{}", SignedClockTime(1_500_000_000)),
+            "+0:00:01.500000000"
+        );
+    }
 
     /// What the TUI leans on at teardown: records buffered while logging was
     /// diverted into a ring can be handed to a real sink afterwards, or the only

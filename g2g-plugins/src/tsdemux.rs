@@ -2104,7 +2104,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_upstream_seek_keeps_its_segment() {
-        const SEEK_STREAM_TIME_NS: u64 = 4_000_000_000;
+        const SEEK_STREAM_TIME_NS: i64 = 4_000_000_000;
         let mut d = TsDemux::new();
         d.configure_pipeline(&input_caps()).unwrap();
         let mut sink = CaptureSink::default();
@@ -2143,7 +2143,7 @@ mod tests {
         let discontinuity = Segment {
             base: DISCONTINUITY_STREAM_TIME_NS,
             start: session_pts_ns(SECOND_SESSION_TICKS, 1)[0],
-            time: DISCONTINUITY_STREAM_TIME_NS,
+            time: g2g_core::stream_time_ns(DISCONTINUITY_STREAM_TIME_NS),
             ..Segment::new()
         };
         for packet in [
@@ -2457,10 +2457,20 @@ mod tests {
         d.configure_pipeline(&input_caps()).unwrap();
         let mut sink = CaptureSink::default();
         run_demux(&mut d, &stream, &mut sink).await;
-        let [seg] = sink.segments.as_slice() else {
-            panic!("one stream-start segment, got {:?}", sink.segments);
-        };
         assert_eq!(sink.pts_ns.len(), 3);
+        // the first B frame presents at the I frame's DTS
+        let first_pts_ns = *sink.pts_ns.iter().min().expect("pictures came out");
+        assert!(
+            sink.segments.iter().all(|seg| seg.start == first_pts_ns),
+            "every segment opens at the first DTS: {:?}",
+            sink.segments
+        );
+        let seg = sink.segments.last().expect("a stream-start segment");
+        assert_eq!(
+            seg.to_stream_time(first_pts_ns),
+            Some(0),
+            "the B frame presenting first reads 0"
+        );
         assert!(
             sink.pts_ns.iter().all(|&pts| seg.presents(pts)),
             "every picture presents inside {seg:?}: {:?}",

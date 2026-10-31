@@ -158,6 +158,11 @@ pub struct KeptSamples {
     pub pts_ns: u64,
 }
 
+// a stream time at or after the stream start, held at the largest one an i64 holds
+pub fn stream_time_ns(ns: u64) -> i64 {
+    i64::try_from(ns).unwrap_or(i64::MAX)
+}
+
 /// A playback segment (the `GstSegment` analog, TIME format). Describes the
 /// portion of the stream currently being played, the rate, and the mapping
 /// onto the pipeline running-time clock.
@@ -174,8 +179,9 @@ pub struct Segment {
     pub start: u64,
     /// Latest valid stream timestamp (ns), or `None` for an open-ended segment.
     pub stop: Option<u64>,
-    /// Stream time of the segment start (ns).
-    pub time: u64,
+    /// Stream time of the segment start (ns), below zero when the segment opens
+    /// before the stream start, as a stream whose first DTS precedes its first PTS does.
+    pub time: i64,
     /// Current playback position within the segment (ns).
     pub position: u64,
     /// Trick mode: only key units (keyframes) are to be presented, the rest
@@ -261,15 +267,15 @@ impl Segment {
     }
 
     /// Map a stream timestamp to **stream time** (ns), or `None` if `ts` is
-    /// outside the segment. Direction-agnostic, scaled by `applied_rate`:
-    /// `time + (ts - start) * |applied_rate|`.
+    /// outside the segment or before the stream start. Direction-agnostic,
+    /// scaled by `applied_rate`: `time + (ts - start) * |applied_rate|`.
     pub fn to_stream_time(&self, ts: u64) -> Option<u64> {
         if !self.contains(ts) {
             return None;
         }
         let span = ts.checked_sub(self.start)?;
-        let scaled = (span as f64 * fabs(self.applied_rate)) as u64;
-        Some(self.time.saturating_add(scaled))
+        let scaled = (span as f64 * fabs(self.applied_rate)) as i64;
+        u64::try_from(self.time.saturating_add(scaled)).ok()
     }
 
     /// Clip a buffer's `[b_start, b_stop]` (ns, stream timeline) to the
@@ -355,7 +361,7 @@ impl Segment {
             base,
             start,
             stop,
-            time: start,
+            time: stream_time_ns(start),
             position: start,
             // Trick-mode seeks ask the sink to present key units only.
             key_units_only: seek.flags.contains(SeekFlags::TRICKMODE),
@@ -460,6 +466,23 @@ mod tests {
         assert_eq!(seg.to_stream_time(1_000), Some(50_000));
         assert_eq!(seg.to_stream_time(2_000), Some(52_000));
         assert_eq!(seg.to_stream_time(500), None);
+    }
+
+    #[test]
+    fn a_segment_opening_before_the_stream_start_reads_zero_there() {
+        const OPENING_NS: u64 = 1_000;
+        const STREAM_START_NS: u64 = 1_080;
+        let seg = Segment {
+            start: OPENING_NS,
+            time: stream_time_ns(OPENING_NS) - stream_time_ns(STREAM_START_NS),
+            ..Segment::new()
+        };
+        assert_eq!(seg.to_stream_time(STREAM_START_NS), Some(0));
+        assert_eq!(
+            seg.to_stream_time(OPENING_NS),
+            None,
+            "before the stream start"
+        );
     }
 
     #[test]

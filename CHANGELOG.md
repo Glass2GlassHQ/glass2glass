@@ -117,6 +117,7 @@ Breaking: `QosMessage` gains `downstream_proc_ns`, `ElementProbe` is no longer `
 - M2014: a DASH manifest fails, as in gst, when a Period start is unknown or not after the Period before it.
 - M2015: a seek reaches every seekable element of a pipeline, so HLS plays its separate audio and subtitle renditions from the seek target.
 - M2016: byte-stream demuxers serve non-flushing seeks, carrying running time on without a `Flush`.
+- M2017: `Segment::time` is signed, so TS streams with B frames report positions from the first PTS.
 
 ## 0.10.0
 

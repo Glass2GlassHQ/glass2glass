@@ -67,7 +67,8 @@ impl OutputSink for CaptureSink {
                 PipelinePacket::Flush => self.flushes += 1,
                 PipelinePacket::Segment(seg) => {
                     self.segment_starts.push(seg.start);
-                    self.segment_times.push(seg.time);
+                    self.segment_times
+                        .push(u64::try_from(seg.time).expect("playlist time is never negative"));
                 }
                 _ => {}
             }
