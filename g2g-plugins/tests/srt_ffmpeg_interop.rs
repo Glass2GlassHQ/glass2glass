@@ -361,8 +361,8 @@ async fn run_reverse_interop(listening: Listening, crypto: Option<(&str, u32)>) 
         status.success(),
         "ffmpeg listener received + finalized the stream"
     );
-    // an ignored SHUTDOWN leaves ffmpeg to wait out libsrt's 5 s peer idle timeout
-    const SHUTDOWN_EXIT_LIMIT: Duration = Duration::from_secs(1);
+    // ffmpeg takes about a second to tear libsrt down after a SHUTDOWN, an ignored one leaves it to wait out the 5 s peer idle timeout
+    const SHUTDOWN_EXIT_LIMIT: Duration = Duration::from_secs(2);
     assert!(
         eos_sent.elapsed() < SHUTDOWN_EXIT_LIMIT,
         "the SHUTDOWN ends the call, ffmpeg took {:?} after EOS",
