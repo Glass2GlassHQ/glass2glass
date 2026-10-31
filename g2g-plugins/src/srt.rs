@@ -88,6 +88,8 @@ const LIGHT_ACK_CIF_LEN: usize = 4;
 const FULL_ACK_CIF_LEN: usize = 16;
 // first and last dropped sequence
 const DROP_REQUEST_CIF_LEN: usize = 8;
+// libsrt 1.5.7 drops a control packet with no CIF, and pads ACKACK, KEEPALIVE and SHUTDOWN with zeros itself
+const EMPTY_CIF_PADDING_LEN: usize = 4;
 const SEQUENCE_MASK: u32 = 0x7FFF_FFFF;
 // The receiver runs inside srtsrc, so its lines go under that element's category.
 const RECEIVER_LOG_CATEGORY: &str = "srtsrc";
@@ -262,7 +264,7 @@ impl Handshake {
 pub fn build_control(ctrl: &Control, timestamp: u32, dst_socket_id: u32) -> Vec<u8> {
     let (ctrl_type, type_info, cif) = match ctrl {
         Control::Handshake(hs) => (CTRL_HANDSHAKE, 0, build_handshake_cif(hs)),
-        Control::Keepalive => (CTRL_KEEPALIVE, 0, Vec::new()),
+        Control::Keepalive => (CTRL_KEEPALIVE, 0, alloc::vec![0; EMPTY_CIF_PADDING_LEN]),
         Control::Ack {
             ack_no,
             ack_seq,
@@ -277,9 +279,9 @@ pub fn build_control(ctrl: &Control, timestamp: u32, dst_socket_id: u32) -> Vec<
             (CTRL_ACK, *ack_no, cif)
         }
         Control::LightAck { ack_seq } => (CTRL_ACK, 0, ack_seq.to_be_bytes().to_vec()),
-        Control::AckAck { ack_no } => (CTRL_ACKACK, *ack_no, Vec::new()),
+        Control::AckAck { ack_no } => (CTRL_ACKACK, *ack_no, alloc::vec![0; EMPTY_CIF_PADDING_LEN]),
         Control::Nak { loss } => (CTRL_NAK, 0, build_nak_cif(loss)),
-        Control::Shutdown => (CTRL_SHUTDOWN, 0, Vec::new()),
+        Control::Shutdown => (CTRL_SHUTDOWN, 0, alloc::vec![0; EMPTY_CIF_PADDING_LEN]),
         // Subtype (type-specific field): KMREQ (3) or KMRSP (4); CIF is the KM blob.
         Control::KeyMaterial { rsp, km } => (
             CTRL_USER,
@@ -1945,6 +1947,18 @@ mod tests {
                 ctrl,
                 "{name} round trips"
             );
+        }
+    }
+
+    #[test]
+    fn control_packets_without_fields_carry_padding_libsrt_accepts() {
+        for ctrl in [
+            Control::AckAck { ack_no: 5 },
+            Control::Keepalive,
+            Control::Shutdown,
+        ] {
+            let bytes = build_control(&ctrl, 7, 13);
+            assert_eq!(bytes.len(), HEADER_LEN + EMPTY_CIF_PADDING_LEN, "{ctrl:?}");
         }
     }
 
