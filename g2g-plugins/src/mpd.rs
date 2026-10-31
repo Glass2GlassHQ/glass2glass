@@ -902,13 +902,17 @@ pub fn parse(xml: &str) -> Result<Mpd, MpdError> {
     // Periods with no usable Representation (nothing addressable) are skipped
     // rather than failing the manifest; `@start` accumulates when absent.
     let mut periods: Vec<Period> = Vec::new();
-    let mut next_start = 0.0f64;
+    let mut previous: Option<PeriodSpan> = None;
     for node in root
         .children()
         .filter(|n| n.is_element() && n.has_tag_name("Period"))
     {
-        let period = parse_period(node, next_start);
-        next_start = period.start_secs + period.duration_secs.unwrap_or(0.0);
+        let declared_start = node.attribute("start").and_then(parse_iso_duration);
+        let period = parse_period(node, period_start_secs(declared_start, previous, dynamic)?);
+        previous = Some(PeriodSpan {
+            start_secs: period.start_secs,
+            duration_secs: period.duration_secs,
+        });
         if !period.representations.is_empty() {
             periods.push(period);
         }
@@ -948,9 +952,33 @@ pub fn parse(xml: &str) -> Result<Mpd, MpdError> {
     })
 }
 
-/// Parse one `Period` and its Representations. `default_start` is the previous
-/// Period's end, used when `@start` is absent.
-fn parse_period(node: Node, default_start: f64) -> Period {
+#[derive(Debug, Clone, Copy)]
+struct PeriodSpan {
+    start_secs: f64,
+    duration_secs: Option<f64>,
+}
+
+// gst rejects a start not after the one before, and an unknown start in a static MPD
+fn period_start_secs(
+    declared_start: Option<f64>,
+    previous: Option<PeriodSpan>,
+    dynamic: bool,
+) -> Result<f64, MpdError> {
+    match (declared_start, previous) {
+        (Some(start), Some(previous)) if start <= previous.start_secs => Err(MpdError::Invalid),
+        (Some(start), _) => Ok(start),
+        (None, None) => Ok(0.0),
+        (None, Some(previous)) => match previous.duration_secs {
+            Some(duration) => Ok(previous.start_secs + duration),
+            // a live manifest can list a Period before the one ahead of it has ended
+            None if dynamic => Ok(previous.start_secs),
+            None => Err(MpdError::Invalid),
+        },
+    }
+}
+
+/// Parse one `Period` and its Representations.
+fn parse_period(node: Node, start_secs: f64) -> Period {
     let mut representations = Vec::new();
     for rep in node
         .descendants()
@@ -976,10 +1004,7 @@ fn parse_period(node: Node, default_start: f64) -> Period {
     }
     Period {
         id: node.attribute("id").map(String::from),
-        start_secs: node
-            .attribute("start")
-            .and_then(parse_iso_duration)
-            .unwrap_or(default_start),
+        start_secs,
         duration_secs: node.attribute("duration").and_then(parse_iso_duration),
         base_url: node
             .descendants()
@@ -1277,6 +1302,7 @@ fn parse_zone_offset(s: &str) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::format;
 
     const MPD: &str = r#"<?xml version="1.0"?>
 <MPD mediaPresentationDuration="PT0H0M12.0S" type="static">
@@ -1431,6 +1457,59 @@ mod tests {
             rep.template().unwrap().media_url(&rep.id, segs[2]),
             "seg-360000.m4s"
         );
+    }
+
+    // two Periods of one `$Number$` Representation, `first` and `second` holding their timing attributes
+    fn two_period_mpd(kind: &str, first: &str, second: &str) -> String {
+        let period = |timing: &str| {
+            format!(
+                r#"<Period {timing}><AdaptationSet>
+                  <SegmentTemplate media="$Number$.m4s" duration="1" timescale="1"/>
+                  <Representation id="r" bandwidth="1"/>
+                </AdaptationSet></Period>"#
+            )
+        };
+        format!(
+            r#"<MPD type="{kind}" mediaPresentationDuration="PT20S">{}{}</MPD>"#,
+            period(first),
+            period(second)
+        )
+    }
+
+    #[test]
+    fn a_period_without_a_start_follows_the_one_before() {
+        let mpd = parse(&two_period_mpd(
+            "static",
+            r#"start="PT2S" duration="PT5S""#,
+            "",
+        ))
+        .unwrap();
+        assert_eq!(mpd.periods[1].start_secs, 2.0 + 5.0);
+    }
+
+    #[test]
+    fn a_static_period_whose_start_is_unknown_fails_the_manifest() {
+        assert_eq!(
+            parse(&two_period_mpd("static", r#"start="PT2S""#, "")),
+            Err(MpdError::Invalid)
+        );
+    }
+
+    #[test]
+    fn a_live_period_whose_start_is_unknown_keeps_the_start_before_it() {
+        let mpd = parse(&two_period_mpd("dynamic", r#"start="PT2S""#, "")).unwrap();
+        assert_eq!(mpd.periods[1].start_secs, 2.0);
+    }
+
+    #[test]
+    fn a_period_starting_before_the_one_ahead_fails_the_manifest() {
+        for kind in ["static", "dynamic"] {
+            assert_eq!(
+                parse(&two_period_mpd(kind, r#"start="PT5S""#, r#"start="PT5S""#)),
+                Err(MpdError::Invalid),
+                "{kind}"
+            );
+        }
     }
 
     #[test]
@@ -2256,7 +2335,7 @@ mod tests {
 
     #[test]
     fn periods_without_a_usable_representation_are_skipped() {
-        let xml = r#"<MPD type="static"><Period id="ad"/><Period id="main"><AdaptationSet>
+        let xml = r#"<MPD type="static"><Period id="ad" duration="PT5S"/><Period id="main"><AdaptationSet>
           <SegmentTemplate media="$Number$.m4s" duration="1000" timescale="1000"/>
           <Representation id="v0" bandwidth="1"/>
         </AdaptationSet></Period></MPD>"#;
