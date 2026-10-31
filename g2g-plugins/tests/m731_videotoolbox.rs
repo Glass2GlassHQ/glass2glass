@@ -9,6 +9,11 @@
 #[path = "common/collect_sink.rs"]
 mod collect_sink;
 use collect_sink::CollectSink;
+#[cfg(feature = "vtencode")]
+#[path = "common/keyframe_request_sink.rs"]
+mod keyframe_request_sink;
+#[cfg(feature = "vtencode")]
+use keyframe_request_sink::KeyframeRequestSink;
 
 use g2g_core::conformance::{ConformanceDimension, Evidence};
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
@@ -210,7 +215,7 @@ async fn vtdecode_h265_fixture() {
 #[cfg(feature = "vtencode")]
 mod encode {
     use super::*;
-    use g2g_core::Interlace;
+    use g2g_core::{Interlace, OutputSink};
     use g2g_plugins::vtencode::VtEncode;
 
     const WIDTH: u32 = 320;
@@ -272,23 +277,48 @@ mod encode {
         out
     }
 
-    async fn encode_frames(mut enc: VtEncode) -> CollectSink {
+    async fn encode_frames(enc: VtEncode) -> CollectSink {
+        let mut sink = CollectSink::default();
+        encode_into(enc, &mut sink).await;
+        sink
+    }
+
+    async fn encode_into(mut enc: VtEncode, sink: &mut dyn OutputSink) {
         let narrowed = enc.intercept_caps(&input_caps()).expect("intercept NV12");
         let outcome = enc
             .configure_pipeline(&narrowed)
             .expect("VideoToolbox compression session must initialise");
         assert!(matches!(outcome, ConfigureOutcome::Accepted));
 
-        let mut sink = CollectSink::default();
         for i in 0..FRAMES {
-            enc.process(PipelinePacket::DataFrame(nv12_frame(i)), &mut sink)
+            enc.process(PipelinePacket::DataFrame(nv12_frame(i)), sink)
                 .await
                 .expect("encode DataFrame");
         }
-        enc.process(PipelinePacket::Eos, &mut sink)
+        enc.process(PipelinePacket::Eos, sink)
             .await
             .expect("drain at Eos");
-        sink
+    }
+
+    async fn forces_a_keyframe_on_request(enc: VtEncode) {
+        const REQUEST_AT: usize = 3;
+        let mut sink = KeyframeRequestSink::new(REQUEST_AT);
+        encode_into(enc, &mut sink).await;
+        assert_eq!(
+            sink.keyframe_indices(),
+            vec![0, REQUEST_AT + 1],
+            "the access unit after the request is a keyframe, the interval puts no other one in {FRAMES} frames"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn vtencode_h264_forces_a_keyframe_on_request() {
+        forces_a_keyframe_on_request(VtEncode::h264().with_bitrate(1_000_000)).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn vtencode_h265_forces_a_keyframe_on_request() {
+        forces_a_keyframe_on_request(VtEncode::h265().with_bitrate(1_000_000)).await;
     }
 
     /// Round-trip: encode synthetic frames, assert the Annex-B stream shape,

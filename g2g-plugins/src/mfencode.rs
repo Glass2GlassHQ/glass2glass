@@ -39,26 +39,28 @@ use alloc::vec::Vec;
 
 use windows::core::Interface;
 use windows::Win32::Media::MediaFoundation::{
-    eAVEncH264VProfile_Main, CLSID_MSH264EncoderMFT, IMFActivate, IMFMediaEventGenerator,
-    IMFSample, IMFTransform, METransformDrainComplete, METransformHaveOutput, METransformNeedInput,
-    MFCreateMediaType, MFMediaType_Video, MFShutdown, MFStartup, MFTEnumEx, MFVideoFormat_H264,
-    MFVideoFormat_HEVC, MFVideoFormat_NV12, MFVideoInterlace_Progressive,
-    MEDIA_EVENT_GENERATOR_GET_EVENT_FLAGS, MFSTARTUP_FULL, MFT_CATEGORY_VIDEO_ENCODER,
-    MFT_ENUM_FLAG_ASYNCMFT, MFT_ENUM_FLAG_HARDWARE, MFT_ENUM_FLAG_SORTANDFILTER,
-    MFT_ENUM_FLAG_SYNCMFT, MFT_MESSAGE_COMMAND_DRAIN, MFT_MESSAGE_COMMAND_FLUSH,
-    MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, MFT_MESSAGE_NOTIFY_END_OF_STREAM,
-    MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_REGISTER_TYPE_INFO, MF_EVENT_FLAG_NO_WAIT,
-    MF_E_NO_EVENTS_AVAILABLE, MF_LOW_LATENCY, MF_MT_AVG_BITRATE, MF_MT_FRAME_RATE,
-    MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE, MF_MT_MPEG2_PROFILE, MF_MT_SUBTYPE,
-    MF_TRANSFORM_ASYNC, MF_TRANSFORM_ASYNC_UNLOCK, MF_VERSION,
+    eAVEncH264VProfile_Main, CLSID_MSH264EncoderMFT, CODECAPI_AVEncVideoForceKeyFrame, ICodecAPI,
+    IMFActivate, IMFMediaEventGenerator, IMFSample, IMFTransform, METransformDrainComplete,
+    METransformHaveOutput, METransformNeedInput, MFCreateMediaType, MFMediaType_Video, MFShutdown,
+    MFStartup, MFTEnumEx, MFVideoFormat_H264, MFVideoFormat_HEVC, MFVideoFormat_NV12,
+    MFVideoInterlace_Progressive, MEDIA_EVENT_GENERATOR_GET_EVENT_FLAGS, MFSTARTUP_FULL,
+    MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG_ASYNCMFT, MFT_ENUM_FLAG_HARDWARE,
+    MFT_ENUM_FLAG_SORTANDFILTER, MFT_ENUM_FLAG_SYNCMFT, MFT_MESSAGE_COMMAND_DRAIN,
+    MFT_MESSAGE_COMMAND_FLUSH, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING,
+    MFT_MESSAGE_NOTIFY_END_OF_STREAM, MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_REGISTER_TYPE_INFO,
+    MF_EVENT_FLAG_NO_WAIT, MF_E_NO_EVENTS_AVAILABLE, MF_LOW_LATENCY, MF_MT_AVG_BITRATE,
+    MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE,
+    MF_MT_MPEG2_PROFILE, MF_MT_SUBTYPE, MF_TRANSFORM_ASYNC, MF_TRANSFORM_ASYNC_UNLOCK, MF_VERSION,
 };
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, CLSCTX_INPROC_SERVER,
     COINIT_MULTITHREADED,
 };
+use windows::Win32::System::Variant::{VARIANT, VARIANT_0, VARIANT_0_0, VARIANT_0_0_0, VT_UI4};
 
 use alloc::collections::VecDeque;
 
+use crate::annexb::au_is_keyframe;
 use crate::mfcommon::{
     feed_sample, make_input_sample, mf_err, mf_ticks_to_ns, ns_to_mf_ticks,
     output_provides_samples, pack_u32_pair, process_output, read_sample_bytes, sample_time_ns,
@@ -66,11 +68,12 @@ use crate::mfcommon::{
 };
 use g2g_core::caps::framerate_q16_to_fraction;
 use g2g_core::frame::Frame;
+use g2g_core::log::Target;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AllocationParams, AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim,
+    g2g_warn, AllocationParams, AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim,
     FrameTiming, G2gError, HardwareError, Interlace, MemoryDomain, OutputSink, PadTemplate,
-    PadTemplates, PipelinePacket, Rate, RawVideoFormat, VideoCodec,
+    PadTemplates, PipelinePacket, PushOutcome, Rate, RawVideoFormat, Reconfigure, VideoCodec,
 };
 
 /// Default target bitrate (bits/s) when the caller doesn't override it.
@@ -181,6 +184,7 @@ pub struct MfEncode {
     /// `configure_allocation`. The encoder emits system-memory bitstream
     /// buffers, so the request is informational.
     requested_alloc: Option<AllocationParams>,
+    force_keyframe: bool,
 }
 
 // SAFETY: `IMFTransform` is a COM interface and thus `!Send` by default. Same
@@ -210,6 +214,7 @@ impl MfEncode {
             input_caps: None,
             emitted: 0,
             requested_alloc: None,
+            force_keyframe: false,
         }
     }
 
@@ -280,12 +285,37 @@ impl MfEncode {
         let duration_hns = sample_duration_hns(timing.duration_ns, rate_duration_hns);
         // SAFETY: setting an attribute on the sample just built, on the owning thread.
         unsafe { sample.SetSampleDuration(duration_hns) }.map_err(mf_err)?;
+        if core::mem::take(&mut self.force_keyframe) {
+            if let Err(error) = self.force_next_keyframe() {
+                g2g_warn!(
+                    Target::category("mfencode"),
+                    "the encoder MFT cannot force a keyframe: {error:?}"
+                );
+            }
+        }
         if async_mode {
             return self.feed_async(sample, encoded);
         }
         feed_sample(self, &sample, Self::transform, |element| {
             element.drain(encoded)
         })
+    }
+
+    fn force_next_keyframe(&self) -> Result<(), G2gError> {
+        let codec_api: ICodecAPI = self.transform()?.cast().map_err(mf_err)?;
+        let force = VARIANT {
+            Anonymous: VARIANT_0 {
+                Anonymous: core::mem::ManuallyDrop::new(VARIANT_0_0 {
+                    vt: VT_UI4,
+                    wReserved1: 0,
+                    wReserved2: 0,
+                    wReserved3: 0,
+                    Anonymous: VARIANT_0_0_0 { ulVal: 1 },
+                }),
+            },
+        };
+        // SAFETY: the codec API call runs on the owning thread and `force` outlives it.
+        unsafe { codec_api.SetValue(&CODECAPI_AVEncVideoForceKeyFrame, &force) }.map_err(mf_err)
     }
 
     fn transform(&self) -> Result<&IMFTransform, G2gError> {
@@ -460,6 +490,10 @@ impl AsyncElement for MfEncode {
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
         Self: 'a;
+
+    fn handles_keyframe_requests(&self) -> bool {
+        true
+    }
 
     /// Reads host memory, so it takes system frames only. The allocation
     /// cascade turns that into a download demand on a GPU producer.
@@ -649,6 +683,7 @@ impl AsyncElement for MfEncode {
                         .await?;
                     self.last_caps = Some(new_caps);
                 }
+                let keyframe = au_is_keyframe(self.codec, &c.data);
                 let frame = Frame {
                     domain: MemoryDomain::System(SystemSlice::from_boxed(c.data)),
                     timing: FrameTiming {
@@ -656,13 +691,18 @@ impl AsyncElement for MfEncode {
                         dts_ns: c.pts_ns,
                         duration_ns: c.duration_ns,
                         capture_ns: c.pts_ns,
+                        keyframe,
                         ..FrameTiming::default()
                     },
                     sequence: self.emitted,
                     meta: Default::default(),
                 };
                 self.emitted += 1;
-                out.push(PipelinePacket::DataFrame(frame)).await?;
+                if let PushOutcome::Reconfigure(Reconfigure::ForceKeyframe) =
+                    out.push(PipelinePacket::DataFrame(frame)).await?
+                {
+                    self.force_keyframe = true;
+                }
             }
             Ok(())
         })

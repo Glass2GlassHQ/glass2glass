@@ -26,7 +26,7 @@
 use core::ffi::{c_char, c_void};
 use core::ptr::{self, NonNull};
 
-use objc2_core_foundation::CFRetained;
+use objc2_core_foundation::{CFBoolean, CFDictionary, CFRetained, CFString, CFType};
 
 // OSStatus is `pub(crate)` in the objc2 framework crates; a local i32 alias
 // matches the FFI signatures exactly (same as VtDecode).
@@ -47,7 +47,8 @@ use objc2_core_video::{
 use objc2_video_toolbox::{
     kVTCompressionPropertyKey_AllowFrameReordering, kVTCompressionPropertyKey_AverageBitRate,
     kVTCompressionPropertyKey_MaxKeyFrameInterval, kVTCompressionPropertyKey_RealTime,
-    VTCompressionSession, VTEncodeInfoFlags, VTSessionSetProperty,
+    kVTEncodeFrameOptionKey_ForceKeyFrame, VTCompressionSession, VTEncodeInfoFlags,
+    VTSessionSetProperty,
 };
 
 use g2g_core::frame::Frame;
@@ -55,8 +56,8 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError,
     HardwareError, Interlace, MemoryDomain, OutputSink, OwnedCvPixelBuffer, PadTemplate,
-    PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate,
-    RawVideoFormat, VideoCodec,
+    PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, PushOutcome, Rate,
+    RawVideoFormat, Reconfigure, VideoCodec,
 };
 
 use crate::annexb::{au_is_keyframe, length_prefixed_to_annexb, AVCC_LENGTH_SIZE};
@@ -133,6 +134,7 @@ pub struct VtEncode {
     state: Option<EncoderState>,
     last_caps: Option<Caps>,
     emitted: u64,
+    force_keyframe: bool,
 }
 
 // SAFETY: a `VTCompressionSession` and the CoreMedia objects are CoreFoundation
@@ -173,6 +175,7 @@ impl VtEncode {
             state: None,
             last_caps: None,
             emitted: 0,
+            force_keyframe: false,
         }
     }
 
@@ -210,11 +213,12 @@ impl VtEncode {
         let Some(state) = self.state.as_mut() else {
             return Err(G2gError::NotConfigured);
         };
+        let frame_properties = core::mem::take(&mut self.force_keyframe).then(keyframe_request);
         // SAFETY: the session is live; the pixel buffer is built from `nv12`
         // (which outlives the synchronous encode), fed, then completed so the
         // callback fires before we return; the refcon points at the boxed
         // collector that lives as long as the session.
-        unsafe { encode_into(state, nv12, pts_ns)? };
+        unsafe { encode_into(state, nv12, pts_ns, frame_properties.as_deref())? };
         if let Some(err) = state.collector.error.take() {
             return Err(err);
         }
@@ -237,8 +241,9 @@ impl VtEncode {
         // whole call; the session is live and the encode is completed
         // synchronously before we return.
         let pb = unsafe { &*(buf.pixel_buffer as *const CVPixelBuffer) };
+        let frame_properties = core::mem::take(&mut self.force_keyframe).then(keyframe_request);
         // SAFETY: as above, `pb` stays pinned and the session is live.
-        unsafe { encode_pixel_buffer(state, pb, pts_ns)? };
+        unsafe { encode_pixel_buffer(state, pb, pts_ns, frame_properties.as_deref())? };
         if let Some(err) = state.collector.error.take() {
             return Err(err);
         }
@@ -270,7 +275,11 @@ impl VtEncode {
             meta: Default::default(),
         };
         self.emitted += 1;
-        out.push(PipelinePacket::DataFrame(frame)).await?;
+        if let PushOutcome::Reconfigure(Reconfigure::ForceKeyframe) =
+            out.push(PipelinePacket::DataFrame(frame)).await?
+        {
+            self.force_keyframe = true;
+        }
         Ok(())
     }
 
@@ -362,6 +371,10 @@ impl AsyncElement for VtEncode {
         self.state = Some(state);
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
+    }
+
+    fn handles_keyframe_requests(&self) -> bool {
+        true
     }
 
     fn metadata(&self) -> g2g_core::ElementMetadata {
@@ -742,13 +755,18 @@ unsafe fn build_session(
 /// the callback has fired before returning.
 ///
 /// SAFETY: `state.session` is live; `nv12` outlives the synchronous encode.
-unsafe fn encode_into(state: &EncoderState, nv12: &[u8], pts_ns: u64) -> Result<(), G2gError> {
+unsafe fn encode_into(
+    state: &EncoderState,
+    nv12: &[u8],
+    pts_ns: u64,
+    frame_properties: Option<&KeyframeRequest>,
+) -> Result<(), G2gError> {
     // SAFETY: make_pixel_buffer rejects an `nv12` shorter than one NV12 frame
     // before it copies anything.
     let pixel_buffer = unsafe { make_pixel_buffer(nv12, state.width, state.height)? };
     // SAFETY: the session is live per this function's contract, and the staging
     // buffer outlives the synchronous encode.
-    unsafe { encode_pixel_buffer(state, &pixel_buffer, pts_ns) }
+    unsafe { encode_pixel_buffer(state, &pixel_buffer, pts_ns, frame_properties) }
 }
 
 /// Submit one `CVPixelBuffer` to the compression session and complete it, so
@@ -761,6 +779,7 @@ unsafe fn encode_pixel_buffer(
     state: &EncoderState,
     pb: &CVPixelBuffer,
     pts_ns: u64,
+    frame_properties: Option<&KeyframeRequest>,
 ) -> Result<(), G2gError> {
     let hw = || G2gError::Hardware(HardwareError::Other);
     let mut info = VTEncodeInfoFlags::empty();
@@ -776,7 +795,7 @@ unsafe fn encode_pixel_buffer(
             image,
             cm_time(pts_ns),
             cm_time_invalid(),
-            None,
+            frame_properties.map(|properties| properties.as_opaque()),
             ptr::null_mut(),
             &mut info,
         )
@@ -789,6 +808,15 @@ unsafe fn encode_pixel_buffer(
     // SAFETY: the session is live per this function's contract.
     unsafe { complete_frames(&state.session) };
     Ok(())
+}
+
+type KeyframeRequest = CFDictionary<CFString, CFType>;
+
+fn keyframe_request() -> CFRetained<KeyframeRequest> {
+    // SAFETY: the key is a static CFString VideoToolbox exports.
+    let key = unsafe { kVTEncodeFrameOptionKey_ForceKeyFrame };
+    let force: &CFType = CFBoolean::new(true).as_ref();
+    CFDictionary::from_slices(&[key], &[force])
 }
 
 /// Complete (flush) all pending frames so their callbacks fire.

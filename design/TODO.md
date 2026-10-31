@@ -288,6 +288,9 @@ Highest leverage first:
 
 - **Pure-Rust / wasm decode** to drop the ffmpeg FFI: VP8 / VP9 decode and a
   pure-Rust Opus path (see the roadmap for why both are blocked).
+- **`mediacodecenc` keyframe requests:** force a sync frame on a downstream
+  request (`AMediaCodec_setParameters` with `request-sync`), which needs API 26
+  where the `mediacodec` feature builds for 24.
 
 ## Colorimetry
 

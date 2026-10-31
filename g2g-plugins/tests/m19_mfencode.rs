@@ -13,8 +13,11 @@
 #[path = "common/collect_sink.rs"]
 mod collect_sink;
 use collect_sink::CollectSink;
+#[path = "common/keyframe_request_sink.rs"]
+mod keyframe_request_sink;
+use keyframe_request_sink::KeyframeRequestSink;
 
-use g2g_core::element::AsyncElement;
+use g2g_core::element::{AsyncElement, OutputSink};
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{Caps, ConfigureOutcome, Dim, Interlace, Rate, RawVideoFormat, VideoCodec};
@@ -91,6 +94,12 @@ fn input_caps(framerate: Rate) -> Caps {
 /// Drive `MfEncode` over `FRAMES` synthetic pictures and return the collected
 /// downstream packets.
 async fn encode_frames(framerate: Rate, duration_ns: u64) -> CollectSink {
+    let mut sink = CollectSink::default();
+    encode_into(framerate, duration_ns, &mut sink).await;
+    sink
+}
+
+async fn encode_into(framerate: Rate, duration_ns: u64, sink: &mut dyn OutputSink) {
     let mut enc = MfEncode::new().with_bitrate(1_000_000);
     let narrowed = enc
         .intercept_caps(&input_caps(framerate))
@@ -100,20 +109,27 @@ async fn encode_frames(framerate: Rate, duration_ns: u64) -> CollectSink {
         .expect("encoder MFT must initialise");
     assert!(matches!(outcome, ConfigureOutcome::Accepted));
 
-    let mut sink = CollectSink::default();
     for i in 0..FRAMES {
-        enc.process(
-            PipelinePacket::DataFrame(nv12_frame(i, duration_ns)),
-            &mut sink,
-        )
-        .await
-        .expect("process DataFrame");
+        enc.process(PipelinePacket::DataFrame(nv12_frame(i, duration_ns)), sink)
+            .await
+            .expect("process DataFrame");
     }
-    enc.process(PipelinePacket::Eos, &mut sink)
+    enc.process(PipelinePacket::Eos, sink)
         .await
         .expect("process Eos");
     assert_eq!(enc.encoded_count(), FRAMES as u64);
-    sink
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn forces_a_keyframe_on_request() {
+    const REQUEST_AT: usize = 3;
+    let mut sink = KeyframeRequestSink::new(REQUEST_AT);
+    encode_into(Rate::Fixed(FPS_Q16), FRAME_DURATION_NS, &mut sink).await;
+    assert_eq!(
+        sink.keyframe_indices(),
+        vec![0, REQUEST_AT + 1],
+        "the access unit after the request is a keyframe, the default GOP puts no other one in {FRAMES} frames"
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
