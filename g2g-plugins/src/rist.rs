@@ -306,6 +306,10 @@ impl NackScheduler {
         }
     }
 
+    pub fn forget_losses(&mut self) {
+        self.pending.clear();
+    }
+
     /// The sequence numbers to request at `now_ns`, at most `limit`, given the
     /// receive buffer's current holes. A hole seen for the first time starts
     /// its reorder wait, and one that has been filled is forgotten.

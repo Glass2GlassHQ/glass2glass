@@ -24,6 +24,7 @@ use alloc::vec::Vec;
 
 use std::net::{SocketAddr, UdpSocket as StdUdpSocket};
 
+use g2g_core::log::Target;
 use g2g_core::rtp::RtpHeader;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
@@ -54,6 +55,7 @@ const MAX_NACKED_PER_REPORT: usize = 256;
 /// number cannot make every check walk the whole buffer.
 const MAX_TRACKED_LOSSES: usize = 4096;
 const NS_PER_MS: u64 = 1_000_000;
+const LOG_CATEGORY: &str = "ristsrc";
 
 /// # Example
 ///
@@ -173,10 +175,29 @@ struct ReceiverLink {
 /// a packet came in on.
 #[derive(Debug)]
 struct StreamState {
-    /// Original-packet SSRC, taken from the first original packet.
+    /// Original-packet SSRC, taken from the sender's first original packet.
     media_ssrc: Option<u32>,
+    // a restarted sender's old SSRC, whose late packets must not switch the stream back
+    previous_media_ssrc: Option<u32>,
     said_goodbye: bool,
     extension_remover: RistExtensionRemover,
+    jitter: RtpJitterBuffer,
+    scheduler: NackScheduler,
+}
+
+impl StreamState {
+    // librist resets the flow when a sender restarts with a new SSRC
+    fn follow_restarted_sender(&mut self, media_ssrc: u32) {
+        g2g_core::g2g_info!(
+            Target::category(LOG_CATEGORY),
+            "the sender restarted with SSRC {media_ssrc:08x}, dropping what the old stream left buffered"
+        );
+        self.previous_media_ssrc = self.media_ssrc.replace(media_ssrc);
+        self.said_goodbye = false;
+        self.extension_remover = RistExtensionRemover::default();
+        self.jitter.restart();
+        self.scheduler.forget_losses();
+    }
 }
 
 impl RistSrc {
@@ -198,15 +219,15 @@ impl RistSrc {
 }
 
 /// Buffer one media datagram if it is RTP MP2T from the stream being received.
-/// An original packet adopts the stream on first sight, a retransmission only
-/// fills a gap in it. A copy of a sequence number already buffered, from
-/// another bonded link, is dropped by the jitter buffer.
+/// An original packet adopts the stream on first sight, or a new SSRC when the
+/// sender restarts, a retransmission only fills a gap in it. A copy of a
+/// sequence number already buffered, from another bonded link, is dropped by
+/// the jitter buffer.
 fn accept_media(
     datagram: &[u8],
     now_ns: u64,
     stream: &mut StreamState,
     statistics: &mut Option<ReceptionStats>,
-    jitter: &mut RtpJitterBuffer,
 ) {
     let Some(parsed) = RtpHeader::parse(datagram) else {
         return;
@@ -217,21 +238,30 @@ fn accept_media(
     }
     let media_ssrc = rist::media_ssrc(header.ssrc);
     let retransmission = rist::is_retransmission(header.ssrc);
+    if retransmission && stream.media_ssrc != Some(media_ssrc) {
+        return;
+    }
     match stream.media_ssrc {
-        None if retransmission => return,
         None => stream.media_ssrc = Some(media_ssrc),
-        Some(known) if known != media_ssrc => return,
-        Some(_) => {}
+        Some(known) if known == media_ssrc => {}
+        Some(_) if stream.previous_media_ssrc == Some(media_ssrc) => return,
+        Some(_) => stream.follow_restarted_sender(media_ssrc),
     }
     let Some(stripped) = stream.extension_remover.strip(datagram) else {
         return;
     };
     if !retransmission {
+        if statistics
+            .as_ref()
+            .is_some_and(|statistics| statistics.source_ssrc() != header.ssrc)
+        {
+            *statistics = None;
+        }
         statistics
             .get_or_insert_with(|| ReceptionStats::new(0, MP2T_CLOCK_HZ))
             .on_rtp(header.ssrc, header.sequence, header.timestamp, now_ns);
     }
-    jitter.push(&stripped, now_ns);
+    stream.jitter.push(&stripped, now_ns);
 }
 
 impl SourceLoop for RistSrc {
@@ -398,20 +428,21 @@ impl SourceLoop for RistSrc {
             out.push(PipelinePacket::CapsChanged(mpegts_caps())).await?;
 
             let buffer_ns = self.receiver_buffer_ns();
-            let mut jitter = RtpJitterBuffer::new(JitterConfig {
-                max_hold_ns: buffer_ns,
-                max_depth: MAX_BUFFERED_PACKETS,
-            })
-            .with_constant_delay();
-            let mut scheduler = NackScheduler::new(
-                self.reorder_section_ms * NS_PER_MS,
-                buffer_ns,
-                self.max_rtx_retries,
-            );
             let mut stream = StreamState {
                 media_ssrc: None,
+                previous_media_ssrc: None,
                 said_goodbye: false,
                 extension_remover: RistExtensionRemover::default(),
+                jitter: RtpJitterBuffer::new(JitterConfig {
+                    max_hold_ns: buffer_ns,
+                    max_depth: MAX_BUFFERED_PACKETS,
+                })
+                .with_constant_delay(),
+                scheduler: NackScheduler::new(
+                    self.reorder_section_ms * NS_PER_MS,
+                    buffer_ns,
+                    self.max_rtx_retries,
+                ),
             };
             let timer_check = Duration::from_millis(rist::TIMER_CHECK_MS);
             let timer_check_ns = rist::TIMER_CHECK_MS * NS_PER_MS;
@@ -435,7 +466,6 @@ impl SourceLoop for RistSrc {
                             now_ns,
                             &mut stream,
                             &mut link.statistics,
-                            &mut jitter,
                         ),
                         Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
                         Err(error) if rist::is_peer_unreachable(&error) => {}
@@ -487,7 +517,7 @@ impl SourceLoop for RistSrc {
                     }
                 }
 
-                while let Some(packet) = jitter.pop(now_ns) {
+                while let Some(packet) = stream.jitter.pop(now_ns) {
                     let Some(parsed) = RtpHeader::parse(&packet) else {
                         continue;
                     };
@@ -497,7 +527,7 @@ impl SourceLoop for RistSrc {
                         .await?;
                     emitted += 1;
                 }
-                if stream.said_goodbye && jitter.buffered() == 0 {
+                if stream.said_goodbye && stream.jitter.buffered() == 0 {
                     out.push(PipelinePacket::Eos).await?;
                     return Ok(emitted);
                 }
@@ -511,9 +541,9 @@ impl SourceLoop for RistSrc {
                 let mut nack = Vec::new();
                 if now_ns >= next_nack_check_ns {
                     next_nack_check_ns = now_ns + timer_check_ns;
-                    let missing = jitter.missing_seqs();
+                    let missing = stream.jitter.missing_seqs();
                     let tracked = &missing[..missing.len().min(MAX_TRACKED_LOSSES)];
-                    let requests = scheduler.due(tracked, now_ns, MAX_NACKED_PER_REPORT);
+                    let requests = stream.scheduler.due(tracked, now_ns, MAX_NACKED_PER_REPORT);
                     if let (Some(media_ssrc), false) = (stream.media_ssrc, requests.is_empty()) {
                         nack = rist::build_nack_feedback(self.ssrc, media_ssrc, &requests);
                     }

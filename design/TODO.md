@@ -176,8 +176,6 @@ Highest leverage first:
 - **RIST bonding test flake:** `ristsender_broadcast_bonding_feeds_ristsrc`
   failed once in 50 runs on hercules, after 2.4 s. Capture its failure output
   and fix the cause.
-- **RIST SSRC change:** `ristsrc` keeps the SSRC of the first packet, so a sender
-  that restarts with a new SSRC stalls it. Follow the new SSRC as librist does.
 - **`rtprecv` NACK policy:** re-request losses through RIST's `NackScheduler`
   (reorder wait, retry cap) instead of its own 20 ms loop.
 

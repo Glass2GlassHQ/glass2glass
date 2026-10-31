@@ -1294,7 +1294,10 @@ packet after it. A hole is first requested once it is `reorder-section` ms old,
 then again every `(receiver-buffer - reorder-section) / max-rtx-retries` ms up
 to `max-rtx-retries` requests. The source reports `receiver-buffer` as live
 latency and ends once the sender's BYE has drained through the buffer. RTT
-echo requests are answered on both ends and never originated.
+echo requests are answered on both ends and never originated. An original packet
+with a new SSRC is a restarted sender: as in librist, the source drops what the
+old stream left buffered and starts over on the new one, and drops later packets
+of the old SSRC.
 
 Bonding follows GStreamer's `ristsink` / `ristsrc`. `bonding-addresses` lists
 the links, and `address`, `port` and `multicast-iface` set the first one. Each

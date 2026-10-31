@@ -36,7 +36,7 @@ mod rist_common;
 use rist_common::{
     assert_recovered_through, collect_from_gst, free_even_port, loopback, output_path, spawn_gst,
     stop_gst, synthetic_ts, FirstMediaOrder, LossyRelay, PacedTsSource, RelayLog, ZeroClock,
-    GST_BIND_WAIT, GST_DEADLINE,
+    GST_BIND_WAIT, GST_DEADLINE, SEND_INTERVAL,
 };
 
 const MEDIA_SSRC: u32 = 0x1234_5670;
@@ -636,6 +636,96 @@ async fn g2g_to_g2g_recovers_dropped_packets() {
     assert!(received == sent, "the received bytes equal the sent ones");
     assert_recovered_through(&log, DROPPED_FROM_G2G);
     assert_both_nack_forms(&log);
+}
+
+// ---- a sender restart ----
+
+const RESTARTED_SSRC: u32 = 0x7654_3210;
+// a restarted sender starts its sequence numbers anywhere
+const RESTARTED_FIRST_SEQUENCE: u16 = 40_000;
+const PACKETS_PER_SENDER_RUN: usize = 10;
+const RESTART_RECEIVER_BUFFER_MS: u64 = 100;
+// long enough for ristsrc to release the first run before the restart
+const RESTART_GAP: Duration = Duration::from_millis(3 * RESTART_RECEIVER_BUFFER_MS);
+const RECEIVER_BIND_WAIT: Duration = Duration::from_millis(200);
+
+async fn send_media(
+    socket: &tokio::net::UdpSocket,
+    port: u16,
+    ssrc: u32,
+    first_sequence: u16,
+    payloads: &[u8],
+) {
+    for (index, payload) in payloads.chunks(TS_DATAGRAM_PAYLOAD).enumerate() {
+        let header = RtpHeader {
+            ssrc,
+            sequence: first_sequence.wrapping_add(index as u16),
+            ..media_header(0)
+        };
+        let mut packet = header.to_bytes().to_vec();
+        packet.extend_from_slice(payload);
+        socket
+            .send_to(&packet, loopback(port))
+            .await
+            .expect("send media");
+        tokio::time::sleep(SEND_INTERVAL).await;
+    }
+}
+
+#[tokio::test]
+async fn ristsrc_follows_a_sender_that_restarts_with_a_new_ssrc() {
+    let port = free_even_port();
+    let received_path = output_path("g2g_m2027_restart.ts");
+    let mut source = ristsrc_on(port);
+    source
+        .set_property(
+            "receiver-buffer",
+            PropValue::Uint(RESTART_RECEIVER_BUFFER_MS),
+        )
+        .unwrap();
+    let mut recorder = FileSink::new(&received_path);
+    let receive = run_simple_pipeline(
+        &mut source,
+        &mut recorder,
+        &ZeroClock,
+        LatencyProfile::Live.link_capacity(),
+    );
+    let sent = synthetic_ts(2 * PACKETS_PER_SENDER_RUN);
+    let (first_run, second_run) = sent.split_at(PACKETS_PER_SENDER_RUN * TS_DATAGRAM_PAYLOAD);
+    let send = async {
+        let socket = tokio::net::UdpSocket::bind(loopback(0))
+            .await
+            .expect("bind the sender");
+        tokio::time::sleep(RECEIVER_BIND_WAIT).await;
+        send_media(&socket, port, MEDIA_SSRC, 0, first_run).await;
+        tokio::time::sleep(RESTART_GAP).await;
+        send_media(
+            &socket,
+            port,
+            RESTARTED_SSRC,
+            RESTARTED_FIRST_SEQUENCE,
+            second_run,
+        )
+        .await;
+        // a late packet of the old run, which must not switch the stream back
+        let late_sequence = PACKETS_PER_SENDER_RUN as u16;
+        let late_payload = [0u8; TS_DATAGRAM_PAYLOAD];
+        send_media(&socket, port, MEDIA_SSRC, late_sequence, &late_payload).await;
+        socket
+            .send_to(&rtcp::build_bye(RESTARTED_SSRC), loopback(port + 1))
+            .await
+            .expect("send BYE");
+    };
+    let (received, ()) =
+        tokio::time::timeout(LOOPBACK_DEADLINE, async { tokio::join!(receive, send) })
+            .await
+            .expect("ristsrc ends on the restarted sender's BYE");
+    received.expect("the receive pipeline runs");
+    let received = std::fs::read(&received_path).expect("read the received stream");
+    assert!(
+        received == sent,
+        "both runs arrive whole and the late packet is dropped"
+    );
 }
 
 // ---- real-peer interop against gst-launch-1.0 (ignored: needs GStreamer) ----

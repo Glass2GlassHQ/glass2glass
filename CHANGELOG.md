@@ -125,6 +125,7 @@ Breaking: `QosMessage` gains `downstream_proc_ns`, `ElementProbe` is no longer `
 - M2024: `ristsink` resends each packet once per NACK datagram, however often the NACK repeats it.
 - M2025: `mediacodecenc` forces a keyframe on a downstream request, and the `mediacodec` feature now needs Android API 26.
 - M2026: `srtsrc` corrects TSBPD for clock drift from ACKACKs and keeps its schedule across pauses longer than 35 minutes.
+- M2027: `ristsrc` follows a sender that restarts with a new SSRC.
 
 ## 0.10.0
 

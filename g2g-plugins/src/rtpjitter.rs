@@ -128,6 +128,14 @@ impl RtpJitterBuffer {
         self
     }
 
+    // a new RTP stream starts its own sequence numbers, so nothing buffered from the old one carries over
+    pub fn restart(&mut self) {
+        self.packets.clear();
+        self.next = None;
+        self.released_any = false;
+        self.sequence_extender = RtpSequenceExtender::new();
+    }
+
     pub fn stats(&self) -> JitterStats {
         self.stats
     }
