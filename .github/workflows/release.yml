@@ -71,6 +71,22 @@ jobs:
           unexpected=$(otool -L target/${{ matrix.target }}/release/g2g-launch | tail -n +2 \
             | grep -vE '^\s+(/usr/lib/|/System/Library/)' || true)
           [ -z "$unexpected" ] || { echo "::error::g2g-launch links $unexpected"; exit 1; }
+      # windows runners carry the Visual C++ runtime in System32, a fresh install does not
+      - name: links only system libraries (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          vswhere="/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe"
+          system32="$(cygpath -u "$SYSTEMROOT")/System32"
+          dumpbin=$("$vswhere" -latest -find 'VC/Tools/MSVC/**/bin/Hostx64/x64/dumpbin.exe' | head -n 1 | tr -d '\r')
+          unexpected=$(for binary in g2g-launch g2g-inspect; do
+              "$dumpbin" -nologo -dependents "target/${{ matrix.target }}/release/$binary.exe"
+            done | tr -d '\r' | grep -iE '^\s+\S+\.dll$' | tr -d ' ' | sort -u \
+            | grep -viE '^(api|ext)-ms-' \
+            | while read -r library; do
+                if echo "$library" | grep -qiE '^(vcruntime|msvcp|concrt|vcomp)'; then echo "$library"
+                elif [ ! -f "$system32/$library" ]; then echo "$library"; fi
+              done)
+          [ -z "$unexpected" ] || { echo "::error::release binaries link $unexpected"; exit 1; }
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-about@0.9.3
