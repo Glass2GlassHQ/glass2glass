@@ -115,7 +115,7 @@ dependencies = [
 
 [[package]]
 name = "g2g-core"
-version = "0.7.0"
+version = "0.12.0"
 dependencies = [
  "loom",
  "portable-atomic",
@@ -125,20 +125,23 @@ dependencies = [
 
 [[package]]
 name = "g2g-mcu"
-version = "0.7.0"
+version = "0.12.0"
 dependencies = [
  "embedded-hal",
  "g2g-core",
+ "libm",
 ]
 
 [[package]]
 name = "g2g-plugins"
-version = "0.7.0"
+version = "0.12.0"
 dependencies = [
  "cc",
  "g2g-core",
  "g2g-mcu",
+ "libc",
  "md-5",
+ "memchr",
  "miniz_oxide",
  "pkg-config",
  "serde_json",
@@ -213,6 +216,12 @@ name = "libc"
 version = "0.2.189"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
+
+[[package]]
+name = "libm"
+version = "0.2.16"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
 name = "log"
