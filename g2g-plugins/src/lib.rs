@@ -1270,6 +1270,9 @@ pub mod metalvideosink;
 // macOS Core Audio render + capture via AudioToolbox AudioQueue (M737).
 #[cfg(all(target_os = "macos", feature = "coreaudio"))]
 pub mod coreaudio;
+// macOS AAC-LC encode through the AudioToolbox AudioConverter.
+#[cfg(all(target_os = "macos", feature = "audiotoolbox-aac"))]
+pub mod atenc;
 
 // Core Audio device discovery: the HAL's input / output devices, for the
 // device monitor.
@@ -1356,6 +1359,7 @@ pub mod mfaacencode;
     all(target_os = "linux", feature = "ffmpeg"),
     all(any(target_os = "linux", windows), feature = "nvenc"),
     all(target_os = "linux", feature = "openh264"),
+    all(target_os = "macos", feature = "audiotoolbox-aac"),
     feature = "gstreamer"
 ))]
 mod encoder_base;

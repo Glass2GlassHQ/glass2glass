@@ -349,7 +349,10 @@ fn encode_provider(target: &Caps) -> Option<&'static [EncoderChoice]> {
     static PNG: &[EncoderChoice] = &[EncoderChoice::plain("pngenc")];
     static PNM: &[EncoderChoice] = &[EncoderChoice::plain("pnmenc")];
     static JPEGXS: &[EncoderChoice] = &[EncoderChoice::plain("jpegxsenc")];
-    static AAC: &[EncoderChoice] = &[EncoderChoice::plain("avenc_aac")];
+    static AAC: &[EncoderChoice] = &[
+        EncoderChoice::plain("avenc_aac"),
+        EncoderChoice::plain("atenc"),
+    ];
     static OPUS: &[EncoderChoice] = &[EncoderChoice::plain("opusenc")];
     static MULAW: &[EncoderChoice] = &[EncoderChoice::plain("mulawenc")];
     static ALAW: &[EncoderChoice] = &[EncoderChoice::plain("alawenc")];
@@ -2320,6 +2323,10 @@ fn register_autoplug_candidates(reg: &mut Registry) {
         })
         .with_experimental(),
     );
+    #[cfg(all(target_os = "macos", feature = "audiotoolbox-aac"))]
+    reg.register_launch(LaunchFactory::of::<crate::atenc::AtEnc>("atenc", || {
+        Box::new(crate::atenc::AtEnc::new())
+    }));
     // macOS Core Audio mic capture (M737); `osxaudiosrc` is the gst analog.
     #[cfg(all(target_os = "macos", feature = "coreaudio"))]
     reg.register_source(
@@ -2567,8 +2574,8 @@ fn register_aliases(reg: &mut Registry) {
     // gst-plugins-rs names for the WHIP / WHEP clients.
     reg.register_alias("whipclientsink", &["webrtcsink"]);
     reg.register_alias("whepclientsrc", &["webrtcsrc"]);
-    // gst's short AAC encoder name -> the libavcodec AAC encoder.
-    reg.register_alias("aacenc", &["avenc_aac"]);
+    // gst's short AAC encoder name -> the libavcodec or AudioToolbox AAC encoder.
+    reg.register_alias("aacenc", &["avenc_aac", "atenc"]);
     // GStreamer's nvcodec names -> the native g2g NVENC / NVDEC elements. Resolve
     // to the registered target only when the feature is on (else the alias is
     // inert), the same first-registered rule as the VA-API names above.
@@ -2810,6 +2817,7 @@ pub static FEATURE_GATED_ELEMENTS: &[FeatureGatedElement] = &{
         "metalvideosink" => "metal-sink" on "macos";
         "coreaudiosink" => "coreaudio" on "macos";
         "coreaudiosrc" => "coreaudio" on "macos";
+        "atenc" => "audiotoolbox-aac" on "macos";
         "avfvideosrc" => "avfoundation" on "macos";
         "avfaudiosrc" => "avfoundation" on "macos";
         "screencapturesrc" => "screencapture" on "macos";

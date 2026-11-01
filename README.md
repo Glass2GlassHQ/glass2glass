@@ -596,6 +596,7 @@ cargo clippy --workspace --all-targets
 | AVI / QuickTime / Matroska streams g2g has no caps type for (Cinepak, Indeo, Ut Video, QuickTime RLE, ADPCM, MACE, ...), demuxed under their container tag and decoded by `ffmpegdec` / `ffmpegaudiodec` | `ffmpeg-long-tail` | Linux + libavcodec + libavformat |
 | `MfDecode` / `MfEncode` / `MfAacEncode` / `MfAacDecode` | `mf-decode`, `mf-encode`, `mf-aac` | Windows + Media Foundation |
 | `VtDecode` / `VtEncode` (H.264 / H.265, zero-copy `CVPixelBuffer` output via `cv-output`) | `vtdecode`, `vtencode` | macOS + VideoToolbox |
+| `AtEnc` (`atenc`: PCM to ADTS AAC-LC, mono or stereo) | `audiotoolbox-aac` | macOS + AudioToolbox |
 | `MediaCodecDec` (H.264 / H.265, zero-copy GPU output via `with_gpu_output`) | `mediacodec`, `mediacodec-wgpu` | Android + NDK MediaCodec (+ wgpu / Vulkan for GPU output) |
 | `WaylandSink` | `wayland-sink` | Linux + Wayland |
 | `KmsSink` | `kms-sink` | Linux + libdrm, needs DRM master / tty |

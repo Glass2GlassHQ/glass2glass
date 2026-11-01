@@ -53,7 +53,7 @@ release-binary-linux = [
     "kms-sink", "wayland-sink", "wgpu-present", "cuda", "nvenc", "nvdec", "cuda-wgpu",
     "gl-sink", "alsa-sink", "alsa-src", "openh264", "ffmpeg-long-tail",
 ]
-release-binary-macos = ["release-binary", "vtdecode", "vtencode", "metal-sink", "coreaudio", "avfoundation", "screencapture"]
+release-binary-macos = ["release-binary", "vtdecode", "vtencode", "metal-sink", "coreaudio", "audiotoolbox-aac", "avfoundation", "screencapture"]
 release-aar = ["release-binary", "camera2", "mediacodec-wgpu", "aaudio"]
 release-binary-windows = [
     "release-binary", "mf-decode", "mf-encode", "mf-aac", "wasapi-sink", "wasapi-src", "d3d11-sink", "mf-video-src",
@@ -312,6 +312,14 @@ coreaudio = [
     "dep:objc2-core-audio",
     "dep:objc2-core-audio-types",
     "dep:objc2-core-foundation",
+]
+# AAC-LC encode (atenc) through the AudioToolbox AudioConverter. macOS-only,
+# implies std.
+audiotoolbox-aac = [
+    "std",
+    "dep:objc2-audio-toolbox",
+    "objc2-audio-toolbox/AudioConverter",
+    "dep:objc2-core-audio-types",
 ]
 # macOS Metal present sink (M736): renders NV12 (System bytes or the M735
 # zero-copy CVPixelBuffer domain, imported via CVMetalTextureCache) to a
