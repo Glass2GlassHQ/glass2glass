@@ -29,7 +29,7 @@ linux-full = [
     "remote", "remote-ws", "webtransport", "moqt",
     "http-src", "hls", "dash",
     "ffmpeg", "ffmpeg-long-tail", "v4l2",
-    "opus", "vorbis", "webrtcdsp", "vpx", "av1-encode", "mjpeg", "mjpeg-encode", "png", "webp",
+    "opus", "vorbis", "aac-decode", "mpeg-audio-decode", "webrtcdsp", "vpx", "av1-encode", "mjpeg", "mjpeg-encode", "png", "webp",
     "alsa-sink", "alsa-src", "pulse-sink", "pulse-src", "pipewire", "portal", "decklink",
     "wayland-sink", "gl-sink", "kms-sink", "wgpu-sink", "wgpu-present", "vello-overlay", "analytics",
     "analytics-json", "mqtt", "embedding-index",

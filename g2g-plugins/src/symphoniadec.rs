@@ -357,7 +357,7 @@ mod element {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, any(feature = "aac-decode", feature = "mpeg-audio-decode")))]
 mod tests {
     use alloc::vec::Vec;
 

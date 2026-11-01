@@ -1426,7 +1426,11 @@ mod tests {
             (true, true) => GstEquivalent::Available,
             (true, false) => GstEquivalent::NotCompiled("nvdec"),
             (false, _) => GstEquivalent::BuildsOnlyOn {
-                platform: "linux",
+                platform: crate::registry::FEATURE_GATED_ELEMENTS
+                    .iter()
+                    .find(|element| element.name == "nvdec")
+                    .and_then(|element| element.platform)
+                    .expect("the nvdec row names its platform"),
                 feature: "nvdec",
             },
         };

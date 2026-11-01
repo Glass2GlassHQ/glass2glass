@@ -16,12 +16,17 @@ crate::shared_library::shared_library! {
     fn snd_pcm_open = "snd_pcm_open"(pcm: *mut *mut c_void, name: *const c_char, stream: c_int, mode: c_int) -> c_int;
     fn snd_pcm_close = "snd_pcm_close"(pcm: *mut c_void) -> c_int;
     fn snd_pcm_prepare = "snd_pcm_prepare"(pcm: *mut c_void) -> c_int;
+    #[cfg(feature = "alsa-src")]
     fn snd_pcm_start = "snd_pcm_start"(pcm: *mut c_void) -> c_int;
+    #[cfg(feature = "alsa-src")]
     fn snd_pcm_drop = "snd_pcm_drop"(pcm: *mut c_void) -> c_int;
+    #[cfg(feature = "alsa-sink")]
     fn snd_pcm_drain = "snd_pcm_drain"(pcm: *mut c_void) -> c_int;
     fn snd_pcm_recover = "snd_pcm_recover"(pcm: *mut c_void, error: c_int, silent: c_int) -> c_int;
     fn snd_pcm_delay = "snd_pcm_delay"(pcm: *mut c_void, delay: *mut c_long) -> c_int;
+    #[cfg(feature = "alsa-sink")]
     fn snd_pcm_writei = "snd_pcm_writei"(pcm: *mut c_void, buffer: *const c_void, frames: c_ulong) -> c_long;
+    #[cfg(feature = "alsa-src")]
     fn snd_pcm_readi = "snd_pcm_readi"(pcm: *mut c_void, buffer: *mut c_void, frames: c_ulong) -> c_long;
     fn snd_pcm_get_chmap = "snd_pcm_get_chmap"(pcm: *mut c_void) -> *mut c_uint;
     fn snd_pcm_hw_params = "snd_pcm_hw_params"(pcm: *mut c_void, params: *mut c_void) -> c_int;
@@ -35,6 +40,7 @@ crate::shared_library::shared_library! {
     fn snd_pcm_hw_params_set_rate = "snd_pcm_hw_params_set_rate"(pcm: *mut c_void, params: *mut c_void, rate: c_uint, direction: c_int) -> c_int;
     fn snd_pcm_hw_params_set_period_time_near = "snd_pcm_hw_params_set_period_time_near"(pcm: *mut c_void, params: *mut c_void, microseconds: *mut c_uint, direction: *mut c_int) -> c_int;
     fn snd_pcm_hw_params_set_buffer_time_near = "snd_pcm_hw_params_set_buffer_time_near"(pcm: *mut c_void, params: *mut c_void, microseconds: *mut c_uint, direction: *mut c_int) -> c_int;
+    #[cfg(feature = "alsa-src")]
     fn snd_pcm_hw_params_get_period_size = "snd_pcm_hw_params_get_period_size"(params: *const c_void, frames: *mut c_ulong, direction: *mut c_int) -> c_int;
     fn snd_pcm_hw_params_get_rate_min = "snd_pcm_hw_params_get_rate_min"(params: *const c_void, rate: *mut c_uint, direction: *mut c_int) -> c_int;
     fn snd_pcm_hw_params_get_rate_max = "snd_pcm_hw_params_get_rate_max"(params: *const c_void, rate: *mut c_uint, direction: *mut c_int) -> c_int;
@@ -61,6 +67,7 @@ pub(crate) fn require_library() -> Result<(), G2gError> {
         )))
 }
 
+#[cfg(feature = "alsa-sink")]
 pub(crate) fn library_installed() -> Result<(), String> {
     require_library().map_err(|_| alloc::format!("{LIBASOUND} is not installed"))
 }
@@ -147,16 +154,19 @@ impl Pcm {
         check(unsafe { snd_pcm_prepare(self.0) })
     }
 
+    #[cfg(feature = "alsa-src")]
     pub(crate) fn start(&self) -> Result<(), i32> {
         // SAFETY: the handle is open.
         check(unsafe { snd_pcm_start(self.0) })
     }
 
+    #[cfg(feature = "alsa-src")]
     pub(crate) fn drop_pending(&self) -> Result<(), i32> {
         // SAFETY: the handle is open.
         check(unsafe { snd_pcm_drop(self.0) })
     }
 
+    #[cfg(feature = "alsa-sink")]
     pub(crate) fn drain(&self) -> Result<(), i32> {
         // SAFETY: the handle is open.
         check(unsafe { snd_pcm_drain(self.0) })
@@ -174,12 +184,14 @@ impl Pcm {
         Ok(delay)
     }
 
+    #[cfg(feature = "alsa-sink")]
     pub(crate) fn write_interleaved(&self, bytes: &[u8], frames: usize) -> Result<usize, i32> {
         // SAFETY: `bytes` holds `frames` whole frames of the opened format.
         let written = unsafe { snd_pcm_writei(self.0, bytes.as_ptr().cast(), frames as c_ulong) };
         transferred(written)
     }
 
+    #[cfg(feature = "alsa-src")]
     pub(crate) fn read_interleaved(&self, buffer: &mut [u8], frames: usize) -> Result<usize, i32> {
         // SAFETY: `buffer` has room for `frames` whole frames of the opened format.
         let read = unsafe { snd_pcm_readi(self.0, buffer.as_mut_ptr().cast(), frames as c_ulong) };
@@ -278,6 +290,7 @@ impl HwParams<'_> {
         })
     }
 
+    #[cfg(feature = "alsa-src")]
     pub(crate) fn period_size(&self) -> Result<c_ulong, i32> {
         let (mut frames, mut direction): (c_ulong, c_int) = (0, 0);
         // SAFETY: the parameters are allocated and the out-parameters are valid for the call.
