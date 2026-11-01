@@ -540,7 +540,7 @@
     <div class="hero-content">
         <div class="hero-badge">
             <div class="badge-dot"></div>
-            <span>Pre-release</span>
+            <span>Pre-1.0, on crates.io and PyPI</span>
         </div>
         <h1>Hardware-first multimedia,<br><em>glass to glass</em>, in Rust.</h1>
         <p class="hero-sub">
@@ -552,6 +552,7 @@
         </p>
         <div class="hero-actions">
             <a href="#quickstart" class="btn btn-accent">Quickstart &rarr;</a>
+            <a href="https://github.com/Glass2GlassHQ/glass2glass/releases/latest" class="btn btn-outline">Download</a>
             <a href="https://github.com/Glass2GlassHQ/glass2glass" class="btn btn-outline">View on GitHub</a>
         </div>
 
@@ -1298,6 +1299,11 @@ g2g-launch <span class="flag">--script</span> build.rhai</div>
             Step-by-step recipes for every shape (RTSP, NVDEC, KMS, VAAPI, ML) are in the
             <a href="https://github.com/Glass2GlassHQ/glass2glass#running-smoke-tests" style="color: var(--accent);">README</a>.
         </p>
+        <p class="section-desc">
+            To try it without Rust, download <code>g2g-launch</code> for Linux, macOS or Windows from the
+            <a href="https://github.com/Glass2GlassHQ/glass2glass/releases/latest" style="color: var(--accent);">latest release</a>,
+            or run <code>pip install glass2glass</code> for Python. Android apps can use the AAR on the same release page.
+        </p>
 
         <div class="code-block">
             <div class="tab-row">
@@ -1312,8 +1318,8 @@ g2g-launch <span class="flag">--script</span> build.rhai</div>
 
 <div class="tab-panel active" id="rtsp-wayland"><pre><span class="cmt"># Cargo.toml</span>
 [dependencies]
-g2g-core    = { git = <span class="str">"https://github.com/Glass2GlassHQ/glass2glass"</span> }
-g2g-plugins = { git = <span class="str">"https://github.com/Glass2GlassHQ/glass2glass"</span>, features = [<span class="str">"rtsp"</span>, <span class="str">"ffmpeg"</span>, <span class="str">"wayland-sink"</span>] }
+g2g-core    = "0.11"
+g2g-plugins = { version = "0.11", features = [<span class="str">"rtsp"</span>, <span class="str">"ffmpeg"</span>, <span class="str">"wayland-sink"</span>] }
 
 <span class="cmt">// main.rs</span>
 <span class="kw">use</span> g2g_core::runtime::{<span class="fn">run_source_transform_sink</span>, <span class="ty">LatencyProfile</span>};
@@ -1327,7 +1333,7 @@ g2g-plugins = { git = <span class="str">"https://github.com/Glass2GlassHQ/glass2
 
 <div class="tab-panel" id="nvdec-gl"><pre><span class="cmt"># Linux + NVIDIA; zero PCIe round-trip after decode.</span>
 [dependencies]
-g2g-plugins = { git = <span class="str">"..."</span>, features = [<span class="str">"rtsp"</span>, <span class="str">"ffmpeg"</span>, <span class="str">"cuda"</span>, <span class="str">"cuda-gl"</span>] }
+g2g-plugins = { version = "0.11", features = [<span class="str">"rtsp"</span>, <span class="str">"ffmpeg"</span>, <span class="str">"cuda"</span>, <span class="str">"cuda-gl"</span>] }
 
 <span class="kw">use</span> g2g_plugins::{<span class="ty">RtspSrc</span>, ffmpegdec::{<span class="ty">FfmpegH264Dec</span>, <span class="ty">Backend</span>}, <span class="ty">CudaGlSink</span>};
 
@@ -1339,8 +1345,8 @@ g2g-plugins = { git = <span class="str">"..."</span>, features = [<span class="s
 
 <div class="tab-panel" id="ml-chain"><pre><span class="cmt"># RTSP -> decode -> GPU preprocess -> ORT (CUDA EP) -> classification.</span>
 [dependencies]
-g2g-plugins = { git = <span class="str">"..."</span>, features = [<span class="str">"rtsp"</span>, <span class="str">"ffmpeg"</span>] }
-g2g-ml      = { git = <span class="str">"..."</span>, features = [<span class="str">"wgpu"</span>, <span class="str">"cuda"</span>] }
+g2g-plugins = { version = "0.11", features = [<span class="str">"rtsp"</span>, <span class="str">"ffmpeg"</span>] }
+g2g-ml      = { version = "0.11", features = [<span class="str">"wgpu"</span>, <span class="str">"cuda"</span>] }
 
 <span class="kw">use</span> g2g_core::runtime::<span class="fn">run_linear_chain</span>;
 <span class="kw">use</span> g2g_ml::{<span class="ty">WgpuPreprocess</span>, <span class="ty">OrtInference</span>, <span class="ty">TensorPostprocess</span>};
@@ -1356,7 +1362,7 @@ g2g-ml      = { git = <span class="str">"..."</span>, features = [<span class="s
 
 <div class="tab-panel" id="rtp-egress"><pre><span class="cmt"># Loopback-verified; honors receive-side NACK by retransmit.</span>
 [dependencies]
-g2g-plugins = { git = <span class="str">"..."</span>, features = [<span class="str">"udp-egress"</span>, <span class="str">"mf-encode"</span>] }
+g2g-plugins = { version = "0.11", features = [<span class="str">"udp-egress"</span>, <span class="str">"mf-encode"</span>] }
 
 <span class="kw">use</span> g2g_plugins::{<span class="ty">VideoTestSrc</span>, <span class="ty">MfEncode</span>, <span class="ty">UdpSink</span>};
 
@@ -1369,7 +1375,7 @@ g2g-plugins = { git = <span class="str">"..."</span>, features = [<span class="s
 
 <div class="tab-panel" id="browser"><pre><span class="cmt"># wasm32-unknown-unknown; needs --cfg=web_sys_unstable_apis for WebCodecs.</span>
 [dependencies]
-g2g-plugins = { git = <span class="str">"..."</span>, features = [<span class="str">"web"</span>, <span class="str">"web-codecs"</span>] }
+g2g-plugins = { version = "0.11", features = [<span class="str">"web"</span>, <span class="str">"web-codecs"</span>] }
 
 <span class="kw">use</span> g2g_plugins::{<span class="ty">WebSocketSrc</span>, <span class="ty">H264Parse</span>, <span class="ty">WebCodecsDecode</span>, <span class="ty">CanvasSink</span>};
 
@@ -1397,6 +1403,80 @@ g2g-launch videotestsrc num-buffers=8 ! \
 <span class="cmt">// Pull each channel live (Rust / C / Python) while the pipeline runs:</span>
 <span class="kw">let</span> even = <span class="fn">register_appsink_pull</span>(<span class="str">"even"</span>);
 <span class="kw">while let</span> <span class="ty">Some</span>(frame) = even.<span class="fn">pull</span>().<span class="kw">await</span> { <span class="cmt">/* feed your consumer */</span> }</pre></div>
+
+            </div>
+        </div>
+
+        <p class="section-desc" style="margin-top: 40px;">
+            The same pipelines run from other languages. Each binding takes a launch line
+            and pushes or pulls frames without copying them.
+        </p>
+        <div class="code-block">
+            <div class="tab-row">
+                <button class="tab-btn active" data-tab="lang-python">Python</button>
+                <button class="tab-btn" data-tab="lang-c">C</button>
+                <button class="tab-btn" data-tab="lang-cpp">C++</button>
+                <button class="tab-btn" data-tab="lang-csharp">C#</button>
+                <button class="tab-btn" data-tab="lang-kotlin">Kotlin</button>
+                <button class="tab-btn" data-tab="lang-swift">Swift</button>
+            </div>
+            <div class="tab-body">
+
+<div class="tab-panel active" id="lang-python"><pre><span class="cmt"># pip install glass2glass</span>
+<span class="kw">import</span> g2g, numpy
+
+sink = g2g.<span class="ty">AppSink</span>(<span class="str">"out"</span>)
+pipeline = g2g.<span class="ty">Pipeline</span>(<span class="str">"videotestsrc num-buffers=30 ! appsink channel=out"</span>)
+<span class="kw">while</span> (frame := sink.<span class="fn">pull</span>()) <span class="kw">is not</span> <span class="kw">None</span>:
+    pixels = numpy.<span class="fn">frombuffer</span>(frame, numpy.uint8)  <span class="cmt"># no copy</span>
+pipeline.<span class="fn">wait</span>()</pre></div>
+
+<div class="tab-panel" id="lang-c"><pre><span class="cmt">// g2g.h, from g2g-capi</span>
+<span class="kw">char</span> *error = <span class="kw">NULL</span>;
+<span class="ty">G2gStats</span> stats;
+<span class="ty">G2gAppSink</span> *sink = <span class="fn">g2g_appsink_new</span>(<span class="str">"out"</span>);
+<span class="ty">G2gPipeline</span> *pipeline = <span class="fn">g2g_pipeline_launch</span>(<span class="str">"videotestsrc num-buffers=30 ! appsink channel=out"</span>, &amp;error);
+<span class="ty">G2gSample</span> *sample;
+<span class="kw">while</span> (<span class="fn">g2g_appsink_pull</span>(sink, &amp;sample)) {
+    <span class="fn">printf</span>(<span class="str">"%zu bytes\n"</span>, <span class="fn">g2g_sample_len</span>(sample));
+    <span class="fn">g2g_sample_free</span>(sample);
+}
+<span class="fn">g2g_pipeline_wait</span>(pipeline, &amp;stats);</pre></div>
+
+<div class="tab-panel" id="lang-cpp"><pre><span class="cmt">// g2g.hpp, header-only over the C library</span>
+g2g::<span class="ty">AppSink</span> sink(<span class="str">"out"</span>);
+g2g::<span class="ty">Pipeline</span> pipeline(<span class="str">"videotestsrc num-buffers=30 ! appsink channel=out"</span>);
+<span class="kw">while</span> (<span class="kw">auto</span> sample = sink.<span class="fn">pull</span>()) {
+    std::cout &lt;&lt; sample-&gt;<span class="fn">size</span>() &lt;&lt; <span class="str">" bytes\n"</span>;
+}
+pipeline.<span class="fn">wait</span>();</pre></div>
+
+<div class="tab-panel" id="lang-csharp"><pre><span class="cmt">// g2g-dotnet</span>
+<span class="kw">using var</span> sink = <span class="kw">new</span> <span class="ty">AppSink</span>(<span class="str">"out"</span>);
+<span class="kw">using var</span> pipeline = <span class="kw">new</span> <span class="ty">Pipeline</span>(<span class="str">"videotestsrc num-buffers=30 ! appsink channel=out"</span>);
+<span class="kw">while</span> (sink.<span class="fn">Pull</span>() <span class="kw">is</span> { } sample) {
+    <span class="kw">using</span> (sample) Console.<span class="fn">WriteLine</span>(<span class="str">$"{sample.Data.Length} bytes"</span>);
+}
+pipeline.<span class="fn">Wait</span>();</pre></div>
+
+<div class="tab-panel" id="lang-kotlin"><pre><span class="cmt">// the AAR on each release, or g2g-uniffi on the JVM</span>
+<span class="ty">AppSink</span>(<span class="str">"out"</span>).<span class="fn">use</span> { sink -&gt;
+    <span class="ty">Pipeline</span>(<span class="str">"videotestsrc num-buffers=30 ! appsink channel=out"</span>).<span class="fn">use</span> { pipeline -&gt;
+        <span class="kw">while</span> (<span class="kw">true</span>) {
+            <span class="kw">val</span> sample = sink.<span class="fn">pull</span>() ?: <span class="kw">break</span>
+            <span class="fn">println</span>(<span class="str">"${sample.data.size} bytes"</span>)
+        }
+        pipeline.<span class="fn">wait</span>()
+    }
+}</pre></div>
+
+<div class="tab-panel" id="lang-swift"><pre><span class="cmt">// g2g-uniffi</span>
+<span class="kw">let</span> sink = <span class="ty">AppSink</span>(channel: <span class="str">"out"</span>)
+<span class="kw">let</span> pipeline = <span class="kw">try</span> <span class="ty">Pipeline</span>(description: <span class="str">"videotestsrc num-buffers=30 ! appsink channel=out"</span>)
+<span class="kw">while let</span> sample = <span class="kw">try</span> sink.<span class="fn">pull</span>() {
+    <span class="fn">print</span>(<span class="str">"\(sample.data.count) bytes"</span>)
+}
+_ = <span class="kw">try</span> pipeline.<span class="fn">wait</span>()</pre></div>
 
             </div>
         </div>
@@ -1454,8 +1534,9 @@ g2g-launch videotestsrc num-buffers=8 ! \
     document.querySelectorAll('.tab-btn').forEach(btn => {
         btn.addEventListener('click', () => {
             const tab = btn.dataset.tab;
-            document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-            document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+            const block = btn.closest('.code-block');
+            block.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+            block.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
             btn.classList.add('active');
             document.getElementById(tab).classList.add('active');
         });

@@ -62,8 +62,8 @@ cmd_publish() {
     if ! git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
         require_clean_release_branch
         sed -i "0,/^## Unreleased$/s//## Unreleased\n\n## $version/" CHANGELOG.md
-        # the dependency lines in the quick start and the authoring guide
-        tools/set-doc-dependency-version.sh "${version%.*}" README.md AUTHORING.md
+        # the dependency lines in the quick start, the authoring guide and the landing page
+        tools/set-doc-dependency-version.sh "${version%.*}" README.md AUTHORING.md docs/index.html
         git commit -q -am "release $version"
         git tag "$tag"
     fi

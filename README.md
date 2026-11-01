@@ -101,6 +101,23 @@ g2g-launch "videotestsrc num-buffers=1 pattern=ball ! videoconvert ! pngenc ! fi
 
 The last line needs no display: it writes the first frame to `ball.png`.
 
+Prebuilt `g2g-launch` and `g2g-inspect` for Linux, macOS and Windows are on each
+[GitHub release](https://github.com/Glass2GlassHQ/glass2glass/releases/latest).
+They leave out the elements that need distro libraries (ffmpeg, libvpx, libopus,
+PipeWire, Pulse).
+
+### Other languages
+
+The same pipelines run from Python, C, C++, C#, Kotlin and Swift. Each binding
+takes a launch line and has the bus, `appsrc` and `appsink`.
+
+- Python: `pip install glass2glass`, see [g2g-pyapi](g2g-pyapi/README.md).
+- Kotlin on Android: the AAR on each GitHub release. Kotlin on the JVM and
+  Swift build from source, see [g2g-uniffi](g2g-uniffi/README.md).
+- C and C++: `cargo build --release -p g2g-capi` builds the library for
+  `g2g.h` and `g2g.hpp`, see [g2g-capi](g2g-capi/README.md).
+- C#: [g2g-dotnet](g2g-dotnet/README.md), on top of the C library.
+
 ## Portability: one pipeline, five targets
 
 `g2g-core` is pure Rust, `no_std` with `alloc` optional, and sans-IO. The
@@ -165,7 +182,11 @@ parse error: unknown element: theoraenc
 ```
 
 - **`g2g-launch -v`** prints each link's negotiated caps and memory domain,
-  like `gst-launch -v`. `--dot` dumps a Graphviz graph.
+  like `gst-launch -v`. `--dot` dumps a Graphviz graph. `--seek <seconds>`
+  starts a file, HLS or DASH stream at that time, and `--seek-at` seeks once
+  playback reaches a position. Live HLS and DASH take seeks inside their live
+  window. `--trace run.json` writes each element's per-frame wait and work time
+  for https://ui.perfetto.dev.
 - **`g2g-inspect`** is `gst-inspect-1.0`: list elements, dump one's properties
   and pads, or map a GStreamer name with `g2g-inspect --gst x264enc`.
   `--gst-scan app.c` scans an app's source for element names.
@@ -456,9 +477,11 @@ no-heap targets (MISRA, certification processes).
   if cited evidence goes missing. `tools/qualification-kit.sh` runs the whole
   proof set into one report. Pre-1.0 and emulated, so this is a down payment
   on a functional-safety case, not a certificate.
-- **ARM and RISC-V.** The no-alloc core and `g2g-mcu` build unchanged for
+- **ARM, RISC-V and Xtensa.** The no-alloc core and `g2g-mcu` build unchanged for
   `riscv32imafc` (ESP32-P4 class). The symbol proofs and the footprint report
-  run on both `thumbv7em` and RISC-V.
+  run on both `thumbv7em` and RISC-V, and the heap-free, panic-free proof also
+  runs on the ESP32-S3 (Xtensa). The `alloc` core builds for targets without
+  64-bit atomics.
 - **TinyML inference.** `TensorInference` runs a model on each `Caps::Tensor`
   frame through a `TensorModel` backend seam, output into a static ring slot.
   The `microflow` feature compiles a `.tflite` into Rust at build time with
@@ -555,6 +578,7 @@ cargo clippy --workspace --all-targets
 | `OnvifSrc` (camera discovery + stream-URI resolution) / `OnvifMetadataParse` / `OnvifMetadataCombiner` | `onvif` | reqwest + roxmltree |
 | `H264Parse` | (default) | none |
 | `FfmpegH264Dec` (sw / `NvdecCuvid` / `NvdecCuda` / `Vaapi`) | `ffmpeg` | Linux + libavcodec |
+| `FfmpegVideoEnc` (`x264enc`, `ffmpegenc`), and `vah264enc` / `vah265enc` / `vaav1enc` on VA-API GPUs | `ffmpeg` | Linux + libavcodec (+ the GPU's VA-API driver) |
 | AVI / QuickTime / Matroska streams g2g has no caps type for (Cinepak, Indeo, Ut Video, QuickTime RLE, ADPCM, MACE, ...), demuxed under their container tag and decoded by `ffmpegdec` / `ffmpegaudiodec` | `ffmpeg-long-tail` | Linux + libavcodec + libavformat |
 | `MfDecode` / `MfEncode` / `MfAacEncode` / `MfAacDecode` | `mf-decode`, `mf-encode`, `mf-aac` | Windows + Media Foundation |
 | `VtDecode` / `VtEncode` (H.264 / H.265, zero-copy `CVPixelBuffer` output via `cv-output`) | `vtdecode`, `vtencode` | macOS + VideoToolbox |
@@ -574,6 +598,7 @@ cargo clippy --workspace --all-targets
 | `UdpSrc` (H.264 / Opus RTP ingest + jitter buffer + RTCP / NACK, or raw MPEG-TS datagrams) | `udp-ingress` | none |
 | `SrtpEnc` / `SrtpDec` (RFC 3711 / RFC 7714 SRTP and SRTCP, per-SSRC receive contexts) | `srtp` | none |
 | `DtlsSrtpEnc` / `DtlsSrtpDec` (DTLS-SRTP handshake over the media socket keys SRTP) | `dtls-srtp` | none |
+| `SrtSrc` / `SrtSink` (SRT caller, listener and rendezvous, AES-128 / 192 / 256 via `passphrase` and `pbkeylen`, gst's `uri`, a listener that accepts callers by `streamid`) | `srt` | none |
 | `RistSink` / `RistSrc` (RIST Simple Profile: MPEG-TS over RTP with NACK retransmission) | `rist` | none |
 | `TcpServerSrc` / `TcpClientSrc` / `TcpServerSink` / `TcpClientSink` | `tcp` | none |
 | `HttpServerSink` (`httpserversink`: streams MPEG-TS, fMP4 or Matroska to HTTP clients, a late client starting at the next keyframe) | `http-server` | none |
@@ -598,6 +623,7 @@ cargo clippy --workspace --all-targets
 | `PulseSink` | `pulse-sink` | Linux + libpulse |
 | `PipeWireSink` / `PipeWireSrc` (audio) | `pipewire` | Linux + libpipewire |
 | `PipeWireVideoSrc` (video capture, `io-mode=mmap` or `dmabuf`) | `pipewire` | Linux + libpipewire |
+| `PipeWireVideoSink` (`pipewirevideosink`: publishes video as a PipeWire camera node that other applications capture from) | `pipewire` | Linux + libpipewire |
 | `PipeWireVideoSrc portal=true` (screen capture via xdg-desktop-portal) | `portal` | Linux + libpipewire + a desktop portal |
 | `DeckLinkVideoSink` / `DeckLinkAudioSink` (SDI output for Blackmagic Design DeckLink, unverified on hardware until a board runs them) | `decklink` | Linux + a C++ compiler at build, the Desktop Video driver at run time |
 | `MfVideoSrc` (camera) | `mf-video-src` | Windows + Media Foundation |
@@ -607,6 +633,7 @@ cargo clippy --workspace --all-targets
 | `PngDec` / `PngEnc` (pure Rust) | `png` | none |
 | `WebPDec` (lossy + lossless, pure Rust) | `webp` | none |
 | `AnalyticsOverlay` (CPU) / `VelloAnalyticsOverlay` (GPU) (detection boxes, segmentation masks, ROIs) / `WgpuSink` | `analytics`, `vello-overlay`, `wgpu-sink` | wgpu (GPU variants) |
+| `H264SeiInserter` / `H265SeiInserter` (write a frame's SEI user data metadata into its access unit) | `metadata` | none |
 | `Tracker` (ByteTrack: a persistent track id on each detection) | `analytics` | none |
 | `MetaSink` / `MetaReplay` (one JSON line per frame: detections, blobs, text; replay onto frames) / `AnalyticsAlert` (rules, cooldown, `alert` blob, webhook) / `AlertRecorder` (a clip around each alert) | `analytics-json` | none |
 | `MqttSink` (the same record per frame, published to an MQTT topic) / `MqttSrc` (each message on a topic filter as a text frame) | `mqtt` | none |
@@ -635,6 +662,7 @@ cargo clippy --workspace --all-targets
 | Audio transforms | `audioconvert` (`dithering` and `noise-shaping` on bit-depth reduction), `audioresample` (windowed sinc, `quality` 0 to 10), `audiorate`, `audiomixer`, `interleave`, `deinterleave`, `scaletempo`, `volume`, `audiopanorama`, `audioamplify`, `audioecho`, `audiodynamic`, `audiowsinclimit`, `audiocheblimit`, `audiochannelmix`, `audiomixmatrix`, `stereo`, `audiofirfilter`, `audioiirfilter`, `removesilence`, `audiobuffersplit`, `speed`, `audioreverse`, `equalizer-3bands` |
 | Audio analysis | `level`, `ebur128`, `cutter`, `spectrum` |
 | Telemetry | `klvdecode` (MISB ST 0601 / STANAG 4609) |
+| Ad markers | SCTE-35 splice sections pass from `tsdemux` to `mpegtsmux scte-35-pid` |
 | Subtitles and captions | bitmap decoders `vobsubdec` (alias `dvdsubdec`), `dvbsubdec`, `pgsdec` with `subpictureoverlay` to blend their cues onto video, `teletextdec`, `subparse`, `srtenc`, `webvttenc`, `ccextract` / `cccombiner`, `ccconverter` (between cc_data, CDP, S334-1A, and raw CEA-608) |
 | Flow control and debug | `concat`, `input-selector`, `output-selector`, `valve`, `fakesrc`, `fdsrc`, `fdsink`, `watchdog`, `capssetter`, `taginject`, `rndbuffersize`, `errorignore`, `breakmydata`, `chopmydata`, `checksumsink`, `fakevideosink`, `fakeaudiosink`, `progressreport` |
 | Composition and DSL | `compositor`, the tag system, `parse_launch` / `gst-inspect` |
@@ -1343,7 +1371,7 @@ access to `master`.
 ## System dependencies
 
 The cargo features pull pure Rust crates. OS-level dependencies must be on the
-host.
+host. TLS uses rustls, so no build links OpenSSL.
 
 | Distro | Decoder (`ffmpeg`) | Wayland sink | KMS sink |
 | :--- | :--- | :--- | :--- |
@@ -1359,10 +1387,11 @@ USAC (xHE-AAC) decode needs libavcodec 62 (ffmpeg 8) or later.
 
 `ffmpegvaapidec` also needs the GPU's VA-API driver at runtime.
 
-For the CUDA path, install the NVIDIA driver and CUDA runtime your
-distribution ships, with `libnvcuvid.so` and `libcuda.so` on the linker path.
-`Backend::NvdecCuvid` / `Backend::NvdecCuda` need an `ffmpeg` build with cuvid
-support.
+`cuda`, `nvdec` and `nvenc` need no NVIDIA libraries at build time. They load
+`libcuda`, `libnvcuvid` and `libnvidia-encode` (`nvcuda.dll`, `nvcuvid.dll`,
+`nvEncodeAPI64.dll` on Windows) when the element starts, and an element whose
+library is missing reports which one. `Backend::NvdecCuvid` /
+`Backend::NvdecCuda` need an `ffmpeg` build with cuvid support.
 
 The loopback RTSP relay is `mediamtx`, run from docker or as a single binary
 (see [A standing RTSP feed](#a-standing-rtsp-feed)).
