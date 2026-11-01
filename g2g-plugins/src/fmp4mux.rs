@@ -63,6 +63,8 @@ pub(crate) fn video_sample(codec: VideoCodec, au: &[u8]) -> (Vec<u8>, bool) {
             (avcc_sample(&split_annexb(au)), au_is_keyframe(codec, au))
         }
         VideoCodec::Vp8 => (au.to_vec(), vp8_keyframe(au)),
+        // JPEG has no inter prediction
+        VideoCodec::Mjpeg => (au.to_vec(), true),
         VideoCodec::Av1 => (
             crate::av1parse::strip_temporal_delimiters(au),
             crate::av1parse::av1_keyframe(au),

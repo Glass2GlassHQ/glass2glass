@@ -388,7 +388,8 @@ impl MkvMuxN {
                     | VideoCodec::H265
                     | VideoCodec::Vp8
                     | VideoCodec::Vp9
-                    | VideoCodec::Av1),
+                    | VideoCodec::Av1
+                    | VideoCodec::Mjpeg),
                 ..
             } => Some(PadKind::Video(*c)),
             Caps::Audio {
@@ -660,6 +661,7 @@ fn track_config(init: &TrackInit, subtitle_format: TextFormat) -> MkvTrackConfig
                 VideoCodec::H265 => (MkvCodec::H265, hvcc_record(&refs)),
                 VideoCodec::Vp8 => (MkvCodec::Vp8, Vec::new()),
                 VideoCodec::Vp9 => (MkvCodec::Vp9, Vec::new()),
+                VideoCodec::Mjpeg => (MkvCodec::Mjpeg, Vec::new()),
                 // The captured init is the sequence-header OBU; its parse
                 // succeeded at capture, so the re-parse here cannot fail.
                 VideoCodec::Av1 => {
@@ -1242,6 +1244,40 @@ mod tests {
         // VP8: frame tag bit 0 clear = key frame.
         assert!(vp8_keyframe(&[0x10]));
         assert!(!vp8_keyframe(&[0x11]));
+    }
+
+    #[tokio::test]
+    async fn mjpeg_frames_mux_as_keyframes_of_a_v_mjpeg_track() {
+        let mjpeg = Caps::CompressedVideo {
+            codec: VideoCodec::Mjpeg,
+            width: Dim::Fixed(320),
+            height: Dim::Fixed(240),
+            framerate: g2g_core::Rate::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
+        };
+        // a JPEG start-of-image marker, then arbitrary payload
+        let jpeg: Vec<u8> = alloc::vec![0xFF, 0xD8, 0xFF, 0xE0, 0x12, 0x34];
+        let mut mux = MkvMuxN::new(1);
+        mux.configure_pipeline(0, &mjpeg).unwrap();
+        let mut sink = CaptureSink::default();
+        for pts_ns in [0, 33_333_333] {
+            mux.process(0, frame(jpeg.clone(), pts_ns), &mut sink)
+                .await
+                .unwrap();
+        }
+        mux.process(0, PipelinePacket::Eos, &mut sink)
+            .await
+            .unwrap();
+
+        let mut demuxer = MatroskaDemuxer::new();
+        demuxer.push_data(&sink.bytes);
+        assert_eq!(demuxer.tracks()[0].codec, MkvCodec::Mjpeg);
+        let frames = demuxer.take_frames();
+        assert_eq!(frames.len(), 2);
+        assert!(frames
+            .iter()
+            .all(|frame| frame.keyframe && frame.data == jpeg));
     }
 
     #[tokio::test]
