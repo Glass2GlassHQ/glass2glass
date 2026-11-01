@@ -46,24 +46,16 @@ use ffmpeg::packet::Packet;
 use ffmpeg::Error as FfError;
 use ffmpeg_next as ffmpeg;
 
-use g2g_core::frame::{Frame, FrameTiming};
+use g2g_core::frame::FrameTiming;
 use g2g_core::log::{short_type_name, Target};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
-use g2g_core::time::ticks_to_ns;
 use g2g_core::{
     g2g_warn, pcm_caps_any_rate_and_channels, AsyncElement, AudioFormat, Caps, CapsConstraint,
     CapsSet, ConfigureOutcome, ElementMetadata, G2gError, HardwareError, OutputSink, PadTemplate,
-    PadTemplates, PipelinePacket, Segment, ANY_CHANNELS, ANY_SAMPLE_RATE,
+    PadTemplates, PipelinePacket,
 };
 
-use crate::pcmclip::clip_pcm_to_segment;
-
-/// One decoded audio frame: interleaved `PcmS16Le` bytes plus its real layout.
-struct DecodedAudio {
-    pcm: Vec<u8>,
-    channels: u8,
-    rate: u32,
-}
+use crate::audioframe::split_frames;
+use crate::pcmoutput::{f32_to_s16, pcm_s16_decoder_output, DecodedPcm, PcmOutput};
 
 /// # Example
 ///
@@ -83,10 +75,7 @@ pub struct FfmpegAudioDec {
     lead_config: Option<Vec<u8>>,
     // the AAC stream opened on a LOAS frame, so libavcodec's LATM decoder takes it
     loas: bool,
-    emitted: u64,
-    /// Last emitted output caps, to suppress re-emitting an unchanged `CapsChanged`.
-    last_out: Option<Caps>,
-    segment: Segment,
+    output: PcmOutput,
 }
 
 // SAFETY: `ffmpeg::decoder::Audio` wraps a raw `*mut AVCodecContext` and is
@@ -99,7 +88,7 @@ impl core::fmt::Debug for FfmpegAudioDec {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("FfmpegAudioDec")
             .field("configured", &self.configured)
-            .field("emitted", &self.emitted)
+            .field("emitted", &self.output.frames_pushed())
             .finish()
     }
 }
@@ -118,9 +107,7 @@ impl FfmpegAudioDec {
             configured: false,
             lead_config: None,
             loas: false,
-            emitted: 0,
-            last_out: None,
-            segment: Segment::new(),
+            output: PcmOutput::default(),
         }
     }
 
@@ -212,7 +199,7 @@ impl FfmpegAudioDec {
     // the AudioSpecificConfig libavcodec stores as extradata once it reads a StreamMuxConfig in `buf`
     fn latm_config_from(&mut self, buf: &[u8]) -> Result<Option<Vec<u8>>, G2gError> {
         let mut discarded = Vec::new();
-        for frame in loas_frames(buf) {
+        for frame in split_frames(buf, crate::aacparse::loas_frame_len) {
             self.send_unit(frame)?;
             self.drain(&mut discarded)?;
             let decoder = self.decoder.as_ref().ok_or(G2gError::NotConfigured)?;
@@ -276,7 +263,7 @@ impl FfmpegAudioDec {
 
     /// Count of decoded `DataFrame`s pushed downstream. Useful in tests.
     pub fn decoded_count(&self) -> u64 {
-        self.emitted
+        self.output.frames_pushed()
     }
 
     // the ffmpeg CLI logs a unit libavcodec rejects for its content and decodes on
@@ -299,7 +286,7 @@ impl FfmpegAudioDec {
     /// Drain whatever the decoder is ready to release into `out_frames`,
     /// converting each to interleaved `PcmS16Le`. libavcodec may buffer, so a
     /// send commonly yields zero frames.
-    fn drain(&mut self, out_frames: &mut Vec<DecodedAudio>) -> Result<(), G2gError> {
+    fn drain(&mut self, out_frames: &mut Vec<DecodedPcm>) -> Result<(), G2gError> {
         let decoder = self.decoder.as_mut().ok_or(G2gError::NotConfigured)?;
         loop {
             let mut frame = FfAudio::empty();
@@ -355,15 +342,7 @@ impl AsyncElement for FfmpegAudioDec {
     /// with no `audioresample` still fails loud at runtime.
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
         CapsConstraint::DerivedOutput(Box::new(|input: &Caps| match input {
-            Caps::Audio { format, .. } if Self::decodes(*format) => {
-                let pcm = |sample_rate| Caps::Audio {
-                    format: AudioFormat::PcmS16Le,
-                    channels: ANY_CHANNELS,
-                    sample_rate,
-                    channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
-                };
-                CapsSet::from_alternatives(alloc::vec![pcm(48_000), pcm(ANY_SAMPLE_RATE)])
-            }
+            Caps::Audio { format, .. } if Self::decodes(*format) => pcm_s16_decoder_output(),
             _ => CapsSet::from_alternatives(Vec::new()),
         }))
     }
@@ -468,11 +447,13 @@ impl AsyncElement for FfmpegAudioDec {
                         // AAC, MPEG audio header for mp2, `0x0B77` sync for AC-3) and
                         // send each, the audio analog of access-unit framing for video.
                         let aus = match self.format {
-                            AudioFormat::Mp2 | AudioFormat::Mp3 => mpa_frames(buf),
-                            AudioFormat::Ac3 => ac3_frames(buf),
-                            _ if self.loas => loas_frames(buf),
+                            AudioFormat::Mp2 | AudioFormat::Mp3 => {
+                                split_frames(buf, crate::audioframe::mpa_frame_len)
+                            }
+                            AudioFormat::Ac3 => split_frames(buf, crate::audioframe::ac3_frame_len),
+                            _ if self.loas => split_frames(buf, crate::aacparse::loas_frame_len),
                             _ if self.lead_config.is_some() => alloc::vec![buf],
-                            _ => adts_frames(buf),
+                            _ => split_frames(buf, crate::aacparse::adts_frame_len),
                         };
                         for au in aus {
                             self.send_unit(au)?;
@@ -489,10 +470,7 @@ impl AsyncElement for FfmpegAudioDec {
                         Caps::Audio {
                             format: AudioFormat::PcmS16Le,
                             ..
-                        } => {
-                            out.push(PipelinePacket::CapsChanged(c.clone())).await?;
-                            self.last_out = Some(c);
-                        }
+                        } => self.output.forward_caps(c, out).await?,
                         _ => return Err(G2gError::CapsMismatch),
                     }
                     return Ok(());
@@ -501,7 +479,7 @@ impl AsyncElement for FfmpegAudioDec {
                     if let Some(d) = self.decoder.as_mut() {
                         d.flush();
                     }
-                    self.last_out = None;
+                    self.output.forget_caps();
                     out.push(PipelinePacket::Flush).await?;
                     return Ok(());
                 }
@@ -512,9 +490,8 @@ impl AsyncElement for FfmpegAudioDec {
                     }
                     self.drain(&mut decoded)?;
                 }
-                PipelinePacket::Segment(seg) => {
-                    self.segment = seg;
-                    out.push(PipelinePacket::Segment(seg)).await?;
+                PipelinePacket::Segment(segment) => {
+                    self.output.forward_segment(segment, out).await?;
                     return Ok(());
                 }
                 other => {
@@ -523,53 +500,7 @@ impl AsyncElement for FfmpegAudioDec {
                 }
             }
 
-            let mut next_pts_ns = timing.pts_ns;
-            for d in decoded {
-                let bytes_per_sample_frame = usize::from(d.channels) * 2;
-                let samples = d
-                    .pcm
-                    .len()
-                    .checked_div(bytes_per_sample_frame)
-                    .ok_or(G2gError::CapsMismatch)?;
-                // the frames one packet decodes to follow each other
-                let frame_timing = FrameTiming {
-                    pts_ns: next_pts_ns,
-                    ..timing
-                };
-                if next_pts_ns != FrameTiming::PTS_NONE {
-                    next_pts_ns = next_pts_ns.saturating_add(ticks_to_ns(samples as u64, d.rate));
-                }
-                let Some((frame_timing, pcm)) = clip_pcm_to_segment(
-                    &self.segment,
-                    frame_timing,
-                    d.pcm,
-                    bytes_per_sample_frame,
-                    d.rate,
-                )?
-                else {
-                    continue;
-                };
-                let new_caps = Caps::Audio {
-                    format: AudioFormat::PcmS16Le,
-                    channels: d.channels,
-                    sample_rate: d.rate,
-                    channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
-                };
-                if self.last_out.as_ref() != Some(&new_caps) {
-                    out.push(PipelinePacket::CapsChanged(new_caps.clone()))
-                        .await?;
-                    self.last_out = Some(new_caps);
-                }
-                let out_frame = Frame {
-                    domain: MemoryDomain::System(SystemSlice::from_boxed(pcm.into_boxed_slice())),
-                    timing: frame_timing,
-                    sequence: self.emitted,
-                    meta: Default::default(),
-                };
-                self.emitted += 1;
-                out.push(PipelinePacket::DataFrame(out_frame)).await?;
-            }
-            Ok(())
+            self.output.push_consecutive(timing, decoded, out).await
         })
     }
 }
@@ -591,84 +522,6 @@ impl PadTemplates for FfmpegAudioDec {
             })),
         ])
     }
-}
-
-/// Split a buffer of back-to-back ADTS AAC frames into individual frames, so each
-/// reaches the decoder as one access unit. Each ADTS frame begins with a 12-bit
-/// syncword (`0xFFF`) and carries a 13-bit `aac_frame_length` (total header +
-/// payload) at bits spanning bytes 3..6. Walking stops at the first byte that is
-/// not a valid sync or a length that overruns the buffer, so a truncated tail is
-/// dropped rather than mis-fed. A buffer that is already a single frame yields it
-/// once.
-fn adts_frames(buf: &[u8]) -> Vec<&[u8]> {
-    let mut frames = Vec::new();
-    let mut pos = 0;
-    while let Some(header) = crate::aacparse::adts_header(&buf[pos..]) {
-        let len = header.frame_len;
-        if pos + len > buf.len() {
-            break;
-        }
-        frames.push(&buf[pos..pos + len]);
-        pos += len;
-    }
-    frames
-}
-
-// one MPEG-TS PES can carry several LOAS frames, and a truncated tail is dropped
-fn loas_frames(buf: &[u8]) -> Vec<&[u8]> {
-    let mut frames = Vec::new();
-    let mut pos = 0;
-    while let Some(frame) = crate::aacparse::loas_frame_len(&buf[pos..])
-        .and_then(|len| buf.get(pos..pos.checked_add(len)?))
-    {
-        frames.push(frame);
-        pos += frame.len();
-    }
-    frames
-}
-
-/// Split a buffer of back-to-back MPEG audio (Layer II `mp2` or Layer III `mp3`)
-/// frames into individual frames, the MPEG-audio sibling of [`adts_frames`]. The
-/// per-frame length comes from [`crate::audioframe::mpa_frame_len`], shared with
-/// the MPEG program stream demuxer's frame realignment so the two cannot drift.
-/// Walking stops at the first invalid header or a length overrunning the buffer,
-/// so a truncated tail is dropped rather than mis-fed.
-fn mpa_frames(buf: &[u8]) -> Vec<&[u8]> {
-    let mut frames = Vec::new();
-    let mut pos = 0;
-    while pos < buf.len() {
-        let Some(len) = crate::audioframe::mpa_frame_len(&buf[pos..]) else {
-            break;
-        };
-        if pos + len > buf.len() {
-            break;
-        }
-        frames.push(&buf[pos..pos + len]);
-        pos += len;
-    }
-    frames
-}
-
-/// Split a buffer of back-to-back AC-3 syncframes into individual frames, the AC-3
-/// sibling of [`adts_frames`]. The per-frame length comes from
-/// [`crate::audioframe::ac3_frame_len`], shared with the MPEG program stream
-/// demuxer's frame realignment so the two cannot drift. Walking stops at the
-/// first header that is not a usable syncframe or a length overrunning the
-/// buffer, so a truncated tail is dropped rather than mis-fed.
-fn ac3_frames(buf: &[u8]) -> Vec<&[u8]> {
-    let mut frames = Vec::new();
-    let mut pos = 0;
-    while pos < buf.len() {
-        let Some(len) = crate::audioframe::ac3_frame_len(&buf[pos..]) else {
-            break;
-        };
-        if pos + len > buf.len() {
-            break;
-        }
-        frames.push(&buf[pos..pos + len]);
-        pos += len;
-    }
-    frames
 }
 
 /// The raw interleaved bytes of a packed audio frame, sliced to exactly
@@ -694,7 +547,7 @@ fn packed_bytes<T>(frame: &FfAudio, samples: usize, channels: usize) -> Result<&
 /// samples convert like swresample (round to nearest at 1<<15 scale, clipped) so
 /// the PCM matches ffmpeg's own decode of the same stream; an unsupported layout
 /// is a loud `CapsMismatch` rather than silent noise.
-fn to_s16_interleaved(frame: &FfAudio) -> Result<DecodedAudio, G2gError> {
+fn to_s16_interleaved(frame: &FfAudio) -> Result<DecodedPcm, G2gError> {
     let channels = frame.channels() as usize;
     let samples = frame.samples();
     if channels == 0 {
@@ -704,7 +557,6 @@ fn to_s16_interleaved(frame: &FfAudio) -> Result<DecodedAudio, G2gError> {
     // match swresample's float->s16 (lrintf at 1<<15 scale, clipped): every
     // other libavcodec consumer converts this way, so a differential decode
     // against ffmpeg stays bit-exact
-    let f32_to_i16 = |v: f32| (v * 32768.0).round_ties_even().clamp(-32768.0, 32767.0) as i16;
     let f64_to_i16 = |v: f64| (v * 32768.0).round_ties_even().clamp(-32768.0, 32767.0) as i16;
     // unsigned 8-bit is offset by 128, and swresample widens it by a plain shift
     let u8_to_i16 = |v: u8| (i16::from(v) - 128) << 8;
@@ -713,14 +565,14 @@ fn to_s16_interleaved(frame: &FfAudio) -> Result<DecodedAudio, G2gError> {
             for (c, slot) in (0..channels).zip(0..) {
                 let plane = frame.plane::<f32>(c);
                 for i in 0..samples {
-                    out[i * channels + slot] = f32_to_i16(plane[i]);
+                    out[i * channels + slot] = f32_to_s16(plane[i]);
                 }
             }
         }
         Sample::F32(Type::Packed) => {
             let data = packed_bytes::<f32>(frame, samples, channels)?;
             for (i, b) in data.as_chunks::<4>().0.iter().enumerate() {
-                out[i] = f32_to_i16(f32::from_ne_bytes(*b));
+                out[i] = f32_to_s16(f32::from_ne_bytes(*b));
             }
         }
         Sample::I16(Type::Planar) => {
@@ -785,148 +637,10 @@ fn to_s16_interleaved(frame: &FfAudio) -> Result<DecodedAudio, G2gError> {
     for s in out {
         pcm.extend_from_slice(&s.to_le_bytes());
     }
-    Ok(DecodedAudio {
+    Ok(DecodedPcm {
         pcm,
         channels: channels as u8,
-        rate: frame.rate(),
+        sample_rate: frame.rate(),
+        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::adts_frames;
-    use alloc::vec;
-    use alloc::vec::Vec;
-
-    /// A minimal `len`-byte ADTS frame: a 7-byte header zero-padded to `len`.
-    fn adts(len: usize) -> Vec<u8> {
-        const ADTS_HEADER_LEN: usize = 7;
-        crate::aacparse::test_frames::adts_au(&vec![0u8; len - ADTS_HEADER_LEN])
-    }
-
-    #[test]
-    fn splits_concatenated_adts_frames() {
-        let mut buf = adts(20);
-        buf.extend_from_slice(&adts(13));
-        let frames = adts_frames(&buf);
-        assert_eq!(frames.len(), 2, "two back-to-back ADTS frames split apart");
-        assert_eq!(frames[0].len(), 20);
-        assert_eq!(frames[1].len(), 13);
-    }
-
-    #[test]
-    fn drops_a_truncated_tail() {
-        let mut buf = adts(20);
-        buf.extend_from_slice(&adts(30)[..10]); // a second frame claiming 30 bytes, only 10 present
-        let frames = adts_frames(&buf);
-        assert_eq!(
-            frames.len(),
-            1,
-            "the complete frame is kept, the truncated tail dropped"
-        );
-        assert_eq!(frames[0].len(), 20);
-    }
-
-    #[test]
-    fn bails_without_a_syncword() {
-        assert!(adts_frames(&[0, 1, 2, 3, 4, 5, 6, 7]).is_empty());
-    }
-
-    /// A minimal MPEG-1 Layer II frame header: 384 kbit/s at 48 kHz, no padding
-    /// (frame length = 144 * 384000 / 48000 = 1152 bytes), zero-padded.
-    fn mpa() -> Vec<u8> {
-        let mut f = vec![0u8; 1152];
-        f[0] = 0xFF;
-        f[1] = 0xFD; // sync + MPEG-1 + Layer II + no CRC
-        f[2] = 0xE4; // bitrate index 14 (384k) + rate index 1 (48k) + no padding
-        f
-    }
-
-    #[test]
-    fn splits_concatenated_mpa_frames() {
-        let mut buf = mpa();
-        buf.extend_from_slice(&mpa());
-        let frames = super::mpa_frames(&buf);
-        assert_eq!(frames.len(), 2, "two back-to-back mp2 frames split apart");
-        assert!(frames.iter().all(|f| f.len() == 1152));
-    }
-
-    /// A minimal Layer III frame, zero-padded to its computed length.
-    /// MPEG-1: 128 kbit/s at 44.1 kHz = 144 * 128000 / 44100 = 417 bytes.
-    /// MPEG-2.5: 32 kbit/s at 8 kHz = 72 * 32000 / 8000 = 288 bytes.
-    fn mp3(mpeg1: bool) -> Vec<u8> {
-        let (len, version_layer, bitrate_rate) = if mpeg1 {
-            (417, 0xFBu8, 0x90u8) // MPEG-1 Layer III, bitrate index 9, rate index 0
-        } else {
-            (288, 0xE3, 0x48) // MPEG-2.5 Layer III, bitrate index 4, rate index 2
-        };
-        let mut f = vec![0u8; len];
-        f[0] = 0xFF;
-        f[1] = version_layer;
-        f[2] = bitrate_rate;
-        f
-    }
-
-    #[test]
-    fn splits_concatenated_mp3_frames() {
-        // Layer III uses its own bitrate table and, on MPEG-2.5, a half-size
-        // frame: getting either wrong mis-splits the stream.
-        for (mpeg1, len) in [(true, 417), (false, 288)] {
-            let mut buf = mp3(mpeg1);
-            buf.extend_from_slice(&mp3(mpeg1));
-            let frames = super::mpa_frames(&buf);
-            assert_eq!(frames.len(), 2, "mpeg1={mpeg1}");
-            assert!(frames.iter().all(|f| f.len() == len), "mpeg1={mpeg1}");
-        }
-    }
-
-    #[test]
-    fn mpa_drops_truncated_tail_and_bad_headers() {
-        let mut buf = mpa();
-        buf.extend_from_slice(&mpa()[..40]); // truncated second frame
-        assert_eq!(super::mpa_frames(&buf).len(), 1);
-        // free-format bitrate (index 0) has no computable length: bail, no panic.
-        let mut free = mpa();
-        free[2] = 0x04;
-        assert!(super::mpa_frames(&free).is_empty());
-        assert!(super::mpa_frames(&[0xFF, 0xFD]).is_empty());
-    }
-
-    /// A minimal AC-3 frame: `0x0B77` sync, `fscod`/`frmsizecod` in byte 4, padded
-    /// to its computed length. `frmsizecod` 20 at 48 kHz = 384 words = 768 bytes.
-    /// The length comes from the shared header parser rather than a second copy
-    /// of its size table.
-    fn ac3(fscod: u8, frmsizecod: u8) -> Vec<u8> {
-        let mut head = [0u8; crate::audioframe::AC3_HEADER_LEN];
-        head[0] = 0x0B;
-        head[1] = 0x77;
-        head[4] = (fscod << 6) | (frmsizecod & 0x3F);
-        let len = crate::audioframe::ac3_frame_len(&head).expect("a valid header has a length");
-        let mut f = vec![0u8; len];
-        f[..head.len()].copy_from_slice(&head);
-        f
-    }
-
-    #[test]
-    fn splits_concatenated_ac3_frames() {
-        let mut buf = ac3(0, 20); // 48 kHz, 768 bytes
-        buf.extend_from_slice(&ac3(0, 20));
-        let frames = super::ac3_frames(&buf);
-        assert_eq!(frames.len(), 2, "two back-to-back AC-3 frames split apart");
-        assert!(frames.iter().all(|f| f.len() == 768));
-    }
-
-    #[test]
-    fn ac3_drops_truncated_tail_and_rejects_bad_headers() {
-        let mut buf = ac3(0, 20);
-        buf.extend_from_slice(&ac3(0, 20)[..100]); // truncated second frame
-        assert_eq!(super::ac3_frames(&buf).len(), 1);
-        // reserved fscod (3) has no frame length: bail, no panic.
-        let mut bad_rate = ac3(0, 20);
-        bad_rate[4] = (3 << 6) | 20;
-        assert!(super::ac3_frames(&bad_rate).is_empty());
-        // no syncword, and a too-short buffer: both empty, no panic.
-        assert!(super::ac3_frames(&[0, 1, 2, 3, 4]).is_empty());
-        assert!(super::ac3_frames(&[0x0B, 0x77]).is_empty());
-    }
 }

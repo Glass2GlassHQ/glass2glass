@@ -62,19 +62,27 @@ pub(crate) fn first_caps(packets: &[PipelinePacket]) -> Option<Caps> {
 
 /// Configure `element`, push each buffer then EOS, return collected packets.
 pub(crate) fn run<E: AsyncElement>(element: &mut E, caps: &Caps, buffers: &[&[u8]]) -> CollectSink {
+    let packets = buffers
+        .iter()
+        .map(|buf| PipelinePacket::DataFrame(frame(buf.to_vec())));
+    run_packets(element, caps, packets)
+}
+
+pub(crate) fn run_packets<E: AsyncElement>(
+    element: &mut E,
+    caps: &Caps,
+    packets: impl IntoIterator<Item = PipelinePacket>,
+) -> CollectSink {
     element.configure_pipeline(caps).unwrap();
     let mut sink = CollectSink::default();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .build()
         .unwrap();
-    for buf in buffers {
+    for packet in packets.into_iter().chain([PipelinePacket::Eos]) {
         runtime
-            .block_on(element.process(PipelinePacket::DataFrame(frame(buf.to_vec())), &mut sink))
+            .block_on(element.process(packet, &mut sink))
             .unwrap();
     }
-    runtime
-        .block_on(element.process(PipelinePacket::Eos, &mut sink))
-        .unwrap();
     sink
 }
 

@@ -722,6 +722,14 @@ mod compressed_audio_passthrough;
 // The caps the PCM filters that keep their input caps share.
 mod pcm_passthrough;
 mod pcmclip;
+// Decoded PCM output shared by the audio decoders.
+#[cfg(any(
+    all(target_os = "linux", feature = "ffmpeg"),
+    feature = "vorbis",
+    feature = "aac-decode",
+    feature = "mpeg-audio-decode"
+))]
+mod pcmoutput;
 // ID3v1 / ID3v2 tag parsing and writing (no_std), shared by id3demux,
 // mpegaudioparse and id3v2mux.
 mod id3;
@@ -1408,6 +1416,14 @@ pub mod opusenc;
 // Vorbis decode, pure Rust via symphonia. Gated behind the `vorbis` feature.
 #[cfg(feature = "vorbis")]
 pub mod vorbisdec;
+// AAC-LC and MPEG audio decode, pure Rust via symphonia, plus the symphonia
+// decode step vorbisdec shares.
+#[cfg(any(
+    feature = "vorbis",
+    feature = "aac-decode",
+    feature = "mpeg-audio-decode"
+))]
+pub mod symphoniadec;
 // Vorbis I channel order, shared by opusdec mapping family 1 and vorbisdec.
 #[cfg(any(feature = "opus", feature = "vorbis"))]
 mod vorbischannels;
@@ -1687,6 +1703,8 @@ pub mod decklinkvideosink;
 // mapping they both need.
 // ALSA (libasound), the lowest-level path.
 #[cfg(all(target_os = "linux", any(feature = "alsa-sink", feature = "alsa-src")))]
+mod alsa_ffi;
+#[cfg(all(target_os = "linux", any(feature = "alsa-sink", feature = "alsa-src")))]
 mod alsapcm;
 #[cfg(all(target_os = "linux", feature = "alsa-sink"))]
 pub mod alsasink;
@@ -1703,8 +1721,6 @@ pub mod alsadevice;
 mod pulsepcm;
 #[cfg(all(target_os = "linux", feature = "pulse-sink"))]
 pub mod pulsesink;
-mod alsa_ffi;
-#[cfg(all(target_os = "linux", any(feature = "alsa-sink", feature = "alsa-src")))]
 #[cfg(all(target_os = "linux", feature = "pulse-src"))]
 pub mod pulsesrc;
 // PipeWire audio render sink + capture source and the video capture source (the
@@ -1832,6 +1848,11 @@ pub(crate) mod waylandwindow;
 ))]
 pub(crate) mod waylanddisplay;
 
+#[cfg(all(
+    target_os = "linux",
+    any(feature = "cuda-gl", feature = "cuda-kms", feature = "gl-sink")
+))]
+mod egl_library;
 // EGL device queries that put the CUDA-GL sinks' GL context on a CUDA GPU.
 #[cfg(all(target_os = "linux", any(feature = "cuda-gl", feature = "cuda-kms")))]
 pub(crate) mod egldevice;
@@ -1848,11 +1869,6 @@ pub mod glsink;
 
 // CUDA-GL zero-copy-ish display sink: keeps decoded NV12 on the GPU and
 // presents it via CUDA-GL interop on a Wayland EGL surface. Linux + NVIDIA.
-#[cfg(all(
-    target_os = "linux",
-    any(feature = "cuda-gl", feature = "cuda-kms", feature = "gl-sink")
-))]
-mod egl_library;
 #[cfg(all(target_os = "linux", feature = "cuda-gl"))]
 pub mod cudaglsink;
 

@@ -2047,6 +2047,22 @@ fn register_autoplug_candidates(reg: &mut Registry) {
     reg.register(ElementFactory::of::<VorbisDec>("vorbisdec", |_| {
         Box::new(VorbisDec::new())
     }));
+    // Pure-Rust AAC / MPEG audio decode. Negative rank so ffmpegaudiodec wins the
+    // auto-plug tiebreak when both are built.
+    #[cfg(feature = "aac-decode")]
+    reg.register(
+        ElementFactory::of::<crate::symphoniadec::AacDec>("aacdec", |_| {
+            Box::new(crate::symphoniadec::AacDec::new())
+        })
+        .rank(-10),
+    );
+    #[cfg(feature = "mpeg-audio-decode")]
+    reg.register(
+        ElementFactory::of::<crate::symphoniadec::MpegAudioDec>("mpegaudiodec", |_| {
+            Box::new(crate::symphoniadec::MpegAudioDec::new())
+        })
+        .rank(-10),
+    );
     #[cfg(feature = "mjpeg")]
     reg.register(ElementFactory::of::<MjpegDec>("mjpegdec", |_| {
         Box::new(MjpegDec::new())
@@ -2560,7 +2576,8 @@ fn register_aliases(reg: &mut Registry) {
     reg.register_alias("videomixer", &["compositor"]);
     // The remaining libav / plain decoder names the one ffmpeg decoder covers:
     // `ffmpegdec` decodes VP8, VP9, MPEG-2 and MPEG-4 part 2, `ffmpegaudiodec`
-    // decodes AAC, MP2, MP3, AC-3 and FLAC.
+    // decodes AAC, MP2, MP3, AC-3 and FLAC, and symphonia decodes AAC and MPEG audio
+    // when ffmpeg is not built.
     for name in [
         "vp8dec",
         "vp9dec",
@@ -2572,18 +2589,14 @@ fn register_aliases(reg: &mut Registry) {
     ] {
         reg.register_alias(name, &["ffmpegdec"]);
     }
-    for name in [
-        "mpg123audiodec",
-        "flacdec",
-        "a52dec",
-        "faad",
-        "fdkaacdec",
-        "avdec_mp3",
-        "avdec_aac",
-        "avdec_ac3",
-        "avdec_flac",
-    ] {
+    for name in ["flacdec", "a52dec", "avdec_ac3", "avdec_flac"] {
         reg.register_alias(name, &["ffmpegaudiodec"]);
+    }
+    for name in ["faad", "fdkaacdec", "avdec_aac"] {
+        reg.register_alias(name, &["ffmpegaudiodec", "aacdec"]);
+    }
+    for name in ["mpg123audiodec", "avdec_mp3"] {
+        reg.register_alias(name, &["ffmpegaudiodec", "mpegaudiodec"]);
     }
     // gst's rtmp2 sink takes the same `location` URL as `rtmpsink`. `rtmp2src`
     // has no alias: `rtmpsrc` listens for a publisher on `address` / `port`.
@@ -2644,6 +2657,8 @@ pub static FEATURE_GATED_ELEMENTS: &[FeatureGatedElement] = &{
         "opusenc" => "opus";
         "opusdec" => "opus";
         "vorbisdec" => "vorbis";
+        "aacdec" => "aac-decode";
+        "mpegaudiodec" => "mpeg-audio-decode";
         "webrtcdsp" => "webrtcdsp";
         "webrtcechoprobe" => "webrtcdsp";
         "av1enc" => "av1-encode";
@@ -2873,6 +2888,16 @@ fn register_feature_gated(reg: &mut Registry) {
     reg.register_launch(LaunchFactory::of::<VorbisDec>("vorbisdec", || {
         Box::new(VorbisDec::new())
     }));
+    #[cfg(feature = "aac-decode")]
+    reg.register_launch(LaunchFactory::of::<crate::symphoniadec::AacDec>(
+        "aacdec",
+        || Box::new(crate::symphoniadec::AacDec::new()),
+    ));
+    #[cfg(feature = "mpeg-audio-decode")]
+    reg.register_launch(LaunchFactory::of::<crate::symphoniadec::MpegAudioDec>(
+        "mpegaudiodec",
+        || Box::new(crate::symphoniadec::MpegAudioDec::new()),
+    ));
     #[cfg(feature = "webrtcdsp")]
     {
         reg.register_launch(LaunchFactory::of::<WebrtcDsp>("webrtcdsp", || {

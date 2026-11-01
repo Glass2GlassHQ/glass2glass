@@ -1024,6 +1024,11 @@ pub(crate) fn adts_header(buf: &[u8]) -> Option<AdtsHeader> {
     })
 }
 
+#[cfg(any(all(target_os = "linux", feature = "ffmpeg"), feature = "aac-decode"))]
+pub(crate) fn adts_frame_len(buf: &[u8]) -> Option<usize> {
+    Some(adts_header(buf)?.frame_len)
+}
+
 /// Recover the channel count and sample rate from either AAC framing: LOAS/LATM
 /// (the MPEG-TS / broadcast sync) first, since its unaligned payload can hold a
 /// valid ADTS header, then ADTS (the elementary-stream sync).

@@ -250,7 +250,7 @@ mod ogg_audio {
 
     /// FNV-1a 64 of `vorbis_stereo_48k.ogg` decoded to interleaved S16LE stereo.
     #[cfg(feature = "vorbis")]
-    const VORBIS_STEREO_GOLDEN: u64 = 0x775c_081b_f8b2_3868;
+    const VORBIS_STEREO_GOLDEN: u64 = 0x6d76_52a7_ae02_edfa;
 
     #[cfg(feature = "vorbis")]
     #[tokio::test]

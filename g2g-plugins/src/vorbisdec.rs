@@ -20,24 +20,20 @@ use core::pin::Pin;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
-use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::time::{ns_to_ticks, ticks_to_ns};
 use g2g_core::{
     pcm_caps_any_rate_and_channels, AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet,
-    ConfigureOutcome, ElementMetadata, FrameTiming, G2gError, MemoryDomain, OutputSink,
-    PadTemplate, PadTemplates, PipelinePacket, Segment, ANY_CHANNELS, ANY_SAMPLE_RATE,
+    ConfigureOutcome, ElementMetadata, FrameTiming, G2gError, OutputSink, PadTemplate,
+    PadTemplates, PipelinePacket,
 };
 
-use crate::pcmclip::clip_pcm_to_segment;
+use crate::pcmoutput::{pcm_s16_decoder_output, DecodedPcm, PcmOutput};
+use crate::symphoniadec::decode_to_s16;
 use crate::vorbischannels::vorbis_layout;
 
 use symphonia_codec_vorbis::VorbisDecoder;
-use symphonia_core::audio::GenericAudioBufferRef;
 use symphonia_core::codecs::audio::well_known::CODEC_ID_VORBIS;
 use symphonia_core::codecs::audio::{AudioCodecParameters, AudioDecoder, AudioDecoderOptions};
-use symphonia_core::packet::PacketRef;
-use symphonia_core::units::{Duration, Timestamp};
 
 /// Decodes a Vorbis elementary stream into raw interleaved S16LE PCM.
 ///
@@ -54,13 +50,10 @@ pub struct VorbisDec {
     dec: Option<VorbisDecoder>,
     channels: u8,
     sample_rate: u32,
-    /// Last emitted output caps, to suppress an unchanged `CapsChanged`.
-    last_out: Option<Caps>,
     /// Decoded samples (per channel) so far, the PTS accumulator.
     samples: u64,
-    sequence: u64,
     configured: bool,
-    segment: Segment,
+    output: PcmOutput,
 }
 
 impl core::fmt::Debug for VorbisDec {
@@ -69,7 +62,7 @@ impl core::fmt::Debug for VorbisDec {
         f.debug_struct("VorbisDec")
             .field("channels", &self.channels)
             .field("sample_rate", &self.sample_rate)
-            .field("sequence", &self.sequence)
+            .field("sequence", &self.output.frames_pushed())
             .field("configured", &self.configured)
             .finish()
     }
@@ -88,11 +81,9 @@ impl VorbisDec {
             dec: None,
             channels: 0,
             sample_rate: 0,
-            last_out: None,
             samples: 0,
-            sequence: 0,
             configured: false,
-            segment: Segment::new(),
+            output: PcmOutput::default(),
         }
     }
 
@@ -122,29 +113,19 @@ impl VorbisDec {
         Ok(())
     }
 
-    fn output_caps(&self) -> Caps {
-        // symphonia already permutes the Vorbis order into this layout's interleave order
-        let channel_layout = vorbis_layout(self.channels)
-            .map_or(g2g_core::ChannelLayout::UNSPECIFIED, |(layout, _)| layout);
-        Caps::Audio {
-            format: AudioFormat::PcmS16Le,
-            channels: self.channels,
-            sample_rate: self.sample_rate,
-            channel_layout,
-        }
-    }
-
-    /// Decode one Vorbis packet to interleaved i16 samples (empty for the
+    /// Decode one Vorbis packet to interleaved PCM (empty for the
     /// stream-priming first packet, whose window has no predecessor).
-    fn decode(&mut self, packet: &[u8]) -> Result<Vec<i16>, G2gError> {
+    fn decode(&mut self, packet: &[u8]) -> Result<DecodedPcm, G2gError> {
         let dec = self.dec.as_mut().ok_or(G2gError::NotConfigured)?;
-        let pkt = PacketRef::new(0, Timestamp::ZERO, Duration::ZERO, packet);
-        let buf: GenericAudioBufferRef<'_> = dec
-            .decode_ref(&pkt)
+        let decoded = decode_to_s16(dec, packet)
             .map_err(|_| G2gError::Hardware(g2g_core::HardwareError::Other))?;
-        let mut pcm = alloc::vec![0i16; buf.samples_interleaved()];
-        buf.copy_to_slice_interleaved::<i16, _>(&mut pcm[..]);
-        Ok(pcm)
+        // symphonia already permutes the Vorbis order into this layout's interleave order
+        let channel_layout = vorbis_layout(decoded.channels)
+            .map_or(g2g_core::ChannelLayout::UNSPECIFIED, |(layout, _)| layout);
+        Ok(DecodedPcm {
+            channel_layout,
+            ..decoded
+        })
     }
 }
 
@@ -180,15 +161,7 @@ impl AsyncElement for VorbisDec {
             Caps::Audio {
                 format: AudioFormat::Vorbis,
                 ..
-            } => {
-                let pcm = |sample_rate| Caps::Audio {
-                    format: AudioFormat::PcmS16Le,
-                    channels: ANY_CHANNELS,
-                    sample_rate,
-                    channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
-                };
-                CapsSet::from_alternatives(alloc::vec![pcm(48_000), pcm(ANY_SAMPLE_RATE)])
-            }
+            } => pcm_s16_decoder_output(),
             _ => CapsSet::from_alternatives(Vec::new()),
         }))
     }
@@ -245,14 +218,14 @@ impl AsyncElement for VorbisDec {
                         self.build_decoder(&setup)?;
                         return Ok(());
                     }
-                    let pcm = self.decode(slice)?;
+                    let mut decoded = self.decode(slice)?;
                     // The first audio packet primes the overlap window and
                     // decodes to nothing; consume it without an empty frame.
-                    if pcm.is_empty() {
+                    if decoded.pcm.is_empty() {
                         return Ok(());
                     }
-                    let channels = usize::from(self.channels.max(1));
-                    let decoded = pcm.len() / channels;
+                    let bytes_per_sample_frame = decoded.bytes_per_sample_frame();
+                    let decoded_samples = decoded.pcm.len() / bytes_per_sample_frame;
                     let ns = |s: u64| ticks_to_ns(s, self.sample_rate.max(1));
                     // Demux-provided timing (M778): the packet's timeline
                     // duration arrives end-granule clamped, so trim the decoded
@@ -266,49 +239,24 @@ impl AsyncElement for VorbisDec {
                         (
                             frame.timing.pts_ns,
                             frame.timing.duration_ns,
-                            k.min(decoded),
+                            k.min(decoded_samples),
                         )
                     } else if let Some(pts) = frame.timing.pts() {
-                        (pts, ns(decoded as u64), decoded)
+                        (pts, ns(decoded_samples as u64), decoded_samples)
                     } else {
                         let pts = ns(self.samples);
-                        let dur = ns(self.samples + decoded as u64).saturating_sub(pts);
-                        (pts, dur, decoded)
+                        let dur = ns(self.samples + decoded_samples as u64).saturating_sub(pts);
+                        (pts, dur, decoded_samples)
                     };
                     self.samples += keep as u64;
-                    let mut bytes = Vec::with_capacity(keep * channels * 2);
-                    for s in &pcm[..keep * channels] {
-                        bytes.extend_from_slice(&s.to_le_bytes());
-                    }
+                    decoded.pcm.truncate(keep * bytes_per_sample_frame);
                     let timing = FrameTiming {
                         pts_ns,
                         dts_ns: pts_ns,
                         duration_ns,
                         ..FrameTiming::default()
                     };
-                    let Some((timing, bytes)) = clip_pcm_to_segment(
-                        &self.segment,
-                        timing,
-                        bytes,
-                        channels * 2,
-                        self.sample_rate,
-                    )?
-                    else {
-                        return Ok(());
-                    };
-                    let new_caps = self.output_caps();
-                    if self.last_out.as_ref() != Some(&new_caps) {
-                        out.push(PipelinePacket::CapsChanged(new_caps.clone()))
-                            .await?;
-                        self.last_out = Some(new_caps);
-                    }
-                    let decoded = Frame::new(
-                        MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-                        timing,
-                        self.sequence,
-                    );
-                    self.sequence += 1;
-                    out.push(PipelinePacket::DataFrame(decoded)).await?;
+                    self.output.push(timing, decoded, out).await?;
                 }
                 PipelinePacket::Flush => {
                     // A seek/flush restarts the DSP window and sample clock; the
@@ -330,15 +278,11 @@ impl AsyncElement for VorbisDec {
                     Caps::Audio {
                         format: AudioFormat::PcmS16Le,
                         ..
-                    } => {
-                        out.push(PipelinePacket::CapsChanged(c.clone())).await?;
-                        self.last_out = Some(c);
-                    }
+                    } => self.output.forward_caps(c, out).await?,
                     _ => return Err(G2gError::CapsMismatch),
                 },
                 PipelinePacket::Segment(segment) => {
-                    self.segment = segment;
-                    out.push(PipelinePacket::Segment(segment)).await?;
+                    self.output.forward_segment(segment, out).await?;
                 }
                 other => {
                     out.push(other).await?;
@@ -367,7 +311,7 @@ mod tests {
     use super::*;
     use crate::oggdemux::OggDemux;
     use crate::testutil::{data_bytes, first_caps, run};
-    use g2g_core::{ByteStreamEncoding, ChannelLayout, PropValue};
+    use g2g_core::{ByteStreamEncoding, ChannelLayout, PropValue, ANY_CHANNELS, ANY_SAMPLE_RATE};
 
     // libvorbis 5.1: a tone on each channel in turn, a tenth of a second each, in layout order
     const SURROUND_FIXTURE: &[u8] = include_bytes!("../tests/fixtures/vorbis_5_1_48k.ogg");

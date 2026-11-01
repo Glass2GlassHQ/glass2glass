@@ -526,6 +526,25 @@ pub(crate) fn mpa_frame_len(buf: &[u8]) -> Option<usize> {
     (header.layer != MpaLayer::One).then_some(header.frame_len)
 }
 
+#[cfg(any(
+    all(target_os = "linux", feature = "ffmpeg"),
+    feature = "aac-decode",
+    feature = "mpeg-audio-decode"
+))]
+pub(crate) fn split_frames(
+    buf: &[u8],
+    frame_len: fn(&[u8]) -> Option<usize>,
+) -> alloc::vec::Vec<&[u8]> {
+    // one MPEG-TS PES carries several frames back to back
+    let mut frames = alloc::vec::Vec::new();
+    let mut rest = buf;
+    while let Some(frame) = frame_len(rest).and_then(|len| rest.get(..len)) {
+        frames.push(frame);
+        rest = &rest[frame.len()..];
+    }
+    frames
+}
+
 /// Synthetic MPEG audio and AC-3 frames, shared by the tests of the parsers and
 /// of the content sniffer (all need a stream that frames the way a real one does).
 #[cfg(test)]
@@ -596,5 +615,168 @@ pub(crate) mod test_frames {
         let mut frame = Vec::from(header);
         frame.resize(len, fill);
         frame
+    }
+}
+
+#[cfg(all(
+    test,
+    any(
+        all(target_os = "linux", feature = "ffmpeg"),
+        feature = "aac-decode",
+        feature = "mpeg-audio-decode"
+    )
+))]
+mod split_frames_tests {
+    use super::{ac3_frame_len, mpa_frame_len, split_frames};
+    use alloc::vec;
+    use alloc::vec::Vec;
+
+    #[cfg(any(all(target_os = "linux", feature = "ffmpeg"), feature = "aac-decode"))]
+    fn adts_frames(buf: &[u8]) -> Vec<&[u8]> {
+        split_frames(buf, crate::aacparse::adts_frame_len)
+    }
+
+    fn mpa_frames(buf: &[u8]) -> Vec<&[u8]> {
+        split_frames(buf, mpa_frame_len)
+    }
+
+    fn ac3_frames(buf: &[u8]) -> Vec<&[u8]> {
+        split_frames(buf, ac3_frame_len)
+    }
+
+    #[cfg(any(all(target_os = "linux", feature = "ffmpeg"), feature = "aac-decode"))]
+    /// A minimal `len`-byte ADTS frame: a 7-byte header zero-padded to `len`.
+    fn adts(len: usize) -> Vec<u8> {
+        const ADTS_HEADER_LEN: usize = 7;
+        crate::aacparse::test_frames::adts_au(&vec![0u8; len - ADTS_HEADER_LEN])
+    }
+
+    #[cfg(any(all(target_os = "linux", feature = "ffmpeg"), feature = "aac-decode"))]
+    #[test]
+    fn splits_concatenated_adts_frames() {
+        let mut buf = adts(20);
+        buf.extend_from_slice(&adts(13));
+        let frames = adts_frames(&buf);
+        assert_eq!(frames.len(), 2, "two back-to-back ADTS frames split apart");
+        assert_eq!(frames[0].len(), 20);
+        assert_eq!(frames[1].len(), 13);
+    }
+
+    #[cfg(any(all(target_os = "linux", feature = "ffmpeg"), feature = "aac-decode"))]
+    #[test]
+    fn drops_a_truncated_tail() {
+        let mut buf = adts(20);
+        buf.extend_from_slice(&adts(30)[..10]); // a second frame claiming 30 bytes, only 10 present
+        let frames = adts_frames(&buf);
+        assert_eq!(
+            frames.len(),
+            1,
+            "the complete frame is kept, the truncated tail dropped"
+        );
+        assert_eq!(frames[0].len(), 20);
+    }
+
+    #[cfg(any(all(target_os = "linux", feature = "ffmpeg"), feature = "aac-decode"))]
+    #[test]
+    fn bails_without_a_syncword() {
+        assert!(adts_frames(&[0, 1, 2, 3, 4, 5, 6, 7]).is_empty());
+    }
+
+    /// A minimal MPEG-1 Layer II frame header: 384 kbit/s at 48 kHz, no padding
+    /// (frame length = 144 * 384000 / 48000 = 1152 bytes), zero-padded.
+    fn mpa() -> Vec<u8> {
+        let mut f = vec![0u8; 1152];
+        f[0] = 0xFF;
+        f[1] = 0xFD; // sync + MPEG-1 + Layer II + no CRC
+        f[2] = 0xE4; // bitrate index 14 (384k) + rate index 1 (48k) + no padding
+        f
+    }
+
+    #[test]
+    fn splits_concatenated_mpa_frames() {
+        let mut buf = mpa();
+        buf.extend_from_slice(&mpa());
+        let frames = mpa_frames(&buf);
+        assert_eq!(frames.len(), 2, "two back-to-back mp2 frames split apart");
+        assert!(frames.iter().all(|f| f.len() == 1152));
+    }
+
+    /// A minimal Layer III frame, zero-padded to its computed length.
+    /// MPEG-1: 128 kbit/s at 44.1 kHz = 144 * 128000 / 44100 = 417 bytes.
+    /// MPEG-2.5: 32 kbit/s at 8 kHz = 72 * 32000 / 8000 = 288 bytes.
+    fn mp3(mpeg1: bool) -> Vec<u8> {
+        let (len, version_layer, bitrate_rate) = if mpeg1 {
+            (417, 0xFBu8, 0x90u8) // MPEG-1 Layer III, bitrate index 9, rate index 0
+        } else {
+            (288, 0xE3, 0x48) // MPEG-2.5 Layer III, bitrate index 4, rate index 2
+        };
+        let mut f = vec![0u8; len];
+        f[0] = 0xFF;
+        f[1] = version_layer;
+        f[2] = bitrate_rate;
+        f
+    }
+
+    #[test]
+    fn splits_concatenated_mp3_frames() {
+        // Layer III uses its own bitrate table and, on MPEG-2.5, a half-size
+        // frame: getting either wrong mis-splits the stream.
+        for (mpeg1, len) in [(true, 417), (false, 288)] {
+            let mut buf = mp3(mpeg1);
+            buf.extend_from_slice(&mp3(mpeg1));
+            let frames = mpa_frames(&buf);
+            assert_eq!(frames.len(), 2, "mpeg1={mpeg1}");
+            assert!(frames.iter().all(|f| f.len() == len), "mpeg1={mpeg1}");
+        }
+    }
+
+    #[test]
+    fn mpa_drops_truncated_tail_and_bad_headers() {
+        let mut buf = mpa();
+        buf.extend_from_slice(&mpa()[..40]); // truncated second frame
+        assert_eq!(mpa_frames(&buf).len(), 1);
+        // free-format bitrate (index 0) has no computable length: bail, no panic.
+        let mut free = mpa();
+        free[2] = 0x04;
+        assert!(mpa_frames(&free).is_empty());
+        assert!(mpa_frames(&[0xFF, 0xFD]).is_empty());
+    }
+
+    /// A minimal AC-3 frame: `0x0B77` sync, `fscod`/`frmsizecod` in byte 4, padded
+    /// to its computed length. `frmsizecod` 20 at 48 kHz = 384 words = 768 bytes.
+    /// The length comes from the shared header parser rather than a second copy
+    /// of its size table.
+    fn ac3(fscod: u8, frmsizecod: u8) -> Vec<u8> {
+        let mut head = [0u8; super::AC3_HEADER_LEN];
+        head[0] = 0x0B;
+        head[1] = 0x77;
+        head[4] = (fscod << 6) | (frmsizecod & 0x3F);
+        let len = ac3_frame_len(&head).expect("a valid header has a length");
+        let mut f = vec![0u8; len];
+        f[..head.len()].copy_from_slice(&head);
+        f
+    }
+
+    #[test]
+    fn splits_concatenated_ac3_frames() {
+        let mut buf = ac3(0, 20); // 48 kHz, 768 bytes
+        buf.extend_from_slice(&ac3(0, 20));
+        let frames = ac3_frames(&buf);
+        assert_eq!(frames.len(), 2, "two back-to-back AC-3 frames split apart");
+        assert!(frames.iter().all(|f| f.len() == 768));
+    }
+
+    #[test]
+    fn ac3_drops_truncated_tail_and_rejects_bad_headers() {
+        let mut buf = ac3(0, 20);
+        buf.extend_from_slice(&ac3(0, 20)[..100]); // truncated second frame
+        assert_eq!(ac3_frames(&buf).len(), 1);
+        // reserved fscod (3) has no frame length: bail, no panic.
+        let mut bad_rate = ac3(0, 20);
+        bad_rate[4] = (3 << 6) | 20;
+        assert!(ac3_frames(&bad_rate).is_empty());
+        // no syncword, and a too-short buffer: both empty, no panic.
+        assert!(ac3_frames(&[0, 1, 2, 3, 4]).is_empty());
+        assert!(ac3_frames(&[0x0B, 0x77]).is_empty());
     }
 }

@@ -43,8 +43,8 @@ release-binary = [
     "rtsp", "rtsp-server", "rtsp-client-sink", "srt", "rist", "srtp", "dtls-srtp", "tcp", "http-server", "udp-egress", "udp-ingress", "rtmp", "webrtc",
     "remote", "remote-ws", "webtransport", "moqt",
     "http-src", "hls", "dash",
-    "vorbis", "webrtcdsp", "av1-encode", "rav1d", "mjpeg", "mjpeg-encode", "png", "webp",
-    "wgpu-sink", "vello-overlay", "analytics", "analytics-json", "mqtt", "embedding-index",
+    "vorbis", "aac-decode", "mpeg-audio-decode", "webrtcdsp", "av1-encode", "rav1d", "mjpeg",
+    "mjpeg-encode", "png", "webp", "wgpu-sink", "vello-overlay", "analytics", "analytics-json", "mqtt", "embedding-index",
     "declarative-yaml", "script-rhai", "observe", "mcp", "tui",
     "matroska-compression", "matroska-decrypt",
 ]
@@ -748,6 +748,12 @@ webrtcdsp = ["std", "dep:sonora"]
 # Vorbis audio decode (VorbisDec) via symphonia's pure-Rust decoder: the Ogg /
 # WebM audio codec preceding Opus. No system deps. Implies std.
 vorbis = ["std", "dep:symphonia-core", "dep:symphonia-codec-vorbis"]
+# AAC-LC decode of ADTS streams, mono or stereo (aacdec), via symphonia's
+# pure-Rust decoder. No system deps. Implies std.
+aac-decode = ["std", "dep:symphonia-core", "dep:symphonia-codec-aac"]
+# MPEG audio layer II / III decode (mpegaudiodec) via symphonia's pure-Rust
+# decoder. No system deps. Implies std.
+mpeg-audio-decode = ["std", "dep:symphonia-core", "dep:symphonia-bundle-mp3"]
 # HTTP(S) byte-stream source (HttpSrc) via the `reqwest` async client: a single
 # GET streamed downstream as a `Caps::ByteStream` (or declared codec), the
 # souphttpsrc analog and the fetch layer under HLS/DASH. Implies std + tokio.
@@ -926,19 +932,19 @@ audiopus = { version = "0.3.0-rc.0", optional = true }
 # Pure-Rust port of WebRTC's audio processing module (webrtcdsp feature): AEC3,
 # noise suppression, AGC2, high-pass filter. BSD-3-Clause, MSRV 1.91.
 sonora = { version = "0.2", optional = true }
-# Pure-Rust Vorbis decoder (vorbis feature) for VorbisDec. symphonia is the
-# maintained pure-Rust codec suite (lewton is dormant); only the vorbis codec
-# crate + core are pulled, not the demuxers.
+# Pure-Rust Vorbis, AAC-LC and MPEG audio decoders (vorbis, aac-decode,
+# mpeg-audio-decode). symphonia is the maintained pure-Rust codec suite (lewton
+# is dormant); only the codec crates + core are pulled, not the demuxers.
 symphonia-core = { version = "0.6", optional = true }
 symphonia-codec-vorbis = { version = "0.6", optional = true }
+symphonia-codec-aac = { version = "0.6", optional = true }
+symphonia-bundle-mp3 = { version = "0.6", optional = true, default-features = false, features = ["mp2", "mp3"] }
 # Async HTTP client for HttpSrc (http-src feature). rustls on ring with the OS
 # root certificates, so no OpenSSL is linked. Runs on the caller's tokio runtime.
 reqwest = { version = "0.12", optional = true, default-features = false, features = ["rustls-tls-native-roots", "charset", "http2", "macos-system-configuration"] }
 # MQTT client for `mqttsink` (the `mqtt` feature). The provider-free rustls
 # feature, because its default provider is aws-lc-rs, which needs cmake to build.
 rumqttc = { version = "0.25", optional = true, default-features = false, features = ["use-rustls-no-provider"] }
-symphonia-codec-aac = { version = "0.6", optional = true }
-symphonia-bundle-mp3 = { version = "0.6", optional = true, default-features = false, features = ["mp2", "mp3"] }
 # str0m: sans-IO WebRTC stack (ICE / DTLS / SRTP / SCTP / RTP). `rust-crypto` is
 # the pure-Rust crypto backend (RustCrypto ecosystem), so no OpenSSL system dep.
 # Drives the native WebRtcSink (the `webrtc` feature). 0.22 is the first release
