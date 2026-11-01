@@ -885,7 +885,7 @@ jobs:
         run: |
           python -m pip install --upgrade maturin numpy
           maturin build --release -m g2g-pyapi/Cargo.toml
-          python -m pip install target/wheels/g2g-*.whl
+          python -m pip install target/wheels/glass2glass-*.whl
           python g2g-pyapi/examples/appsink_numpy.py
       # The C example links the g2g-capi staticlib (the C ABI) and drives an
       # appsrc!appsink pipeline; `make run` exits non-zero unless all 3 frames

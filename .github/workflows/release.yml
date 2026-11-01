@@ -34,7 +34,7 @@ jobs:
         run: |
           apt-get update
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            build-essential pkg-config curl ca-certificates git \
+            build-essential pkg-config curl ca-certificates git clang libclang-dev \
             libasound2-dev libwayland-dev libxkbcommon-dev libegl-dev
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -63,22 +63,84 @@ jobs:
           cp target/${{ matrix.target }}/release/g2g-launch* target/${{ matrix.target }}/release/g2g-inspect* LICENSE "$name/"
           rm -f "$name"/*.d "$name"/*.pdb
           if [ "${{ runner.os }}" = Windows ]; then 7z a "$name.zip" "$name"; else tar czf "$name.tar.gz" "$name"; fi
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
-          name: ${{ matrix.target }}
+          name: binary-${{ matrix.target }}
           path: |
             g2g-*.tar.gz
             g2g-*.zip
 
-  publish:
+  wheel:
+    name: wheel (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-24.04, target: x86_64-unknown-linux-gnu, features: release-wheel-linux }
+          - { runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, features: release-wheel-linux }
+          - { runner: macos-latest, target: aarch64-apple-darwin, features: release-binary-macos }
+          - { runner: windows-latest, target: x86_64-pc-windows-msvc, features: release-binary-windows }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: PyO3/maturin-action@v1
+        with:
+          maturin-version: "1.16.0"
+          working-directory: g2g-pyapi
+          target: ${{ matrix.target }}
+          manylinux: "2_28"
+          before-script-linux: dnf install -y clang-devel wayland-devel libxkbcommon-devel
+          # --features replaces the list in pyproject.toml
+          args: >
+            --release --locked --out dist --auditwheel check
+            --features python,pyo3/extension-module,pyo3/abi3-py311,g2g-plugins/${{ matrix.features }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: smoke run
+        shell: bash
+        run: |
+          python -m pip install g2g-pyapi/dist/*.whl
+          python -c '
+          import g2g
+          sink = g2g.AppSink("out")
+          pipeline = g2g.Pipeline("audiotestsrc num-buffers=2 ! appsink channel=out")
+          frames = 0
+          while sink.pull() is not None:
+              frames += 1
+          pipeline.wait()
+          assert frames == 2, frames
+          '
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wheel-${{ matrix.target }}
+          path: g2g-pyapi/dist/*.whl
+
+  pypi:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: wheel
+    runs-on: ubuntu-24.04
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: wheel-*
+          path: dist
+          merge-multiple: true
+      - uses: pypa/gh-action-pypi-publish@release/v1
+
+  github-release:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: build
     runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
+          pattern: binary-*
           path: dist
           merge-multiple: true
       - name: attach to the GitHub release

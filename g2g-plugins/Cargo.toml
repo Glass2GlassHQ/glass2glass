@@ -48,10 +48,12 @@ release-binary = [
     "declarative-yaml", "script-rhai", "observe", "mcp", "tui",
     "matroska-compression", "matroska-decrypt",
 ]
-# wayland, EGL and ALSA ship on desktop distros but not on most servers
-release-binary-linux = [
+# EGL and ALSA ship on desktop distros but not on most servers
+release-binary-linux = ["release-wheel-linux", "gl-sink", "alsa-sink", "alsa-src"]
+# manylinux wheels may not link libEGL or libasound
+release-wheel-linux = [
     "release-binary", "plugin-signing", "shm", "unixfd", "v4l2", "vulkan-video",
-    "kms-sink", "wayland-sink", "gl-sink", "wgpu-present", "alsa-sink", "alsa-src",
+    "kms-sink", "wayland-sink", "wgpu-present",
 ]
 release-binary-macos = ["release-binary", "vtdecode", "vtencode", "metal-sink", "coreaudio", "avfoundation", "screencapture"]
 release-binary-windows = ["release-binary", "mf-decode", "mf-encode", "mf-aac", "wasapi-sink", "wasapi-src", "d3d11-sink", "mf-video-src"]

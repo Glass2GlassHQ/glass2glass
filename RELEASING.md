@@ -45,5 +45,7 @@ in [STABILITY.md](STABILITY.md).
   and `g2g-inspect` for Linux, macOS and Windows and attaches them to the
   GitHub release. Run it by hand from the Actions tab to test the builds without
   a tag. The feature sets are the `release-binary-*` features of g2g-plugins.
+- The same workflow builds the `glass2glass` wheels and uploads them to PyPI
+  through trusted publishing, so no PyPI token is stored anywhere.
 - `g2g-pyapi`, `xtask` and the benchmark and web crates are `publish = false`.
   The Python wheel is built with maturin, not published by this script.

@@ -9,6 +9,17 @@ elements inside a pipeline; both sit on the same language-neutral waist as
 The compiled extension imports as `g2g` (the `#[pymodule] fn g2g`) and exposes
 `Pipeline`, `AppSrc`, `AppSink`, and `FrameView`.
 
+## Install
+
+```sh
+pip install glass2glass
+```
+
+Wheels exist for Linux (x86_64, aarch64), macOS (arm64) and Windows (x86_64)
+on CPython 3.11 and later. They carry the same elements as the release
+binaries, without the ALSA and EGL sinks on Linux. For the elements that need
+distro libraries (ffmpeg, libvpx, libopus, PipeWire), build the wheel yourself.
+
 ## Building the wheel (maturin)
 
 The crate ships a `pyproject.toml` with the [maturin](https://www.maturin.rs)
@@ -21,8 +32,8 @@ pip install maturin numpy
 maturin develop --release
 
 # Or build a redistributable wheel:
-maturin build --release         # -> ../target/wheels/g2g-*.whl
-pip install ../target/wheels/g2g-*.whl
+maturin build --release         # -> ../target/wheels/glass2glass-*.whl
+pip install ../target/wheels/glass2glass-*.whl
 ```
 
 `pyproject.toml` enables the `python` feature plus `pyo3/extension-module`, so

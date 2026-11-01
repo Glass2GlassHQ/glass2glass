@@ -28,7 +28,6 @@ Highest leverage first:
 
 ## Distribution
 
-- Publish the Python wheel to PyPI.
 - A prebuilt Android AAR for the Kotlin bindings.
 
 ## Architecture guarantees (validation-first)
