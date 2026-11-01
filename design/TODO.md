@@ -35,6 +35,34 @@ Highest leverage first:
   runner that has the hardware: a `Hardware` row can only come from a run on the
   device, so a runner without a GPU or a camera will never produce one.
 
+## Release binaries
+
+The release `g2g-launch` binaries and wheels must start on a host with no media
+libraries installed.
+
+- **0.12.0.** AAC-LC and MP3 decode through symphonia (`aacdec`,
+  `mpegaudiodec`, ranked below `ffmpegaudiodec`). libopus built from source
+  through `opusic-sys` in place of `audiopus`. `openh264dec` / `openh264enc`
+  loading Cisco's `libopenh264` at runtime, never built from source. Rerun the
+  release binary in a GPU-less `fedora:43` container on an H.264 + AAC MP4 before
+  publishing.
+- **Load ffmpeg at runtime in every build.** Replace `ffmpeg-next` with
+  runtime-loaded bindings to libavutil, libavcodec, libavformat and libswscale
+  for libavcodec 59 to 62 (ffmpeg 5.1 to 8), Linux only. Set codec context fields
+  through `av_opt_*`, and keep per-major `#[repr(C)]` layouts only for the
+  `AVFrame` / `AVPacket` fields with no accessor. A missing or older library makes
+  the elements unusable with a reason. When the registry is built, check each
+  codec with `avcodec_find_decoder` / `avcodec_find_encoder` so `accepting_input`
+  offers only what the host ffmpeg has. Add the ffmpeg elements to the release
+  sets.
+- **ffmpeg CI matrix.** A C probe compares the per-major layouts against the
+  headers in `debian:12`, `ubuntu:24.04`, `debian:13` and `archlinux`. The full
+  ffmpeg suite runs on one major, and the release binary decodes an H.264 + AAC
+  file and an HEVC file in all four containers.
+- **Bundle libvpx.** Build libvpx from source for `vpxenc` in place of the
+  `build.rs` bindgen run against system headers, and add `vpx` to the release
+  sets.
+
 ## Alloc-optional (heap-free) MCU core
 
 - **On-device `Hardware` rows (ARM) on a NUCLEO-H753ZI.** The H753 has the
