@@ -43,9 +43,6 @@ libraries installed. Everything below ships in 0.12.0.
 - **Bare-host check.** Before publishing, run each release binary on a GPU-less
   host on an H.264 + AAC MP4 and a camera to WebRTC pipeline, and check that
   `decodebin` picks a software decoder rather than `vulkanvideodec` on Linux.
-- **Release ffmpeg run on a bare host.** Run a downloaded Linux release tarball
-  and wheel on a bare `ubuntu:22.04` and `fedora:43` on an HEVC and a VP9 file,
-  and check that `decodebin` picks the bundled ffmpeg.
 
 ## Alloc-optional (heap-free) MCU core
 
