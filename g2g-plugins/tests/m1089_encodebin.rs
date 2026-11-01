@@ -259,7 +259,8 @@ async fn transcodebin_writes_a_container_from_a_runtime_geometry() {
 /// YUV, so the profile has to splice the converter itself. The proof is that the
 /// H.264-in-MP4 profile runs at all, and that its output is what the chain with
 /// the converter written out produces.
-#[cfg(feature = "ffmpeg")]
+// encodebin picks nvenc over x264enc wherever the NVIDIA driver is installed
+#[cfg(all(feature = "ffmpeg", not(feature = "nvenc")))]
 #[tokio::test]
 async fn a_profile_splices_the_converter_the_encoder_needs() {
     const SOURCE: &str = "videotestsrc num-buffers=3";

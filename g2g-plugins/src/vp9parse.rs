@@ -253,7 +253,7 @@ fn skip_color_config(br: &mut BitReader, profile: u8) -> Option<()> {
     Some(())
 }
 
-#[cfg(all(target_os = "linux", feature = "nvdec"))]
+#[cfg(all(any(target_os = "linux", windows), feature = "nvdec"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Vp9FrameKind {
     // repeats the frame held in reference slot `slot`
@@ -267,7 +267,7 @@ pub(crate) enum Vp9FrameKind {
     },
 }
 
-#[cfg(all(target_os = "linux", feature = "nvdec"))]
+#[cfg(all(any(target_os = "linux", windows), feature = "nvdec"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Vp9FrameHeader {
     pub(crate) profile: u8,
@@ -275,7 +275,7 @@ pub(crate) struct Vp9FrameHeader {
 }
 
 // the uncompressed header up to refresh_frame_flags
-#[cfg(all(target_os = "linux", feature = "nvdec"))]
+#[cfg(all(any(target_os = "linux", windows), feature = "nvdec"))]
 pub(crate) fn frame_header(frame: &[u8]) -> Option<Vp9FrameHeader> {
     const KEY_FRAME_REFRESHES_EVERY_SLOT: u8 = 0xFF;
     let mut br = BitReader::new(frame);
@@ -324,7 +324,7 @@ pub(crate) fn frame_header(frame: &[u8]) -> Option<Vp9FrameHeader> {
 }
 
 // the frames of a superframe, or the whole packet when it carries no valid index
-#[cfg(all(target_os = "linux", feature = "nvdec"))]
+#[cfg(all(any(target_os = "linux", windows), feature = "nvdec"))]
 pub(crate) fn superframe_frames(packet: &[u8]) -> Vec<&[u8]> {
     const MARKER_BITS: u8 = 0b1110_0000;
     const MARKER: u8 = 0b1100_0000;
@@ -613,7 +613,7 @@ mod tests {
         }
     }
 
-    #[cfg(all(target_os = "linux", feature = "nvdec"))]
+    #[cfg(all(any(target_os = "linux", windows), feature = "nvdec"))]
     fn inter_frame(shown: bool, intra_only: bool, refresh_slots: u8) -> Vec<u8> {
         let mut w = BitWriter::default();
         w.write_bits(2, 2); // frame_marker
@@ -636,7 +636,7 @@ mod tests {
         w.into_bytes()
     }
 
-    #[cfg(all(target_os = "linux", feature = "nvdec"))]
+    #[cfg(all(any(target_os = "linux", windows), feature = "nvdec"))]
     #[test]
     fn frame_header_reads_what_each_frame_shows_and_refreshes() {
         let decoded = |shown, intra, refresh_slots| Vp9FrameKind::Decoded {
@@ -666,7 +666,7 @@ mod tests {
         assert_eq!(kind(&[0]), None, "no frame marker");
     }
 
-    #[cfg(all(target_os = "linux", feature = "nvdec"))]
+    #[cfg(all(any(target_os = "linux", windows), feature = "nvdec"))]
     #[test]
     fn superframe_frames_splits_by_the_trailing_index() {
         // two frames of 3 and 2 bytes, then an index of one-byte sizes

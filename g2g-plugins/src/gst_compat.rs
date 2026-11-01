@@ -1419,7 +1419,10 @@ mod tests {
         let reg = default_registry();
         // `nvdec` matches the `nv*dec` family and `videoconvert` is registered:
         // neither may come back as a family hint.
-        let expected = match (cfg!(target_os = "linux"), cfg!(feature = "nvdec")) {
+        let expected = match (
+            cfg!(any(target_os = "linux", windows)),
+            cfg!(feature = "nvdec"),
+        ) {
             (true, true) => GstEquivalent::Available,
             (true, false) => GstEquivalent::NotCompiled("nvdec"),
             (false, _) => GstEquivalent::BuildsOnlyOn {

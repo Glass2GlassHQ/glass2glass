@@ -101,7 +101,7 @@ mod fifobuffer;
 #[cfg(any(
     feature = "metadata",
     all(target_os = "linux", feature = "ffmpeg"),
-    all(target_os = "linux", feature = "nvdec"),
+    all(any(target_os = "linux", windows), feature = "nvdec"),
     all(
         any(target_os = "linux", target_os = "windows"),
         feature = "vulkan-video"
@@ -232,7 +232,10 @@ mod xmlutil;
 // Shared gst `num-buffers` property conversion used by the source elements.
 mod numbuffers;
 // Shared `cuda-device-id` property used by the elements that open a CUDA context.
-#[cfg(all(target_os = "linux", any(feature = "cuda", feature = "ffmpeg")))]
+#[cfg(any(
+    all(any(target_os = "linux", windows), feature = "cuda"),
+    all(target_os = "linux", feature = "ffmpeg")
+))]
 mod cudadeviceid;
 
 // Software RGBA8 compositor (fan-in pixel mixer): PiP / grids / overlays.
@@ -289,7 +292,7 @@ pub mod gpu;
 // GPU / compute device discovery (M939): wgpu adapters, CUDA devices, VAAPI nodes.
 #[cfg(any(
     feature = "wgpu-sink",
-    all(target_os = "linux", feature = "cuda"),
+    all(any(target_os = "linux", windows), feature = "cuda"),
     all(target_os = "linux", feature = "ffmpeg")
 ))]
 pub mod gpudevice;
@@ -302,7 +305,8 @@ pub mod gpudevice;
         all(
             target_os = "linux",
             any(feature = "cuda", feature = "ffmpeg", feature = "gl-sink")
-        )
+        ),
+        all(windows, feature = "cuda")
     )
 ))]
 pub(crate) static EGL_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -316,7 +320,8 @@ pub(crate) static EGL_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(()
         feature = "vulkan-video",
         feature = "mediacodec-wgpu",
         all(target_os = "linux", feature = "dmabuf-wgpu"),
-        all(target_os = "linux", any(feature = "cuda", feature = "ffmpeg"))
+        all(any(target_os = "linux", windows), feature = "cuda"),
+        all(target_os = "linux", feature = "ffmpeg")
     )
 ))]
 pub(crate) static GPU_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -1340,7 +1345,7 @@ pub mod mfaacencode;
     feature = "vpx",
     feature = "opus",
     all(target_os = "linux", feature = "ffmpeg"),
-    all(target_os = "linux", feature = "nvenc"),
+    all(any(target_os = "linux", windows), feature = "nvenc"),
     feature = "gstreamer"
 ))]
 mod encoder_base;
@@ -1728,11 +1733,11 @@ pub mod pwdevice;
 // CUDA device-memory consumers (C3 Phase 3). `CudaDownload` copies a
 // `MemoryDomain::Cuda` NV12 frame back to system memory so a `NvdecCuda`
 // stream reaches the CPU sinks. Hand-rolled libcuda FFI; Linux + NVIDIA only.
-#[cfg(all(target_os = "linux", feature = "cuda"))]
+#[cfg(all(any(target_os = "linux", windows), feature = "cuda"))]
 pub mod cuda;
-#[cfg(all(target_os = "linux", feature = "cuda"))]
+#[cfg(all(any(target_os = "linux", windows), feature = "cuda"))]
 mod cuda_driver_ffi;
-#[cfg(all(target_os = "linux", feature = "cuda"))]
+#[cfg(all(any(target_os = "linux", windows), feature = "cuda"))]
 mod shared_library;
 
 // Local zero-copy IPC over CUDA IPC memory handles (M556): share a device
@@ -1775,7 +1780,7 @@ pub mod localdmabuf;
 // encode runs GPU-resident with no device->host read-back, the zero-copy mirror
 // of the `cuda-wgpu` import bridge. Hand-rolled libnvidia-encode + libcuda FFI;
 // Linux + NVIDIA only.
-#[cfg(all(target_os = "linux", feature = "nvenc"))]
+#[cfg(all(any(target_os = "linux", windows), feature = "nvenc"))]
 pub mod nvenc;
 
 // Native NVDEC H.264 decode (M270): `NvDec` is the decode half of the
@@ -1783,7 +1788,7 @@ pub mod nvenc;
 // parser+decoder API directly (no libavcodec), emitting CUDA NV12 surfaces
 // (`MemoryDomain::Cuda`) for a zero-copy handoff to the GPU consumers / `NvEnc`.
 // Hand-rolled libnvcuvid + libcuda FFI; Linux + NVIDIA only.
-#[cfg(all(target_os = "linux", feature = "nvdec"))]
+#[cfg(all(any(target_os = "linux", windows), feature = "nvdec"))]
 pub mod nvdec;
 
 // JPEG XS encode / decode (M605): `SvtJpegXsEnc` / `SvtJpegXsDec`, the ST 2110-22

@@ -149,6 +149,8 @@ Breaking: `QosMessage` gains `downstream_proc_ns`, `ElementProbe` is no longer `
 - M2048: each release tag publishes the Python bindings to PyPI as `glass2glass`.
 - M2049: each release tag attaches an Android AAR of the Kotlin bindings for arm64-v8a and x86_64.
 - M2050: `nvdec` and `nvenc` load the NVIDIA libraries at runtime, and the Linux release builds include them.
+- M2051: `cuda`, `nvdec` and `nvenc` build on Windows and ship in the Windows release binary, and an element that cannot run here says why.
+- M2052: `matroskamux` writes MJPEG tracks.
 
 ## 0.10.0
 

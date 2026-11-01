@@ -62,7 +62,7 @@ impl DeviceProvider for GpuDeviceProvider {
         let mut devices = Vec::new();
         #[cfg(feature = "wgpu-sink")]
         devices.extend(probe_wgpu());
-        #[cfg(all(target_os = "linux", feature = "cuda"))]
+        #[cfg(all(any(target_os = "linux", windows), feature = "cuda"))]
         devices.extend(probe_cuda());
         #[cfg(all(target_os = "linux", feature = "ffmpeg"))]
         devices.extend(probe_vaapi());
@@ -179,7 +179,7 @@ fn device_type_name(kind: wgpu::DeviceType) -> &'static str {
 
 /// Every CUDA device ordinal the driver reports. No libcuda (or no NVIDIA
 /// driver loaded) means no devices, not an error.
-#[cfg(all(target_os = "linux", feature = "cuda"))]
+#[cfg(all(any(target_os = "linux", windows), feature = "cuda"))]
 fn probe_cuda() -> Vec<Device> {
     // SAFETY: cuInit takes only a flags word (0 is the only legal value) and is
     // idempotent, so calling it again after another element already did is
@@ -199,7 +199,7 @@ fn probe_cuda() -> Vec<Device> {
 
 /// One device per ordinal. `None` when the driver refuses the ordinal (a device
 /// disappearing between the count and the query).
-#[cfg(all(target_os = "linux", feature = "cuda"))]
+#[cfg(all(any(target_os = "linux", windows), feature = "cuda"))]
 fn cuda_device(ordinal: i32) -> Option<Device> {
     let mut handle: ffi::CuDevice = 0;
     // SAFETY: `handle` is a live local of the handle type; ordinal came from
@@ -234,12 +234,12 @@ fn cuda_device(ordinal: i32) -> Option<Device> {
 
 /// Name buffer size cuDeviceGetName is called with. 256 is what the CUDA
 /// samples use; the driver truncates and NUL-terminates within it.
-#[cfg(all(target_os = "linux", feature = "cuda"))]
+#[cfg(all(any(target_os = "linux", windows), feature = "cuda"))]
 const CUDA_NAME_LEN: usize = 256;
 
 /// Decode a NUL-terminated C name buffer: cut at the first NUL, drop trailing
 /// whitespace. Not UTF-8 by contract, so lossy.
-#[cfg(all(target_os = "linux", feature = "cuda"))]
+#[cfg(all(any(target_os = "linux", windows), feature = "cuda"))]
 fn cuda_name(buf: &[u8]) -> String {
     let end = buf.iter().position(|b| *b == 0).unwrap_or(buf.len());
     String::from_utf8_lossy(&buf[..end]).trim().to_string()
@@ -248,7 +248,7 @@ fn cuda_name(buf: &[u8]) -> String {
 /// Hand-rolled driver-API bindings, matching `cuda.rs`: the `cuda` feature's
 /// gate guarantees Linux + an NVIDIA driver, so linking `libcuda` directly
 /// beats pulling a wrapper crate for three calls.
-#[cfg(all(target_os = "linux", feature = "cuda"))]
+#[cfg(all(any(target_os = "linux", windows), feature = "cuda"))]
 mod ffi {
     use core::ffi::c_char;
 
@@ -368,7 +368,7 @@ mod tests {
         );
     }
 
-    #[cfg(all(target_os = "linux", feature = "cuda"))]
+    #[cfg(all(any(target_os = "linux", windows), feature = "cuda"))]
     #[test]
     fn cuda_name_stops_at_nul() {
         let mut buf = [0u8; 16];

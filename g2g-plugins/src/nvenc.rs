@@ -1234,7 +1234,10 @@ mod ffi {
     pub type NvEncStatus = i32;
     pub const NV_ENC_SUCCESS: NvEncStatus = 0;
     pub const NV_ENC_ERR_NO_ENCODE_DEVICE: NvEncStatus = 1;
+    #[cfg(target_os = "linux")]
     pub const LIBNVIDIA_ENCODE: &str = "libnvidia-encode.so.1";
+    #[cfg(windows)]
+    pub const LIBNVIDIA_ENCODE: &str = "nvEncodeAPI64.dll";
     pub const NV_ENC_ERR_NEED_MORE_INPUT: NvEncStatus = 17;
 
     pub const NVENCAPI_MAJOR_VERSION: u32 = 13;

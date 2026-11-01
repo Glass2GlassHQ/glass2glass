@@ -2144,6 +2144,39 @@ mod factory {
 
         /// Whether a launch factory of this name is registered and its
         /// `with_usable` check (if any) passes here.
+        pub fn unusable_encoders(&self, target: &Caps) -> Vec<String> {
+            let Some(candidates) = self.encoder_provider.and_then(|provider| provider(target))
+            else {
+                return Vec::new();
+            };
+            candidates
+                .iter()
+                .filter_map(|choice| {
+                    let reason = self.unusable_reason(choice.element)?;
+                    Some(format!("{} ({reason})", choice.element))
+                })
+                .collect()
+        }
+
+        pub fn unusable_reason(&self, name: &str) -> Option<String> {
+            // names that run here and names this build lacks both give None
+            if let Some(factory) = self.launch.iter().find(|factory| factory.name == name) {
+                return factory.usable().err();
+            }
+            let (_, targets) = self.aliases.iter().find(|(alias, _)| *alias == name)?;
+            if self.resolve_alias(name) != name {
+                return None;
+            }
+            let reasons: Vec<String> = targets
+                .iter()
+                .filter_map(|&target| match self.alias_target(target) {
+                    AliasTarget::Unusable(reason) => Some(format!("{target} ({reason})")),
+                    AliasTarget::Usable | AliasTarget::NotBuilt => None,
+                })
+                .collect();
+            (!reasons.is_empty()).then(|| reasons.join(", "))
+        }
+
         fn has_usable_launch(&self, name: &str) -> bool {
             self.launch
                 .iter()
@@ -4076,6 +4109,47 @@ mod tests {
         assert!(
             message.contains(&alloc::format!("not in this build: {UNBUILT_SINK}")),
             "the warning names the sink this build left out: {message}"
+        );
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn an_alias_whose_targets_cannot_run_here_says_why() {
+        let mut reg = Registry::new();
+        reg.register_launch(
+            named_sink("displaysink").with_usable(|| Err(alloc::string::String::from(NO_DISPLAY))),
+        );
+        reg.register_alias("gstdisplaysink", &["displaysink"]);
+
+        let error = crate::runtime::launch::build_element(&reg, "gstdisplaysink", &[]).err();
+        assert_eq!(
+            error,
+            Some(crate::runtime::launch::ParseError::CannotRunHere {
+                element: "gstdisplaysink".into(),
+                reason: alloc::format!("displaysink ({NO_DISPLAY})"),
+            })
+        );
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn the_encoders_that_cannot_run_here_are_listed_with_why() {
+        const NO_DRIVER: &str = "no driver";
+        static CHOICES: &[EncoderChoice] = &[
+            EncoderChoice::plain("hardwareenc"),
+            EncoderChoice::plain("unbuiltenc"),
+        ];
+        let mut reg = Registry::new();
+        reg.register_launch(
+            named_sink("hardwareenc").with_usable(|| Err(alloc::string::String::from(NO_DRIVER))),
+        );
+        reg.set_encoder_provider(|_| Some(CHOICES));
+        let target = h264(Dim::Any);
+
+        assert_eq!(reg.encoder_choice(&target), None);
+        assert_eq!(
+            reg.unusable_encoders(&target),
+            [alloc::format!("hardwareenc ({NO_DRIVER})")]
         );
     }
 

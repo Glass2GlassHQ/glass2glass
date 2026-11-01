@@ -564,9 +564,9 @@ cargo clippy --workspace --all-targets
 | `D3D11Sink` | `d3d11-sink` | Windows |
 | `MetalVideoSink` (zero-copy from `CVPixelBuffer`) | `metal-sink` | macOS + Metal |
 | `WgpuPresentSink` (`wgpusink`: owns its Wayland window, presents GPU-resident frames with no upload) | `wgpu-present` | Linux + Wayland + wgpu |
-| `NvDec` (native NVDEC H.264 / H.265 / VP9 / AV1 to CUDA NV12 or 10-bit P010) | `nvdec` | Linux + NVIDIA driver (libnvcuvid) |
-| `NvEnc` (native NVENC CUDA NV12 / P010 to H.264 / H.265, incl. HEVC Main 10) | `nvenc` | Linux + NVIDIA driver (libnvidia-encode) |
-| `CudaDownload` (CUDA to System), `CudaUpload` (System to CUDA) | `cuda` | Linux + NVIDIA driver (libcuda) |
+| `NvDec` (native NVDEC H.264 / H.265 / VP9 / AV1 to CUDA NV12 or 10-bit P010) | `nvdec` | Linux or Windows + NVIDIA driver (libnvcuvid / nvcuvid.dll) |
+| `NvEnc` (native NVENC CUDA NV12 / P010 to H.264 / H.265, incl. HEVC Main 10) | `nvenc` | Linux or Windows + NVIDIA driver (libnvidia-encode / nvEncodeAPI64.dll) |
+| `CudaDownload` (CUDA to System), `CudaUpload` (System to CUDA) | `cuda` | Linux or Windows + NVIDIA driver (libcuda / nvcuda.dll) |
 | `WgpuDownload` (`wgpudownload`: wgpu texture or buffer to System), `WgpuUpload` (`wgpuupload`: System to wgpu buffer) | `wgpu-sink` | wgpu adapter |
 | `CudaGlSink` (CUDA-GL present), `CudaKmsSink` (CUDA-GL on KMS) | `cuda-gl`, `cuda-kms` | Linux + NVIDIA + EGL + GL (+ libdrm for KMS) |
 | `CudaToWgpu` / `WgpuToCuda` (zero-copy bridge) | `cuda-wgpu` | Linux + NVIDIA + Vulkan |
@@ -709,7 +709,7 @@ let g = auto_plug_cuda_converters(g);   // splices CudaUpload: src → [CudaUplo
 run_graph(g, &clock, LatencyProfile::Live).await?;
 ```
 
-Features: `nvenc` (`nvdec` for the decoder). Linux + NVIDIA only. `NvDec`
+Features: `nvenc` (`nvdec` for the decoder). Linux or Windows, NVIDIA only. `NvDec`
 keeps frames on the GPU or downloads to System, driven by downstream demand.
 It decodes H.264 / H.265 / AV1, emits P010 for 10-bit streams, reconfigures
 in place on a mid-stream resolution change, and takes `max-display-delay`

@@ -39,7 +39,10 @@ pub(crate) struct CudaMemcpy2D {
     pub(crate) height: usize,
 }
 
+#[cfg(target_os = "linux")]
 pub(crate) const LIBCUDA: &str = "libcuda.so.1";
+#[cfg(windows)]
+pub(crate) const LIBCUDA: &str = "nvcuda.dll";
 // cuda.h names this "shared object initialization failed"
 pub(crate) const CUDA_ERROR_SHARED_OBJECT_INIT_FAILED: CuResult = 303;
 

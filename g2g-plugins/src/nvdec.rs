@@ -747,7 +747,8 @@ impl NvDec {
             pkt.flags = ffi::CUVID_PKT_ENDOFSTREAM;
         } else {
             pkt.flags = ffi::CUVID_PKT_TIMESTAMP;
-            pkt.payload_size = payload.len() as u64;
+            pkt.payload_size =
+                core::ffi::c_ulong::try_from(payload.len()).map_err(|_| G2gError::InputRefused)?;
             pkt.payload = payload.as_ptr();
             pkt.timestamp = pts_ns as i64;
         }
@@ -1206,24 +1207,24 @@ extern "C" fn handle_sequence(user: *mut core::ffi::c_void, fmt: *mut ffi::Video
     // SAFETY: the NVCUVID param structs are plain old data (ints, pointers,
     // reserved arrays); all-zero is a valid initial state we then fill.
     let mut info: ffi::DecodeCreateInfo = unsafe { core::mem::zeroed() };
-    info.width = f.coded_width as u64;
-    info.height = f.coded_height as u64;
-    info.num_decode_surfaces = num_surfaces as u64;
+    info.width = core::ffi::c_ulong::from(f.coded_width);
+    info.height = core::ffi::c_ulong::from(f.coded_height);
+    info.num_decode_surfaces = core::ffi::c_ulong::from(num_surfaces);
     info.codec_type = state.codec_cuvid;
     info.chroma_format = f.chroma_format;
     info.creation_flags = ffi::CUDA_VIDEO_CREATE_PREFER_CUVID;
-    info.bit_depth_minus8 = f.bit_depth_luma_minus8 as u64;
-    info.max_width = f.coded_width as u64;
-    info.max_height = f.coded_height as u64;
+    info.bit_depth_minus8 = core::ffi::c_ulong::from(f.bit_depth_luma_minus8);
+    info.max_width = core::ffi::c_ulong::from(f.coded_width);
+    info.max_height = core::ffi::c_ulong::from(f.coded_height);
     info.display_area_left = geometry.area_left;
     info.display_area_top = geometry.area_top;
     info.display_area_right = geometry.area_right;
     info.display_area_bottom = geometry.area_bottom;
     info.output_format = surface_format;
     info.deinterlace_mode = ffi::CUDA_VIDEO_DEINTERLACE_WEAVE;
-    info.target_width = geometry.target_width as u64;
-    info.target_height = geometry.target_height as u64;
-    info.num_output_surfaces = state.num_output_surfaces as u64;
+    info.target_width = core::ffi::c_ulong::from(geometry.target_width);
+    info.target_height = core::ffi::c_ulong::from(geometry.target_height);
+    info.num_output_surfaces = core::ffi::c_ulong::from(state.num_output_surfaces);
     info.vid_lock = cuda.ctx_lock;
 
     let mut decoder: *mut core::ffi::c_void = core::ptr::null_mut();
@@ -1841,9 +1842,12 @@ static NVDEC_PROPS: &[PropertySpec] = &[
 // `crate::cuda` / `crate::nvenc` FFI blocks.
 #[allow(non_upper_case_globals, unreachable_pub)]
 mod ffi {
-    use core::ffi::c_void;
+    use core::ffi::{c_ulong, c_void};
 
+    #[cfg(target_os = "linux")]
     pub const LIBNVCUVID: &str = "libnvcuvid.so.1";
+    #[cfg(windows)]
+    pub const LIBNVCUVID: &str = "nvcuvid.dll";
 
     // Codec / format enum values (cuviddec.h).
     pub const CUDA_VIDEO_CODEC_H264: i32 = 4;
@@ -1858,19 +1862,20 @@ mod ffi {
     /// 16-bit semi-planar YUV, the 9- and 10-bit output surface (g2g `P010`).
     pub const CUDA_VIDEO_SURFACE_FORMAT_P016: i32 = 1;
     pub const CUDA_VIDEO_DEINTERLACE_WEAVE: i32 = 0;
-    pub const CUDA_VIDEO_CREATE_PREFER_CUVID: u64 = 0x04;
+    pub const CUDA_VIDEO_CREATE_PREFER_CUVID: c_ulong = 0x04;
     // Packet flags (nvcuvid.h).
-    pub const CUVID_PKT_ENDOFSTREAM: u64 = 0x01;
-    pub const CUVID_PKT_TIMESTAMP: u64 = 0x02;
+    pub const CUVID_PKT_ENDOFSTREAM: c_ulong = 0x01;
+    pub const CUVID_PKT_TIMESTAMP: c_ulong = 0x02;
 
-    /// `CUVIDSOURCEDATAPACKET` (32 bytes). `unsigned long` flags / payload_size.
+    /// `CUVIDSOURCEDATAPACKET` (32 bytes on Linux). `unsigned long` flags / payload_size.
     #[repr(C)]
     pub struct SourceDataPacket {
-        pub flags: u64,
-        pub payload_size: u64,
+        pub flags: c_ulong,
+        pub payload_size: c_ulong,
         pub payload: *const u8,
         pub timestamp: i64,
     }
+    #[cfg(target_os = "linux")]
     const _: () = assert!(core::mem::size_of::<SourceDataPacket>() == 32);
 
     // CUVIDDECODECAPS
@@ -1964,38 +1969,39 @@ mod ffi {
         pub bottom: i32,
     }
 
-    /// `CUVIDDECODECREATEINFO` (176 bytes). `unsigned long` fields are 8 bytes;
+    /// `CUVIDDECODECREATEINFO` (176 bytes on Linux). `unsigned long` fields are 8 bytes there;
     /// the two `short` rectangles are flattened into named `i16` fields.
     #[repr(C)]
     pub struct DecodeCreateInfo {
-        pub width: u64,
-        pub height: u64,
-        pub num_decode_surfaces: u64,
+        pub width: c_ulong,
+        pub height: c_ulong,
+        pub num_decode_surfaces: c_ulong,
         pub codec_type: i32,
         pub chroma_format: i32,
-        pub creation_flags: u64,
-        pub bit_depth_minus8: u64,
-        pub intra_decode_only: u64,
-        pub max_width: u64,
-        pub max_height: u64,
-        pub reserved1: u64,
+        pub creation_flags: c_ulong,
+        pub bit_depth_minus8: c_ulong,
+        pub intra_decode_only: c_ulong,
+        pub max_width: c_ulong,
+        pub max_height: c_ulong,
+        pub reserved1: c_ulong,
         pub display_area_left: i16,
         pub display_area_top: i16,
         pub display_area_right: i16,
         pub display_area_bottom: i16,
         pub output_format: i32,
         pub deinterlace_mode: i32,
-        pub target_width: u64,
-        pub target_height: u64,
-        pub num_output_surfaces: u64,
+        pub target_width: c_ulong,
+        pub target_height: c_ulong,
+        pub num_output_surfaces: c_ulong,
         pub vid_lock: *mut c_void,
         pub target_rect_left: i16,
         pub target_rect_top: i16,
         pub target_rect_right: i16,
         pub target_rect_bottom: i16,
-        pub enable_histogram: u64,
-        pub reserved2: [u64; 4],
+        pub enable_histogram: c_ulong,
+        pub reserved2: [c_ulong; 4],
     }
+    #[cfg(target_os = "linux")]
     const _: () = assert!(core::mem::size_of::<DecodeCreateInfo>() == 176);
 
     /// `CUVIDRECONFIGUREDECODERINFO` (128 bytes), the in-place decoder reset for a

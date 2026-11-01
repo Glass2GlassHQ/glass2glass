@@ -254,6 +254,11 @@ pub enum ParseError {
         sink: String,
         downstream: String,
     },
+    // the element is in this build but cannot run on this machine, such as a missing driver
+    CannotRunHere {
+        element: String,
+        reason: String,
+    },
 }
 
 impl ParseError {
@@ -442,6 +447,9 @@ impl core::fmt::Display for ParseError {
                 f,
                 "could not link {sink} to {downstream}: {sink} is a sink and has no output"
             ),
+            ParseError::CannotRunHere { element, reason } => {
+                write!(f, "{element} cannot run here: {reason}")
+            }
         }
     }
 }
@@ -1813,10 +1821,19 @@ fn encoder_spec(
         return Ok(None);
     }
     let choice = registry.encoder_choice(&stream.caps).ok_or_else(|| {
-        ParseError::NoEncoder(alloc::format!(
-            "no encoder for {} is compiled in (build the feature for it, or name an encoder explicitly)",
-            stream.caps.to_gst_string()
-        ))
+        let unusable = registry.unusable_encoders(&stream.caps);
+        ParseError::NoEncoder(if unusable.is_empty() {
+            alloc::format!(
+                "no encoder for {} is compiled in (build the feature for it, or name an encoder explicitly)",
+                stream.caps.to_gst_string()
+            )
+        } else {
+            alloc::format!(
+                "no encoder for {} can run here: {}",
+                stream.caps.to_gst_string(),
+                unusable.join(", ")
+            )
+        })
     })?;
     let mut props: Vec<(String, String)> = choice
         .props
@@ -3892,9 +3909,16 @@ pub fn build_element(
     name: &str,
     properties: &[(String, String)],
 ) -> Result<Box<dyn DynAsyncElement>, ParseError> {
-    let mut element = registry
-        .make_element(name)
-        .ok_or_else(|| ParseError::UnknownElement(name.to_string()))?;
+    let mut element =
+        registry
+            .make_element(name)
+            .ok_or_else(|| match registry.unusable_reason(name) {
+                Some(reason) => ParseError::CannotRunHere {
+                    element: name.to_string(),
+                    reason,
+                },
+                None => ParseError::UnknownElement(name.to_string()),
+            })?;
     apply_props(&mut element, name, properties)?;
     Ok(element)
 }

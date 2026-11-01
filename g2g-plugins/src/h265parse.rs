@@ -288,7 +288,10 @@ pub(crate) struct H265PpsHead {
 
 // takes the RBSP after the 2-byte NAL header and returns the reader at the tile layout
 #[cfg_attr(
-    not(any(feature = "vulkan-video", all(target_os = "linux", feature = "nvdec"))),
+    not(any(
+        feature = "vulkan-video",
+        all(any(target_os = "linux", windows), feature = "nvdec")
+    )),
     allow(dead_code)
 )]
 pub(crate) fn parse_h265_pps_head(rbsp: &[u8]) -> Option<(H265PpsHead, BitReader<'_>)> {

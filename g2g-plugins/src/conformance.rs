@@ -1492,9 +1492,12 @@ pub mod persist {
     /// when the runner names itself, else the device name `name_device` finds,
     /// else the host os / arch (which names no device, so it cannot pass for a
     /// device claim).
-    #[cfg(all(
-        target_os = "linux",
-        any(feature = "cuda", feature = "v4l2", feature = "libcamera")
+    #[cfg(any(
+        all(
+            target_os = "linux",
+            any(feature = "cuda", feature = "v4l2", feature = "libcamera")
+        ),
+        all(windows, feature = "cuda")
     ))]
     fn platform_tag(name_device: impl FnOnce() -> Option<String>) -> String {
         if let Some(name) = std::env::var_os("G2G_CONFORMANCE_PLATFORM") {
@@ -1512,7 +1515,7 @@ pub mod persist {
     ///
     /// A test that already holds its own device name (Vulkan Video, a wgpu
     /// adapter it opened itself) passes that instead.
-    #[cfg(all(target_os = "linux", feature = "cuda"))]
+    #[cfg(all(any(target_os = "linux", windows), feature = "cuda"))]
     pub fn cuda_platform_tag() -> String {
         use g2g_core::runtime::DeviceProvider;
         platform_tag(|| {

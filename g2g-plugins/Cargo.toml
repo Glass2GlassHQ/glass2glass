@@ -57,7 +57,10 @@ release-wheel-linux = [
 ]
 release-binary-macos = ["release-binary", "vtdecode", "vtencode", "metal-sink", "coreaudio", "avfoundation", "screencapture"]
 release-aar = ["release-binary", "camera2", "mediacodec-wgpu", "aaudio"]
-release-binary-windows = ["release-binary", "mf-decode", "mf-encode", "mf-aac", "wasapi-sink", "wasapi-src", "d3d11-sink", "mf-video-src"]
+release-binary-windows = [
+    "release-binary", "mf-decode", "mf-encode", "mf-aac", "wasapi-sink", "wasapi-src", "d3d11-sink", "mf-video-src",
+    "cuda", "nvenc", "nvdec",
+]
 # libc lets g2g-launch die on a closed stdout the way gst-launch does
 std = ["g2g-core/std", "dep:tokio", "dep:libc"]
 # bzip2 and lzo `ContentEncoding` decompression in the Matroska demuxer. Both
@@ -412,7 +415,7 @@ embassy-link = ["dep:embassy-sync"]
 # `Backend::NvdecCuda` `MemoryDomain::Cuda` NV12 frame back to system memory
 # (device->host `cuMemcpy2D`) so the decode path reaches the existing CPU
 # sinks for bring-up. Hand-rolled FFI that loads `libcuda` on first use, so a
-# build with it also starts without the NVIDIA driver; Linux + NVIDIA only, implies std. See DESIGN-C3-cuda.md §3.4, §4.
+# build with it also starts without the NVIDIA driver; Linux and Windows, implies std. See DESIGN-C3-cuda.md §3.4, §4.
 cuda = ["std", "dep:libloading"]
 # Local zero-copy IPC over CUDA IPC memory handles (`localipc`, M556): share a
 # device allocation with another process on the same machine + GPU without a
@@ -437,14 +440,14 @@ local-dmabuf = ["std", "tokio/net", "tokio/io-util"]
 # encode of a CUDA NV12 surface (the NVDEC hwframe domain) via the NVIDIA Video
 # Codec SDK, the encode-side mirror of the `cuda-wgpu` import bridge. Hand-rolled
 # FFI that loads `libnvidia-encode` + `libcuda` on first use (no crate dep), struct
-# layouts asserted against the installed `nvEncodeAPI.h`. Linux + NVIDIA only,
+# layouts asserted against the installed `nvEncodeAPI.h`. Linux and Windows,
 # implies std (via `cuda`). CI-excluded like `ffmpeg` (no NVENC runtime in CI).
 nvenc = ["cuda"]
 # Native NVDEC H.264 decode (`NvDec`, M270): the decode half of the gst-`nvcodec`
 # pair, mirror of `NvEnc`. Drives the NVCUVID parser+decoder API directly (no
 # libavcodec), emitting CUDA NV12 surfaces (`MemoryDomain::Cuda`). Hand-rolled FFI
 # loading `libnvcuvid` + `libcuda` on first use, struct layouts asserted against cuviddec.h /
-# nvcuvid.h. Linux + NVIDIA only, implies std (via `cuda`). CI-excluded.
+# nvcuvid.h. Linux and Windows, implies std (via `cuda`). CI-excluded.
 nvdec = ["cuda"]
 # CUDA-GL zero-copy-ish display sink (`CudaGlSink`, C3 Phase 3 step 2). Keeps
 # decoded NV12 on the GPU and presents via CUDA-GL interop (device->texture

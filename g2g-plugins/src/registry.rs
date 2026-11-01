@@ -156,9 +156,9 @@ use crate::moqtsink::MoqtSink;
 #[cfg(feature = "moqt")]
 use crate::moqtsrc::MoqtSrc;
 use crate::mp4demux::Mp4Demux;
-#[cfg(all(target_os = "linux", feature = "nvdec"))]
+#[cfg(all(any(target_os = "linux", windows), feature = "nvdec"))]
 use crate::nvdec::NvDec;
-#[cfg(all(target_os = "linux", feature = "nvenc"))]
+#[cfg(all(any(target_os = "linux", windows), feature = "nvenc"))]
 use crate::nvenc::NvEnc;
 #[cfg(feature = "onvif")]
 use crate::onvif::OnvifSrc;
@@ -402,7 +402,7 @@ fn container_muxer_provider(container: &Caps) -> Option<&'static [&'static str]>
 }
 
 #[cfg(any(
-    all(target_os = "linux", feature = "cuda"),
+    all(any(target_os = "linux", windows), feature = "cuda"),
     all(target_os = "linux", feature = "dmabuf-wgpu"),
     feature = "wgpu-sink"
 ))]
@@ -410,7 +410,7 @@ fn domain_converter(
     from: g2g_core::MemoryDomainKind,
     to: g2g_core::MemoryDomainKind,
 ) -> Option<g2g_core::runtime::GraphNode> {
-    #[cfg(all(target_os = "linux", feature = "cuda"))]
+    #[cfg(all(any(target_os = "linux", windows), feature = "cuda"))]
     if let Some(converter) = crate::cuda::cuda_domain_converter(from, to) {
         return Some(converter);
     }
@@ -503,7 +503,7 @@ pub fn default_registry() -> Registry {
     // gets the bridge spliced in (M354): `nvdec ! wgpusink` keeps the frame on
     // the GPU, `nvdec ! waylandsink` downloads it.
     #[cfg(any(
-        all(target_os = "linux", feature = "cuda"),
+        all(any(target_os = "linux", windows), feature = "cuda"),
         all(target_os = "linux", feature = "dmabuf-wgpu"),
         feature = "wgpu-sink"
     ))]
@@ -1894,7 +1894,7 @@ const FFMPEGDEC_FRAME_COST: g2g_core::runtime::FrameCost = g2g_core::runtime::Fr
     fixed_us: 0,
     per_megapixel_us: 600,
 };
-#[cfg(all(target_os = "linux", feature = "nvdec"))]
+#[cfg(all(any(target_os = "linux", windows), feature = "nvdec"))]
 const NVDEC_FRAME_COST: g2g_core::runtime::FrameCost = g2g_core::runtime::FrameCost {
     fixed_us: 2800,
     per_megapixel_us: 0,
@@ -1904,7 +1904,7 @@ const VULKANVIDEODEC_FRAME_COST: g2g_core::runtime::FrameCost = g2g_core::runtim
     fixed_us: 3700,
     per_megapixel_us: 0,
 };
-#[cfg(all(target_os = "linux", feature = "cuda"))]
+#[cfg(all(any(target_os = "linux", windows), feature = "cuda"))]
 const CUDADOWNLOAD_COST: g2g_core::runtime::DomainTransferCost =
     g2g_core::runtime::DomainTransferCost {
         from: g2g_core::MemoryDomainKind::Cuda,
@@ -1920,7 +1920,7 @@ const WGPUDOWNLOAD_COST: g2g_core::runtime::DomainTransferCost =
     };
 
 fn register_autoplug_candidates(reg: &mut Registry) {
-    #[cfg(all(target_os = "linux", feature = "cuda"))]
+    #[cfg(all(any(target_os = "linux", windows), feature = "cuda"))]
     reg.register_transfer_cost(CUDADOWNLOAD_COST);
     #[cfg(feature = "wgpu-sink")]
     reg.register_transfer_cost(WGPUDOWNLOAD_COST);
@@ -2157,7 +2157,7 @@ fn register_autoplug_candidates(reg: &mut Registry) {
     // domain-aware search prefers `NvDec` for a GPU consumer (M989 reads that
     // preference off the consumer's declared `input_domains`), while a consumer
     // that declares no domain requirement keeps the CPU decoder.
-    #[cfg(all(target_os = "linux", feature = "nvdec"))]
+    #[cfg(all(any(target_os = "linux", windows), feature = "nvdec"))]
     if crate::nvdec::missing_driver_library().is_none() {
         reg.register(
             ElementFactory::of::<NvDec>("nvdec", |_| Box::new(NvDec::new()))
@@ -2620,15 +2620,18 @@ pub static FEATURE_GATED_ELEMENTS: &[FeatureGatedElement] = &{
         ($os:literal) => {
             Some($os)
         };
+        ($first:literal $(, $rest:literal)+) => {
+            Some(concat!($first $(, " or ", $rest)+))
+        };
     }
     macro_rules! rows {
-        ($($name:literal => $feature:literal $(on $os:literal)?;)*) => {
+        ($($name:literal => $feature:literal $(on $($os:literal)|+)?;)*) => {
             [$(FeatureGatedElement {
                 name: $name,
                 feature: $feature,
-                platform: platform!($($os)?),
-                builds_on_this_target: cfg!(all($(target_os = $os)?)),
-                compiled_in: cfg!(all(feature = $feature $(, target_os = $os)?)),
+                platform: platform!($($($os),+)?),
+                builds_on_this_target: cfg!(all($(any($(target_os = $os),+))?)),
+                compiled_in: cfg!(all(feature = $feature $(, any($(target_os = $os),+))?)),
             }),*]
         };
     }
@@ -2745,10 +2748,10 @@ pub static FEATURE_GATED_ELEMENTS: &[FeatureGatedElement] = &{
         "vah265enc" => "ffmpeg" on "linux";
         "vaav1enc" => "ffmpeg" on "linux";
         "avenc_aac" => "ffmpeg" on "linux";
-        "cudadownload" => "cuda" on "linux";
-        "cudaupload" => "cuda" on "linux";
-        "nvdec" => "nvdec" on "linux";
-        "nvenc" => "nvenc" on "linux";
+        "cudadownload" => "cuda" on "linux" | "windows";
+        "cudaupload" => "cuda" on "linux" | "windows";
+        "nvdec" => "nvdec" on "linux" | "windows";
+        "nvenc" => "nvenc" on "linux" | "windows";
         "jpegxsenc" => "jpegxs" on "linux";
         "jpegxsdec" => "jpegxs" on "linux";
         "dmabuftowgpu" => "dmabuf-wgpu" on "linux";
@@ -2803,7 +2806,10 @@ pub fn feature_gated_element(name: &str) -> Option<&'static FeatureGatedElement>
 /// real value comes from a property / builder before use (the placeholder only
 /// has to be side-effect-free, since `inspect` default-builds to read metadata).
 #[allow(unused_variables)]
-#[cfg(all(target_os = "linux", any(feature = "nvdec", feature = "nvenc")))]
+#[cfg(all(
+    any(target_os = "linux", windows),
+    any(feature = "nvdec", feature = "nvenc")
+))]
 fn driver_installed(missing_library: Option<&'static str>) -> Result<(), alloc::string::String> {
     missing_library.map_or(Ok(()), |file| {
         Err(alloc::format!("{file} is not installed"))
@@ -3480,13 +3486,13 @@ fn register_feature_gated(reg: &mut Registry) {
     ));
     // Native NVIDIA Video Codec SDK elements (M269 / M270): zero-copy CUDA NV12
     // <-> H.264, the gst-`nvcodec`-style pair. Explicit-select by name.
-    #[cfg(all(target_os = "linux", feature = "nvdec"))]
+    #[cfg(all(any(target_os = "linux", windows), feature = "nvdec"))]
     reg.register_launch(
         LaunchFactory::of::<NvDec>("nvdec", || Box::new(NvDec::new()))
             .with_usable(|| driver_installed(crate::nvdec::missing_driver_library()))
             .with_experimental(),
     );
-    #[cfg(all(target_os = "linux", feature = "nvenc"))]
+    #[cfg(all(any(target_os = "linux", windows), feature = "nvenc"))]
     reg.register_launch(
         LaunchFactory::of::<NvEnc>("nvenc", || Box::new(NvEnc::new()))
             .with_usable(|| driver_installed(crate::nvenc::missing_driver_library()))
@@ -3510,11 +3516,11 @@ fn register_feature_gated(reg: &mut Registry) {
         })
         .with_experimental(),
     );
-    #[cfg(all(target_os = "linux", feature = "cuda"))]
+    #[cfg(all(any(target_os = "linux", windows), feature = "cuda"))]
     reg.register_launch(LaunchFactory::new("cudadownload", Vec::new(), || {
         Box::new(crate::cuda::CudaDownload::new())
     }));
-    #[cfg(all(target_os = "linux", feature = "cuda"))]
+    #[cfg(all(any(target_os = "linux", windows), feature = "cuda"))]
     reg.register_launch(LaunchFactory::new("cudaupload", Vec::new(), || {
         Box::new(crate::cuda::CudaUpload::new())
     }));
@@ -3796,7 +3802,12 @@ fn register_feature_gated(reg: &mut Registry) {
     );
 }
 
-#[cfg(all(test, target_os = "linux", feature = "nvenc", feature = "nvdec"))]
+#[cfg(all(
+    test,
+    any(target_os = "linux", windows),
+    feature = "nvenc",
+    feature = "nvdec"
+))]
 mod nv_registry_tests {
     use super::*;
 
