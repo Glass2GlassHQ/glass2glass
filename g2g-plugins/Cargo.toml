@@ -36,6 +36,25 @@ linux-full = [
     "declarative-yaml", "script-rhai", "observe", "mcp", "tui", "latency-bench",
     "matroska-compression", "matroska-decrypt",
 ]
+# The g2g-launch binaries attached to a GitHub release. They link only libraries
+# the OS ships, so nothing that needs ffmpeg, libvpx, libopus, PipeWire or Pulse.
+release-binary = [
+    "multi-thread", "plugin-loader",
+    "rtsp", "rtsp-server", "rtsp-client-sink", "srt", "rist", "srtp", "dtls-srtp", "tcp", "http-server", "udp-egress", "udp-ingress", "rtmp", "webrtc",
+    "remote", "remote-ws", "webtransport", "moqt",
+    "http-src", "hls", "dash",
+    "vorbis", "webrtcdsp", "av1-encode", "rav1d", "mjpeg", "mjpeg-encode", "png", "webp",
+    "wgpu-sink", "vello-overlay", "analytics", "analytics-json", "mqtt", "embedding-index",
+    "declarative-yaml", "script-rhai", "observe", "mcp", "tui",
+    "matroska-compression", "matroska-decrypt",
+]
+# wayland, EGL and ALSA ship on desktop distros but not on most servers
+release-binary-linux = [
+    "release-binary", "plugin-signing", "shm", "unixfd", "v4l2", "vulkan-video",
+    "kms-sink", "wayland-sink", "gl-sink", "wgpu-present", "alsa-sink", "alsa-src",
+]
+release-binary-macos = ["release-binary", "vtdecode", "vtencode", "metal-sink", "coreaudio", "avfoundation", "screencapture"]
+release-binary-windows = ["release-binary", "mf-decode", "mf-encode", "mf-aac", "wasapi-sink", "wasapi-src", "d3d11-sink", "mf-video-src"]
 # libc lets g2g-launch die on a closed stdout the way gst-launch does
 std = ["g2g-core/std", "dep:tokio", "dep:libc"]
 # bzip2 and lzo `ContentEncoding` decompression in the Matroska demuxer. Both

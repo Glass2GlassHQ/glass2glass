@@ -41,5 +41,9 @@ in [STABILITY.md](STABILITY.md).
   exists and skips every crate already on crates.io at that version.
 - crates.io limits how fast crates are published. On a failed upload the
   script waits 10 minutes and retries the same crate.
+- The tag push runs `.github/workflows/release.yml`, which builds `g2g-launch`
+  and `g2g-inspect` for Linux, macOS and Windows and attaches them to the
+  GitHub release. Run it by hand from the Actions tab to test the builds without
+  a tag. The feature sets are the `release-binary-*` features of g2g-plugins.
 - `g2g-pyapi`, `xtask` and the benchmark and web crates are `publish = false`.
   The Python wheel is built with maturin, not published by this script.

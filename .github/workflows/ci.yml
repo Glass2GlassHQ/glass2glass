@@ -213,6 +213,8 @@ jobs:
         run: >
           cargo check -p g2g-plugins --locked --all-targets --features
           dav1d,rav1d,mjpeg,opus,vorbis
+      - name: release binary feature set
+        run: cargo check -p g2g-plugins --locked --bin g2g-launch --features release-binary-linux
 
   # The libavcodec decode path (`ffmpeg` feature) and its latency guard.
   # `ffmpeg-sys-next` probes the installed libav* version and gates its
@@ -745,6 +747,8 @@ jobs:
         run: >
           cargo check -p g2g-plugins --locked --all-targets --features
           mf-decode,mf-encode,mf-aac,wasapi-sink,wasapi-src,d3d11-sink,mf-video-src,wgpu-sink
+      - name: release binary feature set
+        run: cargo check -p g2g-plugins --locked --bin g2g-launch --features release-binary-windows
       # the runner has no render endpoint, so the tone test skips and only negotiation runs
       - name: test g2g-plugins (wasapi sink)
         shell: bash
@@ -783,6 +787,8 @@ jobs:
             cargo check -p g2g-plugins --locked --all-targets --features "$f"
             echo "::endgroup::"
           done
+      - name: release binary feature set
+        run: cargo check -p g2g-plugins --locked --bin g2g-launch --features release-binary-macos
       # M731+: run the VideoToolbox / Metal / Core Audio / AVFoundation /
       # ScreenCaptureKit elements for real (decode the reference fixtures,
       # encode round trip, CAMetalLayer present, AudioQueue render + capture;

@@ -145,6 +145,7 @@ Breaking: `QosMessage` gains `downstream_proc_ns`, `ElementProbe` is no longer `
 - M2044: `AppSinkPull::caps` returns the caps of the last frame pulled.
 - M2045: `examples/g2g-gtk4-video` shows any launch line in a GTK4 window, DMABUF frames as `GdkDmabufTexture`.
 - M2046: every TLS client and the WHIP server use rustls on ring instead of native-tls, so no build links OpenSSL.
+- M2047: each release tag attaches `g2g-launch` and `g2g-inspect` binaries for Linux, macOS and Windows.
 
 ## 0.10.0
 

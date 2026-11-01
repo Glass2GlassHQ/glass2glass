@@ -28,7 +28,6 @@ Highest leverage first:
 
 ## Distribution
 
-- Prebuilt `g2g-launch` binaries for Linux, macOS and Windows on each release.
 - Publish the Python wheel to PyPI.
 - A prebuilt Android AAR for the Kotlin bindings.
 
