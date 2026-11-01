@@ -51,7 +51,7 @@ release-binary = [
 release-binary-linux = [
     "release-binary", "plugin-signing", "shm", "unixfd", "v4l2", "vulkan-video",
     "kms-sink", "wayland-sink", "wgpu-present", "cuda", "nvenc", "nvdec", "cuda-wgpu",
-    "gl-sink", "alsa-sink", "alsa-src",
+    "gl-sink", "alsa-sink", "alsa-src", "openh264",
 ]
 release-binary-macos = ["release-binary", "vtdecode", "vtencode", "metal-sink", "coreaudio", "avfoundation", "screencapture"]
 release-aar = ["release-binary", "camera2", "mediacodec-wgpu", "aaudio"]
@@ -741,6 +741,10 @@ mozjpeg = ["mjpeg", "mjpeg-encode", "dep:mozjpeg"]
 # so building needs cmake but no libopus package. Implies std. v1 is 48 kHz
 # mono/stereo S16LE <-> Opus, the rate Opus always decodes at.
 opus = ["std", "dep:opusic-sys"]
+# H.264 decode (openh264dec) with Cisco's libopenh264, loaded at runtime. Cisco's
+# patent licence covers only the binary Cisco distributes, so the library is
+# never built from source here. Linux-only, implies std.
+openh264 = ["std", "dep:openh264"]
 # WebRTC audio processing (webrtcdsp + webrtcechoprobe): echo cancellation, noise
 # suppression, gain control and a high-pass filter via `sonora`, a pure-Rust port
 # of WebRTC's audio processing module. No system deps. Implies std.
@@ -924,6 +928,8 @@ image-webp = { version = "0.2", optional = true }
 # pure-Rust Opus codec. `bundled` (the default) builds the libopus source the
 # crate ships with cmake and links it statically.
 opusic-sys = { version = "0.7.6", optional = true }
+# OpenH264 bindings (openh264 feature), `libloading` only so no source build.
+openh264 = { version = "0.9.9", optional = true, default-features = false, features = ["libloading"] }
 # Pure-Rust port of WebRTC's audio processing module (webrtcdsp feature): AEC3,
 # noise suppression, AGC2, high-pass filter. BSD-3-Clause, MSRV 1.91.
 sonora = { version = "0.2", optional = true }

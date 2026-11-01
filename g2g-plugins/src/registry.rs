@@ -2047,6 +2047,16 @@ fn register_autoplug_candidates(reg: &mut Registry) {
     reg.register(ElementFactory::of::<VorbisDec>("vorbisdec", |_| {
         Box::new(VorbisDec::new())
     }));
+    // Negative rank so the GPU decoders and ffmpegdec win the auto-plug tiebreak.
+    #[cfg(all(target_os = "linux", feature = "openh264"))]
+    if crate::openh264dec::missing_library().is_none() {
+        reg.register(
+            ElementFactory::of::<crate::openh264dec::OpenH264Dec>("openh264dec", |_| {
+                Box::new(crate::openh264dec::OpenH264Dec::new())
+            })
+            .rank(-10),
+        );
+    }
     // Pure-Rust AAC / MPEG audio decode. Negative rank so ffmpegaudiodec wins the
     // auto-plug tiebreak when both are built.
     #[cfg(feature = "aac-decode")]
@@ -2511,7 +2521,7 @@ fn register_aliases(reg: &mut Registry) {
     // Decoders: GStreamer's libav / VA-API names -> the g2g decoders, resolving
     // to the first registered target. `avdec_h264` falls back to VideoToolbox `vtdec` on macOS builds without
     // the ffmpeg feature.
-    reg.register_alias("avdec_h264", &["ffmpegdec", "vtdec"]);
+    reg.register_alias("avdec_h264", &["ffmpegdec", "vtdec", "openh264dec"]);
     reg.register_alias("avdec_h265", &["ffmpegdec"]);
     reg.register_alias("vaapih264dec", &["ffmpegvaapidec"]);
     // AV1 decode: gst's libav name and its aom plugin name -> the libdav1d
@@ -2659,6 +2669,7 @@ pub static FEATURE_GATED_ELEMENTS: &[FeatureGatedElement] = &{
         "vorbisdec" => "vorbis";
         "aacdec" => "aac-decode";
         "mpegaudiodec" => "mpeg-audio-decode";
+        "openh264dec" => "openh264" on "linux";
         "webrtcdsp" => "webrtcdsp";
         "webrtcechoprobe" => "webrtcdsp";
         "av1enc" => "av1-encode";
@@ -2821,9 +2832,12 @@ pub fn feature_gated_element(name: &str) -> Option<&'static FeatureGatedElement>
 /// real value comes from a property / builder before use (the placeholder only
 /// has to be side-effect-free, since `inspect` default-builds to read metadata).
 #[allow(unused_variables)]
-#[cfg(all(
-    any(target_os = "linux", windows),
-    any(feature = "nvdec", feature = "nvenc")
+#[cfg(any(
+    all(
+        any(target_os = "linux", windows),
+        any(feature = "nvdec", feature = "nvenc")
+    ),
+    all(target_os = "linux", feature = "openh264")
 ))]
 fn driver_installed(missing_library: Option<&'static str>) -> Result<(), alloc::string::String> {
     missing_library.map_or(Ok(()), |file| {
@@ -2893,6 +2907,13 @@ fn register_feature_gated(reg: &mut Registry) {
         "aacdec",
         || Box::new(crate::symphoniadec::AacDec::new()),
     ));
+    #[cfg(all(target_os = "linux", feature = "openh264"))]
+    reg.register_launch(
+        LaunchFactory::of::<crate::openh264dec::OpenH264Dec>("openh264dec", || {
+            Box::new(crate::openh264dec::OpenH264Dec::new())
+        })
+        .with_usable(|| driver_installed(crate::openh264dec::missing_library())),
+    );
     #[cfg(feature = "mpeg-audio-decode")]
     reg.register_launch(LaunchFactory::of::<crate::symphoniadec::MpegAudioDec>(
         "mpegaudiodec",

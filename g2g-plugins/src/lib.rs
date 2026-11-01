@@ -111,6 +111,7 @@ mod fifobuffer;
     all(target_os = "android", feature = "mediacodec"),
     all(target_os = "macos", feature = "vtdecode"),
     all(target_os = "windows", feature = "mf-decode"),
+    all(target_os = "linux", feature = "openh264"),
 ))]
 mod inputstamp;
 // `audioreverse`: the audio half of reverse playback, the analog of `areverse`.
@@ -1565,6 +1566,9 @@ pub mod ffmpegdec;
 // of `ffmpegdec`. Same Linux + `ffmpeg` gate.
 #[cfg(all(target_os = "linux", feature = "ffmpeg"))]
 pub mod ffmpegaudiodec;
+// H.264 decode with Cisco's libopenh264, loaded at runtime.
+#[cfg(all(target_os = "linux", feature = "openh264"))]
+pub mod openh264dec;
 // libavcodec setup for codecs known only by container tag.
 #[cfg(all(target_os = "linux", feature = "ffmpeg-long-tail"))]
 mod ffmpegtagged;

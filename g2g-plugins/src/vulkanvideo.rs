@@ -15438,6 +15438,10 @@ fn decode_refused(err: VulkanVideoError) -> G2gError {
         VulkanVideoError::StreamRefused(reason) => {
             g2g_error!(target, "cannot decode this stream: {reason}")
         }
+        VulkanVideoError::NoVulkanAdapter => g2g_error!(
+            target,
+            "no GPU with a Vulkan video decode driver was found, which vulkanvideodec needs"
+        ),
         other => g2g_error!(target, "the GPU refused to decode this stream: {other:?}"),
     }
     G2gError::CapsMismatch

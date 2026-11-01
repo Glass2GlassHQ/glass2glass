@@ -40,12 +40,13 @@ Highest leverage first:
 The release `g2g-launch` binaries and wheels must start on a host with no media
 libraries installed.
 
-- **0.12.0.** AAC-LC and MP3 decode through symphonia (`aacdec`,
-  `mpegaudiodec`, ranked below `ffmpegaudiodec`). libopus built from source
-  through `opusic-sys` in place of `audiopus`. `openh264dec` / `openh264enc`
-  loading Cisco's `libopenh264` at runtime, never built from source. Rerun the
+- **0.12.0.** `openh264enc` on the runtime-loaded `libopenh264`. Rerun the
   release binary in a GPU-less `fedora:43` container on an H.264 + AAC MP4 before
-  publishing.
+  publishing, and check that `decodebin` picks `openh264dec` there rather than
+  `vulkanvideodec`.
+- **openh264dec and ffmpeg disagree on one B-pyramid frame.** Frame 20 of
+  `h264_bpyramid_320x240.h264` differs in 5 samples by 1. Find which decoder is
+  off against a third decoder.
 - **Load ffmpeg at runtime in every build.** Replace `ffmpeg-next` with
   runtime-loaded bindings to libavutil, libavcodec, libavformat and libswscale
   for libavcodec 59 to 62 (ffmpeg 5.1 to 8), Linux only. Set codec context fields
