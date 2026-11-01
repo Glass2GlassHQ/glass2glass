@@ -8,6 +8,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 - M2054: ALSA and EGL load at runtime, so the release binaries start on hosts without libasound or libEGL.
 - M2055: `aacdec` and `mpegaudiodec` decode AAC-LC and MP2 / MP3 in pure Rust, and the release binaries include them.
+- M2056: the `opus` feature builds libopus from source, and the release binaries include `opusenc` and `opusdec`.
 
 ## 0.11.0
 

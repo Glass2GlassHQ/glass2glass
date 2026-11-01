@@ -1407,8 +1407,8 @@ mod stillimage;
 // Netpbm stills (PBM / PGM / PPM): `pnmenc` / `pnmdec`, no extra crate.
 pub mod pnm;
 
-// Opus audio encode + decode via libopus (FFI through audiopus). Not pure Rust;
-// links libopus (system or bundled-and-built), gated behind the `opus` feature.
+// Opus audio encode + decode via libopus, built from source by opusic-sys. Not
+// pure Rust, gated behind the `opus` feature.
 #[cfg(feature = "opus")]
 pub mod opusdec;
 #[cfg(feature = "opus")]

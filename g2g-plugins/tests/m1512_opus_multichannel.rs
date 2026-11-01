@@ -4,7 +4,6 @@
 mod collect_sink;
 use collect_sink::CollectSink;
 
-use audiopus::ffi;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, AudioFormat, Caps, ChannelLayout, Frame, FrameTiming, MemoryDomain,
@@ -12,6 +11,7 @@ use g2g_core::{
 };
 use g2g_plugins::opusdec::OpusDec;
 use g2g_plugins::opusparse::OPUS_RATE_HZ;
+use opusic_sys as ffi;
 
 const CHANNELS: usize = 6;
 const STREAMS: u8 = 4;

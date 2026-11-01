@@ -1,6 +1,6 @@
 //! Opus audio encoder element (OpusEnc, `opus` feature): `Audio{PcmS16Le}` or
 //! `Audio{PcmF32Le}` in (the float path uses libopus' `opus_encode_float`, no
-//! S16 quantize), `Audio{Opus}` out, via libopus through the `audiopus` crate.
+//! S16 quantize), `Audio{Opus}` out, via libopus through the `opusic-sys` crate.
 //! The encode sibling of [`crate::opusdec::OpusDec`] and the producer that
 //! [`crate::opusparse::OpusParse`] reads.
 //!
@@ -30,8 +30,10 @@ use g2g_core::{
     PropValue, PropertySpec,
 };
 
-use audiopus::coder::Encoder;
-use audiopus::{Application, Bitrate, Channels, SampleRate};
+use core::ffi::c_int;
+use core::ptr::NonNull;
+
+use opusic_sys as ffi;
 
 use crate::opusparse::OPUS_RATE_HZ;
 
@@ -169,12 +171,103 @@ impl OpusAudioType {
         })
     }
 
-    fn application(self) -> Application {
+    fn application(self) -> c_int {
         match self {
-            OpusAudioType::Generic => Application::Audio,
-            OpusAudioType::Voice => Application::Voip,
-            OpusAudioType::RestrictedLowDelay => Application::LowDelay,
+            OpusAudioType::Generic => ffi::OPUS_APPLICATION_AUDIO,
+            OpusAudioType::Voice => ffi::OPUS_APPLICATION_VOIP,
+            OpusAudioType::RestrictedLowDelay => ffi::OPUS_APPLICATION_RESTRICTED_LOWDELAY,
         }
+    }
+}
+
+struct Encoder {
+    state: NonNull<ffi::OpusEncoder>,
+    channels: usize,
+}
+
+// SAFETY: libopus encoder state has no thread affinity and is only reached through the element.
+unsafe impl Send for Encoder {}
+
+impl Encoder {
+    fn new(channels: u8, application: c_int) -> Result<Self, G2gError> {
+        let mut error = 0;
+        // SAFETY: `error` is a valid out-pointer.
+        let state = unsafe {
+            ffi::opus_encoder_create(
+                OPUS_RATE_HZ as i32,
+                c_int::from(channels),
+                application,
+                &mut error,
+            )
+        };
+        match NonNull::new(state) {
+            Some(state) if error == ffi::OPUS_OK => Ok(Self {
+                state,
+                channels: usize::from(channels),
+            }),
+            _ => Err(G2gError::CapsMismatch),
+        }
+    }
+
+    fn set(&mut self, request: c_int, value: i32) -> Result<(), G2gError> {
+        // SAFETY: every SET request sent here takes one opus_int32 argument.
+        let status = unsafe { ffi::opus_encoder_ctl(self.state.as_ptr(), request, value) };
+        match status {
+            ffi::OPUS_OK => Ok(()),
+            _ => Err(G2gError::CapsMismatch),
+        }
+    }
+
+    fn get(&self, request: c_int) -> Result<i32, G2gError> {
+        let mut value: i32 = 0;
+        // SAFETY: every GET request sent here writes one opus_int32 through the pointer.
+        let status =
+            unsafe { ffi::opus_encoder_ctl(self.state.as_ptr(), request, &mut value as *mut i32) };
+        match status {
+            ffi::OPUS_OK => Ok(value),
+            _ => Err(G2gError::CapsMismatch),
+        }
+    }
+
+    fn encode(&mut self, pcm: &[i16], out: &mut [u8]) -> Result<usize, G2gError> {
+        let frame_size =
+            c_int::try_from(pcm.len() / self.channels).map_err(|_| G2gError::CapsMismatch)?;
+        let capacity = i32::try_from(out.len()).map_err(|_| G2gError::CapsMismatch)?;
+        // SAFETY: `pcm` holds `frame_size` samples per channel and `out` is `capacity` bytes.
+        let written = unsafe {
+            ffi::opus_encode(
+                self.state.as_ptr(),
+                pcm.as_ptr(),
+                frame_size,
+                out.as_mut_ptr(),
+                capacity,
+            )
+        };
+        usize::try_from(written).map_err(|_| G2gError::CapsMismatch)
+    }
+
+    fn encode_float(&mut self, pcm: &[f32], out: &mut [u8]) -> Result<usize, G2gError> {
+        let frame_size =
+            c_int::try_from(pcm.len() / self.channels).map_err(|_| G2gError::CapsMismatch)?;
+        let capacity = i32::try_from(out.len()).map_err(|_| G2gError::CapsMismatch)?;
+        // SAFETY: `pcm` holds `frame_size` samples per channel and `out` is `capacity` bytes.
+        let written = unsafe {
+            ffi::opus_encode_float(
+                self.state.as_ptr(),
+                pcm.as_ptr(),
+                frame_size,
+                out.as_mut_ptr(),
+                capacity,
+            )
+        };
+        usize::try_from(written).map_err(|_| G2gError::CapsMismatch)
+    }
+}
+
+impl Drop for Encoder {
+    fn drop(&mut self) {
+        // SAFETY: the pointer came from `opus_encoder_create`, destroyed once here.
+        unsafe { ffi::opus_encoder_destroy(self.state.as_ptr()) }
     }
 }
 
@@ -191,7 +284,8 @@ impl OpusAudioType {
 /// ```
 pub struct OpusEnc {
     channels: u8,
-    bitrate: Bitrate,
+    // `None` lets libopus pick the bitrate
+    bitrate: Option<i32>,
     /// Duration of the frames fed to libopus: it sets the accumulation size, the
     /// PTS step, and (through the sample count passed to `opus_encode`) the
     /// packet duration libopus codes into the TOC.
@@ -231,7 +325,7 @@ pub struct OpusEnc {
 
 impl core::fmt::Debug for OpusEnc {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        // audiopus' Encoder is not Debug; report the configuration instead.
+        // libopus encoder state is opaque; report the configuration instead.
         f.debug_struct("OpusEnc")
             .field("channels", &self.channels)
             .field("frame_size", &self.frame_size)
@@ -259,7 +353,7 @@ impl OpusEnc {
     pub fn new() -> Self {
         Self {
             channels: 0,
-            bitrate: Bitrate::Auto,
+            bitrate: None,
             frame_size: OpusFrameSize::default(),
             complexity: DEFAULT_COMPLEXITY,
             audio_type: OpusAudioType::Generic,
@@ -280,7 +374,7 @@ impl OpusEnc {
     /// Set the target bitrate in bits per second (e.g. 64_000). Default is
     /// libopus auto (rate chosen from the signal and frame size).
     pub fn with_bitrate(mut self, bits_per_second: i32) -> Self {
-        self.bitrate = Bitrate::BitsPerSecond(bits_per_second);
+        self.bitrate = Some(bits_per_second);
         self
     }
 
@@ -309,7 +403,8 @@ impl OpusEnc {
     pub fn complexity(&self) -> u8 {
         self.enc
             .as_ref()
-            .and_then(|e| e.complexity().ok())
+            .and_then(|e| e.get(ffi::OPUS_GET_COMPLEXITY_REQUEST).ok())
+            .and_then(|complexity| u8::try_from(complexity).ok())
             .unwrap_or(self.complexity)
     }
 
@@ -340,8 +435,8 @@ impl OpusEnc {
     pub fn inband_fec(&self) -> bool {
         self.enc
             .as_ref()
-            .and_then(|e| e.inband_fec().ok())
-            .unwrap_or(self.inband_fec)
+            .and_then(|e| e.get(ffi::OPUS_GET_INBAND_FEC_REQUEST).ok())
+            .map_or(self.inband_fec, |fec| fec != 0)
     }
 
     /// Tell libopus how much loss to encode for, 0..=100 %. Values above 100
@@ -356,7 +451,8 @@ impl OpusEnc {
     pub fn packet_loss_percentage(&self) -> u8 {
         self.enc
             .as_ref()
-            .and_then(|e| e.packet_loss_perc().ok())
+            .and_then(|e| e.get(ffi::OPUS_GET_PACKET_LOSS_PERC_REQUEST).ok())
+            .and_then(|percent| u8::try_from(percent).ok())
             .unwrap_or(self.packet_loss_perc)
     }
 
@@ -369,7 +465,10 @@ impl OpusEnc {
     /// its input, which is the pre-skip a container must declare for this
     /// stream. `None` before `configure_pipeline` builds the encoder.
     pub fn lookahead(&self) -> Option<u32> {
-        self.enc.as_ref().and_then(|e| e.lookahead().ok())
+        self.enc
+            .as_ref()
+            .and_then(|e| e.get(ffi::OPUS_GET_LOOKAHEAD_REQUEST).ok())
+            .and_then(|lookahead| u32::try_from(lookahead).ok())
     }
 
     fn input_templates() -> Vec<Caps> {
@@ -418,8 +517,8 @@ impl OpusEnc {
     /// Encode one full interleaved frame (`frame_len` samples) into an owned
     /// Opus packet. libopus reads the frame duration from the sample count, so
     /// the TOC of the packet carries whatever `frame_size` selected.
-    fn encode_frame(&self, frame: &[i16]) -> Result<Vec<u8>, G2gError> {
-        let enc = self.enc.as_ref().ok_or(G2gError::NotConfigured)?;
+    fn encode_frame(&mut self, frame: &[i16]) -> Result<Vec<u8>, G2gError> {
+        let enc = self.enc.as_mut().ok_or(G2gError::NotConfigured)?;
         let mut out = alloc::vec![0u8; MAX_PACKET];
         let len = enc
             .encode(frame, &mut out)
@@ -430,8 +529,8 @@ impl OpusEnc {
 
     /// The float twin of [`encode_frame`](Self::encode_frame) (libopus'
     /// `opus_encode_float`).
-    fn encode_frame_f32(&self, frame: &[f32]) -> Result<Vec<u8>, G2gError> {
-        let enc = self.enc.as_ref().ok_or(G2gError::NotConfigured)?;
+    fn encode_frame_f32(&mut self, frame: &[f32]) -> Result<Vec<u8>, G2gError> {
+        let enc = self.enc.as_mut().ok_or(G2gError::NotConfigured)?;
         let mut out = alloc::vec![0u8; MAX_PACKET];
         let len = enc
             .encode_float(frame, &mut out)
@@ -521,7 +620,7 @@ impl OpusEnc {
             return;
         }
         if let Some(enc) = self.enc.as_mut() {
-            if enc.set_bitrate(Bitrate::BitsPerSecond(bps)).is_ok() {
+            if enc.set(ffi::OPUS_SET_BITRATE_REQUEST, bps).is_ok() {
                 self.applied_bps = Some(bps);
             }
         }
@@ -565,21 +664,17 @@ impl AsyncElement for OpusEnc {
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         let (in_f32, channels) = Self::pcm_shape(absolute_caps).ok_or(G2gError::CapsMismatch)?;
         self.in_f32 = in_f32;
-        let ch = match channels {
-            1 => Channels::Mono,
-            2 => Channels::Stereo,
-            _ => return Err(G2gError::CapsMismatch),
-        };
-        let mut enc = Encoder::new(SampleRate::Hz48000, ch, self.audio_type.application())
-            .map_err(|_| G2gError::CapsMismatch)?;
-        enc.set_bitrate(self.bitrate)
-            .map_err(|_| G2gError::CapsMismatch)?;
-        enc.set_complexity(self.complexity)
-            .map_err(|_| G2gError::CapsMismatch)?;
-        enc.set_inband_fec(self.inband_fec)
-            .map_err(|_| G2gError::CapsMismatch)?;
-        enc.set_packet_loss_perc(self.packet_loss_perc)
-            .map_err(|_| G2gError::CapsMismatch)?;
+        let mut enc = Encoder::new(channels, self.audio_type.application())?;
+        enc.set(
+            ffi::OPUS_SET_BITRATE_REQUEST,
+            self.bitrate.unwrap_or(ffi::OPUS_AUTO),
+        )?;
+        enc.set(ffi::OPUS_SET_COMPLEXITY_REQUEST, i32::from(self.complexity))?;
+        enc.set(ffi::OPUS_SET_INBAND_FEC_REQUEST, i32::from(self.inband_fec))?;
+        enc.set(
+            ffi::OPUS_SET_PACKET_LOSS_PERC_REQUEST,
+            i32::from(self.packet_loss_perc),
+        )?;
         self.enc = Some(enc);
         self.channels = channels;
         self.buf.clear();
@@ -648,11 +743,7 @@ impl AsyncElement for OpusEnc {
             // bits/second; 0 lets libopus pick a bitrate from the sample rate / channels.
             "bitrate" => {
                 let bps = value.as_uint().ok_or(PropError::Type)?;
-                self.bitrate = if bps == 0 {
-                    Bitrate::Auto
-                } else {
-                    Bitrate::BitsPerSecond(bps.min(i32::MAX as u64) as i32)
-                };
+                self.bitrate = (bps != 0).then(|| bps.min(i32::MAX as u64) as i32);
                 Ok(())
             }
             // GStreamer opusenc's enum integers: whole ms, except 2 = 2.5 ms.
@@ -671,7 +762,7 @@ impl AsyncElement for OpusEnc {
                 }
                 self.complexity = value as u8;
                 if let Some(enc) = self.enc.as_mut() {
-                    enc.set_complexity(self.complexity)
+                    enc.set(ffi::OPUS_SET_COMPLEXITY_REQUEST, i32::from(self.complexity))
                         .map_err(|_| PropError::Value)?;
                 }
                 Ok(())
@@ -689,7 +780,7 @@ impl AsyncElement for OpusEnc {
             "inband-fec" => {
                 self.inband_fec = value.as_bool().ok_or(PropError::Type)?;
                 if let Some(enc) = self.enc.as_mut() {
-                    enc.set_inband_fec(self.inband_fec)
+                    enc.set(ffi::OPUS_SET_INBAND_FEC_REQUEST, i32::from(self.inband_fec))
                         .map_err(|_| PropError::Value)?;
                 }
                 Ok(())
@@ -701,8 +792,11 @@ impl AsyncElement for OpusEnc {
                 }
                 self.packet_loss_perc = value as u8;
                 if let Some(enc) = self.enc.as_mut() {
-                    enc.set_packet_loss_perc(self.packet_loss_perc)
-                        .map_err(|_| PropError::Value)?;
+                    enc.set(
+                        ffi::OPUS_SET_PACKET_LOSS_PERC_REQUEST,
+                        i32::from(self.packet_loss_perc),
+                    )
+                    .map_err(|_| PropError::Value)?;
                 }
                 Ok(())
             }
@@ -712,10 +806,9 @@ impl AsyncElement for OpusEnc {
 
     fn get_property(&self, name: &str) -> Option<PropValue> {
         match name {
-            "bitrate" => Some(PropValue::Uint(match self.bitrate {
-                Bitrate::BitsPerSecond(b) => b.max(0) as u64,
-                _ => 0,
-            })),
+            "bitrate" => Some(PropValue::Uint(
+                self.bitrate.map_or(0, |bps| bps.max(0) as u64),
+            )),
             "frame-size" => Some(PropValue::Uint(self.frame_size.property_value())),
             "complexity" => Some(PropValue::Uint(self.complexity() as u64)),
             "audio-type" => Some(PropValue::Str(self.audio_type.property_value().into())),

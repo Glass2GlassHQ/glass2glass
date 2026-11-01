@@ -1,5 +1,5 @@
 //! Opus audio decoder element (OpusDec, `opus` feature): `Audio{Opus}` in,
-//! `Audio{PcmS16Le}` (or negotiated `PcmF32Le`) out, via libopus through the `audiopus` crate. The decode
+//! `Audio{PcmS16Le}` (or negotiated `PcmF32Le`) out, via libopus through the `opusic-sys` crate. The decode
 //! sibling of [`crate::opusenc::OpusEnc`]; it consumes the packets
 //! [`crate::opusparse::OpusParse`] frames.
 //!
@@ -63,7 +63,7 @@ use g2g_core::{
     ANY_SAMPLE_RATE,
 };
 
-use audiopus::ffi;
+use opusic_sys as ffi;
 
 use crate::opusparse::{
     mapping_len, packet_frame_samples, packet_samples, parse_opus_head, MAPPING_FAMILY_RTP,
@@ -256,7 +256,7 @@ pub struct OpusDec {
 
 impl core::fmt::Debug for OpusDec {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        // audiopus' Decoder is not Debug; report the configuration instead.
+        // libopus decoder state is opaque; report the configuration instead.
         f.debug_struct("OpusDec")
             .field("channels", &self.channels)
             .field("sequence", &self.sequence)

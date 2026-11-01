@@ -37,13 +37,13 @@ linux-full = [
     "matroska-compression", "matroska-decrypt",
 ]
 # The g2g-launch binaries attached to a GitHub release. They link only libraries
-# the OS ships, so nothing that needs ffmpeg, libvpx, libopus, PipeWire or Pulse.
+# the OS ships, so nothing that needs ffmpeg, libvpx, PipeWire or Pulse.
 release-binary = [
     "multi-thread", "plugin-loader",
     "rtsp", "rtsp-server", "rtsp-client-sink", "srt", "rist", "srtp", "dtls-srtp", "tcp", "http-server", "udp-egress", "udp-ingress", "rtmp", "webrtc",
     "remote", "remote-ws", "webtransport", "moqt",
     "http-src", "hls", "dash",
-    "vorbis", "aac-decode", "mpeg-audio-decode", "webrtcdsp", "av1-encode", "rav1d", "mjpeg",
+    "vorbis", "aac-decode", "mpeg-audio-decode", "opus", "webrtcdsp", "av1-encode", "rav1d", "mjpeg",
     "mjpeg-encode", "png", "webp", "wgpu-sink", "vello-overlay", "analytics", "analytics-json", "mqtt", "embedding-index",
     "declarative-yaml", "script-rhai", "observe", "mcp", "tui",
     "matroska-compression", "matroska-decrypt",
@@ -736,11 +736,11 @@ webp = ["std", "dep:image-webp"]
 # features, since it only adds a second backend to those elements.
 mozjpeg = ["mjpeg", "mjpeg-encode", "dep:mozjpeg"]
 # Opus audio encode + decode (OpusEnc / OpusDec) via libopus through the
-# `audiopus` crate. The WebRTC default audio codec; pairs with `opusparse` (M133).
-# NOT pure Rust: links libopus (system or the bundled source built with cmake),
-# so it is gated and excluded from pure-Rust / no_std builds. Implies std. v1 is
-# 48 kHz mono/stereo S16LE <-> Opus, the rate Opus always decodes at.
-opus = ["std", "dep:audiopus"]
+# `opusic-sys` crate. The WebRTC default audio codec; pairs with `opusparse` (M133).
+# NOT pure Rust: libopus is built from source with cmake and linked statically,
+# so building needs cmake but no libopus package. Implies std. v1 is 48 kHz
+# mono/stereo S16LE <-> Opus, the rate Opus always decodes at.
+opus = ["std", "dep:opusic-sys"]
 # WebRTC audio processing (webrtcdsp + webrtcechoprobe): echo cancellation, noise
 # suppression, gain control and a high-pass filter via `sonora`, a pure-Rust port
 # of WebRTC's audio processing module. No system deps. Implies std.
@@ -920,15 +920,10 @@ png = { version = "0.18", optional = true }
 # trivial pure-Rust deps (byteorder-lite, quick-error). MSRV 1.80.1. No system
 # dependency.
 image-webp = { version = "0.2", optional = true }
-# libopus encode + decode wrapper (opus feature) for OpusEnc / OpusDec. Not pure
-# Rust (there is no mature pure-Rust Opus codec): `audiopus` wraps libopus via
-# `audiopus_sys`. It prefers a pkg-config-discovered system libopus, so install
-# the dev package like the other native features (Fedora: opus-devel; Debian:
-# libopus-dev; macOS: brew opus; Windows: vcpkg opus). Without pkg-config it
-# falls back to building the bundled libopus source with cmake, but that fallback
-# mis-locates the lib on multiarch lib64 layouts, so the dev package is the
-# supported path. Gated + std-only, excluded from no_std builds.
-audiopus = { version = "0.3.0-rc.0", optional = true }
+# libopus bindings (opus feature) for OpusEnc / OpusDec. There is no mature
+# pure-Rust Opus codec. `bundled` (the default) builds the libopus source the
+# crate ships with cmake and links it statically.
+opusic-sys = { version = "0.7.6", optional = true }
 # Pure-Rust port of WebRTC's audio processing module (webrtcdsp feature): AEC3,
 # noise suppression, AGC2, high-pass filter. BSD-3-Clause, MSRV 1.91.
 sonora = { version = "0.2", optional = true }

@@ -28,6 +28,8 @@ jobs:
     env:
       # a fresh Windows install has no Visual C++ runtime
       CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: -C target-feature=+crt-static
+      # libopus builds with cmake and must use the same static C runtime
+      CMAKE_TOOLCHAIN_FILE_x86_64_pc_windows_msvc: ${{ github.workspace }}/tools/msvc-static-crt.cmake
     defaults:
       run:
         shell: bash
@@ -37,7 +39,7 @@ jobs:
         run: |
           apt-get update
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            build-essential pkg-config curl ca-certificates git clang libclang-dev \
+            build-essential pkg-config cmake curl ca-certificates git clang libclang-dev \
             libwayland-dev libxkbcommon-dev
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -138,7 +140,7 @@ jobs:
           working-directory: g2g-pyapi
           target: ${{ matrix.target }}
           manylinux: "2_28"
-          before-script-linux: dnf install -y clang-devel wayland-devel libxkbcommon-devel
+          before-script-linux: dnf install -y clang-devel cmake wayland-devel libxkbcommon-devel
           # --features replaces the list in pyproject.toml
           args: --release --locked --out dist --auditwheel check --features ${{ matrix.features }}
       - uses: actions/setup-python@v5
@@ -197,5 +199,5 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || gh release create "$GITHUB_REF_NAME" --verify-tag --notes \
-            "Changes are in CHANGELOG.md. These binaries leave out the elements that need distro libraries (ffmpeg, libvpx, libopus, PipeWire, Pulse): build those with \`cargo install g2g-plugins --features linux-full --bin g2g-launch\`."
+            "Changes are in CHANGELOG.md. These binaries leave out the elements that need distro libraries (ffmpeg, libvpx, PipeWire, Pulse): build those with \`cargo install g2g-plugins --features linux-full --bin g2g-launch\`."
           gh release upload "$GITHUB_REF_NAME" dist/* --clobber
