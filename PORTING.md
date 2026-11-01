@@ -432,7 +432,7 @@ is design/runtime.md; the patterns an app developer hits most:
 | GStreamer idiom | glass2glass |
 | :--- | :--- |
 | `appsrc` `need-data`/`push-buffer` | `appsrc channel=<name>` + `register_appsrc` → `AppSrcFeed::push`, or `g2g-bridge`'s `BridgeGraph` for a whole embedded sub-graph |
-| `appsink` `new-sample`/pull | `appsink channel=<name>` + `set_appsink_callback` (callback) or `register_appsink_pull` (pull) |
+| `appsink` `new-sample`/pull | `appsink channel=<name>` + `set_appsink_callback` (callback) or `register_appsink_pull` (pull, `caps()` for the sample caps) |
 | `pad-added` relink (decodebin) | bounded dynamic pads: `decodebin`/`uridecodebin` auto-plug, or `StreamDemux` / `register_demux` with N typed output ports ("dark slots" populated on discovery) |
 | `gst_pad_add_probe(BUFFER)` | a `LinkInterceptor` registered on a slot (the probe analog) |
 | `gst_pad_add_probe(BLOCK)` / `pad_idle`, then relink | no block to install: name the position instead (§5.2) |

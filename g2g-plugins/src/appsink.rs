@@ -67,10 +67,12 @@ impl core::fmt::Debug for Slot {
     }
 }
 
-/// One item on the pull channel: a frame or the end-of-stream marker.
+/// One item on the pull channel: a frame, the caps of the frames after it, or
+/// the end-of-stream marker.
 #[derive(Debug)]
 enum Pulled {
     Frame(Frame),
+    Caps(Caps),
     Eos,
 }
 
@@ -99,7 +101,10 @@ pub fn set_appsink_callback(channel: &str, cb: SampleCallback, user: *mut c_void
 pub fn register_appsink_pull(channel: &str) -> AppSinkPull {
     let (tx, rx) = bounded::<Pulled>(PULL_DEPTH);
     SINKS.lock().insert(channel.to_string(), SinkMode::Pull(tx));
-    AppSinkPull { rx }
+    AppSinkPull {
+        rx,
+        caps: Mutex::new(None),
+    }
 }
 
 /// Outcome of a non-blocking [`AppSinkPull::try_pull`].
@@ -118,18 +123,22 @@ pub enum Pull {
 #[derive(Debug)]
 pub struct AppSinkPull {
     rx: Receiver<Pulled>,
+    caps: Mutex<Option<Caps>>,
 }
 
 impl AppSinkPull {
     /// Non-blocking: return the next frame if one is queued.
     pub fn try_pull(&self) -> Pull {
-        // read before try_recv, a last frame sent in between must not read as Ended
-        let closed = self.rx.is_closed();
-        match self.rx.try_recv() {
-            Some(Pulled::Frame(f)) => Pull::Frame(f),
-            Some(Pulled::Eos) => Pull::Ended,
-            None if closed => Pull::Ended,
-            None => Pull::Empty,
+        loop {
+            // read before try_recv, a last frame sent in between must not read as Ended
+            let closed = self.rx.is_closed();
+            match self.rx.try_recv() {
+                Some(Pulled::Caps(caps)) => *self.caps.lock() = Some(caps),
+                Some(Pulled::Frame(f)) => return Pull::Frame(f),
+                Some(Pulled::Eos) => return Pull::Ended,
+                None if closed => return Pull::Ended,
+                None => return Pull::Empty,
+            }
         }
     }
 
@@ -137,10 +146,19 @@ impl AppSinkPull {
     /// is gone. The application drives this to completion (e.g. a `block_on` on
     /// its own thread) while the pipeline runs on another.
     pub async fn pull(&self) -> Option<Frame> {
-        match self.rx.recv().await {
-            Some(Pulled::Frame(f)) => Some(f),
-            _ => None,
+        loop {
+            match self.rx.recv().await {
+                Some(Pulled::Caps(caps)) => *self.caps.lock() = Some(caps),
+                Some(Pulled::Frame(f)) => return Some(f),
+                Some(Pulled::Eos) | None => return None,
+            }
         }
+    }
+
+    /// The caps of the last frame pulled: its format and geometry. `None` before
+    /// the first frame.
+    pub fn caps(&self) -> Option<Caps> {
+        self.caps.lock().clone()
     }
 }
 
@@ -278,6 +296,9 @@ pub struct AppSink {
     negotiated: AtomicBool,
     mode: Option<SinkMode>,
     received: u64,
+    stream_caps: Option<Caps>,
+    // the caps the pull channel last carried, so an unchanged refinement is not resent
+    delivered_caps: Option<Caps>,
 }
 
 impl Default for AppSink {
@@ -290,6 +311,8 @@ impl Default for AppSink {
             negotiated: AtomicBool::new(false),
             mode: None,
             received: 0,
+            stream_caps: None,
+            delivered_caps: None,
         }
     }
 }
@@ -368,7 +391,8 @@ impl AsyncElement for AppSink {
         self.input_domains
     }
 
-    fn configure_pipeline(&mut self, _absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
+    fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
+        self.stream_caps = Some(absolute_caps.clone());
         // Claim the registered delivery mode here only if setting the channel
         // found none (a default channel name, or a registration made after the
         // element was built). A format- or size-changing upstream transform
@@ -420,6 +444,12 @@ impl AsyncElement for AppSink {
                         // a full channel backpressures the pipeline. A closed
                         // channel (app dropped its handle) drops the frame.
                         Some(SinkMode::Pull(tx)) => {
+                            if self.stream_caps != self.delivered_caps {
+                                self.delivered_caps.clone_from(&self.stream_caps);
+                                if let Some(caps) = self.stream_caps.clone() {
+                                    let _ = tx.send(Pulled::Caps(caps)).await;
+                                }
+                            }
                             let _ = tx.send(Pulled::Frame(f)).await;
                         }
                         None => {}
@@ -434,10 +464,9 @@ impl AsyncElement for AppSink {
                     }
                     None => {}
                 },
+                PipelinePacket::CapsChanged(caps) => self.stream_caps = Some(caps),
                 // Control packets are not surfaced to the application in v1.
-                PipelinePacket::Flush
-                | PipelinePacket::CapsChanged(_)
-                | PipelinePacket::Segment(_) => {}
+                PipelinePacket::Flush | PipelinePacket::Segment(_) => {}
                 // future PipelinePacket variants: no-op (terminal sink).
                 _ => {}
             }
