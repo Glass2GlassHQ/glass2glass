@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2064: `d3d11videosink` takes system-memory NV12 and is what `autovideosink` picks on Windows.
+
 ## 0.12.0
 
 - M2054: ALSA and EGL load at runtime, so the release binaries start on hosts without libasound or libEGL.

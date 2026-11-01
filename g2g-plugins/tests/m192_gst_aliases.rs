@@ -19,7 +19,8 @@ impl PipelineClock for ZeroClock {
     feature = "wgpu-present",
     feature = "wayland-sink",
     feature = "kms-sink",
-    feature = "metal-sink"
+    feature = "metal-sink",
+    feature = "d3d11-sink"
 )))]
 #[tokio::test]
 async fn autovideosink_resolves_and_runs() {

@@ -50,11 +50,14 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use windows::core::{w, Interface};
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{HMODULE, HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
 use windows::Win32::Graphics::Direct3D11::{
-    ID3D11Device, ID3D11Texture2D, ID3D11VideoContext, ID3D11VideoContext1, ID3D11VideoDevice,
-    ID3D11VideoProcessor, ID3D11VideoProcessorEnumerator, ID3D11VideoProcessorInputView,
-    ID3D11VideoProcessorOutputView, D3D11_TEX2D_VPIV, D3D11_TEX2D_VPOV,
+    D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D, ID3D11VideoContext,
+    ID3D11VideoContext1, ID3D11VideoDevice, ID3D11VideoProcessor, ID3D11VideoProcessorEnumerator,
+    ID3D11VideoProcessorInputView, ID3D11VideoProcessorOutputView, D3D11_BIND_SHADER_RESOURCE,
+    D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_VIDEO_SUPPORT, D3D11_SDK_VERSION,
+    D3D11_TEX2D_VPIV, D3D11_TEX2D_VPOV, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
     D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE, D3D11_VIDEO_PROCESSOR_CAPS,
     D3D11_VIDEO_PROCESSOR_CONTENT_DESC, D3D11_VIDEO_PROCESSOR_FEATURE_CAPS,
     D3D11_VIDEO_PROCESSOR_FEATURE_CAPS_MIRROR, D3D11_VIDEO_PROCESSOR_FEATURE_CAPS_ROTATION,
@@ -67,8 +70,8 @@ use windows::Win32::Graphics::Direct3D11::{
     D3D11_VPOV_DIMENSION_TEXTURE2D,
 };
 use windows::Win32::Graphics::Dxgi::Common::{
-    DXGI_ALPHA_MODE_UNSPECIFIED, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_UNKNOWN, DXGI_RATIONAL,
-    DXGI_SAMPLE_DESC,
+    DXGI_ALPHA_MODE_UNSPECIFIED, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_NV12, DXGI_FORMAT_UNKNOWN,
+    DXGI_RATIONAL, DXGI_SAMPLE_DESC,
 };
 use windows::Win32::Graphics::Dxgi::{
     CreateDXGIFactory1, IDXGIFactory2, IDXGISwapChain1, DXGI_PRESENT, DXGI_SCALING_STRETCH,
@@ -78,14 +81,16 @@ use windows::Win32::Graphics::Dxgi::{
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, PeekMessageW,
-    RegisterClassExW, SetWindowPos, TranslateMessage, CW_USEDEFAULT, MSG, PM_REMOVE,
-    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, WNDCLASSEXW, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+    PostQuitMessage, RegisterClassExW, SetWindowPos, TranslateMessage, CW_USEDEFAULT, MSG,
+    PM_REMOVE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, WM_DESTROY, WM_QUIT, WNDCLASSEXW,
+    WS_OVERLAPPEDWINDOW, WS_VISIBLE,
 };
 
 use crate::videoflip::frame_orientation;
 use crate::worker_ready::Handshake;
 use g2g_core::element::{PresentationStats, QosMessage};
 use g2g_core::frame::Frame;
+use g2g_core::memory::{DomainSet, MemoryDomainKind};
 use g2g_core::meta::{Orientation, OrientationSet};
 use g2g_core::metrics::{monotonic_ns, LatencyHistogram, LatencySnapshot};
 use g2g_core::{
@@ -107,12 +112,13 @@ const D3D11_POOL_HEADROOM: usize = 3;
 /// DXVA texture alignment).
 const D3D11_ALIGN: usize = 256;
 
-/// Worker-thread command. `Frame` carries the decoded D3D11 texture (still
-/// GPU-resident) plus the source-side `arrival_ns` and a one-shot `ack`
-/// signalled once the frame is presented (compositor-paced backpressure).
+/// Worker-thread command. `Frame` carries the frame's memory (a decoded D3D11
+/// texture, still GPU-resident, or packed system NV12) plus the source-side
+/// `arrival_ns` and a one-shot `ack` signalled once the frame is presented
+/// (compositor-paced backpressure).
 enum WorkerCmd {
     Frame {
-        texture: OwnedD3D11Texture,
+        domain: MemoryDomain,
         arrival_ns: u64,
         orientation: Orientation,
         ack: tokio::sync::oneshot::Sender<()>,
@@ -337,6 +343,10 @@ impl AsyncElement for D3D11Sink {
         }))
     }
 
+    fn input_domains(&self) -> DomainSet {
+        DomainSet::only(MemoryDomainKind::System).with(MemoryDomainKind::D3D11Texture)
+    }
+
     /// Ask the decoder to keep buffers in D3D11 textures so the
     /// `MfDecode(with_d3d11)` -> sink handoff stays on the GPU. The runner
     /// conveys this `MemoryDomainKind::D3D11Texture` proposal to the decoder's
@@ -414,9 +424,11 @@ impl AsyncElement for D3D11Sink {
                 PipelinePacket::DataFrame(frame) => {
                     let orientation = frame_orientation(&frame);
                     let Frame { domain, timing, .. } = frame;
-                    let MemoryDomain::D3D11Texture(texture) = domain else {
+                    if !matches!(domain, MemoryDomain::D3D11Texture(_))
+                        && domain.as_system_slice().is_none()
+                    {
                         return Err(G2gError::UnsupportedDomain);
-                    };
+                    }
                     // PTS pacing: hold the frame until its deadline on the
                     // elected clock, or drop it when it is already too late (the
                     // QoS bound) or outside the segment. Unpaced without a clock:
@@ -428,7 +440,7 @@ impl AsyncElement for D3D11Sink {
                     let tx = self.cmd_tx.as_ref().ok_or(G2gError::NotConfigured)?;
                     let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
                     tx.send(WorkerCmd::Frame {
-                        texture,
+                        domain,
                         arrival_ns: timing.arrival_ns,
                         orientation,
                         ack: ack_tx,
@@ -483,6 +495,10 @@ impl PadTemplates for D3D11Sink {
 
 /// GPU objects, created lazily on the first frame from that frame's device.
 struct GpuState {
+    context: ID3D11DeviceContext,
+    // NV12 texture system-memory frames are copied into, made on the first one
+    upload: Option<ID3D11Texture2D>,
+    device: ID3D11Device,
     video_device: ID3D11VideoDevice,
     video_context: ID3D11VideoContext,
     vp_enum: ID3D11VideoProcessorEnumerator,
@@ -509,15 +525,18 @@ fn worker_main(
     let mut gpu: Option<GpuState> = None;
 
     loop {
-        pump_messages();
+        if !pump_messages() {
+            std::eprintln!("g2g-d3d11sink: the window was closed");
+            break;
+        }
         match rx.recv_timeout(Duration::from_millis(8)) {
             Ok(WorkerCmd::Frame {
-                texture,
+                domain,
                 arrival_ns,
                 orientation,
                 ack,
             }) => {
-                if let Err(e) = present_frame(&mut gpu, hwnd, &texture, orientation) {
+                if let Err(e) = present_frame(&mut gpu, hwnd, &domain, width, height, orientation) {
                     std::eprintln!("g2g-d3d11sink present error: {e:?}");
                 } else {
                     presented.fetch_add(1, Ordering::Relaxed);
@@ -530,7 +549,7 @@ fn worker_main(
                 }
                 // Drop the texture (release the IMFSample) before acking, then
                 // release the producer.
-                drop(texture);
+                drop(domain);
                 let _ = ack.send(());
             }
             Ok(WorkerCmd::Shutdown) | Err(RecvTimeoutError::Disconnected) => break,
@@ -545,23 +564,54 @@ fn worker_main(
     Ok(())
 }
 
-/// Drain pending window messages so the window stays responsive.
-fn pump_messages() {
+/// Drain pending window messages so the window stays responsive. False once
+/// the window has been closed.
+fn pump_messages() -> bool {
     let mut msg = MSG::default();
     // SAFETY: standard message-pump calls; `msg` is a valid local.
     unsafe {
         while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
+            if msg.message == WM_QUIT {
+                return false;
+            }
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
     }
+    true
 }
 
-/// Minimal window procedure: default handling for everything (the worker loop
-/// owns the lifecycle via the command channel).
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    // win32 sends WM_DESTROY when the user closes the window
+    if msg == WM_DESTROY {
+        // SAFETY: called on the thread that owns the window's message queue.
+        unsafe { PostQuitMessage(0) };
+        return LRESULT(0);
+    }
     // SAFETY: forwarded straight to the default handler.
     unsafe { DefWindowProcW(hwnd, msg, wp, lp) }
+}
+
+/// A hardware D3D11 device with video support, for system-memory frames that
+/// bring no device of their own.
+fn create_device() -> Result<ID3D11Device, G2gError> {
+    let mut device: Option<ID3D11Device> = None;
+    // SAFETY: the out-param is a valid local, initialised by the call before it is read.
+    unsafe {
+        D3D11CreateDevice(
+            None,
+            D3D_DRIVER_TYPE_HARDWARE,
+            HMODULE::default(),
+            D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
+            None,
+            D3D11_SDK_VERSION,
+            Some(&mut device),
+            None,
+            None,
+        )
+        .map_err(win_err)?;
+    }
+    device.ok_or(G2gError::Hardware(HardwareError::Other))
 }
 
 /// Register the window class (idempotent) and create a visible window at the
@@ -604,16 +654,15 @@ fn create_window(title: &str, width: u32, height: u32) -> Result<HWND, G2gError>
     }
 }
 
-/// Build the swapchain + video processor for `device_ptr` on `hwnd`.
-fn init_gpu(device_ptr: u64, width: u32, height: u32, hwnd: HWND) -> Result<GpuState, G2gError> {
-    // SAFETY: the device pointer comes from a live decoded frame (its
-    // keep-alive holds the owning IMFSample, which refs the device); we only
-    // borrow it to create owned video/​swapchain objects that take their own
-    // refs.
+/// Build the swapchain + video processor for `device` on `hwnd`.
+fn init_gpu(
+    device: ID3D11Device,
+    width: u32,
+    height: u32,
+    hwnd: HWND,
+) -> Result<GpuState, G2gError> {
+    // SAFETY: COM object creation on the worker thread, every object from `device`.
     unsafe {
-        let dev_raw = device_ptr as *mut core::ffi::c_void;
-        let device = ID3D11Device::from_raw_borrowed(&dev_raw)
-            .ok_or(G2gError::Hardware(HardwareError::Other))?;
         let video_device: ID3D11VideoDevice = device.cast().map_err(win_err)?;
         let context = device.GetImmediateContext().map_err(win_err)?;
         let video_context: ID3D11VideoContext = context.cast().map_err(win_err)?;
@@ -657,10 +706,13 @@ fn init_gpu(device_ptr: u64, width: u32, height: u32, hwnd: HWND) -> Result<GpuS
             Flags: 0,
         };
         let swapchain = factory
-            .CreateSwapChainForHwnd(device, hwnd, &desc, None, None)
+            .CreateSwapChainForHwnd(&device, hwnd, &desc, None, None)
             .map_err(win_err)?;
 
         Ok(GpuState {
+            context,
+            upload: None,
+            device,
             video_device,
             video_context,
             vp_enum,
@@ -671,45 +723,128 @@ fn init_gpu(device_ptr: u64, width: u32, height: u32, hwnd: HWND) -> Result<GpuS
     }
 }
 
-/// Present one decoded NV12 texture: blit it (NV12 -> RGB) to the swapchain
-/// backbuffer through the video processor and `Present`.
+/// The D3D11 objects a decoded frame carries, as owned references.
+fn decoded_texture(
+    texture: &OwnedD3D11Texture,
+) -> Result<(ID3D11Device, ID3D11Texture2D), G2gError> {
+    // SAFETY: both pointers come from a live decoded frame whose keep-alive holds
+    // the owning IMFSample, and cloning takes a reference of our own.
+    unsafe {
+        let device_raw = texture.device as *mut core::ffi::c_void;
+        let texture_raw = texture.texture as *mut core::ffi::c_void;
+        let device = ID3D11Device::from_raw_borrowed(&device_raw)
+            .ok_or(G2gError::Hardware(HardwareError::Other))?;
+        let input = ID3D11Texture2D::from_raw_borrowed(&texture_raw)
+            .ok_or(G2gError::Hardware(HardwareError::Other))?;
+        Ok((device.clone(), input.clone()))
+    }
+}
+
+/// Copy a packed system-memory NV12 frame into the sink's own texture.
+fn upload_system(
+    gpu: &mut GpuState,
+    bytes: &[u8],
+    width: u32,
+    height: u32,
+) -> Result<ID3D11Texture2D, G2gError> {
+    if bytes.len() < crate::pixel::frame_byte_size(RawVideoFormat::Nv12, width, height) {
+        return Err(G2gError::CapsMismatch);
+    }
+    let texture = match &gpu.upload {
+        Some(texture) => texture.clone(),
+        None => {
+            let desc = D3D11_TEXTURE2D_DESC {
+                Width: width,
+                Height: height,
+                MipLevels: 1,
+                ArraySize: 1,
+                Format: DXGI_FORMAT_NV12,
+                SampleDesc: DXGI_SAMPLE_DESC {
+                    Count: 1,
+                    Quality: 0,
+                },
+                Usage: D3D11_USAGE_DEFAULT,
+                BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
+                CPUAccessFlags: 0,
+                MiscFlags: 0,
+            };
+            let mut texture: Option<ID3D11Texture2D> = None;
+            // SAFETY: `desc` and the out-param are valid locals for the call.
+            unsafe {
+                gpu.device
+                    .CreateTexture2D(&desc, None, Some(&mut texture))
+                    .map_err(win_err)?;
+            }
+            let texture = texture.ok_or(G2gError::Hardware(HardwareError::Other))?;
+            gpu.upload = Some(texture.clone());
+            texture
+        }
+    };
+    // d3d11 reads an NV12 upload as the luma rows followed by the chroma rows, both at the source row pitch
+    // SAFETY: `bytes` holds a whole packed frame at `width` row pitch, checked above.
+    unsafe {
+        gpu.context
+            .UpdateSubresource(&texture, 0, None, bytes.as_ptr().cast(), width, 0);
+    }
+    Ok(texture)
+}
+
+/// Present one NV12 frame, a decoded D3D11 texture or packed system memory:
+/// blit it (NV12 -> RGB) to the swapchain backbuffer through the video processor
+/// and `Present`.
 fn present_frame(
     gpu: &mut Option<GpuState>,
     hwnd: HWND,
-    texture: &OwnedD3D11Texture,
+    domain: &MemoryDomain,
+    width: u32,
+    height: u32,
     orientation: Orientation,
 ) -> Result<(), G2gError> {
+    let decoded = match domain {
+        MemoryDomain::D3D11Texture(texture) => Some((texture, decoded_texture(texture)?)),
+        _ => None,
+    };
     if gpu.is_none() {
-        *gpu = Some(init_gpu(
-            texture.device,
-            texture.width,
-            texture.height,
-            hwnd,
-        )?);
+        *gpu = Some(match &decoded {
+            Some((texture, (device, _))) => {
+                init_gpu(device.clone(), texture.width, texture.height, hwnd)?
+            }
+            None => init_gpu(create_device()?, width, height, hwnd)?,
+        });
     }
-    let gpu = gpu.as_mut().unwrap();
-    apply_orientation(gpu, hwnd, texture, orientation)?;
+    let gpu = gpu.as_mut().ok_or(G2gError::NotConfigured)?;
+    let (input_tex, subresource, picture_width, picture_height) = match decoded {
+        Some((texture, (_, input))) => (input, texture.subresource, texture.width, texture.height),
+        None => {
+            let bytes = domain
+                .as_system_slice()
+                .ok_or(G2gError::UnsupportedDomain)?;
+            (upload_system(gpu, bytes, width, height)?, 0, width, height)
+        }
+    };
+    apply_orientation(gpu, hwnd, picture_width, picture_height, orientation)?;
 
-    // SAFETY: the input texture is kept alive by `texture`'s keep-alive for the
-    // duration of this call; all COM objects belong to the same device.
+    // SAFETY: `input_tex` holds its own reference for this call, and a decoded
+    // frame's keep-alive in `domain` outlives it; all COM objects belong to the same device.
     unsafe {
-        let tex_raw = texture.texture as *mut core::ffi::c_void;
-        let input_tex = ID3D11Texture2D::from_raw_borrowed(&tex_raw)
-            .ok_or(G2gError::Hardware(HardwareError::Other))?;
-
         let in_desc = D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC {
             FourCC: 0,
             ViewDimension: D3D11_VPIV_DIMENSION_TEXTURE2D,
             Anonymous: D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0 {
                 Texture2D: D3D11_TEX2D_VPIV {
                     MipSlice: 0,
-                    ArraySlice: texture.subresource,
+                    ArraySlice: subresource,
                 },
             },
         };
         let mut input_view: Option<ID3D11VideoProcessorInputView> = None;
         gpu.video_device
-            .CreateVideoProcessorInputView(input_tex, &gpu.vp_enum, &in_desc, Some(&mut input_view))
+            .CreateVideoProcessorInputView(
+                &input_tex,
+                &gpu.vp_enum,
+                &in_desc,
+                Some(&mut input_view),
+            )
             .map_err(win_err)?;
         let input_view = input_view.ok_or(G2gError::Hardware(HardwareError::Other))?;
 
@@ -812,7 +947,8 @@ fn has_feature(
 fn apply_orientation(
     gpu: &mut GpuState,
     hwnd: HWND,
-    texture: &OwnedD3D11Texture,
+    picture_width: u32,
+    picture_height: u32,
     orientation: Orientation,
 ) -> Result<(), G2gError> {
     if orientation == gpu.orientation {
@@ -852,9 +988,9 @@ fn apply_orientation(
     }
     if orientation.swaps_dims() != gpu.orientation.swaps_dims() {
         let (width, height) = if orientation.swaps_dims() {
-            (texture.height, texture.width)
+            (picture_height, picture_width)
         } else {
-            (texture.width, texture.height)
+            (picture_width, picture_height)
         };
         // SAFETY: `present_frame` drops its buffer views, and `hwnd` was created on this thread.
         unsafe {

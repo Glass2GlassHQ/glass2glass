@@ -2427,6 +2427,13 @@ fn register_autoplug_candidates(reg: &mut Registry) {
         )
         .with_experimental(),
     );
+    #[cfg(all(target_os = "windows", feature = "d3d11-sink"))]
+    reg.register_launch(
+        LaunchFactory::of::<crate::d3d11sink::D3D11Sink>("d3d11videosink", || {
+            Box::new(crate::d3d11sink::D3D11Sink::new())
+        })
+        .with_experimental(),
+    );
     #[cfg(all(target_os = "windows", feature = "wasapi-sink"))]
     reg.register_launch(
         LaunchFactory::of::<crate::wasapisink::WasapiSink>("wasapisink", || {
@@ -2455,6 +2462,7 @@ fn register_aliases(reg: &mut Registry) {
             "waylandsink",
             "kmssink",
             "metalvideosink",
+            "d3d11videosink",
             "fakevideosink",
         ],
     );
@@ -2823,6 +2831,7 @@ pub static FEATURE_GATED_ELEMENTS: &[FeatureGatedElement] = &{
         "screencapturesrc" => "screencapture" on "macos";
         "mfvideosrc" => "mf-video-src" on "windows";
         "wasapisrc" => "wasapi-src" on "windows";
+        "d3d11videosink" => "d3d11-sink" on "windows";
         "wasapisink" => "wasapi-sink" on "windows";
     }
 };
