@@ -49,6 +49,18 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all --check
 
+  # the canary image builds g2g-api-soak with --locked
+  standalone-lockfiles:
+    name: standalone lockfiles current
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: |
+          git ls-files '*/Cargo.lock' | while read -r lockfile; do
+            cargo metadata -q --locked --format-version 1 --manifest-path "$(dirname "$lockfile")/Cargo.toml" > /dev/null
+          done
+
   # a test calling a std-only helper breaks only the feature sets that lack std
   core-features:
     name: g2g-core lib tests per feature
