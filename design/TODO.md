@@ -43,9 +43,10 @@ libraries installed. Everything below ships in 0.12.0.
 - **Bare-host check.** Before publishing, run each release binary on a GPU-less
   host on an H.264 + AAC MP4 and a camera to WebRTC pipeline, and check that
   `decodebin` picks a software decoder rather than `vulkanvideodec` on Linux.
-- **openh264dec and ffmpeg disagree on one B-pyramid frame.** Frame 20 of
-  `h264_bpyramid_320x240.h264` differs in 5 samples by 1. Find which decoder is
-  off against a third decoder.
+- **OpenH264 misdecodes one B-pyramid frame.** Frame 20 of
+  `h264_bpyramid_320x240.h264` differs in 5 samples by 1 from ffmpeg and NVDEC,
+  which agree, and gst `openh264dec` gives the same frame as ours. Report it to
+  cisco/openh264 with the fixture.
 - **Release ffmpeg run on a bare host.** Run a downloaded Linux release tarball
   and wheel on a bare `ubuntu:22.04` and `fedora:43` on an HEVC and a VP9 file,
   and check that `decodebin` picks the bundled ffmpeg.
