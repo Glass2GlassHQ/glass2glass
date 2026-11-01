@@ -75,7 +75,7 @@ mod tests {
 
     // splice_insert for event 1 at pts 0x1_0000_0000
     fn splice_insert(pts_adjustment: u64) -> Vec<u8> {
-        let mut body = Vec::from([0x00, 0x00 | (pts_adjustment >> 32) as u8]);
+        let mut body = Vec::from([0x00, (pts_adjustment >> 32) as u8]);
         body.extend_from_slice(&(pts_adjustment as u32).to_be_bytes());
         // cw_index, tier 0xFFF, splice_command_length 20
         body.extend_from_slice(&[0xFF, 0xFF, 0xF0, 0x14]);
