@@ -410,12 +410,16 @@ static GST_FAMILY_MAP: &[(&str, &str, GstEquivalent)] = &[
     (
         "vaapi",
         "enc",
-        GstEquivalent::Unsupported("no VA-API encoder; use `ffmpegenc`, `nvenc` or `vpxenc`"),
+        GstEquivalent::Unsupported(
+            "VA-API encodes H.264, H.265 and AV1 only: `vah264enc`, `vah265enc`, `vaav1enc`",
+        ),
     ),
     (
         "va",
         "enc",
-        GstEquivalent::Unsupported("no VA-API encoder; use `ffmpegenc`, `nvenc` or `vpxenc`"),
+        GstEquivalent::Unsupported(
+            "VA-API encodes H.264, H.265 and AV1 only: `vah264enc`, `vah265enc`, `vaav1enc`",
+        ),
     ),
     (
         "ladspa",

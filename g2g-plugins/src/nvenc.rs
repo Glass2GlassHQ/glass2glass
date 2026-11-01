@@ -1,5 +1,5 @@
 //! Native NVENC H.264 encode element (`nvenc` feature): the zero-copy,
-//! device-resident counterpart of [`crate::ffmpegenc::FfmpegH264Enc`]. Where the
+//! device-resident counterpart of [`crate::ffmpegenc::FfmpegVideoEnc`]. Where the
 //! ffmpeg encoder takes system-memory I420 and copies it into libavcodec, this
 //! element ingests an NVDEC/CUDA NV12 surface ([`MemoryDomain::Cuda`]) *in place*
 //! and drives the NVIDIA Video Codec SDK (`nvEncodeAPI`) directly, so the pixels
@@ -11,7 +11,7 @@
 //! `Caps::RawVideo{Nv12}` in, `Caps::CompressedVideo{H264}` Annex-B out. Caps do
 //! not encode the memory domain, so negotiation is identical to a system-memory
 //! encoder; at runtime the frame must be `MemoryDomain::Cuda` (an `UnsupportedDomain`
-//! error otherwise, the symmetric contract `FfmpegH264Enc` upholds for `System`).
+//! error otherwise, the symmetric contract `FfmpegVideoEnc` upholds for `System`).
 //! The incoming `OwnedCudaBuffer` must be a contiguous NV12 surface (chroma at
 //! `luma_ptr + luma_pitch * height`, a single base pointer + pitch), which is how
 //! NVDEC lays out its hwframe pool; NVENC registers that one device pointer.
@@ -25,7 +25,7 @@
 //! rate control / GOP). The session opens lazily on the first frame, on that
 //! frame's `CUcontext`, so it runs in the same context as the NVDEC source.
 //!
-//! Low latency by default, like `FfmpegH264Enc`: preset P4 + the LOW_LATENCY
+//! Low latency by default, like `FfmpegVideoEnc`: preset P4 + the LOW_LATENCY
 //! tuning info, CBR, no B-frames (`frameIntervalP = 1`), and an *infinite GOP* so
 //! IDRs are emitted only on demand (the first frame, and on a downstream PLI via
 //! [`Reconfigure::ForceKeyframe`]); each forced IDR carries in-band SPS/PPS
@@ -48,7 +48,7 @@
 //!
 //! Threading: the encoder is a raw session handle plus a CUDA context, driven
 //! through `&mut self` only and never shared; `unsafe impl Send` rests on the
-//! same ownership-transfer contract as `FfmpegH264Enc` / `FfmpegVideoDec`.
+//! same ownership-transfer contract as `FfmpegVideoEnc` / `FfmpegVideoDec`.
 //!
 //! The output bitstream buffer is pooled (created once at session open, reused
 //! every frame), and the target bitrate retargets a live session via
@@ -185,7 +185,7 @@ const MAX_INPUT_REGISTRATIONS: usize = 32;
 // SAFETY: `Session` holds raw NVENC/CUDA handles. The runner moves `NvEnc`
 // between worker tasks but drives it through `&mut self` only (never
 // concurrently), so the handles are owned and moved, never aliased, the same
-// contract upheld by `FfmpegH264Enc` / `FfmpegVideoDec`.
+// contract upheld by `FfmpegVideoEnc` / `FfmpegVideoDec`.
 unsafe impl Send for NvEnc {}
 
 impl core::fmt::Debug for NvEnc {
@@ -374,7 +374,7 @@ impl NvEnc {
     /// function table, opens a CUDA encode session, pulls the low-latency preset
     /// config, tweaks rate control + GOP, and initializes the encoder for the
     /// negotiated geometry. Fails loud (`HardwareError::Other`) if NVENC is
-    /// unavailable so the caller can fall back to `FfmpegH264Enc`.
+    /// unavailable so the caller can fall back to `FfmpegVideoEnc`.
     fn open_session(&mut self, buf: &OwnedCudaBuffer) -> Result<(), G2gError> {
         let context = buf.context;
         let encode_guid = self.encode_guid();
@@ -1921,7 +1921,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn system_memory_frame_is_rejected() {
         // NvEnc is the device-resident encoder: a System frame is the wrong
-        // domain (FfmpegH264Enc handles that path). No GPU needed for this.
+        // domain (FfmpegVideoEnc handles that path). No GPU needed for this.
         use g2g_core::frame::Frame;
         use g2g_core::memory::SystemSlice;
         use g2g_core::FrameTiming;

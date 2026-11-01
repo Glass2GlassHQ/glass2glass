@@ -1360,39 +1360,27 @@ impl FfmpegVideoDec {
         if self.backend == Backend::NvdecCuda {
             // ffmpeg names a CUDA device by its ordinal in decimal (null would
             // also mean 0, but then the ordinal could not be pinned).
-            let device = alloc::ffi::CString::new(alloc::format!("{}", self.cuda_device_id))
-                .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
+            let device = open_hw_device(
+                ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_CUDA,
+                Some(&alloc::format!("{}", self.cuda_device_id)),
+            )?;
             // SAFETY: standard ffmpeg hwaccel init on a freshly-allocated,
-            // not-yet-opened context. `av_hwdevice_ctx_create` initialises
-            // `hw_device_ctx`; we read the CUcontext out of the device's
-            // hwctx, hand the codec its own ref, drop ours, and install the
-            // get_format callback. A successful create guarantees the device
-            // `data` and CUDA `hwctx` are non-null, so only `hw_device_ctx`
-            // itself is checked explicitly below. `device` outlives the create
-            // call.
+            // not-yet-opened context. We read the CUcontext out of the
+            // device's hwctx, hand the codec its own ref and install the
+            // get_format callback; `device` drops ours at the end of the
+            // block. A successful create guarantees the device `data` and
+            // CUDA `hwctx` are non-null.
             unsafe {
-                let mut hw_device_ctx: *mut ffmpeg::ffi::AVBufferRef = core::ptr::null_mut();
-                let ret = ffmpeg::ffi::av_hwdevice_ctx_create(
-                    &mut hw_device_ctx,
-                    ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_CUDA,
-                    device.as_ptr(),
-                    core::ptr::null_mut(), // no options
-                    0,
-                );
-                if ret < 0 || hw_device_ctx.is_null() {
-                    return Err(G2gError::Hardware(HardwareError::Other));
-                }
-
                 // Walk the device buffer to its AVCUDADeviceContext and read
                 // the CUcontext. The device stays alive for the decoder's
                 // lifetime via the codec's own ref taken below, so this
                 // pointer remains valid for every frame we emit.
-                let dev_ctx = (*hw_device_ctx).data as *const ffmpeg::ffi::AVHWDeviceContext;
+                let dev_ctx = (*device.as_ptr()).data as *const ffmpeg::ffi::AVHWDeviceContext;
                 let cuda_dev = (*dev_ctx).hwctx as *const AVCUDADeviceContextHead;
                 self.cuda_context = (*cuda_dev).cuda_ctx as u64;
 
                 let raw = decoder_ctx.as_mut_ptr();
-                (*raw).hw_device_ctx = ffmpeg::ffi::av_buffer_ref(hw_device_ctx);
+                (*raw).hw_device_ctx = device.new_reference()?;
                 (*raw).get_format = Some(get_cuda_format);
                 // Pool headroom: the decoder must keep enough surfaces for the
                 // frames we hold downstream (link capacity) plus its own
@@ -1408,10 +1396,6 @@ impl FfmpegVideoDec {
                     .map(|p| (p.min_buffers + REORDER_MARGIN) as i32)
                     .unwrap_or(8);
                 (*raw).extra_hw_frames = headroom;
-
-                // The codec now owns a ref; release ours so only the decoder
-                // keeps the device alive.
-                ffmpeg::ffi::av_buffer_unref(&mut hw_device_ctx);
             }
         }
 
@@ -1422,38 +1406,17 @@ impl FfmpegVideoDec {
         // we keep no device handle on the element (unlike NvdecCuda's
         // CUcontext), the decoder's own ref keeps the device alive.
         if self.backend == Backend::Vaapi {
-            // A non-empty device string must be a valid C string; an interior
-            // NUL is a caller error, surfaced loud rather than truncating.
-            let device = match self.vaapi_device.as_deref() {
-                Some(path) => Some(
-                    alloc::ffi::CString::new(path)
-                        .map_err(|_| G2gError::Hardware(HardwareError::Other))?,
-                ),
-                None => None,
-            };
-            let device_ptr = device.as_ref().map_or(core::ptr::null(), |c| c.as_ptr());
+            let device = open_hw_device(
+                ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_VAAPI,
+                self.vaapi_device.as_deref(),
+            )?;
             // SAFETY: standard ffmpeg hwaccel init on a freshly-allocated,
-            // not-yet-opened context, mirroring the NvdecCuda path above.
-            // `av_hwdevice_ctx_create` initialises `hw_device_ctx`; we hand the
-            // codec its own ref, install the get_format callback, then drop our
-            // ref. `device_ptr` is either null or points into `device`, which
-            // outlives the create call.
+            // not-yet-opened context, mirroring the NvdecCuda path above. The
+            // codec gets its own ref; `device` drops ours.
             unsafe {
-                let mut hw_device_ctx: *mut ffmpeg::ffi::AVBufferRef = core::ptr::null_mut();
-                let ret = ffmpeg::ffi::av_hwdevice_ctx_create(
-                    &mut hw_device_ctx,
-                    ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_VAAPI,
-                    device_ptr,
-                    core::ptr::null_mut(), // no options
-                    0,
-                );
-                if ret < 0 || hw_device_ctx.is_null() {
-                    return Err(G2gError::Hardware(HardwareError::Other));
-                }
                 let raw = decoder_ctx.as_mut_ptr();
-                (*raw).hw_device_ctx = ffmpeg::ffi::av_buffer_ref(hw_device_ctx);
+                (*raw).hw_device_ctx = device.new_reference()?;
                 (*raw).get_format = Some(get_vaapi_format);
-                ffmpeg::ffi::av_buffer_unref(&mut hw_device_ctx);
             }
         }
 
@@ -2299,6 +2262,70 @@ enum DecoderCodec {
 }
 
 // a codec this element opens: a typed one, or with ffmpeg-long-tail one libavformat's tag tables name
+#[derive(Debug)]
+pub(crate) struct AvBufferRef(core::ptr::NonNull<ffmpeg::ffi::AVBufferRef>);
+
+impl AvBufferRef {
+    // takes over a reference returned by a libav allocator, null meaning it failed
+    pub(crate) fn from_raw(reference: *mut ffmpeg::ffi::AVBufferRef) -> Result<Self, G2gError> {
+        core::ptr::NonNull::new(reference)
+            .map(Self)
+            .ok_or(G2gError::Hardware(HardwareError::Other))
+    }
+
+    pub(crate) fn as_ptr(&self) -> *mut ffmpeg::ffi::AVBufferRef {
+        self.0.as_ptr()
+    }
+
+    // for a libav field such as `hw_device_ctx`, which unrefs what it holds
+    pub(crate) fn new_reference(&self) -> Result<*mut ffmpeg::ffi::AVBufferRef, G2gError> {
+        // SAFETY: `self.0` is a live reference until drop.
+        let reference = unsafe { ffmpeg::ffi::av_buffer_ref(self.0.as_ptr()) };
+        if reference.is_null() {
+            return Err(G2gError::Hardware(HardwareError::Other));
+        }
+        Ok(reference)
+    }
+}
+
+impl Drop for AvBufferRef {
+    fn drop(&mut self) {
+        let mut reference = self.0.as_ptr();
+        // SAFETY: this struct holds exactly one reference and releases it once.
+        unsafe { ffmpeg::ffi::av_buffer_unref(&mut reference) };
+    }
+}
+
+// a `None` device lets libav pick the default
+pub(crate) fn open_hw_device(
+    device_type: ffmpeg::ffi::AVHWDeviceType,
+    device: Option<&str>,
+) -> Result<AvBufferRef, G2gError> {
+    let device = device
+        .map(alloc::ffi::CString::new)
+        .transpose()
+        .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
+    let device_name = device
+        .as_ref()
+        .map_or(core::ptr::null(), |name| name.as_ptr());
+    let mut reference: *mut ffmpeg::ffi::AVBufferRef = core::ptr::null_mut();
+    // SAFETY: `device_name` is null or points into `device`, which outlives the
+    // call, and `reference` is a valid out-pointer.
+    let ret = unsafe {
+        ffmpeg::ffi::av_hwdevice_ctx_create(
+            &mut reference,
+            device_type,
+            device_name,
+            core::ptr::null_mut(),
+            0,
+        )
+    };
+    if ret < 0 {
+        return Err(G2gError::Hardware(HardwareError::Other));
+    }
+    AvBufferRef::from_raw(reference)
+}
+
 fn decodes(codec: VideoCodec) -> bool {
     match codec {
         #[cfg(feature = "ffmpeg-long-tail")]

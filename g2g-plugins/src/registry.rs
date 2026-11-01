@@ -129,7 +129,7 @@ use crate::decklinkvideosink::DeckLinkVideoSink;
 #[cfg(all(target_os = "linux", feature = "ffmpeg"))]
 use crate::ffmpegdec::{Backend as FfmpegBackend, FfmpegH264Dec};
 #[cfg(all(target_os = "linux", feature = "ffmpeg"))]
-use crate::ffmpegenc::{Backend as FfmpegEncBackend, FfmpegH264Enc};
+use crate::ffmpegenc::{Backend as FfmpegEncBackend, FfmpegVideoEnc};
 use crate::fmp4demux::Fmp4Demux;
 #[cfg(feature = "hls")]
 use crate::hlssrc::HlsSrc;
@@ -339,6 +339,7 @@ fn encode_provider(target: &Caps) -> Option<&'static [EncoderChoice]> {
         EncoderChoice::with_props("nvenc", &[("codec", "hevc")]),
         EncoderChoice::plain("vtenc_h265"),
         EncoderChoice::plain("mediacodecench265"),
+        EncoderChoice::plain("vah265enc"),
     ];
     static VP8: &[EncoderChoice] = &[EncoderChoice::with_props("vpxenc", &[("codec", "vp8")])];
     static VP9: &[EncoderChoice] = &[EncoderChoice::with_props("vpxenc", &[("codec", "vp9")])];
@@ -2503,6 +2504,8 @@ fn register_aliases(reg: &mut Registry) {
     reg.register_alias("vah264dec", &["ffmpegvaapidec"]);
     reg.register_alias("vaapih265dec", &["ffmpegvaapidec"]);
     reg.register_alias("vah265dec", &["ffmpegvaapidec"]);
+    reg.register_alias("vaapih264enc", &["vah264enc"]);
+    reg.register_alias("vaapih265enc", &["vah265enc"]);
     // VPx encoders: gst splits vp8enc / vp9enc; g2g has one vpxenc.
     reg.register_alias("vp8enc", &["vpxenc"]);
     reg.register_alias("vp9enc", &["vpxenc"]);
@@ -2735,6 +2738,9 @@ pub static FEATURE_GATED_ELEMENTS: &[FeatureGatedElement] = &{
         "ffmpegvaapidec" => "ffmpeg" on "linux";
         "ffmpegenc" => "ffmpeg" on "linux";
         "x264enc" => "ffmpeg" on "linux";
+        "vah264enc" => "ffmpeg" on "linux";
+        "vah265enc" => "ffmpeg" on "linux";
+        "vaav1enc" => "ffmpeg" on "linux";
         "avenc_aac" => "ffmpeg" on "linux";
         "cudadownload" => "cuda" on "linux";
         "cudaupload" => "cuda" on "linux";
@@ -3408,13 +3414,47 @@ fn register_feature_gated(reg: &mut Registry) {
     // explicit `x264enc` name opens the libx264 software encoder for hosts without
     // an NVIDIA GPU. Launch-only: an encoder is never an auto-plug candidate.
     #[cfg(all(target_os = "linux", feature = "ffmpeg"))]
-    reg.register_launch(LaunchFactory::of::<FfmpegH264Enc>("ffmpegenc", || {
-        Box::new(FfmpegH264Enc::new())
+    reg.register_launch(LaunchFactory::of::<FfmpegVideoEnc>("ffmpegenc", || {
+        Box::new(FfmpegVideoEnc::new())
     }));
     #[cfg(all(target_os = "linux", feature = "ffmpeg"))]
-    reg.register_launch(LaunchFactory::of::<FfmpegH264Enc>("x264enc", || {
-        Box::new(FfmpegH264Enc::new().with_backend(FfmpegEncBackend::Software))
+    reg.register_launch(LaunchFactory::of::<FfmpegVideoEnc>("x264enc", || {
+        Box::new(FfmpegVideoEnc::new().with_backend(FfmpegEncBackend::Software))
     }));
+    #[cfg(all(target_os = "linux", feature = "ffmpeg"))]
+    for (name, codec, build) in [
+        (
+            "vah264enc",
+            crate::ffmpegenc::VaapiCodec::H264,
+            (|| {
+                Box::new(
+                    FfmpegVideoEnc::new()
+                        .with_backend(FfmpegEncBackend::Vaapi(crate::ffmpegenc::VaapiCodec::H264)),
+                ) as Box<dyn DynAsyncElement>
+            }) as fn() -> Box<dyn DynAsyncElement>,
+        ),
+        ("vah265enc", crate::ffmpegenc::VaapiCodec::H265, || {
+            Box::new(
+                FfmpegVideoEnc::new()
+                    .with_backend(FfmpegEncBackend::Vaapi(crate::ffmpegenc::VaapiCodec::H265)),
+            )
+        }),
+        ("vaav1enc", crate::ffmpegenc::VaapiCodec::Av1, || {
+            Box::new(
+                FfmpegVideoEnc::new()
+                    .with_backend(FfmpegEncBackend::Vaapi(crate::ffmpegenc::VaapiCodec::Av1)),
+            )
+        }),
+    ] {
+        reg.register_launch(
+            LaunchFactory::new(
+                name,
+                FfmpegVideoEnc::backend_pad_templates(FfmpegEncBackend::Vaapi(codec)),
+                build,
+            )
+            .with_experimental(),
+        );
+    }
     // libavcodec AAC-LC audio encoder (M292), the gst `avenc_aac` analog and the
     // Linux audio-encode path for the A/V muxers; the `aacenc` alias is added in
     // `register_aliases`.

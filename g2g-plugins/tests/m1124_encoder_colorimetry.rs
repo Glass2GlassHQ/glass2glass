@@ -1,4 +1,4 @@
-//! M1124: `FfmpegH264Enc` writes the caps colorimetry into the SPS VUI colour
+//! M1124: `FfmpegVideoEnc` writes the caps colorimetry into the SPS VUI colour
 //! description and carries it on its output caps.
 //!
 //! The oracle is ffprobe reading the encoded elementary stream, not a g2g
@@ -26,7 +26,7 @@ use g2g_core::{
     AsyncElement, Caps, Colorimetry, Dim, G2gError, Interlace, OutputSink, PushOutcome, Rate,
     RawVideoFormat, VideoCodec,
 };
-use g2g_plugins::ffmpegenc::{Backend, FfmpegH264Enc};
+use g2g_plugins::ffmpegenc::{Backend, FfmpegVideoEnc};
 use g2g_plugins::h264parse::H264Parse;
 
 const WIDTH: u32 = 320;
@@ -93,7 +93,7 @@ impl OutputSink for CaptureSink {
 /// Encode the test pattern under `colorimetry`. `None` when `backend` is missing
 /// on this host, which skips the test rather than failing it.
 async fn encode_with(backend: Backend, colorimetry: Colorimetry) -> Option<CaptureSink> {
-    let mut encoder = FfmpegH264Enc::new().with_backend(backend);
+    let mut encoder = FfmpegVideoEnc::new().with_backend(backend);
     encoder.configure_pipeline(&raw_caps(colorimetry)).ok()?;
     let mut sink = CaptureSink::default();
     for seq in 0..FRAMES {

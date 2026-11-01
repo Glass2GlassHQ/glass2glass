@@ -61,7 +61,7 @@ use core::future::Future;
 use core::pin::Pin;
 
 use alloc::boxed::Box;
-use alloc::string::ToString;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use ffmpeg::codec::encoder::video::Encoder as VideoEncoder;
@@ -73,6 +73,7 @@ use ffmpeg::Error as FfError;
 use ffmpeg::Rational;
 use ffmpeg_next as ffmpeg;
 
+use crate::ffmpegdec::{open_hw_device, AvBufferRef};
 use g2g_core::caps::framerate_q16_to_fraction;
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ColorRange, Colorimetry, ConfigureOutcome, Dim,
@@ -90,10 +91,6 @@ const DEFAULT_GOP: u32 = 60;
 
 const DEFAULT_FRAMERATE: (u32, u32) = (30, 1);
 
-// gst x264enc's `quantizer` default and upper bound
-const DEFAULT_QUANTIZER: u32 = 21;
-const MAX_QUANTIZER: u32 = 50;
-
 // gst x264enc's `pass` nicks, for the two modes this element applies
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Pass {
@@ -110,6 +107,26 @@ pub enum Backend {
     Nvenc,
     /// libx264 software encoder (`libx264`). Portable CPU fallback.
     Software,
+    /// VA-API on a DRM render node (`h264_vaapi` / `hevc_vaapi` / `av1_vaapi`).
+    /// Frames are uploaded from system memory into VA surfaces.
+    Vaapi(VaapiCodec),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VaapiCodec {
+    H264,
+    H265,
+    Av1,
+}
+
+impl VaapiCodec {
+    // gst names the constant quantizer `qpp` on vah264enc / vah265enc and `qp` on vaav1enc
+    fn quantizer_property(self) -> &'static str {
+        match self {
+            VaapiCodec::H264 | VaapiCodec::H265 => "qpp",
+            VaapiCodec::Av1 => "qp",
+        }
+    }
 }
 
 impl Backend {
@@ -118,6 +135,49 @@ impl Backend {
         match self {
             Backend::Nvenc => "h264_nvenc",
             Backend::Software => "libx264",
+            Backend::Vaapi(VaapiCodec::H264) => "h264_vaapi",
+            Backend::Vaapi(VaapiCodec::H265) => "hevc_vaapi",
+            Backend::Vaapi(VaapiCodec::Av1) => "av1_vaapi",
+        }
+    }
+
+    fn codec(self) -> VideoCodec {
+        match self {
+            Backend::Nvenc | Backend::Software | Backend::Vaapi(VaapiCodec::H264) => {
+                VideoCodec::H264
+            }
+            Backend::Vaapi(VaapiCodec::H265) => VideoCodec::H265,
+            Backend::Vaapi(VaapiCodec::Av1) => VideoCodec::Av1,
+        }
+    }
+
+    // the VA-API formats match gst's vah264enc / vah265enc / vaav1enc sink pads
+    fn input_formats(self) -> &'static [RawVideoFormat] {
+        match self {
+            Backend::Nvenc | Backend::Software => &[
+                RawVideoFormat::I420,
+                RawVideoFormat::Nv12,
+                RawVideoFormat::I420p10,
+            ],
+            Backend::Vaapi(VaapiCodec::H264 | VaapiCodec::Av1) => &[RawVideoFormat::Nv12],
+            Backend::Vaapi(VaapiCodec::H265) => &[RawVideoFormat::Nv12, RawVideoFormat::P010],
+        }
+    }
+
+    // gst x264enc `quantizer`, vah26xenc `qpp` and vaav1enc `qp` defaults and upper bounds
+    fn default_quantizer(self) -> u32 {
+        match self {
+            Backend::Nvenc | Backend::Software => 21,
+            Backend::Vaapi(VaapiCodec::H264 | VaapiCodec::H265) => 26,
+            Backend::Vaapi(VaapiCodec::Av1) => 128,
+        }
+    }
+
+    fn max_quantizer(self) -> u32 {
+        match self {
+            Backend::Nvenc | Backend::Software => 50,
+            Backend::Vaapi(VaapiCodec::H264 | VaapiCodec::H265) => 51,
+            Backend::Vaapi(VaapiCodec::Av1) => 255,
         }
     }
 }
@@ -130,6 +190,7 @@ fn pixel_for(format: RawVideoFormat) -> Option<Pixel> {
         RawVideoFormat::I420 => Pixel::YUV420P,
         RawVideoFormat::Nv12 => Pixel::NV12,
         RawVideoFormat::I420p10 => Pixel::YUV420P10LE,
+        RawVideoFormat::P010 => Pixel::P010LE,
         _ => return None,
     })
 }
@@ -144,6 +205,7 @@ fn plane_layout(format: RawVideoFormat, w: usize, h: usize) -> Option<Vec<(usize
         RawVideoFormat::I420 => Vec::from([(w, h), (cw, ch), (cw, ch)]),
         RawVideoFormat::Nv12 => Vec::from([(w, h), (cw * 2, ch)]),
         RawVideoFormat::I420p10 => Vec::from([(w * 2, h), (cw * 2, ch), (cw * 2, ch)]),
+        RawVideoFormat::P010 => Vec::from([(w * 2, h), (cw * 4, ch)]),
         _ => return None,
     })
 }
@@ -190,13 +252,13 @@ fn set_color_description(
 /// # Example
 ///
 /// ```no_run
-/// use g2g_plugins::ffmpegenc::{Backend, FfmpegH264Enc};
+/// use g2g_plugins::ffmpegenc::{Backend, FfmpegVideoEnc};
 ///
-/// let encoder = FfmpegH264Enc::new()
+/// let encoder = FfmpegVideoEnc::new()
 ///     .with_backend(Backend::Software)
 ///     .with_bitrate(4_000_000);
 /// ```
-pub struct FfmpegH264Enc {
+pub struct FfmpegVideoEnc {
     backend: Backend,
     width: u32,
     height: u32,
@@ -211,6 +273,11 @@ pub struct FfmpegH264Enc {
     bitrate_bps: usize,
     pass: Pass,
     quantizer: u32,
+    gop: u32,
+    // VA-API render node; `None` lets libva pick
+    device_path: Option<String>,
+    // the VA surface pool frames are uploaded into, VA-API only
+    vaapi_frames: Option<AvBufferRef>,
     /// The opened video encoder. Derefs to the base `Encoder` for
     /// `send_frame` / `receive_packet`.
     encoder: Option<VideoEncoder>,
@@ -246,11 +313,11 @@ pub struct FfmpegH264Enc {
 // `!Send`. The multi-thread runner moves the element between worker tasks but
 // drives it through `&mut self` only (never concurrently), so the context is
 // owned and moved, never aliased, the same contract upheld by `FfmpegVideoDec`.
-unsafe impl Send for FfmpegH264Enc {}
+unsafe impl Send for FfmpegVideoEnc {}
 
-impl core::fmt::Debug for FfmpegH264Enc {
+impl core::fmt::Debug for FfmpegVideoEnc {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("FfmpegH264Enc")
+        f.debug_struct("FfmpegVideoEnc")
             .field("backend", &self.backend)
             .field("width", &self.width)
             .field("height", &self.height)
@@ -261,13 +328,13 @@ impl core::fmt::Debug for FfmpegH264Enc {
     }
 }
 
-impl Default for FfmpegH264Enc {
+impl Default for FfmpegVideoEnc {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl FfmpegH264Enc {
+impl FfmpegVideoEnc {
     pub fn new() -> Self {
         Self {
             backend: Backend::Nvenc,
@@ -278,7 +345,10 @@ impl FfmpegH264Enc {
             colorimetry: Colorimetry::UNKNOWN,
             bitrate_bps: DEFAULT_BITRATE_BPS,
             pass: Pass::Cbr,
-            quantizer: DEFAULT_QUANTIZER,
+            quantizer: Backend::Nvenc.default_quantizer(),
+            gop: DEFAULT_GOP,
+            device_path: None,
+            vaapi_frames: None,
             encoder: None,
             input_frame: None,
             pts_by_frameno: alloc::collections::BTreeMap::new(),
@@ -293,9 +363,17 @@ impl FfmpegH264Enc {
         }
     }
 
-    /// Select the encoder backend (default [`Backend::Nvenc`]).
+    /// Select the encoder backend (default [`Backend::Nvenc`]). Resets the
+    /// constant quantizer to the backend's default.
     pub fn with_backend(mut self, backend: Backend) -> Self {
         self.backend = backend;
+        self.quantizer = backend.default_quantizer();
+        self
+    }
+
+    /// Pin the VA-API render node, e.g. `/dev/dri/renderD128`.
+    pub fn with_device_path(mut self, path: &str) -> Self {
+        self.device_path = Some(path.into());
         self
     }
 
@@ -328,7 +406,7 @@ impl FfmpegH264Enc {
 
     fn output_caps(&self) -> Caps {
         Caps::CompressedVideo {
-            codec: VideoCodec::H264,
+            codec: self.backend.codec(),
             width: Dim::Fixed(self.width),
             height: Dim::Fixed(self.height),
             framerate: self.framerate.clone(),
@@ -369,10 +447,22 @@ impl FfmpegH264Enc {
                 opts.set("preset", "veryfast");
                 opts.set("tune", "zerolatency");
             }
+            Backend::Vaapi(_) => {
+                // one frame in flight instead of two
+                opts.set("async_depth", "1");
+                match self.pass {
+                    Pass::Cbr => opts.set("rc_mode", "CBR"),
+                    Pass::Quant => opts.set("rc_mode", "CQP"),
+                }
+            }
         }
-        // both encoders take the constant quantizer as `qp`
         if self.pass == Pass::Quant {
-            opts.set("qp", &self.quantizer.to_string());
+            // av1_vaapi has no `qp` option and reads the base q index from global_quality
+            let option = match self.backend {
+                Backend::Vaapi(VaapiCodec::Av1) => "global_quality",
+                Backend::Nvenc | Backend::Software | Backend::Vaapi(_) => "qp",
+            };
+            opts.set(option, &self.quantizer.to_string());
         }
         opts
     }
@@ -384,16 +474,23 @@ impl FfmpegH264Enc {
         let codec = ffmpeg::encoder::find_by_name(self.backend.encoder_name())
             .ok_or(G2gError::Hardware(HardwareError::Other))?;
         let pixel = pixel_for(self.format).ok_or(G2gError::CapsMismatch)?;
+        let vaapi = matches!(self.backend, Backend::Vaapi(_));
+        let encoder_pixel = if vaapi { Pixel::VAAPI } else { pixel };
         // Reject a pixel format this libavcodec build's encoder does not list
         // (an 8-bit-only libx264 against 10-bit input) here rather than letting
         // avcodec_open2 fail deeper: the caller sees the negotiation fail.
         if let Ok(video) = codec.video() {
             if let Some(mut advertised) = video.formats() {
-                if !advertised.any(|f| f == pixel) {
+                if !advertised.any(|f| f == encoder_pixel) {
                     return Err(G2gError::Hardware(HardwareError::Other));
                 }
             }
         }
+        self.vaapi_frames = if vaapi {
+            Some(self.open_vaapi_frames(pixel)?)
+        } else {
+            None
+        };
 
         let (fps_num, fps_den) = self.framerate_fraction();
         let fps_num = i32::try_from(fps_num).map_err(|_| G2gError::CapsMismatch)?;
@@ -413,7 +510,12 @@ impl FfmpegH264Enc {
         video.set_height(self.height);
         // The bit depth alone picks the profile: libx264 encodes 10-bit input as
         // High 10, so no explicit profile is set here.
-        video.set_format(pixel);
+        video.set_format(encoder_pixel);
+        if let Some(frames) = &self.vaapi_frames {
+            // SAFETY: `video` owns a live AVCodecContext that is not yet open,
+            // and takes ownership of the new frames reference.
+            unsafe { (*video.as_mut_ptr()).hw_frames_ctx = frames.new_reference()? };
+        }
         // time_base = 1/fps, so a frame's PTS is just its index; frame_rate lets
         // the encoder pace its rate control.
         video.set_time_base(Rational::new(fps_den, fps_num));
@@ -422,7 +524,7 @@ impl FfmpegH264Enc {
             video.set_bit_rate(self.bitrate_bps);
             video.set_max_bit_rate(self.bitrate_bps);
         }
-        video.set_gop(DEFAULT_GOP);
+        video.set_gop(self.gop);
         // No B-frames: output stays in presentation order (no reorder latency),
         // which the low-latency streaming path wants.
         video.set_max_b_frames(0);
@@ -436,6 +538,31 @@ impl FfmpegH264Enc {
         self.pts_by_frameno.clear();
         self.frame_no = 0;
         Ok(())
+    }
+
+    fn open_vaapi_frames(&self, software_pixel: Pixel) -> Result<AvBufferRef, G2gError> {
+        let device = open_hw_device(
+            ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_VAAPI,
+            self.device_path.as_deref(),
+        )?;
+        // SAFETY: `device` is a live hardware device reference.
+        let frames =
+            AvBufferRef::from_raw(unsafe { ffmpeg::ffi::av_hwframe_ctx_alloc(device.as_ptr()) })?;
+        // SAFETY: the data of a fresh frames reference is its AVHWFramesContext,
+        // filled in here before init and not shared yet.
+        let initialised = unsafe {
+            let context = (*frames.as_ptr()).data as *mut ffmpeg::ffi::AVHWFramesContext;
+            (*context).format = ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_VAAPI;
+            (*context).sw_format = software_pixel.into();
+            (*context).width = i32::try_from(self.width).map_err(|_| G2gError::CapsMismatch)?;
+            (*context).height = i32::try_from(self.height).map_err(|_| G2gError::CapsMismatch)?;
+            (*context).initial_pool_size = VAAPI_SURFACE_POOL;
+            ffmpeg::ffi::av_hwframe_ctx_init(frames.as_ptr())
+        };
+        if initialised < 0 {
+            return Err(G2gError::Hardware(HardwareError::Other));
+        }
+        Ok(frames)
     }
 
     /// Copy a raw access unit into the session's AVFrame of the negotiated pixel
@@ -468,10 +595,15 @@ impl FfmpegH264Enc {
             off = end;
         }
 
+        let mut surface = match &self.vaapi_frames {
+            Some(frames) => Some(upload_to_surface(frames, frame)?),
+            None => None,
+        };
+        let frame = surface.as_mut().unwrap_or(frame);
         let frameno = self.frame_no;
         frame.set_pts(Some(frameno));
-        // Picture type I requests an IDR on this frame. NVENC and libx264 both
-        // honour `pict_type` for forced key frames.
+        // Picture type I requests an IDR on this frame. NVENC, libx264 and the
+        // VA-API encoders all honour `pict_type` for forced key frames.
         let pict_type = if core::mem::take(&mut self.force_keyframe) {
             ffmpeg::ffi::AVPictureType::AV_PICTURE_TYPE_I
         } else {
@@ -515,7 +647,13 @@ impl FfmpegH264Enc {
                         _ => 0,
                     };
                     if let Some(data) = packet.data() {
-                        out.push((data.to_vec(), pts_ns));
+                        let data = match self.backend {
+                            Backend::Vaapi(VaapiCodec::H265) => {
+                                crop_padded_h265_sps(data, self.width, self.height)?
+                            }
+                            _ => data.to_vec(),
+                        };
+                        out.push((data, pts_ns));
                     }
                 }
                 Err(FfError::Other { errno }) if errno == ffmpeg::error::EAGAIN => break,
@@ -573,6 +711,83 @@ impl FfmpegH264Enc {
         Ok(())
     }
 
+    fn set_quantizer(&mut self, quantizer: u64) -> Result<(), PropError> {
+        self.quantizer = u32::try_from(quantizer)
+            .ok()
+            .filter(|&quantizer| quantizer <= self.backend.max_quantizer())
+            .ok_or(PropError::Value)?;
+        self.reopen().map_err(|_| PropError::Value)
+    }
+
+    // gst vah264enc / vah265enc / vaav1enc names and units: bitrate in kbit/s
+    fn set_vaapi_property(
+        &mut self,
+        codec: VaapiCodec,
+        name: &str,
+        value: PropValue,
+    ) -> Result<(), PropError> {
+        match name {
+            "bitrate" => {
+                let kbps = value.as_uint().ok_or(PropError::Type)?;
+                if !(1..=MAX_VAAPI_BITRATE_KBPS).contains(&kbps) {
+                    return Err(PropError::Value);
+                }
+                self.retarget(kbps as usize * 1000)
+                    .map_err(|_| PropError::Value)
+            }
+            "rate-control" => {
+                self.pass = match value.as_str().ok_or(PropError::Type)? {
+                    "cbr" => Pass::Cbr,
+                    "cqp" => Pass::Quant,
+                    _ => return Err(PropError::Value),
+                };
+                self.reopen().map_err(|_| PropError::Value)
+            }
+            "key-int-max" => {
+                let frames = value.as_uint().ok_or(PropError::Type)?;
+                if frames > MAX_VAAPI_KEY_INT {
+                    return Err(PropError::Value);
+                }
+                // gst reads 0 as "pick the GOP length"
+                self.gop = if frames == 0 {
+                    DEFAULT_GOP
+                } else {
+                    frames as u32
+                };
+                self.reopen().map_err(|_| PropError::Value)
+            }
+            "device-path" => {
+                let path = value.as_str().ok_or(PropError::Type)?;
+                self.device_path = (!path.is_empty()).then(|| path.into());
+                self.reopen().map_err(|_| PropError::Value)
+            }
+            name if name == codec.quantizer_property() => {
+                let quantizer = value.as_uint().ok_or(PropError::Type)?;
+                self.set_quantizer(quantizer)
+            }
+            _ => Err(PropError::Unknown),
+        }
+    }
+
+    fn vaapi_property(&self, codec: VaapiCodec, name: &str) -> Option<PropValue> {
+        match name {
+            "bitrate" => Some(PropValue::Uint(self.bitrate_bps as u64 / 1000)),
+            "rate-control" => Some(PropValue::Str(
+                match self.pass {
+                    Pass::Cbr => "cbr",
+                    Pass::Quant => "cqp",
+                }
+                .into(),
+            )),
+            "key-int-max" => Some(PropValue::Uint(u64::from(self.gop))),
+            "device-path" => Some(PropValue::Str(self.device_path.clone().unwrap_or_default())),
+            name if name == codec.quantizer_property() => {
+                Some(PropValue::Uint(u64::from(self.quantizer)))
+            }
+            _ => None,
+        }
+    }
+
     /// Apply a new target bitrate. libavcodec fixes the rate at open, so a
     /// running encoder is flushed (its remaining packets are held in `pending`
     /// for the next emit rather than dropped) and reopened at the new rate; the
@@ -593,6 +808,105 @@ impl FfmpegH264Enc {
     }
 }
 
+const H265_SPS_NAL_TYPE: u8 = 33;
+
+// libavcodec 7.1's hevc_vaapi codes radeonsi's 16-aligned picture size with no conformance window
+fn crop_padded_h265_sps(au: &[u8], width: u32, height: u32) -> Result<Vec<u8>, G2gError> {
+    let has_sps = crate::annexb::nal_units(au)
+        .any(|nal| crate::annexb::nalu_type(VideoCodec::H265, nal) == H265_SPS_NAL_TYPE);
+    if !has_sps {
+        return Ok(au.to_vec());
+    }
+    let mut rebuilt = Vec::with_capacity(au.len() + 8);
+    for nal in crate::annexb::nal_units(au) {
+        rebuilt.extend_from_slice(&[0, 0, 0, 1]);
+        if crate::annexb::nalu_type(VideoCodec::H265, nal) == H265_SPS_NAL_TYPE {
+            rebuilt.extend_from_slice(&crop_h265_sps(nal, width, height)?);
+        } else {
+            rebuilt.extend_from_slice(nal);
+        }
+    }
+    Ok(rebuilt)
+}
+
+const H265_NAL_HEADER_BYTES: usize = 2;
+
+// adds a conformance window cropping the coded picture to width x height
+fn crop_h265_sps(nal: &[u8], width: u32, height: u32) -> Result<Vec<u8>, G2gError> {
+    let malformed = || G2gError::Hardware(HardwareError::Other);
+    let header = nal.get(..H265_NAL_HEADER_BYTES).ok_or_else(malformed)?;
+    let rbsp = crate::annexb::strip_emulation_prevention(&nal[H265_NAL_HEADER_BYTES..]);
+    let (head, reader) = crate::h265parse::parse_h265_sps_head(&rbsp).ok_or_else(malformed)?;
+    let (coded_width, coded_height) = (
+        head.pic_width_in_luma_samples,
+        head.pic_height_in_luma_samples,
+    );
+    if head.conformance_window_flag || (coded_width, coded_height) == (width, height) {
+        return Ok(nal.to_vec());
+    }
+    let (chroma_step_x, chroma_step_y) = match head.chroma_format_idc {
+        1 => (2, 2),
+        2 => (2, 1),
+        _ => (1, 1),
+    };
+    let right = coded_width.checked_sub(width).ok_or_else(malformed)?;
+    let bottom = coded_height.checked_sub(height).ok_or_else(malformed)?;
+    if right % chroma_step_x != 0 || bottom % chroma_step_y != 0 {
+        return Err(malformed());
+    }
+    // the reader stopped just past the zero conformance_window_flag
+    let flag_bit = reader.bit_pos() - 1;
+    let stop_bit = rbsp_stop_bit(&rbsp).ok_or_else(malformed)?;
+
+    let mut source = crate::annexb::BitReader::new(&rbsp);
+    let mut writer = crate::annexb::BitWriter::default();
+    for _ in 0..flag_bit {
+        writer.write_bit(source.read_bit().ok_or_else(malformed)?);
+    }
+    source.read_bit();
+    writer.write_bit(1);
+    for offset in [0, right / chroma_step_x, 0, bottom / chroma_step_y] {
+        writer.write_ue(offset);
+    }
+    for _ in flag_bit + 1..stop_bit {
+        writer.write_bit(source.read_bit().ok_or_else(malformed)?);
+    }
+    writer.write_bit(1);
+    writer.align_to_byte();
+
+    let mut cropped = header.to_vec();
+    cropped.extend(crate::annexb::add_emulation_prevention(
+        &writer.into_bytes(),
+    ));
+    Ok(cropped)
+}
+
+// position of rbsp_stop_one_bit, the last set bit of the RBSP
+fn rbsp_stop_bit(rbsp: &[u8]) -> Option<usize> {
+    let last = rbsp.iter().rposition(|&byte| byte != 0)?;
+    Some(last * 8 + 7 - rbsp[last].trailing_zeros() as usize)
+}
+
+// surfaces for in-flight and reference frames, the size ffmpeg's vaapi_encode example uses
+const VAAPI_SURFACE_POOL: i32 = 20;
+
+fn upload_to_surface(frames: &AvBufferRef, software: &FfVideo) -> Result<FfVideo, G2gError> {
+    let mut surface = FfVideo::empty();
+    // SAFETY: `frames` is an initialised VA-API frames context and `surface` an
+    // empty AVFrame we own.
+    if unsafe { ffmpeg::ffi::av_hwframe_get_buffer(frames.as_ptr(), surface.as_mut_ptr(), 0) } < 0 {
+        return Err(G2gError::Hardware(HardwareError::Other));
+    }
+    // SAFETY: both frames are allocated, the surface with the software frame's
+    // geometry and pixel format as its frames context's sw_format.
+    if unsafe { ffmpeg::ffi::av_hwframe_transfer_data(surface.as_mut_ptr(), software.as_ptr(), 0) }
+        < 0
+    {
+        return Err(G2gError::Hardware(HardwareError::Other));
+    }
+    Ok(surface)
+}
+
 /// Copy `src` (tightly packed `w` bytes per row, `h` rows) into a libavcodec
 /// plane whose row pitch is `stride` (>= `w`, alignment padding at the end).
 fn copy_plane(dst: &mut [u8], stride: usize, src: &[u8], w: usize, h: usize) {
@@ -603,7 +917,7 @@ fn copy_plane(dst: &mut [u8], stride: usize, src: &[u8], w: usize, h: usize) {
     }
 }
 
-impl AsyncElement for FfmpegH264Enc {
+impl AsyncElement for FfmpegVideoEnc {
     // M759: a re-encode to a compressed codec drops pixel-derived meta
     // (AnalyticsMeta); opaque side-data (BlobMeta) rides through.
     #[cfg(feature = "metadata")]
@@ -633,7 +947,7 @@ impl AsyncElement for FfmpegH264Enc {
         // Accept any supported raw format, narrowing only geometry; the encoder
         // opens with the matching libavcodec pixel format.
         if let Caps::RawVideo { format, .. } = upstream_caps {
-            if pixel_for(*format).is_some() {
+            if self.backend.input_formats().contains(format) {
                 return upstream_caps.intersect(&Self::input_template(*format));
             }
         }
@@ -644,7 +958,9 @@ impl AsyncElement for FfmpegH264Enc {
     /// the same dims and framerate out. Anything else yields an empty set,
     /// rejected at solve.
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
-        CapsConstraint::DerivedOutput(Box::new(|input: &Caps| match input {
+        let formats = self.backend.input_formats();
+        let codec = self.backend.codec();
+        CapsConstraint::DerivedOutput(Box::new(move |input: &Caps| match input {
             Caps::RawVideo {
                 format,
                 width,
@@ -652,8 +968,8 @@ impl AsyncElement for FfmpegH264Enc {
                 framerate,
                 colorimetry,
                 ..
-            } if pixel_for(*format).is_some() => CapsSet::one(Caps::CompressedVideo {
-                codec: VideoCodec::H264,
+            } if formats.contains(format) => CapsSet::one(Caps::CompressedVideo {
+                codec,
                 width: width.clone(),
                 height: height.clone(),
                 framerate: framerate.clone(),
@@ -676,7 +992,7 @@ impl AsyncElement for FfmpegH264Enc {
         else {
             return Err(G2gError::CapsMismatch);
         };
-        if pixel_for(*format).is_none() {
+        if !self.backend.input_formats().contains(format) {
             return Err(G2gError::CapsMismatch);
         }
         let (Dim::Fixed(w), Dim::Fixed(h)) = (width, height) else {
@@ -695,19 +1011,39 @@ impl AsyncElement for FfmpegH264Enc {
     }
 
     fn metadata(&self) -> ElementMetadata {
-        ElementMetadata::new(
-            "FFmpeg H.264 encoder",
-            "Codec/Encoder/Video",
-            "Encodes raw I420 / NV12 / I420_10LE video to H.264 Annex-B via libavcodec (NVENC / libx264)",
-            "g2g",
-        )
+        let (name, description) = match self.backend {
+            Backend::Nvenc | Backend::Software => (
+                "FFmpeg H.264 encoder",
+                "Encodes raw I420 / NV12 / I420_10LE video to H.264 Annex-B via libavcodec (NVENC / libx264)",
+            ),
+            Backend::Vaapi(VaapiCodec::H264) => (
+                "VA-API H.264 encoder",
+                "Encodes raw NV12 video to H.264 Annex-B on a VA-API GPU via libavcodec",
+            ),
+            Backend::Vaapi(VaapiCodec::H265) => (
+                "VA-API H.265 encoder",
+                "Encodes raw NV12 / P010 video to H.265 Annex-B on a VA-API GPU via libavcodec",
+            ),
+            Backend::Vaapi(VaapiCodec::Av1) => (
+                "VA-API AV1 encoder",
+                "Encodes raw NV12 video to an AV1 OBU stream on a VA-API GPU via libavcodec",
+            ),
+        };
+        ElementMetadata::new(name, "Codec/Encoder/Video", description, "g2g")
     }
 
     fn properties(&self) -> &'static [PropertySpec] {
-        FFMPEGENC_PROPS
+        match self.backend {
+            Backend::Nvenc | Backend::Software => FFMPEGENC_PROPS,
+            Backend::Vaapi(VaapiCodec::H264 | VaapiCodec::H265) => VAAPI_H26X_PROPS,
+            Backend::Vaapi(VaapiCodec::Av1) => VAAPI_AV1_PROPS,
+        }
     }
 
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        if let Backend::Vaapi(codec) = self.backend {
+            return self.set_vaapi_property(codec, name, value);
+        }
         match name {
             "backend" => {
                 self.backend = match value.as_str().ok_or(PropError::Type)? {
@@ -735,22 +1071,22 @@ impl AsyncElement for FfmpegH264Enc {
             }
             "quantizer" => {
                 let quantizer = value.as_uint().ok_or(PropError::Type)?;
-                self.quantizer = u32::try_from(quantizer)
-                    .ok()
-                    .filter(|&quantizer| quantizer <= MAX_QUANTIZER)
-                    .ok_or(PropError::Value)?;
-                self.reopen().map_err(|_| PropError::Value)
+                self.set_quantizer(quantizer)
             }
             _ => Err(PropError::Unknown),
         }
     }
 
     fn get_property(&self, name: &str) -> Option<PropValue> {
+        if let Backend::Vaapi(codec) = self.backend {
+            return self.vaapi_property(codec, name);
+        }
         match name {
             "backend" => Some(PropValue::Str(
                 match self.backend {
                     Backend::Nvenc => "nvenc",
                     Backend::Software => "software",
+                    Backend::Vaapi(_) => return None,
                 }
                 .into(),
             )),
@@ -816,25 +1152,33 @@ impl AsyncElement for FfmpegH264Enc {
     }
 }
 
-impl PadTemplates for FfmpegH264Enc {
-    fn pad_templates() -> Vec<PadTemplate> {
+impl FfmpegVideoEnc {
+    pub fn backend_pad_templates(backend: Backend) -> Vec<PadTemplate> {
         let out = Caps::CompressedVideo {
-            codec: VideoCodec::H264,
+            codec: backend.codec(),
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
-        let sink = CapsSet::from_alternatives(Vec::from([
-            Self::input_template(RawVideoFormat::I420),
-            Self::input_template(RawVideoFormat::Nv12),
-            Self::input_template(RawVideoFormat::I420p10),
-        ]));
+        let sink = CapsSet::from_alternatives(
+            backend
+                .input_formats()
+                .iter()
+                .map(|&format| Self::input_template(format))
+                .collect(),
+        );
         Vec::from([
             PadTemplate::sink(sink),
             PadTemplate::source(CapsSet::one(out)),
         ])
+    }
+}
+
+impl PadTemplates for FfmpegVideoEnc {
+    fn pad_templates() -> Vec<PadTemplate> {
+        Self::backend_pad_templates(Backend::Nvenc)
     }
 }
 
@@ -867,9 +1211,61 @@ static FFMPEGENC_PROPS: &[PropertySpec] = &[
     .with_range("0", "50"),
 ];
 
-/// Preferred alias once this encodes more than H.264 (HEVC via `hevc_nvenc` is
-/// the natural next backend); the struct keeps its current name for now.
-pub type FfmpegVideoEnc = FfmpegH264Enc;
+// gst vah264enc's bitrate and key-int-max upper bounds
+const MAX_VAAPI_BITRATE_KBPS: u64 = 2_048_000;
+const MAX_VAAPI_KEY_INT: u64 = 1024;
+
+const VAAPI_BITRATE_PROP: PropertySpec = PropertySpec::new(
+    "bitrate",
+    PropKind::Uint,
+    "target bitrate in kbit/s under rate-control=cbr",
+)
+.with_default("4000")
+.with_range("1", "2048000");
+const VAAPI_RATE_CONTROL_PROP: PropertySpec =
+    PropertySpec::new("rate-control", PropKind::Str, "rate control: cbr | cqp")
+        .with_enum_values("cbr | cqp")
+        .with_default("cbr");
+const VAAPI_KEY_INT_MAX_PROP: PropertySpec = PropertySpec::new(
+    "key-int-max",
+    PropKind::Uint,
+    "frames between keyframes, 0 picks the default of 60",
+)
+.with_default("60")
+.with_range("0", "1024");
+const VAAPI_DEVICE_PATH_PROP: PropertySpec = PropertySpec::new(
+    "device-path",
+    PropKind::Str,
+    "DRM render node, e.g. /dev/dri/renderD128 (empty = libva default)",
+);
+
+static VAAPI_H26X_PROPS: &[PropertySpec] = &[
+    VAAPI_BITRATE_PROP,
+    VAAPI_RATE_CONTROL_PROP,
+    PropertySpec::new(
+        "qpp",
+        PropKind::Uint,
+        "constant quantizer under rate-control=cqp",
+    )
+    .with_default("26")
+    .with_range("0", "51"),
+    VAAPI_KEY_INT_MAX_PROP,
+    VAAPI_DEVICE_PATH_PROP,
+];
+
+static VAAPI_AV1_PROPS: &[PropertySpec] = &[
+    VAAPI_BITRATE_PROP,
+    VAAPI_RATE_CONTROL_PROP,
+    PropertySpec::new(
+        "qp",
+        PropKind::Uint,
+        "constant base q index under rate-control=cqp",
+    )
+    .with_default("128")
+    .with_range("0", "255"),
+    VAAPI_KEY_INT_MAX_PROP,
+    VAAPI_DEVICE_PATH_PROP,
+];
 
 #[cfg(test)]
 mod tests {
@@ -987,7 +1383,7 @@ mod tests {
     /// not available on this host (no NVIDIA driver / libavcodec built without it),
     /// so the test skips rather than failing on a machine that can't run it.
     async fn encode_with(backend: Backend) -> Option<CaptureSink> {
-        let mut enc = FfmpegH264Enc::new().with_backend(backend);
+        let mut enc = FfmpegVideoEnc::new().with_backend(backend);
         if enc.configure_pipeline(&i420_caps(W, H)).is_err() {
             return None; // encoder absent on this host
         }
@@ -1012,7 +1408,7 @@ mod tests {
     #[tokio::test]
     async fn encodes_again_after_eos_and_a_flush() {
         const FRAMES: u64 = 10;
-        let mut enc = FfmpegH264Enc::new().with_backend(Backend::Software);
+        let mut enc = FfmpegVideoEnc::new().with_backend(Backend::Software);
         if enc.configure_pipeline(&i420_caps(W, H)).is_err() {
             std::eprintln!("skipping: libx264 not available");
             return;
@@ -1092,7 +1488,7 @@ mod tests {
     #[tokio::test]
     async fn bitrate_feedback_retargets_via_reopen() {
         async fn bytes_after_feedback(bps: u32) -> Option<f64> {
-            let mut enc = FfmpegH264Enc::new()
+            let mut enc = FfmpegVideoEnc::new()
                 .with_backend(Backend::Software)
                 .with_bitrate(2_000_000);
             if enc.configure_pipeline(&i420_caps(W, H)).is_err() {
@@ -1140,12 +1536,12 @@ mod tests {
     /// 1-in-32 keep-alives only), and a non-zero target resumes it on an IDR.
     #[tokio::test]
     async fn bitrate_zero_idles_and_resume_restarts_on_idr() {
-        let mut enc = FfmpegH264Enc::new().with_backend(Backend::Software);
+        let mut enc = FfmpegVideoEnc::new().with_backend(Backend::Software);
         if enc.configure_pipeline(&i420_caps(W, H)).is_err() {
             std::eprintln!("skipping: libx264 not available");
             return;
         }
-        async fn push_n(enc: &mut FfmpegH264Enc, n: u64, base: u64, bps: u32) -> Vec<Vec<u8>> {
+        async fn push_n(enc: &mut FfmpegVideoEnc, n: u64, base: u64, bps: u32) -> Vec<Vec<u8>> {
             let mut sink = BitrateSink {
                 bps,
                 frames: Vec::new(),
@@ -1278,10 +1674,14 @@ mod tests {
         );
     }
 
-    /// Push `frames` (already in `format`'s layout) plus EOS through a software
-    /// encoder. `None` when libx264 cannot take that input on this host.
-    async fn encode_frames(format: RawVideoFormat, frames: Vec<Vec<u8>>) -> Option<CaptureSink> {
-        let mut enc = FfmpegH264Enc::new().with_backend(Backend::Software);
+    /// Push `frames` (already in `format`'s layout) plus EOS through `backend`.
+    /// `None` when that encoder cannot take that input on this host.
+    async fn encode_frames(
+        backend: Backend,
+        format: RawVideoFormat,
+        frames: Vec<Vec<u8>>,
+    ) -> Option<CaptureSink> {
+        let mut enc = FfmpegVideoEnc::new().with_backend(backend);
         enc.configure_pipeline(&raw_caps(format, W, H)).ok()?;
         let mut sink = CaptureSink::default();
         for (i, raw) in frames.into_iter().enumerate() {
@@ -1306,18 +1706,18 @@ mod tests {
     /// Decode an encoded stream back with the in-repo ffmpeg decoder, returning
     /// the decoded raw frames and the format the decoder announced. `Auto` output
     /// so the decode preserves whatever chroma and depth the stream carries.
-    async fn decode_back(aus: &[Vec<u8>]) -> (RawVideoFormat, Vec<Vec<u8>>) {
+    async fn decode_back(codec: VideoCodec, aus: &[Vec<u8>]) -> (RawVideoFormat, Vec<Vec<u8>>) {
         let mut dec =
             FfmpegVideoDec::new().with_output_format(crate::ffmpegdec::OutputFormat::Auto);
         dec.configure_pipeline(&Caps::CompressedVideo {
-            codec: VideoCodec::H264,
+            codec,
             width: Dim::Fixed(W),
             height: Dim::Fixed(H),
             framerate: Rate::Fixed(30 << 16),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         })
-        .expect("open H.264 decoder");
+        .expect("open decoder");
         let mut sink = CaptureSink::default();
         for au in aus {
             let f = Frame::new(
@@ -1352,14 +1752,39 @@ mod tests {
     /// belong (a mis-read interleave would grey the chroma out).
     #[tokio::test]
     async fn nv12_input_round_trips_through_the_decoder() {
+        nv12_round_trip(Backend::Software).await;
+    }
+
+    #[tokio::test]
+    async fn vaapi_h264_nv12_round_trips_through_the_decoder() {
+        nv12_round_trip(Backend::Vaapi(VaapiCodec::H264)).await;
+    }
+
+    #[tokio::test]
+    async fn vaapi_h265_nv12_round_trips_through_the_decoder() {
+        nv12_round_trip(Backend::Vaapi(VaapiCodec::H265)).await;
+    }
+
+    #[tokio::test]
+    async fn vaapi_av1_nv12_round_trips_through_the_decoder() {
+        nv12_round_trip(Backend::Vaapi(VaapiCodec::Av1)).await;
+    }
+
+    async fn nv12_round_trip(backend: Backend) {
         let frames = (0..10u64).map(nv12_frame).collect();
-        let Some(sink) = encode_frames(RawVideoFormat::Nv12, frames).await else {
-            std::eprintln!("skipping: libx264 not available");
+        let Some(sink) = encode_frames(backend, RawVideoFormat::Nv12, frames).await else {
+            std::eprintln!("skipping: {backend:?} encoder not available");
             return;
         };
         assert!(!sink.frames.is_empty(), "NV12 input produced access units");
+        assert!(
+            matches!(sink.caps.as_slice(), [Caps::CompressedVideo { codec, .. }] if *codec == backend.codec()),
+            "{backend:?} announces {:?} output, got {:?}",
+            backend.codec(),
+            sink.caps
+        );
 
-        let (format, decoded) = decode_back(&sink.frames).await;
+        let (format, decoded) = decode_back(backend.codec(), &sink.frames).await;
         assert_eq!(format, RawVideoFormat::I420, "decoder emits 8-bit I420");
         assert!(!decoded.is_empty(), "NV12-sourced stream decodes back");
         let (w, h) = (W as usize, H as usize);
@@ -1390,7 +1815,8 @@ mod tests {
     #[tokio::test]
     async fn ten_bit_input_encodes_high10_and_round_trips() {
         let frames = (0..10u64).map(i420p10_frame).collect();
-        let Some(sink) = encode_frames(RawVideoFormat::I420p10, frames).await else {
+        let Some(sink) = encode_frames(Backend::Software, RawVideoFormat::I420p10, frames).await
+        else {
             std::eprintln!(
                 "skipping: this host's libx264 has no 10-bit support \
                  (yuv420p10le is not in the encoder's pixel formats)"
@@ -1409,7 +1835,7 @@ mod tests {
             "10-bit input encodes as High 10, got {codec}"
         );
 
-        let (format, decoded) = decode_back(&sink.frames).await;
+        let (format, decoded) = decode_back(VideoCodec::H264, &sink.frames).await;
         assert_eq!(
             format,
             RawVideoFormat::I420p10,
@@ -1423,11 +1849,141 @@ mod tests {
         );
     }
 
+    /// Semi-planar 10-bit: each 8-bit test sample as a little-endian word with
+    /// the 10 significant bits at the top (`<< 8`).
+    fn p010_frame(seq: u64) -> Vec<u8> {
+        let (cw, ch) = chroma_dims();
+        let mut v = Vec::new();
+        let widen = |v: &mut Vec<u8>, s: u8| v.extend_from_slice(&((s as u16) << 8).to_le_bytes());
+        for s in luma(seq) {
+            widen(&mut v, s);
+        }
+        for _ in 0..cw * ch {
+            widen(&mut v, U_VAL);
+            widen(&mut v, V_VAL);
+        }
+        v
+    }
+
+    #[tokio::test]
+    async fn vaapi_h265_p010_round_trips_as_ten_bit() {
+        let backend = Backend::Vaapi(VaapiCodec::H265);
+        let frames = (0..10u64).map(p010_frame).collect();
+        let Some(sink) = encode_frames(backend, RawVideoFormat::P010, frames).await else {
+            std::eprintln!("skipping: no VA-API H.265 Main10 encoder");
+            return;
+        };
+        let (format, decoded) = decode_back(VideoCodec::H265, &sink.frames).await;
+        // the decoder's auto output keeps the depth, as planar or semi-planar
+        let eight_bit_shift = match format {
+            RawVideoFormat::I420p10 => 2,
+            RawVideoFormat::P010 => 8,
+            other => panic!("Main10 stream decodes to a 10-bit format, got {other:?}"),
+        };
+        let (w, h) = (W as usize, H as usize);
+        let luma_words = &decoded.first().expect("stream decodes back")[..w * h * 2];
+        let decoded_luma: Vec<u8> = luma_words
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|word| (u16::from_le_bytes(*word) >> eight_bit_shift) as u8)
+            .collect();
+        let (y, src) = (mean(&decoded_luma), mean(&luma(0)));
+        assert!(
+            (y - src).abs() < 8.0,
+            "P010 luma survives the round trip, got {y:.0} for a {src:.0} source"
+        );
+    }
+
+    #[test]
+    fn vaapi_encoders_take_gst_property_names_and_units() {
+        let mut h264 = FfmpegVideoEnc::new().with_backend(Backend::Vaapi(VaapiCodec::H264));
+        h264.set_property("bitrate", PropValue::Uint(2500))
+            .expect("bitrate in kbit/s");
+        assert_eq!(h264.bitrate_bps, 2_500_000);
+        assert_eq!(h264.get_property("bitrate"), Some(PropValue::Uint(2500)));
+        assert_eq!(h264.get_property("qpp"), Some(PropValue::Uint(26)));
+        h264.set_property("rate-control", PropValue::Str("cqp".into()))
+            .expect("cqp rate control");
+        assert_eq!(h264.pass, Pass::Quant);
+        assert_eq!(
+            h264.set_property("qpp", PropValue::Uint(52)),
+            Err(PropError::Value)
+        );
+        assert_eq!(
+            h264.set_property("quantizer", PropValue::Uint(20)),
+            Err(PropError::Unknown),
+            "the x264enc name is not a vah264enc property"
+        );
+
+        let mut av1 = FfmpegVideoEnc::new().with_backend(Backend::Vaapi(VaapiCodec::Av1));
+        av1.set_property("qp", PropValue::Uint(200))
+            .expect("AV1 q index up to 255");
+        assert_eq!(av1.get_property("qpp"), None);
+        assert!(av1.properties().iter().any(|spec| spec.name == "qp"));
+    }
+
+    // the SPS libavcodec 7.1 hevc_vaapi writes on radeonsi for 640x360 input
+    const RADEONSI_PADDED_SPS: &[u8] = &[
+        0x00, 0x00, 0x00, 0x01, 0x42, 0x01, 0x01, 0x01, 0x60, 0x00, 0x00, 0x03, 0x00, 0xb0, 0x00,
+        0x00, 0x03, 0x00, 0x00, 0x03, 0x00, 0x3f, 0xa0, 0x05, 0x02, 0x01, 0x71, 0x62, 0x4b, 0x92,
+        0x42, 0x95, 0xa2, 0x01, 0x00, 0x00, 0x03, 0x00, 0x01, 0x00, 0x00, 0x03, 0x00, 0x1e, 0xc4,
+    ];
+
+    fn bits_after_window(nal: &[u8]) -> (crate::h265parse::H265SpsHead, Vec<u32>) {
+        let rbsp = crate::annexb::strip_emulation_prevention(&nal[H265_NAL_HEADER_BYTES..]);
+        let (head, mut reader) = crate::h265parse::parse_h265_sps_head(&rbsp).expect("SPS parses");
+        let stop = rbsp_stop_bit(&rbsp).expect("SPS has a stop bit");
+        let bits = (reader.bit_pos()..stop)
+            .map(|_| reader.read_bit().expect("bit before the stop bit"))
+            .collect();
+        (head, bits)
+    }
+
+    #[test]
+    fn padded_h265_sps_gets_a_conformance_window() {
+        let au = RADEONSI_PADDED_SPS;
+        let (padded, padded_rest) = bits_after_window(&au[4..]);
+        assert!(!padded.conformance_window_flag);
+        let coded = (
+            padded.pic_width_in_luma_samples,
+            padded.pic_height_in_luma_samples,
+        );
+        let (width, height) = (640, 360);
+        assert_ne!(coded, (width, height), "the fixture is the padded case");
+
+        let rebuilt = crop_padded_h265_sps(au, width, height).expect("SPS rewrite");
+        let cropped_nal = &rebuilt[4..];
+        let (cropped, cropped_rest) = bits_after_window(cropped_nal);
+        assert!(cropped.conformance_window_flag);
+        assert_eq!(
+            (
+                cropped.pic_width_in_luma_samples,
+                cropped.pic_height_in_luma_samples
+            ),
+            coded
+        );
+        // 4:2:0 offsets count chroma samples, two luma rows each
+        assert_eq!(
+            cropped.conformance_window,
+            [0, (coded.0 - width) / 2, 0, (coded.1 - height) / 2]
+        );
+        assert_eq!(
+            cropped_rest, padded_rest,
+            "fields after the window are unchanged"
+        );
+        assert_eq!(
+            crop_padded_h265_sps(&rebuilt, width, height).expect("second pass"),
+            rebuilt,
+            "an SPS with a window is left alone"
+        );
+    }
+
     /// Fail loud: NVENC's H.264 encoder is 8-bit only, so 10-bit input must
     /// fail negotiation rather than open and emit garbage.
     #[tokio::test]
     async fn ten_bit_on_nvenc_fails_negotiation() {
-        let mut enc = FfmpegH264Enc::new().with_backend(Backend::Nvenc);
+        let mut enc = FfmpegVideoEnc::new().with_backend(Backend::Nvenc);
         assert!(
             enc.configure_pipeline(&raw_caps(RawVideoFormat::I420p10, W, H))
                 .is_err(),
@@ -1438,7 +1994,7 @@ mod tests {
     /// The element advertises exactly the raw formats it can encode.
     #[test]
     fn accepts_i420_nv12_and_10_bit_input_caps() {
-        let enc = FfmpegH264Enc::new();
+        let enc = FfmpegVideoEnc::new();
         for format in [
             RawVideoFormat::I420,
             RawVideoFormat::Nv12,
@@ -1463,7 +2019,7 @@ mod tests {
     /// continues, restarts on an IDR, and the access units get smaller.
     #[tokio::test]
     async fn bitrate_property_retargets_a_running_encoder() {
-        let mut enc = FfmpegH264Enc::new()
+        let mut enc = FfmpegVideoEnc::new()
             .with_backend(Backend::Software)
             .with_bitrate(2_000_000);
         if enc.configure_pipeline(&i420_caps(W, H)).is_err() {
@@ -1472,7 +2028,7 @@ mod tests {
         }
         let mut sink = CaptureSink::default();
         async fn push_n(
-            enc: &mut FfmpegH264Enc,
+            enc: &mut FfmpegVideoEnc,
             sink: &mut CaptureSink,
             range: core::ops::Range<u64>,
         ) {
@@ -1525,13 +2081,16 @@ mod tests {
 
     #[tokio::test]
     async fn quantizer_zero_round_trips_bit_exact() {
-        let mut enc = FfmpegH264Enc::new().with_backend(Backend::Software);
+        let mut enc = FfmpegVideoEnc::new().with_backend(Backend::Software);
         enc.set_property("pass", PropValue::Str("quant".into()))
             .expect("set pass");
         enc.set_property("quantizer", PropValue::Uint(0))
             .expect("set quantizer");
         assert_eq!(
-            enc.set_property("quantizer", PropValue::Uint(u64::from(MAX_QUANTIZER) + 1)),
+            enc.set_property(
+                "quantizer",
+                PropValue::Uint(u64::from(Backend::Software.max_quantizer()) + 1)
+            ),
             Err(PropError::Value)
         );
         if enc.configure_pipeline(&i420_caps(W, H)).is_err() {
@@ -1572,7 +2131,7 @@ mod tests {
             codec.starts_with("avc1.F4"),
             "lossless profile, got {codec}"
         );
-        let (format, decoded) = decode_back(&sink.frames).await;
+        let (format, decoded) = decode_back(VideoCodec::H264, &sink.frames).await;
         assert_eq!(format, RawVideoFormat::I420);
         assert!(decoded == frames, "decoded frames equal the input frames");
     }

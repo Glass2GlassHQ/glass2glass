@@ -406,8 +406,8 @@ IDR and `mediacodecenc` sets MediaCodec's `request-sync`, which needs Android AP
 (`Event::EgressBitrateEstimate`, TWCC/REMB) becomes `PushOutcome::Bitrate` via
 `take_bitrate`, and the encoder retargets, rav1e by a hysteresis-gated context
 rebuild. `OpusEnc` retargets live through `OPUS_SET_BITRATE` with no rebuild,
-and `FfmpegH264Enc` by a hysteresis-gated reopen, zerolatency with nothing in
-flight. `FfmpegH264Enc` under `pass=quant` has no rate and ignores the target.
+and `FfmpegVideoEnc` by a hysteresis-gated reopen, zerolatency with nothing in
+flight. `FfmpegVideoEnc` under `pass=quant` has no rate and ignores the target.
 
 A keyframe request reaches an encoder that answers it after the frame it was
 pushing has entered the link. The link's pre-send check holds a packet back

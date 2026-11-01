@@ -276,8 +276,7 @@ Highest leverage first:
 - **V4L2 mem2mem decode and encode**, stateful and stateless, the hardware
   codec path on Raspberry Pi and most ARM SoCs (gst `v4l2h264dec`,
   `v4l2h264enc`, `v4l2slh264dec`).
-- **VAAPI encode** for H.264, H.265 and AV1 (gst `vah264enc`, `vah265enc`,
-  `vaav1enc`). Decode already goes through VAAPI.
+- Run `vaav1enc` on a GPU with VA-API AV1 encode (AMD RDNA3, Intel Arc).
 - **Pure-Rust / wasm decode** to drop the ffmpeg FFI: VP8 / VP9 decode and a
   pure-Rust Opus path (see the roadmap for why both are blocked).
 

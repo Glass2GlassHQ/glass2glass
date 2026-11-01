@@ -47,7 +47,7 @@ use g2g_core::element::DynAsyncElement;
 use g2g_core::runtime::{run_graph, run_linear_chain, GraphNodeRef, SourceLoop};
 use g2g_core::{G2gError, Graph, HardwareError, PipelineClock, PropValue, RawVideoFormat};
 use g2g_plugins::appsrc::{register_appsrc, AppSrc, AppSrcFeed};
-use g2g_plugins::ffmpegenc::{Backend, FfmpegH264Enc};
+use g2g_plugins::ffmpegenc::{Backend, FfmpegVideoEnc};
 use g2g_plugins::filesink::FileSink;
 use g2g_plugins::moqtsink::MoqtSink;
 use g2g_plugins::mp4muxn::Mp4MuxN;
@@ -715,7 +715,7 @@ fn sink_pipeline(settings: StreamSettings, encoded: bool) -> Result<u64, G2gErro
         .expect("appsrc caps");
 
     let mut convert = VideoConvert::new(RawVideoFormat::I420);
-    let mut enc = FfmpegH264Enc::new()
+    let mut enc = FfmpegVideoEnc::new()
         .with_backend(Backend::Software)
         .with_bitrate(settings.bitrate as usize);
     let transforms: Vec<&mut dyn DynAsyncElement> = if encoded {

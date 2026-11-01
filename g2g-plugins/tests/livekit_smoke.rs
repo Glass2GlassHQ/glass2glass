@@ -1069,7 +1069,7 @@ mod fan_graph {
     use super::*;
     use g2g_core::runtime::{run_graph, GraphNode};
     use g2g_core::{Graph, RawVideoFormat};
-    use g2g_plugins::ffmpegenc::{Backend, FfmpegH264Enc};
+    use g2g_plugins::ffmpegenc::{Backend, FfmpegVideoEnc};
     use g2g_plugins::videoscale::VideoScale;
 
     fn i420_caps(width: u32, height: u32) -> Caps {
@@ -1170,13 +1170,13 @@ mod fan_graph {
                 }));
                 let tee = g.add_tee(2);
                 let enc_hi = g.add_transform(GraphNode::element(
-                    FfmpegH264Enc::new()
+                    FfmpegVideoEnc::new()
                         .with_backend(Backend::Software)
                         .with_bitrate(1_200_000),
                 ));
                 let scale_lo = g.add_transform(GraphNode::element(VideoScale::new(320, 240)));
                 let enc_lo = g.add_transform(GraphNode::element(
-                    FfmpegH264Enc::new()
+                    FfmpegVideoEnc::new()
                         .with_backend(Backend::Software)
                         .with_bitrate(300_000),
                 ));

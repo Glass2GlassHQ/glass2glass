@@ -390,7 +390,7 @@ mod h264 {
     use super::*;
     use g2g_core::{AsyncElement, PipelinePacket};
     use g2g_plugins::ffmpegdec::{FfmpegVideoDec, OutputFormat};
-    use g2g_plugins::ffmpegenc::{Backend, FfmpegH264Enc};
+    use g2g_plugins::ffmpegenc::{Backend, FfmpegVideoEnc};
     use m1001_common::{data_frame, CaptureSink};
 
     /// 500 kbit/s at this geometry, which keeps the encoder off its quality ceiling:
@@ -408,7 +408,7 @@ mod h264 {
         let log = EvidenceLog::scoped(LOG);
         let source = source_frames();
 
-        let mut encoder = FfmpegH264Enc::new()
+        let mut encoder = FfmpegVideoEnc::new()
             .with_backend(Backend::Software)
             .with_bitrate(BITRATE);
         encoder

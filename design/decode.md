@@ -134,9 +134,9 @@ calls `send_eof()` plus a final drain before forwarding `Eos`.
 default, so `unsafe impl Send` rests on the same ownership-transfer argument as
 `MfDecode`.
 
-## FfmpegH264Enc
+## FfmpegVideoEnc
 
-`FfmpegH264Enc` (`g2g-plugins/src/ffmpegenc.rs`, feature `ffmpeg`,
+`FfmpegVideoEnc` (`g2g-plugins/src/ffmpegenc.rs`, feature `ffmpeg`,
 `cfg(target_os = "linux")`) is the encode-side mirror:
 `Caps::RawVideo { format: I420, .. }` in,
 `Caps::CompressedVideo { codec: H264, .. }` Annex-B out, via `ffmpeg-next`. It
@@ -148,6 +148,16 @@ AV1, VP8/9 and MJPEG, which those H.264-only sinks do not accept.
 | :--- | :--- | :--- |
 | `Nvenc` (default) | `h264_nvenc` | NVIDIA NVENC, hardware, realtime. The server-side render-and-stream path wants this. Fails loud at configure if absent. |
 | `Software` | `libx264` | Portable CPU fallback for CI and no-GPU hosts, present only if libavcodec was built `--enable-libx264`. |
+| `Vaapi(VaapiCodec)` | `h264_vaapi` / `hevc_vaapi` / `av1_vaapi` | VA-API on a DRM render node, launched as `vah264enc` / `vah265enc` / `vaav1enc`. |
+
+The VA-API backend takes NV12 (and P010 on H.265), as gst's `va` encoders do.
+Each frame is copied into a VA surface from a pool built on a hardware frames
+context, then encoded with `rc_mode` CBR or CQP and `async_depth=1`. Under those
+launch names the element takes gst's property names and units: `bitrate` in
+kbit/s, `rate-control` (`cbr` | `cqp`), `qpp` (`qp` for AV1, the base q index),
+`key-int-max` and `device-path`. libavcodec 7.1's `hevc_vaapi` on radeonsi codes
+the driver's 16-aligned picture size with no conformance window, so the element
+adds the crop to any H.265 SPS whose coded size exceeds the caps.
 
 `max_b_frames = 0`, so output is in presentation order with no reorder hold.
 Parameter sets are in band: the `GLOBAL_HEADER` flag is not set, so SPS/PPS ride
@@ -185,7 +195,7 @@ render-and-stream path fed by the wgpu-to-CUDA hand-off.
   `DerivedOutput` at the same dims and framerate. Caps do not encode the memory
   domain, so negotiation is identical to a system encoder. At runtime the frame
   must be `MemoryDomain::Cuda`, else `UnsupportedDomain`, the symmetric contract
-  `FfmpegH264Enc` upholds for `System`.
+  `FfmpegVideoEnc` upholds for `System`.
 - NV12 input, the NVDEC hwframe domain, must be a contiguous surface: chroma at
   `luma_ptr + luma_pitch * height`, one base pointer plus pitch. RGBA input, the
   GPU-render domain reached via `WgpuToCuda`, is a single packed plane at
@@ -230,7 +240,7 @@ render-and-stream path fed by the wgpu-to-CUDA hand-off.
   `nvenc` feature is CI-excluded.
 - The session is a raw NVENC handle plus CUDA context driven through `&mut self`
   only, so `unsafe impl Send` rests on the same ownership-transfer argument as
-  `FfmpegH264Enc`.
+  `FfmpegVideoEnc`.
 
 ## NvDec
 

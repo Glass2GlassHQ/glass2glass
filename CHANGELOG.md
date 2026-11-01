@@ -6,7 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
-Breaking: `QosMessage` gains `downstream_proc_ns`, `ElementProbe` is no longer `UnwindSafe`, `SpecError::UnknownProperty` / `BadValue` are replaced by `SpecError::Property(ParseError)`, `receive_rtp_h264` is renamed `receive_rtp`, `RtpRecvConfig` gains an `encoding` field, the `vaapi` feature with `vaapidec` / `vaapidech265` is removed, `MkvCodec` / `MkvStream` gain `Mp2` and `Mp3`, `srt::Handshake` gains `srt_flags`, `AesKeySize` gains `Aes192`, `srt::Role` gains `Rendezvous`, `SrtReceiver::on_data` returns the sequences to NAK, `SeekController::take_pending` is replaced by `take_seek` while `seek` returns a `SeekTicket`, `attach_seek` also returns the first seek's `SeekTicket`, and `Mpd` gains `max_segment_duration_secs`, `FrameTiming::default()` leaves `dts_ns` unset at `FrameTiming::DTS_NONE` rather than 0, and `MkvFrame` and `SpsGeometry` gain a field.
+Breaking: `QosMessage` gains `downstream_proc_ns`, `ElementProbe` is no longer `UnwindSafe`, `SpecError::UnknownProperty` / `BadValue` are replaced by `SpecError::Property(ParseError)`, `receive_rtp_h264` is renamed `receive_rtp`, `RtpRecvConfig` gains an `encoding` field, the `vaapi` feature with `vaapidec` / `vaapidech265` is removed, `MkvCodec` / `MkvStream` gain `Mp2` and `Mp3`, `srt::Handshake` gains `srt_flags`, `AesKeySize` gains `Aes192`, `srt::Role` gains `Rendezvous`, `SrtReceiver::on_data` returns the sequences to NAK, `SeekController::take_pending` is replaced by `take_seek` while `seek` returns a `SeekTicket`, `attach_seek` also returns the first seek's `SeekTicket`, and `Mpd` gains `max_segment_duration_secs`, `FrameTiming::default()` leaves `dts_ns` unset at `FrameTiming::DTS_NONE` rather than 0, `MkvFrame` and `SpsGeometry` gain a field, and `FfmpegH264Enc` is renamed `FfmpegVideoEnc` with `Backend` gaining `Vaapi`.
 
 - M1900: `VelloAnalyticsOverlay` draws on RGBA wgpu textures, `WgpuColorConvert` converts NV12 wgpu textures to RGBA, and `CudaToWgpu` keeps frame metadata.
 - M1901: `VelloAnalyticsOverlay` draws the `show-label` / `show-track` / `show-score` captions.
@@ -138,6 +138,7 @@ Breaking: `QosMessage` gains `downstream_proc_ns`, `ElementProbe` is no longer `
 - M2037: `h264seiinserter` and `h265seiinserter` write a frame's `SeiUserDataMeta` into its access unit as registered and unregistered SEI user data.
 - M2038: `tsdemux` forwards SCTE-35 sections as the new `PipelinePacket::SpliceInfo`, and `mpegtsmux scte-35-pid` writes them.
 - M2039: `pipewirevideosink` publishes raw video as a PipeWire camera node other applications capture from.
+- M2040: `vah264enc`, `vah265enc` and `vaav1enc` encode on VA-API GPUs through libavcodec.
 
 ## 0.10.0
 

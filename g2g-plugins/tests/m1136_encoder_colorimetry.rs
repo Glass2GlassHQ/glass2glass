@@ -2,7 +2,7 @@
 //! and carry it on their compressed output caps.
 //!
 //! The oracle is ffprobe reading the encoded stream, the same one M1124 uses for
-//! `FfmpegH264Enc`: what ffmpeg reads back is what any other decoder sees. No
+//! `FfmpegVideoEnc`: what ffmpeg reads back is what any other decoder sees. No
 //! colour value is spelled against a probe here, every expected reading comes
 //! from probing a stream ffmpeg itself encoded with the same colour request, and
 //! the tagged and untagged references have to disagree, so a probe that reported

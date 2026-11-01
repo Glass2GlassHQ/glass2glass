@@ -1,6 +1,6 @@
 //! libavcodec AAC-LC audio encoder: interleaved PCM in
 //! (`Caps::Audio{PcmS16Le|PcmF32Le}`), ADTS-framed AAC out
-//! (`Caps::Audio{Aac}`). The audio companion of [`crate::ffmpegenc::FfmpegH264Enc`],
+//! (`Caps::Audio{Aac}`). The audio companion of [`crate::ffmpegenc::FfmpegVideoEnc`],
 //! so the Linux path finally has an AAC encoder for `mp4mux` / `mpegtsmux` /
 //! `matroskamux` / `flvmux` (the existing `MfAacEncode` is Windows-only):
 //!
@@ -15,7 +15,7 @@
 //! samples per frame, so input PCM is converted to FLTP and buffered into
 //! frame-sized chunks; a partial tail is flushed at EOS.
 //!
-//! Threading: like `FfmpegH264Enc`, the raw `AVCodecContext` is single-owner and
+//! Threading: like `FfmpegVideoEnc`, the raw `AVCodecContext` is single-owner and
 //! the element asserts `Send` under that contract.
 
 use crate::aacparse::adts_frame;
@@ -83,7 +83,7 @@ pub struct FfmpegAacEnc {
     emitted: u64,
 }
 
-// SAFETY: `AudioEncoder` wraps a raw `*mut AVCodecContext`; like `FfmpegH264Enc`
+// SAFETY: `AudioEncoder` wraps a raw `*mut AVCodecContext`; like `FfmpegVideoEnc`
 // the element is single-owner (one executor thread drives it) and never shares
 // the context, so the `Send` contract holds.
 unsafe impl Send for FfmpegAacEnc {}
