@@ -22,11 +22,11 @@ const EXPECTED_MAX_MS: u64 = (FRAMES - 1) * FRAME_INTERVAL_MS + 200;
 
 #[tokio::test]
 async fn sync_sink_paces_presentation_to_pts() {
+    let t0 = Instant::now();
     let clock = WallClock::new();
     let mut src = VideoTestSrc::new(16, 16, FPS, FRAMES);
     let mut snk = SyncSink::new(clock);
 
-    let t0 = Instant::now();
     let stats = run_simple_pipeline(&mut src, &mut snk, &clock, 8)
         .await
         .expect("sync pipeline should complete");
