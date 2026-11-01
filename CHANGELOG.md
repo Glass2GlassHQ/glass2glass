@@ -151,6 +151,7 @@ Breaking: `QosMessage` gains `downstream_proc_ns`, `ElementProbe` is no longer `
 - M2050: `nvdec` and `nvenc` load the NVIDIA libraries at runtime, and the Linux release builds include them.
 - M2051: `cuda`, `nvdec` and `nvenc` build on Windows and ship in the Windows release binary, and an element that cannot run here says why.
 - M2052: `matroskamux` writes MJPEG tracks.
+- M2053: release archives, wheels and the AAR carry the licences of the third-party crates they include.
 
 ## 0.10.0
 

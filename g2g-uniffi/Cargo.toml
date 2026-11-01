@@ -20,6 +20,7 @@ required-features = ["bindgen"]
 
 [features]
 bindgen = ["uniffi/cli"]
+release-aar = ["g2g-plugins/release-aar"]
 
 [dependencies]
 g2g-core = { workspace = true, features = ["std", "runtime", "multi-thread"] }

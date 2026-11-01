@@ -1,0 +1,13 @@
+Licences of the third-party crates compiled into this build of glass2glass.
+{{#each licenses}}
+
+================================================================================
+{{{name}}}
+
+Used by:
+{{#each used_by}}
+  {{crate.name}} {{crate.version}}
+{{/each}}
+
+{{{text}}}
+{{/each}}

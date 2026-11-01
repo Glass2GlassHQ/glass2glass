@@ -59,11 +59,18 @@ jobs:
           [ -z "$unexpected" ] || { echo "::error::g2g-launch links $unexpected"; exit 1; }
       - name: smoke run
         run: target/${{ matrix.target }}/release/g2g-launch -q audiotestsrc num-buffers=5 ! fakesink
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-about@0.9.3
+      - name: third-party licences
+        run: >
+          cargo about generate --locked --fail -m g2g-plugins/Cargo.toml --features ${{ matrix.features }}
+          about.hbs -o LICENSE-THIRD-PARTY.txt
       - name: package
         run: |
           name="g2g-${GITHUB_REF_NAME}-${{ matrix.target }}"
           mkdir "$name"
-          cp target/${{ matrix.target }}/release/g2g-launch* target/${{ matrix.target }}/release/g2g-inspect* LICENSE "$name/"
+          cp target/${{ matrix.target }}/release/g2g-launch* target/${{ matrix.target }}/release/g2g-inspect* LICENSE LICENSE-THIRD-PARTY.txt "$name/"
           rm -f "$name"/*.d "$name"/*.pdb
           if [ "${{ runner.os }}" = Windows ]; then 7z a "$name.zip" "$name"; else tar czf "$name.tar.gz" "$name"; fi
       - uses: actions/upload-artifact@v7
@@ -87,11 +94,16 @@ jobs:
           java-version: "21"
       - name: install cargo-ndk
         run: cargo install cargo-ndk --locked --version 4.1.2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-about@0.9.3
       - name: build
         run: |
           aar=$(ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME" tools/android-aar.sh | tail -1)
           mkdir dist
           cp "$aar" "dist/g2g-${GITHUB_REF_NAME}-android.aar"
+          cargo about generate --locked --fail -m g2g-uniffi/Cargo.toml --features release-aar about.hbs -o LICENSE-THIRD-PARTY.txt
+          zip "dist/g2g-${GITHUB_REF_NAME}-android.aar" LICENSE LICENSE-THIRD-PARTY.txt
       - uses: actions/upload-artifact@v7
         with:
           name: release-asset-android
@@ -106,10 +118,20 @@ jobs:
         include:
           - { runner: ubuntu-24.04, target: x86_64-unknown-linux-gnu, features: release-wheel-linux }
           - { runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, features: release-wheel-linux }
-          - { runner: macos-latest, target: aarch64-apple-darwin, features: release-binary-macos }
-          - { runner: windows-latest, target: x86_64-pc-windows-msvc, features: release-binary-windows }
+          - { runner: macos-latest, target: aarch64-apple-darwin, features: release-wheel-macos }
+          - { runner: windows-latest, target: x86_64-pc-windows-msvc, features: release-wheel-windows }
     steps:
       - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-about@0.9.3
+      # maturin puts every LICEN[CS]E* file next to pyproject.toml into the wheel
+      - name: third-party licences
+        shell: bash
+        run: |
+          cargo about generate --locked --fail -m g2g-pyapi/Cargo.toml --features ${{ matrix.features }} \
+            about.hbs -o g2g-pyapi/LICENSE-THIRD-PARTY.txt
+          cp LICENSE g2g-pyapi/
       - uses: PyO3/maturin-action@v1
         with:
           maturin-version: "1.16.0"
@@ -118,15 +140,14 @@ jobs:
           manylinux: "2_28"
           before-script-linux: dnf install -y clang-devel wayland-devel libxkbcommon-devel
           # --features replaces the list in pyproject.toml
-          args: >
-            --release --locked --out dist --auditwheel check
-            --features python,pyo3/extension-module,pyo3/abi3-py311,g2g-plugins/${{ matrix.features }}
+          args: --release --locked --out dist --auditwheel check --features ${{ matrix.features }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
       - name: smoke run
         shell: bash
         run: |
+          unzip -l g2g-pyapi/dist/*.whl | grep -q 'licenses/LICENSE-THIRD-PARTY.txt' || { echo "::error::wheel has no third-party licences"; exit 1; }
           python -m pip install g2g-pyapi/dist/*.whl
           python -c '
           import g2g

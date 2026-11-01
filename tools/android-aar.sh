@@ -24,7 +24,7 @@ mkdir -p "$OUT/stage"
 TARGET_FLAGS=()
 for abi in "${ABIS[@]}"; do TARGET_FLAGS+=(-t "$abi"); done
 (cd "$REPO" && cargo ndk --platform "$MIN_SDK" "${TARGET_FLAGS[@]}" -o "$OUT/stage/jni" \
-    build --locked --release -p g2g-uniffi --features g2g-plugins/release-aar)
+    build --locked --release -p g2g-uniffi --features release-aar)
 
 unzip -q "$JNA_AAR" classes.jar -d "$OUT/jna"
 "$KOTLINC" -no-jdk -no-reflect -cp "$ANDROID_JAR:$OUT/jna/classes.jar" -d "$OUT/classes" \
