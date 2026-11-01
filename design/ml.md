@@ -891,6 +891,14 @@ every `VideoScreen`-tagged mesh, through an sRGB view, the overlay's texture
 listing `Rgba8UnormSrgb` in `view_formats` for exactly this. It is the mirror of
 the crate's streaming side, which renders in Bevy and encodes in g2g.
 
+`examples/g2g-egui-video` goes the other way round. g2g opens the device with
+`GpuContext::headless` and eframe renders on it through egui-wgpu's
+`WgpuSetup::Existing`, because egui-wgpu's `RenderState` exposes no
+`wgpu::Instance` for `from_wgpu`. The app keeps the newest frame the appsink
+pull channel delivers and re-points one egui texture id at it with
+`update_egui_texture_from_wgpu_texture`, again through an sRGB view. A
+`clocksync` before the appsink paces the pipeline to the stream's timestamps.
+
 ### Presenting on the producer's device
 
 A GPU decoder cannot be handed a device: Vulkan Video decode needs queues and

@@ -141,6 +141,7 @@ Breaking: `QosMessage` gains `downstream_proc_ns`, `ElementProbe` is no longer `
 - M2040: `vah264enc`, `vah265enc` and `vaav1enc` encode on VA-API GPUs through libavcodec.
 - M2041: encoders mark their keyframe output, so `hlssink` cuts segments after `x264enc ! mpegtsmux`.
 - M2042: `hlssink http-port` serves its playlist and segments over HTTP, and `httpserversink` streams MPEG-TS, fMP4 or Matroska to clients that join at the next keyframe.
+- M2043: `examples/g2g-egui-video` draws pipeline video in an egui window on a wgpu device shared with g2g.
 
 ## 0.10.0
 

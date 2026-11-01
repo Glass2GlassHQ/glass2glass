@@ -227,7 +227,8 @@ Highest leverage first:
 - Run `decklinkvideosink` and `decklinkaudiosink` on a board: scheduled
   playback, the board clock and audio against video have only run against a
   mock device.
-- Examples that embed `WgpuSink::with_surface` in Qt/QML, GTK4 and egui windows.
+- Examples that show pipeline video inside GTK4 (as a `GdkTexture`, like
+  `gtk4paintablesink`) and Qt/QML windows.
 
 ## Containers
 

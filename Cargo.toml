@@ -36,6 +36,9 @@ exclude = [
     # a Wayland session), so it stays out of the workspace's default-feature
     # build. Standalone, own Cargo.lock. See its README.
     "examples/g2g-mutate-demo",
+    # egui embedding example: eframe and winit stay out of the workspace build.
+    # Standalone, own Cargo.lock. See its README.
+    "examples/g2g-egui-video",
     # Rust API soak for the calliope canary: needs rtsp + ffmpeg + observe
     # (libavcodec). Standalone, own Cargo.lock. See its README.
     "examples/g2g-api-soak",
