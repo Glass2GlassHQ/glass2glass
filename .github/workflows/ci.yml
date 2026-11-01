@@ -192,8 +192,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             pkg-config libasound2-dev libpulse-dev libopus-dev \
-            libwayland-dev libxkbcommon-dev libdav1d-dev nasm \
-            libavcodec-dev libavformat-dev libavutil-dev libswscale-dev
+            libwayland-dev libxkbcommon-dev libdav1d-dev nasm clang \
+            libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libvpx-dev
       # Audio sink without its capture sibling, plus one display: the shape that
       # left `pulsepcm::opt_name` and `alsapcm::frame_bytes` dead.
       - name: pulse sink + wayland display

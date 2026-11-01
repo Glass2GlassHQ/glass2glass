@@ -51,7 +51,7 @@ release-binary = [
 release-binary-linux = [
     "release-binary", "plugin-signing", "shm", "unixfd", "v4l2", "vulkan-video",
     "kms-sink", "wayland-sink", "wgpu-present", "cuda", "nvenc", "nvdec", "cuda-wgpu",
-    "gl-sink", "alsa-sink", "alsa-src", "openh264", "ffmpeg-long-tail",
+    "gl-sink", "alsa-sink", "alsa-src", "openh264", "ffmpeg-long-tail", "vpx",
 ]
 release-binary-macos = ["release-binary", "vtdecode", "vtencode", "metal-sink", "coreaudio", "audiotoolbox-aac", "avfoundation", "screencapture"]
 release-aar = ["release-binary", "camera2", "mediacodec-wgpu", "aaudio"]
