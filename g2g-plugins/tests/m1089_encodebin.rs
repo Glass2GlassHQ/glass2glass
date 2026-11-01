@@ -569,9 +569,14 @@ fn a_profile_with_no_writer_or_encoder_here_says_which() {
     let err =
         parse_error("videotestsrc ! encodebin profile=\"video/x-ivf:video/x-vp9\" ! fakesink");
     assert!(err.contains("no muxer for video/x-ivf"), "{err:?}");
-    // H.265 encoding needs hardware (NVENC / VideoToolbox / MediaCodec), so a
+    // H.265 encoding needs hardware (NVENC / VideoToolbox / MediaCodec / VA-API), so a
     // plain software build has no encoder for it.
-    #[cfg(not(any(feature = "nvenc", feature = "vtencode", feature = "mediacodec")))]
+    #[cfg(not(any(
+        feature = "nvenc",
+        feature = "vtencode",
+        feature = "mediacodec",
+        feature = "ffmpeg"
+    )))]
     {
         let err = parse_error(
             "videotestsrc ! encodebin profile=\"video/x-matroska:video/x-h265\" ! fakesink",
