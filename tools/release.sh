@@ -82,6 +82,10 @@ cmd_bump() {
     # the default user-agent property shows the version on the element cards
     sed -i "s|<code>g2g/$current</code>|<code>g2g/$next</code>|" docs/elements.html
     cargo update -q --workspace
+    # crates outside the workspace have their own Cargo.lock, which pins the g2g-* path crate versions
+    git ls-files '*/Cargo.lock' | while read -r lockfile; do
+        cargo metadata -q --format-version 1 --manifest-path "$(dirname "$lockfile")/Cargo.toml" > /dev/null
+    done
     tools/api-breaks.sh record
     git commit -q -am "rev to $next"
     echo "bumped $current to $next, push when ready"
