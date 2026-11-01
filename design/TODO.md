@@ -41,9 +41,6 @@ The release `g2g-launch` binaries and wheels must start on a host with no media
 libraries installed. Everything below ships in 0.12.0.
 
 - **AAC encode on macOS.** An AudioToolbox AAC-LC encoder (gst `atenc`).
-- **macOS and Windows downloads.** The binaries are unsigned: give the macOS
-  binary an ad-hoc signature and document clearing the quarantine flag and the
-  SmartScreen prompt in the README.
 - **Bare-host check.** Before publishing, run each release binary on a GPU-less
   host on an H.264 + AAC MP4 and a camera to WebRTC pipeline, and check that
   `decodebin` picks a software decoder rather than `vulkanvideodec` on Linux.

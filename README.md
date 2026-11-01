@@ -103,8 +103,20 @@ The last line needs no display: it writes the first frame to `ball.png`.
 
 Prebuilt `g2g-launch` and `g2g-inspect` for Linux, macOS and Windows are on each
 [GitHub release](https://github.com/Glass2GlassHQ/glass2glass/releases/latest).
-They leave out the elements that need distro libraries (ffmpeg, libvpx, libopus,
-PipeWire, Pulse).
+They need no codec libraries on the host. The Linux tarball carries the LGPL
+ffmpeg libraries in `lib/` next to the binaries, so keep the folder together, and
+the matching ffmpeg source is a release asset. They leave out `vpxenc`, PipeWire
+and Pulse.
+
+The binaries are unsigned. macOS refuses to run one downloaded with a browser
+until the quarantine flag is cleared:
+
+```sh
+xattr -dr com.apple.quarantine g2g-*-aarch64-apple-darwin
+```
+
+On Windows, SmartScreen warns on the first run: pick More info, then Run anyway,
+or run `Get-ChildItem -Recurse | Unblock-File` in the extracted folder.
 
 ### Other languages
 
@@ -579,6 +591,8 @@ cargo clippy --workspace --all-targets
 | `H264Parse` | (default) | none |
 | `FfmpegH264Dec` (sw / `NvdecCuvid` / `NvdecCuda` / `Vaapi`) | `ffmpeg` | Linux + libavcodec |
 | `FfmpegVideoEnc` (`x264enc`, `ffmpegenc`), and `vah264enc` / `vah265enc` / `vaav1enc` on VA-API GPUs | `ffmpeg` | Linux + libavcodec (+ the GPU's VA-API driver) |
+| `OpenH264Dec` / `OpenH264Enc` (`openh264dec` / `openh264enc`) | `openh264` | Linux, OpenH264 built from source |
+| `AacDec` / `MpegAudioDec` (`aacdec` / `mpegaudiodec`, AAC-LC and MP2 / MP3 in pure Rust via symphonia) | `aac-decode`, `mpeg-audio-decode` | none |
 | AVI / QuickTime / Matroska streams g2g has no caps type for (Cinepak, Indeo, Ut Video, QuickTime RLE, ADPCM, MACE, ...), demuxed under their container tag and decoded by `ffmpegdec` / `ffmpegaudiodec` | `ffmpeg-long-tail` | Linux + libavcodec + libavformat |
 | `MfDecode` / `MfEncode` / `MfAacEncode` / `MfAacDecode` | `mf-decode`, `mf-encode`, `mf-aac` | Windows + Media Foundation |
 | `VtDecode` / `VtEncode` (H.264 / H.265, zero-copy `CVPixelBuffer` output via `cv-output`) | `vtdecode`, `vtencode` | macOS + VideoToolbox |
@@ -1382,6 +1396,9 @@ host. TLS uses rustls, so no build links OpenSSL.
 Each of these features also needs `pkg-config` and a C compiler to build:
 `pkgconf-pkg-config gcc` on Fedora, `pkg-config build-essential` on Debian /
 Ubuntu, `pkgconf base-devel` on Arch.
+
+`opus` builds libopus from source with cmake, and `openh264` builds OpenH264
+with the C++ compiler. Both add their x86 assembly when `nasm` is installed.
 
 USAC (xHE-AAC) decode needs libavcodec 62 (ffmpeg 8) or later.
 

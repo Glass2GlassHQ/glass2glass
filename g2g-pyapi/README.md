@@ -17,8 +17,8 @@ pip install glass2glass
 
 Wheels exist for Linux (x86_64, aarch64), macOS (arm64) and Windows (x86_64)
 on CPython 3.11 and later. They carry the same elements as the release
-binaries. For the elements that need distro libraries (ffmpeg, libvpx,
-PipeWire), build the wheel yourself.
+binaries, and the Linux wheels include the LGPL ffmpeg libraries. For
+`vpxenc` or PipeWire, build the wheel yourself.
 
 ## Building the wheel (maturin)
 
