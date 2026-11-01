@@ -15,6 +15,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M2060: `openh264enc` encodes H.264 with the bundled OpenH264, and `encodebin` and `avenc_h264` fall back to it when libavcodec has no libx264 or NVENC.
 - M2061: `atenc` encodes AAC-LC with macOS AudioToolbox, and the macOS release binaries include it.
 - M2062: the Linux and macOS release binaries and wheels link libvpx 1.17 built from source, adding `vpxenc` for VP8 and VP9.
+- M2063: the Windows release binary and wheel link a static libvpx from vcpkg, and the wheel uses the static C runtime.
 
 ## 0.11.0
 

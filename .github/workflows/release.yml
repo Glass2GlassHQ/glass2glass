@@ -10,6 +10,10 @@ permissions:
 
 env:
   CARGO_PROFILE_RELEASE_STRIP: symbols
+  # a fresh Windows install has no Visual C++ runtime
+  CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: -C target-feature=+crt-static
+  # libopus builds with cmake and must use the same static C runtime
+  CMAKE_TOOLCHAIN_FILE_x86_64_pc_windows_msvc: ${{ github.workspace }}/tools/msvc-static-crt.cmake
 
 jobs:
   build:
@@ -26,10 +30,6 @@ jobs:
           - { runner: macos-latest, target: aarch64-apple-darwin, features: release-binary-macos }
           - { runner: windows-latest, target: x86_64-pc-windows-msvc, features: release-binary-windows }
     env:
-      # a fresh Windows install has no Visual C++ runtime
-      CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: -C target-feature=+crt-static
-      # libopus builds with cmake and must use the same static C runtime
-      CMAKE_TOOLCHAIN_FILE_x86_64_pc_windows_msvc: ${{ github.workspace }}/tools/msvc-static-crt.cmake
       # the ffmpeg libraries ship in lib/ next to the binary, DT_RPATH also covers libavcodec loading libavutil
       CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: -C link-arg=-Wl,--disable-new-dtags,-rpath,$ORIGIN/lib
       CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS: -C link-arg=-Wl,--disable-new-dtags,-rpath,$ORIGIN/lib
@@ -52,7 +52,6 @@ jobs:
         if: runner.os == 'Linux'
         run: tools/ffmpeg-build.sh "$CODEC_PREFIX" | sed 's/^export //' >> "$GITHUB_ENV"
       - name: build libvpx
-        if: runner.os != 'Windows'
         run: tools/libvpx-build.sh "$CODEC_PREFIX" | sed 's/^export //' >> "$GITHUB_ENV"
       - name: build
         run: >
@@ -94,10 +93,8 @@ jobs:
           if [ "${{ runner.os }}" = Linux ]; then
             "$name/g2g-launch" -q audiotestsrc num-buffers=20 ! avenc_aac ! fakesink
           fi
-          if [ "${{ runner.os }}" != Windows ]; then
-            "$name/g2g-launch" -q videotestsrc num-buffers=10 ! vpxenc codec=vp8 ! fakesink
-            cat "$CODEC_PREFIX"/libvpx-*/LICENSE "$CODEC_PREFIX"/libvpx-*/PATENTS > "$name/LICENSE-LIBVPX.txt"
-          fi
+          "$name/g2g-launch" -q videotestsrc num-buffers=10 ! vpxenc codec=vp8 ! fakesink
+          cp "$CODEC_PREFIX/LICENSE-LIBVPX.txt" "$name/"
           if [ "${{ runner.os }}" = Windows ]; then 7z a "$name.zip" "$name"; else tar czf "$name.tar.gz" "$name"; fi
           # LGPL: the ffmpeg source the bundled libraries were built from
           if [ "${{ matrix.target }}" = x86_64-unknown-linux-gnu ]; then cp "$CODEC_PREFIX"/ffmpeg-*.tar.xz .; fi
@@ -154,12 +151,12 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-about@0.9.3
-      - name: build libvpx (macOS)
-        if: runner.os == 'macOS'
+      - name: build libvpx (macOS, Windows)
+        if: runner.os != 'Linux'
         shell: bash
         run: |
           tools/libvpx-build.sh "$HOME/g2g-codecs" | sed 's/^export //' >> "$GITHUB_ENV"
-          cat "$HOME"/g2g-codecs/libvpx-*/LICENSE "$HOME"/g2g-codecs/libvpx-*/PATENTS > g2g-pyapi/LICENSE-LIBVPX.txt
+          cp "$HOME/g2g-codecs/LICENSE-LIBVPX.txt" g2g-pyapi/
       # maturin puts every LICEN[CS]E* file next to pyproject.toml into the wheel
       - name: third-party licences
         shell: bash
@@ -178,7 +175,7 @@ jobs:
             ../tools/ffmpeg-build.sh /opt/g2g-codecs
             ../tools/libvpx-build.sh /opt/g2g-codecs
             cp /opt/g2g-codecs/ffmpeg-*/COPYING.LGPLv2.1 LICENSE-FFMPEG.txt
-            cat /opt/g2g-codecs/libvpx-*/LICENSE /opt/g2g-codecs/libvpx-*/PATENTS > LICENSE-LIBVPX.txt
+            cp /opt/g2g-codecs/LICENSE-LIBVPX.txt .
           # repair copies the bundled ffmpeg libraries into the wheel
           docker-options: -e PKG_CONFIG_PATH=/opt/g2g-codecs/lib/pkgconfig -e VPX_STATIC=1 -e LD_LIBRARY_PATH=/opt/g2g-codecs/lib
           # --features replaces the list in pyproject.toml

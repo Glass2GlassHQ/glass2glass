@@ -11,11 +11,26 @@ if [ "$#" -ne 1 ]; then
 fi
 
 prefix=$(realpath -m "$1")
+mkdir -p "$prefix"
+
+case "$(uname -s)" in
+MINGW* | MSYS*)
+    # vcpkg's libvpx port drives libvpx's own MSVC project generator, x64-windows-static links the static C runtime
+    vcpkg install --triplet x64-windows-static libvpx pkgconf >&2
+    vcpkg_root=$(cygpath -m "$VCPKG_INSTALLATION_ROOT")
+    installed="$vcpkg_root/installed/x64-windows-static"
+    cat "$installed/share/libvpx/copyright" "$vcpkg_root"/buildtrees/libvpx/src/*/PATENTS > "$prefix/LICENSE-LIBVPX.txt"
+    echo "export PKG_CONFIG=$installed/tools/pkgconf/pkgconf.exe"
+    echo "export PKG_CONFIG_PATH=$installed/lib/pkgconfig"
+    echo "export VPX_STATIC=1"
+    exit 0
+    ;;
+esac
+
 tarball="$prefix/libvpx-$LIBVPX_VERSION.tar.gz"
 source_dir="$prefix/libvpx-$LIBVPX_VERSION"
 
 if [ ! -f "$prefix/lib/pkgconfig/vpx.pc" ]; then
-    mkdir -p "$prefix"
     if [ ! -f "$tarball" ]; then
         curl -sfL -o "$tarball" "https://github.com/webmproject/libvpx/archive/refs/tags/v$LIBVPX_VERSION.tar.gz"
     fi
@@ -36,6 +51,9 @@ if [ ! -f "$prefix/lib/pkgconfig/vpx.pc" ]; then
     make -j"$(getconf _NPROCESSORS_ONLN)" >&2
     make install >&2
 fi
+
+# x86inc is ISC licensed and assembled into libvpx on x86 and x64
+cat "$source_dir/LICENSE" "$source_dir/PATENTS" "$source_dir/third_party/x86inc/LICENSE" > "$prefix/LICENSE-LIBVPX.txt"
 
 echo "export PKG_CONFIG_PATH=$prefix/lib/pkgconfig"
 # pkg-config-rs links the static archive and its private libraries when this is set
