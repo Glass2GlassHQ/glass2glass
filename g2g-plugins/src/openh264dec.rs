@@ -21,18 +21,6 @@ use openh264::OpenH264API;
 
 use crate::inputstamp::{InputStamp, PendingInputStamps};
 
-// openh264 2.5 and later carry ABI 8, the ABI the openh264 crate's bindings are generated from
-const LIBOPENH264: &str = "libopenh264.so.8";
-
-fn load_library() -> Option<OpenH264API> {
-    // SAFETY: the soname pins ABI 8, which the bindings match.
-    unsafe { OpenH264API::from_blob_path_unchecked(LIBOPENH264) }.ok()
-}
-
-pub(crate) fn missing_library() -> Option<&'static str> {
-    load_library().is_none().then_some(LIBOPENH264)
-}
-
 struct DecodedPicture {
     width: u32,
     height: u32,
@@ -73,9 +61,7 @@ fn pack_i420(yuv: &DecodedYUV<'_>) -> Result<DecodedPicture, G2gError> {
 }
 
 fn open_decoder() -> Result<Decoder, G2gError> {
-    let api = load_library().ok_or(G2gError::Hardware(HardwareError::LibraryNotFound(
-        LIBOPENH264,
-    )))?;
+    let api = OpenH264API::from_source();
     // openh264's default flushes after every access unit, which hands a B-frame stream out of order
     let config = DecoderConfig::new().flush_after_decode(Flush::NoFlush);
     Decoder::with_api_config(api, config).map_err(|_| G2gError::Hardware(HardwareError::Other))
@@ -298,7 +284,7 @@ impl AsyncElement for OpenH264Dec {
         ElementMetadata::new(
             "OpenH264 video decoder",
             "Codec/Decoder/Video",
-            "Decodes H.264 to I420 with Cisco's libopenh264, loaded at runtime",
+            "Decodes H.264 to I420 with OpenH264",
             "g2g",
         )
     }
@@ -400,11 +386,7 @@ mod tests {
         }
     }
 
-    fn decode(annexb: &[u8]) -> Option<Vec<PipelinePacket>> {
-        // hosts without libopenh264 installed have no decoder to test
-        if missing_library().is_some() {
-            return None;
-        }
+    fn decode(annexb: &[u8]) -> Vec<PipelinePacket> {
         let parsed = run(
             &mut H264Parse::reframing(),
             &h264(BitstreamAlignment::Unspecified),
@@ -419,15 +401,12 @@ mod tests {
             &h264(BitstreamAlignment::AccessUnit),
             access_units,
         );
-        Some(decoded.packets)
+        decoded.packets
     }
 
     #[test]
     fn a_b_frame_stream_matches_ffmpeg() {
-        let Some(packets) = decode(include_bytes!("../tests/fixtures/h264_64x48_bframes.h264"))
-        else {
-            return;
-        };
+        let packets = decode(include_bytes!("../tests/fixtures/h264_64x48_bframes.h264"));
         assert_eq!(
             data_bytes(&packets),
             include_bytes!("../tests/fixtures/h264_64x48_bframes.h264.i420"),
@@ -436,11 +415,9 @@ mod tests {
 
     #[test]
     fn a_resolution_change_keeps_every_picture() {
-        let Some(packets) = decode(include_bytes!(
+        let packets = decode(include_bytes!(
             "../tests/fixtures/h264_reconfig_640x480_to_320x240.h264"
-        )) else {
-            return;
-        };
+        ));
         let mut pictures_per_geometry: Vec<((Dim, Dim), usize)> = Vec::new();
         for packet in &packets {
             match packet {

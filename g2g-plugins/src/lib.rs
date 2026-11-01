@@ -1566,7 +1566,7 @@ pub mod ffmpegdec;
 // of `ffmpegdec`. Same Linux + `ffmpeg` gate.
 #[cfg(all(target_os = "linux", feature = "ffmpeg"))]
 pub mod ffmpegaudiodec;
-// H.264 decode with Cisco's libopenh264, loaded at runtime.
+// H.264 decode with OpenH264, built from source and linked statically.
 #[cfg(all(target_os = "linux", feature = "openh264"))]
 pub mod openh264dec;
 // libavcodec setup for codecs known only by container tag.

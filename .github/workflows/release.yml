@@ -30,6 +30,10 @@ jobs:
       CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: -C target-feature=+crt-static
       # libopus builds with cmake and must use the same static C runtime
       CMAKE_TOOLCHAIN_FILE_x86_64_pc_windows_msvc: ${{ github.workspace }}/tools/msvc-static-crt.cmake
+      FFMPEG_PREFIX: /opt/g2g-ffmpeg
+      # the ffmpeg libraries ship in lib/ next to the binary, DT_RPATH also covers libavcodec loading libavutil
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: -C link-arg=-Wl,--disable-new-dtags,-rpath,$ORIGIN/lib
+      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS: -C link-arg=-Wl,--disable-new-dtags,-rpath,$ORIGIN/lib
     defaults:
       run:
         shell: bash
@@ -39,19 +43,24 @@ jobs:
         run: |
           apt-get update
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            build-essential pkg-config cmake curl ca-certificates git clang libclang-dev \
+            build-essential pkg-config cmake nasm curl xz-utils ca-certificates git clang libclang-dev \
             libwayland-dev libxkbcommon-dev
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - name: build ffmpeg
+        if: runner.os == 'Linux'
+        run: tools/ffmpeg-build.sh "$FFMPEG_PREFIX" | sed 's/^export //' >> "$GITHUB_ENV"
       - name: build
         run: >
           cargo build --locked --release -p g2g-plugins --target ${{ matrix.target }}
           --features ${{ matrix.features }} --bin g2g-launch --bin g2g-inspect
-      - name: links only system libraries (Linux)
+      - name: links only system and bundled libraries (Linux)
         if: runner.os == 'Linux'
         run: |
-          unexpected=$(readelf -d target/${{ matrix.target }}/release/g2g-launch | sed -n 's/.*Shared library: \[\(.*\)\]/\1/p' \
-            | grep -vxE 'libc\.so\.6|libm\.so\.6|libgcc_s\.so\.1|ld-linux-.*\.so\.[0-9]+' || true)
+          unexpected=$(readelf -d target/${{ matrix.target }}/release/g2g-launch "$FFMPEG_PREFIX"/lib/lib*.so.*.*.* \
+            | sed -n 's/.*Shared library: \[\(.*\)\]/\1/p' | sort -u \
+            | grep -vxE 'libc\.so\.6|libm\.so\.6|libgcc_s\.so\.1|libstdc\+\+\.so\.6|ld-linux-.*\.so\.[0-9]+' \
+            | while read -r library; do [ -f "$FFMPEG_PREFIX/lib/$library" ] || echo "$library"; done)
           [ -z "$unexpected" ] || { echo "::error::g2g-launch links $unexpected"; exit 1; }
       - name: links only system libraries (macOS)
         if: runner.os == 'macOS'
@@ -59,8 +68,6 @@ jobs:
           unexpected=$(otool -L target/${{ matrix.target }}/release/g2g-launch | tail -n +2 \
             | grep -vE '^\s+(/usr/lib/|/System/Library/)' || true)
           [ -z "$unexpected" ] || { echo "::error::g2g-launch links $unexpected"; exit 1; }
-      - name: smoke run
-        run: target/${{ matrix.target }}/release/g2g-launch -q audiotestsrc num-buffers=5 ! fakesink
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-about@0.9.3
@@ -74,13 +81,25 @@ jobs:
           mkdir "$name"
           cp target/${{ matrix.target }}/release/g2g-launch* target/${{ matrix.target }}/release/g2g-inspect* LICENSE LICENSE-THIRD-PARTY.txt "$name/"
           rm -f "$name"/*.d "$name"/*.pdb
+          if [ "${{ runner.os }}" = Linux ]; then
+            mkdir "$name/lib"
+            find "$FFMPEG_PREFIX/lib" -maxdepth 1 -name 'lib*.so.*' ! -name '*.so.*.*' -exec cp -L {} "$name/lib/" \;
+            cp "$FFMPEG_PREFIX"/ffmpeg-*/COPYING.LGPLv2.1 "$name/LICENSE-FFMPEG.txt"
+          fi
+          "$name/g2g-launch" -q audiotestsrc num-buffers=5 ! fakesink
+          if [ "${{ runner.os }}" = Linux ]; then
+            "$name/g2g-launch" -q audiotestsrc num-buffers=20 ! avenc_aac ! fakesink
+          fi
           if [ "${{ runner.os }}" = Windows ]; then 7z a "$name.zip" "$name"; else tar czf "$name.tar.gz" "$name"; fi
+          # LGPL: the ffmpeg source the bundled libraries were built from
+          if [ "${{ matrix.target }}" = x86_64-unknown-linux-gnu ]; then cp "$FFMPEG_PREFIX"/ffmpeg-*.tar.xz .; fi
       - uses: actions/upload-artifact@v7
         with:
           name: release-asset-${{ matrix.target }}
           path: |
             g2g-*.tar.gz
             g2g-*.zip
+            ffmpeg-*.tar.xz
 
   aar:
     name: android aar
@@ -140,9 +159,14 @@ jobs:
           working-directory: g2g-pyapi
           target: ${{ matrix.target }}
           manylinux: "2_28"
-          before-script-linux: dnf install -y clang-devel cmake wayland-devel libxkbcommon-devel
+          before-script-linux: |
+            dnf install -y clang-devel cmake nasm xz wayland-devel libxkbcommon-devel
+            ../tools/ffmpeg-build.sh /opt/g2g-ffmpeg
+            cp /opt/g2g-ffmpeg/ffmpeg-*/COPYING.LGPLv2.1 LICENSE-FFMPEG.txt
+          # repair copies the bundled ffmpeg libraries into the wheel
+          docker-options: -e PKG_CONFIG_PATH=/opt/g2g-ffmpeg/lib/pkgconfig -e LD_LIBRARY_PATH=/opt/g2g-ffmpeg/lib
           # --features replaces the list in pyproject.toml
-          args: --release --locked --out dist --auditwheel check --features ${{ matrix.features }}
+          args: --release --locked --out dist --auditwheel repair --features ${{ matrix.features }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -199,5 +223,5 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || gh release create "$GITHUB_REF_NAME" --verify-tag --notes \
-            "Changes are in CHANGELOG.md. These binaries leave out the elements that need distro libraries (ffmpeg, libvpx, PipeWire, Pulse): build those with \`cargo install g2g-plugins --features linux-full --bin g2g-launch\`."
+            "Changes are in CHANGELOG.md. These binaries leave out the elements that need distro libraries (libvpx, PipeWire, Pulse): build those with \`cargo install g2g-plugins --features linux-full --bin g2g-launch\`."
           gh release upload "$GITHUB_REF_NAME" dist/* --clobber

@@ -192,7 +192,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             pkg-config libasound2-dev libpulse-dev libopus-dev \
-            libwayland-dev libxkbcommon-dev libdav1d-dev nasm
+            libwayland-dev libxkbcommon-dev libdav1d-dev nasm \
+            libavcodec-dev libavformat-dev libavutil-dev libswscale-dev
       # Audio sink without its capture sibling, plus one display: the shape that
       # left `pulsepcm::opt_name` and `alsapcm::frame_bytes` dead.
       - name: pulse sink + wayland display
@@ -212,7 +213,7 @@ jobs:
       - name: codecs only
         run: >
           cargo check -p g2g-plugins --locked --all-targets --features
-          dav1d,rav1d,mjpeg,opus,vorbis
+          dav1d,rav1d,mjpeg,opus,vorbis,aac-decode,mpeg-audio-decode,openh264
       - name: release binary feature set
         run: cargo check -p g2g-plugins --locked --bin g2g-launch --features release-binary-linux
 

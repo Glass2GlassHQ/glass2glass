@@ -2049,14 +2049,12 @@ fn register_autoplug_candidates(reg: &mut Registry) {
     }));
     // Negative rank so the GPU decoders and ffmpegdec win the auto-plug tiebreak.
     #[cfg(all(target_os = "linux", feature = "openh264"))]
-    if crate::openh264dec::missing_library().is_none() {
-        reg.register(
-            ElementFactory::of::<crate::openh264dec::OpenH264Dec>("openh264dec", |_| {
-                Box::new(crate::openh264dec::OpenH264Dec::new())
-            })
-            .rank(-10),
-        );
-    }
+    reg.register(
+        ElementFactory::of::<crate::openh264dec::OpenH264Dec>("openh264dec", |_| {
+            Box::new(crate::openh264dec::OpenH264Dec::new())
+        })
+        .rank(-10),
+    );
     // Pure-Rust AAC / MPEG audio decode. Negative rank so ffmpegaudiodec wins the
     // auto-plug tiebreak when both are built.
     #[cfg(feature = "aac-decode")]
@@ -2832,12 +2830,9 @@ pub fn feature_gated_element(name: &str) -> Option<&'static FeatureGatedElement>
 /// real value comes from a property / builder before use (the placeholder only
 /// has to be side-effect-free, since `inspect` default-builds to read metadata).
 #[allow(unused_variables)]
-#[cfg(any(
-    all(
-        any(target_os = "linux", windows),
-        any(feature = "nvdec", feature = "nvenc")
-    ),
-    all(target_os = "linux", feature = "openh264")
+#[cfg(all(
+    any(target_os = "linux", windows),
+    any(feature = "nvdec", feature = "nvenc")
 ))]
 fn driver_installed(missing_library: Option<&'static str>) -> Result<(), alloc::string::String> {
     missing_library.map_or(Ok(()), |file| {
@@ -2908,12 +2903,10 @@ fn register_feature_gated(reg: &mut Registry) {
         || Box::new(crate::symphoniadec::AacDec::new()),
     ));
     #[cfg(all(target_os = "linux", feature = "openh264"))]
-    reg.register_launch(
-        LaunchFactory::of::<crate::openh264dec::OpenH264Dec>("openh264dec", || {
-            Box::new(crate::openh264dec::OpenH264Dec::new())
-        })
-        .with_usable(|| driver_installed(crate::openh264dec::missing_library())),
-    );
+    reg.register_launch(LaunchFactory::of::<crate::openh264dec::OpenH264Dec>(
+        "openh264dec",
+        || Box::new(crate::openh264dec::OpenH264Dec::new()),
+    ));
     #[cfg(feature = "mpeg-audio-decode")]
     reg.register_launch(LaunchFactory::of::<crate::symphoniadec::MpegAudioDec>(
         "mpegaudiodec",

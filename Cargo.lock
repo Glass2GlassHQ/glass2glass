@@ -6962,8 +6962,9 @@ version = "0.9.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "414f5bd53da84e126dc9449eb6f0003bb6994b2de63c48119b0c9b7a8b28086a"
 dependencies = [
- "libloading 0.8.9",
- "sha2",
+ "cc",
+ "nasm-rs",
+ "walkdir",
 ]
 
 [[package]]

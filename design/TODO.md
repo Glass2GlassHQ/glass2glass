@@ -38,28 +38,22 @@ Highest leverage first:
 ## Release binaries
 
 The release `g2g-launch` binaries and wheels must start on a host with no media
-libraries installed.
+libraries installed. Everything below ships in 0.12.0.
 
-- **0.12.0.** `openh264enc` on the runtime-loaded `libopenh264`. Rerun the
-  release binary in a GPU-less `fedora:43` container on an H.264 + AAC MP4 before
-  publishing, and check that `decodebin` picks `openh264dec` there rather than
-  `vulkanvideodec`.
+- **openh264enc.** H.264 encode on the bundled OpenH264.
+- **AAC encode on macOS.** An AudioToolbox AAC-LC encoder (gst `atenc`).
+- **macOS and Windows downloads.** The binaries are unsigned: give the macOS
+  binary an ad-hoc signature and document clearing the quarantine flag and the
+  SmartScreen prompt in the README.
+- **Bare-host check.** Before publishing, run each release binary on a GPU-less
+  host on an H.264 + AAC MP4 and a camera to WebRTC pipeline, and check that
+  `decodebin` picks a software decoder rather than `vulkanvideodec` on Linux.
 - **openh264dec and ffmpeg disagree on one B-pyramid frame.** Frame 20 of
   `h264_bpyramid_320x240.h264` differs in 5 samples by 1. Find which decoder is
   off against a third decoder.
-- **Load ffmpeg at runtime in every build.** Replace `ffmpeg-next` with
-  runtime-loaded bindings to libavutil, libavcodec, libavformat and libswscale
-  for libavcodec 59 to 62 (ffmpeg 5.1 to 8), Linux only. Set codec context fields
-  through `av_opt_*`, and keep per-major `#[repr(C)]` layouts only for the
-  `AVFrame` / `AVPacket` fields with no accessor. A missing or older library makes
-  the elements unusable with a reason. When the registry is built, check each
-  codec with `avcodec_find_decoder` / `avcodec_find_encoder` so `accepting_input`
-  offers only what the host ffmpeg has. Add the ffmpeg elements to the release
-  sets.
-- **ffmpeg CI matrix.** A C probe compares the per-major layouts against the
-  headers in `debian:12`, `ubuntu:24.04`, `debian:13` and `archlinux`. The full
-  ffmpeg suite runs on one major, and the release binary decodes an H.264 + AAC
-  file and an HEVC file in all four containers.
+- **Release ffmpeg run on a bare host.** Run a downloaded Linux release tarball
+  and wheel on a bare `ubuntu:22.04` and `fedora:43` on an HEVC and a VP9 file,
+  and check that `decodebin` picks the bundled ffmpeg.
 - **Bundle libvpx.** Build libvpx from source for `vpxenc` in place of the
   `build.rs` bindgen run against system headers, and add `vpx` to the release
   sets.
