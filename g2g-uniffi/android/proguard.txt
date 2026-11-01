@@ -1,0 +1,3 @@
+# JNA finds the native functions and structure fields of these classes by reflection
+-keep class com.sun.jna.** { *; }
+-keep class dev.g2g.** { *; }

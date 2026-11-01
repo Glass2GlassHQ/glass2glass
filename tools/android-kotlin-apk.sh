@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
-# Build g2g-uniffi/examples/android as a debug-signed APK for one ABI and print
-# its path last. Needs cargo-ndk with ANDROID_NDK_HOME and the rustup target, a
-# JDK, and SDK build-tools plus a platform under ANDROID_SDK_ROOT (default
-# ~/Android/sdk). No Gradle: kotlinc, d8 and aapt2 run directly.
+# Build g2g-uniffi/examples/android on the g2g AAR as a debug-signed APK for one
+# ABI and print its path last. Needs what tools/android-aar.sh needs plus SDK
+# build-tools. No Gradle: kotlinc, d8 and aapt2 run directly.
 #
 # Usage: tools/android-kotlin-apk.sh [abi]   (default arm64-v8a)
 set -euo pipefail
@@ -10,8 +9,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/kotlin-tools.sh"
 
 ABI="${1:-arm64-v8a}"
 case "$ABI" in
-    arm64-v8a) TRIPLE=aarch64-linux-android ;;
-    x86_64)    TRIPLE=x86_64-linux-android ;;
+    arm64-v8a | x86_64) ;;
     *) echo "unknown ABI '$ABI' (use arm64-v8a | x86_64)" >&2; exit 2 ;;
 esac
 
@@ -22,22 +20,20 @@ MIN_SDK=26
 EXAMPLE="$REPO/g2g-uniffi/examples/android"
 OUT="$TARGET/android-kotlin-apk/$ABI"
 
-fetch_kotlin_tools
-generate_bindings "$OUT/generated" kotlin
-(cd "$REPO" && cargo ndk --platform "$MIN_SDK" -t "$ABI" build --locked --release -p g2g-uniffi \
-    --features g2g-plugins/camera2,g2g-plugins/mediacodec-wgpu)
+AAR="$("$REPO/tools/android-aar.sh" "$ABI" | tail -1)"
 
-rm -rf "$OUT/jna" "$OUT/classes" "$OUT/dex" "$OUT/stage" "$OUT/assets"
+rm -rf "$OUT/aar" "$OUT/jna" "$OUT/classes" "$OUT/dex" "$OUT/stage" "$OUT/assets"
 mkdir -p "$OUT/dex" "$OUT/stage/lib/$ABI" "$OUT/assets"
 cp "$REPO/g2g-plugins/tests/fixtures/h264_640x480.h264" "$OUT/assets/"
+unzip -q "$AAR" -d "$OUT/aar"
 unzip -q "$JNA_AAR" classes.jar "jni/$ABI/libjnidispatch.so" -d "$OUT/jna"
-"$KOTLINC" -no-jdk -no-reflect -cp "$ANDROID_JAR:$OUT/jna/classes.jar" -d "$OUT/classes" \
-    "$OUT/generated" "$REPO/g2g-uniffi/android/Surfaces.kt" "$EXAMPLE/MainActivity.kt"
+"$KOTLINC" -no-jdk -no-reflect -cp "$ANDROID_JAR:$OUT/jna/classes.jar:$OUT/aar/classes.jar" \
+    -d "$OUT/classes" "$EXAMPLE/MainActivity.kt"
 find "$OUT/classes" -name '*.class' -print0 \
     | xargs -0 "$BUILD_TOOLS/d8" --release --min-api "$MIN_SDK" --lib "$ANDROID_JAR" \
-        --output "$OUT/dex" "$KOTLIN_STDLIB" "$OUT/jna/classes.jar"
+        --output "$OUT/dex" "$KOTLIN_STDLIB" "$OUT/jna/classes.jar" "$OUT/aar/classes.jar"
 
-cp "$TARGET/$TRIPLE/release/libg2g_uniffi.so" "$OUT/jna/jni/$ABI/libjnidispatch.so" "$OUT/stage/lib/$ABI/"
+cp "$OUT/aar/jni/$ABI/libg2g_uniffi.so" "$OUT/jna/jni/$ABI/libjnidispatch.so" "$OUT/stage/lib/$ABI/"
 cp "$OUT/dex/classes.dex" "$OUT/stage/"
 "$BUILD_TOOLS/aapt2" link -o "$OUT/unsigned.apk" --manifest "$EXAMPLE/AndroidManifest.xml" \
     -I "$ANDROID_JAR" -A "$OUT/assets" --min-sdk-version "$MIN_SDK" --target-sdk-version 35

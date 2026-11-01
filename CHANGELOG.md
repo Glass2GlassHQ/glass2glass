@@ -147,6 +147,7 @@ Breaking: `QosMessage` gains `downstream_proc_ns`, `ElementProbe` is no longer `
 - M2046: every TLS client and the WHIP server use rustls on ring instead of native-tls, so no build links OpenSSL.
 - M2047: each release tag attaches `g2g-launch` and `g2g-inspect` binaries for Linux, macOS and Windows.
 - M2048: each release tag publishes the Python bindings to PyPI as `glass2glass`.
+- M2049: each release tag attaches an Android AAR of the Kotlin bindings for arm64-v8a and x86_64.
 
 ## 0.10.0
 

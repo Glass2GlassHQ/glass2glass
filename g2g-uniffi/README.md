@@ -28,7 +28,18 @@ This builds `libg2g_uniffi.so`, generates the Swift bindings, and runs [`example
 
 ## Android
 
-Build the library with `cargo ndk --platform 26 -t arm64-v8a build --release -p g2g-uniffi`. Package `libg2g_uniffi.so` with the generated Kotlin, [`android/Surfaces.kt`](android/Surfaces.kt), and JNA's Android archive (`net.java.dev.jna:jna:<version>@aar`). Add the elements of a `g2g-plugins` feature with `--features g2g-plugins/camera2` (or `mediacodec`, `aaudio`).
+Each GitHub release has `g2g-<version>-android.aar` for arm64-v8a and x86_64, API 26 and up. It carries the elements of the release binaries plus `camera2`, `mediacodec`, `aaudio` and `surfacesink`. Add JNA next to it, since a file dependency brings no dependencies of its own:
+
+```kotlin
+dependencies {
+    implementation(files("libs/g2g-v0.11.0-android.aar"))
+    implementation("net.java.dev.jna:jna:5.19.1@aar")
+}
+```
+
+`tools/android-aar.sh` builds the same AAR from a checkout.
+
+To build the library yourself, run `cargo ndk --platform 26 -t arm64-v8a build --release -p g2g-uniffi`. Package `libg2g_uniffi.so` with the generated Kotlin, [`android/Surfaces.kt`](android/Surfaces.kt), and JNA's Android archive (`net.java.dev.jna:jna:<version>@aar`). Add the elements of a `g2g-plugins` feature with `--features g2g-plugins/camera2` (or `mediacodec`, `aaudio`).
 
 `surfacesink channel=<name>` draws RGBA frames into the `Surface` attached under that name and drops frames while none is attached. It copies frames in host memory. Built with `g2g-plugins/mediacodec-wgpu`, it also presents the GPU textures of `mediacodecdec gpu-output=true` with no copy. The first frame decides which kind a `Surface` takes until it is detached, and a frame of the other kind fails the run. Attach in `surfaceCreated` and detach in `surfaceDestroyed`. `detach` returns once the sink has stopped drawing. The frame is scaled to the view, so size the view to the frame's aspect ratio.
 

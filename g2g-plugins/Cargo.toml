@@ -56,6 +56,7 @@ release-wheel-linux = [
     "kms-sink", "wayland-sink", "wgpu-present",
 ]
 release-binary-macos = ["release-binary", "vtdecode", "vtencode", "metal-sink", "coreaudio", "avfoundation", "screencapture"]
+release-aar = ["release-binary", "camera2", "mediacodec-wgpu", "aaudio"]
 release-binary-windows = ["release-binary", "mf-decode", "mf-encode", "mf-aac", "wasapi-sink", "wasapi-src", "d3d11-sink", "mf-video-src"]
 # libc lets g2g-launch die on a closed stdout the way gst-launch does
 std = ["g2g-core/std", "dep:tokio", "dep:libc"]

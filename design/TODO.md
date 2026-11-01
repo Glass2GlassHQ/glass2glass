@@ -26,10 +26,6 @@ Highest leverage first:
    device on wasm); it would need raw `web_sys` WebGPU + hand-rolled
    onnxruntime-web bindings.
 
-## Distribution
-
-- A prebuilt Android AAR for the Kotlin bindings.
-
 ## Architecture guarantees (validation-first)
 
 - **CI never runs m960 or m961 with `ffmpeg`.** The conformance job runs them with `rav1d` alone and linux-full enables neither rav1d nor dav1d, so a regression that only shows with both decoders built stays invisible. Add an `ffmpeg,rav1d` run of both files to a job that has the libav packages.

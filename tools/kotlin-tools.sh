@@ -42,9 +42,10 @@ fetch_kotlin_tools() {
 # Builds the host library, which the JVM and Swift examples also load, and writes the $2 bindings to $1.
 generate_bindings() {
     local out="$1" language="$2"
-    (cd "$REPO" && cargo build --locked --release -p g2g-uniffi)
+    # uniffi-bindgen reads the interface from symbols in the library
+    (cd "$REPO" && CARGO_PROFILE_RELEASE_STRIP=none cargo build --locked --release -p g2g-uniffi)
     rm -rf "$out"
-    (cd "$REPO" && cargo run --locked --release -p g2g-uniffi --features bindgen --bin uniffi-bindgen -- \
+    (cd "$REPO" && CARGO_PROFILE_RELEASE_STRIP=none cargo run --locked --release -p g2g-uniffi --features bindgen --bin uniffi-bindgen -- \
         generate --library "$TARGET/release/libg2g_uniffi.so" --language "$language" --no-format \
         --out-dir "$out")
 }

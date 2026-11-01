@@ -46,6 +46,8 @@ in [STABILITY.md](STABILITY.md).
   GitHub release. Run it by hand from the Actions tab to test the builds without
   a tag. The feature sets are the `release-binary-*` features of g2g-plugins.
 - The same workflow builds the `glass2glass` wheels and uploads them to PyPI
-  through trusted publishing, so no PyPI token is stored anywhere.
+  through trusted publishing, so no PyPI token is stored anywhere. The upload
+  waits for approval in the `pypi` environment.
+- The same workflow attaches the Android AAR that `tools/android-aar.sh` builds.
 - `g2g-pyapi`, `xtask` and the benchmark and web crates are `publish = false`.
   The Python wheel is built with maturin, not published by this script.

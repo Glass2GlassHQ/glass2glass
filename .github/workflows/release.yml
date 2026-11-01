@@ -8,6 +8,9 @@ on:
 permissions:
   contents: read
 
+env:
+  CARGO_PROFILE_RELEASE_STRIP: symbols
+
 jobs:
   build:
     name: build (${{ matrix.target }})
@@ -65,10 +68,34 @@ jobs:
           if [ "${{ runner.os }}" = Windows ]; then 7z a "$name.zip" "$name"; else tar czf "$name.tar.gz" "$name"; fi
       - uses: actions/upload-artifact@v7
         with:
-          name: binary-${{ matrix.target }}
+          name: release-asset-${{ matrix.target }}
           path: |
             g2g-*.tar.gz
             g2g-*.zip
+
+  aar:
+    name: android aar
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,x86_64-linux-android
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "21"
+      - name: install cargo-ndk
+        run: cargo install cargo-ndk --locked --version 4.1.2
+      - name: build
+        run: |
+          aar=$(ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME" tools/android-aar.sh | tail -1)
+          mkdir dist
+          cp "$aar" "dist/g2g-${GITHUB_REF_NAME}-android.aar"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-asset-android
+          path: dist/*.aar
 
   wheel:
     name: wheel (${{ matrix.target }})
@@ -133,14 +160,14 @@ jobs:
 
   github-release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: build
+    needs: [build, aar]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
       - uses: actions/download-artifact@v8
         with:
-          pattern: binary-*
+          pattern: release-asset-*
           path: dist
           merge-multiple: true
       - name: attach to the GitHub release
