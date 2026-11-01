@@ -376,6 +376,9 @@ impl NvEnc {
     /// negotiated geometry. Fails loud (`HardwareError::Other`) if NVENC is
     /// unavailable so the caller can fall back to `FfmpegVideoEnc`.
     fn open_session(&mut self, buf: &OwnedCudaBuffer) -> Result<(), G2gError> {
+        if let Some(file) = missing_driver_library() {
+            return Err(G2gError::Hardware(HardwareError::LibraryNotFound(file)));
+        }
         let context = buf.context;
         let encode_guid = self.encode_guid();
         // Load the SDK dispatch table.
@@ -386,7 +389,7 @@ impl NvEnc {
         funcs.version = ffi::NV_ENCODE_API_FUNCTION_LIST_VER;
         // SAFETY: `funcs` is a zeroed, version-tagged function-list struct; the
         // SDK fills it with entry points and only reads `version`.
-        nvchk(unsafe { ffi::NvEncodeAPICreateInstance(funcs.as_mut()) })?;
+        nvchk(unsafe { ffi::nv_encode_api_create_instance(funcs.as_mut()) })?;
 
         // Everything below runs in `context` (push now, pop at the end).
         let _ctx = ContextGuard::push(context)?;
@@ -925,6 +928,15 @@ fn fill_vui_color(vui: &mut ffi::VuiColor, colorimetry: g2g_core::Colorimetry) {
 }
 
 /// Map an NVENC status to a `Result`.
+pub(crate) fn missing_driver_library() -> Option<&'static str> {
+    if crate::cuda_driver_ffi::LibCuda::get().is_none() {
+        return Some(crate::cuda_driver_ffi::LIBCUDA);
+    }
+    ffi::LibNvidiaEncode::get()
+        .is_none()
+        .then_some(ffi::LIBNVIDIA_ENCODE)
+}
+
 fn nvchk(status: ffi::NvEncStatus) -> Result<(), G2gError> {
     if status == ffi::NV_ENC_SUCCESS {
         Ok(())
@@ -1221,6 +1233,8 @@ mod ffi {
 
     pub type NvEncStatus = i32;
     pub const NV_ENC_SUCCESS: NvEncStatus = 0;
+    pub const NV_ENC_ERR_NO_ENCODE_DEVICE: NvEncStatus = 1;
+    pub const LIBNVIDIA_ENCODE: &str = "libnvidia-encode.so.1";
     pub const NV_ENC_ERR_NEED_MORE_INPUT: NvEncStatus = 17;
 
     pub const NVENCAPI_MAJOR_VERSION: u32 = 13;
@@ -1707,11 +1721,11 @@ mod ffi {
     }
     const _: () = assert!(core::mem::size_of::<NvEncodeApiFunctionList>() == 2552);
 
-    #[link(name = "nvidia-encode")]
-    extern "C" {
-        /// Populate the function table (must have `version` set on input).
-        #[allow(non_snake_case)]
-        pub fn NvEncodeAPICreateInstance(list: *mut NvEncodeApiFunctionList) -> NvEncStatus;
+    crate::shared_library::shared_library! {
+        pub struct LibNvidiaEncode = LIBNVIDIA_ENCODE;
+        when missing return NV_ENC_ERR_NO_ENCODE_DEVICE;
+        // Populate the function table (must have `version` set on input).
+        pub fn nv_encode_api_create_instance = "NvEncodeAPICreateInstance"(list: *mut NvEncodeApiFunctionList) -> NvEncStatus;
     }
 
     pub(crate) use crate::cuda_driver_ffi::{cu_ctx_pop_current, cu_ctx_push_current};

@@ -2158,13 +2158,15 @@ fn register_autoplug_candidates(reg: &mut Registry) {
     // preference off the consumer's declared `input_domains`), while a consumer
     // that declares no domain requirement keeps the CPU decoder.
     #[cfg(all(target_os = "linux", feature = "nvdec"))]
-    reg.register(
-        ElementFactory::of::<NvDec>("nvdec", |_| Box::new(NvDec::new()))
-            .produces(g2g_core::MemoryDomainKind::Cuda)
-            .hardware()
-            .accepting_input(NvDec::accepts_input)
-            .cost(NVDEC_FRAME_COST),
-    );
+    if crate::nvdec::missing_driver_library().is_none() {
+        reg.register(
+            ElementFactory::of::<NvDec>("nvdec", |_| Box::new(NvDec::new()))
+                .produces(g2g_core::MemoryDomainKind::Cuda)
+                .hardware()
+                .accepting_input(NvDec::accepts_input)
+                .cost(NVDEC_FRAME_COST),
+        );
+    }
     // Vendor-neutral Vulkan Video hardware decode (M493; H.264 / H.265 / AV1 since
     // M517), the wgpu-texture analog of NvDec: tagged `produces(WgpuTexture)`, so a
     // WgpuTexture-preferring domain-aware search picks it for a wgpu consumer (the
@@ -2801,6 +2803,13 @@ pub fn feature_gated_element(name: &str) -> Option<&'static FeatureGatedElement>
 /// real value comes from a property / builder before use (the placeholder only
 /// has to be side-effect-free, since `inspect` default-builds to read metadata).
 #[allow(unused_variables)]
+#[cfg(all(target_os = "linux", any(feature = "nvdec", feature = "nvenc")))]
+fn driver_installed(missing_library: Option<&'static str>) -> Result<(), alloc::string::String> {
+    missing_library.map_or(Ok(()), |file| {
+        Err(alloc::format!("{file} is not installed"))
+    })
+}
+
 fn register_feature_gated(reg: &mut Registry) {
     // Rhai script transform (M580): `scriptelement script=... ! ...` runs a
     // per-frame `process(frame)` over a raw-video buffer. Pure Rust, no system dep.
@@ -3473,11 +3482,15 @@ fn register_feature_gated(reg: &mut Registry) {
     // <-> H.264, the gst-`nvcodec`-style pair. Explicit-select by name.
     #[cfg(all(target_os = "linux", feature = "nvdec"))]
     reg.register_launch(
-        LaunchFactory::of::<NvDec>("nvdec", || Box::new(NvDec::new())).with_experimental(),
+        LaunchFactory::of::<NvDec>("nvdec", || Box::new(NvDec::new()))
+            .with_usable(|| driver_installed(crate::nvdec::missing_driver_library()))
+            .with_experimental(),
     );
     #[cfg(all(target_os = "linux", feature = "nvenc"))]
     reg.register_launch(
-        LaunchFactory::of::<NvEnc>("nvenc", || Box::new(NvEnc::new())).with_experimental(),
+        LaunchFactory::of::<NvEnc>("nvenc", || Box::new(NvEnc::new()))
+            .with_usable(|| driver_installed(crate::nvenc::missing_driver_library()))
+            .with_experimental(),
     );
     // JPEG XS codec (M605): the ST 2110-22 compressed essence, via SVT-JPEG-XS.
     #[cfg(all(target_os = "linux", feature = "jpegxs"))]

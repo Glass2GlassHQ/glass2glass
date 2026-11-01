@@ -444,11 +444,11 @@ pub unsafe fn cuda_roundtrip_check(shared: &SharedNv12Image) -> Result<bool, G2g
     // SAFETY: all calls follow the CUDA Driver API contract; handles are checked
     // before use and destroyed before return.
     unsafe {
-        check(c::cu_init(0))?;
+        crate::cuda_driver_ffi::init_driver()?;
         let mut dev: i32 = 0;
         check(c::cu_device_get(&mut dev, 0))?;
         let mut ctx: c::CuContext = core::ptr::null_mut();
-        check(c::cuDevicePrimaryCtxRetain(&mut ctx, dev))?;
+        check(c::cu_device_primary_ctx_retain(&mut ctx, dev))?;
         // Release the retain on every path: the `?` calls below early-return past
         // the manual release otherwise, leaking the primary-context reference.
         let _ctx_release = PrimaryCtxRelease(dev);
@@ -466,7 +466,7 @@ pub unsafe fn cuda_roundtrip_check(shared: &SharedNv12Image) -> Result<bool, G2g
             reserved: [0; 16],
         };
         let mut ext_mem: c::CuExternalMemory = core::ptr::null_mut();
-        check(c::cuImportExternalMemory(&mut ext_mem, &import_desc))?;
+        check(c::cu_import_external_memory(&mut ext_mem, &import_desc))?;
 
         let array_desc = c::CudaArray3dDescriptor {
             width: w,
@@ -485,13 +485,13 @@ pub unsafe fn cuda_roundtrip_check(shared: &SharedNv12Image) -> Result<bool, G2g
         let mut mipmap: c::CuMipmappedArray = core::ptr::null_mut();
         let mut array: c::CuArray = core::ptr::null_mut();
         let mut ok = false;
-        let mut result = check(c::cuExternalMemoryGetMappedMipmappedArray(
+        let mut result = check(c::cu_external_memory_get_mapped_mipmapped_array(
             &mut mipmap,
             ext_mem,
             &mipmap_desc,
         ));
         if result.is_ok() {
-            result = check(c::cuMipmappedArrayGetLevel(&mut array, mipmap, 0));
+            result = check(c::cu_mipmapped_array_get_level(&mut array, mipmap, 0));
         }
         if result.is_ok() {
             // A recognizable pattern: byte (x ^ y) per texel.
@@ -521,7 +521,7 @@ pub unsafe fn cuda_roundtrip_check(shared: &SharedNv12Image) -> Result<bool, G2g
             };
             result = check(c::cu_memcpy_2d(&to_array));
             if result.is_ok() {
-                result = check(c::cuCtxSynchronize());
+                result = check(c::cu_ctx_synchronize());
             }
             if result.is_ok() {
                 let mut back = alloc::vec![0u8; w * tex_h];
@@ -545,16 +545,16 @@ pub unsafe fn cuda_roundtrip_check(shared: &SharedNv12Image) -> Result<bool, G2g
                 };
                 result = check(c::cu_memcpy_2d(&from_array));
                 if result.is_ok() {
-                    let _ = check(c::cuCtxSynchronize());
+                    let _ = check(c::cu_ctx_synchronize());
                     ok = back == src;
                 }
             }
         }
 
         if !mipmap.is_null() {
-            c::cuMipmappedArrayDestroy(mipmap);
+            c::cu_mipmapped_array_destroy(mipmap);
         }
-        c::cuDestroyExternalMemory(ext_mem);
+        c::cu_destroy_external_memory(ext_mem);
         let mut popped: c::CuContext = core::ptr::null_mut();
         let _ = c::cu_ctx_pop_current(&mut popped);
         // `_ctx_release` releases the primary context on scope exit.
@@ -577,11 +577,11 @@ pub unsafe fn cuda_fill_xor_pattern(shared: &SharedNv12Image) -> Result<(), G2gE
 
     // SAFETY: standard CUDA Driver API sequence; handles destroyed before return.
     unsafe {
-        check(c::cu_init(0))?;
+        crate::cuda_driver_ffi::init_driver()?;
         let mut dev: i32 = 0;
         check(c::cu_device_get(&mut dev, 0))?;
         let mut ctx: c::CuContext = core::ptr::null_mut();
-        check(c::cuDevicePrimaryCtxRetain(&mut ctx, dev))?;
+        check(c::cu_device_primary_ctx_retain(&mut ctx, dev))?;
         // Release the retain on every path: the `?` calls below early-return past
         // the manual release otherwise, leaking the primary-context reference.
         let _ctx_release = PrimaryCtxRelease(dev);
@@ -597,7 +597,7 @@ pub unsafe fn cuda_fill_xor_pattern(shared: &SharedNv12Image) -> Result<(), G2gE
             reserved: [0; 16],
         };
         let mut ext_mem: c::CuExternalMemory = core::ptr::null_mut();
-        check(c::cuImportExternalMemory(&mut ext_mem, &import_desc))?;
+        check(c::cu_import_external_memory(&mut ext_mem, &import_desc))?;
 
         let mipmap_desc = c::CudaExternalMemoryMipmappedArrayDesc {
             offset: 0,
@@ -614,13 +614,13 @@ pub unsafe fn cuda_fill_xor_pattern(shared: &SharedNv12Image) -> Result<(), G2gE
         };
         let mut mipmap: c::CuMipmappedArray = core::ptr::null_mut();
         let mut array: c::CuArray = core::ptr::null_mut();
-        let mut result = check(c::cuExternalMemoryGetMappedMipmappedArray(
+        let mut result = check(c::cu_external_memory_get_mapped_mipmapped_array(
             &mut mipmap,
             ext_mem,
             &mipmap_desc,
         ));
         if result.is_ok() {
-            result = check(c::cuMipmappedArrayGetLevel(&mut array, mipmap, 0));
+            result = check(c::cu_mipmapped_array_get_level(&mut array, mipmap, 0));
         }
         if result.is_ok() {
             let mut src = alloc::vec![0u8; w * tex_h];
@@ -649,14 +649,14 @@ pub unsafe fn cuda_fill_xor_pattern(shared: &SharedNv12Image) -> Result<(), G2gE
             };
             result = check(c::cu_memcpy_2d(&to_array));
             if result.is_ok() {
-                result = check(c::cuCtxSynchronize());
+                result = check(c::cu_ctx_synchronize());
             }
         }
 
         if !mipmap.is_null() {
-            c::cuMipmappedArrayDestroy(mipmap);
+            c::cu_mipmapped_array_destroy(mipmap);
         }
-        c::cuDestroyExternalMemory(ext_mem);
+        c::cu_destroy_external_memory(ext_mem);
         let mut popped: c::CuContext = core::ptr::null_mut();
         let _ = c::cu_ctx_pop_current(&mut popped);
         // `_ctx_release` releases the primary context on scope exit.
@@ -706,9 +706,9 @@ impl CudaImageMapping {
         unsafe {
             if c::cu_ctx_push_current(self.context as c::CuContext) == 0 {
                 if self.mipmap != 0 {
-                    c::cuMipmappedArrayDestroy(self.mipmap as c::CuMipmappedArray);
+                    c::cu_mipmapped_array_destroy(self.mipmap as c::CuMipmappedArray);
                 }
-                c::cuDestroyExternalMemory(self.ext_mem as c::CuExternalMemory);
+                c::cu_destroy_external_memory(self.ext_mem as c::CuExternalMemory);
                 let mut popped: c::CuContext = core::ptr::null_mut();
                 let _ = c::cu_ctx_pop_current(&mut popped);
             }
@@ -738,7 +738,7 @@ pub unsafe fn import_image_into_cuda(
     // exported FD is closed (or was already consumed + released by CUDA), so
     // nothing leaks; the caller still owns `shared`'s Vulkan image / memory.
     unsafe {
-        check(c::cu_init(0))?;
+        crate::cuda_driver_ffi::init_driver()?;
         check(c::cu_ctx_push_current(context as c::CuContext))?;
 
         let import_desc = c::CudaExternalMemoryHandleDesc {
@@ -751,7 +751,7 @@ pub unsafe fn import_image_into_cuda(
             reserved: [0; 16],
         };
         let mut ext_mem: c::CuExternalMemory = core::ptr::null_mut();
-        let mut result = check(c::cuImportExternalMemory(&mut ext_mem, &import_desc));
+        let mut result = check(c::cu_import_external_memory(&mut ext_mem, &import_desc));
 
         let mipmap_desc = c::CudaExternalMemoryMipmappedArrayDesc {
             offset: 0,
@@ -769,25 +769,25 @@ pub unsafe fn import_image_into_cuda(
         let mut mipmap: c::CuMipmappedArray = core::ptr::null_mut();
         let mut array: c::CuArray = core::ptr::null_mut();
         if result.is_ok() {
-            result = check(c::cuExternalMemoryGetMappedMipmappedArray(
+            result = check(c::cu_external_memory_get_mapped_mipmapped_array(
                 &mut mipmap,
                 ext_mem,
                 &mipmap_desc,
             ));
         }
         if result.is_ok() {
-            result = check(c::cuMipmappedArrayGetLevel(&mut array, mipmap, 0));
+            result = check(c::cu_mipmapped_array_get_level(&mut array, mipmap, 0));
         }
 
         if let Err(e) = result {
             // Destroy whatever was created, while still current.
             if !mipmap.is_null() {
-                c::cuMipmappedArrayDestroy(mipmap);
+                c::cu_mipmapped_array_destroy(mipmap);
             }
             if !ext_mem.is_null() {
                 // The import succeeded (it took ownership of the FD) but a later
                 // step failed; destroying the external memory releases the FD.
-                c::cuDestroyExternalMemory(ext_mem);
+                c::cu_destroy_external_memory(ext_mem);
             } else {
                 // The import itself failed, so it never took the FD; it is still
                 // ours. Close it here so the caller's `shared` can be discarded
@@ -883,7 +883,7 @@ pub unsafe fn cuda_copy_planes_into(
             result = check(c::cu_memcpy_2d(&chroma));
         }
         if result.is_ok() {
-            result = check(c::cuCtxSynchronize());
+            result = check(c::cu_ctx_synchronize());
         }
         let mut popped: c::CuContext = core::ptr::null_mut();
         let _ = c::cu_ctx_pop_current(&mut popped);
@@ -1248,7 +1248,7 @@ pub unsafe fn import_rgba_into_cuda(
     // SAFETY: CUDA Driver API import sequence in `context`; on error every handle
     // created so far is destroyed before the context is popped.
     unsafe {
-        check(c::cu_init(0))?;
+        crate::cuda_driver_ffi::init_driver()?;
         check(c::cu_ctx_push_current(context as c::CuContext))?;
 
         let import_desc = c::CudaExternalMemoryHandleDesc {
@@ -1261,7 +1261,7 @@ pub unsafe fn import_rgba_into_cuda(
             reserved: [0; 16],
         };
         let mut ext_mem: c::CuExternalMemory = core::ptr::null_mut();
-        let mut result = check(c::cuImportExternalMemory(&mut ext_mem, &import_desc));
+        let mut result = check(c::cu_import_external_memory(&mut ext_mem, &import_desc));
 
         let mipmap_desc = c::CudaExternalMemoryMipmappedArrayDesc {
             offset: 0,
@@ -1279,21 +1279,21 @@ pub unsafe fn import_rgba_into_cuda(
         let mut mipmap: c::CuMipmappedArray = core::ptr::null_mut();
         let mut array: c::CuArray = core::ptr::null_mut();
         if result.is_ok() {
-            result = check(c::cuExternalMemoryGetMappedMipmappedArray(
+            result = check(c::cu_external_memory_get_mapped_mipmapped_array(
                 &mut mipmap,
                 ext_mem,
                 &mipmap_desc,
             ));
         }
         if result.is_ok() {
-            result = check(c::cuMipmappedArrayGetLevel(&mut array, mipmap, 0));
+            result = check(c::cu_mipmapped_array_get_level(&mut array, mipmap, 0));
         }
         if let Err(e) = result {
             if !mipmap.is_null() {
-                c::cuMipmappedArrayDestroy(mipmap);
+                c::cu_mipmapped_array_destroy(mipmap);
             }
             if !ext_mem.is_null() {
-                c::cuDestroyExternalMemory(ext_mem);
+                c::cu_destroy_external_memory(ext_mem);
             }
             let mut popped: c::CuContext = core::ptr::null_mut();
             let _ = c::cu_ctx_pop_current(&mut popped);
@@ -1365,7 +1365,7 @@ impl Drop for PrimaryCtxRelease {
         // SAFETY: balances the `cuDevicePrimaryCtxRetain` in `WgpuToCuda::new`;
         // released once. Best-effort.
         unsafe {
-            let _ = cuda_ffi::cuDevicePrimaryCtxRelease(self.0);
+            let _ = cuda_ffi::cu_device_primary_ctx_release(self.0);
         }
     }
 }
@@ -1404,7 +1404,7 @@ impl WgpuToCuda {
         let mut cuda_device = 0i32;
         // SAFETY: retain the primary context on `cuda_device_id`; released in `Drop`.
         let context = unsafe {
-            check(c::cu_init(0))?;
+            crate::cuda_driver_ffi::init_driver()?;
             let rc = c::cu_device_get(&mut cuda_device, cuda_device_id);
             if rc != 0 {
                 g2g_error!(
@@ -1416,7 +1416,7 @@ impl WgpuToCuda {
                 return Err(G2gError::Hardware(HardwareError::Cuda(rc)));
             }
             let mut ctx: c::CuContext = core::ptr::null_mut();
-            check(c::cuDevicePrimaryCtxRetain(&mut ctx, cuda_device))?;
+            check(c::cu_device_primary_ctx_retain(&mut ctx, cuda_device))?;
             ctx as u64
         };
         // SAFETY: interop device per the contract; `shared` is exported, imported
@@ -1445,7 +1445,7 @@ impl WgpuToCuda {
             Err(e) => {
                 // SAFETY: balance the retain above on the build failure path.
                 unsafe {
-                    let _ = c::cuDevicePrimaryCtxRelease(cuda_device);
+                    let _ = c::cu_device_primary_ctx_release(cuda_device);
                 }
                 Err(e)
             }
@@ -1513,7 +1513,8 @@ impl WgpuToCuda {
                 width_in_bytes: pitch,
                 height: self.height as usize,
             };
-            let result = check(c::cu_memcpy_2d(&copy)).and_then(|()| check(c::cuCtxSynchronize()));
+            let result =
+                check(c::cu_memcpy_2d(&copy)).and_then(|()| check(c::cu_ctx_synchronize()));
             let mut popped: c::CuContext = core::ptr::null_mut();
             let _ = c::cu_ctx_pop_current(&mut popped);
             result
@@ -1826,7 +1827,7 @@ mod cuda_ffi {
     use core::ffi::c_void;
 
     pub(crate) use crate::cuda_driver_ffi::{
-        cu_ctx_pop_current, cu_ctx_push_current, cu_device_get, cu_init, cu_mem_alloc, cu_mem_free,
+        cu_ctx_pop_current, cu_ctx_push_current, cu_device_get, cu_mem_alloc, cu_mem_free,
         cu_memcpy_2d, CuContext, CudaMemcpy2D, CU_MEMORYTYPE_ARRAY, CU_MEMORYTYPE_DEVICE,
         CU_MEMORYTYPE_HOST,
     };
@@ -1873,28 +1874,27 @@ mod cuda_ffi {
         pub reserved: [u32; 16],
     }
 
-    #[link(name = "cuda")]
-    extern "C" {
-        #[link_name = "cuDevicePrimaryCtxRetain"]
-        pub fn cuDevicePrimaryCtxRetain(pctx: *mut CuContext, dev: i32) -> i32;
-        #[link_name = "cuDevicePrimaryCtxRelease_v2"]
-        pub fn cuDevicePrimaryCtxRelease(dev: i32) -> i32;
-        pub fn cuCtxSynchronize() -> i32;
-        pub fn cuImportExternalMemory(
+    crate::shared_library::shared_library! {
+        pub struct LibCudaExternalMemory = crate::cuda_driver_ffi::LIBCUDA;
+        when missing return crate::cuda_driver_ffi::CUDA_ERROR_SHARED_OBJECT_INIT_FAILED;
+        pub fn cu_device_primary_ctx_retain = "cuDevicePrimaryCtxRetain"(pctx: *mut CuContext, dev: i32) -> i32;
+        pub fn cu_device_primary_ctx_release = "cuDevicePrimaryCtxRelease_v2"(dev: i32) -> i32;
+        pub fn cu_ctx_synchronize = "cuCtxSynchronize"() -> i32;
+        pub fn cu_import_external_memory = "cuImportExternalMemory"(
             ext_mem_out: *mut CuExternalMemory,
             mem_handle_desc: *const CudaExternalMemoryHandleDesc,
         ) -> i32;
-        pub fn cuExternalMemoryGetMappedMipmappedArray(
+        pub fn cu_external_memory_get_mapped_mipmapped_array = "cuExternalMemoryGetMappedMipmappedArray"(
             mipmap: *mut CuMipmappedArray,
             ext_mem: CuExternalMemory,
             mipmap_desc: *const CudaExternalMemoryMipmappedArrayDesc,
         ) -> i32;
-        pub fn cuMipmappedArrayGetLevel(
+        pub fn cu_mipmapped_array_get_level = "cuMipmappedArrayGetLevel"(
             level_array: *mut CuArray,
             mipmap: CuMipmappedArray,
             level: u32,
         ) -> i32;
-        pub fn cuMipmappedArrayDestroy(mipmap: CuMipmappedArray) -> i32;
-        pub fn cuDestroyExternalMemory(ext_mem: CuExternalMemory) -> i32;
+        pub fn cu_mipmapped_array_destroy = "cuMipmappedArrayDestroy"(mipmap: CuMipmappedArray) -> i32;
+        pub fn cu_destroy_external_memory = "cuDestroyExternalMemory"(ext_mem: CuExternalMemory) -> i32;
     }
 }

@@ -256,14 +256,13 @@ mod ffi {
         cu_device_get, cu_init, CuDevice, CuResult, CUDA_SUCCESS,
     };
 
-    #[link(name = "cuda")]
-    extern "C" {
-        /// Number of devices with compute capability, through `count`.
-        #[link_name = "cuDeviceGetCount"]
-        pub(super) fn cu_device_get_count(count: *mut i32) -> CuResult;
-        /// Write the device's NUL-terminated name into `name` (at most `len`).
-        #[link_name = "cuDeviceGetName"]
-        pub(super) fn cu_device_get_name(name: *mut c_char, len: i32, dev: CuDevice) -> CuResult;
+    crate::shared_library::shared_library! {
+        pub(super) struct LibCudaDevices = crate::cuda_driver_ffi::LIBCUDA;
+        when missing return crate::cuda_driver_ffi::CUDA_ERROR_SHARED_OBJECT_INIT_FAILED;
+        // Number of devices with compute capability, through `count`.
+        pub(super) fn cu_device_get_count = "cuDeviceGetCount"(count: *mut i32) -> CuResult;
+        // Write the device's NUL-terminated name into `name` (at most `len`).
+        pub(super) fn cu_device_get_name = "cuDeviceGetName"(name: *mut c_char, len: i32, dev: CuDevice) -> CuResult;
     }
 }
 

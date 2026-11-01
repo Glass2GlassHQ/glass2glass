@@ -362,7 +362,7 @@ impl AsyncElement for CudaUpload {
         // SAFETY: plain driver-API init/create calls; failures map to a hardware
         // error so a host without an NVIDIA GPU fails the configure gracefully.
         let ctx = unsafe {
-            check(ffi::cu_init(0))?;
+            crate::cuda_driver_ffi::init_driver()?;
             let mut dev: ffi::CuDevice = 0;
             check(ffi::cu_device_get(&mut dev, self.cuda_device_id))?;
             let mut ctx: ffi::CuContext = core::ptr::null_mut();

@@ -2,6 +2,8 @@
 
 use core::ffi::c_void;
 
+use g2g_core::{G2gError, HardwareError};
+
 // `CUresult` is an int-sized C enum.
 pub(crate) type CuResult = i32;
 // `CUdevice` is an int handle.
@@ -37,52 +39,55 @@ pub(crate) struct CudaMemcpy2D {
     pub(crate) height: usize,
 }
 
-#[link(name = "cuda")]
-extern "C" {
-    #[link_name = "cuInit"]
-    pub(crate) fn cu_init(flags: u32) -> CuResult;
-    #[link_name = "cuDeviceGet"]
-    pub(crate) fn cu_device_get(device: *mut CuDevice, ordinal: i32) -> CuResult;
-    #[link_name = "cuCtxCreate_v2"]
-    pub(crate) fn cu_ctx_create(context: *mut CuContext, flags: u32, device: CuDevice) -> CuResult;
-    #[link_name = "cuCtxDestroy_v2"]
-    pub(crate) fn cu_ctx_destroy(context: CuContext) -> CuResult;
-    #[link_name = "cuCtxPushCurrent_v2"]
-    pub(crate) fn cu_ctx_push_current(context: CuContext) -> CuResult;
-    #[link_name = "cuCtxPopCurrent_v2"]
-    pub(crate) fn cu_ctx_pop_current(context: *mut CuContext) -> CuResult;
+pub(crate) const LIBCUDA: &str = "libcuda.so.1";
+// cuda.h names this "shared object initialization failed"
+pub(crate) const CUDA_ERROR_SHARED_OBJECT_INIT_FAILED: CuResult = 303;
+
+crate::shared_library::shared_library! {
+    pub(crate) struct LibCuda = LIBCUDA;
+    when missing return CUDA_ERROR_SHARED_OBJECT_INIT_FAILED;
+    pub(crate) fn cu_init = "cuInit"(flags: u32) -> CuResult;
+    pub(crate) fn cu_device_get = "cuDeviceGet"(device: *mut CuDevice, ordinal: i32) -> CuResult;
+    pub(crate) fn cu_ctx_create = "cuCtxCreate_v2"(context: *mut CuContext, flags: u32, device: CuDevice) -> CuResult;
+    pub(crate) fn cu_ctx_destroy = "cuCtxDestroy_v2"(context: CuContext) -> CuResult;
+    pub(crate) fn cu_ctx_push_current = "cuCtxPushCurrent_v2"(context: CuContext) -> CuResult;
+    pub(crate) fn cu_ctx_pop_current = "cuCtxPopCurrent_v2"(context: *mut CuContext) -> CuResult;
     #[cfg(any(
         feature = "local-ipc",
         feature = "cuda-wgpu",
         all(test, feature = "nvenc")
     ))]
-    #[link_name = "cuMemAlloc_v2"]
-    pub(crate) fn cu_mem_alloc(device_pointer: *mut u64, size: usize) -> CuResult;
+    pub(crate) fn cu_mem_alloc = "cuMemAlloc_v2"(device_pointer: *mut u64, size: usize) -> CuResult;
     // pitched rows, aligned so NVENC's input-resource registration accepts them
-    #[link_name = "cuMemAllocPitch_v2"]
-    pub(crate) fn cu_mem_alloc_pitch(
+    pub(crate) fn cu_mem_alloc_pitch = "cuMemAllocPitch_v2"(
         device_pointer: *mut u64,
         pitch: *mut usize,
         width_in_bytes: usize,
         height: usize,
         element_size: u32,
     ) -> CuResult;
-    #[link_name = "cuMemFree_v2"]
-    pub(crate) fn cu_mem_free(device_pointer: u64) -> CuResult;
+    pub(crate) fn cu_mem_free = "cuMemFree_v2"(device_pointer: u64) -> CuResult;
     #[cfg(any(feature = "local-ipc", all(test, feature = "nvenc")))]
-    #[link_name = "cuMemcpyHtoD_v2"]
-    pub(crate) fn cu_memcpy_htod(destination: u64, source: *const c_void, size: usize) -> CuResult;
+    pub(crate) fn cu_memcpy_htod = "cuMemcpyHtoD_v2"(destination: u64, source: *const c_void, size: usize) -> CuResult;
     #[cfg(any(feature = "local-ipc", all(test, feature = "nvdec")))]
-    #[link_name = "cuMemcpyDtoH_v2"]
-    pub(crate) fn cu_memcpy_dtoh(destination: *mut c_void, source: u64, size: usize) -> CuResult;
-    #[link_name = "cuMemcpy2D_v2"]
-    pub(crate) fn cu_memcpy_2d(copy: *const CudaMemcpy2D) -> CuResult;
+    pub(crate) fn cu_memcpy_dtoh = "cuMemcpyDtoH_v2"(destination: *mut c_void, source: u64, size: usize) -> CuResult;
+    pub(crate) fn cu_memcpy_2d = "cuMemcpy2D_v2"(copy: *const CudaMemcpy2D) -> CuResult;
     #[cfg(feature = "nvdec")]
-    #[link_name = "cuGetErrorName"]
-    pub(crate) fn cu_get_error_name(
+    pub(crate) fn cu_get_error_name = "cuGetErrorName"(
         error: CuResult,
         name: *mut *const core::ffi::c_char,
     ) -> CuResult;
+}
+
+pub(crate) fn init_driver() -> Result<(), G2gError> {
+    if LibCuda::get().is_none() {
+        return Err(G2gError::Hardware(HardwareError::LibraryNotFound(LIBCUDA)));
+    }
+    // SAFETY: cuInit takes only a flags word, and 0 is its one legal value.
+    match unsafe { cu_init(0) } {
+        CUDA_SUCCESS => Ok(()),
+        code => Err(G2gError::Hardware(HardwareError::Cuda(code))),
+    }
 }
 
 // CUDA-GL interop, the GL entry points live in libcuda itself
@@ -104,31 +109,27 @@ mod gl_interop {
     pub(crate) const CU_GRAPHICS_REGISTER_FLAGS_WRITE_DISCARD: u32 = 0x02;
     pub(crate) const GL_TEXTURE_2D: GlEnum = 0x0DE1;
 
-    #[link(name = "cuda")]
-    extern "C" {
-        #[link_name = "cuGraphicsGLRegisterImage"]
-        pub(crate) fn cu_graphics_gl_register_image(
+    crate::shared_library::shared_library! {
+        pub(crate) struct LibCudaGraphics = super::LIBCUDA;
+        when missing return super::CUDA_ERROR_SHARED_OBJECT_INIT_FAILED;
+        pub(crate) fn cu_graphics_gl_register_image = "cuGraphicsGLRegisterImage"(
             resource: *mut CuGraphicsResource,
             image: GlUint,
             target: GlEnum,
             flags: u32,
         ) -> CuResult;
-        #[link_name = "cuGraphicsUnregisterResource"]
-        pub(crate) fn cu_graphics_unregister_resource(resource: CuGraphicsResource) -> CuResult;
-        #[link_name = "cuGraphicsMapResources"]
-        pub(crate) fn cu_graphics_map_resources(
+        pub(crate) fn cu_graphics_unregister_resource = "cuGraphicsUnregisterResource"(resource: CuGraphicsResource) -> CuResult;
+        pub(crate) fn cu_graphics_map_resources = "cuGraphicsMapResources"(
             count: u32,
             resources: *mut CuGraphicsResource,
             stream: CuStream,
         ) -> CuResult;
-        #[link_name = "cuGraphicsUnmapResources"]
-        pub(crate) fn cu_graphics_unmap_resources(
+        pub(crate) fn cu_graphics_unmap_resources = "cuGraphicsUnmapResources"(
             count: u32,
             resources: *mut CuGraphicsResource,
             stream: CuStream,
         ) -> CuResult;
-        #[link_name = "cuGraphicsSubResourceGetMappedArray"]
-        pub(crate) fn cu_graphics_sub_resource_get_mapped_array(
+        pub(crate) fn cu_graphics_sub_resource_get_mapped_array = "cuGraphicsSubResourceGetMappedArray"(
             array: *mut CuArray,
             resource: CuGraphicsResource,
             array_index: u32,

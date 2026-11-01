@@ -96,7 +96,7 @@ pub fn init_context(ordinal: i32) -> Result<u64, G2gError> {
     // SAFETY: plain driver-API init/create calls; a host without an NVIDIA GPU
     // fails here (mapped to a hardware error) rather than proceeding.
     unsafe {
-        check(ffi::cu_init(0))?;
+        crate::cuda_driver_ffi::init_driver()?;
         let mut dev: ffi::CuDevice = 0;
         check(ffi::cu_device_get(&mut dev, ordinal))?;
         let mut ctx: ffi::CuContext = core::ptr::null_mut();
@@ -247,8 +247,8 @@ pub unsafe fn ipc_close(dptr: u64) -> Result<(), G2gError> {
 /// The IPC-only CUDA Driver API calls on top of the shared driver bindings.
 mod ffi {
     pub(super) use crate::cuda_driver_ffi::{
-        cu_ctx_create, cu_ctx_destroy, cu_device_get, cu_init, cu_mem_alloc, cu_mem_free,
-        cu_memcpy_dtoh, cu_memcpy_htod, CuContext, CuDevice, CuResult, CUDA_SUCCESS,
+        cu_ctx_create, cu_ctx_destroy, cu_device_get, cu_mem_alloc, cu_mem_free, cu_memcpy_dtoh,
+        cu_memcpy_htod, CuContext, CuDevice, CuResult, CUDA_SUCCESS,
     };
 
     /// `CU_IPC_MEM_LAZY_ENABLE_PEER_ACCESS`: enable peer access lazily on first
@@ -262,29 +262,25 @@ mod ffi {
         pub(super) reserved: [u8; super::CUDA_IPC_HANDLE_SIZE],
     }
 
-    #[link(name = "cuda")]
-    extern "C" {
-        #[link_name = "cuMemGetAddressRange_v2"]
-        pub(super) fn cu_mem_get_address_range(
+    crate::shared_library::shared_library! {
+        pub(super) struct LibCudaIpc = crate::cuda_driver_ffi::LIBCUDA;
+        when missing return crate::cuda_driver_ffi::CUDA_ERROR_SHARED_OBJECT_INIT_FAILED;
+        pub(super) fn cu_mem_get_address_range = "cuMemGetAddressRange_v2"(
             pbase: *mut u64,
             psize: *mut usize,
             dptr: u64,
         ) -> CuResult;
-        #[link_name = "cuMemcpyDtoD_v2"]
-        pub(super) fn cu_memcpy_dtod(dst: u64, src: u64, size: usize) -> CuResult;
-        /// Export an allocation as a 64-byte IPC handle.
-        #[link_name = "cuIpcGetMemHandle"]
-        pub(super) fn cu_ipc_get_mem_handle(handle: *mut CuIpcMemHandle, dptr: u64) -> CuResult;
-        /// Open a handle from another process; the handle is passed by value.
-        #[link_name = "cuIpcOpenMemHandle_v2"]
-        pub(super) fn cu_ipc_open_mem_handle(
+        pub(super) fn cu_memcpy_dtod = "cuMemcpyDtoD_v2"(dst: u64, src: u64, size: usize) -> CuResult;
+        // Export an allocation as a 64-byte IPC handle.
+        pub(super) fn cu_ipc_get_mem_handle = "cuIpcGetMemHandle"(handle: *mut CuIpcMemHandle, dptr: u64) -> CuResult;
+        // Open a handle from another process; the handle is passed by value.
+        pub(super) fn cu_ipc_open_mem_handle = "cuIpcOpenMemHandle_v2"(
             pdptr: *mut u64,
             handle: CuIpcMemHandle,
             flags: u32,
         ) -> CuResult;
-        /// Close a mapping from `cuIpcOpenMemHandle` (does not free the source).
-        #[link_name = "cuIpcCloseMemHandle"]
-        pub(super) fn cu_ipc_close_mem_handle(dptr: u64) -> CuResult;
+        // Close a mapping from `cuIpcOpenMemHandle` (does not free the source).
+        pub(super) fn cu_ipc_close_mem_handle = "cuIpcCloseMemHandle"(dptr: u64) -> CuResult;
     }
 }
 

@@ -471,9 +471,10 @@ impl NvDec {
     }
 
     fn query_hardware_input_caps() -> Result<CapsSet, G2gError> {
+        require_driver()?;
         // SAFETY: standard CUDA driver bring-up, each result checked before use.
         let context = unsafe {
-            cuchk(ffi::cu_init(0))?;
+            crate::cuda_driver_ffi::init_driver()?;
             let mut device = 0i32;
             cuchk(ffi::cu_device_get(
                 &mut device,
@@ -564,10 +565,11 @@ impl NvDec {
     /// decoder is created lazily in the sequence callback (it needs the parsed SPS
     /// geometry). Fails loud if NVDEC / the driver is unavailable.
     fn open(&mut self) -> Result<(), G2gError> {
+        require_driver()?;
         // SAFETY: standard CUDA driver bring-up; each result is checked and we
         // bail before using a handle on failure.
         let context = unsafe {
-            cuda_check("cuInit", ffi::cu_init(0))?;
+            crate::cuda_driver_ffi::init_driver()?;
             let mut dev = 0i32;
             let rc = ffi::cu_device_get(&mut dev, self.cuda_device_id);
             if rc != 0 {
@@ -677,7 +679,7 @@ impl NvDec {
                 .into_iter()
                 .try_fold(Vec::new(), |mut displayed, frame| {
                     displayed.extend(self.parse(frame, pts_ns, false)?);
-                    Ok(displayed)
+                    Ok::<_, G2gError>(displayed)
                 });
         // frames NVDEC skipped, such as those before the first keyframe, refresh no slot
         self.state.vp9_decodes.clear();
@@ -1394,6 +1396,19 @@ impl PictureMapping {
 }
 
 /// Map a CUDA / CUVID result to a `Result`, carrying the code on failure.
+pub(crate) fn missing_driver_library() -> Option<&'static str> {
+    if crate::cuda_driver_ffi::LibCuda::get().is_none() {
+        return Some(crate::cuda_driver_ffi::LIBCUDA);
+    }
+    ffi::LibNvcuvid::get().is_none().then_some(ffi::LIBNVCUVID)
+}
+
+fn require_driver() -> Result<(), G2gError> {
+    missing_driver_library().map_or(Ok(()), |file| {
+        Err(G2gError::Hardware(HardwareError::LibraryNotFound(file)))
+    })
+}
+
 fn cuchk(code: i32) -> Result<(), G2gError> {
     if code == 0 {
         Ok(())
@@ -1828,6 +1843,8 @@ static NVDEC_PROPS: &[PropertySpec] = &[
 mod ffi {
     use core::ffi::c_void;
 
+    pub const LIBNVCUVID: &str = "libnvcuvid.so.1";
+
     // Codec / format enum values (cuviddec.h).
     pub const CUDA_VIDEO_CODEC_H264: i32 = 4;
     pub const CUDA_VIDEO_CODEC_HEVC: i32 = 8;
@@ -2028,49 +2045,37 @@ mod ffi {
     const _: () = assert!(core::mem::size_of::<ProcParams>() == 264);
 
     // NVCUVID exports plain symbols; alias them to snake_case via link_name.
-    #[link(name = "nvcuvid")]
-    extern "C" {
-        #[link_name = "cuvidCreateVideoParser"]
-        pub fn cuvid_create_video_parser(
+    crate::shared_library::shared_library! {
+        pub struct LibNvcuvid = LIBNVCUVID;
+        when missing return crate::cuda_driver_ffi::CUDA_ERROR_SHARED_OBJECT_INIT_FAILED;
+        pub fn cuvid_create_video_parser = "cuvidCreateVideoParser"(
             parser: *mut *mut c_void,
             params: *mut ParserParams,
         ) -> i32;
-        #[link_name = "cuvidParseVideoData"]
-        pub fn cuvid_parse_video_data(parser: *mut c_void, pkt: *mut SourceDataPacket) -> i32;
-        #[link_name = "cuvidDestroyVideoParser"]
-        pub fn cuvid_destroy_video_parser(parser: *mut c_void) -> i32;
-        #[link_name = "cuvidCreateDecoder"]
-        pub fn cuvid_create_decoder(decoder: *mut *mut c_void, info: *mut DecodeCreateInfo) -> i32;
-        #[link_name = "cuvidDestroyDecoder"]
-        pub fn cuvid_destroy_decoder(decoder: *mut c_void) -> i32;
-        #[link_name = "cuvidReconfigureDecoder"]
-        pub fn cuvid_reconfigure_decoder(
+        pub fn cuvid_parse_video_data = "cuvidParseVideoData"(parser: *mut c_void, pkt: *mut SourceDataPacket) -> i32;
+        pub fn cuvid_destroy_video_parser = "cuvidDestroyVideoParser"(parser: *mut c_void) -> i32;
+        pub fn cuvid_create_decoder = "cuvidCreateDecoder"(decoder: *mut *mut c_void, info: *mut DecodeCreateInfo) -> i32;
+        pub fn cuvid_destroy_decoder = "cuvidDestroyDecoder"(decoder: *mut c_void) -> i32;
+        pub fn cuvid_reconfigure_decoder = "cuvidReconfigureDecoder"(
             decoder: *mut c_void,
             info: *mut ReconfigureDecoderInfo,
         ) -> i32;
-        #[link_name = "cuvidDecodePicture"]
-        pub fn cuvid_decode_picture(decoder: *mut c_void, pic: *mut c_void) -> i32;
-        #[link_name = "cuvidMapVideoFrame64"]
-        pub fn cuvid_map_video_frame(
+        pub fn cuvid_decode_picture = "cuvidDecodePicture"(decoder: *mut c_void, pic: *mut c_void) -> i32;
+        pub fn cuvid_map_video_frame = "cuvidMapVideoFrame64"(
             decoder: *mut c_void,
             pic_idx: i32,
             dev_ptr: *mut u64,
             pitch: *mut u32,
             proc: *mut ProcParams,
         ) -> i32;
-        #[link_name = "cuvidUnmapVideoFrame64"]
-        pub fn cuvid_unmap_video_frame(decoder: *mut c_void, dev_ptr: u64) -> i32;
-        #[link_name = "cuvidGetDecoderCaps"]
-        pub fn cuvid_get_decoder_caps(caps: *mut DecodeCaps) -> i32;
-        #[link_name = "cuvidCtxLockCreate"]
-        pub fn cuvid_ctx_lock_create(lock: *mut *mut c_void, ctx: *mut c_void) -> i32;
-        #[link_name = "cuvidCtxLockDestroy"]
-        pub fn cuvid_ctx_lock_destroy(lock: *mut c_void) -> i32;
+        pub fn cuvid_unmap_video_frame = "cuvidUnmapVideoFrame64"(decoder: *mut c_void, dev_ptr: u64) -> i32;
+        pub fn cuvid_get_decoder_caps = "cuvidGetDecoderCaps"(caps: *mut DecodeCaps) -> i32;
+        pub fn cuvid_ctx_lock_create = "cuvidCtxLockCreate"(lock: *mut *mut c_void, ctx: *mut c_void) -> i32;
+        pub fn cuvid_ctx_lock_destroy = "cuvidCtxLockDestroy"(lock: *mut c_void) -> i32;
     }
 
     pub(crate) use crate::cuda_driver_ffi::{
         cu_ctx_create, cu_ctx_destroy, cu_ctx_pop_current, cu_ctx_push_current, cu_device_get,
-        cu_init,
     };
 }
 

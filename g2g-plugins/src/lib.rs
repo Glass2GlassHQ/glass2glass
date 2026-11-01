@@ -1732,6 +1732,8 @@ pub mod pwdevice;
 pub mod cuda;
 #[cfg(all(target_os = "linux", feature = "cuda"))]
 mod cuda_driver_ffi;
+#[cfg(all(target_os = "linux", feature = "cuda"))]
+mod shared_library;
 
 // Local zero-copy IPC over CUDA IPC memory handles (M556): share a device
 // allocation with another same-machine + same-GPU process with no

@@ -202,8 +202,10 @@ render-and-stream path fed by the wgpu-to-CUDA hand-off.
   `luma_ptr` with `luma_pitch = width * 4`, registered as NVENC `ABGR` for wgpu
   `Rgba8` byte order or `ARGB`, NVENC converting to H.264 colour internally.
 - Bindings are hand-rolled FFI. As in the `cuda` module
-  (`g2g-plugins/src/cuda.rs`), `cudarc` is not used: the element links
-  `libnvidia-encode` and `libcuda` directly. The SDK's version-tagged structs are
+  (`g2g-plugins/src/cuda.rs`), `cudarc` is not used: the element loads
+  `libnvidia-encode` and `libcuda` with `dlopen` on first use, so a binary
+  built with it starts on a machine without the NVIDIA driver, and `nvdec` /
+  `nvenc` drop out of auto-plug and `encodebin` there. The SDK's version-tagged structs are
   transcribed `#[repr(C)]` with compile-time size assertions
   (`const _: () = assert!(size_of::<T>() == N)`) checked against the installed
   `nvEncodeAPI.h` (SDK 13.0, field offsets verified with `offsetof`), so a
