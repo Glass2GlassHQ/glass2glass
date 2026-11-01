@@ -12,6 +12,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M2057: `openh264dec` decodes H.264 with Cisco's libopenh264 loaded at runtime, and the Linux release binaries include it.
 - M2058: `openh264dec` builds OpenH264 from source and links it statically, so H.264 decode needs no installed library.
 - M2059: the Linux release binaries and wheels ship LGPL ffmpeg 8.1 libraries built from source, adding HEVC, VP9 and AAC encode on a bare host.
+- M2060: `openh264enc` encodes H.264 with the bundled OpenH264, and `encodebin` and `avenc_h264` fall back to it when libavcodec has no libx264 or NVENC.
 
 ## 0.11.0
 

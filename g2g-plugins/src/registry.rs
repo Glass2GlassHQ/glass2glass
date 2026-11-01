@@ -334,6 +334,7 @@ fn encode_provider(target: &Caps) -> Option<&'static [EncoderChoice]> {
         EncoderChoice::plain("mediacodecenc"),
         EncoderChoice::plain("x264enc"),
         EncoderChoice::plain("ffmpegenc"),
+        EncoderChoice::plain("openh264enc"),
     ];
     static H265: &[EncoderChoice] = &[
         EncoderChoice::with_props("nvenc", &[("codec", "hevc")]),
@@ -2538,7 +2539,7 @@ fn register_aliases(reg: &mut Registry) {
     // gst's libav software H.264 encoder name -> the ffmpeg encoder, software
     // first (`x264enc`, libx264), falling back to the NVENC-backed `ffmpegenc`
     // when only that is registered. The native NVENC encoder owns `nvh264enc`.
-    reg.register_alias("avenc_h264", &["x264enc", "ffmpegenc"]);
+    reg.register_alias("avenc_h264", &["x264enc", "ffmpegenc", "openh264enc"]);
     // QuickTime / MP4 muxer names -> the one fMP4 muxer (inert without std).
     reg.register_alias("qtmux", &["mp4mux"]);
     // gst's HLS sinks bundle their own muxer; g2g's takes one upstream, so the
@@ -2668,6 +2669,7 @@ pub static FEATURE_GATED_ELEMENTS: &[FeatureGatedElement] = &{
         "aacdec" => "aac-decode";
         "mpegaudiodec" => "mpeg-audio-decode";
         "openh264dec" => "openh264" on "linux";
+        "openh264enc" => "openh264" on "linux";
         "webrtcdsp" => "webrtcdsp";
         "webrtcechoprobe" => "webrtcdsp";
         "av1enc" => "av1-encode";
@@ -2906,6 +2908,11 @@ fn register_feature_gated(reg: &mut Registry) {
     reg.register_launch(LaunchFactory::of::<crate::openh264dec::OpenH264Dec>(
         "openh264dec",
         || Box::new(crate::openh264dec::OpenH264Dec::new()),
+    ));
+    #[cfg(all(target_os = "linux", feature = "openh264"))]
+    reg.register_launch(LaunchFactory::of::<crate::openh264enc::OpenH264Enc>(
+        "openh264enc",
+        || Box::new(crate::openh264enc::OpenH264Enc::new()),
     ));
     #[cfg(feature = "mpeg-audio-decode")]
     reg.register_launch(LaunchFactory::of::<crate::symphoniadec::MpegAudioDec>(
@@ -3474,15 +3481,19 @@ fn register_feature_gated(reg: &mut Registry) {
     // explicit `x264enc` name opens the libx264 software encoder for hosts without
     // an NVIDIA GPU. Launch-only: an encoder is never an auto-plug candidate.
     #[cfg(all(target_os = "linux", feature = "ffmpeg"))]
-    reg.register_launch(LaunchFactory::of::<FfmpegVideoEnc>("ffmpegenc", || {
-        Box::new(FfmpegVideoEnc::new())
-    }));
+    reg.register_launch(
+        LaunchFactory::of::<FfmpegVideoEnc>("ffmpegenc", || Box::new(FfmpegVideoEnc::new()))
+            .with_usable(|| FfmpegEncBackend::Nvenc.usable()),
+    );
     #[cfg(all(target_os = "linux", feature = "ffmpeg"))]
-    reg.register_launch(LaunchFactory::of::<FfmpegVideoEnc>("x264enc", || {
-        Box::new(FfmpegVideoEnc::new().with_backend(FfmpegEncBackend::Software))
-    }));
+    reg.register_launch(
+        LaunchFactory::of::<FfmpegVideoEnc>("x264enc", || {
+            Box::new(FfmpegVideoEnc::new().with_backend(FfmpegEncBackend::Software))
+        })
+        .with_usable(|| FfmpegEncBackend::Software.usable()),
+    );
     #[cfg(all(target_os = "linux", feature = "ffmpeg"))]
-    for (name, codec, build) in [
+    for (name, codec, build, usable) in [
         (
             "vah264enc",
             crate::ffmpegenc::VaapiCodec::H264,
@@ -3492,19 +3503,31 @@ fn register_feature_gated(reg: &mut Registry) {
                         .with_backend(FfmpegEncBackend::Vaapi(crate::ffmpegenc::VaapiCodec::H264)),
                 ) as Box<dyn DynAsyncElement>
             }) as fn() -> Box<dyn DynAsyncElement>,
+            (|| FfmpegEncBackend::Vaapi(crate::ffmpegenc::VaapiCodec::H264).usable())
+                as fn() -> Result<(), alloc::string::String>,
         ),
-        ("vah265enc", crate::ffmpegenc::VaapiCodec::H265, || {
-            Box::new(
-                FfmpegVideoEnc::new()
-                    .with_backend(FfmpegEncBackend::Vaapi(crate::ffmpegenc::VaapiCodec::H265)),
-            )
-        }),
-        ("vaav1enc", crate::ffmpegenc::VaapiCodec::Av1, || {
-            Box::new(
-                FfmpegVideoEnc::new()
-                    .with_backend(FfmpegEncBackend::Vaapi(crate::ffmpegenc::VaapiCodec::Av1)),
-            )
-        }),
+        (
+            "vah265enc",
+            crate::ffmpegenc::VaapiCodec::H265,
+            || {
+                Box::new(
+                    FfmpegVideoEnc::new()
+                        .with_backend(FfmpegEncBackend::Vaapi(crate::ffmpegenc::VaapiCodec::H265)),
+                )
+            },
+            || FfmpegEncBackend::Vaapi(crate::ffmpegenc::VaapiCodec::H265).usable(),
+        ),
+        (
+            "vaav1enc",
+            crate::ffmpegenc::VaapiCodec::Av1,
+            || {
+                Box::new(
+                    FfmpegVideoEnc::new()
+                        .with_backend(FfmpegEncBackend::Vaapi(crate::ffmpegenc::VaapiCodec::Av1)),
+                )
+            },
+            || FfmpegEncBackend::Vaapi(crate::ffmpegenc::VaapiCodec::Av1).usable(),
+        ),
     ] {
         reg.register_launch(
             LaunchFactory::new(
@@ -3512,6 +3535,7 @@ fn register_feature_gated(reg: &mut Registry) {
                 FfmpegVideoEnc::backend_pad_templates(FfmpegEncBackend::Vaapi(codec)),
                 build,
             )
+            .with_usable(usable)
             .with_experimental(),
         );
     }

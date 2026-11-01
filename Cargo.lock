@@ -4219,6 +4219,7 @@ dependencies = [
  "objc2-screen-capture-kit",
  "objc2-video-toolbox",
  "openh264",
+ "openh264-sys2",
  "opusic-sys",
  "pbkdf2 0.12.2",
  "pipewire",

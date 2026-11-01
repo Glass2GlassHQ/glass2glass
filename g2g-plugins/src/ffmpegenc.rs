@@ -130,6 +130,14 @@ impl VaapiCodec {
 }
 
 impl Backend {
+    // the linked libavcodec decides which encoders exist, and the bundled LGPL build has no libx264, NVENC or VA-API
+    pub(crate) fn usable(self) -> Result<(), String> {
+        let name = self.encoder_name();
+        ffmpeg::encoder::find_by_name(name)
+            .map(|_| ())
+            .ok_or_else(|| alloc::format!("libavcodec has no {name} encoder"))
+    }
+
     /// The libavcodec encoder name to look up.
     fn encoder_name(self) -> &'static str {
         match self {
@@ -471,8 +479,9 @@ impl FfmpegVideoEnc {
     /// loud if the encoder is absent (libavcodec built without it, or no NVIDIA
     /// driver for NVENC) so the caller can pick another backend.
     fn open_encoder(&mut self) -> Result<(), G2gError> {
-        let codec = ffmpeg::encoder::find_by_name(self.backend.encoder_name())
-            .ok_or(G2gError::Hardware(HardwareError::Other))?;
+        let codec = ffmpeg::encoder::find_by_name(self.backend.encoder_name()).ok_or(
+            G2gError::Hardware(HardwareError::MissingCodec(self.backend.encoder_name())),
+        )?;
         let pixel = pixel_for(self.format).ok_or(G2gError::CapsMismatch)?;
         let vaapi = matches!(self.backend, Backend::Vaapi(_));
         let encoder_pixel = if vaapi { Pixel::VAAPI } else { pixel };

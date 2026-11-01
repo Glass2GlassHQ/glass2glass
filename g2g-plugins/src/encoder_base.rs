@@ -38,7 +38,10 @@ pub(crate) struct EmitFeedback {
 /// at least 20%. No encoder here can retarget in place (rav1e fixes the rate at
 /// `Context` construction, libavcodec at `avcodec_open2`), so each change costs a
 /// rebuild and a keyframe; the gate damps a jittery BWE estimate.
-#[cfg(any(feature = "av1-encode", all(target_os = "linux", feature = "ffmpeg")))]
+#[cfg(any(
+    feature = "av1-encode",
+    all(target_os = "linux", any(feature = "ffmpeg", feature = "openh264"))
+))]
 pub(crate) fn bitrate_change_is_significant(current: u64, target: u64) -> bool {
     let current = current.max(1);
     target.abs_diff(current) * 100 >= current * 20

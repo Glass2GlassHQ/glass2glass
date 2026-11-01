@@ -1355,6 +1355,7 @@ pub mod mfaacencode;
     feature = "opus",
     all(target_os = "linux", feature = "ffmpeg"),
     all(any(target_os = "linux", windows), feature = "nvenc"),
+    all(target_os = "linux", feature = "openh264"),
     feature = "gstreamer"
 ))]
 mod encoder_base;
@@ -1569,6 +1570,8 @@ pub mod ffmpegaudiodec;
 // H.264 decode with OpenH264, built from source and linked statically.
 #[cfg(all(target_os = "linux", feature = "openh264"))]
 pub mod openh264dec;
+#[cfg(all(target_os = "linux", feature = "openh264"))]
+pub mod openh264enc;
 // libavcodec setup for codecs known only by container tag.
 #[cfg(all(target_os = "linux", feature = "ffmpeg-long-tail"))]
 mod ffmpegtagged;

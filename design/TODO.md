@@ -40,7 +40,6 @@ Highest leverage first:
 The release `g2g-launch` binaries and wheels must start on a host with no media
 libraries installed. Everything below ships in 0.12.0.
 
-- **openh264enc.** H.264 encode on the bundled OpenH264.
 - **AAC encode on macOS.** An AudioToolbox AAC-LC encoder (gst `atenc`).
 - **macOS and Windows downloads.** The binaries are unsigned: give the macOS
   binary an ad-hoc signature and document clearing the quarantine flag and the

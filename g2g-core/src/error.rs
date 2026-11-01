@@ -125,6 +125,8 @@ pub enum HardwareError {
     Http(u16),
     // an HTTP request that failed before any response status arrived
     HttpTransport(HttpTransportFailure),
+    // the linked codec library has no encoder or decoder of this name
+    MissingCodec(&'static str),
 }
 
 // the stage at which an HTTP request failed with no response status

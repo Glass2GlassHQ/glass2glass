@@ -743,7 +743,7 @@ mozjpeg = ["mjpeg", "mjpeg-encode", "dep:mozjpeg"]
 opus = ["std", "dep:opusic-sys"]
 # H.264 decode (openh264dec) with OpenH264, built from source with cc and linked
 # statically. nasm adds the x86 assembly when it is on PATH. Linux-only, implies std.
-openh264 = ["std", "dep:openh264"]
+openh264 = ["std", "dep:openh264", "dep:openh264-sys2"]
 # WebRTC audio processing (webrtcdsp + webrtcechoprobe): echo cancellation, noise
 # suppression, gain control and a high-pass filter via `sonora`, a pure-Rust port
 # of WebRTC's audio processing module. No system deps. Implies std.
@@ -929,6 +929,8 @@ image-webp = { version = "0.2", optional = true }
 opusic-sys = { version = "0.7.6", optional = true }
 # OpenH264 (openh264 feature), built from the source the crate ships.
 openh264 = { version = "0.9.9", optional = true, default-features = false, features = ["source"] }
+# The encoder's trace-level option, which the openh264 crate does not wrap.
+openh264-sys2 = { version = "0.9.9", optional = true, default-features = false }
 # Pure-Rust port of WebRTC's audio processing module (webrtcdsp feature): AEC3,
 # noise suppression, AGC2, high-pass filter. BSD-3-Clause, MSRV 1.91.
 sonora = { version = "0.2", optional = true }
