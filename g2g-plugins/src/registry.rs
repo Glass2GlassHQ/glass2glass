@@ -2677,6 +2677,7 @@ pub static FEATURE_GATED_ELEMENTS: &[FeatureGatedElement] = &{
         "tcpserversrc" => "tcp";
         "tcpclientsrc" => "tcp";
         "tcpserversink" => "tcp";
+        "httpserversink" => "http-server";
         "tcpclientsink" => "tcp";
         "shmsrc" => "shm";
         "shmsink" => "shm";
@@ -3031,6 +3032,11 @@ fn register_feature_gated(reg: &mut Registry) {
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         },
         || Box::new(WebRtcWhepSrc::new("")),
+    ));
+    #[cfg(feature = "http-server")]
+    reg.register_launch(LaunchFactory::of::<crate::httpserver::HttpServerSink>(
+        "httpserversink",
+        || Box::new(crate::httpserver::HttpServerSink::default()),
     ));
     #[cfg(feature = "tcp")]
     reg.register_launch(LaunchFactory::of::<TcpServerSink>("tcpserversink", || {

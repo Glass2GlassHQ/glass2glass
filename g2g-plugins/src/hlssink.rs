@@ -94,6 +94,13 @@ pub struct HlsSink {
     /// Segment files on disk in write order, for `max-files` pruning.
     on_disk: VecDeque<String>,
     segments_written: u64,
+    #[cfg(feature = "http-server")]
+    http_address: String,
+    // `None` serves nothing, `Some(0)` lets the OS pick the port
+    #[cfg(feature = "http-server")]
+    http_port: Option<u16>,
+    #[cfg(feature = "http-server")]
+    file_server: Option<crate::httpserver::FileServer>,
 }
 
 impl core::fmt::Debug for HlsSink {
@@ -150,6 +157,54 @@ impl HlsSink {
             },
             on_disk: VecDeque::new(),
             segments_written: 0,
+            #[cfg(feature = "http-server")]
+            http_address: String::from(HTTP_DEFAULT_ADDRESS),
+            #[cfg(feature = "http-server")]
+            http_port: None,
+            #[cfg(feature = "http-server")]
+            file_server: None,
+        }
+    }
+
+    /// Serve the playlist, init segment and listed segments over HTTP on
+    /// `address:port`. Port 0 lets the OS pick, read back with [`Self::http_port`].
+    #[cfg(feature = "http-server")]
+    pub fn with_http_server(mut self, address: impl Into<String>, port: u16) -> Self {
+        self.http_address = address.into();
+        self.http_port = Some(port);
+        self
+    }
+
+    /// The port the HTTP server listens on, once configured.
+    #[cfg(feature = "http-server")]
+    pub fn http_port(&self) -> Option<u16> {
+        self.file_server.as_ref().map(|server| server.port())
+    }
+
+    #[cfg(feature = "http-server")]
+    fn publish(&self, path: &str, content_type: &'static str) {
+        if let Some(server) = &self.file_server {
+            server.publish(basename(path), path, content_type);
+        }
+    }
+
+    #[cfg(not(feature = "http-server"))]
+    fn publish(&self, _path: &str, _content_type: &'static str) {}
+
+    #[cfg(feature = "http-server")]
+    fn withdraw(&self, path: &str) {
+        if let Some(server) = &self.file_server {
+            server.withdraw(basename(path));
+        }
+    }
+
+    #[cfg(not(feature = "http-server"))]
+    fn withdraw(&self, _path: &str) {}
+
+    fn segment_content_type(&self) -> &'static str {
+        match self.encoding {
+            Some(ByteStreamEncoding::IsoBmff) => FMP4_CONTENT_TYPE,
+            _ => TS_CONTENT_TYPE,
         }
     }
 
@@ -207,7 +262,7 @@ impl HlsSink {
     /// The URI a segment path gets in the playlist: its basename, under
     /// `playlist-root` when one is set.
     fn playlist_uri(&self, path: &str) -> String {
-        let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
+        let name = basename(path);
         if self.playlist_root.is_empty() {
             return String::from(name);
         }
@@ -238,6 +293,7 @@ impl HlsSink {
             })?;
             self.playlist.map_uri = Some(self.playlist_uri(&self.init_location));
             self.init_written = true;
+            self.publish(&self.init_location, FMP4_CONTENT_TYPE);
         }
         let path = expand(&self.location, self.index);
         let mut file = fs::File::create(&path)
@@ -246,6 +302,7 @@ impl HlsSink {
         file.flush().map_err(io_err)?;
         self.index += 1;
         self.segments_written += 1;
+        self.publish(&path, self.segment_content_type());
         self.on_disk.push_back(path.clone());
 
         self.playlist.segments.push(Segment {
@@ -283,21 +340,28 @@ impl HlsSink {
 
         while self.max_files > 0 && self.on_disk.len() as u64 > self.max_files {
             if let Some(old) = self.on_disk.pop_front() {
+                self.withdraw(&old);
                 let _ = fs::remove_file(old);
             }
         }
         self.write_playlist()
     }
 
+    // a reader polling the live playlist never sees it half written, rename replaces it whole
     fn write_playlist(&self) -> Result<(), G2gError> {
-        fs::write(&self.playlist_location, write_media(&self.playlist)).map_err(|e| {
+        let staging = alloc::format!("{}.tmp", self.playlist_location);
+        fs::write(&staging, write_media(&self.playlist))
+            .map_err(|e| path_io_err(short_type_name::<Self>(), "write", &staging, e))?;
+        fs::rename(&staging, &self.playlist_location).map_err(|e| {
             path_io_err(
                 short_type_name::<Self>(),
-                "write",
+                "rename",
                 &self.playlist_location,
                 e,
             )
-        })
+        })?;
+        self.publish(&self.playlist_location, PLAYLIST_CONTENT_TYPE);
+        Ok(())
     }
 
     /// One MPEG-TS input frame: a whole access unit's packets. The keyframe flag
@@ -375,9 +439,19 @@ impl HlsSink {
     }
 }
 
+const PLAYLIST_CONTENT_TYPE: &str = "application/vnd.apple.mpegurl";
+const TS_CONTENT_TYPE: &str = "video/mp2t";
+const FMP4_CONTENT_TYPE: &str = "video/mp4";
+#[cfg(feature = "http-server")]
+const HTTP_DEFAULT_ADDRESS: &str = "localhost";
+
+fn basename(path: &str) -> &str {
+    path.rsplit(['/', '\\']).next().unwrap_or(path)
+}
+
 /// A fragment's (track id, whether its first sample is a sync sample, total
 /// sample duration in the track timescale), read from the first `traf`.
-fn fragment_info(moof: &[u8], frame_len: usize) -> Result<(u32, bool, u64), G2gError> {
+pub(crate) fn fragment_info(moof: &[u8], frame_len: usize) -> Result<(u32, bool, u64), G2gError> {
     let traf = find_box(moof, b"traf").ok_or(G2gError::CapsMismatch)?;
     let tfhd = find_box(traf, b"tfhd").ok_or(G2gError::CapsMismatch)?;
     let trun = find_box(traf, b"trun").ok_or(G2gError::CapsMismatch)?;
@@ -393,7 +467,7 @@ fn fragment_info(moof: &[u8], frame_len: usize) -> Result<(u32, bool, u64), G2gE
 /// Each track's (track id, media timescale) from a `moov`. Only the two header
 /// boxes are read: unlike the demuxer's header parse this must not care whether
 /// the sample entry names a codec we can decode.
-fn track_timescales(moov: &[u8]) -> Result<Vec<(u32, u32)>, G2gError> {
+pub(crate) fn track_timescales(moov: &[u8]) -> Result<Vec<(u32, u32)>, G2gError> {
     let mut out = Vec::new();
     for (kind, trak) in boxes(moov) {
         if kind != b"trak" {
@@ -450,6 +524,13 @@ impl AsyncElement for HlsSink {
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         self.encoding = Some(encoding_of(absolute_caps)?);
+        #[cfg(feature = "http-server")]
+        if let (Some(port), None) = (self.http_port, &self.file_server) {
+            self.file_server = Some(crate::httpserver::FileServer::bind(
+                &self.http_address,
+                port,
+            )?);
+        }
         Ok(ConfigureOutcome::Accepted)
     }
 
@@ -459,6 +540,10 @@ impl AsyncElement for HlsSink {
         _out: &'a mut dyn OutputSink,
     ) -> Self::ProcessFuture<'a> {
         Box::pin(async move {
+            #[cfg(feature = "http-server")]
+            if let Some(server) = &mut self.file_server {
+                server.start()?;
+            }
             match packet {
                 PipelinePacket::DataFrame(frame) => {
                     let slice = frame
@@ -516,6 +601,14 @@ impl AsyncElement for HlsSink {
             }
             "playlist-length" => self.playlist_length = value.as_uint().ok_or(PropError::Type)?,
             "max-files" => self.max_files = value.as_uint().ok_or(PropError::Type)?,
+            #[cfg(feature = "http-server")]
+            "http-address" => self.http_address = value.as_str().ok_or(PropError::Type)?.into(),
+            #[cfg(feature = "http-server")]
+            "http-port" => {
+                let port = value.as_uint().ok_or(PropError::Type)?;
+                let port = u16::try_from(port).map_err(|_| PropError::Value)?;
+                self.http_port = (port != 0).then_some(port);
+            }
             _ => return Err(PropError::Unknown),
         }
         Ok(())
@@ -530,6 +623,10 @@ impl AsyncElement for HlsSink {
             "target-duration" => Some(PropValue::Uint(self.target_duration_secs)),
             "playlist-length" => Some(PropValue::Uint(self.playlist_length)),
             "max-files" => Some(PropValue::Uint(self.max_files)),
+            #[cfg(feature = "http-server")]
+            "http-address" => Some(PropValue::Str(self.http_address.clone())),
+            #[cfg(feature = "http-server")]
+            "http-port" => Some(PropValue::Uint(u64::from(self.http_port.unwrap_or(0)))),
             _ => None,
         }
     }
@@ -582,6 +679,21 @@ static HLSSINK_PROPS: &[PropertySpec] = &[
         PropKind::Uint,
         "segment files kept on disk (0 = all)",
     ),
+    #[cfg(feature = "http-server")]
+    PropertySpec::new(
+        "http-address",
+        PropKind::Str,
+        "address the HTTP server listens on when http-port is set",
+    )
+    .with_default(HTTP_DEFAULT_ADDRESS),
+    #[cfg(feature = "http-server")]
+    PropertySpec::new(
+        "http-port",
+        PropKind::Uint,
+        "serve the playlist and segments over HTTP on this port (0 = no server)",
+    )
+    .with_default("0")
+    .with_range("0", "65535"),
 ];
 
 impl PadTemplates for HlsSink {

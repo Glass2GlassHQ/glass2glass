@@ -25,7 +25,7 @@ default = []
 # explicitly), and the no_std `embassy*` RTOS backends.
 linux-full = [
     "multi-thread", "plugin-loader", "plugin-signing",
-    "rtsp", "rtsp-server", "rtsp-client-sink", "srt", "rist", "srtp", "dtls-srtp", "tcp", "shm", "unixfd", "udp-egress", "udp-ingress", "rtmp", "webrtc",
+    "rtsp", "rtsp-server", "rtsp-client-sink", "srt", "rist", "srtp", "dtls-srtp", "tcp", "http-server", "shm", "unixfd", "udp-egress", "udp-ingress", "rtmp", "webrtc",
     "remote", "remote-ws", "webtransport", "moqt",
     "http-src", "hls", "dash",
     "ffmpeg", "ffmpeg-long-tail", "v4l2",
@@ -127,6 +127,8 @@ udp-ingress = ["std", "metadata", "tokio/net"]
 # plugin. They carry raw bytes with no framing of their own, so any peer that
 # speaks a socket can sit on the other end. Implies std + tokio net/io-util.
 tcp = ["std", "tokio/net", "tokio/io-util"]
+# HTTP serving: `httpserversink` and `hlssink http-port`.
+http-server = ["tcp", "tokio/fs"]
 # Shared-memory IPC pair (M1081): ShmSink / ShmSrc speak the `shmpipe` protocol
 # of GStreamer's `shm` plugin, a unix control socket plus a POSIX shm area, so
 # either end can be a gst `shmsink` / `shmsrc`. Linux only (macOS rejects the

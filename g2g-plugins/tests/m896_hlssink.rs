@@ -15,6 +15,12 @@
 //! `HlsSink` is `std`-gated, so this file is too.
 #![cfg(feature = "std")]
 
+#[path = "common/hls_mux_fixture.rs"]
+mod hls_mux_fixture;
+use hls_mux_fixture::{
+    bytestream, frame, h264_caps, mux_fmp4, mux_ts, synthetic_aus, CaptureSink, NullSink,
+    FRAME_25FPS_NS, HEIGHT, WIDTH,
+};
 #[path = "common/ffmpeg_tool.rs"]
 mod ffmpeg_tool;
 use ffmpeg_tool::have_ffmpeg;
@@ -27,11 +33,10 @@ use std::process::Command;
 
 use g2g_core::conformance::{ConformanceDimension, Evidence};
 use g2g_core::element::AsyncElement;
-use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
+use g2g_core::frame::{FrameTiming, PipelinePacket};
 use g2g_core::{
-    AudioFormat, ByteStreamEncoding, Caps, Dim, G2gError, MultiInputElement, MultiOutputElement,
-    OutputSink, PropValue, PropertySpec, PushOutcome, Rate, VideoCodec,
+    AudioFormat, ByteStreamEncoding, Caps, G2gError, MultiInputElement, MultiOutputElement,
+    PropValue, PropertySpec, PushOutcome,
 };
 use g2g_plugins::conformance::persist;
 use g2g_plugins::hls::{parse, Playlist};
@@ -41,41 +46,7 @@ use g2g_plugins::mp4muxn::Mp4MuxN;
 use g2g_plugins::registry::default_registry;
 use g2g_plugins::tsmuxn::TsMux;
 
-const WIDTH: u32 = 320;
-const HEIGHT: u32 = 240;
-/// One frame at 25 fps, a whole number of the muxers' 90 kHz ticks, so the
-/// synthetic fixture's segment durations are exact.
-const FRAME_25FPS_NS: u64 = 40_000_000;
-/// Frames per GOP in the synthetic fixture: exactly 1 s, the target duration the
-/// segmenting tests use.
-const GOP: usize = 25;
-
 // --- pipeline plumbing ----------------------------------------------------
-
-/// Captures the byte-stream frames an element pushes downstream, timing and all,
-/// which is exactly what the runner would hand the next element.
-#[derive(Default)]
-struct CaptureSink {
-    frames: Vec<(Vec<u8>, FrameTiming)>,
-}
-
-impl OutputSink for CaptureSink {
-    fn poll_push(
-        &mut self,
-        _cx: &mut core::task::Context<'_>,
-        packet_slot: &mut Option<PipelinePacket>,
-    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
-        let packet = packet_slot.take().expect("poll_push without a packet");
-        core::task::Poll::Ready({
-            if let PipelinePacket::DataFrame(f) = packet {
-                if let Some(s) = f.domain.as_system_slice() {
-                    self.frames.push((s.to_vec(), f.timing));
-                }
-            }
-            Ok(PushOutcome::Accepted)
-        })
-    }
-}
 
 #[derive(Default)]
 struct PortCapture {
@@ -108,37 +79,6 @@ impl g2g_core::MultiOutputSink for PortCapture {
     }
 }
 
-struct NullSink;
-impl OutputSink for NullSink {
-    fn poll_push(
-        &mut self,
-        _cx: &mut core::task::Context<'_>,
-        packet_slot: &mut Option<PipelinePacket>,
-    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
-        packet_slot.take();
-        core::task::Poll::Ready(Ok(PushOutcome::Accepted))
-    }
-}
-
-fn frame(bytes: Vec<u8>, timing: FrameTiming) -> PipelinePacket {
-    PipelinePacket::DataFrame(Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        timing,
-        0,
-    ))
-}
-
-fn h264_caps() -> Caps {
-    Caps::CompressedVideo {
-        codec: VideoCodec::H264,
-        width: Dim::Fixed(WIDTH),
-        height: Dim::Fixed(HEIGHT),
-        framerate: Rate::Fixed(25 << 16),
-        colorimetry: g2g_core::Colorimetry::UNKNOWN,
-        alignment: g2g_core::BitstreamAlignment::Unspecified,
-    }
-}
-
 fn aac_caps() -> Caps {
     Caps::Audio {
         format: AudioFormat::Aac,
@@ -146,26 +86,6 @@ fn aac_caps() -> Caps {
         sample_rate: 48_000,
         channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
     }
-}
-
-fn bytestream(encoding: ByteStreamEncoding) -> Caps {
-    Caps::ByteStream { encoding }
-}
-
-/// Access units through a one-pad `TsMux`, as the frames it pushes downstream.
-async fn mux_ts(aus: &[(Vec<u8>, FrameTiming)]) -> Vec<(Vec<u8>, FrameTiming)> {
-    let mut mux = TsMux::new(1);
-    mux.configure_pipeline(0, &h264_caps()).expect("configure");
-    let mut sink = CaptureSink::default();
-    for (au, timing) in aus {
-        mux.process(0, frame(au.clone(), *timing), &mut sink)
-            .await
-            .expect("mux");
-    }
-    mux.process(0, PipelinePacket::Eos, &mut sink)
-        .await
-        .expect("mux eos");
-    sink.frames
 }
 
 /// The same access units through a two-pad `TsMux`, with an AAC AU
@@ -235,22 +155,6 @@ async fn mux_fmp4_av(
     sink.frames
 }
 
-/// Access units through `Mp4MuxN` batched into `fragment_ms` fragments.
-async fn mux_fmp4(aus: &[(Vec<u8>, FrameTiming)], fragment_ms: u64) -> Vec<(Vec<u8>, FrameTiming)> {
-    let mut mux = Mp4MuxN::new(1).with_fragment_duration_ms(fragment_ms);
-    mux.configure_pipeline(0, &h264_caps()).expect("configure");
-    let mut sink = CaptureSink::default();
-    for (au, timing) in aus {
-        mux.process(0, frame(au.clone(), *timing), &mut sink)
-            .await
-            .expect("mux");
-    }
-    mux.process(0, PipelinePacket::Eos, &mut sink)
-        .await
-        .expect("mux eos");
-    sink.frames
-}
-
 /// Run muxed frames through the sink and close the stream.
 async fn package(
     sink: &mut HlsSink,
@@ -282,47 +186,6 @@ fn work_dir(name: &str) -> PathBuf {
 
 fn at(dir: &Path, name: &str) -> String {
     dir.join(name).to_string_lossy().into_owned()
-}
-
-fn annexb(nals: &[&[u8]]) -> Vec<u8> {
-    let mut v = Vec::new();
-    for n in nals {
-        v.extend_from_slice(&[0, 0, 0, 1]);
-        v.extend_from_slice(n);
-    }
-    v
-}
-
-/// `groups` GOPs of [`GOP`] access units at 25 fps, each opening on an IDR. The
-/// muxers never look inside a slice, so synthetic NALs suffice for the
-/// segmenting tests; the ffmpeg oracle uses a real encode instead.
-fn synthetic_aus(groups: usize) -> Vec<(Vec<u8>, FrameTiming)> {
-    let sps: &[u8] = &[0x67, 0x42, 0x00, 0x1e, 0x88];
-    let pps: &[u8] = &[0x68, 0xce, 0x3c, 0x80];
-    let idr: &[u8] = &[0x65, 0x88, 0x84, 0x00];
-    let inter: &[u8] = &[0x41, 0x9a, 0x00];
-    let mut aus = Vec::new();
-    for g in 0..groups {
-        for i in 0..GOP {
-            let index = (g * GOP + i) as u64;
-            let bytes = if i == 0 {
-                annexb(&[sps, pps, idr])
-            } else {
-                annexb(&[inter])
-            };
-            aus.push((
-                bytes,
-                FrameTiming {
-                    pts_ns: index * FRAME_25FPS_NS,
-                    dts_ns: index * FRAME_25FPS_NS,
-                    duration_ns: FRAME_25FPS_NS,
-                    keyframe: i == 0,
-                    ..FrameTiming::default()
-                },
-            ));
-        }
-    }
-    aus
 }
 
 // --- reference peers ------------------------------------------------------
@@ -878,7 +741,7 @@ struct ByteCapture {
 }
 
 #[cfg(feature = "hls")]
-impl OutputSink for ByteCapture {
+impl g2g_core::OutputSink for ByteCapture {
     fn poll_push(
         &mut self,
         _cx: &mut core::task::Context<'_>,

@@ -2530,6 +2530,7 @@ const DEFAULT_MAX_CLUSTER_SPAN_MS: u64 = 1_000;
 /// Segment keeps. Eight is the widest form, so any length fits without moving a
 /// byte of what follows.
 const UNKNOWN_SIZE_8: [u8; 8] = [0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF];
+const UNKNOWN_SIZE_1: u8 = 0xFF;
 
 /// A reserved size field waiting on its element's length: where the 8 bytes sit
 /// in the muxed output, and where the element's data begins (the length is the
@@ -2838,7 +2839,7 @@ impl MatroskaMuxer {
                     data_at: size_at + UNKNOWN_SIZE_8.len(),
                 });
             } else {
-                out.push(0xFF);
+                out.push(UNKNOWN_SIZE_1);
             }
             out.extend_from_slice(&elem_vec(ID_TIMESTAMP, &uint_bytes(ts)));
             self.segment_pos += (out.len() - before) as u64;
@@ -3421,6 +3422,114 @@ fn uint_bytes(v: u64) -> Vec<u8> {
     let bytes = v.to_be_bytes();
     let start = bytes.iter().position(|&b| b != 0).unwrap_or(7);
     bytes[start..].to_vec()
+}
+
+// SimpleBlock flags bit 7
+#[cfg(feature = "http-server")]
+const SIMPLE_BLOCK_KEYFRAME: u8 = 0x80;
+
+/// Where a client can start reading a live Matroska stream that a muxer emits
+/// one output frame at a time, and what it needs first.
+#[cfg(feature = "http-server")]
+#[derive(Debug, Default)]
+pub(crate) struct LiveJoin {
+    // everything ahead of the first Cluster: EBML header, Segment start, Info, Tracks
+    header: Vec<u8>,
+    // the first TrackEntry, whose keyframes are the join points
+    lead_track: Option<u64>,
+    cluster_timestamp: Option<u64>,
+}
+
+#[cfg(feature = "http-server")]
+impl LiveJoin {
+    /// The bytes a client needs ahead of `frame` to start reading there, or
+    /// `None` when `frame` does not start on a lead-track keyframe.
+    pub(crate) fn prefix_for(
+        &mut self,
+        frame: &[u8],
+    ) -> Result<Option<Vec<u8>>, g2g_core::G2gError> {
+        let malformed = || g2g_core::G2gError::CapsMismatch;
+        let mut pos = 0usize;
+        let mut carries_header = false;
+        let mut cluster_opened = false;
+        let mut first_block: Option<(u64, bool)> = None;
+        while pos < frame.len() {
+            let (id, id_len) = read_id(frame, pos).ok_or_else(malformed)?;
+            let (size, size_len, _) = read_size(frame, pos + id_len).ok_or_else(malformed)?;
+            let body_start = pos + id_len + size_len;
+            match id {
+                ID_EBML => {
+                    carries_header = true;
+                    self.header.clear();
+                }
+                // master elements whose children follow inline in a live stream
+                ID_SEGMENT => {
+                    pos = body_start;
+                    continue;
+                }
+                ID_CLUSTER => {
+                    if carries_header && self.header.is_empty() {
+                        self.header = frame[..pos].to_vec();
+                    }
+                    cluster_opened = true;
+                    pos = body_start;
+                    continue;
+                }
+                _ => {}
+            }
+            let body_end = usize::try_from(size)
+                .ok()
+                .and_then(|size| body_start.checked_add(size))
+                .ok_or_else(malformed)?;
+            let body = frame.get(body_start..body_end).ok_or_else(malformed)?;
+            match id {
+                ID_TRACKS => {
+                    self.lead_track = children(body)
+                        .find(|(child, _)| *child == ID_TRACK_ENTRY)
+                        .and_then(|(_, entry)| {
+                            children(entry).find(|(child, _)| *child == ID_TRACK_NUMBER)
+                        })
+                        .map(|(_, number)| read_uint(number));
+                }
+                ID_TIMESTAMP => self.cluster_timestamp = Some(read_uint(body)),
+                ID_SIMPLE_BLOCK if first_block.is_none() => {
+                    let (track, track_len, _) = read_size(body, 0).ok_or_else(malformed)?;
+                    let flags = *body
+                        .get(track_len + BLOCK_TIMESTAMP_AND_FLAGS_LEN - 1)
+                        .ok_or_else(malformed)?;
+                    first_block = Some((track, flags & SIMPLE_BLOCK_KEYFRAME != 0));
+                }
+                // a Block carries no keyframe flag of its own
+                ID_BLOCK_GROUP if first_block.is_none() => {
+                    first_block =
+                        Some((block_track_number(id, body).ok_or_else(malformed)?, false));
+                }
+                _ => {}
+            }
+            pos = body_end;
+        }
+        if carries_header {
+            if self.header.is_empty() {
+                self.header = frame.to_vec();
+            }
+            return Ok(Some(Vec::new()));
+        }
+        let Some((track, keyframe)) = first_block else {
+            return Ok(None);
+        };
+        if !keyframe || Some(track) != self.lead_track {
+            return Ok(None);
+        }
+        let mut prefix = self.header.clone();
+        if !cluster_opened {
+            // the keyframe sits mid-Cluster, so the client gets a Cluster of its own with the same base
+            id_bytes(ID_CLUSTER, &mut prefix);
+            prefix.push(UNKNOWN_SIZE_1);
+            let timestamp = self.cluster_timestamp.ok_or_else(malformed)?;
+            prefix.extend_from_slice(&elem_vec(ID_TIMESTAMP, &uint_bytes(timestamp)));
+        }
+        Ok(Some(prefix))
+    }
 }
 
 #[cfg(test)]

@@ -123,7 +123,7 @@ const FORMAT_SPEC: PropertySpec = PropertySpec::new(
 /// defaults it to `localhost`), so it is resolved at bind / connect time instead
 /// of being parsed into a `SocketAddr` when the property is set.
 #[derive(Debug, Clone)]
-struct Endpoint {
+pub(crate) struct Endpoint {
     host: String,
     port: u16,
 }
@@ -138,14 +138,14 @@ impl Default for Endpoint {
 }
 
 impl Endpoint {
-    fn new(host: impl Into<String>, port: u16) -> Self {
+    pub(crate) fn new(host: impl Into<String>, port: u16) -> Self {
         Self {
             host: host.into(),
             port,
         }
     }
 
-    fn resolve(&self) -> Result<SocketAddr, G2gError> {
+    pub(crate) fn resolve(&self) -> Result<SocketAddr, G2gError> {
         (self.host.as_str(), self.port)
             .to_socket_addrs()
             .map_err(io_err)?

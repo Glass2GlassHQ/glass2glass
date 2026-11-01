@@ -576,6 +576,7 @@ cargo clippy --workspace --all-targets
 | `DtlsSrtpEnc` / `DtlsSrtpDec` (DTLS-SRTP handshake over the media socket keys SRTP) | `dtls-srtp` | none |
 | `RistSink` / `RistSrc` (RIST Simple Profile: MPEG-TS over RTP with NACK retransmission) | `rist` | none |
 | `TcpServerSrc` / `TcpClientSrc` / `TcpServerSink` / `TcpClientSink` | `tcp` | none |
+| `HttpServerSink` (`httpserversink`: streams MPEG-TS, fMP4 or Matroska to HTTP clients, a late client starting at the next keyframe) | `http-server` | none |
 | `ShmSink` / `ShmSrc` (GStreamer's `shm` protocol: shared-memory frames + unix control socket) | `shm` | Linux |
 | `UnixFdSink` / `UnixFdSrc` (GStreamer's `unixfd` protocol: memfd / dma-buf descriptors over a unix socket) | `unixfd` | Linux |
 | `RtmpSrc` (RTMP publisher ingest) | `rtmp` | none |
@@ -650,7 +651,7 @@ cargo clippy --workspace --all-targets
 | `splitmuxsink` | segmented recording, `muxer=mp4\|matroska\|mpegts` |
 | `splitmuxsrc` | plays a `splitmuxsink` recording's parts as one stream |
 | `togglerecord` | starts and stops several streams together on the main stream's keyframes: one element per stream joined by `group=`, `main=true` on the one that decides |
-| `hlssink` | HLS packaging, segment files plus an `.m3u8` playlist, fed by `mpegtsmux` or `mp4mux` |
+| `hlssink` | HLS packaging, segment files plus an `.m3u8` playlist, fed by `mpegtsmux` or `mp4mux`. With the `http-server` feature, `http-port` also serves them over HTTP |
 | `fallbackswitch` | forwards the highest-priority input still delivering, input 0 being primary |
 | `fallbacksrc uri=X` | wraps `fallbackswitch` around a URI's decode chain, rebuilds the source when it dies, and reports each restart on the bus. On its own it carries every stream kind in the container through a switch and a sink of its own |
 | `livesync` | keeps a stalling live input's output going by repeating the last video frame or filling audio silence |

@@ -184,8 +184,6 @@ Highest leverage first:
   and fix the cause.
 - Pass video and audio between processes on Windows. `shmsink`, `unixfdsink`
   and the DMABUF / CUDA IPC elements are Linux only.
-- Serve HLS playlists and segments, and progressive output, over HTTP from the
-  pipeline.
 
 ## Adaptive streaming (HLS / DASH)
 

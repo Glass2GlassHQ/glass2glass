@@ -30,10 +30,9 @@ use alloc::vec::Vec;
 use std::net::SocketAddr;
 use std::time::Instant;
 
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, UdpSocket};
 use tokio::sync::{mpsc, oneshot};
-use tokio::task::JoinHandle;
 use tokio_native_tls::{native_tls, TlsAcceptor};
 
 use str0m::change::SdpOffer;
@@ -48,6 +47,7 @@ use g2g_core::{
 };
 
 use crate::filesink::io_err;
+use crate::httprequest::{read_request, AbortOnDrop, HttpRequest, RequestError};
 use crate::turn::TurnSet;
 use crate::webrtc_codec::{
     enable_tracks, get_video_codec_property, opus_caps, set_video_codec_property, Track,
@@ -79,10 +79,6 @@ const TRICKLE_CONTENT_TYPE: &str = "application/trickle-ice-sdpfrag";
 const TEXT_CONTENT_TYPE: &str = "text/plain";
 const BEARER_SCHEME: &str = "Bearer ";
 const IF_MATCH_ANY: &str = "*";
-const HEAD_TERMINATOR: &[u8] = b"\r\n\r\n";
-const MAX_HEAD_BYTES: usize = 64 * 1024;
-const MAX_BODY_BYTES: usize = 1024 * 1024;
-const READ_CHUNK_BYTES: usize = 4096;
 const REQUEST_QUEUE_DEPTH: usize = 16;
 const STEREO: u8 = 2;
 const CORS_HEADERS: &[(&str, &str)] = &[
@@ -858,14 +854,6 @@ impl Dispatched {
     }
 }
 
-struct AbortOnDrop(JoinHandle<()>);
-
-impl Drop for AbortOnDrop {
-    fn drop(&mut self) {
-        self.0.abort();
-    }
-}
-
 #[derive(Debug, PartialEq, Eq)]
 struct BindTarget {
     authority: String,
@@ -1003,26 +991,10 @@ impl HttpResponse {
     }
 }
 
-#[derive(Debug, Default)]
-struct HttpRequest {
-    method: String,
-    path: String,
-    authorization: Option<String>,
-    content_type: Option<String>,
-    if_match: Option<String>,
-    body: String,
-}
-
 /// A request handed to the run loop, which owns the session and answers it.
 struct PendingRequest {
     request: HttpRequest,
     respond: oneshot::Sender<HttpResponse>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RequestError {
-    Malformed,
-    TooLarge,
 }
 
 impl RequestError {
@@ -1031,79 +1003,6 @@ impl RequestError {
             RequestError::Malformed => HttpResponse::new(Status::BadRequest),
             RequestError::TooLarge => HttpResponse::new(Status::PayloadTooLarge),
         }
-    }
-}
-
-/// One complete request from `buf`, `None` until the head and body have arrived.
-fn parse_request(buf: &[u8]) -> Result<Option<HttpRequest>, RequestError> {
-    let head_end = buf
-        .windows(HEAD_TERMINATOR.len())
-        .position(|window| window == HEAD_TERMINATOR);
-    let Some(head_end) = head_end else {
-        if buf.len() > MAX_HEAD_BYTES {
-            return Err(RequestError::TooLarge);
-        }
-        return Ok(None);
-    };
-    if head_end > MAX_HEAD_BYTES {
-        return Err(RequestError::TooLarge);
-    }
-    let head = core::str::from_utf8(&buf[..head_end]).map_err(|_| RequestError::Malformed)?;
-    let mut lines = head.split("\r\n");
-    let mut request_line = lines.next().unwrap_or_default().split(' ');
-    let (Some(method), Some(path)) = (request_line.next(), request_line.next()) else {
-        return Err(RequestError::Malformed);
-    };
-    let mut request = HttpRequest {
-        method: method.to_string(),
-        path: path.to_string(),
-        ..HttpRequest::default()
-    };
-    let mut content_length = 0usize;
-    for line in lines {
-        let Some((name, value)) = line.split_once(':') else {
-            continue;
-        };
-        let value = value.trim();
-        if name.eq_ignore_ascii_case("Content-Length") {
-            content_length = value.parse().map_err(|_| RequestError::Malformed)?;
-        } else if name.eq_ignore_ascii_case("Authorization") {
-            request.authorization = Some(value.to_string());
-        } else if name.eq_ignore_ascii_case("Content-Type") {
-            request.content_type = Some(value.to_string());
-        } else if name.eq_ignore_ascii_case("If-Match") {
-            request.if_match = Some(value.to_string());
-        }
-    }
-    if content_length > MAX_BODY_BYTES {
-        return Err(RequestError::TooLarge);
-    }
-    let body_start = head_end.saturating_add(HEAD_TERMINATOR.len());
-    let body_end = body_start.saturating_add(content_length);
-    let Some(body) = buf.get(body_start..body_end) else {
-        return Ok(None);
-    };
-    request.body = core::str::from_utf8(body)
-        .map_err(|_| RequestError::Malformed)?
-        .to_string();
-    Ok(Some(request))
-}
-
-async fn read_request<S: AsyncRead + Unpin>(stream: &mut S) -> Result<HttpRequest, RequestError> {
-    let mut buf = Vec::new();
-    let mut chunk = [0u8; READ_CHUNK_BYTES];
-    loop {
-        if let Some(request) = parse_request(&buf)? {
-            return Ok(request);
-        }
-        let n = stream
-            .read(&mut chunk)
-            .await
-            .map_err(|_| RequestError::Malformed)?;
-        if n == 0 {
-            return Err(RequestError::Malformed);
-        }
-        buf.extend_from_slice(&chunk[..n]);
     }
 }
 
@@ -1326,46 +1225,6 @@ mod tests {
         );
         assert_eq!(bind_target("rtsp://0.0.0.0:8190"), None);
         assert_eq!(bind_target("http://"), None);
-    }
-
-    #[test]
-    fn parser_reads_head_and_body() {
-        let raw = b"POST /whip HTTP/1.1\r\ncontent-LENGTH: 4\r\nCONTENT-TYPE: application/sdp\r\nauthorization: Bearer t\r\n\r\nv=0\n";
-        let parsed = parse_request(raw).unwrap().unwrap();
-        assert_eq!(parsed.method, "POST");
-        assert_eq!(parsed.path, "/whip");
-        assert_eq!(parsed.content_type.as_deref(), Some(SDP_CONTENT_TYPE));
-        assert_eq!(parsed.authorization.as_deref(), Some("Bearer t"));
-        assert_eq!(parsed.body, "v=0\n");
-        assert!(parse_request(&raw[..raw.len() - 1]).unwrap().is_none());
-        assert!(parse_request(b"POST /whip HTTP/1.1\r\n").unwrap().is_none());
-    }
-
-    #[test]
-    fn parser_rejects_oversize_and_garbage() {
-        let huge_body = format!(
-            "POST / HTTP/1.1\r\nContent-Length: {}\r\n\r\n",
-            MAX_BODY_BYTES + 1
-        );
-        assert_eq!(
-            parse_request(huge_body.as_bytes()).unwrap_err(),
-            RequestError::TooLarge
-        );
-        let endless_head = alloc::vec![b'a'; MAX_HEAD_BYTES + 1];
-        assert_eq!(
-            parse_request(&endless_head).unwrap_err(),
-            RequestError::TooLarge
-        );
-        let bad_length = b"POST / HTTP/1.1\r\nContent-Length: lots\r\n\r\n";
-        assert_eq!(
-            parse_request(bad_length).unwrap_err(),
-            RequestError::Malformed
-        );
-        let overflowing = format!("POST / HTTP/1.1\r\nContent-Length: {}\r\n\r\n", usize::MAX);
-        assert_eq!(
-            parse_request(overflowing.as_bytes()).unwrap_err(),
-            RequestError::TooLarge
-        );
     }
 
     #[tokio::test]

@@ -1503,6 +1503,39 @@ dropped, so the init segment plus the media segments concatenate back to the
 muxer's own byte stream. `playlist-length` bounds the listed window, advancing
 `#EXT-X-MEDIA-SEQUENCE` as segments roll off, and `max-files` deletes the files
 that leave it, which is the live case. EOS appends `#EXT-X-ENDLIST` for VOD.
+The playlist is written to a temporary file and renamed into place, so a reader
+never sees a partial one.
+
+### HTTP serving
+
+The `http-server` feature serves pipeline output over plain HTTP/1.1, one
+request per connection.
+
+`hlssink http-port` (`http-address` picks the interface, `0` turns it off)
+answers GET and HEAD for the files the sink has written: the playlist, the init
+segment and every segment `max-files` has not yet deleted. A request resolves by
+its last path segment, so a `playlist-root` prefix still matches. Any other name,
+including a deleted segment or a file the sink did not write, is a 404. The
+listener binds at configure, so a taken port fails the run before any frame
+flows.
+
+`httpserversink` streams one muxed byte stream to every client that GETs it,
+with `Transfer-Encoding: chunked` and a zero-length chunk at EOS. A client that
+connects mid-stream gets its response headers at once, then waits for a frame it
+can start decoding at:
+
+- MPEG-TS: a frame whose `FrameTiming::keyframe` is set.
+- fMP4: a `moof` whose first sample is a sync sample of the lead track, after
+  the stream's `ftyp` + `moov`.
+- Matroska (`matroskamux streamable=true`): a frame whose first SimpleBlock is a
+  lead-track keyframe, after the EBML header, Info and Tracks. When the keyframe
+  falls inside a Cluster, the client gets an unknown-size Cluster header with
+  the current Cluster's Timestamp ahead of it.
+
+The lead track is the first track in the `moov` or Tracks, the same one
+`hlssink` takes its segment durations from. There is no per-client queue: a slow
+client slows the pipeline, as `tcpserversink` does, and a client whose write
+fails is dropped.
 
 ### DASH
 
