@@ -10,8 +10,8 @@ if [ "$#" -ne 1 ]; then
     exit 2
 fi
 
-prefix=$(realpath -m "$1")
-mkdir -p "$prefix"
+mkdir -p "$1"
+prefix=$(cd "$1" && pwd)
 
 case "$(uname -s)" in
 MINGW* | MSYS*)
