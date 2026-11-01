@@ -978,6 +978,8 @@ pub use webrtc_util::IceTransportPolicy;
 pub(crate) mod httprequest;
 #[cfg(feature = "http-server")]
 pub mod httpserver;
+#[cfg(any(feature = "webrtc", feature = "mqtt"))]
+pub(crate) mod tlsclient;
 #[cfg(feature = "webrtc")]
 pub mod webrtcdata;
 #[cfg(feature = "webrtc")]

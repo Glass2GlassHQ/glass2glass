@@ -149,7 +149,7 @@ element re-runs the publisher's original offer with the new credentials and
 candidates swapped in, which makes str0m restart its agent and mint new local
 credentials, and the `200` carries those plus the server's candidates as a
 frag. `https://` in `host-addr` serves TLS from the `tls-cert-file` /
-`tls-key-file` PEM pair over `tokio-native-tls`. The host candidate is added before `accept_offer` so it rides in
+`tls-key-file` PEM pair over `tokio-rustls`. The host candidate is added before `accept_offer` so it rides in
 the answer, and the mids come from `MediaAdded` per the answerer rule.
 `max-publishers` reserves a pad pair per publisher slot up front, the
 fixed-arity answer to gst's pad per producer: slot `i` emits on outputs `2i`
@@ -312,7 +312,7 @@ local side added.
 
 `livekit_signal` is the protocol seam: an HS256 JWT access-token mint and a
 hand-rolled protobuf codec for the `livekit_rtc.proto` subset, over a
-tokio-tungstenite WebSocket, `ws://` and, via native-tls, `wss://`, the TLS
+tokio-tungstenite WebSocket, `ws://` and, via rustls, `wss://`, the TLS
 stack the WHIP reqwest client already links.
 
 `LiveKitSink` publishes, the client offering as in WHIP. `LiveKitSrc`

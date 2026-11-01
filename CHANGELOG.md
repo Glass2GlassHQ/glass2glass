@@ -144,6 +144,7 @@ Breaking: `QosMessage` gains `downstream_proc_ns`, `ElementProbe` is no longer `
 - M2043: `examples/g2g-egui-video` draws pipeline video in an egui window on a wgpu device shared with g2g.
 - M2044: `AppSinkPull::caps` returns the caps of the last frame pulled.
 - M2045: `examples/g2g-gtk4-video` shows any launch line in a GTK4 window, DMABUF frames as `GdkDmabufTexture`.
+- M2046: every TLS client and the WHIP server use rustls on ring instead of native-tls, so no build links OpenSSL.
 
 ## 0.10.0
 

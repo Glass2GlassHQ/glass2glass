@@ -78,7 +78,9 @@ impl BrokerSettings {
             options.set_credentials(self.username.clone(), self.password.clone());
         }
         if self.tls {
-            options.set_transport(Transport::tls_with_config(TlsConfiguration::Native));
+            options.set_transport(Transport::tls_with_config(TlsConfiguration::Rustls(
+                crate::tlsclient::client_config(),
+            )));
         }
         options
     }

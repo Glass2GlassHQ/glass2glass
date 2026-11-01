@@ -33,7 +33,11 @@ use std::time::Instant;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, UdpSocket};
 use tokio::sync::{mpsc, oneshot};
-use tokio_native_tls::{native_tls, TlsAcceptor};
+use tokio_rustls::rustls::crypto::ring;
+use tokio_rustls::rustls::pki_types::pem::PemObject;
+use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use tokio_rustls::rustls::ServerConfig;
+use tokio_rustls::TlsAcceptor;
 
 use str0m::change::SdpOffer;
 use str0m::crypto::from_feature_flags;
@@ -210,11 +214,18 @@ impl WhipServerSrc {
         let cert =
             std::fs::read(cert_file).map_err(|e| format!("tls-cert-file {cert_file}: {e}"))?;
         let key = std::fs::read(key_file).map_err(|e| format!("tls-key-file {key_file}: {e}"))?;
-        let identity = native_tls::Identity::from_pkcs8(&cert, &key)
+        let chain = CertificateDer::pem_slice_iter(&cert)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("tls-cert-file {cert_file}: {e}"))?;
+        let key = PrivateKeyDer::from_pem_slice(&key)
+            .map_err(|e| format!("tls-key-file {key_file}: {e}"))?;
+        let config = ServerConfig::builder_with_provider(Arc::new(ring::default_provider()))
+            .with_safe_default_protocol_versions()
+            .expect("ring supports the default TLS versions")
+            .with_no_client_auth()
+            .with_single_cert(chain, key)
             .map_err(|e| format!("tls certificate and key: {e}"))?;
-        let acceptor =
-            native_tls::TlsAcceptor::new(identity).map_err(|e| format!("tls acceptor: {e}"))?;
-        Ok(Some(TlsAcceptor::from(acceptor)))
+        Ok(Some(TlsAcceptor::from(Arc::new(config))))
     }
 
     fn authorized(&self, request: &HttpRequest) -> bool {

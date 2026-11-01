@@ -642,10 +642,10 @@ async fn spawn_stream_bridge(
     let udp = UdpSocket::bind((local_ip, 0)).await.ok()?;
     let addr = udp.local_addr().ok()?;
     if tls {
-        let connector = tokio_native_tls::TlsConnector::from(
-            tokio_native_tls::native_tls::TlsConnector::new().ok()?,
-        );
-        let stream = connector.connect(sni, tcp).await.ok()?;
+        let connector = tokio_rustls::TlsConnector::from(crate::tlsclient::client_config());
+        let server_name =
+            tokio_rustls::rustls::pki_types::ServerName::try_from(String::from(sni)).ok()?;
+        let stream = connector.connect(server_name, tcp).await.ok()?;
         tokio::spawn(bridge_loop(udp, stream));
     } else {
         tokio::spawn(bridge_loop(udp, tcp));

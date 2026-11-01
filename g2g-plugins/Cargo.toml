@@ -198,23 +198,22 @@ tui = ["std", "tokio/time", "tokio/macros", "dep:ratatui"]
 # system dep. WHIP signaling (HTTP offer/answer) reuses reqwest. Implies std +
 # tokio. str0m 0.22 requires rustc 1.85, within the workspace MSRV; the feature
 # is off by default, so the no_std baseline is unaffected.
-webrtc = ["std", "tokio/net", "tokio/time", "tokio/macros", "tokio/io-util", "dep:str0m", "dep:reqwest", "dep:hmac", "dep:tokio-native-tls"]
+webrtc = ["std", "tokio/net", "tokio/time", "tokio/macros", "tokio/io-util", "dep:str0m", "dep:reqwest", "dep:hmac", "dep:tokio-rustls", "dep:rustls-native-certs"]
 # Native LiveKit publisher (LiveKitSink, T4): joins a LiveKit room and publishes
 # H.264 (+ optional Opus) over the str0m PeerConnection, with a hand-rolled
 # WebSocket + protobuf signaller (livekit_rtc.proto subset) and an HS256 JWT
 # access token. Layers on the `webrtc` engine and adds the WebSocket client
 # (tokio-tungstenite, shared with remote-ws) + JWT crypto (sha2 + base64). Implies
-# std. `wss://` (LiveKit Cloud) works natively: tungstenite's native-tls is the
-# same TLS stack reqwest (the `webrtc` WHIP client) already links.
-webrtc-livekit = ["webrtc", "dep:tokio-tungstenite", "tokio-tungstenite/native-tls", "futures-util/sink", "dep:base64"]
+# std. `wss://` (LiveKit Cloud) goes through rustls, as reqwest does.
+webrtc-livekit = ["webrtc", "dep:tokio-tungstenite", "tokio-tungstenite/rustls-tls-native-roots", "futures-util/sink", "dep:base64"]
 # Janus VideoRoom publisher (JanusVrSink): joins a room over the Janus WebSocket
 # API (JSON, `janus-protocol` subprotocol) and publishes one track through the
 # str0m PeerConnection. Layers on `webrtc` like the LiveKit elements.
-webrtc-janus = ["webrtc", "dep:tokio-tungstenite", "tokio-tungstenite/native-tls", "futures-util/sink", "dep:serde_json"]
+webrtc-janus = ["webrtc", "dep:tokio-tungstenite", "tokio-tungstenite/rustls-tls-native-roots", "futures-util/sink", "dep:serde_json"]
 # Amazon Kinesis Video Streams WebRTC (KvsWebRtcSink as master, KvsWebRtcSrc as
 # viewer): hand-rolled SigV4 for the control-plane calls and the presigned
 # signalling WebSocket, str0m for the PeerConnection. Layers on `webrtc`.
-webrtc-kvs = ["webrtc", "dep:tokio-tungstenite", "tokio-tungstenite/native-tls", "futures-util/sink", "dep:serde_json", "dep:base64"]
+webrtc-kvs = ["webrtc", "dep:tokio-tungstenite", "tokio-tungstenite/rustls-tls-native-roots", "futures-util/sink", "dep:serde_json", "dep:base64"]
 # ONVIF camera discovery + RTSP stream-URI resolution (OnvifSrc). Hand-rolled
 # WS-Discovery Probe (UDP multicast) and the two media SOAP calls
 # (GetProfiles / GetStreamUri) with a WS-Security UsernameToken digest header.
@@ -628,8 +627,7 @@ analytics = ["metadata"]
 analytics-json = ["metadata", "std", "dep:serde_json", "dep:reqwest"]
 # `mqttsink`: publishes the record `metasink` writes as one MQTT message per
 # frame, through the pure-Rust rumqttc client on the caller's tokio runtime.
-# TLS goes through native-tls, the stack reqwest already links.
-mqtt = ["analytics-json", "dep:rumqttc"]
+mqtt = ["analytics-json", "dep:rumqttc", "dep:tokio-rustls", "dep:rustls-native-certs"]
 # `embeddingsink`: one sqlite row per embedded frame (source_id, pts, model_name,
 # vector), the same schema gst-python-ml's `pyml_embeddingsink` writes and its
 # `search_video` reads. rusqlite with sqlite bundled, so there is no system dep.
@@ -730,8 +728,7 @@ vorbis = ["std", "dep:symphonia-core", "dep:symphonia-codec-vorbis"]
 # HTTP(S) byte-stream source (HttpSrc) via the `reqwest` async client: a single
 # GET streamed downstream as a `Caps::ByteStream` (or declared codec), the
 # souphttpsrc analog and the fetch layer under HLS/DASH. Implies std + tokio.
-# Uses reqwest default-tls (SChannel on Windows, SecureTransport on macOS; Linux
-# needs system OpenSSL dev headers, like the other native-backed features).
+# TLS is rustls on ring with the OS root certificates.
 http-src = ["std", "dep:reqwest", "tokio/time"]
 # HLS source (HlsSrc): fetches an .m3u8 playlist, selects a variant (simple ABR),
 # and streams its MPEG-TS media segments downstream as a `Caps::ByteStream` for
@@ -912,13 +909,12 @@ sonora = { version = "0.2", optional = true }
 # crate + core are pulled, not the demuxers.
 symphonia-core = { version = "0.6", optional = true }
 symphonia-codec-vorbis = { version = "0.6", optional = true }
-# Async HTTP client for HttpSrc (http-src feature). Default features keep
-# default-tls (platform-native TLS) and http1/http2; only `chunk()` streaming is
-# used. Runs on the caller's tokio runtime.
-reqwest = { version = "0.12", optional = true }
-# MQTT client for `mqttsink` (the `mqtt` feature). Default features would pull
-# rustls; native-tls shares the TLS stack reqwest links.
-rumqttc = { version = "0.25", optional = true, default-features = false, features = ["use-native-tls"] }
+# Async HTTP client for HttpSrc (http-src feature). rustls on ring with the OS
+# root certificates, so no OpenSSL is linked. Runs on the caller's tokio runtime.
+reqwest = { version = "0.12", optional = true, default-features = false, features = ["rustls-tls-native-roots", "charset", "http2", "macos-system-configuration"] }
+# MQTT client for `mqttsink` (the `mqtt` feature). The provider-free rustls
+# feature, because its default provider is aws-lc-rs, which needs cmake to build.
+rumqttc = { version = "0.25", optional = true, default-features = false, features = ["use-rustls-no-provider"] }
 # str0m: sans-IO WebRTC stack (ICE / DTLS / SRTP / SCTP / RTP). `rust-crypto` is
 # the pure-Rust crypto backend (RustCrypto ecosystem), so no OpenSSL system dep.
 # Drives the native WebRtcSink (the `webrtc` feature). 0.22 is the first release
@@ -984,9 +980,11 @@ tokio-tungstenite = { version = "0.24", optional = true }
 # (webtransport feature). `ring` rather than the default aws-lc-rs backend:
 # rustls already resolves on ring here, and aws-lc-sys needs cmake at build time.
 web-transport-quinn = { version = "0.12", optional = true, default-features = false, features = ["ring"] }
-# TLS for TURN-over-TLS (`turns:`) and the LiveKit `wss://` signalling: the same
-# native-tls stack reqwest's default-tls already links.
-tokio-native-tls = { version = "0.3", optional = true }
+# TLS for TURN-over-TLS (`turns:`), the whipserversrc HTTPS listener and MQTT,
+# on ring like the rest of the tree's rustls.
+tokio-rustls = { version = "0.26", optional = true, default-features = false, features = ["ring", "logging", "tls12"] }
+# The OS root certificates the TLS clients verify servers against.
+rustls-native-certs = { version = "0.8", optional = true }
 url = { version = "2", optional = true }
 bytes = { version = "1", optional = true }
 # TrueType / OpenType font parser + rasterizer (truetype-overlay feature, M409).

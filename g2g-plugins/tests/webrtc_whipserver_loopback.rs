@@ -21,6 +21,10 @@ use str0m::{Candidate, Event, Input, Output, Rtc, RtcConfig};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::mpsc;
+use tokio_rustls::rustls::crypto::ring;
+use tokio_rustls::rustls::pki_types::pem::PemObject;
+use tokio_rustls::rustls::pki_types::{CertificateDer, ServerName};
+use tokio_rustls::rustls::{ClientConfig, RootCertStore};
 
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
@@ -303,6 +307,22 @@ async fn opus_publishes_into_the_audio_output() {
     assert_session_counted(&run, frames.len() as u64);
 }
 
+fn trusting_the_test_cert() -> Arc<ClientConfig> {
+    let mut roots = RootCertStore::empty();
+    let pem = std::fs::read(TLS_CERT).expect("read the test certificate");
+    for cert in CertificateDer::pem_slice_iter(&pem) {
+        roots
+            .add(cert.expect("parse the test certificate"))
+            .expect("trust it");
+    }
+    let config = ClientConfig::builder_with_provider(Arc::new(ring::default_provider()))
+        .with_safe_default_protocol_versions()
+        .expect("ring supports the default TLS versions")
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    Arc::new(config)
+}
+
 #[tokio::test]
 async fn https_host_addr_serves_whip_over_tls() {
     let port = free_port();
@@ -316,17 +336,13 @@ async fn https_host_addr_serves_whip_over_tls() {
         for _ in 0..2 {
             received.recv().await.unwrap();
         }
-        let connector = tokio_native_tls::TlsConnector::from(
-            tokio_native_tls::native_tls::TlsConnector::builder()
-                .danger_accept_invalid_certs(true)
-                .build()
-                .unwrap(),
-        );
+        let connector = tokio_rustls::TlsConnector::from(trusting_the_test_cert());
         let tcp = tokio::net::TcpStream::connect(("127.0.0.1", port))
             .await
             .unwrap();
+        let server_name = ServerName::try_from("localhost").unwrap();
         let mut tls = connector
-            .connect("localhost", tcp)
+            .connect(server_name, tcp)
             .await
             .expect("tls handshake");
         tls.write_all(
