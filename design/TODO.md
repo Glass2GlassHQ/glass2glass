@@ -50,9 +50,8 @@ libraries installed. Everything below ships in 0.12.0.
 - **Release ffmpeg run on a bare host.** Run a downloaded Linux release tarball
   and wheel on a bare `ubuntu:22.04` and `fedora:43` on an HEVC and a VP9 file,
   and check that `decodebin` picks the bundled ffmpeg.
-- **libvpx in the macOS and Windows release binaries.** `tools/libvpx-build.sh`
-  covers Linux only. Build the static libvpx on macOS and with MSVC, and add
-  `vpx` to `release-binary-macos` and `release-binary-windows`.
+- **libvpx in the Windows release binaries.** Build a static libvpx with MSVC
+  and the static C runtime, and add `vpx` to `release-binary-windows`.
 
 ## Alloc-optional (heap-free) MCU core
 

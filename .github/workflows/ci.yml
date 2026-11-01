@@ -789,7 +789,9 @@ jobs:
             echo "::endgroup::"
           done
       - name: release binary feature set
-        run: cargo check -p g2g-plugins --locked --bin g2g-launch --features release-binary-macos
+        run: |
+          brew install libvpx
+          cargo check -p g2g-plugins --locked --bin g2g-launch --features release-binary-macos
       # M731+: run the VideoToolbox / Metal / Core Audio / AVFoundation /
       # ScreenCaptureKit elements for real (decode the reference fixtures,
       # encode round trip, CAMetalLayer present, AudioQueue render + capture;

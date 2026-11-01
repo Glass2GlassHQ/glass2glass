@@ -106,7 +106,7 @@ Prebuilt `g2g-launch` and `g2g-inspect` for Linux, macOS and Windows are on each
 They need no codec libraries on the host. The Linux tarball carries the LGPL
 ffmpeg libraries in `lib/` next to the binaries, so keep the folder together, and
 the matching ffmpeg source is a release asset. They leave out PipeWire and Pulse,
-and `vpxenc` outside Linux.
+and `vpxenc` on Windows.
 
 The binaries are unsigned. macOS refuses to run one downloaded with a browser
 until the quarantine flag is cleared:

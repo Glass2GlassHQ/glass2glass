@@ -19,7 +19,12 @@ if [ ! -f "$prefix/lib/pkgconfig/vpx.pc" ]; then
     if [ ! -f "$tarball" ]; then
         curl -sfL -o "$tarball" "https://github.com/webmproject/libvpx/archive/refs/tags/v$LIBVPX_VERSION.tar.gz"
     fi
-    echo "$LIBVPX_SHA256  $tarball" | sha256sum -c - >&2
+    # macOS has shasum but no sha256sum
+    if command -v sha256sum > /dev/null; then
+        echo "$LIBVPX_SHA256  $tarball" | sha256sum -c - >&2
+    else
+        echo "$LIBVPX_SHA256  $tarball" | shasum -a 256 -c - >&2
+    fi
     tar -xzf "$tarball" -C "$prefix"
     cd "$source_dir"
     ./configure \
@@ -28,7 +33,7 @@ if [ ! -f "$prefix/lib/pkgconfig/vpx.pc" ]; then
         --enable-vp8 --enable-vp9 \
         --disable-examples --disable-tools --disable-docs --disable-unit-tests \
         >&2
-    make -j"$(nproc)" >&2
+    make -j"$(getconf _NPROCESSORS_ONLN)" >&2
     make install >&2
 fi
 

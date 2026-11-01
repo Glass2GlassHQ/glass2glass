@@ -53,7 +53,7 @@ release-binary-linux = [
     "kms-sink", "wayland-sink", "wgpu-present", "cuda", "nvenc", "nvdec", "cuda-wgpu",
     "gl-sink", "alsa-sink", "alsa-src", "openh264", "ffmpeg-long-tail", "vpx",
 ]
-release-binary-macos = ["release-binary", "vtdecode", "vtencode", "metal-sink", "coreaudio", "audiotoolbox-aac", "avfoundation", "screencapture"]
+release-binary-macos = ["release-binary", "vtdecode", "vtencode", "metal-sink", "coreaudio", "audiotoolbox-aac", "avfoundation", "screencapture", "vpx"]
 release-aar = ["release-binary", "camera2", "mediacodec-wgpu", "aaudio"]
 release-binary-windows = [
     "release-binary", "mf-decode", "mf-encode", "mf-aac", "wasapi-sink", "wasapi-src", "d3d11-sink", "mf-video-src",
