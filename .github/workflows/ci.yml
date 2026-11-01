@@ -821,6 +821,8 @@ jobs:
           --test m731_videotoolbox --test m733_vt_registry --test m735_vt_zerocopy
           --test m736_metal_sink --test m737_coreaudio --test m738_avf
           --test m739_screencapture --test m2061_atenc -- --nocapture
+      - name: test g2g-plugins (metal window)
+        run: cargo test -p g2g-plugins --locked --features metal-sink --test m2065_metal_window
       - name: check g2g-ml (wgpu + burn, Metal)
         run: cargo check -p g2g-ml --locked --all-targets --features wgpu,burn
 

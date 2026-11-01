@@ -572,7 +572,18 @@ fn print_run_json(_reg: &Registry, _pipeline: &str) -> i32 {
     2
 }
 
+#[cfg(not(all(target_os = "macos", feature = "metal-sink")))]
 fn main() {
+    launch();
+}
+
+// appkit opens windows only on the main thread, so the pipeline runs on a second one
+#[cfg(all(target_os = "macos", feature = "metal-sink"))]
+fn main() {
+    g2g_plugins::metalvideosink::run_with_appkit_main_loop(launch);
+}
+
+fn launch() {
     // Honor G2G_DEBUG (the GST_DEBUG analog): install the stderr log sink and
     // apply the category thresholds before the pipeline runs.
     g2g_core::log::init_from_env();

@@ -333,6 +333,8 @@ metal-sink = [
     "dep:objc2-core-foundation",
     "dep:objc2-foundation",
     "dep:objc2-io-surface",
+    "dep:objc2-app-kit",
+    "dep:dispatch2",
 ]
 # Android hardware H.264 decode via the NDK MediaCodec (AMediaCodec) through the
 # `ndk` crate. Android-only (the dep lives under [target.'cfg(target_os =
@@ -1208,6 +1210,17 @@ objc2-quartz-core = { version = "0.3", optional = true, default-features = false
     "CALayer",
     "CAMetalLayer",
 ] }
+# metalvideosink's window when no app hands over a layer.
+objc2-app-kit = { version = "0.3", optional = true, default-features = false, features = [
+    "std",
+    "objc2-quartz-core",
+    "NSApplication",
+    "NSGraphics",
+    "NSResponder",
+    "NSRunningApplication",
+    "NSView",
+    "NSWindow",
+] }
 # AVFoundation camera + mic capture (M738).
 objc2-av-foundation = { version = "0.3", optional = true, default-features = false, features = [
     "std",
@@ -1616,6 +1629,12 @@ required-features = ["pipewire"]
 [[test]]
 name = "av_lipsync_soak"
 required-features = ["hls", "ffmpeg", "wayland-sink", "pipewire"]
+
+# M2065: hands the main thread to AppKit, which libtest's harness keeps for itself.
+[[test]]
+name = "m2065_metal_window"
+harness = false
+required-features = ["metal-sink"]
 
 # M636: asserts a process-global allocation counter stays flat, so it must be
 # the only thread in its process (libtest's harness threads allocate mid-test).

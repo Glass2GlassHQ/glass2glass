@@ -25,9 +25,16 @@
 use core::ffi::c_void;
 use core::ptr::NonNull;
 
+use core::sync::atomic::{AtomicBool, Ordering};
+
+use dispatch2::DispatchQueue;
 use objc2::rc::Retained;
-use objc2::runtime::ProtocolObject;
-use objc2_core_foundation::{CFRetained, CGSize};
+use objc2::runtime::{NSObjectProtocol, ProtocolObject};
+use objc2::{sel, MainThreadMarker, MainThreadOnly};
+use objc2_app_kit::{
+    NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSWindow, NSWindowStyleMask,
+};
+use objc2_core_foundation::{CFRetained, CGPoint, CGRect, CGSize};
 use objc2_core_video::{CVPixelBuffer, CVPixelBufferGetIOSurface};
 use objc2_foundation::NSString;
 use objc2_metal::{
@@ -50,6 +57,7 @@ use g2g_core::{
 use crate::clock::wait_to_present;
 
 use alloc::boxed::Box;
+use alloc::string::String;
 use alloc::vec::Vec;
 use core::future::Future;
 use core::pin::Pin;
@@ -78,6 +86,122 @@ fragment float4 fs(VOut in [[stage_in]],
     return float4(saturate(rgb), 1.0);
 }
 "#;
+
+/// Set once the main thread runs the AppKit event loop, the only thread that can
+/// open a window.
+static APPKIT_MAIN_LOOP: AtomicBool = AtomicBool::new(false);
+
+/// macOS gives the main thread 8 MiB of stack, and `launch` gets the same.
+const LAUNCH_STACK_BYTES: usize = 8 << 20;
+
+/// Run `launch` on a second thread while the calling thread, which must be the
+/// main thread, runs the AppKit event loop, so `metalvideosink` can open a
+/// window. The process exits when `launch` returns.
+pub fn run_with_appkit_main_loop(launch: impl FnOnce() + Send + 'static) -> ! {
+    let mtm = MainThreadMarker::new().expect("run_with_appkit_main_loop runs on the main thread");
+    let app = NSApplication::sharedApplication(mtm);
+    // appkit gives a process without a regular activation policy no dock icon and no windows in front
+    app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
+    APPKIT_MAIN_LOOP.store(true, Ordering::Release);
+    std::thread::Builder::new()
+        .name(String::from("g2g-launch"))
+        .stack_size(LAUNCH_STACK_BYTES)
+        .spawn(move || {
+            let code = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(launch)) {
+                Ok(()) => 0,
+                Err(_) => 101,
+            };
+            std::process::exit(code);
+        })
+        .expect("spawn the launch thread");
+    app.run();
+    std::process::exit(0)
+}
+
+/// A window the main thread opened for this sink: the address of an `NSWindow`
+/// the sink holds one reference to, closed on the main thread when dropped.
+#[derive(Debug)]
+struct AppKitWindow(usize);
+
+impl AppKitWindow {
+    /// Open a window of `width` x `height` points whose content view draws `layer`.
+    fn open(layer: &CAMetalLayer, width: u32, height: u32) -> Self {
+        let layer_address = layer as *const CAMetalLayer as usize;
+        let mut window_address = 0usize;
+        let window_out = &mut window_address;
+        DispatchQueue::main().exec_sync(move || {
+            // SAFETY: work on the main queue runs on the main thread.
+            let mtm = unsafe { MainThreadMarker::new_unchecked() };
+            // SAFETY: the caller holds `layer` for the whole synchronous call.
+            let layer = unsafe { &*(layer_address as *const CAMetalLayer) };
+            let content = CGRect::new(
+                CGPoint::new(0.0, 0.0),
+                CGSize::new(f64::from(width), f64::from(height)),
+            );
+            let style = NSWindowStyleMask::Titled
+                | NSWindowStyleMask::Closable
+                | NSWindowStyleMask::Miniaturizable
+                | NSWindowStyleMask::Resizable;
+            // SAFETY: a plain window init on the main thread.
+            let window = unsafe {
+                NSWindow::initWithContentRect_styleMask_backing_defer(
+                    NSWindow::alloc(mtm),
+                    content,
+                    style,
+                    NSBackingStoreType::Buffered,
+                    false,
+                )
+            };
+            // SAFETY: the sink's reference keeps the window, so a click on close must not release it.
+            unsafe { window.setReleasedWhenClosed(false) };
+            window.setTitle(&NSString::from_str("glass2glass"));
+            if let Some(view) = window.contentView() {
+                view.setWantsLayer(true);
+                view.setLayer(Some(layer));
+            }
+            window.center();
+            window.makeKeyAndOrderFront(None);
+            let app = NSApplication::sharedApplication(mtm);
+            // appkit only has NSApplication.activate from macOS 14
+            if app.respondsToSelector(sel!(activate)) {
+                app.activate();
+            }
+            *window_out = Retained::into_raw(window) as usize;
+        });
+        Self(window_address)
+    }
+
+    /// Draw `layer` in this window instead of the layer it showed before.
+    fn show(&self, layer: &CAMetalLayer) {
+        let window_address = self.0;
+        let layer_address = layer as *const CAMetalLayer as usize;
+        DispatchQueue::main().exec_sync(move || {
+            // SAFETY: the sink's reference keeps the window alive, and the caller holds `layer` for the call.
+            let (window, layer) = unsafe {
+                (
+                    &*(window_address as *const NSWindow),
+                    &*(layer_address as *const CAMetalLayer),
+                )
+            };
+            if let Some(view) = window.contentView() {
+                view.setLayer(Some(layer));
+            }
+        });
+    }
+}
+
+impl Drop for AppKitWindow {
+    fn drop(&mut self) {
+        let window_address = self.0;
+        DispatchQueue::main().exec_async(move || {
+            // SAFETY: this is the reference `open` took, given back exactly once.
+            let window = unsafe { Retained::from_raw(window_address as *mut NSWindow) };
+            if let Some(window) = window {
+                window.close();
+            }
+        });
+    }
+}
 
 /// Everything the render loop needs, built at configure.
 struct RenderState {
@@ -118,6 +242,8 @@ pub struct MetalVideoSink {
     /// An app-supplied `CAMetalLayer` (retained at configure); the sink builds
     /// its own standalone layer when absent.
     external_layer: Option<Retained<CAMetalLayer>>,
+    /// The window the sink's own layer shows in, when the main thread runs AppKit.
+    window: Option<AppKitWindow>,
     /// Test hook: read each presented drawable back to CPU RGBA.
     readback: bool,
     last_rgba: Option<Vec<u8>>,
@@ -145,6 +271,7 @@ impl MetalVideoSink {
             configured: false,
             state: None,
             external_layer: None,
+            window: None,
             readback: false,
             last_rgba: None,
             presented: 0,
@@ -246,7 +373,16 @@ impl MetalVideoSink {
 
         let layer = match &self.external_layer {
             Some(l) => l.clone(),
-            None => CAMetalLayer::layer(),
+            None => {
+                let layer = CAMetalLayer::layer();
+                if APPKIT_MAIN_LOOP.load(Ordering::Acquire) {
+                    match &self.window {
+                        Some(window) => window.show(&layer),
+                        None => self.window = Some(AppKitWindow::open(&layer, width, height)),
+                    }
+                }
+                layer
+            }
         };
         layer.setDevice(Some(&*device));
         layer.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
