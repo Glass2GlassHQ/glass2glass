@@ -8,7 +8,8 @@ use alloc::vec::Vec;
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    Caps, FrameTiming, G2gError, MemoryDomain, OutputSink, PipelinePacket, PushOutcome, Reconfigure,
+    Caps, FrameTiming, G2gError, MemoryDomain, OutputSink, PipelinePacket, PushOutcome,
+    Reconfigure, VideoCodec,
 };
 
 /// Push a batch of encoded `(payload, pts_ns)` packets downstream.
@@ -73,11 +74,14 @@ pub(crate) async fn emit_packets(
     }
     let mut feedback = EmitFeedback::default();
     for (payload, pts_ns) in packets {
+        let domain = payload.into_domain();
+        let keyframe = is_sync_point(caps, &domain);
         let frame = Frame::new(
-            payload.into_domain(),
+            domain,
             FrameTiming {
                 pts_ns,
                 dts_ns: pts_ns,
+                keyframe,
                 ..FrameTiming::default()
             },
             *emitted,
@@ -90,6 +94,26 @@ pub(crate) async fn emit_packets(
         }
     }
     Ok(feedback)
+}
+
+// read from the bitstream, which a muxer or segmenter downstream cuts on
+fn is_sync_point(caps: &Caps, domain: &MemoryDomain) -> bool {
+    let Some(bytes) = domain.as_system_slice() else {
+        return false;
+    };
+    match caps {
+        Caps::CompressedVideo {
+            codec: VideoCodec::Vp8,
+            ..
+        } => crate::fmp4mux::vp8_keyframe(bytes),
+        Caps::CompressedVideo {
+            codec: VideoCodec::Vp9,
+            ..
+        } => crate::fmp4mux::vp9_keyframe(bytes),
+        Caps::CompressedVideo { codec, .. } => crate::annexb::au_is_keyframe(*codec, bytes),
+        Caps::Audio { .. } => true,
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -118,6 +142,59 @@ mod tests {
             sample_rate: 48_000,
             channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         }
+    }
+
+    #[derive(Default)]
+    struct TimingSink(Vec<bool>);
+    impl OutputSink for TimingSink {
+        fn poll_push(
+            &mut self,
+            _cx: &mut core::task::Context<'_>,
+            packet_slot: &mut Option<PipelinePacket>,
+        ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+            if let Some(PipelinePacket::DataFrame(frame)) = packet_slot.take() {
+                self.0.push(frame.timing.keyframe);
+            }
+            core::task::Poll::Ready(Ok(PushOutcome::Accepted))
+        }
+    }
+
+    #[tokio::test]
+    async fn flags_the_keyframes_the_bitstream_marks() {
+        // nal_unit_type 5 is an IDR slice, 1 a non-IDR slice
+        let idr = Vec::from([0u8, 0, 0, 1, 0x65, 0x88]);
+        let inter = Vec::from([0u8, 0, 0, 1, 0x41, 0x9a]);
+        let h264 = Caps::CompressedVideo {
+            codec: VideoCodec::H264,
+            width: g2g_core::Dim::Fixed(16),
+            height: g2g_core::Dim::Fixed(16),
+            framerate: g2g_core::Rate::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
+        };
+        let mut sink = TimingSink::default();
+        emit_packets(
+            &mut false,
+            &mut 0,
+            Vec::from([(idr, 0u64), (inter, 1)]),
+            &h264,
+            &mut sink,
+        )
+        .await
+        .unwrap();
+        assert_eq!(sink.0, [true, false]);
+
+        let mut sink = TimingSink::default();
+        emit_packets(
+            &mut false,
+            &mut 0,
+            Vec::from([(Vec::from([1u8]), 0u64)]),
+            &caps(),
+            &mut sink,
+        )
+        .await
+        .unwrap();
+        assert_eq!(sink.0, [true], "every audio packet is a sync point");
     }
 
     #[tokio::test]

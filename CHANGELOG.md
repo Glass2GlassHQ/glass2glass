@@ -139,6 +139,7 @@ Breaking: `QosMessage` gains `downstream_proc_ns`, `ElementProbe` is no longer `
 - M2038: `tsdemux` forwards SCTE-35 sections as the new `PipelinePacket::SpliceInfo`, and `mpegtsmux scte-35-pid` writes them.
 - M2039: `pipewirevideosink` publishes raw video as a PipeWire camera node other applications capture from.
 - M2040: `vah264enc`, `vah265enc` and `vaav1enc` encode on VA-API GPUs through libavcodec.
+- M2041: encoders mark their keyframe output, so `hlssink` cuts segments after `x264enc ! mpegtsmux`.
 
 ## 0.10.0
 
