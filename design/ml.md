@@ -899,6 +899,12 @@ pull channel delivers and re-points one egui texture id at it with
 `update_egui_texture_from_wgpu_texture`, again through an sRGB view. A
 `clocksync` before the appsink paces the pipeline to the stream's timestamps.
 
+GTK4 takes no wgpu device, so `examples/g2g-gtk4-video` hands frames over as
+`GdkTexture`s instead. A `MemoryDomain::DmaBuf` frame becomes a
+`GdkDmabufTexture` whose release function drops the frame, which keeps the fd
+open for as long as GTK holds the texture. A system-memory frame is copied into
+a `GdkMemoryTexture`. The format and size come from `AppSinkPull::caps`.
+
 ### Presenting on the producer's device
 
 A GPU decoder cannot be handed a device: Vulkan Video decode needs queues and

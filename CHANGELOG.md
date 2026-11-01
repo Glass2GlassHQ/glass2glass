@@ -143,6 +143,7 @@ Breaking: `QosMessage` gains `downstream_proc_ns`, `ElementProbe` is no longer `
 - M2042: `hlssink http-port` serves its playlist and segments over HTTP, and `httpserversink` streams MPEG-TS, fMP4 or Matroska to clients that join at the next keyframe.
 - M2043: `examples/g2g-egui-video` draws pipeline video in an egui window on a wgpu device shared with g2g.
 - M2044: `AppSinkPull::caps` returns the caps of the last frame pulled.
+- M2045: `examples/g2g-gtk4-video` shows any launch line in a GTK4 window, DMABUF frames as `GdkDmabufTexture`.
 
 ## 0.10.0
 

@@ -227,8 +227,7 @@ Highest leverage first:
 - Run `decklinkvideosink` and `decklinkaudiosink` on a board: scheduled
   playback, the board clock and audio against video have only run against a
   mock device.
-- Examples that show pipeline video inside GTK4 (as a `GdkTexture`, like
-  `gtk4paintablesink`) and Qt/QML windows.
+- An example that shows pipeline video inside a Qt/QML window.
 
 ## Containers
 

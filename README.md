@@ -112,7 +112,7 @@ every target. Only the executor and the hardware elements change.
 | **MCU** | a heap-free static pipeline on bare-metal Cortex-M or RISC-V | no allocator linked, proven panic-free, KB-scale footprint budget. `g2g-mcu` supplies the peripheral elements. See [Embedded](#embedded-heap-free-pipelines-on-a-bare-metal-mcu). |
 | **RTOS** | the same static pipeline under an RTOS task | bit-exact under bare-metal, Embassy, FreeRTOS, and Zephyr. `embassy-sync` stack channels via the `embassy` / `embassy-link` features. |
 | **CPU** | the full media and protocol stack | Tokio, multi-thread on servers or current-thread on edge. |
-| **GPU** | zero-copy hardware pipelines | frames stay in Vulkan / CUDA / wgpu / DMABUF domains: Vulkan Video decode to `wgpu::Texture`, NVDEC / NVENC, a CUDA to wgpu bridge. Embeds in an app's own wgpu device (`GpuContext::from_wgpu`, packaged for Bevy as `bevy-g2g`), or hands its device to the app, as `examples/g2g-egui-video` does for egui. |
+| **GPU** | zero-copy hardware pipelines | frames stay in Vulkan / CUDA / wgpu / DMABUF domains: Vulkan Video decode to `wgpu::Texture`, NVDEC / NVENC, a CUDA to wgpu bridge. Embeds in an app's own wgpu device (`GpuContext::from_wgpu`, packaged for Bevy as `bevy-g2g`), or hands its device to the app, as `examples/g2g-egui-video` does for egui. `examples/g2g-gtk4-video` hands DMABUF frames to GTK4 as textures. |
 | **WASM** | the same graph in the browser | `wasm32`, single-threaded, optionally in a Worker presenting to an `OffscreenCanvas`. WebCodecs H.264 / H.265 decode, WebGPU present, in-browser or server-offloaded ML. |
 
 [PORTABILITY.md](https://github.com/Glass2GlassHQ/glass2glass/blob/master/PORTABILITY.md) runs one detection-overlay pipeline, with its

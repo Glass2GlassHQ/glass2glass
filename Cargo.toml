@@ -39,6 +39,9 @@ exclude = [
     # egui embedding example: eframe and winit stay out of the workspace build.
     # Standalone, own Cargo.lock. See its README.
     "examples/g2g-egui-video",
+    # GTK4 embedding example: gtk4-rs needs the GTK development libraries.
+    # Standalone, own Cargo.lock. See its README.
+    "examples/g2g-gtk4-video",
     # Rust API soak for the calliope canary: needs rtsp + ffmpeg + observe
     # (libavcodec). Standalone, own Cargo.lock. See its README.
     "examples/g2g-api-soak",
