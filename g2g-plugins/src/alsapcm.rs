@@ -15,7 +15,7 @@
 
 use alloc::vec::Vec;
 
-use alsa::pcm::{ChmapPosition, Format, PCM};
+use crate::alsa_ffi::{channel_position, Format, Pcm};
 
 use g2g_core::{
     AudioFormat, Caps, ChannelLayout, ChannelPosition, G2gError, ANY_CHANNELS, ANY_SAMPLE_RATE,
@@ -26,10 +26,10 @@ use g2g_core::{
 /// (not `S24LE`, which is 24 bits inside a 32-bit container).
 pub(crate) const FORMATS: [(AudioFormat, Format); 5] = [
     (AudioFormat::PcmU8, Format::U8),
-    (AudioFormat::PcmS16Le, Format::S16LE),
-    (AudioFormat::PcmS24Le, Format::S243LE),
-    (AudioFormat::PcmS32Le, Format::S32LE),
-    (AudioFormat::PcmF32Le, Format::FloatLE),
+    (AudioFormat::PcmS16Le, Format::S16_LE),
+    (AudioFormat::PcmS24Le, Format::S24_3LE),
+    (AudioFormat::PcmS32Le, Format::S32_LE),
+    (AudioFormat::PcmF32Le, Format::FLOAT_LE),
 ];
 
 /// Negotiated PCM device parameters passed to a worker as one unit (keeps the
@@ -87,19 +87,19 @@ pub(crate) fn alsa_params(caps: &Caps) -> Result<PcmConfig, G2gError> {
 /// Our speaker position for an ALSA channel-map position. `None` for one
 /// outside the [`ChannelLayout`] table (or an unpositioned channel), which
 /// makes the caller fall back to passing the buffer straight through.
-fn our_position(p: ChmapPosition) -> Option<ChannelPosition> {
+fn our_position(p: u32) -> Option<ChannelPosition> {
     Some(match p {
-        ChmapPosition::FL => ChannelPosition::Fl,
-        ChmapPosition::FR => ChannelPosition::Fr,
-        ChmapPosition::FC | ChmapPosition::Mono => ChannelPosition::Fc,
-        ChmapPosition::LFE => ChannelPosition::Lfe,
-        ChmapPosition::RL => ChannelPosition::Bl,
-        ChmapPosition::RR => ChannelPosition::Br,
-        ChmapPosition::SL => ChannelPosition::Sl,
-        ChmapPosition::SR => ChannelPosition::Sr,
-        ChmapPosition::RC => ChannelPosition::Bc,
-        ChmapPosition::FLC => ChannelPosition::Flc,
-        ChmapPosition::FRC => ChannelPosition::Frc,
+        channel_position::FL => ChannelPosition::Fl,
+        channel_position::FR => ChannelPosition::Fr,
+        channel_position::FC | channel_position::MONO => ChannelPosition::Fc,
+        channel_position::LFE => ChannelPosition::Lfe,
+        channel_position::RL => ChannelPosition::Bl,
+        channel_position::RR => ChannelPosition::Br,
+        channel_position::SL => ChannelPosition::Sl,
+        channel_position::SR => ChannelPosition::Sr,
+        channel_position::RC => ChannelPosition::Bc,
+        channel_position::FLC => ChannelPosition::Flc,
+        channel_position::FRC => ChannelPosition::Frc,
         _ => return None,
     })
 }
@@ -110,9 +110,9 @@ fn our_position(p: ChmapPosition) -> Option<ChannelPosition> {
 /// agree, the device reports no map, or a device position falls outside our
 /// layout: the buffer then goes out unpermuted. Must be called after
 /// `hw_params`, which is when ALSA fixes the map.
-pub(crate) fn device_permutation(pcm: &PCM, channels: u32) -> Option<Vec<usize>> {
+pub(crate) fn device_permutation(pcm: &Pcm, channels: u32) -> Option<Vec<usize>> {
     let layout = ChannelLayout::default_for(u8::try_from(channels).ok()?)?;
-    let positions: Vec<ChmapPosition> = (&pcm.get_chmap().ok()?).into();
+    let positions = pcm.channel_map()?;
     if positions.len() != channels as usize {
         return None;
     }
@@ -167,21 +167,21 @@ mod tests {
     #[test]
     fn alsa_params_maps_formats_and_rejects_compressed() {
         let p = alsa_params(&caps(AudioFormat::PcmS16Le, 2, 48_000)).unwrap();
-        assert_eq!((p.fmt, p.channels, p.rate), (Format::S16LE, 2, 48_000));
+        assert_eq!((p.fmt, p.channels, p.rate), (Format::S16_LE, 2, 48_000));
         #[cfg(feature = "alsa-src")]
         assert_eq!(p.frame_bytes(), 4);
         let p = alsa_params(&caps(AudioFormat::PcmF32Le, 1, 44_100)).unwrap();
-        assert_eq!((p.fmt, p.channels, p.rate), (Format::FloatLE, 1, 44_100));
+        assert_eq!((p.fmt, p.channels, p.rate), (Format::FLOAT_LE, 1, 44_100));
         // 24-bit is the 3-byte packed ALSA format, not the 32-bit container.
         let p = alsa_params(&caps(AudioFormat::PcmS24Le, 6, 48_000)).unwrap();
-        assert_eq!(p.fmt, Format::S243LE);
+        assert_eq!(p.fmt, Format::S24_3LE);
         #[cfg(feature = "alsa-src")]
         assert_eq!(p.frame_bytes(), 18);
         assert_eq!(
             alsa_params(&caps(AudioFormat::PcmS32Le, 2, 48_000))
                 .unwrap()
                 .fmt,
-            Format::S32LE
+            Format::S32_LE
         );
         assert_eq!(
             alsa_params(&caps(AudioFormat::PcmU8, 2, 8_000))

@@ -36,7 +36,7 @@ pub(crate) trait FramePresenter: 'static {
 
     fn open_display(
         &self,
-        egl: &egl::Instance<egl::Static>,
+        egl: &crate::egl_library::Egl,
         native_display: egl::NativeDisplayType,
     ) -> Result<egl::Display, Box<dyn std::error::Error>> {
         // SAFETY: `native_display` is the live connection's libwayland `*mut wl_display`,
@@ -49,7 +49,7 @@ pub(crate) trait FramePresenter: 'static {
 // CUDA registers only textures of a GL context on its own GPU, and a hybrid laptop's default EGL is the iGPU's
 #[cfg(feature = "cuda-gl")]
 pub(crate) fn open_cuda_display(
-    egl: &egl::Instance<egl::Static>,
+    egl: &crate::egl_library::Egl,
     native_display: egl::NativeDisplayType,
     cuda_device_id: i32,
 ) -> Result<egl::Display, Box<dyn std::error::Error>> {
@@ -127,7 +127,7 @@ impl<P: FramePresenter> WindowRenderer for GlRenderer<P> {
 /// the worker's lifetime: the `WlEglSurface` must outlive the EGL surface, which
 /// must outlive the `wl_surface`.
 struct EglWindow {
-    egl: egl::Instance<egl::Static>,
+    egl: crate::egl_library::Egl,
     display: egl::Display,
     surface: egl::Surface,
     context: egl::Context,
@@ -144,7 +144,7 @@ impl EglWindow {
         width: u32,
         height: u32,
     ) -> Result<(Self, glow::Context), Box<dyn std::error::Error>> {
-        let egl = egl::Instance::new(egl::Static);
+        let egl = crate::egl_library::load()?;
 
         // The wl_display raw pointer on wayland-client 0.31. The display is a
         // special global; `backend().display_ptr()` returns the libwayland

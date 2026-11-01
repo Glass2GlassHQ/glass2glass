@@ -619,7 +619,7 @@ cargo clippy --workspace --all-targets
 | `DashSrc` (`SegmentTemplate` / `SegmentTimeline`, live, CMAF chunked low latency) | `dash` | reqwest + roxmltree |
 | `V4l2Src` | `v4l2` | Linux + V4L2 (`/dev/videoN`) |
 | `WasapiSink` / `WasapiSrc` | `wasapi-sink`, `wasapi-src` | Windows |
-| `AlsaSink` | `alsa-sink` | Linux + libasound |
+| `AlsaSink` | `alsa-sink` | Linux + libasound at run time |
 | `PulseSink` | `pulse-sink` | Linux + libpulse |
 | `PipeWireSink` / `PipeWireSrc` (audio) | `pipewire` | Linux + libpipewire |
 | `PipeWireVideoSrc` (video capture, `io-mode=mmap` or `dmabuf`) | `pipewire` | Linux + libpipewire |

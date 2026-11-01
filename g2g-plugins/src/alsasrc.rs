@@ -37,8 +37,7 @@ use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
 
-use alsa::pcm::{Access, HwParams, PCM};
-use alsa::{Direction, ValueOr};
+use crate::alsa_ffi::{Direction, Pcm};
 
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
@@ -296,6 +295,7 @@ impl SourceLoop for AlsaSrc {
                 return Err(G2gError::NotConfigured);
             }
             let cfg = alsa_params(&self.caps()?)?;
+            crate::alsa_ffi::require_library()?;
             let (audio_tx, audio_rx) = capture_queue(cfg.frame_bytes())?;
             let (ready_tx, ready_rx) = std_mpsc::sync_channel::<Result<(), i32>>(1);
             let stop = Arc::new(AtomicBool::new(false));
@@ -413,18 +413,17 @@ fn worker_main(
     let perm = device_permutation(&pcm, cfg.channels).map(invert);
     let sample = cfg.frame_bytes() / cfg.channels as usize;
 
-    let io = pcm.io_bytes();
     let mut buf = vec![0u8; period_frames * cfg.frame_bytes()];
     let mut frames_read = 0u64;
     let mut last_clock_log_ns = 0u64;
     while !stop.load(Ordering::Relaxed) {
-        let frames = match io.readi(&mut buf) {
+        let frames = match pcm.read_interleaved(&mut buf, period_frames) {
             // A driver could report more frames than the buffer holds; clamp
             // before it becomes a slice length.
             Ok(frames) => frames.min(period_frames),
             // Overrun / suspend: recover and retry, else give up.
             Err(e) => {
-                if pcm.try_recover(e, true).is_err() {
+                if pcm.recover(e).is_err() {
                     break;
                 }
                 continue;
@@ -452,7 +451,7 @@ fn worker_main(
             break; // consumer dropped
         }
     }
-    let _ = pcm.drop();
+    let _ = pcm.drop_pending();
 }
 
 /// Feed the drift clock one `(monotonic_now, captured_ns)` observation. Frames
@@ -465,7 +464,7 @@ fn worker_main(
 /// trace is throttled to [`CLOCK_LOG_INTERVAL_NS`]; `last_log_ns` carries the
 /// caller's stamp of the last line.
 fn discipline_clock(
-    pcm: &PCM,
+    pcm: &Pcm,
     rate: u32,
     frames_read: u64,
     clock: &DriftClock,
@@ -517,36 +516,32 @@ fn observe_capture(
 /// PCM and its period size in sample frames, or the ALSA errno on failure. The
 /// rate / channels / format are set exactly, so a device that cannot deliver
 /// them fails here instead of silently producing something else.
-fn open_pcm(device: &str, cfg: PcmConfig, timing: (u32, u32)) -> Result<(PCM, usize), i32> {
+fn open_pcm(device: &str, cfg: PcmConfig, timing: (u32, u32)) -> Result<(Pcm, usize), i32> {
     let (buffer_us, latency_us) = timing;
-    let pcm = PCM::new(device, Direction::Capture, false).map_err(|e| e.errno())?;
+    let pcm = Pcm::open(device, Direction::Capture, false)?;
     let period_frames = {
-        let hwp = HwParams::any(&pcm).map_err(|e| e.errno())?;
-        hwp.set_channels(cfg.channels).map_err(|e| e.errno())?;
-        hwp.set_rate(cfg.rate, ValueOr::Nearest)
-            .map_err(|e| e.errno())?;
-        hwp.set_format(cfg.fmt).map_err(|e| e.errno())?;
-        hwp.set_access(Access::RWInterleaved)
-            .map_err(|e| e.errno())?;
+        let hwp = pcm.hardware_parameters()?;
+        hwp.set_channels(cfg.channels)?;
+        hwp.set_rate(cfg.rate)?;
+        hwp.set_format(cfg.fmt)?;
+        hwp.set_access_interleaved()?;
         // `_near` so a device that cannot honour the exact span picks its
         // closest instead of failing the open. The period is the read
         // granularity, i.e. one emitted buffer.
-        hwp.set_period_time_near(latency_us, ValueOr::Nearest)
-            .map_err(|e| e.errno())?;
-        hwp.set_buffer_time_near(buffer_us, ValueOr::Nearest)
-            .map_err(|e| e.errno())?;
-        pcm.hw_params(&hwp).map_err(|e| e.errno())?;
+        hwp.set_period_time_near(latency_us)?;
+        hwp.set_buffer_time_near(buffer_us)?;
+        pcm.apply(&hwp)?;
         // Device-reported: it sizes the read buffer, so bound it before it
         // becomes an allocation.
-        let frames = hwp.get_period_size().map_err(|e| e.errno())?;
+        let frames = hwp.period_size()?;
         let frames = usize::try_from(frames).map_err(|_| EINVAL)?;
         if frames == 0 || frames > MAX_PERIOD_FRAMES {
             return Err(EINVAL);
         }
         frames
     };
-    pcm.prepare().map_err(|e| e.errno())?;
-    pcm.start().map_err(|e| e.errno())?;
+    pcm.prepare()?;
+    pcm.start()?;
     Ok((pcm, period_frames))
 }
 

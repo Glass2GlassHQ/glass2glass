@@ -555,7 +555,7 @@ struct WorkerState {
     egl_surface: egl::Surface,
     _egl_context: egl::Context,
     egl_display: egl::Display,
-    egl: egl::Instance<egl::Static>,
+    egl: crate::egl_library::Egl,
     gbm_surface: GbmSurface<()>,
     // Keep-alive: the GBM surface holds only a weak ref to the device, so the
     // device must outlive it (declared after, so dropped after).
@@ -668,7 +668,7 @@ impl WorkerState {
         )?;
 
         // EGL on the GBM platform.
-        let egl = egl::Instance::new(egl::Static);
+        let egl = crate::egl_library::load()?;
         // VERIFY: EGL native display is the raw gbm_device pointer under
         // EGL_PLATFORM_GBM_KHR; cast to the c_void EGL expects.
         let gbm_ptr = gbm.as_raw() as *mut core::ffi::c_void;

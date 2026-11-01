@@ -29,7 +29,7 @@ macro_rules! shared_library {
             }
 
             fn open() -> Option<Self> {
-                // SAFETY: the NVIDIA driver libraries need nothing from the caller when loaded.
+                // SAFETY: the libraries loaded here run no initialisation that needs anything from the caller.
                 let library = unsafe { libloading::Library::new($file) }.ok()?;
                 Some(Self {
                     $(

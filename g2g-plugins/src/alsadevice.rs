@@ -18,9 +18,7 @@ use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
 
-use alsa::device_name::HintIter;
-use alsa::pcm::{HwParams, PCM};
-use alsa::Direction;
+use crate::alsa_ffi::{pcm_hints, Direction, Pcm};
 
 use g2g_core::runtime::{Device, DeviceProvider};
 use g2g_core::{AudioFormat, Caps, CapsSet, G2gError, HardwareError};
@@ -52,11 +50,13 @@ impl DeviceProvider for AlsaDeviceProvider {
     }
 
     fn probe(&self) -> Result<Vec<Device>, G2gError> {
-        let hints = HintIter::new_str(None, "pcm").map_err(|e| alsa_err(e.errno()))?;
+        let hints = pcm_hints().map_err(alsa_err)?;
         let mut out = Vec::new();
         for hint in hints {
             let Some(name) = hint.name else { continue };
-            for (dir, mut device) in hint_devices(&name, hint.desc.as_deref(), hint.direction) {
+            for (dir, mut device) in
+                hint_devices(&name, hint.description.as_deref(), hint.direction)
+            {
                 match probe_pcm(&name, dir) {
                     Ok(probe) => {
                         device.caps = probe.caps();
@@ -202,18 +202,20 @@ fn clamped(want: u32, min: u32, max: u32) -> u32 {
 /// Open the PCM nonblocking and read its parameter space. Errno on failure, so
 /// one busy device does not fail the whole enumeration.
 fn probe_pcm(name: &str, dir: Direction) -> Result<HwProbe, i32> {
-    let pcm = PCM::new(name, dir, true).map_err(|e| e.errno())?;
-    let hwp = HwParams::any(&pcm).map_err(|e| e.errno())?;
+    let pcm = Pcm::open(name, dir, true)?;
+    let hwp = pcm.hardware_parameters()?;
     let formats = FORMATS
         .iter()
-        .filter(|(_, fmt)| hwp.test_format(*fmt).is_ok())
+        .filter(|(_, fmt)| hwp.supports_format(*fmt))
         .map(|(format, _)| *format)
         .collect();
+    let (rate_min, rate_max) = hwp.rate_range()?;
+    let (channels_min, channels_max) = hwp.channel_range()?;
     Ok(HwProbe {
-        rate_min: hwp.get_rate_min().map_err(|e| e.errno())?,
-        rate_max: hwp.get_rate_max().map_err(|e| e.errno())?,
-        channels_min: hwp.get_channels_min().map_err(|e| e.errno())?,
-        channels_max: hwp.get_channels_max().map_err(|e| e.errno())?,
+        rate_min,
+        rate_max,
+        channels_min,
+        channels_max,
         formats,
     })
 }

@@ -511,7 +511,7 @@ impl FramePresenter for CudaPresenter {
 
     fn open_display(
         &self,
-        egl: &khronos_egl::Instance<khronos_egl::Static>,
+        egl: &crate::egl_library::Egl,
         native_display: khronos_egl::NativeDisplayType,
     ) -> Result<khronos_egl::Display, Box<dyn std::error::Error>> {
         open_cuda_display(egl, native_display, self.cuda_device_id)

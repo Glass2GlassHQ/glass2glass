@@ -9,7 +9,7 @@ const EGL_CUDA_DEVICE_NV: egl::Int = 0x323A;
 type QueryDeviceAttrib = unsafe extern "system" fn(*mut c_void, egl::Int, *mut isize) -> u32;
 
 fn query_device_attrib(
-    egl: &egl::Instance<egl::Static>,
+    egl: &crate::egl_library::Egl,
 ) -> Result<QueryDeviceAttrib, Box<dyn std::error::Error>> {
     let entry = egl
         .get_proc_address("eglQueryDeviceAttribEXT")
@@ -35,7 +35,7 @@ const MAX_EGL_DEVICES: usize = 16;
 
 #[cfg(feature = "cuda-gl")]
 pub(crate) fn cuda_egl_device(
-    egl: &egl::Instance<egl::Static>,
+    egl: &crate::egl_library::Egl,
     cuda_device_id: i32,
 ) -> Result<*mut c_void, Box<dyn std::error::Error>> {
     type QueryDevices = unsafe extern "system" fn(egl::Int, *mut *mut c_void, *mut egl::Int) -> u32;
@@ -68,7 +68,7 @@ pub(crate) fn cuda_egl_device(
 
 #[cfg(feature = "cuda-kms")]
 pub(crate) fn display_cuda_ordinal(
-    egl: &egl::Instance<egl::Static>,
+    egl: &crate::egl_library::Egl,
     display: egl::Display,
 ) -> Result<Option<i32>, Box<dyn std::error::Error>> {
     type QueryDisplayAttrib = unsafe extern "system" fn(*mut c_void, egl::Int, *mut isize) -> u32;

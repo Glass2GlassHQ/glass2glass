@@ -48,12 +48,10 @@ release-binary = [
     "declarative-yaml", "script-rhai", "observe", "mcp", "tui",
     "matroska-compression", "matroska-decrypt",
 ]
-# EGL and ALSA ship on desktop distros but not on most servers
-release-binary-linux = ["release-wheel-linux", "gl-sink", "alsa-sink", "alsa-src"]
-# manylinux wheels may not link libEGL or libasound
-release-wheel-linux = [
+release-binary-linux = [
     "release-binary", "plugin-signing", "shm", "unixfd", "v4l2", "vulkan-video",
     "kms-sink", "wayland-sink", "wgpu-present", "cuda", "nvenc", "nvdec", "cuda-wgpu",
+    "gl-sink", "alsa-sink", "alsa-src",
 ]
 release-binary-macos = ["release-binary", "vtdecode", "vtencode", "metal-sink", "coreaudio", "avfoundation", "screencapture"]
 release-aar = ["release-binary", "camera2", "mediacodec-wgpu", "aaudio"]
@@ -773,10 +771,9 @@ mp4-cenc = ["std", "dep:aes", "dep:cbc", "dep:ctr"]
 dash = ["http-src", "dep:roxmltree", "tokio/net"]
 # Linux ALSA render sink (AlsaSink): plays interleaved PCM (PcmS16Le / PcmF32Le)
 # on an ALSA PCM device (`default` by default) via libasound. The Linux analog of
-# WasapiSink; blocking writes run on a dedicated worker thread. Pulls the `alsa`
-# crate (links system libasound: alsa-lib-devel / libasound2-dev). Linux-only,
-# implies std.
-alsa-sink = ["std", "dep:alsa", "dep:libc"]
+# WasapiSink; blocking writes run on a dedicated worker thread. libasound is
+# loaded at runtime, so building needs no ALSA package. Linux-only, implies std.
+alsa-sink = ["std", "dep:libloading", "dep:libc"]
 # SDI output for Blackmagic Design DeckLink (decklinkvideosink, decklinkaudiosink).
 # build.rs compiles a C++ shim over the vendored SDK headers, and the SDK's
 # dispatch file loads the driver's libDeckLinkAPI.so at runtime, so building
@@ -784,9 +781,9 @@ alsa-sink = ["std", "dep:alsa", "dep:libc"]
 decklink = ["std"]
 # Linux ALSA capture source (AlsaSrc): reads interleaved PCM from an ALSA capture
 # device via libasound, the input mirror of AlsaSink and the non-PipeWire mic
-# path. Blocking reads run on a dedicated worker thread. Same `alsa` crate /
-# system libasound as `alsa-sink`. Linux-only, implies std.
-alsa-src = ["std", "dep:alsa"]
+# path. Blocking reads run on a dedicated worker thread. libasound is loaded at
+# runtime, as for `alsa-sink`. Linux-only, implies std.
+alsa-src = ["std", "dep:libloading", "dep:libc"]
 # ST 2110 network elements (M597): AsyncElement sink / SourceLoop source wrapping
 # the sans-IO ST 2110-30 / -40 cores over UDP, RTP timestamps off the PTP media
 # clock. std (UdpSocket). The sans-IO cores themselves are always compiled.
@@ -940,6 +937,8 @@ reqwest = { version = "0.12", optional = true, default-features = false, feature
 # MQTT client for `mqttsink` (the `mqtt` feature). The provider-free rustls
 # feature, because its default provider is aws-lc-rs, which needs cmake to build.
 rumqttc = { version = "0.25", optional = true, default-features = false, features = ["use-rustls-no-provider"] }
+symphonia-codec-aac = { version = "0.6", optional = true }
+symphonia-bundle-mp3 = { version = "0.6", optional = true, default-features = false, features = ["mp2", "mp3"] }
 # str0m: sans-IO WebRTC stack (ICE / DTLS / SRTP / SCTP / RTP). `rust-crypto` is
 # the pure-Rust crypto backend (RustCrypto ecosystem), so no OpenSSL system dep.
 # Drives the native WebRtcSink (the `webrtc` feature). 0.22 is the first release
@@ -1294,15 +1293,13 @@ smithay-client-toolkit = { version = "0.20", optional = true }
 # handed to a native API (Vulkan WSI under `wgpu-present`). The GL sinks get the
 # same backend through wayland-egl.
 wayland-backend = { version = "0.3", optional = true, features = ["client_system"] }
-# CUDA-GL sink (cuda-gl feature). khronos-egl `static` links libEGL at build;
+# GL sinks (gl-sink, cuda-gl, cuda-kms). khronos-egl `dynamic` loads libEGL at runtime;
 # glow is the GL ES wrapper; wayland-egl turns a wl_surface into an EGL window.
-khronos-egl = { version = "6", optional = true, features = ["static"] }
+khronos-egl = { version = "6", optional = true, features = ["dynamic"] }
 glow = { version = "0.17", optional = true }
 wayland-egl = { version = "0.32", optional = true }
 # Linux audio output / capture backends. All link system libraries via
 # pkg-config and are Linux-only.
-# ALSA render sink (alsa-sink): the `alsa` crate over libasound.
-alsa = { version = "0.12", optional = true }
 # PulseAudio render sink (pulse-sink): the blocking "simple" API + the binding.
 libpulse-binding = { version = "2", optional = true, default-features = false }
 libpulse-simple-binding = { version = "2", optional = true, default-features = false }

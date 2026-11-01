@@ -641,7 +641,7 @@ mod tests {
     /// offers it, else the default display, and a pbuffer surface unless the
     /// driver supports a surfaceless (`EGL_NO_SURFACE`) make-current.
     struct Headless {
-        egl: egl::Instance<egl::Static>,
+        egl: crate::egl_library::Egl,
         display: egl::Display,
         surface: Option<egl::Surface>,
         context: egl::Context,
@@ -680,7 +680,7 @@ mod tests {
     /// Bring up an offscreen GL ES 3 context, or return why it was not possible
     /// (no EGL device on the host: the test then skips).
     fn headless_context() -> Result<(Headless, glow::Context), String> {
-        let egl = egl::Instance::new(egl::Static);
+        let egl = crate::egl_library::load()?;
         let client_exts = egl
             .query_string(None, egl::EXTENSIONS)
             .map(|s| s.to_string_lossy().into_owned())

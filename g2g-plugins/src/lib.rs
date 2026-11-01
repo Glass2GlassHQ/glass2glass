@@ -1703,6 +1703,8 @@ pub mod alsadevice;
 mod pulsepcm;
 #[cfg(all(target_os = "linux", feature = "pulse-sink"))]
 pub mod pulsesink;
+mod alsa_ffi;
+#[cfg(all(target_os = "linux", any(feature = "alsa-sink", feature = "alsa-src")))]
 #[cfg(all(target_os = "linux", feature = "pulse-src"))]
 pub mod pulsesrc;
 // PipeWire audio render sink + capture source and the video capture source (the
@@ -1737,7 +1739,10 @@ pub mod pwdevice;
 pub mod cuda;
 #[cfg(all(any(target_os = "linux", windows), feature = "cuda"))]
 mod cuda_driver_ffi;
-#[cfg(all(any(target_os = "linux", windows), feature = "cuda"))]
+#[cfg(any(
+    all(any(target_os = "linux", windows), feature = "cuda"),
+    all(target_os = "linux", any(feature = "alsa-sink", feature = "alsa-src"))
+))]
 mod shared_library;
 
 // Local zero-copy IPC over CUDA IPC memory handles (M556): share a device
@@ -1843,6 +1848,11 @@ pub mod glsink;
 
 // CUDA-GL zero-copy-ish display sink: keeps decoded NV12 on the GPU and
 // presents it via CUDA-GL interop on a Wayland EGL surface. Linux + NVIDIA.
+#[cfg(all(
+    target_os = "linux",
+    any(feature = "cuda-gl", feature = "cuda-kms", feature = "gl-sink")
+))]
+mod egl_library;
 #[cfg(all(target_os = "linux", feature = "cuda-gl"))]
 pub mod cudaglsink;
 

@@ -3583,7 +3583,10 @@ fn register_feature_gated(reg: &mut Registry) {
         LaunchFactory::of::<crate::glsink::GlSink>("glimagesink", || {
             Box::new(crate::glsink::GlSink::new())
         })
-        .with_usable(crate::waylanddisplay::compositor_reachable)
+        .with_usable(|| {
+            crate::egl_library::installed()?;
+            crate::waylanddisplay::compositor_reachable()
+        })
         .with_experimental(),
     );
     // Windowed wgpu display sink: it takes GPU-resident frames as they are, so a
@@ -3695,7 +3698,9 @@ fn register_feature_gated(reg: &mut Registry) {
     );
     #[cfg(all(target_os = "linux", feature = "alsa-sink"))]
     reg.register_launch(
-        LaunchFactory::of::<AlsaSink>("alsasink", || Box::new(AlsaSink::new())).with_experimental(),
+        LaunchFactory::of::<AlsaSink>("alsasink", || Box::new(AlsaSink::new()))
+            .with_usable(crate::alsa_ffi::library_installed)
+            .with_experimental(),
     );
     #[cfg(all(target_os = "linux", feature = "pulse-sink"))]
     reg.register_launch(

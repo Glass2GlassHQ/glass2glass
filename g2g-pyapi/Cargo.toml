@@ -30,7 +30,7 @@ python = [
     "g2g-core/multi-thread",
     "g2g-plugins/multi-thread",
 ]
-release-wheel-linux = ["python", "pyo3/extension-module", "pyo3/abi3-py311", "g2g-plugins/release-wheel-linux"]
+release-wheel-linux = ["python", "pyo3/extension-module", "pyo3/abi3-py311", "g2g-plugins/release-binary-linux"]
 release-wheel-macos = ["python", "pyo3/extension-module", "pyo3/abi3-py311", "g2g-plugins/release-binary-macos"]
 release-wheel-windows = ["python", "pyo3/extension-module", "pyo3/abi3-py311", "g2g-plugins/release-binary-windows"]
 

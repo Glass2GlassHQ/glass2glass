@@ -38,7 +38,7 @@ jobs:
           apt-get update
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
             build-essential pkg-config curl ca-certificates git clang libclang-dev \
-            libasound2-dev libwayland-dev libxkbcommon-dev libegl-dev
+            libwayland-dev libxkbcommon-dev
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - name: build
@@ -49,7 +49,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           unexpected=$(readelf -d target/${{ matrix.target }}/release/g2g-launch | sed -n 's/.*Shared library: \[\(.*\)\]/\1/p' \
-            | grep -vxE 'libc\.so\.6|libm\.so\.6|libgcc_s\.so\.1|ld-linux-.*\.so\.[0-9]+|libasound\.so\.2|libEGL\.so\.1' || true)
+            | grep -vxE 'libc\.so\.6|libm\.so\.6|libgcc_s\.so\.1|ld-linux-.*\.so\.[0-9]+' || true)
           [ -z "$unexpected" ] || { echo "::error::g2g-launch links $unexpected"; exit 1; }
       - name: links only system libraries (macOS)
         if: runner.os == 'macOS'

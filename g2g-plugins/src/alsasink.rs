@@ -38,8 +38,7 @@ use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use alsa::pcm::{Access, HwParams, PCM};
-use alsa::{Direction, ValueOr};
+use crate::alsa_ffi::{Direction, Pcm};
 
 use g2g_core::frame::Frame;
 use g2g_core::{
@@ -180,6 +179,7 @@ impl AsyncElement for AlsaSink {
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         let cfg = alsa_params(absolute_caps)?;
+        crate::alsa_ffi::require_library()?;
 
         if self.link.as_ref().is_some_and(|l| l.is_running()) {
             if self.caps.as_ref() == Some(absolute_caps) {
@@ -386,7 +386,7 @@ fn worker_main(
 /// queued in the ring; that is the true DAC playout position, which drifts from
 /// wall time at the hardware's real rate. The local time is sampled next to the
 /// `delay()` probe so the pair lines up.
-fn discipline_clock(pcm: &PCM, rate: u32, rendered: &AtomicU64, clock: &DriftClock) {
+fn discipline_clock(pcm: &Pcm, rate: u32, rendered: &AtomicU64, clock: &DriftClock) {
     let local_ns = clock.reference_now();
     // A failed / negative delay probe (device not running yet) yields no usable
     // playout position; skip rather than feed a bogus sample.
@@ -413,16 +413,14 @@ fn discipline_clock(pcm: &PCM, rate: u32, rendered: &AtomicU64, clock: &DriftClo
 
 /// Open and configure the PCM device for blocking interleaved playback.
 /// Returns the ALSA errno on failure.
-fn open_pcm(device: &str, cfg: PcmConfig) -> Result<PCM, i32> {
-    let pcm = PCM::new(device, Direction::Playback, false).map_err(|e| e.errno())?;
+fn open_pcm(device: &str, cfg: PcmConfig) -> Result<Pcm, i32> {
+    let pcm = Pcm::open(device, Direction::Playback, false)?;
     {
-        let hwp = HwParams::any(&pcm).map_err(|e| e.errno())?;
-        hwp.set_channels(cfg.channels).map_err(|e| e.errno())?;
-        hwp.set_rate(cfg.rate, ValueOr::Nearest)
-            .map_err(|e| e.errno())?;
-        hwp.set_format(cfg.fmt).map_err(|e| e.errno())?;
-        hwp.set_access(Access::RWInterleaved)
-            .map_err(|e| e.errno())?;
+        let hwp = pcm.hardware_parameters()?;
+        hwp.set_channels(cfg.channels)?;
+        hwp.set_rate(cfg.rate)?;
+        hwp.set_format(cfg.fmt)?;
+        hwp.set_access_interleaved()?;
         // Bound the ring so `writei` blocks (paces) at the device rate. Without
         // this some backends (pipewire-alsa) expose a very large default buffer,
         // so the whole stream queues without ever blocking, which both defeats
@@ -430,13 +428,11 @@ fn open_pcm(device: &str, cfg: PcmConfig) -> Result<PCM, i32> {
         // backlog, so the M590 playout-clock discipline sees zero frames played.
         // ~200 ms buffer / ~20 ms period; `_near` so a device that cannot honour
         // the exact size picks its closest instead of failing configure.
-        hwp.set_period_time_near(20_000, ValueOr::Nearest)
-            .map_err(|e| e.errno())?;
-        hwp.set_buffer_time_near(200_000, ValueOr::Nearest)
-            .map_err(|e| e.errno())?;
-        pcm.hw_params(&hwp).map_err(|e| e.errno())?;
+        hwp.set_period_time_near(20_000)?;
+        hwp.set_buffer_time_near(200_000)?;
+        pcm.apply(&hwp)?;
     }
-    pcm.prepare().map_err(|e| e.errno())?;
+    pcm.prepare()?;
     Ok(pcm)
 }
 
@@ -445,7 +441,7 @@ fn open_pcm(device: &str, cfg: PcmConfig) -> Result<PCM, i32> {
 /// opened with the matching little-endian ALSA format, so no per-format
 /// reinterpretation is needed and 3-byte S24 works like the rest.
 fn write_all(
-    pcm: &PCM,
+    pcm: &Pcm,
     cfg: PcmConfig,
     perm: Option<&[usize]>,
     permuted: &mut Vec<u8>,
@@ -468,17 +464,17 @@ fn write_all(
         None => &bytes[..bytes.len() / frame * frame],
     };
 
-    let io = pcm.io_bytes();
     let mut off = 0usize;
     while off < buf.len() {
-        match io.writei(&buf[off..]) {
+        let remaining = &buf[off..];
+        match pcm.write_interleaved(remaining, remaining.len() / frame) {
             Ok(frames) => {
                 rendered.fetch_add(frames as u64, Ordering::Relaxed);
                 off += frames * frame;
             }
             Err(e) => {
                 // Underrun / suspend: recover and retry the remainder.
-                pcm.try_recover(e, true).map_err(|e| alsa_err(e.errno()))?;
+                pcm.recover(e).map_err(alsa_err)?;
             }
         }
     }
