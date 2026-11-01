@@ -748,6 +748,9 @@ jobs:
         run: >
           cargo check -p g2g-plugins --locked --all-targets --features
           mf-decode,mf-encode,mf-aac,wasapi-sink,wasapi-src,d3d11-sink,mf-video-src,wgpu-sink
+      - name: libvpx
+        shell: bash
+        run: tools/libvpx-build.sh "$HOME/g2g-codecs" | sed 's/^export //' >> "$GITHUB_ENV"
       - name: release binary feature set
         run: cargo check -p g2g-plugins --locked --bin g2g-launch --features release-binary-windows
       # the runner has no render endpoint, so the tone test skips and only negotiation runs
