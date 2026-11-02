@@ -527,7 +527,7 @@ pub(crate) fn mpa_frame_len(buf: &[u8]) -> Option<usize> {
 }
 
 #[cfg(any(
-    all(target_os = "linux", feature = "ffmpeg"),
+    all(any(target_os = "linux", windows), feature = "ffmpeg"),
     feature = "aac-decode",
     feature = "mpeg-audio-decode"
 ))]
@@ -621,7 +621,7 @@ pub(crate) mod test_frames {
 #[cfg(all(
     test,
     any(
-        all(target_os = "linux", feature = "ffmpeg"),
+        all(any(target_os = "linux", windows), feature = "ffmpeg"),
         feature = "aac-decode",
         feature = "mpeg-audio-decode"
     )
@@ -631,7 +631,10 @@ mod split_frames_tests {
     use alloc::vec;
     use alloc::vec::Vec;
 
-    #[cfg(any(all(target_os = "linux", feature = "ffmpeg"), feature = "aac-decode"))]
+    #[cfg(any(
+        all(any(target_os = "linux", windows), feature = "ffmpeg"),
+        feature = "aac-decode"
+    ))]
     fn adts_frames(buf: &[u8]) -> Vec<&[u8]> {
         split_frames(buf, crate::aacparse::adts_frame_len)
     }
@@ -644,14 +647,20 @@ mod split_frames_tests {
         split_frames(buf, ac3_frame_len)
     }
 
-    #[cfg(any(all(target_os = "linux", feature = "ffmpeg"), feature = "aac-decode"))]
+    #[cfg(any(
+        all(any(target_os = "linux", windows), feature = "ffmpeg"),
+        feature = "aac-decode"
+    ))]
     /// A minimal `len`-byte ADTS frame: a 7-byte header zero-padded to `len`.
     fn adts(len: usize) -> Vec<u8> {
         const ADTS_HEADER_LEN: usize = 7;
         crate::aacparse::test_frames::adts_au(&vec![0u8; len - ADTS_HEADER_LEN])
     }
 
-    #[cfg(any(all(target_os = "linux", feature = "ffmpeg"), feature = "aac-decode"))]
+    #[cfg(any(
+        all(any(target_os = "linux", windows), feature = "ffmpeg"),
+        feature = "aac-decode"
+    ))]
     #[test]
     fn splits_concatenated_adts_frames() {
         let mut buf = adts(20);
@@ -662,7 +671,10 @@ mod split_frames_tests {
         assert_eq!(frames[1].len(), 13);
     }
 
-    #[cfg(any(all(target_os = "linux", feature = "ffmpeg"), feature = "aac-decode"))]
+    #[cfg(any(
+        all(any(target_os = "linux", windows), feature = "ffmpeg"),
+        feature = "aac-decode"
+    ))]
     #[test]
     fn drops_a_truncated_tail() {
         let mut buf = adts(20);
@@ -676,7 +688,10 @@ mod split_frames_tests {
         assert_eq!(frames[0].len(), 20);
     }
 
-    #[cfg(any(all(target_os = "linux", feature = "ffmpeg"), feature = "aac-decode"))]
+    #[cfg(any(
+        all(any(target_os = "linux", windows), feature = "ffmpeg"),
+        feature = "aac-decode"
+    ))]
     #[test]
     fn bails_without_a_syncword() {
         assert!(adts_frames(&[0, 1, 2, 3, 4, 5, 6, 7]).is_empty());

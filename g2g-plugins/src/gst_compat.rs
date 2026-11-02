@@ -60,10 +60,10 @@ static LAUNCH_KEYWORDS: &[&str] = &[
 /// `Available` before this table is consulted; keep this for the gst names that
 /// have no same-name g2g element. Extend freely.
 static GST_MAP: &[(&str, GstEquivalent)] = &[
-    // on Linux the `ffmpeg` feature builds `x264enc`, so the feature catalog answers
-    #[cfg(not(target_os = "linux"))]
+    // on Linux and Windows the `ffmpeg` feature builds `x264enc`, so the feature catalog answers
+    #[cfg(not(any(target_os = "linux", windows)))]
     ("x264enc", GstEquivalent::Unsupported(
-        "software H.264 encode (`x264enc`, libx264) needs the `ffmpeg` feature on Linux; \
+        "software H.264 encode (`x264enc`, libx264) needs the `ffmpeg` feature on Linux or Windows; \
          otherwise `nvenc` (NVIDIA), `mfencode` (Windows), or encode AV1/VP8/VP9 with `av1enc`/`vpxenc`",
     )),
     ("x265enc", GstEquivalent::Unsupported("no software H.265 encoder; use `nvenc` (NVIDIA HEVC) or `av1enc`")),
@@ -953,9 +953,9 @@ mod tests {
         assert!(r.ok, "findings: {:?}", r.findings);
     }
 
-    #[cfg(all(target_os = "linux", not(feature = "ffmpeg")))]
+    #[cfg(all(any(target_os = "linux", windows), not(feature = "ffmpeg")))]
     #[test]
-    fn x264enc_names_its_feature_on_linux() {
+    fn x264enc_names_its_feature() {
         let reg = default_registry();
         assert_eq!(
             gst_equivalent(&reg, "x264enc"),
@@ -969,7 +969,7 @@ mod tests {
         );
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", windows)))]
     #[test]
     fn unknown_encoder_gets_a_suggestion() {
         let reg = default_registry();
@@ -1309,7 +1309,7 @@ mod tests {
     #[test]
     fn the_extra_decoder_names_point_at_the_ffmpeg_decoders() {
         let reg = default_registry();
-        let compiled = cfg!(all(target_os = "linux", feature = "ffmpeg"));
+        let compiled = cfg!(all(any(target_os = "linux", windows), feature = "ffmpeg"));
         for name in ["vp8dec", "mpeg2dec", "avdec_vp9", "avdec_mpeg4"] {
             let expected = if compiled {
                 GstEquivalent::Available

@@ -111,7 +111,7 @@ pub(crate) fn audio_from_stream_name(
 }
 
 // what the demuxer named the stream before it forwarded tagged codecs
-#[cfg(all(target_os = "linux", feature = "ffmpeg-long-tail"))]
+#[cfg(all(any(target_os = "linux", windows), feature = "ffmpeg-long-tail"))]
 pub(crate) fn tagged_codec_name(caps: &g2g_core::Caps) -> Option<String> {
     let (tag, video) = match caps {
         g2g_core::Caps::CompressedVideo {

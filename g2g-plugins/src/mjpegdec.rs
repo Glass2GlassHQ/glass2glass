@@ -332,7 +332,7 @@ impl MjpegDec {
             return self.decode_mozjpeg(&jpeg);
         }
         let decoded = self.decode_zune(&jpeg);
-        #[cfg(all(target_os = "linux", feature = "ffmpeg-long-tail"))]
+        #[cfg(all(any(target_os = "linux", windows), feature = "ffmpeg-long-tail"))]
         if decoded.is_err() {
             // zune-jpeg rejects some JPEGs libavcodec decodes, such as 12-bit samples or a sampling factor of 3
             let (rgba, w, h) = decode_libavcodec_rgba(&jpeg)?;
@@ -454,7 +454,7 @@ impl MjpegDec {
     }
 }
 
-#[cfg(all(target_os = "linux", feature = "ffmpeg-long-tail"))]
+#[cfg(all(any(target_os = "linux", windows), feature = "ffmpeg-long-tail"))]
 fn decode_libavcodec_rgba(jpeg: &[u8]) -> Result<(Vec<u8>, u32, u32), G2gError> {
     use ffmpeg_next as ffmpeg;
     let failed = |_: ffmpeg::Error| G2gError::CapsMismatch;

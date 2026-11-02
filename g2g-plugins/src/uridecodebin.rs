@@ -2307,7 +2307,7 @@ pub fn mp4_primary_stream(location: &str, caps: &Caps) -> Option<ContainerStream
             })
         })
         .collect();
-    #[cfg(all(target_os = "linux", feature = "ffmpeg-long-tail"))]
+    #[cfg(all(any(target_os = "linux", windows), feature = "ffmpeg-long-tail"))]
     let (streams, unsupported) = name_undecodable_tagged(streams, unsupported);
     Some(ContainerStreams {
         streams,
@@ -2362,7 +2362,7 @@ pub fn mkv_primary_stream(location: &str, caps: &Caps) -> Option<ContainerStream
             has_clean_aperture: false,
         })
         .collect();
-    #[cfg(all(target_os = "linux", feature = "ffmpeg-long-tail"))]
+    #[cfg(all(any(target_os = "linux", windows), feature = "ffmpeg-long-tail"))]
     let (streams, unsupported) = name_undecodable_tagged(streams, unsupported);
     Some(ContainerStreams {
         streams,
@@ -2709,7 +2709,7 @@ pub fn avi_primary_stream(location: &str, caps: &Caps) -> Option<ContainerStream
             })
         })
         .collect();
-    #[cfg(all(target_os = "linux", feature = "ffmpeg-long-tail"))]
+    #[cfg(all(any(target_os = "linux", windows), feature = "ffmpeg-long-tail"))]
     let (streams, unsupported) = name_undecodable_tagged(streams, unsupported);
     Some(ContainerStreams {
         streams,
@@ -2718,7 +2718,7 @@ pub fn avi_primary_stream(location: &str, caps: &Caps) -> Option<ContainerStream
 }
 
 // a tagged stream no decoder takes is named the way its demuxer named it before it forwarded tags
-#[cfg(all(target_os = "linux", feature = "ffmpeg-long-tail"))]
+#[cfg(all(any(target_os = "linux", windows), feature = "ffmpeg-long-tail"))]
 fn name_undecodable_tagged(
     streams: Vec<PrimaryStream>,
     mut unsupported: Vec<String>,

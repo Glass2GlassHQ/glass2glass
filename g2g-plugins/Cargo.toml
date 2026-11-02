@@ -389,9 +389,11 @@ wasapi-src = ["std", "dep:windows", "dep:windows-core"]
 # implies std. Pairs with MfDecode::with_d3d11().
 d3d11-sink = ["std", "dep:windows"]
 # ffmpeg/libavcodec decode (software, NVDEC, and VAAPI hwaccel backends).
-# Pulls ffmpeg-next + ffmpeg-sys; Linux-only, implies std. Needs system libav*
-# (Fedora: ffmpeg-free-devel; Debian/Ubuntu: libavcodec-dev libavformat-dev
-# libavutil-dev). Its VAAPI backend is the Intel and AMD hardware path.
+# Pulls ffmpeg-next + ffmpeg-sys; Linux and Windows, implies std. Linux needs
+# system libav* (Fedora: ffmpeg-free-devel; Debian/Ubuntu: libavcodec-dev
+# libavformat-dev libavutil-dev); Windows needs FFMPEG_DIR at a shared LGPL build
+# and LIBCLANG_PATH for bindgen. Its VAAPI backend (Linux only) is the Intel and
+# AMD hardware path.
 ffmpeg = ["std", "dep:ffmpeg-next"]
 # The AVI, QuickTime / MP4 and Matroska demuxers forward a stream whose codec
 # g2g has no caps type for under its container tag, and the ffmpeg decoders open
@@ -1118,6 +1120,12 @@ windows = { version = "0.62", optional = true, features = [
 # the symbols the decoder uses; they may need adjusting on the first on-device
 # build (this Linux dev host cannot compile the macOS target). objc2 0.6, the
 # framework crates 0.3.
+# ffmpeg-next links the shared libavcodec/libavformat/libavutil/libswscale: found
+# through pkg-config on Linux, through FFMPEG_DIR (include/ + MSVC import libs in
+# lib/) on Windows. Target-gated so Wasm/RTOS/macOS/Android builds never resolve it.
+[target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
+ffmpeg-next = { version = "9.0", optional = true, default-features = false, features = ["codec", "format", "software-scaling"] }
+
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = { version = "0.6", optional = true }
 objc2-video-toolbox = { version = "0.3", optional = true, default-features = false, features = [
@@ -1313,10 +1321,6 @@ v4l = { version = "0.14", optional = true }
 # needs libclang). Drives the `libcamera` capture source. Linux-only; libcamera
 # is a Linux camera stack. Known to build against libcamera >= 0.4.
 libcamera = { version = "0.7", optional = true }
-# ffmpeg-next links against system libavcodec/libavformat/libavutil/libswscale.
-# Linux-only target-gate keeps Windows/Wasm/RTOS builds from trying to resolve
-# it (the underlying pkg-config probe doesn't fit those targets).
-ffmpeg-next = { version = "9.0", optional = true, default-features = false, features = ["codec", "format", "software-scaling"] }
 smithay-client-toolkit = { version = "0.20", optional = true }
 # The libwayland-backed client backend, so a display / surface raw pointer can be
 # handed to a native API (Vulkan WSI under `wgpu-present`). The GL sinks get the

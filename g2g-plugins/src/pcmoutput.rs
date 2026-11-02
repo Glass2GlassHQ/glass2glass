@@ -63,7 +63,7 @@ impl PcmOutput {
     }
 
     #[cfg(any(
-        all(target_os = "linux", feature = "ffmpeg"),
+        all(any(target_os = "linux", windows), feature = "ffmpeg"),
         feature = "aac-decode",
         feature = "mpeg-audio-decode"
     ))]
@@ -125,7 +125,7 @@ impl PcmOutput {
     }
 
     #[cfg(any(
-        all(target_os = "linux", feature = "ffmpeg"),
+        all(any(target_os = "linux", windows), feature = "ffmpeg"),
         feature = "aac-decode",
         feature = "mpeg-audio-decode"
     ))]
