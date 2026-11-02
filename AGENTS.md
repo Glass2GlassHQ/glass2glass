@@ -88,6 +88,10 @@ cargo clippy -p g2g-plugins --features mf-decode --all-targets
 Integration tests live in `g2g-plugins/tests/` and `g2g-core/tests/`, one file
 per milestone (e.g. `m10_muxer.rs`).
 
+On a Windows host, `tools/windows-test-suite.sh <log> [features]` (Git Bash) runs
+the whole `g2g-plugins` suite one test binary at a time, deleting each after it
+runs, and skips without building the files that cannot apply on Windows.
+
 **Feature-gated tests run zero tests without their feature.** A
 `#![cfg(feature = "std")]` test file passes vacuously under
 `cargo test -p g2g-plugins --test <name>` (`std` only arrives through workspace
