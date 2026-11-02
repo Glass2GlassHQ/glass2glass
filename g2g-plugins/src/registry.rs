@@ -3977,15 +3977,22 @@ mod ffmpeg_enc_registry_tests {
     /// The ffmpeg H.264 encoder resolves under its native name, the
     /// software `x264enc` name, and the gst `avenc_h264` alias. `new()` opens no
     /// libavcodec context (that happens at configure), so this needs no GPU.
+    /// The alias only lands on a target that can run, so against a libavcodec
+    /// with no H.264 encoder (the LGPL bundles carry neither libx264 nor NVENC)
+    /// it must instead say why.
     #[test]
     fn ffmpeg_encoder_and_alias_resolve() {
         let reg = default_registry();
-        for name in ["ffmpegenc", "x264enc", "avenc_h264"] {
+        for name in ["ffmpegenc", "x264enc"] {
             assert!(
                 reg.make_element(name).is_some(),
                 "registry resolves `{name}`"
             );
         }
+        assert!(
+            reg.make_element("avenc_h264").is_some() || reg.unusable_reason("avenc_h264").is_some(),
+            "`avenc_h264` resolves or names why it cannot run"
+        );
     }
 }
 

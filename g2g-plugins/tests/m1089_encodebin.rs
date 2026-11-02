@@ -263,6 +263,11 @@ async fn transcodebin_writes_a_container_from_a_runtime_geometry() {
 #[cfg(all(feature = "ffmpeg", not(feature = "nvenc")))]
 #[tokio::test]
 async fn a_profile_splices_the_converter_the_encoder_needs() {
+    // the LGPL ffmpeg bundles carry no software H.264 encoder (libx264 is GPL)
+    if let Some(reason) = default_registry().unusable_reason("x264enc") {
+        eprintln!("skipping: x264enc cannot run here: {reason}");
+        return;
+    }
     const SOURCE: &str = "videotestsrc num-buffers=3";
     let profile = run_to_bytes(
         &format!(

@@ -13,6 +13,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M2068: `d3d11videosink` presents system-memory NV12 on a device without D3D11 video, such as WARP.
 - M2069: the `ffmpeg` elements build on Windows against a shared ffmpeg named by `FFMPEG_DIR`.
 - M2070: the ffmpeg integration tests run on Windows, and `tools/ffmpeg-build.sh` builds the DLLs with MSVC.
+- M2071: Windows CI tests the ffmpeg elements, and the Windows release binaries and wheel ship the LGPL ffmpeg DLLs.
 
 ## 0.12.0
 

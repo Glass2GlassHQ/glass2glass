@@ -51,6 +51,23 @@ jobs:
       - name: build ffmpeg
         if: runner.os == 'Linux'
         run: tools/ffmpeg-build.sh "$CODEC_PREFIX" | sed 's/^export //' >> "$GITHUB_ENV"
+      # Windows builds the same ffmpeg with MSVC under MSYS2; the DLLs ship beside g2g-launch.exe
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: runner.os == 'Windows'
+      - uses: msys2/setup-msys2@v2
+        if: runner.os == 'Windows'
+        with:
+          msystem: MSYS
+          path-type: inherit
+          update: false
+          install: make nasm diffutils
+      - name: build ffmpeg (Windows)
+        if: runner.os == 'Windows'
+        shell: msys2 {0}
+        run: |
+          tools/ffmpeg-build.sh /c/g2g-ffmpeg | sed 's/^export //' >> "$GITHUB_ENV"
+          echo "FFMPEG_PREFIX=/c/g2g-ffmpeg" >> "$GITHUB_ENV"
+          echo 'LIBCLANG_PATH=C:\Program Files\LLVM\bin' >> "$GITHUB_ENV"
       - name: build libvpx
         run: tools/libvpx-build.sh "$CODEC_PREFIX" | sed 's/^export //' >> "$GITHUB_ENV"
       - name: build
@@ -72,18 +89,22 @@ jobs:
             | grep -vE '^\s+(/usr/lib/|/System/Library/)' || true)
           [ -z "$unexpected" ] || { echo "::error::g2g-launch links $unexpected"; exit 1; }
       # windows runners carry the Visual C++ runtime in System32, a fresh install does not
-      - name: links only system libraries (Windows)
+      - name: links only system and bundled libraries (Windows)
         if: runner.os == 'Windows'
         run: |
           vswhere="/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe"
           system32="$(cygpath -u "$SYSTEMROOT")/System32"
+          bundled="$FFMPEG_PREFIX/bin"
           dumpbin=$("$vswhere" -latest -find 'VC/Tools/MSVC/**/bin/Hostx64/x64/dumpbin.exe' | head -n 1 | tr -d '\r')
-          unexpected=$(for binary in g2g-launch g2g-inspect; do
-              "$dumpbin" -nologo -dependents "target/${{ matrix.target }}/release/$binary.exe"
+          # the ffmpeg DLLs ship too, so their own imports must be system or bundled as well
+          unexpected=$(for binary in target/${{ matrix.target }}/release/g2g-launch.exe \
+              target/${{ matrix.target }}/release/g2g-inspect.exe "$bundled"/*.dll; do
+              "$dumpbin" -nologo -dependents "$binary"
             done | tr -d '\r' | grep -iE '^\s+\S+\.dll$' | tr -d ' ' | sort -u \
             | grep -viE '^(api|ext)-ms-' \
             | while read -r library; do
                 if echo "$library" | grep -qiE '^(vcruntime|msvcp|concrt|vcomp)'; then echo "$library"
+                elif [ -f "$bundled/$library" ]; then :
                 elif [ ! -f "$system32/$library" ]; then echo "$library"; fi
               done)
           [ -z "$unexpected" ] || { echo "::error::release binaries link $unexpected"; exit 1; }
@@ -105,8 +126,13 @@ jobs:
             find "$CODEC_PREFIX/lib" -maxdepth 1 -name 'lib*.so.*' ! -name '*.so.*.*' -exec cp -L {} "$name/lib/" \;
             cp "$CODEC_PREFIX"/ffmpeg-*/COPYING.LGPLv2.1 "$name/LICENSE-FFMPEG.txt"
           fi
+          if [ "${{ runner.os }}" = Windows ]; then
+            # the DLL search starts in the executable's directory
+            cp "$FFMPEG_PREFIX"/bin/*.dll "$name/"
+            cp "$FFMPEG_PREFIX"/ffmpeg-*/COPYING.LGPLv2.1 "$name/LICENSE-FFMPEG.txt"
+          fi
           "$name/g2g-launch" -q audiotestsrc num-buffers=5 ! fakesink
-          if [ "${{ runner.os }}" = Linux ]; then
+          if [ "${{ runner.os }}" != macOS ]; then
             "$name/g2g-launch" -q audiotestsrc num-buffers=20 ! avenc_aac ! fakesink
           fi
           "$name/g2g-launch" -q videotestsrc num-buffers=10 ! vpxenc codec=vp8 ! fakesink
@@ -173,6 +199,22 @@ jobs:
         run: |
           tools/libvpx-build.sh "$HOME/g2g-codecs" | sed 's/^export //' >> "$GITHUB_ENV"
           cp "$HOME/g2g-codecs/LICENSE-LIBVPX.txt" g2g-pyapi/
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: runner.os == 'Windows'
+      - uses: msys2/setup-msys2@v2
+        if: runner.os == 'Windows'
+        with:
+          msystem: MSYS
+          path-type: inherit
+          update: false
+          install: make nasm diffutils
+      - name: build ffmpeg (Windows)
+        if: runner.os == 'Windows'
+        shell: msys2 {0}
+        run: |
+          tools/ffmpeg-build.sh /c/g2g-ffmpeg | sed 's/^export //' >> "$GITHUB_ENV"
+          echo 'LIBCLANG_PATH=C:\Program Files\LLVM\bin' >> "$GITHUB_ENV"
+          cp /c/g2g-ffmpeg/ffmpeg-*/COPYING.LGPLv2.1 g2g-pyapi/LICENSE-FFMPEG.txt
       # maturin puts every LICEN[CS]E* file next to pyproject.toml into the wheel
       - name: third-party licences
         shell: bash
@@ -199,6 +241,15 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+      # auditwheel's Windows counterpart: copies the ffmpeg DLLs the extension imports into the wheel
+      - name: bundle ffmpeg (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          python -m pip install delvewheel==1.13.2
+          python -m delvewheel repair --add-path 'C:\g2g-ffmpeg\bin' -w g2g-pyapi/repaired g2g-pyapi/dist/*.whl
+          rm g2g-pyapi/dist/*.whl
+          mv g2g-pyapi/repaired/*.whl g2g-pyapi/dist/
       - name: smoke run
         shell: bash
         run: |
