@@ -1,0 +1,4 @@
+# Scripts keep LF on every checkout: Git Bash and MSYS2 bash reject the CRLF a
+# Windows checkout with core.autocrlf would otherwise give them.
+*.sh text eol=lf
+*.pl text eol=lf
