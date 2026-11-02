@@ -357,11 +357,10 @@ impl AsyncElement for D3D11Sink {
             return None;
         };
         let size = crate::pixel::frame_byte_size(RawVideoFormat::Nv12, w, h);
-        Some(AllocationParams::d3d11(
-            size,
-            D3D11_POOL_HEADROOM,
-            D3D11_ALIGN,
-        ))
+        let mut params = AllocationParams::d3d11(size, D3D11_POOL_HEADROOM, D3D11_ALIGN);
+        // a producer that cannot allocate D3D11 textures hands over system memory instead
+        params.accepts = self.input_domains();
+        Some(params)
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
