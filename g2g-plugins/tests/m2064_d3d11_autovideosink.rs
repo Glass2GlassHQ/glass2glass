@@ -26,4 +26,12 @@ async fn autovideosink_presents_system_frames_through_d3d11() {
     assert_eq!(stats.frames_consumed, FRAMES, "{line}");
     // d3d11videosink provides the pipeline clock, fakevideosink provides none
     assert_eq!(stats.clock_priority, ClockPriority::Provider, "{line}");
+    // a failing present still consumes the frame, so count what reached the swapchain
+    let presented: u64 = stats
+        .per_element
+        .iter()
+        .filter_map(|e| e.presentation)
+        .map(|p| p.presented)
+        .sum();
+    assert_eq!(presented, FRAMES, "{line}");
 }
