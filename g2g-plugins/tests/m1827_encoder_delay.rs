@@ -1,7 +1,7 @@
 //! M1827: the encoder delay and padding an MP3's LAME tag or an M4A's
 //! `iTunSMPB` tag records go downstream as a `Segment`, and the decoder drops
 //! the samples outside it, the way ffmpeg and gst trim them.
-#![cfg(all(target_os = "linux", feature = "ffmpeg"))]
+#![cfg(all(any(target_os = "linux", windows), feature = "ffmpeg"))]
 
 #[path = "common/collect_sink.rs"]
 mod collect_sink;

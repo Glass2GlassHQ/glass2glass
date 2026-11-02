@@ -3,7 +3,7 @@
     feature = "rtsp",
     feature = "rtsp-server",
     feature = "ffmpeg",
-    target_os = "linux"
+    any(target_os = "linux", windows)
 ))]
 
 use core::time::Duration;

@@ -11,7 +11,7 @@
 //! deliberately not pinned there), so this runs in the local full-feature
 //! suite:
 //! `cargo test -p g2g-plugins --features ffmpeg --test m1109_decoder_depth`.
-#![cfg(all(target_os = "linux", feature = "ffmpeg"))]
+#![cfg(all(any(target_os = "linux", windows), feature = "ffmpeg"))]
 
 use std::process::Command;
 

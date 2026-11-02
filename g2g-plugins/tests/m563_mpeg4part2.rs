@@ -12,7 +12,7 @@
 //! `ffmpeg -i h264_640x480.h264 -c:v mpeg4 -q:v 5 mpeg4part2_640x480.mp4`.
 //! libav* (the `ffmpeg` cargo feature) is required to build the decode half.
 
-#![cfg(all(target_os = "linux", feature = "ffmpeg"))]
+#![cfg(all(any(target_os = "linux", windows), feature = "ffmpeg"))]
 
 #[path = "common/collect_sink.rs"]
 mod collect_sink;

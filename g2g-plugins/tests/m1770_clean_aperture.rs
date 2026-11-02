@@ -1,7 +1,7 @@
 #![cfg(all(
     feature = "std",
     feature = "metadata",
-    target_os = "linux",
+    any(target_os = "linux", windows),
     feature = "ffmpeg"
 ))]
 

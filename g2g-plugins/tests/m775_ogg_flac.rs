@@ -5,7 +5,7 @@
 //! (FLAC is lossless, so the comparison is bit-exact). Bare `decodebin` sniffs
 //! the codec via the primary-stream hook, and a `Caps::Audio{Flac}` decode
 //! chain auto-inserts `flacparse` (the elementary `.flac` path).
-#![cfg(all(feature = "std", target_os = "linux", feature = "ffmpeg"))]
+#![cfg(all(feature = "std", any(target_os = "linux", windows), feature = "ffmpeg"))]
 
 use std::process::Command;
 

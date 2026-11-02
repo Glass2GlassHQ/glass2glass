@@ -7,7 +7,7 @@
 //! reference stream ffmpeg itself encoded with the same colour request, and the
 //! two references (tagged and untagged) have to disagree, so a probe that
 //! reported nothing could not pass the test.
-#![cfg(all(target_os = "linux", feature = "ffmpeg"))]
+#![cfg(all(any(target_os = "linux", windows), feature = "ffmpeg"))]
 
 #[path = "common/ffmpeg_tool.rs"]
 mod ffmpeg_tool;

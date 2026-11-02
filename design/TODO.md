@@ -43,10 +43,12 @@ libraries installed. Everything below ships in 0.12.0.
 - **Bare-host check.** Before publishing, run each release binary on a GPU-less
   host on an H.264 + AAC MP4 and a camera to WebRTC pipeline, and check that
   `decodebin` picks a software decoder rather than `vulkanvideodec` on Linux.
-- **ffmpeg on Windows.** Build the LGPL ffmpeg 8.1.3 DLLs from source with
-  `tools/ffmpeg-build.sh` under MSVC (MSYS2 on the runner), run the ffmpeg
-  integration tests on Windows in CI, and ship the DLLs next to `g2g-launch.exe`
-  in the Windows release with the LGPL notice and source tarball.
+- **ffmpeg on Windows.** Build the DLLs with `tools/ffmpeg-build.sh` (MSYS2 and
+  the MSVC developer environment on the runner), run the ffmpeg integration tests
+  on Windows in CI, and ship the DLLs next to `g2g-launch.exe` in the Windows
+  release with the LGPL notice and source tarball. Widen to Windows the RTSP
+  ffmpeg tests still gated Linux-only (m1650, m1680, m1681, m1682, m1873, m1879,
+  m1929): m1873, m1879 and m1929 end in `RtspStream` there.
 
 ## Alloc-optional (heap-free) MCU core
 

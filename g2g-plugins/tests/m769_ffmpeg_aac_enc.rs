@@ -4,7 +4,7 @@
 //! stream back to PCM and checks the tone survived (duration and dominant
 //! frequency via zero crossings), so the encode core is validated against the
 //! reference peer, not just self-consistent.
-#![cfg(all(target_os = "linux", feature = "ffmpeg"))]
+#![cfg(all(any(target_os = "linux", windows), feature = "ffmpeg"))]
 
 use std::process::Command;
 

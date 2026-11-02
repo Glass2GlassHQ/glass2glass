@@ -1,6 +1,6 @@
 // `hlssrc location=X ! decodebin name=d  d. ! ...  d. ! ...` decodes every muxed stream of the
 // playlist, as gst's `souphttpsrc ! hlsdemux ! decodebin name=d` does.
-#![cfg(all(feature = "hls", feature = "ffmpeg", target_os = "linux"))]
+#![cfg(all(feature = "hls", feature = "ffmpeg", any(target_os = "linux", windows)))]
 
 use std::time::Duration;
 

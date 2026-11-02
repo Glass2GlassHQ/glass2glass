@@ -1,6 +1,6 @@
 // A `decodebin` or `parsebin` fan-out splits every file the inline bin plays, so each
 // branch carries the same stream the inline bin picks with `current-video` / `current-audio`.
-#![cfg(all(feature = "std", feature = "ffmpeg", target_os = "linux"))]
+#![cfg(all(feature = "std", feature = "ffmpeg", any(target_os = "linux", windows)))]
 
 use std::path::{Path, PathBuf};
 

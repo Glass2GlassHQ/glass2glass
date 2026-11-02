@@ -1,4 +1,8 @@
-#![cfg(all(feature = "dash", feature = "ffmpeg", target_os = "linux"))]
+#![cfg(all(
+    feature = "dash",
+    feature = "ffmpeg",
+    any(target_os = "linux", windows)
+))]
 
 use std::io::{Read, Write};
 use std::net::TcpListener;

@@ -1,6 +1,6 @@
 // An http(s) URL naming an `.m3u8` playlist is an HLS URI, as gst's `uridecodebin` plays it,
 // so `uridecodebin uri=http://host/master.m3u8 name=d` fans out the variant's muxed streams.
-#![cfg(all(feature = "hls", feature = "ffmpeg", target_os = "linux"))]
+#![cfg(all(feature = "hls", feature = "ffmpeg", any(target_os = "linux", windows)))]
 
 use std::time::Duration;
 

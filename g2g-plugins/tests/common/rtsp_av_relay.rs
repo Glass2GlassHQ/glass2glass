@@ -88,7 +88,9 @@ fn read_full_sdp(mut stdout: ChildStdout) -> String {
             if sent {
                 continue;
             }
-            text.push_str(&String::from_utf8_lossy(&chunk[..len]));
+            // Windows' text-mode stdout turns ffmpeg's "\n" into "\r\n" (and its SDP's "\r\n"
+            // into "\r\r\n"); with_track_controls writes every line ending back
+            text.push_str(&String::from_utf8_lossy(&chunk[..len]).replace('\r', ""));
             let Some(start) = text.rfind(SDP_HEADER) else {
                 continue;
             };

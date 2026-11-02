@@ -12,6 +12,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M2067: `wasapisink` plays PCM at any rate or layout by letting the audio engine convert it to the endpoint's mix format.
 - M2068: `d3d11videosink` presents system-memory NV12 on a device without D3D11 video, such as WARP.
 - M2069: the `ffmpeg` elements build on Windows against a shared ffmpeg named by `FFMPEG_DIR`.
+- M2070: the ffmpeg integration tests run on Windows, and `tools/ffmpeg-build.sh` builds the DLLs with MSVC.
 
 ## 0.12.0
 

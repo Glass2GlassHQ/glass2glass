@@ -36,7 +36,11 @@
 //! sleep, and resume once you restart the publisher. PTS should stay
 //! monotonic across the gap (the soak asserts this).
 
-#![cfg(all(target_os = "linux", feature = "rtsp", feature = "ffmpeg"))]
+#![cfg(all(
+    any(target_os = "linux", windows),
+    feature = "rtsp",
+    feature = "ffmpeg"
+))]
 
 use core::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;

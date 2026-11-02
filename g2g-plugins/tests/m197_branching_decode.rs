@@ -10,7 +10,10 @@
 //! the synthetic frames. The branching behaviour under test is decoder
 //! independent, so the baseline build covers it; m118 covers tee under all
 //! features.
-#![cfg(all(feature = "std", not(all(target_os = "linux", feature = "ffmpeg"))))]
+#![cfg(all(
+    feature = "std",
+    not(all(any(target_os = "linux", windows), feature = "ffmpeg"))
+))]
 
 use g2g_core::runtime::{parse_launch, run_graph, ElementFactory, SourceFactory};
 use g2g_core::{Caps, CapsSet, Dim, PadTemplate, PipelineClock, Rate, RawVideoFormat, VideoCodec};

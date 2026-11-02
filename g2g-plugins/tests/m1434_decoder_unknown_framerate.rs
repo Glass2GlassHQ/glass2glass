@@ -1,4 +1,4 @@
-#![cfg(all(feature = "std", target_os = "linux", feature = "ffmpeg"))]
+#![cfg(all(feature = "std", any(target_os = "linux", windows), feature = "ffmpeg"))]
 
 use core::future::Future;
 use core::pin::Pin;

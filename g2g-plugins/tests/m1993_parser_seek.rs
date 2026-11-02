@@ -1,7 +1,7 @@
 //! M1993: a bare `.mp3`, `.aac` or `.ac3` file seeks through its parser, which
 //! rescans from the file start and hands the decoder the frames it needs before
 //! the target, so the decode from the target matches ffmpeg's own decode.
-#![cfg(all(feature = "std", target_os = "linux", feature = "ffmpeg"))]
+#![cfg(all(feature = "std", any(target_os = "linux", windows), feature = "ffmpeg"))]
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
