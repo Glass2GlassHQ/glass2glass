@@ -1,6 +1,6 @@
 // A fan-out stream no branch links is dropped and the linked ones play, as gst leaves the
 // extra pad unlinked: one branch on a two-stream URI decodes its stream alone.
-#![cfg(all(feature = "std", feature = "ffmpeg", target_os = "linux"))]
+#![cfg(all(feature = "std", feature = "ffmpeg", any(target_os = "linux", windows)))]
 
 use std::time::Duration;
 

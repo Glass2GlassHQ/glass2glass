@@ -45,9 +45,7 @@ libraries installed. Everything below ships in 0.12.0.
   `decodebin` picks a software decoder rather than `vulkanvideodec` on Linux.
 - **Windows release with ffmpeg.** Run the release workflow once (`workflow_dispatch`)
   to check the MSVC ffmpeg build, the bundled-DLL link check and the
-  delvewheel-repaired wheel. Widen to Windows the RTSP ffmpeg tests still gated
-  Linux-only (m1650, m1680, m1681, m1682, m1873, m1879, m1929): m1873, m1879 and
-  m1929 end in `RtspStream` there.
+  delvewheel-repaired wheel.
 - **zlib in the bundled ffmpeg.** `tools/ffmpeg-build.sh` builds without zlib, so
   the release bundles lack the zlib codecs (ZMBV, Screenpresso, among others) that
   m1590 decodes against a system ffmpeg. Build zlib statically into the bundle.

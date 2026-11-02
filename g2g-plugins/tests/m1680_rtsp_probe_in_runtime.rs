@@ -4,7 +4,7 @@
     feature = "std",
     feature = "rtsp",
     feature = "ffmpeg",
-    target_os = "linux"
+    any(target_os = "linux", windows)
 ))]
 
 use g2g_core::graph::NodeKind;

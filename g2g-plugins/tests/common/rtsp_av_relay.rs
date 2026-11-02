@@ -18,6 +18,8 @@ const TRACK_CONTROL: &str = "trackID=";
 pub(crate) struct AvRelay {
     pub(crate) url: String,
     ffmpeg: Child,
+    // held, never read, so ffmpeg's RTCP has ports of its own (see rtcp_sink)
+    _rtcp: Vec<UdpSocket>,
 }
 
 impl Drop for AvRelay {
@@ -36,6 +38,8 @@ pub(crate) fn serve_av_fixture(fixture: &str) -> AvRelay {
         .iter()
         .map(|socket| socket.local_addr().unwrap().port())
         .collect();
+    let (rtcp, rtcp_ports): (Vec<UdpSocket>, Vec<u16>) =
+        TRACK_MEDIA.iter().map(|_| rtcp_sink()).unzip();
     let mut command = Command::new("ffmpeg");
     command
         .args([
@@ -48,10 +52,10 @@ pub(crate) fn serve_av_fixture(fixture: &str) -> AvRelay {
         ])
         .arg("-i")
         .arg(fixture);
-    for (map, port) in ["0:v", "0:a"].iter().zip(&ports) {
+    for ((map, port), rtcp_port) in ["0:v", "0:a"].iter().zip(&ports).zip(&rtcp_ports) {
         command
             .args(["-map", map, "-c", "copy", "-f", "rtp"])
-            .arg(format!("rtp://127.0.0.1:{port}"));
+            .arg(format!("rtp://127.0.0.1:{port}?rtcpport={rtcp_port}"));
     }
     let mut ffmpeg = command
         .stdin(Stdio::null())
@@ -73,7 +77,17 @@ pub(crate) fn serve_av_fixture(fixture: &str) -> AvRelay {
     AvRelay {
         url: format!("rtsp://127.0.0.1:{port}/stream"),
         ffmpeg,
+        _rtcp: rtcp,
     }
+}
+
+// ffmpeg sends RTCP to the RTP port + 1 unless told otherwise; Windows hands out ephemeral
+// ports in sequence, so that is often the next track's RTP socket, which would forward the
+// reports as media
+fn rtcp_sink() -> (UdpSocket, u16) {
+    let socket = UdpSocket::bind("127.0.0.1:0").expect("bind rtcp");
+    let port = socket.local_addr().unwrap().port();
+    (socket, port)
 }
 
 // ffmpeg 6 prints a video-only SDP as the first muxer starts, the last print lists both tracks

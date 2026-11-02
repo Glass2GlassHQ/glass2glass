@@ -21,6 +21,8 @@ pub(crate) struct H265Relay {
     pub(crate) url: String,
     sessions: Arc<AtomicUsize>,
     ffmpeg: Child,
+    // held, never read, so ffmpeg's RTCP has a port of its own (see rtcp_sink)
+    _rtcp: UdpSocket,
 }
 
 impl H265Relay {
@@ -54,6 +56,7 @@ pub(crate) enum EarlyEnd {
 pub(crate) fn serve_h265_fixture(early_ends: &[EarlyEnd], range: Option<&str>) -> H265Relay {
     let rtp = UdpSocket::bind("127.0.0.1:0").expect("bind rtp");
     let rtp_port = rtp.local_addr().unwrap().port();
+    let (rtcp, rtcp_port) = rtcp_sink();
     let sdp_path = std::env::temp_dir().join(format!("h265-relay-{rtp_port}.sdp"));
     let ffmpeg = Command::new("ffmpeg")
         .args([
@@ -68,7 +71,7 @@ pub(crate) fn serve_h265_fixture(early_ends: &[EarlyEnd], range: Option<&str>) -
         ])
         .args(["-c", "copy", "-f", "rtp", "-sdp_file"])
         .arg(&sdp_path)
-        .arg(format!("rtp://127.0.0.1:{rtp_port}"))
+        .arg(format!("rtp://127.0.0.1:{rtp_port}?rtcpport={rtcp_port}"))
         .stdin(Stdio::null())
         .spawn()
         .expect("spawn ffmpeg");
@@ -103,7 +106,17 @@ pub(crate) fn serve_h265_fixture(early_ends: &[EarlyEnd], range: Option<&str>) -
         url: format!("rtsp://127.0.0.1:{port}/stream"),
         sessions,
         ffmpeg,
+        _rtcp: rtcp,
     }
+}
+
+// ffmpeg sends RTCP to the RTP port + 1 unless told otherwise; Windows hands out ephemeral
+// ports in sequence, so that is often another relay's RTP socket, which would forward the
+// reports as media
+fn rtcp_sink() -> (UdpSocket, u16) {
+    let socket = UdpSocket::bind("127.0.0.1:0").expect("bind rtcp");
+    let port = socket.local_addr().unwrap().port();
+    (socket, port)
 }
 
 fn serve_client(stream: TcpStream, sdp: &str, rtp: &UdpSocket, early_end: Option<EarlyEnd>) {

@@ -2,7 +2,7 @@
     feature = "std",
     feature = "rtsp",
     feature = "ffmpeg",
-    target_os = "linux"
+    any(target_os = "linux", windows)
 ))]
 
 use std::time::Duration;
