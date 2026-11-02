@@ -28,6 +28,7 @@
 //! meta.class_names()  -> [str, ...]
 //! meta.blobs()        -> {name: bytes, ...}
 //! meta.tracking_ids() -> [int | None, ...]
+//! meta.framerate      -> (numerator, denominator) | None
 //! ```
 //!
 //! Boxes come back in pixels of the frame being processed, the shape
@@ -127,6 +128,7 @@ use pyo3::ffi;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict};
 
+use g2g_core::caps::{framerate_q16_to_fraction, Rate};
 use g2g_core::log::Target;
 use g2g_core::runtime::{bounded, Receiver};
 use g2g_core::{
@@ -186,6 +188,7 @@ enum JobCaps {
         width: u32,
         height: u32,
         fmt: RawVideoFormat,
+        framerate: Rate,
         colorimetry: Colorimetry,
     },
     /// The negotiated caps, handed to Python as its `gst-launch` string.
@@ -356,6 +359,7 @@ struct MetaSink {
     /// is.
     emitted: Mutex<Vec<Emitted>>,
     text_output: bool,
+    framerate: Option<(u32, u32)>,
 }
 
 /// What upstream attached to the frame this call is about, converted once into
@@ -447,6 +451,11 @@ impl MetaSink {
     #[getter]
     fn text_output(&self) -> bool {
         self.text_output
+    }
+
+    #[getter]
+    fn framerate(&self) -> Option<(u32, u32)> {
+        self.framerate
     }
 
     /// The opaque blobs already on the incoming frame, keyed by canonical header
@@ -1096,6 +1105,13 @@ fn process_job(
         MetaSink {
             upstream,
             text_output: job.text_output,
+            framerate: match &job.caps {
+                JobCaps::RawVideo {
+                    framerate: Rate::Fixed(q16),
+                    ..
+                } => Some(framerate_q16_to_fraction(*q16)),
+                _ => None,
+            },
             ..Default::default()
         },
     ) {
@@ -1856,12 +1872,14 @@ fn raw_video_caps(caps: &Caps) -> Result<JobCaps, G2gError> {
             format,
             width,
             height,
+            framerate,
             colorimetry,
             ..
         } => Ok(JobCaps::RawVideo {
             width: dim_fixed(width)?,
             height: dim_fixed(height)?,
             fmt: *format,
+            framerate: framerate.clone(),
             colorimetry: *colorimetry,
         }),
         _ => Err(G2gError::CapsMismatch),
