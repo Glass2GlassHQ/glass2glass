@@ -56,7 +56,7 @@ use windows::Win32::Graphics::Direct3D11::{
     D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D, ID3D11VideoContext,
     ID3D11VideoContext1, ID3D11VideoDevice, ID3D11VideoProcessor, ID3D11VideoProcessorEnumerator,
     ID3D11VideoProcessorInputView, ID3D11VideoProcessorOutputView, D3D11_BIND_RENDER_TARGET,
-    D3D11_BIND_SHADER_RESOURCE, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+    D3D11_BIND_SHADER_RESOURCE, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_FLAG,
     D3D11_CREATE_DEVICE_VIDEO_SUPPORT, D3D11_SDK_VERSION, D3D11_TEX2D_VPIV, D3D11_TEX2D_VPOV,
     D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
     D3D11_VIDEO_PROCESSOR_CAPS, D3D11_VIDEO_PROCESSOR_CONTENT_DESC,
@@ -507,13 +507,20 @@ struct GpuState {
     // NV12 texture system-memory frames are copied into, made on the first one
     upload: Option<ID3D11Texture2D>,
     device: ID3D11Device,
+    // `None` on a device without D3D11 video (WARP, a GPU-less VM or CI runner):
+    // system-memory frames are then converted to BGRA on the CPU
+    video: Option<VideoPath>,
+    swapchain: IDXGISwapChain1,
+    // the turn the processor applies to the stream
+    orientation: Orientation,
+}
+
+/// The D3D11 video processor that converts NV12 to the RGB backbuffer.
+struct VideoPath {
     video_device: ID3D11VideoDevice,
     video_context: ID3D11VideoContext,
     vp_enum: ID3D11VideoProcessorEnumerator,
     processor: ID3D11VideoProcessor,
-    swapchain: IDXGISwapChain1,
-    // the turn the processor applies to the stream
-    orientation: Orientation,
 }
 
 fn worker_main(
@@ -600,9 +607,16 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
     unsafe { DefWindowProcW(hwnd, msg, wp, lp) }
 }
 
-/// A hardware D3D11 device with video support, for system-memory frames that
-/// bring no device of their own.
+/// A hardware D3D11 device for system-memory frames that bring no device of
+/// their own: one with video support when the driver has it, else a plain one
+/// (WARP refuses the video flag with `DXGI_ERROR_UNSUPPORTED`).
 fn create_device() -> Result<ID3D11Device, G2gError> {
+    let base = D3D11_CREATE_DEVICE_BGRA_SUPPORT;
+    create_device_with(base | D3D11_CREATE_DEVICE_VIDEO_SUPPORT)
+        .or_else(|_| create_device_with(base))
+}
+
+fn create_device_with(flags: D3D11_CREATE_DEVICE_FLAG) -> Result<ID3D11Device, G2gError> {
     let mut device: Option<ID3D11Device> = None;
     // SAFETY: the out-param is a valid local, initialised by the call before it is read.
     unsafe {
@@ -610,7 +624,7 @@ fn create_device() -> Result<ID3D11Device, G2gError> {
             None,
             D3D_DRIVER_TYPE_HARDWARE,
             HMODULE::default(),
-            D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
+            flags,
             None,
             D3D11_SDK_VERSION,
             Some(&mut device),
@@ -662,7 +676,8 @@ fn create_window(title: &str, width: u32, height: u32) -> Result<HWND, G2gError>
     }
 }
 
-/// Build the swapchain + video processor for `device` on `hwnd`.
+/// Build the swapchain, plus the video processor when `device` has D3D11 video,
+/// for `device` on `hwnd`.
 fn init_gpu(
     device: ID3D11Device,
     width: u32,
@@ -671,30 +686,8 @@ fn init_gpu(
 ) -> Result<GpuState, G2gError> {
     // SAFETY: COM object creation on the worker thread, every object from `device`.
     unsafe {
-        let video_device: ID3D11VideoDevice = device.cast().map_err(win_err)?;
         let context = device.GetImmediateContext().map_err(win_err)?;
-        let video_context: ID3D11VideoContext = context.cast().map_err(win_err)?;
-
-        let rate = DXGI_RATIONAL {
-            Numerator: 60,
-            Denominator: 1,
-        };
-        let content = D3D11_VIDEO_PROCESSOR_CONTENT_DESC {
-            InputFrameFormat: D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
-            InputFrameRate: rate,
-            InputWidth: width,
-            InputHeight: height,
-            OutputFrameRate: rate,
-            OutputWidth: width,
-            OutputHeight: height,
-            Usage: D3D11_VIDEO_USAGE_PLAYBACK_NORMAL,
-        };
-        let vp_enum = video_device
-            .CreateVideoProcessorEnumerator(&content)
-            .map_err(win_err)?;
-        let processor = video_device
-            .CreateVideoProcessor(&vp_enum, 0)
-            .map_err(win_err)?;
+        let video = init_video(&device, &context, width, height).ok();
 
         let factory: IDXGIFactory2 = CreateDXGIFactory1().map_err(win_err)?;
         let desc = DXGI_SWAP_CHAIN_DESC1 {
@@ -721,12 +714,51 @@ fn init_gpu(
             context,
             upload: None,
             device,
+            video,
+            swapchain,
+            orientation: Orientation::Identity,
+        })
+    }
+}
+
+/// The NV12 -> RGB video processor for `device`, which fails on a device
+/// created without video support.
+fn init_video(
+    device: &ID3D11Device,
+    context: &ID3D11DeviceContext,
+    width: u32,
+    height: u32,
+) -> Result<VideoPath, G2gError> {
+    // SAFETY: COM object creation on the worker thread, every object from `device`.
+    unsafe {
+        let video_device: ID3D11VideoDevice = device.cast().map_err(win_err)?;
+        let video_context: ID3D11VideoContext = context.cast().map_err(win_err)?;
+
+        let rate = DXGI_RATIONAL {
+            Numerator: 60,
+            Denominator: 1,
+        };
+        let content = D3D11_VIDEO_PROCESSOR_CONTENT_DESC {
+            InputFrameFormat: D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
+            InputFrameRate: rate,
+            InputWidth: width,
+            InputHeight: height,
+            OutputFrameRate: rate,
+            OutputWidth: width,
+            OutputHeight: height,
+            Usage: D3D11_VIDEO_USAGE_PLAYBACK_NORMAL,
+        };
+        let vp_enum = video_device
+            .CreateVideoProcessorEnumerator(&content)
+            .map_err(win_err)?;
+        let processor = video_device
+            .CreateVideoProcessor(&vp_enum, 0)
+            .map_err(win_err)?;
+        Ok(VideoPath {
             video_device,
             video_context,
             vp_enum,
             processor,
-            swapchain,
-            orientation: Orientation::Identity,
         })
     }
 }
@@ -822,6 +854,13 @@ fn present_frame(
         });
     }
     let gpu = gpu.as_mut().ok_or(G2gError::NotConfigured)?;
+    if gpu.video.is_none() {
+        // a decoded texture's device always has video, so only system memory lands here
+        let bytes = domain
+            .as_system_slice()
+            .ok_or(G2gError::UnsupportedDomain)?;
+        return present_converted(gpu, bytes, width, height, orientation);
+    }
     let (input_tex, subresource, picture_width, picture_height) = match decoded {
         Some((texture, (_, input))) => (input, texture.subresource, texture.width, texture.height),
         None => {
@@ -832,6 +871,7 @@ fn present_frame(
         }
     };
     apply_orientation(gpu, hwnd, picture_width, picture_height, orientation)?;
+    let video = gpu.video.as_ref().ok_or(G2gError::NotConfigured)?;
 
     // SAFETY: `input_tex` holds its own reference for this call, and a decoded
     // frame's keep-alive in `domain` outlives it; all COM objects belong to the same device.
@@ -847,10 +887,11 @@ fn present_frame(
             },
         };
         let mut input_view: Option<ID3D11VideoProcessorInputView> = None;
-        gpu.video_device
+        video
+            .video_device
             .CreateVideoProcessorInputView(
                 &input_tex,
-                &gpu.vp_enum,
+                &video.vp_enum,
                 &in_desc,
                 Some(&mut input_view),
             )
@@ -865,10 +906,11 @@ fn present_frame(
             },
         };
         let mut output_view: Option<ID3D11VideoProcessorOutputView> = None;
-        gpu.video_device
+        video
+            .video_device
             .CreateVideoProcessorOutputView(
                 &backbuffer,
-                &gpu.vp_enum,
+                &video.vp_enum,
                 &out_desc,
                 Some(&mut output_view),
             )
@@ -888,9 +930,10 @@ fn present_frame(
             pInputSurfaceRight: ManuallyDrop::new(None),
             ppFutureSurfacesRight: core::ptr::null_mut(),
         }];
-        let blt = gpu
-            .video_context
-            .VideoProcessorBlt(&gpu.processor, &output_view, 0, &streams);
+        let blt =
+            video
+                .video_context
+                .VideoProcessorBlt(&video.processor, &output_view, 0, &streams);
         // Release the input-view refs we placed in the stream struct.
         drop(ManuallyDrop::into_inner(core::mem::replace(
             &mut streams[0].pInputSurface,
@@ -902,6 +945,44 @@ fn present_frame(
         )));
         blt.map_err(win_err)?;
 
+        gpu.swapchain
+            .Present(1, DXGI_PRESENT(0))
+            .ok()
+            .map_err(win_err)?;
+    }
+    Ok(())
+}
+
+/// Present a packed system-memory NV12 frame without a video processor: convert
+/// it to BGRA on the CPU, copy that into the swapchain backbuffer, `Present`.
+fn present_converted(
+    gpu: &mut GpuState,
+    bytes: &[u8],
+    width: u32,
+    height: u32,
+    orientation: Orientation,
+) -> Result<(), G2gError> {
+    if bytes.len() < crate::pixel::frame_byte_size(RawVideoFormat::Nv12, width, height) {
+        return Err(G2gError::CapsMismatch);
+    }
+    // turning or mirroring needs the video processor this device lacks
+    if orientation != Orientation::Identity {
+        return Err(G2gError::Hardware(HardwareError::Other));
+    }
+    let bgra = crate::videoconvert::convert(
+        bytes,
+        RawVideoFormat::Nv12,
+        RawVideoFormat::Bgra8,
+        width as usize,
+        height as usize,
+        g2g_core::Colorimetry::UNKNOWN,
+    );
+    // SAFETY: `bgra` holds `width * height` tightly packed BGRA pixels, the
+    // backbuffer's format and size, and every object belongs to one device.
+    unsafe {
+        let backbuffer: ID3D11Texture2D = gpu.swapchain.GetBuffer(0).map_err(win_err)?;
+        gpu.context
+            .UpdateSubresource(&backbuffer, 0, None, bgra.as_ptr().cast(), width * 4, 0);
         gpu.swapchain
             .Present(1, DXGI_PRESENT(0))
             .ok()
@@ -965,10 +1046,16 @@ fn apply_orientation(
     }
     let previous = stream_orientation(gpu.orientation);
     let next = stream_orientation(orientation);
+    // only the video processor turns or mirrors the picture
+    let video = gpu
+        .video
+        .as_ref()
+        .ok_or(G2gError::Hardware(HardwareError::Other))?;
     // SAFETY: the enumerator, context and processor come from one device and stay on this thread.
     unsafe {
         let mut caps = D3D11_VIDEO_PROCESSOR_CAPS::default();
-        gpu.vp_enum
+        video
+            .vp_enum
             .GetVideoProcessorCaps(&mut caps)
             .map_err(win_err)?;
         let missing_rotation =
@@ -978,16 +1065,17 @@ fn apply_orientation(
         if missing_rotation || missing_mirror {
             return Err(G2gError::Hardware(HardwareError::Other));
         }
-        gpu.video_context.VideoProcessorSetStreamRotation(
-            &gpu.processor,
+        video.video_context.VideoProcessorSetStreamRotation(
+            &video.processor,
             0,
             next.rotates(),
             next.rotation,
         );
         if next.mirrors() || previous.mirrors() {
-            let video_context1: ID3D11VideoContext1 = gpu.video_context.cast().map_err(win_err)?;
+            let video_context1: ID3D11VideoContext1 =
+                video.video_context.cast().map_err(win_err)?;
             video_context1.VideoProcessorSetStreamMirror(
-                &gpu.processor,
+                &video.processor,
                 0,
                 next.mirrors(),
                 next.flip_horizontal,
