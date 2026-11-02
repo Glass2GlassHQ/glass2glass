@@ -14,7 +14,10 @@
 #include <gst/base/gstbasetransform.h>
 #include <gst/video/video.h>
 #include <string.h>
+/* Windows has no dma-buf: there every buffer crosses as system memory */
+#ifndef _WIN32
 #include <unistd.h>
+#endif
 #ifdef G2G_GST_ANALYTICS
 #include <gst/analytics/analytics.h>
 #endif
@@ -475,6 +478,7 @@ static gboolean push_input(GstGlass2Glass *self, GstBuffer *in) {
 #ifdef G2G_GST_ANALYTICS
   read_analytics(self, in);
 #endif
+#ifndef _WIN32
   GstMemory *mem = gst_buffer_peek_memory(in, 0);
   if (mem && gst_is_dmabuf_memory(mem)) {
     int fd = gst_dmabuf_memory_get_fd(mem);
@@ -486,6 +490,7 @@ static gboolean push_input(GstGlass2Glass *self, GstBuffer *in) {
     }
     return g2g_bridge_push_dmabuf(self->bridge, fd, stride, offset, pts);
   }
+#endif
   if (self->have_in_planes && !buffer_is_tight(in, &self->in_info, &self->in_planes)) {
     guint8 *tight = g_malloc(self->in_planes.size);
     GstBuffer *dst = wrap_frame(tight, 0, &self->in_info, &self->in_planes);
@@ -505,6 +510,7 @@ static gboolean push_input(GstGlass2Glass *self, GstBuffer *in) {
   return ok;
 }
 
+#ifndef _WIN32
 /* The plane layout g2g gives a dma-buf frame at this luma stride, and its size. */
 static gsize dmabuf_layout(const GstVideoInfo *info, guint stride, guint offset,
                            gsize offsets[GST_VIDEO_MAX_PLANES],
@@ -530,6 +536,7 @@ static void release_held_frame(gpointer held) {
   g2g_bridge_out_release(held);
   g_free(held);
 }
+#endif
 
 /* Build the downstream buffer from a pulled frame: a system frame becomes an
  * owned GstBuffer (bytes copied, into GStreamer's padded rows when they differ
@@ -538,6 +545,9 @@ static void release_held_frame(gpointer held) {
  * frame moves onto that memory, clearing `out->owner`. */
 static GstBuffer *wrap_output(GstGlass2Glass *self, G2gOut *out) {
   if (out->kind == 1) {
+#ifdef _WIN32
+    return NULL;
+#else
     if (!self->have_out_info)
       return NULL;
     if (!self->dmabuf_alloc)
@@ -567,6 +577,7 @@ static GstBuffer *wrap_output(GstGlass2Glass *self, G2gOut *out) {
                                      GST_VIDEO_INFO_WIDTH(info), GST_VIDEO_INFO_HEIGHT(info),
                                      GST_VIDEO_INFO_N_PLANES(info), offsets, strides);
     return buf;
+#endif
   }
   const G2gBridgePlanes *planes = &self->out_planes;
   if (self->have_out_planes &&

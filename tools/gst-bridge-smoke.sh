@@ -14,15 +14,23 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-echo "== building libgstglass2glass.so =="
+echo "== building the glass2glass plugin =="
 cargo build -p g2g-bridge --features gstreamer,wgpu
 
-# GStreamer derives the plugin name from the `libgst<name>.so` filename, so the
-# cargo cdylib (libg2g_bridge.so) is published under the expected name.
+# GStreamer derives the plugin name from the `libgst<name>.so` (Windows: `gst<name>.dll`)
+# filename, so the cargo cdylib is published under the expected name.
 plugdir="target/gstplugins"
 mkdir -p "$plugdir"
-cp -f "${CARGO_TARGET_DIR:-target}/debug/libg2g_bridge.so" "$plugdir/libgstglass2glass.so"
-export GST_PLUGIN_PATH="$PWD/$plugdir"
+case "$(uname -s)" in
+MINGW* | MSYS*)
+    cp -f "${CARGO_TARGET_DIR:-target}/debug/g2g_bridge.dll" "$plugdir/gstglass2glass.dll"
+    export GST_PLUGIN_PATH="$(cygpath -w "$PWD/$plugdir")"
+    ;;
+*)
+    cp -f "${CARGO_TARGET_DIR:-target}/debug/libg2g_bridge.so" "$plugdir/libgstglass2glass.so"
+    export GST_PLUGIN_PATH="$PWD/$plugdir"
+    ;;
+esac
 
 echo "== gst-inspect-1.0 glass2glass =="
 gst-inspect-1.0 glass2glass >/dev/null || { echo "FAIL: element not registered"; exit 1; }
