@@ -36,7 +36,8 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use windows::Win32::Media::Audio::{
-    eRender, IAudioClient, IAudioRenderClient, AUDCLNT_SHAREMODE_SHARED, WAVEFORMATEX,
+    eRender, IAudioClient, IAudioRenderClient, AUDCLNT_SHAREMODE_SHARED,
+    AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM, AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY, WAVEFORMATEX,
 };
 use windows::Win32::System::Com::{
     CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_MULTITHREADED,
@@ -202,7 +203,7 @@ impl AsyncElement for WasapiSink {
             self.shutdown();
         }
 
-        let (ready_tx, ready_rx) = mpsc::sync_channel::<Result<(), ()>>(1);
+        let (ready_tx, ready_rx) = mpsc::sync_channel::<Result<(), G2gError>>(1);
         let rendered = Arc::clone(&self.frames_rendered);
         let format = wave_format(tag, bits, channels, rate);
         let device = self.device.clone();
@@ -214,11 +215,13 @@ impl AsyncElement for WasapiSink {
         })?;
 
         // The worker reports whether the endpoint opened; a headless host (no
-        // audio device) fails loud here rather than silently dropping audio.
+        // audio device) fails loud here rather than silently dropping audio, with
+        // the open's own error so no device and a refused format stay apart.
         // `link`'s Drop reaps the worker, so a failed open needs no join.
         match ready_rx.recv_timeout(DEVICE_OPEN_TIMEOUT) {
             Ok(Ok(())) => {}
-            _ => return Err(worker_gone()),
+            Ok(Err(e)) => return Err(e),
+            Err(_) => return Err(worker_gone()),
         }
 
         self.link = Some(link);
@@ -315,7 +318,7 @@ fn worker_main(
     format: WAVEFORMATEX,
     rx: Receiver<WorkerCmd>,
     rendered: Arc<AtomicU64>,
-    ready: SyncSender<Result<(), ()>>,
+    ready: SyncSender<Result<(), G2gError>>,
 ) -> Result<(), G2gError> {
     // SAFETY: COM is initialised MTA on this worker thread; every later WASAPI
     // call lands on the same thread. S_FALSE (already initialised) is fine.
@@ -325,7 +328,7 @@ fn worker_main(
             state
         }
         Err(e) => {
-            let _ = ready.send(Err(()));
+            let _ = ready.send(Err(e.clone()));
             // CoUninitialize is paired in open_endpoint's error paths via the
             // guard below only on success; on failure CoInitializeEx may or may
             // not have run, so balance it here best-effort.
@@ -372,10 +375,12 @@ unsafe fn open_render(device: &str, format: &WAVEFORMATEX) -> Result<RenderState
         let endpoint = open_endpoint(eRender, device)?;
         let client: IAudioClient = endpoint.Activate(CLSCTX_ALL, None).map_err(audio_err)?;
 
+        // shared mode takes only the endpoint's mix format unless the engine converts
+        // the stream's rate, channels and sample type to it
         client
             .Initialize(
                 AUDCLNT_SHAREMODE_SHARED,
-                0,
+                AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
                 BUFFER_DURATION_HNS,
                 0,
                 format,

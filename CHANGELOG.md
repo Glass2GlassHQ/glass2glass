@@ -9,6 +9,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M2064: `d3d11videosink` takes system-memory NV12 and is what `autovideosink` picks on Windows.
 - M2065: on macOS `g2g-launch` runs AppKit on the main thread, so `metalvideosink` shows video in a window.
 - M2066: `g2g-inspect` dumps the element an alias such as `autovideosink` resolves to, and C plugins build and load on Windows.
+- M2067: `wasapisink` plays PCM at any rate or layout by letting the audio engine convert it to the endpoint's mix format.
 
 ## 0.12.0
 

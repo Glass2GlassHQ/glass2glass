@@ -164,6 +164,8 @@ unsafe fn probe_endpoints() -> Result<Vec<Device>, G2gError> {
 
 /// The endpoint directions this build lists: each needs the element that
 /// drives it compiled in.
+// each push is feature-gated, so no single vec![] literal covers every build
+#[allow(clippy::vec_init_then_push)]
 fn listed_dataflows() -> Vec<EDataFlow> {
     #[allow(unused_mut)]
     let mut out = Vec::new();
