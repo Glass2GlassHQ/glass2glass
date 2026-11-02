@@ -1421,6 +1421,10 @@ winit = "0.30"
 # NDK cross-compiler the android CI check does not have.
 rcgen = "0.14"
 
+# Finds MSVC cl.exe for the C plugin tests (tests/common/mod.rs) on Windows.
+[target.'cfg(target_env = "msvc")'.dev-dependencies]
+cc = "1"
+
 # gst-launch / gst-inspect analogs over the standard registry (M107). Both need
 # the std-only registry + wall clock, so they are gated on `std`; the no_std
 # baseline build skips them rather than failing to resolve.

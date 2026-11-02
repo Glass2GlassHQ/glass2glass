@@ -102,11 +102,11 @@ const ABI_SYMBOL: &[u8] = b"g2g_plugin_abi";
 const REGISTER_SYMBOL: &[u8] = b"g2g_plugin_register";
 
 /// The environment variable a packaged `g2g-launch` / `g2g-inspect` scans for
-/// plugin directories (`:`-separated, like `PATH`).
+/// plugin directories (separated like `PATH`: `:`, or `;` on Windows).
 pub const PLUGIN_PATH_ENV: &str = "G2G_PLUGIN_PATH";
 
 /// The environment variable holding the trusted signing keys, one hex public
-/// key file per entry, `:`-separated like `PATH`. Set it and every plugin this
+/// key file per entry, separated like `PATH` (`;` on Windows). Set it and every plugin this
 /// host loads must carry a signature from one of those keys; leave it unset and
 /// nothing is verified.
 pub const TRUSTED_KEYS_ENV: &str = "G2G_PLUGIN_TRUSTED_KEYS";

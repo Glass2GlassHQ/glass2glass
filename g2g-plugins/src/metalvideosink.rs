@@ -49,8 +49,8 @@ use objc2_quartz_core::{CAMetalDrawable, CAMetalLayer};
 use g2g_core::element::{PresentationStats, QosMessage};
 use g2g_core::{
     AsyncElement, BusHandle, Caps, CapsConstraint, CapsSet, ClockSync, ConfigureOutcome, Dim,
-    DomainSet, G2gError, HardwareError, Interlace, MemoryDomain, MemoryDomainKind, OutputSink,
-    PadTemplate, PadTemplates, PipelinePacket, PresentationPacer, PropError, PropValue,
+    DomainSet, ElementMetadata, G2gError, HardwareError, Interlace, MemoryDomain, MemoryDomainKind,
+    OutputSink, PadTemplate, PadTemplates, PipelinePacket, PresentationPacer, PropError, PropValue,
     PropertySpec, Rate, RawVideoFormat, PACING_PROPERTIES,
 };
 
@@ -654,6 +654,15 @@ impl AsyncElement for MetalVideoSink {
     /// incoming link, where the producer can shed load.
     fn take_qos(&mut self) -> Option<QosMessage> {
         self.pacer.take_qos()
+    }
+
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::new(
+            "Metal video sink",
+            "Sink/Video",
+            "Presents NV12 video in an AppKit window through a CAMetalLayer",
+            "g2g",
+        )
     }
 
     fn presentation_stats(&self) -> Option<PresentationStats> {

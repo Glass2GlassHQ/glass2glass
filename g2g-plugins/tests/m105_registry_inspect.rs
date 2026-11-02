@@ -96,6 +96,29 @@ fn inspect_dumps_properties_and_templates() {
     assert!(reg.inspect("nonesuch").is_none(), "unknown name -> None");
 }
 
+/// An alias such as `autovideosink` inspects as the element it resolves to, as it
+/// launches, and one with nothing to resolve to is not registered.
+#[test]
+fn inspect_resolves_aliases() {
+    let mut reg = registry();
+    reg.register_alias("autoflip", &["notbuilt", "videoflip"]);
+    reg.register_alias("nowhere", &["notbuilt"]);
+
+    let flip = reg.inspect("autoflip").expect("alias resolves");
+    assert!(
+        flip.starts_with("autoflip is an alias, here for videoflip (not in this build: notbuilt)"),
+        "names the resolved element and what it skipped:\n{flip}"
+    );
+    assert!(
+        flip.contains("Klass       Filter/Effect/Video"),
+        "dumps the resolved element:\n{flip}"
+    );
+    assert!(
+        reg.inspect("nowhere").is_none(),
+        "unresolvable alias -> None"
+    );
+}
+
 /// M472: the muxer inspect path builds a one-input instance to carry its metadata
 /// and properties (before, it printed only the name and role). A muxer-only
 /// element (`funnel`) shows its Factory Details; a fan-in muxer with runtime knobs

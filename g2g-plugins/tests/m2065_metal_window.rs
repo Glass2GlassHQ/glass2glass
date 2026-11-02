@@ -32,6 +32,14 @@ fn main() {
             .block_on(run_graph(graph, &ZeroClock, 4))
             .unwrap_or_else(|e| panic!("{line:?} runs: {e:?}"));
         assert_eq!(stats.frames_consumed, FRAMES, "{line}");
+        // consumed counts frames the sink took, so check they reached the drawable too
+        let presented: u64 = stats
+            .per_element
+            .iter()
+            .filter_map(|e| e.presentation)
+            .map(|p| p.presented)
+            .sum();
+        assert_eq!(presented, FRAMES, "{line}");
         println!("m2065: {FRAMES} frames presented in an AppKit window");
     });
 }

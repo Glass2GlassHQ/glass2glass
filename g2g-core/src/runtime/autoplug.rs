@@ -2638,11 +2638,24 @@ mod factory {
 
         /// A `gst-inspect`-style dump for the named element: its role, its
         /// settable properties, and (for a transform / sink) its pad templates.
-        /// `None` if the name is not registered.
+        /// An alias dumps the element it resolves to here, under a line naming
+        /// it. `None` if the name is not registered.
         pub fn inspect(&self, name: &str) -> Option<String> {
             use crate::property::format_metadata;
             use core::fmt::Write;
-            let facts = self.element_facts(name)?;
+            let Some(facts) = self.element_facts(name) else {
+                let resolved = self.resolve_alias(name);
+                if resolved == name {
+                    return None;
+                }
+                let mut out = format!("{name} is an alias, here for {resolved}");
+                let fallthrough = self.alias_fallthrough(name, resolved);
+                if !fallthrough.is_empty() {
+                    let _ = write!(out, " ({fallthrough})");
+                }
+                let _ = write!(out, "\n\n{}", self.inspect(resolved)?);
+                return Some(out);
+            };
             let mut out = format_metadata(name, &facts.metadata);
             let _ = writeln!(out, "  Role        {}", facts.role);
             if facts.experimental {

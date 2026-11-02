@@ -17,11 +17,12 @@
 //!    before the reserved slots and leaves `configure_pipeline` /
 //!    `configure_output` null, and the host substitutes its own defaults.
 //!
-//! Unix only: it shells out to a C compiler with `-shared` / `-dynamiclib`.
+//! It shells out to a C compiler: `cc -shared` / `-dynamiclib` on Unix, MSVC
+//! `cl /LD` on Windows.
 //!
 //! Requires the `plugin-loader` feature:
 //!   cargo test -p g2g-plugins --features plugin-loader --test plugin_c_abi
-#![cfg(unix)]
+#![cfg(any(unix, target_env = "msvc"))]
 
 use std::path::{Path, PathBuf};
 

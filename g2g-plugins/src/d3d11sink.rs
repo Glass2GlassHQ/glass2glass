@@ -95,10 +95,10 @@ use g2g_core::meta::{Orientation, OrientationSet};
 use g2g_core::metrics::{monotonic_ns, LatencyHistogram, LatencySnapshot};
 use g2g_core::{
     AllocationParams, AsyncElement, BusHandle, Caps, CapsConstraint, CapsSet, ClockCandidate,
-    ClockPriority, ClockSync, ConfigureOutcome, Dim, G2gError, HardwareError, Interlace,
-    MemoryDomain, OutputSink, OwnedD3D11Texture, PadTemplate, PadTemplates, PipelineClock,
-    PipelinePacket, PresentationPacer, PropError, PropKind, PropValue, PropertySpec, Rate,
-    RawVideoFormat, MAX_LATENESS_PROPERTY, QOS_INTERVAL_PROPERTY,
+    ClockPriority, ClockSync, ConfigureOutcome, Dim, ElementMetadata, G2gError, HardwareError,
+    Interlace, MemoryDomain, OutputSink, OwnedD3D11Texture, PadTemplate, PadTemplates,
+    PipelineClock, PipelinePacket, PresentationPacer, PropError, PropKind, PropValue, PropertySpec,
+    Rate, RawVideoFormat, MAX_LATENESS_PROPERTY, QOS_INTERVAL_PROPERTY,
 };
 
 use crate::clock::wait_to_present;
@@ -291,6 +291,15 @@ impl AsyncElement for D3D11Sink {
             dropped: 0,
             late_dropped: self.late_dropped(),
         })
+    }
+
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::new(
+            "Direct3D11 video sink",
+            "Sink/Video",
+            "Presents NV12 video in a window through a D3D11 video processor",
+            "g2g",
+        )
     }
 
     fn properties(&self) -> &'static [PropertySpec] {

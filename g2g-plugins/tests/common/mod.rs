@@ -83,22 +83,53 @@ pub(crate) fn compile_c_plugin(include_flags: &[OsString], out_dir: &Path) -> Pa
         std::env::consts::DLL_SUFFIX
     ));
 
-    let shared_flag = if cfg!(target_os = "macos") {
-        "-dynamiclib"
-    } else {
-        "-shared"
-    };
-    let compiler = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
-    let status = Command::new(compiler)
-        .args(["-std=c11", "-Wall", "-Wextra", "-Werror", "-fPIC", "-O1"])
-        .arg(shared_flag)
-        .args(include_flags)
-        .arg("-o")
-        .arg(&so)
+    let status = c_compiler(include_flags, out_dir, &so)
         .arg(&source)
         .status()
         .expect("spawn the C compiler");
     assert!(status.success(), "the C plugin failed to compile");
     assert!(so.is_file(), "no library at {}", so.display());
     so
+}
+
+/// A Unix C compiler (`$CC`, else `cc`) set up to link a shared library at `so`.
+#[cfg(not(target_env = "msvc"))]
+fn c_compiler(include_flags: &[OsString], _out_dir: &Path, so: &Path) -> Command {
+    let shared_flag = if cfg!(target_os = "macos") {
+        "-dynamiclib"
+    } else {
+        "-shared"
+    };
+    let compiler = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
+    let mut cmd = Command::new(compiler);
+    cmd.args(["-std=c11", "-Wall", "-Wextra", "-Werror", "-fPIC", "-O1"])
+        .arg(shared_flag)
+        .args(include_flags)
+        .arg("-o")
+        .arg(so);
+    cmd
+}
+
+/// MSVC `cl.exe`, found through the Visual Studio install with its environment
+/// set, so the test needs no developer prompt. `/LD` links a DLL at `so`.
+#[cfg(target_env = "msvc")]
+fn c_compiler(include_flags: &[OsString], out_dir: &Path, so: &Path) -> Command {
+    let target = if cfg!(target_arch = "aarch64") {
+        "aarch64-pc-windows-msvc"
+    } else {
+        "x86_64-pc-windows-msvc"
+    };
+    let cl = cc::windows_registry::find_tool(target, "cl.exe")
+        .expect("MSVC cl.exe (install the Visual Studio C++ build tools)");
+    let mut cmd = cl.to_command();
+    let mut fe = OsString::from("/Fe");
+    fe.push(so);
+    let mut fo = OsString::from("/Fo");
+    fo.push(out_dir.join("plugin.obj"));
+    // cl takes the Unix-style `-I dir` the callers pass as is
+    cmd.args(["/nologo", "/std:c11", "/W4", "/WX", "/O1", "/LD"])
+        .args(include_flags)
+        .arg(fe)
+        .arg(fo);
+    cmd
 }
