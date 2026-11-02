@@ -165,7 +165,8 @@ impl OutputMemory {
     fn from_nick(nick: &str) -> Option<Self> {
         match nick {
             "system" => Some(Self::System),
-            "dmabuf" => Some(Self::DmaBuf),
+            // Windows has no dma-buf, the C helper's dma-buf calls fail there
+            "dmabuf" if cfg!(not(windows)) => Some(Self::DmaBuf),
             _ => None,
         }
     }

@@ -12,10 +12,15 @@
 //! because the launch DSL v1 cannot carry a quoted property value with spaces
 //! (`element="videoflip method=horizontal-flip"`). It asserts the pixels come
 //! back horizontally flipped, which only a real GStreamer `videoflip` produces.
+//! The dma-buf cases run on Linux only: they hand the element memfds.
+// the helpers the dma-buf cases share go unused elsewhere
+#![cfg_attr(not(target_os = "linux"), allow(dead_code, unused_imports))]
 
 use std::fs::{File, OpenOptions};
 use std::io::Write;
+#[cfg(target_os = "linux")]
 use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, IntoRawFd};
+#[cfg(target_os = "linux")]
 use std::os::unix::fs::{FileExt, MetadataExt};
 use std::sync::{Arc, Mutex};
 
@@ -93,6 +98,7 @@ fn first_frame(domain: MemoryDomain) -> Frame {
     Frame::new(domain, timing, 0)
 }
 
+#[cfg(target_os = "linux")]
 fn memfd_holding(bytes: &[u8]) -> File {
     // SAFETY: the name is NUL-terminated; memfd_create returns a new fd or -1.
     let fd = unsafe { libc::memfd_create(c"g2g-gstwrap-test".as_ptr(), libc::MFD_CLOEXEC) };
@@ -103,12 +109,14 @@ fn memfd_holding(bytes: &[u8]) -> File {
     file
 }
 
+#[cfg(target_os = "linux")]
 fn file_behind(dmabuf: &OwnedDmaBuf) -> File {
     // SAFETY: the OwnedDmaBuf keeps the fd open for this borrow.
     let borrowed = unsafe { BorrowedFd::borrow_raw(dmabuf.as_raw()) };
     File::from(borrowed.try_clone_to_owned().expect("dup the dma-buf fd"))
 }
 
+#[cfg(target_os = "linux")]
 fn dmabuf_wrap() -> GstWrap {
     let mut el = GstWrap::new().with_output_memory(OutputMemory::DmaBuf);
     el.set_property("element", PropValue::Str("identity".into()))
@@ -118,6 +126,7 @@ fn dmabuf_wrap() -> GstWrap {
     el
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn passes_a_dmabuf_through_without_copying() {
     let frame_end = PLANE_OFFSET + PADDED_STRIDE * RGBA_HEIGHT;
@@ -172,6 +181,7 @@ async fn passes_a_dmabuf_through_without_copying() {
 }
 
 // videoflip maps the dma-buf, so this checks the GstVideoMeta stride and offset.
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn maps_a_padded_dmabuf_into_a_system_element() {
     const PIXEL_BYTES: usize = 4;
@@ -215,6 +225,7 @@ async fn maps_a_padded_dmabuf_into_a_system_element() {
     assert_eq!(sink.frames, vec![flipped], "each row came back mirrored");
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn dmabuf_output_rejects_a_system_sample() {
     let mut el = dmabuf_wrap();
@@ -238,6 +249,7 @@ async fn dmabuf_output_rejects_a_system_sample() {
 }
 
 // A write-only fd cannot be mapped for reading, so the system copy-out fails.
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn an_unmappable_sample_fails_the_stream() {
     let bytes = vec![0u8; (PLANE_OFFSET + PADDED_STRIDE * RGBA_HEIGHT) as usize];
@@ -301,11 +313,20 @@ fn output_memory_is_a_launch_property() {
     assert!(!el.input_domains().contains(MemoryDomainKind::DmaBuf));
 
     let dmabuf = spec.parse_value("dmabuf").expect("dmabuf parses");
-    el.set_property("output-memory", dmabuf.clone())
-        .expect("dmabuf is accepted");
-    assert_eq!(el.get_property("output-memory"), Some(dmabuf));
-    assert_eq!(el.output_memory(), MemoryDomainKind::DmaBuf);
-    assert!(el.input_domains().contains(MemoryDomainKind::DmaBuf));
+    if cfg!(windows) {
+        // no dma-buf on Windows, so the value is refused rather than failing every frame
+        assert!(matches!(
+            el.set_property("output-memory", dmabuf),
+            Err(PropError::Value)
+        ));
+        assert_eq!(el.output_memory(), MemoryDomainKind::System);
+    } else {
+        el.set_property("output-memory", dmabuf.clone())
+            .expect("dmabuf is accepted");
+        assert_eq!(el.get_property("output-memory"), Some(dmabuf));
+        assert_eq!(el.output_memory(), MemoryDomainKind::DmaBuf);
+        assert!(el.input_domains().contains(MemoryDomainKind::DmaBuf));
+    }
 
     assert!(matches!(
         el.set_property("output-memory", PropValue::Str("gpu".into())),

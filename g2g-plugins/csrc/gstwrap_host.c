@@ -9,7 +9,8 @@
  * between the caller's layout and the caps' default GstVideoInfo layout, so
  * the wrapped element never sees a layout it might not honour. A dma-buf frame is pushed as a GstDmaBufMemory
  * over a dup of its fd, and a dma-buf sample is handed back as a dup of its fd
- * plus the plane layout, so neither direction copies pixels.
+ * plus the plane layout, so neither direction copies pixels. Windows has no
+ * dma-buf, so there the dma-buf entry points fail and only system memory moves.
  *
  * The pipeline runs on GStreamer's own streaming threads; appsrc push and
  * appsink pull are MT-safe, so the Rust side drives them from its runner task
@@ -24,7 +25,9 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#ifndef _WIN32
 #include <unistd.h>
+#endif
 
 /* The Rust side mirrors the plane arrays below with a fixed length of 4. */
 G_STATIC_ASSERT(GST_VIDEO_MAX_PLANES == 4);
@@ -173,7 +176,9 @@ G2gGstWrap *g2g_gstwrap_create(const char *element_desc, const char *in_caps,
   w->pipeline = pipeline;
   w->src = GST_APP_SRC(src);
   w->sink = GST_APP_SINK(sink);
+#ifndef _WIN32
   w->dmabuf_allocator = gst_dmabuf_allocator_new();
+#endif
   w->input_is_video = input_is_video;
   w->input_info = input_info;
   if (output_planes != NULL) {
@@ -273,6 +278,33 @@ int g2g_gstwrap_push(G2gGstWrap *w, const uint8_t *data, size_t len,
 static GQuark keep_alive_quark(void) {
   return g_quark_from_static_string("g2g-gstwrap-keep-alive");
 }
+
+#ifdef _WIN32
+
+int g2g_gstwrap_push_dmabuf(G2gGstWrap *w, int fd, size_t data_offset,
+                            size_t required_end, unsigned int n_planes,
+                            const size_t *plane_offsets,
+                            const int *plane_strides, uint64_t pts_ns,
+                            void *keep_alive, G2gGstWrapRelease release) {
+  (void)w;
+  (void)fd;
+  (void)data_offset;
+  (void)required_end;
+  (void)n_planes;
+  (void)plane_offsets;
+  (void)plane_strides;
+  (void)pts_ns;
+  release(keep_alive);
+  return -1;
+}
+
+int g2g_gstwrap_try_pull_dmabuf(G2gGstWrap *w, G2gGstWrapDmaBufSample *out) {
+  (void)w;
+  (void)out;
+  return G2G_GSTWRAP_FAILED;
+}
+
+#else
 
 /* dma-buf reports its size only through lseek(SEEK_END) */
 static off_t fd_size(int fd) {
@@ -390,6 +422,8 @@ int g2g_gstwrap_try_pull_dmabuf(G2gGstWrap *w, G2gGstWrapDmaBufSample *out) {
   out->pts = (uint64_t)GST_BUFFER_PTS(buf);
   return G2G_GSTWRAP_PULLED;
 }
+
+#endif
 
 void g2g_gstwrap_sample_unref(GstSample *sample) { gst_sample_unref(sample); }
 

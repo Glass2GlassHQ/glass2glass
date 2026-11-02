@@ -14,6 +14,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M2069: the `ffmpeg` elements build on Windows against a shared ffmpeg named by `FFMPEG_DIR`.
 - M2070: the ffmpeg integration tests run on Windows, and `tools/ffmpeg-build.sh` builds the DLLs with MSVC.
 - M2071: Windows CI tests the ffmpeg elements, and the Windows release binaries and wheel ship the LGPL ffmpeg DLLs.
+- M2072: `gstwrap` builds and runs on Windows against the GStreamer MSVC install, with system memory only.
 
 ## 0.12.0
 

@@ -509,8 +509,9 @@ hdr-present = ["vulkan-video", "wgpu-sink", "dep:raw-window-handle"]
 # build.rs via pkg-config + cc, mirroring g2g-bridge's shell).
 # The incremental-migration path in the g2g-as-top-framework direction: adopt g2g
 # now, keep unported GStreamer stages running until they are ported. Implies std;
-# needs the gstreamer-1.0, -app, -allocators and -video dev packages. Linux-primary (the C
-# API is portable; only build.rs's pkg-config probe is host-specific).
+# needs the gstreamer-1.0, -app, -allocators and -video dev packages. On Windows,
+# point PKG_CONFIG at the pkg-config.exe of the GStreamer MSVC install and
+# PKG_CONFIG_PATH at its lib\pkgconfig; there only system memory crosses (no dma-buf).
 gstreamer = ["std"]
 # KMS/DRM video sink: NV12 dumb-buffer scanout via the primary plane on the
 # active CRTC. Pulls `drm` (libdrm bindings), `drm-ffi` + `drm-fourcc`; Linux-only,
