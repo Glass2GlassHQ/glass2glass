@@ -242,6 +242,34 @@ fn an_odd_size_nv12_frame_fuses_to_the_expected_rgb() {
 }
 
 #[test]
+fn a_conversion_at_the_input_size_matches_videoconvert() {
+    let (w, h) = (8usize, 8usize);
+    let mut nv12: Vec<u8> = (0..w * h).map(|i| (i * 3) as u8).collect();
+    nv12.extend((0..w * h / 2).map(|i| (i * 17) as u8));
+    let converted = g2g_plugins::videoconvert::convert(
+        &nv12,
+        RawVideoFormat::Nv12,
+        RawVideoFormat::Rgba8,
+        w,
+        h,
+        g2g_core::Colorimetry::UNKNOWN,
+    );
+
+    let mut element = VideoConvertScale::auto();
+    let packets = run_negotiated(
+        &mut element,
+        raw(RawVideoFormat::Nv12, w as u32, h as u32),
+        Some(raw(RawVideoFormat::Rgba8, w as u32, h as u32)),
+        nv12,
+    );
+    let PipelinePacket::DataFrame(out) = packets.last().unwrap() else {
+        panic!("expected a DataFrame downstream");
+    };
+    let bytes = out.domain.require_system_slice("test").unwrap();
+    assert_eq!(bytes, converted.as_ref());
+}
+
+#[test]
 fn a_format_the_scaler_cannot_take_is_refused() {
     let mut element = VideoConvertScale::auto();
     assert_eq!(

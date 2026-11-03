@@ -17,6 +17,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M2072: `gstwrap` builds and runs on Windows against the GStreamer MSVC install, with system memory only.
 - M2073: the `glass2glass` GStreamer plugin builds and loads on Windows as `gstglass2glass.dll`.
 - M2074: the bundled ffmpeg links zlib statically, so the release binaries and wheels decode the zlib codecs (ZMBV, PNG, Screenpresso, ...).
+- M2075: `videoconvertscale` with nothing to scale converts as fast as `videoconvert`, 267 fps instead of 107 on 720p NV12 to RGBA.
 
 ## 0.12.0
 

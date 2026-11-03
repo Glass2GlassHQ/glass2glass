@@ -355,6 +355,10 @@ impl VideoConvertScale {
         else {
             return Ok(None);
         };
+        // fused_resample_convert interpolates every pixel, 2.6x slower than videoconvert at 720p
+        if (in_w, in_h) == (out_w, out_h) {
+            return Ok(None);
+        }
         let src = frame
             .domain
             .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
