@@ -3123,6 +3123,26 @@ mod factory {
         /// Domain-aware [`autoplug`](Self::autoplug): instantiate the chain the
         /// domain-aware search picks (see
         /// [`autoplug_names_preferring`](Self::autoplug_names_preferring)).
+        pub fn decoded_video_reaches_sink(
+            &self,
+            input: &Caps,
+            sink: &str,
+            max_depth: usize,
+        ) -> bool {
+            self.make_element(sink).is_some_and(|sink| {
+                let sink_takes_raw_video = |caps: &Caps| {
+                    matches!(caps, Caps::RawVideo { .. }) && sink.intercept_caps(caps).is_ok()
+                };
+                self.autoplug_preferring(
+                    input,
+                    &sink_takes_raw_video,
+                    max_depth,
+                    MemoryDomainKind::System,
+                )
+                .is_some()
+            })
+        }
+
         pub fn autoplug_preferring(
             &self,
             input: &Caps,

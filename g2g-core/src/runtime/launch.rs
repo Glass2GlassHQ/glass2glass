@@ -2936,6 +2936,16 @@ fn expand_uri_sources(
                 }
             }
             if let Some(sink) = sink {
+                if matches!(caps, Caps::CompressedVideo { .. })
+                    && !registry.decoded_video_reaches_sink(&caps, &sink, DECODEBIN_MAX_DEPTH)
+                {
+                    new_chain.push(Item::Element(ElementSpec {
+                        name: "videoconvert".to_string(),
+                        props: Vec::new(),
+                        instance: None,
+                        log_category: None,
+                    }));
+                }
                 new_chain.push(Item::Element(ElementSpec {
                     name: sink,
                     props: Vec::new(),

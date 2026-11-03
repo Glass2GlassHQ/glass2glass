@@ -222,12 +222,21 @@ impl Default for KmsSink {
     }
 }
 
+const DEFAULT_CARD: &str = "/dev/dri/card0";
+
+pub(crate) fn default_card_present() -> Result<(), alloc::string::String> {
+    if Path::new(DEFAULT_CARD).exists() {
+        return Ok(());
+    }
+    Err(alloc::format!("{DEFAULT_CARD} does not exist"))
+}
+
 impl KmsSink {
     /// Defaults to `/dev/dri/card0`. Override with [`Self::with_device`]
     /// for multi-GPU systems or render-node-only environments.
     pub fn new() -> Self {
         Self {
-            device_path: PathBuf::from("/dev/dri/card0"),
+            device_path: PathBuf::from(DEFAULT_CARD),
             card: None,
             connector: None,
             crtc: None,

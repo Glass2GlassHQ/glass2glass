@@ -280,3 +280,91 @@ async fn the_mp4_hook_handles_mp4_only() {
         "MP4 fans out via mp4_playbin (audio branch adds convert+resample, video the auto deinterlace)"
     );
 }
+
+#[derive(Default)]
+struct Nv12OnlySink;
+impl PadTemplates for Nv12OnlySink {
+    fn pad_templates() -> Vec<PadTemplate> {
+        Vec::from([PadTemplate::sink(CapsSet::one(raw_video()))])
+    }
+}
+impl AsyncElement for Nv12OnlySink {
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    where
+        Self: 'a;
+    fn intercept_caps(&self, c: &Caps) -> Result<Caps, G2gError> {
+        c.intersect(&raw_video())
+    }
+    fn configure_pipeline(&mut self, _c: &Caps) -> Result<ConfigureOutcome, G2gError> {
+        Ok(ConfigureOutcome::Accepted)
+    }
+    fn process<'a>(
+        &'a mut self,
+        _packet: g2g_core::PipelinePacket,
+        _out: &'a mut dyn OutputSink,
+    ) -> Self::ProcessFuture<'a> {
+        Box::pin(async { Ok(()) })
+    }
+}
+
+async fn playbin_graph_has_a_videoconvert(decoded_format: RawVideoFormat) -> bool {
+    let (path, uri) = temp_uri(&format!("convert_{decoded_format:?}"), &av_mp4().await);
+    let mut reg = Registry::new();
+    reg.register_playbin(g2g_plugins::uridecodebin::mp4_playbin);
+    reg.register(ElementFactory::new(
+        "h264stub",
+        Vec::from([
+            PadTemplate::sink(CapsSet::one(h264_any())),
+            PadTemplate::source(CapsSet::one(Caps::RawVideo {
+                format: decoded_format,
+                width: Dim::Any,
+                height: Dim::Any,
+                framerate: Rate::Any,
+                interlace: g2g_core::Interlace::Any,
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            })),
+        ]),
+        |_| Box::new(g2g_plugins::identity::IdentityTransform::new()),
+    ));
+    reg.register(ElementFactory::new(
+        "aacstub",
+        Vec::from([
+            PadTemplate::sink(CapsSet::one(aac_any())),
+            PadTemplate::source(CapsSet::one(raw_audio())),
+        ]),
+        |_| Box::new(g2g_plugins::identity::IdentityTransform::new()),
+    ));
+    reg.register_launch(LaunchFactory::of::<Nv12OnlySink>("autovideosink", || {
+        Box::new(Nv12OnlySink)
+    }));
+    reg.register_launch(LaunchFactory::of::<NullSink>("autoaudiosink", || {
+        Box::new(NullSink)
+    }));
+    reg.register_launch(
+        LaunchFactory::of::<g2g_plugins::videoconvert::VideoConvert>("videoconvert", || {
+            Box::new(g2g_plugins::videoconvert::VideoConvert::new(
+                RawVideoFormat::Nv12,
+            ))
+        }),
+    );
+    let graph = parse_launch(&reg, &format!("playbin uri={uri}")).expect("mp4 playbin fans out");
+    std::fs::remove_file(&path).ok();
+    graph
+        .to_dot(
+            "pipeline",
+            |node| graph.element(node).map(|e| e.log_category().to_string()),
+            &g2g_core::DotAnnotations::default(),
+        )
+        .contains("VideoConvert")
+}
+
+#[tokio::test]
+async fn playbin_converts_when_no_decoder_produces_what_the_sink_takes() {
+    assert!(playbin_graph_has_a_videoconvert(RawVideoFormat::I420).await);
+}
+
+#[tokio::test]
+async fn playbin_adds_no_convert_when_a_decoder_produces_what_the_sink_takes() {
+    assert!(!playbin_graph_has_a_videoconvert(RawVideoFormat::Nv12).await);
+}

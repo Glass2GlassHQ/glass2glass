@@ -23,6 +23,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M2078: the release binaries and wheels include Intel macOS.
 - M2079: closing the `metalvideosink` window ends the run, and audio sinks stop with the window instead of playing out their queue.
 - M2080: `g2g-device-monitor` links on macOS before 14.
+- M2081: `playbin` adds a `videoconvert` when no decoder produces a format its video sink takes.
+- M2082: `autovideosink` skips `kmssink` when `/dev/dri/card0` does not exist.
 
 ## 0.12.0
 

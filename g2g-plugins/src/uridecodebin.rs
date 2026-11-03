@@ -1311,7 +1311,18 @@ fn wire_av_ports(
                 .make_element(sinks.video)
                 .ok_or_else(|| ParseError::UnknownElement(sinks.video.to_string()))?;
             let vsnk = graph.add_sink(GraphNodeRef::Element(sink));
-            let head = deinterlace_into(graph, vsnk)?;
+            let after_deinterlace =
+                if reg.decoded_video_reaches_sink(&port.caps, sinks.video, PLAYBIN_MAX_DEPTH) {
+                    vsnk
+                } else {
+                    let convert = reg
+                        .make_element("videoconvert")
+                        .ok_or_else(|| ParseError::UnknownElement("videoconvert".to_string()))?;
+                    let convert = graph.add_transform(GraphNodeRef::Element(convert));
+                    graph.link(convert, vsnk).map_err(ParseError::Graph)?;
+                    convert
+                };
+            let head = deinterlace_into(graph, after_deinterlace)?;
             reg.decodebin_port(graph, pad, head, port, &is_raw_video, PLAYBIN_MAX_DEPTH)
                 .map_err(|e| map_decode_err(&port.caps, e))?;
         } else {

@@ -3776,7 +3776,9 @@ fn register_feature_gated(reg: &mut Registry) {
     ));
     #[cfg(all(target_os = "linux", feature = "kms-sink"))]
     reg.register_launch(
-        LaunchFactory::of::<KmsSink>("kmssink", || Box::new(KmsSink::new())).with_experimental(),
+        LaunchFactory::of::<KmsSink>("kmssink", || Box::new(KmsSink::new()))
+            .with_usable(crate::kmssink::default_card_present)
+            .with_experimental(),
     );
     #[cfg(all(target_os = "linux", feature = "alsa-sink"))]
     reg.register_launch(
