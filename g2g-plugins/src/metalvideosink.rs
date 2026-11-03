@@ -30,7 +30,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use dispatch2::DispatchQueue;
 use objc2::rc::Retained;
 use objc2::runtime::{NSObjectProtocol, ProtocolObject};
-use objc2::{sel, MainThreadMarker, MainThreadOnly};
+use objc2::{msg_send, sel, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSWindow, NSWindowStyleMask,
 };
@@ -44,7 +44,7 @@ use objc2_metal::{
     MTLRenderPipelineDescriptor, MTLRenderPipelineState, MTLResourceOptions, MTLSize,
     MTLStorageMode, MTLTexture, MTLTextureDescriptor, MTLTextureUsage,
 };
-use objc2_quartz_core::{CAMetalDrawable, CAMetalLayer};
+use objc2_quartz_core::{CAMetalDrawable, CAMetalLayer, CATransaction};
 
 use g2g_core::element::{PresentationStats, QosMessage};
 use g2g_core::{
@@ -165,6 +165,9 @@ impl AppKitWindow {
             // appkit only has NSApplication.activate from macOS 14
             if app.respondsToSelector(sel!(activate)) {
                 app.activate();
+            } else {
+                // SAFETY: appkit has had activateIgnoringOtherApps: (BOOL, void return) on every macOS release.
+                let () = unsafe { msg_send![&*app, activateIgnoringOtherApps: true] };
             }
             *window_out = Retained::into_raw(window) as usize;
         });
@@ -373,16 +376,7 @@ impl MetalVideoSink {
 
         let layer = match &self.external_layer {
             Some(l) => l.clone(),
-            None => {
-                let layer = CAMetalLayer::layer();
-                if APPKIT_MAIN_LOOP.load(Ordering::Acquire) {
-                    match &self.window {
-                        Some(window) => window.show(&layer),
-                        None => self.window = Some(AppKitWindow::open(&layer, width, height)),
-                    }
-                }
-                layer
-            }
+            None => CAMetalLayer::layer(),
         };
         layer.setDevice(Some(&*device));
         layer.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
@@ -392,6 +386,12 @@ impl MetalVideoSink {
             width: width as f64,
             height: height as f64,
         });
+        if self.external_layer.is_none() && APPKIT_MAIN_LOOP.load(Ordering::Acquire) {
+            match &self.window {
+                Some(window) => window.show(&layer),
+                None => self.window = Some(AppKitWindow::open(&layer, width, height)),
+            }
+        }
 
         let staging_y = make_plane_texture(&device, MTLPixelFormat::R8Unorm, width, height)?;
         let staging_cbcr =
@@ -478,6 +478,8 @@ impl MetalVideoSink {
 
         cmd.presentDrawable(ProtocolObject::from_ref(&*drawable));
         cmd.commit();
+        // core animation only commits implicit transactions from a run loop, and this thread has none
+        CATransaction::flush();
         // The sink is the pipeline tail: wait so back-pressure is real and the
         // readback buffer is complete.
         cmd.waitUntilCompleted();
@@ -585,7 +587,8 @@ fn make_plane_texture(
         )
     };
     desc.setUsage(MTLTextureUsage::ShaderRead);
-    desc.setStorageMode(MTLStorageMode::Shared);
+    // metal on intel macs rejects shared storage for textures
+    desc.setStorageMode(MTLStorageMode::Managed);
     device
         .newTextureWithDescriptor(&desc)
         .ok_or(G2gError::Hardware(HardwareError::Other))

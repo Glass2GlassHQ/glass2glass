@@ -1218,6 +1218,7 @@ objc2-quartz-core = { version = "0.3", optional = true, default-features = false
     "objc2-core-foundation",
     "CALayer",
     "CAMetalLayer",
+    "CATransaction",
 ] }
 # metalvideosink's window when no app hands over a layer.
 objc2-app-kit = { version = "0.3", optional = true, default-features = false, features = [
