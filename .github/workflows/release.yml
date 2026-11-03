@@ -28,6 +28,7 @@ jobs:
           - { runner: ubuntu-24.04, container: "ubuntu:22.04", target: x86_64-unknown-linux-gnu, features: release-binary-linux }
           - { runner: ubuntu-24.04-arm, container: "ubuntu:22.04", target: aarch64-unknown-linux-gnu, features: release-binary-linux }
           - { runner: macos-latest, target: aarch64-apple-darwin, features: release-binary-macos }
+          - { runner: macos-15-intel, target: x86_64-apple-darwin, features: release-binary-macos }
           - { runner: windows-latest, target: x86_64-pc-windows-msvc, features: release-binary-windows }
     env:
       # the ffmpeg libraries ship in lib/ next to the binary, DT_RPATH also covers libavcodec loading libavutil
@@ -74,6 +75,14 @@ jobs:
           tools/ffmpeg-build.sh /c/g2g-ffmpeg | sed 's/^export //' >> "$GITHUB_ENV"
           echo "FFMPEG_PREFIX=/c/g2g-ffmpeg" >> "$GITHUB_ENV"
           echo 'LIBCLANG_PATH=C:\Program Files\LLVM\bin' >> "$GITHUB_ENV"
+      # cargo-about has no prebuilt intel mac binary, and a source install needs its cli feature
+      # libvpx and rav1d assemble their x86 code with nasm, and clang targets the runner's macOS unless told otherwise
+      - name: intel mac build setup
+        if: matrix.target == 'x86_64-apple-darwin'
+        run: |
+          brew install nasm
+          cargo install cargo-about --version 0.9.3 --locked --features cli
+          echo "MACOSX_DEPLOYMENT_TARGET=12.0" >> "$GITHUB_ENV"
       - name: build libvpx
         run: tools/libvpx-build.sh "$CODEC_PREFIX" | sed 's/^export //' >> "$GITHUB_ENV"
       - name: build
@@ -115,6 +124,7 @@ jobs:
               done)
           [ -z "$unexpected" ] || { echo "::error::release binaries link $unexpected"; exit 1; }
       - uses: taiki-e/install-action@v2
+        if: matrix.target != 'x86_64-apple-darwin'
         with:
           tool: cargo-about@0.9.3
       - name: third-party licences
@@ -193,12 +203,23 @@ jobs:
           - { runner: ubuntu-24.04, target: x86_64-unknown-linux-gnu, features: release-wheel-linux }
           - { runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, features: release-wheel-linux }
           - { runner: macos-latest, target: aarch64-apple-darwin, features: release-wheel-macos }
+          - { runner: macos-15-intel, target: x86_64-apple-darwin, features: release-wheel-macos }
           - { runner: windows-latest, target: x86_64-pc-windows-msvc, features: release-wheel-windows }
     steps:
       - uses: actions/checkout@v4
       - uses: taiki-e/install-action@v2
+        if: matrix.target != 'x86_64-apple-darwin'
         with:
           tool: cargo-about@0.9.3
+      # cargo-about has no prebuilt intel mac binary, and a source install needs its cli feature
+      # libvpx and rav1d assemble their x86 code with nasm, and clang targets the runner's macOS unless told otherwise
+      - name: intel mac build setup
+        if: matrix.target == 'x86_64-apple-darwin'
+        shell: bash
+        run: |
+          brew install nasm
+          cargo install cargo-about --version 0.9.3 --locked --features cli
+          echo "MACOSX_DEPLOYMENT_TARGET=12.0" >> "$GITHUB_ENV"
       - name: build libvpx (macOS, Windows)
         if: runner.os != 'Linux'
         shell: bash
