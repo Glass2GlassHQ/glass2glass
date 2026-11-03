@@ -805,8 +805,7 @@ jobs:
         run: cargo test -p g2g-plugins --locked --features mf-encode,mf-decode --test m19_mfencode
       - name: test g2g-plugins (d3d11 sink)
         run: cargo test -p g2g-plugins --locked --features d3d11-sink --test m2064_d3d11_autovideosink
-      # the runner has no ffmpeg CLI, so these are files that need only the libraries, and
-      # none of the zlib codecs the bundled build leaves out
+      # the runner has no ffmpeg CLI, so these are files that need only the libraries
       - name: test g2g-plugins (ffmpeg)
         shell: bash
         run: |
@@ -815,7 +814,8 @@ jobs:
             --test ffmpeg_smoke --test m193_decodebin --test m196_uridecodebin --test m83_autoplug \
             --test m194_container_demux --test m1089_encodebin --test m1548_mp4_edit_list \
             --test m1651_hls_http_uri \
-            --test m746_audio_only_autoplug --test m479_progressive_mp4
+            --test m746_audio_only_autoplug --test m479_progressive_mp4 \
+            --test m1590_tagged_codecs
 
   # macOS platform build: VideoToolbox H.264 decode (VtDecode) plus the wgpu/burn
   # ML path on the Metal backend. The objc2 crates link the system frameworks

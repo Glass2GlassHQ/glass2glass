@@ -46,9 +46,6 @@ libraries installed. Everything below ships in 0.12.0.
 - **Windows release with ffmpeg.** Run the release workflow once (`workflow_dispatch`)
   to check the MSVC ffmpeg build, the bundled-DLL link check and the
   delvewheel-repaired wheel.
-- **zlib in the bundled ffmpeg.** `tools/ffmpeg-build.sh` builds without zlib, so
-  the release bundles lack the zlib codecs (ZMBV, Screenpresso, among others) that
-  m1590 decodes against a system ffmpeg. Build zlib statically into the bundle.
 
 ## Alloc-optional (heap-free) MCU core
 
