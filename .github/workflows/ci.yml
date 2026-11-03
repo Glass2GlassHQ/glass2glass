@@ -760,6 +760,11 @@ jobs:
       # ffmpeg 8.1.3 built from the same source and flags as on Linux, with MSVC
       # under MSYS2; cached on the build script, which pins the version
       - uses: ilammy/msvc-dev-cmd@v1
+      # with the developer environment set rustc takes link.exe from PATH, where a bash step
+      # finds Git's coreutils `link` first, so name the MSVC linker outright
+      - name: pin the MSVC linker
+        shell: pwsh
+        run: echo "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=$env:VCToolsInstallDir\bin\Hostx64\x64\link.exe" >> $env:GITHUB_ENV
       - uses: msys2/setup-msys2@v2
         with:
           msystem: MSYS

@@ -54,6 +54,12 @@ jobs:
       # Windows builds the same ffmpeg with MSVC under MSYS2; the DLLs ship beside g2g-launch.exe
       - uses: ilammy/msvc-dev-cmd@v1
         if: runner.os == 'Windows'
+      # with the developer environment set rustc takes link.exe from PATH, where a bash step
+      # finds Git's coreutils `link` first, so name the MSVC linker outright
+      - name: pin the MSVC linker
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: echo "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=$env:VCToolsInstallDir\bin\Hostx64\x64\link.exe" >> $env:GITHUB_ENV
       - uses: msys2/setup-msys2@v2
         if: runner.os == 'Windows'
         with:
@@ -201,6 +207,10 @@ jobs:
           cp "$HOME/g2g-codecs/LICENSE-LIBVPX.txt" g2g-pyapi/
       - uses: ilammy/msvc-dev-cmd@v1
         if: runner.os == 'Windows'
+      - name: pin the MSVC linker
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: echo "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=$env:VCToolsInstallDir\bin\Hostx64\x64\link.exe" >> $env:GITHUB_ENV
       - uses: msys2/setup-msys2@v2
         if: runner.os == 'Windows'
         with:
