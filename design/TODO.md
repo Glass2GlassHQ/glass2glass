@@ -38,14 +38,11 @@ Highest leverage first:
 ## Release binaries
 
 The release `g2g-launch` binaries and wheels must start on a host with no media
-libraries installed. Everything below ships in 0.12.0.
+libraries installed.
 
 - **Bare-host check.** Before publishing, run each release binary on a GPU-less
   host on an H.264 + AAC MP4 and a camera to WebRTC pipeline, and check that
   `decodebin` picks a software decoder rather than `vulkanvideodec` on Linux.
-- **Windows release with ffmpeg.** Run the release workflow once (`workflow_dispatch`)
-  to check the MSVC ffmpeg build, the bundled-DLL link check and the
-  delvewheel-repaired wheel.
 
 ## Alloc-optional (heap-free) MCU core
 
