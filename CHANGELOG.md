@@ -18,6 +18,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M2073: the `glass2glass` GStreamer plugin builds and loads on Windows as `gstglass2glass.dll`.
 - M2074: the bundled ffmpeg links zlib statically, so the release binaries and wheels decode the zlib codecs (ZMBV, PNG, Screenpresso, ...).
 - M2075: `videoconvertscale` with nothing to scale converts as fast as `videoconvert`, 267 fps instead of 107 on 720p NV12 to RGBA.
+- M2076: `openh264enc` takes `num-slices` and encodes the slices on separate threads, 274 fps instead of 167 on 720p with four.
 
 ## 0.12.0
 

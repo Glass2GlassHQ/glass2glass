@@ -70,6 +70,7 @@ struct Settings {
     qp_min: u8,
     qp_max: u8,
     threads: u16,
+    slices: u32,
     frame_skip: bool,
     scene_change_detection: bool,
     adaptive_quantization: bool,
@@ -87,6 +88,7 @@ impl Default for Settings {
             qp_min: 0,
             qp_max: MAX_QP,
             threads: 0,
+            slices: 1,
             frame_skip: false,
             scene_change_detection: true,
             adaptive_quantization: true,
@@ -128,12 +130,43 @@ fn open_encoder(settings: &Settings, framerate: &Rate) -> Result<Encoder, G2gErr
     Ok(encoder)
 }
 
+fn set_slice_count(encoder: &mut Encoder, settings: &Settings) -> Result<(), G2gError> {
+    let mut params = openh264_sys2::SEncParamExt::default();
+    // SAFETY: OpenH264 copies its current parameters into the struct the pointer names.
+    let status = unsafe {
+        encoder.raw_api().get_option(
+            openh264_sys2::ENCODER_OPTION_SVC_ENCODE_PARAM_EXT,
+            (&raw mut params).cast(),
+        )
+    };
+    if status != 0 {
+        return Err(G2gError::Hardware(HardwareError::Other));
+    }
+    let slicing = &mut params.sSpatialLayers[0].sSliceArgument;
+    slicing.uiSliceMode = openh264_sys2::SM_FIXEDSLCNUM_SLICE;
+    slicing.uiSliceNum = settings.slices;
+    // OpenH264 cut the thread count to one for the single slice it started with
+    params.iMultipleThreadIdc = settings.threads;
+    // SAFETY: OpenH264 reads the parameters through the pointer and re-initialises with them.
+    let status = unsafe {
+        encoder.raw_api().set_option(
+            openh264_sys2::ENCODER_OPTION_SVC_ENCODE_PARAM_EXT,
+            (&raw mut params).cast(),
+        )
+    };
+    if status != 0 {
+        return Err(G2gError::Hardware(HardwareError::Other));
+    }
+    Ok(())
+}
+
 pub struct OpenH264Enc {
     settings: Settings,
     width: u32,
     height: u32,
     framerate: Rate,
     encoder: Option<Encoder>,
+    slice_count_pending: bool,
     emitted: u64,
     caps_sent: bool,
 }
@@ -163,6 +196,7 @@ impl OpenH264Enc {
             height: 0,
             framerate: Rate::Any,
             encoder: None,
+            slice_count_pending: false,
             emitted: 0,
             caps_sent: false,
         }
@@ -198,8 +232,14 @@ impl OpenH264Enc {
     // settings fix at initialisation, so a change takes a new encoder that starts on an IDR
     fn reopen(&mut self) -> Result<(), G2gError> {
         if self.encoder.is_some() {
-            self.encoder = Some(open_encoder(&self.settings, &self.framerate)?);
+            self.open()?;
         }
+        Ok(())
+    }
+
+    fn open(&mut self) -> Result<(), G2gError> {
+        self.encoder = Some(open_encoder(&self.settings, &self.framerate)?);
+        self.slice_count_pending = self.settings.slices > 1;
         Ok(())
     }
 
@@ -251,10 +291,15 @@ impl OpenH264Enc {
             Timestamp::from_millis(pts_ns / 1_000_000)
         };
         let encoder = self.encoder.as_mut().ok_or(G2gError::NotConfigured)?;
-        let bitstream = encoder
+        let access_unit = encoder
             .encode_at(&source, timestamp)
-            .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
-        let access_unit = bitstream.to_vec();
+            .map_err(|_| G2gError::Hardware(HardwareError::Other))?
+            .to_vec();
+        // openh264's Encoder initialises OpenH264 with one slice on its first encode
+        if self.slice_count_pending {
+            set_slice_count(encoder, &self.settings)?;
+            self.slice_count_pending = false;
+        }
         Ok((!access_unit.is_empty()).then_some(access_unit))
     }
 
@@ -353,7 +398,7 @@ impl AsyncElement for OpenH264Enc {
         self.height = *height;
         self.framerate = framerate.clone();
         self.caps_sent = false;
-        self.encoder = Some(open_encoder(&self.settings, &self.framerate)?);
+        self.open()?;
         Ok(ConfigureOutcome::Accepted)
     }
 
@@ -392,6 +437,12 @@ impl AsyncElement for OpenH264Enc {
                 .with_default("51"),
             PropertySpec::new("multi-thread", PropKind::Uint, "encoder threads, 0 = auto")
                 .with_default("0"),
+            PropertySpec::new(
+                "num-slices",
+                PropKind::Uint,
+                "slices per frame, encoded on separate threads from the second frame on",
+            )
+            .with_default("1"),
             PropertySpec::new(
                 "enable-frame-skip",
                 PropKind::Bool,
@@ -462,6 +513,13 @@ impl AsyncElement for OpenH264Enc {
                 let threads = u16::try_from(uint(&value)?).map_err(|_| PropError::Value)?;
                 self.set_setting(|settings| settings.threads = threads)
             }
+            "num-slices" => {
+                let slices = u32::try_from(uint(&value)?)
+                    .ok()
+                    .filter(|&slices| slices > 0)
+                    .ok_or(PropError::Value)?;
+                self.set_setting(|settings| settings.slices = slices)
+            }
             "enable-frame-skip" => {
                 let enabled = flag(&value)?;
                 self.set_setting(|settings| settings.frame_skip = enabled)
@@ -493,6 +551,7 @@ impl AsyncElement for OpenH264Enc {
             "qp-min" => PropValue::Uint(u64::from(settings.qp_min)),
             "qp-max" => PropValue::Uint(u64::from(settings.qp_max)),
             "multi-thread" => PropValue::Uint(u64::from(settings.threads)),
+            "num-slices" => PropValue::Uint(u64::from(settings.slices)),
             "enable-frame-skip" => PropValue::Bool(settings.frame_skip),
             "scene-change-detection" => PropValue::Bool(settings.scene_change_detection),
             "adaptive-quantization" => PropValue::Bool(settings.adaptive_quantization),
@@ -699,6 +758,68 @@ mod tests {
             .map(|(index, _)| index)
             .collect();
         assert_eq!(keyframes, [0, 3]);
+    }
+
+    #[test]
+    fn each_frame_after_the_first_has_the_set_number_of_slices() {
+        const SLICES: usize = 4;
+        // openh264 keeps one slice in a frame of 48 macroblocks or fewer
+        const SLICED_WIDTH: u32 = 176;
+        const SLICED_HEIGHT: u32 = 144;
+        let caps = Caps::RawVideo {
+            format: RawVideoFormat::I420,
+            width: Dim::Fixed(SLICED_WIDTH),
+            height: Dim::Fixed(SLICED_HEIGHT),
+            framerate: Rate::Fixed(30 << 16),
+            interlace: Interlace::Progressive,
+            colorimetry: Colorimetry::UNKNOWN,
+        };
+        let frame_bytes = (SLICED_WIDTH * SLICED_HEIGHT * 3 / 2) as usize;
+        let frames = (0..FRAME_COUNT).map(|index| {
+            PipelinePacket::DataFrame(Frame::new(
+                MemoryDomain::System(SystemSlice::from_boxed(
+                    alloc::vec![(index * 20) as u8; frame_bytes].into_boxed_slice(),
+                )),
+                FrameTiming {
+                    pts_ns: index * FRAME_PERIOD_NS,
+                    ..FrameTiming::default()
+                },
+                index,
+            ))
+        });
+        let mut encoder = OpenH264Enc::new();
+        encoder
+            .set_property("num-slices", PropValue::Uint(SLICES as u64))
+            .unwrap();
+        let encoded = run_packets(&mut encoder, &caps, frames);
+        let slice_counts: Vec<usize> = frame_payloads(&encoded.packets)
+            .iter()
+            .map(|access_unit| {
+                crate::annexb::nal_units(access_unit)
+                    .filter(|nal| matches!(crate::annexb::h264_nal_type(nal), Some(1 | 5)))
+                    .count()
+            })
+            .collect();
+        assert_eq!(slice_counts.len() as u64, FRAME_COUNT);
+        assert!(
+            slice_counts[1..].iter().all(|&count| count == SLICES),
+            "slices per frame: {slice_counts:?}"
+        );
+        let mut params = openh264_sys2::SEncParamExt::default();
+        let openh264 = encoder.encoder.as_mut().unwrap();
+        // SAFETY: OpenH264 copies its current parameters into the struct the pointer names.
+        let status = unsafe {
+            openh264.raw_api().get_option(
+                openh264_sys2::ENCODER_OPTION_SVC_ENCODE_PARAM_EXT,
+                (&raw mut params).cast(),
+            )
+        };
+        assert_eq!(status, 0);
+        assert!(
+            params.iMultipleThreadIdc > 1,
+            "encoder threads: {}",
+            params.iMultipleThreadIdc
+        );
     }
 
     #[test]
