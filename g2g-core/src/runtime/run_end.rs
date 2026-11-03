@@ -35,7 +35,7 @@ impl RunEndRequest {
         RunEndRequested { request: self }
     }
 
-    fn is_requested(&self) -> bool {
+    pub(crate) fn is_requested(&self) -> bool {
         self.inner.requested.load(Ordering::SeqCst)
     }
 }

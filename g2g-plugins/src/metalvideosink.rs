@@ -191,6 +191,23 @@ impl AppKitWindow {
             }
         });
     }
+
+    fn is_closed(&self) -> bool {
+        let window_address = self.0;
+        let mut closed = false;
+        let closed_out = &mut closed;
+        DispatchQueue::main().exec_sync(move || {
+            // SAFETY: work on the main queue runs on the main thread.
+            let mtm = unsafe { MainThreadMarker::new_unchecked() };
+            // SAFETY: the sink's reference keeps the window alive.
+            let window = unsafe { &*(window_address as *const NSWindow) };
+            // appkit also reports a minimized window, or one in a hidden app, as not visible
+            *closed_out = !window.isVisible()
+                && !window.isMiniaturized()
+                && !NSApplication::sharedApplication(mtm).isHidden();
+        });
+        closed
+    }
 }
 
 impl Drop for AppKitWindow {
@@ -716,6 +733,9 @@ impl AsyncElement for MetalVideoSink {
             }
             match packet {
                 PipelinePacket::DataFrame(frame) => {
+                    if self.window.as_ref().is_some_and(AppKitWindow::is_closed) {
+                        return Err(G2gError::WindowClosed);
+                    }
                     // PTS pacing: hold the frame until its deadline on the elected
                     // clock, or drop it when it is already too late (the QoS bound)
                     // or outside the segment. Unpaced without a clock: present as

@@ -502,8 +502,9 @@ A display sink whose window the user closes returns `WindowClosed` from `process
 The runner then asks every source to end its stream: each source arm stops the
 source's `run` and sends `Eos` itself, the sink drops frames until that `Eos`
 reaches it, and the run drains and returns its stats. A live camera, which never
-ends its stream by itself, ends this way too. GStreamer's `waylandsink` posts an
-error instead.
+ends its stream by itself, ends this way too. Audio sinks (klass `Sink/Audio`) also
+drop their queued frames at that point, so the sound stops with the window, while
+file and network sinks drain. GStreamer's `waylandsink` posts an error instead.
 
 A finished run gives back what it took. Parsing, running and dropping pipelines
 two hundred times leaves the heap, the open file descriptors and the thread count

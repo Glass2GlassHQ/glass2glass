@@ -2,15 +2,15 @@
 
 use core::future::Future;
 use core::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use g2g_core::frame::{Frame, FrameTiming};
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{block_on, run_graph, run_simple_pipeline, GraphNodeRef, SourceLoop};
 use g2g_core::{
-    graph::Graph, AsyncElement, Caps, ConfigureOutcome, Dim, G2gError, MemoryDomain, OutputSink,
-    PipelineClock, PipelinePacket, Rate, RawVideoFormat,
+    graph::Graph, AsyncElement, Caps, ConfigureOutcome, Dim, ElementMetadata, G2gError,
+    MemoryDomain, OutputSink, PipelineClock, PipelinePacket, Rate, RawVideoFormat,
 };
 
 // the frame the user closes the window on, late enough that the run is under way
@@ -156,4 +156,111 @@ fn closing_the_window_drains_a_linear_run() {
     let stats = block_on(run_simple_pipeline(&mut source, &mut sink, &ZeroClock, 1))
         .expect("the run ends cleanly");
     assert!(stats.frames_emitted > CLOSED_AT, "{stats:?}");
+}
+
+struct SignallingWindowSink {
+    closed: Arc<AtomicBool>,
+}
+
+impl AsyncElement for SignallingWindowSink {
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    where
+        Self: 'a;
+
+    fn intercept_caps(&self, upstream: &Caps) -> Result<Caps, G2gError> {
+        Ok(upstream.clone())
+    }
+    fn configure_pipeline(&mut self, _caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
+        Ok(ConfigureOutcome::Accepted)
+    }
+    fn process<'a>(
+        &'a mut self,
+        packet: PipelinePacket,
+        _out: &'a mut dyn OutputSink,
+    ) -> Self::ProcessFuture<'a> {
+        Box::pin(async move {
+            match packet {
+                PipelinePacket::DataFrame(frame) if frame.sequence >= CLOSED_AT => {
+                    self.closed.store(true, Ordering::SeqCst);
+                    Err(G2gError::WindowClosed)
+                }
+                _ => Ok(()),
+            }
+        })
+    }
+}
+
+struct HoldingSink {
+    klass: &'static str,
+    window_closed: Arc<AtomicBool>,
+    frames_rendered: Arc<AtomicU64>,
+}
+
+impl AsyncElement for HoldingSink {
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    where
+        Self: 'a;
+
+    fn intercept_caps(&self, upstream: &Caps) -> Result<Caps, G2gError> {
+        Ok(upstream.clone())
+    }
+    fn configure_pipeline(&mut self, _caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
+        Ok(ConfigureOutcome::Accepted)
+    }
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::new("holding sink", self.klass, "holds its first frame", "test")
+    }
+    fn process<'a>(
+        &'a mut self,
+        packet: PipelinePacket,
+        _out: &'a mut dyn OutputSink,
+    ) -> Self::ProcessFuture<'a> {
+        Box::pin(async move {
+            if !matches!(packet, PipelinePacket::DataFrame(_)) {
+                return Ok(());
+            }
+            core::future::poll_fn(|cx| {
+                if self.window_closed.load(Ordering::SeqCst) {
+                    return core::task::Poll::Ready(());
+                }
+                cx.waker().wake_by_ref();
+                core::task::Poll::Pending
+            })
+            .await;
+            self.frames_rendered.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        })
+    }
+}
+
+fn frames_rendered_after_closing_the_window(klass: &'static str) -> u64 {
+    let closed = Arc::new(AtomicBool::new(false));
+    let frames_rendered = Arc::new(AtomicU64::new(0));
+    let mut graph: Graph<GraphNodeRef<'static>> = Graph::new();
+    let window_source = graph.add_source(GraphNodeRef::source(EndlessSource));
+    let window_sink = graph.add_sink(GraphNodeRef::element(SignallingWindowSink {
+        closed: closed.clone(),
+    }));
+    graph.link(window_source, window_sink).unwrap();
+    let other_source = graph.add_source(GraphNodeRef::source(EndlessSource));
+    let other_sink = graph.add_sink(GraphNodeRef::element(HoldingSink {
+        klass,
+        window_closed: closed,
+        frames_rendered: frames_rendered.clone(),
+    }));
+    graph.link(other_source, other_sink).unwrap();
+    block_on(run_graph(graph, &ZeroClock, 4)).expect("the run ends cleanly");
+    frames_rendered.load(Ordering::SeqCst)
+}
+
+#[test]
+fn closing_the_window_drops_the_frames_queued_for_an_audio_sink() {
+    assert_eq!(frames_rendered_after_closing_the_window("Sink/Audio"), 1);
+}
+
+#[test]
+fn closing_the_window_still_drains_a_file_sink() {
+    assert!(frames_rendered_after_closing_the_window("Sink/File") > 1);
 }

@@ -4963,6 +4963,7 @@ async fn sink_arm_loop<E: AsyncElement>(elem: &mut E, io: SinkArmIo) -> Result<u
     } = io;
     // once the user closes the window, the frames still in flight have nowhere to go
     let mut window_closed = false;
+    let plays_audio = elem.metadata().klass.starts_with("Sink/Audio");
     let mut null = NullSink;
     let mut consumed = 0u64;
     let mut prerolled_self = false;
@@ -5022,6 +5023,7 @@ async fn sink_arm_loop<E: AsyncElement>(elem: &mut E, io: SinkArmIo) -> Result<u
         if let (Some(probe), Some(packet)) = (&probe, &packet) {
             log_received(probe.log_name(), packet);
         }
+        window_closed |= plays_audio && run_end.is_requested();
         match packet {
             Some(PipelinePacket::Eos) if window_closed => return Ok(consumed),
             Some(PipelinePacket::DataFrame(_)) if window_closed => {
