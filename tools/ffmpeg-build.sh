@@ -70,16 +70,16 @@ if $windows; then
     # Makefile.msc builds against the DLL C runtime (-MD), as ffmpeg's MSVC build does
     (cd "$zlib_dir" && nmake -nologo -f win32/Makefile.msc zlib.lib >&2)
     cp "$zlib_dir/zlib.h" "$zlib_dir/zconf.h" "$zlib_prefix/include/"
-    # configure links `-lz`, which the MSVC toolchain spells z.lib
-    cp "$zlib_dir/zlib.lib" "$zlib_prefix/lib/z.lib"
+    # the MSVC toolchain turns `-lz` into zlib.lib, and hands -L to link.exe as is, which ignores it
+    cp "$zlib_dir/zlib.lib" "$zlib_prefix/lib/"
     zlib_include=$(cygpath -m "$zlib_prefix/include")
-    zlib_lib=$(cygpath -m "$zlib_prefix/lib")
+    zlib_ldflags="-libpath:$(cygpath -m "$zlib_prefix/lib")"
 else
     (cd "$zlib_dir" && CFLAGS="-O2 -fPIC" ./configure --static --prefix="$zlib_prefix" >&2 && make -j"$(nproc)" libz.a >&2)
     cp "$zlib_dir/zlib.h" "$zlib_dir/zconf.h" "$zlib_prefix/include/"
     cp "$zlib_dir/libz.a" "$zlib_prefix/lib/"
     zlib_include=$zlib_prefix/include
-    zlib_lib=$zlib_prefix/lib
+    zlib_ldflags="-L$zlib_prefix/lib"
 fi
 
 cd "$source_dir"
@@ -90,7 +90,7 @@ cd "$source_dir"
     "${platform[@]}" \
     --enable-shared --disable-static \
     --disable-autodetect \
-    --enable-zlib --extra-cflags="-I$zlib_include" --extra-ldflags="-L$zlib_lib" \
+    --enable-zlib --extra-cflags="-I$zlib_include" --extra-ldflags="$zlib_ldflags" \
     --disable-programs --disable-doc --disable-debug \
     --disable-avdevice --disable-avfilter --disable-swresample \
     >&2
