@@ -20,6 +20,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M2075: `videoconvertscale` with nothing to scale converts as fast as `videoconvert`, 267 fps instead of 107 on 720p NV12 to RGBA.
 - M2076: `openh264enc` takes `num-slices` and encodes the slices on separate threads, 274 fps instead of 167 on 720p with four.
 - M2077: `metalvideosink` shows video in its window on Intel Macs and macOS before 14.
+- M2079: closing the `metalvideosink` window ends the run, and audio sinks stop with the window instead of playing out their queue.
+- M2080: `g2g-device-monitor` links on macOS before 14.
 
 ## 0.12.0
 

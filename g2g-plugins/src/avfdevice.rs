@@ -24,7 +24,7 @@ use alloc::vec::Vec;
 
 use objc2_av_foundation::{
     AVCaptureDevice, AVCaptureDeviceDiscoverySession, AVCaptureDevicePosition, AVCaptureDeviceType,
-    AVCaptureDeviceTypeBuiltInWideAngleCamera, AVCaptureDeviceTypeExternal, AVMediaTypeVideo,
+    AVCaptureDeviceTypeBuiltInWideAngleCamera, AVMediaTypeVideo,
 };
 use objc2_foundation::NSArray;
 
@@ -58,9 +58,11 @@ impl DeviceProvider for AvfDeviceProvider {
         // SAFETY: the device-type statics are valid on macOS; the discovery
         // session and the devices it returns are ordinary retained objects.
         unsafe {
+            // avfoundation only has AVCaptureDeviceTypeExternal from macOS 14
+            #[allow(deprecated)]
             let types: Vec<&AVCaptureDeviceType> = [
                 AVCaptureDeviceTypeBuiltInWideAngleCamera,
-                AVCaptureDeviceTypeExternal,
+                objc2_av_foundation::AVCaptureDeviceTypeExternalUnknown,
             ]
             .into_iter()
             .collect();
