@@ -1261,6 +1261,8 @@ mod factory {
         }
     }
 
+    pub type CapsTarget = Box<dyn Fn(&Caps) -> bool>;
+
     /// One output branch of a `playbin` graph: the elementary stream a
     /// demux port carries, the raw target to decode it to, and the sink it ends in.
     /// The caller derives these from the demux's announced
@@ -1272,7 +1274,7 @@ mod factory {
         pub input_caps: Caps,
         /// The raw shape to decode the port to (commonly [`is_raw_video`] for a
         /// video port, [`is_raw_audio`] for an audio port).
-        pub target: Box<dyn Fn(&Caps) -> bool>,
+        pub target: CapsTarget,
         /// The terminal sink for this branch (e.g. an `autovideosink` /
         /// `autoaudiosink` chosen by the stream kind).
         pub sink: Box<dyn DynAsyncElement>,
@@ -3120,17 +3122,14 @@ mod factory {
             )
         }
 
-        /// Domain-aware [`autoplug`](Self::autoplug): instantiate the chain the
-        /// domain-aware search picks (see
-        /// [`autoplug_names_preferring`](Self::autoplug_names_preferring)).
         pub fn raw_video_target_for_sink(
             &self,
             input: &Caps,
             sink: &str,
             max_depth: usize,
-        ) -> Option<Box<dyn Fn(&Caps) -> bool>> {
+        ) -> Option<CapsTarget> {
             let sink = self.make_element(sink)?;
-            let sink_takes_raw_video: Box<dyn Fn(&Caps) -> bool> =
+            let sink_takes_raw_video: CapsTarget =
                 Box::new(move |caps| is_raw_video(caps) && sink.intercept_caps(caps).is_ok());
             self.autoplug_preferring(
                 input,
@@ -3141,6 +3140,9 @@ mod factory {
             Some(sink_takes_raw_video)
         }
 
+        /// Domain-aware [`autoplug`](Self::autoplug): instantiate the chain the
+        /// domain-aware search picks (see
+        /// [`autoplug_names_preferring`](Self::autoplug_names_preferring)).
         pub fn autoplug_preferring(
             &self,
             input: &Caps,
@@ -3491,14 +3493,14 @@ mod factory {
 
 #[cfg(feature = "std")]
 pub use factory::{
-    declared_source_caps, AutoplugError, AutoplugParams, ContainerStreams, DecodebinError,
-    DecodebinSelectHook, DemuxCapsSelectHook, DemuxFactory, DemuxSelectHook, DemuxStreamHook,
-    ElementDoc, ElementFactory, FallbacksrcSourceFactory, FanoutRebuild, FanoutSrcFactory,
-    LaunchFactory, MuxerFactory, PlaybinError, PlaybinGraphError, PlaybinHook, PlaybinPort,
-    PlaybinSinks, PrimaryStream, PrimaryStreamHook, PropertyDoc, RankOverride, RankSpecError,
-    Registry, RestartFanoutSourceHook, RestartPolicy, RestartSourceHook, SourceFactory, Uri,
-    UriError, UriFanout, UriFanoutHead, UriFanoutHook, UriFanoutPort, UriRebuild, UriSource,
-    UriSourceFactory,
+    declared_source_caps, AutoplugError, AutoplugParams, CapsTarget, ContainerStreams,
+    DecodebinError, DecodebinSelectHook, DemuxCapsSelectHook, DemuxFactory, DemuxSelectHook,
+    DemuxStreamHook, ElementDoc, ElementFactory, FallbacksrcSourceFactory, FanoutRebuild,
+    FanoutSrcFactory, LaunchFactory, MuxerFactory, PlaybinError, PlaybinGraphError, PlaybinHook,
+    PlaybinPort, PlaybinSinks, PrimaryStream, PrimaryStreamHook, PropertyDoc, RankOverride,
+    RankSpecError, Registry, RestartFanoutSourceHook, RestartPolicy, RestartSourceHook,
+    SourceFactory, Uri, UriError, UriFanout, UriFanoutHead, UriFanoutHook, UriFanoutPort,
+    UriRebuild, UriSource, UriSourceFactory,
 };
 
 #[cfg(test)]

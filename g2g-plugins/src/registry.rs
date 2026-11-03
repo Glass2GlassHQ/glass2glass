@@ -1910,6 +1910,10 @@ fn ffmpegdec_pinned_output_format(out: &Caps) -> Option<crate::ffmpegdec::Output
 #[cfg(all(target_os = "macos", feature = "vtdecode"))]
 const VIDEOTOOLBOX_OVER_FFMPEG_RANK: i16 = 1;
 
+// libavcodec built without VA-API fails to open this decoder, and rav1ddec's rank is -10
+#[cfg(all(target_os = "linux", feature = "ffmpeg"))]
+const VAAPI_BELOW_SOFTWARE_DECODERS_RANK: i16 = -20;
+
 #[cfg(all(
     any(target_os = "linux", target_os = "macos", windows),
     feature = "ffmpeg"
@@ -2206,7 +2210,8 @@ fn register_autoplug_candidates(reg: &mut Registry) {
                     .with_output_format(ffmpegdec_output_format(out)),
             )
         })
-        .hardware(),
+        .hardware()
+        .rank(VAAPI_BELOW_SOFTWARE_DECODERS_RANK),
     );
     // Native NVDEC (M270), registered last so a default (System-memory) auto-plug
     // still picks a CPU decoder: `NvDec` emits NV12 in CUDA device memory, which
