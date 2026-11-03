@@ -431,7 +431,10 @@ mod tests {
     /// Frame an SPS RBSP in Annex-B with an explicit profile / level (unlike
     /// [`build_test_annexb_sps`], which hardcodes baseline). `rbsp` is the
     /// post-NAL-header bytes.
-    #[cfg(all(any(target_os = "linux", windows), feature = "ffmpeg"))]
+    #[cfg(all(
+        any(target_os = "linux", target_os = "macos", windows),
+        feature = "ffmpeg"
+    ))]
     fn annexb_sps(profile_idc: u8, level_idc: u8, rbsp: &[u8]) -> Vec<u8> {
         let mut out = vec![0u8, 0, 0, 1, 0x67, profile_idc, 0, level_idc];
         out.extend_from_slice(rbsp);
@@ -439,7 +442,10 @@ mod tests {
     }
 
     /// Minimal SPS body (non-high-profile branch) at `width` x `height`.
-    #[cfg(all(any(target_os = "linux", windows), feature = "ffmpeg"))]
+    #[cfg(all(
+        any(target_os = "linux", target_os = "macos", windows),
+        feature = "ffmpeg"
+    ))]
     fn sps_body(width: u32, height: u32) -> Vec<u8> {
         let mut w = BitWriter::default();
         w.write_ue(0); // seq_parameter_set_id
@@ -459,7 +465,10 @@ mod tests {
         w.into_bytes()
     }
 
-    #[cfg(all(any(target_os = "linux", windows), feature = "ffmpeg"))]
+    #[cfg(all(
+        any(target_os = "linux", target_os = "macos", windows),
+        feature = "ffmpeg"
+    ))]
     #[test]
     fn sps_reorder_frames_uses_level_dpb_for_reordering_profile() {
         // Main profile, level 4.0, 1920x1088 (120x68 = 8160 MBs).
@@ -468,7 +477,10 @@ mod tests {
         assert_eq!(sps_reorder_frames(&au), Some(4));
     }
 
-    #[cfg(all(any(target_os = "linux", windows), feature = "ffmpeg"))]
+    #[cfg(all(
+        any(target_os = "linux", target_os = "macos", windows),
+        feature = "ffmpeg"
+    ))]
     #[test]
     fn sps_reorder_frames_uses_level_dpb_for_baseline_too() {
         // Baseline (66) is not special-cased to zero: some JVT conformance vectors
@@ -478,7 +490,10 @@ mod tests {
         assert_eq!(sps_reorder_frames(&au), Some(4));
     }
 
-    #[cfg(all(any(target_os = "linux", windows), feature = "ffmpeg"))]
+    #[cfg(all(
+        any(target_os = "linux", target_os = "macos", windows),
+        feature = "ffmpeg"
+    ))]
     #[test]
     fn sps_reorder_frames_zero_for_poc_type_2() {
         // POC type 2 pins output order to decode order, so the level DPB bound
@@ -501,7 +516,10 @@ mod tests {
         assert_eq!(sps_reorder_frames(&au), Some(0));
     }
 
-    #[cfg(all(any(target_os = "linux", windows), feature = "ffmpeg"))]
+    #[cfg(all(
+        any(target_os = "linux", target_os = "macos", windows),
+        feature = "ffmpeg"
+    ))]
     #[test]
     fn sps_reorder_frames_crosses_scaling_lists() {
         // High profile with a custom scaling matrix: the lists sit before the
@@ -536,7 +554,10 @@ mod tests {
         assert_eq!(sps_reorder_frames(&au), Some(4));
     }
 
-    #[cfg(all(any(target_os = "linux", windows), feature = "ffmpeg"))]
+    #[cfg(all(
+        any(target_os = "linux", target_os = "macos", windows),
+        feature = "ffmpeg"
+    ))]
     #[test]
     fn sps_reorder_frames_follows_each_level_dpb_size() {
         // MaxDpbMbs (Table A-1) over the frame's macroblocks, each under the 16 frame cap
@@ -562,7 +583,10 @@ mod tests {
         }
     }
 
-    #[cfg(all(any(target_os = "linux", windows), feature = "ffmpeg"))]
+    #[cfg(all(
+        any(target_os = "linux", target_os = "macos", windows),
+        feature = "ffmpeg"
+    ))]
     #[test]
     fn sps_reorder_frames_none_without_sps() {
         // A stream carrying only a slice NAL (type 5 = IDR) has no SPS.

@@ -1,6 +1,10 @@
 // `parsebin` demuxes and parses without decoding, so its streams remux into another
 // container, and the remuxed file decodes to the same pictures and samples as the original.
-#![cfg(all(feature = "std", feature = "ffmpeg", any(target_os = "linux", windows)))]
+#![cfg(all(
+    feature = "std",
+    feature = "ffmpeg",
+    any(target_os = "linux", target_os = "macos", windows)
+))]
 
 use std::path::{Path, PathBuf};
 

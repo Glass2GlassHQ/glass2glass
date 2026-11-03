@@ -18,7 +18,10 @@
 //! concatenation is a valid stream) to give the skip budget room to drain well
 //! before the end.
 
-#![cfg(all(any(target_os = "linux", windows), feature = "ffmpeg"))]
+#![cfg(all(
+    any(target_os = "linux", target_os = "macos", windows),
+    feature = "ffmpeg"
+))]
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};

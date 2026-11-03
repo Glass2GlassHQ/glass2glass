@@ -12,7 +12,10 @@
 //! features.
 #![cfg(all(
     feature = "std",
-    not(all(any(target_os = "linux", windows), feature = "ffmpeg"))
+    not(all(
+        any(target_os = "linux", target_os = "macos", windows),
+        feature = "ffmpeg"
+    ))
 ))]
 
 use g2g_core::runtime::{parse_launch, run_graph, ElementFactory, SourceFactory};

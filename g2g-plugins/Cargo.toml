@@ -53,7 +53,7 @@ release-binary-linux = [
     "kms-sink", "wayland-sink", "wgpu-present", "cuda", "nvenc", "nvdec", "cuda-wgpu",
     "gl-sink", "alsa-sink", "alsa-src", "openh264", "ffmpeg-long-tail", "vpx",
 ]
-release-binary-macos = ["release-binary", "vtdecode", "vtencode", "metal-sink", "coreaudio", "audiotoolbox-aac", "avfoundation", "screencapture", "vpx"]
+release-binary-macos = ["release-binary", "vtdecode", "vtencode", "metal-sink", "coreaudio", "audiotoolbox-aac", "avfoundation", "screencapture", "vpx", "ffmpeg-long-tail"]
 release-aar = ["release-binary", "camera2", "mediacodec-wgpu", "aaudio"]
 release-binary-windows = [
     "release-binary", "mf-decode", "mf-encode", "mf-aac", "wasapi-sink", "wasapi-src", "d3d11-sink", "mf-video-src",
@@ -389,7 +389,7 @@ wasapi-src = ["std", "dep:windows", "dep:windows-core"]
 # implies std. Pairs with MfDecode::with_d3d11().
 d3d11-sink = ["std", "dep:windows"]
 # ffmpeg/libavcodec decode (software, NVDEC, and VAAPI hwaccel backends).
-# Pulls ffmpeg-next + ffmpeg-sys; Linux and Windows, implies std. Linux needs
+# Pulls ffmpeg-next + ffmpeg-sys; Linux, macOS and Windows, implies std. Linux needs
 # system libav* (Fedora: ffmpeg-free-devel; Debian/Ubuntu: libavcodec-dev
 # libavformat-dev libavutil-dev); Windows needs FFMPEG_DIR at a shared LGPL build
 # and LIBCLANG_PATH for bindgen. Its VAAPI backend (Linux only) is the Intel and
@@ -1122,9 +1122,9 @@ windows = { version = "0.62", optional = true, features = [
 # build (this Linux dev host cannot compile the macOS target). objc2 0.6, the
 # framework crates 0.3.
 # ffmpeg-next links the shared libavcodec/libavformat/libavutil/libswscale: found
-# through pkg-config on Linux, through FFMPEG_DIR (include/ + MSVC import libs in
-# lib/) on Windows. Target-gated so Wasm/RTOS/macOS/Android builds never resolve it.
-[target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
+# through pkg-config on Linux and macOS, through FFMPEG_DIR (include/ + MSVC import libs in
+# lib/) on Windows. Target-gated so Wasm/RTOS/Android builds never resolve it.
+[target.'cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))'.dependencies]
 ffmpeg-next = { version = "9.0", optional = true, default-features = false, features = ["codec", "format", "software-scaling"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]

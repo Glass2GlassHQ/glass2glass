@@ -25,6 +25,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M2080: `g2g-device-monitor` links on macOS before 14.
 - M2081: `playbin` adds a `videoconvert` when no decoder produces a format its video sink takes.
 - M2082: `autovideosink` skips `kmssink` when `/dev/dri/card0` does not exist.
+- M2083: the macOS release binaries and wheels ship the LGPL ffmpeg libraries, adding VP8, VP9 and the long-tail decoders, and `vtdec` stays first for H.264 and H.265.
+- M2084: `decodebin` skips libavcodec's hardware-only AV1 decoder, so AV1 decodes with `rav1ddec` on hosts without libdav1d.
 
 ## 0.12.0
 

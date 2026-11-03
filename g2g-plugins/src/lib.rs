@@ -100,7 +100,10 @@ mod fifobuffer;
 // Input metadata a decoder or a re-framing parser carries to the unit it emits.
 #[cfg(any(
     feature = "metadata",
-    all(any(target_os = "linux", windows), feature = "ffmpeg"),
+    all(
+        any(target_os = "linux", target_os = "macos", windows),
+        feature = "ffmpeg"
+    ),
     all(any(target_os = "linux", windows), feature = "nvdec"),
     all(
         any(target_os = "linux", target_os = "windows"),
@@ -235,7 +238,10 @@ mod numbuffers;
 // Shared `cuda-device-id` property used by the elements that open a CUDA context.
 #[cfg(any(
     all(any(target_os = "linux", windows), feature = "cuda"),
-    all(any(target_os = "linux", windows), feature = "ffmpeg")
+    all(
+        any(target_os = "linux", target_os = "macos", windows),
+        feature = "ffmpeg"
+    )
 ))]
 mod cudadeviceid;
 
@@ -725,7 +731,10 @@ mod pcm_passthrough;
 mod pcmclip;
 // Decoded PCM output shared by the audio decoders.
 #[cfg(any(
-    all(any(target_os = "linux", windows), feature = "ffmpeg"),
+    all(
+        any(target_os = "linux", target_os = "macos", windows),
+        feature = "ffmpeg"
+    ),
     feature = "vorbis",
     feature = "aac-decode",
     feature = "mpeg-audio-decode"
@@ -1356,7 +1365,10 @@ pub mod mfaacencode;
     feature = "av1-encode",
     feature = "vpx",
     feature = "opus",
-    all(any(target_os = "linux", windows), feature = "ffmpeg"),
+    all(
+        any(target_os = "linux", target_os = "macos", windows),
+        feature = "ffmpeg"
+    ),
     all(any(target_os = "linux", windows), feature = "nvenc"),
     all(target_os = "linux", feature = "openh264"),
     all(target_os = "macos", feature = "audiotoolbox-aac"),
@@ -1564,12 +1576,18 @@ pub mod mfdevice;
 // ffmpeg/libavcodec H.264 decode is Linux-only here (the ffmpeg-next dep is
 // target-gated). Currently software decode; VAAPI hwaccel is a follow-up that
 // stays inside this module and does not change the public AsyncElement shape.
-#[cfg(all(any(target_os = "linux", windows), feature = "ffmpeg"))]
+#[cfg(all(
+    any(target_os = "linux", target_os = "macos", windows),
+    feature = "ffmpeg"
+))]
 pub mod ffmpegdec;
 
 // Audio decode via libavcodec (AAC -> interleaved PcmS16Le), the audio sibling
 // of `ffmpegdec`. Same Linux + `ffmpeg` gate.
-#[cfg(all(any(target_os = "linux", windows), feature = "ffmpeg"))]
+#[cfg(all(
+    any(target_os = "linux", target_os = "macos", windows),
+    feature = "ffmpeg"
+))]
 pub mod ffmpegaudiodec;
 // H.264 decode with OpenH264, built from source and linked statically.
 #[cfg(all(target_os = "linux", feature = "openh264"))]
@@ -1577,22 +1595,37 @@ pub mod openh264dec;
 #[cfg(all(target_os = "linux", feature = "openh264"))]
 pub mod openh264enc;
 // libavcodec setup for codecs known only by container tag.
-#[cfg(all(any(target_os = "linux", windows), feature = "ffmpeg-long-tail"))]
+#[cfg(all(
+    any(target_os = "linux", target_os = "macos", windows),
+    feature = "ffmpeg-long-tail"
+))]
 mod ffmpegtagged;
 
 // H.264 encode via libavcodec (NVENC / libx264), the encode-side mirror of
 // ffmpegdec (M266). Same Linux + ffmpeg gating.
-#[cfg(all(any(target_os = "linux", windows), feature = "ffmpeg"))]
+#[cfg(all(
+    any(target_os = "linux", target_os = "macos", windows),
+    feature = "ffmpeg"
+))]
 pub mod ffmpegenc;
 
 // AAC-LC audio encode via libavcodec, the audio companion of ffmpegenc (M292).
-#[cfg(all(any(target_os = "linux", windows), feature = "ffmpeg"))]
+#[cfg(all(
+    any(target_os = "linux", target_os = "macos", windows),
+    feature = "ffmpeg"
+))]
 pub mod ffmpegaacenc;
 
 // Pure chroma-resampling math for the decoders (YUV444P -> 4:2:0 downsample).
 // Compiled for the Linux ffmpeg build that uses it and under cfg(test) so the
 // resampling logic is host-testable without libavcodec.
-#[cfg(any(test, all(any(target_os = "linux", windows), feature = "ffmpeg")))]
+#[cfg(any(
+    test,
+    all(
+        any(target_os = "linux", target_os = "macos", windows),
+        feature = "ffmpeg"
+    )
+))]
 mod yuv;
 
 // KMS/DRM display sink for NV12 frames. Linux-only (drm + drm-fourcc deps are

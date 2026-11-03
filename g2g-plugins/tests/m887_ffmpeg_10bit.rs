@@ -12,7 +12,10 @@
 //! `ffmpeg -f lavfi -i testsrc2=size=320x240:rate=25 -frames:v 12 -c:v libx264
 //! -pix_fmt yuv420p10le -profile:v high10 -bf 2 -g 12 -f h264`.
 
-#![cfg(all(any(target_os = "linux", windows), feature = "ffmpeg"))]
+#![cfg(all(
+    any(target_os = "linux", target_os = "macos", windows),
+    feature = "ffmpeg"
+))]
 
 #[path = "common/collect_sink.rs"]
 mod collect_sink;

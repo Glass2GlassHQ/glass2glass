@@ -34,6 +34,9 @@ jobs:
       # the ffmpeg libraries ship in lib/ next to the binary, DT_RPATH also covers libavcodec loading libavutil
       CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: -C link-arg=-Wl,--disable-new-dtags,-rpath,$ORIGIN/lib
       CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS: -C link-arg=-Wl,--disable-new-dtags,-rpath,$ORIGIN/lib
+      # the same on macOS, where dyld expands @executable_path
+      CARGO_TARGET_X86_64_APPLE_DARWIN_RUSTFLAGS: -C link-arg=-Wl,-rpath,@executable_path/lib
+      CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS: -C link-arg=-Wl,-rpath,@executable_path/lib
     defaults:
       run:
         shell: bash
@@ -49,8 +52,19 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: codec prefix
         run: echo "CODEC_PREFIX=$HOME/g2g-codecs" >> "$GITHUB_ENV"
+      # delocate and the linker warn on libraries newer than the deployment target, and clang targets the runner's macOS unless told otherwise
+      - name: macOS build setup
+        if: runner.os == 'macOS'
+        run: echo "MACOSX_DEPLOYMENT_TARGET=12.0" >> "$GITHUB_ENV"
+      # cargo-about has no prebuilt intel mac binary, and a source install needs its cli feature
+      # ffmpeg, libvpx and rav1d assemble their x86 code with nasm
+      - name: intel mac build setup
+        if: matrix.target == 'x86_64-apple-darwin'
+        run: |
+          brew install nasm
+          cargo install cargo-about --version 0.9.3 --locked --features cli
       - name: build ffmpeg
-        if: runner.os == 'Linux'
+        if: runner.os != 'Windows'
         run: tools/ffmpeg-build.sh "$CODEC_PREFIX" | sed 's/^export //' >> "$GITHUB_ENV"
       # Windows builds the same ffmpeg with MSVC under MSYS2; the DLLs ship beside g2g-launch.exe
       - uses: ilammy/msvc-dev-cmd@v1
@@ -75,14 +89,6 @@ jobs:
           tools/ffmpeg-build.sh /c/g2g-ffmpeg | sed 's/^export //' >> "$GITHUB_ENV"
           echo "FFMPEG_PREFIX=/c/g2g-ffmpeg" >> "$GITHUB_ENV"
           echo 'LIBCLANG_PATH=C:\Program Files\LLVM\bin' >> "$GITHUB_ENV"
-      # cargo-about has no prebuilt intel mac binary, and a source install needs its cli feature
-      # libvpx and rav1d assemble their x86 code with nasm, and clang targets the runner's macOS unless told otherwise
-      - name: intel mac build setup
-        if: matrix.target == 'x86_64-apple-darwin'
-        run: |
-          brew install nasm
-          cargo install cargo-about --version 0.9.3 --locked --features cli
-          echo "MACOSX_DEPLOYMENT_TARGET=12.0" >> "$GITHUB_ENV"
       - name: build libvpx
         run: tools/libvpx-build.sh "$CODEC_PREFIX" | sed 's/^export //' >> "$GITHUB_ENV"
       - name: build
@@ -97,11 +103,13 @@ jobs:
             | grep -vxE 'libc\.so\.6|libm\.so\.6|libgcc_s\.so\.1|libstdc\+\+\.so\.6|ld-linux-.*\.so\.[0-9]+' \
             | while read -r library; do [ -f "$CODEC_PREFIX/lib/$library" ] || echo "$library"; done)
           [ -z "$unexpected" ] || { echo "::error::g2g-launch links $unexpected"; exit 1; }
-      - name: links only system libraries (macOS)
+      - name: links only system and bundled libraries (macOS)
         if: runner.os == 'macOS'
         run: |
-          unexpected=$(otool -L target/${{ matrix.target }}/release/g2g-launch | tail -n +2 \
-            | grep -vE '^\s+(/usr/lib/|/System/Library/)' || true)
+          unexpected=$(for binary in target/${{ matrix.target }}/release/g2g-launch "$CODEC_PREFIX"/lib/libav*.dylib "$CODEC_PREFIX"/lib/libswscale*.dylib; do
+              otool -L "$binary" | tail -n +2 | awk '{print $1}'
+            done | sort -u | grep -vE '^(/usr/lib/|/System/Library/)' \
+            | while read -r library; do [ -e "$CODEC_PREFIX/lib/${library#@rpath/}" ] || echo "$library"; done)
           [ -z "$unexpected" ] || { echo "::error::g2g-launch links $unexpected"; exit 1; }
       # windows runners carry the Visual C++ runtime in System32, a fresh install does not
       - name: links only system and bundled libraries (Windows)
@@ -142,16 +150,25 @@ jobs:
             find "$CODEC_PREFIX/lib" -maxdepth 1 -name 'lib*.so.*' ! -name '*.so.*.*' -exec cp -L {} "$name/lib/" \;
             cp "$CODEC_PREFIX"/ffmpeg-*/COPYING.LGPLv2.1 "$name/LICENSE-FFMPEG.txt"
           fi
+          if [ "${{ runner.os }}" = macOS ]; then
+            mkdir "$name/lib"
+            find "$CODEC_PREFIX/lib" -maxdepth 1 -type l -name 'lib*.*.dylib' -exec cp -L {} "$name/lib/" \;
+            cp "$CODEC_PREFIX"/ffmpeg-*/COPYING.LGPLv2.1 "$name/LICENSE-FFMPEG.txt"
+          fi
           if [ "${{ runner.os }}" = Windows ]; then
             # the DLL search starts in the executable's directory
             cp "$FFMPEG_PREFIX"/bin/*.dll "$name/"
             cp "$FFMPEG_PREFIX"/ffmpeg-*/COPYING.LGPLv2.1 "$name/LICENSE-FFMPEG.txt"
           fi
           "$name/g2g-launch" -q audiotestsrc num-buffers=5 ! fakesink
-          if [ "${{ runner.os }}" != macOS ]; then
-            "$name/g2g-launch" -q audiotestsrc num-buffers=20 ! avenc_aac ! fakesink
-          fi
+          "$name/g2g-launch" -q audiotestsrc num-buffers=20 ! avenc_aac ! fakesink
           "$name/g2g-launch" -q videotestsrc num-buffers=10 ! vpxenc codec=vp8 ! fakesink
+          # decodebin must pick a decoder that runs on a host with no GPU
+          for encoder in "av1enc ! mp4mux" "vpxenc codec=vp9 ! webmmux"; do
+            "$name/g2g-launch" -q videotestsrc num-buffers=5 ! video/x-raw,format=I420,width=320,height=240,framerate=30/1 ! $encoder ! filesink location=smoke.bin
+            "$name/g2g-launch" -q filesrc location=smoke.bin ! decodebin ! fakesink
+          done
+          rm smoke.bin
           cp "$CODEC_PREFIX/LICENSE-LIBVPX.txt" "$name/"
           if [ "${{ runner.os }}" = Windows ]; then 7z a "$name.zip" "$name"; else tar czf "$name.tar.gz" "$name"; fi
           # LGPL: the ffmpeg source the bundled libraries were built from
@@ -211,15 +228,26 @@ jobs:
         if: matrix.target != 'x86_64-apple-darwin'
         with:
           tool: cargo-about@0.9.3
+      # delocate and the linker warn on libraries newer than the deployment target, and clang targets the runner's macOS unless told otherwise
+      - name: macOS build setup
+        if: runner.os == 'macOS'
+        run: echo "MACOSX_DEPLOYMENT_TARGET=12.0" >> "$GITHUB_ENV"
       # cargo-about has no prebuilt intel mac binary, and a source install needs its cli feature
-      # libvpx and rav1d assemble their x86 code with nasm, and clang targets the runner's macOS unless told otherwise
+      # ffmpeg, libvpx and rav1d assemble their x86 code with nasm
       - name: intel mac build setup
         if: matrix.target == 'x86_64-apple-darwin'
         shell: bash
         run: |
           brew install nasm
           cargo install cargo-about --version 0.9.3 --locked --features cli
-          echo "MACOSX_DEPLOYMENT_TARGET=12.0" >> "$GITHUB_ENV"
+      # rustc leaves the library search path out of the extension, and delocate follows the rpath to find the libraries it bundles
+      - name: build ffmpeg (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          tools/ffmpeg-build.sh "$HOME/g2g-codecs" | sed 's/^export //' >> "$GITHUB_ENV"
+          echo "RUSTFLAGS=-C link-arg=-Wl,-rpath,$HOME/g2g-codecs/lib" >> "$GITHUB_ENV"
+          cp "$HOME"/g2g-codecs/ffmpeg-*/COPYING.LGPLv2.1 g2g-pyapi/LICENSE-FFMPEG.txt
       - name: build libvpx (macOS, Windows)
         if: runner.os != 'Linux'
         shell: bash
@@ -279,6 +307,15 @@ jobs:
         run: |
           python -m pip install delvewheel==1.13.2
           python -m delvewheel repair --add-path 'C:\g2g-ffmpeg\bin' -w g2g-pyapi/repaired g2g-pyapi/dist/*.whl
+          rm g2g-pyapi/dist/*.whl
+          mv g2g-pyapi/repaired/*.whl g2g-pyapi/dist/
+      # auditwheel's macOS counterpart: copies the ffmpeg libraries the extension links into the wheel
+      - name: bundle ffmpeg (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          python -m pip install delocate==0.13.0
+          delocate-wheel -w g2g-pyapi/repaired g2g-pyapi/dist/*.whl
           rm g2g-pyapi/dist/*.whl
           mv g2g-pyapi/repaired/*.whl g2g-pyapi/dist/
       - name: smoke run

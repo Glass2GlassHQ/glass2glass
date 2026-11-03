@@ -15,7 +15,10 @@
 //! Each test asserts decoded frames are produced, so a green run is a real
 //! end-to-end signal.
 
-#![cfg(all(any(target_os = "linux", windows), feature = "ffmpeg"))]
+#![cfg(all(
+    any(target_os = "linux", target_os = "macos", windows),
+    feature = "ffmpeg"
+))]
 
 #[path = "common/collect_sink.rs"]
 mod collect_sink;

@@ -1,6 +1,10 @@
 // A demux or decodebin fan-out over two tracks of one codec carries each track on its own
 // port: `d.audio_1` is the second AAC track, not a dark port behind the first one.
-#![cfg(all(feature = "std", feature = "ffmpeg", any(target_os = "linux", windows)))]
+#![cfg(all(
+    feature = "std",
+    feature = "ffmpeg",
+    any(target_os = "linux", target_os = "macos", windows)
+))]
 
 #[path = "common/multitrack_fixture.rs"]
 mod multitrack_fixture;

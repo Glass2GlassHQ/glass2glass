@@ -7,7 +7,11 @@
 //! byte-identical (the M615 oracle discipline).
 //!
 //! Self-skips where the ffmpeg CLI is absent.
-#![cfg(all(feature = "std", any(target_os = "linux", windows), feature = "ffmpeg"))]
+#![cfg(all(
+    feature = "std",
+    any(target_os = "linux", target_os = "macos", windows),
+    feature = "ffmpeg"
+))]
 
 use std::path::PathBuf;
 use std::process::Command;

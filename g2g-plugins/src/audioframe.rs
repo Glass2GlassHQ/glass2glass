@@ -527,7 +527,10 @@ pub(crate) fn mpa_frame_len(buf: &[u8]) -> Option<usize> {
 }
 
 #[cfg(any(
-    all(any(target_os = "linux", windows), feature = "ffmpeg"),
+    all(
+        any(target_os = "linux", target_os = "macos", windows),
+        feature = "ffmpeg"
+    ),
     feature = "aac-decode",
     feature = "mpeg-audio-decode"
 ))]
@@ -621,7 +624,10 @@ pub(crate) mod test_frames {
 #[cfg(all(
     test,
     any(
-        all(any(target_os = "linux", windows), feature = "ffmpeg"),
+        all(
+            any(target_os = "linux", target_os = "macos", windows),
+            feature = "ffmpeg"
+        ),
         feature = "aac-decode",
         feature = "mpeg-audio-decode"
     )
@@ -632,7 +638,10 @@ mod split_frames_tests {
     use alloc::vec::Vec;
 
     #[cfg(any(
-        all(any(target_os = "linux", windows), feature = "ffmpeg"),
+        all(
+            any(target_os = "linux", target_os = "macos", windows),
+            feature = "ffmpeg"
+        ),
         feature = "aac-decode"
     ))]
     fn adts_frames(buf: &[u8]) -> Vec<&[u8]> {
@@ -648,7 +657,10 @@ mod split_frames_tests {
     }
 
     #[cfg(any(
-        all(any(target_os = "linux", windows), feature = "ffmpeg"),
+        all(
+            any(target_os = "linux", target_os = "macos", windows),
+            feature = "ffmpeg"
+        ),
         feature = "aac-decode"
     ))]
     /// A minimal `len`-byte ADTS frame: a 7-byte header zero-padded to `len`.
@@ -658,7 +670,10 @@ mod split_frames_tests {
     }
 
     #[cfg(any(
-        all(any(target_os = "linux", windows), feature = "ffmpeg"),
+        all(
+            any(target_os = "linux", target_os = "macos", windows),
+            feature = "ffmpeg"
+        ),
         feature = "aac-decode"
     ))]
     #[test]
@@ -672,7 +687,10 @@ mod split_frames_tests {
     }
 
     #[cfg(any(
-        all(any(target_os = "linux", windows), feature = "ffmpeg"),
+        all(
+            any(target_os = "linux", target_os = "macos", windows),
+            feature = "ffmpeg"
+        ),
         feature = "aac-decode"
     ))]
     #[test]
@@ -689,7 +707,10 @@ mod split_frames_tests {
     }
 
     #[cfg(any(
-        all(any(target_os = "linux", windows), feature = "ffmpeg"),
+        all(
+            any(target_os = "linux", target_os = "macos", windows),
+            feature = "ffmpeg"
+        ),
         feature = "aac-decode"
     ))]
     #[test]

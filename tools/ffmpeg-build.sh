@@ -22,7 +22,8 @@ case "$(uname -s)" in
 MINGW* | MSYS*) windows=true ;;
 esac
 
-prefix=$(realpath -m "$1")
+mkdir -p "$1"
+prefix=$(cd "$1" && pwd)
 tarball="$prefix/ffmpeg-$FFMPEG_VERSION.tar.xz"
 source_dir="$prefix/ffmpeg-$FFMPEG_VERSION"
 zlib_tarball="$prefix/zlib-$ZLIB_VERSION.tar.xz"
@@ -43,16 +44,27 @@ if [ -f "$prefix/lib/pkgconfig/libavcodec.pc" ]; then
     exit 0
 fi
 
-mkdir -p "$prefix"
+# macOS has shasum but no sha256sum
+sha256_check() {
+    if command -v sha256sum > /dev/null; then
+        sha256sum -c - >&2
+    else
+        shasum -a 256 -c - >&2
+    fi
+}
+
+# macOS has no nproc
+jobs=$(nproc 2> /dev/null || sysctl -n hw.ncpu)
+
 if [ ! -f "$tarball" ]; then
     curl -sfL -o "$tarball" "https://ffmpeg.org/releases/ffmpeg-$FFMPEG_VERSION.tar.xz"
 fi
-echo "$FFMPEG_SHA256  $tarball" | sha256sum -c - >&2
+echo "$FFMPEG_SHA256  $tarball" | sha256_check
 tar -xJf "$tarball" -C "$prefix"
 if [ ! -f "$zlib_tarball" ]; then
     curl -sfL -o "$zlib_tarball" "https://github.com/madler/zlib/releases/download/v$ZLIB_VERSION/zlib-$ZLIB_VERSION.tar.xz"
 fi
-echo "$ZLIB_SHA256  $zlib_tarball" | sha256sum -c - >&2
+echo "$ZLIB_SHA256  $zlib_tarball" | sha256_check
 tar -xJf "$zlib_tarball" -C "$prefix"
 
 platform=()
@@ -61,6 +73,10 @@ if $windows; then
     # MSYS2's coreutils `link` would shadow the MSVC linker that sits beside cl.exe
     cl_path=$(command -v cl) || { echo "cl.exe is not on PATH: run from a Visual Studio developer environment" >&2; exit 1; }
     PATH="$(dirname "$cl_path"):$PATH"
+fi
+# dyld finds an @rpath library through the executable's rpath, wherever the release is unpacked
+if [ "$(uname -s)" = Darwin ]; then
+    platform=(--install-name-dir=@rpath)
 fi
 
 # the zlib codecs (ZMBV, PNG, Screenpresso, ...) need it; static, and position
@@ -75,7 +91,7 @@ if $windows; then
     zlib_include=$(cygpath -m "$zlib_prefix/include")
     zlib_ldflags="-libpath:$(cygpath -m "$zlib_prefix/lib")"
 else
-    (cd "$zlib_dir" && CFLAGS="-O2 -fPIC" ./configure --static --prefix="$zlib_prefix" >&2 && make -j"$(nproc)" libz.a >&2)
+    (cd "$zlib_dir" && CFLAGS="-O2 -fPIC" ./configure --static --prefix="$zlib_prefix" >&2 && make -j"$jobs" libz.a >&2)
     cp "$zlib_dir/zlib.h" "$zlib_dir/zconf.h" "$zlib_prefix/include/"
     cp "$zlib_dir/libz.a" "$zlib_prefix/lib/"
     zlib_include=$zlib_prefix/include
@@ -94,7 +110,7 @@ cd "$source_dir"
     --disable-programs --disable-doc --disable-debug \
     --disable-avdevice --disable-avfilter --disable-swresample \
     >&2
-make -j"$(nproc)" >&2
+make -j"$jobs" >&2
 make install >&2
 if $windows; then
     # the MSVC install puts the import libraries beside the DLLs, ffmpeg-sys-next looks in lib/

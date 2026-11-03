@@ -1,4 +1,7 @@
-#![cfg(all(any(target_os = "linux", windows), feature = "ffmpeg-long-tail"))]
+#![cfg(all(
+    any(target_os = "linux", target_os = "macos", windows),
+    feature = "ffmpeg-long-tail"
+))]
 
 use std::path::{Path, PathBuf};
 

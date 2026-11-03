@@ -1,6 +1,9 @@
 //! M1578: `FfmpegAudioDec` drops an access unit libavcodec rejects and decodes
 //! on, as the ffmpeg CLI does, instead of failing the pipeline.
-#![cfg(all(any(target_os = "linux", windows), feature = "ffmpeg"))]
+#![cfg(all(
+    any(target_os = "linux", target_os = "macos", windows),
+    feature = "ffmpeg"
+))]
 
 #[path = "common/collect_sink.rs"]
 mod collect_sink;

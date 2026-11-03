@@ -1,7 +1,11 @@
 // A bare `d.` / `s.` branch of a fan-out takes the first free stream its first element
 // accepts, as gst-launch links a delayed pad by caps, so an audio branch written before the
 // video branch still gets the audio.
-#![cfg(all(feature = "std", feature = "ffmpeg", any(target_os = "linux", windows)))]
+#![cfg(all(
+    feature = "std",
+    feature = "ffmpeg",
+    any(target_os = "linux", target_os = "macos", windows)
+))]
 
 use std::time::Duration;
 

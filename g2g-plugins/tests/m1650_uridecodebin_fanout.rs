@@ -1,6 +1,10 @@
 // `uridecodebin uri=X name=d  d. ! ...  d. ! ...` decodes every stream the URI carries, one
 // per reference, as gst's does. A bare `d.` reads the next port, whatever kind it is.
-#![cfg(all(feature = "std", feature = "ffmpeg", any(target_os = "linux", windows)))]
+#![cfg(all(
+    feature = "std",
+    feature = "ffmpeg",
+    any(target_os = "linux", target_os = "macos", windows)
+))]
 
 use std::time::Duration;
 

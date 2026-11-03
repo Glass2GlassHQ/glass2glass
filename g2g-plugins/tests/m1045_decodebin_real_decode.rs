@@ -10,7 +10,11 @@
 //!
 //! Needs decoders in the auto-plug pool (ffmpeg).
 
-#![cfg(all(feature = "std", any(target_os = "linux", windows), feature = "ffmpeg"))]
+#![cfg(all(
+    feature = "std",
+    any(target_os = "linux", target_os = "macos", windows),
+    feature = "ffmpeg"
+))]
 
 use std::path::PathBuf;
 use std::process::Command;

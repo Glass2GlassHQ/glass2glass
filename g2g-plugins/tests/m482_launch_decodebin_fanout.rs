@@ -14,7 +14,11 @@
 //! full playback is live-validated (a real A/V MP4 decodes both branches to raw).
 //! Needs decoders in the autoplug pool (ffmpeg).
 
-#![cfg(all(feature = "std", any(target_os = "linux", windows), feature = "ffmpeg"))]
+#![cfg(all(
+    feature = "std",
+    any(target_os = "linux", target_os = "macos", windows),
+    feature = "ffmpeg"
+))]
 
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};

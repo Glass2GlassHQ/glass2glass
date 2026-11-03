@@ -3123,24 +3123,22 @@ mod factory {
         /// Domain-aware [`autoplug`](Self::autoplug): instantiate the chain the
         /// domain-aware search picks (see
         /// [`autoplug_names_preferring`](Self::autoplug_names_preferring)).
-        pub fn decoded_video_reaches_sink(
+        pub fn raw_video_target_for_sink(
             &self,
             input: &Caps,
             sink: &str,
             max_depth: usize,
-        ) -> bool {
-            self.make_element(sink).is_some_and(|sink| {
-                let sink_takes_raw_video = |caps: &Caps| {
-                    matches!(caps, Caps::RawVideo { .. }) && sink.intercept_caps(caps).is_ok()
-                };
-                self.autoplug_preferring(
-                    input,
-                    &sink_takes_raw_video,
-                    max_depth,
-                    MemoryDomainKind::System,
-                )
-                .is_some()
-            })
+        ) -> Option<Box<dyn Fn(&Caps) -> bool>> {
+            let sink = self.make_element(sink)?;
+            let sink_takes_raw_video: Box<dyn Fn(&Caps) -> bool> =
+                Box::new(move |caps| is_raw_video(caps) && sink.intercept_caps(caps).is_ok());
+            self.autoplug_preferring(
+                input,
+                &*sink_takes_raw_video,
+                max_depth,
+                MemoryDomainKind::System,
+            )?;
+            Some(sink_takes_raw_video)
         }
 
         pub fn autoplug_preferring(

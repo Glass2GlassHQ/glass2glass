@@ -104,9 +104,9 @@ The last line needs no display: it writes the first frame to `ball.png`.
 Prebuilt `g2g-launch` and `g2g-inspect` for Linux, macOS (Intel and Apple
 Silicon) and Windows are on each
 [GitHub release](https://github.com/Glass2GlassHQ/glass2glass/releases/latest).
-They need no codec libraries on the host. The Linux tarball carries the LGPL
-ffmpeg libraries in `lib/` next to the binaries, so keep the folder together, and
-the matching ffmpeg source is a release asset. They leave out PipeWire and Pulse.
+They need no codec libraries on the host. The Linux and macOS tarballs carry the
+LGPL ffmpeg libraries in `lib/` next to the binaries, so keep the folder together,
+and the matching ffmpeg source is a release asset. They leave out PipeWire and Pulse.
 
 The binaries are unsigned. macOS refuses to run one downloaded with a browser
 until the quarantine flag is cleared:

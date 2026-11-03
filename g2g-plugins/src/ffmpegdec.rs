@@ -2384,6 +2384,25 @@ fn vp6_dimension_byte_len(codec: VideoCodec) -> usize {
     }
 }
 
+fn av1_decoder_runs_in_software(decoder_name: &str) -> bool {
+    // libavcodec's decoder named av1 only drives a hardware accelerator, libdav1d and libaom are software
+    decoder_name != "av1"
+}
+
+pub(crate) fn libavcodec_decodes_in_software(input: &Caps) -> bool {
+    if !matches!(
+        input,
+        Caps::CompressedVideo {
+            codec: VideoCodec::Av1,
+            ..
+        }
+    ) {
+        return true;
+    }
+    codec::decoder::find(codec_id(VideoCodec::Av1))
+        .is_some_and(|decoder| av1_decoder_runs_in_software(decoder.name()))
+}
+
 fn codec_id(codec: VideoCodec) -> Id {
     match codec {
         VideoCodec::H264 => Id::H264,
@@ -3871,6 +3890,12 @@ mod tests {
         let extradata = xiph_laced(&headers);
         let split = crate::matroska::split_xiph_codec_private(&extradata).expect("laced");
         assert_eq!(split, headers.iter().map(Vec::as_slice).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn the_hardware_only_av1_decoder_does_not_count_as_software() {
+        assert!(!av1_decoder_runs_in_software("av1"));
+        assert!(av1_decoder_runs_in_software("libdav1d"));
     }
 
     #[test]

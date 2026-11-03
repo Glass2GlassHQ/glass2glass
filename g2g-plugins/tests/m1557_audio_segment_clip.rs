@@ -1,7 +1,10 @@
 //! M1557: an audio decoder trims its PCM to the upstream segment, sample-accurate
 //! at both edges, and `qtdemux` sends an AAC track's edit list as that segment, so
 //! the priming goes the way ffmpeg drops it.
-#![cfg(all(any(target_os = "linux", windows), feature = "ffmpeg"))]
+#![cfg(all(
+    any(target_os = "linux", target_os = "macos", windows),
+    feature = "ffmpeg"
+))]
 
 #[path = "common/collect_sink.rs"]
 mod collect_sink;

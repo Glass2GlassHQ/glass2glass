@@ -839,7 +839,13 @@ impl BitWriter {
     }
 
     /// Unsigned Exp-Golomb (`ue(v)`), the H.264/H.265 RBSP coding.
-    #[cfg(any(test, all(any(target_os = "linux", windows), feature = "ffmpeg")))]
+    #[cfg(any(
+        test,
+        all(
+            any(target_os = "linux", target_os = "macos", windows),
+            feature = "ffmpeg"
+        )
+    ))]
     pub(crate) fn write_ue(&mut self, v: u32) {
         let v1 = v + 1;
         let n = 31 - v1.leading_zeros();

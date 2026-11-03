@@ -128,9 +128,15 @@ use crate::decklinkaudiosink::DeckLinkAudioSink;
 use crate::decklinkvideosink::DeckLinkVideoSink;
 #[cfg(all(target_os = "linux", feature = "ffmpeg"))]
 use crate::ffmpegdec::Backend as FfmpegBackend;
-#[cfg(all(any(target_os = "linux", windows), feature = "ffmpeg"))]
+#[cfg(all(
+    any(target_os = "linux", target_os = "macos", windows),
+    feature = "ffmpeg"
+))]
 use crate::ffmpegdec::FfmpegH264Dec;
-#[cfg(all(any(target_os = "linux", windows), feature = "ffmpeg"))]
+#[cfg(all(
+    any(target_os = "linux", target_os = "macos", windows),
+    feature = "ffmpeg"
+))]
 use crate::ffmpegenc::{Backend as FfmpegEncBackend, FfmpegVideoEnc};
 use crate::fmp4demux::Fmp4Demux;
 #[cfg(feature = "hls")]
@@ -1864,7 +1870,10 @@ fn register_uri_handlers(reg: &mut Registry) {
 /// the alternative the search settled on (see [`ffmpegdec_output_format`]).
 /// Decoders mirror their feature gates, so the search only routes through a
 /// decoder when its backend is compiled in.
-#[cfg(all(any(target_os = "linux", windows), feature = "ffmpeg"))]
+#[cfg(all(
+    any(target_os = "linux", target_os = "macos", windows),
+    feature = "ffmpeg"
+))]
 fn ffmpegdec_output_format(out: &Caps) -> crate::ffmpegdec::OutputFormat {
     ffmpegdec_pinned_output_format(out).unwrap_or(crate::ffmpegdec::OutputFormat::Auto)
 }
@@ -1873,7 +1882,10 @@ fn ffmpegdec_output_format(out: &Caps) -> crate::ffmpegdec::OutputFormat {
 /// that fixes NV12, a non-4:2:0 chroma, or a 10-/12-bit format must get a
 /// decoder built for exactly that, or its `CapsChanged` is rejected at startup.
 /// `None` for an I420 / non-raw target, which gets `Auto`.
-#[cfg(all(any(target_os = "linux", windows), feature = "ffmpeg"))]
+#[cfg(all(
+    any(target_os = "linux", target_os = "macos", windows),
+    feature = "ffmpeg"
+))]
 fn ffmpegdec_pinned_output_format(out: &Caps) -> Option<crate::ffmpegdec::OutputFormat> {
     use crate::ffmpegdec::OutputFormat;
     let Caps::RawVideo { format, .. } = out else {
@@ -1895,7 +1907,13 @@ fn ffmpegdec_pinned_output_format(out: &Caps) -> Option<crate::ffmpegdec::Output
 }
 
 // measured 2026-10-20, see design/decode.md
-#[cfg(all(any(target_os = "linux", windows), feature = "ffmpeg"))]
+#[cfg(all(target_os = "macos", feature = "vtdecode"))]
+const VIDEOTOOLBOX_OVER_FFMPEG_RANK: i16 = 1;
+
+#[cfg(all(
+    any(target_os = "linux", target_os = "macos", windows),
+    feature = "ffmpeg"
+))]
 const FFMPEGDEC_FRAME_COST: g2g_core::runtime::FrameCost = g2g_core::runtime::FrameCost {
     fixed_us: 0,
     per_megapixel_us: 600,
@@ -2116,17 +2134,24 @@ fn register_autoplug_candidates(reg: &mut Registry) {
     // fixed-I420 decoder under a chain promised NV12, so the runner's forward-caps
     // pre-fix (sink's NV12 accept-set) hit the decoder's `format != output_format`
     // arm and failed startup negotiation. A loose target gets `Auto`.
-    #[cfg(all(any(target_os = "linux", windows), feature = "ffmpeg"))]
+    #[cfg(all(
+        any(target_os = "linux", target_os = "macos", windows),
+        feature = "ffmpeg"
+    ))]
     reg.register(
         ElementFactory::of::<FfmpegH264Dec>("ffmpegdec", |out| {
             Box::new(FfmpegH264Dec::new().with_output_format(ffmpegdec_output_format(out)))
         })
+        .accepting_input(crate::ffmpegdec::libavcodec_decodes_in_software)
         .cost(FFMPEGDEC_FRAME_COST),
     );
     // AAC (and other libavcodec audio codecs) -> interleaved PcmS16Le (M422), the
     // audio sibling of ffmpegdec, in the auto-plug pool so a decode chain reaches
     // raw audio (e.g. an MPEG-TS / HLS AAC track).
-    #[cfg(all(any(target_os = "linux", windows), feature = "ffmpeg"))]
+    #[cfg(all(
+        any(target_os = "linux", target_os = "macos", windows),
+        feature = "ffmpeg"
+    ))]
     reg.register(ElementFactory::of::<crate::ffmpegaudiodec::FfmpegAudioDec>(
         "ffmpegaudiodec",
         |_| Box::new(crate::ffmpegaudiodec::FfmpegAudioDec::new()),
@@ -2134,7 +2159,10 @@ fn register_autoplug_candidates(reg: &mut Registry) {
     // A codec known only by its container tag (`ffmpeg-long-tail`) has no caps a
     // template can list, so these registrations take any input and keep the tags
     // libavformat maps to a libavcodec decoder.
-    #[cfg(all(any(target_os = "linux", windows), feature = "ffmpeg-long-tail"))]
+    #[cfg(all(
+        any(target_os = "linux", target_os = "macos", windows),
+        feature = "ffmpeg-long-tail"
+    ))]
     {
         use g2g_core::{PadDirection, PadTemplate, PadTemplates};
         let any_input = |templates: Vec<PadTemplate>| {
@@ -2268,14 +2296,16 @@ fn register_autoplug_candidates(reg: &mut Registry) {
         ElementFactory::of::<crate::vtdecode::VtDecode>("vtdec", |_| {
             Box::new(crate::vtdecode::VtDecode::h264())
         })
-        .hardware(),
+        .hardware()
+        .rank(VIDEOTOOLBOX_OVER_FFMPEG_RANK),
     );
     #[cfg(all(target_os = "macos", feature = "vtdecode"))]
     reg.register(
         ElementFactory::of::<crate::vtdecode::VtDecode>("vtdech265", |_| {
             Box::new(crate::vtdecode::VtDecode::h265())
         })
-        .hardware(),
+        .hardware()
+        .rank(VIDEOTOOLBOX_OVER_FFMPEG_RANK),
     );
     #[cfg(all(target_os = "macos", feature = "vtdecode"))]
     reg.register_launch(
@@ -3463,7 +3493,10 @@ fn register_feature_gated(reg: &mut Registry) {
         )
         .with_experimental(),
     );
-    #[cfg(all(any(target_os = "linux", windows), feature = "ffmpeg"))]
+    #[cfg(all(
+        any(target_os = "linux", target_os = "macos", windows),
+        feature = "ffmpeg"
+    ))]
     reg.register_launch(LaunchFactory::of::<FfmpegH264Dec>("ffmpegdec", || {
         // Auto preserves source chroma (M685/M686): a `decodebin` chain whose
         // downstream pins 4:2:2 / 4:4:4 negotiates it, while a 4:2:0 source (or
@@ -3471,7 +3504,10 @@ fn register_feature_gated(reg: &mut Registry) {
         // sets `output-format=nv12` explicitly.
         Box::new(FfmpegH264Dec::new().with_output_format(crate::ffmpegdec::OutputFormat::Auto))
     }));
-    #[cfg(all(any(target_os = "linux", windows), feature = "ffmpeg"))]
+    #[cfg(all(
+        any(target_os = "linux", target_os = "macos", windows),
+        feature = "ffmpeg"
+    ))]
     reg.register_launch(LaunchFactory::of::<crate::ffmpegaudiodec::FfmpegAudioDec>(
         "ffmpegaudiodec",
         || Box::new(crate::ffmpegaudiodec::FfmpegAudioDec::new()),
@@ -3499,12 +3535,18 @@ fn register_feature_gated(reg: &mut Registry) {
     // ffmpegdec. `ffmpegenc` defaults to the NVENC backend (`h264_nvenc`); the
     // explicit `x264enc` name opens the libx264 software encoder for hosts without
     // an NVIDIA GPU. Launch-only: an encoder is never an auto-plug candidate.
-    #[cfg(all(any(target_os = "linux", windows), feature = "ffmpeg"))]
+    #[cfg(all(
+        any(target_os = "linux", target_os = "macos", windows),
+        feature = "ffmpeg"
+    ))]
     reg.register_launch(
         LaunchFactory::of::<FfmpegVideoEnc>("ffmpegenc", || Box::new(FfmpegVideoEnc::new()))
             .with_usable(|| FfmpegEncBackend::Nvenc.usable()),
     );
-    #[cfg(all(any(target_os = "linux", windows), feature = "ffmpeg"))]
+    #[cfg(all(
+        any(target_os = "linux", target_os = "macos", windows),
+        feature = "ffmpeg"
+    ))]
     reg.register_launch(
         LaunchFactory::of::<FfmpegVideoEnc>("x264enc", || {
             Box::new(FfmpegVideoEnc::new().with_backend(FfmpegEncBackend::Software))
@@ -3561,7 +3603,10 @@ fn register_feature_gated(reg: &mut Registry) {
     // libavcodec AAC-LC audio encoder (M292), the gst `avenc_aac` analog and the
     // Linux audio-encode path for the A/V muxers; the `aacenc` alias is added in
     // `register_aliases`.
-    #[cfg(all(any(target_os = "linux", windows), feature = "ffmpeg"))]
+    #[cfg(all(
+        any(target_os = "linux", target_os = "macos", windows),
+        feature = "ffmpeg"
+    ))]
     reg.register_launch(LaunchFactory::of::<crate::ffmpegaacenc::FfmpegAacEnc>(
         "avenc_aac",
         || Box::new(crate::ffmpegaacenc::FfmpegAacEnc::new()),
@@ -3972,7 +4017,11 @@ mod domain_aware_autoplug_tests {
     }
 }
 
-#[cfg(all(test, any(target_os = "linux", windows), feature = "ffmpeg"))]
+#[cfg(all(
+    test,
+    any(target_os = "linux", target_os = "macos", windows),
+    feature = "ffmpeg"
+))]
 mod ffmpeg_enc_registry_tests {
     use super::*;
 

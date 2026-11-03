@@ -1,7 +1,11 @@
 //! M1546: a bare `decodebin` on an FLV selects the codec the file's tags carry,
 //! so a VP6 FLV no longer plugs a decoder on the default H.264 port.
 
-#![cfg(all(feature = "std", any(target_os = "linux", windows), feature = "ffmpeg"))]
+#![cfg(all(
+    feature = "std",
+    any(target_os = "linux", target_os = "macos", windows),
+    feature = "ffmpeg"
+))]
 
 mod framemd5_common;
 use framemd5_common::{decoded_i420_md5s, ffmpeg_frame_md5s};

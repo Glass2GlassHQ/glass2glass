@@ -953,7 +953,10 @@ mod tests {
         assert!(r.ok, "findings: {:?}", r.findings);
     }
 
-    #[cfg(all(any(target_os = "linux", windows), not(feature = "ffmpeg")))]
+    #[cfg(all(
+        any(target_os = "linux", target_os = "macos", windows),
+        not(feature = "ffmpeg")
+    ))]
     #[test]
     fn x264enc_names_its_feature() {
         let reg = default_registry();
@@ -1309,7 +1312,10 @@ mod tests {
     #[test]
     fn the_extra_decoder_names_point_at_the_ffmpeg_decoders() {
         let reg = default_registry();
-        let compiled = cfg!(all(any(target_os = "linux", windows), feature = "ffmpeg"));
+        let compiled = cfg!(all(
+            any(target_os = "linux", target_os = "macos", windows),
+            feature = "ffmpeg"
+        ));
         for name in ["vp8dec", "mpeg2dec", "avdec_vp9", "avdec_mpeg4"] {
             let expected = if compiled {
                 GstEquivalent::Available

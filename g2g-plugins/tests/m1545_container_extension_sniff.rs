@@ -2,7 +2,11 @@
 //! transport stream saved as `.mpg` demuxes as one, and `mpegpsdemux` fails on
 //! bytes that never show a pack header instead of ending early with success.
 
-#![cfg(all(feature = "std", any(target_os = "linux", windows), feature = "ffmpeg"))]
+#![cfg(all(
+    feature = "std",
+    any(target_os = "linux", target_os = "macos", windows),
+    feature = "ffmpeg"
+))]
 
 use g2g_core::runtime::{parse_launch, run_graph};
 use g2g_core::G2gError;

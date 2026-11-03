@@ -41,7 +41,10 @@ pub(crate) struct EmitFeedback {
 #[cfg(any(
     feature = "av1-encode",
     all(target_os = "linux", feature = "openh264"),
-    all(any(target_os = "linux", windows), feature = "ffmpeg")
+    all(
+        any(target_os = "linux", target_os = "macos", windows),
+        feature = "ffmpeg"
+    )
 ))]
 pub(crate) fn bitrate_change_is_significant(current: u64, target: u64) -> bool {
     let current = current.max(1);

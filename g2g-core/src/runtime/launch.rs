@@ -2912,9 +2912,18 @@ fn expand_uri_sources(
             let preferred = consumer.map_or(MemoryDomainKind::System, |name| {
                 registry.declared_memory_preference(name)
             });
-            let target = |c: &Caps| is_raw_video(c) || is_raw_audio(c);
+            let decodes_video_to_sink = matches!(caps, Caps::CompressedVideo { .. });
+            let sink_target = sink
+                .as_deref()
+                .filter(|_| decodes_video_to_sink)
+                .and_then(|sink| {
+                    registry.raw_video_target_for_sink(&caps, sink, DECODEBIN_MAX_DEPTH)
+                });
+            let needs_convert = sink.is_some() && decodes_video_to_sink && sink_target.is_none();
+            let any_raw = |c: &Caps| is_raw_video(c) || is_raw_audio(c);
+            let target = sink_target.as_deref().unwrap_or(&any_raw);
             let decoders = registry
-                .autoplug_avoiding(&caps, &target, DECODEBIN_MAX_DEPTH, preferred, avoided)
+                .autoplug_avoiding(&caps, target, DECODEBIN_MAX_DEPTH, preferred, avoided)
                 .ok_or_else(|| ParseError::no_decode_chain(&caps))?;
             new_chain.push(Item::Prebuilt {
                 node: PrebuiltNode::Source(built.source),
@@ -2936,9 +2945,7 @@ fn expand_uri_sources(
                 }
             }
             if let Some(sink) = sink {
-                if matches!(caps, Caps::CompressedVideo { .. })
-                    && !registry.decoded_video_reaches_sink(&caps, &sink, DECODEBIN_MAX_DEPTH)
-                {
+                if needs_convert {
                     new_chain.push(Item::Element(ElementSpec {
                         name: "videoconvert".to_string(),
                         props: Vec::new(),

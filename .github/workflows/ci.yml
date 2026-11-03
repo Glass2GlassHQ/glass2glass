@@ -845,10 +845,20 @@ jobs:
             cargo check -p g2g-plugins --locked --all-targets --features "$f"
             echo "::endgroup::"
           done
+      - uses: actions/cache@v4
+        with:
+          path: ~/g2g-ffmpeg
+          key: ffmpeg-macos-${{ hashFiles('tools/ffmpeg-build.sh') }}
+      - name: build ffmpeg
+        run: tools/ffmpeg-build.sh "$HOME/g2g-ffmpeg" | sed 's/^export //' >> "$GITHUB_ENV"
       - name: release binary feature set
         run: |
           brew install libvpx
           cargo check -p g2g-plugins --locked --bin g2g-launch --features release-binary-macos
+      - name: test g2g-plugins (ffmpeg)
+        run: |
+          export DYLD_FALLBACK_LIBRARY_PATH="$HOME/g2g-ffmpeg/lib"
+          cargo test -p g2g-plugins --locked --features ffmpeg,ffmpeg-long-tail --lib
       # M731+: run the VideoToolbox / Metal / Core Audio / AVFoundation /
       # ScreenCaptureKit elements for real (decode the reference fixtures,
       # encode round trip, CAMetalLayer present, AudioQueue render + capture;

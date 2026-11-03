@@ -9,7 +9,11 @@
 //! the end-to-end PCM output is live-validated with `g2g-launch`. Needs the audio
 //! decoder in the autoplug pool (ffmpeg).
 
-#![cfg(all(feature = "std", any(target_os = "linux", windows), feature = "ffmpeg"))]
+#![cfg(all(
+    feature = "std",
+    any(target_os = "linux", target_os = "macos", windows),
+    feature = "ffmpeg"
+))]
 
 mod ts_continuity;
 

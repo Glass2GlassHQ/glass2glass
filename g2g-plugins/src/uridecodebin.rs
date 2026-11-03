@@ -1311,19 +1311,21 @@ fn wire_av_ports(
                 .make_element(sinks.video)
                 .ok_or_else(|| ParseError::UnknownElement(sinks.video.to_string()))?;
             let vsnk = graph.add_sink(GraphNodeRef::Element(sink));
-            let after_deinterlace =
-                if reg.decoded_video_reaches_sink(&port.caps, sinks.video, PLAYBIN_MAX_DEPTH) {
-                    vsnk
-                } else {
-                    let convert = reg
-                        .make_element("videoconvert")
-                        .ok_or_else(|| ParseError::UnknownElement("videoconvert".to_string()))?;
-                    let convert = graph.add_transform(GraphNodeRef::Element(convert));
-                    graph.link(convert, vsnk).map_err(ParseError::Graph)?;
-                    convert
-                };
+            let sink_target =
+                reg.raw_video_target_for_sink(&port.caps, sinks.video, PLAYBIN_MAX_DEPTH);
+            let after_deinterlace = if sink_target.is_some() {
+                vsnk
+            } else {
+                let convert = reg
+                    .make_element("videoconvert")
+                    .ok_or_else(|| ParseError::UnknownElement("videoconvert".to_string()))?;
+                let convert = graph.add_transform(GraphNodeRef::Element(convert));
+                graph.link(convert, vsnk).map_err(ParseError::Graph)?;
+                convert
+            };
             let head = deinterlace_into(graph, after_deinterlace)?;
-            reg.decodebin_port(graph, pad, head, port, &is_raw_video, PLAYBIN_MAX_DEPTH)
+            let target = sink_target.as_deref().unwrap_or(&is_raw_video);
+            reg.decodebin_port(graph, pad, head, port, target, PLAYBIN_MAX_DEPTH)
                 .map_err(|e| map_decode_err(&port.caps, e))?;
         } else {
             wire_audio_branch(reg, sinks, graph, pad, &port.caps)?;
@@ -2318,7 +2320,10 @@ pub fn mp4_primary_stream(location: &str, caps: &Caps) -> Option<ContainerStream
             })
         })
         .collect();
-    #[cfg(all(any(target_os = "linux", windows), feature = "ffmpeg-long-tail"))]
+    #[cfg(all(
+        any(target_os = "linux", target_os = "macos", windows),
+        feature = "ffmpeg-long-tail"
+    ))]
     let (streams, unsupported) = name_undecodable_tagged(streams, unsupported);
     Some(ContainerStreams {
         streams,
@@ -2373,7 +2378,10 @@ pub fn mkv_primary_stream(location: &str, caps: &Caps) -> Option<ContainerStream
             has_clean_aperture: false,
         })
         .collect();
-    #[cfg(all(any(target_os = "linux", windows), feature = "ffmpeg-long-tail"))]
+    #[cfg(all(
+        any(target_os = "linux", target_os = "macos", windows),
+        feature = "ffmpeg-long-tail"
+    ))]
     let (streams, unsupported) = name_undecodable_tagged(streams, unsupported);
     Some(ContainerStreams {
         streams,
@@ -2720,7 +2728,10 @@ pub fn avi_primary_stream(location: &str, caps: &Caps) -> Option<ContainerStream
             })
         })
         .collect();
-    #[cfg(all(any(target_os = "linux", windows), feature = "ffmpeg-long-tail"))]
+    #[cfg(all(
+        any(target_os = "linux", target_os = "macos", windows),
+        feature = "ffmpeg-long-tail"
+    ))]
     let (streams, unsupported) = name_undecodable_tagged(streams, unsupported);
     Some(ContainerStreams {
         streams,
@@ -2729,7 +2740,10 @@ pub fn avi_primary_stream(location: &str, caps: &Caps) -> Option<ContainerStream
 }
 
 // a tagged stream no decoder takes is named the way its demuxer named it before it forwarded tags
-#[cfg(all(any(target_os = "linux", windows), feature = "ffmpeg-long-tail"))]
+#[cfg(all(
+    any(target_os = "linux", target_os = "macos", windows),
+    feature = "ffmpeg-long-tail"
+))]
 fn name_undecodable_tagged(
     streams: Vec<PrimaryStream>,
     mut unsupported: Vec<String>,

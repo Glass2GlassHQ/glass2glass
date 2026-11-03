@@ -1025,7 +1025,10 @@ pub(crate) fn adts_header(buf: &[u8]) -> Option<AdtsHeader> {
 }
 
 #[cfg(any(
-    all(any(target_os = "linux", windows), feature = "ffmpeg"),
+    all(
+        any(target_os = "linux", target_os = "macos", windows),
+        feature = "ffmpeg"
+    ),
     feature = "aac-decode"
 ))]
 pub(crate) fn adts_frame_len(buf: &[u8]) -> Option<usize> {

@@ -1,7 +1,11 @@
 //! M1544: `decodebin` splices `mpegvideoparse` ahead of the MPEG-2 decoder, so a
 //! transport stream whose PES packets split field pictures decodes bit-exact.
 
-#![cfg(all(feature = "std", any(target_os = "linux", windows), feature = "ffmpeg"))]
+#![cfg(all(
+    feature = "std",
+    any(target_os = "linux", target_os = "macos", windows),
+    feature = "ffmpeg"
+))]
 
 mod framemd5_common;
 use framemd5_common::{decoded_i420_md5s, ffmpeg_frame_md5s};

@@ -1,6 +1,10 @@
 // `decodebin current-video=N` / `current-audio=N` decode the Nth stream of that kind in
 // container order, the stream `ffmpeg -map 0:v:N` / `-map 0:a:N` reads.
-#![cfg(all(feature = "std", feature = "ffmpeg", any(target_os = "linux", windows)))]
+#![cfg(all(
+    feature = "std",
+    feature = "ffmpeg",
+    any(target_os = "linux", target_os = "macos", windows)
+))]
 
 #[path = "common/multitrack_fixture.rs"]
 mod multitrack_fixture;

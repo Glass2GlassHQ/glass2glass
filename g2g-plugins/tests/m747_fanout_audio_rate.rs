@@ -15,7 +15,11 @@
 //!
 //! Needs the AAC decoder in the autoplug pool (ffmpeg) and `default_registry`
 //! (std).
-#![cfg(all(feature = "std", any(target_os = "linux", windows), feature = "ffmpeg"))]
+#![cfg(all(
+    feature = "std",
+    any(target_os = "linux", target_os = "macos", windows),
+    feature = "ffmpeg"
+))]
 
 use std::path::PathBuf;
 
