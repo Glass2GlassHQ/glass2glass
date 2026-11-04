@@ -317,7 +317,8 @@ jobs:
         shell: bash
         run: |
           python -m pip install delocate==0.13.0
-          delocate-wheel -w g2g-pyapi/repaired g2g-pyapi/dist/*.whl
+          # delocate resolves the @rpath names inside the ffmpeg libraries on this variable
+          DYLD_LIBRARY_PATH="$HOME/g2g-codecs/lib" delocate-wheel -w g2g-pyapi/repaired g2g-pyapi/dist/*.whl
           rm g2g-pyapi/dist/*.whl
           mv g2g-pyapi/repaired/*.whl g2g-pyapi/dist/
       - name: smoke run
