@@ -91,12 +91,13 @@ jobs:
         run: >
           cargo build --locked --release -p g2g-plugins --target ${{ matrix.target }}
           --features ${{ matrix.features }} --bin g2g-launch --bin g2g-inspect
+      # glibc before 2.34 ships libdl, libpthread and librt as separate libraries, and newer glibc keeps stubs under the same names
       - name: links only system and bundled libraries (Linux)
         if: runner.os == 'Linux'
         run: |
           unexpected=$(readelf -d target/${{ matrix.target }}/release/g2g-launch "$CODEC_PREFIX"/lib/lib*.so.*.*.* \
             | sed -n 's/.*Shared library: \[\(.*\)\]/\1/p' | sort -u \
-            | grep -vxE 'libc\.so\.6|libm\.so\.6|libgcc_s\.so\.1|libstdc\+\+\.so\.6|ld-linux-.*\.so\.[0-9]+' \
+            | grep -vxE 'libc\.so\.6|libm\.so\.6|libdl\.so\.2|libpthread\.so\.0|librt\.so\.1|libgcc_s\.so\.1|libstdc\+\+\.so\.6|ld-linux-.*\.so\.[0-9]+' \
             | while read -r library; do [ -f "$CODEC_PREFIX/lib/$library" ] || echo "$library"; done)
           [ -z "$unexpected" ] || { echo "::error::g2g-launch links $unexpected"; exit 1; }
       - name: links only system and bundled libraries (macOS)
