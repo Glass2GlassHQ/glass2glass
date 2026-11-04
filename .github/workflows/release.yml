@@ -241,12 +241,13 @@ jobs:
           brew install nasm
           cargo install cargo-about --version 0.9.3 --locked --features cli
       # rustc leaves the library search path out of the extension, and delocate follows the rpath to find the libraries it bundles
+      # install_name_tool needs spare Mach-O header space for the paths delocate writes
       - name: build ffmpeg (macOS)
         if: runner.os == 'macOS'
         shell: bash
         run: |
           tools/ffmpeg-build.sh "$HOME/g2g-codecs" | sed 's/^export //' >> "$GITHUB_ENV"
-          echo "RUSTFLAGS=-C link-arg=-Wl,-rpath,$HOME/g2g-codecs/lib" >> "$GITHUB_ENV"
+          echo "RUSTFLAGS=-C link-arg=-Wl,-rpath,$HOME/g2g-codecs/lib -C link-arg=-Wl,-headerpad_max_install_names" >> "$GITHUB_ENV"
           cp "$HOME"/g2g-codecs/ffmpeg-*/COPYING.LGPLv2.1 g2g-pyapi/LICENSE-FFMPEG.txt
       - name: build libvpx (macOS, Windows)
         if: runner.os != 'Linux'
@@ -296,7 +297,8 @@ jobs:
           # repair copies the bundled ffmpeg libraries into the wheel
           docker-options: -e PKG_CONFIG_PATH=/opt/g2g-codecs/lib/pkgconfig -e VPX_STATIC=1 -e LD_LIBRARY_PATH=/opt/g2g-codecs/lib
           # --features replaces the list in pyproject.toml
-          args: --release --locked --out dist --auditwheel repair --features ${{ matrix.features }}
+          # maturin's macOS repair wrote an x86_64 extension that install_name_tool rejects as malformed
+          args: --release --locked --out dist --auditwheel ${{ runner.os == 'macOS' && 'skip' || 'repair' }} --features ${{ matrix.features }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
