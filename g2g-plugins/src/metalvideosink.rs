@@ -48,10 +48,11 @@ use objc2_quartz_core::{CAMetalDrawable, CAMetalLayer, CATransaction};
 
 use g2g_core::element::{PresentationStats, QosMessage};
 use g2g_core::{
-    AsyncElement, BusHandle, Caps, CapsConstraint, CapsSet, ClockSync, ConfigureOutcome, Dim,
-    DomainSet, ElementMetadata, G2gError, HardwareError, Interlace, MemoryDomain, MemoryDomainKind,
-    OutputSink, PadTemplate, PadTemplates, PipelinePacket, PresentationPacer, PropError, PropValue,
-    PropertySpec, Rate, RawVideoFormat, PACING_PROPERTIES,
+    AsyncElement, BusHandle, Caps, CapsConstraint, CapsSet, ClockCandidate, ClockPriority,
+    ClockSync, ConfigureOutcome, Dim, DomainSet, ElementMetadata, G2gError, HardwareError,
+    Interlace, MemoryDomain, MemoryDomainKind, OutputSink, PadTemplate, PadTemplates,
+    PipelineClock, PipelinePacket, PresentationPacer, PropError, PropValue, PropertySpec, Rate,
+    RawVideoFormat, PACING_PROPERTIES,
 };
 
 use crate::clock::wait_to_present;
@@ -174,8 +175,8 @@ impl AppKitWindow {
         Self(window_address)
     }
 
-    /// Draw `layer` in this window instead of the layer it showed before.
-    fn show(&self, layer: &CAMetalLayer) {
+    /// Draw `layer` in this window at `width` x `height` points instead of the layer it showed before.
+    fn show(&self, layer: &CAMetalLayer, width: u32, height: u32) {
         let window_address = self.0;
         let layer_address = layer as *const CAMetalLayer as usize;
         DispatchQueue::main().exec_sync(move || {
@@ -189,6 +190,8 @@ impl AppKitWindow {
             if let Some(view) = window.contentView() {
                 view.setLayer(Some(layer));
             }
+            window.setContentSize(CGSize::new(f64::from(width), f64::from(height)));
+            window.center();
         });
     }
 
@@ -405,7 +408,7 @@ impl MetalVideoSink {
         });
         if self.external_layer.is_none() && APPKIT_MAIN_LOOP.load(Ordering::Acquire) {
             match &self.window {
-                Some(window) => window.show(&layer),
+                Some(window) => window.show(&layer, width, height),
                 None => self.window = Some(AppKitWindow::open(&layer, width, height)),
             }
         }
@@ -645,11 +648,26 @@ fn nv12_any() -> Caps {
     }
 }
 
+#[derive(Debug)]
+struct MetalClock;
+impl PipelineClock for MetalClock {
+    fn now_ns(&self) -> u64 {
+        g2g_core::metrics::monotonic_ns()
+    }
+}
+
 impl AsyncElement for MetalVideoSink {
     type ProcessFuture<'a>
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
         Self: 'a;
+
+    fn provide_clock(&self) -> Option<ClockCandidate> {
+        Some(ClockCandidate::new(
+            ClockPriority::Provider,
+            alloc::sync::Arc::new(MetalClock),
+        ))
+    }
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
         upstream_caps.intersect(&nv12_any())

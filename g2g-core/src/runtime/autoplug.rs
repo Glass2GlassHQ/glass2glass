@@ -3129,8 +3129,14 @@ mod factory {
             max_depth: usize,
         ) -> Option<CapsTarget> {
             let sink = self.make_element(sink)?;
-            let sink_takes_raw_video: CapsTarget =
-                Box::new(move |caps| is_raw_video(caps) && sink.intercept_caps(caps).is_ok());
+            let sink_takes_raw_video: CapsTarget = Box::new(move |caps| {
+                // display sinks pass any caps through intercept_caps and list their formats only in the constraint
+                let declared = match sink.caps_constraint_as_sink() {
+                    crate::CapsConstraint::Accepts(accepted) => accepted.accepts(caps),
+                    _ => true,
+                };
+                is_raw_video(caps) && declared && sink.intercept_caps(caps).is_ok()
+            });
             self.autoplug_names_preferring(
                 input,
                 &*sink_takes_raw_video,

@@ -28,6 +28,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M2083: the macOS release binaries and wheels ship the LGPL ffmpeg libraries, adding VP8, VP9 and the long-tail decoders, and `vtdec` stays first for H.264 and H.265.
 - M2084: `decodebin` skips libavcodec's hardware-only AV1 decoder, so AV1 decodes with `rav1ddec` on hosts without libdav1d.
 - M2085: `decodebin` tries `ffmpegvaapidec` after the software decoders.
+- M2086: `playbin` adds a `videoconvert` for sinks that list their formats only in their caps constraint.
+- M2087: `metalvideosink` paces video-only streams and resizes its window to the real picture size.
 
 ## 0.12.0
 

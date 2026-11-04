@@ -294,7 +294,10 @@ impl AsyncElement for Nv12OnlySink {
     where
         Self: 'a;
     fn intercept_caps(&self, c: &Caps) -> Result<Caps, G2gError> {
-        c.intersect(&raw_video())
+        Ok(c.clone())
+    }
+    fn caps_constraint_as_sink(&self) -> g2g_core::CapsConstraint<'_> {
+        g2g_core::CapsConstraint::Accepts(CapsSet::one(raw_video()))
     }
     fn configure_pipeline(&mut self, _c: &Caps) -> Result<ConfigureOutcome, G2gError> {
         Ok(ConfigureOutcome::Accepted)
