@@ -192,24 +192,25 @@ pub fn file_handler() -> UriSourceFactory {
         if uri.rest.is_empty() {
             return Err(UriError::Malformed);
         }
-        let prefix = read_file_prefix(uri.rest, crate::typefind::SNIFF_LEN as u64)
+        let path = file_uri_rest_to_path(uri.rest);
+        let prefix = read_file_prefix(path, crate::typefind::SNIFF_LEN as u64)
             .ok_or(UriError::Unreadable)?;
         match crate::typefind::sniff_caps(&prefix).ok_or(UriError::UnknownContent)? {
             Caps::ByteStream {
                 encoding: ByteStreamEncoding::IsoBmff,
             } => {
-                let mut source = crate::mp4src::Mp4Src::new(uri.rest);
+                let mut source = crate::mp4src::Mp4Src::new(path);
                 let (caps, has_clean_aperture) = source
                     .probe_stream()
                     .map_err(|_| UriError::UnknownContent)?;
                 Ok(UriSource {
                     source: Box::new(source),
                     caps,
-                    has_clean_aperture: crops_clean_aperture(uri.rest, has_clean_aperture),
+                    has_clean_aperture: crops_clean_aperture(path, has_clean_aperture),
                 })
             }
             caps => Ok(UriSource {
-                source: Box::new(crate::filesrc::FileSrc::new(uri.rest, caps.clone())),
+                source: Box::new(crate::filesrc::FileSrc::new(path, caps.clone())),
                 caps,
                 has_clean_aperture: false,
             }),
@@ -334,7 +335,21 @@ fn file_uri_path(uri: &str) -> Option<&str> {
     if parsed.scheme != "file" || parsed.rest.is_empty() {
         return None;
     }
-    Some(parsed.rest)
+    Some(file_uri_rest_to_path(parsed.rest))
+}
+
+#[cfg(feature = "std")]
+pub(crate) fn file_uri_rest_to_path(rest: &str) -> &str {
+    // windows rejects `/C:/clip.mp4` with os error 123
+    match rest.strip_prefix('/') {
+        Some(path)
+            if cfg!(windows)
+                && matches!(path.as_bytes(), [drive, b':', ..] if drive.is_ascii_alphabetic()) =>
+        {
+            path
+        }
+        _ => rest,
+    }
 }
 
 /// The first `bytes` of `path`, or `None` if it cannot be opened or read. An

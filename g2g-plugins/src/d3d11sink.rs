@@ -39,7 +39,7 @@
 use core::future::Future;
 use core::mem::ManuallyDrop;
 use core::pin::Pin;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
@@ -145,6 +145,7 @@ pub struct D3D11Sink {
     width: u32,
     height: u32,
     frames_presented: Arc<AtomicU64>,
+    window_closed: Arc<AtomicBool>,
     latency: Arc<LatencyHistogram>,
     /// PTS pacing + QoS late-drop, on top of the worker's present-paced ack: idle
     /// until the runner hands over a clock, and the default lateness bound never
@@ -181,6 +182,7 @@ impl D3D11Sink {
             width: 0,
             height: 0,
             frames_presented: Arc::new(AtomicU64::new(0)),
+            window_closed: Arc::new(AtomicBool::new(false)),
             latency: Arc::new(LatencyHistogram::new()),
             pacer: PresentationPacer::for_video_sink(),
         }
@@ -216,6 +218,14 @@ impl D3D11Sink {
     /// Frames dropped by QoS late-drop (past their deadline beyond the bound).
     pub fn late_dropped(&self) -> u64 {
         self.pacer.late_dropped()
+    }
+
+    fn worker_gone_error(&self) -> G2gError {
+        if self.window_closed.load(Ordering::Acquire) {
+            G2gError::WindowClosed
+        } else {
+            G2gError::Hardware(HardwareError::Other)
+        }
     }
 
     pub fn frames_presented(&self) -> u64 {
@@ -394,8 +404,11 @@ impl AsyncElement for D3D11Sink {
         }
 
         let (tx, rx) = std::sync::mpsc::channel::<WorkerCmd>();
-        let presented = Arc::clone(&self.frames_presented);
-        let latency = Arc::clone(&self.latency);
+        let reports = WorkerReports {
+            presented: Arc::clone(&self.frames_presented),
+            window_closed: Arc::clone(&self.window_closed),
+            latency: Arc::clone(&self.latency),
+        };
         let title = self.title.clone();
         let ready = Arc::new(Handshake::new());
         let ready_for_worker = Arc::clone(&ready);
@@ -403,7 +416,7 @@ impl AsyncElement for D3D11Sink {
         let join = thread::Builder::new()
             .name(String::from("g2g-d3d11sink"))
             .spawn(move || {
-                if let Err(e) = worker_main(w, h, title, rx, presented, latency, ready_for_worker) {
+                if let Err(e) = worker_main(w, h, title, rx, reports, ready_for_worker) {
                     std::eprintln!("g2g-d3d11sink worker error: {e:?}");
                 }
             })
@@ -453,10 +466,8 @@ impl AsyncElement for D3D11Sink {
                         orientation,
                         ack: ack_tx,
                     })
-                    .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
-                    ack_rx
-                        .await
-                        .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
+                    .map_err(|_| self.worker_gone_error())?;
+                    ack_rx.await.map_err(|_| self.worker_gone_error())?;
                     Ok(())
                 }
                 PipelinePacket::CapsChanged(_) => Ok(()),
@@ -523,13 +534,18 @@ struct VideoPath {
     processor: ID3D11VideoProcessor,
 }
 
+struct WorkerReports {
+    presented: Arc<AtomicU64>,
+    window_closed: Arc<AtomicBool>,
+    latency: Arc<LatencyHistogram>,
+}
+
 fn worker_main(
     width: u32,
     height: u32,
     title: String,
     rx: Receiver<WorkerCmd>,
-    presented: Arc<AtomicU64>,
-    latency: Arc<LatencyHistogram>,
+    reports: WorkerReports,
     ready: Arc<Handshake>,
 ) -> Result<(), G2gError> {
     let hwnd = create_window(&title, width, height)?;
@@ -542,6 +558,7 @@ fn worker_main(
     loop {
         if !pump_messages() {
             std::eprintln!("g2g-d3d11sink: the window was closed");
+            reports.window_closed.store(true, Ordering::Release);
             break;
         }
         match rx.recv_timeout(Duration::from_millis(8)) {
@@ -554,11 +571,11 @@ fn worker_main(
                 if let Err(e) = present_frame(&mut gpu, hwnd, &domain, width, height, orientation) {
                     std::eprintln!("g2g-d3d11sink present error: {e:?}");
                 } else {
-                    presented.fetch_add(1, Ordering::Relaxed);
+                    reports.presented.fetch_add(1, Ordering::Relaxed);
                     if arrival_ns != 0 {
                         let now = monotonic_ns();
                         if now >= arrival_ns {
-                            latency.record(now - arrival_ns);
+                            reports.latency.record(now - arrival_ns);
                         }
                     }
                 }

@@ -31,6 +31,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M2086: `playbin` adds a `videoconvert` for sinks that list their formats only in their caps constraint.
 - M2087: `metalvideosink` paces video-only streams and resizes its window to the real picture size.
 - M2088: `deinterlace` passes the sink's memory domains to its decoder, so `playbin` draws NVDEC frames.
+- M2089: `file:///C:/x` URIs open on Windows.
+- M2090: closing the `d3d11videosink` window stops the run with exit 0.
 
 ## 0.12.0
 

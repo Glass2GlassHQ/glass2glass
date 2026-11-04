@@ -118,7 +118,7 @@ fn local_path(uri: &str) -> Result<String, DiscoverError> {
     if let Some(rest) = uri.strip_prefix("file://") {
         // `file:///clip.mp4` (empty authority) and `file://clip.mp4` both reach
         // the path after the last leading slash pair.
-        return Ok(rest.to_string());
+        return Ok(crate::uridecodebin::file_uri_rest_to_path(rest).to_string());
     }
     match uri.split_once("://") {
         Some((scheme, _)) => Err(DiscoverError::UnsupportedScheme(scheme.to_string())),
@@ -450,6 +450,13 @@ mod tests {
     fn a_file_uri_and_a_bare_path_both_resolve() {
         assert_eq!(local_path("file:///tmp/clip.mp4").unwrap(), "/tmp/clip.mp4");
         assert_eq!(local_path("/tmp/clip.mp4").unwrap(), "/tmp/clip.mp4");
+        let drive_path = if cfg!(windows) {
+            "C:/clip.mp4"
+        } else {
+            "/C:/clip.mp4"
+        };
+        assert_eq!(local_path("file:///C:/clip.mp4").unwrap(), drive_path);
+        assert_eq!(local_path("file://C:/clip.mp4").unwrap(), "C:/clip.mp4");
     }
 
     #[test]
