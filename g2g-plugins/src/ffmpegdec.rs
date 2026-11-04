@@ -2403,6 +2403,13 @@ pub(crate) fn libavcodec_decodes_in_software(input: &Caps) -> bool {
         .is_some_and(|decoder| av1_decoder_runs_in_software(decoder.name()))
 }
 
+#[cfg(target_os = "linux")]
+pub(crate) fn libavcodec_has_vaapi(_input: &Caps) -> bool {
+    // SAFETY: the name is a nul-terminated literal and the call only reads libavutil's static table.
+    let device_type = unsafe { ffmpeg::ffi::av_hwdevice_find_type_by_name(c"vaapi".as_ptr()) };
+    device_type != ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_NONE
+}
+
 fn codec_id(codec: VideoCodec) -> Id {
     match codec {
         VideoCodec::H264 => Id::H264,

@@ -2211,7 +2211,8 @@ fn register_autoplug_candidates(reg: &mut Registry) {
             )
         })
         .hardware()
-        .rank(VAAPI_BELOW_SOFTWARE_DECODERS_RANK),
+        .rank(VAAPI_BELOW_SOFTWARE_DECODERS_RANK)
+        .accepting_input(crate::ffmpegdec::libavcodec_has_vaapi),
     );
     // Native NVDEC (M270), registered last so a default (System-memory) auto-plug
     // still picks a CPU decoder: `NvDec` emits NV12 in CUDA device memory, which
