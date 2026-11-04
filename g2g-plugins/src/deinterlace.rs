@@ -779,6 +779,10 @@ impl AsyncElement for Deinterlace {
         }))
     }
 
+    fn output_domain_follows_input(&self) -> bool {
+        true
+    }
+
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         self.reconfigure(absolute_caps)?;
         self.configured = true;

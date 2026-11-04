@@ -19,6 +19,7 @@ use g2g_core::{
     PipelinePacket, Rate, RawVideoFormat,
 };
 use g2g_plugins::capsfilter::CapsFilter;
+use g2g_plugins::deinterlace::{Deinterlace, DeinterlaceMode};
 
 struct NullClock;
 impl PipelineClock for NullClock {
@@ -258,6 +259,33 @@ async fn capsfilter_hands_the_sink_domain_to_a_multi_domain_producer() {
     }));
     g.link(src, filter).unwrap();
     g.link(filter, snk).unwrap();
+
+    let g = auto_plug_domain_converters(g, &fake_factory);
+    assert_eq!(g.node_count(), 3, "the producer can emit System itself");
+
+    let stats = run_graph(g, &NullClock, 4).await.expect("runs");
+    let allocation = stats.allocation.expect("the source got a proposal");
+    assert_eq!(allocation.domain, MemoryDomainKind::System);
+    assert_eq!(*seen.lock().unwrap(), 3);
+}
+
+#[tokio::test]
+async fn deinterlace_hands_the_sink_domain_to_a_multi_domain_producer() {
+    let seen = Arc::new(Mutex::new(0u64));
+    let mut g: Graph<GraphNode> = Graph::new();
+    let src = g.add_source(GraphNode::source(FakeSource {
+        count: 3,
+        domains: DomainSet::only(MemoryDomainKind::Cuda).with(MemoryDomainKind::System),
+    }));
+    let deinterlace = g.add_transform(GraphNode::element(
+        Deinterlace::new().with_mode(DeinterlaceMode::Auto),
+    ));
+    let snk = g.add_sink(GraphNode::element(DomainSink {
+        requires: DomainSet::only(MemoryDomainKind::System),
+        seen: Arc::clone(&seen),
+    }));
+    g.link(src, deinterlace).unwrap();
+    g.link(deinterlace, snk).unwrap();
 
     let g = auto_plug_domain_converters(g, &fake_factory);
     assert_eq!(g.node_count(), 3, "the producer can emit System itself");
