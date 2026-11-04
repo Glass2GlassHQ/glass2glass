@@ -44,6 +44,8 @@ use g2g_plugins::tsdemux::{TsDemux, TsStream};
 /// The subtitle page the fixture's `teletext_descriptor` names, and therefore the
 /// page both decoders follow without being told.
 const PAGE: u16 = 888;
+/// A page of the same magazine that no decoder here follows.
+const OTHER_PAGE_OF_MAGAZINE: u16 = 801;
 /// Magazine 8, page 0x88: page 888 as the descriptor and the page header spell it.
 const MAGAZINE: u8 = 8;
 const PAGE_BCD: u8 = 0x88;
@@ -77,7 +79,8 @@ fn have_teletext_decoder() -> bool {
 
 /// Author the fixture transport stream: one private-PES elementary stream marked
 /// as teletext by its PMT descriptor, carrying a page header + rows per cue and a
-/// bare header to erase the last one.
+/// bare header to erase the last one. Each of those headers follows a header for
+/// another page of the magazine.
 fn author_ts() -> Vec<u8> {
     let mut mux = TsMuxer::with_streams(&[STREAM_TYPE_PRIVATE_PES]);
     mux.set_stream_teletext(
@@ -93,9 +96,14 @@ fn author_ts() -> Vec<u8> {
     // repeats them, and it also exercises the demuxer's re-parse.
     mux.set_table_interval_90khz(90_000);
 
+    // libzvbi since 0.2.45 stores a page only when a header for a different page arrives.
+    let page_start = [
+        DataUnit::page_header(OTHER_PAGE_OF_MAGAZINE, 0, false),
+        DataUnit::page_header(PAGE, 0, true),
+    ];
     let mut out = Vec::new();
     for (pts_ns, rows) in cues() {
-        let mut units = Vec::from([DataUnit::page_header(PAGE, 0, true)]);
+        let mut units = Vec::from(page_start.clone());
         for (i, row) in rows.iter().enumerate() {
             units.push(DataUnit::text_row(MAGAZINE, 20 + i as u8, row));
         }
@@ -108,7 +116,7 @@ fn author_ts() -> Vec<u8> {
     }
     // A page header with no rows behind it erases the subtitle on screen.
     out.extend_from_slice(&mux.push_au(
-        &encode_payload(&[DataUnit::page_header(PAGE, 0, true)]),
+        &encode_payload(&page_start),
         Some(ns_to_90k(END_NS)),
         None,
         false,

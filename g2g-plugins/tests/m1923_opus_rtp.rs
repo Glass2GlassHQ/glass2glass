@@ -2,6 +2,7 @@
 
 use core::future::Future;
 use core::pin::Pin;
+use std::io::Read;
 use std::net::UdpSocket as StdUdpSocket;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
@@ -313,16 +314,34 @@ fn have_gstreamer_elements(elements: &[&str]) -> bool {
     })
 }
 
+fn read_on_thread(mut pipe: impl Read + Send + 'static) -> std::thread::JoinHandle<Vec<u8>> {
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        pipe.read_to_end(&mut bytes).expect("read the peer output");
+        bytes
+    })
+}
+
 fn wait_for(mut child: Child) -> std::process::Output {
+    // linux caps new pipes at 8 KiB once a user holds fs.pipe-user-pages-soft pages, and gst-launch blocks on a full pipe.
+    let stdout = read_on_thread(child.stdout.take().expect("the peer stdout is piped"));
+    let stderr = read_on_thread(child.stderr.take().expect("the peer stderr is piped"));
     let deadline = std::time::Instant::now() + PEER_DEADLINE;
-    while child.try_wait().expect("poll the peer").is_none() {
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("poll the peer") {
+            break status;
+        }
         if std::time::Instant::now() >= deadline {
             let _ = child.kill();
             panic!("the peer did not finish within {PEER_DEADLINE:?}");
         }
         std::thread::sleep(Duration::from_millis(50));
+    };
+    std::process::Output {
+        status,
+        stdout: stdout.join().expect("the stdout reader finishes"),
+        stderr: stderr.join().expect("the stderr reader finishes"),
     }
-    child.wait_with_output().expect("collect the peer output")
 }
 
 #[tokio::test]
