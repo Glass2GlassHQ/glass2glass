@@ -26,8 +26,8 @@ name `invert` and run from a launch line. Start a binary crate
 ```toml
 # Cargo.toml
 [dependencies]
-g2g-core    = { version = "0.12", features = ["std", "runtime"] }
-g2g-plugins = { version = "0.12", features = ["std"] }
+g2g-core    = { version = "0.13", features = ["std", "runtime"] }
+g2g-plugins = { version = "0.13", features = ["std"] }
 tokio       = { version = "1", features = ["macros", "rt"] }
 ```
 
