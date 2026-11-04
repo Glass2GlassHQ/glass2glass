@@ -183,6 +183,15 @@ jobs:
           export PACKAGE_TREE="$PWD/g2g-${GITHUB_REF_NAME}-${{ matrix.target }}"
           nfpm package -f tools/nfpm.yaml -p deb
           nfpm package -f tools/nfpm.yaml -p rpm
+      - name: msi
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          dotnet tool install --tool-path "$env:RUNNER_TEMP\wix" wix --version 7.0.1
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.*)"$' | Select-Object -First 1).Matches.Groups[1].Value
+          $tree = "$PWD\g2g-$env:GITHUB_REF_NAME-${{ matrix.target }}"
+          & "$env:RUNNER_TEMP\wix\wix.exe" build tools\glass2glass.wxs -arch x64 -acceptEula wix7 -d "PackageVersion=$version" -d "PackageTree=$tree" -o "glass2glass-$version-x64.msi"
       - uses: actions/upload-artifact@v7
         with:
           name: release-asset-${{ matrix.target }}
@@ -192,6 +201,7 @@ jobs:
             ffmpeg-*.tar.xz
             *.deb
             *.rpm
+            *.msi
 
   linux-package-install:
     name: install (${{ matrix.image }}, ${{ matrix.target }})
@@ -226,6 +236,62 @@ jobs:
           g2g-launch -q audiotestsrc num-buffers=20 ! avenc_aac ! fakesink
           g2g-launch -q videotestsrc num-buffers=10 ! vpxenc codec=vp8 ! fakesink
 
+  msi-install:
+    name: install msi
+    needs: build
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-asset-x86_64-pc-windows-msvc
+          path: dist
+      - name: install, run and uninstall
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $msi = (Get-ChildItem dist\*.msi).FullName
+          $installed = "$env:ProgramFiles\glass2glass"
+          $install = Start-Process msiexec -Wait -PassThru -ArgumentList '/i', "`"$msi`"", '/qn', '/l*v', 'install.log'
+          if ($install.ExitCode -ne 0) { Get-Content install.log -Tail 40; exit $install.ExitCode }
+          # windows gives the new PATH only to processes started after the install
+          $env:PATH = [Environment]::GetEnvironmentVariable('PATH', 'Machine')
+          if ((Get-Command g2g-launch).Source -notlike "$installed\*") { throw "g2g-launch is not on the machine PATH" }
+          g2g-inspect fakesink
+          g2g-launch -q audiotestsrc num-buffers=5 ! fakesink
+          g2g-launch -q audiotestsrc num-buffers=20 ! avenc_aac ! fakesink
+          g2g-launch -q videotestsrc num-buffers=10 ! vpxenc codec=vp8 ! fakesink
+          $uninstall = Start-Process msiexec -Wait -PassThru -ArgumentList '/x', "`"$msi`"", '/qn', '/l*v', 'uninstall.log'
+          if ($uninstall.ExitCode -ne 0) { Get-Content uninstall.log -Tail 40; exit $uninstall.ExitCode }
+          if (Test-Path "$installed\g2g-launch.exe") { throw "uninstall left g2g-launch.exe" }
+          if ([Environment]::GetEnvironmentVariable('PATH', 'Machine') -like "*$installed*") { throw "uninstall left the PATH entry" }
+
+  homebrew-install:
+    name: brew install (${{ matrix.runner }})
+    needs: build
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-latest, macos-15-intel]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: release-asset-*-apple-darwin
+          path: dist
+          merge-multiple: true
+      - name: install and test from a local tap
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: 1
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+          brew tap-new --no-git g2g/local
+          tools/homebrew-formula.sh "$version" "$GITHUB_REF_NAME" "file://$PWD/dist" dist > "$(brew --repository g2g/local)/Formula/glass2glass.rb"
+          brew install g2g/local/glass2glass
+          brew test g2g/local/glass2glass
+
   aar:
     name: android aar
     runs-on: ubuntu-24.04
@@ -250,10 +316,15 @@ jobs:
           cp "$aar" "dist/g2g-${GITHUB_REF_NAME}-android.aar"
           cargo about generate --locked --fail -m g2g-uniffi/Cargo.toml --features release-aar about.hbs -o LICENSE-THIRD-PARTY.txt
           zip "dist/g2g-${GITHUB_REF_NAME}-android.aar" LICENSE LICENSE-THIRD-PARTY.txt
+          tools/maven-central.sh layout "dist/g2g-${GITHUB_REF_NAME}-android.aar" "$(dirname "$aar")/generated" maven-layout
       - uses: actions/upload-artifact@v7
         with:
           name: release-asset-android
           path: dist/*.aar
+      - uses: actions/upload-artifact@v7
+        with:
+          name: maven-layout
+          path: maven-layout
 
   wheel:
     name: wheel (${{ matrix.target }})
@@ -403,7 +474,7 @@ jobs:
 
   github-release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [build, linux-package-install, aar]
+    needs: [build, linux-package-install, msi-install, homebrew-install, aar]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -421,3 +492,53 @@ jobs:
           gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || gh release create "$GITHUB_REF_NAME" --verify-tag --notes \
             "Changes are in CHANGELOG.md. These binaries leave out the elements that need distro libraries (PipeWire, Pulse): build those with \`cargo install g2g-plugins --features linux-full --bin g2g-launch\`."
           gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+
+  homebrew-tap:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: github-release
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: release-asset-*-apple-darwin
+          path: dist
+          merge-multiple: true
+      - name: update the formula in Glass2GlassHQ/homebrew-tap
+        env:
+          HOMEBREW_TAP_DEPLOY_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+          key="$RUNNER_TEMP/tap-key"
+          (umask 077; printf '%s\n' "$HOMEBREW_TAP_DEPLOY_KEY" > "$key")
+          export GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
+          git clone git@github.com:Glass2GlassHQ/homebrew-tap.git tap
+          mkdir -p tap/Formula
+          tools/homebrew-formula.sh "$version" "$GITHUB_REF_NAME" \
+            "https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME" dist > tap/Formula/glass2glass.rb
+          git -C tap add Formula/glass2glass.rb
+          git -C tap -c user.name=github-actions -c user.email=github-actions@users.noreply.github.com commit -m "glass2glass $version"
+          git -C tap push
+
+  maven-central:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: github-release
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v8
+        with:
+          name: maven-layout
+          path: maven-layout
+      # maven central never removes a published version
+      - name: sign and upload
+        env:
+          MAVEN_GPG_PRIVATE_KEY: ${{ secrets.MAVEN_GPG_PRIVATE_KEY }}
+          MAVEN_CENTRAL_TOKEN: ${{ secrets.MAVEN_CENTRAL_TOKEN }}
+        run: |
+          printf '%s\n' "$MAVEN_GPG_PRIVATE_KEY" | gpg --batch --import
+          tools/maven-central.sh bundle maven-layout central-bundle.zip
+          curl --fail-with-body -sS -X POST \
+            --header "Authorization: Bearer $MAVEN_CENTRAL_TOKEN" \
+            --form bundle=@central-bundle.zip \
+            "https://central.sonatype.com/api/v1/publisher/upload?name=g2g-android-$GITHUB_REF_NAME&publishingType=USER_MANAGED"

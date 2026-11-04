@@ -48,6 +48,14 @@ in [STABILITY.md](STABILITY.md).
 - The same workflow wraps the Linux build in `.deb` and `.rpm` packages with
   nFPM, from `tools/nfpm.yaml`. It installs them in clean containers and runs
   a smoke pipeline before the release is created.
+- The same workflow builds a Windows `.msi` from `tools/glass2glass.wxs` with
+  WiX, and installs, runs and uninstalls it before the release is created.
+- After the release, the workflow writes `Formula/glass2glass.rb` to
+  `Glass2GlassHQ/homebrew-tap`, using the `HOMEBREW_TAP_DEPLOY_KEY` secret. The
+  `homebrew-install` job tests the same formula from a local tap first.
+- After the release, the workflow uploads the AAR to the Central Portal, using
+  the `MAVEN_GPG_PRIVATE_KEY` and `MAVEN_CENTRAL_TOKEN` secrets. The upload waits
+  for a manual publish in the portal, and a published version cannot be removed.
 - The same workflow builds the `glass2glass` wheels and uploads them to PyPI
   through trusted publishing, so no PyPI token is stored anywhere. The upload
   waits for approval in the `pypi` environment.

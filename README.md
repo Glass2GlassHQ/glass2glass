@@ -118,6 +118,15 @@ sudo apt install ./glass2glass_*.deb
 sudo dnf install ./glass2glass-*.rpm
 ```
 
+On macOS, Homebrew installs the same binaries:
+
+```sh
+brew install Glass2GlassHQ/tap/glass2glass
+```
+
+On Windows, each release has a `.msi` that installs to `Program Files` and adds
+the folder to `PATH`. It is unsigned, so SmartScreen warns when it starts.
+
 The binaries are unsigned. macOS refuses to run one downloaded with a browser
 until the quarantine flag is cleared:
 

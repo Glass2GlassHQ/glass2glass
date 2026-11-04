@@ -1,0 +1,13 @@
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="glass2glass" Manufacturer="Glass2GlassHQ" Version="$(var.PackageVersion)" UpgradeCode="51320f34-124f-428f-8cc1-8c69cb5a7f8a">
+    <MajorUpgrade DowngradeErrorMessage="A newer version of glass2glass is installed." />
+    <MediaTemplate EmbedCab="yes" />
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="glass2glass" />
+    </StandardDirectory>
+    <Files Include="$(var.PackageTree)\**" Directory="INSTALLFOLDER" />
+    <Component Id="PathEntry" Directory="INSTALLFOLDER" Guid="0acfaf30-2bdd-43fa-815c-9eb7598f6815">
+      <Environment Id="PathEntry" Name="PATH" Value="[INSTALLFOLDER]" Action="set" Part="last" System="yes" />
+    </Component>
+  </Package>
+</Wix>
