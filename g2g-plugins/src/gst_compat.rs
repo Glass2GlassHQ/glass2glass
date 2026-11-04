@@ -60,10 +60,10 @@ static LAUNCH_KEYWORDS: &[&str] = &[
 /// `Available` before this table is consulted; keep this for the gst names that
 /// have no same-name g2g element. Extend freely.
 static GST_MAP: &[(&str, GstEquivalent)] = &[
-    // on Linux and Windows the `ffmpeg` feature builds `x264enc`, so the feature catalog answers
-    #[cfg(not(any(target_os = "linux", windows)))]
+    // on Linux, macOS and Windows the `ffmpeg` feature builds `x264enc`, so the feature catalog answers
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     ("x264enc", GstEquivalent::Unsupported(
-        "software H.264 encode (`x264enc`, libx264) needs the `ffmpeg` feature on Linux or Windows; \
+        "software H.264 encode (`x264enc`, libx264) needs the `ffmpeg` feature on Linux, macOS or Windows; \
          otherwise `nvenc` (NVIDIA), `mfencode` (Windows), or encode AV1/VP8/VP9 with `av1enc`/`vpxenc`",
     )),
     ("x265enc", GstEquivalent::Unsupported("no software H.265 encoder; use `nvenc` (NVIDIA HEVC) or `av1enc`")),
@@ -517,7 +517,7 @@ fn family_equivalent(gst_name: &str) -> Option<GstEquivalent> {
 ///
 /// The hand-written table outranks the feature catalog. Its `x264enc` entry lists
 /// the alternatives for a platform where the feature cannot be built, and is left
-/// out on Linux, where the catalog names the feature.
+/// out on Linux, macOS and Windows, where the catalog names the feature.
 pub fn gst_equivalent(registry: &Registry, gst_name: &str) -> GstEquivalent {
     if registry_has(registry, gst_name) || LAUNCH_KEYWORDS.contains(&gst_name) {
         return GstEquivalent::Available;
@@ -972,7 +972,7 @@ mod tests {
         );
     }
 
-    #[cfg(not(any(target_os = "linux", windows)))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     #[test]
     fn unknown_encoder_gets_a_suggestion() {
         let reg = default_registry();
