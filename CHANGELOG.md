@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2091: releases include `.deb` and `.rpm` packages, and the Linux binaries need glibc 2.28 instead of 2.35.
+
 ## 0.13.0
 
 - M2064: `d3d11videosink` takes system-memory NV12 and is what `autovideosink` picks on Windows.

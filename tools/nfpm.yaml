@@ -1,0 +1,23 @@
+name: glass2glass
+arch: ${PACKAGE_ARCH}
+version: ${PACKAGE_VERSION}
+maintainer: Aaron Boxer <boxerab@protonmail.com>
+description: g2g-launch and g2g-inspect, the glass2glass multimedia pipeline tools.
+homepage: https://github.com/Glass2GlassHQ/glass2glass
+license: MPL-2.0
+contents:
+  - src: ${PACKAGE_TREE}
+    dst: /opt/glass2glass
+    type: tree
+    expand: true
+  - src: /opt/glass2glass/g2g-launch
+    dst: /usr/bin/g2g-launch
+    type: symlink
+  - src: /opt/glass2glass/g2g-inspect
+    dst: /usr/bin/g2g-inspect
+    type: symlink
+overrides:
+  deb:
+    depends: [libc6, libgcc-s1, libstdc++6]
+  rpm:
+    depends: [glibc, libgcc, libstdc++]

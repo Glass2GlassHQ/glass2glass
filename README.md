@@ -108,6 +108,16 @@ They need no codec libraries on the host. The Linux and macOS tarballs carry the
 LGPL ffmpeg libraries in `lib/` next to the binaries, so keep the folder together,
 and the matching ffmpeg source is a release asset. They leave out PipeWire and Pulse.
 
+Each release also has `.deb` and `.rpm` packages for x86_64 and arm64, with the
+same contents as the Linux tarballs. They install to `/opt/glass2glass` and put
+`g2g-launch` and `g2g-inspect` in `/usr/bin`. The packages and tarballs need
+glibc 2.28 or newer, which includes RHEL 8.
+
+```sh
+sudo apt install ./glass2glass_*.deb
+sudo dnf install ./glass2glass-*.rpm
+```
+
 The binaries are unsigned. macOS refuses to run one downloaded with a browser
 until the quarantine flag is cleared:
 

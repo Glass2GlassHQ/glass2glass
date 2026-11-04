@@ -45,6 +45,9 @@ in [STABILITY.md](STABILITY.md).
   and `g2g-inspect` for Linux, macOS and Windows and attaches them to the
   GitHub release. Run it by hand from the Actions tab to test the builds without
   a tag. The feature sets are the `release-binary-*` features of g2g-plugins.
+- The same workflow wraps the Linux build in `.deb` and `.rpm` packages with
+  nFPM, from `tools/nfpm.yaml`. It installs them in clean containers and runs
+  a smoke pipeline before the release is created.
 - The same workflow builds the `glass2glass` wheels and uploads them to PyPI
   through trusted publishing, so no PyPI token is stored anywhere. The upload
   waits for approval in the `pypi` environment.

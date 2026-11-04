@@ -19,14 +19,14 @@ jobs:
   build:
     name: build (${{ matrix.target }})
     runs-on: ${{ matrix.runner }}
-    # glibc 2.35, so the binary also runs on distros older than the runner
+    # manylinux_2_28 has glibc 2.28, so the binaries run on RHEL 8 and newer
     container: ${{ matrix.container }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { runner: ubuntu-24.04, container: "ubuntu:22.04", target: x86_64-unknown-linux-gnu, features: release-binary-linux }
-          - { runner: ubuntu-24.04-arm, container: "ubuntu:22.04", target: aarch64-unknown-linux-gnu, features: release-binary-linux }
+          - { runner: ubuntu-24.04, container: "quay.io/pypa/manylinux_2_28_x86_64", target: x86_64-unknown-linux-gnu, features: release-binary-linux, package_arch: amd64, nfpm_asset: nfpm_2.48.0_Linux_x86_64.tar.gz, nfpm_sha256: 6d7f9a28b2f397934403950fcbba83f598b08d02edbe79a0815b3b4897341750 }
+          - { runner: ubuntu-24.04-arm, container: "quay.io/pypa/manylinux_2_28_aarch64", target: aarch64-unknown-linux-gnu, features: release-binary-linux, package_arch: arm64, nfpm_asset: nfpm_2.48.0_Linux_arm64.tar.gz, nfpm_sha256: a9a75213763783b7669719e505474c748c5ad7dc66591a195619deb50f85c2f4 }
           - { runner: macos-latest, target: aarch64-apple-darwin, features: release-binary-macos }
           - { runner: macos-15-intel, target: x86_64-apple-darwin, features: release-binary-macos }
           - { runner: windows-latest, target: x86_64-pc-windows-msvc, features: release-binary-windows }
@@ -43,11 +43,7 @@ jobs:
     steps:
       - name: install build packages
         if: runner.os == 'Linux'
-        run: |
-          apt-get update
-          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            build-essential pkg-config cmake nasm curl xz-utils ca-certificates git clang libclang-dev \
-            libwayland-dev libxkbcommon-dev
+        run: dnf install -y clang-devel cmake nasm xz git wayland-devel libxkbcommon-devel
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - name: codec prefix
@@ -173,6 +169,19 @@ jobs:
           if [ "${{ runner.os }}" = Windows ]; then 7z a "$name.zip" "$name"; else tar czf "$name.tar.gz" "$name"; fi
           # LGPL: the ffmpeg source the bundled libraries were built from
           if [ "${{ matrix.target }}" = x86_64-unknown-linux-gnu ]; then cp "$CODEC_PREFIX"/ffmpeg-*.tar.xz .; fi
+      - name: deb and rpm
+        if: runner.os == 'Linux'
+        env:
+          PACKAGE_ARCH: ${{ matrix.package_arch }}
+        run: |
+          curl -fsSL "https://github.com/goreleaser/nfpm/releases/download/v2.48.0/${{ matrix.nfpm_asset }}" -o nfpm.tar.gz
+          echo "${{ matrix.nfpm_sha256 }}  nfpm.tar.gz" | sha256sum -c -
+          tar xzf nfpm.tar.gz -C /usr/local/bin nfpm
+          rm nfpm.tar.gz
+          export PACKAGE_VERSION=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+          export PACKAGE_TREE="$PWD/g2g-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          nfpm package -f tools/nfpm.yaml -p deb
+          nfpm package -f tools/nfpm.yaml -p rpm
       - uses: actions/upload-artifact@v7
         with:
           name: release-asset-${{ matrix.target }}
@@ -180,6 +189,41 @@ jobs:
             g2g-*.tar.gz
             g2g-*.zip
             ffmpeg-*.tar.xz
+            *.deb
+            *.rpm
+
+  linux-package-install:
+    name: install (${{ matrix.image }}, ${{ matrix.target }})
+    needs: build
+    runs-on: ${{ matrix.runner }}
+    container: ${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-24.04, image: "almalinux:8", target: x86_64-unknown-linux-gnu, install: "dnf install -y dist/*.rpm" }
+          - { runner: ubuntu-24.04, image: "rockylinux:9", target: x86_64-unknown-linux-gnu, install: "dnf install -y dist/*.rpm" }
+          - { runner: ubuntu-24.04, image: "fedora:43", target: x86_64-unknown-linux-gnu, install: "dnf install -y dist/*.rpm" }
+          - { runner: ubuntu-24.04, image: "ubuntu:22.04", target: x86_64-unknown-linux-gnu, install: "apt-get update && apt-get install -y ./dist/*.deb" }
+          - { runner: ubuntu-24.04, image: "debian:13", target: x86_64-unknown-linux-gnu, install: "apt-get update && apt-get install -y ./dist/*.deb" }
+          - { runner: ubuntu-24.04-arm, image: "almalinux:8", target: aarch64-unknown-linux-gnu, install: "dnf install -y dist/*.rpm" }
+          - { runner: ubuntu-24.04-arm, image: "debian:13", target: aarch64-unknown-linux-gnu, install: "apt-get update && apt-get install -y ./dist/*.deb" }
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-asset-${{ matrix.target }}
+          path: dist
+      - name: install
+        run: ${{ matrix.install }}
+      - name: smoke run
+        run: |
+          g2g-inspect fakesink
+          g2g-launch -q audiotestsrc num-buffers=5 ! fakesink
+          g2g-launch -q audiotestsrc num-buffers=20 ! avenc_aac ! fakesink
+          g2g-launch -q videotestsrc num-buffers=10 ! vpxenc codec=vp8 ! fakesink
 
   aar:
     name: android aar
@@ -358,7 +402,7 @@ jobs:
 
   github-release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [build, aar]
+    needs: [build, linux-package-install, aar]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
