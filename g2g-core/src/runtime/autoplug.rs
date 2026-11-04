@@ -3131,7 +3131,7 @@ mod factory {
             let sink = self.make_element(sink)?;
             let sink_takes_raw_video: CapsTarget =
                 Box::new(move |caps| is_raw_video(caps) && sink.intercept_caps(caps).is_ok());
-            self.autoplug_preferring(
+            self.autoplug_names_preferring(
                 input,
                 &*sink_takes_raw_video,
                 max_depth,
