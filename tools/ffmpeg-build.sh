@@ -57,7 +57,13 @@ sha256_check() {
 jobs=$(nproc 2> /dev/null || sysctl -n hw.ncpu)
 
 if [ ! -f "$tarball" ]; then
-    curl -sfL -o "$tarball" "https://ffmpeg.org/releases/ffmpeg-$FFMPEG_VERSION.tar.xz"
+    # ffmpeg.org times out and resets connections, and manylinux curl has no --retry-all-errors
+    attempt=1
+    until curl -sSfL --connect-timeout 30 -o "$tarball" "https://ffmpeg.org/releases/ffmpeg-$FFMPEG_VERSION.tar.xz"; do
+        [ "$attempt" -lt 6 ] || exit 1
+        attempt=$((attempt + 1))
+        sleep 30
+    done
 fi
 echo "$FFMPEG_SHA256  $tarball" | sha256_check
 tar -xJf "$tarball" -C "$prefix"

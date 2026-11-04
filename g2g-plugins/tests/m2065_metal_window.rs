@@ -13,6 +13,8 @@ fn main() {
     }
 
     const FRAMES: u64 = 10;
+    // at the default 20 ms max-lateness a ci runner presented 1 of the 10 frames
+    const MAX_LATENESS_NS: u64 = 60_000_000_000;
 
     if !MetalVideoSink::device_available() {
         eprintln!("skipping: no Metal device");
@@ -21,7 +23,7 @@ fn main() {
     run_with_appkit_main_loop(|| {
         let reg = default_registry();
         let line = format!(
-            "videotestsrc num-buffers={FRAMES} ! video/x-raw,format=NV12,width=320,height=240 ! metalvideosink"
+            "videotestsrc num-buffers={FRAMES} ! video/x-raw,format=NV12,width=320,height=240 ! metalvideosink max-lateness={MAX_LATENESS_NS}"
         );
         let graph = parse_launch(&reg, &line).unwrap_or_else(|e| panic!("{line:?} parse: {e:?}"));
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -33,13 +35,12 @@ fn main() {
             .unwrap_or_else(|e| panic!("{line:?} runs: {e:?}"));
         assert_eq!(stats.frames_consumed, FRAMES, "{line}");
         // consumed counts frames the sink took, so check they reached the drawable too
-        let presented: u64 = stats
+        let presentation = stats
             .per_element
             .iter()
-            .filter_map(|e| e.presentation)
-            .map(|p| p.presented)
-            .sum();
-        assert_eq!(presented, FRAMES, "{line}");
+            .find_map(|e| e.presentation)
+            .expect("metalvideosink reports presentation stats");
+        assert_eq!(presentation.presented, FRAMES, "{line}: {presentation:?}");
         println!("m2065: {FRAMES} frames presented in an AppKit window");
     });
 }
