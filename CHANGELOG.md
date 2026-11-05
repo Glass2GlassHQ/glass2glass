@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+## 0.14.0
+
 - M2091: releases include `.deb` and `.rpm` packages, and the Linux binaries need glibc 2.28 instead of 2.35.
 - M2092: releases include a Windows `.msi`, a Homebrew formula and an AAR upload to Maven Central.
 
