@@ -53,9 +53,10 @@ in [STABILITY.md](STABILITY.md).
 - After the release, the workflow writes `Formula/glass2glass.rb` to
   `Glass2GlassHQ/homebrew-tap`, using the `HOMEBREW_TAP_DEPLOY_KEY` secret. The
   `homebrew-install` job tests the same formula from a local tap first.
-- After the release, the workflow uploads the AAR to the Central Portal, using
-  the `MAVEN_GPG_PRIVATE_KEY` and `MAVEN_CENTRAL_TOKEN` secrets. The upload waits
-  for a manual publish in the portal, and a published version cannot be removed.
+- The `maven-central` job is commented out. Enabled, it uploads the AAR to the
+  Central Portal after the release, using the `MAVEN_GPG_PRIVATE_KEY` and
+  `MAVEN_CENTRAL_TOKEN` secrets. The upload waits for a manual publish in the
+  portal, and a published version cannot be removed.
 - The same workflow builds the `glass2glass` wheels and uploads them to PyPI
   through trusted publishing, so no PyPI token is stored anywhere. The upload
   waits for approval in the `pypi` environment.
