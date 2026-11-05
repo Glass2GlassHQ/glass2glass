@@ -286,9 +286,10 @@ jobs:
   features-linux:
     name: features (linux)
     runs-on: ubuntu-26.04
-    # one test binary per test file links all of linux-full, line tables alone fill the disk
+    # one test binary per test file links all of linux-full, line tables and symbol tables fill the disk
     env:
       CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_DEV_STRIP: symbols
     steps:
       # the linux-full test build runs out of disk on a stock runner
       - name: free runner disk
