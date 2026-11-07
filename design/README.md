@@ -241,6 +241,17 @@ launch holds its `Read` buffers until an event recorded after the kernel, since
 libhiprtc and libnvrtc ship with the HIP and CUDA toolkits, not the drivers, so a
 host with only the drivers returns `LibraryNotFound` from `compile`.
 
+`hipupload` copies a system frame into a pinned staging buffer, then into
+device memory from a pool on its own stream, so the element returns before the
+GPU copy finishes. On NVIDIA it wraps a CUDA frame as a Hip frame with the
+CUDA pitches as its plane layout, and `hipdownload` hands a Hip frame back as
+CUDA on the primary context when the consumer takes only CUDA. A kernel in
+the primary context reads memory allocated in another context on the same
+device, which CUDA does not document, and `m2104_hip_upload_download` checks
+it on every run. Otherwise `hipdownload` copies to system memory, packing
+padded rows tight. Both are domain converters, so a Hip consumer after a
+system or CUDA producer gets `hipupload` spliced in.
+
 ### The copy plan
 
 Because negotiation resolves the memory domain of every link before a frame

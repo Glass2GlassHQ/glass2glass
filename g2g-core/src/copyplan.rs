@@ -99,6 +99,14 @@ pub fn classify(from: MemoryDomainKind, to: MemoryDomainKind) -> TransferKind {
     if from == MemoryDomainKind::DmaBuf || to == MemoryDomainKind::DmaBuf {
         return TransferKind::Interop;
     }
+    // hip on nvidia runs over the cuda driver, so a frame crosses between the two by pointer
+    if matches!(
+        (from, to),
+        (MemoryDomainKind::Cuda, MemoryDomainKind::Hip)
+            | (MemoryDomainKind::Hip, MemoryDomainKind::Cuda)
+    ) {
+        return TransferKind::Interop;
+    }
     match (is_host(from), is_host(to)) {
         // Both host (System <-> SystemView): a view or a cheap CPU touch, no
         // device bus transfer.
@@ -404,6 +412,9 @@ mod tests {
             "dma-buf is zero-copy"
         );
         assert_eq!(classify(DmaBuf, System), TransferKind::Interop);
+        assert_eq!(classify(Cuda, Hip), TransferKind::Interop, "hip wraps cuda");
+        assert_eq!(classify(Hip, Cuda), TransferKind::Interop);
+        assert_eq!(classify(Hip, System), TransferKind::DeviceHost);
     }
 
     #[test]

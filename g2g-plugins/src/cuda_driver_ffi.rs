@@ -113,6 +113,10 @@ crate::shared_library::shared_library! {
     #[cfg(feature = "hip")]
     pub(crate) fn cu_memcpy_dtoh_async = "cuMemcpyDtoHAsync_v2"(destination: *mut c_void, source: u64, size: usize, stream: CuStream) -> CuResult;
     #[cfg(feature = "hip")]
+    pub(crate) fn cu_mem_alloc_host = "cuMemAllocHost_v2"(pointer: *mut *mut c_void, size: usize) -> CuResult;
+    #[cfg(feature = "hip")]
+    pub(crate) fn cu_mem_free_host = "cuMemFreeHost"(pointer: *mut c_void) -> CuResult;
+    #[cfg(feature = "hip")]
     pub(crate) fn cu_device_get_attribute = "cuDeviceGetAttribute"(value: *mut i32, attribute: i32, device: CuDevice) -> CuResult;
     #[cfg(feature = "hip")]
     pub(crate) fn cu_module_load_data = "cuModuleLoadData"(module: *mut CuModule, image: *const c_void) -> CuResult;

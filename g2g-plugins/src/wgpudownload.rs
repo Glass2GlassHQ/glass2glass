@@ -10,44 +10,20 @@ use g2g_core::memory::{
     DomainSet, MemoryDomainKind, OwnedWgpuBuffer, OwnedWgpuTexture, SystemSlice,
 };
 use g2g_core::{
-    g2g_error, AsyncElement, Caps, CapsConstraint, ConfigureOutcome, Dim, ElementMetadata,
-    G2gError, MemoryDomain, OutputSink, PipelinePacket, RawVideoFormat,
+    g2g_error, AsyncElement, Caps, CapsConstraint, ConfigureOutcome, ElementMetadata, G2gError,
+    MemoryDomain, OutputSink, PipelinePacket,
 };
 
 use crate::gpu::{
     gpu_err, read_rgba_texture_dq, read_texture_plane, WgpuNv12Texture, WgpuTextureKeepAlive,
 };
+use crate::pixel::{tight_frame, RawVideoGeometry};
 
 #[derive(Debug, Default)]
 pub struct WgpuDownload {
     configured: bool,
     downloaded: u64,
     raw_video: Option<RawVideoGeometry>,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct RawVideoGeometry {
-    format: RawVideoFormat,
-    width: usize,
-    height: usize,
-}
-
-impl RawVideoGeometry {
-    fn of(caps: &Caps) -> Option<Self> {
-        match caps {
-            Caps::RawVideo {
-                format,
-                width: Dim::Fixed(width),
-                height: Dim::Fixed(height),
-                ..
-            } => Some(Self {
-                format: *format,
-                width: *width as usize,
-                height: *height as usize,
-            }),
-            _ => None,
-        }
-    }
 }
 
 impl WgpuDownload {
@@ -111,19 +87,7 @@ fn download_buffer(
     owned: &OwnedWgpuBuffer,
     raw_video: Option<RawVideoGeometry>,
 ) -> Result<Vec<u8>, G2gError> {
-    let bytes = read_owned_buffer(owned)?;
-    let Some(layout) = owned.plane_layout() else {
-        return Ok(bytes);
-    };
-    let raw_video = raw_video.ok_or(G2gError::CapsMismatch)?;
-    let RawVideoGeometry {
-        format,
-        width,
-        height,
-    } = raw_video;
-    crate::pixel::pack_planes(&bytes, format, width, height, layout)
-        .map(Vec::from)
-        .ok_or(G2gError::CapsMismatch)
+    tight_frame(read_owned_buffer(owned)?, owned.plane_layout(), raw_video)
 }
 
 fn read_owned_buffer(owned: &OwnedWgpuBuffer) -> Result<Vec<u8>, G2gError> {

@@ -131,7 +131,11 @@ pub(crate) fn tight_plane(
 /// order: the shape a [`PlaneLayout`](g2g_core::meta::PlaneLayout) puts offsets
 /// and strides on. A tightly-packed frame is exactly these rows back to back;
 /// a padded one differs only in where each row starts. `None` on overflow.
-#[cfg(any(feature = "metadata", feature = "wgpu-sink"))]
+#[cfg(any(
+    feature = "metadata",
+    feature = "wgpu-sink",
+    all(target_os = "linux", feature = "hip")
+))]
 pub(crate) fn plane_shapes(
     format: RawVideoFormat,
     w: usize,
@@ -150,7 +154,11 @@ pub(crate) fn plane_shapes(
 /// form. `None` when the layout does not describe this format's planes, or the
 /// buffer does not hold what it claims: a layout can come from any producer, so
 /// a bad one fails the frame instead of reading out of bounds.
-#[cfg(any(feature = "metadata", feature = "wgpu-sink"))]
+#[cfg(any(
+    feature = "metadata",
+    feature = "wgpu-sink",
+    all(target_os = "linux", feature = "hip")
+))]
 pub(crate) fn pack_planes(
     src: &[u8],
     format: RawVideoFormat,
@@ -298,4 +306,59 @@ pub(crate) mod tests {
             usize::MAX
         );
     }
+}
+
+#[cfg(any(
+    feature = "wgpu-sink",
+    all(target_os = "linux", feature = "hip"),
+    feature = "gstreamer"
+))]
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct RawVideoGeometry {
+    pub(crate) format: RawVideoFormat,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+}
+
+#[cfg(any(
+    feature = "wgpu-sink",
+    all(target_os = "linux", feature = "hip"),
+    feature = "gstreamer"
+))]
+impl RawVideoGeometry {
+    pub(crate) fn of(caps: &g2g_core::Caps) -> Option<Self> {
+        match caps {
+            g2g_core::Caps::RawVideo {
+                format,
+                width: g2g_core::Dim::Fixed(width),
+                height: g2g_core::Dim::Fixed(height),
+                ..
+            } => Some(Self {
+                format: *format,
+                width: *width,
+                height: *height,
+            }),
+            _ => None,
+        }
+    }
+}
+
+// bytes read back from a GPU buffer, with padded rows packed tight when the buffer had a plane layout
+#[cfg(any(feature = "wgpu-sink", all(target_os = "linux", feature = "hip")))]
+pub(crate) fn tight_frame(
+    bytes: alloc::vec::Vec<u8>,
+    layout: Option<&g2g_core::meta::PlaneLayout>,
+    raw_video: Option<RawVideoGeometry>,
+) -> Result<alloc::vec::Vec<u8>, g2g_core::G2gError> {
+    let Some(layout) = layout else {
+        return Ok(bytes);
+    };
+    let RawVideoGeometry {
+        format,
+        width,
+        height,
+    } = raw_video.ok_or(g2g_core::G2gError::CapsMismatch)?;
+    pack_planes(&bytes, format, width as usize, height as usize, layout)
+        .map(alloc::vec::Vec::from)
+        .ok_or(g2g_core::G2gError::CapsMismatch)
 }

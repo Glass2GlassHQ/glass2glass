@@ -52,7 +52,7 @@ use g2g_core::frame::Frame;
 use g2g_core::log::{short_type_name, Target};
 use g2g_core::memory::{DomainSet, MemoryDomain, MemoryDomainKind, OwnedDmaBuf, SystemSlice};
 use g2g_core::{
-    g2g_error, AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata,
+    g2g_error, AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata,
     G2gError, HardwareError, OutputSink, PipelinePacket, PropError, PropKind, PropValue,
     PropertySpec, RawVideoFormat,
 };
@@ -60,6 +60,7 @@ use g2g_core::{
 use crate::capsfilter::parse_caps;
 use crate::encoder_base::emit_packets;
 use crate::gstplanes::{GstVideoPlanes, GST_VIDEO_MAX_PLANES};
+use crate::pixel::RawVideoGeometry;
 
 // `try_pull` / `try_pull_dmabuf` results, mirroring the C helper's defines.
 const PULLED: c_int = 1;
@@ -393,29 +394,6 @@ fn sample_layout(raw_format: Option<RawVideoFormat>, sample: &DmaBufSample) -> O
     Some((stride, offset))
 }
 
-#[derive(Debug, Clone, Copy)]
-struct RawVideoGeometry {
-    format: RawVideoFormat,
-    width: u32,
-    height: u32,
-}
-
-fn raw_video_of(caps: &Caps) -> Option<RawVideoGeometry> {
-    match caps {
-        Caps::RawVideo {
-            format,
-            width: Dim::Fixed(width),
-            height: Dim::Fixed(height),
-            ..
-        } => Some(RawVideoGeometry {
-            format: *format,
-            width: *width,
-            height: *height,
-        }),
-        _ => None,
-    }
-}
-
 // The frame's own `PlaneLayout`, else tightly packed.
 fn frame_planes(frame: &Frame, raw_video: RawVideoGeometry) -> Option<GstVideoPlanes> {
     let RawVideoGeometry {
@@ -628,7 +606,7 @@ impl AsyncElement for GstWrap {
             None => None,
         };
         let out_ptr = out_c.as_ref().map_or(ptr::null(), |c| c.as_ptr());
-        let output_planes = match raw_video_of(&announce) {
+        let output_planes = match RawVideoGeometry::of(&announce) {
             Some(raw_video) => Some(
                 GstVideoPlanes::tight(raw_video.format, raw_video.width, raw_video.height)
                     .ok_or(G2gError::CapsMismatch)?,
@@ -652,7 +630,7 @@ impl AsyncElement for GstWrap {
             return Err(G2gError::Hardware(HardwareError::Other));
         }
         self.handle = Some(WrapPtr(h));
-        self.input_raw_video = raw_video_of(absolute_caps);
+        self.input_raw_video = RawVideoGeometry::of(absolute_caps);
         self.output_raw_format = match &announce {
             Caps::RawVideo { format, .. } => Some(*format),
             _ => None,

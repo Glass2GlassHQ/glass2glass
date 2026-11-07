@@ -91,6 +91,8 @@ crate::shared_library::shared_library! {
         device: i32,
     ) -> i32;
     fn hip_malloc = "hipMalloc"(pointer: *mut *mut c_void, size: usize) -> i32;
+    fn hip_host_malloc = "hipHostMalloc"(pointer: *mut *mut c_void, size: usize, flags: u32) -> i32;
+    fn hip_host_free = "hipHostFree"(pointer: *mut c_void) -> i32;
     fn hip_stream_create_with_flags = "hipStreamCreateWithFlags"(stream: *mut HipStreamHandle, flags: u32) -> i32;
     fn hip_stream_destroy = "hipStreamDestroy"(stream: HipStreamHandle) -> i32;
     fn hip_stream_synchronize = "hipStreamSynchronize"(stream: HipStreamHandle) -> i32;
@@ -336,6 +338,13 @@ impl HipDevice {
         self.ordinal
     }
 
+    pub(crate) fn cuda_context(&self) -> Option<u64> {
+        match self.backend {
+            Backend::Amd => None,
+            Backend::Nvidia { context, .. } => Some(context as u64),
+        }
+    }
+
     fn bind(&self) -> Result<Bound<'_>, G2gError> {
         match self.backend {
             // SAFETY: the ordinal was validated in `open`.
@@ -423,11 +432,14 @@ impl Drop for HipEvent {
     }
 }
 
+type FreeList = Arc<Mutex<Vec<HipMemory>>>;
+
 #[derive(Debug)]
 pub struct HipMemory {
     device: Arc<HipDevice>,
     device_pointer: u64,
     size: usize,
+    recycle_into: Option<FreeList>,
 }
 
 impl HipMemory {
@@ -453,6 +465,7 @@ impl HipMemory {
             device: Arc::clone(device),
             device_pointer,
             size,
+            recycle_into: None,
         })
     }
 
@@ -466,23 +479,48 @@ impl HipMemory {
 
     // `ready` must be recorded after the last write into this memory
     pub fn into_buffer(self, ready: HipEvent, len: usize) -> Result<OwnedHipBuffer, G2gError> {
-        if len > self.size || !Arc::ptr_eq(&self.device, &ready.device) {
+        if len > self.size {
             return Err(G2gError::Hardware(HardwareError::Other));
         }
-        let buffer = OwnedHipBuffer::new(
-            self.device_pointer,
-            len,
-            self.device.vendor(),
-            self.device.ordinal,
-            ready.handle as u64,
-            Arc::new(HipBufferOwner(Some((self, ready)))),
-        );
-        Ok(buffer)
+        let device = Arc::clone(&self.device);
+        let device_pointer = self.device_pointer;
+        hip_buffer(&device, device_pointer, len, ready, Box::new(self))
     }
+}
+
+pub(crate) fn hip_buffer(
+    device: &Arc<HipDevice>,
+    device_pointer: u64,
+    len: usize,
+    ready: HipEvent,
+    resources: Box<dyn core::fmt::Debug + Send + Sync>,
+) -> Result<OwnedHipBuffer, G2gError> {
+    if !Arc::ptr_eq(device, &ready.device) {
+        return Err(G2gError::Hardware(HardwareError::Other));
+    }
+    Ok(OwnedHipBuffer::new(
+        device_pointer,
+        len,
+        device.vendor(),
+        device.ordinal,
+        ready.handle as u64,
+        Arc::new(HipBufferOwner(Some((resources, ready)))),
+    ))
 }
 
 impl Drop for HipMemory {
     fn drop(&mut self) {
+        if let Some(free) = self.recycle_into.take() {
+            free.lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(HipMemory {
+                    device: Arc::clone(&self.device),
+                    device_pointer: self.device_pointer,
+                    size: self.size,
+                    recycle_into: None,
+                });
+            return;
+        }
         let Ok(_bound) = self.device.bind() else {
             return;
         };
@@ -497,7 +535,94 @@ impl Drop for HipMemory {
 }
 
 #[derive(Debug)]
-struct HipBufferOwner(Option<(HipMemory, HipEvent)>);
+pub(crate) struct HipMemoryPool {
+    device: Arc<HipDevice>,
+    size: usize,
+    free: FreeList,
+}
+
+impl HipMemoryPool {
+    pub(crate) fn new(device: &Arc<HipDevice>, size: usize) -> Self {
+        Self {
+            device: Arc::clone(device),
+            size,
+            free: Arc::default(),
+        }
+    }
+
+    pub(crate) fn size(&self) -> usize {
+        self.size
+    }
+
+    pub(crate) fn acquire(&self) -> Result<HipMemory, G2gError> {
+        let recycled = self
+            .free
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .pop();
+        let mut memory = match recycled {
+            Some(memory) => memory,
+            None => HipMemory::allocate(&self.device, self.size)?,
+        };
+        memory.recycle_into = Some(Arc::clone(&self.free));
+        Ok(memory)
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct HipPinnedMemory {
+    device: Arc<HipDevice>,
+    pointer: usize,
+    size: usize,
+}
+
+impl HipPinnedMemory {
+    pub(crate) fn allocate(device: &Arc<HipDevice>, size: usize) -> Result<Self, G2gError> {
+        let _bound = device.bind()?;
+        let mut pointer: *mut c_void = core::ptr::null_mut();
+        // SAFETY: `pointer` is a valid out pointer and the device is bound.
+        let code = unsafe {
+            match device.backend {
+                Backend::Amd => hip_host_malloc(&mut pointer, size, 0),
+                Backend::Nvidia { .. } => cuda::cu_mem_alloc_host(&mut pointer, size),
+            }
+        };
+        device.check(code)?;
+        Ok(Self {
+            device: Arc::clone(device),
+            pointer: pointer as usize,
+            size,
+        })
+    }
+
+    pub(crate) fn size(&self) -> usize {
+        self.size
+    }
+
+    pub(crate) fn as_mut_slice(&mut self) -> &mut [u8] {
+        // SAFETY: the allocation is `size` bytes and `&mut self` makes this the only view of it.
+        unsafe { core::slice::from_raw_parts_mut(self.pointer as *mut u8, self.size) }
+    }
+}
+
+impl Drop for HipPinnedMemory {
+    fn drop(&mut self) {
+        let Ok(_bound) = self.device.bind() else {
+            return;
+        };
+        let pointer = self.pointer as *mut c_void;
+        // SAFETY: the allocation came from `allocate` on this device and nothing uses it after this.
+        unsafe {
+            match self.device.backend {
+                Backend::Amd => hip_host_free(pointer),
+                Backend::Nvidia { .. } => cuda::cu_mem_free_host(pointer),
+            };
+        }
+    }
+}
+
+#[derive(Debug)]
+struct HipBufferOwner(Option<(Box<dyn core::fmt::Debug + Send + Sync>, HipEvent)>);
 
 impl HipKeepAlive for HipBufferOwner {
     fn as_any(&self) -> &dyn core::any::Any {
@@ -507,8 +632,8 @@ impl HipKeepAlive for HipBufferOwner {
 
 impl Drop for HipBufferOwner {
     fn drop(&mut self) {
-        if let Some((memory, ready)) = self.0.take() {
-            release_after(ready, Box::new(memory));
+        if let Some((resources, ready)) = self.0.take() {
+            release_after(ready, resources);
         }
     }
 }
@@ -995,6 +1120,35 @@ impl HipStream {
         self.record(&done)?;
         release_after(done, Box::new(reads));
         Ok(())
+    }
+
+    pub(crate) fn upload_pinned(
+        &self,
+        memory: &HipMemory,
+        staging: &HipPinnedMemory,
+        len: usize,
+    ) -> Result<(), G2gError> {
+        // the GPU reads `staging` after this returns, until the stream reaches the copy
+        let same_device =
+            Arc::ptr_eq(&self.device, &memory.device) && Arc::ptr_eq(&self.device, &staging.device);
+        if len > memory.size || len > staging.size || !same_device {
+            return Err(G2gError::Hardware(HardwareError::Other));
+        }
+        let _bound = self.device.bind()?;
+        let stream = self.handle as HipStreamHandle;
+        let source = staging.pointer as *const c_void;
+        // SAFETY: the copy stays inside both allocations, which belong to the bound device.
+        let code = unsafe {
+            match self.device.backend {
+                Backend::Amd => {
+                    hip_memcpy_htod_async(memory.device_pointer as *mut c_void, source, len, stream)
+                }
+                Backend::Nvidia { .. } => {
+                    cuda::cu_memcpy_htod_async(memory.device_pointer, source, len, stream)
+                }
+            }
+        };
+        self.device.check(code)
     }
 
     // returns once `bytes` has reached `memory`

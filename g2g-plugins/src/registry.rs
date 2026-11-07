@@ -426,6 +426,26 @@ fn domain_converter(
     if let Some(converter) = crate::cuda::cuda_domain_converter(from, to) {
         return Some(converter);
     }
+    #[cfg(all(target_os = "linux", feature = "hip"))]
+    match (from, to) {
+        (
+            g2g_core::MemoryDomainKind::System | g2g_core::MemoryDomainKind::Cuda,
+            g2g_core::MemoryDomainKind::Hip,
+        ) => {
+            return Some(g2g_core::runtime::GraphNode::element(
+                crate::hipupload::HipUpload::new(),
+            ))
+        }
+        (
+            g2g_core::MemoryDomainKind::Hip,
+            g2g_core::MemoryDomainKind::System | g2g_core::MemoryDomainKind::Cuda,
+        ) => {
+            return Some(g2g_core::runtime::GraphNode::element(
+                crate::hipdownload::HipDownload::new(),
+            ))
+        }
+        _ => {}
+    }
     #[cfg(all(target_os = "linux", feature = "dmabuf-wgpu"))]
     if (from, to)
         == (
@@ -2844,6 +2864,8 @@ pub static FEATURE_GATED_ELEMENTS: &[FeatureGatedElement] = &{
         "avenc_aac" => "ffmpeg" on "linux" | "macos" | "windows";
         "cudadownload" => "cuda" on "linux" | "windows";
         "cudaupload" => "cuda" on "linux" | "windows";
+        "hipdownload" => "hip" on "linux";
+        "hipupload" => "hip" on "linux";
         "nvdec" => "nvdec" on "linux" | "windows";
         "nvenc" => "nvenc" on "linux" | "windows";
         "jpegxsenc" => "jpegxs" on "linux";
@@ -3671,6 +3693,14 @@ fn register_feature_gated(reg: &mut Registry) {
     #[cfg(all(any(target_os = "linux", windows), feature = "cuda"))]
     reg.register_launch(LaunchFactory::new("cudaupload", Vec::new(), || {
         Box::new(crate::cuda::CudaUpload::new())
+    }));
+    #[cfg(all(target_os = "linux", feature = "hip"))]
+    reg.register_launch(LaunchFactory::new("hipdownload", Vec::new(), || {
+        Box::new(crate::hipdownload::HipDownload::new())
+    }));
+    #[cfg(all(target_os = "linux", feature = "hip"))]
+    reg.register_launch(LaunchFactory::new("hipupload", Vec::new(), || {
+        Box::new(crate::hipupload::HipUpload::new())
     }));
     // A GPU-resident wgpu texture or buffer back to system memory.
     #[cfg(feature = "wgpu-sink")]

@@ -516,7 +516,8 @@ pub mod yuvmatrix;
     all(target_os = "linux", feature = "pipewire"),
     feature = "wgpu-sink",
     all(target_os = "linux", feature = "dmabuf-wgpu"),
-    all(target_os = "linux", feature = "kms-sink")
+    all(target_os = "linux", feature = "kms-sink"),
+    all(target_os = "linux", feature = "hip")
 ))]
 mod paddedrows;
 // Sans-IO RFC 4566 SDP: the shared media-section scanner plus the RTP/AVP
@@ -1807,6 +1808,10 @@ pub mod cuda;
 mod cuda_driver_ffi;
 #[cfg(all(target_os = "linux", feature = "hip"))]
 pub mod hip;
+#[cfg(all(target_os = "linux", feature = "hip"))]
+pub mod hipdownload;
+#[cfg(all(target_os = "linux", feature = "hip"))]
+pub mod hipupload;
 #[cfg(any(
     all(any(target_os = "linux", windows), feature = "cuda"),
     all(

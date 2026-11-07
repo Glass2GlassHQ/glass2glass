@@ -17,6 +17,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M2101: `wgpupreprocess` writes into pooled exportable buffers that `ortinfer` reads on CUDA and HIP without a copy.
 - M2102: `MemoryDomain::Hip`, with HIP device memory, streams and events on AMD and NVIDIA.
 - M2103: `HipKernelModule` compiles kernels at run time with hiprtc or nvrtc, and `HipStream::launch` runs them.
+- M2104: `hipupload` and `hipdownload`, with CUDA frames crossing to and from HIP on NVIDIA without a copy.
 
 ## 0.14.0
 
