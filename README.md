@@ -1220,11 +1220,13 @@ G2G_RTSP_TEST_URL=rtsp://localhost:8554/pattern \
 # ORT with the CUDA execution provider (silently falls back to CPU):
 cargo test -p g2g-ml --features cuda --test ort_inference -- --nocapture
 
-# ORT with MIGraphX on an AMD GPU, fed wgpupreprocess's GPU tensor. Needs a
-# MIGraphX 6.4 install (Fedora ships none: build its rocm-6.4.4 tag with MLIR off)
-# and ONNX Runtime built against it, whose script prints the two exports.
-tools/ort-migraphx-build.sh ~/opt/ort-migraphx ~/src/AMDMIGraphX/install
-LD_LIBRARY_PATH=$ORT_LIB_LOCATION:<migraphx>/lib:<migraphx>/lib/migraphx/lib \
+# ORT with MIGraphX on an AMD GPU, fed wgpupreprocess's GPU tensor. On Fedora 45:
+#   sudo dnf swap onnxruntime onnxruntime-migraphx
+#   sudo dnf install onnxruntime-devel
+# ONNX Runtime 1.26 fails every MIGraphX model load without a cache directory.
+mkdir -p ~/.cache/g2g-migraphx
+ORT_LIB_LOCATION=/usr/lib64 ORT_PREFER_DYNAMIC_LINK=1 \
+  ORT_MIGRAPHX_MODEL_CACHE_PATH=~/.cache/g2g-migraphx \
   VK_DRIVER_FILES=/usr/share/vulkan/icd.d/radeon_icd.x86_64.json \
   cargo test -p g2g-ml --features ort-hip-wgpu --test ort_wgpu_tensor
 

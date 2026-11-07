@@ -11,7 +11,9 @@ use g2g_core::{g2g_error, G2gError, HardwareError};
 
 use crate::cuda_driver_ffi as cuda;
 
-const LIBAMDHIP: &str = "libamdhip64.so";
+// rocm-hip-devel ships the unversioned libamdhip64.so, ROCm 7 and 6 runtimes only the sonames
+const LIBAMDHIP: &str = "libamdhip64.so.7";
+const LIBAMDHIP_ROCM6: &str = "libamdhip64.so.6";
 const HIP_ERROR_SHARED_OBJECT_INIT_FAILED: i32 = 303;
 const HIP_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD: u32 = 1;
 const HIP_EXTERNAL_MEMORY_DEDICATED: u32 = 0x1;
@@ -51,7 +53,7 @@ const _: () = assert!(core::mem::size_of::<HipExternalMemoryHandleDesc>() == 104
 const _: () = assert!(core::mem::size_of::<HipExternalMemoryBufferDesc>() == 88);
 
 crate::shared_library::shared_library! {
-    struct LibAmdHip = LIBAMDHIP;
+    struct LibAmdHip = LIBAMDHIP, LIBAMDHIP_ROCM6;
     when missing return HIP_ERROR_SHARED_OBJECT_INIT_FAILED;
     fn hip_set_device = "hipSetDevice"(device: i32) -> i32;
     fn hip_import_external_memory = "hipImportExternalMemory"(

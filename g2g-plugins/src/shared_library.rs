@@ -1,7 +1,7 @@
 macro_rules! shared_library {
     (
         $(#[$library_attribute:meta])*
-        $visibility:vis struct $library:ident = $file:expr;
+        $visibility:vis struct $library:ident = $($file:expr),+;
         when missing return $missing:expr;
         $(
             $(#[$attribute:meta])*
@@ -18,7 +18,7 @@ macro_rules! shared_library {
 
         impl core::fmt::Debug for $library {
             fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-                formatter.write_str($file)
+                formatter.write_str([$($file),+][0])
             }
         }
 
@@ -29,8 +29,10 @@ macro_rules! shared_library {
             }
 
             fn open() -> Option<Self> {
-                // SAFETY: the libraries loaded here run no initialisation that needs anything from the caller.
-                let library = unsafe { libloading::Library::new($file) }.ok()?;
+                let library = [$($file),+].into_iter().find_map(|file| {
+                    // SAFETY: the libraries loaded here run no initialisation that needs anything from the caller.
+                    unsafe { libloading::Library::new(file) }.ok()
+                })?;
                 Some(Self {
                     $(
                         $(#[$attribute])*

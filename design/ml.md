@@ -234,15 +234,15 @@ memory.
 import, so a tensor on an AMD device goes to `hipImportExternalMemory`
 (`g2g-plugins::hip`, `libamdhip64` loaded at run time) and reaches the MIGraphX
 provider as an ONNX Runtime `Hip` tensor. ONNX Runtime dropped its ROCm provider
-in 1.23, and `ort` needs 1.24, so MIGraphX is the only AMD provider and needs an
-ONNX Runtime built against it (`tools/ort-migraphx-build.sh`, which patches out
-the two calls MIGraphX 6.4 lacks, and fixes ONNX Runtime turning an unset model
-cache directory into the path `""`, which fails every model load). MIGraphX 6.4 rejects opset-18 `Resize`, so
-YOLO models are exported at opset 17. On the Radeon 680M (gfx1035, Fedora's
-ROCm 6.4), `ball11n.onnx` at 1280x1280 runs at 30.5 fps from the GPU tensor and
-27.9 fps through system memory: the integrated GPU shares system RAM, so the
-copy saved is cheap. The first run compiles the model for about 75 s, and
-`ORT_MIGRAPHX_MODEL_CACHE_PATH` keeps the compiled program for later runs.
+in 1.23, so MIGraphX is the only AMD provider and needs an ONNX Runtime built
+with it, such as Fedora 45's `onnxruntime-migraphx` (1.26 on ROCm 7.2). That
+build turns an unset model cache directory into the path `""`, which fails every
+model load, so `ORT_MIGRAPHX_MODEL_CACHE_PATH` must be set. It also keeps the
+compiled program for later runs, and the first run compiles the model for about
+75 s. MIGraphX 6.4 rejects opset-18 `Resize`, so YOLO models are exported at
+opset 17. On the Radeon 680M (gfx1035, Fedora's ROCm 6.4), `ball11n.onnx` at
+1280x1280 runs at 30.5 fps from the GPU tensor and 27.9 fps through system
+memory: the integrated GPU shares system RAM, so the copy saved is cheap.
 
 On the Android edge there is `from_memory_with_nnapi`, the system NeuralNetworks
 API over NPU, GPU or DSP, `from_memory_with_xnnpack`, ARM-optimized CPU, and
