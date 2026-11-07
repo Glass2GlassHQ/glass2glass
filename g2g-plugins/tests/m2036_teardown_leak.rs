@@ -57,7 +57,7 @@ const TS_PACKET_BYTES: usize = 188;
 const INPUT_TS_PACKETS: usize = 256;
 // sync byte, then PID 0x1FFF (null packet) with payload only
 const TS_NULL_PACKET_HEADER: [u8; 4] = [0x47, 0x1F, 0xFF, 0x10];
-// arm threads exit just after the run returns its stats
+// joined threads stay in /proc/self/task for a moment after the join returns
 const THREAD_EXIT_DEADLINE: Duration = Duration::from_secs(5);
 
 struct ZeroClock;

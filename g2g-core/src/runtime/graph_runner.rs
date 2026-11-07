@@ -3559,13 +3559,18 @@ impl GraphSpawner for ThreadSpawner {
         // A capacity-1 channel is the handle: the worker delivers its one result,
         // the caller awaits it. Cross-thread wake is via the channel's waker.
         let (tx, rx) = crate::runtime::channel::bounded::<Result<u64, G2gError>>(1);
-        std::thread::spawn(move || {
+        let thread = std::thread::spawn(move || {
             let result = crate::runtime::block_on(build());
             // Best-effort: a dropped handle (the join aborted after a sibling's
             // error) just discards the result.
             let _ = tx.try_send(result);
         });
-        Box::pin(async move { rx.recv().await.unwrap_or(Err(G2gError::Shutdown)) })
+        Box::pin(async move {
+            let result = rx.recv().await.unwrap_or(Err(G2gError::Shutdown));
+            // std threads run thread-local destructors after the send, which races process exit
+            thread.join().map_err(|_| G2gError::Shutdown)?;
+            result
+        })
     }
 }
 

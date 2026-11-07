@@ -86,7 +86,7 @@ fn drive_on_a_thread(
 ) -> BoxFuture<'static, Result<u64, G2gError>> {
     // a panicked thread or dropped handle reads as Shutdown, like a closed link
     let (tx, rx) = tokio::sync::oneshot::channel::<Result<u64, G2gError>>();
-    thread::spawn(move || {
+    let thread = thread::spawn(move || {
         let result = match prepare() {
             Err(error) => Err(G2gError::Hardware(HardwareError::Io(
                 error.raw_os_error().unwrap_or(0),
@@ -103,7 +103,12 @@ fn drive_on_a_thread(
         };
         let _ = tx.send(result);
     });
-    Box::pin(async move { rx.await.unwrap_or(Err(G2gError::Shutdown)) })
+    Box::pin(async move {
+        let result = rx.await.unwrap_or(Err(G2gError::Shutdown));
+        // std threads run thread-local destructors after the send, which races process exit
+        thread.join().map_err(|_| G2gError::Shutdown)?;
+        result
+    })
 }
 
 #[cfg(target_os = "linux")]
