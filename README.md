@@ -626,7 +626,7 @@ cargo clippy --workspace --all-targets
 | `NvDec` (native NVDEC H.264 / H.265 / VP9 / AV1 to CUDA NV12 or 10-bit P010) | `nvdec` | Linux or Windows + NVIDIA driver (libnvcuvid / nvcuvid.dll) |
 | `NvEnc` (native NVENC CUDA NV12 / P010 to H.264 / H.265, incl. HEVC Main 10) | `nvenc` | Linux or Windows + NVIDIA driver (libnvidia-encode / nvEncodeAPI64.dll) |
 | `CudaDownload` (CUDA to System), `CudaUpload` (System to CUDA) | `cuda` | Linux or Windows + NVIDIA driver (libcuda / nvcuda.dll) |
-| `HipUpload` (System or CUDA to HIP), `HipDownload` (HIP to System or CUDA) | `hip` | Linux + ROCm (libamdhip64) or the NVIDIA driver (libcuda) |
+| `HipUpload` (System, CUDA or a dma-buf to HIP, importing linear dma-bufs on AMD), `HipDownload` (HIP to System or CUDA) | `hip` | Linux + ROCm (libamdhip64) or the NVIDIA driver (libcuda) |
 | `HipConvertScale` (`hipconvertscale`: format conversion and scaling on HIP, including planar and float RGB for model input) | `hip` | Linux + ROCm (libamdhip64, libhiprtc) or NVIDIA (libcuda, libnvrtc) |
 | `WgpuDownload` (`wgpudownload`: wgpu texture or buffer to System), `WgpuUpload` (`wgpuupload`: System to wgpu buffer) | `wgpu-sink` | wgpu adapter |
 | `CudaGlSink` (CUDA-GL present), `CudaKmsSink` (CUDA-GL on KMS) | `cuda-gl`, `cuda-kms` | Linux + NVIDIA + EGL + GL (+ libdrm for KMS) |

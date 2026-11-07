@@ -5,14 +5,23 @@ use alloc::boxed::Box;
 use alloc::sync::Arc;
 
 use g2g_core::log::{short_type_name, Target};
-use g2g_core::memory::{DomainSet, HipVendor, MemoryDomainKind, OwnedCudaBuffer, OwnedHipBuffer};
+use g2g_core::memory::{
+    DomainSet, HipVendor, MemoryDomainKind, OwnedCudaBuffer, OwnedDmaBuf, OwnedHipBuffer,
+};
 use g2g_core::meta::{Plane, PlaneLayout};
 use g2g_core::{
-    g2g_error, AsyncElement, Caps, CapsConstraint, ConfigureOutcome, ElementMetadata, G2gError,
-    MemoryDomain, OutputSink, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
+    g2g_error, g2g_warn, AsyncElement, Caps, CapsConstraint, ConfigureOutcome, ElementMetadata,
+    G2gError, MemoryDomain, OutputSink, PipelinePacket, PropError, PropKind, PropValue,
+    PropertySpec,
 };
 
-use crate::hip::{hip_buffer, HipDevice, HipEvent, HipMemoryPool, HipPinnedMemory, HipStream};
+use crate::dmabufimport::DmaBufImportCache;
+use crate::dmabufmap::{dmabuf_len, DmaBufReadMap};
+use crate::hip::{
+    hip_buffer, HipDevice, HipEvent, HipExternalBuffer, HipMemoryPool, HipPinnedMemory, HipStream,
+};
+use crate::paddedrows::single_stride_layout;
+use crate::pixel::RawVideoGeometry;
 
 #[derive(Debug)]
 struct Staging {
@@ -33,11 +42,14 @@ struct UploadGpu {
     stream: HipStream,
     pool: Option<HipMemoryPool>,
     staging: Option<Staging>,
+    dmabuf_imports: DmaBufImportCache<Arc<HipExternalBuffer>>,
+    dmabuf_import_failed: bool,
 }
 
 #[derive(Debug, Default)]
 pub struct HipUpload {
     configured: bool,
+    raw_video: Option<RawVideoGeometry>,
     device_id: Option<i32>,
     vendor: Option<HipVendor>,
     gpu: Option<UploadGpu>,
@@ -80,6 +92,8 @@ impl HipUpload {
                     device,
                     pool: None,
                     staging: None,
+                    dmabuf_imports: DmaBufImportCache::new(),
+                    dmabuf_import_failed: false,
                 }
             }
         };
@@ -153,6 +167,79 @@ fn wrap_cuda(gpu: &UploadGpu, cuda: &OwnedCudaBuffer) -> Result<OwnedHipBuffer, 
     Ok(buffer.with_plane_layout(layout))
 }
 
+fn upload_dmabuf(
+    gpu: &mut UploadGpu,
+    dmabuf: &OwnedDmaBuf,
+    raw_video: RawVideoGeometry,
+) -> Result<OwnedHipBuffer, G2gError> {
+    let RawVideoGeometry {
+        format,
+        width,
+        height,
+    } = raw_video;
+    let tag = Target::category(short_type_name::<HipUpload>());
+    if dmabuf.sync_fd().is_some() {
+        g2g_error!(
+            tag,
+            "the dma-buf comes with a GPU semaphore this element cannot wait on, turn off the producer's zero-stall sync"
+        );
+        return Err(G2gError::UnsupportedDomain);
+    }
+    let (layout, size) = single_stride_layout(format, width, height, dmabuf.offset, dmabuf.stride)
+        .ok_or(G2gError::CapsMismatch)?;
+    // hip imports dma-bufs only on amd
+    if gpu.device.vendor() == HipVendor::Amd && !gpu.dmabuf_import_failed {
+        match import_dmabuf(gpu, dmabuf, size) {
+            Ok(buffer) => return Ok(buffer.with_plane_layout(layout)),
+            Err(error) => {
+                g2g_warn!(
+                    tag,
+                    "importing a dma-buf into HIP failed ({error:?}), copying frames through the CPU"
+                );
+                gpu.dmabuf_import_failed = true;
+            }
+        }
+    }
+    let map = DmaBufReadMap::read(dmabuf)?;
+    let (layout, size) = single_stride_layout(format, width, height, 0, dmabuf.stride)
+        .ok_or(G2gError::CapsMismatch)?;
+    let bytes = usize::try_from(size)
+        .ok()
+        .and_then(|size| map.as_slice().get(..size))
+        .ok_or(G2gError::CapsMismatch)?;
+    Ok(upload(gpu, bytes)?.with_plane_layout(layout))
+}
+
+fn import_dmabuf(
+    gpu: &mut UploadGpu,
+    dmabuf: &OwnedDmaBuf,
+    size: u64,
+) -> Result<OwnedHipBuffer, G2gError> {
+    if u64::try_from(dmabuf_len(dmabuf)?).map_err(|_| G2gError::CapsMismatch)? < size {
+        return Err(G2gError::CapsMismatch);
+    }
+    let device = &gpu.device;
+    let imported = gpu.dmabuf_imports.get_or_import(dmabuf, size, || {
+        // SAFETY: the fd is a live dma-buf owned by `dmabuf` for this call.
+        let fd = unsafe { std::os::fd::BorrowedFd::borrow_raw(dmabuf.as_raw()) }
+            .try_clone_to_owned()
+            .map_err(|_| G2gError::Hardware(g2g_core::HardwareError::Other))?;
+        // SAFETY: `fd` is a dma-buf of at least `size` bytes, checked above, on an AMD device.
+        unsafe { HipExternalBuffer::import(fd, size, device.ordinal()) }.map(Arc::new)
+    })?;
+    let ready = HipEvent::new(device)?;
+    gpu.stream.record(&ready)?;
+    let len = usize::try_from(size).map_err(|_| G2gError::CapsMismatch)?;
+    // the frame keeps the producer from recycling the dma-buf while the import is read
+    hip_buffer(
+        device,
+        imported.device_pointer(),
+        len,
+        ready,
+        Box::new((imported, dmabuf.clone())),
+    )
+}
+
 static HIP_UPLOAD_PROPS: &[PropertySpec] = &[
     PropertySpec::new(
         "device-id",
@@ -180,7 +267,7 @@ impl AsyncElement for HipUpload {
         ElementMetadata::new(
             "HIP upload",
             "Filter/Converter/Video/GPU",
-            "Copies a system frame into HIP device memory, or wraps a CUDA frame on NVIDIA without a copy",
+            "Copies a system frame into HIP device memory, imports a linear dma-buf on AMD, or wraps a CUDA frame on NVIDIA without a copy",
             "g2g",
         )
     }
@@ -196,6 +283,7 @@ impl AsyncElement for HipUpload {
     fn input_domains(&self) -> DomainSet {
         DomainSet::only(MemoryDomainKind::System)
             .with(MemoryDomainKind::Cuda)
+            .with(MemoryDomainKind::DmaBuf)
             .with(MemoryDomainKind::Hip)
     }
 
@@ -203,7 +291,8 @@ impl AsyncElement for HipUpload {
         MemoryDomainKind::Hip
     }
 
-    fn configure_pipeline(&mut self, _absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
+    fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
+        self.raw_video = RawVideoGeometry::of(absolute_caps);
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
     }
@@ -269,6 +358,11 @@ impl AsyncElement for HipUpload {
                         MemoryDomain::Cuda(cuda) => {
                             let gpu = self.gpu_for(Some(cuda.device_ordinal))?;
                             Some(wrap_cuda(gpu, cuda)?)
+                        }
+                        MemoryDomain::DmaBuf(dmabuf) => {
+                            let raw_video = self.raw_video.ok_or(G2gError::CapsMismatch)?;
+                            let gpu = self.gpu_for(None)?;
+                            Some(upload_dmabuf(gpu, dmabuf, raw_video)?)
                         }
                         domain => {
                             let bytes = domain.require_system_slice(short_type_name::<Self>())?;

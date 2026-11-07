@@ -21,6 +21,17 @@ const DMA_BUF_IOCTL_SYNC: libc::c_ulong = 0x4008_6200;
 const DMA_BUF_SYNC_READ: u64 = 1 << 0;
 const DMA_BUF_SYNC_END: u64 = 1 << 2;
 
+// the whole buffer, from offset 0
+pub(crate) fn dmabuf_len(dmabuf: &OwnedDmaBuf) -> Result<usize, G2gError> {
+    // SAFETY: the fd is an open dma-buf descriptor the frame owns; SEEK_END on
+    // one reports its size, which is how a consumer learns it.
+    let size = unsafe { libc::lseek(dmabuf.as_raw(), 0, libc::SEEK_END) };
+    usize::try_from(size)
+        .ok()
+        .filter(|&size| size > 0)
+        .ok_or(G2gError::UnsupportedDomain)
+}
+
 /// A DMABUF mapped for reading, unmapped on drop.
 #[derive(Debug)]
 pub struct DmaBufReadMap {
@@ -41,13 +52,7 @@ impl DmaBufReadMap {
     /// page offset), so the offset is applied to the mapping, not to `mmap`.
     pub fn read(dmabuf: &OwnedDmaBuf) -> Result<Self, G2gError> {
         let fd = dmabuf.as_raw();
-        // SAFETY: `fd` is an open dma-buf descriptor the frame owns; SEEK_END on
-        // one reports its size, which is how a consumer learns it.
-        let size = unsafe { libc::lseek(fd, 0, libc::SEEK_END) };
-        if size <= 0 {
-            return Err(G2gError::UnsupportedDomain);
-        }
-        let length = size as usize;
+        let length = dmabuf_len(dmabuf)?;
         let offset = dmabuf.offset as usize;
         if offset >= length {
             return Err(G2gError::UnsupportedDomain);

@@ -7,7 +7,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::ffi::{c_char, c_void};
 use std::ffi::CString;
-use std::os::fd::{FromRawFd, IntoRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, OwnedFd};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Condvar, Mutex, OnceLock, PoisonError};
 
@@ -189,31 +189,30 @@ pub struct HipExternalBuffer {
     ext_mem: usize,
     device_pointer: u64,
     device_ordinal: i32,
+    // rocm maps the fd without taking it, so it closes after the import is destroyed
+    _fd: OwnedFd,
 }
 
 impl HipExternalBuffer {
     /// # Safety
-    /// `fd` must be an `OPAQUE_FD` export of a dedicated allocation of at least `size` bytes.
+    /// `fd` must be an `OPAQUE_FD` export of a dedicated allocation, or on AMD a
+    /// dma-buf, of at least `size` bytes.
     pub unsafe fn import(fd: OwnedFd, size: u64, device_ordinal: i32) -> Result<Self, G2gError> {
-        // SAFETY: HIP owns the fd once the import succeeds, and the import is
+        // SAFETY: `fd` stays open while the import lives, and the import is
         // destroyed when mapping it fails.
         unsafe {
             check(hip_set_device(device_ordinal))?;
-            let raw_fd = fd.into_raw_fd();
             let import_desc = HipExternalMemoryHandleDesc {
                 type_: HIP_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD,
                 _pad: 0,
-                handle_fd: raw_fd,
+                handle_fd: fd.as_raw_fd(),
                 _handle_rest: [0; 12],
                 size,
                 flags: HIP_EXTERNAL_MEMORY_DEDICATED,
                 reserved: [0; 16],
             };
             let mut ext_mem: HipExternalMemory = core::ptr::null_mut();
-            if let Err(error) = check(hip_import_external_memory(&mut ext_mem, &import_desc)) {
-                drop(OwnedFd::from_raw_fd(raw_fd));
-                return Err(error);
-            }
+            check(hip_import_external_memory(&mut ext_mem, &import_desc))?;
             let buffer_desc = HipExternalMemoryBufferDesc {
                 offset: 0,
                 size,
@@ -234,6 +233,7 @@ impl HipExternalBuffer {
                 ext_mem: ext_mem as usize,
                 device_pointer: device_pointer as u64,
                 device_ordinal,
+                _fd: fd,
             })
         }
     }

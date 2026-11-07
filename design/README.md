@@ -252,6 +252,18 @@ it on every run. Otherwise `hipdownload` copies to system memory, packing
 padded rows tight. Both are domain converters, so a Hip consumer after a
 system or CUDA producer gets `hipupload` spliced in.
 
+On AMD, `hipupload` imports a linear dma-buf frame with
+`hipImportExternalMemory`, as GStreamer's `hipupload` does, and keeps each import
+in a cache keyed by the dma-buf's inode, the same `DmaBufImportCache` the wgpu
+importer uses. The Hip frame holds a share of the dma-buf, so `v4l2src` does not
+requeue the buffer until the Hip frame drops. ROCm imports only memory amdgpu exported, such
+as a Vulkan or VA-API export, and returns `hipErrorOutOfMemory` for a CPU-backed
+dma-buf (a udmabuf, a UVC webcam's buffer). Then, and always on NVIDIA,
+`hipupload` maps the dma-buf and copies it through the CPU, after one warning.
+A frame carrying `wgpudmabuf`'s zero-stall semaphore is refused, since HIP does
+not wait on it. ROCm never closes an imported fd, so `HipExternalBuffer` holds
+it until the import is destroyed.
+
 `hipconvertscale` converts and scales Hip frames between NV12, I420, P010,
 RGBA, BGRA, RGB, the planar `RGBP` and `BGRP`, and the float `RGBA_F16LE`,
 `RGBA_F32LE`, `RGB_F16LE`, `RGB_F32LE`, `RGBP_F16LE` and `RGBP_F32LE`, whose

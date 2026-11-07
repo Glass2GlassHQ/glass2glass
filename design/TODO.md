@@ -166,11 +166,8 @@ GstHip's inference path, with an AMD backend (`libamdhip64`, hiprtc) and an
 NVIDIA backend (`libcuda`, nvrtc), loaded at run time. Milestones validate on
 the laptop's RTX 3060 and Radeon 680M.
 
-- Linear dmabuf import into HIP on AMD in `hipupload`, with an import cache, from
-  `v4l2src`, `pipewirevideosrc` and `wgpudmabuf`, copying through the CPU when
-  the import fails.
-- Later: `hipconvert`, `hipscale`, `hipcompositor`, `video-direction` on
-  `hipconvertscale`, pinned buffers offered upstream so `v4l2src` writes straight
+- Later: `hipconvert`, `hipscale`, `hipcompositor`, `video-direction` and YUY2
+  (a UVC webcam's format) in `hipconvertscale`, pinned buffers offered upstream so `v4l2src` writes straight
   into them.
 
 ## Egress / transports

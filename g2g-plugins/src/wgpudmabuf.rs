@@ -84,10 +84,8 @@ use g2g_core::{
     G2gError, HardwareError, OutputSink, PipelinePacket, RawVideoFormat,
 };
 
-use crate::dmabufwgpu::{
-    dmabuf_frame_caps, single_stride_layout, DmaBufWgpuBuffer, DMABUF_FRAME_FORMATS,
-};
-use crate::paddedrows::{padded_planes, PaddedPlane};
+use crate::dmabufwgpu::{dmabuf_frame_caps, DmaBufWgpuBuffer, DMABUF_FRAME_FORMATS};
+use crate::paddedrows::{padded_planes, single_stride_layout, PaddedPlane};
 use crate::wgpubuffer::{whole_word_size, PlainWgpuBuffer};
 
 fn gpu_err() -> G2gError {

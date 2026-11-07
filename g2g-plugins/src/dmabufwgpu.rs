@@ -26,7 +26,6 @@ use core::pin::Pin;
 
 use alloc::boxed::Box;
 use alloc::sync::Arc;
-use alloc::vec::Vec;
 
 use std::os::fd::{BorrowedFd, FromRawFd, IntoRawFd, OwnedFd};
 use std::time::{Duration, Instant};
@@ -36,13 +35,14 @@ use ash::vk;
 use g2g_core::memory::{
     DomainSet, MemoryDomain, MemoryDomainKind, OwnedDmaBuf, OwnedWgpuBuffer, WgpuBufferKeepAlive,
 };
-use g2g_core::meta::{Plane, PlaneLayout};
 use g2g_core::pad_template::{PadTemplate, PadTemplates};
 use g2g_core::{
     AsyncElement, Caps, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError, HardwareError,
     OutputSink, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, RawVideoFormat,
 };
 
+use crate::dmabufimport::DmaBufImportCache;
+use crate::paddedrows::single_stride_layout;
 use crate::wgpubuffer::whole_word_size;
 
 /// Raw formats the import and the export ([`crate::wgpudmabuf::WgpuToDmaBuf`])
@@ -125,19 +125,14 @@ pub struct DmaBufImporter {
     semaphore: Option<(vk::Semaphore, wgpu::Device)>,
     /// Buffers already imported, by the dma-buf's inode and the imported size,
     /// so a producer pool handing its buffers round imports each once.
-    imports: Vec<((u64, u64), wgpu::Buffer)>,
+    imports: DmaBufImportCache<wgpu::Buffer>,
 }
-
-/// How many imported buffers a [`DmaBufImporter`] keeps. A dma-buf it has not
-/// seen once this many are held means the producer's pool changed, so the
-/// cache starts over.
-const MAX_CACHED_IMPORTS: usize = 16;
 
 impl DmaBufImporter {
     pub const fn new() -> Self {
         Self {
             semaphore: None,
-            imports: Vec::new(),
+            imports: DmaBufImportCache::new(),
         }
     }
 
@@ -157,21 +152,12 @@ impl DmaBufImporter {
         size: u64,
     ) -> Result<wgpu::Buffer, G2gError> {
         self.await_producer(device, dmabuf).await?;
-        // SAFETY: the fd is a live dma-buf owned by `dmabuf` for this call.
-        let fd = unsafe { BorrowedFd::borrow_raw(dmabuf.as_raw()) };
-        let key = (dmabuf_inode(fd)?, size);
-        if let Some((_, buffer)) = self.imports.iter().find(|(known, _)| *known == key) {
-            return Ok(buffer.clone());
-        }
-        // SAFETY: `device` carries VK_EXT_external_memory_dma_buf; the fd is a
-        // live dma-buf owned by `dmabuf` for this call and is duplicated before
-        // Vulkan takes ownership.
-        let buffer = unsafe { import_dmabuf(device, dmabuf.as_raw(), size)? };
-        if self.imports.len() >= MAX_CACHED_IMPORTS {
-            self.imports.clear();
-        }
-        self.imports.push((key, buffer.clone()));
-        Ok(buffer)
+        self.imports.get_or_import(dmabuf, size, || {
+            // SAFETY: `device` carries VK_EXT_external_memory_dma_buf; the fd is a
+            // live dma-buf owned by `dmabuf` for this call and is duplicated before
+            // Vulkan takes ownership.
+            unsafe { import_dmabuf(device, dmabuf.as_raw(), size) }
+        })
     }
 
     /// Cross-process GPU sync: if the producer attached a timeline semaphore
@@ -218,14 +204,6 @@ impl DmaBufImporter {
             tokio::task::yield_now().await;
         }
     }
-}
-
-/// The inode of the dma-buf behind `fd`: every fd of one buffer shares it, and
-/// it is not reused while an import holds the buffer open.
-fn dmabuf_inode(fd: BorrowedFd<'_>) -> Result<u64, G2gError> {
-    use std::os::unix::fs::MetadataExt;
-    let file = std::fs::File::from(fd.try_clone_to_owned().map_err(|_| gpu_err())?);
-    Ok(file.metadata().map_err(|_| gpu_err())?.ino())
 }
 
 impl Drop for DmaBufImporter {
@@ -454,44 +432,6 @@ impl AsyncElement for DmaBufToWgpu {
             Ok(())
         })
     }
-}
-
-/// Where each plane of a `format` frame sits in a dma-buf whose plane 0 starts at
-/// `offset` with rows `stride` bytes apart (0 means tight), and how many bytes the
-/// planes span with every row at full stride. `None` when the stride cannot hold
-/// a row or the arithmetic overflows: both numbers come from the producer. A
-/// tight stride is plane 0's row, so an odd-width NV12 frame, whose chroma row
-/// is one byte wider, has no tight single-stride layout.
-pub(crate) fn single_stride_layout(
-    format: RawVideoFormat,
-    width: u32,
-    height: u32,
-    offset: u32,
-    stride: u32,
-) -> Option<(PlaneLayout, u64)> {
-    let stride = match stride {
-        0 => format.plane_stride(0, width)?,
-        stride => stride,
-    };
-    let planes = crate::paddedrows::padded_planes(
-        format,
-        width as usize,
-        height as usize,
-        offset as usize,
-        stride as usize,
-    )?;
-    let last = planes.last()?;
-    let size = last
-        .offset
-        .checked_add(last.stride.checked_mul(last.rows)?)?;
-    let planes: alloc::vec::Vec<Plane> = planes
-        .iter()
-        .map(|p| Plane {
-            offset: p.offset,
-            stride: p.stride,
-        })
-        .collect();
-    Some((PlaneLayout::new(&planes)?, size as u64))
 }
 
 /// The [`ImportAdapter`] choice as a property, declared once and reused by every

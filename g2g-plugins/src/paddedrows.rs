@@ -51,7 +51,8 @@ pub(crate) fn plane_shapes_with_stride_shift(
     all(target_os = "linux", feature = "pipewire"),
     all(target_os = "linux", feature = "dmabuf-wgpu"),
     all(target_os = "linux", feature = "unixfd"),
-    all(target_os = "linux", feature = "kms-sink")
+    all(target_os = "linux", feature = "kms-sink"),
+    all(target_os = "linux", feature = "hip")
 ))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct PaddedPlane {
@@ -71,7 +72,8 @@ pub(crate) struct PaddedPlane {
     all(target_os = "linux", feature = "pipewire"),
     all(target_os = "linux", feature = "dmabuf-wgpu"),
     all(target_os = "linux", feature = "unixfd"),
-    all(target_os = "linux", feature = "kms-sink")
+    all(target_os = "linux", feature = "kms-sink"),
+    all(target_os = "linux", feature = "hip")
 ))]
 pub(crate) fn padded_planes(
     format: RawVideoFormat,
@@ -99,6 +101,48 @@ pub(crate) fn padded_planes(
         offset = offset.checked_add(stride.checked_mul(rows)?)?;
     }
     Some(planes)
+}
+
+/// Where each plane of a `format` frame sits in a dma-buf whose plane 0 starts at
+/// `offset` with rows `stride` bytes apart (0 means tight), and how many bytes the
+/// planes span with every row at full stride. `None` when the stride cannot hold
+/// a row or the arithmetic overflows: both numbers come from the producer. A
+/// tight stride is plane 0's row, so an odd-width NV12 frame, whose chroma row
+/// is one byte wider, has no tight single-stride layout.
+#[cfg(any(
+    all(target_os = "linux", feature = "dmabuf-wgpu"),
+    all(target_os = "linux", feature = "hip")
+))]
+pub(crate) fn single_stride_layout(
+    format: RawVideoFormat,
+    width: u32,
+    height: u32,
+    offset: u32,
+    stride: u32,
+) -> Option<(g2g_core::meta::PlaneLayout, u64)> {
+    let stride = match stride {
+        0 => format.plane_stride(0, width)?,
+        stride => stride,
+    };
+    let planes = padded_planes(
+        format,
+        width as usize,
+        height as usize,
+        offset as usize,
+        stride as usize,
+    )?;
+    let last = planes.last()?;
+    let size = last
+        .offset
+        .checked_add(last.stride.checked_mul(last.rows)?)?;
+    let planes: alloc::vec::Vec<g2g_core::meta::Plane> = planes
+        .iter()
+        .map(|p| g2g_core::meta::Plane {
+            offset: p.offset,
+            stride: p.stride,
+        })
+        .collect();
+    Some((g2g_core::meta::PlaneLayout::new(&planes)?, size as u64))
 }
 
 /// How many bytes a padded frame occupies: the end of its last plane's last

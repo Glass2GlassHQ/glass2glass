@@ -1080,10 +1080,17 @@ pub mod tcp;
         feature = "alsa-sink",
         feature = "pulse-sink",
         feature = "pipewire",
-        feature = "unixfd"
+        feature = "unixfd",
+        feature = "hip"
     )
 ))]
 pub mod dmabufmap;
+
+#[cfg(any(
+    all(target_os = "linux", feature = "dmabuf-wgpu"),
+    all(target_os = "linux", feature = "hip")
+))]
+mod dmabufimport;
 
 // Shared-memory IPC pair (M1081): ShmSink serves frames through a POSIX shm
 // area announced over a unix control socket, ShmSrc maps that area and copies
