@@ -166,16 +166,15 @@ GstHip's inference path, with an AMD backend (`libamdhip64`, hiprtc) and an
 NVIDIA backend (`libcuda`, nvrtc), loaded at run time. Milestones validate on
 the laptop's RTX 3060 and Radeon 680M.
 
-- `hipconvertscale` between NV12, I420, RGBA, BGRA, P010, planar RGB and float
-  RGB, with its converter public in `g2g_plugins::hip` for applications to call.
 - `hippreprocess` (the `wgpupreprocess` properties and `Caps::Tensor` output),
   and `ortinfer` reading Hip tensors through MIGraphX on AMD and the CUDA EP on
   NVIDIA. Validate nvdec -> `hipconvertscale` -> `hippreprocess` -> `ortinfer`.
 - Linear dmabuf import into HIP on AMD in `hipupload`, with an import cache, from
   `v4l2src`, `pipewirevideosrc` and `wgpudmabuf`, copying through the CPU when
   the import fails, and MIGraphX on Hip tensors.
-- Later: `hipconvert`, `hipscale`, `hipcompositor`, pinned buffers offered
-  upstream so `v4l2src` writes straight into them.
+- Later: `hipconvert`, `hipscale`, `hipcompositor`, `video-direction` on
+  `hipconvertscale`, pinned buffers offered upstream so `v4l2src` writes straight
+  into them.
 
 ## Egress / transports
 

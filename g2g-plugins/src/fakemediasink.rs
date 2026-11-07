@@ -20,40 +20,10 @@ use g2g_core::log::{short_type_name, LogName, LogSource};
 use g2g_core::{
     g2g_debug, AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim,
     ElementMetadata, G2gError, Interlace, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
-    PropError, PropKind, PropValue, PropertySpec, Rate, RawVideoFormat,
+    PropError, PropKind, PropValue, PropertySpec, Rate,
 };
 
 use crate::fakesink::FakeSink;
-
-/// The raw video formats a `fakevideosink` pad advertises: every one g2g has, so
-/// nothing negotiable is turned away.
-const RAW_VIDEO_FORMATS: [RawVideoFormat; 25] = [
-    RawVideoFormat::Nv12,
-    RawVideoFormat::I420,
-    RawVideoFormat::Rgba8,
-    RawVideoFormat::Bgra8,
-    RawVideoFormat::Rgb8,
-    RawVideoFormat::Yuyv,
-    RawVideoFormat::I420p10,
-    RawVideoFormat::I420p12,
-    RawVideoFormat::I422,
-    RawVideoFormat::I422p10,
-    RawVideoFormat::I422p12,
-    RawVideoFormat::I444,
-    RawVideoFormat::I444p10,
-    RawVideoFormat::I444p12,
-    RawVideoFormat::P010,
-    RawVideoFormat::A420,
-    RawVideoFormat::Uyvy,
-    RawVideoFormat::A444p12,
-    RawVideoFormat::V210,
-    RawVideoFormat::R210,
-    RawVideoFormat::Gbr10Le,
-    RawVideoFormat::Gray8,
-    RawVideoFormat::Bgr8,
-    RawVideoFormat::Bgrx8,
-    RawVideoFormat::Argb8,
-];
 
 /// The PCM formats a `fakeaudiosink` pad advertises. `Caps::Audio` also carries
 /// the encoded formats, which is exactly what this sink refuses.
@@ -73,7 +43,7 @@ const ANY_SAMPLE_RATE: u32 = 0;
 /// Every raw video shape, for the sink's declared constraint and pad template.
 fn raw_video_caps() -> CapsSet {
     CapsSet::from_alternatives(
-        RAW_VIDEO_FORMATS
+        g2g_core::caps::ALL_RAW_VIDEO_FORMATS
             .iter()
             .map(|&format| Caps::RawVideo {
                 format,

@@ -252,6 +252,16 @@ it on every run. Otherwise `hipdownload` copies to system memory, packing
 padded rows tight. Both are domain converters, so a Hip consumer after a
 system or CUDA producer gets `hipupload` spliced in.
 
+`hipconvertscale` converts and scales Hip frames between NV12, I420, P010,
+RGBA, BGRA, RGB, the planar `RGBP` and `BGRP`, and the float `RGBA_F16LE`,
+`RGBA_F32LE`, `RGB_F16LE`, `RGB_F32LE`, `RGBP_F16LE` and `RGBP_F32LE`, whose
+samples run 0.0 to 1.0 as in GStreamer 1.30. `HipConverter` holds one kernel
+compiled for the input and output format pair, with the formats, each side's
+`Kr` / `Kb`, range and bit depth passed as `-D` defines, so YUV math decodes
+10-bit P010 at its own depth. Scaling is bilinear, chroma included, and
+`add-borders` letterboxes the picture inside the output, on even rows and
+columns for a 4:2:0 output.
+
 ### The copy plan
 
 Because negotiation resolves the memory domain of every link before a frame

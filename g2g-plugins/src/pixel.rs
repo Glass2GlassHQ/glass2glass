@@ -55,6 +55,14 @@ pub(crate) fn carries_yuv(format: RawVideoFormat) -> bool {
             | RawVideoFormat::Bgr8
             | RawVideoFormat::Bgrx8
             | RawVideoFormat::Argb8
+            | RawVideoFormat::Rgbp8
+            | RawVideoFormat::Bgrp8
+            | RawVideoFormat::RgbaF16
+            | RawVideoFormat::RgbaF32
+            | RawVideoFormat::RgbF16
+            | RawVideoFormat::RgbF32
+            | RawVideoFormat::RgbpF16
+            | RawVideoFormat::RgbpF32
     )
 }
 
@@ -204,40 +212,12 @@ pub(crate) fn frame_byte_size(format: RawVideoFormat, w: u32, h: u32) -> usize {
 pub(crate) mod tests {
     use super::*;
 
-    pub(crate) const EVERY_FORMAT: [RawVideoFormat; 25] = [
-        RawVideoFormat::Nv12,
-        RawVideoFormat::I420,
-        RawVideoFormat::Rgba8,
-        RawVideoFormat::Bgra8,
-        RawVideoFormat::Rgb8,
-        RawVideoFormat::Yuyv,
-        RawVideoFormat::I420p10,
-        RawVideoFormat::I420p12,
-        RawVideoFormat::I422,
-        RawVideoFormat::I422p10,
-        RawVideoFormat::I422p12,
-        RawVideoFormat::I444,
-        RawVideoFormat::I444p10,
-        RawVideoFormat::I444p12,
-        RawVideoFormat::P010,
-        RawVideoFormat::A420,
-        RawVideoFormat::Uyvy,
-        RawVideoFormat::A444p12,
-        RawVideoFormat::V210,
-        RawVideoFormat::R210,
-        RawVideoFormat::Gbr10Le,
-        RawVideoFormat::Gray8,
-        RawVideoFormat::Bgr8,
-        RawVideoFormat::Bgrx8,
-        RawVideoFormat::Argb8,
-    ];
-
     // odd and even on each axis, so a subsampled chroma plane has to round up
     pub(crate) const GEOMETRIES: [(u32, u32); 5] = [(37, 5), (37, 4), (38, 5), (38, 4), (1, 1)];
 
     #[test]
     fn frame_size_is_the_core_definition() {
-        for format in EVERY_FORMAT {
+        for &format in g2g_core::caps::ALL_RAW_VIDEO_FORMATS {
             for (w, h) in GEOMETRIES {
                 let core = format.unpadded_frame_bytes(w, h).unwrap() as usize;
                 assert_eq!(frame_byte_size(format, w, h), core, "{format:?} {w}x{h}");
@@ -247,7 +227,7 @@ pub(crate) mod tests {
 
     #[test]
     fn planes_are_the_core_definition() {
-        for format in EVERY_FORMAT {
+        for &format in g2g_core::caps::ALL_RAW_VIDEO_FORMATS {
             for (w, h) in GEOMETRIES {
                 let (wu, hu) = (w as usize, h as usize);
                 let core_plane = |plane: usize| {

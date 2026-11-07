@@ -291,8 +291,8 @@ mod tests {
 
     #[test]
     fn shapes_are_the_core_planes() {
-        use crate::pixel::tests::{EVERY_FORMAT, GEOMETRIES};
-        for format in EVERY_FORMAT {
+        use crate::pixel::tests::GEOMETRIES;
+        for &format in g2g_core::caps::ALL_RAW_VIDEO_FORMATS {
             for (w, h) in GEOMETRIES {
                 let shapes = plane_shapes_with_stride_shift(format, w as usize, h as usize)
                     .expect("small frame");

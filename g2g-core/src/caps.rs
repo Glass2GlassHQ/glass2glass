@@ -2395,6 +2395,22 @@ pub enum RawVideoFormat {
     Bgrx8,
     // packed 8-bit RGBA with the alpha byte first
     Argb8,
+    // planar 8-bit RGB in the plane order R, G, B
+    Rgbp8,
+    // planar 8-bit RGB in the plane order B, G, R
+    Bgrp8,
+    // packed RGBA of little-endian half floats, each channel 0.0 to 1.0
+    RgbaF16,
+    // packed RGBA of little-endian 32-bit floats, each channel 0.0 to 1.0
+    RgbaF32,
+    // packed RGB of little-endian half floats, each channel 0.0 to 1.0
+    RgbF16,
+    // packed RGB of little-endian 32-bit floats, each channel 0.0 to 1.0
+    RgbF32,
+    // planar R, G, B of little-endian half floats, each channel 0.0 to 1.0
+    RgbpF16,
+    // planar R, G, B of little-endian 32-bit floats, each channel 0.0 to 1.0, the CHW layout models read
+    RgbpF32,
 }
 
 impl RawVideoFormat {
@@ -2426,10 +2442,18 @@ impl RawVideoFormat {
             RawVideoFormat::Bgr8 => "BGR",
             RawVideoFormat::Bgrx8 => "BGRx",
             RawVideoFormat::Argb8 => "ARGB",
+            RawVideoFormat::Rgbp8 => "RGBP",
+            RawVideoFormat::Bgrp8 => "BGRP",
+            RawVideoFormat::RgbaF16 => "RGBA_F16LE",
+            RawVideoFormat::RgbaF32 => "RGBA_F32LE",
+            RawVideoFormat::RgbF16 => "RGB_F16LE",
+            RawVideoFormat::RgbF32 => "RGB_F32LE",
+            RawVideoFormat::RgbpF16 => "RGBP_F16LE",
+            RawVideoFormat::RgbpF32 => "RGBP_F32LE",
         }
     }
 
-    /// Bits per sample: 8, 10, or 12. The 10- and 12-bit planar formats
+    /// Bits per sample: 8, 10, 12, or 16 and 32 for the float formats. The 10- and 12-bit planar formats
     /// store each sample little-endian in a 2-byte word (P010 in the word's top
     /// bits, the planar family in the low bits), and v210 / r210 pack three
     /// 10-bit samples into each 32-bit word. The 8-bit RGBA / packed formats
@@ -2447,17 +2471,20 @@ impl RawVideoFormat {
             | RawVideoFormat::I422p12
             | RawVideoFormat::I444p12
             | RawVideoFormat::A444p12 => 12,
+            RawVideoFormat::RgbaF16 | RawVideoFormat::RgbF16 | RawVideoFormat::RgbpF16 => 16,
+            RawVideoFormat::RgbaF32 | RawVideoFormat::RgbF32 | RawVideoFormat::RgbpF32 => 32,
             _ => 8,
         }
     }
 
-    /// Bytes per sample: 2 for the 10- / 12-bit planar formats (LE `u16`), else 1.
+    /// Bytes per sample: 2 for the 10- / 12-bit planar formats (LE `u16`) and
+    /// half floats, 4 for 32-bit floats, else 1.
     /// It does not describe v210 or r210, whose samples share 32-bit words.
     pub const fn bytes_per_sample(self) -> usize {
-        if self.bit_depth() > 8 {
-            2
-        } else {
-            1
+        match self.bit_depth() {
+            32 => 4,
+            9..=16 => 2,
+            _ => 1,
         }
     }
 
@@ -2500,7 +2527,14 @@ impl RawVideoFormat {
 
     pub const fn is_full_resolution_plane(self, plane: usize) -> bool {
         plane == 0
-            || matches!(self, RawVideoFormat::Gbr10Le)
+            || matches!(
+                self,
+                RawVideoFormat::Gbr10Le
+                    | RawVideoFormat::Rgbp8
+                    | RawVideoFormat::Bgrp8
+                    | RawVideoFormat::RgbpF16
+                    | RawVideoFormat::RgbpF32
+            )
             || matches!(self.alpha_plane(), Some(alpha) if alpha == plane)
     }
 
@@ -2523,7 +2557,11 @@ impl RawVideoFormat {
             | RawVideoFormat::Gray8
             | RawVideoFormat::Bgr8
             | RawVideoFormat::Bgrx8
-            | RawVideoFormat::Argb8 => self.plane_stride(0, width),
+            | RawVideoFormat::Argb8
+            | RawVideoFormat::RgbaF16
+            | RawVideoFormat::RgbaF32
+            | RawVideoFormat::RgbF16
+            | RawVideoFormat::RgbF32 => self.plane_stride(0, width),
             RawVideoFormat::Nv12 | RawVideoFormat::I420 => width.div_ceil(2).checked_mul(2),
             _ => None,
         }
@@ -2548,7 +2586,11 @@ impl RawVideoFormat {
             | RawVideoFormat::Gray8
             | RawVideoFormat::Bgr8
             | RawVideoFormat::Bgrx8
-            | RawVideoFormat::Argb8 => Some(luma),
+            | RawVideoFormat::Argb8
+            | RawVideoFormat::RgbaF16
+            | RawVideoFormat::RgbaF32
+            | RawVideoFormat::RgbF16
+            | RawVideoFormat::RgbF32 => Some(luma),
             RawVideoFormat::Nv12 | RawVideoFormat::I420 => {
                 luma.checked_add(stride.checked_mul(height.div_ceil(2))?)
             }
@@ -2573,7 +2615,11 @@ impl RawVideoFormat {
             | RawVideoFormat::Gray8
             | RawVideoFormat::Bgr8
             | RawVideoFormat::Bgrx8
-            | RawVideoFormat::Argb8 => 1,
+            | RawVideoFormat::Argb8
+            | RawVideoFormat::RgbaF16
+            | RawVideoFormat::RgbaF32
+            | RawVideoFormat::RgbF16
+            | RawVideoFormat::RgbF32 => 1,
             RawVideoFormat::Nv12 | RawVideoFormat::P010 => 2,
             RawVideoFormat::I420
             | RawVideoFormat::I420p10
@@ -2584,7 +2630,11 @@ impl RawVideoFormat {
             | RawVideoFormat::I444
             | RawVideoFormat::I444p10
             | RawVideoFormat::I444p12
-            | RawVideoFormat::Gbr10Le => 3,
+            | RawVideoFormat::Gbr10Le
+            | RawVideoFormat::Rgbp8
+            | RawVideoFormat::Bgrp8
+            | RawVideoFormat::RgbpF16
+            | RawVideoFormat::RgbpF32 => 3,
             RawVideoFormat::A420 | RawVideoFormat::A444p12 => 4,
         }
     }
@@ -2602,6 +2652,10 @@ impl RawVideoFormat {
             | RawVideoFormat::Bgrx8
             | RawVideoFormat::Argb8 => Some(4),
             RawVideoFormat::Rgb8 | RawVideoFormat::Bgr8 => Some(3),
+            RawVideoFormat::RgbaF32 => Some(16),
+            RawVideoFormat::RgbF32 => Some(12),
+            RawVideoFormat::RgbaF16 => Some(8),
+            RawVideoFormat::RgbF16 => Some(6),
             RawVideoFormat::Yuyv | RawVideoFormat::Uyvy => Some(2),
             RawVideoFormat::Gray8 => Some(1),
             _ => None,
@@ -2910,8 +2964,7 @@ pub enum TensorLayout {
     Nhwc,
 }
 
-#[cfg(all(test, feature = "alloc"))]
-pub(crate) const ALL_RAW_VIDEO_FORMATS: [RawVideoFormat; 25] = [
+pub const ALL_RAW_VIDEO_FORMATS: &[RawVideoFormat] = &[
     RawVideoFormat::Nv12,
     RawVideoFormat::I420,
     RawVideoFormat::Rgba8,
@@ -2937,6 +2990,14 @@ pub(crate) const ALL_RAW_VIDEO_FORMATS: [RawVideoFormat; 25] = [
     RawVideoFormat::Bgr8,
     RawVideoFormat::Bgrx8,
     RawVideoFormat::Argb8,
+    RawVideoFormat::Rgbp8,
+    RawVideoFormat::Bgrp8,
+    RawVideoFormat::RgbaF16,
+    RawVideoFormat::RgbaF32,
+    RawVideoFormat::RgbF16,
+    RawVideoFormat::RgbF32,
+    RawVideoFormat::RgbpF16,
+    RawVideoFormat::RgbpF32,
 ];
 
 #[cfg(test)]

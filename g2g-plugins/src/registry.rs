@@ -2864,6 +2864,7 @@ pub static FEATURE_GATED_ELEMENTS: &[FeatureGatedElement] = &{
         "avenc_aac" => "ffmpeg" on "linux" | "macos" | "windows";
         "cudadownload" => "cuda" on "linux" | "windows";
         "cudaupload" => "cuda" on "linux" | "windows";
+        "hipconvertscale" => "hip" on "linux";
         "hipdownload" => "hip" on "linux";
         "hipupload" => "hip" on "linux";
         "nvdec" => "nvdec" on "linux" | "windows";
@@ -3693,6 +3694,10 @@ fn register_feature_gated(reg: &mut Registry) {
     #[cfg(all(any(target_os = "linux", windows), feature = "cuda"))]
     reg.register_launch(LaunchFactory::new("cudaupload", Vec::new(), || {
         Box::new(crate::cuda::CudaUpload::new())
+    }));
+    #[cfg(all(target_os = "linux", feature = "hip"))]
+    reg.register_launch(LaunchFactory::new("hipconvertscale", Vec::new(), || {
+        Box::new(crate::hipconvertscale::HipConvertScale::new())
     }));
     #[cfg(all(target_os = "linux", feature = "hip"))]
     reg.register_launch(LaunchFactory::new("hipdownload", Vec::new(), || {

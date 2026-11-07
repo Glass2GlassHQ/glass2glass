@@ -570,6 +570,14 @@ pub fn parse_raw_format(s: &str) -> Option<RawVideoFormat> {
         "bgr" => RawVideoFormat::Bgr8,
         "bgrx" => RawVideoFormat::Bgrx8,
         "argb" => RawVideoFormat::Argb8,
+        "rgbp" => RawVideoFormat::Rgbp8,
+        "bgrp" => RawVideoFormat::Bgrp8,
+        "rgba_f16le" => RawVideoFormat::RgbaF16,
+        "rgba_f32le" => RawVideoFormat::RgbaF32,
+        "rgb_f16le" => RawVideoFormat::RgbF16,
+        "rgb_f32le" => RawVideoFormat::RgbF32,
+        "rgbp_f16le" => RawVideoFormat::RgbpF16,
+        "rgbp_f32le" => RawVideoFormat::RgbpF32,
         _ => return None,
     })
 }
@@ -680,7 +688,7 @@ mod tests {
 
     #[test]
     fn every_raw_format_parses_back_from_its_gst_name() {
-        for format in crate::caps::ALL_RAW_VIDEO_FORMATS {
+        for &format in crate::caps::ALL_RAW_VIDEO_FORMATS {
             assert_eq!(
                 parse_raw_format(format.gst_name()),
                 Some(format),

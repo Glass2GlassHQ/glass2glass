@@ -1809,6 +1809,8 @@ mod cuda_driver_ffi;
 #[cfg(all(target_os = "linux", feature = "hip"))]
 pub mod hip;
 #[cfg(all(target_os = "linux", feature = "hip"))]
+pub mod hipconvertscale;
+#[cfg(all(target_os = "linux", feature = "hip"))]
 pub mod hipdownload;
 #[cfg(all(target_os = "linux", feature = "hip"))]
 pub mod hipupload;

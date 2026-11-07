@@ -382,6 +382,14 @@ pub fn raw_format_to_u8(f: RawVideoFormat) -> u8 {
         RawVideoFormat::Bgr8 => 22,
         RawVideoFormat::Bgrx8 => 23,
         RawVideoFormat::Argb8 => 24,
+        RawVideoFormat::Rgbp8 => 25,
+        RawVideoFormat::Bgrp8 => 26,
+        RawVideoFormat::RgbaF16 => 27,
+        RawVideoFormat::RgbaF32 => 28,
+        RawVideoFormat::RgbF16 => 29,
+        RawVideoFormat::RgbF32 => 30,
+        RawVideoFormat::RgbpF16 => 31,
+        RawVideoFormat::RgbpF32 => 32,
     }
 }
 /// Inverse of [`raw_format_to_u8`]; errors on an unknown byte (never trust the
@@ -413,6 +421,14 @@ pub fn raw_format_from_u8(v: u8) -> Result<RawVideoFormat, WireError> {
         22 => RawVideoFormat::Bgr8,
         23 => RawVideoFormat::Bgrx8,
         24 => RawVideoFormat::Argb8,
+        25 => RawVideoFormat::Rgbp8,
+        26 => RawVideoFormat::Bgrp8,
+        27 => RawVideoFormat::RgbaF16,
+        28 => RawVideoFormat::RgbaF32,
+        29 => RawVideoFormat::RgbF16,
+        30 => RawVideoFormat::RgbF32,
+        31 => RawVideoFormat::RgbpF16,
+        32 => RawVideoFormat::RgbpF32,
         _ => return Err(WireError::BadTag),
     })
 }

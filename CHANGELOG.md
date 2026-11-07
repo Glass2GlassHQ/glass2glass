@@ -18,6 +18,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M2102: `MemoryDomain::Hip`, with HIP device memory, streams and events on AMD and NVIDIA.
 - M2103: `HipKernelModule` compiles kernels at run time with hiprtc or nvrtc, and `HipStream::launch` runs them.
 - M2104: `hipupload` and `hipdownload`, with CUDA frames crossing to and from HIP on NVIDIA without a copy.
+- M2105: `hipconvertscale` and the public `HipConverter`, with planar RGB and GStreamer 1.30's float RGB formats in the caps.
 
 ## 0.14.0
 
