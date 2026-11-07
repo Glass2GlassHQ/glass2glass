@@ -259,6 +259,9 @@ pub mod analyticsoverlay;
 // ByteTrack multi-object tracker (M1711): adds a track id to each AnalyticsMeta detection.
 #[cfg(feature = "analytics")]
 pub mod tracker;
+// Tracking crop: a fixed-size window that follows a detected object (M2094).
+#[cfg(feature = "analytics")]
+pub mod trackcrop;
 // Metadata records as JSON lines (M1176): one line per frame out of `metasink`,
 // back onto the frames through `metareplay`. Both need std and serde_json.
 #[cfg(feature = "analytics-json")]

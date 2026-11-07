@@ -918,7 +918,7 @@ pub fn vmti_from_analytics(
     frame_width: u32,
     frame_height: u32,
 ) -> VmtiLocalSet {
-    use g2g_core::{AnalyticsNode, RelationKind};
+    use g2g_core::AnalyticsNode;
 
     let width = frame_width.max(1);
     let height = frame_height.max(1);
@@ -940,15 +940,8 @@ pub fn vmti_from_analytics(
         let AnalyticsNode::Detection(detection) = node else {
             continue;
         };
-        let tracked = meta.relations.iter().find_map(|r| {
-            (r.kind == RelationKind::Tracks && r.from == index)
-                .then(|| match meta.nodes.get(r.to) {
-                    Some(AnalyticsNode::Tracking(t)) => Some(t.object_id),
-                    _ => None,
-                })
-                .flatten()
-        });
-        let id = tracked
+        let id = meta
+            .tracking_id(index)
             .unwrap_or(set.targets.len() as u64 + 1)
             .min(MAX_TARGET_ID as u64) as u32;
         let bbox = detection.bbox;

@@ -7,6 +7,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 ## Unreleased
 
 - M2093: `analyticsjoin` attaches a detector branch's `AnalyticsMeta` to the full-resolution video frames at the same time.
+- M2094: `trackcrop` crops and scales a fixed-size window that follows the frame's `Roi` nodes.
 
 ## 0.14.0
 

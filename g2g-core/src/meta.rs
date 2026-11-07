@@ -920,6 +920,17 @@ mod on {
             self.relations.push(Relation { from, to, kind });
         }
 
+        /// The `object_id` of the tracking node the node at `index` tracks as.
+        pub fn tracking_id(&self, index: usize) -> Option<u64> {
+            self.relations
+                .iter()
+                .find(|r| r.from == index && r.kind == RelationKind::Tracks)
+                .and_then(|r| match self.nodes.get(r.to) {
+                    Some(AnalyticsNode::Tracking(tracking)) => Some(tracking.object_id),
+                    _ => None,
+                })
+        }
+
         /// Iterate the detection nodes.
         pub fn detections(&self) -> impl Iterator<Item = &ObjectDetection> {
             self.nodes.iter().filter_map(|n| match n {

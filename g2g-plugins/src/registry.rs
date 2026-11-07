@@ -1017,6 +1017,12 @@ pub fn default_registry() -> Registry {
     reg.register_launch(LaunchFactory::new("tracker", Vec::new(), || {
         Box::new(crate::tracker::Tracker::new())
     }));
+    // Tracking crop (M2094): `... ! analyticsjoin ! trackcrop width=1080 height=1920` turns
+    // landscape video into a portrait crop that follows the frame's `Roi` nodes.
+    #[cfg(feature = "analytics")]
+    reg.register_launch(LaunchFactory::new("trackcrop", Vec::new(), || {
+        Box::new(crate::trackcrop::TrackCrop::default())
+    }));
     // Metadata record tools (M1176): `metasink` writes one JSON line per frame
     // and posts it on the bus, `metareplay` puts such a file back onto the frames
     // it was recorded from. The replay is caps-driven (no pad templates): it
@@ -2804,6 +2810,7 @@ pub static FEATURE_GATED_ELEMENTS: &[FeatureGatedElement] = &{
         "rtmpsink" => "rtmp";
         "analyticsoverlay" => "analytics";
         "tracker" => "analytics";
+        "trackcrop" => "analytics";
         "metasink" => "analytics-json";
         "metareplay" => "analytics-json";
         "mqttsink" => "mqtt";

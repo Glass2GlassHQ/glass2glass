@@ -164,7 +164,7 @@ impl AnalyticsShapes {
             match node {
                 AnalyticsNode::Detection(detection) => shapes.detections.push(PaintedDetection {
                     detection: *detection,
-                    track_id: track_id_of(meta, index),
+                    track_id: meta.tracking_id(index),
                 }),
                 AnalyticsNode::Segmentation(segmentation) => {
                     let palette_index = shapes.masks.len() as u32;
@@ -266,18 +266,6 @@ pub(crate) fn caption_bar_origin(
     let bar_x = x0.min((frame_w - bar_w).max(0)).max(0);
     let bar_y = if y0 - bar_h >= 0 { y0 - bar_h } else { y0 };
     (bar_x, bar_y)
-}
-
-/// The `object_id` of the tracking node the detection at `index` tracks as, if
-/// the producer wired one.
-fn track_id_of(meta: &AnalyticsMeta, index: usize) -> Option<u64> {
-    meta.relations
-        .iter()
-        .find(|r| r.from == index && r.kind == RelationKind::Tracks)
-        .and_then(|r| match meta.nodes.get(r.to) {
-            Some(AnalyticsNode::Tracking(tracking)) => Some(tracking.object_id),
-            _ => None,
-        })
 }
 
 impl Default for AnalyticsOverlay {

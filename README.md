@@ -954,6 +954,8 @@ parses. `detectionpostprocess head=pose` or `head=obb` decodes a YOLO `-pose` or
 `picture-height` map coordinates back through a letterboxed model input.
 `analyticsjoin` puts the detections from a scaled, rate-reduced `tee` branch back
 onto the full-resolution frames (`... ! tracker ! j.analytics  t. ! j.video`).
+`trackcrop width=1080 height=1920` then cuts a portrait window that pans to
+follow the frame's `Roi` nodes, the `vertical_reframe` example in `g2g-ml`.
 
 ### Camera → encode → RTP egress over UDP
 

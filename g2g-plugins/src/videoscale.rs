@@ -34,7 +34,7 @@ use g2g_core::{
     RawVideoShape,
 };
 
-const FORMATS: [RawVideoFormat; 13] = [
+pub(crate) const FORMATS: [RawVideoFormat; 13] = [
     RawVideoFormat::Rgba8,
     RawVideoFormat::Bgra8,
     RawVideoFormat::Rgb8,

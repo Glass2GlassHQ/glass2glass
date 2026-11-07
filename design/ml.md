@@ -574,6 +574,42 @@ latency. Stretching to the model size keeps the normalised boxes valid on the
 full frame, and `videorate` restamps onto its own grid, which the half-frame
 window absorbs.
 
+### Following a region
+
+`g2g-plugins::trackcrop::TrackCrop` (`trackcrop`, `analytics` feature) cuts a
+window of the output's aspect ratio from each frame and scales it to `width` x
+`height`, so `trackcrop width=1080 height=1920` turns 16:9 video into 9:16. The
+window is the largest of that aspect that fits the input, and it pans to keep the
+union of the frame's `Roi` nodes in view. Choosing what to frame is left to the
+graph: whatever writes the `Roi` decides, so one ball, two players or a speaker
+are all the same element.
+
+The window centre moves only when the target leaves the `dead-zone` (a fraction
+of the window size around the centre), follows it through a low-pass filter with
+time constant `smoothing-time`, and moves at most `max-pan-speed` frame widths per
+second, all measured on PTS. A frame with no `Roi` keeps the last target, which
+covers the frames between detections. When none of the frame's `Roi` ids was on
+the previous target, the window jumps instead of panning. Output caps stay fixed,
+and the output frames carry no metadata, because their pixels no longer match the
+input coordinates.
+
+`g2g-ml/examples/vertical_reframe.rs` has the selection side as an example
+element, `followtarget`: it keeps following the same track id, else takes the most
+confident detection of `label`, and adds a `Roi` for it:
+
+```
+cargo run --release -p g2g-ml --features "vertical-reframe cuda" --example vertical_reframe -- \
+  analyticsjoin name=j ! trackcrop width=540 height=960 ! videoconvert ! autovideosink \
+  filesrc location=match.mp4 ! decodebin ! videoconvert ! video/x-raw,format=RGBA ! tee name=t \
+  t. ! videorate framerate=5/1 ! videoscale width=640 height=640 \
+     ! ortinfer model=yolo11m.onnx execution-provider=cuda ! detectionpostprocess \
+     ! tracker ! followtarget label=32 ! j.analytics \
+  t. ! j.video
+```
+
+Label 32 is COCO's sports ball. `execution-provider=cuda` needs cuDNN 9 and the
+CUDA runtime that ort's prebuilt was built against on `LD_LIBRARY_PATH`.
+
 ### Records
 
 `g2g-plugins::metasink` (`analytics-json` feature) writes one JSON line per frame:

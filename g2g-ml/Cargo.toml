@@ -129,6 +129,8 @@ camera2-tpu = ["nnapi", "xnnpack", "dep:g2g-plugins", "g2g-plugins/camera2"]
 # wayland-sink display backend to the `examples/detect_overlay` graph; without it
 # the example writes a still PPM. Pulls g2g-plugins's wayland-sink + analytics.
 detect-overlay-live = ["ort", "analytics", "dep:g2g-plugins", "g2g-plugins/wayland-sink", "g2g-plugins/analytics"]
+# Decode, display and the threaded runner for the vertical_reframe example.
+vertical-reframe = ["launch", "ort", "analytics", "dep:g2g-plugins", "g2g-plugins/analytics", "g2g-plugins/ffmpeg", "g2g-plugins/wayland-sink", "g2g-plugins/multi-thread"]
 # CUDA<->wgpu GPU keep-on-GPU end-to-end tests (M220; moved here from the
 # dissolved g2g-enterprise crate, M635). Forwards the decode side (g2g-plugins
 # libcuda FFI + ffmpeg NVDEC) alongside the inference side so
@@ -213,6 +215,10 @@ workspace = true
 [[example]]
 name = "detect_overlay"
 required-features = ["ort", "analytics"]
+
+[[example]]
+name = "vertical_reframe"
+required-features = ["vertical-reframe"]
 
 # `ort` downloads the ONNX Runtime binaries at build time, so it can never build
 # in the docs.rs sandbox; `burn` and the execution-provider features need a GPU /
