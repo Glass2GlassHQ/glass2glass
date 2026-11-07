@@ -227,6 +227,19 @@ The wgpu device must be on CUDA device 0, checked by PCI bus id, so
 `ball11n.onnx` at 1280x1280 runs at 63 fps this way and 32 fps through system
 memory.
 
+`ort-hip-wgpu` does the same on an AMD GPU: the adapter's PCI vendor picks the
+import, so a tensor on an AMD device goes to `hipImportExternalMemory`
+(`g2g-plugins::hip`, `libamdhip64` loaded at run time) and reaches the MIGraphX
+provider as an ONNX Runtime `Hip` tensor. ONNX Runtime dropped its ROCm provider
+in 1.23, and `ort` needs 1.24, so MIGraphX is the only AMD provider and needs an
+ONNX Runtime built against it (`tools/ort-migraphx-build.sh`, which patches out
+the two calls MIGraphX 6.4 lacks). MIGraphX 6.4 rejects opset-18 `Resize`, so
+YOLO models are exported at opset 17. On the Radeon 680M (gfx1035, Fedora's
+ROCm 6.4), `ball11n.onnx` at 1280x1280 runs at 30.5 fps from the GPU tensor and
+27.9 fps through system memory: the integrated GPU shares system RAM, so the
+copy saved is cheap. The first run compiles the model for about 75 s, and
+`ORT_MIGRAPHX_MODEL_CACHE_PATH` keeps the compiled program for later runs.
+
 On the Android edge there is `from_memory_with_nnapi`, the system NeuralNetworks
 API over NPU, GPU or DSP, `from_memory_with_xnnpack`, ARM-optimized CPU, and
 `from_memory_for_android`, which registers NNAPI then XNNPACK then the default

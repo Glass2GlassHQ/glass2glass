@@ -427,3 +427,8 @@ unless it says otherwise.
 - D3D11 decoder surface import into `WgpuPreprocess` (bind the surface directly
   into the compute pass, the Windows counterpart of the dma-buf import).
 - Run the QNN and CoreML execution providers on Qualcomm and Apple hardware.
+- `ortinfer execution-provider=migraphx` on `ball11n.onnx` aborts at process exit
+  with heap corruption in libgcc's frame deregistration, on both the GPU-tensor
+  and the system-memory input. Find the cause.
+- Choose the GPU `wgpupreprocess` opens for system-memory input, so a hybrid host
+  can preprocess on its AMD GPU for MIGraphX without `VK_DRIVER_FILES`.

@@ -1805,9 +1805,14 @@ pub mod pwdevice;
 pub mod cuda;
 #[cfg(all(any(target_os = "linux", windows), feature = "cuda"))]
 mod cuda_driver_ffi;
+#[cfg(all(target_os = "linux", feature = "hip"))]
+pub mod hip;
 #[cfg(any(
     all(any(target_os = "linux", windows), feature = "cuda"),
-    all(target_os = "linux", any(feature = "alsa-sink", feature = "alsa-src"))
+    all(
+        target_os = "linux",
+        any(feature = "alsa-sink", feature = "alsa-src", feature = "hip")
+    )
 ))]
 mod shared_library;
 

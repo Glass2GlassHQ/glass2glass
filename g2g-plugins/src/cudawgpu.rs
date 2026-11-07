@@ -1911,7 +1911,7 @@ impl Drop for CudaExternalBuffer {
 
 pub fn cuda_pci_bus_id(device_ordinal: i32) -> Result<String, G2gError> {
     use cuda_ffi as c;
-    // cuda writes "domain:bus:device.function", 13 characters plus the terminator
+    // cuda writes "domain:bus:device.function", 12 characters plus the terminator
     let mut text = [0u8; 16];
     // SAFETY: `text` is writable for the length passed.
     unsafe {

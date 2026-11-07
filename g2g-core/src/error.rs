@@ -127,6 +127,8 @@ pub enum HardwareError {
     HttpTransport(HttpTransportFailure),
     // the linked codec library has no encoder or decoder of this name
     MissingCodec(&'static str),
+    // `hipError_t` code from a HIP runtime call
+    Hip(i32),
 }
 
 // the stage at which an HTTP request failed with no response status

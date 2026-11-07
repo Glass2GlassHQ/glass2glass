@@ -1,11 +1,18 @@
-//! `ortinfer` on the CUDA provider takes the tensor `wgpupreprocess` leaves on the
-//! GPU and returns what the same model returns on the CPU from the read-back tensor.
+//! `ortinfer` on the CUDA or MIGraphX provider takes the tensor `wgpupreprocess`
+//! leaves on the GPU and returns what the same model returns on the CPU from the
+//! read-back tensor. Each test runs when `wgpupreprocess` opens its device on that
+//! vendor's GPU.
 //!
 //! ```sh
 //! cargo test -p g2g-ml --features ort-cuda-wgpu --test ort_wgpu_tensor
+//! VK_DRIVER_FILES=/usr/share/vulkan/icd.d/radeon_icd.x86_64.json \
+//!   ORT_LIB_LOCATION=... cargo test -p g2g-ml --features ort-hip-wgpu --test ort_wgpu_tensor
 //! ```
 
-#![cfg(all(target_os = "linux", feature = "ort-cuda-wgpu"))]
+#![cfg(all(
+    target_os = "linux",
+    any(feature = "ort-cuda-wgpu", feature = "ort-hip-wgpu")
+))]
 
 use g2g_core::element::PushOutcome;
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
@@ -15,7 +22,7 @@ use g2g_core::{
     TensorLayout, TensorShape,
 };
 use g2g_ml::ortinfer::OrtInference;
-use g2g_ml::wgpupreprocess::{gpu_available, WgpuPreprocess};
+use g2g_ml::wgpupreprocess::{gpu_available, WgpuBufferOwner, WgpuPreprocess};
 
 mod onnx {
     include!("util/onnx_fixture.rs");
@@ -124,20 +131,48 @@ async fn infer(provider: &str, tensor: Frame) -> Vec<u8> {
         .to_vec()
 }
 
-#[tokio::test]
-async fn cuda_runs_on_the_gpu_tensor_and_matches_the_cpu() {
+fn vendor(tensor: &Frame) -> u32 {
+    let MemoryDomain::WgpuBuffer(buffer) = &tensor.domain else {
+        panic!("wgpupreprocess gpu-output must emit a wgpu buffer");
+    };
+    buffer
+        .keep_alive()
+        .as_any()
+        .downcast_ref::<WgpuBufferOwner>()
+        .expect("a wgpupreprocess buffer")
+        .device()
+        .adapter_info()
+        .vendor
+}
+
+async fn gpu_matches_cpu(provider: &str, gpu_vendor: u32) {
     if !gpu_available().await {
         eprintln!("skipping: no wgpu adapter on this host");
         return;
     }
     let gpu_tensor = preprocess(true).await;
-    assert!(matches!(gpu_tensor.domain, MemoryDomain::WgpuBuffer(_)));
+    if vendor(&gpu_tensor) != gpu_vendor {
+        eprintln!("skipping: wgpupreprocess is not on a {gpu_vendor:#06x} GPU");
+        return;
+    }
     let host_tensor = preprocess(false).await;
 
-    let from_gpu = infer("cuda", gpu_tensor).await;
+    let from_gpu = infer(provider, gpu_tensor).await;
     let from_host = infer("cpu", host_tensor).await;
 
     assert_eq!(from_gpu.len(), 3 * (WIDTH * HEIGHT) as usize * 4);
     assert!(from_host.iter().any(|&byte| byte != 0));
     assert_eq!(from_gpu, from_host);
+}
+
+#[cfg(feature = "ort-cuda-wgpu")]
+#[tokio::test]
+async fn cuda_runs_on_the_gpu_tensor_and_matches_the_cpu() {
+    gpu_matches_cpu("cuda", 0x10de).await;
+}
+
+#[cfg(feature = "ort-hip-wgpu")]
+#[tokio::test]
+async fn migraphx_runs_on_the_gpu_tensor_and_matches_the_cpu() {
+    gpu_matches_cpu("migraphx", 0x1002).await;
 }

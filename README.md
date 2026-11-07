@@ -674,7 +674,7 @@ cargo clippy --workspace --all-targets
 | `MqttSink` (the same record per frame, published to an MQTT topic) / `MqttSrc` (each message on a topic filter as a text frame) | `mqtt` | none |
 | `EmbeddingSink` (sqlite index of embedding vectors, searchable from `pyml-mcp`) | `embedding-index` | none (sqlite bundled) |
 | `VelloTextOverlay` (subtitle cues drawn on the GPU, `WgpuTexture` out) | `vello-text-overlay` | wgpu |
-| `OrtInference` (+ CUDA / TensorRT / DirectML / OpenVINO / ROCm / MIGraphX EPs, `execution-provider=` on the launch line; a GPU tensor from `wgpupreprocess` on CUDA) | `ort`, `cuda`, `tensorrt`, `directml`, `openvino`, `rocm`, `migraphx`, `ort-cuda-wgpu` (in `g2g-ml`) | onnxruntime (`openvino` / `rocm` / `migraphx` register only on an ONNX Runtime built with them) |
+| `OrtInference` (+ CUDA / TensorRT / DirectML / OpenVINO / ROCm / MIGraphX EPs, `execution-provider=` on the launch line; a GPU tensor from `wgpupreprocess` on CUDA or MIGraphX) | `ort`, `cuda`, `tensorrt`, `directml`, `openvino`, `rocm`, `migraphx`, `ort-cuda-wgpu`, `ort-hip-wgpu` (in `g2g-ml`) | onnxruntime (`openvino` / `rocm` / `migraphx` register only on an ONNX Runtime built with them) |
 | `ExecutorchInference` (a `.pte` model on ExecuTorch's portable CPU kernels) | `executorch` (in `g2g-ml`) | ExecuTorch 1.5.1 static libs (`tools/executorch-build.sh`, `EXECUTORCH_RS_EXECUTORCH_LIB_DIR`) |
 | `BurnInference` (linear layer, or an ONNX topology imported by `burn-onnx` codegen) | `burn` (in `g2g-ml`) | wgpu (Vulkan / Metal / DX12) |
 | `WhisperTranscribe` (16 kHz mono f32 in, timed text segments out, whisper.cpp) | `whisper`, `whisper-cuda`, `whisper-vulkan` (in `g2g-ml`) | whisper.cpp built from source (cmake, libclang), plus nvcc or the Vulkan headers and `glslc` for the GPU features |
@@ -1219,6 +1219,14 @@ G2G_RTSP_TEST_URL=rtsp://localhost:8554/pattern \
 ```sh
 # ORT with the CUDA execution provider (silently falls back to CPU):
 cargo test -p g2g-ml --features cuda --test ort_inference -- --nocapture
+
+# ORT with MIGraphX on an AMD GPU, fed wgpupreprocess's GPU tensor. Needs a
+# MIGraphX 6.4 install (Fedora ships none: build its rocm-6.4.4 tag with MLIR off)
+# and ONNX Runtime built against it, whose script prints the two exports.
+tools/ort-migraphx-build.sh ~/opt/ort-migraphx ~/src/AMDMIGraphX/install
+LD_LIBRARY_PATH=$ORT_LIB_LOCATION:<migraphx>/lib:<migraphx>/lib/migraphx/lib \
+  VK_DRIVER_FILES=/usr/share/vulkan/icd.d/radeon_icd.x86_64.json \
+  cargo test -p g2g-ml --features ort-hip-wgpu --test ort_wgpu_tensor
 
 # Pure-Rust Burn over wgpu (any Vulkan/Metal/DX12 adapter):
 cargo test -p g2g-ml --features burn --test burn_inference -- --nocapture

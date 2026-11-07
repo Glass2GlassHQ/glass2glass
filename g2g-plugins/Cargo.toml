@@ -427,6 +427,8 @@ embassy-link = ["dep:embassy-sync"]
 # sinks for bring-up. Hand-rolled FFI that loads `libcuda` on first use, so a
 # build with it also starts without the NVIDIA driver; Linux and Windows, implies std. See DESIGN-C3-cuda.md §3.4, §4.
 cuda = ["std", "dep:libloading"]
+# AMD HIP runtime, loaded at run time from libamdhip64: imports Vulkan memory exported as an fd.
+hip = ["std", "dep:libloading"]
 # Local zero-copy IPC over CUDA IPC memory handles (`localipc`, M556): share a
 # device allocation with another process on the same machine + GPU without a
 # device->host->device round trip. `cuIpcGetMemHandle` exports a 64-byte handle
