@@ -24,7 +24,7 @@ fi
 
 if [ ! -d "$source_dir/.git" ]; then
     git clone --depth 1 --branch "v$ONNXRUNTIME_VERSION" "$ONNXRUNTIME_REPOSITORY" "$source_dir"
-    # the onnxruntime 1.24 provider calls fp4 and bf16 functions migraphx 6.4 lacks
+    # the onnxruntime 1.24 provider calls fp4 and bf16 functions migraphx 6.4 lacks, and turns an empty model cache dir into the path ""
     git -C "$source_dir" apply "$patch_file"
 fi
 

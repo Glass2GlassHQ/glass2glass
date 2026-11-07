@@ -236,7 +236,8 @@ import, so a tensor on an AMD device goes to `hipImportExternalMemory`
 provider as an ONNX Runtime `Hip` tensor. ONNX Runtime dropped its ROCm provider
 in 1.23, and `ort` needs 1.24, so MIGraphX is the only AMD provider and needs an
 ONNX Runtime built against it (`tools/ort-migraphx-build.sh`, which patches out
-the two calls MIGraphX 6.4 lacks). MIGraphX 6.4 rejects opset-18 `Resize`, so
+the two calls MIGraphX 6.4 lacks, and fixes ONNX Runtime turning an unset model
+cache directory into the path `""`, which fails every model load). MIGraphX 6.4 rejects opset-18 `Resize`, so
 YOLO models are exported at opset 17. On the Radeon 680M (gfx1035, Fedora's
 ROCm 6.4), `ball11n.onnx` at 1280x1280 runs at 30.5 fps from the GPU tensor and
 27.9 fps through system memory: the integrated GPU shares system RAM, so the
