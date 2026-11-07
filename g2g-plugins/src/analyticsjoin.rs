@@ -7,7 +7,7 @@ use alloc::collections::VecDeque;
 use g2g_core::frame::Frame;
 use g2g_core::{
     AnalyticsMeta, Caps, CapsConstraint, ConfigureOutcome, ElementMetadata, G2gError,
-    MultiInputElement, OutputSink, PipelinePacket,
+    MultiInputElement, OutputSink, PipelinePacket, Relation,
 };
 
 // gst-python-ml's metadata replay allows this window when a frame has no duration.
@@ -19,6 +19,24 @@ pub(crate) fn frame_match_tolerance_ns(duration_ns: u64) -> u64 {
     } else {
         duration_ns / 2
     }
+}
+
+fn append_analytics(existing: &mut AnalyticsMeta, added: &AnalyticsMeta) -> Result<(), G2gError> {
+    match (&existing.class_names, &added.class_names) {
+        (Some(kept), Some(other)) if kept != other => return Err(G2gError::CapsMismatch),
+        (None, Some(other)) => existing.class_names = Some(other.clone()),
+        _ => {}
+    }
+    let offset = existing.nodes.len();
+    existing.nodes.extend(added.nodes.iter().cloned());
+    existing
+        .relations
+        .extend(added.relations.iter().map(|relation| Relation {
+            from: relation.from + offset,
+            to: relation.to + offset,
+            kind: relation.kind,
+        }));
+    Ok(())
 }
 
 #[derive(Debug, Default)]
@@ -45,7 +63,7 @@ impl AnalyticsJoin {
                 .is_some_and(|latest| latest >= pts_ns)
     }
 
-    fn attach_nearest(&mut self, frame: &mut Frame) {
+    fn attach_nearest(&mut self, frame: &mut Frame) -> Result<(), G2gError> {
         let pts_ns = frame.timing.pts_ns;
         let tolerance_ns = frame_match_tolerance_ns(frame.timing.duration_ns);
         while self
@@ -62,8 +80,15 @@ impl AnalyticsJoin {
             .iter()
             .filter(|(analytics_pts_ns, _)| analytics_pts_ns.abs_diff(pts_ns) <= tolerance_ns)
             .min_by_key(|(analytics_pts_ns, _)| analytics_pts_ns.abs_diff(pts_ns));
-        if let Some((_, analytics)) = nearest {
-            frame.meta.attach(analytics.clone());
+        let Some((_, analytics)) = nearest else {
+            return Ok(());
+        };
+        match frame.meta.get_mut::<AnalyticsMeta>() {
+            Some(existing) => append_analytics(existing, analytics),
+            None => {
+                frame.meta.attach(analytics.clone());
+                Ok(())
+            }
         }
     }
 
@@ -77,7 +102,7 @@ impl AnalyticsJoin {
                 self.held_video.push_front(PipelinePacket::DataFrame(frame));
                 return Ok(());
             }
-            self.attach_nearest(&mut frame);
+            self.attach_nearest(&mut frame)?;
             out.push(PipelinePacket::DataFrame(frame)).await?;
         }
         Ok(())
@@ -96,6 +121,10 @@ impl MultiInputElement for AnalyticsJoin {
 
     fn output_follows_input(&self) -> Option<usize> {
         Some(Self::VIDEO)
+    }
+
+    fn forwards_caps_changes(&self) -> bool {
+        true
     }
 
     fn input_pad_index(

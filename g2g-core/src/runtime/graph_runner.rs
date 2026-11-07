@@ -4386,6 +4386,17 @@ fn solve_mux_output_dyn(mux: &dyn DynMultiInputElement) -> Result<Caps, G2gError
     let mux_c = mux
         .caps_constraint_for_output()
         .map_err(|_| G2gError::CapsMismatch)?;
+    // a followed pad's caps were accepted as they came, and an unknown framerate there is a wildcard fixation refuses
+    let followed_caps = match (&mux_c, mux.output_follows_input()) {
+        (CapsConstraint::Produces(set), Some(_)) => match set.alternatives() {
+            [caps] => Some(caps.clone()),
+            _ => None,
+        },
+        _ => None,
+    };
+    if let Some(caps) = followed_caps {
+        return Ok(caps);
+    }
     let sink_c = CapsConstraint::AcceptsAny;
     let links = solve_linear(&[&mux_c, &sink_c]).map_err(|_| G2gError::CapsMismatch)?;
     links.last().cloned().ok_or(G2gError::CapsMismatch)
@@ -6194,9 +6205,15 @@ async fn apply_pad_caps<E: MultiInputElement>(
     let new_output = solve_mux_output_dyn(&*mux as &dyn DynMultiInputElement)?;
     if new_output != *current_output {
         *current_output = new_output.clone();
-        adapter
-            .push(PipelinePacket::CapsChanged(new_output))
-            .await?;
+        // an element that holds frames sends the change after the frames that came before it
+        if mux.forwards_caps_changes() {
+            mux.process(pad, PipelinePacket::CapsChanged(new_output), adapter)
+                .await?;
+        } else {
+            adapter
+                .push(PipelinePacket::CapsChanged(new_output))
+                .await?;
+        }
     }
     beta.pad_changed(
         &mut *mux as &mut dyn DynMultiInputElement,

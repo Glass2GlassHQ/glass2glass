@@ -567,12 +567,16 @@ src ! tee name=t
 pad, which takes any caps and only reads `AnalyticsMeta` off its frames. Each
 video frame waits in the element until the analytics stream reaches its PTS, then
 takes the meta of the analytics frame closest in time within half its duration
-(20 ms when the duration is 0, the window `metareplay` uses). A frame with no
-match passes through unchanged, and when the analytics pad ends the held video is
-released in order. The wait adds one detection stride plus inference time of
-latency. Stretching to the model size keeps the normalised boxes valid on the
-full frame, and `videorate` restamps onto its own grid, which the half-frame
-window absorbs.
+(20 ms when the duration is 0, the window `metareplay` uses). A frame that
+already carries `AnalyticsMeta` keeps it and gains the branch's nodes, so two
+joins in a row put two detectors' results on one frame, and two different
+class-name tables fail the run with `CapsMismatch`. A frame with no match passes
+through unchanged, and when the analytics pad ends the held video is released in
+order. A mid-stream caps change on the video pad is queued with the held frames,
+so it reaches downstream after the frames that came before it. The wait adds one
+detection stride plus inference time of latency. Stretching to the model size
+keeps the normalised boxes valid on the full frame, and `videorate` restamps onto
+its own grid, which the half-frame window absorbs.
 
 ### Following a region
 
@@ -594,21 +598,36 @@ and the output frames carry no metadata, because their pixels no longer match th
 input coordinates.
 
 `g2g-ml/examples/vertical_reframe.rs` has the selection side as an example
-element, `followtarget`: it keeps following the same track id, else takes the most
-confident detection of `label`, and adds a `Roi` for it:
+element, `followtarget`. It adds a `Roi` for the most confident detection of
+`label` (the ball). While the ball has been missing for more than a second, it
+frames the densest group of `group-label` detections (the players) instead. Every
+`Roi` it writes has the same id, so switching between ball and players pans
+instead of jumping. The ball model sees a 1280x1280 letterbox of the frame and the
+player model a 640x640 one, each through its own `analyticsjoin`:
 
 ```
 cargo run --release -p g2g-ml --features "vertical-reframe cuda" --example vertical_reframe -- \
-  analyticsjoin name=j ! trackcrop width=540 height=960 ! videoconvert ! autovideosink \
+  analyticsjoin name=p ! b.video \
+  analyticsjoin name=b ! followtarget label=0 group-label=2 \
+    ! trackcrop width=540 height=960 dead-zone=0.25 smoothing-time=800 max-pan-speed=0.3 \
+    ! videoconvert ! autovideosink \
   filesrc location=match.mp4 ! decodebin ! videoconvert ! video/x-raw,format=RGBA ! tee name=t \
-  t. ! videorate framerate=5/1 ! videoscale width=640 height=640 \
-     ! ortinfer model=yolo11m.onnx execution-provider=cuda ! detectionpostprocess \
-     ! tracker ! followtarget label=32 ! j.analytics \
-  t. ! j.video
+  t. ! p.video \
+  t. ! videorate framerate=10/1 ! videoscale width=640 height=360 ! videobox top=-140 bottom=-140 \
+     ! ortinfer model=football.onnx execution-provider=cuda \
+     ! detectionpostprocess conf-threshold=0.3 picture-width=640 picture-height=360 ! p.analytics \
+  t. ! videorate framerate=10/1 ! videoscale width=1280 height=720 ! videobox top=-280 bottom=-280 \
+     ! ortinfer model=ball11n.onnx execution-provider=cuda \
+     ! detectionpostprocess conf-threshold=0.4 picture-width=1280 picture-height=720 ! b.analytics
 ```
 
-Label 32 is COCO's sports ball. `execution-provider=cuda` needs cuDNN 9 and the
-CUDA runtime that ort's prebuilt was built against on `LD_LIBRARY_PATH`.
+`football.onnx` (ball, goalkeeper, player, referee) and `ball11n` are the
+gst-python-ml football demo's models; export `ball11n.pt` with ultralytics at
+`imgsz=1280`. Letterboxing matters: on a 720p match clip `ball11n` finds the ball
+on 52% of frames at confidence 0.3 when letterboxed and 18% when stretched to the
+square. `execution-provider=cuda` needs cuDNN 9 and the CUDA runtime that ort's
+prebuilt was built against on `LD_LIBRARY_PATH`. Setting `G2G_DEBUG` prints the
+run's log.
 
 ### Records
 

@@ -7,8 +7,8 @@ use collect_sink::CollectSink;
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{
-    AnalyticsMeta, BBox, Caps, Colorimetry, Dim, Interlace, MultiInputElement, ObjectDetection,
-    Rate, RawVideoFormat,
+    AnalyticsMeta, AnalyticsNode, BBox, Caps, Colorimetry, Dim, Interlace, MultiInputElement,
+    ObjectDetection, Rate, RawVideoFormat, RelationKind, Tracking,
 };
 use g2g_plugins::analyticsjoin::AnalyticsJoin;
 
@@ -229,6 +229,312 @@ async fn an_ended_detector_branch_releases_the_held_video_in_order() {
             && detection_x(first).is_none()
             && detection_x(second).is_none()
     ));
+}
+
+#[tokio::test]
+async fn a_second_branch_adds_to_the_detections_already_on_the_frame() {
+    let mut join = configured_join();
+    let mut sink = CollectSink::default();
+    let mut players = AnalyticsMeta::new();
+    let player = players.add_detection(ObjectDetection {
+        bbox: BBox {
+            x: 0.25,
+            y: 0.5,
+            w: 0.1,
+            h: 0.2,
+        },
+        label: 2,
+        confidence: 0.8,
+    });
+    let track = players.push(AnalyticsNode::Tracking(Tracking { object_id: 7 }));
+    players.relate(player, track, RelationKind::Tracks);
+    let PipelinePacket::DataFrame(mut video) = video_frame(0) else {
+        unreachable!()
+    };
+    video.meta.attach(players);
+
+    push(
+        &mut join,
+        AnalyticsJoin::VIDEO,
+        PipelinePacket::DataFrame(video),
+        &mut sink,
+    )
+    .await;
+    push(
+        &mut join,
+        AnalyticsJoin::ANALYTICS,
+        detections_frame(0, 0.75),
+        &mut sink,
+    )
+    .await;
+
+    let frames = data_frames(&sink);
+    let analytics = frames[0].meta.get::<AnalyticsMeta>().expect("analytics");
+    let xs: Vec<f32> = analytics
+        .detections()
+        .map(|detection| detection.bbox.x)
+        .collect();
+    assert_eq!(
+        xs,
+        [0.25, 0.75],
+        "the frame keeps its detection and gains the branch's"
+    );
+    assert_eq!(
+        analytics.tracking_id(player),
+        Some(7),
+        "existing relations still resolve"
+    );
+    assert_eq!(analytics.tracking_id(analytics.nodes.len() - 1), None);
+}
+
+#[derive(Default)]
+struct ScriptedSource {
+    packets: Vec<PipelinePacket>,
+    wait_before_pushing: Option<std::sync::Arc<tokio::sync::Notify>>,
+    signal_when_pushed: Option<std::sync::Arc<tokio::sync::Notify>>,
+}
+
+fn scripted(packets: Vec<PipelinePacket>) -> ScriptedSource {
+    ScriptedSource {
+        packets,
+        ..ScriptedSource::default()
+    }
+}
+
+impl g2g_core::runtime::SourceLoop for ScriptedSource {
+    type RunFuture<'a>
+        = std::pin::Pin<Box<dyn std::future::Future<Output = Result<u64, g2g_core::G2gError>> + 'a>>
+    where
+        Self: 'a;
+    type CapsFuture<'a>
+        = std::future::Ready<Result<Caps, g2g_core::G2gError>>
+    where
+        Self: 'a;
+
+    fn intercept_caps(&mut self) -> Self::CapsFuture<'_> {
+        std::future::ready(Ok(rgba()))
+    }
+    fn configure_pipeline(
+        &mut self,
+        _caps: &Caps,
+    ) -> Result<g2g_core::ConfigureOutcome, g2g_core::G2gError> {
+        Ok(g2g_core::ConfigureOutcome::Accepted)
+    }
+    fn run<'a>(&'a mut self, out: &'a mut dyn g2g_core::OutputSink) -> Self::RunFuture<'a> {
+        Box::pin(async move {
+            if let Some(wait) = &self.wait_before_pushing {
+                wait.notified().await;
+            }
+            let count = self.packets.len() as u64;
+            for packet in self.packets.drain(..) {
+                out.push(packet).await?;
+            }
+            if let Some(signal) = &self.signal_when_pushed {
+                signal.notify_one();
+            }
+            out.push(PipelinePacket::Eos).await?;
+            Ok(count)
+        })
+    }
+}
+
+#[derive(Clone, Default)]
+struct SharedSink(std::sync::Arc<std::sync::Mutex<Vec<Seen>>>);
+
+#[derive(Debug, Clone, PartialEq)]
+enum Seen {
+    Caps {
+        width: u32,
+    },
+    Frame {
+        bytes: usize,
+        detection_x: Option<f32>,
+    },
+}
+
+impl g2g_core::AsyncElement for SharedSink {
+    type ProcessFuture<'a>
+        = std::future::Ready<Result<(), g2g_core::G2gError>>
+    where
+        Self: 'a;
+    fn intercept_caps(&self, caps: &Caps) -> Result<Caps, g2g_core::G2gError> {
+        Ok(caps.clone())
+    }
+    fn caps_constraint_as_sink(&self) -> g2g_core::CapsConstraint<'_> {
+        g2g_core::CapsConstraint::AcceptsAny
+    }
+    fn configure_pipeline(
+        &mut self,
+        _caps: &Caps,
+    ) -> Result<g2g_core::ConfigureOutcome, g2g_core::G2gError> {
+        Ok(g2g_core::ConfigureOutcome::Accepted)
+    }
+    fn process<'a>(
+        &'a mut self,
+        packet: PipelinePacket,
+        _out: &'a mut dyn g2g_core::OutputSink,
+    ) -> Self::ProcessFuture<'a> {
+        let seen = match packet {
+            PipelinePacket::CapsChanged(Caps::RawVideo {
+                width: Dim::Fixed(width),
+                ..
+            }) => Seen::Caps { width },
+            PipelinePacket::DataFrame(frame) => Seen::Frame {
+                bytes: frame.domain.as_system_slice().unwrap().len(),
+                detection_x: detection_x(&frame),
+            },
+            _ => return std::future::ready(Ok(())),
+        };
+        self.0.lock().unwrap().push(seen);
+        std::future::ready(Ok(()))
+    }
+}
+
+struct NullClock;
+impl g2g_core::PipelineClock for NullClock {
+    fn now_ns(&self) -> u64 {
+        0
+    }
+}
+
+// decoders announce a stream before they know its framerate
+#[tokio::test]
+async fn video_caps_with_an_unknown_framerate_mid_stream_keep_the_join_running() {
+    use g2g_core::runtime::{run_graph, GraphNode};
+    let unknown_rate = Caps::RawVideo {
+        format: RawVideoFormat::Rgba8,
+        width: Dim::Fixed(WIDTH),
+        height: Dim::Fixed(HEIGHT),
+        framerate: Rate::Any,
+        interlace: Interlace::Any,
+        colorimetry: Colorimetry::UNKNOWN,
+    };
+    let mut video = vec![PipelinePacket::CapsChanged(unknown_rate)];
+    video.extend((0..DETECTION_STRIDE).map(video_frame));
+    let analytics = vec![detections_frame(0, 0.5)];
+
+    let seen = SharedSink::default();
+    let mut graph: g2g_core::Graph<GraphNode> = g2g_core::Graph::new();
+    let video_source = graph.add_source(GraphNode::source(scripted(video)));
+    let analytics_source = graph.add_source(GraphNode::source(scripted(analytics)));
+    let join = graph.add_muxer(GraphNode::muxer(AnalyticsJoin::new()), 2);
+    let sink = graph.add_sink(GraphNode::element(seen.clone()));
+    graph
+        .link(
+            video_source,
+            join.input(u8::try_from(AnalyticsJoin::VIDEO).unwrap()),
+        )
+        .unwrap();
+    graph
+        .link(
+            analytics_source,
+            join.input(u8::try_from(AnalyticsJoin::ANALYTICS).unwrap()),
+        )
+        .unwrap();
+    graph.link(join.output(), sink).unwrap();
+
+    run_graph(graph, &NullClock, 4)
+        .await
+        .expect("the join runs");
+
+    let found: Vec<Option<f32>> = seen
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|seen| match seen {
+            Seen::Frame { detection_x, .. } => Some(*detection_x),
+            Seen::Caps { .. } => None,
+        })
+        .collect();
+    assert_eq!(found, [Some(0.5), None, None]);
+}
+
+fn rgba_frame(width: u32, index: u64) -> PipelinePacket {
+    PipelinePacket::DataFrame(Frame::new(
+        MemoryDomain::System(SystemSlice::from_boxed(
+            vec![0u8; (width * HEIGHT * 4) as usize].into_boxed_slice(),
+        )),
+        FrameTiming {
+            pts_ns: index * FRAME_PERIOD_NS,
+            duration_ns: FRAME_PERIOD_NS,
+            ..FrameTiming::default()
+        },
+        index,
+    ))
+}
+
+#[tokio::test]
+async fn a_size_change_reaches_downstream_after_the_frames_held_before_it() {
+    use g2g_core::runtime::{run_graph, GraphNode};
+    const NARROW: u32 = WIDTH / 2;
+    const WIDE_FRAMES: u64 = 2;
+    const NARROW_FRAMES: u64 = 8;
+    let narrow_caps = Caps::RawVideo {
+        format: RawVideoFormat::Rgba8,
+        width: Dim::Fixed(NARROW),
+        height: Dim::Fixed(HEIGHT),
+        framerate: Rate::Fixed(30 << 16),
+        interlace: Interlace::Any,
+        colorimetry: Colorimetry::UNKNOWN,
+    };
+    let mut video: Vec<PipelinePacket> = (0..WIDE_FRAMES).map(|i| rgba_frame(WIDTH, i)).collect();
+    video.push(PipelinePacket::CapsChanged(narrow_caps));
+    video.extend((WIDE_FRAMES..WIDE_FRAMES + NARROW_FRAMES).map(|i| rgba_frame(NARROW, i)));
+    let last_pts_ns = (WIDE_FRAMES + NARROW_FRAMES - 1) * FRAME_PERIOD_NS;
+    // with link capacity 4, the join has taken the size change once all ten video packets are sent
+    let video_sent = std::sync::Arc::new(tokio::sync::Notify::new());
+    let video_source = ScriptedSource {
+        packets: video,
+        signal_when_pushed: Some(video_sent.clone()),
+        ..ScriptedSource::default()
+    };
+    let analytics_source = ScriptedSource {
+        packets: vec![detections_frame(last_pts_ns, 0.5)],
+        wait_before_pushing: Some(video_sent),
+        ..ScriptedSource::default()
+    };
+
+    let seen = SharedSink::default();
+    let mut graph: g2g_core::Graph<GraphNode> = g2g_core::Graph::new();
+    let video_node = graph.add_source(GraphNode::source(video_source));
+    let analytics_node = graph.add_source(GraphNode::source(analytics_source));
+    let join = graph.add_muxer(GraphNode::muxer(AnalyticsJoin::new()), 2);
+    let sink = graph.add_sink(GraphNode::element(seen.clone()));
+    graph
+        .link(
+            video_node,
+            join.input(u8::try_from(AnalyticsJoin::VIDEO).unwrap()),
+        )
+        .unwrap();
+    graph
+        .link(
+            analytics_node,
+            join.input(u8::try_from(AnalyticsJoin::ANALYTICS).unwrap()),
+        )
+        .unwrap();
+    graph.link(join.output(), sink).unwrap();
+
+    run_graph(graph, &NullClock, 4)
+        .await
+        .expect("the join runs");
+
+    let mut width = WIDTH;
+    let mut frames = 0;
+    for seen in seen.0.lock().unwrap().iter() {
+        match seen {
+            Seen::Caps { width: changed } => width = *changed,
+            Seen::Frame { bytes, .. } => {
+                frames += 1;
+                assert_eq!(
+                    *bytes,
+                    (width * HEIGHT * 4) as usize,
+                    "frame {frames} matches the caps before it"
+                );
+            }
+        }
+    }
+    assert_eq!(frames, WIDE_FRAMES + NARROW_FRAMES);
 }
 
 #[cfg(feature = "analytics-json")]

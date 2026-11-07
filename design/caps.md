@@ -560,7 +560,17 @@ input pad's edge (`NodeConstraint::Muxer { follows }`), so the element negotiate
 without knowing its output geometry up front; the fixpoint solve makes the
 coupling order-independent. The default `None` is the independent-output case (a
 container interleave, a fixed-size compositor) declared by
-`caps_constraint_for_output`.
+`caps_constraint_for_output`. On a mid-stream change the followed pad's caps
+become the output as they arrived, unfixated, so a decoder's first caps with an
+unknown framerate pass through.
+
+A muxer that holds frames back (`analyticsjoin` waiting for its detector
+branch) returns `forwards_caps_changes() = true`. The runner still re-solves and
+reconfigures the pad, but hands the new output `CapsChanged` to the element's
+`process` instead of pushing it downstream, so the element sends it after the
+frames it held from before the change. This is `GstAggregator`'s rule, where
+serialized events wait in the sink pad's queue with the buffers. Without the
+flag, the runner pushes the change at once.
 
 A fan-in muxer interleaves its inputs by **presentation timestamp**, not
 arrival order: `InterleaveMux` buffers frames per input in an `InputAggregator`

@@ -269,8 +269,15 @@ impl AsyncElement for VideoRate {
         if !self.auto && self.rate_q16 == 0 {
             return Err(G2gError::CapsMismatch);
         }
-        let (format, w, h) = self.accept_input(absolute_caps)?;
-        self.input = Some((format, w, h));
+        let new_input = self.accept_input(absolute_caps)?;
+        // g2g's runner reconfigures before it delivers the mid-stream CapsChanged,
+        // so a held frame of the old geometry must be dropped here.
+        if self.input.is_some_and(|input| input != new_input) {
+            self.prev = None;
+            self.next_pts = None;
+            self.last_caps = None;
+        }
+        self.input = Some(new_input);
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
     }
@@ -525,6 +532,58 @@ mod tests {
             .collect();
         assert_eq!(repeats.len(), 2, "the first input fills two 60 fps slots");
         assert_eq!(repeats[0], repeats[1], "the repeat is a deep copy");
+    }
+
+    #[test]
+    fn a_geometry_change_never_emits_an_old_frame_under_the_new_caps() {
+        let rgba = |side: u32| Caps::RawVideo {
+            format: RawVideoFormat::Rgba8,
+            width: Dim::Fixed(side),
+            height: Dim::Fixed(side),
+            framerate: Rate::Any,
+            interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        };
+        let mut rate = VideoRate::new(10.0);
+        let mut sink = crate::testutil::CollectSink::default();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let push = |rate: &mut VideoRate, sink: &mut crate::testutil::CollectSink, packet| {
+            runtime.block_on(rate.process(packet, sink)).unwrap();
+        };
+        let frame_at = |side: u32, k: u64| {
+            let mut frame = crate::testutil::frame(vec![0u8; (side * side * 4) as usize]);
+            frame.timing.pts_ns = k * STEP_30;
+            PipelinePacket::DataFrame(frame)
+        };
+        rate.configure_pipeline(&rgba(4)).unwrap();
+        // the last old frame owns the 100 ms slot, so it is still held at the change
+        for k in 0..4 {
+            push(&mut rate, &mut sink, frame_at(4, k));
+        }
+        rate.configure_pipeline(&rgba(2)).unwrap();
+        let output = rate.output_caps(RawVideoFormat::Rgba8, 2, 2);
+        push(&mut rate, &mut sink, PipelinePacket::CapsChanged(output));
+        for k in 4..14 {
+            push(&mut rate, &mut sink, frame_at(2, k));
+        }
+
+        let mut expected_len = None;
+        for packet in &sink.packets {
+            match packet {
+                PipelinePacket::CapsChanged(Caps::RawVideo {
+                    width: Dim::Fixed(w),
+                    height: Dim::Fixed(h),
+                    ..
+                }) => expected_len = Some((w * h * 4) as usize),
+                PipelinePacket::DataFrame(frame) => {
+                    let len = frame.domain.as_system_slice().unwrap().len();
+                    assert_eq!(Some(len), expected_len, "pts {}", frame.timing.pts_ns);
+                }
+                _ => {}
+            }
+        }
     }
 
     #[test]

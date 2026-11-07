@@ -8,6 +8,9 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 - M2093: `analyticsjoin` attaches a detector branch's `AnalyticsMeta` to the full-resolution video frames at the same time.
 - M2094: `trackcrop` crops and scales a fixed-size window that follows the frame's `Roi` nodes.
+- M2095: `videorate` drops its held frame on a size change instead of sending it under the new caps.
+- M2096: fan-in elements that follow an input pass mid-stream caps through unfixated, and can forward them in order with held frames.
+- M2097: `analyticsjoin` adds a branch's detections to those already on the frame.
 
 ## 0.14.0
 

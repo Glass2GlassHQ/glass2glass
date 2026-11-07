@@ -791,6 +791,10 @@ pub trait MultiInputElement: ElementBound {
         None
     }
 
+    fn forwards_caps_changes(&self) -> bool {
+        false
+    }
+
     /// Whether the merged output is a [`Caps::Batch`] of the inputs' caps in
     /// pad order. The solver then derives the output edge from every
     /// input edge, and each input edge back from its stream of the output, so

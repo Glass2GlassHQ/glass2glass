@@ -6,70 +6,113 @@ use g2g_core::element::{AsyncElement, OutputSink};
 use g2g_core::frame::PipelinePacket;
 use g2g_core::runtime::{parse_launch, run_graph_threaded, LaunchFactory};
 use g2g_core::{
-    AnalyticsMeta, AnalyticsNode, Caps, ConfigureOutcome, ElementMetadata, G2gError, PropError,
-    PropKind, PropValue, PropertySpec, Roi,
+    AnalyticsMeta, AnalyticsNode, BBox, Caps, ConfigureOutcome, ElementMetadata, G2gError,
+    ObjectDetection, PropError, PropKind, PropValue, PropertySpec, Roi,
 };
 use g2g_plugins::clock::WallClock;
 use g2g_plugins::registry::default_registry;
 use g2g_plugins::TokioThreadSpawner;
 
-const ANY_LABEL: i64 = -1;
+const NO_LABEL: i64 = -1;
 const LINK_CAPACITY: usize = 4;
+const BALL_HOLD_NS: u64 = 1_000_000_000;
+// players closer than this, in normalized frame coordinates, count as one group
+const GROUP_RADIUS: f32 = 0.15;
+const FOLLOWED_REGION_ID: u32 = 1;
 
-static FOLLOW_TARGET_PROPERTIES: &[PropertySpec] = &[PropertySpec::new(
-    "label",
-    PropKind::Int,
-    "class index of the detections to follow, -1 for any class",
-)
-.with_default("-1")];
+static FOLLOW_TARGET_PROPERTIES: &[PropertySpec] = &[
+    PropertySpec::new("label", PropKind::Int, "class index of the ball").with_default("-1"),
+    PropertySpec::new(
+        "group-label",
+        PropKind::Int,
+        "class index of the players framed while the ball is lost, -1 for none",
+    )
+    .with_default("-1"),
+];
+
+fn centre(bbox: &BBox) -> (f32, f32) {
+    (bbox.x + bbox.w / 2.0, bbox.y + bbox.h / 2.0)
+}
+
+fn union(boxes: &[BBox]) -> BBox {
+    let left = boxes.iter().map(|b| b.x).fold(f32::MAX, f32::min);
+    let top = boxes.iter().map(|b| b.y).fold(f32::MAX, f32::min);
+    let right = boxes.iter().map(|b| b.x + b.w).fold(f32::MIN, f32::max);
+    let bottom = boxes.iter().map(|b| b.y + b.h).fold(f32::MIN, f32::max);
+    BBox {
+        x: left,
+        y: top,
+        w: right - left,
+        h: bottom - top,
+    }
+}
+
+fn densest_group(players: &[BBox]) -> Option<BBox> {
+    let near = |a: &BBox, b: &BBox| {
+        let ((ax, ay), (bx, by)) = (centre(a), centre(b));
+        (ax - bx).hypot(ay - by) <= GROUP_RADIUS
+    };
+    let seed = players
+        .iter()
+        .max_by_key(|seed| players.iter().filter(|other| near(seed, other)).count())?;
+    let group: Vec<BBox> = players
+        .iter()
+        .filter(|other| near(seed, other))
+        .copied()
+        .collect();
+    Some(union(&group))
+}
+
+fn label_property(value: PropValue) -> Result<Option<u32>, PropError> {
+    match value.as_int().ok_or(PropError::Type)? {
+        NO_LABEL => Ok(None),
+        label => Ok(Some(u32::try_from(label).map_err(|_| PropError::Value)?)),
+    }
+}
 
 #[derive(Debug, Default)]
 struct FollowTarget {
-    label: Option<u32>,
-    followed_track: Option<u64>,
-    subject: u32,
+    ball_label: Option<u32>,
+    group_label: Option<u32>,
+    last_ball_pts_ns: Option<u64>,
 }
 
 impl FollowTarget {
-    fn mark_target(&mut self, meta: &mut AnalyticsMeta) {
-        let candidates: Vec<(usize, Roi, f32)> = meta
-            .nodes
-            .iter()
-            .enumerate()
-            .filter_map(|(index, node)| match node {
-                AnalyticsNode::Detection(detection)
-                    if self.label.is_none_or(|wanted| wanted == detection.label) =>
-                {
-                    let roi = Roi {
-                        bbox: detection.bbox,
-                        id: 0,
-                        label: detection.label,
-                    };
-                    Some((index, roi, detection.confidence))
-                }
-                _ => None,
-            })
-            .collect();
-        let followed = self.followed_track.and_then(|id| {
-            candidates
-                .iter()
-                .find(|(index, _, _)| meta.tracking_id(*index) == Some(id))
-        });
-        let chosen = followed.or_else(|| {
-            candidates
-                .iter()
-                .max_by(|(_, _, a), (_, _, b)| a.total_cmp(b))
-        });
-        let Some(&(index, mut roi, _)) = chosen else {
-            return;
+    fn detections_of(meta: &AnalyticsMeta, label: Option<u32>) -> Vec<&ObjectDetection> {
+        meta.detections()
+            .filter(|detection| Some(detection.label) == label)
+            .collect()
+    }
+
+    fn mark_target(&mut self, meta: &mut AnalyticsMeta, pts_ns: u64) {
+        let ball = Self::detections_of(meta, self.ball_label)
+            .into_iter()
+            .max_by(|a, b| a.confidence.total_cmp(&b.confidence))
+            .map(|detection| detection.bbox);
+        let ball_recently_seen = self
+            .last_ball_pts_ns
+            .is_some_and(|seen| pts_ns.saturating_sub(seen) < BALL_HOLD_NS);
+        let target = match ball {
+            Some(ball) => {
+                self.last_ball_pts_ns = Some(pts_ns);
+                Some(ball)
+            }
+            None if ball_recently_seen => None,
+            None => {
+                let players: Vec<BBox> = Self::detections_of(meta, self.group_label)
+                    .into_iter()
+                    .map(|detection| detection.bbox)
+                    .collect();
+                densest_group(&players)
+            }
         };
-        let track = meta.tracking_id(index);
-        if track != self.followed_track {
-            self.subject = self.subject.wrapping_add(1);
-            self.followed_track = track;
+        if let Some(bbox) = target {
+            meta.push(AnalyticsNode::Roi(Roi {
+                bbox,
+                id: FOLLOWED_REGION_ID,
+                label: 0,
+            }));
         }
-        roi.id = self.subject;
-        meta.push(AnalyticsNode::Roi(roi));
     }
 }
 
@@ -83,7 +126,7 @@ impl AsyncElement for FollowTarget {
         ElementMetadata::new(
             "Follow target",
             "Filter/Analytics",
-            "Marks the detection to frame with a Roi node",
+            "Marks the ball, or the densest group of players while the ball is lost, with a Roi node",
             "g2g example",
         )
     }
@@ -106,23 +149,20 @@ impl AsyncElement for FollowTarget {
 
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
         match name {
-            "label" => {
-                let label = value.as_int().ok_or(PropError::Type)?;
-                self.label = match label {
-                    ANY_LABEL => None,
-                    _ => Some(u32::try_from(label).map_err(|_| PropError::Value)?),
-                };
-                Ok(())
-            }
-            _ => Err(PropError::Unknown),
+            "label" => self.ball_label = label_property(value)?,
+            "group-label" => self.group_label = label_property(value)?,
+            _ => return Err(PropError::Unknown),
         }
+        Ok(())
     }
 
     fn get_property(&self, name: &str) -> Option<PropValue> {
-        match name {
-            "label" => Some(PropValue::Int(self.label.map_or(ANY_LABEL, i64::from))),
-            _ => None,
-        }
+        let label = match name {
+            "label" => self.ball_label,
+            "group-label" => self.group_label,
+            _ => return None,
+        };
+        Some(PropValue::Int(label.map_or(NO_LABEL, i64::from)))
     }
 
     fn process<'a>(
@@ -133,8 +173,9 @@ impl AsyncElement for FollowTarget {
         Box::pin(async move {
             match packet {
                 PipelinePacket::DataFrame(mut frame) => {
+                    let pts_ns = frame.timing.pts_ns;
                     if let Some(meta) = frame.meta.get_mut::<AnalyticsMeta>() {
-                        self.mark_target(meta);
+                        self.mark_target(meta, pts_ns);
                     }
                     out.push(PipelinePacket::DataFrame(frame)).await?;
                 }
@@ -151,6 +192,7 @@ impl AsyncElement for FollowTarget {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
+    g2g_core::log::init_from_env();
     let line = std::env::args().skip(1).collect::<Vec<_>>().join(" ");
     if line.is_empty() {
         eprintln!("usage: vertical_reframe <launch line>");
