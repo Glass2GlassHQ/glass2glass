@@ -230,6 +230,15 @@ on it on the GPU (`HipStream::wait_for`), so HIP stages never block the CPU
 between them. Dropping the last clone hands the allocation to a release thread
 that frees it once that event completes.
 
+`HipKernelModule::compile` builds C++ kernel source at run time, with hiprtc on
+AMD and nvrtc on NVIDIA for the device's `sm_` architecture, so one source runs
+on both when its kernels are `extern "C" __global__` and use only the builtins
+both share. `HipStream::launch` takes `KernelArgument`s: a `Read` buffer makes the
+kernel wait on the GPU for that buffer's ready event, and a `Write` goes into
+`HipMemory` that the caller turns into a buffer after recording an event.
+libhiprtc and libnvrtc ship with the HIP and CUDA toolkits, not the drivers, so a
+host with only the drivers returns `LibraryNotFound` from `compile`.
+
 ### The copy plan
 
 Because negotiation resolves the memory domain of every link before a frame

@@ -1,7 +1,12 @@
 use alloc::boxed::Box;
+use alloc::format;
 use alloc::string::String;
+use alloc::string::ToString;
 use alloc::sync::Arc;
+use alloc::vec;
+use alloc::vec::Vec;
 use core::ffi::{c_char, c_void};
+use std::ffi::CString;
 use std::os::fd::{FromRawFd, IntoRawFd, OwnedFd};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Condvar, Mutex, OnceLock, PoisonError};
@@ -24,9 +29,22 @@ const EVENT_DISABLE_TIMING: u32 = 0x2;
 // hipErrorOutOfMemory and CUDA_ERROR_OUT_OF_MEMORY share the value
 const OUT_OF_MEMORY: i32 = 2;
 
+// libhiprtc and libnvrtc come with the HIP and CUDA toolkits, not with the drivers
+const LIBHIPRTC: &str = "libhiprtc.so.7";
+const LIBHIPRTC_ROCM6: &str = "libhiprtc.so.6";
+const LIBNVRTC: &str = "libnvrtc.so.13";
+const LIBNVRTC_CUDA12: &str = "libnvrtc.so.12";
+// hiprtcResult and nvrtcResult share these values
+const RTC_SUCCESS: i32 = 0;
+const RTC_ERROR_INVALID_INPUT: i32 = 3;
+const RTC_ERROR_INTERNAL_ERROR: i32 = 11;
+
 type HipExternalMemory = *mut c_void;
 type HipStreamHandle = *mut c_void;
 type HipEventHandle = *mut c_void;
+type HipModuleHandle = *mut c_void;
+type HipFunctionHandle = *mut c_void;
+type RtcProgram = *mut c_void;
 
 // `hipExternalMemoryHandleDesc`, its handle union written as the leading `int fd`
 #[repr(C)]
@@ -93,6 +111,65 @@ crate::shared_library::shared_library! {
         size: usize,
         stream: HipStreamHandle,
     ) -> i32;
+    fn hip_module_load_data = "hipModuleLoadData"(module: *mut HipModuleHandle, image: *const c_void) -> i32;
+    fn hip_module_unload = "hipModuleUnload"(module: HipModuleHandle) -> i32;
+    fn hip_module_get_function = "hipModuleGetFunction"(
+        function: *mut HipFunctionHandle,
+        module: HipModuleHandle,
+        name: *const c_char,
+    ) -> i32;
+    #[allow(clippy::too_many_arguments)]
+    fn hip_module_launch_kernel = "hipModuleLaunchKernel"(
+        function: HipFunctionHandle,
+        grid_x: u32,
+        grid_y: u32,
+        grid_z: u32,
+        block_x: u32,
+        block_y: u32,
+        block_z: u32,
+        shared_memory_bytes: u32,
+        stream: HipStreamHandle,
+        parameters: *mut *mut c_void,
+        extra: *mut *mut c_void,
+    ) -> i32;
+}
+
+crate::shared_library::shared_library! {
+    struct LibHipRtc = LIBHIPRTC, LIBHIPRTC_ROCM6;
+    when missing return RTC_ERROR_INTERNAL_ERROR;
+    fn hiprtc_create_program = "hiprtcCreateProgram"(
+        program: *mut RtcProgram,
+        source: *const c_char,
+        name: *const c_char,
+        header_count: i32,
+        headers: *const *const c_char,
+        include_names: *const *const c_char,
+    ) -> i32;
+    fn hiprtc_compile_program = "hiprtcCompileProgram"(program: RtcProgram, option_count: i32, options: *const *const c_char) -> i32;
+    fn hiprtc_destroy_program = "hiprtcDestroyProgram"(program: *mut RtcProgram) -> i32;
+    fn hiprtc_get_program_log_size = "hiprtcGetProgramLogSize"(program: RtcProgram, size: *mut usize) -> i32;
+    fn hiprtc_get_program_log = "hiprtcGetProgramLog"(program: RtcProgram, log: *mut c_char) -> i32;
+    fn hiprtc_get_code_size = "hiprtcGetCodeSize"(program: RtcProgram, size: *mut usize) -> i32;
+    fn hiprtc_get_code = "hiprtcGetCode"(program: RtcProgram, code: *mut c_char) -> i32;
+}
+
+crate::shared_library::shared_library! {
+    struct LibNvrtc = LIBNVRTC, LIBNVRTC_CUDA12;
+    when missing return RTC_ERROR_INTERNAL_ERROR;
+    fn nvrtc_create_program = "nvrtcCreateProgram"(
+        program: *mut RtcProgram,
+        source: *const c_char,
+        name: *const c_char,
+        header_count: i32,
+        headers: *const *const c_char,
+        include_names: *const *const c_char,
+    ) -> i32;
+    fn nvrtc_compile_program = "nvrtcCompileProgram"(program: RtcProgram, option_count: i32, options: *const *const c_char) -> i32;
+    fn nvrtc_destroy_program = "nvrtcDestroyProgram"(program: *mut RtcProgram) -> i32;
+    fn nvrtc_get_program_log_size = "nvrtcGetProgramLogSize"(program: RtcProgram, size: *mut usize) -> i32;
+    fn nvrtc_get_program_log = "nvrtcGetProgramLog"(program: RtcProgram, log: *mut c_char) -> i32;
+    fn nvrtc_get_cubin_size = "nvrtcGetCUBINSize"(program: RtcProgram, size: *mut usize) -> i32;
+    fn nvrtc_get_cubin = "nvrtcGetCUBIN"(program: RtcProgram, code: *mut c_char) -> i32;
 }
 
 fn check(code: i32) -> Result<(), G2gError> {
@@ -506,6 +583,257 @@ pub fn release_after(event: HipEvent, resources: Box<dyn core::fmt::Debug + Send
     let _ = sender.send(Release { event, resources });
 }
 
+struct RuntimeCompiler {
+    library: &'static str,
+    is_loaded: fn() -> bool,
+    create_program: unsafe fn(
+        *mut RtcProgram,
+        *const c_char,
+        *const c_char,
+        i32,
+        *const *const c_char,
+        *const *const c_char,
+    ) -> i32,
+    compile_program: unsafe fn(RtcProgram, i32, *const *const c_char) -> i32,
+    destroy_program: unsafe fn(*mut RtcProgram) -> i32,
+    get_program_log_size: unsafe fn(RtcProgram, *mut usize) -> i32,
+    get_program_log: unsafe fn(RtcProgram, *mut c_char) -> i32,
+    get_code_size: unsafe fn(RtcProgram, *mut usize) -> i32,
+    get_code: unsafe fn(RtcProgram, *mut c_char) -> i32,
+}
+
+const HIPRTC: RuntimeCompiler = RuntimeCompiler {
+    library: LIBHIPRTC,
+    is_loaded: || LibHipRtc::get().is_some(),
+    create_program: hiprtc_create_program,
+    compile_program: hiprtc_compile_program,
+    destroy_program: hiprtc_destroy_program,
+    get_program_log_size: hiprtc_get_program_log_size,
+    get_program_log: hiprtc_get_program_log,
+    get_code_size: hiprtc_get_code_size,
+    get_code: hiprtc_get_code,
+};
+
+const NVRTC: RuntimeCompiler = RuntimeCompiler {
+    library: LIBNVRTC,
+    is_loaded: || LibNvrtc::get().is_some(),
+    create_program: nvrtc_create_program,
+    compile_program: nvrtc_compile_program,
+    destroy_program: nvrtc_destroy_program,
+    get_program_log_size: nvrtc_get_program_log_size,
+    get_program_log: nvrtc_get_program_log,
+    get_code_size: nvrtc_get_cubin_size,
+    get_code: nvrtc_get_cubin,
+};
+
+fn rtc_check(code: i32) -> Result<(), G2gError> {
+    match code {
+        RTC_SUCCESS => Ok(()),
+        code => Err(G2gError::Hardware(HardwareError::KernelCompilation(code))),
+    }
+}
+
+fn c_string(text: &str) -> Result<CString, G2gError> {
+    CString::new(text)
+        .map_err(|_| G2gError::Hardware(HardwareError::KernelCompilation(RTC_ERROR_INVALID_INPUT)))
+}
+
+/// # Safety
+/// `program` must be a live program of `compiler`.
+unsafe fn program_log(compiler: &RuntimeCompiler, program: RtcProgram) -> Result<String, G2gError> {
+    let mut size = 0;
+    // SAFETY: the caller passes a live program and `size` is a valid out pointer.
+    rtc_check(unsafe { (compiler.get_program_log_size)(program, &mut size) })?;
+    let mut log = vec![0u8; size];
+    // SAFETY: `log` has the size the compiler reported, terminator included.
+    rtc_check(unsafe { (compiler.get_program_log)(program, log.as_mut_ptr().cast()) })?;
+    let text = log.split(|&byte| byte == 0).next().unwrap_or_default();
+    Ok(String::from_utf8_lossy(text).to_string())
+}
+
+/// # Safety
+/// `program` must be a live program of `compiler`.
+unsafe fn compiled_code(
+    compiler: &RuntimeCompiler,
+    program: RtcProgram,
+    options: &[CString],
+) -> Result<Vec<u8>, G2gError> {
+    let option_pointers: Vec<*const c_char> =
+        options.iter().map(|option| option.as_ptr()).collect();
+    // SAFETY: the option strings outlive the call.
+    let compiled = unsafe {
+        (compiler.compile_program)(
+            program,
+            option_pointers.len() as i32,
+            option_pointers.as_ptr(),
+        )
+    };
+    if compiled != RTC_SUCCESS {
+        // SAFETY: the caller passes a live program.
+        let log = unsafe { program_log(compiler, program) }?;
+        g2g_error!(
+            g2g_core::log::Target::category("hip"),
+            "{} failed to compile a kernel: {}",
+            compiler.library,
+            log
+        );
+        return Err(G2gError::Hardware(HardwareError::KernelCompilation(
+            compiled,
+        )));
+    }
+    let mut size = 0;
+    // SAFETY: the program compiled and `size` is a valid out pointer.
+    rtc_check(unsafe { (compiler.get_code_size)(program, &mut size) })?;
+    let mut code = vec![0u8; size];
+    // SAFETY: `code` has the size the compiler reported.
+    rtc_check(unsafe { (compiler.get_code)(program, code.as_mut_ptr().cast()) })?;
+    Ok(code)
+}
+
+fn compile_to_code(
+    compiler: &RuntimeCompiler,
+    source: &str,
+    options: &[CString],
+) -> Result<Vec<u8>, G2gError> {
+    if !(compiler.is_loaded)() {
+        return Err(G2gError::Hardware(HardwareError::LibraryNotFound(
+            compiler.library,
+        )));
+    }
+    let source = c_string(source)?;
+    let mut program: RtcProgram = core::ptr::null_mut();
+    // SAFETY: the source and name are NUL-terminated and no headers are passed.
+    rtc_check(unsafe {
+        (compiler.create_program)(
+            &mut program,
+            source.as_ptr(),
+            c"g2g_kernel".as_ptr(),
+            0,
+            core::ptr::null(),
+            core::ptr::null(),
+        )
+    })?;
+    // SAFETY: the program was created above and is destroyed only after this.
+    let code = unsafe { compiled_code(compiler, program, options) };
+    // SAFETY: nothing uses the program after this.
+    unsafe { (compiler.destroy_program)(&mut program) };
+    code
+}
+
+#[derive(Debug)]
+pub struct HipKernelModule {
+    device: Arc<HipDevice>,
+    handle: usize,
+}
+
+impl HipKernelModule {
+    // `source` is C++ that both hiprtc and nvrtc accept, with `extern "C" __global__` kernels
+    pub fn compile(
+        device: &Arc<HipDevice>,
+        source: &str,
+        options: &[&str],
+    ) -> Result<Arc<Self>, G2gError> {
+        let mut options = options
+            .iter()
+            .map(|option| c_string(option))
+            .collect::<Result<Vec<_>, _>>()?;
+        let compiler = match device.backend {
+            Backend::Amd => &HIPRTC,
+            Backend::Nvidia {
+                device: cuda_device,
+                ..
+            } => {
+                let mut major = 0;
+                let mut minor = 0;
+                // SAFETY: both out pointers are valid and the device came from cuDeviceGet.
+                unsafe {
+                    cuda::check(cuda::cu_device_get_attribute(
+                        &mut major,
+                        cuda::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR,
+                        cuda_device,
+                    ))?;
+                    cuda::check(cuda::cu_device_get_attribute(
+                        &mut minor,
+                        cuda::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR,
+                        cuda_device,
+                    ))?;
+                }
+                options.push(c_string(&format!("--gpu-architecture=sm_{major}{minor}"))?);
+                &NVRTC
+            }
+        };
+        let code = compile_to_code(compiler, source, &options)?;
+        let _bound = device.bind()?;
+        let mut handle: HipModuleHandle = core::ptr::null_mut();
+        // SAFETY: `code` is a code object or cubin for this device and the device is bound.
+        let loaded = unsafe {
+            match device.backend {
+                Backend::Amd => hip_module_load_data(&mut handle, code.as_ptr().cast()),
+                Backend::Nvidia { .. } => {
+                    cuda::cu_module_load_data(&mut handle, code.as_ptr().cast())
+                }
+            }
+        };
+        device.check(loaded)?;
+        Ok(Arc::new(Self {
+            device: Arc::clone(device),
+            handle: handle as usize,
+        }))
+    }
+
+    pub fn kernel(self: &Arc<Self>, name: &str) -> Result<HipKernel, G2gError> {
+        let name = CString::new(name).map_err(|_| G2gError::Hardware(HardwareError::Other))?;
+        let _bound = self.device.bind()?;
+        let module = self.handle as HipModuleHandle;
+        let mut function: HipFunctionHandle = core::ptr::null_mut();
+        // SAFETY: the module belongs to the bound device and `name` is NUL-terminated.
+        let code = unsafe {
+            match self.device.backend {
+                Backend::Amd => hip_module_get_function(&mut function, module, name.as_ptr()),
+                Backend::Nvidia { .. } => {
+                    cuda::cu_module_get_function(&mut function, module, name.as_ptr())
+                }
+            }
+        };
+        self.device.check(code)?;
+        Ok(HipKernel {
+            module: Arc::clone(self),
+            handle: function as usize,
+        })
+    }
+}
+
+impl Drop for HipKernelModule {
+    fn drop(&mut self) {
+        let Ok(_bound) = self.device.bind() else {
+            return;
+        };
+        let module = self.handle as HipModuleHandle;
+        // SAFETY: the module belongs to the bound device and every kernel from it holds this module alive.
+        unsafe {
+            match self.device.backend {
+                Backend::Amd => hip_module_unload(module),
+                Backend::Nvidia { .. } => cuda::cu_module_unload(module),
+            };
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct HipKernel {
+    module: Arc<HipKernelModule>,
+    handle: usize,
+}
+
+#[derive(Debug)]
+pub enum KernelArgument<'a> {
+    // the kernel starts after the producer's writes into the buffer
+    Read(&'a OwnedHipBuffer),
+    Write(&'a mut HipMemory),
+    U32(u32),
+    F32(f32),
+}
+
 #[derive(Debug)]
 pub struct HipStream {
     device: Arc<HipDevice>,
@@ -577,6 +905,78 @@ impl HipStream {
             match self.device.backend {
                 Backend::Amd => hip_stream_synchronize(stream),
                 Backend::Nvidia { .. } => cuda::cu_stream_synchronize(stream),
+            }
+        };
+        self.device.check(code)
+    }
+
+    pub fn launch(
+        &self,
+        kernel: &HipKernel,
+        grid: [u32; 3],
+        block: [u32; 3],
+        arguments: &[KernelArgument],
+    ) -> Result<(), G2gError> {
+        if !Arc::ptr_eq(&self.device, &kernel.module.device) {
+            return Err(G2gError::Hardware(HardwareError::Other));
+        }
+        for argument in arguments {
+            match argument {
+                KernelArgument::Read(buffer) => self.wait_for(buffer)?,
+                KernelArgument::Write(memory) if !Arc::ptr_eq(&self.device, &memory.device) => {
+                    return Err(G2gError::Hardware(HardwareError::Other))
+                }
+                _ => {}
+            }
+        }
+        // hipModuleLaunchKernel and cuLaunchKernel read each argument through a pointer to its value
+        let mut parameters: Vec<*mut c_void> = arguments
+            .iter()
+            .map(|argument| match argument {
+                KernelArgument::Read(buffer) => core::ptr::from_ref(&buffer.device_pointer)
+                    .cast_mut()
+                    .cast(),
+                KernelArgument::Write(memory) => core::ptr::from_ref(&memory.device_pointer)
+                    .cast_mut()
+                    .cast(),
+                KernelArgument::U32(value) => core::ptr::from_ref(value).cast_mut().cast(),
+                KernelArgument::F32(value) => core::ptr::from_ref(value).cast_mut().cast(),
+            })
+            .collect();
+        let _bound = self.device.bind()?;
+        let function = kernel.handle as HipFunctionHandle;
+        let stream = self.handle as HipStreamHandle;
+        let [grid_x, grid_y, grid_z] = grid;
+        let [block_x, block_y, block_z] = block;
+        // SAFETY: the kernel and stream belong to the bound device, and the launch copies the argument values before it returns.
+        let code = unsafe {
+            match self.device.backend {
+                Backend::Amd => hip_module_launch_kernel(
+                    function,
+                    grid_x,
+                    grid_y,
+                    grid_z,
+                    block_x,
+                    block_y,
+                    block_z,
+                    0,
+                    stream,
+                    parameters.as_mut_ptr(),
+                    core::ptr::null_mut(),
+                ),
+                Backend::Nvidia { .. } => cuda::cu_launch_kernel(
+                    function,
+                    grid_x,
+                    grid_y,
+                    grid_z,
+                    block_x,
+                    block_y,
+                    block_z,
+                    0,
+                    stream,
+                    parameters.as_mut_ptr(),
+                    core::ptr::null_mut(),
+                ),
             }
         };
         self.device.check(code)

@@ -163,11 +163,12 @@ libraries installed.
 ## HIP
 
 GstHip's inference path, with an AMD backend (`libamdhip64`, hiprtc) and an
-NVIDIA backend (`libcuda`, nvrtc), loaded at run time. NVIDIA
-milestones validate on hercules first, AMD ones on the Radeon 680M.
+NVIDIA backend (`libcuda`, nvrtc), loaded at run time. Milestones validate on
+the laptop's RTX 3060 and Radeon 680M.
 
-- Public kernel API in `g2g_plugins::hip`: compile a module from source with
-  hiprtc / nvrtc, build arguments from buffers and scalars, launch on a stream.
+- Keep a launch's `Read` buffers alive until the launching stream's work completes:
+  the release thread waits only for the producer's event, and `cuMemFree` may not
+  wait for a later kernel still reading.
 - `hipupload` / `hipdownload` with internal pinned staging, a CPU-copy fallback,
   and zero-copy `MemoryDomain::Cuda` in and out on the NVIDIA backend.
 - `hipconvertscale` between NV12, I420, RGBA, BGRA, P010, planar RGB and float

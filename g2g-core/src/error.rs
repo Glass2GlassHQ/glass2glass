@@ -129,6 +129,8 @@ pub enum HardwareError {
     MissingCodec(&'static str),
     // `hipError_t` code from a HIP runtime call
     Hip(i32),
+    // `hiprtcResult` or `nvrtcResult` from compiling a kernel, with the compiler log logged
+    KernelCompilation(i32),
 }
 
 // the stage at which an HTTP request failed with no response status

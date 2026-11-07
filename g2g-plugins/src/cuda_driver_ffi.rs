@@ -13,6 +13,14 @@ pub(crate) type CuContext = *mut c_void;
 pub(crate) type CuStream = *mut c_void;
 #[cfg(feature = "hip")]
 pub(crate) type CuEvent = *mut c_void;
+#[cfg(feature = "hip")]
+pub(crate) type CuModule = *mut c_void;
+#[cfg(feature = "hip")]
+pub(crate) type CuFunction = *mut c_void;
+#[cfg(feature = "hip")]
+pub(crate) const CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR: i32 = 75;
+#[cfg(feature = "hip")]
+pub(crate) const CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR: i32 = 76;
 
 pub(crate) const CUDA_SUCCESS: CuResult = 0;
 
@@ -104,6 +112,29 @@ crate::shared_library::shared_library! {
     pub(crate) fn cu_memcpy_htod_async = "cuMemcpyHtoDAsync_v2"(destination: u64, source: *const c_void, size: usize, stream: CuStream) -> CuResult;
     #[cfg(feature = "hip")]
     pub(crate) fn cu_memcpy_dtoh_async = "cuMemcpyDtoHAsync_v2"(destination: *mut c_void, source: u64, size: usize, stream: CuStream) -> CuResult;
+    #[cfg(feature = "hip")]
+    pub(crate) fn cu_device_get_attribute = "cuDeviceGetAttribute"(value: *mut i32, attribute: i32, device: CuDevice) -> CuResult;
+    #[cfg(feature = "hip")]
+    pub(crate) fn cu_module_load_data = "cuModuleLoadData"(module: *mut CuModule, image: *const c_void) -> CuResult;
+    #[cfg(feature = "hip")]
+    pub(crate) fn cu_module_unload = "cuModuleUnload"(module: CuModule) -> CuResult;
+    #[cfg(feature = "hip")]
+    pub(crate) fn cu_module_get_function = "cuModuleGetFunction"(function: *mut CuFunction, module: CuModule, name: *const core::ffi::c_char) -> CuResult;
+    #[cfg(feature = "hip")]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn cu_launch_kernel = "cuLaunchKernel"(
+        function: CuFunction,
+        grid_x: u32,
+        grid_y: u32,
+        grid_z: u32,
+        block_x: u32,
+        block_y: u32,
+        block_z: u32,
+        shared_memory_bytes: u32,
+        stream: CuStream,
+        parameters: *mut *mut c_void,
+        extra: *mut *mut c_void,
+    ) -> CuResult;
     #[cfg(feature = "nvdec")]
     pub(crate) fn cu_get_error_name = "cuGetErrorName"(
         error: CuResult,
