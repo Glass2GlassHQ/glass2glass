@@ -348,7 +348,7 @@ impl RowRepacker {
 /// Recover the input `wgpu::Buffer` and the device and queue it lives on from a
 /// `WgpuBuffer` frame's keep-alive. Known owners: [`PlainWgpuBuffer`] and the
 /// importer's [`DmaBufWgpuBuffer`].
-fn producer_buffer(
+pub fn producer_buffer(
     owned: &OwnedWgpuBuffer,
 ) -> Option<(&wgpu::Buffer, &wgpu::Device, &wgpu::Queue)> {
     let any = owned.keep_alive().as_any();
@@ -361,7 +361,7 @@ fn producer_buffer(
     None
 }
 
-fn raw_device(device: &wgpu::Device) -> Option<vk::Device> {
+pub fn raw_device(device: &wgpu::Device) -> Option<vk::Device> {
     // SAFETY: reads the device handle only, nothing is created or submitted.
     unsafe { device.as_hal::<wgpu_hal::api::Vulkan>() }.map(|hal| hal.raw_device().handle())
 }
@@ -618,7 +618,9 @@ impl WgpuToDmaBuf {
         if index == self.ring.len() {
             // SAFETY: `device` carries the dma-buf export extensions (checked in
             // `adopt_device`).
-            let (buffer, fd) = unsafe { create_exportable(device, size)? };
+            let (buffer, fd) = unsafe {
+                create_exportable(device, size, vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT)?
+            };
             self.ring.push(ExportSlot { buffer, fd });
         }
         Ok(&self.ring[index])
@@ -903,15 +905,17 @@ fn find_memory_type(
 }
 
 /// Allocate an exportable `size`-byte Vulkan buffer and export its backing
-/// memory as a dma-buf fd. The exported fd is an independent reference to the
-/// memory, so it stays valid after the buffer drops.
+/// memory as an fd of `handle_type`. The exported fd is an independent reference
+/// to the memory, so it stays valid after the buffer drops.
 ///
 /// # Safety
 /// `device` must be a Vulkan-backend wgpu device carrying
-/// `VK_KHR_external_memory_fd` + `VK_EXT_external_memory_dma_buf`.
+/// `VK_KHR_external_memory_fd`, plus `VK_EXT_external_memory_dma_buf` for a
+/// dma-buf `handle_type`.
 unsafe fn create_exportable(
     device: &wgpu::Device,
     size: u64,
+    handle_type: vk::ExternalMemoryHandleTypeFlags,
 ) -> Result<(wgpu::Buffer, OwnedFd), G2gError> {
     // Create the exportable Vulkan buffer + dedicated exported memory, and export
     // its fd, all through the raw device.
@@ -926,8 +930,7 @@ unsafe fn create_exportable(
             let instance = hal.shared_instance().raw_instance();
             let phys = hal.raw_physical_device();
 
-            let mut ext = vk::ExternalMemoryBufferCreateInfo::default()
-                .handle_types(vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT);
+            let mut ext = vk::ExternalMemoryBufferCreateInfo::default().handle_types(handle_type);
             let buf_info = vk::BufferCreateInfo::default()
                 .size(size)
                 .usage(
@@ -950,9 +953,7 @@ unsafe fn create_exportable(
                 return Err(gpu_err());
             };
 
-            // Export as dma-buf, dedicated to this buffer.
-            let mut export = vk::ExportMemoryAllocateInfo::default()
-                .handle_types(vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT);
+            let mut export = vk::ExportMemoryAllocateInfo::default().handle_types(handle_type);
             let mut dedicated = vk::MemoryDedicatedAllocateInfo::default().buffer(buffer);
             let alloc = vk::MemoryAllocateInfo::default()
                 .allocation_size(reqs.size)
@@ -976,7 +977,7 @@ unsafe fn create_exportable(
             let fd = loader.get_memory_fd(
                 &vk::MemoryGetFdInfoKHR::default()
                     .memory(memory)
-                    .handle_type(vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT),
+                    .handle_type(handle_type),
             );
             match fd {
                 Ok(fd) if fd >= 0 => (buffer, memory, fd),
@@ -990,7 +991,7 @@ unsafe fn create_exportable(
     };
 
     // Own the fd immediately so any early return closes it.
-    // SAFETY: `fd` is a fresh dma-buf fd just exported and owned by this process.
+    // SAFETY: `fd` is a fresh fd just exported and owned by this process.
     let owned_fd = unsafe { OwnedFd::from_raw_fd(fd) };
 
     // Wrap the exportable buffer as wgpu, which takes ownership of the raw
@@ -1014,6 +1015,21 @@ unsafe fn create_exportable(
         )
     };
     Ok((buffer, owned_fd))
+}
+
+pub fn create_opaque_fd_export(
+    device: &wgpu::Device,
+    size: u64,
+) -> Result<(wgpu::Buffer, OwnedFd), G2gError> {
+    if let Some(extension) = missing_export_extension(device, false) {
+        g2g_error!(
+            Target::category("wgpudmabuf"),
+            "the wgpu device cannot export its memory: {extension:?} is not enabled"
+        );
+        return Err(G2gError::UnsupportedDomain);
+    }
+    // SAFETY: the check above found a Vulkan device with the export extensions.
+    unsafe { create_exportable(device, size, vk::ExternalMemoryHandleTypeFlags::OPAQUE_FD) }
 }
 
 /// Submit the `commands` that fill an exportable buffer on the GPU.

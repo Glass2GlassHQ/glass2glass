@@ -11,6 +11,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M2095: `videorate` drops its held frame on a size change instead of sending it under the new caps.
 - M2096: fan-in elements that follow an input pass mid-stream caps through unfixated, and can forward them in order with held frames.
 - M2097: `analyticsjoin` adds a branch's detections to those already on the frame.
+- M2098: `ortinfer` on CUDA takes `wgpupreprocess`'s GPU tensor without a copy through system memory.
 
 ## 0.14.0
 

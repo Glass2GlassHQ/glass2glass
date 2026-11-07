@@ -5,7 +5,7 @@ use core::pin::Pin;
 use crate::tensor_bytes::{rgba_to_nchw, tensor_bytes_to_chw};
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
+use g2g_core::memory::{OwnedWgpuBuffer, SystemSlice};
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementBound, G2gError,
     MemoryDomain, OutputSink, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate,
@@ -38,6 +38,14 @@ pub trait LoadedModel {
 
     // exactly `3 * H * W` u8 / i8 values, one byte each
     fn run_int(&mut self, bytes: &[u8]) -> Result<(Box<[u8]>, Vec<u32>), G2gError>;
+
+    // a `[1, 3, H, W]` f32 tensor left on a GPU by `wgpupreprocess`
+    fn run_wgpu_f32(
+        &mut self,
+        _tensor: &OwnedWgpuBuffer,
+    ) -> Result<(Box<[u8]>, Vec<u32>), G2gError> {
+        Err(G2gError::UnsupportedDomain)
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -432,11 +440,17 @@ fn infer<M: LoadedModel>(
     tensor_input: bool,
     frame: &Frame,
 ) -> Result<(Box<[u8]>, Vec<u32>), G2gError> {
+    let geometry = *model.geometry();
+    if let MemoryDomain::WgpuBuffer(tensor) = &frame.domain {
+        if !tensor_input || geometry.input_dtype != TensorDType::F32 {
+            return Err(G2gError::UnsupportedDomain);
+        }
+        return model.run_wgpu_f32(tensor);
+    }
     let slice = frame
         .domain
         .as_system_slice()
         .ok_or(G2gError::UnsupportedDomain)?;
-    let geometry = *model.geometry();
     if !tensor_input {
         // RGBA8 -> normalized f32 NCHW RGB, then run the model.
         return model.run_f32(rgba_to_nchw(slice, geometry.width, geometry.height)?);

@@ -1529,7 +1529,10 @@ async fn build_gpu(
 
     let instance = wgpu::Instance::default();
     let adapter = instance
-        .request_adapter(&wgpu::RequestAdapterOptions::default())
+        .request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            ..Default::default()
+        })
         .await
         .map_err(gpu_err)?;
     let (device, queue) = adapter

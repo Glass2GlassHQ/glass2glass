@@ -87,6 +87,10 @@ cuda = ["ort", "ort/cuda"]
 # does; enabling it at load needs the TensorRT runtime libraries (libnvinfer),
 # else a named `execution-provider=tensorrt` fails loud.
 tensorrt = ["cuda", "ort/tensorrt"]
+# ortinfer runs the CUDA provider on the f32 tensor `wgpupreprocess gpu-output=true`
+# leaves in a wgpu buffer, copied on the GPU into memory CUDA imports, never through
+# system memory. Linux + NVIDIA.
+ort-cuda-wgpu = ["cuda", "cuda-wgpu", "dmabuf-wgpu"]
 # OpenVINO execution provider (Intel CPU / iGPU / NPU). The stock ONNX Runtime
 # download builds but does not carry it, so a named provider fails loud until
 # `ort` links an OpenVINO-enabled ONNX Runtime build (ORT_LIB_LOCATION).

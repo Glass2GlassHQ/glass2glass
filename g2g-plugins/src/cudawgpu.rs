@@ -40,7 +40,9 @@ use core::future::Future;
 use core::pin::Pin;
 
 use alloc::boxed::Box;
+use alloc::string::String;
 use ash::vk;
+use std::os::fd::{FromRawFd, IntoRawFd, OwnedFd};
 
 use crate::gpu::packed_nv12_extent;
 
@@ -1817,6 +1819,120 @@ impl Drop for RecycledLinearBuffer {
     }
 }
 
+#[derive(Debug)]
+pub struct CudaExternalBuffer {
+    ext_mem: usize,
+    device_pointer: u64,
+    context: u64,
+    _context_release: PrimaryCtxRelease,
+}
+
+impl CudaExternalBuffer {
+    /// # Safety
+    /// `fd` must be an `OPAQUE_FD` export of a dedicated allocation of at least `size` bytes.
+    pub unsafe fn import(fd: OwnedFd, size: u64, device_ordinal: i32) -> Result<Self, G2gError> {
+        use cuda_ffi as c;
+        // SAFETY: CUDA Driver API import in the primary context of `device_ordinal`,
+        // pushed for the calls and popped before return. CUDA owns the fd once the
+        // import succeeds, and every handle made before a failure is destroyed.
+        unsafe {
+            crate::cuda_driver_ffi::init_driver()?;
+            let mut device = 0i32;
+            check(c::cu_device_get(&mut device, device_ordinal))?;
+            let mut context: c::CuContext = core::ptr::null_mut();
+            check(c::cu_device_primary_ctx_retain(&mut context, device))?;
+            let context_release = PrimaryCtxRelease(device);
+            check(c::cu_ctx_push_current(context))?;
+
+            let raw_fd = fd.into_raw_fd();
+            let import_desc = c::CudaExternalMemoryHandleDesc {
+                type_: c::CU_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD,
+                _pad: 0,
+                handle_fd: raw_fd,
+                _handle_rest: [0; 12],
+                size,
+                flags: c::CUDA_EXTERNAL_MEMORY_DEDICATED,
+                reserved: [0; 16],
+            };
+            let mut ext_mem: c::CuExternalMemory = core::ptr::null_mut();
+            let imported = check(c::cu_import_external_memory(&mut ext_mem, &import_desc));
+            if imported.is_err() {
+                drop(OwnedFd::from_raw_fd(raw_fd));
+            }
+            let mut device_pointer = 0u64;
+            let mapped = imported.and_then(|()| {
+                let buffer_desc = c::CudaExternalMemoryBufferDesc {
+                    offset: 0,
+                    size,
+                    flags: 0,
+                    reserved: [0; 16],
+                };
+                check(c::cu_external_memory_get_mapped_buffer(
+                    &mut device_pointer,
+                    ext_mem,
+                    &buffer_desc,
+                ))
+            });
+            if mapped.is_err() && !ext_mem.is_null() {
+                c::cu_destroy_external_memory(ext_mem);
+            }
+            let mut popped: c::CuContext = core::ptr::null_mut();
+            let _ = c::cu_ctx_pop_current(&mut popped);
+            mapped?;
+            Ok(Self {
+                ext_mem: ext_mem as usize,
+                device_pointer,
+                context: context as u64,
+                _context_release: context_release,
+            })
+        }
+    }
+
+    pub fn device_pointer(&self) -> u64 {
+        self.device_pointer
+    }
+}
+
+impl Drop for CudaExternalBuffer {
+    fn drop(&mut self) {
+        use cuda_ffi as c;
+        // SAFETY: the pointer and the import were made in `context`, which the
+        // primary-context retain keeps alive until after this runs.
+        unsafe {
+            if c::cu_ctx_push_current(self.context as c::CuContext) == 0 {
+                c::cu_mem_free(self.device_pointer);
+                c::cu_destroy_external_memory(self.ext_mem as c::CuExternalMemory);
+                let mut popped: c::CuContext = core::ptr::null_mut();
+                let _ = c::cu_ctx_pop_current(&mut popped);
+            }
+        }
+    }
+}
+
+pub fn cuda_pci_bus_id(device_ordinal: i32) -> Result<String, G2gError> {
+    use cuda_ffi as c;
+    // cuda writes "domain:bus:device.function", 13 characters plus the terminator
+    let mut text = [0u8; 16];
+    // SAFETY: `text` is writable for the length passed.
+    unsafe {
+        crate::cuda_driver_ffi::init_driver()?;
+        let mut device = 0i32;
+        check(c::cu_device_get(&mut device, device_ordinal))?;
+        check(c::cu_device_get_pci_bus_id(
+            text.as_mut_ptr().cast(),
+            text.len() as i32,
+            device,
+        ))?;
+    }
+    let end = text
+        .iter()
+        .position(|&byte| byte == 0)
+        .ok_or(G2gError::Hardware(HardwareError::Other))?;
+    core::str::from_utf8(&text[..end])
+        .map(String::from)
+        .map_err(|_| G2gError::Hardware(HardwareError::Other))
+}
+
 /// CUDA Driver API external-memory FFI for the interop bridge. Extends the
 /// surface in [`crate::cuda`] (which has the download path) with the
 /// import-by-FD + mapped-array calls. Struct layouts are field-for-field from
@@ -1849,6 +1965,15 @@ mod cuda_ffi {
         pub _pad: u32,
         pub handle_fd: i32,
         pub _handle_rest: [u8; 12],
+        pub size: u64,
+        pub flags: u32,
+        pub reserved: [u32; 16],
+    }
+
+    /// `CUDA_EXTERNAL_MEMORY_BUFFER_DESC`.
+    #[repr(C)]
+    pub struct CudaExternalMemoryBufferDesc {
+        pub offset: u64,
         pub size: u64,
         pub flags: u32,
         pub reserved: [u32; 16],
@@ -1896,5 +2021,15 @@ mod cuda_ffi {
         ) -> i32;
         pub fn cu_mipmapped_array_destroy = "cuMipmappedArrayDestroy"(mipmap: CuMipmappedArray) -> i32;
         pub fn cu_destroy_external_memory = "cuDestroyExternalMemory"(ext_mem: CuExternalMemory) -> i32;
+        pub fn cu_external_memory_get_mapped_buffer = "cuExternalMemoryGetMappedBuffer"(
+            device_pointer: *mut u64,
+            ext_mem: CuExternalMemory,
+            buffer_desc: *const CudaExternalMemoryBufferDesc,
+        ) -> i32;
+        pub fn cu_device_get_pci_bus_id = "cuDeviceGetPCIBusId"(
+            pci_bus_id: *mut core::ffi::c_char,
+            len: i32,
+            device: i32,
+        ) -> i32;
     }
 }

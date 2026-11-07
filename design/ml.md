@@ -215,6 +215,18 @@ against the stock download (`ort` has no prebuilt binaries for them) but
 register only on an ONNX Runtime built with that provider, linked through
 `ORT_LIB_LOCATION`.
 
+With `ort-cuda-wgpu` (Linux), `ortinfer tensor-input=true` also takes the
+`MemoryDomain::WgpuBuffer` tensor `wgpupreprocess gpu-output=true` emits. A wgpu
+buffer cannot be exported, so each frame is copied on the GPU into a Vulkan buffer
+allocated with `OPAQUE_FD` export, which CUDA imports once with
+`cuImportExternalMemory` and maps as a device pointer. The session reads that
+pointer as an ONNX Runtime `Cuda` tensor, so the tensor never passes through
+system memory. The copy is waited for on the CPU (`device.poll`) before the run.
+The wgpu device must be on CUDA device 0, checked by PCI bus id, so
+`wgpupreprocess` opens its device on the high-performance adapter. On the RTX 3060,
+`ball11n.onnx` at 1280x1280 runs at 63 fps this way and 32 fps through system
+memory.
+
 On the Android edge there is `from_memory_with_nnapi`, the system NeuralNetworks
 API over NPU, GPU or DSP, `from_memory_with_xnnpack`, ARM-optimized CPU, and
 `from_memory_for_android`, which registers NNAPI then XNNPACK then the default

@@ -674,7 +674,7 @@ cargo clippy --workspace --all-targets
 | `MqttSink` (the same record per frame, published to an MQTT topic) / `MqttSrc` (each message on a topic filter as a text frame) | `mqtt` | none |
 | `EmbeddingSink` (sqlite index of embedding vectors, searchable from `pyml-mcp`) | `embedding-index` | none (sqlite bundled) |
 | `VelloTextOverlay` (subtitle cues drawn on the GPU, `WgpuTexture` out) | `vello-text-overlay` | wgpu |
-| `OrtInference` (+ CUDA / TensorRT / DirectML / OpenVINO / ROCm / MIGraphX EPs, `execution-provider=` on the launch line) | `ort`, `cuda`, `tensorrt`, `directml`, `openvino`, `rocm`, `migraphx` (in `g2g-ml`) | onnxruntime (`openvino` / `rocm` / `migraphx` register only on an ONNX Runtime built with them) |
+| `OrtInference` (+ CUDA / TensorRT / DirectML / OpenVINO / ROCm / MIGraphX EPs, `execution-provider=` on the launch line; a GPU tensor from `wgpupreprocess` on CUDA) | `ort`, `cuda`, `tensorrt`, `directml`, `openvino`, `rocm`, `migraphx`, `ort-cuda-wgpu` (in `g2g-ml`) | onnxruntime (`openvino` / `rocm` / `migraphx` register only on an ONNX Runtime built with them) |
 | `ExecutorchInference` (a `.pte` model on ExecuTorch's portable CPU kernels) | `executorch` (in `g2g-ml`) | ExecuTorch 1.5.1 static libs (`tools/executorch-build.sh`, `EXECUTORCH_RS_EXECUTORCH_LIB_DIR`) |
 | `BurnInference` (linear layer, or an ONNX topology imported by `burn-onnx` codegen) | `burn` (in `g2g-ml`) | wgpu (Vulkan / Metal / DX12) |
 | `WhisperTranscribe` (16 kHz mono f32 in, timed text segments out, whisper.cpp) | `whisper`, `whisper-cuda`, `whisper-vulkan` (in `g2g-ml`) | whisper.cpp built from source (cmake, libclang), plus nvcc or the Vulkan headers and `glslc` for the GPU features |

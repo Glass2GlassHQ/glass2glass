@@ -49,7 +49,7 @@ use crate::model_dims::{input_geometry, static_output_dims};
 use crate::tensor_bytes::f32_le_bytes;
 
 use ::ort::session::builder::SessionBuilder;
-use ::ort::session::Session;
+use ::ort::session::{Session, SessionInputs};
 use ::ort::value::{Tensor, TensorElementType, ValueType};
 
 use g2g_core::{
@@ -65,6 +65,8 @@ pub struct OrtModel {
     input_name: String,
     output_name: String,
     geometry: ModelGeometry,
+    #[cfg(all(target_os = "linux", feature = "ort-cuda-wgpu"))]
+    wgpu_import: Option<wgpu_input::WgpuTensorImport>,
 }
 
 /// Which execution provider a text-constructed element runs the session on.
@@ -441,7 +443,22 @@ impl OrtModel {
                 input_dtype,
                 output_shape,
             },
+            #[cfg(all(target_os = "linux", feature = "ort-cuda-wgpu"))]
+            wgpu_import: None,
         })
+    }
+
+    fn run<'i, 'v: 'i>(
+        &mut self,
+        input: impl Into<SessionInputs<'i, 'v>>,
+    ) -> Result<(Box<[u8]>, Vec<u32>), G2gError> {
+        let outputs = self.session.run(input).map_err(ort_err)?;
+        let value = outputs
+            .get(self.output_name.as_str())
+            .ok_or(G2gError::Hardware(HardwareError::Other))?;
+        let (shape, data) = value.try_extract_tensor::<f32>().map_err(ort_err)?;
+        let dims: Vec<u32> = shape.iter().map(|d| (*d).max(0) as u32).collect();
+        Ok((f32_le_bytes(data).into_boxed_slice(), dims))
     }
 }
 
@@ -455,17 +472,8 @@ impl LoadedModel for OrtModel {
     fn run_f32(&mut self, chw: Vec<f32>) -> Result<(Box<[u8]>, Vec<u32>), G2gError> {
         let (w, h) = (self.geometry.width as i64, self.geometry.height as i64);
         let tensor = Tensor::from_array((vec![1i64, 3, h, w], chw)).map_err(ort_err)?;
-        let outputs = self
-            .session
-            .run(::ort::inputs![self.input_name.as_str() => tensor])
-            .map_err(ort_err)?;
-        let value = outputs
-            .get(self.output_name.as_str())
-            .ok_or(G2gError::Hardware(HardwareError::Other))?;
-        let (shape, data) = value.try_extract_tensor::<f32>().map_err(ort_err)?;
-
-        let dims: Vec<u32> = shape.iter().map(|d| (*d).max(0) as u32).collect();
-        Ok((f32_le_bytes(data).into_boxed_slice(), dims))
+        let name = self.input_name.clone();
+        self.run(::ort::inputs![name => tensor])
     }
 
     /// Feed an already-quantized u8 / i8 NCHW `[1, 3, H, W]` tensor straight to the
@@ -475,28 +483,49 @@ impl LoadedModel for OrtModel {
     fn run_int(&mut self, bytes: &[u8]) -> Result<(Box<[u8]>, Vec<u32>), G2gError> {
         let (iw, ih) = (self.geometry.width as i64, self.geometry.height as i64);
         let shape = vec![1i64, 3, ih, iw];
-        let outputs = match self.geometry.input_dtype {
+        let name = self.input_name.clone();
+        match self.geometry.input_dtype {
             TensorDType::U8 => {
                 let t = Tensor::from_array((shape, bytes.to_vec())).map_err(ort_err)?;
-                self.session
-                    .run(::ort::inputs![self.input_name.as_str() => t])
-                    .map_err(ort_err)?
+                self.run(::ort::inputs![name => t])
             }
             TensorDType::I8 => {
                 let data: Vec<i8> = bytes.iter().map(|&b| b as i8).collect();
                 let t = Tensor::from_array((shape, data)).map_err(ort_err)?;
-                self.session
-                    .run(::ort::inputs![self.input_name.as_str() => t])
-                    .map_err(ort_err)?
+                self.run(::ort::inputs![name => t])
             }
-            _ => return Err(G2gError::CapsMismatch),
-        };
-        let value = outputs
-            .get(self.output_name.as_str())
-            .ok_or(G2gError::Hardware(HardwareError::Other))?;
-        let (out_shape, out_data) = value.try_extract_tensor::<f32>().map_err(ort_err)?;
-        let dims: Vec<u32> = out_shape.iter().map(|d| (*d).max(0) as u32).collect();
-        Ok((f32_le_bytes(out_data).into_boxed_slice(), dims))
+            _ => Err(G2gError::CapsMismatch),
+        }
+    }
+
+    #[cfg(all(target_os = "linux", feature = "ort-cuda-wgpu"))]
+    fn run_wgpu_f32(
+        &mut self,
+        tensor: &g2g_core::memory::OwnedWgpuBuffer,
+    ) -> Result<(Box<[u8]>, Vec<u32>), G2gError> {
+        let (w, h) = (self.geometry.width as i64, self.geometry.height as i64);
+        let shape = [1i64, 3, h, w];
+        let size = shape.iter().product::<i64>() as u64 * core::mem::size_of::<f32>() as u64;
+        let device_pointer = wgpu_input::stage(&mut self.wgpu_import, tensor, size)?;
+        let memory = ::ort::memory::MemoryInfo::new(
+            ::ort::memory::AllocationDevice::CUDA,
+            wgpu_input::DEVICE_ORDINAL,
+            ::ort::memory::AllocatorType::Device,
+            ::ort::memory::MemoryType::Default,
+        )
+        .map_err(ort_err)?;
+        // SAFETY: `device_pointer` is `size` bytes of CUDA memory on the provider's
+        // device, holding the finished copy, and stays mapped until the next frame.
+        let input = unsafe {
+            ::ort::value::TensorRefMut::<f32>::from_raw(
+                memory,
+                device_pointer as *mut core::ffi::c_void,
+                ::ort::value::Shape::new(shape),
+            )
+        }
+        .map_err(ort_err)?;
+        let name = self.input_name.clone();
+        self.run(::ort::inputs![name => input])
     }
 }
 
@@ -553,4 +582,86 @@ pub(crate) fn input_tensor_dims(dtype: &ValueType) -> Result<(Vec<i64>, TensorDT
 // `Error<SessionBuilder>` instead of the plain `Error<()>`.
 pub(crate) fn ort_err<T>(_e: ::ort::Error<T>) -> G2gError {
     G2gError::Hardware(HardwareError::Other)
+}
+
+#[cfg(all(target_os = "linux", feature = "ort-cuda-wgpu"))]
+mod wgpu_input {
+    use g2g_core::log::Target;
+    use g2g_core::memory::OwnedWgpuBuffer;
+    use g2g_core::{g2g_error, G2gError, HardwareError};
+    use g2g_plugins::cudawgpu::{cuda_pci_bus_id, CudaExternalBuffer};
+    use g2g_plugins::wgpudmabuf::{create_opaque_fd_export, producer_buffer, raw_device};
+
+    use crate::wgpupreprocess::WgpuBufferOwner;
+
+    // onnx runtime's cuda provider runs on device 0 unless its options name another
+    pub(super) const DEVICE_ORDINAL: i32 = 0;
+
+    #[derive(Debug)]
+    pub(super) struct WgpuTensorImport {
+        device: wgpu::Device,
+        exported: wgpu::Buffer,
+        size: u64,
+        imported: CudaExternalBuffer,
+    }
+
+    impl WgpuTensorImport {
+        fn open(device: &wgpu::Device, size: u64) -> Result<Self, G2gError> {
+            let wgpu_bus = device.adapter_info().device_pci_bus_id;
+            let cuda_bus = cuda_pci_bus_id(DEVICE_ORDINAL)?;
+            if !wgpu_bus.eq_ignore_ascii_case(&cuda_bus) {
+                g2g_error!(
+                    Target::category("OrtInference"),
+                    "the tensor is on the GPU at PCI {wgpu_bus}, but CUDA device \
+                     {DEVICE_ORDINAL} is at {cuda_bus}"
+                );
+                return Err(G2gError::UnsupportedDomain);
+            }
+            let (exported, fd) = create_opaque_fd_export(device, size)?;
+            // SAFETY: `fd` exports the dedicated allocation behind `exported`, `size` bytes.
+            let imported = unsafe { CudaExternalBuffer::import(fd, size, DEVICE_ORDINAL)? };
+            Ok(Self {
+                device: device.clone(),
+                exported,
+                size,
+                imported,
+            })
+        }
+
+        fn serves(&self, device: &wgpu::Device, size: u64) -> bool {
+            self.size == size && raw_device(&self.device) == raw_device(device)
+        }
+    }
+
+    // copies `size` bytes of `tensor` into memory cuda maps, returning its device pointer
+    pub(super) fn stage(
+        import: &mut Option<WgpuTensorImport>,
+        tensor: &OwnedWgpuBuffer,
+        size: u64,
+    ) -> Result<u64, G2gError> {
+        let any = tensor.keep_alive().as_any();
+        let (buffer, device, queue) = match any.downcast_ref::<WgpuBufferOwner>() {
+            Some(owner) => (owner.buffer(), owner.device(), owner.queue()),
+            None => producer_buffer(tensor).ok_or(G2gError::UnsupportedDomain)?,
+        };
+        if (tensor.len as u64) < size {
+            return Err(G2gError::CapsMismatch);
+        }
+        let current = match import.take() {
+            Some(current) if current.serves(device, size) => current,
+            _ => WgpuTensorImport::open(device, size)?,
+        };
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        encoder.copy_buffer_to_buffer(buffer, 0, &current.exported, 0, size);
+        queue.submit([encoder.finish()]);
+        device
+            .poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: None,
+            })
+            .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
+        let device_pointer = current.imported.device_pointer();
+        *import = Some(current);
+        Ok(device_pointer)
+    }
 }
