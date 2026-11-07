@@ -1362,7 +1362,7 @@ mod tests {
             .unwrap();
         rx.recv().unwrap().unwrap();
 
-        let mapped = slice.get_mapped_range();
+        let mapped = slice.get_mapped_range().unwrap();
         let mut out = Vec::with_capacity(unpadded * h as usize);
         for row in 0..h as usize {
             let start = row * padded;

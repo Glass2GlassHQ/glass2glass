@@ -939,7 +939,7 @@ impl WgpuSink {
         );
         self.ctx.queue.submit([encoder.finish()]);
         if let Some(frame) = surface_frame {
-            frame.present();
+            self.ctx.queue.present(frame);
         }
         self.presented += 1;
         Ok(())

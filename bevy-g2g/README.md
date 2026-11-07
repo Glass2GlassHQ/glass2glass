@@ -6,7 +6,7 @@ decode, with no pipeline code in the app.
 > Standalone crate, **not** a workspace member (excluded in the repo root
 > `Cargo.toml`). It builds against g2g as path packages and keeps its own
 > `Cargo.lock`, so the heavy Bevy dependency never enters the normal build / CI.
-> Bevy 0.19 pins wgpu 29.0.3, the exact version g2g uses, which is what lets a
+> Bevy 0.20 is on wgpu 30, the same version g2g uses, which is what lets a
 > `wgpu::Device` / `wgpu::Texture` cross between the two with no type mismatch.
 
 ## Remote rendering (`RemoteRenderPlugins`)

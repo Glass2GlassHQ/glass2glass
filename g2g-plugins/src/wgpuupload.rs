@@ -9,7 +9,7 @@ use g2g_core::{
     OutputSink, PipelinePacket,
 };
 
-use crate::gpu::GpuContext;
+use crate::gpu::{gpu_err, GpuContext};
 use crate::wgpubuffer::{whole_word_size, wrap_buffer};
 
 #[derive(Debug, Default)]
@@ -49,6 +49,7 @@ fn upload(context: &GpuContext, bytes: &[u8]) -> Result<MemoryDomain, G2gError> 
     buffer
         .slice(..)
         .get_mapped_range_mut()
+        .map_err(gpu_err)?
         .slice(..bytes.len())
         .copy_from_slice(bytes);
     buffer.unmap();

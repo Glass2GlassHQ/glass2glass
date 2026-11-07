@@ -162,6 +162,7 @@ fn source_buffer(device: &wgpu::Device, bytes: &[u8]) -> wgpu::Buffer {
     buffer
         .slice(..)
         .get_mapped_range_mut()
+        .expect("mapped range")
         .slice(..bytes.len())
         .copy_from_slice(bytes);
     buffer.unmap();

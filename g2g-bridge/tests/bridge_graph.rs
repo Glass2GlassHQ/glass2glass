@@ -290,6 +290,7 @@ mod dmabuf {
         buffer
             .slice(..)
             .get_mapped_range_mut()
+            .expect("mapped range")
             .copy_from_slice(pixels);
         buffer.unmap();
         let caps = Caps::RawVideo {

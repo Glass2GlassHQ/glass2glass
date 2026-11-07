@@ -175,9 +175,9 @@ ort = { version = "2.0.0-rc.12", optional = true }
 executorch = { version = "0.13.0", optional = true, features = ["module", "tensor-ptr"] }
 # Inline GPU preprocessing (wgpu feature, §5.1). Default features pull the
 # native backend per platform (dx12 on Windows).
-wgpu = { version = "29", optional = true }
+wgpu = { version = "30", optional = true }
 # Pure-Rust Burn deep-learning framework, wgpu backend (burn feature, §5.2).
-burn = { version = "0.21", optional = true, default-features = false, features = ["std", "wgpu"] }
+burn = { version = "0.22", optional = true, default-features = false, features = ["std", "wgpu"] }
 # CUDA<->wgpu interop primitives (cuda-wgpu feature, M220). Optional NORMAL dep
 # (acyclic: g2g-plugins does not depend on g2g-ml) so the CudaToWgpu element can
 # reach g2g_plugins::cudawgpu. The [dev-dependencies] entry below additionally

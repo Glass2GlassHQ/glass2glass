@@ -148,7 +148,7 @@ The type tiers above translate to per-crate promises:
   That is the surface an MCU / RTOS consumer compiles, often on a toolchain their
   vendor or their certification evidence pins, so it stays conservative and CI
   checks each of those crates on 1.86 (the `msrv` job). Everything else is
-  **Rust 1.92** (`rust-version` in `[workspace.package]`): `g2g-plugins`,
+  **Rust 1.95** (`rust-version` in `[workspace.package]`): `g2g-plugins`,
   `g2g-ml`, `g2g-bridge`, `g2g-python`, `g2g-capi`, `g2g-pyapi`, `xtask`. Those
   are host crates whose own dependencies move, and holding them back only meant
   pinning deps to stale versions. `g2g-capi` is on the host floor rather than

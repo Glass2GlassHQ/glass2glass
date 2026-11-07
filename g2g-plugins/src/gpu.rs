@@ -480,7 +480,7 @@ pub(crate) fn map_for_read(
         })
         .map_err(gpu_err)?;
     rx.recv().map_err(gpu_err)?.map_err(gpu_err)?;
-    Ok(slice.get_mapped_range())
+    slice.get_mapped_range().map_err(gpu_err)
 }
 
 /// [`map_for_read`] that yields to the executor until the GPU is done, rather
@@ -500,7 +500,7 @@ pub(crate) async fn map_for_read_async(
         match rx.try_recv() {
             Ok(mapped) => {
                 mapped.map_err(gpu_err)?;
-                return Ok(slice.get_mapped_range());
+                return slice.get_mapped_range().map_err(gpu_err);
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => tokio::task::yield_now().await,
             Err(disconnected) => return Err(gpu_err(disconnected)),
@@ -582,7 +582,11 @@ pub(crate) unsafe fn import_vk_image_as_wgpu_texture(
             usage: wgpu_usage,
             view_formats: &[],
         };
-        Some(device.create_texture_from_hal::<wgpu_hal::api::Vulkan>(hal_tex, &wgpu_desc))
+        Some(device.create_texture_from_hal::<wgpu_hal::api::Vulkan>(
+            hal_tex,
+            &wgpu_desc,
+            wgpu::TextureUses::UNINITIALIZED,
+        ))
     }
 }
 
@@ -829,7 +833,7 @@ mod tests {
             })
             .unwrap();
         rx.recv().unwrap().unwrap();
-        let data = slice.get_mapped_range().to_vec();
+        let data = slice.get_mapped_range().unwrap().to_vec();
         buffer.unmap();
         data
     }

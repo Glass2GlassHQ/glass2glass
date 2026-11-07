@@ -26,8 +26,8 @@ decode = ["g2g-plugins/vello-overlay"]
 # Bevy 0.19 pins wgpu 29.0.3, the exact version g2g uses, so the two share one
 # wgpu in this crate's lockfile and a `wgpu::Texture`/`Device` crosses between
 # them with no type mismatch, the prerequisite for `GpuContext::from_wgpu`.
-bevy = "0.19"
-wgpu = "29"
+bevy = "0.20"
+wgpu = "30"
 
 g2g-core = { path = "../g2g-core", features = ["std", "runtime"] }
 # webrtc: WebRtcSink (WHIP egress). moqt: MoqtSink (MoQ Transport egress, fed by

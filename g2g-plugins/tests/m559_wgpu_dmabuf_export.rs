@@ -147,7 +147,7 @@ async fn roundtrip(format: RawVideoFormat, w: u32, h: u32, size: usize) -> Optio
     })
     .expect("poll");
     rx.recv().expect("readback channel").expect("map readback");
-    let got = slice.get_mapped_range().to_vec();
+    let got = slice.get_mapped_range().expect("mapped range").to_vec();
 
     assert_eq!(
         got, pattern,

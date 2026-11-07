@@ -591,7 +591,7 @@ output byte-for-byte, checked in CI for both catalogs by
 
 ## Build
 
-Stable Rust, `resolver = "2"`. MSRV 1.92, except `g2g-core`, `g2g-mcu`,
+Stable Rust, `resolver = "2"`. MSRV 1.95, except `g2g-core`, `g2g-mcu`,
 `g2g-mcugen`, and `g2g-plugin`, which build on 1.86 so a vendor-pinned
 toolchain can consume the portable core (see `STABILITY.md`). In a clone:
 

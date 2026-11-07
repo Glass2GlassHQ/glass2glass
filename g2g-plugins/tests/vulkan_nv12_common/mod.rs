@@ -256,7 +256,7 @@ pub(crate) fn read_plane(
         })
         .expect("poll");
     rx.recv().expect("map callback").expect("map");
-    let mapped = slice.get_mapped_range();
+    let mapped = slice.get_mapped_range().expect("mapped range");
     let mut out = Vec::with_capacity(tight * height as usize);
     for row in 0..height as usize {
         out.extend_from_slice(&mapped[row * padded..row * padded + tight]);

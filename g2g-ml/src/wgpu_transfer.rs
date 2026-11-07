@@ -61,7 +61,10 @@ impl ReadbackStaging {
         rx.recv()
             .map_err(|_| G2gError::Hardware(HardwareError::Other))?
             .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
-        let bytes = slice.get_mapped_range().to_vec();
+        let bytes = slice
+            .get_mapped_range()
+            .map_err(|_| G2gError::Hardware(HardwareError::Other))?
+            .to_vec();
         staging.unmap();
         *cached = Some(staging);
         Ok(bytes)

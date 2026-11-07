@@ -477,6 +477,7 @@ fn surface_config(
     Some(wgpu::SurfaceConfiguration {
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
         format,
+        color_space: wgpu::SurfaceColorSpace::Auto,
         width: width.max(1),
         height: height.max(1),
         present_mode: wgpu::PresentMode::AutoVsync,
@@ -536,7 +537,7 @@ fn readback_rgba(ctx: &GpuContext, tex: &wgpu::Texture, width: u32, height: u32)
         .expect("poll readback");
     rx.recv().expect("readback channel").expect("map readback");
 
-    let mapped = slice.get_mapped_range();
+    let mapped = slice.get_mapped_range().expect("mapped range");
     let mut out = Vec::with_capacity(unpadded * height as usize);
     for row in 0..height as usize {
         let start = row * padded;

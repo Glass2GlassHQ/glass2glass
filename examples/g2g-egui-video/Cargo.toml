@@ -8,7 +8,7 @@ publish = false
 [workspace]
 
 [dependencies]
-eframe = "0.35"
+eframe = "0.37"
 g2g-core = { path = "../../g2g-core", features = ["std", "runtime"] }
 g2g-plugins = { path = "../../g2g-plugins", features = ["std", "ffmpeg", "vello-overlay"] }
 # clocksync paces frames with tokio timers

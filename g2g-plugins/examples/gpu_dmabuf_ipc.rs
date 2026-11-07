@@ -294,7 +294,7 @@ fn read_back(device: &wgpu::Device, queue: &wgpu::Queue, buffer: &wgpu::Buffer) 
         })
         .expect("poll");
     rx.recv().expect("readback channel").expect("map readback");
-    slice.get_mapped_range().to_vec()
+    slice.get_mapped_range().expect("mapped range").to_vec()
 }
 
 fn run_child(path: &str) -> i32 {

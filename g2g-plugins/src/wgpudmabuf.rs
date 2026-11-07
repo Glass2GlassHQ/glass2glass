@@ -1123,7 +1123,7 @@ mod tests {
             })
             .unwrap();
         receiver.recv().unwrap().unwrap();
-        slice.get_mapped_range().to_vec()
+        slice.get_mapped_range().unwrap().to_vec()
     }
 
     #[test]

@@ -146,10 +146,10 @@ jobs:
 
   # MSRV floor of the embedded-facing surface (M999). g2g-core / g2g-mcu /
   # g2g-mcugen / g2g-plugin declare rust-version 1.86 while the host crates are
-  # on 1.92, so a vendor-pinned or certification-frozen toolchain can still
+  # on 1.95, so a vendor-pinned or certification-frozen toolchain can still
   # consume the portable core and build a plugin against it. The claim is that
   # the LIBRARIES build on 1.86: `--all-targets` is deliberately absent because
-  # g2g-mcu's dev-dependency on g2g-plugins is a 1.92 crate.
+  # g2g-mcu's dev-dependency on g2g-plugins is a 1.95 crate.
   msrv:
     name: msrv 1.86 (embedded surface)
     runs-on: ubuntu-26.04

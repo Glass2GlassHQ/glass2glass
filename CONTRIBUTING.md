@@ -5,7 +5,7 @@ Issues and pull requests are welcome at
 
 ## Build and test
 
-Stable Rust. MSRV is 1.92, except `g2g-core`, `g2g-mcu`, `g2g-mcugen` and
+Stable Rust. MSRV is 1.95, except `g2g-core`, `g2g-mcu`, `g2g-mcugen` and
 `g2g-plugin`, which build on 1.86 (see `STABILITY.md`).
 
 ```sh

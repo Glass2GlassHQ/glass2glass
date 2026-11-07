@@ -14,4 +14,4 @@ cargo run --release -- clip.h264    # an H.264 Annex-B file
 
 Needs a display, a wgpu adapter, and the ffmpeg libraries for the file path.
 
-eframe is pinned to 0.35, the last release on wgpu 29, the version g2g uses.
+eframe 0.37 is on wgpu 30, the version g2g uses.

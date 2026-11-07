@@ -231,6 +231,8 @@ libraries installed.
   playback, the board clock and audio against video have only run against a
   mock device.
 - An example that shows pipeline video inside a Qt/QML window.
+- Move `vulkanhdrsink` off its raw Vulkan swapchain onto a wgpu surface, using
+  wgpu 30's `SurfaceConfiguration::color_space` for the HDR10 / scRGB output.
 
 ## Containers
 

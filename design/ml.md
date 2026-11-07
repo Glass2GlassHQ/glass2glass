@@ -171,7 +171,7 @@ runtime graph loader to hand the file to.
 
 The seam is the `BurnModule` trait: one forward pass from the `[1, 3, H, W]` NCHW
 f32 tensor the element normalizes to `[1, N]` logits. The importing crate
-implements it over its generated `Model<Wgpu>` and passes it to
+implements it over its generated `Model` and passes it to
 `BurnInference::module`, which then drives it frame by frame exactly like the
 built-in linear layer. A forward pass whose output is not the declared
 `num_outputs` fails the frame, so the emitted `Caps::Tensor` cannot lie.

@@ -13,9 +13,9 @@ plus the per-track files it indexes.
 
 Cargo workspace (`resolver = "2"`, edition 2021, stable toolchain). MSRV is
 split: the embedded-facing crates (`g2g-core`, `g2g-mcu`, `g2g-mcugen`,
-`g2g-plugin`) declare 1.86, everything else takes the workspace value of 1.92.
+`g2g-plugin`) declare 1.86, everything else takes the workspace value of 1.95.
 Adding a dependency to one of the 1.86 crates means checking its MSRV, and a
-1.86 crate can never depend on a 1.92 one. See `STABILITY.md`.
+1.86 crate can never depend on a 1.95 one. See `STABILITY.md`.
 
 | Crate | Role |
 | :--- | :--- |

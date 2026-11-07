@@ -13,7 +13,6 @@
 //!   self-attention (the standard ONNX `Attention` op, which `burn-onnx` lowers
 //!   onto `burn::tensor::module::attention`) -> mean pool -> linear.
 
-use burn::backend::Wgpu;
 use burn::tensor::Tensor;
 use g2g_core::G2gError;
 use g2g_ml::burninfer::{BurnInference, BurnModule};
@@ -44,7 +43,7 @@ macro_rules! imported_onnx_model {
 
         #[doc = concat!("The generated ", $what, " behind g2g's element-facing trait.")]
         #[derive(Debug)]
-        pub struct $wrapper($module::Model<Wgpu>);
+        pub struct $wrapper($module::Model);
 
         impl $wrapper {
             /// Build the model with its embedded trained weights.
@@ -60,7 +59,7 @@ macro_rules! imported_onnx_model {
         }
 
         impl BurnModule for $wrapper {
-            fn forward(&self, input: Tensor<Wgpu, 4>) -> Tensor<Wgpu, 2> {
+            fn forward(&self, input: Tensor<4>) -> Tensor<2> {
                 self.0.forward(input)
             }
         }

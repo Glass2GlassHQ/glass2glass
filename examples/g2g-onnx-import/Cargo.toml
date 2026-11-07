@@ -16,13 +16,13 @@ publish = false
 [dependencies]
 g2g-core = { path = "../../g2g-core", features = ["std", "runtime"] }
 g2g-ml = { path = "../../g2g-ml", features = ["burn"] }
-burn = { version = "0.21", default-features = false, features = ["std", "wgpu"] }
+burn = { version = "0.22", default-features = false, features = ["std", "wgpu"] }
 # The generated model's weight loader: burn-onnx writes the weights as a
 # burnpack blob and emits `BurnpackStore` / `ModuleSnapshot` calls to read it.
-burn-store = { version = "0.21", default-features = false, features = ["std", "burnpack"] }
+burn-store = { version = "0.22", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "macros", "sync"] }
 
 [build-dependencies]
-burn-onnx = "0.21"
+burn-onnx = "0.22"

@@ -683,7 +683,9 @@ impl ReadbackState {
         let unpadded = (self.width * 4) as usize;
         let mut rgba = Vec::with_capacity(unpadded * self.height as usize);
         {
-            let data = slice.get_mapped_range();
+            let data = slice
+                .get_mapped_range()
+                .map_err(|_| G2gError::Hardware(HardwareError::Wgpu))?;
             for row in data.chunks_exact(self.padded_bytes_per_row as usize) {
                 rgba.extend_from_slice(&row[..unpadded]);
             }

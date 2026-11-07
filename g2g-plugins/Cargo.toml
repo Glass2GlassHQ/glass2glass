@@ -1048,10 +1048,10 @@ cosmic-text = { version = "0.17", optional = true, default-features = false, fea
 ] }
 # Vello GPU 2D renderer (vello-overlay feature, M102). Renders detection boxes
 # into a wgpu texture; re-exports wgpu 29 (matching g2g-ml) as `vello::wgpu`.
-vello = { version = "0.9", optional = true }
+vello = { version = "0.11", optional = true }
 # wgpu for the GpuContext + WgpuSink (and shared with vello, which re-exports the
 # same crate). Optional; pulled by vello-overlay / wgpu-sink.
-wgpu = { version = "29", optional = true }
+wgpu = { version = "30", optional = true }
 # Maps `font-variations=` user values to the normalized coords Vello draws a
 # variable face at (vello-text-overlay feature). The version vello 0.9 uses.
 skrifa = { version = "0.42.1", optional = true }
@@ -1060,7 +1060,7 @@ skrifa = { version = "0.42.1", optional = true }
 # and to wrap a self-allocated, externally-shared VkImage as a wgpu texture
 # (texture_from_raw + TextureMemory::External). ash is the Vulkan FFI; its
 # version is pinned to the one wgpu-hal 29 links so vk::Image handles match.
-wgpu-hal = { version = "29", optional = true, default-features = false, features = ["vulkan"] }
+wgpu-hal = { version = "30", optional = true, default-features = false, features = ["vulkan"] }
 ash = { version = "0.38", optional = true }
 # Window/display handles for the HDR swapchain surface (hdr-present feature). Only
 # the handle enums are needed (the app owns the window, e.g. via winit); the

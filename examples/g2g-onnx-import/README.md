@@ -7,7 +7,7 @@ topology itself in from an ONNX file.
 `build.rs` runs `burn-onnx`'s `ModelGen` over each fixture in [`model/`](model),
 which generates a burn `Module` plus a burnpack weight blob embedded in the
 binary. `burn-onnx` is build-time codegen, not a runtime loader, so the generated
-`Model<Wgpu>` reaches the pipeline through `g2g_ml::burninfer::BurnModule`: the
+`Model` reaches the pipeline through `g2g_ml::burninfer::BurnModule`: the
 wrappers in [`src/lib.rs`](src/lib.rs) implement that trait and
 `BurnInference::module` drives them per frame, exactly like the element's built-in
 linear layer.

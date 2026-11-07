@@ -189,6 +189,7 @@ pub async fn probe_decode_caps(
             power_preference: wgpu::PowerPreference::HighPerformance,
             force_fallback_adapter: false,
             compatible_surface: None,
+            ..Default::default()
         })
         .await
         .map_err(|_| VulkanVideoError::NoVulkanAdapter)?;

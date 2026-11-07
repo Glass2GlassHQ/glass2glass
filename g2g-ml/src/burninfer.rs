@@ -15,16 +15,14 @@
 //! `[1, 3, H, W]` NCHW tensor and pushed through the caller's forward pass. That
 //! is how a topology imported from ONNX runs here, since `burn-onnx` (the crate
 //! `burn-import` forwards to) is build-time codegen rather than a runtime
-//! loader: the generated `Model<Wgpu>` implements [`BurnModule`] in the
+//! loader: the generated `Model` implements [`BurnModule`] in the
 //! importing crate. `examples/g2g-onnx-import` is the worked case, both a
 //! conv / BN / ReLU classifier and a multi-head self-attention model.
 
 use core::future::Future;
 use core::pin::Pin;
 
-use burn::backend::wgpu::WgpuDevice;
-use burn::backend::Wgpu;
-use burn::tensor::{Tensor, TensorData};
+use burn::tensor::{Device, Tensor, TensorData};
 
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
@@ -36,8 +34,6 @@ use g2g_core::{
 
 use crate::tensor_bytes::{f32_le_bytes, rgba_to_nchw};
 
-type B = Wgpu;
-
 /// A burn `Module` this element can drive: one forward pass from a
 /// `[1, 3, height, width]` NCHW f32 tensor of normalized RGB to `[1, N]` logits.
 ///
@@ -47,7 +43,6 @@ type B = Wgpu;
 /// # Example
 ///
 /// ```no_run
-/// use burn::backend::Wgpu;
 /// use burn::tensor::Tensor;
 /// use g2g_ml::burninfer::BurnModule;
 ///
@@ -55,14 +50,14 @@ type B = Wgpu;
 /// struct FlattenPixels;
 ///
 /// impl BurnModule for FlattenPixels {
-///     fn forward(&self, input: Tensor<Wgpu, 4>) -> Tensor<Wgpu, 2> {
+///     fn forward(&self, input: Tensor<4>) -> Tensor<2> {
 ///         input.flatten(1, 3)
 ///     }
 /// }
 /// ```
 pub trait BurnModule: core::fmt::Debug + Send {
     /// Run the model's forward pass on one `[1, 3, height, width]` batch.
-    fn forward(&self, input: Tensor<B, 4>) -> Tensor<B, 2>;
+    fn forward(&self, input: Tensor<4>) -> Tensor<2>;
 }
 
 /// `output = input . W + b`. `weights` is row-major `[K, N]` (`K = 3 * W * H`)
@@ -72,8 +67,8 @@ pub trait BurnModule: core::fmt::Debug + Send {
 struct LinearLayer {
     weights: Vec<f32>,
     bias: Vec<f32>,
-    weight_t: Option<Tensor<B, 2>>,
-    bias_t: Option<Tensor<B, 2>>,
+    weight_t: Option<Tensor<2>>,
+    bias_t: Option<Tensor<2>>,
 }
 
 /// What the element runs per frame: the built-in linear layer, or a caller-supplied
@@ -99,7 +94,7 @@ pub struct BurnInference {
     height: u32,
     num_outputs: usize,
     model: Model,
-    device: WgpuDevice,
+    device: Device,
     configured: bool,
     last_caps: Option<Caps>,
     emitted: u64,
@@ -163,7 +158,7 @@ impl BurnInference {
             height,
             num_outputs,
             model,
-            device: WgpuDevice::default(),
+            device: Device::wgpu(Default::default()),
             configured: false,
             last_caps: None,
             emitted: 0,
@@ -204,19 +199,19 @@ impl BurnInference {
                 let weight = layer.weight_t.as_ref().ok_or(G2gError::NotConfigured)?;
                 let bias = layer.bias_t.as_ref().ok_or(G2gError::NotConfigured)?;
                 let k = flat.len();
-                let input = Tensor::<B, 2>::from_data(TensorData::new(flat, [1, k]), &self.device);
+                let input = Tensor::<2>::from_data(TensorData::new(flat, [1, k]), &self.device);
                 input.matmul(weight.clone()).add(bias.clone())
             }
             Model::Module(model) => {
                 let input =
-                    Tensor::<B, 4>::from_data(TensorData::new(flat, [1, 3, h, w]), &self.device);
+                    Tensor::<4>::from_data(TensorData::new(flat, [1, 3, h, w]), &self.device);
                 model.forward(input)
             }
         };
 
         let values = logits
             .into_data()
-            .to_vec::<f32>()
+            .try_to_vec::<f32>()
             .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
         if values.len() != self.num_outputs {
             return Err(G2gError::CapsMismatch);
@@ -256,11 +251,11 @@ impl AsyncElement for BurnInference {
         let num_outputs = self.num_outputs;
         let device = self.device.clone();
         if let Model::Linear(layer) = &mut self.model {
-            layer.weight_t = Some(Tensor::<B, 2>::from_data(
+            layer.weight_t = Some(Tensor::<2>::from_data(
                 TensorData::new(layer.weights.clone(), [k, num_outputs]),
                 &device,
             ));
-            layer.bias_t = Some(Tensor::<B, 2>::from_data(
+            layer.bias_t = Some(Tensor::<2>::from_data(
                 TensorData::new(layer.bias.clone(), [1, num_outputs]),
                 &device,
             ));
@@ -329,8 +324,8 @@ impl AsyncElement for BurnInference {
 /// gracefully on a headless machine.
 pub fn gpu_available() -> bool {
     std::panic::catch_unwind(|| {
-        let device = WgpuDevice::default();
-        let t = Tensor::<B, 1>::from_data(TensorData::new(vec![1.0f32], [1]), &device);
+        let device = Device::wgpu(Default::default());
+        let t = Tensor::<1>::from_data(TensorData::new(vec![1.0f32], [1]), &device);
         let _ = t.into_data();
     })
     .is_ok()
@@ -409,7 +404,7 @@ mod tests {
         struct Never;
 
         impl BurnModule for Never {
-            fn forward(&self, _input: Tensor<B, 4>) -> Tensor<B, 2> {
+            fn forward(&self, _input: Tensor<4>) -> Tensor<2> {
                 unreachable!("construction-time validation never runs the model");
             }
         }

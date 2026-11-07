@@ -128,7 +128,7 @@ async fn wgpu_reads_what_cuda_wrote() {
             timeout: None,
         })
         .expect("poll");
-    let data = slice.get_mapped_range();
+    let data = slice.get_mapped_range().expect("mapped range");
 
     let mut mismatches = 0u64;
     for y in 0..tex_h as usize {
@@ -267,7 +267,7 @@ async fn an_odd_size_cuda_frame_lands_in_the_packed_texture() {
             timeout: None,
         })
         .expect("poll");
-    let rows = slice.get_mapped_range();
+    let rows = slice.get_mapped_range().expect("mapped range");
 
     let padded_row = padded_row as usize;
     let luma_row = RawVideoFormat::Nv12.plane_stride(0, ODD_W).unwrap() as usize;

@@ -156,7 +156,7 @@ async fn timeline_sync_roundtrip_multi_frame() {
         })
         .expect("poll");
         rx.recv().expect("readback channel").expect("map readback");
-        let got = slice.get_mapped_range().to_vec();
+        let got = slice.get_mapped_range().expect("mapped range").to_vec();
         assert_eq!(
             got, pattern,
             "frame {n}: pixels exact through timeline-synced dma-buf handoff"
