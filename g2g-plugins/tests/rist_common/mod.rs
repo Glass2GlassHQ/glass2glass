@@ -3,6 +3,7 @@
 
 use std::collections::BTreeSet;
 use std::future::Future;
+use std::io::ErrorKind;
 use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -17,8 +18,8 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::rtp::RtpHeader;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
-    Caps, CapsConstraint, CapsSet, ConfigureOutcome, FrameTiming, G2gError, MemoryDomain,
-    OutputSink, PipelineClock, PipelinePacket,
+    Caps, CapsConstraint, CapsSet, ConfigureOutcome, FrameTiming, G2gError, HardwareError,
+    MemoryDomain, OutputSink, PipelineClock, PipelinePacket,
 };
 
 use g2g_plugins::bytestream::{
@@ -149,6 +150,22 @@ pub(crate) fn bound_even_port_pair() -> (UdpSocket, UdpSocket) {
 pub(crate) fn free_even_port() -> u16 {
     let (media, _rtcp) = bound_even_port_pair();
     media.local_addr().expect("bound address").port()
+}
+
+const PORT_COLLISION_ATTEMPTS: usize = 3;
+
+pub(crate) async fn rerun_on_port_collision<T>(
+    mut leg: impl AsyncFnMut() -> Result<T, G2gError>,
+) -> T {
+    // another socket can take a port between `free_even_port` releasing it and the element binding it
+    for _ in 1..PORT_COLLISION_ATTEMPTS {
+        match leg().await {
+            Err(G2gError::Hardware(HardwareError::Io(code)))
+                if std::io::Error::from_raw_os_error(code).kind() == ErrorKind::AddrInUse => {}
+            result => return result.expect("the pipelines run"),
+        }
+    }
+    leg().await.expect("the pipelines run on fresh ports")
 }
 
 pub(crate) fn loopback(port: u16) -> SocketAddr {

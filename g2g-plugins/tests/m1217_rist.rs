@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use g2g_core::rtp::{RtpHeader, RTP_HEADER_LEN};
 use g2g_core::runtime::{parse_launch, run_simple_pipeline, LatencyProfile, SourceLoop};
-use g2g_core::{AsyncElement, PropValue, PropertySpec};
+use g2g_core::{AsyncElement, G2gError, PropValue, PropertySpec};
 
 use g2g_plugins::bytestream::{TS_DATAGRAM_PAYLOAD, TS_PACKET_SIZE};
 use g2g_plugins::filesink::FileSink;
@@ -34,9 +34,9 @@ use g2g_plugins::rtpjitter::{JitterConfig, RtpJitterBuffer};
 
 mod rist_common;
 use rist_common::{
-    assert_recovered_through, collect_from_gst, free_even_port, loopback, output_path, spawn_gst,
-    stop_gst, synthetic_ts, FirstMediaOrder, LossyRelay, PacedTsSource, RelayLog, ZeroClock,
-    GST_BIND_WAIT, GST_DEADLINE, SEND_INTERVAL,
+    assert_recovered_through, collect_from_gst, free_even_port, loopback, output_path,
+    rerun_on_port_collision, spawn_gst, stop_gst, synthetic_ts, FirstMediaOrder, LossyRelay,
+    PacedTsSource, RelayLog, ZeroClock, GST_BIND_WAIT, GST_DEADLINE, SEND_INTERVAL,
 };
 
 const MEDIA_SSRC: u32 = 0x1234_5670;
@@ -105,7 +105,12 @@ fn ristsink_to(port: u16) -> RistSink {
 
 /// Run a paced g2g sender into `sink_port` and a g2g receiver on
 /// `receiver_port`, returning what the receiver wrote.
-async fn g2g_to_g2g(sink_port: u16, receiver_port: u16, sent: &[u8], name: &str) -> Vec<u8> {
+async fn g2g_to_g2g(
+    sink_port: u16,
+    receiver_port: u16,
+    sent: &[u8],
+    name: &str,
+) -> Result<Vec<u8>, G2gError> {
     let received_path = output_path(name);
     let mut source = ristsrc_on(receiver_port);
     let mut recorder = FileSink::new(&received_path);
@@ -129,14 +134,14 @@ async fn g2g_to_g2g(sink_port: u16, receiver_port: u16, sent: &[u8], name: &str)
         tokio::time::timeout(LOOPBACK_DEADLINE, async { tokio::join!(receive, send) })
             .await
             .expect("both ends finish");
-    sent_run.expect("the send pipeline runs");
-    received.expect("the receive pipeline runs");
+    sent_run?;
+    received?;
     assert!(sink.eos_seen(), "the sender reached Eos");
     assert!(
         recorder.eos_seen(),
         "the receiver ended on the sender's BYE"
     );
-    std::fs::read(&received_path).expect("read the received stream")
+    Ok(std::fs::read(&received_path).expect("read the received stream"))
 }
 
 // ---- wire pieces ----
@@ -607,28 +612,35 @@ fn both_elements_build_from_a_launch_line_and_the_gst_helpers_answer() {
 #[tokio::test]
 async fn g2g_to_g2g_without_loss() {
     let sent = synthetic_ts(SENT_RTP_PACKETS);
-    let port = free_even_port();
-    let received = g2g_to_g2g(port, port, &sent, "g2g_m1217_direct.ts").await;
+    let received = rerun_on_port_collision(async || {
+        let port = free_even_port();
+        g2g_to_g2g(port, port, &sent, "g2g_m1217_direct.ts").await
+    })
+    .await;
     assert!(received == sent, "the received bytes equal the sent ones");
 }
 
 #[tokio::test]
 async fn g2g_to_g2g_recovers_dropped_packets() {
     let sent = synthetic_ts(SENT_RTP_PACKETS);
-    let receiver_port = free_even_port();
-    let relay = LossyRelay::start(
-        loopback(receiver_port),
-        DROPPED_FROM_G2G,
-        FirstMediaOrder::Unordered,
-    );
-    let received = g2g_to_g2g(
-        relay.media_port,
-        receiver_port,
-        &sent,
-        "g2g_m1217_relayed.ts",
-    )
+    let (received, log) = rerun_on_port_collision(async || {
+        let receiver_port = free_even_port();
+        let relay = LossyRelay::start(
+            loopback(receiver_port),
+            DROPPED_FROM_G2G,
+            FirstMediaOrder::Unordered,
+        );
+        let received = g2g_to_g2g(
+            relay.media_port,
+            receiver_port,
+            &sent,
+            "g2g_m1217_relayed.ts",
+        )
+        .await;
+        let log = relay.finish();
+        Ok((received?, log))
+    })
     .await;
-    let log = relay.finish();
     assert!(
         log.sent_payloads() == sent,
         "ristsink put the whole stream on the wire"
@@ -674,54 +686,57 @@ async fn send_media(
 
 #[tokio::test]
 async fn ristsrc_follows_a_sender_that_restarts_with_a_new_ssrc() {
-    let port = free_even_port();
-    let received_path = output_path("g2g_m2027_restart.ts");
-    let mut source = ristsrc_on(port);
-    source
-        .set_property(
-            "receiver-buffer",
-            PropValue::Uint(RESTART_RECEIVER_BUFFER_MS),
-        )
-        .unwrap();
-    let mut recorder = FileSink::new(&received_path);
-    let receive = run_simple_pipeline(
-        &mut source,
-        &mut recorder,
-        &ZeroClock,
-        LatencyProfile::Live.link_capacity(),
-    );
     let sent = synthetic_ts(2 * PACKETS_PER_SENDER_RUN);
-    let (first_run, second_run) = sent.split_at(PACKETS_PER_SENDER_RUN * TS_DATAGRAM_PAYLOAD);
-    let send = async {
-        let socket = tokio::net::UdpSocket::bind(loopback(0))
-            .await
-            .expect("bind the sender");
-        tokio::time::sleep(RECEIVER_BIND_WAIT).await;
-        send_media(&socket, port, MEDIA_SSRC, 0, first_run).await;
-        tokio::time::sleep(RESTART_GAP).await;
-        send_media(
-            &socket,
-            port,
-            RESTARTED_SSRC,
-            RESTARTED_FIRST_SEQUENCE,
-            second_run,
-        )
-        .await;
-        // a late packet of the old run, which must not switch the stream back
-        let late_sequence = PACKETS_PER_SENDER_RUN as u16;
-        let late_payload = [0u8; TS_DATAGRAM_PAYLOAD];
-        send_media(&socket, port, MEDIA_SSRC, late_sequence, &late_payload).await;
-        socket
-            .send_to(&rtcp::build_bye(RESTARTED_SSRC), loopback(port + 1))
-            .await
-            .expect("send BYE");
-    };
-    let (received, ()) =
-        tokio::time::timeout(LOOPBACK_DEADLINE, async { tokio::join!(receive, send) })
-            .await
-            .expect("ristsrc ends on the restarted sender's BYE");
-    received.expect("the receive pipeline runs");
-    let received = std::fs::read(&received_path).expect("read the received stream");
+    let received = rerun_on_port_collision(async || {
+        let port = free_even_port();
+        let received_path = output_path("g2g_m2027_restart.ts");
+        let mut source = ristsrc_on(port);
+        source
+            .set_property(
+                "receiver-buffer",
+                PropValue::Uint(RESTART_RECEIVER_BUFFER_MS),
+            )
+            .unwrap();
+        let mut recorder = FileSink::new(&received_path);
+        let receive = run_simple_pipeline(
+            &mut source,
+            &mut recorder,
+            &ZeroClock,
+            LatencyProfile::Live.link_capacity(),
+        );
+        let (first_run, second_run) = sent.split_at(PACKETS_PER_SENDER_RUN * TS_DATAGRAM_PAYLOAD);
+        let send = async {
+            let socket = tokio::net::UdpSocket::bind(loopback(0))
+                .await
+                .expect("bind the sender");
+            tokio::time::sleep(RECEIVER_BIND_WAIT).await;
+            send_media(&socket, port, MEDIA_SSRC, 0, first_run).await;
+            tokio::time::sleep(RESTART_GAP).await;
+            send_media(
+                &socket,
+                port,
+                RESTARTED_SSRC,
+                RESTARTED_FIRST_SEQUENCE,
+                second_run,
+            )
+            .await;
+            // a late packet of the old run, which must not switch the stream back
+            let late_sequence = PACKETS_PER_SENDER_RUN as u16;
+            let late_payload = [0u8; TS_DATAGRAM_PAYLOAD];
+            send_media(&socket, port, MEDIA_SSRC, late_sequence, &late_payload).await;
+            socket
+                .send_to(&rtcp::build_bye(RESTARTED_SSRC), loopback(port + 1))
+                .await
+                .expect("send BYE");
+        };
+        let (received, ()) =
+            tokio::time::timeout(LOOPBACK_DEADLINE, async { tokio::join!(receive, send) })
+                .await
+                .expect("ristsrc ends on the restarted sender's BYE");
+        received?;
+        Ok(std::fs::read(&received_path).expect("read the received stream"))
+    })
+    .await;
     assert!(
         received == sent,
         "both runs arrive whole and the late packet is dropped"
@@ -738,36 +753,38 @@ async fn ristsrc_follows_a_sender_that_restarts_with_a_new_ssrc() {
 async fn gst_ristsink_feeds_ristsrc_through_loss() {
     let reference = output_path("g2g_m1217_gst_sent.ts");
     let received_path = output_path("g2g_m1217_from_gst.ts");
-    let receiver_port = free_even_port();
-    let relay = LossyRelay::start(
-        loopback(receiver_port),
-        DROPPED_FROM_GST,
-        FirstMediaOrder::Unordered,
-    );
-
-    let mut source = ristsrc_on(receiver_port);
-    let mut recorder = FileSink::new(&received_path);
-    let peer = spawn_gst(&format!(
-        "videotestsrc num-buffers={GST_VIDEO_FRAMES} ! openh264enc bitrate={GST_BITRATE} ! \
-         h264parse ! mpegtsmux ! tee name=t t. ! queue ! filesink buffer-mode=unbuffered location={} \
-         t. ! queue ! rtpmp2tpay ! ristsink address=127.0.0.1 port={}",
-        reference.display(),
-        relay.media_port
-    ));
-    tokio::time::timeout(
-        GST_DEADLINE,
-        run_simple_pipeline(
-            &mut source,
-            &mut recorder,
-            &ZeroClock,
-            LatencyProfile::Live.link_capacity(),
-        ),
-    )
-    .await
-    .expect("ristsrc ends on the gst sender's BYE")
-    .expect("the receive pipeline runs");
-    stop_gst(peer);
-    let log = relay.finish();
+    let log = rerun_on_port_collision(async || {
+        let receiver_port = free_even_port();
+        let relay = LossyRelay::start(
+            loopback(receiver_port),
+            DROPPED_FROM_GST,
+            FirstMediaOrder::Unordered,
+        );
+        let mut source = ristsrc_on(receiver_port);
+        let mut recorder = FileSink::new(&received_path);
+        let peer = spawn_gst(&format!(
+            "videotestsrc num-buffers={GST_VIDEO_FRAMES} ! openh264enc bitrate={GST_BITRATE} ! \
+             h264parse ! mpegtsmux ! tee name=t t. ! queue ! filesink buffer-mode=unbuffered location={} \
+             t. ! queue ! rtpmp2tpay ! ristsink address=127.0.0.1 port={}",
+            reference.display(),
+            relay.media_port
+        ));
+        let received = tokio::time::timeout(
+            GST_DEADLINE,
+            run_simple_pipeline(
+                &mut source,
+                &mut recorder,
+                &ZeroClock,
+                LatencyProfile::Live.link_capacity(),
+            ),
+        )
+        .await
+        .expect("ristsrc ends on the gst sender's BYE");
+        stop_gst(peer);
+        let log = relay.finish();
+        received.map(|_| log)
+    })
+    .await;
 
     let muxed = std::fs::read(&reference).expect("read the TS gst muxed");
     let received = std::fs::read(&received_path).expect("read the TS g2g received");

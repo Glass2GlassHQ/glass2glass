@@ -34,8 +34,9 @@ use g2g_plugins::ristsrc::RistSrc;
 mod rist_common;
 use rist_common::{
     assert_recovered_through, bound_even_port_pair, collect_from_gst, free_even_port, loopback,
-    output_path, spawn_gst, stop_gst, synthetic_ts, FirstMediaOrder, LossyRelay, PacedTsSource,
-    PeerProcess, RelayLog, ZeroClock, GST_BIND_WAIT, GST_DEADLINE, RELAY_POLL,
+    output_path, rerun_on_port_collision, spawn_gst, stop_gst, synthetic_ts, FirstMediaOrder,
+    LossyRelay, PacedTsSource, PeerProcess, RelayLog, ZeroClock, GST_BIND_WAIT, GST_DEADLINE,
+    RELAY_POLL,
 };
 
 const MEDIA_SSRC: u32 = 0x1234_5670;
@@ -511,7 +512,12 @@ fn finish(relays: Vec<LossyRelay>) -> Vec<RelayLog> {
 
 // Run a paced g2g sender and a g2g receiver to the end, returning what the
 // receiver wrote.
-async fn g2g_to_g2g(mut sink: RistSink, mut source: RistSrc, sent: &[u8], name: &str) -> Vec<u8> {
+async fn g2g_to_g2g(
+    mut sink: RistSink,
+    mut source: RistSrc,
+    sent: &[u8],
+    name: &str,
+) -> Result<Vec<u8>, G2gError> {
     let received_path = output_path(name);
     let mut recorder = FileSink::new(&received_path);
     let mut player = PacedTsSource {
@@ -533,14 +539,14 @@ async fn g2g_to_g2g(mut sink: RistSink, mut source: RistSrc, sent: &[u8], name: 
         tokio::time::timeout(LOOPBACK_DEADLINE, async { tokio::join!(receive, send) })
             .await
             .expect("both ends finish");
-    sent_run.expect("the send pipeline runs");
-    received.expect("the receive pipeline runs");
+    sent_run?;
+    received?;
     assert!(sink.eos_seen(), "the sender reached Eos");
     assert!(
         recorder.eos_seen(),
         "the receiver ended on the sender's BYE"
     );
-    std::fs::read(&received_path).expect("read the received stream")
+    Ok(std::fs::read(&received_path).expect("read the received stream"))
 }
 
 // Run a paced g2g sender to the end.
@@ -563,7 +569,7 @@ async fn send_from_g2g(mut sink: RistSink, sent: &[u8]) {
 }
 
 // Run a g2g receiver until the sender's BYE, returning what it wrote.
-async fn receive_until_goodbye(mut source: RistSrc, name: &str) -> Vec<u8> {
+async fn receive_until_goodbye(mut source: RistSrc, name: &str) -> Result<Vec<u8>, G2gError> {
     let received_path = output_path(name);
     let mut recorder = FileSink::new(&received_path);
     tokio::time::timeout(
@@ -576,9 +582,8 @@ async fn receive_until_goodbye(mut source: RistSrc, name: &str) -> Vec<u8> {
         ),
     )
     .await
-    .expect("ristsrc ends on the sender's BYE")
-    .expect("the receive pipeline runs");
-    std::fs::read(&received_path).expect("read the received stream")
+    .expect("ristsrc ends on the sender's BYE")?;
+    Ok(std::fs::read(&received_path).expect("read the received stream"))
 }
 
 // Every original packet a relay saw carries the RIST extension, and its
@@ -634,15 +639,19 @@ fn assert_gst_sent_all_but_its_tail(received: &[u8], muxed: &[u8]) {
 #[tokio::test]
 async fn broadcast_bonding_delivers_every_packet_past_a_lossy_link() {
     let sent = synthetic_ts(SENT_RTP_PACKETS);
-    let receiver_ports = distinct_even_ports(LINK_COUNT);
-    let relays = relays_to(&receiver_ports, FIRST_LINK, DROPPED_ON_LOSSY_LINK);
-    let sink = ristsink_with(&[
-        bonded_to(&relay_ports(&relays)),
-        bonding_method("broadcast"),
-    ]);
-    let source = ristsrc_with(&[bonded_to(&receiver_ports)]);
-    let received = g2g_to_g2g(sink, source, &sent, "g2g_m1734_broadcast.ts").await;
-    let logs = finish(relays);
+    let (received, logs) = rerun_on_port_collision(async || {
+        let receiver_ports = distinct_even_ports(LINK_COUNT);
+        let relays = relays_to(&receiver_ports, FIRST_LINK, DROPPED_ON_LOSSY_LINK);
+        let sink = ristsink_with(&[
+            bonded_to(&relay_ports(&relays)),
+            bonding_method("broadcast"),
+        ]);
+        let source = ristsrc_with(&[bonded_to(&receiver_ports)]);
+        let received = g2g_to_g2g(sink, source, &sent, "g2g_m1734_broadcast.ts").await;
+        let logs = finish(relays);
+        Ok((received?, logs))
+    })
+    .await;
     assert!(received == sent, "the received bytes equal the sent ones");
     assert_eq!(logs[0].dropped.len(), DROPPED_ON_LOSSY_LINK.len());
     for log in &logs {
@@ -656,15 +665,19 @@ async fn broadcast_bonding_delivers_every_packet_past_a_lossy_link() {
 #[tokio::test]
 async fn round_robin_bonding_splits_the_stream_and_recovers_on_the_lossy_link() {
     let sent = synthetic_ts(SENT_RTP_PACKETS);
-    let receiver_ports = distinct_even_ports(LINK_COUNT);
-    let relays = relays_to(&receiver_ports, FIRST_LINK, DROPPED_ON_LOSSY_LINK);
-    let sink = ristsink_with(&[
-        bonded_to(&relay_ports(&relays)),
-        bonding_method("round-robin"),
-    ]);
-    let source = ristsrc_with(&[bonded_to(&receiver_ports)]);
-    let received = g2g_to_g2g(sink, source, &sent, "g2g_m1734_round_robin.ts").await;
-    let logs = finish(relays);
+    let (received, logs) = rerun_on_port_collision(async || {
+        let receiver_ports = distinct_even_ports(LINK_COUNT);
+        let relays = relays_to(&receiver_ports, FIRST_LINK, DROPPED_ON_LOSSY_LINK);
+        let sink = ristsink_with(&[
+            bonded_to(&relay_ports(&relays)),
+            bonding_method("round-robin"),
+        ]);
+        let source = ristsrc_with(&[bonded_to(&receiver_ports)]);
+        let received = g2g_to_g2g(sink, source, &sent, "g2g_m1734_round_robin.ts").await;
+        let logs = finish(relays);
+        Ok((received?, logs))
+    })
+    .await;
     assert!(received == sent, "the received bytes equal the sent ones");
     for log in &logs {
         assert_eq!(
@@ -695,14 +708,16 @@ async fn multicast_g2g_to_g2g() {
         return;
     }
     let sent = synthetic_ts(SENT_RTP_PACKETS);
-    let port = free_even_port();
-    let group = multicast_group_properties(port);
-    let received = g2g_to_g2g(
-        ristsink_with(&group),
-        ristsrc_with(&group),
-        &sent,
-        "g2g_m1734_multicast.ts",
-    )
+    let received = rerun_on_port_collision(async || {
+        let group = multicast_group_properties(free_even_port());
+        g2g_to_g2g(
+            ristsink_with(&group),
+            ristsrc_with(&group),
+            &sent,
+            "g2g_m1734_multicast.ts",
+        )
+        .await
+    })
     .await;
     assert!(received == sent, "the received bytes equal the sent ones");
 }
@@ -720,20 +735,24 @@ fn extension_sink_properties(first_sequence: u16, port: u16) -> Vec<(&'static st
 #[tokio::test]
 async fn the_extension_carries_g2g_to_g2g_across_the_sequence_wrap() {
     let sent = ts_with_null_packets(SENT_RTP_PACKETS);
-    let receiver_port = free_even_port();
-    let relay = LossyRelay::start(
-        loopback(receiver_port),
-        DROPPED_ACROSS_THE_WRAP,
-        FirstMediaOrder::Unordered,
-    );
     let first_sequence = first_sequence_before_wrap(PACKETS_BEFORE_WRAP);
-    let sink = ristsink_with(&extension_sink_properties(first_sequence, relay.media_port));
-    let source = ristsrc_with(&[
-        ("address", PropValue::Str("127.0.0.1".into())),
-        ("port", PropValue::Uint(receiver_port.into())),
-    ]);
-    let received = g2g_to_g2g(sink, source, &sent, "g2g_m1734_extension.ts").await;
-    let log = relay.finish();
+    let (received, log) = rerun_on_port_collision(async || {
+        let receiver_port = free_even_port();
+        let relay = LossyRelay::start(
+            loopback(receiver_port),
+            DROPPED_ACROSS_THE_WRAP,
+            FirstMediaOrder::Unordered,
+        );
+        let sink = ristsink_with(&extension_sink_properties(first_sequence, relay.media_port));
+        let source = ristsrc_with(&[
+            ("address", PropValue::Str("127.0.0.1".into())),
+            ("port", PropValue::Uint(receiver_port.into())),
+        ]);
+        let received = g2g_to_g2g(sink, source, &sent, "g2g_m1734_extension.ts").await;
+        let log = relay.finish();
+        Ok((received?, log))
+    })
+    .await;
     assert!(
         received == sent,
         "the null packets came back and nothing was lost"
@@ -791,21 +810,25 @@ async fn gst_bonded_to_g2g(method: &str, lossy_link: usize, name: &str) {
         return;
     }
     let played = synthetic_ts(GST_SENT_RTP_PACKETS);
-    let receiver_ports = distinct_even_ports(LINK_COUNT);
-    let relays = relays_to(&receiver_ports, lossy_link, DROPPED_FROM_GST_ON_LOSSY_LINK);
-    let source = ristsrc_with(&[bonded_to(&receiver_ports)]);
-    let peer = gst_ts_sender(
-        &played,
-        &format!("{name}.sent"),
-        "rtpmp2tpay",
-        &format!(
-            "ristsink bonding-addresses={} bonding-method={method}",
-            bonding_addresses(&relay_ports(&relays))
-        ),
-    );
-    let received = receive_until_goodbye(source, name).await;
-    stop_gst(peer);
-    let logs = finish(relays);
+    let (received, logs) = rerun_on_port_collision(async || {
+        let receiver_ports = distinct_even_ports(LINK_COUNT);
+        let relays = relays_to(&receiver_ports, lossy_link, DROPPED_FROM_GST_ON_LOSSY_LINK);
+        let source = ristsrc_with(&[bonded_to(&receiver_ports)]);
+        let peer = gst_ts_sender(
+            &played,
+            &format!("{name}.sent"),
+            "rtpmp2tpay",
+            &format!(
+                "ristsink bonding-addresses={} bonding-method={method}",
+                bonding_addresses(&relay_ports(&relays))
+            ),
+        );
+        let received = receive_until_goodbye(source, name).await;
+        stop_gst(peer);
+        let logs = finish(relays);
+        Ok((received?, logs))
+    })
+    .await;
     assert_eq!(
         logs[lossy_link].dropped.len(),
         DROPPED_FROM_GST_ON_LOSSY_LINK.len()
@@ -898,29 +921,33 @@ async fn gst_ristrtpext_feeds_ristsrc_across_the_wrap() {
         return;
     }
     let played = ts_with_null_packets(GST_SENT_RTP_PACKETS);
-    let receiver_port = free_even_port();
-    let relay = LossyRelay::start(
-        loopback(receiver_port),
-        NO_DROPS,
-        FirstMediaOrder::Unordered,
-    );
     let first_sequence = first_sequence_before_wrap(GST_PACKETS_BEFORE_WRAP);
-    let source = ristsrc_with(&[
-        ("address", PropValue::Str("127.0.0.1".into())),
-        ("port", PropValue::Uint(receiver_port.into())),
-    ]);
-    let peer = gst_ts_sender(
-        &played,
-        "g2g_m1734_extension_from_gst.sent",
-        &format!(
-            "rtpmp2tpay seqnum-offset={first_sequence} ! \
-             ristrtpext sequence-number-extension=true drop-null-ts-packets=true"
-        ),
-        &format!("ristsink address=127.0.0.1 port={}", relay.media_port),
-    );
-    let received = receive_until_goodbye(source, "g2g_m1734_extension_from_gst.ts").await;
-    stop_gst(peer);
-    let log = relay.finish();
+    let (received, log) = rerun_on_port_collision(async || {
+        let receiver_port = free_even_port();
+        let relay = LossyRelay::start(
+            loopback(receiver_port),
+            NO_DROPS,
+            FirstMediaOrder::Unordered,
+        );
+        let source = ristsrc_with(&[
+            ("address", PropValue::Str("127.0.0.1".into())),
+            ("port", PropValue::Uint(receiver_port.into())),
+        ]);
+        let peer = gst_ts_sender(
+            &played,
+            "g2g_m1734_extension_from_gst.sent",
+            &format!(
+                "rtpmp2tpay seqnum-offset={first_sequence} ! \
+                 ristrtpext sequence-number-extension=true drop-null-ts-packets=true"
+            ),
+            &format!("ristsink address=127.0.0.1 port={}", relay.media_port),
+        );
+        let received = receive_until_goodbye(source, "g2g_m1734_extension_from_gst.ts").await;
+        stop_gst(peer);
+        let log = relay.finish();
+        Ok((received?, log))
+    })
+    .await;
     assert_extended_sequences(&log, first_sequence);
     assert_gst_sent_all_but_its_tail(&received, &played);
 }
@@ -970,7 +997,7 @@ impl AsyncElement for CollectingSink {
 
 // Run `source` until it has emitted `expected` bytes: librist ends a stream
 // without the BYE `ristsrc` waits for.
-async fn receive_bytes(mut source: RistSrc, expected: usize) -> Vec<u8> {
+async fn receive_bytes(mut source: RistSrc, expected: usize) -> Result<Vec<u8>, G2gError> {
     let received = Arc::new(Mutex::new(Vec::new()));
     let mut sink = CollectingSink {
         received: received.clone(),
@@ -988,16 +1015,14 @@ async fn receive_bytes(mut source: RistSrc, expected: usize) -> Vec<u8> {
     };
     tokio::time::timeout(GST_DEADLINE, async {
         tokio::select! {
-            result = run => {
-                result.expect("the receive pipeline runs");
-            }
-            () = filled => {}
+            result = run => result.map(drop),
+            () = filled => Ok(()),
         }
     })
     .await
-    .expect("the stream arrives");
+    .expect("the stream arrives")?;
     let bytes = received.lock().unwrap().clone();
-    bytes
+    Ok(bytes)
 }
 
 // Start `ristreceiver` on `input_url` and collect what it puts out over UDP
@@ -1120,17 +1145,21 @@ async fn ristsender_broadcast_bonding_feeds_ristsrc() {
         return;
     };
     let sent = synthetic_ts(SENT_RTP_PACKETS);
-    let receiver_ports = distinct_even_ports(LINK_COUNT);
-    let source = ristsrc_with(&[bonded_to(&receiver_ports)]);
-    // weight 0 makes every librist peer a duplicate path
-    let outputs: Vec<String> = receiver_ports
-        .iter()
-        .map(|port| format!("rist://127.0.0.1:{port}?weight=0"))
-        .collect();
-    let (peer, player) = ristsender_input(&tool, outputs.join(","), sent.clone());
-    let received = receive_bytes(source, sent.len()).await;
-    player.join().expect("the input player");
-    stop_gst(peer);
+    let received = rerun_on_port_collision(async || {
+        let receiver_ports = distinct_even_ports(LINK_COUNT);
+        let source = ristsrc_with(&[bonded_to(&receiver_ports)]);
+        // weight 0 makes every librist peer a duplicate path
+        let outputs: Vec<String> = receiver_ports
+            .iter()
+            .map(|port| format!("rist://127.0.0.1:{port}?weight=0"))
+            .collect();
+        let (peer, player) = ristsender_input(&tool, outputs.join(","), sent.clone());
+        let received = receive_bytes(source, sent.len()).await;
+        player.join().expect("the input player");
+        stop_gst(peer);
+        received
+    })
+    .await;
     assert!(
         received == sent,
         "ristsrc merged the TS ristsender sent on both links"
@@ -1173,16 +1202,20 @@ async fn multicast_ristsender_to_ristsrc() {
         return;
     }
     let sent = synthetic_ts(SENT_RTP_PACKETS);
-    let port = free_even_port();
-    let source = ristsrc_with(&multicast_group_properties(port));
-    let (peer, player) = ristsender_input(
-        &tool,
-        format!("rist://{MULTICAST_GROUP}:{port}"),
-        sent.clone(),
-    );
-    let received = receive_bytes(source, sent.len()).await;
-    player.join().expect("the input player");
-    stop_gst(peer);
+    let received = rerun_on_port_collision(async || {
+        let port = free_even_port();
+        let source = ristsrc_with(&multicast_group_properties(port));
+        let (peer, player) = ristsender_input(
+            &tool,
+            format!("rist://{MULTICAST_GROUP}:{port}"),
+            sent.clone(),
+        );
+        let received = receive_bytes(source, sent.len()).await;
+        player.join().expect("the input player");
+        stop_gst(peer);
+        received
+    })
+    .await;
     assert!(
         received == sent,
         "ristsrc received the TS ristsender sent to the group"
