@@ -235,7 +235,9 @@ AMD and nvrtc on NVIDIA for the device's `sm_` architecture, so one source runs
 on both when its kernels are `extern "C" __global__` and use only the builtins
 both share. `HipStream::launch` takes `KernelArgument`s: a `Read` buffer makes the
 kernel wait on the GPU for that buffer's ready event, and a `Write` goes into
-`HipMemory` that the caller turns into a buffer after recording an event.
+`HipMemory` that the caller turns into a buffer after recording an event. The
+launch holds its `Read` buffers until an event recorded after the kernel, since
+`cuMemFree` may free a dropped input while the kernel still reads it.
 libhiprtc and libnvrtc ship with the HIP and CUDA toolkits, not the drivers, so a
 host with only the drivers returns `LibraryNotFound` from `compile`.
 

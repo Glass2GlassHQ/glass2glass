@@ -979,7 +979,22 @@ impl HipStream {
                 ),
             }
         };
-        self.device.check(code)
+        self.device.check(code)?;
+        // cuMemFree may free a dropped input while this kernel still reads it
+        let reads: Vec<OwnedHipBuffer> = arguments
+            .iter()
+            .filter_map(|argument| match argument {
+                KernelArgument::Read(buffer) => Some((*buffer).clone()),
+                _ => None,
+            })
+            .collect();
+        if reads.is_empty() {
+            return Ok(());
+        }
+        let done = HipEvent::new(&self.device)?;
+        self.record(&done)?;
+        release_after(done, Box::new(reads));
+        Ok(())
     }
 
     // returns once `bytes` has reached `memory`
