@@ -484,6 +484,9 @@ pub mod ccconverter;
 // Closed-caption combiner: video + captions in, video carrying caption meta out.
 #[cfg(feature = "metadata")]
 pub mod cccombiner;
+// Analytics join: video + a detector branch in, video carrying the detections out.
+#[cfg(feature = "metadata")]
+pub mod analyticsjoin;
 // Batch mux and demux (M1233): N raw video streams as one batch frame and back.
 #[cfg(feature = "metadata")]
 pub mod batchdemux;

@@ -1530,6 +1530,13 @@ pub fn default_registry() -> Registry {
         })
         .with_input_kinds(&[StreamType::Video, StreamType::Text]),
     );
+    // Analytics join (M2093): `j.video` takes the full-resolution video and any
+    // other pad name the detector branch, whose `AnalyticsMeta` lands on the video
+    // frame nearest in time.
+    #[cfg(feature = "metadata")]
+    reg.register_muxer(MuxerFactory::new("analyticsjoin", |_inputs| {
+        Box::new(crate::analyticsjoin::AnalyticsJoin::new())
+    }));
     // Batch fan-in and fan-out (M1233): the demux's `d.src_N` branches are wired in link order.
     #[cfg(feature = "metadata")]
     reg.register_muxer(MuxerFactory::new("streammux", |inputs| {
@@ -2714,6 +2721,7 @@ pub static FEATURE_GATED_ELEMENTS: &[FeatureGatedElement] = &{
         "scriptelement" => "script-rhai";
         "scriptrouter" => "script-rhai";
         "cccombiner" => "metadata";
+        "analyticsjoin" => "metadata";
         "h264seiinserter" => "metadata";
         "h265seiinserter" => "metadata";
         "opusenc" => "opus";

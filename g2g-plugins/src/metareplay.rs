@@ -31,6 +31,7 @@ use g2g_core::{
     PropValue, PropertySpec,
 };
 
+use crate::analyticsjoin::frame_match_tolerance_ns;
 use crate::metasink::{
     caps_dimensions, DETECTIONS_KEY, HEIGHT_KEY, LABEL_KEY, NON_BLOB_KEYS, PTS_KEY, SCORE_KEY,
     WIDTH_KEY, X_KEY, Y_KEY,
@@ -38,9 +39,6 @@ use crate::metasink::{
 
 const NS_PER_MILLISECOND: f64 = 1_000_000.0;
 const MILLISECONDS_PER_SECOND: f64 = 1000.0;
-/// How far a frame may sit from a record when its duration is unknown, the same
-/// window the Python element allows.
-const UNKNOWN_DURATION_TOLERANCE_MS: f64 = 20.0;
 
 /// The records of one file: each one keyed by its time in whole milliseconds,
 /// plus the class-name table the labels in them index.
@@ -94,11 +92,7 @@ impl Records {
             return None;
         }
         let millisecond = (pts_ns as f64 / NS_PER_MILLISECOND).round() as i64;
-        let tolerance = if duration_ns == 0 {
-            UNKNOWN_DURATION_TOLERANCE_MS
-        } else {
-            duration_ns as f64 / NS_PER_MILLISECOND / 2.0
-        };
+        let tolerance = frame_match_tolerance_ns(duration_ns) as f64 / NS_PER_MILLISECOND;
         let after = self.times.partition_point(|time| *time < millisecond);
         let first = after.saturating_sub(1);
         let last = (after + 1).min(self.times.len());

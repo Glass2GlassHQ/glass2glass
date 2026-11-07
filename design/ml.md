@@ -549,6 +549,31 @@ Matching ignores the class label, as ByteTrack does, so a detector that
 flips an object's class keeps its id. The property defaults are Ultralytics'
 `bytetrack.yaml`, so ids follow the hosted Python path.
 
+### Joining a detector branch
+
+`g2g-plugins::analyticsjoin::AnalyticsJoin` (`analyticsjoin`, `metadata` feature)
+puts detections made on a scaled, rate-reduced copy back onto the full-resolution
+video:
+
+```
+analyticsjoin name=j ! ...
+src ! tee name=t
+  t. ! videorate framerate=5/1 ! videoscale width=640 height=640
+     ! ortinfer model=yolo11n.onnx ! detectionpostprocess ! tracker ! j.analytics
+  t. ! j.video
+```
+
+`j.video` is pad 0 and must be raw video. Any other pad name is the analytics
+pad, which takes any caps and only reads `AnalyticsMeta` off its frames. Each
+video frame waits in the element until the analytics stream reaches its PTS, then
+takes the meta of the analytics frame closest in time within half its duration
+(20 ms when the duration is 0, the window `metareplay` uses). A frame with no
+match passes through unchanged, and when the analytics pad ends the held video is
+released in order. The wait adds one detection stride plus inference time of
+latency. Stretching to the model size keeps the normalised boxes valid on the
+full frame, and `videorate` restamps onto its own grid, which the half-frame
+window absorbs.
+
 ### Records
 
 `g2g-plugins::metasink` (`analytics-json` feature) writes one JSON line per frame:

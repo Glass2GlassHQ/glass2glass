@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2093: `analyticsjoin` attaches a detector branch's `AnalyticsMeta` to the full-resolution video frames at the same time.
+
 ## 0.14.0
 
 - M2091: releases include `.deb` and `.rpm` packages, and the Linux binaries need glibc 2.28 instead of 2.35.
