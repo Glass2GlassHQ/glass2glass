@@ -160,6 +160,29 @@ libraries installed.
 - Run `CudaKmsSink` from a bare VT with DRM master and verify the in-tree
   `// VERIFY:` points.
 
+## HIP
+
+GstHip's inference path, with an AMD backend (`libamdhip64`, hiprtc) and an
+NVIDIA backend (`libcuda`, nvrtc), loaded at run time. NVIDIA
+milestones validate on hercules first, AMD ones on the Radeon 680M after the
+laptop moves to Fedora 45.
+
+- Public kernel API in `g2g_plugins::hip`: compile a module from source with
+  hiprtc / nvrtc, build arguments from buffers and scalars, launch on a stream.
+- `hipupload` / `hipdownload` with internal pinned staging, and zero-copy
+  `MemoryDomain::Cuda` in and out on the NVIDIA backend.
+- `hipconvertscale` between NV12, I420, RGBA, BGRA and P010.
+- `hippreprocess` (the `wgpupreprocess` properties and `Caps::Tensor` output),
+  and `ortinfer` reading Hip tensors through MIGraphX on AMD and the CUDA EP on
+  NVIDIA. Validate nvdec -> `hipconvertscale` -> `hippreprocess` -> `ortinfer`.
+- AMD backend on Fedora 45's ROCm 7.2: run `m2102_hip_memory` on the Radeon
+  680M, linear dmabuf import into HIP with an import cache from `v4l2src`,
+  `pipewirevideosrc` and `wgpudmabuf`, and MIGraphX on Hip tensors.
+- If `ort` runs against Fedora 45's ONNX Runtime 1.26 with MIGraphX, drop
+  `tools/ort-migraphx-build.sh` and its ONNX Runtime patch.
+- Later: `hipconvert`, `hipscale`, `hipcompositor`, pinned buffers offered
+  upstream so `v4l2src` writes straight into them.
+
 ## Egress / transports
 
 - **RTP over QUIC (RoQ):** implement after the draft becomes an RFC with an

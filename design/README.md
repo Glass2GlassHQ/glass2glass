@@ -221,6 +221,15 @@ frame to several consumers, decode-on-GPU into inference and display, with no
 device-to-host copy. Branches treat the shared memory as read-only, and a
 mutating branch copies first, as the per-frame metadata does copy-on-write.
 
+`MemoryDomain::Hip` is linear HIP device memory on an AMD GPU, or on an NVIDIA
+GPU through HIP's CUDA backend (`HipVendor`). `g2g_plugins::hip` loads
+`libamdhip64` or `libcuda` at run time, and on NVIDIA it uses the device's
+primary context, the one ONNX Runtime's CUDA provider uses. Each buffer carries a
+ready event recorded after the producer's last write. A consumer's stream waits
+on it on the GPU (`HipStream::wait_for`), so HIP stages never block the CPU
+between them. Dropping the last clone hands the allocation to a release thread
+that frees it once that event completes.
+
 ### The copy plan
 
 Because negotiation resolves the memory domain of every link before a frame

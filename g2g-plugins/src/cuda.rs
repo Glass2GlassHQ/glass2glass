@@ -38,11 +38,12 @@ use g2g_core::memory::{CudaKeepAlive, MemoryDomainKind, OwnedCudaBuffer};
 use g2g_core::runtime::{auto_plug_domain_converters, GraphNode};
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, Frame,
-    G2gError, Graph, HardwareError, MemoryDomain, OutputSink, PipelinePacket, PropError, PropValue,
-    PropertySpec, Rate, RawVideoFormat, SystemSlice,
+    G2gError, Graph, MemoryDomain, OutputSink, PipelinePacket, PropError, PropValue, PropertySpec,
+    Rate, RawVideoFormat, SystemSlice,
 };
 
 use crate::cuda_driver_ffi as ffi;
+use crate::cuda_driver_ffi::check;
 use crate::cudadeviceid::{
     get_cuda_device_id, set_cuda_device_id, CUDA_DEVICE_ID_PROP, DEFAULT_CUDA_DEVICE_ID,
 };
@@ -758,15 +759,6 @@ unsafe fn copy_plane(
 pub unsafe fn make_context_current(context: u64) -> Result<(), G2gError> {
     // SAFETY: `context` is a valid CUcontext per the contract.
     unsafe { check(ffi::cu_ctx_push_current(context as ffi::CuContext)) }
-}
-
-/// Map a `CUresult` to a `Result`, carrying the raw code on failure.
-fn check(code: ffi::CuResult) -> Result<(), G2gError> {
-    if code == ffi::CUDA_SUCCESS {
-        Ok(())
-    } else {
-        Err(G2gError::Hardware(HardwareError::Cuda(code)))
-    }
 }
 
 /// Per-plane extent of the NV12 -> GL-texture upload (CUDA device memory ->

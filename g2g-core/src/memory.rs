@@ -82,6 +82,8 @@ pub enum MemoryDomain {
     /// it via [`WgpuBufferKeepAlive::as_any`]. See [`OwnedWgpuBuffer`].
     #[cfg(feature = "alloc")]
     WgpuBuffer(OwnedWgpuBuffer),
+    #[cfg(feature = "alloc")]
+    Hip(OwnedHipBuffer),
 }
 
 /// The memory domain of a [`MemoryDomain`] without its payload. Used by the
@@ -102,6 +104,7 @@ pub enum MemoryDomainKind {
     WebGPUExternalTexture,
     WgpuTexture,
     WgpuBuffer,
+    Hip,
 }
 
 impl MemoryDomainKind {
@@ -116,7 +119,7 @@ impl MemoryDomainKind {
     }
 
     /// Stable bit index for [`DomainSet`]. Keep in sync with the enum (one bit
-    /// per variant, 11 variants fit a `u16`).
+    /// per variant, 12 variants fit a `u16`).
     const fn bit_index(self) -> u16 {
         match self {
             MemoryDomainKind::System => 0,
@@ -130,6 +133,7 @@ impl MemoryDomainKind {
             MemoryDomainKind::WgpuTexture => 8,
             MemoryDomainKind::WgpuBuffer => 9,
             MemoryDomainKind::CvPixelBuffer => 10,
+            MemoryDomainKind::Hip => 11,
         }
     }
 }
@@ -138,8 +142,9 @@ impl MemoryDomainKind {
 /// zero-copy GPU-resident domains first, plain `System` bytes last. So when a
 /// producer and its consumer(s) both accept several domains, the negotiation
 /// keeps the frame on the device rather than falling back to a host copy.
-const DOMAIN_PREFERENCE: [MemoryDomainKind; 11] = [
+const DOMAIN_PREFERENCE: [MemoryDomainKind; 12] = [
     MemoryDomainKind::Cuda,
+    MemoryDomainKind::Hip,
     MemoryDomainKind::D3D11Texture,
     MemoryDomainKind::CvPixelBuffer,
     MemoryDomainKind::VulkanTexture,
@@ -256,6 +261,8 @@ impl MemoryDomain {
             MemoryDomain::WgpuTexture(_) => MemoryDomainKind::WgpuTexture,
             #[cfg(feature = "alloc")]
             MemoryDomain::WgpuBuffer(_) => MemoryDomainKind::WgpuBuffer,
+            #[cfg(feature = "alloc")]
+            MemoryDomain::Hip(_) => MemoryDomainKind::Hip,
         }
     }
 
@@ -339,6 +346,7 @@ impl MemoryDomain {
             }
             MemoryDomain::WgpuTexture(t) => MemoryDomain::WgpuTexture(t.clone()),
             MemoryDomain::WgpuBuffer(b) => MemoryDomain::WgpuBuffer(b.clone()),
+            MemoryDomain::Hip(b) => MemoryDomain::Hip(b.clone()),
         }
     }
 
@@ -1313,6 +1321,68 @@ impl OwnedWgpuBuffer {
 #[cfg(feature = "alloc")]
 pub trait WgpuBufferKeepAlive: core::fmt::Debug + Send + Sync {
     /// Recover the concrete owner so a consumer can extract the `wgpu::Buffer`.
+    fn as_any(&self) -> &dyn core::any::Any;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum HipVendor {
+    Amd,
+    Nvidia,
+}
+
+#[cfg(feature = "alloc")]
+#[derive(Debug, Clone)]
+pub struct OwnedHipBuffer {
+    pub device_pointer: u64,
+    // the allocation may be larger than the payload
+    pub len: usize,
+    pub vendor: HipVendor,
+    // hip and cuda number their own devices from 0
+    pub device_ordinal: i32,
+    // hipEvent_t, or CUevent on nvidia, recorded after the producer's last write
+    pub ready_event: u64,
+    keep_alive: Arc<dyn HipKeepAlive>,
+    // boxed so this payload does not grow every `MemoryDomain`
+    plane_layout: Option<Box<PlaneLayout>>,
+}
+
+#[cfg(feature = "alloc")]
+impl OwnedHipBuffer {
+    pub fn new(
+        device_pointer: u64,
+        len: usize,
+        vendor: HipVendor,
+        device_ordinal: i32,
+        ready_event: u64,
+        keep_alive: Arc<dyn HipKeepAlive>,
+    ) -> Self {
+        Self {
+            device_pointer,
+            len,
+            vendor,
+            device_ordinal,
+            ready_event,
+            keep_alive,
+            plane_layout: None,
+        }
+    }
+
+    pub fn with_plane_layout(mut self, layout: PlaneLayout) -> Self {
+        self.plane_layout = Some(Box::new(layout));
+        self
+    }
+
+    pub fn plane_layout(&self) -> Option<&PlaneLayout> {
+        self.plane_layout.as_deref()
+    }
+
+    pub fn keep_alive(&self) -> &dyn HipKeepAlive {
+        self.keep_alive.as_ref()
+    }
+}
+
+#[cfg(feature = "alloc")]
+pub trait HipKeepAlive: core::fmt::Debug + Send + Sync {
     fn as_any(&self) -> &dyn core::any::Any;
 }
 

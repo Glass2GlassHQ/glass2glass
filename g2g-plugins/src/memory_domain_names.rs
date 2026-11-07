@@ -19,6 +19,7 @@ const MEMORY_DOMAIN_NAMES: &[(&str, MemoryDomainKind)] = &[
     ),
     ("wgputexture", MemoryDomainKind::WgpuTexture),
     ("wgpubuffer", MemoryDomainKind::WgpuBuffer),
+    ("hip", MemoryDomainKind::Hip),
 ];
 
 pub(crate) fn parse_domains(names: &str) -> Result<DomainSet, PropError> {

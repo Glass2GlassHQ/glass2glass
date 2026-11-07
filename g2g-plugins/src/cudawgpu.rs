@@ -44,6 +44,7 @@ use alloc::string::String;
 use ash::vk;
 use std::os::fd::{FromRawFd, IntoRawFd, OwnedFd};
 
+use crate::cuda_driver_ffi::check;
 use crate::gpu::packed_nv12_extent;
 
 use g2g_core::g2g_error;
@@ -1060,15 +1061,6 @@ impl Drop for PoolReturn {
     }
 }
 
-/// Map a `CUresult` to a `Result`, carrying the raw code on failure.
-fn check(code: i32) -> Result<(), G2gError> {
-    if code == 0 {
-        Ok(())
-    } else {
-        Err(G2gError::Hardware(HardwareError::Cuda(code)))
-    }
-}
-
 // ===========================================================================
 // wgpu -> CUDA (the encode direction, M271): the reverse of the NV12 import
 // above. A renderer writes a packed-RGBA `wgpu::Texture` backed by exportable
@@ -1943,9 +1935,9 @@ mod cuda_ffi {
     use core::ffi::c_void;
 
     pub(crate) use crate::cuda_driver_ffi::{
-        cu_ctx_pop_current, cu_ctx_push_current, cu_device_get, cu_mem_alloc, cu_mem_free,
-        cu_memcpy_2d, CuContext, CudaMemcpy2D, CU_MEMORYTYPE_ARRAY, CU_MEMORYTYPE_DEVICE,
-        CU_MEMORYTYPE_HOST,
+        cu_ctx_pop_current, cu_ctx_push_current, cu_device_get, cu_device_primary_ctx_release,
+        cu_device_primary_ctx_retain, cu_mem_alloc, cu_mem_free, cu_memcpy_2d, CuContext,
+        CudaMemcpy2D, CU_MEMORYTYPE_ARRAY, CU_MEMORYTYPE_DEVICE, CU_MEMORYTYPE_HOST,
     };
 
     pub type CuExternalMemory = *mut c_void;
@@ -2002,8 +1994,6 @@ mod cuda_ffi {
     crate::shared_library::shared_library! {
         pub struct LibCudaExternalMemory = crate::cuda_driver_ffi::LIBCUDA;
         when missing return crate::cuda_driver_ffi::CUDA_ERROR_SHARED_OBJECT_INIT_FAILED;
-        pub fn cu_device_primary_ctx_retain = "cuDevicePrimaryCtxRetain"(pctx: *mut CuContext, dev: i32) -> i32;
-        pub fn cu_device_primary_ctx_release = "cuDevicePrimaryCtxRelease_v2"(dev: i32) -> i32;
         pub fn cu_ctx_synchronize = "cuCtxSynchronize"() -> i32;
         pub fn cu_import_external_memory = "cuImportExternalMemory"(
             ext_mem_out: *mut CuExternalMemory,

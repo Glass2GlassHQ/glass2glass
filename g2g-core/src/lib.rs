@@ -243,14 +243,14 @@ pub use ptp::{
 };
 // The heap-free memory subset: the domain enum + its discriminant / set, and the
 // `System` slice (whose `Foreign` variant the StaticLendRing lends zero-copy).
-pub use memory::{DomainSet, MemoryDomain, MemoryDomainKind, SystemSlice};
+pub use memory::{DomainSet, HipVendor, MemoryDomain, MemoryDomainKind, SystemSlice};
 // The GPU / shared-CPU domains are heap-backed (Arc/Box keep-alives).
 #[cfg(feature = "alloc")]
 pub use memory::{
-    CudaKeepAlive, CvPixelBufferKeepAlive, D3D11KeepAlive, OwnedCudaBuffer, OwnedCvPixelBuffer,
-    OwnedD3D11Texture, OwnedDmaBuf, OwnedVulkanTexture, OwnedWebGPUBuffer,
-    OwnedWebGPUExternalTexture, OwnedWgpuBuffer, OwnedWgpuTexture, SyncFd, SystemView,
-    VulkanKeepAlive, WebGPUKeepAlive, WgpuBufferKeepAlive, WgpuKeepAlive,
+    CudaKeepAlive, CvPixelBufferKeepAlive, D3D11KeepAlive, HipKeepAlive, OwnedCudaBuffer,
+    OwnedCvPixelBuffer, OwnedD3D11Texture, OwnedDmaBuf, OwnedHipBuffer, OwnedVulkanTexture,
+    OwnedWebGPUBuffer, OwnedWebGPUExternalTexture, OwnedWgpuBuffer, OwnedWgpuTexture, SyncFd,
+    SystemView, VulkanKeepAlive, WebGPUKeepAlive, WgpuBufferKeepAlive, WgpuKeepAlive,
 };
 pub use metrics::{LatencyHistogram, LatencySnapshot};
 pub use query::{AllocationParams, LatencyReport};

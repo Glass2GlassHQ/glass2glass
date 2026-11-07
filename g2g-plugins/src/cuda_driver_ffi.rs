@@ -9,6 +9,10 @@ pub(crate) type CuResult = i32;
 // `CUdevice` is an int handle.
 pub(crate) type CuDevice = i32;
 pub(crate) type CuContext = *mut c_void;
+#[cfg(feature = "hip")]
+pub(crate) type CuStream = *mut c_void;
+#[cfg(feature = "hip")]
+pub(crate) type CuEvent = *mut c_void;
 
 pub(crate) const CUDA_SUCCESS: CuResult = 0;
 
@@ -58,6 +62,7 @@ crate::shared_library::shared_library! {
     #[cfg(any(
         feature = "local-ipc",
         feature = "cuda-wgpu",
+        feature = "hip",
         all(test, feature = "nvenc")
     ))]
     pub(crate) fn cu_mem_alloc = "cuMemAlloc_v2"(device_pointer: *mut u64, size: usize) -> CuResult;
@@ -75,6 +80,30 @@ crate::shared_library::shared_library! {
     #[cfg(any(feature = "local-ipc", all(test, feature = "nvdec")))]
     pub(crate) fn cu_memcpy_dtoh = "cuMemcpyDtoH_v2"(destination: *mut c_void, source: u64, size: usize) -> CuResult;
     pub(crate) fn cu_memcpy_2d = "cuMemcpy2D_v2"(copy: *const CudaMemcpy2D) -> CuResult;
+    #[cfg(any(feature = "cuda-wgpu", feature = "hip"))]
+    pub(crate) fn cu_device_primary_ctx_retain = "cuDevicePrimaryCtxRetain"(context: *mut CuContext, device: CuDevice) -> CuResult;
+    #[cfg(any(feature = "cuda-wgpu", feature = "hip"))]
+    pub(crate) fn cu_device_primary_ctx_release = "cuDevicePrimaryCtxRelease_v2"(device: CuDevice) -> CuResult;
+    #[cfg(feature = "hip")]
+    pub(crate) fn cu_stream_create = "cuStreamCreate"(stream: *mut CuStream, flags: u32) -> CuResult;
+    #[cfg(feature = "hip")]
+    pub(crate) fn cu_stream_destroy = "cuStreamDestroy_v2"(stream: CuStream) -> CuResult;
+    #[cfg(feature = "hip")]
+    pub(crate) fn cu_stream_synchronize = "cuStreamSynchronize"(stream: CuStream) -> CuResult;
+    #[cfg(feature = "hip")]
+    pub(crate) fn cu_stream_wait_event = "cuStreamWaitEvent"(stream: CuStream, event: CuEvent, flags: u32) -> CuResult;
+    #[cfg(feature = "hip")]
+    pub(crate) fn cu_event_create = "cuEventCreate"(event: *mut CuEvent, flags: u32) -> CuResult;
+    #[cfg(feature = "hip")]
+    pub(crate) fn cu_event_record = "cuEventRecord"(event: CuEvent, stream: CuStream) -> CuResult;
+    #[cfg(feature = "hip")]
+    pub(crate) fn cu_event_synchronize = "cuEventSynchronize"(event: CuEvent) -> CuResult;
+    #[cfg(feature = "hip")]
+    pub(crate) fn cu_event_destroy = "cuEventDestroy_v2"(event: CuEvent) -> CuResult;
+    #[cfg(feature = "hip")]
+    pub(crate) fn cu_memcpy_htod_async = "cuMemcpyHtoDAsync_v2"(destination: u64, source: *const c_void, size: usize, stream: CuStream) -> CuResult;
+    #[cfg(feature = "hip")]
+    pub(crate) fn cu_memcpy_dtoh_async = "cuMemcpyDtoHAsync_v2"(destination: *mut c_void, source: u64, size: usize, stream: CuStream) -> CuResult;
     #[cfg(feature = "nvdec")]
     pub(crate) fn cu_get_error_name = "cuGetErrorName"(
         error: CuResult,
@@ -82,15 +111,19 @@ crate::shared_library::shared_library! {
     ) -> CuResult;
 }
 
+pub(crate) fn check(code: CuResult) -> Result<(), G2gError> {
+    match code {
+        CUDA_SUCCESS => Ok(()),
+        code => Err(G2gError::Hardware(HardwareError::Cuda(code))),
+    }
+}
+
 pub(crate) fn init_driver() -> Result<(), G2gError> {
     if LibCuda::get().is_none() {
         return Err(G2gError::Hardware(HardwareError::LibraryNotFound(LIBCUDA)));
     }
     // SAFETY: cuInit takes only a flags word, and 0 is its one legal value.
-    match unsafe { cu_init(0) } {
-        CUDA_SUCCESS => Ok(()),
-        code => Err(G2gError::Hardware(HardwareError::Cuda(code))),
-    }
+    check(unsafe { cu_init(0) })
 }
 
 // CUDA-GL interop, the GL entry points live in libcuda itself
