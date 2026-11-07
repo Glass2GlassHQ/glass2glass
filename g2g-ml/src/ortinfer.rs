@@ -70,6 +70,8 @@ pub struct OrtModel {
         any(feature = "ort-cuda-wgpu", feature = "ort-hip-wgpu")
     ))]
     wgpu_imports: wgpu_input::WgpuTensorImports,
+    #[cfg(all(target_os = "linux", feature = "ort-hip"))]
+    hip_device: Option<std::sync::Arc<g2g_plugins::hip::HipDevice>>,
 }
 
 /// Which execution provider a text-constructed element runs the session on.
@@ -451,6 +453,8 @@ impl OrtModel {
                 any(feature = "ort-cuda-wgpu", feature = "ort-hip-wgpu")
             ))]
             wgpu_imports: Default::default(),
+            #[cfg(all(target_os = "linux", feature = "ort-hip"))]
+            hip_device: None,
         })
     }
 
@@ -512,25 +516,90 @@ impl LoadedModel for OrtModel {
         &mut self,
         tensor: &g2g_core::memory::OwnedWgpuBuffer,
     ) -> Result<(Box<[u8]>, Vec<u32>), G2gError> {
-        let (w, h) = (self.geometry.width as i64, self.geometry.height as i64);
-        let shape = [1i64, 3, h, w];
-        let size = shape.iter().product::<i64>() as u64 * core::mem::size_of::<f32>() as u64;
+        let len = self.f32_input_len();
         let (device_pointer, memory_device) =
-            wgpu_input::stage(&mut self.wgpu_imports, tensor, size)?;
+            wgpu_input::stage(&mut self.wgpu_imports, tensor, len)?;
+        self.run_device_f32(device_pointer, memory_device)
+    }
+
+    #[cfg(all(target_os = "linux", feature = "ort-hip"))]
+    fn run_hip_f32(
+        &mut self,
+        tensor: &g2g_core::memory::OwnedHipBuffer,
+    ) -> Result<(Box<[u8]>, Vec<u32>), G2gError> {
+        use g2g_core::memory::HipVendor;
+        use g2g_plugins::hip::HipDevice;
+        let (width, height) = (self.geometry.width, self.geometry.height);
+        let tight =
+            g2g_core::meta::PlaneLayout::tight(g2g_core::RawVideoFormat::RgbpF32, width, height)
+                .ok_or(G2gError::CapsMismatch)?;
+        let padded = tensor.plane_layout().is_some_and(|layout| *layout != tight);
+        if padded || (tensor.len as u64) < self.f32_input_len() {
+            return Err(G2gError::CapsMismatch);
+        }
+        if tensor.device_ordinal != DEVICE_ORDINAL {
+            g2g_core::g2g_error!(
+                g2g_core::log::Target::category("OrtInference"),
+                "the tensor is on HIP device {}, but onnx runtime runs on device {DEVICE_ORDINAL}",
+                tensor.device_ordinal
+            );
+            return Err(G2gError::UnsupportedDomain);
+        }
+        let device = match &self.hip_device {
+            Some(device) => std::sync::Arc::clone(device),
+            None => {
+                let device = HipDevice::open(tensor.vendor, tensor.device_ordinal)?;
+                self.hip_device = Some(std::sync::Arc::clone(&device));
+                device
+            }
+        };
+        // onnx runtime reads its inputs on its own stream, which does not wait on the producer's event
+        device.wait_until_ready(tensor)?;
+        let memory_device = match tensor.vendor {
+            HipVendor::Amd => ::ort::memory::AllocationDevice::HIP,
+            HipVendor::Nvidia => ::ort::memory::AllocationDevice::CUDA,
+        };
+        self.run_device_f32(tensor.device_pointer, memory_device)
+    }
+}
+
+// onnx runtime's cuda and migraphx providers run on device 0 unless their options name another
+#[cfg(all(
+    target_os = "linux",
+    any(feature = "ort-cuda-wgpu", feature = "ort-hip")
+))]
+const DEVICE_ORDINAL: i32 = 0;
+
+#[cfg(all(
+    target_os = "linux",
+    any(feature = "ort-cuda-wgpu", feature = "ort-hip")
+))]
+impl OrtModel {
+    fn f32_input_len(&self) -> u64 {
+        let ModelGeometry { width, height, .. } = self.geometry;
+        3 * u64::from(width) * u64::from(height) * core::mem::size_of::<f32>() as u64
+    }
+
+    fn run_device_f32(
+        &mut self,
+        device_pointer: u64,
+        memory_device: ::ort::memory::AllocationDevice,
+    ) -> Result<(Box<[u8]>, Vec<u32>), G2gError> {
+        let (w, h) = (self.geometry.width as i64, self.geometry.height as i64);
         let memory = ::ort::memory::MemoryInfo::new(
             memory_device,
-            wgpu_input::DEVICE_ORDINAL,
+            DEVICE_ORDINAL,
             ::ort::memory::AllocatorType::Device,
             ::ort::memory::MemoryType::Default,
         )
         .map_err(ort_err)?;
-        // SAFETY: `device_pointer` is `size` bytes of GPU memory on the provider's
-        // device, holding the finished tensor, and stays mapped while `tensor` is held.
+        // SAFETY: the caller hands over a pointer to `f32_input_len` bytes of finished
+        // tensor on the provider's device, which stays allocated for this call.
         let input = unsafe {
             ::ort::value::TensorRefMut::<f32>::from_raw(
                 memory,
                 device_pointer as *mut core::ffi::c_void,
-                ::ort::value::Shape::new(shape),
+                ::ort::value::Shape::new([1i64, 3, h, w]),
             )
         }
         .map_err(ort_err)?;
@@ -614,8 +683,7 @@ mod wgpu_input {
 
     use crate::wgpupreprocess::WgpuBufferOwner;
 
-    // onnx runtime's cuda and migraphx providers run on device 0 unless their options name another
-    pub(super) const DEVICE_ORDINAL: i32 = 0;
+    use super::DEVICE_ORDINAL;
     #[cfg(feature = "ort-cuda-wgpu")]
     const NVIDIA_VENDOR_ID: u32 = 0x10de;
     #[cfg(feature = "ort-hip-wgpu")]

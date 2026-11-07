@@ -5,7 +5,7 @@ use core::pin::Pin;
 use crate::tensor_bytes::{rgba_to_nchw, tensor_bytes_to_chw};
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::{OwnedWgpuBuffer, SystemSlice};
+use g2g_core::memory::{OwnedHipBuffer, OwnedWgpuBuffer, SystemSlice};
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementBound, G2gError,
     MemoryDomain, OutputSink, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate,
@@ -46,6 +46,11 @@ pub trait LoadedModel {
     ) -> Result<(Box<[u8]>, Vec<u32>), G2gError> {
         Err(G2gError::UnsupportedDomain)
     }
+
+    // a `[1, 3, H, W]` f32 tensor in HIP device memory
+    fn run_hip_f32(&mut self, _tensor: &OwnedHipBuffer) -> Result<(Box<[u8]>, Vec<u32>), G2gError> {
+        Err(G2gError::UnsupportedDomain)
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -59,6 +64,15 @@ pub struct ModelGeometry {
     pub input_dtype: TensorDType,
     /// Static output shape (a dynamic leading batch dim coerced to 1).
     pub output_shape: TensorShape,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InputEncoding {
+    Rgba8,
+    // `[1, 3, H, W]` f32, from a tensor or from RGBP_F32LE video
+    F32Planes,
+    // `[1, 3, H, W]` u8 or i8 for a quantized model
+    IntPlanes,
 }
 
 #[derive(Debug)]
@@ -83,6 +97,7 @@ pub struct Inference<B: InferenceBackend> {
     /// Name of the metadata a frame must carry to be inferred on: a blob header,
     /// or `detections` for any detection. Empty runs the model on every frame.
     only_on: g2g_core::OnlyOnGate,
+    input_encoding: InputEncoding,
     configured: bool,
     last_caps: Option<Caps>,
     emitted: u64,
@@ -110,6 +125,7 @@ impl<B: InferenceBackend> Inference<B> {
             #[cfg(feature = "analytics")]
             tensor_name: String::new(),
             only_on: g2g_core::OnlyOnGate::default(),
+            input_encoding: InputEncoding::Rgba8,
             configured: false,
             last_caps: None,
             emitted: 0,
@@ -183,26 +199,46 @@ impl<B: InferenceBackend> Inference<B> {
         self.model.as_ref().map(|m| *m.geometry())
     }
 
-    fn supported_input(&self) -> Option<Caps> {
+    fn supported_inputs(&self) -> Option<Vec<(Caps, InputEncoding)>> {
         let m = self.geometry()?;
-        Some(if self.tensor_input {
-            Caps::Tensor {
+        if self.tensor_input {
+            let encoding = match m.input_dtype {
+                TensorDType::F32 => InputEncoding::F32Planes,
+                _ => InputEncoding::IntPlanes,
+            };
+            let tensor = Caps::Tensor {
                 // The model's own input dtype: f32, or u8 / i8 for a quantized
                 // model fed an already-quantized tensor (M442).
                 dtype: m.input_dtype,
                 shape: TensorShape::new([1, 3, m.height, m.width]),
                 layout: TensorLayout::Nchw,
-            }
-        } else {
-            Caps::RawVideo {
-                format: RawVideoFormat::Rgba8,
-                width: Dim::Fixed(m.width),
-                height: Dim::Fixed(m.height),
-                framerate: Rate::Any,
-                interlace: g2g_core::Interlace::Any,
-                colorimetry: g2g_core::Colorimetry::UNKNOWN,
-            }
-        })
+            };
+            return Some(Vec::from([(tensor, encoding)]));
+        }
+        let video = |format| Caps::RawVideo {
+            format,
+            width: Dim::Fixed(m.width),
+            height: Dim::Fixed(m.height),
+            framerate: Rate::Any,
+            interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        };
+        Some(Vec::from([
+            (video(RawVideoFormat::Rgba8), InputEncoding::Rgba8),
+            (video(RawVideoFormat::RgbpF32), InputEncoding::F32Planes),
+        ]))
+    }
+
+    fn accepted_input(&self, caps: &Caps) -> Result<(Caps, InputEncoding), G2gError> {
+        self.supported_inputs()
+            .ok_or(G2gError::NotConfigured)?
+            .into_iter()
+            .find_map(|(supported, encoding)| {
+                caps.intersect(&supported)
+                    .ok()
+                    .map(|narrowed| (narrowed, encoding))
+            })
+            .ok_or(G2gError::CapsMismatch)
     }
 
     fn output_caps(&self) -> Option<Caps> {
@@ -223,11 +259,11 @@ impl<B: InferenceBackend> AsyncElement for Inference<B> {
         Self: 'a;
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
-        let supported = self.supported_input().ok_or(G2gError::NotConfigured)?;
-        upstream_caps.intersect(&supported)
+        self.accepted_input(upstream_caps)
+            .map(|(narrowed, _)| narrowed)
     }
 
-    /// Native `DerivedOutput`: RGBA at the model's geometry in, the model's
+    /// Native `DerivedOutput`: RGBA or RGBP_F32LE at the model's geometry in, the model's
     /// static tensor caps out. Non-matching input yields an empty set, so
     /// the solver rejects it at negotiation time. With no model loaded the set
     /// is empty for every input, so negotiation fails instead of guessing caps.
@@ -236,13 +272,16 @@ impl<B: InferenceBackend> AsyncElement for Inference<B> {
         let attach = self.attach_tensor;
         #[cfg(not(feature = "analytics"))]
         let attach = false;
-        let loaded = self.supported_input().zip(self.output_caps());
+        let loaded = self.supported_inputs().zip(self.output_caps());
         CapsConstraint::DerivedOutput(Box::new(move |input: &Caps| match &loaded {
-            Some((supported, out)) => match input.intersect(supported) {
+            Some((supported, out)) => match supported
+                .iter()
+                .find_map(|(caps, _)| input.intersect(caps).ok())
+            {
                 // attach-tensor keeps the picture: identity output, the model
                 // output rides along as meta.
-                Ok(narrowed) => CapsSet::one(if attach { narrowed } else { out.clone() }),
-                Err(_) => CapsSet::from_alternatives(Vec::new()),
+                Some(narrowed) => CapsSet::one(if attach { narrowed } else { out.clone() }),
+                None => CapsSet::from_alternatives(Vec::new()),
             },
             _ => CapsSet::from_alternatives(Vec::new()),
         }))
@@ -262,8 +301,8 @@ impl<B: InferenceBackend> AsyncElement for Inference<B> {
         if !self.tensor_input && geometry.input_dtype != TensorDType::F32 {
             return Err(G2gError::CapsMismatch);
         }
-        let supported = self.supported_input().ok_or(G2gError::NotConfigured)?;
-        absolute_caps.intersect(&supported)?;
+        let (_, encoding) = self.accepted_input(absolute_caps)?;
+        self.input_encoding = encoding;
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
     }
@@ -335,12 +374,12 @@ impl<B: InferenceBackend> AsyncElement for Inference<B> {
                         out.push(PipelinePacket::DataFrame(frame)).await?;
                         return Ok(());
                     }
-                    let tensor_input = self.tensor_input;
+                    let input_encoding = self.input_encoding;
                     // the model and the frame leave the element with the run and
                     // come back with its result
                     let model = self.model.take().ok_or(G2gError::NotConfigured)?;
                     let run = move |mut model: B::Model| {
-                        let result = infer(&mut model, tensor_input, &frame);
+                        let result = infer(&mut model, input_encoding, &frame);
                         (model, frame, result)
                     };
                     #[cfg(feature = "offload")]
@@ -405,7 +444,7 @@ impl<B: InferenceBackend> AsyncElement for Inference<B> {
                     // `configure_output` (output) and pushes this packet carrying
                     // the pre-fixed forward *output* caps, NOT a new input. So `c`
                     // is our output tensor (the model's), not something to validate
-                    // against `supported_input` (a real model's output never
+                    // against `supported_inputs` (a real model's output never
                     // matches its input, so the old `c.intersect(supported_input)?`
                     // hard-errored whenever ORT was an interior transform). Forward
                     // it so a strict downstream sees the tensor caps before the
@@ -437,28 +476,30 @@ impl<B: InferenceBackend> AsyncElement for Inference<B> {
 // one frame's input conversion and session run, the work that leaves the arm
 fn infer<M: LoadedModel>(
     model: &mut M,
-    tensor_input: bool,
+    input_encoding: InputEncoding,
     frame: &Frame,
 ) -> Result<(Box<[u8]>, Vec<u32>), G2gError> {
     let geometry = *model.geometry();
-    if let MemoryDomain::WgpuBuffer(tensor) = &frame.domain {
-        if !tensor_input || geometry.input_dtype != TensorDType::F32 {
-            return Err(G2gError::UnsupportedDomain);
+    match (&frame.domain, input_encoding) {
+        (MemoryDomain::WgpuBuffer(tensor), InputEncoding::F32Planes) => {
+            return model.run_wgpu_f32(tensor)
         }
-        return model.run_wgpu_f32(tensor);
+        (MemoryDomain::Hip(tensor), InputEncoding::F32Planes) => return model.run_hip_f32(tensor),
+        _ => {}
     }
     let slice = frame
         .domain
         .as_system_slice()
         .ok_or(G2gError::UnsupportedDomain)?;
-    if !tensor_input {
-        // RGBA8 -> normalized f32 NCHW RGB, then run the model.
-        return model.run_f32(rgba_to_nchw(slice, geometry.width, geometry.height)?);
+    match input_encoding {
+        InputEncoding::Rgba8 => {
+            model.run_f32(rgba_to_nchw(slice, geometry.width, geometry.height)?)
+        }
+        InputEncoding::F32Planes => {
+            model.run_f32(tensor_bytes_to_chw(slice, geometry.width, geometry.height)?)
+        }
+        InputEncoding::IntPlanes => model.run_int(int_tensor_bytes(slice, &geometry)?),
     }
-    if geometry.input_dtype == TensorDType::F32 {
-        return model.run_f32(tensor_bytes_to_chw(slice, geometry.width, geometry.height)?);
-    }
-    model.run_int(int_tensor_bytes(slice, &geometry)?)
 }
 
 // the leading `[1, 3, H, W]` one-byte elements of a quantized tensor frame
@@ -516,14 +557,17 @@ pub const BASE_PROPERTIES: &[PropertySpec] = &[MODEL_PROP, TENSOR_INPUT_PROP, ON
 #[cfg(feature = "launch")]
 impl<B: InferenceBackend> g2g_core::PadTemplates for Inference<B> {
     fn pad_templates() -> Vec<g2g_core::PadTemplate> {
-        Vec::from([g2g_core::PadTemplate::sink(CapsSet::one(Caps::RawVideo {
-            format: RawVideoFormat::Rgba8,
+        let video = |format| Caps::RawVideo {
+            format,
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
-        }))])
+        };
+        Vec::from([g2g_core::PadTemplate::sink(CapsSet::from_alternatives(
+            Vec::from([video(RawVideoFormat::Rgba8), video(RawVideoFormat::RgbpF32)]),
+        ))])
     }
 }
 

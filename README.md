@@ -676,7 +676,7 @@ cargo clippy --workspace --all-targets
 | `MqttSink` (the same record per frame, published to an MQTT topic) / `MqttSrc` (each message on a topic filter as a text frame) | `mqtt` | none |
 | `EmbeddingSink` (sqlite index of embedding vectors, searchable from `pyml-mcp`) | `embedding-index` | none (sqlite bundled) |
 | `VelloTextOverlay` (subtitle cues drawn on the GPU, `WgpuTexture` out) | `vello-text-overlay` | wgpu |
-| `OrtInference` (+ CUDA / TensorRT / DirectML / OpenVINO / ROCm / MIGraphX EPs, `execution-provider=` on the launch line; a GPU tensor from `wgpupreprocess` on CUDA or MIGraphX) | `ort`, `cuda`, `tensorrt`, `directml`, `openvino`, `rocm`, `migraphx`, `ort-cuda-wgpu`, `ort-hip-wgpu` (in `g2g-ml`) | onnxruntime (`openvino` / `rocm` / `migraphx` register only on an ONNX Runtime built with them) |
+| `OrtInference` (+ CUDA / TensorRT / DirectML / OpenVINO / ROCm / MIGraphX EPs, `execution-provider=` on the launch line; a GPU tensor from `wgpupreprocess` or `RGBP_F32LE` from `hipconvertscale` on CUDA or MIGraphX) | `ort`, `cuda`, `tensorrt`, `directml`, `openvino`, `rocm`, `migraphx`, `ort-cuda-wgpu`, `ort-hip-wgpu`, `ort-hip` (in `g2g-ml`) | onnxruntime (`openvino` / `rocm` / `migraphx` register only on an ONNX Runtime built with them) |
 | `ExecutorchInference` (a `.pte` model on ExecuTorch's portable CPU kernels) | `executorch` (in `g2g-ml`) | ExecuTorch 1.5.1 static libs (`tools/executorch-build.sh`, `EXECUTORCH_RS_EXECUTORCH_LIB_DIR`) |
 | `BurnInference` (linear layer, or an ONNX topology imported by `burn-onnx` codegen) | `burn` (in `g2g-ml`) | wgpu (Vulkan / Metal / DX12) |
 | `WhisperTranscribe` (16 kHz mono f32 in, timed text segments out, whisper.cpp) | `whisper`, `whisper-cuda`, `whisper-vulkan` (in `g2g-ml`) | whisper.cpp built from source (cmake, libclang), plus nvcc or the Vulkan headers and `glslc` for the GPU features |
@@ -1231,6 +1231,14 @@ ORT_LIB_LOCATION=/usr/lib64 ORT_PREFER_DYNAMIC_LINK=1 \
   ORT_MIGRAPHX_MODEL_CACHE_PATH=~/.cache/g2g-migraphx \
   VK_DRIVER_FILES=/usr/share/vulkan/icd.d/radeon_icd.x86_64.json \
   cargo test -p g2g-ml --features ort-hip-wgpu --test ort_wgpu_tensor
+
+# ortinfer reading hipconvertscale's output in place. The CUDA provider needs
+# cuDNN 9 for CUDA 13 on the library path (e.g. the nvidia-cudnn-cu13 wheel).
+LD_LIBRARY_PATH=<dir with libcudnn.so.9> \
+  cargo test -p g2g-ml --features ort-hip,cuda,launch,g2g-plugins/nvdec --test m2106_hip_ortinfer
+ORT_LIB_LOCATION=/usr/lib64 ORT_PREFER_DYNAMIC_LINK=1 \
+  ORT_MIGRAPHX_MODEL_CACHE_PATH=~/.cache/g2g-migraphx \
+  cargo test -p g2g-ml --features ort-hip,migraphx,launch --test m2106_hip_ortinfer
 
 # Pure-Rust Burn over wgpu (any Vulkan/Metal/DX12 adapter):
 cargo test -p g2g-ml --features burn --test burn_inference -- --nocapture

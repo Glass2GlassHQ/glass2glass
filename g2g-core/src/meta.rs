@@ -212,6 +212,21 @@ impl PlaneLayout {
         }
     }
 
+    pub fn tight(format: crate::RawVideoFormat, width: u32, height: u32) -> Option<Self> {
+        let count = format.plane_count();
+        let mut planes = [Plane {
+            offset: 0,
+            stride: 0,
+        }; MAX_PLANES];
+        for (index, plane) in planes.iter_mut().enumerate().take(count) {
+            *plane = Plane {
+                offset: usize::try_from(format.plane_offset(index, width, height)?).ok()?,
+                stride: usize::try_from(format.plane_stride(index, width)?).ok()?,
+            };
+        }
+        Self::new(planes.get(..count)?)
+    }
+
     pub fn count(&self) -> usize {
         self.count
     }

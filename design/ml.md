@@ -244,6 +244,16 @@ opset 17. On the Radeon 680M (gfx1035, Fedora's ROCm 6.4), `ball11n.onnx` at
 1280x1280 runs at 30.5 fps from the GPU tensor and 27.9 fps through system
 memory: the integrated GPU shares system RAM, so the copy saved is cheap.
 
+`ortinfer` also takes `RGBP_F32LE` video at the model's input size, which is
+already the `[1, 3, H, W]` f32 tensor, so `hipconvertscale` feeds it with no
+preprocess element, as in GStreamer. With `ort-hip`, a `MemoryDomain::Hip` frame
+reaches the session in place, as an ONNX Runtime `Hip` tensor on AMD (MIGraphX)
+or a `Cuda` tensor on NVIDIA (the CUDA provider). The frame must be tightly
+packed on HIP device 0. The run waits on the CPU for the frame's ready event,
+because the provider's stream does not wait on it. The CUDA provider in the `ort`
+download links CUDA 13 and loads `libcudnn.so.9`, which a CUDA toolkit install
+does not include.
+
 On the Android edge there is `from_memory_with_nnapi`, the system NeuralNetworks
 API over NPU, GPU or DSP, `from_memory_with_xnnpack`, ARM-optimized CPU, and
 `from_memory_for_android`, which registers NNAPI then XNNPACK then the default

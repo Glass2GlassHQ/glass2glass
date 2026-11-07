@@ -10,6 +10,7 @@ use alloc::vec::Vec;
 use g2g_core::caps_transform::{FieldTransform, RawVideoShape};
 use g2g_core::log::{short_type_name, Target};
 use g2g_core::memory::{DomainSet, MemoryDomainKind, OwnedHipBuffer};
+use g2g_core::meta::PlaneLayout;
 use g2g_core::{
     g2g_error, AsyncElement, Caps, CapsConstraint, CapsTransform, Colorimetry, ConfigureOutcome,
     Dim, ElementMetadata, Frame, G2gError, MemoryDomain, OutputSink, PipelinePacket, PropError,
@@ -461,27 +462,8 @@ impl Picture {
         }
     }
 
-    fn tight_planes(&self) -> Result<[(u32, u32); 3], G2gError> {
-        let mut planes = [(0, 0); 3];
-        for (plane, slot) in planes
-            .iter_mut()
-            .enumerate()
-            .take(self.format.plane_count())
-        {
-            let offset = self
-                .format
-                .plane_offset(plane, self.width, self.height)
-                .ok_or(G2gError::CapsMismatch)?;
-            let stride = self
-                .format
-                .plane_stride(plane, self.width)
-                .ok_or(G2gError::CapsMismatch)?;
-            *slot = (
-                u32::try_from(offset).map_err(|_| G2gError::CapsMismatch)?,
-                stride,
-            );
-        }
-        Ok(planes)
+    fn tight_layout(&self) -> Result<PlaneLayout, G2gError> {
+        PlaneLayout::tight(self.format, self.width, self.height).ok_or(G2gError::CapsMismatch)
     }
 
     fn defines(&self, side: &str) -> Vec<String> {
@@ -529,6 +511,20 @@ fn picture_rect(input: &Picture, output: &Picture, add_borders: bool) -> Picture
         width,
         height,
     }
+}
+
+// the kernel takes three planes of (offset, stride), zero past the format's last plane
+fn kernel_planes(layout: &PlaneLayout) -> Result<[(u32, u32); 3], G2gError> {
+    let mut planes = [(0, 0); 3];
+    for (plane, slot) in planes.iter_mut().enumerate() {
+        if let Some(found) = layout.plane(plane) {
+            *slot = (
+                u32::try_from(found.offset).map_err(|_| G2gError::CapsMismatch)?,
+                u32::try_from(found.stride).map_err(|_| G2gError::CapsMismatch)?,
+            );
+        }
+    }
+    Ok(planes)
 }
 
 #[derive(Debug)]
@@ -590,21 +586,10 @@ impl HipConverter {
             return Err(G2gError::CapsMismatch);
         }
         let source = match input.plane_layout() {
-            Some(layout) => {
-                let mut planes = [(0, 0); 3];
-                for (plane, slot) in planes.iter_mut().enumerate() {
-                    if let Some(found) = layout.plane(plane) {
-                        *slot = (
-                            u32::try_from(found.offset).map_err(|_| G2gError::CapsMismatch)?,
-                            u32::try_from(found.stride).map_err(|_| G2gError::CapsMismatch)?,
-                        );
-                    }
-                }
-                planes
-            }
-            None => self.input.tight_planes()?,
+            Some(layout) => kernel_planes(layout)?,
+            None => kernel_planes(&self.input.tight_layout()?)?,
         };
-        let destination = self.output.tight_planes()?;
+        let destination = kernel_planes(&self.output.tight_layout()?)?;
         let (width, height) = (self.output.width, self.output.height);
         stream.launch(
             &self.kernel,

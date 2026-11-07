@@ -367,6 +367,27 @@ impl HipDevice {
     fn holds(&self, buffer: &OwnedHipBuffer) -> bool {
         buffer.vendor == self.vendor() && buffer.device_ordinal == self.ordinal
     }
+
+    unsafe fn synchronize_event(&self, event: HipEventHandle) -> Result<(), G2gError> {
+        let _bound = self.bind()?;
+        // SAFETY: the caller guarantees the event is live and belongs to the bound device.
+        let code = unsafe {
+            match self.backend {
+                Backend::Amd => hip_event_synchronize(event),
+                Backend::Nvidia { .. } => cuda::cu_event_synchronize(event),
+            }
+        };
+        self.check(code)
+    }
+
+    // returns once the producer's writes into `buffer` have finished
+    pub fn wait_until_ready(&self, buffer: &OwnedHipBuffer) -> Result<(), G2gError> {
+        if !self.holds(buffer) {
+            return Err(G2gError::Hardware(HardwareError::Other));
+        }
+        // SAFETY: the ready event belongs to this device and stays alive while `buffer` does.
+        unsafe { self.synchronize_event(buffer.ready_event as HipEventHandle) }
+    }
 }
 
 impl Drop for HipDevice {
@@ -403,16 +424,8 @@ impl HipEvent {
     }
 
     pub fn synchronize(&self) -> Result<(), G2gError> {
-        let _bound = self.device.bind()?;
-        let handle = self.handle as HipEventHandle;
-        // SAFETY: the event belongs to the bound device.
-        let code = unsafe {
-            match self.device.backend {
-                Backend::Amd => hip_event_synchronize(handle),
-                Backend::Nvidia { .. } => cuda::cu_event_synchronize(handle),
-            }
-        };
-        self.device.check(code)
+        // SAFETY: the event belongs to the device and lives as long as `self`.
+        unsafe { self.device.synchronize_event(self.handle as HipEventHandle) }
     }
 }
 

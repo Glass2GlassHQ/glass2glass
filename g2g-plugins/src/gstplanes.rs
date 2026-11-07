@@ -1,6 +1,6 @@
 use core::ffi::{c_int, c_uint};
 
-use g2g_core::meta::{Plane, PlaneLayout, MAX_PLANES};
+use g2g_core::meta::{PlaneLayout, MAX_PLANES};
 use g2g_core::{Caps, Dim, RawVideoFormat};
 
 // `GST_VIDEO_MAX_PLANES`, which the C sides assert at compile time.
@@ -20,7 +20,12 @@ pub struct GstVideoPlanes {
 
 impl GstVideoPlanes {
     pub fn tight(format: RawVideoFormat, width: u32, height: u32) -> Option<Self> {
-        Self::of_layout(&tight_layout(format, width, height)?, format, width, height)
+        Self::of_layout(
+            &PlaneLayout::tight(format, width, height)?,
+            format,
+            width,
+            height,
+        )
     }
 
     pub fn tight_for_caps(caps: &Caps) -> Option<Self> {
@@ -68,21 +73,6 @@ impl GstVideoPlanes {
     pub fn size(&self) -> usize {
         self.size
     }
-}
-
-fn tight_layout(format: RawVideoFormat, width: u32, height: u32) -> Option<PlaneLayout> {
-    let count = format.plane_count();
-    let mut planes = [Plane {
-        offset: 0,
-        stride: 0,
-    }; MAX_PLANES];
-    for (index, plane) in planes.iter_mut().enumerate().take(count) {
-        *plane = Plane {
-            offset: usize::try_from(format.plane_offset(index, width, height)?).ok()?,
-            stride: usize::try_from(format.plane_stride(index, width)?).ok()?,
-        };
-    }
-    PlaneLayout::new(planes.get(..count)?)
 }
 
 #[cfg(test)]

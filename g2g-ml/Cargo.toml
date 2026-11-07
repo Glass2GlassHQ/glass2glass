@@ -91,9 +91,12 @@ tensorrt = ["cuda", "ort/tensorrt"]
 # leaves in a wgpu buffer, copied on the GPU into memory CUDA imports, never through
 # system memory. Linux + NVIDIA.
 ort-cuda-wgpu = ["cuda", "cuda-wgpu", "dmabuf-wgpu"]
+# ortinfer reads RGBP_F32LE frames and f32 tensors in HIP memory in place, through
+# the CUDA provider on NVIDIA or MIGraphX on AMD. Linux.
+ort-hip = ["ort", "dep:g2g-plugins", "g2g-plugins/hip"]
 # The same for an AMD GPU: HIP imports the copy and the MIGraphX provider reads it.
 # Linux + ROCm, and an ONNX Runtime built with MIGraphX (`ORT_LIB_LOCATION`).
-ort-hip-wgpu = ["migraphx", "dmabuf-wgpu", "g2g-plugins/hip"]
+ort-hip-wgpu = ["migraphx", "dmabuf-wgpu", "ort-hip"]
 # OpenVINO execution provider (Intel CPU / iGPU / NPU). The stock ONNX Runtime
 # download builds but does not carry it, so a named provider fails loud until
 # `ort` links an OpenVINO-enabled ONNX Runtime build (ORT_LIB_LOCATION).
