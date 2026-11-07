@@ -294,6 +294,7 @@ pub(crate) enum RenderMessage {
 /// The offscreen texture cameras render into. Inserted at startup; exposed so
 /// an app can point extra cameras or UI at the stream explicitly.
 #[derive(Resource, Clone, ExtractResource)]
+#[extract_app(RenderApp)]
 pub struct StreamTarget(pub Handle<Image>);
 
 #[derive(Resource)]
@@ -314,6 +315,7 @@ struct StreamState {
 
 /// Settings snapshot for the systems (main and render world).
 #[derive(Resource, Clone, ExtractResource)]
+#[extract_app(RenderApp)]
 struct Settings(StreamSettings);
 
 /// Which encode path the render world should build.
@@ -560,7 +562,7 @@ fn produce_frame(
                 {
                     zerocopy::EncodeState::new(
                         device.wgpu_device().clone(),
-                        (**queue.0).clone(),
+                        (**queue).clone(),
                         &settings.0,
                     )
                     .map(PathState::ZeroCopy)
@@ -593,7 +595,7 @@ fn produce_frame(
             }
         }),
         PathState::Readback(r) => r
-            .read(device.wgpu_device(), &queue.0, &gpu_image.texture)
+            .read(device.wgpu_device(), &queue, &gpu_image.texture)
             .map(|(rgba, pts_ns)| {
                 let _ = sender.0.send(RenderMessage::Frame(rgba, pts_ns));
             }),

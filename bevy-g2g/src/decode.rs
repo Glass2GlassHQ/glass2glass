@@ -122,15 +122,10 @@ impl Plugin for VideoPlayerPlugin {
         // The embedder handoff (M263): clone Bevy's own wgpu handles into g2g.
         // Everything g2g's GPU elements produce now lives on Bevy's device.
         let device = app.world().resource::<RenderDevice>().wgpu_device().clone();
-        let queue = (**app.world().resource::<RenderQueue>().0).clone();
-        let adapter = (**app.world().resource::<RenderAdapter>().0).clone();
+        let queue = (**app.world().resource::<RenderQueue>()).clone();
+        let adapter = (**app.world().resource::<RenderAdapter>()).clone();
         // Bevy keeps the instance in the render world only.
-        let instance = (**app
-            .sub_app(RenderApp)
-            .world()
-            .resource::<RenderInstance>()
-            .0)
-            .clone();
+        let instance = (**app.sub_app(RenderApp).world().resource::<RenderInstance>()).clone();
         let ctx = GpuContext::from_wgpu(instance, adapter, device, queue);
 
         let pull = register_appsink_pull(CHANNEL);

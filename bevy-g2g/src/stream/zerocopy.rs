@@ -3,13 +3,9 @@
 //! (`WgpuToCuda`) and encoded by the native `NvEnc`. Only H.264 access units
 //! leave the GPU.
 
-use std::sync::Arc;
-
 use bevy::render::{
-    renderer::{
-        RenderAdapter, RenderAdapterInfo, RenderDevice, RenderInstance, RenderQueue, WgpuWrapper,
-    },
-    settings::{RenderCreation, RenderResources},
+    renderer::{RenderAdapter, RenderAdapterInfo, RenderDevice, RenderInstance, RenderQueue},
+    settings::RenderCreation,
 };
 use g2g_core::{
     AsyncElement, Caps, Dim, G2gError, Interlace, OutputSink, PipelinePacket, PushOutcome, Rate,
@@ -31,16 +27,16 @@ const CUDA_DEVICE_ID: i32 = 0;
 /// for the zero-copy bridge.
 pub(super) fn interop_render_creation() -> Result<RenderCreation, G2gError> {
     let interop = pollster::block_on(create_interop_device_full())?;
-    let resources = RenderResources(
+    let creation = RenderCreation::manual(
         RenderDevice::from(interop.device.clone()),
-        RenderQueue(Arc::new(WgpuWrapper::new(interop.queue.clone()))),
-        RenderAdapterInfo(WgpuWrapper::new(interop.adapter.get_info())),
-        RenderAdapter(Arc::new(WgpuWrapper::new(interop.adapter.clone()))),
-        RenderInstance(Arc::new(WgpuWrapper::new(interop.instance.clone()))),
+        RenderQueue::new(interop.queue.clone()),
+        RenderAdapterInfo::new(interop.adapter.get_info()),
+        RenderAdapter::new(interop.adapter.clone()),
+        RenderInstance::new(interop.instance.clone()),
     );
     // Bevy holds its own (reference-counted) clones now; drop our handle.
     drop(interop);
-    Ok(RenderCreation::Manual(resources))
+    Ok(creation)
 }
 
 /// The render-world encode state: the NVENC encoder and the wgpu->CUDA
@@ -130,18 +126,17 @@ struct CaptureAus {
 }
 
 impl OutputSink for CaptureAus {
-    fn push<'a>(
-        &'a mut self,
-        packet: PipelinePacket,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<PushOutcome, G2gError>> + 'a>>
-    {
-        Box::pin(async move {
-            if let PipelinePacket::DataFrame(f) = packet {
-                if let Some(s) = f.domain.as_system_slice() {
-                    self.aus.push((s.to_vec(), f.timing.pts_ns));
-                }
+    fn poll_push(
+        &mut self,
+        _cx: &mut std::task::Context<'_>,
+        packet_slot: &mut Option<PipelinePacket>,
+    ) -> std::task::Poll<Result<PushOutcome, G2gError>> {
+        let packet = packet_slot.take().expect("poll_push without a packet");
+        if let PipelinePacket::DataFrame(f) = packet {
+            if let Some(s) = f.domain.as_system_slice() {
+                self.aus.push((s.to_vec(), f.timing.pts_ns));
             }
-            Ok(PushOutcome::Accepted)
-        })
+        }
+        std::task::Poll::Ready(Ok(PushOutcome::Accepted))
     }
 }
