@@ -1017,6 +1017,10 @@ unsafe fn create_exportable(
     Ok((buffer, owned_fd))
 }
 
+pub fn opaque_fd_export_supported(device: &wgpu::Device) -> bool {
+    missing_export_extension(device, false).is_none()
+}
+
 pub fn create_opaque_fd_export(
     device: &wgpu::Device,
     size: u64,

@@ -513,6 +513,7 @@ struct Gpu {
     input_buf: wgpu::Buffer,
     out_buf: wgpu::Buffer,
     staging: Arc<ReadbackStaging>,
+    pool: TensorPool,
     layout: InputLayout,
     input_len: usize,
     out_bytes: usize,
@@ -533,7 +534,83 @@ struct ImportGpu {
     dims_buf: wgpu::Buffer,
     out_buf: wgpu::Buffer,
     staging: Arc<ReadbackStaging>,
+    pool: TensorPool,
     out_bytes: usize,
+}
+
+#[derive(Debug, Default)]
+struct TensorPool {
+    slots: std::sync::Mutex<Vec<Arc<WgpuBufferOwner>>>,
+}
+
+impl TensorPool {
+    fn acquire(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        staging: &Arc<ReadbackStaging>,
+        len: usize,
+    ) -> Result<Arc<WgpuBufferOwner>, G2gError> {
+        let mut slots = self.slots.lock().expect("tensor pool lock poisoned");
+        if let Some(unheld) = slots.iter().find(|slot| Arc::strong_count(slot) == 1) {
+            return Ok(unheld.clone());
+        }
+        let slot = Arc::new(new_tensor_slot(device, queue, len)?.with_staging(staging.clone()));
+        slots.push(slot.clone());
+        Ok(slot)
+    }
+}
+
+fn new_tensor_slot(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    len: usize,
+) -> Result<WgpuBufferOwner, G2gError> {
+    #[cfg(all(target_os = "linux", feature = "dmabuf-wgpu"))]
+    if g2g_plugins::wgpudmabuf::opaque_fd_export_supported(device) {
+        let (buffer, fd) = g2g_plugins::wgpudmabuf::create_opaque_fd_export(device, len as u64)?;
+        return Ok(
+            WgpuBufferOwner::new(device.clone(), queue.clone(), buffer, len)
+                .with_export_fd(Arc::new(fd)),
+        );
+    }
+    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("preprocess-tensor"),
+        size: len as u64,
+        usage: wgpu::BufferUsages::STORAGE
+            | wgpu::BufferUsages::COPY_SRC
+            | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    Ok(WgpuBufferOwner::new(
+        device.clone(),
+        queue.clone(),
+        buffer,
+        len,
+    ))
+}
+
+enum TensorTarget {
+    Downstream(Arc<WgpuBufferOwner>),
+    ReadBack,
+}
+
+impl TensorTarget {
+    fn pick(ig: &ImportGpu, gpu_output: bool) -> Result<Self, G2gError> {
+        if !gpu_output {
+            return Ok(Self::ReadBack);
+        }
+        ig.pool
+            .acquire(&ig.device, &ig.queue, &ig.staging, ig.out_bytes)
+            .map(Self::Downstream)
+    }
+
+    fn buffer<'a>(&'a self, ig: &'a ImportGpu) -> &'a wgpu::Buffer {
+        match self {
+            Self::Downstream(tensor) => tensor.buffer(),
+            Self::ReadBack => &ig.out_buf,
+        }
+    }
 }
 
 /// # Example
@@ -721,12 +798,11 @@ impl WgpuPreprocess {
     }
 
     /// GPU-output variant of [`dispatch`](Self::dispatch): run the same
-    /// compute, then copy the result into a fresh per-frame `wgpu::Buffer` (a
-    /// GPU->GPU copy, on-device) and hand it downstream, with NO map / poll /
-    /// read-back. The fresh buffer is `STORAGE | COPY_SRC` so a downstream GPU
-    /// consumer can bind it, or read it back via the owner. A per-frame buffer
-    /// (not the shared `out_buf`) so the next frame's compute does not clobber a
-    /// buffer still in flight downstream.
+    /// compute straight into a pooled `wgpu::Buffer` and hand it downstream, with
+    /// no map / poll / read-back. A pooled buffer is reused only once no frame
+    /// holds it, so the next frame's compute does not clobber a buffer still in
+    /// flight downstream. It is exportable to CUDA / HIP when the device can
+    /// export its memory.
     fn dispatch_gpu(&self, pixels: &[u8]) -> Result<OwnedWgpuBuffer, G2gError> {
         let gpu = self.gpu.as_ref().ok_or(G2gError::NotConfigured)?;
         if pixels.len() < gpu.input_len {
@@ -742,13 +818,27 @@ impl WgpuPreprocess {
             &dims_bytes(self.width, self.height, gpu.layout, self.colorimetry),
         );
 
-        let frame_buf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("preprocess-tensor"),
-            size: gpu.out_bytes as u64,
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_SRC
-                | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
+        let tensor = gpu
+            .pool
+            .acquire(&gpu.device, &gpu.queue, &gpu.staging, gpu.out_bytes)?;
+        let layout = gpu.pipeline.get_bind_group_layout(0);
+        let bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("yuv-rgb-tensor-binding"),
+            layout: &layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: gpu.dims_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: gpu.input_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: tensor.buffer().as_entire_binding(),
+                },
+            ],
         });
 
         let mut encoder = gpu
@@ -760,26 +850,13 @@ impl WgpuPreprocess {
                 timestamp_writes: None,
             });
             pass.set_pipeline(&gpu.pipeline);
-            pass.set_bind_group(0, &gpu.bind_group, &[]);
+            pass.set_bind_group(0, &bind_group, &[]);
             let gx = self.width.div_ceil(WORKGROUP);
             let gy = self.height.div_ceil(WORKGROUP);
             pass.dispatch_workgroups(gx, gy, 1);
         }
-        // On-device copy into the per-frame buffer; no read-back to the CPU.
-        encoder.copy_buffer_to_buffer(&gpu.out_buf, 0, &frame_buf, 0, gpu.out_bytes as u64);
         gpu.queue.submit([encoder.finish()]);
-
-        let owner = WgpuBufferOwner::new(
-            gpu.device.clone(),
-            gpu.queue.clone(),
-            frame_buf,
-            gpu.out_bytes,
-        )
-        .with_staging(gpu.staging.clone());
-        Ok(OwnedWgpuBuffer::new(
-            gpu.out_bytes,
-            std::sync::Arc::new(owner),
-        ))
+        Ok(OwnedWgpuBuffer::new(gpu.out_bytes, tensor))
     }
 
     /// Build the surface-import pipeline and output buffers on `device`.
@@ -860,6 +937,7 @@ impl WgpuPreprocess {
             ),
         );
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let target = TensorTarget::pick(tg, self.gpu_output)?;
         let layout = tg.pipeline.get_bind_group_layout(0);
         let bind_group = tg.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("nv12-tex-binding"),
@@ -875,7 +953,7 @@ impl WgpuPreprocess {
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
-                    resource: tg.out_buf.as_entire_binding(),
+                    resource: target.buffer(tg).as_entire_binding(),
                 },
             ],
         });
@@ -895,7 +973,7 @@ impl WgpuPreprocess {
             pass.dispatch_workgroups(gx, gy, 1);
         }
 
-        finish_import(tg, encoder, self.gpu_output)
+        finish_import(tg, encoder, target)
     }
 
     /// Two-plane surface-import dispatch: bind the decoder's
@@ -922,6 +1000,7 @@ impl WgpuPreprocess {
             ),
         );
         let [luma, chroma] = nv12_plane_views(texture);
+        let target = TensorTarget::pick(tg, self.gpu_output)?;
         let layout = tg.pipeline.get_bind_group_layout(0);
         let bind_group = tg.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("nv12-planes-tex-binding"),
@@ -937,7 +1016,7 @@ impl WgpuPreprocess {
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
-                    resource: tg.out_buf.as_entire_binding(),
+                    resource: target.buffer(tg).as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 3,
@@ -961,7 +1040,7 @@ impl WgpuPreprocess {
             pass.dispatch_workgroups(gx, gy, 1);
         }
 
-        finish_import(tg, encoder, self.gpu_output)
+        finish_import(tg, encoder, target)
     }
 
     /// Try to consume the GPU texture as an already-RGB `WgpuRgbaTexture` (the
@@ -1020,6 +1099,7 @@ impl WgpuPreprocess {
             return Err(G2gError::CapsMismatch);
         }
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let target = TensorTarget::pick(tg, self.gpu_output)?;
         let layout = tg.pipeline.get_bind_group_layout(0);
         let bind_group = tg.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("rgba-tex-binding"),
@@ -1035,7 +1115,7 @@ impl WgpuPreprocess {
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
-                    resource: tg.out_buf.as_entire_binding(),
+                    resource: target.buffer(tg).as_entire_binding(),
                 },
             ],
         });
@@ -1055,7 +1135,7 @@ impl WgpuPreprocess {
             pass.dispatch_workgroups(gx, gy, 1);
         }
 
-        finish_import(tg, encoder, self.gpu_output)
+        finish_import(tg, encoder, target)
     }
 
     /// dma-buf import dispatch: import the frame's dma-buf as a Vulkan
@@ -1134,6 +1214,7 @@ impl WgpuPreprocess {
                 self.colorimetry,
             ),
         );
+        let target = TensorTarget::pick(ig, self.gpu_output)?;
         let layout = ig.pipeline.get_bind_group_layout(0);
         let bind_group = ig.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("dmabuf-binding"),
@@ -1149,7 +1230,7 @@ impl WgpuPreprocess {
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
-                    resource: ig.out_buf.as_entire_binding(),
+                    resource: target.buffer(ig).as_entire_binding(),
                 },
             ],
         });
@@ -1168,37 +1249,24 @@ impl WgpuPreprocess {
             let gy = self.height.div_ceil(WORKGROUP);
             pass.dispatch_workgroups(gx, gy, 1);
         }
-        finish_import(ig, encoder, self.gpu_output)
+        finish_import(ig, encoder, target)
     }
 }
 
 /// Finish an import dispatch: submit `encoder` and return the tensor, either
-/// GPU-resident in a fresh per-frame buffer (`gpu_output`, so the next frame's
-/// compute cannot clobber one still in flight downstream) or read back to system
+/// GPU-resident in the pooled buffer `target` holds or read back to system
 /// memory. Shared by every import path, whose only difference is how the input
 /// was bound.
 fn finish_import(
     ig: &ImportGpu,
-    mut encoder: wgpu::CommandEncoder,
-    gpu_output: bool,
+    encoder: wgpu::CommandEncoder,
+    target: TensorTarget,
 ) -> Result<MemoryDomain, G2gError> {
-    if gpu_output {
-        let frame_buf = ig.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("preprocess-tensor"),
-            size: ig.out_bytes as u64,
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_SRC
-                | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        encoder.copy_buffer_to_buffer(&ig.out_buf, 0, &frame_buf, 0, ig.out_bytes as u64);
+    if let TensorTarget::Downstream(tensor) = target {
         ig.queue.submit([encoder.finish()]);
-        let owner =
-            WgpuBufferOwner::new(ig.device.clone(), ig.queue.clone(), frame_buf, ig.out_bytes)
-                .with_staging(ig.staging.clone());
         return Ok(MemoryDomain::WgpuBuffer(OwnedWgpuBuffer::new(
             ig.out_bytes,
-            std::sync::Arc::new(owner),
+            tensor,
         )));
     }
     let bytes = ig.staging.read_back(
@@ -1233,6 +1301,8 @@ pub struct WgpuBufferOwner {
     buffer: wgpu::Buffer,
     len: usize,
     staging: Arc<ReadbackStaging>,
+    #[cfg(all(target_os = "linux", feature = "dmabuf-wgpu"))]
+    export_fd: Option<Arc<std::os::fd::OwnedFd>>,
 }
 
 impl WgpuBufferOwner {
@@ -1246,6 +1316,8 @@ impl WgpuBufferOwner {
             buffer,
             len,
             staging: Arc::default(),
+            #[cfg(all(target_os = "linux", feature = "dmabuf-wgpu"))]
+            export_fd: None,
         }
     }
 
@@ -1253,6 +1325,20 @@ impl WgpuBufferOwner {
     pub(crate) fn with_staging(mut self, staging: Arc<ReadbackStaging>) -> Self {
         self.staging = staging;
         self
+    }
+
+    #[cfg(all(target_os = "linux", feature = "dmabuf-wgpu"))]
+    fn with_export_fd(mut self, fd: Arc<std::os::fd::OwnedFd>) -> Self {
+        self.export_fd = Some(fd);
+        self
+    }
+
+    #[cfg(all(
+        target_os = "linux",
+        any(feature = "ort-cuda-wgpu", feature = "ort-hip-wgpu")
+    ))]
+    pub(crate) fn export_fd(&self) -> Option<&Arc<std::os::fd::OwnedFd>> {
+        self.export_fd.as_ref()
     }
 
     /// The backing GPU buffer, for a downstream GPU consumer to bind directly.
@@ -1611,6 +1697,7 @@ async fn build_gpu(
         input_buf,
         out_buf,
         staging: Arc::default(),
+        pool: TensorPool::default(),
         layout: input_layout,
         input_len,
         out_bytes,
@@ -1724,6 +1811,7 @@ fn build_import_gpu(
         dims_buf,
         out_buf,
         staging: Arc::default(),
+        pool: TensorPool::default(),
         out_bytes,
     }
 }

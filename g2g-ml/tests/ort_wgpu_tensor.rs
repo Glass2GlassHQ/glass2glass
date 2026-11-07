@@ -60,8 +60,10 @@ impl Collect {
     }
 }
 
-fn nv12_frame() -> Frame {
-    let luma = [16u8, 81, 145, 235, 41, 100, 200, 128];
+const FIRST_LUMA: [u8; 8] = [16, 81, 145, 235, 41, 100, 200, 128];
+const SECOND_LUMA: [u8; 8] = [235, 200, 145, 100, 81, 41, 16, 60];
+
+fn nv12_frame(luma: [u8; 8]) -> Frame {
     let chroma = [128u8, 128, 90, 200];
     let bytes: Vec<u8> = luma.iter().chain(&chroma).copied().collect();
     Frame {
@@ -72,7 +74,7 @@ fn nv12_frame() -> Frame {
     }
 }
 
-async fn preprocess(gpu_output: bool) -> Frame {
+fn preprocessor(gpu_output: bool) -> WgpuPreprocess {
     let mut preprocess = WgpuPreprocess::new();
     if gpu_output {
         preprocess = preprocess.with_gpu_output();
@@ -87,15 +89,19 @@ async fn preprocess(gpu_output: bool) -> Frame {
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
         })
         .expect("configure preprocess");
+    preprocess
+}
+
+async fn preprocess(preprocess: &mut WgpuPreprocess, luma: [u8; 8]) -> Frame {
     let mut out = Collect::default();
     preprocess
-        .process(PipelinePacket::DataFrame(nv12_frame()), &mut out)
+        .process(PipelinePacket::DataFrame(nv12_frame(luma)), &mut out)
         .await
         .expect("preprocess");
     out.frame()
 }
 
-async fn infer(provider: &str, tensor: Frame) -> Vec<u8> {
+fn inference(provider: &str) -> OrtInference {
     let model = std::env::temp_dir().join("g2g_ort_wgpu_tensor.onnx");
     std::fs::write(
         &model,
@@ -119,6 +125,10 @@ async fn infer(provider: &str, tensor: Frame) -> Vec<u8> {
             layout: TensorLayout::Nchw,
         })
         .expect("configure ortinfer");
+    element
+}
+
+async fn infer(element: &mut OrtInference, tensor: Frame) -> Vec<u8> {
     let mut out = Collect::default();
     element
         .process(PipelinePacket::DataFrame(tensor), &mut out)
@@ -150,19 +160,47 @@ async fn gpu_matches_cpu(provider: &str, gpu_vendor: u32) {
         eprintln!("skipping: no wgpu adapter on this host");
         return;
     }
-    let gpu_tensor = preprocess(true).await;
+    let gpu_tensor = preprocess(&mut preprocessor(true), FIRST_LUMA).await;
     if vendor(&gpu_tensor) != gpu_vendor {
         eprintln!("skipping: wgpupreprocess is not on a {gpu_vendor:#06x} GPU");
         return;
     }
-    let host_tensor = preprocess(false).await;
+    let host_tensor = preprocess(&mut preprocessor(false), FIRST_LUMA).await;
 
-    let from_gpu = infer(provider, gpu_tensor).await;
-    let from_host = infer("cpu", host_tensor).await;
+    let from_gpu = infer(&mut inference(provider), gpu_tensor).await;
+    let from_host = infer(&mut inference("cpu"), host_tensor).await;
 
     assert_eq!(from_gpu.len(), 3 * (WIDTH * HEIGHT) as usize * 4);
     assert!(from_host.iter().any(|&byte| byte != 0));
     assert_eq!(from_gpu, from_host);
+}
+
+async fn held_tensors_keep_their_values(provider: &str, gpu_vendor: u32) {
+    if !gpu_available().await {
+        eprintln!("skipping: no wgpu adapter on this host");
+        return;
+    }
+    let mut gpu = preprocessor(true);
+    let first = preprocess(&mut gpu, FIRST_LUMA).await;
+    if vendor(&first) != gpu_vendor {
+        eprintln!("skipping: wgpupreprocess is not on a {gpu_vendor:#06x} GPU");
+        return;
+    }
+    let second = preprocess(&mut gpu, SECOND_LUMA).await;
+    let mut host = preprocessor(false);
+    let first_host = preprocess(&mut host, FIRST_LUMA).await;
+    let second_host = preprocess(&mut host, SECOND_LUMA).await;
+
+    let mut on_gpu = inference(provider);
+    let second_from_gpu = infer(&mut on_gpu, second).await;
+    let first_from_gpu = infer(&mut on_gpu, first).await;
+    let mut on_cpu = inference("cpu");
+    let first_from_host = infer(&mut on_cpu, first_host).await;
+    let second_from_host = infer(&mut on_cpu, second_host).await;
+
+    assert_ne!(first_from_host, second_from_host);
+    assert_eq!(first_from_gpu, first_from_host);
+    assert_eq!(second_from_gpu, second_from_host);
 }
 
 #[cfg(feature = "ort-cuda-wgpu")]
@@ -171,8 +209,20 @@ async fn cuda_runs_on_the_gpu_tensor_and_matches_the_cpu() {
     gpu_matches_cpu("cuda", 0x10de).await;
 }
 
+#[cfg(feature = "ort-cuda-wgpu")]
+#[tokio::test]
+async fn cuda_reads_each_held_tensor_from_its_own_buffer() {
+    held_tensors_keep_their_values("cuda", 0x10de).await;
+}
+
 #[cfg(feature = "ort-hip-wgpu")]
 #[tokio::test]
 async fn migraphx_runs_on_the_gpu_tensor_and_matches_the_cpu() {
     gpu_matches_cpu("migraphx", 0x1002).await;
+}
+
+#[cfg(feature = "ort-hip-wgpu")]
+#[tokio::test]
+async fn migraphx_reads_each_held_tensor_from_its_own_buffer() {
+    held_tensors_keep_their_values("migraphx", 0x1002).await;
 }

@@ -26,8 +26,10 @@ shader to a `Caps::Tensor { F32, [1,3,H,W], Nchw }`, the same contract
 to a storage buffer and reads the f32 tensor back to `MemoryDomain::System`.
 
 `with_gpu_output` instead leaves the tensor in a `wgpu::Buffer` and emits
-`MemoryDomain::WgpuBuffer`, an on-device GPU-to-GPU copy into a fresh per-frame
-buffer with no map or read-back in the element, so a downstream GPU consumer
+`MemoryDomain::WgpuBuffer`. The compute pass writes straight into a pooled buffer,
+reused once no frame holds it, with no map or read-back in the element. On a
+Vulkan device that can export its memory (`dmabuf-wgpu`), each pooled buffer is
+an `OPAQUE_FD` export. A downstream GPU consumer
 reads it on-device and a CPU consumer pays the deferred read-back via the buffer
 owner. This removes the output-side GPU-to-CPU copy. `WgpuInference` is the
 consumer that binds the resulting buffer on-device, so `preprocess -> infer`
@@ -216,12 +218,13 @@ register only on an ONNX Runtime built with that provider, linked through
 `ORT_LIB_LOCATION`.
 
 With `ort-cuda-wgpu` (Linux), `ortinfer tensor-input=true` also takes the
-`MemoryDomain::WgpuBuffer` tensor `wgpupreprocess gpu-output=true` emits. A wgpu
-buffer cannot be exported, so each frame is copied on the GPU into a Vulkan buffer
-allocated with `OPAQUE_FD` export, which CUDA imports once with
-`cuImportExternalMemory` and maps as a device pointer. The session reads that
-pointer as an ONNX Runtime `Cuda` tensor, so the tensor never passes through
-system memory. The copy is waited for on the CPU (`device.poll`) before the run.
+`MemoryDomain::WgpuBuffer` tensor `wgpupreprocess gpu-output=true` emits. Each of
+`wgpupreprocess`'s exported pool buffers is imported into CUDA once with
+`cuImportExternalMemory`, keyed by the buffer, and mapped as a device pointer, so
+the session reads the tensor where the compute pass wrote it as an ONNX Runtime
+`Cuda` tensor, with no copy. A wgpu buffer from another producer cannot be
+exported, so it is copied on the GPU into an `OPAQUE_FD` export first. The
+compute pass (or that copy) is waited for on the CPU (`device.poll`) before the run.
 The wgpu device must be on CUDA device 0, checked by PCI bus id, so
 `wgpupreprocess` opens its device on the high-performance adapter. On the RTX 3060,
 `ball11n.onnx` at 1280x1280 runs at 63 fps this way and 32 fps through system

@@ -14,6 +14,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M2098: `ortinfer` on CUDA takes `wgpupreprocess`'s GPU tensor without a copy through system memory.
 - M2099: `ortinfer` on MIGraphX takes the same GPU tensor on an AMD GPU through HIP.
 - M2100: wgpu 30, vello 0.11, burn 0.22 (`BurnModule` drops the backend type parameter), host MSRV 1.95.
+- M2101: `wgpupreprocess` writes into pooled exportable buffers that `ortinfer` reads on CUDA and HIP without a copy.
 
 ## 0.14.0
 

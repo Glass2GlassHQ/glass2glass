@@ -69,7 +69,7 @@ pub struct OrtModel {
         target_os = "linux",
         any(feature = "ort-cuda-wgpu", feature = "ort-hip-wgpu")
     ))]
-    wgpu_import: Option<wgpu_input::WgpuTensorImport>,
+    wgpu_imports: wgpu_input::WgpuTensorImports,
 }
 
 /// Which execution provider a text-constructed element runs the session on.
@@ -450,7 +450,7 @@ impl OrtModel {
                 target_os = "linux",
                 any(feature = "ort-cuda-wgpu", feature = "ort-hip-wgpu")
             ))]
-            wgpu_import: None,
+            wgpu_imports: Default::default(),
         })
     }
 
@@ -516,7 +516,7 @@ impl LoadedModel for OrtModel {
         let shape = [1i64, 3, h, w];
         let size = shape.iter().product::<i64>() as u64 * core::mem::size_of::<f32>() as u64;
         let (device_pointer, memory_device) =
-            wgpu_input::stage(&mut self.wgpu_import, tensor, size)?;
+            wgpu_input::stage(&mut self.wgpu_imports, tensor, size)?;
         let memory = ::ort::memory::MemoryInfo::new(
             memory_device,
             wgpu_input::DEVICE_ORDINAL,
@@ -525,7 +525,7 @@ impl LoadedModel for OrtModel {
         )
         .map_err(ort_err)?;
         // SAFETY: `device_pointer` is `size` bytes of GPU memory on the provider's
-        // device, holding the finished copy, and stays mapped until the next frame.
+        // device, holding the finished tensor, and stays mapped while `tensor` is held.
         let input = unsafe {
             ::ort::value::TensorRefMut::<f32>::from_raw(
                 memory,
@@ -609,6 +609,9 @@ mod wgpu_input {
     use g2g_plugins::hip::{hip_pci_bus_id, HipExternalBuffer};
     use g2g_plugins::wgpudmabuf::{create_opaque_fd_export, producer_buffer, raw_device};
 
+    use std::os::fd::OwnedFd;
+    use std::sync::{Arc, Weak};
+
     use crate::wgpupreprocess::WgpuBufferOwner;
 
     // onnx runtime's cuda and migraphx providers run on device 0 unless their options name another
@@ -626,12 +629,29 @@ mod wgpu_input {
         Hip(HipExternalBuffer),
     }
 
+    impl ImportedBuffer {
+        fn device_memory(&self) -> (u64, AllocationDevice) {
+            match self {
+                #[cfg(feature = "ort-cuda-wgpu")]
+                Self::Cuda(buffer) => (buffer.device_pointer(), AllocationDevice::CUDA),
+                #[cfg(feature = "ort-hip-wgpu")]
+                Self::Hip(buffer) => (buffer.device_pointer(), AllocationDevice::HIP),
+            }
+        }
+    }
+
     #[derive(Debug)]
-    pub(super) struct WgpuTensorImport {
+    struct CopyTarget {
         device: wgpu::Device,
         exported: wgpu::Buffer,
         size: u64,
         imported: ImportedBuffer,
+    }
+
+    #[derive(Debug, Default)]
+    pub(super) struct WgpuTensorImports {
+        copy_target: Option<CopyTarget>,
+        pooled: Vec<(Weak<OwnedFd>, ImportedBuffer)>,
     }
 
     fn same_gpu(wgpu_bus: &str, runtime: &str, runtime_bus: &str) -> Result<(), G2gError> {
@@ -646,44 +666,52 @@ mod wgpu_input {
         Err(G2gError::UnsupportedDomain)
     }
 
-    impl WgpuTensorImport {
+    unsafe fn import_fd(
+        device: &wgpu::Device,
+        fd: OwnedFd,
+        size: u64,
+    ) -> Result<ImportedBuffer, G2gError> {
+        let adapter = device.adapter_info();
+        match adapter.vendor {
+            #[cfg(feature = "ort-cuda-wgpu")]
+            NVIDIA_VENDOR_ID => {
+                same_gpu(
+                    &adapter.device_pci_bus_id,
+                    "CUDA",
+                    &cuda_pci_bus_id(DEVICE_ORDINAL)?,
+                )?;
+                // SAFETY: the caller guarantees `fd` exports at least `size` bytes.
+                let buffer = unsafe { CudaExternalBuffer::import(fd, size, DEVICE_ORDINAL)? };
+                Ok(ImportedBuffer::Cuda(buffer))
+            }
+            #[cfg(feature = "ort-hip-wgpu")]
+            AMD_VENDOR_ID => {
+                same_gpu(
+                    &adapter.device_pci_bus_id,
+                    "HIP",
+                    &hip_pci_bus_id(DEVICE_ORDINAL)?,
+                )?;
+                // SAFETY: the caller guarantees `fd` exports at least `size` bytes.
+                let buffer = unsafe { HipExternalBuffer::import(fd, size, DEVICE_ORDINAL)? };
+                Ok(ImportedBuffer::Hip(buffer))
+            }
+            vendor => {
+                g2g_error!(
+                    Target::category("OrtInference"),
+                    "this build cannot hand a tensor on {} (PCI vendor {vendor:#06x}) to \
+                     onnx runtime",
+                    adapter.name
+                );
+                Err(G2gError::UnsupportedDomain)
+            }
+        }
+    }
+
+    impl CopyTarget {
         fn open(device: &wgpu::Device, size: u64) -> Result<Self, G2gError> {
-            let adapter = device.adapter_info();
-            let (exported, imported) = match adapter.vendor {
-                #[cfg(feature = "ort-cuda-wgpu")]
-                NVIDIA_VENDOR_ID => {
-                    same_gpu(
-                        &adapter.device_pci_bus_id,
-                        "CUDA",
-                        &cuda_pci_bus_id(DEVICE_ORDINAL)?,
-                    )?;
-                    let (exported, fd) = create_opaque_fd_export(device, size)?;
-                    // SAFETY: `fd` exports the dedicated allocation behind `exported`, `size` bytes.
-                    let buffer = unsafe { CudaExternalBuffer::import(fd, size, DEVICE_ORDINAL)? };
-                    (exported, ImportedBuffer::Cuda(buffer))
-                }
-                #[cfg(feature = "ort-hip-wgpu")]
-                AMD_VENDOR_ID => {
-                    same_gpu(
-                        &adapter.device_pci_bus_id,
-                        "HIP",
-                        &hip_pci_bus_id(DEVICE_ORDINAL)?,
-                    )?;
-                    let (exported, fd) = create_opaque_fd_export(device, size)?;
-                    // SAFETY: `fd` exports the dedicated allocation behind `exported`, `size` bytes.
-                    let buffer = unsafe { HipExternalBuffer::import(fd, size, DEVICE_ORDINAL)? };
-                    (exported, ImportedBuffer::Hip(buffer))
-                }
-                vendor => {
-                    g2g_error!(
-                        Target::category("OrtInference"),
-                        "this build cannot hand a tensor on {} (PCI vendor {vendor:#06x}) to \
-                         onnx runtime",
-                        adapter.name
-                    );
-                    return Err(G2gError::UnsupportedDomain);
-                }
-            };
+            let (exported, fd) = create_opaque_fd_export(device, size)?;
+            // SAFETY: `fd` exports the dedicated allocation behind `exported`, `size` bytes.
+            let imported = unsafe { import_fd(device, fd, size)? };
             Ok(Self {
                 device: device.clone(),
                 exported,
@@ -695,34 +723,64 @@ mod wgpu_input {
         fn serves(&self, device: &wgpu::Device, size: u64) -> bool {
             self.size == size && raw_device(&self.device) == raw_device(device)
         }
+    }
 
-        fn device_memory(&self) -> (u64, AllocationDevice) {
-            match &self.imported {
-                #[cfg(feature = "ort-cuda-wgpu")]
-                ImportedBuffer::Cuda(buffer) => (buffer.device_pointer(), AllocationDevice::CUDA),
-                #[cfg(feature = "ort-hip-wgpu")]
-                ImportedBuffer::Hip(buffer) => (buffer.device_pointer(), AllocationDevice::HIP),
+    impl WgpuTensorImports {
+        fn import_pooled(
+            &mut self,
+            owner: &WgpuBufferOwner,
+            fd: &Arc<OwnedFd>,
+            size: u64,
+        ) -> Result<(u64, AllocationDevice), G2gError> {
+            self.pooled.retain(|(slot, _)| slot.strong_count() > 0);
+            if let Some((_, imported)) = self
+                .pooled
+                .iter()
+                .find(|(slot, _)| core::ptr::eq(slot.as_ptr(), Arc::as_ptr(fd)))
+            {
+                return Ok(imported.device_memory());
             }
+            let dup = fd
+                .try_clone()
+                .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
+            // SAFETY: wgpupreprocess exports each pooled buffer as one dedicated
+            // allocation of `owner.buffer().size()` bytes, and `stage` checked `size` fits.
+            let imported = unsafe { import_fd(owner.device(), dup, size)? };
+            let memory = imported.device_memory();
+            self.pooled.push((Arc::downgrade(fd), imported));
+            Ok(memory)
         }
     }
 
-    // copies `size` bytes of `tensor` into memory the GPU runtime maps, returning its device pointer
+    // returns the device pointer of `size` bytes of `tensor` in memory the GPU runtime maps
     pub(super) fn stage(
-        import: &mut Option<WgpuTensorImport>,
+        imports: &mut WgpuTensorImports,
         tensor: &OwnedWgpuBuffer,
         size: u64,
     ) -> Result<(u64, AllocationDevice), G2gError> {
-        let any = tensor.keep_alive().as_any();
-        let (buffer, device, queue) = match any.downcast_ref::<WgpuBufferOwner>() {
-            Some(owner) => (owner.buffer(), owner.device(), owner.queue()),
-            None => producer_buffer(tensor).ok_or(G2gError::UnsupportedDomain)?,
-        };
         if (tensor.len as u64) < size {
             return Err(G2gError::CapsMismatch);
         }
-        let current = match import.take() {
+        let any = tensor.keep_alive().as_any();
+        let owner = any.downcast_ref::<WgpuBufferOwner>();
+        let pooled = owner.and_then(|owner| owner.export_fd().map(|fd| (owner, fd)));
+        if let Some((owner, fd)) = pooled {
+            owner
+                .device()
+                .poll(wgpu::PollType::Wait {
+                    submission_index: None,
+                    timeout: None,
+                })
+                .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
+            return imports.import_pooled(owner, fd, size);
+        }
+        let (buffer, device, queue) = match owner {
+            Some(owner) => (owner.buffer(), owner.device(), owner.queue()),
+            None => producer_buffer(tensor).ok_or(G2gError::UnsupportedDomain)?,
+        };
+        let current = match imports.copy_target.take() {
             Some(current) if current.serves(device, size) => current,
-            _ => WgpuTensorImport::open(device, size)?,
+            _ => CopyTarget::open(device, size)?,
         };
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
         encoder.copy_buffer_to_buffer(buffer, 0, &current.exported, 0, size);
@@ -733,8 +791,8 @@ mod wgpu_input {
                 timeout: None,
             })
             .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
-        let memory = current.device_memory();
-        *import = Some(current);
+        let memory = current.imported.device_memory();
+        imports.copy_target = Some(current);
         Ok(memory)
     }
 }
