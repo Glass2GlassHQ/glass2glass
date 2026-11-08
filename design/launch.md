@@ -529,12 +529,17 @@ path, because the surface is the producer's and the flag is what says so.
 CAI carries no CUDA context, so the pointers are valid only in the context the
 producer decoded into, exposed as the plane's `cuda_context` property for a
 consumer that must push it, and cupy and torch use the device's primary context.
-Plane lifetime is the call, enforced by a refcount check after it: a retained
-plane, including one a cupy array holds as its base or a consumed DLPack tensor
-holds as its manager context, fails the frame. An element that defines no hook
-for its shape gets `UnsupportedDomain` for a GPU frame rather than a silent
-readback, because `g2g-python` links no CUDA, so a CPU-only element needs an
-explicit `cudadownload` upstream. `g2g_process_cuda` may return a new
+A plane holds a share of its frame, and so does each DLPack tensor exported from
+it, so a plane kept past the call, as a cupy array's base or a tensor's manager
+context, keeps the producer's memory. A producer that recycles a fixed pool, such
+as `nvdec`'s output surfaces, has one fewer buffer until it goes. When Python lets
+go, `g2g_plugins::cuda::release_after_stream` frees the frame once an event
+recorded on a stream completes: the stream the consumer passed to `__dlpack__`
+for a tensor, and the legacy default stream, where cupy queues by default, for
+the plane. A kernel still queued when the hook returns then reads the frame
+before the producer reuses it. An element that defines no hook for its shape gets
+`UnsupportedDomain` for a GPU frame rather than a silent readback, so a CPU-only
+element needs an explicit `cudadownload` upstream. `g2g_process_cuda` may return a new
 `(luma, chroma)` pair at the input's geometry, which is validated and kept alive
 like a produced surface below and sent on in place of the input frame with the
 input's timing, sequence and metadata, under the element's `cuda_context` and
@@ -546,8 +551,7 @@ per contributing input, so a batched detector reads every stream's decoded
 surface in place, and the anchor flows on device-resident. A hosted source runs
 the handoff backwards: `g2g_produce_cuda(width, height, meta)` returns the two
 planes as any CAI-exporting objects, a cupy or torch allocation, or `None` for
-end of stream, because this crate links no CUDA and cannot allocate device memory
-itself. The returned planes are validated against the negotiated caps for shape,
+end of stream, because the host does not allocate device memory. The returned planes are validated against the negotiated caps for shape,
 sample type, packed-within-each-row layout, only the row pitch free, and a
 non-null pointer, before they become a frame, and the frame's keep-alive holds
 the Python objects so the memory outlives it. The source stamps timing and
@@ -561,8 +565,9 @@ since the CUDA domain carries the producing context but no device ordinal. A
 consumer asking for 1.0 or newer through `max_version` gets a
 `DLManagedTensorVersioned` capsule with the read-only flag set, and one asking
 for nothing gets the pre-1.0 `DLManagedTensor`. `copy=True` or another
-`dl_device` is refused rather than silently ignored, and `stream` is ignored
-because the domain carries no stream. DLPack strides count elements rather than
+`dl_device` is refused rather than silently ignored. `stream` names the stream
+the frame's release waits on: `None` and -1 mean the legacy default stream, and
+0 is refused because DLPack leaves it ambiguous for CUDA. DLPack strides count elements rather than
 bytes, so a row pitch that is not a whole number of samples is refused instead of
 rounded. The capsule's destructor frees the tensor only while the capsule still
 carries the unconsumed name, since a consumer that takes ownership renames it and

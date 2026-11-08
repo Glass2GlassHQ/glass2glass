@@ -260,6 +260,10 @@ fn dlpack_describes_the_same_plane_as_cai() {
         observed::<bool>("other_device_refused"),
         "a request for another device must be refused"
     );
+    assert!(
+        observed::<bool>("stream_zero_refused"),
+        "DLPack stream 0 is ambiguous for CUDA and must be refused"
+    );
 }
 
 #[test]

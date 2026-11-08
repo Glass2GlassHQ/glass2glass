@@ -598,7 +598,10 @@ or hands the pointers to another API (`nvenc`, the GL interop sinks,
 a frame that is already complete. `nvdec` records its event after
 `cuvidMapVideoFrame64`, which queues the surface's post-processing on the legacy
 default stream, and a non-blocking stream does not wait on that stream. A consumer finishes reading a frame before it
-drops it, since producers recycle the memory on drop.
+drops it, since producers recycle the memory on drop. A consumer that hands the
+pointers to work it cannot wait on, as the Python host does, passes the frame to
+`release_after_stream`, which drops it once the work queued so far on a given
+stream completes.
 `AllocationParams::cuda(...)` makes `MemoryDomainKind::Cuda` a cross-element pool
 domain in the allocation negotiation ([caps.md](caps.md)).
 

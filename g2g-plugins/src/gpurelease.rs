@@ -72,7 +72,7 @@ pub fn release_after(fence: impl GpuFence + 'static, resources: Box<dyn core::fm
     });
 }
 
-#[cfg(feature = "hip")]
+#[cfg(any(feature = "hip", test))]
 pub(crate) fn wait_until_released() {
     let queue = release_queue();
     let pending = queue.pending.lock().unwrap_or_else(PoisonError::into_inner);

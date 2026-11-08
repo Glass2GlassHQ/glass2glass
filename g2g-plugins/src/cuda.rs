@@ -148,6 +148,21 @@ impl GpuFence for CudaEvent {
     }
 }
 
+// drops `buffer` once the work queued so far on `stream` in its device's primary context completes
+pub fn release_after_stream(buffer: OwnedCudaBuffer, stream: u64) -> Result<(), G2gError> {
+    let device = CudaDevice::open(buffer.device_ordinal)?;
+    let event = CudaEvent::new(&device)?;
+    {
+        let _bound = device.bind()?;
+        // SAFETY: the event belongs to the current context, and `stream` names a stream of that context.
+        check(unsafe {
+            ffi::cu_event_record(event.handle as ffi::CuEvent, stream as ffi::CuStream)
+        })?;
+    }
+    release_after(event, Box::new(buffer));
+    Ok(())
+}
+
 #[derive(Debug)]
 pub(crate) struct CudaStream {
     device: Arc<CudaDevice>,
@@ -1225,6 +1240,71 @@ unsafe fn copy_plane_to_array(
 mod tests {
     use super::*;
     use g2g_core::{FrameTiming, PushOutcome};
+
+    #[derive(Debug, Default)]
+    struct StreamGate {
+        open: Mutex<bool>,
+        opened: std::sync::Condvar,
+    }
+
+    unsafe extern "C" fn wait_for_gate(gate: *mut core::ffi::c_void) {
+        // SAFETY: the test keeps the gate alive until the stream passes this callback.
+        let gate = unsafe { &*(gate as *const StreamGate) };
+        let mut open = gate.open.lock().unwrap();
+        while !*open {
+            open = gate.opened.wait(open).unwrap();
+        }
+    }
+
+    #[derive(Debug)]
+    struct DropFlag(Arc<std::sync::atomic::AtomicBool>);
+
+    impl CudaKeepAlive for DropFlag {}
+
+    impl Drop for DropFlag {
+        fn drop(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn a_frame_released_after_a_stream_outlives_the_work_queued_on_it() {
+        let device = match CudaDevice::open(0) {
+            Ok(device) => device,
+            Err(error) => {
+                std::eprintln!("skipping: no CUDA device 0: {error:?}");
+                return;
+            }
+        };
+        let stream = CudaStream::new(&device).unwrap();
+        let gate = Arc::new(StreamGate::default());
+        {
+            let _bound = device.bind().unwrap();
+            // SAFETY: `gate` outlives the callback, which the test unblocks before it ends.
+            check(unsafe {
+                ffi::cu_launch_host_func(
+                    stream.handle as ffi::CuStream,
+                    wait_for_gate,
+                    Arc::as_ptr(&gate) as *mut core::ffi::c_void,
+                )
+            })
+            .unwrap();
+        }
+        let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let frame =
+            OwnedCudaBuffer::new(0, 0, 0, 0, 0, 0, 0, 0, Arc::new(DropFlag(dropped.clone())));
+        release_after_stream(frame, stream.handle as u64).unwrap();
+
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let dropped_while_blocked = dropped.load(std::sync::atomic::Ordering::SeqCst);
+        *gate.open.lock().unwrap() = true;
+        gate.opened.notify_all();
+        stream.synchronize().unwrap();
+        crate::gpurelease::wait_until_released();
+
+        assert!(!dropped_while_blocked);
+        assert!(dropped.load(std::sync::atomic::Ordering::SeqCst));
+    }
 
     #[derive(Default)]
     struct FrameSink {

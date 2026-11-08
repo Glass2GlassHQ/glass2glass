@@ -32,8 +32,9 @@ use pyo3::types::{PyDict, PyTuple};
 
 use std::sync::Arc;
 
+use g2g_core::log::Target;
 use g2g_core::memory::{CudaKeepAlive, OwnedCudaBuffer};
-use g2g_core::RawVideoFormat;
+use g2g_core::{g2g_error, G2gError, HardwareError, RawVideoFormat};
 
 /// `__cuda_array_interface__` version this describes.
 const CAI_VERSION: u32 = 3;
@@ -128,9 +129,8 @@ const _: () = assert!(core::mem::size_of::<DlManagedTensor>() == 64);
 const _: () = assert!(core::mem::size_of::<DlManagedTensorVersioned>() == 80);
 
 /// Backing store for one exported tensor: the managed tensor the capsule points
-/// at, the shape / stride arrays it points into, and a handle on the plane, so a
-/// consumer that keeps the tensor keeps the plane alive too and the host's
-/// post-call refcount check catches it.
+/// at, the shape / stride arrays it points into, a handle on the plane, and a
+/// share of the frame released behind the consumer's stream.
 #[derive(Debug)]
 struct Exported<T> {
     managed: T,
@@ -138,15 +138,48 @@ struct Exported<T> {
     strides: [i64; MAX_RANK],
     #[allow(dead_code, reason = "held only to keep the exporting plane alive")]
     plane: Py<CudaPlane>,
+    #[allow(dead_code, reason = "held only to keep the frame alive")]
+    frame: HeldFrame,
+}
+
+// cuda.h's CU_STREAM_LEGACY, the value DLPack also passes for the legacy default stream
+const LEGACY_DEFAULT_STREAM: u64 = 0x1;
+
+#[derive(Debug)]
+struct HeldFrame {
+    frame: Option<OwnedCudaBuffer>,
+    stream: u64,
+}
+
+impl Drop for HeldFrame {
+    fn drop(&mut self) {
+        let Some(frame) = self.frame.take() else {
+            return;
+        };
+        #[cfg(any(target_os = "linux", windows))]
+        match g2g_plugins::cuda::release_after_stream(frame, self.stream) {
+            Ok(()) => {}
+            // without libcuda nothing can have queued work on the frame
+            Err(G2gError::Hardware(HardwareError::LibraryNotFound(_))) => {}
+            Err(error) => g2g_error!(
+                Target::category("cudaplane"),
+                "freed a CUDA frame without waiting for the GPU work Python queued on it: {:?}",
+                error
+            ),
+        }
+        #[cfg(not(any(target_os = "linux", windows)))]
+        drop(frame);
+    }
 }
 
 /// One plane of a GPU-resident frame, described to Python by CAI v3 and DLPack.
-/// Holds only the device pointer and the plane's layout, so it is inert on the
-/// Rust side: nothing here touches CUDA. Valid for the duration of one
-/// `g2g_process_cuda` call (see the retention guard in [`crate::host`]).
+/// Holds a share of the frame, so the producer cannot recycle the memory while
+/// Python refers to the plane, and releases it behind the legacy default stream,
+/// the stream a CAI consumer such as cupy queues on by default.
 #[pyclass(frozen, module = "g2g")]
 #[derive(Debug)]
 pub(crate) struct CudaPlane {
+    frame: HeldFrame,
     device_ptr: u64,
     shape: Vec<usize>,
     /// Byte strides, outermost first: the producer's row pitch, then the
@@ -302,6 +335,7 @@ unsafe fn capsule<'py, T>(
 fn export_legacy<'py>(
     py: Python<'py>,
     plane: Py<CudaPlane>,
+    frame: HeldFrame,
     tensor: DlTensor,
     shape: [i64; MAX_RANK],
     strides: [i64; MAX_RANK],
@@ -315,6 +349,7 @@ fn export_legacy<'py>(
         shape,
         strides,
         plane,
+        frame,
     }));
     // SAFETY: `raw` is a live, uniquely owned box, so pointers into it stay valid
     // until its deleter reclaims it; the tensor's array pointers must point at the
@@ -333,6 +368,7 @@ fn export_legacy<'py>(
 fn export_versioned<'py>(
     py: Python<'py>,
     plane: Py<CudaPlane>,
+    frame: HeldFrame,
     tensor: DlTensor,
     shape: [i64; MAX_RANK],
     strides: [i64; MAX_RANK],
@@ -351,6 +387,7 @@ fn export_versioned<'py>(
         shape,
         strides,
         plane,
+        frame,
     }));
     // SAFETY: as `export_legacy`.
     unsafe {
@@ -400,10 +437,10 @@ impl CudaPlane {
     ///
     /// `max_version` picks the struct: a consumer that asks for 1.0 or newer gets
     /// the versioned tensor (which carries the read-only flag), one that asks for
-    /// nothing gets the pre-1.0 one. `stream` is ignored: the g2g CUDA domain
-    /// carries no stream and the host waits for the producer's writes before the
-    /// frame reaches Python, so there is nothing for the consumer's stream to
-    /// wait on. A `dl_device` other than this
+    /// nothing gets the pre-1.0 one. The host waits for the producer's writes
+    /// before the frame reaches Python, so the consumer's `stream` has nothing to
+    /// wait on. The tensor holds a share of the frame and releases it behind that
+    /// stream once the consumer frees the tensor. A `dl_device` other than this
     /// plane's, or `copy=True`, is refused rather than silently ignored, since
     /// this export cannot move or duplicate the producer's memory.
     #[pyo3(signature = (stream=None, max_version=None, dl_device=None, copy=None))]
@@ -414,7 +451,15 @@ impl CudaPlane {
         dl_device: Option<(i32, i32)>,
         copy: Option<bool>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let _ = stream;
+        let stream =
+            match stream.map(|stream| stream.extract::<i64>()).transpose()? {
+                // the array API's None and -1 name no stream, so the legacy default stream stands in
+                None | Some(-1) => LEGACY_DEFAULT_STREAM,
+                Some(0) => return Err(PyBufferError::new_err(
+                    "DLPack stream 0 is ambiguous for CUDA, pass 1 for the legacy default stream",
+                )),
+                Some(stream) => stream as u64,
+            };
         if copy == Some(true) {
             return Err(PyBufferError::new_err(
                 "g2g.CudaPlane cannot copy the producer's device memory",
@@ -436,11 +481,15 @@ impl CudaPlane {
         };
         let py = slf.py();
         let handle = slf.clone().unbind();
+        let frame = HeldFrame {
+            frame: plane.frame.frame.clone(),
+            stream,
+        };
         match max_version {
             Some((major, _)) if major >= DLPACK_MAJOR => {
-                export_versioned(py, handle, tensor, shape, strides)
+                export_versioned(py, handle, frame, tensor, shape, strides)
             }
-            _ => export_legacy(py, handle, tensor, shape, strides),
+            _ => export_legacy(py, handle, frame, tensor, shape, strides),
         }
     }
 
@@ -463,7 +512,12 @@ pub(crate) fn nv12_planes(
     }
     let sample = fmt.bytes_per_sample();
     let (width, height) = (buf.width as usize, buf.height as usize);
+    let held = || HeldFrame {
+        frame: Some(buf.clone()),
+        stream: LEGACY_DEFAULT_STREAM,
+    };
     let luma = CudaPlane {
+        frame: held(),
         device_ptr: buf.luma_ptr,
         shape: vec![height, width],
         strides: vec![buf.luma_pitch as usize, sample],
@@ -472,6 +526,7 @@ pub(crate) fn nv12_planes(
         device_ordinal: buf.device_ordinal,
     };
     let chroma = CudaPlane {
+        frame: held(),
         device_ptr: buf.chroma_ptr,
         shape: vec![height.div_ceil(2), width.div_ceil(2), 2],
         strides: vec![buf.chroma_pitch as usize, 2 * sample, sample],

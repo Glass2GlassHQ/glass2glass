@@ -4,7 +4,9 @@
 //! needs torch and a CUDA device and skips itself without one.
 #![cfg(feature = "analytics")]
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -69,6 +71,10 @@ fn nv12_caps() -> Caps {
 /// A pitched CUDA NV12 frame with distinctive timing, sequence and an upstream
 /// blob, chroma following luma after `HEIGHT` rows.
 fn cuda_frame(luma_ptr: u64, device_ordinal: i32) -> Frame {
+    cuda_frame_owned_by(luma_ptr, device_ordinal, Arc::new(NoOwner))
+}
+
+fn cuda_frame_owned_by(luma_ptr: u64, device_ordinal: i32, owner: Arc<dyn CudaKeepAlive>) -> Frame {
     let chroma_ptr = luma_ptr + u64::from(PITCH) * u64::from(HEIGHT);
     let mut frame = Frame {
         domain: MemoryDomain::Cuda(OwnedCudaBuffer::new(
@@ -80,7 +86,7 @@ fn cuda_frame(luma_ptr: u64, device_ordinal: i32) -> Frame {
             HEIGHT,
             0,
             device_ordinal,
-            Arc::new(NoOwner),
+            owner,
         )),
         timing: FrameTiming {
             pts_ns: INPUT_PTS_NS,
@@ -255,24 +261,76 @@ fn returning_none_passes_the_input_frame_on() {
     assert_eq!(upstream_blob(&frame, UPSTREAM_HEADER), UPSTREAM_PAYLOAD);
 }
 
+#[derive(Debug)]
+struct DropFlag(Arc<AtomicBool>);
+
+impl CudaKeepAlive for DropFlag {}
+
+impl Drop for DropFlag {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
+// the release thread waits on a CUDA event, which completes within milliseconds
+const RELEASE_TIMEOUT: Duration = Duration::from_secs(5);
+
+fn wait_until_dropped(dropped: &AtomicBool) -> bool {
+    let deadline = Instant::now() + RELEASE_TIMEOUT;
+    while !dropped.load(Ordering::SeqCst) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    dropped.load(Ordering::SeqCst)
+}
+
 #[test]
-fn returning_the_input_planes_fails_the_frame() {
+fn a_frame_outlives_a_read_python_queued_on_its_own_stream() {
+    let Some((input_luma, _, ordinal)) = allocate_torch_surface() else {
+        eprintln!("skipping: no torch / no CUDA device on this host");
+        return;
+    };
+    let dropped = Arc::new(AtomicBool::new(false));
+    let input = cuda_frame_owned_by(input_luma, ordinal, Arc::new(DropFlag(dropped.clone())));
+    let frame = run_transform("TorchQueuedReader", input);
+    drop(frame);
+    let held_while_queued = !dropped.load(Ordering::SeqCst);
+    assert!(held_while_queued, "the queued read holds the frame");
+    assert!(
+        wait_until_dropped(&dropped),
+        "the frame is freed once the read ran"
+    );
+}
+
+#[test]
+fn returned_input_planes_keep_the_input_memory_while_the_frame_flows_on() {
     prepare_interpreter();
     let mut element = PyTransform::new("cuda_element", "InputReturner")
         .with_accept(nv12_caps())
         .with_cuda_frames(true);
     element.configure_pipeline(&nv12_caps()).unwrap();
+    let dropped = Arc::new(AtomicBool::new(false));
+    let input = cuda_frame_owned_by(FAKE_LUMA, 0, Arc::new(DropFlag(dropped.clone())));
     let mut sink = CollectSink::default();
-    let result = tokio::runtime::Builder::new_current_thread()
+    tokio::runtime::Builder::new_current_thread()
         .build()
         .unwrap()
-        .block_on(element.process(
-            PipelinePacket::DataFrame(cuda_frame(FAKE_LUMA, 0)),
-            &mut sink,
-        ));
+        .block_on(element.process(PipelinePacket::DataFrame(input), &mut sink))
+        .expect("handing the input planes back is allowed");
+    let [PipelinePacket::DataFrame(frame)] = <[PipelinePacket; 1]>::try_from(sink.packets).unwrap()
+    else {
+        panic!("one frame flows on");
+    };
+    let MemoryDomain::Cuda(buffer) = &frame.domain else {
+        panic!("the frame stays in the Cuda domain");
+    };
+    assert_eq!(buffer.luma_ptr, FAKE_LUMA);
     assert!(
-        result.is_err(),
-        "the input planes dangle once the input frame is replaced, got {result:?}"
+        !dropped.load(Ordering::SeqCst),
+        "the returned planes hold the input memory"
     );
-    assert!(sink.packets.is_empty());
+    Python::attach(|_| drop(frame));
+    assert!(
+        wait_until_dropped(&dropped),
+        "the input memory is freed once the frame that carries it goes"
+    );
 }

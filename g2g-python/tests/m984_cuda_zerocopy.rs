@@ -7,7 +7,9 @@
 //! real device plus cupy and skips itself when either is missing.
 #![cfg(feature = "python")]
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -25,6 +27,8 @@ const HEIGHT: u32 = 1080;
 const PITCH: u32 = 2048;
 /// Never dereferenced: only the routing and the CAI description are under test.
 const FAKE_LUMA: u64 = 0xdead_0000;
+// the release thread waits on a CUDA event, which completes within milliseconds
+const RELEASE_TIMEOUT: Duration = Duration::from_secs(5);
 /// The byte `CupyConsumer` writes through the plane; mirrors the fixture.
 const MARKER_VALUE: u32 = 0xA5;
 
@@ -96,18 +100,14 @@ fn nv12_caps() -> Caps {
 /// A frame whose memory is a CUDA NV12 surface at `luma_ptr`, chroma following
 /// after `HEIGHT` pitched rows (the layout NVDEC hands over).
 fn cuda_frame(luma_ptr: u64, pitch: u32) -> Frame {
+    cuda_frame_owned_by(luma_ptr, pitch, Arc::new(NoOwner))
+}
+
+fn cuda_frame_owned_by(luma_ptr: u64, pitch: u32, owner: Arc<dyn CudaKeepAlive>) -> Frame {
     let chroma_ptr = luma_ptr + u64::from(pitch) * u64::from(HEIGHT);
     Frame {
         domain: MemoryDomain::Cuda(OwnedCudaBuffer::new(
-            luma_ptr,
-            chroma_ptr,
-            pitch,
-            pitch,
-            WIDTH,
-            HEIGHT,
-            0,
-            0,
-            Arc::new(NoOwner),
+            luma_ptr, chroma_ptr, pitch, pitch, WIDTH, HEIGHT, 0, 0, owner,
         )),
         timing: FrameTiming {
             pts_ns: 0,
@@ -248,14 +248,38 @@ fn element_without_the_cuda_entry_point_refuses_a_gpu_frame() {
     assert!(packets.is_empty(), "nothing should flow downstream");
 }
 
+#[derive(Debug)]
+struct DropFlag(Arc<AtomicBool>);
+
+impl CudaKeepAlive for DropFlag {}
+
+impl Drop for DropFlag {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
 #[test]
-fn retaining_a_plane_past_the_call_fails_the_frame() {
-    let (result, packets) = run_one("PlaneRetainer", cuda_frame(FAKE_LUMA, PITCH));
+fn a_plane_kept_past_the_call_holds_the_frame_until_python_lets_go() {
+    let dropped = Arc::new(AtomicBool::new(false));
+    let frame = cuda_frame_owned_by(FAKE_LUMA, PITCH, Arc::new(DropFlag(dropped.clone())));
+    let (result, packets) = run_one("PlaneRetainer", frame);
+    result.expect("keeping a plane is allowed");
+    drop(packets);
+    let held_while_kept = !dropped.load(Ordering::SeqCst);
+    Python::attach(|py| {
+        let observed = fixture(py).getattr("OBSERVED").unwrap();
+        observed.del_item("kept_plane").unwrap();
+    });
+    let deadline = Instant::now() + RELEASE_TIMEOUT;
+    while !dropped.load(Ordering::SeqCst) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(held_while_kept, "the kept plane holds the frame");
     assert!(
-        result.is_err(),
-        "a plane kept past return would dangle; the host must reject it"
+        dropped.load(Ordering::SeqCst),
+        "the frame is freed once Python lets go of the plane"
     );
-    assert!(packets.is_empty());
 }
 
 #[test]

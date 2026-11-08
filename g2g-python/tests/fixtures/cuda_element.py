@@ -47,11 +47,10 @@ class CpuOnly:
 
 
 class PlaneRetainer:
-    """Misbehaves: keeps a plane past the call, whose device pointer dangles once
-    the frame is released downstream. The host must reject this."""
+    """Keeps a plane past the call, which keeps the frame's device memory with it."""
 
     def g2g_process_cuda(self, luma, chroma, width, height, yuv_conversion, meta):
-        self.kept = luma
+        OBSERVED["kept_plane"] = luma
 
 
 class DlpackShapeProbe:
@@ -70,6 +69,7 @@ class DlpackShapeProbe:
         del versioned, legacy
 
         OBSERVED["copy_refused"] = _refuses(luma.__dlpack__, copy=True)
+        OBSERVED["stream_zero_refused"] = _refuses(luma.__dlpack__, stream=0)
         OBSERVED["other_device_refused"] = _refuses(luma.__dlpack__, dl_device=(2, 7))
 
 
@@ -507,9 +507,28 @@ class NoneReturner:
         return None
 
 
+# about half a second of GPU spinning on an RTX 3060, long enough to look at the frame while the read waits
+QUEUED_READ_SLEEP_CYCLES = 1_000_000_000
+
+
+class TorchQueuedReader:
+    """Queues a read of the luma plane behind a long GPU sleep on a side stream,
+    then returns while the read is still waiting."""
+
+    def g2g_process_cuda(self, luma, chroma, width, height, yuv_conversion, meta):
+        import torch
+
+        # CUDA loads a kernel on its first launch and waits for the device to go idle to do it
+        torch.zeros((2, 4), dtype=torch.uint8, device="cuda")[:, :2].to(torch.int32)
+        stream = torch.cuda.Stream()
+        with torch.cuda.stream(stream):
+            torch.cuda._sleep(QUEUED_READ_SLEEP_CYCLES)
+            OBSERVED["queued_read"] = torch.from_dlpack(luma).to(torch.int32)
+        OBSERVED["reader_stream"] = stream
+
+
 class InputReturner:
-    """Misbehaves: hands the input planes back, whose memory the host releases
-    when it replaces the input frame. The host must reject this."""
+    """Hands the input planes back, which hold the input frame's memory."""
 
     def g2g_process_cuda(self, luma, chroma, width, height, yuv_conversion, meta):
         return luma, chroma

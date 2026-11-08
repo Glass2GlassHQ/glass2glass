@@ -948,7 +948,7 @@ fn propvalue_to_py(py: Python<'_>, value: &PropValue) -> PyResult<Py<PyAny>> {
 enum Handoff {
     System(Vec<SystemSpan>),
     /// Luma and interleaved chroma of a single Cuda-domain frame.
-    Cuda(CudaPlane, CudaPlane),
+    Cuda(Box<(CudaPlane, CudaPlane)>),
     /// One plane pair per contributing input of a Cuda-domain batch.
     CudaBatch(Vec<(CudaPlane, CudaPlane)>),
     /// Nothing to hand over: a GPU source allocates its own surface and returns
@@ -991,7 +991,7 @@ fn handoff(py: Python<'_>, instance: &Py<PyAny>, job: &mut Job) -> Result<Handof
             JobKind::Transform | JobKind::Consume => {
                 require_hook(py, instance, CUDA_HOOK, CUDA_REMEDY)?;
                 let (luma, chroma) = planes.pop().ok_or(G2gError::UnsupportedDomain)?;
-                Ok(Handoff::Cuda(luma, chroma))
+                Ok(Handoff::Cuda(Box::new((luma, chroma))))
             }
             JobKind::Batch => {
                 require_hook(py, instance, CUDA_BATCH_HOOK, CUDA_REMEDY)?;
@@ -1124,7 +1124,10 @@ fn process_job(
     // `Produce` job returns the Python source's bool (false = EOS).
     let produced = match handoff {
         Handoff::System(spans) => call_system(py, instance, &spans, &job, &sink),
-        Handoff::Cuda(luma, chroma) => call_cuda(py, instance, luma, chroma, &mut job, &sink),
+        Handoff::Cuda(planes) => {
+            let (luma, chroma) = *planes;
+            call_cuda(py, instance, luma, chroma, &mut job, &sink)
+        }
         Handoff::CudaBatch(planes) => call_cuda_batch(py, instance, planes, &job, &sink),
         Handoff::ProduceCuda => call_produce_cuda(py, instance, &mut job, &sink),
     };
@@ -1480,23 +1483,20 @@ fn call_cuda(
     job: &mut Job,
     sink: &Py<MetaSink>,
 ) -> PyResult<bool> {
-    let planes = [Py::new(py, luma)?, Py::new(py, chroma)?];
     let (width, height, fmt) = cuda_geometry(job)?;
     let yuv_conversion = cuda_yuv_conversion(job)?;
     let bound = instance.bind(py);
     let returned = bound.call_method1(
         CUDA_HOOK,
         (
-            planes[0].clone_ref(py),
-            planes[1].clone_ref(py),
+            Py::new(py, luma)?,
+            Py::new(py, chroma)?,
             width,
             height,
             yuv_conversion,
             sink.clone_ref(py),
         ),
     )?;
-    // `returned` is still alive here: an input plane handed back counts as retained.
-    planes_released(py, &planes)?;
     if returned_by_sink(&job.kind, &returned) {
         return Err(sink_produced(bound, SINK_RETURNED));
     }
@@ -1524,24 +1524,16 @@ fn call_cuda_batch(
     job: &Job,
     sink: &Py<MetaSink>,
 ) -> PyResult<bool> {
-    let mut handles = Vec::with_capacity(planes.len() * 2);
     let mut pairs = Vec::with_capacity(planes.len());
     for (luma, chroma) in planes {
-        let (luma, chroma) = (Py::new(py, luma)?, Py::new(py, chroma)?);
-        pairs.push((luma.clone_ref(py), chroma.clone_ref(py)));
-        handles.push(luma);
-        handles.push(chroma);
+        pairs.push((Py::new(py, luma)?, Py::new(py, chroma)?));
     }
     let (width, height, _) = cuda_geometry(job)?;
     let list = pyo3::types::PyList::new(py, pairs)?;
-    instance.bind(py).call_method1(
-        CUDA_BATCH_HOOK,
-        (list.clone(), width, height, sink.clone_ref(py)),
-    )?;
-    // Release the list's own references before counting, so only what the element
-    // kept is left.
-    drop(list);
-    planes_released(py, &handles)
+    instance
+        .bind(py)
+        .call_method1(CUDA_BATCH_HOOK, (list, width, height, sink.clone_ref(py)))?;
+    Ok(true)
 }
 
 /// Ask a hosted GPU source for its next surface. It allocates the device memory
@@ -1590,25 +1582,6 @@ fn reported_cuda_device(instance: &Bound<'_, PyAny>) -> PyResult<i32> {
         Ok(value) if !value.is_none() => value.extract(),
         _ => Ok(0),
     }
-}
-
-/// The device pointers belong to the producer and are freed once the frame is
-/// released downstream, so nothing built over a plane may outlive the call: a
-/// retained cupy array holds its plane as the array's base, and a consumed DLPack
-/// capsule holds it through the tensor's manager context. Our own handle is the
-/// only reference left if the element let go, so a higher count means it kept one:
-/// fail the frame loud rather than let a later kernel read freed device memory.
-fn planes_released(py: Python<'_>, planes: &[Py<CudaPlane>]) -> PyResult<bool> {
-    let retained = || planes.iter().any(|plane| plane.get_refcnt(py) > 1);
-    if retained() {
-        collect_cycles(py)?;
-    }
-    if retained() {
-        return Err(PyRuntimeError::new_err(
-            "a hosted element retained a CudaPlane past return (use-after-free risk)",
-        ));
-    }
-    Ok(true)
 }
 
 // a frame object that stores itself, as `torch.fx.wrap` does on import, keeps its callers' views alive until gc runs

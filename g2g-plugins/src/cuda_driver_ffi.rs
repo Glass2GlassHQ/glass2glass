@@ -103,6 +103,12 @@ crate::shared_library::shared_library! {
     pub(crate) fn cu_event_record = "cuEventRecord"(event: CuEvent, stream: CuStream) -> CuResult;
     pub(crate) fn cu_event_synchronize = "cuEventSynchronize"(event: CuEvent) -> CuResult;
     pub(crate) fn cu_event_destroy = "cuEventDestroy_v2"(event: CuEvent) -> CuResult;
+    #[cfg(test)]
+    pub(crate) fn cu_launch_host_func = "cuLaunchHostFunc"(
+        stream: CuStream,
+        function: unsafe extern "C" fn(*mut c_void),
+        data: *mut c_void,
+    ) -> CuResult;
     #[cfg(feature = "hip")]
     pub(crate) fn cu_memcpy_htod_async = "cuMemcpyHtoDAsync_v2"(destination: u64, source: *const c_void, size: usize, stream: CuStream) -> CuResult;
     #[cfg(feature = "hip")]

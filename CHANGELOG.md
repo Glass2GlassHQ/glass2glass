@@ -36,6 +36,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M2120: `nvdec` downloads to system memory asynchronously, and its frames carry a ready event recorded after the surface is mapped.
 - M2121: `--profile` times every element's host, wait and GPU time, and the throughput objective counts the runner thread, each element, and each copy's wait for its producer.
 - M2122: the planner places `nvdec cuda-device-id=-1` and `hipdownload`, and keeps a line's `execution-provider`.
+- M2123: CUDA planes handed to Python hold their frame and free it after the consumer's stream passes the queued work.
 
 ## 0.14.0
 
