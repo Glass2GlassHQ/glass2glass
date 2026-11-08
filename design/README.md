@@ -290,6 +290,27 @@ outputs, and `funnel`, which merges in arrival order, but no merge that restores
 the split order. Every branch must emit one frame for each frame it receives:
 a dropped frame leaves the merge waiting until that branch ends.
 
+`g2g-launch --profile <file>` and `g2g-launch-py --profile <file>` measure the
+costs the placement planner reads. `placement::ProfileRun::prepare` picks every
+element that has a `device-id` or `cuda-device-id` property and a GPU device,
+declared or followed from upstream (`traced_gpu_device`, the trace the splice
+uses), and puts a `HipSync` after each one whose output is a Hip frame.
+HIP elements return once their kernels are queued, so without the wait a
+convert records 30 µs instead of the 3 ms it takes. The sync waits on the
+frame's ready event on tokio's blocking pool. An element's time is the median
+of its per-frame `process()` compute from the run's `VisitRecorder`, plus the
+median wait in its sync, skipping the first ten frames. The runner's latency
+histograms have power-of-two buckets, too coarse to rank two devices. An entry is keyed by
+the element's Rust type name (`DynAsyncElement::type_name`), its writable
+properties other than the device and backend ones, the caps on each input, and
+the device with its product name. A run merges into the file and replaces the
+entries it measured again, so one run per device setup builds up the
+candidates. After the elements, every ordered pair of devices in the file gets a
+copy timing, a fixed overhead and a bandwidth fitted from the median of 21 copies
+of 4 KiB and of 16 MiB through `CrossDeviceCopier`'s staging path. `ortinfer`
+passes its `device-id` to the CUDA, TensorRT, ROCm and MIGraphX providers and
+reports it as its device, with the vendor set by the provider.
+
 On AMD, `hipupload` imports a linear dma-buf frame with
 `hipImportExternalMemory`, as GStreamer's `hipupload` does, and keeps each import
 in a cache keyed by the dma-buf's inode, the same `DmaBufImportCache` the wgpu

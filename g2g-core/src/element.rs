@@ -697,6 +697,10 @@ pub trait DynAsyncElement: ElementBound {
         None
     }
 
+    fn type_name(&self) -> &'static str {
+        core::any::type_name::<Self>()
+    }
+
     fn output_domain_follows_input(&self) -> bool {
         false
     }
@@ -1184,6 +1188,10 @@ impl<'b> DynAsyncElement for &'b mut (dyn DynAsyncElement + 'b) {
 
     fn gpu_device(&self) -> Option<GpuDevice> {
         (**self).gpu_device()
+    }
+
+    fn type_name(&self) -> &'static str {
+        (**self).type_name()
     }
 
     fn output_domain_follows_input(&self) -> bool {

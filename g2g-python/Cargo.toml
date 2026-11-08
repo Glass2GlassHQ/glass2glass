@@ -34,6 +34,8 @@ analytics = ["python", "g2g-core/metadata"]
 # `analyticsoverlay` -> `autovideosink` end to end in pure g2g. Pulls g2g-plugins
 # (a normal, no longer dev-only edge; g2g-plugins still does not depend on us, so
 # it stays acyclic) with the host Linux media features, plus a tokio runtime.
+# `g2g-launch-py --profile`: per-element GPU timings for the placement planner.
+placement = ["launch", "g2g-plugins/placement"]
 launch = [
     "analytics",
     "dep:tokio",

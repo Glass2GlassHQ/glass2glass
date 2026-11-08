@@ -40,6 +40,10 @@
 //!                     <dir> as a `replaysrc` recording
 //! --trace <file>      write each element's per-frame wait and work spans to
 //!                     <file> as Chrome trace JSON, for ui.perfetto.dev
+//! --profile <file>    time each GPU element on the device it runs on and the
+//!                     copies between those devices, and merge the timings
+//!                     into <file> for the placement planner (`placement`
+//!                     build feature)
 //! --seek <seconds>    one flushing seek to that stream time before the first
 //!                     frame, then run to the end (`--help` says where the
 //!                     first frame lands)
@@ -164,7 +168,7 @@ type RunFuture<'r> = core::pin::Pin<
     >,
 >;
 
-const USAGE: &str = "usage: g2g-launch [-v] [-q] [--dot] [--copy-plan] [--validate-json] [--run-json] [--threads[=pinned]] [--observe <port>] [--observe-host <addr>] [--tui] [--record-on-error <dir>] [--trace <file>] [--seek <seconds>] [--seek-at <position>:<seconds>] [--plugin <path>] [-e] [-m] [-h] [--version] \
+const USAGE: &str = "usage: g2g-launch [-v] [-q] [--dot] [--copy-plan] [--validate-json] [--run-json] [--threads[=pinned]] [--observe <port>] [--observe-host <addr>] [--tui] [--record-on-error <dir>] [--trace <file>] [--profile <file>] [--seek <seconds>] [--seek-at <position>:<seconds>] [--plugin <path>] [-e] [-m] [-h] [--version] \
 <element> [key=value ...] ! <element> ! ...\n       \
 g2g-launch [OPTIONS] --graph <file.json|.yaml>   # declarative graph\n       \
 g2g-launch [OPTIONS] --script <file.rhai>         # Rhai graph-building script";
@@ -253,6 +257,7 @@ struct Opts {
     /// `replaysrc` recording of the traffic that led to the failure.
     record_on_error: Option<String>,
     trace: Option<String>,
+    profile: Option<String>,
     seek_seconds: Option<String>,
     seek_at: Option<String>,
 }
@@ -321,6 +326,10 @@ fn parse_opts(args: impl Iterator<Item = String>) -> (Opts, Vec<String>) {
             opts.trace = Some(path.to_string());
             continue;
         }
+        if let Some(path) = arg.strip_prefix("--profile=") {
+            opts.profile = Some(path.to_string());
+            continue;
+        }
         if let Some(seconds) = arg.strip_prefix("--seek=") {
             opts.seek_seconds = Some(seconds.to_string());
             continue;
@@ -369,6 +378,13 @@ fn parse_opts(args: impl Iterator<Item = String>) -> (Opts, Vec<String>) {
                 Some(path) => opts.trace = Some(path),
                 None => {
                     eprintln!("g2g-launch: --trace needs a file argument");
+                    process::exit(2);
+                }
+            },
+            "--profile" => match args.next() {
+                Some(path) => opts.profile = Some(path),
+                None => {
+                    eprintln!("g2g-launch: --profile needs a file argument");
                     process::exit(2);
                 }
             },
@@ -628,6 +644,7 @@ fn launch() {
         ("--seek", seek_ns.is_some()),
         ("--seek-at", seek_at.is_some()),
         ("--trace", opts.trace.is_some()),
+        ("--profile", opts.profile.is_some()),
     ] {
         if given && skips_the_run {
             eprintln!(
@@ -636,6 +653,17 @@ fn launch() {
             );
             process::exit(2);
         }
+    }
+    if opts.profile.is_some() && opts.trace.is_some() {
+        eprintln!("g2g-launch: --profile and --trace both record every frame's timing, pick one");
+        process::exit(2);
+    }
+    #[cfg(not(all(target_os = "linux", feature = "placement")))]
+    if opts.profile.is_some() {
+        eprintln!(
+            "g2g-launch: --profile requires a placement build (rebuild with --features placement)"
+        );
+        process::exit(2);
     }
     let pipeline = tokens.join(" ");
     let use_file = opts.graph.is_some() || opts.script.is_some();
@@ -916,10 +944,21 @@ fn launch() {
         };
         // a re-plugged retry starts the file over
         let trace = opts.trace.as_deref().map(create_trace);
+        #[cfg(all(target_os = "linux", feature = "placement"))]
+        let profile = opts.profile.as_ref().map(|path| {
+            (
+                path,
+                g2g_plugins::placement::ProfileRun::prepare(&mut graph),
+            )
+        });
         let result = rt.block_on(async {
             let mut run_builder = RunBuilder::new(graph, &clock, LINK_CAPACITY)
                 .with_progress(&progress)
                 .with_bus(&bus_handle);
+            #[cfg(all(target_os = "linux", feature = "placement"))]
+            if let Some((_, run)) = &profile {
+                run_builder = run_builder.with_observer(run.observer());
+            }
             if let Some(controller) = &launch_seeks.seek_at_controller {
                 controller.keep_run_open();
                 run_builder = run_builder.with_seek_controller(controller);
@@ -1009,6 +1048,20 @@ fn launch() {
             Ok(stats) => {
                 if !opts.quiet {
                     print_run_summary(&stats, started.elapsed().as_secs_f64());
+                }
+                #[cfg(all(target_os = "linux", feature = "placement"))]
+                if let Some((path, run)) = profile {
+                    match run.record(std::path::Path::new(path)) {
+                        Ok(written) => println_stdout!(
+                            "profile: {path} has {} element timings and {} copy timings",
+                            written.elements.len(),
+                            written.copies.len()
+                        ),
+                        Err(error) => {
+                            eprintln!("g2g-launch: --profile {path}: {error}");
+                            process::exit(1);
+                        }
+                    }
                 }
                 // the sink publishes a position for every frame it takes
                 if let (Some(seconds), None) = (&opts.seek_seconds, progress.position()) {

@@ -254,6 +254,16 @@ impl<'a> GraphNodeRef<'a> {
         }
     }
 
+    pub fn get_property(&self, name: &str) -> Option<PropValue> {
+        match self {
+            GraphNodeRef::Source(s) => s.get_property(name),
+            GraphNodeRef::Element(e) => e.get_property(name),
+            GraphNodeRef::Muxer(m) => m.get_property(name),
+            GraphNodeRef::FanoutSource(s) => s.get_property(name),
+            GraphNodeRef::Demux(d) => d.get_property(name),
+        }
+    }
+
     /// The memory domains this node accepts on its input pad(s), for the
     /// converter auto-plug and the allocation cascade. A muxer declares one set
     /// covering every input pad; a terminal fan-out source has no input, so it
@@ -273,6 +283,16 @@ impl<'a> GraphNodeRef<'a> {
         match self {
             GraphNodeRef::Element(e) => e.gpu_device(),
             GraphNodeRef::Muxer(m) => m.gpu_device(),
+            GraphNodeRef::Source(_) | GraphNodeRef::FanoutSource(_) | GraphNodeRef::Demux(_) => {
+                None
+            }
+        }
+    }
+
+    pub fn type_name(&self) -> Option<&'static str> {
+        match self {
+            GraphNodeRef::Element(e) => Some(e.type_name()),
+            GraphNodeRef::Muxer(m) => Some(m.type_name()),
             GraphNodeRef::Source(_) | GraphNodeRef::FanoutSource(_) | GraphNodeRef::Demux(_) => {
                 None
             }
@@ -1154,7 +1174,7 @@ fn bridges_two_gpus(from: MemoryDomainKind, to: MemoryDomainKind) -> bool {
     from != to && !from.is_system() && !to.is_system()
 }
 
-fn traced_gpu_device(graph: &Graph<GraphNodeRef<'_>>, node: NodeId) -> Option<GpuDevice> {
+pub fn traced_gpu_device(graph: &Graph<GraphNodeRef<'_>>, node: NodeId) -> Option<GpuDevice> {
     if let Some(device) = graph.element(node).and_then(|n| n.gpu_device()) {
         return Some(device);
     }

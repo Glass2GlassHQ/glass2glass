@@ -429,6 +429,8 @@ embassy-link = ["dep:embassy-sync"]
 cuda = ["std", "dep:libloading"]
 # HIP device memory, streams and events, loaded at run time from libamdhip64 on AMD and libcuda on NVIDIA.
 hip = ["cuda", "offload", "dep:libc"]
+# Per-element GPU timings for the placement planner, written by `g2g-launch --profile`.
+placement = ["hip", "dep:serde", "dep:serde_json"]
 # Local zero-copy IPC over CUDA IPC memory handles (`localipc`, M556): share a
 # device allocation with another process on the same machine + GPU without a
 # device->host->device round trip. `cuIpcGetMemHandle` exports a 64-byte handle

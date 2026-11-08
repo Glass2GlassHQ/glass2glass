@@ -462,6 +462,9 @@ pub trait DynMultiInputElement: ElementBound {
     fn gpu_device(&self) -> Option<GpuDevice> {
         None
     }
+    fn type_name(&self) -> &'static str {
+        core::any::type_name::<Self>()
+    }
     fn output_domains(&self) -> DomainSet {
         DomainSet::only(crate::memory::MemoryDomainKind::System)
     }
@@ -924,6 +927,10 @@ impl<'b> DynMultiInputElement for &'b mut (dyn DynMultiInputElement + 'b) {
 
     fn gpu_device(&self) -> Option<GpuDevice> {
         (**self).gpu_device()
+    }
+
+    fn type_name(&self) -> &'static str {
+        (**self).type_name()
     }
 
     fn output_domains(&self) -> DomainSet {

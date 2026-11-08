@@ -1833,6 +1833,8 @@ mod hipdeviceid;
 pub mod hipdownload;
 #[cfg(all(target_os = "linux", feature = "hip"))]
 pub mod hipupload;
+#[cfg(all(target_os = "linux", feature = "placement"))]
+pub mod placement;
 #[cfg(any(
     all(any(target_os = "linux", windows), feature = "cuda"),
     all(

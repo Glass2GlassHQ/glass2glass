@@ -235,12 +235,12 @@ fn cuda_device(ordinal: i32) -> Option<Device> {
 /// Name buffer size cuDeviceGetName is called with. 256 is what the CUDA
 /// samples use; the driver truncates and NUL-terminates within it.
 #[cfg(all(any(target_os = "linux", windows), feature = "cuda"))]
-const CUDA_NAME_LEN: usize = 256;
+pub(crate) const CUDA_NAME_LEN: usize = 256;
 
 /// Decode a NUL-terminated C name buffer: cut at the first NUL, drop trailing
 /// whitespace. Not UTF-8 by contract, so lossy.
 #[cfg(all(any(target_os = "linux", windows), feature = "cuda"))]
-fn cuda_name(buf: &[u8]) -> String {
+pub(crate) fn cuda_name(buf: &[u8]) -> String {
     let end = buf.iter().position(|b| *b == 0).unwrap_or(buf.len());
     String::from_utf8_lossy(&buf[..end]).trim().to_string()
 }
@@ -250,10 +250,8 @@ fn cuda_name(buf: &[u8]) -> String {
 /// beats pulling a wrapper crate for three calls.
 #[cfg(all(any(target_os = "linux", windows), feature = "cuda"))]
 mod ffi {
-    use core::ffi::c_char;
-
     pub(super) use crate::cuda_driver_ffi::{
-        cu_device_get, cu_init, CuDevice, CuResult, CUDA_SUCCESS,
+        cu_device_get, cu_device_get_name, cu_init, CuDevice, CuResult, CUDA_SUCCESS,
     };
 
     crate::shared_library::shared_library! {
@@ -261,8 +259,6 @@ mod ffi {
         when missing return crate::cuda_driver_ffi::CUDA_ERROR_SHARED_OBJECT_INIT_FAILED;
         // Number of devices with compute capability, through `count`.
         pub(super) fn cu_device_get_count = "cuDeviceGetCount"(count: *mut i32) -> CuResult;
-        // Write the device's NUL-terminated name into `name` (at most `len`).
-        pub(super) fn cu_device_get_name = "cuDeviceGetName"(name: *mut c_char, len: i32, dev: CuDevice) -> CuResult;
     }
 }
 

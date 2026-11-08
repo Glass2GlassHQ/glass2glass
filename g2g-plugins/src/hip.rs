@@ -74,6 +74,7 @@ crate::shared_library::shared_library! {
     struct LibAmdHip = LIBAMDHIP, LIBAMDHIP_ROCM6;
     when missing return HIP_ERROR_SHARED_OBJECT_INIT_FAILED;
     fn hip_set_device = "hipSetDevice"(device: i32) -> i32;
+    fn hip_device_get_name = "hipDeviceGetName"(name: *mut c_char, len: i32, device: i32) -> i32;
     fn hip_import_external_memory = "hipImportExternalMemory"(
         ext_mem_out: *mut HipExternalMemory,
         mem_handle_desc: *const HipExternalMemoryHandleDesc,
@@ -336,6 +337,22 @@ impl HipDevice {
 
     pub fn ordinal(&self) -> i32 {
         self.ordinal
+    }
+
+    pub fn name(&self) -> Result<String, G2gError> {
+        let mut text = [0u8; crate::gpudevice::CUDA_NAME_LEN];
+        let len = text.len() as i32;
+        // SAFETY: `text` is writable for the length passed, and the ordinal was validated in `open`.
+        let code = unsafe {
+            match self.backend {
+                Backend::Amd => hip_device_get_name(text.as_mut_ptr().cast(), len, self.ordinal),
+                Backend::Nvidia { device, .. } => {
+                    cuda::cu_device_get_name(text.as_mut_ptr().cast(), len, device)
+                }
+            }
+        };
+        self.check(code)?;
+        Ok(crate::gpudevice::cuda_name(&text))
     }
 
     pub(crate) fn cuda_context(&self) -> Option<u64> {
@@ -1279,6 +1296,36 @@ impl CrossDeviceCopier {
         self.streams = Some(streams);
         copied
     }
+}
+
+#[cfg(feature = "placement")]
+const COPY_REPEATS: usize = 21;
+
+#[cfg(feature = "placement")]
+pub(crate) fn median_copy_time(
+    source: GpuDevice,
+    target: GpuDevice,
+    len: usize,
+) -> Result<core::time::Duration, G2gError> {
+    let mut streams = CopyStreams::default();
+    let source_stream = streams.sources.on(source.vendor, source.ordinal)?;
+    let memory = HipMemory::allocate(&source_stream.device, len)?;
+    let ready = HipEvent::new(&source_stream.device)?;
+    source_stream.stream.record(&ready)?;
+    let buffer = memory.into_buffer(ready, len)?;
+    let mut times = Vec::with_capacity(COPY_REPEATS);
+    for _ in 0..COPY_REPEATS {
+        let started = std::time::Instant::now();
+        let copied = streams.copy(&buffer, target)?;
+        streams
+            .targets
+            .on(target.vendor, target.ordinal)?
+            .device
+            .wait_until_ready(&copied)?;
+        times.push(started.elapsed());
+    }
+    times.sort_unstable();
+    Ok(times[COPY_REPEATS / 2])
 }
 
 #[derive(Debug, Default)]

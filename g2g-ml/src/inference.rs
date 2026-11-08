@@ -5,7 +5,7 @@ use core::pin::Pin;
 use crate::tensor_bytes::{rgba_to_nchw, tensor_bytes_to_chw};
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::{OwnedHipBuffer, OwnedWgpuBuffer, SystemSlice};
+use g2g_core::memory::{GpuDevice, OwnedHipBuffer, OwnedWgpuBuffer, SystemSlice};
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementBound, G2gError,
     MemoryDomain, OutputSink, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate,
@@ -28,6 +28,10 @@ pub trait InferenceBackend: Default + Debug + ElementBound {
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError>;
 
     fn get_property(&self, name: &str) -> Option<PropValue>;
+
+    fn gpu_device(&self) -> Option<GpuDevice> {
+        None
+    }
 }
 
 pub trait LoadedModel {
@@ -309,6 +313,10 @@ impl<B: InferenceBackend> AsyncElement for Inference<B> {
 
     fn properties(&self) -> &'static [PropertySpec] {
         B::PROPERTIES
+    }
+
+    fn gpu_device(&self) -> Option<GpuDevice> {
+        self.backend.gpu_device()
     }
 
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {

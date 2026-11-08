@@ -52,6 +52,7 @@ use ::ort::session::builder::SessionBuilder;
 use ::ort::session::{Session, SessionInputs};
 use ::ort::value::{Tensor, TensorElementType, ValueType};
 
+use g2g_core::memory::{GpuDevice, GpuVendor};
 use g2g_core::{
     G2gError, HardwareError, PropError, PropKind, PropValue, PropertySpec, TensorDType,
 };
@@ -72,6 +73,11 @@ pub struct OrtModel {
     wgpu_imports: wgpu_input::WgpuTensorImports,
     #[cfg(all(target_os = "linux", feature = "ort-hip"))]
     hip_device: Option<std::sync::Arc<g2g_plugins::hip::HipDevice>>,
+    #[cfg(all(
+        target_os = "linux",
+        any(feature = "ort-cuda-wgpu", feature = "ort-hip")
+    ))]
+    device_ordinal: i32,
 }
 
 /// Which execution provider a text-constructed element runs the session on.
@@ -137,20 +143,28 @@ impl ExecutionProvider {
         feature = "rocm",
         feature = "migraphx"
     ))]
-    fn register(self, builder: &mut SessionBuilder) -> Result<(), G2gError> {
+    fn register(self, builder: &mut SessionBuilder, device_ordinal: i32) -> Result<(), G2gError> {
         use ::ort::ep::ExecutionProvider as _;
         let registered = match self {
             Self::Cpu => return Ok(()),
             #[cfg(feature = "cuda")]
-            Self::Cuda => ::ort::ep::CUDA::default().register(builder),
+            Self::Cuda => ::ort::ep::CUDA::default()
+                .with_device_id(device_ordinal)
+                .register(builder),
             #[cfg(feature = "tensorrt")]
-            Self::TensorRt => ::ort::ep::TensorRT::default().register(builder),
+            Self::TensorRt => ::ort::ep::TensorRT::default()
+                .with_device_id(device_ordinal)
+                .register(builder),
             #[cfg(feature = "openvino")]
             Self::OpenVino => ::ort::ep::OpenVINO::default().register(builder),
             #[cfg(feature = "rocm")]
-            Self::Rocm => ::ort::ep::ROCm::default().register(builder),
+            Self::Rocm => ::ort::ep::ROCm::default()
+                .with_device_id(device_ordinal)
+                .register(builder),
             #[cfg(feature = "migraphx")]
-            Self::MiGraphX => ::ort::ep::MIGraphX::default().register(builder),
+            Self::MiGraphX => ::ort::ep::MIGraphX::default()
+                .with_device_id(device_ordinal)
+                .register(builder),
         };
         registered.map_err(|error| {
             // the caller only sees "invalid value", so name the cause here,
@@ -172,8 +186,24 @@ impl ExecutionProvider {
         feature = "rocm",
         feature = "migraphx"
     )))]
-    fn register(self, _builder: &mut SessionBuilder) -> Result<(), G2gError> {
+    fn register(self, _builder: &mut SessionBuilder, _device_ordinal: i32) -> Result<(), G2gError> {
         Ok(())
+    }
+
+    fn vendor(self) -> Option<GpuVendor> {
+        match self {
+            Self::Cpu => None,
+            #[cfg(feature = "cuda")]
+            Self::Cuda => Some(GpuVendor::Nvidia),
+            #[cfg(feature = "tensorrt")]
+            Self::TensorRt => Some(GpuVendor::Nvidia),
+            #[cfg(feature = "openvino")]
+            Self::OpenVino => None,
+            #[cfg(feature = "rocm")]
+            Self::Rocm => Some(GpuVendor::Amd),
+            #[cfg(feature = "migraphx")]
+            Self::MiGraphX => Some(GpuVendor::Amd),
+        }
     }
 }
 
@@ -181,15 +211,20 @@ impl ExecutionProvider {
 pub struct OrtBackend {
     /// Execution provider registered when the model loads.
     provider: ExecutionProvider,
+    device_ordinal: i32,
 }
 
 impl Default for OrtBackend {
     fn default() -> Self {
         Self {
             provider: ExecutionProvider::Cpu,
+            device_ordinal: DEFAULT_DEVICE_ORDINAL,
         }
     }
 }
+
+// onnx runtime's gpu providers run on device 0 unless their options name another
+const DEFAULT_DEVICE_ORDINAL: i32 = 0;
 
 /// # Example
 ///
@@ -211,9 +246,18 @@ impl InferenceBackend for OrtBackend {
 
     fn load(&self, path: &str) -> Result<OrtModel, G2gError> {
         let mut builder = Session::builder().map_err(ort_err)?;
-        self.provider.register(&mut builder)?;
+        self.provider.register(&mut builder, self.device_ordinal)?;
         let session = builder.commit_from_file(path).map_err(ort_err)?;
-        OrtModel::load(session)
+        let model = OrtModel::load(session)?;
+        #[cfg(all(
+            target_os = "linux",
+            any(feature = "ort-cuda-wgpu", feature = "ort-hip")
+        ))]
+        let model = OrtModel {
+            device_ordinal: self.device_ordinal,
+            ..model
+        };
+        Ok(model)
     }
 
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
@@ -223,6 +267,14 @@ impl InferenceBackend for OrtBackend {
                 self.provider = ExecutionProvider::parse(name).ok_or(PropError::Value)?;
                 Ok(())
             }
+            "device-id" => {
+                let ordinal = value.as_int().ok_or(PropError::Type)?;
+                self.device_ordinal = i32::try_from(ordinal)
+                    .ok()
+                    .filter(|ordinal| *ordinal >= 0)
+                    .ok_or(PropError::Value)?;
+                Ok(())
+            }
             _ => Err(PropError::Unknown),
         }
     }
@@ -230,8 +282,17 @@ impl InferenceBackend for OrtBackend {
     fn get_property(&self, name: &str) -> Option<PropValue> {
         match name {
             "execution-provider" => Some(PropValue::Str(String::from(self.provider.name()))),
+            "device-id" => Some(PropValue::Int(i64::from(self.device_ordinal))),
             _ => None,
         }
+    }
+
+    fn gpu_device(&self) -> Option<GpuDevice> {
+        let vendor = self.provider.vendor()?;
+        Some(GpuDevice {
+            vendor,
+            ordinal: self.device_ordinal,
+        })
     }
 }
 
@@ -455,6 +516,11 @@ impl OrtModel {
             wgpu_imports: Default::default(),
             #[cfg(all(target_os = "linux", feature = "ort-hip"))]
             hip_device: None,
+            #[cfg(all(
+                target_os = "linux",
+                any(feature = "ort-cuda-wgpu", feature = "ort-hip")
+            ))]
+            device_ordinal: DEFAULT_DEVICE_ORDINAL,
         })
     }
 
@@ -518,7 +584,7 @@ impl LoadedModel for OrtModel {
     ) -> Result<(Box<[u8]>, Vec<u32>), G2gError> {
         let len = self.f32_input_len();
         let (device_pointer, memory_device) =
-            wgpu_input::stage(&mut self.wgpu_imports, tensor, len)?;
+            wgpu_input::stage(&mut self.wgpu_imports, tensor, len, self.device_ordinal)?;
         self.run_device_f32(device_pointer, memory_device)
     }
 
@@ -527,7 +593,6 @@ impl LoadedModel for OrtModel {
         &mut self,
         tensor: &g2g_core::memory::OwnedHipBuffer,
     ) -> Result<(Box<[u8]>, Vec<u32>), G2gError> {
-        use g2g_core::memory::GpuVendor;
         use g2g_plugins::hip::HipDevice;
         let (width, height) = (self.geometry.width, self.geometry.height);
         let tight =
@@ -537,11 +602,12 @@ impl LoadedModel for OrtModel {
         if padded || (tensor.len as u64) < self.f32_input_len() {
             return Err(G2gError::CapsMismatch);
         }
-        if tensor.device_ordinal != DEVICE_ORDINAL {
+        if tensor.device_ordinal != self.device_ordinal {
             g2g_core::g2g_error!(
                 g2g_core::log::Target::category("OrtInference"),
-                "the tensor is on HIP device {}, but onnx runtime runs on device {DEVICE_ORDINAL}",
-                tensor.device_ordinal
+                "the tensor is on HIP device {}, but onnx runtime runs on device {}",
+                tensor.device_ordinal,
+                self.device_ordinal
             );
             return Err(G2gError::UnsupportedDomain);
         }
@@ -563,13 +629,6 @@ impl LoadedModel for OrtModel {
     }
 }
 
-// onnx runtime's cuda and migraphx providers run on device 0 unless their options name another
-#[cfg(all(
-    target_os = "linux",
-    any(feature = "ort-cuda-wgpu", feature = "ort-hip")
-))]
-const DEVICE_ORDINAL: i32 = 0;
-
 #[cfg(all(
     target_os = "linux",
     any(feature = "ort-cuda-wgpu", feature = "ort-hip")
@@ -588,7 +647,7 @@ impl OrtModel {
         let (w, h) = (self.geometry.width as i64, self.geometry.height as i64);
         let memory = ::ort::memory::MemoryInfo::new(
             memory_device,
-            DEVICE_ORDINAL,
+            self.device_ordinal,
             ::ort::memory::AllocatorType::Device,
             ::ort::memory::MemoryType::Default,
         )
@@ -615,18 +674,31 @@ const PROVIDER_PROP: PropertySpec = PropertySpec::new(
      (cuda, tensorrt, openvino, rocm, migraphx)",
 );
 
+const DEVICE_ID_PROP: PropertySpec = PropertySpec::new(
+    "device-id",
+    PropKind::Int,
+    "GPU the cuda, tensorrt, rocm or migraphx provider runs on, as CUDA or HIP number it",
+)
+.with_default("0");
+
 #[cfg(feature = "analytics")]
 static ORT_INFER_PROPS: &[PropertySpec] = &[
     MODEL_PROP,
     TENSOR_INPUT_PROP,
     PROVIDER_PROP,
+    DEVICE_ID_PROP,
     ATTACH_TENSOR_PROP,
     TENSOR_NAME_PROP,
     ONLY_ON_PROP,
 ];
 #[cfg(not(feature = "analytics"))]
-static ORT_INFER_PROPS: &[PropertySpec] =
-    &[MODEL_PROP, TENSOR_INPUT_PROP, PROVIDER_PROP, ONLY_ON_PROP];
+static ORT_INFER_PROPS: &[PropertySpec] = &[
+    MODEL_PROP,
+    TENSOR_INPUT_PROP,
+    PROVIDER_PROP,
+    DEVICE_ID_PROP,
+    ONLY_ON_PROP,
+];
 
 /// Dims of an f32 tensor outlet; rejects every other value type.
 pub(crate) fn f32_tensor_dims(dtype: &ValueType) -> Result<Vec<i64>, G2gError> {
@@ -683,7 +755,6 @@ mod wgpu_input {
 
     use crate::wgpupreprocess::WgpuBufferOwner;
 
-    use super::DEVICE_ORDINAL;
     #[cfg(feature = "ort-cuda-wgpu")]
     const NVIDIA_VENDOR_ID: u32 = 0x10de;
     #[cfg(feature = "ort-hip-wgpu")]
@@ -722,14 +793,19 @@ mod wgpu_input {
         pooled: Vec<(Weak<OwnedFd>, ImportedBuffer)>,
     }
 
-    fn same_gpu(wgpu_bus: &str, runtime: &str, runtime_bus: &str) -> Result<(), G2gError> {
+    fn same_gpu(
+        wgpu_bus: &str,
+        runtime: &str,
+        runtime_bus: &str,
+        device_ordinal: i32,
+    ) -> Result<(), G2gError> {
         if wgpu_bus.eq_ignore_ascii_case(runtime_bus) {
             return Ok(());
         }
         g2g_error!(
             Target::category("OrtInference"),
             "the tensor is on the GPU at PCI {wgpu_bus}, but {runtime} device \
-             {DEVICE_ORDINAL} is at {runtime_bus}"
+             {device_ordinal} is at {runtime_bus}"
         );
         Err(G2gError::UnsupportedDomain)
     }
@@ -738,6 +814,7 @@ mod wgpu_input {
         device: &wgpu::Device,
         fd: OwnedFd,
         size: u64,
+        device_ordinal: i32,
     ) -> Result<ImportedBuffer, G2gError> {
         let adapter = device.adapter_info();
         match adapter.vendor {
@@ -746,10 +823,11 @@ mod wgpu_input {
                 same_gpu(
                     &adapter.device_pci_bus_id,
                     "CUDA",
-                    &cuda_pci_bus_id(DEVICE_ORDINAL)?,
+                    &cuda_pci_bus_id(device_ordinal)?,
+                    device_ordinal,
                 )?;
                 // SAFETY: the caller guarantees `fd` exports at least `size` bytes.
-                let buffer = unsafe { CudaExternalBuffer::import(fd, size, DEVICE_ORDINAL)? };
+                let buffer = unsafe { CudaExternalBuffer::import(fd, size, device_ordinal)? };
                 Ok(ImportedBuffer::Cuda(buffer))
             }
             #[cfg(feature = "ort-hip-wgpu")]
@@ -757,10 +835,11 @@ mod wgpu_input {
                 same_gpu(
                     &adapter.device_pci_bus_id,
                     "HIP",
-                    &hip_pci_bus_id(DEVICE_ORDINAL)?,
+                    &hip_pci_bus_id(device_ordinal)?,
+                    device_ordinal,
                 )?;
                 // SAFETY: the caller guarantees `fd` exports at least `size` bytes.
-                let buffer = unsafe { HipExternalBuffer::import(fd, size, DEVICE_ORDINAL)? };
+                let buffer = unsafe { HipExternalBuffer::import(fd, size, device_ordinal)? };
                 Ok(ImportedBuffer::Hip(buffer))
             }
             vendor => {
@@ -776,10 +855,10 @@ mod wgpu_input {
     }
 
     impl CopyTarget {
-        fn open(device: &wgpu::Device, size: u64) -> Result<Self, G2gError> {
+        fn open(device: &wgpu::Device, size: u64, device_ordinal: i32) -> Result<Self, G2gError> {
             let (exported, fd) = create_opaque_fd_export(device, size)?;
             // SAFETY: `fd` exports the dedicated allocation behind `exported`, `size` bytes.
-            let imported = unsafe { import_fd(device, fd, size)? };
+            let imported = unsafe { import_fd(device, fd, size, device_ordinal)? };
             Ok(Self {
                 device: device.clone(),
                 exported,
@@ -799,6 +878,7 @@ mod wgpu_input {
             owner: &WgpuBufferOwner,
             fd: &Arc<OwnedFd>,
             size: u64,
+            device_ordinal: i32,
         ) -> Result<(u64, AllocationDevice), G2gError> {
             self.pooled.retain(|(slot, _)| slot.strong_count() > 0);
             if let Some((_, imported)) = self
@@ -813,7 +893,7 @@ mod wgpu_input {
                 .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
             // SAFETY: wgpupreprocess exports each pooled buffer as one dedicated
             // allocation of `owner.buffer().size()` bytes, and `stage` checked `size` fits.
-            let imported = unsafe { import_fd(owner.device(), dup, size)? };
+            let imported = unsafe { import_fd(owner.device(), dup, size, device_ordinal)? };
             let memory = imported.device_memory();
             self.pooled.push((Arc::downgrade(fd), imported));
             Ok(memory)
@@ -825,6 +905,7 @@ mod wgpu_input {
         imports: &mut WgpuTensorImports,
         tensor: &OwnedWgpuBuffer,
         size: u64,
+        device_ordinal: i32,
     ) -> Result<(u64, AllocationDevice), G2gError> {
         if (tensor.len as u64) < size {
             return Err(G2gError::CapsMismatch);
@@ -840,7 +921,7 @@ mod wgpu_input {
                     timeout: None,
                 })
                 .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
-            return imports.import_pooled(owner, fd, size);
+            return imports.import_pooled(owner, fd, size, device_ordinal);
         }
         let (buffer, device, queue) = match owner {
             Some(owner) => (owner.buffer(), owner.device(), owner.queue()),
@@ -848,7 +929,7 @@ mod wgpu_input {
         };
         let current = match imports.copy_target.take() {
             Some(current) if current.serves(device, size) => current,
-            _ => CopyTarget::open(device, size)?,
+            _ => CopyTarget::open(device, size, device_ordinal)?,
         };
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
         encoder.copy_buffer_to_buffer(buffer, 0, &current.exported, 0, size);

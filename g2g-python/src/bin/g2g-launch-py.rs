@@ -54,7 +54,7 @@ use g2g_plugins::TokioThreadSpawner;
 const LINK_CAPACITY: usize = 4;
 
 const USAGE: &str =
-    "usage: g2g-launch-py [-q] [--threads] [--trace <file>] <element> [key=value ...] ! <element> ! ...
+    "usage: g2g-launch-py [-q] [--threads] [--trace <file>] [--profile <file>] <element> [key=value ...] ! <element> ! ...
        g2g-launch-py --inspect [g2g-inspect arguments]
        g2g-launch-py --inspect pyelement|pyaggregator|pysink module=<module> class=<class>
        g2g-launch-py --docgen [out.html]
@@ -69,6 +69,7 @@ fn main() {
     let mut quiet = false;
     let mut threads = false;
     let mut trace_path: Option<String> = None;
+    let mut profile_path: Option<String> = None;
     let mut tokens: Vec<String> = Vec::new();
     let mut in_pipeline = false;
     let mut args = std::env::args().skip(1);
@@ -81,6 +82,13 @@ fn main() {
                     Some(path) => trace_path = Some(path),
                     None => {
                         eprintln!("g2g-launch-py: --trace needs a file argument");
+                        process::exit(2);
+                    }
+                },
+                "--profile" => match args.next() {
+                    Some(path) => profile_path = Some(path),
+                    None => {
+                        eprintln!("g2g-launch-py: --profile needs a file argument");
                         process::exit(2);
                     }
                 },
@@ -123,6 +131,18 @@ fn main() {
 
     let reg = registry();
 
+    if profile_path.is_some() && trace_path.is_some() {
+        eprintln!(
+            "g2g-launch-py: --profile and --trace both record every frame's timing, pick one"
+        );
+        process::exit(2);
+    }
+    #[cfg(not(all(target_os = "linux", feature = "placement")))]
+    if profile_path.is_some() {
+        eprintln!("g2g-launch-py: --profile requires a placement build (rebuild with --features placement)");
+        process::exit(2);
+    }
+
     let graph = match parse_launch(&reg, &pipeline) {
         Ok(graph) => graph,
         Err(err) => {
@@ -148,6 +168,15 @@ fn main() {
                 process::exit(1);
             }
         });
+    #[cfg(all(target_os = "linux", feature = "placement"))]
+    let mut graph = graph;
+    #[cfg(all(target_os = "linux", feature = "placement"))]
+    let profile = profile_path.as_ref().map(|path| {
+        (
+            path,
+            g2g_plugins::placement::ProfileRun::prepare(&mut graph),
+        )
+    });
     let clock = WallClock::new();
     let progress = PipelineProgress::new();
     let started = Instant::now();
@@ -158,6 +187,10 @@ fn main() {
             RunBuilder::new(graph, &clock, LINK_CAPACITY).with_progress(&progress);
         if let Some(trace) = &trace {
             run_builder = run_builder.with_visit_recorder(trace.clone());
+        }
+        #[cfg(all(target_os = "linux", feature = "placement"))]
+        if let Some((_, run)) = &profile {
+            run_builder = run_builder.with_observer(run.observer());
         }
         // one OS thread per element, so a CPU-bound convert does not hold up every other element's handoff
         let mut run: Pin<Box<dyn Future<Output = Result<RunStats, G2gError>> + '_>> = if threads {
@@ -206,6 +239,20 @@ fn main() {
                         elapsed,
                         stats.frames_consumed as f64 / elapsed
                     );
+                }
+            }
+            #[cfg(all(target_os = "linux", feature = "placement"))]
+            if let Some((path, run)) = profile {
+                match run.record(Path::new(path)) {
+                    Ok(written) => println!(
+                        "profile: {path} has {} element timings and {} copy timings",
+                        written.elements.len(),
+                        written.copies.len()
+                    ),
+                    Err(error) => {
+                        eprintln!("g2g-launch-py: --profile {path}: {error}");
+                        process::exit(1);
+                    }
                 }
             }
         }

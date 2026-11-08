@@ -170,8 +170,9 @@ libraries installed.
   `cuMemcpyPeerAsync`), validated on a two-GPU host.
 - Report `gpu_device()` from the other CUDA elements (`cudaupload`,
   `cudadownload`, `cudaglsink`, `ffmpegdec` on NVDEC) and the wgpu elements.
-- A planner that places elements on a device or backend by where the frames
-  are.
+- A placement planner pass that sets each unset `device-id` and the `ortinfer`
+  provider from a `--profile` file, minimizing latency or the busiest GPU or
+  link, with `--placement-profile` and `--objective` on the launchers.
 - Wait for a dma-buf frame's fence on the GPU in `hipupload` once ROCm supports
   semaphore import on Linux.
 

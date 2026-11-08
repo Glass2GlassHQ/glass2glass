@@ -63,6 +63,7 @@ crate::shared_library::shared_library! {
     when missing return CUDA_ERROR_SHARED_OBJECT_INIT_FAILED;
     pub(crate) fn cu_init = "cuInit"(flags: u32) -> CuResult;
     pub(crate) fn cu_device_get = "cuDeviceGet"(device: *mut CuDevice, ordinal: i32) -> CuResult;
+    pub(crate) fn cu_device_get_name = "cuDeviceGetName"(name: *mut core::ffi::c_char, len: i32, device: CuDevice) -> CuResult;
     pub(crate) fn cu_ctx_create = "cuCtxCreate_v2"(context: *mut CuContext, flags: u32, device: CuDevice) -> CuResult;
     pub(crate) fn cu_ctx_destroy = "cuCtxDestroy_v2"(context: CuContext) -> CuResult;
     pub(crate) fn cu_ctx_push_current = "cuCtxPushCurrent_v2"(context: CuContext) -> CuResult;
