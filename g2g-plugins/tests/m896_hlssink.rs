@@ -563,6 +563,90 @@ async fn rolling_playlist_advances_media_sequence_and_prunes_files() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+// every segment's range in playlist order, each starting where the one before ended
+fn contiguous_ranges(playlist: &g2g_plugins::hls::MediaPlaylist, start: u64, file: &str) -> u64 {
+    let mut offset = start;
+    for segment in &playlist.segments {
+        assert_eq!(segment.uri, file, "every segment names the one file");
+        let range = segment
+            .byte_range
+            .expect("a single-file segment has a byte range");
+        assert_eq!(range.offset, offset, "{} continues the file", segment.uri);
+        offset += range.length;
+    }
+    offset
+}
+
+#[tokio::test]
+async fn single_media_file_ts_lists_byte_ranges_of_the_mux_output() {
+    let dir = work_dir("single-ts");
+    let playlist_path = at(&dir, "out.m3u8");
+    let muxed = mux_ts(&synthetic_aus(2)).await;
+    let whole: Vec<u8> = muxed.iter().flat_map(|(b, _)| b.clone()).collect();
+
+    let mut sink = HlsSink::new(at(&dir, "seg%05d.ts"))
+        .with_playlist_location(&playlist_path)
+        .with_single_media_file(at(&dir, "all.ts"))
+        .with_target_duration(1)
+        .with_playlist_length(0);
+    package(&mut sink, ByteStreamEncoding::MpegTs, &muxed).await;
+
+    let playlist = read_playlist(&playlist_path);
+    assert_eq!(playlist.segments.len(), 2, "two 1 s segments from 2 s");
+    let file = std::fs::read(dir.join("all.ts")).expect("single media file");
+    assert_eq!(file, whole, "the one file is the muxer's byte stream");
+    assert_eq!(
+        contiguous_ranges(&playlist, 0, "all.ts"),
+        whole.len() as u64
+    );
+    assert!(!dir.join("seg00000.ts").exists(), "no per-segment files");
+    let text = std::fs::read_to_string(&playlist_path).unwrap();
+    assert!(
+        text.contains("#EXT-X-VERSION:4"),
+        "byte ranges need version 4:\n{text}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn single_media_file_fmp4_puts_the_init_segment_first() {
+    let dir = work_dir("single-fmp4");
+    let playlist_path = at(&dir, "out.m3u8");
+    let muxed = mux_fmp4(&synthetic_aus(2), 400).await;
+    let whole: Vec<u8> = muxed.iter().flat_map(|(b, _)| b.clone()).collect();
+
+    let mut sink = HlsSink::new(at(&dir, "seg%05d.m4s"))
+        .with_playlist_location(&playlist_path)
+        .with_single_media_file(at(&dir, "all.mp4"))
+        .with_target_duration(1)
+        .with_playlist_length(0);
+    package(&mut sink, ByteStreamEncoding::IsoBmff, &muxed).await;
+
+    let playlist = read_playlist(&playlist_path);
+    let file = std::fs::read(dir.join("all.mp4")).expect("single media file");
+    assert_eq!(file, whole, "init + segments is the muxer's byte stream");
+    assert_eq!(playlist.map_uri.as_deref(), Some("all.mp4"));
+    let map = playlist
+        .map_byte_range
+        .expect("EXT-X-MAP names a byte range");
+    assert_eq!(map.offset, 0);
+    assert_eq!(&file[4..8], b"ftyp", "the file opens with the init segment");
+    assert_eq!(
+        contiguous_ranges(&playlist, map.length, "all.mp4"),
+        whole.len() as u64
+    );
+    for segment in &playlist.segments {
+        let offset = segment.byte_range.unwrap().offset as usize;
+        assert_eq!(
+            &file[offset + 4..offset + 8],
+            b"moof",
+            "segments open at a fragment"
+        );
+    }
+    assert!(!dir.join("init.mp4").exists(), "no separate init file");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A caps this sink cannot segment is refused at negotiation rather than
 /// producing files it cannot cut.
 #[test]
@@ -652,6 +736,52 @@ async fn ffmpeg_plays_the_published_playlists() {
         .expect("record oracle evidence");
     } else {
         eprintln!("skipping the GStreamer leg: no gst-launch-1.0 on this host");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ffmpeg reads byte-range segments from disk, and over HTTP with Range requests
+#[tokio::test]
+async fn ffmpeg_plays_single_media_file_playlists() {
+    if !have_ffmpeg() || !have_ffprobe() {
+        eprintln!("skipping: no ffmpeg on this host");
+        return;
+    }
+    let dir = work_dir("single-oracle");
+    let aus = real_access_units(&dir).await;
+    let cases = [
+        ("ts", ByteStreamEncoding::MpegTs, mux_ts(&aus).await),
+        (
+            "mp4",
+            ByteStreamEncoding::IsoBmff,
+            mux_fmp4(&aus, 400).await,
+        ),
+    ];
+    for (extension, encoding, muxed) in cases {
+        let playlist = at(&dir, &format!("single-{extension}.m3u8"));
+        let sink = HlsSink::new(at(&dir, &format!("s%05d.{extension}")))
+            .with_playlist_location(&playlist)
+            .with_single_media_file(at(&dir, &format!("single.{extension}")))
+            .with_target_duration(1)
+            .with_playlist_length(0);
+        #[cfg(feature = "http-server")]
+        let sink = sink.with_http_server("127.0.0.1", 0);
+        let mut sink = sink;
+        package(&mut sink, encoding, &muxed).await;
+        assert_eq!(
+            ffmpeg_reads_playlist(&playlist),
+            aus.len() as u64,
+            "the {extension} single-file playlist decodes to one packet per access unit"
+        );
+        #[cfg(feature = "http-server")]
+        {
+            let port = sink.http_port().expect("the sink serves over HTTP");
+            let url = format!("http://127.0.0.1:{port}/single-{extension}.m3u8");
+            let packets = tokio::task::spawn_blocking(move || ffmpeg_reads_playlist(&url))
+                .await
+                .expect("ffmpeg ran");
+            assert_eq!(packets, aus.len() as u64, "and so it does over HTTP");
+        }
     }
     let _ = std::fs::remove_dir_all(&dir);
 }

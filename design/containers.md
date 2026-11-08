@@ -1578,6 +1578,13 @@ that leave it, which is the live case. EOS appends `#EXT-X-ENDLIST` for VOD.
 The playlist is written to a temporary file and renamed into place, so a reader
 never sees a partial one.
 
+`single-media-file` writes every segment into one file instead, as gst's
+`hlssink3` and `hlscmafsink` do. Each playlist entry names that file with an
+`#EXT-X-BYTERANGE`, the fMP4 init segment sits at offset 0 behind a
+`#EXT-X-MAP` `BYTERANGE`, and the playlist is version 4 or, with a map, 6. The
+file is the muxer's byte stream unchanged, and `max-files` deletes nothing.
+ffmpeg plays both carriers from disk and over HTTP (`m896_hlssink`).
+
 ### HTTP serving
 
 The `http-server` feature serves pipeline output over plain HTTP/1.1, one
@@ -1589,7 +1596,9 @@ segment and every segment `max-files` has not yet deleted. A request resolves by
 its last path segment, so a `playlist-root` prefix still matches. Any other name,
 including a deleted segment or a file the sink did not write, is a 404. The
 listener binds at configure, so a taken port fails the run before any frame
-flows.
+flows. A request with one `Range` gets `206 Partial Content`, read from disk
+without loading the whole file, and one past the end gets `416`. Several ranges
+or a malformed header get the whole file, which RFC 9110 allows.
 
 `httpserversink` streams one muxed byte stream to every client that GETs it,
 with `Transfer-Encoding: chunked` and a zero-length chunk at EOS. A client that

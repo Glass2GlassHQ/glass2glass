@@ -25,6 +25,7 @@ pub(crate) struct HttpRequest {
     pub(crate) authorization: Option<String>,
     pub(crate) content_type: Option<String>,
     pub(crate) if_match: Option<String>,
+    pub(crate) range: Option<String>,
     pub(crate) body: String,
 }
 
@@ -73,6 +74,8 @@ pub(crate) fn parse_request(buf: &[u8]) -> Result<Option<HttpRequest>, RequestEr
             request.content_type = Some(value.to_string());
         } else if name.eq_ignore_ascii_case("If-Match") {
             request.if_match = Some(value.to_string());
+        } else if name.eq_ignore_ascii_case("Range") {
+            request.range = Some(value.to_string());
         }
     }
     if content_length > MAX_BODY_BYTES {

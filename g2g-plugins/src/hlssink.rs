@@ -47,7 +47,7 @@ use g2g_core::{
 
 use crate::filesink::{io_err, path_io_err};
 use crate::fmp4::{parse_trun, tfhd_defaults, trun_first_sample_is_sync};
-use crate::hls::{write_media, MediaPlaylist, Segment};
+use crate::hls::{write_media, ByteRange, MediaPlaylist, Segment};
 use crate::mp4box::{be32, boxes, find_box, find_path};
 use crate::multifilesink::expand;
 use g2g_core::log::short_type_name;
@@ -67,6 +67,10 @@ pub struct HlsSink {
     playlist_location: String,
     init_location: String,
     playlist_root: String,
+    // empty writes one file per segment
+    single_media_file: String,
+    single_file: Option<fs::File>,
+    single_file_length: u64,
     target_duration_secs: u64,
     playlist_length: u64,
     max_files: u64,
@@ -131,6 +135,9 @@ impl HlsSink {
             playlist_location: String::from("playlist.m3u8"),
             init_location: String::from("init.mp4"),
             playlist_root: String::new(),
+            single_media_file: String::new(),
+            single_file: None,
+            single_file_length: 0,
             target_duration_secs: 15,
             playlist_length: 5,
             max_files: 10,
@@ -228,6 +235,11 @@ impl HlsSink {
         self
     }
 
+    pub fn with_single_media_file(mut self, path: impl Into<String>) -> Self {
+        self.single_media_file = path.into();
+        self
+    }
+
     /// Target segment duration in seconds; a segment closes at the first keyframe
     /// at or past it. `0` cuts at every keyframe.
     pub fn with_target_duration(mut self, secs: u64) -> Self {
@@ -282,39 +294,87 @@ impl HlsSink {
             && self.open_duration_ns >= self.target_duration_secs.saturating_mul(1_000_000_000)
     }
 
+    fn append_to_single_file(&mut self, bytes: &[u8]) -> Result<ByteRange, G2gError> {
+        let file = match &mut self.single_file {
+            Some(file) => file,
+            None => {
+                let file = fs::File::create(&self.single_media_file).map_err(|e| {
+                    path_io_err(
+                        short_type_name::<Self>(),
+                        "create",
+                        &self.single_media_file,
+                        e,
+                    )
+                })?;
+                self.single_file.insert(file)
+            }
+        };
+        file.write_all(bytes).map_err(io_err)?;
+        file.flush().map_err(io_err)?;
+        let range = ByteRange {
+            offset: self.single_file_length,
+            length: bytes.len() as u64,
+        };
+        self.single_file_length += range.length;
+        Ok(range)
+    }
+
+    fn write_init(&mut self) -> Result<(), G2gError> {
+        let init = core::mem::take(&mut self.init);
+        let path = if self.single_media_file.is_empty() {
+            fs::write(&self.init_location, &init).map_err(|e| {
+                path_io_err(short_type_name::<Self>(), "write", &self.init_location, e)
+            })?;
+            self.init_location.clone()
+        } else {
+            self.playlist.map_byte_range = Some(self.append_to_single_file(&init)?);
+            self.single_media_file.clone()
+        };
+        self.init = init;
+        self.playlist.map_uri = Some(self.playlist_uri(&path));
+        self.init_written = true;
+        self.publish(&path, FMP4_CONTENT_TYPE);
+        Ok(())
+    }
+
+    // the path the segment went to, and its range when every segment shares one file
+    fn write_segment(&mut self) -> Result<(String, Option<ByteRange>), G2gError> {
+        let segment = core::mem::take(&mut self.open_segment);
+        if !self.single_media_file.is_empty() {
+            let range = self.append_to_single_file(&segment)?;
+            return Ok((self.single_media_file.clone(), Some(range)));
+        }
+        let path = expand(&self.location, self.index);
+        let mut file = fs::File::create(&path)
+            .map_err(|e| path_io_err(short_type_name::<Self>(), "create", &path, e))?;
+        file.write_all(&segment).map_err(io_err)?;
+        file.flush().map_err(io_err)?;
+        self.index += 1;
+        self.on_disk.push_back(path.clone());
+        Ok((path, None))
+    }
+
     /// Write the open segment out, list it, and republish the playlist.
     fn close_segment(&mut self) -> Result<(), G2gError> {
         if self.open_segment.is_empty() {
             return Ok(());
         }
         if !self.init.is_empty() && !self.init_written {
-            fs::write(&self.init_location, &self.init).map_err(|e| {
-                path_io_err(short_type_name::<Self>(), "write", &self.init_location, e)
-            })?;
-            self.playlist.map_uri = Some(self.playlist_uri(&self.init_location));
-            self.init_written = true;
-            self.publish(&self.init_location, FMP4_CONTENT_TYPE);
+            self.write_init()?;
         }
-        let path = expand(&self.location, self.index);
-        let mut file = fs::File::create(&path)
-            .map_err(|e| path_io_err(short_type_name::<Self>(), "create", &path, e))?;
-        file.write_all(&self.open_segment).map_err(io_err)?;
-        file.flush().map_err(io_err)?;
-        self.index += 1;
+        let (path, byte_range) = self.write_segment()?;
         self.segments_written += 1;
         self.publish(&path, self.segment_content_type());
-        self.on_disk.push_back(path.clone());
 
         self.playlist.segments.push(Segment {
             uri: self.playlist_uri(&path),
             duration_ms: (self.open_duration_ns / 1_000_000) as u32,
             key: None,
-            byte_range: None,
+            byte_range,
             gap: false,
             discontinuity: false,
             parts: Vec::new(),
         });
-        self.open_segment.clear();
         self.open_duration_ns = 0;
 
         if self.playlist_length > 0 {
@@ -596,6 +656,9 @@ impl AsyncElement for HlsSink {
             }
             "init-location" => self.init_location = value.as_str().ok_or(PropError::Type)?.into(),
             "playlist-root" => self.playlist_root = value.as_str().ok_or(PropError::Type)?.into(),
+            "single-media-file" => {
+                self.single_media_file = value.as_str().ok_or(PropError::Type)?.into()
+            }
             "target-duration" => {
                 self.target_duration_secs = value.as_uint().ok_or(PropError::Type)?
             }
@@ -620,6 +683,7 @@ impl AsyncElement for HlsSink {
             "playlist-location" => Some(PropValue::Str(self.playlist_location.clone())),
             "init-location" => Some(PropValue::Str(self.init_location.clone())),
             "playlist-root" => Some(PropValue::Str(self.playlist_root.clone())),
+            "single-media-file" => Some(PropValue::Str(self.single_media_file.clone())),
             "target-duration" => Some(PropValue::Uint(self.target_duration_secs)),
             "playlist-length" => Some(PropValue::Uint(self.playlist_length)),
             "max-files" => Some(PropValue::Uint(self.max_files)),
@@ -663,6 +727,11 @@ static HLSSINK_PROPS: &[PropertySpec] = &[
         "playlist-root",
         PropKind::Str,
         "prefix for the segment URIs written into the playlist",
+    ),
+    PropertySpec::new(
+        "single-media-file",
+        PropKind::Str,
+        "write every segment, and the fMP4 init segment, into this one file, addressed by byte range (empty = one file per segment)",
     ),
     PropertySpec::new(
         "target-duration",

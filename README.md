@@ -724,7 +724,7 @@ cargo clippy --workspace --all-targets
 | `splitmuxsink` | segmented recording, `muxer=mp4\|matroska\|mpegts` |
 | `splitmuxsrc` | plays a `splitmuxsink` recording's parts as one stream |
 | `togglerecord` | starts and stops several streams together on the main stream's keyframes: one element per stream joined by `group=`, `main=true` on the one that decides |
-| `hlssink` | HLS packaging, segment files plus an `.m3u8` playlist, fed by `mpegtsmux` or `mp4mux`. With the `http-server` feature, `http-port` also serves them over HTTP |
+| `hlssink` | HLS packaging, segment files plus an `.m3u8` playlist, fed by `mpegtsmux` or `mp4mux`. `single-media-file` writes one file addressed by byte range. With the `http-server` feature, `http-port` also serves them over HTTP |
 | `fallbackswitch` | forwards the highest-priority input still delivering, input 0 being primary |
 | `fallbacksrc uri=X` | wraps `fallbackswitch` around a URI's decode chain, rebuilds the source when it dies, and reports each restart on the bus. On its own it carries every stream kind in the container through a switch and a sink of its own |
 | `livesync` | keeps a stalling live input's output going by repeating the last video frame or filling audio silence |

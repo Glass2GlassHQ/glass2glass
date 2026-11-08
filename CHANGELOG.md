@@ -48,6 +48,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M2132: a single link from a named `st2038anctocc` pad carries that pad's caption type.
 - M2133: `st2038ancdemux` and `st2038ancmux`, live included, with ST 2038 caps alignment and framerate and a `Gap` packet.
 - M2134: `st2038combiner` and `st2038extractor` move ST 2038 on and off video frames as `AncillaryMeta`.
+- M2135: `hlssink single-media-file` writes one byte-range addressed file, and its HTTP server answers Range requests.
 
 ## 0.14.0
 

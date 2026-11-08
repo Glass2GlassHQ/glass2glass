@@ -15,7 +15,7 @@ use g2g_core::{
     ElementMetadata, G2gError, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError,
     PropKind, PropValue, PropertySpec,
 };
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 
@@ -25,20 +25,31 @@ use crate::httprequest::{read_request, AbortOnDrop, HttpRequest};
 use crate::mp4box::boxes;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ContentRange {
+    first: u64,
+    last: u64,
+    total: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Status {
     Ok,
+    PartialContent(ContentRange),
     BadRequest,
     NotFound,
     MethodNotAllowed,
+    RangeNotSatisfiable { total: u64 },
 }
 
 impl Status {
     fn code_and_reason(self) -> (u16, &'static str) {
         match self {
             Status::Ok => (200, "OK"),
+            Status::PartialContent(_) => (206, "Partial Content"),
             Status::BadRequest => (400, "Bad Request"),
             Status::NotFound => (404, "Not Found"),
             Status::MethodNotAllowed => (405, "Method Not Allowed"),
+            Status::RangeNotSatisfiable { .. } => (416, "Range Not Satisfiable"),
         }
     }
 }
@@ -62,6 +73,15 @@ pub(crate) fn response_head(
     );
     if let Some(content_type) = content_type {
         head.push_str(&alloc::format!("Content-Type: {content_type}\r\n"));
+    }
+    match status {
+        Status::PartialContent(ContentRange { first, last, total }) => head.push_str(
+            &alloc::format!("Content-Range: bytes {first}-{last}/{total}\r\n"),
+        ),
+        Status::RangeNotSatisfiable { total } => {
+            head.push_str(&alloc::format!("Content-Range: bytes */{total}\r\n"))
+        }
+        _ => {}
     }
     match body_length {
         BodyLength::Exact(length) => head.push_str(&alloc::format!("Content-Length: {length}\r\n")),
@@ -178,18 +198,87 @@ async fn file_response(request: &HttpRequest, files: &PublishedFiles) -> Vec<u8>
         return response_head(Status::NotFound, None, BodyLength::Exact(0));
     };
     // pruned from disk between the lookup and the read
-    let Ok(body) = tokio::fs::read(&file.path).await else {
+    let Ok(mut opened) = tokio::fs::File::open(&file.path).await else {
         return response_head(Status::NotFound, None, BodyLength::Exact(0));
     };
-    let mut response = response_head(
-        Status::Ok,
-        Some(file.content_type),
-        BodyLength::Exact(body.len()),
-    );
-    if !head_only {
-        response.extend_from_slice(&body);
+    let Ok(total) = opened.metadata().await.map(|metadata| metadata.len()) else {
+        return response_head(Status::NotFound, None, BodyLength::Exact(0));
+    };
+    let header = request.range.as_deref();
+    let (status, range) = match header.map_or(RangeRequest::Whole, |h| requested_range(h, total)) {
+        RangeRequest::Whole => (Status::Ok, 0..total),
+        RangeRequest::Part(range) => {
+            let content_range = ContentRange {
+                first: range.start,
+                last: range.end - 1,
+                total,
+            };
+            (Status::PartialContent(content_range), range)
+        }
+        RangeRequest::Unsatisfiable => {
+            let status = Status::RangeNotSatisfiable { total };
+            return response_head(status, None, BodyLength::Exact(0));
+        }
+    };
+    let Ok(length) = usize::try_from(range.end - range.start) else {
+        return response_head(Status::BadRequest, None, BodyLength::Exact(0));
+    };
+    let mut response = response_head(status, Some(file.content_type), BodyLength::Exact(length));
+    if head_only {
+        return response;
+    }
+    let body_start = response.len();
+    response.resize(body_start + length, 0);
+    let read = async {
+        opened.seek(std::io::SeekFrom::Start(range.start)).await?;
+        opened.read_exact(&mut response[body_start..]).await
+    };
+    // the file shrank between the length check and the read
+    if read.await.is_err() {
+        return response_head(Status::NotFound, None, BodyLength::Exact(0));
     }
     response
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RangeRequest {
+    Whole,
+    Part(core::ops::Range<u64>),
+    Unsatisfiable,
+}
+
+// RFC 9110 14.2: a server may ignore a Range it does not read, so several ranges or bad syntax get the whole file
+fn requested_range(header: &str, total: u64) -> RangeRequest {
+    let Some((first, last)) = header
+        .trim()
+        .strip_prefix("bytes=")
+        .filter(|spec| !spec.contains(','))
+        .and_then(|spec| spec.split_once('-'))
+    else {
+        return RangeRequest::Whole;
+    };
+    let (first, last) = (first.trim(), last.trim());
+    let range = if first.is_empty() {
+        match last.parse::<u64>() {
+            Ok(0) => return RangeRequest::Unsatisfiable,
+            Ok(suffix) => total.saturating_sub(suffix)..total,
+            Err(_) => return RangeRequest::Whole,
+        }
+    } else {
+        let Ok(first) = first.parse::<u64>() else {
+            return RangeRequest::Whole;
+        };
+        let end = match last.parse::<u64>() {
+            _ if last.is_empty() => total,
+            Ok(last) if last >= first => last.saturating_add(1).min(total),
+            _ => return RangeRequest::Whole,
+        };
+        first..end
+    };
+    if range.start >= total {
+        return RangeRequest::Unsatisfiable;
+    }
+    RangeRequest::Part(range)
 }
 
 const DEFAULT_HOST: &str = "localhost";
@@ -578,3 +667,27 @@ static HTTPSERVERSINK_PROPS: &[PropertySpec] = &[
     .with_default("8080")
     .with_range("0", "65535"),
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn requested_range_reads_one_range_and_ignores_the_rest() {
+        let total = 10;
+        let cases = [
+            ("bytes=2-5", RangeRequest::Part(2..6)),
+            ("bytes=4-", RangeRequest::Part(4..10)),
+            ("bytes=-3", RangeRequest::Part(7..10)),
+            ("bytes=8-99", RangeRequest::Part(8..10)),
+            ("bytes=10-", RangeRequest::Unsatisfiable),
+            ("bytes=-0", RangeRequest::Unsatisfiable),
+            ("bytes=0-1,4-5", RangeRequest::Whole),
+            ("bytes=5-2", RangeRequest::Whole),
+            ("items=0-1", RangeRequest::Whole),
+        ];
+        for (header, expected) in cases {
+            assert_eq!(requested_range(header, total), expected, "{header}");
+        }
+    }
+}
