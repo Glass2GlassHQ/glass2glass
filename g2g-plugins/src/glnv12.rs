@@ -240,6 +240,7 @@ impl GlState {
             self.interop = Some(unsafe { CudaGlInterop::register(y, uv)? });
         }
 
+        buf.keep_alive().wait_until_ready()?;
         // SAFETY: textures registered, CUDA context current, planes valid.
         unsafe { self.interop.as_ref().unwrap().upload(buf)? };
 

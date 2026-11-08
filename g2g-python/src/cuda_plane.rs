@@ -372,8 +372,8 @@ fn export_versioned<'py>(
 impl CudaPlane {
     /// The CAI v3 description of this plane: `shape`, `typestr`, `data`
     /// (device pointer, read-only flag), byte `strides`, `version`, and a
-    /// `stream` of `None` (the g2g CUDA domain carries no stream; a producer
-    /// hands the frame over once the decode into it has completed, so a
+    /// `stream` of `None` (the g2g CUDA domain carries no stream; the host
+    /// waits for the producer's writes before the frame reaches Python, so a
     /// consumer needs no cross-stream synchronization).
     #[getter(__cuda_array_interface__)]
     fn cuda_array_interface<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
@@ -401,8 +401,9 @@ impl CudaPlane {
     /// `max_version` picks the struct: a consumer that asks for 1.0 or newer gets
     /// the versioned tensor (which carries the read-only flag), one that asks for
     /// nothing gets the pre-1.0 one. `stream` is ignored: the g2g CUDA domain
-    /// carries no stream and a producer hands a frame over complete, so there is
-    /// nothing for the consumer's stream to wait on. A `dl_device` other than this
+    /// carries no stream and the host waits for the producer's writes before the
+    /// frame reaches Python, so there is nothing for the consumer's stream to
+    /// wait on. A `dl_device` other than this
     /// plane's, or `copy=True`, is refused rather than silently ignored, since
     /// this export cannot move or duplicate the producer's memory.
     #[pyo3(signature = (stream=None, max_version=None, dl_device=None, copy=None))]

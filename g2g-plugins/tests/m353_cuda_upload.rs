@@ -139,6 +139,84 @@ async fn an_odd_size_nv12_frame_round_trips_through_cuda() {
     assert_eq!(back.domain.as_system_slice(), Some(bytes.as_slice()));
 }
 
+// a 4K frame takes about a millisecond to cross PCIe, long enough for a download that skips the upload's event to read it half written
+const LARGE_WIDTH: u32 = 3840;
+const LARGE_HEIGHT: u32 = 2160;
+
+fn frame_bytes(seq: u64, len: usize) -> Vec<u8> {
+    (0..len)
+        .map(|index| (index as u64).wrapping_mul(31).wrapping_add(seq * 97) as u8)
+        .collect()
+}
+
+#[tokio::test]
+async fn frames_uploaded_back_to_back_download_intact() {
+    const FRAMES: u64 = 6;
+    let caps = nv12_caps_at(LARGE_WIDTH, LARGE_HEIGHT);
+    let mut up = CudaUpload::new();
+    match up.configure_pipeline(&caps) {
+        Ok(_) => {}
+        Err(e) if skip_if_no_gpu(&e) => return,
+        Err(e) => panic!("unexpected configure error: {e:?}"),
+    }
+    let offered = up
+        .propose_allocation(&caps)
+        .and_then(|params| params.host_allocator)
+        .expect("cudaupload offers pinned buffers upstream");
+    let len = RawVideoFormat::Nv12
+        .unpadded_frame_bytes(LARGE_WIDTH, LARGE_HEIGHT)
+        .unwrap() as usize;
+    let mut down = g2g_plugins::cuda::CudaDownload::new();
+    down.configure_pipeline(&caps).expect("configures");
+    // the second round uploads into the allocations the first round's frames returned
+    for round in 0..2 {
+        let first = round * FRAMES;
+        let mut sources = Vec::new();
+        for seq in first..first + FRAMES {
+            let mut pinned = offered.allocate(len).expect("allocate an offered buffer");
+            pinned
+                .as_mut_slice()
+                .copy_from_slice(&frame_bytes(seq, len));
+            sources.push(Frame::new(
+                MemoryDomain::System(pinned),
+                FrameTiming::default(),
+                seq,
+            ));
+        }
+        let mut uploaded = CollectSink::default();
+        for frame in sources {
+            up.process(PipelinePacket::DataFrame(frame), &mut uploaded)
+                .await
+                .expect("upload a frame");
+        }
+        // the last frame queued is downloaded first, while the uploads before it still occupy the copy queue
+        let numbered: Vec<_> = (first..).zip(uploaded.packets).collect();
+        for (seq, packet) in numbered.into_iter().rev() {
+            let PipelinePacket::DataFrame(frame) = packet else {
+                panic!("upload emitted a non-frame packet");
+            };
+            let MemoryDomain::Cuda(buffer) = &frame.domain else {
+                panic!("upload emitted a non-CUDA frame");
+            };
+            assert!(
+                buffer.keep_alive().ready_event().is_some(),
+                "an uploaded frame carries the event its copy records"
+            );
+            let mut downloaded = CollectSink::default();
+            down.process(PipelinePacket::DataFrame(frame), &mut downloaded)
+                .await
+                .expect("downloads");
+            let Some(PipelinePacket::DataFrame(back)) = downloaded.packets.pop() else {
+                panic!("download emitted no frame");
+            };
+            assert!(
+                back.domain.as_system_slice() == Some(frame_bytes(seq, len).as_slice()),
+                "frame {seq} in round {round} came back changed"
+            );
+        }
+    }
+}
+
 /// A frame already in CUDA memory passes through untouched (no redundant copy),
 /// so the converter is a safe no-op on a GPU-resident path. Driven by routing a
 /// `CudaUpload` output back into a second `CudaUpload`.

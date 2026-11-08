@@ -32,6 +32,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M2116: `framesplit` and `framemerge` spread one stream over branches by which has room and restore the frame order.
 - M2117: `g2g-launch --profile` records each GPU element's time on its device and the copy cost between GPUs, and `ortinfer` takes a `device-id`.
 - M2118: `--placement-profile` places each GPU element with `device-id=-1` on the device that minimizes latency or the busiest GPU's load.
+- M2119: `cudaupload`, `cudadownload` and `hipdownload` copy asynchronously through pinned memory, and CUDA frames carry a ready event.
 
 ## 0.14.0
 

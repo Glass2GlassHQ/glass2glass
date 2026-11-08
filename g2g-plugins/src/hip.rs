@@ -8,13 +8,15 @@ use alloc::vec::Vec;
 use core::ffi::{c_char, c_void};
 use std::ffi::CString;
 use std::os::fd::{AsRawFd, OwnedFd};
-use std::sync::mpsc::{self, Sender};
-use std::sync::{Condvar, Mutex, OnceLock, PoisonError};
+use std::sync::{Mutex, PoisonError};
 
-use g2g_core::memory::{GpuDevice, GpuVendor, HipKeepAlive, OwnedHipBuffer};
+use g2g_core::memory::{GpuDevice, GpuVendor, HipKeepAlive, OwnedCudaBuffer, OwnedHipBuffer};
 use g2g_core::{g2g_error, G2gError, HardwareError};
 
 use crate::cuda_driver_ffi as cuda;
+pub use crate::gpurelease::release_after;
+use crate::gpurelease::{wait_until_released, GpuFence};
+use crate::pinnedframes::PinnedAllocation;
 
 // rocm-hip-devel ships the unversioned libamdhip64.so, ROCm 7 and 6 runtimes only the sonames
 const LIBAMDHIP: &str = "libamdhip64.so.7";
@@ -487,7 +489,7 @@ impl HipMemory {
         };
         let mut code = malloc();
         if code == OUT_OF_MEMORY {
-            release_queue().wait_until_drained();
+            wait_until_released();
             code = malloc();
         }
         device.check(code)?;
@@ -635,6 +637,22 @@ impl HipPinnedMemory {
     }
 }
 
+impl PinnedAllocation for HipPinnedMemory {
+    type Device = Arc<HipDevice>;
+
+    fn allocate(device: &Arc<HipDevice>, size: usize) -> Result<Self, G2gError> {
+        HipPinnedMemory::allocate(device, size)
+    }
+
+    fn size(&self) -> usize {
+        self.size()
+    }
+
+    fn as_mut_slice(&mut self) -> &mut [u8] {
+        self.as_mut_slice()
+    }
+}
+
 impl Drop for HipPinnedMemory {
     fn drop(&mut self) {
         let Ok(_bound) = self.device.bind() else {
@@ -668,74 +686,10 @@ impl Drop for HipBufferOwner {
     }
 }
 
-#[derive(Debug)]
-struct Release {
-    event: HipEvent,
-    resources: Box<dyn core::fmt::Debug + Send>,
-}
-
-#[derive(Debug)]
-struct ReleaseQueue {
-    sender: Mutex<Sender<Release>>,
-    pending: Mutex<usize>,
-    drained: Condvar,
-}
-
-impl ReleaseQueue {
-    fn wait_until_drained(&self) {
-        let pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
-        drop(
-            self.drained
-                .wait_while(pending, |pending| *pending > 0)
-                .unwrap_or_else(PoisonError::into_inner),
-        );
+impl GpuFence for HipEvent {
+    fn wait(&self) -> Result<(), G2gError> {
+        self.synchronize()
     }
-
-    fn finish_one(&self) {
-        let mut pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
-        *pending -= 1;
-        if *pending == 0 {
-            self.drained.notify_all();
-        }
-    }
-}
-
-fn release_queue() -> &'static ReleaseQueue {
-    static QUEUE: OnceLock<ReleaseQueue> = OnceLock::new();
-    QUEUE.get_or_init(|| {
-        let (sender, receiver) = mpsc::channel::<Release>();
-        std::thread::Builder::new()
-            .name("g2g-hip-release".into())
-            .spawn(move || {
-                for release in receiver {
-                    if let Err(error) = release.event.synchronize() {
-                        g2g_error!(
-                            g2g_core::log::Target::category("hip"),
-                            "waiting for GPU work before freeing {:?} failed: {:?}",
-                            release.resources,
-                            error
-                        );
-                    }
-                    drop(release);
-                    release_queue().finish_one();
-                }
-            })
-            .expect("spawn the HIP release thread");
-        ReleaseQueue {
-            sender: Mutex::new(sender),
-            pending: Mutex::new(0),
-            drained: Condvar::new(),
-        }
-    })
-}
-
-// drops `resources` on a background thread once the GPU work before `event` completes
-pub fn release_after(event: HipEvent, resources: Box<dyn core::fmt::Debug + Send>) {
-    let queue = release_queue();
-    *queue.pending.lock().unwrap_or_else(PoisonError::into_inner) += 1;
-    let sender = queue.sender.lock().unwrap_or_else(PoisonError::into_inner);
-    // the receiver lives in a thread that never exits
-    let _ = sender.send(Release { event, resources });
 }
 
 struct RuntimeCompiler {
@@ -1035,6 +989,21 @@ impl HipStream {
         self.device.check(code)
     }
 
+    pub(crate) fn wait_for_cuda(&self, buffer: &OwnedCudaBuffer) -> Result<(), G2gError> {
+        let Some(event) = buffer.keep_alive().ready_event() else {
+            return Ok(());
+        };
+        let Backend::Nvidia { .. } = self.device.backend else {
+            return Err(G2gError::UnsupportedDomain);
+        };
+        let _bound = self.device.bind()?;
+        // SAFETY: the frame keeps its event alive, and cuStreamWaitEvent takes events from other contexts.
+        let code = unsafe {
+            cuda::cu_stream_wait_event(self.handle as HipStreamHandle, event as HipEventHandle, 0)
+        };
+        self.device.check(code)
+    }
+
     pub fn record(&self, event: &HipEvent) -> Result<(), G2gError> {
         if !Arc::ptr_eq(&self.device, &event.device) {
             return Err(G2gError::Hardware(HardwareError::Other));
@@ -1188,8 +1157,7 @@ impl HipStream {
         self.synchronize()
     }
 
-    // returns once the first `out.len()` bytes of `buffer` are in `out`
-    pub fn download_blocking(
+    pub(crate) unsafe fn download_async(
         &self,
         buffer: &OwnedHipBuffer,
         out: &mut [u8],
@@ -1198,29 +1166,37 @@ impl HipStream {
             return Err(G2gError::Hardware(HardwareError::Other));
         }
         self.wait_for(buffer)?;
-        {
-            let _bound = self.device.bind()?;
-            let stream = self.handle as HipStreamHandle;
-            let destination = out.as_mut_ptr().cast::<c_void>();
-            // SAFETY: the copy stays inside both buffers, and `synchronize` below ends it before `out` can go away.
-            let code = unsafe {
-                match self.device.backend {
-                    Backend::Amd => hip_memcpy_dtoh_async(
-                        destination,
-                        buffer.device_pointer as *mut c_void,
-                        out.len(),
-                        stream,
-                    ),
-                    Backend::Nvidia { .. } => cuda::cu_memcpy_dtoh_async(
-                        destination,
-                        buffer.device_pointer,
-                        out.len(),
-                        stream,
-                    ),
-                }
-            };
-            self.device.check(code)?;
-        }
+        let _bound = self.device.bind()?;
+        let stream = self.handle as HipStreamHandle;
+        let destination = out.as_mut_ptr().cast::<c_void>();
+        // SAFETY: the copy stays inside both buffers, and the caller keeps both alive until the stream passes it.
+        let code = unsafe {
+            match self.device.backend {
+                Backend::Amd => hip_memcpy_dtoh_async(
+                    destination,
+                    buffer.device_pointer as *mut c_void,
+                    out.len(),
+                    stream,
+                ),
+                Backend::Nvidia { .. } => cuda::cu_memcpy_dtoh_async(
+                    destination,
+                    buffer.device_pointer,
+                    out.len(),
+                    stream,
+                ),
+            }
+        };
+        self.device.check(code)
+    }
+
+    // returns once the first `out.len()` bytes of `buffer` are in `out`
+    pub fn download_blocking(
+        &self,
+        buffer: &OwnedHipBuffer,
+        out: &mut [u8],
+    ) -> Result<(), G2gError> {
+        // SAFETY: `synchronize` below ends the copy before `out` can go away.
+        unsafe { self.download_async(buffer, out) }?;
         self.synchronize()
     }
 }

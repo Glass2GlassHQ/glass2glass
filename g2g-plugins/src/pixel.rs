@@ -324,7 +324,7 @@ impl RawVideoGeometry {
 }
 
 // bytes read back from a GPU buffer, with padded rows packed tight when the buffer had a plane layout
-#[cfg(any(feature = "wgpu-sink", all(target_os = "linux", feature = "hip")))]
+#[cfg(feature = "wgpu-sink")]
 pub(crate) fn tight_frame(
     bytes: alloc::vec::Vec<u8>,
     layout: Option<&g2g_core::meta::PlaneLayout>,

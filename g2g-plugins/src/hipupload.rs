@@ -1,11 +1,9 @@
-use core::ffi::c_void;
 use core::future::Future;
 use core::pin::Pin;
 
 use alloc::boxed::Box;
 use alloc::sync::Arc;
-use alloc::vec::Vec;
-use std::sync::{Mutex, OnceLock, PoisonError};
+use std::sync::OnceLock;
 
 use g2g_core::log::{short_type_name, Target};
 use g2g_core::memory::{
@@ -14,8 +12,8 @@ use g2g_core::memory::{
 use g2g_core::meta::{Plane, PlaneLayout};
 use g2g_core::{
     g2g_error, g2g_warn, AllocationParams, AsyncElement, Caps, CapsConstraint, ConfigureOutcome,
-    ElementMetadata, Frame, G2gError, HostAllocator, MemoryDomain, OutputSink, PipelinePacket,
-    PropError, PropValue, PropertySpec, SystemSlice,
+    ElementMetadata, Frame, G2gError, MemoryDomain, OutputSink, PipelinePacket, PropError,
+    PropValue, PropertySpec, SystemSlice,
 };
 
 use crate::dmabuffence::wait_for_producer;
@@ -29,92 +27,8 @@ use crate::hipdeviceid::{HipDeviceChoice, HIP_DEVICE_ID_PROP, HIP_VENDOR_PROP};
 use crate::paddedrows::single_stride_layout;
 use crate::pixel::RawVideoGeometry;
 
-#[derive(Debug)]
-struct PinnedFrames {
-    device: Arc<HipDevice>,
-    free: Mutex<Vec<HipPinnedMemory>>,
-    // address and size of every buffer this pool allocated
-    allocations: Mutex<Vec<(usize, usize)>>,
-}
-
-#[derive(Debug)]
-struct PinnedLease {
-    memory: HipPinnedMemory,
-    frames: Arc<PinnedFrames>,
-}
-
-unsafe extern "C" fn return_lease(user: *mut c_void) {
-    // SAFETY: `user` is the `Box` that `PinnedFrames::lease` leaked, and SystemSlice calls this once.
-    let lease = unsafe { Box::from_raw(user.cast::<PinnedLease>()) };
-    let PinnedLease { memory, frames } = *lease;
-    frames
-        .free
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .push(memory);
-}
-
-impl PinnedFrames {
-    fn lease(self: &Arc<Self>, len: usize) -> Result<SystemSlice, G2gError> {
-        let recycled = {
-            let mut free = self.free.lock().unwrap_or_else(PoisonError::into_inner);
-            free.iter()
-                .position(|memory| memory.size() >= len)
-                .map(|index| free.swap_remove(index))
-        };
-        let mut memory = match recycled {
-            Some(memory) => memory,
-            None => {
-                let mut memory = HipPinnedMemory::allocate(&self.device, len)?;
-                let address = memory.as_mut_slice().as_mut_ptr() as usize;
-                self.allocations
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .push((address, memory.size()));
-                memory
-            }
-        };
-        let pointer = memory.as_mut_slice().as_mut_ptr();
-        let lease = Box::into_raw(Box::new(PinnedLease {
-            memory,
-            frames: Arc::clone(self),
-        }));
-        // SAFETY: the lease owns `len` or more bytes at `pointer` until `return_lease` runs, and only this slice reaches them.
-        Ok(unsafe {
-            SystemSlice::from_foreign_exclusive(pointer, len, Some(return_lease), lease.cast())
-        })
-    }
-
-    fn allocated(&self, bytes: &[u8]) -> bool {
-        let start = bytes.as_ptr() as usize;
-        self.allocations
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .iter()
-            .any(|&(address, size)| start >= address && start + bytes.len() <= address + size)
-    }
-}
-
-#[derive(Debug)]
-struct PinnedOffer {
-    frames: Arc<PinnedFrames>,
-    allocator: HostAllocator,
-}
-
-impl PinnedOffer {
-    fn open(device: &HipDeviceChoice) -> Result<Self, G2gError> {
-        let frames = Arc::new(PinnedFrames {
-            device: device.open()?,
-            free: Mutex::default(),
-            allocations: Mutex::default(),
-        });
-        let leased_from = Arc::clone(&frames);
-        Ok(Self {
-            frames,
-            allocator: HostAllocator::new(move |len| leased_from.lease(len)),
-        })
-    }
-}
+type PinnedFrames = crate::pinnedframes::PinnedFrames<HipPinnedMemory>;
+type PinnedOffer = crate::pinnedframes::PinnedOffer<HipPinnedMemory>;
 
 #[derive(Debug)]
 struct UploadGpu {
@@ -152,7 +66,7 @@ impl HipUpload {
         if let Some(offer) = self.pinned.get() {
             return Ok(offer);
         }
-        let offer = PinnedOffer::open(&self.device)?;
+        let offer = PinnedOffer::new(self.device.open()?);
         Ok(self.pinned.get_or_init(|| offer))
     }
 
@@ -240,6 +154,7 @@ fn wrap_cuda(gpu: &DeviceStream, cuda: &OwnedCudaBuffer) -> Result<OwnedHipBuffe
         },
     ])
     .ok_or(G2gError::UnsupportedDomain)?;
+    gpu.stream.wait_for_cuda(cuda)?;
     let ready = HipEvent::new(&gpu.device)?;
     gpu.stream.record(&ready)?;
     // kernels in the primary context read allocations made in other contexts on the same device
@@ -471,6 +386,7 @@ impl AsyncElement for HipUpload {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec::Vec;
     use g2g_core::{FrameTiming, PushOutcome, RawVideoFormat};
 
     const WIDTH: u32 = 64;

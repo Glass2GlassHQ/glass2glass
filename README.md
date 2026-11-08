@@ -629,7 +629,7 @@ cargo clippy --workspace --all-targets
 | `WgpuPresentSink` (`wgpusink`: owns its Wayland window, presents GPU-resident frames with no upload) | `wgpu-present` | Linux + Wayland + wgpu |
 | `NvDec` (native NVDEC H.264 / H.265 / VP9 / AV1 to CUDA NV12 or 10-bit P010) | `nvdec` | Linux or Windows + NVIDIA driver (libnvcuvid / nvcuvid.dll) |
 | `NvEnc` (native NVENC CUDA NV12 / P010 to H.264 / H.265, incl. HEVC Main 10) | `nvenc` | Linux or Windows + NVIDIA driver (libnvidia-encode / nvEncodeAPI64.dll) |
-| `CudaDownload` (CUDA to System), `CudaUpload` (System to CUDA) | `cuda` | Linux or Windows + NVIDIA driver (libcuda / nvcuda.dll) |
+| `CudaDownload` (CUDA to System), `CudaUpload` (System to CUDA, offering pinned host buffers upstream) | `cuda` | Linux or Windows + NVIDIA driver (libcuda / nvcuda.dll) |
 | `HipUpload` (System, CUDA or a dma-buf to HIP, offering pinned host buffers upstream and importing linear dma-bufs on AMD), `HipDownload` (HIP to System or CUDA) | `hip` | Linux + ROCm (libamdhip64) or the NVIDIA driver (libcuda) |
 | `HipConvertScale` (`hipconvertscale`: format conversion, scaling and `video-direction` rotation on HIP, including planar and float RGB for model input; `hipconvert` and `hipscale` do one of the two) | `hip` | Linux + ROCm (libamdhip64, libhiprtc) or NVIDIA (libcuda, libnvrtc) |
 | `HipCompositor` (`hipcompositor`: picture-in-picture and grids of Hip inputs in any `hipconvertscale` format, on the GPU) | `hip` | Linux + ROCm (libamdhip64, libhiprtc) or NVIDIA (libcuda, libnvrtc) |

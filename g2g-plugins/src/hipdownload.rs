@@ -3,7 +3,6 @@ use core::pin::Pin;
 
 use alloc::boxed::Box;
 use alloc::sync::Arc;
-use alloc::vec;
 
 use g2g_core::log::{short_type_name, Target};
 use g2g_core::memory::{
@@ -15,18 +14,27 @@ use g2g_core::{
     ElementMetadata, G2gError, MemoryDomain, OutputSink, PipelinePacket, RawVideoFormat,
 };
 
-use crate::hip::{HipDevice, HipStream};
-use crate::pixel::{tight_frame, RawVideoGeometry};
+use crate::hip::{HipDevice, HipEvent, HipPinnedMemory, HipStream};
+use crate::pinnedframes::{PinnedFrames, PinnedOffer};
+use crate::pixel::{pack_planes, RawVideoGeometry};
+use g2g_core::offload::run_blocking;
 
 const OUTPUT_DOMAINS: DomainSet =
     DomainSet::only(MemoryDomainKind::System).with(MemoryDomainKind::Cuda);
+
+#[derive(Debug)]
+struct DownloadGpu {
+    device: Arc<HipDevice>,
+    stream: HipStream,
+    pinned: Arc<PinnedFrames<HipPinnedMemory>>,
+}
 
 #[derive(Debug)]
 pub struct HipDownload {
     configured: bool,
     out_domain: MemoryDomainKind,
     raw_video: Option<RawVideoGeometry>,
-    gpu: Option<(Arc<HipDevice>, HipStream)>,
+    gpu: Option<DownloadGpu>,
 }
 
 impl Default for HipDownload {
@@ -45,29 +53,61 @@ impl HipDownload {
         Self::default()
     }
 
-    fn stream_for(&mut self, buffer: &OwnedHipBuffer) -> Result<&HipStream, G2gError> {
+    fn gpu_for(&mut self, buffer: &OwnedHipBuffer) -> Result<&DownloadGpu, G2gError> {
         let on_device = |device: &HipDevice| {
             device.vendor() == buffer.vendor && device.ordinal() == buffer.device_ordinal
         };
         let gpu = match self.gpu.take() {
-            Some(gpu) if on_device(&gpu.0) => gpu,
+            Some(gpu) if on_device(&gpu.device) => gpu,
             _ => {
                 let device = HipDevice::open(buffer.vendor, buffer.device_ordinal)?;
-                let stream = HipStream::new(&device)?;
-                (device, stream)
+                DownloadGpu {
+                    stream: HipStream::new(&device)?,
+                    pinned: PinnedOffer::new(Arc::clone(&device)).frames,
+                    device,
+                }
             }
         };
-        Ok(&self.gpu.insert(gpu).1)
+        Ok(self.gpu.insert(gpu))
     }
 
-    fn download(&mut self, buffer: &OwnedHipBuffer) -> Result<MemoryDomain, G2gError> {
-        let mut bytes = vec![0u8; buffer.len];
-        self.stream_for(buffer)?
-            .download_blocking(buffer, &mut bytes)?;
-        let tight = tight_frame(bytes, buffer.plane_layout(), self.raw_video)?;
-        Ok(MemoryDomain::System(SystemSlice::from_boxed(
-            tight.into_boxed_slice(),
-        )))
+    async fn download(&mut self, buffer: OwnedHipBuffer) -> Result<MemoryDomain, G2gError> {
+        let layout = buffer.plane_layout().copied();
+        let gpu = self.gpu_for(&buffer)?;
+        let mut output = gpu.pinned.lease(buffer.len)?;
+        // SAFETY: the stream is synchronized below, or the blocking wait holds `output` and `buffer` until the copy ends.
+        let queued = unsafe { gpu.stream.download_async(&buffer, output.as_mut_slice()) };
+        let copied = queued.and_then(|()| {
+            let copied = HipEvent::new(&gpu.device)?;
+            gpu.stream.record(&copied)?;
+            Ok(copied)
+        });
+        let copied = match copied {
+            Ok(copied) => copied,
+            Err(error) => {
+                // a copy queued before the failure still writes the leased slice
+                let _ = gpu.stream.synchronize();
+                return Err(error);
+            }
+        };
+        let output = run_blocking(move || {
+            let _source = buffer;
+            copied.synchronize().map(|()| output)
+        })
+        .await?;
+        let Some(layout) = layout else {
+            return Ok(MemoryDomain::System(output));
+        };
+        let raw_video = self.raw_video.ok_or(G2gError::CapsMismatch)?;
+        let packed = pack_planes(
+            output.as_slice(),
+            raw_video.format,
+            raw_video.width as usize,
+            raw_video.height as usize,
+            &layout,
+        )
+        .ok_or(G2gError::CapsMismatch)?;
+        Ok(MemoryDomain::System(SystemSlice::from_boxed(packed)))
     }
 
     fn as_cuda(&mut self, buffer: &OwnedHipBuffer) -> Result<MemoryDomain, G2gError> {
@@ -111,14 +151,8 @@ impl HipDownload {
                 )
             }
         };
-        let stream = self.stream_for(buffer)?;
-        let context = stream
-            .device()
-            .cuda_context()
-            .ok_or(G2gError::UnsupportedDomain)?;
-        // CUDA consumers read a frame as soon as it arrives, without waiting on an event
-        stream.wait_for(buffer)?;
-        stream.synchronize()?;
+        let device = Arc::clone(&self.gpu_for(buffer)?.device);
+        let context = device.cuda_context().ok_or(G2gError::UnsupportedDomain)?;
         let pitch = |stride: usize| u32::try_from(stride).map_err(|_| G2gError::CapsMismatch);
         Ok(MemoryDomain::Cuda(OwnedCudaBuffer::new(
             buffer.device_pointer + luma.offset as u64,
@@ -130,7 +164,8 @@ impl HipDownload {
             context,
             buffer.device_ordinal,
             Arc::new(HipFrame {
-                _frame: buffer.clone(),
+                frame: buffer.clone(),
+                device,
             }),
         )))
     }
@@ -138,10 +173,20 @@ impl HipDownload {
 
 #[derive(Debug)]
 struct HipFrame {
-    _frame: OwnedHipBuffer,
+    frame: OwnedHipBuffer,
+    device: Arc<HipDevice>,
 }
 
-impl CudaKeepAlive for HipFrame {}
+impl CudaKeepAlive for HipFrame {
+    fn ready_event(&self) -> Option<u64> {
+        // hip events on nvidia are CUevents
+        Some(self.frame.ready_event)
+    }
+
+    fn wait_until_ready(&self) -> Result<(), G2gError> {
+        self.device.wait_until_ready(&self.frame)
+    }
+}
 
 impl AsyncElement for HipDownload {
     type ProcessFuture<'a>
@@ -205,12 +250,13 @@ impl AsyncElement for HipDownload {
             }
             match packet {
                 PipelinePacket::DataFrame(mut frame) => {
-                    if let MemoryDomain::Hip(buffer) = &frame.domain {
-                        frame.domain = match self.out_domain {
-                            MemoryDomainKind::Cuda => self.as_cuda(buffer)?,
-                            _ => self.download(buffer)?,
-                        };
-                    }
+                    frame.domain = match frame.domain {
+                        MemoryDomain::Hip(buffer) => match self.out_domain {
+                            MemoryDomainKind::Cuda => self.as_cuda(&buffer)?,
+                            _ => self.download(buffer).await?,
+                        },
+                        domain => domain,
+                    };
                     out.push(PipelinePacket::DataFrame(frame)).await?;
                 }
                 PipelinePacket::CapsChanged(caps) => {

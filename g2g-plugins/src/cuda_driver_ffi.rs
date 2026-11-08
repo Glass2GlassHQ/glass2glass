@@ -9,10 +9,10 @@ pub(crate) type CuResult = i32;
 // `CUdevice` is an int handle.
 pub(crate) type CuDevice = i32;
 pub(crate) type CuContext = *mut c_void;
-#[cfg(any(feature = "cuda-wgpu", feature = "hip"))]
 pub(crate) type CuStream = *mut c_void;
-#[cfg(feature = "hip")]
 pub(crate) type CuEvent = *mut c_void;
+pub(crate) const CU_STREAM_NON_BLOCKING: u32 = 0x1;
+pub(crate) const CU_EVENT_DISABLE_TIMING: u32 = 0x2;
 #[cfg(feature = "hip")]
 pub(crate) type CuModule = *mut c_void;
 #[cfg(feature = "hip")]
@@ -64,7 +64,9 @@ crate::shared_library::shared_library! {
     pub(crate) fn cu_init = "cuInit"(flags: u32) -> CuResult;
     pub(crate) fn cu_device_get = "cuDeviceGet"(device: *mut CuDevice, ordinal: i32) -> CuResult;
     pub(crate) fn cu_device_get_name = "cuDeviceGetName"(name: *mut core::ffi::c_char, len: i32, device: CuDevice) -> CuResult;
+    #[cfg(any(feature = "nvdec", feature = "local-ipc", all(test, feature = "nvenc")))]
     pub(crate) fn cu_ctx_create = "cuCtxCreate_v2"(context: *mut CuContext, flags: u32, device: CuDevice) -> CuResult;
+    #[cfg(any(feature = "nvdec", feature = "local-ipc", all(test, feature = "nvenc")))]
     pub(crate) fn cu_ctx_destroy = "cuCtxDestroy_v2"(context: CuContext) -> CuResult;
     pub(crate) fn cu_ctx_push_current = "cuCtxPushCurrent_v2"(context: CuContext) -> CuResult;
     pub(crate) fn cu_ctx_pop_current = "cuCtxPopCurrent_v2"(context: *mut CuContext) -> CuResult;
@@ -88,34 +90,24 @@ crate::shared_library::shared_library! {
     pub(crate) fn cu_memcpy_htod = "cuMemcpyHtoD_v2"(destination: u64, source: *const c_void, size: usize) -> CuResult;
     #[cfg(any(feature = "local-ipc", all(test, any(feature = "nvdec", feature = "cuda-wgpu"))))]
     pub(crate) fn cu_memcpy_dtoh = "cuMemcpyDtoH_v2"(destination: *mut c_void, source: u64, size: usize) -> CuResult;
+    #[cfg(any(feature = "nvdec", feature = "cuda-wgpu", feature = "cuda-gl", feature = "cuda-kms"))]
     pub(crate) fn cu_memcpy_2d = "cuMemcpy2D_v2"(copy: *const CudaMemcpy2D) -> CuResult;
-    #[cfg(any(feature = "cuda-wgpu", feature = "hip"))]
+    pub(crate) fn cu_memcpy_2d_async = "cuMemcpy2DAsync_v2"(copy: *const CudaMemcpy2D, stream: CuStream) -> CuResult;
     pub(crate) fn cu_device_primary_ctx_retain = "cuDevicePrimaryCtxRetain"(context: *mut CuContext, device: CuDevice) -> CuResult;
-    #[cfg(any(feature = "cuda-wgpu", feature = "hip"))]
     pub(crate) fn cu_device_primary_ctx_release = "cuDevicePrimaryCtxRelease_v2"(device: CuDevice) -> CuResult;
-    #[cfg(any(feature = "cuda-wgpu", feature = "hip"))]
     pub(crate) fn cu_stream_create = "cuStreamCreate"(stream: *mut CuStream, flags: u32) -> CuResult;
-    #[cfg(any(feature = "cuda-wgpu", feature = "hip"))]
     pub(crate) fn cu_stream_destroy = "cuStreamDestroy_v2"(stream: CuStream) -> CuResult;
-    #[cfg(any(feature = "cuda-wgpu", feature = "hip"))]
     pub(crate) fn cu_stream_synchronize = "cuStreamSynchronize"(stream: CuStream) -> CuResult;
-    #[cfg(feature = "hip")]
     pub(crate) fn cu_stream_wait_event = "cuStreamWaitEvent"(stream: CuStream, event: CuEvent, flags: u32) -> CuResult;
-    #[cfg(feature = "hip")]
     pub(crate) fn cu_event_create = "cuEventCreate"(event: *mut CuEvent, flags: u32) -> CuResult;
-    #[cfg(feature = "hip")]
     pub(crate) fn cu_event_record = "cuEventRecord"(event: CuEvent, stream: CuStream) -> CuResult;
-    #[cfg(feature = "hip")]
     pub(crate) fn cu_event_synchronize = "cuEventSynchronize"(event: CuEvent) -> CuResult;
-    #[cfg(feature = "hip")]
     pub(crate) fn cu_event_destroy = "cuEventDestroy_v2"(event: CuEvent) -> CuResult;
     #[cfg(feature = "hip")]
     pub(crate) fn cu_memcpy_htod_async = "cuMemcpyHtoDAsync_v2"(destination: u64, source: *const c_void, size: usize, stream: CuStream) -> CuResult;
     #[cfg(feature = "hip")]
     pub(crate) fn cu_memcpy_dtoh_async = "cuMemcpyDtoHAsync_v2"(destination: *mut c_void, source: u64, size: usize, stream: CuStream) -> CuResult;
-    #[cfg(feature = "hip")]
     pub(crate) fn cu_mem_alloc_host = "cuMemAllocHost_v2"(pointer: *mut *mut c_void, size: usize) -> CuResult;
-    #[cfg(feature = "hip")]
     pub(crate) fn cu_mem_free_host = "cuMemFreeHost"(pointer: *mut c_void) -> CuResult;
     #[cfg(feature = "hip")]
     pub(crate) fn cu_device_get_attribute = "cuDeviceGetAttribute"(value: *mut i32, attribute: i32, device: CuDevice) -> CuResult;

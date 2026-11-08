@@ -612,6 +612,8 @@ impl NvEnc {
         if self.session.is_none() {
             self.open_session(buf)?;
         }
+        // nvenc reads the input on the legacy default stream, which does not wait on non-blocking streams
+        buf.keep_alive().wait_until_ready()?;
         // Apply any pending rate-control / GOP change before encoding.
         if self.applied != Some(self.live_config()) {
             self.reconfigure_live()?;

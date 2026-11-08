@@ -1821,6 +1821,8 @@ pub mod cuda;
 mod cuda_driver_ffi;
 #[cfg(all(target_os = "linux", any(feature = "hip", feature = "unixfd")))]
 mod dmabuffence;
+#[cfg(all(any(target_os = "linux", windows), feature = "cuda"))]
+pub mod gpurelease;
 #[cfg(all(target_os = "linux", feature = "hip"))]
 pub mod hip;
 #[cfg(all(target_os = "linux", feature = "hip"))]
@@ -1833,6 +1835,8 @@ mod hipdeviceid;
 pub mod hipdownload;
 #[cfg(all(target_os = "linux", feature = "hip"))]
 pub mod hipupload;
+#[cfg(all(any(target_os = "linux", windows), feature = "cuda"))]
+mod pinnedframes;
 #[cfg(all(target_os = "linux", feature = "placement"))]
 pub mod placement;
 #[cfg(any(

@@ -286,8 +286,9 @@ loop stays on the GPU and out of libavcodec.
   and its CUDA context outlive any frame in flight. Decoder, context lock and
   context are destroyed in that order once the last frame is released. The
   element owns its own CUDA context, created at configure.
-- Device selection: every element creating its own CUDA context takes the ordinal
-  from a `cuda-device-id` property, that is `NvDec`, `CudaUpload`,
+- Device selection: every element opening a CUDA context, its own or the
+  device's primary one, takes the ordinal from a `cuda-device-id` property, that
+  is `NvDec`, `CudaUpload`,
   `LocalCudaSrc`, `FfmpegVideoDec` on `Backend::NvdecCuda`, and read-only on the
   `WgpuToCuda` bridge whose device is fixed by the wgpu device it was built over.
   The spec is declared once in `g2g-plugins/src/cudadeviceid.rs` so name, range
@@ -589,6 +590,13 @@ platform-agnostic. `OwnedCudaBuffer` carries the two NV12 plane device pointers,
 luma Y and interleaved chroma UV, row pitches, dims, the `CUcontext`, and a boxed
 `CudaKeepAlive` owner. Core never links CUDA: the producing element supplies the
 owner as a trait object, and dropping the buffer releases the backing allocation.
+A producer that pushes a frame before its GPU writes finish returns the CUevent
+recorded after them from `CudaKeepAlive::ready_event`. A consumer that reads on a
+CUDA stream waits on it with `cuStreamWaitEvent`, and one that reads on the host
+or hands the pointers to another API (`nvenc`, the GL interop sinks,
+`localcudasink`, the Python host) calls `wait_until_ready` first. Both default to
+a frame that is already complete. A consumer finishes reading a frame before it
+drops it, since producers recycle the memory on drop.
 `AllocationParams::cuda(...)` makes `MemoryDomainKind::Cuda` a cross-element pool
 domain in the allocation negotiation ([caps.md](caps.md)).
 
@@ -627,10 +635,20 @@ links `libcuda` directly.
 
 ### CudaDownload, CudaGlSink, CudaKmsSink
 
-- `CudaDownload` (`cuda` feature) is an `Identity(NV12)` transform copying a
-  `MemoryDomain::Cuda` frame to `MemoryDomain::System` via device-to-host
-  `cuMemcpy2D`. It negates the latency win but lets a `NvdecCuda` stream reach
-  the existing CPU sinks for correctness and bring-up.
+- `CudaUpload` and `CudaDownload` (`cuda` feature) are `Identity(NV12)`
+  transforms between `MemoryDomain::System` and `MemoryDomain::Cuda`. Both run
+  in the device's primary context, each on its own non-blocking stream, and copy
+  with `cuMemcpy2DAsync` through pinned host memory from `cuMemAllocHost`.
+  `CudaUpload` offers its pinned buffers upstream through
+  `AllocationParams::host_allocator` and copies any other system frame into one
+  first. It writes into pitched device buffers from a pool that the frames
+  return to on drop, and pushes each frame once its copy is queued, with the
+  copy's event as the frame's ready event. `CudaDownload` makes its stream wait
+  on the input's ready event, copies into a pinned buffer, and waits for the
+  copy on tokio's blocking pool, so the runner keeps polling the other elements
+  while the copy runs. A copy from a frame allocated in another context on the
+  same device, such as an `nvdec` frame, matches an ffmpeg software decode byte
+  for byte.
 - `CudaGlSink` (`cuda-gl` feature, Linux + NVIDIA) holds an EGL context on a
   Wayland surface (`wl_egl_window` from SCTK), a `glow` GL ES 3 program with the
   two NV12 textures, and the per-frame map, copy and unmap render loop via the

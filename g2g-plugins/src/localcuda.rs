@@ -327,6 +327,8 @@ impl AsyncElement for LocalCudaSink {
                         // frame belongs on the wire codec instead.
                         return Err(G2gError::UnsupportedDomain);
                     };
+                    // the receiving process reads the planes as soon as the handle arrives
+                    buf.keep_alive().wait_until_ready()?;
                     // Resolve the enclosing allocation: for CudaUpload it is the
                     // luma pointer itself (offset 0); for an NVDEC pool frame the
                     // planes sit at offsets within a larger pool allocation. CUDA

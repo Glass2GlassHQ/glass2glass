@@ -248,12 +248,15 @@ one of those buffers goes to device memory from a pool on `hipupload`'s own
 stream, and its buffer returns to the pinned pool once the copy finishes, so
 the element returns before the GPU copy does. Any other system frame is first
 copied into a buffer leased from the same pool. On NVIDIA it wraps a CUDA frame as a Hip frame with the
-CUDA pitches as its plane layout, and `hipdownload` hands a Hip frame back as
-CUDA on the primary context when the consumer takes only CUDA. A kernel in
+CUDA pitches as its plane layout, with its stream waiting on the CUDA frame's
+ready event, and `hipdownload` hands a Hip frame back as CUDA on the primary
+context when the consumer takes only CUDA, with the Hip frame's event, a
+CUevent on NVIDIA, as the CUDA frame's ready event. A kernel in
 the primary context reads memory allocated in another context on the same
 device, which CUDA does not document, and `m2104_hip_upload_download` checks
-it on every run. Otherwise `hipdownload` copies to system memory, packing
-padded rows tight. Both are domain converters, so a Hip consumer after a
+it on every run. Otherwise `hipdownload` copies to a pinned buffer on its own
+stream and waits for the copy on tokio's blocking pool, then packs padded rows
+tight. Both are domain converters, so a Hip consumer after a
 system or CUDA producer gets `hipupload` spliced in.
 
 A GPU element names the device it runs on through `gpu_device()`, a

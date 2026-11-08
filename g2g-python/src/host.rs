@@ -984,6 +984,7 @@ fn handoff(py: Python<'_>, instance: &Py<PyAny>, job: &mut Job) -> Result<Handof
                 // A batch mixing GPU and CPU frames has no single contract.
                 return Err(G2gError::UnsupportedDomain);
             };
+            buf.keep_alive().wait_until_ready()?;
             planes.push(nv12_planes(fmt, buf).ok_or(G2gError::UnsupportedDomain)?);
         }
         return match job.kind {

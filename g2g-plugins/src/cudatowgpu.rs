@@ -208,6 +208,7 @@ impl AsyncElement for CudaToWgpu {
                         // GPU-input only: a System frame is the CPU path's job.
                         return Err(G2gError::UnsupportedDomain);
                     };
+                    buf.keep_alive().wait_until_ready()?;
                     // Copy the plane geometry out before borrowing the device.
                     let (ctx, luma, luma_p, chroma, chroma_p, w, h) = (
                         buf.context,

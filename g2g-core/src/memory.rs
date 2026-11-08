@@ -1019,7 +1019,16 @@ impl OwnedCudaBuffer {
 /// device memory is safe for concurrent read-only access (immutable decoded
 /// surface), the same contract under which the owners assert `Send`.
 #[cfg(feature = "alloc")]
-pub trait CudaKeepAlive: core::fmt::Debug + Send + Sync {}
+pub trait CudaKeepAlive: core::fmt::Debug + Send + Sync {
+    fn ready_event(&self) -> Option<u64> {
+        // producers that finish writing before the push have no CUevent to wait on
+        None
+    }
+
+    fn wait_until_ready(&self) -> Result<(), crate::G2gError> {
+        Ok(())
+    }
+}
 
 /// A decoded picture left in a Direct3D 11 texture (Windows GPU memory). Holds
 /// the `ID3D11Texture2D` pointer, the subresource index of this frame within
