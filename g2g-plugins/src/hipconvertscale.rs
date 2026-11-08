@@ -451,12 +451,63 @@ extern "C" __global__ void convert_scale(
     write_rgb(dst, offset, stride, x, y, covered ? sample_color(frame, source_x, source_y) : black);
 #endif
 }
+
+extern "C" __global__ void blend_into_canvas(
+    const unsigned char* src, float* canvas,
+    unsigned int src_width, unsigned int src_height,
+    unsigned int src_offset0, unsigned int src_offset1, unsigned int src_offset2,
+    unsigned int src_stride0, unsigned int src_stride1, unsigned int src_stride2,
+    unsigned int canvas_width, unsigned int canvas_height,
+    int rect_x, int rect_y, unsigned int rect_width, unsigned int rect_height, float alpha) {
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= (int)canvas_width || y >= (int)canvas_height) {
+        return;
+    }
+    float inside_x = (float)(x - rect_x) + 0.5f;
+    float inside_y = (float)(y - rect_y) + 0.5f;
+    if (inside_x <= 0.0f || inside_y <= 0.0f || inside_x >= (float)rect_width ||
+        inside_y >= (float)rect_height) {
+        return;
+    }
+    Frame frame = {src, src_width, src_height, {src_offset0, src_offset1, src_offset2},
+                   {src_stride0, src_stride1, src_stride2}};
+    Color color = sample_color(frame, inside_x * (float)src_width / (float)rect_width,
+                               inside_y * (float)src_height / (float)rect_height);
+    float a = clamp01(color.a) * alpha;
+    float* pixel = canvas + 4 * ((unsigned long long)y * canvas_width + x);
+    pixel[0] = color.r * a + pixel[0] * (1.0f - a);
+    pixel[1] = color.g * a + pixel[1] * (1.0f - a);
+    pixel[2] = color.b * a + pixel[2] * (1.0f - a);
+    pixel[3] = a + pixel[3] * (1.0f - a);
+}
 "#;
 
 const BLOCK_SIZE: u32 = 16;
 
 fn format_index(format: RawVideoFormat) -> Option<usize> {
     FORMATS.iter().position(|&(known, _)| known == format)
+}
+
+pub(crate) fn converts(format: RawVideoFormat) -> bool {
+    format_index(format).is_some()
+}
+
+pub(crate) fn any_size_formats() -> impl Iterator<Item = Caps> {
+    FORMATS.iter().map(|&(format, _)| Caps::RawVideo {
+        format,
+        width: Dim::Any,
+        height: Dim::Any,
+        framerate: Rate::Any,
+        interlace: g2g_core::Interlace::Any,
+        colorimetry: Colorimetry::UNKNOWN,
+    })
+}
+
+pub(crate) fn narrow_to_converted_format(upstream_caps: &Caps) -> Result<Caps, G2gError> {
+    any_size_formats()
+        .find_map(|candidate| upstream_caps.intersect(&candidate).ok())
+        .ok_or(G2gError::CapsMismatch)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -539,6 +590,36 @@ fn picture_rect(input: &Picture, output: &Picture, add_borders: bool) -> Picture
     }
 }
 
+fn compile(
+    device: &Arc<HipDevice>,
+    input: &Picture,
+    output: &Picture,
+) -> Result<Arc<HipKernelModule>, G2gError> {
+    let mut options: Vec<String> = FORMATS
+        .iter()
+        .enumerate()
+        .map(|(index, (_, name))| format!("-DFMT_{name}={index}"))
+        .collect();
+    options.extend(input.defines("IN"));
+    options.extend(output.defines("OUT"));
+    let (input_luma, output_luma) = (
+        input.colorimetry.yuv_conversion().luma,
+        output.colorimetry.yuv_conversion().luma,
+    );
+    let same_matrix =
+        carries_yuv(input.format) && carries_yuv(output.format) && input_luma == output_luma;
+    options.push(format!("-DSAME_MATRIX={}", u8::from(same_matrix)));
+    let options: Vec<&str> = options.iter().map(String::as_str).collect();
+    HipKernelModule::compile(device, KERNEL_SOURCE, &options)
+}
+
+fn source_planes(input: &OwnedHipBuffer, picture: &Picture) -> Result<[(u32, u32); 3], G2gError> {
+    match input.plane_layout() {
+        Some(layout) => kernel_planes(layout),
+        None => kernel_planes(&picture.tight_layout()?),
+    }
+}
+
 // the kernel takes three planes of (offset, stride), zero past the format's last plane
 fn kernel_planes(layout: &PlaneLayout) -> Result<[(u32, u32); 3], G2gError> {
     let mut planes = [(0, 0); 3];
@@ -570,22 +651,7 @@ impl HipConverter {
     ) -> Result<Self, G2gError> {
         let input = Picture::of(input)?;
         let output = Picture::of(output)?;
-        let mut options: Vec<String> = FORMATS
-            .iter()
-            .enumerate()
-            .map(|(index, (_, name))| format!("-DFMT_{name}={index}"))
-            .collect();
-        options.extend(input.defines("IN"));
-        options.extend(output.defines("OUT"));
-        let (input_luma, output_luma) = (
-            input.colorimetry.yuv_conversion().luma,
-            output.colorimetry.yuv_conversion().luma,
-        );
-        let same_matrix =
-            carries_yuv(input.format) && carries_yuv(output.format) && input_luma == output_luma;
-        options.push(format!("-DSAME_MATRIX={}", u8::from(same_matrix)));
-        let options: Vec<&str> = options.iter().map(String::as_str).collect();
-        let module = HipKernelModule::compile(device, KERNEL_SOURCE, &options)?;
+        let module = compile(device, &input, &output)?;
         Ok(Self {
             kernel: module.kernel("convert_scale")?,
             rect: picture_rect(&input, &output, add_borders),
@@ -611,10 +677,7 @@ impl HipConverter {
         if output.size() < self.output_len()? {
             return Err(G2gError::CapsMismatch);
         }
-        let source = match input.plane_layout() {
-            Some(layout) => kernel_planes(layout)?,
-            None => kernel_planes(&self.input.tight_layout()?)?,
-        };
+        let source = source_planes(input, &self.input)?;
         let destination = kernel_planes(&self.output.tight_layout()?)?;
         let (width, height) = (self.output.width, self.output.height);
         stream.launch(
@@ -644,6 +707,81 @@ impl HipConverter {
                 KernelArgument::U32(self.rect.y),
                 KernelArgument::U32(self.rect.width),
                 KernelArgument::U32(self.rect.height),
+            ],
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct CanvasRect {
+    pub(crate) x: i32,
+    pub(crate) y: i32,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+}
+
+#[derive(Debug)]
+pub(crate) struct HipBlender {
+    kernel: HipKernel,
+    input: Picture,
+}
+
+impl HipBlender {
+    pub(crate) fn new(device: &Arc<HipDevice>, input: &Caps) -> Result<Self, G2gError> {
+        let input = Picture::of(input)?;
+        let canvas = Picture::of(&Caps::RawVideo {
+            format: RawVideoFormat::RgbaF32,
+            width: Dim::Fixed(1),
+            height: Dim::Fixed(1),
+            framerate: Rate::Any,
+            interlace: g2g_core::Interlace::Any,
+            colorimetry: Colorimetry::UNKNOWN,
+        })?;
+        let module = compile(device, &input, &canvas)?;
+        Ok(Self {
+            kernel: module.kernel("blend_into_canvas")?,
+            input,
+        })
+    }
+
+    // `canvas` holds `canvas_width` x `canvas_height` RGBA pixels of four f32 each
+    pub(crate) fn blend(
+        &self,
+        stream: &HipStream,
+        input: &OwnedHipBuffer,
+        canvas: &mut HipMemory,
+        (canvas_width, canvas_height): (u32, u32),
+        rect: CanvasRect,
+        alpha: f32,
+    ) -> Result<(), G2gError> {
+        let source = source_planes(input, &self.input)?;
+        stream.launch(
+            &self.kernel,
+            [
+                canvas_width.div_ceil(BLOCK_SIZE),
+                canvas_height.div_ceil(BLOCK_SIZE),
+                1,
+            ],
+            [BLOCK_SIZE, BLOCK_SIZE, 1],
+            &[
+                KernelArgument::Read(input),
+                KernelArgument::Write(canvas),
+                KernelArgument::U32(self.input.width),
+                KernelArgument::U32(self.input.height),
+                KernelArgument::U32(source[0].0),
+                KernelArgument::U32(source[1].0),
+                KernelArgument::U32(source[2].0),
+                KernelArgument::U32(source[0].1),
+                KernelArgument::U32(source[1].1),
+                KernelArgument::U32(source[2].1),
+                KernelArgument::U32(canvas_width),
+                KernelArgument::U32(canvas_height),
+                // the kernel reads these two as signed ints
+                KernelArgument::U32(rect.x as u32),
+                KernelArgument::U32(rect.y as u32),
+                KernelArgument::U32(rect.width),
+                KernelArgument::U32(rect.height),
+                KernelArgument::F32(alpha),
             ],
         )
     }
@@ -752,20 +890,7 @@ impl AsyncElement for HipConvertScale {
     }
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
-        for (format, _) in FORMATS {
-            let candidate = Caps::RawVideo {
-                format,
-                width: Dim::Any,
-                height: Dim::Any,
-                framerate: Rate::Any,
-                interlace: g2g_core::Interlace::Any,
-                colorimetry: Colorimetry::UNKNOWN,
-            };
-            if let Ok(narrowed) = upstream_caps.intersect(&candidate) {
-                return Ok(narrowed);
-            }
-        }
-        Err(G2gError::CapsMismatch)
+        narrow_to_converted_format(upstream_caps)
     }
 
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {

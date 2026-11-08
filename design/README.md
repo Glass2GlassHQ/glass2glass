@@ -278,6 +278,15 @@ compiled for the input and output format pair, with the formats, each side's
 `add-borders` letterboxes the picture inside the output, on even rows and
 columns for a 4:2:0 output.
 
+`hipcompositor` composites Hip frames of any format `hipconvertscale` reads.
+Each output frame fills an RGBA f32 canvas with the background, then blends
+every pad in paint order with `blend_into_canvas`, a kernel in the same source
+as `HipConverter`. That kernel samples the pad with the converter's bilinear YUV
+or RGB reads, and blends straight alpha the way the CPU compositor does. A
+`HipConverter` then writes the canvas in the output `format`. The pads use the
+CPU compositor's `sinkN-*` properties, so GStreamer's `operator` and
+`sizing-policy` pad properties are not there.
+
 ### The copy plan
 
 Because negotiation resolves the memory domain of every link before a frame
@@ -478,7 +487,12 @@ and primaries ride through. The `Compositor` mixes in input 0's colorimetry, fil
 its background through that same conversion, limited-range black by default,
 and announces the refined output caps when they firm up after negotiation.
 `WgpuCompositor` mixes `Rgba8` textures only, planar YUV mixes stay on the CPU
-`Compositor`.
+`Compositor`. All three compositors (`Compositor`, `WgpuCompositor`,
+`HipCompositor`) keep their canvas, pads, input-0 cadence, colorimetry and
+segment in one `CompositorCanvas` and run every packet through
+`process_compositor_packet`. Each element supplies only the `CompositorBackend`
+pieces: what it caches per input frame, how it composites one output frame, and
+which input caps it takes.
 
 Raw frames of any size share one tight layout, `RawVideoFormat::plane_stride` and
 `plane_rows`, which every byte-size helper derives from. Subsampled chroma rounds

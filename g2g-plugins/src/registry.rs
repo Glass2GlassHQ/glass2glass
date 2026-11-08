@@ -1612,6 +1612,17 @@ pub fn default_registry() -> Registry {
         })
         .with_input_kinds(&[StreamType::Video]),
     );
+    #[cfg(all(target_os = "linux", feature = "hip"))]
+    reg.register_muxer(
+        MuxerFactory::new("hipcompositor", |inputs| {
+            Box::new(crate::hipcompositor::HipCompositor::new(
+                320,
+                240,
+                (0..inputs).map(|_| CompositorPad::at(0, 0)).collect(),
+            ))
+        })
+        .with_input_kinds(&[StreamType::Video]),
+    );
     // Summing audio fan-in (M130): sums N S16LE inputs on a PTS-aligned timeline
     // (M664). The output caps are a nominal default matching `audiotestsrc`; its
     // channel count / rate drive the PTS-to-sample-frame mapping.
@@ -2864,6 +2875,7 @@ pub static FEATURE_GATED_ELEMENTS: &[FeatureGatedElement] = &{
         "avenc_aac" => "ffmpeg" on "linux" | "macos" | "windows";
         "cudadownload" => "cuda" on "linux" | "windows";
         "cudaupload" => "cuda" on "linux" | "windows";
+        "hipcompositor" => "hip" on "linux";
         "hipconvertscale" => "hip" on "linux";
         "hipdownload" => "hip" on "linux";
         "hipupload" => "hip" on "linux";

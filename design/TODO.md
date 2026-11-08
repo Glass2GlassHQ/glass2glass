@@ -166,8 +166,8 @@ GstHip's inference path, with an AMD backend (`libamdhip64`, hiprtc) and an
 NVIDIA backend (`libcuda`, nvrtc), loaded at run time. Milestones validate on
 the laptop's RTX 3060 and Radeon 680M.
 
-- Later: `hipconvert`, `hipscale`, `hipcompositor`, `video-direction` in
-  `hipconvertscale`.
+- Later: `hipconvert`, `hipscale`, `video-direction` in `hipconvertscale`,
+  and `hipcompositor`'s `operator` and `sizing-policy` pad properties.
 
 ## Egress / transports
 

@@ -54,13 +54,11 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::compositor::{
-    color_property, color_value, dim_property, frame_period_ns, framerate_property, pad_property,
-    paint_order, set_pad_property, CompositorPad, CompositorState, WGPU_COMPOSITOR_PROPS,
+    configure_compositor_input, paint_order, process_compositor_packet, CompositorBackend,
+    CompositorCanvas, CompositorPad, WGPU_COMPOSITOR_PROPS,
 };
 use crate::gpu::{map_for_read_async, texture_of, GpuContext, WgpuTextureKeepAlive};
-use g2g_core::caps::{
-    framerate_q16_from_fraction, framerate_q16_period_ns, framerate_q16_to_fraction,
-};
+use g2g_core::caps::framerate_q16_from_fraction;
 use g2g_core::frame::Frame;
 use g2g_core::memory::{OwnedWgpuTexture, SystemSlice};
 use g2g_core::{
@@ -254,7 +252,7 @@ fn shader_source(tex_count: usize) -> String {
 /// upload into the packed source buffer, or a producer's texture bound and
 /// sampled where it already is, never copied.
 #[derive(Debug)]
-enum Source {
+pub(crate) enum Source {
     Bytes(Box<[u8]>),
     Texture(OwnedWgpuTexture),
 }
@@ -398,14 +396,7 @@ fn build_bind_group(
 /// ```
 #[derive(Debug)]
 pub struct WgpuCompositor {
-    out_w: u32,
-    out_h: u32,
-    framerate_q16: u32,
-    pads: Vec<CompositorPad>,
-    /// Same latest-wins cadence as the CPU compositor: input 0 queues and
-    /// releases one output frame each, every other input keeps only its newest.
-    /// Caches either system-memory bytes or a texture, per input.
-    state: CompositorState<Source>,
+    canvas: CompositorCanvas<Source>,
     /// Inputs whose cached bytes are already in `src_buf`, so an overlay that
     /// has not moved is not re-uploaded per output frame. Bytes pads only: a
     /// texture pad is bound, never uploaded.
@@ -414,7 +405,6 @@ pub struct WgpuCompositor {
     /// frames. Both the generated shader and the packed source layout derive
     /// from this, so a pad switching kind rebuilds the device state.
     textures: Vec<bool>,
-    background: [u8; 4],
     ctx: Option<GpuContext>,
     gpu: Option<Gpu>,
     gpu_output: bool,
@@ -429,17 +419,11 @@ impl WgpuCompositor {
     /// An `out_w` x `out_h` RGBA8 canvas at 30 fps with one [`CompositorPad`]
     /// per input (input 0 is the timing driver). Panics if `pads` is empty.
     pub fn new(out_w: u32, out_h: u32, pads: Vec<CompositorPad>) -> Self {
-        assert!(!pads.is_empty(), "WgpuCompositor needs at least one input");
         let n = pads.len();
         Self {
-            out_w,
-            out_h,
-            framerate_q16: 30 << 16,
-            pads,
-            state: CompositorState::new(n),
+            canvas: CompositorCanvas::new(out_w, out_h, RawVideoFormat::Rgba8, pads),
             uploaded: vec![false; n],
             textures: vec![false; n],
-            background: [0, 0, 0, 255],
             ctx: None,
             gpu: None,
             gpu_output: false,
@@ -451,14 +435,14 @@ impl WgpuCompositor {
     /// Set the output framerate in nominal fps. Labels the output caps; the emit
     /// cadence follows input 0 (put a `VideoRate` downstream to resample).
     pub fn with_framerate(mut self, fps: u32) -> Self {
-        self.framerate_q16 =
+        self.canvas.framerate_q16 =
             framerate_q16_from_fraction(fps, 1).expect("fps fits the Q16 framerate range");
         self
     }
 
     /// Set the RGBA8 background the inputs composite over (default opaque black).
     pub fn with_background(mut self, rgba: [u8; 4]) -> Self {
-        self.background = rgba;
+        self.canvas.background = rgba;
         self
     }
 
@@ -467,7 +451,7 @@ impl WgpuCompositor {
     /// (zero-order-hold). Off by default. Needs a pipeline clock that can sleep on
     /// a deadline, as on the CPU element.
     pub fn with_timed_output(mut self) -> Self {
-        self.state.set_hold(true);
+        self.canvas.state.set_hold(true);
         self
     }
 
@@ -489,18 +473,7 @@ impl WgpuCompositor {
 
     /// Number of composited frames emitted so far (one per input-0 frame).
     pub fn emitted(&self) -> u64 {
-        self.state.emitted()
-    }
-
-    fn output(&self) -> Caps {
-        Caps::RawVideo {
-            format: RawVideoFormat::Rgba8,
-            width: Dim::Fixed(self.out_w),
-            height: Dim::Fixed(self.out_h),
-            framerate: Rate::Fixed(self.framerate_q16),
-            interlace: g2g_core::Interlace::Any,
-            colorimetry: g2g_core::Colorimetry::UNKNOWN,
-        }
+        self.canvas.state.emitted()
     }
 
     fn accepted(&self) -> Caps {
@@ -534,19 +507,21 @@ impl WgpuCompositor {
         // Pack the inputs back to back; an unconfigured input, and one bound as
         // a texture, still gets a (zero-sized) slot, so offsets stay indexed by
         // input number.
-        let mut offsets = Vec::with_capacity(self.pads.len());
+        let mut offsets = Vec::with_capacity(self.canvas.pads.len());
         let mut total = 0usize;
-        for i in 0..self.pads.len() {
+        for i in 0..self.canvas.pads.len() {
             offsets.push(total);
             let (w, h) = match self.textures[i] {
                 true => (0, 0),
-                false => self.state.geometry(i).unwrap_or((0, 0)),
+                false => self.canvas.state.geometry(i).unwrap_or((0, 0)),
             };
             total += w as usize * h as usize * 4;
         }
-        let tex_inputs: Vec<usize> = (0..self.pads.len()).filter(|&i| self.textures[i]).collect();
-        let row_bytes = (self.out_w as usize * 4).div_ceil(256) * 256;
-        let out_bytes = row_bytes * self.out_h as usize;
+        let tex_inputs: Vec<usize> = (0..self.canvas.pads.len())
+            .filter(|&i| self.textures[i])
+            .collect();
+        let row_bytes = (self.canvas.out_w as usize * 4).div_ceil(256) * 256;
+        let out_bytes = row_bytes * self.canvas.out_h as usize;
 
         let src_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("compositor-src"),
@@ -557,7 +532,7 @@ impl WgpuCompositor {
         });
         let pads_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("compositor-pads"),
-            size: (self.pads.len() * PAD_WORDS * 4) as u64,
+            size: (self.canvas.pads.len() * PAD_WORDS * 4) as u64,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -641,19 +616,19 @@ impl WgpuCompositor {
     /// The pads the shader should walk, in paint order: only inputs that are
     /// configured, non-degenerate, and have pixels available.
     fn gpu_pads(&self, gpu: &Gpu) -> Vec<GpuPad> {
-        let mut out = Vec::with_capacity(self.pads.len());
-        for i in paint_order(&self.pads) {
-            let Some((sw, sh)) = self.state.geometry(i) else {
+        let mut out = Vec::with_capacity(self.canvas.pads.len());
+        for i in paint_order(&self.canvas.pads) {
+            let Some((sw, sh)) = self.canvas.state.geometry(i) else {
                 continue;
             };
             if sw == 0 || sh == 0 {
                 continue;
             }
             // Input 0 is the frame driving this output; the rest need a cached one.
-            if i != 0 && self.state.latest(i).is_none() {
+            if i != 0 && self.canvas.state.latest(i).is_none() {
                 continue;
             }
-            let pad = self.pads[i];
+            let pad = self.canvas.pads[i];
             let (dw, dh) = pad.dest_size(sw, sh);
             if dw == 0 || dh == 0 {
                 continue;
@@ -686,10 +661,10 @@ impl WgpuCompositor {
         let pads = self.gpu_pads(gpu);
         // Each input's pixels for this output frame: input 0 drives it, the rest
         // contribute their cached latest.
-        let sources: Vec<Option<&Source>> = (0..self.pads.len())
+        let sources: Vec<Option<&Source>> = (0..self.canvas.pads.len())
             .map(|i| match i {
                 0 => Some(base0),
-                _ => self.state.latest(i).map(|(_, s)| s),
+                _ => self.canvas.state.latest(i).map(|(_, s)| s),
             })
             .collect();
 
@@ -697,7 +672,7 @@ impl WgpuCompositor {
         // updated.
         let uploaded = &mut self.uploaded;
         for (i, up) in uploaded.iter_mut().enumerate() {
-            let Some((w, h)) = self.state.geometry(i) else {
+            let Some((w, h)) = self.canvas.state.geometry(i) else {
                 continue;
             };
             let need = w as usize * h as usize * 4;
@@ -733,10 +708,10 @@ impl WgpuCompositor {
 
         let mut params = [0u8; 32];
         for (slot, v) in [
-            self.out_w,
-            self.out_h,
+            self.canvas.out_w,
+            self.canvas.out_h,
             pads.len() as u32,
-            u32::from_le_bytes(self.background),
+            u32::from_le_bytes(self.canvas.background),
             (gpu.row_bytes / 4) as u32,
         ]
         .into_iter()
@@ -770,8 +745,8 @@ impl WgpuCompositor {
             pass.set_pipeline(&gpu.pipeline);
             pass.set_bind_group(0, rebound.as_ref().unwrap_or(&gpu.bind_group), &[]);
             pass.dispatch_workgroups(
-                self.out_w.div_ceil(WORKGROUP),
-                self.out_h.div_ceil(WORKGROUP),
+                self.canvas.out_w.div_ceil(WORKGROUP),
+                self.canvas.out_h.div_ceil(WORKGROUP),
                 1,
             );
         }
@@ -797,7 +772,7 @@ impl WgpuCompositor {
     /// for the [`PlaneLayout`](g2g_core::meta::PlaneLayout) that describes it.
     async fn read_canvas(&self) -> Result<Box<[u8]>, G2gError> {
         let gpu = self.gpu.as_ref().ok_or(G2gError::NotConfigured)?;
-        let bytes = gpu.row_bytes * self.out_h as usize;
+        let bytes = gpu.row_bytes * self.canvas.out_h as usize;
         let mut encoder = gpu
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
@@ -805,12 +780,12 @@ impl WgpuCompositor {
         gpu.queue.submit([encoder.finish()]);
 
         let mapped = map_for_read_async(&gpu.device, &gpu.staging).await?;
-        let tight = self.out_w as usize * 4;
+        let tight = self.canvas.out_w as usize * 4;
         let out = match self.keeps_row_padding() {
             true => mapped.to_vec(),
             false => {
-                let mut packed = Vec::with_capacity(tight * self.out_h as usize);
-                for row in 0..self.out_h as usize {
+                let mut packed = Vec::with_capacity(tight * self.canvas.out_h as usize);
+                for row in 0..self.canvas.out_h as usize {
                     let start = row * gpu.row_bytes;
                     packed.extend_from_slice(&mapped[start..start + tight]);
                 }
@@ -828,8 +803,8 @@ impl WgpuCompositor {
     fn canvas_texture(&self) -> Result<WgpuTextureKeepAlive, G2gError> {
         let gpu = self.gpu.as_ref().ok_or(G2gError::NotConfigured)?;
         let size = wgpu::Extent3d {
-            width: self.out_w,
-            height: self.out_h,
+            width: self.canvas.out_w,
+            height: self.canvas.out_h,
             depth_or_array_layers: 1,
         };
         let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
@@ -853,7 +828,7 @@ impl WgpuCompositor {
                 layout: wgpu::TexelCopyBufferLayout {
                     offset: 0,
                     bytes_per_row: Some(gpu.row_bytes as u32),
-                    rows_per_image: Some(self.out_h),
+                    rows_per_image: Some(self.canvas.out_h),
                 },
             },
             wgpu::TexelCopyTextureInfo {
@@ -900,35 +875,6 @@ impl WgpuCompositor {
         }
         Ok(Source::Bytes(src[..need].into()))
     }
-
-    /// Composite `base0` and wrap the result as the next output frame, in
-    /// whichever memory domain this compositor was built for.
-    async fn compose_frame(
-        &mut self,
-        base0: &Source,
-        timing: FrameTiming,
-    ) -> Result<Frame, G2gError> {
-        self.dispatch(base0)?;
-        let domain = if self.gpu_output {
-            MemoryDomain::WgpuTexture(OwnedWgpuTexture::new(
-                self.out_w,
-                self.out_h,
-                Arc::new(self.canvas_texture()?),
-            ))
-        } else {
-            MemoryDomain::System(SystemSlice::from_boxed(self.read_canvas().await?))
-        };
-        #[allow(unused_mut)]
-        let mut frame = Frame::new(domain, timing, self.state.next_sequence());
-        #[cfg(feature = "metadata")]
-        if self.keep_row_padding && !self.gpu_output {
-            let row_bytes = self.gpu.as_ref().ok_or(G2gError::NotConfigured)?.row_bytes;
-            frame
-                .meta
-                .attach(g2g_core::meta::PlaneLayout::single(row_bytes));
-        }
-        Ok(frame)
-    }
 }
 
 impl MultiInputElement for WgpuCompositor {
@@ -961,16 +907,13 @@ impl MultiInputElement for WgpuCompositor {
     }
 
     fn input_count(&self) -> usize {
-        self.pads.len()
+        self.canvas.pads.len()
     }
 
     /// Only with timed output on: the arm then ticks once per output frame period,
     /// which is when a zero-order-hold frame may be due.
     fn tick_interval_ns(&self) -> Option<u64> {
-        match self.state.hold_enabled() {
-            true => framerate_q16_period_ns(self.framerate_q16),
-            false => None,
-        }
+        self.canvas.tick_interval_ns()
     }
 
     fn properties(&self) -> &'static [PropertySpec] {
@@ -978,23 +921,14 @@ impl MultiInputElement for WgpuCompositor {
     }
 
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
-        if let Some(applied) = set_pad_property(&mut self.pads, name, &value) {
+        if let Some(applied) = self.canvas.set_property(name, &value) {
+            // the canvas geometry sizes the device buffers
+            if matches!(name, "width" | "height") {
+                self.gpu = None;
+            }
             return applied;
         }
         match name {
-            // The canvas geometry sizes the device buffers, so a change rebuilds
-            // them on the next dispatch.
-            "width" => {
-                self.out_w = dim_property(&value)?;
-                self.gpu = None;
-            }
-            "height" => {
-                self.out_h = dim_property(&value)?;
-                self.gpu = None;
-            }
-            "framerate" => self.framerate_q16 = framerate_property(&value)?,
-            "background-color" => self.background = color_property(&value)?,
-            "timed-output" => self.state.set_hold(value.as_bool().ok_or(PropError::Type)?),
             "gpu-output" => self.gpu_output = value.as_bool().ok_or(PropError::Type)?,
             _ => return Err(PropError::Unknown),
         }
@@ -1002,21 +936,10 @@ impl MultiInputElement for WgpuCompositor {
     }
 
     fn get_property(&self, name: &str) -> Option<PropValue> {
-        if let Some(value) = pad_property(&self.pads, name) {
-            return Some(value);
+        match name {
+            "gpu-output" => Some(PropValue::Bool(self.gpu_output)),
+            _ => self.canvas.get_property(name),
         }
-        Some(match name {
-            "width" => PropValue::Uint(self.out_w as u64),
-            "height" => PropValue::Uint(self.out_h as u64),
-            "framerate" => {
-                let (num, den) = framerate_q16_to_fraction(self.framerate_q16);
-                PropValue::Fraction(num as i32, den as i32)
-            }
-            "background-color" => color_value(self.background),
-            "timed-output" => PropValue::Bool(self.state.hold_enabled()),
-            "gpu-output" => PropValue::Bool(self.gpu_output),
-            _ => return None,
-        })
     }
 
     fn intercept_caps(&self, _input: usize, upstream_caps: &Caps) -> Result<Caps, G2gError> {
@@ -1028,7 +951,7 @@ impl MultiInputElement for WgpuCompositor {
     }
 
     fn caps_constraint_for_output(&self) -> Result<CapsConstraint<'_>, G2gError> {
-        Ok(CapsConstraint::Produces(CapsSet::one(self.output())))
+        Ok(CapsConstraint::Produces(CapsSet::one(self.canvas.output())))
     }
 
     fn configure_pipeline(
@@ -1036,27 +959,11 @@ impl MultiInputElement for WgpuCompositor {
         input: usize,
         absolute_caps: &Caps,
     ) -> Result<ConfigureOutcome, G2gError> {
-        let Caps::RawVideo {
-            format: RawVideoFormat::Rgba8,
-            width: Dim::Fixed(w),
-            height: Dim::Fixed(h),
-            ..
-        } = absolute_caps
-        else {
-            return Err(G2gError::CapsMismatch);
-        };
-        if *w > MAX_DIM || *h > MAX_DIM || self.out_w > MAX_DIM || self.out_h > MAX_DIM {
-            return Err(G2gError::CapsMismatch);
-        }
-        if self.state.set_geometry(input, *w, *h) {
-            // The packed source layout is derived from every input's geometry.
-            self.gpu = None;
-        }
-        Ok(ConfigureOutcome::Accepted)
+        configure_compositor_input(self, input, absolute_caps)
     }
 
     fn output_caps(&self) -> Result<Caps, G2gError> {
-        Ok(self.output())
+        Ok(self.canvas.output())
     }
 
     /// The readback repacks the GPU's 256-byte-aligned rows into tight ones
@@ -1074,77 +981,98 @@ impl MultiInputElement for WgpuCompositor {
         packet: PipelinePacket,
         out: &'a mut dyn OutputSink,
     ) -> Self::ProcessFuture<'a> {
-        Box::pin(async move {
-            match packet {
-                PipelinePacket::DataFrame(frame) => {
-                    let (w, h) = self.state.geometry(input).ok_or(G2gError::NotConfigured)?;
-                    let source = self.source_of(&frame.domain, w, h)?;
-                    // The shader text and the packed source layout both derive
-                    // from which pads are textures, so a switch rebuilds them.
-                    if self.textures[input] != source.is_texture() {
-                        self.textures[input] = source.is_texture();
-                        self.gpu = None;
-                        if input == 0 {
-                            // A retained frame of the other kind no longer fits
-                            // the layout it would be composited under.
-                            self.state.drop_held();
-                        }
-                    }
-                    if input != 0 {
-                        // The overlay's new bytes need re-uploading.
-                        self.uploaded[input] = false;
-                    }
-                    self.state.ingest(input, frame.timing, source);
+        Box::pin(process_compositor_packet(self, input, packet, out))
+    }
+}
 
-                    while let Some((timing, base)) = self.state.take_due() {
-                        self.ensure_gpu().await?;
-                        let frame = self.compose_frame(&base, timing).await?;
-                        self.state.record_emitted(timing, base);
-                        out.push(PipelinePacket::DataFrame(frame)).await?;
-                    }
-                }
-                // Zero-order-hold: input 0 has not delivered for a whole output
-                // period, so re-composite the frame it last did (bytes still in
-                // the packed buffer, or the texture still bound) with the overlays
-                // as they now stand.
-                PipelinePacket::Tick => {
-                    let period = frame_period_ns(self.framerate_q16);
-                    if let Some((timing, base)) = self.state.take_tick_due(period) {
-                        self.ensure_gpu().await?;
-                        let frame = self.compose_frame(&base, timing).await?;
-                        self.state.record_held(timing, base);
-                        out.push(PipelinePacket::DataFrame(frame)).await?;
-                    }
-                }
-                // A per-input geometry change invalidates that input's queued
-                // frames and the packed source layout; the output caps are fixed,
-                // so nothing is forwarded.
-                PipelinePacket::CapsChanged(Caps::RawVideo {
-                    format: RawVideoFormat::Rgba8,
-                    width: Dim::Fixed(w),
-                    height: Dim::Fixed(h),
-                    ..
-                }) => {
-                    if self.state.geometry(input) != Some((w, h)) {
-                        if w > MAX_DIM || h > MAX_DIM {
-                            return Err(G2gError::CapsMismatch);
-                        }
-                        self.state.set_geometry(input, w, h);
-                        self.state.clear(input);
-                        self.uploaded[input] = false;
-                        self.gpu = None;
-                    }
-                }
-                // A flush on an overlay drops its cached frame so a stale overlay
-                // never lingers, and re-arms startup so it is waited for again.
-                PipelinePacket::Flush => {
-                    self.state.flush(input);
-                    self.uploaded[input] = false;
-                }
-                PipelinePacket::Eos | PipelinePacket::Segment(_) => {}
-                _ => {}
+impl CompositorBackend for WgpuCompositor {
+    type Payload = Source;
+
+    fn canvas(&mut self) -> &mut CompositorCanvas<Source> {
+        &mut self.canvas
+    }
+
+    fn accept_input(&mut self, _input: usize, caps: &Caps) -> Result<(u32, u32), G2gError> {
+        let Caps::RawVideo {
+            format: RawVideoFormat::Rgba8,
+            width: Dim::Fixed(w),
+            height: Dim::Fixed(h),
+            ..
+        } = caps
+        else {
+            return Err(G2gError::CapsMismatch);
+        };
+        let canvas = &self.canvas;
+        if *w > MAX_DIM || *h > MAX_DIM || canvas.out_w > MAX_DIM || canvas.out_h > MAX_DIM {
+            return Err(G2gError::CapsMismatch);
+        }
+        Ok((*w, *h))
+    }
+
+    // the packed source layout is derived from every input's geometry
+    fn input_changed(&mut self, input: usize) {
+        self.uploaded[input] = false;
+        self.gpu = None;
+    }
+
+    fn flushed(&mut self, input: usize) {
+        self.uploaded[input] = false;
+    }
+
+    fn payload(&mut self, input: usize, frame: Frame) -> Result<Source, G2gError> {
+        let (w, h) = self
+            .canvas
+            .state
+            .geometry(input)
+            .ok_or(G2gError::NotConfigured)?;
+        let source = self.source_of(&frame.domain, w, h)?;
+        // The shader text and the packed source layout both derive
+        // from which pads are textures, so a switch rebuilds them.
+        if self.textures[input] != source.is_texture() {
+            self.textures[input] = source.is_texture();
+            self.gpu = None;
+            if input == 0 {
+                // A retained frame of the other kind no longer fits
+                // the layout it would be composited under.
+                self.canvas.state.drop_held();
             }
-            Ok(())
+        }
+        if input != 0 {
+            // The overlay's new bytes need re-uploading.
+            self.uploaded[input] = false;
+        }
+        Ok(source)
+    }
+
+    /// Composite `base0` and wrap the result as the next output frame, in
+    /// whichever memory domain this compositor was built for.
+    fn compose_frame<'a>(
+        &'a mut self,
+        base0: &'a Source,
+        timing: FrameTiming,
+    ) -> Pin<Box<dyn Future<Output = Result<Frame, G2gError>> + 'a>> {
+        Box::pin(async move {
+            self.ensure_gpu().await?;
+            self.dispatch(base0)?;
+            let domain = if self.gpu_output {
+                MemoryDomain::WgpuTexture(OwnedWgpuTexture::new(
+                    self.canvas.out_w,
+                    self.canvas.out_h,
+                    Arc::new(self.canvas_texture()?),
+                ))
+            } else {
+                MemoryDomain::System(SystemSlice::from_boxed(self.read_canvas().await?))
+            };
+            #[allow(unused_mut)]
+            let mut frame = Frame::new(domain, timing, self.canvas.state.next_sequence());
+            #[cfg(feature = "metadata")]
+            if self.keep_row_padding && !self.gpu_output {
+                let row_bytes = self.gpu.as_ref().ok_or(G2gError::NotConfigured)?.row_bytes;
+                frame
+                    .meta
+                    .attach(g2g_core::meta::PlaneLayout::single(row_bytes));
+            }
+            Ok(frame)
         })
     }
 }
@@ -1971,7 +1899,7 @@ mod tests {
         ));
         assert!(comp.configure_pipeline(0, &rgba_caps(64, 64)).is_ok());
         assert!(matches!(
-            comp.output(),
+            comp.canvas.output(),
             Caps::RawVideo {
                 format: RawVideoFormat::Rgba8,
                 width: Dim::Fixed(64),

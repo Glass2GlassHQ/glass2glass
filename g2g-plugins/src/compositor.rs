@@ -147,35 +147,7 @@ impl CompositorPad {
 /// ```
 #[derive(Debug)]
 pub struct Compositor {
-    out_w: u32,
-    out_h: u32,
-    /// Output (and required input) pixel format. RGBA8 blends packed with a
-    /// per-pixel source alpha; the YUV formats (NV12 / I420 / I422 / I444, 8-bit)
-    /// blend per-plane with the scalar per-pad alpha and no RGBA round-trip.
-    format: RawVideoFormat,
-    framerate_q16: u32,
-    /// Per-input placement; `pads.len()` is the input count.
-    pads: Vec<CompositorPad>,
-    /// Input geometry, cached frames and emit cadence, shared with the GPU
-    /// sibling. The CPU element caches each frame's bytes.
-    state: CompositorState<Box<[u8]>>,
-    /// The canvas fill behind all inputs (RGBA8), default opaque black.
-    background: [u8; 4],
-    /// Colorimetry input 0 negotiated, which is the space the inputs are mixed
-    /// in and so the space the output is in. Drives the YUV background fill and
-    /// the output caps.
-    colorimetry: Colorimetry,
-    /// The output caps last announced downstream, so a colorimetry that firms up
-    /// after negotiation is announced once rather than per frame.
-    announced_output: Option<Caps>,
-    /// The last `Segment` forwarded downstream. Output frames carry input 0's
-    /// PTS, so input 0's segment is the one that maps them to running time and a
-    /// paced sink needs it: without it the sink paces against the raw PTS base (a
-    /// DVD title starting at 2267 s stalls for 37 minutes at zero CPU). A stream
-    /// gets more than one: the runner opens every link with a default segment and
-    /// the demuxer's real one follows, so a later segment supersedes an earlier
-    /// one and must go out. Kept to suppress re-emitting an unchanged one.
-    last_segment: Option<Segment>,
+    canvas: CompositorCanvas<Box<[u8]>>,
 }
 
 /// Max input-0 frames buffered during startup before output begins flowing
@@ -192,14 +164,14 @@ const FORMAT_PROP: PropertySpec = PropertySpec::new(
 .with_enum_values("rgba | RGBA | rgba8 | nv12 | NV12 | i420 | I420 | i422 | I422 | i444 | I444")
 .with_default("rgba");
 
-/// Both compositors' property table: the canvas knobs, the per-pad placement
+/// Every compositor's property table: the canvas knobs, the per-pad placement
 /// flattened to `sinkN-*` for the pad indices given, and whatever the element
-/// adds. One macro, so the two tables cannot drift apart.
+/// adds. One macro, so the tables cannot drift apart.
 ///
 /// The pad indices are spelled out because
 /// [`properties`](MultiInputElement::properties) is a `&'static` table: gst's
 /// request-pad properties (`sink_1::xpos`) have no analog in this launch syntax.
-/// Both tables cover pads 0..=7; a graph with more pads places the rest through
+/// Every table covers pads 0..=7; a graph with more pads places the rest through
 /// [`CompositorPad`] at construction.
 macro_rules! compositor_props {
     ([$($i:literal)*] $(, $extra:expr)*) => {
@@ -291,6 +263,18 @@ const GPU_OUTPUT_PROP: PropertySpec = PropertySpec::new(
 #[cfg(feature = "wgpu-sink")]
 pub(crate) static WGPU_COMPOSITOR_PROPS: &[PropertySpec] =
     compositor_props!([0 1 2 3 4 5 6 7], GPU_OUTPUT_PROP);
+
+#[cfg(all(target_os = "linux", feature = "hip"))]
+const HIP_FORMAT_PROP: PropertySpec = PropertySpec::new(
+    "format",
+    PropKind::Str,
+    "output pixel format, any format hipconvertscale writes",
+)
+.with_default("RGBA");
+
+#[cfg(all(target_os = "linux", feature = "hip"))]
+pub(crate) static HIP_COMPOSITOR_PROPS: &[PropertySpec] =
+    compositor_props!([0 1 2 3 4 5 6 7], HIP_FORMAT_PROP);
 
 /// Apply a flattened per-pad property. `None` when `name` is not one; `Err` when
 /// it names a pad this element does not have (silently ignoring it would leave a
@@ -681,24 +665,215 @@ impl<P> CompositorState<P> {
     }
 }
 
+#[derive(Debug)]
+pub(crate) struct CompositorCanvas<P> {
+    pub(crate) out_w: u32,
+    pub(crate) out_h: u32,
+    pub(crate) format: RawVideoFormat,
+    pub(crate) framerate_q16: u32,
+    pub(crate) pads: Vec<CompositorPad>,
+    pub(crate) background: [u8; 4],
+    pub(crate) state: CompositorState<P>,
+    // input 0's colorimetry, which the inputs are mixed in and the output carries
+    pub(crate) colorimetry: Colorimetry,
+    announced_output: Option<Caps>,
+    // output frames carry input 0's pts, so a paced sink needs input 0's segment
+    last_segment: Option<Segment>,
+}
+
+impl<P> CompositorCanvas<P> {
+    pub(crate) fn new(
+        out_w: u32,
+        out_h: u32,
+        format: RawVideoFormat,
+        pads: Vec<CompositorPad>,
+    ) -> Self {
+        assert!(!pads.is_empty(), "a compositor needs at least one input");
+        let inputs = pads.len();
+        Self {
+            out_w,
+            out_h,
+            format,
+            framerate_q16: 30 << 16,
+            pads,
+            background: [0, 0, 0, 255],
+            state: CompositorState::new(inputs),
+            colorimetry: Colorimetry::UNKNOWN,
+            announced_output: None,
+            last_segment: None,
+        }
+    }
+
+    pub(crate) fn output(&self) -> Caps {
+        Caps::RawVideo {
+            format: self.format,
+            width: Dim::Fixed(self.out_w),
+            height: Dim::Fixed(self.out_h),
+            framerate: Rate::Fixed(self.framerate_q16),
+            interlace: g2g_core::Interlace::Any,
+            colorimetry: self.colorimetry,
+        }
+    }
+
+    pub(crate) fn tick_interval_ns(&self) -> Option<u64> {
+        match self.state.hold_enabled() {
+            true => framerate_q16_period_ns(self.framerate_q16),
+            false => None,
+        }
+    }
+
+    // `None` when `name` is not a canvas or pad property
+    pub(crate) fn set_property(
+        &mut self,
+        name: &str,
+        value: &PropValue,
+    ) -> Option<Result<(), PropError>> {
+        if let Some(applied) = set_pad_property(&mut self.pads, name, value) {
+            return Some(applied);
+        }
+        let applied = match name {
+            "width" => dim_property(value).map(|width| self.out_w = width),
+            "height" => dim_property(value).map(|height| self.out_h = height),
+            "framerate" => framerate_property(value).map(|rate| self.framerate_q16 = rate),
+            "background-color" => color_property(value).map(|color| self.background = color),
+            "timed-output" => value
+                .as_bool()
+                .ok_or(PropError::Type)
+                .map(|hold| self.state.set_hold(hold)),
+            _ => return None,
+        };
+        Some(applied)
+    }
+
+    pub(crate) fn get_property(&self, name: &str) -> Option<PropValue> {
+        if let Some(value) = pad_property(&self.pads, name) {
+            return Some(value);
+        }
+        Some(match name {
+            "width" => PropValue::Uint(self.out_w as u64),
+            "height" => PropValue::Uint(self.out_h as u64),
+            "framerate" => {
+                let (num, den) = framerate_q16_to_fraction(self.framerate_q16);
+                PropValue::Fraction(num as i32, den as i32)
+            }
+            "background-color" => color_value(self.background),
+            "timed-output" => PropValue::Bool(self.state.hold_enabled()),
+            _ => return None,
+        })
+    }
+
+    // negotiation runs before any input is configured, so downstream first saw unknown colorimetry
+    async fn announce_output(&mut self, out: &mut dyn OutputSink) -> Result<(), G2gError> {
+        if self.colorimetry == Colorimetry::UNKNOWN {
+            return Ok(());
+        }
+        let caps = self.output();
+        if self.announced_output.as_ref() == Some(&caps) {
+            return Ok(());
+        }
+        out.push(PipelinePacket::CapsChanged(caps.clone())).await?;
+        self.announced_output = Some(caps);
+        Ok(())
+    }
+}
+
+pub(crate) trait CompositorBackend {
+    type Payload;
+
+    fn canvas(&mut self) -> &mut CompositorCanvas<Self::Payload>;
+
+    // the input geometry `caps` carries, an error when this compositor cannot take them
+    fn accept_input(&mut self, input: usize, caps: &Caps) -> Result<(u32, u32), G2gError>;
+
+    fn input_changed(&mut self, _input: usize) {}
+
+    fn flushed(&mut self, _input: usize) {}
+
+    fn payload(&mut self, input: usize, frame: Frame) -> Result<Self::Payload, G2gError>;
+
+    fn compose_frame<'a>(
+        &'a mut self,
+        base: &'a Self::Payload,
+        timing: FrameTiming,
+    ) -> Pin<Box<dyn Future<Output = Result<Frame, G2gError>> + 'a>>;
+}
+
+pub(crate) fn configure_compositor_input<B: CompositorBackend>(
+    backend: &mut B,
+    input: usize,
+    caps: &Caps,
+) -> Result<ConfigureOutcome, G2gError> {
+    let (width, height) = backend.accept_input(input, caps)?;
+    let canvas = backend.canvas();
+    if let (0, Caps::RawVideo { colorimetry, .. }) = (input, caps) {
+        canvas.colorimetry = *colorimetry;
+    }
+    if canvas.state.set_geometry(input, width, height) {
+        canvas.state.clear(input);
+        backend.input_changed(input);
+    }
+    Ok(ConfigureOutcome::Accepted)
+}
+
+pub(crate) async fn process_compositor_packet<B: CompositorBackend>(
+    backend: &mut B,
+    input: usize,
+    packet: PipelinePacket,
+    out: &mut dyn OutputSink,
+) -> Result<(), G2gError> {
+    match packet {
+        PipelinePacket::DataFrame(frame) => {
+            let timing = frame.timing;
+            let payload = backend.payload(input, frame)?;
+            backend.canvas().state.ingest(input, timing, payload);
+            backend.canvas().announce_output(out).await?;
+            while let Some((timing, base)) = backend.canvas().state.take_due() {
+                let frame = backend.compose_frame(&base, timing).await?;
+                backend.canvas().state.record_emitted(timing, base);
+                out.push(PipelinePacket::DataFrame(frame)).await?;
+            }
+        }
+        // input 0 delivered nothing for a whole output period, so its last frame goes out again over the current overlays
+        PipelinePacket::Tick => {
+            let period = frame_period_ns(backend.canvas().framerate_q16);
+            if let Some((timing, base)) = backend.canvas().state.take_tick_due(period) {
+                let frame = backend.compose_frame(&base, timing).await?;
+                backend.canvas().state.record_held(timing, base);
+                out.push(PipelinePacket::DataFrame(frame)).await?;
+            }
+        }
+        PipelinePacket::CapsChanged(caps) => {
+            configure_compositor_input(backend, input, &caps)?;
+        }
+        PipelinePacket::Flush => {
+            let canvas = backend.canvas();
+            if input == 0 {
+                canvas.last_segment = None;
+            }
+            canvas.state.flush(input);
+            backend.flushed(input);
+        }
+        // an overlay's segment would remap the output, whose frames carry input 0's pts
+        PipelinePacket::Segment(segment) if input == 0 => {
+            let canvas = backend.canvas();
+            if canvas.last_segment != Some(segment) {
+                canvas.last_segment = Some(segment);
+                out.push(PipelinePacket::Segment(segment)).await?;
+            }
+        }
+        // the runner merges the per-input end-of-stream
+        _ => {}
+    }
+    Ok(())
+}
+
 impl Compositor {
     /// A compositor producing an `out_w` x `out_h` RGBA8 canvas at 30 fps, with
     /// one `CompositorPad` per input (input 0 is the timing driver). Panics if
     /// `pads` is empty.
     pub fn new(out_w: u32, out_h: u32, pads: Vec<CompositorPad>) -> Self {
-        assert!(!pads.is_empty(), "Compositor needs at least one input");
-        let n = pads.len();
         Self {
-            out_w,
-            out_h,
-            format: RawVideoFormat::Rgba8,
-            framerate_q16: 30 << 16,
-            pads,
-            state: CompositorState::new(n),
-            background: [0, 0, 0, 255],
-            colorimetry: Colorimetry::UNKNOWN,
-            announced_output: None,
-            last_segment: None,
+            canvas: CompositorCanvas::new(out_w, out_h, RawVideoFormat::Rgba8, pads),
         }
     }
 
@@ -708,7 +883,7 @@ impl Compositor {
     /// (`compositor ! videorate`), which repeats / drops to the target rate off
     /// the per-frame PTS the compositor stamps.
     pub fn with_framerate(mut self, fps: u32) -> Self {
-        self.framerate_q16 =
+        self.canvas.framerate_q16 =
             framerate_q16_from_fraction(fps, 1).expect("fps fits the Q16 framerate range");
         self
     }
@@ -726,14 +901,14 @@ impl Compositor {
             ok,
             "Compositor supports RGBA8 and 8-bit NV12/I420/I422/I444, got {format:?}"
         );
-        self.format = format;
+        self.canvas.format = format;
         self
     }
 
     /// Set the RGBA8 background the inputs composite over (default opaque black).
     /// Shows wherever no input covers the canvas.
     pub fn with_background(mut self, rgba: [u8; 4]) -> Self {
-        self.background = rgba;
+        self.canvas.background = rgba;
         self
     }
 
@@ -749,47 +924,19 @@ impl Compositor {
     /// [`PipelinePacket::Tick`] it gets back. Against a clock that only tells time
     /// it behaves exactly as it does without this.
     pub fn with_timed_output(mut self) -> Self {
-        self.state.set_hold(true);
+        self.canvas.state.set_hold(true);
         self
     }
 
     /// Number of composited frames emitted so far (one per input-0 frame).
     pub fn emitted(&self) -> u64 {
-        self.state.emitted()
-    }
-
-    fn output(&self) -> Caps {
-        Caps::RawVideo {
-            format: self.format,
-            width: Dim::Fixed(self.out_w),
-            height: Dim::Fixed(self.out_h),
-            framerate: Rate::Fixed(self.framerate_q16),
-            interlace: g2g_core::Interlace::Any,
-            colorimetry: self.colorimetry,
-        }
-    }
-
-    /// Announce the output caps when the colorimetry input 0 settled on refines
-    /// what negotiation fixed. Negotiation runs before any input is configured,
-    /// so downstream only ever saw the unknown colorimetry this element starts
-    /// with; an untagged input leaves it there and nothing is sent.
-    async fn announce_output(&mut self, out: &mut dyn OutputSink) -> Result<(), G2gError> {
-        if self.colorimetry == Colorimetry::UNKNOWN {
-            return Ok(());
-        }
-        let caps = self.output();
-        if self.announced_output.as_ref() == Some(&caps) {
-            return Ok(());
-        }
-        out.push(PipelinePacket::CapsChanged(caps.clone())).await?;
-        self.announced_output = Some(caps);
-        Ok(())
+        self.canvas.state.emitted()
     }
 
     /// The format the compositor accepts on every input, at any geometry.
     fn accepted(&self) -> Caps {
         Caps::RawVideo {
-            format: self.format,
+            format: self.canvas.format,
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
@@ -803,7 +950,7 @@ impl Compositor {
     /// latest cached frame. Dispatches to the packed (RGBA) or planar (YUV) path
     /// by the output format.
     fn compose(&self, base0: &[u8]) -> Box<[u8]> {
-        match self.format {
+        match self.canvas.format {
             RawVideoFormat::Rgba8 | RawVideoFormat::Bgra8 => self.compose_packed(base0),
             _ => self.compose_planar(base0),
         }
@@ -811,24 +958,24 @@ impl Compositor {
 
     /// Packed RGBA compositing: source-over with per-pixel source alpha.
     fn compose_packed(&self, base0: &[u8]) -> Box<[u8]> {
-        let (cw, ch) = (self.out_w as usize, self.out_h as usize);
+        let (cw, ch) = (self.canvas.out_w as usize, self.canvas.out_h as usize);
         let mut canvas = vec![0u8; cw * ch * 4];
         for px in canvas.as_chunks_mut::<4>().0 {
-            px.copy_from_slice(&self.background);
+            px.copy_from_slice(&self.canvas.background);
         }
-        for i in paint_order(&self.pads) {
-            let Some((w, h)) = self.state.geometry(i) else {
+        for i in paint_order(&self.canvas.pads) {
+            let Some((w, h)) = self.canvas.state.geometry(i) else {
                 continue;
             };
             let src: &[u8] = if i == 0 {
                 base0
             } else {
-                match self.state.latest(i) {
+                match self.canvas.state.latest(i) {
                     Some((_, s)) => s,
                     None => continue,
                 }
             };
-            let pad = self.pads[i];
+            let pad = self.canvas.pads[i];
             let (sw, sh) = (w as usize, h as usize);
             let (dw, dh) = pad.dest_size(w, h);
             let (dw, dh) = (dw as usize, dh as usize);
@@ -868,29 +1015,33 @@ impl Compositor {
     /// scalar per-pad alpha, so a YUV mix needs no RGBA round-trip. Overlay
     /// positions and sizes are aligned to even for the subsampled chroma.
     fn compose_planar(&self, base0: &[u8]) -> Box<[u8]> {
-        let (w, h) = (self.out_w as usize, self.out_h as usize);
-        let mut canvas = vec![0u8; frame_byte_size(self.format, self.out_w, self.out_h)];
+        let (w, h) = (self.canvas.out_w as usize, self.canvas.out_h as usize);
+        let mut canvas =
+            vec![0u8; frame_byte_size(self.canvas.format, self.canvas.out_w, self.canvas.out_h)];
 
-        let dst_chans = channels(self.format, w, h);
-        let bg = rgba_to_yuv(self.background, &YuvRgbMatrix::new(self.colorimetry));
+        let dst_chans = channels(self.canvas.format, w, h);
+        let bg = rgba_to_yuv(
+            self.canvas.background,
+            &YuvRgbMatrix::new(self.canvas.colorimetry),
+        );
         for (chan, &val) in dst_chans.iter().zip(bg.iter()) {
             fill_channel(&mut canvas, chan, val);
         }
 
-        for i in paint_order(&self.pads) {
-            let Some((sw, sh)) = self.state.geometry(i) else {
+        for i in paint_order(&self.canvas.pads) {
+            let Some((sw, sh)) = self.canvas.state.geometry(i) else {
                 continue;
             };
             let src: &[u8] = if i == 0 {
                 base0
             } else {
-                match self.state.latest(i) {
+                match self.canvas.state.latest(i) {
                     Some((_, s)) => s,
                     None => continue,
                 }
             };
-            let pad = self.pads[i];
-            let src_chans = channels(self.format, sw as usize, sh as usize);
+            let pad = self.canvas.pads[i];
+            let src_chans = channels(self.canvas.format, sw as usize, sh as usize);
             // even-align so a subsampled plane's placement stays on a chroma
             // sample (harmless for the full-res luma plane).
             let (x0, y0) = (pad.xpos & !1, pad.ypos & !1);
@@ -917,17 +1068,6 @@ impl Compositor {
             }
         }
         canvas.into_boxed_slice()
-    }
-
-    /// Wrap composited `canvas` bytes as the next output frame, advancing the
-    /// output sequence counter.
-    fn output_frame(&mut self, canvas: Box<[u8]>, timing: FrameTiming) -> Frame {
-        Frame {
-            domain: MemoryDomain::System(SystemSlice::from_boxed(canvas)),
-            timing,
-            sequence: self.state.next_sequence(),
-            meta: Default::default(),
-        }
     }
 }
 
@@ -1209,16 +1349,13 @@ impl MultiInputElement for Compositor {
     }
 
     fn input_count(&self) -> usize {
-        self.pads.len()
+        self.canvas.pads.len()
     }
 
     /// Only with timed output on: the arm then ticks once per output frame period,
     /// which is when a zero-order-hold frame may be due.
     fn tick_interval_ns(&self) -> Option<u64> {
-        match self.state.hold_enabled() {
-            true => framerate_q16_period_ns(self.framerate_q16),
-            false => None,
-        }
+        self.canvas.tick_interval_ns()
     }
 
     fn properties(&self) -> &'static [PropertySpec] {
@@ -1226,46 +1363,30 @@ impl MultiInputElement for Compositor {
     }
 
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
-        if let Some(applied) = set_pad_property(&mut self.pads, name, &value) {
+        if let Some(applied) = self.canvas.set_property(name, &value) {
             return applied;
         }
-        match name {
-            "width" => self.out_w = dim_property(&value)?,
-            "height" => self.out_h = dim_property(&value)?,
-            "framerate" => self.framerate_q16 = framerate_property(&value)?,
-            "background-color" => self.background = color_property(&value)?,
-            "timed-output" => self.state.set_hold(value.as_bool().ok_or(PropError::Type)?),
-            "format" => {
-                let format = match value.as_str().ok_or(PropError::Type)? {
-                    "rgba" | "RGBA" | "rgba8" => RawVideoFormat::Rgba8,
-                    "nv12" | "NV12" => RawVideoFormat::Nv12,
-                    "i420" | "I420" => RawVideoFormat::I420,
-                    "i422" | "I422" => RawVideoFormat::I422,
-                    "i444" | "I444" => RawVideoFormat::I444,
-                    _ => return Err(PropError::Value),
-                };
-                self.format = format;
-            }
-            _ => return Err(PropError::Unknown),
+        if name != "format" {
+            return Err(PropError::Unknown);
         }
+        self.canvas.format = match value.as_str().ok_or(PropError::Type)? {
+            "rgba" | "RGBA" | "rgba8" => RawVideoFormat::Rgba8,
+            "nv12" | "NV12" => RawVideoFormat::Nv12,
+            "i420" | "I420" => RawVideoFormat::I420,
+            "i422" | "I422" => RawVideoFormat::I422,
+            "i444" | "I444" => RawVideoFormat::I444,
+            _ => return Err(PropError::Value),
+        };
         Ok(())
     }
 
     fn get_property(&self, name: &str) -> Option<PropValue> {
-        if let Some(value) = pad_property(&self.pads, name) {
+        if let Some(value) = self.canvas.get_property(name) {
             return Some(value);
         }
-        Some(match name {
-            "width" => PropValue::Uint(self.out_w as u64),
-            "height" => PropValue::Uint(self.out_h as u64),
-            "framerate" => {
-                let (num, den) = framerate_q16_to_fraction(self.framerate_q16);
-                PropValue::Fraction(num as i32, den as i32)
-            }
-            "background-color" => color_value(self.background),
-            "timed-output" => PropValue::Bool(self.state.hold_enabled()),
-            "format" => PropValue::Str(
-                match self.format {
+        (name == "format").then(|| {
+            PropValue::Str(
+                match self.canvas.format {
                     RawVideoFormat::Nv12 => "nv12",
                     RawVideoFormat::I420 => "i420",
                     RawVideoFormat::I422 => "i422",
@@ -1273,8 +1394,7 @@ impl MultiInputElement for Compositor {
                     _ => "rgba",
                 }
                 .into(),
-            ),
-            _ => return None,
+            )
         })
     }
 
@@ -1287,7 +1407,7 @@ impl MultiInputElement for Compositor {
     }
 
     fn caps_constraint_for_output(&self) -> Result<CapsConstraint<'_>, G2gError> {
-        Ok(CapsConstraint::Produces(CapsSet::one(self.output())))
+        Ok(CapsConstraint::Produces(CapsSet::one(self.canvas.output())))
     }
 
     fn configure_pipeline(
@@ -1295,30 +1415,11 @@ impl MultiInputElement for Compositor {
         input: usize,
         absolute_caps: &Caps,
     ) -> Result<ConfigureOutcome, G2gError> {
-        let Caps::RawVideo {
-            format,
-            width: Dim::Fixed(w),
-            height: Dim::Fixed(h),
-            colorimetry,
-            ..
-        } = absolute_caps
-        else {
-            return Err(G2gError::CapsMismatch);
-        };
-        if *format != self.format {
-            return Err(G2gError::CapsMismatch);
-        }
-        // Inputs are mixed sample for sample, so input 0's colour space is the
-        // output's. The overlays are assumed to be in it too.
-        if input == 0 {
-            self.colorimetry = *colorimetry;
-        }
-        self.state.set_geometry(input, *w, *h);
-        Ok(ConfigureOutcome::Accepted)
+        configure_compositor_input(self, input, absolute_caps)
     }
 
     fn output_caps(&self) -> Result<Caps, G2gError> {
-        Ok(self.output())
+        Ok(self.canvas.output())
     }
 
     fn process<'a>(
@@ -1327,85 +1428,58 @@ impl MultiInputElement for Compositor {
         packet: PipelinePacket,
         out: &'a mut dyn OutputSink,
     ) -> Self::ProcessFuture<'a> {
-        Box::pin(async move {
-            match packet {
-                PipelinePacket::DataFrame(frame) => {
-                    let (w, h) = self.state.geometry(input).ok_or(G2gError::NotConfigured)?;
-                    let src = frame
-                        .domain
-                        .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
-                    let need = frame_byte_size(self.format, w, h);
-                    if src.len() < need {
-                        return Err(G2gError::CapsMismatch);
-                    }
-                    self.state.ingest(input, frame.timing, src[..need].into());
+        Box::pin(process_compositor_packet(self, input, packet, out))
+    }
+}
 
-                    self.announce_output(out).await?;
-                    while let Some((timing, base)) = self.state.take_due() {
-                        let canvas = self.compose(&base);
-                        let frame = self.output_frame(canvas, timing);
-                        self.state.record_emitted(timing, base);
-                        out.push(PipelinePacket::DataFrame(frame)).await?;
-                    }
-                }
-                // Zero-order-hold: input 0 has not delivered for a whole output
-                // period, so re-composite the frame it last did with the overlays
-                // as they now stand, rather than letting output freeze with it.
-                PipelinePacket::Tick => {
-                    let period = frame_period_ns(self.framerate_q16);
-                    if let Some((timing, base)) = self.state.take_tick_due(period) {
-                        let canvas = self.compose(&base);
-                        let frame = self.output_frame(canvas, timing);
-                        self.state.record_held(timing, base);
-                        out.push(PipelinePacket::DataFrame(frame)).await?;
-                    }
-                }
-                // A per-input caps refinement updates that input's geometry, and
-                // input 0's colorimetry the output's; the refined output caps go
-                // out with the next frame.
-                PipelinePacket::CapsChanged(Caps::RawVideo {
-                    format,
-                    width: Dim::Fixed(w),
-                    height: Dim::Fixed(h),
-                    colorimetry,
-                    ..
-                }) if format == self.format => {
-                    if input == 0 {
-                        self.colorimetry = colorimetry;
-                    }
-                    // A geometry change invalidates that input's queued frames:
-                    // compose() would otherwise read the old (smaller) bytes
-                    // at the new dims and panic out of bounds. For an overlay
-                    // the fresh frame repopulates the cache; for input 0 any
-                    // startup-buffered frames are dropped too.
-                    if self.state.set_geometry(input, w, h) {
-                        self.state.clear(input);
-                    }
-                }
-                // A flush on input 0 clears any buffered startup frames (nothing
-                // else is cached); on an overlay it also re-arms startup.
-                PipelinePacket::Flush => {
-                    if input == 0 {
-                        self.last_segment = None;
-                    }
-                    self.state.flush(input);
-                }
-                // Per-input Eos is informational; the runner aggregates input
-                // ends and emits the single merged Eos.
-                PipelinePacket::Eos => {}
-                // Only the timing input's segment describes the output, whose
-                // frames are stamped from input 0. An overlay's own segment would
-                // remap the video, so it is consumed here.
-                PipelinePacket::Segment(seg) if input == 0 && self.last_segment != Some(seg) => {
-                    self.last_segment = Some(seg);
-                    out.push(PipelinePacket::Segment(seg)).await?;
-                }
-                PipelinePacket::Segment(_) => {}
-                // future PipelinePacket variants: no-op.
-                _ => {}
-            }
-            Ok(())
-        })
+impl CompositorBackend for Compositor {
+    type Payload = Box<[u8]>;
+
+    fn canvas(&mut self) -> &mut CompositorCanvas<Box<[u8]>> {
+        &mut self.canvas
+    }
+
+    fn accept_input(&mut self, _input: usize, caps: &Caps) -> Result<(u32, u32), G2gError> {
+        match caps {
+            Caps::RawVideo {
+                format,
+                width: Dim::Fixed(width),
+                height: Dim::Fixed(height),
+                ..
+            } if *format == self.canvas.format => Ok((*width, *height)),
+            _ => Err(G2gError::CapsMismatch),
+        }
+    }
+
+    fn payload(&mut self, input: usize, frame: Frame) -> Result<Box<[u8]>, G2gError> {
+        let (w, h) = self
+            .canvas
+            .state
+            .geometry(input)
+            .ok_or(G2gError::NotConfigured)?;
+        let source = frame
+            .domain
+            .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
+        let need = frame_byte_size(self.canvas.format, w, h);
+        source
+            .get(..need)
+            .map(Into::into)
+            .ok_or(G2gError::CapsMismatch)
+    }
+
+    fn compose_frame<'a>(
+        &'a mut self,
+        base: &'a Box<[u8]>,
+        timing: FrameTiming,
+    ) -> Pin<Box<dyn Future<Output = Result<Frame, G2gError>> + 'a>> {
+        let canvas = self.compose(base);
+        let frame = Frame {
+            domain: MemoryDomain::System(SystemSlice::from_boxed(canvas)),
+            timing,
+            sequence: self.canvas.state.next_sequence(),
+            meta: Default::default(),
+        };
+        Box::pin(core::future::ready(Ok(frame)))
     }
 }
 
@@ -1493,9 +1567,10 @@ mod tests {
     /// which is what `take_due` does for the frame it releases. These tests call
     /// `compose` directly, so they do that step themselves.
     fn seed(comp: &mut Compositor, input: usize, bytes: Vec<u8>) {
-        comp.state
+        comp.canvas
+            .state
             .ingest(input, FrameTiming::default(), bytes.into());
-        comp.state.advance_overlays(0);
+        comp.canvas.state.advance_overlays(0);
     }
 
     fn px(buf: &[u8], cw: usize, x: usize, y: usize) -> [u8; 4] {
@@ -1642,8 +1717,8 @@ mod tests {
                 CompositorPad::at(2, 2).with_zorder(1).with_size(2, 2),
             ]),
         );
-        comp.state.set_geometry(0, 8, 8);
-        comp.state.set_geometry(1, 4, 4); // native overlay geometry
+        comp.canvas.state.set_geometry(0, 8, 8);
+        comp.canvas.state.set_geometry(1, 4, 4); // native overlay geometry
         let red = solid(8, 8, [255, 0, 0, 255]);
         seed(&mut comp, 1, solid(4, 4, [0, 255, 0, 255]));
         let out = comp.compose(&red);
@@ -1667,7 +1742,7 @@ mod tests {
         // (0,0), so only the top-left quarter is green, the rest the background.
         let mut comp = Compositor::new(4, 4, Vec::from([CompositorPad::at(0, 0)]))
             .with_background([0, 0, 255, 255]);
-        comp.state.set_geometry(0, 2, 2);
+        comp.canvas.state.set_geometry(0, 2, 2);
         let out = comp.compose(&solid(2, 2, [0, 255, 0, 255]));
         assert_eq!(
             px(&out, 4, 0, 0),
@@ -1681,7 +1756,7 @@ mod tests {
         );
         // The default background stays opaque black.
         let mut def = Compositor::new(4, 4, Vec::from([CompositorPad::at(0, 0)]));
-        def.state.set_geometry(0, 2, 2);
+        def.canvas.state.set_geometry(0, 2, 2);
         let out = def.compose(&solid(2, 2, [0, 255, 0, 255]));
         assert_eq!(
             px(&out, 4, 3, 3),
@@ -1701,8 +1776,8 @@ mod tests {
                 CompositorPad::at(0, 0).with_zorder(5),
             ]),
         );
-        comp.state.set_geometry(0, 2, 2);
-        comp.state.set_geometry(1, 2, 2);
+        comp.canvas.state.set_geometry(0, 2, 2);
+        comp.canvas.state.set_geometry(1, 2, 2);
         let red = solid(2, 2, [255, 0, 0, 255]);
         seed(&mut comp, 1, solid(2, 2, [0, 0, 255, 255]));
         // input 0 (red) is passed as the base; input 1 (blue) has higher z-order.
@@ -1752,8 +1827,8 @@ mod tests {
             ]),
         )
         .with_format(RawVideoFormat::Nv12);
-        comp.state.set_geometry(0, 8, 8);
-        comp.state.set_geometry(1, 4, 4);
+        comp.canvas.state.set_geometry(0, 8, 8);
+        comp.canvas.state.set_geometry(1, 4, 4);
         seed(
             &mut comp,
             1,
@@ -1786,8 +1861,8 @@ mod tests {
             ]),
         )
         .with_format(RawVideoFormat::I420);
-        comp.state.set_geometry(0, 8, 8);
-        comp.state.set_geometry(1, 4, 4);
+        comp.canvas.state.set_geometry(0, 8, 8);
+        comp.canvas.state.set_geometry(1, 4, 4);
         seed(
             &mut comp,
             1,
@@ -1815,8 +1890,8 @@ mod tests {
             ]),
         )
         .with_format(RawVideoFormat::Nv12);
-        comp.state.set_geometry(0, 4, 4);
-        comp.state.set_geometry(1, 4, 4);
+        comp.canvas.state.set_geometry(0, 4, 4);
+        comp.canvas.state.set_geometry(1, 4, 4);
         seed(
             &mut comp,
             1,
@@ -1836,7 +1911,7 @@ mod tests {
         let format = RawVideoFormat::Nv12;
         let mut comp =
             Compositor::new(w, h, Vec::from([CompositorPad::at(0, 0)])).with_format(format);
-        comp.state.set_geometry(0, w, h);
+        comp.canvas.state.set_geometry(0, w, h);
         let input: Vec<u8> = (0..format.unpadded_frame_bytes(w, h).unwrap())
             .map(|i| i as u8)
             .collect();
@@ -1851,7 +1926,7 @@ mod tests {
     fn planar_background_fills_uncovered_area() {
         let mut comp = Compositor::new(4, 4, Vec::from([CompositorPad::at(0, 0)]))
             .with_format(RawVideoFormat::Nv12);
-        comp.state.set_geometry(0, 2, 2);
+        comp.canvas.state.set_geometry(0, 2, 2);
         let out = comp.compose(&solid_yuv(RawVideoFormat::Nv12, 2, 2, [90, 40, 200]));
         let f = RawVideoFormat::Nv12;
         let black = YuvRgbMatrix::new(Colorimetry::UNKNOWN).rgb_to_yuv(0, 0, 0);
@@ -1933,8 +2008,8 @@ mod tests {
             ]),
         )
         .with_format(RawVideoFormat::Nv12);
-        comp.state.set_geometry(0, 8, 8);
-        comp.state.set_geometry(1, 4, 4);
+        comp.canvas.state.set_geometry(0, 8, 8);
+        comp.canvas.state.set_geometry(1, 4, 4);
         seed(
             &mut comp,
             1,
@@ -1977,7 +2052,7 @@ mod tests {
         );
         // The output caps carry the chosen format.
         assert!(matches!(
-            comp.output(),
+            comp.canvas.output(),
             Caps::RawVideo {
                 format: RawVideoFormat::Nv12,
                 ..

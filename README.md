@@ -628,6 +628,7 @@ cargo clippy --workspace --all-targets
 | `CudaDownload` (CUDA to System), `CudaUpload` (System to CUDA) | `cuda` | Linux or Windows + NVIDIA driver (libcuda / nvcuda.dll) |
 | `HipUpload` (System, CUDA or a dma-buf to HIP, offering pinned host buffers upstream and importing linear dma-bufs on AMD), `HipDownload` (HIP to System or CUDA) | `hip` | Linux + ROCm (libamdhip64) or the NVIDIA driver (libcuda) |
 | `HipConvertScale` (`hipconvertscale`: format conversion and scaling on HIP, including planar and float RGB for model input) | `hip` | Linux + ROCm (libamdhip64, libhiprtc) or NVIDIA (libcuda, libnvrtc) |
+| `HipCompositor` (`hipcompositor`: picture-in-picture and grids of Hip inputs in any `hipconvertscale` format, on the GPU) | `hip` | Linux + ROCm (libamdhip64, libhiprtc) or NVIDIA (libcuda, libnvrtc) |
 | `WgpuDownload` (`wgpudownload`: wgpu texture or buffer to System), `WgpuUpload` (`wgpuupload`: System to wgpu buffer) | `wgpu-sink` | wgpu adapter |
 | `CudaGlSink` (CUDA-GL present), `CudaKmsSink` (CUDA-GL on KMS) | `cuda-gl`, `cuda-kms` | Linux + NVIDIA + EGL + GL (+ libdrm for KMS) |
 | `CudaToWgpu` / `WgpuToCuda` (zero-copy bridge) | `cuda-wgpu` | Linux + NVIDIA + Vulkan |
