@@ -511,6 +511,16 @@ fn is_caps_token(tok: &str) -> bool {
     }
 }
 
+fn is_uri_token(tok: &str) -> bool {
+    Uri::parse(tok).is_some_and(|uri| {
+        uri.scheme.starts_with(|c: char| c.is_ascii_alphabetic())
+            && uri
+                .scheme
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+    })
+}
+
 /// A pad reference (`t.`, `t.src_0`, `d.video_0`): a name, a `.`, and no `=` / `/`.
 /// Returns the referenced element name and the pad suffix after the first dot
 /// (`""` for a bare `t.`). The suffix drives the explicit-demux fan-out;
@@ -765,7 +775,14 @@ fn parse_chains_with(
                 if tok == "!" {
                     return Err(ParseError::EmptyStage); // leading or doubled `!`
                 }
-                if is_caps_token(tok) {
+                if is_uri_token(tok) {
+                    cur.push(Item::Element(consume_element(
+                        tok,
+                        &mut tokens,
+                        knows_element,
+                    )?));
+                    st = St::AfterNode;
+                } else if is_caps_token(tok) {
                     cur.push(Item::Element(ElementSpec {
                         name: "capsfilter".to_string(),
                         props: alloc::vec![("caps".to_string(), tok.to_string())],
@@ -2166,6 +2183,32 @@ fn expand_mpegtslivesrc(
         out.push(new_chain);
     }
     Ok(out)
+}
+
+fn expand_uri_tokens(registry: &Registry, chains: Vec<Chain>) -> Vec<Chain> {
+    chains
+        .into_iter()
+        .map(|chain| {
+            chain
+                .into_iter()
+                .map(|item| match item {
+                    Item::Element(spec) => Item::Element(uri_token_element(registry, spec)),
+                    other => other,
+                })
+                .collect()
+        })
+        .collect()
+}
+
+fn uri_token_element(registry: &Registry, mut spec: ElementSpec) -> ElementSpec {
+    let Some(element) =
+        Uri::parse(&spec.name).and_then(|uri| registry.uri_scheme_element(uri.scheme))
+    else {
+        return spec;
+    };
+    let uri = core::mem::replace(&mut spec.name, element.to_string());
+    spec.props.insert(0, ("location".to_string(), uri));
+    spec
 }
 
 /// `transcodebin`: decode whatever arrives and re-encode it to a profile, which
@@ -3901,6 +3944,7 @@ pub fn parse_launch_avoiding(
     };
     let chains = parse_chains_with(pipeline, &knows)?;
     let chains = expand_mpegtslivesrc(chains, &knows)?;
+    let chains = expand_uri_tokens(registry, chains);
     // playbin uri=X auto-fan-out (M382): a lone `playbin uri=` probes the
     // container via the registered hook and auto-builds source -> demux ->
     // per-stream decode -> auto sinks (multi-stream). Without a hook (or if it
@@ -4913,6 +4957,37 @@ mod tests {
             parse_launch(&reg, "videotestsrc"),
             Err(ParseError::TooFewStages)
         ));
+    }
+
+    #[test]
+    fn bare_uri_token_builds_its_scheme_element() {
+        let mut registry = Registry::new();
+        registry.register_uri_scheme("ice+http", "icecastsink");
+        let uri = "ice+http://source:hackme@localhost:8000/radio?mount=a";
+        let chains =
+            parse_chains(&alloc::format!("audiotestsrc ! {uri} public=false")).expect("parses");
+        let chains = expand_uri_tokens(&registry, chains);
+        let Item::Element(sink) = &chains[0][1] else {
+            panic!("element")
+        };
+        assert_eq!(sink.name, "icecastsink");
+        assert_eq!(
+            sink.props,
+            [
+                ("location".to_string(), uri.to_string()),
+                ("public".to_string(), "false".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn unregistered_uri_scheme_keeps_the_uri_as_its_name() {
+        let chains = parse_chains("audiotestsrc ! rtmp://host/app/key").expect("parses");
+        let chains = expand_uri_tokens(&Registry::new(), chains);
+        assert_eq!(
+            item_names(&chains[0]),
+            ["audiotestsrc", "rtmp://host/app/key"]
+        );
     }
 
     #[test]

@@ -1035,7 +1035,7 @@ pub use webrtc_util::IceTransportPolicy;
 pub(crate) mod httprequest;
 #[cfg(feature = "http-server")]
 pub mod httpserver;
-#[cfg(any(feature = "webrtc", feature = "mqtt"))]
+#[cfg(any(feature = "webrtc", feature = "mqtt", feature = "icecast"))]
 pub(crate) mod tlsclient;
 #[cfg(feature = "webrtc")]
 pub mod webrtcdata;
@@ -1525,6 +1525,9 @@ pub mod sampleaesdecrypt;
 pub mod rtmp;
 // RTMP "genuine FMS/FP" HMAC-SHA256 digest (complex) handshake, gated to the
 // rtmp feature that supplies the crypto; the sans-IO core uses the simple one.
+// Icecast source client: sends an encoded audio stream to an Icecast mount.
+#[cfg(feature = "icecast")]
+pub mod icecastsink;
 #[cfg(feature = "rtmp")]
 pub mod rtmphandshake;
 #[cfg(feature = "rtmp")]

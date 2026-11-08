@@ -64,6 +64,13 @@ A bare `media/type,field=value,...` stage is the inline caps-filter shorthand.
 `videotestsrc ! video/x-raw,format=nv12,width=320 ! ...` pins a format and
 geometry as text.
 
+A bare `scheme://...` stage names an element by its URI, as gst-launch does
+with an element's URI handler. `Registry::register_uri_scheme` maps a scheme to
+an element, and the parser builds that element with the URI as its `location`,
+so `... ! ice+http://source:pass@host:8000/radio` is `icecastsink`. Only the
+`ice+http` and `ice+https` schemes are registered. A token whose scheme has no
+element stays an unknown element.
+
 Branching makes this a chain parser. `name=t` names an element and a `t.`
 reference opens a branch, with `tee` the structural fan-out node broadcasting to
 every branch, its width derived from the branch count. Roles follow

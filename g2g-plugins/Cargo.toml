@@ -25,7 +25,7 @@ default = []
 # explicitly), and the no_std `embassy*` RTOS backends.
 linux-full = [
     "multi-thread", "plugin-loader", "plugin-signing",
-    "rtsp", "rtsp-server", "rtsp-client-sink", "srt", "rist", "srtp", "dtls-srtp", "tcp", "http-server", "shm", "unixfd", "udp-egress", "udp-ingress", "rtmp", "webrtc",
+    "rtsp", "rtsp-server", "rtsp-client-sink", "srt", "rist", "srtp", "dtls-srtp", "tcp", "http-server", "icecast", "shm", "unixfd", "udp-egress", "udp-ingress", "rtmp", "webrtc",
     "remote", "remote-ws", "webtransport", "moqt",
     "http-src", "hls", "dash",
     "ffmpeg", "ffmpeg-long-tail", "v4l2",
@@ -40,7 +40,7 @@ linux-full = [
 # the OS ships, so nothing that needs ffmpeg, libvpx, PipeWire or Pulse.
 release-binary = [
     "multi-thread", "plugin-loader",
-    "rtsp", "rtsp-server", "rtsp-client-sink", "srt", "rist", "srtp", "dtls-srtp", "tcp", "http-server", "udp-egress", "udp-ingress", "rtmp", "webrtc",
+    "rtsp", "rtsp-server", "rtsp-client-sink", "srt", "rist", "srtp", "dtls-srtp", "tcp", "http-server", "icecast", "udp-egress", "udp-ingress", "rtmp", "webrtc",
     "remote", "remote-ws", "webtransport", "moqt",
     "http-src", "hls", "dash",
     "vorbis", "aac-decode", "mpeg-audio-decode", "opus", "webrtcdsp", "av1-encode", "rav1d", "mjpeg",
@@ -152,6 +152,8 @@ udp-ingress = ["std", "metadata", "tokio/net", "dep:socket2", "dep:libc", "dep:q
 tcp = ["std", "tokio/net", "tokio/io-util"]
 # HTTP serving: `httpserversink` and `hlssink http-port`.
 http-server = ["tcp", "tokio/fs"]
+# `icecastsink`: sends an encoded audio stream to an Icecast server, over TLS for `ice+https`.
+icecast = ["std", "tokio/net", "tokio/io-util", "tokio/time", "dep:url", "dep:tokio-rustls", "dep:rustls-native-certs"]
 # Shared-memory IPC pair (M1081): ShmSink / ShmSrc speak the `shmpipe` protocol
 # of GStreamer's `shm` plugin, a unix control socket plus a POSIX shm area, so
 # either end can be a gst `shmsink` / `shmsrc`. Linux only (macOS rejects the

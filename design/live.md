@@ -662,6 +662,26 @@ feeding media, so a slow server back-pressures the pipeline instead of bloating
 the socket buffer. Ingest is validated against a real peer
 (`rtmp_ffmpeg_interop`, ffmpeg publishing into `RtmpSrc`).
 
+## Icecast
+
+`IcecastSink` (`icecastsink.rs`, `icecast` feature) is a source client for an
+Icecast server, after gst-plugins-rs's `icecastsink`, with its properties
+(`location`, `timeout`, `public`, `stream-name`, `auto-reconnect`). It sends
+`PUT <mount>` with Basic credentials from the URL, `Content-Type`,
+`Ice-audio-info`, `Ice-public`, `Ice-name` and `Expect: 100-continue`, then
+writes the encoded stream once the server answers 100 or 2xx. `ice+https` runs
+the same exchange over rustls, verified against the OS roots. Input is MP2 or
+MP3 frames, ADTS AAC, FLAC frames, or an Ogg byte stream. gst reads FLAC and Ogg
+stream headers from caps. g2g caps carry none, so the sink keeps FLAC's leading
+`fLaC` frame and, for Ogg, holds the stream until the first page with a
+granule position other than 0 or -1. The pages before it are the headers, and
+their identification header gives the channels and rate for `Ice-audio-info`.
+With `auto-reconnect` (the default) a failed write drops that buffer, posts a
+`Warning`, and the next buffer reconnects and resends the headers first. It is
+validated against Icecast 2.4.4 for every input format (`m2136_icecastsink`,
+ignored, `G2G_ICECAST_SOURCE_URL`), each mount read back by ffprobe. `ice+https`
+has not been run against a TLS server.
+
 ## RTSP server
 
 `RtspServerSink` (`rtspserversink.rs`, `rtsp-server` feature) hosts the server

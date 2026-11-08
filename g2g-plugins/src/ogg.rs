@@ -45,6 +45,65 @@ const MAX_STREAMS: usize = 16;
 /// growing for the length of a chained radio stream.
 const MAX_RETAINED: usize = 32;
 
+pub(crate) enum PageScan {
+    Page {
+        start: usize,
+        len: usize,
+        table_end: usize,
+    },
+    // no page starts before `resume_at`
+    Incomplete {
+        resume_at: usize,
+    },
+}
+
+pub(crate) fn scan_page(buf: &[u8]) -> PageScan {
+    // the last three bytes may be the start of a split "OggS" pattern
+    let Some(start) = buf.windows(4).position(|w| w == CAPTURE_PATTERN) else {
+        return PageScan::Incomplete {
+            resume_at: buf.len().saturating_sub(3),
+        };
+    };
+    let incomplete = PageScan::Incomplete { resume_at: start };
+    let rest = &buf[start..];
+    if rest.len() < HEADER_LEN {
+        return incomplete;
+    }
+    let table_end = HEADER_LEN + rest[26] as usize;
+    let Some(table) = rest.get(HEADER_LEN..table_end) else {
+        return incomplete;
+    };
+    let len = table_end + table.iter().map(|&s| s as usize).sum::<usize>();
+    if rest.len() < len {
+        return incomplete;
+    }
+    PageScan::Page {
+        start,
+        len,
+        table_end,
+    }
+}
+
+#[cfg(feature = "icecast")]
+const NO_PACKET_ENDS_GRANULE: u64 = u64::MAX;
+
+// Ogg audio mappings end their header packets on pages of granule position zero, ahead of the first audio page
+#[cfg(feature = "icecast")]
+pub(crate) fn header_pages_len(buf: &[u8]) -> Option<usize> {
+    let mut at = 0usize;
+    loop {
+        let PageScan::Page { start, len, .. } = scan_page(&buf[at..]) else {
+            return None;
+        };
+        let page = &buf[at + start..at + start + len];
+        let granule = u64::from_le_bytes(page[6..14].try_into().expect("eight bytes"));
+        if granule != 0 && granule != NO_PACKET_ENDS_GRANULE {
+            return Some(at + start);
+        }
+        at += start + len;
+    }
+}
+
 /// The codec of an Ogg logical bitstream, sniffed from its first packet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OggCodec {
@@ -465,31 +524,18 @@ impl OggDemuxer {
     fn parse_pages(&mut self, buf: &[u8]) -> usize {
         let mut at = 0usize;
         loop {
-            // Skip to the next "OggS" capture pattern, keeping a short tail that
-            // might be a split pattern when none is buffered.
-            let Some(pos) = buf[at..].windows(4).position(|w| w == CAPTURE_PATTERN) else {
-                return at.max(buf.len().saturating_sub(3));
-            };
-            at += pos;
-            let rest = &buf[at..];
-            if rest.len() < HEADER_LEN {
-                return at;
+            match scan_page(&buf[at..]) {
+                PageScan::Page {
+                    start,
+                    len,
+                    table_end,
+                } => {
+                    at += start;
+                    self.parse_page(&buf[at..at + len], table_end);
+                    at += len;
+                }
+                PageScan::Incomplete { resume_at } => return at + resume_at,
             }
-            let num_segments = rest[26] as usize;
-            let table_end = HEADER_LEN + num_segments;
-            if rest.len() < table_end {
-                return at;
-            }
-            let body_len: usize = rest[HEADER_LEN..table_end]
-                .iter()
-                .map(|&s| s as usize)
-                .sum();
-            let total = table_end + body_len;
-            if rest.len() < total {
-                return at;
-            }
-            self.parse_page(&rest[..total], table_end);
-            at += total;
         }
     }
 
@@ -1058,6 +1104,17 @@ mod tests {
         h.extend_from_slice(&48_000u32.to_le_bytes()); // input sample rate
         h.extend_from_slice(&[0, 0, 0]); // output gain + mapping family
         h
+    }
+
+    #[cfg(feature = "icecast")]
+    #[test]
+    fn header_pages_end_at_the_first_audio_page() {
+        let mut stream = page(0x02, 1, 0, &[&opus_head(2)]);
+        stream.extend(page(0, 1, 1, &[b"OpusTags"]));
+        let headers_len = stream.len();
+        stream.extend(page_g(0, 1, 2, 960, &[b"audio"]));
+        assert_eq!(header_pages_len(&stream), Some(headers_len));
+        assert_eq!(header_pages_len(&stream[..stream.len() - 1]), None);
     }
 
     /// Like `page`, but with an explicit granule position.

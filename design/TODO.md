@@ -355,6 +355,9 @@ libraries installed.
 
 - **Bare refs into `textoverlay` fill its inputs in link order.** `TextOverlayN` expects video on input 0, so `d.text ! o.  d.video ! o.` with bare `o.` refs puts text on the video input. Assign a bare muxer-side ref to the input whose kind its stream has.
 - A GUI / tooling introspection surface beyond the text dump.
+- Register URI schemes for bare `scheme://` launch stages beyond `ice+http(s)`:
+  `udp`, `srt`, `rtsp`, `rtmp`, `http(s)`, and `file` (as a path for `filesrc` /
+  `filesink`), each with the property its element takes the URI in.
 - `g2g-discover`: read audio-only MP4 and native FLAC / MP3 files, which it
   cannot probe, so their tags show.
 

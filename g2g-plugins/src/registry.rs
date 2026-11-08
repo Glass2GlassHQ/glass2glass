@@ -1859,6 +1859,15 @@ pub fn default_registry() -> Registry {
         "hlssink",
         || Box::new(crate::hlssink::HlsSink::default()),
     ));
+    #[cfg(feature = "icecast")]
+    {
+        reg.register_launch(LaunchFactory::of::<crate::icecastsink::IcecastSink>(
+            "icecastsink",
+            || Box::new(crate::icecastsink::IcecastSink::default()),
+        ));
+        reg.register_uri_scheme("ice+http", "icecastsink");
+        reg.register_uri_scheme("ice+https", "icecastsink");
+    }
     #[cfg(feature = "rtmp")]
     reg.register_launch(LaunchFactory::of::<RtmpSink>("rtmpsink", || {
         Box::new(RtmpSink::new(""))
@@ -2916,6 +2925,7 @@ pub static FEATURE_GATED_ELEMENTS: &[FeatureGatedElement] = &{
         "dashsrc" => "dash";
         "rtmpsrc" => "rtmp";
         "rtmpsink" => "rtmp";
+        "icecastsink" => "icecast";
         "analyticsoverlay" => "analytics";
         "tracker" => "analytics";
         "trackcrop" => "analytics";

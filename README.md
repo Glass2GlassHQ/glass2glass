@@ -645,6 +645,7 @@ cargo clippy --workspace --all-targets
 | `RistSink` / `RistSrc` (RIST Simple Profile: MPEG-TS over RTP with NACK retransmission) | `rist` | none |
 | `TcpServerSrc` / `TcpClientSrc` / `TcpServerSink` / `TcpClientSink` | `tcp` | none |
 | `HttpServerSink` (`httpserversink`: streams MPEG-TS, fMP4 or Matroska to HTTP clients, a late client starting at the next keyframe) | `http-server` | none |
+| `IcecastSink` (`icecastsink`: MP3, AAC, FLAC or Ogg audio to an Icecast mount over `ice+http` or `ice+https`, reconnecting with the stream headers resent) | `icecast` | url, rustls |
 | `ShmSink` / `ShmSrc` (GStreamer's `shm` protocol: shared-memory frames + unix control socket) | `shm` | Linux |
 | `UnixFdSink` / `UnixFdSrc` (GStreamer's `unixfd` protocol: memfd / dma-buf descriptors over a unix socket) | `unixfd` | Linux |
 | `RtmpSrc` (RTMP publisher ingest) | `rtmp` | none |

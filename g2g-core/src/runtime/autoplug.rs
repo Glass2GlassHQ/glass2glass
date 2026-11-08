@@ -1770,6 +1770,7 @@ mod factory {
         /// (`waylandsink`, `kmssink`, ..., `fakevideosink`). Resolved at `make_*` time,
         /// so an alias whose targets are all feature-gated-out simply misses.
         aliases: Vec<(&'static str, &'static [&'static str])>,
+        uri_schemes: Vec<(&'static str, &'static str)>,
         /// The `playbin uri=X` auto-fan-out hooks. A lone
         /// `playbin` in a text pipeline tries each in registration order until one
         /// handles the URI (`Ok(Some)`); each declines (`Ok(None)`) a container it
@@ -2275,6 +2276,22 @@ mod factory {
         ) -> &mut Self {
             self.aliases.push((name, targets));
             self
+        }
+
+        pub fn register_uri_scheme(
+            &mut self,
+            scheme: &'static str,
+            element: &'static str,
+        ) -> &mut Self {
+            self.uri_schemes.push((scheme, element));
+            self
+        }
+
+        pub fn uri_scheme_element(&self, scheme: &str) -> Option<&'static str> {
+            self.uri_schemes
+                .iter()
+                .find(|(registered, _)| *registered == scheme)
+                .map(|(_, element)| *element)
         }
 
         /// Resolve a name through the alias table to the first target that is

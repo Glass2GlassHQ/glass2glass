@@ -49,6 +49,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M2133: `st2038ancdemux` and `st2038ancmux`, live included, with ST 2038 caps alignment and framerate and a `Gap` packet.
 - M2134: `st2038combiner` and `st2038extractor` move ST 2038 on and off video frames as `AncillaryMeta`.
 - M2135: `hlssink single-media-file` writes one byte-range addressed file, and its HTTP server answers Range requests.
+- M2136: `icecastsink` sends MP3, AAC, FLAC or Ogg audio to an Icecast mount, and a launch line may name a sink by its URI.
 
 ## 0.14.0
 
