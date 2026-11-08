@@ -1900,8 +1900,8 @@ async fn prepare_graph<'a>(
     // Hand the elected clock + base time to every sink so each presents its
     // frames at their running-time deadline (PTS pacing), the same as the linear
     // runners (M169). Only when a clock was elected; without one the sinks present
-    // as fast as backpressure allows. A sink node always holds a
-    // `GraphNodeRef::Element` (not a `Source`), so the match below covers them.
+    // as fast as backpressure allows. Transforms get it too: `clocksync` paces on
+    // it, and `mpegtslivesrc` maps stream time onto running time with its base.
     // The same sync is kept for a sink the mutator later splices in (M1149).
     let mut sink_clock_sync = None;
     if let Some(c) = &elected {
@@ -1922,11 +1922,10 @@ async fn prepare_graph<'a>(
         };
         let sync = sync.with_path_latency(latency);
         for &node in topo {
-            let is_sink = matches!(vg.kind(node), NodeKind::Sink);
             match vg.element_mut(node) {
                 // A live capture source stamps running time off the same sync.
                 Some(GraphNodeRef::Source(src)) => src.set_clock_sync(sync.clone()),
-                Some(GraphNodeRef::Element(elem)) if is_sink => elem.set_clock_sync(sync.clone()),
+                Some(GraphNodeRef::Element(elem)) => elem.set_clock_sync(sync.clone()),
                 _ => {}
             }
         }

@@ -723,6 +723,9 @@ pub mod mpegcrc;
 // MPEG-TS demuxer element (no_std): Caps::ByteStream{MpegTs} -> H.264, wrapping
 // the mpegts parser.
 pub mod tsdemux;
+// Pipeline clock from a live MPEG-TS stream's PCR, placed ahead of tsdemux.
+#[cfg(feature = "std")]
+pub mod mpegtslivesrc;
 // MPEG program stream demuxer (no_std): Caps::ByteStream{MpegPs} -> one
 // elementary stream, the `.mpg` / `.vob` sibling of tsdemux.
 pub mod mpeg2video;

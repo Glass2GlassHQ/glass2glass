@@ -513,6 +513,14 @@ struct TsProgram {
     streams: Vec<ElementaryStream>,
     // `None` until the first PMT parses
     pmt_version: Option<u8>,
+    pcr_pid: Option<u16>,
+}
+
+/// One program clock reference read off the active program's PCR PID.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PcrSample {
+    pub pcr_27mhz: u64,
+    pub discontinuity: bool,
 }
 
 /// Incremental MPEG-TS demuxer: feed 188-byte packets, drain [`EsUnit`]s.
@@ -557,11 +565,25 @@ pub struct TsDemuxer {
     continuity: Vec<PidContinuity>,
     // replayed once the active program's PMT parses
     packets_before_pmt: VecDeque<[u8; TS_PACKET_LEN]>,
+    // reads only the tables and the PCR, for a reader that leaves the streams to tsdemux
+    pcr_only: bool,
+    pcr_samples: Vec<PcrSample>,
 }
 
 impl TsDemuxer {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn pcr_reader() -> Self {
+        Self {
+            pcr_only: true,
+            ..Self::default()
+        }
+    }
+
+    pub fn take_pcr_samples(&mut self) -> Vec<PcrSample> {
+        core::mem::take(&mut self.pcr_samples)
     }
 
     /// Select which PAT program to demux by `program_number` (`None` = the first
@@ -718,6 +740,18 @@ impl TsDemuxer {
         let discontinuity =
             has_adaptation_field && pkt[4] > 0 && pkt[5] & DISCONTINUITY_INDICATOR != 0;
         let table = self.psi_table_of(pid);
+        if self.pcr_only {
+            let on_pcr_pid = self.active_program().and_then(|program| program.pcr_pid) == Some(pid);
+            if let Some(pcr_27mhz) = adaptation_field_pcr(pkt).filter(|_| on_pcr_pid) {
+                self.pcr_samples.push(PcrSample {
+                    pcr_27mhz,
+                    discontinuity,
+                });
+            }
+            if table.is_none() {
+                return;
+            }
+        }
         let stream_type = self.stream_type_of(pid);
         if table.is_none() && stream_type.is_none() {
             self.hold_before_pmt(pid, pkt);
@@ -1011,6 +1045,7 @@ impl TsDemuxer {
                     pmt_pid: pid,
                     streams: Vec::new(),
                     pmt_version: None,
+                    pcr_pid: None,
                 });
             }
             i += 4;
@@ -1217,6 +1252,7 @@ impl TsDemuxer {
             return;
         }
         self.programs[prog_idx].pmt_version = Some(version);
+        self.programs[prog_idx].pcr_pid = Some((((body[8] & 0x1F) as u16) << 8) | body[9] as u16);
         let program_info_length = (((body[10] & 0x0F) as usize) << 8) | body[11] as usize;
         let mut i = 12usize.saturating_add(program_info_length);
         while i + 5 <= body.len() {
@@ -1382,6 +1418,27 @@ fn drain_complete_sections(
         }
         sections.push(pending.drain(..total).collect());
     }
+}
+
+pub fn ticks_90khz_to_ns(ticks: u64) -> u64 {
+    (ticks as u128 * 1_000_000_000 / 90_000) as u64
+}
+
+// ISO/IEC 13818-1 2.4.3.5: a 33-bit 90 kHz base then a 9-bit extension, after the adaptation flags
+fn adaptation_field_pcr(pkt: &[u8; TS_PACKET_LEN]) -> Option<u64> {
+    let has_adaptation_field = (pkt[3] >> 4) & 0x02 != 0;
+    let af_len = pkt[4] as usize;
+    if !has_adaptation_field || af_len < 1 + PCR_FIELD_LEN || pkt[5] & AF_FLAG_PCR == 0 {
+        return None;
+    }
+    let field = &pkt[6..6 + PCR_FIELD_LEN];
+    let base = (u64::from(field[0]) << 25)
+        | (u64::from(field[1]) << 17)
+        | (u64::from(field[2]) << 9)
+        | (u64::from(field[3]) << 1)
+        | (u64::from(field[4]) >> 7);
+    let extension = (u64::from(field[4] & 0x01) << 8) | u64::from(field[5]);
+    Some(base * SYSTEM_CLOCK_TICKS_PER_90KHZ + extension)
 }
 
 #[derive(Debug, Default)]
@@ -1965,8 +2022,8 @@ pub const DEFAULT_TRANSPORT_STREAM_ID: u16 = 1;
 pub const DEFAULT_ORIGINAL_NETWORK_ID: u16 = 1;
 pub const MAX_TABLES_VERSION: u8 = 31;
 
-const SYSTEM_CLOCK_TICKS_PER_90KHZ: u64 = 300;
-const SYSTEM_CLOCK_HZ: u128 = 27_000_000;
+pub const SYSTEM_CLOCK_TICKS_PER_90KHZ: u64 = 300;
+pub(crate) const SYSTEM_CLOCK_HZ: u128 = 27_000_000;
 const BITS_PER_BYTE: u128 = 8;
 // the PCR value refers to the byte holding the last bit of its base
 const PCR_BYTE_OFFSET: usize = 11;
@@ -4299,6 +4356,19 @@ pub(crate) mod tests {
         }
         assert_eq!(count_pid(&ts, PID_PAT), 5, "PAT every table interval");
         assert_eq!(count_pid(&ts, PID_SDT), 3, "SDT every second one");
+    }
+
+    #[test]
+    fn the_pcr_reader_reads_back_the_written_pcr() {
+        const PCR_27MHZ: u64 = ((1 << 33) - 1) * SYSTEM_CLOCK_TICKS_PER_90KHZ + 299;
+        let mut written = Vec::new();
+        write_pcr(PCR_27MHZ, &mut written);
+        let mut packet = [0xFFu8; TS_PACKET_LEN];
+        packet[..4].copy_from_slice(&[SYNC_BYTE, 0x01, 0x00, AFC_ADAPTATION_ONLY]);
+        packet[4] = (TS_PACKET_LEN - 5) as u8;
+        packet[5] = AF_FLAG_PCR;
+        packet[6..6 + PCR_FIELD_LEN].copy_from_slice(&written);
+        assert_eq!(adaptation_field_pcr(&packet), Some(PCR_27MHZ));
     }
 
     #[test]

@@ -41,8 +41,8 @@ use g2g_core::{
 
 use crate::demuxseek::DemuxSeek;
 use crate::mpegts::{
-    unwrap_metadata_au_cells, EitSlot, EsUnit, TsDemuxer, TsPacketSplitter, STREAM_TYPE_AAC,
-    STREAM_TYPE_AAC_LATM, STREAM_TYPE_AC3, STREAM_TYPE_H264, STREAM_TYPE_H265,
+    ticks_90khz_to_ns, unwrap_metadata_au_cells, EitSlot, EsUnit, TsDemuxer, TsPacketSplitter,
+    STREAM_TYPE_AAC, STREAM_TYPE_AAC_LATM, STREAM_TYPE_AC3, STREAM_TYPE_H264, STREAM_TYPE_H265,
     STREAM_TYPE_METADATA_PES, STREAM_TYPE_MPEG1_AUDIO, STREAM_TYPE_MPEG1_VIDEO,
     STREAM_TYPE_MPEG2_AUDIO, STREAM_TYPE_MPEG2_VIDEO, STREAM_TYPE_MPEG4P2, STREAM_TYPE_PRIVATE_PES,
     STREAM_TYPE_SCTE35, TAG_KEY_EVENT_DURATION, TAG_KEY_EVENT_NAME, TAG_KEY_EVENT_START,
@@ -265,10 +265,6 @@ fn push_event_timing(
             value: duration_secs.into(),
         });
     }
-}
-
-fn ticks_90khz_to_ns(ticks: u64) -> u64 {
-    (ticks as u128 * 1_000_000_000 / 90_000) as u64
 }
 
 // the pts tsdemux stamps on the earliest presented unit of this stretch of stream

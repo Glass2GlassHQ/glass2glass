@@ -615,7 +615,7 @@ impl DriftClock {
         Self::with_window_and_gate(reference, Self::DEFAULT_WINDOW, outlier_gate_ns)
     }
 
-    fn with_window_and_gate(
+    pub fn with_window_and_gate(
         reference: Arc<dyn PipelineClock + Send + Sync>,
         window: usize,
         outlier_gate_ns: u64,

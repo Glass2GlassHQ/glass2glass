@@ -706,6 +706,7 @@ cargo clippy --workspace --all-targets
 | Audio analysis | `level`, `ebur128`, `cutter`, `spectrum` |
 | Telemetry | `klvdecode` (MISB ST 0601 / STANAG 4609) |
 | Ad markers | SCTE-35 splice sections pass from `tsdemux` to `mpegtsmux scte-35-pid` |
+| Live MPEG-TS clock | `mpegtslivesrc` paces a live TS pipeline on the sender's PCR (`udpsrc ... ! mpegtslivesrc ! tsdemux`, or gst's `mpegtslivesrc source="udpsrc ..."`) |
 | Subtitles and captions | bitmap decoders `vobsubdec` (alias `dvdsubdec`), `dvbsubdec`, `pgsdec` with `subpictureoverlay` to blend their cues onto video, `teletextdec`, `subparse`, `srtenc`, `webvttenc`, `ccextract` / `cccombiner`, `ccconverter` (between cc_data, CDP, S334-1A, and raw CEA-608) |
 | Flow control and debug | `concat`, `input-selector`, `output-selector`, `framesplit` / `framemerge` (one stream split across branches by which has room, then put back in order), `valve`, `fakesrc`, `fdsrc`, `fdsink`, `watchdog`, `capssetter`, `taginject`, `rndbuffersize`, `errorignore`, `breakmydata`, `chopmydata`, `checksumsink`, `fakevideosink`, `fakeaudiosink`, `progressreport` |
 | Composition and DSL | `compositor`, the tag system, `parse_launch` / `gst-inspect` |

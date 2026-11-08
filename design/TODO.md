@@ -331,6 +331,12 @@ libraries installed.
   soak of `PtpClient` (host/root/reference-gear gated); a direct PHC
   (`/dev/ptpN`) read; hardware RX/TX timestamping for uncompressed ST 2110-20
   timing; BMCA/Announce, peer-delay, unicast.
+- **Audio sinks follow a clock they do not provide.** `alsasink`, `pulsesink`
+  and `pipewiresink` drop or repeat samples once they drift past a threshold
+  from the elected clock, gst's `slave-method=skew`, so audio stays with a
+  `mpegtslivesrc`, PTP or capture clock.
+- **`mpegtslivesrc` PTS wrap:** a PTS that wraps past 2^33 ticks before the PCR
+  does falls outside the segment. Send a segment for the wrapped timeline.
 - **ST 2110 media transport:** wire compliance of -20/-22/-30/-40 + multicast
   validated against reference gear (built from the RFCs, not yet
   interop-tested).

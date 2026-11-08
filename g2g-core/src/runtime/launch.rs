@@ -2121,6 +2121,52 @@ fn expand_togglerecord(chains: Vec<Chain>) -> Result<Vec<Chain>, ParseError> {
     Ok(chains)
 }
 
+// gst's mpegtslivesrc is a bin around its `source`, a graph has no runtime bins so the source runs ahead of it
+fn expand_mpegtslivesrc(
+    chains: Vec<Chain>,
+    knows_element: &dyn Fn(&str) -> bool,
+) -> Result<Vec<Chain>, ParseError> {
+    let mut out = Vec::with_capacity(chains.len());
+    for chain in chains {
+        let mut new_chain: Chain = Vec::with_capacity(chain.len() + 1);
+        for item in chain {
+            let Item::Element(mut spec) = item else {
+                new_chain.push(item);
+                continue;
+            };
+            let source = spec
+                .props
+                .iter()
+                .position(|(key, _)| key == "source")
+                .filter(|_| spec.name == "mpegtslivesrc");
+            if let Some(index) = source {
+                let (key, description) = spec.props.remove(index);
+                let bad_source = || ParseError::BadValue {
+                    element: spec.name.clone(),
+                    key: key.clone(),
+                    value: description.clone(),
+                    range: None,
+                };
+                let mut inner = parse_chains_with(&description, knows_element)?;
+                let source_chain = inner
+                    .pop()
+                    .filter(|_| inner.is_empty())
+                    .ok_or_else(bad_source)?;
+                if !source_chain
+                    .iter()
+                    .all(|item| matches!(item, Item::Element(_)))
+                {
+                    return Err(bad_source());
+                }
+                new_chain.extend(source_chain);
+            }
+            new_chain.push(Item::Element(spec));
+        }
+        out.push(new_chain);
+    }
+    Ok(out)
+}
+
 /// `transcodebin`: decode whatever arrives and re-encode it to a profile, which
 /// is exactly `decodebin ! encodebin profile=...`. Rewritten into those two
 /// macros before either expands, so it inherits both behaviours (and both error
@@ -3848,6 +3894,7 @@ pub fn parse_launch_avoiding(
             )
     };
     let chains = parse_chains_with(pipeline, &knows)?;
+    let chains = expand_mpegtslivesrc(chains, &knows)?;
     // playbin uri=X auto-fan-out (M382): a lone `playbin uri=` probes the
     // container via the registered hook and auto-builds source -> demux ->
     // per-stream decode -> auto sinks (multi-stream). Without a hook (or if it

@@ -16,8 +16,9 @@ display sink (`Provider`), which outranks the system fallback.
 The runner samples the elected clock's `now_ns()` once at startup as the base
 time, the clock reading at running-time zero, and hands both to each sink via
 `set_clock_sync(ClockSync { clock, base_time_ns })`, called once after election.
-Both the linear runners and the DAG runner deliver it, the latter walking its sink
-nodes after election, so a display sink PTS-paces in any topology. A sink that
+Both the linear runners and the DAG runner deliver it, the latter walking every
+element node after election, transforms included, so a display sink PTS-paces in
+any topology and `clocksync` and `mpegtslivesrc` read the elected clock. A sink that
 synchronises presents a frame when the elected clock reaches
 `base_time_ns + running_time`, where running time is the frame's `pts_ns` mapped
 through the active `Segment`, and a sink that ignores the hook presents as fast as
@@ -110,6 +111,30 @@ leaky byte queue, so producer-side drops never skew the fit and the constant
 graph-to-speaker delay lands in the affine offset. Each callback fills only the
 frames the buffer's `requested` field asks for, one graph cycle, so the clock gets
 one observation per cycle and the sink adds no more than a cycle of latency.
+
+## MPEG-TS PCR clock
+
+`mpegtslivesrc` gives a live MPEG-TS pipeline the sender's clock, as
+gst-plugins-rs's element of that name does. GStreamer's is a bin around the
+source. Here it is a pass-through after any TS source, and the launch parser
+rewrites gst's `mpegtslivesrc source="udpsrc ..."` into `udpsrc ... !
+mpegtslivesrc`. A `TsDemuxer` in PCR-only mode reads the tables and each PCR of
+the first program. Each PCR, paired with the `arrival_ns` of the buffer that
+carried it, is an observation for a `DriftClock` offered at `LiveSource`
+priority, fitted over `window-size` observations (32 by default, as in gst). The
+clock reads the monotonic clock at the first PCR and runs at the sender's rate
+from there.
+
+A PCR that cannot be unwrapped to within 15 s of the previous one, lands more than
+a second from the clock's projection, or carries the discontinuity indicator
+starts a new timeline, the same rules as gst's. The new timeline is anchored at
+the clock's projection, so the clock never jumps. Each timeline sends `tsdemux`
+a `Segment` that puts the PCR's stream time at the running time it arrived:
+`start` is the PCR in `tsdemux`'s PTS nanoseconds, and `base` is its clock time
+minus the base time. A frame then presents when the sender's clock reaches its
+PTS plus the path latency. `tsdemux` keeps a segment that follows the runner's
+opening one, so it needs no mode of its own, where gst's needs `ignore-pcr=true`.
+A PTS that wraps past 2^33 ticks before the PCR does falls outside the segment.
 
 ## PTP
 

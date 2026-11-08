@@ -40,6 +40,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M2124: `hlssrc` warns when a live playlist publishes nothing new for three target durations, and again when it moves.
 - M2125: `udpsrc` reads datagrams in batches with optional GRO and kernel receive timestamps, takes `udpsrc2`'s properties and name, and joins multicast per source.
 - M2126: `udpsrc` posts `ReceiveTimeout` on the bus after `timeout` without data, joins multicast on several interfaces, and resolves host names in `source-filter`.
+- M2127: `mpegtslivesrc` clocks a live MPEG-TS pipeline from the stream's PCR and maps `tsdemux` output onto it.
 
 ## 0.14.0
 

@@ -1250,6 +1250,10 @@ pub fn default_registry() -> Registry {
     reg.register_launch(LaunchFactory::of::<TsDemux>("tsdemux", || {
         Box::new(TsDemux::new())
     }));
+    reg.register_launch(LaunchFactory::of::<crate::mpegtslivesrc::MpegTsLiveSrc>(
+        "mpegtslivesrc",
+        || Box::new(crate::mpegtslivesrc::MpegTsLiveSrc::new()),
+    ));
     reg.register_launch(LaunchFactory::of::<crate::psdemux::PsDemux>(
         "mpegpsdemux",
         || Box::new(crate::psdemux::PsDemux::new()),
