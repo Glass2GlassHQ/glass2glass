@@ -44,6 +44,14 @@
 //!                     copies between those devices, and merge the timings
 //!                     into <file> for the placement planner (`placement`
 //!                     build feature)
+//! --placement-profile <file>
+//!                     before the run, put each GPU element whose device-id
+//!                     is -1 on the GPU the <file> timings make cheapest
+//!                     (`placement` build feature)
+//! --objective latency|throughput
+//!                     what --placement-profile minimizes: the time one frame
+//!                     takes (default), or the per-frame time of the busiest
+//!                     GPU or GPU-to-GPU link
 //! --seek <seconds>    one flushing seek to that stream time before the first
 //!                     frame, then run to the end (`--help` says where the
 //!                     first frame lands)
@@ -168,7 +176,7 @@ type RunFuture<'r> = core::pin::Pin<
     >,
 >;
 
-const USAGE: &str = "usage: g2g-launch [-v] [-q] [--dot] [--copy-plan] [--validate-json] [--run-json] [--threads[=pinned]] [--observe <port>] [--observe-host <addr>] [--tui] [--record-on-error <dir>] [--trace <file>] [--profile <file>] [--seek <seconds>] [--seek-at <position>:<seconds>] [--plugin <path>] [-e] [-m] [-h] [--version] \
+const USAGE: &str = "usage: g2g-launch [-v] [-q] [--dot] [--copy-plan] [--validate-json] [--run-json] [--threads[=pinned]] [--observe <port>] [--observe-host <addr>] [--tui] [--record-on-error <dir>] [--trace <file>] [--profile <file>] [--placement-profile <file>] [--objective latency|throughput] [--seek <seconds>] [--seek-at <position>:<seconds>] [--plugin <path>] [-e] [-m] [-h] [--version] \
 <element> [key=value ...] ! <element> ! ...\n       \
 g2g-launch [OPTIONS] --graph <file.json|.yaml>   # declarative graph\n       \
 g2g-launch [OPTIONS] --script <file.rhai>         # Rhai graph-building script";
@@ -258,6 +266,8 @@ struct Opts {
     record_on_error: Option<String>,
     trace: Option<String>,
     profile: Option<String>,
+    placement_profile: Option<String>,
+    objective: Option<String>,
     seek_seconds: Option<String>,
     seek_at: Option<String>,
 }
@@ -330,6 +340,14 @@ fn parse_opts(args: impl Iterator<Item = String>) -> (Opts, Vec<String>) {
             opts.profile = Some(path.to_string());
             continue;
         }
+        if let Some(path) = arg.strip_prefix("--placement-profile=") {
+            opts.placement_profile = Some(path.to_string());
+            continue;
+        }
+        if let Some(objective) = arg.strip_prefix("--objective=") {
+            opts.objective = Some(objective.to_string());
+            continue;
+        }
         if let Some(seconds) = arg.strip_prefix("--seek=") {
             opts.seek_seconds = Some(seconds.to_string());
             continue;
@@ -385,6 +403,20 @@ fn parse_opts(args: impl Iterator<Item = String>) -> (Opts, Vec<String>) {
                 Some(path) => opts.profile = Some(path),
                 None => {
                     eprintln!("g2g-launch: --profile needs a file argument");
+                    process::exit(2);
+                }
+            },
+            "--placement-profile" => match args.next() {
+                Some(path) => opts.placement_profile = Some(path),
+                None => {
+                    eprintln!("g2g-launch: --placement-profile needs a file argument");
+                    process::exit(2);
+                }
+            },
+            "--objective" => match args.next() {
+                Some(objective) => opts.objective = Some(objective),
+                None => {
+                    eprintln!("g2g-launch: --objective needs latency or throughput");
                     process::exit(2);
                 }
             },
@@ -645,6 +677,7 @@ fn launch() {
         ("--seek-at", seek_at.is_some()),
         ("--trace", opts.trace.is_some()),
         ("--profile", opts.profile.is_some()),
+        ("--placement-profile", opts.placement_profile.is_some()),
     ] {
         if given && skips_the_run {
             eprintln!(
@@ -659,12 +692,28 @@ fn launch() {
         process::exit(2);
     }
     #[cfg(not(all(target_os = "linux", feature = "placement")))]
-    if opts.profile.is_some() {
+    if opts.profile.is_some() || opts.placement_profile.is_some() {
         eprintln!(
-            "g2g-launch: --profile requires a placement build (rebuild with --features placement)"
+            "g2g-launch: --profile and --placement-profile require a placement build \
+             (rebuild with --features placement)"
         );
         process::exit(2);
     }
+    if opts.objective.is_some() && opts.placement_profile.is_none() {
+        eprintln!("g2g-launch: --objective takes --placement-profile");
+        process::exit(2);
+    }
+    #[cfg(all(target_os = "linux", feature = "placement"))]
+    let objective = match opts.objective.as_deref() {
+        None => g2g_plugins::placement::PlacementObjective::Latency,
+        Some(name) => match g2g_plugins::placement::PlacementObjective::parse(name) {
+            Some(objective) => objective,
+            None => {
+                eprintln!("g2g-launch: --objective is latency or throughput, not {name}");
+                process::exit(2);
+            }
+        },
+    };
     let pipeline = tokens.join(" ");
     let use_file = opts.graph.is_some() || opts.script.is_some();
     if !use_file && pipeline.trim().is_empty() {
@@ -911,6 +960,11 @@ fn launch() {
     // to choose differently.
     let mut avoided: Vec<&'static str> = Vec::new();
     let mut graph = graph;
+    #[cfg(all(target_os = "linux", feature = "placement"))]
+    if let Some(path) = &opts.placement_profile {
+        let dry = build_graph(&reg, &opts, &pipeline);
+        place_on_gpus(&rt, &reg, &mut graph, dry, path, objective, opts.quiet);
+    }
     let mut launch_seeks = attach_launch_seeks(&mut graph, seek_ns, seek_at);
     loop {
         let mut pending_seek = seek_at;
@@ -1107,6 +1161,12 @@ fn launch() {
                             "{factory} could not decode this stream ({err:?}), retrying without it"
                         );
                         graph = next;
+                        #[cfg(all(target_os = "linux", feature = "placement"))]
+                        if let Some(path) = &opts.placement_profile {
+                            let dry = parse_launch_avoiding(&reg, &pipeline, &avoided)
+                                .map_err(|error| format!("parse error: {error}"));
+                            place_on_gpus(&rt, &reg, &mut graph, dry, path, objective, opts.quiet);
+                        }
                         launch_seeks = attach_launch_seeks(&mut graph, seek_ns, seek_at);
                         continue;
                     }
@@ -1118,6 +1178,35 @@ fn launch() {
                 process::exit(1);
             }
         }
+    }
+}
+
+#[cfg(all(target_os = "linux", feature = "placement"))]
+fn place_on_gpus(
+    rt: &tokio::runtime::Runtime,
+    reg: &Registry,
+    graph: &mut Graph<GraphNode>,
+    dry: Result<Graph<GraphNode>, String>,
+    path: &str,
+    objective: g2g_plugins::placement::PlacementObjective,
+    quiet: bool,
+) {
+    let fail = |error: &dyn std::fmt::Display| -> ! {
+        eprintln!("g2g-launch: --placement-profile {path}: {error}");
+        process::exit(1);
+    };
+    let dry = dry.unwrap_or_else(|error| fail(&error));
+    let placement = rt
+        .block_on(g2g_plugins::placement::place_launch_graph(
+            reg,
+            graph,
+            dry,
+            std::path::Path::new(path),
+            objective,
+        ))
+        .unwrap_or_else(|error| fail(&error));
+    if !quiet {
+        print_stdout!("{}", placement.report(graph, objective));
     }
 }
 

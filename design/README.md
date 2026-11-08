@@ -311,6 +311,30 @@ of 4 KiB and of 16 MiB through `CrossDeviceCopier`'s staging path. `ortinfer`
 passes its `device-id` to the CUDA, TensorRT, ROCm and MIGraphX providers and
 reports it as its device, with the vendor set by the provider.
 
+`g2g-launch --placement-profile <file>` (and `g2g-launch-py`) places the line on
+the GPUs before it runs. An element is placeable when its device property is -1,
+plus `vendor=unknown` on HIP elements, which is GStreamer's HIP `device-id -1`
+meaning any device. `ortinfer` takes -1 as its default and then runs on the
+provider's device 0. `placement::place_launch_graph` parses the line a second
+time and negotiates that copy with `negotiate_graph` to get each edge's caps,
+which index the profile alongside each element's properties, as `--profile`
+recorded them. Each placeable element's candidates are the devices with a
+matching entry, and an element on a fixed device must have an entry for that
+device. A missing entry, a missing copy timing for a device pair the search
+tries, or a device whose product name differs from the profile's fails the
+launch. `plan_placement` tries every combination of candidates, up to a million,
+and keeps the cheapest. Under `--objective latency` (the default) the cost is
+the longest source-to-sink path through element times and the copies placed
+between devices. Under `throughput` it is the busiest GPU or device-pair link,
+the sum of the element or copy times charged to it per frame. A placed element
+gets `execution-provider` from its entry first, since `ortinfer` reloads its
+model on each set, then its device property, then `vendor`. `parse_launch`
+has already spliced converters for the devices the line named, so
+`place_launch_graph` runs `splice_domain_converters` again to add the copies
+the placed devices need. The placement goes into the graph before `run_graph`,
+and the launcher prints one line per placed element. The search does not insert
+`framesplit`.
+
 On AMD, `hipupload` imports a linear dma-buf frame with
 `hipImportExternalMemory`, as GStreamer's `hipupload` does, and keeps each import
 in a cache keyed by the dma-buf's inode, the same `DmaBufImportCache` the wgpu

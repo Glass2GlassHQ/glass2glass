@@ -54,7 +54,7 @@ use g2g_plugins::TokioThreadSpawner;
 const LINK_CAPACITY: usize = 4;
 
 const USAGE: &str =
-    "usage: g2g-launch-py [-q] [--threads] [--trace <file>] [--profile <file>] <element> [key=value ...] ! <element> ! ...
+    "usage: g2g-launch-py [-q] [--threads] [--trace <file>] [--profile <file>] [--placement-profile <file>] [--objective latency|throughput] <element> [key=value ...] ! <element> ! ...
        g2g-launch-py --inspect [g2g-inspect arguments]
        g2g-launch-py --inspect pyelement|pyaggregator|pysink module=<module> class=<class>
        g2g-launch-py --docgen [out.html]
@@ -70,6 +70,8 @@ fn main() {
     let mut threads = false;
     let mut trace_path: Option<String> = None;
     let mut profile_path: Option<String> = None;
+    let mut placement_profile_path: Option<String> = None;
+    let mut objective_name: Option<String> = None;
     let mut tokens: Vec<String> = Vec::new();
     let mut in_pipeline = false;
     let mut args = std::env::args().skip(1);
@@ -89,6 +91,20 @@ fn main() {
                     Some(path) => profile_path = Some(path),
                     None => {
                         eprintln!("g2g-launch-py: --profile needs a file argument");
+                        process::exit(2);
+                    }
+                },
+                "--placement-profile" => match args.next() {
+                    Some(path) => placement_profile_path = Some(path),
+                    None => {
+                        eprintln!("g2g-launch-py: --placement-profile needs a file argument");
+                        process::exit(2);
+                    }
+                },
+                "--objective" => match args.next() {
+                    Some(name) => objective_name = Some(name),
+                    None => {
+                        eprintln!("g2g-launch-py: --objective needs latency or throughput");
                         process::exit(2);
                     }
                 },
@@ -138,10 +154,28 @@ fn main() {
         process::exit(2);
     }
     #[cfg(not(all(target_os = "linux", feature = "placement")))]
-    if profile_path.is_some() {
-        eprintln!("g2g-launch-py: --profile requires a placement build (rebuild with --features placement)");
+    if profile_path.is_some() || placement_profile_path.is_some() {
+        eprintln!(
+            "g2g-launch-py: --profile and --placement-profile require a placement build \
+             (rebuild with --features placement)"
+        );
         process::exit(2);
     }
+    if objective_name.is_some() && placement_profile_path.is_none() {
+        eprintln!("g2g-launch-py: --objective takes --placement-profile");
+        process::exit(2);
+    }
+    #[cfg(all(target_os = "linux", feature = "placement"))]
+    let objective = match objective_name.as_deref() {
+        None => g2g_plugins::placement::PlacementObjective::Latency,
+        Some(name) => match g2g_plugins::placement::PlacementObjective::parse(name) {
+            Some(objective) => objective,
+            None => {
+                eprintln!("g2g-launch-py: --objective is latency or throughput, not {name}");
+                process::exit(2);
+            }
+        },
+    };
 
     let graph = match parse_launch(&reg, &pipeline) {
         Ok(graph) => graph,
@@ -170,6 +204,29 @@ fn main() {
         });
     #[cfg(all(target_os = "linux", feature = "placement"))]
     let mut graph = graph;
+    #[cfg(all(target_os = "linux", feature = "placement"))]
+    if let Some(path) = &placement_profile_path {
+        let placed = parse_launch(&reg, &pipeline)
+            .map_err(|error| format!("parse error: {error}"))
+            .and_then(|dry| {
+                rt.block_on(g2g_plugins::placement::place_launch_graph(
+                    &reg,
+                    &mut graph,
+                    dry,
+                    Path::new(path),
+                    objective,
+                ))
+                .map_err(|error| error.to_string())
+            });
+        match placed {
+            Ok(placement) if !quiet => print!("{}", placement.report(&graph, objective)),
+            Ok(_) => {}
+            Err(error) => {
+                eprintln!("g2g-launch-py: --placement-profile {path}: {error}");
+                process::exit(1);
+            }
+        }
+    }
     #[cfg(all(target_os = "linux", feature = "placement"))]
     let profile = profile_path.as_ref().map(|path| {
         (

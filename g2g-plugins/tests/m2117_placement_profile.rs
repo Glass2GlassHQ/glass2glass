@@ -1,53 +1,14 @@
 #![cfg(all(target_os = "linux", feature = "placement"))]
 
-use std::path::{Path, PathBuf};
+#[path = "common/gpu_profile.rs"]
+mod gpu_profile;
 
 use g2g_core::memory::GpuVendor;
-use g2g_core::runtime::{parse_launch, RunBuilder};
 use g2g_plugins::capsfilter::CapsFilter;
-use g2g_plugins::clock::WallClock;
-use g2g_plugins::hip::HipDevice;
 use g2g_plugins::hipconvertscale::HipConvertScale;
 use g2g_plugins::hipupload::HipUpload;
-use g2g_plugins::placement::{PlacementProfile, ProfileRun};
-use g2g_plugins::registry::default_registry;
-
-const LINK_CAPACITY: usize = 4;
-const INPUT_WIDTH: u32 = 1920;
-
-fn line(vendor: &str) -> String {
-    format!(
-        "videotestsrc num-buffers=40 ! video/x-raw,format=RGBA,width={INPUT_WIDTH},height=1080 \
-         ! hipupload vendor={vendor} device-id=0 ! hipconvertscale \
-         ! video/x-raw,format=RGBA,width=640,height=640 ! hipdownload ! fakesink"
-    )
-}
-
-async fn profile(vendor: &str, path: &Path) -> PlacementProfile {
-    let mut graph = parse_launch(&default_registry(), &line(vendor)).expect("the line parses");
-    let run = ProfileRun::prepare(&mut graph);
-    let clock = WallClock::new();
-    RunBuilder::new(graph, &clock, LINK_CAPACITY)
-        .with_observer(run.observer())
-        .run()
-        .await
-        .expect("the pipeline runs to EOS");
-    run.record(path).expect("the profile is written")
-}
-
-fn has_device(vendor: GpuVendor) -> bool {
-    match HipDevice::open(vendor, 0) {
-        Ok(_) => true,
-        Err(error) => {
-            eprintln!("skipping: no {vendor:?} HIP device 0: {error:?}");
-            false
-        }
-    }
-}
-
-fn profile_path(test: &str) -> PathBuf {
-    Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("{test}-{}.json", std::process::id()))
-}
+use g2g_plugins::placement::PlacementProfile;
+use gpu_profile::{has_device, profile, profile_path, INPUT_WIDTH};
 
 #[tokio::test]
 async fn a_profile_run_times_each_gpu_element_on_the_device_it_ran_on() {

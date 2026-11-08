@@ -264,6 +264,16 @@ impl<'a> GraphNodeRef<'a> {
         }
     }
 
+    pub fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        match self {
+            GraphNodeRef::Source(s) => s.set_property(name, value),
+            GraphNodeRef::Element(e) => e.set_property(name, value),
+            GraphNodeRef::Muxer(m) => m.set_property(name, value),
+            GraphNodeRef::FanoutSource(s) => s.set_property(name, value),
+            GraphNodeRef::Demux(d) => d.set_property(name, value),
+        }
+    }
+
     /// The memory domains this node accepts on its input pad(s), for the
     /// converter auto-plug and the allocation cascade. A muxer declares one set
     /// covering every input pad; a terminal fan-out source has no input, so it
@@ -1174,7 +1184,7 @@ fn bridges_two_gpus(from: MemoryDomainKind, to: MemoryDomainKind) -> bool {
     from != to && !from.is_system() && !to.is_system()
 }
 
-pub fn traced_gpu_device(graph: &Graph<GraphNodeRef<'_>>, node: NodeId) -> Option<GpuDevice> {
+fn traced_gpu_device(graph: &Graph<GraphNodeRef<'_>>, node: NodeId) -> Option<GpuDevice> {
     if let Some(device) = graph.element(node).and_then(|n| n.gpu_device()) {
         return Some(device);
     }

@@ -211,20 +211,26 @@ impl ExecutionProvider {
 pub struct OrtBackend {
     /// Execution provider registered when the model loads.
     provider: ExecutionProvider,
-    device_ordinal: i32,
+    device_id: Option<i32>,
 }
 
 impl Default for OrtBackend {
     fn default() -> Self {
         Self {
             provider: ExecutionProvider::Cpu,
-            device_ordinal: DEFAULT_DEVICE_ORDINAL,
+            device_id: None,
         }
     }
 }
 
 // onnx runtime's gpu providers run on device 0 unless their options name another
 const DEFAULT_DEVICE_ORDINAL: i32 = 0;
+
+impl OrtBackend {
+    fn device_ordinal(&self) -> i32 {
+        self.device_id.unwrap_or(DEFAULT_DEVICE_ORDINAL)
+    }
+}
 
 /// # Example
 ///
@@ -246,7 +252,8 @@ impl InferenceBackend for OrtBackend {
 
     fn load(&self, path: &str) -> Result<OrtModel, G2gError> {
         let mut builder = Session::builder().map_err(ort_err)?;
-        self.provider.register(&mut builder, self.device_ordinal)?;
+        self.provider
+            .register(&mut builder, self.device_ordinal())?;
         let session = builder.commit_from_file(path).map_err(ort_err)?;
         let model = OrtModel::load(session)?;
         #[cfg(all(
@@ -254,7 +261,7 @@ impl InferenceBackend for OrtBackend {
             any(feature = "ort-cuda-wgpu", feature = "ort-hip")
         ))]
         let model = OrtModel {
-            device_ordinal: self.device_ordinal,
+            device_ordinal: self.device_ordinal(),
             ..model
         };
         Ok(model)
@@ -268,11 +275,15 @@ impl InferenceBackend for OrtBackend {
                 Ok(())
             }
             "device-id" => {
-                let ordinal = value.as_int().ok_or(PropError::Type)?;
-                self.device_ordinal = i32::try_from(ordinal)
-                    .ok()
-                    .filter(|ordinal| *ordinal >= 0)
-                    .ok_or(PropError::Value)?;
+                self.device_id = match value.as_int().ok_or(PropError::Type)? {
+                    -1 => None,
+                    ordinal => Some(
+                        i32::try_from(ordinal)
+                            .ok()
+                            .filter(|ordinal| *ordinal >= 0)
+                            .ok_or(PropError::Value)?,
+                    ),
+                };
                 Ok(())
             }
             _ => Err(PropError::Unknown),
@@ -282,7 +293,7 @@ impl InferenceBackend for OrtBackend {
     fn get_property(&self, name: &str) -> Option<PropValue> {
         match name {
             "execution-provider" => Some(PropValue::Str(String::from(self.provider.name()))),
-            "device-id" => Some(PropValue::Int(i64::from(self.device_ordinal))),
+            "device-id" => Some(PropValue::Int(self.device_id.map_or(-1, i64::from))),
             _ => None,
         }
     }
@@ -291,7 +302,7 @@ impl InferenceBackend for OrtBackend {
         let vendor = self.provider.vendor()?;
         Some(GpuDevice {
             vendor,
-            ordinal: self.device_ordinal,
+            ordinal: self.device_ordinal(),
         })
     }
 }
@@ -677,9 +688,11 @@ const PROVIDER_PROP: PropertySpec = PropertySpec::new(
 const DEVICE_ID_PROP: PropertySpec = PropertySpec::new(
     "device-id",
     PropKind::Int,
-    "GPU the cuda, tensorrt, rocm or migraphx provider runs on, as CUDA or HIP number it",
+    "GPU the cuda, tensorrt, rocm or migraphx provider runs on, as CUDA or HIP number it, \
+     -1 for the provider's device 0",
 )
-.with_default("0");
+.with_default("-1")
+.with_range("-1", "2147483647");
 
 #[cfg(feature = "analytics")]
 static ORT_INFER_PROPS: &[PropertySpec] = &[
