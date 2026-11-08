@@ -2205,9 +2205,18 @@ mod factory {
             self
         }
 
-        /// The configured domain-converter factory, if any.
-        pub fn domain_converter(&self) -> Option<DomainConverterHook> {
-            self.domain_converter
+        pub fn splice_domain_converters<'a>(
+            &self,
+            graph: Graph<GraphNodeRef<'a>>,
+        ) -> Graph<GraphNodeRef<'a>> {
+            match self.domain_converter {
+                Some(factory) => {
+                    crate::runtime::auto_plug_domain_converters(graph, &|from, to, device| {
+                        factory(from, to, device)
+                    })
+                }
+                None => graph,
+            }
         }
 
         /// The launch name of the re-framing parser `decodebin` prepends ahead of

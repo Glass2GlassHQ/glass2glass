@@ -163,10 +163,9 @@ libraries installed.
 ## Heterogeneous devices
 
 - Pick the cheapest converter by `DomainTransferCost` in the domain-converter
-  splice instead of the factory's first answer, and splice graphs built for
-  `run_graph` as well as `parse_launch` lines.
-- `hipcompositor` and the CUDA mixers: copy an input from another GPU onto
-  their device instead of failing with `UnsupportedDomain`.
+  splice, with each converter's cost measured, once two converters compete on
+  one edge (a dma-buf import into wgpu against a download and an upload, or a
+  peer copy against staging through the host).
 - Peer copies between two GPUs of one vendor (`hipMemcpyPeerAsync`,
   `cuMemcpyPeerAsync`), validated on a two-GPU host.
 - Report `gpu_device()` from the other CUDA elements (`cudaupload`,

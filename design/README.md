@@ -266,11 +266,14 @@ arrive from. The domain-converter splice traces the device a frame sits on back
 through such elements, and when a consumer names another GPU it asks the
 converter factory for a copy onto that device, even where the two ends share a
 domain kind. The factory receives the consumer's device, so a spliced
-`hipupload` or `cudaupload` targets it. `hipupload` moves a Hip or CUDA frame
-from another GPU by downloading it into its pinned pool and uploading from
-there, the only path between the two vendors, since ROCm imports only memory
-amdgpu exported. `hipconvertscale` and `hipcompositor` refuse a frame from a
-device other than the one they name. The device stays out of `DomainSet` and the
+`hipupload` or `cudaupload` targets it. A graph built in code gets the same
+splice from `Registry::splice_domain_converters` before `run_graph`.
+`hipupload` moves a Hip or CUDA frame from another GPU with `copy_through_host`,
+a download into host memory and an upload, the only path between the two
+vendors, since ROCm imports only memory amdgpu exported. `hipcompositor` runs on
+the device it names, or else the one its first frame arrives on, and copies a
+frame from any other GPU onto it the same way. `hipconvertscale` refuses a frame
+from a device other than the one it names. The device stays out of `DomainSet` and the
 caps, as GStreamer keeps it in the element and its context rather than the
 caps.
 

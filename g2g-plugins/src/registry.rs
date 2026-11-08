@@ -435,6 +435,7 @@ fn domain_converter(
         (
             g2g_core::MemoryDomainKind::System
             | g2g_core::MemoryDomainKind::Cuda
+            | g2g_core::MemoryDomainKind::DmaBuf
             | g2g_core::MemoryDomainKind::Hip,
             g2g_core::MemoryDomainKind::Hip,
         ) => {

@@ -21,8 +21,8 @@ use g2g_core::{
 use crate::dmabufimport::DmaBufImportCache;
 use crate::dmabufmap::{dmabuf_len, DmaBufReadMap};
 use crate::hip::{
-    hip_buffer, release_after, HipDevice, HipEvent, HipExternalBuffer, HipMemoryPool,
-    HipPinnedMemory, HipStream,
+    copy_through_host, hip_buffer, release_after, DeviceStream, DeviceStreamCache, HipDevice,
+    HipEvent, HipExternalBuffer, HipMemoryPool, HipPinnedMemory, HipStream,
 };
 use crate::hipdeviceid::{HipDeviceChoice, HIP_DEVICE_ID_PROP, HIP_VENDOR_PROP};
 use crate::paddedrows::single_stride_layout;
@@ -124,12 +124,6 @@ struct UploadGpu {
     dmabuf_import_failed: bool,
 }
 
-#[derive(Debug)]
-struct SourceGpu {
-    device: Arc<HipDevice>,
-    stream: HipStream,
-}
-
 #[derive(Debug, Default)]
 pub struct HipUpload {
     configured: bool,
@@ -137,7 +131,7 @@ pub struct HipUpload {
     device: HipDeviceChoice,
     pinned: OnceLock<PinnedOffer>,
     gpu: Option<UploadGpu>,
-    source: Option<SourceGpu>,
+    sources: DeviceStreamCache,
 }
 
 impl HipUpload {
@@ -177,42 +171,18 @@ impl HipUpload {
         Ok(self.gpu.insert(gpu))
     }
 
-    fn source_gpu(&mut self, vendor: GpuVendor, ordinal: i32) -> Result<&SourceGpu, G2gError> {
-        let source = match self.source.take() {
-            Some(source)
-                if (source.device.vendor(), source.device.ordinal()) == (vendor, ordinal) =>
-            {
-                source
-            }
-            _ => {
-                let device = HipDevice::open(vendor, ordinal)?;
-                SourceGpu {
-                    stream: HipStream::new(&device)?,
-                    device,
-                }
-            }
-        };
-        Ok(self.source.insert(source))
-    }
-
     fn onto_chosen_device(&mut self, buffer: OwnedHipBuffer) -> Result<OwnedHipBuffer, G2gError> {
         if !self.device.is_set() {
             return Ok(buffer);
         }
-        let frames = Arc::clone(&self.pinned_offer()?.frames);
-        let target = (frames.device.vendor(), frames.device.ordinal());
-        if (buffer.vendor, buffer.device_ordinal) == target {
+        self.gpu()?;
+        let Self { gpu, sources, .. } = self;
+        let gpu = gpu.as_ref().ok_or(G2gError::NotConfigured)?;
+        if (buffer.vendor, buffer.device_ordinal) == (gpu.device.vendor(), gpu.device.ordinal()) {
             return Ok(buffer);
         }
-        let mut staging = frames.lease(buffer.len)?;
-        self.source_gpu(buffer.vendor, buffer.device_ordinal)?
-            .stream
-            .download_blocking(&buffer, staging.as_mut_slice())?;
-        let moved = upload_pinned(self.gpu()?, staging)?;
-        Ok(match buffer.plane_layout() {
-            Some(layout) => moved.with_plane_layout(*layout),
-            None => moved,
-        })
+        let source = sources.on(buffer.vendor, buffer.device_ordinal)?;
+        copy_through_host(&source.stream, &buffer, &gpu.device, &gpu.stream)
     }
 }
 
@@ -246,7 +216,7 @@ fn upload(
     upload_pinned(gpu, staging)
 }
 
-fn wrap_cuda(gpu: &SourceGpu, cuda: &OwnedCudaBuffer) -> Result<OwnedHipBuffer, G2gError> {
+fn wrap_cuda(gpu: &DeviceStream, cuda: &OwnedCudaBuffer) -> Result<OwnedHipBuffer, G2gError> {
     let chroma_offset = cuda
         .chroma_ptr
         .checked_sub(cuda.luma_ptr)
@@ -454,7 +424,7 @@ impl AsyncElement for HipUpload {
                     let buffer = match domain {
                         MemoryDomain::Hip(buffer) => self.onto_chosen_device(buffer)?,
                         MemoryDomain::Cuda(cuda) => {
-                            let source = self.source_gpu(GpuVendor::Nvidia, cuda.device_ordinal)?;
+                            let source = self.sources.on(GpuVendor::Nvidia, cuda.device_ordinal)?;
                             let wrapped = wrap_cuda(source, &cuda)?;
                             self.onto_chosen_device(wrapped)?
                         }

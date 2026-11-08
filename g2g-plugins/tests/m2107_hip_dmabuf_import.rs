@@ -128,6 +128,50 @@ fn nvidia_copies_a_dmabuf_through_the_cpu() {
     copies_a_padded_udmabuf(GpuVendor::Nvidia, "nvidia");
 }
 
+#[derive(Debug)]
+struct ZeroClock;
+
+impl g2g_core::PipelineClock for ZeroClock {
+    fn now_ns(&self) -> u64 {
+        0
+    }
+}
+
+#[test]
+fn a_launch_line_splices_hipupload_after_a_dmabuf_producer() {
+    let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(PoisonError::into_inner);
+    if !device_present(GpuVendor::Amd) && !device_present(GpuVendor::Nvidia) {
+        return;
+    }
+    let picture = tight_nv12(3);
+    let mut pages = picture.clone();
+    pages.resize(picture.len().next_multiple_of(PAGE), PAD_BYTE);
+    let Some(mut dmabuf) = udmabuf_of(&pages) else {
+        eprintln!("skipping: /dev/udmabuf is not available");
+        return;
+    };
+    dmabuf.stride = WIDTH as u32;
+    let feed = g2g_plugins::appsrc::register_appsrc("m2107_dmabuf_in");
+    assert!(feed.push_dmabuf(dmabuf, 0));
+    feed.end_of_stream();
+    let pull = g2g_plugins::appsink::register_appsink_pull("m2107_dmabuf_out");
+    let line = format!(
+        "appsrc channel=m2107_dmabuf_in output-domains=dmabuf \
+         caps=video/x-raw,format=NV12,width={WIDTH},height={HEIGHT},framerate=30/1 \
+         ! hipconvertscale ! hipdownload ! appsink channel=m2107_dmabuf_out"
+    );
+    let registry = g2g_plugins::registry::default_registry();
+    let graph = g2g_core::runtime::parse_launch(&registry, &line).expect("parses");
+    block_on(g2g_core::runtime::run_graph(graph, &ZeroClock, 4)).expect("runs");
+    let g2g_plugins::appsink::Pull::Frame(frame) = pull.try_pull() else {
+        panic!("no frame reached the appsink");
+    };
+    assert_eq!(
+        frame.domain.as_system_slice().expect("a system frame"),
+        picture
+    );
+}
+
 #[cfg(feature = "dmabuf-wgpu")]
 mod amdgpu_exports {
     use std::time::{Duration, Instant};

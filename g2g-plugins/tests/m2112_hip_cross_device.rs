@@ -8,15 +8,20 @@ use std::sync::Arc;
 use collect_sink::CollectSink;
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{GpuDevice, GpuVendor, MemoryDomain, OwnedHipBuffer};
-use g2g_core::runtime::{block_on, parse_launch, run_graph};
+use g2g_core::runtime::{block_on, parse_launch, run_graph, GraphNode};
 use g2g_core::{
-    AsyncElement, Caps, Colorimetry, Dim, Interlace, PipelineClock, Rate, RawVideoFormat,
+    AsyncElement, Caps, Colorimetry, Dim, Graph, Interlace, PipelineClock, PropValue, Rate,
+    RawVideoFormat,
 };
 use g2g_plugins::appsink::register_appsink_pull;
 use g2g_plugins::appsrc::register_appsrc;
+use g2g_plugins::fakesink::FakeSink;
 use g2g_plugins::hip::{HipDevice, HipEvent, HipMemory, HipStream};
+use g2g_plugins::hipconvertscale::HipConvertScale;
+use g2g_plugins::hipdownload::HipDownload;
 use g2g_plugins::hipupload::HipUpload;
 use g2g_plugins::registry::default_registry;
+use g2g_plugins::videotestsrc::VideoTestSrc;
 
 const WIDTH: u32 = 16;
 const HEIGHT: u32 = 8;
@@ -142,6 +147,41 @@ fn a_launch_line_copies_frames_onto_the_gpu_hipconvertscale_names() {
         frame.domain.as_system_slice().expect("a system frame"),
         swapped
     );
+}
+
+#[test]
+fn a_graph_built_in_code_gets_the_same_copy_from_the_registry() {
+    if both_gpus().is_none() {
+        return;
+    }
+    const FRAMES: u64 = 3;
+    let mut convert = HipConvertScale::new();
+    convert
+        .set_property("vendor", PropValue::Str("amd".into()))
+        .unwrap();
+    let mut graph: Graph<GraphNode> = Graph::new();
+    let source = graph.add_source(GraphNode::source(VideoTestSrc::new(
+        WIDTH, HEIGHT, 30, FRAMES,
+    )));
+    let upload = graph.add_transform(GraphNode::element(HipUpload::on_device(GpuDevice {
+        vendor: GpuVendor::Nvidia,
+        ordinal: 0,
+    })));
+    let convert = graph.add_transform(GraphNode::element(convert));
+    let download = graph.add_transform(GraphNode::element(HipDownload::new()));
+    let sink = graph.add_sink(GraphNode::element(FakeSink::new()));
+    for (from, to) in [
+        (source, upload),
+        (upload, convert),
+        (convert, download),
+        (download, sink),
+    ] {
+        graph.link(from, to).unwrap();
+    }
+    let graph = default_registry().splice_domain_converters(graph);
+    assert_eq!(graph.node_count(), 6, "a copy onto the AMD GPU was spliced");
+    let stats = block_on(run_graph(graph, &ZeroClock, 4)).expect("runs");
+    assert_eq!(stats.frames_consumed, FRAMES);
 }
 
 #[cfg(feature = "nvdec")]

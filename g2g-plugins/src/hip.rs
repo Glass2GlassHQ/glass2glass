@@ -1223,3 +1223,57 @@ impl Drop for HipStream {
         }
     }
 }
+
+#[derive(Debug)]
+pub(crate) struct DeviceStream {
+    pub(crate) device: Arc<HipDevice>,
+    pub(crate) stream: HipStream,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct DeviceStreamCache {
+    current: Option<DeviceStream>,
+}
+
+impl DeviceStreamCache {
+    pub(crate) fn on(
+        &mut self,
+        vendor: GpuVendor,
+        ordinal: i32,
+    ) -> Result<&DeviceStream, G2gError> {
+        let reusable = self.current.take().filter(|cached| {
+            (cached.device.vendor(), cached.device.ordinal()) == (vendor, ordinal)
+        });
+        let stream = match reusable {
+            Some(cached) => cached,
+            None => {
+                let device = HipDevice::open(vendor, ordinal)?;
+                DeviceStream {
+                    stream: HipStream::new(&device)?,
+                    device,
+                }
+            }
+        };
+        Ok(self.current.insert(stream))
+    }
+}
+
+// a frame crosses between two vendors' GPUs only through host memory
+pub(crate) fn copy_through_host(
+    source: &HipStream,
+    buffer: &OwnedHipBuffer,
+    target_device: &Arc<HipDevice>,
+    target_stream: &HipStream,
+) -> Result<OwnedHipBuffer, G2gError> {
+    let mut staging = vec![0u8; buffer.len];
+    source.download_blocking(buffer, &mut staging)?;
+    let memory = HipMemory::allocate(target_device, buffer.len)?;
+    target_stream.upload_blocking(&memory, &staging)?;
+    let ready = HipEvent::new(target_device)?;
+    target_stream.record(&ready)?;
+    let copied = memory.into_buffer(ready, buffer.len)?;
+    Ok(match buffer.plane_layout() {
+        Some(layout) => copied.with_plane_layout(*layout),
+        None => copied,
+    })
+}

@@ -271,6 +271,40 @@ fn the_source_operator_and_keep_aspect_ratio_match_the_cpu_compositor() {
 }
 
 #[test]
+fn an_overlay_on_the_other_gpu_is_copied_onto_the_compositors() {
+    let (Some(nvidia), Some(amd)) = (device(GpuVendor::Nvidia), device(GpuVendor::Amd)) else {
+        return;
+    };
+    for (background_on, overlay_on) in [(&nvidia, &amd), (&amd, &nvidia)] {
+        let mut hip = HipCompositor::new(WIDTH, HEIGHT, pads());
+        let out = composite(
+            &mut hip,
+            [
+                (
+                    caps(RawVideoFormat::Rgba8, WIDTH, HEIGHT),
+                    MemoryDomain::Hip(upload(background_on, &background_frame())),
+                ),
+                (
+                    caps(RawVideoFormat::Rgba8, OVERLAY_WIDTH, OVERLAY_HEIGHT),
+                    MemoryDomain::Hip(upload(overlay_on, &translucent_overlay())),
+                ),
+            ],
+        );
+        let MemoryDomain::Hip(buffer) = &out else {
+            panic!("hipcompositor emits Hip frames");
+        };
+        // `composite` feeds the overlay first, so the compositor settles on its GPU
+        let settled_on = (overlay_on.vendor(), overlay_on.ordinal());
+        assert_eq!((buffer.vendor, buffer.device_ordinal), settled_on);
+        assert_close(
+            &hip_bytes(overlay_on, out),
+            &cpu_composite(pads(), background_frame(), translucent_overlay()),
+            &format!("{:?} background", background_on.vendor()),
+        );
+    }
+}
+
+#[test]
 fn a_yuv_background_converts_as_it_composites() {
     for vendor in VENDORS {
         let Some(device) = device(vendor) else {

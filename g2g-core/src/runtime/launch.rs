@@ -3858,7 +3858,7 @@ pub fn parse_launch_avoiding(
         // URI; a hook returns Ok(None) to decline a container it does not parse.
         for hook in registry.playbin_hooks() {
             if let Some(graph) = hook(registry, &sinks, uri)? {
-                return Ok(splice_domain_converters(registry, graph));
+                return Ok(registry.splice_domain_converters(graph));
             }
         }
     }
@@ -3868,13 +3868,10 @@ pub fn parse_launch_avoiding(
     // single-stream form plus one automatic sink.
     if let Some(spec) = lone_fallbacksrc_spec(&chains) {
         if let Some(graph) = build_fallbacksrc_fanout(registry, spec)? {
-            return Ok(splice_domain_converters(registry, graph));
+            return Ok(registry.splice_domain_converters(graph));
         }
     }
-    Ok(splice_domain_converters(
-        registry,
-        build_graph(registry, chains, avoided)?,
-    ))
+    Ok(registry.splice_domain_converters(build_graph(registry, chains, avoided)?))
 }
 
 /// The factory to bar from the auto-plug search after a run ended in
@@ -4043,17 +4040,6 @@ pub async fn set_property_text(
         None => PropValue::Str(text.to_string()),
     };
     mutator.set_property(node, name, value).await
-}
-
-/// Splice memory-domain converters into a just-parsed graph, where the
-/// registry carries a factory: a text pipeline that links a GPU decoder to a sink
-/// in another domain gets the bridge (or the download) it needs without naming
-/// it. A no-op when the domains already agree, or when no factory is registered.
-fn splice_domain_converters(registry: &Registry, graph: Graph<GraphNode>) -> Graph<GraphNode> {
-    match registry.domain_converter() {
-        Some(factory) => crate::runtime::auto_plug_domain_converters(graph, &factory),
-        None => graph,
-    }
 }
 
 /// The `uri=` and sinks of a pipeline that is a single bare `playbin uri=X`
