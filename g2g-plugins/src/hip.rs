@@ -1260,13 +1260,36 @@ impl DeviceStreamCache {
 
 #[derive(Debug, Default)]
 pub(crate) struct CrossDeviceCopier {
+    streams: Option<CopyStreams>,
+}
+
+impl CrossDeviceCopier {
+    // the blocking copy runs on tokio's blocking pool, leaving the pipeline's runner free
+    pub(crate) async fn copy(
+        &mut self,
+        buffer: OwnedHipBuffer,
+        target: GpuDevice,
+    ) -> Result<OwnedHipBuffer, G2gError> {
+        let mut streams = self.streams.take().unwrap_or_default();
+        let (streams, copied) = g2g_core::offload::run_blocking(move || {
+            let copied = streams.copy(&buffer, target);
+            (streams, copied)
+        })
+        .await;
+        self.streams = Some(streams);
+        copied
+    }
+}
+
+#[derive(Debug, Default)]
+struct CopyStreams {
     sources: DeviceStreamCache,
     targets: DeviceStreamCache,
 }
 
-impl CrossDeviceCopier {
+impl CopyStreams {
     // a frame crosses between two vendors' GPUs only through host memory
-    pub(crate) fn copy(
+    fn copy(
         &mut self,
         buffer: &OwnedHipBuffer,
         target: GpuDevice,

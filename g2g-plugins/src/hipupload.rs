@@ -133,7 +133,7 @@ pub struct HipUpload {
     pinned: OnceLock<PinnedOffer>,
     gpu: Option<UploadGpu>,
     sources: DeviceStreamCache,
-    copier: Option<CrossDeviceCopier>,
+    copier: CrossDeviceCopier,
 }
 
 impl HipUpload {
@@ -188,14 +188,7 @@ impl HipUpload {
         if (buffer.vendor, buffer.device_ordinal) == (target.vendor, target.ordinal) {
             return Ok(buffer);
         }
-        let mut copier = self.copier.take().unwrap_or_default();
-        let (copier, copied) = g2g_core::offload::run_blocking(move || {
-            let copied = copier.copy(&buffer, target);
-            (copier, copied)
-        })
-        .await;
-        self.copier = Some(copier);
-        copied
+        self.copier.copy(buffer, target).await
     }
 }
 

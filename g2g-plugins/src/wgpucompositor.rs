@@ -1032,7 +1032,7 @@ impl CompositorBackend for WgpuCompositor {
         self.uploaded[input] = false;
     }
 
-    fn payload(&mut self, input: usize, frame: Frame) -> Result<Source, G2gError> {
+    async fn payload(&mut self, input: usize, frame: Frame) -> Result<Source, G2gError> {
         let (w, h) = self
             .canvas
             .state

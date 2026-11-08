@@ -900,7 +900,7 @@ pub(crate) trait CompositorBackend {
 
     fn flushed(&mut self, _input: usize) {}
 
-    fn payload(&mut self, input: usize, frame: Frame) -> Result<Self::Payload, G2gError>;
+    async fn payload(&mut self, input: usize, frame: Frame) -> Result<Self::Payload, G2gError>;
 
     fn compose_frame<'a>(
         &'a mut self,
@@ -935,7 +935,7 @@ pub(crate) async fn process_compositor_packet<B: CompositorBackend>(
     match packet {
         PipelinePacket::DataFrame(frame) => {
             let timing = frame.timing;
-            let payload = backend.payload(input, frame)?;
+            let payload = backend.payload(input, frame).await?;
             backend.canvas().state.ingest(input, timing, payload);
             backend.canvas().announce_output(out).await?;
             while let Some((timing, base)) = backend.canvas().state.take_due() {
@@ -1577,7 +1577,7 @@ impl CompositorBackend for Compositor {
         }
     }
 
-    fn payload(&mut self, input: usize, frame: Frame) -> Result<Box<[u8]>, G2gError> {
+    async fn payload(&mut self, input: usize, frame: Frame) -> Result<Box<[u8]>, G2gError> {
         let (w, h) = self
             .canvas
             .state

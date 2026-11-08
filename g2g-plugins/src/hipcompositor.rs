@@ -369,7 +369,7 @@ impl CompositorBackend for HipCompositor {
         Ok((*width, *height))
     }
 
-    fn payload(&mut self, _input: usize, frame: Frame) -> Result<OwnedHipBuffer, G2gError> {
+    async fn payload(&mut self, _input: usize, frame: Frame) -> Result<OwnedHipBuffer, G2gError> {
         let MemoryDomain::Hip(buffer) = frame.domain else {
             return Err(G2gError::UnsupportedDomain);
         };
@@ -377,7 +377,7 @@ impl CompositorBackend for HipCompositor {
         if (buffer.vendor, buffer.device_ordinal) == (target.vendor, target.ordinal) {
             return Ok(buffer);
         }
-        self.copier.copy(&buffer, target)
+        self.copier.copy(buffer, target).await
     }
 
     fn compose_frame<'a>(
