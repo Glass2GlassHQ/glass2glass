@@ -937,6 +937,40 @@ fn has_media_from(media: &MediaPlaylist, seq: u64, part: usize) -> bool {
     })
 }
 
+// a live playlist publishes a segment about once per target duration
+const STALLED_TARGET_DURATIONS: u64 = 3;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PlaylistProgress {
+    Stalled { for_ms: u64 },
+    Resumed { after_ms: u64 },
+}
+
+#[derive(Debug, Default)]
+struct PlaylistStall {
+    since_ms: Option<u64>,
+    reported: bool,
+}
+
+impl PlaylistStall {
+    fn observe(&mut self, advanced: bool, now_ms: u64, target_ms: u64) -> Option<PlaylistProgress> {
+        if advanced {
+            let since_ms = self.since_ms.take()?;
+            let reported = core::mem::take(&mut self.reported);
+            return reported.then(|| PlaylistProgress::Resumed {
+                after_ms: now_ms.saturating_sub(since_ms),
+            });
+        }
+        let since_ms = *self.since_ms.get_or_insert(now_ms);
+        let for_ms = now_ms.saturating_sub(since_ms);
+        if self.reported || for_ms < STALLED_TARGET_DURATIONS * target_ms {
+            return None;
+        }
+        self.reported = true;
+        Some(PlaylistProgress::Stalled { for_ms })
+    }
+}
+
 impl LogSource for HlsSrc {
     fn log_category(&self) -> &'static str {
         "hlssrc"
@@ -1036,6 +1070,7 @@ impl SourceLoop for HlsSrc {
             let mut blocking_misses = 0u32;
             // Next timed reload on an absolute schedule (None until the first).
             let mut next_reload: Option<tokio::time::Instant> = None;
+            let mut stall = PlaylistStall::default();
             // Duration-keyed prebuffer window (0 = pass-through); init segments
             // ride it with duration 0 so ordering survives an ABR re-init.
             let mut window = crate::segprebuf::SegmentPrebuffer::new(
@@ -1620,10 +1655,24 @@ impl SourceLoop for HlsSrc {
                     (next_seq, next_part) = start_position(&media, self.full_replay, ll);
                     init_emitted = false;
                     next_reload = None;
+                    stall = PlaylistStall::default();
                     continue;
                 }
+                let advanced = has_media_from(&media, next_seq, next_part);
+                let now_ms = g2g_core::metrics::monotonic_ns() / 1_000_000;
+                match stall.observe(advanced, now_ms, target_ms) {
+                    Some(PlaylistProgress::Stalled { for_ms }) => g2g_warn!(
+                        self,
+                        "{media_url} has published nothing past media sequence {next_seq} for {for_ms} ms, with a target duration of {target_ms} ms"
+                    ),
+                    Some(PlaylistProgress::Resumed { after_ms }) => g2g_warn!(
+                        self,
+                        "{media_url} published media sequence {next_seq} after {after_ms} ms without new media"
+                    ),
+                    None => {}
+                }
                 if ll {
-                    if has_media_from(&media, next_seq, next_part) {
+                    if advanced {
                         blocking_misses = 0;
                     } else {
                         blocking_misses += 1;
@@ -1758,6 +1807,37 @@ static HLSSRC_PROPS: &[PropertySpec] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_stalled_live_playlist_is_reported_once_and_again_when_it_moves() {
+        const TARGET_MS: u64 = 2_000;
+        let stalled_ms = STALLED_TARGET_DURATIONS * TARGET_MS;
+        let mut stall = PlaylistStall::default();
+        assert_eq!(stall.observe(true, 0, TARGET_MS), None);
+        assert_eq!(stall.observe(false, 1_000, TARGET_MS), None);
+        assert_eq!(
+            stall.observe(false, 1_000 + stalled_ms - 1, TARGET_MS),
+            None
+        );
+        assert_eq!(
+            stall.observe(false, 1_000 + stalled_ms, TARGET_MS),
+            Some(PlaylistProgress::Stalled { for_ms: stalled_ms })
+        );
+        assert_eq!(
+            stall.observe(false, 1_000 + 2 * stalled_ms, TARGET_MS),
+            None
+        );
+        assert_eq!(
+            stall.observe(true, 2_000 + 2 * stalled_ms, TARGET_MS),
+            Some(PlaylistProgress::Resumed {
+                after_ms: 1_000 + 2 * stalled_ms
+            })
+        );
+        assert_eq!(
+            stall.observe(false, 3_000 + 2 * stalled_ms, TARGET_MS),
+            None
+        );
+    }
     use crate::hls::{parse, Playlist};
 
     fn master(text: &str) -> MasterPlaylist {
