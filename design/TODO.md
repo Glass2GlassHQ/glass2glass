@@ -166,9 +166,8 @@ GstHip's inference path, with an AMD backend (`libamdhip64`, hiprtc) and an
 NVIDIA backend (`libcuda`, nvrtc), loaded at run time. Milestones validate on
 the laptop's RTX 3060 and Radeon 680M.
 
-- Later: `hipconvert`, `hipscale`, `hipcompositor`, `video-direction` and YUY2
-  (a UVC webcam's format) in `hipconvertscale`, pinned buffers offered upstream so `v4l2src` writes straight
-  into them.
+- Later: `hipconvert`, `hipscale`, `hipcompositor`, `video-direction` in
+  `hipconvertscale`.
 
 ## Egress / transports
 

@@ -1135,29 +1135,29 @@ impl HipStream {
         Ok(())
     }
 
-    pub(crate) fn upload_pinned(
+    // the GPU reads `source` after this returns, until the stream reaches the copy
+    pub(crate) unsafe fn upload_async(
         &self,
         memory: &HipMemory,
-        staging: &HipPinnedMemory,
-        len: usize,
+        source: &[u8],
     ) -> Result<(), G2gError> {
-        // the GPU reads `staging` after this returns, until the stream reaches the copy
-        let same_device =
-            Arc::ptr_eq(&self.device, &memory.device) && Arc::ptr_eq(&self.device, &staging.device);
-        if len > memory.size || len > staging.size || !same_device {
+        if source.len() > memory.size || !Arc::ptr_eq(&self.device, &memory.device) {
             return Err(G2gError::Hardware(HardwareError::Other));
         }
         let _bound = self.device.bind()?;
         let stream = self.handle as HipStreamHandle;
-        let source = staging.pointer as *const c_void;
-        // SAFETY: the copy stays inside both allocations, which belong to the bound device.
+        let pointer = source.as_ptr().cast::<c_void>();
+        // SAFETY: the copy stays inside both buffers, and the caller keeps `source` alive until the stream passes it.
         let code = unsafe {
             match self.device.backend {
-                Backend::Amd => {
-                    hip_memcpy_htod_async(memory.device_pointer as *mut c_void, source, len, stream)
-                }
+                Backend::Amd => hip_memcpy_htod_async(
+                    memory.device_pointer as *mut c_void,
+                    pointer,
+                    source.len(),
+                    stream,
+                ),
                 Backend::Nvidia { .. } => {
-                    cuda::cu_memcpy_htod_async(memory.device_pointer, source, len, stream)
+                    cuda::cu_memcpy_htod_async(memory.device_pointer, pointer, source.len(), stream)
                 }
             }
         };
@@ -1166,32 +1166,8 @@ impl HipStream {
 
     // returns once `bytes` has reached `memory`
     pub fn upload_blocking(&self, memory: &HipMemory, bytes: &[u8]) -> Result<(), G2gError> {
-        if bytes.len() > memory.size || !Arc::ptr_eq(&self.device, &memory.device) {
-            return Err(G2gError::Hardware(HardwareError::Other));
-        }
-        {
-            let _bound = self.device.bind()?;
-            let stream = self.handle as HipStreamHandle;
-            let source = bytes.as_ptr().cast::<c_void>();
-            // SAFETY: the copy stays inside both buffers, and `synchronize` below ends it before `bytes` can go away.
-            let code = unsafe {
-                match self.device.backend {
-                    Backend::Amd => hip_memcpy_htod_async(
-                        memory.device_pointer as *mut c_void,
-                        source,
-                        bytes.len(),
-                        stream,
-                    ),
-                    Backend::Nvidia { .. } => cuda::cu_memcpy_htod_async(
-                        memory.device_pointer,
-                        source,
-                        bytes.len(),
-                        stream,
-                    ),
-                }
-            };
-            self.device.check(code)?;
-        }
+        // SAFETY: `synchronize` below ends the copy before `bytes` can go away.
+        unsafe { self.upload_async(memory, bytes) }?;
         self.synchronize()
     }
 

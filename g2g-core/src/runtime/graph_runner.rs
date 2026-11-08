@@ -684,7 +684,7 @@ impl GraphCoordinator {
                     }
                     RecascadeRoute::Upstream => {
                         for &u in &self.upstream_arms[event.node.0 as usize] {
-                            self.send_to(u, ArmDirective::Recascade(p));
+                            self.send_to(u, ArmDirective::Recascade(p.clone()));
                         }
                     }
                 }
@@ -3953,14 +3953,15 @@ fn cascade_allocation(
                 // origin (the source) and at the sibling join (the tee), not at
                 // every hop, so a GPU proposal merely passing through a plain
                 // transform is not rejected against its System default (M351).
-                if let Some(p) = edge_proposal[out_e] {
-                    element_configure_alloc(vg, node, &p);
+                let downstream_proposal = edge_proposal[out_e].take();
+                if let Some(p) = &downstream_proposal {
+                    element_configure_alloc(vg, node, p);
                 }
                 let caps = solution[out_e].clone();
-                let downstream = edge_meta_requests(edge_proposal[out_e]);
+                let downstream = edge_meta_requests(downstream_proposal.as_ref());
                 // The downstream demand reaches past an element that forwards frames untouched.
                 let forwarded =
-                    edge_proposal[out_e].filter(|_| forwards_input_domain(vg.element(node)));
+                    downstream_proposal.filter(|_| forwards_input_domain(vg.element(node)));
                 edge_proposal[in_e] = element_propose(vg, node, &caps, downstream, forwarded);
             }
             NodeKind::Tee(_) => {
@@ -3971,8 +3972,8 @@ fn cascade_allocation(
                 let mut joined: Option<AllocationParams> = None;
                 for (i, &oe) in vg.out_edges(node).iter().enumerate() {
                     joined = match i {
-                        0 => edge_proposal[oe],
-                        _ => join_alloc(joined, edge_proposal[oe])?,
+                        0 => edge_proposal[oe].take(),
+                        _ => join_alloc(joined, edge_proposal[oe].take())?,
                     };
                 }
                 // A plain tee carries no element and narrows nothing; a demux
@@ -3982,7 +3983,7 @@ fn cascade_allocation(
             }
             NodeKind::Source => {
                 let out_e = vg.out_edges(node)[0];
-                if let Some(p) = edge_proposal[out_e] {
+                if let Some(p) = edge_proposal[out_e].take() {
                     // M351: reconcile against the source's emittable domains, the
                     // upstream end of the two-sided negotiation. The reconciled
                     // proposal is what the source allocates and what `RunStats`
@@ -4022,7 +4023,7 @@ fn cascade_allocation(
                 let out_demand = vg
                     .out_edges(node)
                     .first()
-                    .map(|&out_e| edge_meta_requests(edge_proposal[out_e]))
+                    .map(|&out_e| edge_meta_requests(edge_proposal[out_e].as_ref()))
                     .unwrap_or_default();
                 if !out_demand.is_empty() {
                     if let Some(GraphNodeRef::Muxer(mux)) = vg.element_mut(node) {
@@ -4085,7 +4086,7 @@ fn narrow_to_input_domains(
     if accepts == DomainSet::ALL {
         return proposal;
     }
-    let narrowed = match proposal {
+    let narrowed = match &proposal {
         Some(p) => p.accepts.intersect(accepts),
         None => accepts,
     };
@@ -4104,7 +4105,7 @@ fn narrow_to_input_domains(
 
 /// The metadata demand an edge's stored proposal carries, empty when there is
 /// none.
-fn edge_meta_requests(proposal: Option<AllocationParams>) -> MetaRequests {
+fn edge_meta_requests(proposal: Option<&AllocationParams>) -> MetaRequests {
     proposal.map(|p| p.meta_requests).unwrap_or_default()
 }
 
@@ -4360,10 +4361,12 @@ fn join_alloc(
     let joined = match (a, b) {
         (Some(x), Some(y)) => Some(x.join(y)?),
         (Some(x), None) => {
-            Some(x.with_meta_requests(x.meta_requests.join_branches(MetaRequests::new())))
+            let meta_requests = x.meta_requests.join_branches(MetaRequests::new());
+            Some(x.with_meta_requests(meta_requests))
         }
         (None, Some(y)) => {
-            Some(y.with_meta_requests(y.meta_requests.join_branches(MetaRequests::new())))
+            let meta_requests = y.meta_requests.join_branches(MetaRequests::new());
+            Some(y.with_meta_requests(meta_requests))
         }
         (None, None) => None,
     };
@@ -4713,10 +4716,11 @@ pub(crate) async fn transform_arm_on<E: AsyncElement>(
                     // our output caps, and report it so the cascade continues to
                     // our upstream neighbour.
                     elem.configure_allocation(&params);
+                    let downstream = params.meta_requests;
                     let forwarded = elem.output_domain_follows_input().then_some(params);
                     let proposal = with_meta_demand(
                         elem.propose_allocation(&out_caps).or(forwarded),
-                        elem.meta_requests().carry_upstream(params.meta_requests),
+                        elem.meta_requests().carry_upstream(downstream),
                     );
                     coord
                         .report(Recascade {
@@ -5914,7 +5918,7 @@ impl MuxBeta {
             if want == self.pads[i].alloc {
                 continue;
             }
-            self.pads[i].alloc = want;
+            self.pads[i].alloc = want.clone();
             if let (Some(target), Some(p)) = (self.pads[i].upstream, want) {
                 self.coord
                     .report(Recascade {
@@ -5943,7 +5947,7 @@ impl MuxBeta {
             if self.rounds > MAX_RECASCADE_ROUNDS {
                 return Err(G2gError::AllocationConflict);
             }
-            self.out_alloc = derived;
+            self.out_alloc = derived.clone();
             if let Some(p) = derived {
                 mux.configure_allocation_for_output(&p);
                 for &c in &self.consumers {
@@ -5951,7 +5955,7 @@ impl MuxBeta {
                         .report(Recascade {
                             node: self.node,
                             route: RecascadeRoute::Consumer(c),
-                            proposal: Some(p),
+                            proposal: Some(p.clone()),
                         })
                         .await;
                 }

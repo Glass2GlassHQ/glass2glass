@@ -165,10 +165,10 @@ pub(crate) fn padded_frame_bytes(
         .checked_add(last.row_bytes)
 }
 
-/// Append the frame in `src` to `dst`, tightly packed, reading plane 0's rows
-/// `first_stride` bytes apart (0 means already tight). `None` when `src` does
-/// not hold what the geometry claims, in which case `dst` may hold a partial
-/// frame and has to be discarded.
+/// Hand each row of the frame in `src` to `write_row` in order, tightly packed,
+/// reading plane 0's rows `first_stride` bytes apart (0 means already tight).
+/// `None` when `src` does not hold what the geometry claims, in which case some
+/// rows may already have been written and the output has to be discarded.
 #[cfg(any(
     all(target_os = "linux", feature = "v4l2"),
     all(target_os = "linux", feature = "pipewire")
@@ -179,7 +179,7 @@ pub(crate) fn pack_tight(
     w: usize,
     h: usize,
     first_stride: usize,
-    dst: &mut Vec<u8>,
+    mut write_row: impl FnMut(&[u8]),
 ) -> Option<()> {
     for plane in padded_planes(format, w, h, 0, first_stride)? {
         for row in 0..plane.rows {
@@ -188,7 +188,7 @@ pub(crate) fn pack_tight(
             if end > src.len() {
                 return None;
             }
-            dst.extend_from_slice(&src[start..end]);
+            write_row(&src[start..end]);
         }
     }
     Some(())
@@ -387,7 +387,8 @@ mod tests {
         let rows = h + h.div_ceil(2);
         let src: Vec<u8> = (0..stride * rows).map(|i| i as u8).collect();
         let mut dst = Vec::new();
-        pack_tight(&src, format, w, h, stride, &mut dst).expect("the buffer fits");
+        pack_tight(&src, format, w, h, stride, |row| dst.extend_from_slice(row))
+            .expect("the buffer fits");
         assert_eq!(
             dst.len(),
             format.unpadded_frame_bytes(w as u32, h as u32).unwrap() as usize
@@ -416,7 +417,10 @@ mod tests {
             6, 0xff, // V row 0 + pad
         ];
         let mut dst = Vec::new();
-        pack_tight(&src, RawVideoFormat::I420, 2, 2, 4, &mut dst).expect("the buffer fits");
+        pack_tight(&src, RawVideoFormat::I420, 2, 2, 4, |row| {
+            dst.extend_from_slice(row)
+        })
+        .expect("the buffer fits");
         assert_eq!(dst, [1, 2, 3, 4, 5, 6]);
     }
 
@@ -425,11 +429,15 @@ mod tests {
         // The V plane's row ends at byte 11, so 10 bytes cannot hold the frame.
         let mut dst = Vec::new();
         assert_eq!(
-            pack_tight(&[0u8; 10], RawVideoFormat::I420, 2, 2, 4, &mut dst),
+            pack_tight(&[0u8; 10], RawVideoFormat::I420, 2, 2, 4, |row| {
+                dst.extend_from_slice(row)
+            }),
             None
         );
         assert_eq!(
-            pack_tight(&[0u8; 11], RawVideoFormat::I420, 2, 2, 4, &mut dst),
+            pack_tight(&[0u8; 11], RawVideoFormat::I420, 2, 2, 4, |row| {
+                dst.extend_from_slice(row)
+            }),
             Some(())
         );
     }

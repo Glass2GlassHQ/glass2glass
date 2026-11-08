@@ -8,8 +8,62 @@
 //! a runtime query object travelling along pads. The linear runners compute it
 //! once after negotiation and expose it on `RunStats`.
 
+#[cfg(feature = "alloc")]
+use alloc::sync::Arc;
+
+#[cfg(feature = "alloc")]
+use crate::error::G2gError;
+#[cfg(feature = "alloc")]
+use crate::memory::SystemSlice;
 use crate::memory::{DomainSet, MemoryDomainKind};
 use crate::meta::MetaRequests;
+
+#[cfg(feature = "alloc")]
+type AllocateHostBytes = dyn Fn(usize) -> Result<SystemSlice, G2gError> + Send + Sync;
+
+#[cfg(feature = "alloc")]
+#[derive(Clone)]
+pub struct HostAllocator(Arc<AllocateHostBytes>);
+
+#[cfg(feature = "alloc")]
+impl HostAllocator {
+    pub fn new(
+        allocate: impl Fn(usize) -> Result<SystemSlice, G2gError> + Send + Sync + 'static,
+    ) -> Self {
+        Self(Arc::new(allocate))
+    }
+
+    pub fn heap() -> Self {
+        Self::new(|len| {
+            Ok(SystemSlice::from_boxed(
+                alloc::vec![0; len].into_boxed_slice(),
+            ))
+        })
+    }
+
+    pub fn allocate(&self, len: usize) -> Result<SystemSlice, G2gError> {
+        (self.0)(len)
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl core::fmt::Debug for HostAllocator {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_tuple("HostAllocator")
+            .field(&Arc::as_ptr(&self.0).cast::<()>())
+            .finish()
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl PartialEq for HostAllocator {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl Eq for HostAllocator {}
 
 /// Downstream-proposed buffer allocation parameters (the ALLOCATION query).
 ///
@@ -18,7 +72,7 @@ use crate::meta::MetaRequests;
 /// directly into a compatible pool and hand buffers over without a copy. This
 /// mirrors GStreamer's `ALLOCATION` query, where downstream proposes pools and
 /// allocation parameters that upstream then honours.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AllocationParams {
     /// Minimum buffer size in bytes the producer must allocate.
     pub size_bytes: usize,
@@ -45,6 +99,8 @@ pub struct AllocationParams {
     /// `MetaRequests::wants` before it decides whether to attach optional
     /// metadata. Empty unless some element declared a request.
     pub meta_requests: MetaRequests,
+    #[cfg(feature = "alloc")]
+    pub host_allocator: Option<HostAllocator>,
 }
 
 impl Default for AllocationParams {
@@ -56,6 +112,8 @@ impl Default for AllocationParams {
             domain: MemoryDomainKind::System,
             accepts: DomainSet::only(MemoryDomainKind::System),
             meta_requests: MetaRequests::new(),
+            #[cfg(feature = "alloc")]
+            host_allocator: None,
         }
     }
 }
@@ -71,6 +129,8 @@ impl AllocationParams {
             domain: MemoryDomainKind::System,
             accepts: DomainSet::only(MemoryDomainKind::System),
             meta_requests: MetaRequests::new(),
+            #[cfg(feature = "alloc")]
+            host_allocator: None,
         }
     }
 
@@ -87,6 +147,8 @@ impl AllocationParams {
             domain: MemoryDomainKind::System,
             accepts: DomainSet::ALL,
             meta_requests,
+            #[cfg(feature = "alloc")]
+            host_allocator: None,
         }
     }
 
@@ -101,6 +163,8 @@ impl AllocationParams {
             domain: MemoryDomainKind::Cuda,
             accepts: DomainSet::only(MemoryDomainKind::Cuda),
             meta_requests: MetaRequests::new(),
+            #[cfg(feature = "alloc")]
+            host_allocator: None,
         }
     }
 
@@ -115,6 +179,8 @@ impl AllocationParams {
             domain: MemoryDomainKind::D3D11Texture,
             accepts: DomainSet::only(MemoryDomainKind::D3D11Texture),
             meta_requests: MetaRequests::new(),
+            #[cfg(feature = "alloc")]
+            host_allocator: None,
         }
     }
 
@@ -133,6 +199,8 @@ impl AllocationParams {
             // `upstream` is the folding element's own demand and `self` what came
             // from downstream of it, which is exactly the cascade hop.
             meta_requests: upstream.meta_requests.carry_upstream(self.meta_requests),
+            #[cfg(feature = "alloc")]
+            host_allocator: upstream.host_allocator,
         }
     }
 
@@ -164,7 +232,16 @@ impl AllocationParams {
             // Both branches read the producer's frames, so a demand that changes
             // those frames needs both branches to have asked.
             meta_requests: self.meta_requests.join_branches(other.meta_requests),
+            #[cfg(feature = "alloc")]
+            host_allocator: self.host_allocator.or(other.host_allocator),
         })
+    }
+
+    #[cfg(feature = "alloc")]
+    pub fn host_allocator_or_heap(&self) -> HostAllocator {
+        self.host_allocator
+            .clone()
+            .unwrap_or_else(HostAllocator::heap)
     }
 
     /// This proposal carrying `meta_requests` instead of its own.
@@ -205,6 +282,10 @@ impl AllocationParams {
         Ok(Self {
             domain,
             accepts,
+            #[cfg(feature = "alloc")]
+            host_allocator: self
+                .host_allocator
+                .filter(|_| domain == MemoryDomainKind::System),
             ..self
         })
     }
@@ -384,6 +465,8 @@ mod tests {
             domain: MemoryDomainKind::DmaBuf,
             accepts: DomainSet::only(MemoryDomainKind::DmaBuf),
             meta_requests: MetaRequests::new(),
+            #[cfg(feature = "alloc")]
+            host_allocator: None,
         };
         let upstream = AllocationParams::system(4096, 2);
         let merged = downstream.merge(upstream);
@@ -457,6 +540,26 @@ mod tests {
         let can = DomainSet::only(MemoryDomainKind::System);
         let r = want.resolve_for_producer(can).expect("System is shared");
         assert_eq!(r.domain, MemoryDomainKind::System);
+    }
+
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn a_host_allocator_reaches_only_a_producer_that_settles_on_system_memory() {
+        let allocator = HostAllocator::heap();
+        let want = AllocationParams {
+            accepts: DomainSet::only(MemoryDomainKind::System).with(MemoryDomainKind::DmaBuf),
+            host_allocator: Some(allocator.clone()),
+            ..AllocationParams::system(1024, 2)
+        };
+        let system = want
+            .clone()
+            .resolve_for_producer(DomainSet::only(MemoryDomainKind::System))
+            .expect("System is shared");
+        assert_eq!(system.host_allocator, Some(allocator));
+        let dmabuf = want
+            .resolve_for_producer(DomainSet::only(MemoryDomainKind::DmaBuf))
+            .expect("DmaBuf is shared");
+        assert_eq!(dmabuf.host_allocator, None);
     }
 
     #[test]

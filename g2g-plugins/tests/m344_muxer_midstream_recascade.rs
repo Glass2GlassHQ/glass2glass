@@ -129,7 +129,7 @@ impl AsyncElement for RecordingTransform {
     }
 
     fn configure_allocation(&mut self, params: &AllocationParams) {
-        self.log.lock().unwrap().push(*params);
+        self.log.lock().unwrap().push(params.clone());
     }
 
     fn process<'a>(

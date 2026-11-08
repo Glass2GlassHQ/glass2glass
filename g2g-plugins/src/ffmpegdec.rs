@@ -677,7 +677,7 @@ impl FfmpegVideoDec {
     /// The downstream consumer's recorded allocation proposal, if any
     /// (see [`AsyncElement::configure_allocation`]).
     pub fn requested_alloc(&self) -> Option<AllocationParams> {
-        self.requested_alloc
+        self.requested_alloc.clone()
     }
 
     /// Whether this backend emits frames in CUDA device memory
@@ -1393,6 +1393,7 @@ impl FfmpegVideoDec {
                 const REORDER_MARGIN: usize = 4;
                 let headroom = self
                     .requested_alloc
+                    .as_ref()
                     .map(|p| (p.min_buffers + REORDER_MARGIN) as i32)
                     .unwrap_or(8);
                 (*raw).extra_hw_frames = headroom;
@@ -1567,7 +1568,7 @@ impl AsyncElement for FfmpegVideoDec {
     /// Cuda request there is simply unsatisfiable and stays recorded for
     /// diagnostics rather than silently changing the output domain.
     fn configure_allocation(&mut self, params: &AllocationParams) {
-        self.requested_alloc = Some(*params);
+        self.requested_alloc = Some(params.clone());
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {

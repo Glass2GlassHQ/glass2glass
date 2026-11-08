@@ -24,9 +24,10 @@ use crate::hip::{
 use crate::pixel::carries_yuv;
 
 // the kernel names each format FMT_<name>, numbered by its position here
-const FORMATS: [(RawVideoFormat, &str); 14] = [
+const FORMATS: [(RawVideoFormat, &str); 15] = [
     (RawVideoFormat::Nv12, "NV12"),
     (RawVideoFormat::I420, "I420"),
+    (RawVideoFormat::Yuyv, "YUY2"),
     (RawVideoFormat::P010, "P010"),
     (RawVideoFormat::Rgba8, "RGBA8"),
     (RawVideoFormat::Bgra8, "BGRA8"),
@@ -155,6 +156,8 @@ __device__ Yuv rgb_to_yuv(Color color, float kr, float kb) {
 __device__ float read_luma_code(const Frame& frame, int x, int y) {
 #if IN_FORMAT == FMT_P010
     return (float)(((const unsigned short*)row(frame, 0, y))[x] >> 6);
+#elif IN_FORMAT == FMT_YUY2
+    return (float)row(frame, 0, y)[2 * x];
 #else
     return (float)row(frame, 0, y)[x];
 #endif
@@ -169,6 +172,10 @@ __device__ void read_chroma_codes(const Frame& frame, int x, int y, float* u, fl
     const unsigned short* pair = (const unsigned short*)row(frame, 1, y) + 2 * x;
     *u = (float)(pair[0] >> 6);
     *v = (float)(pair[1] >> 6);
+#elif IN_FORMAT == FMT_YUY2
+    const unsigned char* pair = row(frame, 0, y) + 4 * x;
+    *u = (float)pair[1];
+    *v = (float)pair[3];
 #else
     *u = (float)row(frame, 1, y)[x];
     *v = (float)row(frame, 2, y)[x];
@@ -258,7 +265,11 @@ __device__ float sample_luma(const Frame& frame, float x, float y) {
 }
 
 __device__ void sample_chroma(const Frame& frame, float x, float y, float* pb, float* pr) {
+#if IN_FORMAT == FMT_YUY2
+    Taps t = taps(x * 0.5f - 0.5f, y - 0.5f, (frame.width + 1) / 2, frame.height);
+#else
     Taps t = taps(x * 0.5f - 0.5f, y * 0.5f - 0.5f, (frame.width + 1) / 2, (frame.height + 1) / 2);
+#endif
     float u[4], v[4];
     read_chroma_codes(frame, t.x0, t.y0, &u[0], &v[0]);
     read_chroma_codes(frame, t.x1, t.y0, &u[1], &v[1]);
@@ -304,6 +315,8 @@ __device__ void write_luma(unsigned char* plane, unsigned int stride, int x, int
     float code = encode_luma(luma, OUT_BIT_DEPTH, OUT_FULL_RANGE);
 #if OUT_FORMAT == FMT_P010
     ((unsigned short*)(plane + (unsigned long long)y * stride))[x] = (unsigned short)code << 6;
+#elif OUT_FORMAT == FMT_YUY2
+    plane[(unsigned long long)y * stride + 2 * x] = (unsigned char)code;
 #else
     plane[(unsigned long long)y * stride + x] = (unsigned char)code;
 #endif
@@ -321,6 +334,10 @@ __device__ void write_chroma(unsigned char* dst, const unsigned int* offset, con
     unsigned short* pair = (unsigned short*)(dst + offset[1] + (unsigned long long)y * stride[1]) + 2 * x;
     pair[0] = (unsigned short)u << 6;
     pair[1] = (unsigned short)v << 6;
+#elif OUT_FORMAT == FMT_YUY2
+    unsigned char* pair = dst + offset[0] + (unsigned long long)y * stride[0] + 4 * x;
+    pair[1] = (unsigned char)u;
+    pair[3] = (unsigned char)v;
 #else
     dst[offset[1] + (unsigned long long)y * stride[1] + x] = (unsigned char)u;
     dst[offset[2] + (unsigned long long)y * stride[2] + x] = (unsigned char)v;
@@ -408,9 +425,14 @@ extern "C" __global__ void convert_scale(
 #if OUT_YUV
     float luma = covered ? sample_out_yuv(frame, source_x, source_y).y : 0.0f;
     write_luma(dst + offset[0], stride[0], x, y, luma);
+#if OUT_FORMAT == FMT_YUY2
+    if ((x & 1) == 0) {
+        float chroma_y = (float)y + 0.5f;
+#else
     if ((x & 1) == 0 && (y & 1) == 0) {
-        float chroma_x = (float)x + 1.0f;
         float chroma_y = (float)y + 1.0f;
+#endif
+        float chroma_x = (float)x + 1.0f;
         float pb = 0.0f, pr = 0.0f;
         if (inside(chroma_x, chroma_y, rect_x, rect_y, rect_width, rect_height)) {
             Yuv yuv = sample_out_yuv(frame, (chroma_x - (float)rect_x) * scale_x,
@@ -418,7 +440,11 @@ extern "C" __global__ void convert_scale(
             pb = yuv.pb;
             pr = yuv.pr;
         }
+#if OUT_FORMAT == FMT_YUY2
+        write_chroma(dst, offset, stride, x / 2, y, pb, pr);
+#else
         write_chroma(dst, offset, stride, x / 2, y / 2, pb, pr);
+#endif
     }
 #else
     Color black = {0.0f, 0.0f, 0.0f, 1.0f};

@@ -253,6 +253,8 @@ pub use memory::{
     SystemView, VulkanKeepAlive, WebGPUKeepAlive, WgpuBufferKeepAlive, WgpuKeepAlive,
 };
 pub use metrics::{LatencyHistogram, LatencySnapshot};
+#[cfg(feature = "alloc")]
+pub use query::HostAllocator;
 pub use query::{AllocationParams, LatencyReport};
 pub use rtp::{CaptureTimeExtensionIds, RtpHeader, RtpHeaderExtension, RtpParsed, RTP_HEADER_LEN};
 pub use segment::{stream_time_ns, KeptSamples, Seek, SeekFlags, SeekType, Segment};

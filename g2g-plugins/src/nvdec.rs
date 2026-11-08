@@ -1657,7 +1657,7 @@ impl AsyncElement for NvDec {
     /// download. No reconcilable domain leaves the default (`Cuda`) in place; the
     /// consumer then rejects the domain at `process` as it would today.
     fn configure_allocation(&mut self, params: &AllocationParams) {
-        if let Ok(resolved) = params.resolve_for_producer(Self::OUTPUT_DOMAINS) {
+        if let Ok(resolved) = params.clone().resolve_for_producer(Self::OUTPUT_DOMAINS) {
             self.out_domain = resolved.domain;
         }
     }

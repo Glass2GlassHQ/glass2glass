@@ -60,6 +60,22 @@ fn nv12_frame() -> Vec<u8> {
     luma.chain(chroma).collect()
 }
 
+fn yuy2_frame() -> Vec<u8> {
+    let (w, h) = (WIDTH as usize, HEIGHT as usize);
+    (0..w * h * 2)
+        .map(|i| {
+            let (x, y) = (i % (w * 2) / 2, i / (w * 2));
+            let pair = x / 2;
+            // byte order Y0 U Y1 V
+            match i % 4 {
+                1 => (64 + pair + y) as u8,
+                3 => (192 - pair - y) as u8,
+                _ => (16 + (x * 3 + y * 5) % 220) as u8,
+            }
+        })
+        .collect()
+}
+
 fn rgba_frame() -> Vec<u8> {
     (0..WIDTH * HEIGHT * 4)
         .map(|i| (i * 13 % 256) as u8)
@@ -173,6 +189,28 @@ fn yuv_and_rgb_match_the_cpu_converter() {
             &gpu_convert(&device, &rgba, &rgba_bytes, &nv12, false),
             &cpu_convert(&rgba, &rgba_bytes, &nv12),
             &format!("{vendor:?} RGBA to NV12"),
+        );
+    }
+}
+
+#[test]
+fn yuy2_matches_the_cpu_converter() {
+    for vendor in VENDORS {
+        let Some(device) = device(vendor) else {
+            continue;
+        };
+        let yuy2 = caps(RawVideoFormat::Yuyv, WIDTH, HEIGHT);
+        let rgba = caps(RawVideoFormat::Rgba8, WIDTH, HEIGHT);
+        let (yuy2_bytes, rgba_bytes) = (yuy2_frame(), rgba_frame());
+        assert_close(
+            &gpu_convert(&device, &yuy2, &yuy2_bytes, &rgba, false),
+            &cpu_convert(&yuy2, &yuy2_bytes, &rgba),
+            &format!("{vendor:?} YUY2 to RGBA"),
+        );
+        assert_close(
+            &gpu_convert(&device, &rgba, &rgba_bytes, &yuy2, false),
+            &cpu_convert(&rgba, &rgba_bytes, &yuy2),
+            &format!("{vendor:?} RGBA to YUY2"),
         );
     }
 }

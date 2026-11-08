@@ -184,7 +184,7 @@ impl AsyncElement for CaptureSink {
     }
 
     fn propose_allocation(&self, _caps: &Caps) -> Option<AllocationParams> {
-        Some(self.proposal)
+        Some(self.proposal.clone())
     }
 
     fn process<'a>(

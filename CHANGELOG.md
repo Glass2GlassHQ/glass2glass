@@ -21,6 +21,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M2105: `hipconvertscale` and the public `HipConverter`, with planar RGB and GStreamer 1.30's float RGB formats in the caps.
 - M2106: `ortinfer` reads `RGBP_F32LE` video and f32 tensors in HIP memory in place on CUDA and MIGraphX.
 - M2107: `hipupload` imports linear dma-bufs on AMD with a per-buffer cache, copying through the CPU when the import fails.
+- M2108: `hipupload` offers pinned host buffers that `v4l2src` and `libcamerasrc` capture into, and `hipconvertscale` takes YUY2.
 
 ## 0.14.0
 

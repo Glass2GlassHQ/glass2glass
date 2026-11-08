@@ -67,7 +67,7 @@ impl SourceLoop for DualDomainSource {
     }
 
     fn configure_allocation(&mut self, params: &AllocationParams) {
-        if let Ok(resolved) = params.resolve_for_producer(self.output_domains()) {
+        if let Ok(resolved) = params.clone().resolve_for_producer(self.output_domains()) {
             self.settled = resolved.domain;
         }
     }

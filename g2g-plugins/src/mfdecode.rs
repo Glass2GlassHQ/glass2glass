@@ -222,7 +222,7 @@ impl MfDecode {
     /// The downstream consumer's recorded allocation proposal, if any
     /// (see [`AsyncElement::configure_allocation`]).
     pub fn requested_alloc(&self) -> Option<AllocationParams> {
-        self.requested_alloc
+        self.requested_alloc.clone()
     }
 
     /// Enable DXVA / D3D11 hardware decode. `configure_pipeline` then creates a
@@ -387,7 +387,7 @@ impl AsyncElement for MfDecode {
     /// texture request there is unsatisfiable and stays recorded for
     /// diagnostics rather than silently changing the output domain.
     fn configure_allocation(&mut self, params: &AllocationParams) {
-        self.requested_alloc = Some(*params);
+        self.requested_alloc = Some(params.clone());
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {

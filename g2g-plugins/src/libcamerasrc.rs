@@ -35,8 +35,8 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
     Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata, FrameTiming, G2gError,
-    HardwareError, LatencyReport, MemoryDomain, OutputSink, PipelinePacket, PropError, PropKind,
-    PropValue, PropertySpec,
+    HardwareError, HostAllocator, LatencyReport, MemoryDomain, OutputSink, PipelinePacket,
+    PropError, PropKind, PropValue, PropertySpec,
 };
 
 use crate::capturepixelformat::CapturePixelFormat;
@@ -200,6 +200,7 @@ pub struct LibCameraSrc {
     /// Cached negotiation result: (output kind, width, height, fps). Set by
     /// [`negotiate`](Self::negotiate), consumed by `run`.
     negotiated: Option<(CapturePixelFormat, u32, u32, u32)>,
+    host_allocator: HostAllocator,
     configured: bool,
 }
 
@@ -221,6 +222,7 @@ impl LibCameraSrc {
             contrast: None,
             saturation: None,
             negotiated: None,
+            host_allocator: HostAllocator::heap(),
             configured: false,
         }
     }
@@ -490,6 +492,10 @@ impl SourceLoop for LibCameraSrc {
         LatencyReport::live(period_ns, None)
     }
 
+    fn configure_allocation(&mut self, params: &g2g_core::AllocationParams) {
+        self.host_allocator = params.host_allocator_or_heap();
+    }
+
     fn properties(&self) -> &'static [PropertySpec] {
         LIBCAMERA_PROPS
     }
@@ -595,6 +601,7 @@ impl SourceLoop for LibCameraSrc {
                 h,
                 frame_bytes: kind.frame_bytes(w, h),
                 limit: self.frame_limit,
+                host_allocator: self.host_allocator.clone(),
             };
             let controls = CamControls {
                 fps,
@@ -643,9 +650,7 @@ impl SourceLoop for LibCameraSrc {
                     _ => pts_step_ns,
                 };
                 let frame = Frame {
-                    domain: MemoryDomain::System(SystemSlice::from_boxed(
-                        captured.bytes.into_boxed_slice(),
-                    )),
+                    domain: MemoryDomain::System(captured.bytes),
                     timing: FrameTiming {
                         pts_ns: pts,
                         dts_ns: pts,
@@ -693,6 +698,7 @@ struct CaptureSetup {
     /// length varies per frame.
     frame_bytes: Option<usize>,
     limit: u64,
+    host_allocator: HostAllocator,
 }
 
 /// One completed capture handed to the async loop: the packed bytes plus
@@ -700,7 +706,7 @@ struct CaptureSetup {
 /// buffer carried no metadata).
 #[derive(Debug)]
 struct Captured {
-    bytes: Vec<u8>,
+    bytes: SystemSlice,
     timestamp_ns: Option<u64>,
 }
 
@@ -730,6 +736,7 @@ fn capture_loop(
         h,
         frame_bytes,
         limit,
+        host_allocator,
     } = setup;
     let mgr = CameraManager::new().map_err(|e| lc_err(&e))?;
     let cameras = mgr.cameras();
@@ -861,21 +868,31 @@ fn capture_loop(
             let timestamp_ns = meta.as_ref().map(|m| m.timestamp());
             if complete {
                 let planes = fb.data();
-                let mut payload = Vec::new();
-                for (i, plane) in planes.iter().enumerate() {
-                    let used = meta
-                        .as_ref()
-                        .and_then(|m| m.planes().get(i))
-                        .map(|p| p.bytes_used as usize)
-                        .unwrap_or(plane.len())
-                        .min(plane.len());
-                    payload.extend_from_slice(&plane[..used]);
+                let used: Vec<&[u8]> = planes
+                    .iter()
+                    .enumerate()
+                    .map(|(i, plane)| {
+                        let used = meta
+                            .as_ref()
+                            .and_then(|m| m.planes().get(i))
+                            .map(|p| p.bytes_used as usize)
+                            .unwrap_or(plane.len())
+                            .min(plane.len());
+                        &plane[..used]
+                    })
+                    .collect();
+                let len = used.iter().map(|plane| plane.len()).sum();
+                let mut payload = host_allocator.allocate(len)?;
+                let mut written = 0;
+                for plane in used {
+                    payload.as_mut_slice()[written..written + plane.len()].copy_from_slice(plane);
+                    written += plane.len();
                 }
                 // A short frame cannot be unpacked at the negotiated geometry;
                 // downstream converters reject it and fail the whole run, so
                 // drop it here as V4l2Src does.
                 frame_bytes
-                    .is_none_or(|need| payload.len() >= need)
+                    .is_none_or(|need| len >= need)
                     .then_some(Captured {
                         bytes: payload,
                         timestamp_ns,

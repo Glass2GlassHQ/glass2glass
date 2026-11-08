@@ -74,7 +74,7 @@ impl SourceLoop for RecordingSource {
         Ok(ConfigureOutcome::Accepted)
     }
     fn configure_allocation(&mut self, params: &AllocationParams) {
-        *self.absorbed.lock().unwrap() = Some(*params);
+        *self.absorbed.lock().unwrap() = Some(params.clone());
     }
     fn run<'a>(&'a mut self, out: &'a mut dyn OutputSink) -> Self::RunFuture<'a> {
         Box::pin(async move {
@@ -156,7 +156,7 @@ impl AsyncElement for RequestingSink {
         Ok(ConfigureOutcome::Accepted)
     }
     fn propose_allocation(&self, _caps: &Caps) -> Option<AllocationParams> {
-        self.proposal
+        self.proposal.clone()
     }
     fn meta_requests(&self) -> MetaRequests {
         self.requests
@@ -206,7 +206,7 @@ impl MultiInputElement for RecordingFanIn {
         Ok(caps())
     }
     fn configure_allocation_for_output(&mut self, params: &AllocationParams) {
-        *self.absorbed.lock().unwrap() = Some(*params);
+        *self.absorbed.lock().unwrap() = Some(params.clone());
     }
     fn process<'a>(
         &'a mut self,
@@ -238,7 +238,7 @@ fn run_line(transform: MetaRequests, sink: RequestingSink) -> Option<AllocationP
     g.link(src, xform).unwrap();
     g.link(xform, snk).unwrap();
     block_on(run_graph(g, &ZeroClock, 4)).expect("graph runs");
-    let out = *absorbed.lock().unwrap();
+    let out = absorbed.lock().unwrap().clone();
     out
 }
 
@@ -289,6 +289,7 @@ fn a_request_rides_alongside_a_pool_proposal() {
     let params = absorbed
         .lock()
         .unwrap()
+        .clone()
         .expect("proposal reaches the source");
     assert_eq!((params.size_bytes, params.min_buffers), (4096, 3));
     assert!(params.meta_requests.wants::<CaptionMeta>());
@@ -329,6 +330,7 @@ fn two_sinks_additive_requests_union_at_the_tee() {
     let params = absorbed
         .lock()
         .unwrap()
+        .clone()
         .expect("joined demand reaches the source");
     assert!(params.meta_requests.wants::<AnalyticsMeta>());
     assert!(params.meta_requests.wants::<CaptionMeta>());
@@ -359,6 +361,7 @@ fn demand_crosses_a_fan_in_producers_output() {
     let params = absorbed
         .lock()
         .unwrap()
+        .clone()
         .expect("the fan-in is told what downstream wants");
     assert!(params.meta_requests.wants::<AnalyticsMeta>());
 }
@@ -428,7 +431,7 @@ fn run_tee_with_one_silent_branch(asked: MetaRequests) -> Option<AllocationParam
     g.link(tee.out(0), asking).unwrap();
     g.link(tee.out(1), silent).unwrap();
     block_on(run_graph(g, &ZeroClock, 4)).expect("graph runs");
-    let out = *absorbed.lock().unwrap();
+    let out = absorbed.lock().unwrap().clone();
     out
 }
 
@@ -472,6 +475,7 @@ fn both_branches_asking_carries_an_every_consumer_demand_through() {
     let params = absorbed
         .lock()
         .unwrap()
+        .clone()
         .expect("both branches asked, so the demand stands");
     assert!(params.meta_requests.wants::<BlobMeta>());
 }

@@ -23,6 +23,7 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::meta::{MetaRequests, PlaneLayout};
 use g2g_core::runtime::{run_simple_pipeline, LatencyProfile};
+use g2g_core::HostAllocator;
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, ConfigureOutcome, G2gError, MemoryDomain, OutputSink,
     PipelineClock, PipelinePacket, PushOutcome, RawVideoFormat,
@@ -77,8 +78,10 @@ fn the_request_decides_whether_a_padded_capture_is_repacked() {
             first_stride: 7
         }
     );
-    let (bytes, stride) = take_rows(&padded, repack, 4, 2).expect("the buffer holds a frame");
-    assert_eq!(bytes, tight, "the repack packs every plane");
+    let (packed, stride) = take_rows(&padded, repack, 4, 2, &HostAllocator::heap())
+        .unwrap()
+        .expect("the buffer holds a frame");
+    assert_eq!(packed.as_slice(), tight, "the repack packs every plane");
     assert_eq!(stride, 0, "packed rows carry no pitch");
 
     let declare = row_handling(CapturePixelFormat::Nv12, 4, 7, true);
@@ -89,7 +92,10 @@ fn the_request_decides_whether_a_padded_capture_is_repacked() {
             first_stride: 7
         }
     );
-    let (bytes, stride) = take_rows(&padded, declare, 4, 2).expect("the buffer holds a frame");
+    let (declared, stride) = take_rows(&padded, declare, 4, 2, &HostAllocator::heap())
+        .unwrap()
+        .expect("the buffer holds a frame");
+    let bytes = declared.as_slice();
     assert_eq!(bytes, padded, "the driver's buffer travels untouched");
     assert_eq!(stride, 7);
 

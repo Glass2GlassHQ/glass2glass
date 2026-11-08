@@ -1,8 +1,11 @@
+use core::ffi::c_void;
 use core::future::Future;
 use core::pin::Pin;
 
 use alloc::boxed::Box;
 use alloc::sync::Arc;
+use alloc::vec::Vec;
+use std::sync::{Mutex, OnceLock, PoisonError};
 
 use g2g_core::log::{short_type_name, Target};
 use g2g_core::memory::{
@@ -10,29 +13,104 @@ use g2g_core::memory::{
 };
 use g2g_core::meta::{Plane, PlaneLayout};
 use g2g_core::{
-    g2g_error, g2g_warn, AsyncElement, Caps, CapsConstraint, ConfigureOutcome, ElementMetadata,
-    G2gError, MemoryDomain, OutputSink, PipelinePacket, PropError, PropKind, PropValue,
-    PropertySpec,
+    g2g_error, g2g_warn, AllocationParams, AsyncElement, Caps, CapsConstraint, ConfigureOutcome,
+    ElementMetadata, Frame, G2gError, HostAllocator, MemoryDomain, OutputSink, PipelinePacket,
+    PropError, PropKind, PropValue, PropertySpec, SystemSlice,
 };
 
 use crate::dmabufimport::DmaBufImportCache;
 use crate::dmabufmap::{dmabuf_len, DmaBufReadMap};
 use crate::hip::{
-    hip_buffer, HipDevice, HipEvent, HipExternalBuffer, HipMemoryPool, HipPinnedMemory, HipStream,
+    hip_buffer, release_after, HipDevice, HipEvent, HipExternalBuffer, HipMemoryPool,
+    HipPinnedMemory, HipStream,
 };
 use crate::paddedrows::single_stride_layout;
 use crate::pixel::RawVideoGeometry;
 
 #[derive(Debug)]
-struct Staging {
-    memory: HipPinnedMemory,
-    copied: HipEvent,
+struct PinnedFrames {
+    device: Arc<HipDevice>,
+    free: Mutex<Vec<HipPinnedMemory>>,
+    // address and size of every buffer this pool allocated
+    allocations: Mutex<Vec<(usize, usize)>>,
 }
 
-impl Drop for Staging {
-    fn drop(&mut self) {
-        // hipHostFree and cuMemFreeHost do not wait for a copy still reading the memory
-        let _ = self.copied.synchronize();
+#[derive(Debug)]
+struct PinnedLease {
+    memory: HipPinnedMemory,
+    frames: Arc<PinnedFrames>,
+}
+
+unsafe extern "C" fn return_lease(user: *mut c_void) {
+    // SAFETY: `user` is the `Box` that `PinnedFrames::lease` leaked, and SystemSlice calls this once.
+    let lease = unsafe { Box::from_raw(user.cast::<PinnedLease>()) };
+    let PinnedLease { memory, frames } = *lease;
+    frames
+        .free
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .push(memory);
+}
+
+impl PinnedFrames {
+    fn lease(self: &Arc<Self>, len: usize) -> Result<SystemSlice, G2gError> {
+        let recycled = {
+            let mut free = self.free.lock().unwrap_or_else(PoisonError::into_inner);
+            free.iter()
+                .position(|memory| memory.size() >= len)
+                .map(|index| free.swap_remove(index))
+        };
+        let mut memory = match recycled {
+            Some(memory) => memory,
+            None => {
+                let mut memory = HipPinnedMemory::allocate(&self.device, len)?;
+                let address = memory.as_mut_slice().as_mut_ptr() as usize;
+                self.allocations
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .push((address, memory.size()));
+                memory
+            }
+        };
+        let pointer = memory.as_mut_slice().as_mut_ptr();
+        let lease = Box::into_raw(Box::new(PinnedLease {
+            memory,
+            frames: Arc::clone(self),
+        }));
+        // SAFETY: the lease owns `len` or more bytes at `pointer` until `return_lease` runs, and only this slice reaches them.
+        Ok(unsafe {
+            SystemSlice::from_foreign_exclusive(pointer, len, Some(return_lease), lease.cast())
+        })
+    }
+
+    fn allocated(&self, bytes: &[u8]) -> bool {
+        let start = bytes.as_ptr() as usize;
+        self.allocations
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .any(|&(address, size)| start >= address && start + bytes.len() <= address + size)
+    }
+}
+
+#[derive(Debug)]
+struct PinnedOffer {
+    frames: Arc<PinnedFrames>,
+    allocator: HostAllocator,
+}
+
+impl PinnedOffer {
+    fn open(vendor: Option<HipVendor>, ordinal: i32) -> Result<Self, G2gError> {
+        let frames = Arc::new(PinnedFrames {
+            device: open_device(vendor, ordinal)?,
+            free: Mutex::default(),
+            allocations: Mutex::default(),
+        });
+        let leased_from = Arc::clone(&frames);
+        Ok(Self {
+            frames,
+            allocator: HostAllocator::new(move |len| leased_from.lease(len)),
+        })
     }
 }
 
@@ -41,7 +119,6 @@ struct UploadGpu {
     device: Arc<HipDevice>,
     stream: HipStream,
     pool: Option<HipMemoryPool>,
-    staging: Option<Staging>,
     dmabuf_imports: DmaBufImportCache<Arc<HipExternalBuffer>>,
     dmabuf_import_failed: bool,
 }
@@ -52,12 +129,21 @@ pub struct HipUpload {
     raw_video: Option<RawVideoGeometry>,
     device_id: Option<i32>,
     vendor: Option<HipVendor>,
+    pinned: OnceLock<PinnedOffer>,
     gpu: Option<UploadGpu>,
 }
 
 impl HipUpload {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    fn pinned_offer(&self) -> Result<&PinnedOffer, G2gError> {
+        if let Some(offer) = self.pinned.get() {
+            return Ok(offer);
+        }
+        let offer = PinnedOffer::open(self.vendor, self.device_id.unwrap_or(0))?;
+        Ok(self.pinned.get_or_init(|| offer))
     }
 
     fn gpu_for(&mut self, cuda_ordinal: Option<i32>) -> Result<&mut UploadGpu, G2gError> {
@@ -85,13 +171,12 @@ impl HipUpload {
             None => {
                 let device = match cuda_ordinal {
                     Some(ordinal) => HipDevice::open(HipVendor::Nvidia, ordinal)?,
-                    None => open_device(self.vendor, self.device_id.unwrap_or(0))?,
+                    None => Arc::clone(&self.pinned_offer()?.frames.device),
                 };
                 UploadGpu {
                     stream: HipStream::new(&device)?,
                     device,
                     pool: None,
-                    staging: None,
                     dmabuf_imports: DmaBufImportCache::new(),
                     dmabuf_import_failed: false,
                 }
@@ -109,31 +194,34 @@ fn open_device(vendor: Option<HipVendor>, ordinal: i32) -> Result<Arc<HipDevice>
     }
 }
 
-fn upload(gpu: &mut UploadGpu, bytes: &[u8]) -> Result<OwnedHipBuffer, G2gError> {
-    let len = bytes.len();
+fn upload_pinned(gpu: &mut UploadGpu, pinned: SystemSlice) -> Result<OwnedHipBuffer, G2gError> {
+    let len = pinned.as_slice().len();
     if gpu.pool.as_ref().is_none_or(|pool| pool.size() != len) {
         gpu.pool = Some(HipMemoryPool::new(&gpu.device, len));
     }
-    let mut staging = match gpu.staging.take() {
-        Some(staging) if staging.memory.size() >= len => staging,
-        _ => Staging {
-            memory: HipPinnedMemory::allocate(&gpu.device, len)?,
-            copied: HipEvent::new(&gpu.device)?,
-        },
-    };
-    staging.copied.synchronize()?;
-    staging.memory.as_mut_slice()[..len].copy_from_slice(bytes);
     let memory = gpu
         .pool
         .as_ref()
         .ok_or(G2gError::NotConfigured)?
         .acquire()?;
-    gpu.stream.upload_pinned(&memory, &staging.memory, len)?;
-    gpu.stream.record(&staging.copied)?;
-    gpu.staging = Some(staging);
+    // SAFETY: `release_after` below keeps `pinned` alive until the stream passes the copy.
+    unsafe { gpu.stream.upload_async(&memory, pinned.as_slice()) }?;
+    let copied = HipEvent::new(&gpu.device)?;
+    gpu.stream.record(&copied)?;
+    release_after(copied, Box::new(pinned));
     let ready = HipEvent::new(&gpu.device)?;
     gpu.stream.record(&ready)?;
     memory.into_buffer(ready, len)
+}
+
+fn upload(
+    gpu: &mut UploadGpu,
+    frames: &Arc<PinnedFrames>,
+    bytes: &[u8],
+) -> Result<OwnedHipBuffer, G2gError> {
+    let mut staging = frames.lease(bytes.len())?;
+    staging.as_mut_slice().copy_from_slice(bytes);
+    upload_pinned(gpu, staging)
 }
 
 fn wrap_cuda(gpu: &UploadGpu, cuda: &OwnedCudaBuffer) -> Result<OwnedHipBuffer, G2gError> {
@@ -169,6 +257,7 @@ fn wrap_cuda(gpu: &UploadGpu, cuda: &OwnedCudaBuffer) -> Result<OwnedHipBuffer, 
 
 fn upload_dmabuf(
     gpu: &mut UploadGpu,
+    frames: &Arc<PinnedFrames>,
     dmabuf: &OwnedDmaBuf,
     raw_video: RawVideoGeometry,
 ) -> Result<OwnedHipBuffer, G2gError> {
@@ -207,7 +296,7 @@ fn upload_dmabuf(
         .ok()
         .and_then(|size| map.as_slice().get(..size))
         .ok_or(G2gError::CapsMismatch)?;
-    Ok(upload(gpu, bytes)?.with_plane_layout(layout))
+    Ok(upload(gpu, frames, bytes)?.with_plane_layout(layout))
 }
 
 fn import_dmabuf(
@@ -301,8 +390,28 @@ impl AsyncElement for HipUpload {
         HIP_UPLOAD_PROPS
     }
 
+    fn propose_allocation(&self, _caps: &Caps) -> Option<AllocationParams> {
+        let offer = match self.pinned_offer() {
+            Ok(offer) => offer,
+            Err(error) => {
+                g2g_warn!(
+                    Target::category(short_type_name::<Self>()),
+                    "no pinned host buffers to offer upstream, opening the HIP device failed: {error:?}"
+                );
+                return None;
+            }
+        };
+        let accepts = self.input_domains();
+        Some(AllocationParams {
+            domain: accepts.preferred()?,
+            accepts,
+            host_allocator: Some(offer.allocator.clone()),
+            ..AllocationParams::default()
+        })
+    }
+
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
-        if self.gpu.is_some() {
+        if self.gpu.is_some() || self.pinned.get().is_some() {
             return Err(PropError::ReadOnly);
         }
         match name {
@@ -352,28 +461,42 @@ impl AsyncElement for HipUpload {
                 return Err(G2gError::NotConfigured);
             }
             match packet {
-                PipelinePacket::DataFrame(mut frame) => {
-                    let uploaded = match &frame.domain {
-                        MemoryDomain::Hip(_) => None,
+                PipelinePacket::DataFrame(frame) => {
+                    let Frame {
+                        domain,
+                        timing,
+                        sequence,
+                        meta,
+                    } = frame;
+                    let buffer = match domain {
+                        MemoryDomain::Hip(buffer) => buffer,
                         MemoryDomain::Cuda(cuda) => {
                             let gpu = self.gpu_for(Some(cuda.device_ordinal))?;
-                            Some(wrap_cuda(gpu, cuda)?)
+                            wrap_cuda(gpu, &cuda)?
                         }
                         MemoryDomain::DmaBuf(dmabuf) => {
                             let raw_video = self.raw_video.ok_or(G2gError::CapsMismatch)?;
-                            let gpu = self.gpu_for(None)?;
-                            Some(upload_dmabuf(gpu, dmabuf, raw_video)?)
+                            let frames = Arc::clone(&self.pinned_offer()?.frames);
+                            upload_dmabuf(self.gpu_for(None)?, &frames, &dmabuf, raw_video)?
+                        }
+                        MemoryDomain::System(slice)
+                            if self.pinned_offer()?.frames.allocated(slice.as_slice()) =>
+                        {
+                            upload_pinned(self.gpu_for(None)?, slice)?
                         }
                         domain => {
+                            let frames = Arc::clone(&self.pinned_offer()?.frames);
                             let bytes = domain.require_system_slice(short_type_name::<Self>())?;
-                            let gpu = self.gpu_for(None)?;
-                            Some(upload(gpu, bytes)?)
+                            upload(self.gpu_for(None)?, &frames, bytes)?
                         }
                     };
-                    if let Some(buffer) = uploaded {
-                        frame.domain = MemoryDomain::Hip(buffer);
-                    }
-                    out.push(PipelinePacket::DataFrame(frame)).await?;
+                    out.push(PipelinePacket::DataFrame(Frame {
+                        domain: MemoryDomain::Hip(buffer),
+                        timing,
+                        sequence,
+                        meta,
+                    }))
+                    .await?;
                 }
                 // the runner forwards end-of-stream after `process` returns
                 PipelinePacket::Eos => {}
@@ -383,5 +506,99 @@ impl AsyncElement for HipUpload {
             }
             Ok(())
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use g2g_core::{FrameTiming, PushOutcome, RawVideoFormat};
+
+    const WIDTH: u32 = 64;
+    const HEIGHT: u32 = 48;
+
+    #[derive(Default)]
+    struct FrameSink {
+        frames: Vec<Frame>,
+    }
+
+    impl OutputSink for FrameSink {
+        fn poll_push(
+            &mut self,
+            _cx: &mut core::task::Context<'_>,
+            packet: &mut Option<PipelinePacket>,
+        ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+            if let Some(PipelinePacket::DataFrame(frame)) = packet.take() {
+                self.frames.push(frame);
+            }
+            core::task::Poll::Ready(Ok(PushOutcome::Accepted))
+        }
+    }
+
+    fn upload_and_read_back(upload: &mut HipUpload, source: SystemSlice) -> Vec<u8> {
+        let mut sink = FrameSink::default();
+        let frame = Frame::new(MemoryDomain::System(source), FrameTiming::default(), 0);
+        g2g_core::runtime::block_on(upload.process(PipelinePacket::DataFrame(frame), &mut sink))
+            .unwrap();
+        let [Frame {
+            domain: MemoryDomain::Hip(buffer),
+            ..
+        }] = <[Frame; 1]>::try_from(sink.frames).unwrap()
+        else {
+            panic!("hipupload emits one Hip frame");
+        };
+        let stream = HipStream::new(&upload.pinned.get().unwrap().frames.device).unwrap();
+        let mut read_back = alloc::vec![0; buffer.len];
+        stream.download_blocking(&buffer, &mut read_back).unwrap();
+        read_back
+    }
+
+    fn pinned_allocations(upload: &HipUpload) -> usize {
+        let frames = &upload.pinned.get().unwrap().frames;
+        frames.allocations.lock().unwrap().len()
+    }
+
+    #[test]
+    fn a_frame_in_offered_pinned_memory_uploads_without_a_staging_copy() {
+        let caps = Caps::RawVideo {
+            format: RawVideoFormat::Nv12,
+            width: g2g_core::Dim::Fixed(WIDTH),
+            height: g2g_core::Dim::Fixed(HEIGHT),
+            framerate: g2g_core::Rate::Any,
+            interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        };
+        let len = RawVideoFormat::Nv12
+            .unpadded_frame_bytes(WIDTH, HEIGHT)
+            .unwrap() as usize;
+        let bytes: Vec<u8> = (0..len).map(|index| (index * 7) as u8).collect();
+        for (vendor, name) in [(HipVendor::Amd, "amd"), (HipVendor::Nvidia, "nvidia")] {
+            if let Err(error) = HipDevice::open(vendor, 0) {
+                std::eprintln!("skipping: no {vendor:?} HIP device 0: {error:?}");
+                continue;
+            }
+            let mut upload = HipUpload::new();
+            upload
+                .set_property("vendor", PropValue::Str(name.into()))
+                .unwrap();
+            upload.configure_pipeline(&caps).unwrap();
+            let offered = upload
+                .propose_allocation(&caps)
+                .and_then(|params| params.host_allocator)
+                .expect("hipupload offers pinned buffers upstream");
+
+            let mut pinned = offered.allocate(len).unwrap();
+            pinned.as_mut_slice().copy_from_slice(&bytes);
+            assert_eq!(
+                upload_and_read_back(&mut upload, pinned),
+                bytes,
+                "{vendor:?}"
+            );
+            assert_eq!(
+                pinned_allocations(&upload),
+                1,
+                "{vendor:?}: no staging buffer"
+            );
+        }
     }
 }

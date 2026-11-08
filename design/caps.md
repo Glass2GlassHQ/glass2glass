@@ -464,6 +464,14 @@ Two fan structures have non-trivial joins:
   the first frame instead of at negotiation. The `DomainSet::ALL` default (what
   an element that never considered memory reports) narrows nothing, so a graph of
   such elements cascades unchanged.
+- **Host buffers offered upstream.** A consumer that reads system frames faster
+  from its own memory sets `AllocationParams::host_allocator`, and a source
+  that copies captures into system memory (`v4l2src`, `libcamerasrc`) writes
+  each frame into a `SystemSlice` from it, falling back to the heap through
+  `host_allocator_or_heap`. `resolve_for_producer` drops the allocator unless
+  the producer settles on System, and the cascade carries it only through
+  elements that forward their input untouched, as it does the rest of the
+  proposal. `hipupload` uses it to hand out pinned host memory.
 - **Converter auto-plug.** When no shared domain exists (the negotiation
   would otherwise fail loud), `auto_plug_domain_converters` splices a memory-domain
   converter instead. A pre-solve graph pass: for each edge it traces the producer

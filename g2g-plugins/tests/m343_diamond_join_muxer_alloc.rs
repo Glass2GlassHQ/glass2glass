@@ -119,7 +119,7 @@ impl AsyncElement for RecordingTransform {
     }
 
     fn configure_allocation(&mut self, params: &AllocationParams) {
-        self.log.lock().unwrap().push(*params);
+        self.log.lock().unwrap().push(params.clone());
     }
 
     fn process<'a>(
@@ -168,7 +168,7 @@ impl AsyncElement for DomainSink {
     }
 
     fn propose_allocation(&self, _caps: &Caps) -> Option<AllocationParams> {
-        Some(self.params)
+        Some(self.params.clone())
     }
 
     fn process<'a>(
@@ -209,7 +209,7 @@ impl MultiInputElement for AllocMux {
     }
 
     fn propose_allocation_for_input(&self, input: usize, _caps: &Caps) -> Option<AllocationParams> {
-        self.per_pad.get(input).copied().flatten()
+        self.per_pad.get(input).cloned().flatten()
     }
 
     fn configure_pipeline(

@@ -36,9 +36,9 @@ use g2g_core::memory::{OwnedDmaBuf, SystemSlice};
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
     Caps, CapsConstraint, CapsSet, CaptureAnchor, ClockSync, ConfigureOutcome, Dim,
-    ElementMetadata, FrameTiming, G2gError, HardwareError, LatencyReport, MemoryDomain,
-    MemoryDomainKind, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
-    PropValue, PropertySpec, Rate,
+    ElementMetadata, FrameTiming, G2gError, HardwareError, HostAllocator, LatencyReport,
+    MemoryDomain, MemoryDomainKind, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
+    PropError, PropKind, PropValue, PropertySpec, Rate,
 };
 
 use crate::capturepixelformat::CapturePixelFormat;
@@ -213,30 +213,46 @@ pub fn row_handling(
 }
 
 /// Take one captured buffer's `w x h` frame out of the driver's memory the way
-/// `handling` says, returning the bytes to send on and the row pitch they carry
-/// (0 for tight rows). `None` when the buffer is shorter than the frame it is
+/// `handling` says, into memory from `host_allocator`, returning the bytes to send on and the row pitch they carry (0 for
+/// tight rows). `Ok(None)` when the buffer is shorter than the frame it is
 /// supposed to hold.
-pub fn take_rows(buf: &[u8], handling: RowHandling, w: u32, h: u32) -> Option<(Vec<u8>, usize)> {
+pub fn take_rows(
+    buf: &[u8],
+    handling: RowHandling,
+    w: u32,
+    h: u32,
+    host_allocator: &HostAllocator,
+) -> Result<Option<(SystemSlice, usize)>, G2gError> {
     let (w, h) = (w as usize, h as usize);
-    match handling {
-        RowHandling::AsIs => Some((buf.to_vec(), 0)),
+    let (len, first_stride) = match handling {
+        RowHandling::AsIs => (buf.len(), 0),
         RowHandling::Declare {
             format,
             first_stride,
-        } => {
-            let needed = crate::paddedrows::padded_frame_bytes(format, w, h, 0, first_stride)?;
-            (buf.len() >= needed).then(|| (buf.to_vec(), first_stride))
+        } => match crate::paddedrows::padded_frame_bytes(format, w, h, 0, first_stride) {
+            Some(needed) if buf.len() >= needed => (buf.len(), first_stride),
+            _ => return Ok(None),
+        },
+        RowHandling::Repack { format, .. } => {
+            (crate::pixel::frame_byte_size(format, w as u32, h as u32), 0)
         }
-        RowHandling::Repack {
-            format,
-            first_stride,
-        } => {
-            let mut packed =
-                Vec::with_capacity(crate::pixel::frame_byte_size(format, w as u32, h as u32));
-            crate::paddedrows::pack_tight(buf, format, w, h, first_stride, &mut packed)?;
-            Some((packed, 0))
-        }
-    }
+    };
+    let mut payload = host_allocator.allocate(len)?;
+    let destination = payload.as_mut_slice();
+    let RowHandling::Repack {
+        format,
+        first_stride: source_stride,
+    } = handling
+    else {
+        destination.copy_from_slice(buf);
+        return Ok(Some((payload, first_stride)));
+    };
+    let mut written = 0;
+    let packed = crate::paddedrows::pack_tight(buf, format, w, h, source_stride, |row| {
+        destination[written..written + row.len()].copy_from_slice(row);
+        written += row.len();
+    });
+    Ok(packed.map(|()| (payload, 0)))
 }
 
 /// Map a V4L2 / OS error to the reserved `G2gError::V4l2` arm, preserving the
@@ -756,7 +772,7 @@ fn apply_extra_controls(dev: &Device, extra: &[(String, i64)]) -> Result<(), G2g
 /// share of the dma-buf fd the driver filled (no copy).
 #[derive(Debug)]
 enum CapturedPayload {
-    Bytes(Vec<u8>),
+    Bytes(SystemSlice),
     DmaBuf(OwnedDmaBuf),
 }
 
@@ -1061,6 +1077,7 @@ pub struct V4l2Src {
     /// Whether a consumer asked where the rows are, so a driver that
     /// pads them can hand its buffer over as it is instead of packing it tight.
     keep_row_padding: bool,
+    host_allocator: HostAllocator,
     configured: bool,
 }
 
@@ -1082,6 +1099,7 @@ impl V4l2Src {
             modes: Vec::new(),
             chosen: None,
             keep_row_padding: false,
+            host_allocator: HostAllocator::heap(),
             configured: false,
         }
     }
@@ -1389,8 +1407,7 @@ impl SourceLoop for V4l2Src {
         {
             self.keep_row_padding = params.meta_requests.wants::<g2g_core::meta::PlaneLayout>();
         }
-        #[cfg(not(feature = "metadata"))]
-        let _ = params;
+        self.host_allocator = params.host_allocator_or_heap();
     }
 
     /// Live source: contributes one frame period of latency so the sink keeps a
@@ -1436,6 +1453,7 @@ impl SourceLoop for V4l2Src {
             // capture buffer the driver still needs.
             let io_mode = self.io_mode;
             let keep_row_padding = self.keep_row_padding;
+            let host_allocator = self.host_allocator.clone();
             let queued_frames = match io_mode {
                 IoMode::DmaBuf => DMABUF_INFLIGHT,
                 IoMode::Auto | IoMode::Mmap => BUFFER_COUNT as usize,
@@ -1465,7 +1483,9 @@ impl SourceLoop for V4l2Src {
                 loop {
                     let (buf, meta) = stream.next().map_err(|e| v4l2_err(&e))?;
                     let n = (meta.bytesused as usize).min(buf.len());
-                    let Some((payload, first_stride)) = take_rows(&buf[..n], handling, w, h) else {
+                    let Some((payload, first_stride)) =
+                        take_rows(&buf[..n], handling, w, h, &host_allocator)?
+                    else {
                         // The buffer does not hold the frame the geometry
                         // claims. Skipping it captures again rather than
                         // pushing a malformed frame downstream.
@@ -1507,7 +1527,7 @@ impl SourceLoop for V4l2Src {
                 // the capture thread instead, where the buffer can still be
                 // re-queued.
                 if let CapturedPayload::Bytes(bytes) = &captured.payload {
-                    if bytes.len() < min_bytes {
+                    if bytes.as_slice().len() < min_bytes {
                         continue;
                     }
                 }
@@ -1531,9 +1551,7 @@ impl SourceLoop for V4l2Src {
                     _ => pts_step_ns,
                 };
                 let domain = match captured.payload {
-                    CapturedPayload::Bytes(bytes) => {
-                        MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice()))
-                    }
+                    CapturedPayload::Bytes(bytes) => MemoryDomain::System(bytes),
                     CapturedPayload::DmaBuf(buffer) => MemoryDomain::DmaBuf(buffer),
                 };
                 let mut frame = Frame {
@@ -1690,8 +1708,10 @@ mod tests {
     fn a_repack_packs_every_plane_and_declares_nothing() {
         let (padded, tight) = padded_nv12();
         let handling = row_handling(CapturePixelFormat::Nv12, 4, 6, false);
-        let (bytes, stride) = take_rows(&padded, handling, 4, 2).expect("the buffer holds a frame");
-        assert_eq!(bytes, tight);
+        let (bytes, stride) = take_rows(&padded, handling, 4, 2, &HostAllocator::heap())
+            .unwrap()
+            .expect("the buffer holds a frame");
+        assert_eq!(bytes.as_slice(), tight);
         assert_eq!(stride, 0, "packed rows carry no pitch");
     }
 
@@ -1699,7 +1719,10 @@ mod tests {
     fn a_declared_frame_keeps_the_driver_bytes_and_its_pitch() {
         let (padded, _) = padded_nv12();
         let handling = row_handling(CapturePixelFormat::Nv12, 4, 6, true);
-        let (bytes, stride) = take_rows(&padded, handling, 4, 2).expect("the buffer holds a frame");
+        let (bytes, stride) = take_rows(&padded, handling, 4, 2, &HostAllocator::heap())
+            .unwrap()
+            .expect("the buffer holds a frame");
+        let bytes = bytes.as_slice();
         assert_eq!(bytes, padded, "the driver's buffer travels untouched");
         assert_eq!(stride, 6);
 
@@ -1723,12 +1746,30 @@ mod tests {
     }
 
     #[test]
+    fn rows_land_in_memory_from_the_offered_allocator() {
+        let (padded, tight) = padded_nv12();
+        let requested = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = std::sync::Arc::clone(&requested);
+        let offered = HostAllocator::new(move |len| {
+            recorded.lock().unwrap().push(len);
+            HostAllocator::heap().allocate(len)
+        });
+        let handling = row_handling(CapturePixelFormat::Nv12, 4, 6, false);
+        let (bytes, _) = take_rows(&padded, handling, 4, 2, &offered)
+            .unwrap()
+            .expect("the buffer holds a frame");
+        assert_eq!(bytes.as_slice(), tight);
+        assert_eq!(*requested.lock().unwrap(), [tight.len()]);
+    }
+
+    #[test]
     fn a_buffer_short_of_the_frame_is_dropped() {
         // The chroma row ends at byte 16, so 15 bytes cannot hold the frame.
         let (padded, _) = padded_nv12();
         for requested in [false, true] {
             let handling = row_handling(CapturePixelFormat::Nv12, 4, 6, requested);
-            assert_eq!(take_rows(&padded[..15], handling, 4, 2), None);
+            let taken = take_rows(&padded[..15], handling, 4, 2, &HostAllocator::heap()).unwrap();
+            assert!(taken.is_none());
         }
     }
 

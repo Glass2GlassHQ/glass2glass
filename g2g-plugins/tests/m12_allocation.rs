@@ -55,6 +55,7 @@ impl PoolSrc {
 
     fn pool_buffer_size(&self) -> usize {
         self.proposed
+            .clone()
             .map(|p| p.size_bytes)
             .unwrap_or(self.fallback_size)
     }
@@ -80,7 +81,7 @@ impl SourceLoop for PoolSrc {
     }
 
     fn configure_allocation(&mut self, params: &AllocationParams) {
-        self.proposed = Some(*params);
+        self.proposed = Some(params.clone());
     }
 
     /// A test fake standing in for a domain-flexible producer (eg `NvdecCuda`),
@@ -92,7 +93,12 @@ impl SourceLoop for PoolSrc {
 
     fn run<'a>(&'a mut self, out: &'a mut dyn OutputSink) -> Self::RunFuture<'a> {
         let size = self.pool_buffer_size();
-        let count = self.proposed.map(|p| p.min_buffers).unwrap_or(1).max(1);
+        let count = self
+            .proposed
+            .as_ref()
+            .map(|p| p.min_buffers)
+            .unwrap_or(1)
+            .max(1);
         Box::pin(async move {
             // Real pool allocation from the negotiated parameters.
             let pool: BufferPool<Box<[u8]>> = BufferPool::new_byte_pool(count, size);
@@ -141,7 +147,7 @@ impl AsyncElement for ProposingSink {
     }
 
     fn propose_allocation(&self, _caps: &Caps) -> Option<AllocationParams> {
-        self.proposal
+        self.proposal.clone()
     }
 
     fn process<'a>(
@@ -180,13 +186,13 @@ impl AsyncElement for FoldingTransform {
     }
 
     fn configure_allocation(&mut self, params: &AllocationParams) {
-        self.seen_downstream = Some(*params);
+        self.seen_downstream = Some(params.clone());
     }
 
     fn propose_allocation(&self, _caps: &Caps) -> Option<AllocationParams> {
         // Fold the downstream proposal with this element's own requirement.
         let own = AllocationParams::system(self.own_min_size, 1);
-        Some(match self.seen_downstream {
+        Some(match self.seen_downstream.clone() {
             Some(downstream) => downstream.merge(own),
             None => own,
         })

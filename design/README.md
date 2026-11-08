@@ -241,9 +241,13 @@ launch holds its `Read` buffers until an event recorded after the kernel, since
 libhiprtc and libnvrtc ship with the HIP and CUDA toolkits, not the drivers, so a
 host with only the drivers returns `LibraryNotFound` from `compile`.
 
-`hipupload` copies a system frame into a pinned staging buffer, then into
-device memory from a pool on its own stream, so the element returns before the
-GPU copy finishes. On NVIDIA it wraps a CUDA frame as a Hip frame with the
+`hipupload` offers upstream pinned host buffers from a pool
+(`hipHostMalloc` / `cuMemAllocHost`) through `AllocationParams::host_allocator`,
+so `v4l2src` and `libcamerasrc` copy captures straight into them. A frame in
+one of those buffers goes to device memory from a pool on `hipupload`'s own
+stream, and its buffer returns to the pinned pool once the copy finishes, so
+the element returns before the GPU copy does. Any other system frame is first
+copied into a buffer leased from the same pool. On NVIDIA it wraps a CUDA frame as a Hip frame with the
 CUDA pitches as its plane layout, and `hipdownload` hands a Hip frame back as
 CUDA on the primary context when the consumer takes only CUDA. A kernel in
 the primary context reads memory allocated in another context on the same
@@ -264,8 +268,8 @@ A frame carrying `wgpudmabuf`'s zero-stall semaphore is refused, since HIP does
 not wait on it. ROCm never closes an imported fd, so `HipExternalBuffer` holds
 it until the import is destroyed.
 
-`hipconvertscale` converts and scales Hip frames between NV12, I420, P010,
-RGBA, BGRA, RGB, the planar `RGBP` and `BGRP`, and the float `RGBA_F16LE`,
+`hipconvertscale` converts and scales Hip frames between NV12, I420, YUY2,
+P010, RGBA, BGRA, RGB, the planar `RGBP` and `BGRP`, and the float `RGBA_F16LE`,
 `RGBA_F32LE`, `RGB_F16LE`, `RGB_F32LE`, `RGBP_F16LE` and `RGBP_F32LE`, whose
 samples run 0.0 to 1.0 as in GStreamer 1.30. `HipConverter` holds one kernel
 compiled for the input and output format pair, with the formats, each side's

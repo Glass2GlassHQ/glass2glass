@@ -1890,7 +1890,7 @@ mod run_tests {
         }
 
         fn propose_allocation(&self, _caps: &Caps) -> Option<AllocationParams> {
-            self.proposal
+            self.proposal.clone()
         }
 
         fn meta_requests(&self) -> crate::meta::MetaRequests {
@@ -2026,7 +2026,7 @@ mod run_tests {
         let mut source = TestSource::default();
         let emits = SourceLoop::output_domains(&source);
         let mut sink = TestSink {
-            proposal: Some(cuda_or_system),
+            proposal: Some(cuda_or_system.clone()),
             ..TestSink::default()
         };
         let stats = block_on(run_simple_pipeline(

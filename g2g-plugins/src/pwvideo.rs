@@ -460,7 +460,9 @@ impl PlaneLayout {
     /// yields `None` instead of a short or out-of-range copy. `dst` may hold a
     /// partial frame on `None`, so discard it.
     pub(crate) fn copy_tight(&self, src: &[u8], stride: usize, dst: &mut Vec<u8>) -> Option<()> {
-        crate::paddedrows::pack_tight(src, self.format, self.width, self.height, stride, dst)
+        crate::paddedrows::pack_tight(src, self.format, self.width, self.height, stride, |row| {
+            dst.extend_from_slice(row)
+        })
     }
 
     pub(crate) fn copy_planes_tight(

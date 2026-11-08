@@ -266,7 +266,7 @@ impl MfEncode {
 
     /// The downstream consumer's recorded allocation proposal, if any.
     pub fn requested_alloc(&self) -> Option<AllocationParams> {
-        self.requested_alloc
+        self.requested_alloc.clone()
     }
 
     /// Feed one raw picture, then drain whatever the encoder is ready to
@@ -530,7 +530,7 @@ impl AsyncElement for MfEncode {
     /// emits system-memory bitstream buffers sized per encoded frame, so the
     /// request is recorded for diagnostics.
     fn configure_allocation(&mut self, params: &AllocationParams) {
-        self.requested_alloc = Some(*params);
+        self.requested_alloc = Some(params.clone());
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {

@@ -16352,7 +16352,7 @@ impl AsyncElement for VulkanVideoDec {
     /// `WgpuTexture`-capable sink (e.g. `WgpuSink`) keeps the frame on the GPU;
     /// anything else makes the decoder emit system NV12.
     fn configure_allocation(&mut self, params: &AllocationParams) {
-        if let Ok(resolved) = params.resolve_for_producer(Self::OUTPUT_DOMAINS) {
+        if let Ok(resolved) = params.clone().resolve_for_producer(Self::OUTPUT_DOMAINS) {
             self.out_domain = resolved.domain;
         }
     }
