@@ -2,10 +2,10 @@
 
 use std::sync::Arc;
 
-use g2g_core::memory::{HipVendor, MemoryDomain, MemoryDomainKind};
+use g2g_core::memory::{GpuVendor, MemoryDomain, MemoryDomainKind};
 use g2g_plugins::hip::{HipDevice, HipEvent, HipMemory, HipStream};
 
-fn open_device(vendor: HipVendor) -> Option<Arc<HipDevice>> {
+fn open_device(vendor: GpuVendor) -> Option<Arc<HipDevice>> {
     match HipDevice::open(vendor, 0) {
         Ok(device) => Some(device),
         Err(error) => {
@@ -15,7 +15,7 @@ fn open_device(vendor: HipVendor) -> Option<Arc<HipDevice>> {
     }
 }
 
-fn bytes_reach_a_second_stream_through_a_shared_buffer(vendor: HipVendor) {
+fn bytes_reach_a_second_stream_through_a_shared_buffer(vendor: GpuVendor) {
     let Some(device) = open_device(vendor) else {
         return;
     };
@@ -50,7 +50,7 @@ fn bytes_reach_a_second_stream_through_a_shared_buffer(vendor: HipVendor) {
 const RELEASE_ALLOCATION: usize = 256 << 20;
 const RELEASE_ROUNDS: usize = 200;
 
-fn dropped_buffers_are_freed(vendor: HipVendor) {
+fn dropped_buffers_are_freed(vendor: GpuVendor) {
     let Some(device) = open_device(vendor) else {
         return;
     };
@@ -67,20 +67,20 @@ fn dropped_buffers_are_freed(vendor: HipVendor) {
 
 #[test]
 fn amd_bytes_reach_a_second_stream_through_a_shared_buffer() {
-    bytes_reach_a_second_stream_through_a_shared_buffer(HipVendor::Amd);
+    bytes_reach_a_second_stream_through_a_shared_buffer(GpuVendor::Amd);
 }
 
 #[test]
 fn nvidia_bytes_reach_a_second_stream_through_a_shared_buffer() {
-    bytes_reach_a_second_stream_through_a_shared_buffer(HipVendor::Nvidia);
+    bytes_reach_a_second_stream_through_a_shared_buffer(GpuVendor::Nvidia);
 }
 
 #[test]
 fn amd_dropped_buffers_are_freed() {
-    dropped_buffers_are_freed(HipVendor::Amd);
+    dropped_buffers_are_freed(GpuVendor::Amd);
 }
 
 #[test]
 fn nvidia_dropped_buffers_are_freed() {
-    dropped_buffers_are_freed(HipVendor::Nvidia);
+    dropped_buffers_are_freed(GpuVendor::Nvidia);
 }

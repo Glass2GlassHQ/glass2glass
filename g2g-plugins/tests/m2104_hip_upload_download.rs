@@ -5,7 +5,7 @@ mod collect_sink;
 
 use collect_sink::CollectSink;
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{DomainSet, HipVendor, MemoryDomain, MemoryDomainKind, SystemSlice};
+use g2g_core::memory::{DomainSet, GpuVendor, MemoryDomain, MemoryDomainKind, SystemSlice};
 use g2g_core::runtime::block_on;
 use g2g_core::{
     AllocationParams, AsyncElement, Caps, Colorimetry, Dim, Interlace, PropValue, Rate,
@@ -74,7 +74,7 @@ fn system_bytes(frame: &Frame) -> &[u8] {
     frame.domain.as_system_slice().expect("a system frame")
 }
 
-fn device_present(vendor: HipVendor) -> bool {
+fn device_present(vendor: GpuVendor) -> bool {
     match HipDevice::open(vendor, 0) {
         Ok(_) => true,
         Err(error) => {
@@ -84,13 +84,13 @@ fn device_present(vendor: HipVendor) -> bool {
     }
 }
 
-fn system_frames_round_trip(vendor: HipVendor) {
+fn system_frames_round_trip(vendor: GpuVendor) {
     if !device_present(vendor) {
         return;
     }
     let vendor_name = match vendor {
-        HipVendor::Amd => "amd",
-        HipVendor::Nvidia => "nvidia",
+        GpuVendor::Amd => "amd",
+        GpuVendor::Nvidia => "nvidia",
     };
     let mut upload = HipUpload::new();
     upload
@@ -120,12 +120,12 @@ fn system_frames_round_trip(vendor: HipVendor) {
 
 #[test]
 fn amd_system_frames_round_trip() {
-    system_frames_round_trip(HipVendor::Amd);
+    system_frames_round_trip(GpuVendor::Amd);
 }
 
 #[test]
 fn nvidia_system_frames_round_trip() {
-    system_frames_round_trip(HipVendor::Nvidia);
+    system_frames_round_trip(GpuVendor::Nvidia);
 }
 
 fn kernel_copy(
@@ -162,7 +162,7 @@ fn kernel_copy(
 
 #[test]
 fn nvidia_cuda_frames_cross_without_a_copy() {
-    if !device_present(HipVendor::Nvidia) {
+    if !device_present(GpuVendor::Nvidia) {
         return;
     }
     let bytes = nv12_frame(0);
@@ -180,7 +180,7 @@ fn nvidia_cuda_frames_cross_without_a_copy() {
     let MemoryDomain::Hip(buffer) = &hip_frame.domain else {
         panic!("upload left a {:?} frame", hip_frame.domain.kind());
     };
-    assert_eq!(buffer.vendor, HipVendor::Nvidia);
+    assert_eq!(buffer.vendor, GpuVendor::Nvidia);
     assert_eq!(
         buffer.device_pointer, luma_ptr,
         "the Hip frame is the CUDA memory"
@@ -190,7 +190,7 @@ fn nvidia_cuda_frames_cross_without_a_copy() {
         luma_pitch
     );
 
-    let device = HipDevice::open(HipVendor::Nvidia, 0).unwrap();
+    let device = HipDevice::open(GpuVendor::Nvidia, 0).unwrap();
     let mut wrapped_bytes = vec![0u8; buffer.len];
     HipStream::new(&device)
         .unwrap()
@@ -273,7 +273,7 @@ impl g2g_core::PipelineClock for ZeroClock {
 
 #[test]
 fn a_launch_line_splices_hipupload_in_front_of_hipdownload() {
-    if !device_present(HipVendor::Amd) && !device_present(HipVendor::Nvidia) {
+    if !device_present(GpuVendor::Amd) && !device_present(GpuVendor::Nvidia) {
         return;
     }
     let bytes = nv12_frame(0);

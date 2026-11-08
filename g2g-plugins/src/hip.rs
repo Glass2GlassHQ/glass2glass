@@ -11,7 +11,7 @@ use std::os::fd::{AsRawFd, OwnedFd};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Condvar, Mutex, OnceLock, PoisonError};
 
-use g2g_core::memory::{HipKeepAlive, HipVendor, OwnedHipBuffer};
+use g2g_core::memory::{GpuVendor, HipKeepAlive, OwnedHipBuffer};
 use g2g_core::{g2g_error, G2gError, HardwareError};
 
 use crate::cuda_driver_ffi as cuda;
@@ -302,14 +302,14 @@ impl Drop for Bound<'_> {
 }
 
 impl HipDevice {
-    pub fn open(vendor: HipVendor, ordinal: i32) -> Result<Arc<Self>, G2gError> {
+    pub fn open(vendor: GpuVendor, ordinal: i32) -> Result<Arc<Self>, G2gError> {
         let backend = match vendor {
-            HipVendor::Amd => {
+            GpuVendor::Amd => {
                 // SAFETY: hipSetDevice validates the ordinal.
                 check(unsafe { hip_set_device(ordinal) })?;
                 Backend::Amd
             }
-            HipVendor::Nvidia => {
+            GpuVendor::Nvidia => {
                 cuda::init_driver()?;
                 let mut device: cuda::CuDevice = 0;
                 let mut context: cuda::CuContext = core::ptr::null_mut();
@@ -327,10 +327,10 @@ impl HipDevice {
         Ok(Arc::new(Self { ordinal, backend }))
     }
 
-    pub fn vendor(&self) -> HipVendor {
+    pub fn vendor(&self) -> GpuVendor {
         match self.backend {
-            Backend::Amd => HipVendor::Amd,
-            Backend::Nvidia { .. } => HipVendor::Nvidia,
+            Backend::Amd => GpuVendor::Amd,
+            Backend::Nvidia { .. } => GpuVendor::Nvidia,
         }
     }
 

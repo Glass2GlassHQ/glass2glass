@@ -9,7 +9,7 @@ use std::sync::{Mutex, OnceLock, PoisonError};
 
 use g2g_core::log::{short_type_name, Target};
 use g2g_core::memory::{
-    DomainSet, GpuDevice, HipVendor, MemoryDomainKind, OwnedCudaBuffer, OwnedDmaBuf, OwnedHipBuffer,
+    DomainSet, GpuDevice, GpuVendor, MemoryDomainKind, OwnedCudaBuffer, OwnedDmaBuf, OwnedHipBuffer,
 };
 use g2g_core::meta::{Plane, PlaneLayout};
 use g2g_core::{
@@ -177,7 +177,7 @@ impl HipUpload {
         Ok(self.gpu.insert(gpu))
     }
 
-    fn source_gpu(&mut self, vendor: HipVendor, ordinal: i32) -> Result<&SourceGpu, G2gError> {
+    fn source_gpu(&mut self, vendor: GpuVendor, ordinal: i32) -> Result<&SourceGpu, G2gError> {
         let source = match self.source.take() {
             Some(source)
                 if (source.device.vendor(), source.device.ordinal()) == (vendor, ordinal) =>
@@ -299,7 +299,7 @@ fn upload_dmabuf(
     let (layout, size) = single_stride_layout(format, width, height, dmabuf.offset, dmabuf.stride)
         .ok_or(G2gError::CapsMismatch)?;
     // hip imports dma-bufs only on amd
-    if gpu.device.vendor() == HipVendor::Amd && !gpu.dmabuf_import_failed {
+    if gpu.device.vendor() == GpuVendor::Amd && !gpu.dmabuf_import_failed {
         match import_dmabuf(gpu, dmabuf, size) {
             Ok(buffer) => return Ok(buffer.with_plane_layout(layout)),
             Err(error) => {
@@ -454,7 +454,7 @@ impl AsyncElement for HipUpload {
                     let buffer = match domain {
                         MemoryDomain::Hip(buffer) => self.onto_chosen_device(buffer)?,
                         MemoryDomain::Cuda(cuda) => {
-                            let source = self.source_gpu(HipVendor::Nvidia, cuda.device_ordinal)?;
+                            let source = self.source_gpu(GpuVendor::Nvidia, cuda.device_ordinal)?;
                             let wrapped = wrap_cuda(source, &cuda)?;
                             self.onto_chosen_device(wrapped)?
                         }
@@ -556,7 +556,7 @@ mod tests {
             .unpadded_frame_bytes(WIDTH, HEIGHT)
             .unwrap() as usize;
         let bytes: Vec<u8> = (0..len).map(|index| (index * 7) as u8).collect();
-        for (vendor, name) in [(HipVendor::Amd, "amd"), (HipVendor::Nvidia, "nvidia")] {
+        for (vendor, name) in [(GpuVendor::Amd, "amd"), (GpuVendor::Nvidia, "nvidia")] {
             if let Err(error) = HipDevice::open(vendor, 0) {
                 std::eprintln!("skipping: no {vendor:?} HIP device 0: {error:?}");
                 continue;

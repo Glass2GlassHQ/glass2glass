@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use g2g_core::memory::{HipVendor, OwnedHipBuffer};
+use g2g_core::memory::{GpuVendor, OwnedHipBuffer};
 use g2g_core::{G2gError, HardwareError};
 use g2g_plugins::hip::{
     HipDevice, HipEvent, HipKernelModule, HipMemory, HipStream, KernelArgument,
@@ -21,7 +21,7 @@ const BLOCK: u32 = 256;
 // a power of two keeps every product exact, so fused multiply-add on the GPU rounds the same as the CPU
 const SCALE: f32 = 0.5;
 
-fn open_device(vendor: HipVendor) -> Option<Arc<HipDevice>> {
+fn open_device(vendor: GpuVendor) -> Option<Arc<HipDevice>> {
     match HipDevice::open(vendor, 0) {
         Ok(device) => Some(device),
         Err(error) => {
@@ -50,7 +50,7 @@ fn ready_buffer(stream: &HipStream, memory: HipMemory, len: usize) -> OwnedHipBu
     memory.into_buffer(ready, len).unwrap()
 }
 
-fn kernel_output_matches_the_cpu(vendor: HipVendor) {
+fn kernel_output_matches_the_cpu(vendor: GpuVendor) {
     let Some(device) = open_device(vendor) else {
         return;
     };
@@ -115,7 +115,7 @@ const DELAY_CYCLES: u32 = 200_000_000;
 // few enough threads to run in at most two waves on the Radeon 680M
 const DELAYED_COUNT: u32 = 1 << 12;
 
-fn read_buffers_stay_allocated_while_the_kernel_runs(vendor: HipVendor) {
+fn read_buffers_stay_allocated_while_the_kernel_runs(vendor: GpuVendor) {
     let Some(device) = open_device(vendor) else {
         return;
     };
@@ -172,7 +172,7 @@ fn read_buffers_stay_allocated_while_the_kernel_runs(vendor: HipVendor) {
     );
 }
 
-fn compile_errors_are_reported(vendor: HipVendor) {
+fn compile_errors_are_reported(vendor: GpuVendor) {
     let Some(device) = open_device(vendor) else {
         return;
     };
@@ -190,30 +190,30 @@ fn compile_errors_are_reported(vendor: HipVendor) {
 
 #[test]
 fn amd_kernel_output_matches_the_cpu() {
-    kernel_output_matches_the_cpu(HipVendor::Amd);
+    kernel_output_matches_the_cpu(GpuVendor::Amd);
 }
 
 #[test]
 fn nvidia_kernel_output_matches_the_cpu() {
-    kernel_output_matches_the_cpu(HipVendor::Nvidia);
+    kernel_output_matches_the_cpu(GpuVendor::Nvidia);
 }
 
 #[test]
 fn amd_compile_errors_are_reported() {
-    compile_errors_are_reported(HipVendor::Amd);
+    compile_errors_are_reported(GpuVendor::Amd);
 }
 
 #[test]
 fn nvidia_compile_errors_are_reported() {
-    compile_errors_are_reported(HipVendor::Nvidia);
+    compile_errors_are_reported(GpuVendor::Nvidia);
 }
 
 #[test]
 fn amd_read_buffers_stay_allocated_while_the_kernel_runs() {
-    read_buffers_stay_allocated_while_the_kernel_runs(HipVendor::Amd);
+    read_buffers_stay_allocated_while_the_kernel_runs(GpuVendor::Amd);
 }
 
 #[test]
 fn nvidia_read_buffers_stay_allocated_while_the_kernel_runs() {
-    read_buffers_stay_allocated_while_the_kernel_runs(HipVendor::Nvidia);
+    read_buffers_stay_allocated_while_the_kernel_runs(GpuVendor::Nvidia);
 }

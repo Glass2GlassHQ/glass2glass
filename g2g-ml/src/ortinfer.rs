@@ -527,7 +527,7 @@ impl LoadedModel for OrtModel {
         &mut self,
         tensor: &g2g_core::memory::OwnedHipBuffer,
     ) -> Result<(Box<[u8]>, Vec<u32>), G2gError> {
-        use g2g_core::memory::HipVendor;
+        use g2g_core::memory::GpuVendor;
         use g2g_plugins::hip::HipDevice;
         let (width, height) = (self.geometry.width, self.geometry.height);
         let tight =
@@ -556,8 +556,8 @@ impl LoadedModel for OrtModel {
         // onnx runtime reads its inputs on its own stream, which does not wait on the producer's event
         device.wait_until_ready(tensor)?;
         let memory_device = match tensor.vendor {
-            HipVendor::Amd => ::ort::memory::AllocationDevice::HIP,
-            HipVendor::Nvidia => ::ort::memory::AllocationDevice::CUDA,
+            GpuVendor::Amd => ::ort::memory::AllocationDevice::HIP,
+            GpuVendor::Nvidia => ::ort::memory::AllocationDevice::CUDA,
         };
         self.run_device_f32(tensor.device_pointer, memory_device)
     }

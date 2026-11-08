@@ -11,7 +11,7 @@ use core::pin::Pin;
 use std::boxed::Box;
 use std::sync::{Arc, Mutex};
 
-use g2g_core::memory::{DomainSet, GpuDevice, HipVendor, SystemSlice};
+use g2g_core::memory::{DomainSet, GpuDevice, GpuVendor, SystemSlice};
 use g2g_core::runtime::{auto_plug_domain_converters, run_graph, GraphNode, SourceLoop};
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, Frame, FrameTiming,
@@ -626,11 +626,11 @@ impl AsyncElement for GpuStage {
 }
 
 const FIRST_GPU: GpuDevice = GpuDevice {
-    vendor: HipVendor::Nvidia,
+    vendor: GpuVendor::Nvidia,
     ordinal: 0,
 };
 const SECOND_GPU: GpuDevice = GpuDevice {
-    vendor: HipVendor::Amd,
+    vendor: GpuVendor::Amd,
     ordinal: 0,
 };
 

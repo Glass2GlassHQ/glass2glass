@@ -1,7 +1,7 @@
 #![cfg(all(target_os = "linux", feature = "ort-hip", feature = "launch"))]
 
 use g2g_core::clock::MonotonicClock;
-use g2g_core::memory::HipVendor;
+use g2g_core::memory::GpuVendor;
 use g2g_core::runtime::{block_on, parse_launch, run_graph, Registry};
 use g2g_plugins::appsink::register_appsink_pull;
 use g2g_plugins::appsrc::register_appsrc;
@@ -34,7 +34,7 @@ fn registry() -> Registry {
     registry
 }
 
-fn hip_device_present(vendor: HipVendor) -> bool {
+fn hip_device_present(vendor: GpuVendor) -> bool {
     match HipDevice::open(vendor, 0) {
         Ok(_) => true,
         Err(error) => {
@@ -100,7 +100,7 @@ fn assert_same_tensors(on_gpu: &[Vec<u8>], on_cpu: &[Vec<u8>]) {
     }
 }
 
-fn provider_reads_hip_memory(vendor: HipVendor, vendor_name: &str, provider: &str) {
+fn provider_reads_hip_memory(vendor: GpuVendor, vendor_name: &str, provider: &str) {
     if !hip_device_present(vendor) {
         return;
     }
@@ -115,13 +115,13 @@ fn provider_reads_hip_memory(vendor: HipVendor, vendor_name: &str, provider: &st
 #[cfg(feature = "migraphx")]
 #[test]
 fn migraphx_reads_hipconvertscale_output_in_place() {
-    provider_reads_hip_memory(HipVendor::Amd, "amd", "migraphx");
+    provider_reads_hip_memory(GpuVendor::Amd, "amd", "migraphx");
 }
 
 #[cfg(feature = "cuda")]
 #[test]
 fn cuda_reads_hipconvertscale_output_in_place() {
-    provider_reads_hip_memory(HipVendor::Nvidia, "nvidia", "cuda");
+    provider_reads_hip_memory(GpuVendor::Nvidia, "nvidia", "cuda");
 }
 
 // nvdec's frames live in its own CUDA context, and hipupload wraps them without a copy
@@ -139,7 +139,7 @@ fn cuda_infers_on_nvdec_frames() {
         eprintln!("skipping: built without g2g-plugins/nvdec");
         return;
     }
-    if !hip_device_present(HipVendor::Nvidia) {
+    if !hip_device_present(GpuVendor::Nvidia) {
         return;
     }
     let head =

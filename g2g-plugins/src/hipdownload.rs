@@ -7,7 +7,7 @@ use alloc::vec;
 
 use g2g_core::log::{short_type_name, Target};
 use g2g_core::memory::{
-    CudaKeepAlive, DomainSet, HipVendor, MemoryDomainKind, OwnedCudaBuffer, OwnedHipBuffer,
+    CudaKeepAlive, DomainSet, GpuVendor, MemoryDomainKind, OwnedCudaBuffer, OwnedHipBuffer,
     SystemSlice,
 };
 use g2g_core::{
@@ -72,7 +72,7 @@ impl HipDownload {
 
     fn as_cuda(&mut self, buffer: &OwnedHipBuffer) -> Result<MemoryDomain, G2gError> {
         let category = Target::category(short_type_name::<Self>());
-        if buffer.vendor != HipVendor::Nvidia {
+        if buffer.vendor != GpuVendor::Nvidia {
             g2g_error!(
                 category,
                 "only a Hip frame on an NVIDIA device can become a CUDA frame, this one is on {:?}",

@@ -222,7 +222,7 @@ device-to-host copy. Branches treat the shared memory as read-only, and a
 mutating branch copies first, as the per-frame metadata does copy-on-write.
 
 `MemoryDomain::Hip` is linear HIP device memory on an AMD GPU, or on an NVIDIA
-GPU through HIP's CUDA backend (`HipVendor`). `g2g_plugins::hip` loads
+GPU through HIP's CUDA backend (`GpuVendor`). `g2g_plugins::hip` loads
 `libamdhip64` or `libcuda` at run time, and on NVIDIA it uses the device's
 primary context, the one ONNX Runtime's CUDA provider uses. Each buffer carries a
 ready event recorded after the producer's last write. A consumer's stream waits

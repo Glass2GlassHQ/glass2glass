@@ -62,7 +62,7 @@ use crate::vp9parse::{frame_header, superframe_frames, Vp9FrameKind};
 use g2g_core::g2g_error;
 use g2g_core::log::{short_type_name, Target};
 use g2g_core::memory::{
-    CudaKeepAlive, DomainSet, GpuDevice, HipVendor, MemoryDomainKind, OwnedCudaBuffer,
+    CudaKeepAlive, DomainSet, GpuDevice, GpuVendor, MemoryDomainKind, OwnedCudaBuffer,
 };
 use g2g_core::{
     AllocationParams, AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim,
@@ -1653,7 +1653,7 @@ impl AsyncElement for NvDec {
 
     fn gpu_device(&self) -> Option<GpuDevice> {
         Some(GpuDevice {
-            vendor: HipVendor::Nvidia,
+            vendor: GpuVendor::Nvidia,
             ordinal: self.cuda_device_id,
         })
     }

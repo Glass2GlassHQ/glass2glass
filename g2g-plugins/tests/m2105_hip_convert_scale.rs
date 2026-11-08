@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use collect_sink::CollectSink;
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{HipVendor, MemoryDomain, SystemSlice};
+use g2g_core::memory::{GpuVendor, MemoryDomain, SystemSlice};
 use g2g_core::meta::Orientation;
 use g2g_core::runtime::block_on;
 use g2g_core::{
@@ -22,7 +22,7 @@ const HEIGHT: u32 = 48;
 // VideoConvert rounds through 8-bit fixed-point coefficients, the kernel through floats
 const CPU_TOLERANCE: u8 = 2;
 const F16_TOLERANCE: f32 = 1e-3;
-const VENDORS: [HipVendor; 2] = [HipVendor::Amd, HipVendor::Nvidia];
+const VENDORS: [GpuVendor; 2] = [GpuVendor::Amd, GpuVendor::Nvidia];
 
 fn caps(format: RawVideoFormat, width: u32, height: u32) -> Caps {
     Caps::RawVideo {
@@ -35,7 +35,7 @@ fn caps(format: RawVideoFormat, width: u32, height: u32) -> Caps {
     }
 }
 
-fn device(vendor: HipVendor) -> Option<Arc<HipDevice>> {
+fn device(vendor: GpuVendor) -> Option<Arc<HipDevice>> {
     match HipDevice::open(vendor, 0) {
         Ok(device) => Some(device),
         Err(error) => {

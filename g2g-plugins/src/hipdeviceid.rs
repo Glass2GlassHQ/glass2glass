@@ -1,6 +1,6 @@
 use alloc::sync::Arc;
 
-use g2g_core::memory::{GpuDevice, HipVendor, OwnedHipBuffer};
+use g2g_core::memory::{GpuDevice, GpuVendor, OwnedHipBuffer};
 use g2g_core::{G2gError, PropError, PropKind, PropValue, PropertySpec};
 
 use crate::hip::HipDevice;
@@ -23,7 +23,7 @@ pub(crate) const HIP_VENDOR_PROP: PropertySpec = PropertySpec::new(
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct HipDeviceChoice {
-    vendor: Option<HipVendor>,
+    vendor: Option<GpuVendor>,
     device_id: Option<i32>,
 }
 
@@ -55,8 +55,8 @@ impl HipDeviceChoice {
         let ordinal = self.device_id.unwrap_or(0);
         match self.vendor {
             Some(vendor) => HipDevice::open(vendor, ordinal),
-            None => HipDevice::open(HipVendor::Amd, ordinal)
-                .or_else(|_| HipDevice::open(HipVendor::Nvidia, ordinal)),
+            None => HipDevice::open(GpuVendor::Amd, ordinal)
+                .or_else(|_| HipDevice::open(GpuVendor::Nvidia, ordinal)),
         }
     }
 
@@ -86,8 +86,8 @@ impl HipDeviceChoice {
     fn set_vendor(&mut self, value: &PropValue) -> Result<(), PropError> {
         self.vendor = match value.as_str().ok_or(PropError::Type)? {
             "unknown" => None,
-            "amd" => Some(HipVendor::Amd),
-            "nvidia" => Some(HipVendor::Nvidia),
+            "amd" => Some(GpuVendor::Amd),
+            "nvidia" => Some(GpuVendor::Nvidia),
             _ => return Err(PropError::Value),
         };
         Ok(())
@@ -99,8 +99,8 @@ impl HipDeviceChoice {
             "vendor" => Some(PropValue::Str(
                 match self.vendor {
                     None => "unknown",
-                    Some(HipVendor::Amd) => "amd",
-                    Some(HipVendor::Nvidia) => "nvidia",
+                    Some(GpuVendor::Amd) => "amd",
+                    Some(GpuVendor::Nvidia) => "nvidia",
                 }
                 .into(),
             )),

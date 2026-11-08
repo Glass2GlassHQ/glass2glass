@@ -34,7 +34,7 @@ use alloc::boxed::Box;
 use alloc::sync::Arc;
 use alloc::vec;
 
-use g2g_core::memory::{CudaKeepAlive, GpuDevice, HipVendor, MemoryDomainKind, OwnedCudaBuffer};
+use g2g_core::memory::{CudaKeepAlive, GpuDevice, GpuVendor, MemoryDomainKind, OwnedCudaBuffer};
 use g2g_core::runtime::{auto_plug_domain_converters, GraphNode};
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, Frame,
@@ -602,7 +602,7 @@ pub fn cuda_domain_converter(
         }
         (MemoryDomainKind::System, MemoryDomainKind::Cuda) => {
             let ordinal = device
-                .filter(|device| device.vendor == HipVendor::Nvidia)
+                .filter(|device| device.vendor == GpuVendor::Nvidia)
                 .map_or(DEFAULT_CUDA_DEVICE_ID, |device| device.ordinal);
             Some(GraphNode::element(
                 CudaUpload::new().with_cuda_device_id(ordinal),

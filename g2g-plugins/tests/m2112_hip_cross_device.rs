@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use collect_sink::CollectSink;
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{GpuDevice, HipVendor, MemoryDomain, OwnedHipBuffer};
+use g2g_core::memory::{GpuDevice, GpuVendor, MemoryDomain, OwnedHipBuffer};
 use g2g_core::runtime::{block_on, parse_launch, run_graph};
 use g2g_core::{
     AsyncElement, Caps, Colorimetry, Dim, Interlace, PipelineClock, Rate, RawVideoFormat,
@@ -40,7 +40,7 @@ fn both_gpus() -> Option<[Arc<HipDevice>; 2]> {
             None
         }
     };
-    Some([open(HipVendor::Nvidia)?, open(HipVendor::Amd)?])
+    Some([open(GpuVendor::Nvidia)?, open(GpuVendor::Amd)?])
 }
 
 fn rgba_frame() -> Vec<u8> {

@@ -1325,7 +1325,7 @@ pub trait WgpuBufferKeepAlive: core::fmt::Debug + Send + Sync {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum HipVendor {
+pub enum GpuVendor {
     Amd,
     Nvidia,
 }
@@ -1333,7 +1333,7 @@ pub enum HipVendor {
 // NVIDIA ordinals are CUDA's, which HIP on NVIDIA shares
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct GpuDevice {
-    pub vendor: HipVendor,
+    pub vendor: GpuVendor,
     pub ordinal: i32,
 }
 
@@ -1343,7 +1343,7 @@ pub struct OwnedHipBuffer {
     pub device_pointer: u64,
     // the allocation may be larger than the payload
     pub len: usize,
-    pub vendor: HipVendor,
+    pub vendor: GpuVendor,
     // hip and cuda number their own devices from 0
     pub device_ordinal: i32,
     // hipEvent_t, or CUevent on nvidia, recorded after the producer's last write
@@ -1358,7 +1358,7 @@ impl OwnedHipBuffer {
     pub fn new(
         device_pointer: u64,
         len: usize,
-        vendor: HipVendor,
+        vendor: GpuVendor,
         device_ordinal: i32,
         ready_event: u64,
         keep_alive: Arc<dyn HipKeepAlive>,

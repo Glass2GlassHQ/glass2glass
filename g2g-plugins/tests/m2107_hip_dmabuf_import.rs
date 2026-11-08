@@ -9,7 +9,7 @@ use std::sync::{Mutex, PoisonError};
 
 use collect_sink::CollectSink;
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{HipVendor, MemoryDomain, OwnedDmaBuf};
+use g2g_core::memory::{GpuVendor, MemoryDomain, OwnedDmaBuf};
 use g2g_core::runtime::block_on;
 use g2g_core::{AsyncElement, Caps, Colorimetry, Dim, Interlace, PropValue, Rate, RawVideoFormat};
 use g2g_plugins::hip::HipDevice;
@@ -42,7 +42,7 @@ fn tight_nv12(seed: usize) -> Vec<u8> {
         .collect()
 }
 
-fn device_present(vendor: HipVendor) -> bool {
+fn device_present(vendor: GpuVendor) -> bool {
     match HipDevice::open(vendor, 0) {
         Ok(_) => true,
         Err(error) => {
@@ -104,7 +104,7 @@ fn padded_udmabuf(tight: &[u8]) -> Option<OwnedDmaBuf> {
     Some(dmabuf)
 }
 
-fn copies_a_padded_udmabuf(vendor: HipVendor, vendor_name: &str) {
+fn copies_a_padded_udmabuf(vendor: GpuVendor, vendor_name: &str) {
     let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(PoisonError::into_inner);
     if !device_present(vendor) {
         return;
@@ -120,12 +120,12 @@ fn copies_a_padded_udmabuf(vendor: HipVendor, vendor_name: &str) {
 
 #[test]
 fn amd_copies_a_dmabuf_hip_cannot_import() {
-    copies_a_padded_udmabuf(HipVendor::Amd, "amd");
+    copies_a_padded_udmabuf(GpuVendor::Amd, "amd");
 }
 
 #[test]
 fn nvidia_copies_a_dmabuf_through_the_cpu() {
-    copies_a_padded_udmabuf(HipVendor::Nvidia, "nvidia");
+    copies_a_padded_udmabuf(GpuVendor::Nvidia, "nvidia");
 }
 
 #[cfg(feature = "dmabuf-wgpu")]
@@ -176,7 +176,7 @@ mod amdgpu_exports {
     #[test]
     fn amd_imports_each_pooled_dmabuf_once_and_closes_its_fds() {
         let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(PoisonError::into_inner);
-        if !device_present(HipVendor::Amd) {
+        if !device_present(GpuVendor::Amd) {
             return;
         }
         let pictures = [tight_nv12(4), tight_nv12(5)];
