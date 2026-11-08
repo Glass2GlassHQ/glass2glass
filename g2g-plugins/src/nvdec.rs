@@ -68,7 +68,7 @@ use g2g_core::{
     AllocationParams, AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim,
     ElementMetadata, G2gError, HardwareError, MemoryDomain, OutputSink, PadTemplate, PadTemplates,
     PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, RawVideoFormat, Segment,
-    SystemSlice, VideoCodec,
+    VideoCodec,
 };
 
 /// Number of decode surfaces the parser cycles through. Also the cap on the
@@ -140,6 +140,7 @@ pub struct NvDec {
     /// `configure_allocation` by reconciling the downstream proposal against
     /// [`Self::OUTPUT_DOMAINS`].
     out_domain: MemoryDomainKind,
+    to_host: crate::cuda::CudaToHostCopier,
 }
 
 /// State the parser callbacks read and write (decoder handle, geometry, the ready
@@ -397,6 +398,7 @@ impl NvDec {
             cuda_device_id: crate::cudadeviceid::DEFAULT_CUDA_DEVICE_ID,
             configured: false,
             out_domain: MemoryDomainKind::Cuda,
+            to_host: crate::cuda::CudaToHostCopier::default(),
         }
     }
 
@@ -813,11 +815,7 @@ impl NvDec {
             // settled this decoder's output on System, in which case download it
             // device->host before emitting.
             let domain = if self.out_domain == MemoryDomainKind::System {
-                // SAFETY: `f.buffer`'s plane pointers are valid CUDA device memory
-                // in its context, pinned by the buffer's keep-alive owner for the
-                // duration of this copy.
-                let bytes = unsafe { crate::cuda::download_nv12(&f.buffer, f.format)? };
-                MemoryDomain::System(SystemSlice::from_boxed(bytes))
+                MemoryDomain::System(self.to_host.download(f.buffer, f.format).await?)
             } else {
                 MemoryDomain::Cuda(f.buffer)
             };
@@ -935,6 +933,7 @@ impl Drop for CuvidDecoder {
 struct CuvidMappedFrame {
     owner: Arc<CuvidDecoder>,
     dev_ptr: u64,
+    ready: usize,
 }
 
 // SAFETY: see `CuvidDecoder`; this only unmaps (serialized by the context lock)
@@ -949,7 +948,19 @@ impl core::fmt::Debug for CuvidMappedFrame {
     }
 }
 
-impl CudaKeepAlive for CuvidMappedFrame {}
+impl CudaKeepAlive for CuvidMappedFrame {
+    fn ready_event(&self) -> Option<u64> {
+        Some(self.ready as u64)
+    }
+
+    fn wait_until_ready(&self) -> Result<(), G2gError> {
+        let _ctx = ContextGuard::push(self.owner.ctx.context)?;
+        // SAFETY: the event lives as long as the frame, in the pushed context.
+        cuda_check("cuEventSynchronize", unsafe {
+            ffi::cu_event_synchronize(self.ready as ffi::CuEvent)
+        })
+    }
+}
 
 impl Drop for CuvidMappedFrame {
     fn drop(&mut self) {
@@ -960,6 +971,7 @@ impl Drop for CuvidMappedFrame {
         unsafe {
             let _ = ffi::cu_ctx_push_current(self.owner.ctx.context as *mut core::ffi::c_void);
             let _ = ffi::cuvid_unmap_video_frame(self.owner.decoder, self.dev_ptr);
+            let _ = ffi::cu_event_destroy(self.ready as ffi::CuEvent);
             let mut popped = core::ptr::null_mut();
             let _ = ffi::cu_ctx_pop_current(&mut popped);
         }
@@ -1330,6 +1342,11 @@ fn map_picture(
     if let Some((mapping, frame)) = live {
         return Ok(mapping.ready_frame(frame, pts_ns));
     }
+    let mut ready: ffi::CuEvent = core::ptr::null_mut();
+    // SAFETY: `ready` is a valid out pointer and `process` pushed the decoder's context.
+    cuda_check("cuEventCreate", unsafe {
+        ffi::cu_event_create(&mut ready, ffi::CU_EVENT_DISABLE_TIMING)
+    })?;
     let mut dev_ptr: u64 = 0;
     let mut pitch: u32 = 0;
     // SAFETY: valid decoder + a picture index the parser decoded into; on success
@@ -1338,6 +1355,8 @@ fn map_picture(
         ffi::cuvid_map_video_frame(owner.decoder, picture_index, &mut dev_ptr, &mut pitch, proc)
     };
     if rc != 0 || dev_ptr == 0 {
+        // SAFETY: nothing recorded or waits on the event.
+        unsafe { ffi::cu_event_destroy(ready) };
         if owner.mapped.load(Ordering::Relaxed) >= state.num_output_surfaces {
             g2g_error!(
                 Target::category(short_type_name::<NvDec>()),
@@ -1350,7 +1369,16 @@ fn map_picture(
         return Err(G2gError::Hardware(HardwareError::Cuda(rc)));
     }
     owner.mapped.fetch_add(1, Ordering::Relaxed);
-    let frame = Arc::new(CuvidMappedFrame { owner, dev_ptr });
+    let frame = Arc::new(CuvidMappedFrame {
+        owner,
+        dev_ptr,
+        ready: ready as usize,
+    });
+    // cuvidMapVideoFrame queues its post-processing on output_stream, the legacy default stream when it is null
+    // SAFETY: the event belongs to the current context.
+    cuda_check("cuEventRecord", unsafe {
+        ffi::cu_event_record(ready, core::ptr::null_mut())
+    })?;
     let mapping = PictureMapping {
         frame: Arc::downgrade(&frame),
         pitch,
@@ -2091,12 +2119,15 @@ mod ffi {
 
     pub(crate) use crate::cuda_driver_ffi::{
         cu_ctx_create, cu_ctx_destroy, cu_ctx_pop_current, cu_ctx_push_current, cu_device_get,
+        cu_event_create, cu_event_destroy, cu_event_record, cu_event_synchronize, CuEvent,
+        CU_EVENT_DISABLE_TIMING,
     };
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use g2g_core::memory::SystemSlice;
 
     fn h264(w: u32, h: u32) -> Caps {
         Caps::CompressedVideo {
@@ -2892,6 +2923,101 @@ mod tests {
             samples.iter().any(|&s| s != samples[0]),
             "decoded luma is uniform; decode likely failed"
         );
+    }
+
+    #[derive(Default)]
+    struct TightFrames {
+        frames: Vec<Vec<u8>>,
+    }
+
+    impl OutputSink for TightFrames {
+        fn poll_push(
+            &mut self,
+            _cx: &mut core::task::Context<'_>,
+            packet_slot: &mut Option<PipelinePacket>,
+        ) -> core::task::Poll<Result<g2g_core::PushOutcome, G2gError>> {
+            if let Some(PipelinePacket::DataFrame(frame)) = packet_slot.take() {
+                let bytes = match &frame.domain {
+                    MemoryDomain::System(slice) => slice.as_slice().to_vec(),
+                    MemoryDomain::Cuda(buf) => read_p010_rows(buf),
+                    other => panic!("unexpected {:?} frame", other.kind()),
+                };
+                self.frames.push(bytes);
+            }
+            core::task::Poll::Ready(Ok(g2g_core::PushOutcome::Accepted))
+        }
+    }
+
+    // one cuMemcpyDtoH per row, independent of the 2D copy the System output takes
+    fn read_p010_rows(buf: &OwnedCudaBuffer) -> Vec<u8> {
+        let (width, height) = (buf.width as usize, buf.height as usize);
+        let luma_row = width * 2;
+        let chroma_row = width.div_ceil(2) * 4;
+        let planes = [
+            (buf.luma_ptr, buf.luma_pitch as usize, luma_row, height),
+            (
+                buf.chroma_ptr,
+                buf.chroma_pitch as usize,
+                chroma_row,
+                height.div_ceil(2),
+            ),
+        ];
+        let mut bytes = Vec::new();
+        // SAFETY: the mapped surface is valid device memory in `buf.context` while the frame is held.
+        unsafe {
+            cu::cu_ctx_push_current(buf.context as *mut core::ffi::c_void);
+            for (plane, pitch, row_bytes, rows) in planes {
+                for row in 0..rows {
+                    let start = bytes.len();
+                    bytes.resize(start + row_bytes, 0);
+                    cu::cu_memcpy_dtoh(
+                        bytes[start..].as_mut_ptr().cast(),
+                        plane + (row * pitch) as u64,
+                        row_bytes,
+                    );
+                }
+            }
+            let mut popped = core::ptr::null_mut();
+            cu::cu_ctx_pop_current(&mut popped);
+        }
+        bytes
+    }
+
+    async fn decode_main10(dec: &mut NvDec) -> Vec<Vec<u8>> {
+        let mut sink = TightFrames::default();
+        for (i, au) in h265_units(HEVC_MAIN10).iter().enumerate() {
+            dec.process(
+                PipelinePacket::DataFrame(au_frame(au, i as u64 * 33_000_000)),
+                &mut sink,
+            )
+            .await
+            .expect("decode AU");
+        }
+        dec.process(PipelinePacket::Eos, &mut sink)
+            .await
+            .expect("flush");
+        sink.frames
+    }
+
+    #[tokio::test]
+    async fn p010_frames_downloaded_to_system_match_the_device_surfaces() {
+        let Some(mut on_gpu) = open_dec(VideoCodec::H265, 640, 480, 1) else {
+            return;
+        };
+        let Some(mut to_system) = open_dec(VideoCodec::H265, 640, 480, 1) else {
+            return;
+        };
+        to_system.configure_allocation(&AllocationParams {
+            accepts: DomainSet::only(MemoryDomainKind::System),
+            ..AllocationParams::default()
+        });
+        let expected = decode_main10(&mut on_gpu).await;
+        let downloaded = decode_main10(&mut to_system).await;
+        assert!(!expected.is_empty(), "the 10-bit stream produced frames");
+        assert_eq!(downloaded.len(), expected.len());
+        for (index, (downloaded, expected)) in downloaded.iter().zip(&expected).enumerate() {
+            assert!(downloaded == expected, "frame {index} differs");
+        }
     }
 
     #[tokio::test]

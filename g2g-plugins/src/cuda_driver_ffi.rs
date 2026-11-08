@@ -90,7 +90,7 @@ crate::shared_library::shared_library! {
     pub(crate) fn cu_memcpy_htod = "cuMemcpyHtoD_v2"(destination: u64, source: *const c_void, size: usize) -> CuResult;
     #[cfg(any(feature = "local-ipc", all(test, any(feature = "nvdec", feature = "cuda-wgpu"))))]
     pub(crate) fn cu_memcpy_dtoh = "cuMemcpyDtoH_v2"(destination: *mut c_void, source: u64, size: usize) -> CuResult;
-    #[cfg(any(feature = "nvdec", feature = "cuda-wgpu", feature = "cuda-gl", feature = "cuda-kms"))]
+    #[cfg(any(feature = "cuda-wgpu", feature = "cuda-gl", feature = "cuda-kms"))]
     pub(crate) fn cu_memcpy_2d = "cuMemcpy2D_v2"(copy: *const CudaMemcpy2D) -> CuResult;
     pub(crate) fn cu_memcpy_2d_async = "cuMemcpy2DAsync_v2"(copy: *const CudaMemcpy2D, stream: CuStream) -> CuResult;
     pub(crate) fn cu_device_primary_ctx_retain = "cuDevicePrimaryCtxRetain"(context: *mut CuContext, device: CuDevice) -> CuResult;

@@ -174,8 +174,6 @@ libraries installed.
   `device-id` is -1, add `cuda-device-id=-1` to `nvdec` and a device property
   to `hipdownload` so both are placed, and charge an element's host-side time to
   the host thread rather than its GPU under the throughput objective.
-- Copy `nvdec`'s system-memory output through a stream and pinned memory, as
-  `cudadownload` does, instead of a blocking `cuMemcpy2D`.
 - Wait for a dma-buf frame's fence on the GPU in `hipupload` once ROCm supports
   semaphore import on Linux.
 

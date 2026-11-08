@@ -271,6 +271,11 @@ pub struct CudaDownload {
     downloaded: u64,
     /// Frames forwarded untouched (already system-memory inputs).
     forwarded: u64,
+    to_host: CudaToHostCopier,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct CudaToHostCopier {
     gpu: Option<DownloadGpu>,
 }
 
@@ -295,7 +300,9 @@ impl CudaDownload {
     pub fn forwarded(&self) -> u64 {
         self.forwarded
     }
+}
 
+impl CudaToHostCopier {
     fn gpu_for(&mut self, ordinal: i32) -> Result<&DownloadGpu, G2gError> {
         let gpu = match self.gpu.take() {
             Some(gpu) if gpu.device.ordinal == ordinal => gpu,
@@ -311,13 +318,17 @@ impl CudaDownload {
         Ok(self.gpu.insert(gpu))
     }
 
-    async fn download(&mut self, buffer: OwnedCudaBuffer) -> Result<SystemSlice, G2gError> {
+    pub(crate) async fn download(
+        &mut self,
+        buffer: OwnedCudaBuffer,
+        format: RawVideoFormat,
+    ) -> Result<SystemSlice, G2gError> {
         let (luma, chroma, total) = nv12_plane_copies(
             buffer.width,
             buffer.height,
             buffer.luma_pitch,
             buffer.chroma_pitch,
-            RawVideoFormat::Nv12,
+            format,
         )
         .ok_or(G2gError::CapsMismatch)?;
         let gpu = self.gpu_for(buffer.device_ordinal)?;
@@ -428,7 +439,7 @@ impl AsyncElement for CudaDownload {
                     } = frame;
                     let domain = match domain {
                         MemoryDomain::Cuda(buffer) => {
-                            let bytes = self.download(buffer).await?;
+                            let bytes = self.to_host.download(buffer, RawVideoFormat::Nv12).await?;
                             self.downloaded += 1;
                             MemoryDomain::System(bytes)
                         }
@@ -981,55 +992,6 @@ fn nv12_plane_copies(
         copy(1, chroma_pitch)?,
         usize::try_from(total).ok()?,
     ))
-}
-
-/// Copy both semi-planar planes of `buf` from CUDA device memory into a freshly
-/// allocated packed system buffer (device->host). `format` is NV12 or the
-/// 10-bit P010 surface. `pub(crate)` so `NvDec`'s
-/// download-on-demand path reuses the same copy when negotiation settles
-/// its output on `System`.
-///
-/// # Safety
-/// `buf`'s plane pointers must be valid device memory in `buf.context`, and
-/// the backing allocation must stay alive for the duration of the call (its
-/// keep-alive owner guarantees this while the [`OwnedCudaBuffer`] is held).
-#[cfg(feature = "nvdec")]
-pub(crate) unsafe fn download_nv12(
-    buf: &OwnedCudaBuffer,
-    format: RawVideoFormat,
-) -> Result<Box<[u8]>, G2gError> {
-    let (luma, chroma, total) = nv12_plane_copies(
-        buf.width,
-        buf.height,
-        buf.luma_pitch,
-        buf.chroma_pitch,
-        format,
-    )
-    .ok_or(G2gError::CapsMismatch)?;
-    let mut dst = alloc::vec![0u8; total].into_boxed_slice();
-    let dst_base = dst.as_mut_ptr();
-
-    // SAFETY: push the foreign `CUcontext` the pointers are valid in, run both
-    // plane copies, then always pop it (even on copy failure) so we leave the
-    // thread's context stack as we found it. The copies run unconditionally
-    // and the first error is surfaced after the pop via `Result::and`.
-    unsafe {
-        check(ffi::cu_ctx_push_current(buf.context as ffi::CuContext))?;
-        let luma_result = check(ffi::cu_memcpy_2d(&device_to_host(
-            &luma,
-            buf.luma_ptr,
-            dst_base,
-        )));
-        let chroma_result = check(ffi::cu_memcpy_2d(&device_to_host(
-            &chroma,
-            buf.chroma_ptr,
-            dst_base,
-        )));
-        let mut popped: ffi::CuContext = core::ptr::null_mut();
-        let pop_result = check(ffi::cu_ctx_pop_current(&mut popped));
-        luma_result.and(chroma_result).and(pop_result)?;
-    }
-    Ok(dst)
 }
 
 fn device_to_host(plane: &PlaneCopy, device: u64, host_base: *mut u8) -> ffi::CudaMemcpy2D {

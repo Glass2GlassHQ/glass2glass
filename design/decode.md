@@ -595,7 +595,9 @@ recorded after them from `CudaKeepAlive::ready_event`. A consumer that reads on 
 CUDA stream waits on it with `cuStreamWaitEvent`, and one that reads on the host
 or hands the pointers to another API (`nvenc`, the GL interop sinks,
 `localcudasink`, the Python host) calls `wait_until_ready` first. Both default to
-a frame that is already complete. A consumer finishes reading a frame before it
+a frame that is already complete. `nvdec` records its event after
+`cuvidMapVideoFrame64`, which queues the surface's post-processing on the legacy
+default stream, and a non-blocking stream does not wait on that stream. A consumer finishes reading a frame before it
 drops it, since producers recycle the memory on drop.
 `AllocationParams::cuda(...)` makes `MemoryDomainKind::Cuda` a cross-element pool
 domain in the allocation negotiation ([caps.md](caps.md)).
@@ -646,7 +648,8 @@ links `libcuda` directly.
   copy's event as the frame's ready event. `CudaDownload` makes its stream wait
   on the input's ready event, copies into a pinned buffer, and waits for the
   copy on tokio's blocking pool, so the runner keeps polling the other elements
-  while the copy runs. A copy from a frame allocated in another context on the
+  while the copy runs. `nvdec` downloads through the same copier when
+  negotiation settles its output on `System`, for NV12 and P010. A copy from a frame allocated in another context on the
   same device, such as an `nvdec` frame, matches an ffmpeg software decode byte
   for byte.
 - `CudaGlSink` (`cuda-gl` feature, Linux + NVIDIA) holds an EGL context on a
