@@ -1,7 +1,9 @@
 mod plan;
 mod profile;
 
-pub use plan::{place_launch_graph, plan_placement, PlacedElement, Placement, PlacementObjective};
+pub use plan::{
+    place_launch_graph, plan_placement, PlacedElement, Placement, PlacementObjective, RunnerThreads,
+};
 pub use profile::ProfileRun;
 
 use alloc::collections::BTreeMap;
@@ -9,7 +11,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use std::path::Path;
 
-use g2g_core::memory::GpuVendor;
+use g2g_core::memory::{GpuVendor, MemoryDomainKind};
 use g2g_core::runtime::GraphNode;
 use g2g_core::{G2gError, PropError, PropValue};
 use serde::{Deserialize, Serialize};
@@ -34,15 +36,29 @@ pub struct ElementKey {
     pub element: String,
     pub properties: BTreeMap<String, String>,
     pub input_caps: Vec<String>,
-    pub device: ProfiledDevice,
+    pub device: Option<ProfiledDevice>,
     pub execution_provider: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ElementCost {
+    pub host_ns: u64,
+    pub wait_ns: u64,
+    pub gpu_ns: u64,
+}
+
+impl ElementCost {
+    pub fn total_ns(&self) -> u64 {
+        self.host_ns + self.wait_ns + self.gpu_ns
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ElementTiming {
     #[serde(flatten)]
     pub key: ElementKey,
-    pub median_ns: u64,
+    #[serde(flatten)]
+    pub cost: ElementCost,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -69,9 +85,6 @@ pub enum PlacementError {
         element: String,
         frames: usize,
     },
-    NoInput {
-        element: String,
-    },
     CopyNotSlower {
         from: ProfiledDevice,
         to: ProfiledDevice,
@@ -80,6 +93,10 @@ pub enum PlacementError {
         element: String,
         input_caps: Vec<String>,
         device: Option<ProfiledDevice>,
+    },
+    NoCpuTiming {
+        element: String,
+        input_caps: Vec<String>,
     },
     DeviceRenamed {
         profiled: ProfiledDevice,
@@ -124,9 +141,6 @@ impl core::fmt::Display for PlacementError {
                  first {}",
                 profile::WARM_UP_FRAMES
             ),
-            PlacementError::NoInput { element } => {
-                write!(f, "{element} has no input link with caps")
-            }
             PlacementError::CopyNotSlower { from, to } => write!(
                 f,
                 "copying {} bytes from {} to {} was no slower than {} bytes, so its \
@@ -154,6 +168,14 @@ impl core::fmt::Display for PlacementError {
                 f,
                 "the profile has no timing for {element} with these properties and input \
                  caps {input_caps:?} on any GPU, run --profile with it on each GPU"
+            ),
+            PlacementError::NoCpuTiming {
+                element,
+                input_caps,
+            } => write!(
+                f,
+                "the profile has no timing for {element} with these properties and input \
+                 caps {input_caps:?}, run --profile with this line"
             ),
             PlacementError::DeviceRenamed { profiled, found } => write!(
                 f,
@@ -230,9 +252,13 @@ impl PlacementProfile {
 
     fn devices(&self) -> Vec<ProfiledDevice> {
         let mut devices: Vec<ProfiledDevice> = Vec::new();
-        for timing in &self.elements {
-            if !devices.contains(&timing.key.device) {
-                devices.push(timing.key.device.clone());
+        for device in self
+            .elements
+            .iter()
+            .filter_map(|timing| timing.key.device.as_ref())
+        {
+            if !devices.contains(device) {
+                devices.push(device.clone());
             }
         }
         devices
@@ -255,7 +281,9 @@ fn device_property(element: &GraphNode) -> Option<&'static str> {
 }
 
 fn runs_on_a_gpu(element: &GraphNode) -> bool {
-    element.gpu_device().is_some() || !element.output_memory().is_system()
+    element.gpu_device().is_some()
+        || !element.output_memory().is_system()
+        || !element.input_domains().contains(MemoryDomainKind::System)
 }
 
 fn has_automatic_device(element: &GraphNode, device_property: &str) -> bool {
@@ -299,16 +327,19 @@ mod tests {
         }
     }
 
-    fn timing(model: &str, ordinal: i32, median_ns: u64) -> ElementTiming {
+    fn timing(model: &str, ordinal: i32, gpu_ns: u64) -> ElementTiming {
         ElementTiming {
             key: ElementKey {
                 element: String::from("g2g_ml::inference::Inference<g2g_ml::ortinfer::OrtBackend>"),
                 properties: BTreeMap::from([(String::from("model"), String::from(model))]),
                 input_caps: alloc::vec![String::from("video/x-raw,format=RGBP")],
-                device: device(ordinal),
+                device: Some(device(ordinal)),
                 execution_provider: Some(String::from("migraphx")),
             },
-            median_ns,
+            cost: ElementCost {
+                gpu_ns,
+                ..ElementCost::default()
+            },
         }
     }
 
@@ -328,8 +359,8 @@ mod tests {
             .map(|timing| {
                 (
                     timing.key.properties["model"].clone(),
-                    timing.key.device.ordinal,
-                    timing.median_ns,
+                    timing.key.device.as_ref().unwrap().ordinal,
+                    timing.cost.gpu_ns,
                 )
             })
             .collect();

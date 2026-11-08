@@ -215,6 +215,10 @@ fn main() {
                     dry,
                     Path::new(path),
                     objective,
+                    match threads {
+                        true => g2g_plugins::placement::RunnerThreads::PerElement,
+                        false => g2g_plugins::placement::RunnerThreads::One,
+                    },
                 ))
                 .map_err(|error| error.to_string())
             });
@@ -250,11 +254,13 @@ fn main() {
             run_builder = run_builder.with_observer(run.observer());
         }
         // one OS thread per element, so a CPU-bound convert does not hold up every other element's handoff
-        let mut run: Pin<Box<dyn Future<Output = Result<RunStats, G2gError>> + '_>> = if threads {
-            Box::pin(run_builder.run_threaded(&spawner))
-        } else {
-            Box::pin(run_builder.run())
-        };
+        // a profile run on the shared thread times each element's wait behind the others' work
+        let mut run: Pin<Box<dyn Future<Output = Result<RunStats, G2gError>> + '_>> =
+            if threads || profile_path.is_some() {
+                Box::pin(run_builder.run_threaded(&spawner))
+            } else {
+                Box::pin(run_builder.run())
+            };
         loop {
             match tokio::time::timeout(Duration::from_secs(1), &mut run).await {
                 Ok(r) => break r,

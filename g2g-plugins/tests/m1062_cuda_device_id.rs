@@ -55,7 +55,8 @@ fn nvdec_cuda_device_id_round_trips() {
     assert_eq!(spec.kind, g2g_core::PropKind::Int);
     assert_eq!(spec.default, Some("0"));
     let (min, max) = spec.range.expect("the ordinal range is declared");
-    assert_eq!(min, DEFAULT_DEVICE_ID.to_string());
+    // -1 leaves the device to the placement planner
+    assert_eq!(min, "-1");
     // cuDeviceGet takes a C int, so that is the top of the range.
     assert_eq!(max, i32::MAX.to_string());
     assert_eq!(
@@ -78,13 +79,18 @@ fn nvdec_cuda_device_id_round_trips() {
         dec.set_property(PROP, PropValue::Uint(1)),
         Err(PropError::Type)
     );
-    // No such thing as a negative ordinal, and the range says so.
     assert_eq!(
-        dec.set_property(PROP, PropValue::Int(-1)),
+        dec.set_property(PROP, PropValue::Int(-2)),
         Err(PropError::Value)
     );
     // A refused set leaves the field alone.
     assert_eq!(dec.get_property(PROP), Some(PropValue::Int(3)));
+    dec.set_property(PROP, PropValue::Int(-1)).unwrap();
+    assert_eq!(dec.get_property(PROP), Some(PropValue::Int(-1)));
+    assert_eq!(
+        dec.gpu_device().map(|device| device.ordinal),
+        Some(DEFAULT_DEVICE_ID)
+    );
 }
 
 #[cfg(feature = "ffmpeg")]
@@ -348,7 +354,12 @@ fn nvdec_takes_cuda_device_id_from_a_launch_line() {
         &registry,
         "filesrc location=/dev/null ! nvdec cuda-device-id=-1 ! fakesink",
     )
-    .expect_err("a negative ordinal is refused by set_property");
+    .expect("-1 leaves the device to the placement planner");
+    parse_launch(
+        &registry,
+        "filesrc location=/dev/null ! nvdec cuda-device-id=-2 ! fakesink",
+    )
+    .expect_err("an ordinal below -1 is refused by set_property");
 }
 
 #[cfg(feature = "cuda-wgpu")]

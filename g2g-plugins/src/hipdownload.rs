@@ -6,15 +6,17 @@ use alloc::sync::Arc;
 
 use g2g_core::log::{short_type_name, Target};
 use g2g_core::memory::{
-    CudaKeepAlive, DomainSet, GpuVendor, MemoryDomainKind, OwnedCudaBuffer, OwnedHipBuffer,
-    SystemSlice,
+    CudaKeepAlive, DomainSet, GpuDevice, GpuVendor, MemoryDomainKind, OwnedCudaBuffer,
+    OwnedHipBuffer, SystemSlice,
 };
 use g2g_core::{
     g2g_error, AllocationParams, AsyncElement, Caps, CapsConstraint, ConfigureOutcome,
-    ElementMetadata, G2gError, MemoryDomain, OutputSink, PipelinePacket, RawVideoFormat,
+    ElementMetadata, G2gError, MemoryDomain, OutputSink, PipelinePacket, PropError, PropValue,
+    PropertySpec, RawVideoFormat,
 };
 
 use crate::hip::{HipDevice, HipEvent, HipPinnedMemory, HipStream};
+use crate::hipdeviceid::{HipDeviceChoice, HIP_DEVICE_ID_PROP, HIP_VENDOR_PROP};
 use crate::pinnedframes::{PinnedFrames, PinnedOffer};
 use crate::pixel::{pack_planes, RawVideoGeometry};
 use g2g_core::offload::run_blocking;
@@ -29,8 +31,11 @@ struct DownloadGpu {
     pinned: Arc<PinnedFrames<HipPinnedMemory>>,
 }
 
+static HIP_DOWNLOAD_PROPS: &[PropertySpec] = &[HIP_DEVICE_ID_PROP, HIP_VENDOR_PROP];
+
 #[derive(Debug)]
 pub struct HipDownload {
+    device: HipDeviceChoice,
     configured: bool,
     out_domain: MemoryDomainKind,
     raw_video: Option<RawVideoGeometry>,
@@ -40,6 +45,7 @@ pub struct HipDownload {
 impl Default for HipDownload {
     fn default() -> Self {
         Self {
+            device: HipDeviceChoice::default(),
             configured: false,
             out_domain: MemoryDomainKind::System,
             raw_video: None,
@@ -54,6 +60,16 @@ impl HipDownload {
     }
 
     fn gpu_for(&mut self, buffer: &OwnedHipBuffer) -> Result<&DownloadGpu, G2gError> {
+        if !self.device.holds(buffer) {
+            g2g_error!(
+                Target::category(short_type_name::<Self>()),
+                "runs on {:?}, and a frame arrived on {:?} device {}",
+                self.device,
+                buffer.vendor,
+                buffer.device_ordinal
+            );
+            return Err(G2gError::UnsupportedDomain);
+        }
         let on_device = |device: &HipDevice| {
             device.vendor() == buffer.vendor && device.ordinal() == buffer.device_ordinal
         };
@@ -221,6 +237,27 @@ impl AsyncElement for HipDownload {
 
     fn output_domains(&self) -> DomainSet {
         OUTPUT_DOMAINS
+    }
+
+    fn gpu_device(&self) -> Option<GpuDevice> {
+        self.device.declared()
+    }
+
+    fn properties(&self) -> &'static [PropertySpec] {
+        HIP_DOWNLOAD_PROPS
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        let applied = self
+            .device
+            .set_property(name, &value)
+            .ok_or(PropError::Unknown)?;
+        self.gpu = None;
+        applied
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        self.device.get_property(name)
     }
 
     fn configure_allocation(&mut self, params: &AllocationParams) {

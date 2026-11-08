@@ -411,6 +411,13 @@ impl NvDec {
         self
     }
 
+    fn device_ordinal(&self) -> i32 {
+        match self.cuda_device_id {
+            PLACEABLE_CUDA_DEVICE_ID => crate::cudadeviceid::DEFAULT_CUDA_DEVICE_ID,
+            ordinal => ordinal,
+        }
+    }
+
     /// Frames the parser holds back before displaying (0..=16, default 1). Higher
     /// values pipeline decode against display (NVIDIA recommends 2..4 for
     /// throughput) at the cost of latency. Also the `max-display-delay` property;
@@ -575,12 +582,12 @@ impl NvDec {
         let context = unsafe {
             crate::cuda_driver_ffi::init_driver()?;
             let mut dev = 0i32;
-            let rc = ffi::cu_device_get(&mut dev, self.cuda_device_id);
+            let rc = ffi::cu_device_get(&mut dev, self.device_ordinal());
             if rc != 0 {
                 g2g_error!(
                     Target::category(short_type_name::<NvDec>()),
                     "no CUDA device {} (cuDeviceGet returned {}): set cuda-device-id to an ordinal this host has",
-                    self.cuda_device_id,
+                    self.device_ordinal(),
                     cuda_error_name(rc)
                 );
                 return Err(G2gError::Hardware(HardwareError::Cuda(rc)));
@@ -607,7 +614,7 @@ impl NvDec {
         self.state.cuda = Some(Arc::new(CuvidContext {
             ctx_lock,
             context,
-            device_ordinal: self.cuda_device_id,
+            device_ordinal: self.device_ordinal(),
         }));
 
         self.state.num_output_surfaces = self.num_output_surfaces;
@@ -1682,7 +1689,7 @@ impl AsyncElement for NvDec {
     fn gpu_device(&self) -> Option<GpuDevice> {
         Some(GpuDevice {
             vendor: GpuVendor::Nvidia,
-            ordinal: self.cuda_device_id,
+            ordinal: self.device_ordinal(),
         })
     }
 
@@ -1730,10 +1737,11 @@ impl AsyncElement for NvDec {
                 self.num_output_surfaces = surfaces as u32;
                 Ok(())
             }
-            "cuda-device-id" => crate::cudadeviceid::set_cuda_device_id(
+            "cuda-device-id" => crate::cudadeviceid::set_cuda_device_id_from(
                 &mut self.cuda_device_id,
                 self.state.cuda.is_some(),
                 &value,
+                PLACEABLE_CUDA_DEVICE_ID.into(),
             ),
             _ => Err(PropError::Unknown),
         }
@@ -1854,6 +1862,8 @@ impl PadTemplates for NvDec {
 /// the CUDA device, so a `gst-launch` line can trade latency for decode/display
 /// pipelining, give a deep chain room to hold frames, or pin the GPU, without the
 /// builder. Named as gst-nvcodec's decoders name them.
+const PLACEABLE_CUDA_DEVICE_ID: i32 = -1;
+
 static NVDEC_PROPS: &[PropertySpec] = &[
     PropertySpec::new(
         "max-display-delay",
@@ -1865,7 +1875,14 @@ static NVDEC_PROPS: &[PropertySpec] = &[
         PropKind::Uint,
         "decoded frames the pipeline may hold at once, 1..64 (default 20); a deeper chain needs more, at a frame of device memory each",
     ),
-    crate::cudadeviceid::CUDA_DEVICE_ID_PROP,
+    PropertySpec::new(
+        "cuda-device-id",
+        PropKind::Int,
+        "CUDA device ordinal the decoder opens its context on, -1 for device 0 unless \
+         --placement-profile picks one",
+    )
+    .with_default("0")
+    .with_range("-1", "2147483647"),
 ];
 
 /// Thin hand-rolled FFI for the NVCUVID decode API (`cuviddec.h` / `nvcuvid.h`)

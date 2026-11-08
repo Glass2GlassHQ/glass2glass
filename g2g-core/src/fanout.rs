@@ -358,6 +358,9 @@ pub trait MultiOutputSource: ElementBound {
 /// [`DynSourceLoop`](crate::runtime::DynSourceLoop) for single-output sources.
 pub trait DynMultiOutputSource: ElementBound {
     fn output_count(&self) -> usize;
+    fn type_name(&self) -> &'static str {
+        core::any::type_name::<Self>()
+    }
     fn output_caps(&self, output: usize) -> Result<Caps, G2gError>;
     fn run<'a>(
         &'a mut self,
@@ -430,6 +433,9 @@ impl<T: MultiOutputSource> DynMultiOutputSource for T {
 impl<'b> DynMultiOutputSource for &'b mut (dyn DynMultiOutputSource + 'b) {
     fn output_count(&self) -> usize {
         (**self).output_count()
+    }
+    fn type_name(&self) -> &'static str {
+        (**self).type_name()
     }
     fn output_caps(&self, output: usize) -> Result<Caps, G2gError> {
         (**self).output_caps(output)

@@ -55,6 +55,11 @@ pub struct ElementProbe {
     // set by the output adapter when the running process() call pushes a DataFrame
     #[cfg(feature = "std")]
     frame_emitted: portable_atomic::AtomicBool,
+    #[cfg(feature = "std")]
+    poll_accum: AtomicU64,
+    // 0 outside a poll
+    #[cfg(feature = "std")]
+    poll_started_ns: AtomicU64,
     last_frame_proc_ns: AtomicU64,
     /// Queue-residency (transit) time of each `DataFrame` on this element's input
     /// link: how long the frame sat queued between the producer sending it and
@@ -110,6 +115,10 @@ impl ElementProbe {
             push_wait_accum: AtomicU64::new(0),
             #[cfg(feature = "std")]
             frame_emitted: portable_atomic::AtomicBool::new(false),
+            #[cfg(feature = "std")]
+            poll_accum: AtomicU64::new(0),
+            #[cfg(feature = "std")]
+            poll_started_ns: AtomicU64::new(0),
             last_frame_proc_ns: AtomicU64::new(0),
             transit_ns: LatencyHistogram::new(),
             age_at_emit_ns: LatencyHistogram::new(),
@@ -150,6 +159,39 @@ impl ElementProbe {
     #[inline]
     pub fn add_push_wait(&self, ns: u64) {
         self.push_wait_accum.fetch_add(ns, Ordering::Relaxed);
+    }
+
+    #[cfg(feature = "std")]
+    pub(crate) fn records_visits(&self) -> bool {
+        self.journeys.is_some() || self.visit_recorder.is_some()
+    }
+
+    #[cfg(feature = "std")]
+    #[inline]
+    pub(crate) fn start_poll(&self, now_ns: u64) {
+        self.poll_started_ns.store(now_ns, Ordering::Relaxed);
+    }
+
+    #[cfg(feature = "std")]
+    #[inline]
+    pub(crate) fn end_poll(&self, now_ns: u64) {
+        let started = self.poll_started_ns.swap(0, Ordering::Relaxed);
+        self.poll_accum
+            .fetch_add(now_ns.saturating_sub(started), Ordering::Relaxed);
+    }
+
+    // visits are recorded from inside a poll, so the running poll counts up to `now_ns`
+    #[cfg(feature = "std")]
+    fn take_poll_ns(&self, now_ns: u64) -> u64 {
+        let started = self.poll_started_ns.load(Ordering::Relaxed);
+        let running = match started {
+            0 => 0,
+            _ => {
+                self.poll_started_ns.store(now_ns, Ordering::Relaxed);
+                now_ns.saturating_sub(started)
+            }
+        };
+        self.poll_accum.swap(0, Ordering::Relaxed) + running
     }
 
     #[cfg(feature = "std")]
@@ -224,16 +266,15 @@ impl ElementProbe {
     #[inline]
     pub fn record_visit(&self, sequence: u64, wait_ns: u64, enter: Option<u64>, push_wait_ns: u64) {
         #[cfg(feature = "std")]
-        if let (true, Some(enter_ns)) = (
-            self.journeys.is_some() || self.visit_recorder.is_some(),
-            enter,
-        ) {
+        if let (true, Some(enter_ns)) = (self.records_visits(), enter) {
+            let exit_ns = crate::metrics::monotonic_ns();
             self.push_visit(StageVisit {
                 sequence,
                 wait_ns,
                 enter_ns,
-                exit_ns: crate::metrics::monotonic_ns(),
+                exit_ns,
                 push_wait_ns,
+                poll_ns: self.take_poll_ns(exit_ns),
             });
         }
         #[cfg(not(feature = "std"))]
@@ -254,6 +295,7 @@ impl ElementProbe {
             enter_ns,
             exit_ns,
             push_wait_ns: waited,
+            poll_ns: self.take_poll_ns(exit_ns),
         });
     }
 
@@ -364,6 +406,8 @@ pub struct StageVisit {
     /// as the aggregate `push_wait`: a push made outside `process()` (an arm
     /// forwarding a mid-stream `CapsChanged`) lands on the next visit.
     pub push_wait_ns: u64,
+    // the arm's polls since its previous visit, which leave out time it spent awaiting
+    pub poll_ns: u64,
 }
 
 #[cfg(feature = "std")]

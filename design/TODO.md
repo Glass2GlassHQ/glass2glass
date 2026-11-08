@@ -170,10 +170,11 @@ libraries installed.
   `cuMemcpyPeerAsync`), validated on a two-GPU host.
 - Report `gpu_device()` from the other CUDA elements (`cudaupload`,
   `cudadownload`, `cudaglsink`, `ffmpegdec` on NVDEC) and the wgpu elements.
-- Placement: keep a user-set `ortinfer` `execution-provider` fixed when
-  `device-id` is -1, add `cuda-device-id=-1` to `nvdec` and a device property
-  to `hipdownload` so both are placed, and charge an element's host-side time to
-  the host thread rather than its GPU under the throughput objective.
+- Placement: time `nvdec`'s decode engine in `--profile` (a CUDA counterpart of
+  `HipSync` after it), charge copies on a discrete GPU to its copy engines apart
+  from its compute, and account for the host memory contention that makes a
+  cross-GPU copy take 3.9 ms per 1080p frame in a running pipeline against the
+  2.8 ms the model charges.
 - Wait for a dma-buf frame's fence on the GPU in `hipupload` once ROCm supports
   semaphore import on Linux.
 

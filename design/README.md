@@ -294,19 +294,25 @@ the split order. Every branch must emit one frame for each frame it receives:
 a dropped frame leaves the merge waiting until that branch ends.
 
 `g2g-launch --profile <file>` and `g2g-launch-py --profile <file>` measure the
-costs the placement planner reads. `placement::ProfileRun::prepare` picks every
-element that has a `device-id` or `cuda-device-id` property and a GPU device,
-declared or followed from upstream (`traced_gpu_device`, the trace the splice
-uses), and puts a `HipSync` after each one whose output is a Hip frame.
-HIP elements return once their kernels are queued, so without the wait a
-convert records 30 µs instead of the 3 ms it takes. The sync waits on the
-frame's ready event on tokio's blocking pool. An element's time is the median
-of its per-frame `process()` compute from the run's `VisitRecorder`, plus the
-median wait in its sync, skipping the first ten frames. The runner's latency
-histograms have power-of-two buckets, too coarse to rank two devices. An entry is keyed by
-the element's Rust type name (`DynAsyncElement::type_name`), its writable
-properties other than the device and backend ones, the caps on each input, and
-the device with its product name. A run merges into the file and replaces the
+costs the placement planner reads. The profile run uses one thread per element,
+because on the shared thread an element that awaits work is polled again only
+after the others' host work, which turned a 0.04 ms convert into the 2.7 ms frame
+period. `placement::ProfileRun::prepare` times every element. A GPU element, one
+with a `device-id` or `cuda-device-id` property that declares a device, writes
+GPU frames or takes only GPU frames, is timed on its device: the declared one,
+the device its Hip frames carry, or for `hipdownload` the device of the GPU
+element upstream. A `HipSync` goes after each element whose output is a Hip
+frame and waits on the frame's ready event on tokio's blocking pool, because HIP
+elements return once their kernels are queued. An entry has three medians over
+the frames after the first ten, from the run's `VisitRecorder`: host time, the
+`StageVisit::poll_ns` the element spent running on its thread, wait time, the
+rest of its `process()` call, and GPU time, the wait in its sync. The runner
+times each arm's polls (`PollTimed`) only when visits are recorded. The runner's
+latency histograms have power-of-two buckets, too coarse to rank two devices. An
+entry is keyed by the element's Rust type name (`type_name` on every dyn element
+trait), its writable properties other than the device and backend ones, its
+`execution-provider`, the caps on each input, and the device with its product
+name, or no device for an element timed on the CPU. A run merges into the file and replaces the
 entries it measured again, so one run per device setup builds up the
 candidates. After the elements, every ordered pair of devices in the file gets a
 copy timing, a fixed overhead and a bandwidth fitted from the median of 21 copies
@@ -318,20 +324,29 @@ reports it as its device, with the vendor set by the provider.
 the GPUs before it runs. An element is placeable when its device property is -1,
 plus `vendor=unknown` on HIP elements, which is GStreamer's HIP `device-id -1`
 meaning any device. `ortinfer` takes -1 as its default and then runs on the
-provider's device 0. `placement::place_launch_graph` parses the line a second
+provider's device 0. `nvdec` takes `cuda-device-id=-1` with a default of 0, as
+`nvh264dec` defaults to 0, and opens device 0 when nothing places it.
+`hipdownload` has `device-id` and `vendor` like the other HIP elements. `placement::place_launch_graph` parses the line a second
 time and negotiates that copy with `negotiate_graph` to get each edge's caps,
 which index the profile alongside each element's properties, as `--profile`
 recorded them. Each placeable element's candidates are the devices with a
 matching entry, and an element on a fixed device must have an entry for that
 device. A missing entry, a missing copy timing for a device pair the search
 tries, or a device whose product name differs from the profile's fails the
-launch. `plan_placement` tries every combination of candidates, up to a million,
+launch. Candidates keep the element's `execution-provider`, so a line that names
+`migraphx` runs on an AMD GPU only. `plan_placement` tries every combination of candidates, up to a million,
 and keeps the cheapest. Under `--objective latency` (the default) the cost is
-the longest source-to-sink path through element times and the copies placed
-between devices. Under `throughput` it is the busiest GPU or device-pair link,
-the sum of the element or copy times charged to it per frame. A placed element
-gets `execution-provider` from its entry first, since `ortinfer` reloads its
-model on each set, then its device property, then `vendor`. `parse_launch`
+the longest source-to-sink path through element times, each the sum of its
+three, and the copies placed between devices. Under `throughput` it is the
+largest per-frame load on any resource: each GPU, charged its elements' wait and
+GPU time, each device-pair link, charged its copies, each element, charged its
+host and wait time, and each copy, charged the copy plus the GPU time its
+producer leaves queued, since a cross-GPU copy waits for that work inside the
+same visit. Without `--threads` one thread runs every element, so it is charged
+every element's host time. On the 1080p `videotestsrc ! hipupload ! hipconvertscale`
+line that thread is the bottleneck (2.68 ms predicted, 359 fps measured), and
+moving the convert to the 680M adds a copy that waits for the upload. A placed
+element gets its device property, then `vendor`. `parse_launch`
 has already spliced converters for the devices the line named, so
 `place_launch_graph` runs `splice_domain_converters` again to add the copies
 the placed devices need. The placement goes into the graph before `run_graph`,

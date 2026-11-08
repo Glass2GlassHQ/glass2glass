@@ -6,6 +6,7 @@ use g2g_plugins::clock::WallClock;
 use g2g_plugins::hip::HipDevice;
 use g2g_plugins::placement::{PlacementProfile, ProfileRun};
 use g2g_plugins::registry::default_registry;
+use g2g_plugins::TokioThreadSpawner;
 
 pub(crate) const LINK_CAPACITY: usize = 4;
 pub(crate) const INPUT_WIDTH: u32 = 1920;
@@ -24,7 +25,7 @@ pub(crate) async fn profile(vendor: &str, path: &Path) -> PlacementProfile {
     let clock = WallClock::new();
     RunBuilder::new(graph, &clock, LINK_CAPACITY)
         .with_observer(run.observer())
-        .run()
+        .run_threaded(&TokioThreadSpawner)
         .await
         .expect("the pipeline runs to EOS");
     run.record(path).expect("the profile is written")

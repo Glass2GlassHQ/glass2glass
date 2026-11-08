@@ -709,6 +709,7 @@ mod tests {
                 enter_ns: base,
                 exit_ns: base + 200,
                 push_wait_ns: 60,
+                poll_ns: 0,
             });
             sink.push_visit(StageVisit {
                 sequence: seq,
@@ -716,6 +717,7 @@ mod tests {
                 enter_ns: base + 250,
                 exit_ns: base + 400,
                 push_wait_ns: 0,
+                poll_ns: 0,
             });
         }
 
@@ -785,6 +787,7 @@ mod tests {
             enter_ns: 5_000,
             exit_ns: 5_100,
             push_wait_ns: 0,
+            poll_ns: 0,
         });
         sink.push_visit(StageVisit {
             sequence: 0,
@@ -792,6 +795,7 @@ mod tests {
             enter_ns: 1_000,
             exit_ns: 1_100,
             push_wait_ns: 0,
+            poll_ns: 0,
         });
         assert!(obs.snapshot().journey.is_none());
     }
@@ -843,6 +847,7 @@ mod tests {
             enter_ns: 900,
             exit_ns: 1_000,
             push_wait_ns: 0,
+            poll_ns: 0,
         });
         let j = obs.snapshot().journey.expect("prefix assembles");
         assert_eq!(j.stages.len(), 1, "only the pre-tee stage");

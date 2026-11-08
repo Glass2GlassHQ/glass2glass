@@ -11,7 +11,7 @@ use g2g_core::PropValue;
 use g2g_plugins::clock::WallClock;
 use g2g_plugins::hipconvertscale::HipConvertScale;
 use g2g_plugins::placement::{
-    place_launch_graph, PlacementError, PlacementObjective, PlacementProfile,
+    place_launch_graph, PlacementError, PlacementObjective, PlacementProfile, RunnerThreads,
 };
 use g2g_plugins::registry::default_registry;
 use gpu_profile::{has_device, line, profile, profile_path, LINK_CAPACITY};
@@ -48,6 +48,7 @@ async fn place(
         dry,
         path,
         PlacementObjective::Latency,
+        RunnerThreads::One,
     )
     .await?;
     Ok(graph)
@@ -61,8 +62,13 @@ async fn a_stage_placed_on_the_other_gpu_gets_a_copy_and_runs() {
     let convert = std::any::type_name::<HipConvertScale>();
     rewrite(&path, |profile| {
         for timing in &mut profile.elements {
-            if timing.key.element == convert && timing.key.device.vendor == GpuVendor::Nvidia {
-                timing.median_ns = SLOWER_THAN_ANY_GPU_NS;
+            let on_nvidia = timing
+                .key
+                .device
+                .as_ref()
+                .is_some_and(|device| device.vendor == GpuVendor::Nvidia);
+            if timing.key.element == convert && on_nvidia {
+                timing.cost.gpu_ns = SLOWER_THAN_ANY_GPU_NS;
             }
         }
     });
@@ -74,7 +80,7 @@ async fn a_stage_placed_on_the_other_gpu_gets_a_copy_and_runs() {
     let placed = (0..graph.node_count() as u32)
         .map(g2g_core::graph::NodeId)
         .filter_map(|node| graph.element(node))
-        .find(|element| element.type_name() == Some(convert))
+        .find(|element| element.type_name() == convert)
         .expect("the graph keeps hipconvertscale");
     assert_eq!(
         placed.get_property("vendor"),
@@ -95,8 +101,11 @@ async fn a_profile_whose_gpu_has_a_different_name_now_fails_the_plan() {
     };
     rewrite(&path, |profile| {
         for timing in &mut profile.elements {
-            if timing.key.device.vendor == GpuVendor::Amd {
-                timing.key.device.name = String::from("a GPU from another machine");
+            let Some(device) = timing.key.device.as_mut() else {
+                continue;
+            };
+            if device.vendor == GpuVendor::Amd {
+                device.name = String::from("a GPU from another machine");
             }
         }
     });

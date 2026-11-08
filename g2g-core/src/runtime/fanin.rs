@@ -61,6 +61,10 @@ use spin::Mutex;
 pub trait DynSourceLoop: ElementBound {
     fn intercept_caps<'a>(&'a mut self) -> BoxFuture<'a, Result<Caps, G2gError>>;
 
+    fn type_name(&self) -> &'static str {
+        core::any::type_name::<Self>()
+    }
+
     /// Dyn-safe mirror of the produce set behind
     /// [`SourceLoop::caps_constraint`], so the DAG runner negotiates a source
     /// that offers alternatives (a camera's pixel formats) instead of only its
@@ -296,6 +300,10 @@ impl<T: SourceLoop> DynSourceLoop for T {
 impl<'b> DynSourceLoop for &'b mut (dyn DynSourceLoop + 'b) {
     fn intercept_caps<'a>(&'a mut self) -> BoxFuture<'a, Result<Caps, G2gError>> {
         (**self).intercept_caps()
+    }
+
+    fn type_name(&self) -> &'static str {
+        (**self).type_name()
     }
 
     fn produced_caps<'a>(&'a mut self) -> BoxFuture<'a, Result<CapsSet, G2gError>> {

@@ -40,10 +40,11 @@
 //!                     <dir> as a `replaysrc` recording
 //! --trace <file>      write each element's per-frame wait and work spans to
 //!                     <file> as Chrome trace JSON, for ui.perfetto.dev
-//! --profile <file>    time each GPU element on the device it runs on and the
-//!                     copies between those devices, and merge the timings
-//!                     into <file> for the placement planner (`placement`
-//!                     build feature)
+//! --profile <file>    time each element, each GPU element on the device it
+//!                     runs on, and the copies between those devices, and
+//!                     merge the timings into <file> for the placement planner
+//!                     (`placement` build feature). The run uses one thread
+//!                     per element, as --threads does
 //! --placement-profile <file>
 //!                     before the run, put each GPU element whose device-id
 //!                     is -1 on the GPU the <file> timings make cheapest
@@ -51,7 +52,7 @@
 //! --objective latency|throughput
 //!                     what --placement-profile minimizes: the time one frame
 //!                     takes (default), or the per-frame time of the busiest
-//!                     GPU or GPU-to-GPU link
+//!                     GPU, GPU-to-GPU link, element, or runner thread
 //! --seek <seconds>    one flushing seek to that stream time before the first
 //!                     frame, then run to the end (`--help` says where the
 //!                     first frame lands)
@@ -963,7 +964,7 @@ fn launch() {
     #[cfg(all(target_os = "linux", feature = "placement"))]
     if let Some(path) = &opts.placement_profile {
         let dry = build_graph(&reg, &opts, &pipeline);
-        place_on_gpus(&rt, &reg, &mut graph, dry, path, objective, opts.quiet);
+        place_on_gpus(&rt, &reg, &mut graph, dry, path, objective, &opts);
     }
     let mut launch_seeks = attach_launch_seeks(&mut graph, seek_ns, seek_at);
     loop {
@@ -1026,7 +1027,8 @@ fn launch() {
             // `--threads` runs one OS thread per arm (opt-in multicore); the default
             // is the cooperative single-thread runner. Both return the same
             // `Result<RunStats, _>`, boxed to one type so the heartbeat loop is shared.
-            let mut run: RunFuture = if opts.threads.is_some() {
+            // a profile run on the shared thread times each element's wait behind the others' work
+            let mut run: RunFuture = if opts.threads.is_some() || opts.profile.is_some() {
                 #[cfg(feature = "multi-thread")]
                 {
                     Box::pin(run_builder.run_threaded(&spawner))
@@ -1165,7 +1167,7 @@ fn launch() {
                         if let Some(path) = &opts.placement_profile {
                             let dry = parse_launch_avoiding(&reg, &pipeline, &avoided)
                                 .map_err(|error| format!("parse error: {error}"));
-                            place_on_gpus(&rt, &reg, &mut graph, dry, path, objective, opts.quiet);
+                            place_on_gpus(&rt, &reg, &mut graph, dry, path, objective, &opts);
                         }
                         launch_seeks = attach_launch_seeks(&mut graph, seek_ns, seek_at);
                         continue;
@@ -1189,7 +1191,7 @@ fn place_on_gpus(
     dry: Result<Graph<GraphNode>, String>,
     path: &str,
     objective: g2g_plugins::placement::PlacementObjective,
-    quiet: bool,
+    opts: &Opts,
 ) {
     let fail = |error: &dyn std::fmt::Display| -> ! {
         eprintln!("g2g-launch: --placement-profile {path}: {error}");
@@ -1203,9 +1205,13 @@ fn place_on_gpus(
             dry,
             std::path::Path::new(path),
             objective,
+            match opts.threads {
+                Some(_) => g2g_plugins::placement::RunnerThreads::PerElement,
+                None => g2g_plugins::placement::RunnerThreads::One,
+            },
         ))
         .unwrap_or_else(|error| fail(&error));
-    if !quiet {
+    if !opts.quiet {
         print_stdout!("{}", placement.report(graph, objective));
     }
 }

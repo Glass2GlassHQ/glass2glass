@@ -6,6 +6,7 @@ mod gpu_profile;
 use g2g_core::memory::GpuVendor;
 use g2g_plugins::capsfilter::CapsFilter;
 use g2g_plugins::hipconvertscale::HipConvertScale;
+use g2g_plugins::hipdownload::HipDownload;
 use g2g_plugins::hipupload::HipUpload;
 use g2g_plugins::placement::PlacementProfile;
 use gpu_profile::{has_device, profile, profile_path, INPUT_WIDTH};
@@ -28,23 +29,45 @@ async fn a_profile_run_times_each_gpu_element_on_the_device_it_ran_on() {
         elements.contains(&std::any::type_name::<HipUpload>()),
         "{elements:?}"
     );
-    assert!(
-        !elements.contains(&std::any::type_name::<CapsFilter>()),
-        "{elements:?}"
-    );
+    let caps_filter = written
+        .elements
+        .iter()
+        .find(|timing| timing.key.element == std::any::type_name::<CapsFilter>())
+        .expect("elements that run on no GPU are timed too");
+    assert_eq!(caps_filter.key.device, None);
     let convert = written
         .elements
         .iter()
         .find(|timing| timing.key.element == std::any::type_name::<HipConvertScale>())
         .expect("hipconvertscale follows hipupload onto the AMD GPU and is timed there");
-    assert_eq!(convert.key.device.vendor, GpuVendor::Amd);
-    assert!(!convert.key.device.name.is_empty());
+    let device = convert
+        .key
+        .device
+        .as_ref()
+        .expect("the convert ran on a GPU");
+    assert_eq!(device.vendor, GpuVendor::Amd);
+    assert!(!device.name.is_empty());
     assert!(
         convert.key.input_caps[0].contains(&format!("width={INPUT_WIDTH}")),
         "{:?}",
         convert.key.input_caps
     );
-    assert!(convert.median_ns > 0);
+    let download = written
+        .elements
+        .iter()
+        .find(|timing| timing.key.element == std::any::type_name::<HipDownload>())
+        .expect("hipdownload is timed");
+    assert_eq!(
+        download.key.device.as_ref().map(|device| device.vendor),
+        Some(GpuVendor::Amd),
+        "hipdownload is timed on the GPU its frames arrive from"
+    );
+    assert!(convert.cost.host_ns > 0, "{:?}", convert.cost);
+    assert!(
+        convert.cost.gpu_ns > convert.cost.host_ns,
+        "{:?}",
+        convert.cost
+    );
 }
 
 #[tokio::test]
@@ -62,7 +85,7 @@ async fn runs_on_two_gpus_merge_into_one_profile_with_copies_both_ways() {
         .elements
         .iter()
         .filter(|timing| timing.key.element == std::any::type_name::<HipConvertScale>())
-        .map(|timing| timing.key.device.vendor)
+        .filter_map(|timing| Some(timing.key.device.as_ref()?.vendor))
         .collect();
     assert_eq!(convert_vendors, [GpuVendor::Amd, GpuVendor::Nvidia]);
     let directions: Vec<(GpuVendor, GpuVendor)> = merged

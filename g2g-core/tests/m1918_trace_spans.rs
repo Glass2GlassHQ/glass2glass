@@ -484,3 +484,110 @@ fn elements_a_mutator_adds_record_spans() {
         );
     }
 }
+
+const ELEMENT_WORK: Duration = Duration::from_millis(5);
+
+#[derive(Default)]
+struct WaitState {
+    finished: bool,
+    waker: Option<std::task::Waker>,
+}
+
+#[derive(Default)]
+struct OffThreadWait {
+    state: Option<Arc<Mutex<WaitState>>>,
+}
+
+impl Future for OffThreadWait {
+    type Output = ();
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        let state = self.state.get_or_insert_with(|| {
+            let state = Arc::new(Mutex::new(WaitState::default()));
+            let shared = Arc::clone(&state);
+            std::thread::spawn(move || {
+                std::thread::sleep(ELEMENT_WORK);
+                let mut state = shared.lock().unwrap();
+                state.finished = true;
+                if let Some(waker) = state.waker.take() {
+                    waker.wake();
+                }
+            });
+            state
+        });
+        let mut state = state.lock().unwrap();
+        if state.finished {
+            return Poll::Ready(());
+        }
+        state.waker = Some(cx.waker().clone());
+        Poll::Pending
+    }
+}
+
+struct Work {
+    off_thread: bool,
+}
+
+impl AsyncElement for Work {
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    where
+        Self: 'a;
+
+    fn intercept_caps(&self, upstream: &Caps) -> Result<Caps, G2gError> {
+        Ok(upstream.clone())
+    }
+
+    fn configure_pipeline(&mut self, _caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
+        Ok(ConfigureOutcome::Accepted)
+    }
+
+    fn process<'a>(
+        &'a mut self,
+        packet: PipelinePacket,
+        out: &'a mut dyn OutputSink,
+    ) -> Self::ProcessFuture<'a> {
+        Box::pin(async move {
+            if !matches!(packet, PipelinePacket::DataFrame(_)) {
+                return Ok(());
+            }
+            match self.off_thread {
+                true => OffThreadWait::default().await,
+                false => std::thread::sleep(ELEMENT_WORK),
+            }
+            out.push(packet).await?;
+            Ok(())
+        })
+    }
+}
+
+#[test]
+fn poll_time_counts_work_on_the_arm_thread_and_not_time_spent_awaiting() {
+    let mut graph: Graph<GraphNode> = Graph::new();
+    let source = graph.add_source(GraphNode::source(CountingSource::default()));
+    let on_thread = graph.add_transform(GraphNode::element(Work { off_thread: false }));
+    graph.set_node_name(on_thread, "on-thread".into());
+    let off_thread = graph.add_transform(GraphNode::element(Work { off_thread: true }));
+    graph.set_node_name(off_thread, "off-thread".into());
+    let sink = graph.add_sink(GraphNode::element(DiscardSink));
+    graph.link(source, on_thread).unwrap();
+    graph.link(on_thread, off_thread).unwrap();
+    graph.link(off_thread, sink).unwrap();
+
+    let visits = run_traced(graph);
+    let work_ns = ELEMENT_WORK.as_nanos() as u64;
+    let on_thread = visits.of("on-thread");
+    let off_thread = visits.of("off-thread");
+    assert_eq!(on_thread.len(), FRAME_COUNT as usize);
+    assert_eq!(off_thread.len(), FRAME_COUNT as usize);
+    assert!(
+        on_thread.iter().all(|visit| visit.poll_ns >= work_ns),
+        "{on_thread:?}"
+    );
+    assert!(
+        off_thread
+            .iter()
+            .all(|visit| visit.exit_ns - visit.enter_ns >= work_ns && visit.poll_ns < work_ns / 2),
+        "{off_thread:?}"
+    );
+}

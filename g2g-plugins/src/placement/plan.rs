@@ -10,7 +10,7 @@ use g2g_core::{Caps, Dim, PropValue};
 
 use super::{
     device_property, execution_provider, has_automatic_device, has_property, key_properties,
-    runs_on_a_gpu, ElementTiming, PlacementError, PlacementProfile, ProfiledDevice,
+    runs_on_a_gpu, ElementCost, ElementTiming, PlacementError, PlacementProfile, ProfiledDevice,
 };
 use crate::hip::HipDevice;
 use crate::hipdeviceid::HipDeviceChoice;
@@ -33,6 +33,12 @@ impl PlacementObjective {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunnerThreads {
+    One,
+    PerElement,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct PlacedElement {
     pub node: NodeId,
@@ -53,13 +59,14 @@ pub async fn place_launch_graph(
     dry: Graph<GraphNode>,
     profile_path: &std::path::Path,
     objective: PlacementObjective,
+    runner_threads: RunnerThreads,
 ) -> Result<Placement, PlacementError> {
     let profile = PlacementProfile::read(profile_path)?;
     // negotiate_graph consumes the graph it solves
     let (_, edge_caps, _) = negotiate_graph(dry)
         .await
         .map_err(PlacementError::Negotiation)?;
-    let placement = plan_placement(graph, &edge_caps, &profile, objective)?;
+    let placement = plan_placement(graph, &edge_caps, &profile, objective, runner_threads)?;
     // parse_launch spliced converters for the devices the line named, before any were placed
     *graph = registry.splice_domain_converters(core::mem::take(graph));
     Ok(placement)
@@ -95,9 +102,10 @@ pub fn plan_placement(
     edge_caps: &[Caps],
     profile: &PlacementProfile,
     objective: PlacementObjective,
+    runner_threads: RunnerThreads,
 ) -> Result<Placement, PlacementError> {
     let model = model_of(graph, edge_caps, profile)?;
-    let (choice, cost_ns) = model.cheapest(objective)?;
+    let (choice, cost_ns) = model.cheapest(objective, runner_threads)?;
     let mut elements = Vec::new();
     for (&node, &pick) in model.placeable.iter().zip(&choice) {
         let NodeCost::Placeable {
@@ -107,45 +115,32 @@ pub fn plan_placement(
         else {
             continue;
         };
-        let candidate = &candidates[pick];
         let node = NodeId(node as u32);
-        let device = model.devices[candidate.device].clone();
-        place(
-            graph,
-            node,
-            element,
-            &device,
-            candidate.execution_provider.as_deref(),
-        )?;
+        let device = model.devices[candidates[pick].device].clone();
+        let placed = graph
+            .element_mut(node)
+            .expect("the cost model takes placeable nodes from the graph's elements");
+        place(placed, element, &device)?;
         elements.push(PlacedElement {
             node,
             element,
             device,
-            execution_provider: candidate.execution_provider.clone(),
+            execution_provider: execution_provider(placed),
         });
     }
     Ok(Placement { elements, cost_ns })
 }
 
 fn place(
-    graph: &mut Graph<GraphNode>,
-    node: NodeId,
+    element: &mut GraphNode,
     name: &'static str,
     device: &ProfiledDevice,
-    provider: Option<&str>,
 ) -> Result<(), PlacementError> {
-    let element = graph
-        .element_mut(node)
-        .expect("the cost model takes placeable nodes from the graph's elements");
     let gpu = GpuDevice {
         vendor: device.vendor,
         ordinal: device.ordinal,
     };
     let mut settings: Vec<(&'static str, PropValue)> = Vec::new();
-    // ortinfer reloads its model on each set, and every provider has a device 0
-    if let Some(provider) = provider {
-        settings.push(("execution-provider", PropValue::Str(provider.to_string())));
-    }
     if let Some(property) = device_property(element) {
         settings.push((property, PropValue::Int(i64::from(device.ordinal))));
     }
@@ -238,7 +233,7 @@ fn node_of(
 ) -> Result<ModelNode, PlacementError> {
     let Some(element) = element else {
         return Ok(ModelNode {
-            cost: NodeCost::Follows,
+            cost: NodeCost::Free,
             output: FrameOutput::AsInput,
         });
     };
@@ -247,19 +242,9 @@ fn node_of(
         _ if element.output_memory().is_system() => FrameOutput::Cpu,
         _ => FrameOutput::Gpu,
     };
-    let (Some(type_name), Some(property)) = (element.type_name(), device_property(element)) else {
-        return Ok(ModelNode {
-            cost: NodeCost::Follows,
-            output,
-        });
-    };
-    if !runs_on_a_gpu(element) {
-        return Ok(ModelNode {
-            cost: NodeCost::Follows,
-            output,
-        });
-    }
+    let type_name = element.type_name();
     let properties = key_properties(element);
+    let provider = execution_provider(element);
     let matching: Vec<&ElementTiming> = profile
         .elements
         .iter()
@@ -267,24 +252,42 @@ fn node_of(
             timing.key.element == type_name
                 && timing.key.properties == properties
                 && timing.key.input_caps == input_caps
+                && timing.key.execution_provider == provider
         })
         .collect();
+    let Some(property) = device_property(element).filter(|_| runs_on_a_gpu(element)) else {
+        let timing = matching
+            .into_iter()
+            .find(|timing| timing.key.device.is_none())
+            .ok_or_else(|| PlacementError::NoCpuTiming {
+                element: type_name.to_string(),
+                input_caps: input_caps.clone(),
+            })?;
+        return Ok(ModelNode {
+            cost: NodeCost::Host(timing.cost),
+            output,
+        });
+    };
     let no_timing = |device: Option<ProfiledDevice>| PlacementError::NoTiming {
         element: type_name.to_string(),
         input_caps: input_caps.clone(),
         device,
     };
+    let on_a_gpu = matching
+        .into_iter()
+        .filter_map(|timing| Some((timing.key.device.as_ref()?, timing.cost)));
     if has_automatic_device(element, property) {
         let mut candidates: Vec<Candidate> = Vec::new();
-        for timing in matching {
-            let device = devices.index_of(&timing.key.device);
+        for (device, cost) in on_a_gpu {
             let candidate = Candidate {
-                device,
-                cost_ns: timing.median_ns,
-                execution_provider: timing.key.execution_provider.clone(),
+                device: devices.index_of(device),
+                cost,
             };
-            match candidates.iter_mut().find(|known| known.device == device) {
-                Some(known) if known.cost_ns <= candidate.cost_ns => {}
+            match candidates
+                .iter_mut()
+                .find(|known| known.device == candidate.device)
+            {
+                Some(known) if known.cost.total_ns() <= cost.total_ns() => {}
                 Some(known) => *known = candidate,
                 None => candidates.push(candidate),
             }
@@ -305,16 +308,10 @@ fn node_of(
             element: type_name.to_string(),
         });
     };
-    let provider = execution_provider(element);
-    let timing = matching
-        .into_iter()
-        .filter(|timing| {
-            timing.key.device.vendor == fixed.vendor
-                && timing.key.device.ordinal == fixed.ordinal
-                && timing.key.execution_provider == provider
-        })
-        .min_by_key(|timing| timing.median_ns);
-    let Some(timing) = timing else {
+    let timing = on_a_gpu
+        .filter(|(device, _)| device.vendor == fixed.vendor && device.ordinal == fixed.ordinal)
+        .min_by_key(|(_, cost)| cost.total_ns());
+    let Some((device, cost)) = timing else {
         let name = HipDevice::open(fixed.vendor, fixed.ordinal)?.name()?;
         return Err(no_timing(Some(ProfiledDevice {
             vendor: fixed.vendor,
@@ -324,8 +321,8 @@ fn node_of(
     };
     Ok(ModelNode {
         cost: NodeCost::Fixed {
-            device: devices.index_of(&timing.key.device),
-            cost_ns: timing.median_ns,
+            device: devices.index_of(device),
+            cost,
         },
         output,
     })
@@ -391,16 +388,16 @@ enum FrameOutput {
 #[derive(Debug, Clone, PartialEq)]
 struct Candidate {
     device: usize,
-    cost_ns: u64,
-    execution_provider: Option<String>,
+    cost: ElementCost,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 enum NodeCost {
-    Follows,
+    Free,
+    Host(ElementCost),
     Fixed {
         device: usize,
-        cost_ns: u64,
+        cost: ElementCost,
     },
     Placeable {
         element: &'static str,
@@ -486,7 +483,11 @@ impl CostModel {
             .collect()
     }
 
-    fn cheapest(&self, objective: PlacementObjective) -> Result<(Vec<usize>, u64), PlacementError> {
+    fn cheapest(
+        &self,
+        objective: PlacementObjective,
+        runner_threads: RunnerThreads,
+    ) -> Result<(Vec<usize>, u64), PlacementError> {
         let counts = self.candidate_counts();
         let count = counts
             .iter()
@@ -495,7 +496,10 @@ impl CostModel {
             return Err(PlacementError::TooManyPlacements { count });
         }
         let mut choice = vec![0usize; counts.len()];
-        let mut best = (choice.clone(), self.cost(&choice, objective)?);
+        let mut best = (
+            choice.clone(),
+            self.cost(&choice, objective, runner_threads)?,
+        );
         loop {
             let next = choice
                 .iter()
@@ -506,7 +510,7 @@ impl CostModel {
             };
             choice[slot] += 1;
             choice[..slot].fill(0);
-            let cost = self.cost(&choice, objective)?;
+            let cost = self.cost(&choice, objective, runner_threads)?;
             if cost < best.1 {
                 best = (choice.clone(), cost);
             }
@@ -514,77 +518,98 @@ impl CostModel {
         Ok(best)
     }
 
-    fn cost(&self, choice: &[usize], objective: PlacementObjective) -> Result<u64, PlacementError> {
+    fn cost(
+        &self,
+        choice: &[usize],
+        objective: PlacementObjective,
+        runner_threads: RunnerThreads,
+    ) -> Result<u64, PlacementError> {
         let node_count = self.nodes.len();
         let mut device: Vec<Option<usize>> = vec![None; node_count];
-        let mut cost_ns = vec![0u64; node_count];
+        let mut cost: Vec<ElementCost> = vec![ElementCost::default(); node_count];
         for (index, node) in self.nodes.iter().enumerate() {
-            if let NodeCost::Fixed {
-                device: fixed,
-                cost_ns: fixed_cost,
-            } = node.cost
-            {
-                device[index] = Some(fixed);
-                cost_ns[index] = fixed_cost;
+            match node.cost {
+                NodeCost::Host(host) => cost[index] = host,
+                NodeCost::Fixed {
+                    device: fixed,
+                    cost: fixed_cost,
+                } => {
+                    device[index] = Some(fixed);
+                    cost[index] = fixed_cost;
+                }
+                NodeCost::Free | NodeCost::Placeable { .. } => {}
             }
         }
         for (&node, &pick) in self.placeable.iter().zip(choice) {
             if let NodeCost::Placeable { candidates, .. } = &self.nodes[node].cost {
                 device[node] = Some(candidates[pick].device);
-                cost_ns[node] = candidates[pick].cost_ns;
+                cost[node] = candidates[pick].cost;
             }
         }
         let mut frames_on: Vec<Option<usize>> = vec![None; node_count];
-        let mut copy_ns = vec![0u64; self.edges.len()];
+        // GPU work still queued for the frames a node emits, which a copy waits for
+        let mut queued_gpu_ns = vec![0u64; node_count];
         let mut finish_ns = vec![0u64; node_count];
         let mut device_load_ns = vec![0u64; self.devices.len()];
         let mut link_load_ns = vec![vec![0u64; self.devices.len()]; self.devices.len()];
+        let mut runner_load_ns = 0u64;
+        let mut busiest_arm_ns = 0u64;
         for &node in &self.topological_order {
             let mut ready_ns = 0u64;
             let mut input_on: Option<Option<usize>> = None;
-            for (edge_index, edge) in self.edges.iter().enumerate() {
-                if edge.to != node {
-                    continue;
-                }
+            let mut input_queued_gpu_ns = 0u64;
+            for edge in self.edges.iter().filter(|edge| edge.to == node) {
                 let arriving_on = frames_on[edge.from];
                 input_on.get_or_insert(arriving_on);
-                let copy = match (arriving_on, device[node]) {
+                input_queued_gpu_ns = input_queued_gpu_ns.max(queued_gpu_ns[edge.from]);
+                let copy_ns = match (arriving_on, device[node]) {
                     (Some(from), Some(to)) if from != to && self.owns_device(node) => {
                         let ns = self.copy_ns(from, to, edge)?;
                         link_load_ns[from][to] += ns;
+                        busiest_arm_ns = busiest_arm_ns.max(queued_gpu_ns[edge.from] + ns);
                         ns
                     }
                     _ => 0,
                 };
-                copy_ns[edge_index] = copy;
-                ready_ns = ready_ns.max(finish_ns[edge.from] + copy);
+                ready_ns = ready_ns.max(finish_ns[edge.from] + copy_ns);
             }
             let input_on = input_on.flatten();
             if !self.owns_device(node) {
                 device[node] = input_on;
             }
-            frames_on[node] = match self.nodes[node].output {
-                FrameOutput::Cpu => None,
-                FrameOutput::Gpu => device[node].or(input_on),
-                FrameOutput::AsInput => input_on,
+            (frames_on[node], queued_gpu_ns[node]) = match self.nodes[node].output {
+                FrameOutput::Cpu => (None, 0),
+                FrameOutput::Gpu => (device[node].or(input_on), cost[node].gpu_ns),
+                FrameOutput::AsInput => (input_on, input_queued_gpu_ns),
             };
-            finish_ns[node] = ready_ns + cost_ns[node];
+            let element = cost[node];
+            finish_ns[node] = ready_ns + element.total_ns();
+            runner_load_ns += element.host_ns;
+            busiest_arm_ns = busiest_arm_ns.max(element.host_ns + element.wait_ns);
             if let (Some(on), true) = (device[node], self.owns_device(node)) {
-                device_load_ns[on] += cost_ns[node];
+                device_load_ns[on] += element.wait_ns + element.gpu_ns;
             }
         }
+        let shared_runner_ns = match runner_threads {
+            RunnerThreads::One => runner_load_ns,
+            RunnerThreads::PerElement => 0,
+        };
         Ok(match objective {
             PlacementObjective::Latency => finish_ns.into_iter().max().unwrap_or(0),
             PlacementObjective::Throughput => device_load_ns
                 .into_iter()
                 .chain(link_load_ns.into_iter().flatten())
+                .chain([busiest_arm_ns, shared_runner_ns])
                 .max()
                 .unwrap_or(0),
         })
     }
 
     fn owns_device(&self, node: usize) -> bool {
-        !matches!(self.nodes[node].cost, NodeCost::Follows)
+        matches!(
+            self.nodes[node].cost,
+            NodeCost::Fixed { .. } | NodeCost::Placeable { .. }
+        )
     }
 
     fn copy_ns(&self, from: usize, to: usize, edge: &ModelEdge) -> Result<u64, PlacementError> {
@@ -630,25 +655,42 @@ mod tests {
         vec![vec![None, link], vec![link, None]]
     }
 
+    fn gpu(gpu_ns: u64) -> ElementCost {
+        ElementCost {
+            gpu_ns,
+            ..ElementCost::default()
+        }
+    }
+
+    fn host(host_ns: u64) -> ElementCost {
+        ElementCost {
+            host_ns,
+            ..ElementCost::default()
+        }
+    }
+
     fn source() -> ModelNode {
         ModelNode {
-            cost: NodeCost::Follows,
+            cost: NodeCost::Free,
             output: FrameOutput::Cpu,
         }
     }
 
-    fn placeable(costs_ns: [u64; 2], output: FrameOutput) -> ModelNode {
+    fn fixed(device: usize, cost: ElementCost, output: FrameOutput) -> ModelNode {
+        ModelNode {
+            cost: NodeCost::Fixed { device, cost },
+            output,
+        }
+    }
+
+    fn placeable(costs: [ElementCost; 2], output: FrameOutput) -> ModelNode {
         ModelNode {
             cost: NodeCost::Placeable {
                 element: "test element",
-                candidates: costs_ns
+                candidates: costs
                     .into_iter()
                     .enumerate()
-                    .map(|(device, cost_ns)| Candidate {
-                        device,
-                        cost_ns,
-                        execution_provider: None,
-                    })
+                    .map(|(device, cost)| Candidate { device, cost })
                     .collect(),
             },
             output,
@@ -664,20 +706,17 @@ mod tests {
         }
     }
 
+    fn transfer_ns() -> u64 {
+        (FRAME_BYTES as f64 / FAST_LINK * 1e9) as u64
+    }
+
     // a convert that is faster on the second GPU feeding a stage fixed on the first
     fn convert_then_fixed_stage(link_overhead_ns: u64) -> CostModel {
-        let fixed = ModelNode {
-            cost: NodeCost::Fixed {
-                device: 0,
-                cost_ns: 5 * MS,
-            },
-            output: FrameOutput::Cpu,
-        };
         CostModel::new(
             vec![
                 source(),
-                placeable([10 * MS, 4 * MS], FrameOutput::Gpu),
-                fixed,
+                placeable([gpu(10 * MS), gpu(4 * MS)], FrameOutput::Gpu),
+                fixed(0, gpu(5 * MS), FrameOutput::Cpu),
             ],
             vec![edge(0, 1), edge(1, 2)],
             devices(),
@@ -688,29 +727,32 @@ mod tests {
     #[test]
     fn latency_keeps_a_stage_beside_its_consumer_when_the_copy_costs_more_than_it_saves() {
         let model = convert_then_fixed_stage(20 * MS);
-        let (choice, cost_ns) = model.cheapest(PlacementObjective::Latency).unwrap();
-        assert_eq!((choice, cost_ns), (vec![0], 15 * MS));
+        let placed = model
+            .cheapest(PlacementObjective::Latency, RunnerThreads::One)
+            .unwrap();
+        assert_eq!(placed, (vec![0], 15 * MS));
     }
 
     #[test]
     fn latency_moves_a_stage_to_the_faster_gpu_when_the_copy_is_cheap() {
         let model = convert_then_fixed_stage(MS);
-        let (choice, cost_ns) = model.cheapest(PlacementObjective::Latency).unwrap();
-        let transfer_ns = (FRAME_BYTES as f64 / FAST_LINK * 1e9) as u64;
-        assert_eq!((choice, cost_ns), (vec![1], 10 * MS + transfer_ns));
+        let placed = model
+            .cheapest(PlacementObjective::Latency, RunnerThreads::One)
+            .unwrap();
+        assert_eq!(placed, (vec![1], 10 * MS + transfer_ns()));
     }
 
     fn two_parallel_branches() -> CostModel {
         let tee = ModelNode {
-            cost: NodeCost::Follows,
+            cost: NodeCost::Free,
             output: FrameOutput::AsInput,
         };
         CostModel::new(
             vec![
                 source(),
                 tee,
-                placeable([10 * MS, 12 * MS], FrameOutput::Cpu),
-                placeable([10 * MS, 12 * MS], FrameOutput::Cpu),
+                placeable([gpu(10 * MS), gpu(12 * MS)], FrameOutput::Cpu),
+                placeable([gpu(10 * MS), gpu(12 * MS)], FrameOutput::Cpu),
             ],
             vec![edge(0, 1), edge(1, 2), edge(1, 3)],
             devices(),
@@ -720,29 +762,164 @@ mod tests {
 
     #[test]
     fn latency_puts_both_branches_on_the_faster_gpu() {
-        let (choice, cost_ns) = two_parallel_branches()
-            .cheapest(PlacementObjective::Latency)
+        let placed = two_parallel_branches()
+            .cheapest(PlacementObjective::Latency, RunnerThreads::One)
             .unwrap();
-        assert_eq!((choice, cost_ns), (vec![0, 0], 10 * MS));
+        assert_eq!(placed, (vec![0, 0], 10 * MS));
     }
 
     #[test]
     fn throughput_spreads_branches_so_no_gpu_carries_both() {
         let (choice, cost_ns) = two_parallel_branches()
-            .cheapest(PlacementObjective::Throughput)
+            .cheapest(PlacementObjective::Throughput, RunnerThreads::One)
             .unwrap();
         assert_eq!(cost_ns, 12 * MS);
         assert_ne!(choice[0], choice[1]);
     }
 
     #[test]
+    fn throughput_charges_a_copy_the_wait_for_its_producers_gpu_work() {
+        let copy_overhead_ns = 2 * MS;
+        let producer_gpu_ns = 3 * MS;
+        let model = CostModel::new(
+            vec![
+                source(),
+                fixed(0, gpu(producer_gpu_ns), FrameOutput::Gpu),
+                placeable([gpu(MS), gpu(MS / 2)], FrameOutput::Cpu),
+            ],
+            vec![edge(0, 1), edge(1, 2)],
+            devices(),
+            links(copy_overhead_ns),
+        );
+        let placed = model
+            .cheapest(PlacementObjective::Throughput, RunnerThreads::One)
+            .unwrap();
+        assert_eq!(placed, (vec![0], producer_gpu_ns + MS));
+        let moved = model
+            .cost(&[1], PlacementObjective::Throughput, RunnerThreads::One)
+            .unwrap();
+        assert_eq!(moved, producer_gpu_ns + copy_overhead_ns + transfer_ns());
+    }
+
+    #[test]
+    fn one_runner_thread_carries_the_host_time_of_every_element() {
+        let source_host_ns = 5 * MS;
+        let upload_host_ns = 2 * MS;
+        let upload = ElementCost {
+            host_ns: upload_host_ns,
+            ..gpu(MS)
+        };
+        let model = CostModel::new(
+            vec![
+                ModelNode {
+                    cost: NodeCost::Host(host(source_host_ns)),
+                    output: FrameOutput::Cpu,
+                },
+                fixed(0, upload, FrameOutput::Gpu),
+                placeable([gpu(3 * MS), gpu(3 * MS)], FrameOutput::Cpu),
+            ],
+            vec![edge(0, 1), edge(1, 2)],
+            devices(),
+            links(MS),
+        );
+        let throughput = |runner_threads| {
+            model
+                .cost(&[0], PlacementObjective::Throughput, runner_threads)
+                .unwrap()
+        };
+        assert_eq!(
+            throughput(RunnerThreads::One),
+            source_host_ns + upload_host_ns
+        );
+        assert_eq!(throughput(RunnerThreads::PerElement), source_host_ns);
+    }
+
+    struct MigraphxInference;
+
+    static INFERENCE_PROPS: &[g2g_core::PropertySpec] = &[
+        g2g_core::PropertySpec::new("execution-provider", g2g_core::PropKind::Str, "provider"),
+        g2g_core::PropertySpec::new("device-id", g2g_core::PropKind::Int, "device"),
+    ];
+
+    impl g2g_core::AsyncElement for MigraphxInference {
+        type ProcessFuture<'a> = core::future::Ready<Result<(), g2g_core::G2gError>>;
+
+        fn intercept_caps(&self, upstream: &Caps) -> Result<Caps, g2g_core::G2gError> {
+            Ok(upstream.clone())
+        }
+
+        fn configure_pipeline(
+            &mut self,
+            _caps: &Caps,
+        ) -> Result<g2g_core::ConfigureOutcome, g2g_core::G2gError> {
+            Ok(g2g_core::ConfigureOutcome::Accepted)
+        }
+
+        fn input_domains(&self) -> g2g_core::memory::DomainSet {
+            g2g_core::memory::DomainSet::only(g2g_core::memory::MemoryDomainKind::Hip)
+        }
+
+        fn properties(&self) -> &'static [g2g_core::PropertySpec] {
+            INFERENCE_PROPS
+        }
+
+        fn get_property(&self, name: &str) -> Option<PropValue> {
+            match name {
+                "execution-provider" => Some(PropValue::Str(String::from("migraphx"))),
+                "device-id" => Some(PropValue::Int(-1)),
+                _ => None,
+            }
+        }
+
+        fn process<'a>(
+            &'a mut self,
+            _packet: g2g_core::PipelinePacket,
+            _out: &'a mut dyn g2g_core::OutputSink,
+        ) -> Self::ProcessFuture<'a> {
+            core::future::ready(Ok(()))
+        }
+    }
+
+    #[test]
+    fn a_placeable_element_keeps_the_execution_provider_its_line_set() {
+        let element = GraphNode::element(MigraphxInference);
+        let input_caps = vec![String::from("video/x-raw,format=RGBP")];
+        let timing = |device: usize, provider: &str, gpu_ns: u64| ElementTiming {
+            key: super::super::ElementKey {
+                element: String::from(element.type_name()),
+                properties: Default::default(),
+                input_caps: input_caps.clone(),
+                device: Some(devices()[device].clone()),
+                execution_provider: Some(String::from(provider)),
+            },
+            cost: gpu(gpu_ns),
+        };
+        let profile = PlacementProfile {
+            elements: vec![timing(0, "migraphx", 50 * MS), timing(1, "cuda", 5 * MS)],
+            copies: Vec::new(),
+        };
+        let mut table = DeviceTable::default();
+        let node = node_of(Some(&element), input_caps.clone(), &profile, &mut table).unwrap();
+        let NodeCost::Placeable { candidates, .. } = node.cost else {
+            panic!("device-id -1 leaves the device to the planner: {node:?}");
+        };
+        let vendors: Vec<GpuVendor> = candidates
+            .iter()
+            .map(|candidate| table.profiled[candidate.device].vendor)
+            .collect();
+        assert_eq!(vendors, [GpuVendor::Amd]);
+    }
+
+    #[test]
     fn a_search_past_the_limit_fails_instead_of_running() {
         let stages = 21;
         let mut nodes = vec![source()];
-        nodes.extend((0..stages).map(|_| placeable([MS, MS], FrameOutput::Cpu)));
+        nodes.extend((0..stages).map(|_| placeable([gpu(MS), gpu(MS)], FrameOutput::Cpu)));
         let edges = (0..stages).map(|stage| edge(stage, stage + 1)).collect();
         let model = CostModel::new(nodes, edges, devices(), links(MS));
-        let error = model.cheapest(PlacementObjective::Latency).unwrap_err();
+        let error = model
+            .cheapest(PlacementObjective::Latency, RunnerThreads::One)
+            .unwrap_err();
         assert!(matches!(
             error,
             PlacementError::TooManyPlacements { count } if count == 1 << stages
@@ -753,7 +930,9 @@ mod tests {
     fn a_copy_of_unsized_frames_fails_instead_of_costing_nothing() {
         let mut model = convert_then_fixed_stage(MS);
         model.edges[1].frame_bytes = None;
-        let error = model.cost(&[1], PlacementObjective::Latency).unwrap_err();
+        let error = model
+            .cost(&[1], PlacementObjective::Latency, RunnerThreads::One)
+            .unwrap_err();
         assert!(matches!(error, PlacementError::UnsizedCopy { .. }));
     }
 }

@@ -219,10 +219,11 @@ parse error: unknown element: theoraenc
   playback reaches a position. Live HLS and DASH take seeks inside their live
   window. `--trace run.json` writes each element's per-frame wait and work time
   for https://ui.perfetto.dev. `--profile gpus.json` (the `placement` feature)
-  records each GPU element's time on its device and the copy cost between GPUs.
-  `--placement-profile gpus.json` then puts each element whose `device-id` is
-  -1 on the GPU that minimizes per-frame latency, or with
-  `--objective throughput` the load on the busiest GPU or copy link.
+  records each element's time, each GPU element's on its device, and the copy
+  cost between GPUs. `--placement-profile gpus.json` then puts each element
+  whose `device-id` is -1 on the GPU that minimizes per-frame latency, or with
+  `--objective throughput` the load on the busiest GPU, copy link, element or
+  runner thread.
 - **`g2g-inspect`** is `gst-inspect-1.0`: list elements, dump one's properties
   and pads, or map a GStreamer name with `g2g-inspect --gst x264enc`.
   `--gst-scan app.c` scans an app's source for element names.

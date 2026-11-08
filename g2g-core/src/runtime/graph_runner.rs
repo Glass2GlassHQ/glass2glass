@@ -299,13 +299,13 @@ impl<'a> GraphNodeRef<'a> {
         }
     }
 
-    pub fn type_name(&self) -> Option<&'static str> {
+    pub fn type_name(&self) -> &'static str {
         match self {
-            GraphNodeRef::Element(e) => Some(e.type_name()),
-            GraphNodeRef::Muxer(m) => Some(m.type_name()),
-            GraphNodeRef::Source(_) | GraphNodeRef::FanoutSource(_) | GraphNodeRef::Demux(_) => {
-                None
-            }
+            GraphNodeRef::Element(e) => e.type_name(),
+            GraphNodeRef::Muxer(m) => m.type_name(),
+            GraphNodeRef::Source(s) => s.type_name(),
+            GraphNodeRef::FanoutSource(s) => s.type_name(),
+            GraphNodeRef::Demux(d) => d.type_name(),
         }
     }
 }
@@ -328,6 +328,10 @@ impl core::fmt::Debug for GraphNodeRef<'_> {
 /// runner uses are mirrored.
 pub trait DynMultiOutputElement: ElementBound {
     fn caps_constraint_as_input(&self) -> CapsConstraint<'_>;
+
+    fn type_name(&self) -> &'static str {
+        core::any::type_name::<Self>()
+    }
     /// Dyn-safe mirror of [`MultiOutputElement::input_domains`]. Default
     /// [`DomainSet::ALL`].
     fn input_domains(&self) -> DomainSet {
@@ -558,6 +562,10 @@ impl MultiOutputElement for DemuxRef<'_> {
 impl<'b> DynMultiOutputElement for &'b mut (dyn DynMultiOutputElement + 'b) {
     fn caps_constraint_as_input(&self) -> CapsConstraint<'_> {
         (**self).caps_constraint_as_input()
+    }
+
+    fn type_name(&self) -> &'static str {
+        (**self).type_name()
     }
 
     fn input_domains(&self) -> DomainSet {
@@ -2313,7 +2321,9 @@ impl<'a> ArmPlan<'a> {
     where
         'a: 'f,
     {
-        match self {
+        #[cfg(feature = "std")]
+        let probe = self.visit_probe();
+        let arm: BoxFuture<'f, Result<u64, G2gError>> = match self {
             ArmPlan::Source {
                 source,
                 io,
@@ -2360,7 +2370,48 @@ impl<'a> ArmPlan<'a> {
                 probe,
             } => Box::pin(fanout_src_arm(source, ports, bus, probe)),
             ArmPlan::Muxer { muxer, parts } => drive_muxer(muxer, parts),
+        };
+        #[cfg(feature = "std")]
+        if let Some(probe) = probe {
+            return Box::pin(PollTimed { arm, probe });
         }
+        arm
+    }
+
+    #[cfg(feature = "std")]
+    fn visit_probe(&self) -> Probe {
+        let probe = match self {
+            ArmPlan::Source { io, .. } => &io.probe,
+            ArmPlan::Transform { io, .. } => &io.probe,
+            ArmPlan::Sink { io, .. } => &io.probe,
+            ArmPlan::Demux { io, .. } => &io.probe,
+            ArmPlan::Tee { .. } => &None,
+            ArmPlan::FaninSink { io, .. } => &io.probe,
+            ArmPlan::FanoutSrc { probe, .. } => probe,
+            ArmPlan::Muxer { parts, .. } => &parts.probe,
+        };
+        probe.clone().filter(|probe| probe.records_visits())
+    }
+}
+
+#[cfg(feature = "std")]
+struct PollTimed<'f> {
+    arm: BoxFuture<'f, Result<u64, G2gError>>,
+    probe: alloc::sync::Arc<ElementProbe>,
+}
+
+#[cfg(feature = "std")]
+impl core::future::Future for PollTimed<'_> {
+    type Output = Result<u64, G2gError>;
+
+    fn poll(
+        mut self: Pin<&mut Self>,
+        cx: &mut core::task::Context<'_>,
+    ) -> core::task::Poll<Self::Output> {
+        self.probe.start_poll(crate::metrics::monotonic_ns());
+        let polled = self.arm.as_mut().poll(cx);
+        self.probe.end_poll(crate::metrics::monotonic_ns());
+        polled
     }
 }
 

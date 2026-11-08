@@ -32,11 +32,20 @@ pub(crate) fn set_cuda_device_id(
     context_open: bool,
     value: &PropValue,
 ) -> Result<(), PropError> {
+    set_cuda_device_id_from(field, context_open, value, 0)
+}
+
+pub(crate) fn set_cuda_device_id_from(
+    field: &mut i32,
+    context_open: bool,
+    value: &PropValue,
+    lowest: i64,
+) -> Result<(), PropError> {
     if context_open {
         return Err(PropError::ReadOnly);
     }
     let ordinal = value.as_int().ok_or(PropError::Type)?;
-    if !(0..=MAX_CUDA_DEVICE_ID).contains(&ordinal) {
+    if !(lowest..=MAX_CUDA_DEVICE_ID).contains(&ordinal) {
         return Err(PropError::Value);
     }
     *field = ordinal as i32;
