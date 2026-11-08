@@ -26,6 +26,11 @@ Adding a dependency to one of the 1.86 crates means checking its MSRV, and a
 
 ## Conventions
 
+- **Reuse code. Search before you write.** Before writing any struct, helper,
+  constant or loop, grep the sibling elements of the same feature and `g2g-core`
+  for the same logic, and import it. If it is private, make it `pub(crate)` and
+  share it. Never write a copy and merge it afterwards. If two elements need the
+  same state or arithmetic, it lives in one place.
 - **`no_std + alloc` baseline.** `g2g-core` and `g2g-plugins` are `#![no_std]`
   with `extern crate alloc`. Anything needing the OS (network, COM, GPU) lives
   behind a cargo feature that implies `std`. Do not add `std` use to the
