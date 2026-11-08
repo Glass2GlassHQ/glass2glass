@@ -190,7 +190,15 @@ const KLV_METADATA_DESCRIPTOR: &[u8] = &[
 
 /// The MISB ST 1402 `registration_descriptor` marking a private PES (0x06) as
 /// asynchronous KLV, which is how this muxer writes an unqualified private stream.
-const KLVA_REGISTRATION: &[u8] = &[DESC_TAG_REGISTRATION, 4, b'K', b'L', b'V', b'A'];
+const KLVA_REGISTRATION_ID: &[u8; 4] = b"KLVA";
+const KLVA_REGISTRATION: &[u8] = &[
+    DESC_TAG_REGISTRATION,
+    KLVA_REGISTRATION_ID.len() as u8,
+    KLVA_REGISTRATION_ID[0],
+    KLVA_REGISTRATION_ID[1],
+    KLVA_REGISTRATION_ID[2],
+    KLVA_REGISTRATION_ID[3],
+];
 
 /// The `registration_descriptor` format_identifier the AOM "Carriage of AV1 in
 /// MPEG-2 TS" spec assigns AV1 on a private PES (0x06). AV1 has no `stream_type`
@@ -205,6 +213,11 @@ const AV1_REGISTRATION_ID: &[u8; 4] = b"AV01";
 /// accepted on the demux side; the mux writes this one so a real receiver plays
 /// the result.
 const AV1_REGISTRATION_ID_GSTREAMER: &[u8; 4] = b"AV1G";
+// SMPTE ST 2038 marks its ancillary data private PES with this format_identifier
+const VANC_REGISTRATION_ID: &[u8; 4] = b"VANC";
+// ISO/IEC 13818-1 2.4.3.7: the PES flag byte bit ST 2038 requires set
+const PES_DATA_ALIGNMENT_INDICATOR: u8 = 0x04;
+const PES_FLAGS_OFFSET: usize = 6;
 
 /// The first 4 bytes of every SMPTE ST 336 KLV key (the SMPTE UL designator).
 const KLV_UL_PREFIX: [u8; 4] = [0x06, 0x0E, 0x2B, 0x34];
@@ -245,6 +258,8 @@ pub struct ElementaryStream {
     /// (disambiguating the generic 0x06) and carries the page a decoder should
     /// follow. The subtitle entry wins when the descriptor lists several.
     pub teletext: Option<TeletextService>,
+    // a private (0x06) stream with a 'VANC' registration, SMPTE ST 2038 ancillary data
+    pub st2038: bool,
 }
 
 /// One entry of a DVB `teletext_descriptor`: which teletext page a stream
@@ -682,6 +697,13 @@ impl TsDemuxer {
             .iter()
             .find(|s| s.pid == pid)
             .is_some_and(|s| s.klv)
+    }
+
+    pub fn is_st2038(&self, pid: u16) -> bool {
+        self.streams()
+            .iter()
+            .find(|s| s.pid == pid)
+            .is_some_and(|s| s.st2038)
     }
 
     /// Whether `pid` is an AV1 video stream (a private 0x06 stream with an AV1
@@ -1271,17 +1293,20 @@ impl TsDemuxer {
             // A metadata-in-PES (0x15) stream is KLV without needing a descriptor
             // (the ffmpeg convention); a private 0x06 needs the 'KLVA' registration.
             let klv = stream_type == STREAM_TYPE_METADATA_PES
-                || private.is_some_and(has_klv_registration);
+                || private.is_some_and(|d| has_registration(d, &[KLVA_REGISTRATION_ID]));
             let mut es = ElementaryStream {
                 pid,
                 stream_type,
                 opus_channels,
                 ac3,
                 klv,
-                av1: private.is_some_and(has_av1_registration),
+                av1: private.is_some_and(|d| {
+                    has_registration(d, &[AV1_REGISTRATION_ID, AV1_REGISTRATION_ID_GSTREAMER])
+                }),
                 subtitling: private.and_then(parse_subtitling_descriptor),
                 teletext: private.and_then(parse_teletext_descriptor),
                 language: descriptors.and_then(parse_iso639_language),
+                st2038: private.is_some_and(|d| has_registration(d, &[VANC_REGISTRATION_ID])),
             };
             let streams = &mut self.programs[prog_idx].streams;
             // a PID listed twice takes its last entry's type, as ffmpeg does
@@ -1683,44 +1708,15 @@ fn has_ac3_descriptor(mut desc: &[u8]) -> bool {
     false
 }
 
-/// Whether a PMT ES-info descriptor list carries a 'KLVA' registration descriptor
-/// (tag 0x05), the MISB ST 1402 marker for asynchronous KLV metadata on a private
-/// (0x06) stream. Every field is bounds-checked so a malformed loop returns
-/// `false`, never panics.
-fn has_klv_registration(mut desc: &[u8]) -> bool {
+// whether a PMT ES-info descriptor loop has a registration_descriptor (tag 0x05) naming one of `ids`
+fn has_registration(mut desc: &[u8], ids: &[&[u8; 4]]) -> bool {
     while desc.len() >= 2 {
         let tag = desc[0];
         let len = desc[1] as usize;
         let Some(body) = desc.get(2..2 + len) else {
             return false;
         };
-        if tag == DESC_TAG_REGISTRATION && body.len() >= 4 && &body[..4] == b"KLVA" {
-            return true;
-        }
-        desc = &desc[2 + len..];
-    }
-    false
-}
-
-/// Whether a PMT ES-info descriptor list carries an AV1 `registration_descriptor`
-/// (tag 0x05), the AOM marker for AV1 video on a private (0x06) stream.
-/// Both the spec's 'AV01' and GStreamer's 'AV1G' are accepted, since only the
-/// latter has a live reader. The AV1_video_descriptor (tag 0x80) the spec pairs
-/// with the registration is not required: it carries profile / bit-depth fields
-/// the bitstream repeats in its sequence header, which is where `av1parse` reads
-/// them, and GStreamer's demuxer likewise keys on the registration alone. Every
-/// field is bounds-checked so a malformed loop returns `false`, never panics.
-fn has_av1_registration(mut desc: &[u8]) -> bool {
-    while desc.len() >= 2 {
-        let tag = desc[0];
-        let len = desc[1] as usize;
-        let Some(body) = desc.get(2..2 + len) else {
-            return false;
-        };
-        if tag == DESC_TAG_REGISTRATION
-            && (body.starts_with(AV1_REGISTRATION_ID)
-                || body.starts_with(AV1_REGISTRATION_ID_GSTREAMER))
-        {
+        if tag == DESC_TAG_REGISTRATION && ids.iter().any(|id| body.starts_with(*id)) {
             return true;
         }
         desc = &desc[2 + len..];
@@ -2073,6 +2069,7 @@ struct MuxStream {
     /// Set by [`TsMuxer::set_stream_opus`]: each access unit goes out behind the
     /// Opus-in-TS control header that [`opus_ts_packets`] strips.
     opus: bool,
+    st2038: bool,
     overrun_warned: bool,
 }
 
@@ -2232,6 +2229,7 @@ impl TsMuxer {
                 dvb_subtitle: false,
                 teletext: false,
                 opus: false,
+                st2038: false,
                 overrun_warned: false,
             });
         }
@@ -2433,6 +2431,16 @@ impl TsMuxer {
         self.set_private_identity(index, &descriptor);
         if let Some(s) = self.streams.get_mut(index) {
             s.opus = s.stream_type == STREAM_TYPE_PRIVATE_PES;
+        }
+    }
+
+    // the PMT goes out with the first access unit, so this only takes effect before it
+    pub fn set_stream_st2038(&mut self, index: usize) {
+        let mut descriptor = Vec::from([DESC_TAG_REGISTRATION, VANC_REGISTRATION_ID.len() as u8]);
+        descriptor.extend_from_slice(VANC_REGISTRATION_ID);
+        self.set_private_identity(index, &descriptor);
+        if let Some(s) = self.streams.get_mut(index) {
+            s.st2038 = s.stream_type == STREAM_TYPE_PRIVATE_PES;
         }
     }
 
@@ -2768,7 +2776,10 @@ impl TsMuxer {
             .or_else(|| s.opus.then(|| opus_ts_access_unit(au)))
             .or(cell);
         let payload = field.map_or(Cow::Borrowed(au), Cow::Owned);
-        let header = pes_header(s.stream_id, payload.len(), pts_90khz, dts_90khz);
+        let mut header = pes_header(s.stream_id, payload.len(), pts_90khz, dts_90khz);
+        if s.st2038 {
+            header[PES_FLAGS_OFFSET] |= PES_DATA_ALIGNMENT_INDICATOR;
+        }
         (header, payload)
     }
 
@@ -3457,7 +3468,8 @@ pub(crate) mod tests {
                 av1: false,
                 subtitling: None,
                 teletext: None,
-                language: None
+                language: None,
+                st2038: false,
             }]
         );
         assert_eq!(d.video_pid(), Some(es_pid));
@@ -4803,6 +4815,41 @@ pub(crate) mod tests {
             Some(klv),
             "and unwraps back to the packet"
         );
+    }
+
+    // gst's mpegtsmux and tsdemux carry ST 2038 this way: 0x06, 'VANC', stream_id 0xBD, data aligned
+    #[test]
+    fn st2038_rides_an_aligned_private_pes_with_the_vanc_registration() {
+        // six zero bits, then the start of a line 9 luma ANC header
+        const ANC: [u8; 6] = [0x00, 0x02, 0x40, 0x00, 0x18, 0x5A];
+        let mut m = TsMuxer::with_streams(&[STREAM_TYPE_PRIVATE_PES]);
+        m.set_stream_st2038(0);
+        let delay = m.decoder_delay_90khz();
+        let bytes = m.push_au(&ANC, Some(9000), None, false);
+        let pes_start = bytes
+            .windows(4)
+            .position(|w| w == [0x00, 0x00, 0x01, 0xBD])
+            .expect("ST 2038 uses private_stream_1");
+        assert_ne!(
+            bytes[pes_start + PES_FLAGS_OFFSET] & PES_DATA_ALIGNMENT_INDICATOR,
+            0,
+            "the PES sets data_alignment_indicator"
+        );
+        let mut d = TsDemuxer::new();
+        for pkt in bytes.chunks(TS_PACKET_LEN) {
+            d.push_packet(pkt);
+        }
+        d.flush();
+        let pid = d.streams()[0].pid;
+        assert!(d.is_st2038(pid), "the 'VANC' registration marks the stream");
+        assert!(
+            !d.is_klv(pid),
+            "and replaces the private PES default of KLV"
+        );
+        let units = d.take_units();
+        assert_eq!(units.len(), 1);
+        assert_eq!(units[0].pts_90khz, Some(9000 + delay));
+        assert_eq!(units[0].data, ANC);
     }
 
     /// EN 300 468 Annex C's worked example: MJD 45218 is 1982-09-06, so with the

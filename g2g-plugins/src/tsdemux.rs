@@ -350,6 +350,8 @@ pub enum TsStream {
     /// page selection goes out in band ahead of the first one so the decoder
     /// knows which page to assemble.
     Teletext,
+    // a private PES (0x06) with a 'VANC' registration, each PES payload SMPTE ST 2038 ANC packets
+    St2038,
 }
 
 /// Demuxes an MPEG-TS byte stream into one selected elementary stream.
@@ -437,6 +439,7 @@ fn output_caps(stream: TsStream) -> Caps {
         TsStream::Opus => compressed_audio(AudioFormat::Opus),
         TsStream::Ac3 => compressed_audio(AudioFormat::Ac3),
         TsStream::Klv => Caps::Klv,
+        TsStream::St2038 => Caps::St2038,
         TsStream::Teletext => Caps::Text {
             format: g2g_core::TextFormat::Teletext,
         },
@@ -472,6 +475,7 @@ fn selected_stream_type(stream: TsStream) -> u8 {
         TsStream::Klv => STREAM_TYPE_PRIVATE_PES,
         TsStream::DvbSub => STREAM_TYPE_PRIVATE_PES,
         TsStream::Teletext => STREAM_TYPE_PRIVATE_PES,
+        TsStream::St2038 => STREAM_TYPE_PRIVATE_PES,
     }
 }
 
@@ -553,6 +557,7 @@ fn es_to_stream(es: &crate::mpegts::ElementaryStream) -> Option<Stream> {
         ),
         // KLV metadata: no dedicated StreamType kind, the caps classify it.
         _ if es.klv => (StreamType::Unknown, Caps::Klv),
+        STREAM_TYPE_PRIVATE_PES if es.st2038 => (StreamType::Unknown, Caps::St2038),
         _ => return None,
     };
     Some(Stream::new(id, stream_type, caps))
@@ -574,7 +579,8 @@ fn is_keyframe(stream: TsStream, au: &[u8]) -> bool {
         | TsStream::Ac3
         | TsStream::Klv
         | TsStream::DvbSub
-        | TsStream::Teletext => true,
+        | TsStream::Teletext
+        | TsStream::St2038 => true,
     }
 }
 
@@ -598,7 +604,7 @@ static ONE_PORT_PROPS: &[PropertySpec] = &[
     PropertySpec::new(
         "stream",
         PropKind::Str,
-        "elementary stream to emit: h264 | h265 | av1 | mpeg2 | mpeg4part2 | aac | mp2 (or mp3) | opus | ac3 | klv | dvbsub | teletext",
+        "elementary stream to emit: h264 | h265 | av1 | mpeg2 | mpeg4part2 | aac | mp2 (or mp3) | opus | ac3 | klv | dvbsub | teletext | st2038",
     ),
     PROGRAM_NUMBER_PROP,
     PropertySpec::new(
@@ -644,12 +650,13 @@ fn ts_stream_from_str(s: &str) -> Option<TsStream> {
         "klv" => Some(TsStream::Klv),
         "dvbsub" => Some(TsStream::DvbSub),
         "teletext" => Some(TsStream::Teletext),
+        "st2038" => Some(TsStream::St2038),
         _ => None,
     }
 }
 
 #[cfg(feature = "std")]
-const TS_STREAMS: [TsStream; 12] = [
+const TS_STREAMS: [TsStream; 13] = [
     TsStream::H264,
     TsStream::H265,
     TsStream::Mpeg4Part2,
@@ -662,6 +669,7 @@ const TS_STREAMS: [TsStream; 12] = [
     TsStream::Klv,
     TsStream::DvbSub,
     TsStream::Teletext,
+    TsStream::St2038,
 ];
 
 // the first stream a consumer with sink caps `accepted` takes
@@ -697,6 +705,7 @@ pub(crate) fn ts_stream_to_str(stream: TsStream) -> &'static str {
         TsStream::Klv => "klv",
         TsStream::DvbSub => "dvbsub",
         TsStream::Teletext => "teletext",
+        TsStream::St2038 => "st2038",
     }
 }
 
@@ -1515,6 +1524,7 @@ fn pid_carries(demux: &TsDemuxer, stream: TsStream, pid: u16, stream_type: u8) -
         TsStream::Av1 => demux.is_av1(pid),
         TsStream::DvbSub => demux.subtitling(pid).is_some(),
         TsStream::Teletext => demux.teletext(pid).is_some(),
+        TsStream::St2038 => demux.is_st2038(pid),
         _ => true,
     }
 }
@@ -1777,6 +1787,7 @@ mod tests {
             subtitling: None,
             teletext: None,
             language: None,
+            st2038: false,
         };
         let stream = es_to_stream(&es).expect("0x10 is forwarded");
         assert_eq!(stream.stream_type, StreamType::Video);
@@ -1802,6 +1813,7 @@ mod tests {
                 subtitling: None,
                 teletext: None,
                 language: None,
+                st2038: false,
             }),
             Some(TsStream::Mpeg4Part2)
         );
@@ -2640,6 +2652,23 @@ mod tests {
         let mut sink = CaptureSink::default();
         run_demux(&mut d, &stream, &mut sink).await;
         assert_eq!(sink.frames, alloc::vec![syncframe.to_vec()]);
+    }
+
+    #[tokio::test]
+    async fn st2038_selects_the_vanc_stream_beside_video() {
+        const ANC: [u8; 6] = [0x00, 0x02, 0x40, 0x00, 0x18, 0x5A];
+        let mut m =
+            crate::mpegts::TsMuxer::with_streams(&[STREAM_TYPE_H264, STREAM_TYPE_PRIVATE_PES]);
+        m.set_stream_st2038(1);
+        let mut stream = m.push_au_on(0, &[0, 0, 0, 1, 0x65, 0x11], Some(900_000), None, true);
+        stream.extend(m.push_au_on(1, &ANC, Some(900_000), None, false));
+
+        assert_eq!(output_caps(TsStream::St2038), Caps::St2038);
+        let mut d = TsDemux::new().with_stream(TsStream::St2038);
+        d.configure_pipeline(&input_caps()).unwrap();
+        let mut sink = CaptureSink::default();
+        run_demux(&mut d, &stream, &mut sink).await;
+        assert_eq!(sink.frames, alloc::vec![ANC.to_vec()]);
     }
 
     /// The one-port demuxer posts the tags a transport stream carries:

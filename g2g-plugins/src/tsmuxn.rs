@@ -5,7 +5,7 @@
 //!
 //! A [`MultiInputElement`]: each input pad accepts one elementary stream
 //! (`Caps::CompressedVideo{H264|H265|Av1}`, `Caps::Audio{Aac|Opus}`, `Caps::Klv`,
-//! or the `Caps::SubPicture{DvbSub}` subtitle pad), and the access
+//! `Caps::St2038`, or the `Caps::SubPicture{DvbSub}` subtitle pad), and the access
 //! units are interleaved into one multiplex by decode time (the DTS when the
 //! frame carries one, else the PTS) before being written to their per-stream
 //! PIDs. Time-ordering reuses the
@@ -468,6 +468,8 @@ fn stream_type_for(caps: &Caps, klv_sync: bool) -> Option<u8> {
         Caps::SubPicture {
             format: SubPictureFormat::DvbSub,
         } => Some(STREAM_TYPE_PRIVATE_PES),
+        // ST 2038 rides a private PES told apart by its 'VANC' registration
+        Caps::St2038 => Some(STREAM_TYPE_PRIVATE_PES),
         _ => None,
     }
 }
@@ -604,6 +606,7 @@ pub struct TsMux {
     /// Per input: the channel count of an Opus pad, which declares the Opus
     /// descriptors and wraps its access units in the control header.
     opus: Vec<Option<u8>>,
+    st2038: Vec<bool>,
     // per input, how an AAC pad's frames are multiplexed, `None` for any other pad
     aac: Vec<Option<AacCarriage>>,
 }
@@ -630,6 +633,7 @@ impl TsMux {
             dvbsub_page_id: DEFAULT_PAGE_ID,
             av1: alloc::vec![false; inputs],
             opus: alloc::vec![None; inputs],
+            st2038: alloc::vec![false; inputs],
             aac: alloc::vec![None; inputs],
         }
     }
@@ -829,6 +833,9 @@ impl TsMux {
             if let Some(channels) = self.opus[i] {
                 mux.set_stream_opus(i, channels);
             }
+            if self.st2038[i] {
+                mux.set_stream_st2038(i);
+            }
             if self.aac[i].as_ref().is_some_and(AacCarriage::is_loas) {
                 mux.set_stream_latm(i);
             }
@@ -967,6 +974,7 @@ impl MultiInputElement for TsMux {
         }
         self.av1[input] = is_av1(absolute_caps);
         self.opus[input] = opus_channels(absolute_caps);
+        self.st2038[input] = *absolute_caps == Caps::St2038;
         Ok(ConfigureOutcome::Accepted)
     }
 

@@ -421,6 +421,7 @@ impl CapsSet {
             "private/teletext" => text_set(TextFormat::Teletext),
             "meta/x-klv" => Some(CapsSet::one(Caps::Klv)),
             "application/x-onvif-metadata" => Some(CapsSet::one(Caps::OnvifMetadata)),
+            "meta/x-st-2038" => Some(CapsSet::one(Caps::St2038)),
             // The container media types, the inverse of what `to_gst_string`
             // prints for a `ByteStream`, so a caps string round-trips and an
             // encoding profile can name its container. `video/quicktime` parses

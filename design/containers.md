@@ -341,6 +341,18 @@ GStreamer: a `svtav1enc ! mpegtsmux` stream demuxes to units ffmpeg's `obu`
 demuxer decodes at full size, and `tsdemux ! av1parse ! dav1ddec` decodes the
 g2g mux's output.
 
+### SMPTE ST 2038 over TS
+
+ST 2038 ancillary data (captions, timecode, AFD, SCTE-104) rides a private PES
+as well, `private_stream_1` (0xBD) with the PES `data_alignment_indicator` set,
+told apart by a 'VANC' `registration_descriptor`, the carriage GStreamer's
+`mpegtsmux` and `tsdemux` use. `Caps::St2038` (`meta/x-st-2038`) is the stream
+type, `tsdemux stream=st2038` selects it, and `mpegtsmux` writes an input of
+those caps. Each PES payload is forwarded unchanged, one or more ST 2038 ANC
+packets. Both directions are checked against GStreamer 1.28 in
+`m2129_st2038_ts`: its `tsdemux` reads the g2g mux's stream byte for byte, and
+g2g's `tsdemux` reads what its `mpegtsmux` writes.
+
 ### DVB EIT
 
 The DVB EIT on PID 0x12 adds what a service is showing. The demuxers parse the

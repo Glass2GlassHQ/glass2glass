@@ -42,6 +42,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M2126: `udpsrc` posts `ReceiveTimeout` on the bus after `timeout` without data, joins multicast on several interfaces, and resolves host names in `source-filter`.
 - M2127: `mpegtslivesrc` clocks a live MPEG-TS pipeline from the stream's PCR and maps `tsdemux` output onto it.
 - M2128: `alsasink`, `pulsesink` and `pipewiresink` follow an elected clock they do not provide by skipping or inserting samples (`slave-method=skew`).
+- M2129: `tsdemux stream=st2038` and `mpegtsmux` carry SMPTE ST 2038 ancillary data as `meta/x-st-2038`.
 
 ## 0.14.0
 

@@ -841,6 +841,7 @@ fn put_caps(w: &mut Writer, c: &Caps) {
             w.u8(subpicture_format_to_u8(*format));
         }
         Caps::OnvifMetadata => w.u8(9),
+        Caps::St2038 => w.u8(11),
         Caps::Batch { streams } => {
             w.u8(10);
             w.u32(streams.len() as u32);
@@ -920,6 +921,7 @@ fn get_caps(r: &mut Reader) -> Result<Caps, WireError> {
             }
             Caps::Batch { streams }
         }
+        11 => Caps::St2038,
         _ => return Err(WireError::BadTag),
     })
 }

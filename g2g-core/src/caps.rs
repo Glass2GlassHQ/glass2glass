@@ -146,6 +146,9 @@ pub enum Caps {
     /// carrier's own buffer is empty.
     #[cfg(feature = "alloc")]
     Batch { streams: Vec<Caps> },
+    /// SMPTE ST 2038 ancillary data (captions, timecode, AFD) as MPEG-TS carries
+    /// it, each frame the ANC packets of one PES (GStreamer `meta/x-st-2038`).
+    St2038,
 }
 
 impl Caps {
@@ -166,6 +169,7 @@ impl Caps {
             | Caps::Text { .. }
             | Caps::Klv
             | Caps::OnvifMetadata
+            | Caps::St2038
             | Caps::ClosedCaption { .. }
             | Caps::SubPicture { .. } => false,
             #[cfg(feature = "alloc")]
@@ -288,6 +292,7 @@ impl Caps {
             (Caps::Text { format: fa }, Caps::Text { format: fb }) if fa == fb => Ok(self.clone()),
             (Caps::Klv, Caps::Klv) => Ok(Caps::Klv),
             (Caps::OnvifMetadata, Caps::OnvifMetadata) => Ok(Caps::OnvifMetadata),
+            (Caps::St2038, Caps::St2038) => Ok(Caps::St2038),
             (Caps::ClosedCaption { format: a }, Caps::ClosedCaption { format: b }) if a == b => {
                 Ok(Caps::ClosedCaption { format: *a })
             }
@@ -410,6 +415,7 @@ impl Caps {
             | Caps::Text { .. }
             | Caps::Klv
             | Caps::OnvifMetadata
+            | Caps::St2038
             | Caps::ClosedCaption { .. }
             | Caps::SubPicture { .. } => Ok(self.clone()),
             Caps::Tensor { .. } => Ok(self.clone()),
@@ -470,6 +476,7 @@ impl Caps {
             | Caps::Text { .. }
             | Caps::Klv
             | Caps::OnvifMetadata
+            | Caps::St2038
             | Caps::ClosedCaption { .. }
             | Caps::SubPicture { .. } => None,
             Caps::Tensor { .. } => None,
@@ -558,6 +565,7 @@ impl Caps {
             Caps::Text { format } => String::from(text_format_gst_media_type(*format)),
             Caps::Klv => String::from("meta/x-klv"),
             Caps::OnvifMetadata => String::from("application/x-onvif-metadata"),
+            Caps::St2038 => String::from("meta/x-st-2038,alignment=line"),
             Caps::ClosedCaption { format } => String::from(cc_format_gst_media_type(*format)),
             Caps::SubPicture { format } => String::from(subpicture_gst_media_type(*format)),
             Caps::Batch { streams } => {
