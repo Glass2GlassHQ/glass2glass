@@ -1,34 +1,11 @@
 #![cfg(feature = "std")]
 
-use std::path::PathBuf;
+#[path = "common/st2038_ts.rs"]
+mod st2038_ts;
 
-use g2g_core::runtime::{parse_launch, run_graph};
-use g2g_core::PipelineClock;
-use g2g_plugins::mpegts::{TsMuxer, STREAM_TYPE_H264, STREAM_TYPE_PRIVATE_PES};
 use g2g_plugins::st2038::{parse_st2038, write_st2038};
 use g2g_plugins::st291::{AncPacket, CAPTION_DID, CEA608_SDID};
-
-// gst-plugins-rs cctost2038anc wrote this CEA-708 CDP packet at its default line 9
-const GST_CEA708_PACKET: &[u8] = include_bytes!("fixtures/st2038_cea708_gst.bin");
-const CEA608_S334: [u8; 3] = [0x80, 0x94, 0x2C];
-const PTS_90KHZ: u64 = 900_000;
-const FRAME_90KHZ: u64 = 3_600;
-// gst tsdemux needs about a second of frames before it activates a program
-const FRAMES: usize = 25;
-const IDR: [u8; 6] = [0, 0, 0, 1, 0x65, 0x11];
-
-struct ZeroClock;
-impl PipelineClock for ZeroClock {
-    fn now_ns(&self) -> u64 {
-        0
-    }
-}
-
-fn scratch(name: &str) -> PathBuf {
-    let path = std::env::temp_dir().join(name);
-    let _ = std::fs::remove_file(&path);
-    path
-}
+use st2038_ts::{run_launch, scratch, video_and_st2038_ts, CEA608_S334, FRAMES, GST_CEA708_PACKET};
 
 fn cdp() -> Vec<u8> {
     parse_st2038(GST_CEA708_PACKET).unwrap()[0].user_data_bytes()
@@ -38,23 +15,7 @@ fn captions_ts() -> Vec<u8> {
     let cea608 = AncPacket::from_bytes(CAPTION_DID, CEA608_SDID, &CEA608_S334);
     let mut payload = GST_CEA708_PACKET.to_vec();
     payload.extend(write_st2038(&[cea608]).unwrap());
-    let mut muxer = TsMuxer::with_streams(&[STREAM_TYPE_H264, STREAM_TYPE_PRIVATE_PES]);
-    muxer.set_stream_st2038(1);
-    let mut ts = Vec::new();
-    for frame in 0..FRAMES as u64 {
-        let pts = PTS_90KHZ + frame * FRAME_90KHZ;
-        ts.extend(muxer.push_au_on(0, &IDR, Some(pts), None, true));
-        ts.extend(muxer.push_au_on(1, &payload, Some(pts), None, false));
-    }
-    ts
-}
-
-async fn run_launch(line: &str) {
-    let registry = g2g_plugins::registry::default_registry();
-    let graph = parse_launch(&registry, line).expect("the launch line parses");
-    run_graph(graph, &ZeroClock, 4)
-        .await
-        .expect("the launch line runs");
+    video_and_st2038_ts(&payload)
 }
 
 #[tokio::test]

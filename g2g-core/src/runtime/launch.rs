@@ -531,7 +531,7 @@ fn as_ref_name(tok: &str) -> Option<&str> {
 
 /// Parse a demux output-pad suffix into a [`PadRequest`]: `"video_0"` ->
 /// `{ Video, 0 }`, `"audio_1"` -> `{ Audio, 1 }`, `"text_0"` / `"subtitle_0"` ->
-/// `{ Text, 0 }`, `"caption"` -> `{ Text, 0 }`, `"src_2"` -> `{ Any, 2 }`. A bare `d.` (empty suffix) or an
+/// `{ Text, 0 }`, `"caption"` / `"st2038"` -> `{ Text, 0 }`, `"src_2"` -> `{ Any, 2 }`. A bare `d.` (empty suffix) or an
 /// unrecognized prefix is `{ Any, ordinal }`, i.e. positional by reference order.
 fn parse_pad_request(pad: &str, ordinal: usize) -> PadRequest {
     let (prefix, index) = match pad.rsplit_once('_') {
@@ -541,9 +541,10 @@ fn parse_pad_request(pad: &str, ordinal: usize) -> PadRequest {
     let kind = match prefix {
         "video" => PadKind::Video,
         "audio" => PadKind::Audio,
-        // `caption` is the name a closed-caption fan-in gives its second pad; it
-        // rides the text kind, which is the one every sidecar-cue pad uses.
-        "text" | "subtitle" | "caption" => PadKind::Text,
+        // `caption` is the name a closed-caption fan-in gives its second pad and
+        // `st2038` the one `st2038combiner` gives its ancillary pad; they ride the
+        // text kind, which is the one every sidecar-cue pad uses.
+        "text" | "subtitle" | "caption" | "st2038" => PadKind::Text,
         _ => PadKind::Any,
     };
     // `src_N` (output) / `sink_N` (input) and unrecognized prefixes select the Nth

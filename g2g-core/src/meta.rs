@@ -505,6 +505,12 @@ mod on {
                 .downcast_mut::<T>()
         }
 
+        pub fn remove<T: FrameMeta + 'static>(&mut self) {
+            if let Some(idx) = self.position::<T>() {
+                self.entries_mut().remove(idx);
+            }
+        }
+
         /// Iterate every attached meta as a trait object.
         pub fn iter(&self) -> impl Iterator<Item = &dyn FrameMeta> {
             self.entries().iter().map(|m| m.as_ref())

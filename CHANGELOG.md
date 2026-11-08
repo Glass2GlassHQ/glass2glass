@@ -47,6 +47,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M2131: `cctost2038anc` and `st2038anctocc` carry CEA-608 and CEA-708 captions in and out of ST 2038.
 - M2132: a single link from a named `st2038anctocc` pad carries that pad's caption type.
 - M2133: `st2038ancdemux` and `st2038ancmux`, live included, with ST 2038 caps alignment and framerate and a `Gap` packet.
+- M2134: `st2038combiner` and `st2038extractor` move ST 2038 on and off video frames as `AncillaryMeta`.
 
 ## 0.14.0
 

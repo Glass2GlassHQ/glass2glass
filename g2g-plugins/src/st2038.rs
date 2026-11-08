@@ -1,7 +1,26 @@
 use alloc::vec::Vec;
 
+use g2g_core::caps::framerate_q16_period_ns;
+use g2g_core::{Caps, Rate};
+
 use crate::annexb::{BitReader, BitWriter};
 use crate::st291::{AncFieldOverflow, AncPacket};
+
+pub(crate) fn video_framerate(caps: &Caps) -> Rate {
+    match caps {
+        Caps::RawVideo { framerate, .. } | Caps::CompressedVideo { framerate, .. } => {
+            framerate.clone()
+        }
+        _ => Rate::Any,
+    }
+}
+
+pub(crate) fn framerate_period_ns(framerate: &Rate) -> Option<u64> {
+    match framerate {
+        Rate::Fixed(q16) => framerate_q16_period_ns(*q16),
+        _ => None,
+    }
+}
 
 const ZERO_BITS_BEFORE_LOCATION: u32 = 6;
 // ST 2038 PES payloads may end in 0xFF stuffing bytes, which no packet starts with

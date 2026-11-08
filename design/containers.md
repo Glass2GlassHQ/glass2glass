@@ -395,6 +395,24 @@ byte for byte. Both directions are checked against GStreamer 1.28 in
 `m2129_st2038_ts`: its `tsdemux` reads the g2g mux's stream byte for byte, and
 g2g's `tsdemux` reads what its `mpegtsmux` writes.
 
+`st291::AncillaryMeta` holds the ANC packets one video frame carries, the
+`GstAncillaryMeta` analog, behind the `metadata` feature. `st2038combiner` takes
+video on `sink` (or `video`) and ST 2038 on `st2038`, and the output follows the
+video caps. A video frame covers its PTS up to its duration, the frame rate's
+period, the next frame's PTS, or 50 ms for a last frame with none of those, as
+in gst. It goes out with the packets timed before its end, sorted by line and
+offset, once the ST 2038 input has data past that end, a `Gap` covering it, an
+end of stream or, at `alignment=frame`, a payload inside it. Live, it also goes
+out when its end plus `latency` passes, timed as in `st2038ancmux`. Packets
+timed before the frame are attached unless `drop-late-st2038` is set.
+`st2038extractor` passes the video on through `src` and writes each frame's
+packets as one `alignment=frame` payload on `st2038`, sorted by line, or a `Gap`
+the length of the frame when it has none. gst adds the `st2038` pad on the first
+packet, unless `always-add-st2038-pad` is set, so g2g has no such property: the
+named pad exists whenever it is linked. `remove-ancillary-meta` strips the meta
+from the video. The `st2038` input pad name parses as a text pad, which is how
+the combiner tells it from `sink` whatever the link order.
+
 ### DVB EIT
 
 The DVB EIT on PID 0x12 adds what a service is showing. The demuxers parse the

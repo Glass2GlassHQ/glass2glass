@@ -552,6 +552,12 @@ pub mod st2038ancdemux;
 // st2038ancmux: ST 2038 streams merged per frame. std: the live deadline reads the monotonic clock.
 #[cfg(feature = "std")]
 pub mod st2038ancmux;
+// st2038combiner: ST 2038 packets attached to the video frames they belong with. std: as st2038ancmux.
+#[cfg(all(feature = "std", feature = "metadata"))]
+pub mod st2038combiner;
+// st2038extractor: the ANC packets a video frame carries sent on as ST 2038.
+#[cfg(feature = "metadata")]
+pub mod st2038extractor;
 
 // ST 2110-20 uncompressed video over RTP (M599, RFC 4175): sans-IO packetizer /
 // depacketizer slicing a frame into SRD line runs, RGBA 8-bit + YCbCr-4:2:2 8/10-bit.

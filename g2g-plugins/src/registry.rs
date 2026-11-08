@@ -992,6 +992,24 @@ pub fn default_registry() -> Registry {
     reg.register_muxer(MuxerFactory::new("st2038ancmux", |inputs| {
         Box::new(crate::st2038ancmux::St2038AncMux::new(inputs))
     }));
+    // ST 2038 on video frames as ancillary meta: `v ! c.sink  a ! c.st2038
+    // st2038combiner name=c ! ...` attaches it, and `st2038extractor name=e` sends
+    // it on from `e.st2038` with the video on `e.src`, also for one named link.
+    #[cfg(feature = "metadata")]
+    {
+        reg.register_muxer(MuxerFactory::new("st2038combiner", |_inputs| {
+            Box::new(crate::st2038combiner::St2038Combiner::new())
+        }));
+        reg.register_launch(LaunchFactory::new("st2038extractor", Vec::new(), || {
+            Box::new(crate::st2038extractor::St2038Extractor::new())
+        }));
+        reg.register_demux(
+            g2g_core::runtime::DemuxFactory::new("st2038extractor", |outputs| {
+                Box::new(crate::st2038extractor::St2038ExtractorN::new(outputs))
+            })
+            .routing_one_named_pad(),
+        );
+    }
     // Closed-caption extractor (M429): mines CEA-608 / CEA-708 captions from a
     // compressed H.264 / H.265 stream's SEI into timed text cues (default CC1),
     // e.g. `... ! h264parse ! ccextract ! textoverlay ...` on a teed branch.
@@ -2814,6 +2832,8 @@ pub static FEATURE_GATED_ELEMENTS: &[FeatureGatedElement] = &{
         "scriptelement" => "script-rhai";
         "scriptrouter" => "script-rhai";
         "cccombiner" => "metadata";
+        "st2038combiner" => "metadata";
+        "st2038extractor" => "metadata";
         "analyticsjoin" => "metadata";
         "h264seiinserter" => "metadata";
         "h265seiinserter" => "metadata";

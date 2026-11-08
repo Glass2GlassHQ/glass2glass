@@ -6,7 +6,6 @@ use alloc::collections::{BTreeMap, VecDeque};
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use g2g_core::caps::framerate_q16_period_ns;
 use g2g_core::log::{short_type_name, LogName, LogSource};
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
@@ -15,7 +14,7 @@ use g2g_core::{
     PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, St2038Alignment,
 };
 
-use crate::st2038::{parse_st2038, write_st2038};
+use crate::st2038::{framerate_period_ns, parse_st2038, write_st2038};
 use crate::st291::AncPacket;
 
 // gst's aggregator advances 40 ms at a time while it knows no frame rate
@@ -42,23 +41,31 @@ fn output_alternatives() -> CapsSet {
 }
 
 #[derive(Debug)]
-struct QueuedPayload {
-    timing: FrameTiming,
-    packets: Vec<AncPacket>,
+pub(crate) struct QueuedPayload {
+    pub(crate) timing: FrameTiming,
+    pub(crate) packets: Vec<AncPacket>,
 }
 
 #[derive(Debug, Default)]
-struct MuxInput {
-    queue: VecDeque<QueuedPayload>,
+pub(crate) struct MuxInput {
+    pub(crate) queue: VecDeque<QueuedPayload>,
     gap_until_ns: Option<u64>,
-    ended: bool,
+    pub(crate) ended: bool,
 }
 
 impl MuxInput {
-    fn has_nothing_more_before(&self, end_ns: u64) -> bool {
+    pub(crate) fn has_nothing_more_before(&self, end_ns: u64) -> bool {
         self.ended
             || self.queue.back().is_some_and(|q| q.timing.pts_ns >= end_ns)
             || self.gap_until_ns.is_some_and(|gap_end| gap_end >= end_ns)
+    }
+
+    pub(crate) fn note_gap(&mut self, pts_ns: u64, duration_ns: u64) {
+        let gap_end_ns = pts_ns.saturating_add(duration_ns);
+        self.gap_until_ns = Some(
+            self.gap_until_ns
+                .map_or(gap_end_ns, |end| end.max(gap_end_ns)),
+        );
     }
 }
 
@@ -69,10 +76,18 @@ struct MuxWindow {
     end_ns: u64,
 }
 
+// the first frame's pts and the wall time it arrived at
 #[derive(Clone, Copy, Debug)]
-struct LiveAnchor {
-    pts_ns: u64,
-    wall_ns: u64,
+pub(crate) struct LiveAnchor {
+    pub(crate) pts_ns: u64,
+    pub(crate) wall_ns: u64,
+}
+
+impl LiveAnchor {
+    pub(crate) fn deadline_passed(&self, end_ns: u64, latency_ns: u64, now_ns: u64) -> bool {
+        let due_ns = self.wall_ns + end_ns.saturating_sub(self.pts_ns) + latency_ns;
+        now_ns >= due_ns
+    }
 }
 
 #[derive(Debug)]
@@ -108,13 +123,7 @@ impl St2038AncMux {
             Some(Caps::St2038 {
                 alignment,
                 framerate,
-            }) => {
-                let period_ns = match framerate {
-                    Rate::Fixed(q16) => framerate_q16_period_ns(*q16),
-                    _ => None,
-                };
-                Ok((*alignment, period_ns))
-            }
+            }) => Ok((*alignment, framerate_period_ns(framerate))),
             _ => Err(G2gError::NotConfigured),
         }
     }
@@ -148,11 +157,9 @@ impl St2038AncMux {
     }
 
     fn live_deadline_passed(&self, end_ns: u64, now_ns: u64) -> bool {
-        let Some(anchor) = self.live_anchor.filter(|_| self.live) else {
-            return false;
-        };
-        let due_ns = anchor.wall_ns + end_ns.saturating_sub(anchor.pts_ns) + self.latency_ns;
-        now_ns >= due_ns
+        self.live_anchor
+            .filter(|_| self.live)
+            .is_some_and(|anchor| anchor.deadline_passed(end_ns, self.latency_ns, now_ns))
     }
 
     async fn drain(&mut self, now_ns: u64, out: &mut dyn OutputSink) -> Result<(), G2gError> {
@@ -306,9 +313,7 @@ impl St2038AncMux {
                 pts_ns,
                 duration_ns,
             } => {
-                let gap_end_ns = pts_ns.saturating_add(duration_ns);
-                let gap_until_ns = &mut self.inputs[input].gap_until_ns;
-                *gap_until_ns = Some(gap_until_ns.map_or(gap_end_ns, |end| end.max(gap_end_ns)));
+                self.inputs[input].note_gap(pts_ns, duration_ns);
                 self.drain(now_ns, out).await
             }
             // the runner aggregates the inputs' Eos and sends the merged one

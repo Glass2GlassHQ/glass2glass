@@ -126,6 +126,30 @@ impl AncPacket {
     }
 }
 
+// the ANC packets one video frame carries, the GstAncillaryMeta analog
+#[cfg(feature = "metadata")]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AncillaryMeta {
+    pub packets: Vec<AncPacket>,
+}
+
+#[cfg(feature = "metadata")]
+impl g2g_core::meta::FrameMeta for AncillaryMeta {
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn core::any::Any {
+        self
+    }
+    fn clone_box(&self) -> alloc::boxed::Box<dyn g2g_core::meta::FrameMeta> {
+        alloc::boxed::Box::new(self.clone())
+    }
+}
+
+pub(crate) fn sort_by_position(packets: &mut [AncPacket]) {
+    packets.sort_by_key(|p| (p.line_number, p.horizontal_offset));
+}
+
 pub fn word_with_parity(value: u8) -> u16 {
     let parity = (value.count_ones() & 1) as u16;
     u16::from(value) | (parity << 8) | ((parity ^ 1) << 9)

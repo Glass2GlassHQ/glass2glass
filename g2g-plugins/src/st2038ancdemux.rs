@@ -214,6 +214,17 @@ impl PadTemplates for St2038AncDemux {
     }
 }
 
+pub(crate) async fn push_to_ports(
+    ports: impl IntoIterator<Item = usize>,
+    packet: impl Fn() -> PipelinePacket,
+    out: &mut dyn MultiOutputSink,
+) -> Result<(), G2gError> {
+    for port in ports {
+        out.push_to(port, packet()).await?;
+    }
+    Ok(())
+}
+
 #[derive(Debug)]
 struct DemuxPort {
     // None for the combined `src` pad
@@ -274,17 +285,6 @@ impl St2038AncDemuxN {
                 duration_ns: behind_ns,
             };
             out.push_to(index, gap).await?;
-        }
-        Ok(())
-    }
-
-    async fn push_to_every_port(
-        &self,
-        packet: impl Fn() -> PipelinePacket,
-        out: &mut dyn MultiOutputSink,
-    ) -> Result<(), G2gError> {
-        for port in 0..self.ports.len() {
-            out.push_to(port, packet()).await?;
         }
         Ok(())
     }
@@ -384,14 +384,18 @@ impl MultiOutputElement for St2038AncDemuxN {
                     self.push_gaps_for_late_streams(pts_ns, out).await
                 }
                 PipelinePacket::Segment(segment) => {
-                    self.push_to_every_port(|| PipelinePacket::Segment(segment), out)
-                        .await
+                    push_to_ports(
+                        0..self.ports.len(),
+                        || PipelinePacket::Segment(segment),
+                        out,
+                    )
+                    .await
                 }
                 PipelinePacket::Flush => {
                     for port in &mut self.ports {
                         port.last_pts_ns = None;
                     }
-                    self.push_to_every_port(|| PipelinePacket::Flush, out).await
+                    push_to_ports(0..self.ports.len(), || PipelinePacket::Flush, out).await
                 }
                 PipelinePacket::Gap {
                     pts_ns,
@@ -401,7 +405,7 @@ impl MultiOutputElement for St2038AncDemuxN {
                         pts_ns,
                         duration_ns,
                     };
-                    self.push_to_every_port(gap, out).await
+                    push_to_ports(0..self.ports.len(), gap, out).await
                 }
                 // the runner broadcasts the trailing Eos, and each port announces its own caps
                 _ => Ok(()),
