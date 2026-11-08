@@ -77,6 +77,7 @@ impl Canvas {
                 width as usize,
                 height as usize,
                 255,
+                crate::paint::blend_px,
             );
             return;
         }

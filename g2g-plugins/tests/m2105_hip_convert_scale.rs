@@ -8,6 +8,7 @@ use std::sync::Arc;
 use collect_sink::CollectSink;
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{HipVendor, MemoryDomain, SystemSlice};
+use g2g_core::meta::Orientation;
 use g2g_core::runtime::block_on;
 use g2g_core::{
     AsyncElement, Caps, Colorimetry, Dim, Interlace, PipelineClock, PropValue, Rate, RawVideoFormat,
@@ -95,7 +96,8 @@ fn gpu_convert(
     let ready = HipEvent::new(device).unwrap();
     stream.record(&ready).unwrap();
     let buffer = memory.into_buffer(ready, bytes.len()).unwrap();
-    let converter = HipConverter::new(device, input, output, add_borders).unwrap();
+    let converter =
+        HipConverter::new(device, input, output, add_borders, Orientation::Identity).unwrap();
     let len = converter.output_len().unwrap();
     let mut converted = HipMemory::allocate(device, len).unwrap();
     converter.convert(&stream, &buffer, &mut converted).unwrap();

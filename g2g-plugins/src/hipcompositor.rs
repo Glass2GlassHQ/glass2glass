@@ -8,6 +8,7 @@ use alloc::vec::Vec;
 
 use g2g_core::caps_parse::parse_raw_format;
 use g2g_core::memory::{DomainSet, MemoryDomainKind, OwnedHipBuffer};
+use g2g_core::meta::Orientation;
 use g2g_core::{
     Caps, CapsConstraint, CapsSet, Colorimetry, ConfigureOutcome, Dim, ElementMetadata, Frame,
     FrameTiming, G2gError, MemoryDomain, MultiInputElement, OutputSink, PipelinePacket, PropError,
@@ -22,7 +23,7 @@ use crate::hip::{
     HipDevice, HipEvent, HipKernel, HipKernelModule, HipMemoryPool, HipStream, KernelArgument,
 };
 use crate::hipconvertscale::{
-    any_size_formats, converts, narrow_to_converted_format, CanvasRect, HipBlender, HipConverter,
+    any_size_formats, converts, narrow_to_converted_format, HipBlender, HipConverter,
 };
 
 const FILL_SOURCE: &str = r#"
@@ -72,7 +73,13 @@ impl CompositeGpu {
         (width, height): (u32, u32),
     ) -> Result<Self, G2gError> {
         let fill = HipKernelModule::compile(&device, FILL_SOURCE, &[])?.kernel("fill_canvas")?;
-        let output = HipConverter::new(&device, &canvas_caps(width, height), &output_caps, false)?;
+        let output = HipConverter::new(
+            &device,
+            &canvas_caps(width, height),
+            &output_caps,
+            false,
+            Orientation::Identity,
+        )?;
         Ok(Self {
             stream: HipStream::new(&device)?,
             fill,
@@ -163,9 +170,9 @@ impl HipCompositor {
             ],
         )?;
         for input in paint_order(&canvas.pads) {
-            let Some((source_width, source_height)) = canvas.state.geometry(input) else {
+            if canvas.state.geometry(input).is_none() {
                 continue;
-            };
+            }
             let buffer = match input {
                 0 => base,
                 _ => match canvas.state.latest(input) {
@@ -177,8 +184,6 @@ impl HipCompositor {
             {
                 return Err(G2gError::UnsupportedDomain);
             }
-            let pad = canvas.pads[input];
-            let (pad_width, pad_height) = pad.dest_size(source_width, source_height);
             let blender = match &mut gpu.blenders[input] {
                 Some(blender) => blender,
                 slot => {
@@ -191,13 +196,7 @@ impl HipCompositor {
                 buffer,
                 &mut memory,
                 (width, height),
-                CanvasRect {
-                    x: pad.xpos,
-                    y: pad.ypos,
-                    width: pad_width,
-                    height: pad_height,
-                },
-                f32::from(pad.alpha) / 255.0,
+                &canvas.pads[input],
             )?;
         }
         let blended = HipEvent::new(&gpu.device)?;

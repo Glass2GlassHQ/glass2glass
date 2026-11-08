@@ -8,12 +8,13 @@ use std::sync::Arc;
 use collect_sink::CollectSink;
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{HipVendor, MemoryDomain, OwnedHipBuffer, SystemSlice};
+use g2g_core::meta::Orientation;
 use g2g_core::runtime::block_on;
 use g2g_core::{
     AsyncElement, Caps, Colorimetry, Dim, Interlace, MultiInputElement, PipelineClock, Rate,
     RawVideoFormat,
 };
-use g2g_plugins::compositor::{Compositor, CompositorPad};
+use g2g_plugins::compositor::{Compositor, CompositorOperator, CompositorPad, SizingPolicy};
 use g2g_plugins::hip::{HipDevice, HipEvent, HipMemory, HipStream};
 use g2g_plugins::hipcompositor::HipCompositor;
 use g2g_plugins::hipconvertscale::HipConverter;
@@ -145,8 +146,8 @@ fn hip_bytes(device: &Arc<HipDevice>, domain: MemoryDomain) -> Vec<u8> {
     download(device, &buffer)
 }
 
-fn cpu_composite(background: Vec<u8>, overlay: Vec<u8>) -> Vec<u8> {
-    let mut cpu = Compositor::new(WIDTH, HEIGHT, pads());
+fn cpu_composite(pads: Vec<CompositorPad>, background: Vec<u8>, overlay: Vec<u8>) -> Vec<u8> {
+    let mut cpu = Compositor::new(WIDTH, HEIGHT, pads);
     let out = composite(
         &mut cpu,
         [
@@ -224,7 +225,46 @@ fn a_scaled_translucent_overlay_matches_the_cpu_compositor() {
         );
         assert_close(
             &hip_bytes(&device, out),
-            &cpu_composite(background_frame(), translucent_overlay()),
+            &cpu_composite(pads(), background_frame(), translucent_overlay()),
+            &format!("{vendor:?}"),
+        );
+    }
+}
+
+#[test]
+fn the_source_operator_and_keep_aspect_ratio_match_the_cpu_compositor() {
+    let pads = || {
+        Vec::from([
+            CompositorPad::at(0, 0),
+            CompositorPad::at(-4, 10)
+                .with_size(30, 30)
+                .with_alpha(160)
+                .with_zorder(1)
+                .with_operator(CompositorOperator::Source)
+                .with_sizing_policy(SizingPolicy::KeepAspectRatio),
+        ])
+    };
+    for vendor in VENDORS {
+        let Some(device) = device(vendor) else {
+            continue;
+        };
+        let mut hip = HipCompositor::new(WIDTH, HEIGHT, pads());
+        let out = composite(
+            &mut hip,
+            [
+                (
+                    caps(RawVideoFormat::Rgba8, WIDTH, HEIGHT),
+                    MemoryDomain::Hip(upload(&device, &background_frame())),
+                ),
+                (
+                    caps(RawVideoFormat::Rgba8, OVERLAY_WIDTH, OVERLAY_HEIGHT),
+                    MemoryDomain::Hip(upload(&device, &translucent_overlay())),
+                ),
+            ],
+        );
+        assert_close(
+            &hip_bytes(&device, out),
+            &cpu_composite(pads(), background_frame(), translucent_overlay()),
             &format!("{vendor:?}"),
         );
     }
@@ -254,7 +294,7 @@ fn a_yuv_background_converts_as_it_composites() {
         let background = cpu_convert(&nv12, &nv12_frame(), RawVideoFormat::Rgba8);
         assert_close(
             &hip_bytes(&device, out),
-            &cpu_composite(background, translucent_overlay()),
+            &cpu_composite(pads(), background, translucent_overlay()),
             &format!("{vendor:?}"),
         );
     }
@@ -291,6 +331,7 @@ fn the_output_format_is_converted_from_the_canvas() {
             &caps(RawVideoFormat::Rgba8, WIDTH, HEIGHT),
             &caps(RawVideoFormat::Nv12, WIDTH, HEIGHT),
             false,
+            Orientation::Identity,
         )
         .unwrap();
         let stream = HipStream::new(&device).unwrap();

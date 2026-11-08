@@ -17,6 +17,13 @@ pub(crate) fn blend_px(canvas: &mut [u8], d: usize, src: [u8; 4], galpha: u8) {
     canvas[d + 3] = (a + canvas[d + 3] as u32 * inv / 255) as u8;
 }
 
+// gst's compositor `source` operator: the colour is copied and the alpha scaled by `galpha`
+#[inline]
+pub(crate) fn source_px(canvas: &mut [u8], d: usize, src: [u8; 4], galpha: u8) {
+    canvas[d..d + 3].copy_from_slice(&src[..3]);
+    canvas[d + 3] = ((src[3] as u32 * galpha as u32 + 127) / 255) as u8;
+}
+
 /// Source-over onto a canvas that may itself be transparent, leaving the result
 /// un-premultiplied. [`blend_px`] weights the destination by `255 - a` alone,
 /// which only holds where the destination is opaque: against a cleared canvas it

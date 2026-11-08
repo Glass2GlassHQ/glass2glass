@@ -55,7 +55,7 @@ use alloc::vec::Vec;
 
 use crate::compositor::{
     configure_compositor_input, paint_order, process_compositor_packet, CompositorBackend,
-    CompositorCanvas, CompositorPad, WGPU_COMPOSITOR_PROPS,
+    CompositorCanvas, CompositorOperator, CompositorPad, WGPU_COMPOSITOR_PROPS,
 };
 use crate::gpu::{map_for_read_async, texture_of, GpuContext, WgpuTextureKeepAlive};
 use g2g_core::caps::framerate_q16_from_fraction;
@@ -74,7 +74,7 @@ pub const MAX_DIM: u32 = 16384;
 const WORKGROUP: u32 = 8;
 
 /// `u32`s per `Pad` in the pads buffer, matching the WGSL struct.
-const PAD_WORDS: usize = 9;
+const PAD_WORDS: usize = 10;
 
 /// First bind-group slot for a texture pad; 0..=3 are the buffers.
 const TEX_BINDING_BASE: u32 = 4;
@@ -106,6 +106,7 @@ struct Pad {
     off: u32,
     // 0 reads the packed src buffer, else the (1-based) texture binding.
     src_kind: u32,
+    source_operator: u32,
 };
 
 @group(0) @binding(0) var<uniform> params: Params;
@@ -131,6 +132,11 @@ fn blend(d: vec4<u32>, s: vec4<u32>, galpha: u32) -> vec4<u32> {
         (s.z * a + d.z * inv + 127u) / 255u,
         a + d.w * inv / 255u,
     );
+}
+
+// the exact arithmetic of paint::source_px
+fn copy_source(s: vec4<u32>, galpha: u32) -> vec4<u32> {
+    return vec4<u32>(s.xyz, (s.w * galpha + 127u) / 255u);
 }
 
 // center-aligned Q16 source coordinate: ((d + 0.5) * s / dst - 0.5), clamped.
@@ -219,7 +225,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         } else {
             px = sample_scaled(p, u32(dx), u32(dy));
         }
-        acc = blend(acc, px, p.alpha);
+        if (p.source_operator == 1u) {
+            acc = copy_source(px, p.alpha);
+        } else {
+            acc = blend(acc, px, p.alpha);
+        }
     }
     dst[gid.y * params.stride_words + gid.x] = pack(acc);
 }
@@ -284,6 +294,7 @@ struct GpuPad {
     alpha: u32,
     off: u32,
     src_kind: u32,
+    source_operator: bool,
 }
 
 impl GpuPad {
@@ -299,6 +310,7 @@ impl GpuPad {
             self.alpha,
             self.off,
             self.src_kind,
+            u32::from(self.source_operator),
         ]
     }
 }
@@ -629,15 +641,15 @@ impl WgpuCompositor {
                 continue;
             }
             let pad = self.canvas.pads[i];
-            let (dw, dh) = pad.dest_size(sw, sh);
-            if dw == 0 || dh == 0 {
+            let rect = pad.dest_rect(sw, sh);
+            if rect.width == 0 || rect.height == 0 {
                 continue;
             }
             out.push(GpuPad {
-                x0: pad.xpos,
-                y0: pad.ypos,
-                dw,
-                dh,
+                x0: rect.x,
+                y0: rect.y,
+                dw: rect.width,
+                dh: rect.height,
                 sw,
                 sh,
                 alpha: pad.alpha as u32,
@@ -647,6 +659,7 @@ impl WgpuCompositor {
                     Some(slot) => slot as u32 + 1,
                     None => 0,
                 },
+                source_operator: pad.operator == CompositorOperator::Source,
             });
         }
         out
@@ -1403,6 +1416,30 @@ mod tests {
                 solid(16, 16, [0, 0, 255, 128]),
             ],
             "per-pad alpha",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn matches_cpu_on_the_source_operator_and_keep_aspect_ratio() {
+        let _gpu = crate::GPU_TEST_LOCK.lock().await;
+        assert_parity(
+            Vec::from([
+                CompositorPad::at(0, 0),
+                CompositorPad::at(4, 4)
+                    .with_zorder(1)
+                    .with_alpha(160)
+                    .with_operator(CompositorOperator::Source),
+                CompositorPad::at(2, 10)
+                    .with_zorder(2)
+                    .with_size(20, 20)
+                    .with_sizing_policy(crate::compositor::SizingPolicy::KeepAspectRatio),
+            ]),
+            (32, 32),
+            [90, 90, 90, 255],
+            &[(32, 32), (16, 16), (12, 7)],
+            &[solid(32, 32, [255, 0, 0, 255]), ramp(16, 16), ramp(12, 7)],
+            "source operator and keep-aspect-ratio",
         )
         .await;
     }

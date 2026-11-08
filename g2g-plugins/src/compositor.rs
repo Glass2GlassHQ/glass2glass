@@ -49,7 +49,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::padprop::split_pad_name;
-use crate::paint::blend_px;
+use crate::paint::{blend_px, source_px};
 use crate::pixel::{chroma_420_size, frame_byte_size, planar_planes, tight_plane};
 use crate::videoscale::{axis_samples, bilerp};
 use crate::yuvmatrix::YuvRgbMatrix;
@@ -81,6 +81,28 @@ pub struct CompositorPad {
     /// `None` draws the input at its native geometry; `Some` resamples it
     /// (bilinear), so a downscaled camera needs no upstream `VideoScale`.
     pub size: Option<(u32, u32)>,
+    pub operator: CompositorOperator,
+    pub sizing_policy: SizingPolicy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompositorOperator {
+    Source,
+    Over,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SizingPolicy {
+    Fill,
+    KeepAspectRatio,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CanvasRect {
+    pub(crate) x: i32,
+    pub(crate) y: i32,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
 }
 
 impl CompositorPad {
@@ -92,6 +114,8 @@ impl CompositorPad {
             zorder: 0,
             alpha: 255,
             size: None,
+            operator: CompositorOperator::Over,
+            sizing_policy: SizingPolicy::Fill,
         }
     }
 
@@ -114,10 +138,20 @@ impl CompositorPad {
         self
     }
 
+    pub fn with_operator(mut self, operator: CompositorOperator) -> Self {
+        self.operator = operator;
+        self
+    }
+
+    pub fn with_sizing_policy(mut self, sizing_policy: SizingPolicy) -> Self {
+        self.sizing_policy = sizing_policy;
+        self
+    }
+
     /// On-canvas size for an input whose native geometry is `sw` x `sh`: the
     /// requested size, with an unset (zero) dimension falling back to native, the
     /// way a `compositor` pad's `width` / `height` of 0 does.
-    pub(crate) fn dest_size(&self, sw: u32, sh: u32) -> (u32, u32) {
+    fn dest_size(&self, sw: u32, sh: u32) -> (u32, u32) {
         match self.size {
             None => (sw, sh),
             Some((w, h)) => (
@@ -130,6 +164,37 @@ impl CompositorPad {
                     h => h,
                 },
             ),
+        }
+    }
+
+    pub(crate) fn dest_rect(&self, sw: u32, sh: u32) -> CanvasRect {
+        let (dw, dh) = self.dest_size(sw, sh);
+        let fill = CanvasRect {
+            x: self.xpos,
+            y: self.ypos,
+            width: dw,
+            height: dh,
+        };
+        if self.sizing_policy == SizingPolicy::Fill || sw == 0 || sh == 0 {
+            return fill;
+        }
+        // gst_video_center_rect: the source aspect ratio, centred, truncated to whole pixels
+        let (source_wide, target_wide) =
+            (u64::from(sw) * u64::from(dh), u64::from(dw) * u64::from(sh));
+        let (width, height) = match source_wide.cmp(&target_wide) {
+            core::cmp::Ordering::Greater => {
+                (dw, (u64::from(dw) * u64::from(sh) / u64::from(sw)) as u32)
+            }
+            core::cmp::Ordering::Less => {
+                ((u64::from(dh) * u64::from(sw) / u64::from(sh)) as u32, dh)
+            }
+            core::cmp::Ordering::Equal => return fill,
+        };
+        CanvasRect {
+            x: self.xpos + ((dw - width) / 2) as i32,
+            y: self.ypos + ((dh - height) / 2) as i32,
+            width,
+            height,
         }
     }
 }
@@ -243,6 +308,20 @@ macro_rules! compositor_props {
                     concat!("pad ", $i, ": on-canvas height to scale to, 0 for native"),
                 )
                 .with_default("0"),
+                PropertySpec::new(
+                    concat!("sink", $i, "-operator"),
+                    PropKind::Str,
+                    concat!("pad ", $i, ": blending operator over the pads below it"),
+                )
+                .with_enum_values("source | over")
+                .with_default("over"),
+                PropertySpec::new(
+                    concat!("sink", $i, "-sizing-policy"),
+                    PropKind::Str,
+                    concat!("pad ", $i, ": scale to fill the pad rectangle, or fit and centre keeping the aspect ratio"),
+                )
+                .with_enum_values("none | keep-aspect-ratio")
+                .with_default("none"),
             )*
         ]
     };
@@ -303,12 +382,26 @@ fn set_pad_knob(
         "xpos" => pad.xpos = as_pos()?,
         "ypos" => pad.ypos = as_pos()?,
         "zorder" => pad.zorder = as_dim()?,
+        "operator" => {
+            pad.operator = match value.as_str().ok_or(PropError::Type)? {
+                "source" => CompositorOperator::Source,
+                "over" => CompositorOperator::Over,
+                _ => return Err(PropError::Value),
+            }
+        }
+        "sizing-policy" => {
+            pad.sizing_policy = match value.as_str().ok_or(PropError::Type)? {
+                "none" => SizingPolicy::Fill,
+                "keep-aspect-ratio" => SizingPolicy::KeepAspectRatio,
+                _ => return Err(PropError::Value),
+            }
+        }
         "alpha" => {
             pad.alpha = u8::try_from(value.as_uint().ok_or(PropError::Type)?)
                 .map_err(|_| PropError::Value)?
         }
         // A zero dimension is "native", so the pair carries whichever of the two
-        // the line set (see `CompositorPad::dest_size`).
+        // the line set (see `CompositorPad::dest_rect`).
         "width" | "height" => {
             let (w, h) = pad.size.unwrap_or((0, 0));
             let v = as_dim()?;
@@ -333,6 +426,20 @@ pub(crate) fn pad_property(pads: &[CompositorPad], name: &str) -> Option<PropVal
         "ypos" => PropValue::Int(pad.ypos as i64),
         "zorder" => PropValue::Uint(pad.zorder as u64),
         "alpha" => PropValue::Uint(pad.alpha as u64),
+        "operator" => PropValue::Str(
+            match pad.operator {
+                CompositorOperator::Source => "source",
+                CompositorOperator::Over => "over",
+            }
+            .into(),
+        ),
+        "sizing-policy" => PropValue::Str(
+            match pad.sizing_policy {
+                SizingPolicy::Fill => "none",
+                SizingPolicy::KeepAspectRatio => "keep-aspect-ratio",
+            }
+            .into(),
+        ),
         "width" => PropValue::Uint(w as u64),
         "height" => PropValue::Uint(h as u64),
         _ => return None,
@@ -977,8 +1084,12 @@ impl Compositor {
             };
             let pad = self.canvas.pads[i];
             let (sw, sh) = (w as usize, h as usize);
-            let (dw, dh) = pad.dest_size(w, h);
-            let (dw, dh) = (dw as usize, dh as usize);
+            let rect = pad.dest_rect(w, h);
+            let (dw, dh) = (rect.width as usize, rect.height as usize);
+            let paint = match pad.operator {
+                CompositorOperator::Source => source_px,
+                CompositorOperator::Over => blend_px,
+            };
             if (dw, dh) == (sw, sh) {
                 blend_over(
                     &mut canvas,
@@ -987,9 +1098,10 @@ impl Compositor {
                     src,
                     sw,
                     sh,
-                    pad.xpos,
-                    pad.ypos,
+                    rect.x,
+                    rect.y,
                     pad.alpha,
+                    paint,
                 );
             } else {
                 blend_over_scaled(
@@ -999,11 +1111,12 @@ impl Compositor {
                     src,
                     sw,
                     sh,
-                    pad.xpos,
-                    pad.ypos,
+                    rect.x,
+                    rect.y,
                     dw,
                     dh,
                     pad.alpha,
+                    paint,
                 );
             }
         }
@@ -1044,15 +1157,20 @@ impl Compositor {
             let src_chans = channels(self.canvas.format, sw as usize, sh as usize);
             // even-align so a subsampled plane's placement stays on a chroma
             // sample (harmless for the full-res luma plane).
-            let (x0, y0) = (pad.xpos & !1, pad.ypos & !1);
-            let scaled = pad.size.map(|_| {
-                let (dw, dh) = pad.dest_size(sw, sh);
-                ((dw & !1) as usize, (dh & !1) as usize)
-            });
+            let rect = pad.dest_rect(sw, sh);
+            let (x0, y0) = (rect.x & !1, rect.y & !1);
+            let scaled = pad
+                .size
+                .map(|_| ((rect.width & !1) as usize, (rect.height & !1) as usize));
+            // gst's compositor copies planar YUV under the source operator, ignoring pad alpha
+            let alpha = match pad.operator {
+                CompositorOperator::Source => 255,
+                CompositorOperator::Over => pad.alpha,
+            };
             for (dc, sc) in dst_chans.iter().zip(src_chans.iter()) {
                 let (cx, cy) = (x0 >> dc.hs, y0 >> dc.vs);
                 match scaled {
-                    None => blend_channel(&mut canvas, dc, src, sc, cx, cy, pad.alpha),
+                    None => blend_channel(&mut canvas, dc, src, sc, cx, cy, alpha),
                     Some((dw, dh)) => blend_channel_scaled(
                         &mut canvas,
                         dc,
@@ -1062,7 +1180,7 @@ impl Compositor {
                         cy,
                         dw >> dc.hs,
                         dh >> dc.vs,
-                        pad.alpha,
+                        alpha,
                     ),
                 }
             }
@@ -1076,6 +1194,8 @@ impl Compositor {
 /// `galpha`. Straight "source-over" compositing, integer math; pixels outside
 /// the canvas are clipped. The arguments are the canvas + source geometry and
 /// the placement: a flat parameter list keeps this inner loop allocation-free.
+pub(crate) type PixelPaint = fn(&mut [u8], usize, [u8; 4], u8);
+
 #[allow(clippy::too_many_arguments)]
 fn blend_over(
     canvas: &mut [u8],
@@ -1087,6 +1207,7 @@ fn blend_over(
     x0: i32,
     y0: i32,
     galpha: u8,
+    paint: PixelPaint,
 ) {
     let columns = visible(x0, sw, cw);
     for sy in visible(y0, sh, ch) {
@@ -1095,7 +1216,7 @@ fn blend_over(
             let s = (sy * sw + sx) * 4;
             let d = (dy * cw + (x0 + sx as i32) as usize) * 4;
             let px = [src[s], src[s + 1], src[s + 2], src[s + 3]];
-            blend_px(canvas, d, px, galpha);
+            paint(canvas, d, px, galpha);
         }
     }
 }
@@ -1125,6 +1246,7 @@ pub(crate) fn blend_over_scaled(
     dw: usize,
     dh: usize,
     galpha: u8,
+    paint: PixelPaint,
 ) {
     if sw == 0 || sh == 0 || dw == 0 || dh == 0 {
         return;
@@ -1151,7 +1273,7 @@ pub(crate) fn blend_over_scaled(
                 );
             }
             let d = (row + (x0 + ddx as i32) as usize) * 4;
-            blend_px(canvas, d, px, galpha);
+            paint(canvas, d, px, galpha);
         }
     }
 }
@@ -1583,7 +1705,7 @@ mod tests {
         // 4x4 red canvas-fill, then a 2x2 opaque blue square at (1,1).
         let mut canvas = solid(4, 4, [255, 0, 0, 255]);
         let blue = solid(2, 2, [0, 0, 255, 255]);
-        blend_over(&mut canvas, 4, 4, &blue, 2, 2, 1, 1, 255);
+        blend_over(&mut canvas, 4, 4, &blue, 2, 2, 1, 1, 255, blend_px);
         assert_eq!(
             px(&canvas, 4, 0, 0),
             [255, 0, 0, 255],
@@ -1607,7 +1729,7 @@ mod tests {
         // Blue over red at 50% alpha -> roughly (128, 0, 128).
         let mut canvas = solid(2, 2, [255, 0, 0, 255]);
         let blue = solid(2, 2, [0, 0, 255, 255]);
-        blend_over(&mut canvas, 2, 2, &blue, 2, 2, 0, 0, 128);
+        blend_over(&mut canvas, 2, 2, &blue, 2, 2, 0, 0, 128, blend_px);
         let p = px(&canvas, 2, 0, 0);
         assert!((p[0] as i32 - 127).abs() <= 2, "red ~half: {}", p[0]);
         assert_eq!(p[1], 0);
@@ -1620,7 +1742,7 @@ mod tests {
         // A 4x4 green source placed at (-2,-2): only its bottom-right 2x2 lands.
         let mut canvas = solid(4, 4, [0, 0, 0, 255]);
         let green = solid(4, 4, [0, 255, 0, 255]);
-        blend_over(&mut canvas, 4, 4, &green, 4, 4, -2, -2, 255);
+        blend_over(&mut canvas, 4, 4, &green, 4, 4, -2, -2, 255, blend_px);
         assert_eq!(px(&canvas, 4, 0, 0), [0, 255, 0, 255], "top-left now green");
         assert_eq!(
             px(&canvas, 4, 1, 1),
@@ -1641,7 +1763,7 @@ mod tests {
         // border stays red.
         let mut canvas = solid(6, 6, [255, 0, 0, 255]);
         let blue = solid(2, 2, [0, 0, 255, 255]);
-        blend_over_scaled(&mut canvas, 6, 6, &blue, 2, 2, 1, 1, 4, 4, 255);
+        blend_over_scaled(&mut canvas, 6, 6, &blue, 2, 2, 1, 1, 4, 4, 255, blend_px);
         assert_eq!(px(&canvas, 6, 0, 0), [255, 0, 0, 255], "border stays red");
         assert_eq!(
             px(&canvas, 6, 1, 1),
@@ -1690,6 +1812,7 @@ mod tests {
             SCALED.0,
             SCALED.1,
             u8::MAX,
+            blend_px,
         );
         for y in 0..CANVAS {
             for x in 0..CANVAS {
@@ -1902,6 +2025,74 @@ mod tests {
         assert!(
             (y as i32 - 125).abs() <= 2,
             "half-blended luma ~125, got {y}"
+        );
+    }
+
+    #[test]
+    fn the_source_operator_copies_the_overlay_instead_of_blending() {
+        let mut comp = Compositor::new(
+            2,
+            2,
+            Vec::from([
+                CompositorPad::at(0, 0),
+                CompositorPad::at(0, 0)
+                    .with_zorder(1)
+                    .with_alpha(128)
+                    .with_operator(CompositorOperator::Source),
+            ]),
+        );
+        comp.canvas.state.set_geometry(0, 2, 2);
+        comp.canvas.state.set_geometry(1, 2, 2);
+        seed(&mut comp, 1, solid(2, 2, [0, 0, 255, 200]));
+        let out = comp.compose(&solid(2, 2, [255, 0, 0, 255]));
+        // 200 * 128 / 255, rounded
+        assert_eq!(px(&out, 2, 0, 0), [0, 0, 255, 100]);
+    }
+
+    #[test]
+    fn the_source_operator_copies_planar_yuv_whatever_the_pad_alpha() {
+        let mut comp = Compositor::new(
+            4,
+            4,
+            Vec::from([
+                CompositorPad::at(0, 0),
+                CompositorPad::at(0, 0)
+                    .with_zorder(1)
+                    .with_alpha(128)
+                    .with_operator(CompositorOperator::Source),
+            ]),
+        )
+        .with_format(RawVideoFormat::Nv12);
+        comp.canvas.state.set_geometry(0, 4, 4);
+        comp.canvas.state.set_geometry(1, 4, 4);
+        seed(
+            &mut comp,
+            1,
+            solid_yuv(RawVideoFormat::Nv12, 4, 4, [200, 128, 128]),
+        );
+        let out = comp.compose(&solid_yuv(RawVideoFormat::Nv12, 4, 4, [50, 128, 128]));
+        assert_eq!(yuv_at(&out, RawVideoFormat::Nv12, 4, 4, 0, 0, 0), 200);
+    }
+
+    #[test]
+    fn keep_aspect_ratio_fits_and_centres_the_input_in_the_pad_rectangle() {
+        let pad = CompositorPad::at(10, 20)
+            .with_size(100, 100)
+            .with_sizing_policy(SizingPolicy::KeepAspectRatio);
+        let rect = |x, y, width, height| CanvasRect {
+            x,
+            y,
+            width,
+            height,
+        };
+        assert_eq!(pad.dest_rect(200, 100), rect(10, 45, 100, 50));
+        assert_eq!(pad.dest_rect(30, 60), rect(35, 20, 50, 100));
+        // gst_video_center_rect truncates 100 / 1.5 to 66
+        assert_eq!(pad.dest_rect(3, 2), rect(10, 37, 100, 66));
+        assert_eq!(
+            pad.with_sizing_policy(SizingPolicy::Fill)
+                .dest_rect(200, 100),
+            rect(10, 20, 100, 100)
         );
     }
 

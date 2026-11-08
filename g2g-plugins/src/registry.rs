@@ -2876,8 +2876,10 @@ pub static FEATURE_GATED_ELEMENTS: &[FeatureGatedElement] = &{
         "cudadownload" => "cuda" on "linux" | "windows";
         "cudaupload" => "cuda" on "linux" | "windows";
         "hipcompositor" => "hip" on "linux";
+        "hipconvert" => "hip" on "linux";
         "hipconvertscale" => "hip" on "linux";
         "hipdownload" => "hip" on "linux";
+        "hipscale" => "hip" on "linux";
         "hipupload" => "hip" on "linux";
         "nvdec" => "nvdec" on "linux" | "windows";
         "nvenc" => "nvenc" on "linux" | "windows";
@@ -3710,6 +3712,14 @@ fn register_feature_gated(reg: &mut Registry) {
     #[cfg(all(target_os = "linux", feature = "hip"))]
     reg.register_launch(LaunchFactory::new("hipconvertscale", Vec::new(), || {
         Box::new(crate::hipconvertscale::HipConvertScale::new())
+    }));
+    #[cfg(all(target_os = "linux", feature = "hip"))]
+    reg.register_launch(LaunchFactory::new("hipconvert", Vec::new(), || {
+        Box::new(crate::hipconvertscale::HipConvertScale::convert_only())
+    }));
+    #[cfg(all(target_os = "linux", feature = "hip"))]
+    reg.register_launch(LaunchFactory::new("hipscale", Vec::new(), || {
+        Box::new(crate::hipconvertscale::HipConvertScale::scale_only())
     }));
     #[cfg(all(target_os = "linux", feature = "hip"))]
     reg.register_launch(LaunchFactory::new("hipdownload", Vec::new(), || {

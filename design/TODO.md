@@ -160,15 +160,6 @@ libraries installed.
 - Run `CudaKmsSink` from a bare VT with DRM master and verify the in-tree
   `// VERIFY:` points.
 
-## HIP
-
-GstHip's inference path, with an AMD backend (`libamdhip64`, hiprtc) and an
-NVIDIA backend (`libcuda`, nvrtc), loaded at run time. Milestones validate on
-the laptop's RTX 3060 and Radeon 680M.
-
-- Later: `hipconvert`, `hipscale`, `video-direction` in `hipconvertscale`,
-  and `hipcompositor`'s `operator` and `sizing-policy` pad properties.
-
 ## Egress / transports
 
 - **RTP over QUIC (RoQ):** implement after the draft becomes an RFC with an

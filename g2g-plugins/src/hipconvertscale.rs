@@ -10,13 +10,14 @@ use alloc::vec::Vec;
 use g2g_core::caps_transform::{FieldTransform, RawVideoShape};
 use g2g_core::log::{short_type_name, Target};
 use g2g_core::memory::{DomainSet, MemoryDomainKind, OwnedHipBuffer};
-use g2g_core::meta::PlaneLayout;
+use g2g_core::meta::{Orientation, PlaneLayout};
 use g2g_core::{
     g2g_error, AsyncElement, Caps, CapsConstraint, CapsTransform, Colorimetry, ConfigureOutcome,
     Dim, ElementMetadata, Frame, G2gError, MemoryDomain, OutputSink, PipelinePacket, PropError,
     PropKind, PropValue, PropertySpec, Rate, RawVideoFormat,
 };
 
+use crate::compositor::{CompositorOperator, CompositorPad};
 use crate::hip::{
     HipDevice, HipEvent, HipKernel, HipKernelModule, HipMemory, HipMemoryPool, HipStream,
     KernelArgument,
@@ -397,6 +398,16 @@ __device__ bool inside(float x, float y, unsigned int rect_x, unsigned int rect_
            y < (float)(rect_y + rect_height);
 }
 
+__device__ void source_point(float x, float y, unsigned int src_width, unsigned int src_height,
+                             unsigned int rect_x, unsigned int rect_y, unsigned int rect_width,
+                             unsigned int rect_height, float* source_x, float* source_y) {
+    float u = x - (float)rect_x, v = y - (float)rect_y;
+    float w = (float)rect_width, h = (float)rect_height;
+    float sw = (float)src_width, sh = (float)src_height;
+    *source_x = SOURCE_X;
+    *source_y = SOURCE_Y;
+}
+
 extern "C" __global__ void convert_scale(
     const unsigned char* src, unsigned char* dst,
     unsigned int src_width, unsigned int src_height,
@@ -415,13 +426,12 @@ extern "C" __global__ void convert_scale(
                    {src_stride0, src_stride1, src_stride2}};
     unsigned int offset[3] = {dst_offset0, dst_offset1, dst_offset2};
     unsigned int stride[3] = {dst_stride0, dst_stride1, dst_stride2};
-    float scale_x = (float)src_width / (float)rect_width;
-    float scale_y = (float)src_height / (float)rect_height;
     float centre_x = (float)x + 0.5f;
     float centre_y = (float)y + 0.5f;
     bool covered = inside(centre_x, centre_y, rect_x, rect_y, rect_width, rect_height);
-    float source_x = (centre_x - (float)rect_x) * scale_x;
-    float source_y = (centre_y - (float)rect_y) * scale_y;
+    float source_x, source_y;
+    source_point(centre_x, centre_y, src_width, src_height, rect_x, rect_y, rect_width,
+                 rect_height, &source_x, &source_y);
 #if OUT_YUV
     float luma = covered ? sample_out_yuv(frame, source_x, source_y).y : 0.0f;
     write_luma(dst + offset[0], stride[0], x, y, luma);
@@ -435,8 +445,10 @@ extern "C" __global__ void convert_scale(
         float chroma_x = (float)x + 1.0f;
         float pb = 0.0f, pr = 0.0f;
         if (inside(chroma_x, chroma_y, rect_x, rect_y, rect_width, rect_height)) {
-            Yuv yuv = sample_out_yuv(frame, (chroma_x - (float)rect_x) * scale_x,
-                                     (chroma_y - (float)rect_y) * scale_y);
+            float chroma_source_x, chroma_source_y;
+            source_point(chroma_x, chroma_y, src_width, src_height, rect_x, rect_y, rect_width,
+                         rect_height, &chroma_source_x, &chroma_source_y);
+            Yuv yuv = sample_out_yuv(frame, chroma_source_x, chroma_source_y);
             pb = yuv.pb;
             pr = yuv.pr;
         }
@@ -458,7 +470,8 @@ extern "C" __global__ void blend_into_canvas(
     unsigned int src_offset0, unsigned int src_offset1, unsigned int src_offset2,
     unsigned int src_stride0, unsigned int src_stride1, unsigned int src_stride2,
     unsigned int canvas_width, unsigned int canvas_height,
-    int rect_x, int rect_y, unsigned int rect_width, unsigned int rect_height, float alpha) {
+    int rect_x, int rect_y, unsigned int rect_width, unsigned int rect_height, float alpha,
+    unsigned int source_operator) {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
     if (x >= (int)canvas_width || y >= (int)canvas_height) {
@@ -476,6 +489,13 @@ extern "C" __global__ void blend_into_canvas(
                                inside_y * (float)src_height / (float)rect_height);
     float a = clamp01(color.a) * alpha;
     float* pixel = canvas + 4 * ((unsigned long long)y * canvas_width + x);
+    if (source_operator) {
+        pixel[0] = color.r;
+        pixel[1] = color.g;
+        pixel[2] = color.b;
+        pixel[3] = a;
+        return;
+    }
     pixel[0] = color.r * a + pixel[0] * (1.0f - a);
     pixel[1] = color.g * a + pixel[1] * (1.0f - a);
     pixel[2] = color.b * a + pixel[2] * (1.0f - a);
@@ -564,7 +584,12 @@ struct PictureRect {
     height: u32,
 }
 
-fn picture_rect(input: &Picture, output: &Picture, add_borders: bool) -> PictureRect {
+fn picture_rect(
+    input: &Picture,
+    output: &Picture,
+    add_borders: bool,
+    direction: Orientation,
+) -> PictureRect {
     if !add_borders {
         return PictureRect {
             x: 0,
@@ -573,15 +598,19 @@ fn picture_rect(input: &Picture, output: &Picture, add_borders: bool) -> Picture
             height: output.height,
         };
     }
+    let (input_width, input_height) = match direction.swaps_dims() {
+        true => (input.height, input.width),
+        false => (input.width, input.height),
+    };
     let scale = f64::min(
-        f64::from(output.width) / f64::from(input.width),
-        f64::from(output.height) / f64::from(input.height),
+        f64::from(output.width) / f64::from(input_width),
+        f64::from(output.height) / f64::from(input_height),
     );
     let subsampled = output.format.plane_rows(1, output.height) != Some(output.height);
     // a 4:2:0 output keeps the picture on whole chroma samples
     let even = |value: u32| if subsampled { value & !1 } else { value };
-    let width = even((f64::from(input.width) * scale).round() as u32).clamp(1, output.width);
-    let height = even((f64::from(input.height) * scale).round() as u32).clamp(1, output.height);
+    let width = even((f64::from(input_width) * scale).round() as u32).clamp(1, output.width);
+    let height = even((f64::from(input_height) * scale).round() as u32).clamp(1, output.height);
     PictureRect {
         x: even((output.width - width) / 2),
         y: even((output.height - height) / 2),
@@ -590,10 +619,25 @@ fn picture_rect(input: &Picture, output: &Picture, add_borders: bool) -> Picture
     }
 }
 
+// the source point for (u, v) inside a w x h output rect, read from a sw x sh source
+fn source_point_expressions(direction: Orientation) -> (&'static str, &'static str) {
+    match direction {
+        Orientation::Identity => ("u * sw / w", "v * sh / h"),
+        Orientation::Rotate90Cw => ("v * sw / h", "(w - u) * sh / w"),
+        Orientation::Rotate180 => ("(w - u) * sw / w", "(h - v) * sh / h"),
+        Orientation::Rotate90Ccw => ("(h - v) * sw / h", "u * sh / w"),
+        Orientation::HorizontalMirror => ("(w - u) * sw / w", "v * sh / h"),
+        Orientation::VerticalMirror => ("u * sw / w", "(h - v) * sh / h"),
+        Orientation::Transpose => ("v * sw / h", "u * sh / w"),
+        Orientation::Transverse => ("(h - v) * sw / h", "(w - u) * sh / w"),
+    }
+}
+
 fn compile(
     device: &Arc<HipDevice>,
     input: &Picture,
     output: &Picture,
+    direction: Orientation,
 ) -> Result<Arc<HipKernelModule>, G2gError> {
     let mut options: Vec<String> = FORMATS
         .iter()
@@ -602,6 +646,9 @@ fn compile(
         .collect();
     options.extend(input.defines("IN"));
     options.extend(output.defines("OUT"));
+    let (source_x, source_y) = source_point_expressions(direction);
+    options.push(format!("-DSOURCE_X={source_x}"));
+    options.push(format!("-DSOURCE_Y={source_y}"));
     let (input_luma, output_luma) = (
         input.colorimetry.yuv_conversion().luma,
         output.colorimetry.yuv_conversion().luma,
@@ -648,13 +695,14 @@ impl HipConverter {
         input: &Caps,
         output: &Caps,
         add_borders: bool,
+        direction: Orientation,
     ) -> Result<Self, G2gError> {
         let input = Picture::of(input)?;
         let output = Picture::of(output)?;
-        let module = compile(device, &input, &output)?;
+        let module = compile(device, &input, &output, direction)?;
         Ok(Self {
             kernel: module.kernel("convert_scale")?,
-            rect: picture_rect(&input, &output, add_borders),
+            rect: picture_rect(&input, &output, add_borders, direction),
             input,
             output,
         })
@@ -712,14 +760,6 @@ impl HipConverter {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct CanvasRect {
-    pub(crate) x: i32,
-    pub(crate) y: i32,
-    pub(crate) width: u32,
-    pub(crate) height: u32,
-}
-
 #[derive(Debug)]
 pub(crate) struct HipBlender {
     kernel: HipKernel,
@@ -737,7 +777,7 @@ impl HipBlender {
             interlace: g2g_core::Interlace::Any,
             colorimetry: Colorimetry::UNKNOWN,
         })?;
-        let module = compile(device, &input, &canvas)?;
+        let module = compile(device, &input, &canvas, Orientation::Identity)?;
         Ok(Self {
             kernel: module.kernel("blend_into_canvas")?,
             input,
@@ -751,10 +791,10 @@ impl HipBlender {
         input: &OwnedHipBuffer,
         canvas: &mut HipMemory,
         (canvas_width, canvas_height): (u32, u32),
-        rect: CanvasRect,
-        alpha: f32,
+        pad: &CompositorPad,
     ) -> Result<(), G2gError> {
         let source = source_planes(input, &self.input)?;
+        let rect = pad.dest_rect(self.input.width, self.input.height);
         stream.launch(
             &self.kernel,
             [
@@ -781,7 +821,8 @@ impl HipBlender {
                 KernelArgument::U32(rect.y as u32),
                 KernelArgument::U32(rect.width),
                 KernelArgument::U32(rect.height),
-                KernelArgument::F32(alpha),
+                KernelArgument::F32(f32::from(pad.alpha) / 255.0),
+                KernelArgument::U32(u32::from(pad.operator == CompositorOperator::Source)),
             ],
         )
     }
@@ -796,8 +837,116 @@ struct ConvertGpu {
 }
 
 #[derive(Debug)]
+struct HipConvertVariant {
+    metadata: (&'static str, &'static str, &'static str),
+    properties: &'static [PropertySpec],
+    changes_format: bool,
+    changes_size: bool,
+}
+
+const ADD_BORDERS_PROP: PropertySpec = PropertySpec::new(
+    "add-borders",
+    PropKind::Bool,
+    "Add borders if necessary to keep the display aspect ratio",
+)
+.with_default("true");
+
+static CONVERT_SCALE: HipConvertVariant = HipConvertVariant {
+    metadata: (
+        "HIP converter and scaler",
+        "Filter/Converter/Video/Scaler/Hardware",
+        "Converts the pixel format, resizes and rotates HIP frames on the GPU",
+    ),
+    properties: &[
+        ADD_BORDERS_PROP,
+        PropertySpec::new(
+            "video-direction",
+            PropKind::Str,
+            "Video direction: rotation and flipping",
+        )
+        .with_enum_values("identity | 90r | 180 | 90l | horiz | vert | ul-lr | ur-ll")
+        .with_default("identity"),
+    ],
+    changes_format: true,
+    changes_size: true,
+};
+
+static CONVERT: HipConvertVariant = HipConvertVariant {
+    metadata: (
+        "HIP colorspace converter",
+        "Filter/Converter/Video/Hardware",
+        "Converts the pixel format of HIP frames on the GPU",
+    ),
+    properties: &[],
+    changes_format: true,
+    changes_size: false,
+};
+
+static SCALE: HipConvertVariant = HipConvertVariant {
+    metadata: (
+        "HIP video scaler",
+        "Filter/Converter/Video/Scaler/Hardware",
+        "Resizes HIP frames on the GPU",
+    ),
+    properties: &[ADD_BORDERS_PROP],
+    changes_format: false,
+    changes_size: true,
+};
+
+// the nicknames of GStreamer's GstVideoOrientationMethod
+fn video_direction_from_str(name: &str) -> Option<Orientation> {
+    match name {
+        "identity" => Some(Orientation::Identity),
+        "90r" => Some(Orientation::Rotate90Cw),
+        "180" => Some(Orientation::Rotate180),
+        "90l" => Some(Orientation::Rotate90Ccw),
+        "horiz" => Some(Orientation::HorizontalMirror),
+        "vert" => Some(Orientation::VerticalMirror),
+        "ul-lr" => Some(Orientation::Transpose),
+        "ur-ll" => Some(Orientation::Transverse),
+        _ => None,
+    }
+}
+
+fn video_direction_name(direction: Orientation) -> &'static str {
+    match direction {
+        Orientation::Identity => "identity",
+        Orientation::Rotate90Cw => "90r",
+        Orientation::Rotate180 => "180",
+        Orientation::Rotate90Ccw => "90l",
+        Orientation::HorizontalMirror => "horiz",
+        Orientation::VerticalMirror => "vert",
+        Orientation::Transpose => "ul-lr",
+        Orientation::Transverse => "ur-ll",
+    }
+}
+
+fn swap_dims(caps: &Caps) -> Caps {
+    match caps {
+        Caps::RawVideo {
+            format,
+            width,
+            height,
+            framerate,
+            interlace,
+            colorimetry,
+        } => Caps::RawVideo {
+            format: *format,
+            width: height.clone(),
+            height: width.clone(),
+            framerate: framerate.clone(),
+            interlace: *interlace,
+            colorimetry: *colorimetry,
+        },
+        other => other.clone(),
+    }
+}
+
+#[derive(Debug)]
 pub struct HipConvertScale {
+    variant: &'static HipConvertVariant,
     add_borders: bool,
+    direction: Orientation,
     configured: bool,
     input_caps: Option<Caps>,
     output_caps: Option<Caps>,
@@ -807,20 +956,34 @@ pub struct HipConvertScale {
 
 impl Default for HipConvertScale {
     fn default() -> Self {
-        Self {
-            add_borders: true,
-            configured: false,
-            input_caps: None,
-            output_caps: None,
-            last_caps: None,
-            gpu: None,
-        }
+        Self::of(&CONVERT_SCALE)
     }
 }
 
 impl HipConvertScale {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn convert_only() -> Self {
+        Self::of(&CONVERT)
+    }
+
+    pub fn scale_only() -> Self {
+        Self::of(&SCALE)
+    }
+
+    fn of(variant: &'static HipConvertVariant) -> Self {
+        Self {
+            variant,
+            add_borders: true,
+            direction: Orientation::Identity,
+            configured: false,
+            input_caps: None,
+            output_caps: None,
+            last_caps: None,
+            gpu: None,
+        }
     }
 
     fn gpu_for(&mut self, buffer: &OwnedHipBuffer) -> Result<&mut ConvertGpu, G2gError> {
@@ -833,7 +996,8 @@ impl HipConvertScale {
                 let input = self.input_caps.as_ref().ok_or(G2gError::NotConfigured)?;
                 let output = self.output_caps.as_ref().ok_or(G2gError::NotConfigured)?;
                 let device = HipDevice::open(buffer.vendor, buffer.device_ordinal)?;
-                let converter = HipConverter::new(&device, input, output, self.add_borders)?;
+                let converter =
+                    HipConverter::new(&device, input, output, self.add_borders, self.direction)?;
                 ConvertGpu {
                     stream: HipStream::new(&device)?,
                     pool: HipMemoryPool::new(&device, converter.output_len()?),
@@ -858,21 +1022,19 @@ impl HipConvertScale {
     fn passthrough(&self) -> bool {
         let picture = |caps: &Option<Caps>| caps.as_ref().and_then(|caps| Picture::of(caps).ok());
         let (input, output) = (picture(&self.input_caps), picture(&self.output_caps));
-        input.is_some_and(|input| {
+        let same_picture = input.is_some_and(|input| {
             output.is_some_and(|output| {
                 (input.format, input.width, input.height)
                     == (output.format, output.width, output.height)
             })
-        })
+        });
+        same_picture && self.direction == Orientation::Identity
+    }
+
+    fn has_property(&self, name: &str) -> bool {
+        self.variant.properties.iter().any(|spec| spec.name == name)
     }
 }
-
-static HIP_CONVERT_SCALE_PROPS: &[PropertySpec] = &[PropertySpec::new(
-    "add-borders",
-    PropKind::Bool,
-    "Add borders if necessary to keep the display aspect ratio",
-)
-.with_default("true")];
 
 impl AsyncElement for HipConvertScale {
     type ProcessFuture<'a>
@@ -881,12 +1043,8 @@ impl AsyncElement for HipConvertScale {
         Self: 'a;
 
     fn metadata(&self) -> ElementMetadata {
-        ElementMetadata::new(
-            "HIP converter and scaler",
-            "Filter/Converter/Video/Scaler/Hardware",
-            "Converts the pixel format and resizes HIP frames on the GPU",
-            "g2g",
-        )
+        let (long_name, klass, description) = self.variant.metadata;
+        ElementMetadata::new(long_name, klass, description, "g2g")
     }
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
@@ -904,20 +1062,30 @@ impl AsyncElement for HipConvertScale {
                 .with_width(FieldTransform::Fixed(range.clone()))
                 .with_height(FieldTransform::Fixed(range))
         };
-        let mut shapes = Vec::from([
-            RawVideoShape::PASSTHROUGH,
-            any_size(RawVideoShape::PASSTHROUGH),
-        ]);
-        for &format in &formats {
-            let converted = RawVideoShape::PASSTHROUGH.with_format(FieldTransform::Fixed(format));
-            shapes.push(converted.clone());
-            shapes.push(any_size(converted));
+        let mut converted: Vec<RawVideoShape> = Vec::from([RawVideoShape::PASSTHROUGH]);
+        if self.variant.changes_format {
+            converted.extend(formats.iter().map(|&format| {
+                RawVideoShape::PASSTHROUGH.with_format(FieldTransform::Fixed(format))
+            }));
         }
-        CapsConstraint::DerivedFields(CapsTransform::RawVideo {
+        let shapes = converted
+            .into_iter()
+            .flat_map(|shape| {
+                let resized = self.variant.changes_size.then(|| any_size(shape.clone()));
+                core::iter::once(shape).chain(resized)
+            })
+            .collect();
+        let transform = CapsTransform::RawVideo {
             accept: formats.clone(),
             produce: formats,
             shapes,
-        })
+        };
+        if !self.direction.swaps_dims() {
+            return CapsConstraint::DerivedFields(transform);
+        }
+        CapsConstraint::DerivedOutput(Box::new(move |input: &Caps| {
+            transform.derive(&swap_dims(input))
+        }))
     }
 
     fn input_domains(&self) -> DomainSet {
@@ -944,23 +1112,32 @@ impl AsyncElement for HipConvertScale {
     }
 
     fn properties(&self) -> &'static [PropertySpec] {
-        HIP_CONVERT_SCALE_PROPS
+        self.variant.properties
     }
 
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
-        match name {
-            "add-borders" => {
-                self.add_borders = value.as_bool().ok_or(PropError::Type)?;
-                self.gpu = None;
-                Ok(())
-            }
-            _ => Err(PropError::Unknown),
+        if !self.has_property(name) {
+            return Err(PropError::Unknown);
         }
+        match name {
+            "add-borders" => self.add_borders = value.as_bool().ok_or(PropError::Type)?,
+            "video-direction" => {
+                let name = value.as_str().ok_or(PropError::Type)?;
+                self.direction = video_direction_from_str(name).ok_or(PropError::Value)?;
+            }
+            _ => return Err(PropError::Unknown),
+        }
+        self.gpu = None;
+        Ok(())
     }
 
     fn get_property(&self, name: &str) -> Option<PropValue> {
+        if !self.has_property(name) {
+            return None;
+        }
         match name {
             "add-borders" => Some(PropValue::Bool(self.add_borders)),
+            "video-direction" => Some(PropValue::Str(video_direction_name(self.direction).into())),
             _ => None,
         }
     }

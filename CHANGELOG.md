@@ -23,6 +23,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M2107: `hipupload` imports linear dma-bufs on AMD with a per-buffer cache, copying through the CPU when the import fails.
 - M2108: `hipupload` offers pinned host buffers that `v4l2src` and `libcamerasrc` capture into, and `hipconvertscale` takes YUY2.
 - M2109: `hipcompositor`, with the three compositors sharing one canvas and packet loop.
+- M2110: `hipconvert`, `hipscale`, and `video-direction` on `hipconvertscale`.
+- M2111: the `operator` and `sizing-policy` pad properties on every compositor.
 
 ## 0.14.0
 

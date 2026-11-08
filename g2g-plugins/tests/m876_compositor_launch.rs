@@ -165,8 +165,12 @@ fn px(canvas: &[u8], x: usize, y: usize) -> [u8; 4] {
     [canvas[i], canvas[i + 1], canvas[i + 2], canvas[i + 3]]
 }
 
+// every compositor run shares the `composited` cell
+static COMPOSITOR_RUN: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[tokio::test]
 async fn a_launch_line_places_every_pad_on_the_canvas() {
+    let _run = COMPOSITOR_RUN.lock().await;
     let reg = test_registry();
     // 32x32 opaque-green canvas; the blue base covers its top-left 16x16, and the
     // 8x8 red overlay is scaled to a 16x16 inset at (4,4) above it.
@@ -210,6 +214,41 @@ async fn a_launch_line_places_every_pad_on_the_canvas() {
         "past the inset and the base: background-color"
     );
     assert_eq!(px(canvas, 24, 24), GREEN, "uncovered canvas");
+}
+
+#[tokio::test]
+async fn a_launch_line_sets_the_operator_and_sizing_policy() {
+    let _run = COMPOSITOR_RUN.lock().await;
+    let reg = test_registry();
+    // the 8x8 red overlay fits a 16x8 pad rectangle at (4,4) as 8x8 at (8,4)
+    let graph = parse_launch(
+        &reg,
+        "bluesrc ! c.   redsrc ! c.   \
+         compositor name=c width=32 height=32 \
+         sink1-xpos=4 sink1-ypos=4 sink1-zorder=1 sink1-width=16 sink1-height=8 \
+         sink1-sizing-policy=keep-aspect-ratio sink1-operator=source sink1-alpha=128 \
+         ! capturesink",
+    )
+    .expect("the compositor fan-in parses");
+    composited().lock().unwrap().clear();
+    run_graph(graph, &ZeroClock, 4)
+        .await
+        .expect("pipeline runs");
+    let frames = composited().lock().unwrap().clone();
+    let canvas = frames.last().expect("a composited frame");
+    let copied_red = [255, 0, 0, 128];
+    assert_eq!(px(canvas, 4, 4), BLUE, "left of the centred overlay");
+    assert_eq!(
+        px(canvas, 8, 4),
+        copied_red,
+        "source copies red with alpha 128"
+    );
+    assert_eq!(px(canvas, 15, 11), copied_red, "the overlay stays 8x8");
+    assert_eq!(
+        px(canvas, 16, 4),
+        [0, 0, 0, 255],
+        "right of the overlay and the base"
+    );
 }
 
 #[test]

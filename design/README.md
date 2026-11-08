@@ -276,7 +276,12 @@ compiled for the input and output format pair, with the formats, each side's
 `Kr` / `Kb`, range and bit depth passed as `-D` defines, so YUV math decodes
 10-bit P010 at its own depth. Scaling is bilinear, chroma included, and
 `add-borders` letterboxes the picture inside the output, on even rows and
-columns for a 4:2:0 output.
+columns for a 4:2:0 output. `video-direction` takes GStreamer's eight
+orientation nicknames, passed to the kernel as the source-point expressions for
+the turn. A turn that swaps width and height swaps them in the derived output
+caps too, so a bare `hipconvertscale video-direction=90r` emits the transposed
+size. `hipconvert` and `hipscale` are the same element limited to a format
+change or a size change.
 
 `hipcompositor` composites Hip frames of any format `hipconvertscale` reads.
 Each output frame fills an RGBA f32 canvas with the background, then blends
@@ -284,8 +289,7 @@ every pad in paint order with `blend_into_canvas`, a kernel in the same source
 as `HipConverter`. That kernel samples the pad with the converter's bilinear YUV
 or RGB reads, and blends straight alpha the way the CPU compositor does. A
 `HipConverter` then writes the canvas in the output `format`. The pads use the
-CPU compositor's `sinkN-*` properties, so GStreamer's `operator` and
-`sizing-policy` pad properties are not there.
+CPU compositor's `sinkN-*` properties.
 
 ### The copy plan
 
@@ -490,7 +494,12 @@ and announces the refined output caps when they firm up after negotiation.
 `Compositor`. All three compositors (`Compositor`, `WgpuCompositor`,
 `HipCompositor`) keep their canvas, pads, input-0 cadence, colorimetry and
 segment in one `CompositorCanvas` and run every packet through
-`process_compositor_packet`. Each element supplies only the `CompositorBackend`
+`process_compositor_packet`. The pad geometry is shared too:
+`CompositorPad::dest_rect` applies `sizing-policy`, where `keep-aspect-ratio`
+fits and centres the input in its pad rectangle as `gst_video_center_rect`
+does. The `source` operator copies the pad's colour and scales its alpha by the
+pad alpha, and on planar YUV it copies the samples, as GStreamer's compositor
+does. Each element supplies only the `CompositorBackend`
 pieces: what it caches per input frame, how it composites one output frame, and
 which input caps it takes.
 
