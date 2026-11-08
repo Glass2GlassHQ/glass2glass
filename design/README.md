@@ -277,6 +277,19 @@ from a device other than the one it names. The device stays out of `DomainSet` a
 caps, as GStreamer keeps it in the element and its context rather than the
 caps.
 
+`framesplit` spreads one stream over branches on different devices for
+throughput. It sends each frame to the first output whose link has room, trying
+outputs in port order, so the faster device's branch goes first, and it asks
+through `MultiOutputSink::poll_port_ready`, which polls the link without sending.
+`framemerge` emits frames in the order `framesplit` sent them, from a log of
+output ports the two share by their `dispatch-log` name, as `intersink` and
+`intersrc` share a `producer-name`. The merge waits only for the branch holding
+the next frame, so a branch the split has not used does not hold the others back,
+which a merge by PTS cannot avoid. GStreamer has `roundrobin`, which alternates
+outputs, and `funnel`, which merges in arrival order, but no merge that restores
+the split order. Every branch must emit one frame for each frame it receives:
+a dropped frame leaves the merge waiting until that branch ends.
+
 On AMD, `hipupload` imports a linear dma-buf frame with
 `hipImportExternalMemory`, as GStreamer's `hipupload` does, and keeps each import
 in a cache keyed by the dma-buf's inode, the same `DmaBufImportCache` the wgpu

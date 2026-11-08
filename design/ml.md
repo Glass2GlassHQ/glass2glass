@@ -120,6 +120,11 @@ array, and `to_cuda_frame` copies it device to device into a linear
 `CUdeviceptr` emitted as a `MemoryDomain::Cuda` `Rgba8` frame that `NvEnc`
 registers as `ABGR`. So a GPU render reaches the H.264 encoder with no
 device-to-host read-back, validated on an RTX 3060 by the `wgpu_to_cuda` test.
+`ingest_texture` signals a Vulkan timeline semaphore on its copy, which CUDA
+imports with `cuImportExternalSemaphore` and waits on in the stream that runs
+`to_cuda_frame`'s copy. The CPU then waits once per frame, on that stream,
+instead of on `Device::poll` and again on CUDA. The import works only when wgpu
+and CUDA run on the same GPU.
 
 This is the zero-copy egress for server-side rendering and cloud gaming, and the
 `bevy-g2g` crate's `RemoteRenderPlugins` is the packaged Bevy proof: Bevy renders

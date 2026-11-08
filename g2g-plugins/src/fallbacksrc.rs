@@ -619,6 +619,10 @@ impl MultiOutputSink for LifeSink<'_> {
         result
     }
 
+    fn poll_port_ready(&mut self, cx: &mut Context<'_>, port: usize) -> Poll<Result<(), G2gError>> {
+        self.out.poll_port_ready(cx, port)
+    }
+
     fn port_count(&self) -> usize {
         self.out.port_count()
     }

@@ -118,6 +118,17 @@ pub trait MultiOutputSink {
     /// Discard any phase a cancelled earlier push to `port` left behind.
     fn begin_push_to(&mut self, _port: usize) {}
 
+    /// Ready once a push to `port` would not wait for room, parking the waker
+    /// while it would. Default: always ready, for a sink whose ports never apply
+    /// backpressure. A sink over bounded links overrides it.
+    fn poll_port_ready(
+        &mut self,
+        _cx: &mut core::task::Context<'_>,
+        _port: usize,
+    ) -> core::task::Poll<Result<(), G2gError>> {
+        core::task::Poll::Ready(Ok(()))
+    }
+
     fn port_count(&self) -> usize;
 
     /// Add an output port carrying `caps` and return its index, or `None` if this
@@ -255,6 +266,17 @@ impl MultiOutputSink for MultiSenderSink {
             .get_mut(port)
             .expect("push_to: port out of range");
         sink.poll_push(cx, packet)
+    }
+
+    fn poll_port_ready(
+        &mut self,
+        cx: &mut core::task::Context<'_>,
+        port: usize,
+    ) -> core::task::Poll<Result<(), G2gError>> {
+        self.ports
+            .get(port)
+            .expect("poll_port_ready: port out of range")
+            .poll_ready(cx)
     }
 
     fn port_count(&self) -> usize {

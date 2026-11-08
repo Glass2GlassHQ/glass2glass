@@ -28,6 +28,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M2112: GPU elements name their device, and the converter splice copies frames onto a consumer's GPU.
 - M2113: the converter splice for graphs built in code and for dma-buf into HIP, and cross-GPU `hipcompositor` inputs.
 - M2114: zero-stall dma-buf frames carry a sync_file that `hipupload` and `unixfdsink` wait on, and cross-GPU copies leave the runner free.
+- M2115: `WgpuToCuda` waits for its texture copy in CUDA on an imported Vulkan timeline semaphore instead of on the CPU.
+- M2116: `framesplit` and `framemerge` spread one stream over branches by which has room and restore the frame order.
 
 ## 0.14.0
 

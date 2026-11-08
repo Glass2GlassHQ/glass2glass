@@ -1516,6 +1516,13 @@ pub fn default_registry() -> Registry {
         "output-selector",
         |outputs| Box::new(crate::outputselector::OutputSelector::new(outputs)),
     ));
+    reg.register_demux(g2g_core::runtime::DemuxFactory::new(
+        "framesplit",
+        |outputs| Box::new(crate::framesplit::FrameSplit::new(outputs)),
+    ));
+    reg.register_muxer(MuxerFactory::new("framemerge", |inputs| {
+        Box::new(crate::framesplit::FrameMerge::new(inputs))
+    }));
     // Channel splitter fan-out (M1072): one N-channel PCM stream in, one mono
     // stream per port out, port count from the `d.` link degree:
     // `audiotestsrc channels=2 ! deinterleave name=d  d.src_0 ! fakesink

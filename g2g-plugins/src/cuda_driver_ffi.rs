@@ -9,7 +9,7 @@ pub(crate) type CuResult = i32;
 // `CUdevice` is an int handle.
 pub(crate) type CuDevice = i32;
 pub(crate) type CuContext = *mut c_void;
-#[cfg(feature = "hip")]
+#[cfg(any(feature = "cuda-wgpu", feature = "hip"))]
 pub(crate) type CuStream = *mut c_void;
 #[cfg(feature = "hip")]
 pub(crate) type CuEvent = *mut c_void;
@@ -85,18 +85,18 @@ crate::shared_library::shared_library! {
     pub(crate) fn cu_mem_free = "cuMemFree_v2"(device_pointer: u64) -> CuResult;
     #[cfg(any(feature = "local-ipc", all(test, feature = "nvenc")))]
     pub(crate) fn cu_memcpy_htod = "cuMemcpyHtoD_v2"(destination: u64, source: *const c_void, size: usize) -> CuResult;
-    #[cfg(any(feature = "local-ipc", all(test, feature = "nvdec")))]
+    #[cfg(any(feature = "local-ipc", all(test, any(feature = "nvdec", feature = "cuda-wgpu"))))]
     pub(crate) fn cu_memcpy_dtoh = "cuMemcpyDtoH_v2"(destination: *mut c_void, source: u64, size: usize) -> CuResult;
     pub(crate) fn cu_memcpy_2d = "cuMemcpy2D_v2"(copy: *const CudaMemcpy2D) -> CuResult;
     #[cfg(any(feature = "cuda-wgpu", feature = "hip"))]
     pub(crate) fn cu_device_primary_ctx_retain = "cuDevicePrimaryCtxRetain"(context: *mut CuContext, device: CuDevice) -> CuResult;
     #[cfg(any(feature = "cuda-wgpu", feature = "hip"))]
     pub(crate) fn cu_device_primary_ctx_release = "cuDevicePrimaryCtxRelease_v2"(device: CuDevice) -> CuResult;
-    #[cfg(feature = "hip")]
+    #[cfg(any(feature = "cuda-wgpu", feature = "hip"))]
     pub(crate) fn cu_stream_create = "cuStreamCreate"(stream: *mut CuStream, flags: u32) -> CuResult;
-    #[cfg(feature = "hip")]
+    #[cfg(any(feature = "cuda-wgpu", feature = "hip"))]
     pub(crate) fn cu_stream_destroy = "cuStreamDestroy_v2"(stream: CuStream) -> CuResult;
-    #[cfg(feature = "hip")]
+    #[cfg(any(feature = "cuda-wgpu", feature = "hip"))]
     pub(crate) fn cu_stream_synchronize = "cuStreamSynchronize"(stream: CuStream) -> CuResult;
     #[cfg(feature = "hip")]
     pub(crate) fn cu_stream_wait_event = "cuStreamWaitEvent"(stream: CuStream, event: CuEvent, flags: u32) -> CuResult;

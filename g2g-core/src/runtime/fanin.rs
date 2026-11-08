@@ -2910,6 +2910,14 @@ impl MultiOutputSink for GrowableSenderSink {
         self.ports.poll_push_to(cx, port, packet)
     }
 
+    fn poll_port_ready(
+        &mut self,
+        cx: &mut core::task::Context<'_>,
+        port: usize,
+    ) -> core::task::Poll<Result<(), G2gError>> {
+        self.ports.poll_port_ready(cx, port)
+    }
+
     fn port_count(&self) -> usize {
         self.ports.port_count()
     }

@@ -187,6 +187,7 @@ mod vui;
 // NAL streams (MPEG-1/2 video, MPEG-4 Part 2, VC-1).
 pub mod startcodeparse;
 // Legacy video parsers over that core.
+pub mod framesplit;
 pub mod mpeg4videoparse;
 pub mod mpegvideoparse;
 pub mod opusparse;
@@ -1703,6 +1704,11 @@ pub mod dmabufwgpu;
 // Zero-copy wgpu buffer -> DMABUF export element (M559): the producer half that
 // pairs with dmabufwgpu's importer, so a GPU frame leaves the process via a
 // dma-buf fd (feed it to DmaBufSink). Needs Vulkan dma-buf export support.
+#[cfg(all(
+    target_os = "linux",
+    any(feature = "dmabuf-wgpu", feature = "cuda-wgpu")
+))]
+mod timelinesemaphore;
 #[cfg(all(target_os = "linux", feature = "dmabuf-wgpu"))]
 pub mod wgpudmabuf;
 

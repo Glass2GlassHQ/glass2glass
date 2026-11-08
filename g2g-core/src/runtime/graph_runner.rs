@@ -4548,6 +4548,14 @@ impl<S: MultiOutputSink + ?Sized> MultiOutputSink for SourceFrameSpans<'_, S> {
         outcome
     }
 
+    fn poll_port_ready(
+        &mut self,
+        cx: &mut core::task::Context<'_>,
+        port: usize,
+    ) -> core::task::Poll<Result<(), G2gError>> {
+        self.output.poll_port_ready(cx, port)
+    }
+
     fn port_count(&self) -> usize {
         self.output.port_count()
     }

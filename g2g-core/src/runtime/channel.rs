@@ -171,6 +171,22 @@ impl<T> Sender<T> {
         Poll::Pending
     }
 
+    /// Ready once a send would enqueue without waiting, parking the send waker
+    /// while the channel is full. Enqueues nothing.
+    pub fn poll_ready(&self, cx: &mut Context<'_>) -> Poll<Result<(), SendError>> {
+        let mut g = self.inner.lock();
+        if g.receivers == 0 {
+            return Poll::Ready(Err(SendError::Closed));
+        }
+        if g.queue.len() < g.capacity {
+            return Poll::Ready(Ok(()));
+        }
+        if !g.send_wakers.iter().any(|w| w.will_wake(cx.waker())) {
+            g.send_wakers.push(cx.waker().clone());
+        }
+        Poll::Pending
+    }
+
     /// Remove and return the front-most queued value matching `pred`, or
     /// `None` if none match. Used by a leaky `DropOldest` link to evict the
     /// oldest data frame and make room without disturbing queued control
@@ -1387,6 +1403,14 @@ impl SenderSink {
 }
 
 impl SenderSink {
+    /// Ready once the link has room for a packet, without sending one.
+    pub fn poll_ready(&self, cx: &mut core::task::Context<'_>) -> Poll<Result<(), G2gError>> {
+        self.link
+            .data
+            .poll_ready(cx)
+            .map_err(|_| G2gError::Shutdown)
+    }
+
     /// The blocking-send tail of a push: enqueue when capacity frees, then the
     /// accounting and the post-send outcome. `stamped` says whether the Block
     /// path pushed a transit stamp for this packet, so a dead link rolls back

@@ -209,6 +209,7 @@ async fn open_interop_device(
             Some(Box::new(
                 |args: wgpu_hal::vulkan::CreateDeviceCallbackArgs| {
                     args.extensions.push(ash::khr::external_memory_fd::NAME);
+                    args.extensions.push(ash::khr::external_semaphore_fd::NAME);
                 },
             )),
         )
@@ -1343,9 +1344,129 @@ pub struct WgpuToCuda {
     /// Frames bridged wgpu -> CUDA (the element path). Atomic so `to_cuda_frame`
     /// can count on `&self` (the standalone struct API takes `&self`).
     frames: core::sync::atomic::AtomicU64,
+    ingest_fence: IngestFence,
     // Last field: releases the retained CUDA primary context, so it runs *after*
     // `mapping` (the CUDA import) and `texture` (the Vulkan memory) have dropped.
     _ctx_release: PrimaryCtxRelease,
+}
+
+#[derive(Debug)]
+struct IngestFence {
+    device: wgpu::Device,
+    vulkan_semaphore: vk::Semaphore,
+    cuda_semaphore: usize,
+    cuda_stream: usize,
+    context: u64,
+    last_signalled: core::sync::atomic::AtomicU64,
+    unwaited: core::sync::atomic::AtomicU64,
+}
+
+impl IngestFence {
+    // SAFETY (caller): `device` carries VK_KHR_external_semaphore_fd and runs on the GPU `context` belongs to.
+    unsafe fn new(device: &wgpu::Device, context: u64) -> Result<Self, G2gError> {
+        use cuda_ffi as c;
+        // SAFETY: the caller guarantees the extension.
+        let (vulkan_semaphore, fd) =
+            unsafe { crate::timelinesemaphore::create_export_semaphore(device)? };
+        let mut fence = Self {
+            device: device.clone(),
+            vulkan_semaphore,
+            cuda_semaphore: 0,
+            cuda_stream: 0,
+            context,
+            last_signalled: core::sync::atomic::AtomicU64::new(0),
+            unwaited: core::sync::atomic::AtomicU64::new(0),
+        };
+        let desc = c::CudaExternalSemaphoreHandleDesc {
+            type_: c::CU_EXTERNAL_SEMAPHORE_HANDLE_TYPE_TIMELINE_SEMAPHORE_FD,
+            _pad: 0,
+            handle_fd: fd,
+            _handle_rest: [0; 12],
+            flags: 0,
+            reserved: [0; 16],
+        };
+        // SAFETY: `context` is a live retained context, pushed for the import and the
+        // stream creation and popped after.
+        unsafe {
+            check(c::cu_ctx_push_current(context as c::CuContext))?;
+            let mut semaphore: c::CuExternalSemaphore = core::ptr::null_mut();
+            let mut stream: c::CuStream = core::ptr::null_mut();
+            let built = check(c::cu_import_external_semaphore(&mut semaphore, &desc))
+                .inspect_err(|_| drop(OwnedFd::from_raw_fd(fd)))
+                .and_then(|()| {
+                    fence.cuda_semaphore = semaphore as usize;
+                    check(c::cu_stream_create(&mut stream, c::CU_STREAM_NON_BLOCKING))
+                });
+            fence.cuda_stream = stream as usize;
+            let mut popped: c::CuContext = core::ptr::null_mut();
+            let _ = c::cu_ctx_pop_current(&mut popped);
+            built?;
+        }
+        Ok(fence)
+    }
+
+    fn next_value(&self) -> u64 {
+        self.last_signalled
+            .fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+            + 1
+    }
+
+    // SAFETY (caller): `context` is current on this thread.
+    unsafe fn queue_wait_for_ingest(&self) -> Result<(), G2gError> {
+        use cuda_ffi as c;
+        let value = self.unwaited.swap(0, core::sync::atomic::Ordering::AcqRel);
+        if value == 0 {
+            return Ok(());
+        }
+        let params = c::CudaExternalSemaphoreWaitParams {
+            fence_value: value,
+            _params_rest: [0; 8],
+            flags: 0,
+            reserved: [0; 16],
+        };
+        let semaphore = self.cuda_semaphore as c::CuExternalSemaphore;
+        // SAFETY: one live imported semaphore and one params struct, on a stream of the current context.
+        check(unsafe {
+            c::cu_wait_external_semaphores_async(
+                &semaphore,
+                &params,
+                1,
+                self.cuda_stream as c::CuStream,
+            )
+        })
+    }
+}
+
+impl Drop for IngestFence {
+    fn drop(&mut self) {
+        use cuda_ffi as c;
+        // SAFETY: the handles came from `new` in `context`, which the owning bridge
+        // releases only after this drop; `to_cuda_frame` leaves no work queued on the stream.
+        unsafe {
+            if c::cu_ctx_push_current(self.context as c::CuContext) == 0 {
+                if self.cuda_stream != 0 {
+                    c::cu_stream_destroy(self.cuda_stream as c::CuStream);
+                }
+                if self.cuda_semaphore != 0 {
+                    c::cu_destroy_external_semaphore(self.cuda_semaphore as c::CuExternalSemaphore);
+                }
+                let mut popped: c::CuContext = core::ptr::null_mut();
+                let _ = c::cu_ctx_pop_current(&mut popped);
+            }
+        }
+        // vulkan requires a semaphore's pending signals to finish before it is destroyed
+        let _ = self.device.poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: None,
+        });
+        // SAFETY: the semaphore was created on `device` and nothing signals it any more.
+        unsafe {
+            if let Some(hal) = self.device.as_hal::<wgpu_hal::api::Vulkan>() {
+                hal.raw_device()
+                    .destroy_semaphore(self.vulkan_semaphore, None);
+            }
+        }
+    }
 }
 
 /// Releases a retained CUDA primary context on drop (the `CUdevice` handle it was
@@ -1385,8 +1506,8 @@ impl WgpuToCuda {
     /// the CUDA import of the Vulkan image fails on any other device.
     ///
     /// # Safety
-    /// `device` must be a `VK_KHR_external_memory_fd` interop device (see
-    /// [`create_interop_device`]).
+    /// `device` must be an interop device carrying `VK_KHR_external_memory_fd` and
+    /// `VK_KHR_external_semaphore_fd` (see [`create_interop_device`]).
     pub unsafe fn new(
         device: wgpu::Device,
         queue: wgpu::Queue,
@@ -1416,13 +1537,16 @@ impl WgpuToCuda {
         // SAFETY: interop device per the contract; `shared` is exported, imported
         // exactly once (FD consumed), then wrapped (image/memory owned by the texture).
         let built = unsafe {
-            export_rgba_image(&device, width, height).and_then(|shared| {
-                import_rgba_into_cuda(&shared, context)
-                    .map(|mapping| (mapping, wrap_rgba_as_texture(&device, shared)))
+            IngestFence::new(&device, context).and_then(|ingest_fence| {
+                export_rgba_image(&device, width, height).and_then(|shared| {
+                    import_rgba_into_cuda(&shared, context).map(|mapping| {
+                        (mapping, wrap_rgba_as_texture(&device, shared), ingest_fence)
+                    })
+                })
             })
         };
         match built {
-            Ok((mapping, texture)) => Ok(Self {
+            Ok((mapping, texture, ingest_fence)) => Ok(Self {
                 device,
                 queue,
                 mapping,
@@ -1434,6 +1558,7 @@ impl WgpuToCuda {
                 pool: LinearBufferPool::new(),
                 configured: false,
                 frames: core::sync::atomic::AtomicU64::new(0),
+                ingest_fence,
                 _ctx_release: PrimaryCtxRelease(cuda_device),
             }),
             Err(e) => {
@@ -1468,8 +1593,10 @@ impl WgpuToCuda {
 
     /// Copy the current texture contents (the shared CUDA array) device->device
     /// into a linear `CUdeviceptr` and return it as a `MemoryDomain::Cuda` `Rgba8`
-    /// frame stamped with `pts_ns`. The caller must have completed and drained the
-    /// render (`device.poll(Wait)`) before calling this.
+    /// frame stamped with `pts_ns`. After [`ingest_texture`](Self::ingest_texture)
+    /// the CUDA copy waits on the GPU for its wgpu copy. A caller that renders into
+    /// [`texture`](Self::texture) itself must have completed and drained the render
+    /// (`device.poll(Wait)`) before calling this.
     ///
     /// The linear buffer is drawn from the bridge's [`LinearBufferPool`]: a
     /// recycled buffer of the right size is reused, else one is allocated, and it
@@ -1507,8 +1634,12 @@ impl WgpuToCuda {
                 width_in_bytes: pitch,
                 height: self.height as usize,
             };
-            let result =
-                check(c::cu_memcpy_2d(&copy)).and_then(|()| check(c::cu_ctx_synchronize()));
+            let stream = self.ingest_fence.cuda_stream as c::CuStream;
+            let result = self
+                .ingest_fence
+                .queue_wait_for_ingest()
+                .and_then(|()| check(c::cu_memcpy_2d_async(&copy, stream)))
+                .and_then(|()| check(c::cu_stream_synchronize(stream)));
             let mut popped: c::CuContext = core::ptr::null_mut();
             let _ = c::cu_ctx_pop_current(&mut popped);
             result
@@ -1553,7 +1684,8 @@ impl WgpuToCuda {
 
     /// Copy an upstream `src` RGBA texture (which must live on this bridge's
     /// interop [`device`](Self::device)) into the bridge's exportable render
-    /// target, then drain the device so CUDA sees the result. The element path
+    /// target, signalling a timeline semaphore the next
+    /// [`to_cuda_frame`](Self::to_cuda_frame) waits on in CUDA. The element path
     /// calls this before [`to_cuda_frame`](Self::to_cuda_frame); a renderer that
     /// already draws straight into [`texture`](Self::texture) skips it. Public so a
     /// host (e.g. the Bevy demo) that renders on the interop device can push its
@@ -1589,15 +1721,16 @@ impl WgpuToCuda {
                 depth_or_array_layers: 1,
             },
         );
+        let value = self.ingest_fence.next_value();
+        // SAFETY: `queue` is the interop device's Vulkan queue, and the semaphore is a
+        // timeline semaphore on that device, signalled by the submit below.
+        let hal_queue = unsafe { self.queue.as_hal::<wgpu_hal::api::Vulkan>() }
+            .ok_or(G2gError::Hardware(HardwareError::Other))?;
+        hal_queue.add_signal_semaphore(self.ingest_fence.vulkan_semaphore, Some(value));
         self.queue.submit([encoder.finish()]);
-        // CUDA reads the shared memory directly (no wgpu fence), so the copy must
-        // be complete before to_cuda_frame's device->device copy runs.
-        self.device
-            .poll(wgpu::PollType::Wait {
-                submission_index: None,
-                timeout: None,
-            })
-            .map_err(gpu_err)?;
+        self.ingest_fence
+            .unwaited
+            .store(value, core::sync::atomic::Ordering::Release);
         Ok(())
     }
 }
@@ -1936,8 +2069,9 @@ mod cuda_ffi {
 
     pub(crate) use crate::cuda_driver_ffi::{
         cu_ctx_pop_current, cu_ctx_push_current, cu_device_get, cu_device_primary_ctx_release,
-        cu_device_primary_ctx_retain, cu_mem_alloc, cu_mem_free, cu_memcpy_2d, CuContext,
-        CudaMemcpy2D, CU_MEMORYTYPE_ARRAY, CU_MEMORYTYPE_DEVICE, CU_MEMORYTYPE_HOST,
+        cu_device_primary_ctx_retain, cu_mem_alloc, cu_mem_free, cu_memcpy_2d, cu_stream_create,
+        cu_stream_destroy, cu_stream_synchronize, CuContext, CuStream, CudaMemcpy2D,
+        CU_MEMORYTYPE_ARRAY, CU_MEMORYTYPE_DEVICE, CU_MEMORYTYPE_HOST,
     };
 
     pub type CuExternalMemory = *mut c_void;
@@ -1945,6 +2079,35 @@ mod cuda_ffi {
     pub type CuArray = *mut c_void;
 
     pub const CU_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD: u32 = 1;
+    pub const CU_EXTERNAL_SEMAPHORE_HANDLE_TYPE_TIMELINE_SEMAPHORE_FD: u32 = 9;
+    pub const CU_STREAM_NON_BLOCKING: u32 = 0x1;
+
+    pub type CuExternalSemaphore = *mut c_void;
+
+    /// `CUDA_EXTERNAL_SEMAPHORE_HANDLE_DESC`, the same `handle` union layout as
+    /// [`CudaExternalMemoryHandleDesc`]. The union holds pointers, so the struct
+    /// aligns to 8.
+    #[repr(C, align(8))]
+    pub struct CudaExternalSemaphoreHandleDesc {
+        pub type_: u32,
+        pub _pad: u32,
+        pub handle_fd: i32,
+        pub _handle_rest: [u8; 12],
+        pub flags: u32,
+        pub reserved: [u32; 16],
+    }
+    const _: () = assert!(core::mem::size_of::<CudaExternalSemaphoreHandleDesc>() == 96);
+
+    /// `CUDA_EXTERNAL_SEMAPHORE_WAIT_PARAMS`: `params.fence.value` first, then the
+    /// `nvSciSync` and `keyedMutex` members and `params.reserved`, all zero here.
+    #[repr(C)]
+    pub struct CudaExternalSemaphoreWaitParams {
+        pub fence_value: u64,
+        pub _params_rest: [u64; 8],
+        pub flags: u32,
+        pub reserved: [u32; 16],
+    }
+    const _: () = assert!(core::mem::size_of::<CudaExternalSemaphoreWaitParams>() == 144);
     pub const CUDA_EXTERNAL_MEMORY_DEDICATED: u32 = 0x1;
     pub const CU_AD_FORMAT_UNSIGNED_INT8: u32 = 0x01;
 
@@ -2011,6 +2174,18 @@ mod cuda_ffi {
         ) -> i32;
         pub fn cu_mipmapped_array_destroy = "cuMipmappedArrayDestroy"(mipmap: CuMipmappedArray) -> i32;
         pub fn cu_destroy_external_memory = "cuDestroyExternalMemory"(ext_mem: CuExternalMemory) -> i32;
+        pub fn cu_import_external_semaphore = "cuImportExternalSemaphore"(
+            ext_sem_out: *mut CuExternalSemaphore,
+            sem_handle_desc: *const CudaExternalSemaphoreHandleDesc,
+        ) -> i32;
+        pub fn cu_wait_external_semaphores_async = "cuWaitExternalSemaphoresAsync"(
+            ext_sem_array: *const CuExternalSemaphore,
+            params_array: *const CudaExternalSemaphoreWaitParams,
+            num_ext_sems: u32,
+            stream: CuStream,
+        ) -> i32;
+        pub fn cu_destroy_external_semaphore = "cuDestroyExternalSemaphore"(ext_sem: CuExternalSemaphore) -> i32;
+        pub fn cu_memcpy_2d_async = "cuMemcpy2DAsync_v2"(copy: *const CudaMemcpy2D, stream: CuStream) -> i32;
         pub fn cu_external_memory_get_mapped_buffer = "cuExternalMemoryGetMappedBuffer"(
             device_pointer: *mut u64,
             ext_mem: CuExternalMemory,
@@ -2021,5 +2196,112 @@ mod cuda_ffi {
             len: i32,
             device: i32,
         ) -> i32;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const WIDTH: u32 = 1920;
+    const HEIGHT: u32 = 1080;
+    const STALE_COPIES: usize = 200;
+
+    fn pattern(frame: u32) -> alloc::vec::Vec<u8> {
+        (0..WIDTH * HEIGHT * 4)
+            .map(|index| (index / 4 + frame * 97) as u8)
+            .collect()
+    }
+
+    fn upstream_texture(device: &wgpu::Device) -> wgpu::Texture {
+        device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("upstream-rgba"),
+            size: wgpu::Extent3d {
+                width: WIDTH,
+                height: HEIGHT,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        })
+    }
+
+    fn cuda_bytes(frame: &g2g_core::frame::Frame) -> alloc::vec::Vec<u8> {
+        use crate::cuda_driver_ffi as c;
+        let g2g_core::MemoryDomain::Cuda(buffer) = &frame.domain else {
+            panic!("the bridge emitted a non-CUDA frame");
+        };
+        let mut bytes = alloc::vec![0u8; (WIDTH * HEIGHT * 4) as usize];
+        // SAFETY: the frame keeps the linear buffer alive in `buffer.context`, and
+        // `bytes` holds the packed RGBA frame `to_cuda_frame` wrote.
+        unsafe {
+            check(c::cu_ctx_push_current(buffer.context as c::CuContext)).expect("push context");
+            let copied = check(c::cu_memcpy_dtoh(
+                bytes.as_mut_ptr().cast(),
+                buffer.luma_ptr,
+                bytes.len(),
+            ));
+            let mut popped: c::CuContext = core::ptr::null_mut();
+            let _ = c::cu_ctx_pop_current(&mut popped);
+            copied.expect("download the CUDA frame");
+        }
+        bytes
+    }
+
+    #[tokio::test]
+    async fn cuda_reads_each_ingested_texture_after_its_copy() {
+        let _gpu = crate::GPU_TEST_LOCK.lock().await;
+        let Ok(interop) = create_interop_device().await else {
+            return;
+        };
+        // SAFETY: `create_interop_device` enables both external fd extensions.
+        let Ok(bridge) = (unsafe {
+            WgpuToCuda::new(
+                interop.device.clone(),
+                interop.queue.clone(),
+                WIDTH,
+                HEIGHT,
+                0,
+            )
+        }) else {
+            return;
+        };
+        let staged = upstream_texture(&interop.device);
+        let upstream = upstream_texture(&interop.device);
+        for frame in 0..3 {
+            let expected = pattern(frame);
+            interop.queue.write_texture(
+                staged.as_image_copy(),
+                &expected,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(WIDTH * 4),
+                    rows_per_image: Some(HEIGHT),
+                },
+                staged.size(),
+            );
+            // queued gpu copies keep the upstream texture stale for longer than cuda takes to start its copy
+            let mut encoder = interop
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+            for _ in 0..STALE_COPIES {
+                encoder.copy_texture_to_texture(
+                    staged.as_image_copy(),
+                    upstream.as_image_copy(),
+                    staged.size(),
+                );
+            }
+            interop.queue.submit([encoder.finish()]);
+            bridge.ingest_texture(&upstream).expect("ingest");
+            let bridged = bridge.to_cuda_frame(0).expect("bridge to CUDA");
+            assert!(
+                cuda_bytes(&bridged) == expected,
+                "frame {frame} differs in CUDA"
+            );
+        }
     }
 }

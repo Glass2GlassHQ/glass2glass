@@ -172,11 +172,8 @@ libraries installed.
   `cudadownload`, `cudaglsink`, `ffmpegdec` on NVDEC) and the wgpu elements.
 - A planner that places elements on a device or backend by where the frames
   are.
-- Wait for a frame's fence on the GPU instead of the CPU: import the timeline
-  semaphore into CUDA (`cuImportExternalSemaphore`) for HIP on NVIDIA and the CUDA
-  elements, and into HIP once ROCm supports semaphore import on Linux.
-- Split one stream's frames across both GPUs and merge them back in order, for
-  throughput.
+- Wait for a dma-buf frame's fence on the GPU in `hipupload` once ROCm supports
+  semaphore import on Linux.
 
 ## Egress / transports
 
