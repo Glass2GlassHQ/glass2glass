@@ -884,7 +884,8 @@ fn ogg_demux(bytes: &[u8]) -> Vec<Vec<u8>> {
 /// has read this, so it tops out at `UnitTested`.
 pub fn st2110_anc() -> MaturityRecord {
     use crate::cea::{build_cdp, parse_cdp, CcTriple, CDP_FRAME_RATE_29_97};
-    use crate::st2110anc::{AncField, AncPacket, St2110AncDepacketizer, St2110AncPacketizer};
+    use crate::st2110anc::{AncField, St2110AncDepacketizer, St2110AncPacketizer};
+    use crate::st291::AncPacket;
 
     /// DID / SDID of a CEA-708 caption ANC packet (SMPTE ST 334).
     const ANC_DID_CAPTIONS: u8 = 0x61;
@@ -910,16 +911,19 @@ pub fn st2110_anc() -> MaturityRecord {
         },
     ];
     let cdp = build_cdp(&triples, CDP_FRAME_RATE_29_97, CDP_SEQUENCE);
-    let anc = AncPacket::generic(ANC_DID_CAPTIONS, ANC_SDID_CEA708, cdp);
+    let anc = AncPacket::from_bytes(ANC_DID_CAPTIONS, ANC_SDID_CEA708, &cdp);
     let mut tx = St2110AncPacketizer::new(PAYLOAD_TYPE, SSRC);
-    let packet = tx.packetize(core::slice::from_ref(&anc), TAI_NS, AncField::Progressive);
+    let Ok(packet) = tx.packetize(core::slice::from_ref(&anc), TAI_NS, AncField::Progressive)
+    else {
+        return rec;
+    };
     let rx = St2110AncDepacketizer::new();
 
     let recovered = rx.depacketize(&packet);
     let intact = recovered.as_ref().is_some_and(|frame| {
         frame.field == AncField::Progressive
             && frame.packets == alloc::vec![anc.clone()]
-            && parse_cdp(&frame.packets[0].user_data) == Some(triples.clone())
+            && parse_cdp(&frame.packets[0].user_data_bytes()) == Some(triples.clone())
     });
     // A single flipped bit in the ANC data section must fail parity / checksum.
     let mut corrupt = packet.clone();

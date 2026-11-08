@@ -41,9 +41,10 @@ use crate::ccextract::push_cue_frames;
 use crate::cea::{build_cdp, extract_cc_data, parse_cdp, CaptionDecoder, CcSource};
 use crate::filesink::io_err;
 use crate::rtpjitter::RtpPtsRebase;
-use crate::st2110anc::{AncField, AncPacket, St2110AncDepacketizer, St2110AncPacketizer};
+use crate::st2110anc::{AncField, St2110AncDepacketizer, St2110AncPacketizer};
 use crate::st2110dup::spawn_rtp_receiver;
 use crate::st2110sdp::{St2110Essence, St2110Sdp};
+use crate::st291::AncPacket;
 
 /// DID / SDID of a CEA closed-caption ANC packet (SMPTE ST 334-1): DID 0x61 with
 /// SDID 0x01 carries the CDP (both CEA-608 and CEA-708).
@@ -275,11 +276,13 @@ impl AsyncElement for St2110AncSink {
                     }
                     let cdp = build_cdp(&triples, self.frame_rate_code, self.cdp_seq);
                     self.cdp_seq = self.cdp_seq.wrapping_add(1);
-                    let anc = AncPacket::generic(CC_DID, CC_SDID, cdp);
+                    let anc = AncPacket::from_bytes(CC_DID, CC_SDID, &cdp);
                     // The video frame's sampling instant on the PTP timeline.
                     let base = self.clock_sync.as_ref().map_or(0, ClockSync::base_time);
                     let tai = base.saturating_add(frame.timing.pts_ns);
-                    let rtp = pkt.packetize(&[anc], tai, AncField::Progressive);
+                    let rtp = pkt
+                        .packetize(&[anc], tai, AncField::Progressive)
+                        .expect("build_cdp caps a CDP at 31 triples, under 255 words");
                     sock.send(&rtp).map_err(io_err)?;
                     Ok(())
                 }
@@ -426,7 +429,7 @@ impl SourceLoop for St2110AncSrc {
                     if anc.did != CC_DID {
                         continue;
                     }
-                    if let Some(triples) = parse_cdp(&anc.user_data) {
+                    if let Some(triples) = parse_cdp(&anc.user_data_bytes()) {
                         decoder.push_triples(&triples, pts_ns);
                     }
                 }

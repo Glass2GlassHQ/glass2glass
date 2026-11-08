@@ -855,6 +855,10 @@ impl BitWriter {
         self.write_bits(v1, n + 1);
     }
 
+    pub(crate) fn bit_pos(&self) -> usize {
+        self.bit_pos
+    }
+
     pub(crate) fn align_to_byte(&mut self) {
         while !self.bit_pos.is_multiple_of(8) {
             self.write_bit(0);

@@ -292,10 +292,10 @@ libraries installed.
     flvdemux declares `au`.
   - An MP4 audio track whose edit list replays media plays its samples once:
     replayed edits need sample-accurate clipping, as the video path lays them out.
-- **ST 2038 elements:** parse and write ST 2038 ANC packets with the ST 291
-  word code `st2110anc` uses, then gst-plugins-rs's `st2038anctocc` and
-  `cctost2038anc`, `st2038ancdemux` and `st2038ancmux`, and `st2038combiner` and
-  `st2038extractor` against an ancillary frame meta.
+- **ST 2038 elements:** gst-plugins-rs's `st2038anctocc` and `cctost2038anc`,
+  `st2038ancdemux` and `st2038ancmux`, and `st2038combiner` and
+  `st2038extractor` against an ancillary frame meta, on `st2038::parse_st2038`
+  and `write_st2038`.
 
 ## Codecs
 

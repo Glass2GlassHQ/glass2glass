@@ -349,7 +349,15 @@ told apart by a 'VANC' `registration_descriptor`, the carriage GStreamer's
 `mpegtsmux` and `tsdemux` use. `Caps::St2038` (`meta/x-st-2038`) is the stream
 type, `tsdemux stream=st2038` selects it, and `mpegtsmux` writes an input of
 those caps. Each PES payload is forwarded unchanged, one or more ST 2038 ANC
-packets. Both directions are checked against GStreamer 1.28 in
+packets.
+
+`st2038::parse_st2038` and `write_st2038` read and write that payload as
+`st291::AncPacket`s, stopping at `0xFF` stuffing. DID, SDID and Data_Count must
+carry ST 291 parity and the checksum word must match, but user data words are
+kept as 10-bit values without a parity check, since some packet types (ST 299
+audio) carry data in b8. gst-plugins-rs's parser strips the parity bits instead
+and never checks the checksum. A packet `cctost2038anc` wrote parses and is
+written back byte for byte. Both directions are checked against GStreamer 1.28 in
 `m2129_st2038_ts`: its `tsdemux` reads the g2g mux's stream byte for byte, and
 g2g's `tsdemux` reads what its `mpegtsmux` writes.
 

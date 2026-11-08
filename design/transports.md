@@ -1168,7 +1168,9 @@ same timestamp for the same sampling instant.
 depayloader, L16 and L24 big-endian in the RTP payload with timestamps off the
 media clock. `st2110anc` (ST 2110-40, RFC 8331) carries SMPTE ST 291 ancillary data,
 closed captions and timecode, as bit-packed 10-bit words with parity and checksum
-validation, so the caption stack can ride 2110.
+validation, so the caption stack can ride 2110. The words are `st291::AncPacket`,
+shared with ST 2038. The S flag and StreamNum are written as zero and skipped on
+receive.
 
 The sans-IO cores get network element wrappers. `st2110audiortp`, giving
 `St2110AudioSink` and `St2110AudioSrc` behind the `st2110` feature, puts -30 audio

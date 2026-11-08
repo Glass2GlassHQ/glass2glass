@@ -541,6 +541,10 @@ pub mod st2110audio;
 // timecode) per RFC 8331, sans-IO packetizer / depacketizer with 10-bit-word
 // parity + checksum. no_std+alloc.
 pub mod st2110anc;
+// SMPTE ST 291 ANC packet words shared by ST 2110-40 and ST 2038.
+pub mod st291;
+// SMPTE ST 2038 ANC packet framing, the payload of meta/x-st-2038.
+pub mod st2038;
 
 // ST 2110-20 uncompressed video over RTP (M599, RFC 4175): sans-IO packetizer /
 // depacketizer slicing a frame into SRD line runs, RGBA 8-bit + YCbCr-4:2:2 8/10-bit.
