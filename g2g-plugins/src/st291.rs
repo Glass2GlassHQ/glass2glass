@@ -146,6 +146,7 @@ impl g2g_core::meta::FrameMeta for AncillaryMeta {
     }
 }
 
+#[cfg(feature = "metadata")]
 pub(crate) fn sort_by_position(packets: &mut [AncPacket]) {
     packets.sort_by_key(|p| (p.line_number, p.horizontal_offset));
 }

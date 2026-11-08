@@ -1,23 +1,23 @@
 use alloc::vec::Vec;
 
-use g2g_core::caps::framerate_q16_period_ns;
-use g2g_core::{Caps, Rate};
-
 use crate::annexb::{BitReader, BitWriter};
 use crate::st291::{AncFieldOverflow, AncPacket};
 
-pub(crate) fn video_framerate(caps: &Caps) -> Rate {
+#[cfg(feature = "metadata")]
+pub(crate) fn video_framerate(caps: &g2g_core::Caps) -> g2g_core::Rate {
+    use g2g_core::Caps;
     match caps {
         Caps::RawVideo { framerate, .. } | Caps::CompressedVideo { framerate, .. } => {
             framerate.clone()
         }
-        _ => Rate::Any,
+        _ => g2g_core::Rate::Any,
     }
 }
 
-pub(crate) fn framerate_period_ns(framerate: &Rate) -> Option<u64> {
+#[cfg(any(feature = "std", feature = "metadata"))]
+pub(crate) fn framerate_period_ns(framerate: &g2g_core::Rate) -> Option<u64> {
     match framerate {
-        Rate::Fixed(q16) => framerate_q16_period_ns(*q16),
+        g2g_core::Rate::Fixed(q16) => g2g_core::caps::framerate_q16_period_ns(*q16),
         _ => None,
     }
 }
