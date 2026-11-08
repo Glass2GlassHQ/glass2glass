@@ -598,6 +598,9 @@ pub mod st2110jxsrtp;
 // Gated to the ingest features that supply tokio (its UDP transport).
 #[cfg(any(feature = "udp-ingress", feature = "rtsp-server"))]
 pub mod rtprecv;
+// Batched UDP receive (recvmmsg, GRO, kernel timestamps) under the RTP ingest loop and udpsrc.
+#[cfg(any(feature = "udp-ingress", feature = "rtsp-server"))]
+mod udprecv;
 // Sans-IO RTP jitter buffer (reorder / loss / dup detection) between a socket
 // and the depayloader, the receive-side network-resilience stage.
 pub mod rtpjitter;
@@ -970,10 +973,13 @@ pub mod srturi;
 // Sans-IO RIST (VSF TR-06-1 Simple Profile) NACK, RTT echo and retransmission
 // pieces, always compiled. The tokio sink / source need the `rist` feature.
 pub mod rist;
+// UDP socket setup shared by the RIST links, udpsrc and the PTP client.
 #[cfg(feature = "rist")]
 pub mod ristsink;
 #[cfg(feature = "rist")]
 pub mod ristsrc;
+#[cfg(any(feature = "rist", feature = "udp-ingress", feature = "ptp"))]
+mod udpsocket;
 
 // UDP egress sink (M47): drives the M46 RtpH264Packetizer and sends RTP over a
 // tokio UdpSocket, the send-side inverse of RtspSrc's receive path.

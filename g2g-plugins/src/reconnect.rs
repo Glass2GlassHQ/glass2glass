@@ -183,7 +183,7 @@ pub(crate) const RECONNECT_BACKOFF_MAX_PROP: PropertySpec = PropertySpec::new(
 )
 .with_default("5000");
 
-#[cfg(test)]
+#[cfg(all(test, any(feature = "rtsp", feature = "webrtc")))]
 mod tests {
     use super::*;
 

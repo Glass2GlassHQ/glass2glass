@@ -509,6 +509,26 @@ buffer, RTCP, NACK, RTX and FEC path is shared: `RtpRecvConfig::encoding` picks
 the depayloader and the media clock, and nothing else in the loop depends on the
 codec. `width` / `height` are refused in Opus mode.
 
+### Socket reads
+
+`UdpReceiver` (`udprecv.rs`) reads the socket for `udpsrc` and the RTP ingest
+loop that `udpsrc` and the RTSP server sources share. It reads up to
+`batch-size` datagrams per wakeup through `quinn-udp` (`recvmmsg` on Linux,
+Android and the BSDs). With `allow-gro` the kernel merges consecutive equal-size
+datagrams from one sender into one buffer, and the reader splits it at the
+segment stride. Each buffer then has room for 64 datagrams of `mtu` bytes.
+`mtu` defaults to 65507, the largest IPv4 UDP payload, instead of gst's 1500,
+so no datagram is ever truncated, as with gst's C `udpsrc`. Linux kernel receive
+timestamps (`SO_TIMESTAMPNS`) are wall-clock time, so a datagram's age on that
+clock is subtracted from the monotonic clock to give its `arrival_ns`.
+
+`source-filter` drops datagrams by sender address, and an inclusive filter on a
+multicast group also joins only those senders (source-specific multicast), as
+gst's `udpsrc2` does. Binding, port reuse, `SO_BINDTODEVICE` and the group joins
+live in `udpsocket.rs`, shared with the RIST links and `PtpClient`. Raw mode
+keeps one buffer per datagram unless `preserve-packetization=false`, which joins
+each read batch into one buffer. `udpsrc2` is an alias for `udpsrc`.
+
 ### Jitter buffer, RTCP, NACK, RTX and FEC
 
 Between the socket and the depayloader sits a sans-IO jitter buffer

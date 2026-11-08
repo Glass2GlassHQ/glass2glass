@@ -201,6 +201,11 @@ libraries installed.
   and fix the cause.
 - Pass video and audio between processes on Windows. `shmsink`, `unixfdsink`
   and the DMABUF / CUDA IPC elements are Linux only.
+- **io_uring receive for ST 2110.** Profile an uncompressed 1080p60 receive
+  (about 200k packets a second) on the `recvmmsg` path first. If system calls
+  still show up, try multishot receive into provided buffer rings on Linux,
+  keeping the `recvmmsg` path as the fallback. tokio has no io_uring backend,
+  and Android apps and Docker's default seccomp profile block it.
 
 ## Adaptive streaming (HLS / DASH)
 

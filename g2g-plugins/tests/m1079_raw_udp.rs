@@ -239,6 +239,44 @@ async fn datagrams_carry_whole_ts_packets() {
     }
 }
 
+/// With `preserve-packetization=false` each socket read becomes one buffer: the
+/// fixture's datagrams, all queued before the source reads, arrive `batch-size`
+/// at a time and back to back.
+#[tokio::test]
+async fn unpreserved_packetization_joins_each_read_batch() {
+    const BATCH_SIZE: u64 = 4;
+    let (mut source, port) = bound_raw_source(datagram_count().div_ceil(BATCH_SIZE));
+    source
+        .set_property("batch-size", PropValue::Uint(BATCH_SIZE))
+        .expect("batch-size applies");
+    source
+        .set_property("preserve-packetization", PropValue::Bool(false))
+        .expect("raw mode takes preserve-packetization");
+    send_fixture_to(format!("host=127.0.0.1 port={port}")).await;
+
+    let mut sizes = SizeSink::default();
+    tokio::time::timeout(
+        LOOPBACK_DEADLINE,
+        run_simple_pipeline(
+            &mut source,
+            &mut sizes,
+            &ZeroClock,
+            LatencyProfile::Live.link_capacity(),
+        ),
+    )
+    .await
+    .expect("the receiver finishes")
+    .expect("the receive pipeline runs");
+
+    let batch_bytes =
+        datagram_chunk(ByteStreamEncoding::MpegTs, DEFAULT_MAX_PAYLOAD) * BATCH_SIZE as usize;
+    let total = std::fs::metadata(fixture_path()).unwrap().len() as usize;
+    let expected: Vec<usize> = (0..total.div_ceil(batch_bytes))
+        .map(|batch| batch_bytes.min(total - batch * batch_bytes))
+        .collect();
+    assert_eq!(sizes.sizes, expected);
+}
+
 /// The received datagrams demux exactly like the file does: `udpsrc ! tsdemux`
 /// yields the frame count `filesrc ! tsdemux` yields for the same fixture.
 #[tokio::test]
@@ -360,6 +398,14 @@ fn raw_mode_rejects_the_rtp_only_properties() {
 /// Unset `bytestream-format` leaves the source on the RTP path it has always
 /// taken, RTP-only properties included.
 #[test]
+fn preserve_packetization_needs_raw_mode() {
+    let mut source = UdpSrc::new("127.0.0.1:0".parse().unwrap());
+    assert!(source
+        .set_property("preserve-packetization", PropValue::Bool(false))
+        .is_err());
+}
+
+#[test]
 fn rtp_mode_is_still_the_default() {
     let mut source = UdpSrc::new("127.0.0.1:0".parse().unwrap());
     assert_eq!(
@@ -382,6 +428,10 @@ fn raw_names_build_from_a_launch_line() {
     let registry = default_registry();
     for line in [
         &format!("udpsrc address=127.0.0.1 port=0 bytestream-format={TS_FORMAT} ! fakesink"),
+        &format!(
+            "udpsrc2 address=127.0.0.1 port=0 bytestream-format={TS_FORMAT} \
+             batch-size=32 preserve-packetization=false ! fakesink"
+        ),
         &format!(
             "filesrc location={} bytestream-format={TS_FORMAT} ! udpsink host=127.0.0.1 port=5004",
             fixture_path().display()

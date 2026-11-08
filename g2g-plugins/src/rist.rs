@@ -780,34 +780,25 @@ impl LinkSettings {
         local: std::net::SocketAddr,
         group: Option<std::net::IpAddr>,
     ) -> std::io::Result<std::net::UdpSocket> {
-        use socket2::{Domain, InterfaceIndexOrAddress, Protocol, Socket, Type};
-        use std::net::{IpAddr, Ipv4Addr};
-        let socket = Socket::new(Domain::for_address(local), Type::DGRAM, Some(Protocol::UDP))?;
-        if group.is_some() {
-            socket.set_reuse_address(true)?;
-        }
-        let interface_index = match &link.multicast_iface {
-            Some(iface) => Some(bind_to_interface(&socket, iface)?),
-            None => None,
-        };
-        socket.bind(&local.into())?;
+        use crate::udpsocket::{bind_udp_socket, MulticastJoin, UdpBind};
+        use std::net::IpAddr;
+        let socket = bind_udp_socket(UdpBind {
+            local,
+            iface: link.multicast_iface.as_deref(),
+            multicast: group.map(|group| MulticastJoin {
+                group,
+                sources: &[],
+            }),
+            reuse: group.is_some(),
+        })?;
         let ttl = u32::from(self.multicast_ttl);
         match group {
             None => {}
-            Some(IpAddr::V4(group)) => {
-                match interface_index {
-                    Some(index) => socket
-                        .join_multicast_v4_n(&group, &InterfaceIndexOrAddress::Index(index))?,
-                    None => socket.join_multicast_v4(&group, &Ipv4Addr::UNSPECIFIED)?,
-                }
+            Some(IpAddr::V4(_)) => {
                 socket.set_multicast_ttl_v4(ttl)?;
                 socket.set_multicast_loop_v4(self.multicast_loopback)?;
             }
-            Some(IpAddr::V6(group)) => {
-                // interface 0 lets the kernel pick
-                let index = interface_index.unwrap_or(0);
-                socket.join_multicast_v6(&group, index)?;
-                socket.set_multicast_if_v6(index)?;
+            Some(IpAddr::V6(_)) => {
                 socket.set_multicast_hops_v6(ttl)?;
                 socket.set_multicast_loop_v6(self.multicast_loopback)?;
             }
@@ -815,38 +806,6 @@ impl LinkSettings {
         socket.set_nonblocking(true)?;
         Ok(socket.into())
     }
-}
-
-#[cfg(feature = "rist")]
-pub(crate) fn unspecified_address(like: std::net::SocketAddr, port: u16) -> std::net::SocketAddr {
-    use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
-    if like.is_ipv6() {
-        SocketAddr::from((Ipv6Addr::UNSPECIFIED, port))
-    } else {
-        SocketAddr::from((Ipv4Addr::UNSPECIFIED, port))
-    }
-}
-
-// SO_BINDTODEVICE, what GStreamer applies for `multicast-iface`
-#[cfg(all(feature = "rist", any(target_os = "linux", target_os = "android")))]
-fn bind_to_interface(socket: &socket2::Socket, name: &str) -> std::io::Result<u32> {
-    socket.bind_device(Some(name.as_bytes()))?;
-    let name = std::ffi::CString::new(name)
-        .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
-    // SAFETY: `name` is a NUL-terminated string that outlives the call, which only reads it.
-    let index = unsafe { libc::if_nametoindex(name.as_ptr()) };
-    if index == 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    Ok(index)
-}
-
-#[cfg(all(feature = "rist", not(any(target_os = "linux", target_os = "android"))))]
-fn bind_to_interface(_socket: &socket2::Socket, _name: &str) -> std::io::Result<u32> {
-    Err(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        "multicast-iface needs SO_BINDTODEVICE",
-    ))
 }
 
 #[cfg(feature = "rist")]

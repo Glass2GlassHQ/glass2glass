@@ -2614,6 +2614,8 @@ fn register_aliases(reg: &mut Registry) {
     // `dynudpsink` is not an alias: its destination rides on per-buffer metadata,
     // which this sink has no equivalent of.
     reg.register_alias("multiudpsink", &["udpsink"]);
+    // gst-plugins-rs names its batched UDP receiver udpsrc2.
+    reg.register_alias("udpsrc2", &["udpsrc"]);
     // gst's macOS audio element names.
     reg.register_alias("osxaudiosink", &["coreaudiosink", "fakesink"]);
     reg.register_alias("osxaudiosrc", &["coreaudiosrc"]);
@@ -2805,6 +2807,7 @@ pub static FEATURE_GATED_ELEMENTS: &[FeatureGatedElement] = &{
         // The alias needs its own row: without `udp-egress` there is no
         // `udpsink` for it to resolve to, so the name reads as unknown.
         "multiudpsink" => "udp-egress";
+        "udpsrc2" => "udp-ingress";
         "cotsink" => "udp-egress";
         "rtspserversink" => "rtsp-server";
         "rtspclientsink" => "rtsp-client-sink";

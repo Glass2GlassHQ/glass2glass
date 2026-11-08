@@ -102,7 +102,7 @@ rtsp = ["std", "dep:retina", "dep:futures-util", "dep:url", "dep:bytes"]
 # RTSP server sink (RtspServerSink): hosts a pipeline's H.264 as an RTSP endpoint,
 # serving RTP over UDP to a connecting player. The sans-IO `rtspserver` responder
 # is always compiled; only the tokio TCP/UDP element needs this. Implies std + tokio.
-rtsp-server = ["std", "tokio/net", "tokio/io-util", "tokio/macros"]
+rtsp-server = ["std", "tokio/net", "tokio/io-util", "tokio/macros", "dep:quinn-udp", "dep:libc"]
 # RTSP publishing sink (RtspClientSink): ANNOUNCE + SETUP + RECORD to an RTSP
 # server, RTP over TCP-interleaved or UDP. The sans-IO `rtspclient` request and
 # response layer is always compiled. Implies std + tokio.
@@ -144,7 +144,7 @@ rtmp = ["std", "tokio/net", "tokio/io-util", "dep:hmac", "dep:getrandom"]
 # depayloads H.264 to Annex-B access units, with caps taken from a published SDP
 # or the stream's SPS. Implies std and adds tokio's net feature, plus `metadata` for
 # the capture time a header extension stamps onto each frame.
-udp-ingress = ["std", "metadata", "tokio/net"]
+udp-ingress = ["std", "metadata", "tokio/net", "dep:socket2", "dep:libc", "dep:quinn-udp"]
 # Plain TCP byte-stream elements (M1068): the `tcpserversrc` / `tcpclientsrc`
 # sources and the `tcpserversink` / `tcpclientsink` sinks of GStreamer's `tcp`
 # plugin. They carry raw bytes with no framing of their own, so any peer that
@@ -885,10 +885,14 @@ memchr = { version = "2.8", default-features = false }
 # CLOCK_TAI via clock_gettime for the `ptp` feature (PtpSystemClock). Top-level
 # optional (builds on all platforms); the module using it is Linux + `ptp` gated.
 libc = { version = "0.2", optional = true }
-# SO_REUSEADDR / SO_REUSEPORT before bind for the `ptp` feature (PtpClient), so it
-# can share UDP 319 / 320 with a running ptp4l. std's UdpSocket binds first.
-# (its `all` feature is what exposes set_reuse_port).
+# Socket options that must be set before bind (SO_REUSEADDR / SO_REUSEPORT,
+# SO_BINDTODEVICE) and multicast joins, for `ptp`, `rist` and `udp-ingress`.
+# PtpClient shares UDP 319 / 320 with a running ptp4l this way. std's UdpSocket
+# binds first. Its `all` feature is what exposes set_reuse_port.
 socket2 = { version = "0.6", features = ["all"], optional = true }
+# recvmmsg batches, UDP GRO and kernel receive timestamps for the UDP RTP
+# receive path (`udp-ingress`, `rtsp-server`).
+quinn-udp = { version = "0.6", optional = true, default-features = false }
 # Dynamic plugin loader (plugin-loader feature): cross-platform `dlopen`/`dlsym`
 # over the loaded `cdylib`. The host keeps each `Library` alive for the process
 # lifetime (dropping it unmaps the code the registered elements run from).

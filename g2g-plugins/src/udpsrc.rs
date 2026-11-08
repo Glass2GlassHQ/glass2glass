@@ -18,9 +18,10 @@
 //! Setting `bytestream-format` switches the source to raw datagram mode,
 //! the broadcast `udpsrc port=5000 ! tsdemux` case: every datagram becomes one
 //! `DataFrame` of `Caps::ByteStream` with no RTP header, no depayloading and no
-//! jitter buffer. The RTP-only properties are rejected in that mode rather than
-//! silently ignored. A multicast `address` is joined on every interface when
-//! `auto-multicast` is left on.
+//! jitter buffer (with `preserve-packetization` off, one per read batch). The
+//! RTP-only properties are rejected in that mode rather than silently ignored.
+//! A multicast `address` is joined on every interface when `auto-multicast` is
+//! left on.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -28,7 +29,7 @@ use core::pin::Pin;
 use alloc::boxed::Box;
 use alloc::string::{String, ToString};
 
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket as StdUdpSocket};
+use std::net::{IpAddr, SocketAddr, UdpSocket as StdUdpSocket};
 
 use g2g_core::log::LogSource;
 use g2g_core::runtime::SourceLoop;
@@ -47,6 +48,8 @@ use crate::rtpdepay::RtpEncoding;
 use crate::rtpjitter::JitterConfig;
 use crate::rtprecv::RtpRecvConfig;
 use crate::sdp::{SdpMedia, OPUS_CLOCK_HZ, OPUS_RTPMAP_CHANNELS};
+use crate::udprecv::{UdpReceiveConfig, UdpReceiver, MAX_DATAGRAM};
+use crate::udpsocket::{bind_udp_socket, unspecified_address, MulticastJoin, UdpBind};
 
 // libopus decodes a mono packet into the stereo the RFC 7587 rtpmap always announces
 fn opus_caps() -> Caps {
@@ -71,11 +74,10 @@ fn read_sdp(value: &str) -> Result<String, G2gError> {
 const DEFAULT_WIDTH: u32 = 1280;
 const DEFAULT_HEIGHT: u32 = 720;
 const DEFAULT_FPS: u32 = 30;
-/// Largest payload an IPv4 UDP datagram can carry, so one receive buffer always
-/// holds a whole datagram (a short read would silently truncate it).
-const MAX_DATAGRAM: usize = 65_507;
 /// gst `udpsrc auto-multicast` default: join the group named by `address`.
 const DEFAULT_AUTO_MULTICAST: bool = true;
+// gst udpsrc2's batch-size maximum
+const MAX_BATCH_SIZE: usize = 1024;
 
 /// # Example
 ///
@@ -112,6 +114,12 @@ pub struct UdpSrc {
     bytestream: Option<ByteStreamEncoding>,
     /// Join the group when `bind` names a multicast address.
     auto_multicast: bool,
+    udp: UdpReceiveConfig,
+    multicast_iface: Option<String>,
+    multicast_loop: bool,
+    reuse: bool,
+    receive_buffer_size: u32,
+    preserve_packetization: bool,
 }
 
 impl UdpSrc {
@@ -129,6 +137,13 @@ impl UdpSrc {
             configured: false,
             bytestream: None,
             auto_multicast: DEFAULT_AUTO_MULTICAST,
+            udp: UdpReceiveConfig::default(),
+            multicast_iface: None,
+            // gst udpsrc2 defaults
+            multicast_loop: true,
+            reuse: true,
+            receive_buffer_size: 0,
+            preserve_packetization: true,
         }
     }
 
@@ -322,30 +337,58 @@ impl UdpSrc {
 
     /// The multicast group to join, when the bind address names one and
     /// `auto-multicast` is on.
-    fn multicast_group(&self) -> Option<Ipv4Addr> {
-        match self.bind.ip() {
-            IpAddr::V4(ip) if self.auto_multicast && ip.is_multicast() => Some(ip),
-            _ => None,
-        }
+    fn multicast_group(&self) -> Option<IpAddr> {
+        let ip = self.bind.ip();
+        (self.auto_multicast && ip.is_multicast()).then_some(ip)
     }
 
     fn bind_socket(&self) -> Result<StdUdpSocket, G2gError> {
         let group = self.multicast_group();
+        // gst joins only the listed senders when the filter is inclusive, and filters the rest per packet
+        let ssm_sources: &[IpAddr] = if self.udp.source_filter_exclusive {
+            &[]
+        } else {
+            &self.udp.source_filter
+        };
         // A multicast receiver binds the port on every interface and then joins
         // the group; binding the group address itself drops unicast to the port.
-        let socket = match group {
-            Some(_) => StdUdpSocket::bind((Ipv4Addr::UNSPECIFIED, self.bind.port())),
-            None => StdUdpSocket::bind(self.bind),
+        let local = match group {
+            Some(_) => unspecified_address(self.bind, self.bind.port()),
+            None => self.bind,
+        };
+        let socket = bind_udp_socket(UdpBind {
+            local,
+            iface: self.multicast_iface.as_deref(),
+            multicast: group.map(|group| MulticastJoin {
+                group,
+                sources: ssm_sources,
+            }),
+            reuse: self.reuse,
+        })
+        .map_err(io_err)?;
+        match group {
+            Some(IpAddr::V4(_)) => socket.set_multicast_loop_v4(self.multicast_loop),
+            Some(IpAddr::V6(_)) => socket.set_multicast_loop_v6(self.multicast_loop),
+            None => Ok(()),
         }
         .map_err(io_err)?;
-        if let Some(group) = group {
+        if self.receive_buffer_size > 0 {
             socket
-                .join_multicast_v4(&group, &Ipv4Addr::UNSPECIFIED)
+                .set_recv_buffer_size(self.receive_buffer_size as usize)
                 .map_err(io_err)?;
         }
         socket.set_nonblocking(true).map_err(io_err)?;
-        Ok(socket)
+        Ok(socket.into())
     }
+}
+
+// gst also resolves host names here, this takes addresses only
+fn parse_source_filter(text: &str) -> Result<alloc::vec::Vec<IpAddr>, PropError> {
+    text.split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| entry.parse().map_err(|_| PropError::Value))
+        .collect()
 }
 
 impl LogSource for UdpSrc {
@@ -354,19 +397,28 @@ impl LogSource for UdpSrc {
     }
 }
 
-/// Push every datagram as it arrived, one `DataFrame` each, until `limit`
-/// datagrams have been emitted. Raw UDP has no in-band end, so EOS comes only
-/// from that limit (`num-buffers`).
+/// Push the datagrams as they arrived, one `DataFrame` each, or with
+/// `preserve_packetization` off one per received batch, until `limit` frames
+/// have been emitted. Raw UDP has no in-band end, so EOS comes only from that
+/// limit (`num-buffers`).
 async fn receive_datagrams(
-    socket: &tokio::net::UdpSocket,
+    receiver: &mut UdpReceiver,
     limit: u64,
+    preserve_packetization: bool,
     out: &mut dyn OutputSink,
 ) -> Result<u64, G2gError> {
-    let mut buf = alloc::vec![0u8; MAX_DATAGRAM];
     let mut sequence = 0u64;
     while sequence < limit {
-        let (filled, _from) = socket.recv_from(&mut buf).await.map_err(io_err)?;
-        let frame = byte_frame(buf[..filled].to_vec(), sequence);
+        let datagram = receiver.recv().await.map_err(io_err)?;
+        let arrival_ns = datagram.arrival_ns;
+        let mut bytes = datagram.payload.to_vec();
+        if !preserve_packetization {
+            while let Some(next) = receiver.next_buffered() {
+                bytes.extend_from_slice(next.payload);
+            }
+        }
+        let mut frame = byte_frame(bytes, sequence);
+        frame.timing.arrival_ns = arrival_ns;
         sequence += 1;
         out.push(PipelinePacket::DataFrame(frame)).await?;
     }
@@ -493,7 +545,7 @@ impl SourceLoop for UdpSrc {
             PropertySpec::new(
                 "num-buffers",
                 PropKind::Int,
-                "datagrams (raw) or access units (RTP) to emit then EOS (-1 = until error/shutdown)",
+                "buffers (raw) or access units (RTP) to emit then EOS (-1 = until error/shutdown)",
             )
             .with_default("-1")
             .with_range("-1", "9223372036854775807"),
@@ -549,6 +601,73 @@ impl SourceLoop for UdpSrc {
             )
             .with_default("0")
             .with_range("0", "127"),
+            PropertySpec::new(
+                "buffer-size",
+                PropKind::Uint,
+                "kernel receive buffer size in bytes (0 = system default)",
+            )
+            .with_default("0")
+            .with_range("0", "2147483647"),
+            PropertySpec::new(
+                "mtu",
+                PropKind::Uint,
+                "largest datagram expected, bytes; a longer one is truncated",
+            )
+            .with_default("65507")
+            .with_range("1", "65507"),
+            PropertySpec::new(
+                "multicast-iface",
+                PropKind::Str,
+                "network interface to join the multicast group on (Linux)",
+            ),
+            PropertySpec::new(
+                "source-filter",
+                PropKind::Str,
+                "comma-separated sender IP addresses to accept (to drop, with source-filter-exclusive)",
+            ),
+            PropertySpec::new(
+                "source-filter-exclusive",
+                PropKind::Bool,
+                "drop the senders in source-filter instead of accepting only them",
+            )
+            .with_default("false"),
+            PropertySpec::new(
+                "loop",
+                PropKind::Bool,
+                "loop back multicast packets sent from this host",
+            )
+            .with_default("true"),
+            PropertySpec::new(
+                "reuse",
+                PropKind::Bool,
+                "share the port with other sockets (SO_REUSEADDR and SO_REUSEPORT)",
+            )
+            .with_default("true"),
+            PropertySpec::new(
+                "batch-size",
+                PropKind::Uint,
+                "most datagrams read from the socket at once",
+            )
+            .with_default("16")
+            .with_range("1", "1024"),
+            PropertySpec::new(
+                "allow-gro",
+                PropKind::Bool,
+                "let the kernel merge consecutive datagrams into one read (UDP GRO); receive buffers grow 64 times",
+            )
+            .with_default("false"),
+            PropertySpec::new(
+                "preserve-packetization",
+                PropKind::Bool,
+                "one buffer per datagram; off joins each read batch into one buffer (bytestream-format only)",
+            )
+            .with_default("true"),
+            PropertySpec::new(
+                "skip-first-bytes",
+                PropKind::Uint,
+                "bytes to drop from the start of every datagram",
+            )
+            .with_default("0"),
             ABS_CAPTURE_TIME_ID_PROPERTY,
             NTP_64_ID_PROPERTY,
         ];
@@ -558,6 +677,13 @@ impl SourceLoop for UdpSrc {
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
         if self.bytestream.is_some() && self.is_rtp_only(name) {
             g2g_core::g2g_warn!(self, "`{name}` needs RTP mode, not bytestream-format");
+            return Err(PropError::Value);
+        }
+        if self.bytestream.is_none() && name == "preserve-packetization" {
+            g2g_core::g2g_warn!(
+                self,
+                "`{name}` needs bytestream-format, RTP packets stay apart"
+            );
             return Err(PropError::Value);
         }
         let is_geometry = matches!(name, "width" | "height");
@@ -618,6 +744,67 @@ impl SourceLoop for UdpSrc {
                 Ok(())
             }
             "current-port" => Err(PropError::ReadOnly),
+            "buffer-size" => {
+                let bytes = value.as_uint().ok_or(PropError::Type)?;
+                self.receive_buffer_size =
+                    i32::try_from(bytes).map_err(|_| PropError::Value)? as u32;
+                Ok(())
+            }
+            "mtu" => {
+                let bytes = value.as_uint().ok_or(PropError::Type)?;
+                if bytes == 0 || bytes > MAX_DATAGRAM as u64 {
+                    return Err(PropError::Value);
+                }
+                self.udp.mtu = bytes as usize;
+                Ok(())
+            }
+            "multicast-iface" => {
+                let iface = value.as_str().ok_or(PropError::Type)?.trim();
+                // gst takes a comma-separated list, one socket here binds to one interface
+                if iface.contains(',') {
+                    return Err(PropError::Value);
+                }
+                self.multicast_iface = (!iface.is_empty()).then(|| iface.to_string());
+                Ok(())
+            }
+            "source-filter" => {
+                let text = value.as_str().ok_or(PropError::Type)?;
+                self.udp.source_filter = parse_source_filter(text)?;
+                Ok(())
+            }
+            "source-filter-exclusive" => {
+                self.udp.source_filter_exclusive = value.as_bool().ok_or(PropError::Type)?;
+                Ok(())
+            }
+            "loop" => {
+                self.multicast_loop = value.as_bool().ok_or(PropError::Type)?;
+                Ok(())
+            }
+            "reuse" => {
+                self.reuse = value.as_bool().ok_or(PropError::Type)?;
+                Ok(())
+            }
+            "batch-size" => {
+                let size = value.as_uint().ok_or(PropError::Type)?;
+                if size == 0 || size > MAX_BATCH_SIZE as u64 {
+                    return Err(PropError::Value);
+                }
+                self.udp.batch_size = size as usize;
+                Ok(())
+            }
+            "allow-gro" => {
+                self.udp.allow_gro = value.as_bool().ok_or(PropError::Type)?;
+                Ok(())
+            }
+            "preserve-packetization" => {
+                self.preserve_packetization = value.as_bool().ok_or(PropError::Type)?;
+                Ok(())
+            }
+            "skip-first-bytes" => {
+                let bytes = value.as_uint().ok_or(PropError::Type)?;
+                self.udp.skip_first_bytes = usize::try_from(bytes).map_err(|_| PropError::Value)?;
+                Ok(())
+            }
             _ => Err(PropError::Unknown),
         }
     }
@@ -649,6 +836,26 @@ impl SourceLoop for UdpSrc {
             )),
             "auto-multicast" => Some(PropValue::Bool(self.auto_multicast)),
             "current-port" => Some(PropValue::Uint(self.local_port().unwrap_or(0) as u64)),
+            "buffer-size" => Some(PropValue::Uint(u64::from(self.receive_buffer_size))),
+            "mtu" => Some(PropValue::Uint(self.udp.mtu as u64)),
+            "multicast-iface" => Some(PropValue::Str(
+                self.multicast_iface.clone().unwrap_or_default(),
+            )),
+            "source-filter" => Some(PropValue::Str(
+                self.udp
+                    .source_filter
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<alloc::vec::Vec<_>>()
+                    .join(","),
+            )),
+            "source-filter-exclusive" => Some(PropValue::Bool(self.udp.source_filter_exclusive)),
+            "loop" => Some(PropValue::Bool(self.multicast_loop)),
+            "reuse" => Some(PropValue::Bool(self.reuse)),
+            "batch-size" => Some(PropValue::Uint(self.udp.batch_size as u64)),
+            "allow-gro" => Some(PropValue::Bool(self.udp.allow_gro)),
+            "preserve-packetization" => Some(PropValue::Bool(self.preserve_packetization)),
+            "skip-first-bytes" => Some(PropValue::Uint(self.udp.skip_first_bytes as u64)),
             _ => None,
         }
     }
@@ -671,9 +878,16 @@ impl SourceLoop for UdpSrc {
             }
             let std = self.std_socket.take().ok_or(G2gError::NotConfigured)?;
             let socket = tokio::net::UdpSocket::from_std(std).map_err(io_err)?;
+            let mut receiver = UdpReceiver::new(socket, self.udp.clone()).map_err(io_err)?;
 
             if self.bytestream.is_some() {
-                return receive_datagrams(&socket, self.frame_limit, out).await;
+                return receive_datagrams(
+                    &mut receiver,
+                    self.frame_limit,
+                    self.preserve_packetization,
+                    out,
+                )
+                .await;
             }
 
             // The jitter + RTCP RR/NACK + FEC/RTX + depayload receive path is
@@ -681,7 +895,7 @@ impl SourceLoop for UdpSrc {
             // H.264 stream's SPS can refine them mid-flight.
             let mut recv = self.recv.clone();
             recv.declared_caps = Some(self.caps());
-            crate::rtprecv::receive_rtp(&socket, &recv, self.frame_limit, 0, out).await
+            crate::rtprecv::receive_rtp(&mut receiver, &recv, self.frame_limit, 0, out).await
         })
     }
 }

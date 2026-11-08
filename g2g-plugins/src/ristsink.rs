@@ -89,10 +89,10 @@ impl SenderLink {
         let socket = if ip.is_multicast() {
             // the receivers of a group send their RTCP to the group
             let rtcp_port = destination.port() + 1;
-            let local = rist::unspecified_address(destination, rtcp_port);
+            let local = crate::udpsocket::unspecified_address(destination, rtcp_port);
             settings.link_socket(address, local, Some(ip))
         } else {
-            let local = rist::unspecified_address(destination, 0);
+            let local = crate::udpsocket::unspecified_address(destination, 0);
             settings.link_socket(address, local, None)
         }
         .map_err(io_err)?;

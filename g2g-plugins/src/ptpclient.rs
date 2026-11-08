@@ -42,8 +42,6 @@ use std::time::Duration;
 
 use alloc::vec::Vec;
 
-use socket2::{Domain, Protocol, Socket, Type};
-
 use g2g_core::metrics::monotonic_ns;
 use g2g_core::ptp::wire;
 use g2g_core::{
@@ -163,15 +161,20 @@ impl Drop for PtpClient {
 /// Bind `0.0.0.0:port` sharing the port with any other PTP stack on the host,
 /// join the PTP multicast group, and set a read timeout so the reader loop can
 /// poll the stop flag. Both reuse options have to be set before the bind, which
-/// is why this goes through `socket2` rather than `UdpSocket::bind`.
+/// is why this goes through `bind_udp_socket` rather than `UdpSocket::bind`.
 fn bind_multicast(port: u16) -> io::Result<UdpSocket> {
-    let sock = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
+    use crate::udpsocket::{bind_udp_socket, MulticastJoin, UdpBind};
     // SO_REUSEADDR is the one ptp4l sets, SO_REUSEPORT the one another PtpClient
     // sets; a bind only shares the port when every socket agrees.
-    sock.set_reuse_address(true)?;
-    sock.set_reuse_port(true)?;
-    sock.bind(&SocketAddr::from(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port)).into())?;
-    sock.join_multicast_v4(&PTP_PRIMARY, &Ipv4Addr::UNSPECIFIED)?;
+    let sock = bind_udp_socket(UdpBind {
+        local: SocketAddr::from(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port)),
+        iface: None,
+        multicast: Some(MulticastJoin {
+            group: PTP_PRIMARY.into(),
+            sources: &[],
+        }),
+        reuse: true,
+    })?;
     sock.set_read_timeout(Some(Duration::from_millis(200)))?;
     Ok(sock.into())
 }

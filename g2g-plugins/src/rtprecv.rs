@@ -2,17 +2,16 @@
 //! FEC/RTX + depayload-to-access-unit path used by both [`UdpSrc`](crate::udpsrc)
 //! (raw RTP) and [`RtspServerSrc`](crate::rtspserversrc) (RTSP RECORD ingest).
 //!
-//! Given a bound UDP socket it reorders (jitter buffer), recovers (ULPFEC /
-//! FlexFEC / RTX), and depayloads RTP into H.264 Annex-B access units or Opus
-//! packets ([`RtpRecvConfig::encoding`]), pushing each as one frame downstream,
-//! while driving RTCP receiver reports and Generic NACK retransmission requests
-//! back to the sender.
+//! Given a bound UDP socket, read in batches through a
+//! [`UdpReceiver`](crate::udprecv::UdpReceiver), it reorders (jitter buffer),
+//! recovers (ULPFEC / FlexFEC / RTX), and depayloads RTP into H.264 Annex-B
+//! access units or Opus packets ([`RtpRecvConfig::encoding`]), pushing each as
+//! one frame downstream, while driving RTCP receiver reports and Generic NACK
+//! retransmission requests back to the sender.
 //!
 //! Both ingest sources differ only in how they obtain the socket (a raw bind vs
 //! the RTP port negotiated over an RTSP control channel); the receive path is
 //! identical, so it lives here once.
-
-use alloc::vec;
 
 use std::net::SocketAddr;
 
@@ -32,10 +31,9 @@ use crate::rtcp::{self, ReceptionStats, RtcpPacket};
 use crate::rtpdepay::{AccessUnit, RtpDepayloader, RtpEncoding};
 use crate::rtpjitter::{JitterConfig, RtpJitterBuffer, RtpPtsRebase};
 use crate::rtx;
+use crate::udprecv::UdpReceiver;
 use crate::ulpfec::FecDecoder;
 
-/// Receive buffer: a UDP datagram tops out at 65507 payload bytes.
-const RECV_BUF: usize = 65_536;
 /// Default receiver-report cadence.
 pub const DEFAULT_RR_INTERVAL_MS: u64 = 1000;
 // GStreamer's rtpjitterbuffer, before it has measured jitter and RTT, first requests a loss after 20 ms and retries every 40 ms
@@ -326,8 +324,8 @@ fn nack_scheduler(jitter: &JitterConfig) -> NackScheduler {
 /// shutdown, 0 = emit nothing), pushing each completed access unit downstream
 /// and emitting `Eos` on the bounded path. `seq_base` is the sequence number the
 /// first emitted frame carries. Returns the number of access units pushed.
-pub async fn receive_rtp(
-    socket: &tokio::net::UdpSocket,
+pub(crate) async fn receive_rtp(
+    receiver: &mut UdpReceiver,
     cfg: &RtpRecvConfig,
     frame_limit: u64,
     seq_base: u64,
@@ -339,7 +337,6 @@ pub async fn receive_rtp(
     let mut depay = RtpDepayloader::new(cfg.encoding);
     let mut jitter = RtpJitterBuffer::new(cfg.jitter);
     let mut stats = ReceptionStats::new(0, cfg.encoding.clock_rate_hz());
-    let mut buf = vec![0u8; RECV_BUF];
     let mut emitter = AccessUnitEmitter::new(cfg.encoding, seq_base, frame_limit);
     // The original media stream's SSRC, learned from the first non-RTX packet;
     // an RFC 4588 RTX resend is restamped back onto it.
@@ -382,7 +379,7 @@ pub async fn receive_rtp(
             if let Some(dest) = peer {
                 if now.saturating_sub(last_rr_ns) >= rr_interval_ns {
                     let rr = rtcp::build_receiver_report(LOCAL_SSRC, &[stats.report_block(now)]);
-                    let _ = socket.send_to(&rr, dest).await;
+                    let _ = receiver.socket().send_to(&rr, dest).await;
                     last_rr_ns = now;
                 }
             }
@@ -407,28 +404,25 @@ pub async fn receive_rtp(
         let received = match timeout {
             Some(delay) if delay > 0 => {
                 // Err (deadline elapsed, no packet) => None: loop to flush / report.
-                tokio::time::timeout(
-                    core::time::Duration::from_nanos(delay),
-                    socket.recv_from(&mut buf),
-                )
-                .await
-                .ok()
+                tokio::time::timeout(core::time::Duration::from_nanos(delay), receiver.recv())
+                    .await
+                    .ok()
             }
             // Deadline already elapsed (delay == 0): don't block on recv; loop
             // back so the jitter flush / receiver report at the top of the loop
             // fires now instead of waiting for a packet.
             Some(_) => None,
-            None => Some(socket.recv_from(&mut buf).await),
+            None => Some(receiver.recv().await),
         };
 
         let Some(r) = received else { continue };
-        let (n, from) = r.map_err(io_err)?;
-        let now = g2g_core::metrics::monotonic_ns();
+        let datagram = r.map_err(io_err)?;
+        let (payload, from, now) = (datagram.payload, datagram.from, datagram.arrival_ns);
 
         // RTCP (muxed) feedback from the sender: a sender report fills the
         // LSR/DLSR fields for round-trip estimation.
-        if rtcp_on && rtcp::is_rtcp(&buf[..n]) {
-            for p in rtcp::parse_compound(&buf[..n]) {
+        if rtcp_on && rtcp::is_rtcp(payload) {
+            for p in rtcp::parse_compound(payload) {
                 if let RtcpPacket::SenderReport { ntp, .. } = p {
                     stats.on_sender_report(ntp, now);
                 }
@@ -438,12 +432,12 @@ pub async fn receive_rtp(
 
         // RTP media: account it for reception stats, buffer it for reordering,
         // and remember the peer for feedback.
-        if n >= 12 {
-            let pt = buf[1] & 0x7F;
+        if payload.len() >= 12 {
+            let pt = payload[1] & 0x7F;
             // ULPFEC repair packet: feed the decoder and inject any recovered
             // media into the jitter buffer (no NAK round trip).
             if cfg.fec_pt == Some(pt) {
-                fec_decoder.push_fec(&buf[..n]);
+                fec_decoder.push_fec(payload);
                 for rec in fec_decoder.take_recovered() {
                     jitter.push(&rec, now);
                 }
@@ -451,7 +445,7 @@ pub async fn receive_rtp(
             }
             // FlexFEC repair packet (RFC 8627): same, via its own decoder.
             if cfg.flexfec_pt == Some(pt) {
-                flexfec_decoder.push_fec(&buf[..n]);
+                flexfec_decoder.push_fec(payload);
                 for rec in flexfec_decoder.take_recovered() {
                     jitter.push(&rec, now);
                 }
@@ -467,13 +461,13 @@ pub async fn receive_rtp(
                 .rtx
                 .is_some_and(|(rtx_pt, _)| rtx_pt != 0 && pt == rtx_pt);
             let reconstructed = match (is_rtx, cfg.rtx, media_ssrc_seen) {
-                (true, Some((_, apt)), Some(ssrc)) => rtx::parse_rtx_packet(&buf[..n], apt, ssrc),
+                (true, Some((_, apt)), Some(ssrc)) => rtx::parse_rtx_packet(payload, apt, ssrc),
                 _ => None,
             };
             if is_rtx && reconstructed.is_none() {
                 continue; // unusable RTX packet (no media SSRC yet / malformed)
             }
-            let pkt: &[u8] = reconstructed.as_deref().unwrap_or(&buf[..n]);
+            let pkt: &[u8] = reconstructed.as_deref().unwrap_or(payload);
 
             let media_ssrc = u32::from_be_bytes([pkt[8], pkt[9], pkt[10], pkt[11]]);
             let pkt_seq = u16::from_be_bytes([pkt[2], pkt[3]]);
@@ -503,7 +497,7 @@ pub async fn receive_rtp(
                 let requests = nacks.due(&jitter.missing_seqs(), now, usize::MAX);
                 if !requests.is_empty() {
                     let nack = rtcp::build_nack(LOCAL_SSRC, media_ssrc, &requests);
-                    let _ = socket.send_to(&nack, from).await;
+                    let _ = receiver.socket().send_to(&nack, from).await;
                 }
             }
         }

@@ -58,6 +58,7 @@ use crate::rtspingest::{
     RecordTransport, SessionEnd, SessionTap,
 };
 use crate::rtspserver::{sdp_h264, RtspResponder, DEFAULT_SESSION_TIMEOUT_SECS};
+use crate::udprecv::{UdpReceiveConfig, UdpReceiver};
 
 /// Default dynamic RTP payload type for H.264.
 const DEFAULT_PAYLOAD_TYPE: u8 = 96;
@@ -595,8 +596,10 @@ impl SourceLoop for RtspServerSrc {
                             mut responder,
                         } => {
                             let session_recv = session_recv_config(&recv, &responder);
+                            let mut rtp_receiver =
+                                UdpReceiver::new(rtp_socket, UdpReceiveConfig::default()).map_err(io_err)?;
                             tokio::select! {
-                                r = crate::rtprecv::receive_rtp(&rtp_socket, &session_recv, remaining, seq_base, &mut tap) => {
+                                r = crate::rtprecv::receive_rtp(&mut rtp_receiver, &session_recv, remaining, seq_base, &mut tap) => {
                                     r?;
                                     SessionEnd::Limit
                                 }

@@ -127,8 +127,9 @@ impl BoundLink {
         let rtcp_port = media_address.port() + 1;
         let ip = media_address.ip();
         if ip.is_multicast() {
-            let media_local = rist::unspecified_address(media_address, media_address.port());
-            let rtcp_local = rist::unspecified_address(media_address, rtcp_port);
+            let media_local =
+                crate::udpsocket::unspecified_address(media_address, media_address.port());
+            let rtcp_local = crate::udpsocket::unspecified_address(media_address, rtcp_port);
             return Ok(Self {
                 media_socket: settings
                     .link_socket(address, media_local, Some(ip))
