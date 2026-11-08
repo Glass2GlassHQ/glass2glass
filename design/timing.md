@@ -112,6 +112,20 @@ graph-to-speaker delay lands in the affine offset. Each callback fills only the
 frames the buffer's `requested` field asks for, one graph cycle, so the clock gets
 one observation per cycle and the sink adds no more than a cycle of latency.
 
+An audio sink whose clock loses the election follows the winner instead, by
+GStreamer's `slave-method=skew`. `SkewSlaver` (`audioskew.rs`, shared by
+`alsasink`, `pulsesink` and `pipewiresink`) compares the sink's own playout
+clock with the elected clock on every buffer, once the playout clock has eight
+observations, keeping the difference at the first comparison as the zero. It
+averages the change from that zero with the newest value weighted 1/32, as
+gst's `audiobasesink` does. Past half of `drift-tolerance` (40 ms by default)
+the average moves the playout position: a device ahead of the elected clock
+plays that much silence first, a device behind skips that many frames, and the
+zero moves by the same amount so the window recentres. A sink that is itself
+the elected clock measures no difference and never corrects, so it needs no
+check of which clock won. The playout clock is now disciplined whether or not
+`provide-clock` offers it.
+
 ## MPEG-TS PCR clock
 
 `mpegtslivesrc` gives a live MPEG-TS pipeline the sender's clock, as

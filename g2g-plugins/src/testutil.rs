@@ -176,3 +176,31 @@ pub(crate) fn data_pts_ns(packets: &[PipelinePacket]) -> Vec<u64> {
         })
         .collect()
 }
+
+// a clock that reads whatever the test last stored
+#[cfg(all(
+    target_os = "linux",
+    any(feature = "alsa-sink", feature = "pulse-sink", feature = "pipewire")
+))]
+#[derive(Debug, Default, Clone)]
+pub(crate) struct ManualClock(pub alloc::sync::Arc<core::sync::atomic::AtomicU64>);
+
+#[cfg(all(
+    target_os = "linux",
+    any(feature = "alsa-sink", feature = "pulse-sink", feature = "pipewire")
+))]
+impl ManualClock {
+    pub(crate) fn set(&self, now_ns: u64) {
+        self.0.store(now_ns, core::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+#[cfg(all(
+    target_os = "linux",
+    any(feature = "alsa-sink", feature = "pulse-sink", feature = "pipewire")
+))]
+impl g2g_core::PipelineClock for ManualClock {
+    fn now_ns(&self) -> u64 {
+        self.0.load(core::sync::atomic::Ordering::Relaxed)
+    }
+}

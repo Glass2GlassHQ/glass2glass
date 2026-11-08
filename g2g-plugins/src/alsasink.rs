@@ -42,9 +42,10 @@ use crate::alsa_ffi::{Direction, Pcm};
 
 use g2g_core::frame::Frame;
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, CapsSet, ClockCandidate, ClockPriority, ConfigureOutcome,
-    DriftClock, ElementMetadata, G2gError, HardwareError, MonotonicClock, OutputSink, PadTemplate,
-    PadTemplates, PipelineClock, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
+    AsyncElement, Caps, CapsConstraint, CapsSet, ClockCandidate, ClockPriority, ClockSync,
+    ConfigureOutcome, DriftClock, ElementMetadata, G2gError, HardwareError, MonotonicClock,
+    OutputSink, PadTemplate, PadTemplates, PipelineClock, PipelinePacket, PropError, PropKind,
+    PropValue, PropertySpec,
 };
 
 use crate::alsapcm::{alsa_params, device_permutation, permute, PcmConfig, FORMATS};
@@ -87,6 +88,7 @@ pub struct AlsaSink {
     /// Whether to offer [`clock`](Self::clock) to the pipeline's clock election
     /// (the `provide-clock` property, default on, GStreamer's `basesink`).
     provide_clock: bool,
+    skew: crate::audioskew::SkewSlaver,
 }
 
 impl core::fmt::Debug for AlsaSink {
@@ -123,6 +125,7 @@ impl AlsaSink {
             frames_rendered: Arc::new(AtomicU64::new(0)),
             clock: Arc::new(DriftClock::new(Arc::new(MonotonicClock))),
             provide_clock: true,
+            skew: crate::audioskew::SkewSlaver::default(),
         }
     }
 
@@ -191,9 +194,9 @@ impl AsyncElement for AlsaSink {
         let (ready_tx, ready_rx) = mpsc::sync_channel::<Result<(), i32>>(1);
         let rendered = Arc::clone(&self.frames_rendered);
         let device = self.device.clone();
-        // Only discipline the clock when we actually offer it; otherwise the
-        // per-buffer `delay()` probe is wasted work no one reads.
-        let clock = self.provide_clock.then(|| Arc::clone(&self.clock));
+        // disciplined even when not offered, skew slaving reads it
+        let clock = Arc::clone(&self.clock);
+        self.skew.configure(absolute_caps)?;
 
         let link = crate::audioworker::WorkerLink::spawn("g2g-alsasink", move |rx| {
             worker_main(&device, cfg, rx, rendered, clock, ready_tx);
@@ -224,6 +227,10 @@ impl AsyncElement for AlsaSink {
         Some(ClockCandidate::new(ClockPriority::AudioProvider, clock))
     }
 
+    fn set_clock_sync(&mut self, sync: ClockSync) {
+        self.skew.set_master(sync.clock);
+    }
+
     fn metadata(&self) -> ElementMetadata {
         ElementMetadata::new(
             "ALSA audio sink",
@@ -247,11 +254,16 @@ impl AsyncElement for AlsaSink {
                 "Provide a DAC-disciplined clock so audio is the A/V sync master",
             )
             .with_default("true"),
+            crate::audioskew::SLAVE_METHOD_PROPERTY,
+            crate::audioskew::DRIFT_TOLERANCE_PROPERTY,
         ];
         PROPS
     }
 
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        if let Some(result) = self.skew.set_property(name, &value) {
+            return result;
+        }
         match name {
             "device" => {
                 self.device = value.as_str().ok_or(PropError::Type)?.into();
@@ -266,6 +278,9 @@ impl AsyncElement for AlsaSink {
     }
 
     fn get_property(&self, name: &str) -> Option<PropValue> {
+        if let Some(value) = self.skew.get_property(name) {
+            return Some(value);
+        }
         match name {
             "device" => Some(PropValue::Str(self.device.clone())),
             "provide-clock" => Some(PropValue::Bool(self.provide_clock)),
@@ -282,6 +297,8 @@ impl AsyncElement for AlsaSink {
             match packet {
                 PipelinePacket::DataFrame(frame) => {
                     crate::dmabufmap::require_readable_domain(&frame, ELEMENT_NAME)?;
+                    self.skew.measure(&self.clock);
+                    let frame = self.skew.correct_frame(frame, ELEMENT_NAME)?;
                     let link = self.link.as_ref().ok_or(G2gError::NotConfigured)?;
                     // Awaited, not blocking: a full queue is the device's
                     // back-pressure and yields to the executor.
@@ -339,7 +356,7 @@ fn worker_main(
     cfg: PcmConfig,
     rx: Receiver<WorkerCmd>,
     rendered: Arc<AtomicU64>,
-    clock: Option<Arc<DriftClock>>,
+    clock: Arc<DriftClock>,
     ready: SyncSender<Result<(), i32>>,
 ) {
     let pcm = match open_pcm(device, cfg) {
@@ -370,9 +387,7 @@ fn worker_main(
                 }
                 // After the blocking write returns (at ~the device rate), feed
                 // the drift clock one playout observation.
-                if let Some(clock) = clock.as_deref() {
-                    discipline_clock(&pcm, cfg.rate, &rendered, clock);
-                }
+                discipline_clock(&pcm, cfg.rate, &rendered, &clock);
             }
             Ok(WorkerCmd::Shutdown) | Err(_) => closing = true,
         }

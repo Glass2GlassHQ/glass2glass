@@ -50,9 +50,10 @@ use libpulse_simple_binding::Simple;
 use g2g_core::frame::Frame;
 
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, CapsSet, ClockCandidate, ClockPriority, ConfigureOutcome,
-    DriftClock, ElementMetadata, G2gError, HardwareError, MonotonicClock, OutputSink, PadTemplate,
-    PadTemplates, PipelineClock, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
+    AsyncElement, Caps, CapsConstraint, CapsSet, ClockCandidate, ClockPriority, ClockSync,
+    ConfigureOutcome, DriftClock, ElementMetadata, G2gError, HardwareError, MonotonicClock,
+    OutputSink, PadTemplate, PadTemplates, PipelineClock, PipelinePacket, PropError, PropKind,
+    PropValue, PropertySpec,
 };
 
 use crate::pulsepcm::{pulse_map, pulse_spec, FORMATS};
@@ -114,6 +115,7 @@ pub struct PulseSink {
     /// Whether to offer [`clock`](Self::clock) to the pipeline's clock election
     /// (the `provide-clock` property, default on, GStreamer's `basesink`).
     provide_clock: bool,
+    skew: crate::audioskew::SkewSlaver,
 }
 
 impl core::fmt::Debug for PulseSink {
@@ -147,6 +149,7 @@ impl PulseSink {
             bytes_written: Arc::new(AtomicU64::new(0)),
             clock: Arc::new(DriftClock::new(Arc::new(MonotonicClock))),
             provide_clock: true,
+            skew: crate::audioskew::SkewSlaver::default(),
         }
     }
 
@@ -215,9 +218,9 @@ impl AsyncElement for PulseSink {
         let (ready_tx, ready_rx) = mpsc::sync_channel::<Result<(), i32>>(1);
         let written = Arc::clone(&self.bytes_written);
         let app_name = self.app_name.clone();
-        // Only discipline the clock when we actually offer it; otherwise the
-        // per-buffer latency query is wasted work no one reads.
-        let clock = self.provide_clock.then(|| Arc::clone(&self.clock));
+        // disciplined even when not offered, skew slaving reads it
+        let clock = Arc::clone(&self.clock);
+        self.skew.configure(absolute_caps)?;
 
         let link = crate::audioworker::WorkerLink::spawn("g2g-pulsesink", move |rx| {
             worker_main(&app_name, spec, rx, written, clock, ready_tx);
@@ -248,6 +251,10 @@ impl AsyncElement for PulseSink {
         Some(ClockCandidate::new(ClockPriority::AudioProvider, clock))
     }
 
+    fn set_clock_sync(&mut self, sync: ClockSync) {
+        self.skew.set_master(sync.clock);
+    }
+
     fn metadata(&self) -> ElementMetadata {
         ElementMetadata::new(
             "PulseAudio audio sink",
@@ -271,11 +278,16 @@ impl AsyncElement for PulseSink {
                 "Provide a playout-disciplined clock so audio is the A/V sync master",
             )
             .with_default("true"),
+            crate::audioskew::SLAVE_METHOD_PROPERTY,
+            crate::audioskew::DRIFT_TOLERANCE_PROPERTY,
         ];
         PROPS
     }
 
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        if let Some(result) = self.skew.set_property(name, &value) {
+            return result;
+        }
         match name {
             "client-name" => {
                 self.app_name = value.as_str().ok_or(PropError::Type)?.into();
@@ -290,6 +302,9 @@ impl AsyncElement for PulseSink {
     }
 
     fn get_property(&self, name: &str) -> Option<PropValue> {
+        if let Some(value) = self.skew.get_property(name) {
+            return Some(value);
+        }
         match name {
             "client-name" => Some(PropValue::Str(self.app_name.clone())),
             "provide-clock" => Some(PropValue::Bool(self.provide_clock)),
@@ -306,6 +321,8 @@ impl AsyncElement for PulseSink {
             match packet {
                 PipelinePacket::DataFrame(frame) => {
                     crate::dmabufmap::require_readable_domain(&frame, ELEMENT_NAME)?;
+                    self.skew.measure(&self.clock);
+                    let frame = self.skew.correct_frame(frame, ELEMENT_NAME)?;
                     let link = self.link.as_ref().ok_or(G2gError::NotConfigured)?;
                     // Awaited, not blocking: a full queue is the device's
                     // back-pressure and yields to the executor.
@@ -363,7 +380,7 @@ fn worker_main(
     spec: Spec,
     rx: Receiver<WorkerCmd>,
     written: Arc<AtomicU64>,
-    clock: Option<Arc<DriftClock>>,
+    clock: Arc<DriftClock>,
     ready: SyncSender<Result<(), i32>>,
 ) {
     let map = pulse_map(spec.channels);
@@ -402,9 +419,7 @@ fn worker_main(
                 written.fetch_add(bytes.len() as u64, Ordering::Relaxed);
                 // After the blocking write returns (at ~the device rate), feed
                 // the drift clock one playout observation.
-                if let Some(clock) = clock.as_deref() {
-                    discipline_clock(&simple, &spec, &written, clock);
-                }
+                discipline_clock(&simple, &spec, &written, &clock);
             }
             Ok(WorkerCmd::Shutdown) | Err(_) => closing = true,
         }
