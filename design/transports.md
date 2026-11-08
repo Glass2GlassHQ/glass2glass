@@ -1143,6 +1143,16 @@ cross-device and cross-process on the RTX 3060: `dmabuf_timeline_probe` for the
 bare primitive, `m562_dmabuf_semaphore_sync` for the element handoff, and
 `gpu_dmabuf_ipc` with `G2G_DMABUF_SEM=1` for the full cross-process chain.
 
+Each zero-stall frame also carries a sync_file, a kernel fence that `poll()`
+reports readable once the copy finishes, so a consumer needs no Vulkan device to
+wait. `WgpuToDmaBuf` signals one binary `SYNC_FD`-exportable semaphore on every
+copy submit beside the timeline value and exports it right after, which resets
+the semaphore for the next frame. Vulkan may return -1 instead of an fd when the
+copy has already finished, and that frame then carries no fence at all.
+`hipupload` and `unixfdsink` wait on the sync_file with a blocking `poll()` on
+tokio's blocking pool (`dmabuffence::wait_for_producer`), so the runner's other
+arms keep running. RADV and the NVIDIA driver both export it.
+
 ## SMPTE ST 2110
 
 ST 2110 media transport rides on the shared PTP clock

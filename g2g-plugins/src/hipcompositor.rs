@@ -20,8 +20,8 @@ use crate::compositor::{
     CompositorCanvas, CompositorPad, HIP_COMPOSITOR_PROPS,
 };
 use crate::hip::{
-    copy_through_host, DeviceStream, DeviceStreamCache, HipDevice, HipEvent, HipKernel,
-    HipKernelModule, HipMemoryPool, HipStream, KernelArgument,
+    CrossDeviceCopier, HipDevice, HipEvent, HipKernel, HipKernelModule, HipMemoryPool, HipStream,
+    KernelArgument,
 };
 use crate::hipconvertscale::{
     any_size_formats, converts, narrow_to_converted_format, HipBlender, HipConverter,
@@ -102,8 +102,8 @@ impl CompositeGpu {
 pub struct HipCompositor {
     canvas: CompositorCanvas<OwnedHipBuffer>,
     device: HipDeviceChoice,
-    running_on: Option<DeviceStream>,
-    sources: DeviceStreamCache,
+    running_on: Option<GpuDevice>,
+    copier: CrossDeviceCopier,
     input_caps: Vec<Option<Caps>>,
     gpu: Option<CompositeGpu>,
 }
@@ -115,7 +115,7 @@ impl HipCompositor {
             canvas: CompositorCanvas::new(out_w, out_h, RawVideoFormat::Rgba8, pads),
             device: HipDeviceChoice::default(),
             running_on: None,
-            sources: DeviceStreamCache::default(),
+            copier: CrossDeviceCopier::default(),
             input_caps: vec![None; inputs],
             gpu: None,
         }
@@ -132,21 +132,24 @@ impl HipCompositor {
         self
     }
 
-    fn running_on(&mut self, first: &OwnedHipBuffer) -> Result<&DeviceStream, G2gError> {
-        let running_on = match self.running_on.take() {
-            Some(running_on) => running_on,
-            None => {
-                let device = match self.device.is_set() {
-                    true => self.device.open()?,
-                    false => HipDevice::open(first.vendor, first.device_ordinal)?,
-                };
-                DeviceStream {
-                    stream: HipStream::new(&device)?,
-                    device,
+    fn running_on(&mut self, first: &OwnedHipBuffer) -> Result<GpuDevice, G2gError> {
+        if let Some(device) = self.running_on {
+            return Ok(device);
+        }
+        let device = match self.device.is_set() {
+            true => {
+                let opened = self.device.open()?;
+                GpuDevice {
+                    vendor: opened.vendor(),
+                    ordinal: opened.ordinal(),
                 }
             }
+            false => GpuDevice {
+                vendor: first.vendor,
+                ordinal: first.device_ordinal,
+            },
         };
-        Ok(self.running_on.insert(running_on))
+        Ok(*self.running_on.insert(device))
     }
 
     fn gpu_for(&mut self, base: &OwnedHipBuffer) -> Result<&mut CompositeGpu, G2gError> {
@@ -370,20 +373,11 @@ impl CompositorBackend for HipCompositor {
         let MemoryDomain::Hip(buffer) = frame.domain else {
             return Err(G2gError::UnsupportedDomain);
         };
-        self.running_on(&buffer)?;
-        let Self {
-            running_on,
-            sources,
-            ..
-        } = self;
-        let target = running_on.as_ref().ok_or(G2gError::NotConfigured)?;
-        if (buffer.vendor, buffer.device_ordinal)
-            == (target.device.vendor(), target.device.ordinal())
-        {
+        let target = self.running_on(&buffer)?;
+        if (buffer.vendor, buffer.device_ordinal) == (target.vendor, target.ordinal) {
             return Ok(buffer);
         }
-        let source = sources.on(buffer.vendor, buffer.device_ordinal)?;
-        copy_through_host(&source.stream, &buffer, &target.device, &target.stream)
+        self.copier.copy(&buffer, target)
     }
 
     fn compose_frame<'a>(

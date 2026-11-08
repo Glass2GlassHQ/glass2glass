@@ -184,8 +184,11 @@ mod amdgpu_exports {
     const AMD_PCI_VENDOR: u32 = 0x1002;
 
     // `pictures` as dma-bufs the radeon's vulkan driver exported, `None` off an AMD GPU
-    fn exported(pictures: &[Vec<u8>]) -> Option<(WgpuToDmaBuf, Vec<OwnedDmaBuf>)> {
-        let mut export = WgpuToDmaBuf::new();
+    fn exported(
+        pictures: &[Vec<u8>],
+        external_semaphore: bool,
+    ) -> Option<(WgpuToDmaBuf, Vec<OwnedDmaBuf>)> {
+        let mut export = WgpuToDmaBuf::new().with_external_semaphore(external_semaphore);
         let (device, queue) = block_on(export.gpu()).ok()?;
         if device.adapter_info().vendor != AMD_PCI_VENDOR {
             eprintln!("skipping: the vulkan export device is not an AMD GPU");
@@ -218,13 +221,33 @@ mod amdgpu_exports {
     }
 
     #[test]
+    fn amd_reads_an_export_after_its_sync_file_signals() {
+        let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(PoisonError::into_inner);
+        if !device_present(GpuVendor::Amd) {
+            return;
+        }
+        let pictures = [tight_nv12(6), tight_nv12(7)];
+        let Some((_export, dmabufs)) = exported(&pictures, true) else {
+            return;
+        };
+        assert!(
+            dmabufs.iter().all(|dmabuf| dmabuf.sync_file().is_some()),
+            "radv exports a sync_file for every frame"
+        );
+        let mut upload = hipupload("amd");
+        for (dmabuf, picture) in dmabufs.iter().zip(&pictures) {
+            assert!(download(&upload_dmabuf(&mut upload, dmabuf)) == *picture);
+        }
+    }
+
+    #[test]
     fn amd_imports_each_pooled_dmabuf_once_and_closes_its_fds() {
         let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(PoisonError::into_inner);
         if !device_present(GpuVendor::Amd) {
             return;
         }
         let pictures = [tight_nv12(4), tight_nv12(5)];
-        let Some((_export, pool)) = exported(&pictures) else {
+        let Some((_export, pool)) = exported(&pictures, false) else {
             return;
         };
         // the HIP runtime keeps the fds it opens for a stream, so a first element opens them

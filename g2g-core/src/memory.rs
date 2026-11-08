@@ -723,6 +723,7 @@ pub struct OwnedDmaBuf {
     /// (`WgpuToDmaBuf` / `DmaBufToWgpu`). `None` means the buffer is already
     /// complete (the producer synchronised itself, e.g. a CPU / capture dma-buf).
     sync: Option<(SyncFd, u64)>,
+    sync_file: Option<SyncFile>,
 }
 
 /// A shared, reference-counted GPU-completion sync fd: an exported timeline
@@ -751,6 +752,24 @@ impl SyncFd {
 
 /// Sole owner of a DMABUF descriptor; closes it on drop. Held behind an `Arc` in
 /// [`OwnedDmaBuf`] so the descriptor is shared, not duplicated, across a tee.
+// a kernel sync_file, readable once the GPU work it fences has finished
+#[cfg(feature = "alloc")]
+#[derive(Debug, Clone)]
+pub struct SyncFile(Arc<DmaBufFd>);
+
+#[cfg(feature = "alloc")]
+impl SyncFile {
+    /// # Safety
+    /// `fd` must be a sync_file this call takes sole ownership of.
+    pub unsafe fn from_raw(fd: i32) -> Self {
+        Self(Arc::new(DmaBufFd(fd)))
+    }
+
+    pub fn as_raw(&self) -> i32 {
+        self.0 .0
+    }
+}
+
 #[cfg(feature = "alloc")]
 #[derive(Debug)]
 struct DmaBufFd(i32);
@@ -787,6 +806,7 @@ impl OwnedDmaBuf {
             stride,
             offset,
             sync: None,
+            sync_file: None,
         }
     }
 
@@ -824,6 +844,15 @@ impl OwnedDmaBuf {
     /// stream semaphore across the frames it reconstructs.
     pub fn sync(&self) -> Option<(SyncFd, u64)> {
         self.sync.clone()
+    }
+
+    pub fn with_sync_file(mut self, sync_file: SyncFile) -> Self {
+        self.sync_file = Some(sync_file);
+        self
+    }
+
+    pub fn sync_file(&self) -> Option<&SyncFile> {
+        self.sync_file.as_ref()
     }
 }
 

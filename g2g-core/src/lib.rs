@@ -250,7 +250,7 @@ pub use memory::{
     CudaKeepAlive, CvPixelBufferKeepAlive, D3D11KeepAlive, HipKeepAlive, OwnedCudaBuffer,
     OwnedCvPixelBuffer, OwnedD3D11Texture, OwnedDmaBuf, OwnedHipBuffer, OwnedVulkanTexture,
     OwnedWebGPUBuffer, OwnedWebGPUExternalTexture, OwnedWgpuBuffer, OwnedWgpuTexture, SyncFd,
-    SystemView, VulkanKeepAlive, WebGPUKeepAlive, WgpuBufferKeepAlive, WgpuKeepAlive,
+    SyncFile, SystemView, VulkanKeepAlive, WebGPUKeepAlive, WgpuBufferKeepAlive, WgpuKeepAlive,
 };
 pub use metrics::{LatencyHistogram, LatencySnapshot};
 #[cfg(feature = "alloc")]

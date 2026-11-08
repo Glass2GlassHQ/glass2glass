@@ -27,6 +27,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M2111: the `operator` and `sizing-policy` pad properties on every compositor.
 - M2112: GPU elements name their device, and the converter splice copies frames onto a consumer's GPU.
 - M2113: the converter splice for graphs built in code and for dma-buf into HIP, and cross-GPU `hipcompositor` inputs.
+- M2114: zero-stall dma-buf frames carry a sync_file that `hipupload` and `unixfdsink` wait on, and cross-GPU copies leave the runner free.
 
 ## 0.14.0
 

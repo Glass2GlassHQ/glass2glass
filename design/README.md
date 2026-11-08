@@ -268,8 +268,8 @@ converter factory for a copy onto that device, even where the two ends share a
 domain kind. The factory receives the consumer's device, so a spliced
 `hipupload` or `cudaupload` targets it. A graph built in code gets the same
 splice from `Registry::splice_domain_converters` before `run_graph`.
-`hipupload` moves a Hip or CUDA frame from another GPU with `copy_through_host`,
-a download into host memory and an upload, the only path between the two
+`hipupload` moves a Hip or CUDA frame from another GPU with `CrossDeviceCopier`,
+a download into host memory and an upload on tokio's blocking pool, the only path between the two
 vendors, since ROCm imports only memory amdgpu exported. `hipcompositor` runs on
 the device it names, or else the one its first frame arrives on, and copies a
 frame from any other GPU onto it the same way. `hipconvertscale` refuses a frame
@@ -285,8 +285,12 @@ requeue the buffer until the Hip frame drops. ROCm imports only memory amdgpu ex
 as a Vulkan or VA-API export, and returns `hipErrorOutOfMemory` for a CPU-backed
 dma-buf (a udmabuf, a UVC webcam's buffer). Then, and always on NVIDIA,
 `hipupload` maps the dma-buf and copies it through the CPU, after one warning.
-A frame carrying `wgpudmabuf`'s zero-stall semaphore is refused, since HIP does
-not wait on it. ROCm never closes an imported fd, so `HipExternalBuffer` holds
+`hipupload` waits for a frame's sync_file (see "Cross-device synchronisation"
+in `transports.md`) before it reads the dma-buf, and refuses a frame that
+carries only the timeline semaphore, which reaches it only across a process
+boundary. ROCm 7.2 cannot import a semaphore at all on Linux
+(`hipImportExternalSemaphore` returns not-supported), so the wait is on the CPU,
+on tokio's blocking pool. ROCm never closes an imported fd, so `HipExternalBuffer` holds
 it until the import is destroyed.
 
 `hipconvertscale` converts and scales Hip frames between NV12, I420, YUY2,

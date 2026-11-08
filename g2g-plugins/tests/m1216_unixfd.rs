@@ -25,7 +25,7 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::{MemoryDomain, MemoryDomainKind, OwnedDmaBuf, SystemSlice};
+use g2g_core::memory::{MemoryDomain, MemoryDomainKind, OwnedDmaBuf, SyncFile, SystemSlice};
 use g2g_core::runtime::{parse_launch, run_graph, RunStats, SourceLoop};
 use g2g_core::{
     AsyncElement, Caps, ClockSync, Colorimetry, Dim, FrameTiming, G2gError, Interlace,
@@ -402,6 +402,37 @@ async fn a_dmabuf_crosses_as_a_dmabuf_with_its_layout() {
             .collect();
         assert_eq!(rows, frame_bytes(index as u64), "frame {index}");
     }
+}
+
+fn signalled_fence() -> SyncFile {
+    // an eventfd created at 1 stands in for a sync_file whose GPU work finished
+    // SAFETY: eventfd takes no pointers and returns a fresh descriptor or -1.
+    let fd = unsafe { libc::eventfd(1, libc::EFD_CLOEXEC) };
+    assert!(fd >= 0, "eventfd");
+    // SAFETY: `fd` is the fresh descriptor above, handed over whole.
+    unsafe { SyncFile::from_raw(fd) }
+}
+
+#[tokio::test]
+async fn a_fenced_dmabuf_is_sent_once_its_sync_file_signals() {
+    let caps = rgba_caps(WIDTH, HEIGHT);
+    let (mut sink, mut source) = connected_pair(SocketType::Path, "fenced_dmabuf");
+    sink.configure_pipeline(&caps).expect("the sink binds");
+    let packets = (0..FRAMES)
+        .map(|index| {
+            dmabuf_frame(
+                padded_dmabuf(index).with_sync_file(signalled_fence()),
+                index,
+            )
+        })
+        .collect();
+    let (_, received) = tokio::time::timeout(RUN_DEADLINE, async {
+        tokio::join!(feed(&mut sink, &caps, packets), receive(&mut source))
+    })
+    .await
+    .expect("the loopback finishes");
+    let (_, count, _) = received.expect("the source runs");
+    assert_eq!(count, FRAMES);
 }
 
 /// Read one message the way a gst client does, fds off the header.

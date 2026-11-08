@@ -18,10 +18,11 @@ use g2g_core::{
     PropError, PropValue, PropertySpec, SystemSlice,
 };
 
+use crate::dmabuffence::wait_for_producer;
 use crate::dmabufimport::DmaBufImportCache;
 use crate::dmabufmap::{dmabuf_len, DmaBufReadMap};
 use crate::hip::{
-    copy_through_host, hip_buffer, release_after, DeviceStream, DeviceStreamCache, HipDevice,
+    hip_buffer, release_after, CrossDeviceCopier, DeviceStream, DeviceStreamCache, HipDevice,
     HipEvent, HipExternalBuffer, HipMemoryPool, HipPinnedMemory, HipStream,
 };
 use crate::hipdeviceid::{HipDeviceChoice, HIP_DEVICE_ID_PROP, HIP_VENDOR_PROP};
@@ -132,6 +133,7 @@ pub struct HipUpload {
     pinned: OnceLock<PinnedOffer>,
     gpu: Option<UploadGpu>,
     sources: DeviceStreamCache,
+    copier: Option<CrossDeviceCopier>,
 }
 
 impl HipUpload {
@@ -171,18 +173,29 @@ impl HipUpload {
         Ok(self.gpu.insert(gpu))
     }
 
-    fn onto_chosen_device(&mut self, buffer: OwnedHipBuffer) -> Result<OwnedHipBuffer, G2gError> {
+    async fn onto_chosen_device(
+        &mut self,
+        buffer: OwnedHipBuffer,
+    ) -> Result<OwnedHipBuffer, G2gError> {
         if !self.device.is_set() {
             return Ok(buffer);
         }
-        self.gpu()?;
-        let Self { gpu, sources, .. } = self;
-        let gpu = gpu.as_ref().ok_or(G2gError::NotConfigured)?;
-        if (buffer.vendor, buffer.device_ordinal) == (gpu.device.vendor(), gpu.device.ordinal()) {
+        let device = &self.gpu()?.device;
+        let target = GpuDevice {
+            vendor: device.vendor(),
+            ordinal: device.ordinal(),
+        };
+        if (buffer.vendor, buffer.device_ordinal) == (target.vendor, target.ordinal) {
             return Ok(buffer);
         }
-        let source = sources.on(buffer.vendor, buffer.device_ordinal)?;
-        copy_through_host(&source.stream, &buffer, &gpu.device, &gpu.stream)
+        let mut copier = self.copier.take().unwrap_or_default();
+        let (copier, copied) = g2g_core::offload::run_blocking(move || {
+            let copied = copier.copy(&buffer, target);
+            (copier, copied)
+        })
+        .await;
+        self.copier = Some(copier);
+        copied
     }
 }
 
@@ -259,13 +272,6 @@ fn upload_dmabuf(
         height,
     } = raw_video;
     let tag = Target::category(short_type_name::<HipUpload>());
-    if dmabuf.sync_fd().is_some() {
-        g2g_error!(
-            tag,
-            "the dma-buf comes with a GPU semaphore this element cannot wait on, turn off the producer's zero-stall sync"
-        );
-        return Err(G2gError::UnsupportedDomain);
-    }
     let (layout, size) = single_stride_layout(format, width, height, dmabuf.offset, dmabuf.stride)
         .ok_or(G2gError::CapsMismatch)?;
     // hip imports dma-bufs only on amd
@@ -422,13 +428,19 @@ impl AsyncElement for HipUpload {
                         meta,
                     } = frame;
                     let buffer = match domain {
-                        MemoryDomain::Hip(buffer) => self.onto_chosen_device(buffer)?,
+                        MemoryDomain::Hip(buffer) => self.onto_chosen_device(buffer).await?,
                         MemoryDomain::Cuda(cuda) => {
                             let source = self.sources.on(GpuVendor::Nvidia, cuda.device_ordinal)?;
                             let wrapped = wrap_cuda(source, &cuda)?;
-                            self.onto_chosen_device(wrapped)?
+                            self.onto_chosen_device(wrapped).await?
                         }
                         MemoryDomain::DmaBuf(dmabuf) => {
+                            wait_for_producer(&dmabuf).await.inspect_err(|_| {
+                                g2g_error!(
+                                    Target::category(short_type_name::<Self>()),
+                                    "the dma-buf carries only a Vulkan timeline semaphore, which HIP cannot wait on"
+                                );
+                            })?;
                             let raw_video = self.raw_video.ok_or(G2gError::CapsMismatch)?;
                             let frames = Arc::clone(&self.pinned_offer()?.frames);
                             upload_dmabuf(self.gpu()?, &frames, &dmabuf, raw_video)?

@@ -75,7 +75,7 @@ use ash::vk;
 
 use g2g_core::log::{short_type_name, Target};
 use g2g_core::memory::{
-    DomainSet, MemoryDomain, MemoryDomainKind, OwnedDmaBuf, OwnedWgpuBuffer, SyncFd,
+    DomainSet, MemoryDomain, MemoryDomainKind, OwnedDmaBuf, OwnedWgpuBuffer, SyncFd, SyncFile,
 };
 use g2g_core::meta::PlaneLayout;
 use g2g_core::pad_template::{PadTemplate, PadTemplates};
@@ -420,6 +420,8 @@ pub struct WgpuToDmaBuf {
     /// into every frame. Only used when `external_semaphore` is set.
     semaphore: Option<vk::Semaphore>,
     sync_fd: Option<SyncFd>,
+    // signalled with each frame's copy and exported as that frame's sync_file
+    sync_file_semaphore: Option<vk::Semaphore>,
     /// Monotonic timeline value; frame N signals `signal_value` = N.
     signal_value: u64,
     row_repacker: Option<RowRepacker>,
@@ -449,6 +451,7 @@ impl WgpuToDmaBuf {
             external_semaphore: false,
             semaphore: None,
             sync_fd: None,
+            sync_file_semaphore: None,
             signal_value: 0,
             row_repacker: None,
             ring: alloc::vec::Vec::new(),
@@ -592,6 +595,8 @@ impl WgpuToDmaBuf {
         self.semaphore = Some(sem);
         // SAFETY: `fd` is a fresh, owned OPAQUE_FD from the export above.
         self.sync_fd = Some(unsafe { SyncFd::from_raw(fd) });
+        // SAFETY: as above.
+        self.sync_file_semaphore = Some(unsafe { create_sync_file_semaphore(device)? });
         Ok(())
     }
 
@@ -640,7 +645,10 @@ impl Drop for WgpuToDmaBuf {
             timeout: None,
         });
         self.ring.clear();
-        if let Some(sem) = self.semaphore.take() {
+        for sem in [self.semaphore.take(), self.sync_file_semaphore.take()]
+            .into_iter()
+            .flatten()
+        {
             // SAFETY: the semaphore was created on this device; after the wait above
             // no submission still references it, so destroying it is legal.
             unsafe {
@@ -753,7 +761,11 @@ impl AsyncElement for WgpuToDmaBuf {
                     let sync = if self.external_semaphore {
                         self.ensure_semaphore()?;
                         self.signal_value += 1;
-                        Some((self.semaphore.unwrap(), self.signal_value))
+                        Some(ExportSync {
+                            timeline: self.semaphore.ok_or_else(gpu_err)?,
+                            value: self.signal_value,
+                            sync_file: self.sync_file_semaphore.ok_or_else(gpu_err)?,
+                        })
                     } else {
                         None
                     };
@@ -767,15 +779,22 @@ impl AsyncElement for WgpuToDmaBuf {
                     // SAFETY: `device` is the adopted export device and `queue`
                     // its queue; `sync`, when set, names this device's timeline
                     // semaphore.
-                    unsafe { submit_export(device, queue, commands, sync)? };
+                    unsafe { submit_export(device, queue, commands, sync.as_ref())? };
 
                     // SAFETY: `frame_fd` is a dup of the slot's dma-buf fd owned by
                     // this process; OwnedDmaBuf closes it once on drop.
                     let mut dmabuf = unsafe {
                         OwnedDmaBuf::from_raw(frame_fd.into_raw_fd(), export.stride, export.offset)
                     };
-                    if let (Some(sf), Some((_, value))) = (&self.sync_fd, sync) {
-                        dmabuf = dmabuf.with_sync(sf.clone(), value);
+                    if let (Some(sync_fd), Some(sync)) = (&self.sync_fd, &sync) {
+                        // SAFETY: the submit above signals `sync.sync_file` on this device.
+                        let sync_file = unsafe { export_sync_file(device, sync.sync_file)? };
+                        // no sync_file means the copy has already finished
+                        if let Some(sync_file) = sync_file {
+                            dmabuf = dmabuf
+                                .with_sync(sync_fd.clone(), sync.value)
+                                .with_sync_file(sync_file);
+                        }
                     }
                     let mut out_frame = frame;
                     out_frame.domain = MemoryDomain::DmaBuf(dmabuf);
@@ -885,6 +904,52 @@ unsafe fn create_export_semaphore(device: &wgpu::Device) -> Result<(vk::Semaphor
                 Err(gpu_err())
             }
         }
+    }
+}
+
+/// # Safety
+/// `device` must be a Vulkan-backend wgpu device carrying
+/// `VK_KHR_external_semaphore_fd`.
+unsafe fn create_sync_file_semaphore(device: &wgpu::Device) -> Result<vk::Semaphore, G2gError> {
+    // SAFETY: caller guarantees the export device.
+    unsafe {
+        let hal = device
+            .as_hal::<wgpu_hal::api::Vulkan>()
+            .ok_or_else(gpu_err)?;
+        let mut export = vk::ExportSemaphoreCreateInfo::default()
+            .handle_types(vk::ExternalSemaphoreHandleTypeFlags::SYNC_FD);
+        let info = vk::SemaphoreCreateInfo::default().push_next(&mut export);
+        hal.raw_device()
+            .create_semaphore(&info, None)
+            .map_err(|_| gpu_err())
+    }
+}
+
+/// # Safety
+/// `semaphore` must be a binary `SYNC_FD`-exportable semaphore on `device` with a
+/// signal submitted.
+unsafe fn export_sync_file(
+    device: &wgpu::Device,
+    semaphore: vk::Semaphore,
+) -> Result<Option<SyncFile>, G2gError> {
+    // SAFETY: caller guarantees the semaphore and its pending signal.
+    unsafe {
+        let hal = device
+            .as_hal::<wgpu_hal::api::Vulkan>()
+            .ok_or_else(gpu_err)?;
+        let loader = ash::khr::external_semaphore_fd::Device::new(
+            hal.shared_instance().raw_instance(),
+            hal.raw_device(),
+        );
+        let fd = loader
+            .get_semaphore_fd(
+                &vk::SemaphoreGetFdInfoKHR::default()
+                    .semaphore(semaphore)
+                    .handle_type(vk::ExternalSemaphoreHandleTypeFlags::SYNC_FD),
+            )
+            .map_err(|_| gpu_err())?;
+        // vulkan returns -1 instead of a sync_file when the signal has already happened
+        Ok((fd >= 0).then(|| SyncFile::from_raw(fd)))
     }
 }
 
@@ -1047,21 +1112,29 @@ pub fn create_opaque_fd_export(
 /// `device` must be a Vulkan-backend wgpu device (carrying
 /// `VK_KHR_external_semaphore_fd` when `sync` is set), `queue` its queue, and
 /// `sem` (when set) a timeline semaphore on `device`.
+#[derive(Debug)]
+struct ExportSync {
+    timeline: vk::Semaphore,
+    value: u64,
+    sync_file: vk::Semaphore,
+}
+
 unsafe fn submit_export(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     commands: wgpu::CommandBuffer,
-    sync: Option<(vk::Semaphore, u64)>,
+    sync: Option<&ExportSync>,
 ) -> Result<(), G2gError> {
     match sync {
-        Some((sem, value)) => {
+        Some(sync) => {
             // Zero-stall: inject a timeline signal of `value` on the copy submit so
             // the consumer can order its read after the copy on the GPU timeline,
             // and return WITHOUT blocking.
             // SAFETY: `queue` is this device's live Vulkan queue; `sem` is a timeline
             // semaphore on the device, signalled by the submit below.
             let hal_q = unsafe { queue.as_hal::<wgpu_hal::api::Vulkan>() }.ok_or_else(gpu_err)?;
-            hal_q.add_signal_semaphore(sem, Some(value));
+            hal_q.add_signal_semaphore(sync.timeline, Some(sync.value));
+            hal_q.add_signal_semaphore(sync.sync_file, None);
             queue.submit([commands]);
         }
         None => {

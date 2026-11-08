@@ -172,16 +172,16 @@ libraries installed.
   `cudadownload`, `cudaglsink`, `ffmpegdec` on NVDEC) and the wgpu elements.
 - A planner that places elements on a device or backend by where the frames
   are.
-- One ready fence that every GPU domain can export and wait on.
+- Wait for a frame's fence on the GPU instead of the CPU: import the timeline
+  semaphore into CUDA (`cuImportExternalSemaphore`) for HIP on NVIDIA and the CUDA
+  elements, and into HIP once ROCm supports semaphore import on Linux.
+- Split one stream's frames across both GPUs and merge them back in order, for
+  throughput.
 
 ## Egress / transports
 
 - **RTP over QUIC (RoQ):** implement after the draft becomes an RFC with an
   assigned ALPN. Candidate peers: mengelbart/roq (Go), meetecho/imquic.
-- **`unixfdsink`:** carry a dma-buf frame's GPU fence. GStreamer's wire has no
-  fence slot, and the fd `WgpuToDmaBuf` exports is a timeline semaphore that poll
-  cannot wait on, so this needs a `vkWaitSemaphores` wait in the sink or a
-  pollable sync_file from the exporter.
 - **RTMP:** multiple NetStreams over one connection. Deferred by design: it needs
   a dynamic-arity multi-output `RtmpSrc` (the stream count is only known once the
   client `createStream`s at runtime), which collides with g2g's fixed-arity-from-caps

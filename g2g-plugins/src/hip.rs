@@ -11,7 +11,7 @@ use std::os::fd::{AsRawFd, OwnedFd};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Condvar, Mutex, OnceLock, PoisonError};
 
-use g2g_core::memory::{GpuVendor, HipKeepAlive, OwnedHipBuffer};
+use g2g_core::memory::{GpuDevice, GpuVendor, HipKeepAlive, OwnedHipBuffer};
 use g2g_core::{g2g_error, G2gError, HardwareError};
 
 use crate::cuda_driver_ffi as cuda;
@@ -1258,22 +1258,33 @@ impl DeviceStreamCache {
     }
 }
 
-// a frame crosses between two vendors' GPUs only through host memory
-pub(crate) fn copy_through_host(
-    source: &HipStream,
-    buffer: &OwnedHipBuffer,
-    target_device: &Arc<HipDevice>,
-    target_stream: &HipStream,
-) -> Result<OwnedHipBuffer, G2gError> {
-    let mut staging = vec![0u8; buffer.len];
-    source.download_blocking(buffer, &mut staging)?;
-    let memory = HipMemory::allocate(target_device, buffer.len)?;
-    target_stream.upload_blocking(&memory, &staging)?;
-    let ready = HipEvent::new(target_device)?;
-    target_stream.record(&ready)?;
-    let copied = memory.into_buffer(ready, buffer.len)?;
-    Ok(match buffer.plane_layout() {
-        Some(layout) => copied.with_plane_layout(*layout),
-        None => copied,
-    })
+#[derive(Debug, Default)]
+pub(crate) struct CrossDeviceCopier {
+    sources: DeviceStreamCache,
+    targets: DeviceStreamCache,
+}
+
+impl CrossDeviceCopier {
+    // a frame crosses between two vendors' GPUs only through host memory
+    pub(crate) fn copy(
+        &mut self,
+        buffer: &OwnedHipBuffer,
+        target: GpuDevice,
+    ) -> Result<OwnedHipBuffer, G2gError> {
+        let mut staging = vec![0u8; buffer.len];
+        self.sources
+            .on(buffer.vendor, buffer.device_ordinal)?
+            .stream
+            .download_blocking(buffer, &mut staging)?;
+        let target = self.targets.on(target.vendor, target.ordinal)?;
+        let memory = HipMemory::allocate(&target.device, buffer.len)?;
+        target.stream.upload_blocking(&memory, &staging)?;
+        let ready = HipEvent::new(&target.device)?;
+        target.stream.record(&ready)?;
+        let copied = memory.into_buffer(ready, buffer.len)?;
+        Ok(match buffer.plane_layout() {
+            Some(layout) => copied.with_plane_layout(*layout),
+            None => copied,
+        })
+    }
 }

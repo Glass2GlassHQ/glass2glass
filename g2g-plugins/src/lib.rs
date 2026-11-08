@@ -1813,6 +1813,8 @@ pub mod pwdevice;
 pub mod cuda;
 #[cfg(all(any(target_os = "linux", windows), feature = "cuda"))]
 mod cuda_driver_ffi;
+#[cfg(all(target_os = "linux", any(feature = "hip", feature = "unixfd")))]
+mod dmabuffence;
 #[cfg(all(target_os = "linux", feature = "hip"))]
 pub mod hip;
 #[cfg(all(target_os = "linux", feature = "hip"))]

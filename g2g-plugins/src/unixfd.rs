@@ -512,9 +512,9 @@ impl UnixFdSink {
     async fn send_frame(&mut self, frame: Frame) -> Result<(), G2gError> {
         self.service_clients().await?;
         let dmabuf = matches!(frame.domain, MemoryDomain::DmaBuf(_));
-        // the wire cannot carry the fence, so a reader could see an unfinished GPU write
-        if matches!(&frame.domain, MemoryDomain::DmaBuf(fenced) if fenced.sync_fd().is_some()) {
-            return Err(G2gError::UnsupportedDomain);
+        // the wire cannot carry the fence, so the frame leaves only once its GPU writes finish
+        if let MemoryDomain::DmaBuf(fenced) = &frame.domain {
+            crate::dmabuffence::wait_for_producer(fenced).await?;
         }
         if self.dmabuf_input.is_some_and(|seen| seen != dmabuf) {
             return Err(G2gError::UnsupportedDomain);
