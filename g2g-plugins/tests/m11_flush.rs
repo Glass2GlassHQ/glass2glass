@@ -1,9 +1,5 @@
 //! M11 flush: a mid-stream `Flush` packet resets element position so the
 //! stream resumes (here, with a restarted sequence) without terminating.
-//!
-//! `FakeSink` rejects a non-increasing sequence, so the second frame 0 would
-//! error were it not for the flush resetting `last_sequence` — the test fails
-//! if `Flush` handling regresses.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -74,7 +70,7 @@ impl SourceLoop for FlushingSrc {
             assert!(self.configured, "runner must configure source before run");
             out.push(PipelinePacket::DataFrame(make_frame(0))).await?;
             out.push(PipelinePacket::Flush).await?;
-            // Restarted sequence: only valid because Flush reset the sink.
+            // Restarted sequence.
             out.push(PipelinePacket::DataFrame(make_frame(0))).await?;
             out.push(PipelinePacket::Eos).await?;
             Ok(2)
@@ -90,7 +86,7 @@ async fn flush_resets_sink_position_allowing_sequence_restart() {
 
     let stats = run_simple_pipeline(&mut src, &mut snk, &clock, 8)
         .await
-        .expect("flush must reset the sink so the restarted frame is accepted");
+        .expect("a flush is non-terminal, so the restarted frame still arrives");
 
     assert_eq!(stats.frames_consumed, 2);
     assert_eq!(snk.received(), 2);

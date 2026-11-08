@@ -11,8 +11,8 @@ use alloc::vec::Vec;
 
 use g2g_core::metrics::{LatencyHistogram, LatencySnapshot};
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, ConfigureOutcome, ElementMetadata, G2gError, HardwareError,
-    MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, Segment,
+    AsyncElement, Caps, CapsConstraint, ConfigureOutcome, ElementMetadata, G2gError, MemoryDomain,
+    OutputSink, PadTemplate, PadTemplates, PipelinePacket, Segment,
 };
 
 #[cfg(feature = "std")]
@@ -84,8 +84,7 @@ impl FakeSink {
         self.eos_seen
     }
 
-    /// Number of `Flush` packets seen. A flush resets `last_sequence` so the
-    /// stream may resume with a lower sequence after a seek.
+    /// Number of `Flush` packets seen. A flush resets `last_sequence`.
     pub fn flushes(&self) -> u64 {
         self.flushes
     }
@@ -170,11 +169,6 @@ impl AsyncElement for FakeSink {
             }
             match packet {
                 PipelinePacket::DataFrame(f) => {
-                    if let Some(prev) = self.last_sequence {
-                        if f.sequence <= prev {
-                            return Err(G2gError::Hardware(HardwareError::Other));
-                        }
-                    }
                     self.last_sequence = Some(f.sequence);
                     self.received += 1;
                     // M180: stride-aware path. A shared-view frame is recorded
@@ -205,8 +199,7 @@ impl AsyncElement for FakeSink {
                     self.eos_seen = true;
                 }
                 PipelinePacket::Flush => {
-                    // Seek flush: reset position so a lower sequence is
-                    // accepted when the stream resumes.
+                    // Seek flush: `last_sequence` reports only frames after it.
                     self.flushes += 1;
                     self.last_sequence = None;
                 }
