@@ -3269,8 +3269,13 @@ fn build_graph(
     // demux (M210): the transpose of a muxer. A registered name with one output
     // falls back to its single-output launch element (e.g. `tsdemux`), the way a
     // one-input muxer name registered both ways falls back to its single-input
-    // element.
-    let is_demux = |ei: usize| !is_tee(ei) && out_deg[ei] > 1 && registry.is_demux(&specs[ei].name);
+    // element, unless its factory routes by pad name and that output names a pad.
+    let names_an_output_pad = |ei: usize| output_pad_names[ei].iter().any(|pad| !pad.is_empty());
+    let is_demux = |ei: usize| {
+        let name = &specs[ei].name;
+        let one_named_output = names_an_output_pad(ei) && registry.demux_routes_one_named_pad(name);
+        !is_tee(ei) && registry.is_demux(name) && (out_deg[ei] > 1 || one_named_output)
+    };
     // Explicit-demux fan-out (M476): a non-tee, non-registered-demux element that
     // fans out to several pads and is fed by a file source is built by a registered
     // demux-select hook, which probes the file (`location=`) and returns a

@@ -82,6 +82,12 @@ run, so a `DemuxCapsSelectHook` gets each branch's first element's sink-pad caps
 (`Registry::declared_input_caps`) and picks the stream per port by codec, the
 static form of gst linking a dynamic pad by caps.
 
+A name registered both as a launch element and as a demux is built as the
+launch element when it has one output link. A `DemuxFactory` marked
+`routing_one_named_pad` is the exception: one link from a named pad
+(`st2038anctocc name=d d.src_cea608 ! ...`) builds the demux with one port, so
+the pad name picks the stream.
+
 An unnamed single-output demuxer with one consumer and no `stream` property
 (`tsdemux ! aacparse`) gets its `stream` from a `DemuxStreamHook`, which matches
 the consumer's sink-pad caps by codec. The hook sets nothing when the demuxer's

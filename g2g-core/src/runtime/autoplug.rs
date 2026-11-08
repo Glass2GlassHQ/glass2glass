@@ -964,6 +964,7 @@ mod factory {
     pub struct DemuxFactory {
         name: &'static str,
         build: fn(usize) -> Box<dyn DynMultiOutputElement>,
+        routes_one_named_pad: bool,
     }
 
     /// Factory for a terminal fan-out *source*: a 0-in / N-out
@@ -1002,7 +1003,17 @@ mod factory {
         /// Register a fan-out demuxer by name and an output-count constructor
         /// (`|n| Box::new(MyDemux::new(n, ...))`).
         pub fn new(name: &'static str, build: fn(usize) -> Box<dyn DynMultiOutputElement>) -> Self {
-            Self { name, build }
+            Self {
+                name,
+                build,
+                routes_one_named_pad: false,
+            }
+        }
+
+        // a single link from a named pad (`d.src_cea608 ! ...`) builds this demux with one port
+        pub fn routing_one_named_pad(mut self) -> Self {
+            self.routes_one_named_pad = true;
+            self
         }
 
         /// This factory's element name.
@@ -2430,6 +2441,12 @@ mod factory {
         /// to allow a multi-output node without an explicit `tee`).
         pub fn is_demux(&self, name: &str) -> bool {
             self.demuxes.iter().any(|d| d.name == name)
+        }
+
+        pub fn demux_routes_one_named_pad(&self, name: &str) -> bool {
+            self.demuxes
+                .iter()
+                .any(|d| d.name == name && d.routes_one_named_pad)
         }
 
         /// Whether `name` is registered as a fan-in muxer. The transpose of

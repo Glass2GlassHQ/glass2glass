@@ -442,8 +442,8 @@ impl PadTemplates for St2038AncToCc {
 
 #[derive(Debug)]
 pub struct St2038AncToCcDemux {
-    port_carriages: [&'static CaptionCarriage; 2],
-    caps_emitted: [bool; 2],
+    port_carriages: Vec<&'static CaptionCarriage>,
+    caps_emitted: Vec<bool>,
     sequence: u64,
     log_name: LogName,
 }
@@ -451,8 +451,8 @@ pub struct St2038AncToCcDemux {
 impl Default for St2038AncToCcDemux {
     fn default() -> Self {
         Self {
-            port_carriages: [&CAPTION_CARRIAGES[0], &CAPTION_CARRIAGES[1]],
-            caps_emitted: [false; 2],
+            port_carriages: CAPTION_CARRIAGES.iter().collect(),
+            caps_emitted: alloc::vec![false; CAPTION_CARRIAGES.len()],
             sequence: 0,
             log_name: LogName::default(),
         }
@@ -500,8 +500,8 @@ impl MultiOutputElement for St2038AncToCcDemux {
     }
 
     fn name_output_ports(&mut self, pad_names: &[&str]) -> Result<(), usize> {
-        if pad_names.len() > self.port_carriages.len() {
-            return Err(self.port_carriages.len());
+        if pad_names.len() > CAPTION_CARRIAGES.len() {
+            return Err(CAPTION_CARRIAGES.len());
         }
         let mut named: Vec<&'static CaptionCarriage> = Vec::new();
         for (port, name) in pad_names.iter().enumerate() {
@@ -514,9 +514,8 @@ impl MultiOutputElement for St2038AncToCcDemux {
             }
             named.push(carriage);
         }
-        if let [first, second] = named[..] {
-            self.port_carriages = [first, second];
-        }
+        self.caps_emitted = alloc::vec![false; named.len()];
+        self.port_carriages = named;
         Ok(())
     }
 
@@ -712,6 +711,28 @@ mod tests {
             Some(caps(ClosedCaptionFormat::Cea708Cdp))
         );
         assert_eq!(data_bytes(&out.ports[1]), cdp.user_data_bytes());
+    }
+
+    #[test]
+    fn demux_with_one_named_pad_carries_only_that_caption_type() {
+        let cea608 = AncPacket::from_bytes(CAPTION_DID, CEA608_SDID, &CEA608_S334);
+        let mut payload = GST_CEA708_PACKET.to_vec();
+        payload.extend(write_st2038(&[cea608]).unwrap());
+        let mut demux = St2038AncToCcDemux::new();
+        demux.name_output_ports(&["src_cea608"]).unwrap();
+        assert_eq!(
+            demux.port_output_caps(0),
+            Some(caps(ClosedCaptionFormat::Cea608S334))
+        );
+        assert_eq!(demux.port_output_caps(1), None);
+        let mut out = PortCollectSink::new(1);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        runtime
+            .block_on(demux.process(PipelinePacket::DataFrame(frame(payload)), &mut out))
+            .unwrap();
+        assert_eq!(data_bytes(&out.ports[0]), CEA608_S334);
     }
 
     #[test]

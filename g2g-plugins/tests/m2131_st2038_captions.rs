@@ -69,7 +69,10 @@ async fn st2038anctocc_and_cctost2038anc_rebuild_the_gst_packet() {
         out.display()
     ))
     .await;
-    assert_eq!(std::fs::read(&out).unwrap(), GST_CEA708_PACKET.repeat(FRAMES));
+    assert_eq!(
+        std::fs::read(&out).unwrap(),
+        GST_CEA708_PACKET.repeat(FRAMES)
+    );
 }
 
 #[tokio::test]
@@ -88,5 +91,20 @@ async fn st2038anctocc_splits_captions_to_named_pads() {
     ))
     .await;
     assert_eq!(std::fs::read(&cea708).unwrap(), cdp().repeat(FRAMES));
+    assert_eq!(std::fs::read(&cea608).unwrap(), CEA608_S334.repeat(FRAMES));
+}
+
+#[tokio::test]
+async fn one_named_pad_picks_its_caption_type() {
+    let ts = scratch("g2g_m2131_named.ts");
+    let cea608 = scratch("g2g_m2131_named_608.bin");
+    std::fs::write(&ts, captions_ts()).unwrap();
+    run_launch(&format!(
+        "filesrc location={} bytestream-format=mpegts ! tsdemux stream=st2038 \
+         ! st2038anctocc name=d d.src_cea608 ! filesink location={}",
+        ts.display(),
+        cea608.display()
+    ))
+    .await;
     assert_eq!(std::fs::read(&cea608).unwrap(), CEA608_S334.repeat(FRAMES));
 }

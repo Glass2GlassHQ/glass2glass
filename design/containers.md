@@ -364,8 +364,9 @@ packet (DID 0x61, SDID 0x01 or 0x02) at its `line-number`, `horizontal-offset`
 and `c-not-y-channel`, line 9 by default as in gst. `st2038anctocc` takes the
 caption packets back out as one buffer each and skips other DIDs. With one
 output link it is a transform whose output is whichever caption caps
-negotiation picks, CDP first. With two links it is a demux with gst's
-`src_cea708` and `src_cea608` pads, and the pads must be named. Run through
+negotiation picks, CDP first. Linked from gst's named `src_cea708` and
+`src_cea608` pads, one or both, it is a demux that sends each pad its own
+caption type. Run through
 both elements, gst's `cctost2038anc` packet comes out byte for byte. Both directions are checked against GStreamer 1.28 in
 `m2129_st2038_ts`: its `tsdemux` reads the g2g mux's stream byte for byte, and
 g2g's `tsdemux` reads what its `mpegtsmux` writes.
