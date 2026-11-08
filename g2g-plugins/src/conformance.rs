@@ -885,11 +885,9 @@ fn ogg_demux(bytes: &[u8]) -> Vec<Vec<u8>> {
 pub fn st2110_anc() -> MaturityRecord {
     use crate::cea::{build_cdp, parse_cdp, CcTriple, CDP_FRAME_RATE_29_97};
     use crate::st2110anc::{AncField, St2110AncDepacketizer, St2110AncPacketizer};
-    use crate::st291::AncPacket;
+    use crate::st291::{AncPacket, CAPTION_DID, CEA708_CDP_SDID};
 
     /// DID / SDID of a CEA-708 caption ANC packet (SMPTE ST 334).
-    const ANC_DID_CAPTIONS: u8 = 0x61;
-    const ANC_SDID_CEA708: u8 = 0x01;
     const CDP_SEQUENCE: u16 = 0x1234;
     const PAYLOAD_TYPE: u8 = 96;
     const SSRC: u32 = 0x0ACC_0ACC;
@@ -911,7 +909,7 @@ pub fn st2110_anc() -> MaturityRecord {
         },
     ];
     let cdp = build_cdp(&triples, CDP_FRAME_RATE_29_97, CDP_SEQUENCE);
-    let anc = AncPacket::from_bytes(ANC_DID_CAPTIONS, ANC_SDID_CEA708, &cdp);
+    let anc = AncPacket::from_bytes(CAPTION_DID, CEA708_CDP_SDID, &cdp);
     let mut tx = St2110AncPacketizer::new(PAYLOAD_TYPE, SSRC);
     let Ok(packet) = tx.packetize(core::slice::from_ref(&anc), TAI_NS, AncField::Progressive)
     else {

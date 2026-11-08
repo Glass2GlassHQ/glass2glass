@@ -545,6 +545,8 @@ pub mod st2110anc;
 pub mod st291;
 // SMPTE ST 2038 ANC packet framing, the payload of meta/x-st-2038.
 pub mod st2038;
+// cctost2038anc and st2038anctocc: closed captions in and out of ST 2038 packets.
+pub mod st2038cc;
 
 // ST 2110-20 uncompressed video over RTP (M599, RFC 4175): sans-IO packetizer /
 // depacketizer slicing a frame into SRD line runs, RGBA 8-bit + YCbCr-4:2:2 8/10-bit.

@@ -204,3 +204,31 @@ impl g2g_core::PipelineClock for ManualClock {
         self.0.load(core::sync::atomic::Ordering::Relaxed)
     }
 }
+
+pub(crate) struct PortCollectSink {
+    pub ports: Vec<Vec<PipelinePacket>>,
+}
+
+impl PortCollectSink {
+    pub(crate) fn new(ports: usize) -> Self {
+        Self {
+            ports: (0..ports).map(|_| Vec::new()).collect(),
+        }
+    }
+}
+
+impl g2g_core::MultiOutputSink for PortCollectSink {
+    fn poll_push_to(
+        &mut self,
+        _cx: &mut core::task::Context<'_>,
+        port: usize,
+        packet_slot: &mut Option<PipelinePacket>,
+    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+        self.ports[port].push(packet_slot.take().expect("poll_push_to without a packet"));
+        core::task::Poll::Ready(Ok(PushOutcome::Accepted))
+    }
+
+    fn port_count(&self) -> usize {
+        self.ports.len()
+    }
+}

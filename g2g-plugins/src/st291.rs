@@ -2,12 +2,17 @@ use alloc::vec::Vec;
 
 use crate::annexb::{BitReader, BitWriter};
 
-const LINE_NUMBER_BITS: u32 = 11;
-const HORIZONTAL_OFFSET_BITS: u32 = 12;
+pub(crate) const LINE_NUMBER_BITS: u32 = 11;
+pub(crate) const HORIZONTAL_OFFSET_BITS: u32 = 12;
 const WORD_BITS: u32 = 10;
 const MAX_USER_DATA_WORDS: usize = 0xFF;
 const LINE_NUMBER_UNSPECIFIED: u16 = 0x7FF;
 const HORIZONTAL_OFFSET_UNSPECIFIED: u16 = 0xFFF;
+
+// SMPTE ST 334-1 caption packets: DID 0x61, SDID 0x01 for a CEA-708 CDP and 0x02 for CEA-608
+pub const CAPTION_DID: u8 = 0x61;
+pub const CEA708_CDP_SDID: u8 = 0x01;
+pub const CEA608_SDID: u8 = 0x02;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AncFieldOverflow {

@@ -44,6 +44,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M2128: `alsasink`, `pulsesink` and `pipewiresink` follow an elected clock they do not provide by skipping or inserting samples (`slave-method=skew`).
 - M2129: `tsdemux stream=st2038` and `mpegtsmux` carry SMPTE ST 2038 ancillary data as `meta/x-st-2038`.
 - M2130: ST 2038 ANC packet parsing and writing, sharing ST 291 words with `st2110anc`, which now keeps 10-bit user data words.
+- M2131: `cctost2038anc` and `st2038anctocc` carry CEA-608 and CEA-708 captions in and out of ST 2038.
 
 ## 0.14.0
 

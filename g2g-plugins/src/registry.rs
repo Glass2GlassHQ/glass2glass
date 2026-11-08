@@ -957,6 +957,22 @@ pub fn default_registry() -> Registry {
         "ccconverter",
         || Box::new(crate::ccconverter::CcConverter::new()),
     ));
+    // Closed captions in and out of SMPTE ST 2038 ancillary packets (M2131):
+    // `... ! cctost2038anc ! mpegtsmux` and `tsdemux stream=st2038 ! st2038anctocc ! ...`.
+    // With two links, `st2038anctocc name=d d.src_cea708 ! ... d.src_cea608 ! ...`
+    // builds the demux.
+    reg.register_launch(LaunchFactory::of::<crate::st2038cc::CcToSt2038Anc>(
+        "cctost2038anc",
+        || Box::new(crate::st2038cc::CcToSt2038Anc::new()),
+    ));
+    reg.register_launch(LaunchFactory::of::<crate::st2038cc::St2038AncToCc>(
+        "st2038anctocc",
+        || Box::new(crate::st2038cc::St2038AncToCc::new()),
+    ));
+    reg.register_demux(g2g_core::runtime::DemuxFactory::new(
+        "st2038anctocc",
+        |_outputs| Box::new(crate::st2038cc::St2038AncToCcDemux::new()),
+    ));
     // Closed-caption extractor (M429): mines CEA-608 / CEA-708 captions from a
     // compressed H.264 / H.265 stream's SEI into timed text cues (default CC1),
     // e.g. `... ! h264parse ! ccextract ! textoverlay ...` on a teed branch.

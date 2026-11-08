@@ -44,12 +44,7 @@ use crate::rtpjitter::RtpPtsRebase;
 use crate::st2110anc::{AncField, St2110AncDepacketizer, St2110AncPacketizer};
 use crate::st2110dup::spawn_rtp_receiver;
 use crate::st2110sdp::{St2110Essence, St2110Sdp};
-use crate::st291::AncPacket;
-
-/// DID / SDID of a CEA closed-caption ANC packet (SMPTE ST 334-1): DID 0x61 with
-/// SDID 0x01 carries the CDP (both CEA-608 and CEA-708).
-const CC_DID: u8 = 0x61;
-const CC_SDID: u8 = 0x01;
+use crate::st291::{AncPacket, CAPTION_DID, CEA708_CDP_SDID};
 
 fn accepted_caps() -> CapsSet {
     let any_geometry = |codec| Caps::CompressedVideo {
@@ -276,7 +271,7 @@ impl AsyncElement for St2110AncSink {
                     }
                     let cdp = build_cdp(&triples, self.frame_rate_code, self.cdp_seq);
                     self.cdp_seq = self.cdp_seq.wrapping_add(1);
-                    let anc = AncPacket::from_bytes(CC_DID, CC_SDID, &cdp);
+                    let anc = AncPacket::from_bytes(CAPTION_DID, CEA708_CDP_SDID, &cdp);
                     // The video frame's sampling instant on the PTP timeline.
                     let base = self.clock_sync.as_ref().map_or(0, ClockSync::base_time);
                     let tai = base.saturating_add(frame.timing.pts_ns);
@@ -426,7 +421,7 @@ impl SourceLoop for St2110AncSrc {
                 last_pts = pts_ns;
                 for anc in &anc_frame.packets {
                     // Only CEA caption ANC packets carry a CDP.
-                    if anc.did != CC_DID {
+                    if anc.did != CAPTION_DID {
                         continue;
                     }
                     if let Some(triples) = parse_cdp(&anc.user_data_bytes()) {
