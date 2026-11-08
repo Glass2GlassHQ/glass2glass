@@ -160,6 +160,21 @@ libraries installed.
 - Run `CudaKmsSink` from a bare VT with DRM master and verify the in-tree
   `// VERIFY:` points.
 
+## Heterogeneous devices
+
+- Pick the cheapest converter by `DomainTransferCost` in the domain-converter
+  splice instead of the factory's first answer, and splice graphs built for
+  `run_graph` as well as `parse_launch` lines.
+- `hipcompositor` and the CUDA mixers: copy an input from another GPU onto
+  their device instead of failing with `UnsupportedDomain`.
+- Peer copies between two GPUs of one vendor (`hipMemcpyPeerAsync`,
+  `cuMemcpyPeerAsync`), validated on a two-GPU host.
+- Report `gpu_device()` from the other CUDA elements (`cudaupload`,
+  `cudadownload`, `cudaglsink`, `ffmpegdec` on NVDEC) and the wgpu elements.
+- A planner that places elements on a device or backend by where the frames
+  are.
+- One ready fence that every GPU domain can export and wait on.
+
 ## Egress / transports
 
 - **RTP over QUIC (RoQ):** implement after the draft becomes an RFC with an

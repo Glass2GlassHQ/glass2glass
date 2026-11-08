@@ -25,6 +25,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M2109: `hipcompositor`, with the three compositors sharing one canvas and packet loop.
 - M2110: `hipconvert`, `hipscale`, and `video-direction` on `hipconvertscale`.
 - M2111: the `operator` and `sizing-policy` pad properties on every compositor.
+- M2112: GPU elements name their device, and the converter splice copies frames onto a consumer's GPU.
 
 ## 0.14.0
 

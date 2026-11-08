@@ -115,7 +115,7 @@ fn requested_conversions(
     graph.link(element, sink).unwrap();
 
     let recorder = Arc::clone(&asked);
-    let factory = move |from, to| {
+    let factory = move |from, to, _device| {
         recorder.lock().unwrap().push((from, to));
         None
     };

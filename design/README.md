@@ -256,6 +256,24 @@ it on every run. Otherwise `hipdownload` copies to system memory, packing
 padded rows tight. Both are domain converters, so a Hip consumer after a
 system or CUDA producer gets `hipupload` spliced in.
 
+A GPU element names the device it runs on through `gpu_device()`, a
+`GpuDevice` of vendor and ordinal. NVIDIA ordinals are CUDA's, which HIP on
+NVIDIA shares, so a CUDA frame and a Hip frame on the same card compare equal.
+`nvdec` reports its `cuda-device-id`, and the HIP elements report their
+`vendor` and `device-id` once `vendor` is set, as GStreamer's HIP elements
+spell them. An element that names no device runs on whichever device its frames
+arrive from. The domain-converter splice traces the device a frame sits on back
+through such elements, and when a consumer names another GPU it asks the
+converter factory for a copy onto that device, even where the two ends share a
+domain kind. The factory receives the consumer's device, so a spliced
+`hipupload` or `cudaupload` targets it. `hipupload` moves a Hip or CUDA frame
+from another GPU by downloading it into its pinned pool and uploading from
+there, the only path between the two vendors, since ROCm imports only memory
+amdgpu exported. `hipconvertscale` and `hipcompositor` refuse a frame from a
+device other than the one they name. The device stays out of `DomainSet` and the
+caps, as GStreamer keeps it in the element and its context rather than the
+caps.
+
 On AMD, `hipupload` imports a linear dma-buf frame with
 `hipImportExternalMemory`, as GStreamer's `hipupload` does, and keeps each import
 in a cache keyed by the dma-buf's inode, the same `DmaBufImportCache` the wgpu

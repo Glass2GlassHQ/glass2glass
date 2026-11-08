@@ -1330,6 +1330,13 @@ pub enum HipVendor {
     Nvidia,
 }
 
+// NVIDIA ordinals are CUDA's, which HIP on NVIDIA shares
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct GpuDevice {
+    pub vendor: HipVendor,
+    pub ordinal: i32,
+}
+
 #[cfg(feature = "alloc")]
 #[derive(Debug, Clone)]
 pub struct OwnedHipBuffer {

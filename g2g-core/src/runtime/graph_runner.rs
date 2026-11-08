@@ -71,7 +71,7 @@ use crate::format_element::{CapsConstraint, CapsPreferences};
 use crate::frame::{Frame, PipelinePacket};
 use crate::graph::{FanOutPolicy, Graph, NodeId, NodeKind, ValidatedGraph};
 use crate::log::ElementLogName;
-use crate::memory::{DomainSet, MemoryDomainKind};
+use crate::memory::{DomainSet, GpuDevice, MemoryDomainKind};
 use crate::meta::MetaRequests;
 use crate::property::{ElementMetadata, PropError, PropValue, PropertySpec};
 use crate::query::{with_meta_demand, AllocationParams, LatencyReport};
@@ -265,6 +265,16 @@ impl<'a> GraphNodeRef<'a> {
             GraphNodeRef::Demux(d) => d.input_domains(),
             GraphNodeRef::Source(_) | GraphNodeRef::FanoutSource(_) => {
                 crate::memory::DomainSet::ALL
+            }
+        }
+    }
+
+    pub fn gpu_device(&self) -> Option<GpuDevice> {
+        match self {
+            GraphNodeRef::Element(e) => e.gpu_device(),
+            GraphNodeRef::Muxer(m) => m.gpu_device(),
+            GraphNodeRef::Source(_) | GraphNodeRef::FanoutSource(_) | GraphNodeRef::Demux(_) => {
+                None
             }
         }
     }
@@ -1086,7 +1096,11 @@ pub async fn run_graph_with_copy_policy<'a, Clk: PipelineClock>(
 /// `g2g-plugins` provides the CUDA wrapper.
 pub fn auto_plug_domain_converters<'a>(
     mut graph: Graph<GraphNodeRef<'a>>,
-    factory: &dyn Fn(MemoryDomainKind, MemoryDomainKind) -> Option<GraphNodeRef<'a>>,
+    factory: &dyn Fn(
+        MemoryDomainKind,
+        MemoryDomainKind,
+        Option<GpuDevice>,
+    ) -> Option<GraphNodeRef<'a>>,
 ) -> Graph<GraphNodeRef<'a>> {
     // Snapshot the original edge count: splicing appends nodes and a `K -> C`
     // edge and only rewires the edge being spliced, so original ids stay valid.
@@ -1101,19 +1115,26 @@ pub fn auto_plug_domain_converters<'a>(
         let (Some(from), Some(to)) = (producer.preferred(), consumer.preferred()) else {
             continue;
         };
+        let consumer_device = graph.element(edge.dst.node).and_then(|n| n.gpu_device());
+        let on_another_gpu = !from.is_system()
+            && !to.is_system()
+            && consumer_device.is_some_and(|wanted| {
+                traced_gpu_device(&graph, edge.src.node).is_some_and(|held| held != wanted)
+            });
         // Nothing to do when the two ends already agree on a domain, unless the
         // only thing they agree on is system memory while both would rather stay
         // on the GPU.
         let shared = producer.intersect(consumer);
         let shares_a_device_domain = shared.preferred().is_some_and(|k| !k.is_system());
-        if shares_a_device_domain || (!shared.is_empty() && !bridges_two_gpus(from, to)) {
+        let agrees = shares_a_device_domain || (!shared.is_empty() && !bridges_two_gpus(from, to));
+        if agrees && !on_another_gpu {
             continue;
         }
         // Skip domains the producer emits itself, bar the preferred one a GPU bridge targets.
         let converter = consumer
             .iter()
             .filter(|&k| k == to || !producer.contains(k))
-            .find_map(|k| factory(from, k));
+            .find_map(|k| factory(from, k, consumer_device));
         if let Some(conv) = converter {
             graph.insert_on_edge(e, conv);
         }
@@ -1131,6 +1152,20 @@ pub fn auto_plug_domain_converters<'a>(
 /// nothing is spliced.
 fn bridges_two_gpus(from: MemoryDomainKind, to: MemoryDomainKind) -> bool {
     from != to && !from.is_system() && !to.is_system()
+}
+
+fn traced_gpu_device(graph: &Graph<GraphNodeRef<'_>>, node: NodeId) -> Option<GpuDevice> {
+    if let Some(device) = graph.element(node).and_then(|n| n.gpu_device()) {
+        return Some(device);
+    }
+    let on_gpu = traced_output_domains(graph, node)
+        .preferred()
+        .is_some_and(|kind| !kind.is_system());
+    if !on_gpu {
+        return None;
+    }
+    let input = graph.edges().iter().find(|e| e.dst.node == node)?;
+    traced_gpu_device(graph, input.src.node)
 }
 
 /// Domains the node emits, tracing through structural tee/demux nodes and

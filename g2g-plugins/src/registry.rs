@@ -421,20 +421,27 @@ fn container_muxer_provider(container: &Caps) -> Option<&'static [&'static str]>
 fn domain_converter(
     from: g2g_core::MemoryDomainKind,
     to: g2g_core::MemoryDomainKind,
+    device: Option<g2g_core::GpuDevice>,
 ) -> Option<g2g_core::runtime::GraphNode> {
+    // wgpu converters have no device to pick
+    #[cfg(not(all(any(target_os = "linux", windows), feature = "cuda")))]
+    let _ = device;
     #[cfg(all(any(target_os = "linux", windows), feature = "cuda"))]
-    if let Some(converter) = crate::cuda::cuda_domain_converter(from, to) {
+    if let Some(converter) = crate::cuda::cuda_domain_converter(from, to, device) {
         return Some(converter);
     }
     #[cfg(all(target_os = "linux", feature = "hip"))]
     match (from, to) {
         (
-            g2g_core::MemoryDomainKind::System | g2g_core::MemoryDomainKind::Cuda,
+            g2g_core::MemoryDomainKind::System
+            | g2g_core::MemoryDomainKind::Cuda
+            | g2g_core::MemoryDomainKind::Hip,
             g2g_core::MemoryDomainKind::Hip,
         ) => {
-            return Some(g2g_core::runtime::GraphNode::element(
-                crate::hipupload::HipUpload::new(),
-            ))
+            return Some(g2g_core::runtime::GraphNode::element(device.map_or_else(
+                crate::hipupload::HipUpload::new,
+                crate::hipupload::HipUpload::on_device,
+            )))
         }
         (
             g2g_core::MemoryDomainKind::Hip,

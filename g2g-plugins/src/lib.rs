@@ -1820,6 +1820,8 @@ pub mod hipcompositor;
 #[cfg(all(target_os = "linux", feature = "hip"))]
 pub mod hipconvertscale;
 #[cfg(all(target_os = "linux", feature = "hip"))]
+mod hipdeviceid;
+#[cfg(all(target_os = "linux", feature = "hip"))]
 pub mod hipdownload;
 #[cfg(all(target_os = "linux", feature = "hip"))]
 pub mod hipupload;

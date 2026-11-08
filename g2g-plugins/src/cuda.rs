@@ -34,7 +34,7 @@ use alloc::boxed::Box;
 use alloc::sync::Arc;
 use alloc::vec;
 
-use g2g_core::memory::{CudaKeepAlive, MemoryDomainKind, OwnedCudaBuffer};
+use g2g_core::memory::{CudaKeepAlive, GpuDevice, HipVendor, MemoryDomainKind, OwnedCudaBuffer};
 use g2g_core::runtime::{auto_plug_domain_converters, GraphNode};
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, Frame,
@@ -591,13 +591,22 @@ unsafe fn htod_plane(
 /// (`System -> Cuda`), plus `Cuda -> WgpuTexture` through the zero-copy
 /// external-memory bridge where that is built in. The factory the domain auto-plug
 /// calls; see [`auto_plug_cuda_converters`].
-pub fn cuda_domain_converter(from: MemoryDomainKind, to: MemoryDomainKind) -> Option<GraphNode> {
+pub fn cuda_domain_converter(
+    from: MemoryDomainKind,
+    to: MemoryDomainKind,
+    device: Option<GpuDevice>,
+) -> Option<GraphNode> {
     match (from, to) {
         (MemoryDomainKind::Cuda, MemoryDomainKind::System) => {
             Some(GraphNode::element(CudaDownload::new()))
         }
         (MemoryDomainKind::System, MemoryDomainKind::Cuda) => {
-            Some(GraphNode::element(CudaUpload::new()))
+            let ordinal = device
+                .filter(|device| device.vendor == HipVendor::Nvidia)
+                .map_or(DEFAULT_CUDA_DEVICE_ID, |device| device.ordinal);
+            Some(GraphNode::element(
+                CudaUpload::new().with_cuda_device_id(ordinal),
+            ))
         }
         // Keeps a decoded NVDEC frame on the GPU all the way to a wgpu consumer
         // (preprocess, present), instead of the PCIe download a System hop costs.

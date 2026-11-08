@@ -352,8 +352,12 @@ const HIP_FORMAT_PROP: PropertySpec = PropertySpec::new(
 .with_default("RGBA");
 
 #[cfg(all(target_os = "linux", feature = "hip"))]
-pub(crate) static HIP_COMPOSITOR_PROPS: &[PropertySpec] =
-    compositor_props!([0 1 2 3 4 5 6 7], HIP_FORMAT_PROP);
+pub(crate) static HIP_COMPOSITOR_PROPS: &[PropertySpec] = compositor_props!(
+    [0 1 2 3 4 5 6 7],
+    HIP_FORMAT_PROP,
+    crate::hipdeviceid::HIP_DEVICE_ID_PROP,
+    crate::hipdeviceid::HIP_VENDOR_PROP
+);
 
 /// Apply a flattened per-pad property. `None` when `name` is not one; `Err` when
 /// it names a pad this element does not have (silently ignoring it would leave a

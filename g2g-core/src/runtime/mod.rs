@@ -194,12 +194,12 @@ pub use autoplug::{FallbackSourceRole, PadKind, PadRequest};
 pub use autoplug::{
     declared_source_caps, AutoplugError, AutoplugParams, CapsTarget, ContainerStreams,
     DecodebinError, DecodebinSelectHook, DemuxCapsSelectHook, DemuxFactory, DemuxSelectHook,
-    DemuxStreamHook, ElementDoc, ElementFactory, FallbacksrcSourceFactory, FanoutRebuild,
-    FanoutSrcFactory, LaunchFactory, MuxerFactory, PlaybinError, PlaybinGraphError, PlaybinHook,
-    PlaybinPort, PlaybinSinks, PrimaryStream, PrimaryStreamHook, PropertyDoc, RankOverride,
-    RankSpecError, Registry, RestartFanoutSourceHook, RestartPolicy, RestartSourceHook,
-    SourceFactory, Uri, UriError, UriFanout, UriFanoutHead, UriFanoutHook, UriFanoutPort,
-    UriRebuild, UriSource, UriSourceFactory,
+    DemuxStreamHook, DomainConverterHook, ElementDoc, ElementFactory, FallbacksrcSourceFactory,
+    FanoutRebuild, FanoutSrcFactory, LaunchFactory, MuxerFactory, PlaybinError, PlaybinGraphError,
+    PlaybinHook, PlaybinPort, PlaybinSinks, PrimaryStream, PrimaryStreamHook, PropertyDoc,
+    RankOverride, RankSpecError, Registry, RestartFanoutSourceHook, RestartPolicy,
+    RestartSourceHook, SourceFactory, Uri, UriError, UriFanout, UriFanoutHead, UriFanoutHook,
+    UriFanoutPort, UriRebuild, UriSource, UriSourceFactory,
 };
 
 #[cfg(feature = "std")]

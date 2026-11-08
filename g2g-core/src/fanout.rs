@@ -32,7 +32,7 @@ use crate::element::{
 use crate::error::G2gError;
 use crate::format_element::CapsConstraint;
 use crate::frame::PipelinePacket;
-use crate::memory::DomainSet;
+use crate::memory::{DomainSet, GpuDevice};
 use crate::property::{ElementMetadata, PropError, PropValue, PropertySpec};
 use crate::runtime::SenderSink;
 use crate::runtime::{PadKind, PadRequest};
@@ -946,6 +946,10 @@ pub trait MultiInputElement: ElementBound {
     /// [`configure_pipeline`](Self::configure_pipeline).
     fn input_domains(&self) -> DomainSet {
         DomainSet::ALL
+    }
+
+    fn gpu_device(&self) -> Option<GpuDevice> {
+        None
     }
 
     fn output_domains(&self) -> DomainSet {

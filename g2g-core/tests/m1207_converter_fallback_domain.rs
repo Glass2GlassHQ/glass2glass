@@ -4,7 +4,7 @@ use core::future::Future;
 use core::pin::Pin;
 use std::sync::Mutex;
 
-use g2g_core::memory::DomainSet;
+use g2g_core::memory::{DomainSet, GpuDevice};
 use g2g_core::runtime::{auto_plug_domain_converters, GraphNode, SourceLoop};
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, ConfigureOutcome, Dim, G2gError, Graph, MemoryDomainKind,
@@ -120,7 +120,7 @@ fn emitted_by(graph: &Graph<GraphNode>, id: u32) -> Option<MemoryDomainKind> {
 #[test]
 fn falls_back_to_the_consumers_second_domain() {
     let asked = Mutex::new(Vec::new());
-    let factory = |from: MemoryDomainKind, to: MemoryDomainKind| {
+    let factory = |from: MemoryDomainKind, to: MemoryDomainKind, _device: Option<GpuDevice>| {
         asked.lock().unwrap().push(to);
         match (from, to) {
             (MemoryDomainKind::WgpuTexture, MemoryDomainKind::System) => {
@@ -144,7 +144,7 @@ fn falls_back_to_the_consumers_second_domain() {
 #[test]
 fn preferred_domain_converter_still_wins() {
     let asked = Mutex::new(Vec::new());
-    let factory = |_from: MemoryDomainKind, to: MemoryDomainKind| {
+    let factory = |_from: MemoryDomainKind, to: MemoryDomainKind, _device: Option<GpuDevice>| {
         asked.lock().unwrap().push(to);
         Some(GraphNode::element(FakeConverter { emits: to }))
     };
@@ -158,7 +158,7 @@ fn preferred_domain_converter_still_wins() {
 
 #[test]
 fn consumer_sharing_the_texture_domain_gets_no_converter() {
-    let factory = |_from: MemoryDomainKind, to: MemoryDomainKind| {
+    let factory = |_from: MemoryDomainKind, to: MemoryDomainKind, _device: Option<GpuDevice>| {
         Some(GraphNode::element(FakeConverter { emits: to }))
     };
     let cuda_texture_or_system = DomainSet::only(MemoryDomainKind::Cuda)

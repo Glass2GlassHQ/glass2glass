@@ -61,7 +61,9 @@ use crate::inputstamp::{InputStamp, PendingInputStamps};
 use crate::vp9parse::{frame_header, superframe_frames, Vp9FrameKind};
 use g2g_core::g2g_error;
 use g2g_core::log::{short_type_name, Target};
-use g2g_core::memory::{CudaKeepAlive, DomainSet, MemoryDomainKind, OwnedCudaBuffer};
+use g2g_core::memory::{
+    CudaKeepAlive, DomainSet, GpuDevice, HipVendor, MemoryDomainKind, OwnedCudaBuffer,
+};
 use g2g_core::{
     AllocationParams, AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim,
     ElementMetadata, G2gError, HardwareError, MemoryDomain, OutputSink, PadTemplate, PadTemplates,
@@ -1647,6 +1649,13 @@ impl AsyncElement for NvDec {
     /// and [`configure_allocation`](Self::configure_allocation) settles the choice.
     fn output_domains(&self) -> DomainSet {
         Self::OUTPUT_DOMAINS
+    }
+
+    fn gpu_device(&self) -> Option<GpuDevice> {
+        Some(GpuDevice {
+            vendor: HipVendor::Nvidia,
+            ordinal: self.cuda_device_id,
+        })
     }
 
     /// Receive the (possibly tee-joined) downstream allocation proposal and settle

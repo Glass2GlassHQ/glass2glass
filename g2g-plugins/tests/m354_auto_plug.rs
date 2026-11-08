@@ -11,7 +11,7 @@ use core::pin::Pin;
 use std::boxed::Box;
 use std::sync::{Arc, Mutex};
 
-use g2g_core::memory::{DomainSet, SystemSlice};
+use g2g_core::memory::{DomainSet, GpuDevice, HipVendor, SystemSlice};
 use g2g_core::runtime::{auto_plug_domain_converters, run_graph, GraphNode, SourceLoop};
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, Frame, FrameTiming,
@@ -181,7 +181,11 @@ impl AsyncElement for DomainSink {
 
 /// Fake factory: the three pairs the real CUDA factory covers, an upload into
 /// CUDA, a CUDA -> GPU-texture bridge, and a download.
-fn fake_factory(from: MemoryDomainKind, to: MemoryDomainKind) -> Option<GraphNode> {
+fn fake_factory(
+    from: MemoryDomainKind,
+    to: MemoryDomainKind,
+    _device: Option<GpuDevice>,
+) -> Option<GraphNode> {
     match (from, to) {
         (MemoryDomainKind::System, MemoryDomainKind::Cuda) => {
             Some(GraphNode::element(FakeConverter {
@@ -584,4 +588,108 @@ async fn no_bridge_when_the_consumer_wants_system_memory() {
     assert_eq!(g.node_count(), 2, "nothing spliced");
     run_graph(g, &NullClock, 4).await.expect("runs");
     assert_eq!(*seen.lock().unwrap(), 3);
+}
+
+/// A Cuda pass-through that declares the GPU it runs on, or none to follow its input.
+struct GpuStage {
+    device: Option<GpuDevice>,
+}
+
+impl AsyncElement for GpuStage {
+    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>;
+
+    fn intercept_caps(&self, upstream: &Caps) -> Result<Caps, G2gError> {
+        Ok(upstream.clone())
+    }
+    fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
+        CapsConstraint::Identity(nv12_any())
+    }
+    fn configure_pipeline(&mut self, _: &Caps) -> Result<ConfigureOutcome, G2gError> {
+        Ok(ConfigureOutcome::Accepted)
+    }
+    fn input_domains(&self) -> DomainSet {
+        DomainSet::only(MemoryDomainKind::Cuda)
+    }
+    fn output_memory(&self) -> MemoryDomainKind {
+        MemoryDomainKind::Cuda
+    }
+    fn gpu_device(&self) -> Option<GpuDevice> {
+        self.device
+    }
+    fn process<'a>(
+        &'a mut self,
+        packet: PipelinePacket,
+        out: &'a mut dyn OutputSink,
+    ) -> Self::ProcessFuture<'a> {
+        Box::pin(async move { out.push(packet).await.map(drop) })
+    }
+}
+
+const FIRST_GPU: GpuDevice = GpuDevice {
+    vendor: HipVendor::Nvidia,
+    ordinal: 0,
+};
+const SECOND_GPU: GpuDevice = GpuDevice {
+    vendor: HipVendor::Amd,
+    ordinal: 0,
+};
+
+type ConverterRequest = (MemoryDomainKind, MemoryDomainKind, Option<GpuDevice>);
+
+struct SplicedAcrossGpus {
+    graph: Graph<GraphNode>,
+    stage: NodeId,
+    requests: Vec<ConverterRequest>,
+}
+
+// decoder on `producer` -> a stage following it -> a stage on `consumer`
+fn splice_across_gpus(producer: GpuDevice, consumer: Option<GpuDevice>) -> SplicedAcrossGpus {
+    let mut g: Graph<GraphNode> = Graph::new();
+    let src = g.add_source(GraphNode::source(FakeSource {
+        count: 1,
+        domains: DomainSet::only(MemoryDomainKind::Cuda),
+    }));
+    let decoder = g.add_transform(GraphNode::element(GpuStage {
+        device: Some(producer),
+    }));
+    let follower = g.add_transform(GraphNode::element(GpuStage { device: None }));
+    let stage = g.add_transform(GraphNode::element(GpuStage { device: consumer }));
+    g.link(src, decoder).unwrap();
+    g.link(decoder, follower).unwrap();
+    g.link(follower, stage).unwrap();
+    let requests = Mutex::new(Vec::new());
+    let factory = |from, to, device| {
+        requests.lock().unwrap().push((from, to, device));
+        Some(GraphNode::element(FakeConverter { emits: to }))
+    };
+    let graph = auto_plug_domain_converters(g, &factory);
+    SplicedAcrossGpus {
+        graph,
+        stage,
+        requests: requests.into_inner().unwrap(),
+    }
+}
+
+#[test]
+fn a_stage_on_another_gpu_gets_a_copy_onto_its_device() {
+    let spliced = splice_across_gpus(FIRST_GPU, Some(SECOND_GPU));
+    assert_eq!(
+        spliced.requests,
+        [(
+            MemoryDomainKind::Cuda,
+            MemoryDomainKind::Cuda,
+            Some(SECOND_GPU)
+        )]
+    );
+    let converter = feeder(&spliced.graph, spliced.stage);
+    assert_eq!(element_name(&spliced.graph, converter), "FakeConverter");
+}
+
+#[test]
+fn stages_on_the_same_gpu_or_following_it_need_no_copy() {
+    for consumer in [Some(FIRST_GPU), None] {
+        let spliced = splice_across_gpus(FIRST_GPU, consumer);
+        assert!(spliced.requests.is_empty(), "{consumer:?}");
+        assert_eq!(spliced.graph.node_count(), 4, "{consumer:?}");
+    }
 }

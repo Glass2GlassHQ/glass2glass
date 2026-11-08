@@ -8,7 +8,7 @@ use crate::clock::{ClockCandidate, ClockSync};
 use crate::error::G2gError;
 use crate::format_element::{CapsConstraint, CapsPreferences};
 use crate::frame::PipelinePacket;
-use crate::memory::{DomainSet, MemoryDomainKind};
+use crate::memory::{DomainSet, GpuDevice, MemoryDomainKind};
 use crate::meta::OrientationSet;
 use crate::property::{ElementMetadata, PropError, PropValue, PropertySpec};
 use crate::query::{AllocationParams, LatencyReport};
@@ -298,6 +298,10 @@ pub trait AsyncElement: ElementBound {
     /// `ALL`. Caps-free so the splice runs before the caps solve.
     fn input_domains(&self) -> DomainSet {
         DomainSet::ALL
+    }
+
+    fn gpu_device(&self) -> Option<GpuDevice> {
+        None
     }
 
     /// True when every frame leaves in the memory it arrived in, like a caps filter.
@@ -689,6 +693,10 @@ pub trait DynAsyncElement: ElementBound {
         DomainSet::ALL
     }
 
+    fn gpu_device(&self) -> Option<GpuDevice> {
+        None
+    }
+
     fn output_domain_follows_input(&self) -> bool {
         false
     }
@@ -947,6 +955,10 @@ impl<T: AsyncElement> DynAsyncElement for T {
         AsyncElement::input_domains(self)
     }
 
+    fn gpu_device(&self) -> Option<GpuDevice> {
+        AsyncElement::gpu_device(self)
+    }
+
     fn output_domain_follows_input(&self) -> bool {
         AsyncElement::output_domain_follows_input(self)
     }
@@ -1168,6 +1180,10 @@ impl<'b> DynAsyncElement for &'b mut (dyn DynAsyncElement + 'b) {
 
     fn input_domains(&self) -> DomainSet {
         (**self).input_domains()
+    }
+
+    fn gpu_device(&self) -> Option<GpuDevice> {
+        (**self).gpu_device()
     }
 
     fn output_domain_follows_input(&self) -> bool {

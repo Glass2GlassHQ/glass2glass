@@ -617,7 +617,7 @@ mod factory {
     use crate::element::{AsyncElement, DynAsyncElement};
     use crate::fanout::{DynMultiOutputSource, MultiOutputElement};
     use crate::graph::{Graph, GraphError, NodeId, PadId};
-    use crate::memory::DomainSet;
+    use crate::memory::{DomainSet, GpuDevice};
     use crate::pad_template::{PadCaps, PadDirection, PadTemplate, PadTemplates};
     use crate::property::{format_specs, PropError, PropValue};
     use crate::runtime::launch::ParseError;
@@ -1518,6 +1518,9 @@ mod factory {
     /// [`Registry::register_uri_fanout`].
     pub type UriFanoutHook = fn(&Registry, &str) -> Result<Option<UriFanout>, ParseError>;
 
+    pub type DomainConverterHook =
+        fn(MemoryDomainKind, MemoryDomainKind, Option<GpuDevice>) -> Option<GraphNode>;
+
     /// When a `fallbacksrc` rebuilds the source behind a URI. The
     /// timeouts are nanoseconds, as gst's `fallbacksrc` takes them.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1827,7 +1830,7 @@ mod factory {
         /// The converter elements live outside this crate, so the registry
         /// carries the factory; `None` (the default) leaves a domain mismatch to
         /// fail loud at negotiation, as it did before.
-        domain_converter: Option<fn(MemoryDomainKind, MemoryDomainKind) -> Option<GraphNode>>,
+        domain_converter: Option<DomainConverterHook>,
         transfer_costs: Vec<DomainTransferCost>,
         rank_overridden: Vec<&'static str>,
     }
@@ -2190,10 +2193,7 @@ mod factory {
         /// consumer share no memory domain gets `factory(from, to)` inserted, so a
         /// text pipeline reaches a GPU sink from a GPU decoder without naming the
         /// bridge element. Returns `&mut self` to chain calls.
-        pub fn set_domain_converter(
-            &mut self,
-            factory: fn(MemoryDomainKind, MemoryDomainKind) -> Option<GraphNode>,
-        ) -> &mut Self {
+        pub fn set_domain_converter(&mut self, factory: DomainConverterHook) -> &mut Self {
             self.domain_converter = Some(factory);
             self
         }
@@ -2206,9 +2206,7 @@ mod factory {
         }
 
         /// The configured domain-converter factory, if any.
-        pub fn domain_converter(
-            &self,
-        ) -> Option<fn(MemoryDomainKind, MemoryDomainKind) -> Option<GraphNode>> {
+        pub fn domain_converter(&self) -> Option<DomainConverterHook> {
             self.domain_converter
         }
 
@@ -3501,12 +3499,12 @@ mod factory {
 pub use factory::{
     declared_source_caps, AutoplugError, AutoplugParams, CapsTarget, ContainerStreams,
     DecodebinError, DecodebinSelectHook, DemuxCapsSelectHook, DemuxFactory, DemuxSelectHook,
-    DemuxStreamHook, ElementDoc, ElementFactory, FallbacksrcSourceFactory, FanoutRebuild,
-    FanoutSrcFactory, LaunchFactory, MuxerFactory, PlaybinError, PlaybinGraphError, PlaybinHook,
-    PlaybinPort, PlaybinSinks, PrimaryStream, PrimaryStreamHook, PropertyDoc, RankOverride,
-    RankSpecError, Registry, RestartFanoutSourceHook, RestartPolicy, RestartSourceHook,
-    SourceFactory, Uri, UriError, UriFanout, UriFanoutHead, UriFanoutHook, UriFanoutPort,
-    UriRebuild, UriSource, UriSourceFactory,
+    DemuxStreamHook, DomainConverterHook, ElementDoc, ElementFactory, FallbacksrcSourceFactory,
+    FanoutRebuild, FanoutSrcFactory, LaunchFactory, MuxerFactory, PlaybinError, PlaybinGraphError,
+    PlaybinHook, PlaybinPort, PlaybinSinks, PrimaryStream, PrimaryStreamHook, PropertyDoc,
+    RankOverride, RankSpecError, Registry, RestartFanoutSourceHook, RestartPolicy,
+    RestartSourceHook, SourceFactory, Uri, UriError, UriFanout, UriFanoutHead, UriFanoutHook,
+    UriFanoutPort, UriRebuild, UriSource, UriSourceFactory,
 };
 
 #[cfg(test)]

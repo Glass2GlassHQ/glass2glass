@@ -35,7 +35,7 @@ use crate::format_element::{CapsConstraint, CapsPreferences};
 use crate::frame::PipelinePacket;
 use crate::graph::Graph;
 use crate::log::ElementLogName;
-use crate::memory::{DomainSet, MemoryDomainKind};
+use crate::memory::{DomainSet, GpuDevice, MemoryDomainKind};
 use crate::property::{ElementMetadata, PropError, PropValue, PropertySpec};
 use crate::query::{AllocationParams, LatencyReport};
 use crate::runtime::channel::{
@@ -459,6 +459,9 @@ pub trait DynMultiInputElement: ElementBound {
     fn input_domains(&self) -> DomainSet {
         DomainSet::ALL
     }
+    fn gpu_device(&self) -> Option<GpuDevice> {
+        None
+    }
     fn output_domains(&self) -> DomainSet {
         DomainSet::only(crate::memory::MemoryDomainKind::System)
     }
@@ -598,6 +601,10 @@ impl<T: MultiInputElement> DynMultiInputElement for T {
 
     fn input_domains(&self) -> DomainSet {
         MultiInputElement::input_domains(self)
+    }
+
+    fn gpu_device(&self) -> Option<GpuDevice> {
+        MultiInputElement::gpu_device(self)
     }
 
     fn output_domains(&self) -> DomainSet {
@@ -808,6 +815,10 @@ impl MultiInputElement for MuxRef<'_> {
         self.0.input_domains()
     }
 
+    fn gpu_device(&self) -> Option<GpuDevice> {
+        self.0.gpu_device()
+    }
+
     fn output_domains(&self) -> DomainSet {
         self.0.output_domains()
     }
@@ -909,6 +920,10 @@ impl<'b> DynMultiInputElement for &'b mut (dyn DynMultiInputElement + 'b) {
 
     fn input_domains(&self) -> DomainSet {
         (**self).input_domains()
+    }
+
+    fn gpu_device(&self) -> Option<GpuDevice> {
+        (**self).gpu_device()
     }
 
     fn output_domains(&self) -> DomainSet {

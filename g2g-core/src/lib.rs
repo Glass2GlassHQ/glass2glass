@@ -243,7 +243,7 @@ pub use ptp::{
 };
 // The heap-free memory subset: the domain enum + its discriminant / set, and the
 // `System` slice (whose `Foreign` variant the StaticLendRing lends zero-copy).
-pub use memory::{DomainSet, HipVendor, MemoryDomain, MemoryDomainKind, SystemSlice};
+pub use memory::{DomainSet, GpuDevice, HipVendor, MemoryDomain, MemoryDomainKind, SystemSlice};
 // The GPU / shared-CPU domains are heap-backed (Arc/Box keep-alives).
 #[cfg(feature = "alloc")]
 pub use memory::{

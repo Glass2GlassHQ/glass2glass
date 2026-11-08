@@ -9,7 +9,7 @@ use alloc::vec::Vec;
 
 use g2g_core::caps_transform::{FieldTransform, RawVideoShape};
 use g2g_core::log::{short_type_name, Target};
-use g2g_core::memory::{DomainSet, MemoryDomainKind, OwnedHipBuffer};
+use g2g_core::memory::{DomainSet, GpuDevice, MemoryDomainKind, OwnedHipBuffer};
 use g2g_core::meta::{Orientation, PlaneLayout};
 use g2g_core::{
     g2g_error, AsyncElement, Caps, CapsConstraint, CapsTransform, Colorimetry, ConfigureOutcome,
@@ -22,6 +22,7 @@ use crate::hip::{
     HipDevice, HipEvent, HipKernel, HipKernelModule, HipMemory, HipMemoryPool, HipStream,
     KernelArgument,
 };
+use crate::hipdeviceid::{HipDeviceChoice, HIP_DEVICE_ID_PROP, HIP_VENDOR_PROP};
 use crate::pixel::carries_yuv;
 
 // the kernel names each format FMT_<name>, numbered by its position here
@@ -858,6 +859,8 @@ static CONVERT_SCALE: HipConvertVariant = HipConvertVariant {
         "Converts the pixel format, resizes and rotates HIP frames on the GPU",
     ),
     properties: &[
+        HIP_DEVICE_ID_PROP,
+        HIP_VENDOR_PROP,
         ADD_BORDERS_PROP,
         PropertySpec::new(
             "video-direction",
@@ -877,7 +880,7 @@ static CONVERT: HipConvertVariant = HipConvertVariant {
         "Filter/Converter/Video/Hardware",
         "Converts the pixel format of HIP frames on the GPU",
     ),
-    properties: &[],
+    properties: &[HIP_DEVICE_ID_PROP, HIP_VENDOR_PROP],
     changes_format: true,
     changes_size: false,
 };
@@ -888,7 +891,7 @@ static SCALE: HipConvertVariant = HipConvertVariant {
         "Filter/Converter/Video/Scaler/Hardware",
         "Resizes HIP frames on the GPU",
     ),
-    properties: &[ADD_BORDERS_PROP],
+    properties: &[HIP_DEVICE_ID_PROP, HIP_VENDOR_PROP, ADD_BORDERS_PROP],
     changes_format: false,
     changes_size: true,
 };
@@ -945,6 +948,7 @@ fn swap_dims(caps: &Caps) -> Caps {
 #[derive(Debug)]
 pub struct HipConvertScale {
     variant: &'static HipConvertVariant,
+    device: HipDeviceChoice,
     add_borders: bool,
     direction: Orientation,
     configured: bool,
@@ -976,6 +980,7 @@ impl HipConvertScale {
     fn of(variant: &'static HipConvertVariant) -> Self {
         Self {
             variant,
+            device: HipDeviceChoice::default(),
             add_borders: true,
             direction: Orientation::Identity,
             configured: false,
@@ -1010,6 +1015,16 @@ impl HipConvertScale {
     }
 
     fn convert(&mut self, buffer: &OwnedHipBuffer) -> Result<OwnedHipBuffer, G2gError> {
+        if !self.device.holds(buffer) {
+            g2g_error!(
+                Target::category(short_type_name::<Self>()),
+                "runs on {:?}, and a frame arrived on {:?} device {}",
+                self.device,
+                buffer.vendor,
+                buffer.device_ordinal
+            );
+            return Err(G2gError::UnsupportedDomain);
+        }
         let gpu = self.gpu_for(buffer)?;
         let mut memory = gpu.pool.acquire()?;
         gpu.converter.convert(&gpu.stream, buffer, &mut memory)?;
@@ -1096,6 +1111,10 @@ impl AsyncElement for HipConvertScale {
         MemoryDomainKind::Hip
     }
 
+    fn gpu_device(&self) -> Option<GpuDevice> {
+        self.device.declared()
+    }
+
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         Picture::of(absolute_caps)?;
         self.input_caps = Some(absolute_caps.clone());
@@ -1119,6 +1138,10 @@ impl AsyncElement for HipConvertScale {
         if !self.has_property(name) {
             return Err(PropError::Unknown);
         }
+        if let Some(applied) = self.device.set_property(name, &value) {
+            self.gpu = None;
+            return applied;
+        }
         match name {
             "add-borders" => self.add_borders = value.as_bool().ok_or(PropError::Type)?,
             "video-direction" => {
@@ -1134,6 +1157,9 @@ impl AsyncElement for HipConvertScale {
     fn get_property(&self, name: &str) -> Option<PropValue> {
         if !self.has_property(name) {
             return None;
+        }
+        if let Some(value) = self.device.get_property(name) {
+            return Some(value);
         }
         match name {
             "add-borders" => Some(PropValue::Bool(self.add_borders)),

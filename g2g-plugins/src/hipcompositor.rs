@@ -7,7 +7,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use g2g_core::caps_parse::parse_raw_format;
-use g2g_core::memory::{DomainSet, MemoryDomainKind, OwnedHipBuffer};
+use g2g_core::memory::{DomainSet, GpuDevice, MemoryDomainKind, OwnedHipBuffer};
 use g2g_core::meta::Orientation;
 use g2g_core::{
     Caps, CapsConstraint, CapsSet, Colorimetry, ConfigureOutcome, Dim, ElementMetadata, Frame,
@@ -25,6 +25,7 @@ use crate::hip::{
 use crate::hipconvertscale::{
     any_size_formats, converts, narrow_to_converted_format, HipBlender, HipConverter,
 };
+use crate::hipdeviceid::HipDeviceChoice;
 
 const FILL_SOURCE: &str = r#"
 extern "C" __global__ void fill_canvas(float* canvas, unsigned int pixels, float r, float g, float b, float a) {
@@ -99,6 +100,7 @@ impl CompositeGpu {
 #[derive(Debug)]
 pub struct HipCompositor {
     canvas: CompositorCanvas<OwnedHipBuffer>,
+    device: HipDeviceChoice,
     input_caps: Vec<Option<Caps>>,
     gpu: Option<CompositeGpu>,
 }
@@ -108,6 +110,7 @@ impl HipCompositor {
         let inputs = pads.len();
         Self {
             canvas: CompositorCanvas::new(out_w, out_h, RawVideoFormat::Rgba8, pads),
+            device: HipDeviceChoice::default(),
             input_caps: vec![None; inputs],
             gpu: None,
         }
@@ -125,6 +128,9 @@ impl HipCompositor {
     }
 
     fn gpu_for(&mut self, base: &OwnedHipBuffer) -> Result<&mut CompositeGpu, G2gError> {
+        if !self.device.holds(base) {
+            return Err(G2gError::UnsupportedDomain);
+        }
         let output_caps = self.canvas.output();
         let reusable = self.gpu.as_ref().is_some_and(|gpu| {
             gpu.device.vendor() == base.vendor
@@ -150,6 +156,7 @@ impl HipCompositor {
             canvas,
             input_caps,
             gpu,
+            ..
         } = self;
         let gpu = gpu.as_mut().ok_or(G2gError::NotConfigured)?;
         let (width, height) = (canvas.out_w, canvas.out_h);
@@ -234,6 +241,10 @@ impl MultiInputElement for HipCompositor {
         DomainSet::only(MemoryDomainKind::Hip)
     }
 
+    fn gpu_device(&self) -> Option<GpuDevice> {
+        self.device.declared()
+    }
+
     fn input_count(&self) -> usize {
         self.canvas.pads.len()
     }
@@ -250,6 +261,10 @@ impl MultiInputElement for HipCompositor {
         if let Some(applied) = self.canvas.set_property(name, &value) {
             return applied;
         }
+        if let Some(applied) = self.device.set_property(name, &value) {
+            self.gpu = None;
+            return applied;
+        }
         if name != "format" {
             return Err(PropError::Unknown);
         }
@@ -263,6 +278,7 @@ impl MultiInputElement for HipCompositor {
     fn get_property(&self, name: &str) -> Option<PropValue> {
         match name {
             "format" => Some(PropValue::Str(self.canvas.format.gst_name().into())),
+            "device-id" | "vendor" => self.device.get_property(name),
             _ => self.canvas.get_property(name),
         }
     }

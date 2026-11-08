@@ -9,13 +9,13 @@ use std::sync::{Mutex, OnceLock, PoisonError};
 
 use g2g_core::log::{short_type_name, Target};
 use g2g_core::memory::{
-    DomainSet, HipVendor, MemoryDomainKind, OwnedCudaBuffer, OwnedDmaBuf, OwnedHipBuffer,
+    DomainSet, GpuDevice, HipVendor, MemoryDomainKind, OwnedCudaBuffer, OwnedDmaBuf, OwnedHipBuffer,
 };
 use g2g_core::meta::{Plane, PlaneLayout};
 use g2g_core::{
     g2g_error, g2g_warn, AllocationParams, AsyncElement, Caps, CapsConstraint, ConfigureOutcome,
     ElementMetadata, Frame, G2gError, HostAllocator, MemoryDomain, OutputSink, PipelinePacket,
-    PropError, PropKind, PropValue, PropertySpec, SystemSlice,
+    PropError, PropValue, PropertySpec, SystemSlice,
 };
 
 use crate::dmabufimport::DmaBufImportCache;
@@ -24,6 +24,7 @@ use crate::hip::{
     hip_buffer, release_after, HipDevice, HipEvent, HipExternalBuffer, HipMemoryPool,
     HipPinnedMemory, HipStream,
 };
+use crate::hipdeviceid::{HipDeviceChoice, HIP_DEVICE_ID_PROP, HIP_VENDOR_PROP};
 use crate::paddedrows::single_stride_layout;
 use crate::pixel::RawVideoGeometry;
 
@@ -100,9 +101,9 @@ struct PinnedOffer {
 }
 
 impl PinnedOffer {
-    fn open(vendor: Option<HipVendor>, ordinal: i32) -> Result<Self, G2gError> {
+    fn open(device: &HipDeviceChoice) -> Result<Self, G2gError> {
         let frames = Arc::new(PinnedFrames {
-            device: open_device(vendor, ordinal)?,
+            device: device.open()?,
             free: Mutex::default(),
             allocations: Mutex::default(),
         });
@@ -123,14 +124,20 @@ struct UploadGpu {
     dmabuf_import_failed: bool,
 }
 
+#[derive(Debug)]
+struct SourceGpu {
+    device: Arc<HipDevice>,
+    stream: HipStream,
+}
+
 #[derive(Debug, Default)]
 pub struct HipUpload {
     configured: bool,
     raw_video: Option<RawVideoGeometry>,
-    device_id: Option<i32>,
-    vendor: Option<HipVendor>,
+    device: HipDeviceChoice,
     pinned: OnceLock<PinnedOffer>,
     gpu: Option<UploadGpu>,
+    source: Option<SourceGpu>,
 }
 
 impl HipUpload {
@@ -138,41 +145,26 @@ impl HipUpload {
         Self::default()
     }
 
+    pub fn on_device(device: GpuDevice) -> Self {
+        Self {
+            device: HipDeviceChoice::of(device),
+            ..Self::default()
+        }
+    }
+
     fn pinned_offer(&self) -> Result<&PinnedOffer, G2gError> {
         if let Some(offer) = self.pinned.get() {
             return Ok(offer);
         }
-        let offer = PinnedOffer::open(self.vendor, self.device_id.unwrap_or(0))?;
+        let offer = PinnedOffer::open(&self.device)?;
         Ok(self.pinned.get_or_init(|| offer))
     }
 
-    fn gpu_for(&mut self, cuda_ordinal: Option<i32>) -> Result<&mut UploadGpu, G2gError> {
-        if let Some(cuda_ordinal) = cuda_ordinal {
-            let wrong_vendor = self.vendor == Some(HipVendor::Amd);
-            let wrong_ordinal = self
-                .device_id
-                .is_some_and(|ordinal| ordinal != cuda_ordinal);
-            let wrong_open_device = self.gpu.as_ref().is_some_and(|gpu| {
-                gpu.device.vendor() != HipVendor::Nvidia || gpu.device.ordinal() != cuda_ordinal
-            });
-            if wrong_vendor || wrong_ordinal || wrong_open_device {
-                g2g_error!(
-                    Target::category(short_type_name::<Self>()),
-                    "a CUDA frame from device {} becomes a Hip frame only on that NVIDIA device, and this element is set to vendor {:?} device {:?}",
-                    cuda_ordinal,
-                    self.vendor,
-                    self.device_id
-                );
-                return Err(G2gError::UnsupportedDomain);
-            }
-        }
+    fn gpu(&mut self) -> Result<&mut UploadGpu, G2gError> {
         let gpu = match self.gpu.take() {
             Some(gpu) => gpu,
             None => {
-                let device = match cuda_ordinal {
-                    Some(ordinal) => HipDevice::open(HipVendor::Nvidia, ordinal)?,
-                    None => Arc::clone(&self.pinned_offer()?.frames.device),
-                };
+                let device = Arc::clone(&self.pinned_offer()?.frames.device);
                 UploadGpu {
                     stream: HipStream::new(&device)?,
                     device,
@@ -184,13 +176,43 @@ impl HipUpload {
         };
         Ok(self.gpu.insert(gpu))
     }
-}
 
-fn open_device(vendor: Option<HipVendor>, ordinal: i32) -> Result<Arc<HipDevice>, G2gError> {
-    match vendor {
-        Some(vendor) => HipDevice::open(vendor, ordinal),
-        None => HipDevice::open(HipVendor::Amd, ordinal)
-            .or_else(|_| HipDevice::open(HipVendor::Nvidia, ordinal)),
+    fn source_gpu(&mut self, vendor: HipVendor, ordinal: i32) -> Result<&SourceGpu, G2gError> {
+        let source = match self.source.take() {
+            Some(source)
+                if (source.device.vendor(), source.device.ordinal()) == (vendor, ordinal) =>
+            {
+                source
+            }
+            _ => {
+                let device = HipDevice::open(vendor, ordinal)?;
+                SourceGpu {
+                    stream: HipStream::new(&device)?,
+                    device,
+                }
+            }
+        };
+        Ok(self.source.insert(source))
+    }
+
+    fn onto_chosen_device(&mut self, buffer: OwnedHipBuffer) -> Result<OwnedHipBuffer, G2gError> {
+        if !self.device.is_set() {
+            return Ok(buffer);
+        }
+        let frames = Arc::clone(&self.pinned_offer()?.frames);
+        let target = (frames.device.vendor(), frames.device.ordinal());
+        if (buffer.vendor, buffer.device_ordinal) == target {
+            return Ok(buffer);
+        }
+        let mut staging = frames.lease(buffer.len)?;
+        self.source_gpu(buffer.vendor, buffer.device_ordinal)?
+            .stream
+            .download_blocking(&buffer, staging.as_mut_slice())?;
+        let moved = upload_pinned(self.gpu()?, staging)?;
+        Ok(match buffer.plane_layout() {
+            Some(layout) => moved.with_plane_layout(*layout),
+            None => moved,
+        })
     }
 }
 
@@ -224,7 +246,7 @@ fn upload(
     upload_pinned(gpu, staging)
 }
 
-fn wrap_cuda(gpu: &UploadGpu, cuda: &OwnedCudaBuffer) -> Result<OwnedHipBuffer, G2gError> {
+fn wrap_cuda(gpu: &SourceGpu, cuda: &OwnedCudaBuffer) -> Result<OwnedHipBuffer, G2gError> {
     let chroma_offset = cuda
         .chroma_ptr
         .checked_sub(cuda.luma_ptr)
@@ -329,22 +351,7 @@ fn import_dmabuf(
     )
 }
 
-static HIP_UPLOAD_PROPS: &[PropertySpec] = &[
-    PropertySpec::new(
-        "device-id",
-        PropKind::Int,
-        "HIP device ordinal, -1 for device 0 or the ordinal of an incoming CUDA frame",
-    )
-    .with_default("-1")
-    .with_range("-1", "2147483647"),
-    PropertySpec::new(
-        "vendor",
-        PropKind::Str,
-        "GPU vendor of the HIP device, unknown tries AMD then NVIDIA",
-    )
-    .with_default("unknown")
-    .with_enum_values("unknown | amd | nvidia"),
-];
+static HIP_UPLOAD_PROPS: &[PropertySpec] = &[HIP_DEVICE_ID_PROP, HIP_VENDOR_PROP];
 
 impl AsyncElement for HipUpload {
     type ProcessFuture<'a>
@@ -378,6 +385,10 @@ impl AsyncElement for HipUpload {
 
     fn output_memory(&self) -> MemoryDomainKind {
         MemoryDomainKind::Hip
+    }
+
+    fn gpu_device(&self) -> Option<GpuDevice> {
+        self.device.declared()
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -414,41 +425,13 @@ impl AsyncElement for HipUpload {
         if self.gpu.is_some() || self.pinned.get().is_some() {
             return Err(PropError::ReadOnly);
         }
-        match name {
-            "device-id" => {
-                let device_id = value.as_int().ok_or(PropError::Type)?;
-                self.device_id = match device_id {
-                    -1 => None,
-                    0..=0x7fff_ffff => Some(device_id as i32),
-                    _ => return Err(PropError::Value),
-                };
-            }
-            "vendor" => {
-                self.vendor = match value.as_str().ok_or(PropError::Type)? {
-                    "unknown" => None,
-                    "amd" => Some(HipVendor::Amd),
-                    "nvidia" => Some(HipVendor::Nvidia),
-                    _ => return Err(PropError::Value),
-                };
-            }
-            _ => return Err(PropError::Unknown),
-        }
-        Ok(())
+        self.device
+            .set_property(name, &value)
+            .unwrap_or(Err(PropError::Unknown))
     }
 
     fn get_property(&self, name: &str) -> Option<PropValue> {
-        match name {
-            "device-id" => Some(PropValue::Int(self.device_id.map_or(-1, i64::from))),
-            "vendor" => Some(PropValue::Str(
-                match self.vendor {
-                    None => "unknown",
-                    Some(HipVendor::Amd) => "amd",
-                    Some(HipVendor::Nvidia) => "nvidia",
-                }
-                .into(),
-            )),
-            _ => None,
-        }
+        self.device.get_property(name)
     }
 
     fn process<'a>(
@@ -469,25 +452,26 @@ impl AsyncElement for HipUpload {
                         meta,
                     } = frame;
                     let buffer = match domain {
-                        MemoryDomain::Hip(buffer) => buffer,
+                        MemoryDomain::Hip(buffer) => self.onto_chosen_device(buffer)?,
                         MemoryDomain::Cuda(cuda) => {
-                            let gpu = self.gpu_for(Some(cuda.device_ordinal))?;
-                            wrap_cuda(gpu, &cuda)?
+                            let source = self.source_gpu(HipVendor::Nvidia, cuda.device_ordinal)?;
+                            let wrapped = wrap_cuda(source, &cuda)?;
+                            self.onto_chosen_device(wrapped)?
                         }
                         MemoryDomain::DmaBuf(dmabuf) => {
                             let raw_video = self.raw_video.ok_or(G2gError::CapsMismatch)?;
                             let frames = Arc::clone(&self.pinned_offer()?.frames);
-                            upload_dmabuf(self.gpu_for(None)?, &frames, &dmabuf, raw_video)?
+                            upload_dmabuf(self.gpu()?, &frames, &dmabuf, raw_video)?
                         }
                         MemoryDomain::System(slice)
                             if self.pinned_offer()?.frames.allocated(slice.as_slice()) =>
                         {
-                            upload_pinned(self.gpu_for(None)?, slice)?
+                            upload_pinned(self.gpu()?, slice)?
                         }
                         domain => {
                             let frames = Arc::clone(&self.pinned_offer()?.frames);
                             let bytes = domain.require_system_slice(short_type_name::<Self>())?;
-                            upload(self.gpu_for(None)?, &frames, bytes)?
+                            upload(self.gpu()?, &frames, bytes)?
                         }
                     };
                     out.push(PipelinePacket::DataFrame(Frame {
