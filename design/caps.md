@@ -257,6 +257,14 @@ closure owns everything it carries, so `run_graph_threaded_ticked` takes the clo
 as an `Arc<dyn DynAsyncClock + Send + Sync>` and each muxer arm is wrapped in a
 future that owns its handle and lends it to the shared arm code.
 
+**A fan-in learns its solved output caps.** After configuring every input pad,
+the graph runner calls `MultiInputElement::configure_output` with the caps solved
+on the output edge, as it does for a transform. A muxer that produces several
+alternatives (`st2038ancmux`'s alignments) reads the one a downstream capsfilter
+picked there, and from then on answers `caps_constraint_for_output` with that one,
+since the runner re-derives the output from it when an input's caps change
+mid-stream.
+
 **The fan-in deadline tick comes from the pipeline clock.** A fan-in element that
 declares a `tick_interval_ns` receives `PipelinePacket::Tick` on that period even
 while its inputs are silent, which is how a compositor holds its output rate

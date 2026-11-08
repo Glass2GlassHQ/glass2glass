@@ -40,6 +40,11 @@ pub enum PipelinePacket {
     },
     // an SCTE-35 splice_info_section whose splice times count on the pipeline's 90 kHz timeline, passed on by every element until a muxer writes it
     SpliceInfo(Frame),
+    // no data on this stream from `pts_ns` for `duration_ns` (gst's GAP event), so a fan-in element stops waiting on it for that span
+    Gap {
+        pts_ns: u64,
+        duration_ns: u64,
+    },
 }
 
 #[derive(Debug)]

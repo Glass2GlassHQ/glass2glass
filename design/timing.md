@@ -297,8 +297,9 @@ feeding it, which is what a per-pad or minimum-upstream figure has to be measure
 against.
 
 The aggregate's `live` flag does not only fold into the sink's `ClockSync`, it also
-reaches every element: each runner calls `AsyncElement::configure_liveness` after
-the fold and before any arm starts, unconditionally, so a path with no live source
+reaches every element: each runner calls `AsyncElement::configure_liveness`, and
+`MultiInputElement::configure_liveness` on a fan-in, after the fold and before any
+arm starts, unconditionally, so a path with no live source
 is told `false` rather than left to assume one. A `GraphMutator` splice hands the
 run's flag to the spliced element beside its caps. `ffmpegdec` is what reads it
 today: `thread-type=auto` resolves to slice threading off a live source and to

@@ -484,6 +484,8 @@ pub trait DynMultiInputElement: ElementBound {
     fn configure_allocation_for_output(&mut self, params: &AllocationParams);
     /// Dyn-safe mirror of [`MultiInputElement::output_caps`].
     fn output_caps(&self) -> Result<Caps, G2gError>;
+    fn configure_output(&mut self, output_caps: &Caps) -> Result<(), G2gError>;
+    fn configure_liveness(&mut self, live: bool);
     fn configure_pipeline(
         &mut self,
         input: usize,
@@ -636,6 +638,14 @@ impl<T: MultiInputElement> DynMultiInputElement for T {
 
     fn output_caps(&self) -> Result<Caps, G2gError> {
         MultiInputElement::output_caps(self)
+    }
+
+    fn configure_output(&mut self, output_caps: &Caps) -> Result<(), G2gError> {
+        MultiInputElement::configure_output(self, output_caps)
+    }
+
+    fn configure_liveness(&mut self, live: bool) {
+        MultiInputElement::configure_liveness(self, live)
     }
 
     fn configure_pipeline(
@@ -792,6 +802,14 @@ impl MultiInputElement for MuxRef<'_> {
 
     fn output_caps(&self) -> Result<Caps, G2gError> {
         self.0.output_caps()
+    }
+
+    fn configure_output(&mut self, output_caps: &Caps) -> Result<(), G2gError> {
+        self.0.configure_output(output_caps)
+    }
+
+    fn configure_liveness(&mut self, live: bool) {
+        self.0.configure_liveness(live)
     }
 
     fn output_follows_input(&self) -> Option<usize> {
@@ -959,6 +977,14 @@ impl<'b> DynMultiInputElement for &'b mut (dyn DynMultiInputElement + 'b) {
 
     fn output_caps(&self) -> Result<Caps, G2gError> {
         (**self).output_caps()
+    }
+
+    fn configure_output(&mut self, output_caps: &Caps) -> Result<(), G2gError> {
+        (**self).configure_output(output_caps)
+    }
+
+    fn configure_liveness(&mut self, live: bool) {
+        (**self).configure_liveness(live)
     }
 
     fn configure_pipeline(

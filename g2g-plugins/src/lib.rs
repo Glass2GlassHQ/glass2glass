@@ -547,6 +547,11 @@ pub mod st291;
 pub mod st2038;
 // cctost2038anc and st2038anctocc: closed captions in and out of ST 2038 packets.
 pub mod st2038cc;
+// st2038ancdemux: one ST 2038 stream split per packet and per DID, SDID, line and offset.
+pub mod st2038ancdemux;
+// st2038ancmux: ST 2038 streams merged per frame. std: the live deadline reads the monotonic clock.
+#[cfg(feature = "std")]
+pub mod st2038ancmux;
 
 // ST 2110-20 uncompressed video over RTP (M599, RFC 4175): sans-IO packetizer /
 // depacketizer slicing a frame into SRD line runs, RGBA 8-bit + YCbCr-4:2:2 8/10-bit.

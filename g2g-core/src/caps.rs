@@ -147,8 +147,13 @@ pub enum Caps {
     #[cfg(feature = "alloc")]
     Batch { streams: Vec<Caps> },
     /// SMPTE ST 2038 ancillary data (captions, timecode, AFD) as MPEG-TS carries
-    /// it, each frame the ANC packets of one PES (GStreamer `meta/x-st-2038`).
-    St2038,
+    /// it (GStreamer `meta/x-st-2038`). Each frame holds one ANC packet, one
+    /// line's packets or one video frame's packets, as `alignment` says, and
+    /// `framerate` is the video frame rate when it is known.
+    St2038 {
+        alignment: St2038Alignment,
+        framerate: Rate,
+    },
 }
 
 impl Caps {
@@ -169,7 +174,7 @@ impl Caps {
             | Caps::Text { .. }
             | Caps::Klv
             | Caps::OnvifMetadata
-            | Caps::St2038
+            | Caps::St2038 { .. }
             | Caps::ClosedCaption { .. }
             | Caps::SubPicture { .. } => false,
             #[cfg(feature = "alloc")]
@@ -292,7 +297,19 @@ impl Caps {
             (Caps::Text { format: fa }, Caps::Text { format: fb }) if fa == fb => Ok(self.clone()),
             (Caps::Klv, Caps::Klv) => Ok(Caps::Klv),
             (Caps::OnvifMetadata, Caps::OnvifMetadata) => Ok(Caps::OnvifMetadata),
-            (Caps::St2038, Caps::St2038) => Ok(Caps::St2038),
+            (
+                Caps::St2038 {
+                    alignment: a,
+                    framerate: ra,
+                },
+                Caps::St2038 {
+                    alignment: b,
+                    framerate: rb,
+                },
+            ) if a == b => Ok(Caps::St2038 {
+                alignment: *a,
+                framerate: ra.intersect(rb).ok_or(G2gError::CapsMismatch)?,
+            }),
             (Caps::ClosedCaption { format: a }, Caps::ClosedCaption { format: b }) if a == b => {
                 Ok(Caps::ClosedCaption { format: *a })
             }
@@ -415,9 +432,23 @@ impl Caps {
             | Caps::Text { .. }
             | Caps::Klv
             | Caps::OnvifMetadata
-            | Caps::St2038
             | Caps::ClosedCaption { .. }
             | Caps::SubPicture { .. } => Ok(self.clone()),
+            // gst leaves an ST 2038 framerate out when the video rate is unknown
+            Caps::St2038 {
+                alignment,
+                framerate: Rate::Any,
+            } => Ok(Caps::St2038 {
+                alignment: *alignment,
+                framerate: Rate::Any,
+            }),
+            Caps::St2038 {
+                alignment,
+                framerate,
+            } => Ok(Caps::St2038 {
+                alignment: *alignment,
+                framerate: framerate.fixate().ok_or(G2gError::CapsMismatch)?,
+            }),
             Caps::Tensor { .. } => Ok(self.clone()),
             #[cfg(feature = "alloc")]
             Caps::Batch { streams } => Ok(Caps::Batch {
@@ -476,7 +507,7 @@ impl Caps {
             | Caps::Text { .. }
             | Caps::Klv
             | Caps::OnvifMetadata
-            | Caps::St2038
+            | Caps::St2038 { .. }
             | Caps::ClosedCaption { .. }
             | Caps::SubPicture { .. } => None,
             Caps::Tensor { .. } => None,
@@ -565,7 +596,14 @@ impl Caps {
             Caps::Text { format } => String::from(text_format_gst_media_type(*format)),
             Caps::Klv => String::from("meta/x-klv"),
             Caps::OnvifMetadata => String::from("application/x-onvif-metadata"),
-            Caps::St2038 => String::from("meta/x-st-2038,alignment=line"),
+            Caps::St2038 {
+                alignment,
+                framerate,
+            } => {
+                let mut s = format!("meta/x-st-2038,alignment={}", alignment.gst_name());
+                push_rate(&mut s, framerate);
+                s
+            }
             Caps::ClosedCaption { format } => String::from(cc_format_gst_media_type(*format)),
             Caps::SubPicture { format } => String::from(subpicture_gst_media_type(*format)),
             Caps::Batch { streams } => {
@@ -2308,6 +2346,44 @@ pub enum ClosedCaptionFormat {
     /// (GStreamer's `format=cdp`), the payload of a DID 0x61 ancillary packet and
     /// of the MP4 `c708` sample entry's `ccdp` atom.
     Cea708Cdp,
+}
+
+// what one Caps::St2038 frame holds, spelled as gst's `alignment` field
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum St2038Alignment {
+    Packet,
+    Line,
+    Frame,
+}
+
+impl St2038Alignment {
+    pub const ALL: [St2038Alignment; 3] = [Self::Packet, Self::Line, Self::Frame];
+
+    pub fn gst_name(self) -> &'static str {
+        match self {
+            Self::Packet => "packet",
+            Self::Line => "line",
+            Self::Frame => "frame",
+        }
+    }
+
+    pub fn from_gst_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|a| a.gst_name() == name)
+    }
+}
+
+// every ST 2038 alignment at `framerate`, the input set of an element that reads any of them
+#[cfg(feature = "alloc")]
+pub fn st2038_any_alignment(framerate: Rate) -> CapsSet {
+    CapsSet::from_alternatives(
+        St2038Alignment::ALL
+            .into_iter()
+            .map(|alignment| Caps::St2038 {
+                alignment,
+                framerate: framerate.clone(),
+            })
+            .collect(),
+    )
 }
 
 /// Which bitmap-subtitle coding a [`Caps::SubPicture`] stream carries. Each

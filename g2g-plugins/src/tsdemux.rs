@@ -35,8 +35,8 @@ use g2g_core::{
     g2g_error, AsyncElement, AudioFormat, BusHandle, BusMessage, ByteStreamEncoding, Caps,
     CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, FrameTiming, G2gError,
     LatencyReport, MemoryDomain, MultiOutputElement, MultiOutputSink, PadTemplate, PadTemplates,
-    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, Segment, Stream,
-    StreamCollection, StreamType, SubPictureFormat, Tag, TagList, VideoCodec,
+    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, Segment, St2038Alignment,
+    Stream, StreamCollection, StreamType, SubPictureFormat, Tag, TagList, VideoCodec,
 };
 
 use crate::demuxseek::DemuxSeek;
@@ -427,6 +427,14 @@ fn input_caps() -> Caps {
 /// for async-discovered dims. AAC has no open `Caps` field, so it advertises
 /// the sentinel channels/rate 0 that `aacparse` accepts pre-header and
 /// refines from the ADTS header.
+// gst tsdemux labels an ST 2038 PES alignment=line
+fn st2038_caps() -> Caps {
+    Caps::St2038 {
+        alignment: St2038Alignment::Line,
+        framerate: Rate::Any,
+    }
+}
+
 fn output_caps(stream: TsStream) -> Caps {
     match stream {
         TsStream::H264 => elementary_video_caps(VideoCodec::H264),
@@ -439,7 +447,7 @@ fn output_caps(stream: TsStream) -> Caps {
         TsStream::Opus => compressed_audio(AudioFormat::Opus),
         TsStream::Ac3 => compressed_audio(AudioFormat::Ac3),
         TsStream::Klv => Caps::Klv,
-        TsStream::St2038 => Caps::St2038,
+        TsStream::St2038 => st2038_caps(),
         TsStream::Teletext => Caps::Text {
             format: g2g_core::TextFormat::Teletext,
         },
@@ -557,7 +565,7 @@ fn es_to_stream(es: &crate::mpegts::ElementaryStream) -> Option<Stream> {
         ),
         // KLV metadata: no dedicated StreamType kind, the caps classify it.
         _ if es.klv => (StreamType::Unknown, Caps::Klv),
-        STREAM_TYPE_PRIVATE_PES if es.st2038 => (StreamType::Unknown, Caps::St2038),
+        STREAM_TYPE_PRIVATE_PES if es.st2038 => (StreamType::Unknown, st2038_caps()),
         _ => return None,
     };
     Some(Stream::new(id, stream_type, caps))
@@ -2663,7 +2671,7 @@ mod tests {
         let mut stream = m.push_au_on(0, &[0, 0, 0, 1, 0x65, 0x11], Some(900_000), None, true);
         stream.extend(m.push_au_on(1, &ANC, Some(900_000), None, false));
 
-        assert_eq!(output_caps(TsStream::St2038), Caps::St2038);
+        assert_eq!(output_caps(TsStream::St2038), st2038_caps());
         let mut d = TsDemux::new().with_stream(TsStream::St2038);
         d.configure_pipeline(&input_caps()).unwrap();
         let mut sink = CaptureSink::default();

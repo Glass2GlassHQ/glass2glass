@@ -975,6 +975,23 @@ pub fn default_registry() -> Registry {
         })
         .routing_one_named_pad(),
     );
+    // ST 2038 split and merge (M2133). One link carries every packet on its own:
+    // `... ! st2038ancdemux ! ...`. Named pads pick streams, `d.src` all of them
+    // and `d.anc_61_01_at_9_0` one DID, SDID, line and offset, also for one link.
+    // `st2038ancmux` merges its inputs per frame, timing out on a live pipeline.
+    reg.register_launch(LaunchFactory::of::<crate::st2038ancdemux::St2038AncDemux>(
+        "st2038ancdemux",
+        || Box::new(crate::st2038ancdemux::St2038AncDemux::new()),
+    ));
+    reg.register_demux(
+        g2g_core::runtime::DemuxFactory::new("st2038ancdemux", |outputs| {
+            Box::new(crate::st2038ancdemux::St2038AncDemuxN::new(outputs))
+        })
+        .routing_one_named_pad(),
+    );
+    reg.register_muxer(MuxerFactory::new("st2038ancmux", |inputs| {
+        Box::new(crate::st2038ancmux::St2038AncMux::new(inputs))
+    }));
     // Closed-caption extractor (M429): mines CEA-608 / CEA-708 captions from a
     // compressed H.264 / H.265 stream's SEI into timed text cues (default CC1),
     // e.g. `... ! h264parse ! ccextract ! textoverlay ...` on a teed branch.

@@ -64,6 +64,10 @@ impl fmt::Display for PacketFields<'_> {
             PipelinePacket::SpliceInfo(frame) => {
                 write!(f, "event splice-info: size {}", frame_bytes(frame))
             }
+            PipelinePacket::Gap {
+                pts_ns,
+                duration_ns,
+            } => write!(f, "event gap: pts {pts_ns} ns, duration {duration_ns} ns"),
             PipelinePacket::Eos => f.write_str("event eos"),
             PipelinePacket::Flush => f.write_str("event flush"),
             PipelinePacket::Tick => f.write_str("event tick"),

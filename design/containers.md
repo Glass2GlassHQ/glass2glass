@@ -367,7 +367,31 @@ output link it is a transform whose output is whichever caption caps
 negotiation picks, CDP first. Linked from gst's named `src_cea708` and
 `src_cea608` pads, one or both, it is a demux that sends each pad its own
 caption type. Run through
-both elements, gst's `cctost2038anc` packet comes out byte for byte. Both directions are checked against GStreamer 1.28 in
+both elements, gst's `cctost2038anc` packet comes out byte for byte.
+
+`Caps::St2038` carries gst's `alignment` (`packet`, `line` or `frame`, how many
+packets one frame holds) and an optional `framerate`. `tsdemux` writes `line`, as
+gst's does, and a caps string without `alignment` stands for all three.
+
+`st2038ancdemux` sends every packet as its own frame, `alignment=packet` at the
+input's framerate. With one unnamed link it is a transform. Named pads build the
+demux: `src` carries every packet, and gst's per-stream pad names
+`anc_<did>_<sdid>_at_<line>_<offset>` (DID and SDID in two hex digits) carry one
+stream each. gst creates those pads as streams appear, so g2g takes the stream
+from the pad name written on the launch line, and a stream no pad names is
+dropped. A stream that falls 500 ms behind the input gets a `Gap` for the time
+since its last packet, as in gst.
+
+`st2038ancmux` merges its inputs per frame and writes the alignment and framerate
+downstream asks for, `packet` by default. With a framerate a frame is one frame
+period of PTS, without one it is the packets that share a PTS. A frame goes out
+once every input has data past it, a `Gap` covering it or an end of stream. On a
+live pipeline it also goes out when its end plus `latency` passes on the
+monotonic clock, timed from the first packet's arrival, and an empty frame
+becomes a `Gap`. Two packets covering the same part of a line keep the one from
+the later input, the later payload within an input. Demuxing a TS stream into
+two named pads and muxing them back at `alignment=frame` rebuilds every payload
+byte for byte. Both directions are checked against GStreamer 1.28 in
 `m2129_st2038_ts`: its `tsdemux` reads the g2g mux's stream byte for byte, and
 g2g's `tsdemux` reads what its `mpegtsmux` writes.
 

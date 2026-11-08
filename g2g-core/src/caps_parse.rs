@@ -9,9 +9,9 @@ use alloc::vec::Vec;
 use crate::caps::{
     batch_alternatives, framerate_q16_from_fraction, pcm_from_gst_format, AudioFormat,
     BitstreamAlignment, ByteStreamEncoding, Caps, CapsSet, CodecTag, Colorimetry, Dim, Interlace,
-    ProResVariant, Rate, RawVideoFormat, SubPictureFormat, TagNamespace, TextFormat, VideoCodec,
-    ANY_CHANNELS, ANY_SAMPLE_RATE, MOV_UNKNOWN_SUBTYPE_PREFIX, PCM_FORMATS, RIFF_AUDIO_TAG_FIELD,
-    RIFF_UNKNOWN_SUBTYPE, RIFF_VIDEO_TAG_FIELD,
+    ProResVariant, Rate, RawVideoFormat, St2038Alignment, SubPictureFormat, TagNamespace,
+    TextFormat, VideoCodec, ANY_CHANNELS, ANY_SAMPLE_RATE, MOV_UNKNOWN_SUBTYPE_PREFIX, PCM_FORMATS,
+    RIFF_AUDIO_TAG_FIELD, RIFF_UNKNOWN_SUBTYPE, RIFF_VIDEO_TAG_FIELD,
 };
 use crate::channels::ChannelLayout;
 
@@ -125,6 +125,18 @@ fn expand_rate(fv: Option<&FieldVal>) -> Option<Vec<Rate>> {
             .iter()
             .map(|x| parse_rate(x))
             .collect::<Option<Vec<_>>>()?,
+    })
+}
+
+fn expand_st2038_alignment(fv: Option<&FieldVal>) -> Option<Vec<St2038Alignment>> {
+    Some(match fv {
+        None => St2038Alignment::ALL.to_vec(),
+        Some(FieldVal::One(s)) => alloc::vec![St2038Alignment::from_gst_name(s)?],
+        Some(FieldVal::List(xs)) => xs
+            .iter()
+            .map(|x| St2038Alignment::from_gst_name(x))
+            .collect::<Option<Vec<_>>>()?,
+        Some(FieldVal::Range(..)) => return None,
     })
 }
 
@@ -421,7 +433,20 @@ impl CapsSet {
             "private/teletext" => text_set(TextFormat::Teletext),
             "meta/x-klv" => Some(CapsSet::one(Caps::Klv)),
             "application/x-onvif-metadata" => Some(CapsSet::one(Caps::OnvifMetadata)),
-            "meta/x-st-2038" => Some(CapsSet::one(Caps::St2038)),
+            "meta/x-st-2038" => {
+                let alignments = expand_st2038_alignment(fv("alignment"))?;
+                let rates = expand_rate(fv("framerate"))?;
+                let mut alts = Vec::new();
+                for &alignment in &alignments {
+                    for framerate in &rates {
+                        alts.push(Caps::St2038 {
+                            alignment,
+                            framerate: framerate.clone(),
+                        });
+                    }
+                }
+                Some(CapsSet::from_alternatives(alts))
+            }
             // The container media types, the inverse of what `to_gst_string`
             // prints for a `ByteStream`, so a caps string round-trips and an
             // encoding profile can name its container. `video/quicktime` parses
@@ -628,6 +653,23 @@ mod tests {
                 .unwrap_or_else(|| panic!("{printed} does not parse back"));
             assert_eq!(parsed.alternatives(), [caps].as_slice(), "{printed}");
         }
+    }
+
+    #[test]
+    fn st2038_caps_parse_back_and_leave_an_absent_alignment_open() {
+        for alignment in St2038Alignment::ALL {
+            let caps = Caps::St2038 {
+                alignment,
+                framerate: Rate::Fixed(framerate_q16_from_fraction(30_000, 1_001).unwrap()),
+            };
+            let printed = caps.to_gst_string();
+            let parsed = CapsSet::from_gst_string(&printed)
+                .unwrap_or_else(|| panic!("{printed} does not parse back"));
+            assert_eq!(parsed.alternatives(), [caps].as_slice(), "{printed}");
+        }
+        let open = CapsSet::from_gst_string("meta/x-st-2038").unwrap();
+        assert_eq!(open, crate::caps::st2038_any_alignment(Rate::Any));
+        assert!(CapsSet::from_gst_string("meta/x-st-2038,alignment=field").is_none());
     }
 
     #[test]

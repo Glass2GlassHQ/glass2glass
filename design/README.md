@@ -56,7 +56,7 @@ The types you meet everywhere are all in `g2g-core`:
 | Type | Role |
 | :--- | :--- |
 | `Frame` | one media buffer: a `MemoryDomain` payload + `FrameTiming` + a sequence number + optional metadata. Caps live on the *link*, not the frame. |
-| `PipelinePacket` | what crosses a link: `CapsChanged` / `DataFrame` / `Segment` / `Flush` / `Eos` / `Overwrite` / `SpliceInfo`, plus the arm-local `Tick`. |
+| `PipelinePacket` | what crosses a link: `CapsChanged` / `DataFrame` / `Segment` / `Flush` / `Eos` / `Overwrite` / `SpliceInfo` / `Gap`, plus the arm-local `Tick`. |
 | `Caps` | the typed capability algebra (`RawVideo` / `CompressedVideo` / `Audio` / `Tensor` / `Text` / `ByteStream`), negotiated per link. |
 | `AsyncElement` / `SourceLoop` | the two element traits, transform-or-sink and source. Pads are implicit in the trait shape, not a runtime object. |
 | `MemoryDomain` | where a frame's bytes live: System, DMABUF, CUDA, Vulkan / WebGPU texture, the basis for zero-copy. |
@@ -149,6 +149,10 @@ pub enum PipelinePacket {
     /// 90 kHz clock. It travels with the video like gst's SCTE-35 event: an
     /// element that does not handle it passes it on, and `mpegtsmux` writes it.
     SpliceInfo(Frame),
+    /// No data on this stream from `pts_ns` for `duration_ns`, gst's GAP
+    /// event. A fan-in waiting on the stream stops waiting for that span, and
+    /// an element that does not handle it passes it on.
+    Gap { pts_ns: u64, duration_ns: u64 },
 }
 
 pub struct Frame {

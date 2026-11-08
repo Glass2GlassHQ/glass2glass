@@ -292,9 +292,10 @@ libraries installed.
     flvdemux declares `au`.
   - An MP4 audio track whose edit list replays media plays its samples once:
     replayed edits need sample-accurate clipping, as the video path lays them out.
-- **ST 2038 elements:** gst-plugins-rs's `st2038ancdemux` and `st2038ancmux`,
-  and `st2038combiner` and `st2038extractor` against an ancillary frame meta, on
-  `st2038::parse_st2038` and `write_st2038`.
+- **ST 2038 elements:** gst-plugins-rs's `st2038combiner` and
+  `st2038extractor` against an ancillary frame meta, on `st2038::parse_st2038`
+  and `write_st2038`. `st2038ancdemux` should add a port when a stream no pad
+  names appears, once a launch line can link a pad that appears at run time.
 
 ## Codecs
 

@@ -9,10 +9,11 @@ use core::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
+use g2g_core::fanout::MultiInputElement;
 use g2g_core::query::LatencyReport;
 use g2g_core::runtime::{
     block_on, run_graph, run_graph_mutable, run_simple_pipeline, run_source_transform_sink,
-    GraphNode, Join2, SourceLoop,
+    GraphNode, GraphNodeRef, Join2, SourceLoop,
 };
 use g2g_core::{
     AsyncElement, Caps, ConfigureOutcome, Dim, Frame, FrameTiming, G2gError, Graph, OutputSink,
@@ -261,4 +262,81 @@ fn a_spliced_element_is_told_the_runs_liveness() {
 
     assert_told(&sink_told, true, "the sink");
     assert_told(&spliced_told, true, "the spliced element");
+}
+
+/// A two-input fan-in that forwards input 0, recording what the runner told it
+/// against the frames it had already processed.
+#[derive(Default)]
+struct MuxProbe {
+    liveness: Vec<(bool, usize)>,
+    output_caps: Vec<(Caps, usize)>,
+    seen: usize,
+}
+
+impl MultiInputElement for MuxProbe {
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    where
+        Self: 'a;
+
+    fn input_count(&self) -> usize {
+        2
+    }
+    fn intercept_caps(&self, _input: usize, upstream_caps: &Caps) -> Result<Caps, G2gError> {
+        Ok(upstream_caps.clone())
+    }
+    fn configure_pipeline(
+        &mut self,
+        _input: usize,
+        _absolute_caps: &Caps,
+    ) -> Result<ConfigureOutcome, G2gError> {
+        Ok(ConfigureOutcome::Accepted)
+    }
+    fn output_caps(&self) -> Result<Caps, G2gError> {
+        Ok(caps())
+    }
+    fn configure_output(&mut self, output_caps: &Caps) -> Result<(), G2gError> {
+        self.output_caps.push((output_caps.clone(), self.seen));
+        Ok(())
+    }
+    fn configure_liveness(&mut self, live: bool) {
+        self.liveness.push((live, self.seen));
+    }
+    fn process<'a>(
+        &'a mut self,
+        input: usize,
+        packet: PipelinePacket,
+        out: &'a mut dyn OutputSink,
+    ) -> Self::ProcessFuture<'a> {
+        Box::pin(async move {
+            if let PipelinePacket::DataFrame(_) = packet {
+                self.seen += 1;
+                if input == 0 {
+                    out.push(packet).await?;
+                }
+            }
+            Ok(())
+        })
+    }
+}
+
+#[test]
+fn a_fan_in_is_told_liveness_and_its_output_caps_before_its_first_frame() {
+    for live in [true, false] {
+        let mut first = Src::new(live);
+        let mut second = Src::new(false);
+        let mut mux = MuxProbe::default();
+        let mut sink = Probe::new();
+        let mut g: Graph<GraphNodeRef<'_>> = Graph::new();
+        let mux_node = g.add_muxer(GraphNodeRef::muxer_ref(&mut mux), 2);
+        let first_node = g.add_source(GraphNodeRef::source_ref(&mut first));
+        let second_node = g.add_source(GraphNodeRef::source_ref(&mut second));
+        let sink_node = g.add_sink(GraphNodeRef::element_ref(&mut sink));
+        g.link(first_node, mux_node.input(0)).unwrap();
+        g.link(second_node, mux_node.input(1)).unwrap();
+        g.link(mux_node.output(), sink_node).unwrap();
+        block_on(run_graph(g, &ZeroClock, LINK_CAPACITY)).expect("graph runs");
+        assert_eq!(mux.liveness, vec![(live, 0)], "live={live}");
+        assert_eq!(mux.output_caps, vec![(caps(), 0)]);
+    }
 }

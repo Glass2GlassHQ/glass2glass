@@ -789,6 +789,14 @@ pub trait MultiInputElement: ElementBound {
     /// The merged-output caps, valid once every input has been configured.
     fn output_caps(&self) -> Result<Caps, G2gError>;
 
+    // the solved output caps, after every input pad is configured
+    fn configure_output(&mut self, _output_caps: &Caps) -> Result<(), G2gError> {
+        Ok(())
+    }
+
+    // whether a live source feeds the pipeline, as AsyncElement::configure_liveness hears it
+    fn configure_liveness(&mut self, _live: bool) {}
+
     /// A [`ReverseChannel`] for input pad `input`, if this session routes reverse
     /// signals (WebRTC PLI / BWE) back to individual upstream sources. The runner
     /// clones it before running and polls it after each push from that source,
@@ -1121,7 +1129,8 @@ impl AsyncElement for Gate {
             | PipelinePacket::Flush
             | PipelinePacket::Segment(_)
             | PipelinePacket::Overwrite { .. }
-            | PipelinePacket::SpliceInfo(_) => true,
+            | PipelinePacket::SpliceInfo(_)
+            | PipelinePacket::Gap { .. } => true,
             // Runner forwards Eos after process() returns. A fan-in arm's
             // deadline tick never reaches a 1->1 element.
             PipelinePacket::Eos | PipelinePacket::Tick => false,
@@ -1280,7 +1289,8 @@ impl MultiOutputElement for Router {
             | PipelinePacket::Flush
             | PipelinePacket::Segment(_)
             | PipelinePacket::Overwrite { .. }
-            | PipelinePacket::SpliceInfo(_) => 0..self.ports,
+            | PipelinePacket::SpliceInfo(_)
+            | PipelinePacket::Gap { .. } => 0..self.ports,
             // Runner broadcasts Eos to all ports after process() returns. A
             // fan-in arm's deadline tick never reaches a 1->N element.
             PipelinePacket::Eos | PipelinePacket::Tick => 0..0,
@@ -1421,7 +1431,8 @@ mod tests {
                 | PipelinePacket::Segment(_)
                 | PipelinePacket::Tick
                 | PipelinePacket::Overwrite { .. }
-                | PipelinePacket::SpliceInfo(_) => {}
+                | PipelinePacket::SpliceInfo(_)
+                | PipelinePacket::Gap { .. } => {}
             }
             core::task::Poll::Ready(Ok(PushOutcome::Accepted))
         }
@@ -1452,7 +1463,8 @@ mod tests {
                 | PipelinePacket::Segment(_)
                 | PipelinePacket::Tick
                 | PipelinePacket::Overwrite { .. }
-                | PipelinePacket::SpliceInfo(_) => {}
+                | PipelinePacket::SpliceInfo(_)
+                | PipelinePacket::Gap { .. } => {}
             }
             core::task::Poll::Ready(Ok(PushOutcome::Accepted))
         }

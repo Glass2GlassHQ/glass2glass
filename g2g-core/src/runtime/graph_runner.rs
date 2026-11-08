@@ -1629,6 +1629,14 @@ fn configure_nodes(
                         return Ok(Some((vg.edge(eid).src.node, counter)));
                     }
                 }
+                if let Some(&out_edge) = vg.out_edges(node).first() {
+                    let GraphNodeRef::Muxer(elem) =
+                        vg.element_mut(node).ok_or(G2gError::CapsMismatch)?
+                    else {
+                        return Err(G2gError::CapsMismatch);
+                    };
+                    elem.configure_output(&solution[out_edge])?;
+                }
             }
         }
     }
@@ -1872,8 +1880,10 @@ async fn prepare_graph<'a>(
     // arm starts. Unconditional, unlike the clock below: a path with no live
     // source is told `false` rather than left to assume one.
     for &node in topo {
-        if let Some(GraphNodeRef::Element(elem)) = vg.element_mut(node) {
-            elem.configure_liveness(latency.live);
+        match vg.element_mut(node) {
+            Some(GraphNodeRef::Element(elem)) => elem.configure_liveness(latency.live),
+            Some(GraphNodeRef::Muxer(elem)) => elem.configure_liveness(latency.live),
+            _ => {}
         }
     }
 
@@ -6814,6 +6824,13 @@ pub(crate) fn try_clone_packet(packet: &PipelinePacket) -> Result<PipelinePacket
             frame: frame.share(),
         },
         PipelinePacket::SpliceInfo(frame) => PipelinePacket::SpliceInfo(frame.share()),
+        PipelinePacket::Gap {
+            pts_ns,
+            duration_ns,
+        } => PipelinePacket::Gap {
+            pts_ns: *pts_ns,
+            duration_ns: *duration_ns,
+        },
         // Runner-internal (a fan-in arm's deadline), so it is never on a link to
         // begin with; trivially cloneable all the same.
         PipelinePacket::Tick => PipelinePacket::Tick,

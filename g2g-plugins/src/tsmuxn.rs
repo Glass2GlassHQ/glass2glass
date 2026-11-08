@@ -469,7 +469,7 @@ fn stream_type_for(caps: &Caps, klv_sync: bool) -> Option<u8> {
             format: SubPictureFormat::DvbSub,
         } => Some(STREAM_TYPE_PRIVATE_PES),
         // ST 2038 rides a private PES told apart by its 'VANC' registration
-        Caps::St2038 => Some(STREAM_TYPE_PRIVATE_PES),
+        Caps::St2038 { .. } => Some(STREAM_TYPE_PRIVATE_PES),
         _ => None,
     }
 }
@@ -974,7 +974,7 @@ impl MultiInputElement for TsMux {
         }
         self.av1[input] = is_av1(absolute_caps);
         self.opus[input] = opus_channels(absolute_caps);
-        self.st2038[input] = *absolute_caps == Caps::St2038;
+        self.st2038[input] = matches!(absolute_caps, Caps::St2038 { .. });
         Ok(ConfigureOutcome::Accepted)
     }
 

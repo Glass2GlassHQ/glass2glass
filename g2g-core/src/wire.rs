@@ -44,8 +44,8 @@ use alloc::vec::Vec;
 use crate::caps::{
     AudioFormat, ByteStreamEncoding, Caps, ClosedCaptionFormat, CodecTag, ColorPrimaries,
     ColorRange, Colorimetry, Dim, Interlace, MatrixCoefficients, ProResVariant, Rate,
-    RawVideoFormat, SubPictureFormat, TagNamespace, TensorDType, TensorLayout, TensorShape,
-    TextFormat, TransferCharacteristics, VideoCodec,
+    RawVideoFormat, St2038Alignment, SubPictureFormat, TagNamespace, TensorDType, TensorLayout,
+    TensorShape, TextFormat, TransferCharacteristics, VideoCodec,
 };
 use crate::channels::ChannelLayout;
 use crate::frame::{Frame, FrameTiming, PipelinePacket};
@@ -85,6 +85,7 @@ const PKT_FLUSH: u8 = 3;
 const PKT_SEGMENT: u8 = 4;
 const PKT_OVERWRITE: u8 = 5;
 const PKT_SPLICE_INFO: u8 = 6;
+const PKT_GAP: u8 = 7;
 
 const DOMAIN_SYSTEM: u8 = 0;
 
@@ -674,6 +675,21 @@ fn get_rate(r: &mut Reader) -> Result<Rate, WireError> {
     })
 }
 
+fn st2038_alignment_to_u8(alignment: St2038Alignment) -> u8 {
+    match alignment {
+        St2038Alignment::Packet => 0,
+        St2038Alignment::Line => 1,
+        St2038Alignment::Frame => 2,
+    }
+}
+
+fn st2038_alignment_from_u8(tag: u8) -> Result<St2038Alignment, WireError> {
+    St2038Alignment::ALL
+        .into_iter()
+        .find(|&a| st2038_alignment_to_u8(a) == tag)
+        .ok_or(WireError::BadTag)
+}
+
 fn interlace_to_u8(i: Interlace) -> u8 {
     match i {
         Interlace::Any => 0,
@@ -841,7 +857,14 @@ fn put_caps(w: &mut Writer, c: &Caps) {
             w.u8(subpicture_format_to_u8(*format));
         }
         Caps::OnvifMetadata => w.u8(9),
-        Caps::St2038 => w.u8(11),
+        Caps::St2038 {
+            alignment,
+            framerate,
+        } => {
+            w.u8(11);
+            w.u8(st2038_alignment_to_u8(*alignment));
+            put_rate(w, framerate);
+        }
         Caps::Batch { streams } => {
             w.u8(10);
             w.u32(streams.len() as u32);
@@ -921,7 +944,10 @@ fn get_caps(r: &mut Reader) -> Result<Caps, WireError> {
             }
             Caps::Batch { streams }
         }
-        11 => Caps::St2038,
+        11 => Caps::St2038 {
+            alignment: st2038_alignment_from_u8(r.u8()?)?,
+            framerate: get_rate(r)?,
+        },
         _ => return Err(WireError::BadTag),
     })
 }
@@ -1476,6 +1502,14 @@ pub fn encode_packet(packet: &PipelinePacket) -> Result<Vec<u8>, WireError> {
             w.u8(PKT_SPLICE_INFO);
             put_frame(&mut w, frame)?;
         }
+        PipelinePacket::Gap {
+            pts_ns,
+            duration_ns,
+        } => {
+            w.u8(PKT_GAP);
+            w.u64(*pts_ns);
+            w.u64(*duration_ns);
+        }
         PipelinePacket::Eos => w.u8(PKT_EOS),
         PipelinePacket::Flush => w.u8(PKT_FLUSH),
         PipelinePacket::Segment(seg) => {
@@ -1533,6 +1567,10 @@ pub fn decode_packet(bytes: &[u8]) -> Result<PipelinePacket, WireError> {
             }
         }
         PKT_SPLICE_INFO => PipelinePacket::SpliceInfo(get_frame(&mut r)?),
+        PKT_GAP => PipelinePacket::Gap {
+            pts_ns: r.u64()?,
+            duration_ns: r.u64()?,
+        },
         PKT_EOS => PipelinePacket::Eos,
         PKT_FLUSH => PipelinePacket::Flush,
         PKT_SEGMENT => PipelinePacket::Segment(get_segment(&mut r)?),
@@ -1732,6 +1770,10 @@ mod tests {
                 format: ClosedCaptionFormat::Cea708,
             },
             Caps::OnvifMetadata,
+            Caps::St2038 {
+                alignment: St2038Alignment::Frame,
+                framerate: Rate::Fixed(25 << 16),
+            },
             Caps::Batch {
                 streams: alloc::vec![
                     Caps::OnvifMetadata,
@@ -1874,6 +1916,16 @@ mod tests {
         match roundtrip(&PipelinePacket::Segment(seg)) {
             PipelinePacket::Segment(got) => assert_eq!(got, seg),
             other => panic!("expected Segment, got {other:?}"),
+        }
+        match roundtrip(&PipelinePacket::Gap {
+            pts_ns: 40_000_000,
+            duration_ns: 500_000_000,
+        }) {
+            PipelinePacket::Gap {
+                pts_ns,
+                duration_ns,
+            } => assert_eq!((pts_ns, duration_ns), (40_000_000, 500_000_000)),
+            other => panic!("expected Gap, got {other:?}"),
         }
     }
 

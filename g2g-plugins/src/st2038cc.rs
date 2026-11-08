@@ -8,10 +8,10 @@ use alloc::vec::Vec;
 use g2g_core::log::{short_type_name, LogName, LogSource};
 use g2g_core::memory::{DomainSet, MemoryDomainKind, SystemSlice};
 use g2g_core::{
-    g2g_warn, AsyncElement, Caps, CapsConstraint, CapsSet, ClosedCaptionFormat, ConfigureOutcome,
-    ElementMetadata, Frame, FrameTiming, G2gError, MemoryDomain, MultiOutputElement,
-    MultiOutputSink, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
-    PropValue, PropertySpec,
+    g2g_warn, st2038_any_alignment, AsyncElement, Caps, CapsConstraint, CapsSet,
+    ClosedCaptionFormat, ConfigureOutcome, ElementMetadata, Frame, FrameTiming, G2gError,
+    MemoryDomain, MultiOutputElement, MultiOutputSink, OutputSink, PadTemplate, PadTemplates,
+    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, St2038Alignment,
 };
 
 use crate::st2038::{parse_st2038, write_st2038};
@@ -73,9 +73,31 @@ fn caption_frame(packet: &AncPacket, timing: FrameTiming, sequence: u64) -> Fram
 
 fn accept_st2038(caps: &Caps) -> Result<Caps, G2gError> {
     match caps {
-        Caps::St2038 => Ok(Caps::St2038),
+        Caps::St2038 { .. } => Ok(caps.clone()),
         _ => Err(G2gError::CapsMismatch),
     }
+}
+
+fn any_st2038() -> CapsSet {
+    st2038_any_alignment(Rate::Any)
+}
+
+// gst cctost2038anc writes alignment=frame unless downstream asks for another
+fn cctost2038anc_output() -> CapsSet {
+    let alignments = [
+        St2038Alignment::Frame,
+        St2038Alignment::Line,
+        St2038Alignment::Packet,
+    ];
+    CapsSet::from_alternatives(
+        alignments
+            .into_iter()
+            .map(|alignment| Caps::St2038 {
+                alignment,
+                framerate: Rate::Any,
+            })
+            .collect(),
+    )
 }
 
 // gst cctost2038anc writes line 9 unless told otherwise
@@ -110,6 +132,7 @@ pub struct CcToSt2038Anc {
     line_number: u16,
     horizontal_offset: u16,
     sdid: Option<u8>,
+    output_caps: Option<Caps>,
     caps_emitted: bool,
     log_name: LogName,
 }
@@ -121,6 +144,7 @@ impl Default for CcToSt2038Anc {
             line_number: DEFAULT_LINE_NUMBER,
             horizontal_offset: 0,
             sdid: None,
+            output_caps: None,
             caps_emitted: false,
             log_name: LogName::default(),
         }
@@ -182,16 +206,18 @@ impl AsyncElement for CcToSt2038Anc {
     }
 
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
-        CapsConstraint::Mapping(Vec::from([(
-            caption_caps_set(),
-            CapsSet::one(Caps::St2038),
-        )]))
+        CapsConstraint::Mapping(Vec::from([(caption_caps_set(), cctost2038anc_output())]))
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         let carriage = carriage_of_caps(absolute_caps).ok_or(G2gError::CapsMismatch)?;
         self.sdid = Some(carriage.sdid);
         Ok(ConfigureOutcome::Accepted)
+    }
+
+    fn configure_output(&mut self, output_caps: &Caps) -> Result<(), G2gError> {
+        self.output_caps = Some(accept_st2038(output_caps)?);
+        Ok(())
     }
 
     fn metadata(&self) -> ElementMetadata {
@@ -242,6 +268,7 @@ impl AsyncElement for CcToSt2038Anc {
             match packet {
                 PipelinePacket::DataFrame(frame) => {
                     let sdid = self.sdid.ok_or(G2gError::NotConfigured)?;
+                    let output_caps = self.output_caps.clone().ok_or(G2gError::NotConfigured)?;
                     let captions = frame
                         .domain
                         .require_system_slice(short_type_name::<Self>())?;
@@ -249,7 +276,7 @@ impl AsyncElement for CcToSt2038Anc {
                         return Ok(());
                     };
                     if !self.caps_emitted {
-                        out.push(PipelinePacket::CapsChanged(Caps::St2038)).await?;
+                        out.push(PipelinePacket::CapsChanged(output_caps)).await?;
                         self.caps_emitted = true;
                     }
                     let st2038 = Frame::new(
@@ -263,7 +290,7 @@ impl AsyncElement for CcToSt2038Anc {
                 }
                 // the runner hands a transform its own solved output caps, upstream caption caps stop here
                 PipelinePacket::CapsChanged(caps) => {
-                    if caps != Caps::St2038 {
+                    if self.output_caps.as_ref() != Some(&caps) {
                         return Ok(());
                     }
                     self.caps_emitted = true;
@@ -303,7 +330,7 @@ impl PadTemplates for CcToSt2038Anc {
     fn pad_templates() -> Vec<PadTemplate> {
         Vec::from([
             PadTemplate::sink(caption_caps_set()),
-            PadTemplate::source(CapsSet::one(Caps::St2038)),
+            PadTemplate::source(any_st2038()),
         ])
     }
 }
@@ -337,10 +364,7 @@ impl AsyncElement for St2038AncToCc {
     }
 
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
-        CapsConstraint::Mapping(Vec::from([(
-            CapsSet::one(Caps::St2038),
-            caption_caps_set(),
-        )]))
+        CapsConstraint::Mapping(Vec::from([(any_st2038(), caption_caps_set())]))
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -434,7 +458,7 @@ impl LogSource for St2038AncToCc {
 impl PadTemplates for St2038AncToCc {
     fn pad_templates() -> Vec<PadTemplate> {
         Vec::from([
-            PadTemplate::sink(CapsSet::one(Caps::St2038)),
+            PadTemplate::sink(any_st2038()),
             PadTemplate::source(caption_caps_set()),
         ])
     }
@@ -487,7 +511,7 @@ impl MultiOutputElement for St2038AncToCcDemux {
     }
 
     fn caps_constraint_as_input(&self) -> CapsConstraint<'_> {
-        CapsConstraint::Accepts(CapsSet::one(Caps::St2038))
+        CapsConstraint::Accepts(any_st2038())
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -613,24 +637,37 @@ mod tests {
         Caps::ClosedCaption { format }
     }
 
+    fn frame_st2038() -> Caps {
+        Caps::St2038 {
+            alignment: St2038Alignment::Frame,
+            framerate: Rate::Any,
+        }
+    }
+
+    fn cctost2038anc_to(output: &Caps) -> CcToSt2038Anc {
+        let mut to_st2038 = CcToSt2038Anc::new();
+        to_st2038.configure_output(output).unwrap();
+        to_st2038
+    }
+
     #[test]
     fn caption_round_trip_matches_gst_cctost2038anc() {
         let cea708 = caps(ClosedCaptionFormat::Cea708Cdp);
         let mut to_captions = St2038AncToCc::new();
         to_captions.configure_output(&cea708).unwrap();
-        let captions = run(&mut to_captions, &Caps::St2038, &[GST_CEA708_PACKET]);
+        let captions = run(&mut to_captions, &frame_st2038(), &[GST_CEA708_PACKET]);
         assert_eq!(first_caps(&captions.packets), Some(cea708.clone()));
         let cdp = data_bytes(&captions.packets);
         assert!(parse_cdp(&cdp).is_some());
 
-        let st2038 = run(&mut CcToSt2038Anc::new(), &cea708, &[&cdp]);
-        assert_eq!(first_caps(&st2038.packets), Some(Caps::St2038));
+        let st2038 = run(&mut cctost2038anc_to(&frame_st2038()), &cea708, &[&cdp]);
+        assert_eq!(first_caps(&st2038.packets), Some(frame_st2038()));
         assert_eq!(data_bytes(&st2038.packets), GST_CEA708_PACKET);
     }
 
     #[test]
     fn cea608_packet_takes_the_location_properties() {
-        let mut to_st2038 = CcToSt2038Anc::new();
+        let mut to_st2038 = cctost2038anc_to(&frame_st2038());
         to_st2038
             .set_property("line-number", PropValue::Uint(21))
             .unwrap();
@@ -655,7 +692,7 @@ mod tests {
             .unwrap();
         let cea708 = run(
             &mut to_cea708,
-            &Caps::St2038,
+            &frame_st2038(),
             &[&data_bytes(&st2038.packets)],
         );
         assert!(data_bytes(&cea708.packets).is_empty());
@@ -692,7 +729,7 @@ mod tests {
         demux
             .name_output_ports(&["src_cea608", "src_cea708"])
             .unwrap();
-        demux.configure_pipeline(&Caps::St2038).unwrap();
+        demux.configure_pipeline(&frame_st2038()).unwrap();
         let mut out = PortCollectSink::new(2);
         let runtime = tokio::runtime::Builder::new_current_thread()
             .build()

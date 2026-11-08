@@ -46,6 +46,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M2130: ST 2038 ANC packet parsing and writing, sharing ST 291 words with `st2110anc`, which now keeps 10-bit user data words.
 - M2131: `cctost2038anc` and `st2038anctocc` carry CEA-608 and CEA-708 captions in and out of ST 2038.
 - M2132: a single link from a named `st2038anctocc` pad carries that pad's caption type.
+- M2133: `st2038ancdemux` and `st2038ancmux`, live included, with ST 2038 caps alignment and framerate and a `Gap` packet.
 
 ## 0.14.0
 
