@@ -784,7 +784,7 @@ impl LinkSettings {
         use std::net::IpAddr;
         let socket = bind_udp_socket(UdpBind {
             local,
-            iface: link.multicast_iface.as_deref(),
+            ifaces: link.multicast_iface.as_slice(),
             multicast: group.map(|group| MulticastJoin {
                 group,
                 sources: &[],

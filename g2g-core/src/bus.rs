@@ -267,6 +267,11 @@ pub enum BusMessage {
         pts_ns: u64,
         digest: alloc::string::String,
     },
+    // gst udpsrc's `GstUDPSrcTimeout` element message, posted again each time the wait repeats
+    ReceiveTimeout {
+        element: alloc::string::String,
+        timeout_ns: u64,
+    },
 }
 
 /// What a restarting source is doing, gst `fallbacksrc`'s `status`.

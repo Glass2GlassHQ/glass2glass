@@ -1308,7 +1308,8 @@ fn attach_launch_seeks(
 
 /// Drain the bus, which nothing else reads on this path: keep the element it
 /// named as having ended the run, print each `checksumsink` line on stdout as
-/// gst-launch does, and under `-v` print each sink's frame-identity report.
+/// gst-launch does, and under `-v` print each sink's frame-identity report and
+/// each receive timeout.
 fn drain_bus(bus: &Bus, verbose: bool, failed: &mut Option<String>) {
     while let Some(message) = bus.try_recv() {
         handle_bus_message(message, verbose, failed);
@@ -1326,6 +1327,15 @@ fn handle_bus_message(message: BusMessage, verbose: bool, failed: &mut Option<St
         }
         BusMessage::FrameIdentity { element, stats } if verbose => {
             eprintln!("\r{}", frame_identity_line(&element, &stats));
+        }
+        BusMessage::ReceiveTimeout {
+            element,
+            timeout_ns,
+        } if verbose => {
+            eprintln!(
+                "\r{element}: no data for {:.1} ms",
+                timeout_ns as f64 / NANOS_PER_MILLISECOND
+            );
         }
         _ => {}
     }

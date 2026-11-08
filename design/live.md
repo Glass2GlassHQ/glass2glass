@@ -522,10 +522,15 @@ so no datagram is ever truncated, as with gst's C `udpsrc`. Linux kernel receive
 timestamps (`SO_TIMESTAMPNS`) are wall-clock time, so a datagram's age on that
 clock is subtracted from the monotonic clock to give its `arrival_ns`.
 
-`source-filter` drops datagrams by sender address, and an inclusive filter on a
-multicast group also joins only those senders (source-specific multicast), as
-gst's `udpsrc2` does. Binding, port reuse, `SO_BINDTODEVICE` and the group joins
-live in `udpsocket.rs`, shared with the RIST links and `PtpClient`. Raw mode
+`source-filter` drops datagrams by sender, its host names resolved when the
+socket binds, and an inclusive filter on a multicast group also joins only those
+senders (source-specific multicast), as gst's `udpsrc2` does. `multicast-iface`
+lists interfaces to join the group on. With exactly one the socket is also bound
+to it (`SO_BINDTODEVICE`). Binding, port reuse and the group joins live in
+`udpsocket.rs`, shared with the RIST links and `PtpClient`. `timeout` posts
+`BusMessage::ReceiveTimeout`, gst's `GstUDPSrcTimeout`, each time that long
+passes with no datagram. The quiet time is kept in the receiver, since the RTP
+loop drops a pending read at every jitter or report deadline. Raw mode
 keeps one buffer per datagram unless `preserve-packetization=false`, which joins
 each read batch into one buffer. `udpsrc2` is an alias for `udpsrc`.
 

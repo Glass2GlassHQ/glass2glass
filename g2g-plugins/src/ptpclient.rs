@@ -168,7 +168,7 @@ fn bind_multicast(port: u16) -> io::Result<UdpSocket> {
     // sets; a bind only shares the port when every socket agrees.
     let sock = bind_udp_socket(UdpBind {
         local: SocketAddr::from(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port)),
-        iface: None,
+        ifaces: &[],
         multicast: Some(MulticastJoin {
             group: PTP_PRIMARY.into(),
             sources: &[],

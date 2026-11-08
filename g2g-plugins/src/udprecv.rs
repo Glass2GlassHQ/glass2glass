@@ -1,8 +1,10 @@
+use alloc::string::String;
 use alloc::vec::Vec;
 
 use std::io::{self, IoSliceMut};
 use std::net::{IpAddr, SocketAddr};
 
+use g2g_core::bus::{BusHandle, BusMessage};
 use quinn_udp::{RecvMeta, UdpSockRef, UdpSocketState};
 use tokio::io::Interest;
 use tokio::net::UdpSocket;
@@ -43,6 +45,13 @@ impl UdpReceiveConfig {
     }
 }
 
+#[derive(Debug)]
+pub(crate) struct IdleReport {
+    pub(crate) timeout_ns: u64,
+    pub(crate) bus: BusHandle,
+    pub(crate) element: String,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Datagram<'a> {
     pub(crate) payload: &'a [u8],
@@ -73,6 +82,8 @@ pub(crate) struct UdpReceiver {
     arrivals_ns: Vec<u64>,
     filled: usize,
     cursor: BatchCursor,
+    idle_report: Option<IdleReport>,
+    quiet_since_ns: u64,
 }
 
 impl UdpReceiver {
@@ -97,7 +108,15 @@ impl UdpReceiver {
             arrivals_ns: alloc::vec![0; batch_size],
             filled: 0,
             cursor: BatchCursor::default(),
+            idle_report: None,
+            quiet_since_ns: g2g_core::metrics::monotonic_ns(),
         })
+    }
+
+    #[cfg(feature = "udp-ingress")]
+    pub(crate) fn with_idle_report(mut self, report: IdleReport) -> Self {
+        self.idle_report = Some(report);
+        self
     }
 
     pub(crate) fn socket(&self) -> &UdpSocket {
@@ -155,7 +174,39 @@ impl UdpReceiver {
         None
     }
 
+    // the quiet time lives in self, since the RTP loop drops a pending recv at every jitter or report deadline
     async fn fill(&mut self) -> io::Result<()> {
+        let filled = loop {
+            let Some(timeout_ns) = self.idle_report.as_ref().map(|report| report.timeout_ns) else {
+                break self.read_batch().await?;
+            };
+            let wait_ns = self
+                .quiet_since_ns
+                .saturating_add(timeout_ns)
+                .saturating_sub(g2g_core::metrics::monotonic_ns());
+            let wait = core::time::Duration::from_nanos(wait_ns);
+            if let Ok(read) = tokio::time::timeout(wait, self.read_batch()).await {
+                break read?;
+            }
+            if let Some(report) = &self.idle_report {
+                report.bus.try_post(BusMessage::ReceiveTimeout {
+                    element: report.element.clone(),
+                    timeout_ns,
+                });
+            }
+            self.quiet_since_ns = g2g_core::metrics::monotonic_ns();
+        };
+        let clocks = ClockReadings::now();
+        self.quiet_since_ns = clocks.monotonic_ns;
+        for (arrival_ns, meta) in self.arrivals_ns.iter_mut().zip(&self.metas[..filled]) {
+            *arrival_ns = clocks.arrival_ns(meta.timestamp);
+        }
+        self.filled = filled;
+        self.cursor = BatchCursor::default();
+        Ok(())
+    }
+
+    async fn read_batch(&mut self) -> io::Result<usize> {
         let Self {
             socket,
             state,
@@ -163,18 +214,11 @@ impl UdpReceiver {
             metas,
             ..
         } = self;
-        let filled = socket
+        socket
             .async_io(Interest::READABLE, || {
                 receive_batch(state, socket, buffers, metas)
             })
-            .await?;
-        let clocks = ClockReadings::now();
-        for (arrival_ns, meta) in self.arrivals_ns.iter_mut().zip(&self.metas[..filled]) {
-            *arrival_ns = clocks.arrival_ns(meta.timestamp);
-        }
-        self.filled = filled;
-        self.cursor = BatchCursor::default();
-        Ok(())
+            .await
     }
 }
 
@@ -355,6 +399,32 @@ mod tests {
         assert_eq!(
             filtered_payloads(true).await,
             [b"a1".to_vec(), b"a2".to_vec()]
+        );
+    }
+
+    // the RTP loop drops a pending recv at every jitter or report deadline, shorter than the timeout here
+    #[tokio::test]
+    async fn the_receive_timeout_survives_dropped_receives() {
+        const TIMEOUT_NS: u64 = 60_000_000;
+        const RECEIVE_SLICE: core::time::Duration = core::time::Duration::from_millis(20);
+        const WATCHED_FOR: core::time::Duration = core::time::Duration::from_millis(200);
+        let (bus, handle) = g2g_core::bus::Bus::new(8);
+        let mut receiver = receiver_on("127.0.0.1:0", UdpReceiveConfig::default())
+            .with_idle_report(IdleReport {
+                timeout_ns: TIMEOUT_NS,
+                bus: handle,
+                element: String::from("udpsrc0"),
+            });
+        let watch_until = tokio::time::Instant::now() + WATCHED_FOR;
+        while tokio::time::Instant::now() < watch_until {
+            let _ = tokio::time::timeout(RECEIVE_SLICE, receiver.recv()).await;
+        }
+        assert_eq!(
+            bus.try_recv(),
+            Some(BusMessage::ReceiveTimeout {
+                element: String::from("udpsrc0"),
+                timeout_ns: TIMEOUT_NS,
+            })
         );
     }
 

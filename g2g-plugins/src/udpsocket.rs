@@ -1,3 +1,6 @@
+use alloc::string::String;
+use alloc::vec::Vec;
+
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
@@ -6,7 +9,7 @@ use socket2::{Domain, InterfaceIndexOrAddress, Protocol, Socket, Type};
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct UdpBind<'a> {
     pub(crate) local: SocketAddr,
-    pub(crate) iface: Option<&'a str>,
+    pub(crate) ifaces: &'a [String],
     pub(crate) multicast: Option<MulticastJoin<'a>>,
     pub(crate) reuse: bool,
 }
@@ -27,13 +30,31 @@ pub(crate) fn bind_udp_socket(bind: UdpBind<'_>) -> io::Result<Socket> {
         #[cfg(not(windows))]
         socket.set_reuse_port(true)?;
     }
-    let interface_index = match bind.iface {
-        Some(iface) => Some(bind_to_interface(&socket, iface)?),
-        None => None,
-    };
+    let interface_indices = bind
+        .ifaces
+        .iter()
+        .map(|iface| interface_index(iface))
+        .collect::<io::Result<Vec<u32>>>()?;
+    // gst binds to the device only when one interface is named, SO_BINDTODEVICE takes just one
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    if let [iface] = bind.ifaces {
+        socket.bind_device(Some(iface.as_bytes()))?;
+    }
     socket.bind(&local.into())?;
-    if let Some(join) = bind.multicast {
-        join_group(&socket, join, interface_index.unwrap_or(0))?;
+    let Some(join) = bind.multicast else {
+        return Ok(socket);
+    };
+    // interface 0 lets the kernel pick
+    let join_on = if interface_indices.is_empty() {
+        alloc::vec![0]
+    } else {
+        interface_indices
+    };
+    for &index in &join_on {
+        join_group(&socket, join, index)?;
+    }
+    if join.group.is_ipv6() {
+        socket.set_multicast_if_v6(join_on[0])?;
     }
     Ok(socket)
 }
@@ -45,7 +66,7 @@ fn join_group(socket: &Socket, join: MulticastJoin<'_>, interface_index: u32) ->
         IpAddr::V4(_) => socket.set_multicast_all_v4(false)?,
         IpAddr::V6(_) => socket.set_multicast_all_v6(false)?,
     }
-    let sources: alloc::vec::Vec<IpAddr> = join
+    let sources: Vec<IpAddr> = join
         .sources
         .iter()
         .copied()
@@ -64,11 +85,7 @@ fn join_group(socket: &Socket, join: MulticastJoin<'_>, interface_index: u32) ->
         IpAddr::V4(group) => {
             socket.join_multicast_v4_n(&group, &InterfaceIndexOrAddress::Index(interface_index))
         }
-        // interface 0 lets the kernel pick
-        IpAddr::V6(group) => {
-            socket.join_multicast_v6(&group, interface_index)?;
-            socket.set_multicast_if_v6(interface_index)
-        }
+        IpAddr::V6(group) => socket.join_multicast_v6(&group, interface_index),
     }
 }
 
@@ -128,20 +145,19 @@ fn join_source_group(
     socket: &Socket,
     group: IpAddr,
     source: IpAddr,
-    _interface_index: u32,
+    interface_index: u32,
 ) -> io::Result<()> {
-    match (group, source) {
-        (IpAddr::V4(group), IpAddr::V4(source)) => {
+    // socket2 names the interface of a source-specific join by address, not index
+    match (group, source, interface_index) {
+        (IpAddr::V4(group), IpAddr::V4(source), 0) => {
             socket.join_ssm_v4(&source, &group, &Ipv4Addr::UNSPECIFIED)
         }
         _ => Err(io::Error::from(io::ErrorKind::Unsupported)),
     }
 }
 
-// SO_BINDTODEVICE, what GStreamer applies for `multicast-iface`
-#[cfg(any(target_os = "linux", target_os = "android"))]
-fn bind_to_interface(socket: &Socket, name: &str) -> io::Result<u32> {
-    socket.bind_device(Some(name.as_bytes()))?;
+#[cfg(unix)]
+fn interface_index(name: &str) -> io::Result<u32> {
     let name =
         std::ffi::CString::new(name).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
     // SAFETY: `name` is a NUL-terminated string that outlives the call, which only reads it.
@@ -152,11 +168,11 @@ fn bind_to_interface(socket: &Socket, name: &str) -> io::Result<u32> {
     Ok(index)
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "android")))]
-fn bind_to_interface(_socket: &Socket, _name: &str) -> io::Result<u32> {
+#[cfg(not(unix))]
+fn interface_index(_name: &str) -> io::Result<u32> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
-        "multicast-iface needs SO_BINDTODEVICE",
+        "multicast-iface needs if_nametoindex",
     ))
 }
 

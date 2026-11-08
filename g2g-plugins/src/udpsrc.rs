@@ -28,9 +28,11 @@ use core::pin::Pin;
 
 use alloc::boxed::Box;
 use alloc::string::{String, ToString};
+use alloc::vec::Vec;
 
-use std::net::{IpAddr, SocketAddr, UdpSocket as StdUdpSocket};
+use std::net::{IpAddr, SocketAddr, ToSocketAddrs, UdpSocket as StdUdpSocket};
 
+use g2g_core::bus::BusHandle;
 use g2g_core::log::LogSource;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
@@ -48,7 +50,7 @@ use crate::rtpdepay::RtpEncoding;
 use crate::rtpjitter::JitterConfig;
 use crate::rtprecv::RtpRecvConfig;
 use crate::sdp::{SdpMedia, OPUS_CLOCK_HZ, OPUS_RTPMAP_CHANNELS};
-use crate::udprecv::{UdpReceiveConfig, UdpReceiver, MAX_DATAGRAM};
+use crate::udprecv::{IdleReport, UdpReceiveConfig, UdpReceiver, MAX_DATAGRAM};
 use crate::udpsocket::{bind_udp_socket, unspecified_address, MulticastJoin, UdpBind};
 
 // libopus decodes a mono packet into the stereo the RFC 7587 rtpmap always announces
@@ -115,11 +117,16 @@ pub struct UdpSrc {
     /// Join the group when `bind` names a multicast address.
     auto_multicast: bool,
     udp: UdpReceiveConfig,
-    multicast_iface: Option<String>,
+    multicast_ifaces: Vec<String>,
+    // as set, host names resolve when the socket binds
+    source_filter: Vec<String>,
     multicast_loop: bool,
     reuse: bool,
     receive_buffer_size: u32,
     preserve_packetization: bool,
+    receive_timeout_ns: u64,
+    bus: Option<BusHandle>,
+    instance_name: String,
 }
 
 impl UdpSrc {
@@ -138,12 +145,16 @@ impl UdpSrc {
             bytestream: None,
             auto_multicast: DEFAULT_AUTO_MULTICAST,
             udp: UdpReceiveConfig::default(),
-            multicast_iface: None,
+            multicast_ifaces: Vec::new(),
+            source_filter: Vec::new(),
             // gst udpsrc2 defaults
             multicast_loop: true,
             reuse: true,
             receive_buffer_size: 0,
             preserve_packetization: true,
+            receive_timeout_ns: 0,
+            bus: None,
+            instance_name: String::from("udpsrc"),
         }
     }
 
@@ -358,7 +369,7 @@ impl UdpSrc {
         };
         let socket = bind_udp_socket(UdpBind {
             local,
-            iface: self.multicast_iface.as_deref(),
+            ifaces: &self.multicast_ifaces,
             multicast: group.map(|group| MulticastJoin {
                 group,
                 sources: ssm_sources,
@@ -382,13 +393,21 @@ impl UdpSrc {
     }
 }
 
-// gst also resolves host names here, this takes addresses only
-fn parse_source_filter(text: &str) -> Result<alloc::vec::Vec<IpAddr>, PropError> {
+fn comma_list(text: &str) -> Vec<String> {
     text.split(',')
         .map(str::trim)
         .filter(|entry| !entry.is_empty())
-        .map(|entry| entry.parse().map_err(|_| PropError::Value))
+        .map(String::from)
         .collect()
+}
+
+fn resolve_source_filter(hosts: &[String]) -> Result<Vec<IpAddr>, G2gError> {
+    let mut addresses = Vec::new();
+    for host in hosts {
+        let resolved = (host.as_str(), 0).to_socket_addrs().map_err(io_err)?;
+        addresses.extend(resolved.map(|address| address.ip()));
+    }
+    Ok(addresses)
 }
 
 impl LogSource for UdpSrc {
@@ -466,6 +485,7 @@ impl SourceLoop for UdpSrc {
     }
 
     fn configure_pipeline(&mut self, _absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
+        self.udp.source_filter = resolve_source_filter(&self.source_filter)?;
         if self.std_socket.is_none() {
             self.std_socket = Some(self.bind_socket()?);
         }
@@ -618,12 +638,12 @@ impl SourceLoop for UdpSrc {
             PropertySpec::new(
                 "multicast-iface",
                 PropKind::Str,
-                "network interface to join the multicast group on (Linux)",
+                "comma-separated network interfaces to join the multicast group on",
             ),
             PropertySpec::new(
                 "source-filter",
                 PropKind::Str,
-                "comma-separated sender IP addresses to accept (to drop, with source-filter-exclusive)",
+                "comma-separated sender addresses or host names to accept (to drop, with source-filter-exclusive)",
             ),
             PropertySpec::new(
                 "source-filter-exclusive",
@@ -662,6 +682,12 @@ impl SourceLoop for UdpSrc {
                 "one buffer per datagram; off joins each read batch into one buffer (bytestream-format only)",
             )
             .with_default("true"),
+            PropertySpec::new(
+                "timeout",
+                PropKind::Uint,
+                "post a receive-timeout bus message after this many nanoseconds without data (0 = off)",
+            )
+            .with_default("0"),
             PropertySpec::new(
                 "skip-first-bytes",
                 PropKind::Uint,
@@ -759,17 +785,15 @@ impl SourceLoop for UdpSrc {
                 Ok(())
             }
             "multicast-iface" => {
-                let iface = value.as_str().ok_or(PropError::Type)?.trim();
-                // gst takes a comma-separated list, one socket here binds to one interface
-                if iface.contains(',') {
-                    return Err(PropError::Value);
-                }
-                self.multicast_iface = (!iface.is_empty()).then(|| iface.to_string());
+                self.multicast_ifaces = comma_list(value.as_str().ok_or(PropError::Type)?);
                 Ok(())
             }
             "source-filter" => {
-                let text = value.as_str().ok_or(PropError::Type)?;
-                self.udp.source_filter = parse_source_filter(text)?;
+                self.source_filter = comma_list(value.as_str().ok_or(PropError::Type)?);
+                Ok(())
+            }
+            "timeout" => {
+                self.receive_timeout_ns = value.as_uint().ok_or(PropError::Type)?;
                 Ok(())
             }
             "source-filter-exclusive" => {
@@ -838,17 +862,9 @@ impl SourceLoop for UdpSrc {
             "current-port" => Some(PropValue::Uint(self.local_port().unwrap_or(0) as u64)),
             "buffer-size" => Some(PropValue::Uint(u64::from(self.receive_buffer_size))),
             "mtu" => Some(PropValue::Uint(self.udp.mtu as u64)),
-            "multicast-iface" => Some(PropValue::Str(
-                self.multicast_iface.clone().unwrap_or_default(),
-            )),
-            "source-filter" => Some(PropValue::Str(
-                self.udp
-                    .source_filter
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<alloc::vec::Vec<_>>()
-                    .join(","),
-            )),
+            "multicast-iface" => Some(PropValue::Str(self.multicast_ifaces.join(","))),
+            "source-filter" => Some(PropValue::Str(self.source_filter.join(","))),
+            "timeout" => Some(PropValue::Uint(self.receive_timeout_ns)),
             "source-filter-exclusive" => Some(PropValue::Bool(self.udp.source_filter_exclusive)),
             "loop" => Some(PropValue::Bool(self.multicast_loop)),
             "reuse" => Some(PropValue::Bool(self.reuse)),
@@ -871,6 +887,14 @@ impl SourceLoop for UdpSrc {
         LatencyReport::live(period_ns, None)
     }
 
+    fn set_bus(&mut self, bus: BusHandle) {
+        self.bus = Some(bus);
+    }
+
+    fn set_instance_name(&mut self, name: String) {
+        self.instance_name = name;
+    }
+
     fn run<'a>(&'a mut self, out: &'a mut dyn OutputSink) -> Self::RunFuture<'a> {
         Box::pin(async move {
             if !self.configured {
@@ -879,6 +903,18 @@ impl SourceLoop for UdpSrc {
             let std = self.std_socket.take().ok_or(G2gError::NotConfigured)?;
             let socket = tokio::net::UdpSocket::from_std(std).map_err(io_err)?;
             let mut receiver = UdpReceiver::new(socket, self.udp.clone()).map_err(io_err)?;
+            if self.receive_timeout_ns > 0 {
+                match self.bus.clone() {
+                    Some(bus) => {
+                        receiver = receiver.with_idle_report(IdleReport {
+                            timeout_ns: self.receive_timeout_ns,
+                            bus,
+                            element: self.instance_name.clone(),
+                        });
+                    }
+                    None => g2g_core::g2g_warn!(self, "`timeout` has no bus to post to"),
+                }
+            }
 
             if self.bytestream.is_some() {
                 return receive_datagrams(
@@ -943,6 +979,17 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn source_filter_resolves_host_names_and_keeps_addresses() {
+        let resolved =
+            resolve_source_filter(&comma_list("localhost, 192.0.2.7")).expect("both resolve");
+        assert!(resolved.iter().any(IpAddr::is_loopback), "{resolved:?}");
+        assert!(
+            resolved.contains(&"192.0.2.7".parse().unwrap()),
+            "{resolved:?}"
+        );
     }
 
     #[test]
