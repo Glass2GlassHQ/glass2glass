@@ -26,6 +26,7 @@ use core::future::Future;
 use core::pin::Pin;
 
 use alloc::boxed::Box;
+use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -1285,8 +1286,8 @@ struct SsaState {
     i_style_align: Option<usize>,
     /// `MarginL` / `MarginR` / `MarginV` columns of the styles `Format:` line.
     i_style_margins: (Option<usize>, Option<usize>, Option<usize>),
-    /// Style name -> its placement defaults, in declaration order.
-    styles: Vec<(String, SsaStyle)>,
+    /// Lowercased style name -> the placement defaults its first declaration gives.
+    styles: BTreeMap<String, SsaStyle>,
 }
 
 impl Default for SsaState {
@@ -1308,7 +1309,7 @@ impl Default for SsaState {
             i_style_name: 0,
             i_style_align: None,
             i_style_margins: (None, None, None),
-            styles: Vec::new(),
+            styles: BTreeMap::new(),
         }
     }
 }
@@ -1407,7 +1408,8 @@ impl SsaState {
             return; // nothing placeable in this style
         }
         self.styles
-            .push((String::from(*name), SsaStyle { align, margins }));
+            .entry(name.to_ascii_lowercase())
+            .or_insert(SsaStyle { align, margins });
     }
 
     /// Parse one `Dialogue:` body into a cue using the resolved column indices.
@@ -1432,12 +1434,8 @@ impl SsaState {
         let style = fields
             .get(self.i_style)
             .map(|s| s.trim())
-            .and_then(|name| {
-                self.styles
-                    .iter()
-                    .find(|(n, _)| n.eq_ignore_ascii_case(name))
-            })
-            .map(|(_, s)| *s)
+            .and_then(|name| self.styles.get(&name.to_ascii_lowercase()))
+            .copied()
             .unwrap_or_default();
         let an = ass_inline_alignment(raw).or(style.align);
         let mut settings = an.map(ass_alignment_settings).unwrap_or_default();
@@ -1534,8 +1532,8 @@ fn ass_inline_pos(raw: &str) -> Option<(u32, u32)> {
         let mut block = &after[..end];
         while let Some(at) = block.find("\\pos(") {
             let tail = &block[at + 5..];
-            block = tail;
             let Some(close) = tail.find(')') else { break };
+            block = &tail[close + 1..];
             let mut parts = tail[..close].split(',');
             let mut coord = || {
                 let v = parts.next()?.trim();
@@ -1976,7 +1974,11 @@ fn find_paragraph_close(s: &str) -> Option<(usize, usize)> {
     loop {
         let lt = s[from..].find("</")? + from;
         let after = &s[lt + 2..];
-        let gt = after.find('>')?;
+        let gt = after.find(['<', '>'])?;
+        if after.as_bytes()[gt] == b'<' {
+            from = lt + 2 + gt;
+            continue;
+        }
         let name = after[..gt].trim();
         let local = name.rsplit(':').next().unwrap_or(name);
         if local.eq_ignore_ascii_case("p") {
@@ -2059,6 +2061,8 @@ fn push_collapsed(out: &mut String, text: &str) {
 /// Decode the XML predefined entities and numeric character references. An
 /// unrecognised `&...;` is left verbatim (a lone `&` is common in dirty input).
 fn decode_entities(s: &str) -> String {
+    // `#x10FFFF` is the longest entity name decoded here
+    const LONGEST_ENTITY: usize = 8;
     if !s.contains('&') {
         return s.into();
     }
@@ -2067,7 +2071,11 @@ fn decode_entities(s: &str) -> String {
     while let Some(amp) = rest.find('&') {
         out.push_str(&rest[..amp]);
         let after = &rest[amp + 1..];
-        match after.find(';') {
+        match after
+            .bytes()
+            .take(LONGEST_ENTITY + 1)
+            .position(|b| b == b';')
+        {
             Some(semi) => {
                 let ent = &after[..semi];
                 let decoded = match ent {
@@ -2149,31 +2157,77 @@ fn frac_of_unit_ns(frac: &str, unit_ns: u64) -> u64 {
     ((unit_ns as u128 * frac_int as u128) / denom) as u64
 }
 
-/// Length of the longest valid-UTF8 prefix of `buf`. A multi-byte char may be
-/// split across a chunk boundary; only this prefix is safe to parse, and the
-/// trailing partial-char bytes wait in the buffer for the next chunk.
-fn utf8_prefix_len(buf: &[u8]) -> usize {
-    match core::str::from_utf8(buf) {
-        Ok(s) => s.len(),
-        Err(e) => e.valid_up_to(),
-    }
+#[derive(Debug, Default)]
+struct SubtitleText {
+    text: String,
+    // the first bytes of a character split across chunks
+    undecoded: Vec<u8>,
+    newline_scanned_to: usize,
+    line_start: usize,
 }
 
-/// Byte offset just past the last blank-line separator in `s` (a line empty
-/// after trimming), i.e. the end of the last fully terminated block. `None` if
-/// no blank line has arrived yet, so no block is known complete.
-fn last_block_boundary(s: &str) -> Option<usize> {
-    let mut boundary = None;
-    let mut line_start = 0;
-    for (i, &b) in s.as_bytes().iter().enumerate() {
-        if b == b'\n' {
-            if s[line_start..i].trim().is_empty() {
-                boundary = Some(i + 1);
+struct LineEnds {
+    line: Option<usize>,
+    blank_line: Option<usize>,
+}
+
+impl SubtitleText {
+    fn push_bytes(&mut self, bytes: &[u8]) {
+        let mut pending = core::mem::take(&mut self.undecoded);
+        pending.extend_from_slice(bytes);
+        let mut rest = pending.as_slice();
+        loop {
+            match core::str::from_utf8(rest) {
+                Ok(valid) => {
+                    self.text.push_str(valid);
+                    return;
+                }
+                Err(error) => {
+                    let (valid, after) = rest.split_at(error.valid_up_to());
+                    self.text.push_str(
+                        core::str::from_utf8(valid).expect("valid_up_to is a char boundary"),
+                    );
+                    let Some(invalid_len) = error.error_len() else {
+                        self.undecoded = after.to_vec();
+                        return;
+                    };
+                    self.text.push(char::REPLACEMENT_CHARACTER);
+                    rest = &after[invalid_len..];
+                }
             }
-            line_start = i + 1;
         }
     }
-    boundary
+
+    fn finish(&mut self) -> String {
+        let mut text = core::mem::take(&mut self.text);
+        text.push_str(&String::from_utf8_lossy(&self.undecoded));
+        *self = Self::default();
+        text
+    }
+
+    fn scan_lines(&mut self) -> LineEnds {
+        let mut ends = LineEnds {
+            line: None,
+            blank_line: None,
+        };
+        let scan_from = self.newline_scanned_to;
+        for (offset, _) in self.text[scan_from..].match_indices('\n') {
+            let at = scan_from + offset;
+            if self.text[self.line_start..at].trim().is_empty() {
+                ends.blank_line = Some(at + 1);
+            }
+            ends.line = Some(at + 1);
+            self.line_start = at + 1;
+        }
+        self.newline_scanned_to = self.text.len();
+        ends
+    }
+
+    fn consume(&mut self, end: usize) {
+        self.text.drain(..end);
+        self.newline_scanned_to -= end;
+        self.line_start -= end;
+    }
 }
 
 /// Walk blank-line-separated blocks, turning each cue block into a [`Cue`].
@@ -2606,8 +2660,8 @@ fn push_stripped(line: &str, out: &mut String) {
 pub struct SubParse {
     /// Input subtitle format, fixed at `configure_pipeline`.
     format: Option<TextFormat>,
-    /// Sink bytes not yet forming a complete cue, carried to the next chunk.
-    buf: Vec<u8>,
+    /// Input not yet forming a complete cue, carried to the next chunk.
+    input: SubtitleText,
     /// SSA `[Events]` / column-order state, persisted across chunks.
     ssa: SsaState,
     /// The `X-TIMESTAMP-MAP` rebase the last WebVTT header block put in effect,
@@ -2656,11 +2710,11 @@ impl SubParse {
         if self.bom_stripped {
             return;
         }
-        if self.buf.starts_with(&[0xEF, 0xBB, 0xBF]) {
-            self.buf.drain(..3);
+        if self.input.text.starts_with('\u{FEFF}') {
+            self.input.text.drain(..'\u{FEFF}'.len_utf8());
             self.bom_stripped = true;
-        } else if self.buf.len() >= 3 {
-            // Three bytes in and not a BOM, so there is none to strip.
+        } else if !self.input.text.is_empty() {
+            // The first character is in and not a BOM, so there is none to strip.
             self.bom_stripped = true;
         }
     }
@@ -2675,10 +2729,7 @@ impl SubParse {
                 if !final_flush {
                     return Vec::new();
                 }
-                let doc = String::from_utf8_lossy(&self.buf);
-                let cues = parse_ttml(&doc);
-                self.buf.clear();
-                cues
+                parse_ttml(&self.input.finish())
             }
             Some(TextFormat::Ssa) => self.drain_ssa(final_flush),
             Some(TextFormat::WebVtt) => self.drain_blocks(true, final_flush),
@@ -2692,18 +2743,18 @@ impl SubParse {
     /// blank line are taken and the partial tail is retained.
     fn drain_blocks(&mut self, webvtt: bool, final_flush: bool) -> Vec<Cue> {
         if final_flush {
-            let doc = String::from_utf8_lossy(&self.buf);
-            let cues = parse_blocks_rebased(&doc, webvtt, &mut self.map_offset_ns);
-            self.buf.clear();
-            return cues;
+            let doc = self.input.finish();
+            return parse_blocks_rebased(&doc, webvtt, &mut self.map_offset_ns);
         }
-        let valid = utf8_prefix_len(&self.buf);
-        let s = core::str::from_utf8(&self.buf[..valid]).expect("valid_up_to is a char boundary");
-        let Some(boundary) = last_block_boundary(s) else {
+        let Some(boundary) = self.input.scan_lines().blank_line else {
             return Vec::new();
         };
-        let cues = parse_blocks_rebased(&s[..boundary], webvtt, &mut self.map_offset_ns);
-        self.buf.drain(..boundary);
+        let cues = parse_blocks_rebased(
+            &self.input.text[..boundary],
+            webvtt,
+            &mut self.map_offset_ns,
+        );
+        self.input.consume(boundary);
         cues
     }
 
@@ -2713,26 +2764,23 @@ impl SubParse {
     fn drain_ssa(&mut self, final_flush: bool) -> Vec<Cue> {
         let mut cues = Vec::new();
         if final_flush {
-            let doc = String::from_utf8_lossy(&self.buf);
+            let doc = self.input.finish();
             for line in doc.lines() {
                 if let Some(cue) = self.ssa.feed_line(line) {
                     cues.push(cue);
                 }
             }
-            self.buf.clear();
             return cues;
         }
-        let valid = utf8_prefix_len(&self.buf);
-        let s = core::str::from_utf8(&self.buf[..valid]).expect("valid_up_to is a char boundary");
-        let Some(nl) = s.rfind('\n') else {
+        let Some(lines_end) = self.input.scan_lines().line else {
             return Vec::new();
         };
-        for line in s[..=nl].lines() {
+        for line in self.input.text[..lines_end].lines() {
             if let Some(cue) = self.ssa.feed_line(line) {
                 cues.push(cue);
             }
         }
-        self.buf.drain(..=nl);
+        self.input.consume(lines_end);
         cues
     }
 }
@@ -2801,8 +2849,7 @@ impl AsyncElement for SubParse {
             let cues = match packet {
                 PipelinePacket::DataFrame(frame) => {
                     if let Some(slice) = frame.domain.as_system_slice() {
-                        // The parsers handle CRLF / BOM, so accumulate raw bytes.
-                        self.buf.extend_from_slice(slice);
+                        self.input.push_bytes(slice);
                     }
                     self.strip_bom();
                     self.drain_cues(false)
@@ -2815,7 +2862,7 @@ impl AsyncElement for SubParse {
                     Vec::new()
                 }
                 PipelinePacket::Flush => {
-                    self.buf.clear();
+                    self.input = SubtitleText::default();
                     self.ssa = SsaState::default();
                     self.map_offset_ns = 0;
                     self.bom_stripped = false;
@@ -4174,6 +4221,33 @@ mod tests {
         // Eos cannot complete the dangling second cue (no end timestamp/text).
         el.process(PipelinePacket::Eos, &mut sink).await.unwrap();
         assert_eq!(count(&sink), 1);
+    }
+
+    #[tokio::test]
+    async fn an_invalid_utf8_byte_does_not_hold_back_later_cues() {
+        let mut el = SubParse::new();
+        el.configure_pipeline(&Caps::Text {
+            format: TextFormat::Srt,
+        })
+        .unwrap();
+        let mut sink = CollectSink::default();
+        el.process(
+            srt_bytes_frame(
+                b"1\n00:00:01,000 --> 00:00:02,000\nbad \xFF byte\n\n2\n00:00:03,000 --> 00:00:04,000\nsecond\n\n",
+            ),
+            &mut sink,
+        )
+        .await
+        .unwrap();
+        let cues: Vec<&[u8]> = sink
+            .packets
+            .iter()
+            .filter_map(|p| match p {
+                PipelinePacket::DataFrame(f) => f.domain.as_system_slice(),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(cues, ["bad \u{FFFD} byte".as_bytes(), b"second"]);
     }
 
     #[tokio::test]

@@ -85,6 +85,7 @@ pub struct FlacParse {
     info: Option<StreamInfo>,
     /// How many `fLaC` header blocks have been emitted downstream.
     headers_sent: u64,
+    header_scanned_to: usize,
     buf_offset: u64,
     clock: FrameClock,
     // a seek re-reads the file from its start and drops the frames before the target
@@ -115,6 +116,7 @@ impl FlacParse {
         Self {
             configured: false,
             buf: Vec::new(),
+            header_scanned_to: 0,
             info: None,
             headers_sent: 0,
             buf_offset: 0,
@@ -219,7 +221,8 @@ impl FlacParse {
     async fn drain(&mut self, out: &mut dyn OutputSink) -> Result<(), G2gError> {
         // A chained Ogg link or a re-read after a flush re-sends the header in-band.
         while self.headers_sent == 0 || self.buf.starts_with(b"fLaC") {
-            let Some(header_len) = complete_header_len(&self.buf)? else {
+            let Some(header_len) = complete_header_len(&self.buf, &mut self.header_scanned_to)?
+            else {
                 return Ok(()); // header still arriving
             };
             let caps_before = self.info.map(|_| self.flac_caps());
@@ -284,27 +287,34 @@ fn header_tags(header: &[u8]) -> Result<TagList, G2gError> {
 /// `None` while it is still arriving. `Err` when the stream does not open with
 /// the marker (not a FLAC stream: fail loud, not silent). Shared with
 /// [`crate::flactag`], which rewrites one of those metadata blocks.
-pub(crate) fn complete_header_len(buf: &[u8]) -> Result<Option<usize>, G2gError> {
+pub(crate) fn complete_header_len(
+    buf: &[u8],
+    scanned_to: &mut usize,
+) -> Result<Option<usize>, G2gError> {
     if buf.len() < 4 {
         return Ok(None);
     }
     if &buf[..4] != b"fLaC" {
         return Err(G2gError::CapsMismatch);
     }
-    let mut at = 4usize;
+    let mut at = (*scanned_to).max(4);
     loop {
         let Some(block) = buf.get(at..at + 4) else {
+            *scanned_to = at;
             return Ok(None);
         };
         let last = block[0] & 0x80 != 0;
         let len = u32::from_be_bytes([0, block[1], block[2], block[3]]) as usize;
-        at = match at.checked_add(4 + len) {
-            Some(v) => v,
-            None => return Err(G2gError::CapsMismatch),
-        };
-        if last {
-            return Ok((at <= buf.len()).then_some(at));
+        let block_end = at.checked_add(4 + len).ok_or(G2gError::CapsMismatch)?;
+        if last && block_end <= buf.len() {
+            *scanned_to = 0;
+            return Ok(Some(block_end));
         }
+        if last {
+            *scanned_to = at;
+            return Ok(None);
+        }
+        at = block_end;
     }
 }
 
@@ -577,6 +587,7 @@ impl AsyncElement for FlacParse {
                 PipelinePacket::Flush => {
                     let forward = self.seek.on_flush();
                     self.buf.clear();
+                    self.header_scanned_to = 0;
                     self.clock.reset();
                     if forward {
                         out.push(PipelinePacket::Flush).await?;
@@ -601,7 +612,9 @@ impl PadTemplates for FlacParse {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testutil::{flac_block, flac_picture_body, flac_streaminfo, run, STREAMINFO_TYPE};
+    use crate::testutil::{
+        flac_block, flac_picture_body, flac_streaminfo, run, PADDING_TYPE, STREAMINFO_TYPE,
+    };
     use crate::vorbiscomment::vorbis_comment;
 
     // two channels of 192 16-bit samples at 44.1 kHz, each channel one CONSTANT subframe of zero
@@ -646,6 +659,31 @@ mod tests {
             .filter(|bytes| parse_frame_header(bytes).is_some())
             .map(|bytes| bytes[4])
             .collect()
+    }
+
+    #[test]
+    fn a_header_arriving_in_pieces_resumes_its_block_walk() {
+        const EMPTY_BLOCKS: usize = 100;
+        let mut stream = Vec::from(*FLAC_MARKER);
+        stream.extend(flac_block(STREAMINFO_TYPE, false, &flac_streaminfo()));
+        for _ in 1..EMPTY_BLOCKS {
+            stream.extend(flac_block(PADDING_TYPE, false, &[]));
+        }
+        stream.extend(flac_block(PADDING_TYPE, true, &[]));
+        let mut scanned_to = 0;
+        for end in 1..stream.len() {
+            assert_eq!(
+                complete_header_len(&stream[..end], &mut scanned_to),
+                Ok(None)
+            );
+        }
+        let last_block_header = stream.len() - 4;
+        assert_eq!(scanned_to, last_block_header);
+        assert_eq!(
+            complete_header_len(&stream, &mut scanned_to),
+            Ok(Some(stream.len()))
+        );
+        assert_eq!(scanned_to, 0);
     }
 
     #[test]

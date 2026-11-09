@@ -194,9 +194,12 @@ impl MpegAudioParse {
             } else {
                 self.buf.len().saturating_sub(ID3V1_LEN)
             };
-            let Located::Frame { start, len } = locate_frame::<MpaHeader>(&self.buf[..limit], eos)
-            else {
-                return Ok(());
+            let (start, len) = match locate_frame::<MpaHeader>(&self.buf[..limit], eos) {
+                Located::Frame { start, len } => (start, len),
+                Located::NeedMore { junk } => {
+                    self.consume(junk);
+                    return Ok(());
+                }
             };
             if start > 0 {
                 g2g_warn!(self, "resynchronized past {start} bytes of non-audio");

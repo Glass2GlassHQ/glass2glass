@@ -14,7 +14,7 @@
 //! length, so a caller resynchronizes instead of mis-framing.
 
 use crate::bereader::{be_u24, be_u32};
-use crate::id3::{id3v2_len, ID3V2_HEADER_LEN, ID3V2_MAGIC};
+use crate::id3::{id3v2_len, ID3V1_LEN, ID3V2_HEADER_LEN, ID3V2_MAGIC};
 
 /// AC-3 syncword, the first two bytes of every syncframe.
 pub(crate) const AC3_SYNC: [u8; 2] = [0x0B, 0x77];
@@ -231,7 +231,8 @@ impl SyncFrameHeader for Ac3Header {
 /// yet hold enough to say.
 pub(crate) enum Located {
     Frame { start: usize, len: usize },
-    NeedMore,
+    // `junk` is the leading bytes no frame or ID3v2 tag can start in
+    NeedMore { junk: usize },
 }
 
 /// Find the next frame in `buf`, confirming a candidate header against the one at
@@ -243,9 +244,13 @@ pub(crate) enum Located {
 /// and is skipped.
 pub(crate) fn locate_frame<H: SyncFrameHeader>(buf: &[u8], eos: bool) -> Located {
     let mut start = 0;
+    let mut last_frame_candidate = None;
     while start + H::HEADER_LEN <= buf.len() {
         // HLS segments of a bare audio stream each open on an ID3v2 tag
-        if let Some(tag_len) = id3v2_len(&buf[start..]).filter(|len| start + len <= buf.len()) {
+        if let Some(tag_len) = id3v2_len(&buf[start..]) {
+            if start + tag_len > buf.len() {
+                return Located::NeedMore { junk: start };
+            }
             start += tag_len;
             continue;
         }
@@ -261,14 +266,14 @@ pub(crate) fn locate_frame<H: SyncFrameHeader>(buf: &[u8], eos: bool) -> Located
                     len: header.coded_bytes(),
                 };
             }
-            return Located::NeedMore;
+            return Located::NeedMore { junk: start };
         }
         let after = &buf[end..];
         let confirmed = match H::parse(after) {
             Some(next) => header.confirms_sync(&next),
             None if after.starts_with(&ID3V2_MAGIC) && after.len() < ID3V2_HEADER_LEN => {
                 if !eos {
-                    return Located::NeedMore;
+                    return Located::NeedMore { junk: start };
                 }
                 true
             }
@@ -280,9 +285,17 @@ pub(crate) fn locate_frame<H: SyncFrameHeader>(buf: &[u8], eos: bool) -> Located
                 len: header.coded_bytes(),
             };
         }
+        // parsers strip an ID3v1 trailer at the end of the stream, which leaves this frame last
+        if after.len() <= ID3V1_LEN {
+            last_frame_candidate.get_or_insert(start);
+        }
         start += 1;
     }
-    Located::NeedMore
+    // the tail may hold the first bytes of an ID3v2 header
+    let junk = start
+        .min(buf.len().saturating_sub(ID3V2_HEADER_LEN - 1))
+        .min(last_frame_candidate.unwrap_or(usize::MAX));
+    Located::NeedMore { junk }
 }
 
 /// Which layer an MPEG audio frame is coded in. Layer I is decoded so a parser
@@ -814,5 +827,34 @@ mod split_frames_tests {
         // no syncword, and a too-short buffer: both empty, no panic.
         assert!(ac3_frames(&[0, 1, 2, 3, 4]).is_empty());
         assert!(ac3_frames(&[0x0B, 0x77]).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod locate_frame_tests {
+    use super::{locate_frame, Ac3Header, Located};
+    use crate::id3::{ID3V2_HEADER_LEN, ID3V2_MAGIC};
+    use alloc::vec;
+
+    #[test]
+    fn junk_with_no_sync_is_reported_up_to_a_possible_id3v2_header() {
+        let junk = vec![0u8; 1000];
+        let Located::NeedMore { junk: dropped } = locate_frame::<Ac3Header>(&junk, false) else {
+            panic!("no frame in junk");
+        };
+        assert_eq!(dropped, junk.len() - (ID3V2_HEADER_LEN - 1));
+    }
+
+    #[test]
+    fn junk_stops_at_an_id3v2_tag_still_arriving() {
+        const JUNK_LEN: usize = 100;
+        let mut buffer = vec![0u8; JUNK_LEN];
+        buffer.extend(ID3V2_MAGIC);
+        // version 2.4, no flags, a 1000-byte body that has not arrived
+        buffer.extend([4, 0, 0, 0, 0, 0x07, 0x68]);
+        let Located::NeedMore { junk } = locate_frame::<Ac3Header>(&buffer, false) else {
+            panic!("no frame in junk");
+        };
+        assert_eq!(junk, JUNK_LEN);
     }
 }

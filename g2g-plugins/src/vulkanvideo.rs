@@ -2839,6 +2839,11 @@ fn finish_tile_info(
     } else {
         (0, 1)
     };
+    // AV1 spec 5.9.15: TileCols and TileRows are at most 64 and context_update_tile_id names a tile
+    let tiles_in_range = tile_cols <= AV1_MAX_TILE_COLS && tile_rows <= AV1_MAX_TILE_ROWS;
+    if !tiles_in_range || context_update_tile_id >= tile_cols * tile_rows {
+        return None;
+    }
     Some(Av1TileInfo {
         uniform_spacing,
         tile_cols_log2,
@@ -17754,6 +17759,51 @@ mod tests {
         assert_eq!(tile.tile_cols, 2);
         // two superblocks, then the one left over
         assert_eq!(tile.width_in_sbs_minus_1, [1, 0]);
+    }
+
+    #[test]
+    fn av1_tile_info_refuses_more_than_64_tile_columns() {
+        let mi_per_superblock = 16;
+        // uniform_tile_spacing_flag 0, then every coded width is one superblock
+        let bytes = [0u8; 64];
+        let tile_columns = |superblock_columns: u32| {
+            parse_av1_tile_info(
+                &mut BitReader::new(&bytes),
+                superblock_columns * mi_per_superblock,
+                mi_per_superblock,
+                false,
+            )
+            .map(|tile| tile.tile_cols)
+        };
+        assert_eq!(tile_columns(AV1_MAX_TILE_COLS), Some(AV1_MAX_TILE_COLS));
+        assert_eq!(tile_columns(AV1_MAX_TILE_COLS + 1), None);
+    }
+
+    #[test]
+    fn av1_tile_info_refuses_a_context_update_tile_id_past_the_last_tile() {
+        // five superblock columns in uniform tiles of two give three tile columns
+        let superblock_columns = 5;
+        let mi_per_superblock = 16;
+        let tile_count = 3;
+        let context_update_tile_id = |tile_id: u32| {
+            let mut w = BitWriter::default();
+            w.write_bit(1); // uniform_tile_spacing_flag
+            w.write_bit(1); // increment_tile_cols_log2
+            w.write_bit(1); // increment_tile_cols_log2
+            w.write_bit(0); // stop at tile_cols_log2 = 2
+            w.write_bits(tile_id, 2); // context_update_tile_id
+            w.write_bits(0, 2); // tile_size_bytes_minus_1
+            let bytes = w.into_bytes();
+            parse_av1_tile_info(
+                &mut BitReader::new(&bytes),
+                superblock_columns * mi_per_superblock,
+                mi_per_superblock,
+                false,
+            )
+            .map(|tile| tile.context_update_tile_id)
+        };
+        assert_eq!(context_update_tile_id(tile_count - 1), Some(tile_count - 1));
+        assert_eq!(context_update_tile_id(tile_count), None);
     }
 
     #[test]

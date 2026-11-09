@@ -120,6 +120,7 @@ pub(crate) fn flac_picture_body(media_type: &str, picture: &[u8]) -> Vec<u8> {
 }
 
 pub(crate) const STREAMINFO_TYPE: u8 = 0;
+pub(crate) const PADDING_TYPE: u8 = 1;
 
 pub(crate) fn flac_block(kind: u8, last: bool, body: &[u8]) -> Vec<u8> {
     use crate::flactag::FLAC_LAST_BLOCK;

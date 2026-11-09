@@ -67,6 +67,7 @@ pub struct FlacTag {
     tags: TagsProperty,
     /// Bytes not yet forwarded: the header until it has all arrived.
     buf: Vec<u8>,
+    header_scanned_to: usize,
     header_written: bool,
     sequence: u64,
 }
@@ -101,7 +102,8 @@ impl FlacTag {
     /// Rewrite the header once it is whole, then forward the audio behind it.
     async fn drain(&mut self, out: &mut dyn OutputSink) -> Result<(), G2gError> {
         if !self.header_written {
-            let Some(header_len) = complete_header_len(&self.buf)? else {
+            let Some(header_len) = complete_header_len(&self.buf, &mut self.header_scanned_to)?
+            else {
                 return Ok(()); // header still arriving
             };
             let header: Vec<u8> = self.buf.drain(..header_len).collect();
@@ -250,6 +252,7 @@ impl AsyncElement for FlacTag {
                 PipelinePacket::Eos => self.drain(out).await?,
                 PipelinePacket::Flush => {
                     self.buf.clear();
+                    self.header_scanned_to = 0;
                     out.push(PipelinePacket::Flush).await?;
                 }
                 other => {
@@ -297,10 +300,10 @@ mod tests {
     use crate::flacparse::parse_streaminfo;
     use crate::vorbiscomment::parse_comment_body;
 
-    use crate::testutil::{flac_block as block, flac_streaminfo as streaminfo, STREAMINFO_TYPE};
+    use crate::testutil::{
+        flac_block as block, flac_streaminfo as streaminfo, PADDING_TYPE, STREAMINFO_TYPE,
+    };
 
-    /// FLAC metadata block types this test builds around the comment one.
-    const PADDING_TYPE: u8 = 1;
     /// The vendor string the incoming header declares, which the rewrite keeps.
     const UPSTREAM_VENDOR: &[u8] = b"reference libFLAC 1.4.3";
     /// Audio bytes standing in for the frames behind the header.
@@ -365,7 +368,7 @@ mod tests {
     async fn rewrites_the_comment_block_only() {
         let stream = flac_stream(&[Tag::Title("Old".into())].into_iter().collect());
         let written = run(&stream, 7).await;
-        let header_len = complete_header_len(&written)
+        let header_len = complete_header_len(&written, &mut 0)
             .expect("a FLAC header")
             .expect("the whole header");
         assert_eq!(&written[header_len..], AUDIO, "the audio is untouched");
@@ -394,7 +397,7 @@ mod tests {
         stream.extend(block(STREAMINFO_TYPE, true, &streaminfo()));
         stream.extend_from_slice(AUDIO);
         let written = run(&stream, 64).await;
-        let header_len = complete_header_len(&written)
+        let header_len = complete_header_len(&written, &mut 0)
             .expect("a FLAC header")
             .expect("the whole header");
         let blocks = metadata_blocks(&written[..header_len]).expect("the header parses");

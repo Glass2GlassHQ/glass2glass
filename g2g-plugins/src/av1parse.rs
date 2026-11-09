@@ -351,14 +351,15 @@ pub const SELECT_INTEGER_MV: u8 = 2;
 
 /// LEB128 (unsigned, little-endian 7-bit groups) read at `*pos`, advancing it.
 /// `None` on truncation or an over-long (> 8 byte) encoding.
-pub(crate) fn read_leb128(data: &[u8], pos: &mut usize) -> Option<u64> {
+pub(crate) fn read_leb128(data: &[u8], pos: &mut usize) -> Option<u32> {
     let mut value = 0u64;
     for i in 0..8 {
         let byte = *data.get(*pos)?;
         *pos += 1;
         value |= u64::from(byte & 0x7f) << (7 * i);
         if byte & 0x80 == 0 {
-            return Some(value);
+            // AV1 spec 4.10.5: leb128 values above 2^32 - 1 are invalid
+            return u32::try_from(value).ok();
         }
     }
     None
@@ -399,7 +400,7 @@ fn obu_ranges(data: &[u8]) -> Option<Vec<ObuRange>> {
             }
         }
         let size = if has_size {
-            read_leb128(data, &mut pos)? as usize
+            usize::try_from(read_leb128(data, &mut pos)?).ok()?
         } else {
             data.len().checked_sub(pos)? // no size: OBU runs to the end
         };
@@ -1177,6 +1178,20 @@ mod tests {
         let mut pos = 0;
         assert_eq!(read_leb128(&[0xAC, 0x02], &mut pos), Some(300));
         assert_eq!(pos, 2);
+    }
+
+    #[test]
+    fn read_leb128_refuses_a_value_above_u32() {
+        let mut pos = 0;
+        assert_eq!(
+            read_leb128(&leb128(u64::from(u32::MAX) + 1), &mut pos),
+            None
+        );
+        pos = 0;
+        assert_eq!(
+            read_leb128(&leb128(u64::from(u32::MAX)), &mut pos),
+            Some(u32::MAX)
+        );
     }
 
     // -- Element-level tests (drive Av1Parse::process directly) -------------

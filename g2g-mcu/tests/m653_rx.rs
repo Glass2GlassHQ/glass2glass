@@ -15,7 +15,7 @@ use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::rtp::RtpHeader;
 use g2g_core::staticelem::Chain;
 use g2g_core::staticpool::StaticLendRing;
-use g2g_core::{run_source_transform_sink, StaticSink, StaticTransform};
+use g2g_core::{run_source_transform_sink, StaticSink, StaticSource, StaticTransform};
 use g2g_mcu::{G711Dec, JitterBuffer, Law, PacketReceiver, RtpSrc};
 
 fn block_on<F: Future>(fut: F) -> F::Output {
@@ -360,4 +360,24 @@ fn rx_flagship_survives_packet_loss() {
         pcm, expected,
         "loss leaves a clean gap; surrounding frames intact and in order"
     );
+}
+
+#[test]
+fn an_oversized_payload_is_dropped_and_the_source_keeps_receiving() {
+    let mut oversized = rtp_datagram(0);
+    oversized.push(0);
+    let wire = [oversized, rtp_datagram(1)];
+    let recv = QueuedReceiver {
+        datagrams: Rc::new(RefCell::new(wire.into_iter().collect())),
+    };
+    let ring: &'static StaticLendRing<4, SP> = leaked_ring();
+    // the scratch has room for a CSRC list, so a datagram can carry more than a ring slot
+    const CSRC_ROOM: usize = 15 * 4;
+    let mut src =
+        RtpSrc::<_, 4, SP, { 12 + SP + CSRC_ROOM }>::new(recv, ring, MediaClock::audio(8000));
+    let frame = block_on(src.next())
+        .expect("the source keeps receiving")
+        .expect("a frame");
+    assert_eq!(frame.sequence, 1);
+    assert_eq!(src.oversized(), 1);
 }

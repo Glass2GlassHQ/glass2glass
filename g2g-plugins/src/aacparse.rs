@@ -694,8 +694,13 @@ impl AacParse {
     /// Emit every access unit the buffer holds whole.
     async fn drain(&mut self, eos: bool, out: &mut dyn OutputSink) -> Result<(), G2gError> {
         loop {
-            let Located::Frame { start, len } = locate_frame::<AdtsHeader>(&self.buf, eos) else {
-                return Ok(());
+            let (start, len) = match locate_frame::<AdtsHeader>(&self.buf, eos) {
+                Located::Frame { start, len } => (start, len),
+                Located::NeedMore { junk } => {
+                    self.buf.drain(..junk);
+                    self.buf_offset += junk as u64;
+                    return Ok(());
+                }
             };
             if start > 0 {
                 g2g_warn!(self, "resynchronized past {start} bytes of non-ADTS");

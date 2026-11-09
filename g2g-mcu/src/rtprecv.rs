@@ -49,8 +49,8 @@ pub trait PacketReceiver {
 ///
 /// A datagram that fails to parse (not RTP v2, truncated) or that a payload-type
 /// filter rejects is skipped and counted, not surfaced as an error: a receiver
-/// must tolerate stray packets on the wire. A payload larger than `PAYLOAD` is a
-/// ring-sizing bug surfaced as [`G2gError::CapsMismatch`].
+/// must tolerate stray packets on the wire. A payload larger than `PAYLOAD` is
+/// dropped and counted in [`RtpSrc::oversized`].
 pub struct RtpSrc<'r, R, const SLOTS: usize, const PAYLOAD: usize, const DGRAM: usize> {
     receiver: R,
     ring: &'r StaticLendRing<SLOTS, PAYLOAD>,
@@ -62,6 +62,7 @@ pub struct RtpSrc<'r, R, const SLOTS: usize, const PAYLOAD: usize, const DGRAM: 
     malformed: u32,
     /// Datagrams dropped by the payload-type filter.
     filtered: u32,
+    oversized: u32,
 }
 
 impl<R, const SLOTS: usize, const PAYLOAD: usize, const DGRAM: usize>
@@ -107,6 +108,7 @@ where
             remaining: None,
             malformed: 0,
             filtered: 0,
+            oversized: 0,
         }
     }
 
@@ -133,6 +135,11 @@ where
     /// Datagrams dropped by the payload-type filter.
     pub fn filtered(&self) -> u32 {
         self.filtered
+    }
+
+    /// Datagrams dropped because their payload is larger than a ring slot.
+    pub fn oversized(&self) -> u32 {
+        self.oversized
     }
 
     /// Release the receiver.
@@ -172,7 +179,8 @@ where
                 continue;
             }
             if parsed.payload_len > PAYLOAD {
-                return Err(G2gError::CapsMismatch);
+                self.oversized = self.oversized.wrapping_add(1);
+                continue;
             }
             let Some(payload) = self
                 .scratch

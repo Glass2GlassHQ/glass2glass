@@ -83,8 +83,13 @@ impl Ac3Parse {
                 g2g_error!(self, "E-AC-3 stream: nothing here decodes it");
                 return Err(G2gError::CapsMismatch);
             }
-            let Located::Frame { start, len } = locate_frame::<Ac3Header>(&self.buf, eos) else {
-                return Ok(());
+            let (start, len) = match locate_frame::<Ac3Header>(&self.buf, eos) {
+                Located::Frame { start, len } => (start, len),
+                Located::NeedMore { junk } => {
+                    self.buf.drain(..junk);
+                    self.buf_offset += junk as u64;
+                    return Ok(());
+                }
             };
             if start > 0 {
                 g2g_warn!(self, "resynchronized past {start} bytes of non-audio");
