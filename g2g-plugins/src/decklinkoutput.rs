@@ -5,8 +5,8 @@ use std::time::Duration;
 use alloc::boxed::Box;
 
 use g2g_core::{
-    g2g_error, AudioFormat, ClockSync, DriftClock, FrameTiming, G2gError, HardwareError,
-    MonotonicClock, PresentationPacer, RawVideoFormat,
+    g2g_error, AudioFormat, ClockSync, DeviceClockOffset, DriftClock, FrameTiming, G2gError,
+    HardwareError, MonotonicClock, PresentationPacer, RawVideoFormat,
 };
 
 use crate::decklink::{
@@ -35,8 +35,7 @@ struct OutputState {
     playing: bool,
     // elected-clock time that running time zero is due at, shared so audio and video line up
     anchor_ns: Option<i128>,
-    // the first reference and board readings, so the drift clock starts out at the reference clock's time
-    clock_epoch: Option<(u64, u64)>,
+    clock_offset: DeviceClockOffset,
 }
 
 // the device one decklinkvideosink and one decklinkaudiosink share through a device-number
@@ -130,9 +129,10 @@ impl SharedOutput {
     fn board_now(&self, state: &mut OutputState) -> Result<u64, G2gError> {
         let local_ns = self.clock.reference_now();
         let board_ns = self.board(state)?.hardware_time_ns()?;
-        let (local_epoch, board_epoch) = *state.clock_epoch.get_or_insert((local_ns, board_ns));
-        self.clock
-            .observe(local_ns, local_epoch + board_ns.saturating_sub(board_epoch));
+        let master_ns = state
+            .clock_offset
+            .master_ns(&self.clock, local_ns, board_ns);
+        self.clock.observe(local_ns, master_ns);
         Ok(board_ns)
     }
 

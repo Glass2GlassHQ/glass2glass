@@ -49,9 +49,9 @@ use libpulse_simple_binding::Simple;
 
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ClockCandidate, ClockPriority, ClockSync,
-    ConfigureOutcome, DriftClock, ElementMetadata, G2gError, HardwareError, MonotonicClock,
-    OutputSink, PadTemplate, PadTemplates, PipelineClock, PipelinePacket, PropError, PropKind,
-    PropValue, PropertySpec,
+    ConfigureOutcome, DeviceClockOffset, DriftClock, ElementMetadata, G2gError, HardwareError,
+    MonotonicClock, OutputSink, PadTemplate, PadTemplates, PipelineClock, PipelinePacket,
+    PropError, PropKind, PropValue, PropertySpec,
 };
 
 use crate::audiooutput::{DeviceCmd, OutputDevice, PlayEnd};
@@ -229,13 +229,14 @@ impl AsyncElement for PulseSink {
         );
 
         let link = crate::audioworker::WorkerLink::spawn("g2g-pulsesink", move |rx| {
+            let mut clock_offset = DeviceClockOffset::default();
             crate::audiooutput::run_device_worker(
                 device,
                 rx,
                 fallback,
                 ready_tx,
                 |device| open_stream(&app_name, device, &spec),
-                |simple, rx| play(simple, &spec, rx, &written, &clock),
+                |simple, rx| play(simple, &spec, rx, &written, &clock, &mut clock_offset),
             );
         })?;
 
@@ -435,6 +436,7 @@ fn play(
     rx: &Receiver<DeviceCmd>,
     written: &AtomicU64,
     clock: &DriftClock,
+    clock_offset: &mut DeviceClockOffset,
 ) -> PlayEnd {
     let end = loop {
         match rx.recv() {
@@ -450,7 +452,7 @@ fn play(
                 written.fetch_add(bytes.len() as u64, Ordering::Relaxed);
                 // After the blocking write returns (at ~the device rate), feed
                 // the drift clock one playout observation.
-                discipline_clock(&simple, spec, written, clock);
+                discipline_clock(&simple, spec, written, clock, clock_offset);
             }
             Ok(DeviceCmd::SwitchDevice(device)) => break PlayEnd::SwitchDevice(device),
             Ok(DeviceCmd::Shutdown) | Err(_) => break PlayEnd::Shutdown,
@@ -467,7 +469,13 @@ fn play(
 /// `snd_pcm_delay`), both converted to time through the stream spec. That is the
 /// true playout position, which drifts from wall time at the hardware's real
 /// rate. The local time is sampled next to the latency query so the pair lines up.
-fn discipline_clock(simple: &Simple, spec: &Spec, written: &AtomicU64, clock: &DriftClock) {
+fn discipline_clock(
+    simple: &Simple,
+    spec: &Spec,
+    written: &AtomicU64,
+    clock: &DriftClock,
+    clock_offset: &mut DeviceClockOffset,
+) {
     let local_ns = clock.reference_now();
     // A failed latency query (stream not running yet) yields no usable playout
     // position; skip rather than feed a bogus sample.
@@ -479,7 +487,8 @@ fn discipline_clock(simple: &Simple, spec: &Spec, written: &AtomicU64, clock: &D
     if played_us == 0 {
         return;
     }
-    clock.observe(local_ns, played_us.saturating_mul(1_000));
+    let master_ns = clock_offset.master_ns(clock, local_ns, played_us.saturating_mul(1_000));
+    clock.observe(local_ns, master_ns);
 }
 
 #[cfg(test)]

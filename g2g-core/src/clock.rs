@@ -780,6 +780,23 @@ impl DriftClock {
 }
 
 #[cfg(feature = "runtime")]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DeviceClockOffset {
+    offset_ns: Option<i128>,
+}
+
+#[cfg(feature = "runtime")]
+impl DeviceClockOffset {
+    pub fn master_ns(&mut self, clock: &DriftClock, local_ns: u64, device_ns: u64) -> u64 {
+        // device counters start near zero, while the clock already reads the process age before its first observation
+        let offset_ns = *self
+            .offset_ns
+            .get_or_insert_with(|| i128::from(clock.project_ns(local_ns)) - i128::from(device_ns));
+        u64::try_from(i128::from(device_ns) + offset_ns).unwrap_or(0)
+    }
+}
+
+#[cfg(feature = "runtime")]
 impl PipelineClock for DriftClock {
     fn now_ns(&self) -> u64 {
         // Project the current reference time through the fit (identity until the
@@ -1023,6 +1040,27 @@ mod drift_tests {
             "undisciplined clock is the reference"
         );
         assert_eq!(drift.slope(), 1.0);
+    }
+
+    #[test]
+    fn a_device_counter_from_zero_continues_the_reading_already_given() {
+        const PROCESS_AGE_NS: u64 = 12_000_000_000;
+        const DEVICE_FIRST_NS: u64 = 20_000_000;
+        const STEP_NS: u64 = 10_000_000;
+        let tick = Arc::new(Tick::default());
+        let drift = DriftClock::new(tick.clone());
+        let mut offset = DeviceClockOffset::default();
+        tick.set(PROCESS_AGE_NS);
+        let before_first_observation = drift.now_ns();
+
+        let local = drift.reference_now();
+        drift.observe(local, offset.master_ns(&drift, local, DEVICE_FIRST_NS));
+        assert_eq!(drift.now_ns(), before_first_observation);
+
+        tick.set(PROCESS_AGE_NS + STEP_NS);
+        let local = drift.reference_now();
+        let master = offset.master_ns(&drift, local, DEVICE_FIRST_NS + STEP_NS);
+        assert_eq!(master, before_first_observation + STEP_NS);
     }
 
     /// Master running 0.1% fast (1.001x) relative to the reference, plus a

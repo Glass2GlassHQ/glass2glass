@@ -42,9 +42,9 @@ use crate::alsa_ffi::{Direction, Pcm};
 
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ClockCandidate, ClockPriority, ClockSync,
-    ConfigureOutcome, DriftClock, ElementMetadata, G2gError, HardwareError, MonotonicClock,
-    OutputSink, PadTemplate, PadTemplates, PipelineClock, PipelinePacket, PropError, PropKind,
-    PropValue, PropertySpec,
+    ConfigureOutcome, DeviceClockOffset, DriftClock, ElementMetadata, G2gError, HardwareError,
+    MonotonicClock, OutputSink, PadTemplate, PadTemplates, PipelineClock, PipelinePacket,
+    PropError, PropKind, PropValue, PropertySpec,
 };
 
 use crate::alsapcm::{alsa_params, device_permutation, permute, PcmConfig, FORMATS};
@@ -207,13 +207,14 @@ impl AsyncElement for AlsaSink {
         );
 
         let link = crate::audioworker::WorkerLink::spawn("g2g-alsasink", move |rx| {
+            let mut clock_offset = DeviceClockOffset::default();
             crate::audiooutput::run_device_worker(
                 device,
                 rx,
                 fallback,
                 ready_tx,
                 |device| open_pcm(device, cfg).map_err(alsa_err),
-                |pcm, rx| play(pcm, cfg, rx, &rendered, &clock),
+                |pcm, rx| play(pcm, cfg, rx, &rendered, &clock, &mut clock_offset),
             );
         })?;
 
@@ -386,6 +387,7 @@ fn play(
     rx: &Receiver<DeviceCmd>,
     rendered: &AtomicU64,
     clock: &DriftClock,
+    clock_offset: &mut DeviceClockOffset,
 ) -> PlayEnd {
     let perm = device_permutation(&pcm, cfg.channels);
     let mut permuted = Vec::new();
@@ -409,7 +411,7 @@ fn play(
                 }
                 // After the blocking write returns (at ~the device rate), feed
                 // the drift clock one playout observation.
-                discipline_clock(&pcm, cfg.rate, rendered, clock);
+                discipline_clock(&pcm, cfg.rate, rendered, clock, clock_offset);
             }
             Ok(DeviceCmd::SwitchDevice(device)) => break PlayEnd::SwitchDevice(device),
             Ok(DeviceCmd::Shutdown) | Err(_) => break PlayEnd::Shutdown,
@@ -425,7 +427,13 @@ fn play(
 /// queued in the ring; that is the true DAC playout position, which drifts from
 /// wall time at the hardware's real rate. The local time is sampled next to the
 /// `delay()` probe so the pair lines up.
-fn discipline_clock(pcm: &Pcm, rate: u32, rendered: &AtomicU64, clock: &DriftClock) {
+fn discipline_clock(
+    pcm: &Pcm,
+    rate: u32,
+    rendered: &AtomicU64,
+    clock: &DriftClock,
+    clock_offset: &mut DeviceClockOffset,
+) {
     let local_ns = clock.reference_now();
     // A failed / negative delay probe (device not running yet) yields no usable
     // playout position; skip rather than feed a bogus sample.
@@ -435,7 +443,8 @@ fn discipline_clock(pcm: &Pcm, rate: u32, rendered: &AtomicU64, clock: &DriftClo
     if played == 0 {
         return;
     }
-    let master_ns = (u128::from(played) * 1_000_000_000 / u128::from(rate)) as u64;
+    let played_ns = (u128::from(played) * 1_000_000_000 / u128::from(rate)) as u64;
+    let master_ns = clock_offset.master_ns(clock, local_ns, played_ns);
     let outcome = clock.observe(local_ns, master_ns);
     // Pacing diagnosis: how the DAC clock the video slaves to actually moves,
     // and whether the outlier gate dropped this reading.

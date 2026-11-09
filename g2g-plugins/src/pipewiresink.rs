@@ -46,9 +46,9 @@ use pw::spa;
 
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ClockCandidate, ClockPriority, ClockSync,
-    ConfigureOutcome, DriftClock, ElementMetadata, G2gError, HardwareError, MonotonicClock,
-    OutputSink, PadTemplate, PadTemplates, PipelineClock, PipelinePacket, PropError, PropKind,
-    PropValue, PropertySpec,
+    ConfigureOutcome, DeviceClockOffset, DriftClock, ElementMetadata, G2gError, HardwareError,
+    MonotonicClock, OutputSink, PadTemplate, PadTemplates, PipelineClock, PipelinePacket,
+    PropError, PropKind, PropValue, PropertySpec,
 };
 
 use crate::audiooutput::OutputDevice;
@@ -497,16 +497,12 @@ fn build_and_run(
     let q = Arc::clone(&queue);
     let drift = cfg.clock.clone();
     let mut last_clock_log_ns = 0u64;
-    let mut timeline_offset_ns = None;
+    // pipewire ticks restart from zero with each stream
+    let mut clock_offset = DeviceClockOffset::default();
     let _listener = stream
         .add_local_listener_with_user_data(())
         .process(move |stream, ()| {
-            discipline_clock(
-                stream,
-                &drift,
-                &mut timeline_offset_ns,
-                &mut last_clock_log_ns,
-            );
+            discipline_clock(stream, &drift, &mut clock_offset, &mut last_clock_log_ns);
             let Some(mut buffer) = stream.dequeue_buffer() else {
                 return;
             };
@@ -583,7 +579,7 @@ fn build_and_run(
 fn discipline_clock(
     stream: &pw::stream::Stream,
     clock: &DriftClock,
-    timeline_offset_ns: &mut Option<i128>,
+    clock_offset: &mut DeviceClockOffset,
     last_log_ns: &mut u64,
 ) {
     let Some(time) = crate::pwaudio::stream_time(stream) else {
@@ -598,13 +594,8 @@ fn discipline_clock(
         return;
     }
     let graph_ns = (u128::from(time.ticks) * u128::from(time.rate.num) * 1_000_000_000
-        / u128::from(time.rate.denom)) as i128;
-    // pipewire ticks restart with each stream, so a stream after a target switch continues the clock it took over
-    let offset = *timeline_offset_ns.get_or_insert_with(|| match clock.observations() {
-        0 => 0,
-        _ => i128::from(clock.project_ns(local_ns)) - graph_ns,
-    });
-    let master_ns = u64::try_from(graph_ns + offset).unwrap_or(0);
+        / u128::from(time.rate.denom)) as u64;
+    let master_ns = clock_offset.master_ns(clock, local_ns, graph_ns);
     let outcome = clock.observe(local_ns, master_ns);
     if local_ns.saturating_sub(*last_log_ns) < CLOCK_LOG_INTERVAL_NS {
         return;

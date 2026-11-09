@@ -42,9 +42,9 @@ use crate::alsa_ffi::{Direction, Pcm};
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
     pcm_caps_any_rate_and_channels, AudioFormat, Caps, CapsConstraint, CapsSet, ClockCandidate,
-    ClockPriority, ClockSync, ConfigureOutcome, DriftClock, DriftObservation, ElementMetadata,
-    G2gError, HardwareError, LatencyReport, MonotonicClock, OutputSink, PadTemplate, PadTemplates,
-    PipelineClock, PropError, PropKind, PropValue, PropertySpec,
+    ClockPriority, ClockSync, ConfigureOutcome, DeviceClockOffset, DriftClock, DriftObservation,
+    ElementMetadata, G2gError, HardwareError, LatencyReport, MonotonicClock, OutputSink,
+    PadTemplate, PadTemplates, PipelineClock, PropError, PropKind, PropValue, PropertySpec,
 };
 
 use crate::alsapcm::{alsa_params, device_permutation, invert, permute, PcmConfig, FORMATS};
@@ -416,6 +416,7 @@ fn worker_main(
     let mut buf = vec![0u8; period_frames * cfg.frame_bytes()];
     let mut frames_read = 0u64;
     let mut last_clock_log_ns = 0u64;
+    let mut clock_offset = DeviceClockOffset::default();
     while !stop.load(Ordering::Relaxed) {
         let frames = match pcm.read_interleaved(&mut buf, period_frames) {
             // A driver could report more frames than the buffer holds; clamp
@@ -436,7 +437,14 @@ fn worker_main(
         // Sampled right after the read returns (at ~the device rate), the same
         // place the sink observes its playout position.
         if let Some(clock) = clock.as_deref() {
-            discipline_clock(&pcm, cfg.rate, frames_read, clock, &mut last_clock_log_ns);
+            discipline_clock(
+                &pcm,
+                cfg.rate,
+                frames_read,
+                clock,
+                &mut clock_offset,
+                &mut last_clock_log_ns,
+            );
         }
         let captured = &buf[..frames * cfg.frame_bytes()];
         let chunk = match perm.as_deref() {
@@ -468,6 +476,7 @@ fn discipline_clock(
     rate: u32,
     frames_read: u64,
     clock: &DriftClock,
+    clock_offset: &mut DeviceClockOffset,
     last_log_ns: &mut u64,
 ) {
     let local_ns = clock.reference_now();
@@ -475,8 +484,13 @@ fn discipline_clock(
     // capture position; skip rather than feed a bogus sample.
     let Ok(delay) = pcm.delay() else { return };
     let unread = delay.max(0) as u64;
-    let Some(outcome) = observe_capture(clock, local_ns, frames_read.saturating_add(unread), rate)
-    else {
+    let Some(outcome) = observe_capture(
+        clock,
+        clock_offset,
+        local_ns,
+        frames_read.saturating_add(unread),
+        rate,
+    ) else {
         return;
     };
     if local_ns.saturating_sub(*last_log_ns) < CLOCK_LOG_INTERVAL_NS {
@@ -501,6 +515,7 @@ fn discipline_clock(
 /// or a zero rate), so the caller skips instead of feeding a bogus sample.
 fn observe_capture(
     clock: &DriftClock,
+    clock_offset: &mut DeviceClockOffset,
     local_ns: u64,
     frames_captured: u64,
     rate: u32,
@@ -508,7 +523,8 @@ fn observe_capture(
     if frames_captured == 0 || rate == 0 {
         return None;
     }
-    let master_ns = (u128::from(frames_captured) * 1_000_000_000 / u128::from(rate)) as u64;
+    let captured_ns = (u128::from(frames_captured) * 1_000_000_000 / u128::from(rate)) as u64;
+    let master_ns = clock_offset.master_ns(clock, local_ns, captured_ns);
     Some(clock.observe(local_ns, master_ns))
 }
 
@@ -652,12 +668,13 @@ mod tests {
         const CARD_PPM_FAST: f64 = 1.0001;
 
         let clock = DriftClock::new(Arc::new(MonotonicClock));
+        let mut clock_offset = DeviceClockOffset::default();
         let base_local_ns = 5_000_000_000u64;
         for period in 1..=DriftClock::DEFAULT_WINDOW as u64 {
             let local_ns = base_local_ns + period * 10_000_000;
             let captured = (period as f64 * PERIOD_FRAMES * CARD_PPM_FAST).round() as u64;
             assert_eq!(
-                observe_capture(&clock, local_ns, captured, RATE),
+                observe_capture(&clock, &mut clock_offset, local_ns, captured, RATE),
                 Some(DriftObservation::Folded),
                 "clean ramp sample {period} should fold"
             );
@@ -682,8 +699,15 @@ mod tests {
     #[test]
     fn a_position_with_nothing_captured_feeds_no_sample() {
         let clock = DriftClock::new(Arc::new(MonotonicClock));
-        assert_eq!(observe_capture(&clock, 1_000, 0, 48_000), None);
-        assert_eq!(observe_capture(&clock, 1_000, 480, 0), None);
+        let mut clock_offset = DeviceClockOffset::default();
+        assert_eq!(
+            observe_capture(&clock, &mut clock_offset, 1_000, 0, 48_000),
+            None
+        );
+        assert_eq!(
+            observe_capture(&clock, &mut clock_offset, 1_000, 480, 0),
+            None
+        );
         assert_eq!(clock.observations(), 0);
     }
 

@@ -188,7 +188,7 @@ pub use clock::{
     DynAsyncClock, ElectedClock, PipelineClock,
 };
 #[cfg(feature = "runtime")]
-pub use clock::{DriftClock, DriftObservation};
+pub use clock::{DeviceClockOffset, DriftClock, DriftObservation};
 #[cfg(feature = "alloc")]
 pub use conformance::{
     ConformanceDimension, ConformanceReport, Evidence, MaturityLevel, MaturityRecord,
