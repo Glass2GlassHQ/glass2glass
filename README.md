@@ -105,8 +105,9 @@ Prebuilt `g2g-launch` and `g2g-inspect` for Linux, macOS (Intel and Apple
 Silicon) and Windows (x64 and ARM64) are on each
 [GitHub release](https://github.com/Glass2GlassHQ/glass2glass/releases/latest).
 They need no codec libraries on the host. The Linux and macOS tarballs carry the
-LGPL ffmpeg libraries in `lib/` next to the binaries, so keep the folder together,
-and the matching ffmpeg source is a release asset. They leave out PipeWire and Pulse.
+LGPL ffmpeg libraries in `lib/` next to the binaries, and the Windows release
+carries the ffmpeg DLLs, so keep the folder together. The matching ffmpeg source
+is a release asset. They leave out PipeWire and Pulse.
 
 Each release also has `.deb` and `.rpm` packages for x86_64 and arm64, with the
 same contents as the Linux tarballs. They install to `/opt/glass2glass` and put
@@ -258,7 +259,8 @@ parse error: unknown element: theoraenc
 - **Incremental migration.** `g2g-bridge` embeds a g2g sub-graph in a
   GStreamer pipeline, and its `gst-analytics` feature carries GstAnalytics
   detections, classifications, tracking ids and masks across it both ways.
-  `gstwrap` hosts an un-ported GStreamer element in a g2g graph.
+  `gstwrap` hosts an un-ported GStreamer element in a g2g graph. Both build
+  on Linux and on Windows against the GStreamer MSVC install.
 
 Full guide, with the equivalence cookbook and application / element porting:
 [PORTING.md](https://github.com/Glass2GlassHQ/glass2glass/blob/master/PORTING.md). Writing an element from scratch:
@@ -614,9 +616,9 @@ cargo clippy --workspace --all-targets
 | `RtspClientSink` (`rtspclientsink`: publishes H.264 / H.265 + AAC / Opus to an RTSP server with ANNOUNCE / RECORD, TCP-interleaved or UDP, Basic / Digest auth, RTCP sender reports, keepalive, reconnect) | `rtsp-client-sink` | none |
 | `OnvifSrc` (camera discovery + stream-URI resolution) / `OnvifMetadataParse` / `OnvifMetadataCombiner` | `onvif` | reqwest + roxmltree |
 | `H264Parse` | (default) | none |
-| `FfmpegH264Dec` (sw / `NvdecCuvid` / `NvdecCuda` / `Vaapi`) | `ffmpeg` | Linux + libavcodec |
-| `FfmpegVideoEnc` (`x264enc`, `ffmpegenc`), and `vah264enc` / `vah265enc` / `vaav1enc` on VA-API GPUs | `ffmpeg` | Linux + libavcodec (+ the GPU's VA-API driver) |
-| `OpenH264Dec` / `OpenH264Enc` (`openh264dec` / `openh264enc`) | `openh264` | Linux, OpenH264 built from source |
+| `FfmpegH264Dec` (sw / `NvdecCuvid` / `NvdecCuda` / `Vaapi`) | `ffmpeg` | Linux + libavcodec, or Windows + a shared ffmpeg named by `FFMPEG_DIR` |
+| `FfmpegVideoEnc` (`x264enc`, `ffmpegenc`), and `vah264enc` / `vah265enc` / `vaav1enc` on VA-API GPUs | `ffmpeg` | Linux + libavcodec (+ the GPU's VA-API driver), or Windows + a shared ffmpeg named by `FFMPEG_DIR` |
+| `OpenH264Dec` / `OpenH264Enc` (`openh264dec` / `openh264enc`, `num-slices` encodes the slices on separate threads) | `openh264` | Linux, OpenH264 built from source |
 | `AacDec` / `MpegAudioDec` (`aacdec` / `mpegaudiodec`, AAC-LC and MP2 / MP3 in pure Rust via symphonia) | `aac-decode`, `mpeg-audio-decode` | none |
 | AVI / QuickTime / Matroska streams g2g has no caps type for (Cinepak, Indeo, Ut Video, QuickTime RLE, ADPCM, MACE, ...), demuxed under their container tag and decoded by `ffmpegdec` / `ffmpegaudiodec` | `ffmpeg-long-tail` | Linux + libavcodec + libavformat |
 | `MfDecode` / `MfEncode` / `MfAacEncode` / `MfAacDecode` | `mf-decode`, `mf-encode`, `mf-aac` | Windows + Media Foundation |
@@ -638,7 +640,7 @@ cargo clippy --workspace --all-targets
 | `CudaGlSink` (CUDA-GL present), `CudaKmsSink` (CUDA-GL on KMS) | `cuda-gl`, `cuda-kms` | Linux + NVIDIA + EGL + GL (+ libdrm for KMS) |
 | `CudaToWgpu` / `WgpuToCuda` (zero-copy bridge) | `cuda-wgpu` | Linux + NVIDIA + Vulkan |
 | `UdpSink` + H.264 / Opus RTP packetizer, or raw datagrams (`multiudpsink` `clients=`) | `udp-egress` | none |
-| `UdpSrc` (`udpsrc2` alias: H.264 / Opus RTP ingest + jitter buffer + RTCP / NACK, or raw MPEG-TS datagrams; batched reads, GRO, kernel timestamps, source-specific multicast) | `udp-ingress` | none |
+| `UdpSrc` (`udpsrc2` alias: H.264 / Opus RTP ingest + jitter buffer + RTCP / NACK, or raw MPEG-TS datagrams; batched reads, GRO, kernel timestamps, source-specific multicast on several interfaces, a `ReceiveTimeout` bus message after `timeout` with no data) | `udp-ingress` | none |
 | `SrtpEnc` / `SrtpDec` (RFC 3711 / RFC 7714 SRTP and SRTCP, per-SSRC receive contexts) | `srtp` | none |
 | `DtlsSrtpEnc` / `DtlsSrtpDec` (DTLS-SRTP handshake over the media socket keys SRTP) | `dtls-srtp` | none |
 | `SrtSrc` / `SrtSink` (SRT caller, listener and rendezvous, AES-128 / 192 / 256 via `passphrase` and `pbkeylen`, gst's `uri`, a listener that accepts callers by `streamid`) | `srt` | none |
@@ -659,7 +661,7 @@ cargo clippy --workspace --all-targets
 | `KvsWebRtcSink` / `KvsWebRtcSrc` (Amazon Kinesis Video Streams WebRTC signalling: SigV4-signed WebSocket, master answers a viewer's offer, TURN from the service) | `webrtc-kvs` | + tokio-tungstenite + serde_json + base64 |
 | `JanusVrSink` / `JanusVrSrc` (publish into or subscribe from a Janus VideoRoom: JSON WebSocket signalling, keepalive, unpublish + leave on EOS) | `webrtc-janus` | + tokio-tungstenite + serde_json |
 | `HttpSrc` (HTTP(S) byte-stream source) | `http-src` | reqwest |
-| `HlsSrc` (TS + fMP4 / CMAF, live, LL-HLS parts + blocking reload, AES-128 / SAMPLE-AES) | `hls` | reqwest + aes |
+| `HlsSrc` (TS + fMP4 / CMAF, live, LL-HLS parts + blocking reload, AES-128 / SAMPLE-AES, a warning when a live playlist stops updating) | `hls` | reqwest + aes |
 | `DashSrc` (`SegmentTemplate` / `SegmentTimeline`, live, CMAF chunked low latency) | `dash` | reqwest + roxmltree |
 | `V4l2Src` | `v4l2` | Linux + V4L2 (`/dev/videoN`) |
 | `WasapiSink` / `WasapiSrc` | `wasapi-sink`, `wasapi-src` | Windows |
@@ -669,10 +671,10 @@ cargo clippy --workspace --all-targets
 | `PipeWireVideoSrc` (video capture, `io-mode=mmap` or `dmabuf`) | `pipewire` | Linux + libpipewire |
 | `PipeWireVideoSink` (`pipewirevideosink`: publishes video as a PipeWire camera node that other applications capture from) | `pipewire` | Linux + libpipewire |
 | `PipeWireVideoSrc portal=true` (screen capture via xdg-desktop-portal) | `portal` | Linux + libpipewire + a desktop portal |
-| `DeckLinkVideoSink` / `DeckLinkAudioSink` / `DeckLinkVideoSrc` (SDI output and video capture for Blackmagic Design DeckLink, unverified on hardware until a board runs them) | `decklink` | Linux + a C++ compiler at build, the Desktop Video driver at run time |
+| `DeckLinkVideoSink` / `DeckLinkAudioSink` / `DeckLinkVideoSrc` (SDI output with VANC from `output-vanc`, and video capture that detects the input mode and attaches VANC as `AncillaryMeta`, for Blackmagic Design DeckLink, unverified on hardware until a board runs them) | `decklink` | Linux + a C++ compiler at build, the Desktop Video driver at run time |
 | `MfVideoSrc` (camera) | `mf-video-src` | Windows + Media Foundation |
 | `Av1Enc` (pure-Rust `rav1e`) | `av1-encode` | none |
-| `VpxEnc` (VP8 / VP9 via libvpx) | `vpx` | libvpx, libclang at build |
+| `VpxEnc` (VP8 / VP9 via libvpx, in the Linux, macOS and Windows release binaries) | `vpx` | libvpx, libclang at build |
 | `MjpegDec` / `MjpegEnc` (pure Rust) | `mjpeg`, `mjpeg-encode` | none |
 | `PngDec` / `PngEnc` (pure Rust) | `png` | none |
 | `WebPDec` (lossy + lossless, pure Rust) | `webp` | none |
@@ -691,6 +693,12 @@ cargo clippy --workspace --all-targets
 | `WgpuPreprocess` (NV12 / YUYV system bytes, a dma-buf, or a GPU texture in, NCHW tensor out) | `wgpu`, `dmabuf-wgpu`, `mediacodec-wgpu` (in `g2g-ml`) | wgpu (Vulkan for the dma-buf import) |
 | Embassy / RTOS pool + clock | `embassy`, `embassy-link` | none |
 | Browser elements | `web`, `web-codecs` | `wasm32-unknown-unknown` |
+
+`alsasink`, `pulsesink` and `pipewiresink` (with `slave-method=skew`), and
+`wasapisink`, `coreaudiosink` and the AAudio sink, follow a pipeline clock they
+do not provide by skipping or inserting samples. The last three also offer their
+own playout clock. `alsasink`, `pulsesink`, `pipewiresink` and `wasapisink`
+switch device while playing and take `continue-on-error`.
 
 ### In the default `no_std + alloc` build
 
@@ -711,7 +719,7 @@ cargo clippy --workspace --all-targets
 | Live MPEG-TS clock | `mpegtslivesrc` paces a live TS pipeline on the sender's PCR (`udpsrc ... ! mpegtslivesrc ! tsdemux`, or gst's `mpegtslivesrc source="udpsrc ..."`) |
 | Subtitles and captions | bitmap decoders `vobsubdec` (alias `dvdsubdec`), `dvbsubdec`, `pgsdec` with `subpictureoverlay` to blend their cues onto video, `teletextdec`, `subparse`, `srtenc`, `webvttenc`, `ccextract` / `cccombiner`, `ccconverter` (between cc_data, CDP, S334-1A, and raw CEA-608), `cctost2038anc` / `st2038anctocc` (captions in SMPTE ST 2038), `st2038ancdemux` / `st2038ancmux`, `st2038combiner` / `st2038extractor` (ST 2038 on video frames) |
 | Flow control and debug | `concat`, `input-selector`, `output-selector`, `framesplit` / `framemerge` (one stream split across branches by which has room, then put back in order), `valve`, `fakesrc`, `fdsrc`, `fdsink`, `watchdog`, `capssetter`, `taginject`, `rndbuffersize`, `errorignore`, `breakmydata`, `chopmydata`, `checksumsink`, `fakevideosink`, `fakeaudiosink`, `progressreport` |
-| Composition and DSL | `compositor`, the tag system, `parse_launch` / `gst-inspect` |
+| Composition and DSL | `compositor` (pad `operator` and `sizing-policy`, as on every compositor), the tag system, `parse_launch` / `gst-inspect` |
 
 ### Added by the `std` build
 
@@ -1476,7 +1484,7 @@ g2g-mcugen/      # host graph compiler: a declarative MCU graph -> a static pipe
 g2g-plugin/      # dynamic-plugin SDK (declare_plugin! + ABI tag)
 g2g-plugins/     # all source/sink/transform elements
 g2g-ml/          # ORT, Burn, WgpuPreprocess, batcher
-g2g-bridge/      # GStreamer C-FFI bridge (libgstglass2glass.so)
+g2g-bridge/      # GStreamer C-FFI bridge (libgstglass2glass.so, gstglass2glass.dll)
 g2g-python/      # gst-python-ml element host (embedded CPython)
 g2g-capi/        # C ABI (cdylib/staticlib + include/g2g.h, C++ wrapper include/g2g.hpp)
 g2g-pyapi/       # Python (pyo3) bindings

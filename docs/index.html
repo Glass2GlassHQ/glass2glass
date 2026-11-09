@@ -1224,6 +1224,16 @@ g2g-launch <span class="flag">--script</span> build.rhai</div>
                 <span class="feature-tag tag-gpu">GPU</span>
             </div>
             <div class="feature-card">
+                <span class="f-icon">&#9881;</span>
+                <h3>AMD GPUs too</h3>
+                <p class="f-lead">Upload, convert, scale and composite video on an AMD GPU with HIP, then run an ONNX model on the frames without copying them back. The same elements also run on NVIDIA.</p>
+                <div class="chip-group">
+                    <span class="chip-label">Elements</span>
+                    <div class="chip-row"><span class="chip">hipupload</span><span class="chip">hipconvertscale</span><span class="chip">hipcompositor</span><span class="chip">hipdownload</span><span class="chip">ortinfer</span></div>
+                </div>
+                <span class="feature-tag tag-gpu">GPU</span>
+            </div>
+            <div class="feature-card">
                 <span class="f-icon">&#128241;</span>
                 <h3>Android</h3>
                 <p class="f-lead">Hardware decode straight into a GPU texture. The frame never touches the CPU.</p>
@@ -1303,6 +1313,10 @@ g2g-launch <span class="flag">--script</span> build.rhai</div>
             To try it without Rust, download <code>g2g-launch</code> for Linux, macOS or Windows from the
             <a href="https://github.com/Glass2GlassHQ/glass2glass/releases/latest" style="color: var(--accent);">latest release</a>,
             or run <code>pip install glass2glass</code> for Python. Android apps can use the AAR on the same release page.
+        </p>
+        <p class="section-desc">
+            The release page also has <code>.deb</code> and <code>.rpm</code> packages for Linux and an <code>.msi</code> installer for Windows,
+            and <code>brew install Glass2GlassHQ/tap/glass2glass</code> installs it on macOS.
         </p>
 
         <div class="code-block">
