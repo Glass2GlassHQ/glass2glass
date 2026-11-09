@@ -41,14 +41,14 @@ use tokio::sync::mpsc;
 use g2g_core::element::BoxFuture;
 use g2g_core::runtime::join_all;
 use g2g_core::{
-    Caps, Dim, G2gError, MultiOutputSink, MultiOutputSource, OutputSink, PipelinePacket, PropError,
-    PropKind, PropValue, PropertySpec, PushOutcome, Rate, VideoCodec,
+    Caps, G2gError, MultiOutputSink, MultiOutputSource, OutputSink, PipelinePacket, PropError,
+    PropKind, PropValue, PropertySpec, PushOutcome,
 };
 
 use crate::filesink::io_err;
 use crate::rtpdepay::RtpEncoding;
 use crate::rtpjitter::JitterConfig;
-use crate::rtprecv::RtpRecvConfig;
+use crate::rtprecv::{AccessUnitEmitter, RtpRecvConfig};
 use crate::rtspingest::{
     handshake, inactive_for, receive_interleaved, refuse_one, session_recv_config, watch_control,
     RecordTransport, SessionEnd, SessionTap,
@@ -239,14 +239,7 @@ impl RtspServerSrcN {
     }
 
     fn caps(&self) -> Caps {
-        Caps::CompressedVideo {
-            codec: VideoCodec::H264,
-            width: Dim::Fixed(self.width),
-            height: Dim::Fixed(self.height),
-            framerate: Rate::Fixed(self.fps << 16),
-            colorimetry: g2g_core::Colorimetry::UNKNOWN,
-            alignment: g2g_core::BitstreamAlignment::Unspecified,
-        }
+        crate::rtspingest::ingest_caps(&self.recv, self.width, self.height, self.fps)
     }
 
     fn pad_config(&self) -> PadConfig {
@@ -289,6 +282,7 @@ impl PadConfig {
             server_rtp_port,
             self.ssrc.wrapping_add(port as u32),
         )
+        .accepting_codec(crate::rtspingest::ingest_codec(&self.recv))
         .with_session_timeout_secs(self.session_timeout_secs)
     }
 }
@@ -415,7 +409,7 @@ async fn pad_worker(
                 rtp_channel,
                 leftover,
             } => tokio::select! {
-                r = receive_interleaved(&mut control, &mut responder, rtp_channel, leftover, remaining, seq_base, &mut tap) => r?,
+                r = receive_interleaved(&mut control, &mut responder, rtp_channel, leftover, AccessUnitEmitter::new(cfg.recv.encoding, seq_base, remaining), &mut tap) => r?,
                 _ = inactive_for(&activity, cfg.timeout_ns) => SessionEnd::PeerGone,
             },
         };
@@ -501,6 +495,7 @@ static SRCN_PROPS: &[PropertySpec] = &[
     .with_default("720"),
     PropertySpec::new("framerate", PropKind::Uint, "declared frame rate hint, fps")
         .with_default("30"),
+    crate::rtspingest::ENCODING_NAME_PROPERTY,
     PropertySpec::new(
         "num-buffers",
         PropKind::Int,
@@ -586,8 +581,8 @@ impl MultiOutputSource for RtspServerSrcN {
         self.pads.max(1)
     }
 
-    /// Every pad carries one publisher's H.264, so they all declare the same hint
-    /// caps; a downstream decoder corrects the geometry from the in-band SPS.
+    /// Every pad carries one publisher's `encoding-name` video, so they all declare
+    /// the same hint caps; a downstream decoder corrects the geometry from the in-band SPS.
     fn output_caps(&self, output: usize) -> Result<Caps, G2gError> {
         if output >= self.output_count() {
             return Err(G2gError::CapsMismatch);
@@ -632,6 +627,7 @@ impl MultiOutputSource for RtspServerSrcN {
                 self.fps = value.as_uint().ok_or(PropError::Type)? as u32;
                 Ok(())
             }
+            "encoding-name" => crate::rtspingest::set_encoding_name(&mut self.recv, &value),
             "num-buffers" => crate::numbuffers::set_num_buffers(&mut self.frame_limit, &value),
             "max-sessions" => {
                 let n = value.as_uint().ok_or(PropError::Type)?;
@@ -669,6 +665,7 @@ impl MultiOutputSource for RtspServerSrcN {
             "width" => Some(PropValue::Uint(self.width as u64)),
             "height" => Some(PropValue::Uint(self.height as u64)),
             "framerate" => Some(PropValue::Uint(self.fps as u64)),
+            "encoding-name" => Some(PropValue::Str(self.recv.encoding.name().into())),
             "num-buffers" => Some(crate::numbuffers::get_num_buffers(self.frame_limit)),
             "max-sessions" => Some(PropValue::Uint(self.output_count() as u64)),
             "timeout" => Some(PropValue::Uint(match self.session_timeout_ns {
@@ -783,6 +780,7 @@ impl MultiOutputSource for RtspServerSrcN {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use g2g_core::VideoCodec;
 
     fn src(pads: usize) -> RtspServerSrcN {
         RtspServerSrcN::new("0.0.0.0:8554".parse().unwrap(), pads)

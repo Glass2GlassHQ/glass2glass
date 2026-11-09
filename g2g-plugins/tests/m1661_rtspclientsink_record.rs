@@ -228,8 +228,9 @@ async fn end_streams(sink: &mut RtspClientSink, pads: usize) -> Result<(), G2gEr
 async fn ingest_one_publisher(
     sink: &mut RtspClientSink,
     mut server: RtspServerSrc,
+    pad: PadFrames,
 ) -> (Vec<Vec<u8>>, Result<(), G2gError>) {
-    server.configure_pipeline(&h264_caps()).expect("configure");
+    server.configure_pipeline(&pad.caps).expect("configure");
     let received = Rc::new(RefCell::new(Vec::new()));
     let mut capture = Capture {
         access_units: received.clone(),
@@ -240,7 +241,7 @@ async fn ingest_one_publisher(
             .expect("server finishes")
             .expect("server runs")
     };
-    let pads = [video_pad()];
+    let pads = [pad];
     let send = async {
         publish_frames(sink, &pads, Duration::ZERO).await?;
         // UDP media can arrive after the TEARDOWN on the control connection, so EOS waits for the server
@@ -267,7 +268,7 @@ fn one_shot_server() -> (RtspServerSrc, u16) {
 async fn h264_published_over_tcp_interleaved_reaches_the_record_server_intact() {
     let (server, port) = one_shot_server();
     let mut sink = RtspClientSink::new(1, format!("rtsp://127.0.0.1:{port}/stream"));
-    let (received, published) = ingest_one_publisher(&mut sink, server).await;
+    let (received, published) = ingest_one_publisher(&mut sink, server, video_pad()).await;
     published.expect("publish and teardown");
     assert_eq!(
         received,
@@ -281,9 +282,123 @@ async fn h264_published_over_udp_reaches_the_record_server_intact() {
     let (server, port) = one_shot_server();
     let mut sink = RtspClientSink::new(1, format!("rtsp://127.0.0.1:{port}/stream"))
         .with_protocols(vec![LowerTransport::Udp]);
-    let (received, published) = ingest_one_publisher(&mut sink, server).await;
+    let (received, published) = ingest_one_publisher(&mut sink, server, video_pad()).await;
     published.expect("publish and teardown");
     assert_eq!(received, video_frames());
+}
+
+// the fixture's first access units, framed by the real `h265parse`
+fn h265_access_units() -> Vec<Vec<u8>> {
+    use g2g_core::AsyncElement;
+    const CLIP: &[u8] = include_bytes!("fixtures/h265_320x180.hevc");
+    let mut parse = g2g_plugins::h265parse::H265Parse::reframing();
+    let caps = Caps::CompressedVideo {
+        codec: VideoCodec::H265,
+        width: Dim::Any,
+        height: Dim::Any,
+        framerate: Rate::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        alignment: g2g_core::BitstreamAlignment::Unspecified,
+    };
+    parse
+        .configure_pipeline(&caps)
+        .expect("h265parse takes H.265");
+    let received = Rc::new(RefCell::new(Vec::new()));
+    let mut capture = Capture {
+        access_units: received.clone(),
+    };
+    g2g_core::runtime::block_on(async {
+        parse
+            .process(data_frame(CLIP.to_vec(), 0), &mut capture)
+            .await
+            .unwrap();
+        parse
+            .process(PipelinePacket::Eos, &mut capture)
+            .await
+            .unwrap();
+    });
+    let units = received.borrow()[..ACCESS_UNITS].to_vec();
+    units
+}
+
+#[tokio::test]
+async fn h265_published_over_tcp_interleaved_reaches_an_h265_record_server() {
+    let (mut server, port) = one_shot_server();
+    server
+        .set_property("encoding-name", PropValue::Str("H265".into()))
+        .expect("H265 is an ingest encoding");
+    let units = h265_access_units();
+    let pad = PadFrames {
+        caps: Caps::CompressedVideo {
+            codec: VideoCodec::H265,
+            width: Dim::Fixed(320),
+            height: Dim::Fixed(180),
+            framerate: Rate::Fixed(30 << 16),
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
+        },
+        frames: units
+            .iter()
+            .enumerate()
+            .map(|(i, unit)| (unit.clone(), i as u64 * FRAME_PERIOD_NS))
+            .collect(),
+    };
+    let mut sink = RtspClientSink::new(1, format!("rtsp://127.0.0.1:{port}/stream"));
+    let (received, published) = ingest_one_publisher(&mut sink, server, pad).await;
+    published.expect("publish and teardown");
+    let nal_lists = |units: &[Vec<u8>]| {
+        units
+            .iter()
+            .map(|unit| nal_payloads(unit))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(nal_lists(&received), nal_lists(&units));
+}
+
+// Annex-B start codes are 3 or 4 bytes, so access units are compared NAL by NAL
+fn nal_payloads(unit: &[u8]) -> Vec<Vec<u8>> {
+    let mut nals = Vec::new();
+    let mut start = None;
+    let mut at = 0;
+    while at + START_CODE.len() - 1 <= unit.len() {
+        if unit[at..].starts_with(&START_CODE[1..]) {
+            if let Some(from) = start {
+                nals.push(unit[from..at].to_vec());
+            }
+            at += START_CODE.len() - 1;
+            start = Some(at);
+            continue;
+        }
+        at += 1;
+    }
+    if let Some(from) = start {
+        nals.push(unit[from..].to_vec());
+    }
+    // a 4-byte start code leaves its leading zero on the NAL before it
+    for nal in &mut nals {
+        while nal.last() == Some(&0) {
+            nal.pop();
+        }
+    }
+    nals
+}
+
+#[tokio::test]
+async fn an_h264_publisher_is_refused_by_an_h265_record_server() {
+    let (mut server, port) = one_shot_server();
+    server
+        .set_property("encoding-name", PropValue::Str("H265".into()))
+        .expect("H265 is an ingest encoding");
+    server.configure_pipeline(&h264_caps()).expect("configure");
+    let mut capture = Capture {
+        access_units: Rc::new(RefCell::new(Vec::new())),
+    };
+    let mut sink = RtspClientSink::new(1, format!("rtsp://127.0.0.1:{port}/stream"));
+    let pads = [video_pad()];
+    let serve = tokio::time::timeout(Duration::from_millis(500), server.run(&mut capture));
+    let (_, published) = tokio::join!(serve, publish_frames(&mut sink, &pads, Duration::ZERO));
+    assert!(published.is_err(), "the ANNOUNCE is answered 415");
+    assert!(capture.access_units.borrow().is_empty());
 }
 
 #[derive(Default)]

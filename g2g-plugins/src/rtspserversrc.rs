@@ -52,7 +52,7 @@ use g2g_core::{
 use crate::filesink::io_err;
 use crate::rtpdepay::RtpEncoding;
 use crate::rtpjitter::JitterConfig;
-use crate::rtprecv::RtpRecvConfig;
+use crate::rtprecv::{AccessUnitEmitter, RtpRecvConfig};
 use crate::rtspingest::{
     handshake, inactive_for, receive_interleaved, refuse_one, session_recv_config, watch_control,
     RecordTransport, SessionEnd, SessionTap,
@@ -250,14 +250,7 @@ impl RtspServerSrc {
     }
 
     fn caps(&self) -> Caps {
-        Caps::CompressedVideo {
-            codec: VideoCodec::H264,
-            width: Dim::Fixed(self.width),
-            height: Dim::Fixed(self.height),
-            framerate: Rate::Fixed(self.fps << 16),
-            colorimetry: g2g_core::Colorimetry::UNKNOWN,
-            alignment: g2g_core::BitstreamAlignment::Unspecified,
-        }
+        crate::rtspingest::ingest_caps(&self.recv, self.width, self.height, self.fps)
     }
 
     fn responder(&self, server_rtp_port: u16) -> RtspResponder {
@@ -268,6 +261,7 @@ impl RtspServerSrc {
             server_rtp_port,
             self.ssrc,
         )
+        .accepting_codec(crate::rtspingest::ingest_codec(&self.recv))
         .with_session_timeout_secs(self.session_timeout_secs())
     }
 }
@@ -365,6 +359,7 @@ impl SourceLoop for RtspServerSrc {
             .with_default("720"),
             PropertySpec::new("framerate", PropKind::Uint, "declared frame rate hint, fps")
                 .with_default("30"),
+            crate::rtspingest::ENCODING_NAME_PROPERTY,
             PropertySpec::new(
                 "num-buffers",
                 PropKind::Int,
@@ -474,6 +469,7 @@ impl SourceLoop for RtspServerSrc {
                 self.fps = value.as_uint().ok_or(PropError::Type)? as u32;
                 Ok(())
             }
+            "encoding-name" => crate::rtspingest::set_encoding_name(&mut self.recv, &value),
             "num-buffers" => crate::numbuffers::set_num_buffers(&mut self.frame_limit, &value),
             "max-sessions" => {
                 self.max_sessions = value.as_uint().ok_or(PropError::Type)?;
@@ -507,6 +503,7 @@ impl SourceLoop for RtspServerSrc {
             "width" => Some(PropValue::Uint(self.width as u64)),
             "height" => Some(PropValue::Uint(self.height as u64)),
             "framerate" => Some(PropValue::Uint(self.fps as u64)),
+            "encoding-name" => Some(PropValue::Str(self.recv.encoding.name().into())),
             "num-buffers" => Some(crate::numbuffers::get_num_buffers(self.frame_limit)),
             "max-sessions" => Some(PropValue::Uint(self.max_sessions)),
             "timeout" => Some(PropValue::Uint(match self.session_timeout_ns {
@@ -616,7 +613,7 @@ impl SourceLoop for RtspServerSrc {
                             rtp_channel,
                             leftover,
                         } => tokio::select! {
-                            r = receive_interleaved(&mut control, &mut responder, rtp_channel, leftover, remaining, seq_base, &mut tap) => r?,
+                            r = receive_interleaved(&mut control, &mut responder, rtp_channel, leftover, AccessUnitEmitter::new(recv.encoding, seq_base, remaining), &mut tap) => r?,
                             _ = inactive_for(&activity, timeout_ns) => SessionEnd::PeerGone,
                             _ = refuse_extras(&listener, &refused) => unreachable!("refusal never ends"),
                         },
@@ -646,13 +643,16 @@ impl SourceLoop for RtspServerSrc {
 
 impl PadTemplates for RtspServerSrc {
     fn pad_templates() -> Vec<PadTemplate> {
-        Vec::from([PadTemplate::source(CapsSet::one(Caps::CompressedVideo {
-            codec: VideoCodec::H264,
+        let ingested = [VideoCodec::H264, VideoCodec::H265].map(|codec| Caps::CompressedVideo {
+            codec,
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
-        }))])
+        });
+        Vec::from([PadTemplate::source(CapsSet::from_alternatives(Vec::from(
+            ingested,
+        )))])
     }
 }

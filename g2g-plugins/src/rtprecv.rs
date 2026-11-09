@@ -261,6 +261,10 @@ impl AccessUnitEmitter {
         self.seq - self.seq_base
     }
 
+    pub(crate) fn encoding(&self) -> RtpEncoding {
+        self.encoding
+    }
+
     // true once `frame_limit` access units are out and `Eos` is pushed
     pub(crate) async fn push(
         &mut self,

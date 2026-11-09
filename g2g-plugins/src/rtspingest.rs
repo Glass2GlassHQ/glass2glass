@@ -16,9 +16,12 @@ use alloc::vec::Vec;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use g2g_core::{G2gError, OutputSink, PipelinePacket, PushOutcome};
+use g2g_core::{
+    Caps, Dim, G2gError, OutputSink, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
+    PushOutcome, Rate, VideoCodec,
+};
 
-use crate::rtpdepay::{RtpEncoding, RtpH264Depayloader};
+use crate::rtpdepay::{RtpDepayloader, RtpEncoding};
 use crate::rtprecv::{AccessUnitEmitter, CaptureTimeLatch, RtpRecvConfig};
 use crate::rtspserver::{
     interleaved_frame, RtspEvent, RtspRequest, RtspResponder, INTERLEAVED_HEADER_LEN,
@@ -129,6 +132,44 @@ pub(crate) enum RecordTransport {
         rtp_channel: u8,
         leftover: Vec<u8>,
     },
+}
+
+pub(crate) const ENCODING_NAME_PROPERTY: PropertySpec = PropertySpec::new(
+    "encoding-name",
+    PropKind::Str,
+    "video codec the publishers send, as in gst application/x-rtp caps",
+)
+.with_default("H264")
+.with_enum_values("H264 | H265");
+
+pub(crate) fn set_encoding_name(
+    recv: &mut RtpRecvConfig,
+    value: &PropValue,
+) -> Result<(), PropError> {
+    let name = value.as_str().ok_or(PropError::Type)?;
+    let encoding = RtpEncoding::from_name(name)
+        .filter(|encoding| encoding.video_codec().is_some())
+        .ok_or(PropError::Value)?;
+    recv.encoding = encoding;
+    Ok(())
+}
+
+// the caps an ingest pad declares before the publisher's SPS refines them
+pub(crate) fn ingest_caps(recv: &RtpRecvConfig, width: u32, height: u32, fps: u32) -> Caps {
+    Caps::CompressedVideo {
+        codec: ingest_codec(recv),
+        width: Dim::Fixed(width),
+        height: Dim::Fixed(height),
+        framerate: Rate::Fixed(fps << 16),
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        alignment: g2g_core::BitstreamAlignment::Unspecified,
+    }
+}
+
+pub(crate) fn ingest_codec(recv: &RtpRecvConfig) -> VideoCodec {
+    recv.encoding
+        .video_codec()
+        .expect("set_encoding_name admits video encodings only")
 }
 
 // the UDP receive path reads the capture-time extensions this publisher announced
@@ -378,12 +419,10 @@ pub(crate) async fn receive_interleaved(
     responder: &mut RtspResponder,
     rtp_channel: u8,
     mut pending: Vec<u8>,
-    frame_limit: u64,
-    seq_base: u64,
+    mut emitter: AccessUnitEmitter,
     out: &mut SessionTap<'_>,
 ) -> Result<SessionEnd, G2gError> {
-    let mut depay = RtpH264Depayloader::new();
-    let mut emitter = AccessUnitEmitter::new(RtpEncoding::H264, seq_base, frame_limit);
+    let mut depay = RtpDepayloader::new(emitter.encoding());
     let capture_time_ids = responder.capture_time_ids();
     let mut capture_time = CaptureTimeLatch::default();
     let mut buf = [0u8; CTRL_BUF];

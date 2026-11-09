@@ -81,6 +81,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M2165: `wavparse` reads RF64 / BW64 files and posts the `LIST INFO` and ID3 tags found before or after the samples.
 - M2166: `rtspsrc` and `rtspclientsink` take credentials from an `rtsp://user:password@host` location, with `user-id` / `user-pw` taking precedence.
 - M2167: H.265 RTP depayloader (RFC 7798), and `udpsrc` receives H.265 with `encoding-name=H265` or an H.265 SDP.
+- M2168: `rtspserversrc` and `rtspserversrcn` ingest H.265 with `encoding-name=H265` and refuse an ANNOUNCE for another codec.
 
 ## 0.14.0
 

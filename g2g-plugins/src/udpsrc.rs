@@ -318,10 +318,8 @@ impl UdpSrc {
     }
 
     fn caps(&self) -> Caps {
-        let codec = match self.recv.encoding {
-            RtpEncoding::H264 => VideoCodec::H264,
-            RtpEncoding::H265 => VideoCodec::H265,
-            RtpEncoding::Opus => return opus_caps(),
+        let Some(codec) = self.recv.encoding.video_codec() else {
+            return opus_caps();
         };
         Caps::CompressedVideo {
             codec,

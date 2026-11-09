@@ -74,6 +74,14 @@ impl RtpEncoding {
         }
     }
 
+    pub fn video_codec(self) -> Option<VideoCodec> {
+        match self {
+            RtpEncoding::H264 => Some(VideoCodec::H264),
+            RtpEncoding::H265 => Some(VideoCodec::H265),
+            RtpEncoding::Opus => None,
+        }
+    }
+
     // every Opus packet decodes without the ones before it
     pub fn is_keyframe(self, unit: &[u8]) -> bool {
         match self {

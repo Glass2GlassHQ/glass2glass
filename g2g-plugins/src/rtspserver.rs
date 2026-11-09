@@ -160,21 +160,11 @@ pub fn sdp_h264(payload_type: u8, sps: Option<&[u8]>, pps: Option<&[u8]>) -> Str
     session_description(&[h264_media_section(payload_type, sps, pps, 0)])
 }
 
-// the ingest path receives H.264 only, so that section's extmap names the extensions
-fn announced_capture_time_ids(sdp: &str) -> CaptureTimeExtensionIds {
+// the ingest path receives one video stream, so that section's extmap names the extensions
+fn announced_video(sdp: &str) -> Option<SdpMedia> {
     SdpMedia::parse_all(sdp)
         .into_iter()
-        .find(|media| {
-            matches!(
-                media.caps,
-                Caps::CompressedVideo {
-                    codec: VideoCodec::H264,
-                    ..
-                }
-            )
-        })
-        .map(|media| media.capture_time_ids())
-        .unwrap_or_default()
+        .find(|media| matches!(media.caps, Caps::CompressedVideo { .. }))
 }
 
 /// Sans-IO RTSP server responder for one session.
@@ -192,6 +182,8 @@ pub struct RtspResponder {
     /// a client silent (no request, no RTCP) past it.
     timeout_secs: u32,
     capture_time_ids: CaptureTimeExtensionIds,
+    // the video codec an ingest server records, a publisher announcing another is refused
+    ingest_codec: Option<VideoCodec>,
 }
 
 /// Default RTSP session timeout (RFC 2326 §12.37's default).
@@ -212,7 +204,13 @@ impl RtspResponder {
             interleaved: None,
             timeout_secs: DEFAULT_SESSION_TIMEOUT_SECS,
             capture_time_ids: CaptureTimeExtensionIds::default(),
+            ingest_codec: None,
         }
+    }
+
+    pub fn accepting_codec(mut self, codec: VideoCodec) -> Self {
+        self.ingest_codec = Some(codec);
+        self
     }
 
     /// Advertise a non-default session timeout in the SETUP response.
@@ -276,8 +274,21 @@ impl RtspResponder {
             "ANNOUNCE" => {
                 if !req.body.is_empty() {
                     if let Ok(sdp) = core::str::from_utf8(&req.body) {
+                        let video = announced_video(sdp);
+                        let codec = video.as_ref().and_then(|media| match media.caps {
+                            Caps::CompressedVideo { codec, .. } => Some(codec),
+                            _ => None,
+                        });
+                        if self.ingest_codec.zip(codec).is_some_and(|(want, got)| want != got) {
+                            return (
+                                self.respond(req.cseq, "415 Unsupported Media Type", &[], b""),
+                                RtspEvent::None,
+                            );
+                        }
                         self.sdp = sdp.to_string();
-                        self.capture_time_ids = announced_capture_time_ids(sdp);
+                        self.capture_time_ids = video
+                            .map(|media| media.capture_time_ids())
+                            .unwrap_or_default();
                     }
                 }
                 (self.respond(req.cseq, "200 OK", &[], b""), RtspEvent::None)
