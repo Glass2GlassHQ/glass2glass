@@ -1,6 +1,7 @@
 //! JPEG XS encode / decode via Intel SVT-JPEG-XS: the ST 2110-22 compressed
 //! essence. `SvtJpegXsEnc` takes planar YUV `RawVideo` and emits a
-//! `CompressedVideo{JpegXs}` codestream (one independent codestream per frame);
+//! `CompressedVideo{JpegXs}` codestream (one independent codestream per frame, or
+//! one per field for interleaved video);
 //! `SvtJpegXsDec` is the inverse. Together they close the -22 loop: a plant can
 //! encode to JPEG XS, ship it over `st2110jxsrtp` (RFC 9134), and decode on the far
 //! side, at a fraction of -20's uncompressed bandwidth with sub-frame latency.
@@ -205,6 +206,13 @@ mod ffi {
             out_image_config: *mut ImageConfig,
         ) -> i32;
         pub(super) fn svt_jpeg_xs_decoder_close(dec_api: *mut DecoderApi);
+        pub(super) fn svt_jpeg_xs_decoder_get_single_frame_size(
+            bitstream_buf: *const u8,
+            bitstream_buf_size: usize,
+            out_image_config: *mut ImageConfig,
+            frame_size: *mut u32,
+            fast_search: u32,
+        ) -> i32;
         pub(super) fn svt_jpeg_xs_decoder_send_frame(
             dec_api: *mut DecoderApi,
             dec_input: *mut Frame,
@@ -253,17 +261,54 @@ fn raw_geometry(caps: &Caps) -> Result<(RawVideoFormat, u32, u32), G2gError> {
     }
 }
 
+fn raw_fields_per_frame(caps: &Caps) -> u32 {
+    match caps {
+        Caps::RawVideo {
+            interlace: g2g_core::Interlace::Interleaved,
+            ..
+        } => 2,
+        _ => 1,
+    }
+}
+
+fn coded_fields_per_frame(caps: &Caps) -> u32 {
+    match caps {
+        Caps::CompressedVideo {
+            alignment: g2g_core::BitstreamAlignment::FieldPair,
+            ..
+        } => 2,
+        _ => 1,
+    }
+}
+
+fn jpeg_xs_caps(width: u32, height: u32, fields_per_frame: u32) -> Caps {
+    let alignment = if fields_per_frame == 2 {
+        g2g_core::BitstreamAlignment::FieldPair
+    } else {
+        g2g_core::BitstreamAlignment::Unspecified
+    };
+    Caps::CompressedVideo {
+        codec: VideoCodec::JpegXs,
+        width: Dim::Fixed(width),
+        height: Dim::Fixed(height),
+        framerate: Rate::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        alignment,
+    }
+}
+
+fn interlace_of(fields_per_frame: u32) -> g2g_core::Interlace {
+    if fields_per_frame == 2 {
+        g2g_core::Interlace::Interleaved
+    } else {
+        g2g_core::Interlace::Any
+    }
+}
+
 /// The codestream caps the encoder produces from raw `input`.
 fn encoded_caps(input: &Caps) -> Result<Caps, G2gError> {
     let (_, w, h) = raw_geometry(input)?;
-    Ok(Caps::CompressedVideo {
-        codec: VideoCodec::JpegXs,
-        width: Dim::Fixed(w),
-        height: Dim::Fixed(h),
-        framerate: Rate::Any,
-        colorimetry: g2g_core::Colorimetry::UNKNOWN,
-        alignment: g2g_core::BitstreamAlignment::Unspecified,
-    })
+    Ok(jpeg_xs_caps(w, h, raw_fields_per_frame(input)))
 }
 
 /// The raw caps the decoder announces for a JPEG XS `input`.
@@ -282,11 +327,86 @@ fn decoded_caps(input: &Caps) -> Result<Caps, G2gError> {
                 width: width.clone(),
                 height: height.clone(),
                 framerate: Rate::Any,
-                interlace: g2g_core::Interlace::Any,
+                interlace: interlace_of(coded_fields_per_frame(input)),
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
             })
         }
         _ => Err(G2gError::CapsMismatch),
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct FieldLayout {
+    format: RawVideoFormat,
+    width: u32,
+    frame_height: u32,
+    fields_per_frame: u32,
+}
+
+impl FieldLayout {
+    fn frame_bytes(&self) -> Result<usize, G2gError> {
+        self.format
+            .unpadded_frame_bytes(self.width, self.frame_height)
+            .and_then(|bytes| usize::try_from(bytes).ok())
+            .ok_or(G2gError::CapsMismatch)
+    }
+
+    fn check_codestream_planes(&self, config: &ffi::ImageConfig) -> Result<(), G2gError> {
+        let plane_count = self.format.plane_count();
+        if usize::from(config.components_num) != plane_count {
+            return Err(G2gError::CapsMismatch);
+        }
+        let fields = u64::from(self.fields_per_frame);
+        for (plane, component) in config.components[..plane_count].iter().enumerate() {
+            let frame_rows = self
+                .format
+                .plane_rows(plane, self.frame_height)
+                .ok_or(G2gError::CapsMismatch)?;
+            let frame_plane_bytes = self
+                .format
+                .plane_bytes(plane, self.width, self.frame_height)
+                .ok_or(G2gError::CapsMismatch)?;
+            if u64::from(component.height) * fields != u64::from(frame_rows)
+                || u64::from(component.byte_size) * fields != frame_plane_bytes
+            {
+                return Err(G2gError::CapsMismatch);
+            }
+        }
+        Ok(())
+    }
+
+    fn point_at_field(
+        &self,
+        image: &mut ffi::ImageBuffer,
+        frame_start: *mut u8,
+        field: u32,
+    ) -> Result<(), G2gError> {
+        let sample_bytes = self.format.bytes_per_sample() as u64;
+        for plane in 0..self.format.plane_count() {
+            let offset = self
+                .format
+                .plane_offset(plane, self.width, self.frame_height)
+                .ok_or(G2gError::CapsMismatch)?;
+            let row_bytes = u64::from(
+                self.format
+                    .plane_stride(plane, self.width)
+                    .ok_or(G2gError::CapsMismatch)?,
+            );
+            let plane_bytes = self
+                .format
+                .plane_bytes(plane, self.width, self.frame_height)
+                .ok_or(G2gError::CapsMismatch)?;
+            let skipped = u64::from(field) * row_bytes;
+            let start = usize::try_from(offset + skipped).map_err(|_| G2gError::CapsMismatch)?;
+            image.data_yuv[plane] = frame_start.wrapping_add(start) as *mut c_void;
+            // svt strides count samples, and a doubled stride writes every other row
+            image.stride[plane] =
+                u32::try_from(row_bytes * u64::from(self.fields_per_frame) / sample_bytes)
+                    .map_err(|_| G2gError::CapsMismatch)?;
+            image.alloc_size[plane] =
+                u32::try_from(plane_bytes - skipped).map_err(|_| G2gError::CapsMismatch)?;
+        }
+        Ok(())
     }
 }
 
@@ -305,18 +425,13 @@ fn decoded_caps(input: &Caps) -> Result<Caps, G2gError> {
 /// let enc = SvtJpegXsEnc::new();
 /// ```
 pub struct SvtJpegXsEnc {
-    width: u32,
-    height: u32,
-    format: RawVideoFormat,
+    layout: FieldLayout,
     /// Target bits per pixel as a fraction (`bpp_numerator` / `bpp_denominator`).
     bpp_num: u32,
     bpp_den: u32,
     /// Boxed so the C `private_ptr` inside it keeps a stable address across moves.
     enc: Option<Box<ffi::EncoderApi>>,
-    /// Per-component byte sizes / plane widths from `get_image_config`.
-    components: [(u32, u32); ffi::MAX_COMPONENTS], // (stride_samples, byte_size)
-    components_num: usize,
-    /// Output codestream scratch, sized to the encoder's max bytes per frame.
+    /// Output codestream scratch, sized to the encoder's max bytes per codestream.
     out_buf: Vec<u8>,
     caps_sent: bool,
 }
@@ -330,9 +445,7 @@ unsafe impl Send for SvtJpegXsEnc {}
 impl core::fmt::Debug for SvtJpegXsEnc {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("SvtJpegXsEnc")
-            .field("width", &self.width)
-            .field("height", &self.height)
-            .field("format", &self.format)
+            .field("layout", &self.layout)
             .field("bpp", &(self.bpp_num, self.bpp_den))
             .finish()
     }
@@ -348,14 +461,15 @@ impl SvtJpegXsEnc {
     /// A JPEG XS encoder targeting 6 bpp (a visually lossless mezzanine default).
     pub fn new() -> Self {
         Self {
-            width: 0,
-            height: 0,
-            format: RawVideoFormat::I422p10,
+            layout: FieldLayout {
+                format: RawVideoFormat::I422p10,
+                width: 0,
+                frame_height: 0,
+                fields_per_frame: 1,
+            },
             bpp_num: 6,
             bpp_den: 1,
             enc: None,
-            components: [(0, 0); ffi::MAX_COMPONENTS],
-            components_num: 0,
             out_buf: Vec::new(),
             caps_sent: false,
         }
@@ -398,9 +512,12 @@ impl AsyncElement for SvtJpegXsEnc {
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         let (format, width, height) = raw_geometry(absolute_caps)?;
         let (colour, depth) = format_to_svt(format).ok_or(G2gError::CapsMismatch)?;
-        self.format = format;
-        self.width = width;
-        self.height = height;
+        let layout = FieldLayout {
+            format,
+            width,
+            frame_height: height,
+            fields_per_frame: raw_fields_per_frame(absolute_caps),
+        };
 
         // SAFETY: `api` is a correctly-sized, zeroed `EncoderApi`; the SVT calls read
         // / write only within it and the buffers we point at. Size is asserted above.
@@ -420,7 +537,7 @@ impl AsyncElement for SvtJpegXsEnc {
             return Err(G2gError::Hardware(HardwareError::Other));
         }
         api.source_width = width;
-        api.source_height = height;
+        api.source_height = height / layout.fields_per_frame;
         api.input_bit_depth = depth;
         api.colour_format = colour;
         api.bpp_numerator = self.bpp_num;
@@ -444,10 +561,8 @@ impl AsyncElement for SvtJpegXsEnc {
         if rc != ffi::ERR_NONE || bytes_per_frame == 0 {
             return Err(G2gError::Hardware(HardwareError::Other));
         }
-        self.components_num = usize::from(cfg.components_num).min(ffi::MAX_COMPONENTS);
-        for i in 0..self.components_num {
-            self.components[i] = (cfg.components[i].width, cfg.components[i].byte_size);
-        }
+        layout.check_codestream_planes(&cfg)?;
+        self.layout = layout;
         self.out_buf = vec![0u8; bytes_per_frame as usize];
 
         // SAFETY: `api` is fully configured; init allocates the encoder's state.
@@ -517,14 +632,11 @@ impl AsyncElement for SvtJpegXsEnc {
                         .domain
                         .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
                     if !self.caps_sent {
-                        out.push(PipelinePacket::CapsChanged(Caps::CompressedVideo {
-                            codec: VideoCodec::JpegXs,
-                            width: Dim::Fixed(self.width),
-                            height: Dim::Fixed(self.height),
-                            framerate: Rate::Any,
-                            colorimetry: g2g_core::Colorimetry::UNKNOWN,
-                            alignment: g2g_core::BitstreamAlignment::Unspecified,
-                        }))
+                        out.push(PipelinePacket::CapsChanged(jpeg_xs_caps(
+                            self.layout.width,
+                            self.layout.frame_height,
+                            self.layout.fields_per_frame,
+                        )))
                         .await?;
                         self.caps_sent = true;
                     }
@@ -547,57 +659,48 @@ impl AsyncElement for SvtJpegXsEnc {
 }
 
 impl SvtJpegXsEnc {
-    /// Encode one planar-YUV frame to a JPEG XS codestream (a fresh `Vec`). The input
-    /// slice must hold the tightly-packed planes for the configured geometry.
+    /// Encode one planar-YUV frame to JPEG XS (a fresh `Vec`): one codestream, or
+    /// one per field back to back, top field first. The input slice must hold the
+    /// tightly-packed planes for the configured geometry.
     fn encode_one(&mut self, input: &[u8]) -> Result<Vec<u8>, G2gError> {
         let enc = self.enc.as_mut().ok_or(G2gError::NotConfigured)?;
+        if input.len() < self.layout.frame_bytes()? {
+            return Err(G2gError::CapsMismatch);
+        }
+        let mut codestreams = Vec::new();
+        for field in 0..self.layout.fields_per_frame {
+            // SAFETY: an all-zero bit pattern is valid for this `#[repr(C)]` POD struct (only integers / null pointers); the SVT call fills or reads it.
+            let mut fr: ffi::Frame = unsafe { core::mem::zeroed() };
+            self.layout
+                .point_at_field(&mut fr.image, input.as_ptr() as *mut u8, field)?;
+            fr.bitstream.buffer = self.out_buf.as_mut_ptr();
+            fr.bitstream.allocation_size = self.out_buf.len() as u32;
 
-        // Point the SVT image buffer at each plane in the contiguous input.
-        // SAFETY: an all-zero bit pattern is valid for this `#[repr(C)]` POD struct (only integers / null pointers); the SVT call fills or reads it.
-        let mut fr: ffi::Frame = unsafe { core::mem::zeroed() };
-        let mut offset = 0usize;
-        for i in 0..self.components_num {
-            let (stride_samples, byte_size) = self.components[i];
-            let end = offset
-                .checked_add(byte_size as usize)
-                .ok_or(G2gError::CapsMismatch)?;
-            if end > input.len() {
-                return Err(G2gError::CapsMismatch);
+            // SAFETY: `enc` is initialized; `fr` points at planes inside `input` (its
+            // length is checked against the frame size above, and the encoder only
+            // reads them) and an output buffer sized to the encoder's max bytes per
+            // codestream. Blocking, so the library consumes `fr` before returning.
+            let rc = unsafe { ffi::svt_jpeg_xs_encoder_send_picture(&mut **enc, &mut fr, 1) };
+            if rc != ffi::ERR_NONE {
+                return Err(G2gError::Hardware(HardwareError::Other));
             }
-            // SAFETY: the range [offset, end) is within `input` (checked above); the
-            // pointer is only read by the encoder, which does not retain it past the
-            // blocking `send_picture` call.
-            fr.image.data_yuv[i] = unsafe { input.as_ptr().add(offset) as *mut c_void };
-            fr.image.stride[i] = stride_samples;
-            fr.image.alloc_size[i] = byte_size;
-            offset = end;
+            // SAFETY: an all-zero bit pattern is valid for this `#[repr(C)]` POD struct (only integers / null pointers); the SVT call fills or reads it.
+            let mut got: ffi::Frame = unsafe { core::mem::zeroed() };
+            // SAFETY: blocking get returns this picture's packet (codestream mode: one
+            // packet per picture); `got` is a valid out param.
+            let rc = unsafe { ffi::svt_jpeg_xs_encoder_get_packet(&mut **enc, &mut got, 1) };
+            if rc != ffi::ERR_NONE {
+                return Err(G2gError::Hardware(HardwareError::Other));
+            }
+            let len = got.bitstream.used_size as usize;
+            let ptr = got.bitstream.buffer;
+            if ptr.is_null() || len == 0 {
+                return Err(G2gError::Hardware(HardwareError::Other));
+            }
+            // SAFETY: the library filled `len` valid bytes at `ptr` (its output buffer).
+            codestreams.extend_from_slice(unsafe { core::slice::from_raw_parts(ptr, len) });
         }
-        fr.bitstream.buffer = self.out_buf.as_mut_ptr();
-        fr.bitstream.allocation_size = self.out_buf.len() as u32;
-
-        // SAFETY: `enc` is initialized; `fr` points at valid input planes and an
-        // output buffer sized to the encoder's max bytes per frame. Blocking, so the
-        // library consumes `fr` before returning.
-        let rc = unsafe { ffi::svt_jpeg_xs_encoder_send_picture(&mut **enc, &mut fr, 1) };
-        if rc != ffi::ERR_NONE {
-            return Err(G2gError::Hardware(HardwareError::Other));
-        }
-        // SAFETY: an all-zero bit pattern is valid for this `#[repr(C)]` POD struct (only integers / null pointers); the SVT call fills or reads it.
-        let mut got: ffi::Frame = unsafe { core::mem::zeroed() };
-        // SAFETY: blocking get returns this frame's packet (codestream mode: one
-        // packet per picture); `got` is a valid out param.
-        let rc = unsafe { ffi::svt_jpeg_xs_encoder_get_packet(&mut **enc, &mut got, 1) };
-        if rc != ffi::ERR_NONE {
-            return Err(G2gError::Hardware(HardwareError::Other));
-        }
-        let len = got.bitstream.used_size as usize;
-        let ptr = got.bitstream.buffer;
-        if ptr.is_null() || len == 0 {
-            return Err(G2gError::Hardware(HardwareError::Other));
-        }
-        // SAFETY: the library filled `len` valid bytes at `ptr` (its output buffer).
-        let bytes = unsafe { core::slice::from_raw_parts(ptr, len) };
-        Ok(bytes.to_vec())
+        Ok(codestreams)
     }
 }
 
@@ -648,14 +751,7 @@ impl PadTemplates for SvtJpegXsEnc {
 pub struct SvtJpegXsDec {
     /// Boxed for a stable C `private_ptr` address; `None` until the first frame.
     dec: Option<Box<ffi::DecoderApi>>,
-    out_format: RawVideoFormat,
-    width: u32,
-    height: u32,
-    /// (stride_samples, byte_size) per component, from decoder init.
-    components: [(u32, u32); ffi::MAX_COMPONENTS],
-    components_num: usize,
-    /// Total output frame size (sum of component byte sizes).
-    frame_size: usize,
+    layout: FieldLayout,
     caps_sent: bool,
     segment: Segment,
 }
@@ -667,9 +763,7 @@ unsafe impl Send for SvtJpegXsDec {}
 impl core::fmt::Debug for SvtJpegXsDec {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("SvtJpegXsDec")
-            .field("width", &self.width)
-            .field("height", &self.height)
-            .field("out_format", &self.out_format)
+            .field("layout", &self.layout)
             .finish()
     }
 }
@@ -685,12 +779,12 @@ impl SvtJpegXsDec {
     pub fn new() -> Self {
         Self {
             dec: None,
-            out_format: RawVideoFormat::I422p10,
-            width: 0,
-            height: 0,
-            components: [(0, 0); ffi::MAX_COMPONENTS],
-            components_num: 0,
-            frame_size: 0,
+            layout: FieldLayout {
+                format: RawVideoFormat::I422p10,
+                width: 0,
+                frame_height: 0,
+                fields_per_frame: 1,
+            },
             caps_sent: false,
             segment: Segment::new(),
         }
@@ -699,11 +793,7 @@ impl SvtJpegXsDec {
 
 impl Drop for SvtJpegXsDec {
     fn drop(&mut self) {
-        if let Some(dec) = self.dec.as_mut() {
-            // SAFETY: `dec` was initialized by `svt_jpeg_xs_decoder_init`; close frees
-            // its state exactly once (the element owns the only handle).
-            unsafe { ffi::svt_jpeg_xs_decoder_close(&mut **dec) };
-        }
+        self.close_decoder();
     }
 }
 
@@ -735,7 +825,10 @@ impl AsyncElement for SvtJpegXsDec {
             Caps::CompressedVideo {
                 codec: VideoCodec::JpegXs,
                 ..
-            } => Ok(ConfigureOutcome::Accepted),
+            } => {
+                self.set_fields_per_frame(coded_fields_per_frame(absolute_caps));
+                Ok(ConfigureOutcome::Accepted)
+            }
             // A pass-through no-op configure with the downstream (raw) caps also lands
             // here after the runner cascades the source-side format.
             Caps::RawVideo { .. } => Ok(ConfigureOutcome::Accepted),
@@ -776,11 +869,11 @@ impl AsyncElement for SvtJpegXsDec {
                     let pixels = self.decode_one(slice)?;
                     if !self.caps_sent {
                         out.push(PipelinePacket::CapsChanged(Caps::RawVideo {
-                            format: self.out_format,
-                            width: Dim::Fixed(self.width),
-                            height: Dim::Fixed(self.height),
+                            format: self.layout.format,
+                            width: Dim::Fixed(self.layout.width),
+                            height: Dim::Fixed(self.layout.frame_height),
                             framerate: Rate::Any,
-                            interlace: g2g_core::Interlace::Any,
+                            interlace: interlace_of(self.layout.fields_per_frame),
                             colorimetry: g2g_core::Colorimetry::UNKNOWN,
                         }))
                         .await?;
@@ -800,7 +893,16 @@ impl AsyncElement for SvtJpegXsDec {
                 }
                 // A compressed CapsChanged upstream carries no pixel layout; swallow it
                 // (our own output CapsChanged is emitted from the first decoded frame).
-                PipelinePacket::CapsChanged(_) => Ok(()),
+                PipelinePacket::CapsChanged(caps) => {
+                    if let Caps::CompressedVideo {
+                        codec: VideoCodec::JpegXs,
+                        ..
+                    } = caps
+                    {
+                        self.set_fields_per_frame(coded_fields_per_frame(&caps));
+                    }
+                    Ok(())
+                }
                 PipelinePacket::Segment(segment) => {
                     self.segment = segment;
                     out.push(PipelinePacket::Segment(segment)).await.map(|_| ())
@@ -812,46 +914,84 @@ impl AsyncElement for SvtJpegXsDec {
 }
 
 impl SvtJpegXsDec {
-    /// Ensure the decoder is initialized from `codestream` (learning geometry /
-    /// format), then decode one frame into a fresh contiguous planar buffer.
-    fn decode_one(&mut self, codestream: &[u8]) -> Result<Vec<u8>, G2gError> {
+    fn close_decoder(&mut self) {
+        if let Some(mut dec) = self.dec.take() {
+            // SAFETY: `dec` was initialized by `svt_jpeg_xs_decoder_init`; close frees
+            // its state exactly once (the element owns the only handle).
+            unsafe { ffi::svt_jpeg_xs_decoder_close(&mut *dec) };
+        }
+    }
+
+    fn set_fields_per_frame(&mut self, fields_per_frame: u32) {
+        if fields_per_frame == self.layout.fields_per_frame {
+            return;
+        }
+        self.close_decoder();
+        self.caps_sent = false;
+        self.layout.fields_per_frame = fields_per_frame;
+    }
+
+    /// Ensure the decoder is initialized from `codestreams` (learning geometry /
+    /// format), then decode one frame, or one field codestream into each field's
+    /// rows, into a fresh contiguous planar buffer.
+    fn decode_one(&mut self, codestreams: &[u8]) -> Result<Vec<u8>, G2gError> {
         if self.dec.is_none() {
-            self.init_from(codestream)?;
+            self.init_from(codestreams)?;
         }
         let dec = self.dec.as_mut().ok_or(G2gError::NotConfigured)?;
 
-        let mut pixels = vec![0u8; self.frame_size];
-        // SAFETY: an all-zero bit pattern is valid for this `#[repr(C)]` POD struct (only integers / null pointers); the SVT call fills or reads it.
-        let mut fr: ffi::Frame = unsafe { core::mem::zeroed() };
-        // Input bitstream (the library only reads it during the blocking send).
-        fr.bitstream.buffer = codestream.as_ptr() as *mut u8;
-        fr.bitstream.allocation_size = codestream.len() as u32;
-        fr.bitstream.used_size = codestream.len() as u32;
-        // Output planes into the contiguous buffer.
-        let mut offset = 0usize;
-        for i in 0..self.components_num {
-            let (stride_samples, byte_size) = self.components[i];
-            // SAFETY: offsets sum to `frame_size` == `pixels.len()`, so each plane
-            // pointer stays within the allocation.
-            fr.image.data_yuv[i] = unsafe { pixels.as_mut_ptr().add(offset) as *mut c_void };
-            fr.image.stride[i] = stride_samples;
-            fr.image.alloc_size[i] = byte_size;
-            offset += byte_size as usize;
-        }
+        let mut pixels = vec![0u8; self.layout.frame_bytes()?];
+        let mut rest = codestreams;
+        for field in 0..self.layout.fields_per_frame {
+            let codestream_len = if field + 1 == self.layout.fields_per_frame {
+                rest.len()
+            } else {
+                let mut len: u32 = 0;
+                // SAFETY: `rest` is a valid readable slice and `len` a valid out param;
+                // the image config out param is optional and passed as null.
+                let rc = unsafe {
+                    ffi::svt_jpeg_xs_decoder_get_single_frame_size(
+                        rest.as_ptr(),
+                        rest.len(),
+                        core::ptr::null_mut(),
+                        &mut len,
+                        1,
+                    )
+                };
+                if rc != ffi::ERR_NONE {
+                    return Err(G2gError::Hardware(HardwareError::Other));
+                }
+                len as usize
+            };
+            if codestream_len == 0 || codestream_len > rest.len() {
+                return Err(G2gError::Hardware(HardwareError::Other));
+            }
+            let (codestream, after) = rest.split_at(codestream_len);
+            rest = after;
 
-        // SAFETY: `dec` is initialized; `fr` points at a valid input codestream and
-        // output planes sized from the decoder's own config. Blocking calls.
-        let rc = unsafe { ffi::svt_jpeg_xs_decoder_send_frame(&mut **dec, &mut fr, 1) };
-        if rc != ffi::ERR_NONE {
-            return Err(G2gError::Hardware(HardwareError::Other));
-        }
-        // SAFETY: an all-zero bit pattern is valid for this `#[repr(C)]` POD struct (only integers / null pointers); the SVT call fills or reads it.
-        let mut got: ffi::Frame = unsafe { core::mem::zeroed() };
-        // SAFETY: blocking get returns the decoded frame into the planes we set on
-        // `fr`; `got` is a valid out param. End-of-codestream is a non-fatal status.
-        let rc = unsafe { ffi::svt_jpeg_xs_decoder_get_frame(&mut **dec, &mut got, 1) };
-        if rc != ffi::ERR_NONE && rc != ffi::ERR_END_OF_CODESTREAM {
-            return Err(G2gError::Hardware(HardwareError::Other));
+            // SAFETY: an all-zero bit pattern is valid for this `#[repr(C)]` POD struct (only integers / null pointers); the SVT call fills or reads it.
+            let mut fr: ffi::Frame = unsafe { core::mem::zeroed() };
+            // Input bitstream (the library only reads it during the blocking send).
+            fr.bitstream.buffer = codestream.as_ptr() as *mut u8;
+            fr.bitstream.allocation_size = codestream.len() as u32;
+            fr.bitstream.used_size = codestream.len() as u32;
+            self.layout
+                .point_at_field(&mut fr.image, pixels.as_mut_ptr(), field)?;
+
+            // SAFETY: `dec` is initialized; `fr` points at a valid input codestream and
+            // output planes inside `pixels`, which is `frame_bytes` long. Blocking calls.
+            let rc = unsafe { ffi::svt_jpeg_xs_decoder_send_frame(&mut **dec, &mut fr, 1) };
+            if rc != ffi::ERR_NONE {
+                return Err(G2gError::Hardware(HardwareError::Other));
+            }
+            // SAFETY: an all-zero bit pattern is valid for this `#[repr(C)]` POD struct (only integers / null pointers); the SVT call fills or reads it.
+            let mut got: ffi::Frame = unsafe { core::mem::zeroed() };
+            // SAFETY: blocking get returns the decoded picture into the planes we set on
+            // `fr`; `got` is a valid out param. End-of-codestream is a non-fatal status.
+            let rc = unsafe { ffi::svt_jpeg_xs_decoder_get_frame(&mut **dec, &mut got, 1) };
+            if rc != ffi::ERR_NONE && rc != ffi::ERR_END_OF_CODESTREAM {
+                return Err(G2gError::Hardware(HardwareError::Other));
+            }
         }
         Ok(pixels)
     }
@@ -880,17 +1020,20 @@ impl SvtJpegXsDec {
         if rc != ffi::ERR_NONE {
             return Err(G2gError::Hardware(HardwareError::Other));
         }
-        self.out_format = svt_to_format(cfg.format, cfg.bit_depth).ok_or(G2gError::CapsMismatch)?;
-        self.width = cfg.width;
-        self.height = cfg.height;
-        self.components_num = usize::from(cfg.components_num).min(ffi::MAX_COMPONENTS);
-        let mut total = 0usize;
-        for i in 0..self.components_num {
-            self.components[i] = (cfg.components[i].width, cfg.components[i].byte_size);
-            total += cfg.components[i].byte_size as usize;
-        }
-        self.frame_size = total;
         self.dec = Some(api);
+        let layout = svt_to_format(cfg.format, cfg.bit_depth)
+            .map(|format| FieldLayout {
+                format,
+                width: cfg.width,
+                frame_height: cfg.height.saturating_mul(self.layout.fields_per_frame),
+                fields_per_frame: self.layout.fields_per_frame,
+            })
+            .ok_or(G2gError::CapsMismatch)
+            .and_then(|layout| layout.check_codestream_planes(&cfg).map(|()| layout));
+        if layout.is_err() {
+            self.close_decoder();
+        }
+        self.layout = layout?;
         Ok(())
     }
 }
@@ -988,6 +1131,83 @@ mod tests {
         buf
     }
 
+    fn mean_10bit_error(expected: &[u8], actual: &[u8]) -> f64 {
+        let samples = expected.len() / 2;
+        let sum: u64 = (0..samples)
+            .map(|i| {
+                let a = u16::from_le_bytes([expected[2 * i], expected[2 * i + 1]]) & 0x03FF;
+                let b = u16::from_le_bytes([actual[2 * i], actual[2 * i + 1]]) & 0x03FF;
+                u64::from(a.abs_diff(b))
+            })
+            .sum();
+        sum as f64 / samples as f64
+    }
+
+    #[test]
+    fn interleaved_frame_round_trips_as_two_field_codestreams() {
+        let (w, field_h) = (128usize, 32usize);
+        let h = 2 * field_h;
+        let format = RawVideoFormat::I422p10;
+        let top = i422p10_ramp(w, field_h);
+        let bottom: Vec<u8> = top
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .flat_map(|sample| (0x03FF - u16::from_le_bytes(*sample)).to_le_bytes())
+            .collect();
+        let mut frame = vec![0u8; top.len() * 2];
+        for plane in 0..format.plane_count() {
+            let row = format.plane_stride(plane, w as u32).unwrap() as usize;
+            let field_offset = format
+                .plane_offset(plane, w as u32, field_h as u32)
+                .unwrap() as usize;
+            let frame_offset = format.plane_offset(plane, w as u32, h as u32).unwrap() as usize;
+            for field_row in 0..format.plane_rows(plane, field_h as u32).unwrap() as usize {
+                let source = field_offset + field_row * row;
+                let target = frame_offset + 2 * field_row * row;
+                frame[target..target + row].copy_from_slice(&top[source..source + row]);
+                frame[target + row..target + 2 * row]
+                    .copy_from_slice(&bottom[source..source + row]);
+            }
+        }
+        let caps = Caps::RawVideo {
+            format,
+            width: Dim::Fixed(w as u32),
+            height: Dim::Fixed(h as u32),
+            framerate: Rate::Fixed(30 << 16),
+            interlace: g2g_core::Interlace::Interleaved,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        };
+
+        let mut enc = SvtJpegXsEnc::new();
+        enc.set_property("bpp", PropValue::Fraction(10, 1)).unwrap();
+        enc.configure_pipeline(&caps).expect("encoder configures");
+        let mut enc_out = Capture::default();
+        block_on(enc.process(data_frame(frame.clone()), &mut enc_out)).expect("encode");
+        let coded_caps = jpeg_xs_caps(w as u32, h as u32, 2);
+        assert_eq!(enc_out.caps, vec![coded_caps.clone()]);
+        let codestreams = enc_out.frames.remove(0);
+
+        let mut dec = SvtJpegXsDec::new();
+        dec.configure_pipeline(&coded_caps)
+            .expect("decoder configures");
+        let mut dec_out = Capture::default();
+        block_on(dec.process(data_frame(codestreams), &mut dec_out)).expect("decode");
+        assert_eq!(
+            dec_out.caps,
+            vec![Caps::RawVideo {
+                format,
+                width: Dim::Fixed(w as u32),
+                height: Dim::Fixed(h as u32),
+                framerate: Rate::Any,
+                interlace: g2g_core::Interlace::Interleaved,
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            }]
+        );
+        let mean_err = mean_10bit_error(&frame, &dec_out.frames[0]);
+        assert!(mean_err < 8.0, "mean 10-bit error {mean_err} too high");
+    }
+
     #[test]
     fn encode_then_decode_round_trips_i422p10() {
         let (w, h) = (128usize, 64usize);
@@ -1046,14 +1266,7 @@ mod tests {
         );
 
         // Near-lossless at 10 bpp: mean absolute 10-bit sample error is small.
-        let mut sum_err = 0u64;
-        let n = input.len() / 2;
-        for i in 0..n {
-            let a = u16::from_le_bytes([input[2 * i], input[2 * i + 1]]) & 0x03FF;
-            let b = u16::from_le_bytes([decoded[2 * i], decoded[2 * i + 1]]) & 0x03FF;
-            sum_err += u64::from(a.abs_diff(b));
-        }
-        let mean_err = sum_err as f64 / n as f64;
+        let mean_err = mean_10bit_error(&input, decoded);
         assert!(
             mean_err < 8.0,
             "mean 10-bit error {mean_err} too high (round trip broken)"

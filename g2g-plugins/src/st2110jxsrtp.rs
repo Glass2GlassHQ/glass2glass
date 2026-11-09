@@ -74,15 +74,17 @@ fn any_geometry_jpeg_xs() -> Caps {
 }
 
 /// Extract the geometry from an absolute `Caps::CompressedVideo{JpegXs}`:
-/// returns (width, height). Errors on a non-JPEG-XS caps or a non-fixed dimension.
+/// returns (width, height). Errors on a non-JPEG-XS caps, a non-fixed dimension
+/// or two field codestreams per buffer.
 fn jxs_geometry(caps: &Caps) -> Result<(u32, u32), G2gError> {
     match caps {
         Caps::CompressedVideo {
             codec: VideoCodec::JpegXs,
             width: Dim::Fixed(w),
             height: Dim::Fixed(h),
+            alignment,
             ..
-        } => Ok((*w, *h)),
+        } if *alignment != g2g_core::BitstreamAlignment::FieldPair => Ok((*w, *h)),
         _ => Err(G2gError::CapsMismatch),
     }
 }
@@ -601,6 +603,19 @@ mod tests {
     use g2g_core::runtime::block_on;
     use g2g_core::{MonotonicClock, PushOutcome};
     use std::sync::Arc;
+
+    #[test]
+    fn sink_refuses_two_field_codestreams_per_buffer() {
+        let field_pair = Caps::CompressedVideo {
+            codec: VideoCodec::JpegXs,
+            width: Dim::Fixed(1920),
+            height: Dim::Fixed(1080),
+            framerate: Rate::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::FieldPair,
+        };
+        assert_eq!(jxs_geometry(&field_pair), Err(G2gError::CapsMismatch));
+    }
 
     /// Collects the codestream bytes of every DataFrame the source emits.
     #[derive(Default)]

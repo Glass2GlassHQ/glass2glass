@@ -277,7 +277,10 @@ impl CapsSet {
                 expand_rate(fv("framerate"))?,
             );
             let colorimetry = expand_colorimetry(fv("colorimetry"))?;
-            let alignment = expand_alignment(fv("alignment"))?;
+            let alignment = match fv("interlace-mode") {
+                Some(FieldVal::One(s)) if *s == "fields" => BitstreamAlignment::FieldPair,
+                _ => expand_alignment(fv("alignment"))?,
+            };
             let mut alts = Vec::new();
             for w in &widths {
                 for h in &heights {
@@ -406,6 +409,7 @@ impl CapsSet {
                 Some(CapsSet::from_alternatives(alternatives))
             }
             "video/x-dnxhd" => compressed_set(VideoCodec::DnxHd),
+            "image/x-jxsc" => compressed_set(VideoCodec::JpegXs),
             "audio/x-speex" => audio_set(&[AudioFormat::Speex]),
             "audio/x-opus" => audio_set(&[AudioFormat::Opus]),
             "audio/x-ac3" => audio_set(&[AudioFormat::Ac3]),
@@ -1042,6 +1046,10 @@ mod tests {
             Some(BitstreamAlignment::Unspecified)
         );
         assert_eq!(alignment_of("video/x-h264,alignment=frame"), None);
+        assert_eq!(
+            alignment_of("image/x-jxsc,interlace-mode=fields"),
+            Some(BitstreamAlignment::FieldPair)
+        );
     }
 
     #[test]

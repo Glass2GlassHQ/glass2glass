@@ -563,6 +563,9 @@ impl Caps {
                 if let Some(name) = alignment.gst_name() {
                     s.push_str(&format!(",alignment={name}"));
                 }
+                if *alignment == BitstreamAlignment::FieldPair {
+                    s.push_str(",interlace-mode=fields");
+                }
                 s
             }
             Caps::Audio {
@@ -1109,6 +1112,8 @@ pub enum BitstreamAlignment {
     AccessUnit,
     // each buffer is one or more whole NAL units, GStreamer's `nal`
     Nal,
+    // each buffer is two field codestreams, top field first, GStreamer's `interlace-mode=fields`
+    FieldPair,
 }
 
 impl BitstreamAlignment {
@@ -1125,6 +1130,7 @@ impl BitstreamAlignment {
             BitstreamAlignment::Unspecified => None,
             BitstreamAlignment::AccessUnit => Some("au"),
             BitstreamAlignment::Nal => Some("nal"),
+            BitstreamAlignment::FieldPair => None,
         }
     }
 }
@@ -4066,6 +4072,12 @@ mod tests {
         );
         assert!(access_unit.to_gst_string().ends_with(",alignment=au"));
         assert!(!unspecified.to_gst_string().contains("alignment"));
+        let field_pair = h264(crate::BitstreamAlignment::FieldPair).to_gst_string();
+        assert_eq!(
+            CapsSet::from_gst_string(&field_pair).map(|set| set.alternatives()[0].clone()),
+            Some(h264(crate::BitstreamAlignment::FieldPair)),
+            "{field_pair}"
+        );
     }
 
     #[test]

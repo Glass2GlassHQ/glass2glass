@@ -1241,6 +1241,14 @@ codestream. So a plant can move visually lossless video at a fraction of -20's
 bandwidth with sub-frame latency, end to end from raw through encode and -22 to
 decode.
 
+Interleaved raw video codes as two field codestreams in one buffer, top field
+first, as GStreamer's `svtjpegxsenc` writes it. Each field is handed to SVT with a
+doubled stride, so it reads or writes every other row of the frame. The compressed
+caps mark such buffers `BitstreamAlignment::FieldPair`, printed as gst's
+`interlace-mode=fields`, and the decoder finds the second codestream with
+`svt_jpeg_xs_decoder_get_single_frame_size`. `St2110JxsSink` refuses `FieldPair`,
+as gst's `rtpjxsvpay` refuses interlaced input.
+
 ### Redundancy and pacing
 
 `st2110dup` implements ST 2110-7 seamless protection: a receive-side sequence-number
