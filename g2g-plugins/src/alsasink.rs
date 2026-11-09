@@ -41,10 +41,9 @@ use alloc::vec::Vec;
 use crate::alsa_ffi::{Direction, Pcm};
 
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, CapsSet, ClockCandidate, ClockPriority, ClockSync,
-    ConfigureOutcome, DeviceClockOffset, DriftClock, ElementMetadata, G2gError, HardwareError,
-    MonotonicClock, OutputSink, PadTemplate, PadTemplates, PipelineClock, PipelinePacket,
-    PropError, PropKind, PropValue, PropertySpec,
+    AsyncElement, Caps, CapsConstraint, CapsSet, ClockCandidate, ClockSync, ConfigureOutcome,
+    DeviceClockOffset, DriftClock, ElementMetadata, G2gError, HardwareError, OutputSink,
+    PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
 };
 
 use crate::alsapcm::{alsa_params, device_permutation, permute, PcmConfig, FORMATS};
@@ -74,14 +73,7 @@ pub struct AlsaSink {
     link: Option<crate::audioworker::WorkerLink<DeviceCmd>>,
     caps: Option<Caps>,
     frames_rendered: Arc<AtomicU64>,
-    /// DAC-disciplined master clock (A/V sync). The worker feeds it
-    /// `(monotonic_now, frames_played)` observations so its `now_ns()` tracks
-    /// the real playout rate; a video sink slaves to it when it is elected.
-    clock: Arc<DriftClock>,
-    /// Whether to offer [`clock`](Self::clock) to the pipeline's clock election
-    /// (the `provide-clock` property, default on, GStreamer's `basesink`).
-    provide_clock: bool,
-    skew: crate::audioskew::SkewSlaver,
+    playout: crate::audioskew::PlayoutClock,
 }
 
 impl core::fmt::Debug for AlsaSink {
@@ -116,9 +108,7 @@ impl AlsaSink {
             link: None,
             caps: None,
             frames_rendered: Arc::new(AtomicU64::new(0)),
-            clock: Arc::new(DriftClock::new(Arc::new(MonotonicClock))),
-            provide_clock: true,
-            skew: crate::audioskew::SkewSlaver::default(),
+            playout: crate::audioskew::PlayoutClock::default(),
         }
     }
 
@@ -131,7 +121,7 @@ impl AlsaSink {
     /// tests / introspection; its `now_ns()` tracks real playout once the
     /// worker has observed the device.
     pub fn clock(&self) -> Arc<DriftClock> {
-        Arc::clone(&self.clock)
+        self.playout.clock()
     }
 
     /// Tear down without waiting for playout (reconfigure / drop). The
@@ -188,8 +178,8 @@ impl AsyncElement for AlsaSink {
         let rendered = Arc::clone(&self.frames_rendered);
         let device = String::from(self.output.name());
         // disciplined even when not offered, skew slaving reads it
-        let clock = Arc::clone(&self.clock);
-        self.skew.configure(absolute_caps)?;
+        let clock = self.playout.clock();
+        self.playout.configure(absolute_caps)?;
         let frame_bytes = cfg
             .format
             .bytes_per_sample()
@@ -234,18 +224,14 @@ impl AsyncElement for AlsaSink {
     }
 
     /// Offer the DAC-disciplined [`clock`](Self::clock) as an
-    /// [`AudioProvider`](ClockPriority::AudioProvider) so audio becomes the
+    /// [`AudioProvider`](g2g_core::ClockPriority::AudioProvider) so audio becomes the
     /// pipeline master (video slaves to it), unless `provide-clock` is off.
     fn provide_clock(&self) -> Option<ClockCandidate> {
-        if !self.provide_clock {
-            return None;
-        }
-        let clock: Arc<dyn PipelineClock + Send + Sync> = self.clock.clone();
-        Some(ClockCandidate::new(ClockPriority::AudioProvider, clock))
+        self.playout.candidate()
     }
 
     fn set_clock_sync(&mut self, sync: ClockSync) {
-        self.skew.set_master(sync.clock);
+        self.playout.set_clock_sync(sync);
     }
 
     fn set_bus(&mut self, bus: g2g_core::bus::BusHandle) {
@@ -269,12 +255,7 @@ impl AsyncElement for AlsaSink {
                 "ALSA PCM device (e.g. default, hw:0,0, plughw:1)",
             )
             .with_default("default"),
-            PropertySpec::new(
-                "provide-clock",
-                PropKind::Bool,
-                "Provide a DAC-disciplined clock so audio is the A/V sync master",
-            )
-            .with_default("true"),
+            crate::audioskew::PROVIDE_CLOCK_PROPERTY,
             crate::audioskew::SLAVE_METHOD_PROPERTY,
             crate::audioskew::DRIFT_TOLERANCE_PROPERTY,
             crate::audiooutput::CONTINUE_ON_ERROR_PROPERTY,
@@ -283,32 +264,19 @@ impl AsyncElement for AlsaSink {
     }
 
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
-        if let Some(result) = self.skew.set_property(name, &value) {
+        if let Some(result) = self.playout.set_property(name, &value) {
             return result;
         }
-        if let Some(result) = self.output.set_property(name, &value, self.link.is_some()) {
-            return result;
-        }
-        match name {
-            "provide-clock" => {
-                self.provide_clock = value.as_bool().ok_or(PropError::Type)?;
-                Ok(())
-            }
-            _ => Err(PropError::Unknown),
-        }
+        self.output
+            .set_property(name, &value, self.link.is_some())
+            .unwrap_or(Err(PropError::Unknown))
     }
 
     fn get_property(&self, name: &str) -> Option<PropValue> {
-        if let Some(value) = self.skew.get_property(name) {
+        if let Some(value) = self.playout.get_property(name) {
             return Some(value);
         }
-        if let Some(value) = self.output.get_property(name) {
-            return Some(value);
-        }
-        match name {
-            "provide-clock" => Some(PropValue::Bool(self.provide_clock)),
-            _ => None,
-        }
+        self.output.get_property(name)
     }
 
     fn process<'a>(
@@ -320,8 +288,7 @@ impl AsyncElement for AlsaSink {
             match packet {
                 PipelinePacket::DataFrame(frame) => {
                     crate::dmabufmap::require_readable_domain(&frame, ELEMENT_NAME)?;
-                    self.skew.measure(&self.clock);
-                    let frame = self.skew.correct_frame(frame, ELEMENT_NAME)?;
+                    let frame = self.playout.correct_frame(frame, ELEMENT_NAME)?;
                     let link = self.link.as_ref().ok_or(G2gError::NotConfigured)?;
                     if let Some(device) = self.output.take_switch() {
                         link.send(
@@ -443,8 +410,7 @@ fn discipline_clock(
     if played == 0 {
         return;
     }
-    let played_ns = (u128::from(played) * 1_000_000_000 / u128::from(rate)) as u64;
-    let master_ns = clock_offset.master_ns(clock, local_ns, played_ns);
+    let master_ns = crate::audioskew::played_master_ns(clock, clock_offset, local_ns, played, rate);
     let outcome = clock.observe(local_ns, master_ns);
     // Pacing diagnosis: how the DAC clock the video slaves to actually moves,
     // and whether the outlier gate dropped this reading.

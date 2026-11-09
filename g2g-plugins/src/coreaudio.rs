@@ -32,22 +32,24 @@ use std::time::{Duration, Instant};
 
 use objc2_audio_toolbox::{
     kAudioQueueProperty_CurrentDevice, AudioQueueAllocateBuffer, AudioQueueBufferRef,
-    AudioQueueDispose, AudioQueueEnqueueBuffer, AudioQueueFlush, AudioQueueNewInput,
-    AudioQueueNewOutput, AudioQueueRef, AudioQueueSetProperty, AudioQueueStart, AudioQueueStop,
+    AudioQueueDispose, AudioQueueEnqueueBuffer, AudioQueueFlush, AudioQueueGetCurrentTime,
+    AudioQueueNewInput, AudioQueueNewOutput, AudioQueueRef, AudioQueueSetProperty, AudioQueueStart,
+    AudioQueueStop,
 };
 use objc2_core_audio_types::{
     kAudioFormatFlagIsFloat, kAudioFormatFlagIsPacked, kAudioFormatFlagIsSignedInteger,
     kAudioFormatLinearPCM, AudioStreamBasicDescription, AudioStreamPacketDescription,
-    AudioTimeStamp,
+    AudioTimeStamp, AudioTimeStampFlags,
 };
 use objc2_core_foundation::CFString;
 
 use g2g_core::frame::Frame;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
-    AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ClockSync, ConfigureOutcome,
-    ElementMetadata, G2gError, HardwareError, OutputSink, PadTemplate, PadTemplates,
-    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, ANY_CHANNELS, ANY_SAMPLE_RATE,
+    AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ClockCandidate, ClockSync,
+    ConfigureOutcome, DeviceClockOffset, DriftClock, ElementMetadata, G2gError, HardwareError,
+    OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue,
+    PropertySpec, ANY_CHANNELS, ANY_SAMPLE_RATE,
 };
 
 use crate::audiocapture::{
@@ -162,6 +164,7 @@ struct SinkState {
     queue: AudioQueueRef,
     shared: Box<SinkShared>,
     started: bool,
+    sample_rate: u32,
 }
 
 // SAFETY: configure hands the state to the render thread, the only caller of
@@ -271,7 +274,9 @@ fn render_worker(
     commands: Receiver<SinkCommand>,
     frame_bytes: usize,
     rendered: Arc<AtomicU64>,
+    clock: &DriftClock,
 ) {
+    let mut clock_offset = DeviceClockOffset::default();
     loop {
         let frame = match commands.recv() {
             Ok(SinkCommand::Samples(frame)) => frame,
@@ -289,7 +294,36 @@ fn render_worker(
             }
             Err(_) => return,
         }
+        discipline_clock(&state, clock, &mut clock_offset);
     }
+}
+
+fn discipline_clock(state: &SinkState, clock: &DriftClock, clock_offset: &mut DeviceClockOffset) {
+    if !state.started {
+        return;
+    }
+    let local_ns = clock.reference_now();
+    // SAFETY: an all-zero AudioTimeStamp is a valid plain C struct with no flags set.
+    let mut stamp: AudioTimeStamp = unsafe { core::mem::zeroed() };
+    // SAFETY: the queue is live and owned by this thread, `stamp` is a valid out slot, and
+    // the timeline and discontinuity pointers may be null.
+    let status = unsafe {
+        AudioQueueGetCurrentTime(state.queue, ptr::null_mut(), &mut stamp, ptr::null_mut())
+    };
+    let sample_time_valid = stamp.mFlags.contains(AudioTimeStampFlags::SampleTimeValid);
+    if status != 0 || !sample_time_valid || stamp.mSampleTime <= 0.0 {
+        return;
+    }
+    // AudioQueue sample time counts device frames from the queue's start, underruns included
+    let played = stamp.mSampleTime as u64;
+    let master_ns = crate::audioskew::played_master_ns(
+        clock,
+        clock_offset,
+        local_ns,
+        played,
+        state.sample_rate,
+    );
+    clock.observe(local_ns, master_ns);
 }
 
 impl Drop for SinkState {
@@ -310,14 +344,19 @@ impl core::fmt::Debug for SinkState {
     }
 }
 
-/// The one property the render element takes: the device UID the device monitor
-/// reports, empty for the system default. The sink's PCM shape comes from the
-/// caps it is configured with, so there is nothing else to tune.
-static DEVICE_PROP_RENDER: &[PropertySpec] = &[PropertySpec::new(
-    "device",
-    PropKind::Str,
-    "Core Audio device UID to render on (empty = system default)",
-)];
+/// The device UID the device monitor reports, empty for the system default, and
+/// the playout clock settings. The sink's PCM shape comes from the caps it is
+/// configured with.
+static RENDER_PROPS: &[PropertySpec] = &[
+    PropertySpec::new(
+        "device",
+        PropKind::Str,
+        "Core Audio device UID to render on (empty = system default)",
+    ),
+    crate::audioskew::PROVIDE_CLOCK_PROPERTY,
+    crate::audioskew::SLAVE_METHOD_PROPERTY,
+    crate::audioskew::DRIFT_TOLERANCE_PROPERTY,
+];
 
 /// `CoreAudioSrc`'s settable properties. `device` matches gst `osxaudiosrc` (a
 /// UID here rather than an integer id) and `num-buffers` matches gst `basesrc`;
@@ -389,6 +428,7 @@ pub struct CoreAudioSink {
     channels: u8,
     sample_rate: u32,
     rendered: Arc<AtomicU64>,
+    playout: crate::audioskew::PlayoutClock,
 }
 
 impl Default for CoreAudioSink {
@@ -406,6 +446,7 @@ impl CoreAudioSink {
             channels: 2,
             sample_rate: 48_000,
             rendered: Arc::new(AtomicU64::new(0)),
+            playout: crate::audioskew::PlayoutClock::default(),
         }
     }
 
@@ -426,6 +467,10 @@ impl CoreAudioSink {
     /// Count of PCM frames handed to the device. Useful in tests.
     pub fn rendered(&self) -> u64 {
         self.rendered.load(Ordering::Relaxed)
+    }
+
+    pub fn clock(&self) -> Arc<DriftClock> {
+        self.playout.clock()
     }
 
     fn open(&self) -> Result<SinkState, G2gError> {
@@ -475,6 +520,7 @@ impl CoreAudioSink {
             queue,
             shared,
             started: false,
+            sample_rate: self.sample_rate,
         })
     }
 
@@ -524,12 +570,14 @@ impl AsyncElement for CoreAudioSink {
         self.format = format;
         self.channels = channels;
         self.sample_rate = sample_rate;
+        self.playout.configure(absolute_caps)?;
         let state = self.open()?;
         let frame_bytes =
             format.bytes_per_sample().ok_or(G2gError::CapsMismatch)? * usize::from(channels);
         let rendered = Arc::clone(&self.rendered);
+        let clock = self.playout.clock();
         self.link = Some(WorkerLink::spawn("g2g-coreaudiosink", move |commands| {
-            render_worker(state, commands, frame_bytes, rendered)
+            render_worker(state, commands, frame_bytes, rendered, &clock)
         })?);
         Ok(ConfigureOutcome::Accepted)
     }
@@ -543,11 +591,22 @@ impl AsyncElement for CoreAudioSink {
         )
     }
 
+    fn provide_clock(&self) -> Option<ClockCandidate> {
+        self.playout.candidate()
+    }
+
+    fn set_clock_sync(&mut self, sync: ClockSync) {
+        self.playout.set_clock_sync(sync);
+    }
+
     fn properties(&self) -> &'static [PropertySpec] {
-        DEVICE_PROP_RENDER
+        RENDER_PROPS
     }
 
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        if let Some(result) = self.playout.set_property(name, &value) {
+            return result;
+        }
         match name {
             "device" => {
                 self.device = value.as_str().ok_or(PropError::Type)?.to_string();
@@ -558,6 +617,9 @@ impl AsyncElement for CoreAudioSink {
     }
 
     fn get_property(&self, name: &str) -> Option<PropValue> {
+        if let Some(value) = self.playout.get_property(name) {
+            return Some(value);
+        }
         match name {
             "device" => Some(PropValue::Str(self.device.clone())),
             _ => None,
@@ -572,9 +634,9 @@ impl AsyncElement for CoreAudioSink {
         Box::pin(async move {
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    frame
-                        .domain
-                        .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
+                    let element = g2g_core::log::short_type_name::<Self>();
+                    frame.domain.require_system_slice(element)?;
+                    let frame = self.playout.correct_frame(frame, element)?;
                     let link = self.link.as_ref().ok_or(G2gError::NotConfigured)?;
                     // a full queue is the device's back-pressure and yields
                     link.send(SinkCommand::Samples(frame), hw()).await?;

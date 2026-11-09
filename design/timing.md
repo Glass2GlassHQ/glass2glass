@@ -112,19 +112,25 @@ graph-to-speaker delay lands in the affine offset. Each callback fills only the
 frames the buffer's `requested` field asks for, one graph cycle, so the clock gets
 one observation per cycle and the sink adds no more than a cycle of latency.
 
+`WasapiSink`, `CoreAudioSink` and `AAudioSink` offer the same clock. WASAPI takes
+frames written minus `GetCurrentPadding` after each top-up, Core Audio the
+queue's sample time from `AudioQueueGetCurrentTime`, and AAudio the stream's
+`frames_read`. `PlayoutClock` (`audioskew.rs`) holds each of these sinks' clock,
+the `provide-clock` flag and the skew slaving below.
+
 Device counters start near zero, while a `DriftClock` passes its reference, the
 process's monotonic time, through until the first observation, and the pipeline
 base time is read in that window. `DeviceClockOffset` adds the difference between
 the clock's projection and the counter at the first observation to every later
 reading, so the clock continues from the time it already gave instead of jumping
-back by the process age. `AlsaSink`, `PulseSink`, `PipeWireSink`, `AlsaSrc` and the
-DeckLink output feed their counters through it. A new PipeWire stream after a
+back by the process age. Every audio sink, `AlsaSrc` and the DeckLink output feed
+their counters through it. A new PipeWire stream after a
 target switch takes a fresh offset against the clock the previous stream disciplined.
 The PTP and PCR servos feed absolute master time and do not use it.
 
 An audio sink whose clock loses the election follows the winner instead, by
-GStreamer's `slave-method=skew`. `SkewSlaver` (`audioskew.rs`, shared by
-`alsasink`, `pulsesink` and `pipewiresink`) compares the sink's own playout
+GStreamer's `slave-method=skew`. `SkewSlaver` (`audioskew.rs`, in every audio
+sink's `PlayoutClock`) compares the sink's own playout
 clock with the elected clock on every buffer, once the playout clock has eight
 observations, keeping the difference at the first comparison as the zero. It
 averages the change from that zero with the newest value weighted 1/32, as

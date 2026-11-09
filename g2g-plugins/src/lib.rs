@@ -1810,14 +1810,19 @@ pub mod decklinkvideosrc;
 mod alsa_ffi;
 #[cfg(all(target_os = "linux", any(feature = "alsa-sink", feature = "alsa-src")))]
 mod alsapcm;
-// Skew slaving that keeps an audio sink with a pipeline clock it does not provide.
 #[cfg(all(target_os = "linux", feature = "alsa-sink"))]
 pub mod alsasink;
 #[cfg(all(target_os = "linux", feature = "alsa-src"))]
 pub mod alsasrc;
-#[cfg(all(
-    target_os = "linux",
-    any(feature = "alsa-sink", feature = "pulse-sink", feature = "pipewire")
+// Audio sink playout clocks and the skew slaving that keeps a sink with a clock it does not provide.
+#[cfg(any(
+    all(
+        target_os = "linux",
+        any(feature = "alsa-sink", feature = "pulse-sink", feature = "pipewire")
+    ),
+    all(target_os = "windows", feature = "wasapi-sink"),
+    all(target_os = "macos", feature = "coreaudio"),
+    all(target_os = "android", feature = "aaudio")
 ))]
 mod audioskew;
 // ALSA device discovery: the PCM hint list as capture / playback devices.

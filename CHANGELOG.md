@@ -61,6 +61,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M2145: release binaries, MSI and Python wheel for Windows on ARM64.
 - M2146: `vtenc_h265a` encodes BGRA to HEVC with an alpha layer on VideoToolbox.
 - M2147: `tsdemux` places a stream's first timestamp past a 33-bit wrap that the PCR or another stream already crossed.
+- M2148: `wasapisink`, `coreaudiosink` and the AAudio sink offer a playout clock and skew-slave to a clock they do not provide.
 
 ## 0.14.0
 

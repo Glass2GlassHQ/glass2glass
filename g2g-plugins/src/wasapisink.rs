@@ -44,9 +44,9 @@ use windows::Win32::System::Com::{
 };
 
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, ConfigureOutcome, ElementMetadata, G2gError, HardwareError,
-    OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue,
-    PropertySpec,
+    AsyncElement, Caps, CapsConstraint, ClockCandidate, ClockSync, ConfigureOutcome,
+    DeviceClockOffset, DriftClock, ElementMetadata, G2gError, HardwareError, OutputSink,
+    PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
 };
 
 use crate::audio::{linear_pcm_caps, pcm_params};
@@ -91,6 +91,7 @@ pub struct WasapiSink {
     link: Option<WorkerLink<DeviceCmd>>,
     caps: Option<Caps>,
     frames_rendered: Arc<AtomicU64>,
+    playout: crate::audioskew::PlayoutClock,
 }
 
 impl core::fmt::Debug for WasapiSink {
@@ -119,6 +120,7 @@ impl WasapiSink {
             link: None,
             caps: None,
             frames_rendered: Arc::new(AtomicU64::new(0)),
+            playout: crate::audioskew::PlayoutClock::default(),
         }
     }
 
@@ -132,6 +134,10 @@ impl WasapiSink {
     /// Count of sample frames written to the endpoint. Useful in tests.
     pub fn frames_rendered(&self) -> u64 {
         self.frames_rendered.load(Ordering::Relaxed)
+    }
+
+    pub fn clock(&self) -> Arc<DriftClock> {
+        self.playout.clock()
     }
 
     /// Tear down without waiting for playout (reconfigure / drop). The
@@ -200,6 +206,8 @@ impl AsyncElement for WasapiSink {
         let rendered = Arc::clone(&self.frames_rendered);
         let format = wave_format(tag, bits, channels, rate);
         let device = String::from(self.output.name());
+        let clock = self.playout.clock();
+        self.playout.configure(absolute_caps)?;
         let fallback = self.output.fallback(
             u64::from(format.nAvgBytesPerSec),
             Arc::clone(&self.frames_rendered),
@@ -208,13 +216,14 @@ impl AsyncElement for WasapiSink {
         );
 
         let link = WorkerLink::spawn("g2g-wasapisink", move |rx| {
+            let mut clock_offset = DeviceClockOffset::default();
             crate::audiooutput::run_device_worker(
                 device,
                 rx,
                 fallback,
                 ready_tx,
                 |device| open(device, &format),
-                |render, rx| play(render, rx, &rendered),
+                |render, rx| play(render, rx, &rendered, &clock, &mut clock_offset),
             );
         })?;
 
@@ -247,18 +256,31 @@ impl AsyncElement for WasapiSink {
         self.output.set_bus(bus);
     }
 
+    fn provide_clock(&self) -> Option<ClockCandidate> {
+        self.playout.candidate()
+    }
+
+    fn set_clock_sync(&mut self, sync: ClockSync) {
+        self.playout.set_clock_sync(sync);
+    }
+
     fn properties(&self) -> &'static [PropertySpec] {
         WASAPISINK_PROPS
     }
 
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        if let Some(result) = self.playout.set_property(name, &value) {
+            return result;
+        }
         self.output
             .set_property(name, &value, self.link.is_some())
             .unwrap_or(Err(PropError::Unknown))
     }
 
     fn get_property(&self, name: &str) -> Option<PropValue> {
-        self.output.get_property(name)
+        self.playout
+            .get_property(name)
+            .or_else(|| self.output.get_property(name))
     }
 
     fn process<'a>(
@@ -270,6 +292,7 @@ impl AsyncElement for WasapiSink {
             match packet {
                 PipelinePacket::DataFrame(frame) => {
                     frame.domain.require_system_slice(ELEMENT_NAME)?;
+                    let frame = self.playout.correct_frame(frame, ELEMENT_NAME)?;
                     let link = self.link.as_ref().ok_or(G2gError::NotConfigured)?;
                     if let Some(device) = self.output.take_switch() {
                         link.send(DeviceCmd::SwitchDevice(device), worker_gone())
@@ -310,6 +333,9 @@ static WASAPISINK_PROPS: &[PropertySpec] = &[
         "endpoint id to render on (empty = default endpoint)",
     ),
     crate::audiooutput::CONTINUE_ON_ERROR_PROPERTY,
+    crate::audioskew::PROVIDE_CLOCK_PROPERTY,
+    crate::audioskew::SLAVE_METHOD_PROPERTY,
+    crate::audioskew::DRIFT_TOLERANCE_PROPERTY,
 ];
 
 impl PadTemplates for WasapiSink {
@@ -333,8 +359,14 @@ fn open(device: &str, format: &WAVEFORMATEX) -> Result<RenderState, G2gError> {
     render
 }
 
-fn play(render: RenderState, rx: &Receiver<DeviceCmd>, rendered: &AtomicU64) -> PlayEnd {
-    let end = match run_render_loop(&render, rx, rendered) {
+fn play(
+    render: RenderState,
+    rx: &Receiver<DeviceCmd>,
+    rendered: &AtomicU64,
+    clock: &DriftClock,
+    clock_offset: &mut DeviceClockOffset,
+) -> PlayEnd {
+    let end = match run_render_loop(&render, rx, rendered, clock, clock_offset) {
         Ok(Some(device)) => PlayEnd::SwitchDevice(device),
         Ok(None) => PlayEnd::Shutdown,
         Err(error) => PlayEnd::Failed(error),
@@ -359,6 +391,7 @@ struct RenderState {
     buffer_frames: u32,
     /// Bytes per sample frame (`nBlockAlign`).
     block_align: usize,
+    rate: u32,
 }
 
 /// Open the selected render endpoint in shared mode and start it. Initialises
@@ -396,6 +429,7 @@ unsafe fn open_render(device: &str, format: &WAVEFORMATEX) -> Result<RenderState
             render,
             buffer_frames,
             block_align: format.nBlockAlign as usize,
+            rate: format.nSamplesPerSec,
         })
     }
 }
@@ -407,6 +441,8 @@ fn run_render_loop(
     state: &RenderState,
     rx: &Receiver<DeviceCmd>,
     rendered: &AtomicU64,
+    clock: &DriftClock,
+    clock_offset: &mut DeviceClockOffset,
 ) -> Result<Option<String>, G2gError> {
     // one endpoint buffer ahead, so the rest waits in the bounded command queue
     let queue_limit = state.buffer_frames as usize * state.block_align;
@@ -443,6 +479,9 @@ fn run_render_loop(
         }
 
         let wrote = top_up(state, &mut queue, rendered)?;
+        if wrote > 0 {
+            discipline_clock(state, rendered, clock, clock_offset)?;
+        }
 
         if closing && queue.len() < state.block_align {
             // Queue exhausted: wait for the endpoint to play out the last
@@ -459,6 +498,27 @@ fn run_render_loop(
         }
     }
     Ok(switch_to)
+}
+
+fn discipline_clock(
+    state: &RenderState,
+    rendered: &AtomicU64,
+    clock: &DriftClock,
+    clock_offset: &mut DeviceClockOffset,
+) -> Result<(), G2gError> {
+    let local_ns = clock.reference_now();
+    // SAFETY: padding query on the owning thread.
+    let padding = unsafe { state.client.GetCurrentPadding() }.map_err(audio_err)?;
+    let played = rendered
+        .load(Ordering::Relaxed)
+        .saturating_sub(u64::from(padding));
+    if played == 0 {
+        return Ok(());
+    }
+    let master_ns =
+        crate::audioskew::played_master_ns(clock, clock_offset, local_ns, played, state.rate);
+    clock.observe(local_ns, master_ns);
+    Ok(())
 }
 
 /// Write as many queued frames as the endpoint has free space for. Returns the

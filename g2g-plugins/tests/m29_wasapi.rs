@@ -47,6 +47,10 @@ async fn tone_renders_to_the_default_endpoint() {
                 BUFFERS * FRAMES_PER_BUFFER,
                 "every produced sample frame must reach the endpoint"
             );
+            assert!(
+                sink.clock().observations() > 0,
+                "the playout clock reads the endpoint padding while it plays"
+            );
         }
         // only a missing endpoint skips; a refused format or other device error fails
         Err(G2gError::Hardware(HardwareError::MediaFoundation(E_NOTFOUND))) => {

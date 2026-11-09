@@ -32,9 +32,9 @@ use ndk::audio::{
 use g2g_core::frame::Frame;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
-    AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ClockSync, ConfigureOutcome,
-    G2gError, HardwareError, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError,
-    PropKind, PropValue, PropertySpec,
+    AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ClockCandidate, ClockSync,
+    ConfigureOutcome, DeviceClockOffset, DriftClock, G2gError, HardwareError, OutputSink,
+    PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
 };
 
 use alloc::boxed::Box;
@@ -135,6 +135,7 @@ pub struct AAudioSink {
     channels: u8,
     sample_rate: u32,
     rendered: Arc<AtomicU64>,
+    playout: crate::audioskew::PlayoutClock,
 }
 
 impl core::fmt::Debug for AAudioSink {
@@ -167,6 +168,7 @@ impl AAudioSink {
             channels: 2,
             sample_rate: 48_000,
             rendered: Arc::new(AtomicU64::new(0)),
+            playout: crate::audioskew::PlayoutClock::default(),
         }
     }
 
@@ -247,8 +249,10 @@ fn render_worker(
     commands: Receiver<SinkCommand>,
     frame_bytes: usize,
     rendered: Arc<AtomicU64>,
+    clock: &DriftClock,
 ) {
     let stream = stream.0;
+    let mut clock_offset = DeviceClockOffset::default();
     loop {
         let frame = match commands.recv() {
             Ok(SinkCommand::Samples(frame)) => frame,
@@ -265,7 +269,27 @@ fn render_worker(
         if write_all(&stream, pcm, frame_bytes, &rendered).is_err() {
             return;
         }
+        discipline_clock(&stream, clock, &mut clock_offset);
     }
+}
+
+fn discipline_clock(
+    stream: &AudioStream,
+    clock: &DriftClock,
+    clock_offset: &mut DeviceClockOffset,
+) {
+    let local_ns = clock.reference_now();
+    let Ok(played) = u64::try_from(stream.frames_read()) else {
+        return;
+    };
+    let Ok(rate) = u32::try_from(stream.sample_rate()) else {
+        return;
+    };
+    if played == 0 {
+        return;
+    }
+    let master_ns = crate::audioskew::played_master_ns(clock, clock_offset, local_ns, played, rate);
+    clock.observe(local_ns, master_ns);
 }
 
 impl AsyncElement for AAudioSink {
@@ -300,14 +324,43 @@ impl AsyncElement for AAudioSink {
         self.format = format;
         self.channels = channels;
         self.sample_rate = sample_rate;
+        self.playout.configure(absolute_caps)?;
         let stream = DeviceThreadStream(self.open()?);
         let frame_bytes =
             format.bytes_per_sample().ok_or(G2gError::CapsMismatch)? * usize::from(channels);
         let rendered = Arc::clone(&self.rendered);
+        let clock = self.playout.clock();
         self.link = Some(WorkerLink::spawn("g2g-aaudiosink", move |commands| {
-            render_worker(stream, commands, frame_bytes, rendered)
+            render_worker(stream, commands, frame_bytes, rendered, &clock)
         })?);
         Ok(ConfigureOutcome::Accepted)
+    }
+
+    fn provide_clock(&self) -> Option<ClockCandidate> {
+        self.playout.candidate()
+    }
+
+    fn set_clock_sync(&mut self, sync: ClockSync) {
+        self.playout.set_clock_sync(sync);
+    }
+
+    fn properties(&self) -> &'static [PropertySpec] {
+        const PROPS: &[PropertySpec] = &[
+            crate::audioskew::PROVIDE_CLOCK_PROPERTY,
+            crate::audioskew::SLAVE_METHOD_PROPERTY,
+            crate::audioskew::DRIFT_TOLERANCE_PROPERTY,
+        ];
+        PROPS
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        self.playout
+            .set_property(name, &value)
+            .unwrap_or(Err(PropError::Unknown))
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        self.playout.get_property(name)
     }
 
     fn process<'a>(
@@ -318,9 +371,9 @@ impl AsyncElement for AAudioSink {
         Box::pin(async move {
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    frame
-                        .domain
-                        .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
+                    let element = g2g_core::log::short_type_name::<Self>();
+                    frame.domain.require_system_slice(element)?;
+                    let frame = self.playout.correct_frame(frame, element)?;
                     let link = self.link.as_ref().ok_or(G2gError::NotConfigured)?;
                     // a full queue is the device's back-pressure and yields
                     link.send(SinkCommand::Samples(frame), audio_err(()))

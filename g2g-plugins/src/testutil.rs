@@ -178,16 +178,26 @@ pub(crate) fn data_pts_ns(packets: &[PipelinePacket]) -> Vec<u64> {
 }
 
 // a clock that reads whatever the test last stored
-#[cfg(all(
-    target_os = "linux",
-    any(feature = "alsa-sink", feature = "pulse-sink", feature = "pipewire")
+#[cfg(any(
+    all(
+        target_os = "linux",
+        any(feature = "alsa-sink", feature = "pulse-sink", feature = "pipewire")
+    ),
+    all(target_os = "windows", feature = "wasapi-sink"),
+    all(target_os = "macos", feature = "coreaudio"),
+    all(target_os = "android", feature = "aaudio")
 ))]
 #[derive(Debug, Default, Clone)]
 pub(crate) struct ManualClock(pub alloc::sync::Arc<core::sync::atomic::AtomicU64>);
 
-#[cfg(all(
-    target_os = "linux",
-    any(feature = "alsa-sink", feature = "pulse-sink", feature = "pipewire")
+#[cfg(any(
+    all(
+        target_os = "linux",
+        any(feature = "alsa-sink", feature = "pulse-sink", feature = "pipewire")
+    ),
+    all(target_os = "windows", feature = "wasapi-sink"),
+    all(target_os = "macos", feature = "coreaudio"),
+    all(target_os = "android", feature = "aaudio")
 ))]
 impl ManualClock {
     pub(crate) fn set(&self, now_ns: u64) {
@@ -195,9 +205,14 @@ impl ManualClock {
     }
 }
 
-#[cfg(all(
-    target_os = "linux",
-    any(feature = "alsa-sink", feature = "pulse-sink", feature = "pipewire")
+#[cfg(any(
+    all(
+        target_os = "linux",
+        any(feature = "alsa-sink", feature = "pulse-sink", feature = "pipewire")
+    ),
+    all(target_os = "windows", feature = "wasapi-sink"),
+    all(target_os = "macos", feature = "coreaudio"),
+    all(target_os = "android", feature = "aaudio")
 ))]
 impl g2g_core::PipelineClock for ManualClock {
     fn now_ns(&self) -> u64 {

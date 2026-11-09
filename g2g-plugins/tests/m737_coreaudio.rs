@@ -108,6 +108,10 @@ async fn sink_renders_or_reports_no_device() {
         (10 * FRAMES_PER_BUF) as u64,
         "every PCM frame handed to the device"
     );
+    assert!(
+        sink.clock().observations() > 0,
+        "the playout clock reads the queue's sample time while it plays"
+    );
     eprintln!("rendered {} PCM frames", sink.rendered());
 }
 

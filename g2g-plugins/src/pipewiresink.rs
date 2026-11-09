@@ -45,10 +45,9 @@ use pipewire as pw;
 use pw::spa;
 
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, CapsSet, ClockCandidate, ClockPriority, ClockSync,
-    ConfigureOutcome, DeviceClockOffset, DriftClock, ElementMetadata, G2gError, HardwareError,
-    MonotonicClock, OutputSink, PadTemplate, PadTemplates, PipelineClock, PipelinePacket,
-    PropError, PropKind, PropValue, PropertySpec,
+    AsyncElement, Caps, CapsConstraint, CapsSet, ClockCandidate, ClockSync, ConfigureOutcome,
+    DeviceClockOffset, DriftClock, ElementMetadata, G2gError, HardwareError, OutputSink,
+    PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
 };
 
 use crate::audiooutput::OutputDevice;
@@ -117,15 +116,7 @@ pub struct PipeWireSink {
     queue: SharedQueue,
     caps: Option<Caps>,
     bytes_queued: Arc<AtomicU64>,
-    /// Playout-disciplined master clock, like the ALSA sink's. The
-    /// realtime callback feeds it `(monotonic_now, graph_ticks_ns)`
-    /// observations from `pw_stream_get_time_n`, so its `now_ns()` tracks the
-    /// device rate; a video sink slaves to it when it is elected.
-    clock: Arc<DriftClock>,
-    /// Whether to offer [`clock`](Self::clock) to the pipeline's clock
-    /// election (the `provide-clock` property, default on).
-    provide_clock: bool,
-    skew: crate::audioskew::SkewSlaver,
+    playout: crate::audioskew::PlayoutClock,
 }
 
 /// What the loop thread needs to open the playback stream.
@@ -164,9 +155,7 @@ impl PipeWireSink {
             queue: Arc::new(Mutex::new(LeakyPcmQueue::default())),
             caps: None,
             bytes_queued: Arc::new(AtomicU64::new(0)),
-            clock: Arc::new(DriftClock::new(Arc::new(MonotonicClock))),
-            provide_clock: true,
-            skew: crate::audioskew::SkewSlaver::default(),
+            playout: crate::audioskew::PlayoutClock::default(),
         }
     }
 
@@ -180,7 +169,7 @@ impl PipeWireSink {
     /// tests / introspection; its `now_ns()` tracks the stream's graph time
     /// once the realtime callback has observed the device.
     pub fn clock(&self) -> Arc<DriftClock> {
-        Arc::clone(&self.clock)
+        self.playout.clock()
     }
 
     /// Total PCM bytes accepted from the pipeline (before any leaky drop).
@@ -215,7 +204,7 @@ impl PipeWireSink {
             stride: frame_bytes(format, channels),
             target: String::from(self.output.name()),
             // disciplined even when not offered, skew slaving reads it
-            clock: Arc::clone(&self.clock),
+            clock: self.playout.clock(),
         };
         let queue = Arc::clone(&self.queue);
         let join = thread::Builder::new()
@@ -304,7 +293,7 @@ impl AsyncElement for PipeWireSink {
             // ~1 s of audio
             q.reset(frame_bytes(format, channels) * rate as usize);
         }
-        self.skew.configure(absolute_caps)?;
+        self.playout.configure(absolute_caps)?;
         self.start_stream(absolute_caps)?;
         self.output.opened();
         self.caps = Some(absolute_caps.clone());
@@ -312,18 +301,14 @@ impl AsyncElement for PipeWireSink {
     }
 
     /// Offer the playout-disciplined [`clock`](Self::clock) as an
-    /// [`AudioProvider`](ClockPriority::AudioProvider) so audio becomes the
+    /// [`AudioProvider`](g2g_core::ClockPriority::AudioProvider) so audio becomes the
     /// pipeline master (video slaves to it), unless `provide-clock` is off.
     fn provide_clock(&self) -> Option<ClockCandidate> {
-        if !self.provide_clock {
-            return None;
-        }
-        let clock: Arc<dyn PipelineClock + Send + Sync> = self.clock.clone();
-        Some(ClockCandidate::new(ClockPriority::AudioProvider, clock))
+        self.playout.candidate()
     }
 
     fn set_clock_sync(&mut self, sync: ClockSync) {
-        self.skew.set_master(sync.clock);
+        self.playout.set_clock_sync(sync);
     }
 
     fn set_bus(&mut self, bus: g2g_core::bus::BusHandle) {
@@ -347,12 +332,7 @@ impl AsyncElement for PipeWireSink {
                 "node name or object serial to play to (empty = default)",
             )
             .with_default(""),
-            PropertySpec::new(
-                "provide-clock",
-                PropKind::Bool,
-                "Provide a playout-disciplined clock so audio is the A/V sync master",
-            )
-            .with_default("true"),
+            crate::audioskew::PROVIDE_CLOCK_PROPERTY,
             crate::audioskew::SLAVE_METHOD_PROPERTY,
             crate::audioskew::DRIFT_TOLERANCE_PROPERTY,
             crate::audiooutput::CONTINUE_ON_ERROR_PROPERTY,
@@ -361,32 +341,19 @@ impl AsyncElement for PipeWireSink {
     }
 
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
-        if let Some(result) = self.skew.set_property(name, &value) {
+        if let Some(result) = self.playout.set_property(name, &value) {
             return result;
         }
-        if let Some(result) = self.output.set_property(name, &value, self.caps.is_some()) {
-            return result;
-        }
-        match name {
-            "provide-clock" => {
-                self.provide_clock = value.as_bool().ok_or(PropError::Type)?;
-                Ok(())
-            }
-            _ => Err(PropError::Unknown),
-        }
+        self.output
+            .set_property(name, &value, self.caps.is_some())
+            .unwrap_or(Err(PropError::Unknown))
     }
 
     fn get_property(&self, name: &str) -> Option<PropValue> {
-        if let Some(value) = self.skew.get_property(name) {
+        if let Some(value) = self.playout.get_property(name) {
             return Some(value);
         }
-        if let Some(value) = self.output.get_property(name) {
-            return Some(value);
-        }
-        match name {
-            "provide-clock" => Some(PropValue::Bool(self.provide_clock)),
-            _ => None,
-        }
+        self.output.get_property(name)
     }
 
     fn process<'a>(
@@ -406,8 +373,7 @@ impl AsyncElement for PipeWireSink {
                         self.stop_stream();
                         self.start_stream(&caps)?;
                     }
-                    self.skew.measure(&self.clock);
-                    let corrected = self.skew.correct(payload.as_slice());
+                    let corrected = self.playout.correct(payload.as_slice());
                     let bytes = corrected.as_deref().unwrap_or(payload.as_slice());
                     self.queue
                         .lock()

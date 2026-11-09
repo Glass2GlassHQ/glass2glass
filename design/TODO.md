@@ -344,8 +344,8 @@ libraries installed.
   timing; BMCA/Announce, peer-delay, unicast.
 - **Skew slaving on a real device:** run an audio sink under a `mpegtslivesrc`
   clock from a sender whose clock runs measurably off the receiver's, and
-  confirm the corrections hold sync over an hour. Extend slaving to
-  `wasapisink`, `coreaudiosink` and the AAudio sink.
+  confirm the corrections hold sync over an hour. Run `aaudiosink`'s playout
+  clock on a device: CI only cross-compiles it.
 - **ST 2110 media transport:** wire compliance of -20/-22/-30/-40 + multicast
   validated against reference gear (built from the RFCs, not yet
   interop-tested).

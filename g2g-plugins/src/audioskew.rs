@@ -2,16 +2,24 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use g2g_core::{
-    Caps, DriftClock, G2gError, PipelineClock, PropError, PropKind, PropValue, PropertySpec,
+    Caps, ClockCandidate, ClockPriority, ClockSync, DeviceClockOffset, DriftClock, G2gError,
+    MonotonicClock, PipelineClock, PropError, PropKind, PropValue, PropertySpec,
 };
 
-use crate::audioconvert::{frame_bytes, ns_to_samples, silence_byte};
+use crate::audioconvert::{frame_bytes, ns_to_samples, samples_to_ns, silence_byte};
 
 // gst audiobasesink drift-tolerance default, in microseconds
 const DEFAULT_DRIFT_TOLERANCE_US: u64 = 40_000;
 const NANOS_PER_MICROSECOND: u64 = 1_000;
 // gst audiobasesink's moving average weighs the newest skew 1/32
 const SKEW_AVERAGE_WEIGHT: i128 = 32;
+
+pub(crate) const PROVIDE_CLOCK_PROPERTY: PropertySpec = PropertySpec::new(
+    "provide-clock",
+    PropKind::Bool,
+    "Provide a playout-disciplined clock so audio is the A/V sync master",
+)
+.with_default("true");
 
 pub(crate) const SLAVE_METHOD_PROPERTY: PropertySpec = PropertySpec::new(
     "slave-method",
@@ -51,7 +59,7 @@ struct PcmShape {
     silence: u8,
 }
 
-pub(crate) struct SkewSlaver {
+struct SkewSlaver {
     method: SlaveMethod,
     drift_tolerance_us: u64,
     master: Option<Arc<dyn PipelineClock + Send + Sync>>,
@@ -90,11 +98,11 @@ impl Default for SkewSlaver {
 }
 
 impl SkewSlaver {
-    pub(crate) fn set_master(&mut self, master: Arc<dyn PipelineClock + Send + Sync>) {
+    fn set_master(&mut self, master: Arc<dyn PipelineClock + Send + Sync>) {
         self.master = Some(master);
     }
 
-    pub(crate) fn configure(&mut self, caps: &Caps) -> Result<(), G2gError> {
+    fn configure(&mut self, caps: &Caps) -> Result<(), G2gError> {
         let Caps::Audio {
             format,
             channels,
@@ -115,7 +123,7 @@ impl SkewSlaver {
 
     // gst audiobasesink skew slaving: device clock minus master, averaged, and past half the
     // tolerance the playout position moves by the whole average
-    pub(crate) fn measure(&mut self, device: &DriftClock) {
+    fn measure(&mut self, device: &DriftClock) {
         let (SlaveMethod::Skew, Some(master), Some(shape)) =
             (self.method, &self.master, self.shape)
         else {
@@ -143,7 +151,7 @@ impl SkewSlaver {
     }
 
     // `None` when nothing is pending and the buffer plays as it is
-    pub(crate) fn correct(&mut self, bytes: &[u8]) -> Option<Vec<u8>> {
+    fn correct(&mut self, bytes: &[u8]) -> Option<Vec<u8>> {
         let shape = self.shape.filter(|_| self.pending_frames != 0)?;
         if self.pending_frames > 0 {
             let silence_len = self.pending_frames as usize * shape.frame_len;
@@ -158,8 +166,16 @@ impl SkewSlaver {
         Some(bytes[dropped as usize * shape.frame_len..].to_vec())
     }
 
-    #[cfg(any(feature = "alsa-sink", feature = "pulse-sink"))]
-    pub(crate) fn correct_frame(
+    #[cfg(any(
+        all(
+            target_os = "linux",
+            any(feature = "alsa-sink", feature = "pulse-sink")
+        ),
+        all(target_os = "windows", feature = "wasapi-sink"),
+        all(target_os = "macos", feature = "coreaudio"),
+        all(target_os = "android", feature = "aaudio")
+    ))]
+    fn correct_frame(
         &mut self,
         frame: g2g_core::frame::Frame,
         element: &'static str,
@@ -170,10 +186,13 @@ impl SkewSlaver {
         if self.pending_frames == 0 {
             return Ok(frame);
         }
+        #[cfg(target_os = "linux")]
         let corrected = {
             let mapped = crate::dmabufmap::frame_bytes(&frame, element)?;
             self.correct(mapped.as_slice())
         };
+        #[cfg(not(target_os = "linux"))]
+        let corrected = self.correct(frame.domain.require_system_slice(element)?);
         let Some(corrected) = corrected else {
             return Ok(frame);
         };
@@ -183,11 +202,7 @@ impl SkewSlaver {
         })
     }
 
-    pub(crate) fn set_property(
-        &mut self,
-        name: &str,
-        value: &PropValue,
-    ) -> Option<Result<(), PropError>> {
+    fn set_property(&mut self, name: &str, value: &PropValue) -> Option<Result<(), PropError>> {
         Some(match name {
             "slave-method" => match value.as_str() {
                 Some("skew") => {
@@ -213,13 +228,107 @@ impl SkewSlaver {
         })
     }
 
-    pub(crate) fn get_property(&self, name: &str) -> Option<PropValue> {
+    fn get_property(&self, name: &str) -> Option<PropValue> {
         match name {
             "slave-method" => Some(PropValue::Str(self.method.name().into())),
             "drift-tolerance" => Some(PropValue::Int(self.drift_tolerance_us as i64)),
             _ => None,
         }
     }
+}
+
+#[derive(Debug)]
+pub(crate) struct PlayoutClock {
+    clock: Arc<DriftClock>,
+    provide: bool,
+    skew: SkewSlaver,
+}
+
+impl Default for PlayoutClock {
+    fn default() -> Self {
+        Self {
+            clock: Arc::new(DriftClock::new(Arc::new(MonotonicClock))),
+            provide: true,
+            skew: SkewSlaver::default(),
+        }
+    }
+}
+
+impl PlayoutClock {
+    pub(crate) fn clock(&self) -> Arc<DriftClock> {
+        Arc::clone(&self.clock)
+    }
+
+    pub(crate) fn configure(&mut self, caps: &Caps) -> Result<(), G2gError> {
+        self.skew.configure(caps)
+    }
+
+    pub(crate) fn candidate(&self) -> Option<ClockCandidate> {
+        let clock: Arc<dyn PipelineClock + Send + Sync> = self.clock.clone();
+        self.provide
+            .then(|| ClockCandidate::new(ClockPriority::AudioProvider, clock))
+    }
+
+    pub(crate) fn set_clock_sync(&mut self, sync: ClockSync) {
+        self.skew.set_master(sync.clock);
+    }
+
+    #[cfg(all(target_os = "linux", feature = "pipewire"))]
+    pub(crate) fn correct(&mut self, bytes: &[u8]) -> Option<Vec<u8>> {
+        self.skew.measure(&self.clock);
+        self.skew.correct(bytes)
+    }
+
+    #[cfg(any(
+        all(
+            target_os = "linux",
+            any(feature = "alsa-sink", feature = "pulse-sink")
+        ),
+        all(target_os = "windows", feature = "wasapi-sink"),
+        all(target_os = "macos", feature = "coreaudio"),
+        all(target_os = "android", feature = "aaudio")
+    ))]
+    pub(crate) fn correct_frame(
+        &mut self,
+        frame: g2g_core::frame::Frame,
+        element: &'static str,
+    ) -> Result<g2g_core::frame::Frame, G2gError> {
+        self.skew.measure(&self.clock);
+        self.skew.correct_frame(frame, element)
+    }
+
+    pub(crate) fn set_property(
+        &mut self,
+        name: &str,
+        value: &PropValue,
+    ) -> Option<Result<(), PropError>> {
+        if name != "provide-clock" {
+            return self.skew.set_property(name, value);
+        }
+        Some(
+            value
+                .as_bool()
+                .map(|provide| self.provide = provide)
+                .ok_or(PropError::Type),
+        )
+    }
+
+    pub(crate) fn get_property(&self, name: &str) -> Option<PropValue> {
+        if name != "provide-clock" {
+            return self.skew.get_property(name);
+        }
+        Some(PropValue::Bool(self.provide))
+    }
+}
+
+pub(crate) fn played_master_ns(
+    clock: &DriftClock,
+    offset: &mut DeviceClockOffset,
+    local_ns: u64,
+    played_frames: u64,
+    rate: u32,
+) -> u64 {
+    offset.master_ns(clock, local_ns, samples_to_ns(played_frames, rate))
 }
 
 #[cfg(test)]

@@ -23,7 +23,7 @@
 //! ## Clock
 //!
 //! Like `AlsaSink`, this sink offers a playout-disciplined [`DriftClock`] at
-//! [`ClockPriority::AudioProvider`] (the `provide-clock` property, default on),
+//! [`ClockPriority::AudioProvider`](g2g_core::ClockPriority::AudioProvider) (the `provide-clock` property, default on),
 //! so audio is the A/V sync master. The worker feeds it one observation per
 //! write, taking the playout position from `pa_simple_get_latency` (pulse's
 //! analog of `snd_pcm_delay`, and already inclusive of the device latency).
@@ -48,10 +48,9 @@ use libpulse_binding::time::MicroSeconds;
 use libpulse_simple_binding::Simple;
 
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, CapsSet, ClockCandidate, ClockPriority, ClockSync,
-    ConfigureOutcome, DeviceClockOffset, DriftClock, ElementMetadata, G2gError, HardwareError,
-    MonotonicClock, OutputSink, PadTemplate, PadTemplates, PipelineClock, PipelinePacket,
-    PropError, PropKind, PropValue, PropertySpec,
+    AsyncElement, Caps, CapsConstraint, CapsSet, ClockCandidate, ClockSync, ConfigureOutcome,
+    DeviceClockOffset, DriftClock, ElementMetadata, G2gError, HardwareError, OutputSink,
+    PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
 };
 
 use crate::audiooutput::{DeviceCmd, OutputDevice, PlayEnd};
@@ -100,15 +99,7 @@ pub struct PulseSink {
     link: Option<crate::audioworker::WorkerLink<DeviceCmd>>,
     caps: Option<Caps>,
     bytes_written: Arc<AtomicU64>,
-    /// Playout-disciplined master clock (the `AlsaSink` mechanism
-    /// over pulse's latency query). The worker feeds it
-    /// `(monotonic_now, played_ns)` observations so its `now_ns()` tracks the
-    /// real playout rate; a video sink slaves to it when it is elected.
-    clock: Arc<DriftClock>,
-    /// Whether to offer [`clock`](Self::clock) to the pipeline's clock election
-    /// (the `provide-clock` property, default on, GStreamer's `basesink`).
-    provide_clock: bool,
-    skew: crate::audioskew::SkewSlaver,
+    playout: crate::audioskew::PlayoutClock,
 }
 
 impl core::fmt::Debug for PulseSink {
@@ -142,9 +133,7 @@ impl PulseSink {
             link: None,
             caps: None,
             bytes_written: Arc::new(AtomicU64::new(0)),
-            clock: Arc::new(DriftClock::new(Arc::new(MonotonicClock))),
-            provide_clock: true,
-            skew: crate::audioskew::SkewSlaver::default(),
+            playout: crate::audioskew::PlayoutClock::default(),
         }
     }
 
@@ -157,7 +146,7 @@ impl PulseSink {
     /// tests / introspection; its `now_ns()` tracks real playout once the worker
     /// has observed the server.
     pub fn clock(&self) -> Arc<DriftClock> {
-        Arc::clone(&self.clock)
+        self.playout.clock()
     }
 
     /// Tear down without waiting for playout (reconfigure / drop). The
@@ -215,8 +204,8 @@ impl AsyncElement for PulseSink {
         let app_name = self.app_name.clone();
         let device = String::from(self.output.name());
         // disciplined even when not offered, skew slaving reads it
-        let clock = Arc::clone(&self.clock);
-        self.skew.configure(absolute_caps)?;
+        let clock = self.playout.clock();
+        self.playout.configure(absolute_caps)?;
         let fallback = self.output.fallback(
             spec.bytes_per_second() as u64,
             Arc::clone(&self.bytes_written),
@@ -256,18 +245,14 @@ impl AsyncElement for PulseSink {
     }
 
     /// Offer the playout-disciplined [`clock`](Self::clock) as an
-    /// [`AudioProvider`](ClockPriority::AudioProvider) so audio becomes the
+    /// [`AudioProvider`](g2g_core::ClockPriority::AudioProvider) so audio becomes the
     /// pipeline master (video slaves to it), unless `provide-clock` is off.
     fn provide_clock(&self) -> Option<ClockCandidate> {
-        if !self.provide_clock {
-            return None;
-        }
-        let clock: Arc<dyn PipelineClock + Send + Sync> = self.clock.clone();
-        Some(ClockCandidate::new(ClockPriority::AudioProvider, clock))
+        self.playout.candidate()
     }
 
     fn set_clock_sync(&mut self, sync: ClockSync) {
-        self.skew.set_master(sync.clock);
+        self.playout.set_clock_sync(sync);
     }
 
     fn set_bus(&mut self, bus: g2g_core::bus::BusHandle) {
@@ -297,12 +282,7 @@ impl AsyncElement for PulseSink {
                 "PulseAudio sink to play to (empty = the server default)",
             )
             .with_default(""),
-            PropertySpec::new(
-                "provide-clock",
-                PropKind::Bool,
-                "Provide a playout-disciplined clock so audio is the A/V sync master",
-            )
-            .with_default("true"),
+            crate::audioskew::PROVIDE_CLOCK_PROPERTY,
             crate::audioskew::SLAVE_METHOD_PROPERTY,
             crate::audioskew::DRIFT_TOLERANCE_PROPERTY,
             crate::audiooutput::CONTINUE_ON_ERROR_PROPERTY,
@@ -311,7 +291,7 @@ impl AsyncElement for PulseSink {
     }
 
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
-        if let Some(result) = self.skew.set_property(name, &value) {
+        if let Some(result) = self.playout.set_property(name, &value) {
             return result;
         }
         if let Some(result) = self.output.set_property(name, &value, self.link.is_some()) {
@@ -322,16 +302,12 @@ impl AsyncElement for PulseSink {
                 self.app_name = value.as_str().ok_or(PropError::Type)?.into();
                 Ok(())
             }
-            "provide-clock" => {
-                self.provide_clock = value.as_bool().ok_or(PropError::Type)?;
-                Ok(())
-            }
             _ => Err(PropError::Unknown),
         }
     }
 
     fn get_property(&self, name: &str) -> Option<PropValue> {
-        if let Some(value) = self.skew.get_property(name) {
+        if let Some(value) = self.playout.get_property(name) {
             return Some(value);
         }
         if let Some(value) = self.output.get_property(name) {
@@ -339,7 +315,6 @@ impl AsyncElement for PulseSink {
         }
         match name {
             "client-name" => Some(PropValue::Str(self.app_name.clone())),
-            "provide-clock" => Some(PropValue::Bool(self.provide_clock)),
             _ => None,
         }
     }
@@ -353,8 +328,7 @@ impl AsyncElement for PulseSink {
             match packet {
                 PipelinePacket::DataFrame(frame) => {
                     crate::dmabufmap::require_readable_domain(&frame, ELEMENT_NAME)?;
-                    self.skew.measure(&self.clock);
-                    let frame = self.skew.correct_frame(frame, ELEMENT_NAME)?;
+                    let frame = self.playout.correct_frame(frame, ELEMENT_NAME)?;
                     let link = self.link.as_ref().ok_or(G2gError::NotConfigured)?;
                     if let Some(device) = self.output.take_switch() {
                         link.send(
@@ -541,7 +515,7 @@ mod tests {
         let sink = PulseSink::new();
         let cand = sink.provide_clock().expect("audio sink offers a clock");
         // AudioProvider so audio outranks a video sink's plain Provider.
-        assert_eq!(cand.priority, ClockPriority::AudioProvider);
+        assert_eq!(cand.priority, g2g_core::ClockPriority::AudioProvider);
     }
 
     #[test]
