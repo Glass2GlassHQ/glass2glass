@@ -218,11 +218,12 @@ mod device_worker {
     }
 
     fn play_without_device(rx: &Receiver<DeviceCmd>, fallback: &DeviceFallback) -> Option<String> {
-        let started = Instant::now();
+        let mut first_sample_at: Option<Instant> = None;
         let mut consumed_bytes = 0u64;
         loop {
             match rx.recv() {
                 Ok(DeviceCmd::Samples(frame)) => {
+                    let started = *first_sample_at.get_or_insert_with(Instant::now);
                     let bytes = (fallback.payload_len)(&frame)? as u64;
                     consumed_bytes += bytes;
                     fallback
