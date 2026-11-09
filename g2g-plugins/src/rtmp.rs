@@ -871,6 +871,23 @@ impl RtmpPublisher {
         self.send_command(self.stream_id, &body);
     }
 
+    pub fn unpublish(&mut self) {
+        // gst rtmp2sink and ffmpeg both send these two commands before closing
+        let mut fc_unpublish = Vec::new();
+        amf0_string(&mut fc_unpublish, "FCUnpublish");
+        amf0_number(&mut fc_unpublish, 4.0);
+        fc_unpublish.push(AMF0_NULL);
+        amf0_string(&mut fc_unpublish, &self.stream_key);
+        self.send_command(0, &fc_unpublish);
+
+        let mut delete_stream = Vec::new();
+        amf0_string(&mut delete_stream, "deleteStream");
+        amf0_number(&mut delete_stream, 5.0);
+        delete_stream.push(AMF0_NULL);
+        amf0_number(&mut delete_stream, f64::from(self.stream_id));
+        self.send_command(0, &delete_stream);
+    }
+
     /// Send a protocol control message (chunk stream id 2, message stream id 0).
     fn send_control(&mut self, msg_type: u8, payload: &[u8]) {
         write_message(
@@ -1383,6 +1400,36 @@ mod tests {
         }
         assert!(publisher.is_publishing());
         publisher
+    }
+
+    #[test]
+    fn unpublish_sends_fcunpublish_and_deletestream() {
+        let mut server = RtmpSession::new();
+        let mut publisher = coupled_to_publishing(&mut server);
+        publisher.unpublish();
+        let mut reader = ChunkReader::new();
+        reader.push(&publisher.take_outbound());
+        let commands: Vec<(String, Vec<u8>)> = core::iter::from_fn(|| reader.next_message())
+            .map(|(msg_type, _, payload)| {
+                assert_eq!(msg_type, MSG_AMF0_COMMAND);
+                let mut at = 0;
+                let name = amf0_read_string(&payload, &mut at).unwrap();
+                amf0_read_number(&payload, &mut at).unwrap();
+                assert_eq!(payload[at], AMF0_NULL);
+                (name, payload[at + 1..].to_vec())
+            })
+            .collect();
+        let mut stream_key = Vec::new();
+        amf_string(&mut stream_key, "k");
+        let mut stream_id = Vec::new();
+        amf_number(&mut stream_id, f64::from(publisher.stream_id));
+        assert_eq!(
+            commands,
+            vec![
+                (String::from("FCUnpublish"), stream_key),
+                (String::from("deleteStream"), stream_id),
+            ]
+        );
     }
 
     /// Window-acknowledgement flow control (RFC §5.4.3): the session advertises a

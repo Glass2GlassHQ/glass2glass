@@ -276,6 +276,7 @@ impl AsyncElement for RtmpSink {
                     if let (Some(stream), Some(publisher)) =
                         (self.stream.as_mut(), self.publisher.as_mut())
                     {
+                        publisher.unpublish();
                         flush_out(stream, publisher).await?;
                         let _ = stream.shutdown().await;
                     }
