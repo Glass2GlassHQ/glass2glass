@@ -193,8 +193,7 @@ pub fn file_handler() -> UriSourceFactory {
             return Err(UriError::Malformed);
         }
         let path = file_uri_rest_to_path(uri.rest);
-        let prefix = read_file_prefix(path, crate::typefind::SNIFF_LEN as u64)
-            .ok_or(UriError::Unreadable)?;
+        let prefix = read_sniff_window(path).ok_or(UriError::Unreadable)?;
         match crate::typefind::sniff_caps(&prefix).ok_or(UriError::UnknownContent)? {
             Caps::ByteStream {
                 encoding: ByteStreamEncoding::IsoBmff,
@@ -360,7 +359,21 @@ pub(crate) fn file_uri_rest_to_path(rest: &str) -> &str {
 fn read_file_prefix(path: &str, bytes: u64) -> Option<Vec<u8>> {
     use std::io::Read;
     let mut prefix = Vec::new();
-    let f = std::fs::File::open(path)
+    open_for_probe(path)?
+        .take(bytes)
+        .read_to_end(&mut prefix)
+        .ok()?;
+    Some(prefix)
+}
+
+#[cfg(feature = "std")]
+fn read_sniff_window(path: &str) -> Option<Vec<u8>> {
+    crate::typefind::read_sniff_window(&mut open_for_probe(path)?).ok()
+}
+
+#[cfg(feature = "std")]
+fn open_for_probe(path: &str) -> Option<std::fs::File> {
+    std::fs::File::open(path)
         .map_err(|e| {
             crate::filesink::path_io_err(
                 short_type_name::<crate::filesrc::FileSrc>(),
@@ -369,9 +382,7 @@ fn read_file_prefix(path: &str, bytes: u64) -> Option<Vec<u8>> {
                 e,
             )
         })
-        .ok()?;
-    f.take(bytes).read_to_end(&mut prefix).ok()?;
-    Some(prefix)
+        .ok()
 }
 
 /// Parse a closed-caption request from a `playbin` URI fragment, returning the URI
@@ -2487,7 +2498,7 @@ pub fn mkv_primary_stream(location: &str, caps: &Caps) -> Option<ContainerStream
 // content whose codec the sniff recognizes but g2g cannot decode, whatever its container caps say
 #[cfg(feature = "std")]
 pub fn unsupported_codec_primary_stream(location: &str, _caps: &Caps) -> Option<ContainerStreams> {
-    let header = read_file_prefix(location, crate::typefind::SNIFF_LEN as u64)?;
+    let header = read_sniff_window(location)?;
     let codec = crate::typefind::unsupported_codec(&header)?;
     Some(ContainerStreams {
         streams: Vec::new(),

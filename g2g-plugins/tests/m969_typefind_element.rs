@@ -14,11 +14,11 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{parse_launch, run_graph, run_source_transform_sink, SourceLoop};
 use g2g_core::{
-    AsyncElement, ByteStreamEncoding, Caps, ConfigureOutcome, FrameTiming, G2gError, MemoryDomain,
-    OutputSink, PipelineClock, PipelinePacket, VideoCodec,
+    AsyncElement, AudioFormat, ByteStreamEncoding, Caps, ConfigureOutcome, FrameTiming, G2gError,
+    MemoryDomain, OutputSink, PipelineClock, PipelinePacket, VideoCodec,
 };
 use g2g_plugins::registry::default_registry;
-use g2g_plugins::typefind::TypeFind;
+use g2g_plugins::typefind::{elementary_audio_caps, TypeFind};
 
 struct ZeroClock;
 impl PipelineClock for ZeroClock {
@@ -190,6 +190,31 @@ async fn annexb_bytes_retype_to_compressed_video() {
         log.caps_changes
     );
     assert_eq!(log.bytes, payload, "annex-b bytes passed through");
+}
+
+/// FLAC behind an ID3v2 tag longer than the header budget (artwork) types as FLAC:
+/// the tag bytes pass through but are not sniffed.
+#[tokio::test]
+async fn flac_behind_a_long_id3v2_tag_retypes_to_flac() {
+    let tag_body_len = 64 * 1024;
+    let mut payload = b"ID3\x03\0\0".to_vec();
+    payload.extend([21, 14, 7, 0].map(|shift| ((tag_body_len >> shift) & 0x7F) as u8));
+    payload.resize(payload.len() + tag_body_len, 0);
+    payload.extend_from_slice(b"fLaC\0\0\0\x22");
+    let (outcome, log) = run_typefind(
+        bytestream(ByteStreamEncoding::MpegTs),
+        payload.clone(),
+        4096,
+    )
+    .await;
+    outcome.expect("tagged flac stream runs");
+    assert!(
+        log.caps_changes
+            .contains(&elementary_audio_caps(AudioFormat::Flac)),
+        "sniffed FLAC caps reached the sink, got {:?}",
+        log.caps_changes
+    );
+    assert_eq!(log.bytes, payload, "tagged flac bytes passed through");
 }
 
 /// Bytes that match nothing fail the run once the header budget is spent, rather

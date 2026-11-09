@@ -89,6 +89,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M2173: `av1parse` attaches the HDR10 and ITU-T T.35 caption metadata OBUs as frame metadata.
 - M2174: the RTP receiver locks to one sender's SSRC and accepts another only after that sender falls silent.
 - M2175: H.265 timecodes keep frame counts above 255.
+- M2176: typefind looks behind an ID3v2 tag longer than its window instead of calling the stream MP3.
 
 Breaking: `TimecodeMeta.frames` is a `u16`, `WIRE_VERSION` is 4, and `RtpRecvConfig` gains `parameter_sets`.
 

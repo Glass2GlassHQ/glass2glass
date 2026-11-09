@@ -35,11 +35,10 @@ use g2g_core::{
 };
 
 use crate::aacparse::adts_header;
-use crate::audioframe::{
-    ac3_header, mpa_header, MpaHeader, MpaLayer, AC3_MAX_FRAME_LEN, MPA_HEADER_LEN,
-};
+use crate::audioframe::{ac3_header, mpa_header, MpaHeader, MpaLayer, AC3_MAX_FRAME_LEN};
 use crate::h264parse::H264Codec;
 use crate::h265parse::H265Codec;
+use crate::id3::ID3V2_HEADER_LEN;
 use crate::mpegts::{sniff_packet_stride, SYNC_BYTE, TS_PACKET_LEN};
 use crate::nalparse::NalCodec;
 
@@ -83,6 +82,25 @@ pub(crate) const RIFF_HEADER_LEN: usize = RIFF_FORM_OFFSET + FOURCC_LEN;
 /// largest size AC-3 codes have to fit. That covers the MPEG-TS stride check's
 /// several packets many times over.
 pub const SNIFF_LEN: usize = 2 * AC3_MAX_FRAME_LEN;
+
+/// Read the [`SNIFF_LEN`] bytes [`sniff_caps`] types `file` from: the file's
+/// head, or the bytes behind a leading ID3v2 tag, which carries artwork often
+/// enough to be longer than the window.
+#[cfg(feature = "std")]
+pub(crate) fn read_sniff_window(file: &mut std::fs::File) -> std::io::Result<Vec<u8>> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut window = Vec::new();
+    file.by_ref()
+        .take(SNIFF_LEN as u64)
+        .read_to_end(&mut window)?;
+    let Some(tag_len) = crate::id3::id3v2_len(&window) else {
+        return Ok(window);
+    };
+    file.seek(SeekFrom::Start(tag_len as u64))?;
+    window.clear();
+    file.take(SNIFF_LEN as u64).read_to_end(&mut window)?;
+    Ok(window)
+}
 
 /// Guess a media type from a stream's leading bytes, or `None` if nothing matches
 /// (a `typefind` failure). Tries container magic first (binary signatures), then a
@@ -258,15 +276,13 @@ fn sniff_ac3(header: &[u8]) -> bool {
 /// and a handful of field values, which unrelated data hits often.
 ///
 /// Behind an ID3v2 tag a single valid header is enough: the tag has already
-/// said the stream is tagged audio. A tag longer than the sniff window (one
-/// carrying artwork, routinely) leaves no audio to look at, and the stream is
-/// typed MP3 on the strength of the tag alone, MP3 being the only elementary
-/// stream ID3 tags are commonly glued to.
+/// said the stream is tagged audio. A tag longer than the header leaves no audio
+/// to look at, and the stream is not typed: FLAC is tagged with ID3v2 too, so
+/// the tag alone does not say MP3. [`read_sniff_window`] and [`TypeFind`] skip a
+/// leading tag so the window holds the audio behind it.
 fn sniff_mpeg_audio(header: &[u8]) -> Option<AudioFormat> {
     if let Some(tag_len) = crate::id3::id3v2_len(header) {
-        let Some(audio) = header.get(tag_len..).filter(|a| a.len() >= MPA_HEADER_LEN) else {
-            return Some(AudioFormat::Mp3);
-        };
+        let audio = header.get(tag_len..)?;
         return mpa_header(audio).and_then(|h| mpeg_audio_format(&h));
     }
     let first = mpa_header(header)?;
@@ -784,6 +800,8 @@ const MAX_HELD_FRAMES: usize = 1024;
 #[derive(Debug, Default)]
 pub struct TypeFind {
     header: Vec<u8>,
+    id3v2_checked: bool,
+    id3v2_bytes_left: usize,
     held: Vec<Frame>,
     /// Caps currently declared on the output link: the negotiated ones until a
     /// sniff replaces them. Emission is suppressed while the sniff agrees.
@@ -803,13 +821,31 @@ impl TypeFind {
         self.sniffed.as_ref()
     }
 
-    /// Append a frame's system-memory bytes to the sniff buffer, up to the budget.
-    /// A device-domain frame contributes nothing (its bytes are not CPU-readable),
+    /// Append a frame's system-memory bytes to the sniff buffer, up to the budget,
+    /// leaving out a leading ID3v2 tag. A device-domain frame contributes nothing (its bytes are not CPU-readable),
     /// which the held-frame bound then turns into a sniff failure.
     fn accumulate(&mut self, frame: &Frame) {
-        let Some(bytes) = frame.domain.as_system_slice() else {
+        let Some(mut bytes) = frame.domain.as_system_slice() else {
             return;
         };
+        if !self.id3v2_checked {
+            let take = ID3V2_HEADER_LEN
+                .saturating_sub(self.header.len())
+                .min(bytes.len());
+            self.header.extend_from_slice(&bytes[..take]);
+            bytes = &bytes[take..];
+            if self.header.len() < ID3V2_HEADER_LEN {
+                return;
+            }
+            self.id3v2_checked = true;
+            if let Some(tag_len) = crate::id3::id3v2_len(&self.header) {
+                self.header.clear();
+                self.id3v2_bytes_left = tag_len - ID3V2_HEADER_LEN;
+            }
+        }
+        let skipped = self.id3v2_bytes_left.min(bytes.len());
+        self.id3v2_bytes_left -= skipped;
+        let bytes = &bytes[skipped..];
         let room = HEADER_BUDGET.saturating_sub(self.header.len());
         self.header
             .extend_from_slice(&bytes[..bytes.len().min(room)]);
@@ -898,6 +934,8 @@ impl AsyncElement for TypeFind {
                 // an unfinished sniff are stale; the type already found still holds.
                 PipelinePacket::Flush => {
                     self.header = Vec::new();
+                    self.id3v2_checked = false;
+                    self.id3v2_bytes_left = 0;
                     self.held = Vec::new();
                     out.push(PipelinePacket::Flush).await?;
                 }
@@ -1323,15 +1361,32 @@ mod tests {
         let mp3 = elementary_audio_caps(AudioFormat::Mp3);
         let mut tagged = id3v2_tag(64);
         tagged.extend(mp3_stream(1));
-        assert_eq!(sniff_caps(&tagged), Some(mp3.clone()));
-        // A tag the sniff window does not reach past: MP3 on the tag alone.
+        assert_eq!(sniff_caps(&tagged), Some(mp3));
+        // A tag the window does not reach past types nothing: FLAC carries ID3v2 too.
         let long_tag = id3v2_tag(SNIFF_LEN * 2);
-        assert_eq!(sniff_caps(&long_tag[..SNIFF_LEN]), Some(mp3));
+        assert_eq!(sniff_caps(&long_tag[..SNIFF_LEN]), None);
         // A tag in front of FLAC does not become MP3.
         let mut tagged_flac = id3v2_tag(16);
         tagged_flac.extend_from_slice(b"fLaC\0\0\0\x22");
         assert_eq!(
             sniff_caps(&tagged_flac),
+            Some(elementary_audio_caps(AudioFormat::Flac))
+        );
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn the_file_sniff_window_starts_behind_a_long_id3v2_tag() {
+        let tagged_flac = [id3v2_tag(SNIFF_LEN * 2), b"fLaC\0\0\0\x22".to_vec()].concat();
+        let path = std::env::temp_dir().join(alloc::format!(
+            "g2g-typefind-id3-{}.flac",
+            std::process::id()
+        ));
+        std::fs::write(&path, &tagged_flac).expect("write temp");
+        let window = read_sniff_window(&mut std::fs::File::open(&path).expect("open temp"));
+        std::fs::remove_file(&path).ok();
+        assert_eq!(
+            sniff_caps(&window.expect("read window")),
             Some(elementary_audio_caps(AudioFormat::Flac))
         );
     }

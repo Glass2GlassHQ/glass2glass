@@ -33,7 +33,7 @@ use g2g_core::{
 };
 
 use crate::clock::WallClock;
-use crate::typefind::{sniff_caps, SNIFF_LEN};
+use crate::typefind::sniff_caps;
 
 /// Depth of every probe link. One packet in flight is all the probe needs, and a
 /// deeper link only buys frames nobody reads.
@@ -336,15 +336,10 @@ fn link(
 /// Read the header bytes the content sniff needs. A file shorter than that is
 /// read whole.
 fn read_header(path: &str) -> Result<Vec<u8>, DiscoverError> {
-    use std::io::Read;
     let mut file =
         std::fs::File::open(path).map_err(|e| DiscoverError::Io(format!("{path}: {e}")))?;
-    let mut header = Vec::new();
-    file.by_ref()
-        .take(SNIFF_LEN as u64)
-        .read_to_end(&mut header)
-        .map_err(|e| DiscoverError::Io(format!("{path}: {e}")))?;
-    Ok(header)
+    crate::typefind::read_sniff_window(&mut file)
+        .map_err(|e| DiscoverError::Io(format!("{path}: {e}")))
 }
 
 /// Fold every message the probe posted into the report: the stream collection,

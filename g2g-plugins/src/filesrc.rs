@@ -475,17 +475,7 @@ fn read_file_header(
     element: &'static str,
 ) -> Result<alloc::vec::Vec<u8>, G2gError> {
     let mut file = File::open(path).map_err(|e| path_io_err(element, "open", path, e))?;
-    let mut header = alloc::vec![0u8; crate::typefind::SNIFF_LEN];
-    let mut filled = 0;
-    while filled < header.len() {
-        let n = file.read(&mut header[filled..]).map_err(io_err)?;
-        if n == 0 {
-            break;
-        }
-        filled += n;
-    }
-    header.truncate(filled);
-    Ok(header)
+    crate::typefind::read_sniff_window(&mut file).map_err(io_err)
 }
 
 fn file_caps_from_header(header: &[u8]) -> Option<Caps> {
