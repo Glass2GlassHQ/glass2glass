@@ -574,7 +574,7 @@ async fn audio_and_video_pads_publish_as_one_announced_session() {
     let mut depayloader = RtpH264Depayloader::new();
     let video: Vec<Vec<u8>> = recorded.channels[&interleaved_rtp_channel(VIDEO_PAD)]
         .iter()
-        .filter_map(|packet| depayloader.depacketize(packet))
+        .flat_map(|packet| depayloader.depacketize(packet))
         .map(|access_unit| access_unit.data)
         .collect();
     assert_eq!(video, video_frames());
@@ -828,7 +828,7 @@ fn depayloaded_video(recorded: &RecordedPublish) -> Vec<Vec<u8>> {
         .get(&interleaved_rtp_channel(VIDEO_PAD))
         .into_iter()
         .flatten()
-        .filter_map(|packet| depayloader.depacketize(packet))
+        .flat_map(|packet| depayloader.depacketize(packet))
         .map(|access_unit| access_unit.data)
         .collect()
 }

@@ -20,6 +20,8 @@ use g2g_plugins::sei::{build_sei_nal, PAYLOAD_CONTENT_LIGHT_LEVEL, PAYLOAD_MASTE
 
 /// One VCL IDR slice NAL, the picture the SEI describes.
 const VCL: [u8; 8] = [0x00, 0x00, 0x00, 0x01, 0x65, 0x88, 0x84, 0x00];
+/// One non-IDR slice NAL, a later picture of the same coded video sequence.
+const NON_IDR_VCL: [u8; 8] = [0x00, 0x00, 0x00, 0x01, 0x41, 0x9a, 0x02, 0x00];
 
 #[derive(Default)]
 struct RecordingSink {
@@ -111,7 +113,7 @@ async fn hdr_sei_becomes_frame_metadata_and_latches() {
     el.process(frame(hdr_au(), 0), &mut sink).await.unwrap();
     // Every following picture in the sequence carries no SEI of its own.
     for seq in 1..4u64 {
-        el.process(frame(VCL.to_vec(), seq), &mut sink)
+        el.process(frame(NON_IDR_VCL.to_vec(), seq), &mut sink)
             .await
             .unwrap();
     }
@@ -130,6 +132,27 @@ async fn hdr_sei_becomes_frame_metadata_and_latches() {
         assert_eq!(hdr.max_content_light_level, Some(1200));
         assert_eq!(hdr.max_frame_average_light_level, Some(300));
     }
+}
+
+#[tokio::test]
+async fn an_idr_without_hdr_sei_ends_the_latched_metadata() {
+    let mut el = H264Parse::new();
+    el.configure_pipeline(&h264_caps()).unwrap();
+    let mut sink = RecordingSink::default();
+    el.process(frame(hdr_au(), 0), &mut sink).await.unwrap();
+    el.process(frame(NON_IDR_VCL.to_vec(), 1), &mut sink)
+        .await
+        .unwrap();
+    el.process(frame(VCL.to_vec(), 2), &mut sink).await.unwrap();
+    el.process(frame(NON_IDR_VCL.to_vec(), 3), &mut sink)
+        .await
+        .unwrap();
+    let has_hdr: Vec<bool> = sink
+        .frames
+        .iter()
+        .map(|f| f.meta.get::<HdrStaticMeta>().is_some())
+        .collect();
+    assert_eq!(has_hdr, [true, true, false, false]);
 }
 
 #[tokio::test]

@@ -79,6 +79,9 @@ impl RtpEncoding {
     }
 }
 
+pub type AccessUnits =
+    core::iter::Chain<core::option::IntoIter<AccessUnit>, core::option::IntoIter<AccessUnit>>;
+
 #[derive(Debug)]
 pub enum RtpDepayloader {
     H264(RtpH264Depayloader),
@@ -93,10 +96,10 @@ impl RtpDepayloader {
         }
     }
 
-    pub fn depacketize(&mut self, packet: &[u8]) -> Option<AccessUnit> {
+    pub fn depacketize(&mut self, packet: &[u8]) -> AccessUnits {
         match self {
             RtpDepayloader::H264(depayloader) => depayloader.depacketize(packet),
-            RtpDepayloader::Opus => depacketize_opus(packet),
+            RtpDepayloader::Opus => depacketize_opus(packet).into_iter().chain(None),
         }
     }
 }
@@ -125,6 +128,9 @@ pub struct RtpH264Depayloader {
     last_seq: Option<u16>,
     /// RTP timestamp of the in-flight access unit.
     timestamp: u32,
+    /// Part of the current access unit was lost or dropped, so its remaining
+    /// packets are skipped until the next access-unit boundary.
+    discarding: bool,
 }
 
 impl RtpH264Depayloader {
@@ -132,36 +138,67 @@ impl RtpH264Depayloader {
         Self::default()
     }
 
-    /// Feed one RTP packet. Returns `Some(access_unit)` when the packet's
-    /// marker bit closes an access unit; otherwise accumulates and returns
-    /// `None`. Packets that are too short or use unsupported aggregation modes
-    /// (STAP-B / MTAP / FU-B) are skipped.
-    pub fn depacketize(&mut self, packet: &[u8]) -> Option<AccessUnit> {
+    /// Feed one RTP packet. Yields the access unit a new RTP timestamp closed,
+    /// then the one this packet's marker bit closed. Packets that are too short
+    /// or use unsupported aggregation modes (STAP-B / MTAP / FU-B) are skipped.
+    pub fn depacketize(&mut self, packet: &[u8]) -> AccessUnits {
         // One RTP header parser for the whole workspace (the CSRC / extension /
         // padding offset math lives in `g2g_core::rtp`, shared with the MCU RTP
         // source); a malformed or non-v2 datagram is rejected.
-        let parsed = RtpHeader::parse(packet)?;
+        let Some(parsed) = RtpHeader::parse(packet) else {
+            return None.into_iter().chain(None);
+        };
         let seq = parsed.header.sequence;
-        let marker = parsed.header.marker;
 
         // A sequence gap (loss / reorder) means the in-flight FU-A and access
         // unit can no longer be trusted; drop them so we never splice across
         // the discontinuity. The next start-of-AU rebuilds cleanly.
         if let Some(prev) = self.last_seq {
             if seq != prev.wrapping_add(1) {
-                self.fragment_start = None;
-                self.au.clear();
+                self.drop_access_unit();
             }
         }
         self.last_seq = Some(seq);
-        self.timestamp = parsed.header.timestamp;
 
-        let payload =
-            packet.get(parsed.payload_offset..parsed.payload_offset + parsed.payload_len)?;
-        if payload.is_empty() {
-            return None;
+        // senders that omit the marker bit end an access unit only by starting
+        // the next one with a new RTP timestamp
+        let mut closed_by_timestamp = None;
+        if parsed.header.timestamp != self.timestamp {
+            self.abandon_fragment();
+            if !self.discarding && !self.au.is_empty() {
+                closed_by_timestamp = Some(self.take_access_unit());
+            }
+            self.au.clear();
+            self.discarding = false;
+            self.timestamp = parsed.header.timestamp;
         }
 
+        let payload = packet
+            .get(parsed.payload_offset..parsed.payload_offset + parsed.payload_len)
+            .unwrap_or_default();
+        let closed_by_marker = self.add_payload(payload, parsed.header.marker);
+        closed_by_timestamp.into_iter().chain(closed_by_marker)
+    }
+
+    fn add_payload(&mut self, payload: &[u8], marker: bool) -> Option<AccessUnit> {
+        if !self.discarding && !payload.is_empty() {
+            self.add_nals(payload);
+        }
+        if self.discarding {
+            self.discarding = !marker;
+            return None;
+        }
+        if !marker {
+            return None;
+        }
+        self.abandon_fragment();
+        if self.au.is_empty() {
+            return None;
+        }
+        Some(self.take_access_unit())
+    }
+
+    fn add_nals(&mut self, payload: &[u8]) {
         match payload[0] & 0x1F {
             // Single NAL unit (types 1..=23): the payload is the NAL verbatim.
             1..=23 => {
@@ -188,7 +225,7 @@ impl RtpH264Depayloader {
             // header's type; Start/End bits bound the fragment run.
             t if t == FU_A_TYPE => {
                 if payload.len() < 2 {
-                    return None;
+                    return;
                 }
                 let fu_header = payload[1];
                 let start = fu_header & 0x80 != 0;
@@ -204,9 +241,8 @@ impl RtpH264Depayloader {
                     if self.au.len() > MAX_ASSEMBLY_BYTES {
                         // A fragment run that never ends; drop the in-flight data
                         // and resync at the next start-of-AU.
-                        self.fragment_start = None;
-                        self.au.clear();
-                        return None;
+                        self.drop_access_unit();
+                        return;
                     }
                     if end {
                         self.fragment_start = None;
@@ -216,21 +252,22 @@ impl RtpH264Depayloader {
             // STAP-B (25), MTAP (26/27), FU-B (29): unsupported, skip.
             _ => {}
         }
+    }
 
-        if !marker {
-            return None;
-        }
-        self.abandon_fragment();
-        if self.au.is_empty() {
-            return None;
-        }
+    fn take_access_unit(&mut self) -> AccessUnit {
         // the next access unit is likely about as large as this one
         let next_capacity = self.au.len();
         let data = core::mem::replace(&mut self.au, Vec::with_capacity(next_capacity));
-        Some(AccessUnit {
+        AccessUnit {
             data,
             rtp_timestamp: self.timestamp,
-        })
+        }
+    }
+
+    fn drop_access_unit(&mut self) {
+        self.fragment_start = None;
+        self.au.clear();
+        self.discarding = true;
     }
 
     // a fragment run cut short by another NAL or the marker is incomplete, drop it
@@ -251,7 +288,7 @@ impl RtpH264Depayloader {
         if self.au.len() > MAX_ASSEMBLY_BYTES {
             // An access unit whose marker never arrives; drop it rather than
             // buffer without bound.
-            self.au.clear();
+            self.drop_access_unit();
         }
     }
 }
@@ -279,7 +316,7 @@ mod tests {
 
         let mut out = None;
         for p in &packets {
-            if let Some(unit) = depay.depacketize(p) {
+            for unit in depay.depacketize(p) {
                 out = Some(unit);
             }
         }
@@ -302,7 +339,7 @@ mod tests {
         let mut depay = RtpH264Depayloader::new();
         let mut out = None;
         for p in &packets {
-            if let Some(unit) = depay.depacketize(p) {
+            for unit in depay.depacketize(p) {
                 out = Some(unit);
             }
         }
@@ -323,7 +360,7 @@ mod tests {
         packet.extend_from_slice(&payload);
 
         let mut depay = RtpH264Depayloader::new();
-        let unit = depay.depacketize(&packet).expect("marker closes AU");
+        let unit = depay.depacketize(&packet).next().expect("marker closes AU");
         assert_eq!(unit.data, wrap(&[sps, pps]), "both NALs in start-code form");
     }
 
@@ -335,14 +372,84 @@ mod tests {
         let mut depay = RtpH264Depayloader::new();
         // seq 0, no marker: starts an AU.
         let p0 = alloc::vec![0x80u8, 96, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x61, 0xAA];
-        assert!(depay.depacketize(&p0).is_none());
-        // seq 5 (gap), marker set, a fresh single NAL.
-        let p1 = alloc::vec![0x80u8, 0x80 | 96, 0, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0x65, 0xBB];
-        let unit = depay.depacketize(&p1).expect("marker closes AU");
+        assert!(depay.depacketize(&p0).next().is_none());
+        // seq 5 (gap), marker set, a fresh single NAL of the next access unit.
+        let p1 = alloc::vec![
+            0x80u8,
+            0x80 | 96,
+            0,
+            5,
+            0,
+            0,
+            0x0B,
+            0xB8,
+            0,
+            0,
+            0,
+            0,
+            0x65,
+            0xBB
+        ];
+        let unit = depay.depacketize(&p1).next().expect("marker closes AU");
         assert_eq!(
             unit.data,
             wrap(&[&[0x65, 0xBB]]),
             "only the post-gap NAL survives; the dropped one is gone"
+        );
+    }
+
+    fn single_nal_packet(seq: u16, ts: u32, marker: bool, nal: &[u8]) -> Vec<u8> {
+        let mut p = alloc::vec![0x80u8, if marker { 0x80 | 96 } else { 96 }];
+        p.extend_from_slice(&seq.to_be_bytes());
+        p.extend_from_slice(&ts.to_be_bytes());
+        p.extend_from_slice(&[0, 0, 0, 0]);
+        p.extend_from_slice(nal);
+        p
+    }
+
+    #[test]
+    fn gap_inside_an_access_unit_drops_its_remaining_packets() {
+        let mut depay = RtpH264Depayloader::new();
+        assert!(depay
+            .depacketize(&single_nal_packet(0, 9000, false, &[0x65, 1]))
+            .next()
+            .is_none());
+        assert!(
+            depay
+                .depacketize(&single_nal_packet(2, 9000, true, &[0x65, 3]))
+                .next()
+                .is_none(),
+            "the tail of an access unit that lost a packet is not emitted"
+        );
+        let unit = depay
+            .depacketize(&single_nal_packet(3, 12000, true, &[0x41, 4]))
+            .next()
+            .expect("the next access unit is complete");
+        assert_eq!(unit.data, wrap(&[&[0x41, 4]]));
+        assert_eq!(unit.rtp_timestamp, 12000);
+    }
+
+    #[test]
+    fn timestamp_change_closes_an_unmarked_access_unit() {
+        let mut depay = RtpH264Depayloader::new();
+        assert!(depay
+            .depacketize(&single_nal_packet(0, 9000, false, &[0x65, 1]))
+            .next()
+            .is_none());
+        let unit = depay
+            .depacketize(&single_nal_packet(1, 12000, false, &[0x41, 2]))
+            .next()
+            .expect("the new timestamp closes the previous access unit");
+        assert_eq!(unit.data, wrap(&[&[0x65, 1]]));
+        assert_eq!(unit.rtp_timestamp, 9000);
+        let units: Vec<_> = depay
+            .depacketize(&single_nal_packet(2, 15000, true, &[0x41, 3]))
+            .map(|unit| (unit.data, unit.rtp_timestamp))
+            .collect();
+        assert_eq!(
+            units,
+            [(wrap(&[&[0x41, 2]]), 12000), (wrap(&[&[0x41, 3]]), 15000)],
+            "the timestamp closes the unmarked unit and the marker closes this one"
         );
     }
 
@@ -379,18 +486,22 @@ mod tests {
                                                      // and emit nothing instead of growing without bound.
         assert!(depay
             .depacketize(&fu_a_packet(0, 1, false, true, false, &frag))
+            .next()
             .is_none());
         for seq in 1..16u16 {
             assert!(depay
                 .depacketize(&fu_a_packet(seq, 1, false, false, false, &frag))
+                .next()
                 .is_none());
         }
         // A fresh complete FU-A NAL still reassembles after the run is dropped.
         assert!(depay
             .depacketize(&fu_a_packet(100, 2, false, true, false, &[1, 2, 3]))
+            .next()
             .is_none());
         let unit = depay
             .depacketize(&fu_a_packet(101, 2, true, false, true, &[4, 5, 6]))
+            .next()
             .expect("resyncs and completes a new AU");
         assert_eq!(unit.data, wrap(&[&[0x65, 1, 2, 3, 4, 5, 6]]));
     }
@@ -402,15 +513,19 @@ mod tests {
         let mut depay = RtpDepayloader::new(RtpEncoding::Opus);
         let unit = depay
             .depacketize(&packets[0])
+            .next()
             .expect("one RTP packet carries one Opus packet");
         assert_eq!(unit.data, opus);
         assert_eq!(unit.rtp_timestamp, 960);
 
         let header_only = &packets[0][..g2g_core::rtp::RTP_HEADER_LEN];
-        assert!(depay.depacketize(header_only).is_none(), "empty payload");
+        assert!(
+            depay.depacketize(header_only).next().is_none(),
+            "empty payload"
+        );
         for len in 0..g2g_core::rtp::RTP_HEADER_LEN {
             assert!(
-                depay.depacketize(&packets[0][..len]).is_none(),
+                depay.depacketize(&packets[0][..len]).next().is_none(),
                 "{len} bytes"
             );
         }
@@ -421,6 +536,7 @@ mod tests {
         let mut d = RtpH264Depayloader::new();
         assert!(d
             .depacketize(&fu_a_packet(0, 9000, false, true, false, &[1, 2]))
+            .next()
             .is_none());
         let mut single = alloc::vec![0x80u8, 0x80 | 96];
         single.extend_from_slice(&1u16.to_be_bytes());
@@ -429,6 +545,7 @@ mod tests {
         single.extend_from_slice(&[0x41, 7]);
         let au = d
             .depacketize(&single)
+            .next()
             .expect("the marker closes the access unit");
         assert_eq!(au.data, wrap(&[&[0x41, 7]]), "only the complete NAL");
     }

@@ -203,6 +203,17 @@ pub(crate) fn nal_units_contain_keyframe<'a>(
     })
 }
 
+pub(crate) fn nal_units_start_coded_video_sequence<'a>(
+    codec: VideoCodec,
+    mut units: impl Iterator<Item = &'a [u8]>,
+) -> bool {
+    units.any(|n| match codec {
+        // BLA_W_LP (16) through IDR_N_LP (20), without the CRA that follows an end of sequence
+        VideoCodec::H265 => h265_nal_type(n).is_some_and(|t| (16..=20).contains(&t)),
+        _ => h264_nal_type(n) == Some(5),
+    })
+}
+
 /// Whether one MPEG-1/2 video start-code unit (`n[0]` is the start code value,
 /// the start code prefix already stripped) marks a decodable resume point: a
 /// sequence header (0xB3) or a GOP header (0xB8), both of which only ever

@@ -113,7 +113,7 @@ async fn run_player(rtsp_addr: SocketAddr, want: usize) -> Vec<u8> {
         let recv =
             tokio::time::timeout(std::time::Duration::from_secs(8), rtp.recv(&mut pkt)).await;
         let n = recv.expect("rtp arrives within 8s").expect("recv rtp");
-        if let Some(au) = depay.depacketize(&pkt[..n]) {
+        for au in depay.depacketize(&pkt[..n]) {
             tags.push(au.data.get(5).copied().unwrap_or(0));
         }
     }

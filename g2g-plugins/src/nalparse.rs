@@ -141,7 +141,7 @@ pub struct NalParse<C: NalCodec> {
     cached: Vec<Vec<Vec<u8>>>,
     /// Last HDR10 static metadata seen in the stream's SEI. It describes the
     /// whole coded video sequence but is coded per IRAP, so it is latched and
-    /// re-attached to every frame.
+    /// re-attached to every frame until the next sequence starts.
     #[cfg(feature = "metadata")]
     hdr: Option<g2g_core::meta::HdrStaticMeta>,
     /// SPS VUI context the H.264 `pic_timing` SEI parse needs, latched from the
@@ -391,6 +391,10 @@ impl<C: NalCodec> NalParse<C> {
         timing.keyframe = crate::annexb::nal_units_contain_keyframe(C::CODEC, nals.iter().copied());
         #[cfg(feature = "metadata")]
         let sei = crate::sei::parse_nals(nals.iter().copied(), C::CODEC, self.pic_timing);
+        #[cfg(feature = "metadata")]
+        if crate::annexb::nal_units_start_coded_video_sequence(C::CODEC, nals.iter().copied()) {
+            self.hdr = None;
+        }
         drop(nals);
         #[cfg(feature = "metadata")]
         let input_pts_ns = timing.pts_ns;
@@ -544,6 +548,16 @@ impl<C: NalCodec> AsyncElement for NalParse<C> {
                         #[cfg(feature = "metadata")]
                         let sei =
                             crate::sei::parse_nals(nals.iter().copied(), C::CODEC, self.pic_timing);
+                        // nal-aligned buffers carry the SEI ahead of the slice it describes
+                        #[cfg(feature = "metadata")]
+                        if self.input_alignment != BitstreamAlignment::Nal
+                            && crate::annexb::nal_units_start_coded_video_sequence(
+                                C::CODEC,
+                                nals.iter().copied(),
+                            )
+                        {
+                            self.hdr = None;
+                        }
                         drop(nals);
                         frame.timing.keyframe = is_keyframe;
                         #[cfg(feature = "metadata")]

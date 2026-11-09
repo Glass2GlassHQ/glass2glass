@@ -151,6 +151,7 @@ impl AccessUnitFramer {
         if core::mem::replace(&mut input.stamp_taken, true) {
             FrameTiming {
                 pts_ns: FrameTiming::PTS_NONE,
+                dts_ns: FrameTiming::DTS_NONE,
                 ..input.timing
             }
         } else {
@@ -500,16 +501,30 @@ mod tests {
     fn a_buffer_stamp_names_only_the_first_access_unit_starting_in_it() {
         const FIRST_PTS_NS: u64 = 5;
         const SECOND_PTS_NS: u64 = 9;
+        let stamped = |ns| FrameTiming {
+            dts_ns: ns,
+            ..timing(ns)
+        };
         let mut framer = AccessUnitFramer::new(false);
         let mut emitted = framer.push(
             &[picture(1), picture(2)].concat(),
-            timing(FIRST_PTS_NS),
+            stamped(FIRST_PTS_NS),
             mpeg_classify,
         );
-        emitted.extend(framer.push(&picture(3), timing(SECOND_PTS_NS), mpeg_classify));
+        emitted.extend(framer.push(&picture(3), stamped(SECOND_PTS_NS), mpeg_classify));
         emitted.extend(framer.finish());
-        let stamps: Vec<u64> = emitted.iter().map(|(_, timing)| timing.pts_ns).collect();
-        assert_eq!(stamps, [FIRST_PTS_NS, FrameTiming::PTS_NONE, SECOND_PTS_NS]);
+        let stamps: Vec<(u64, u64)> = emitted
+            .iter()
+            .map(|(_, timing)| (timing.pts_ns, timing.dts_ns))
+            .collect();
+        assert_eq!(
+            stamps,
+            [
+                (FIRST_PTS_NS, FIRST_PTS_NS),
+                (FrameTiming::PTS_NONE, FrameTiming::DTS_NONE),
+                (SECOND_PTS_NS, SECOND_PTS_NS)
+            ]
+        );
     }
 
     #[test]

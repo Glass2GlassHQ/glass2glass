@@ -401,7 +401,7 @@ pub(crate) async fn receive_interleaved(
                     if channel == rtp_channel {
                         let packet = &pending[start..end];
                         capture_time.observe(&capture_time_ids, packet);
-                        if let Some(au) = depay.depacketize(packet) {
+                        for au in depay.depacketize(packet) {
                             let capture_unix_ns = capture_time.take(au.rtp_timestamp);
                             if emitter.push(au, capture_unix_ns, out).await? {
                                 return Ok(SessionEnd::Limit);

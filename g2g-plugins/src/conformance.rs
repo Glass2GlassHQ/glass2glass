@@ -259,7 +259,7 @@ pub fn rtp_h264() -> MaturityRecord {
     let mut rx = RtpH264Depayloader::new();
     let mut out = None;
     for p in &packets {
-        if let Some(unit) = rx.depacketize(p) {
+        for unit in rx.depacketize(p) {
             out = Some(unit);
         }
     }
@@ -300,12 +300,12 @@ fn survives_a_dropped_fragment(au: &[u8]) -> bool {
         if i == 2 {
             continue; // the lost fragment
         }
-        if let Some(u) = rx.depacketize(p) {
+        for u in rx.depacketize(p) {
             units.push(u.data);
         }
     }
     for p in &second {
-        if let Some(u) = rx.depacketize(p) {
+        for u in rx.depacketize(p) {
             units.push(u.data);
         }
     }
@@ -359,7 +359,7 @@ pub fn rtp_jitter() -> MaturityRecord {
     let mut units = Vec::new();
     let now = 10 * config.max_hold_ns;
     while let Some(p) = jb.pop(now) {
-        if let Some(u) = rx.depacketize(&p) {
+        for u in rx.depacketize(&p) {
             units.push(u.data);
         }
     }

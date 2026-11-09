@@ -491,7 +491,8 @@ mod tests {
         let mut depayloader = crate::rtpdepay::RtpH264Depayloader::new();
         let access_unit = packets
             .iter()
-            .find_map(|packet| depayloader.depacketize(packet))
+            .flat_map(|packet| depayloader.depacketize(packet))
+            .next()
             .expect("the marker closes the access unit");
         assert_eq!(access_unit.data, wrap(&[&nal]));
     }

@@ -201,7 +201,7 @@ fn sps_refines_declared_caps_once_from_a_canned_rtp_sequence() {
     for ts in [9000u32, 12_000] {
         let seq = if ts == 9000 { 0 } else { 3 };
         for packet in keyframe_packets(seq, ts) {
-            if let Some(au) = depay.depacketize(&packet) {
+            for au in depay.depacketize(&packet) {
                 if let Some(caps) = refiner.refine(&au.data) {
                     refined.push(caps);
                 }

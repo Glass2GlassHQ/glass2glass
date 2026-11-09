@@ -361,15 +361,14 @@ pub(crate) async fn receive_rtp(
         // completed access unit into a downstream frame.
         while let Some(packet) = jitter.pop(g2g_core::metrics::monotonic_ns()) {
             capture_time.observe(&cfg.capture_time_ids, &packet);
-            let Some(au) = depay.depacketize(&packet) else {
-                continue;
-            };
-            if let Some(caps) = refiner.as_mut().and_then(|r| r.refine(&au.data)) {
-                out.push(PipelinePacket::CapsChanged(caps)).await?;
-            }
-            let capture_unix_ns = capture_time.take(au.rtp_timestamp);
-            if emitter.push(au, capture_unix_ns, out).await? {
-                return Ok(emitter.emitted());
+            for au in depay.depacketize(&packet) {
+                if let Some(caps) = refiner.as_mut().and_then(|r| r.refine(&au.data)) {
+                    out.push(PipelinePacket::CapsChanged(caps)).await?;
+                }
+                let capture_unix_ns = capture_time.take(au.rtp_timestamp);
+                if emitter.push(au, capture_unix_ns, out).await? {
+                    return Ok(emitter.emitted());
+                }
             }
         }
 

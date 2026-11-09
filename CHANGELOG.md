@@ -70,6 +70,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M2154: hardened AV1 tile and OBU size, subtitle, FLAC header and MPEG audio / AAC / AC-3 junk parsing, and the MCU RTP source drops oversized payloads.
 - M2155: an SRTP receiver set past 1024 sources evicts the least recently used one instead of refusing new sources.
 - M2156: hardened H.264 / H.265 SPS, ST 2110-30 SDP, Matroska, ID3, WAV, HLS and DASH parsing, ULPFEC / FlexFEC repairs with a CSRC list or long mask, and SDP port ranges.
+- M2157: the H.264 RTP depayloader drops the rest of a damaged access unit and closes unmarked ones on a timestamp change, HDR10 metadata ends at an IDR without it, and a second access unit in one buffer no longer repeats the first one's DTS.
 
 ## 0.14.0
 

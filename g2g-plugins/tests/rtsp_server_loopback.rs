@@ -137,7 +137,7 @@ async fn rtsp_player_handshakes_then_receives_rtp() {
             let recv =
                 tokio::time::timeout(std::time::Duration::from_secs(5), rtp.recv(&mut pkt)).await;
             let n = recv.expect("rtp arrives within 5s").expect("recv rtp");
-            if let Some(au) = depay.depacketize(&pkt[..n]) {
+            for au in depay.depacketize(&pkt[..n]) {
                 // Annex-B payload: [0,0,0,1][NAL][tag ..]; recover the tag byte.
                 tags.push(au.data.get(5).copied().unwrap_or(0));
             }
@@ -458,7 +458,7 @@ async fn rtsp_player_receives_interleaved_rtp_over_control() {
             buf.drain(..4 + len);
             match channel {
                 0 => {
-                    if let Some(au) = depay.depacketize(&payload) {
+                    for au in depay.depacketize(&payload) {
                         tags.push(au.data.get(5).copied().unwrap_or(0));
                     }
                 }
