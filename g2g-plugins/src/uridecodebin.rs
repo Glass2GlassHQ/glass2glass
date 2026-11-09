@@ -2121,6 +2121,85 @@ pub fn ogg_demux_select(
         .flatten()
 }
 
+// probe an FLV file and build an `FlvDemuxN` with the requested ports and their caps
+#[cfg(feature = "std")]
+fn flv_select(
+    location: &str,
+    select: impl FnOnce(&[PadKind]) -> Option<Vec<usize>>,
+) -> Option<(Box<dyn DynMultiOutputElement>, Vec<Caps>)> {
+    use crate::flvdemux::{forwardable_ports, FlvDemux, FlvDemuxN};
+    let ports = forwardable_ports(&read_prefix(location)?);
+    let kinds: Vec<PadKind> = ports
+        .iter()
+        .map(|port| {
+            if FlvDemux::is_video(port.stream) {
+                PadKind::Video
+            } else {
+                PadKind::Audio
+            }
+        })
+        .collect();
+    let selected: Vec<_> = select(&kinds)?.into_iter().map(|i| ports[i]).collect();
+    if selected.is_empty() {
+        return None;
+    }
+    let caps = selected
+        .iter()
+        .map(|port| FlvDemux::output_caps(port.stream))
+        .collect();
+    Some((Box::new(FlvDemuxN::new(&selected)), caps))
+}
+
+#[cfg(feature = "std")]
+pub fn flv_demux_select(
+    name: &str,
+    location: &str,
+    pads: &[PadRequest],
+) -> Option<Box<dyn DynMultiOutputElement>> {
+    (name == "flvdemux")
+        .then(|| flv_select(location, |kinds| resolve_pads(kinds, pads)).map(|(d, _)| d))
+        .flatten()
+}
+
+#[cfg(feature = "std")]
+pub fn flv_decodebin_select(
+    location: &str,
+    caps: &Caps,
+) -> Option<(Box<dyn DynMultiOutputElement>, Vec<UriFanoutPort>)> {
+    if !is_container(caps, &[ByteStreamEncoding::Flv]) {
+        return None;
+    }
+    flv_select(location, every_stream).map(|(demux, caps)| (demux, uncropped_ports(caps)))
+}
+
+// behind `rtmpsrc` there is no file to probe: each port takes the stream its consumer accepts, an `audio_N` pad track N
+#[cfg(feature = "std")]
+pub fn flv_demux_caps_select(
+    name: &str,
+    wanted: &[g2g_core::CapsSet],
+    pads: &[PadRequest],
+) -> Option<Box<dyn DynMultiOutputElement>> {
+    use crate::flvdemux::{stream_carrying, FlvDemuxN, FlvPort};
+    if name != "flvdemux" {
+        return None;
+    }
+    let ports: Option<Vec<FlvPort>> = wanted
+        .iter()
+        .zip(pads)
+        .map(|(accepted, pad)| {
+            let track_id = match pad.kind {
+                PadKind::Audio => u8::try_from(pad.index).ok()?,
+                _ => crate::flv::LEGACY_AUDIO_TRACK,
+            };
+            Some(FlvPort {
+                stream: stream_carrying(accepted)?,
+                track_id,
+            })
+        })
+        .collect();
+    Some(Box::new(FlvDemuxN::new(&ports?)))
+}
+
 /// Probe an MPEG-TS file and build a [`TsDemuxN`](crate::tsdemux::TsDemuxN) with
 /// the requested streams + their caps. Shared by `tsdemux` demux-select and
 /// `decodebin` fan-out. Declines a non-MPEG-TS file.
@@ -2171,6 +2250,7 @@ pub fn ts_demux_select(
 pub fn ts_demux_caps_select(
     name: &str,
     wanted: &[g2g_core::CapsSet],
+    _pads: &[PadRequest],
 ) -> Option<Box<dyn DynMultiOutputElement>> {
     if name != "tsdemux" {
         return None;

@@ -1783,6 +1783,13 @@ pub fn default_registry() -> Registry {
         })
         .with_input_kinds(&[StreamType::Video, StreamType::Audio]),
     );
+    // gst 1.28's Enhanced RTMP muxer: `audio_N` is multitrack audio track N
+    reg.register_muxer(
+        MuxerFactory::new("eflvmux", |inputs| {
+            Box::new(crate::flvmuxn::FlvMuxN::multitrack(inputs))
+        })
+        .with_input_kinds(&[StreamType::Video, StreamType::Audio]),
+    );
 
     // Sinks.
     reg.register_launch(LaunchFactory::of::<FakeSink>("fakesink", || {
@@ -1922,11 +1929,13 @@ fn register_uri_handlers(reg: &mut Registry) {
     reg.register_demux_select(crate::uridecodebin::mkv_demux_select);
     reg.register_demux_select(crate::uridecodebin::ts_demux_select);
     reg.register_demux_caps_select(crate::uridecodebin::ts_demux_caps_select);
+    reg.register_demux_caps_select(crate::uridecodebin::flv_demux_caps_select);
     reg.register_demux_stream(crate::demuxstream::demux_stream);
     reg.register_demux_select(crate::uridecodebin::mp4_demux_select);
     reg.register_demux_select(crate::uridecodebin::ogg_demux_select);
     reg.register_demux_select(crate::uridecodebin::ps_demux_select);
     reg.register_demux_select(crate::uridecodebin::avi_demux_select);
+    reg.register_demux_select(crate::uridecodebin::flv_demux_select);
     // `decodebin` fan-out (M482): `filesrc location=x ! decodebin name=d  d.video_0
     // ! ...  d.audio_0 ! ...` probes the file, builds the multi-output demuxer, and
     // auto-plugs a decoder onto each port (the decode-per-port sibling of the above).
@@ -1936,6 +1945,7 @@ fn register_uri_handlers(reg: &mut Registry) {
     reg.register_decodebin_select(crate::uridecodebin::ps_decodebin_select);
     reg.register_decodebin_select(crate::uridecodebin::avi_decodebin_select);
     reg.register_decodebin_select(crate::uridecodebin::ogg_decodebin_select);
+    reg.register_decodebin_select(crate::uridecodebin::flv_decodebin_select);
     // Bare `filesrc location=X ! decodebin` primary-stream selection (M746): an
     // audio-only container's single-stream demux defaults to a video port; the hook
     // sniffs the file and selects the real (audio) stream instead.

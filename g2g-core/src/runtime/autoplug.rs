@@ -1644,9 +1644,12 @@ mod factory {
     ) -> Option<Box<dyn DynMultiOutputElement>>;
 
     // a demux fed by a network source, which has no file to probe: port i carries
-    // the stream `wanted[i]` (its consumer's sink caps) accepts, `None` declines
-    pub type DemuxCapsSelectHook =
-        fn(name: &str, wanted: &[CapsSet]) -> Option<Box<dyn DynMultiOutputElement>>;
+    // the stream `wanted[i]` (its consumer's sink caps) accepts and `pads[i]` names, `None` declines
+    pub type DemuxCapsSelectHook = fn(
+        name: &str,
+        wanted: &[CapsSet],
+        pads: &[PadRequest],
+    ) -> Option<Box<dyn DynMultiOutputElement>>;
 
     // a single-output demux with one consumer and no `stream` set: the `stream` value
     // for the consumer's sink caps `accepted`, `None` keeps the demux's default

@@ -258,6 +258,9 @@ libraries installed.
 - **FLV:** Speex decode (no Speex encoder exists anywhere to build a validated
   decode vector, and gst's header-in-tag layout is rejected by libavcodec, so
   wiring a decoder would be an unvalidated claim).
+- **Enhanced RTMP:** enhanced video in `flvdemux` / `eflvmux` (H.265, AV1 and
+  VP9 fourccs, multitrack `video_N`), the Opus, FLAC and AC-3 audio fourccs, and
+  `eflvmux`'s `flv-track-mode` pad property.
 - **AV1 in MPEG-TS:** write the AOM spec's 'AV01' `registration_descriptor`
   instead of GStreamer's 'AV1G' once any demuxer reads the former (GStreamer's
   `tsdemux` activates no program for an 'AV01' stream, and ffmpeg's muxer writes

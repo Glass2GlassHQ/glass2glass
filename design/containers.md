@@ -1197,6 +1197,40 @@ with a `PipelinePacket::Overwrite` that `filesink` applies by seeking back, as
 gst's `flvmux` does. The duration runs from the first frame's PTS to the latest
 frame end, so a source that leaves frame durations at 0 comes out one frame short.
 
+### Enhanced RTMP multitrack audio
+
+Enhanced RTMP v2 audio tags have sound format 9: the low nibble is a packet type,
+and a fourcc names the codec. Packet type 5 is multitrack. Its next byte gives the
+multitrack mode (one track, many tracks of one codec, or many tracks each with its
+own fourcc) and the inner packet type, and each track carries a one-byte track id,
+with a 24-bit size when the tag holds several. `FlvDemuxer` reads all three modes
+for AAC (`mp4a`) and MP3 (`.mp3`), and skips other fourccs. It keeps the
+sequence-start `AudioSpecificConfig` per track id, and each `FlvUnit` has a
+`track_id`, 0 for legacy tags.
+
+`eflvmux` is `FlvMuxN` in multitrack mode, after gst 1.28's element of that name.
+Its `audio` pad writes legacy tags as track 0, and `audio_N` writes one-track
+multitrack tags as track N, AAC or MP3 only. This is the layout gst's `eflvmux`
+and ffmpeg 8 both write. Muxers do not see pad names, only the parsed
+`PadRequest`, so `eflvmux` places `audio_N` at input N and video last, and track
+ids therefore run below the input count. The `flv-track-mode` pad property is not
+offered: the `audio` pad is always legacy.
+
+`FlvDemuxN` is the multi-output FLV demuxer. Each port is an `FlvStream` and a
+track id, and it shares the per-stream conversion (`StreamEmitter`) with
+`FlvDemux`, which reads track 0. `flvdemux name=d` with several refs builds it:
+behind `filesrc` the file is probed, video first and then audio by track id, so
+`d.audio_1` is the second audio track. Behind `rtmpsrc` each port takes the
+stream its consumer accepts, and an `audio_N` ref reads track N. The
+`DemuxCapsSelectHook` receives the pad requests for this.
+
+This is validated against ffmpeg 8.1 and gst 1.28 in both directions. A checked-in
+ffmpeg two-track file demuxes per track (`m2137_eflv_multitrack`), and an
+`eflvmux` file round-trips byte-exact. By hand, ffprobe and gst `flvdemux` each
+read both tracks of an `eflvmux` file, and g2g reads gst's `eflvmux` output. Over
+RTMP, ffmpeg publishes two tracks into `rtmpsrc ! flvdemux` and `eflvmux !
+rtmpsink` publishes two into an ffmpeg listener (`rtmp_ffmpeg_interop`, ignored).
+
 With MP4 through `Mp4Src` and `Mp4Sink`, MPEG-TS, Matroska/WebM, Ogg and FLV,
 the demux and mux coverage spans the major containers.
 

@@ -17,7 +17,8 @@
 //! ```
 //!
 //! One output pad carries one elementary stream; the [`FlvStream`] selection picks
-//! which, so a second `flvdemux stream=aac` demuxes the audio. The choice is by
+//! which, so a second `flvdemux stream=aac` demuxes the audio. [`FlvDemuxN`] has a
+//! port per stream, Enhanced RTMP audio tracks included. The choice is by
 //! codec because the output caps are fixed at negotiation, before any tag is
 //! parsed. Besides H.264 and AAC the legacy Flash codecs are carried too
 //! (`stream=sorenson | vp6 | vp6a | mp3 | speex`), their frames forwarded as the
@@ -37,9 +38,9 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{ElementSeekRoute, SeekController};
 use g2g_core::{
     AsyncElement, AudioFormat, BusHandle, BusMessage, ByteStreamEncoding, Caps, CapsConstraint,
-    CapsSet, ConfigureOutcome, ElementMetadata, FrameTiming, G2gError, MemoryDomain, OutputSink,
-    PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Tag,
-    TagList, VideoCodec,
+    CapsSet, ConfigureOutcome, ElementMetadata, FrameTiming, G2gError, MemoryDomain,
+    MultiOutputElement, MultiOutputSink, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
+    PropError, PropKind, PropValue, PropertySpec, Tag, TagList, VideoCodec,
 };
 
 use crate::aacparse::{adts_from_asc, audio_specific_config_info, is_raw_aac_config};
@@ -47,8 +48,8 @@ use crate::annexb::{
     length_prefixed_nal_units, parse_avcc, prepend_param_sets, starts_with_param_set,
 };
 use crate::bereader::{take_be_u16, take_be_u32};
-use crate::demuxseek::DemuxSeek;
-use crate::flv::{FlvCodec, FlvDemuxer, FlvTrack, FlvUnit};
+use crate::demuxseek::{DemuxSeek, SharedSegment};
+use crate::flv::{FlvCodec, FlvDemuxer, FlvTrack, FlvUnit, LEGACY_AUDIO_TRACK};
 
 /// Which elementary stream an [`FlvDemux`] instance forwards. An FLV stream
 /// interleaves one video and one audio track; this element has one output pad, so
@@ -99,9 +100,19 @@ pub struct FlvDemux {
     emitted: u64,
     bus: Option<BusHandle>,
     tags_posted: bool,
+    emitter: StreamEmitter,
+    /// Seek support: app time seeks drive an upstream byte-seek and a
+    /// re-sync. Inert unless `with_seek` wired the controllers.
+    seek: DemuxSeek<FlvUnit>,
+}
+
+#[derive(Debug)]
+struct StreamEmitter {
+    stream: FlvStream,
+    track_id: u8,
     /// Video decoder config from the AVC sequence-header tag, once seen.
     video_init: Option<VideoInit>,
-    /// AAC `AudioSpecificConfig` from the audio sequence-header tag.
+    /// AAC `AudioSpecificConfig` from the track's sequence start.
     audio_asc: Option<Vec<u8>>,
     /// Prepend the parameter sets to the next video access unit (the first, and
     /// the resume point after a flush, so a decoder can (re-)initialize).
@@ -109,9 +120,153 @@ pub struct FlvDemux {
     /// The concrete audio caps (from the ASC) are announced once, before the
     /// first audio frame.
     audio_caps_announced: bool,
-    /// Seek support: app time seeks drive an upstream byte-seek and a
-    /// re-sync. Inert unless `with_seek` wired the controllers.
-    seek: DemuxSeek<FlvUnit>,
+}
+
+#[derive(Debug, Default)]
+struct EmittedUnit {
+    caps: Option<Caps>,
+    payloads: Vec<(Vec<u8>, FrameTiming)>,
+}
+
+impl StreamEmitter {
+    fn new(stream: FlvStream, track_id: u8) -> Self {
+        Self {
+            stream,
+            track_id,
+            video_init: None,
+            audio_asc: None,
+            need_param_sets: true,
+            audio_caps_announced: false,
+        }
+    }
+
+    fn carries(&self, unit: &FlvUnit) -> bool {
+        unit.codec == FlvDemux::selected_codec(self.stream) && unit.track_id == self.track_id
+    }
+
+    /// Adopt newly-parsed sequence-header configs from the tag parser.
+    fn sync_configs(&mut self, demux: &FlvDemuxer) {
+        if self.video_init.is_none() {
+            if let Some(avcc) = demux.video_config() {
+                if let Ok(record) = parse_avcc(avcc) {
+                    self.video_init = Some(VideoInit {
+                        param_sets: record.parameter_sets,
+                        length_size: record.nal_length_size,
+                    });
+                }
+            }
+        }
+        if self.audio_asc.is_none() {
+            self.audio_asc = demux.audio_config(self.track_id).map(|c| c.to_vec());
+        }
+    }
+
+    /// Convert one AVCC video access unit to Annex-B (honouring the `avcC`'s NAL
+    /// length-prefix width) and prepend the parameter sets at the (re-)start, so
+    /// the elementary stream is what the g2g pipeline assumes: start-coded, with
+    /// in-band SPS/PPS a decoder can initialize from. An empty result
+    /// means malformed AVCC lengths.
+    fn video_annexb(&mut self, data: Vec<u8>) -> Vec<u8> {
+        // FLV AVC packets are always length-prefixed: a 4-byte length of 256 to
+        // 511 starts with `00 00 01`, so sniffing for a start code misreads them.
+        let len_size = self.video_init.as_ref().map_or(4, |i| i.length_size);
+        let mut out = Vec::with_capacity(data.len() + 16);
+        for nal in length_prefixed_nal_units(&data, len_size) {
+            out.extend_from_slice(&[0, 0, 0, 1]);
+            out.extend_from_slice(nal);
+        }
+        if out.is_empty() {
+            return out;
+        }
+        if self.need_param_sets {
+            if let Some(init) = &self.video_init {
+                if !starts_with_param_set(&out, VideoCodec::H264) {
+                    out = prepend_param_sets(&out, &init.param_sets, VideoCodec::H264);
+                }
+            }
+            self.need_param_sets = false;
+        }
+        out
+    }
+
+    // the caps refinement and payloads one unit of this stream becomes
+    fn convert(&mut self, demux: &FlvDemuxer, unit: FlvUnit) -> EmittedUnit {
+        let timing = FrameTiming {
+            pts_ns: unit.pts_ns(),
+            dts_ns: unit.dts_ns(),
+            keyframe: unit.keyframe,
+            ..FrameTiming::default()
+        };
+        let mut emitted = EmittedUnit::default();
+        let data = match unit.codec {
+            FlvCodec::H264 => {
+                let annexb = self.video_annexb(unit.data);
+                if annexb.is_empty() {
+                    return emitted; // malformed AVCC lengths: nothing decodable
+                }
+                annexb
+            }
+            // Sorenson frames are already the codec's own bitstream, and VP6
+            // frames keep their leading dimension byte for the decoder.
+            FlvCodec::SorensonH263 | FlvCodec::Vp6 | FlvCodec::Vp6Alpha => unit.data,
+            FlvCodec::Aac | FlvCodec::Mp3 | FlvCodec::Speex => {
+                // Announce the concrete channel layout / sample rate once,
+                // refining the sentinel negotiation caps, before the first
+                // audio frame (the MP4-demuxer pattern). AAC's real layout is
+                // in the ASC, the others' in the legacy audio tag flags.
+                if !self.audio_caps_announced {
+                    self.audio_caps_announced = true;
+                    let params = if unit.codec == FlvCodec::Aac {
+                        self.audio_asc
+                            .as_deref()
+                            .and_then(audio_specific_config_info)
+                            .map(|info| (info.channels, info.sample_rate))
+                    } else {
+                        demux
+                            .audio_params()
+                            .filter(|_| self.track_id == LEGACY_AUDIO_TRACK)
+                    };
+                    if let (Caps::Audio { format, .. }, Some((channels, sample_rate))) =
+                        (FlvDemux::output_caps(self.stream), params)
+                    {
+                        emitted.caps = Some(Caps::Audio {
+                            format,
+                            channels,
+                            sample_rate,
+                            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
+                        });
+                    }
+                    // ADTS cannot carry ER AAC, ELD or USAC, so their config
+                    // leads the raw units as a frame of its own.
+                    if let Some(config) = self
+                        .audio_asc
+                        .as_ref()
+                        .filter(|asc| unit.codec == FlvCodec::Aac && is_raw_aac_config(asc))
+                    {
+                        emitted
+                            .payloads
+                            .push((config.clone(), FrameTiming::default()));
+                    }
+                }
+                if unit.codec != FlvCodec::Aac {
+                    unit.data
+                } else {
+                    // ADTS-frame each raw AAC access unit so the elementary
+                    // stream is self-describing; forwarded raw without an ASC.
+                    match self
+                        .audio_asc
+                        .as_deref()
+                        .and_then(|asc| adts_from_asc(asc, &unit.data))
+                    {
+                        Some(framed) => framed,
+                        None => unit.data,
+                    }
+                }
+            }
+        };
+        emitted.payloads.push((data, timing));
+        emitted
+    }
 }
 
 impl Default for FlvDemux {
@@ -129,18 +284,20 @@ impl FlvDemux {
             emitted: 0,
             bus: None,
             tags_posted: false,
-            video_init: None,
-            audio_asc: None,
-            need_param_sets: true,
-            audio_caps_announced: false,
+            emitter: StreamEmitter::new(FlvStream::H264, LEGACY_AUDIO_TRACK),
             seek: DemuxSeek::default(),
         }
     }
 
     /// Select which elementary stream to forward (default [`FlvStream::H264`]).
     pub fn with_stream(mut self, stream: FlvStream) -> Self {
-        self.stream = stream;
+        self.select(stream);
         self
+    }
+
+    fn select(&mut self, stream: FlvStream) {
+        self.stream = stream;
+        self.emitter = StreamEmitter::new(stream, LEGACY_AUDIO_TRACK);
     }
 
     /// Make the demuxer seekable: `app` carries app time seeks; `upstream`
@@ -158,24 +315,7 @@ impl FlvDemux {
     /// parameter sets are re-prepended so the resume point is decodable.
     fn reset_parser(&mut self) {
         self.demux = FlvDemuxer::new();
-        self.need_param_sets = true;
-    }
-
-    /// Adopt newly-parsed sequence-header configs from the tag parser.
-    fn sync_configs(&mut self) {
-        if self.video_init.is_none() {
-            if let Some(avcc) = self.demux.video_config() {
-                if let Ok(record) = parse_avcc(avcc) {
-                    self.video_init = Some(VideoInit {
-                        param_sets: record.parameter_sets,
-                        length_size: record.nal_length_size,
-                    });
-                }
-            }
-        }
-        if self.audio_asc.is_none() {
-            self.audio_asc = self.demux.audio_config().map(|c| c.to_vec());
-        }
+        self.emitter.need_param_sets = true;
     }
 
     /// Attach the pipeline bus so the FLV `onMetaData` metadata posts as a
@@ -222,12 +362,16 @@ impl FlvDemux {
         }
     }
 
+    pub(crate) fn is_video(stream: FlvStream) -> bool {
+        Self::selected_codec(stream).track() == FlvTrack::Video
+    }
+
     /// The output caps for the selected elementary stream. Video geometry is
     /// unknown until the bitstream parser reads the SPS, so H.264 advertises a
     /// fixatable placeholder `Range` refined downstream via `CapsChanged`. AAC
     /// advertises the sentinel channels/rate 0 that `aacparse` accepts
     /// pre-header; the concrete layout is announced at runtime from the ASC.
-    fn output_caps(stream: FlvStream) -> Caps {
+    pub(crate) fn output_caps(stream: FlvStream) -> Caps {
         let video = crate::typefind::elementary_video_caps;
         // The audio layout is refined at runtime, from the AAC AudioSpecificConfig
         // or the tag flags of the other codecs.
@@ -261,34 +405,6 @@ impl FlvDemux {
         }
     }
 
-    /// Convert one AVCC video access unit to Annex-B (honouring the `avcC`'s NAL
-    /// length-prefix width) and prepend the parameter sets at the (re-)start, so
-    /// the elementary stream is what the g2g pipeline assumes: start-coded, with
-    /// in-band SPS/PPS a decoder can initialize from. An empty result
-    /// means malformed AVCC lengths.
-    fn video_annexb(&mut self, data: Vec<u8>) -> Vec<u8> {
-        // FLV AVC packets are always length-prefixed: a 4-byte length of 256 to
-        // 511 starts with `00 00 01`, so sniffing for a start code misreads them.
-        let len_size = self.video_init.as_ref().map_or(4, |i| i.length_size);
-        let mut out = Vec::with_capacity(data.len() + 16);
-        for nal in length_prefixed_nal_units(&data, len_size) {
-            out.extend_from_slice(&[0, 0, 0, 1]);
-            out.extend_from_slice(nal);
-        }
-        if out.is_empty() {
-            return out;
-        }
-        if self.need_param_sets {
-            if let Some(init) = &self.video_init {
-                if !starts_with_param_set(&out, VideoCodec::H264) {
-                    out = prepend_param_sets(&out, &init.param_sets, VideoCodec::H264);
-                }
-            }
-            self.need_param_sets = false;
-        }
-        out
-    }
-
     /// Emit each access unit of the selected track as a frame, carrying its
     /// PTS/DTS (the FLV millisecond timestamps converted to nanoseconds).
     async fn emit_units(
@@ -296,10 +412,9 @@ impl FlvDemux {
         units: Vec<FlvUnit>,
         out: &mut dyn OutputSink,
     ) -> Result<(), G2gError> {
-        let want = Self::selected_codec(self.stream);
         for u in units {
             self.seek.note_track_unit(u.track() as u64, u.pts_ns());
-            if u.codec != want {
+            if !self.emitter.carries(&u) {
                 continue;
             }
             // M362 seek: hold units from the keyframe at/before the target (the
@@ -310,7 +425,6 @@ impl FlvDemux {
             }
             for u in admitted {
                 let pts_ns = u.pts_ns();
-                let dts_ns = u.dts_ns();
                 // Stream start: map the first emitted timestamp to running time 0,
                 // as every demuxer opens its stream. A unit presenting earlier than
                 // the stream start lowers it.
@@ -318,88 +432,19 @@ impl FlvDemux {
                 if let Some(seg) = self.seek.lowered_segment(pts_ns).or(opening) {
                     out.push(PipelinePacket::Segment(seg)).await?;
                 }
-                let data =
-                    match u.codec {
-                        FlvCodec::H264 => {
-                            let annexb = self.video_annexb(u.data);
-                            if annexb.is_empty() {
-                                continue; // malformed AVCC lengths: nothing decodable
-                            }
-                            annexb
-                        }
-                        // Sorenson frames are already the codec's own bitstream, and VP6
-                        // frames keep their leading dimension byte for the decoder.
-                        FlvCodec::SorensonH263 | FlvCodec::Vp6 | FlvCodec::Vp6Alpha => u.data,
-                        FlvCodec::Aac | FlvCodec::Mp3 | FlvCodec::Speex => {
-                            // Announce the concrete channel layout / sample rate once,
-                            // refining the sentinel negotiation caps, before the first
-                            // audio frame (the MP4-demuxer pattern). AAC's real layout is
-                            // in the ASC, the others' in the audio tag flags.
-                            if !self.audio_caps_announced {
-                                self.audio_caps_announced = true;
-                                let params = if u.codec == FlvCodec::Aac {
-                                    self.audio_asc
-                                        .as_deref()
-                                        .and_then(audio_specific_config_info)
-                                        .map(|info| (info.channels, info.sample_rate))
-                                } else {
-                                    self.demux.audio_params()
-                                };
-                                if let (Caps::Audio { format, .. }, Some((channels, sample_rate))) =
-                                    (Self::output_caps(self.stream), params)
-                                {
-                                    let caps = Caps::Audio {
-                                        format,
-                                        channels,
-                                        sample_rate,
-                                        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
-                                    };
-                                    out.push(PipelinePacket::CapsChanged(caps)).await?;
-                                }
-                                // ADTS cannot carry ER AAC, ELD or USAC, so their config
-                                // leads the raw units as a frame of its own.
-                                if let Some(config) = self.audio_asc.as_ref().filter(|asc| {
-                                    u.codec == FlvCodec::Aac && is_raw_aac_config(asc)
-                                }) {
-                                    let frame = Frame::new(
-                                        MemoryDomain::System(SystemSlice::from_boxed(
-                                            config.clone().into_boxed_slice(),
-                                        )),
-                                        FrameTiming::default(),
-                                        self.emitted,
-                                    );
-                                    self.emitted += 1;
-                                    out.push(PipelinePacket::DataFrame(frame)).await?;
-                                }
-                            }
-                            if u.codec != FlvCodec::Aac {
-                                u.data
-                            } else {
-                                // ADTS-frame each raw AAC access unit so the elementary
-                                // stream is self-describing; forwarded raw without an ASC.
-                                match self
-                                    .audio_asc
-                                    .as_deref()
-                                    .and_then(|asc| adts_from_asc(asc, &u.data))
-                                {
-                                    Some(framed) => framed,
-                                    None => u.data,
-                                }
-                            }
-                        }
-                    };
-                let frame = Frame::new(
-                    MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
-                    FrameTiming {
-                        pts_ns,
-                        dts_ns,
-                        keyframe: u.keyframe,
-                        ..FrameTiming::default()
-                    },
-                    self.emitted,
-                );
-                self.emitted += 1;
-                out.push(PipelinePacket::DataFrame(frame)).await?;
+                let emitted = self.emitter.convert(&self.demux, u);
+                if let Some(caps) = emitted.caps {
+                    out.push(PipelinePacket::CapsChanged(caps)).await?;
+                }
+                for (payload, timing) in emitted.payloads {
+                    let frame = Frame::new(
+                        MemoryDomain::System(SystemSlice::from_boxed(payload.into_boxed_slice())),
+                        timing,
+                        self.emitted,
+                    );
+                    self.emitted += 1;
+                    out.push(PipelinePacket::DataFrame(frame)).await?;
+                }
             }
         }
         Ok(())
@@ -483,7 +528,7 @@ impl AsyncElement for FlvDemux {
                         .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
                     self.demux.push_data(slice);
                     self.maybe_post_tags();
-                    self.sync_configs();
+                    self.emitter.sync_configs(&self.demux);
                     let units = self.demux.take_units();
                     self.emit_units(units, out).await?;
                 }
@@ -505,7 +550,7 @@ impl AsyncElement for FlvDemux {
                     // forwards the EOS itself, so pushing it here would double it
                     // (the second hits a closed sink under a full link).
                     self.maybe_post_tags();
-                    self.sync_configs();
+                    self.emitter.sync_configs(&self.demux);
                     let units = self.demux.take_units();
                     self.emit_units(units, out).await?;
                     self.seek.end_and_wait_for_seek(out).await?;
@@ -528,7 +573,7 @@ impl AsyncElement for FlvDemux {
         match name {
             "stream" => {
                 let s = value.as_str().ok_or(PropError::Type)?;
-                self.stream = flv_stream_from_str(s).ok_or(PropError::Value)?;
+                self.select(flv_stream_from_str(s).ok_or(PropError::Value)?);
                 Ok(())
             }
             _ => Err(PropError::Unknown),
@@ -540,6 +585,152 @@ impl AsyncElement for FlvDemux {
             "stream" => Some(PropValue::Str(flv_stream_to_str(self.stream).into())),
             _ => None,
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FlvPort {
+    pub stream: FlvStream,
+    // the Enhanced RTMP track of an audio stream, `LEGACY_AUDIO_TRACK` for video and legacy audio
+    pub track_id: u8,
+}
+
+// the ports the units in an FLV prefix fill, video first, then audio by track id
+pub fn forwardable_ports(prefix: &[u8]) -> Vec<FlvPort> {
+    let mut demux = FlvDemuxer::new();
+    demux.push_data(prefix);
+    let mut ports: Vec<FlvPort> = Vec::new();
+    for unit in demux.take_units() {
+        let port = FlvPort {
+            stream: stream_of_codec(unit.codec),
+            track_id: unit.track_id,
+        };
+        if !ports.contains(&port) {
+            ports.push(port);
+        }
+    }
+    ports.sort_by_key(|port| (!FlvDemux::is_video(port.stream), port.track_id));
+    ports
+}
+
+// splits an FLV byte stream into one port per stream, so `d.audio_1` reads Enhanced RTMP audio track 1
+#[derive(Debug)]
+pub struct FlvDemuxN {
+    demux: FlvDemuxer,
+    emitters: Vec<StreamEmitter>,
+    segment: SharedSegment,
+    emitted: u64,
+}
+
+impl FlvDemuxN {
+    pub fn new(ports: &[FlvPort]) -> Self {
+        assert!(
+            !ports.is_empty(),
+            "FlvDemuxN needs at least one output port"
+        );
+        Self {
+            demux: FlvDemuxer::new(),
+            emitters: ports
+                .iter()
+                .map(|port| StreamEmitter::new(port.stream, port.track_id))
+                .collect(),
+            segment: SharedSegment::new(ports.len()),
+            emitted: 0,
+        }
+    }
+
+    async fn route_units(&mut self, out: &mut dyn MultiOutputSink) -> Result<(), G2gError> {
+        for emitter in &mut self.emitters {
+            emitter.sync_configs(&self.demux);
+        }
+        for unit in self.demux.take_units() {
+            let Some(port) = self.emitters.iter().position(|e| e.carries(&unit)) else {
+                continue;
+            };
+            let pts_ns = unit.pts_ns();
+            self.segment
+                .send_before_unit(port, pts_ns, Some(pts_ns), out)
+                .await?;
+            let emitted = self.emitters[port].convert(&self.demux, unit);
+            if let Some(caps) = emitted.caps {
+                out.push_to(port, PipelinePacket::CapsChanged(caps)).await?;
+            }
+            for (payload, timing) in emitted.payloads {
+                let frame = Frame::new(
+                    MemoryDomain::System(SystemSlice::from_boxed(payload.into_boxed_slice())),
+                    timing,
+                    self.emitted,
+                );
+                self.emitted += 1;
+                out.push_to(port, PipelinePacket::DataFrame(frame)).await?;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl MultiOutputElement for FlvDemuxN {
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    where
+        Self: 'a;
+
+    fn input_domains(&self) -> g2g_core::memory::DomainSet {
+        g2g_core::memory::DomainSet::only(g2g_core::memory::MemoryDomainKind::System)
+    }
+
+    fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
+        upstream_caps.intersect(&FlvDemux::input_caps())
+    }
+
+    fn caps_constraint_as_input(&self) -> CapsConstraint<'_> {
+        CapsConstraint::Accepts(CapsSet::one(FlvDemux::input_caps()))
+    }
+
+    fn port_output_caps(&self, port: usize) -> Option<Caps> {
+        self.emitters
+            .get(port)
+            .map(|emitter| FlvDemux::output_caps(emitter.stream))
+    }
+
+    fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
+        absolute_caps
+            .intersect(&FlvDemux::input_caps())
+            .map(|_| ConfigureOutcome::Accepted)
+    }
+
+    fn process<'a>(
+        &'a mut self,
+        packet: PipelinePacket,
+        out: &'a mut dyn MultiOutputSink,
+    ) -> Self::ProcessFuture<'a> {
+        Box::pin(async move {
+            match packet {
+                PipelinePacket::DataFrame(frame) => {
+                    let slice = frame
+                        .domain
+                        .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
+                    self.demux.push_data(slice);
+                    self.route_units(out).await?;
+                }
+                PipelinePacket::Flush => {
+                    self.demux = FlvDemuxer::new();
+                    for port in 0..self.emitters.len() {
+                        self.emitters[port].need_param_sets = true;
+                        out.push_to(port, PipelinePacket::Flush).await?;
+                    }
+                }
+                PipelinePacket::Segment(seg) => {
+                    for port in 0..self.emitters.len() {
+                        out.push_to(port, PipelinePacket::Segment(seg)).await?;
+                    }
+                }
+                // the runner sends the merged Eos to every port
+                PipelinePacket::Eos => self.route_units(out).await?,
+                _ => {}
+            }
+            Ok(())
+        })
     }
 }
 
@@ -568,18 +759,14 @@ fn stream_of_codec(codec: FlvCodec) -> FlvStream {
 /// caps [`FlvDemux`] emits for it. Empty when the prefix holds no audio or
 /// video tag g2g reads.
 pub fn forwardable_streams(prefix: &[u8]) -> Vec<(FlvStream, Caps)> {
-    let mut demux = FlvDemuxer::new();
-    demux.push_data(prefix);
-    let mut codecs: Vec<FlvCodec> = Vec::new();
-    for unit in demux.take_units() {
-        if !codecs.contains(&unit.codec) {
-            codecs.push(unit.codec);
+    let mut streams: Vec<FlvStream> = Vec::new();
+    for port in forwardable_ports(prefix) {
+        if !streams.contains(&port.stream) {
+            streams.push(port.stream);
         }
     }
-    codecs.sort_by_key(|codec| codec.track() != FlvTrack::Video);
-    codecs
+    streams
         .into_iter()
-        .map(stream_of_codec)
         .map(|stream| (stream, FlvDemux::output_caps(stream)))
         .collect()
 }
@@ -622,6 +809,14 @@ const FLV_STREAMS: [FlvStream; 7] = [
     FlvStream::Mp3,
     FlvStream::Speex,
 ];
+
+// the first stream a consumer with sink caps `accepted` takes
+#[cfg(feature = "std")]
+pub(crate) fn stream_carrying(accepted: &CapsSet) -> Option<FlvStream> {
+    FLV_STREAMS
+        .into_iter()
+        .find(|&stream| crate::demuxstream::takes(accepted, &FlvDemux::output_caps(stream)))
+}
 
 #[cfg(feature = "std")]
 pub(crate) fn stream_for_consumer(accepted: &CapsSet) -> Option<alloc::string::String> {

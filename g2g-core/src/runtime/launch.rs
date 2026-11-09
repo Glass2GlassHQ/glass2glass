@@ -3371,7 +3371,7 @@ fn build_graph(
         demux_select_node[ei] = registry
             .demux_caps_select_hooks()
             .iter()
-            .find_map(|hook| hook(&specs[ei].name, &wanted));
+            .find_map(|hook| hook(&specs[ei].name, &wanted, &demux_pads[ei]));
     }
     // a demux with one consumer and no `stream` takes the stream that consumer accepts,
     // the way gst links a dynamic pad by caps

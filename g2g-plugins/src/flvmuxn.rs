@@ -24,8 +24,9 @@
 //! Reachable from the `gst-launch` fan-in syntax: registered only as the `flvmux`
 //! muxer in `default_registry`, so any number of input links builds this element.
 //! Scope: FLV's one-video + one-audio model; a second pad of either kind is
-//! rejected. The legacy Flash codecs have no sequence header, so their tracks are
-//! ready to write from the first access unit.
+//! rejected, except under `eflvmux`, where each `audio_N` pad is Enhanced RTMP
+//! multitrack audio track N. The legacy Flash codecs have no sequence header, so
+//! their tracks are ready to write from the first access unit.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -43,7 +44,7 @@ use g2g_core::{
 
 use crate::aacparse::{is_leading_aac_config, muxer_access_unit, muxer_audio_specific_config};
 use crate::annexb::{au_is_keyframe, avcc_record, avcc_sample, parameter_sets, split_annexb};
-use crate::flv::{FlvCodec, FlvMuxer, FlvTrack};
+use crate::flv::{FlvCodec, FlvMuxer, FlvTrack, LEGACY_AUDIO_TRACK};
 use crate::mux::{
     audio_header_config, audio_track_params, every_track_header_ready, refused_input,
     refused_input_because, require_header_config_at_end, video_header_config, CODEC_CONFIG,
@@ -91,7 +92,9 @@ pub struct FlvMuxN {
     inputs: usize,
     /// Per-pad codec, learned at configure.
     kinds: Vec<Option<FlvCodec>>,
-    /// The audio pad's negotiated layout, which MP3's tag flags declare.
+    // `eflvmux`: input N is audio track N, so several audio pads mux as Enhanced RTMP tracks
+    multitrack: bool,
+    // the legacy audio pad's negotiated layout, which MP3's tag flags declare
     audio_params: Option<(u8, u32)>,
     /// Per-pad track init, captured from the first AU.
     inits: Vec<Option<TrackInit>>,
@@ -106,10 +109,19 @@ pub struct FlvMuxN {
 
 impl FlvMuxN {
     pub fn new(inputs: usize) -> Self {
+        Self::with_inputs(inputs, false)
+    }
+
+    pub fn multitrack(inputs: usize) -> Self {
+        Self::with_inputs(inputs, true)
+    }
+
+    fn with_inputs(inputs: usize, multitrack: bool) -> Self {
         assert!(inputs > 0, "FlvMuxN needs at least one input");
         Self {
             inputs,
             kinds: alloc::vec![None; inputs],
+            multitrack,
             audio_params: None,
             inits: alloc::vec![None; inputs],
             agg: InputAggregator::new(inputs),
@@ -190,40 +202,53 @@ impl FlvMuxN {
         Ok(())
     }
 
+    // the Enhanced RTMP track an audio pad writes
+    fn audio_track_id(&self, input: usize) -> u8 {
+        if self.multitrack {
+            u8::try_from(input).expect("configure refuses inputs past the last track id")
+        } else {
+            LEGACY_AUDIO_TRACK
+        }
+    }
+
     /// Build the A/V muxer from the captured inits (video `avcC` record + AAC ASC).
     fn build_mux(&self) -> Result<FlvMuxer, G2gError> {
+        let mut video = None;
         let mut video_config = Vec::new();
+        let mut audio = None;
         let mut audio_config = Vec::new();
-        for init in self.inits.iter().flatten() {
+        let mut multitrack_audio = Vec::new();
+        // a pad that ended with no frames has no init and writes no track
+        let written = self
+            .kinds
+            .iter()
+            .zip(&self.inits)
+            .enumerate()
+            .filter_map(|(input, (kind, init))| Some((input, (*kind)?, init.as_ref()?)));
+        for (input, codec, init) in written {
+            let config = init.asc().map(<[u8]>::to_vec).unwrap_or_default();
             match init {
                 TrackInit::Video { param_sets } => {
                     let refs: Vec<&[u8]> = param_sets.iter().map(|v| v.as_slice()).collect();
+                    video = Some(codec);
                     video_config = avcc_record(&refs);
                 }
-                TrackInit::Audio { asc } => audio_config = asc.clone(),
-                TrackInit::None => {}
+                _ if codec.track() == FlvTrack::Video => video = Some(codec),
+                _ if self.audio_track_id(input) == LEGACY_AUDIO_TRACK => {
+                    audio = Some(codec);
+                    audio_config = config;
+                }
+                _ => multitrack_audio.push((self.audio_track_id(input), codec, config)),
             }
         }
-        // a pad that ended with no frames has no init and writes no track
-        let of_track = |t| {
-            self.kinds
-                .iter()
-                .zip(&self.inits)
-                .filter(|(_, init)| init.is_some())
-                .filter_map(|(kind, _)| *kind)
-                .find(|c| c.track() == t)
-        };
-        let audio_codec = of_track(FlvTrack::Audio);
-        let mut mux = FlvMuxer::new_av(
-            of_track(FlvTrack::Video),
-            video_config,
-            audio_codec,
-            audio_config,
-        )
-        .with_tags(self.tags.clone());
+        let mut mux =
+            FlvMuxer::new_av(video, video_config, audio, audio_config).with_tags(self.tags.clone());
+        for (track_id, codec, config) in multitrack_audio {
+            mux.add_multitrack_audio(track_id, codec, config);
+        }
         if let Some((channels, sample_rate)) = self.audio_params {
             // an MP3 tag's flags declare the rate and channel count
-            if audio_codec == Some(FlvCodec::Mp3) {
+            if audio == Some(FlvCodec::Mp3) {
                 audio_track_params(
                     short_type_name::<Self>(),
                     AudioFormat::Mp3,
@@ -248,6 +273,7 @@ impl FlvMuxN {
             .domain
             .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
         let pts_ms = (frame.timing.pts_ns / 1_000_000) as u32;
+        let track_id = self.audio_track_id(input);
         let mux = self.mux.as_mut().ok_or(G2gError::NotConfigured)?;
         let bytes = match self.kinds[input] {
             Some(FlvCodec::H264) => {
@@ -264,10 +290,17 @@ impl FlvMuxN {
             }
             // AAC access units are raw frames once any ADTS header is stripped;
             // MP3 and Speex frames need no unwrapping.
-            _ => match self.inits[input].as_ref().and_then(TrackInit::asc) {
-                Some(config) => mux.push_audio(muxer_access_unit(config, slice), pts_ms),
-                None => mux.push_audio(slice, pts_ms),
-            },
+            _ => {
+                let au = match self.inits[input].as_ref().and_then(TrackInit::asc) {
+                    Some(config) => muxer_access_unit(config, slice),
+                    None => slice,
+                };
+                if track_id == LEGACY_AUDIO_TRACK {
+                    mux.push_audio(au, pts_ms)
+                } else {
+                    mux.push_multitrack_audio(track_id, au, pts_ms)
+                }
+            }
         };
 
         let start_ns = frame.timing.pts_ns;
@@ -331,10 +364,17 @@ impl MultiInputElement for FlvMuxN {
     /// can name the pads (`m.video_0` / `m.audio_0`) in any order.
     fn input_pad_index(
         &self,
-        _req: &g2g_core::runtime::PadRequest,
+        req: &g2g_core::runtime::PadRequest,
         ordinal: usize,
     ) -> Option<usize> {
-        (ordinal < self.inputs).then_some(ordinal)
+        use g2g_core::runtime::PadKind;
+        // `eflvmux` reads the track id from an audio pad's name and puts video last
+        let input = match (self.multitrack, req.kind) {
+            (true, PadKind::Audio) => req.index,
+            (true, PadKind::Video) => self.inputs - 1,
+            _ => ordinal,
+        };
+        (input < self.inputs).then_some(input)
     }
 
     fn intercept_caps(&self, _input: usize, upstream_caps: &Caps) -> Result<Caps, G2gError> {
@@ -362,17 +402,29 @@ impl MultiInputElement for FlvMuxN {
     ) -> Result<ConfigureOutcome, G2gError> {
         let kind = Self::pad_kind_for(absolute_caps)
             .ok_or_else(|| refused_input(short_type_name::<Self>(), absolute_caps))?;
-        // FLV carries at most one video and one audio track; reject a duplicate.
-        if self
-            .kinds
-            .iter()
-            .enumerate()
-            .any(|(i, k)| i != input && k.is_some_and(|k| k.track() == kind.track()))
-        {
+        // FLV carries one video track, and legacy FLV one audio track
+        let duplicates_a_track = |track: FlvTrack| {
+            self.kinds
+                .iter()
+                .enumerate()
+                .any(|(i, k)| i != input && k.is_some_and(|k| k.track() == track))
+        };
+        let single_track = kind.track() == FlvTrack::Video || !self.multitrack;
+        if single_track && duplicates_a_track(kind.track()) {
             return Err(refused_input_because(
                 short_type_name::<Self>(),
                 absolute_caps,
                 "FLV holds one video and one audio track",
+            ));
+        }
+        let multitrack_audio = kind.track() == FlvTrack::Audio
+            && self.multitrack
+            && input != usize::from(LEGACY_AUDIO_TRACK);
+        if multitrack_audio && (kind.audio_fourcc().is_none() || u8::try_from(input).is_err()) {
+            return Err(refused_input_because(
+                short_type_name::<Self>(),
+                absolute_caps,
+                "Enhanced RTMP audio tracks 1 to 255 carry AAC or MP3",
             ));
         }
         if let Caps::Audio {
@@ -381,7 +433,9 @@ impl MultiInputElement for FlvMuxN {
             ..
         } = absolute_caps
         {
-            self.audio_params = Some((*channels, *sample_rate));
+            if !multitrack_audio {
+                self.audio_params = Some((*channels, *sample_rate));
+            }
         }
         self.kinds[input] = Some(kind);
         Ok(ConfigureOutcome::Accepted)
@@ -780,7 +834,7 @@ mod tests {
         let mut d = FlvDemuxer::new();
         d.push_data(&flv);
         assert_eq!(
-            d.audio_config(),
+            d.audio_config(crate::flv::LEGACY_AUDIO_TRACK),
             Some(&[0x11u8, 0x90][..]),
             "ASC from the ADTS header"
         );

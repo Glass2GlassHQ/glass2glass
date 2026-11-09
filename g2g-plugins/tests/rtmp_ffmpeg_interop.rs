@@ -24,6 +24,13 @@ use g2g_core::{ByteStreamEncoding, Caps, G2gError, OutputSink, PipelinePacket, P
 
 use g2g_plugins::rtmpsrc::RtmpSrc;
 
+mod ffprobe;
+use ffprobe::fixture_path;
+
+use g2g_core::runtime::{parse_launch, run_graph};
+use g2g_core::PipelineClock;
+use g2g_plugins::registry::default_registry;
+
 /// Concatenates every FLV byte-stream `DataFrame` the source emits.
 #[derive(Default)]
 struct FlvCollect {
@@ -152,4 +159,127 @@ async fn ffmpeg_rtmp_publisher_into_rtmpsrc() {
             ),
     )
     .expect("record oracle evidence");
+}
+
+struct ZeroClock;
+impl PipelineClock for ZeroClock {
+    fn now_ns(&self) -> u64 {
+        0
+    }
+}
+
+// the RTMP peer has bound its port by then
+const PEER_READY: Duration = Duration::from_millis(500);
+
+fn free_port() -> u16 {
+    StdTcpListener::bind("127.0.0.1:0")
+        .expect("bind a probe socket")
+        .local_addr()
+        .expect("address")
+        .port()
+}
+
+// each stream's codec and decoded frame count
+fn ffprobe_streams(path: &Path) -> Vec<(String, u64)> {
+    let out = Command::new("ffprobe")
+        .args(["-v", "error", "-count_frames", "-show_entries"])
+        .arg("stream=codec_name,nb_read_frames")
+        .args(["-of", "csv=p=0"])
+        .arg(path)
+        .output()
+        .expect("spawn ffprobe");
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|line| {
+            let (codec, frames) = line.trim().split_once(',')?;
+            Some((codec.to_string(), frames.parse().ok()?))
+        })
+        .collect()
+}
+
+#[tokio::test]
+#[ignore = "needs ffmpeg+ffprobe; opens a local TCP port + temp files"]
+async fn ffmpeg_publishes_two_audio_tracks_into_rtmpsrc() {
+    let port = free_port();
+    let dir = std::env::temp_dir().join(format!("g2g_rtmp_tracks_in_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("work dir");
+    let tracks = [dir.join("track0.aac"), dir.join("track1.aac")];
+    let line = format!(
+        "rtmpsrc address=127.0.0.1 port={port} ! flvdemux name=d \
+         d.audio ! aacparse ! filesink location={} d.audio_1 ! aacparse ! filesink location={}",
+        tracks[0].display(),
+        tracks[1].display()
+    );
+    let graph = parse_launch(&default_registry(), &line).expect("the line parses");
+    let url = format!("rtmp://127.0.0.1:{port}/live/stream");
+    let ffmpeg = std::thread::spawn(move || {
+        std::thread::sleep(PEER_READY);
+        Command::new("ffmpeg")
+            .args([
+                "-v",
+                "error",
+                "-re",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=1",
+            ])
+            .args(["-f", "lavfi", "-i", "sine=frequency=880:duration=1"])
+            .args(["-map", "0", "-map", "1", "-c:a", "aac", "-f", "flv", &url])
+            .status()
+            .expect("spawn ffmpeg")
+    });
+    tokio::time::timeout(Duration::from_secs(20), run_graph(graph, &ZeroClock, 4))
+        .await
+        .expect("the ingest ends when ffmpeg disconnects")
+        .expect("the ingest runs");
+    assert!(ffmpeg.join().expect("ffmpeg thread").success());
+    for track in &tracks {
+        let streams = ffprobe_streams(track);
+        assert!(
+            matches!(streams.as_slice(), [(codec, frames)] if codec == "aac" && *frames > 0),
+            "{track:?}: {streams:?}"
+        );
+    }
+    assert_ne!(
+        std::fs::read(&tracks[0]).expect("track 0"),
+        std::fs::read(&tracks[1]).expect("track 1")
+    );
+}
+
+#[tokio::test]
+#[ignore = "needs ffmpeg+ffprobe; opens a local TCP port + temp files"]
+async fn eflvmux_publishes_two_audio_tracks_to_ffmpeg() {
+    let port = free_port();
+    let received =
+        std::env::temp_dir().join(format!("g2g_rtmp_tracks_out_{}.flv", std::process::id()));
+    let url = format!("rtmp://127.0.0.1:{port}/live/stream");
+    let listener_url = url.clone();
+    let listener_out = received.clone();
+    let ffmpeg = std::thread::spawn(move || {
+        Command::new("ffmpeg")
+            .args(["-v", "error", "-y", "-listen", "1", "-i", &listener_url])
+            .args(["-map", "0", "-c", "copy", "-f", "flv"])
+            .arg(&listener_out)
+            .status()
+            .expect("spawn ffmpeg")
+    });
+    tokio::time::sleep(PEER_READY).await;
+    let line = format!(
+        "eflvmux name=m ! rtmpsink location={url} \
+         filesrc location={} ! typefind ! aacparse ! m.audio \
+         filesrc location={} ! typefind ! mpegaudioparse ! m.audio_1",
+        fixture_path("aac_stereo_44100_adts.aac").display(),
+        fixture_path("mp3_stereo_44100_id3v2.mp3").display()
+    );
+    let graph = parse_launch(&default_registry(), &line).expect("the line parses");
+    run_graph(graph, &ZeroClock, 4)
+        .await
+        .expect("the publish runs");
+    ffmpeg.join().expect("ffmpeg thread");
+    let streams = ffprobe_streams(&received);
+    let _ = std::fs::remove_file(&received);
+    let codecs: Vec<&str> = streams.iter().map(|(codec, _)| codec.as_str()).collect();
+    assert_eq!(codecs, ["aac", "mp3"], "{streams:?}");
+    assert!(streams.iter().all(|(_, frames)| *frames > 0), "{streams:?}");
 }

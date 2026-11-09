@@ -756,7 +756,7 @@ pub fn flv() -> [MaturityRecord; 2] {
     demux.push_data(&bytes);
     let units = demux.take_units();
     let configs_match = demux.video_config() == Some(video_config.as_slice())
-        && demux.audio_config() == Some(audio_config.as_slice());
+        && demux.audio_config(crate::flv::LEGACY_AUDIO_TRACK) == Some(audio_config.as_slice());
     let video_unit = units.iter().find(|u| u.track() == FlvTrack::Video);
     let audio_unit = units.iter().find(|u| u.track() == FlvTrack::Audio);
     let units_match = units.len() == 2

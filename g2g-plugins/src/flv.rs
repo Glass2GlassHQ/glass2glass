@@ -22,6 +22,7 @@
 //! script tag's body is retained ([`FlvDemuxer::metadata`]) so the element can
 //! surface its AMF0 metadata via the tag system.
 
+use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
 use crate::bereader::be_u24;
@@ -40,6 +41,17 @@ const TAG_SCRIPT: u8 = 18;
 const VIDEO_CODEC_AVC: u8 = 7;
 /// FLV audio sound format for AAC (the high nibble of an audio tag's first byte).
 const SOUND_FORMAT_AAC: u8 = 10;
+// Enhanced RTMP v2 audio: the sound format nibble 9 puts an audio packet type in the low nibble and a fourcc after it
+const SOUND_FORMAT_EX_HEADER: u8 = 9;
+const AUDIO_PACKET_SEQUENCE_START: u8 = 0;
+const AUDIO_PACKET_CODED_FRAMES: u8 = 1;
+const AUDIO_PACKET_MULTITRACK: u8 = 5;
+const MULTITRACK_ONE_TRACK: u8 = 0;
+const MULTITRACK_MANY_TRACKS_MANY_CODECS: u8 = 2;
+const FOURCC_LEN: usize = 4;
+const TRACK_SIZE_LEN: usize = 3;
+// the legacy audio tags carry the stream's first audio track
+pub const LEGACY_AUDIO_TRACK: u8 = 0;
 
 /// A codec an FLV tag can carry, in the form the tag's first byte identifies it:
 /// a video codec id (low nibble of a video tag) or an audio sound format (high
@@ -96,6 +108,22 @@ impl FlvCodec {
             4 => Some(FlvCodec::Vp6),
             5 => Some(FlvCodec::Vp6Alpha),
             VIDEO_CODEC_AVC => Some(FlvCodec::H264),
+            _ => None,
+        }
+    }
+
+    fn from_audio_fourcc(fourcc: &[u8]) -> Option<Self> {
+        match fourcc {
+            b"mp4a" => Some(FlvCodec::Aac),
+            b".mp3" => Some(FlvCodec::Mp3),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn audio_fourcc(self) -> Option<&'static [u8; FOURCC_LEN]> {
+        match self {
+            FlvCodec::Aac => Some(b"mp4a"),
+            FlvCodec::Mp3 => Some(b".mp3"),
             _ => None,
         }
     }
@@ -264,6 +292,8 @@ pub struct FlvUnit {
     /// audio frame. Used by the demuxer seek path to snap to a decodable
     /// resume point.
     pub keyframe: bool,
+    // the Enhanced RTMP track id of an audio unit, `LEGACY_AUDIO_TRACK` for legacy tags and video
+    pub track_id: u8,
 }
 
 const NANOS_PER_MILLISECOND: u64 = 1_000_000;
@@ -296,8 +326,7 @@ pub struct FlvDemuxer {
     /// The video sequence-header body (the `AVCDecoderConfigurationRecord`),
     /// updated on every sequence-header tag so a mid-stream config change wins.
     video_config: Option<Vec<u8>>,
-    /// The audio sequence-header body (the AAC `AudioSpecificConfig`).
-    audio_config: Option<Vec<u8>>,
+    audio_configs: BTreeMap<u8, Vec<u8>>,
     /// Channels / sample rate the first audio tag's flags declared, for the
     /// codecs that carry no decoder config.
     audio_params: Option<(u8, u32)>,
@@ -330,13 +359,12 @@ impl FlvDemuxer {
         self.video_config.as_deref()
     }
 
-    /// The audio decoder config (the AAC `AudioSpecificConfig` from the AAC
-    /// sequence-header tag), once seen.
-    pub fn audio_config(&self) -> Option<&[u8]> {
-        self.audio_config.as_deref()
+    // the AAC `AudioSpecificConfig` of an audio track's sequence start, once seen
+    pub fn audio_config(&self, track_id: u8) -> Option<&[u8]> {
+        self.audio_configs.get(&track_id).map(Vec::as_slice)
     }
 
-    /// Channels and sample rate the audio tags declare, for the codecs whose
+    /// Channels and sample rate the legacy audio tags declare, for the codecs whose
     /// layout is not in a decoder config (MP3, Speex). `None` before the first
     /// audio tag, and for AAC (whose layout is in the `AudioSpecificConfig`).
     pub fn audio_params(&self) -> Option<(u8, u32)> {
@@ -367,44 +395,43 @@ impl FlvDemuxer {
         // Each record is a `PreviousTagSize` prefix (PreviousTagSize0 prefixes the
         // first tag, PreviousTagSize_i prefixes tag i+1) then an 11-byte tag
         // header and its body, so the final tag needs no trailing bytes.
-        let mut units = Vec::new();
-        let mut metadata: Option<Vec<u8>> = None;
-        let mut video_config: Option<Vec<u8>> = None;
-        let mut audio_config: Option<Vec<u8>> = None;
-        let mut audio_params: Option<(u8, u32)> = None;
         while let Some((tag, body_range)) = tag_at(&self.buf, pos) {
             let (tag_type, timestamp) = (tag.tag_type, tag.timestamp_ms);
             let body = &self.buf[body_range.clone()];
-            if tag_type == TAG_SCRIPT && metadata.is_none() {
-                metadata = Some(body.to_vec());
-            } else if let Some((track, config)) = sequence_header(tag_type, body) {
-                match track {
-                    FlvTrack::Video => video_config = Some(config.to_vec()),
-                    FlvTrack::Audio => audio_config = Some(config.to_vec()),
+            match tag_type {
+                TAG_SCRIPT if self.metadata.is_none() => self.metadata = Some(body.to_vec()),
+                TAG_VIDEO => {
+                    if let Some(config) = video_sequence_header(body) {
+                        self.video_config = Some(config.to_vec());
+                    } else if let Some(unit) = video_unit(timestamp, body) {
+                        self.units.push(unit);
+                    }
                 }
-            } else if let Some(unit) = parse_tag(tag_type, timestamp, body) {
-                let first = body.first().copied().unwrap_or(0);
-                if audio_params.is_none() && self.audio_params.is_none() {
-                    audio_params = audio_tag_params(unit.codec, first);
+                TAG_AUDIO => {
+                    for packet in audio_packets(body) {
+                        if packet.config {
+                            self.audio_configs
+                                .insert(packet.track_id, packet.payload.to_vec());
+                            continue;
+                        }
+                        if self.audio_params.is_none() && body[0] >> 4 != SOUND_FORMAT_EX_HEADER {
+                            self.audio_params = audio_tag_params(packet.codec, body[0]);
+                        }
+                        self.units.push(FlvUnit {
+                            codec: packet.codec,
+                            data: packet.payload.to_vec(),
+                            pts_ms: timestamp,
+                            dts_ms: timestamp,
+                            keyframe: true,
+                            track_id: packet.track_id,
+                        });
+                    }
                 }
-                units.push(unit);
+                _ => {}
             }
             pos = body_range.end;
         }
         self.buf.drain(..pos);
-        self.units.append(&mut units);
-        if self.metadata.is_none() {
-            self.metadata = metadata;
-        }
-        if let Some(c) = video_config {
-            self.video_config = Some(c);
-        }
-        if let Some(c) = audio_config {
-            self.audio_config = Some(c);
-        }
-        if self.audio_params.is_none() {
-            self.audio_params = audio_params;
-        }
     }
 }
 
@@ -444,6 +471,7 @@ pub struct FlvMuxer {
     audio_config: Vec<u8>,
     /// First byte of every audio tag: sound format + rate / size / channel flags.
     audio_flags: u8,
+    multitrack_audio: Vec<MultitrackAudio>,
     header_written: bool,
     // where the `onMetaData` duration's 8 bytes start in the output, known once the header is written
     duration_at: Option<u64>,
@@ -476,6 +504,7 @@ impl FlvMuxer {
             video_config,
             audio_config,
             audio_flags: audio.map_or(0, |codec| audio_tag_flags(codec, 2, 44_100)),
+            multitrack_audio: Vec::new(),
             header_written: false,
             duration_at: None,
         }
@@ -488,6 +517,18 @@ impl FlvMuxer {
         if let Some(codec) = self.audio {
             self.audio_flags = audio_tag_flags(codec, channels, sample_rate);
         }
+    }
+
+    // an Enhanced RTMP audio track written as one-track multitrack tags, AAC or MP3 only
+    pub fn add_multitrack_audio(&mut self, track_id: u8, codec: FlvCodec, config: Vec<u8>) {
+        let fourcc = codec
+            .audio_fourcc()
+            .expect("multitrack audio is AAC or MP3");
+        self.multitrack_audio.push(MultitrackAudio {
+            track_id,
+            fourcc,
+            config,
+        });
     }
 
     /// Attach stream metadata, written as an `onMetaData` script tag ahead of the
@@ -572,6 +613,19 @@ impl FlvMuxer {
         out
     }
 
+    pub fn push_multitrack_audio(&mut self, track_id: u8, au: &[u8], pts_ms: u32) -> Vec<u8> {
+        let mut out = Vec::new();
+        self.write_header(&mut out);
+        let track = self
+            .multitrack_audio
+            .iter()
+            .find(|track| track.track_id == track_id)
+            .expect("the track was added before its frames");
+        let prefix = track.tag_prefix(AUDIO_PACKET_CODED_FRAMES);
+        emit_tag(&mut out, TAG_AUDIO, pts_ms, &[&prefix, au]);
+        out
+    }
+
     // the bytes and offset that write the stream's real duration over the 0 the header carries
     pub fn duration_overwrite(&self, duration_ns: u64) -> Option<(u64, [u8; 8])> {
         let seconds = duration_ns as f64 / 1e9;
@@ -589,7 +643,7 @@ impl FlvMuxer {
         if self.video.is_some() {
             flags |= FLV_FLAG_VIDEO;
         }
-        if self.audio.is_some() {
+        if self.audio.is_some() || !self.multitrack_audio.is_empty() {
             flags |= FLV_FLAG_AUDIO;
         }
         put_file_header(out, flags);
@@ -617,6 +671,34 @@ impl FlvMuxer {
                 &[&[self.audio_flags, 0x00], &self.audio_config],
             );
         }
+        for track in self
+            .multitrack_audio
+            .iter()
+            .filter(|track| !track.config.is_empty())
+        {
+            let prefix = track.tag_prefix(AUDIO_PACKET_SEQUENCE_START);
+            emit_tag(out, TAG_AUDIO, 0, &[&prefix, &track.config]);
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct MultitrackAudio {
+    track_id: u8,
+    fourcc: &'static [u8; FOURCC_LEN],
+    // the AAC `AudioSpecificConfig`, empty for MP3
+    config: Vec<u8>,
+}
+
+impl MultitrackAudio {
+    fn tag_prefix(&self, packet_type: u8) -> Vec<u8> {
+        let mut prefix = alloc::vec![
+            (SOUND_FORMAT_EX_HEADER << 4) | AUDIO_PACKET_MULTITRACK,
+            (MULTITRACK_ONE_TRACK << 4) | packet_type,
+        ];
+        prefix.extend_from_slice(self.fourcc);
+        prefix.push(self.track_id);
+        prefix
     }
 }
 
@@ -680,19 +762,117 @@ fn write_amf0_string(out: &mut Vec<u8>, s: &str) {
     out.extend_from_slice(s.as_bytes());
 }
 
-/// A sequence-header tag's decoder config, or `None` for any other tag: the
-/// `AVCDecoderConfigurationRecord` of an AVC packet-type-0 video tag, or the
-/// `AudioSpecificConfig` of an AAC packet-type-0 audio tag.
-fn sequence_header(tag_type: u8, body: &[u8]) -> Option<(FlvTrack, &[u8])> {
-    match tag_type {
-        TAG_VIDEO if *body.first()? & 0x0F == VIDEO_CODEC_AVC && *body.get(1)? == 0 => {
-            Some((FlvTrack::Video, body.get(5..)?))
-        }
-        TAG_AUDIO if *body.first()? >> 4 == SOUND_FORMAT_AAC && *body.get(1)? == 0 => {
-            Some((FlvTrack::Audio, body.get(2..)?))
-        }
-        _ => None,
+// the `AVCDecoderConfigurationRecord` of an AVC packet-type-0 video tag
+fn video_sequence_header(body: &[u8]) -> Option<&[u8]> {
+    (*body.first()? & 0x0F == VIDEO_CODEC_AVC && *body.get(1)? == 0).then_some(body.get(5..)?)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AudioPacket<'a> {
+    track_id: u8,
+    codec: FlvCodec,
+    // an AAC `AudioSpecificConfig` rather than a frame
+    config: bool,
+    payload: &'a [u8],
+}
+
+// one packet for a legacy audio tag, one per track for an Enhanced RTMP multitrack tag
+fn audio_packets(body: &[u8]) -> Vec<AudioPacket<'_>> {
+    let Some(&first) = body.first() else {
+        return Vec::new();
+    };
+    if first >> 4 == SOUND_FORMAT_EX_HEADER {
+        return ex_audio_packets(first & 0x0F, &body[1..]).unwrap_or_default();
     }
+    legacy_audio_packet(first, body).into_iter().collect()
+}
+
+fn legacy_audio_packet(first: u8, body: &[u8]) -> Option<AudioPacket<'_>> {
+    let codec = FlvCodec::from_sound_format(first >> 4)?;
+    if codec != FlvCodec::Aac {
+        return Some(AudioPacket {
+            track_id: LEGACY_AUDIO_TRACK,
+            codec,
+            config: false,
+            payload: &body[1..],
+        });
+    }
+    // AAC packet type 0 is the config, 1 a raw frame
+    let config = match *body.get(1)? {
+        0 => true,
+        1 => false,
+        _ => return None,
+    };
+    Some(AudioPacket {
+        track_id: LEGACY_AUDIO_TRACK,
+        codec,
+        config,
+        payload: body.get(2..)?,
+    })
+}
+
+// the packets after an ex-header audio tag's first byte, `None` when a track's fourcc, id or size is cut short
+fn ex_audio_packets(packet_type: u8, rest: &[u8]) -> Option<Vec<AudioPacket<'_>>> {
+    if packet_type != AUDIO_PACKET_MULTITRACK {
+        let (fourcc, payload) = rest.split_at_checked(FOURCC_LEN)?;
+        return Some(
+            ex_audio_packet(packet_type, fourcc, LEGACY_AUDIO_TRACK, payload)
+                .into_iter()
+                .collect(),
+        );
+    }
+    let (&modes, mut rest) = rest.split_first()?;
+    let (multitrack, packet_type) = (modes >> 4, modes & 0x0F);
+    let shared_fourcc = if multitrack == MULTITRACK_MANY_TRACKS_MANY_CODECS {
+        None
+    } else {
+        let (fourcc, after) = rest.split_at_checked(FOURCC_LEN)?;
+        rest = after;
+        Some(fourcc)
+    };
+    let mut packets = Vec::new();
+    while !rest.is_empty() {
+        let fourcc = match shared_fourcc {
+            Some(fourcc) => fourcc,
+            None => {
+                let (fourcc, after) = rest.split_at_checked(FOURCC_LEN)?;
+                rest = after;
+                fourcc
+            }
+        };
+        let (&track_id, after) = rest.split_first()?;
+        rest = after;
+        let payload = if multitrack == MULTITRACK_ONE_TRACK {
+            core::mem::take(&mut rest)
+        } else {
+            let size = be_u24(rest, 0)? as usize;
+            let (payload, after) = rest.get(TRACK_SIZE_LEN..)?.split_at_checked(size)?;
+            rest = after;
+            payload
+        };
+        packets.extend(ex_audio_packet(packet_type, fourcc, track_id, payload));
+    }
+    Some(packets)
+}
+
+fn ex_audio_packet<'a>(
+    packet_type: u8,
+    fourcc: &[u8],
+    track_id: u8,
+    payload: &'a [u8],
+) -> Option<AudioPacket<'a>> {
+    let codec = FlvCodec::from_audio_fourcc(fourcc)?;
+    let config = match packet_type {
+        AUDIO_PACKET_SEQUENCE_START => true,
+        AUDIO_PACKET_CODED_FRAMES => false,
+        _ => return None,
+    };
+    Some(AudioPacket {
+        track_id,
+        codec,
+        config,
+        payload,
+    })
 }
 
 // FLV sound formats this parser does not carry, by the codec name ffmpeg gives them
@@ -729,6 +909,7 @@ pub(crate) fn unsupported_codecs(data: &[u8]) -> Vec<alloc::string::String> {
         };
         let codec = match tag.tag_type {
             TAG_VIDEO if first & VIDEO_EX_HEADER != 0 => continue,
+            TAG_AUDIO if first >> 4 == SOUND_FORMAT_EX_HEADER => continue,
             TAG_VIDEO if FlvCodec::from_video_id(first & 0x0F).is_none() => {
                 alloc::format!("flv video codec id {}", first & 0x0F)
             }
@@ -751,23 +932,18 @@ pub(crate) fn unsupported_codecs(data: &[u8]) -> Vec<alloc::string::String> {
     codecs
 }
 
-/// Map one FLV tag to an access unit, or `None` for a tag this parser skips
-/// (a sequence header, an unsupported codec, or a script/metadata tag).
-fn parse_tag(tag_type: u8, timestamp: u32, body: &[u8]) -> Option<FlvUnit> {
+/// Map one FLV video tag to an access unit, or `None` for a tag this parser skips
+/// (a sequence header or an unsupported codec).
+fn video_unit(timestamp: u32, body: &[u8]) -> Option<FlvUnit> {
     let first = *body.first()?;
-    let (codec, keyframe) = match tag_type {
-        // body[0] = frame type (high nibble) | codec id (low nibble). Frame type
-        // 1 is a keyframe (2 interframe, 3..5 disposable/generated).
-        TAG_VIDEO => (FlvCodec::from_video_id(first & 0x0F)?, first >> 4 == 1),
-        // body[0] = sound format (high nibble) | rate/size/type (low nibble).
-        // Every audio frame is a resync point.
-        TAG_AUDIO => (FlvCodec::from_sound_format(first >> 4)?, true),
-        _ => return None,
-    };
-    // H.264 and AAC prefix the payload with a packet type: 0 is the decoder
-    // config, kept as the side channel by `sequence_header`, 2 an end-of-sequence
-    // marker, and only 1 is a media frame.
-    if matches!(codec, FlvCodec::H264 | FlvCodec::Aac) && *body.get(1)? != 1 {
+    // body[0] = frame type (high nibble) | codec id (low nibble). Frame type
+    // 1 is a keyframe (2 interframe, 3..5 disposable/generated).
+    let codec = FlvCodec::from_video_id(first & 0x0F)?;
+    let keyframe = first >> 4 == 1;
+    // H.264 prefixes the payload with a packet type: 0 is the decoder
+    // config, kept as the side channel by `video_sequence_header`, 2 an
+    // end-of-sequence marker, and only 1 is a media frame.
+    if codec == FlvCodec::H264 && *body.get(1)? != 1 {
         return None;
     }
     // A VP6 unit without its dimension byte has nothing to decode.
@@ -792,6 +968,7 @@ fn parse_tag(tag_type: u8, timestamp: u32, body: &[u8]) -> Option<FlvUnit> {
         pts_ms,
         dts_ms: timestamp,
         keyframe,
+        track_id: LEGACY_AUDIO_TRACK,
     })
 }
 
@@ -892,7 +1069,8 @@ mod tests {
                 data: v0.to_vec(),
                 pts_ms: 0,
                 dts_ms: 0,
-                keyframe: true
+                keyframe: true,
+                track_id: LEGACY_AUDIO_TRACK
             }
         );
         assert_eq!(
@@ -902,7 +1080,8 @@ mod tests {
                 data: a0.to_vec(),
                 pts_ms: 0,
                 dts_ms: 0,
-                keyframe: true
+                keyframe: true,
+                track_id: LEGACY_AUDIO_TRACK
             }
         );
         assert_eq!(
@@ -912,7 +1091,8 @@ mod tests {
                 data: v1.to_vec(),
                 pts_ms: 33,
                 dts_ms: 33,
-                keyframe: true
+                keyframe: true,
+                track_id: LEGACY_AUDIO_TRACK
             }
         );
     }
@@ -1047,14 +1227,16 @@ mod tests {
                     data: aus[0].to_vec(),
                     pts_ms: 0,
                     dts_ms: 0,
-                    keyframe: true
+                    keyframe: true,
+                    track_id: LEGACY_AUDIO_TRACK
                 },
                 FlvUnit {
                     codec: FlvCodec::H264,
                     data: aus[1].to_vec(),
                     pts_ms: 33,
                     dts_ms: 33,
-                    keyframe: true
+                    keyframe: true,
+                    track_id: LEGACY_AUDIO_TRACK
                 },
             ]
         );
@@ -1106,7 +1288,8 @@ mod tests {
                 data: vec![0x11, 0x22],
                 pts_ms: 10,
                 dts_ms: 10,
-                keyframe: true
+                keyframe: true,
+                track_id: LEGACY_AUDIO_TRACK
             }]
         );
     }
@@ -1157,7 +1340,7 @@ mod tests {
             "avcC retained as the side channel"
         );
         assert_eq!(
-            d.audio_config(),
+            d.audio_config(LEGACY_AUDIO_TRACK),
             Some(&asc[..]),
             "AudioSpecificConfig retained"
         );
@@ -1296,5 +1479,117 @@ mod tests {
             assert_eq!(units[0].pts_ms, 10);
             assert_eq!(d.audio_params(), Some((channels, rate)), "{codec:?}");
         }
+    }
+
+    fn multitrack_body(multitrack: u8, tracks: &[(&[u8; 4], u8, &[u8])]) -> Vec<u8> {
+        let mut body = vec![
+            (SOUND_FORMAT_EX_HEADER << 4) | AUDIO_PACKET_MULTITRACK,
+            (multitrack << 4) | AUDIO_PACKET_CODED_FRAMES,
+        ];
+        if multitrack != MULTITRACK_MANY_TRACKS_MANY_CODECS {
+            body.extend_from_slice(tracks[0].0);
+        }
+        for (fourcc, track_id, payload) in tracks {
+            if multitrack == MULTITRACK_MANY_TRACKS_MANY_CODECS {
+                body.extend_from_slice(*fourcc);
+            }
+            body.push(*track_id);
+            push_u24(&mut body, payload.len() as u32);
+            body.extend_from_slice(payload);
+        }
+        body
+    }
+
+    fn demux_audio(body: &[u8]) -> Vec<FlvUnit> {
+        let mut d = FlvDemuxer::new();
+        d.push_data(&flv_stream(&[tag(TAG_AUDIO, 20, body)]));
+        d.take_units()
+    }
+
+    const MANY_TRACKS: u8 = 1;
+
+    #[test]
+    fn many_tracks_tag_splits_into_one_unit_per_track() {
+        let body = multitrack_body(
+            MANY_TRACKS,
+            &[(b"mp4a", 0, b"first"), (b"mp4a", 3, b"second")],
+        );
+        let units = demux_audio(&body);
+        let tracks: Vec<(u8, FlvCodec, &[u8])> = units
+            .iter()
+            .map(|u| (u.track_id, u.codec, u.data.as_slice()))
+            .collect();
+        assert_eq!(
+            tracks,
+            [
+                (0, FlvCodec::Aac, b"first".as_slice()),
+                (3, FlvCodec::Aac, b"second".as_slice())
+            ]
+        );
+    }
+
+    #[test]
+    fn many_codecs_tag_reads_each_track_fourcc() {
+        let body = multitrack_body(
+            MULTITRACK_MANY_TRACKS_MANY_CODECS,
+            &[
+                (b"mp4a", 1, b"aac"),
+                (b".mp3", 2, b"mp3"),
+                (b"Opus", 4, b"opus"),
+            ],
+        );
+        let codecs: Vec<(u8, FlvCodec)> = demux_audio(&body)
+            .iter()
+            .map(|u| (u.track_id, u.codec))
+            .collect();
+        assert_eq!(
+            codecs,
+            [(1, FlvCodec::Aac), (2, FlvCodec::Mp3)],
+            "Opus is skipped"
+        );
+    }
+
+    #[test]
+    fn cut_short_multitrack_tag_yields_no_units() {
+        let mut body = multitrack_body(
+            MANY_TRACKS,
+            &[(b"mp4a", 0, b"first"), (b"mp4a", 1, b"second")],
+        );
+        body.truncate(body.len() - 1);
+        assert!(demux_audio(&body).is_empty());
+    }
+
+    #[test]
+    fn multitrack_audio_round_trips_through_the_muxer() {
+        let legacy_config = vec![0x12, 0x10];
+        let track_config = vec![0x11, 0x90];
+        let mut mux =
+            FlvMuxer::new_av(None, Vec::new(), Some(FlvCodec::Aac), legacy_config.clone());
+        mux.add_multitrack_audio(1, FlvCodec::Aac, track_config.clone());
+        mux.add_multitrack_audio(2, FlvCodec::Mp3, Vec::new());
+        let mut bytes = mux.push_audio(b"legacy", 0);
+        bytes.extend(mux.push_multitrack_audio(1, b"track one", 0));
+        bytes.extend(mux.push_multitrack_audio(2, b"track two", 23));
+
+        let mut d = FlvDemuxer::new();
+        d.push_data(&bytes);
+        assert_eq!(
+            d.audio_config(LEGACY_AUDIO_TRACK),
+            Some(legacy_config.as_slice())
+        );
+        assert_eq!(d.audio_config(1), Some(track_config.as_slice()));
+        let units: Vec<(u8, FlvCodec, Vec<u8>, u32)> = d
+            .take_units()
+            .into_iter()
+            .map(|u| (u.track_id, u.codec, u.data, u.pts_ms))
+            .collect();
+        assert_eq!(
+            units,
+            [
+                (LEGACY_AUDIO_TRACK, FlvCodec::Aac, b"legacy".to_vec(), 0),
+                (1, FlvCodec::Aac, b"track one".to_vec(), 0),
+                (2, FlvCodec::Mp3, b"track two".to_vec(), 23),
+            ]
+        );
     }
 }
