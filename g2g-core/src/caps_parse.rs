@@ -277,9 +277,13 @@ impl CapsSet {
                 expand_rate(fv("framerate"))?,
             );
             let colorimetry = expand_colorimetry(fv("colorimetry"))?;
-            let alignment = match fv("interlace-mode") {
-                Some(FieldVal::One(s)) if *s == "fields" => BitstreamAlignment::FieldPair,
-                _ => expand_alignment(fv("alignment"))?,
+            let alignment = match (fv("interlace-mode"), codec, fv("alignment")) {
+                (Some(FieldVal::One(s)), _, _) if *s == "fields" => BitstreamAlignment::FieldPair,
+                // gst svtjpegxsenc, rtpjxsvdepay, tsdemux and mpegtsmux all put alignment=frame on JPEG XS
+                (_, VideoCodec::JpegXs, Some(FieldVal::One(s))) if *s == "frame" => {
+                    BitstreamAlignment::Unspecified
+                }
+                (_, _, alignment) => expand_alignment(alignment)?,
             };
             let mut alts = Vec::new();
             for w in &widths {
@@ -1048,6 +1052,14 @@ mod tests {
         assert_eq!(alignment_of("video/x-h264,alignment=frame"), None);
         assert_eq!(
             alignment_of("image/x-jxsc,interlace-mode=fields"),
+            Some(BitstreamAlignment::FieldPair)
+        );
+        assert_eq!(
+            alignment_of("image/x-jxsc,alignment=frame"),
+            Some(BitstreamAlignment::Unspecified)
+        );
+        assert_eq!(
+            alignment_of("image/x-jxsc,alignment=frame,interlace-mode=fields"),
             Some(BitstreamAlignment::FieldPair)
         );
     }
