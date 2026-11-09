@@ -37,6 +37,7 @@ impl PipelineClock for ZeroClock {
 #[derive(Default)]
 struct MarkerSink {
     markers: Vec<u8>,
+    pts_ns: Vec<u64>,
 }
 
 impl AsyncElement for MarkerSink {
@@ -61,6 +62,7 @@ impl AsyncElement for MarkerSink {
                     // Annex-B: [0,0,0,1][NAL header][index marker ..].
                     if let Some(&marker) = slice.get(5) {
                         self.markers.push(marker);
+                        self.pts_ns.push(frame.timing.pts_ns);
                     }
                 }
             }
@@ -977,4 +979,86 @@ async fn flexfec_recovers_a_loss_in_a_group_beyond_ulpfec() {
         0,
         "recovery was FlexFEC, not resends"
     );
+}
+
+#[tokio::test]
+async fn a_second_sender_is_dropped_until_the_first_falls_silent() {
+    const MAX_HOLD_MS: u64 = 50;
+    const PER_SENDER: u8 = 5;
+    const FIRST_SENDER_MARKER: u8 = 0xA0;
+    const INTRUDER_MARKER: u8 = 0xB0;
+    const REPLACEMENT_MARKER: u8 = 0xC0;
+    let recv = StdUdpSocket::bind("127.0.0.1:0").expect("bind receiver");
+    let recv_addr = recv.local_addr().unwrap();
+    let mut src = UdpSrc::from_socket(recv)
+        .unwrap()
+        .with_jitter(MAX_HOLD_MS, 64)
+        .with_frame_limit(2 * u64::from(PER_SENDER));
+    let mut sink = MarkerSink::default();
+
+    let idr = |marker: u8| vec![0, 0, 0, 1, 0x65, marker, 0xAB, 0xCD];
+    // RFC 3550 senders start at a random sequence number
+    let second_sender_sequence = |mut rtp: Vec<u8>| {
+        let sequence = u16::from_be_bytes([rtp[2], rtp[3]]).wrapping_add(0x4000);
+        rtp[2..4].copy_from_slice(&sequence.to_be_bytes());
+        rtp
+    };
+    let first = StdUdpSocket::bind("127.0.0.1:0").expect("bind first sender");
+    let second = StdUdpSocket::bind("127.0.0.1:0").expect("bind second sender");
+    let silence = std::time::Duration::from_millis(4 * MAX_HOLD_MS);
+    let send_task = tokio::task::spawn_blocking(move || {
+        let mut first_pay = RtpH264Packetizer::new(96, 0xA);
+        let mut second_pay = RtpH264Packetizer::new(96, 0xB);
+        for i in 0..PER_SENDER {
+            let ts = u32::from(i) * 3000;
+            for rtp in first_pay.packetize(&idr(FIRST_SENDER_MARKER + i), ts) {
+                first.send_to(&rtp, recv_addr).unwrap();
+            }
+            for rtp in second_pay.packetize(&idr(INTRUDER_MARKER + i), ts) {
+                second
+                    .send_to(&second_sender_sequence(rtp), recv_addr)
+                    .unwrap();
+            }
+            std::thread::sleep(std::time::Duration::from_millis(3));
+        }
+        std::thread::sleep(silence);
+        // a restarted sender starts its timestamps anywhere
+        let restart_base = 900_000u32;
+        for i in 0..PER_SENDER {
+            let ts = restart_base + u32::from(i) * 3000;
+            for rtp in second_pay.packetize(&idr(REPLACEMENT_MARKER + i), ts) {
+                second
+                    .send_to(&second_sender_sequence(rtp), recv_addr)
+                    .unwrap();
+            }
+            std::thread::sleep(std::time::Duration::from_millis(3));
+        }
+    });
+
+    tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        run_simple_pipeline(
+            &mut src,
+            &mut sink,
+            &ZeroClock,
+            LatencyProfile::Live.link_capacity(),
+        ),
+    )
+    .await
+    .expect("pipeline finishes")
+    .expect("pipeline runs");
+    send_task.await.unwrap();
+
+    let expected: Vec<u8> = (0..PER_SENDER)
+        .map(|i| FIRST_SENDER_MARKER + i)
+        .chain((0..PER_SENDER).map(|i| REPLACEMENT_MARKER + i))
+        .collect();
+    assert_eq!(sink.markers, expected);
+    let handover = usize::from(PER_SENDER);
+    assert!(
+        sink.pts_ns[handover] - sink.pts_ns[handover - 1] >= silence.as_nanos() as u64,
+        "the replacing sender continues past the silence: {:?}",
+        sink.pts_ns
+    );
+    assert!(sink.pts_ns.windows(2).all(|pair| pair[0] < pair[1]));
 }

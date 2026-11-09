@@ -87,6 +87,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M2171: `flacparse` and typefind accept FLAC behind an ID3v2 tag.
 - M2172: H.265 HDR10 metadata ends at a CRA that follows an end of sequence.
 - M2173: `av1parse` attaches the HDR10 and ITU-T T.35 caption metadata OBUs as frame metadata.
+- M2174: the RTP receiver locks to one sender's SSRC and accepts another only after that sender falls silent.
 
 ## 0.14.0
 

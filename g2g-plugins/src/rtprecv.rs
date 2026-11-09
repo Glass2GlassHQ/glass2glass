@@ -245,6 +245,9 @@ pub(crate) struct AccessUnitEmitter {
     // emptied at the first keyframe
     parameter_sets: Vec<u8>,
     pts_rebase: RtpPtsRebase,
+    // a replacing sender's timeline continues past the last frame instead of restarting at zero
+    pts_offset_ns: u64,
+    last_pts_ns: u64,
     seq: u64,
     seq_base: u64,
     // u64::MAX never reaches the limit, which is how "run forever" is spelled
@@ -258,6 +261,8 @@ impl AccessUnitEmitter {
             encoding: cfg.encoding,
             parameter_sets: cfg.parameter_sets.clone(),
             pts_rebase: RtpPtsRebase::new(),
+            pts_offset_ns: 0,
+            last_pts_ns: 0,
             seq: seq_base,
             seq_base,
             frame_limit,
@@ -266,6 +271,11 @@ impl AccessUnitEmitter {
 
     fn emitted(&self) -> u64 {
         self.seq - self.seq_base
+    }
+
+    fn restart_timeline_after(&mut self, silence_ns: u64) {
+        self.pts_offset_ns = self.last_pts_ns.saturating_add(silence_ns);
+        self.pts_rebase = RtpPtsRebase::new();
     }
 
     #[cfg(feature = "rtsp-server")]
@@ -280,9 +290,11 @@ impl AccessUnitEmitter {
         capture_unix_ns: Option<i64>,
         out: &mut dyn OutputSink,
     ) -> Result<bool, G2gError> {
-        let pts = self
-            .pts_rebase
-            .pts_ns(au.rtp_timestamp, self.encoding.clock_rate_hz());
+        let pts = self.pts_offset_ns
+            + self
+                .pts_rebase
+                .pts_ns(au.rtp_timestamp, self.encoding.clock_rate_hz());
+        self.last_pts_ns = pts;
         let arrival_ns = g2g_core::metrics::monotonic_ns();
         // false (the safe default) for H.264 without an IDR NAL.
         let keyframe = self.encoding.is_keyframe(&au.data);
@@ -345,6 +357,61 @@ fn nack_scheduler(jitter: &JitterConfig) -> NackScheduler {
     )
 }
 
+// the receive state that belongs to one sender, rebuilt when another sender replaces it
+#[derive(Debug)]
+struct SenderReceiveState {
+    jitter: RtpJitterBuffer,
+    depay: RtpDepayloader,
+    stats: ReceptionStats,
+    // each consulted only when its payload type is set
+    fec_decoder: FecDecoder,
+    flexfec_decoder: FlexFecDecoder,
+    nacks: NackScheduler,
+    capture_time: CaptureTimeLatch,
+}
+
+impl SenderReceiveState {
+    fn new(cfg: &RtpRecvConfig) -> Self {
+        Self {
+            jitter: RtpJitterBuffer::new(cfg.jitter),
+            depay: RtpDepayloader::new(cfg.encoding),
+            stats: ReceptionStats::new(0, cfg.encoding.clock_rate_hz()),
+            fec_decoder: FecDecoder::default(),
+            flexfec_decoder: FlexFecDecoder::default(),
+            nacks: nack_scheduler(&cfg.jitter),
+            capture_time: CaptureTimeLatch::default(),
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum SsrcAdmission {
+    Locked,
+    Replaced { silence_ns: u64 },
+    Rejected,
+}
+
+#[derive(Debug, Default)]
+struct SsrcLock {
+    locked: Option<u32>,
+    last_arrival_ns: u64,
+}
+
+impl SsrcLock {
+    fn admit(&mut self, ssrc: u32, arrival_ns: u64, silence_limit_ns: u64) -> SsrcAdmission {
+        let silence_ns = arrival_ns.saturating_sub(self.last_arrival_ns);
+        let admission = match self.locked {
+            None => SsrcAdmission::Locked,
+            Some(locked) if locked == ssrc => SsrcAdmission::Locked,
+            Some(_) if silence_ns >= silence_limit_ns => SsrcAdmission::Replaced { silence_ns },
+            Some(_) => return SsrcAdmission::Rejected,
+        };
+        self.locked = Some(ssrc);
+        self.last_arrival_ns = arrival_ns;
+        admission
+    }
+}
+
 /// Run the RTP receive loop on `socket` until `frame_limit` access units
 /// have been emitted (`u64::MAX` = run until a socket error or downstream
 /// shutdown, 0 = emit nothing), pushing each completed access unit downstream
@@ -360,19 +427,14 @@ pub(crate) async fn receive_rtp(
     if crate::numbuffers::finished_at_zero_limit(frame_limit, out).await? {
         return Ok(0);
     }
-    let mut depay = RtpDepayloader::new(cfg.encoding);
-    let mut jitter = RtpJitterBuffer::new(cfg.jitter);
-    let mut stats = ReceptionStats::new(0, cfg.encoding.clock_rate_hz());
+    let mut sender = SenderReceiveState::new(cfg);
     let mut emitter = AccessUnitEmitter::new(cfg, seq_base, frame_limit);
+    let mut ssrc_lock = SsrcLock::default();
     // The original media stream's SSRC, learned from the first non-RTX packet;
     // an RFC 4588 RTX resend is restamped back onto it.
     let mut media_ssrc_seen: Option<u32> = None;
-    // FEC decoders; each consulted only when its payload type is set.
-    let mut fec_decoder = FecDecoder::default();
-    let mut flexfec_decoder = FlexFecDecoder::default();
     // In-band caps discovery: correct the declared geometry from the stream's SPS.
     let mut refiner = cfg.declared_caps.clone().map(SpsCapsRefiner::new);
-    let mut capture_time = CaptureTimeLatch::default();
 
     // RTCP feedback state (RTP/RTCP-muxed on this socket): the peer to report to
     // (learned from the first datagram) and report timers.
@@ -380,18 +442,17 @@ pub(crate) async fn receive_rtp(
     let rr_interval_ns = cfg.rtcp_rr_interval_ms * 1_000_000;
     let mut peer: Option<SocketAddr> = None;
     let mut last_rr_ns = g2g_core::metrics::monotonic_ns();
-    let mut nacks = nack_scheduler(&cfg.jitter);
 
     loop {
         // Drain every packet the jitter buffer will release now, turning each
         // completed access unit into a downstream frame.
-        while let Some(packet) = jitter.pop(g2g_core::metrics::monotonic_ns()) {
-            capture_time.observe(&cfg.capture_time_ids, &packet);
-            for au in depay.depacketize(&packet) {
+        while let Some(packet) = sender.jitter.pop(g2g_core::metrics::monotonic_ns()) {
+            sender.capture_time.observe(&cfg.capture_time_ids, &packet);
+            for au in sender.depay.depacketize(&packet) {
                 if let Some(caps) = refiner.as_mut().and_then(|r| r.refine(&au.data)) {
                     out.push(PipelinePacket::CapsChanged(caps)).await?;
                 }
-                let capture_unix_ns = capture_time.take(au.rtp_timestamp);
+                let capture_unix_ns = sender.capture_time.take(au.rtp_timestamp);
                 if emitter.push(au, capture_unix_ns, out).await? {
                     return Ok(emitter.emitted());
                 }
@@ -403,7 +464,8 @@ pub(crate) async fn receive_rtp(
         if rtcp_on {
             if let Some(dest) = peer {
                 if now.saturating_sub(last_rr_ns) >= rr_interval_ns {
-                    let rr = rtcp::build_receiver_report(LOCAL_SSRC, &[stats.report_block(now)]);
+                    let rr =
+                        rtcp::build_receiver_report(LOCAL_SSRC, &[sender.stats.report_block(now)]);
                     let _ = receiver.socket().send_to(&rr, dest).await;
                     last_rr_ns = now;
                 }
@@ -413,7 +475,7 @@ pub(crate) async fn receive_rtp(
         // Wait for the next datagram, but no longer than the soonest of the
         // jitter hold deadline (flush a gap) and the next report.
         let now = g2g_core::metrics::monotonic_ns();
-        let jitter_deadline = jitter.next_deadline_ns(now);
+        let jitter_deadline = sender.jitter.next_deadline_ns(now);
         let rr_deadline = if rtcp_on && peer.is_some() {
             Some(rr_interval_ns.saturating_sub(now.saturating_sub(last_rr_ns)))
         } else {
@@ -450,7 +512,7 @@ pub(crate) async fn receive_rtp(
             if rtcp_on {
                 for p in rtcp::parse_compound(payload) {
                     if let RtcpPacket::SenderReport { ntp, .. } = p {
-                        stats.on_sender_report(ntp, now);
+                        sender.stats.on_sender_report(ntp, now);
                     }
                 }
             }
@@ -464,17 +526,17 @@ pub(crate) async fn receive_rtp(
             // ULPFEC repair packet: feed the decoder and inject any recovered
             // media into the jitter buffer (no NAK round trip).
             if cfg.fec_pt == Some(pt) {
-                fec_decoder.push_fec(payload);
-                for rec in fec_decoder.take_recovered() {
-                    jitter.push(&rec, now);
+                sender.fec_decoder.push_fec(payload);
+                for rec in sender.fec_decoder.take_recovered() {
+                    sender.jitter.push(&rec, now);
                 }
                 continue;
             }
             // FlexFEC repair packet (RFC 8627): same, via its own decoder.
             if cfg.flexfec_pt == Some(pt) {
-                flexfec_decoder.push_fec(payload);
-                for rec in flexfec_decoder.take_recovered() {
-                    jitter.push(&rec, now);
+                sender.flexfec_decoder.push_fec(payload);
+                for rec in sender.flexfec_decoder.take_recovered() {
+                    sender.jitter.push(&rec, now);
                 }
                 continue;
             }
@@ -501,28 +563,38 @@ pub(crate) async fn receive_rtp(
             let rtp_ts = u32::from_be_bytes([pkt[4], pkt[5], pkt[6], pkt[7]]);
             // RFC 4588 counts a resend in the RTX stream's reception stats, not the original's
             if !is_rtx {
+                match ssrc_lock.admit(media_ssrc, now, cfg.jitter.max_hold_ns) {
+                    SsrcAdmission::Rejected => continue,
+                    SsrcAdmission::Replaced { silence_ns } => {
+                        sender = SenderReceiveState::new(cfg);
+                        emitter.restart_timeline_after(silence_ns);
+                    }
+                    SsrcAdmission::Locked => {}
+                }
                 media_ssrc_seen = Some(media_ssrc);
-                stats.on_rtp(media_ssrc, pkt_seq, rtp_ts, now);
+                sender.stats.on_rtp(media_ssrc, pkt_seq, rtp_ts, now);
             }
             peer = Some(from);
-            jitter.push(pkt, now);
+            sender.jitter.push(pkt, now);
             // Record the packet for FEC and inject anything its arrival now lets
             // a buffered repair packet recover.
             if cfg.fec_pt.is_some() {
-                fec_decoder.push_media(pkt_seq, pkt);
-                for rec in fec_decoder.take_recovered() {
-                    jitter.push(&rec, now);
+                sender.fec_decoder.push_media(pkt_seq, pkt);
+                for rec in sender.fec_decoder.take_recovered() {
+                    sender.jitter.push(&rec, now);
                 }
             }
             if cfg.flexfec_pt.is_some() {
-                flexfec_decoder.push_media(pkt_seq, pkt);
-                for rec in flexfec_decoder.take_recovered() {
-                    jitter.push(&rec, now);
+                sender.flexfec_decoder.push_media(pkt_seq, pkt);
+                for rec in sender.flexfec_decoder.take_recovered() {
+                    sender.jitter.push(&rec, now);
                 }
             }
 
             if cfg.nack_enabled {
-                let requests = nacks.due(&jitter.missing_seqs(), now, usize::MAX);
+                let requests = sender
+                    .nacks
+                    .due(&sender.jitter.missing_seqs(), now, usize::MAX);
                 if !requests.is_empty() {
                     let nack = rtcp::build_nack(LOCAL_SSRC, media_ssrc, &requests);
                     let _ = receiver.socket().send_to(&nack, from).await;
