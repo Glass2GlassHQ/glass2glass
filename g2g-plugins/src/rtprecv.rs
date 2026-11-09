@@ -268,6 +268,7 @@ impl AccessUnitEmitter {
         self.seq - self.seq_base
     }
 
+    #[cfg(feature = "rtsp-server")]
     pub(crate) fn encoding(&self) -> RtpEncoding {
         self.encoding
     }
