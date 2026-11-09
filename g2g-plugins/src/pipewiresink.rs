@@ -51,6 +51,7 @@ use g2g_core::{
     PropValue, PropertySpec,
 };
 
+use crate::audiooutput::OutputDevice;
 use crate::pwaudio::{format_pod_bytes, frame_bytes, pw_params, FORMATS};
 use g2g_core::pcm_caps_any_rate_and_channels;
 
@@ -110,7 +111,7 @@ type SharedQueue = Arc<Mutex<LeakyPcmQueue>>;
 pub struct PipeWireSink {
     /// Node to play to (`node.name` or object serial); empty = the default sink
     /// the session manager picks.
-    target: String,
+    output: OutputDevice,
     ctrl_tx: Option<pw::channel::Sender<Ctrl>>,
     worker: Option<JoinHandle<()>>,
     queue: SharedQueue,
@@ -141,7 +142,7 @@ struct StreamCfg {
 impl core::fmt::Debug for PipeWireSink {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("PipeWireSink")
-            .field("target", &self.target)
+            .field("output", &self.output)
             .field("caps", &self.caps)
             .field("bytes_queued", &self.bytes_queued.load(Ordering::Relaxed))
             .finish()
@@ -157,7 +158,7 @@ impl Default for PipeWireSink {
 impl PipeWireSink {
     pub fn new() -> Self {
         Self {
-            target: String::new(),
+            output: OutputDevice::new("target-object", ""),
             ctrl_tx: None,
             worker: None,
             queue: Arc::new(Mutex::new(LeakyPcmQueue::default())),
@@ -171,7 +172,7 @@ impl PipeWireSink {
 
     /// Play to a specific node: its `node.name` or its object serial.
     pub fn with_target(mut self, target: impl Into<String>) -> Self {
-        self.target = target.into();
+        self.output = OutputDevice::new("target-object", target);
         self
     }
 
@@ -187,16 +188,59 @@ impl PipeWireSink {
         self.bytes_queued.load(Ordering::Relaxed)
     }
 
-    fn shutdown(&mut self) {
+    fn stop_stream(&mut self) {
         if let Some(tx) = self.ctrl_tx.take() {
             let _ = tx.send(Ctrl::Terminate);
         }
         if let Some(join) = self.worker.take() {
             let _ = join.join();
         }
+    }
+
+    fn shutdown(&mut self) {
+        self.stop_stream();
         if let Ok(mut q) = self.queue.lock() {
             q.bytes.clear();
         }
+    }
+
+    fn start_stream(&mut self, caps: &Caps) -> Result<(), G2gError> {
+        let (format, channels, rate) = pw_params(caps)?;
+        let (ctrl_tx, ctrl_rx) = pw::channel::channel::<Ctrl>();
+        let (ready_tx, ready_rx) = sync_channel::<Result<(), i32>>(1);
+        let cfg = StreamCfg {
+            format,
+            channels,
+            rate,
+            stride: frame_bytes(format, channels),
+            target: String::from(self.output.name()),
+            // disciplined even when not offered, skew slaving reads it
+            clock: Arc::clone(&self.clock),
+        };
+        let queue = Arc::clone(&self.queue);
+        let join = thread::Builder::new()
+            .name(String::from("g2g-pipewiresink"))
+            .spawn(move || {
+                worker_main(cfg, queue, ctrl_rx, ready_tx);
+            })
+            .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
+
+        let code = match ready_rx.recv_timeout(Duration::from_secs(5)) {
+            Ok(Ok(())) => {
+                self.ctrl_tx = Some(ctrl_tx);
+                self.worker = Some(join);
+                return Ok(());
+            }
+            Ok(Err(code)) => code,
+            Err(_) => -1,
+        };
+        let _ = join.join();
+        let error = G2gError::Hardware(HardwareError::PipeWire(code));
+        if !self.output.continue_on_error() {
+            return Err(error);
+        }
+        self.output.report(error);
+        Ok(())
     }
 
     /// Wait for the worker to play out the queued PCM before teardown, so EOS
@@ -249,54 +293,20 @@ impl AsyncElement for PipeWireSink {
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         let (format, channels, rate) = pw_params(absolute_caps)?;
 
-        if self.worker.is_some() {
+        if self.caps.is_some() {
             if self.caps.as_ref() == Some(absolute_caps) {
                 return Ok(ConfigureOutcome::Accepted);
             }
             self.shutdown();
         }
 
-        let stride = frame_bytes(format, channels);
-
-        let (ctrl_tx, ctrl_rx) = pw::channel::channel::<Ctrl>();
-        let (ready_tx, ready_rx) = sync_channel::<Result<(), i32>>(1);
-        let queue = Arc::clone(&self.queue);
-        if let Ok(mut q) = queue.lock() {
+        if let Ok(mut q) = self.queue.lock() {
             // ~1 s of audio
-            q.reset(stride * rate as usize);
+            q.reset(frame_bytes(format, channels) * rate as usize);
         }
-
-        let cfg = StreamCfg {
-            format,
-            channels,
-            rate,
-            stride,
-            target: self.target.clone(),
-            // disciplined even when not offered, skew slaving reads it
-            clock: Arc::clone(&self.clock),
-        };
         self.skew.configure(absolute_caps)?;
-        let join = thread::Builder::new()
-            .name(String::from("g2g-pipewiresink"))
-            .spawn(move || {
-                worker_main(cfg, queue, ctrl_rx, ready_tx);
-            })
-            .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
-
-        match ready_rx.recv_timeout(Duration::from_secs(5)) {
-            Ok(Ok(())) => {}
-            Ok(Err(code)) => {
-                let _ = join.join();
-                return Err(G2gError::Hardware(HardwareError::PipeWire(code)));
-            }
-            Err(_) => {
-                let _ = join.join();
-                return Err(G2gError::Hardware(HardwareError::PipeWire(-1)));
-            }
-        }
-
-        self.ctrl_tx = Some(ctrl_tx);
-        self.worker = Some(join);
+        self.start_stream(absolute_caps)?;
+        self.output.opened();
         self.caps = Some(absolute_caps.clone());
         Ok(ConfigureOutcome::Accepted)
     }
@@ -314,6 +324,10 @@ impl AsyncElement for PipeWireSink {
 
     fn set_clock_sync(&mut self, sync: ClockSync) {
         self.skew.set_master(sync.clock);
+    }
+
+    fn set_bus(&mut self, bus: g2g_core::bus::BusHandle) {
+        self.output.set_bus(bus);
     }
 
     fn metadata(&self) -> ElementMetadata {
@@ -341,6 +355,7 @@ impl AsyncElement for PipeWireSink {
             .with_default("true"),
             crate::audioskew::SLAVE_METHOD_PROPERTY,
             crate::audioskew::DRIFT_TOLERANCE_PROPERTY,
+            crate::audiooutput::CONTINUE_ON_ERROR_PROPERTY,
         ];
         PROPS
     }
@@ -349,11 +364,10 @@ impl AsyncElement for PipeWireSink {
         if let Some(result) = self.skew.set_property(name, &value) {
             return result;
         }
+        if let Some(result) = self.output.set_property(name, &value, self.caps.is_some()) {
+            return result;
+        }
         match name {
-            "target-object" => {
-                self.target = value.as_str().ok_or(PropError::Type)?.into();
-                Ok(())
-            }
             "provide-clock" => {
                 self.provide_clock = value.as_bool().ok_or(PropError::Type)?;
                 Ok(())
@@ -366,8 +380,10 @@ impl AsyncElement for PipeWireSink {
         if let Some(value) = self.skew.get_property(name) {
             return Some(value);
         }
+        if let Some(value) = self.output.get_property(name) {
+            return Some(value);
+        }
         match name {
-            "target-object" => Some(PropValue::Str(self.target.clone())),
             "provide-clock" => Some(PropValue::Bool(self.provide_clock)),
             _ => None,
         }
@@ -385,8 +401,10 @@ impl AsyncElement for PipeWireSink {
                         &frame,
                         g2g_core::log::short_type_name::<Self>(),
                     )?;
-                    if self.worker.is_none() {
-                        return Err(G2gError::NotConfigured);
+                    let caps = self.caps.clone().ok_or(G2gError::NotConfigured)?;
+                    if self.output.take_switch().is_some() {
+                        self.stop_stream();
+                        self.start_stream(&caps)?;
                     }
                     self.skew.measure(&self.clock);
                     let corrected = self.skew.correct(payload.as_slice());
@@ -407,8 +425,11 @@ impl AsyncElement for PipeWireSink {
                 }
                 PipelinePacket::Flush | PipelinePacket::Segment(_) => Ok(()),
                 PipelinePacket::Eos => {
-                    self.drain_queue().await;
+                    if self.worker.is_some() {
+                        self.drain_queue().await;
+                    }
                     self.shutdown();
+                    self.caps = None;
                     Ok(())
                 }
                 // future PipelinePacket variants: no-op (terminal sink).
@@ -476,10 +497,16 @@ fn build_and_run(
     let q = Arc::clone(&queue);
     let drift = cfg.clock.clone();
     let mut last_clock_log_ns = 0u64;
+    let mut timeline_offset_ns = None;
     let _listener = stream
         .add_local_listener_with_user_data(())
         .process(move |stream, ()| {
-            discipline_clock(stream, &drift, &mut last_clock_log_ns);
+            discipline_clock(
+                stream,
+                &drift,
+                &mut timeline_offset_ns,
+                &mut last_clock_log_ns,
+            );
             let Some(mut buffer) = stream.dequeue_buffer() else {
                 return;
             };
@@ -553,7 +580,12 @@ fn build_and_run(
 /// The callback runs once per graph quantum (~47 Hz at 1024 frames / 48 kHz),
 /// so the trace is throttled to [`CLOCK_LOG_INTERVAL_NS`]; `last_log_ns` carries
 /// the caller's stamp of the last line.
-fn discipline_clock(stream: &pw::stream::Stream, clock: &DriftClock, last_log_ns: &mut u64) {
+fn discipline_clock(
+    stream: &pw::stream::Stream,
+    clock: &DriftClock,
+    timeline_offset_ns: &mut Option<i128>,
+    last_log_ns: &mut u64,
+) {
     let Some(time) = crate::pwaudio::stream_time(stream) else {
         return;
     };
@@ -565,8 +597,14 @@ fn discipline_clock(stream: &pw::stream::Stream, clock: &DriftClock, last_log_ns
     if time.ticks == 0 || time.rate.denom == 0 {
         return;
     }
-    let master_ns = (u128::from(time.ticks) * u128::from(time.rate.num) * 1_000_000_000
-        / u128::from(time.rate.denom)) as u64;
+    let graph_ns = (u128::from(time.ticks) * u128::from(time.rate.num) * 1_000_000_000
+        / u128::from(time.rate.denom)) as i128;
+    // pipewire ticks restart with each stream, so a stream after a target switch continues the clock it took over
+    let offset = *timeline_offset_ns.get_or_insert_with(|| match clock.observations() {
+        0 => 0,
+        _ => i128::from(clock.project_ns(local_ns)) - graph_ns,
+    });
+    let master_ns = u64::try_from(graph_ns + offset).unwrap_or(0);
     let outcome = clock.observe(local_ns, master_ns);
     if local_ns.saturating_sub(*last_log_ns) < CLOCK_LOG_INTERVAL_NS {
         return;
@@ -617,7 +655,7 @@ mod tests {
         );
         sink.set_property("target-object", PropValue::Str(String::from("spk0")))
             .expect("known prop");
-        assert_eq!(sink.target, "spk0");
+        assert_eq!(sink.output.name(), "spk0");
         assert_eq!(
             sink.get_property("target-object"),
             Some(PropValue::Str(String::from("spk0")))
@@ -631,7 +669,10 @@ mod tests {
             Err(PropError::Unknown)
         );
         // the builder is the same knob
-        assert_eq!(PipeWireSink::new().with_target("spk1").target, "spk1");
+        assert_eq!(
+            PipeWireSink::new().with_target("spk1").output.name(),
+            "spk1"
+        );
         // every declared property is handled by both halves
         for spec in sink.properties() {
             assert!(

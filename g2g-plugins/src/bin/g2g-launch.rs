@@ -1319,6 +1319,7 @@ fn drain_bus(bus: &Bus, verbose: bool, failed: &mut Option<String>) {
 fn handle_bus_message(message: BusMessage, verbose: bool, failed: &mut Option<String>) {
     match message {
         BusMessage::ElementError { element, .. } => *failed = Some(element),
+        BusMessage::Warning(error) => eprintln!("\rWARNING: {error:?}"),
         BusMessage::Checksum { pts_ns, digest, .. } => {
             println_stdout!(
                 "{}",

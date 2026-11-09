@@ -244,6 +244,8 @@ libraries installed.
 ## Sinks
 
 - Validate `wasapisink` U8, S24, and S32 acceptance on a Windows host.
+- Run `wasapisink` on a Windows host with a `device` set while it plays and
+  with `continue-on-error` against an unplugged endpoint.
 - SDI output for Blackmagic Design DeckLink (`decklinkvideosink`,
   `decklinkaudiosink`) on Windows and macOS.
 - Run `decklinkvideosink` and `decklinkaudiosink` on a board: scheduled

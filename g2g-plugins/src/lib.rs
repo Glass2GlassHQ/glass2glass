@@ -805,6 +805,15 @@ pub mod mpegaudioparse;
     all(target_os = "android", feature = "aaudio")
 ))]
 mod audioworker;
+// Live device switching and continue-on-error for the audio render sinks.
+#[cfg(any(
+    all(
+        target_os = "linux",
+        any(feature = "alsa-sink", feature = "pulse-sink", feature = "pipewire")
+    ),
+    all(target_os = "windows", feature = "wasapi-sink")
+))]
+mod audiooutput;
 // Bounded queue and stamping loop shared by the audio capture sources.
 #[cfg(any(
     all(

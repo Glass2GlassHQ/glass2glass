@@ -54,6 +54,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M2138: `rtmpsink` sends `FCUnpublish` and `deleteStream` on EOS before closing, as gst `rtmp2sink` does.
 - M2139: `jpegxsenc` and `jpegxsdec` code interleaved video as two field codestreams per buffer, marked `interlace-mode=fields`.
 - M2140: caps strings accept gst's `alignment=frame` on `image/x-jxsc`.
+- M2141: `alsasink`, `pulsesink`, `pipewiresink` and `wasapisink` switch device while playing and take `continue-on-error`, and `g2g-launch` prints bus warnings.
 
 ## 0.14.0
 

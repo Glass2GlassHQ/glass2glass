@@ -26,13 +26,13 @@ use core::pin::Pin;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use std::collections::VecDeque;
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use alloc::boxed::Box;
-use alloc::string::{String, ToString};
+use alloc::string::String;
 use alloc::vec::Vec;
 
 use windows::Win32::Media::Audio::{
@@ -43,7 +43,6 @@ use windows::Win32::System::Com::{
     CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_MULTITHREADED,
 };
 
-use g2g_core::frame::Frame;
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, ConfigureOutcome, ElementMetadata, G2gError, HardwareError,
     OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue,
@@ -51,6 +50,7 @@ use g2g_core::{
 };
 
 use crate::audio::{linear_pcm_caps, pcm_params};
+use crate::audiooutput::{DeviceCmd, OutputDevice, PlayEnd};
 use crate::audioworker::WorkerLink;
 use crate::wasapipcm::{audio_err, open_endpoint};
 
@@ -67,14 +67,6 @@ const TOPUP_INTERVAL: Duration = Duration::from_millis(20);
 /// Upper bound on the post-queue-drain wait for the endpoint to play out, so a
 /// device that never reports empty padding can't wedge teardown.
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
-
-/// Worker command. `Samples` carries one buffer of interleaved PCM bytes in the
-/// negotiated format; `Shutdown` asks the worker to drain the queue, wait for
-/// playout, and stop.
-enum WorkerCmd {
-    Samples(Frame),
-    Shutdown,
-}
 
 const ELEMENT_NAME: &str = "WasapiSink";
 
@@ -93,10 +85,10 @@ fn worker_gone() -> G2gError {
 /// ```
 pub struct WasapiSink {
     /// Endpoint id to render on; empty opens the default endpoint.
-    device: String,
+    output: OutputDevice,
     /// Bounded, non-blocking link to the render thread (see
     /// [`crate::audioworker`]).
-    link: Option<WorkerLink<WorkerCmd>>,
+    link: Option<WorkerLink<DeviceCmd>>,
     caps: Option<Caps>,
     frames_rendered: Arc<AtomicU64>,
 }
@@ -104,6 +96,7 @@ pub struct WasapiSink {
 impl core::fmt::Debug for WasapiSink {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("WasapiSink")
+            .field("output", &self.output)
             .field("caps", &self.caps)
             .field(
                 "frames_rendered",
@@ -122,7 +115,7 @@ impl Default for WasapiSink {
 impl WasapiSink {
     pub fn new() -> Self {
         Self {
-            device: String::new(),
+            output: OutputDevice::new("device", ""),
             link: None,
             caps: None,
             frames_rendered: Arc::new(AtomicU64::new(0)),
@@ -132,7 +125,7 @@ impl WasapiSink {
     /// Render on the endpoint with this id (what the device monitor reports as
     /// the persistent id) instead of the default one.
     pub fn with_device(mut self, id: impl Into<String>) -> Self {
-        self.device = id.into();
+        self.output = OutputDevice::new("device", id);
         self
     }
 
@@ -206,12 +199,23 @@ impl AsyncElement for WasapiSink {
         let (ready_tx, ready_rx) = mpsc::sync_channel::<Result<(), G2gError>>(1);
         let rendered = Arc::clone(&self.frames_rendered);
         let format = wave_format(tag, bits, channels, rate);
-        let device = self.device.clone();
+        let device = String::from(self.output.name());
+        let fallback = self.output.fallback(
+            u64::from(format.nAvgBytesPerSec),
+            Arc::clone(&self.frames_rendered),
+            u64::from(format.nBlockAlign),
+            |frame| frame.domain.as_system_slice().map(<[u8]>::len),
+        );
 
         let link = WorkerLink::spawn("g2g-wasapisink", move |rx| {
-            if let Err(e) = worker_main(&device, format, rx, rendered, ready_tx) {
-                std::eprintln!("g2g-wasapisink worker error: {e:?}");
-            }
+            crate::audiooutput::run_device_worker(
+                device,
+                rx,
+                fallback,
+                ready_tx,
+                |device| open(device, &format),
+                |render, rx| play(render, rx, &rendered),
+            );
         })?;
 
         // The worker reports whether the endpoint opened; a headless host (no
@@ -224,6 +228,7 @@ impl AsyncElement for WasapiSink {
             Err(_) => return Err(worker_gone()),
         }
 
+        self.output.opened();
         self.link = Some(link);
         self.caps = Some(absolute_caps.clone());
         Ok(ConfigureOutcome::Accepted)
@@ -238,25 +243,22 @@ impl AsyncElement for WasapiSink {
         )
     }
 
+    fn set_bus(&mut self, bus: g2g_core::bus::BusHandle) {
+        self.output.set_bus(bus);
+    }
+
     fn properties(&self) -> &'static [PropertySpec] {
         WASAPISINK_PROPS
     }
 
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
-        match name {
-            "device" => {
-                self.device = value.as_str().ok_or(PropError::Type)?.to_string();
-                Ok(())
-            }
-            _ => Err(PropError::Unknown),
-        }
+        self.output
+            .set_property(name, &value, self.link.is_some())
+            .unwrap_or(Err(PropError::Unknown))
     }
 
     fn get_property(&self, name: &str) -> Option<PropValue> {
-        match name {
-            "device" => Some(PropValue::Str(self.device.clone())),
-            _ => None,
-        }
+        self.output.get_property(name)
     }
 
     fn process<'a>(
@@ -269,8 +271,12 @@ impl AsyncElement for WasapiSink {
                 PipelinePacket::DataFrame(frame) => {
                     frame.domain.require_system_slice(ELEMENT_NAME)?;
                     let link = self.link.as_ref().ok_or(G2gError::NotConfigured)?;
+                    if let Some(device) = self.output.take_switch() {
+                        link.send(DeviceCmd::SwitchDevice(device), worker_gone())
+                            .await?;
+                    }
                     // a full queue is the endpoint's back-pressure and yields
-                    link.send(WorkerCmd::Samples(frame), worker_gone()).await
+                    link.send(DeviceCmd::Samples(frame), worker_gone()).await
                 }
                 // A mid-stream format change can't be honoured on an open
                 // endpoint; only a caps identical to the configured one passes.
@@ -282,7 +288,7 @@ impl AsyncElement for WasapiSink {
                 PipelinePacket::Eos => {
                     // waits for playout while yielding, so other arms keep running
                     if let Some(link) = self.link.as_mut() {
-                        link.finish(WorkerCmd::Shutdown, worker_gone()).await?;
+                        link.finish(DeviceCmd::Shutdown, worker_gone()).await?;
                     }
                     self.link = None;
                     Ok(())
@@ -297,11 +303,14 @@ impl AsyncElement for WasapiSink {
 /// `WasapiSink`'s settable properties: the endpoint id the device monitor
 /// reports, empty for the default endpoint (gst `wasapisink` spells it the
 /// same way).
-static WASAPISINK_PROPS: &[PropertySpec] = &[PropertySpec::new(
-    "device",
-    PropKind::Str,
-    "endpoint id to render on (empty = default endpoint)",
-)];
+static WASAPISINK_PROPS: &[PropertySpec] = &[
+    PropertySpec::new(
+        "device",
+        PropKind::Str,
+        "endpoint id to render on (empty = default endpoint)",
+    ),
+    crate::audiooutput::CONTINUE_ON_ERROR_PROPERTY,
+];
 
 impl PadTemplates for WasapiSink {
     fn pad_templates() -> Vec<PadTemplate> {
@@ -313,33 +322,23 @@ impl PadTemplates for WasapiSink {
 // Worker thread: WASAPI shared-mode render
 // =================================================================
 
-fn worker_main(
-    device: &str,
-    format: WAVEFORMATEX,
-    rx: Receiver<WorkerCmd>,
-    rendered: Arc<AtomicU64>,
-    ready: SyncSender<Result<(), G2gError>>,
-) -> Result<(), G2gError> {
+fn open(device: &str, format: &WAVEFORMATEX) -> Result<RenderState, G2gError> {
     // SAFETY: COM is initialised MTA on this worker thread; every later WASAPI
     // call lands on the same thread. S_FALSE (already initialised) is fine.
-    let render = match unsafe { open_render(device, &format) } {
-        Ok(state) => {
-            let _ = ready.send(Ok(()));
-            state
-        }
-        Err(e) => {
-            let _ = ready.send(Err(e.clone()));
-            // CoUninitialize is paired in open_endpoint's error paths via the
-            // guard below only on success; on failure CoInitializeEx may or may
-            // not have run, so balance it here best-effort.
-            // SAFETY: balances the CoInitializeEx attempted in open_endpoint.
-            unsafe { CoUninitialize() };
-            return Err(e);
-        }
+    let render = unsafe { open_render(device, format) };
+    if render.is_err() {
+        // SAFETY: balances the CoInitializeEx attempted in open_render.
+        unsafe { CoUninitialize() };
+    }
+    render
+}
+
+fn play(render: RenderState, rx: &Receiver<DeviceCmd>, rendered: &AtomicU64) -> PlayEnd {
+    let end = match run_render_loop(&render, rx, rendered) {
+        Ok(Some(device)) => PlayEnd::SwitchDevice(device),
+        Ok(None) => PlayEnd::Shutdown,
+        Err(error) => PlayEnd::Failed(error),
     };
-
-    let result = run_render_loop(&render, rx, &rendered);
-
     // SAFETY: stop the client on the owning thread.
     unsafe {
         let _ = render.client.Stop();
@@ -347,9 +346,9 @@ fn worker_main(
     // Release every COM interface before uninitialising COM: CoUninitialize must
     // come after the last Release, not before the RenderState drops at scope end.
     drop(render);
-    // SAFETY: balances the CoInitializeEx in open_endpoint; all interfaces freed.
+    // SAFETY: balances the CoInitializeEx in open_render; all interfaces freed.
     unsafe { CoUninitialize() };
-    result
+    end
 }
 
 /// Live WASAPI render objects for the endpoint's lifetime.
@@ -402,23 +401,29 @@ unsafe fn open_render(device: &str, format: &WAVEFORMATEX) -> Result<RenderState
 }
 
 /// Pull PCM from the command channel into a byte queue and feed it to the
-/// endpoint at the device rate, draining and playing out on shutdown.
+/// endpoint at the device rate, draining and playing out on shutdown or a
+/// device switch.
 fn run_render_loop(
     state: &RenderState,
-    rx: Receiver<WorkerCmd>,
+    rx: &Receiver<DeviceCmd>,
     rendered: &AtomicU64,
-) -> Result<(), G2gError> {
+) -> Result<Option<String>, G2gError> {
     // one endpoint buffer ahead, so the rest waits in the bounded command queue
     let queue_limit = state.buffer_frames as usize * state.block_align;
     let mut queue: VecDeque<u8> = VecDeque::with_capacity(queue_limit);
     let mut closing = false;
+    let mut switch_to = None;
     let mut drain_deadline: Option<Instant> = None;
 
-    let take = |cmd: WorkerCmd, queue: &mut VecDeque<u8>, closing: &mut bool| match cmd {
-        WorkerCmd::Samples(frame) => {
+    let mut take = |cmd: DeviceCmd, queue: &mut VecDeque<u8>, closing: &mut bool| match cmd {
+        DeviceCmd::Samples(frame) => {
             queue.extend(frame.domain.as_system_slice().unwrap_or_default());
         }
-        WorkerCmd::Shutdown => *closing = true,
+        DeviceCmd::SwitchDevice(device) => {
+            switch_to = Some(device);
+            *closing = true;
+        }
+        DeviceCmd::Shutdown => *closing = true,
     };
     loop {
         if !closing && queue.len() < queue_limit {
@@ -453,7 +458,7 @@ fn run_render_loop(
             thread::sleep(Duration::from_millis(5));
         }
     }
-    Ok(())
+    Ok(switch_to)
 }
 
 /// Write as many queued frames as the endpoint has free space for. Returns the

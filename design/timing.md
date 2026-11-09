@@ -126,6 +126,20 @@ the elected clock measures no difference and never corrects, so it needs no
 check of which clock won. The playout clock is now disciplined whether or not
 `provide-clock` offers it.
 
+`alsasink`, `pulsesink` and `wasapisink` take a new `device` while they play.
+`OutputDevice` (`audiooutput.rs`) queues a `SwitchDevice` command behind the
+samples already sent, so the worker drains the old device, opens the new one and
+plays on in order. The sample counter the playout clock is fitted against keeps
+counting across the switch, so the clock does not jump. With
+`continue-on-error`, as in gst's `wasapi2sink`, a device that fails to open,
+fails a write or disappears posts `BusMessage::Warning`, and the worker keeps
+taking buffers at their real-time rate with no device, advancing the same
+counter, until the next `device` set opens one. `pipewiresink` restarts its
+stream on a `target-object` set and offsets the new stream's tick counter so the
+clock continues from where the old stream left it. Its `continue-on-error`
+covers a failed connection to the PipeWire daemon only: a stream whose target
+disappears is moved by the session manager rather than failing.
+
 ## MPEG-TS PCR clock
 
 `mpegtslivesrc` gives a live MPEG-TS pipeline the sender's clock, as
