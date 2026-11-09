@@ -753,7 +753,10 @@ fn metadata_obu_info(temporal_unit: &[u8]) -> crate::sei::SeiInfo {
                 }
             }
             METADATA_TYPE_ITUT_T35 => {
-                crate::cea::parse_caption_payload(content, &mut info.captions)
+                crate::cea::parse_caption_payload(content, &mut info.captions);
+                if let Some(hdr10_plus) = crate::sei::parse_hdr10_plus(content) {
+                    info.hdr10_plus = Some(hdr10_plus);
+                }
             }
             _ => {}
         }

@@ -92,6 +92,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M2176: typefind looks behind an ID3v2 tag longer than its window instead of calling the stream MP3.
 - M2177: `uridecodebin`, `playbin` and `fallbacksrc` put the stream's parser ahead of the decoder, as `decodebin` does.
 - M2178: a parser behind `id3demux` can seek.
+- M2179: `h264parse`, `h265parse` and `av1parse` attach HDR10+ metadata, which `nvenc` keeps and `h265seiinserter` writes back.
 
 Breaking: `TimecodeMeta.frames` is a `u16`, `WIRE_VERSION` is 4, and `RtpRecvConfig` gains `parameter_sets`.
 

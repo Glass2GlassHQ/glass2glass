@@ -981,6 +981,11 @@ impl Drop for ContextGuard {
 }
 
 impl AsyncElement for NvEnc {
+    #[cfg(feature = "metadata")]
+    fn meta_transform(&self) -> Option<g2g_core::meta::Transform> {
+        Some(g2g_core::meta::Transform::Encode)
+    }
+
     fn handles_keyframe_requests(&self) -> bool {
         true
     }

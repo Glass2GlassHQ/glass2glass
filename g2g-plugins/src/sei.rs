@@ -261,6 +261,29 @@ pub struct SeiInfo {
     /// SMPTE 12M timecode, `None` when the AU codes none.
     #[cfg(feature = "metadata")]
     pub timecode: Option<g2g_core::meta::TimecodeMeta>,
+    #[cfg(feature = "metadata")]
+    pub hdr10_plus: Option<g2g_core::meta::Hdr10PlusMeta>,
+}
+
+// ITU-T T.35 United States country code, then the provider code ffmpeg names Samsung
+#[cfg(feature = "metadata")]
+pub(crate) const HDR10_PLUS_T35_HEADER: [u8; 3] = [0xB5, 0x00, 0x3C];
+// SMPTE ST 2094-40 provider oriented code
+#[cfg(feature = "metadata")]
+const HDR10_PLUS_PROVIDER_ORIENTED_CODE: [u8; 2] = [0x00, 0x01];
+// gst `GST_VIDEO_HDR10_PLUS_MAX_BYTES`, gst drops a payload this long or longer
+#[cfg(feature = "metadata")]
+const HDR10_PLUS_MAX_LEN: usize = 1024;
+
+#[cfg(feature = "metadata")]
+pub(crate) fn parse_hdr10_plus(t35: &[u8]) -> Option<g2g_core::meta::Hdr10PlusMeta> {
+    let data = t35.strip_prefix(&HDR10_PLUS_T35_HEADER)?;
+    if !data.starts_with(&HDR10_PLUS_PROVIDER_ORIENTED_CODE) || data.len() >= HDR10_PLUS_MAX_LEN {
+        return None;
+    }
+    Some(g2g_core::meta::Hdr10PlusMeta {
+        data: data.to_vec(),
+    })
 }
 
 /// Walk one access unit's SEI messages once, collecting everything the parser
@@ -284,7 +307,11 @@ pub(crate) fn parse_nals<'a>(
     let _ = pic_timing;
     for_each_message_in_nals(nals, codec, |ty, payload| match ty {
         PAYLOAD_USER_DATA_REGISTERED => {
-            crate::cea::parse_caption_payload(payload, &mut info.captions)
+            crate::cea::parse_caption_payload(payload, &mut info.captions);
+            #[cfg(feature = "metadata")]
+            if let Some(hdr10_plus) = parse_hdr10_plus(payload) {
+                info.hdr10_plus = Some(hdr10_plus);
+            }
         }
         #[cfg(feature = "metadata")]
         PAYLOAD_PIC_TIMING => {
@@ -348,6 +375,9 @@ impl BitstreamMetaLatch {
         }
         if let Some(tc) = info.timecode {
             frame.meta.attach(tc);
+        }
+        if let Some(hdr10_plus) = info.hdr10_plus {
+            frame.meta.attach(hdr10_plus);
         }
     }
 }

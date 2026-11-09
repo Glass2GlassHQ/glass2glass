@@ -5,8 +5,9 @@ use core::future::Future;
 use core::marker::PhantomData;
 use core::pin::Pin;
 
+use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
-use g2g_core::meta::{SeiUserData, SeiUserDataMeta};
+use g2g_core::meta::{Hdr10PlusMeta, SeiUserData, SeiUserDataMeta};
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError,
     MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, Rate, VideoCodec,
@@ -16,7 +17,10 @@ use crate::annexb::vcl_start;
 use crate::h264parse::H264Codec;
 use crate::h265parse::H265Codec;
 use crate::nalparse::NalCodec;
-use crate::sei::{build_sei_nal, PAYLOAD_USER_DATA_REGISTERED, PAYLOAD_USER_DATA_UNREGISTERED};
+use crate::sei::{
+    build_sei_nal, for_each_message, parse_hdr10_plus, HDR10_PLUS_T35_HEADER,
+    PAYLOAD_USER_DATA_REGISTERED, PAYLOAD_USER_DATA_UNREGISTERED,
+};
 
 pub type H264SeiInserter = SeiInsert<H264Codec>;
 pub type H265SeiInserter = SeiInsert<H265Codec>;
@@ -86,6 +90,31 @@ pub fn insert_user_data(au: &[u8], codec: VideoCodec, messages: &[SeiUserData]) 
     Some(bytes)
 }
 
+fn carries_hdr10_plus(au: &[u8], codec: VideoCodec) -> bool {
+    let mut found = false;
+    for_each_message(au, codec, |payload_type, payload| {
+        found |=
+            payload_type == PAYLOAD_USER_DATA_REGISTERED && parse_hdr10_plus(payload).is_some();
+    });
+    found
+}
+
+fn messages_to_write(frame: &Frame, au: &[u8], codec: VideoCodec) -> Vec<SeiUserData> {
+    let hdr10_plus = frame
+        .meta
+        .get::<Hdr10PlusMeta>()
+        .filter(|_| !carries_hdr10_plus(au, codec))
+        .map(|meta| SeiUserData::Registered {
+            t35: [&HDR10_PLUS_T35_HEADER[..], &meta.data].concat(),
+        });
+    let application = frame
+        .meta
+        .get::<SeiUserDataMeta>()
+        .into_iter()
+        .flat_map(|meta| meta.messages.iter().cloned());
+    hdr10_plus.into_iter().chain(application).collect()
+}
+
 impl<C: NalCodec> AsyncElement for SeiInsert<C> {
     type ProcessFuture<'a>
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
@@ -116,7 +145,7 @@ impl<C: NalCodec> AsyncElement for SeiInsert<C> {
         ElementMetadata::new(
             "SEI user data inserter",
             "Codec/Video/Filter",
-            "Writes each frame's SeiUserDataMeta into its access unit as SEI user data messages",
+            "Writes each frame's Hdr10PlusMeta and SeiUserDataMeta into its access unit as SEI user data messages",
             "g2g",
         )
     }
@@ -130,11 +159,13 @@ impl<C: NalCodec> AsyncElement for SeiInsert<C> {
             let PipelinePacket::DataFrame(mut frame) = packet else {
                 return out.push(packet).await.map(|_| ());
             };
-            let with_user_data = frame
-                .meta
-                .get::<SeiUserDataMeta>()
-                .zip(frame.domain.as_system_slice())
-                .and_then(|(meta, au)| insert_user_data(au, C::CODEC, &meta.messages));
+            let with_user_data = frame.domain.as_system_slice().and_then(|au| {
+                let messages = messages_to_write(&frame, au, C::CODEC);
+                if messages.is_empty() {
+                    return None;
+                }
+                insert_user_data(au, C::CODEC, &messages)
+            });
             if let Some(bytes) = with_user_data {
                 frame.domain =
                     MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice()));
@@ -156,7 +187,6 @@ impl<C: NalCodec> PadTemplates for SeiInsert<C> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sei::for_each_message;
 
     const UUID: [u8; 16] = *b"g2g-sei-unreg-16";
     // United States country code, then the ATSC provider code and a user identifier

@@ -346,6 +346,14 @@ stays on the frame. An access unit with no slice passes unchanged. ffmpeg's
 `trace_headers` reads every message back (`m2037_sei_user_data`). Captions keep
 their own path through `ccinsert`.
 
+`h264parse`, `h265parse` and `av1parse` attach each access unit's SMPTE ST 2094-40
+(HDR10+) T.35 message as `meta::Hdr10PlusMeta`, holding the bytes from the provider
+oriented code on, as gst's `GstVideoHDRMeta` does. The meta is attached per
+access unit, not carried forward. `SeiInsert` writes it first, unless the access
+unit already carries one, so `h265parse ! avdec_h265 ! nvenc codec=hevc !
+h265seiinserter` keeps the metadata. `m2179_hdr10_plus` checks the written SEI
+against hdr10plus_tool's and the AV1 reading against libaom's.
+
 ### Subtitle writers
 
 `SrtEnc` (`srtenc`) and `WebVttEnc` (`webvttenc`) invert `SubParse`: timed

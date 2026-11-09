@@ -1434,6 +1434,24 @@ mod on {
         }
     }
 
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct Hdr10PlusMeta {
+        // SMPTE ST 2094-40 T.35 payload from the provider oriented code on, as gst's `GstVideoHDRMeta` holds it
+        pub data: Vec<u8>,
+    }
+
+    impl FrameMeta for Hdr10PlusMeta {
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+        fn as_any_mut(&mut self) -> &mut dyn Any {
+            self
+        }
+        fn clone_box(&self) -> Box<dyn FrameMeta> {
+            Box::new(self.clone())
+        }
+    }
+
     /// The SMPTE ST 12M timecode a coded picture carries (H.264 `pic_timing` /
     /// H.265 `time_code` SEI, or a container timecode track): where this frame
     /// sits on the source's own clock, which is what an edit list, a broadcast
