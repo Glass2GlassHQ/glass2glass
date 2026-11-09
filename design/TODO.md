@@ -339,6 +339,10 @@ libraries installed.
 ## Metadata (FrameMeta / AnalyticsMeta)
 
 - `NvEnc` AV1 encode (needs RTX 40-series hardware).
+- Return `Transform::Encode` from `meta_transform` in `MediaCodecEnc`,
+  `MfEncode`, `VtEncode` and `WebCodecsEncode`, so frame metadata (captions,
+  HDR10+) reaches a `ccinsert` or `seiinserter` after them. Each needs a run on
+  its platform.
 
 ## Clock-synchronised presentation
 
