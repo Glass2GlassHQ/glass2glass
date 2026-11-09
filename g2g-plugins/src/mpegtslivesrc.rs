@@ -12,7 +12,7 @@ use g2g_core::{
 };
 
 use crate::mpegts::{
-    ticks_90khz_to_ns, PcrSample, TsDemuxer, TsPacketSplitter, SYSTEM_CLOCK_HZ,
+    extend_timestamp, ticks_90khz_to_ns, PcrSample, TsDemuxer, TsPacketSplitter, SYSTEM_CLOCK_HZ,
     SYSTEM_CLOCK_TICKS_PER_90KHZ,
 };
 
@@ -128,13 +128,22 @@ impl MpegTsLiveSrc {
             return Ok(None);
         }
         self.clock.observe(arrival_ns, projected_ns);
+        let anchor_pcr = self.timeline.map_or(sample.pcr_27mhz, |timeline| {
+            // tsdemux extends PES stamps past a wrap by the same rule
+            let base_90khz = extend_timestamp(
+                sample.pcr_27mhz / SYSTEM_CLOCK_TICKS_PER_90KHZ,
+                timeline.last_pcr / SYSTEM_CLOCK_TICKS_PER_90KHZ,
+            );
+            base_90khz * SYSTEM_CLOCK_TICKS_PER_90KHZ
+                + sample.pcr_27mhz % SYSTEM_CLOCK_TICKS_PER_90KHZ
+        });
         self.timeline = Some(PcrTimeline {
-            anchor_pcr: sample.pcr_27mhz,
+            anchor_pcr,
             anchor_clock_ns: projected_ns,
-            last_pcr: sample.pcr_27mhz,
+            last_pcr: anchor_pcr,
         });
         let sync = self.sync.as_ref().ok_or(G2gError::NotConfigured)?;
-        let start = pcr_to_pts_ns(sample.pcr_27mhz);
+        let start = pcr_to_pts_ns(anchor_pcr);
         Ok(Some(Segment {
             start,
             base: projected_ns.saturating_sub(sync.base_time()),
@@ -428,5 +437,34 @@ mod tests {
         assert_eq!(opened, 1, "the wrap is not a new timeline");
         let slope = element.clock().slope();
         assert!((slope - 1.0).abs() < 1e-6, "slope {slope}");
+    }
+
+    #[tokio::test]
+    async fn a_stall_after_a_wrap_starts_the_segment_past_the_wrap() {
+        const PCR_BASE_MODULUS_90KHZ: u64 = 1 << 33;
+        const STALL_NS: u64 = 2 * NANOS_PER_SECOND;
+        let mut element = element();
+        let mut muxer = TsMuxer::new(STREAM_TYPE_H264);
+        let first_dts = PCR_BASE_MODULUS_90KHZ - FRAME_90KHZ;
+        for index in 0..3 {
+            let bytes = keyframe_bytes(&mut muxer, first_dts + index * FRAME_90KHZ);
+            push(
+                &mut element,
+                arriving(bytes, FIRST_ARRIVAL_NS + index * FRAME_NS),
+            )
+            .await;
+        }
+        let stalled_dts = first_dts + 3 * FRAME_90KHZ;
+        let arrival_ns = FIRST_ARRIVAL_NS + 3 * FRAME_NS + STALL_NS;
+        let packets = push(
+            &mut element,
+            arriving(keyframe_bytes(&mut muxer, stalled_dts), arrival_ns),
+        )
+        .await;
+
+        let [segment] = segments(&packets)[..] else {
+            panic!("expected one segment: {packets:?}");
+        };
+        assert_eq!(segment.start, ticks_90khz_to_ns(stalled_dts));
     }
 }

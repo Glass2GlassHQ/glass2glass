@@ -1629,14 +1629,14 @@ pub(crate) fn parse_pes_header(payload: &[u8]) -> (Option<u64>, Option<u64>, &[u
     if es_start > payload.len() {
         return (None, None, payload);
     }
-    let pts = if pts_dts_flags & 0x02 != 0 && payload.len() >= 14 {
+    let pts = if pts_dts_flags & 0x02 != 0 && header_data_len >= 5 {
         Some(decode_timestamp(&payload[9..14]))
     } else {
         None
     };
     // A DTS follows the PTS (bytes 14..19) only when both flags are set. Malformed
     // (too short) keeps the PTS-only best-effort behavior.
-    let dts = if pts_dts_flags == 0b11 && payload.len() >= 19 {
+    let dts = if pts_dts_flags == 0b11 && header_data_len >= 10 {
         Some(decode_timestamp(&payload[14..19]))
     } else {
         None
@@ -1644,7 +1644,7 @@ pub(crate) fn parse_pes_header(payload: &[u8]) -> (Option<u64>, Option<u64>, &[u
     (pts, dts, &payload[es_start..])
 }
 
-fn extend_timestamp(raw: u64, reference: u64) -> u64 {
+pub(crate) fn extend_timestamp(raw: u64, reference: u64) -> u64 {
     let cycle_start = reference - reference % PES_TIMESTAMP_CYCLE_90KHZ;
     let Some(same_cycle) = cycle_start.checked_add(raw) else {
         return raw;
@@ -4658,6 +4658,27 @@ pub(crate) mod tests {
         assert_eq!(both[8], 10, "two 5-byte timestamp fields");
         assert_eq!(decode_timestamp(&both[9..14]), 6000);
         assert_eq!(decode_timestamp(&both[14..19]), 3600);
+    }
+
+    #[test]
+    fn pes_timestamps_outside_the_header_length_are_not_read() {
+        const ES: [u8; 10] = [0x21, 0, 1, 0, 1, 0x21, 0, 1, 0, 1];
+        let mut pts_flag_no_field = alloc::vec![0x00, 0x00, 0x01, 0xE0, 0, 0, 0x80, 0x80, 0];
+        pts_flag_no_field.extend_from_slice(&ES);
+        assert_eq!(
+            parse_pes_header(&pts_flag_no_field),
+            (None, None, &ES[..]),
+            "a PTS flag with an empty header"
+        );
+
+        let mut both_flags_one_field = pes_header(0xE0, ES.len(), Some(6000), None);
+        both_flags_one_field[7] = 0xC0;
+        both_flags_one_field.extend_from_slice(&ES);
+        assert_eq!(
+            parse_pes_header(&both_flags_one_field),
+            (Some(6000), None, &ES[..]),
+            "a DTS flag with only the PTS field in the header"
+        );
     }
 
     #[test]
