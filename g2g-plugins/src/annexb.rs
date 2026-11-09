@@ -209,7 +209,7 @@ pub(crate) fn nal_units_start_coded_video_sequence<'a>(
     mut units: impl Iterator<Item = &'a [u8]>,
 ) -> bool {
     units.any(|n| match codec {
-        // BLA_W_LP (16) through IDR_N_LP (20), without the CRA that follows an end of sequence
+        // BLA_W_LP (16) through IDR_N_LP (20)
         VideoCodec::H265 => h265_nal_type(n).is_some_and(|t| (16..=20).contains(&t)),
         _ => h264_nal_type(n) == Some(5),
     })

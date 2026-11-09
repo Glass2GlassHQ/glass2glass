@@ -98,7 +98,7 @@ const VPS_NUT: u8 = 32;
 pub(crate) const PPS_NUT: u8 = 34;
 const RASL_N_NUT: u8 = 8;
 const RASL_R_NUT: u8 = 9;
-const CRA_NUT: u8 = 21;
+pub(crate) const CRA_NUT: u8 = 21;
 const END_OF_SEQUENCE_NUT: u8 = 36;
 const END_OF_BITSTREAM_NUT: u8 = 37;
 
@@ -135,13 +135,20 @@ impl LeadingRaslFilter {
             Some(RASL_N_NUT | RASL_R_NUT) => !self.rasl_undecodable,
             _ => true,
         };
-        if nal_types()
-            .any(|nal_type| matches!(nal_type, END_OF_SEQUENCE_NUT | END_OF_BITSTREAM_NUT))
-        {
+        if nal_units_end_coded_video_sequence(nals) {
             self.next_irap_starts_sequence = true;
         }
         keep
     }
+}
+
+pub(crate) fn nal_units_end_coded_video_sequence(nals: &[&[u8]]) -> bool {
+    nals.iter().any(|nal| {
+        matches!(
+            h265_nal_type(nal),
+            Some(END_OF_SEQUENCE_NUT | END_OF_BITSTREAM_NUT)
+        )
+    })
 }
 
 /// Walk the NALs of `au` (Annex-B or AVCC, auto-detected), running `parse` over

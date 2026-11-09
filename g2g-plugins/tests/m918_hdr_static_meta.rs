@@ -16,6 +16,7 @@ use g2g_core::{
     VideoCodec,
 };
 use g2g_plugins::h264parse::H264Parse;
+use g2g_plugins::h265parse::H265Parse;
 use g2g_plugins::sei::{build_sei_nal, PAYLOAD_CONTENT_LIGHT_LEVEL, PAYLOAD_MASTERING_DISPLAY};
 
 /// One VCL IDR slice NAL, the picture the SEI describes.
@@ -178,4 +179,63 @@ async fn a_malformed_hdr_sei_is_ignored_not_fatal() {
     let mut sink = RecordingSink::default();
     el.process(frame(au, 0), &mut sink).await.unwrap();
     assert!(sink.frames[0].meta.get::<HdrStaticMeta>().is_none());
+}
+
+// H.265 NAL headers are the type shifted left one bit, then layer 0 and temporal id 1
+const H265_CRA: [u8; 8] = [0x00, 0x00, 0x00, 0x01, 21 << 1, 0x01, 0xAF, 0x00];
+const H265_TRAIL_R: [u8; 8] = [0x00, 0x00, 0x00, 0x01, 1 << 1, 0x01, 0xD0, 0x00];
+const H265_END_OF_SEQUENCE: [u8; 6] = [0x00, 0x00, 0x00, 0x01, 36 << 1, 0x01];
+
+fn h265_caps() -> Caps {
+    Caps::CompressedVideo {
+        codec: VideoCodec::H265,
+        width: Dim::Any,
+        height: Dim::Any,
+        framerate: Rate::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        alignment: g2g_core::BitstreamAlignment::Unspecified,
+    }
+}
+
+async fn h265_hdr_flags(access_units: Vec<Vec<u8>>) -> Vec<bool> {
+    let mut el = H265Parse::new();
+    el.configure_pipeline(&h265_caps()).unwrap();
+    let mut sink = RecordingSink::default();
+    for (seq, au) in access_units.into_iter().enumerate() {
+        el.process(frame(au, seq as u64), &mut sink).await.unwrap();
+    }
+    sink.frames
+        .iter()
+        .map(|f| f.meta.get::<HdrStaticMeta>().is_some())
+        .collect()
+}
+
+#[tokio::test]
+async fn an_h265_cra_ends_the_latched_metadata_only_after_an_end_of_sequence() {
+    let hdr_cra = [
+        build_sei_nal(
+            PAYLOAD_MASTERING_DISPLAY,
+            &mastering_payload(),
+            VideoCodec::H265,
+        ),
+        H265_CRA.to_vec(),
+    ]
+    .concat();
+    let open_gop = vec![
+        hdr_cra.clone(),
+        H265_TRAIL_R.to_vec(),
+        H265_CRA.to_vec(),
+        H265_TRAIL_R.to_vec(),
+    ];
+    assert_eq!(h265_hdr_flags(open_gop).await, [true; 4]);
+    let new_sequence = vec![
+        hdr_cra,
+        [H265_TRAIL_R.as_slice(), &H265_END_OF_SEQUENCE].concat(),
+        H265_CRA.to_vec(),
+        H265_TRAIL_R.to_vec(),
+    ];
+    assert_eq!(
+        h265_hdr_flags(new_sequence).await,
+        [true, true, false, false]
+    );
 }

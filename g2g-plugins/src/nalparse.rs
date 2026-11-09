@@ -144,6 +144,8 @@ pub struct NalParse<C: NalCodec> {
     /// re-attached to every frame until the next sequence starts.
     #[cfg(feature = "metadata")]
     hdr: Option<g2g_core::meta::HdrStaticMeta>,
+    #[cfg(feature = "metadata")]
+    after_end_of_sequence: bool,
     /// SPS VUI context the H.264 `pic_timing` SEI parse needs, latched from the
     /// last SPS (the SEI may ride an access unit that carries no SPS).
     #[cfg(feature = "metadata")]
@@ -175,6 +177,8 @@ impl<C: NalCodec> Default for NalParse<C> {
             cached: C::PARAM_SET_TYPES.iter().map(|_| Vec::new()).collect(),
             #[cfg(feature = "metadata")]
             hdr: None,
+            #[cfg(feature = "metadata")]
+            after_end_of_sequence: false,
             #[cfg(feature = "metadata")]
             pic_timing: crate::sei::PicTimingContext::default(),
             #[cfg(feature = "metadata")]
@@ -392,9 +396,7 @@ impl<C: NalCodec> NalParse<C> {
         #[cfg(feature = "metadata")]
         let sei = crate::sei::parse_nals(nals.iter().copied(), C::CODEC, self.pic_timing);
         #[cfg(feature = "metadata")]
-        if crate::annexb::nal_units_start_coded_video_sequence(C::CODEC, nals.iter().copied()) {
-            self.hdr = None;
-        }
+        self.end_hdr_at_new_sequence(&nals);
         drop(nals);
         #[cfg(feature = "metadata")]
         let input_pts_ns = timing.pts_ns;
@@ -416,6 +418,22 @@ impl<C: NalCodec> NalParse<C> {
         self.seq += 1;
         out.push(PipelinePacket::DataFrame(frame)).await?;
         Ok(())
+    }
+
+    #[cfg(feature = "metadata")]
+    fn end_hdr_at_new_sequence(&mut self, nals: &[&[u8]]) {
+        // H.265 8.1.3: a CRA behind an end of sequence starts a new coded video sequence
+        let cra_after_end = self.after_end_of_sequence
+            && nals
+                .iter()
+                .any(|nal| crate::annexb::h265_nal_type(nal) == Some(crate::h265parse::CRA_NUT));
+        if cra_after_end
+            || crate::annexb::nal_units_start_coded_video_sequence(C::CODEC, nals.iter().copied())
+        {
+            self.hdr = None;
+        }
+        self.after_end_of_sequence = C::CODEC == VideoCodec::H265
+            && crate::h265parse::nal_units_end_coded_video_sequence(nals);
     }
 
     /// Attach what the access unit's SEI carried, so it outlives the bitstream:
@@ -550,13 +568,8 @@ impl<C: NalCodec> AsyncElement for NalParse<C> {
                             crate::sei::parse_nals(nals.iter().copied(), C::CODEC, self.pic_timing);
                         // nal-aligned buffers carry the SEI ahead of the slice it describes
                         #[cfg(feature = "metadata")]
-                        if self.input_alignment != BitstreamAlignment::Nal
-                            && crate::annexb::nal_units_start_coded_video_sequence(
-                                C::CODEC,
-                                nals.iter().copied(),
-                            )
-                        {
-                            self.hdr = None;
+                        if self.input_alignment != BitstreamAlignment::Nal {
+                            self.end_hdr_at_new_sequence(&nals);
                         }
                         drop(nals);
                         frame.timing.keyframe = is_keyframe;
@@ -581,6 +594,7 @@ impl<C: NalCodec> AsyncElement for NalParse<C> {
                     #[cfg(feature = "metadata")]
                     {
                         self.input_stamps = crate::inputstamp::PendingInputStamps::default();
+                        self.after_end_of_sequence = false;
                     }
                     out.push(PipelinePacket::Flush).await?;
                 }
