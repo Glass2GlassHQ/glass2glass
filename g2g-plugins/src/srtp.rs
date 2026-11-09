@@ -795,7 +795,6 @@ pub enum SrtpError {
     InconsistentMki,
     AeadCipherTakesNoAuthentication,
     UnsupportedKeyMaterialLength { actual: usize },
-    TooManySynchronizationSources,
 }
 
 impl fmt::Display for SrtpError {
@@ -841,10 +840,6 @@ impl fmt::Display for SrtpError {
             Self::UnsupportedKeyMaterialLength { actual } => write!(
                 formatter,
                 "{actual} bytes of key material match no SRTP cipher's key plus salt"
-            ),
-            Self::TooManySynchronizationSources => write!(
-                formatter,
-                "already {MAXIMUM_RECEIVE_CONTEXTS} SRTP receive contexts, refusing a new source"
             ),
         }
     }
@@ -2144,6 +2139,7 @@ pub struct SrtpStreamStats {
 #[derive(Debug)]
 pub struct SrtpReceiverSet<P> {
     key_provider: P,
+    // least recently used first
     receivers: Vec<SrtpReceiver>,
     replay_window: usize,
 }
@@ -2244,7 +2240,7 @@ where
         else {
             return false;
         };
-        self.receivers.swap_remove(position);
+        self.receivers.remove(position);
         true
     }
 
@@ -2256,15 +2252,14 @@ where
         synchronization_source: u32,
         unprotect: impl FnOnce(&mut SrtpReceiver) -> Result<Vec<u8>, SrtpError>,
     ) -> Result<Vec<u8>, SrtpError> {
-        if let Some(receiver) = self
+        if let Some(position) = self
             .receivers
-            .iter_mut()
-            .find(|receiver| receiver.synchronization_source == synchronization_source)
+            .iter()
+            .position(|receiver| receiver.synchronization_source == synchronization_source)
         {
-            return unprotect(receiver);
-        }
-        if self.receivers.len() >= MAXIMUM_RECEIVE_CONTEXTS {
-            return Err(SrtpError::TooManySynchronizationSources);
+            let unprotected = unprotect(&mut self.receivers[position])?;
+            self.receivers[position..].rotate_left(1);
+            return Ok(unprotected);
         }
         let keys = self.key_provider.keys_for(synchronization_source);
         if keys.is_empty() {
@@ -2276,6 +2271,10 @@ where
             self.replay_window,
         )?;
         let unprotected = unprotect(&mut receiver)?;
+        if self.receivers.len() == MAXIMUM_RECEIVE_CONTEXTS {
+            // evicted sources pass the replay check again with their old packets
+            self.receivers.remove(0);
+        }
         self.receivers.push(receiver);
         Ok(unprotected)
     }
@@ -3282,7 +3281,7 @@ mod tests {
     }
 
     #[test]
-    fn receiver_set_refuses_sources_past_its_cap() {
+    fn receiver_set_evicts_the_least_recently_used_source_past_its_cap() {
         let unauthenticated = SrtpPolicy {
             cipher: SrtpCipher::Null,
             authentication: SrtpAuthentication::Null,
@@ -3292,29 +3291,34 @@ mod tests {
         let mut receivers = SrtpReceiverSet::new(|_| {
             Vec::from([SrtpKeyingMaterial::new(unauthenticated, &key, &salt, 0).unwrap()])
         });
-        let packet_from = |ssrc| {
+        let packet_from = |ssrc, sequence| {
             RtpHeader {
                 payload_type: 96,
                 marker: false,
-                sequence: 0,
+                sequence,
                 timestamp: 0,
                 ssrc,
             }
             .to_bytes()
             .to_vec()
         };
-        let mut sources = spoofed_sources(MAXIMUM_RECEIVE_CONTEXTS + 1);
-        for source in sources.by_ref().take(MAXIMUM_RECEIVE_CONTEXTS) {
-            receivers.unprotect_rtp(&packet_from(source)).unwrap();
+        let sources: Vec<u32> = spoofed_sources(MAXIMUM_RECEIVE_CONTEXTS + 1).collect();
+        let (one_too_many, first_contexts) = sources.split_last().unwrap();
+        for &source in first_contexts {
+            receivers.unprotect_rtp(&packet_from(source, 0)).unwrap();
         }
-        let one_too_many = sources.next().unwrap();
-        assert_eq!(
-            receivers.unprotect_rtp(&packet_from(one_too_many)),
-            Err(SrtpError::TooManySynchronizationSources)
-        );
-        assert_eq!(
-            receivers.stream_statistics().len(),
-            MAXIMUM_RECEIVE_CONTEXTS
+        let (oldest, second_oldest) = (first_contexts[0], first_contexts[1]);
+        receivers.unprotect_rtp(&packet_from(oldest, 1)).unwrap();
+        receivers
+            .unprotect_rtp(&packet_from(*one_too_many, 0))
+            .unwrap();
+        let kept = receivers.synchronization_sources();
+        assert_eq!(kept.len(), MAXIMUM_RECEIVE_CONTEXTS);
+        assert!(kept.contains(&oldest), "a source in use is kept");
+        assert!(kept.contains(one_too_many));
+        assert!(
+            !kept.contains(&second_oldest),
+            "the least recently used source is evicted"
         );
     }
 
