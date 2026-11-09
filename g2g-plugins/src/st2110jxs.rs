@@ -37,7 +37,8 @@
 //! that never sets the marker cannot grow it without limit), drops a packet whose
 //! packetization mode it does not implement (`K=1` slice mode), and discards a
 //! partial frame when a new timestamp arrives before the marker (a lost final
-//! packet), rather than emitting a truncated or run-on codestream.
+//! packet) or a packet index skips (a lost packet), rather than emitting a
+//! truncated or run-on codestream.
 
 use alloc::vec::Vec;
 
@@ -46,6 +47,8 @@ use g2g_core::MediaClock;
 
 /// RFC 9134 payload header length (T|K|L|I|F|SEP|P, one 32-bit word).
 const JXS_HEADER_LEN: usize = 4;
+// SEP and P, the low 22 bits of the header
+const PACKET_INDEX_MASK: u32 = 0x3F_FFFF;
 
 /// Pack the RFC 9134 4-octet payload header. `last` sets `L`; `packet_index` is the
 /// packet number within the packetization unit, split into the 11-bit `P` counter
@@ -157,6 +160,10 @@ pub struct St2110JxsDepacketizer {
     buf: Vec<u8>,
     /// The accumulating frame's RTP timestamp (all its packets share it).
     ts: Option<u32>,
+    /// The `SEP`/`P` packet index the frame's next packet must carry.
+    next_packet_index: u32,
+    /// A packet of the accumulating frame was lost, so the rest of it is dropped.
+    damaged: bool,
     /// Upper bound on a reassembled codestream; a sender that never marks the frame
     /// end cannot grow the buffer past this (never trust the stream).
     max_frame_bytes: usize,
@@ -170,6 +177,8 @@ impl St2110JxsDepacketizer {
         Self {
             buf: Vec::new(),
             ts: None,
+            next_packet_index: 0,
+            damaged: false,
             max_frame_bytes: max_frame_bytes.max(1),
         }
     }
@@ -193,16 +202,26 @@ impl St2110JxsDepacketizer {
             return None;
         }
         let payload = &rtp_payload[JXS_HEADER_LEN..];
+        let packet_index = u32::from_be_bytes([hdr[0], hdr[1], hdr[2], hdr[3]]) & PACKET_INDEX_MASK;
 
         // A new frame's timestamp before the previous frame's marker means the marker
         // packet was lost: drop the stale partial rather than run two frames together.
-        match self.ts {
-            Some(t) if t != rtp_timestamp => {
-                self.buf.clear();
-                self.ts = Some(rtp_timestamp);
+        if self.ts != Some(rtp_timestamp) {
+            self.buf.clear();
+            self.ts = Some(rtp_timestamp);
+            self.next_packet_index = 0;
+            self.damaged = false;
+        }
+        if packet_index != self.next_packet_index {
+            self.buf.clear();
+            self.damaged = true;
+        }
+        self.next_packet_index = packet_index.wrapping_add(1);
+        if self.damaged {
+            if marker {
+                self.ts = None;
             }
-            None => self.ts = Some(rtp_timestamp),
-            _ => {}
+            return None;
         }
 
         // Bound the reassembly buffer; a run-on frame is discarded, not accumulated.
@@ -341,6 +360,29 @@ mod tests {
         }
         assert!(!completed, "no frame completes without a marker");
         assert!(rx.buf.len() <= 256, "reassembly buffer stays bounded");
+    }
+
+    #[test]
+    fn a_frame_missing_a_packet_is_dropped() {
+        let mut tx = St2110JxsPacketizer::new(96, 1, RTP_HEADER_LEN + JXS_HEADER_LEN + 20);
+        let frame_a = tx.packetize(&codestream(100), 1_000_000_000);
+        let frame_b = tx.packetize(&codestream(30), 1_000_000_000 + 16_000_000);
+        assert!(frame_b.len() > 1, "precondition: frame B spans packets");
+        let mut rx = St2110JxsDepacketizer::new(1 << 20);
+        let mut frames = Vec::new();
+        let middle_lost = frame_a[..2].iter().chain(&frame_a[3..]);
+        let first_lost = frame_b[1..].iter();
+        for p in middle_lost.chain(first_lost).chain(&frame_a) {
+            frames.extend(rx.depacketize(p));
+        }
+        assert_eq!(
+            frames
+                .iter()
+                .map(|f| f.codestream.clone())
+                .collect::<Vec<_>>(),
+            [codestream(100)],
+            "only the frame that arrived whole"
+        );
     }
 
     #[test]

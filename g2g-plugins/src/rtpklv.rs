@@ -161,6 +161,7 @@ impl RtpKlvDepayloader {
         let seq = parsed.header.sequence;
         let marker = parsed.header.marker;
 
+        let first_packet = self.last_seq.is_none();
         if let Some(prev) = self.last_seq {
             if seq != prev.wrapping_add(1) {
                 self.unit.clear();
@@ -173,6 +174,10 @@ impl RtpKlvDepayloader {
             packet.get(parsed.payload_offset..parsed.payload_offset + parsed.payload_len)?;
         if payload.is_empty() {
             return None;
+        }
+        // a receiver that joins mid-unit first sees a fragment that opens on no key
+        if first_packet && !payload.starts_with(&crate::klv::KLV_UL_PREFIX) {
+            self.dropping = true;
         }
 
         if self.dropping {
@@ -214,7 +219,9 @@ mod tests {
     use super::*;
 
     fn unit_bytes(len: usize) -> Vec<u8> {
-        (0..len as u32).map(|i| i as u8).collect()
+        let mut unit = crate::klv::KLV_UL_PREFIX.to_vec();
+        unit.extend((unit.len()..len).map(|i| i as u8));
+        unit
     }
 
     fn marker(packet: &[u8]) -> bool {
@@ -268,6 +275,27 @@ mod tests {
             .collect();
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].data, unit, "fragments reassemble the unit");
+    }
+
+    #[test]
+    fn joining_mid_unit_skips_to_the_next_whole_unit() {
+        let mut pay = RtpKlvPacketizer::new(98, 1).with_max_payload(8);
+        let first = pay.packetize(&unit_bytes(40), 1);
+        let second_unit = unit_bytes(12);
+        let second = pay.packetize(&second_unit, 2);
+        assert!(
+            first.len() > 2,
+            "precondition: the first unit spans packets"
+        );
+
+        let mut depay = RtpKlvDepayloader::new();
+        let out: Vec<_> = first[1..]
+            .iter()
+            .chain(&second)
+            .filter_map(|p| depay.depacketize(p))
+            .collect();
+        assert_eq!(out.len(), 1, "the joined-into unit is not emitted");
+        assert_eq!(out[0].data, second_unit);
     }
 
     #[test]

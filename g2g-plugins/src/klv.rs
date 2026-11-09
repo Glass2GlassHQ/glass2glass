@@ -145,13 +145,16 @@ pub(crate) fn checksum_16(buf: &[u8]) -> u16 {
     bcc
 }
 
+/// The first 4 bytes of every SMPTE ST 336 KLV key (the SMPTE UL designator).
+pub(crate) const KLV_UL_PREFIX: [u8; 4] = [0x06, 0x0E, 0x2B, 0x34];
+
 /// Split a buffer (one PES payload) into the KLV packets it carries: each starts
 /// with the 4-byte SMPTE ST 336 prefix, a 16-byte key, then a BER length. Stops
 /// at the first byte run that is not a KLV packet, so a truncated tail is
 /// dropped rather than over-read.
 pub fn split_klv_packets(mut buf: &[u8]) -> Vec<&[u8]> {
     let mut out = Vec::new();
-    while buf.len() >= 17 && buf[..4] == [0x06, 0x0E, 0x2B, 0x34] {
+    while buf.len() >= 17 && buf.starts_with(&KLV_UL_PREFIX) {
         let Some((len, len_bytes)) = ber_length(buf, 16) else {
             break;
         };

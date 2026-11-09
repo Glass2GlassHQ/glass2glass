@@ -478,6 +478,8 @@ pub struct St2110VideoDepacketizer {
     groups_per_line: usize,
     /// The frame under reassembly; runs are written in place, the marker bit ends it.
     frame: Vec<u8>,
+    /// RTP timestamp of the frame under reassembly, `None` while `frame` is blank.
+    frame_timestamp: Option<u32>,
 }
 
 impl St2110VideoDepacketizer {
@@ -490,6 +492,7 @@ impl St2110VideoDepacketizer {
             height,
             groups_per_line: layout.groups_per_line(),
             frame: alloc::vec![0u8; layout.frame_size()],
+            frame_timestamp: None,
         })
     }
 
@@ -510,6 +513,14 @@ impl St2110VideoDepacketizer {
         }
         let opg = self.layout.sampling.octets_per_group();
         let ppg = self.layout.sampling.pixels_per_group();
+        // a new timestamp before the marker means the previous frame lost its last packet
+        if self
+            .frame_timestamp
+            .is_some_and(|timestamp| timestamp != rtp_timestamp)
+        {
+            self.frame.fill(0);
+        }
+        self.frame_timestamp = Some(rtp_timestamp);
 
         // Find the end of the SRD header list (C=1 chains another header).
         let mut headers_end = EXT_SEQ_LEN;
@@ -551,6 +562,7 @@ impl St2110VideoDepacketizer {
             return None;
         }
         // the finished frame goes downstream, reassembly restarts in a fresh buffer
+        self.frame_timestamp = None;
         let fresh = alloc::vec![0u8; self.frame.len()];
         Some(St2110VideoFrame {
             rtp_timestamp,
@@ -660,6 +672,35 @@ mod tests {
                 .get()
         );
         assert_eq!(f.bytes, frame, "RGBA pixels survive the round trip");
+    }
+
+    #[test]
+    fn a_frame_that_lost_its_marker_packet_is_not_merged_into_the_next() {
+        let (w, h) = (8usize, 4usize);
+        let stride = w * 4;
+        let first = ramp(stride * h);
+        let second = alloc::vec![0x55u8; stride * h];
+        let max_packet = RTP_HEADER_LEN + EXT_SEQ_LEN + SRD_HEADER_LEN + stride;
+        let mut tx = St2110VideoPacketizer::new(96, 1, Sampling::Rgba8, max_packet);
+        let first_packets = tx.packetize(&first, w, h, 0).unwrap();
+        let second_packets = tx.packetize(&second, w, h, 1_000_000_000).unwrap();
+        assert_eq!(second_packets.len(), h, "precondition: one line per packet");
+
+        let mut rx = St2110VideoDepacketizer::new(RawVideoFormat::Rgba8, w, h).unwrap();
+        let lost_marker = &first_packets[..first_packets.len() - 1];
+        let lost_first_line = &second_packets[1..];
+        let frames: Vec<_> = lost_marker
+            .iter()
+            .chain(lost_first_line)
+            .filter_map(|p| rx.depacketize(p))
+            .collect();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(
+            frames[0].bytes[..stride],
+            [0; 32],
+            "the first frame's line 0 is gone"
+        );
+        assert_eq!(frames[0].bytes[stride..], second[stride..]);
     }
 
     #[test]

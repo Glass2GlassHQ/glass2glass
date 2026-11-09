@@ -22,6 +22,7 @@ use alloc::vec::Vec;
 
 use g2g_core::{G2gError, VideoCodec};
 
+use crate::klv::KLV_UL_PREFIX;
 use crate::video_pts_synth::{backfill_leading_pts_90khz, LeadingUnits, VideoPtsSynth};
 
 /// MPEG-TS packet size in bytes (the standard 188). [`TsPacketSplitter`] also
@@ -218,9 +219,6 @@ const VANC_REGISTRATION_ID: &[u8; 4] = b"VANC";
 // ISO/IEC 13818-1 2.4.3.7: the PES flag byte bit ST 2038 requires set
 const PES_DATA_ALIGNMENT_INDICATOR: u8 = 0x04;
 const PES_FLAGS_OFFSET: usize = 6;
-
-/// The first 4 bytes of every SMPTE ST 336 KLV key (the SMPTE UL designator).
-const KLV_UL_PREFIX: [u8; 4] = [0x06, 0x0E, 0x2B, 0x34];
 
 /// One elementary stream announced by the PMT.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
