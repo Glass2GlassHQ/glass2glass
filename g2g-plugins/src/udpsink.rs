@@ -8,7 +8,8 @@
 //! The RTP timestamp is derived from `FrameTiming::pts_ns` at the 90 kHz H.264
 //! or 48 kHz Opus media clock; sequence numbers and the per-AU marker bit come
 //! from the packetizer. Opt-in RFC 3550 sender reports
-//! (`with_rtcp_sender_reports`) let a receiver sync the RTP clock to wall time. The RTSP `ANNOUNCE`/`RECORD`
+//! (`with_rtcp_sender_reports`) let a receiver sync the RTP clock to wall time,
+//! and with them on, EOS sends a final sender report plus a BYE. The RTSP `ANNOUNCE`/`RECORD`
 //! handshake for Wowza-style ingest is the remaining live-egress follow-up (it
 //! needs the network port the sandbox blocks).
 //!
@@ -1075,10 +1076,22 @@ impl AsyncElement for UdpSink {
                         }
                     }
                 }
-                // RTP carries no in-band end marker; an RTCP BYE is the M47
-                // follow-up. Sequence numbers persist so a receiver sees clean
-                // termination of the flow.
-                PipelinePacket::Eos => self.eos_seen = true,
+                // RFC 3550 requires every compound RTCP packet, BYE included, to start with an SR or RR
+                PipelinePacket::Eos => {
+                    self.eos_seen = true;
+                    let rtp_mode = self.bytestream.is_none() && self.packetizer.is_some();
+                    if rtp_mode && self.rtcp_sr_interval_ns.is_some() {
+                        self.ensure_socket()?;
+                        let mut goodbye = self.sender_counters.sender_report(
+                            self.ssrc,
+                            rtcp::ntp_now(),
+                            self.last_rtp_ts,
+                        );
+                        goodbye.extend(rtcp::build_bye(self.ssrc));
+                        self.send_datagram(&goodbye).await?;
+                        self.sender_reports_sent += 1;
+                    }
+                }
                 // A seek does not reset the RTP sequence: a receiver tracks loss
                 // by gaps, so the numbering continues across the flush.
                 PipelinePacket::Flush => self.capture_clock.restart(),

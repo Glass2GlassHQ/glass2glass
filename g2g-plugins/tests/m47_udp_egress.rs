@@ -269,3 +269,46 @@ async fn sink_emits_rtcp_sender_report_when_enabled() {
 
     assert_eq!(sink.sender_reports_sent(), 1);
 }
+
+#[tokio::test]
+async fn eos_sends_a_sender_report_and_bye_when_reports_are_on() {
+    use g2g_plugins::rtcp::{self, RtcpPacket};
+
+    let receiver = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("bind receiver");
+    let dest: SocketAddr = receiver.local_addr().expect("local addr");
+    let mut sink = UdpSink::new(dest)
+        .with_rtp(PAYLOAD_TYPE, SSRC)
+        .with_max_payload(MAX_PAYLOAD)
+        .with_rtcp_sender_reports(0);
+    sink.configure_pipeline(&h264_caps()).expect("configure");
+
+    let sps: &[u8] = &[0x67, 0x42, 0xC0, 0x1E];
+    let pps: &[u8] = &[0x68, 0xCE, 0x3C, 0x80];
+    let mut out = NullOut;
+    sink.process(
+        PipelinePacket::DataFrame(au_frame(annexb(&[sps, pps]), 0, 0)),
+        &mut out,
+    )
+    .await
+    .expect("send AU");
+    // two media packets and the sender report due on the first frame
+    recv_n(&receiver, 3).await;
+    sink.process(PipelinePacket::Eos, &mut out)
+        .await
+        .expect("eos");
+
+    let goodbye = recv_n(&receiver, 1).await.remove(0);
+    let packets = rtcp::parse_compound(&goodbye);
+    assert!(
+        matches!(
+            packets.as_slice(),
+            [
+                RtcpPacket::SenderReport { ssrc: report_ssrc, .. },
+                RtcpPacket::Bye { ssrc: bye_ssrcs },
+            ] if *report_ssrc == SSRC && bye_ssrcs.as_slice() == [SSRC]
+        ),
+        "{packets:?}"
+    );
+}
