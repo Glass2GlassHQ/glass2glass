@@ -805,8 +805,8 @@ alsa-sink = ["std", "dep:libloading", "dep:libc"]
 # SDI output for Blackmagic Design DeckLink (decklinkvideosink, decklinkaudiosink).
 # build.rs compiles a C++ shim over the vendored SDK headers, and the SDK's
 # dispatch file loads the driver's libDeckLinkAPI.so at runtime, so building
-# needs only a C++ compiler. Linux-only, implies std.
-decklink = ["std"]
+# needs only a C++ compiler. Linux-only, implies std and metadata.
+decklink = ["std", "metadata"]
 # Linux ALSA capture source (AlsaSrc): reads interleaved PCM from an ALSA capture
 # device via libasound, the input mirror of AlsaSink and the non-PipeWire mic
 # path. Blocking reads run on a dedicated worker thread. libasound is loaded at

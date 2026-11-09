@@ -9,15 +9,12 @@ use g2g_core::{
     HardwareError, MonotonicClock, PresentationPacer, RawVideoFormat,
 };
 
+use crate::st291::AncPacket;
+
 use crate::decklink::{
-    log_target, DeckLinkOpener, DeckLinkOutput, DisplayMode, ScheduledVideoFrame,
+    log_target, DeckLinkOpener, DeckLinkOutput, DisplayMode, ScheduledVideoFrame, PREROLL_NS,
+    SCHEDULE_LEAD_NS,
 };
-
-// slack between the first buffer and its display time, so the other sink on the device can catch up
-const PREROLL_NS: u64 = 200_000_000;
-
-// GStreamer's decklinkvideosink hands a frame over 30 ms before it is due
-const SCHEDULE_LEAD_NS: u64 = 30_000_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct PictureLayout {
@@ -136,7 +133,11 @@ impl SharedOutput {
         Ok(board_ns)
     }
 
-    pub(crate) fn enable_video(&self, mode: &'static DisplayMode) -> Result<(), G2gError> {
+    pub(crate) fn enable_video(
+        &self,
+        mode: &'static DisplayMode,
+        vanc: bool,
+    ) -> Result<(), G2gError> {
         let mut state = self.lock()?;
         if state.video_enabled {
             g2g_error!(
@@ -146,7 +147,7 @@ impl SharedOutput {
             );
             return Err(G2gError::Hardware(HardwareError::Other));
         }
-        self.board(&mut state)?.enable_video(mode)?;
+        self.board(&mut state)?.enable_video(mode, vanc)?;
         state.video_enabled = true;
         Ok(())
     }
@@ -212,6 +213,7 @@ impl SharedOutput {
         deadline_ns: u64,
         layout: &PictureLayout,
         pixels: &[u8],
+        ancillary: &[AncPacket],
     ) -> Result<u64, G2gError> {
         let mut state = self.lock()?;
         let (board_now, stream_time) = self.stream_time_ns(&mut state, sync, deadline_ns)?;
@@ -231,6 +233,7 @@ impl SharedOutput {
             row_bytes: layout.row_bytes,
             display_time_ns,
             duration_ns,
+            ancillary,
         })?;
         if !playing {
             // stream time then runs on from the board clock reading

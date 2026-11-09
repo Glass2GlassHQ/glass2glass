@@ -1,6 +1,6 @@
 #![cfg(all(target_os = "linux", feature = "decklink"))]
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use g2g_core::{
@@ -8,42 +8,15 @@ use g2g_core::{
     HardwareError, Interlace, MonotonicClock, PipelineClock, PipelinePacket, PropError, PropValue,
     RawVideoFormat,
 };
-use g2g_plugins::decklink::{display_mode, DisplayMode, DISPLAY_MODES};
+use g2g_plugins::decklink::{DISPLAY_MODES, PREROLL_NS};
 use g2g_plugins::decklinkvideosink::DeckLinkVideoSink;
 
 #[path = "common/decklink_board.rs"]
 mod decklink_board;
 use decklink_board::{
-    buffer, driver_installed, manual_board_time, mock_opener, picture_bytes, video_caps, BoardLog,
-    BoardTime, ManualClock, NullOutput, SharedLog,
+    arrival_ns, buffer, driver_installed, manual_board_time, mode, picture_bytes, sink_on_mock,
+    video_caps, BoardTime, ManualClock, NullOutput, BOARD_START_NS, ELECTED_START_NS,
 };
-
-const MILLISECOND: u64 = 1_000_000;
-// the sink holds a buffer until 30 ms before it is due, and the first is due 200 ms after it arrives
-const SCHEDULE_LEAD_NS: u64 = 30 * MILLISECOND;
-const PREROLL_NS: u64 = 200 * MILLISECOND;
-// a whole number of 25 fps frames
-const BOARD_START_NS: u64 = 1_000_000 * MILLISECOND;
-const ELECTED_START_NS: u64 = 5_000 * MILLISECOND;
-
-fn mode(name: &str) -> &'static DisplayMode {
-    display_mode(name).expect("a GStreamer mode name")
-}
-
-// the first buffer arrives at the clocks' start and fixes when running time zero is due, later
-// ones arrive at the moment the sink hands them over, so only the first waits
-fn arrival_ns(index: u64, pts_ns: u64) -> u64 {
-    match index {
-        0 => 0,
-        _ => PREROLL_NS - SCHEDULE_LEAD_NS + pts_ns,
-    }
-}
-
-fn sink_on_mock(device_number: u32, time: BoardTime) -> (DeckLinkVideoSink, SharedLog) {
-    let log: SharedLog = Arc::new(Mutex::new(BoardLog::default()));
-    let sink = DeckLinkVideoSink::with_opener(device_number, mock_opener(Arc::clone(&log), time));
-    (sink, log)
-}
 
 #[tokio::test]
 async fn frames_are_scheduled_at_their_stream_times_and_play_out_at_end_of_stream() {

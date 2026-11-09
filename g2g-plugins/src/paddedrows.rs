@@ -13,7 +13,8 @@ use alloc::vec::Vec;
 
 #[cfg(any(
     all(target_os = "linux", feature = "v4l2"),
-    all(target_os = "linux", feature = "pipewire")
+    all(target_os = "linux", feature = "pipewire"),
+    all(target_os = "linux", feature = "decklink")
 ))]
 use g2g_core::frame::Frame;
 use g2g_core::RawVideoFormat;
@@ -49,6 +50,7 @@ pub(crate) fn plane_shapes_with_stride_shift(
 #[cfg(any(
     all(target_os = "linux", feature = "v4l2"),
     all(target_os = "linux", feature = "pipewire"),
+    all(target_os = "linux", feature = "decklink"),
     all(target_os = "linux", feature = "dmabuf-wgpu"),
     all(target_os = "linux", feature = "unixfd"),
     all(target_os = "linux", feature = "kms-sink"),
@@ -70,6 +72,7 @@ pub(crate) struct PaddedPlane {
 #[cfg(any(
     all(target_os = "linux", feature = "v4l2"),
     all(target_os = "linux", feature = "pipewire"),
+    all(target_os = "linux", feature = "decklink"),
     all(target_os = "linux", feature = "dmabuf-wgpu"),
     all(target_os = "linux", feature = "unixfd"),
     all(target_os = "linux", feature = "kms-sink"),
@@ -226,7 +229,8 @@ pub(crate) fn unpack_tight(
     feature = "metadata",
     any(
         all(target_os = "linux", feature = "v4l2"),
-        all(target_os = "linux", feature = "pipewire")
+        all(target_os = "linux", feature = "pipewire"),
+        all(target_os = "linux", feature = "decklink")
     )
 ))]
 pub(crate) fn padded_plane_layout(
@@ -252,7 +256,8 @@ pub(crate) fn padded_plane_layout(
 /// the `metadata` feature, where there is no meta to attach.
 #[cfg(any(
     all(target_os = "linux", feature = "v4l2"),
-    all(target_os = "linux", feature = "pipewire")
+    all(target_os = "linux", feature = "pipewire"),
+    all(target_os = "linux", feature = "decklink")
 ))]
 pub(crate) fn declare_padded_rows(
     frame: &mut Frame,

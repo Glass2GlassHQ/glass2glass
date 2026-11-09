@@ -126,6 +126,8 @@ use crate::dav1ddec::Dav1dDec;
 use crate::decklinkaudiosink::DeckLinkAudioSink;
 #[cfg(all(target_os = "linux", feature = "decklink"))]
 use crate::decklinkvideosink::DeckLinkVideoSink;
+#[cfg(all(target_os = "linux", feature = "decklink"))]
+use crate::decklinkvideosrc::DeckLinkVideoSrc;
 #[cfg(all(target_os = "linux", feature = "ffmpeg"))]
 use crate::ffmpegdec::Backend as FfmpegBackend;
 #[cfg(all(
@@ -2990,6 +2992,7 @@ pub static FEATURE_GATED_ELEMENTS: &[FeatureGatedElement] = &{
         "kmssink" => "kms-sink" on "linux";
         "decklinkvideosink" => "decklink" on "linux";
         "decklinkaudiosink" => "decklink" on "linux";
+        "decklinkvideosrc" => "decklink" on "linux";
         "alsasink" => "alsa-sink" on "linux";
         "alsasrc" => "alsa-src" on "linux";
         "pulsesink" => "pulse-sink" on "linux";
@@ -4023,6 +4026,22 @@ fn register_feature_gated(reg: &mut Registry) {
         LaunchFactory::of::<DeckLinkAudioSink>("decklinkaudiosink", || {
             Box::new(DeckLinkAudioSink::new())
         })
+        .with_experimental(),
+    );
+    #[cfg(all(target_os = "linux", feature = "decklink"))]
+    reg.register_source(
+        SourceFactory::new(
+            "decklinkvideosrc",
+            Caps::RawVideo {
+                format: RawVideoFormat::Uyvy,
+                width: Dim::Any,
+                height: Dim::Any,
+                framerate: Rate::Any,
+                interlace: g2g_core::Interlace::Any,
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            },
+            || Box::new(DeckLinkVideoSrc::new()),
+        )
         .with_experimental(),
     );
     // Linux audio capture (M886), the non-PipeWire mic paths.

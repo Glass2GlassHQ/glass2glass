@@ -46,7 +46,11 @@ impl ProducerSlot {
     fn announce_caps(&mut self, caps: &Caps) {
         self.caps = Some(caps.clone());
         self.consumers.retain(|consumer| {
-            deliver_dropping_oldest(&consumer.sender, PipelinePacket::CapsChanged(caps.clone()))
+            deliver_dropping_oldest(
+                &consumer.sender,
+                PipelinePacket::CapsChanged(caps.clone()),
+                is_data_frame,
+            )
         });
     }
 }
@@ -54,14 +58,22 @@ impl ProducerSlot {
 static PRODUCERS: Mutex<BTreeMap<String, ProducerSlot>> = Mutex::new(BTreeMap::new());
 static NEXT_CONSUMER_ID: AtomicUsize = AtomicUsize::new(0);
 
-fn deliver_dropping_oldest(sender: &Sender<PipelinePacket>, packet: PipelinePacket) -> bool {
-    let packet = match sender.try_send(packet) {
+pub(crate) fn deliver_dropping_oldest<T>(
+    sender: &Sender<T>,
+    item: T,
+    droppable: impl Fn(&T) -> bool,
+) -> bool {
+    let item = match sender.try_send(item) {
         Ok(()) => return true,
         Err((_, SendError::Closed)) => return false,
-        Err((packet, SendError::Full)) => packet,
+        Err((item, SendError::Full)) => item,
     };
-    sender.evict_front_matching(|queued| matches!(queued, PipelinePacket::DataFrame(_)));
-    !matches!(sender.try_send(packet), Err((_, SendError::Closed)))
+    sender.evict_front_matching(droppable);
+    !matches!(sender.try_send(item), Err((_, SendError::Closed)))
+}
+
+fn is_data_frame(packet: &PipelinePacket) -> bool {
+    matches!(packet, PipelinePacket::DataFrame(_))
 }
 
 fn claim(name: &str, caps: &Caps) -> Result<(), G2gError> {
@@ -104,7 +116,11 @@ fn publish_frame(name: &str, frame: Frame) {
             frame.as_ref().map(Frame::share)
         };
         copy.is_some_and(|copy| {
-            deliver_dropping_oldest(&consumer.sender, PipelinePacket::DataFrame(copy))
+            deliver_dropping_oldest(
+                &consumer.sender,
+                PipelinePacket::DataFrame(copy),
+                is_data_frame,
+            )
         })
     });
     if let Some(slot) = PRODUCERS.lock().get_mut(name) {
@@ -123,7 +139,11 @@ fn subscribe(name: &str, max_buffers: usize) -> Subscription {
     let mut producers = PRODUCERS.lock();
     let slot = producers.entry(name.to_string()).or_default();
     if let Some(caps) = &slot.caps {
-        deliver_dropping_oldest(&sender, PipelinePacket::CapsChanged(caps.clone()));
+        deliver_dropping_oldest(
+            &sender,
+            PipelinePacket::CapsChanged(caps.clone()),
+            is_data_frame,
+        );
     }
     slot.consumers.push(Consumer { id, sender });
     Subscription {

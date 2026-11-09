@@ -186,14 +186,15 @@ kernel's own exporter (a sealed memfd through `/dev/udmabuf`) and played through
 without making a sound; the other two sinks read their payload through the same
 `dmabufmap` reader.
 
-## SDI output
+## SDI output and capture
 
 `decklinkvideosink` and `decklinkaudiosink` (`decklink` feature, Linux) play
-out through an SDI output for Blackmagic Design DeckLink.
+out through an SDI output for Blackmagic Design DeckLink, and `decklinkvideosrc`
+captures from its input.
 `g2g-plugins/vendor/decklink/linux` holds the SDK 16.0 headers and its dispatch
 file, unchanged and with Blackmagic's notice. `build.rs` compiles them with
-`csrc/decklink_shim.cpp`, a C ABI over the output calls of the SDK's COM-style
-C++ interfaces. The dispatch file opens `libDeckLinkAPI.so` with `dlopen` on
+`csrc/decklink_shim.cpp`, a C ABI over the output and input calls of the SDK's
+COM-style C++ interfaces. The dispatch file opens `libDeckLinkAPI.so` with `dlopen` on
 first use, so the crate builds and runs without the driver. Opening a device on
 a host without it fails with `HardwareError::LibraryNotFound("libDeckLinkAPI.so")`,
 and any other SDK failure carries its HRESULT in `HardwareError::DeckLink`.
@@ -216,6 +217,16 @@ video sink takes UYVY, BGRA, v210 and r210 at the strides `RawVideoFormat`
 gives them. The audio sink takes 48 kHz S16LE or S32LE in 2, 8 or 16 channels,
 as GStreamer's does.
 
+With `output-vanc`, as in GStreamer 1.28, the video sink enables video output
+with the SDK's VANC flag and hands each frame's `AncillaryMeta` packets to the
+board. The shim attaches them through `IDeckLinkVideoFrameAncillaryPackets`, so
+the SDK encodes the VANC lines, where GStreamer writes them with its own VBI
+encoder. User data goes as 8-bit words and the SDK adds the parity bits. Packets
+on lines 0x7FE and 0x7FF, which ST 2038 uses for no line, are sent on line zero,
+and the SDK picks their line. GStreamer drops them. As in GStreamer, the horizontal
+offset and the C/Y channel flag are not passed on. The property cannot change
+once video output is enabled.
+
 Playback is scheduled, as in GStreamer: a buffer goes to the board 30 ms before
 it is due, and the board shows it at its stream time. A buffer is due at a
 deadline on the elected clock. On a live path that is the pipeline base time
@@ -236,7 +247,32 @@ board reading each time a buffer is scheduled and offset so it starts at the
 monotonic time. GStreamer's audio sink offers the same clock as its video sink.
 Here only the video sink offers it, which elects the same clock.
 
-No board has run either element yet.
+`decklinkvideosrc` reaches the board through the `DeckLinkInput` trait. The
+SDK calls the shim on its own thread for each captured frame. The shim copies
+the picture and the frame's VANC packets into a channel of `buffer-size` frames,
+GStreamer's default 5, which drops its oldest frame when downstream falls
+behind. With a `mode` set, the caps come from the mode and `video-format`
+(8-bit YUV when `auto`) without opening the board. With `mode=auto`, as in
+GStreamer, the board starts in ntsc with input format detection, and
+negotiation waits for the first frame. When the SDK reports a new input format,
+the source restarts capture in that mode and pixel format the way GStreamer
+does (pause, enable, flush, start), drops the frames still queued in the old
+mode, and sends `CapsChanged` before the next frame. 8-bit RGB input is
+captured as BGRA, where GStreamer picks ARGB. A set `video-format` that differs
+from the detected one fails the run, as in GStreamer. Frames flagged as having
+no input source still flow and clear `signal`, unless `drop-no-signal-frames`
+drops them. `output-vanc` attaches each frame's packets as `AncillaryMeta`, with
+the line numbers the SDK reports and 8-bit user data words.
+
+The source offers the board clock at `LiveSource` priority, a `DriftClock` fed
+a hardware clock reading per frame through a `DeviceClockOffset`. GStreamer's
+video source offers no clock and maps capture times onto the pipeline clock
+instead. A frame's time is the board's hardware timestamp of the frame minus
+that of the first, anchored on running time with `CaptureAnchor` one frame
+period back. Capture across a mode restart keeps the same timeline, since the
+hardware clock does not restart.
+
+No board has run any of these elements yet.
 
 ## Echo cancellation
 

@@ -1797,6 +1797,8 @@ pub mod decklinkaudiosink;
 mod decklinkoutput;
 #[cfg(all(target_os = "linux", feature = "decklink"))]
 pub mod decklinkvideosink;
+#[cfg(all(target_os = "linux", feature = "decklink"))]
+pub mod decklinkvideosrc;
 
 // Linux audio render sinks and capture sources: the two ends of the audio path,
 // the analogs of the Windows-only WasapiSink / WasapiSrc. Each links a different

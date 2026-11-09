@@ -5,24 +5,20 @@ use std::sync::{Arc, Mutex};
 use g2g_core::{
     AsyncElement, AudioFormat, ClockSync, G2gError, Interlace, PropValue, RawVideoFormat,
 };
-use g2g_plugins::decklink::{display_mode, DisplayMode};
+use g2g_plugins::decklink::{DisplayMode, PREROLL_NS};
 use g2g_plugins::decklinkaudiosink::DeckLinkAudioSink;
 use g2g_plugins::decklinkvideosink::DeckLinkVideoSink;
 
 #[path = "common/decklink_board.rs"]
 mod decklink_board;
 use decklink_board::{
-    buffer, manual_board_time, mock_opener, pcm_caps, picture_bytes, video_caps, BoardLog,
-    ManualClock, NullOutput, ScheduledSamples, SharedLog,
+    buffer, manual_board_time, mock_opener, mode, pcm_caps, picture_bytes, video_caps, BoardLog,
+    ManualClock, NullOutput, ScheduledSamples, SharedLog, BOARD_START_NS, ELECTED_START_NS,
 };
 
 const MILLISECOND: u64 = 1_000_000;
 const NANOS_PER_SECOND: u64 = 1_000_000_000;
 const SAMPLE_RATE: u64 = 48_000;
-// the first buffer on the device is due 200 ms after it arrives
-const PREROLL_NS: u64 = 200 * MILLISECOND;
-const BOARD_START_NS: u64 = 1_000_000 * MILLISECOND;
-const ELECTED_START_NS: u64 = 5_000 * MILLISECOND;
 // more than a frame, so a picture timed from its own arrival would land a frame late
 const VIDEO_LAG_NS: u64 = 40 * MILLISECOND;
 const STEREO: u8 = 2;
@@ -75,7 +71,7 @@ fn device(device_number: u32, mode: &DisplayMode) -> Device {
 
 #[tokio::test]
 async fn audio_follows_each_video_frame_with_its_share_of_samples() {
-    let mode = display_mode("1080p2997").expect("mode");
+    let mode = mode("1080p2997");
     let mut device = device(164201, mode);
     // 29.97 fps carries 8008 samples in every five frames
     let samples_per_frame: [u32; 5] = [1602, 1601, 1602, 1601, 1602];
@@ -141,7 +137,7 @@ async fn audio_follows_each_video_frame_with_its_share_of_samples() {
 
 #[tokio::test]
 async fn samples_a_full_board_turns_away_are_offered_again_later_in_the_stream() {
-    let mode = display_mode("1080p25").expect("mode");
+    let mode = mode("1080p25");
     let mut device = device(164202, mode);
     let accepted_per_call = 1000;
     device.log.lock().expect("log").audio_frames_per_call = Some(accepted_per_call);

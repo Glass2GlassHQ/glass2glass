@@ -9,32 +9,20 @@ use alloc::vec::Vec;
 use g2g_core::memory::{DomainSet, MemoryDomainKind};
 use g2g_core::{
     g2g_error, AsyncElement, Caps, CapsConstraint, CapsSet, ClockCandidate, ClockPriority,
-    ClockSync, Colorimetry, ConfigureOutcome, Dim, DriftClock, ElementMetadata, G2gError,
-    Interlace, OutputSink, PadTemplate, PadTemplates, PipelineClock, PipelinePacket,
-    PresentationPacer, PropError, PropKind, PropValue, PropertySpec, Rate,
+    ClockSync, ConfigureOutcome, Dim, DriftClock, ElementMetadata, G2gError, OutputSink,
+    PadTemplate, PadTemplates, PipelineClock, PipelinePacket, PresentationPacer, PropError,
+    PropKind, PropValue, PropertySpec, Rate,
 };
 
 use crate::decklink::{
-    display_mode, log_target, mode_for_caps, sdk_opener, video_format_supported, DeckLinkOpener,
-    DisplayMode, DISPLAY_MODES, PIXEL_FORMATS,
+    any_mode_caps, device_number_from_property, log_target, mode_for_caps, mode_from_property,
+    mode_property_value, sdk_opener, video_format_supported, DeckLinkOpener, DisplayMode,
+    AUTO_MODE, DISPLAY_MODES, MODE_VALUES, PIXEL_FORMATS,
 };
 use crate::decklinkoutput::{claim_output, hold_until_due, sleep_ns, PictureLayout, SharedOutput};
+use crate::st291::AncillaryMeta;
 
 const ELEMENT_NAME: &str = "decklinkvideosink";
-
-const AUTO_MODE: &str = "auto";
-
-// "auto" then every name in DISPLAY_MODES, in order
-const MODE_VALUES: &str = "auto | ntsc | ntsc2398 | pal | ntsc-p | pal-p | 1080p2398 | 1080p24 | \
-1080p25 | 1080p2997 | 1080p30 | 1080i50 | 1080i5994 | 1080i60 | 1080p50 | 1080p5994 | 1080p60 | \
-720p50 | 720p5994 | 720p60 | 1556p2398 | 1556p24 | 1556p25 | 2kdcip2398 | 2kdcip24 | 2kdcip25 | \
-2kdcip2997 | 2kdcip30 | 2kdcip50 | 2kdcip5994 | 2kdcip60 | 2160p2398 | 2160p24 | 2160p25 | \
-2160p2997 | 2160p30 | 2160p50 | 2160p5994 | 2160p60 | 4kdcip2398 | 4kdcip24 | 4kdcip25 | \
-4kdcip2997 | 4kdcip30 | 4kdcip50 | 4kdcip5994 | 4kdcip60 | 8kp2398 | 8kp24 | 8kp25 | 8kp2997 | \
-8kp30 | 8kp50 | 8kp5994 | 8kp60 | 8kdcip2398 | 8kdcip24 | 8kdcip25 | 8kdcip2997 | 8kdcip30 | \
-8kdcip50 | 8kdcip5994 | 8kdcip60 | 640x480p60 | 800x600p60 | 1440x900p50 | 1440x900p60 | \
-1440x1080p50 | 1440x1080p60 | 1600x1200p50 | 1600x1200p60 | 1920x1200p50 | 1920x1200p60 | \
-1920x1440p50 | 1920x1440p60 | 2560x1440p50 | 2560x1440p60 | 2560x1600p50 | 2560x1600p60";
 
 pub struct DeckLinkVideoSink {
     device_number: u32,
@@ -45,6 +33,7 @@ pub struct DeckLinkVideoSink {
     layout: Option<PictureLayout>,
     pacer: PresentationPacer,
     last_frame_end_ns: Option<u64>,
+    output_vanc: bool,
 }
 
 impl core::fmt::Debug for DeckLinkVideoSink {
@@ -53,6 +42,7 @@ impl core::fmt::Debug for DeckLinkVideoSink {
             .field("device_number", &self.device_number)
             .field("mode", &self.mode.map(|mode| mode.name))
             .field("layout", &self.layout)
+            .field("output_vanc", &self.output_vanc)
             .finish()
     }
 }
@@ -77,6 +67,7 @@ impl DeckLinkVideoSink {
             layout: None,
             pacer: PresentationPacer::new(),
             last_frame_end_ns: None,
+            output_vanc: false,
         }
     }
 
@@ -158,9 +149,13 @@ impl DeckLinkVideoSink {
             return Ok(());
         };
         hold_until_due(&sync, deadline_ns).await;
+        let ancillary = match frame.meta.get::<AncillaryMeta>() {
+            Some(meta) if self.output_vanc => meta.packets.as_slice(),
+            _ => &[],
+        };
         let end_ns = self
             .output
-            .schedule_video(&sync, deadline_ns, &layout, pixels)?;
+            .schedule_video(&sync, deadline_ns, &layout, pixels, ancillary)?;
         self.last_frame_end_ns = Some(end_ns);
         Ok(())
     }
@@ -204,7 +199,7 @@ impl AsyncElement for DeckLinkVideoSink {
         };
         let caps = modes
             .iter()
-            .flat_map(|mode| PIXEL_FORMATS.iter().map(|(format, _)| mode.caps(*format)))
+            .flat_map(|mode| PIXEL_FORMATS.iter().map(|pixel| mode.caps(pixel.format)))
             .collect();
         CapsConstraint::Accepts(CapsSet::from_alternatives(caps))
     }
@@ -221,7 +216,7 @@ impl AsyncElement for DeckLinkVideoSink {
             );
             return Err(G2gError::CapsMismatch);
         }
-        self.output.enable_video(layout.mode)?;
+        self.output.enable_video(layout.mode, self.output_vanc)?;
         self.layout = Some(layout);
         Ok(ConfigureOutcome::Accepted)
     }
@@ -260,6 +255,12 @@ impl AsyncElement for DeckLinkVideoSink {
             )
             .with_default(AUTO_MODE)
             .with_enum_values(MODE_VALUES),
+            PropertySpec::new(
+                "output-vanc",
+                PropKind::Bool,
+                "Output the AncillaryMeta packets of input frames as VANC",
+            )
+            .with_default("false"),
         ];
         PROPS
     }
@@ -267,10 +268,7 @@ impl AsyncElement for DeckLinkVideoSink {
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
         match name {
             "device-number" => {
-                let device_number = value
-                    .as_int()
-                    .ok_or(PropError::Type)
-                    .and_then(|n| u32::try_from(n).map_err(|_| PropError::Value))?;
+                let device_number = device_number_from_property(&value)?;
                 if self.layout.is_some() {
                     return Err(PropError::Value);
                 }
@@ -279,11 +277,16 @@ impl AsyncElement for DeckLinkVideoSink {
                 Ok(())
             }
             "mode" => {
-                let name = value.as_str().ok_or(PropError::Type)?;
-                self.mode = match name {
-                    AUTO_MODE => None,
-                    _ => Some(display_mode(name).ok_or(PropError::Value)?),
-                };
+                self.mode = mode_from_property(&value)?;
+                Ok(())
+            }
+            "output-vanc" => {
+                let output_vanc = value.as_bool().ok_or(PropError::Type)?;
+                // the board takes VANC only when video output is enabled with it
+                if self.layout.is_some() {
+                    return Err(PropError::Value);
+                }
+                self.output_vanc = output_vanc;
                 Ok(())
             }
             _ => Err(PropError::Unknown),
@@ -293,9 +296,8 @@ impl AsyncElement for DeckLinkVideoSink {
     fn get_property(&self, name: &str) -> Option<PropValue> {
         match name {
             "device-number" => Some(PropValue::Int(i64::from(self.device_number))),
-            "mode" => Some(PropValue::Str(
-                self.mode.map_or(AUTO_MODE, |mode| mode.name).into(),
-            )),
+            "mode" => Some(mode_property_value(self.mode)),
+            "output-vanc" => Some(PropValue::Bool(self.output_vanc)),
             _ => None,
         }
     }
@@ -329,14 +331,6 @@ impl AsyncElement for DeckLinkVideoSink {
 
 impl PadTemplates for DeckLinkVideoSink {
     fn pad_templates() -> Vec<PadTemplate> {
-        let caps = PIXEL_FORMATS.map(|(format, _)| Caps::RawVideo {
-            format,
-            width: Dim::Any,
-            height: Dim::Any,
-            framerate: Rate::Any,
-            interlace: Interlace::Any,
-            colorimetry: Colorimetry::UNKNOWN,
-        });
-        Vec::from([PadTemplate::sink(CapsSet::from_alternatives(caps.to_vec()))])
+        Vec::from([PadTemplate::sink(any_mode_caps())])
     }
 }

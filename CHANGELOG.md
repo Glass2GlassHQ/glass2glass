@@ -56,6 +56,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M2140: caps strings accept gst's `alignment=frame` on `image/x-jxsc`.
 - M2141: `alsasink`, `pulsesink`, `pipewiresink` and `wasapisink` switch device while playing and take `continue-on-error`, and `g2g-launch` prints bus warnings.
 - M2142: audio sink and source clocks no longer jump back by the process age at their first device reading.
+- M2143: `decklinkvideosink` takes `output-vanc` and plays a frame's `AncillaryMeta` packets as VANC.
+- M2144: `decklinkvideosrc` captures SDI video, detects the input mode and attaches VANC as `AncillaryMeta`.
 
 ## 0.14.0
 

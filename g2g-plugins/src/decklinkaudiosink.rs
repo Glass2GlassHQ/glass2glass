@@ -14,7 +14,7 @@ use g2g_core::{
     PipelinePacket, PresentationPacer, PropError, PropKind, PropValue, PropertySpec,
 };
 
-use crate::decklink::{log_target, NANOS_PER_SECOND};
+use crate::decklink::{device_number_from_property, log_target, NANOS_PER_SECOND};
 use crate::decklinkoutput::{find_output, hold_until_due, sleep_ns, SharedOutput};
 
 const ELEMENT_NAME: &str = "decklinkaudiosink";
@@ -212,10 +212,7 @@ impl AsyncElement for DeckLinkAudioSink {
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
         match name {
             "device-number" => {
-                let device_number = value
-                    .as_int()
-                    .ok_or(PropError::Type)
-                    .and_then(|n| u32::try_from(n).map_err(|_| PropError::Value))?;
+                let device_number = device_number_from_property(&value)?;
                 if self.layout.is_some() {
                     return Err(PropError::Value);
                 }

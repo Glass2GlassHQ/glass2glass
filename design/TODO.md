@@ -238,8 +238,15 @@ libraries installed.
   property, and the `IMMNotificationClient` hotplug path. Both are
   compile-checked only (CI cross-compiles them; the runners have no camera and
   no way to replug one).
-- SDI capture for Blackmagic Design DeckLink (`decklinkvideosrc`,
-  `decklinkaudiosrc`).
+- SDI audio capture for Blackmagic Design DeckLink (`decklinkaudiosrc`),
+  sharing its input device with the `decklinkvideosrc` of the same number.
+- `decklinkvideosrc` properties GStreamer has: `output-cc` and `output-afd-bar`,
+  which attach captions and AFD/Bar from VANC as their own metas, and
+  `timecode-format`, which needs a timecode meta. `mode=auto` should also pick
+  the widescreen SD modes from AFD, as GStreamer does.
+- `decklinkvideosrc` should hand downstream the SDK's frame instead of a copy.
+- Run `decklinkvideosrc` on a board: capture, input format detection, VANC and
+  the board clock have only run against a mock device.
 
 ## Sinks
 
@@ -249,8 +256,8 @@ libraries installed.
 - SDI output for Blackmagic Design DeckLink (`decklinkvideosink`,
   `decklinkaudiosink`) on Windows and macOS.
 - Run `decklinkvideosink` and `decklinkaudiosink` on a board: scheduled
-  playback, the board clock and audio against video have only run against a
-  mock device.
+  playback, the board clock, audio against video and VANC output have only run
+  against a mock device.
 - An example that shows pipeline video inside a Qt/QML window.
 - Move `vulkanhdrsink` off its raw Vulkan swapchain onto a wgpu surface, using
   wgpu 30's `SurfaceConfiguration::color_space` for the HDR10 / scRGB output.
@@ -299,7 +306,6 @@ libraries installed.
     replayed edits need sample-accurate clipping, as the video path lays them out.
 - **ST 2038 elements:** `st2038ancdemux` should add a port when a stream no pad
   names appears, once a launch line can link a pad that appears at run time.
-  DeckLink capture and output should carry VANC as `AncillaryMeta`.
 
 ## Codecs
 

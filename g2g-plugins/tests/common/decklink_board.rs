@@ -10,13 +10,20 @@ use g2g_core::{
     AudioFormat, Caps, ChannelLayout, Colorimetry, Dim, FrameTiming, G2gError, Interlace,
     MemoryDomain, OutputSink, PipelineClock, PipelinePacket, PushOutcome, Rate, RawVideoFormat,
 };
-use g2g_plugins::decklink::{DeckLinkOpener, DeckLinkOutput, DisplayMode, ScheduledVideoFrame};
+use g2g_plugins::decklink::{
+    display_mode, CapturedVideoFrame, DeckLinkInput, DeckLinkInputOpener, DeckLinkOpener,
+    DeckLinkOutput, DisplayMode, InputEvent, InputEventSink, ScheduledVideoFrame, VideoConnection,
+    PREROLL_NS, SCHEDULE_LEAD_NS,
+};
+use g2g_plugins::decklinkvideosink::DeckLinkVideoSink;
+use g2g_plugins::st291::AncPacket;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ScheduledPicture {
     pub(crate) display_time_ns: u64,
     pub(crate) duration_ns: u64,
     pub(crate) row_bytes: u32,
+    pub(crate) ancillary: Vec<AncPacket>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,6 +35,7 @@ pub(crate) struct ScheduledSamples {
 #[derive(Debug, Default)]
 pub(crate) struct BoardLog {
     pub(crate) video_mode: Option<&'static str>,
+    pub(crate) video_vanc: bool,
     pub(crate) audio: Option<(AudioFormat, u8)>,
     pub(crate) pictures: Vec<ScheduledPicture>,
     pub(crate) samples: Vec<ScheduledSamples>,
@@ -54,8 +62,10 @@ impl MockBoard {
 }
 
 impl DeckLinkOutput for MockBoard {
-    fn enable_video(&mut self, mode: &'static DisplayMode) -> Result<(), G2gError> {
-        self.log().video_mode = Some(mode.name);
+    fn enable_video(&mut self, mode: &'static DisplayMode, vanc: bool) -> Result<(), G2gError> {
+        let mut log = self.log();
+        log.video_mode = Some(mode.name);
+        log.video_vanc = vanc;
         Ok(())
     }
 
@@ -64,6 +74,7 @@ impl DeckLinkOutput for MockBoard {
             display_time_ns: frame.display_time_ns,
             duration_ns: frame.duration_ns,
             row_bytes: frame.row_bytes,
+            ancillary: frame.ancillary.to_vec(),
         });
         Ok(())
     }
@@ -108,6 +119,137 @@ impl DeckLinkOutput for MockBoard {
     fn hardware_time_ns(&mut self) -> Result<u64, G2gError> {
         Ok((self.time)())
     }
+}
+
+const MILLISECOND: u64 = 1_000_000;
+// a whole number of 25 fps frames
+pub(crate) const BOARD_START_NS: u64 = 1_000_000 * MILLISECOND;
+pub(crate) const ELECTED_START_NS: u64 = 5_000 * MILLISECOND;
+
+pub(crate) fn mode(name: &str) -> &'static DisplayMode {
+    display_mode(name).expect("a GStreamer mode name")
+}
+
+// the first buffer arrives at the clocks' start and fixes when running time zero is due, later
+// ones arrive at the moment the sink hands them over, so only the first waits
+pub(crate) fn arrival_ns(index: u64, pts_ns: u64) -> u64 {
+    match index {
+        0 => 0,
+        _ => PREROLL_NS - SCHEDULE_LEAD_NS + pts_ns,
+    }
+}
+
+pub(crate) fn sink_on_mock(device_number: u32, time: BoardTime) -> (DeckLinkVideoSink, SharedLog) {
+    let log: SharedLog = Arc::new(Mutex::new(BoardLog::default()));
+    let sink = DeckLinkVideoSink::with_opener(device_number, mock_opener(Arc::clone(&log), time));
+    (sink, log)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct EnabledInput {
+    pub(crate) mode: &'static str,
+    pub(crate) format: RawVideoFormat,
+    pub(crate) format_detection: bool,
+}
+
+#[derive(Default)]
+pub(crate) struct InputLog {
+    pub(crate) connection: Option<&'static str>,
+    pub(crate) enabled: Vec<EnabledInput>,
+    pub(crate) restarts: Vec<(&'static str, RawVideoFormat)>,
+    events: Option<InputEventSink>,
+}
+
+pub(crate) type SharedInputLog = Arc<Mutex<InputLog>>;
+
+struct MockInput {
+    log: SharedInputLog,
+    time: BoardTime,
+}
+
+impl MockInput {
+    fn log(&self) -> std::sync::MutexGuard<'_, InputLog> {
+        self.log.lock().expect("input log lock")
+    }
+}
+
+impl DeckLinkInput for MockInput {
+    fn set_connection(&mut self, connection: &'static VideoConnection) -> Result<(), G2gError> {
+        self.log().connection = Some(connection.name);
+        Ok(())
+    }
+
+    fn enable_video(
+        &mut self,
+        mode: &'static DisplayMode,
+        format: RawVideoFormat,
+        format_detection: bool,
+    ) -> Result<(), G2gError> {
+        self.log().enabled.push(EnabledInput {
+            mode: mode.name,
+            format,
+            format_detection,
+        });
+        Ok(())
+    }
+
+    fn start(&mut self, events: InputEventSink) -> Result<(), G2gError> {
+        self.log().events = Some(events);
+        Ok(())
+    }
+
+    fn restart_video(
+        &mut self,
+        mode: &'static DisplayMode,
+        format: RawVideoFormat,
+    ) -> Result<(), G2gError> {
+        self.log().restarts.push((mode.name, format));
+        Ok(())
+    }
+
+    fn hardware_time_ns(&mut self) -> Result<u64, G2gError> {
+        Ok((self.time)())
+    }
+}
+
+pub(crate) fn mock_input_opener(log: SharedInputLog, time: BoardTime) -> DeckLinkInputOpener {
+    Arc::new(move |_device_number| {
+        Ok(Box::new(MockInput {
+            log: Arc::clone(&log),
+            time: Arc::clone(&time),
+        }) as Box<dyn DeckLinkInput>)
+    })
+}
+
+// waits for the source to start the board, then delivers each event from the board's side
+pub(crate) async fn send_from_board(log: &SharedInputLog, events: Vec<InputEvent>) {
+    while log.lock().expect("input log lock").events.is_none() {
+        tokio::task::yield_now().await;
+    }
+    let log = log.lock().expect("input log lock");
+    let deliver = log.events.as_ref().expect("the board started");
+    for event in events {
+        deliver(event);
+    }
+}
+
+pub(crate) fn captured(
+    mode: &DisplayMode,
+    format: RawVideoFormat,
+    hardware_time_ns: u64,
+    no_signal: bool,
+) -> InputEvent {
+    let row_bytes = format.row_stride(mode.width).expect("packed format");
+    InputEvent::Frame(CapturedVideoFrame {
+        pixels: picture_bytes(format, mode),
+        format,
+        width: mode.width,
+        height: mode.height,
+        row_bytes,
+        hardware_time_ns,
+        no_signal,
+        ancillary: Vec::new(),
+    })
 }
 
 pub(crate) fn mock_opener(log: SharedLog, time: BoardTime) -> DeckLinkOpener {

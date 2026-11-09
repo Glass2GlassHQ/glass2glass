@@ -37,6 +37,7 @@ pub(crate) fn get_num_buffers(limit: u64) -> PropValue {
     feature = "moqt",
     feature = "webrtc",
     all(target_os = "linux", feature = "pipewire"),
+    all(target_os = "linux", feature = "decklink"),
     all(target_os = "linux", feature = "libcamera"),
     all(target_os = "linux", feature = "local-ipc"),
     all(target_os = "linux", feature = "local-dmabuf"),
