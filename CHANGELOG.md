@@ -80,6 +80,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M2164: MP4 demux reads VP9 (`vp09`) tracks, and `mp4mux` writes a VP9 track's `vpcC` from its first keyframe's profile, bit depth, subsampling and colour.
 - M2165: `wavparse` reads RF64 / BW64 files and posts the `LIST INFO` and ID3 tags found before or after the samples.
 - M2166: `rtspsrc` and `rtspclientsink` take credentials from an `rtsp://user:password@host` location, with `user-id` / `user-pw` taking precedence.
+- M2167: H.265 RTP depayloader (RFC 7798), and `udpsrc` receives H.265 with `encoding-name=H265` or an H.265 SDP.
 
 ## 0.14.0
 

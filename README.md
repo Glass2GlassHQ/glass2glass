@@ -640,7 +640,7 @@ cargo clippy --workspace --all-targets
 | `CudaGlSink` (CUDA-GL present), `CudaKmsSink` (CUDA-GL on KMS) | `cuda-gl`, `cuda-kms` | Linux + NVIDIA + EGL + GL (+ libdrm for KMS) |
 | `CudaToWgpu` / `WgpuToCuda` (zero-copy bridge) | `cuda-wgpu` | Linux + NVIDIA + Vulkan |
 | `UdpSink` + H.264 / Opus RTP packetizer, or raw datagrams (`multiudpsink` `clients=`) | `udp-egress` | none |
-| `UdpSrc` (`udpsrc2` alias: H.264 / Opus RTP ingest + jitter buffer + RTCP / NACK, or raw MPEG-TS datagrams; batched reads, GRO, kernel timestamps, source-specific multicast on several interfaces, a `ReceiveTimeout` bus message after `timeout` with no data) | `udp-ingress` | none |
+| `UdpSrc` (`udpsrc2` alias: H.264 / H.265 / Opus RTP ingest + jitter buffer + RTCP / NACK, or raw MPEG-TS datagrams; batched reads, GRO, kernel timestamps, source-specific multicast on several interfaces, a `ReceiveTimeout` bus message after `timeout` with no data) | `udp-ingress` | none |
 | `SrtpEnc` / `SrtpDec` (RFC 3711 / RFC 7714 SRTP and SRTCP, per-SSRC receive contexts) | `srtp` | none |
 | `DtlsSrtpEnc` / `DtlsSrtpDec` (DTLS-SRTP handshake over the media socket keys SRTP) | `dtls-srtp` | none |
 | `SrtSrc` / `SrtSink` (SRT caller, listener and rendezvous, AES-128 / 192 / 256 via `passphrase` and `pbkeylen`, gst's `uri`, a listener that accepts callers by `streamid`) | `srt` | none |

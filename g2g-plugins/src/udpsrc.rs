@@ -204,18 +204,21 @@ impl UdpSrc {
     }
 
     /// Apply one parsed media description. Returns `false` (changing nothing)
-    /// for a description this source cannot receive: it depayloads H.264 and
-    /// Opus only.
+    /// for a description this source cannot receive: it depayloads H.264,
+    /// H.265 and Opus only.
     pub fn apply_sdp(&mut self, media: &SdpMedia) -> bool {
         match &media.caps {
             Caps::CompressedVideo {
-                codec: VideoCodec::H264,
+                codec: codec @ (VideoCodec::H264 | VideoCodec::H265),
                 width,
                 height,
                 framerate,
                 ..
             } => {
-                self.recv.encoding = RtpEncoding::H264;
+                self.recv.encoding = match codec {
+                    VideoCodec::H265 => RtpEncoding::H265,
+                    _ => RtpEncoding::H264,
+                };
                 if let (Dim::Fixed(w), Dim::Fixed(h)) = (width, height) {
                     self.width = *w;
                     self.height = *h;
@@ -315,16 +318,18 @@ impl UdpSrc {
     }
 
     fn caps(&self) -> Caps {
-        match self.recv.encoding {
-            RtpEncoding::H264 => Caps::CompressedVideo {
-                codec: VideoCodec::H264,
-                width: Dim::Fixed(self.width),
-                height: Dim::Fixed(self.height),
-                framerate: Rate::Fixed(self.fps << 16),
-                colorimetry: g2g_core::Colorimetry::UNKNOWN,
-                alignment: g2g_core::BitstreamAlignment::Unspecified,
-            },
-            RtpEncoding::Opus => opus_caps(),
+        let codec = match self.recv.encoding {
+            RtpEncoding::H264 => VideoCodec::H264,
+            RtpEncoding::H265 => VideoCodec::H265,
+            RtpEncoding::Opus => return opus_caps(),
+        };
+        Caps::CompressedVideo {
+            codec,
+            width: Dim::Fixed(self.width),
+            height: Dim::Fixed(self.height),
+            framerate: Rate::Fixed(self.fps << 16),
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         }
     }
 
@@ -479,7 +484,7 @@ impl SourceLoop for UdpSrc {
     fn configured_output_caps(&self) -> Option<Caps> {
         match (self.bytestream, self.recv.encoding) {
             (Some(encoding), _) => Some(Caps::ByteStream { encoding }),
-            (None, RtpEncoding::Opus) => Some(opus_caps()),
+            (None, RtpEncoding::Opus | RtpEncoding::H265) => Some(self.caps()),
             (None, RtpEncoding::H264) => None,
         }
     }
@@ -537,7 +542,7 @@ impl SourceLoop for UdpSrc {
                 "RTP payload format to depayload, as in gst application/x-rtp caps",
             )
             .with_default("H264")
-            .with_enum_values("H264 | OPUS"),
+            .with_enum_values("H264 | H265 | OPUS"),
             PropertySpec::new(
                 "bytestream-format",
                 PropKind::Str,
@@ -714,7 +719,10 @@ impl SourceLoop for UdpSrc {
         }
         let is_geometry = matches!(name, "width" | "height");
         if self.recv.encoding == RtpEncoding::Opus && is_geometry {
-            g2g_core::g2g_warn!(self, "`{name}` needs H.264, not encoding-name=OPUS");
+            g2g_core::g2g_warn!(
+                self,
+                "`{name}` needs H.264 or H.265, not encoding-name=OPUS"
+            );
             return Err(PropError::Value);
         }
         if name == "multicast-group" {

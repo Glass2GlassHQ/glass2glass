@@ -12,12 +12,12 @@ use g2g_core::rtp::{CaptureTimeExtensionIds, RtpHeader, RtpHeaderExtension, RTP_
 
 use crate::annexb::nal_units;
 /// RFC 6184 FU-A NAL type.
-const FU_A_TYPE: u8 = 28;
+pub(crate) const FU_A_TYPE: u8 = 28;
 const FU_A_HEADER_LEN: usize = 2;
-const H265_FU_TYPE: u8 = 49;
+pub(crate) const H265_FU_TYPE: u8 = 49;
 // the two-byte payload header then the one-byte FU header
 const H265_FU_HEADER_LEN: usize = 3;
-const H265_NAL_HEADER_LEN: usize = 2;
+pub(crate) const H265_NAL_HEADER_LEN: usize = 2;
 pub(crate) const AAC_AU_SIZE_BITS: u32 = 13;
 pub(crate) const AAC_AU_INDEX_BITS: u32 = 3;
 // the 16-bit AU-headers-length field, then one AU header of size and index
@@ -25,8 +25,8 @@ const AAC_AU_HEADER_SECTION_LEN: usize = 4;
 const AAC_AU_HEADERS_LENGTH_BITS: u16 = (AAC_AU_SIZE_BITS + AAC_AU_INDEX_BITS) as u16;
 const MAX_PREFIX_LEN: usize = 4;
 const DEFAULT_MAX_PAYLOAD: usize = 1400;
-const FU_START_BIT: u8 = 0x80;
-const FU_END_BIT: u8 = 0x40;
+pub(crate) const FU_START_BIT: u8 = 0x80;
+pub(crate) const FU_END_BIT: u8 = 0x40;
 
 // borrows the access unit so its bytes are copied once, into the packet
 struct Payload<'a> {

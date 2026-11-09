@@ -1,8 +1,9 @@
-//! Sans-IO H.264 RTP depayloader (RFC 3550 header + RFC 6184 payload), the
-//! receive-side inverse of [`rtppay::RtpH264Packetizer`](crate::rtppay). It
-//! turns a stream of RTP packets back into Annex-B access units: single-NAL
-//! and STAP-A payloads pass through; FU-A fragments reassemble; the RTP marker
-//! bit closes an access unit. No I/O: `UdpSrc` wraps this and feeds it the
+//! Sans-IO H.264 and H.265 RTP depayloaders (RFC 3550 header + RFC 6184 /
+//! RFC 7798 payload), the receive-side inverses of the
+//! [`rtppay`](crate::rtppay) packetizers. They turn a stream of RTP packets
+//! back into Annex-B access units: single-NAL and aggregation payloads pass
+//! through; fragmentation units reassemble; the RTP marker bit closes an
+//! access unit. No I/O: `UdpSrc` wraps this and feeds it the
 //! datagrams a socket receives. Opus (RFC 7587) needs no reassembly: each RTP
 //! payload is one Opus packet.
 //!
@@ -17,11 +18,11 @@ use g2g_core::mediaclock::MediaClock;
 use g2g_core::rtp::RtpHeader;
 use g2g_core::VideoCodec;
 
+use crate::rtppay::{FU_A_TYPE, FU_END_BIT, FU_START_BIT, H265_FU_TYPE, H265_NAL_HEADER_LEN};
 use crate::sdp::OPUS_CLOCK_HZ;
 
-/// RFC 6184 aggregation / fragmentation NAL types.
+/// RFC 6184 aggregation packet NAL type.
 const STAP_A_TYPE: u8 = 24;
-const FU_A_TYPE: u8 = 28;
 const ANNEX_B_START_CODE: [u8; 4] = [0, 0, 0, 1];
 
 /// One depayloaded access unit: Annex-B bytes for H.264, one Opus packet for
@@ -45,6 +46,7 @@ pub enum RtpEncoding {
     #[default]
     H264,
     Opus,
+    H265,
 }
 
 impl RtpEncoding {
@@ -52,6 +54,7 @@ impl RtpEncoding {
         match name {
             "H264" => Some(RtpEncoding::H264),
             "OPUS" => Some(RtpEncoding::Opus),
+            "H265" => Some(RtpEncoding::H265),
             _ => None,
         }
     }
@@ -60,12 +63,13 @@ impl RtpEncoding {
         match self {
             RtpEncoding::H264 => "H264",
             RtpEncoding::Opus => "OPUS",
+            RtpEncoding::H265 => "H265",
         }
     }
 
     pub fn clock_rate_hz(self) -> u32 {
         match self {
-            RtpEncoding::H264 => MediaClock::VIDEO_RATE_HZ,
+            RtpEncoding::H264 | RtpEncoding::H265 => MediaClock::VIDEO_RATE_HZ,
             RtpEncoding::Opus => OPUS_CLOCK_HZ,
         }
     }
@@ -74,6 +78,7 @@ impl RtpEncoding {
     pub fn is_keyframe(self, unit: &[u8]) -> bool {
         match self {
             RtpEncoding::H264 => crate::annexb::au_is_keyframe(VideoCodec::H264, unit),
+            RtpEncoding::H265 => crate::annexb::au_is_keyframe(VideoCodec::H265, unit),
             RtpEncoding::Opus => true,
         }
     }
@@ -86,6 +91,7 @@ pub type AccessUnits =
 pub enum RtpDepayloader {
     H264(RtpH264Depayloader),
     Opus,
+    H265(RtpH265Depayloader),
 }
 
 impl RtpDepayloader {
@@ -93,12 +99,14 @@ impl RtpDepayloader {
         match encoding {
             RtpEncoding::H264 => RtpDepayloader::H264(RtpH264Depayloader::new()),
             RtpEncoding::Opus => RtpDepayloader::Opus,
+            RtpEncoding::H265 => RtpDepayloader::H265(RtpH265Depayloader::new()),
         }
     }
 
     pub fn depacketize(&mut self, packet: &[u8]) -> AccessUnits {
         match self {
             RtpDepayloader::H264(depayloader) => depayloader.depacketize(packet),
+            RtpDepayloader::H265(depayloader) => depayloader.depacketize(packet),
             RtpDepayloader::Opus => depacketize_opus(packet).into_iter().chain(None),
         }
     }
@@ -120,17 +128,7 @@ fn depacketize_opus(packet: &[u8]) -> Option<AccessUnit> {
 
 #[derive(Debug, Default)]
 pub struct RtpH264Depayloader {
-    /// Annex-B NALs accumulated for the access unit currently being assembled.
-    au: Vec<u8>,
-    /// Where the FU-A NAL being reassembled starts in `au`, while one is.
-    fragment_start: Option<usize>,
-    /// Last RTP sequence number seen, for gap detection.
-    last_seq: Option<u16>,
-    /// RTP timestamp of the in-flight access unit.
-    timestamp: u32,
-    /// Part of the current access unit was lost or dropped, so its remaining
-    /// packets are skipped until the next access-unit boundary.
-    discarding: bool,
+    assembler: NalAssembler,
 }
 
 impl RtpH264Depayloader {
@@ -142,6 +140,115 @@ impl RtpH264Depayloader {
     /// then the one this packet's marker bit closed. Packets that are too short
     /// or use unsupported aggregation modes (STAP-B / MTAP / FU-B) are skipped.
     pub fn depacketize(&mut self, packet: &[u8]) -> AccessUnits {
+        self.assembler.depacketize(packet, add_h264_nals)
+    }
+}
+
+fn add_h264_nals(assembler: &mut NalAssembler, payload: &[u8]) {
+    match payload[0] & 0x1F {
+        // Single NAL unit (types 1..=23): the payload is the NAL verbatim.
+        1..=23 => {
+            assembler.abandon_fragment();
+            assembler.push_nal(payload);
+        }
+        // STAP-A: [type 24][ (16-bit size)(NAL) ]* aggregated NALs, used
+        // mostly to carry SPS+PPS in one packet.
+        t if t == STAP_A_TYPE => {
+            assembler.abandon_fragment();
+            assembler.push_aggregated_nals(&payload[1..]);
+        }
+        // FU-A: a single NAL fragmented across packets. The original NAL
+        // header byte is rebuilt from the FU indicator's F|NRI and the FU
+        // header's type; Start/End bits bound the fragment run.
+        t if t == FU_A_TYPE => {
+            let Some(&fu_header) = payload.get(1) else {
+                return;
+            };
+            if fu_header & FU_START_BIT != 0 {
+                assembler.start_fragment(&[(payload[0] & 0xE0) | (fu_header & 0x1F)]);
+            }
+            assembler.extend_fragment(&payload[2..], fu_header & FU_END_BIT != 0);
+        }
+        // STAP-B (25), MTAP (26/27), FU-B (29): unsupported, skip.
+        _ => {}
+    }
+}
+
+/// Sans-IO H.265 RTP depayloader (RFC 7798), for senders that keep
+/// `sprop-max-don-diff` at 0 and so carry no DONL fields.
+#[derive(Debug, Default)]
+pub struct RtpH265Depayloader {
+    assembler: NalAssembler,
+}
+
+impl RtpH265Depayloader {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Feed one RTP packet, with the same output as [`RtpH264Depayloader::depacketize`].
+    /// PACI packets are skipped.
+    pub fn depacketize(&mut self, packet: &[u8]) -> AccessUnits {
+        self.assembler.depacketize(packet, add_h265_nals)
+    }
+}
+
+/// RFC 7798 aggregation packet NAL type.
+const H265_AP_TYPE: u8 = 48;
+
+fn add_h265_nals(assembler: &mut NalAssembler, payload: &[u8]) {
+    if payload.len() < H265_NAL_HEADER_LEN {
+        return;
+    }
+    match (payload[0] >> 1) & 0x3F {
+        0..=47 => {
+            assembler.abandon_fragment();
+            assembler.push_nal(payload);
+        }
+        H265_AP_TYPE => {
+            assembler.abandon_fragment();
+            assembler.push_aggregated_nals(&payload[H265_NAL_HEADER_LEN..]);
+        }
+        // the FU header after the payload header carries S, E and the fragmented NAL's type
+        H265_FU_TYPE => {
+            let Some(&fu_header) = payload.get(H265_NAL_HEADER_LEN) else {
+                return;
+            };
+            if fu_header & FU_START_BIT != 0 {
+                let nal_type = fu_header & 0x3F;
+                assembler.start_fragment(&[(payload[0] & 0x81) | (nal_type << 1), payload[1]]);
+            }
+            assembler.extend_fragment(
+                &payload[H265_NAL_HEADER_LEN + 1..],
+                fu_header & FU_END_BIT != 0,
+            );
+        }
+        _ => {}
+    }
+}
+
+// rebuilds Annex-B access units from the NALs of consecutive RTP packets
+#[derive(Debug, Default)]
+struct NalAssembler {
+    /// Annex-B NALs accumulated for the access unit currently being assembled.
+    au: Vec<u8>,
+    /// Where the fragmented NAL being reassembled starts in `au`, while one is.
+    fragment_start: Option<usize>,
+    /// Last RTP sequence number seen, for gap detection.
+    last_seq: Option<u16>,
+    /// RTP timestamp of the in-flight access unit.
+    timestamp: u32,
+    /// Part of the current access unit was lost or dropped, so its remaining
+    /// packets are skipped until the next access-unit boundary.
+    discarding: bool,
+}
+
+impl NalAssembler {
+    fn depacketize(
+        &mut self,
+        packet: &[u8],
+        add_nals: fn(&mut NalAssembler, &[u8]),
+    ) -> AccessUnits {
         // One RTP header parser for the whole workspace (the CSRC / extension /
         // padding offset math lives in `g2g_core::rtp`, shared with the MCU RTP
         // source); a malformed or non-v2 datagram is rejected.
@@ -176,14 +283,14 @@ impl RtpH264Depayloader {
         let payload = packet
             .get(parsed.payload_offset..parsed.payload_offset + parsed.payload_len)
             .unwrap_or_default();
-        let closed_by_marker = self.add_payload(payload, parsed.header.marker);
+        if !self.discarding && !payload.is_empty() {
+            add_nals(self, payload);
+        }
+        let closed_by_marker = self.close_on_marker(parsed.header.marker);
         closed_by_timestamp.into_iter().chain(closed_by_marker)
     }
 
-    fn add_payload(&mut self, payload: &[u8], marker: bool) -> Option<AccessUnit> {
-        if !self.discarding && !payload.is_empty() {
-            self.add_nals(payload);
-        }
+    fn close_on_marker(&mut self, marker: bool) -> Option<AccessUnit> {
         if self.discarding {
             self.discarding = !marker;
             return None;
@@ -198,59 +305,38 @@ impl RtpH264Depayloader {
         Some(self.take_access_unit())
     }
 
-    fn add_nals(&mut self, payload: &[u8]) {
-        match payload[0] & 0x1F {
-            // Single NAL unit (types 1..=23): the payload is the NAL verbatim.
-            1..=23 => {
-                self.abandon_fragment();
-                self.push_nal(payload);
-            }
-            // STAP-A: [type 24][ (16-bit size)(NAL) ]* aggregated NALs, used
-            // mostly to carry SPS+PPS in one packet.
-            t if t == STAP_A_TYPE => {
-                self.abandon_fragment();
-                let mut i = 1;
-                while i + 2 <= payload.len() {
-                    let size = u16::from_be_bytes([payload[i], payload[i + 1]]) as usize;
-                    i += 2;
-                    let Some(nal) = payload.get(i..i + size) else {
-                        break;
-                    };
-                    self.push_nal(nal);
-                    i += size;
-                }
-            }
-            // FU-A: a single NAL fragmented across packets. The original NAL
-            // header byte is rebuilt from the FU indicator's F|NRI and the FU
-            // header's type; Start/End bits bound the fragment run.
-            t if t == FU_A_TYPE => {
-                if payload.len() < 2 {
-                    return;
-                }
-                let fu_header = payload[1];
-                let start = fu_header & 0x80 != 0;
-                let end = fu_header & 0x40 != 0;
-                if start {
-                    self.abandon_fragment();
-                    self.fragment_start = Some(self.au.len());
-                    self.au.extend_from_slice(&ANNEX_B_START_CODE);
-                    self.au.push((payload[0] & 0xE0) | (fu_header & 0x1F));
-                }
-                if self.fragment_start.is_some() {
-                    self.au.extend_from_slice(&payload[2..]);
-                    if self.au.len() > MAX_ASSEMBLY_BYTES {
-                        // A fragment run that never ends; drop the in-flight data
-                        // and resync at the next start-of-AU.
-                        self.drop_access_unit();
-                        return;
-                    }
-                    if end {
-                        self.fragment_start = None;
-                    }
-                }
-            }
-            // STAP-B (25), MTAP (26/27), FU-B (29): unsupported, skip.
-            _ => {}
+    // `[ (16-bit size)(NAL) ]*`, the body of a STAP-A or an H.265 aggregation packet
+    fn push_aggregated_nals(&mut self, mut body: &[u8]) {
+        while let [high, low, rest @ ..] = body {
+            let size = usize::from(u16::from_be_bytes([*high, *low]));
+            let Some(nal) = rest.get(..size) else {
+                break;
+            };
+            self.push_nal(nal);
+            body = &rest[size..];
+        }
+    }
+
+    fn start_fragment(&mut self, nal_header: &[u8]) {
+        self.abandon_fragment();
+        self.fragment_start = Some(self.au.len());
+        self.au.extend_from_slice(&ANNEX_B_START_CODE);
+        self.au.extend_from_slice(nal_header);
+    }
+
+    fn extend_fragment(&mut self, data: &[u8], end: bool) {
+        if self.fragment_start.is_none() {
+            return;
+        }
+        self.au.extend_from_slice(data);
+        if self.au.len() > MAX_ASSEMBLY_BYTES {
+            // A fragment run that never ends; drop the in-flight data
+            // and resync at the next start-of-AU.
+            self.drop_access_unit();
+            return;
+        }
+        if end {
+            self.fragment_start = None;
         }
     }
 
@@ -504,6 +590,45 @@ mod tests {
             .next()
             .expect("resyncs and completes a new AU");
         assert_eq!(unit.data, wrap(&[&[0x65, 1, 2, 3, 4, 5, 6]]));
+    }
+
+    #[test]
+    fn h265_access_unit_round_trips_through_fragmentation() {
+        let mut idr = alloc::vec![0x26u8, 0x01];
+        idr.extend((0..200u8).collect::<Vec<_>>());
+        let au = wrap(&[
+            &[0x40, 0x01, 0x0C],
+            &[0x42, 0x01, 0x01],
+            &[0x44, 0x01, 0xC1],
+            &idr,
+        ]);
+        let mut pay = crate::rtppay::RtpH265Packetizer::new(96, 5).with_max_payload(64);
+        let packets = pay.packetize(&au, 9000);
+        assert!(packets.len() > 4, "precondition: the IDR is fragmented");
+        let mut depay = RtpH265Depayloader::new();
+        let units: Vec<_> = packets.iter().flat_map(|p| depay.depacketize(p)).collect();
+        assert_eq!(units.len(), 1);
+        assert_eq!(units[0].data, au);
+        assert!(RtpEncoding::H265.is_keyframe(&units[0].data));
+    }
+
+    #[test]
+    fn h265_aggregation_packet_splits_into_its_nals() {
+        let vps: &[u8] = &[0x40, 0x01, 0x0C];
+        let sps: &[u8] = &[0x42, 0x01, 0x01, 0x60];
+        let mut payload = alloc::vec![H265_AP_TYPE << 1, 0x01];
+        for nal in [vps, sps] {
+            payload.extend_from_slice(&(nal.len() as u16).to_be_bytes());
+            payload.extend_from_slice(nal);
+        }
+        let mut packet = alloc::vec![0x80u8, 0x80 | 96, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        packet.extend_from_slice(&payload);
+        let mut depay = RtpH265Depayloader::new();
+        let unit = depay
+            .depacketize(&packet)
+            .next()
+            .expect("marker closes the unit");
+        assert_eq!(unit.data, wrap(&[vps, sps]));
     }
 
     #[test]
