@@ -14,6 +14,7 @@
 //! identical, so it lives here once.
 
 use std::net::SocketAddr;
+use std::vec::Vec;
 
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
@@ -66,6 +67,8 @@ pub struct RtpRecvConfig {
     pub declared_caps: Option<Caps>,
     pub capture_time_ids: CaptureTimeExtensionIds,
     pub encoding: RtpEncoding,
+    // ffmpeg's RTSP publisher sends the parameter sets only in the SDP sprop attributes
+    pub parameter_sets: Vec<u8>,
 }
 
 impl Default for RtpRecvConfig {
@@ -80,6 +83,7 @@ impl Default for RtpRecvConfig {
             declared_caps: None,
             capture_time_ids: CaptureTimeExtensionIds::default(),
             encoding: RtpEncoding::default(),
+            parameter_sets: Vec::new(),
         }
     }
 }
@@ -238,6 +242,8 @@ impl CaptureTimeLatch {
 #[derive(Debug)]
 pub(crate) struct AccessUnitEmitter {
     encoding: RtpEncoding,
+    // emptied at the first keyframe
+    parameter_sets: Vec<u8>,
     pts_rebase: RtpPtsRebase,
     seq: u64,
     seq_base: u64,
@@ -247,9 +253,10 @@ pub(crate) struct AccessUnitEmitter {
 
 impl AccessUnitEmitter {
     // `seq_base` is the sequence number the first emitted frame carries
-    pub(crate) fn new(encoding: RtpEncoding, seq_base: u64, frame_limit: u64) -> Self {
+    pub(crate) fn new(cfg: &RtpRecvConfig, seq_base: u64, frame_limit: u64) -> Self {
         Self {
-            encoding,
+            encoding: cfg.encoding,
+            parameter_sets: cfg.parameter_sets.clone(),
             pts_rebase: RtpPtsRebase::new(),
             seq: seq_base,
             seq_base,
@@ -278,8 +285,22 @@ impl AccessUnitEmitter {
         let arrival_ns = g2g_core::metrics::monotonic_ns();
         // false (the safe default) for H.264 without an IDR NAL.
         let keyframe = self.encoding.is_keyframe(&au.data);
+        let announced = if keyframe {
+            core::mem::take(&mut self.parameter_sets)
+        } else {
+            Vec::new()
+        };
+        let in_band = self
+            .encoding
+            .video_codec()
+            .is_some_and(|codec| crate::annexb::starts_with_param_set(&au.data, codec));
+        let data = if announced.is_empty() || in_band {
+            au.data
+        } else {
+            [announced, au.data].concat()
+        };
         let frame = Frame {
-            domain: MemoryDomain::System(SystemSlice::from_boxed(au.data.into_boxed_slice())),
+            domain: MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
             timing: FrameTiming {
                 pts_ns: pts,
                 dts_ns: pts,
@@ -341,7 +362,7 @@ pub(crate) async fn receive_rtp(
     let mut depay = RtpDepayloader::new(cfg.encoding);
     let mut jitter = RtpJitterBuffer::new(cfg.jitter);
     let mut stats = ReceptionStats::new(0, cfg.encoding.clock_rate_hz());
-    let mut emitter = AccessUnitEmitter::new(cfg.encoding, seq_base, frame_limit);
+    let mut emitter = AccessUnitEmitter::new(cfg, seq_base, frame_limit);
     // The original media stream's SSRC, learned from the first non-RTX packet;
     // an RFC 4588 RTX resend is restamped back onto it.
     let mut media_ssrc_seen: Option<u32> = None;

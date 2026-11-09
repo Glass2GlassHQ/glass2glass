@@ -179,6 +179,7 @@ pub(crate) fn session_recv_config(
 ) -> RtpRecvConfig {
     RtpRecvConfig {
         capture_time_ids: responder.capture_time_ids(),
+        parameter_sets: responder.announced_parameter_sets().to_vec(),
         ..recv.clone()
     }
 }

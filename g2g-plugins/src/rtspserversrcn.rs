@@ -126,6 +126,7 @@ impl RtspServerSrcN {
                 declared_caps: None,
                 capture_time_ids: Default::default(),
                 encoding: RtpEncoding::H264,
+                parameter_sets: Vec::new(),
             },
             pads: pads.max(1),
             session_timeout_ns: DEFAULT_SESSION_TIMEOUT_SECS as u64 * 1_000_000_000,
@@ -408,10 +409,17 @@ async fn pad_worker(
                 mut responder,
                 rtp_channel,
                 leftover,
-            } => tokio::select! {
-                r = receive_interleaved(&mut control, &mut responder, rtp_channel, leftover, AccessUnitEmitter::new(cfg.recv.encoding, seq_base, remaining), &mut tap) => r?,
-                _ = inactive_for(&activity, cfg.timeout_ns) => SessionEnd::PeerGone,
-            },
+            } => {
+                let emitter = AccessUnitEmitter::new(
+                    &session_recv_config(&cfg.recv, &responder),
+                    seq_base,
+                    remaining,
+                );
+                tokio::select! {
+                    r = receive_interleaved(&mut control, &mut responder, rtp_channel, leftover, emitter, &mut tap) => r?,
+                    _ = inactive_for(&activity, cfg.timeout_ns) => SessionEnd::PeerGone,
+                }
+            }
         };
         match end {
             // `AccessUnitEmitter::push` already emitted this pad's EOS.

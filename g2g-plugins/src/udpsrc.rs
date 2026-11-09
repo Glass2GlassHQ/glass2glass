@@ -219,6 +219,7 @@ impl UdpSrc {
                     VideoCodec::H265 => RtpEncoding::H265,
                     _ => RtpEncoding::H264,
                 };
+                self.recv.parameter_sets = media.parameter_sets.clone();
                 if let (Dim::Fixed(w), Dim::Fixed(h)) = (width, height) {
                     self.width = *w;
                     self.height = *h;

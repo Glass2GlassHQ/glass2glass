@@ -14,13 +14,14 @@ use g2g_core::runtime::SourceLoop;
 use g2g_core::{Caps, Dim, G2gError, OutputSink, PipelinePacket, PushOutcome, Rate, VideoCodec};
 
 use g2g_plugins::rtppay::RtpH264Packetizer;
+use g2g_plugins::rtspserver::sdp_h264;
 use g2g_plugins::rtspserversrc::RtspServerSrc;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[derive(Default)]
 struct Capture {
-    tags: Vec<u8>,
+    access_units: Vec<Vec<u8>>,
 }
 impl OutputSink for Capture {
     fn poll_push(
@@ -31,9 +32,8 @@ impl OutputSink for Capture {
         let p = packet_slot.take().expect("poll_push without a packet");
 
         if let PipelinePacket::DataFrame(frame) = &p {
-            if let Some(slice) = frame.domain.as_system_slice() {
-                self.tags.push(slice.get(5).copied().unwrap_or(0));
-            }
+            let slice = frame.domain.as_system_slice().expect("system frame");
+            self.access_units.push(slice.to_vec());
         }
         core::task::Poll::Ready(Ok(PushOutcome::Accepted))
     }
@@ -54,6 +54,15 @@ fn h264_caps() -> Caps {
 fn access_unit(tag: u8) -> Vec<u8> {
     vec![0u8, 0, 0, 1, 0x65, tag, 0xAB, 0xCD]
 }
+
+const TAG_OFFSET: usize = 5;
+
+fn tags(access_units: &[Vec<u8>]) -> Vec<u8> {
+    access_units.iter().map(|unit| unit[TAG_OFFSET]).collect()
+}
+
+const BARE_SDP: &str =
+    "v=0\r\no=- 0 0 IN IP4 0.0.0.0\r\ns=g2g\r\nm=video 0 RTP/AVP 96\r\na=rtpmap:96 H264/90000\r\n";
 
 /// Frame an RTP packet as interleaved binary: `$`, channel, 2-byte big-endian
 /// length, then the packet (RFC 2326 §10.12).
@@ -89,7 +98,10 @@ async fn read_response(sock: &mut tokio::net::TcpStream) -> String {
 
 /// Drive the interleaved control handshake and return the control stream (which
 /// also carries the RTP).
-async fn handshake_interleaved(rtsp_addr: std::net::SocketAddr) -> tokio::net::TcpStream {
+async fn handshake_interleaved(
+    rtsp_addr: std::net::SocketAddr,
+    sdp: &str,
+) -> tokio::net::TcpStream {
     let mut ctrl = tokio::net::TcpStream::connect(rtsp_addr)
         .await
         .expect("connect rtsp");
@@ -100,7 +112,6 @@ async fn handshake_interleaved(rtsp_addr: std::net::SocketAddr) -> tokio::net::T
         .unwrap();
     assert!(read_response(&mut ctrl).await.contains("200 OK"));
 
-    let sdp = "v=0\r\no=- 0 0 IN IP4 0.0.0.0\r\ns=g2g\r\nm=video 0 RTP/AVP 96\r\na=rtpmap:96 H264/90000\r\n";
     ctrl.write_all(
         format!(
             "ANNOUNCE {url} RTSP/1.0\r\nCSeq: 2\r\nContent-Type: application/sdp\r\nContent-Length: {}\r\n\r\n{sdp}",
@@ -139,7 +150,7 @@ async fn handshake_interleaved(rtsp_addr: std::net::SocketAddr) -> tokio::net::T
     ctrl
 }
 
-async fn run_ingest<F, Fut>(src: RtspServerSrc, publisher: F) -> (u64, Vec<u8>)
+async fn run_ingest<F, Fut>(src: RtspServerSrc, publisher: F) -> (u64, Vec<Vec<u8>>)
 where
     F: FnOnce(std::net::SocketAddr) -> Fut,
     Fut: Future<Output = ()>,
@@ -156,7 +167,7 @@ where
             .await
             .expect("server completes within 5s")
             .expect("server runs");
-        (n, cap.tags)
+        (n, cap.access_units)
     };
     let (_, out) = tokio::join!(publisher(rtsp_addr), server);
     out
@@ -173,7 +184,7 @@ async fn rtsp_interleaved_publisher_pushes_rtp_over_control_channel() {
         .with_frame_limit(N as u64);
 
     let publisher = |rtsp_addr| async move {
-        let mut ctrl = handshake_interleaved(rtsp_addr).await;
+        let mut ctrl = handshake_interleaved(rtsp_addr, BARE_SDP).await;
         // Push N access units as `$`-framed RTP on channel 0 (the RTP channel).
         let mut pktz = RtpH264Packetizer::new(96, 0x1234_5678);
         for i in 0u8..N {
@@ -188,11 +199,12 @@ async fn rtsp_interleaved_publisher_pushes_rtp_over_control_channel() {
         drop(ctrl);
     };
 
-    let (n, tags) = run_ingest(src, publisher).await;
+    let (n, access_units) = run_ingest(src, publisher).await;
     assert_eq!(n, N as u64, "server emitted every access unit then EOS");
     let expected: Vec<u8> = (0..N).collect();
     assert_eq!(
-        tags, expected,
+        tags(&access_units),
+        expected,
         "interleaved RTP depayloaded in order over the control channel"
     );
 }
@@ -210,7 +222,7 @@ async fn rtsp_interleaved_ignores_the_rtcp_channel() {
         .with_frame_limit(N as u64);
 
     let publisher = |rtsp_addr| async move {
-        let mut ctrl = handshake_interleaved(rtsp_addr).await;
+        let mut ctrl = handshake_interleaved(rtsp_addr, BARE_SDP).await;
         let mut pktz = RtpH264Packetizer::new(96, 0x1234_5678);
         for i in 0u8..N {
             // A dummy RTCP-channel (1) frame interleaved before each RTP frame.
@@ -228,11 +240,48 @@ async fn rtsp_interleaved_ignores_the_rtcp_channel() {
         drop(ctrl);
     };
 
-    let (n, tags) = run_ingest(src, publisher).await;
+    let (n, access_units) = run_ingest(src, publisher).await;
     assert_eq!(n, N as u64, "only the RTP channel produced access units");
     assert_eq!(
-        tags,
+        tags(&access_units),
         (0..N).collect::<Vec<u8>>(),
         "RTCP-channel frames were skipped"
     );
+}
+
+// ffmpeg's RTSP publisher announces the parameter sets in the SDP and sends none in band
+#[tokio::test]
+async fn announced_parameter_sets_open_the_first_keyframe() {
+    const N: u8 = 3;
+    const SPS: &[u8] = &[0x67, 0x64, 0x00, 0x28, 0xAC, 0xD9];
+    const PPS: &[u8] = &[0x68, 0xEB, 0xEC, 0xB2];
+    const START_CODE: &[u8] = &[0, 0, 0, 1];
+    let listener = StdTcpListener::bind("127.0.0.1:0").expect("bind rtsp");
+    let src = RtspServerSrc::from_listener(listener)
+        .unwrap()
+        .with_rtp(96, 0x1234_5678)
+        .with_frame_limit(N as u64);
+
+    let publisher = |rtsp_addr| async move {
+        let sdp = sdp_h264(96, Some(SPS), Some(PPS));
+        let mut ctrl = handshake_interleaved(rtsp_addr, &sdp).await;
+        let mut pktz = RtpH264Packetizer::new(96, 0x1234_5678);
+        for i in 0u8..N {
+            for pkt in pktz.packetize(&access_unit(i), i as u32 * 3000) {
+                ctrl.write_all(&interleaved(0, &pkt))
+                    .await
+                    .expect("send rtp");
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(4)).await;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        drop(ctrl);
+    };
+
+    let (_, access_units) = run_ingest(src, publisher).await;
+    let first = [START_CODE, SPS, START_CODE, PPS, &access_unit(0)].concat();
+    let expected: Vec<Vec<u8>> = core::iter::once(first)
+        .chain((1..N).map(access_unit))
+        .collect();
+    assert_eq!(access_units, expected);
 }

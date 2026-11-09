@@ -131,6 +131,7 @@ impl RtspServerSrc {
                 declared_caps: None,
                 capture_time_ids: Default::default(),
                 encoding: RtpEncoding::H264,
+                parameter_sets: Vec::new(),
             },
             max_sessions: 0,
             session_timeout_ns: DEFAULT_SESSION_TIMEOUT_SECS as u64 * 1_000_000_000,
@@ -612,11 +613,14 @@ impl SourceLoop for RtspServerSrc {
                             mut responder,
                             rtp_channel,
                             leftover,
-                        } => tokio::select! {
-                            r = receive_interleaved(&mut control, &mut responder, rtp_channel, leftover, AccessUnitEmitter::new(recv.encoding, seq_base, remaining), &mut tap) => r?,
-                            _ = inactive_for(&activity, timeout_ns) => SessionEnd::PeerGone,
-                            _ = refuse_extras(&listener, &refused) => unreachable!("refusal never ends"),
-                        },
+                        } => {
+                            let emitter = AccessUnitEmitter::new(&session_recv_config(&recv, &responder), seq_base, remaining);
+                            tokio::select! {
+                                r = receive_interleaved(&mut control, &mut responder, rtp_channel, leftover, emitter, &mut tap) => r?,
+                                _ = inactive_for(&activity, timeout_ns) => SessionEnd::PeerGone,
+                                _ = refuse_extras(&listener, &refused) => unreachable!("refusal never ends"),
+                            }
+                        }
                     };
                     served.set(served.get().saturating_add(1));
                     match end {

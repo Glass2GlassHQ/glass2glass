@@ -182,6 +182,7 @@ pub struct RtspResponder {
     /// a client silent (no request, no RTCP) past it.
     timeout_secs: u32,
     capture_time_ids: CaptureTimeExtensionIds,
+    announced_parameter_sets: Vec<u8>,
     // the video codec an ingest server records, a publisher announcing another is refused
     ingest_codec: Option<VideoCodec>,
 }
@@ -204,6 +205,7 @@ impl RtspResponder {
             interleaved: None,
             timeout_secs: DEFAULT_SESSION_TIMEOUT_SECS,
             capture_time_ids: CaptureTimeExtensionIds::default(),
+            announced_parameter_sets: Vec::new(),
             ingest_codec: None,
         }
     }
@@ -234,6 +236,10 @@ impl RtspResponder {
     /// H.264 stream, empty before an ANNOUNCE.
     pub fn capture_time_ids(&self) -> CaptureTimeExtensionIds {
         self.capture_time_ids
+    }
+
+    pub fn announced_parameter_sets(&self) -> &[u8] {
+        &self.announced_parameter_sets
     }
 
     /// The session identifier assigned at `SETUP`.
@@ -287,7 +293,11 @@ impl RtspResponder {
                         }
                         self.sdp = sdp.to_string();
                         self.capture_time_ids = video
+                            .as_ref()
                             .map(|media| media.capture_time_ids())
+                            .unwrap_or_default();
+                        self.announced_parameter_sets = video
+                            .map(|media| media.parameter_sets)
                             .unwrap_or_default();
                     }
                 }
