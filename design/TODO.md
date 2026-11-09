@@ -150,11 +150,6 @@ libraries installed.
   built to print its `StdVideo*` structs, since Mesa 25.3.6's `RADV_DEBUG=dumpibs`
   prints nothing for video. NVIDIA Turing cannot decode it at all (minimum H.265
   coded extent 144x144).
-- **`rtspsrc` SSRC change.** Follow a sender that changes SSRC mid-session, as
-  GStreamer does. retina fails every packet after the change with "wrong ssrc",
-  so today only `reconnect` recovers the stream. Once a retina release carries
-  `PlayOptions::unknown_rtp_ssrc` (scottlamb/retina PR 153), set
-  `UnknownRtpSsrcPolicy::FollowNewSsrc` and add a relay test that switches SSRC.
 ## CUDA / display
 
 - Run `CudaKmsSink` from a bare VT with DRM master and verify the in-tree
@@ -228,10 +223,12 @@ libraries installed.
 - Camera controls (exposure, focus, white balance) as element properties on
   AVCaptureDevice and Camera2.
 - ONVIF PTZ and event subscriptions.
-- ONVIF metadata tracks advertised with the Streaming Specification's
-  `vnd.onvif.metadata+gzip` encoding name, or with an EXI coding: retina builds
-  no depacketizer for either and fails the whole session on a set-up stream it
-  cannot depacketize, so those tracks are skipped today.
+- ONVIF metadata tracks with the Streaming Specification's
+  `vnd.onvif.metadata+gzip` encoding name: once a retina release carries
+  scottlamb/retina PR 165, map that name to gzip in `onvif_metadata_gzip`
+  instead of skipping the track.
+- ONVIF metadata tracks with an EXI coding (`vnd.onvif.metadata.exi.onvif`,
+  `vnd.onvif.metadata.exi.ext`): g2g has no EXI decoder, so they are skipped.
 - Run the Windows (`mfdevice` / `wasapidevice`) and macOS (`avfdevice` /
   `coreaudiodevice`) device providers on a real host: enumeration against
   attached hardware, endpoint selection by id through each element's `device`
@@ -313,6 +310,10 @@ libraries installed.
   codec path on Raspberry Pi and most ARM SoCs (gst `v4l2h264dec`,
   `v4l2h264enc`, `v4l2slh264dec`).
 - Run `vaav1enc` on a GPU with VA-API AV1 encode (AMD RDNA3, Intel Arc).
+- **HEVC with alpha in `vtencode`** (`kCMVideoCodecType_HEVCWithAlpha`, gst
+  `vtenc_h265a`) from BGRA input. Both macOS CI runners create the session
+  and encode a frame: `macos-latest` on a paravirtualized hardware encoder,
+  `macos-15-intel` on the software one.
 - **Pure-Rust / wasm decode** to drop the ffmpeg FFI: VP8 / VP9 decode and a
   pure-Rust Opus path (see the roadmap for why both are blocked).
 
