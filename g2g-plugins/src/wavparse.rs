@@ -142,6 +142,11 @@ fn parse_fmt(body: &[u8]) -> Option<WaveFormat> {
         Some(_) => readable_format(tag, bits)?,
         None => tagged_audio(tag)?,
     };
+    // some writers put a wrong nAvgBytesPerSec in valid PCM files
+    let byte_rate = match sample_frame_len(format, channels as u8) {
+        Some(frame_len) => u32::try_from(frame_len).ok()?.checked_mul(sample_rate)?,
+        None => byte_rate,
+    };
     Some(WaveFormat {
         format,
         channels: channels as u8,
@@ -153,6 +158,8 @@ fn parse_fmt(body: &[u8]) -> Option<WaveFormat> {
 }
 
 const BLOCK_ALIGN_OFFSET: usize = 12;
+// WAVEFORMATEX is 18 bytes followed by at most a 16-bit cbSize of extra bytes
+const MAX_FMT_CHUNK_LEN: usize = 18 + u16::MAX as usize;
 const BITS_OFFSET: usize = 14;
 const WAVE_FORMAT_MS_ADPCM: u16 = 0x0002;
 const WAVE_FORMAT_XMA1: u16 = 0x0165;
@@ -245,6 +252,7 @@ pub struct WavParse {
     in_data: bool,
     // None when the data chunk size is the streaming sentinel
     data_remaining: Option<usize>,
+    chunk_bytes_to_skip: usize,
     // bytes of the `data` chunk pushed so far, which time the next buffer
     data_offset: u64,
     emitted: u64,
@@ -317,7 +325,10 @@ impl WavParse {
             self.riff_seen = true;
         }
         while !self.in_data {
-            if self.buf.len() < CHUNK_HEADER_LEN {
+            let skipped = self.chunk_bytes_to_skip.min(self.buf.len());
+            self.buf.drain(..skipped);
+            self.chunk_bytes_to_skip -= skipped;
+            if self.chunk_bytes_to_skip > 0 || self.buf.len() < CHUNK_HEADER_LEN {
                 return Ok(());
             }
             let id = read_fourcc(&self.buf, 0).ok_or(G2gError::CapsMismatch)?;
@@ -332,7 +343,8 @@ impl WavParse {
                     return Err(G2gError::CapsMismatch);
                 }
                 self.post_duration(size, format);
-                self.data_remaining = (size != UNKNOWN_DATA_LEN).then_some(size);
+                // gst wavparse reads a zero-length data chunk to the end of the file
+                self.data_remaining = (size != UNKNOWN_DATA_LEN && size != 0).then_some(size);
                 out.push(PipelinePacket::CapsChanged(format.caps())).await?;
                 if matches!(format.format, AudioFormat::Tagged(_)) {
                     let header = core::mem::take(&mut self.tagged_header);
@@ -345,21 +357,27 @@ impl WavParse {
             // the file: a chunk claiming more than the stream holds waits rather
             // than indexing past the buffer.
             let padded = padded_len(size).ok_or(G2gError::CapsMismatch)?;
+            if &id != b"fmt " {
+                self.buf.drain(..CHUNK_HEADER_LEN);
+                self.chunk_bytes_to_skip = padded;
+                continue;
+            }
+            if size > MAX_FMT_CHUNK_LEN {
+                return Err(G2gError::CapsMismatch);
+            }
             let total = padded
                 .checked_add(CHUNK_HEADER_LEN)
                 .ok_or(G2gError::CapsMismatch)?;
             if self.buf.len() < total {
                 return Ok(());
             }
-            if &id == b"fmt " {
-                let body = &self.buf[CHUNK_HEADER_LEN..CHUNK_HEADER_LEN + size];
-                let format = parse_fmt(body).ok_or(G2gError::CapsMismatch)?;
-                self.format = Some(format);
-                // the decoder opens from this header, so it carries the block align the data is cut at
-                self.tagged_header = body.to_vec();
-                self.tagged_header[BLOCK_ALIGN_OFFSET..BITS_OFFSET]
-                    .copy_from_slice(&format.block_align.to_le_bytes());
-            }
+            let body = &self.buf[CHUNK_HEADER_LEN..CHUNK_HEADER_LEN + size];
+            let format = parse_fmt(body).ok_or(G2gError::CapsMismatch)?;
+            self.format = Some(format);
+            // the decoder opens from this header, so it carries the block align the data is cut at
+            self.tagged_header = body.to_vec();
+            self.tagged_header[BLOCK_ALIGN_OFFSET..BITS_OFFSET]
+                .copy_from_slice(&format.block_align.to_le_bytes());
             self.buf.drain(..total);
         }
         let format = self.format.ok_or(G2gError::CapsMismatch)?;
@@ -579,5 +597,120 @@ impl PadTemplates for WavParse {
             PadTemplate::sink(CapsSet::one(Self::input_caps())),
             PadTemplate::source(Self::output_alternatives()),
         ])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testutil::{frame, CollectSink};
+    use g2g_core::ByteStreamEncoding;
+
+    const CHANNELS: u16 = 2;
+    const SAMPLE_RATE: u32 = 44_100;
+    const BITS: u16 = 16;
+    const FRAME_LEN: u32 = CHANNELS as u32 * BITS as u32 / 8;
+    const BYTE_RATE: u32 = FRAME_LEN * SAMPLE_RATE;
+
+    fn chunk(id: &[u8; 4], size: u32, body: &[u8]) -> Vec<u8> {
+        let mut out = id.to_vec();
+        out.extend_from_slice(&size.to_le_bytes());
+        out.extend_from_slice(body);
+        out
+    }
+
+    fn pcm_fmt(byte_rate: u32) -> Vec<u8> {
+        let mut body = Vec::new();
+        body.extend_from_slice(&1u16.to_le_bytes());
+        body.extend_from_slice(&CHANNELS.to_le_bytes());
+        body.extend_from_slice(&SAMPLE_RATE.to_le_bytes());
+        body.extend_from_slice(&byte_rate.to_le_bytes());
+        body.extend_from_slice(&(FRAME_LEN as u16).to_le_bytes());
+        body.extend_from_slice(&BITS.to_le_bytes());
+        chunk(b"fmt ", body.len() as u32, &body)
+    }
+
+    fn riff_header() -> Vec<u8> {
+        let mut out = chunk(b"RIFF", u32::MAX, b"WAVE");
+        out.truncate(RIFF_HEADER_LEN);
+        out
+    }
+
+    fn parser() -> WavParse {
+        let mut parse = WavParse::new();
+        parse
+            .configure_pipeline(&Caps::ByteStream {
+                encoding: ByteStreamEncoding::Wav,
+            })
+            .unwrap();
+        parse
+    }
+
+    async fn push(parse: &mut WavParse, bytes: Vec<u8>, out: &mut CollectSink) {
+        parse
+            .process(PipelinePacket::DataFrame(frame(bytes)), out)
+            .await
+            .unwrap();
+    }
+
+    fn data_frames(out: &CollectSink) -> Vec<(u64, usize)> {
+        out.packets
+            .iter()
+            .filter_map(|packet| match packet {
+                PipelinePacket::DataFrame(frame) => Some((
+                    frame.timing.pts_ns,
+                    frame.domain.as_system_slice().unwrap().len(),
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn pcm_is_timed_by_its_frame_size_not_the_declared_byte_rate() {
+        const SAMPLES_BYTES: usize = 4 * FRAME_LEN as usize;
+        let mut parse = parser();
+        let mut out = CollectSink::default();
+        let mut head = riff_header();
+        head.extend(pcm_fmt(BYTE_RATE / 2));
+        head.extend(chunk(
+            b"data",
+            2 * SAMPLES_BYTES as u32,
+            &[0; SAMPLES_BYTES],
+        ));
+        push(&mut parse, head, &mut out).await;
+        push(&mut parse, alloc::vec![0; SAMPLES_BYTES], &mut out).await;
+
+        let expected_pts = (SAMPLES_BYTES as u64 * NANOS_PER_SECOND).div_ceil(u64::from(BYTE_RATE));
+        assert_eq!(
+            data_frames(&out),
+            [(0, SAMPLES_BYTES), (expected_pts, SAMPLES_BYTES)]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_chunk_ahead_of_data_is_skipped_without_buffering() {
+        const PUSHED: usize = 64 * 1024;
+        let mut parse = parser();
+        let mut out = CollectSink::default();
+        let mut head = riff_header();
+        head.extend(pcm_fmt(BYTE_RATE));
+        head.extend(chunk(b"LIST", u32::MAX - 1, &[]));
+        push(&mut parse, head, &mut out).await;
+        push(&mut parse, alloc::vec![0; PUSHED], &mut out).await;
+        assert!(parse.buf.is_empty());
+        assert_eq!(parse.chunk_bytes_to_skip, u32::MAX as usize - 1 - PUSHED);
+    }
+
+    #[tokio::test]
+    async fn a_zero_length_data_chunk_runs_to_the_end() {
+        const SAMPLES_BYTES: usize = 4 * FRAME_LEN as usize;
+        let mut parse = parser();
+        let mut out = CollectSink::default();
+        let mut head = riff_header();
+        head.extend(pcm_fmt(BYTE_RATE));
+        head.extend(chunk(b"data", 0, &[0; SAMPLES_BYTES]));
+        push(&mut parse, head, &mut out).await;
+        assert_eq!(data_frames(&out), [(0, SAMPLES_BYTES)]);
     }
 }

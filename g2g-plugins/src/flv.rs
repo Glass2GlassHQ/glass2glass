@@ -227,13 +227,16 @@ pub(crate) fn put_file_header(out: &mut Vec<u8>, flags: u8) {
     out.extend_from_slice(&0u32.to_be_bytes());
 }
 
-/// The length of the FLV file header that opens `buf`, `None` until it is
-/// buffered. A `DataOffset` below the minimum header counts as the minimum.
+// FLV version 1 headers are nine bytes
+const MAX_FLV_HEADER_LEN: usize = 4096;
+
+/// The length of the FLV file header that opens `buf`, as its `DataOffset`
+/// declares, `None` until that field is buffered. A `DataOffset` below the
+/// minimum header counts as the minimum.
 pub(crate) fn file_header_len(buf: &[u8]) -> Option<usize> {
     let offset = buf.get(FLV_DATA_OFFSET_AT..FLV_HEADER_MIN)?;
     let offset = u32::from_be_bytes(offset.try_into().ok()?) as usize;
-    let len = offset.max(FLV_HEADER_MIN);
-    (buf.len() >= len).then_some(len)
+    Some(offset.max(FLV_HEADER_MIN))
 }
 
 /// One FLV tag's header fields.
@@ -388,6 +391,13 @@ impl FlvDemuxer {
             let Some(data_offset) = file_header_len(&self.buf) else {
                 return;
             };
+            if data_offset > MAX_FLV_HEADER_LEN {
+                self.buf.clear();
+                return;
+            }
+            if self.buf.len() < data_offset {
+                return;
+            }
             pos = data_offset;
             self.header_done = true;
         }
@@ -400,6 +410,10 @@ impl FlvDemuxer {
             let body = &self.buf[body_range.clone()];
             match tag_type {
                 TAG_SCRIPT if self.metadata.is_none() => self.metadata = Some(body.to_vec()),
+                TAG_VIDEO
+                    if body
+                        .first()
+                        .is_some_and(|first| first & VIDEO_EX_HEADER != 0) => {}
                 TAG_VIDEO => {
                     if let Some(config) = video_sequence_header(body) {
                         self.video_config = Some(config.to_vec());
@@ -888,7 +902,6 @@ const UNSUPPORTED_SOUND_FORMATS: [(u8, &str); 8] = [
     (8, "pcm_mulaw"),
 ];
 // enhanced FLV puts a fourcc after this flag instead of a codec id in the low nibble
-#[cfg(feature = "std")]
 const VIDEO_EX_HEADER: u8 = 0x80;
 
 // the codec of each audio and video tag in an FLV prefix that this parser does not carry
@@ -1044,6 +1057,29 @@ mod tests {
             d.push_data(&stream); // must not panic
             assert!(d.take_units().is_empty(), "truncated tag is skipped");
         }
+    }
+
+    #[test]
+    fn enhanced_video_tags_are_not_read_as_legacy_codecs() {
+        // ffmpeg's colorInfo metadata tag: ex-header | keyframe | packet type 4, then a fourcc
+        let metadata = [0xD4, b'h', b'v', b'c', b'1', 0x02, 0x00];
+        // a ModEx packet (type 7, the AVC codec id in a legacy tag) whose next byte is 0
+        let mod_ex = [0x97, 0x00, 0x00, 0x00, 0x00, 0x01, 0x64];
+        let stream = flv_stream(&[tag(TAG_VIDEO, 0, &metadata), tag(TAG_VIDEO, 0, &mod_ex)]);
+        let mut d = FlvDemuxer::new();
+        d.push_data(&stream);
+        assert!(d.take_units().is_empty());
+        assert_eq!(d.video_config(), None);
+    }
+
+    #[test]
+    fn an_oversized_data_offset_is_not_buffered() {
+        let mut stream = flv_stream(&[]);
+        stream[FLV_DATA_OFFSET_AT..FLV_HEADER_MIN].copy_from_slice(&u32::MAX.to_be_bytes());
+        let mut d = FlvDemuxer::new();
+        d.push_data(&stream);
+        d.push_data(&[0; MAX_FLV_HEADER_LEN]);
+        assert!(d.buf.len() < MAX_FLV_HEADER_LEN);
     }
 
     #[test]

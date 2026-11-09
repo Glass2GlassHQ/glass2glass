@@ -1024,7 +1024,7 @@ fn segment_source(rep: Node) -> Option<SegmentSource> {
         n.children()
             .find(|c| c.is_element() && c.has_tag_name("SegmentList"))
     }) {
-        return Some(SegmentSource::List(parse_segment_list(sl)));
+        return parse_segment_list(sl).map(SegmentSource::List);
     }
     if let Some(sb) = rep
         .ancestors()
@@ -1072,17 +1072,27 @@ fn segment_template(rep: Node) -> Option<SegmentTemplate> {
         .find(|c| c.is_element() && c.has_tag_name("SegmentTimeline"))
         .map(parse_timeline)
         .unwrap_or_default();
+    let duration = st
+        .attribute("duration")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    // ISO/IEC 23009-1 5.3.9.2.1: a template needs @duration or a SegmentTimeline
+    if duration == 0 && timeline.is_empty() {
+        return None;
+    }
+    let media = st.attribute("media")?;
+    let initialization = st.attribute("initialization");
+    if !template_widths_valid(media) || !initialization.is_none_or(template_widths_valid) {
+        return None;
+    }
     Some(SegmentTemplate {
-        initialization: st.attribute("initialization").map(String::from),
-        media: String::from(st.attribute("media")?),
+        initialization: initialization.map(String::from),
+        media: String::from(media),
         start_number: st
             .attribute("startNumber")
             .and_then(|s| s.parse().ok())
             .unwrap_or(1),
-        duration: st
-            .attribute("duration")
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(0),
+        duration,
         timescale: st
             .attribute("timescale")
             .and_then(|s| s.parse().ok())
@@ -1112,7 +1122,7 @@ fn parse_availability_time_offset(s: &str) -> Option<f64> {
 }
 
 /// Parse a `SegmentList` element into its init + ordered `<SegmentURL>` entries.
-fn parse_segment_list(sl: Node) -> SegmentList {
+fn parse_segment_list(sl: Node) -> Option<SegmentList> {
     let init = sl
         .children()
         .find(|c| c.is_element() && c.has_tag_name("Initialization"));
@@ -1123,8 +1133,16 @@ fn parse_segment_list(sl: Node) -> SegmentList {
             media: s.attribute("media").map(String::from).unwrap_or_default(),
             media_range: s.attribute("mediaRange").and_then(parse_dash_range),
         })
-        .collect();
-    SegmentList {
+        .collect::<Vec<_>>();
+    let duration = sl
+        .attribute("duration")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    // ISO/IEC 23009-1 5.3.9.2.1: more than one segment needs @duration to place them
+    if duration == 0 && segments.len() > 1 {
+        return None;
+    }
+    Some(SegmentList {
         init_url: init
             .and_then(|n| n.attribute("sourceURL"))
             .map(String::from)
@@ -1133,10 +1151,7 @@ fn parse_segment_list(sl: Node) -> SegmentList {
             .and_then(|n| n.attribute("range"))
             .and_then(parse_dash_range),
         init_present: init.is_some(),
-        duration: sl
-            .attribute("duration")
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(0),
+        duration,
         timescale: sl
             .attribute("timescale")
             .and_then(|s| s.parse().ok())
@@ -1145,7 +1160,7 @@ fn parse_segment_list(sl: Node) -> SegmentList {
             .attribute("availabilityTimeOffset")
             .and_then(parse_availability_time_offset),
         segments,
-    }
+    })
 }
 
 /// A DASH byte range `"start-end"` (inclusive end) -> [`ByteRange`]. A reversed
@@ -1211,45 +1226,68 @@ fn expand(tmpl: &str, rep_id: &str, number: Option<u64>, time: Option<u64>) -> S
     out
 }
 
-/// Format a `$Number...$` value, honoring a `%0Nd` zero-pad width.
-fn format_number(fmt: &str, n: u64) -> String {
-    if let Some(width) = fmt
-        .strip_prefix("%0")
+fn pad_width(fmt: &str) -> Option<usize> {
+    fmt.strip_prefix("%0")
         .and_then(|s| s.strip_suffix('d'))
         .and_then(|s| s.parse::<usize>().ok())
-    {
+}
+
+// a u64 has at most 20 digits
+const MAX_PAD_WIDTH: usize = 20;
+
+fn template_widths_valid(tmpl: &str) -> bool {
+    tmpl.split('$')
+        .skip(1)
+        .step_by(2)
+        .filter_map(|part| {
+            part.strip_prefix("Number")
+                .or_else(|| part.strip_prefix("Time"))
+        })
+        .filter_map(pad_width)
+        .all(|width| width <= MAX_PAD_WIDTH)
+}
+
+/// Format a `$Number...$` value, honoring a `%0Nd` zero-pad width.
+fn format_number(fmt: &str, n: u64) -> String {
+    if let Some(width) = pad_width(fmt) {
         alloc::format!("{n:0width$}")
     } else {
         alloc::format!("{n}")
     }
 }
 
-/// Parse an ISO 8601 duration's time component (`PT1H2M3.5S`) to seconds. The
-/// date part (years/months/days before `T`) is not expected in media durations
-/// and is ignored.
+const SECONDS_PER_DAY: f64 = 86_400.0;
+
 fn parse_iso_duration(s: &str) -> Option<f64> {
-    let time = s.split_once('T').map(|(_, t)| t).unwrap_or("");
+    let body = s.strip_prefix('P')?;
+    let (date, time) = body.split_once('T').unwrap_or((body, ""));
+    let date_secs = sum_duration_fields(
+        date,
+        &[
+            // gst's xml helper counts a year as 365 days and a month as 30
+            ('Y', 365.0 * SECONDS_PER_DAY),
+            ('M', 30.0 * SECONDS_PER_DAY),
+            ('D', SECONDS_PER_DAY),
+        ],
+    )?;
+    let time_secs = sum_duration_fields(time, &[('H', 3600.0), ('M', 60.0), ('S', 1.0)])?;
+    Some(date_secs + time_secs)
+}
+
+fn sum_duration_fields(fields: &str, units: &[(char, f64)]) -> Option<f64> {
     let mut secs = 0.0f64;
     let mut num = String::new();
-    for ch in time.chars() {
+    for ch in fields.chars() {
         match ch {
             '0'..='9' | '.' => num.push(ch),
-            'H' => {
-                secs += num.parse::<f64>().ok()? * 3600.0;
+            designator => {
+                let (_, unit_secs) = units.iter().find(|(unit, _)| *unit == designator)?;
+                secs += num.parse::<f64>().ok()? * unit_secs;
                 num.clear();
             }
-            'M' => {
-                secs += num.parse::<f64>().ok()? * 60.0;
-                num.clear();
-            }
-            'S' => {
-                secs += num.parse::<f64>().ok()?;
-                num.clear();
-            }
-            _ => return None,
         }
     }
-    Some(secs)
+    num.is_empty().then_some(secs)
 }
 
 /// Parse an `xs:dateTime` (`2026-08-03T20:45:39.541Z`, or with a `+HH:MM` /
@@ -1861,6 +1899,12 @@ mod tests {
         assert_eq!(parse_iso_duration("PT12.0S"), Some(12.0));
         assert_eq!(parse_iso_duration("PT1H2M3S"), Some(3723.0));
         assert_eq!(parse_iso_duration("PT0.5S"), Some(0.5));
+        assert_eq!(parse_iso_duration("P1D"), Some(86_400.0));
+        assert_eq!(parse_iso_duration("P1DT1H"), Some(90_000.0));
+        assert_eq!(parse_iso_duration("P1Y2M"), Some(425.0 * 86_400.0));
+        assert_eq!(parse_iso_duration("PT1D"), None);
+        assert_eq!(parse_iso_duration("PT5"), None);
+        assert_eq!(parse_iso_duration("1H"), None);
     }
 
     #[test]
@@ -2254,14 +2298,50 @@ mod tests {
         assert_eq!(live_urls(&mpd, AST_UNIX + 6.5, None), ["s2.m4s", "s3.m4s"]);
     }
 
+    fn parse_live_with(addressing: &str) -> Result<Mpd, MpdError> {
+        parse(&alloc::format!(
+            r#"<MPD type="dynamic" availabilityStartTime="2026-08-03T00:00:00Z">
+  <Period id="0" start="PT0S"><AdaptationSet mimeType="video/mp4">{addressing}
+    <Representation id="v" bandwidth="1"/>
+  </AdaptationSet></Period>
+</MPD>"#
+        ))
+    }
+
     #[test]
-    fn live_segment_list_without_duration_lists_every_entry() {
-        let mpd = live_mpd_with(&LIVE_SEGMENT_LIST.replace("duration=\"2\" ", ""));
-        let edge = mpd.live_edge(&mpd.periods[0], 1.0).unwrap();
+    fn segment_list_of_several_entries_without_duration_is_rejected() {
+        let undated = LIVE_SEGMENT_LIST.replace("duration=\"2\" ", "");
+        assert_eq!(parse_live_with(&undated).err(), Some(MpdError::Invalid));
+        let single = r#"<SegmentList><SegmentURL media="s0.m4s"/></SegmentList>"#;
+        assert!(parse_live_with(single).is_ok());
+    }
+
+    #[test]
+    fn segment_template_without_duration_or_timeline_is_rejected() {
+        let undated = r#"<SegmentTemplate media="seg-$Number$.m4s" timescale="1"/>"#;
+        assert_eq!(parse_live_with(undated).err(), Some(MpdError::Invalid));
+    }
+
+    #[test]
+    fn segment_template_pad_width_past_a_u64_is_rejected() {
+        let template = |width: usize| {
+            alloc::format!(r#"<SegmentTemplate media="s$Number%0{width}d$.m4s" duration="1"/>"#)
+        };
         assert_eq!(
-            mpd.periods[0].representations[0].live_segments(&edge, AST_UNIX + 1.0, None),
-            None
+            parse_live_with(&template(70_000)).err(),
+            Some(MpdError::Invalid)
         );
+        assert_eq!(
+            parse_live_with(&template(MAX_PAD_WIDTH + 1)).err(),
+            Some(MpdError::Invalid)
+        );
+        let mpd = parse_live_with(&template(MAX_PAD_WIDTH)).unwrap();
+        let rep = &mpd.periods[0].representations[0];
+        let url = rep
+            .template()
+            .unwrap()
+            .media_url(&rep.id, SegmentRef { number: 7, time: 0 });
+        assert_eq!(url, alloc::format!("s{:020}.m4s", 7));
     }
 
     #[test]

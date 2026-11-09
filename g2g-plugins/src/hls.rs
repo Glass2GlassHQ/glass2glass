@@ -263,6 +263,7 @@ pub enum HlsError {
     /// positional (the `_HLS_part` directive names one), so a part that cannot
     /// be read fails the playlist instead of shifting the ones after it.
     MalformedPart,
+    MalformedKey,
 }
 
 // the lowest is the fallback when every entry exceeds the cap
@@ -400,7 +401,7 @@ pub fn parse(text: &str) -> Result<Playlist, HlsError> {
                     })
                 });
         } else if let Some(attrs) = line.strip_prefix("#EXT-X-KEY:") {
-            current_key = parse_key(attrs);
+            current_key = parse_key(attrs)?;
         } else if let Some(attrs) = line.strip_prefix("#EXT-X-PART:") {
             pending_parts.push(parse_part(attrs, &pending_parts).ok_or(HlsError::MalformedPart)?);
         } else if let Some(attrs) = line.strip_prefix("#EXT-X-PART-INF:") {
@@ -580,25 +581,29 @@ fn parse_media(attrs: &str) -> Option<Rendition> {
     })
 }
 
-/// Parse an `#EXT-X-KEY` attribute list. `METHOD=NONE` (or a missing/unknown
-/// method or a keyed method with no `URI`) yields `None`, clearing encryption.
-fn parse_key(attrs: &str) -> Option<SegmentKey> {
+/// Parse an `#EXT-X-KEY` attribute list. `METHOD=NONE` yields `None`, clearing
+/// encryption.
+fn parse_key(attrs: &str) -> Result<Option<SegmentKey>, HlsError> {
     let pairs = attr_pairs(attrs);
     let find = |name: &str| pairs.iter().find(|(k, _)| *k == name).map(|(_, v)| *v);
-    let method = match find("METHOD")? {
-        "AES-128" => KeyMethod::Aes128,
-        "SAMPLE-AES" => KeyMethod::SampleAes,
-        _ => return None,
+    let method = match find("METHOD") {
+        Some("NONE") => return Ok(None),
+        Some("AES-128") => KeyMethod::Aes128,
+        Some("SAMPLE-AES") => KeyMethod::SampleAes,
+        _ => return Err(HlsError::MalformedKey),
     };
-    let uri = String::from(find("URI")?.trim_matches('"'));
-    let iv = find("IV").and_then(parse_iv);
-    let key_id = find("KEYID").and_then(parse_iv);
-    Some(SegmentKey {
+    let uri = String::from(find("URI").ok_or(HlsError::MalformedKey)?.trim_matches('"'));
+    let hex_attribute = |name: &str| {
+        find(name)
+            .map(|value| parse_iv(value).ok_or(HlsError::MalformedKey))
+            .transpose()
+    };
+    Ok(Some(SegmentKey {
         method,
         uri,
-        iv,
-        key_id,
-    })
+        iv: hex_attribute("IV")?,
+        key_id: hex_attribute("KEYID")?,
+    }))
 }
 
 /// `IV=0x<32 hex digits>` -> 16 bytes. Anything else is rejected.
@@ -1051,6 +1056,20 @@ mod tests {
                 key_id: None
             }),
         );
+    }
+
+    #[test]
+    fn a_key_that_cannot_be_applied_fails_the_playlist() {
+        for key in [
+            "METHOD=SAMPLE-AES-CTR,URI=\"k.key\"",
+            "URI=\"k.key\"",
+            "METHOD=AES-128",
+            "METHOD=AES-128,URI=\"k.key\",IV=0x01",
+            "METHOD=SAMPLE-AES,URI=\"k.key\",KEYID=zz",
+        ] {
+            let text = alloc::format!("#EXTM3U\n#EXT-X-KEY:{key}\n#EXTINF:4.0,\nseg0.ts\n");
+            assert_eq!(parse(&text).err(), Some(HlsError::MalformedKey), "{key}");
+        }
     }
 
     #[test]

@@ -952,7 +952,7 @@ impl FlvTagReader {
 
     fn next_tag(&mut self) -> Option<(u8, u32, Vec<u8>)> {
         if !self.header_consumed {
-            let header_len = file_header_len(&self.buf)?;
+            let header_len = file_header_len(&self.buf).filter(|len| self.buf.len() >= *len)?;
             self.buf.drain(..header_len);
             self.header_consumed = true;
         }
