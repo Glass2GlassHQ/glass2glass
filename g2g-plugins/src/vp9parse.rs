@@ -200,6 +200,19 @@ pub(crate) fn is_keyframe(packet: &[u8]) -> bool {
 /// truncated before the size fields.
 fn parse_keyframe(packet: &[u8]) -> Option<Vp9KeyFrame> {
     let mut br = BitReader::new(packet);
+    let color = read_keyframe_head(&mut br)?;
+    // frame_size: 16-bit minus-1 fields.
+    let width = br.read_bits(16)? + 1;
+    let height = br.read_bits(16)? + 1;
+    Some(Vp9KeyFrame {
+        width,
+        height,
+        profile: color.profile,
+    })
+}
+
+// a keyframe's uncompressed header up to and including its color_config
+fn read_keyframe_head(br: &mut BitReader) -> Option<Vp9ColorConfig> {
     if br.read_bits(2)? != 2 {
         return None; // frame_marker is always 0b10
     }
@@ -217,18 +230,8 @@ fn parse_keyframe(packet: &[u8]) -> Option<Vp9KeyFrame> {
     }
     br.read_bit()?; // show_frame
     br.read_bit()?; // error_resilient_mode
-
-    read_sync_code(&mut br)?;
-    skip_color_config(&mut br, profile)?;
-
-    // frame_size: 16-bit minus-1 fields.
-    let width = br.read_bits(16)? + 1;
-    let height = br.read_bits(16)? + 1;
-    Some(Vp9KeyFrame {
-        width,
-        height,
-        profile,
-    })
+    read_sync_code(br)?;
+    read_color_config(br, profile)
 }
 
 // frame_sync_code: 0x49 0x83 0x42, bit-aligned to the current position
@@ -236,21 +239,54 @@ fn read_sync_code(br: &mut BitReader) -> Option<()> {
     (br.read_bits(8)? == 0x49 && br.read_bits(8)? == 0x83 && br.read_bits(8)? == 0x42).then_some(())
 }
 
+// a keyframe's color_config, the fields an MP4 `vpcC` record describes
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Vp9ColorConfig {
+    pub(crate) profile: u8,
+    pub(crate) bit_depth: u8,
+    pub(crate) color_space: u32,
+    pub(crate) full_range: bool,
+    pub(crate) subsampling_x: bool,
+    pub(crate) subsampling_y: bool,
+}
+
 // color_config: its length depends on profile and colour space
-fn skip_color_config(br: &mut BitReader, profile: u8) -> Option<()> {
-    if profile >= 2 {
-        br.read_bit()?; // ten_or_twelve_bit (bit depth)
-    }
+fn read_color_config(br: &mut BitReader, profile: u8) -> Option<Vp9ColorConfig> {
+    let bit_depth = match profile {
+        0 | 1 => 8,
+        _ if br.read_bit()? == 0 => 10,
+        _ => 12,
+    };
     let color_space = br.read_bits(3)?;
-    if color_space != CS_RGB {
-        br.read_bit()?; // color_range
-        if profile == 1 || profile == 3 {
-            br.read_bits(3)?; // subsampling_x, subsampling_y, reserved_zero
+    let four_two_zero_only = profile == 0 || profile == 2;
+    let (full_range, subsampling_x, subsampling_y) = if color_space != CS_RGB {
+        let full_range = br.read_bit()? == 1;
+        if four_two_zero_only {
+            (full_range, true, true)
+        } else {
+            let subsampling = (br.read_bit()? == 1, br.read_bit()? == 1);
+            br.read_bit()?; // reserved_zero
+            (full_range, subsampling.0, subsampling.1)
         }
-    } else if profile == 1 || profile == 3 {
-        br.read_bit()?; // reserved_zero
-    }
-    Some(())
+    } else {
+        if !four_two_zero_only {
+            br.read_bit()?; // reserved_zero
+        }
+        (true, false, false)
+    };
+    Some(Vp9ColorConfig {
+        profile,
+        bit_depth,
+        color_space,
+        full_range,
+        subsampling_x,
+        subsampling_y,
+    })
+}
+
+// the color_config of a packet that opens on a keyframe
+pub(crate) fn keyframe_color_config(packet: &[u8]) -> Option<Vp9ColorConfig> {
+    read_keyframe_head(&mut BitReader::new(packet))
 }
 
 #[cfg(all(any(target_os = "linux", windows), feature = "nvdec"))]
@@ -308,7 +344,7 @@ pub(crate) fn frame_header(frame: &[u8]) -> Option<Vp9FrameHeader> {
         if intra_only {
             read_sync_code(&mut br)?;
             if profile > 0 {
-                skip_color_config(&mut br, profile)?;
+                read_color_config(&mut br, profile)?;
             }
         }
         br.read_bits(8)? as u8

@@ -621,7 +621,18 @@ impl Mp4MuxN {
                             });
                         }
                     }
-                    // VP8/VP9 carry no out-of-band parameter sets; the track is
+                    // VP9's vpcC describes the keyframe's colour config, so wait for one
+                    VideoCodec::Vp9 => {
+                        if let Some(color) = crate::vp9parse::keyframe_color_config(au) {
+                            self.inits[input] = Some(TrackInit::Video {
+                                codec,
+                                width: w,
+                                height: h,
+                                param_sets: alloc::vec![vp9_vpcc_record(color)?.to_vec()],
+                            });
+                        }
+                    }
+                    // VP8 carries no out-of-band parameter sets; the track is
                     // ready at the first frame (the vpcC uses caps geometry).
                     _ => {
                         self.inits[input] = Some(TrackInit::Video {
@@ -1640,7 +1651,16 @@ fn trak_media(init: &TrackInit) -> TrakMedia {
             param_sets,
         } => {
             let sample_entry = match codec {
-                VideoCodec::Vp8 | VideoCodec::Vp9 => vp_sample_entry(*codec, *width, *height),
+                VideoCodec::Vp8 => vp_sample_entry(*codec, *width, *height, VP8_VPCC_RECORD),
+                VideoCodec::Vp9 => {
+                    let record = param_sets
+                        .first()
+                        .and_then(|record| {
+                            <[u8; VPCC_RECORD_LEN]>::try_from(record.as_slice()).ok()
+                        })
+                        .expect("capture_init stores the keyframe's vpcC record");
+                    vp_sample_entry(*codec, *width, *height, record)
+                }
                 VideoCodec::Av1 => {
                     // The captured init is the sequence-header OBU (see
                     // `capture_init`); its parse succeeded at capture.
@@ -1813,9 +1833,13 @@ fn caption_media_header() -> Vec<u8> {
 
 /// The VP8/VP9 `VisualSampleEntry` (`vp08` / `vp09`) with its `vpcC`
 /// VPCodecConfigurationBox (the VP-in-ISOBMFF binding). Geometry comes from the
-/// caps; the codec config uses the 8-bit 4:2:0 unspecified-colour defaults (no
-/// bitstream parsing), which a player overrides from the frames it decodes.
-fn vp_sample_entry(codec: VideoCodec, width: u32, height: u32) -> Vec<u8> {
+/// caps, the codec config from `vpcc_record`.
+fn vp_sample_entry(
+    codec: VideoCodec,
+    width: u32,
+    height: u32,
+    vpcc_record: [u8; VPCC_RECORD_LEN],
+) -> Vec<u8> {
     let fourcc: &[u8; 4] = match codec {
         VideoCodec::Vp8 => b"vp08",
         _ => b"vp09",
@@ -1833,7 +1857,7 @@ fn vp_sample_entry(codec: VideoCodec, width: u32, height: u32) -> Vec<u8> {
     p.extend_from_slice(&[0u8; 32]); // compressor name
     p.extend_from_slice(&0x0018u16.to_be_bytes()); // depth 24
     p.extend_from_slice(&0xFFFFu16.to_be_bytes()); // pre_defined -1
-    p.extend_from_slice(&vpcc());
+    p.extend_from_slice(&full_box(b"vpcC", 1, 0, &vpcc_record));
     mp4_box(fourcc, &p)
 }
 
@@ -1858,16 +1882,54 @@ fn av1_sample_entry(width: u32, height: u32, av1c: &[u8]) -> Vec<u8> {
     mp4_box(b"av01", &p)
 }
 
-/// The `vpcC` VPCodecConfigurationBox (fullbox v1): profile 0, level unset, 8-bit
-/// 4:2:0 (colocated), unspecified colour, no codec initialization data, the
-/// generic defaults for an unparsed VP8/VP9 stream.
-fn vpcc() -> Vec<u8> {
-    // profile 0, level unset, then a packed byte:
-    // bitDepth(4)=8 | chromaSubsampling(3)=1 (4:2:0 colocated) | videoFullRangeFlag(1)=0,
-    // colour_primaries / transfer / matrix unspecified (2), then a 2-byte
-    // codec_initialization_data_size of 0 (VP8/VP9 carry no init data).
-    let record = [0u8, 0, (8 << 4) | (1 << 1), 2, 2, 2, 0, 0];
-    full_box(b"vpcC", 1, 0, &record)
+// vpcC v1: profile, level, bitDepth(4) chromaSubsampling(3) videoFullRangeFlag(1),
+// colour primaries, transfer, matrix, then a 2-byte codecInitializationDataSize of 0
+const VPCC_RECORD_LEN: usize = 8;
+const VPCC_UNSPECIFIED: u8 = 2;
+const VPCC_CHROMA_420_COLOCATED: u8 = 1;
+const VPCC_CHROMA_422: u8 = 2;
+const VPCC_CHROMA_444: u8 = 3;
+// VP8 is always 8-bit 4:2:0, its colour unknown to the muxer
+const VP8_VPCC_RECORD: [u8; VPCC_RECORD_LEN] = [
+    0,
+    0,
+    (8 << 4) | (VPCC_CHROMA_420_COLOCATED << 1),
+    VPCC_UNSPECIFIED,
+    VPCC_UNSPECIFIED,
+    VPCC_UNSPECIFIED,
+    0,
+    0,
+];
+
+// VP9 4:4:0 has no vpcC chroma code
+fn vp9_vpcc_record(
+    color: crate::vp9parse::Vp9ColorConfig,
+) -> Result<[u8; VPCC_RECORD_LEN], G2gError> {
+    let chroma = match (color.subsampling_x, color.subsampling_y) {
+        (true, true) => VPCC_CHROMA_420_COLOCATED,
+        (true, false) => VPCC_CHROMA_422,
+        (false, false) => VPCC_CHROMA_444,
+        (false, true) => return Err(G2gError::CapsMismatch),
+    };
+    // VP9 color_space to ISO/IEC 23091-2 matrix coefficients
+    let matrix = match color.color_space {
+        1 | 3 => 6,
+        2 => 1,
+        4 => 7,
+        5 => 9,
+        7 => 0,
+        _ => VPCC_UNSPECIFIED,
+    };
+    Ok([
+        color.profile,
+        0,
+        (color.bit_depth << 4) | (chroma << 1) | u8::from(color.full_range),
+        VPCC_UNSPECIFIED,
+        VPCC_UNSPECIFIED,
+        matrix,
+        0,
+        0,
+    ])
 }
 
 /// An `AudioSampleEntry` box (`mp4a` / `Opus`): the shared sample-entry header
@@ -2431,12 +2493,38 @@ mod tests {
     }
 
     #[test]
+    fn vp9_vpcc_record_describes_a_10_bit_422_keyframe() {
+        let color = crate::vp9parse::Vp9ColorConfig {
+            profile: 3,
+            bit_depth: 10,
+            color_space: 5,
+            full_range: true,
+            subsampling_x: true,
+            subsampling_y: false,
+        };
+        let bt2020_matrix = 9;
+        assert_eq!(
+            vp9_vpcc_record(color),
+            Ok([
+                3,
+                0,
+                (10 << 4) | (VPCC_CHROMA_422 << 1) | 1,
+                2,
+                2,
+                bt2020_matrix,
+                0,
+                0
+            ])
+        );
+    }
+
+    #[test]
     fn vp9_track_writes_a_vp09_sample_entry_with_vpcc() {
         let tracks = [Some(TrackInit::Video {
             codec: VideoCodec::Vp9,
             width: 320,
             height: 240,
-            param_sets: Vec::new(),
+            param_sets: alloc::vec![VP8_VPCC_RECORD.to_vec()],
         })];
         let moov = av_moov(&tracks, None, &MoovMetadata::default(), &[]);
         let count = |needle: &[u8]| moov.windows(needle.len()).filter(|w| *w == needle).count();

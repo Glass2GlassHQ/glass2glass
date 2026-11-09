@@ -3,9 +3,9 @@
 //! reframing) behind a `vp09` VisualSampleEntry + `vpcC` VPCodecConfigurationBox;
 //! the keyframe flag comes from the VP9 uncompressed frame header. Drives the
 //! element directly with synthetic VP9 frames + ADTS AAC, and asserts the moov
-//! carries the VP9 sample entry (no avcC). A real `vp9enc` end-to-end run needs
-//! libvpx, so the codec config is also checked structurally by ffprobe out of
-//! band.
+//! carries the VP9 sample entry (no avcC) and reads back as a VP9 track. A real
+//! `vp9enc` end-to-end run needs libvpx, so the codec config is also checked
+//! structurally by ffprobe out of band.
 #![cfg(feature = "std")]
 
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
@@ -13,6 +13,7 @@ use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{
     AudioFormat, Caps, Dim, G2gError, MultiInputElement, OutputSink, PushOutcome, Rate, VideoCodec,
 };
+use g2g_plugins::mp4demuxn::forwardable_streams;
 use g2g_plugins::mp4muxn::Mp4MuxN;
 
 fn vp9_caps() -> Caps {
@@ -123,4 +124,17 @@ async fn muxes_vp9_and_aac_into_one_mp4() {
         "the AAC track still carries its esds"
     );
     assert_eq!(mux.emitted(), 4, "all four access units muxed");
+
+    let streams = forwardable_streams(out);
+    assert_eq!(streams.len(), 2, "both tracks read back");
+    assert!(
+        matches!(
+            streams[0].caps,
+            Caps::CompressedVideo {
+                codec: VideoCodec::Vp9,
+                ..
+            }
+        ),
+        "the vp09 entry reads back as VP9"
+    );
 }

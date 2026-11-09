@@ -998,7 +998,7 @@ fn parse_av1c_config(av01: &[u8]) -> Result<Vec<Vec<u8>>, G2gError> {
 }
 
 /// Read a video sample entry (`avc1` / `avc3` / `hvc1` / `hev1` / `mp4v` / `av01` /
-/// `vp08` / `jpeg`, or the encrypted `encv`)
+/// `vp08` / `vp09` / `jpeg`, or the encrypted `encv`)
 /// into a [`TrackKind::Video`] plus the cbcs `cenc` defaults for an encrypted
 /// track. An `encv` carries the original codec config (`avcC` / `hvcC`) alongside
 /// a `sinf` (original format + `cbcs` scheme + `tenc`), the same shape
@@ -1038,6 +1038,8 @@ fn parse_video_entry(
         (VideoCodec::H265, parse_hvcc(hvcc)?.parameter_sets, None)
     } else if find_box(entries, b"vp08").is_some() {
         (VideoCodec::Vp8, Vec::new(), None)
+    } else if find_box(entries, b"vp09").is_some() {
+        (VideoCodec::Vp9, Vec::new(), None)
     } else if find_box(entries, b"jpeg")
         .or_else(|| find_box(entries, b"AVDJ"))
         .is_some()

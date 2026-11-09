@@ -77,6 +77,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M2161: the RTP receiver drops muxed RTCP with reports off and leaves RTX resends out of its receiver reports, and the RTSP server refuses a SETUP without a usable client port and omits an RTP-Info `rtptime` it does not know.
 - M2162: SDP `rtpmap` / `fmtp` lines apply only to their own payload type, static PCMU / PCMA need none, ST 2110 `fmtp` tolerates bare flags, and RTSP digest auth reads quoted commas and answers `qop=auth`.
 - M2163: `jpegparse` keeps an MPO or Ultra HDR file as one image, JPEG and PNG geometry is read only from a header long enough to hold it, and still-image caps re-declare after a flush.
+- M2164: MP4 demux reads VP9 (`vp09`) tracks, and `mp4mux` writes a VP9 track's `vpcC` from its first keyframe's profile, bit depth, subsampling and colour.
 
 ## 0.14.0
 
