@@ -98,16 +98,8 @@ pub fn extract_mpeg2_cc_data(au: &[u8]) -> Vec<CcTriple> {
     out
 }
 
-/// Build an Annex-B SEI NAL carrying `triples` as an ATSC A/53 `GA94` `cc_data`
-/// block, the inverse of [`extract_cc_data`]: the NAL an inserter prepends to an
-/// access unit so a downstream decoder (or TV) recovers the captions. The SEI RBSP
-/// is emulation-prevention escaped, and the NAL header is the codec's SEI form
-/// (H.264 type 6, one byte; H.265 prefix-SEI type 39, two bytes). Returns the NAL
-/// with a 4-byte start code. Up to 31 triples (the 5-bit `cc_count`); excess is
-/// truncated.
-pub fn build_cc_sei(triples: &[CcTriple], codec: VideoCodec) -> Vec<u8> {
+pub(crate) fn cc_t35_payload(triples: &[CcTriple]) -> Vec<u8> {
     let cc_count = triples.len().min(0x1F);
-    // user_data_registered_itu_t_t35 payload (ATSC1 cc_data).
     let mut payload = Vec::with_capacity(9 + cc_count * 3);
     payload.push(0xB5); // itu_t_t35_country_code: USA
     payload.extend_from_slice(&[0x00, 0x31]); // provider_code: ATSC
@@ -117,6 +109,18 @@ pub fn build_cc_sei(triples: &[CcTriple], codec: VideoCodec) -> Vec<u8> {
     payload.push(0xFF); // em_data
     payload.extend_from_slice(&write_cc_data(&triples[..cc_count]));
     payload.push(0xFF); // marker_bits trailer
+    payload
+}
+
+/// Build an Annex-B SEI NAL carrying `triples` as an ATSC A/53 `GA94` `cc_data`
+/// block, the inverse of [`extract_cc_data`]: the NAL an inserter prepends to an
+/// access unit so a downstream decoder (or TV) recovers the captions. The SEI RBSP
+/// is emulation-prevention escaped, and the NAL header is the codec's SEI form
+/// (H.264 type 6, one byte; H.265 prefix-SEI type 39, two bytes). Returns the NAL
+/// with a 4-byte start code. Up to 31 triples (the 5-bit `cc_count`); excess is
+/// truncated.
+pub fn build_cc_sei(triples: &[CcTriple], codec: VideoCodec) -> Vec<u8> {
+    let payload = cc_t35_payload(triples);
 
     // SEI message: payloadType 4 (0xFF-extended), payloadSize (0xFF-extended), payload.
     let mut rbsp = Vec::new();

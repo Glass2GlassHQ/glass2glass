@@ -322,6 +322,38 @@ pub(crate) fn parse_nals<'a>(
     info
 }
 
+#[cfg(feature = "metadata")]
+#[derive(Debug, Default)]
+pub(crate) struct BitstreamMetaLatch {
+    hdr: Option<g2g_core::meta::HdrStaticMeta>,
+}
+
+#[cfg(feature = "metadata")]
+impl BitstreamMetaLatch {
+    pub(crate) fn end_sequence(&mut self) {
+        self.hdr = None;
+    }
+
+    pub(crate) fn attach(&mut self, frame: &mut g2g_core::frame::Frame, info: SeiInfo) {
+        if let Some(hdr) = info.hdr {
+            self.hdr = Some(hdr);
+        }
+        if !info.captions.is_empty() {
+            let mut meta = g2g_core::meta::CaptionMeta::new();
+            for t in info.captions {
+                meta.push(t.into());
+            }
+            frame.meta.attach(meta);
+        }
+        if let Some(hdr) = self.hdr {
+            frame.meta.attach(hdr);
+        }
+        if let Some(tc) = info.timecode {
+            frame.meta.attach(tc);
+        }
+    }
+}
+
 /// Wrap `payload` as an Annex-B SEI NAL of `payload_type` for `codec`, the
 /// framing [`for_each_message`] reads back. Test / authoring helper: the caption
 /// path has its own builder ([`crate::cea::build_cc_sei`]) that also writes the

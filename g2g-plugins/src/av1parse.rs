@@ -70,6 +70,9 @@ pub struct Av1Parse {
     reframed_sequence: u64,
     #[cfg(feature = "metadata")]
     input_stamps: crate::inputstamp::PendingInputStamps,
+    // dav1d keeps HDR metadata until a later OBU replaces it, the AV1 spec gives it no persistence
+    #[cfg(feature = "metadata")]
+    bitstream_meta: crate::sei::BitstreamMetaLatch,
 }
 
 impl Av1Parse {
@@ -118,6 +121,8 @@ impl Av1Parse {
         out: &mut dyn OutputSink,
     ) -> Result<(), G2gError> {
         self.refine_caps(&temporal_unit, out).await?;
+        #[cfg(feature = "metadata")]
+        let info = metadata_obu_info(&temporal_unit);
         #[allow(unused_mut)]
         let mut frame = Frame::new(
             MemoryDomain::System(SystemSlice::from_boxed(temporal_unit.into_boxed_slice())),
@@ -127,6 +132,7 @@ impl Av1Parse {
         #[cfg(feature = "metadata")]
         {
             frame.meta = self.input_stamps.take(timing.pts_ns).meta;
+            self.bitstream_meta.attach(&mut frame, info);
         }
         self.reframed_sequence += 1;
         out.push(PipelinePacket::DataFrame(frame)).await?;
@@ -205,6 +211,12 @@ impl AsyncElement for Av1Parse {
                         self.reframe && (self.framer.started || opens_temporal_unit(bytes));
                     if !delimited_input {
                         self.refine_caps(bytes, out).await?;
+                        #[cfg(feature = "metadata")]
+                        let info = metadata_obu_info(bytes);
+                        #[allow(unused_mut)]
+                        let mut frame = frame;
+                        #[cfg(feature = "metadata")]
+                        self.bitstream_meta.attach(&mut frame, info);
                         out.push(PipelinePacket::DataFrame(frame)).await?;
                         return Ok(());
                     }
@@ -698,6 +710,79 @@ pub(crate) fn strip_temporal_delimiters(data: &[u8]) -> Vec<u8> {
         }
     }
     out
+}
+
+#[cfg(feature = "metadata")]
+const OBU_METADATA: u8 = 5;
+#[cfg(feature = "metadata")]
+const METADATA_TYPE_HDR_CLL: u32 = 1;
+#[cfg(feature = "metadata")]
+const METADATA_TYPE_HDR_MDCV: u32 = 2;
+#[cfg(feature = "metadata")]
+const METADATA_TYPE_ITUT_T35: u32 = 4;
+
+#[cfg(feature = "metadata")]
+fn metadata_obu_info(temporal_unit: &[u8]) -> crate::sei::SeiInfo {
+    let mut info = crate::sei::SeiInfo::default();
+    let mut hdr = g2g_core::meta::HdrStaticMeta::default();
+    for obu in obus(temporal_unit) {
+        if obu.obu_type != OBU_METADATA {
+            continue;
+        }
+        let mut at = 0;
+        let Some(metadata_type) = read_leb128(obu.payload, &mut at) else {
+            continue;
+        };
+        // AV1 6.7.1: the last nonzero byte carries the trailing one bit
+        let Some(trailing) = obu.payload.iter().rposition(|&byte| byte != 0) else {
+            continue;
+        };
+        let Some(content) = obu.payload.get(at..trailing) else {
+            continue;
+        };
+        match metadata_type {
+            METADATA_TYPE_HDR_CLL => {
+                if let Some((cll, fall)) = crate::sei::parse_content_light_level(content) {
+                    hdr.max_content_light_level = Some(cll);
+                    hdr.max_frame_average_light_level = Some(fall);
+                }
+            }
+            METADATA_TYPE_HDR_MDCV => {
+                if let Some(mastering) = parse_mastering_display(content) {
+                    hdr.mastering = Some(mastering);
+                }
+            }
+            METADATA_TYPE_ITUT_T35 => {
+                crate::cea::parse_caption_payload(content, &mut info.captions)
+            }
+            _ => {}
+        }
+    }
+    info.hdr = (!hdr.is_empty()).then_some(hdr);
+    info
+}
+
+#[cfg(feature = "metadata")]
+fn parse_mastering_display(p: &[u8]) -> Option<g2g_core::meta::MasteringDisplay> {
+    use crate::bereader::{be_u16, be_u32};
+    use g2g_core::meta::{Chromaticity, MasteringDisplay};
+    // AV1 6.7.4: chromaticity is 0.16 fixed point, peak luminance 24.8 and black level 18.14
+    const CHROMATICITY_ONE: f32 = (1u32 << 16) as f32;
+    const MAX_LUMINANCE_ONE: f32 = (1u32 << 8) as f32;
+    const MIN_LUMINANCE_ONE: f32 = (1u32 << 14) as f32;
+    let chroma = |i: usize| -> Option<Chromaticity> {
+        Some(Chromaticity {
+            x: f32::from(be_u16(p, i * 4)?) / CHROMATICITY_ONE,
+            y: f32::from(be_u16(p, i * 4 + 2)?) / CHROMATICITY_ONE,
+        })
+    };
+    Some(MasteringDisplay {
+        // AV1 codes the primaries red, green, blue
+        display_primaries: [chroma(0)?, chroma(1)?, chroma(2)?],
+        white_point: chroma(3)?,
+        max_luminance: be_u32(p, 16)? as f32 / MAX_LUMINANCE_ONE,
+        min_luminance: be_u32(p, 20)? as f32 / MIN_LUMINANCE_ONE,
+    })
 }
 
 /// Whether a temporal unit is a random-access (sync) sample: it carries a
@@ -1205,6 +1290,95 @@ mod tests {
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         }
+    }
+
+    #[cfg(feature = "metadata")]
+    #[tokio::test]
+    async fn metadata_obus_become_hdr_and_caption_frame_meta() {
+        use crate::cea::{cc_t35_payload, CcTriple};
+        use g2g_core::meta::{CaptionMeta, CaptionTriple, HdrStaticMeta};
+        const TRAILING_ONE_BIT: u8 = 0x80;
+        let metadata_obu = |metadata_type: u8, content: &[u8]| {
+            obu(
+                OBU_METADATA,
+                &[&[metadata_type][..], content, &[TRAILING_ONE_BIT]].concat(),
+            )
+        };
+        // BT.2020 red, green, blue and D65 in 0.16 fixed point, then 1000 and 0.005 cd/m2
+        let mut mdcv = Vec::new();
+        for (x, y) in [
+            (0.708, 0.292),
+            (0.170, 0.797),
+            (0.131, 0.046),
+            (0.3127, 0.3290),
+        ] {
+            mdcv.extend_from_slice(&((x * 65536.0f64) as u16).to_be_bytes());
+            mdcv.extend_from_slice(&((y * 65536.0f64) as u16).to_be_bytes());
+        }
+        mdcv.extend_from_slice(&(1000u32 << 8).to_be_bytes());
+        mdcv.extend_from_slice(&((0.005f64 * 16384.0) as u32).to_be_bytes());
+        let cll = [1200u16.to_be_bytes(), 300u16.to_be_bytes()].concat();
+        let triple = CcTriple {
+            cc_type: 0,
+            b0: 0x94,
+            b1: 0x2C,
+        };
+        let first = [
+            temporal_unit(1920, 1080, 0),
+            metadata_obu(METADATA_TYPE_HDR_MDCV as u8, &mdcv),
+            metadata_obu(METADATA_TYPE_HDR_CLL as u8, &cll),
+            metadata_obu(METADATA_TYPE_ITUT_T35 as u8, &cc_t35_payload(&[triple])),
+        ]
+        .concat();
+        let second = obu(OBU_TEMPORAL_DELIMITER, &[]);
+
+        let mut parse = Av1Parse::new();
+        parse.configure_pipeline(&av1_caps()).unwrap();
+        let mut sink = CollectSink::default();
+        for (sequence, unit) in [first, second].into_iter().enumerate() {
+            let frame = frame_with_bytes(sequence as u64, unit);
+            parse
+                .process(PipelinePacket::DataFrame(frame), &mut sink)
+                .await
+                .unwrap();
+        }
+        let frames: Vec<&Frame> = sink
+            .packets
+            .iter()
+            .filter_map(|packet| match packet {
+                PipelinePacket::DataFrame(frame) => Some(frame),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(frames.len(), 2);
+        for frame in &frames {
+            let hdr = frame
+                .meta
+                .get::<HdrStaticMeta>()
+                .expect("latched HDR metadata");
+            let mastering = hdr.mastering.expect("mastering display");
+            assert!(
+                (mastering.display_primaries[0].x - 0.708).abs() < 1e-4,
+                "red x"
+            );
+            assert!(
+                (mastering.white_point.y - 0.3290).abs() < 1e-4,
+                "D65 white y"
+            );
+            assert!((mastering.max_luminance - 1000.0).abs() < 1e-3);
+            assert!((mastering.min_luminance - 0.005).abs() < 1e-4);
+            assert_eq!(hdr.max_content_light_level, Some(1200));
+            assert_eq!(hdr.max_frame_average_light_level, Some(300));
+        }
+        let captions: Vec<CaptionTriple> = frames[0]
+            .meta
+            .get::<CaptionMeta>()
+            .expect("captions")
+            .iter()
+            .copied()
+            .collect();
+        assert_eq!(captions, [triple.into()]);
+        assert!(frames[1].meta.get::<CaptionMeta>().is_none());
     }
 
     #[tokio::test]

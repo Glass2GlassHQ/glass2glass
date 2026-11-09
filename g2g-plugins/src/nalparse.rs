@@ -139,11 +139,11 @@ pub struct NalParse<C: NalCodec> {
     /// [`NalCodec::PARAM_SET_TYPES`] entry in the same order, refreshed as they
     /// flow so a keyframe lacking inline parameter sets can be prefixed.
     cached: Vec<Vec<Vec<u8>>>,
-    /// Last HDR10 static metadata seen in the stream's SEI. It describes the
-    /// whole coded video sequence but is coded per IRAP, so it is latched and
-    /// re-attached to every frame until the next sequence starts.
+    /// HDR10 static metadata describes the whole coded video sequence but is
+    /// coded per IRAP, so it is latched and re-attached to every frame until the
+    /// next sequence starts.
     #[cfg(feature = "metadata")]
-    hdr: Option<g2g_core::meta::HdrStaticMeta>,
+    bitstream_meta: crate::sei::BitstreamMetaLatch,
     #[cfg(feature = "metadata")]
     after_end_of_sequence: bool,
     /// SPS VUI context the H.264 `pic_timing` SEI parse needs, latched from the
@@ -176,7 +176,7 @@ impl<C: NalCodec> Default for NalParse<C> {
             last_segment: None,
             cached: C::PARAM_SET_TYPES.iter().map(|_| Vec::new()).collect(),
             #[cfg(feature = "metadata")]
-            hdr: None,
+            bitstream_meta: crate::sei::BitstreamMetaLatch::default(),
             #[cfg(feature = "metadata")]
             after_end_of_sequence: false,
             #[cfg(feature = "metadata")]
@@ -430,7 +430,7 @@ impl<C: NalCodec> NalParse<C> {
         if cra_after_end
             || crate::annexb::nal_units_start_coded_video_sequence(C::CODEC, nals.iter().copied())
         {
-            self.hdr = None;
+            self.bitstream_meta.end_sequence();
         }
         self.after_end_of_sequence = C::CODEC == VideoCodec::H265
             && crate::h265parse::nal_units_end_coded_video_sequence(nals);
@@ -445,25 +445,12 @@ impl<C: NalCodec> NalParse<C> {
     /// video sequence and is typically coded once per IRAP, so the last one seen
     /// is latched and re-attached to every frame.
     #[cfg(feature = "metadata")]
-    fn attach_stream_meta(&mut self, frame: &mut Frame, info: crate::sei::SeiInfo) {
-        if let Some(hdr) = info.hdr {
-            self.hdr = Some(hdr);
-        }
-        if !info.captions.is_empty() {
-            let mut meta = g2g_core::meta::CaptionMeta::new();
-            for t in info.captions {
-                meta.push(t.into());
-            }
-            frame.meta.attach(meta);
-        }
-        if let Some(hdr) = self.hdr {
-            frame.meta.attach(hdr);
-        }
-        if let Some(mut tc) = info.timecode {
+    fn attach_stream_meta(&mut self, frame: &mut Frame, mut info: crate::sei::SeiInfo) {
+        if let Some(tc) = &mut info.timecode {
             // The SEI codes the count, not the rate it runs at; that is the SPS's.
             tc.framerate_q16 = self.sps_framerate;
-            frame.meta.attach(tc);
         }
+        self.bitstream_meta.attach(frame, info);
     }
 
     /// The `CompressedVideo` caps at any geometry that this parser accepts and
