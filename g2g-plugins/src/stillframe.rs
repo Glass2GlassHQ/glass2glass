@@ -173,8 +173,10 @@ pub(crate) fn png_frame_length(data: &[u8]) -> Result<Option<usize>, G2gError> {
 /// `(width, height)` from a PNG's `IHDR`, the first chunk of the file. `None`
 /// when the image does not open with one, or declares a zero side.
 pub(crate) fn png_geometry(image: &[u8]) -> Option<(u32, u32)> {
+    // IHDR's width, height, bit depth, colour type, compression, filter and interlace fields
+    const IHDR_LEN: [u8; 4] = 13u32.to_be_bytes();
     let chunk = image.get(PNG_SIGNATURE.len()..)?;
-    if chunk.get(4..8)? != PNG_HEADER_CHUNK {
+    if chunk.get(..4)? != IHDR_LEN || chunk.get(4..8)? != PNG_HEADER_CHUNK {
         return None;
     }
     let body = chunk.get(PNG_CHUNK_HEADER..PNG_CHUNK_HEADER + 8)?;
@@ -262,6 +264,8 @@ pub(crate) fn jpeg_frame_length(data: &[u8]) -> Result<Option<usize>, G2gError> 
         return Err(G2gError::CapsMismatch);
     }
 
+    // where the images an MPF index lists after the first one end
+    let mut multi_picture_end = None;
     let mut offset = JPEG_SIGNATURE.len();
     loop {
         if offset > MAX_ENCODED_BYTES {
@@ -281,7 +285,15 @@ pub(crate) fn jpeg_frame_length(data: &[u8]) -> Result<Option<usize>, G2gError> 
         let code = offset + skip;
         let marker = data[code];
         if marker == JPEG_END_OF_IMAGE {
-            return Ok(Some(code + 1));
+            let end = code + 1;
+            // an MPO or Ultra HDR file stores its other images after the first one's EOI
+            let Some(images_end) = multi_picture_end.filter(|images_end| *images_end > end) else {
+                return Ok(Some(end));
+            };
+            if images_end > MAX_ENCODED_BYTES {
+                return Err(G2gError::CapsMismatch);
+            }
+            return Ok((data.len() >= images_end).then_some(images_end));
         }
         if jpeg_is_standalone(marker) {
             offset = code + 1;
@@ -299,6 +311,16 @@ pub(crate) fn jpeg_frame_length(data: &[u8]) -> Result<Option<usize>, G2gError> 
             .and_then(|after| after.checked_add(length))
             .filter(|end| *end <= MAX_ENCODED_BYTES)
             .ok_or(G2gError::CapsMismatch)?;
+        if marker == JPEG_APPLICATION_2 && multi_picture_end.is_none() {
+            let body_at = code + 1 + JPEG_SEGMENT_LENGTH;
+            let index_at = body_at + MULTI_PICTURE_SIGNATURE.len();
+            let index = data
+                .get(body_at..body_end)
+                .and_then(|body| body.strip_prefix(MULTI_PICTURE_SIGNATURE.as_slice()));
+            multi_picture_end = index
+                .and_then(multi_picture_images_end)
+                .and_then(|end| index_at.checked_add(end));
+        }
         if marker != JPEG_START_OF_SCAN {
             offset = body_end;
             continue;
@@ -313,6 +335,61 @@ pub(crate) fn jpeg_frame_length(data: &[u8]) -> Result<Option<usize>, G2gError> 
             None => return Ok(None),
         }
     }
+}
+
+// CIPA DC-007 multi-picture format: an APP2 segment holding a TIFF-structured index of the file's images
+const JPEG_APPLICATION_2: u8 = 0xE2;
+const MULTI_PICTURE_SIGNATURE: [u8; 4] = *b"MPF\0";
+
+// The end of the furthest image an MPF index lists, counted from the index's TIFF header like its offsets.
+fn multi_picture_images_end(index: &[u8]) -> Option<usize> {
+    const MP_ENTRY_TAG: u16 = 0xB002;
+    const IFD_COUNT_LEN: usize = 2;
+    const IFD_ENTRY_LEN: usize = 12;
+    const MP_ENTRY_LEN: usize = 16;
+    let big_endian = match index.get(..4)? {
+        b"MM\0*" => true,
+        b"II*\0" => false,
+        _ => return None,
+    };
+    let read_u32 = |bytes: &[u8]| {
+        let bytes = [bytes[0], bytes[1], bytes[2], bytes[3]];
+        if big_endian {
+            u32::from_be_bytes(bytes)
+        } else {
+            u32::from_le_bytes(bytes)
+        }
+    };
+    let u16_at = |at: usize| {
+        let bytes = index.get(at..at.checked_add(2)?)?;
+        let bytes = [bytes[0], bytes[1]];
+        Some(if big_endian {
+            u16::from_be_bytes(bytes)
+        } else {
+            u16::from_le_bytes(bytes)
+        })
+    };
+    let u32_at = |at: usize| Some(read_u32(index.get(at..at.checked_add(4)?)?));
+    let ifd_at = usize::try_from(u32_at(4)?).ok()?;
+    let entry_count = usize::from(u16_at(ifd_at)?);
+    let first_entry_at = ifd_at.checked_add(IFD_COUNT_LEN)?;
+    let mp_entry_tag_at = (0..entry_count)
+        .map(|entry| first_entry_at.checked_add(entry * IFD_ENTRY_LEN))
+        .find(|at| at.and_then(u16_at) == Some(MP_ENTRY_TAG))??;
+    let entries_len = usize::try_from(u32_at(mp_entry_tag_at + 4)?).ok()?;
+    let entries_at = usize::try_from(u32_at(mp_entry_tag_at + 8)?).ok()?;
+    let entries = index.get(entries_at..entries_at.checked_add(entries_len)?)?;
+    entries
+        .as_chunks::<MP_ENTRY_LEN>()
+        .0
+        .iter()
+        .filter_map(|entry| {
+            let size = usize::try_from(read_u32(&entry[4..8])).ok()?;
+            // the first image's entry has offset 0, it starts the file
+            let offset = usize::try_from(read_u32(&entry[8..12])).ok()?;
+            (offset != 0).then(|| offset.checked_add(size)).flatten()
+        })
+        .max()
 }
 
 // a length-declared JPEG marker segment, `code_at` is the offset of the code byte after the FF prefix
@@ -374,6 +451,12 @@ pub(crate) fn jpeg_geometry(image: &[u8]) -> Option<(u32, u32)> {
         .take_while(|segment| segment.marker != JPEG_START_OF_SCAN)
         .find(|segment| jpeg_is_frame_header(segment.marker))?;
     let body = frame_header.body_at();
+    let length = image.get(frame_header.code_at + 1..body)?;
+    let segment_end =
+        frame_header.code_at + 1 + usize::from(u16::from_be_bytes([length[0], length[1]]));
+    if body + PRECISION + 4 > segment_end {
+        return None;
+    }
     let sides = image.get(body + PRECISION..body + PRECISION + 4)?;
     let height = u32::from(u16::from_be_bytes([sides[0], sides[1]]));
     let width = u32::from(u16::from_be_bytes([sides[2], sides[3]]));

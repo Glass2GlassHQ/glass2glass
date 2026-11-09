@@ -364,6 +364,7 @@ impl<F: StillImageFormat> AsyncElement for StillImageParse<F> {
                     self.assembler.reset();
                     self.first_field = None;
                     self.pending_pts = None;
+                    self.declared = None;
                     out.push(PipelinePacket::Flush).await?;
                 }
                 // The refined caps this element emits replace the upstream
@@ -716,6 +717,57 @@ mod tests {
                 Rate::Fixed(FRAMERATE_FPS << 16)
             )]
         );
+    }
+
+    #[tokio::test]
+    async fn a_multi_picture_jpeg_frames_as_one_image() {
+        let second = jpeg_image(WIDTH as u16 / 2, HEIGHT as u16 / 2);
+        let primary_without_index = jpeg_image(WIDTH as u16, HEIGHT as u16);
+        // APP2: length, "MPF\0", big-endian TIFF header, one IFD entry, its two 16-byte image entries
+        const INDEX_LEN: usize = 2 + 4 + 8 + 2 + 12 + 4 + 32;
+        let index_at = 2 + 2 + 2 + 4;
+        let primary_len = primary_without_index.len() + 2 + INDEX_LEN;
+        let mut index = vec![0xFF, 0xE2];
+        index.extend_from_slice(&(INDEX_LEN as u16).to_be_bytes());
+        index.extend_from_slice(b"MPF\0MM\0*");
+        index.extend_from_slice(&8u32.to_be_bytes());
+        index.extend_from_slice(&1u16.to_be_bytes());
+        index.extend_from_slice(&[0xB0, 0x02, 0x00, 0x07]);
+        index.extend_from_slice(&32u32.to_be_bytes());
+        index.extend_from_slice(&26u32.to_be_bytes());
+        index.extend_from_slice(&0u32.to_be_bytes());
+        for (size, offset) in [(primary_len, 0), (second.len(), primary_len - index_at)] {
+            index.extend_from_slice(&0u32.to_be_bytes());
+            index.extend_from_slice(&(size as u32).to_be_bytes());
+            index.extend_from_slice(&(offset as u32).to_be_bytes());
+            index.extend_from_slice(&0u32.to_be_bytes());
+        }
+        let mut file = primary_without_index[..2].to_vec();
+        file.extend_from_slice(&index);
+        file.extend_from_slice(&primary_without_index[2..]);
+        assert_eq!(file.len(), primary_len);
+        file.extend_from_slice(&second);
+
+        let mut parser = JpegParse::new();
+        parser.configure_pipeline(&jpeg_caps()).unwrap();
+        let mut sink = RecordingSink::default();
+        parser
+            .process(data_frame(&file, 0), &mut sink)
+            .await
+            .unwrap();
+        parser
+            .process(PipelinePacket::Eos, &mut sink)
+            .await
+            .unwrap();
+        assert_eq!(sink.payloads(), vec![file]);
+    }
+
+    #[test]
+    fn a_frame_header_shorter_than_its_sides_declares_no_geometry() {
+        let mut image = jpeg_image(WIDTH as u16, HEIGHT as u16);
+        // SOF0 length 3: the precision byte only
+        image[5] = 0x03;
+        assert_eq!(Jpeg::geometry(&image), None);
     }
 
     /// A baseline-JPEG shaped file: `SOI`, `SOF0` at `width` x `height`, `SOS`
