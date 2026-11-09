@@ -129,7 +129,8 @@ fn walk_h264_vui_tail(br: &mut BitReader, tail: &mut H264VuiTail) -> Option<()> 
                         // H.264 counts field ticks, two per frame
         tail.framerate = num_units_in_tick
             .checked_mul(2)
-            .and_then(|frame_ticks| framerate_q16_from_fraction(time_scale, frame_ticks));
+            .and_then(|frame_ticks| framerate_q16_from_fraction(time_scale, frame_ticks))
+            .filter(|&q16| q16 > 0);
     }
     // Either HRD block sizes the pic_timing delays and sets CpbDpbDelaysPresentFlag.
     let mut pic_timing = PicTimingContext::default();

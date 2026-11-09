@@ -264,6 +264,9 @@ pub enum HlsError {
     /// be read fails the playlist instead of shifting the ones after it.
     MalformedPart,
     MalformedKey,
+    /// An `#EXT-X-MEDIA-SEQUENCE` that is not a number, or that numbers the last
+    /// segment past `u64::MAX`.
+    MalformedMediaSequence,
 }
 
 // the lowest is the fallback when every entry exceeds the cap
@@ -383,7 +386,10 @@ pub fn parse(text: &str) -> Result<Playlist, HlsError> {
         } else if let Some(rest) = line.strip_prefix("#EXT-X-TARGETDURATION:") {
             target_duration_secs = rest.trim().parse().unwrap_or(0);
         } else if let Some(rest) = line.strip_prefix("#EXT-X-MEDIA-SEQUENCE:") {
-            media_sequence = rest.trim().parse().unwrap_or(0);
+            media_sequence = rest
+                .trim()
+                .parse()
+                .map_err(|_| HlsError::MalformedMediaSequence)?;
         } else if let Some(attrs) = line.strip_prefix("#EXT-X-MAP:") {
             let pairs = attr_pairs(attrs);
             map_uri = pairs
@@ -481,6 +487,9 @@ pub fn parse(text: &str) -> Result<Playlist, HlsError> {
             renditions,
         }))
     } else {
+        if media_sequence.checked_add(segments.len() as u64).is_none() {
+            return Err(HlsError::MalformedMediaSequence);
+        }
         Ok(Playlist::Media(MediaPlaylist {
             target_duration_secs,
             media_sequence,
@@ -746,6 +755,8 @@ fn key_tag(key: Option<&SegmentKey>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::format;
+    use alloc::string::ToString;
 
     #[test]
     fn parse_iv_rejects_non_ascii_without_panicking() {
@@ -1138,6 +1149,21 @@ mod tests {
             panic!("expected media playlist");
         };
         assert_eq!(back, original);
+    }
+
+    #[test]
+    fn a_media_sequence_that_numbers_segments_past_u64_fails_the_playlist() {
+        let playlist = |sequence: &str| {
+            parse(&format!(
+                "#EXTM3U\n#EXT-X-TARGETDURATION:10\n#EXT-X-MEDIA-SEQUENCE:{sequence}\n#EXTINF:9.0,\nseg0.ts\n"
+            ))
+        };
+        assert!(playlist(&(u64::MAX - 1).to_string()).is_ok());
+        assert_eq!(
+            playlist(&u64::MAX.to_string()),
+            Err(HlsError::MalformedMediaSequence)
+        );
+        assert_eq!(playlist("seven"), Err(HlsError::MalformedMediaSequence));
     }
 
     #[test]

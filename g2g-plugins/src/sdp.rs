@@ -102,10 +102,10 @@ pub fn scan_sections(text: &str) -> Vec<SdpSection> {
 
 /// Scan the lines of a single media section (`lines[0]` is its `m=` line).
 fn scan_one(lines: &[&str]) -> Option<SdpSection> {
-    // "m=<kind> <port> <proto> <pt>"; a port of 0 means "not carried here".
+    // "m=<kind> <port>[/<number of ports>] <proto> <pt>"; a port of 0 means "not carried here".
     let mut m = lines.first()?.strip_prefix("m=")?.split_whitespace();
     let kind = m.next()?.to_string();
-    let port = m.next()?.parse::<u16>().ok()?;
+    let port = m.next()?.split('/').next()?.parse::<u16>().ok()?;
     let _proto = m.next()?;
     let payload_type = m.next()?.parse::<u8>().ok()?;
 
@@ -558,6 +558,17 @@ mod tests {
                 .any(|w| w == [0, 0, 0, 1, 0x68]),
             "PPS follows the SPS"
         );
+    }
+
+    #[test]
+    fn an_m_line_with_a_port_count_takes_its_first_port() {
+        let text = "v=0\r\n\
+            m=audio 5006/2 RTP/AVP 111\r\n\
+            a=rtpmap:111 opus/48000/2\r\n";
+        let sections = scan_sections(text);
+        assert_eq!(sections.len(), 1);
+        assert_eq!(sections[0].port, 5006);
+        assert_eq!(sections[0].payload_type, 111);
     }
 
     #[test]

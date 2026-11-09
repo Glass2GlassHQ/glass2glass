@@ -40,6 +40,12 @@ pub(crate) const RTP_HEADER: usize = 12;
 const FEC_HEADER: usize = 10;
 /// FEC level-0 header (protection length + 16-bit mask).
 const FEC_LEVEL_HEADER: usize = 4;
+/// Protection length field at the start of the FEC level-0 header.
+const PROTECTION_LENGTH: usize = 2;
+// RFC 5109 7.3: the L bit selects a 48-bit mask instead of 16 bits
+const LONG_MASK_BIT: u8 = 0x40;
+const LONG_MASK_BYTES: usize = 6;
+const SHORT_MASK_BYTES: usize = 2;
 
 /// The XOR of the protected RTP fields over a set of media packets: the header
 /// bits a receiver has to rebuild, plus the zero-padded payload. Folding a group
@@ -347,20 +353,30 @@ pub fn build_fec_packet(
     Some(out)
 }
 
+pub(crate) fn repair_payload(fec: &[u8]) -> Option<&[u8]> {
+    let parsed = g2g_core::rtp::RtpHeader::parse(fec)?;
+    fec.get(parsed.payload_offset..parsed.payload_offset + parsed.payload_len)
+}
+
+fn mask_bytes(repair: &[u8]) -> Option<usize> {
+    let long_mask = repair.first()? & LONG_MASK_BIT != 0;
+    Some(if long_mask {
+        LONG_MASK_BYTES
+    } else {
+        SHORT_MASK_BYTES
+    })
+}
+
 /// The sequence numbers a repair packet protects (`SN base` + each set mask bit).
 fn protected_seqs(fec: &[u8]) -> Option<Vec<u16>> {
-    if fec.len() < RTP_HEADER + FEC_HEADER + FEC_LEVEL_HEADER {
-        return None;
-    }
-    let sn_base = u16::from_be_bytes([fec[RTP_HEADER + 2], fec[RTP_HEADER + 3]]);
-    let mask_off = RTP_HEADER + FEC_HEADER + 2;
-    let mask = u16::from_be_bytes([fec[mask_off], fec[mask_off + 1]]);
-    let mut seqs = Vec::new();
-    for i in 0..16 {
-        if mask & (1 << (15 - i)) != 0 {
-            seqs.push(sn_base.wrapping_add(i));
-        }
-    }
+    let repair = repair_payload(fec)?;
+    let mask_start = FEC_HEADER + PROTECTION_LENGTH;
+    let mask = repair.get(mask_start..mask_start + mask_bytes(repair)?)?;
+    let sn_base = u16::from_be_bytes([repair[2], repair[3]]);
+    let seqs = (0..mask.len() * 8)
+        .filter(|&bit| mask[bit / 8] & (0x80 >> (bit % 8)) != 0)
+        .map(|bit| sn_base.wrapping_add(bit as u16))
+        .collect();
     Some(seqs)
 }
 
@@ -371,16 +387,17 @@ pub fn recover_packet(fec: &[u8], present: &[(u16, &[u8])]) -> Option<Vec<u8>> {
     let seqs = protected_seqs(fec)?;
     let (missing_seq, group) = split_group(&seqs, present)?;
 
-    let pxcc_r = fec[RTP_HEADER];
-    let mpt_r = fec[RTP_HEADER + 1];
-    let ts_r = u32::from_be_bytes(fec[RTP_HEADER + 4..RTP_HEADER + 8].try_into().ok()?);
-    let len_r = u16::from_be_bytes(fec[RTP_HEADER + 8..RTP_HEADER + 10].try_into().ok()?);
+    let repair = repair_payload(fec)?;
+    let pxcc_r = repair[0];
+    let mpt_r = repair[1];
+    let ts_r = u32::from_be_bytes(repair[4..8].try_into().ok()?);
+    let len_r = u16::from_be_bytes(repair[8..10].try_into().ok()?);
     let prot_len = u16::from_be_bytes(
-        fec[RTP_HEADER + FEC_HEADER..RTP_HEADER + FEC_HEADER + 2]
+        repair[FEC_HEADER..FEC_HEADER + PROTECTION_LENGTH]
             .try_into()
             .ok()?,
     ) as usize;
-    let fec_payload = &fec[RTP_HEADER + FEC_HEADER + FEC_LEVEL_HEADER..];
+    let fec_payload = &repair[FEC_HEADER + PROTECTION_LENGTH + mask_bytes(repair)?..];
     if fec_payload.len() < prot_len {
         return None;
     }
@@ -587,6 +604,52 @@ mod tests {
                 pkt.packetize(&nal, 1000 + i as u32 * 90).remove(0)
             })
             .collect()
+    }
+
+    fn with_one_csrc(fec: &[u8]) -> Vec<u8> {
+        const CSRC: [u8; 4] = [0x11, 0x22, 0x33, 0x44];
+        let mut moved = fec[..RTP_HEADER].to_vec();
+        // CC = 1, so the FEC header starts four bytes later
+        moved[0] |= 1;
+        moved.extend(CSRC);
+        moved.extend(&fec[RTP_HEADER..]);
+        moved
+    }
+
+    fn present_without(media: &[Vec<u8>], lost_idx: usize) -> Vec<(u16, &[u8])> {
+        media
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != lost_idx)
+            .map(|(_, p)| (u16::from_be_bytes([p[2], p[3]]), p.as_slice()))
+            .collect()
+    }
+
+    #[test]
+    fn a_repair_packet_with_a_csrc_list_still_recovers() {
+        let media = media_run(4);
+        let refs: Vec<&[u8]> = media.iter().map(|v| v.as_slice()).collect();
+        let fec = with_one_csrc(&build_fec_packet(&refs, 97, 0xFEC0_0000, 0).expect("fec built"));
+        let lost_idx = 2;
+        let recovered = recover_packet(&fec, &present_without(&media, lost_idx));
+        assert_eq!(recovered.as_ref(), Some(&media[lost_idx]));
+    }
+
+    #[test]
+    fn a_long_mask_repair_still_recovers() {
+        let media = media_run(4);
+        let refs: Vec<&[u8]> = media.iter().map(|v| v.as_slice()).collect();
+        let short = build_fec_packet(&refs, 97, 0xFEC0_0000, 0).expect("fec built");
+        // the 48-bit mask keeps the first 16 bits and adds 32 zero bits after them
+        let mask_end = RTP_HEADER + FEC_HEADER + PROTECTION_LENGTH + SHORT_MASK_BYTES;
+        let mut long = short[..mask_end].to_vec();
+        long[RTP_HEADER] |= LONG_MASK_BIT;
+        long.extend([0; LONG_MASK_BYTES - SHORT_MASK_BYTES]);
+        long.extend(&short[mask_end..]);
+        assert_eq!(protected_seqs(&long), protected_seqs(&short));
+        let lost_idx = 1;
+        let recovered = recover_packet(&long, &present_without(&media, lost_idx));
+        assert_eq!(recovered.as_ref(), Some(&media[lost_idx]));
     }
 
     #[test]

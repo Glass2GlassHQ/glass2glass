@@ -160,7 +160,9 @@ fn extended_header_len(body: &[u8], version: u8) -> Option<usize> {
     let size = body.get(..4)?;
     let len = match version {
         ID3V2_VERSION_2_4 => syncsafe_u32(size)? as usize,
-        _ => u32::from_be_bytes([size[0], size[1], size[2], size[3]]) as usize + 4,
+        _ => usize::try_from(u32::from_be_bytes([size[0], size[1], size[2], size[3]]))
+            .ok()?
+            .checked_add(4)?,
     };
     (len <= body.len()).then_some(len)
 }

@@ -578,6 +578,10 @@ impl AsyncElement for WavParse {
                 }
                 PipelinePacket::Eos => {
                     self.drain(out).await?;
+                    // gst wavparse fails a file that ends before its `data` chunk
+                    if !self.in_data {
+                        return Err(G2gError::CapsMismatch);
+                    }
                 }
                 // The byte stream carries no sample format; the concrete caps
                 // come from the parsed `fmt ` chunk instead.
@@ -685,6 +689,19 @@ mod tests {
         assert_eq!(
             data_frames(&out),
             [(0, SAMPLES_BYTES), (expected_pts, SAMPLES_BYTES)]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stream_that_ends_before_its_data_chunk_fails() {
+        let mut parse = parser();
+        let mut out = CollectSink::default();
+        let mut head = riff_header();
+        head.extend(pcm_fmt(BYTE_RATE));
+        push(&mut parse, head, &mut out).await;
+        assert_eq!(
+            parse.process(PipelinePacket::Eos, &mut out).await,
+            Err(G2gError::CapsMismatch)
         );
     }
 

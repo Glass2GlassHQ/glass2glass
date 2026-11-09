@@ -20,7 +20,7 @@
 
 use alloc::vec::Vec;
 
-use crate::ulpfec::{split_group, XorFecBuffer, XorFields, RTP_HEADER};
+use crate::ulpfec::{repair_payload, split_group, XorFecBuffer, XorFields, RTP_HEADER};
 
 /// FlexFEC fixed header before the per-SSRC block: R/F/P/X/CC (1) + M/PT (1) +
 /// length recovery (2) + TS recovery (4) + SSRCCount (1) + reserved (3).
@@ -28,7 +28,8 @@ const FLEX_FIXED: usize = 12;
 /// Per protected SSRC: the media SSRC (4) + SN base (2), then the bitmask.
 const FLEX_SSRC_PREFIX: usize = 6;
 /// Offset of the variable-length mask within a repair packet.
-const MASK_OFF: usize = RTP_HEADER + FLEX_FIXED + FLEX_SSRC_PREFIX;
+const REPAIR_MASK_OFF: usize = FLEX_FIXED + FLEX_SSRC_PREFIX;
+const MASK_OFF: usize = RTP_HEADER + REPAIR_MASK_OFF;
 /// Largest sequence offset the 109-bit mask can express.
 const MAX_OFFSET: u16 = 108;
 
@@ -176,36 +177,34 @@ pub fn build_flexfec_packet(
 
 /// Parse a repair packet's `(SN base, protected sequence numbers, payload
 /// offset)`. `None` if truncated or not a single-SSRC FlexFEC repair.
-fn flex_header(fec: &[u8]) -> Option<(u16, Vec<u16>, usize)> {
-    if fec.len() < MASK_OFF + 2 || fec[RTP_HEADER + 8] != 1 {
+fn flex_header(repair: &[u8]) -> Option<(u16, Vec<u16>, usize)> {
+    if repair.len() < REPAIR_MASK_OFF + 2 || repair[8] != 1 {
         return None; // need the fixed header + one SSRC block + at least one mask word
     }
-    let sn_base = u16::from_be_bytes([
-        fec[RTP_HEADER + FLEX_FIXED + 4],
-        fec[RTP_HEADER + FLEX_FIXED + 5],
-    ]);
-    let (offsets, mask_len) = decode_mask(&fec[MASK_OFF..])?;
+    let sn_base = u16::from_be_bytes([repair[FLEX_FIXED + 4], repair[FLEX_FIXED + 5]]);
+    let (offsets, mask_len) = decode_mask(&repair[REPAIR_MASK_OFF..])?;
     let seqs = offsets.iter().map(|o| sn_base.wrapping_add(*o)).collect();
-    Some((sn_base, seqs, MASK_OFF + mask_len))
+    Some((sn_base, seqs, REPAIR_MASK_OFF + mask_len))
 }
 
 /// The sequence numbers a repair packet protects.
 fn protected_seqs(fec: &[u8]) -> Option<Vec<u16>> {
-    flex_header(fec).map(|(_, seqs, _)| seqs)
+    flex_header(repair_payload(fec)?).map(|(_, seqs, _)| seqs)
 }
 
 /// Recover the one missing media packet of a repair's group, given the surviving
 /// members `present` (`(seq, packet)`). `None` unless exactly one protected
 /// sequence is absent.
 pub fn recover_packet(fec: &[u8], present: &[(u16, &[u8])]) -> Option<Vec<u8>> {
-    let (_, seqs, payload_off) = flex_header(fec)?;
+    let repair = repair_payload(fec)?;
+    let (_, seqs, payload_off) = flex_header(repair)?;
     let (missing_seq, group) = split_group(&seqs, present)?;
 
-    let pxcc_r = fec[RTP_HEADER] & 0x3F;
-    let mpt_r = fec[RTP_HEADER + 1];
-    let len_r = u16::from_be_bytes(fec[RTP_HEADER + 2..RTP_HEADER + 4].try_into().ok()?);
-    let ts_r = u32::from_be_bytes(fec[RTP_HEADER + 4..RTP_HEADER + 8].try_into().ok()?);
-    let fec_payload = fec.get(payload_off..)?;
+    let pxcc_r = repair[0] & 0x3F;
+    let mpt_r = repair[1];
+    let len_r = u16::from_be_bytes(repair[2..4].try_into().ok()?);
+    let ts_r = u32::from_be_bytes(repair[4..8].try_into().ok()?);
+    let fec_payload = repair.get(payload_off..)?;
 
     let mut f = XorFields::from_repair(pxcc_r, mpt_r, ts_r, len_r, fec_payload.to_vec());
     for p in &group {
@@ -398,6 +397,25 @@ mod tests {
             assert_eq!(decoded, offsets, "offsets survive the mask round trip");
             assert_eq!(len, m.len(), "reported mask length matches the encoding");
         }
+    }
+
+    #[test]
+    fn a_repair_packet_with_a_csrc_list_still_recovers() {
+        const CSRC: [u8; 4] = [0x11, 0x22, 0x33, 0x44];
+        let media = media_run(8);
+        let refs: Vec<&[u8]> = media.iter().map(|v| v.as_slice()).collect();
+        let fec = build_flexfec_packet(&refs, 110, 0xFEC0_0000, 0).expect("fec");
+        let mut moved = fec[..RTP_HEADER].to_vec();
+        moved[0] |= 1;
+        moved.extend(CSRC);
+        moved.extend(&fec[RTP_HEADER..]);
+        let present = present_except(&media, &[3]);
+        let present_refs: Vec<(u16, &[u8])> =
+            present.iter().map(|(s, p)| (*s, p.as_slice())).collect();
+        assert_eq!(
+            recover_packet(&moved, &present_refs).as_ref(),
+            Some(&media[3])
+        );
     }
 
     #[test]

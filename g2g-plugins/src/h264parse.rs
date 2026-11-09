@@ -132,6 +132,9 @@ pub(crate) struct H264SpsHead {
     pub frame_crop_offsets: [u32; 4],
 }
 
+// H.264 7.4.2.1.1 and H.265 7.4.3.2.1: 0 monochrome, 1 4:2:0, 2 4:2:2, 3 4:4:4
+pub(crate) const MAX_CHROMA_FORMAT_IDC: u32 = 3;
+
 /// Parse an SPS RBSP (the bytes after the NAL header, emulation prevention
 /// stripped) up to `vui_parameters_present_flag`, returning the reader
 /// positioned at that flag. `None` on truncation or an out-of-range field.
@@ -149,7 +152,7 @@ pub(crate) fn parse_h264_sps_head(rbsp: &[u8]) -> Option<(H264SpsHead, BitReader
     let mut bit_depth_chroma_minus8 = 0;
     let mut seq_scaling_matrix_present = false;
     if is_high_profile(profile_idc) {
-        chroma_format_idc = br.read_ue()?;
+        chroma_format_idc = br.read_ue().filter(|&idc| idc <= MAX_CHROMA_FORMAT_IDC)?;
         if chroma_format_idc == 3 {
             separate_colour_plane_flag = br.read_bit()? == 1;
         }
@@ -805,6 +808,13 @@ mod tests {
         let info = H264Codec::extract_sps_info(&stream).expect("SPS with VUI must parse");
         assert_eq!((info.width, info.height), (1280, 720));
         assert_eq!(info.framerate, Some(30 << 16), "30 fps in Q16");
+    }
+
+    #[test]
+    fn a_zero_vui_time_scale_gives_no_framerate() {
+        let stream = build_annexb_sps_with_timing(1280, 720, 1, 0);
+        let info = H264Codec::extract_sps_info(&stream).expect("SPS with VUI must parse");
+        assert_eq!(info.framerate, None);
     }
 
     #[test]

@@ -448,12 +448,15 @@ impl St2110AudioSrc {
         else {
             return false;
         };
+        let Ok(channels) = u8::try_from(*channels) else {
+            return false;
+        };
         self.format = match depth {
             SampleDepth::L16 => AudioFormat::PcmS16Le,
             SampleDepth::L24 => AudioFormat::PcmF32Le,
         };
         self.sample_rate = *sample_rate;
-        self.channels = *channels as u8;
+        self.channels = channels;
         self.port = sdp.port;
         true
     }
@@ -710,6 +713,13 @@ mod tests {
             ptp: None,
         };
         assert!(!src.apply_sdp(&video));
+        // more channels than the caps carry is rejected too
+        let mut too_many_channels = parsed.clone();
+        if let St2110Essence::Audio { channels, .. } = &mut too_many_channels.essence {
+            *channels = u16::from(u8::MAX) + 1;
+        }
+        assert!(!src.apply_sdp(&too_many_channels));
+        assert_eq!(src.channels, 2);
         assert_eq!(src.port, 5004, "unchanged");
     }
 

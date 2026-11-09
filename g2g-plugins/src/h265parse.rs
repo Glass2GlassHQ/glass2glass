@@ -230,7 +230,9 @@ pub(crate) fn parse_h265_sps_head(rbsp: &[u8]) -> Option<(H265SpsHead, BitReader
     let sps_temporal_id_nesting_flag = br.read_bit()? == 1;
     let ptl = read_profile_tier_level(&mut br, u32::from(sps_max_sub_layers_minus1))?;
     let sps_seq_parameter_set_id = br.read_ue()?;
-    let chroma_format_idc = br.read_ue()?;
+    let chroma_format_idc = br
+        .read_ue()
+        .filter(|&idc| idc <= crate::h264parse::MAX_CHROMA_FORMAT_IDC)?;
     let separate_colour_plane_flag = chroma_format_idc == 3 && br.read_bit()? == 1;
     let pic_width_in_luma_samples = br.read_ue()?;
     let pic_height_in_luma_samples = br.read_ue()?;
@@ -451,7 +453,7 @@ fn parse_vui_framerate(
     }
     let num_units_in_tick = br.read_bits(32)?;
     let time_scale = br.read_bits(32)?;
-    framerate_q16_from_fraction(time_scale, num_units_in_tick)
+    framerate_q16_from_fraction(time_scale, num_units_in_tick).filter(|&q16| q16 > 0)
 }
 
 // the VUI fields between `video_signal_type` and `vui_timing_info_present_flag`
@@ -1568,6 +1570,21 @@ mod tests {
         let ntsc = build_annexb_sps_with_vui(720, 480, 1001, 30_000, None);
         let info = H265Codec::extract_sps_info(&ntsc).expect("NTSC SPS must parse");
         assert_eq!(info.framerate, Some(((30_000u64 << 16) / 1001) as u32));
+    }
+
+    #[test]
+    fn a_chroma_format_idc_past_4_4_4_fails_the_sps() {
+        let chroma_format_idc =
+            |idc| H265Codec::extract_sps_info(&build_annexb_sps(64, 64, idc, None));
+        assert!(chroma_format_idc(crate::h264parse::MAX_CHROMA_FORMAT_IDC).is_some());
+        assert!(chroma_format_idc(crate::h264parse::MAX_CHROMA_FORMAT_IDC + 1).is_none());
+    }
+
+    #[test]
+    fn a_zero_vui_time_scale_gives_no_framerate() {
+        let stream = build_annexb_sps_with_vui(1920, 1080, 1, 0, None);
+        let info = H265Codec::extract_sps_info(&stream).expect("SPS with VUI must parse");
+        assert_eq!(info.framerate, None);
     }
 
     #[test]

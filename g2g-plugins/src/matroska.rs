@@ -1816,7 +1816,7 @@ fn parse_track_entry(body: &[u8], content_key: ContentKeyLookup<'_>) -> Option<P
             ID_AUDIO => {
                 for (aid, adata) in children(data) {
                     match aid {
-                        ID_CHANNELS => channels = read_uint(adata) as u8,
+                        ID_CHANNELS => channels = u8::try_from(read_uint(adata)).ok()?,
                         ID_SAMPLING_FREQ => sample_rate = read_float(adata) as u32,
                         ID_BIT_DEPTH => bit_depth = read_uint(adata),
                         _ => {}

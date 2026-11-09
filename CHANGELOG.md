@@ -69,6 +69,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M2153: flacparse no longer drops a frame whose samples contain a sync for the frame after next.
 - M2154: hardened AV1 tile and OBU size, subtitle, FLAC header and MPEG audio / AAC / AC-3 junk parsing, and the MCU RTP source drops oversized payloads.
 - M2155: an SRTP receiver set past 1024 sources evicts the least recently used one instead of refusing new sources.
+- M2156: hardened H.264 / H.265 SPS, ST 2110-30 SDP, Matroska, ID3, WAV, HLS and DASH parsing, ULPFEC / FlexFEC repairs with a CSRC list or long mask, and SDP port ranges.
 
 ## 0.14.0
 

@@ -491,6 +491,15 @@ impl LogSource for DashSrc {
     }
 }
 
+// a manifest without `minimumUpdatePeriod` reloads every second, and a shorter one no faster
+const DEFAULT_MANIFEST_RELOAD_MS: u64 = 1000;
+
+fn manifest_reload_ms(minimum_update_period_secs: Option<f64>) -> u64 {
+    let declared_ms = minimum_update_period_secs
+        .map_or(DEFAULT_MANIFEST_RELOAD_MS, |secs| (secs * 1000.0) as u64);
+    declared_ms.max(DEFAULT_MANIFEST_RELOAD_MS)
+}
+
 impl SourceLoop for DashSrc {
     type RunFuture<'a>
         = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>
@@ -905,7 +914,7 @@ impl SourceLoop for DashSrc {
                 let interval_ms = if self.reload_interval_ms != 0 {
                     self.reload_interval_ms
                 } else {
-                    (mpd.minimum_update_period_secs.unwrap_or(1.0) * 1000.0) as u64
+                    manifest_reload_ms(mpd.minimum_update_period_secs)
                 };
                 let waited = unless_seek(
                     self.seek.as_ref(),
@@ -1050,3 +1059,15 @@ static DASHSRC_PROPS: &[PropertySpec] = &[
     )
     .with_default("false"),
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::{manifest_reload_ms, DEFAULT_MANIFEST_RELOAD_MS};
+
+    #[test]
+    fn a_zero_minimum_update_period_reloads_no_faster_than_the_default() {
+        assert_eq!(manifest_reload_ms(Some(0.0)), DEFAULT_MANIFEST_RELOAD_MS);
+        assert_eq!(manifest_reload_ms(None), DEFAULT_MANIFEST_RELOAD_MS);
+        assert_eq!(manifest_reload_ms(Some(2.5)), 2500);
+    }
+}
