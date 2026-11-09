@@ -5,8 +5,9 @@
 //! [`crate::adpcm`] to decode, and MP3 or AC-3 for its parser and decoder.
 //!
 //! RIFF is a chunk list: a 12-byte `RIFF....WAVE` header, then `id` + `size`
-//! chunks. Only `fmt ` (the sample format) and `data` (the samples) matter here;
-//! anything else (`LIST`, `fact`, a writer's own metadata) is skipped by its
+//! chunks. Only `fmt ` (the sample format), `fact` (a coded payload's sample
+//! count) and `data` (the samples) matter here; anything else (`LIST`, a
+//! writer's own metadata) is skipped by its
 //! declared size. Sizes come from the file, so they are read with checked
 //! arithmetic and a chunk that overruns fails the parse.
 //!
@@ -253,6 +254,8 @@ pub struct WavParse {
     // None when the data chunk size is the streaming sentinel
     data_remaining: Option<usize>,
     chunk_bytes_to_skip: usize,
+    // the `fact` chunk's dwSampleLength, the sample count of a coded payload
+    fact_samples: Option<u32>,
     // bytes of the `data` chunk pushed so far, which time the next buffer
     data_offset: u64,
     emitted: u64,
@@ -293,17 +296,24 @@ impl WavParse {
     }
 
     /// Post the stream's duration from the `data` chunk length and the byte
-    /// rate. Both come from the file, so a zero rate or a streaming file's
-    /// unknown-length sentinel reports nothing rather than a bogus number.
+    /// rate, or for a coded payload from its `fact` sample count. All come from
+    /// the file, so a zero rate or a streaming file's unknown-length sentinel
+    /// reports nothing rather than a bogus number.
     fn post_duration(&self, data_len: usize, format: WaveFormat) {
         let Some(bus) = &self.bus else {
             return;
         };
-        if format.byte_rate == 0 || data_len == 0 || data_len == UNKNOWN_DATA_LEN {
+        // a VBR MP3's nAvgBytesPerSec is only an average
+        let fact_samples = self
+            .fact_samples
+            .filter(|_| sample_frame_len(format.format, format.channels).is_none());
+        let duration_ns = if let Some(samples) = fact_samples {
+            u64::from(samples).saturating_mul(NANOS_PER_SECOND) / u64::from(format.sample_rate)
+        } else if format.byte_rate == 0 || data_len == 0 || data_len == UNKNOWN_DATA_LEN {
             return;
-        }
-        let duration_ns =
-            (data_len as u64).saturating_mul(NANOS_PER_SECOND) / u64::from(format.byte_rate);
+        } else {
+            (data_len as u64).saturating_mul(NANOS_PER_SECOND) / u64::from(format.byte_rate)
+        };
         if duration_ns > 0 {
             bus.try_post(BusMessage::DurationChanged { duration_ns });
         }
@@ -357,6 +367,18 @@ impl WavParse {
             // the file: a chunk claiming more than the stream holds waits rather
             // than indexing past the buffer.
             let padded = padded_len(size).ok_or(G2gError::CapsMismatch)?;
+            if &id == b"fact" {
+                const SAMPLE_LENGTH_LEN: usize = 4;
+                if size >= SAMPLE_LENGTH_LEN {
+                    if self.buf.len() < CHUNK_HEADER_LEN + SAMPLE_LENGTH_LEN {
+                        return Ok(());
+                    }
+                    self.fact_samples = read_u32(&self.buf, CHUNK_HEADER_LEN);
+                }
+                self.buf.drain(..CHUNK_HEADER_LEN);
+                self.chunk_bytes_to_skip = padded;
+                continue;
+            }
             if &id != b"fmt " {
                 self.buf.drain(..CHUNK_HEADER_LEN);
                 self.chunk_bytes_to_skip = padded;
@@ -689,6 +711,34 @@ mod tests {
         assert_eq!(
             data_frames(&out),
             [(0, SAMPLES_BYTES), (expected_pts, SAMPLES_BYTES)]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_coded_payload_takes_its_duration_from_the_fact_sample_count() {
+        const FACT_SAMPLES: u32 = 2 * SAMPLE_RATE;
+        const AVERAGE_BYTE_RATE: u32 = 16_000;
+        let mut fmt = Vec::new();
+        fmt.extend_from_slice(&crate::waveformat::WAVE_FORMAT_MP3.to_le_bytes());
+        fmt.extend_from_slice(&CHANNELS.to_le_bytes());
+        fmt.extend_from_slice(&SAMPLE_RATE.to_le_bytes());
+        fmt.extend_from_slice(&AVERAGE_BYTE_RATE.to_le_bytes());
+        fmt.extend_from_slice(&1u16.to_le_bytes());
+        fmt.extend_from_slice(&0u16.to_le_bytes());
+        let mut head = riff_header();
+        head.extend(chunk(b"fmt ", fmt.len() as u32, &fmt));
+        head.extend(chunk(b"fact", 4, &FACT_SAMPLES.to_le_bytes()));
+        head.extend(chunk(b"data", 1000, &[0; 1000]));
+
+        let (bus, handle) = g2g_core::Bus::new(4);
+        let mut parse = parser().with_bus(handle);
+        let mut out = CollectSink::default();
+        push(&mut parse, head, &mut out).await;
+        assert_eq!(
+            bus.try_recv(),
+            Some(BusMessage::DurationChanged {
+                duration_ns: 2 * NANOS_PER_SECOND
+            })
         );
     }
 

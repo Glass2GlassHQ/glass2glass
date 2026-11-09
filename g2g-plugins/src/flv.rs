@@ -43,6 +43,8 @@ const VIDEO_CODEC_AVC: u8 = 7;
 const SOUND_FORMAT_AAC: u8 = 10;
 // Enhanced RTMP v2 audio: the sound format nibble 9 puts an audio packet type in the low nibble and a fourcc after it
 const SOUND_FORMAT_EX_HEADER: u8 = 9;
+// MP3 at 8 kHz, a rate the 2-bit rate field cannot express
+const SOUND_FORMAT_MP3_8KHZ: u8 = 14;
 const AUDIO_PACKET_SEQUENCE_START: u8 = 0;
 const AUDIO_PACKET_CODED_FRAMES: u8 = 1;
 const AUDIO_PACKET_MULTITRACK: u8 = 5;
@@ -134,7 +136,7 @@ impl FlvCodec {
         match format {
             // 14 is MP3 at 8 kHz: the same bitstream, a rate the 2-bit rate field
             // cannot express.
-            2 | 14 => Some(FlvCodec::Mp3),
+            2 | SOUND_FORMAT_MP3_8KHZ => Some(FlvCodec::Mp3),
             SOUND_FORMAT_AAC => Some(FlvCodec::Aac),
             11 => Some(FlvCodec::Speex),
             _ => None,
@@ -168,7 +170,7 @@ fn audio_tag_params(codec: FlvCodec, first: u8) -> Option<(u8, u32)> {
     let channels = if first & 0x01 == 1 { 2 } else { 1 };
     let rate = 44_100u32 >> (3 - ((first >> 2) & 0x03));
     match codec {
-        FlvCodec::Mp3 if first >> 4 == 14 => Some((channels, 8_000)),
+        FlvCodec::Mp3 if first >> 4 == SOUND_FORMAT_MP3_8KHZ => Some((channels, 8_000)),
         FlvCodec::Mp3 => Some((channels, rate)),
         FlvCodec::Speex => Some((1, 16_000)),
         FlvCodec::Aac => None,
@@ -180,8 +182,12 @@ fn audio_tag_params(codec: FlvCodec, first: u8) -> Option<(u8, u32)> {
 /// channel flags. AAC pins the flags at 44 kHz 16-bit stereo (the FLV spec's
 /// requirement, the real layout being in the `AudioSpecificConfig`) and Speex at
 /// 11 kHz 16-bit mono (what libavcodec writes, its real rate being fixed at
-/// 16 kHz); MP3 declares the nearest expressible rate at or below its own.
+/// 16 kHz); MP3 declares the nearest expressible rate at or below its own, and
+/// 8 kHz MP3 is its own sound format.
 fn audio_tag_flags(codec: FlvCodec, channels: u8, sample_rate: u32) -> u8 {
+    if codec == FlvCodec::Mp3 && sample_rate == 8_000 {
+        return (SOUND_FORMAT_MP3_8KHZ << 4) | 0x02 | u8::from(channels >= 2);
+    }
     let (rate_bits, stereo) = match codec {
         FlvCodec::Aac => (3, 1),
         FlvCodec::Speex => (1, 0),
@@ -428,8 +434,16 @@ impl FlvDemuxer {
                                 .insert(packet.track_id, packet.payload.to_vec());
                             continue;
                         }
-                        if self.audio_params.is_none() && body[0] >> 4 != SOUND_FORMAT_EX_HEADER {
-                            self.audio_params = audio_tag_params(packet.codec, body[0]);
+                        if self.audio_params.is_none() {
+                            self.audio_params = if body[0] >> 4 != SOUND_FORMAT_EX_HEADER {
+                                audio_tag_params(packet.codec, body[0])
+                            } else if packet.codec == FlvCodec::Mp3 {
+                                // enhanced audio tags have no rate flags, MP3 frames carry their own
+                                crate::audioframe::mpa_header(packet.payload)
+                                    .map(|header| (header.channels, header.sample_rate))
+                            } else {
+                                None
+                            };
                         }
                         self.units.push(FlvUnit {
                             codec: packet.codec,
@@ -1501,6 +1515,7 @@ mod tests {
         for (codec, channels, rate) in [
             (FlvCodec::Mp3, 2, 44_100),
             (FlvCodec::Mp3, 1, 22_050),
+            (FlvCodec::Mp3, 1, 8_000),
             (FlvCodec::Speex, 1, 16_000),
         ] {
             let mut mux = FlvMuxer::new(codec);
@@ -1583,6 +1598,17 @@ mod tests {
             [(1, FlvCodec::Aac), (2, FlvCodec::Mp3)],
             "Opus is skipped"
         );
+    }
+
+    #[test]
+    fn an_enhanced_mp3_tag_takes_its_layout_from_the_frame_header() {
+        // MPEG-1 layer III, 128 kbit/s, 48 kHz, single channel
+        const MP3_HEADER: [u8; 4] = [0xFF, 0xFB, 0x94, 0xC4];
+        let body = multitrack_body(MANY_TRACKS, &[(b".mp3", 0, &MP3_HEADER)]);
+        let mut d = FlvDemuxer::new();
+        d.push_data(&flv_stream(&[tag(TAG_AUDIO, 20, &body)]));
+        assert_eq!(d.take_units()[0].codec, FlvCodec::Mp3);
+        assert_eq!(d.audio_params(), Some((1, 48_000)));
     }
 
     #[test]

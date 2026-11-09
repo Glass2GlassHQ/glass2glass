@@ -61,9 +61,8 @@ const CHUNK_HEADER_LEN: usize = 8;
 const COMM_FIXED_LEN: usize = 18;
 /// `SSND` offset + blockSize prefix ahead of the samples.
 const SSND_PREFIX_LEN: usize = 8;
-/// Largest header this accepts: a skipped chunk body (`COMM`, `NAME`, `AUTH`)
-/// or the `SSND` offset ahead of the samples. More than this is corrupt, not a
-/// comment.
+/// Largest header this accepts: a `COMM` body or the `SSND` offset ahead of
+/// the samples. More than this is corrupt.
 const MAX_HEADER_CHUNK: usize = 1 << 20;
 
 /// A chunk body is padded to an even length. `None` on overflow.
@@ -263,6 +262,7 @@ pub struct AiffParse {
     format: Option<PcmWire>,
     ssnd_prefix_pending: bool,
     ssnd_offset_remaining: usize,
+    chunk_bytes_to_skip: usize,
     data_remaining: Option<usize>,
     in_data: bool,
     emitted: u64,
@@ -291,15 +291,14 @@ impl AiffParse {
             self.form_seen = true;
         }
         while !self.in_data {
-            if self.buf.len() < CHUNK_HEADER_LEN {
+            let skipped = self.chunk_bytes_to_skip.min(self.buf.len());
+            self.buf.drain(..skipped);
+            self.chunk_bytes_to_skip -= skipped;
+            if self.chunk_bytes_to_skip > 0 || self.buf.len() < CHUNK_HEADER_LEN {
                 return Ok(());
             }
             let id = read_fourcc(&self.buf, 0).ok_or(G2gError::CapsMismatch)?;
             let size = be_u32(&self.buf, 4).ok_or(G2gError::CapsMismatch)? as usize;
-            // SSND is the sample payload and is not buffered whole.
-            if &id != b"SSND" && size > MAX_HEADER_CHUNK {
-                return Err(G2gError::CapsMismatch);
-            }
             if &id == b"SSND" {
                 let wire = self.format.ok_or(G2gError::CapsMismatch)?;
                 if size < SSND_PREFIX_LEN {
@@ -320,21 +319,27 @@ impl AiffParse {
                 break;
             }
             let padded = padded_len(size).ok_or(G2gError::CapsMismatch)?;
+            if &id != b"COMM" {
+                self.buf.drain(..CHUNK_HEADER_LEN);
+                self.chunk_bytes_to_skip = padded;
+                continue;
+            }
+            if size > MAX_HEADER_CHUNK {
+                return Err(G2gError::CapsMismatch);
+            }
             let total = padded
                 .checked_add(CHUNK_HEADER_LEN)
                 .ok_or(G2gError::CapsMismatch)?;
             if self.buf.len() < total {
                 return Ok(());
             }
-            if &id == b"COMM" {
-                self.format = Some(
-                    parse_comm(
-                        &self.buf[CHUNK_HEADER_LEN..CHUNK_HEADER_LEN + size],
-                        self.aifc,
-                    )
-                    .ok_or(G2gError::CapsMismatch)?,
-                );
-            }
+            self.format = Some(
+                parse_comm(
+                    &self.buf[CHUNK_HEADER_LEN..CHUNK_HEADER_LEN + size],
+                    self.aifc,
+                )
+                .ok_or(G2gError::CapsMismatch)?,
+            );
             self.buf.drain(..total);
         }
         if self.ssnd_prefix_pending {
@@ -701,6 +706,25 @@ mod tests {
             .copy_from_slice(&((SSND_PREFIX_LEN + wire_pcm.len()) as u32).to_be_bytes());
         file.extend_from_slice(&wire_pcm);
         file.extend_from_slice(b"NAME\0\0\0\x04junk");
+
+        let mut parse = AiffParse::new();
+        let parsed = run(&mut parse, &aiff_caps(), &[&file]);
+        assert_eq!(data_bytes(&parsed.packets), pcm);
+        assert!(parse.buf.is_empty(), "the trailing chunk is not held");
+    }
+
+    #[test]
+    fn a_chunk_past_the_header_bound_before_ssnd_is_skipped() {
+        let pcm = samples(AudioFormat::PcmS16Le, 1, 4);
+        let mut wire_pcm = pcm.clone();
+        convert_wire_layout(&mut wire_pcm, AudioFormat::PcmS16Le, true);
+        let mut file = header(AudioFormat::PcmS16Le, 1, 8_000, wire_pcm.len()).unwrap();
+        let ssnd = file.windows(4).position(|bytes| bytes == b"SSND").unwrap();
+        let mut application = b"APPL".to_vec();
+        application.extend_from_slice(&((MAX_HEADER_CHUNK + 2) as u32).to_be_bytes());
+        application.resize(application.len() + MAX_HEADER_CHUNK + 2, 0);
+        file.splice(ssnd..ssnd, application);
+        file.extend_from_slice(&wire_pcm);
 
         let parsed = run(&mut AiffParse::new(), &aiff_caps(), &[&file]);
         assert_eq!(data_bytes(&parsed.packets), pcm);

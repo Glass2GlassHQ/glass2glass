@@ -72,6 +72,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M2156: hardened H.264 / H.265 SPS, ST 2110-30 SDP, Matroska, ID3, WAV, HLS and DASH parsing, ULPFEC / FlexFEC repairs with a CSRC list or long mask, and SDP port ranges.
 - M2157: the H.264 RTP depayloader drops the rest of a damaged access unit and closes unmarked ones on a timestamp change, HDR10 metadata ends at an IDR without it, and a second access unit in one buffer no longer repeats the first one's DTS.
 - M2158: SEI messages whose size counts escape bytes still parse, an SPS cropped to nothing fails, LATM frames reusing their config no longer announce ADTS caps, and SRT / WebVTT cues keep a lone `<`, decode character references and close the span a close tag names.
+- M2159: coded WAV payloads take their duration from the `fact` sample count, AIFF skips large chunks before `SSND` and drops trailing ones, and FLV reads enhanced MP3 tags' layout and muxes 8 kHz MP3 as sound format 14.
 
 ## 0.14.0
 

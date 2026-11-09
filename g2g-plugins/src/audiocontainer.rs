@@ -116,6 +116,13 @@ pub(crate) async fn emit_pcm(
     if frame_bytes == 0 {
         return Err(G2gError::CapsMismatch);
     }
+    // bytes past the declared sample payload are trailing chunks
+    let payload_done =
+        |remaining: &Option<usize>| remaining.is_some_and(|bytes| bytes < frame_bytes);
+    if payload_done(remaining) {
+        buf.clear();
+        return Ok(());
+    }
     let available = remaining.map_or(buf.len(), |bytes| bytes.min(buf.len()));
     let whole = available - (available % frame_bytes);
     if whole == 0 {
@@ -124,6 +131,9 @@ pub(crate) async fn emit_pcm(
     let mut samples: Vec<u8> = buf.drain(..whole).collect();
     if let Some(bytes) = remaining {
         *bytes -= whole;
+    }
+    if payload_done(remaining) {
+        buf.clear();
     }
     convert_wire_layout(&mut samples, wire.format, wire.big_endian);
     let frame = Frame::new(

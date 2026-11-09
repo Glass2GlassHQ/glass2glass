@@ -9,7 +9,7 @@ pub(crate) const WAVE_FORMAT_IEEE_FLOAT: u16 = 0x0003;
 const WAVE_FORMAT_ALAW: u16 = 0x0006;
 const WAVE_FORMAT_MULAW: u16 = 0x0007;
 const WAVE_FORMAT_IMA_ADPCM: u16 = 0x0011;
-const WAVE_FORMAT_MP3: u16 = 0x0055;
+pub(crate) const WAVE_FORMAT_MP3: u16 = 0x0055;
 const WAVE_FORMAT_AAC: u16 = 0x00FF;
 const WAVE_FORMAT_AC3: u16 = 0x2000;
 
