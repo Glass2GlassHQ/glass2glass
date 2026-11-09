@@ -2,15 +2,18 @@
 # usage: tools/ffmpeg-build.sh <prefix>, builds the LGPL ffmpeg shared libraries the release binaries ship into <prefix>
 #
 # On Windows run it from an MSYS2 shell that inherits a Visual Studio developer
-# environment (cl.exe on PATH) and has make and nasm: it builds with MSVC, puts
-# the DLLs in <prefix>/bin and the import libraries in <prefix>/lib, and prints
-# the FFMPEG_DIR that ffmpeg-sys-next reads instead of a PKG_CONFIG_PATH.
+# environment (cl.exe on PATH) and has make, nasm and perl: it builds with MSVC
+# for that environment's target, x64 or arm64, puts the DLLs in <prefix>/bin and
+# the import libraries in <prefix>/lib, and prints the FFMPEG_DIR that
+# ffmpeg-sys-next reads instead of a PKG_CONFIG_PATH.
 set -euo pipefail
 
 FFMPEG_VERSION=8.1.3
 FFMPEG_SHA256=7138d28c96d9d3e3af4ee3d8cad72741f8ffb40da90c1112235dea3ecd3178a3
 ZLIB_VERSION=1.3.2
 ZLIB_SHA256=d7a0654783a4da529d1bb793b7ad9c3318020af77667bcae35f95d0e42a792f3
+GAS_PREPROCESSOR_COMMIT=ac1836309c2e77023c228b7184485597286289d3
+GAS_PREPROCESSOR_SHA256=7124d70cdecba7c5612f9a71fbf3f28514dd9c2ca3022f58ad793f88bb925fcf
 
 if [ "$#" -ne 1 ]; then
     echo "usage: $0 <prefix>" >&2
@@ -76,9 +79,27 @@ tar -xJf "$zlib_tarball" -C "$prefix"
 
 platform=()
 if $windows; then
-    platform=(--toolchain=msvc --target-os=win64 --arch=x86_64)
-    # MSYS2's coreutils `link` would shadow the MSVC linker that sits beside cl.exe
     cl_path=$(command -v cl) || { echo "cl.exe is not on PATH: run from a Visual Studio developer environment" >&2; exit 1; }
+    # vcvarsall sets VSCMD_ARG_TGT_ARCH to the architecture cl.exe builds for
+    case "$VSCMD_ARG_TGT_ARCH" in
+    x64) platform=(--toolchain=msvc --target-os=win64 --arch=x86_64) ;;
+    arm64)
+        platform=(--toolchain=msvc --target-os=win64 --arch=aarch64)
+        # ffmpeg's arm assembly is GNU syntax, which gas-preprocessor.pl rewrites for armasm64
+        gas_dir="$prefix/gas-preprocessor"
+        mkdir -p "$gas_dir"
+        curl -sfL -o "$gas_dir/gas-preprocessor.pl" \
+            "https://raw.githubusercontent.com/FFmpeg/gas-preprocessor/$GAS_PREPROCESSOR_COMMIT/gas-preprocessor.pl"
+        echo "$GAS_PREPROCESSOR_SHA256  $gas_dir/gas-preprocessor.pl" | sha256_check
+        chmod +x "$gas_dir/gas-preprocessor.pl"
+        PATH="$gas_dir:$PATH"
+        ;;
+    *)
+        echo "unsupported VSCMD_ARG_TGT_ARCH '$VSCMD_ARG_TGT_ARCH'" >&2
+        exit 1
+        ;;
+    esac
+    # MSYS2's coreutils `link` would shadow the MSVC linker that sits beside cl.exe
     PATH="$(dirname "$cl_path"):$PATH"
 fi
 # dyld finds an @rpath library through the executable's rpath, wherever the release is unpacked

@@ -15,10 +15,12 @@ prefix=$(cd "$1" && pwd)
 
 case "$(uname -s)" in
 MINGW* | MSYS*)
-    # vcpkg's libvpx port drives libvpx's own MSVC project generator, x64-windows-static links the static C runtime
-    vcpkg install --triplet x64-windows-static libvpx pkgconf >&2
+    # vcpkg's libvpx port drives libvpx's own MSVC project generator, the -windows-static triplets link the static C runtime
+    # vcvarsall sets VSCMD_ARG_TGT_ARCH to x64 or arm64, the same names vcpkg's triplets use
+    triplet="$VSCMD_ARG_TGT_ARCH-windows-static"
+    vcpkg install --triplet "$triplet" libvpx pkgconf >&2
     vcpkg_root=$(cygpath -m "$VCPKG_INSTALLATION_ROOT")
-    installed="$vcpkg_root/installed/x64-windows-static"
+    installed="$vcpkg_root/installed/$triplet"
     cat "$installed/share/libvpx/copyright" "$vcpkg_root"/buildtrees/libvpx/src/*/PATENTS > "$prefix/LICENSE-LIBVPX.txt"
     echo "export PKG_CONFIG=$installed/tools/pkgconf/pkgconf.exe"
     echo "export PKG_CONFIG_PATH=$installed/lib/pkgconfig"

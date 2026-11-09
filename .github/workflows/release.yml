@@ -12,8 +12,10 @@ env:
   CARGO_PROFILE_RELEASE_STRIP: symbols
   # a fresh Windows install has no Visual C++ runtime
   CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: -C target-feature=+crt-static
+  CARGO_TARGET_AARCH64_PC_WINDOWS_MSVC_RUSTFLAGS: -C target-feature=+crt-static
   # libopus builds with cmake and must use the same static C runtime
   CMAKE_TOOLCHAIN_FILE_x86_64_pc_windows_msvc: ${{ github.workspace }}/tools/msvc-static-crt.cmake
+  CMAKE_TOOLCHAIN_FILE_aarch64_pc_windows_msvc: ${{ github.workspace }}/tools/msvc-static-crt.cmake
 
 jobs:
   build:
@@ -30,6 +32,7 @@ jobs:
           - { runner: macos-latest, target: aarch64-apple-darwin, features: release-binary-macos }
           - { runner: macos-15-intel, target: x86_64-apple-darwin, features: release-binary-macos }
           - { runner: windows-latest, target: x86_64-pc-windows-msvc, features: release-binary-windows }
+          - { runner: windows-11-arm, target: aarch64-pc-windows-msvc, features: release-binary-windows }
     env:
       # the ffmpeg libraries ship in lib/ next to the binary, DT_RPATH also covers libavcodec loading libavutil
       CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: -C link-arg=-Wl,--disable-new-dtags,-rpath,$ORIGIN/lib
@@ -65,19 +68,21 @@ jobs:
       # Windows builds the same ffmpeg with MSVC under MSYS2; the DLLs ship beside g2g-launch.exe
       - uses: ilammy/msvc-dev-cmd@v1
         if: runner.os == 'Windows'
+        with:
+          arch: ${{ runner.arch == 'ARM64' && 'arm64' || 'x64' }}
       # with the developer environment set rustc takes link.exe from PATH, where a bash step
       # finds Git's coreutils `link` first, so name the MSVC linker outright
       - name: pin the MSVC linker
         if: runner.os == 'Windows'
         shell: pwsh
-        run: echo "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=$env:VCToolsInstallDir\bin\Hostx64\x64\link.exe" >> $env:GITHUB_ENV
+        run: echo "CARGO_TARGET_$('${{ matrix.target }}'.Replace('-', '_').ToUpper())_LINKER=$env:VCToolsInstallDir\bin\Host$env:VSCMD_ARG_HOST_ARCH\$env:VSCMD_ARG_TGT_ARCH\link.exe" >> $env:GITHUB_ENV
       - uses: msys2/setup-msys2@v2
         if: runner.os == 'Windows'
         with:
           msystem: MSYS
           path-type: inherit
           update: false
-          install: make nasm diffutils
+          install: make nasm perl diffutils
       - name: build ffmpeg (Windows)
         if: runner.os == 'Windows'
         shell: msys2 {0}
@@ -112,10 +117,9 @@ jobs:
       - name: links only system and bundled libraries (Windows)
         if: runner.os == 'Windows'
         run: |
-          vswhere="/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe"
           system32="$(cygpath -u "$SYSTEMROOT")/System32"
           bundled="$FFMPEG_PREFIX/bin"
-          dumpbin=$("$vswhere" -latest -find 'VC/Tools/MSVC/**/bin/Hostx64/x64/dumpbin.exe' | head -n 1 | tr -d '\r')
+          dumpbin="$(cygpath -u "$VCToolsInstallDir")/bin/Host$VSCMD_ARG_HOST_ARCH/$VSCMD_ARG_TGT_ARCH/dumpbin.exe"
           # the ffmpeg DLLs ship too, so their own imports must be system or bundled as well
           unexpected=$(for binary in target/${{ matrix.target }}/release/g2g-launch.exe \
               target/${{ matrix.target }}/release/g2g-inspect.exe "$bundled"/*.dll; do
@@ -191,7 +195,8 @@ jobs:
           dotnet tool install --tool-path "$env:RUNNER_TEMP\wix" wix --version 7.0.1
           $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.*)"$' | Select-Object -First 1).Matches.Groups[1].Value
           $tree = "$PWD\g2g-$env:GITHUB_REF_NAME-${{ matrix.target }}"
-          & "$env:RUNNER_TEMP\wix\wix.exe" build tools\glass2glass.wxs -arch x64 -acceptEula wix7 -d "PackageVersion=$version" -d "PackageTree=$tree" -o "glass2glass-$version-x64.msi"
+          $arch = '${{ runner.arch == 'ARM64' && 'arm64' || 'x64' }}'
+          & "$env:RUNNER_TEMP\wix\wix.exe" build tools\glass2glass.wxs -arch $arch -acceptEula wix7 -d "PackageVersion=$version" -d "PackageTree=$tree" -o "glass2glass-$version-$arch.msi"
       - uses: actions/upload-artifact@v7
         with:
           name: release-asset-${{ matrix.target }}
@@ -237,16 +242,22 @@ jobs:
           g2g-launch -q videotestsrc num-buffers=10 ! vpxenc codec=vp8 ! fakesink
 
   msi-install:
-    name: install msi
+    name: install msi (${{ matrix.target }})
     needs: build
-    runs-on: windows-latest
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: windows-latest, target: x86_64-pc-windows-msvc }
+          - { runner: windows-11-arm, target: aarch64-pc-windows-msvc }
     defaults:
       run:
         shell: pwsh
     steps:
       - uses: actions/download-artifact@v8
         with:
-          name: release-asset-x86_64-pc-windows-msvc
+          name: release-asset-${{ matrix.target }}
           path: dist
       - name: install, run and uninstall
         run: |
@@ -338,6 +349,7 @@ jobs:
           - { runner: macos-latest, target: aarch64-apple-darwin, features: release-wheel-macos }
           - { runner: macos-15-intel, target: x86_64-apple-darwin, features: release-wheel-macos }
           - { runner: windows-latest, target: x86_64-pc-windows-msvc, features: release-wheel-windows }
+          - { runner: windows-11-arm, target: aarch64-pc-windows-msvc, features: release-wheel-windows }
     steps:
       - uses: actions/checkout@v4
       - uses: taiki-e/install-action@v2
@@ -365,25 +377,27 @@ jobs:
           tools/ffmpeg-build.sh "$HOME/g2g-codecs" | sed 's/^export //' >> "$GITHUB_ENV"
           echo "RUSTFLAGS=-C link-arg=-Wl,-rpath,$HOME/g2g-codecs/lib -C link-arg=-Wl,-headerpad_max_install_names" >> "$GITHUB_ENV"
           cp "$HOME"/g2g-codecs/ffmpeg-*/COPYING.LGPLv2.1 g2g-pyapi/LICENSE-FFMPEG.txt
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: runner.os == 'Windows'
+        with:
+          arch: ${{ runner.arch == 'ARM64' && 'arm64' || 'x64' }}
+      - name: pin the MSVC linker
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: echo "CARGO_TARGET_$('${{ matrix.target }}'.Replace('-', '_').ToUpper())_LINKER=$env:VCToolsInstallDir\bin\Host$env:VSCMD_ARG_HOST_ARCH\$env:VSCMD_ARG_TGT_ARCH\link.exe" >> $env:GITHUB_ENV
       - name: build libvpx (macOS, Windows)
         if: runner.os != 'Linux'
         shell: bash
         run: |
           tools/libvpx-build.sh "$HOME/g2g-codecs" | sed 's/^export //' >> "$GITHUB_ENV"
           cp "$HOME/g2g-codecs/LICENSE-LIBVPX.txt" g2g-pyapi/
-      - uses: ilammy/msvc-dev-cmd@v1
-        if: runner.os == 'Windows'
-      - name: pin the MSVC linker
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: echo "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=$env:VCToolsInstallDir\bin\Hostx64\x64\link.exe" >> $env:GITHUB_ENV
       - uses: msys2/setup-msys2@v2
         if: runner.os == 'Windows'
         with:
           msystem: MSYS
           path-type: inherit
           update: false
-          install: make nasm diffutils
+          install: make nasm perl diffutils
       - name: build ffmpeg (Windows)
         if: runner.os == 'Windows'
         shell: msys2 {0}

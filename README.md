@@ -102,7 +102,7 @@ g2g-launch "videotestsrc num-buffers=1 pattern=ball ! videoconvert ! pngenc ! fi
 The last line needs no display: it writes the first frame to `ball.png`.
 
 Prebuilt `g2g-launch` and `g2g-inspect` for Linux, macOS (Intel and Apple
-Silicon) and Windows are on each
+Silicon) and Windows (x64 and ARM64) are on each
 [GitHub release](https://github.com/Glass2GlassHQ/glass2glass/releases/latest).
 They need no codec libraries on the host. The Linux and macOS tarballs carry the
 LGPL ffmpeg libraries in `lib/` next to the binaries, so keep the folder together,
@@ -124,8 +124,8 @@ On macOS, Homebrew installs the same binaries:
 brew install Glass2GlassHQ/tap/glass2glass
 ```
 
-On Windows, each release has a `.msi` that installs to `Program Files` and adds
-the folder to `PATH`. It is unsigned, so SmartScreen warns when it starts.
+On Windows, each release has an x64 and an ARM64 `.msi` that installs to
+`Program Files` and adds the folder to `PATH`. It is unsigned, so SmartScreen warns when it starts.
 
 The binaries are unsigned. macOS refuses to run one downloaded with a browser
 until the quarantine flag is cleared:
