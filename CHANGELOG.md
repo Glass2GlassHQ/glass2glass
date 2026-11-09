@@ -91,6 +91,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M2175: H.265 timecodes keep frame counts above 255.
 - M2176: typefind looks behind an ID3v2 tag longer than its window instead of calling the stream MP3.
 - M2177: `uridecodebin`, `playbin` and `fallbacksrc` put the stream's parser ahead of the decoder, as `decodebin` does.
+- M2178: a parser behind `id3demux` can seek.
 
 Breaking: `TimecodeMeta.frames` is a `u16`, `WIRE_VERSION` is 4, and `RtpRecvConfig` gains `parameter_sets`.
 

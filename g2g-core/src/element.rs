@@ -585,6 +585,10 @@ pub trait AsyncElement: ElementBound {
     #[cfg(feature = "runtime")]
     fn set_buffered_seek(&mut self, _app: crate::runtime::SeekController) {}
 
+    // called only when `seek_route` is `ByteRelay` and a demuxer behind this element seeks
+    #[cfg(feature = "runtime")]
+    fn set_byte_relay(&mut self, _upstream: crate::runtime::SeekController) {}
+
     // a sink that completes its output at Eos, so a seek after the end cannot continue it
     fn finalizes_on_eos(&self) -> bool {
         false
@@ -825,6 +829,9 @@ pub trait DynAsyncElement: ElementBound {
     #[cfg(feature = "runtime")]
     fn set_buffered_seek(&mut self, _app: crate::runtime::SeekController) {}
 
+    #[cfg(feature = "runtime")]
+    fn set_byte_relay(&mut self, _upstream: crate::runtime::SeekController) {}
+
     fn finalizes_on_eos(&self) -> bool {
         false
     }
@@ -1053,6 +1060,11 @@ impl<T: AsyncElement> DynAsyncElement for T {
     #[cfg(feature = "runtime")]
     fn set_buffered_seek(&mut self, app: crate::runtime::SeekController) {
         AsyncElement::set_buffered_seek(self, app)
+    }
+
+    #[cfg(feature = "runtime")]
+    fn set_byte_relay(&mut self, upstream: crate::runtime::SeekController) {
+        AsyncElement::set_byte_relay(self, upstream)
     }
 
     fn finalizes_on_eos(&self) -> bool {
@@ -1284,6 +1296,11 @@ impl<'b> DynAsyncElement for &'b mut (dyn DynAsyncElement + 'b) {
     #[cfg(feature = "runtime")]
     fn set_buffered_seek(&mut self, app: crate::runtime::SeekController) {
         (**self).set_buffered_seek(app)
+    }
+
+    #[cfg(feature = "runtime")]
+    fn set_byte_relay(&mut self, upstream: crate::runtime::SeekController) {
+        (**self).set_byte_relay(upstream)
     }
 
     fn finalizes_on_eos(&self) -> bool {

@@ -19,6 +19,7 @@ use alloc::vec::Vec;
 use g2g_core::frame::Frame;
 use g2g_core::log::short_type_name;
 use g2g_core::memory::SystemSlice;
+use g2g_core::runtime::{ElementSeekRoute, SeekController};
 use g2g_core::{
     AsyncElement, BusHandle, BusMessage, Caps, CapsConstraint, ConfigureOutcome, ElementMetadata,
     G2gError, MemoryDomain, OutputSink, PipelinePacket, TagList,
@@ -42,6 +43,8 @@ pub struct Id3Demux {
     /// trailing [`ID3V1_LEN`] bytes that may be the ID3v1 block.
     buf: Vec<u8>,
     id3v2: LeadingId3v2,
+    leading_tag_len: u64,
+    byte_relay: Option<SeekController>,
     tags: TagList,
     tags_posted: bool,
     sequence: u64,
@@ -81,11 +84,15 @@ impl Id3Demux {
     /// trailing bytes that may still turn out to be the ID3v1 block.
     async fn drain(&mut self, eos: bool, out: &mut dyn OutputSink) -> Result<(), G2gError> {
         let skipped = self.id3v2.skip(&mut self.buf, eos);
+        self.leading_tag_len += skipped.dropped as u64;
         if let Some(tags) = skipped.tags {
             self.tags = tags;
         }
         if !skipped.payload_reached {
             return Ok(());
+        }
+        if let Some(upstream) = self.byte_relay.take() {
+            upstream.relay_dropped_leading_bytes(self.leading_tag_len);
         }
         self.post_tags();
         let hold = if eos { 0 } else { ID3V1_LEN };
@@ -150,6 +157,14 @@ impl AsyncElement for Id3Demux {
         Ok(ConfigureOutcome::Accepted)
     }
 
+    fn seek_route(&self) -> Option<ElementSeekRoute> {
+        Some(ElementSeekRoute::ByteRelay)
+    }
+
+    fn set_byte_relay(&mut self, upstream: SeekController) {
+        self.byte_relay = Some(upstream);
+    }
+
     fn metadata(&self) -> ElementMetadata {
         ElementMetadata::new(
             "ID3 tag demuxer",
@@ -184,6 +199,11 @@ impl AsyncElement for Id3Demux {
                     self.post_tags();
                 }
                 PipelinePacket::Flush => {
+                    // a seek issued before the tag was fully read restarts the file from its first byte
+                    if !self.id3v2.payload_reached() {
+                        self.id3v2 = LeadingId3v2::default();
+                        self.leading_tag_len = 0;
+                    }
                     self.buf.clear();
                     out.push(PipelinePacket::Flush).await?;
                 }

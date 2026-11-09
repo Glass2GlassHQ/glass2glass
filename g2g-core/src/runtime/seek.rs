@@ -36,7 +36,7 @@
 
 use core::future::Future;
 use core::pin::Pin;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use core::task::{Context, Poll, Waker};
 
 use alloc::sync::Arc;
@@ -54,7 +54,7 @@ use crate::graph::{Graph, NodeId};
 use crate::log::{ClockTime, Target, RUNTIME_CATEGORY};
 #[cfg(feature = "std")]
 use crate::runtime::{DynSourceLoop, GraphNode, GraphNodeRef};
-use crate::segment::Seek;
+use crate::segment::{Seek, SeekType};
 use crate::{OutputSink, PipelinePacket};
 
 /// Source -> app segment-done state. `count` is monotonic so the app can detect
@@ -183,6 +183,8 @@ struct SeekInner {
     takes_seeks_after_end: AtomicBool,
     // the byte source a demuxer repositions, it stops and seeks after the end with this controller
     upstream: Mutex<Option<SeekController>>,
+    // tag bytes the elements between a demuxer and its byte source dropped from the head of the stream
+    relayed_leading_bytes: AtomicU64,
     // the controllers of the pipeline's other seekable elements, each sent every seek made on this one
     followers: Vec<SeekController>,
     run_held_open: AtomicBool,
@@ -240,6 +242,7 @@ impl SeekController {
         accept: impl FnOnce(Seek) -> Result<Seek, SeekRefusal>,
     ) -> Option<Seek> {
         let (seek, ticket) = self.inner.pending.lock().take()?;
+        let seek = self.past_relayed_leading_bytes(seek);
         match accept(seek) {
             Ok(seek) => {
                 if seek.is_flush() {
@@ -260,6 +263,27 @@ impl SeekController {
         }
     }
 
+    // the requester addresses the stream behind the dropped head, the byte source addresses the whole file
+    fn past_relayed_leading_bytes(&self, seek: Seek) -> Seek {
+        let dropped = self.inner.relayed_leading_bytes.load(Ordering::SeqCst);
+        let shift = |seek_type: SeekType, position: u64| match seek_type {
+            SeekType::Set => position.saturating_add(dropped),
+            SeekType::None | SeekType::End => position,
+        };
+        Seek {
+            start: shift(seek.start_type, seek.start),
+            stop: shift(seek.stop_type, seek.stop),
+            ..seek
+        }
+    }
+
+    // an element between a demuxer and its byte source dropped `count` bytes from the head of the stream
+    pub fn relay_dropped_leading_bytes(&self, count: u64) {
+        self.inner
+            .relayed_leading_bytes
+            .fetch_add(count, Ordering::SeqCst);
+    }
+
     /// Whether a seek is currently pending (not yet taken).
     pub fn has_pending(&self) -> bool {
         self.inner.pending.lock().is_some()
@@ -277,7 +301,11 @@ impl SeekController {
     /// when it has not (or cannot). A seeking consumer bounds a guessed offset
     /// with it so a guess cannot land past the end.
     pub fn stream_len(&self) -> Option<u64> {
-        *self.inner.stream_len.lock()
+        let dropped = self.inner.relayed_leading_bytes.load(Ordering::SeqCst);
+        self.inner
+            .stream_len
+            .lock()
+            .map(|len| len.saturating_sub(dropped))
     }
 
     /// Application side: attach the pipeline bus, so every segment-done is also
@@ -491,6 +519,8 @@ pub enum ElementSeekRoute {
     Buffered,
     // by byte-seeking the source that feeds it
     UpstreamBytes,
+    // passes a byte stream through with bytes dropped from its head, so a demuxer behind it byte-seeks the source in front of it
+    ByteRelay,
 }
 
 #[cfg(feature = "std")]
@@ -506,7 +536,7 @@ impl core::fmt::Display for AttachSeekError {
             Self::NothingSeekable => write!(
                 f,
                 "nothing in the pipeline can seek: a seek needs an MP4 file source \
-                 (uridecodebin uri=file://...mp4), qtdemux, or a demuxer fed straight by a filesrc"
+                 (uridecodebin uri=file://...mp4), qtdemux, or a demuxer fed by a filesrc directly or through id3demux"
             ),
         }
     }
@@ -541,6 +571,26 @@ impl SeekableNode {
 }
 
 #[cfg(feature = "std")]
+fn upstream_node<N>(graph: &Graph<N>, node: NodeId) -> Option<NodeId> {
+    Some(
+        graph
+            .edges()
+            .iter()
+            .find(|edge| edge.dst.node == node)?
+            .src
+            .node,
+    )
+}
+
+#[cfg(feature = "std")]
+fn byte_relay(graph: &Graph<GraphNodeRef<'_>>, node: NodeId) -> bool {
+    matches!(
+        graph.element(node),
+        Some(GraphNodeRef::Element(element)) if element.seek_route() == Some(ElementSeekRoute::ByteRelay)
+    )
+}
+
+#[cfg(feature = "std")]
 fn seekable_node(graph: &Graph<GraphNodeRef<'_>>, node: NodeId) -> Option<SeekableNode> {
     match graph.element(node)? {
         GraphNodeRef::Source(source) if source.seek_format() == Some(SeekFormat::Time) => {
@@ -554,12 +604,10 @@ fn seekable_node(graph: &Graph<GraphNodeRef<'_>>, node: NodeId) -> Option<Seekab
         GraphNodeRef::Element(element)
             if element.seek_route() == Some(ElementSeekRoute::UpstreamBytes) =>
         {
-            let byte_source = graph
-                .edges()
-                .iter()
-                .find(|edge| edge.dst.node == node)?
-                .src
-                .node;
+            let mut byte_source = upstream_node(graph, node)?;
+            while byte_relay(graph, byte_source) {
+                byte_source = upstream_node(graph, byte_source)?;
+            }
             match graph.element(byte_source)? {
                 GraphNodeRef::Source(source) if source.seek_format() == Some(SeekFormat::Bytes) => {
                     Some(SeekableNode::Demuxer {
@@ -678,6 +726,11 @@ fn give_controller(graph: &mut Graph<GraphNode>, target: SeekableNode, app: &See
             let upstream = SeekController::new();
             *app.inner.upstream.lock() = Some(upstream.clone());
             source_mut(graph, byte_source).set_seek(upstream.clone());
+            let mut relay = upstream_node(graph, demuxer);
+            while let Some(node) = relay.filter(|node| *node != byte_source) {
+                element_mut(graph, node).set_byte_relay(upstream.clone());
+                relay = upstream_node(graph, node);
+            }
             element_mut(graph, demuxer).set_seek(app.clone(), upstream);
         }
     }
@@ -765,6 +818,32 @@ mod tests {
         let leader = SeekController::with_followers(1);
         leader.shutdown();
         assert!(leader.inner.followers[0].is_shutdown());
+    }
+
+    #[test]
+    fn a_relayed_head_shifts_absolute_byte_positions_and_shortens_the_stream() {
+        let demuxer_side = SeekController::new();
+        let source_side = demuxer_side.clone();
+        source_side.set_stream_len(10_000);
+        demuxer_side.relay_dropped_leading_bytes(300);
+        demuxer_side.relay_dropped_leading_bytes(20);
+        assert_eq!(demuxer_side.stream_len(), Some(9_680));
+        demuxer_side.seek(Seek {
+            stop_type: SeekType::Set,
+            stop: 2_000,
+            ..Seek::flush_to(0)
+        });
+        let taken = source_side.take_seek(Ok).expect("a seek was pending");
+        assert_eq!((taken.start, taken.stop), (320, 2_320));
+        demuxer_side.seek(Seek {
+            start_type: SeekType::End,
+            ..Seek::flush_to(100)
+        });
+        let from_the_end = source_side.take_seek(Ok).expect("a seek was pending");
+        assert_eq!(
+            from_the_end.start, 100,
+            "an offset from the end is unchanged"
+        );
     }
 
     #[test]

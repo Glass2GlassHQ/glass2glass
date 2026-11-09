@@ -22,12 +22,13 @@
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::runtime::{
-    is_raw_audio, parse_launch, run_graph, ElementFactory, GraphNode, Registry,
+    attach_seek, is_raw_audio, parse_launch, run_graph, ElementFactory, GraphNode, Registry,
+    SeekOutcome,
 };
 use g2g_core::{
     AsyncElement, AudioFormat, Bus, BusMessage, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
     ElementMetadata, G2gError, Graph, OutputSink, PadTemplate, PadTemplates, PipelineClock,
-    PushOutcome, Tag, TagList, ANY_CHANNELS, ANY_SAMPLE_RATE,
+    PushOutcome, Seek, Tag, TagList, ANY_CHANNELS, ANY_SAMPLE_RATE,
 };
 use g2g_plugins::fakesink::FakeSink;
 use g2g_plugins::filesrc::FileSrc;
@@ -154,6 +155,47 @@ async fn id3demux_ahead_of_the_parser_yields_the_same_frames() {
         .await
         .expect("the pipeline runs");
     assert_eq!(stats.frames_consumed, probe.frames);
+}
+
+async fn frames_after_a_seek_to_the_middle(line: &str, probe: &Probe) -> u64 {
+    let mut graph =
+        parse_launch(&default_registry(), line).expect("the line parses and negotiates");
+    let middle_ns = (probe.duration_seconds * 1e9) as u64 / 2;
+    let (_controller, ticket) =
+        attach_seek(&mut graph, Seek::flush_to(middle_ns)).expect("mpegaudioparse takes the seek");
+    let stats = run_graph(graph, &ZeroClock, 4)
+        .await
+        .expect("the pipeline runs");
+    assert_eq!(ticket.outcome(), Some(SeekOutcome::Served));
+    stats.frames_consumed
+}
+
+#[tokio::test]
+async fn a_parser_behind_id3demux_seeks_like_one_fed_by_the_file() {
+    let probe = Probe::read(MONO_FIXTURE);
+    let location = fixture_path(MONO_FIXTURE);
+    let through_id3demux = frames_after_a_seek_to_the_middle(
+        &format!(
+            "filesrc location={} ! id3demux ! mpegaudioparse ! fakesink",
+            location.display()
+        ),
+        &probe,
+    )
+    .await;
+    let straight = frames_after_a_seek_to_the_middle(
+        &format!(
+            "filesrc location={} ! mpegaudioparse ! fakesink",
+            location.display()
+        ),
+        &probe,
+    )
+    .await;
+    assert!(
+        straight < probe.frames,
+        "the seek skips the first half: {straight} of {}",
+        probe.frames
+    );
+    assert_eq!(through_id3demux, straight);
 }
 
 #[tokio::test]

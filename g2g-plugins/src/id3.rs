@@ -96,6 +96,10 @@ pub(crate) struct Id3v2Skip {
 }
 
 impl LeadingId3v2 {
+    pub(crate) fn payload_reached(&self) -> bool {
+        self.examined && self.remaining == 0
+    }
+
     pub(crate) fn skip(&mut self, buf: &mut Vec<u8>, eos: bool) -> Id3v2Skip {
         let waiting = Id3v2Skip {
             payload_reached: false,

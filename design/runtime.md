@@ -645,7 +645,10 @@ An application seeks a pipeline built from a launch string through
 when it serves a time seek from the whole stream it holds (`Mp4Demux`),
 `UpstreamBytes` when it byte-seeks the source that feeds it (the byte-stream
 demuxers, and the audio parsers `flacparse`, `mpegaudioparse`, `aacparse` and `ac3parse`,
-which rescan a bare file from its start and restart their sample count there). The
+which rescan a bare file from its start and restart their sample count there), and
+`ByteRelay` when it passes the byte stream on with a leading tag cut off (`id3demux`).
+`attach_seek` looks through relays to the byte source, and the byte positions a demuxer
+asks for and the stream length it reads are shifted by the bytes the relays dropped. The
 MP3, AAC and AC-3 parsers also send the frames before the target that the decoder needs
 first: one for the overlap with the previous frame, and for MP3 as many more as hold
 the bit reservoir the frame may borrow from (511 bytes in MPEG-1, 255 in MPEG-2 and
