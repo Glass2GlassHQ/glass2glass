@@ -43,10 +43,7 @@ use g2g_core::{
     PropValue, PropertySpec, Rate, TextFormat, VideoCodec,
 };
 
-use crate::annexb::{
-    add_emulation_prevention, h264_nal_type, h265_nal_type, nal_units_any, read_ff_extended,
-    strip_emulation_prevention, vcl_start,
-};
+use crate::annexb::{add_emulation_prevention, vcl_start};
 use crate::sei::PAYLOAD_USER_DATA_UNREGISTERED;
 use crate::subparse::{Cue, CueSettings};
 
@@ -160,53 +157,13 @@ pub fn build_misp_time_sei(micros: u64, status: u8, codec: VideoCodec) -> Vec<u8
 /// the bitstream, so all of it is bounds-checked: a truncated or malformed SEI
 /// yields `None` rather than a wrong time.
 pub fn extract_misp_time(au: &[u8], codec: VideoCodec) -> Option<MispTime> {
-    for nal in nal_units_any(au) {
-        // SEI NAL header + RBSP offset differ by codec: H.264 SEI is NAL type 6
-        // with a 1-byte header; H.265 prefix-SEI (39) / suffix-SEI (40) carry a
-        // 2-byte header.
-        let rbsp_off = match codec {
-            VideoCodec::H265 => match h265_nal_type(nal) {
-                Some(39) | Some(40) => 2,
-                _ => continue,
-            },
-            _ => match h264_nal_type(nal) {
-                Some(6) => 1,
-                _ => continue,
-            },
-        };
-        if nal.len() <= rbsp_off {
-            continue;
+    let mut found = None;
+    crate::sei::for_each_message(au, codec, |payload_type, payload| {
+        if found.is_none() && payload_type == PAYLOAD_USER_DATA_UNREGISTERED {
+            found = parse_misp_payload(payload);
         }
-        let rbsp = strip_emulation_prevention(&nal[rbsp_off..]);
-        if let Some(t) = misp_time_in_sei_rbsp(&rbsp) {
-            return Some(t);
-        }
-    }
-    None
-}
-
-/// Walk one SEI RBSP's messages for a MISP time payload. Each message is
-/// `payloadType` then `payloadSize` (both extended by leading `0xFF` run bytes)
-/// then that many payload bytes.
-fn misp_time_in_sei_rbsp(rbsp: &[u8]) -> Option<MispTime> {
-    let mut i = 0usize;
-    // Stop once only the rbsp_trailing_bits (a lone 0x80) remain.
-    while i + 1 < rbsp.len() {
-        let (payload_type, next) = read_ff_extended(rbsp, i)?;
-        let (payload_size, next) = read_ff_extended(rbsp, next)?;
-        i = next;
-        let end = match i.checked_add(payload_size) {
-            Some(e) if e <= rbsp.len() => e,
-            _ => return None,
-        };
-        if payload_type == PAYLOAD_USER_DATA_UNREGISTERED {
-            if let Some(t) = parse_misp_payload(&rbsp[i..end]) {
-                return Some(t);
-            }
-        }
-        i = end;
-    }
-    None
+    });
+    found
 }
 
 /// Parse a `user_data_unregistered` payload as a MISP time, or `None` when it is

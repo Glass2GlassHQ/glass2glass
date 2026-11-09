@@ -238,7 +238,8 @@ fn parse_sps(rbsp: &[u8]) -> Option<SpsGeometry> {
     };
     // Crop and dimension fields come from untrusted exp-Golomb, so fold with
     // saturating arithmetic (the additions and the *16 would otherwise overflow,
-    // panicking in debug and wrapping to bogus caps in release).
+    // panicking in debug and wrapping to bogus caps in release). A crop that
+    // leaves no picture fails the SPS.
     let crop_x = crop_left
         .saturating_add(crop_right)
         .saturating_mul(sub_width_c);
@@ -250,11 +251,13 @@ fn parse_sps(rbsp: &[u8]) -> Option<SpsGeometry> {
         .pic_width_in_mbs_minus1
         .saturating_add(1)
         .saturating_mul(16)
-        .saturating_sub(crop_x);
+        .checked_sub(crop_x)
+        .filter(|width| *width > 0)?;
     let height = (2 - frame_mbs_only_flag)
         .saturating_mul(head.pic_height_in_map_units_minus1.saturating_add(1))
         .saturating_mul(16)
-        .saturating_sub(crop_y);
+        .checked_sub(crop_y)
+        .filter(|height| *height > 0)?;
 
     // vui_parameters_present_flag follows frame cropping. Read it without `?`
     // so a stream truncated right here still yields the dimensions.
@@ -618,10 +621,9 @@ mod tests {
         let mut au = vec![0u8, 0, 0, 1, 0x67, 66, 0, 30];
         au.extend_from_slice(&w.into_bytes());
         // Must not panic; the dimension *16 saturates to u32::MAX and the even
-        // larger crop then saturating-subtracts it back to 0 (vs an overflow
+        // larger crop leaves no picture, so the SPS fails (vs an overflow
         // panic in debug or a wrapped bogus value in release).
-        let info = H264Codec::extract_sps_info(&au).expect("parses without overflow");
-        assert_eq!((info.width, info.height), (0, 0));
+        assert!(H264Codec::extract_sps_info(&au).is_none());
     }
 
     /// Build an Annex-B SPS for `width` x `height` carrying a VUI `timing_info`

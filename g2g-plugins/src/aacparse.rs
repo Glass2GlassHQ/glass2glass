@@ -678,7 +678,13 @@ impl AacParse {
                 out.push(PipelinePacket::DataFrame(frame)).await?;
             }
             Framing::Undecided | Framing::Latm => {
-                if let Some(info) = parse_aac(bytes) {
+                // a frame that reuses its mux config can hold an ADTS header in its payload
+                let info = if self.framing == Framing::Latm {
+                    parse_loas(bytes)
+                } else {
+                    parse_aac(bytes)
+                };
+                if let Some(info) = info {
                     self.announce(info.caps(), out).await?;
                 } else if self.last_emitted_caps.is_none() {
                     // a decoder cannot open on a frame that reuses a config it never saw
@@ -1861,6 +1867,31 @@ mod tests {
             .filter_map(|frame| frame.domain.as_system_slice())
             .collect();
         assert_eq!(forwarded, [with_config.as_slice(), reusing.as_slice()]);
+    }
+
+    #[tokio::test]
+    async fn a_latm_frame_reusing_the_config_never_announces_adts_caps() {
+        // 16 kHz mono
+        const ADTS_HEADER: [u8; 7] = [0xFF, 0xF1, 0x60, 0x40, 0x00, 0xFF, 0xFC];
+        let mut reusing = loas_frame_reusing_the_config();
+        reusing.extend_from_slice(&ADTS_HEADER);
+        let payload_len = reusing.len() - LOAS_HEADER_LEN;
+        reusing[1] = 0xE0 | (payload_len >> 8) as u8;
+        reusing[2] = payload_len as u8;
+        assert!(
+            parse_adts(&reusing).is_some(),
+            "precondition: an ADTS header inside"
+        );
+
+        let mut parse = AacParse::new();
+        parse.configure_pipeline(&aac_caps()).unwrap();
+        let mut sink = CollectSink::default();
+        let with_config = loas_frame(&latm_mux_element(2, 4, 2));
+        push_frames(&mut parse, &mut sink, &[with_config, reusing])
+            .await
+            .unwrap();
+        assert_eq!(caps_params(&sink), [(2, 44_100)]);
+        assert_eq!(data_frames(&sink).len(), 2);
     }
 
     #[tokio::test]

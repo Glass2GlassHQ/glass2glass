@@ -66,6 +66,8 @@ fn for_each_message_in_nals<'a>(
             continue;
         }
         let rbsp = strip_emulation_prevention(&nal[rbsp_off..]);
+        let removed_emulation_bytes = nal.len() - rbsp_off - rbsp.len();
+        let payload_limit = rbsp.len() - usize::from(rbsp.last() == Some(&0x80));
         let mut i = 0usize;
         // Stop once only the rbsp_trailing_bits (a lone 0x80) remain.
         while i + 1 < rbsp.len() {
@@ -77,9 +79,16 @@ fn for_each_message_in_nals<'a>(
                 break;
             };
             i = n;
-            let end = match i.checked_add(payload_size) {
-                Some(e) if e <= rbsp.len() => e,
-                _ => break,
+            let Some(end) = i.checked_add(payload_size) else {
+                break;
+            };
+            // some encoders count the emulation prevention bytes in payloadSize
+            let end = if end <= rbsp.len() {
+                end
+            } else if end - payload_limit <= removed_emulation_bytes {
+                payload_limit
+            } else {
+                break;
             };
             f(payload_type, &rbsp[i..end]);
             i = end;
@@ -347,6 +356,40 @@ pub(crate) fn write_ff_extended(out: &mut Vec<u8>, mut value: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn payload_size_that_counts_emulation_prevention_bytes_still_parses() {
+        let payload = [0, 0, 1, 0, 0, 2, 7, 7, 7, 7];
+        let mut rbsp = alloc::vec![
+            PAYLOAD_USER_DATA_UNREGISTERED as u8,
+            payload.len() as u8 + 2
+        ];
+        rbsp.extend_from_slice(&payload);
+        rbsp.push(0x80);
+        let mut nal = alloc::vec![0, 0, 0, 1, 0x06];
+        nal.extend_from_slice(&crate::annexb::add_emulation_prevention(&rbsp));
+        assert_eq!(
+            nal.len(),
+            5 + rbsp.len() + 2,
+            "precondition: two escape bytes"
+        );
+
+        let mut messages = Vec::new();
+        for_each_message(&nal, VideoCodec::H264, |payload_type, body| {
+            messages.push((payload_type, body.to_vec()))
+        });
+        assert_eq!(
+            messages,
+            [(PAYLOAD_USER_DATA_UNREGISTERED, payload.to_vec())]
+        );
+
+        rbsp[1] += 1;
+        let mut nal = alloc::vec![0, 0, 0, 1, 0x06];
+        nal.extend_from_slice(&crate::annexb::add_emulation_prevention(&rbsp));
+        let mut count = 0;
+        for_each_message(&nal, VideoCodec::H264, |_, _| count += 1);
+        assert_eq!(count, 0, "an overrun past the escape bytes is malformed");
+    }
 
     #[cfg(feature = "metadata")]
     fn mastering_payload() -> Vec<u8> {

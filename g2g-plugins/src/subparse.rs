@@ -2084,6 +2084,10 @@ fn decode_entities(s: &str) -> String {
                     "gt" => Some('>'),
                     "quot" => Some('"'),
                     "apos" => Some('\''),
+                    // WebVTT also names these three
+                    "nbsp" => Some('\u{a0}'),
+                    "lrm" => Some('\u{200e}'),
+                    "rlm" => Some('\u{200f}'),
                     _ if ent.starts_with("#x") || ent.starts_with("#X") => {
                         u32::from_str_radix(&ent[2..], 16)
                             .ok()
@@ -2340,16 +2344,25 @@ fn strip_cue_text(lines: &[&str]) -> (String, Vec<CueSpan>) {
         }
         let mut rest = *raw;
         while let Some(lt) = rest.find('<') {
-            push_cue_text(&mut text, &mut annotation, &rest[..lt]);
+            push_cue_text(&mut text, &mut annotation, &decode_entities(&rest[..lt]));
             let after = &rest[lt + 1..];
-            let Some(gt) = after.find('>') else {
-                rest = "";
-                break;
+            // a `<` with no `>` before the next `<` is text, as in "a < b"
+            let Some(gt) = after
+                .find(['<', '>'])
+                .filter(|&at| after.as_bytes()[at] == b'>')
+            else {
+                push_cue_text(&mut text, &mut annotation, "<");
+                rest = after;
+                continue;
             };
             let tag = &after[..gt];
             rest = &after[gt + 1..];
-            if tag.starts_with('/') {
-                if let Some(idx) = open.pop() {
+            if let Some(closed) = tag.strip_prefix('/') {
+                let name = tag_name(closed).to_ascii_lowercase();
+                let Some(depth) = open.iter().rposition(|&idx| spans[idx].tag == name) else {
+                    continue;
+                };
+                for idx in open.split_off(depth).into_iter().rev() {
                     if rt_span == Some(idx) {
                         spans[idx].ruby_text = annotation.take();
                         rt_span = None;
@@ -2382,7 +2395,7 @@ fn strip_cue_text(lines: &[&str]) -> (String, Vec<CueSpan>) {
                 });
             }
         }
-        push_cue_text(&mut text, &mut annotation, rest);
+        push_cue_text(&mut text, &mut annotation, &decode_entities(rest));
     }
     // A span the cue never closes (the common unclosed `<v Speaker>`) runs to the end.
     for idx in open {
@@ -3431,6 +3444,38 @@ mod tests {
         assert_eq!(cues[0].text, "plain tilted");
         assert!(cues[0].settings.italic_at(6));
         assert!(!cues[0].settings.italic_at(0));
+    }
+
+    #[test]
+    fn a_lone_less_than_sign_stays_in_the_cue_text() {
+        let cues = parse_srt("1\n00:00:00,000 --> 00:00:01,000\na < b <i>c</i> <\n");
+        assert_eq!(cues[0].text, "a < b c <");
+        assert!(cues[0].settings.italic_at(6));
+    }
+
+    #[test]
+    fn cue_text_character_references_are_decoded() {
+        let input = "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\n\
+            <i>R&amp;D</i> &lt;3&nbsp;&#65;&#x42; &bogus;\n";
+        let cues = parse_webvtt(input);
+        assert_eq!(cues[0].text, "R&D <3\u{a0}AB &bogus;");
+        assert!(cues[0].settings.italic_at(2));
+        assert!(!cues[0].settings.italic_at(4));
+    }
+
+    #[test]
+    fn a_close_tag_ends_the_span_it_names() {
+        let cues = parse_srt("1\n00:00:00,000 --> 00:00:01,000\n<i>a<b>b</i>c</b>\n");
+        let settings = &cues[0].settings;
+        assert_eq!(cues[0].text, "abc");
+        assert!(settings.italic_at(0) && settings.italic_at(1));
+        assert!(!settings.italic_at(2), "`</i>` ends the italic span");
+        assert_eq!(settings.font_weight_at(1), Some(BOLD_FONT_WEIGHT));
+        assert_ne!(
+            settings.font_weight_at(2),
+            Some(BOLD_FONT_WEIGHT),
+            "`</i>` also ends the bold span opened inside it"
+        );
     }
 
     #[test]

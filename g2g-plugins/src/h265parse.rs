@@ -368,9 +368,14 @@ fn parse_sps(rbsp: &[u8]) -> Option<SpsGeometry> {
         _ => (1, 1),       // 4:4:4 / monochrome
     };
     // Conformance offsets come from untrusted exp-Golomb; saturate the sums so
-    // adversarial values cannot overflow before the subtract.
-    let width = pic_width.saturating_sub(left.saturating_add(right).saturating_mul(sub_width_c));
-    let height = pic_height.saturating_sub(top.saturating_add(bottom).saturating_mul(sub_height_c));
+    // adversarial values cannot overflow before the subtract, and a window
+    // that leaves no picture fails the SPS.
+    let width = pic_width
+        .checked_sub(left.saturating_add(right).saturating_mul(sub_width_c))
+        .filter(|width| *width > 0)?;
+    let height = pic_height
+        .checked_sub(top.saturating_add(bottom).saturating_mul(sub_height_c))
+        .filter(|height| *height > 0)?;
     // The rest of the walk is best-effort: it sits past the scaling-list / RPS /
     // long-term-ref blocks, and a stream this walk cannot cross still has valid
     // geometry, so a failure downgrades its fields instead of failing the parse.
@@ -1601,11 +1606,9 @@ mod tests {
         // Huge conformance offsets must saturate, not overflow-panic on the sum.
         let huge = 3_000_000_000u32;
         let stream = build_annexb_sps(1920, 1080, 1, Some((huge, huge, huge, huge)));
-        let info = H265Codec::extract_sps_info(&stream).expect("parses without overflow");
-        assert_eq!(
-            (info.width, info.height),
-            (0, 0),
-            "offsets clamp dims to zero"
+        assert!(
+            H265Codec::extract_sps_info(&stream).is_none(),
+            "offsets past the picture fail the SPS without overflow"
         );
     }
 
