@@ -66,6 +66,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M2150: hardened FLV, WAV, HLS key and DASH template parsing against malformed input.
 - M2151: hardened H.264/H.265, AV1, FLAC and ST 2110-20 parsing, RTSP ingest and udpsink NACKs against malformed input, and rtspsrc keeps its session alive while downstream blocks.
 - M2152: audio playout-clock helpers build only for the sinks that use them.
+- M2153: flacparse no longer drops a frame whose samples contain a sync for the frame after next.
 
 ## 0.14.0
 

@@ -460,20 +460,21 @@ enum FrameEnd {
 fn frame_end(data: &[u8]) -> Option<FrameEnd> {
     let header = parse_frame_header(data)?;
     let next_number = header.next_number();
+    let after_next = (!header.variable_block_size).then(|| next_number.saturating_add(1));
     let mut crc_before = crc16(&data[..1]);
+    let mut corrupt_successor_seen = false;
     let mut at = 1;
     while at + 1 < data.len() {
-        let next = (data[at] == 0xFF && data[at + 1] & 0xFC == 0xF8)
-            .then(|| parse_frame_header(&data[at..]))
-            .flatten();
-        if let Some(next) = next {
-            if next.number == next_number || crc_before == 0 {
+        let sync = data[at] == 0xFF && data[at + 1] & 0xFC == 0xF8;
+        match sync.then(|| parse_frame_header(&data[at..])) {
+            Some(Some(next)) if next.number == next_number || crc_before == 0 => {
                 return Some(FrameEnd::Next(at));
             }
-            let after_next = (!header.variable_block_size).then(|| next_number.saturating_add(1));
-            if after_next == Some(next.number) {
+            Some(Some(next)) if corrupt_successor_seen && after_next == Some(next.number) => {
                 return Some(FrameEnd::SuccessorLost(at));
             }
+            Some(None) if crc_before == 0 => corrupt_successor_seen = true,
+            _ => {}
         }
         crc_before = crc16_update(crc_before, data[at]);
         at += 1;
