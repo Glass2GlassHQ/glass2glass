@@ -2480,6 +2480,13 @@ fn register_autoplug_candidates(reg: &mut Registry) {
         })
         .with_experimental(),
     );
+    #[cfg(all(target_os = "macos", feature = "vtencode"))]
+    reg.register_launch(
+        LaunchFactory::of::<crate::vtencode::VtEncode>("vtenc_h265a", || {
+            Box::new(crate::vtencode::VtEncode::h265_with_alpha())
+        })
+        .with_experimental(),
+    );
     // macOS Metal present sink (M736); the display sink on this platform, so
     // it also backs the `autovideosink` alias below.
     #[cfg(all(target_os = "macos", feature = "metal-sink"))]
@@ -3012,6 +3019,7 @@ pub static FEATURE_GATED_ELEMENTS: &[FeatureGatedElement] = &{
         "vtdech265" => "vtdecode" on "macos";
         "vtenc_h264" => "vtencode" on "macos";
         "vtenc_h265" => "vtencode" on "macos";
+        "vtenc_h265a" => "vtencode" on "macos";
         "metalvideosink" => "metal-sink" on "macos";
         "coreaudiosink" => "coreaudio" on "macos";
         "coreaudiosrc" => "coreaudio" on "macos";

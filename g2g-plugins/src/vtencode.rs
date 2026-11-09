@@ -5,8 +5,10 @@
 //! macOS analog of `MfEncode` (Windows Media Foundation): it consumes raw NV12
 //! `DataFrame`s (`MemoryDomain::System`) and produces H.264 *or* H.265 (HEVC)
 //! access units, also `MemoryDomain::System`, in Annex-B framing (what the rest
-//! of the pipeline expects). The two codecs differ only in the session codec
-//! FourCC (`'avc1'` vs `'hvc1'`), the keyframe-prefix parameter-set accessor
+//! of the pipeline expects). The HEVC-with-alpha variant consumes BGRA instead
+//! and carries the alpha plane as a second HEVC layer. The codecs differ only in
+//! the session codec FourCC (`'avc1'`, `'hvc1'`, `'muxa'`), the input pixel
+//! format, the keyframe-prefix parameter-set accessor
 //! (`...GetH264/HEVCParameterSetAtIndex`), and IRAP detection; the session,
 //! encode loop, and pixel-buffer fill are shared.
 //!
@@ -34,14 +36,17 @@ use objc2_core_foundation::{CFBoolean, CFDictionary, CFRetained, CFString, CFTyp
 type OSStatus = i32;
 use crate::videotoolbox_common::{cm_time, cm_time_invalid, cmtime_to_ns};
 use objc2_core_media::{
-    CMBlockBuffer, CMFormatDescription, CMSampleBuffer, CMTime,
+    kCMVideoCodecType_H264, kCMVideoCodecType_HEVC, kCMVideoCodecType_HEVCWithAlpha, CMBlockBuffer,
+    CMFormatDescription, CMSampleBuffer, CMTime, CMVideoCodecType,
     CMVideoFormatDescriptionGetH264ParameterSetAtIndex,
     CMVideoFormatDescriptionGetHEVCParameterSetAtIndex,
 };
 use objc2_core_video::{
-    CVImageBuffer, CVPixelBuffer, CVPixelBufferCreate, CVPixelBufferGetBaseAddressOfPlane,
-    CVPixelBufferGetBytesPerRowOfPlane, CVPixelBufferGetHeightOfPlane,
-    CVPixelBufferGetWidthOfPlane, CVPixelBufferLockBaseAddress, CVPixelBufferLockFlags,
+    kCVPixelFormatType_32BGRA, kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, CVImageBuffer,
+    CVPixelBuffer, CVPixelBufferCreate, CVPixelBufferGetBaseAddress,
+    CVPixelBufferGetBaseAddressOfPlane, CVPixelBufferGetBytesPerRow,
+    CVPixelBufferGetBytesPerRowOfPlane, CVPixelBufferGetHeight, CVPixelBufferGetHeightOfPlane,
+    CVPixelBufferIsPlanar, CVPixelBufferLockBaseAddress, CVPixelBufferLockFlags,
     CVPixelBufferUnlockBaseAddress,
 };
 use objc2_video_toolbox::{
@@ -67,12 +72,34 @@ use alloc::vec::Vec;
 use core::future::Future;
 use core::pin::Pin;
 
-/// H.264 codec type FourCC `'avc1'` for `VTCompressionSessionCreate`.
-const CODEC_H264: u32 = 0x6176_6331;
-/// H.265 (HEVC) codec type FourCC `'hvc1'` for `VTCompressionSessionCreate`.
-const CODEC_H265: u32 = 0x6876_6331;
-/// NV12 4:2:0 bi-planar video-range `'420v'`, the pixel format we feed in.
-const K_CV_PIXEL_FORMAT_420V: u32 = 0x3432_3076;
+#[derive(Debug, Clone, Copy)]
+struct SessionFormat {
+    codec: VideoCodec,
+    input: RawVideoFormat,
+    codec_type: CMVideoCodecType,
+    pixel_format: u32,
+}
+
+const H264_FROM_NV12: SessionFormat = SessionFormat {
+    codec: VideoCodec::H264,
+    input: RawVideoFormat::Nv12,
+    codec_type: kCMVideoCodecType_H264,
+    pixel_format: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+};
+
+const H265_FROM_NV12: SessionFormat = SessionFormat {
+    codec: VideoCodec::H265,
+    input: RawVideoFormat::Nv12,
+    codec_type: kCMVideoCodecType_HEVC,
+    pixel_format: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+};
+
+const H265_WITH_ALPHA_FROM_BGRA: SessionFormat = SessionFormat {
+    codec: VideoCodec::H265,
+    input: RawVideoFormat::Bgra8,
+    codec_type: kCMVideoCodecType_HEVCWithAlpha,
+    pixel_format: kCVPixelFormatType_32BGRA,
+};
 
 /// One encoded access unit the output callback has framed to Annex-B.
 #[derive(Debug)]
@@ -101,6 +128,7 @@ struct Collector {
 struct EncoderState {
     session: CFRetained<VTCompressionSession>,
     collector: Box<Collector>,
+    format: SessionFormat,
     width: u32,
     height: u32,
 }
@@ -109,6 +137,7 @@ impl core::fmt::Debug for EncoderState {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("EncoderState")
             .field("collector", &self.collector)
+            .field("format", &self.format)
             .field("width", &self.width)
             .field("height", &self.height)
             .finish_non_exhaustive()
@@ -126,7 +155,7 @@ impl core::fmt::Debug for EncoderState {
 /// ```
 #[derive(Debug)]
 pub struct VtEncode {
-    codec: VideoCodec,
+    format: SessionFormat,
     bitrate: u32,
     keyframe_interval: u32,
     framerate: Rate,
@@ -156,18 +185,22 @@ impl VtEncode {
     /// An H.264 VideoToolbox encoder. Defaults: 4 Mbps, a keyframe every 60
     /// frames, realtime + no frame reordering (DTS == PTS, low latency).
     pub fn h264() -> Self {
-        Self::for_codec(VideoCodec::H264)
+        Self::for_format(H264_FROM_NV12)
     }
 
     /// An H.265 (HEVC) VideoToolbox encoder, same defaults as [`h264`](Self::h264).
     /// Differs only in the session codec FourCC and the keyframe-prefix accessor.
     pub fn h265() -> Self {
-        Self::for_codec(VideoCodec::H265)
+        Self::for_format(H265_FROM_NV12)
     }
 
-    fn for_codec(codec: VideoCodec) -> Self {
+    pub fn h265_with_alpha() -> Self {
+        Self::for_format(H265_WITH_ALPHA_FROM_BGRA)
+    }
+
+    fn for_format(format: SessionFormat) -> Self {
         Self {
-            codec,
+            format,
             bitrate: 4_000_000,
             keyframe_interval: 60,
             framerate: Rate::Any,
@@ -198,7 +231,7 @@ impl VtEncode {
 
     fn output_caps(&self) -> Caps {
         Caps::RawVideo {
-            format: RawVideoFormat::Nv12,
+            format: self.format.input,
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
@@ -207,18 +240,18 @@ impl VtEncode {
         }
     }
 
-    /// Encode one NV12 frame, packing any produced access units into the state
+    /// Encode one packed frame, packing any produced access units into the state
     /// collector for `process` to drain.
-    fn feed(&mut self, nv12: &[u8], pts_ns: u64) -> Result<(), G2gError> {
+    fn feed(&mut self, picture: &[u8], pts_ns: u64) -> Result<(), G2gError> {
         let Some(state) = self.state.as_mut() else {
             return Err(G2gError::NotConfigured);
         };
         let frame_properties = core::mem::take(&mut self.force_keyframe).then(keyframe_request);
-        // SAFETY: the session is live; the pixel buffer is built from `nv12`
+        // SAFETY: the session is live; the pixel buffer is built from `picture`
         // (which outlives the synchronous encode), fed, then completed so the
         // callback fires before we return; the refcon points at the boxed
         // collector that lives as long as the session.
-        unsafe { encode_into(state, nv12, pts_ns, frame_properties.as_deref())? };
+        unsafe { encode_into(state, picture, pts_ns, frame_properties.as_deref())? };
         if let Some(err) = state.collector.error.take() {
             return Err(err);
         }
@@ -255,7 +288,7 @@ impl VtEncode {
             Some(s) => (s.width, s.height),
             None => return Err(G2gError::NotConfigured),
         };
-        let new_caps = h264_caps(self.codec, w, h, self.framerate.clone());
+        let new_caps = h264_caps(self.format.codec, w, h, self.framerate.clone());
         if self.last_caps.as_ref() != Some(&new_caps) {
             out.push(PipelinePacket::CapsChanged(new_caps.clone()))
                 .await?;
@@ -306,12 +339,12 @@ impl AsyncElement for VtEncode {
         upstream_caps.intersect(&self.output_caps())
     }
 
-    /// Native `DerivedOutput`: NV12 in, H.264 at the same dims / framerate out.
+    /// Native `DerivedOutput`: NV12 (or BGRA) in, the coded stream at the same dims / framerate out.
     /// Mirrors `MfEncode`.
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
-        let codec = self.codec;
+        let format = self.format;
         CapsConstraint::DerivedOutput(Box::new(move |input: &Caps| {
-            derive_output_caps(codec, input)
+            derive_output_caps(format, input)
         }))
     }
 
@@ -354,12 +387,14 @@ impl AsyncElement for VtEncode {
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         let (w, h, framerate) = match absolute_caps {
             Caps::RawVideo {
-                format: RawVideoFormat::Nv12,
+                format,
                 width: Dim::Fixed(w),
                 height: Dim::Fixed(h),
                 framerate,
                 ..
-            } if *w % 2 == 0 && *h % 2 == 0 => (*w, *h, framerate.clone()),
+            } if *format == self.format.input && *w % 2 == 0 && *h % 2 == 0 => {
+                (*w, *h, framerate.clone())
+            }
             _ => return Err(G2gError::CapsMismatch),
         };
         self.framerate = framerate;
@@ -367,7 +402,7 @@ impl AsyncElement for VtEncode {
         // valid slot; the session + boxed collector are stored in the returned
         // state, keeping the refcon's target alive for the session's life.
         let state =
-            unsafe { build_session(self.codec, w, h, self.bitrate, self.keyframe_interval)? };
+            unsafe { build_session(self.format, w, h, self.bitrate, self.keyframe_interval)? };
         self.state = Some(state);
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
@@ -381,7 +416,7 @@ impl AsyncElement for VtEncode {
         g2g_core::ElementMetadata::new(
             "VideoToolbox H.264 / H.265 encoder",
             "Codec/Encoder/Video",
-            "Hardware H.264 / H.265 encode on macOS via VideoToolbox (NV12 -> Annex-B)",
+            "Hardware H.264 / H.265 encode on macOS via VideoToolbox (NV12, or BGRA for H.265 with alpha -> Annex-B)",
             "g2g",
         )
     }
@@ -412,7 +447,7 @@ impl AsyncElement for VtEncode {
                 }
                 PipelinePacket::CapsChanged(c) => {
                     // A mid-stream geometry / format change would need a session
-                    // rebuild; reject anything but the exact configured NV12 shape
+                    // rebuild; reject anything but the exact configured input shape
                     // loud (the bare format check let a new resolution slip past).
                     // The runner's pre-fixed output caps (our compressed codec)
                     // are forwarded so the sink sees them before the first access
@@ -420,12 +455,12 @@ impl AsyncElement for VtEncode {
                     let session_dims = self.state.as_ref().map(|s| (s.width, s.height));
                     match &c {
                         Caps::RawVideo {
-                            format: RawVideoFormat::Nv12,
+                            format,
                             width: Dim::Fixed(w),
                             height: Dim::Fixed(h),
                             ..
-                        } if session_dims == Some((*w, *h)) => {}
-                        Caps::CompressedVideo { codec, .. } if *codec == self.codec => {
+                        } if *format == self.format.input && session_dims == Some((*w, *h)) => {}
+                        Caps::CompressedVideo { codec, .. } if *codec == self.format.codec => {
                             out.push(PipelinePacket::CapsChanged(c.clone())).await?;
                             self.last_caps = Some(c);
                         }
@@ -465,8 +500,8 @@ impl AsyncElement for VtEncode {
 
 impl PadTemplates for VtEncode {
     fn pad_templates() -> Vec<PadTemplate> {
-        let nv12 = Caps::RawVideo {
-            format: RawVideoFormat::Nv12,
+        let raw = |format| Caps::RawVideo {
+            format,
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
@@ -482,7 +517,10 @@ impl PadTemplates for VtEncode {
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         Vec::from([
-            PadTemplate::sink(CapsSet::one(nv12)),
+            PadTemplate::sink(CapsSet::from_alternatives(Vec::from([
+                raw(RawVideoFormat::Nv12),
+                raw(RawVideoFormat::Bgra8),
+            ]))),
             PadTemplate::source(CapsSet::from_alternatives(Vec::from([
                 compressed(VideoCodec::H264),
                 compressed(VideoCodec::H265),
@@ -502,16 +540,16 @@ fn h264_caps(codec: VideoCodec, w: u32, h: u32, framerate: Rate) -> Caps {
     }
 }
 
-fn derive_output_caps(codec: VideoCodec, input: &Caps) -> CapsSet {
+fn derive_output_caps(session_format: SessionFormat, input: &Caps) -> CapsSet {
     match input {
         Caps::RawVideo {
-            format: RawVideoFormat::Nv12,
+            format,
             width,
             height,
             framerate,
             ..
-        } => CapsSet::one(Caps::CompressedVideo {
-            codec,
+        } if *format == session_format.input => CapsSet::one(Caps::CompressedVideo {
+            codec: session_format.codec,
             width: width.clone(),
             height: height.clone(),
             framerate: framerate.clone(),
@@ -682,7 +720,7 @@ unsafe fn parameter_sets_annexb(
 /// SAFETY: out-param slot is valid; the boxed collector outlives the session
 /// (stored in the returned state); property values are valid CF objects.
 unsafe fn build_session(
-    codec: VideoCodec,
+    format: SessionFormat,
     w: u32,
     h: u32,
     bitrate: u32,
@@ -692,13 +730,9 @@ unsafe fn build_session(
     let mut collector = Box::new(Collector {
         frames: Vec::new(),
         error: None,
-        codec,
+        codec: format.codec,
     });
     let refcon = collector.as_mut() as *mut Collector as *mut c_void;
-    let codec_type = match codec {
-        VideoCodec::H265 => CODEC_H265,
-        _ => CODEC_H264,
-    };
 
     let mut session: *mut VTCompressionSession = ptr::null_mut();
     // objc2 exposes this as `VTCompressionSession::create` (associated fn).
@@ -710,7 +744,7 @@ unsafe fn build_session(
             None,
             w as i32,
             h as i32,
-            codec_type,
+            format.codec_type,
             None,
             None,
             None,
@@ -746,31 +780,33 @@ unsafe fn build_session(
     Ok(EncoderState {
         session,
         collector,
+        format,
         width: w,
         height: h,
     })
 }
 
-/// Encode one NV12 frame: wrap it in a `CVPixelBuffer`, submit, and complete so
+/// Encode one packed frame: wrap it in a `CVPixelBuffer`, submit, and complete so
 /// the callback has fired before returning.
 ///
-/// SAFETY: `state.session` is live; `nv12` outlives the synchronous encode.
+/// SAFETY: `state.session` is live; `picture` outlives the synchronous encode.
 unsafe fn encode_into(
     state: &EncoderState,
-    nv12: &[u8],
+    picture: &[u8],
     pts_ns: u64,
     frame_properties: Option<&KeyframeRequest>,
 ) -> Result<(), G2gError> {
-    // SAFETY: make_pixel_buffer rejects an `nv12` shorter than one NV12 frame
+    // SAFETY: make_pixel_buffer rejects a `picture` shorter than one frame
     // before it copies anything.
-    let pixel_buffer = unsafe { make_pixel_buffer(nv12, state.width, state.height)? };
+    let pixel_buffer =
+        unsafe { make_pixel_buffer(picture, state.format, state.width, state.height)? };
     // SAFETY: the session is live per this function's contract, and the staging
     // buffer outlives the synchronous encode.
     unsafe { encode_pixel_buffer(state, &pixel_buffer, pts_ns, frame_properties) }
 }
 
 /// Submit one `CVPixelBuffer` to the compression session and complete it, so
-/// the output callback fires before returning. Shared by the packed-NV12 path
+/// the output callback fires before returning. Shared by the packed-frame path
 /// (a staging buffer) and the zero-copy `CvPixelBuffer` input.
 ///
 /// SAFETY: `state.session` is live; `pb` is a valid pixel buffer that outlives
@@ -828,18 +864,19 @@ unsafe fn complete_frames(session: &VTCompressionSession) {
     let _ = unsafe { session.complete_frames(cm_time_invalid()) };
 }
 
-/// Build a bi-planar NV12 `CVPixelBuffer` and copy `nv12` into its planes
-/// (inverse of `VtDecode::pack_nv12`).
+/// Build a `CVPixelBuffer` in the session's input format and copy the tightly
+/// packed `picture` into it, row by row into the buffer's own stride.
 ///
-/// SAFETY: `nv12` holds one NV12 frame; the created buffer is released on drop.
+/// SAFETY: the created buffer is released on drop.
 unsafe fn make_pixel_buffer(
-    nv12: &[u8],
+    picture: &[u8],
+    format: SessionFormat,
     w: u32,
     h: u32,
 ) -> Result<CFRetained<CVPixelBuffer>, G2gError> {
     let hw = || G2gError::Hardware(HardwareError::Other);
     let (wu, hu) = (w as usize, h as usize);
-    if nv12.len() < crate::pixel::frame_byte_size(g2g_core::RawVideoFormat::Nv12, w, h) {
+    if picture.len() < crate::pixel::frame_byte_size(format.input, w, h) {
         return Err(hw());
     }
     let mut pb: *mut CVPixelBuffer = ptr::null_mut();
@@ -851,7 +888,7 @@ unsafe fn make_pixel_buffer(
             None,
             wu,
             hu,
-            K_CV_PIXEL_FORMAT_420V,
+            format.pixel_format,
             None,
             NonNull::from(&mut pb),
         )
@@ -862,37 +899,44 @@ unsafe fn make_pixel_buffer(
     // SAFETY: the create returned 0, so `pb` is a +1 reference we adopt.
     let pb = unsafe { CFRetained::from_raw(NonNull::new(pb).ok_or_else(hw)?) };
 
-    // SAFETY: lock for write, copy the planes in (stripping into the buffer's own
-    // per-row stride), unlock.
+    // SAFETY: `pb` is a live buffer we own.
     let lock = unsafe { CVPixelBufferLockBaseAddress(&pb, CVPixelBufferLockFlags::empty()) };
     if lock != 0 {
         return Err(hw());
     }
-    let mut src = 0usize;
-    for plane in 0..2usize {
-        let base = CVPixelBufferGetBaseAddressOfPlane(&pb, plane) as *mut u8;
-        if base.is_null() {
-            // SAFETY: the lock above succeeded, so this unlock balances it before
-            // we bail out.
-            unsafe { CVPixelBufferUnlockBaseAddress(&pb, CVPixelBufferLockFlags::empty()) };
+    // CoreVideo answers the plane accessors with null for a packed format like BGRA
+    let planar = CVPixelBufferIsPlanar(&pb);
+    let copied = (0..format.input.plane_count()).try_for_each(|plane| {
+        let (offset, row_bytes, rows) =
+            crate::pixel::tight_plane(format.input, plane, wu, hu).ok_or_else(hw)?;
+        let (base, stride, buffer_rows) = match planar {
+            true => (
+                CVPixelBufferGetBaseAddressOfPlane(&pb, plane),
+                CVPixelBufferGetBytesPerRowOfPlane(&pb, plane),
+                CVPixelBufferGetHeightOfPlane(&pb, plane),
+            ),
+            false => (
+                CVPixelBufferGetBaseAddress(&pb),
+                CVPixelBufferGetBytesPerRow(&pb),
+                CVPixelBufferGetHeight(&pb),
+            ),
+        };
+        if base.is_null() || stride < row_bytes || buffer_rows < rows {
             return Err(hw());
         }
-        let stride = CVPixelBufferGetBytesPerRowOfPlane(&pb, plane);
-        let pw = CVPixelBufferGetWidthOfPlane(&pb, plane);
-        let ph = CVPixelBufferGetHeightOfPlane(&pb, plane);
-        let row_bytes = if plane == 0 { pw } else { pw * 2 };
-        for row in 0..ph {
-            if src + row_bytes > nv12.len() {
-                break;
-            }
-            // SAFETY: row < plane height; row_bytes <= stride; base valid for the plane.
-            let dst = unsafe { core::slice::from_raw_parts_mut(base.add(row * stride), row_bytes) };
-            dst.copy_from_slice(&nv12[src..src + row_bytes]);
-            src += row_bytes;
+        for row in 0..rows {
+            let source = &picture[offset + row * row_bytes..][..row_bytes];
+            // SAFETY: the buffer is locked, row < buffer_rows and row_bytes <= stride.
+            let destination = unsafe {
+                core::slice::from_raw_parts_mut((base as *mut u8).add(row * stride), row_bytes)
+            };
+            destination.copy_from_slice(source);
         }
-    }
+        Ok(())
+    });
     // SAFETY: balances the lock above, and no plane pointer is used after it.
     unsafe { CVPixelBufferUnlockBaseAddress(&pb, CVPixelBufferLockFlags::empty()) };
+    copied?;
     Ok(pb)
 }
 

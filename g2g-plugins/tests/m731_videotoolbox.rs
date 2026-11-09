@@ -225,7 +225,7 @@ mod encode {
 
     /// A synthetic packed NV12 picture: a per-frame luma gradient over a neutral
     /// chroma plane, so consecutive frames differ and the encoder has real work.
-    fn nv12_frame(index: usize) -> Frame {
+    fn nv12_picture(index: usize) -> Vec<u8> {
         let w = WIDTH as usize;
         let h = HEIGHT as usize;
         let mut data = vec![128u8; w * h * 3 / 2];
@@ -234,6 +234,35 @@ mod encode {
                 data[row * w + col] = ((row + col + index * 8) % 256) as u8;
             }
         }
+        data
+    }
+
+    // alpha ramps across each row, so the alpha plane is neither opaque nor flat
+    fn bgra_picture(index: usize) -> Vec<u8> {
+        let w = WIDTH as usize;
+        let h = HEIGHT as usize;
+        let mut data = vec![0u8; w * h * 4];
+        for row in 0..h {
+            for col in 0..w {
+                let pixel = (row * w + col) * 4;
+                let shade = ((row + col + index * 8) % 256) as u8;
+                data[pixel..pixel + 4].copy_from_slice(&[
+                    shade,
+                    255 - shade,
+                    128,
+                    (col * 255 / w) as u8,
+                ]);
+            }
+        }
+        data
+    }
+
+    fn frame(format: RawVideoFormat, index: usize) -> Frame {
+        let data = match format {
+            RawVideoFormat::Nv12 => nv12_picture(index),
+            RawVideoFormat::Bgra8 => bgra_picture(index),
+            other => panic!("no test picture for {other:?}"),
+        };
         Frame {
             domain: MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
             timing: FrameTiming {
@@ -248,9 +277,9 @@ mod encode {
         }
     }
 
-    fn input_caps() -> Caps {
+    fn input_caps(format: RawVideoFormat) -> Caps {
         Caps::RawVideo {
-            format: RawVideoFormat::Nv12,
+            format,
             width: Dim::Fixed(WIDTH),
             height: Dim::Fixed(HEIGHT),
             framerate: Rate::Fixed(FPS_Q16),
@@ -260,14 +289,14 @@ mod encode {
     }
 
     /// Walk the Annex-B start codes of one access unit and yield each NAL's
-    /// first header byte.
-    fn nal_header_bytes(au: &[u8]) -> Vec<u8> {
+    /// first two header bytes.
+    fn nal_header_bytes(au: &[u8]) -> Vec<[u8; 2]> {
         let mut out = Vec::new();
         let mut i = 0;
         while i + 3 <= au.len() {
             if au[i..].starts_with(&[0, 0, 1]) {
-                if let Some(&b) = au.get(i + 3) {
-                    out.push(b);
+                if let Some(&[first, second]) = au.get(i + 3..i + 5) {
+                    out.push([first, second]);
                 }
                 i += 3;
             } else {
@@ -277,21 +306,23 @@ mod encode {
         out
     }
 
-    async fn encode_frames(enc: VtEncode) -> CollectSink {
+    async fn encode_frames(enc: VtEncode, format: RawVideoFormat) -> CollectSink {
         let mut sink = CollectSink::default();
-        encode_into(enc, &mut sink).await;
+        encode_into(enc, format, &mut sink).await;
         sink
     }
 
-    async fn encode_into(mut enc: VtEncode, sink: &mut dyn OutputSink) {
-        let narrowed = enc.intercept_caps(&input_caps()).expect("intercept NV12");
+    async fn encode_into(mut enc: VtEncode, format: RawVideoFormat, sink: &mut dyn OutputSink) {
+        let narrowed = enc
+            .intercept_caps(&input_caps(format))
+            .expect("intercept raw input");
         let outcome = enc
             .configure_pipeline(&narrowed)
             .expect("VideoToolbox compression session must initialise");
         assert!(matches!(outcome, ConfigureOutcome::Accepted));
 
         for i in 0..FRAMES {
-            enc.process(PipelinePacket::DataFrame(nv12_frame(i)), sink)
+            enc.process(PipelinePacket::DataFrame(frame(format, i)), sink)
                 .await
                 .expect("encode DataFrame");
         }
@@ -303,7 +334,7 @@ mod encode {
     async fn forces_a_keyframe_on_request(enc: VtEncode) {
         const REQUEST_AT: usize = 3;
         let mut sink = KeyframeRequestSink::new(REQUEST_AT);
-        encode_into(enc, &mut sink).await;
+        encode_into(enc, RawVideoFormat::Nv12, &mut sink).await;
         assert_eq!(
             sink.keyframe_indices(),
             vec![0, REQUEST_AT + 1],
@@ -321,6 +352,46 @@ mod encode {
         forces_a_keyframe_on_request(VtEncode::h265().with_bitrate(1_000_000)).await;
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn vtencode_h265_with_alpha_codes_an_alpha_layer() {
+        let enc = VtEncode::h265_with_alpha().with_bitrate(1_000_000);
+        let encoded = encode_frames(enc, RawVideoFormat::Bgra8).await;
+
+        let caps = encoded.caps_changes();
+        assert!(
+            matches!(
+                caps.first(),
+                Some(Caps::CompressedVideo {
+                    codec: VideoCodec::H265,
+                    width: Dim::Fixed(WIDTH),
+                    height: Dim::Fixed(HEIGHT),
+                    ..
+                })
+            ),
+            "alpha encode is HEVC at the input geometry, got {caps:?}"
+        );
+        let aus = encoded.data_frames();
+        assert_eq!(aus.len(), FRAMES, "no-reorder mode: one output per input");
+        assert!(
+            aus[0].timing.keyframe,
+            "the first access unit is a keyframe"
+        );
+        for (index, au) in aus.iter().enumerate() {
+            let au = au.domain.as_system_slice().expect("System-domain output");
+            let headers = nal_header_bytes(au);
+            // videotoolbox codes the alpha picture as slices outside base layer 0
+            let alpha_slice = headers.iter().any(|h| {
+                let layer_id = ((h[0] & 0x1) << 5) | (h[1] >> 3);
+                let nal_type = (h[0] >> 1) & 0x3f;
+                layer_id > 0 && nal_type < 32
+            });
+            assert!(
+                alpha_slice,
+                "access unit {index} has no alpha layer slice: {headers:x?}"
+            );
+        }
+    }
+
     /// Round-trip: encode synthetic frames, assert the Annex-B stream shape,
     /// then decode it back and assert every picture is recovered.
     async fn round_trip(codec: VideoCodec) {
@@ -329,7 +400,7 @@ mod encode {
             _ => VtEncode::h264(),
         }
         .with_bitrate(1_000_000);
-        let encoded = encode_frames(enc).await;
+        let encoded = encode_frames(enc, RawVideoFormat::Nv12).await;
 
         let caps = encoded.caps_changes();
         assert!(
@@ -367,11 +438,11 @@ mod encode {
         let headers = nal_header_bytes(first);
         let has_params = match codec {
             VideoCodec::H265 => {
-                let types: Vec<u8> = headers.iter().map(|b| (b >> 1) & 0x3f).collect();
+                let types: Vec<u8> = headers.iter().map(|h| (h[0] >> 1) & 0x3f).collect();
                 types.contains(&32) && types.contains(&33) && types.contains(&34)
             }
             _ => {
-                let types: Vec<u8> = headers.iter().map(|b| b & 0x1f).collect();
+                let types: Vec<u8> = headers.iter().map(|h| h[0] & 0x1f).collect();
                 types.contains(&7) && types.contains(&8)
             }
         };

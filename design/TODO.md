@@ -310,10 +310,6 @@ libraries installed.
   codec path on Raspberry Pi and most ARM SoCs (gst `v4l2h264dec`,
   `v4l2h264enc`, `v4l2slh264dec`).
 - Run `vaav1enc` on a GPU with VA-API AV1 encode (AMD RDNA3, Intel Arc).
-- **HEVC with alpha in `vtencode`** (`kCMVideoCodecType_HEVCWithAlpha`, gst
-  `vtenc_h265a`) from BGRA input. Both macOS CI runners create the session
-  and encode a frame: `macos-latest` on a paravirtualized hardware encoder,
-  `macos-15-intel` on the software one.
 - **Pure-Rust / wasm decode** to drop the ffmpeg FFI: VP8 / VP9 decode and a
   pure-Rust Opus path (see the roadmap for why both are blocked).
 

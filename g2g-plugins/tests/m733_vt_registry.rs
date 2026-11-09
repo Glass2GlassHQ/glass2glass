@@ -102,3 +102,14 @@ async fn vtenc_h265_encodes_in_a_text_pipeline() {
     .await;
     assert_eq!(consumed, 5, "every test picture encoded to an access unit");
 }
+
+#[cfg(feature = "vtencode")]
+#[tokio::test(flavor = "current_thread")]
+async fn vtenc_h265a_encodes_bgra_in_a_text_pipeline() {
+    let consumed = run_line(
+        "videotestsrc num-buffers=5 ! videoconvert ! video/x-raw,format=BGRA \
+         ! vtenc_h265a ! fakesink",
+    )
+    .await;
+    assert_eq!(consumed, 5, "every test picture encoded to an access unit");
+}
