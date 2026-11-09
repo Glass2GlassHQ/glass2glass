@@ -349,3 +349,19 @@ async fn a_flush_restarts_timestamps_at_the_demuxer_landing() {
     let after_flush: Vec<u64> = sink.frames.iter().skip(1).map(|(pts, _)| *pts).collect();
     assert_eq!(after_flush, landing.map(frame_pts).collect::<Vec<_>>());
 }
+
+// an ID3v2.4 header with no frames, its body all padding
+fn id3v2_padding_tag(body_len: u8) -> Vec<u8> {
+    let mut tag = b"ID3".to_vec();
+    tag.extend_from_slice(&[4, 0, 0, 0, 0, 0, body_len]);
+    tag.extend(std::iter::repeat_n(0u8, body_len.into()));
+    tag
+}
+
+#[tokio::test]
+async fn an_id3v2_tag_ahead_of_the_stream_is_skipped() {
+    let frames: Vec<Vec<u8>> = (0..3).map(synth_frame).collect();
+    let stream = [synth_stream_header(), frames.concat()].concat();
+    let tagged = [id3v2_padding_tag(64), stream].concat();
+    assert_eq!(parse_frames(&tagged).await, frames);
+}

@@ -84,6 +84,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M2168: `rtspserversrc` and `rtspserversrcn` ingest H.265 with `encoding-name=H265` and refuse an ANNOUNCE for another codec.
 - M2169: RTSP ingest and `udpsrc` put the SDP `sprop` parameter sets in front of a first keyframe that lacks them.
 - M2170: `udpsink` with sender reports on sends a final sender report and an RTCP BYE at EOS.
+- M2171: `flacparse` and typefind accept FLAC behind an ID3v2 tag.
 
 ## 0.14.0
 

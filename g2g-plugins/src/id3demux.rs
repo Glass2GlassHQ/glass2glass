@@ -24,9 +24,7 @@ use g2g_core::{
     G2gError, MemoryDomain, OutputSink, PipelinePacket, TagList,
 };
 
-use crate::id3::{
-    id3v2_len, parse_id3v1, parse_id3v2, ID3V1_LEN, ID3V2_HEADER_LEN, MAX_ID3V2_TAG_PARSED,
-};
+use crate::id3::{parse_id3v1, LeadingId3v2, ID3V1_LEN};
 
 /// # Example
 ///
@@ -43,9 +41,7 @@ pub struct Id3Demux {
     /// Bytes not yet forwarded: the head until the tag is decided, then the
     /// trailing [`ID3V1_LEN`] bytes that may be the ID3v1 block.
     buf: Vec<u8>,
-    head_examined: bool,
-    /// Bytes of ID3v2 tag still to drop from the front of the stream.
-    id3v2_skip: usize,
+    id3v2: LeadingId3v2,
     tags: TagList,
     tags_posted: bool,
     sequence: u64,
@@ -81,36 +77,14 @@ impl Id3Demux {
         }
     }
 
-    /// Skip the ID3v2 tag at the head of the stream, reading its text frames on
-    /// the way past. Returns whether the payload has been reached.
-    fn skip_id3v2(&mut self, eos: bool) -> bool {
-        if !self.head_examined {
-            if self.buf.len() < ID3V2_HEADER_LEN && !eos {
-                return false;
-            }
-            self.head_examined = true;
-            self.id3v2_skip = id3v2_len(&self.buf).unwrap_or(0);
-        }
-        if self.id3v2_skip == 0 {
-            return true;
-        }
-        let readable = self.id3v2_skip <= MAX_ID3V2_TAG_PARSED;
-        if readable && self.buf.len() < self.id3v2_skip {
-            return false; // the tags are read from the whole tag: wait for it
-        }
-        if readable {
-            self.tags = parse_id3v2(&self.buf[..self.id3v2_skip]);
-        }
-        let drop = self.id3v2_skip.min(self.buf.len());
-        self.buf.drain(..drop);
-        self.id3v2_skip -= drop;
-        self.id3v2_skip == 0
-    }
-
     /// Forward everything settled: the payload past the ID3v2 tag, less the
     /// trailing bytes that may still turn out to be the ID3v1 block.
     async fn drain(&mut self, eos: bool, out: &mut dyn OutputSink) -> Result<(), G2gError> {
-        if !self.skip_id3v2(eos) {
+        let skipped = self.id3v2.skip(&mut self.buf, eos);
+        if let Some(tags) = skipped.tags {
+            self.tags = tags;
+        }
+        if !skipped.payload_reached {
             return Ok(());
         }
         self.post_tags();

@@ -47,7 +47,7 @@ use crate::audioframe::{
 use crate::compressed_audio_passthrough::OVERLAP_PREROLL_FRAMES;
 use crate::demuxseek::DemuxSeek;
 use crate::frame_clock::FrameClock;
-use crate::id3::{id3v2_len, parse_id3v1, parse_id3v2, ID3V1_LEN, ID3V2_HEADER_LEN};
+use crate::id3::{parse_id3v1, LeadingId3v2, ID3V1_LEN};
 use crate::pcmclip::within_presentation;
 use g2g_core::time::ticks_to_ns;
 
@@ -66,10 +66,7 @@ pub struct MpegAudioParse {
     /// Unconsumed input bytes, starting at stream offset `buf_offset`.
     buf: Vec<u8>,
     buf_offset: u64,
-    /// Whether the start of the stream has been examined for an ID3v2 tag.
-    head_examined: bool,
-    /// Bytes of ID3v2 tag still to drop from the front of the stream.
-    id3v2_skip: usize,
+    id3v2: LeadingId3v2,
     tags: TagList,
     tags_posted: bool,
     /// Whether a frame has been emitted, so the VBR header frame (only ever the
@@ -134,32 +131,6 @@ impl MpegAudioParse {
         self.buf_offset += n as u64;
     }
 
-    /// Skip the ID3v2 tag at the head of the stream, reading its text frames on
-    /// the way past. Returns whether the audio has been reached.
-    fn skip_id3v2(&mut self, eos: bool) -> bool {
-        if !self.head_examined {
-            if self.buf.len() < ID3V2_HEADER_LEN && !eos {
-                return false;
-            }
-            self.head_examined = true;
-            self.id3v2_skip = id3v2_len(&self.buf).unwrap_or(0);
-        }
-        if self.id3v2_skip == 0 {
-            return true;
-        }
-        let readable = self.id3v2_skip <= crate::id3::MAX_ID3V2_TAG_PARSED;
-        if readable && self.buf.len() < self.id3v2_skip {
-            return false; // the tags are read from the whole tag: wait for it
-        }
-        if readable {
-            self.tags = parse_id3v2(&self.buf[..self.id3v2_skip]);
-        }
-        let drop = self.id3v2_skip.min(self.buf.len());
-        self.consume(drop);
-        self.id3v2_skip -= drop;
-        self.id3v2_skip == 0
-    }
-
     /// Drop the ID3v1 block at the end of the stream, reading its fields. Called
     /// once the last byte has arrived, the only point at which a trailing `TAG`
     /// block can be told from audio.
@@ -179,7 +150,12 @@ impl MpegAudioParse {
     /// Emit every frame the buffer holds whole. Until `eos`, the last
     /// [`ID3V1_LEN`] bytes are held back: they may be the trailer.
     async fn drain(&mut self, eos: bool, out: &mut dyn OutputSink) -> Result<(), G2gError> {
-        if !self.skip_id3v2(eos) {
+        let skipped = self.id3v2.skip(&mut self.buf, eos);
+        self.buf_offset += skipped.dropped as u64;
+        if let Some(tags) = skipped.tags {
+            self.tags = tags;
+        }
+        if !skipped.payload_reached {
             return Ok(());
         }
         self.post_tags();
@@ -456,8 +432,7 @@ impl AsyncElement for MpegAudioParse {
                 PipelinePacket::Flush => {
                     // our own seek re-reads the file from its start, tags and header frame included
                     if self.seek.dropping_input() {
-                        self.head_examined = false;
-                        self.id3v2_skip = 0;
+                        self.id3v2 = LeadingId3v2::default();
                         self.first_frame_seen = false;
                     }
                     let forward = self.seek.on_flush();

@@ -5,7 +5,8 @@
 //! sync before a decoder can consume it (Matroska hands over whole frames, a
 //! bare `.flac` file does not).
 //!
-//! The stream opens with the `fLaC` marker and metadata blocks; STREAMINFO
+//! An ID3v2 tag ahead of the stream is skipped. The stream opens with the
+//! `fLaC` marker and metadata blocks; STREAMINFO
 //! (the mandatory first block) provides the concrete sample rate / channels
 //! for the refined `CapsChanged`. The whole header (marker through the last
 //! metadata block) is forwarded in-band as the first `DataFrame`, the
@@ -39,6 +40,7 @@ use g2g_core::{
 use crate::demuxseek::DemuxSeek;
 use crate::flactag::{metadata_blocks, FLAC_MARKER};
 use crate::frame_clock::FrameClock;
+use crate::id3::LeadingId3v2;
 use crate::vorbiscomment::{
     parse_comment_body, parse_flac_picture, FLAC_COMMENT_BLOCK_TYPE, FLAC_PICTURE_BLOCK_TYPE,
 };
@@ -82,6 +84,7 @@ pub struct FlacParse {
     /// Unconsumed input bytes (the header until complete, then frame data from
     /// the current frame's sync).
     buf: Vec<u8>,
+    id3v2: LeadingId3v2,
     info: Option<StreamInfo>,
     /// How many `fLaC` header blocks have been emitted downstream.
     headers_sent: u64,
@@ -116,6 +119,7 @@ impl FlacParse {
         Self {
             configured: false,
             buf: Vec::new(),
+            id3v2: LeadingId3v2::default(),
             header_scanned_to: 0,
             info: None,
             headers_sent: 0,
@@ -219,6 +223,11 @@ impl FlacParse {
     /// metadata block is complete, then every frame whose end (the next
     /// validated sync) has arrived.
     async fn drain(&mut self, out: &mut dyn OutputSink) -> Result<(), G2gError> {
+        let skipped = self.id3v2.skip(&mut self.buf, false);
+        self.buf_offset += skipped.dropped as u64;
+        if !skipped.payload_reached {
+            return Ok(());
+        }
         // A chained Ogg link or a re-read after a flush re-sends the header in-band.
         while self.headers_sent == 0 || self.buf.starts_with(b"fLaC") {
             let Some(header_len) = complete_header_len(&self.buf, &mut self.header_scanned_to)?
@@ -585,6 +594,10 @@ impl AsyncElement for FlacParse {
                     out.push(PipelinePacket::Segment(segment)).await?;
                 }
                 PipelinePacket::Flush => {
+                    // our own seek re-reads the file from its start, the ID3v2 tag included
+                    if self.seek.dropping_input() {
+                        self.id3v2 = LeadingId3v2::default();
+                    }
                     let forward = self.seek.on_flush();
                     self.buf.clear();
                     self.header_scanned_to = 0;

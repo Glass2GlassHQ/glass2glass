@@ -1,5 +1,5 @@
 //! ID3 metadata parsing and writing, shared by [`crate::id3demux`],
-//! [`crate::mpegaudioparse`] and [`crate::id3v2mux`].
+//! [`crate::mpegaudioparse`], [`crate::flacparse`] and [`crate::id3v2mux`].
 //!
 //! An MPEG audio elementary stream carries its metadata outside the audio: an
 //! ID3v2 tag ahead of the first frame, an ID3v1 128-byte block after the last.
@@ -80,6 +80,56 @@ pub(crate) fn id3v2_len(buf: &[u8]) -> Option<usize> {
         0
     };
     Some(ID3V2_HEADER_LEN + size + footer)
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct LeadingId3v2 {
+    examined: bool,
+    remaining: usize,
+}
+
+#[derive(Debug)]
+pub(crate) struct Id3v2Skip {
+    pub(crate) payload_reached: bool,
+    pub(crate) dropped: usize,
+    pub(crate) tags: Option<TagList>,
+}
+
+impl LeadingId3v2 {
+    pub(crate) fn skip(&mut self, buf: &mut Vec<u8>, eos: bool) -> Id3v2Skip {
+        let waiting = Id3v2Skip {
+            payload_reached: false,
+            dropped: 0,
+            tags: None,
+        };
+        if !self.examined {
+            if buf.len() < ID3V2_HEADER_LEN && !eos {
+                return waiting;
+            }
+            self.examined = true;
+            self.remaining = id3v2_len(buf).unwrap_or(0);
+        }
+        if self.remaining == 0 {
+            return Id3v2Skip {
+                payload_reached: true,
+                ..waiting
+            };
+        }
+        let readable = self.remaining <= MAX_ID3V2_TAG_PARSED;
+        // the tags are read from the whole tag
+        if readable && buf.len() < self.remaining {
+            return waiting;
+        }
+        let tags = readable.then(|| parse_id3v2(&buf[..self.remaining]));
+        let dropped = self.remaining.min(buf.len());
+        buf.drain(..dropped);
+        self.remaining -= dropped;
+        Id3v2Skip {
+            payload_reached: self.remaining == 0,
+            dropped,
+            tags,
+        }
+    }
 }
 
 /// Decode a 4-byte syncsafe integer, or `None` if any byte has its top bit set

@@ -94,7 +94,10 @@ pub fn sniff_caps(header: &[u8]) -> Option<Caps> {
         return Some(Caps::ByteStream { encoding });
     }
     // Native FLAC: the `fLaC` stream marker (M774); `flacparse` frames it.
-    if header.starts_with(b"fLaC") {
+    let behind_id3v2 = header
+        .get(crate::id3::id3v2_len(header).unwrap_or(0)..)
+        .unwrap_or_default();
+    if behind_id3v2.starts_with(b"fLaC") {
         return Some(elementary_audio_caps(AudioFormat::Flac));
     }
     if let Some(codec) = sniff_still_image(header) {
@@ -1324,10 +1327,13 @@ mod tests {
         // A tag the sniff window does not reach past: MP3 on the tag alone.
         let long_tag = id3v2_tag(SNIFF_LEN * 2);
         assert_eq!(sniff_caps(&long_tag[..SNIFF_LEN]), Some(mp3));
-        // A tag in front of something else does not become MP3.
+        // A tag in front of FLAC does not become MP3.
         let mut tagged_flac = id3v2_tag(16);
         tagged_flac.extend_from_slice(b"fLaC\0\0\0\x22");
-        assert_eq!(sniff_caps(&tagged_flac), None);
+        assert_eq!(
+            sniff_caps(&tagged_flac),
+            Some(elementary_audio_caps(AudioFormat::Flac))
+        );
     }
 
     /// Bytes an ADTS access unit carries behind its header in these tests.
