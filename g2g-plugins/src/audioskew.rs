@@ -2,11 +2,11 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use g2g_core::{
-    Caps, ClockCandidate, ClockPriority, ClockSync, DeviceClockOffset, DriftClock, G2gError,
-    MonotonicClock, PipelineClock, PropError, PropKind, PropValue, PropertySpec,
+    Caps, ClockCandidate, ClockPriority, ClockSync, DriftClock, G2gError, MonotonicClock,
+    PipelineClock, PropError, PropKind, PropValue, PropertySpec,
 };
 
-use crate::audioconvert::{frame_bytes, ns_to_samples, samples_to_ns, silence_byte};
+use crate::audioconvert::{frame_bytes, ns_to_samples, silence_byte};
 
 // gst audiobasesink drift-tolerance default, in microseconds
 const DEFAULT_DRIFT_TOLERANCE_US: u64 = 40_000;
@@ -321,14 +321,24 @@ impl PlayoutClock {
     }
 }
 
+#[cfg(any(
+    all(target_os = "linux", feature = "alsa-sink"),
+    all(target_os = "windows", feature = "wasapi-sink"),
+    all(target_os = "macos", feature = "coreaudio"),
+    all(target_os = "android", feature = "aaudio")
+))]
 pub(crate) fn played_master_ns(
     clock: &DriftClock,
-    offset: &mut DeviceClockOffset,
+    offset: &mut g2g_core::DeviceClockOffset,
     local_ns: u64,
     played_frames: u64,
     rate: u32,
 ) -> u64 {
-    offset.master_ns(clock, local_ns, samples_to_ns(played_frames, rate))
+    offset.master_ns(
+        clock,
+        local_ns,
+        crate::audioconvert::samples_to_ns(played_frames, rate),
+    )
 }
 
 #[cfg(test)]
