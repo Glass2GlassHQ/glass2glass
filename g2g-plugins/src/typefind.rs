@@ -59,7 +59,6 @@ const IV8_MAGIC: [u8; 6] = [0x01, 0x01, 0x03, 0xB8, 0x80, 0x60];
 const PS_PACK_MAGIC: [u8; 4] = [0x00, 0x00, 0x01, 0xBA];
 /// RIFF/WAVE: the `RIFF` container magic, with `WAVE` after the 4-byte size.
 pub(crate) const RIFF_MAGIC: [u8; 4] = *b"RIFF";
-const WAVE_MAGIC: [u8; 4] = *b"WAVE";
 /// AVI rides the same RIFF header as WAVE, tagged `AVI ` after the size.
 const AVI_MAGIC: [u8; 4] = *b"AVI ";
 /// WebP rides the same RIFF header as WAVE, tagged `WEBP` after the size.
@@ -419,7 +418,7 @@ pub fn sniff(header: &[u8]) -> Option<ByteStreamEncoding> {
     if header.starts_with(&PS_PACK_MAGIC) {
         return Some(ByteStreamEncoding::MpegPs);
     }
-    if riff_form(header) == Some(WAVE_MAGIC) {
+    if crate::wavparse::opens_wave_file(header) {
         return Some(ByteStreamEncoding::Wav);
     }
     if riff_form(header) == Some(AVI_MAGIC) {

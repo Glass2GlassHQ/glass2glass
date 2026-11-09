@@ -21,6 +21,10 @@ pub(crate) const ID3V2_MAGIC: [u8; 3] = *b"ID3";
 /// ID3v2 header: magic, major version, revision, flags, 4 syncsafe size bytes.
 /// A stream's head has to hold this much before it can be told from audio.
 pub(crate) const ID3V2_HEADER_LEN: usize = 10;
+/// The largest ID3v2 tag whose text frames are read. A tag is skipped whatever
+/// its size, but reading one means holding it whole, and a tag past this is
+/// carrying artwork rather than text.
+pub(crate) const MAX_ID3V2_TAG_PARSED: usize = 1 << 20;
 /// Header flag: a copy of the header is appended after the tag body.
 const ID3V2_FLAG_FOOTER: u8 = 0x10;
 /// Header flag: an extended header precedes the frames.

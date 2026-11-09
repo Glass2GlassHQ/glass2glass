@@ -28,14 +28,14 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use g2g_core::caps::greatest_common_divisor;
-use g2g_core::{AudioFormat, G2gError, RawVideoFormat, Tag, TagList, VideoCodec};
+use g2g_core::{AudioFormat, G2gError, RawVideoFormat, TagList, VideoCodec};
 
 use crate::uncompressedvideo::{avi_raw_video, RawVideoStorage};
 
 use crate::riff::{
-    chunk_len, chunks, chunks_to_cut, padded_len, put_chunk, put_chunk_header, read_fourcc,
-    read_u16, read_u32, Chunk, FourCc, CHUNK_HEADER_LEN, FOURCC_LEN, LIST_FOURCC, RIFF_FOURCC,
-    RIFF_HEADER_LEN,
+    chunk_len, chunks, chunks_to_cut, padded_len, parse_info, put_chunk, put_chunk_header,
+    read_fourcc, read_u16, read_u32, Chunk, FourCc, CHUNK_HEADER_LEN, FOURCC_LEN, INFO_FOURCC,
+    LIST_FOURCC, RIFF_FOURCC, RIFF_HEADER_LEN,
 };
 use crate::waveformat::{
     audio_format, format_tag_name, sample_frame_len, tagged_audio, wave_format_tag, WaveFormatEx,
@@ -50,7 +50,6 @@ const HDRL_FOURCC: FourCc = *b"hdrl";
 const STRL_FOURCC: FourCc = *b"strl";
 const MOVI_FOURCC: FourCc = *b"movi";
 const REC_FOURCC: FourCc = *b"rec ";
-const INFO_FOURCC: FourCc = *b"INFO";
 /// Chunk ids this reads.
 const AVIH_FOURCC: FourCc = *b"avih";
 const STRH_FOURCC: FourCc = *b"strh";
@@ -130,18 +129,6 @@ const VIDEO_FOURCCS: &[(FourCc, VideoCodec)] = &[
     (*b"VP60", VideoCodec::Vp6Plain),
     (*b"VP61", VideoCodec::Vp6Plain),
     (*b"VP62", VideoCodec::Vp6Plain),
-];
-
-/// Builds the [`Tag`] one `INFO` chunk carries from its text.
-type InfoTagBuilder = fn(alloc::string::String) -> Tag;
-
-/// The `INFO` chunk ids g2g reads and the tag each carries.
-const INFO_TAGS: &[(FourCc, InfoTagBuilder)] = &[
-    (*b"INAM", Tag::Title),
-    (*b"IART", Tag::Artist),
-    (*b"IPRD", Tag::Album),
-    (*b"ISFT", Tag::Encoder),
-    (*b"ICMT", Tag::Comment),
 ];
 
 /// The elementary format a stream's `strf` describes, or `Unsupported` for a
@@ -476,24 +463,6 @@ fn parse_audio_format(strf: &[u8]) -> Option<(AviStreamKind, Vec<u8>)> {
         },
         extra,
     ))
-}
-
-/// The `LIST INFO` metadata as tags. Each body is a null-padded string.
-fn parse_info(data: &[u8], range: core::ops::Range<usize>) -> TagList {
-    let mut tags = TagList::new();
-    for chunk in chunks(data, range) {
-        let Some((_, build)) = INFO_TAGS.iter().find(|(id, _)| *id == chunk.id) else {
-            continue;
-        };
-        let body = chunk.body(data);
-        let text = core::str::from_utf8(body)
-            .unwrap_or_default()
-            .trim_end_matches('\0');
-        if !text.is_empty() {
-            tags.push(build(text.into()));
-        }
-    }
-    tags
 }
 
 /// Collect the data chunks of one `LIST movi`, descending into the `LIST rec `

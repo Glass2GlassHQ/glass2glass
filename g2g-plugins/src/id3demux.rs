@@ -24,11 +24,9 @@ use g2g_core::{
     G2gError, MemoryDomain, OutputSink, PipelinePacket, TagList,
 };
 
-use crate::id3::{id3v2_len, parse_id3v1, parse_id3v2, ID3V1_LEN, ID3V2_HEADER_LEN};
-
-/// The largest ID3v2 tag whose text frames are read, as in
-/// [`crate::mpegaudioparse`]: a tag past this is carrying artwork.
-const MAX_ID3V2_TAG_PARSED: usize = 1 << 20;
+use crate::id3::{
+    id3v2_len, parse_id3v1, parse_id3v2, ID3V1_LEN, ID3V2_HEADER_LEN, MAX_ID3V2_TAG_PARSED,
+};
 
 /// # Example
 ///

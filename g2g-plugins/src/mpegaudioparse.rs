@@ -51,11 +51,6 @@ use crate::id3::{id3v2_len, parse_id3v1, parse_id3v2, ID3V1_LEN, ID3V2_HEADER_LE
 use crate::pcmclip::within_presentation;
 use g2g_core::time::ticks_to_ns;
 
-/// The largest ID3v2 tag whose text frames are read. A tag is skipped whatever
-/// its size, but reading one means holding it whole, and a tag past this is
-/// carrying artwork rather than text.
-const MAX_ID3V2_TAG_PARSED: usize = 1 << 20;
-
 /// # Example
 ///
 /// ```no_run
@@ -152,7 +147,7 @@ impl MpegAudioParse {
         if self.id3v2_skip == 0 {
             return true;
         }
-        let readable = self.id3v2_skip <= MAX_ID3V2_TAG_PARSED;
+        let readable = self.id3v2_skip <= crate::id3::MAX_ID3V2_TAG_PARSED;
         if readable && self.buf.len() < self.id3v2_skip {
             return false; // the tags are read from the whole tag: wait for it
         }

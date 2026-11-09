@@ -12,6 +12,8 @@
 use alloc::vec::Vec;
 use core::ops::Range;
 
+use g2g_core::{Tag, TagList};
+
 /// A four-character code: a chunk id, a `LIST` form type, or a codec tag.
 pub(crate) type FourCc = [u8; 4];
 
@@ -56,6 +58,10 @@ pub(crate) fn read_u16(data: &[u8], at: usize) -> Option<u16> {
 
 pub(crate) fn read_u32(data: &[u8], at: usize) -> Option<u32> {
     Some(u32::from_le_bytes(data.get(at..at + 4)?.try_into().ok()?))
+}
+
+pub(crate) fn read_u64(data: &[u8], at: usize) -> Option<u64> {
+    Some(u64::from_le_bytes(data.get(at..at + 8)?.try_into().ok()?))
 }
 
 pub(crate) fn read_fourcc(data: &[u8], at: usize) -> Option<FourCc> {
@@ -159,6 +165,39 @@ impl Iterator for Chunks<'_> {
             body: header_end..body_end,
         })
     }
+}
+
+/// The `LIST` form type that holds text metadata.
+pub(crate) const INFO_FOURCC: FourCc = *b"INFO";
+
+/// Builds the [`Tag`] one `INFO` chunk carries from its text.
+type InfoTagBuilder = fn(alloc::string::String) -> Tag;
+
+/// The `INFO` chunk ids g2g reads and the tag each carries.
+const INFO_TAGS: &[(FourCc, InfoTagBuilder)] = &[
+    (*b"INAM", Tag::Title),
+    (*b"IART", Tag::Artist),
+    (*b"IPRD", Tag::Album),
+    (*b"ISFT", Tag::Encoder),
+    (*b"ICMT", Tag::Comment),
+];
+
+/// The `LIST INFO` metadata as tags. Each body is a null-padded string.
+pub(crate) fn parse_info(data: &[u8], range: core::ops::Range<usize>) -> TagList {
+    let mut tags = TagList::new();
+    for chunk in chunks(data, range) {
+        let Some((_, build)) = INFO_TAGS.iter().find(|(id, _)| *id == chunk.id) else {
+            continue;
+        };
+        let body = chunk.body(data);
+        let text = core::str::from_utf8(body)
+            .unwrap_or_default()
+            .trim_end_matches('\0');
+        if !text.is_empty() {
+            tags.push(build(text.into()));
+        }
+    }
+    tags
 }
 
 #[cfg(test)]

@@ -29,13 +29,14 @@ use g2g_core::{
     pcm_formats, AsyncElement, AudioFormat, BusHandle, BusMessage, ByteStreamEncoding, Caps,
     CapsConstraint, CapsSet, ChannelLayout, ConfigureOutcome, ElementMetadata, FrameTiming,
     G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError,
-    PropKind, PropValue, PropertySpec, ANY_CHANNELS, ANY_SAMPLE_RATE,
+    PropKind, PropValue, PropertySpec, TagList, ANY_CHANNELS, ANY_SAMPLE_RATE,
 };
 
 use crate::codectag::{audio_from_stream_name, audio_stream_name};
+use crate::id3::{parse_id3v2, MAX_ID3V2_TAG_PARSED};
 use crate::riff::{
-    chunks, padded_len, read_fourcc, read_u16, read_u32, CHUNK_HEADER_LEN, FOURCC_LEN, RIFF_FOURCC,
-    RIFF_HEADER_LEN,
+    chunks, padded_len, parse_info, read_fourcc, read_u16, read_u32, read_u64, FourCc,
+    CHUNK_HEADER_LEN, FOURCC_LEN, INFO_FOURCC, LIST_FOURCC, RIFF_FOURCC, RIFF_HEADER_LEN,
 };
 use crate::waveformat::{audio_format, sample_frame_len, tagged_audio};
 
@@ -198,11 +199,17 @@ pub enum WavStream {
     UnreadableTag(u16),
 }
 
+// RF64 (EBU Tech 3306) and BW64 (ITU-R BS.2088) are WAVE files whose 64-bit sizes sit in a `ds64` chunk
+const WAVE_FILE_IDS: [FourCc; 3] = [RIFF_FOURCC, *b"RF64", *b"BW64"];
+
+pub(crate) fn opens_wave_file(prefix: &[u8]) -> bool {
+    read_fourcc(prefix, 0).is_some_and(|id| WAVE_FILE_IDS.contains(&id))
+        && read_fourcc(prefix, CHUNK_HEADER_LEN) == Some(*b"WAVE")
+}
+
 // `None` for a prefix that is not RIFF/WAVE or ends before a whole `fmt ` chunk
 pub fn probe_stream(prefix: &[u8]) -> Option<WavStream> {
-    if read_fourcc(prefix, 0) != Some(RIFF_FOURCC)
-        || read_fourcc(prefix, CHUNK_HEADER_LEN) != Some(*b"WAVE")
-    {
+    if !opens_wave_file(prefix) {
         return None;
     }
     let fmt = chunks(prefix, RIFF_HEADER_LEN..prefix.len()).find(|chunk| &chunk.id == b"fmt ")?;
@@ -256,6 +263,12 @@ pub struct WavParse {
     chunk_bytes_to_skip: usize,
     // the `fact` chunk's dwSampleLength, the sample count of a coded payload
     fact_samples: Option<u32>,
+    // an RF64 / BW64 file's `ds64` data size
+    ds64_data_len: Option<u64>,
+    // the `data` chunk has ended, the chunks after it are read for tags
+    data_done: bool,
+    // the pad byte an odd-sized `data` chunk ends on
+    data_pad: usize,
     // bytes of the `data` chunk pushed so far, which time the next buffer
     data_offset: u64,
     emitted: u64,
@@ -319,6 +332,15 @@ impl WavParse {
         }
     }
 
+    fn post_tags(&self, tags: TagList) {
+        if let (Some(bus), false) = (&self.bus, tags.is_empty()) {
+            bus.try_post(BusMessage::Tag {
+                tags,
+                program: None,
+            });
+        }
+    }
+
     /// Read the RIFF header and the chunks ahead of `data`, then push everything
     /// buffered after it as samples.
     async fn drain(&mut self, out: &mut dyn OutputSink) -> Result<(), G2gError> {
@@ -326,14 +348,54 @@ impl WavParse {
             if self.buf.len() < RIFF_HEADER_LEN {
                 return Ok(());
             }
-            if read_fourcc(&self.buf, 0) != Some(RIFF_FOURCC)
-                || read_fourcc(&self.buf, CHUNK_HEADER_LEN) != Some(*b"WAVE")
-            {
+            if !opens_wave_file(&self.buf) {
                 return Err(G2gError::CapsMismatch);
             }
             self.buf.drain(..RIFF_HEADER_LEN);
             self.riff_seen = true;
         }
+        loop {
+            self.walk_chunks(out).await?;
+            if !self.in_data {
+                return Ok(());
+            }
+            let format = self.format.ok_or(G2gError::CapsMismatch)?;
+            // Coded payloads have no fixed frame width, a tagged codec decodes whole blocks.
+            let frame_len = match format.format {
+                AudioFormat::Tagged(_) => usize::from(format.block_align.max(1)),
+                _ => sample_frame_len(format.format, format.channels).unwrap_or(1),
+            };
+            if let Some(remaining) = self
+                .data_remaining
+                .filter(|remaining| *remaining < frame_len)
+            {
+                // past the end of the `data` chunk, the chunks after it can hold tags
+                self.in_data = false;
+                self.data_done = true;
+                self.chunk_bytes_to_skip = remaining + self.data_pad;
+                continue;
+            }
+            let available = self
+                .data_remaining
+                .map_or(self.buf.len(), |remaining| remaining.min(self.buf.len()));
+            let whole_frames = available - available % frame_len;
+            if whole_frames == 0 {
+                return Ok(());
+            }
+            let rest = self.buf.split_off(whole_frames);
+            let samples = core::mem::replace(&mut self.buf, rest);
+            if let Some(remaining) = &mut self.data_remaining {
+                *remaining -= whole_frames;
+            }
+            let start = self.data_offset;
+            self.data_offset = start.saturating_add(whole_frames as u64);
+            let timing = data_timing(start, self.data_offset, format.byte_rate);
+            self.push_frame(samples, timing, out).await?;
+        }
+    }
+
+    // Read the chunks ahead of the next sample bytes, up to the `data` header or the end of what has arrived.
+    async fn walk_chunks(&mut self, out: &mut dyn OutputSink) -> Result<(), G2gError> {
         while !self.in_data {
             let skipped = self.chunk_bytes_to_skip.min(self.buf.len());
             self.buf.drain(..skipped);
@@ -343,8 +405,38 @@ impl WavParse {
             }
             let id = read_fourcc(&self.buf, 0).ok_or(G2gError::CapsMismatch)?;
             let size = read_u32(&self.buf, FOURCC_LEN).ok_or(G2gError::CapsMismatch)? as usize;
+            // A chunk body is padded to an even length, and the size comes from
+            // the file: a chunk claiming more than the stream holds waits rather
+            // than indexing past the buffer.
+            let padded = padded_len(size).ok_or(G2gError::CapsMismatch)?;
+            let is_tag_chunk = matches!(&id, b"LIST" | b"id3 " | b"ID3 ");
+            if is_tag_chunk && size <= MAX_ID3V2_TAG_PARSED {
+                let total = padded
+                    .checked_add(CHUNK_HEADER_LEN)
+                    .ok_or(G2gError::CapsMismatch)?;
+                if self.buf.len() < total {
+                    return Ok(());
+                }
+                let tags = match chunks(&self.buf, 0..total).next() {
+                    Some(list) if list.id == LIST_FOURCC => match list.list_form(&self.buf) {
+                        Some(INFO_FOURCC) => parse_info(&self.buf, list.list_body()),
+                        _ => TagList::new(),
+                    },
+                    Some(id3) => parse_id3v2(id3.body(&self.buf)),
+                    None => TagList::new(),
+                };
+                self.post_tags(tags);
+                self.buf.drain(..total);
+                continue;
+            }
+            if self.data_done {
+                self.buf.drain(..CHUNK_HEADER_LEN);
+                self.chunk_bytes_to_skip = padded;
+                continue;
+            }
             if &id == b"data" {
                 self.buf.drain(..CHUNK_HEADER_LEN);
+                self.data_pad = size % 2;
                 let format = self.format.ok_or(G2gError::CapsMismatch)?;
                 if self
                     .stream_format
@@ -352,6 +444,12 @@ impl WavParse {
                 {
                     return Err(G2gError::CapsMismatch);
                 }
+                let size = match (size, self.ds64_data_len) {
+                    (UNKNOWN_DATA_LEN, Some(len)) => {
+                        usize::try_from(len).map_err(|_| G2gError::CapsMismatch)?
+                    }
+                    _ => size,
+                };
                 self.post_duration(size, format);
                 // gst wavparse reads a zero-length data chunk to the end of the file
                 self.data_remaining = (size != UNKNOWN_DATA_LEN && size != 0).then_some(size);
@@ -363,10 +461,20 @@ impl WavParse {
                 self.in_data = true;
                 break;
             }
-            // A chunk body is padded to an even length, and the size comes from
-            // the file: a chunk claiming more than the stream holds waits rather
-            // than indexing past the buffer.
-            let padded = padded_len(size).ok_or(G2gError::CapsMismatch)?;
+            if &id == b"ds64" {
+                // riffSize, then the 64-bit dataSize a `data` chunk sized 0xFFFFFFFF stands for
+                const DATA_SIZE_AT: usize = CHUNK_HEADER_LEN + 8;
+                const DATA_SIZE_LEN: usize = 8;
+                if size >= DATA_SIZE_AT - CHUNK_HEADER_LEN + DATA_SIZE_LEN {
+                    if self.buf.len() < DATA_SIZE_AT + DATA_SIZE_LEN {
+                        return Ok(());
+                    }
+                    self.ds64_data_len = read_u64(&self.buf, DATA_SIZE_AT);
+                }
+                self.buf.drain(..CHUNK_HEADER_LEN);
+                self.chunk_bytes_to_skip = padded;
+                continue;
+            }
             if &id == b"fact" {
                 const SAMPLE_LENGTH_LEN: usize = 4;
                 if size >= SAMPLE_LENGTH_LEN {
@@ -402,36 +510,7 @@ impl WavParse {
                 .copy_from_slice(&format.block_align.to_le_bytes());
             self.buf.drain(..total);
         }
-        let format = self.format.ok_or(G2gError::CapsMismatch)?;
-        // Coded payloads have no fixed frame width, a tagged codec decodes whole blocks.
-        let frame_len = match format.format {
-            AudioFormat::Tagged(_) => usize::from(format.block_align.max(1)),
-            _ => sample_frame_len(format.format, format.channels).unwrap_or(1),
-        };
-        if self
-            .data_remaining
-            .is_some_and(|remaining| remaining < frame_len)
-        {
-            // Past the end of the `data` chunk.
-            self.buf.clear();
-            return Ok(());
-        }
-        let available = self
-            .data_remaining
-            .map_or(self.buf.len(), |remaining| remaining.min(self.buf.len()));
-        let whole_frames = available - available % frame_len;
-        if whole_frames == 0 {
-            return Ok(());
-        }
-        let rest = self.buf.split_off(whole_frames);
-        let samples = core::mem::replace(&mut self.buf, rest);
-        if let Some(remaining) = &mut self.data_remaining {
-            *remaining -= whole_frames;
-        }
-        let start = self.data_offset;
-        self.data_offset = start.saturating_add(whole_frames as u64);
-        let timing = data_timing(start, self.data_offset, format.byte_rate);
-        self.push_frame(samples, timing, out).await
+        Ok(())
     }
 
     async fn push_frame(
@@ -486,6 +565,10 @@ impl AsyncElement for WavParse {
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
         Self: 'a;
+
+    fn set_bus(&mut self, bus: BusHandle) {
+        self.bus = Some(bus);
+    }
 
     fn metadata(&self) -> ElementMetadata {
         ElementMetadata::new(
@@ -601,7 +684,7 @@ impl AsyncElement for WavParse {
                 PipelinePacket::Eos => {
                     self.drain(out).await?;
                     // gst wavparse fails a file that ends before its `data` chunk
-                    if !self.in_data {
+                    if !self.in_data && !self.data_done {
                         return Err(G2gError::CapsMismatch);
                     }
                 }
@@ -739,6 +822,84 @@ mod tests {
             Some(BusMessage::DurationChanged {
                 duration_ns: 2 * NANOS_PER_SECOND
             })
+        );
+    }
+
+    #[tokio::test]
+    async fn an_rf64_file_reads_its_data_size_from_ds64() {
+        const SAMPLES_BYTES: usize = 4 * FRAME_LEN as usize;
+        let mut ds64 = Vec::new();
+        ds64.extend_from_slice(&0u64.to_le_bytes()); // riffSize
+        ds64.extend_from_slice(&(SAMPLES_BYTES as u64).to_le_bytes()); // dataSize
+        ds64.extend_from_slice(&4u64.to_le_bytes()); // sampleCount
+        ds64.extend_from_slice(&0u32.to_le_bytes()); // tableLength
+        let mut file = chunk(b"RF64", u32::MAX, b"WAVE");
+        file.extend(chunk(b"ds64", ds64.len() as u32, &ds64));
+        file.extend(pcm_fmt(BYTE_RATE));
+        file.extend(chunk(b"data", u32::MAX, &[0; SAMPLES_BYTES]));
+        file.extend(chunk(b"LIST", 4, b"INFO"));
+        assert_eq!(
+            crate::typefind::sniff(&file),
+            Some(ByteStreamEncoding::Wav),
+            "RF64 types as WAV"
+        );
+
+        let mut parse = parser();
+        let mut out = CollectSink::default();
+        push(&mut parse, file, &mut out).await;
+        assert_eq!(
+            data_frames(&out),
+            [(0, SAMPLES_BYTES)],
+            "the LIST chunk is not samples"
+        );
+    }
+
+    #[tokio::test]
+    async fn info_and_id3_chunks_on_either_side_of_data_post_tags() {
+        const SAMPLES_BYTES: usize = 4 * FRAME_LEN as usize;
+        let mut info = b"INFO".to_vec();
+        info.extend(chunk(b"INAM", 6, b"Title\0"));
+        let id3 = crate::id3::write_id3v2(
+            &TagList::from_iter([g2g_core::Tag::Artist("Someone".into())]),
+            crate::id3::ID3V2_VERSION_2_4,
+        );
+        let mut file = riff_header();
+        file.extend(pcm_fmt(BYTE_RATE));
+        file.extend(chunk(b"LIST", info.len() as u32, &info));
+        // an odd-sized data chunk, so a pad byte sits ahead of the trailing tag chunk
+        file.extend(chunk(
+            b"data",
+            SAMPLES_BYTES as u32 + 1,
+            &[0; SAMPLES_BYTES + 1],
+        ));
+        file.push(0);
+        file.extend(chunk(b"id3 ", id3.len() as u32, &id3));
+        if id3.len() % 2 == 1 {
+            file.push(0);
+        }
+
+        let (bus, handle) = g2g_core::Bus::new(8);
+        let mut parse = parser().with_bus(handle);
+        let mut out = CollectSink::default();
+        push(&mut parse, file, &mut out).await;
+        parse
+            .process(PipelinePacket::Eos, &mut out)
+            .await
+            .expect("a file whose data is followed by tags is whole");
+        assert_eq!(data_frames(&out), [(0, SAMPLES_BYTES)]);
+        let tags: Vec<g2g_core::Tag> = core::iter::from_fn(|| bus.try_recv())
+            .filter_map(|message| match message {
+                BusMessage::Tag { tags, .. } => Some(tags.tags().to_vec()),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        assert_eq!(
+            tags,
+            [
+                g2g_core::Tag::Title("Title".into()),
+                g2g_core::Tag::Artist("Someone".into())
+            ]
         );
     }
 
