@@ -283,7 +283,6 @@ impl RtspResponder {
                 (self.respond(req.cseq, "200 OK", &[], b""), RtspEvent::None)
             }
             "SETUP" => {
-                self.state = State::Ready;
                 // RFC 2326 §12.37: the timeout param tells the client how often to
                 // keepalive (GET_PARAMETER / OPTIONS / RTCP) before it is reaped.
                 let session = format!("{};timeout={}", self.session_id, self.timeout_secs);
@@ -292,6 +291,7 @@ impl RtspResponder {
                 if let Some((rtp_ch, rtcp_ch)) =
                     req.transport.as_deref().and_then(parse_interleaved_channels)
                 {
+                    self.state = State::Ready;
                     self.interleaved = Some((rtp_ch, rtcp_ch));
                     let transport = format!(
                         "RTP/AVP/TCP;unicast;interleaved={rtp_ch}-{rtcp_ch};ssrc={:08X}",
@@ -308,13 +308,21 @@ impl RtspResponder {
                         RtspEvent::SetupInterleaved { rtp_channel: rtp_ch, rtcp_channel: rtcp_ch },
                     );
                 }
-                self.client_rtp_port = req.transport
+                let Some(port) = req.transport
                     .as_deref()
-                    .and_then(|t| parse_rtp_port(t, "client_port="));
+                    .and_then(|t| parse_rtp_port(t, "client_port="))
+                else {
+                    return (
+                        self.respond(req.cseq, "461 Unsupported transport", &[], b""),
+                        RtspEvent::None,
+                    );
+                };
+                self.state = State::Ready;
+                self.client_rtp_port = Some(port);
                 let transport = format!(
                     "RTP/AVP;unicast;client_port={}-{};server_port={}-{};ssrc={:08X}",
-                    self.client_rtp_port.unwrap_or(0),
-                    self.client_rtp_port.map(|p| p.saturating_add(1)).unwrap_or(0),
+                    port,
+                    port.saturating_add(1),
                     self.server_rtp_port,
                     self.server_rtp_port.saturating_add(1),
                     self.ssrc,
@@ -325,15 +333,13 @@ impl RtspResponder {
                     &[("Transport", &transport), ("Session", &session)],
                     b"",
                 );
-                match self.client_rtp_port {
-                    Some(port) => (resp, RtspEvent::Setup { client_rtp_port: port }),
-                    None => (resp, RtspEvent::None),
-                }
+                (resp, RtspEvent::Setup { client_rtp_port: port })
             }
             "PLAY" => {
                 self.state = State::Playing;
                 let session = self.session_id.clone();
-                let rtp_info = format!("url={};seq=0;rtptime=0", req.uri);
+                // the first packet's rtptime is the next access unit's, unknown until it arrives
+                let rtp_info = format!("url={};seq=0", req.uri);
                 (
                     self.respond(
                         req.cseq,
@@ -573,6 +579,21 @@ mod tests {
         assert!(text.starts_with("RTSP/1.0 200 OK\r\n"));
         // The client RTCP port saturates instead of wrapping past u16.
         assert!(text.contains("client_port=65535-65535"), "{text}");
+    }
+
+    #[test]
+    fn setup_without_a_usable_client_port_is_refused() {
+        for transport in ["RTP/AVP;unicast;client_port=x-y", "RTP/AVP;unicast"] {
+            let mut s = responder();
+            let req = request(&format!(
+                "SETUP rtsp://h/s RTSP/1.0\r\nCSeq: 2\r\nTransport: {transport}\r\n\r\n"
+            ));
+            let (resp, event) = s.handle_request(&req);
+            let text = core::str::from_utf8(&resp).unwrap();
+            assert!(text.starts_with("RTSP/1.0 461 "), "{transport}: {text}");
+            assert_eq!(event, RtspEvent::None);
+            assert_eq!(s.client_rtp_port(), None);
+        }
     }
 
     #[test]

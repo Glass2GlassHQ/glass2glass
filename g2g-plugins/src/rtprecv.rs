@@ -420,10 +420,12 @@ pub(crate) async fn receive_rtp(
 
         // RTCP (muxed) feedback from the sender: a sender report fills the
         // LSR/DLSR fields for round-trip estimation.
-        if rtcp_on && rtcp::is_rtcp(payload) {
-            for p in rtcp::parse_compound(payload) {
-                if let RtcpPacket::SenderReport { ntp, .. } = p {
-                    stats.on_sender_report(ntp, now);
+        if rtcp::is_rtcp(payload) {
+            if rtcp_on {
+                for p in rtcp::parse_compound(payload) {
+                    if let RtcpPacket::SenderReport { ntp, .. } = p {
+                        stats.on_sender_report(ntp, now);
+                    }
                 }
             }
             continue;
@@ -471,10 +473,11 @@ pub(crate) async fn receive_rtp(
             let media_ssrc = u32::from_be_bytes([pkt[8], pkt[9], pkt[10], pkt[11]]);
             let pkt_seq = u16::from_be_bytes([pkt[2], pkt[3]]);
             let rtp_ts = u32::from_be_bytes([pkt[4], pkt[5], pkt[6], pkt[7]]);
+            // RFC 4588 counts a resend in the RTX stream's reception stats, not the original's
             if !is_rtx {
                 media_ssrc_seen = Some(media_ssrc);
+                stats.on_rtp(media_ssrc, pkt_seq, rtp_ts, now);
             }
-            stats.on_rtp(media_ssrc, pkt_seq, rtp_ts, now);
             peer = Some(from);
             jitter.push(pkt, now);
             // Record the packet for FEC and inject anything its arrival now lets
