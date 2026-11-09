@@ -1028,6 +1028,21 @@ fn tee_fanout(
 /// wander.
 const DECODEBIN_MAX_DEPTH: usize = 6;
 
+fn decode_chain(
+    registry: &Registry,
+    input: &Caps,
+    target: &dyn Fn(&Caps) -> bool,
+    preferred: MemoryDomainKind,
+    avoided: &[&str],
+) -> Option<Vec<Box<dyn DynAsyncElement>>> {
+    let mut chain =
+        registry.autoplug_avoiding(input, target, DECODEBIN_MAX_DEPTH, preferred, avoided)?;
+    // M421/M676: the caps-identity parser is invisible to the shortest-chain
+    // search, so it never appears in the chain.
+    registry.maybe_prepend_parser(input, &mut chain);
+    Some(chain)
+}
+
 /// The decode chain to raw for `input`, decoding into `preferred` (the memory
 /// the element right after the macro takes) and into caps `consumer` accepts.
 ///
@@ -1070,13 +1085,7 @@ fn autoplug_for_consumer(
     } else {
         &raw
     };
-    let mut chain = registry
-        .autoplug_avoiding(input, target, DECODEBIN_MAX_DEPTH, preferred, avoided)
-        .ok_or_else(no_decode_chain)?;
-    // M421/M676: the caps-identity parser is invisible to the shortest-chain
-    // search, so it never appears in the chain.
-    registry.maybe_prepend_parser(input, &mut chain);
-    Ok(chain)
+    decode_chain(registry, input, target, preferred, avoided).ok_or_else(no_decode_chain)
 }
 
 // the one media kind a consumer takes, `None` when it takes both or its constraint does not say
@@ -2813,7 +2822,7 @@ fn expand_fallbacksrc(
     let video_target: &dyn Fn(&Caps) -> bool = &is_raw_video;
     let audio_target: &dyn Fn(&Caps) -> bool = &is_raw_audio;
     let plug = |caps: &Caps, target: &dyn Fn(&Caps) -> bool| {
-        registry.autoplug_avoiding(caps, target, DECODEBIN_MAX_DEPTH, preferred, avoided)
+        decode_chain(registry, caps, target, preferred, avoided)
     };
     let video = enable_video
         .then(|| plug(source_caps, video_target))
@@ -3012,8 +3021,7 @@ fn expand_uri_sources(
             let needs_convert = sink.is_some() && decodes_video_to_sink && sink_target.is_none();
             let any_raw = |c: &Caps| is_raw_video(c) || is_raw_audio(c);
             let target = sink_target.as_deref().unwrap_or(&any_raw);
-            let decoders = registry
-                .autoplug_avoiding(&caps, target, DECODEBIN_MAX_DEPTH, preferred, avoided)
+            let decoders = decode_chain(registry, &caps, target, preferred, avoided)
                 .ok_or_else(|| ParseError::no_decode_chain(&caps))?;
             new_chain.push(Item::Prebuilt {
                 node: PrebuiltNode::Source(built.source),

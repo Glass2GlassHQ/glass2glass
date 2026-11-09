@@ -2614,7 +2614,10 @@ pub fn audio_playbin(
         return Ok(Some(graph));
     }
     // An elementary audio type by content (`fLaC`, M774): decode off the source.
-    let caps = match crate::typefind::sniff_caps(&prefix) {
+    let caps = match read_sniff_window(&path)
+        .as_deref()
+        .and_then(crate::typefind::sniff_caps)
+    {
         Some(caps @ Caps::Audio { .. }) => caps,
         _ => return Ok(None),
     };

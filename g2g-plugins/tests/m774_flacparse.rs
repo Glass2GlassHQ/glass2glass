@@ -205,6 +205,36 @@ async fn launch_line_types_flac_and_parses() {
     );
 }
 
+// uridecodebin splices flacparse ahead of the decoder, which decodes nothing from raw file chunks
+#[cfg(feature = "ffmpeg")]
+#[tokio::test]
+async fn uridecodebin_decodes_a_flac_file() {
+    let Some((flac, expected)) = encode_flac("uridecodebin") else {
+        eprintln!("skipping: no ffmpeg");
+        return;
+    };
+    let path = std::env::temp_dir().join(format!("g2g-m774-uri-{}.flac", std::process::id()));
+    std::fs::write(&path, &flac).unwrap();
+    struct ZeroClock;
+    impl g2g_core::PipelineClock for ZeroClock {
+        fn now_ns(&self) -> u64 {
+            0
+        }
+    }
+    let reg = g2g_plugins::registry::default_registry();
+    let line = format!("uridecodebin uri=file://{} ! fakesink", path.display());
+    let graph = g2g_core::runtime::parse_launch(&reg, &line).expect("launch line parses");
+    let stats = g2g_core::runtime::run_graph(graph, &ZeroClock, 4)
+        .await
+        .expect("pipeline runs");
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(
+        stats.frames_consumed,
+        expected.len() as u64,
+        "one decoded buffer per FLAC frame"
+    );
+}
+
 const SYNTH_RATE: u64 = 44_100;
 const SYNTH_BLOCK: usize = 16;
 // block size code 6 (8-bit size after the number), rate code 9 (44.1 kHz)

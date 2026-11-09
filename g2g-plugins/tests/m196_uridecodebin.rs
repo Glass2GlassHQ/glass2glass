@@ -55,11 +55,15 @@ fn registry_with_h264_stub() -> Registry {
 #[test]
 fn uridecodebin_expands_source_and_decode_chain() {
     let reg = registry_with_h264_stub();
-    // Mp4Src (from file://) -> h264stub -> fakesink: the source + decoder are
-    // spliced in as pre-built nodes, leaving two edges.
+    // Mp4Src (from file://) -> h264parse -> h264stub -> fakesink: the source,
+    // parser and decoder are spliced in as pre-built nodes, leaving three edges.
     let line = &format!("uridecodebin uri={} ! fakesink", h264_mp4_uri());
     let graph = parse_launch(&reg, line).unwrap_or_else(|e| panic!("{line:?} parse: {e}"));
-    assert_eq!(graph.edges().len(), 2, "source -> decoder -> sink");
+    assert_eq!(
+        graph.edges().len(),
+        3,
+        "source -> parser -> decoder -> sink"
+    );
 }
 
 #[test]
@@ -71,8 +75,8 @@ fn uridecodebin_feeds_a_custom_chain() {
         h264_mp4_uri()
     );
     let graph = parse_launch(&reg, line).unwrap_or_else(|e| panic!("{line:?} parse: {e}"));
-    // Mp4Src -> h264stub -> videoconvert -> fakesink = three edges.
-    assert_eq!(graph.edges().len(), 3, "{line}");
+    // Mp4Src -> h264parse -> h264stub -> videoconvert -> fakesink = four edges.
+    assert_eq!(graph.edges().len(), 4, "{line}");
 }
 
 #[test]
