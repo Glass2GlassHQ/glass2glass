@@ -75,6 +75,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M2159: coded WAV payloads take their duration from the `fact` sample count, AIFF skips large chunks before `SSND` and drops trailing ones, and FLV reads enhanced MP3 tags' layout and muxes 8 kHz MP3 as sound format 14.
 - M2160: ST 2110-20 and JPEG XS receivers drop a frame that lost a packet instead of merging or truncating it, and the KLV depayloader skips a unit it joins midway.
 - M2161: the RTP receiver drops muxed RTCP with reports off and leaves RTX resends out of its receiver reports, and the RTSP server refuses a SETUP without a usable client port and omits an RTP-Info `rtptime` it does not know.
+- M2162: SDP `rtpmap` / `fmtp` lines apply only to their own payload type, static PCMU / PCMA need none, ST 2110 `fmtp` tolerates bare flags, and RTSP digest auth reads quoted commas and answers `qop=auth`.
 
 ## 0.14.0
 

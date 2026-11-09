@@ -119,9 +119,13 @@ fn scan_one(lines: &[&str]) -> Option<SdpSection> {
         if let Some(c) = line.strip_prefix("c=IN IP4 ") {
             section.address = c.split('/').next().map(|a| a.to_string());
         } else if let Some(a) = line.strip_prefix("a=rtpmap:") {
-            section.rtpmap = after_pt(a).map(|s| s.to_string());
+            if let Some(rtpmap) = for_payload_type(a, payload_type) {
+                section.rtpmap = Some(rtpmap.to_string());
+            }
         } else if let Some(a) = line.strip_prefix("a=fmtp:") {
-            section.fmtp = after_pt(a).map(|s| s.to_string());
+            if let Some(fmtp) = for_payload_type(a, payload_type) {
+                section.fmtp = Some(fmtp.to_string());
+            }
         } else if let Some(a) = line.strip_prefix("a=ptime:") {
             section.ptime_us = parse_ptime_us(a);
         } else if let Some(a) = line.strip_prefix("a=framerate:") {
@@ -132,12 +136,23 @@ fn scan_one(lines: &[&str]) -> Option<SdpSection> {
             section.extmap.extend(parse_extmap(a));
         }
     }
+    if section.rtpmap.is_none() {
+        section.rtpmap = STATIC_PAYLOAD_TYPES
+            .iter()
+            .find(|(static_type, _)| *static_type == payload_type)
+            .map(|(_, rtpmap)| rtpmap.to_string());
+    }
     Some(section)
 }
 
-/// Drop the leading `<pt> ` from an `a=rtpmap:` / `a=fmtp:` value.
-fn after_pt(s: &str) -> Option<&str> {
-    s.split_once(' ').map(|(_, rest)| rest)
+// the RFC 3551 static payload types g2g has caps for, which need no `a=rtpmap`
+const STATIC_PAYLOAD_TYPES: [(u8, &str); 2] = [(0, "PCMU/8000/1"), (8, "PCMA/8000/1")];
+
+/// The text after `<pt> ` of an `a=rtpmap:` / `a=fmtp:` value, when `<pt>` is
+/// `payload_type`.
+fn for_payload_type(s: &str, payload_type: u8) -> Option<&str> {
+    let (pt, rest) = s.split_once(' ')?;
+    (pt.parse::<u8>().ok()? == payload_type).then_some(rest)
 }
 
 // `<id>[/<direction>] <uri> [<attributes>]`, RFC 8285 section 5
@@ -569,6 +584,33 @@ mod tests {
         assert_eq!(sections.len(), 1);
         assert_eq!(sections[0].port, 5006);
         assert_eq!(sections[0].payload_type, 111);
+    }
+
+    #[test]
+    fn rtpmap_and_fmtp_lines_for_another_payload_type_are_ignored() {
+        let text = "v=0\r\n\
+            m=audio 5006 RTP/AVP 111\r\n\
+            a=rtpmap:96 H264/90000\r\n\
+            a=rtpmap:111 opus/48000/2\r\n\
+            a=fmtp:111 useinbandfec=1\r\n\
+            a=fmtp:96 packetization-mode=1\r\n";
+        let sections = scan_sections(text);
+        assert_eq!(sections[0].rtpmap.as_deref(), Some("opus/48000/2"));
+        assert_eq!(sections[0].fmtp.as_deref(), Some("useinbandfec=1"));
+    }
+
+    #[test]
+    fn a_static_payload_type_needs_no_rtpmap() {
+        let media = SdpMedia::parse("v=0\r\nm=audio 5004 RTP/AVP 8\r\n").expect("PCMA");
+        assert_eq!(
+            media.caps,
+            Caps::Audio {
+                format: AudioFormat::Alaw,
+                channels: 1,
+                sample_rate: 8_000,
+                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
+            }
+        );
     }
 
     #[test]

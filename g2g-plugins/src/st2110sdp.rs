@@ -331,8 +331,14 @@ fn parse_video_fmtp(params: &str) -> Option<(Sampling, u32, u32, (u32, u32))> {
     let mut height = None;
     let mut depth = None;
     let mut fps = (30u32, 1u32);
-    for kv in params.split(';') {
-        let (k, v) = kv.split_once('=')?;
+    for kv in params.split(';').map(str::trim).filter(|kv| !kv.is_empty()) {
+        let Some((k, v)) = kv.split_once('=') else {
+            // ST 2110-20 bare flags, of which this reads only progressive frames
+            if matches!(kv, "interlace" | "segmented") {
+                return None;
+            }
+            continue;
+        };
         let (k, v) = (k.trim(), v.trim());
         match k {
             "sampling" => sampling_name = Some(v.to_string()),
@@ -616,6 +622,35 @@ mod tests {
                 height: 1080,
                 exact_fps: (25, 1),
             }
+        );
+    }
+
+    #[test]
+    fn fmtp_bare_flags_and_a_trailing_separator_are_tolerated() {
+        let fmtp = |params: &str| {
+            alloc::format!(
+                "m=video 5000 RTP/AVP 96\r\na=rtpmap:96 raw/90000\r\n\
+                 a=fmtp:96 sampling=YCbCr-4:2:2; width=8; height=8; depth=10; {params}\r\n"
+            )
+        };
+        let parsed =
+            St2110Sdp::parse(&fmtp("exactframerate=25; RANGE=NARROW; ")).expect("trailing `; `");
+        assert!(matches!(
+            parsed.essence,
+            St2110Essence::Video {
+                width: 8,
+                height: 8,
+                exact_fps: (25, 1),
+                ..
+            }
+        ));
+        assert!(
+            St2110Sdp::parse(&fmtp("vendor-flag")).is_some(),
+            "unknown bare flag"
+        );
+        assert!(
+            St2110Sdp::parse(&fmtp("interlace")).is_none(),
+            "fields are not read"
         );
     }
 

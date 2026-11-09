@@ -195,6 +195,8 @@ enum Challenge {
         realm: String,
         nonce: String,
         opaque: Option<String>,
+        // the server offered `qop=auth`, so the answer carries a client nonce and count
+        qop_auth: bool,
     },
 }
 
@@ -211,35 +213,60 @@ impl Challenge {
         if !md5 {
             return None;
         }
+        let qop = auth_param(params, "qop");
+        let qop_auth = qop.is_some_and(|qop| qop.split(',').any(|q| q.trim() == "auth"));
+        // only auth-int on offer, which hashes the body
+        if qop.is_some() && !qop_auth {
+            return None;
+        }
         Some(Challenge::Digest {
             realm: auth_param(params, "realm")?.to_string(),
             nonce: auth_param(params, "nonce")?.to_string(),
             opaque: auth_param(params, "opaque").map(str::to_string),
+            qop_auth,
         })
     }
 
-    fn authorization(&self, credentials: &Credentials, method: &str, uri: &str) -> String {
+    fn authorization(
+        &self,
+        credentials: &Credentials,
+        method: &str,
+        uri: &str,
+        client_nonce: &str,
+        nonce_count: u32,
+    ) -> String {
         match self {
             Challenge::Basic => {
                 let pair = format!("{}:{}", credentials.user, credentials.password);
                 format!("Basic {}", base64_encode(pair.as_bytes()))
             }
-            // RFC 2617 §3.2.2 without qop: MD5(MD5(user:realm:password):nonce:MD5(method:uri))
+            // RFC 2617 §3.2.2: MD5(MD5(user:realm:password):nonce[:nc:cnonce:qop]:MD5(method:uri))
             Challenge::Digest {
                 realm,
                 nonce,
                 opaque,
+                qop_auth,
             } => {
                 let user_hash = md5_hex(&format!(
                     "{}:{realm}:{}",
                     credentials.user, credentials.password
                 ));
                 let request_hash = md5_hex(&format!("{method}:{uri}"));
-                let response = md5_hex(&format!("{user_hash}:{nonce}:{request_hash}"));
+                let nc = format!("{nonce_count:08x}");
+                let response = if *qop_auth {
+                    md5_hex(&format!(
+                        "{user_hash}:{nonce}:{nc}:{client_nonce}:auth:{request_hash}"
+                    ))
+                } else {
+                    md5_hex(&format!("{user_hash}:{nonce}:{request_hash}"))
+                };
                 let mut header = format!(
                     "Digest username=\"{}\", realm=\"{realm}\", nonce=\"{nonce}\", uri=\"{uri}\", response=\"{response}\"",
                     credentials.user
                 );
+                if *qop_auth {
+                    header.push_str(&format!(", qop=auth, nc={nc}, cnonce=\"{client_nonce}\""));
+                }
                 if let Some(opaque) = opaque {
                     header.push_str(&format!(", opaque=\"{opaque}\""));
                 }
@@ -255,12 +282,34 @@ fn md5_hex(text: &str) -> String {
 
 // one `key=value` or `key="value"` parameter of a WWW-Authenticate header
 fn auth_param<'a>(params: &'a str, key: &str) -> Option<&'a str> {
-    params.split(',').find_map(|param| {
-        let (k, v) = param.split_once('=')?;
-        k.trim()
-            .eq_ignore_ascii_case(key)
-            .then(|| v.trim().trim_matches('"'))
-    })
+    let mut rest = params;
+    loop {
+        let (name, after) = rest.split_once('=')?;
+        let after = after.trim_start();
+        // a quoted value can hold commas, and a backslash escapes the next character
+        let (value, next) = match after.strip_prefix('"') {
+            Some(quoted) => {
+                let mut escaped = false;
+                let end = quoted.char_indices().find_map(|(at, c)| {
+                    let closes = c == '"' && !escaped;
+                    escaped = c == '\\' && !escaped;
+                    closes.then_some(at)
+                })?;
+                let tail = &quoted[end + 1..];
+                (
+                    &quoted[..end],
+                    tail.split_once(',').map_or("", |(_, next)| next),
+                )
+            }
+            None => after
+                .split_once(',')
+                .map_or((after.trim(), ""), |(value, next)| (value.trim(), next)),
+        };
+        if name.trim().eq_ignore_ascii_case(key) {
+            return Some(value);
+        }
+        rest = next;
+    }
 }
 
 // the request side of one publishing connection: CSeq numbering, the session id and the authorization answer
@@ -269,6 +318,8 @@ pub struct RtspPublishRequests {
     user_agent: String,
     credentials: Option<Credentials>,
     challenge: Option<Challenge>,
+    client_nonce: String,
+    nonce_count: u32,
     last_cseq: u32,
     session: Option<String>,
     session_timeout_s: u64,
@@ -280,6 +331,8 @@ impl RtspPublishRequests {
             user_agent,
             credentials,
             challenge: None,
+            client_nonce: String::new(),
+            nonce_count: 0,
             last_cseq: 0,
             session: None,
             session_timeout_s: u64::from(DEFAULT_SESSION_TIMEOUT_SECS),
@@ -300,9 +353,16 @@ impl RtspPublishRequests {
             out.push_str(&format!("Session: {session}\r\n"));
         }
         if let (Some(challenge), Some(credentials)) = (&self.challenge, &self.credentials) {
+            self.nonce_count += 1;
             out.push_str(&format!(
                 "Authorization: {}\r\n",
-                challenge.authorization(credentials, method, uri)
+                challenge.authorization(
+                    credentials,
+                    method,
+                    uri,
+                    &self.client_nonce,
+                    self.nonce_count
+                )
             ));
         }
         for (key, value) in headers {
@@ -332,8 +392,12 @@ impl RtspPublishRequests {
         Ok(())
     }
 
-    // takes the challenge of a 401 so the resent request carries an Authorization
-    pub fn answer_challenge(&mut self, response: &RtspResponse) -> Result<(), RtspClientError> {
+    // takes the challenge of a 401 so the resent request carries an Authorization, `client_nonce` answering a qop challenge
+    pub fn answer_challenge(
+        &mut self,
+        response: &RtspResponse,
+        client_nonce: String,
+    ) -> Result<(), RtspClientError> {
         if self.credentials.is_none() {
             return Err(RtspClientError::CredentialsNeeded);
         }
@@ -349,6 +413,8 @@ impl RtspPublishRequests {
             .or(challenges.first())
             .ok_or(RtspClientError::UnsupportedChallenge)?;
         self.challenge = Some(chosen.clone());
+        self.client_nonce = client_nonce;
+        self.nonce_count = 0;
         Ok(())
     }
 
@@ -480,7 +546,7 @@ mod tests {
             "RTSP/1.0 401 Unauthorized\r\nCSeq: 1\r\nWWW-Authenticate: Basic realm=\"{realm}\"\r\nWWW-Authenticate: Digest realm=\"{realm}\", nonce=\"{nonce}\"\r\n\r\n"
         ));
         requests
-            .answer_challenge(&challenge)
+            .answer_challenge(&challenge, String::new())
             .expect("digest offered");
         let request = String::from_utf8(requests.request("GET", uri, &[], b"")).unwrap();
         let user_hash = md5_hex(&format!("Mufasa:{realm}:Circle Of Life"));
@@ -491,6 +557,41 @@ mod tests {
             "{request}"
         );
         assert!(request.contains("Authorization: Digest username=\"Mufasa\""));
+    }
+
+    // RFC 2617 §3.5 with qop=auth, its response value given in the RFC
+    #[test]
+    fn digest_qop_answer_matches_the_rfc_2617_example() {
+        const RFC_RESPONSE: &str = "6629fae49393a05397450978507c4ef1";
+        let mut requests = RtspPublishRequests::new("g2g".to_string(), Some(credentials()));
+        let challenge = response(
+            "RTSP/1.0 401 Unauthorized\r\nCSeq: 1\r\nWWW-Authenticate: Digest \
+             realm=\"testrealm@host.com\", qop=\"auth,auth-int\", \
+             nonce=\"dcd98b7102dd2f0e8b11d0f600bfb0c093\", \
+             opaque=\"5ccc069c403ebaf9f0171e9517f40e41\"\r\n\r\n",
+        );
+        requests
+            .answer_challenge(&challenge, "0a4f113b".to_string())
+            .expect("digest offered");
+        let request =
+            String::from_utf8(requests.request("GET", "/dir/index.html", &[], b"")).unwrap();
+        assert!(
+            request.contains(&format!("response=\"{RFC_RESPONSE}\"")),
+            "{request}"
+        );
+        assert!(request.contains("qop=auth, nc=00000001, cnonce=\"0a4f113b\""));
+        let second =
+            String::from_utf8(requests.request("GET", "/dir/index.html", &[], b"")).unwrap();
+        assert!(second.contains("nc=00000002"), "{second}");
+    }
+
+    #[test]
+    fn quoted_auth_params_keep_their_commas() {
+        let params = r#"realm="a, b", nonce="n\"x", stale=FALSE"#;
+        assert_eq!(auth_param(params, "realm"), Some("a, b"));
+        assert_eq!(auth_param(params, "nonce"), Some(r#"n\"x"#));
+        assert_eq!(auth_param(params, "stale"), Some("FALSE"));
+        assert_eq!(auth_param(params, "opaque"), None);
     }
 
     #[test]
@@ -506,7 +607,7 @@ mod tests {
             "RTSP/1.0 401 Unauthorized\r\nCSeq: 1\r\nWWW-Authenticate: Basic realm=\"x\"\r\n\r\n",
         );
         requests
-            .answer_challenge(&challenge)
+            .answer_challenge(&challenge, String::new())
             .expect("basic offered");
         let request =
             String::from_utf8(requests.request("ANNOUNCE", "rtsp://h/s", &[], b"")).unwrap();
@@ -525,7 +626,7 @@ mod tests {
         );
         let mut anonymous = RtspPublishRequests::new("g2g".to_string(), None);
         assert_eq!(
-            anonymous.answer_challenge(&challenge),
+            anonymous.answer_challenge(&challenge, String::new()),
             Err(RtspClientError::CredentialsNeeded)
         );
     }

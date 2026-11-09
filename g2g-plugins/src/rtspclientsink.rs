@@ -428,7 +428,8 @@ impl ControlConnection {
         if response.status != STATUS_UNAUTHORIZED {
             return Ok(response);
         }
-        self.requests.answer_challenge(&response)?;
+        let client_nonce = format!("{:08x}{:08x}", random_u32(), random_u32());
+        self.requests.answer_challenge(&response, client_nonce)?;
         self.round_trip(method, uri, headers, body).await
     }
 
