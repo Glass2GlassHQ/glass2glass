@@ -472,11 +472,18 @@ async fn connect_describe(
     user_agent: &str,
     creds: Option<&retina::client::Credentials>,
 ) -> Result<Session<Described>, G2gError> {
-    let url = url::Url::parse(url).map_err(|_| G2gError::CapsMismatch)?;
+    let mut url = url::Url::parse(url).map_err(|_| G2gError::CapsMismatch)?;
+    // retina refuses a URL carrying credentials; user-id and user-pw win over them, as in gst's rtspsrc
+    let location_creds = crate::rtspclient::take_location_credentials(&mut url)
+        .map_err(|_| G2gError::CapsMismatch)?
+        .map(|credentials| retina::client::Credentials {
+            username: credentials.user,
+            password: credentials.password,
+        });
     let session_group = Arc::new(SessionGroup::default());
     let opts = SessionOptions::default()
         .session_group(session_group)
-        .creds(creds.cloned())
+        .creds(creds.cloned().or(location_creds))
         .user_agent(user_agent.to_string());
     Session::describe(url.clone(), opts).await.map_err(|e| {
         rtsp_failure(

@@ -188,6 +188,27 @@ pub struct Credentials {
     pub password: String,
 }
 
+// Move an `rtsp://user:password@host` location's userinfo out of `url`, so it
+// never reaches a request line. `Err` on a malformed `%` escape.
+#[cfg(any(feature = "rtsp", feature = "rtsp-client-sink"))]
+pub(crate) fn take_location_credentials(url: &mut url::Url) -> Result<Option<Credentials>, ()> {
+    if url.username().is_empty() && url.password().is_none() {
+        return Ok(None);
+    }
+    let decode = |text: &str| {
+        crate::dataurisrc::percent_decode(text)
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+            .ok_or(())
+    };
+    let credentials = Credentials {
+        user: decode(url.username())?,
+        password: decode(url.password().unwrap_or_default())?,
+    };
+    url.set_username("")?;
+    url.set_password(None)?;
+    Ok(Some(credentials))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Challenge {
     Basic,
@@ -592,6 +613,21 @@ mod tests {
         assert_eq!(auth_param(params, "nonce"), Some(r#"n\"x"#));
         assert_eq!(auth_param(params, "stale"), Some("FALSE"));
         assert_eq!(auth_param(params, "opaque"), None);
+    }
+
+    #[cfg(any(feature = "rtsp", feature = "rtsp-client-sink"))]
+    #[test]
+    fn location_credentials_are_decoded_and_removed() {
+        let mut url = url::Url::parse("rtsp://us%40er:p%3Ass@cam:8554/live").unwrap();
+        assert_eq!(
+            take_location_credentials(&mut url),
+            Ok(Some(Credentials {
+                user: "us@er".to_string(),
+                password: "p:ss".to_string()
+            }))
+        );
+        assert_eq!(url.as_str(), "rtsp://cam:8554/live");
+        assert_eq!(take_location_credentials(&mut url), Ok(None));
     }
 
     #[test]

@@ -315,7 +315,6 @@ enum PublishError {
     Rtsp(RtspClientError),
     Io(std::io::Error),
     InvalidLocation,
-    CredentialsInLocation,
     TooManyStreams,
     NoUdpPortPair,
     NoTransports,
@@ -331,7 +330,6 @@ impl PublishError {
         !matches!(
             self,
             PublishError::InvalidLocation
-                | PublishError::CredentialsInLocation
                 | PublishError::TooManyStreams
                 | PublishError::NoTransports
                 | PublishError::AccessUnitTooLarge
@@ -358,9 +356,6 @@ impl core::fmt::Display for PublishError {
             PublishError::Rtsp(e) => write!(f, "{e}"),
             PublishError::Io(e) => write!(f, "{e}"),
             PublishError::InvalidLocation => write!(f, "location is not an rtsp:// URL"),
-            PublishError::CredentialsInLocation => {
-                write!(f, "location carries credentials, set user-id and user-pw instead")
-            }
             PublishError::TooManyStreams => write!(
                 f,
                 "more streams than dynamic RTP payload types {FIRST_DYNAMIC_PAYLOAD_TYPE}..={LAST_DYNAMIC_PAYLOAD_TYPE}"
@@ -819,16 +814,16 @@ struct PublishTarget {
     host: String,
     port: u16,
     request_url: String,
+    credentials: Option<Credentials>,
 }
 
 fn publish_target(location: &str) -> Result<PublishTarget, PublishError> {
-    let url = url::Url::parse(location).map_err(|_| PublishError::InvalidLocation)?;
+    let mut url = url::Url::parse(location).map_err(|_| PublishError::InvalidLocation)?;
     if url.scheme() != "rtsp" {
         return Err(PublishError::InvalidLocation);
     }
-    if !url.username().is_empty() || url.password().is_some() {
-        return Err(PublishError::CredentialsInLocation);
-    }
+    let credentials = crate::rtspclient::take_location_credentials(&mut url)
+        .map_err(|_| PublishError::InvalidLocation)?;
     let host = match url.host().ok_or(PublishError::InvalidLocation)? {
         url::Host::Domain(domain) => domain.to_string(),
         url::Host::Ipv4(address) => address.to_string(),
@@ -838,6 +833,7 @@ fn publish_target(location: &str) -> Result<PublishTarget, PublishError> {
         host,
         port: url.port().unwrap_or(DEFAULT_RTSP_PORT),
         request_url: url.as_str().to_string(),
+        credentials,
     })
 }
 
@@ -1118,10 +1114,15 @@ impl SessionParameters {
             TcpStream::connect((target.host.as_str(), target.port)),
         )
         .await?;
-        let credentials = settings.user_id.clone().map(|user| Credentials {
-            user,
-            password: settings.user_pw.clone(),
-        });
+        // user-id and user-pw win over the location's own credentials, as in gst's rtspsrc
+        let credentials = settings
+            .user_id
+            .clone()
+            .map(|user| Credentials {
+                user,
+                password: settings.user_pw.clone(),
+            })
+            .or(target.credentials);
         let mut control = ControlConnection {
             stream,
             requests: RtspPublishRequests::new(settings.user_agent.clone(), credentials),

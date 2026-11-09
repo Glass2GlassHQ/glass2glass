@@ -1013,6 +1013,32 @@ async fn digest_challenge_is_answered_on_every_request() {
 }
 
 #[tokio::test]
+async fn credentials_in_the_location_answer_the_challenge() {
+    let gate = DigestGate {
+        user: USER,
+        password: PASSWORD,
+    };
+    let (listener, location) = recorder_listener().await;
+    let location = location.replacen("rtsp://", &format!("rtsp://{USER}:{PASSWORD}@"), 1);
+    let mut sink = RtspClientSink::new(1, location);
+    let (recorded, published) = publish_and_record(
+        listener,
+        Some(gate),
+        recorder_responder(),
+        &mut sink,
+        &[video_pad()],
+        Duration::ZERO,
+    )
+    .await;
+    published.expect("publish and teardown");
+    assert!(recorded.torn_down);
+    assert!(
+        recorded.requests.iter().all(|head| !head.contains('@')),
+        "the userinfo never reaches a request line"
+    );
+}
+
+#[tokio::test]
 async fn refused_credentials_fail_the_publish() {
     let gate = DigestGate {
         user: USER,

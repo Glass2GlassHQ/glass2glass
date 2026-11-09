@@ -403,6 +403,7 @@ mod tests {
     }
 
     // the RTP loop drops a pending recv at every jitter or report deadline, shorter than the timeout here
+    #[cfg(feature = "udp-ingress")]
     #[tokio::test]
     async fn the_receive_timeout_survives_dropped_receives() {
         const TIMEOUT_NS: u64 = 60_000_000;
