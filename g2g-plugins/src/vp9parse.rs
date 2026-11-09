@@ -285,6 +285,7 @@ fn read_color_config(br: &mut BitReader, profile: u8) -> Option<Vp9ColorConfig> 
 }
 
 // the color_config of a packet that opens on a keyframe
+#[cfg(feature = "std")]
 pub(crate) fn keyframe_color_config(packet: &[u8]) -> Option<Vp9ColorConfig> {
     read_keyframe_head(&mut BitReader::new(packet))
 }

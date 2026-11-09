@@ -203,6 +203,7 @@ pub(crate) fn nal_units_contain_keyframe<'a>(
     })
 }
 
+#[cfg(feature = "metadata")]
 pub(crate) fn nal_units_start_coded_video_sequence<'a>(
     codec: VideoCodec,
     mut units: impl Iterator<Item = &'a [u8]>,
