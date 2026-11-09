@@ -58,8 +58,8 @@ use crate::tensor::MAX_TENSOR_RANK;
 /// incompatible layout change so a decoder rejects a mismatched peer up front
 /// rather than mis-parsing. Version 2 added the four colorimetry bytes to both
 /// video caps; version 3 added the u16 channel-layout mask to audio
-/// caps.
-pub const WIRE_VERSION: u8 = 3;
+/// caps; version 4 widened the timecode frame count to u16.
+pub const WIRE_VERSION: u8 = 4;
 
 /// Failure decoding (or encoding) a [`PipelinePacket`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1210,7 +1210,7 @@ fn put_meta(w: &mut Writer, meta: &FrameMetaSet) {
         w.u8(t.hours);
         w.u8(t.minutes);
         w.u8(t.seconds);
-        w.u8(t.frames);
+        w.u16(t.frames);
         w.bool(t.drop_frame);
         w.bool(t.framerate_q16.is_some());
         w.u32(t.framerate_q16.unwrap_or(0));
@@ -1435,7 +1435,7 @@ fn get_meta(r: &mut Reader) -> Result<FrameMetaSet, WireError> {
                     hours: r.u8()?,
                     minutes: r.u8()?,
                     seconds: r.u8()?,
-                    frames: r.u8()?,
+                    frames: r.u16()?,
                     drop_frame: r.bool()?,
                     framerate_q16: {
                         let present = r.bool()?;

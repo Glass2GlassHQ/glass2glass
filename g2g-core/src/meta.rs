@@ -1443,7 +1443,7 @@ mod on {
         pub hours: u8,
         pub minutes: u8,
         pub seconds: u8,
-        pub frames: u8,
+        pub frames: u16,
         /// NTSC drop-frame counting (the 29.97 / 59.94 fps count that skips two
         /// frame numbers a minute). Rendered with a `;` before the frame count.
         pub drop_frame: bool,

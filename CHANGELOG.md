@@ -88,6 +88,9 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M2172: H.265 HDR10 metadata ends at a CRA that follows an end of sequence.
 - M2173: `av1parse` attaches the HDR10 and ITU-T T.35 caption metadata OBUs as frame metadata.
 - M2174: the RTP receiver locks to one sender's SSRC and accepts another only after that sender falls silent.
+- M2175: H.265 timecodes keep frame counts above 255.
+
+Breaking: `TimecodeMeta.frames` is a `u16`, `WIRE_VERSION` is 4, and `RtpRecvConfig` gains `parameter_sets`.
 
 ## 0.14.0
 

@@ -190,9 +190,7 @@ pub fn parse_time_code(p: &[u8]) -> Option<g2g_core::meta::TimecodeMeta> {
         let full = br.read_bit()? == 1;
         br.read_bit()?; // discontinuity_flag
         let drop_frame = br.read_bit()? == 1;
-        // n_frames is 9 bits here; a count that does not fit a frame number is
-        // malformed, so the timestamp is dropped rather than truncated.
-        let n_frames = u8::try_from(br.read_bits(9)?).ok()?;
+        let n_frames = br.read_bits(9)? as u16;
         let (hours, minutes, seconds) = read_hms(&mut br, full)?;
         let time_offset_length = br.read_bits(5)?;
         br.skip_bits(time_offset_length as usize)?;
@@ -237,7 +235,7 @@ pub fn parse_pic_timing(p: &[u8], ctx: PicTimingContext) -> Option<g2g_core::met
         let full = br.read_bit()? == 1;
         br.read_bit()?; // discontinuity_flag
         let drop_frame = br.read_bit()? == 1;
-        let n_frames = br.read_bits(8)? as u8;
+        let n_frames = br.read_bits(8)? as u16;
         let (hours, minutes, seconds) = read_hms(&mut br, full)?;
         br.skip_bits(ctx.time_offset_length as usize)?;
         return Some(g2g_core::meta::TimecodeMeta {
@@ -512,7 +510,8 @@ mod tests {
         w.write_bit(1); // full_timestamp_flag
         w.write_bit(0); // discontinuity_flag
         w.write_bit(1); // cnt_dropped_flag (drop frame)
-        w.write_bits(29, 9); // n_frames
+                        // H.265 codes n_frames in 9 bits, so counts past 255 occur at high frame rates
+        w.write_bits(300, 9); // n_frames
         w.write_bits(58, 6); // seconds_value
         w.write_bits(59, 6); // minutes_value
         w.write_bits(10, 5); // hours_value
@@ -522,7 +521,7 @@ mod tests {
         let tc = parse_time_code(&w.into_bytes()).expect("time_code parsed");
         assert_eq!(
             (tc.hours, tc.minutes, tc.seconds, tc.frames),
-            (10, 59, 58, 29)
+            (10, 59, 58, 300)
         );
         assert!(tc.drop_frame);
     }
