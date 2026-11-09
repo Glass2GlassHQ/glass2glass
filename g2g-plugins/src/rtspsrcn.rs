@@ -35,6 +35,7 @@ use core::pin::Pin;
 use core::time::Duration;
 
 use alloc::boxed::Box;
+use std::collections::VecDeque;
 use std::string::{String, ToString};
 use std::sync::Arc;
 use std::vec::Vec;
@@ -1243,9 +1244,14 @@ async fn run_session(
 
     let stall_timeout =
         (src.stall_timeout_ms > 0).then(|| Duration::from_millis(src.stall_timeout_ms));
+    let mut held = HeldItems::default();
     while state.iter().any(|p| p.emitted < limit) {
-        let next = match stall_timeout {
-            Some(stall_timeout) => {
+        if core::mem::take(&mut held.video_dropped) {
+            seen_keyframe = false;
+        }
+        let next = match (held.items.pop_front(), stall_timeout) {
+            (Some(next), _) => next,
+            (None, Some(stall_timeout)) => {
                 match tokio::time::timeout(stall_timeout, demuxed.next()).await {
                     Ok(next) => next,
                     // a tcp connection whose link dropped stays open until the server's retransmit backs off
@@ -1262,7 +1268,7 @@ async fn run_session(
                     }
                 }
             }
-            None => demuxed.next().await,
+            (None, None) => demuxed.next().await,
         };
         let item = match next {
             Some(Ok(item)) => item,
@@ -1304,9 +1310,14 @@ async fn run_session(
                     let refreshed = video_caps_for(&demuxed.streams()[video_idx], codec);
                     if refreshed != video_caps {
                         if let Some(caps) = &refreshed {
-                            if let Err(e) = out
-                                .push_to(VIDEO_PORT, PipelinePacket::CapsChanged(caps.clone()))
-                                .await
+                            if let Err(e) = push_while_polling(
+                                out,
+                                VIDEO_PORT,
+                                PipelinePacket::CapsChanged(caps.clone()),
+                                &mut demuxed,
+                                &mut held,
+                            )
+                            .await
                             {
                                 return SessionOutcome::DownstreamError(e);
                             }
@@ -1417,7 +1428,15 @@ async fn run_session(
                 clock.wall_clock_ns(timestamp.timestamp() as u32),
             );
         }
-        if let Err(e) = out.push_to(port, PipelinePacket::DataFrame(frame)).await {
+        let pushed = push_while_polling(
+            out,
+            port,
+            PipelinePacket::DataFrame(frame),
+            &mut demuxed,
+            &mut held,
+        )
+        .await;
+        if let Err(e) = pushed {
             return SessionOutcome::DownstreamError(e);
         }
         state[port].emitted += 1;
@@ -1425,7 +1444,9 @@ async fn run_session(
         // A pad that reached its limit ends now, so its branch drains while the
         // others keep receiving.
         if state[port].emitted >= limit && !state[port].eos_sent {
-            if let Err(e) = out.push_to(port, PipelinePacket::Eos).await {
+            let pushed =
+                push_while_polling(out, port, PipelinePacket::Eos, &mut demuxed, &mut held).await;
+            if let Err(e) = pushed {
                 return SessionOutcome::DownstreamError(e);
             }
             state[port].eos_sent = true;
@@ -1433,6 +1454,46 @@ async fn run_session(
     }
 
     SessionOutcome::LimitReached
+}
+
+// about six seconds of 30 fps video with 50 audio frames a second
+const MAX_HELD_ITEMS: usize = 512;
+
+#[derive(Default)]
+struct HeldItems {
+    items: VecDeque<Option<Result<CodecItem, retina::Error>>>,
+    video_dropped: bool,
+    stream_ended: bool,
+}
+
+impl HeldItems {
+    fn hold(&mut self, next: Option<Result<CodecItem, retina::Error>>) {
+        self.stream_ended = !matches!(next, Some(Ok(_)));
+        self.items.push_back(next);
+        if self.items.len() > MAX_HELD_ITEMS {
+            let dropped = self.items.pop_front();
+            self.video_dropped |= matches!(dropped, Some(Some(Ok(CodecItem::VideoFrame(_)))));
+        }
+    }
+}
+
+async fn push_while_polling(
+    out: &mut dyn MultiOutputSink,
+    port: usize,
+    packet: PipelinePacket,
+    demuxed: &mut retina::client::Demuxed,
+    held: &mut HeldItems,
+) -> Result<g2g_core::PushOutcome, G2gError> {
+    let mut push = out.push_to(port, packet);
+    // retina sends keepalives only while the session stream is polled
+    while !held.stream_ended {
+        tokio::select! {
+            biased;
+            pushed = &mut push => return pushed,
+            next = demuxed.next() => held.hold(next),
+        }
+    }
+    push.await
 }
 
 /// Attach the sender's wall clock to a frame. A no-op without the `metadata`

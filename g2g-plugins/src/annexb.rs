@@ -145,9 +145,15 @@ pub(crate) fn nal_units_any(data: &[u8]) -> NalUnitsAny<'_> {
     }
 }
 
-/// H.264 NAL unit type: the low 5 bits of the first NAL header byte.
+// some cameras set forbidden_zero_bit on vendor NALs
+const FORBIDDEN_ZERO_BIT: u8 = 0x80;
+
+/// H.264 NAL unit type: the low 5 bits of the first NAL header byte. `None`
+/// for an empty NAL or one with forbidden_zero_bit set.
 pub(crate) fn h264_nal_type(nal: &[u8]) -> Option<u8> {
-    nal.first().map(|b| b & 0x1F)
+    nal.first()
+        .filter(|b| *b & FORBIDDEN_ZERO_BIT == 0)
+        .map(|b| b & 0x1F)
 }
 
 /// Whether an access unit (either framing) begins a keyframe for `codec`: an
@@ -189,13 +195,11 @@ pub(crate) fn nal_units_contain_keyframe<'a>(
     codec: VideoCodec,
     mut units: impl Iterator<Item = &'a [u8]>,
 ) -> bool {
-    units.any(|n| match (codec, n.first()) {
-        (VideoCodec::H265, Some(b)) => (16..=23).contains(&((b >> 1) & 0x3F)),
-        (VideoCodec::Mpeg4Part2, Some(&0xB6)) => n.get(1).is_some_and(|c| c >> 6 == 0),
-        (VideoCodec::Mpeg4Part2, _) => false,
-        (VideoCodec::Mpeg2, _) => mpeg2_start_is_sync(n),
-        (_, Some(b)) => (b & 0x1F) == 5,
-        (_, None) => false,
+    units.any(|n| match codec {
+        VideoCodec::H265 => h265_nal_type(n).is_some_and(|t| (16..=23).contains(&t)),
+        VideoCodec::Mpeg4Part2 => n.first() == Some(&0xB6) && n.get(1).is_some_and(|c| c >> 6 == 0),
+        VideoCodec::Mpeg2 => mpeg2_start_is_sync(n),
+        _ => h264_nal_type(n) == Some(5),
     })
 }
 
@@ -240,9 +244,12 @@ pub(crate) fn h264_parameter_sets(au: &[u8]) -> (Vec<Vec<u8>>, Vec<Vec<u8>>) {
 }
 
 /// The H.265 (HEVC) NAL unit type: bits 1..=6 of the first header byte
-/// (`(b >> 1) & 0x3F`), where H.264 uses the low 5 bits.
+/// (`(b >> 1) & 0x3F`), where H.264 uses the low 5 bits. `None` for an empty
+/// NAL or one with forbidden_zero_bit set.
 pub(crate) fn h265_nal_type(nal: &[u8]) -> Option<u8> {
-    nal.first().map(|b| (b >> 1) & 0x3F)
+    nal.first()
+        .filter(|b| *b & FORBIDDEN_ZERO_BIT == 0)
+        .map(|b| (b >> 1) & 0x3F)
 }
 
 /// VPS, SPS, and PPS NAL lists: the H.265 parameter sets.
@@ -479,8 +486,8 @@ pub(crate) fn starts_with_param_set(annexb: &[u8], codec: VideoCodec) -> bool {
         return false;
     }
     match codec {
-        VideoCodec::H265 => (annexb[4] >> 1) & 0x3F == 32,
-        _ => annexb[4] & 0x1F == 7,
+        VideoCodec::H265 => h265_nal_type(&annexb[4..]) == Some(32),
+        _ => h264_nal_type(&annexb[4..]) == Some(7),
     }
 }
 
@@ -537,11 +544,11 @@ pub(crate) fn split_annexb(data: &[u8]) -> Vec<&[u8]> {
 /// NAL unit type, decoded per codec: H.264 packs it in the low 5 bits of byte
 /// 0; H.265 in bits 1..6 of byte 0.
 pub(crate) fn nalu_type(codec: VideoCodec, nalu: &[u8]) -> u8 {
-    let b0 = nalu.first().copied().unwrap_or(0);
-    match codec {
-        VideoCodec::H265 => (b0 >> 1) & 0x3F,
-        _ => b0 & 0x1F,
-    }
+    let nal_type = match codec {
+        VideoCodec::H265 => h265_nal_type(nalu),
+        _ => h264_nal_type(nalu),
+    };
+    nal_type.unwrap_or(0)
 }
 
 fn find_nalu<'a>(codec: VideoCodec, nalus: &[&'a [u8]], ty: u8) -> Option<&'a [u8]> {
@@ -657,10 +664,10 @@ pub(crate) fn read_ff_extended(data: &[u8], mut i: usize) -> Option<(usize, usiz
 pub(crate) fn vcl_start(au: &[u8], codec: VideoCodec) -> Option<usize> {
     let mut pos = 0usize;
     while let Some((sc, begin)) = next_start_code(au, pos) {
-        let hdr = *au.get(begin)?;
+        let nal = au.get(begin..)?;
         let is_vcl = match codec {
-            VideoCodec::H265 => ((hdr >> 1) & 0x3F) < 32,
-            _ => (1..=5).contains(&(hdr & 0x1F)),
+            VideoCodec::H265 => h265_nal_type(nal).is_some_and(|t| t < 32),
+            _ => h264_nal_type(nal).is_some_and(|t| (1..=5).contains(&t)),
         };
         if is_vcl {
             return Some(sc);
@@ -881,6 +888,25 @@ pub(crate) fn sample_alignment(codec: VideoCodec) -> g2g_core::BitstreamAlignmen
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nals_with_forbidden_zero_bit_have_no_type() {
+        let sps_header = 0x67;
+        let idr_header = 0x65;
+        let hevc_vps_header = [0x40, 0x01];
+        assert_eq!(h264_nal_type(&[sps_header]), Some(7));
+        assert_eq!(h264_nal_type(&[sps_header | FORBIDDEN_ZERO_BIT]), None);
+        assert_eq!(h265_nal_type(&hevc_vps_header), Some(32));
+        assert_eq!(
+            h265_nal_type(&[hevc_vps_header[0] | FORBIDDEN_ZERO_BIT, hevc_vps_header[1]]),
+            None
+        );
+        let vendor_idr: &[u8] = &[idr_header | FORBIDDEN_ZERO_BIT, 0];
+        assert!(!nal_units_contain_keyframe(
+            VideoCodec::H264,
+            [vendor_idr].into_iter()
+        ));
+    }
     use alloc::vec;
 
     #[test]

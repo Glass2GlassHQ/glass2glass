@@ -85,11 +85,7 @@ impl NalCodec for H264Codec {
 /// fully parse.
 fn sps_info<'a>(nals: impl IntoIterator<Item = &'a [u8]>) -> Option<SpsGeometry> {
     for nal in nals {
-        if nal.is_empty() {
-            continue;
-        }
-        let nal_unit_type = nal[0] & 0x1F;
-        if nal_unit_type != 7 {
+        if h264_nal_type(nal) != Some(7) {
             continue;
         }
         let rbsp = strip_emulation_prevention(&nal[1..]);
@@ -309,7 +305,7 @@ fn parse_vui(br: &mut BitReader) -> (Colorimetry, H264VuiTail) {
 /// proof rather than a declaration. `None` if there is no parseable SPS.
 pub(crate) fn sps_reorder_frames(au: &[u8]) -> Option<u8> {
     for nal in crate::annexb::nal_units_any(au) {
-        if nal.first().map(|b| b & 0x1F) != Some(7) {
+        if h264_nal_type(nal) != Some(7) {
             continue;
         }
         let rbsp = strip_emulation_prevention(&nal[1..]);

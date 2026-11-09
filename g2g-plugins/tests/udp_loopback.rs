@@ -396,6 +396,59 @@ async fn nack_recovers_dropped_packets_via_retransmission() {
     );
 }
 
+fn au_frame(index: u8) -> Frame {
+    let au = alloc_au(index);
+    Frame {
+        domain: MemoryDomain::System(SystemSlice::from_boxed(au.into_boxed_slice())),
+        timing: FrameTiming {
+            pts_ns: u64::from(index) * 33_000_000,
+            ..FrameTiming::default()
+        },
+        sequence: u64::from(index),
+        meta: Default::default(),
+    }
+}
+
+#[tokio::test]
+async fn a_repeated_nack_resends_its_packet_once() {
+    const SSRC: u32 = 0x1234_5678;
+    const RECEIVER_SSRC: u32 = 1;
+    const REPEATS: usize = 10;
+    let peer = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("bind peer");
+    let mut sink = UdpSink::new(peer.local_addr().unwrap()).with_rtp(96, SSRC);
+    sink.configure_pipeline(&h264_caps())
+        .expect("configure sink");
+    let mut null = NullOut;
+    sink.process(PipelinePacket::DataFrame(au_frame(0)), &mut null)
+        .await
+        .expect("send");
+    let mut packet = [0u8; 1500];
+    let (_, sink_addr) = peer.recv_from(&mut packet).await.expect("rtp arrives");
+    let sequence = u16::from_be_bytes([packet[2], packet[3]]);
+
+    for _ in 0..REPEATS {
+        peer.send_to(
+            &rtcp::build_nack(RECEIVER_SSRC, SSRC, &[sequence]),
+            sink_addr,
+        )
+        .await
+        .unwrap();
+    }
+    peer.send_to(
+        &rtcp::build_nack(RECEIVER_SSRC, !SSRC, &[sequence]),
+        sink_addr,
+    )
+    .await
+    .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    sink.process(PipelinePacket::DataFrame(au_frame(1)), &mut null)
+        .await
+        .expect("send");
+    assert_eq!(sink.retransmits_sent(), 1);
+}
+
 const NACK_TEST_JITTER_MS: u64 = 200;
 // deep enough that the hold, not the depth, ends the wait for a loss
 const NACK_TEST_JITTER_DEPTH: usize = 256;

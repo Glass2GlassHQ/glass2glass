@@ -557,12 +557,21 @@ impl UdpSink {
         let mut rb = [0u8; 1500];
         let socket = self.socket.as_ref().ok_or(G2gError::NotConfigured)?;
         loop {
-            match socket.try_recv(&mut rb) {
-                Ok(0) => break,
-                Ok(n) => {
+            match socket.try_recv_from(&mut rb) {
+                Ok((0, _)) => break,
+                // linux delivers only the peer's datagrams to the connected single-destination socket
+                Ok((_, from)) if !self.clients.is_empty() && !self.clients.contains(&from) => {}
+                Ok((n, _)) => {
                     for p in rtcp::parse_compound(&rb[..n]) {
-                        if let RtcpPacket::Nack { missing, .. } = p {
-                            requested.extend(missing);
+                        if let RtcpPacket::Nack {
+                            media_ssrc,
+                            missing,
+                            ..
+                        } = p
+                        {
+                            if media_ssrc == self.ssrc {
+                                requested.extend(missing);
+                            }
                         }
                     }
                 }
@@ -570,6 +579,8 @@ impl UdpSink {
                 Err(_) => break,
             }
         }
+        requested.sort_unstable();
+        requested.dedup();
         // taken out so the resend loop can send while reading it
         let history = core::mem::take(&mut self.retx_buf);
         let resent = self.resend(&history, &requested).await;

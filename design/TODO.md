@@ -227,6 +227,10 @@ libraries installed.
   `vnd.onvif.metadata+gzip` encoding name: once a retina release carries
   scottlamb/retina PR 165, map that name to gzip in `onvif_metadata_gzip`
   instead of skipping the track.
+- Bump retina past 0.4.21 once a release carries its commit d163dd8: an SDP
+  `m=` line with no payload type panics the client in 0.4.21.
+- If retina answers scottlamb/retina#166 with a keepalive that runs without
+  polling the session, drop rtspsrc's `push_while_polling` and its held queue.
 - ONVIF metadata tracks with an EXI coding (`vnd.onvif.metadata.exi.onvif`,
   `vnd.onvif.metadata.exi.ext`): g2g has no EXI decoder, so they are skipped.
 - Run the Windows (`mfdevice` / `wasapidevice`) and macOS (`avfdevice` /

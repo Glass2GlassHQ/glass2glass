@@ -242,15 +242,26 @@ impl FlacParse {
         // end (the next validated sync) is in the buffer.
         loop {
             if parse_frame_header(&self.buf).is_none() {
-                // Not at a frame start (mid-header arrival or junk): wait; a
-                // longer buffer either validates or the resync below advances.
-                return Ok(());
+                // Not at a frame start: a header still arriving waits, junk is skipped.
+                if self.buf.len() < MAX_FRAME_HEADER_LEN {
+                    return Ok(());
+                }
+                self.buf.drain(..next_sync_candidate(&self.buf));
+                continue;
             }
-            let Some(end) = frame_end(&self.buf) else {
-                return Ok(()); // the current frame's end has not arrived
-            };
-            let frame: Vec<u8> = self.buf.drain(..end).collect();
-            self.emit(frame, out).await?;
+            match frame_end(&self.buf) {
+                Some(FrameEnd::Next(end)) => {
+                    let frame: Vec<u8> = self.buf.drain(..end).collect();
+                    self.emit(frame, out).await?;
+                }
+                Some(FrameEnd::SuccessorLost(end)) => {
+                    self.buf.drain(..end);
+                }
+                None if self.buf.len() <= MAX_FRAME_LEN => return Ok(()),
+                None => {
+                    self.buf.drain(..next_sync_candidate(&self.buf));
+                }
+            }
         }
     }
 }
@@ -334,16 +345,17 @@ fn crc8(data: &[u8]) -> u8 {
 
 // CRC-16 (polynomial 0x8005, init 0), the FLAC frame footer checksum
 fn crc16(data: &[u8]) -> u16 {
-    let mut crc = 0u16;
-    for &b in data {
-        crc ^= u16::from(b) << 8;
-        for _ in 0..8 {
-            crc = if crc & 0x8000 != 0 {
-                (crc << 1) ^ 0x8005
-            } else {
-                crc << 1
-            };
-        }
+    data.iter().fold(0, |crc, &b| crc16_update(crc, b))
+}
+
+fn crc16_update(crc: u16, byte: u8) -> u16 {
+    let mut crc = crc ^ (u16::from(byte) << 8);
+    for _ in 0..8 {
+        crc = if crc & 0x8000 != 0 {
+            (crc << 1) ^ 0x8005
+        } else {
+            crc << 1
+        };
     }
     crc
 }
@@ -426,18 +438,44 @@ pub(crate) fn parse_frame_header(data: &[u8]) -> Option<FrameHeader> {
     })
 }
 
-// the next validated sync that follows in number or closes a frame whose CRC-16 passes
-fn frame_end(data: &[u8]) -> Option<usize> {
-    let next_number = parse_frame_header(data)?.next_number();
+// FLAC frame headers are at most 16 bytes: 4 fixed, a 7-byte coded number, 2 + 2 optional, a CRC-8
+const MAX_FRAME_HEADER_LEN: usize = 16;
+// 65535 samples of 8 channels at 33 bits is about 2.2 MB
+const MAX_FRAME_LEN: usize = 1 << 22;
+
+// bytes before the next possible frame sync after the first byte, keeping a trailing 0xFF
+fn next_sync_candidate(data: &[u8]) -> usize {
+    (1..data.len())
+        .find(|&at| data[at] == 0xFF && data.get(at + 1).is_none_or(|b| b & 0xFC == 0xF8))
+        .unwrap_or(data.len())
+}
+
+enum FrameEnd {
+    // the next validated sync follows in number or closes a frame whose CRC-16 passes
+    Next(usize),
+    // the frame after next follows, past a successor whose header is corrupt
+    SuccessorLost(usize),
+}
+
+fn frame_end(data: &[u8]) -> Option<FrameEnd> {
+    let header = parse_frame_header(data)?;
+    let next_number = header.next_number();
+    let mut crc_before = crc16(&data[..1]);
     let mut at = 1;
     while at + 1 < data.len() {
-        if data[at] == 0xFF && data[at + 1] & 0xFC == 0xF8 {
-            let follows = parse_frame_header(&data[at..])
-                .is_some_and(|next| next.number == next_number || crc16(&data[..at]) == 0);
-            if follows {
-                return Some(at);
+        let next = (data[at] == 0xFF && data[at + 1] & 0xFC == 0xF8)
+            .then(|| parse_frame_header(&data[at..]))
+            .flatten();
+        if let Some(next) = next {
+            if next.number == next_number || crc_before == 0 {
+                return Some(FrameEnd::Next(at));
+            }
+            let after_next = (!header.variable_block_size).then(|| next_number.saturating_add(1));
+            if after_next == Some(next.number) {
+                return Some(FrameEnd::SuccessorLost(at));
             }
         }
+        crc_before = crc16_update(crc_before, data[at]);
         at += 1;
     }
     None
@@ -564,6 +602,74 @@ mod tests {
     use super::*;
     use crate::testutil::{flac_block, flac_picture_body, flac_streaminfo, run, STREAMINFO_TYPE};
     use crate::vorbiscomment::vorbis_comment;
+
+    // two channels of 192 16-bit samples at 44.1 kHz, each channel one CONSTANT subframe of zero
+    fn constant_frame(number: u8) -> Vec<u8> {
+        const BLOCK_SIZE_192_AT_44_1_KHZ: u8 = 0x19;
+        const STEREO_16_BIT: u8 = 0x18;
+        const CONSTANT_ZERO_SUBFRAME: [u8; 3] = [0, 0, 0];
+        let mut frame = alloc::vec![
+            0xFF,
+            0xF8,
+            BLOCK_SIZE_192_AT_44_1_KHZ,
+            STEREO_16_BIT,
+            number
+        ];
+        frame.push(crc8(&frame));
+        frame.extend(CONSTANT_ZERO_SUBFRAME);
+        frame.extend(CONSTANT_ZERO_SUBFRAME);
+        frame.extend(crc16(&frame).to_be_bytes());
+        frame
+    }
+
+    fn header() -> Vec<u8> {
+        let mut stream = Vec::from(*FLAC_MARKER);
+        stream.extend(flac_block(STREAMINFO_TYPE, true, &flac_streaminfo()));
+        stream
+    }
+
+    fn frame_numbers(stream: &[u8]) -> Vec<u8> {
+        let caps = Caps::Audio {
+            format: AudioFormat::Flac,
+            channels: 0,
+            sample_rate: 0,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
+        };
+        let sink = run(&mut FlacParse::new(), &caps, &[stream]);
+        sink.packets
+            .iter()
+            .filter_map(|packet| match packet {
+                PipelinePacket::DataFrame(frame) => frame.domain.as_system_slice(),
+                _ => None,
+            })
+            .filter(|bytes| parse_frame_header(bytes).is_some())
+            .map(|bytes| bytes[4])
+            .collect()
+    }
+
+    #[test]
+    fn junk_ahead_of_the_first_frame_is_skipped() {
+        let mut stream = header();
+        stream.extend([0x01; MAX_FRAME_HEADER_LEN * 2]);
+        for number in 0..3 {
+            stream.extend(constant_frame(number));
+        }
+        assert_eq!(frame_numbers(&stream), [0, 1, 2]);
+    }
+
+    #[test]
+    fn a_frame_whose_successor_header_is_corrupt_is_dropped_with_it() {
+        const HEADER_CRC8_AT: usize = 5;
+        let mut stream = header();
+        stream.extend(constant_frame(0));
+        let mut corrupt = constant_frame(1);
+        corrupt[HEADER_CRC8_AT] ^= 1;
+        stream.extend(corrupt);
+        for number in 2..5 {
+            stream.extend(constant_frame(number));
+        }
+        assert_eq!(frame_numbers(&stream), [2, 3, 4]);
+    }
 
     #[test]
     fn reads_the_header_comments_and_pictures() {

@@ -125,16 +125,26 @@ fn write_le10(frame: &mut [u8], off: usize, v: u16) {
 
 impl Layout {
     /// A layout for `sampling` at `width` x `height`, or `None` if the width is not
-    /// a whole number of pgroups (e.g. an odd width for 4:2:2) or the height is 0.
+    /// a whole number of pgroups (e.g. an odd width for 4:2:2), either side is 0,
+    /// either side exceeds what an SRD's 15-bit line and offset fields can address,
+    /// or the frame size overflows.
     pub fn new(sampling: Sampling, width: usize, height: usize) -> Option<Self> {
-        if width == 0 || height == 0 || !width.is_multiple_of(sampling.pixels_per_group()) {
+        let max_extent = usize::from(SRD_FIELD_MASK) + 1;
+        if width == 0
+            || height == 0
+            || width > max_extent
+            || height > max_extent
+            || !width.is_multiple_of(sampling.pixels_per_group())
+        {
             return None;
         }
-        Some(Self {
+        let layout = Self {
             sampling,
             width,
             height,
-        })
+        };
+        layout.checked_frame_size()?;
+        Some(layout)
     }
 
     /// pgroups per scan line.
@@ -142,16 +152,22 @@ impl Layout {
         self.width / self.sampling.pixels_per_group()
     }
 
-    /// Total packed buffer size in octets.
-    pub fn frame_size(&self) -> usize {
+    fn checked_frame_size(&self) -> Option<usize> {
         match self.sampling {
             // Packed: one stride, wire octets per line == buffer octets per line.
-            Sampling::Rgba8 | Sampling::YCbCr422_8 => {
-                self.groups_per_line() * self.sampling.octets_per_group() * self.height
-            }
+            Sampling::Rgba8 | Sampling::YCbCr422_8 => self
+                .groups_per_line()
+                .checked_mul(self.sampling.octets_per_group())?
+                .checked_mul(self.height),
             // Planar I422p10: Y (w*h) + Cb (w/2*h) + Cr (w/2*h) samples, 2 bytes each.
-            Sampling::YCbCr422_10 => self.width * self.height * 4,
+            Sampling::YCbCr422_10 => self.width.checked_mul(self.height)?.checked_mul(4),
         }
+    }
+
+    /// Total packed buffer size in octets.
+    pub fn frame_size(&self) -> usize {
+        self.checked_frame_size()
+            .expect("Layout::new rejects a frame size that overflows")
     }
 
     /// Gather one pgroup at `(line, group)` from the buffer into `out` (must be at
@@ -565,6 +581,16 @@ pub(crate) fn with_csrc_extension_and_padding(packet: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dimensions_past_the_srd_fields_have_no_layout() {
+        let max_extent = usize::from(SRD_FIELD_MASK) + 1;
+        let sampling = Sampling::YCbCr422_10;
+        assert!(Layout::new(sampling, max_extent, max_extent).is_some());
+        assert!(Layout::new(sampling, max_extent + 2, 2).is_none());
+        assert!(Layout::new(sampling, 2, max_extent + 1).is_none());
+        assert!(Layout::new(sampling, u32::MAX as usize - 1, u32::MAX as usize).is_none());
+    }
 
     /// A deterministic packed frame of `stride*height` bytes with distinct values.
     fn ramp(len: usize) -> Vec<u8> {

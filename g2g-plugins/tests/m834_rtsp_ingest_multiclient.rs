@@ -447,6 +447,32 @@ async fn the_next_publisher_negotiates_its_own_transport() {
     assert_eq!(served, 2);
 }
 
+#[tokio::test]
+async fn an_interleaved_publisher_sending_an_endless_request_is_dropped() {
+    const SENT_BYTES: usize = 1 << 20;
+    const CHUNK_BYTES: usize = 4096;
+    let (src, addr) = bound_src();
+    let src = src.with_max_sessions(1);
+
+    let publisher = async move {
+        let mut ctrl = publish_interleaved(addr).await;
+        let mut pktz = RtpH264Packetizer::new(96, 0x1234_5678);
+        send_interleaved_aus(&mut ctrl, &mut pktz, &[0]).await;
+        let mut sent = 0;
+        while sent < SENT_BYTES && ctrl.write_all(&[b'a'; CHUNK_BYTES]).await.is_ok() {
+            sent += CHUNK_BYTES;
+        }
+        let mut rest = Vec::new();
+        let read = tokio::time::timeout(Duration::from_secs(5), ctrl.read_to_end(&mut rest)).await;
+        assert!(read.is_ok(), "the server closes the connection");
+    };
+
+    let (received, cap, served, _) = tokio::join!(publisher, serve(src, Duration::from_secs(15))).1;
+    assert_eq!(received, 1);
+    assert_eq!(cap.tags(), vec![0]);
+    assert_eq!(served, 1);
+}
+
 /// The session knobs are runtime properties, not just builders.
 #[test]
 fn session_properties_round_trip() {

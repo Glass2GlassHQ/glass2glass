@@ -152,11 +152,7 @@ fn with_sps_rbsp<'a, T>(
     parse: impl Fn(&[u8]) -> Option<T>,
 ) -> Option<T> {
     for nal in nals {
-        if nal.len() < 2 {
-            continue;
-        }
-        let nal_unit_type = (nal[0] >> 1) & 0x3F;
-        if nal_unit_type != SPS_NUT {
+        if nal.len() < 2 || h265_nal_type(nal) != Some(SPS_NUT) {
             continue;
         }
         // Strip the 2-byte NAL header, then de-emulate the RBSP.

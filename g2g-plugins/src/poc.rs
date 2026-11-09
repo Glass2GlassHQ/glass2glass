@@ -168,11 +168,13 @@ pub enum H264Mmco {
     CurrentAsLongTerm { long_term_frame_idx: u32 },
 }
 
-/// The most operations one `dec_ref_pic_marking()` is read as carrying. Real
-/// streams use one or two (x264's B-pyramid unmarks a single short-term
-/// reference); a longer list makes the parse refuse the header rather than drop
-/// an operation that changes which pictures are references.
-pub const MAX_MMCO_OPS: usize = 8;
+/// The most operations one `dec_ref_pic_marking()` can carry: each of the 32
+/// field references moved to the long-term list and then dropped from it, plus
+/// setting the long-term maximum and marking the current picture
+/// (libavcodec's `H264_MAX_MMCO_COUNT`). A longer list makes the parse refuse
+/// the header rather than drop an operation that changes which pictures are
+/// references.
+pub const MAX_MMCO_OPS: usize = 66;
 
 /// A slice's `dec_ref_pic_marking()` (H.264 7.3.3.3). Fixed-capacity so the
 /// slice header stays `Copy`.
@@ -1206,6 +1208,27 @@ mod tests {
         assert!(slice.field_pic_flag && slice.bottom_field_flag);
         assert_eq!(slice.frame_num, 3);
         assert_eq!(slice.pic_order_cnt_lsb, 9);
+    }
+
+    #[test]
+    fn a_marking_that_drops_fifteen_short_term_references_parses() {
+        const DROPPED: u32 = 15;
+        let mut w = BitWriter::default();
+        w.write_bit(1); // adaptive_ref_pic_marking_mode_flag
+        for _ in 0..DROPPED {
+            w.write_ue(1); // memory_management_control_operation
+            w.write_ue(0); // difference_of_pic_nums_minus1
+        }
+        w.write_ue(0);
+        w.align_to_byte();
+        let rbsp = w.into_bytes();
+        let slice = H264SlicePoc {
+            nal_ref_idc: 1,
+            ..H264SlicePoc::default()
+        };
+        let marking =
+            read_dec_ref_pic_marking(&mut BitReader::new(&rbsp), &slice).expect("marking parses");
+        assert_eq!(marking.ops().len(), DROPPED as usize);
     }
 
     /// A truncated slice header yields nothing rather than a partial count.

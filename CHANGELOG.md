@@ -64,6 +64,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M2148: `wasapisink`, `coreaudiosink` and the AAudio sink offer a playout clock and skew-slave to a clock they do not provide.
 - M2149: `mpegtslivesrc` keeps segment starts past a PCR wrap, and PES timestamps outside the header length are not read.
 - M2150: hardened FLV, WAV, HLS key and DASH template parsing against malformed input.
+- M2151: hardened H.264/H.265, AV1, FLAC and ST 2110-20 parsing, RTSP ingest and udpsink NACKs against malformed input, and rtspsrc keeps its session alive while downstream blocks.
 
 ## 0.14.0
 

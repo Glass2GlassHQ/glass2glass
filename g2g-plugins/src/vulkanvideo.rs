@@ -400,7 +400,9 @@ pub fn aligned_extent(extent: (u32, u32), granularity: (u32, u32)) -> (u32, u32)
 // early because `vkCreateVideoSessionParametersKHR` validates the SPS/PPS.
 // ============================================================================
 
-use crate::annexb::{nal_units_any, strip_emulation_prevention, BitReader};
+use crate::annexb::{
+    h264_nal_type, h265_nal_type, nal_units_any, strip_emulation_prevention, BitReader,
+};
 use crate::vui::VideoSignalType;
 
 /// Parsed H.264 sequence parameter set, the fields the `Std*` SPS needs. Plain
@@ -705,14 +707,11 @@ fn h264_parameter_sets_in(au: &[u8]) -> Result<Option<H264ParameterSets>, Vulkan
     let mut sps = None;
     let mut pps = None;
     for nal in nal_units_any(au) {
-        if nal.is_empty() {
-            continue;
-        }
-        match nal[0] & 0x1F {
-            H264_NAL_SPS if sps.is_none() => {
+        match h264_nal_type(nal) {
+            Some(H264_NAL_SPS) if sps.is_none() => {
                 sps = Some(parse_h264_sps(&strip_emulation_prevention(&nal[1..]))?);
             }
-            H264_NAL_PPS if pps.is_none() => {
+            Some(H264_NAL_PPS) if pps.is_none() => {
                 pps = Some(parse_h264_pps(&strip_emulation_prevention(&nal[1..]))?);
             }
             _ => {}
@@ -1424,11 +1423,14 @@ impl H265ParameterSetTable {
     /// one. Refused when it is malformed or uses a feature this decoder does not
     /// implement.
     fn insert_nal(&mut self, nal: &[u8]) -> Result<bool, VulkanVideoError> {
-        let [header, _, payload @ ..] = nal else {
+        let [_, _, payload @ ..] = nal else {
             return Ok(false);
         };
         let rbsp = || strip_emulation_prevention(payload);
-        match (header >> 1) & 0x3F {
+        let Some(nal_type) = h265_nal_type(nal) else {
+            return Ok(false);
+        };
+        match nal_type {
             H265_NAL_VPS => {
                 let vps = parse_h265_vps(&rbsp())?;
                 self.vps.insert(vps.vps_video_parameter_set_id, vps);
@@ -2787,7 +2789,7 @@ fn parse_av1_tile_info(
         } else {
             sb_rows * sb_cols
         };
-        let max_tile_height_sb = (max_tile_area_sb2 / widest_tile_sb).max(1);
+        let max_tile_height_sb = max_tile_area_sb2.checked_div(widest_tile_sb)?.max(1);
         let mut startr = 0u32;
         let mut j = 0u32;
         while startr < sb_rows {
@@ -4424,6 +4426,9 @@ pub fn parse_av1_frame_header(
             for i in 0..AV1_REFS_PER_FRAME {
                 if br.read_bit()? == 1 {
                     let slot = fh.ref_frame_idx[i] as usize;
+                    if !refs.valid[slot] {
+                        return None;
+                    }
                     fh.upscaled_width = refs.upscaled_width[slot];
                     fh.frame_width = fh.upscaled_width;
                     fh.frame_height = refs.frame_height[slot];
@@ -11932,10 +11937,10 @@ impl H264DpbDecoder {
         let mut current: Option<H264Picture<'s>> = None;
 
         for nal in nal_units_any(stream) {
-            let Some(&nal_header) = nal.first() else {
+            let Some(nal_type) = h264_nal_type(nal) else {
                 continue;
             };
-            match nal_header & 0x1F {
+            match nal_type {
                 H264_NAL_SPS => {
                     let sps = parse_h264_sps(&strip_emulation_prevention(&nal[1..]))?;
                     self.parsed_sets.sps.insert(sps.seq_parameter_set_id, sps);
@@ -12631,7 +12636,9 @@ impl H265DpbDecoder {
             if self.parsed_sets.insert_nal(nal)? {
                 continue;
             }
-            let nal_unit_type = (nal[0] >> 1) & 0x3F;
+            let Some(nal_unit_type) = h265_nal_type(nal) else {
+                continue;
+            };
             if matches!(
                 nal_unit_type,
                 H265_NAL_END_OF_SEQUENCE | H265_NAL_END_OF_BITSTREAM
@@ -15359,7 +15366,9 @@ fn h265_sets_for_session(
     au: &[u8],
 ) -> Result<Option<H265ParameterSets>, VulkanVideoError> {
     let first_slice = nal_units_any(au).find(|nal| {
-        nal.len() >= 2 && h265_nal_layer_id(nal) == 0 && h265_is_slice((nal[0] >> 1) & 0x3F)
+        nal.len() >= 2
+            && h265_nal_layer_id(nal) == 0
+            && h265_nal_type(nal).is_some_and(h265_is_slice)
     });
     let Some(slice) = first_slice else {
         return Ok(None);
@@ -15375,7 +15384,7 @@ fn h265_carries_parameter_sets(au: &[u8]) -> bool {
     nal_units_any(au).any(|nal| {
         nal.len() >= 2
             && h265_nal_layer_id(nal) == 0
-            && (H265_NAL_VPS..=H265_NAL_PPS).contains(&((nal[0] >> 1) & 0x3F))
+            && h265_nal_type(nal).is_some_and(|t| (H265_NAL_VPS..=H265_NAL_PPS).contains(&t))
     })
 }
 
@@ -15407,15 +15416,15 @@ fn parameter_set_fingerprint(codec: VideoCodec, au: &[u8]) -> alloc::vec::Vec<u8
             continue;
         }
         let idx = match codec {
-            VideoCodec::H264 => match nal[0] & 0x1F {
-                7 => 0,
-                8 => 1,
+            VideoCodec::H264 => match h264_nal_type(nal) {
+                Some(7) => 0,
+                Some(8) => 1,
                 _ => continue,
             },
-            _ => match (nal[0] >> 1) & 0x3F {
-                32 => 0,
-                33 => 1,
-                34 => 2,
+            _ => match h265_nal_type(nal) {
+                Some(32) => 0,
+                Some(33) => 1,
+                Some(34) => 2,
                 _ => continue,
             },
         };
@@ -17745,6 +17754,18 @@ mod tests {
         assert_eq!(tile.tile_cols, 2);
         // two superblocks, then the one left over
         assert_eq!(tile.width_in_sbs_minus_1, [1, 0]);
+    }
+
+    #[test]
+    fn av1_non_uniform_tiles_of_a_zero_width_frame_fail_the_parse() {
+        let mut w = BitWriter::default();
+        w.write_bit(0); // uniform_tile_spacing_flag
+        w.write_bits(0, 8);
+        let bytes = w.into_bytes();
+        let mi_per_superblock = 16;
+        assert!(
+            parse_av1_tile_info(&mut BitReader::new(&bytes), 0, mi_per_superblock, false).is_none()
+        );
     }
 
     /// A 2x2 NV12 frame with a constant (Y, Cb, Cr) sample, for exercising the

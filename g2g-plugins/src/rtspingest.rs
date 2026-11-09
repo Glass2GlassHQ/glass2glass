@@ -363,6 +363,9 @@ fn next_interleaved(buf: &[u8]) -> Interleaved {
     }
 }
 
+// the largest interleaved frame, a 16-bit length of RTP, still waiting for one more read
+const MAX_INTERLEAVED_PENDING: usize = INTERLEAVED_HEADER_LEN + u16::MAX as usize + CTRL_BUF;
+
 /// Receive H.264 over a TCP-interleaved control stream (RFC 2326 §10.12): demux
 /// `$`-framed RTP on `rtp_channel` and depayload it into access units, answering
 /// any RTSP request interleaved between the binary frames. TCP is ordered and
@@ -434,5 +437,8 @@ pub(crate) async fn receive_interleaved(
         }
         out.mark_activity();
         pending.extend_from_slice(&buf[..n]);
+        if pending.len() > MAX_INTERLEAVED_PENDING {
+            return Ok(SessionEnd::PeerGone);
+        }
     }
 }
