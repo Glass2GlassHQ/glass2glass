@@ -346,8 +346,6 @@ libraries installed.
   clock from a sender whose clock runs measurably off the receiver's, and
   confirm the corrections hold sync over an hour. Extend slaving to
   `wasapisink`, `coreaudiosink` and the AAudio sink.
-- **`mpegtslivesrc` PTS wrap:** a PTS that wraps past 2^33 ticks before the PCR
-  does falls outside the segment. Send a segment for the wrapped timeline.
 - **ST 2110 media transport:** wire compliance of -20/-22/-30/-40 + multicast
   validated against reference gear (built from the RFCs, not yet
   interop-tested).

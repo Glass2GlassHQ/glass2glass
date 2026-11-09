@@ -172,7 +172,8 @@ a `Segment` that puts the PCR's stream time at the running time it arrived:
 minus the base time. A frame then presents when the sender's clock reaches its
 PTS plus the path latency. `tsdemux` keeps a segment that follows the runner's
 opening one, so it needs no mode of its own, where gst's needs `ignore-pcr=true`.
-A PTS that wraps past 2^33 ticks before the PCR does falls outside the segment.
+A PTS leads its PCR, so it wraps first. `tsdemux` places a PID's first stamp
+against the PCR or another PID's stamp, so it lands in the segment past the wrap.
 
 ## PTP
 

@@ -577,6 +577,8 @@ pub struct TsDemuxer {
     // set by `flush`, so `take_units` lets go of units still waiting for a first stamp
     end_of_stream: bool,
     last_extended_timestamps: Vec<(u16, u64)>,
+    latest_extended_timestamp: Option<u64>,
+    latest_pcr_90khz: Option<u64>,
     continuity: Vec<PidContinuity>,
     // replayed once the active program's PMT parses
     packets_before_pmt: VecDeque<[u8; TS_PACKET_LEN]>,
@@ -762,9 +764,13 @@ impl TsDemuxer {
         let discontinuity =
             has_adaptation_field && pkt[4] > 0 && pkt[5] & DISCONTINUITY_INDICATOR != 0;
         let table = self.psi_table_of(pid);
+        let on_pcr_pid = self.active_program().and_then(|program| program.pcr_pid) == Some(pid);
+        let pcr_27mhz = on_pcr_pid.then(|| adaptation_field_pcr(pkt)).flatten();
+        if let Some(pcr_27mhz) = pcr_27mhz {
+            self.latest_pcr_90khz = Some(pcr_27mhz / SYSTEM_CLOCK_TICKS_PER_90KHZ);
+        }
         if self.pcr_only {
-            let on_pcr_pid = self.active_program().and_then(|program| program.pcr_pid) == Some(pid);
-            if let Some(pcr_27mhz) = adaptation_field_pcr(pkt).filter(|_| on_pcr_pid) {
+            if let Some(pcr_27mhz) = pcr_27mhz {
                 self.pcr_samples.push(PcrSample {
                     pcr_27mhz,
                     discontinuity,
@@ -1359,13 +1365,18 @@ impl TsDemuxer {
             .last_extended_timestamps
             .iter()
             .position(|(known, _)| *known == pid);
-        let reference = slot.map(|index| self.last_extended_timestamps[index].1);
+        let reference = slot
+            .map(|index| self.last_extended_timestamps[index].1)
+            .or(self.latest_extended_timestamp)
+            // ISO 13818-1 T-STD holds a PES stamp less than a second ahead of the PCR
+            .or(self.latest_pcr_90khz);
         let extend = |raw: u64| reference.map_or(raw, |reference| extend_timestamp(raw, reference));
         let pts = pts.map(extend);
         let dts = dts.map(extend);
         let Some(latest) = dts.or(pts) else {
             return (pts, dts);
         };
+        self.latest_extended_timestamp = Some(latest);
         match slot {
             Some(index) => self.last_extended_timestamps[index].1 = latest,
             None => self.last_extended_timestamps.push((pid, latest)),
@@ -4948,6 +4959,49 @@ pub(crate) mod tests {
             .collect();
         let expected: Vec<u64> = (0..5).map(|index| first + index * frame).collect();
         assert_eq!(stamps, expected);
+    }
+
+    fn demux_all(bytes: &[u8]) -> Vec<EsUnit> {
+        let mut d = TsDemuxer::new();
+        for pkt in bytes.chunks(TS_PACKET_LEN) {
+            d.push_packet(pkt);
+        }
+        d.flush();
+        d.take_units()
+    }
+
+    #[test]
+    fn a_first_stamp_that_wraps_before_the_pcr_follows_the_pcr() {
+        let au = [0u8, 0, 0, 1, 0x65, 0xAA];
+        let mut mux = TsMuxer::new(STREAM_TYPE_H264);
+        let delay = mux.decoder_delay_90khz();
+        // the muxer writes the PCR at the given clock and the PTS a decoder delay after it
+        let clock = PES_TIMESTAMP_CYCLE_90KHZ - delay / 2;
+        let units = demux_all(&mux.push_au(&au, Some(clock), None, true));
+        assert_eq!(units[0].pts_90khz, Some(clock + delay));
+    }
+
+    #[test]
+    fn a_pids_first_stamp_joins_the_cycle_of_the_other_pids() {
+        const FRAME: u64 = 3_000;
+        let video = [0u8, 0, 0, 1, 0x65, 0xAA];
+        let audio = [0xFFu8, 0xF1, 0x50, 0x80];
+        let mut mux = TsMuxer::with_streams(&[STREAM_TYPE_H264, STREAM_TYPE_AAC]);
+        let delay = mux.decoder_delay_90khz();
+        let first = PES_TIMESTAMP_CYCLE_90KHZ - 2 * FRAME;
+        let mut bytes = Vec::new();
+        // the video stamps and the PCR both wrap before the audio starts
+        for index in 0..6 {
+            bytes.extend(mux.push_au_on(0, &video, Some(first + index * FRAME), None, true));
+        }
+        let audio_clock = first + 6 * FRAME;
+        bytes.extend(mux.push_au_on(1, &audio, Some(audio_clock), None, true));
+        let units = demux_all(&bytes);
+        let audio_unit = units
+            .iter()
+            .find(|unit| unit.stream_type == STREAM_TYPE_AAC)
+            .expect("the audio unit");
+        assert_eq!(audio_unit.pts_90khz, Some(audio_clock + delay));
     }
 
     fn section_of(table_id: u8, body_len: usize) -> Vec<u8> {

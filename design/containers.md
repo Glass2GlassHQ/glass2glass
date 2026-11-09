@@ -208,7 +208,8 @@ never held.
 PTS and DTS are 33-bit counters that wrap about every 26.5 hours. The demuxer
 places each one against the last timestamp on its PID: the same cycle, one wrap
 ahead, or one wrap behind once the PID has wrapped, whichever lands within an
-hour of it. A larger jump keeps the raw value. The elements see timestamps that
+hour of it. A PID's first timestamp is placed against the latest one on any PID,
+or against the PCR before any PID has one. A larger jump keeps the raw value. The elements see timestamps that
 keep rising across the wrap, and a flush or seek resets this with the rest of
 the parser.
 

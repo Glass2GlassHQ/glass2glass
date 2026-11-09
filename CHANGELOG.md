@@ -60,6 +60,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M2144: `decklinkvideosrc` captures SDI video, detects the input mode and attaches VANC as `AncillaryMeta`.
 - M2145: release binaries, MSI and Python wheel for Windows on ARM64.
 - M2146: `vtenc_h265a` encodes BGRA to HEVC with an alpha layer on VideoToolbox.
+- M2147: `tsdemux` places a stream's first timestamp past a 33-bit wrap that the PCR or another stream already crossed.
 
 ## 0.14.0
 
