@@ -438,7 +438,8 @@ jobs:
         shell: bash
         run: |
           python -m pip install delvewheel==1.13.2
-          python -m delvewheel repair --add-path 'C:\g2g-ffmpeg\bin' -w g2g-pyapi/repaired g2g-pyapi/dist/*.whl
+          # delvewheel 1.13.2's arm64 system-DLL list lacks opengl32.dll, which Windows 11 arm64 ships
+          python -m delvewheel repair --add-path 'C:\g2g-ffmpeg\bin' --no-dll opengl32.dll -w g2g-pyapi/repaired g2g-pyapi/dist/*.whl
           rm g2g-pyapi/dist/*.whl
           mv g2g-pyapi/repaired/*.whl g2g-pyapi/dist/
       # auditwheel's macOS counterpart: copies the ffmpeg libraries the extension links into the wheel
