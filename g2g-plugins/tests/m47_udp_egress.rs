@@ -272,6 +272,37 @@ async fn sink_emits_rtcp_sender_report_when_enabled() {
 }
 
 #[tokio::test]
+async fn eos_before_any_frame_sends_a_receiver_report_and_bye() {
+    use g2g_plugins::rtcp::{self, RtcpPacket};
+
+    let receiver = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("bind receiver");
+    let dest: SocketAddr = receiver.local_addr().expect("local addr");
+    let mut sink = UdpSink::new(dest)
+        .with_rtp(PAYLOAD_TYPE, SSRC)
+        .with_rtcp_sender_reports(0);
+    sink.configure_pipeline(&h264_caps()).expect("configure");
+    sink.process(PipelinePacket::Eos, &mut NullOut)
+        .await
+        .expect("eos");
+
+    let goodbye = recv_n(&receiver, 1).await.remove(0);
+    let packets = rtcp::parse_compound(&goodbye);
+    assert!(
+        matches!(
+            packets.as_slice(),
+            [
+                RtcpPacket::ReceiverReport { ssrc: report_ssrc, reports },
+                RtcpPacket::Bye { ssrc: bye_ssrcs },
+            ] if *report_ssrc == SSRC && reports.is_empty() && bye_ssrcs.as_slice() == [SSRC]
+        ),
+        "{packets:?}"
+    );
+    assert_eq!(sink.sender_reports_sent(), 0);
+}
+
+#[tokio::test]
 async fn eos_sends_a_sender_report_and_bye_when_reports_are_on() {
     use g2g_plugins::rtcp::{self, RtcpPacket};
 

@@ -101,7 +101,7 @@ struct Client {
     next_sequence: Option<u16>,
     /// RFC 3550 sender counters for this player's RTP session.
     sender_counters: rtcp::SenderCounters,
-    last_rtp_ts: u32,
+    last_rtp_ts: Option<u32>,
     last_sr_ns: u64,
     /// Last control-channel or RTCP activity, for session-timeout reaping.
     last_activity_ns: u64,
@@ -120,7 +120,7 @@ impl Client {
             rtcp_channel: None,
             next_sequence: None,
             sender_counters: rtcp::SenderCounters::default(),
-            last_rtp_ts: 0,
+            last_rtp_ts: None,
             last_sr_ns: 0,
             last_activity_ns: g2g_core::metrics::monotonic_ns(),
         }
@@ -213,7 +213,7 @@ impl Client {
             packet[RTP_SEQUENCE_RANGE].copy_from_slice(&sequence.to_be_bytes());
         }
         self.next_sequence = Some(first_sequence.wrapping_add(packets.len() as u16));
-        self.last_rtp_ts = timestamp;
+        self.last_rtp_ts = Some(timestamp);
         let mut sent = 0;
         if let Some(channel) = self.interleaved {
             let framed_len = packets
@@ -496,13 +496,14 @@ impl RtspServerSink {
         let mut i = 0;
         while i < self.clients.len() {
             let c = &mut self.clients[i];
-            if !c.playing() || now.saturating_sub(c.last_sr_ns) < self.sr_interval_ns {
+            let due = c.playing() && now.saturating_sub(c.last_sr_ns) >= self.sr_interval_ns;
+            let Some(last_rtp_ts) = c.last_rtp_ts.filter(|_| due) else {
                 i += 1;
                 continue;
-            }
+            };
             let sr = c
                 .sender_counters
-                .sender_report(self.ssrc, rtcp::ntp_now(), c.last_rtp_ts);
+                .sender_report(self.ssrc, rtcp::ntp_now(), last_rtp_ts);
             match c.send_rtcp(rtcp_socket, &sr).await {
                 Ok(sent) => {
                     if sent {

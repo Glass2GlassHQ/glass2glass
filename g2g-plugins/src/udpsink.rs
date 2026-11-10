@@ -305,7 +305,7 @@ pub struct UdpSink {
     /// FEC and RTX ride other SSRCs and do not count here). Wrap as RFC fields.
     sender_counters: rtcp::SenderCounters,
     /// The most recent media RTP timestamp, reported in the SR alongside NTP now.
-    last_rtp_ts: u32,
+    last_rtp_ts: Option<u32>,
     /// Extra destinations from the `clients` property. Non-empty replaces the
     /// single `dest`, the way gst `multiudpsink` works.
     clients: Vec<SocketAddr>,
@@ -350,7 +350,7 @@ impl UdpSink {
             rtcp_sr_interval_ns: None,
             last_sr_ns: 0,
             sender_counters: rtcp::SenderCounters::default(),
-            last_rtp_ts: 0,
+            last_rtp_ts: None,
             packets_sent: 0,
             bytes_sent: 0,
             frames_sent: 0,
@@ -996,7 +996,7 @@ impl AsyncElement for UdpSink {
                     if packets.is_empty() {
                         return Ok(());
                     }
-                    self.last_rtp_ts = timestamp;
+                    self.last_rtp_ts = Some(timestamp);
                     self.ensure_socket()?;
                     // Generate any ULPFEC repair packets for the just-built media
                     // (before the borrow of `self.socket` below).
@@ -1063,13 +1063,15 @@ impl AsyncElement for UdpSink {
                     // Emit an RTCP sender report when due (rate-limited): NTP now
                     // paired with the last RTP timestamp lets a receiver map this
                     // SSRC's clock to wall time.
-                    if let Some(interval) = self.rtcp_sr_interval_ns {
+                    if let (Some(interval), Some(last_rtp_ts)) =
+                        (self.rtcp_sr_interval_ns, self.last_rtp_ts)
+                    {
                         let now = g2g_core::metrics::monotonic_ns();
                         if now.saturating_sub(self.last_sr_ns) >= interval {
                             let sr = self.sender_counters.sender_report(
                                 self.ssrc,
                                 rtcp::ntp_now(),
-                                self.last_rtp_ts,
+                                last_rtp_ts,
                             );
                             self.send_datagram(&sr).await?;
                             self.last_sr_ns = now;
@@ -1083,14 +1085,20 @@ impl AsyncElement for UdpSink {
                     let rtp_mode = self.bytestream.is_none() && self.packetizer.is_some();
                     if rtp_mode && self.rtcp_sr_interval_ns.is_some() {
                         self.ensure_socket()?;
-                        let mut goodbye = self.sender_counters.sender_report(
-                            self.ssrc,
-                            rtcp::ntp_now(),
-                            self.last_rtp_ts,
-                        );
+                        // a sink that sent no RTP has no RTP time to pair with the wall clock
+                        let mut goodbye = match self.last_rtp_ts {
+                            Some(last_rtp_ts) => {
+                                self.sender_reports_sent += 1;
+                                self.sender_counters.sender_report(
+                                    self.ssrc,
+                                    rtcp::ntp_now(),
+                                    last_rtp_ts,
+                                )
+                            }
+                            None => rtcp::build_receiver_report(self.ssrc, &[]),
+                        };
                         goodbye.extend(rtcp::build_bye(self.ssrc));
                         self.send_datagram(&goodbye).await?;
-                        self.sender_reports_sent += 1;
                     }
                 }
                 // A seek does not reset the RTP sequence: a receiver tracks loss
