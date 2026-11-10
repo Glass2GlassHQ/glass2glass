@@ -623,7 +623,7 @@ fn derive_output_caps(codec: VideoCodec, input: &Caps) -> CapsSet {
             height: height.clone(),
             framerate: framerate.clone(),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
-            pixel_aspect: _,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         }),
         _ => CapsSet::from_alternatives(Vec::new()),
