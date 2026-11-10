@@ -444,13 +444,21 @@ impl DigestGate {
     }
 }
 
+#[derive(Clone, Copy)]
+enum RecorderDrop {
+    Never,
+    // at the first RTP packet stamped at or after this timestamp
+    FromRtpTimestamp(u32),
+    // on receiving TEARDOWN, without answering it
+    AtTeardown,
+}
+
 // one publisher against g2g's RTSP responder, recording what it announces and sends
-// with `drop_from_timestamp`, the connection closes at the first RTP packet stamped at or after it
 async fn record_one_publisher(
     listener: &tokio::net::TcpListener,
     gate: Option<DigestGate>,
     mut responder: RtspResponder,
-    drop_from_timestamp: Option<u32>,
+    drop: RecorderDrop,
 ) -> RecordedPublish {
     let (mut conn, _) = listener.accept().await.expect("publisher connects");
     let mut recorded = RecordedPublish::default();
@@ -465,7 +473,8 @@ async fn record_one_publisher(
                 let (channel, packet, consumed) =
                     (frame.channel, frame.packet.to_vec(), frame.consumed);
                 let is_rtp = channel % 2 == 0;
-                if is_rtp && drop_from_timestamp.is_some_and(|ts| rtp_timestamp(&packet) >= ts) {
+                let dropping = matches!(drop, RecorderDrop::FromRtpTimestamp(timestamp) if rtp_timestamp(&packet) >= timestamp);
+                if is_rtp && dropping {
                     return recorded;
                 }
                 recorded.channels.entry(channel).or_default().push(packet);
@@ -488,6 +497,9 @@ async fn record_one_publisher(
                     conn.write_all(refusal.as_bytes()).await.unwrap();
                     continue;
                 }
+            }
+            if request.method == "TEARDOWN" && matches!(drop, RecorderDrop::AtTeardown) {
+                return recorded;
             }
             if request.method == "ANNOUNCE" {
                 recorded.announced_sdp = String::from_utf8(request.body.clone()).unwrap();
@@ -528,7 +540,7 @@ async fn publish_and_record(
     let recorder = async {
         tokio::time::timeout(
             SERVER_DEADLINE,
-            record_one_publisher(&listener, gate, responder, None),
+            record_one_publisher(&listener, gate, responder, RecorderDrop::Never),
         )
         .await
         .expect("recorder finishes")
@@ -871,7 +883,7 @@ async fn a_stalled_upstream_still_gets_keepalives_and_sender_reports() {
     let recorder = async {
         tokio::time::timeout(
             SERVER_DEADLINE,
-            record_one_publisher(&listener, None, responder, None),
+            record_one_publisher(&listener, None, responder, RecorderDrop::Never),
         )
         .await
         .expect("recorder finishes")
@@ -981,11 +993,50 @@ async fn dropped_connection_publish(reconnect_attempts: u64) -> DroppedConnectio
 
 async fn record_until_the_drop(listener: &tokio::net::TcpListener) -> RecordedPublish {
     let drop_at = rtp_timestamp_of_frame(DROPPED_FRAME);
-    record_one_publisher(listener, None, recorder_responder(), Some(drop_at)).await
+    record_one_publisher(
+        listener,
+        None,
+        recorder_responder(),
+        RecorderDrop::FromRtpTimestamp(drop_at),
+    )
+    .await
 }
 
 fn rtp_timestamp_of_frame(index: usize) -> u32 {
     (index as u64 * FRAME_PERIOD_NS * u64::from(MediaClock::VIDEO_RATE_HZ) / NS_PER_SECOND) as u32
+}
+
+#[tokio::test]
+async fn eos_succeeds_when_the_server_closes_before_answering_teardown() {
+    let (listener, location) = recorder_listener().await;
+    let pads = [video_pad()];
+    let mut sink = RtspClientSink::new(pads.len(), location);
+    let recorder = async {
+        tokio::time::timeout(
+            SERVER_DEADLINE,
+            record_one_publisher(
+                &listener,
+                None,
+                recorder_responder(),
+                RecorderDrop::AtTeardown,
+            ),
+        )
+        .await
+        .expect("recorder finishes")
+    };
+    let send = async {
+        publish_frames(&mut sink, &pads, Duration::ZERO).await?;
+        end_streams(&mut sink, pads.len()).await
+    };
+    let (recorded, result) = tokio::join!(recorder, send);
+    assert!(
+        recorded
+            .requests
+            .iter()
+            .any(|request| request.starts_with("TEARDOWN")),
+        "the sink sent TEARDOWN"
+    );
+    result.expect("the stream was published whole, so EOS succeeds");
 }
 
 #[tokio::test]
@@ -997,7 +1048,8 @@ async fn a_dropped_connection_republishes_from_the_next_keyframe() {
     } = dropped_connection_publish(1).await;
     let recorders = async {
         let first = record_until_the_drop(&listener).await;
-        let second = record_one_publisher(&listener, None, recorder_responder(), None).await;
+        let second =
+            record_one_publisher(&listener, None, recorder_responder(), RecorderDrop::Never).await;
         (first, second)
     };
     let send = async {
@@ -1046,14 +1098,14 @@ async fn a_connection_dropped_during_a_stall_is_republished_before_upstream_resu
     let recorders = async {
         let first = tokio::time::timeout(
             RECORDER_CLOSES_AFTER,
-            record_one_publisher(&listener, None, recorder_responder(), None),
+            record_one_publisher(&listener, None, recorder_responder(), RecorderDrop::Never),
         )
         .await;
         assert!(
             first.is_err(),
             "the first session was still up at the close"
         );
-        record_one_publisher(&listener, None, recorder_responder(), None).await
+        record_one_publisher(&listener, None, recorder_responder(), RecorderDrop::Never).await
     };
     let send = async {
         let mut discard = Capture::default();

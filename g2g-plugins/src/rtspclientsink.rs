@@ -711,8 +711,22 @@ impl PublishSession {
 
     async fn teardown(&mut self) -> Result<(), PublishError> {
         let url = self.request_url.clone();
-        let response = self.control.exchange("TEARDOWN", &url, &[], b"").await?;
-        Ok(require_ok("TEARDOWN", &response)?)
+        match self.control.exchange("TEARDOWN", &url, &[], b"").await {
+            Ok(response) => Ok(require_ok("TEARDOWN", &response)?),
+            // servers that close the control connection have already ended the session
+            Err(PublishError::Closed) => Ok(()),
+            Err(PublishError::Io(error))
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::BrokenPipe
+                        | std::io::ErrorKind::ConnectionReset
+                        | std::io::ErrorKind::ConnectionAborted
+                ) =>
+            {
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
     }
 }
 
