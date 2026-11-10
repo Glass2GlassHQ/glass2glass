@@ -659,7 +659,15 @@ at the display size (gst's rule: keep the stored height when the display aspect
 divides it, else the width) and, with `force-aspect-ratio` on (the default),
 letterboxes the picture through the render pass viewport when the window takes
 another shape. `waylandsink` scales its fixed-size surface to the display size
-through `wp_viewporter`. The caps string field is
+through `wp_viewporter`. Encoders carry the input ratio to their output caps.
+`x264enc` and `ffmpegenc` set libavcodec's `sample_aspect_ratio`, which its encoders
+write as the VUI sample aspect, and `nvenc` sets NVENC's display aspect, from which
+the driver derives it. `openh264enc`, `vpxenc` and `av1enc` carry it on the caps
+only. `mp4mux` writes a `pasp` box for an exact ratio and widens the `tkhd` width
+by it, as qtmux and ffmpeg do. `matroskamux` writes nothing for square pixels, else
+the reduced display aspect under `DisplayUnit` 3, or in a WebM file, which allows
+only pixels, a display size with one side stretched and rounded (gst's formula).
+`y4menc` writes `A` for an exact ratio. The caps string field is
 `pixel-aspect-ratio=n/d`, printed only for an exact value. The wire format carries
 it from version 5.
 

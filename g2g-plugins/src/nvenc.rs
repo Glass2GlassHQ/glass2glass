@@ -73,9 +73,11 @@ use g2g_core::caps::framerate_q16_to_fraction;
 use g2g_core::memory::{CudaKeepAlive, DomainSet, MemoryDomainKind, OwnedCudaBuffer};
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError,
-    HardwareError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError,
-    PropKind, PropValue, PropertySpec, Rate, RawVideoFormat, VideoCodec,
+    HardwareError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
+    PixelAspect, PropError, PropKind, PropValue, PropertySpec, Rate, RawVideoFormat, VideoCodec,
 };
+
+use crate::display_aspect::display_aspect;
 
 /// Default constant target bitrate (bits/second). 4 Mbps, a 1080p30 default that
 /// matches [`crate::ffmpegenc`].
@@ -115,6 +117,8 @@ pub struct NvEnc {
     /// [`coded_colorimetry`] narrows it to what the encoded YUV really is.
     /// Written into the SPS VUI colour description and carried on the output caps.
     colorimetry: g2g_core::Colorimetry,
+    // set as the display aspect NVENC derives the VUI sample aspect from, and carried on the output caps
+    pixel_aspect: PixelAspect,
     bitrate_bps: u32,
     /// Frames between IDRs; negative means an infinite GOP (IDRs on demand only).
     gop_size: i32,
@@ -216,6 +220,7 @@ impl NvEnc {
             input_format: RawVideoFormat::Nv12,
             codec: VideoCodec::H264,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: PixelAspect::Any,
             bitrate_bps: DEFAULT_BITRATE_BPS,
             gop_size: DEFAULT_GOP_SIZE,
             repeat_sequence_header: false,
@@ -358,7 +363,7 @@ impl NvEnc {
             height: Dim::Fixed(self.height),
             framerate: self.framerate.clone(),
             colorimetry: self.colorimetry,
-            pixel_aspect: g2g_core::PixelAspect::Any,
+            pixel_aspect: self.pixel_aspect,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         }
     }
@@ -452,7 +457,7 @@ impl NvEnc {
         // SAFETY: the NVENC param structs are plain old data (ints, pointers,
         // reserved arrays); all-zero is a valid initial state we then version-tag.
         let mut init: ffi::InitializeParams = unsafe { core::mem::zeroed() };
-        self.fill_init_params(&mut init, &mut config);
+        self.fill_init_params(&mut init, &mut config)?;
         let init_fn = funcs.nv_enc_initialize_encoder.ok_or(hw())?;
         // SAFETY: valid encoder handle; `init` and the `config` it points at are
         // fully initialized and live across this call (the driver copies them).
@@ -543,18 +548,33 @@ impl NvEnc {
     /// Fill an `NV_ENC_INITIALIZE_PARAMS` for this element's geometry / codec,
     /// pointing at `config`. Shared by session open and live reconfigure; `config`
     /// must outlive the call that consumes the params (the driver copies them).
-    fn fill_init_params(&self, init: &mut ffi::InitializeParams, config: *mut ffi::Config) {
+    fn fill_init_params(
+        &self,
+        init: &mut ffi::InitializeParams,
+        config: *mut ffi::Config,
+    ) -> Result<(), G2gError> {
         init.version = ffi::NV_ENC_INITIALIZE_PARAMS_VER;
         init.encode_guid = self.encode_guid();
         init.preset_guid = ffi::NV_ENC_PRESET_P4_GUID;
         init.encode_width = self.width;
         init.encode_height = self.height;
-        init.dar_width = self.width;
-        init.dar_height = self.height;
+        (init.dar_width, init.dar_height) = self.display_aspect_ratio()?;
         (init.frame_rate_num, init.frame_rate_den) = self.framerate_fraction();
         init.enable_ptd = 1; // let NVENC decide picture types (we force IDRs per-pic)
         init.tuning_info = ffi::NV_ENC_TUNING_INFO_LOW_LATENCY;
         init.encode_config = config;
+        Ok(())
+    }
+
+    // NVENC writes the VUI sample aspect that turns the coded size into this display aspect
+    fn display_aspect_ratio(&self) -> Result<(u32, u32), G2gError> {
+        if self.pixel_aspect == PixelAspect::Any {
+            return Ok((self.width, self.height));
+        }
+        let (width, height) = display_aspect(self.width, self.height, self.pixel_aspect)
+            .ok_or(G2gError::CapsMismatch)?;
+        let fit = |side: u128| u32::try_from(side).map_err(|_| G2gError::CapsMismatch);
+        Ok((fit(width)?, fit(height)?))
     }
 
     /// Re-apply the rate control / GOP settings to a live session via
@@ -593,7 +613,7 @@ impl NvEnc {
         // SAFETY: NVENC param structs are POD; all-zero until version-tagged.
         let mut reconf: ffi::ReconfigureParams = unsafe { core::mem::zeroed() };
         reconf.version = ffi::NV_ENC_RECONFIGURE_PARAMS_VER;
-        self.fill_init_params(&mut reconf.re_init_encode_params, &mut config);
+        self.fill_init_params(&mut reconf.re_init_encode_params, &mut config)?;
         // flags = 0: no encoder reset, no forced IDR. A CBR retarget is applied
         // smoothly from the next frame.
         reconf.flags = 0;
@@ -1030,7 +1050,7 @@ impl AsyncElement for NvEnc {
                 height,
                 framerate,
                 colorimetry,
-                pixel_aspect: _,
+                pixel_aspect,
                 interlace: _,
             } => CapsSet::one(Caps::CompressedVideo {
                 codec,
@@ -1038,7 +1058,7 @@ impl AsyncElement for NvEnc {
                 height: height.clone(),
                 framerate: framerate.clone(),
                 colorimetry: coded_colorimetry(*format, *colorimetry),
-                pixel_aspect: g2g_core::PixelAspect::Any,
+                pixel_aspect: *pixel_aspect,
                 alignment: g2g_core::BitstreamAlignment::Unspecified,
             }),
             _ => CapsSet::from_alternatives(Vec::new()),
@@ -1059,7 +1079,7 @@ impl AsyncElement for NvEnc {
             height,
             framerate,
             colorimetry,
-            pixel_aspect: _,
+            pixel_aspect,
             interlace: _,
         } = absolute_caps
         else {
@@ -1090,6 +1110,7 @@ impl AsyncElement for NvEnc {
         self.input_format = *format;
         self.framerate = framerate.clone();
         self.colorimetry = coded_colorimetry(*format, *colorimetry);
+        self.pixel_aspect = *pixel_aspect;
         // The NVENC session opens lazily on the first frame (it needs the frame's
         // CUDA context), so configure only records geometry.
         self.configured = true;

@@ -317,6 +317,9 @@ libraries installed.
   codec path on Raspberry Pi and most ARM SoCs (gst `v4l2h264dec`,
   `v4l2h264enc`, `v4l2slh264dec`).
 - Run `vaav1enc` on a GPU with VA-API AV1 encode (AMD RDNA3, Intel Arc).
+- Make `filesrc ! y4mdec ! vpxenc` run: `y4mdec` negotiates on a 1x1, 1 fps
+  placeholder, and `vpxenc`, `x264enc` and `av1enc` fail to open their encoder at
+  that size in `configure_pipeline`.
 - **Pure-Rust / wasm decode** to drop the ffmpeg FFI: VP8 / VP9 decode and a
   pure-Rust Opus path (see the roadmap for why both are blocked).
 
@@ -327,6 +330,19 @@ libraries installed.
   survives a re-encode there too.
 - Tag the raw output of the platform decoders that still leave colorimetry
   unknown (Media Foundation, VideoToolbox, MediaCodec).
+
+## Pixel aspect ratio
+
+- Write the VUI sample aspect from `openh264enc` once the `openh264` crate can
+  set `bAspectRatioPresent`, and carry the caps ratio through `mfencode`,
+  `vtencode`, `mediacodecenc` and `webcodecsencode` into their bitstreams.
+- Letterbox `kmssink` on an overlay plane with source and destination
+  rectangles, and size and letterbox `glsink`, `cudaglsink`, `d3d11videosink`
+  and `metalvideosink` by display aspect behind `force-aspect-ratio`.
+- Keep the display aspect through `videoconvertscale` and the GPU scalers as
+  `videoscale` does, and pick the output width that keeps it when downstream
+  pins a ratio.
+- Map the caps ratio to the widescreen SD modes of `decklinkvideosink`.
 
 ## Transforms and effects
 

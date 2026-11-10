@@ -21,8 +21,8 @@ use core::ffi::c_int;
 
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError,
-    HardwareError, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
-    PropValue, PropertySpec, Rate, RawVideoFormat, VideoCodec,
+    HardwareError, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PixelAspect, PropError,
+    PropKind, PropValue, PropertySpec, Rate, RawVideoFormat, VideoCodec,
 };
 
 #[allow(non_camel_case_types, dead_code, unreachable_pub)]
@@ -54,6 +54,8 @@ pub struct VpxEnc {
     width: u32,
     height: u32,
     framerate: Rate,
+    // carried on the output caps for the muxer, VP8 and VP9 have no sample aspect field
+    pixel_aspect: PixelAspect,
     enc: Option<VpxContext>,
     emitted: u64,
     caps_sent: bool,
@@ -90,6 +92,7 @@ impl VpxEnc {
             width: 0,
             height: 0,
             framerate: Rate::Any,
+            pixel_aspect: PixelAspect::Any,
             enc: None,
             emitted: 0,
             caps_sent: false,
@@ -133,7 +136,7 @@ impl VpxEnc {
             height: Dim::Fixed(self.height),
             framerate: self.framerate.clone(),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
-            pixel_aspect: g2g_core::PixelAspect::Any,
+            pixel_aspect: self.pixel_aspect,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         }
     }
@@ -439,6 +442,7 @@ impl AsyncElement for VpxEnc {
                 width,
                 height,
                 framerate,
+                pixel_aspect,
                 ..
             } => CapsSet::one(Caps::CompressedVideo {
                 codec,
@@ -446,7 +450,7 @@ impl AsyncElement for VpxEnc {
                 height: height.clone(),
                 framerate: framerate.clone(),
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
-                pixel_aspect: g2g_core::PixelAspect::Any,
+                pixel_aspect: *pixel_aspect,
                 alignment: g2g_core::BitstreamAlignment::Unspecified,
             }),
             _ => CapsSet::from_alternatives(Vec::new()),
@@ -459,6 +463,7 @@ impl AsyncElement for VpxEnc {
             width,
             height,
             framerate,
+            pixel_aspect,
             ..
         } = absolute_caps
         else {
@@ -471,6 +476,7 @@ impl AsyncElement for VpxEnc {
         self.width = *w;
         self.height = *h;
         self.framerate = framerate.clone();
+        self.pixel_aspect = *pixel_aspect;
         self.build_encoder()?;
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)

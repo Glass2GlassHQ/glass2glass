@@ -39,9 +39,9 @@ use g2g_core::log::short_type_name;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
     split_tags, AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, Chapter,
-    ClosedCaptionFormat, ConfigureOutcome, Dim, ElementMetadata, FrameTiming, G2gError,
-    InputAggregator, MemoryDomain, MultiInputElement, OutputSink, PipelinePacket, PropError,
-    PropKind, PropValue, PropertySpec, Rate, TagList, TextFormat, VideoCodec,
+    ClosedCaptionFormat, ConfigureOutcome, ElementMetadata, FrameTiming, G2gError, InputAggregator,
+    MemoryDomain, MultiInputElement, OutputSink, PipelinePacket, PixelAspect, PropError, PropKind,
+    PropValue, PropertySpec, Rate, TagList, TextFormat, VideoCodec,
 };
 
 use g2g_core::caps::framerate_q16_period_ns;
@@ -50,7 +50,8 @@ use g2g_core::time::ns_to_ticks;
 use crate::aacparse::{is_leading_aac_config, muxer_access_unit, muxer_audio_specific_config};
 use crate::cea::{build_cdp, parse_cc_data, CcTriple};
 use crate::fmp4mux::{
-    av1c_record, parameter_sets, split_annexb, video_sample, visual_sample_entry,
+    av1c_record, h26x_sample_config, parameter_sets, split_annexb, video_sample,
+    visual_sample_entry, VideoGeometry,
 };
 use crate::mp4audiosink::esds;
 use crate::mp4box::{
@@ -105,8 +106,7 @@ enum PadKind {
 pub(crate) enum TrackInit {
     Video {
         codec: VideoCodec,
-        width: u32,
-        height: u32,
+        geometry: VideoGeometry,
         param_sets: Vec<Vec<u8>>,
     },
     Audio {
@@ -155,8 +155,8 @@ pub struct Mp4MuxN {
     /// Per-pad track init, captured from the first AU. Geometry comes from the
     /// caps; the codec config comes in-band from the first AU.
     inits: Vec<Option<TrackInit>>,
-    /// Per-pad caps geometry (video width/height), recorded at configure.
-    dims: Vec<(u32, u32)>,
+    /// Per-pad video caps geometry, recorded at configure.
+    geometry: Vec<VideoGeometry>,
     agg: InputAggregator<Frame>,
     /// Per-track accumulated decode time in that track's timescale (`tfdt`).
     decode_time: Vec<u64>,
@@ -303,7 +303,7 @@ impl Mp4MuxN {
             inputs,
             kinds: alloc::vec![None; inputs],
             inits: alloc::vec![None; inputs],
-            dims: alloc::vec![(0, 0); inputs],
+            geometry: alloc::vec![VideoGeometry::default(); inputs],
             agg: InputAggregator::new(inputs),
             decode_time: alloc::vec![0; inputs],
             prev_dts_ns: alloc::vec![None; inputs],
@@ -592,7 +592,7 @@ impl Mp4MuxN {
         }
         match self.kinds[input] {
             Some(PadKind::Video { codec, .. }) => {
-                let (w, h) = self.dims[input];
+                let geometry = self.geometry[input];
                 match codec {
                     VideoCodec::H264 | VideoCodec::H265 => {
                         let nalus = split_annexb(au);
@@ -603,8 +603,7 @@ impl Mp4MuxN {
                                 param_sets.iter().map(|s| s.to_vec()).collect();
                             self.inits[input] = Some(TrackInit::Video {
                                 codec,
-                                width: w,
-                                height: h,
+                                geometry,
                                 param_sets: owned,
                             });
                         }
@@ -615,8 +614,7 @@ impl Mp4MuxN {
                         if let Some((_, obu)) = crate::av1parse::seq_header_obu(au) {
                             self.inits[input] = Some(TrackInit::Video {
                                 codec,
-                                width: w,
-                                height: h,
+                                geometry,
                                 param_sets: alloc::vec![obu.to_vec()],
                             });
                         }
@@ -626,8 +624,7 @@ impl Mp4MuxN {
                         if let Some(color) = crate::vp9parse::keyframe_color_config(au) {
                             self.inits[input] = Some(TrackInit::Video {
                                 codec,
-                                width: w,
-                                height: h,
+                                geometry,
                                 param_sets: alloc::vec![vp9_vpcc_record(color)?.to_vec()],
                             });
                         }
@@ -637,8 +634,7 @@ impl Mp4MuxN {
                     _ => {
                         self.inits[input] = Some(TrackInit::Video {
                             codec,
-                            width: w,
-                            height: h,
+                            geometry,
                             param_sets: Vec::new(),
                         });
                     }
@@ -1187,13 +1183,8 @@ impl MultiInputElement for Mp4MuxN {
         }
         let kind = Self::pad_kind_for(absolute_caps)
             .ok_or_else(|| refused_input(short_type_name::<Self>(), absolute_caps))?;
-        if let Caps::CompressedVideo {
-            width: Dim::Fixed(w),
-            height: Dim::Fixed(h),
-            ..
-        } = absolute_caps
-        {
-            self.dims[input] = (*w, *h);
+        if let Some(geometry) = VideoGeometry::from_caps(absolute_caps) {
+            self.geometry[input] = geometry;
         }
         // A text track's `trak` needs nothing from the stream, so it is ready now:
         // the first cue can be many seconds in, and the `moov` (which waits on
@@ -1638,20 +1629,34 @@ struct TrakMedia {
     media_header: Vec<u8>,
     sample_entry: Vec<u8>,
     timescale: u32,
-    dims: (u32, u32),
+    /// The `tkhd` width and height, 16.16 fixed point.
+    presentation_size: (u32, u32),
     is_video: bool,
+}
+
+// ISO 14496-12 sizes a track header by its presentation, so gst and ffmpeg widen it by the pixel aspect
+fn presentation_size(geometry: &VideoGeometry) -> (u32, u32) {
+    let (numerator, denominator) = match geometry.pixel_aspect {
+        PixelAspect::Any => (1, 1),
+        PixelAspect::Exact(ratio) => (ratio.numerator(), ratio.denominator()),
+    };
+    let width =
+        (u128::from(geometry.width) << 16) * u128::from(numerator) / u128::from(denominator);
+    (
+        u32::try_from(width).unwrap_or(u32::MAX),
+        geometry.height << 16,
+    )
 }
 
 fn trak_media(init: &TrackInit) -> TrakMedia {
     match init {
         TrackInit::Video {
             codec,
-            width,
-            height,
+            geometry,
             param_sets,
         } => {
-            let sample_entry = match codec {
-                VideoCodec::Vp8 => vp_sample_entry(*codec, *width, *height, VP8_VPCC_RECORD),
+            let (fourcc, config): (&[u8; 4], Vec<u8>) = match codec {
+                VideoCodec::Vp8 => (b"vp08", full_box(b"vpcC", 1, 0, &VP8_VPCC_RECORD)),
                 VideoCodec::Vp9 => {
                     let record = param_sets
                         .first()
@@ -1659,7 +1664,7 @@ fn trak_media(init: &TrackInit) -> TrakMedia {
                             <[u8; VPCC_RECORD_LEN]>::try_from(record.as_slice()).ok()
                         })
                         .expect("capture_init stores the keyframe's vpcC record");
-                    vp_sample_entry(*codec, *width, *height, record)
+                    (b"vp09", full_box(b"vpcC", 1, 0, &record))
                 }
                 VideoCodec::Av1 => {
                     // The captured init is the sequence-header OBU (see
@@ -1668,19 +1673,19 @@ fn trak_media(init: &TrackInit) -> TrakMedia {
                     let record = crate::av1parse::seq_header_obu(obu)
                         .map(|(seq, _)| av1c_record(&seq, obu))
                         .unwrap_or_default();
-                    av1_sample_entry(*width, *height, &record)
+                    (b"av01", mp4_box(b"av1C", &record))
                 }
                 _ => {
                     let refs: Vec<&[u8]> = param_sets.iter().map(|v| v.as_slice()).collect();
-                    visual_sample_entry(*codec, *width, *height, &refs)
+                    h26x_sample_config(*codec, &refs)
                 }
             };
             TrakMedia {
                 handler: b"vide",
                 media_header: full_box(b"vmhd", 0, 1, &[0u8; 8]),
-                sample_entry,
+                sample_entry: visual_sample_entry(fourcc, geometry, &config),
                 timescale: VIDEO_TIMESCALE,
-                dims: (*width, *height),
+                presentation_size: presentation_size(geometry),
                 is_video: true,
             }
         }
@@ -1689,7 +1694,7 @@ fn trak_media(init: &TrackInit) -> TrakMedia {
             media_header: caption_media_header(),
             sample_entry: cc_sample_entry(*format),
             timescale: VIDEO_TIMESCALE,
-            dims: (0, 0),
+            presentation_size: (0, 0),
             is_video: false,
         },
         // `sbtl` + `nmhd` is what ffmpeg writes for a `tx3g` track, and one of the
@@ -1699,7 +1704,7 @@ fn trak_media(init: &TrackInit) -> TrakMedia {
             media_header: full_box(b"nmhd", 0, 0, &[]),
             sample_entry: tx3g_sample_entry(),
             timescale: TEXT_TIMESCALE,
-            dims: (0, 0),
+            presentation_size: (0, 0),
             is_video: false,
         },
         TrackInit::Audio {
@@ -1719,7 +1724,7 @@ fn trak_media(init: &TrackInit) -> TrakMedia {
                 media_header: full_box(b"smhd", 0, 0, &[0u8; 4]),
                 sample_entry,
                 timescale: *rate,
-                dims: (0, 0),
+                presentation_size: (0, 0),
                 is_video: false,
             }
         }
@@ -1829,57 +1834,6 @@ fn caption_media_header() -> Vec<u8> {
     p.extend_from_slice(&0u16.to_be_bytes()); // balance
     p.extend_from_slice(&0u16.to_be_bytes()); // reserved
     mp4_box(b"gmhd", &full_box(b"gmin", 0, 0, &p))
-}
-
-/// The VP8/VP9 `VisualSampleEntry` (`vp08` / `vp09`) with its `vpcC`
-/// VPCodecConfigurationBox (the VP-in-ISOBMFF binding). Geometry comes from the
-/// caps, the codec config from `vpcc_record`.
-fn vp_sample_entry(
-    codec: VideoCodec,
-    width: u32,
-    height: u32,
-    vpcc_record: [u8; VPCC_RECORD_LEN],
-) -> Vec<u8> {
-    let fourcc: &[u8; 4] = match codec {
-        VideoCodec::Vp8 => b"vp08",
-        _ => b"vp09",
-    };
-    let mut p = Vec::new();
-    p.extend_from_slice(&[0u8; 6]); // reserved
-    p.extend_from_slice(&1u16.to_be_bytes()); // data reference index
-    p.extend_from_slice(&[0u8; 16]); // pre_defined / reserved
-    p.extend_from_slice(&(width as u16).to_be_bytes());
-    p.extend_from_slice(&(height as u16).to_be_bytes());
-    p.extend_from_slice(&0x00480000u32.to_be_bytes()); // 72 dpi horiz
-    p.extend_from_slice(&0x00480000u32.to_be_bytes()); // 72 dpi vert
-    p.extend_from_slice(&[0u8; 4]); // reserved
-    p.extend_from_slice(&1u16.to_be_bytes()); // frame count
-    p.extend_from_slice(&[0u8; 32]); // compressor name
-    p.extend_from_slice(&0x0018u16.to_be_bytes()); // depth 24
-    p.extend_from_slice(&0xFFFFu16.to_be_bytes()); // pre_defined -1
-    p.extend_from_slice(&full_box(b"vpcC", 1, 0, &vpcc_record));
-    mp4_box(fourcc, &p)
-}
-
-/// The AV1 `VisualSampleEntry` (`av01`) with its `av1C`
-/// AV1CodecConfigurationBox (the AV1-in-ISOBMFF binding). Geometry comes from
-/// the caps; the record is built from the stream's own sequence header.
-fn av1_sample_entry(width: u32, height: u32, av1c: &[u8]) -> Vec<u8> {
-    let mut p = Vec::new();
-    p.extend_from_slice(&[0u8; 6]); // reserved
-    p.extend_from_slice(&1u16.to_be_bytes()); // data reference index
-    p.extend_from_slice(&[0u8; 16]); // pre_defined / reserved
-    p.extend_from_slice(&(width as u16).to_be_bytes());
-    p.extend_from_slice(&(height as u16).to_be_bytes());
-    p.extend_from_slice(&0x00480000u32.to_be_bytes()); // 72 dpi horiz
-    p.extend_from_slice(&0x00480000u32.to_be_bytes()); // 72 dpi vert
-    p.extend_from_slice(&[0u8; 4]); // reserved
-    p.extend_from_slice(&1u16.to_be_bytes()); // frame count
-    p.extend_from_slice(&[0u8; 32]); // compressor name
-    p.extend_from_slice(&0x0018u16.to_be_bytes()); // depth 24
-    p.extend_from_slice(&0xFFFFu16.to_be_bytes()); // pre_defined -1
-    p.extend_from_slice(&mp4_box(b"av1C", av1c));
-    mp4_box(b"av01", &p)
 }
 
 // vpcC v1: profile, level, bitDepth(4) chromaSubsampling(3) videoFullRangeFlag(1),
@@ -2009,7 +1963,7 @@ fn trak(
         media_header: header,
         sample_entry,
         timescale,
-        dims,
+        presentation_size,
         is_video,
     } = trak_media(init);
     let tkhd = {
@@ -2028,8 +1982,8 @@ fn trak(
         for m in MATRIX {
             p.extend_from_slice(&m.to_be_bytes());
         }
-        p.extend_from_slice(&(dims.0 << 16).to_be_bytes()); // 16.16 width
-        p.extend_from_slice(&(dims.1 << 16).to_be_bytes()); // 16.16 height
+        p.extend_from_slice(&presentation_size.0.to_be_bytes()); // 16.16 width
+        p.extend_from_slice(&presentation_size.1.to_be_bytes()); // 16.16 height
         full_box(b"tkhd", 0, 3, &p) // enabled | in_movie
     };
 
@@ -2166,6 +2120,7 @@ pub(crate) fn av_fragment(
 mod tests {
     use super::*;
     use crate::aacparse::{asc_from_adts, strip_adts};
+    use g2g_core::Dim;
 
     #[derive(Default)]
     struct CaptureSink {
@@ -2383,8 +2338,11 @@ mod tests {
         let tracks = [
             Some(TrackInit::Video {
                 codec: VideoCodec::H264,
-                width: 320,
-                height: 240,
+                geometry: VideoGeometry {
+                    width: 320,
+                    height: 240,
+                    pixel_aspect: PixelAspect::Any,
+                },
                 param_sets: alloc::vec![
                     alloc::vec![0x67, 0x42, 0x00, 0x1e],
                     alloc::vec![0x68, 0xce]
@@ -2523,8 +2481,11 @@ mod tests {
     fn vp9_track_writes_a_vp09_sample_entry_with_vpcc() {
         let tracks = [Some(TrackInit::Video {
             codec: VideoCodec::Vp9,
-            width: 320,
-            height: 240,
+            geometry: VideoGeometry {
+                width: 320,
+                height: 240,
+                pixel_aspect: PixelAspect::Any,
+            },
             param_sets: alloc::vec![VP8_VPCC_RECORD.to_vec()],
         })];
         let moov = av_moov(&tracks, None, &MoovMetadata::default(), &[]);

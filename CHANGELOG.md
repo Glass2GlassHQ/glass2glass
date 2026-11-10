@@ -98,6 +98,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M2182: video parsers carry the bitstream sample aspect in caps, and an upstream ratio overrides it.
 - M2183: mkvdemux, the MP4 demuxers and y4mdec carry the container pixel aspect ratio in caps.
 - M2184: decoders, videoscale, wgpusink and waylandsink keep the pixel aspect ratio.
+- M2185: encoders and the MP4, Matroska and y4m writers keep the pixel aspect ratio.
 
 Breaking: `TimecodeMeta.frames` is a `u16`, `WIRE_VERSION` is 4, and `RtpRecvConfig` gains `parameter_sets`.
 

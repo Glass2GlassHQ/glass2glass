@@ -8,7 +8,7 @@ use g2g_core::log::short_type_name;
 use g2g_core::{
     AsyncElement, BitstreamAlignment, Caps, CapsConstraint, CapsSet, Colorimetry, ConfigureOutcome,
     Dim, ElementMetadata, FrameTiming, G2gError, HardwareError, Interlace, OutputSink, PadTemplate,
-    PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate,
+    PadTemplates, PipelinePacket, PixelAspect, PropError, PropKind, PropValue, PropertySpec, Rate,
     RawVideoFormat, VideoCodec,
 };
 
@@ -165,6 +165,8 @@ pub struct OpenH264Enc {
     width: u32,
     height: u32,
     framerate: Rate,
+    // carried on the output caps only, the openh264 crate sets no VUI sample aspect
+    pixel_aspect: PixelAspect,
     encoder: Option<Encoder>,
     slice_count_pending: bool,
     emitted: u64,
@@ -195,6 +197,7 @@ impl OpenH264Enc {
             width: 0,
             height: 0,
             framerate: Rate::Any,
+            pixel_aspect: PixelAspect::Any,
             encoder: None,
             slice_count_pending: false,
             emitted: 0,
@@ -219,14 +222,14 @@ impl OpenH264Enc {
         }
     }
 
-    fn output_caps(width: Dim, height: Dim, framerate: Rate) -> Caps {
+    fn output_caps(width: Dim, height: Dim, framerate: Rate, pixel_aspect: PixelAspect) -> Caps {
         Caps::CompressedVideo {
             codec: VideoCodec::H264,
             width,
             height,
             framerate,
             colorimetry: Colorimetry::UNKNOWN,
-            pixel_aspect: g2g_core::PixelAspect::Any,
+            pixel_aspect,
             alignment: BitstreamAlignment::AccessUnit,
         }
     }
@@ -315,6 +318,7 @@ impl OpenH264Enc {
             Dim::Fixed(self.width),
             Dim::Fixed(self.height),
             self.framerate.clone(),
+            self.pixel_aspect,
         );
         let feedback = crate::encoder_base::emit_packets(
             &mut self.caps_sent,
@@ -375,11 +379,13 @@ impl AsyncElement for OpenH264Enc {
                 width,
                 height,
                 framerate,
+                pixel_aspect,
                 ..
             } => CapsSet::one(Self::output_caps(
                 width.clone(),
                 height.clone(),
                 framerate.clone(),
+                *pixel_aspect,
             )),
             _ => CapsSet::from_alternatives(Vec::new()),
         }))
@@ -391,6 +397,7 @@ impl AsyncElement for OpenH264Enc {
             width: Dim::Fixed(width),
             height: Dim::Fixed(height),
             framerate,
+            pixel_aspect,
             ..
         } = absolute_caps
         else {
@@ -399,6 +406,7 @@ impl AsyncElement for OpenH264Enc {
         self.width = *width;
         self.height = *height;
         self.framerate = framerate.clone();
+        self.pixel_aspect = *pixel_aspect;
         self.caps_sent = false;
         self.open()?;
         Ok(ConfigureOutcome::Accepted)
@@ -599,6 +607,7 @@ impl PadTemplates for OpenH264Enc {
                 Dim::Any,
                 Dim::Any,
                 Rate::Any,
+                PixelAspect::Any,
             ))),
         ])
     }

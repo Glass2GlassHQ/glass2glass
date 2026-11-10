@@ -2462,6 +2462,7 @@ pub struct MkvTrackSpec {
     pub codec: MkvCodec,
     pub width: u32,
     pub height: u32,
+    pub pixel_aspect: PixelAspect,
     pub channels: u8,
     pub sample_rate: u32,
 }
@@ -2484,6 +2485,7 @@ impl MkvTrackSpec {
             codec,
             width: 0,
             height: 0,
+            pixel_aspect: PixelAspect::Any,
             channels: 0,
             sample_rate: 0,
         }
@@ -2811,9 +2813,11 @@ impl MatroskaMuxer {
     ) -> Vec<u8> {
         let mut out = Vec::new();
         if !self.header_written {
-            // WebM only when every track is a WebM-subset codec, else matroska.
-            let all_webm = self.tracks.iter().all(|t| t.spec.codec.is_webm());
-            let doctype: &[u8] = if all_webm { b"webm" } else { b"matroska" };
+            let doctype: &[u8] = if is_webm(&self.tracks) {
+                b"webm"
+            } else {
+                b"matroska"
+            };
             out.extend_from_slice(&ebml_header(doctype));
             // The Segment size is 8 bytes either way: all-ones (unknown) for a
             // stream that runs to end of input, a reserved placeholder the
@@ -3151,6 +3155,11 @@ fn info_element(with_duration: bool) -> (Vec<u8>, Option<usize>) {
 /// `Name` / `Language` elements, where ffmpeg and every player look for
 /// them; the rest of its tags go to the `Tags` element.
 fn tracks_element(tracks: &[MkvTrackConfig], track_tags: &[(usize, TagList)]) -> Vec<u8> {
+    let display_elements = if is_webm(tracks) {
+        display_pixel_elements
+    } else {
+        display_aspect_elements
+    };
     let mut entries = Vec::new();
     for (i, track) in tracks.iter().enumerate() {
         let spec = &track.spec;
@@ -3199,6 +3208,7 @@ fn tracks_element(tracks: &[MkvTrackConfig], track_tags: &[(usize, TagList)]) ->
             1 => {
                 let mut v = elem_vec(ID_PIXEL_WIDTH, &uint_bytes(spec.width as u64));
                 v.extend_from_slice(&elem_vec(ID_PIXEL_HEIGHT, &uint_bytes(spec.height as u64)));
+                v.extend_from_slice(&display_elements(spec));
                 entry.extend_from_slice(&elem_vec(ID_VIDEO, &v));
             }
             2 => {
@@ -3214,6 +3224,57 @@ fn tracks_element(tracks: &[MkvTrackConfig], track_tags: &[(usize, TagList)]) ->
         entries.extend_from_slice(&elem_vec(ID_TRACK_ENTRY, &entry));
     }
     elem_vec(ID_TRACKS, &entries)
+}
+
+// WebM only when every track is a WebM-subset codec, else matroska
+fn is_webm(tracks: &[MkvTrackConfig]) -> bool {
+    tracks.iter().all(|t| t.spec.codec.is_webm())
+}
+
+const DISPLAY_UNIT_ASPECT_RATIO: u64 = 3;
+
+// the pixel aspect a video track declares, `None` for square or unknown pixels or an unset geometry
+fn non_square_pixel_aspect(spec: &MkvTrackSpec) -> Option<(u64, u64)> {
+    let PixelAspect::Exact(ratio) = spec.pixel_aspect else {
+        return None;
+    };
+    let declared = ratio != AspectRatio::SQUARE && spec.width > 0 && spec.height > 0;
+    declared.then(|| (u64::from(ratio.numerator()), u64::from(ratio.denominator())))
+}
+
+// gst's matroskamux stores the reduced display aspect, which needs no rounding
+fn display_aspect_elements(spec: &MkvTrackSpec) -> Vec<u8> {
+    let Some((pixel_numerator, pixel_denominator)) = non_square_pixel_aspect(spec) else {
+        return Vec::new();
+    };
+    let width = u64::from(spec.width) * pixel_numerator;
+    let height = u64::from(spec.height) * pixel_denominator;
+    let divisor = greatest_common_divisor(width, height);
+    [
+        elem_vec(ID_DISPLAY_WIDTH, &uint_bytes(width / divisor)),
+        elem_vec(ID_DISPLAY_HEIGHT, &uint_bytes(height / divisor)),
+        elem_vec(ID_DISPLAY_UNIT, &uint_bytes(DISPLAY_UNIT_ASPECT_RATIO)),
+    ]
+    .concat()
+}
+
+// WebM allows only pixel display units, so gst's matroskamux stretches one side and rounds it
+fn display_pixel_elements(spec: &MkvTrackSpec) -> Vec<u8> {
+    let Some((pixel_numerator, pixel_denominator)) = non_square_pixel_aspect(spec) else {
+        return Vec::new();
+    };
+    let (width, height) = (u64::from(spec.width), u64::from(spec.height));
+    let stretched = |side: u64, by: u64, over: u64| (side * by + over / 2) / over;
+    let (display_width, display_height) = if pixel_numerator > pixel_denominator {
+        (stretched(width, pixel_numerator, pixel_denominator), height)
+    } else {
+        (width, stretched(height, pixel_denominator, pixel_numerator))
+    };
+    [
+        elem_vec(ID_DISPLAY_WIDTH, &uint_bytes(display_width)),
+        elem_vec(ID_DISPLAY_HEIGHT, &uint_bytes(display_height)),
+    ]
+    .concat()
 }
 
 /// `SeekPreRoll` for an Opus track: the 80 ms the Matroska Opus mapping fixes as
@@ -5018,6 +5079,7 @@ mod tests {
             codec: MkvCodec::Vp9,
             width: 320,
             height: 240,
+            pixel_aspect: PixelAspect::Any,
             channels: 0,
             sample_rate: 0,
         };
@@ -5096,6 +5158,7 @@ mod tests {
             codec: MkvCodec::Vp9,
             width: 16,
             height: 16,
+            pixel_aspect: PixelAspect::Any,
             channels: 0,
             sample_rate: 0,
         };
@@ -5360,6 +5423,7 @@ mod tests {
                 codec: MkvCodec::Vp9,
                 width: 16,
                 height: 16,
+                pixel_aspect: PixelAspect::Any,
                 channels: 0,
                 sample_rate: 0,
             },
@@ -5370,6 +5434,7 @@ mod tests {
                 codec: MkvCodec::Opus,
                 width: 0,
                 height: 0,
+                pixel_aspect: PixelAspect::Any,
                 channels: 2,
                 sample_rate: 48_000,
             },
@@ -5488,6 +5553,7 @@ mod tests {
             codec: MkvCodec::Vp9,
             width: 16,
             height: 16,
+            pixel_aspect: PixelAspect::Any,
             channels: 0,
             sample_rate: 0,
         };
@@ -5535,6 +5601,7 @@ mod tests {
                 codec: MkvCodec::Opus,
                 width: 0,
                 height: 0,
+                pixel_aspect: PixelAspect::Any,
                 channels: 2,
                 sample_rate: 48_000,
             },
@@ -5675,6 +5742,7 @@ mod tests {
             codec: MkvCodec::Vp9,
             width: 16,
             height: 16,
+            pixel_aspect: PixelAspect::Any,
             channels: 0,
             sample_rate: 0,
         };
@@ -5740,6 +5808,7 @@ mod tests {
             codec: MkvCodec::Vp9,
             width: 16,
             height: 16,
+            pixel_aspect: PixelAspect::Any,
             channels: 0,
             sample_rate: 0,
         };
@@ -5767,6 +5836,7 @@ mod tests {
             codec: MkvCodec::Vp9,
             width: 16,
             height: 16,
+            pixel_aspect: PixelAspect::Any,
             channels: 0,
             sample_rate: 0,
         };
@@ -5789,6 +5859,7 @@ mod tests {
             codec: MkvCodec::Vp9,
             width: 16,
             height: 16,
+            pixel_aspect: PixelAspect::Any,
             channels: 0,
             sample_rate: 0,
         };
@@ -5820,6 +5891,7 @@ mod tests {
             codec: MkvCodec::Vp9,
             width: 16,
             height: 16,
+            pixel_aspect: PixelAspect::Any,
             channels: 0,
             sample_rate: 0,
         };
@@ -5851,6 +5923,7 @@ mod tests {
             codec: MkvCodec::Vp9,
             width: 16,
             height: 16,
+            pixel_aspect: PixelAspect::Any,
             channels: 0,
             sample_rate: 0,
         };
@@ -5880,6 +5953,7 @@ mod tests {
             codec: MkvCodec::Vp9,
             width: 16,
             height: 16,
+            pixel_aspect: PixelAspect::Any,
             channels: 0,
             sample_rate: 0,
         };
@@ -5920,6 +5994,7 @@ mod tests {
             codec: MkvCodec::Vp9,
             width: 16,
             height: 16,
+            pixel_aspect: PixelAspect::Any,
             channels: 0,
             sample_rate: 0,
         };

@@ -40,8 +40,8 @@ use alloc::vec::Vec;
 
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError,
-    OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue,
-    PropertySpec, Rate, RawVideoFormat, VideoCodec,
+    OutputSink, PadTemplate, PadTemplates, PipelinePacket, PixelAspect, PropError, PropKind,
+    PropValue, PropertySpec, Rate, RawVideoFormat, VideoCodec,
 };
 
 use rav1e::prelude::{
@@ -87,6 +87,8 @@ pub struct Av1Enc {
     /// The negotiated input colorimetry, written into the sequence header's
     /// `color_config` and carried on the compressed output caps.
     colorimetry: g2g_core::Colorimetry,
+    // carried on the output caps for the muxer, AV1 has no sample aspect field
+    pixel_aspect: PixelAspect,
     ctx: Option<RavCtx>,
     /// Source PTS keyed by `Packet::input_frameno`. Entries are removed as their
     /// packet is emitted, so this stays bounded to the encoder's lookahead window
@@ -143,6 +145,7 @@ impl Av1Enc {
             format: RawVideoFormat::I420,
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: PixelAspect::Any,
             ctx: None,
             pts_by_frameno: BTreeMap::new(),
             next_frameno: 0,
@@ -182,7 +185,7 @@ impl Av1Enc {
             height: Dim::Fixed(self.height),
             framerate: self.framerate.clone(),
             colorimetry: self.colorimetry,
-            pixel_aspect: g2g_core::PixelAspect::Any,
+            pixel_aspect: self.pixel_aspect,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         }
     }
@@ -568,7 +571,7 @@ impl AsyncElement for Av1Enc {
                 height,
                 framerate,
                 colorimetry,
-                pixel_aspect: _,
+                pixel_aspect,
                 interlace: _,
             } if chroma_for(*format).is_some() && codable(*colorimetry, *format) => {
                 CapsSet::one(Caps::CompressedVideo {
@@ -577,7 +580,7 @@ impl AsyncElement for Av1Enc {
                     height: height.clone(),
                     framerate: framerate.clone(),
                     colorimetry: *colorimetry,
-                    pixel_aspect: g2g_core::PixelAspect::Any,
+                    pixel_aspect: *pixel_aspect,
                     alignment: g2g_core::BitstreamAlignment::Unspecified,
                 })
             }
@@ -592,7 +595,7 @@ impl AsyncElement for Av1Enc {
             height,
             framerate,
             colorimetry,
-            pixel_aspect: _,
+            pixel_aspect,
             interlace: _,
         } = absolute_caps
         else {
@@ -609,6 +612,7 @@ impl AsyncElement for Av1Enc {
         self.format = *format;
         self.framerate = framerate.clone();
         self.colorimetry = *colorimetry;
+        self.pixel_aspect = *pixel_aspect;
         self.build_context()?;
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)

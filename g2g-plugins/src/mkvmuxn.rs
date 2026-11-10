@@ -45,14 +45,16 @@ use g2g_core::log::short_type_name;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
     split_tags, AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, Chapter,
-    ConfigureOutcome, Dim, ElementMetadata, FrameTiming, G2gError, InputAggregator, MemoryDomain,
-    MultiInputElement, OutputSink, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
-    SubPictureFormat, TagList, TextFormat, VideoCodec,
+    ConfigureOutcome, ElementMetadata, FrameTiming, G2gError, InputAggregator, MemoryDomain,
+    MultiInputElement, OutputSink, PipelinePacket, PixelAspect, PropError, PropKind, PropValue,
+    PropertySpec, SubPictureFormat, TagList, TextFormat, VideoCodec,
 };
 
 use crate::aacparse::{is_leading_aac_config, muxer_access_unit, muxer_audio_specific_config};
 use crate::dvbsub::DEFAULT_PAGE_ID;
-use crate::fmp4mux::{avcc_record, hvcc_record, parameter_sets, split_annexb, video_sample};
+use crate::fmp4mux::{
+    avcc_record, hvcc_record, parameter_sets, split_annexb, video_sample, VideoGeometry,
+};
 use crate::matroska::{
     default_page_blob, finalize_seekable, subpicture_block, subpicture_config,
     subpicture_mkv_codec, subtitle_format_from_str, subtitle_format_str, text_codec_private,
@@ -225,8 +227,7 @@ enum PadKind {
 enum TrackInit {
     Video {
         codec: VideoCodec,
-        width: u32,
-        height: u32,
+        geometry: VideoGeometry,
         param_sets: Vec<Vec<u8>>,
     },
     Audio {
@@ -266,8 +267,8 @@ pub struct MkvMuxN {
     /// Per-pad track init, captured from the first AU. Geometry comes from the
     /// caps; video parameter sets / audio ASC come in-band from the first AU.
     inits: Vec<Option<TrackInit>>,
-    /// Per-pad caps geometry (video width/height), recorded at configure.
-    dims: Vec<(u32, u32)>,
+    /// Per-pad video caps geometry, recorded at configure.
+    geometry: Vec<VideoGeometry>,
     agg: InputAggregator<Frame>,
     /// Built lazily once every track has its init (the Tracks element needs all).
     mux: Option<MatroskaMuxer>,
@@ -295,7 +296,7 @@ impl MkvMuxN {
             inputs,
             kinds: alloc::vec![None; inputs],
             inits: alloc::vec![None; inputs],
-            dims: alloc::vec![(0, 0); inputs],
+            geometry: alloc::vec![VideoGeometry::default(); inputs],
             agg: InputAggregator::new(inputs),
             mux: None,
             emitted: 0,
@@ -461,7 +462,7 @@ impl MkvMuxN {
         }
         match self.kinds[input] {
             Some(PadKind::Video(codec)) => {
-                let (w, h) = self.dims[input];
+                let geometry = self.geometry[input];
                 match codec {
                     VideoCodec::H264 | VideoCodec::H265 => {
                         let nalus = split_annexb(au);
@@ -472,8 +473,7 @@ impl MkvMuxN {
                                 param_sets.iter().map(|s| s.to_vec()).collect();
                             self.inits[input] = Some(TrackInit::Video {
                                 codec,
-                                width: w,
-                                height: h,
+                                geometry,
                                 param_sets: owned,
                             });
                         }
@@ -484,8 +484,7 @@ impl MkvMuxN {
                         if let Some((_, obu)) = crate::av1parse::seq_header_obu(au) {
                             self.inits[input] = Some(TrackInit::Video {
                                 codec,
-                                width: w,
-                                height: h,
+                                geometry,
                                 param_sets: alloc::vec![obu.to_vec()],
                             });
                         }
@@ -495,8 +494,7 @@ impl MkvMuxN {
                     _ => {
                         self.inits[input] = Some(TrackInit::Video {
                             codec,
-                            width: w,
-                            height: h,
+                            geometry,
                             param_sets: Vec::new(),
                         });
                     }
@@ -652,8 +650,7 @@ fn track_config(init: &TrackInit, subtitle_format: TextFormat) -> MkvTrackConfig
     match init {
         TrackInit::Video {
             codec,
-            width,
-            height,
+            geometry,
             param_sets,
         } => {
             let refs: Vec<&[u8]> = param_sets.iter().map(|v| v.as_slice()).collect();
@@ -676,8 +673,9 @@ fn track_config(init: &TrackInit, subtitle_format: TextFormat) -> MkvTrackConfig
             MkvTrackConfig {
                 spec: MkvTrackSpec {
                     codec: mkv_codec,
-                    width: *width,
-                    height: *height,
+                    width: geometry.width,
+                    height: geometry.height,
+                    pixel_aspect: geometry.pixel_aspect,
                     channels: 0,
                     sample_rate: 0,
                 },
@@ -699,6 +697,7 @@ fn track_config(init: &TrackInit, subtitle_format: TextFormat) -> MkvTrackConfig
                     codec: mkv_codec,
                     width: 0,
                     height: 0,
+                    pixel_aspect: PixelAspect::Any,
                     channels: *channels,
                     sample_rate: *rate,
                 },
@@ -773,13 +772,8 @@ impl MultiInputElement for MkvMuxN {
     ) -> Result<ConfigureOutcome, G2gError> {
         let kind = Self::pad_kind_for(absolute_caps)
             .ok_or_else(|| refused_input(short_type_name::<Self>(), absolute_caps))?;
-        if let Caps::CompressedVideo {
-            width: Dim::Fixed(w),
-            height: Dim::Fixed(h),
-            ..
-        } = absolute_caps
-        {
-            self.dims[input] = (*w, *h);
+        if let Some(geometry) = VideoGeometry::from_caps(absolute_caps) {
+            self.geometry[input] = geometry;
         }
         // A text track's `TrackEntry` needs nothing from the stream, so it is
         // ready now: the first cue can be many seconds in, and the Tracks element
@@ -980,6 +974,7 @@ mod tests {
     use super::*;
     use crate::fmp4mux::{vp8_keyframe, vp9_keyframe};
     use crate::matroska::MatroskaDemuxer;
+    use g2g_core::Dim;
 
     /// A minimal Annex-B H.264 IDR access unit: SPS (type 7), PPS (type 8), IDR
     /// (type 5), each behind a 4-byte start code. The SPS carries 3 bytes after

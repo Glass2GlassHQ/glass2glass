@@ -356,8 +356,8 @@ fn decodebin_splices_the_y4m_decoder() {
 
 /// A decode / encode round trip reproduces the fixture's frames exactly and a
 /// header describing the same stream. Not a whole-file comparison: ffmpeg writes
-/// an `A` pixel-aspect parameter and an `X` extension g2g's caps carry nothing
-/// to reproduce, so the header is compared parameter by parameter.
+/// an `X` extension g2g's caps carry nothing to reproduce, so the header is
+/// compared parameter by parameter.
 #[tokio::test]
 async fn a_round_trip_reproduces_the_frames_and_the_header_fields() {
     for name in [I420_FIXTURE, I422_FIXTURE] {
@@ -386,18 +386,13 @@ async fn a_round_trip_reproduces_the_frames_and_the_header_fields() {
             "{name}: every frame's planes survive the round trip"
         );
         assert_eq!(written_frames.len() as u64, probe.frames, "{name}");
-        for tag in ['W', 'H', 'F', 'I', 'C'] {
+        for tag in ['W', 'H', 'F', 'I', 'A', 'C'] {
             assert_eq!(
                 parameter(&written_header, tag),
                 parameter(&source_header, tag),
                 "{name}: the {tag} parameter of `{written_header}` vs `{source_header}`"
             );
         }
-        assert_eq!(
-            parameter(&written_header, 'A'),
-            None,
-            "{name}: no pixel aspect is claimed, the caps carry none"
-        );
     }
 }
 

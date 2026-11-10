@@ -29,6 +29,7 @@ use core::pin::Pin;
 
 use alloc::boxed::Box;
 use alloc::format;
+use alloc::string::String;
 use alloc::vec::Vec;
 
 use g2g_core::caps::{framerate_q16_from_fraction, framerate_q16_to_fraction};
@@ -481,25 +482,29 @@ impl PadTemplates for Y4mDec {
 
 /// The stream header for a raw video stream, `None` for a format y4m cannot
 /// carry.
-///
-/// No `A` parameter: g2g caps carry no pixel aspect ratio, and writing `A1:1`
-/// would claim square pixels the stream never declared.
-fn stream_header(
-    format: RawVideoFormat,
-    width: u32,
-    height: u32,
-    framerate_q16: u32,
-    interlace: Interlace,
-) -> Option<Vec<u8>> {
-    let colourspace = format_colourspace(format)?;
-    let (num, den) = framerate_q16_to_fraction(framerate_q16);
-    let scan = match interlace {
+fn stream_header(header: &StreamHeader) -> Option<Vec<u8>> {
+    let colourspace = format_colourspace(header.format)?;
+    let StreamHeader {
+        width,
+        height,
+        framerate_num,
+        framerate_den,
+        ..
+    } = header;
+    let scan = match header.interlace {
         Interlace::Interleaved => 't',
         Interlace::Any | Interlace::Progressive => 'p',
     };
+    // an unknown pixel aspect writes no `A`, readers then assume square pixels as for `A0:0`
+    let pixel_aspect = match header.pixel_aspect {
+        PixelAspect::Any => String::new(),
+        PixelAspect::Exact(ratio) => format!(" A{}:{}", ratio.numerator(), ratio.denominator()),
+    };
     Some(
-        format!("{STREAM_MAGIC}W{width} H{height} F{num}:{den} I{scan} C{colourspace}\n")
-            .into_bytes(),
+        format!(
+            "{STREAM_MAGIC}W{width} H{height} F{framerate_num}:{framerate_den} I{scan}{pixel_aspect} C{colourspace}\n"
+        )
+        .into_bytes(),
     )
 }
 
@@ -661,14 +666,7 @@ impl AsyncElement for Y4mEnc {
                         Vec::new()
                     } else {
                         out.push(PipelinePacket::CapsChanged(y4m_caps())).await?;
-                        stream_header(
-                            header.format,
-                            header.width,
-                            header.height,
-                            header.framerate_q16(),
-                            header.interlace,
-                        )
-                        .ok_or(G2gError::CapsMismatch)?
+                        stream_header(&header).ok_or(G2gError::CapsMismatch)?
                     };
                     self.header_written = true;
                     bytes.reserve_exact(FRAME_MAGIC.len() + 1 + planes.len());
@@ -873,12 +871,31 @@ mod tests {
         assert_eq!(decode_error(&stream), Some(G2gError::CapsMismatch));
     }
 
+    // the header Y4mEnc writes for a 64x48 stream of unknown pixel aspect
+    fn written_header(
+        format: RawVideoFormat,
+        framerate_q16: u32,
+        interlace: Interlace,
+    ) -> StreamHeader {
+        let (framerate_num, framerate_den) = framerate_q16_to_fraction(framerate_q16);
+        StreamHeader {
+            format,
+            width: 64,
+            height: 48,
+            framerate_num,
+            framerate_den,
+            interlace,
+            pixel_aspect: PixelAspect::Any,
+            frame_bytes: 0,
+        }
+    }
+
     #[test]
     fn the_writer_and_the_reader_agree_on_every_colourspace_tag() {
         for format in y4m_formats() {
             let tag = format_colourspace(format).expect("a y4m format has a tag");
             assert_eq!(colourspace_format(tag), Some(format));
-            let header = stream_header(format, 64, 48, 25 << 16, Interlace::Progressive)
+            let header = stream_header(&written_header(format, 25 << 16, Interlace::Progressive))
                 .expect("a y4m format has a header");
             let line = &header[..header.len() - 1];
             assert_eq!(
@@ -919,13 +936,11 @@ mod tests {
         // The caps carry a Q16 rate, so 30000/1001 is written as the Q16 value
         // over 65536: the same rate to 6 decimal places, not the same fraction.
         let ntsc_q16 = ((30_000u64 << 16) / 1001) as u32;
-        let header = stream_header(
+        let header = stream_header(&written_header(
             RawVideoFormat::I422,
-            64,
-            48,
             ntsc_q16,
             Interlace::Interleaved,
-        )
+        ))
         .expect("a y4m format");
         assert_eq!(
             core::str::from_utf8(&header),
@@ -934,5 +949,21 @@ mod tests {
         let parsed = parse_stream_header(&header[..header.len() - 1]).expect("its own header");
         assert_eq!(parsed.interlace, Interlace::Interleaved);
         assert_eq!(parsed.framerate_q16(), ntsc_q16);
+    }
+
+    #[test]
+    fn the_writer_declares_a_known_pixel_aspect() {
+        let ntsc = AspectRatio::new(10, 11).expect("nonzero");
+        let header = StreamHeader {
+            pixel_aspect: PixelAspect::Exact(ntsc),
+            ..written_header(RawVideoFormat::I420, 25 << 16, Interlace::Progressive)
+        };
+        let line = stream_header(&header).expect("a y4m format");
+        assert_eq!(
+            core::str::from_utf8(&line),
+            Ok("YUV4MPEG2 W64 H48 F25:1 Ip A10:11 C420jpeg\n")
+        );
+        let parsed = parse_stream_header(&line[..line.len() - 1]).expect("its own header");
+        assert_eq!(parsed.pixel_aspect, PixelAspect::Exact(ntsc));
     }
 }

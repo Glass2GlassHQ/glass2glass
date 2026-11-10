@@ -78,7 +78,8 @@ use g2g_core::caps::framerate_q16_to_fraction;
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ColorRange, Colorimetry, ConfigureOutcome, Dim,
     ElementMetadata, G2gError, HardwareError, OutputSink, PadTemplate, PadTemplates,
-    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, RawVideoFormat, VideoCodec,
+    PipelinePacket, PixelAspect, PropError, PropKind, PropValue, PropertySpec, Rate,
+    RawVideoFormat, VideoCodec,
 };
 
 /// Default constant target bitrate (bits/second) when the caller sets none. 4
@@ -277,6 +278,8 @@ pub struct FfmpegVideoEnc {
     /// The negotiated input colour description, written into the VUI and onto
     /// the output caps. `UNKNOWN` for an untagged input: nothing is tagged.
     colorimetry: Colorimetry,
+    // written into the VUI sample aspect and onto the output caps
+    pixel_aspect: PixelAspect,
     /// Target constant bitrate (bits/second).
     bitrate_bps: usize,
     pass: Pass,
@@ -351,6 +354,7 @@ impl FfmpegVideoEnc {
             format: RawVideoFormat::I420,
             framerate: Rate::Any,
             colorimetry: Colorimetry::UNKNOWN,
+            pixel_aspect: PixelAspect::Any,
             bitrate_bps: DEFAULT_BITRATE_BPS,
             pass: Pass::Cbr,
             quantizer: Backend::Nvenc.default_quantizer(),
@@ -420,7 +424,7 @@ impl FfmpegVideoEnc {
             height: Dim::Fixed(self.height),
             framerate: self.framerate.clone(),
             colorimetry: self.colorimetry,
-            pixel_aspect: g2g_core::PixelAspect::Any,
+            pixel_aspect: self.pixel_aspect,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         }
     }
@@ -540,6 +544,13 @@ impl FfmpegVideoEnc {
         // which the low-latency streaming path wants.
         video.set_max_b_frames(0);
         set_color_description(&mut video, self.colorimetry)?;
+        // libavcodec's encoders write sample_aspect_ratio into the VUI, 0/1 is unknown and writes none
+        if let PixelAspect::Exact(ratio) = self.pixel_aspect {
+            let numerator = i32::try_from(ratio.numerator()).map_err(|_| G2gError::CapsMismatch)?;
+            let denominator =
+                i32::try_from(ratio.denominator()).map_err(|_| G2gError::CapsMismatch)?;
+            video.set_aspect_ratio(Rational::new(numerator, denominator));
+        }
 
         let opened = video
             .open_as_with(codec, self.open_options())
@@ -978,6 +989,7 @@ impl AsyncElement for FfmpegVideoEnc {
                 height,
                 framerate,
                 colorimetry,
+                pixel_aspect,
                 ..
             } if formats.contains(format) => CapsSet::one(Caps::CompressedVideo {
                 codec,
@@ -985,7 +997,7 @@ impl AsyncElement for FfmpegVideoEnc {
                 height: height.clone(),
                 framerate: framerate.clone(),
                 colorimetry: *colorimetry,
-                pixel_aspect: g2g_core::PixelAspect::Any,
+                pixel_aspect: *pixel_aspect,
                 alignment: g2g_core::BitstreamAlignment::Unspecified,
             }),
             _ => CapsSet::from_alternatives(Vec::new()),
@@ -999,6 +1011,7 @@ impl AsyncElement for FfmpegVideoEnc {
             height,
             framerate,
             colorimetry,
+            pixel_aspect,
             ..
         } = absolute_caps
         else {
@@ -1017,6 +1030,7 @@ impl AsyncElement for FfmpegVideoEnc {
         self.format = *format;
         self.framerate = framerate.clone();
         self.colorimetry = *colorimetry;
+        self.pixel_aspect = *pixel_aspect;
         self.open_encoder()?;
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)

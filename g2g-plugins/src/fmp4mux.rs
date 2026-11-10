@@ -6,7 +6,7 @@
 
 use alloc::vec::Vec;
 
-use g2g_core::VideoCodec;
+use g2g_core::{Caps, Dim, PixelAspect, VideoCodec};
 
 use crate::annexb::au_is_keyframe;
 // The Annex-B split / NAL-type / parameter-set / AVCC helpers moved to the
@@ -18,26 +18,47 @@ use crate::mp4box::mp4_box;
 
 // --- box writers ----------------------------------------------------------
 
-/// The visual sample entry for the track: `avc1`+`avcC` for H.264,
-/// `hvc1`+`hvcC` for H.265. `param_sets` is the ordered set the moov needs
-/// (SPS,PPS for H.264; VPS,SPS,PPS for H.265).
-pub(crate) fn visual_sample_entry(
-    codec: VideoCodec,
-    width: u32,
-    height: u32,
-    param_sets: &[&[u8]],
-) -> Vec<u8> {
-    let (fourcc, config): (&[u8; 4], Vec<u8>) = match codec {
-        VideoCodec::H265 => (b"hvc1", hvcc(param_sets)),
-        _ => (b"avc1", avcc(param_sets)),
-    };
+// the size of a video track's pictures and the aspect of their pixels, from its caps
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub(crate) struct VideoGeometry {
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) pixel_aspect: PixelAspect,
+}
 
+impl VideoGeometry {
+    // `None` for anything but compressed video of fixed size
+    pub(crate) fn from_caps(caps: &Caps) -> Option<Self> {
+        let Caps::CompressedVideo {
+            width: Dim::Fixed(width),
+            height: Dim::Fixed(height),
+            pixel_aspect,
+            ..
+        } = caps
+        else {
+            return None;
+        };
+        Some(Self {
+            width: *width,
+            height: *height,
+            pixel_aspect: *pixel_aspect,
+        })
+    }
+}
+
+/// The `VisualSampleEntry` box `fourcc` holding the codec's `config` box, and a
+/// `pasp` box when the pixel aspect is known.
+pub(crate) fn visual_sample_entry(
+    fourcc: &[u8; 4],
+    geometry: &VideoGeometry,
+    config: &[u8],
+) -> Vec<u8> {
     let mut p = Vec::new();
     p.extend_from_slice(&[0u8; 6]); // reserved
     p.extend_from_slice(&1u16.to_be_bytes()); // data reference index
     p.extend_from_slice(&[0u8; 16]); // pre_defined/reserved
-    p.extend_from_slice(&(width as u16).to_be_bytes());
-    p.extend_from_slice(&(height as u16).to_be_bytes());
+    p.extend_from_slice(&(geometry.width as u16).to_be_bytes());
+    p.extend_from_slice(&(geometry.height as u16).to_be_bytes());
     p.extend_from_slice(&0x00480000u32.to_be_bytes()); // 72 dpi horiz
     p.extend_from_slice(&0x00480000u32.to_be_bytes()); // 72 dpi vert
     p.extend_from_slice(&[0u8; 4]); // reserved
@@ -45,8 +66,28 @@ pub(crate) fn visual_sample_entry(
     p.extend_from_slice(&[0u8; 32]); // compressor name
     p.extend_from_slice(&0x0018u16.to_be_bytes()); // depth 24
     p.extend_from_slice(&0xFFFFu16.to_be_bytes()); // pre_defined -1
-    p.extend_from_slice(&config);
+    p.extend_from_slice(config);
+    if let PixelAspect::Exact(ratio) = geometry.pixel_aspect {
+        let spacing = [
+            ratio.numerator().to_be_bytes(),
+            ratio.denominator().to_be_bytes(),
+        ];
+        p.extend_from_slice(&mp4_box(b"pasp", &spacing.concat()));
+    }
     mp4_box(fourcc, &p)
+}
+
+/// The sample entry fourcc and config box for H.26x: `avc1`+`avcC` for H.264,
+/// `hvc1`+`hvcC` for H.265. `param_sets` is the ordered set the moov needs
+/// (SPS,PPS for H.264; VPS,SPS,PPS for H.265).
+pub(crate) fn h26x_sample_config(
+    codec: VideoCodec,
+    param_sets: &[&[u8]],
+) -> (&'static [u8; 4], Vec<u8>) {
+    match codec {
+        VideoCodec::H265 => (b"hvc1", hvcc(param_sets)),
+        _ => (b"avc1", avcc(param_sets)),
+    }
 }
 
 /// `avcC` decoder configuration record box. `param_sets` is [SPS, PPS].
