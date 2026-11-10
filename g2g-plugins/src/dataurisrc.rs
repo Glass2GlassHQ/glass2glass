@@ -356,7 +356,9 @@ mod tests {
         let src = DataUriSrc::new(png);
         assert_eq!(
             src.caps(),
-            Ok(crate::typefind::still_image_caps(g2g_core::VideoCodec::Png)),
+            Ok(crate::typefind::elementary_video_caps(
+                g2g_core::VideoCodec::Png
+            )),
             "the bytes decide the type, not the declaration"
         );
     }

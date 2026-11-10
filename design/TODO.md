@@ -317,9 +317,6 @@ libraries installed.
   codec path on Raspberry Pi and most ARM SoCs (gst `v4l2h264dec`,
   `v4l2h264enc`, `v4l2slh264dec`).
 - Run `vaav1enc` on a GPU with VA-API AV1 encode (AMD RDNA3, Intel Arc).
-- Make `filesrc ! y4mdec ! vpxenc` run: `y4mdec` negotiates on a 1x1, 1 fps
-  placeholder, and `vpxenc`, `x264enc` and `av1enc` fail to open their encoder at
-  that size in `configure_pipeline`.
 - **Pure-Rust / wasm decode** to drop the ffmpeg FFI: VP8 / VP9 decode and a
   pure-Rust Opus path (see the roadmap for why both are blocked).
 

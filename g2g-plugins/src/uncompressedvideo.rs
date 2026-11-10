@@ -4,7 +4,7 @@ use g2g_core::log::Target;
 use g2g_core::{g2g_warn, Caps, Dim, Interlace, Rate, RawVideoFormat};
 
 use crate::pixel::{frame_byte_size, row_bytes, tight_plane};
-use crate::typefind::PLACEHOLDER_FRAMERATE;
+use crate::typefind::{PLACEHOLDER_FRAMERATE, PLACEHOLDER_MIN_DIMENSION};
 
 // AVI biCompression, Matroska ColourSpace and QuickTime sample entry codes
 const RAW_VIDEO_FOURCCS: &[([u8; 4], RawVideoFormat)] = &[
@@ -238,7 +238,7 @@ pub(crate) fn raw_video_caps(
 
 pub(crate) fn raw_video_placeholder_caps(format: RawVideoFormat) -> Caps {
     let span = || Dim::Range {
-        min: 1,
+        min: PLACEHOLDER_MIN_DIMENSION,
         max: MAX_DIM,
     };
     raw_video_caps(

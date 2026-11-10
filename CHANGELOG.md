@@ -102,6 +102,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M2186: `g2g-inspect` sorts its element list, and colours and pages its output on a terminal.
 - M2187: element metadata `klass` is renamed `classification`, and in-tree elements name Aaron Boxer as author.
 - M2188: bash completion for `g2g-inspect` and `g2g-launch` element and property names.
+- M2189: y4m, still-image and raw container video feed an encoder without a capsfilter.
 
 Breaking: `TimecodeMeta.frames` is a `u16`, `WIRE_VERSION` is 4, and `RtpRecvConfig` gains `parameter_sets`.
 

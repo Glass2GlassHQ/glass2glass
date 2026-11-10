@@ -27,7 +27,7 @@ use g2g_core::{
 };
 use g2g_plugins::pngdec::PngDec;
 use g2g_plugins::pngenc::PngEnc;
-use g2g_plugins::typefind::{sniff_caps, still_image_caps};
+use g2g_plugins::typefind::{elementary_video_caps, sniff_caps};
 use g2g_plugins::webpdec::WebPDec;
 
 const W: u32 = 64;
@@ -125,7 +125,7 @@ async fn encode_pattern_png(level: u8) -> Vec<u8> {
 async fn decode_png(bytes: Vec<u8>) -> CaptureSink {
     let mut decoder = PngDec::new();
     decoder
-        .configure_pipeline(&still_image_caps(VideoCodec::Png))
+        .configure_pipeline(&elementary_video_caps(VideoCodec::Png))
         .expect("pngdec takes image/png");
     run_one(&mut decoder, bytes).await
 }
@@ -134,7 +134,7 @@ async fn decode_png(bytes: Vec<u8>) -> CaptureSink {
 async fn decode_webp(bytes: Vec<u8>) -> CaptureSink {
     let mut decoder = WebPDec::new();
     decoder
-        .configure_pipeline(&still_image_caps(VideoCodec::WebP))
+        .configure_pipeline(&elementary_video_caps(VideoCodec::WebP))
         .expect("webpdec takes image/webp");
     run_one(&mut decoder, bytes).await
 }
@@ -383,7 +383,7 @@ async fn webpdec_simple_upsampling_changes_lossy_output() {
 
     let mut decoder = WebPDec::new().with_no_fancy_upsampling(true);
     decoder
-        .configure_pipeline(&still_image_caps(VideoCodec::WebP))
+        .configure_pipeline(&elementary_video_caps(VideoCodec::WebP))
         .expect("webpdec takes image/webp");
     let simple = run_one(&mut decoder, encoded).await;
 
@@ -485,20 +485,59 @@ async fn pngenc_snapshots_a_launch_line() {
     );
 }
 
+#[cfg(feature = "av1-encode")]
+#[tokio::test]
+async fn a_decoded_png_encodes_without_a_capsfilter() {
+    let out = temp_path("png-to-av1");
+    let line = format!(
+        "filesrc location={FIXTURE_DIR}still_64x48_pal8.png ! pngdec ! videoconvert \
+         ! av1enc ! filesink location={}",
+        out.display()
+    );
+    let written = run_line_to_file(&line, &out).await;
+    assert!(!written.is_empty(), "av1enc wrote the encoded image");
+}
+
+#[tokio::test]
+async fn a_one_pixel_png_decodes_from_a_file() {
+    let png_path = temp_path("one-pixel-png");
+    let encode = format!(
+        "videotestsrc num-buffers=1 width=1 height=1 ! videoconvert \
+         ! video/x-raw,format=RGBA ! pngenc ! filesink location={}",
+        png_path.display()
+    );
+    let png = run_line_to_file(&encode, &png_path).await;
+    let source = temp_path("one-pixel-source").with_extension("png");
+    std::fs::write(&source, png).expect("write the one-pixel png");
+    let out = temp_path("one-pixel-decoded");
+    let decode = format!(
+        "filesrc location={} ! pngdec ! videoconvert ! video/x-raw,format=RGBA \
+         ! filesink location={}",
+        source.display(),
+        out.display()
+    );
+    let decoded = run_line_to_file(&decode, &out).await;
+    let _ = std::fs::remove_file(&source);
+    assert_eq!(decoded.len(), 4, "one RGBA pixel");
+}
+
 /// Typefind types the real files by content, so `filesrc ! decodebin` can reach
 /// the right decoder without an extension to go on.
 #[test]
 fn typefind_types_the_fixtures_by_content() {
     let mut png = Vec::new();
     png.extend_from_slice(&fixture("still_64x48_pal8.png"));
-    assert_eq!(sniff_caps(&png), Some(still_image_caps(VideoCodec::Png)));
+    assert_eq!(
+        sniff_caps(&png),
+        Some(elementary_video_caps(VideoCodec::Png))
+    );
     assert_eq!(
         sniff_caps(&fixture("still_64x48_lossless.webp")),
-        Some(still_image_caps(VideoCodec::WebP))
+        Some(elementary_video_caps(VideoCodec::WebP))
     );
     assert_eq!(
         sniff_caps(&fixture("still_64x48_lossy.webp")),
-        Some(still_image_caps(VideoCodec::WebP))
+        Some(elementary_video_caps(VideoCodec::WebP))
     );
 }
 
@@ -541,7 +580,7 @@ fn oversized_canvas_webp(lossless: &[u8]) -> Vec<u8> {
 async fn png_verdict(bytes: Vec<u8>) -> (Result<(), G2gError>, CaptureSink) {
     let mut decoder = PngDec::new();
     decoder
-        .configure_pipeline(&still_image_caps(VideoCodec::Png))
+        .configure_pipeline(&elementary_video_caps(VideoCodec::Png))
         .unwrap();
     let mut sink = CaptureSink::default();
     let verdict = decoder.process(data_frame(bytes), &mut sink).await;
@@ -551,7 +590,7 @@ async fn png_verdict(bytes: Vec<u8>) -> (Result<(), G2gError>, CaptureSink) {
 async fn webp_verdict(bytes: Vec<u8>) -> (Result<(), G2gError>, CaptureSink) {
     let mut decoder = WebPDec::new();
     decoder
-        .configure_pipeline(&still_image_caps(VideoCodec::WebP))
+        .configure_pipeline(&elementary_video_caps(VideoCodec::WebP))
         .unwrap();
     let mut sink = CaptureSink::default();
     let verdict = decoder.process(data_frame(bytes), &mut sink).await;
@@ -608,7 +647,7 @@ async fn a_truncated_image_is_reported_at_end_of_stream() {
 
     let mut decoder = PngDec::new();
     decoder
-        .configure_pipeline(&still_image_caps(VideoCodec::Png))
+        .configure_pipeline(&elementary_video_caps(VideoCodec::Png))
         .unwrap();
     let mut sink = CaptureSink::default();
     decoder
@@ -623,7 +662,7 @@ async fn a_truncated_image_is_reported_at_end_of_stream() {
 
     let mut decoder = WebPDec::new();
     decoder
-        .configure_pipeline(&still_image_caps(VideoCodec::WebP))
+        .configure_pipeline(&elementary_video_caps(VideoCodec::WebP))
         .unwrap();
     let mut sink = CaptureSink::default();
     decoder
@@ -647,7 +686,7 @@ async fn images_are_reassembled_across_buffer_boundaries() {
     let png = encode_pattern_png(6).await;
     let mut decoder = PngDec::new();
     decoder
-        .configure_pipeline(&still_image_caps(VideoCodec::Png))
+        .configure_pipeline(&elementary_video_caps(VideoCodec::Png))
         .unwrap();
     let mut sink = CaptureSink::default();
     for chunk in png.chunks(CHUNK) {

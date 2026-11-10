@@ -16,7 +16,7 @@ use g2g_plugins::debugspy::DebugSpy;
 use g2g_plugins::pnm::{PnmDec, PnmEnc};
 use g2g_plugins::registry::default_registry;
 use g2g_plugins::scenechange::SceneChange;
-use g2g_plugins::typefind::{sniff_caps, still_image_caps};
+use g2g_plugins::typefind::{elementary_video_caps, sniff_caps};
 use g2g_plugins::videoanalyse::VideoAnalyse;
 
 struct ZeroClock;
@@ -103,7 +103,7 @@ fn pnmenc_pnmdec_roundtrip_rgb() {
     assert_eq!(encoded.frames.len(), 1);
 
     let mut dec = PnmDec::new();
-    dec.configure_pipeline(&still_image_caps(VideoCodec::Pnm))
+    dec.configure_pipeline(&elementary_video_caps(VideoCodec::Pnm))
         .unwrap();
     let decoded = push(&mut dec, encoded.frames[0].clone());
     assert_eq!(decoded.frames.len(), 1);
@@ -124,7 +124,10 @@ fn pnmenc_ascii_is_p3() {
 #[test]
 fn typefind_types_pnm() {
     let ppm = b"P6\n2 1\n255\n\x01\x02\x03\x04\x05\x06";
-    assert_eq!(sniff_caps(ppm), Some(still_image_caps(VideoCodec::Pnm)));
+    assert_eq!(
+        sniff_caps(ppm),
+        Some(elementary_video_caps(VideoCodec::Pnm))
+    );
 }
 
 #[test]

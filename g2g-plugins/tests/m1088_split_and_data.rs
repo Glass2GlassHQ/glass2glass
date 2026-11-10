@@ -207,7 +207,7 @@ async fn a_data_uri_carrying_a_still_decodes_through_decodebin() {
     let caps = futures_lite_block(src.intercept_caps()).expect("the payload types");
     assert_eq!(
         caps,
-        g2g_plugins::typefind::still_image_caps(g2g_core::VideoCodec::Png),
+        g2g_plugins::typefind::elementary_video_caps(g2g_core::VideoCodec::Png),
         "the payload's own header types it"
     );
 

@@ -164,7 +164,10 @@ output pad's media type is fixed at negotiation before any packet is parsed.
 H.264 and H.265 are distinct downstream decoders, not a refinement. Video
 geometry is unknown until the bitstream parser reads the SPS, so the demuxer
 advertises a fixatable placeholder `Range` refined downstream via `CapsChanged`,
-the `RtspSrc` pattern in [caps.md](caps.md). AAC advertises the
+the `RtspSrc` pattern in [caps.md](caps.md). Every video placeholder, coded or
+raw (y4m, still images, raw container tracks), starts at 16x16, because an
+encoder downstream first opens at the fixated size and x264, libvpx and rav1e
+refuse 1x1. A real frame smaller than that still flows through the refinement. AAC advertises the
 sentinel
 channels and rate that `aacparse` refines from the ADTS header.
 

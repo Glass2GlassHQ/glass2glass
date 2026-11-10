@@ -296,11 +296,11 @@ impl Y4mDec {
                 .map(|format| Caps::RawVideo {
                     format,
                     width: Dim::Range {
-                        min: 1,
+                        min: crate::typefind::PLACEHOLDER_MIN_DIMENSION,
                         max: MAX_DIMENSION,
                     },
                     height: Dim::Range {
-                        min: 1,
+                        min: crate::typefind::PLACEHOLDER_MIN_DIMENSION,
                         max: MAX_DIMENSION,
                     },
                     framerate: crate::typefind::PLACEHOLDER_FRAMERATE,

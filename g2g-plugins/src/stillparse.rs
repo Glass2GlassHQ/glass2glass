@@ -404,7 +404,7 @@ impl<F: StillImageFormat> PadTemplates for StillImageParse<F> {
     fn pad_templates() -> Vec<PadTemplate> {
         // A still is a one-frame stream down to a single pixel; the geometry is
         // a fixable `Range` placeholder, refined from the header at runtime.
-        let caps = CapsSet::one(crate::typefind::still_image_caps(F::CODEC));
+        let caps = CapsSet::one(crate::typefind::elementary_video_caps(F::CODEC));
         Vec::from([PadTemplate::sink(caps.clone()), PadTemplate::source(caps)])
     }
 }

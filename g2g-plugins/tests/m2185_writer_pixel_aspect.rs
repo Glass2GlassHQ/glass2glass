@@ -69,9 +69,8 @@ async fn write_through(tag: &str, chain: &str, extension: &str) -> Vec<u8> {
     let source = temp_path(tag, "y4m");
     let out = temp_path(tag, extension);
     write_source(&source);
-    // y4mdec negotiates on a 1x1 placeholder, which vpxenc, x264enc and av1enc refuse to open at
     let line = format!(
-        "filesrc location={} ! y4mdec ! video/x-raw,width={WIDTH},height={HEIGHT} ! {chain} ! filesink location={}",
+        "filesrc location={} ! y4mdec ! {chain} ! filesink location={}",
         source.display(),
         out.display()
     );

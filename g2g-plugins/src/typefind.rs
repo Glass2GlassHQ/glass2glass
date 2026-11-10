@@ -119,7 +119,7 @@ pub fn sniff_caps(header: &[u8]) -> Option<Caps> {
         return Some(elementary_audio_caps(AudioFormat::Flac));
     }
     if let Some(codec) = sniff_still_image(header) {
-        return Some(still_image_caps(codec));
+        return Some(elementary_video_caps(codec));
     }
     if let Some(codec) = sniff_annexb_video(header) {
         let placeholder = elementary_video_caps(codec);
@@ -349,28 +349,16 @@ fn sniff_still_image(header: &[u8]) -> Option<VideoCodec> {
 /// the SPS or sequence header. Shared by content sniffing and `FileSrc`'s extension typing so
 /// the two never drift.
 pub fn elementary_video_caps(codec: VideoCodec) -> Caps {
-    placeholder_video_caps(
-        codec,
-        MIN_CODED_DIM,
-        g2g_core::BitstreamAlignment::Unspecified,
-    )
+    placeholder_video_caps(codec, g2g_core::BitstreamAlignment::Unspecified)
 }
 
 // MP4 and Matroska tracks carry one access unit per sample
 pub(crate) fn container_video_caps(codec: VideoCodec) -> Caps {
-    placeholder_video_caps(codec, MIN_CODED_DIM, crate::annexb::sample_alignment(codec))
+    placeholder_video_caps(codec, crate::annexb::sample_alignment(codec))
 }
 
-/// A coded video stream is at least one macroblock.
-const MIN_CODED_DIM: u32 = 16;
-
-/// Caps for a still image (PNG / WebP) at a fixable `Range` placeholder geometry,
-/// the same shape as [`elementary_video_caps`] but down to a single pixel.
-pub fn still_image_caps(codec: VideoCodec) -> Caps {
-    /// An icon is a legitimate still, where a coded video stream has a floor.
-    const MIN_DIM: u32 = 1;
-    placeholder_video_caps(codec, MIN_DIM, g2g_core::BitstreamAlignment::Unspecified)
-}
+// encoders first open at the placeholder size, and x264, libvpx and rav1e reject 1x1
+pub(crate) const PLACEHOLDER_MIN_DIMENSION: u32 = 16;
 
 // a stream's rate before its parser or demuxer reads one, fixatable unlike Rate::Any
 pub(crate) const PLACEHOLDER_FRAMERATE: Rate = Rate::Range {
@@ -385,19 +373,15 @@ pub(crate) fn framerate_within_placeholder(framerate_q16: Option<u32>) -> Rate {
         .unwrap_or(Rate::Any)
 }
 
-fn placeholder_video_caps(
-    codec: VideoCodec,
-    min_dim: u32,
-    alignment: g2g_core::BitstreamAlignment,
-) -> Caps {
+fn placeholder_video_caps(codec: VideoCodec, alignment: g2g_core::BitstreamAlignment) -> Caps {
     Caps::CompressedVideo {
         codec,
         width: Dim::Range {
-            min: min_dim,
+            min: PLACEHOLDER_MIN_DIMENSION,
             max: 65535,
         },
         height: Dim::Range {
-            min: min_dim,
+            min: PLACEHOLDER_MIN_DIMENSION,
             max: 65535,
         },
         framerate: PLACEHOLDER_FRAMERATE,
@@ -1095,18 +1079,21 @@ mod tests {
         // A PNG must reach the caps layer as CompressedVideo{Png} at a fixable
         // placeholder geometry, or `filesrc ! decodebin` cannot plug pngdec.
         let caps = sniff_caps(&PNG_MAGIC).expect("PNG types");
-        assert_eq!(caps, still_image_caps(VideoCodec::Png));
+        assert_eq!(caps, elementary_video_caps(VideoCodec::Png));
         assert!(matches!(
             caps,
             Caps::CompressedVideo {
                 codec: VideoCodec::Png,
-                width: Dim::Range { min: 1, .. },
+                width: Dim::Range {
+                    min: PLACEHOLDER_MIN_DIMENSION,
+                    ..
+                },
                 ..
             }
         ));
         assert_eq!(
             sniff_caps(b"RIFF\x24\0\0\0WEBPVP8 "),
-            Some(still_image_caps(VideoCodec::WebP))
+            Some(elementary_video_caps(VideoCodec::WebP))
         );
         // RIFF/WAVE still wins the shared RIFF header.
         assert_eq!(
