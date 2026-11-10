@@ -614,6 +614,8 @@ pub(crate) fn read_h265_sps_extensions(br: &mut BitReader) -> Option<H265SpsExte
 pub(crate) const H265_MAX_SUB_LAYERS: usize = 7;
 const H265_MAX_SHORT_TERM_REF_PIC_SETS: u32 = 64;
 pub(crate) const H265_MAX_LONG_TERM_REF_PICS_SPS: usize = 32;
+// MaxDpbSize at its largest, H.265 A.4.2
+pub(crate) const H265_MAX_DPB_SIZE: u32 = 16;
 
 /// `sps_max_dec_pic_buffering_minus1`, `sps_max_num_reorder_pics` and
 /// `sps_max_latency_increase_plus1` per sub-layer. Without
@@ -695,8 +697,11 @@ pub(crate) fn read_h265_sps_middle(
         highest_sub_layer
     };
     for sub_layer in first_coded..=highest_sub_layer {
-        ordering.max_dec_pic_buffering_minus1[sub_layer] = br.read_ue()?;
-        ordering.max_num_reorder_pics[sub_layer] = br.read_ue()?;
+        let max_dec_pic_buffering_minus1 = br.read_ue().filter(|&n| n < H265_MAX_DPB_SIZE)?;
+        ordering.max_dec_pic_buffering_minus1[sub_layer] = max_dec_pic_buffering_minus1;
+        ordering.max_num_reorder_pics[sub_layer] = br
+            .read_ue()
+            .filter(|&n| n <= max_dec_pic_buffering_minus1)?;
         ordering.max_latency_increase_plus1[sub_layer] = br.read_ue()?;
     }
     middle.sub_layer_ordering = Some(ordering);
@@ -2200,6 +2205,31 @@ mod tests {
                 "info present {info_present_flag}"
             );
             assert_eq!(info.framerate, Some(FRAME_RATE_25_Q16));
+        }
+    }
+
+    #[test]
+    fn sub_layer_ordering_outside_the_largest_dpb_stops_the_walk() {
+        let largest = H265_MAX_DPB_SIZE - 1;
+        for (max_dec_pic_buffering_minus1, max_num_reorder_pics) in
+            [(largest, largest), (largest + 1, 0), (4, 5)]
+        {
+            let mut middle = plain_middle();
+            middle.sub_layer_ordering = Some(H265SubLayerOrdering {
+                info_present_flag: false,
+                max_dec_pic_buffering_minus1: [max_dec_pic_buffering_minus1; H265_MAX_SUB_LAYERS],
+                max_num_reorder_pics: [max_num_reorder_pics; H265_MAX_SUB_LAYERS],
+                max_latency_increase_plus1: [0; H265_MAX_SUB_LAYERS],
+            });
+            let stream = annexb_sps(&head_with(1, false), &middle, FRAME_RATE_25);
+            let info = H265Codec::extract_sps_info(&stream).expect("geometry still parses");
+            let in_range = max_dec_pic_buffering_minus1 <= largest
+                && max_num_reorder_pics <= max_dec_pic_buffering_minus1;
+            assert_eq!(
+                info.framerate.is_some(),
+                in_range,
+                "dpb {max_dec_pic_buffering_minus1}, reorder {max_num_reorder_pics}"
+            );
         }
     }
 

@@ -1366,8 +1366,11 @@ fn parse_h265_vps_fields(rbsp: &[u8]) -> Option<H265Vps> {
         if i >= 7 {
             return None;
         }
-        max_dec_pic_buffering_minus1[i] = br.read_ue()? as u8;
-        max_num_reorder_pics[i] = br.read_ue()? as u8;
+        let dec_pic_buffering_minus1 = br
+            .read_ue()
+            .filter(|&n| n < crate::h265parse::H265_MAX_DPB_SIZE)?;
+        max_dec_pic_buffering_minus1[i] = dec_pic_buffering_minus1 as u8;
+        max_num_reorder_pics[i] = br.read_ue().filter(|&n| n <= dec_pic_buffering_minus1)? as u8;
         max_latency_increase_plus1[i] = br.read_ue()?;
     }
     // Layer sets, HRD and timing info are not needed for the Std VPS decode
@@ -5151,6 +5154,19 @@ pub struct H265SliceHeader {
     pub pic_output_flag: bool,
 }
 
+fn long_term_entry_poc(
+    poc: i32,
+    entry: &H265LtEntry,
+    max_lsb: i32,
+    slice_pic_order_cnt_lsb: u32,
+) -> Option<i32> {
+    let full = i64::from(poc)
+        - i64::from(entry.delta_poc_msb_cycle) * i64::from(max_lsb)
+        - (i64::from(slice_pic_order_cnt_lsb) - i64::from(entry.poc_lsb));
+    // a POC outside i32 names no picture in the DPB
+    i32::try_from(full).ok()
+}
+
 /// One long-term reference entry from a slice header (H.265 7.3.6.1), with the
 /// MSB-cycle delta already accumulated per 7.4.7.1.
 #[derive(Debug, Clone, Copy)]
@@ -5322,7 +5338,12 @@ pub fn parse_h265_slice_header(
             };
             let num_long_term_pics = br.read_ue()?;
             let total = num_long_term_sps.checked_add(num_long_term_pics)?;
-            if num_long_term_sps > sps.num_long_term_ref_pics_sps as u32 || total > 32 {
+            let short_term =
+                u32::from(st_rps.num_negative_pics) + u32::from(st_rps.num_positive_pics);
+            // 7.4.7.1: every reference plus the current picture fits in the DPB
+            if num_long_term_sps > sps.num_long_term_ref_pics_sps as u32
+                || total.checked_add(short_term)? >= crate::h265parse::H265_MAX_DPB_SIZE
+            {
                 return None;
             }
             let mut prev_cycle = 0u32;
@@ -12812,10 +12833,8 @@ impl H265DpbDecoder {
         let mut lt_resolved: alloc::vec::Vec<(usize, bool)> = alloc::vec::Vec::new();
         for e in &hdr.lt {
             let slot = if e.has_msb_cycle {
-                let full = poc
-                    - e.delta_poc_msb_cycle as i32 * max_lsb
-                    - (hdr.slice_pic_order_cnt_lsb as i32 - e.poc_lsb as i32);
-                self.slot_of_poc(full)
+                long_term_entry_poc(poc, e, max_lsb, hdr.slice_pic_order_cnt_lsb)
+                    .and_then(|full| self.slot_of_poc(full))
             } else {
                 self.refs.iter().position(
                     |r| matches!(r, Some(rp) if rp.poc & (max_lsb - 1) == e.poc_lsb as i32),
@@ -17200,6 +17219,50 @@ mod tests {
         assert_eq!(std.num_positive_pics, 1);
         assert_eq!(std.delta_poc_s1_minus1[0], 0, "DeltaPocS1 1 -> minus1 0");
         assert_eq!(std.used_by_curr_pic_s1_flag, 0b1);
+    }
+
+    fn vps_with_ordering(
+        max_dec_pic_buffering_minus1: u32,
+        max_num_reorder_pics: u32,
+    ) -> alloc::vec::Vec<u8> {
+        const PROFILE_TIER_LEVEL_BITS: u32 = 96;
+        let mut w = crate::annexb::BitWriter::default();
+        w.write_bits(0, 4); // vps_video_parameter_set_id
+        w.write_bits(0b11, 2); // base layer internal and available
+        w.write_bits(0, 6); // vps_max_layers_minus1
+        w.write_bits(0, 3); // vps_max_sub_layers_minus1
+        w.write_bit(1); // vps_temporal_id_nesting_flag
+        w.write_bits(0xFFFF, 16);
+        for _ in 0..PROFILE_TIER_LEVEL_BITS / 8 {
+            w.write_bits(0, 8);
+        }
+        w.write_bit(1); // vps_sub_layer_ordering_info_present_flag
+        w.write_ue(max_dec_pic_buffering_minus1);
+        w.write_ue(max_num_reorder_pics);
+        w.write_ue(0);
+        w.write_bit(1);
+        w.align_to_byte();
+        w.into_bytes()
+    }
+
+    #[test]
+    fn h265_vps_refuses_a_dpb_larger_than_the_spec_allows() {
+        let largest = crate::h265parse::H265_MAX_DPB_SIZE - 1;
+        assert!(parse_h265_vps(&vps_with_ordering(largest, largest)).is_ok());
+        assert!(parse_h265_vps(&vps_with_ordering(largest + 1, 0)).is_err());
+        assert!(parse_h265_vps(&vps_with_ordering(4, 5)).is_err());
+    }
+
+    #[test]
+    fn h265_long_term_poc_past_i32_names_no_picture() {
+        let entry = |delta_poc_msb_cycle| H265LtEntry {
+            poc_lsb: 2,
+            used_by_curr: true,
+            has_msb_cycle: true,
+            delta_poc_msb_cycle,
+        };
+        assert_eq!(long_term_entry_poc(100, &entry(1), 16, 4), Some(82));
+        assert_eq!(long_term_entry_poc(100, &entry(u32::MAX), 1 << 16, 4), None);
     }
 
     #[test]

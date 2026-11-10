@@ -104,6 +104,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M2188: bash completion for `g2g-inspect` and `g2g-launch` element and property names.
 - M2189: y4m, still-image and raw container video feed an encoder without a capsfilter.
 - M2190: `mp4mux` and `matroskamux` take the H.265 `hvcC` profile, level, chroma format and bit depth from the SPS without its emulation prevention bytes.
+- M2191: H.265 parsing refuses a DPB size, reorder count or long-term reference count past the spec limits, and a long-term MSB cycle past the POC range no longer overflows.
 
 Breaking: `TimecodeMeta.frames` is a `u16`, `WIRE_VERSION` is 4, and `RtpRecvConfig` gains `parameter_sets`.
 
