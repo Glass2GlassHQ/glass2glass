@@ -113,7 +113,7 @@ impl Mp4Src {
             // `run` announces the file's own rate before the first sample
             framerate: PLACEHOLDER_FRAMERATE,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
-            pixel_aspect: g2g_core::PixelAspect::Any,
+            pixel_aspect: h.pixel_aspect,
             alignment: crate::annexb::sample_alignment(h.codec),
         })
     }
@@ -235,7 +235,7 @@ impl SourceLoop for Mp4Src {
                                 height: Dim::Fixed(h.height),
                                 framerate: Rate::Any,
                                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
-                                pixel_aspect: g2g_core::PixelAspect::Any,
+                                pixel_aspect: h.pixel_aspect,
                                 alignment: crate::annexb::sample_alignment(h.codec),
                             },
                         )]),
@@ -277,7 +277,7 @@ impl SourceLoop for Mp4Src {
                 height: Dim::Fixed(header.height),
                 framerate: framerate_within_placeholder(framerate_q16),
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
-                pixel_aspect: g2g_core::PixelAspect::Any,
+                pixel_aspect: header.pixel_aspect,
                 alignment: crate::annexb::sample_alignment(header.codec),
             });
 

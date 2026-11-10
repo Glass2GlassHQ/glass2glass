@@ -648,8 +648,11 @@ through couples the ratio across the link, and `videoconvert` and `colorspace`
 carry the input's ratio to their output. The parsers (`h264parse`, `h265parse`,
 `mpegvideoparse`, `mpeg4videoparse`, `vc1parse`) put the bitstream's sample aspect
 in their refined caps, and a ratio declared by upstream caps overrides it, as in
-gst. `av1parse` passes the upstream ratio through, since AV1 codes none. The caps
-string field is
+gst. `av1parse` passes the upstream ratio through, since AV1 codes none. The
+containers declare it too: Matroska `DisplayWidth` / `DisplayHeight` (gst's formula,
+the same for display units 0 to 3, a missing side taking the pixel side), the MP4
+`pasp` box, the y4m `A` parameter (`A0:0` is unknown) and the MPEG sequence header
+`psdemux` reads. The caps string field is
 `pixel-aspect-ratio=n/d`, printed only for an exact value. The wire format carries
 it from version 5.
 

@@ -421,7 +421,7 @@ impl MkvDemux {
                     height: Dim::Fixed(track.height),
                     framerate: default_duration_framerate(track.default_duration_ns),
                     colorimetry: g2g_core::Colorimetry::UNKNOWN,
-                    pixel_aspect: g2g_core::PixelAspect::Any,
+                    pixel_aspect: track.pixel_aspect,
                     alignment: crate::annexb::sample_alignment(codec),
                 })
             }
@@ -431,6 +431,7 @@ impl MkvDemux {
                     Dim::Fixed(track.width),
                     Dim::Fixed(track.height),
                     default_duration_framerate(track.default_duration_ns),
+                    track.pixel_aspect,
                 ))
             }
             Caps::Audio { format, .. } if track.sample_rate > 0 => Some(Caps::Audio {
@@ -526,7 +527,7 @@ impl MkvDemux {
             height: dim(track.height),
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
-            pixel_aspect: g2g_core::PixelAspect::Any,
+            pixel_aspect: track.pixel_aspect,
             alignment: crate::annexb::sample_alignment(codec),
         };
         let audio = |format| Caps::Audio {
@@ -554,7 +555,13 @@ impl MkvDemux {
             MkvCodec::Pcm { format, .. } => (StreamType::Audio, audio(format)),
             MkvCodec::RawVideo(format) => (
                 StreamType::Video,
-                raw_video_caps(format, dim(track.width), dim(track.height), Rate::Any),
+                raw_video_caps(
+                    format,
+                    dim(track.width),
+                    dim(track.height),
+                    Rate::Any,
+                    track.pixel_aspect,
+                ),
             ),
             MkvCodec::TaggedVideo(tag) => (StreamType::Video, video(VideoCodec::Tagged(tag))),
             MkvCodec::TaggedAudio(tag) => (StreamType::Audio, audio(AudioFormat::Tagged(tag))),
@@ -2251,7 +2258,8 @@ mod tests {
                 RawVideoFormat::I420,
                 Dim::Fixed(WIDTH),
                 Dim::Fixed(HEIGHT),
-                Rate::Any
+                Rate::Any,
+                g2g_core::PixelAspect::Any
             )]
         );
         assert_eq!(

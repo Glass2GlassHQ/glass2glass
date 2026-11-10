@@ -109,6 +109,7 @@ fn nego_caps(kind: &TrackKind) -> (Caps, bool) {
             codec,
             width,
             height,
+            pixel_aspect,
             ..
         } => (
             Caps::CompressedVideo {
@@ -117,7 +118,7 @@ fn nego_caps(kind: &TrackKind) -> (Caps, bool) {
                 height: Dim::Fixed(*height),
                 framerate: crate::typefind::PLACEHOLDER_FRAMERATE,
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
-                pixel_aspect: g2g_core::PixelAspect::Any,
+                pixel_aspect: *pixel_aspect,
                 alignment: crate::annexb::sample_alignment(*codec),
             },
             true,
@@ -126,6 +127,7 @@ fn nego_caps(kind: &TrackKind) -> (Caps, bool) {
             format,
             width,
             height,
+            pixel_aspect,
             ..
         } => (
             crate::uncompressedvideo::raw_video_caps(
@@ -133,6 +135,7 @@ fn nego_caps(kind: &TrackKind) -> (Caps, bool) {
                 Dim::Fixed(*width),
                 Dim::Fixed(*height),
                 crate::typefind::PLACEHOLDER_FRAMERATE,
+                *pixel_aspect,
             ),
             true,
         ),

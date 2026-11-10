@@ -31,13 +31,14 @@ use alloc::borrow::Cow;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use g2g_core::caps::greatest_common_divisor;
 use g2g_core::log::Target;
 use g2g_core::time::ticks_to_ns;
 #[cfg(feature = "ffmpeg-long-tail")]
 use g2g_core::TagNamespace;
 use g2g_core::{
-    g2g_warn, AudioFormat, Chapter, CodecTag, ProResVariant, RawVideoFormat, SubPictureFormat, Tag,
-    TagList, TextFormat,
+    g2g_warn, AspectRatio, AudioFormat, Chapter, CodecTag, PixelAspect, ProResVariant,
+    RawVideoFormat, SubPictureFormat, Tag, TagList, TextFormat,
 };
 
 use crate::decodetimestamper::DecodeTimestamper;
@@ -83,6 +84,9 @@ const ID_DEFAULT_DURATION: u32 = 0x0023_E383;
 const ID_VIDEO: u32 = 0x00E0;
 const ID_PIXEL_WIDTH: u32 = 0x00B0;
 const ID_PIXEL_HEIGHT: u32 = 0x00BA;
+const ID_DISPLAY_WIDTH: u32 = 0x54B0;
+const ID_DISPLAY_HEIGHT: u32 = 0x54BA;
+const ID_DISPLAY_UNIT: u32 = 0x54B2;
 const ID_COLOUR_SPACE: u32 = 0x002E_B524;
 const ID_AUDIO: u32 = 0x00E1;
 const ID_CONTENT_ENCODINGS: u32 = 0x6D80;
@@ -853,6 +857,8 @@ pub struct MkvTrack {
     pub codec: MkvCodec,
     pub width: u32,
     pub height: u32,
+    /// From `DisplayWidth` / `DisplayHeight`, `Any` when the track declares neither.
+    pub pixel_aspect: PixelAspect,
     pub channels: u8,
     pub sample_rate: u32,
     /// Nanoseconds per frame from `DefaultDuration` (0 when the track omits it).
@@ -1780,6 +1786,7 @@ fn parse_track_entry(body: &[u8], content_key: ContentKeyLookup<'_>) -> Option<P
     let mut codec_private: &[u8] = &[];
     let mut width = 0u32;
     let mut height = 0u32;
+    let mut display = DisplaySize::default();
     let mut colour_space: Option<[u8; 4]> = None;
     let mut channels = 0u8;
     let mut sample_rate = 0u32;
@@ -1808,6 +1815,9 @@ fn parse_track_entry(body: &[u8], content_key: ContentKeyLookup<'_>) -> Option<P
                     match vid {
                         ID_PIXEL_WIDTH => width = read_uint(vdata) as u32,
                         ID_PIXEL_HEIGHT => height = read_uint(vdata) as u32,
+                        ID_DISPLAY_WIDTH => display.width = read_uint(vdata),
+                        ID_DISPLAY_HEIGHT => display.height = read_uint(vdata),
+                        ID_DISPLAY_UNIT => display.unit = read_uint(vdata),
                         ID_COLOUR_SPACE => colour_space = vdata.try_into().ok(),
                         _ => {}
                     }
@@ -1881,6 +1891,7 @@ fn parse_track_entry(body: &[u8], content_key: ContentKeyLookup<'_>) -> Option<P
             codec,
             width,
             height,
+            pixel_aspect: display.pixel_aspect(width, height),
             channels,
             sample_rate,
             default_duration_ns,
@@ -1890,6 +1901,46 @@ fn parse_track_entry(body: &[u8], content_key: ContentKeyLookup<'_>) -> Option<P
         tags,
         block_encodings: chains.block,
     })
+}
+
+// Matroska DisplayUnit 4, "unknown": 0 to 3 are pixels, centimeters, inches and a display aspect ratio
+const DISPLAY_UNIT_UNKNOWN: u64 = 4;
+
+// a TrackEntry's DisplayWidth, DisplayHeight and DisplayUnit, zero when absent
+#[derive(Debug, Default)]
+struct DisplaySize {
+    width: u64,
+    height: u64,
+    unit: u64,
+}
+
+impl DisplaySize {
+    // gst's matroskademux reads every known unit with one formula, a missing side taking the pixel side
+    fn pixel_aspect(&self, pixel_width: u32, pixel_height: u32) -> PixelAspect {
+        let declared = self.width > 0 || self.height > 0;
+        if !declared || self.unit >= DISPLAY_UNIT_UNKNOWN {
+            return PixelAspect::Any;
+        }
+        let side = |display: u64, pixels: u32| match display {
+            0 => u64::from(pixels),
+            display => display,
+        };
+        let numerator = side(self.width, pixel_width).checked_mul(u64::from(pixel_height));
+        let denominator = side(self.height, pixel_height).checked_mul(u64::from(pixel_width));
+        let (Some(numerator), Some(denominator)) = (numerator, denominator) else {
+            return PixelAspect::Any;
+        };
+        if numerator == 0 || denominator == 0 {
+            return PixelAspect::Any;
+        }
+        let divisor = greatest_common_divisor(numerator, denominator);
+        let reduced = u32::try_from(numerator / divisor)
+            .ok()
+            .zip(u32::try_from(denominator / divisor).ok());
+        reduced
+            .and_then(|(numerator, denominator)| AspectRatio::new(numerator, denominator))
+            .map_or(PixelAspect::Any, PixelAspect::Exact)
+    }
 }
 
 // the sample format of an `A_PCM/*` track, `None` for another CodecID or a depth no PCM format has
@@ -4425,6 +4476,60 @@ mod tests {
         );
     }
 
+    // a 720x576 H.264 TrackEntry whose Video element also carries `display`, as (id, value) pairs
+    fn pal_track_pixel_aspect(display: &[(u32, u64)]) -> PixelAspect {
+        let mut video = elem_vec(ID_PIXEL_WIDTH, &uint_bytes(720));
+        video.extend_from_slice(&elem_vec(ID_PIXEL_HEIGHT, &uint_bytes(576)));
+        for &(id, value) in display {
+            video.extend_from_slice(&elem_vec(id, &uint_bytes(value)));
+        }
+        let mut entry = elem_vec(ID_TRACK_NUMBER, &uint_bytes(1));
+        entry.extend_from_slice(&elem_vec(ID_CODEC_ID, b"V_MPEG4/ISO/AVC"));
+        entry.extend_from_slice(&elem_vec(ID_VIDEO, &video));
+        parse_track_entry(&entry, &|_| None)
+            .expect("track entry must parse")
+            .track
+            .pixel_aspect
+    }
+
+    #[test]
+    fn display_size_gives_the_pixel_aspect() {
+        // 1024x576 shown from 720x576 pixels: 1024 * 576 / (576 * 720) = 64/45
+        let pal_wide = PixelAspect::Exact(AspectRatio::new(64, 45).expect("nonzero"));
+        const UNIT_DISPLAY_ASPECT_RATIO: u64 = 3;
+        assert_eq!(
+            pal_track_pixel_aspect(&[(ID_DISPLAY_WIDTH, 1024), (ID_DISPLAY_HEIGHT, 576)]),
+            pal_wide
+        );
+        assert_eq!(
+            pal_track_pixel_aspect(&[
+                (ID_DISPLAY_WIDTH, 16),
+                (ID_DISPLAY_HEIGHT, 9),
+                (ID_DISPLAY_UNIT, UNIT_DISPLAY_ASPECT_RATIO)
+            ]),
+            pal_wide
+        );
+        assert_eq!(
+            pal_track_pixel_aspect(&[(ID_DISPLAY_WIDTH, 1024)]),
+            pal_wide,
+            "a missing DisplayHeight takes PixelHeight"
+        );
+        assert_eq!(
+            pal_track_pixel_aspect(&[
+                (ID_DISPLAY_WIDTH, 1024),
+                (ID_DISPLAY_HEIGHT, 576),
+                (ID_DISPLAY_UNIT, DISPLAY_UNIT_UNKNOWN)
+            ]),
+            PixelAspect::Any
+        );
+        assert_eq!(pal_track_pixel_aspect(&[]), PixelAspect::Any);
+        assert_eq!(
+            pal_track_pixel_aspect(&[(ID_DISPLAY_WIDTH, u64::MAX), (ID_DISPLAY_HEIGHT, 1)]),
+            PixelAspect::Any,
+            "an overflowing product is no ratio"
+        );
+    }
+
     #[test]
     fn parses_tracks_and_frames() {
         let mut d = MatroskaDemuxer::new();
@@ -4439,6 +4544,7 @@ mod tests {
                     codec: MkvCodec::Vp9,
                     width: 640,
                     height: 480,
+                    pixel_aspect: PixelAspect::Any,
                     channels: 0,
                     sample_rate: 0,
                     default_duration_ns: 0,
@@ -4450,6 +4556,7 @@ mod tests {
                     codec: MkvCodec::Opus,
                     width: 0,
                     height: 0,
+                    pixel_aspect: PixelAspect::Any,
                     channels: 2,
                     sample_rate: 48_000,
                     default_duration_ns: 0,
@@ -4928,6 +5035,7 @@ mod tests {
                 codec: MkvCodec::Vp9,
                 width: 320,
                 height: 240,
+                pixel_aspect: PixelAspect::Any,
                 channels: 0,
                 sample_rate: 0,
                 default_duration_ns: 0,

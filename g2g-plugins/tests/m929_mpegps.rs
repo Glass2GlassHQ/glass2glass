@@ -325,7 +325,7 @@ async fn an_mpeg1_program_stream_demuxes_video_and_audio() {
             height: Dim::Fixed(288),
             framerate: Rate::Fixed(25 << 16),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
-            pixel_aspect: g2g_core::PixelAspect::Any,
+            pixel_aspect: g2g_core::PixelAspect::SQUARE,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         }),
         "the sequence header's geometry is announced once, concretely"
@@ -407,7 +407,7 @@ async fn a_vob_demuxes_video_audio_and_subpictures() {
             height: Dim::Fixed(VOB_H),
             framerate: Rate::Fixed(25 << 16),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
-            pixel_aspect: g2g_core::PixelAspect::Any,
+            pixel_aspect: g2g_core::PixelAspect::SQUARE,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         })
     );
@@ -1174,7 +1174,7 @@ async fn a_mid_gop_tune_in_drops_to_the_first_sequence_header() {
             height: Dim::Fixed(480),
             framerate: Rate::Fixed(25 << 16),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
-            pixel_aspect: g2g_core::PixelAspect::Any,
+            pixel_aspect: g2g_core::PixelAspect::SQUARE,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         })
     );

@@ -218,14 +218,20 @@ impl Fmp4Demux {
         )
     }
 
-    fn output_caps(codec: VideoCodec, width: Dim, height: Dim, framerate: Rate) -> Caps {
+    fn output_caps(
+        codec: VideoCodec,
+        width: Dim,
+        height: Dim,
+        framerate: Rate,
+        pixel_aspect: g2g_core::PixelAspect,
+    ) -> Caps {
         Caps::CompressedVideo {
             codec,
             width,
             height,
             framerate,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
-            pixel_aspect: g2g_core::PixelAspect::Any,
+            pixel_aspect,
             alignment: crate::annexb::sample_alignment(codec),
         }
     }
@@ -251,6 +257,7 @@ impl Fmp4Demux {
             Dim::Fixed(header.width),
             Dim::Fixed(header.height),
             framerate_q16.map_or(Rate::Any, Rate::Fixed),
+            header.pixel_aspect,
         );
         self.out_codec = header.codec;
         out.push(PipelinePacket::CapsChanged(caps)).await?;
@@ -456,7 +463,15 @@ impl AsyncElement for Fmp4Demux {
 
 impl PadTemplates for Fmp4Demux {
     fn pad_templates() -> Vec<PadTemplate> {
-        let video = |codec| Self::output_caps(codec, Dim::Any, Dim::Any, Rate::Any);
+        let video = |codec| {
+            Self::output_caps(
+                codec,
+                Dim::Any,
+                Dim::Any,
+                Rate::Any,
+                g2g_core::PixelAspect::Any,
+            )
+        };
         Vec::from([
             PadTemplate::sink(CapsSet::one(Self::input_caps())),
             PadTemplate::source(CapsSet::from_alternatives(Vec::from([

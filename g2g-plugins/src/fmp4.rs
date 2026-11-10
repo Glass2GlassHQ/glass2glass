@@ -19,8 +19,8 @@ use g2g_core::meta::{CropRectangle, FrameMetaSet};
 use g2g_core::time::ticks_to_ns;
 
 use g2g_core::{
-    g2g_warn, AudioFormat, Chapter, ClosedCaptionFormat, FrameTiming, G2gError, ProResVariant,
-    RawVideoFormat, Segment, TagList, TextFormat, VideoCodec,
+    g2g_warn, AspectRatio, AudioFormat, Chapter, ClosedCaptionFormat, FrameTiming, G2gError,
+    PixelAspect, ProResVariant, RawVideoFormat, Segment, TagList, TextFormat, VideoCodec,
 };
 
 use crate::aiff::audio_from_comm;
@@ -60,6 +60,7 @@ pub(crate) struct Header {
     /// `seig` table), `None` for a clear track.
     pub(crate) cenc: Option<CencTrack>,
     pub(crate) clean_aperture: Option<CropRectangle>,
+    pub(crate) pixel_aspect: PixelAspect,
 }
 
 /// In-place sample decryptor: given the crypto resolved for a sample (scheme, IV,
@@ -181,6 +182,7 @@ pub(crate) fn parse_header(data: &[u8]) -> Result<Header, G2gError> {
         param_sets,
         cenc: cenc_track(cenc, stbl)?,
         clean_aperture: clean_aperture(entries),
+        pixel_aspect: first_entry_pixel_aspect(entries),
     })
 }
 
@@ -327,6 +329,7 @@ pub(crate) enum TrackKind {
         codec: VideoCodec,
         width: u32,
         height: u32,
+        pixel_aspect: PixelAspect,
         param_sets: Vec<Vec<u8>>,
     },
     // geometry from the sample entry, which the stored frames follow whatever tkhd displays
@@ -334,6 +337,7 @@ pub(crate) enum TrackKind {
         format: RawVideoFormat,
         width: u32,
         height: u32,
+        pixel_aspect: PixelAspect,
         storage: RawVideoStorage,
     },
     Audio {
@@ -912,6 +916,23 @@ fn edit_list(trak: &[u8]) -> Vec<Edit> {
 const VISUAL_SAMPLE_ENTRY_CHILDREN_AT: usize = 78;
 
 // the first sample entry's `clap` against the entry's own size, None for no box or one that cuts nothing
+// pasp holds hSpacing then vSpacing, a pixel's relative width and height
+fn pixel_aspect(entry: &[u8]) -> PixelAspect {
+    let spacing = entry
+        .get(VISUAL_SAMPLE_ENTRY_CHILDREN_AT..)
+        .and_then(|children| find_box(children, b"pasp"))
+        .and_then(|pasp| Some((be32(pasp, 0).ok()?, be32(pasp, 4).ok()?)));
+    spacing
+        .and_then(|(horizontal, vertical)| AspectRatio::new(horizontal, vertical))
+        .map_or(PixelAspect::Any, PixelAspect::Exact)
+}
+
+fn first_entry_pixel_aspect(entries: &[u8]) -> PixelAspect {
+    boxes(entries)
+        .next()
+        .map_or(PixelAspect::Any, |(_, entry)| pixel_aspect(entry))
+}
+
 fn clean_aperture(entries: &[u8]) -> Option<CropRectangle> {
     let (_, entry) = boxes(entries).next()?;
     let clap = find_box(entry.get(VISUAL_SAMPLE_ENTRY_CHILDREN_AT..)?, b"clap")?;
@@ -1080,6 +1101,7 @@ fn parse_video_entry(
             codec,
             width,
             height,
+            pixel_aspect: first_entry_pixel_aspect(entries),
             param_sets,
         },
         cenc,
@@ -1147,6 +1169,7 @@ fn raw_video_track(
         format,
         width: dimension(VISUAL_SAMPLE_ENTRY_WIDTH_AT)?,
         height: dimension(VISUAL_SAMPLE_ENTRY_HEIGHT_AT)?,
+        pixel_aspect: pixel_aspect(entry),
         storage,
     })
 }
@@ -1182,6 +1205,7 @@ fn unread_video_entry(
         codec: VideoCodec::Tagged(mov_tag(fourcc)),
         width,
         height,
+        pixel_aspect: pixel_aspect(payload),
         param_sets: Vec::from([crate::mp4box::mp4_box(fourcc, payload)]),
     };
     Some((kind, None))
@@ -2132,6 +2156,7 @@ pub(crate) fn parse_fragments_multi(
                 width,
                 height,
                 storage,
+                ..
             } => {
                 let framing = RawVideoFraming {
                     format: *format,
@@ -2328,6 +2353,7 @@ impl SampleFraming {
                 width,
                 height,
                 storage,
+                ..
             } => SampleFraming::RawVideo(RawVideoFraming {
                 format: *format,
                 storage: *storage,
@@ -3392,6 +3418,7 @@ mod tests {
                 codec: VideoCodec::H264,
                 width: 64,
                 height: 48,
+                pixel_aspect: PixelAspect::Any,
                 param_sets: Vec::new(),
             },
             cenc: None,
@@ -3465,6 +3492,7 @@ mod tests {
                 codec: VideoCodec::H264,
                 width: 64,
                 height: 48,
+                pixel_aspect: PixelAspect::Any,
                 param_sets: Vec::new(),
             },
             cenc: None,
@@ -3517,15 +3545,34 @@ mod tests {
     }
 
     // one avc1 entry of the picture size, holding only the given clap payload
-    fn entries_with_clap(clap: &[u8]) -> Vec<u8> {
+    fn avc1_entries_with(child: &[u8; 4], payload: &[u8]) -> Vec<u8> {
         let (width, height) = CLAP_PICTURE;
         let mut entry = alloc::vec![0u8; VISUAL_SAMPLE_ENTRY_CHILDREN_AT];
         entry[VISUAL_SAMPLE_ENTRY_WIDTH_AT..VISUAL_SAMPLE_ENTRY_WIDTH_AT + 2]
             .copy_from_slice(&width.to_be_bytes());
         entry[VISUAL_SAMPLE_ENTRY_HEIGHT_AT..VISUAL_SAMPLE_ENTRY_HEIGHT_AT + 2]
             .copy_from_slice(&height.to_be_bytes());
-        entry.extend_from_slice(&crate::mp4box::mp4_box(b"clap", clap));
+        entry.extend_from_slice(&crate::mp4box::mp4_box(child, payload));
         crate::mp4box::mp4_box(b"avc1", &entry)
+    }
+
+    #[test]
+    fn reads_the_pasp_pixel_aspect() {
+        let pasp = [40u32.to_be_bytes(), 33u32.to_be_bytes()].concat();
+        assert_eq!(
+            first_entry_pixel_aspect(&avc1_entries_with(b"pasp", &pasp)),
+            PixelAspect::Exact(AspectRatio::new(40, 33).expect("nonzero"))
+        );
+        let zero_spacing = [0u32.to_be_bytes(), 1u32.to_be_bytes()].concat();
+        assert_eq!(
+            first_entry_pixel_aspect(&avc1_entries_with(b"pasp", &zero_spacing)),
+            PixelAspect::Any
+        );
+        assert_eq!(
+            first_entry_pixel_aspect(&avc1_entries_with(b"pasp", &[0, 0, 0, 40])),
+            PixelAspect::Any,
+            "a truncated pasp"
+        );
     }
 
     #[test]
@@ -3533,7 +3580,7 @@ mod tests {
         // 45 columns centred on (64 - 1) / 2 + 3 = 34.5 span 12.5 to 56.5, truncated to 12 and 56,
         // so 12 columns go on the left and 63 - 56 = 7 on the right.
         // 33 rows centred on (48 - 1) / 2 - 2 = 21.5 span 5.5 to 37.5, so 5 rows go on top and 10 below.
-        let entries = entries_with_clap(&clap_payload([45, 1, 33, 1, 3, 1, -2, 1]));
+        let entries = avc1_entries_with(b"clap", &clap_payload([45, 1, 33, 1, 3, 1, -2, 1]));
         assert_eq!(
             clean_aperture(&entries),
             Some(CropRectangle {
@@ -3544,7 +3591,7 @@ mod tests {
             })
         );
         // the same aperture in halves: 90/2 columns and 66/2 rows, offsets 6/2 and -4/2
-        let halves = entries_with_clap(&clap_payload([90, 2, 66, 2, 6, 2, -4, 2]));
+        let halves = avc1_entries_with(b"clap", &clap_payload([90, 2, 66, 2, 6, 2, -4, 2]));
         assert_eq!(clean_aperture(&halves), clean_aperture(&entries));
     }
 
@@ -3553,7 +3600,7 @@ mod tests {
         let (width, height) = CLAP_PICTURE;
         let whole = [i32::from(width), 1, i32::from(height), 1, 0, 1, 0, 1];
         assert_eq!(
-            clean_aperture(&entries_with_clap(&clap_payload(whole))),
+            clean_aperture(&avc1_entries_with(b"clap", &clap_payload(whole))),
             None
         );
     }
@@ -3581,7 +3628,7 @@ mod tests {
                 "{case} is refused"
             );
             assert_eq!(
-                clean_aperture(&entries_with_clap(&clap)),
+                clean_aperture(&avc1_entries_with(b"clap", &clap)),
                 None,
                 "{case} crops nothing"
             );
@@ -3589,7 +3636,7 @@ mod tests {
         let truncated = clap_payload([45, 1, 33, 1, 3, 1, -2, 1]);
         let truncated = &truncated[..truncated.len() - 1];
         assert!(clap_rectangle(truncated, width, height).is_err());
-        assert_eq!(clean_aperture(&entries_with_clap(truncated)), None);
+        assert_eq!(clean_aperture(&avc1_entries_with(b"clap", truncated)), None);
     }
 
     use alloc::vec;
@@ -4271,6 +4318,7 @@ mod tests {
                 width,
                 height,
                 param_sets,
+                ..
             } => {
                 assert_eq!(*codec, VideoCodec::H264);
                 assert_eq!((*width, *height), (320, 240));

@@ -36,9 +36,9 @@ use g2g_core::frame::Frame;
 use g2g_core::log::{short_type_name, LogSource};
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    g2g_error, AsyncElement, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
-    Dim, ElementMetadata, FrameTiming, G2gError, Interlace, MemoryDomain, OutputSink, PadTemplate,
-    PadTemplates, PipelinePacket, Rate, RawVideoFormat,
+    g2g_error, AspectRatio, AsyncElement, ByteStreamEncoding, Caps, CapsConstraint, CapsSet,
+    ConfigureOutcome, Dim, ElementMetadata, FrameTiming, G2gError, Interlace, MemoryDomain,
+    OutputSink, PadTemplate, PadTemplates, PipelinePacket, PixelAspect, Rate, RawVideoFormat,
 };
 
 /// Signature every y4m stream opens with, the separating space included so a
@@ -126,6 +126,7 @@ struct StreamHeader {
     framerate_num: u32,
     framerate_den: u32,
     interlace: Interlace,
+    pixel_aspect: PixelAspect,
     /// Bytes of one frame's planes, [`MAX_FRAME_BYTES`] at most.
     frame_bytes: usize,
 }
@@ -139,7 +140,7 @@ impl StreamHeader {
             framerate: Rate::Fixed(self.framerate_q16()),
             interlace: self.interlace,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
-            pixel_aspect: g2g_core::PixelAspect::Any,
+            pixel_aspect: self.pixel_aspect,
         }
     }
 
@@ -160,7 +161,7 @@ impl StreamHeader {
 /// Every number here comes from the stream, so each is range-checked before it
 /// reaches an allocation: the sides against [`MAX_DIMENSION`], the frame size
 /// they imply against [`MAX_FRAME_BYTES`], and the framerate against a Q16 that
-/// fits in a `u32`. Parameters this does not model (`A`, `X`, and anything a
+/// fits in a `u32`. Parameters this does not model (`X`, and anything a
 /// writer invented) are skipped, as the format intends.
 fn parse_stream_header(line: &[u8]) -> Result<StreamHeader, G2gError> {
     let text = core::str::from_utf8(line).map_err(|_| G2gError::CapsMismatch)?;
@@ -172,6 +173,7 @@ fn parse_stream_header(line: &[u8]) -> Result<StreamHeader, G2gError> {
     let mut height = None;
     let mut framerate = None;
     let mut interlace = Interlace::Progressive;
+    let mut pixel_aspect = PixelAspect::Any;
     let mut format = DEFAULT_COLOURSPACE;
     for token in parameters.split(' ').filter(|t| !t.is_empty()) {
         let mut characters = token.chars();
@@ -182,6 +184,7 @@ fn parse_stream_header(line: &[u8]) -> Result<StreamHeader, G2gError> {
             'H' => height = Some(parse_u32(value)?),
             'F' => framerate = Some(parse_fraction(value)?),
             'I' => interlace = parse_interlace(value)?,
+            'A' => pixel_aspect = parse_pixel_aspect(value)?,
             'C' => format = colourspace_format(value).ok_or(G2gError::CapsMismatch)?,
             _ => {}
         }
@@ -207,6 +210,7 @@ fn parse_stream_header(line: &[u8]) -> Result<StreamHeader, G2gError> {
         framerate_num,
         framerate_den,
         interlace,
+        pixel_aspect,
         frame_bytes,
     })
 }
@@ -224,6 +228,13 @@ fn parse_fraction(value: &str) -> Result<(u32, u32), G2gError> {
         return Err(G2gError::CapsMismatch);
     }
     Ok((num, den))
+}
+
+// y4m writes an unknown sample aspect as `A0:0`
+fn parse_pixel_aspect(value: &str) -> Result<PixelAspect, G2gError> {
+    let (width, height) = value.split_once(':').ok_or(G2gError::CapsMismatch)?;
+    let ratio = AspectRatio::new(parse_u32(width)?, parse_u32(height)?);
+    Ok(ratio.map_or(PixelAspect::Any, PixelAspect::Exact))
 }
 
 /// The scan type an `I` parameter names. `Ib` / `Im` / `I?` have no [`Interlace`]
@@ -590,6 +601,7 @@ impl AsyncElement for Y4mEnc {
             height: Dim::Fixed(height),
             framerate: Rate::Fixed(framerate_q16),
             interlace,
+            pixel_aspect,
             ..
         } = absolute_caps
         else {
@@ -610,6 +622,7 @@ impl AsyncElement for Y4mEnc {
             framerate_num,
             framerate_den,
             interlace: *interlace,
+            pixel_aspect: *pixel_aspect,
             frame_bytes,
         });
         self.configured = true;
@@ -766,10 +779,25 @@ mod tests {
                 framerate_num: 25,
                 framerate_den: 1,
                 interlace: Interlace::Progressive,
+                pixel_aspect: PixelAspect::SQUARE,
                 frame_bytes: 64 * 48 * 3 / 2,
             }
         );
         assert_eq!(header.frame_period_ns(), 40_000_000);
+    }
+
+    #[test]
+    fn header_reads_the_sample_aspect() {
+        let ntsc =
+            parse_stream_header(b"YUV4MPEG2 W720 H480 F30000:1001 A10:11").expect("a valid header");
+        assert_eq!(
+            ntsc.pixel_aspect,
+            PixelAspect::Exact(AspectRatio::new(10, 11).expect("nonzero"))
+        );
+        let unknown =
+            parse_stream_header(b"YUV4MPEG2 W720 H480 F25:1 A0:0").expect("a valid header");
+        assert_eq!(unknown.pixel_aspect, PixelAspect::Any);
+        assert!(parse_stream_header(b"YUV4MPEG2 W720 H480 F25:1 A16").is_err());
     }
 
     #[test]

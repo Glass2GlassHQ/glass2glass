@@ -63,6 +63,7 @@ struct Probe {
     height: u32,
     format: RawVideoFormat,
     framerate_q16: u32,
+    pixel_aspect: g2g_core::PixelAspect,
     frames: u64,
 }
 
@@ -77,12 +78,22 @@ impl Probe {
             |key: &str| json_value(&json, key).unwrap_or_else(|| panic!("{key} in {path:?}"));
         let rate = value("r_frame_rate");
         let (num, den) = rate.split_once('/').expect("a num/den framerate");
+        let sample_aspect = value("sample_aspect_ratio");
+        let (aspect_width, aspect_height) = sample_aspect
+            .split_once(':')
+            .expect("a width:height sample aspect");
+        let pixel_aspect = g2g_core::AspectRatio::new(
+            aspect_width.parse().expect("a sample aspect width"),
+            aspect_height.parse().expect("a sample aspect height"),
+        )
+        .map_or(g2g_core::PixelAspect::Any, g2g_core::PixelAspect::Exact);
         Probe {
             width: value("width").parse().expect("a width"),
             height: value("height").parse().expect("a height"),
             format: pixel_format(&value("pix_fmt")),
             framerate_q16: ((num.parse::<u64>().expect("a numerator") << 16)
                 / den.parse::<u64>().expect("a denominator")) as u32,
+            pixel_aspect,
             frames: value("nb_read_frames").parse().expect("a frame count"),
         }
     }
@@ -95,7 +106,7 @@ impl Probe {
             framerate: Rate::Fixed(self.framerate_q16),
             interlace: Interlace::Progressive,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
-            pixel_aspect: g2g_core::PixelAspect::Any,
+            pixel_aspect: self.pixel_aspect,
         }
     }
 

@@ -186,6 +186,7 @@ fn nego_caps(kind: &AviStreamKind) -> Option<(Caps, bool)> {
                 Dim::Fixed(*width),
                 Dim::Fixed(*height),
                 PLACEHOLDER_FRAMERATE,
+                g2g_core::PixelAspect::Any,
             ),
             true,
         )),
@@ -1309,6 +1310,7 @@ mod tests {
             Dim::Fixed(WIDTH),
             Dim::Fixed(HEIGHT),
             PLACEHOLDER_FRAMERATE,
+            g2g_core::PixelAspect::Any,
         );
         let infos = forwardable_streams(&bytes);
         assert_eq!(infos[0].caps, want_caps);

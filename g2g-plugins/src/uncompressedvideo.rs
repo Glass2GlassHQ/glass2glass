@@ -223,6 +223,7 @@ pub(crate) fn raw_video_caps(
     width: Dim,
     height: Dim,
     framerate: Rate,
+    pixel_aspect: g2g_core::PixelAspect,
 ) -> Caps {
     Caps::RawVideo {
         format,
@@ -231,7 +232,7 @@ pub(crate) fn raw_video_caps(
         framerate,
         interlace: Interlace::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
-        pixel_aspect: g2g_core::PixelAspect::Any,
+        pixel_aspect,
     }
 }
 
@@ -240,7 +241,13 @@ pub(crate) fn raw_video_placeholder_caps(format: RawVideoFormat) -> Caps {
         min: 1,
         max: MAX_DIM,
     };
-    raw_video_caps(format, span(), span(), PLACEHOLDER_FRAMERATE)
+    raw_video_caps(
+        format,
+        span(),
+        span(),
+        PLACEHOLDER_FRAMERATE,
+        g2g_core::PixelAspect::Any,
+    )
 }
 
 // bytes past the frame's rows are ignored, as libavcodec does

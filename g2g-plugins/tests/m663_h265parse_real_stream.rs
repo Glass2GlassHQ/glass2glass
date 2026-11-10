@@ -48,6 +48,7 @@ async fn recovers_geometry_and_vui_framerate_from_a_libx265_stream() {
         eprintln!("ffmpeg not present; skipping the H.265 real-stream test");
         return;
     }
+    let (sample_aspect_width, sample_aspect_height) = (10, 11);
     let path = std::env::temp_dir().join(format!("g2g_m663_{}.h265", std::process::id()));
     let out = Command::new("ffmpeg")
         .args([
@@ -56,6 +57,10 @@ async fn recovers_geometry_and_vui_framerate_from_a_libx265_stream() {
             "lavfi",
             "-i",
             "testsrc=duration=1:size=320x240:rate=25",
+        ])
+        .args([
+            "-vf",
+            &format!("setsar={sample_aspect_width}/{sample_aspect_height}"),
         ])
         .args([
             "-pix_fmt",
@@ -113,6 +118,7 @@ async fn recovers_geometry_and_vui_framerate_from_a_libx265_stream() {
     // The refined caps carry the concrete geometry and the VUI framerate.
     // libx265 writes a video_signal_type block with the full-range flag off and
     // no colour description, so the colorimetry is limited range, rest unknown.
+    // The VUI aspect_ratio_info carries the setsar ratio.
     assert_eq!(
         sink.caps,
         vec![Caps::CompressedVideo {
@@ -124,7 +130,10 @@ async fn recovers_geometry_and_vui_framerate_from_a_libx265_stream() {
                 range: g2g_core::ColorRange::Limited,
                 ..g2g_core::Colorimetry::UNKNOWN
             },
-            pixel_aspect: g2g_core::PixelAspect::Any,
+            pixel_aspect: g2g_core::PixelAspect::Exact(
+                g2g_core::AspectRatio::new(sample_aspect_width, sample_aspect_height)
+                    .expect("nonzero")
+            ),
             alignment: g2g_core::BitstreamAlignment::AccessUnit,
         }],
         "one CapsChanged with geometry + VUI timing_info framerate"
