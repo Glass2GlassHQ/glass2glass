@@ -295,12 +295,6 @@ libraries installed.
   - The fan-in muxers refuse codecs the gst muxer of the same name takes:
     `matroskamux` PCM, Vorbis, Theora and VP6, `mp4mux` ADTS AAC and VP8,
     `flvmux` and `mpegtsmux` VP8 (calliope TESTING technique 23 lists the rest).
-  - Remux changes samples or frame counts: bipbop TS AAC into mp4mux,
-    `twofields_packet.mp4` into mkv and ts, `test7_cut.mkv` into mp4, and
-    `webm/opus_vp9-alpha.webm` Opus comes back 8 stereo samples longer through
-    mp4mux and matroskamux.
-  - `mpegts/pmtchange.ts` audio 0 to 2 decode to other lengths and samples than
-    ffmpeg's.
 - **MP4 track language and orientation:** `mp4mux` writes `und` in every `mdhd`
   and an identity `tkhd` matrix, and the MP4 demuxers read neither. Write the
   track's `Tag::Language` and an orientation tag (gst's `image-orientation`) and

@@ -3013,9 +3013,7 @@ impl MatroskaMuxer {
     /// it carries, or `None` when the block says nothing the next timestamp does
     /// not. Only Opus is judged: its packet length is readable from the TOC byte,
     /// so a trimmed tail is recognizable, which is exactly the end-of-stream trim
-    /// an Ogg granule or an MP4 sample table carries. The shortfall must
-    /// reach a whole tick, since a `BlockDuration` that rounds back to the packet
-    /// length is noise.
+    /// an Ogg granule or an MP4 sample table carries.
     fn trimmed_block(&self, track: usize, data: &[u8], duration_ns: u64) -> Option<(u64, i64)> {
         if duration_ns == 0 || self.tracks.get(track)?.spec.codec != MkvCodec::Opus {
             return None;
@@ -3023,7 +3021,7 @@ impl MatroskaMuxer {
         let samples = u64::from(crate::opusparse::packet_samples(data));
         let packet_ns = samples * 1_000_000_000 / u64::from(crate::opusparse::OPUS_RATE_HZ);
         let discard_ns = packet_ns.checked_sub(duration_ns)?;
-        if discard_ns < DEFAULT_TIMESTAMP_SCALE {
+        if discard_ns == 0 {
             return None;
         }
         // BlockDuration rounds to the nearest tick, as ffmpeg does (a 6.5 ms tail
@@ -5706,6 +5704,19 @@ mod tests {
             &bytes,
             &[0x75, 0xA2, 0x84, 0x00, 0xCD, 0xFE, 0x60]
         ));
+    }
+
+    #[test]
+    fn an_opus_trim_under_a_millisecond_is_written() {
+        let eight_samples_ns = 8 * 1_000_000_000 / u64::from(crate::opusparse::OPUS_RATE_HZ);
+        let kept_ns = 20_000_000 - eight_samples_ns;
+        let mut mux = MatroskaMuxer::new_multi(vec![opus_track()]);
+        let bytes = mux.push_frame_on(0, &opus_packet(1), 0, true, kept_ns);
+
+        let mut d = MatroskaDemuxer::new();
+        d.push_data(&bytes);
+        let frames = d.take_frames();
+        assert_eq!(frames[0].duration_ns, kept_ns);
     }
 
     #[test]

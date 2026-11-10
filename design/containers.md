@@ -1012,7 +1012,8 @@ pts but no duration with that pts, as ffmpeg does.
 The end trim, with no granule to carry it, is the final block's
 `DiscardPadding`, which is nanoseconds and so survives the millisecond
 `TimestampScale` grid that `BlockDuration` alone would round away, where a
-6.5 ms tail becomes 7. The muxer writes both, as ffmpeg does, and the demuxer
+6.5 ms tail becomes 7. The muxer writes both for any trim, even one under a
+millisecond, as ffmpeg does, and the demuxer
 lets the ns element win. Because the packet's own length is needed to turn a
 tail discard into a kept duration, the conversion reads the Opus TOC byte and
 applies to Opus only.
