@@ -589,6 +589,7 @@ fn avcc_format_fields(sps: &[u8]) -> Option<[u8; 4]> {
     ])
 }
 
+#[cfg(feature = "std")]
 pub(crate) struct HvccSpsFields {
     pub profile_tier_level: [u8; 12],
     pub chroma_format_idc: u8,
@@ -598,10 +599,13 @@ pub(crate) struct HvccSpsFields {
     pub temporal_id_nesting: bool,
 }
 
+#[cfg(feature = "std")]
 const H265_NAL_HEADER_BYTES: usize = 2;
 // hvcC stores each bit depth minus eight in three bits
+#[cfg(feature = "std")]
 const MAX_HVCC_BIT_DEPTH_MINUS8: u32 = 7;
 
+#[cfg(feature = "std")]
 pub(crate) fn hvcc_sps_fields(sps: &[u8]) -> Option<HvccSpsFields> {
     let rbsp = strip_emulation_prevention(sps.get(H265_NAL_HEADER_BYTES..)?);
     let (head, mut reader) = crate::h265parse::parse_h265_sps_head(&rbsp)?;
@@ -649,6 +653,7 @@ pub(crate) fn parameter_sets<'a>(
     {
         return Err(G2gError::CapsMismatch);
     }
+    #[cfg(feature = "std")]
     if matches!(codec, VideoCodec::H265) && hvcc_sps_fields(sets[1]).is_none() {
         return Err(G2gError::CapsMismatch);
     }
