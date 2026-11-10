@@ -2,6 +2,8 @@
   <Package Name="glass2glass" Manufacturer="Glass2GlassHQ" Version="$(var.PackageVersion)" UpgradeCode="51320f34-124f-428f-8cc1-8c69cb5a7f8a">
     <MajorUpgrade DowngradeErrorMessage="A newer version of glass2glass is installed." />
     <MediaTemplate EmbedCab="yes" />
+    <!-- windows installer copies ARPINSTALLLOCATION into the InstallLocation shown in Add/Remove Programs -->
+    <SetProperty Id="ARPINSTALLLOCATION" Value="[INSTALLFOLDER]" After="CostFinalize" />
     <StandardDirectory Id="ProgramFiles64Folder">
       <Directory Id="INSTALLFOLDER" Name="glass2glass" />
     </StandardDirectory>
