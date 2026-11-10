@@ -85,6 +85,9 @@ pub const V2_MAGIC: u64 = 0x3276_4942_4147_3247;
 /// is refused: the host has no way to know what its fields mean.
 pub const V2_ABI_VERSION: u32 = 2;
 
+// abi_version 3 adds the pixel aspect ratio to both video caps bodies, which grows `FfiCaps` and every struct that holds one
+pub const V3_ABI_VERSION: u32 = 3;
+
 /// Longest string (element name, blurb, metadata field) accepted from a plugin.
 /// A length beyond this is garbage or a hostile length field, not a name.
 pub const MAX_STRING_LEN: usize = 4096;
@@ -264,6 +267,21 @@ pub struct FfiRate {
     pub max_q16: u32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(C)]
+pub struct FfiPixelAspect {
+    // 0/0 is any ratio, gst's absent `pixel-aspect-ratio`
+    pub numerator: u32,
+    pub denominator: u32,
+}
+
+impl FfiPixelAspect {
+    pub const ANY: FfiPixelAspect = FfiPixelAspect {
+        numerator: 0,
+        denominator: 0,
+    };
+}
+
 /// Raw pixel-buffer caps.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(C)]
@@ -278,6 +296,7 @@ pub struct FfiRawVideoCaps {
     pub framerate: FfiRate,
     /// `INTERLACE_ANY` / `INTERLACE_PROGRESSIVE` / `INTERLACE_INTERLEAVED`.
     pub interlace: u32,
+    pub pixel_aspect: FfiPixelAspect,
 }
 
 /// Scan structure unconstrained.
@@ -299,6 +318,7 @@ pub struct FfiCompressedVideoCaps {
     pub height: FfiDim,
     /// Nominal framerate.
     pub framerate: FfiRate,
+    pub pixel_aspect: FfiPixelAspect,
 }
 
 /// Audio caps.
@@ -403,21 +423,73 @@ impl FfiCaps {
     };
 }
 
+// the caps layout a plugin declaring `V2_ABI_VERSION` reads and writes, the video bodies without a pixel aspect ratio
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(C)]
+pub struct FfiRawVideoCapsV2 {
+    pub format: u32,
+    pub width: FfiDim,
+    pub height: FfiDim,
+    pub framerate: FfiRate,
+    pub interlace: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(C)]
+pub struct FfiCompressedVideoCapsV2 {
+    pub codec: u32,
+    pub width: FfiDim,
+    pub height: FfiDim,
+    pub framerate: FfiRate,
+}
+
+#[derive(Clone, Copy)]
+#[repr(C)]
+pub union FfiCapsBodyV2 {
+    pub raw_video: FfiRawVideoCapsV2,
+    pub compressed_video: FfiCompressedVideoCapsV2,
+    pub audio: FfiAudioCaps,
+    pub byte_stream: FfiByteStreamCaps,
+    pub text: FfiTextCaps,
+}
+
+impl core::fmt::Debug for FfiCapsBodyV2 {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("FfiCapsBodyV2(union)")
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct FfiCapsV2 {
+    pub tag: u32,
+    pub reserved: u32,
+    pub body: FfiCapsBodyV2,
+}
+
+// one abi_version's caps layout, so the structs that carry caps are written once for both
+pub trait CapsLayout: Copy + core::fmt::Debug + 'static {
+    const NONE: Self;
+    fn tag(&self) -> u32;
+    fn to_caps(&self) -> Result<g2g_core::Caps, CapsCodeError>;
+    fn from_caps(caps: &g2g_core::Caps) -> Result<Self, CapsCodeError>;
+}
+
 /// An ordered set of caps alternatives, highest preference first: the data form
 /// of a pad template. `count == 0` means "any" on a sink pad and "same as the
 /// input" on a source pad.
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
-pub struct FfiCapsSet {
+pub struct FfiCapsSet<C = FfiCaps> {
     /// First alternative, or null when `count` is 0.
-    pub alternatives: *const FfiCaps,
+    pub alternatives: *const C,
     /// Number of alternatives, bounded by [`MAX_CAPS_ALTERNATIVES`].
     pub count: usize,
 }
 
-impl FfiCapsSet {
+impl<C> FfiCapsSet<C> {
     /// The empty set.
-    pub const EMPTY: FfiCapsSet = FfiCapsSet {
+    pub const EMPTY: FfiCapsSet<C> = FfiCapsSet {
         alternatives: core::ptr::null(),
         count: 0,
     };
@@ -499,13 +571,13 @@ impl FfiFrame {
 /// a struct is one less thing a hand-written C plugin can get wrong.
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
-pub struct FfiPacket {
+pub struct FfiPacket<C = FfiCaps> {
     /// One of the `PACKET_*` constants.
     pub tag: u32,
     /// Padding. Must be zero.
     pub reserved: u32,
     /// Live when `tag` is [`PACKET_CAPS_CHANGED`].
-    pub caps: FfiCaps,
+    pub caps: C,
     /// Live when `tag` is [`PACKET_DATA_FRAME`]; its payload ownership travels
     /// with the packet.
     pub frame: FfiFrame,
@@ -525,12 +597,12 @@ pub const PACKET_EOS: u32 = 3;
 /// Discard in-flight and buffered data and reset position state.
 pub const PACKET_FLUSH: u32 = 4;
 
-impl FfiPacket {
+impl<C: CapsLayout> FfiPacket<C> {
     /// An empty packet slot.
-    pub const NONE: FfiPacket = FfiPacket {
+    pub const NONE: FfiPacket<C> = FfiPacket {
         tag: PACKET_NONE,
         reserved: 0,
-        caps: FfiCaps::NONE,
+        caps: C::NONE,
         frame: FfiFrame::EMPTY,
     };
 }
@@ -550,7 +622,7 @@ pub const PUSH_ACCEPTED: i32 = 0;
 /// [`OutputSink::poll_push`](g2g_core::OutputSink::poll_push).
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
-pub struct FfiOutputSinkVtable {
+pub struct FfiOutputSinkVtable<C = FfiCaps> {
     /// `size_of::<FfiOutputSinkVtable>()` as the host wrote it.
     pub struct_size: u32,
     /// Vtable revision within [`V2_ABI_VERSION`].
@@ -565,7 +637,7 @@ pub struct FfiOutputSinkVtable {
     pub poll_push: unsafe extern "C" fn(
         ctx: *mut c_void,
         cx: *mut async_ffi::FfiContext,
-        packet: *mut FfiPacket,
+        packet: *mut FfiPacket<C>,
     ) -> async_ffi::FfiPoll<FfiStatus>,
     /// Reserved for future entries; null in this revision. See the module
     /// "Versioning" note: a host ignores any it does not know.
@@ -575,11 +647,11 @@ pub struct FfiOutputSinkVtable {
 /// A downstream output: the host's opaque context plus its vtable.
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
-pub struct FfiOutputSink {
+pub struct FfiOutputSink<C = FfiCaps> {
     /// Opaque host state, passed back as the vtable's first argument.
     pub ctx: *mut c_void,
     /// Never null.
-    pub vtable: *const FfiOutputSinkVtable,
+    pub vtable: *const FfiOutputSinkVtable<C>,
 }
 
 // ---------------------------------------------------------------------------
@@ -727,7 +799,7 @@ pub struct FfiPropertySpec {
 /// a new entry appends, or claims a `reserved` slot.
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
-pub struct FfiElementVtable {
+pub struct FfiElementVtable<C = FfiCaps> {
     /// `size_of::<FfiElementVtable>()` as the plugin wrote it. At least
     /// [`VERSIONED_HEADER_SIZE`].
     pub struct_size: u32,
@@ -742,8 +814,8 @@ pub struct FfiElementVtable {
     pub process: Option<
         unsafe extern "C" fn(
             elem: *mut c_void,
-            packet: FfiPacket,
-            out: FfiOutputSink,
+            packet: FfiPacket<C>,
+            out: FfiOutputSink<C>,
         ) -> async_ffi::LocalFfiFuture<FfiStatus>,
     >,
 
@@ -758,16 +830,12 @@ pub struct FfiElementVtable {
     /// [`CAPS_NONE`] asks the solver to try again with that proposal, which is
     /// a hard error at pipeline start (the caps are already fixated by then).
     pub configure_pipeline: Option<
-        unsafe extern "C" fn(
-            elem: *mut c_void,
-            caps: *const FfiCaps,
-            refixate: *mut FfiCaps,
-        ) -> FfiStatus,
+        unsafe extern "C" fn(elem: *mut c_void, caps: *const C, refixate: *mut C) -> FfiStatus,
     >,
 
     /// Receive the element's own negotiated **output** caps. Optional.
     pub configure_output:
-        Option<unsafe extern "C" fn(elem: *mut c_void, caps: *const FfiCaps) -> FfiStatus>,
+        Option<unsafe extern "C" fn(elem: *mut c_void, caps: *const C) -> FfiStatus>,
 
     /// Set a property by name. Optional; absent means the element has none.
     /// `value` is borrowed for the call.
@@ -826,7 +894,7 @@ impl FfiElementMetadata {
 /// element is built from these fields long after `register` returned.
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
-pub struct FfiElementRegistration {
+pub struct FfiElementRegistration<C = FfiCaps> {
     /// `size_of::<FfiElementRegistration>()` as the plugin wrote it.
     pub struct_size: u32,
     /// [`ELEMENT_TRANSFORM`] or [`ELEMENT_SINK`]. Must match the kind the
@@ -837,17 +905,17 @@ pub struct FfiElementRegistration {
     /// Introspection metadata.
     pub metadata: FfiElementMetadata,
     /// Caps the element accepts on its input pad. Empty means any.
-    pub sink_caps: FfiCapsSet,
+    pub sink_caps: FfiCapsSet<C>,
     /// Caps the element produces. Empty means "the input caps unchanged", the
     /// pass-through shape. A non-empty set must be fully concrete: an `Any`
     /// dimension or framerate here cannot survive fixation and is refused.
-    pub source_caps: FfiCapsSet,
+    pub source_caps: FfiCapsSet<C>,
     /// First property spec, or null.
     pub properties: *const FfiPropertySpec,
     /// Number of property specs, bounded by [`MAX_PROPERTIES`].
     pub property_count: usize,
     /// The element's entry points. Never null.
-    pub vtable: *const FfiElementVtable,
+    pub vtable: *const FfiElementVtable<C>,
     /// Build one instance. **Required.** Returns null on failure.
     pub create: Option<unsafe extern "C" fn() -> *mut c_void>,
     /// Reserved for future entries; null in this revision.
@@ -857,7 +925,7 @@ pub struct FfiElementRegistration {
 /// The host-owned object a plugin registers its elements through.
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
-pub struct FfiRegistrar {
+pub struct FfiRegistrar<C = FfiCaps> {
     /// `size_of::<FfiRegistrar>()` as the host wrote it.
     pub struct_size: u32,
     /// Registrar revision within [`V2_ABI_VERSION`].
@@ -867,8 +935,10 @@ pub struct FfiRegistrar {
     /// Register one element. Returns [`STATUS_OK`], or an error when the host
     /// refuses it (an undeclared name, a malformed registration, too many
     /// elements). A refusal fails the whole load, so a plugin need not unwind.
-    pub register_element:
-        unsafe extern "C" fn(ctx: *mut c_void, element: *const FfiElementRegistration) -> FfiStatus,
+    pub register_element: unsafe extern "C" fn(
+        ctx: *mut c_void,
+        element: *const FfiElementRegistration<C>,
+    ) -> FfiStatus,
     /// Reserved for future entries; null in this revision.
     pub reserved: [Option<extern "C" fn()>; 4],
 }

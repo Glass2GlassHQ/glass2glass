@@ -31,12 +31,11 @@ use g2g_core::{Frame, FrameTiming, G2gError, PipelinePacket};
 
 use core::ffi::c_void;
 
-use super::caps::{caps_from_ffi, caps_into_ffi};
 use super::{
-    FfiFraction, FfiFrame, FfiPacket, FfiPropStr, FfiPropValue, FfiPropValueBody, FfiPropertySpec,
-    FfiStatus, FfiStr, FRAME_EXCLUSIVE, MAX_FRAME_BYTES, MAX_STRING_LEN, PACKET_CAPS_CHANGED,
-    PACKET_DATA_FRAME, PACKET_EOS, PACKET_FLUSH, PROP_BOOL, PROP_DOUBLE, PROP_FRACTION, PROP_INT,
-    PROP_STR, PROP_UINT, STATUS_ERROR,
+    CapsLayout, FfiFraction, FfiFrame, FfiPacket, FfiPropStr, FfiPropValue, FfiPropValueBody,
+    FfiPropertySpec, FfiStatus, FfiStr, FRAME_EXCLUSIVE, MAX_FRAME_BYTES, MAX_STRING_LEN,
+    PACKET_CAPS_CHANGED, PACKET_DATA_FRAME, PACKET_EOS, PACKET_FLUSH, PROP_BOOL, PROP_DOUBLE,
+    PROP_FRACTION, PROP_INT, PROP_STR, PROP_UINT, STATUS_ERROR,
 };
 
 /// Release a `SystemSlice` that was lent across the boundary.
@@ -57,10 +56,10 @@ unsafe extern "C" fn drop_lent_slice(user: *mut c_void) {
 ///
 /// Only the four packet kinds v2 carries convert. `Segment` and `Tick` are the
 /// host wrapper's business and never reach a plugin.
-pub fn packet_into_ffi(packet: PipelinePacket) -> Result<FfiPacket, G2gError> {
+pub fn packet_into_ffi<C: CapsLayout>(packet: PipelinePacket) -> Result<FfiPacket<C>, G2gError> {
     match packet {
         PipelinePacket::CapsChanged(caps) => {
-            let caps = caps_into_ffi(&caps).map_err(|_| G2gError::CapsMismatch)?;
+            let caps = C::from_caps(&caps).map_err(|_| G2gError::CapsMismatch)?;
             Ok(FfiPacket {
                 tag: PACKET_CAPS_CHANGED,
                 caps,
@@ -125,10 +124,12 @@ pub fn packet_into_ffi(packet: PipelinePacket) -> Result<FfiPacket, G2gError> {
 /// that many readable bytes for as long as the frame lives, and whose `free` may
 /// be called once. That is the one property no amount of validation can check;
 /// it comes from the ABI contract.
-pub unsafe fn packet_from_ffi(packet: FfiPacket) -> Result<PipelinePacket, FfiStatus> {
+pub unsafe fn packet_from_ffi<C: CapsLayout>(
+    packet: FfiPacket<C>,
+) -> Result<PipelinePacket, FfiStatus> {
     match packet.tag {
         PACKET_CAPS_CHANGED => {
-            let caps = caps_from_ffi(&packet.caps).map_err(|_| STATUS_ERROR)?;
+            let caps = packet.caps.to_caps().map_err(|_| STATUS_ERROR)?;
             Ok(PipelinePacket::CapsChanged(caps))
         }
         PACKET_DATA_FRAME => {
@@ -189,7 +190,7 @@ unsafe fn release_frame(frame: &FfiFrame) {
 /// # Safety
 /// The packet's payload must still be owned by the caller, and this must run
 /// once for it.
-pub unsafe fn release_packet(packet: &FfiPacket) {
+pub unsafe fn release_packet<C>(packet: &FfiPacket<C>) {
     if packet.tag == PACKET_DATA_FRAME {
         // SAFETY: forwarded from this function's contract.
         unsafe { release_frame(&packet.frame) };
@@ -325,6 +326,7 @@ pub fn spec_into_ffi(spec: &PropertySpec) -> Option<FfiPropertySpec> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::abi::FfiCaps;
     use g2g_core::caps::{Caps, TextFormat};
 
     #[test]
@@ -344,7 +346,7 @@ mod tests {
             7,
         ));
 
-        let ffi = packet_into_ffi(packet).expect("a System frame crosses");
+        let ffi = packet_into_ffi::<FfiCaps>(packet).expect("a System frame crosses");
         assert_eq!(ffi.frame.data, original, "the bytes were lent, not copied");
         assert_eq!(ffi.frame.len, 4);
 
@@ -367,7 +369,7 @@ mod tests {
 
     fn crossed_slice(domain: MemoryDomain) -> (u32, SystemSlice) {
         let packet = PipelinePacket::DataFrame(Frame::new(domain, FrameTiming::default(), 0));
-        let ffi = packet_into_ffi(packet).expect("a System frame crosses");
+        let ffi = packet_into_ffi::<FfiCaps>(packet).expect("a System frame crosses");
         let flags = ffi.frame.reserved;
         // SAFETY: `ffi` is the value just produced, whose payload this test owns.
         match unsafe { packet_from_ffi(ffi) } {
@@ -425,7 +427,7 @@ mod tests {
                 free: Some(count_free),
                 ..FfiFrame::EMPTY
             },
-            ..FfiPacket::NONE
+            ..FfiPacket::<FfiCaps>::NONE
         };
         // SAFETY: the length is the hostile field under test; nothing reads it.
         let err = unsafe { packet_from_ffi(ffi) }.expect_err("an absurd length is rejected");
@@ -446,7 +448,7 @@ mod tests {
                 len: 16,
                 ..FfiFrame::EMPTY
             },
-            ..FfiPacket::NONE
+            ..FfiPacket::<FfiCaps>::NONE
         };
         // SAFETY: the null pointer is the case under test; nothing reads it.
         assert!(unsafe { packet_from_ffi(ffi) }.is_err());
@@ -462,7 +464,7 @@ mod tests {
             PipelinePacket::Flush,
         ] {
             let expected = alloc_debug(&packet);
-            let ffi = packet_into_ffi(packet).expect("crosses");
+            let ffi = packet_into_ffi::<FfiCaps>(packet).expect("crosses");
             // SAFETY: the value just produced, with no payload to own.
             let back = unsafe { packet_from_ffi(ffi) }.expect("comes back");
             assert_eq!(alloc_debug(&back), expected);
@@ -477,7 +479,7 @@ mod tests {
     fn a_segment_does_not_cross() {
         // Segment and Tick are the host wrapper's business; a conversion attempt
         // must fail rather than silently dropping the packet.
-        assert!(packet_into_ffi(PipelinePacket::Tick).is_err());
+        assert!(packet_into_ffi::<FfiCaps>(PipelinePacket::Tick).is_err());
     }
 
     #[test]

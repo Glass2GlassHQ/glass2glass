@@ -17,6 +17,9 @@
 //!    before the reserved slots and leaves `configure_pipeline` /
 //!    `configure_output` null, and the host substitutes its own defaults.
 //!
+//! The fixture builds twice, against `g2g_plugin_v2.h` and against
+//! `g2g_plugin_v3.h`, so a v2 plugin binary keeps loading next to v3 ones.
+//!
 //! It shells out to a C compiler: `cc -shared` / `-dynamiclib` on Unix, MSVC
 //! `cl /LD` on Windows.
 //!
@@ -34,49 +37,76 @@ use g2g_plugins::registry::default_registry;
 mod common;
 use common::compile_c_plugin;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Header {
+    V2,
+    V3,
+}
+
+const HEADERS: [Header; 2] = [Header::V2, Header::V3];
+
 /// Compile the C fixture into a shared library and return its path.
-fn build_c_plugin() -> PathBuf {
+fn build_c_plugin(header: Header) -> PathBuf {
     // One compile per process: the tests run on parallel threads, and a
     // dlopen against a library the compiler is still writing fails with
     // "file too short".
-    static BUILT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
-    BUILT.get_or_init(build_c_plugin_uncached).clone()
+    static V2: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    static V3: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    match header {
+        Header::V2 => V2.get_or_init(|| build_c_plugin_uncached(header)).clone(),
+        Header::V3 => V3.get_or_init(|| build_c_plugin_uncached(header)).clone(),
+    }
 }
 
-fn build_c_plugin_uncached() -> PathBuf {
+fn build_c_plugin_uncached(header: Header) -> PathBuf {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let include = manifest_dir.join("../g2g-plugin/include");
-    let out_dir = manifest_dir.join("tests/fixtures/c-plugin/build");
-    compile_c_plugin(&["-I".into(), include.into()], &out_dir)
+    let mut flags: Vec<std::ffi::OsString> = vec!["-I".into(), include.into()];
+    let build_dir = match header {
+        Header::V2 => "build",
+        Header::V3 => {
+            flags.push("-DG2G_PLUGIN_V3".into());
+            "build-v3"
+        }
+    };
+    let out_dir = manifest_dir.join("tests/fixtures/c-plugin").join(build_dir);
+    compile_c_plugin(&flags, &out_dir)
 }
 
 /// `sizeof` for every ABI struct, in the order `g2g_c_plugin_layout` reports.
 /// Kept beside the Rust types it is compared against.
-fn rust_layout() -> Vec<usize> {
+fn rust_layout_for<C>() -> Vec<usize> {
     use g2g_plugin::abi::*;
     use std::mem::size_of;
     vec![
         size_of::<FfiStr>(),
         size_of::<FfiDim>(),
         size_of::<FfiRate>(),
-        size_of::<FfiCaps>(),
-        size_of::<FfiCapsSet>(),
+        size_of::<C>(),
+        size_of::<FfiCapsSet<C>>(),
         size_of::<FfiFrame>(),
-        size_of::<FfiPacket>(),
+        size_of::<FfiPacket<C>>(),
         size_of::<async_ffi::FfiPoll<FfiStatus>>(),
         size_of::<async_ffi::LocalFfiFuture<FfiStatus>>(),
-        size_of::<FfiOutputSinkVtable>(),
-        size_of::<FfiOutputSink>(),
+        size_of::<FfiOutputSinkVtable<C>>(),
+        size_of::<FfiOutputSink<C>>(),
         size_of::<FfiPropStr>(),
         size_of::<FfiPropValue>(),
         size_of::<FfiPropertySpec>(),
         size_of::<FfiElementMetadata>(),
-        size_of::<FfiElementVtable>(),
-        size_of::<FfiElementRegistration>(),
-        size_of::<FfiRegistrar>(),
+        size_of::<FfiElementVtable<C>>(),
+        size_of::<FfiElementRegistration<C>>(),
+        size_of::<FfiRegistrar<C>>(),
         size_of::<FfiCapability>(),
         size_of::<FfiPluginDescriptor>(),
     ]
+}
+
+fn rust_layout(header: Header) -> Vec<usize> {
+    match header {
+        Header::V2 => rust_layout_for::<g2g_plugin::abi::FfiCapsV2>(),
+        Header::V3 => rust_layout_for::<g2g_plugin::abi::FfiCaps>(),
+    }
 }
 
 const LAYOUT_NAMES: &[&str] = &[
@@ -104,7 +134,7 @@ const LAYOUT_NAMES: &[&str] = &[
 
 /// Read the C side's struct sizes out of the built library.
 fn c_layout(so: &Path) -> Vec<usize> {
-    let expected = rust_layout().len();
+    let expected = rust_layout(Header::V3).len();
     // SAFETY: loading a library runs its initialisers; this one is built from
     // the fixture source in this repo by the test itself.
     let lib = unsafe { libloading::Library::new(so) }.expect("the C plugin opens");
@@ -121,20 +151,28 @@ fn c_layout(so: &Path) -> Vec<usize> {
 fn the_c_header_and_the_rust_abi_agree_on_every_struct() {
     // The drift guard. `g2g_plugin_v2.h` is hand-written, so nothing but this
     // stops a field landing on one side only.
-    let so = build_c_plugin();
-    let from_c = c_layout(&so);
-    let from_rust = rust_layout();
-    for ((name, c), rust) in LAYOUT_NAMES.iter().zip(&from_c).zip(&from_rust) {
-        assert_eq!(
-            c, rust,
-            "{name}: the C header says {c} bytes, the Rust type is {rust}"
-        );
+    for header in HEADERS {
+        let so = build_c_plugin(header);
+        let from_c = c_layout(&so);
+        let from_rust = rust_layout(header);
+        for ((name, c), rust) in LAYOUT_NAMES.iter().zip(&from_c).zip(&from_rust) {
+            assert_eq!(
+                c, rust,
+                "{header:?} {name}: the C header says {c} bytes, the Rust type is {rust}"
+            );
+        }
     }
 }
 
 #[test]
 fn a_c_plugin_loads_and_carries_frames_through_a_pipeline() {
-    let so = build_c_plugin();
+    for header in HEADERS {
+        carries_frames_through_a_pipeline(header);
+    }
+}
+
+fn carries_frames_through_a_pipeline(header: Header) {
+    let so = build_c_plugin(header);
     let mut reg = default_registry();
     assert!(!reg.element_names().contains(&"cpasser"));
 
@@ -167,7 +205,7 @@ fn a_c_plugin_loads_and_carries_frames_through_a_pipeline() {
 
 #[test]
 fn a_property_reaches_the_c_element_and_reads_back() {
-    let so = build_c_plugin();
+    let so = build_c_plugin(Header::V2);
     let mut reg = default_registry();
     plugin_loader::load_plugin(&so, &mut reg).expect("the C plugin loads");
 

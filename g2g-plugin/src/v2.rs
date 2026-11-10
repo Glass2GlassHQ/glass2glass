@@ -524,7 +524,7 @@ macro_rules! declare_plugin_v2 {
             $crate::abi::AbiStatic<$crate::abi::FfiPluginDescriptor> =
             $crate::abi::AbiStatic($crate::abi::FfiPluginDescriptor {
                 magic: $crate::abi::V2_MAGIC,
-                abi_version: $crate::abi::V2_ABI_VERSION,
+                abi_version: $crate::abi::V3_ABI_VERSION,
                 struct_size: ::core::mem::size_of::<$crate::abi::FfiPluginDescriptor>() as u32,
                 name: $crate::abi::FfiStr::borrowed($plugin_name),
                 version: $crate::abi::FfiStr::borrowed($plugin_version),

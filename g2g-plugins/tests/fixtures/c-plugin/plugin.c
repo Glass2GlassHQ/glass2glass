@@ -1,4 +1,5 @@
-/* A glass2glass plugin written in plain C against g2g_plugin_v2.h.
+/* A glass2glass plugin written in plain C against g2g_plugin_v2.h, or
+ * g2g_plugin_v3.h when built with G2G_PLUGIN_V3 defined.
  *
  * The element is `cpasser`: it counts data frames and forwards them unchanged,
  * and exposes `count` (read-only) and `enabled` (drops frames when false).
@@ -14,7 +15,13 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef G2G_PLUGIN_V3
+#include "g2g_plugin_v3.h"
+#define G2G_FIXTURE_ABI_VERSION G2G_V3_ABI_VERSION
+#else
 #include "g2g_plugin_v2.h"
+#define G2G_FIXTURE_ABI_VERSION G2G_V2_ABI_VERSION
+#endif
 
 /* --- element instance --------------------------------------------------- */
 
@@ -212,7 +219,7 @@ static const G2gCapability CAPABILITIES[] = {
 
 G2G_PLUGIN_EXPORT const G2gPluginDescriptor g2g_plugin_v2_descriptor = {
     G2G_V2_MAGIC,
-    G2G_V2_ABI_VERSION,
+    G2G_FIXTURE_ABI_VERSION,
     sizeof(G2gPluginDescriptor),
     G2G_STR("g2g-c-example-plugin"),
     G2G_STR("0.1.0"),

@@ -283,6 +283,16 @@ vtable leaves the host's newer entries absent and the host uses its defaults, an
 trailing reserved fn-pointer slots let a future entry appear without the size
 changing, which an older host ignores.
 
+Generation 3 (`V3_ABI_VERSION`, header `g2g_plugin_v3.h`) ends both video caps
+bodies with the pixel aspect ratio, `0/0` meaning any. `FfiCaps` is held by value
+in packets and caps arrays without a `struct_size`, so this is a new generation
+rather than a grown struct. The descriptor symbol and magic are unchanged, and
+`declare_plugin_v2!` emits generation 3. The host still loads generation 2
+plugins: the packet, caps set, vtable and registrar types are generic over a
+`CapsLayout`, `FfiCapsV2` is the frozen generation 2 caps, and the loader drives
+each plugin in the layout its `abi_version` names. A generation 2 plugin reads
+caps with the ratio dropped and hands back caps whose ratio is `Any`.
+
 The loader probes the v2 symbol first and falls back to the v1 pair, so existing
 v1 plugins load unchanged. v1 remains the path for a plugin that needs the whole
 trait surface or GPU memory and ships alongside the host build it was compiled
@@ -306,9 +316,9 @@ or unreleased host tree passes the tag check and can still differ in layout. The
 sources therefore have to come from the host's own tree.
 
 A `declare_plugin_v2!` plugin needs `g2g-core` and `g2g-plugin` at any version
-whose `V2_ABI_VERSION` equals the host's, built by any `rustc` from 1.86 on.
+whose `V3_ABI_VERSION` the host loads, built by any `rustc` from 1.86 on.
 `g2g-core` is still a build dependency, because the SDK adapts an ordinary
-`AsyncElement` to the vtables. A plain-C plugin needs only `g2g_plugin_v2.h`.
+`AsyncElement` to the vtables. A plain-C plugin needs only `g2g_plugin_v3.h`.
 
 `tools/plugin-sdk-bundle.sh <prefix>` stages all three from the tree that
 builds the host. `cargo package` turns `g2g-core` and `g2g-plugin` into

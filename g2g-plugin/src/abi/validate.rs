@@ -25,10 +25,10 @@ use g2g_core::property::{ElementMetadata, PropKind, PropValue, PropertySpec};
 
 use super::caps::{caps_set_from_ffi, is_fixable, CapsCodeError};
 use super::{
-    read_versioned, FfiCapability, FfiElementRegistration, FfiElementVtable, FfiPluginDescriptor,
-    FfiPropertySpec, FfiRegistrar, FfiStatus, FfiStr, ELEMENT_SINK, ELEMENT_TRANSFORM,
-    MAX_CAPABILITIES, MAX_ELEMENTS, MAX_PROPERTIES, PROP_BOOL, PROP_DOUBLE, PROP_FRACTION,
-    PROP_INT, PROP_STR, PROP_UINT, V2_ABI_VERSION, V2_MAGIC,
+    read_versioned, CapsLayout, FfiCapability, FfiCaps, FfiElementRegistration, FfiElementVtable,
+    FfiPluginDescriptor, FfiPropertySpec, FfiRegistrar, FfiStatus, FfiStr, ELEMENT_SINK,
+    ELEMENT_TRANSFORM, MAX_CAPABILITIES, MAX_ELEMENTS, MAX_PROPERTIES, PROP_BOOL, PROP_DOUBLE,
+    PROP_FRACTION, PROP_INT, PROP_STR, PROP_UINT, V2_ABI_VERSION, V2_MAGIC, V3_ABI_VERSION,
 };
 
 /// Longest element or property name accepted. Long enough for any real name,
@@ -88,6 +88,8 @@ pub struct PluginDeclaration {
     pub version: String,
     /// Everything the plugin declares it will register.
     pub capabilities: Vec<PluginCapability>,
+    // `V2_ABI_VERSION` or `V3_ABI_VERSION`, which picks the caps layout `register` and every later call uses
+    pub abi_version: u32,
     /// The registration entry point. Call only after the policy allows the
     /// capabilities above.
     pub register: unsafe extern "C" fn(registrar: *const FfiRegistrar) -> FfiStatus,
@@ -106,7 +108,7 @@ impl PluginDeclaration {
 /// A validated element registration, with every plugin-supplied string copied
 /// into host-owned memory and every count checked.
 #[derive(Debug)]
-pub struct ValidatedElement {
+pub struct ValidatedElement<C = FfiCaps> {
     /// The `gst-launch` element name.
     pub name: String,
     /// Transform or sink.
@@ -121,7 +123,7 @@ pub struct ValidatedElement {
     pub properties: Vec<PropertySpec>,
     /// The element's entry points, read into a host-sized copy with any absent
     /// tail zeroed.
-    pub vtable: FfiElementVtable,
+    pub vtable: FfiElementVtable<C>,
     /// Build one instance.
     pub create: unsafe extern "C" fn() -> *mut core::ffi::c_void,
 }
@@ -385,10 +387,10 @@ pub unsafe fn validate_descriptor(
     }
     // SAFETY: as above.
     let abi_version = unsafe { core::ptr::addr_of!((*ptr).abi_version).read_unaligned() };
-    if abi_version != V2_ABI_VERSION {
+    if abi_version != V2_ABI_VERSION && abi_version != V3_ABI_VERSION {
         return Err(ValidationError::AbiVersion {
             plugin: abi_version,
-            host: V2_ABI_VERSION,
+            host: V3_ABI_VERSION,
         });
     }
     // SAFETY: as above.
@@ -447,6 +449,7 @@ pub unsafe fn validate_descriptor(
         name,
         version,
         capabilities,
+        abi_version,
         register,
     })
 }
@@ -458,9 +461,9 @@ pub unsafe fn validate_descriptor(
 /// [`FfiRegistrar::register_element`], addressing a registration whose strings,
 /// caps arrays, property array, and vtable stay valid for the life of the
 /// process.
-pub unsafe fn validate_element(
-    ptr: *const FfiElementRegistration,
-) -> Result<ValidatedElement, ValidationError> {
+pub unsafe fn validate_element<C: CapsLayout>(
+    ptr: *const FfiElementRegistration<C>,
+) -> Result<ValidatedElement<C>, ValidationError> {
     if ptr.is_null() {
         return Err(ValidationError::NullDescriptor);
     }
@@ -511,7 +514,7 @@ pub unsafe fn validate_element(
         unsafe { core::ptr::addr_of!((*reg.vtable).struct_size).read_unaligned() } as usize;
     // SAFETY: the plugin's contract is that it wrote `vtable_size` bytes at
     // `reg.vtable`; `read_versioned` reads no more than that.
-    let vtable: FfiElementVtable = unsafe { read_versioned(reg.vtable, vtable_size) }?;
+    let vtable: FfiElementVtable<C> = unsafe { read_versioned(reg.vtable, vtable_size) }?;
 
     // Only these two are required. Everything else absent means "use the
     // AsyncElement trait default", which is what makes a shorter vtable from an
@@ -600,10 +603,10 @@ unsafe fn read_properties(
 /// This is the second half of the capability gate: the declaration was allowed
 /// by policy *before* the plugin ran, so anything the plugin then attempts that
 /// the declaration did not cover fails the whole load.
-pub fn check_against_declaration(
+pub fn check_against_declaration<C>(
     declaration: &PluginDeclaration,
     already: &[String],
-    element: &ValidatedElement,
+    element: &ValidatedElement<C>,
 ) -> Result<(), ValidationError> {
     if already.len() >= MAX_ELEMENTS {
         return Err(ValidationError::TooManyElements);
@@ -738,7 +741,7 @@ mod tests {
             err,
             ValidationError::AbiVersion {
                 plugin: 99,
-                host: V2_ABI_VERSION
+                host: V3_ABI_VERSION
             }
         );
     }

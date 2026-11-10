@@ -28,6 +28,9 @@ const _: () = {
         FfiPluginDescriptor, FfiPropStr, FfiPropValue, FfiPropValueBody, FfiPropertySpec, FfiRate,
         FfiRawVideoCaps, FfiRegistrar, FfiStatus, FfiStr, FfiTextCaps, VERSIONED_HEADER_SIZE,
     };
+    use super::{
+        FfiCapsBodyV2, FfiCapsV2, FfiCompressedVideoCapsV2, FfiPixelAspect, FfiRawVideoCapsV2,
+    };
     use core::ffi::c_void;
     use core::mem::{align_of, offset_of, size_of};
 
@@ -143,23 +146,30 @@ const _: () = {
     assert!(offset_of!(FfiRate, min_q16) == field_offset(RATE_FIELDS, 1));
     assert!(offset_of!(FfiRate, max_q16) == field_offset(RATE_FIELDS, 2));
 
-    const RAW_VIDEO_FIELDS: &[(usize, usize)] = &[U32, DIM, DIM, RATE, U32];
-    const RAW_VIDEO: (usize, usize) = shape(RAW_VIDEO_FIELDS);
-    assert!(size_of::<FfiRawVideoCaps>() == RAW_VIDEO.0);
-    assert!(offset_of!(FfiRawVideoCaps, format) == field_offset(RAW_VIDEO_FIELDS, 0));
-    assert!(offset_of!(FfiRawVideoCaps, width) == field_offset(RAW_VIDEO_FIELDS, 1));
-    assert!(offset_of!(FfiRawVideoCaps, height) == field_offset(RAW_VIDEO_FIELDS, 2));
-    assert!(offset_of!(FfiRawVideoCaps, framerate) == field_offset(RAW_VIDEO_FIELDS, 3));
-    assert!(offset_of!(FfiRawVideoCaps, interlace) == field_offset(RAW_VIDEO_FIELDS, 4));
+    const RAW_VIDEO_FIELDS_V2: &[(usize, usize)] = &[U32, DIM, DIM, RATE, U32];
+    const RAW_VIDEO_V2: (usize, usize) = shape(RAW_VIDEO_FIELDS_V2);
+    assert!(size_of::<FfiRawVideoCapsV2>() == RAW_VIDEO_V2.0);
+    assert!(offset_of!(FfiRawVideoCapsV2, format) == field_offset(RAW_VIDEO_FIELDS_V2, 0));
+    assert!(offset_of!(FfiRawVideoCapsV2, width) == field_offset(RAW_VIDEO_FIELDS_V2, 1));
+    assert!(offset_of!(FfiRawVideoCapsV2, height) == field_offset(RAW_VIDEO_FIELDS_V2, 2));
+    assert!(offset_of!(FfiRawVideoCapsV2, framerate) == field_offset(RAW_VIDEO_FIELDS_V2, 3));
+    assert!(offset_of!(FfiRawVideoCapsV2, interlace) == field_offset(RAW_VIDEO_FIELDS_V2, 4));
 
-    const COMPRESSED_VIDEO_FIELDS: &[(usize, usize)] = &[U32, DIM, DIM, RATE];
-    const COMPRESSED_VIDEO: (usize, usize) = shape(COMPRESSED_VIDEO_FIELDS);
-    assert!(size_of::<FfiCompressedVideoCaps>() == COMPRESSED_VIDEO.0);
-    assert!(offset_of!(FfiCompressedVideoCaps, codec) == field_offset(COMPRESSED_VIDEO_FIELDS, 0));
-    assert!(offset_of!(FfiCompressedVideoCaps, width) == field_offset(COMPRESSED_VIDEO_FIELDS, 1));
-    assert!(offset_of!(FfiCompressedVideoCaps, height) == field_offset(COMPRESSED_VIDEO_FIELDS, 2));
+    const COMPRESSED_VIDEO_FIELDS_V2: &[(usize, usize)] = &[U32, DIM, DIM, RATE];
+    const COMPRESSED_VIDEO_V2: (usize, usize) = shape(COMPRESSED_VIDEO_FIELDS_V2);
+    assert!(size_of::<FfiCompressedVideoCapsV2>() == COMPRESSED_VIDEO_V2.0);
     assert!(
-        offset_of!(FfiCompressedVideoCaps, framerate) == field_offset(COMPRESSED_VIDEO_FIELDS, 3)
+        offset_of!(FfiCompressedVideoCapsV2, codec) == field_offset(COMPRESSED_VIDEO_FIELDS_V2, 0)
+    );
+    assert!(
+        offset_of!(FfiCompressedVideoCapsV2, width) == field_offset(COMPRESSED_VIDEO_FIELDS_V2, 1)
+    );
+    assert!(
+        offset_of!(FfiCompressedVideoCapsV2, height) == field_offset(COMPRESSED_VIDEO_FIELDS_V2, 2)
+    );
+    assert!(
+        offset_of!(FfiCompressedVideoCapsV2, framerate)
+            == field_offset(COMPRESSED_VIDEO_FIELDS_V2, 3)
     );
 
     const AUDIO_FIELDS: &[(usize, usize)] = &[U32, U32, U32];
@@ -179,6 +189,43 @@ const _: () = {
     assert!(size_of::<FfiTextCaps>() == TEXT.0);
     assert!(offset_of!(FfiTextCaps, format) == field_offset(TEXT_FIELDS, 0));
 
+    const CAPS_BODY_MEMBERS_V2: &[(usize, usize)] =
+        &[RAW_VIDEO_V2, COMPRESSED_VIDEO_V2, AUDIO, BYTE_STREAM, TEXT];
+    const CAPS_BODY_V2: (usize, usize) = union_shape(CAPS_BODY_MEMBERS_V2);
+    assert!(size_of::<FfiCapsBodyV2>() == CAPS_BODY_V2.0);
+    assert!(align_of::<FfiCapsBodyV2>() == CAPS_BODY_V2.1);
+
+    const CAPS_FIELDS_V2: &[(usize, usize)] = &[U32, U32, CAPS_BODY_V2];
+    const CAPS_V2: (usize, usize) = shape(CAPS_FIELDS_V2);
+    assert!(size_of::<FfiCapsV2>() == CAPS_V2.0);
+    assert!(offset_of!(FfiCapsV2, tag) == field_offset(CAPS_FIELDS_V2, 0));
+    assert!(offset_of!(FfiCapsV2, reserved) == field_offset(CAPS_FIELDS_V2, 1));
+    assert!(offset_of!(FfiCapsV2, body) == field_offset(CAPS_FIELDS_V2, 2));
+    // The `reserved` u32 exists so the payload starts on an 8-byte boundary
+    // whatever the union's own alignment works out to.
+    assert!(offset_of!(FfiCapsV2, body) == 8);
+
+    // abi_version 3: both video bodies end with the pixel aspect ratio
+    const PIXEL_ASPECT_FIELDS: &[(usize, usize)] = &[U32, U32];
+    const PIXEL_ASPECT: (usize, usize) = shape(PIXEL_ASPECT_FIELDS);
+    assert!(size_of::<FfiPixelAspect>() == PIXEL_ASPECT.0);
+    assert!(offset_of!(FfiPixelAspect, numerator) == field_offset(PIXEL_ASPECT_FIELDS, 0));
+    assert!(offset_of!(FfiPixelAspect, denominator) == field_offset(PIXEL_ASPECT_FIELDS, 1));
+
+    const RAW_VIDEO_FIELDS: &[(usize, usize)] = &[U32, DIM, DIM, RATE, U32, PIXEL_ASPECT];
+    const RAW_VIDEO: (usize, usize) = shape(RAW_VIDEO_FIELDS);
+    assert!(size_of::<FfiRawVideoCaps>() == RAW_VIDEO.0);
+    assert!(offset_of!(FfiRawVideoCaps, interlace) == field_offset(RAW_VIDEO_FIELDS, 4));
+    assert!(offset_of!(FfiRawVideoCaps, pixel_aspect) == field_offset(RAW_VIDEO_FIELDS, 5));
+
+    const COMPRESSED_VIDEO_FIELDS: &[(usize, usize)] = &[U32, DIM, DIM, RATE, PIXEL_ASPECT];
+    const COMPRESSED_VIDEO: (usize, usize) = shape(COMPRESSED_VIDEO_FIELDS);
+    assert!(size_of::<FfiCompressedVideoCaps>() == COMPRESSED_VIDEO.0);
+    assert!(
+        offset_of!(FfiCompressedVideoCaps, pixel_aspect)
+            == field_offset(COMPRESSED_VIDEO_FIELDS, 4)
+    );
+
     const CAPS_BODY_MEMBERS: &[(usize, usize)] =
         &[RAW_VIDEO, COMPRESSED_VIDEO, AUDIO, BYTE_STREAM, TEXT];
     const CAPS_BODY: (usize, usize) = union_shape(CAPS_BODY_MEMBERS);
@@ -188,12 +235,8 @@ const _: () = {
     const CAPS_FIELDS: &[(usize, usize)] = &[U32, U32, CAPS_BODY];
     const CAPS: (usize, usize) = shape(CAPS_FIELDS);
     assert!(size_of::<FfiCaps>() == CAPS.0);
-    assert!(offset_of!(FfiCaps, tag) == field_offset(CAPS_FIELDS, 0));
-    assert!(offset_of!(FfiCaps, reserved) == field_offset(CAPS_FIELDS, 1));
-    assert!(offset_of!(FfiCaps, body) == field_offset(CAPS_FIELDS, 2));
-    // The `reserved` u32 exists so the payload starts on an 8-byte boundary
-    // whatever the union's own alignment works out to.
     assert!(offset_of!(FfiCaps, body) == 8);
+    assert!(size_of::<FfiCaps>() > size_of::<FfiCapsV2>());
 
     const CAPS_SET_FIELDS: &[(usize, usize)] = &[PTR, PTR];
     const CAPS_SET: (usize, usize) = shape(CAPS_SET_FIELDS);
@@ -240,6 +283,10 @@ const _: () = {
     assert!(offset_of!(FfiPacket, reserved) == field_offset(PACKET_FIELDS, 1));
     assert!(offset_of!(FfiPacket, caps) == field_offset(PACKET_FIELDS, 2));
     assert!(offset_of!(FfiPacket, frame) == field_offset(PACKET_FIELDS, 3));
+
+    const PACKET_V2_FIELDS: &[(usize, usize)] = &[U32, U32, CAPS_V2, FRAME];
+    assert!(size_of::<FfiPacket<FfiCapsV2>>() == struct_size(PACKET_V2_FIELDS));
+    assert!(offset_of!(FfiPacket<FfiCapsV2>, frame) == field_offset(PACKET_V2_FIELDS, 3));
 
     // -----------------------------------------------------------------------
     // Output sink

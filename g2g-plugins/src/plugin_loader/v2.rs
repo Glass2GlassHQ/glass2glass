@@ -32,11 +32,12 @@ use g2g_core::runtime::{LaunchFactory, Registry};
 use g2g_core::{CapsConstraint, G2gError, PipelinePacket};
 
 use g2g_plugin::abi::{
-    caps_from_ffi, caps_into_ffi, check_against_declaration, packet_from_ffi, packet_into_ffi,
-    prop_from_ffi, prop_into_ffi, validate_element, ElementKind, FfiCaps, FfiElementRegistration,
+    check_against_declaration, packet_from_ffi, packet_into_ffi, prop_from_ffi, prop_into_ffi,
+    validate_element, CapsLayout, ElementKind, FfiCaps, FfiCapsV2, FfiElementRegistration,
     FfiElementVtable, FfiOutputSink, FfiOutputSinkVtable, FfiPacket, FfiPropValue, FfiRegistrar,
     FfiStatus, FfiStr, PluginDeclaration, ValidatedElement, ValidationError, CAPS_NONE,
     PACKET_NONE, STATUS_ERROR, STATUS_OK, STATUS_PROPERTY_UNKNOWN, STATUS_PROPERTY_VALUE,
+    V2_ABI_VERSION,
 };
 
 /// How many v2 elements one process can register.
@@ -49,10 +50,33 @@ use g2g_plugin::abi::{
 /// unmapped.
 pub const MAX_V2_ELEMENT_SLOTS: usize = 64;
 
+// the vtable in the caps layout of the abi_version the plugin declared
+#[derive(Debug, Clone, Copy)]
+enum SlotVtable {
+    V2(FfiElementVtable<FfiCapsV2>),
+    V3(FfiElementVtable<FfiCaps>),
+}
+
+trait LoaderLayout: CapsLayout {
+    fn slot_vtable(vtable: FfiElementVtable<Self>) -> SlotVtable;
+}
+
+impl LoaderLayout for FfiCapsV2 {
+    fn slot_vtable(vtable: FfiElementVtable<Self>) -> SlotVtable {
+        SlotVtable::V2(vtable)
+    }
+}
+
+impl LoaderLayout for FfiCaps {
+    fn slot_vtable(vtable: FfiElementVtable<Self>) -> SlotVtable {
+        SlotVtable::V3(vtable)
+    }
+}
+
 /// One registered v2 element type, shared by every instance the registry builds.
 #[derive(Debug)]
 struct ElementSlot {
-    vtable: FfiElementVtable,
+    vtable: SlotVtable,
     create: unsafe extern "C" fn() -> *mut c_void,
     sink_caps: CapsSet,
     source_caps: CapsSet,
@@ -81,7 +105,7 @@ fn slots() -> &'static Mutex<Vec<&'static ElementSlot>> {
 }
 
 /// Install a validated element into the next free slot, returning its index.
-fn claim_slot(element: ValidatedElement, name: &'static str) -> Option<usize> {
+fn claim_slot(element: StagedElement, name: &'static str) -> Option<usize> {
     let slot: &'static ElementSlot = Box::leak(Box::new(ElementSlot {
         vtable: element.vtable,
         create: element.create,
@@ -106,7 +130,11 @@ fn slot(index: usize) -> &'static ElementSlot {
 /// One instantiation of the registry's context-free `fn()` constructor, bound
 /// to a slot by its const parameter. See [`MAX_V2_ELEMENT_SLOTS`].
 fn build_slot<const INDEX: usize>() -> Box<dyn DynAsyncElement> {
-    Box::new(V2Element::new(slot(INDEX)))
+    let slot = slot(INDEX);
+    match slot.vtable {
+        SlotVtable::V2(vtable) => Box::new(PluginElement::new(slot, vtable)),
+        SlotVtable::V3(vtable) => Box::new(PluginElement::new(slot, vtable)),
+    }
 }
 
 macro_rules! slot_builders {
@@ -151,12 +179,13 @@ fn launch_factory(index: usize, name: &'static str, kind: ElementKind) -> Launch
 
 /// A plugin element instance, driven through its vtable.
 #[derive(Debug)]
-struct V2Element {
+struct PluginElement<C: CapsLayout> {
     /// The plugin's opaque instance, or null when `create` failed. A null
     /// instance is not silently tolerated: `configure_pipeline` refuses, so the
     /// pipeline fails to start rather than running a no-op element.
     instance: *mut c_void,
     slot: &'static ElementSlot,
+    vtable: FfiElementVtable<C>,
 }
 
 // SAFETY: the runner owns an element exclusively (it is moved into one arm and
@@ -167,14 +196,18 @@ struct V2Element {
 // plugin code the host cannot verify, and it is the reason a v2 plugin that
 // binds its state to a specific thread (a COM apartment, a GL context) is
 // outside the ABI's contract.
-unsafe impl Send for V2Element {}
+unsafe impl<C: CapsLayout> Send for PluginElement<C> {}
 
-impl V2Element {
-    fn new(slot: &'static ElementSlot) -> V2Element {
+impl<C: CapsLayout> PluginElement<C> {
+    fn new(slot: &'static ElementSlot, vtable: FfiElementVtable<C>) -> PluginElement<C> {
         // SAFETY: `create` was validated non-null, and the plugin's contract is
         // that it builds one instance or returns null.
         let instance = unsafe { (slot.create)() };
-        V2Element { instance, slot }
+        PluginElement {
+            instance,
+            slot,
+            vtable,
+        }
     }
 
     fn require_instance(&self) -> Result<*mut c_void, G2gError> {
@@ -190,18 +223,18 @@ impl V2Element {
     fn configure(
         &mut self,
         caps: &Caps,
-        entry: Option<unsafe extern "C" fn(*mut c_void, *const FfiCaps, *mut FfiCaps) -> FfiStatus>,
-        refixate: Option<&mut FfiCaps>,
+        entry: Option<unsafe extern "C" fn(*mut c_void, *const C, *mut C) -> FfiStatus>,
+        refixate: Option<&mut C>,
     ) -> Result<(), G2gError> {
         let instance = self.require_instance()?;
-        let ffi = caps_into_ffi(caps).map_err(|_| G2gError::CapsMismatch)?;
+        let ffi = C::from_caps(caps).map_err(|_| G2gError::CapsMismatch)?;
         let Some(entry) = entry else {
             return Ok(());
         };
-        let mut scratch = FfiCaps::NONE;
+        let mut scratch = C::NONE;
         let out = match refixate {
-            Some(slot) => slot as *mut FfiCaps,
-            None => &mut scratch as *mut FfiCaps,
+            Some(slot) => slot as *mut C,
+            None => &mut scratch as *mut C,
         };
         // SAFETY: `instance` came from this element's `create`, `ffi` is a live
         // local, and `out` addresses a live `FfiCaps` the callee may overwrite.
@@ -210,12 +243,12 @@ impl V2Element {
     }
 }
 
-impl Drop for V2Element {
+impl<C: CapsLayout> Drop for PluginElement<C> {
     fn drop(&mut self) {
         if self.instance.is_null() {
             return;
         }
-        if let Some(destroy) = self.slot.vtable.destroy {
+        if let Some(destroy) = self.vtable.destroy {
             // SAFETY: `destroy` was validated non-null at registration, and
             // this runs once, from the single owner, at the end of the
             // instance's life.
@@ -224,7 +257,7 @@ impl Drop for V2Element {
     }
 }
 
-impl AsyncElement for V2Element {
+impl<C: CapsLayout> AsyncElement for PluginElement<C> {
     type ProcessFuture<'a>
         = BoxFuture<'a, Result<(), G2gError>>
     where
@@ -250,22 +283,22 @@ impl AsyncElement for V2Element {
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        let mut refixate = FfiCaps::NONE;
-        let entry = self.slot.vtable.configure_pipeline;
+        let mut refixate = C::NONE;
+        let entry = self.vtable.configure_pipeline;
         self.configure(absolute_caps, entry, Some(&mut refixate))?;
-        if refixate.tag == CAPS_NONE {
+        if refixate.tag() == CAPS_NONE {
             return Ok(ConfigureOutcome::Accepted);
         }
-        let proposal = caps_from_ffi(&refixate).map_err(|_| G2gError::CapsMismatch)?;
+        let proposal = refixate.to_caps().map_err(|_| G2gError::CapsMismatch)?;
         Ok(ConfigureOutcome::ReFixate(proposal))
     }
 
     fn configure_output(&mut self, output_caps: &Caps) -> Result<(), G2gError> {
-        let Some(entry) = self.slot.vtable.configure_output else {
+        let Some(entry) = self.vtable.configure_output else {
             return Ok(());
         };
         let instance = self.require_instance()?;
-        let ffi = caps_into_ffi(output_caps).map_err(|_| G2gError::CapsMismatch)?;
+        let ffi = C::from_caps(output_caps).map_err(|_| G2gError::CapsMismatch)?;
         // SAFETY: `instance` came from this element's `create` and `ffi` is a
         // live local borrowed only for the call.
         let status = unsafe { entry(instance, &ffi) };
@@ -289,7 +322,7 @@ impl AsyncElement for V2Element {
         }
 
         let instance = self.instance;
-        let process = self.slot.vtable.process;
+        let process = self.vtable.process;
         Box::pin(async move {
             if instance.is_null() {
                 return Err(G2gError::Hardware(g2g_core::error::HardwareError::Other));
@@ -297,15 +330,24 @@ impl AsyncElement for V2Element {
             let Some(process) = process else {
                 return Err(G2gError::Hardware(g2g_core::error::HardwareError::Other));
             };
-            let ffi_packet = packet_into_ffi(packet)?;
+            let ffi_packet = packet_into_ffi::<C>(packet)?;
 
             // Boxed so the plugin's raw `ctx` pointer addresses a stable heap
             // slot rather than a local whose place in this future's state the
             // compiler is free to choose.
-            let mut shim = Box::new(SinkShim { out, pending: None });
+            let mut shim = Box::new(SinkShim {
+                out,
+                pending: None,
+                vtable: FfiOutputSinkVtable {
+                    struct_size: core::mem::size_of::<FfiOutputSinkVtable<C>>() as u32,
+                    version: 1,
+                    poll_push: shim_poll_push::<C>,
+                    reserved: [None; 4],
+                },
+            });
             let sink = FfiOutputSink {
-                ctx: (&mut *shim as *mut SinkShim) as *mut c_void,
-                vtable: &SINK_VTABLE,
+                vtable: &shim.vtable,
+                ctx: (&mut *shim as *mut SinkShim<C>) as *mut c_void,
             };
             // SAFETY: `instance` came from this element's `create`, the packet's
             // payload ownership passes to the plugin with the struct, and `sink`
@@ -350,7 +392,7 @@ impl AsyncElement for V2Element {
     }
 
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
-        let Some(entry) = self.slot.vtable.set_property else {
+        let Some(entry) = self.vtable.set_property else {
             return Err(PropError::Unknown);
         };
         if self.instance.is_null() {
@@ -369,7 +411,7 @@ impl AsyncElement for V2Element {
     }
 
     fn get_property(&self, name: &str) -> Option<PropValue> {
-        let entry = self.slot.vtable.get_property?;
+        let entry = self.vtable.get_property?;
         if self.instance.is_null() {
             return None;
         }
@@ -393,20 +435,14 @@ impl AsyncElement for V2Element {
 
 /// Host state behind [`FfiOutputSink::ctx`]: the real downstream sink plus the
 /// packet slot a multi-poll push needs.
-struct SinkShim<'a> {
+struct SinkShim<'a, C> {
     out: &'a mut dyn OutputSink,
     /// The packet taken from the plugin, held across pending polls. Dropping
     /// the shim with a packet still here releases it, which is what happens
     /// when the plugin abandons a push.
     pending: Option<PipelinePacket>,
+    vtable: FfiOutputSinkVtable<C>,
 }
-
-static SINK_VTABLE: FfiOutputSinkVtable = FfiOutputSinkVtable {
-    struct_size: core::mem::size_of::<FfiOutputSinkVtable>() as u32,
-    version: 1,
-    poll_push: shim_poll_push,
-    reserved: [None; 4],
-};
 
 /// Drive one packet from a plugin toward downstream.
 ///
@@ -419,10 +455,10 @@ static SINK_VTABLE: FfiOutputSinkVtable = FfiOutputSinkVtable {
 /// # Safety
 /// `ctx` must be the [`SinkShim`] pointer the host installed, `cx` a live
 /// context, and `packet` a live slot the plugin owns.
-unsafe extern "C" fn shim_poll_push(
+unsafe extern "C" fn shim_poll_push<C: CapsLayout>(
     ctx: *mut c_void,
     cx: *mut FfiContext,
-    packet: *mut FfiPacket,
+    packet: *mut FfiPacket<C>,
 ) -> FfiPoll<FfiStatus> {
     if ctx.is_null() || cx.is_null() {
         return FfiPoll::Ready(STATUS_ERROR);
@@ -431,7 +467,7 @@ unsafe extern "C" fn shim_poll_push(
     // behaviour across `extern "C"`, whatever language the plugin is in.
     let outcome = catch_unwind(AssertUnwindSafe(|| {
         // SAFETY: forwarded from this function's contract.
-        let shim = unsafe { &mut *ctx.cast::<SinkShim>() };
+        let shim = unsafe { &mut *ctx.cast::<SinkShim<C>>() };
         if shim.pending.is_none() {
             if packet.is_null() {
                 return FfiPoll::Ready(STATUS_ERROR);
@@ -454,7 +490,7 @@ unsafe extern "C" fn shim_poll_push(
                 Err(status) => return FfiPoll::Ready(status),
             }
         }
-        let SinkShim { out, pending } = shim;
+        let SinkShim { out, pending, .. } = shim;
         // SAFETY: `cx` is a live context borrowed for this call.
         unsafe { &mut *cx }.with_context(|rust_cx| match out.poll_push(rust_cx, pending) {
             Poll::Pending => FfiPoll::Pending,
@@ -477,7 +513,7 @@ unsafe extern "C" fn shim_poll_push(
 /// registers three good elements and one undeclared one contributes nothing.
 struct RegistrarCtx<'d> {
     declaration: &'d PluginDeclaration,
-    staged: Vec<ValidatedElement>,
+    staged: Vec<StagedElement>,
     names: Vec<String>,
     error: Option<ValidationError>,
 }
@@ -485,9 +521,9 @@ struct RegistrarCtx<'d> {
 /// # Safety
 /// `ctx` must be the [`RegistrarCtx`] the host installed, and `element` a
 /// registration the plugin filled in.
-unsafe extern "C" fn registrar_register_element(
+unsafe extern "C" fn registrar_register_element<C: LoaderLayout>(
     ctx: *mut c_void,
-    element: *const FfiElementRegistration,
+    element: *const FfiElementRegistration<C>,
 ) -> FfiStatus {
     if ctx.is_null() {
         return STATUS_ERROR;
@@ -511,17 +547,42 @@ unsafe extern "C" fn registrar_register_element(
             return STATUS_ERROR;
         }
         state.names.push(validated.name.clone());
-        state.staged.push(validated);
+        state.staged.push(stage(validated));
         STATUS_OK
     }));
     outcome.unwrap_or(STATUS_ERROR)
+}
+
+#[derive(Debug)]
+pub(super) struct StagedElement {
+    name: String,
+    kind: ElementKind,
+    metadata: ElementMetadata,
+    sink_caps: CapsSet,
+    source_caps: CapsSet,
+    properties: Vec<PropertySpec>,
+    vtable: SlotVtable,
+    create: unsafe extern "C" fn() -> *mut c_void,
+}
+
+fn stage<C: LoaderLayout>(element: ValidatedElement<C>) -> StagedElement {
+    StagedElement {
+        name: element.name,
+        kind: element.kind,
+        metadata: element.metadata,
+        sink_caps: element.sink_caps,
+        source_caps: element.source_caps,
+        properties: element.properties,
+        vtable: C::slot_vtable(element.vtable),
+        create: element.create,
+    }
 }
 
 /// What a plugin registered, once its `register` entry has returned.
 #[derive(Debug)]
 pub(super) struct Registered {
     /// The elements it staged, in registration order.
-    pub elements: Vec<ValidatedElement>,
+    pub elements: Vec<StagedElement>,
 }
 
 /// Call a validated plugin's `register` entry and collect what it staged.
@@ -532,6 +593,26 @@ pub(super) struct Registered {
 pub(super) unsafe fn run_registration(
     declaration: &PluginDeclaration,
 ) -> Result<Registered, RegistrationFailure> {
+    if declaration.abi_version == V2_ABI_VERSION {
+        // SAFETY: the two registrar types differ only in the pointee types of
+        // their function pointer fields, so they share one layout, and a v2
+        // plugin's `register` reads the v2 one.
+        let register: unsafe extern "C" fn(*const FfiRegistrar<FfiCapsV2>) -> FfiStatus =
+            unsafe { core::mem::transmute(declaration.register) };
+        // SAFETY: forwarded from this function's contract.
+        return unsafe { register_with(declaration, register) };
+    }
+    // SAFETY: forwarded from this function's contract.
+    unsafe { register_with(declaration, declaration.register) }
+}
+
+/// # Safety
+/// As for [`run_registration`], with `register` the declaration's entry read in
+/// the caps layout `C` its abi_version names.
+unsafe fn register_with<C: LoaderLayout>(
+    declaration: &PluginDeclaration,
+    register: unsafe extern "C" fn(*const FfiRegistrar<C>) -> FfiStatus,
+) -> Result<Registered, RegistrationFailure> {
     let mut state = RegistrarCtx {
         declaration,
         staged: Vec::new(),
@@ -539,15 +620,15 @@ pub(super) unsafe fn run_registration(
         error: None,
     };
     let registrar = FfiRegistrar {
-        struct_size: core::mem::size_of::<FfiRegistrar>() as u32,
+        struct_size: core::mem::size_of::<FfiRegistrar<C>>() as u32,
         version: 1,
         ctx: (&mut state as *mut RegistrarCtx) as *mut c_void,
-        register_element: registrar_register_element,
+        register_element: registrar_register_element::<C>,
         reserved: [None; 4],
     };
     // SAFETY: `register` was validated non-null and the library is loaded; the
     // registrar it receives is a live local that outlives the call.
-    let status = unsafe { (declaration.register)(&registrar) };
+    let status = unsafe { register(&registrar) };
 
     if let Some(error) = state.error {
         return Err(RegistrationFailure::Invalid(error));

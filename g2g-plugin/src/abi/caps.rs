@@ -12,15 +12,16 @@
 use std::vec::Vec;
 
 use g2g_core::caps::{
-    AudioFormat, ByteStreamEncoding, Caps, CapsSet, Dim, Interlace, Rate, RawVideoFormat,
-    TextFormat, VideoCodec,
+    AspectRatio, AudioFormat, ByteStreamEncoding, Caps, CapsSet, Dim, Interlace, PixelAspect, Rate,
+    RawVideoFormat, TextFormat, VideoCodec,
 };
 
 use super::{
-    FfiAudioCaps, FfiByteStreamCaps, FfiCaps, FfiCapsBody, FfiCompressedVideoCaps, FfiDim, FfiRate,
-    FfiRawVideoCaps, FfiTextCaps, CAPS_AUDIO, CAPS_BYTE_STREAM, CAPS_COMPRESSED_VIDEO,
-    CAPS_RAW_VIDEO, CAPS_TEXT, DIM_ANY, DIM_FIXED, DIM_RANGE, INTERLACE_ANY, INTERLACE_INTERLEAVED,
-    INTERLACE_PROGRESSIVE, MAX_CAPS_ALTERNATIVES,
+    CapsLayout, FfiAudioCaps, FfiByteStreamCaps, FfiCaps, FfiCapsBody, FfiCapsBodyV2, FfiCapsV2,
+    FfiCompressedVideoCaps, FfiCompressedVideoCapsV2, FfiDim, FfiPixelAspect, FfiRate,
+    FfiRawVideoCaps, FfiRawVideoCapsV2, FfiTextCaps, CAPS_AUDIO, CAPS_BYTE_STREAM,
+    CAPS_COMPRESSED_VIDEO, CAPS_NONE, CAPS_RAW_VIDEO, CAPS_TEXT, DIM_ANY, DIM_FIXED, DIM_RANGE,
+    INTERLACE_ANY, INTERLACE_INTERLEAVED, INTERLACE_PROGRESSIVE, MAX_CAPS_ALTERNATIVES,
 };
 
 /// Why a caps value could not cross the boundary.
@@ -53,6 +54,8 @@ pub enum CapsCodeError {
     TooManyAlternatives(usize),
     /// A non-empty alternative list with a null pointer.
     NullAlternatives,
+    // one side zero and the other not, `0/0` being the only zero the ABI allows
+    BadPixelAspect(FfiPixelAspect),
 }
 
 impl core::fmt::Display for CapsCodeError {
@@ -73,6 +76,11 @@ impl core::fmt::Display for CapsCodeError {
                 write!(f, "{n} caps alternatives exceeds the limit")
             }
             CapsCodeError::NullAlternatives => f.write_str("null caps alternative list"),
+            CapsCodeError::BadPixelAspect(ratio) => write!(
+                f,
+                "invalid pixel aspect ratio {}/{}",
+                ratio.numerator, ratio.denominator
+            ),
         }
     }
 }
@@ -265,6 +273,25 @@ fn rate_from_ffi(rate: &FfiRate) -> Result<Rate, CapsCodeError> {
     }
 }
 
+fn pixel_aspect_into_ffi(pixel_aspect: &PixelAspect) -> FfiPixelAspect {
+    match pixel_aspect {
+        PixelAspect::Any => FfiPixelAspect::ANY,
+        PixelAspect::Exact(ratio) => FfiPixelAspect {
+            numerator: ratio.numerator(),
+            denominator: ratio.denominator(),
+        },
+    }
+}
+
+fn pixel_aspect_from_ffi(ratio: &FfiPixelAspect) -> Result<PixelAspect, CapsCodeError> {
+    if *ratio == FfiPixelAspect::ANY {
+        return Ok(PixelAspect::Any);
+    }
+    AspectRatio::new(ratio.numerator, ratio.denominator)
+        .map(PixelAspect::Exact)
+        .ok_or(CapsCodeError::BadPixelAspect(*ratio))
+}
+
 fn interlace_into_ffi(interlace: Interlace) -> u32 {
     match interlace {
         Interlace::Any => INTERLACE_ANY,
@@ -296,6 +323,7 @@ pub fn caps_into_ffi(caps: &Caps) -> Result<FfiCaps, CapsCodeError> {
             height,
             framerate,
             interlace,
+            pixel_aspect,
             ..
         } => (
             CAPS_RAW_VIDEO,
@@ -306,6 +334,7 @@ pub fn caps_into_ffi(caps: &Caps) -> Result<FfiCaps, CapsCodeError> {
                     height: dim_into_ffi(height),
                     framerate: rate_into_ffi(framerate),
                     interlace: interlace_into_ffi(*interlace),
+                    pixel_aspect: pixel_aspect_into_ffi(pixel_aspect),
                 },
             },
         ),
@@ -314,6 +343,7 @@ pub fn caps_into_ffi(caps: &Caps) -> Result<FfiCaps, CapsCodeError> {
             width,
             height,
             framerate,
+            pixel_aspect,
             ..
         } => (
             CAPS_COMPRESSED_VIDEO,
@@ -323,6 +353,7 @@ pub fn caps_into_ffi(caps: &Caps) -> Result<FfiCaps, CapsCodeError> {
                     width: dim_into_ffi(width),
                     height: dim_into_ffi(height),
                     framerate: rate_into_ffi(framerate),
+                    pixel_aspect: pixel_aspect_into_ffi(pixel_aspect),
                 },
             },
         ),
@@ -386,7 +417,7 @@ pub fn caps_from_ffi(caps: &FfiCaps) -> Result<Caps, CapsCodeError> {
                 framerate: rate_from_ffi(&v.framerate)?,
                 interlace: interlace_from_ffi(v.interlace)?,
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
-                pixel_aspect: g2g_core::PixelAspect::Any,
+                pixel_aspect: pixel_aspect_from_ffi(&v.pixel_aspect)?,
             })
         }
         CAPS_COMPRESSED_VIDEO => {
@@ -398,7 +429,7 @@ pub fn caps_from_ffi(caps: &FfiCaps) -> Result<Caps, CapsCodeError> {
                 height: dim_from_ffi(&v.height)?,
                 framerate: rate_from_ffi(&v.framerate)?,
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
-                pixel_aspect: g2g_core::PixelAspect::Any,
+                pixel_aspect: pixel_aspect_from_ffi(&v.pixel_aspect)?,
                 alignment: g2g_core::BitstreamAlignment::Unspecified,
             })
         }
@@ -442,9 +473,9 @@ pub fn caps_from_ffi(caps: &FfiCaps) -> Result<Caps, CapsCodeError> {
 ///
 /// # Safety
 /// When `count > 0`, `alternatives` must point at `count` initialised
-/// [`FfiCaps`] values that stay valid for the call.
-pub unsafe fn caps_set_from_ffi(
-    alternatives: *const FfiCaps,
+/// caps values that stay valid for the call.
+pub unsafe fn caps_set_from_ffi<C: CapsLayout>(
+    alternatives: *const C,
     count: usize,
 ) -> Result<CapsSet, CapsCodeError> {
     if count == 0 {
@@ -461,9 +492,147 @@ pub unsafe fn caps_set_from_ffi(
     let slice = unsafe { core::slice::from_raw_parts(alternatives, count) };
     let mut out = Vec::with_capacity(count);
     for c in slice {
-        out.push(caps_from_ffi(c)?);
+        out.push(c.to_caps()?);
     }
     Ok(CapsSet::from_alternatives(out))
+}
+
+impl CapsLayout for FfiCaps {
+    const NONE: Self = FfiCaps::NONE;
+
+    fn tag(&self) -> u32 {
+        self.tag
+    }
+
+    fn to_caps(&self) -> Result<Caps, CapsCodeError> {
+        caps_from_ffi(self)
+    }
+
+    fn from_caps(caps: &Caps) -> Result<Self, CapsCodeError> {
+        caps_into_ffi(caps)
+    }
+}
+
+impl CapsLayout for FfiCapsV2 {
+    const NONE: Self = FfiCapsV2 {
+        tag: CAPS_NONE,
+        reserved: 0,
+        body: FfiCapsBodyV2 {
+            byte_stream: FfiByteStreamCaps { encoding: 0 },
+        },
+    };
+
+    fn tag(&self) -> u32 {
+        self.tag
+    }
+
+    fn to_caps(&self) -> Result<Caps, CapsCodeError> {
+        caps_from_ffi(&widen(self))
+    }
+
+    fn from_caps(caps: &Caps) -> Result<Self, CapsCodeError> {
+        Ok(narrow(&caps_into_ffi(caps)?))
+    }
+}
+
+// a v2 video body reads as any pixel aspect ratio
+fn widen(caps: &FfiCapsV2) -> FfiCaps {
+    let body = match caps.tag {
+        CAPS_RAW_VIDEO => {
+            // SAFETY: the matched tag selects this member.
+            let v = unsafe { caps.body.raw_video };
+            FfiCapsBody {
+                raw_video: FfiRawVideoCaps {
+                    format: v.format,
+                    width: v.width,
+                    height: v.height,
+                    framerate: v.framerate,
+                    interlace: v.interlace,
+                    pixel_aspect: FfiPixelAspect::ANY,
+                },
+            }
+        }
+        CAPS_COMPRESSED_VIDEO => {
+            // SAFETY: the matched tag selects this member.
+            let v = unsafe { caps.body.compressed_video };
+            FfiCapsBody {
+                compressed_video: FfiCompressedVideoCaps {
+                    codec: v.codec,
+                    width: v.width,
+                    height: v.height,
+                    framerate: v.framerate,
+                    pixel_aspect: FfiPixelAspect::ANY,
+                },
+            }
+        }
+        CAPS_AUDIO => FfiCapsBody {
+            // SAFETY: the matched tag selects this member.
+            audio: unsafe { caps.body.audio },
+        },
+        CAPS_BYTE_STREAM => FfiCapsBody {
+            // SAFETY: the matched tag selects this member.
+            byte_stream: unsafe { caps.body.byte_stream },
+        },
+        CAPS_TEXT => FfiCapsBody {
+            // SAFETY: the matched tag selects this member.
+            text: unsafe { caps.body.text },
+        },
+        _ => FfiCaps::NONE.body,
+    };
+    FfiCaps {
+        tag: caps.tag,
+        reserved: 0,
+        body,
+    }
+}
+
+// a v2 plugin cannot see a pixel aspect ratio, so it is dropped
+fn narrow(caps: &FfiCaps) -> FfiCapsV2 {
+    let body = match caps.tag {
+        CAPS_RAW_VIDEO => {
+            // SAFETY: the matched tag selects this member.
+            let v = unsafe { caps.body.raw_video };
+            FfiCapsBodyV2 {
+                raw_video: FfiRawVideoCapsV2 {
+                    format: v.format,
+                    width: v.width,
+                    height: v.height,
+                    framerate: v.framerate,
+                    interlace: v.interlace,
+                },
+            }
+        }
+        CAPS_COMPRESSED_VIDEO => {
+            // SAFETY: the matched tag selects this member.
+            let v = unsafe { caps.body.compressed_video };
+            FfiCapsBodyV2 {
+                compressed_video: FfiCompressedVideoCapsV2 {
+                    codec: v.codec,
+                    width: v.width,
+                    height: v.height,
+                    framerate: v.framerate,
+                },
+            }
+        }
+        CAPS_AUDIO => FfiCapsBodyV2 {
+            // SAFETY: the matched tag selects this member.
+            audio: unsafe { caps.body.audio },
+        },
+        CAPS_BYTE_STREAM => FfiCapsBodyV2 {
+            // SAFETY: the matched tag selects this member.
+            byte_stream: unsafe { caps.body.byte_stream },
+        },
+        CAPS_TEXT => FfiCapsBodyV2 {
+            // SAFETY: the matched tag selects this member.
+            text: unsafe { caps.body.text },
+        },
+        _ => FfiCapsV2::NONE.body,
+    };
+    FfiCapsV2 {
+        tag: caps.tag,
+        reserved: 0,
+        body,
+    }
 }
 
 /// Whether a caps value would survive fixation: no `Any` dimension or
@@ -512,6 +681,68 @@ mod tests {
         };
         let ffi = caps_into_ffi(&caps).expect("raw video crosses v2");
         assert_eq!(caps_from_ffi(&ffi).expect("and comes back"), caps);
+    }
+
+    fn ntsc_raw_video() -> Caps {
+        Caps::RawVideo {
+            format: RawVideoFormat::I420,
+            width: Dim::Fixed(720),
+            height: Dim::Fixed(480),
+            framerate: Rate::Fixed(30 << 16),
+            interlace: Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: PixelAspect::Exact(AspectRatio::new(10, 11).expect("nonzero")),
+        }
+    }
+
+    #[test]
+    fn a_v3_caps_carries_the_pixel_aspect_ratio() {
+        let caps = ntsc_raw_video();
+        assert_eq!(
+            FfiCaps::from_caps(&caps).and_then(|ffi| ffi.to_caps()),
+            Ok(caps)
+        );
+    }
+
+    #[test]
+    fn a_v2_caps_drops_the_pixel_aspect_ratio_and_reads_back_as_any() {
+        let caps = ntsc_raw_video();
+        let Caps::RawVideo {
+            format,
+            width,
+            height,
+            framerate,
+            interlace,
+            colorimetry,
+            ..
+        } = caps.clone()
+        else {
+            unreachable!("built as raw video")
+        };
+        let any = Caps::RawVideo {
+            format,
+            width,
+            height,
+            framerate,
+            interlace,
+            colorimetry,
+            pixel_aspect: PixelAspect::Any,
+        };
+        assert_eq!(
+            FfiCapsV2::from_caps(&caps).and_then(|ffi| ffi.to_caps()),
+            Ok(any)
+        );
+    }
+
+    #[test]
+    fn a_pixel_aspect_ratio_with_one_zero_side_is_refused() {
+        let mut ffi = FfiCaps::from_caps(&ntsc_raw_video()).expect("crosses");
+        let bad = FfiPixelAspect {
+            numerator: 0,
+            denominator: 11,
+        };
+        ffi.body.raw_video.pixel_aspect = bad;
+        assert_eq!(ffi.to_caps(), Err(CapsCodeError::BadPixelAspect(bad)));
     }
 
     #[test]
@@ -580,6 +811,7 @@ mod tests {
                         max_q16: 0,
                     },
                     interlace: INTERLACE_ANY,
+                    pixel_aspect: FfiPixelAspect::ANY,
                 },
             },
         };
@@ -625,6 +857,7 @@ mod tests {
                         min_q16: 0,
                         max_q16: 0,
                     },
+                    pixel_aspect: FfiPixelAspect::ANY,
                 },
             },
         };
@@ -687,7 +920,8 @@ mod tests {
     #[test]
     fn a_null_alternative_list_with_a_count_is_refused() {
         // SAFETY: the null pointer is the case under test; nothing is read.
-        let err = unsafe { caps_set_from_ffi(core::ptr::null(), 3) }.expect_err("null is refused");
+        let err = unsafe { caps_set_from_ffi(core::ptr::null::<FfiCaps>(), 3) }
+            .expect_err("null is refused");
         assert_eq!(err, CapsCodeError::NullAlternatives);
     }
 }

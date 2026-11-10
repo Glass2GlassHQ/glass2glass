@@ -640,7 +640,8 @@ is `g2g-plugins/tests/fixtures/example-plugin`.
 **Offline builds.** A distribution ships the SDK so a plugin builds with no
 network. From the source tree it built `g2g-launch` from, it runs
 `tools/plugin-sdk-bundle.sh <prefix>` and installs what that stages:
-`share/g2g/plugin-sdk/`, `include/g2g/g2g_plugin_v2.h` and
+`share/g2g/plugin-sdk/`, `include/g2g/g2g_plugin_v3.h` (and the older
+`g2g_plugin_v2.h`, which the host still loads) and
 `share/pkgconfig/g2g-plugin.pc`. With a `/usr` prefix, a plugin author builds a
 Rust plugin with
 

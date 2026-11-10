@@ -67,7 +67,7 @@ directory = "plugin-sdk/vendor"
 EOF
 
 mkdir -p "$PREFIX/include/g2g" "$PREFIX/share/pkgconfig"
-cp "$ROOT/g2g-plugin/include/g2g_plugin_v2.h" "$PREFIX/include/g2g/"
+cp "$ROOT/g2g-plugin/include/g2g_plugin_v2.h" "$ROOT/g2g-plugin/include/g2g_plugin_v3.h" "$PREFIX/include/g2g/"
 sdk_version="$(basename "$(echo "$VENDOR"/g2g-plugin-[0-9]*)")"
 sdk_version="${sdk_version#g2g-plugin-}"
 cat >"$PREFIX/share/pkgconfig/g2g-plugin.pc" <<EOF
