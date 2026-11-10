@@ -511,7 +511,8 @@ impl PadTemplates for D3D11Sink {
 // Worker thread: Win32 window + DXGI swapchain + D3D11 video processor
 // =================================================================
 
-/// GPU objects, created lazily on the first frame from that frame's device.
+/// GPU objects on the sink's own device, rebuilt on the device of a decoded
+/// D3D11 texture when one arrives from another.
 struct GpuState {
     context: ID3D11DeviceContext,
     // NV12 texture system-memory frames are copied into, made on the first one
@@ -548,11 +549,9 @@ fn worker_main(
     ready: Arc<Handshake>,
 ) -> Result<(), G2gError> {
     let hwnd = create_window(&title, width, height)?;
-    // The window is mappable immediately; signal readiness so the producer can
-    // start.
+    // d3d11 device and swapchain creation takes about 300 ms, enough to make the opening frames late when it waits for the first one
+    let mut gpu = Some(init_gpu(create_device()?, width, height, hwnd)?);
     ready.notify();
-
-    let mut gpu: Option<GpuState> = None;
 
     loop {
         if !pump_messages() {
@@ -861,6 +860,20 @@ fn present_frame(
         MemoryDomain::D3D11Texture(texture) => Some((texture, decoded_texture(texture)?)),
         _ => None,
     };
+    let foreign_device = match (&decoded, gpu.as_ref()) {
+        (Some((_, (device, _))), Some(current)) => *device != current.device,
+        _ => false,
+    };
+    if let Some(old) = gpu.take_if(|_| foreign_device) {
+        let context = old.context.clone();
+        drop(old);
+        // dxgi frees a released flip-model swapchain, and lets another bind to the window, only once its device context flushes
+        // SAFETY: the context belongs to this worker thread's device and nothing else uses it now.
+        unsafe {
+            context.ClearState();
+            context.Flush();
+        }
+    }
     if gpu.is_none() {
         *gpu = Some(match &decoded {
             Some((texture, (device, _))) => {
