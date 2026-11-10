@@ -23,9 +23,9 @@
 use g2g_core::{PropKind, PropertySpec, VideoCodec};
 
 use crate::access_unit::StartCodeRole;
-use crate::annexb::{h264_nal_type, strip_emulation_prevention, BitReader};
+use crate::annexb::{h264_nal_type, nal_units_any, strip_emulation_prevention, BitReader};
 use crate::nalparse::{NalCodec, NalParse, SpsGeometry};
-use crate::vui::{read_h264_vui_tail, read_vui_head, H264VuiTail, VuiHead};
+use crate::vui::{read_h264_vui_tail, read_vui_head, H264VuiTail, VideoSignalType, VuiHead};
 
 /// H.264 access-unit parser: `CompressedVideo{H264}` in and out, refining caps
 /// from the SPS and (in re-framing mode) re-chunking to one access unit per
@@ -362,6 +362,383 @@ fn max_dpb_mbs(level_idc: u8) -> u32 {
         51 | 52 => 184320,
         _ => 696320,
     }
+}
+
+/// A bitstream an H.264 hardware decoder refuses before it reaches the GPU. The
+/// string names the coding tool the decoders do not implement or the syntax
+/// structure that failed to parse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct H264StreamRefused(pub &'static str);
+
+/// Parsed H.264 sequence parameter set, the fields the `Std*` SPS needs. Plain
+/// data, no bitstream cursor. Baseline / main / high 4:2:0 8-bit; scaling
+/// matrices and separate colour planes are rejected
+/// ([`H264StreamRefused::StreamRefused`]) rather than silently mis-decoded.
+#[derive(Debug, Clone, PartialEq)]
+pub struct H264Sps {
+    pub profile_idc: u8,
+    pub level_idc: u8,
+    pub seq_parameter_set_id: u8,
+    pub chroma_format_idc: u8,
+    pub bit_depth_luma_minus8: u8,
+    pub bit_depth_chroma_minus8: u8,
+    pub log2_max_frame_num_minus4: u8,
+    pub pic_order_cnt_type: u8,
+    pub log2_max_pic_order_cnt_lsb_minus4: u8,
+    /// POC type 1 only: when set, the slice header codes no `delta_pic_order_cnt`.
+    pub delta_pic_order_always_zero_flag: u8,
+    /// POC type 1 only (7.4.2.1.1), zero and empty otherwise.
+    pub offset_for_non_ref_pic: i32,
+    pub offset_for_top_to_bottom_field: i32,
+    pub offsets_for_ref_frame: alloc::vec::Vec<i32>,
+    pub max_num_ref_frames: u8,
+    pub pic_width_in_mbs_minus1: u32,
+    pub pic_height_in_map_units_minus1: u32,
+    pub frame_mbs_only_flag: u8,
+    pub mb_adaptive_frame_field_flag: u8,
+    pub direct_8x8_inference_flag: u8,
+    pub gaps_in_frame_num_value_allowed_flag: u8,
+    pub frame_cropping_flag: u8,
+    pub frame_crop_left_offset: u32,
+    pub frame_crop_right_offset: u32,
+    pub frame_crop_top_offset: u32,
+    pub frame_crop_bottom_offset: u32,
+    /// VUI colour description (CICP codepoints, 2 = unspecified) + full-range flag,
+    /// driving the YUV -> RGB conversion. Defaults to unspecified when no VUI.
+    pub color_primaries: u8,
+    pub transfer_characteristics: u8,
+    pub matrix_coefficients: u8,
+    pub video_full_range_flag: bool,
+    /// VUI `bitstream_restriction` `max_num_reorder_frames`: the stream's own
+    /// bound on how many frames decode ahead of display. `None` when the VUI
+    /// carries no restriction block (callers fall back to the DPB size).
+    pub max_num_reorder_frames: Option<u8>,
+}
+
+impl H264Sps {
+    pub(crate) fn fields_per_frame(&self) -> u32 {
+        2 - u32::from(self.frame_mbs_only_flag)
+    }
+
+    // a field-coded map unit is two macroblocks tall
+    pub fn coded_extent(&self) -> (u32, u32) {
+        (
+            (self.pic_width_in_mbs_minus1 + 1) * H264_MACROBLOCK_SIZE,
+            (self.pic_height_in_map_units_minus1 + 1)
+                * H264_MACROBLOCK_SIZE
+                * self.fields_per_frame(),
+        )
+    }
+}
+
+/// Parsed H.264 picture parameter set, the fields the `Std*` PPS needs.
+#[derive(Debug, Clone, PartialEq)]
+pub struct H264Pps {
+    pub pic_parameter_set_id: u8,
+    pub seq_parameter_set_id: u8,
+    pub entropy_coding_mode_flag: u8,
+    pub bottom_field_pic_order_in_frame_present_flag: u8,
+    pub num_ref_idx_l0_default_active_minus1: u8,
+    pub num_ref_idx_l1_default_active_minus1: u8,
+    pub weighted_pred_flag: u8,
+    pub weighted_bipred_idc: u8,
+    pub pic_init_qp_minus26: i8,
+    pub pic_init_qs_minus26: i8,
+    pub chroma_qp_index_offset: i8,
+    pub deblocking_filter_control_present_flag: u8,
+    pub constrained_intra_pred_flag: u8,
+    pub redundant_pic_cnt_present_flag: u8,
+    pub transform_8x8_mode_flag: u8,
+    pub second_chroma_qp_index_offset: i8,
+}
+
+/// The SPS + PPS pulled from an Annex-B / AVCC access unit (e.g. an H.264 codec
+/// config or an IDR AU that carries them in-band).
+#[derive(Debug, Clone)]
+pub struct H264ParameterSets {
+    pub sps: H264Sps,
+    pub pps: H264Pps,
+}
+
+pub(crate) const H264_MACROBLOCK_SIZE: u32 = 16;
+
+pub(crate) const H264_NAL_SPS: u8 = 7;
+pub(crate) const H264_NAL_PPS: u8 = 8;
+// 7.4.2.1.1
+const H264_MAX_SPS_ID: u32 = 31;
+
+pub(crate) const MALFORMED_SPS: H264StreamRefused = H264StreamRefused("malformed H.264 SPS");
+const MALFORMED_PPS: H264StreamRefused = H264StreamRefused("malformed H.264 PPS");
+pub(crate) const MALFORMED_SLICE_HEADER: H264StreamRefused =
+    H264StreamRefused("malformed H.264 slice header");
+const SCALING_MATRICES_REFUSED: H264StreamRefused =
+    H264StreamRefused("H.264 scaling matrices are not supported");
+
+/// Parse an SPS RBSP (the bytes after the NAL header, emulation-prevention
+/// already stripped). [`H264StreamRefused::StreamRefused`] on truncation or an
+/// unsupported feature.
+pub fn parse_h264_sps(rbsp: &[u8]) -> Result<H264Sps, H264StreamRefused> {
+    let (head, mut br) = parse_h264_sps_head(rbsp).ok_or(MALFORMED_SPS)?;
+    // we pass no scaling lists or colour plane ids to the driver
+    if head.poc.separate_colour_plane_flag {
+        return Err(H264StreamRefused(
+            "H.264 separate colour planes are not supported",
+        ));
+    }
+    if head.seq_scaling_matrix_present {
+        return Err(SCALING_MATRICES_REFUSED);
+    }
+    // `to_std_sps` carries the cycle length in a byte
+    u8::try_from(head.poc.offsets_for_ref_frame.len()).map_err(|_| MALFORMED_SPS)?;
+    if head.seq_parameter_set_id > H264_MAX_SPS_ID {
+        return Err(MALFORMED_SPS);
+    }
+    let frame_mbs_only_flag = u32::from(head.poc.frame_mbs_only_flag);
+    // `H264Sps::coded_extent` multiplies these out unchecked
+    head.pic_width_in_mbs_minus1
+        .checked_add(1)
+        .and_then(|mbs| mbs.checked_mul(H264_MACROBLOCK_SIZE))
+        .ok_or(MALFORMED_SPS)?;
+    head.pic_height_in_map_units_minus1
+        .checked_add(1)
+        .and_then(|units| units.checked_mul(H264_MACROBLOCK_SIZE))
+        .and_then(|rows| rows.checked_mul(2 - frame_mbs_only_flag))
+        .ok_or(MALFORMED_SPS)?;
+
+    // VUI (optional): read the colour description for the YUV -> RGB conversion,
+    // then continue to the bitstream-restriction reorder bound. Best-effort: a
+    // truncated / absent VUI leaves the colour unspecified and the bound `None`.
+    let (signal, max_num_reorder_frames) = if br.read_bit().unwrap_or(0) == 1 {
+        match read_vui_head(&mut br) {
+            Some(head) => (
+                head.signal_type.unwrap_or(VideoSignalType::UNSPECIFIED),
+                read_h264_vui_tail(&mut br).max_num_reorder_frames,
+            ),
+            None => (VideoSignalType::UNSPECIFIED, None),
+        }
+    } else {
+        (VideoSignalType::UNSPECIFIED, None)
+    };
+    let [crop_l, crop_r, crop_t, crop_b] = head.frame_crop_offsets;
+
+    Ok(H264Sps {
+        profile_idc: head.profile_idc,
+        level_idc: head.level_idc,
+        seq_parameter_set_id: head.seq_parameter_set_id as u8,
+        chroma_format_idc: head.chroma_format_idc as u8,
+        bit_depth_luma_minus8: head.bit_depth_luma_minus8 as u8,
+        bit_depth_chroma_minus8: head.bit_depth_chroma_minus8 as u8,
+        log2_max_frame_num_minus4: (head.poc.log2_max_frame_num - 4) as u8,
+        pic_order_cnt_type: head.poc.pic_order_cnt_type,
+        log2_max_pic_order_cnt_lsb_minus4: head.poc.log2_max_pic_order_cnt_lsb.saturating_sub(4)
+            as u8,
+        delta_pic_order_always_zero_flag: u8::from(head.poc.delta_pic_order_always_zero_flag),
+        offset_for_non_ref_pic: head.poc.offset_for_non_ref_pic,
+        offset_for_top_to_bottom_field: head.poc.offset_for_top_to_bottom_field,
+        offsets_for_ref_frame: head.poc.offsets_for_ref_frame,
+        max_num_ref_frames: head.max_num_ref_frames as u8,
+        pic_width_in_mbs_minus1: head.pic_width_in_mbs_minus1,
+        pic_height_in_map_units_minus1: head.pic_height_in_map_units_minus1,
+        frame_mbs_only_flag: frame_mbs_only_flag as u8,
+        mb_adaptive_frame_field_flag: u8::from(head.mb_adaptive_frame_field_flag),
+        direct_8x8_inference_flag: u8::from(head.direct_8x8_inference_flag),
+        gaps_in_frame_num_value_allowed_flag: u8::from(head.gaps_in_frame_num_value_allowed_flag),
+        frame_cropping_flag: u8::from(head.frame_cropping_flag),
+        frame_crop_left_offset: crop_l,
+        frame_crop_right_offset: crop_r,
+        frame_crop_top_offset: crop_t,
+        frame_crop_bottom_offset: crop_b,
+        color_primaries: signal.color_primaries,
+        transfer_characteristics: signal.transfer_characteristics,
+        matrix_coefficients: signal.matrix_coefficients,
+        video_full_range_flag: signal.video_full_range_flag,
+        max_num_reorder_frames,
+    })
+}
+
+/// Parse a PPS RBSP (bytes after the NAL header, de-emulated).
+/// [`H264StreamRefused::StreamRefused`] on truncation or an unsupported feature
+/// (slice groups, scaling matrices).
+pub fn parse_h264_pps(rbsp: &[u8]) -> Result<H264Pps, H264StreamRefused> {
+    parse_h264_pps_fields(rbsp).ok_or(MALFORMED_PPS)?
+}
+
+/// The bit walk of [`parse_h264_pps`]: `None` when the RBSP is truncated, an
+/// inner error when it parses but uses a refused feature.
+fn parse_h264_pps_fields(rbsp: &[u8]) -> Option<Result<H264Pps, H264StreamRefused>> {
+    let mut br = BitReader::new(rbsp);
+    let (poc, seq_parameter_set_id, entropy_coding_mode_flag, num_slice_groups_minus1) =
+        crate::poc::parse_h264_pps_poc_bits(&mut br)?;
+    // the Std PPS has no slice group map
+    if num_slice_groups_minus1 != 0 {
+        return Some(Err(H264StreamRefused(
+            "H.264 slice groups (FMO) are not supported",
+        )));
+    }
+    let pic_parameter_set_id = u32::from(poc.pic_parameter_set_id);
+    let bottom_field_pic_order_in_frame_present_flag =
+        u32::from(poc.bottom_field_pic_order_in_frame_present_flag);
+    let num_ref_idx_l0_default_active_minus1 = br.read_ue()?;
+    let num_ref_idx_l1_default_active_minus1 = br.read_ue()?;
+    let weighted_pred_flag = br.read_bit()?;
+    let weighted_bipred_idc = br.read_bits(2)?;
+    let pic_init_qp_minus26 = br.read_se()?;
+    let pic_init_qs_minus26 = br.read_se()?;
+    let chroma_qp_index_offset = br.read_se()?;
+    let deblocking_filter_control_present_flag = br.read_bit()?;
+    let constrained_intra_pred_flag = br.read_bit()?;
+    let redundant_pic_cnt_present_flag = br.read_bit()?;
+    if seq_parameter_set_id > H264_MAX_SPS_ID {
+        return None;
+    }
+
+    // The optional trailing block is present only when `more_rbsp_data()` is
+    // true. A baseline PPS has no such block, so the next bit is the
+    // `rbsp_stop_one_bit` (1); reading it as `transform_8x8_mode_flag` would
+    // wrongly tell the decoder 8x8 transforms are enabled and desync its CAVLC
+    // coefficient parse. Guarding on `more_rbsp_data()` keeps both fields at
+    // their (correct) defaults for baseline.
+    let mut transform_8x8_mode_flag = 0u32;
+    let mut second_chroma_qp_index_offset = chroma_qp_index_offset;
+    if br.more_rbsp_data() {
+        transform_8x8_mode_flag = br.read_bit()?;
+        if br.read_bit()? == 1 {
+            return Some(Err(SCALING_MATRICES_REFUSED));
+        }
+        second_chroma_qp_index_offset = br.read_se()?;
+    }
+
+    Some(Ok(H264Pps {
+        pic_parameter_set_id: pic_parameter_set_id as u8,
+        seq_parameter_set_id: seq_parameter_set_id as u8,
+        entropy_coding_mode_flag: entropy_coding_mode_flag as u8,
+        bottom_field_pic_order_in_frame_present_flag: bottom_field_pic_order_in_frame_present_flag
+            as u8,
+        num_ref_idx_l0_default_active_minus1: num_ref_idx_l0_default_active_minus1 as u8,
+        num_ref_idx_l1_default_active_minus1: num_ref_idx_l1_default_active_minus1 as u8,
+        weighted_pred_flag: weighted_pred_flag as u8,
+        weighted_bipred_idc: weighted_bipred_idc as u8,
+        pic_init_qp_minus26: pic_init_qp_minus26 as i8,
+        pic_init_qs_minus26: pic_init_qs_minus26 as i8,
+        chroma_qp_index_offset: chroma_qp_index_offset as i8,
+        deblocking_filter_control_present_flag: deblocking_filter_control_present_flag as u8,
+        constrained_intra_pred_flag: constrained_intra_pred_flag as u8,
+        redundant_pic_cnt_present_flag: redundant_pic_cnt_present_flag as u8,
+        transform_8x8_mode_flag: transform_8x8_mode_flag as u8,
+        second_chroma_qp_index_offset: second_chroma_qp_index_offset as i8,
+    }))
+}
+
+/// Pull the first SPS (nal type 7) and PPS (nal type 8) from an Annex-B / AVCC
+/// access unit and parse both. `None` when either is missing or refused.
+pub fn extract_h264_parameter_sets(au: &[u8]) -> Option<H264ParameterSets> {
+    h264_parameter_sets_in(au).ok().flatten()
+}
+
+/// The first SPS and PPS of an access unit, `Ok(None)` when it carries no
+/// pair, and the refusal when one of them is malformed or uses a feature this
+/// decoder does not implement.
+pub(crate) fn h264_parameter_sets_in(
+    au: &[u8],
+) -> Result<Option<H264ParameterSets>, H264StreamRefused> {
+    let mut sps = None;
+    let mut pps = None;
+    for nal in nal_units_any(au) {
+        match h264_nal_type(nal) {
+            Some(H264_NAL_SPS) if sps.is_none() => {
+                sps = Some(parse_h264_sps(&strip_emulation_prevention(&nal[1..]))?);
+            }
+            Some(H264_NAL_PPS) if pps.is_none() => {
+                pps = Some(parse_h264_pps(&strip_emulation_prevention(&nal[1..]))?);
+            }
+            _ => {}
+        }
+    }
+    Ok(sps
+        .zip(pps)
+        .map(|(sps, pps)| H264ParameterSets { sps, pps }))
+}
+
+// ============================================================================
+// H.264 slice-header parse
+//
+// The DPB decode loop needs, per coded picture, the slice-header fields that
+// drive reference management and picture-order-count: `frame_num`, the POC
+// syntax, `idr_pic_id`, `slice_type` and the NAL `nal_ref_idc`. Only the prefix
+// up to the POC syntax is parsed (the parts before `ref_pic_list_modification`);
+// the driver re-parses the full slice for the actual decode, so we read just
+// enough to run the DPB. Attacker-controlled: every read is checked and an
+// unsupported tool (field pictures) returns `None`.
+// ============================================================================
+
+/// The H.264 slice-header prefix the DPB loop keys on: the shared picture
+/// order count prefix, which carries every field this decoder reads.
+pub type H264SliceHeader = crate::poc::H264SlicePoc;
+
+/// The parameter-set view the shared slice parse and POC derivation take of an
+/// [`H264Sps`]. Separate colour planes, which this SPS parse rejects, are fixed
+/// at absent.
+pub(crate) fn h264_poc_context(sps: &H264Sps) -> crate::poc::H264PocContext<'_> {
+    crate::poc::H264PocContext {
+        separate_colour_plane_flag: false,
+        log2_max_frame_num: u32::from(sps.log2_max_frame_num_minus4) + 4,
+        frame_mbs_only_flag: sps.frame_mbs_only_flag == 1,
+        pic_order_cnt_type: sps.pic_order_cnt_type,
+        log2_max_pic_order_cnt_lsb: u32::from(sps.log2_max_pic_order_cnt_lsb_minus4) + 4,
+        delta_pic_order_always_zero_flag: sps.delta_pic_order_always_zero_flag == 1,
+        offset_for_non_ref_pic: sps.offset_for_non_ref_pic,
+        offset_for_top_to_bottom_field: sps.offset_for_top_to_bottom_field,
+        offsets_for_ref_frame: &sps.offsets_for_ref_frame,
+    }
+}
+
+const H264_SLICE_TYPE_SP: u32 = 3;
+pub(crate) const H264_SLICE_TYPE_SI: u32 = 4;
+
+/// Parse the slice-header prefix of a VCL NAL (type 1 or 5). `sps`/`pps` supply
+/// the variable-length field widths and POC type. Refused on truncation, a
+/// non-VCL NAL, or an unsupported tool (field pictures, SP / SI slices).
+pub fn parse_h264_slice_header(
+    nal: &[u8],
+    sps: &H264Sps,
+    pps: &H264Pps,
+) -> Result<H264SliceHeader, H264StreamRefused> {
+    let pps_poc = [crate::poc::H264PpsPoc {
+        pic_parameter_set_id: pps.pic_parameter_set_id,
+        bottom_field_pic_order_in_frame_present_flag: pps
+            .bottom_field_pic_order_in_frame_present_flag
+            == 1,
+    }];
+    // Parsed through `dec_ref_pic_marking()`: a stream using adaptive marking
+    // (x264 does, for its B-pyramid) evicts references on its own schedule, and a
+    // DPB running the default sliding window instead would hand the driver a
+    // reference list naming pictures it no longer holds.
+    let marking = crate::poc::H264PpsRefMarking {
+        redundant_pic_cnt_present_flag: pps.redundant_pic_cnt_present_flag == 1,
+        weighted_pred_flag: pps.weighted_pred_flag == 1,
+        weighted_bipred_idc: pps.weighted_bipred_idc,
+        num_ref_idx_l0_default_active_minus1: u32::from(pps.num_ref_idx_l0_default_active_minus1),
+        num_ref_idx_l1_default_active_minus1: u32::from(pps.num_ref_idx_l1_default_active_minus1),
+        chroma_array_type: sps.chroma_format_idc,
+    };
+    let slice =
+        crate::poc::parse_h264_slice_marking(nal, &h264_poc_context(sps), &pps_poc, &marking)
+            .ok_or(MALFORMED_SLICE_HEADER)?;
+    // the DPB here holds frames only, a field picture would need field pairing
+    if slice.field_pic_flag {
+        return Err(H264StreamRefused(
+            "H.264 interlaced field pictures are not supported",
+        ));
+    }
+    if matches!(
+        slice.slice_type % 5,
+        H264_SLICE_TYPE_SP | H264_SLICE_TYPE_SI
+    ) {
+        return Err(H264StreamRefused(
+            "H.264 SP and SI slices are not supported",
+        ));
+    }
+    Ok(slice)
 }
 
 /// Fuzzing entry: walk an H.264 access unit for the SPS and parse its geometry

@@ -409,321 +409,23 @@ use crate::annexb::{
 };
 use crate::vui::VideoSignalType;
 
-/// Parsed H.264 sequence parameter set, the fields the `Std*` SPS needs. Plain
-/// data, no bitstream cursor. Baseline / main / high 4:2:0 8-bit; scaling
-/// matrices and separate colour planes are rejected
-/// ([`VulkanVideoError::StreamRefused`]) rather than silently mis-decoded.
-#[derive(Debug, Clone, PartialEq)]
-pub struct H264Sps {
-    pub profile_idc: u8,
-    pub level_idc: u8,
-    pub seq_parameter_set_id: u8,
-    pub chroma_format_idc: u8,
-    pub bit_depth_luma_minus8: u8,
-    pub bit_depth_chroma_minus8: u8,
-    pub log2_max_frame_num_minus4: u8,
-    pub pic_order_cnt_type: u8,
-    pub log2_max_pic_order_cnt_lsb_minus4: u8,
-    /// POC type 1 only: when set, the slice header codes no `delta_pic_order_cnt`.
-    pub delta_pic_order_always_zero_flag: u8,
-    /// POC type 1 only (7.4.2.1.1), zero and empty otherwise.
-    pub offset_for_non_ref_pic: i32,
-    pub offset_for_top_to_bottom_field: i32,
-    pub offsets_for_ref_frame: alloc::vec::Vec<i32>,
-    pub max_num_ref_frames: u8,
-    pub pic_width_in_mbs_minus1: u32,
-    pub pic_height_in_map_units_minus1: u32,
-    pub frame_mbs_only_flag: u8,
-    pub mb_adaptive_frame_field_flag: u8,
-    pub direct_8x8_inference_flag: u8,
-    pub gaps_in_frame_num_value_allowed_flag: u8,
-    pub frame_cropping_flag: u8,
-    pub frame_crop_left_offset: u32,
-    pub frame_crop_right_offset: u32,
-    pub frame_crop_top_offset: u32,
-    pub frame_crop_bottom_offset: u32,
-    /// VUI colour description (CICP codepoints, 2 = unspecified) + full-range flag,
-    /// driving the YUV -> RGB conversion. Defaults to unspecified when no VUI.
-    pub color_primaries: u8,
-    pub transfer_characteristics: u8,
-    pub matrix_coefficients: u8,
-    pub video_full_range_flag: bool,
-    /// VUI `bitstream_restriction` `max_num_reorder_frames`: the stream's own
-    /// bound on how many frames decode ahead of display. `None` when the VUI
-    /// carries no restriction block (callers fall back to the DPB size).
-    pub max_num_reorder_frames: Option<u8>,
-}
+use crate::h264dpb::{
+    h264_max_frame_num, h264_picture_order, h264_slice_pic_parameter_set_id, H264ParameterSetTable,
+    H264PictureOrder, H264References, H264SessionShape, RefPic, DPB_FULL, H264_NAL_IDR_SLICE,
+    H264_NAL_SLICE,
+};
+pub use crate::h264parse::{
+    extract_h264_parameter_sets, parse_h264_pps, parse_h264_slice_header, parse_h264_sps,
+    H264ParameterSets, H264Pps, H264SliceHeader, H264Sps, H264StreamRefused,
+};
+use crate::h264parse::{
+    h264_parameter_sets_in, H264_MACROBLOCK_SIZE, H264_NAL_PPS, H264_NAL_SPS, MALFORMED_SPS,
+};
 
-/// The SPS fields a decode session and its DPB are sized from: a new SPS that
-/// differs in any of them needs a new session, any other change does not.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct H264SessionShape {
-    coded_extent: (u32, u32),
-    frame_crop_offsets: [u32; 4],
-    max_num_ref_frames: u8,
-    chroma_format_idc: u8,
-    bit_depth_luma_minus8: u8,
-    bit_depth_chroma_minus8: u8,
-}
-
-impl H264Sps {
-    fn session_shape(&self) -> H264SessionShape {
-        H264SessionShape {
-            coded_extent: self.coded_extent(),
-            frame_crop_offsets: [
-                self.frame_crop_left_offset,
-                self.frame_crop_right_offset,
-                self.frame_crop_top_offset,
-                self.frame_crop_bottom_offset,
-            ],
-            max_num_ref_frames: self.max_num_ref_frames,
-            chroma_format_idc: self.chroma_format_idc,
-            bit_depth_luma_minus8: self.bit_depth_luma_minus8,
-            bit_depth_chroma_minus8: self.bit_depth_chroma_minus8,
-        }
+impl From<H264StreamRefused> for VulkanVideoError {
+    fn from(refused: H264StreamRefused) -> Self {
+        VulkanVideoError::StreamRefused(refused.0)
     }
-
-    fn fields_per_frame(&self) -> u32 {
-        2 - u32::from(self.frame_mbs_only_flag)
-    }
-
-    // a field-coded map unit is two macroblocks tall
-    pub fn coded_extent(&self) -> (u32, u32) {
-        (
-            (self.pic_width_in_mbs_minus1 + 1) * H264_MACROBLOCK_SIZE,
-            (self.pic_height_in_map_units_minus1 + 1)
-                * H264_MACROBLOCK_SIZE
-                * self.fields_per_frame(),
-        )
-    }
-}
-
-/// Parsed H.264 picture parameter set, the fields the `Std*` PPS needs.
-#[derive(Debug, Clone, PartialEq)]
-pub struct H264Pps {
-    pub pic_parameter_set_id: u8,
-    pub seq_parameter_set_id: u8,
-    pub entropy_coding_mode_flag: u8,
-    pub bottom_field_pic_order_in_frame_present_flag: u8,
-    pub num_ref_idx_l0_default_active_minus1: u8,
-    pub num_ref_idx_l1_default_active_minus1: u8,
-    pub weighted_pred_flag: u8,
-    pub weighted_bipred_idc: u8,
-    pub pic_init_qp_minus26: i8,
-    pub pic_init_qs_minus26: i8,
-    pub chroma_qp_index_offset: i8,
-    pub deblocking_filter_control_present_flag: u8,
-    pub constrained_intra_pred_flag: u8,
-    pub redundant_pic_cnt_present_flag: u8,
-    pub transform_8x8_mode_flag: u8,
-    pub second_chroma_qp_index_offset: i8,
-}
-
-/// The SPS + PPS pulled from an Annex-B / AVCC access unit (e.g. an H.264 codec
-/// config or an IDR AU that carries them in-band).
-#[derive(Debug, Clone)]
-pub struct H264ParameterSets {
-    pub sps: H264Sps,
-    pub pps: H264Pps,
-}
-
-const H264_MACROBLOCK_SIZE: u32 = 16;
-
-const H264_NAL_SLICE: u8 = 1;
-const H264_NAL_IDR_SLICE: u8 = 5;
-const H264_NAL_SPS: u8 = 7;
-const H264_NAL_PPS: u8 = 8;
-// 7.4.2.1.1
-const H264_MAX_SPS_ID: u32 = 31;
-
-const MALFORMED_SPS: VulkanVideoError = VulkanVideoError::StreamRefused("malformed H.264 SPS");
-const MALFORMED_PPS: VulkanVideoError = VulkanVideoError::StreamRefused("malformed H.264 PPS");
-const MALFORMED_SLICE_HEADER: VulkanVideoError =
-    VulkanVideoError::StreamRefused("malformed H.264 slice header");
-const SCALING_MATRICES_REFUSED: VulkanVideoError =
-    VulkanVideoError::StreamRefused("H.264 scaling matrices are not supported");
-
-/// Parse an SPS RBSP (the bytes after the NAL header, emulation-prevention
-/// already stripped). [`VulkanVideoError::StreamRefused`] on truncation or an
-/// unsupported feature.
-pub fn parse_h264_sps(rbsp: &[u8]) -> Result<H264Sps, VulkanVideoError> {
-    let (head, mut br) = crate::h264parse::parse_h264_sps_head(rbsp).ok_or(MALFORMED_SPS)?;
-    // we pass no scaling lists or colour plane ids to the driver
-    if head.poc.separate_colour_plane_flag {
-        return Err(VulkanVideoError::StreamRefused(
-            "H.264 separate colour planes are not supported",
-        ));
-    }
-    if head.seq_scaling_matrix_present {
-        return Err(SCALING_MATRICES_REFUSED);
-    }
-    // `to_std_sps` carries the cycle length in a byte
-    u8::try_from(head.poc.offsets_for_ref_frame.len()).map_err(|_| MALFORMED_SPS)?;
-    if head.seq_parameter_set_id > H264_MAX_SPS_ID {
-        return Err(MALFORMED_SPS);
-    }
-    let frame_mbs_only_flag = u32::from(head.poc.frame_mbs_only_flag);
-    // `H264Sps::coded_extent` multiplies these out unchecked
-    head.pic_width_in_mbs_minus1
-        .checked_add(1)
-        .and_then(|mbs| mbs.checked_mul(H264_MACROBLOCK_SIZE))
-        .ok_or(MALFORMED_SPS)?;
-    head.pic_height_in_map_units_minus1
-        .checked_add(1)
-        .and_then(|units| units.checked_mul(H264_MACROBLOCK_SIZE))
-        .and_then(|rows| rows.checked_mul(2 - frame_mbs_only_flag))
-        .ok_or(MALFORMED_SPS)?;
-
-    // VUI (optional): read the colour description for the YUV -> RGB conversion,
-    // then continue to the bitstream-restriction reorder bound. Best-effort: a
-    // truncated / absent VUI leaves the colour unspecified and the bound `None`.
-    let (signal, max_num_reorder_frames) = if br.read_bit().unwrap_or(0) == 1 {
-        match crate::vui::read_vui_head(&mut br) {
-            Some(head) => (
-                head.signal_type.unwrap_or(VideoSignalType::UNSPECIFIED),
-                crate::vui::read_h264_vui_tail(&mut br).max_num_reorder_frames,
-            ),
-            None => (VideoSignalType::UNSPECIFIED, None),
-        }
-    } else {
-        (VideoSignalType::UNSPECIFIED, None)
-    };
-    let [crop_l, crop_r, crop_t, crop_b] = head.frame_crop_offsets;
-
-    Ok(H264Sps {
-        profile_idc: head.profile_idc,
-        level_idc: head.level_idc,
-        seq_parameter_set_id: head.seq_parameter_set_id as u8,
-        chroma_format_idc: head.chroma_format_idc as u8,
-        bit_depth_luma_minus8: head.bit_depth_luma_minus8 as u8,
-        bit_depth_chroma_minus8: head.bit_depth_chroma_minus8 as u8,
-        log2_max_frame_num_minus4: (head.poc.log2_max_frame_num - 4) as u8,
-        pic_order_cnt_type: head.poc.pic_order_cnt_type,
-        log2_max_pic_order_cnt_lsb_minus4: head.poc.log2_max_pic_order_cnt_lsb.saturating_sub(4)
-            as u8,
-        delta_pic_order_always_zero_flag: u8::from(head.poc.delta_pic_order_always_zero_flag),
-        offset_for_non_ref_pic: head.poc.offset_for_non_ref_pic,
-        offset_for_top_to_bottom_field: head.poc.offset_for_top_to_bottom_field,
-        offsets_for_ref_frame: head.poc.offsets_for_ref_frame,
-        max_num_ref_frames: head.max_num_ref_frames as u8,
-        pic_width_in_mbs_minus1: head.pic_width_in_mbs_minus1,
-        pic_height_in_map_units_minus1: head.pic_height_in_map_units_minus1,
-        frame_mbs_only_flag: frame_mbs_only_flag as u8,
-        mb_adaptive_frame_field_flag: u8::from(head.mb_adaptive_frame_field_flag),
-        direct_8x8_inference_flag: u8::from(head.direct_8x8_inference_flag),
-        gaps_in_frame_num_value_allowed_flag: u8::from(head.gaps_in_frame_num_value_allowed_flag),
-        frame_cropping_flag: u8::from(head.frame_cropping_flag),
-        frame_crop_left_offset: crop_l,
-        frame_crop_right_offset: crop_r,
-        frame_crop_top_offset: crop_t,
-        frame_crop_bottom_offset: crop_b,
-        color_primaries: signal.color_primaries,
-        transfer_characteristics: signal.transfer_characteristics,
-        matrix_coefficients: signal.matrix_coefficients,
-        video_full_range_flag: signal.video_full_range_flag,
-        max_num_reorder_frames,
-    })
-}
-
-/// Parse a PPS RBSP (bytes after the NAL header, de-emulated).
-/// [`VulkanVideoError::StreamRefused`] on truncation or an unsupported feature
-/// (slice groups, scaling matrices).
-pub fn parse_h264_pps(rbsp: &[u8]) -> Result<H264Pps, VulkanVideoError> {
-    parse_h264_pps_fields(rbsp).ok_or(MALFORMED_PPS)?
-}
-
-/// The bit walk of [`parse_h264_pps`]: `None` when the RBSP is truncated, an
-/// inner error when it parses but uses a refused feature.
-fn parse_h264_pps_fields(rbsp: &[u8]) -> Option<Result<H264Pps, VulkanVideoError>> {
-    let mut br = BitReader::new(rbsp);
-    let (poc, seq_parameter_set_id, entropy_coding_mode_flag, num_slice_groups_minus1) =
-        crate::poc::parse_h264_pps_poc_bits(&mut br)?;
-    // the Std PPS has no slice group map
-    if num_slice_groups_minus1 != 0 {
-        return Some(Err(VulkanVideoError::StreamRefused(
-            "H.264 slice groups (FMO) are not supported",
-        )));
-    }
-    let pic_parameter_set_id = u32::from(poc.pic_parameter_set_id);
-    let bottom_field_pic_order_in_frame_present_flag =
-        u32::from(poc.bottom_field_pic_order_in_frame_present_flag);
-    let num_ref_idx_l0_default_active_minus1 = br.read_ue()?;
-    let num_ref_idx_l1_default_active_minus1 = br.read_ue()?;
-    let weighted_pred_flag = br.read_bit()?;
-    let weighted_bipred_idc = br.read_bits(2)?;
-    let pic_init_qp_minus26 = br.read_se()?;
-    let pic_init_qs_minus26 = br.read_se()?;
-    let chroma_qp_index_offset = br.read_se()?;
-    let deblocking_filter_control_present_flag = br.read_bit()?;
-    let constrained_intra_pred_flag = br.read_bit()?;
-    let redundant_pic_cnt_present_flag = br.read_bit()?;
-    if seq_parameter_set_id > H264_MAX_SPS_ID {
-        return None;
-    }
-
-    // The optional trailing block is present only when `more_rbsp_data()` is
-    // true. A baseline PPS has no such block, so the next bit is the
-    // `rbsp_stop_one_bit` (1); reading it as `transform_8x8_mode_flag` would
-    // wrongly tell the decoder 8x8 transforms are enabled and desync its CAVLC
-    // coefficient parse. Guarding on `more_rbsp_data()` keeps both fields at
-    // their (correct) defaults for baseline.
-    let mut transform_8x8_mode_flag = 0u32;
-    let mut second_chroma_qp_index_offset = chroma_qp_index_offset;
-    if br.more_rbsp_data() {
-        transform_8x8_mode_flag = br.read_bit()?;
-        if br.read_bit()? == 1 {
-            return Some(Err(SCALING_MATRICES_REFUSED));
-        }
-        second_chroma_qp_index_offset = br.read_se()?;
-    }
-
-    Some(Ok(H264Pps {
-        pic_parameter_set_id: pic_parameter_set_id as u8,
-        seq_parameter_set_id: seq_parameter_set_id as u8,
-        entropy_coding_mode_flag: entropy_coding_mode_flag as u8,
-        bottom_field_pic_order_in_frame_present_flag: bottom_field_pic_order_in_frame_present_flag
-            as u8,
-        num_ref_idx_l0_default_active_minus1: num_ref_idx_l0_default_active_minus1 as u8,
-        num_ref_idx_l1_default_active_minus1: num_ref_idx_l1_default_active_minus1 as u8,
-        weighted_pred_flag: weighted_pred_flag as u8,
-        weighted_bipred_idc: weighted_bipred_idc as u8,
-        pic_init_qp_minus26: pic_init_qp_minus26 as i8,
-        pic_init_qs_minus26: pic_init_qs_minus26 as i8,
-        chroma_qp_index_offset: chroma_qp_index_offset as i8,
-        deblocking_filter_control_present_flag: deblocking_filter_control_present_flag as u8,
-        constrained_intra_pred_flag: constrained_intra_pred_flag as u8,
-        redundant_pic_cnt_present_flag: redundant_pic_cnt_present_flag as u8,
-        transform_8x8_mode_flag: transform_8x8_mode_flag as u8,
-        second_chroma_qp_index_offset: second_chroma_qp_index_offset as i8,
-    }))
-}
-
-/// Pull the first SPS (nal type 7) and PPS (nal type 8) from an Annex-B / AVCC
-/// access unit and parse both. `None` when either is missing or refused.
-pub fn extract_h264_parameter_sets(au: &[u8]) -> Option<H264ParameterSets> {
-    h264_parameter_sets_in(au).ok().flatten()
-}
-
-/// The first SPS and PPS of an access unit, `Ok(None)` when it carries no
-/// pair, and the refusal when one of them is malformed or uses a feature this
-/// decoder does not implement.
-fn h264_parameter_sets_in(au: &[u8]) -> Result<Option<H264ParameterSets>, VulkanVideoError> {
-    let mut sps = None;
-    let mut pps = None;
-    for nal in nal_units_any(au) {
-        match h264_nal_type(nal) {
-            Some(H264_NAL_SPS) if sps.is_none() => {
-                sps = Some(parse_h264_sps(&strip_emulation_prevention(&nal[1..]))?);
-            }
-            Some(H264_NAL_PPS) if pps.is_none() => {
-                pps = Some(parse_h264_pps(&strip_emulation_prevention(&nal[1..]))?);
-            }
-            _ => {}
-        }
-    }
-    Ok(sps
-        .zip(pps)
-        .map(|(sps, pps)| H264ParameterSets { sps, pps }))
 }
 
 /// Map a raw `level_idc` byte onto the `StdVideoH264LevelIdc` enum. Unknown
@@ -4925,188 +4627,6 @@ pub fn to_std_av1_picture_info(
         _lr: lr,
         _gm: gm,
     }
-}
-
-// ============================================================================
-// H.264 slice-header parse
-//
-// The DPB decode loop needs, per coded picture, the slice-header fields that
-// drive reference management and picture-order-count: `frame_num`, the POC
-// syntax, `idr_pic_id`, `slice_type` and the NAL `nal_ref_idc`. Only the prefix
-// up to the POC syntax is parsed (the parts before `ref_pic_list_modification`);
-// the driver re-parses the full slice for the actual decode, so we read just
-// enough to run the DPB. Attacker-controlled: every read is checked and an
-// unsupported tool (field pictures) returns `None`.
-// ============================================================================
-
-/// The H.264 slice-header prefix the DPB loop keys on: the shared picture
-/// order count prefix, which carries every field this decoder reads.
-pub type H264SliceHeader = crate::poc::H264SlicePoc;
-
-/// The parameter-set view the shared slice parse and POC derivation take of an
-/// [`H264Sps`]. Separate colour planes, which this SPS parse rejects, are fixed
-/// at absent.
-fn h264_poc_context(sps: &H264Sps) -> crate::poc::H264PocContext<'_> {
-    crate::poc::H264PocContext {
-        separate_colour_plane_flag: false,
-        log2_max_frame_num: u32::from(sps.log2_max_frame_num_minus4) + 4,
-        frame_mbs_only_flag: sps.frame_mbs_only_flag == 1,
-        pic_order_cnt_type: sps.pic_order_cnt_type,
-        log2_max_pic_order_cnt_lsb: u32::from(sps.log2_max_pic_order_cnt_lsb_minus4) + 4,
-        delta_pic_order_always_zero_flag: sps.delta_pic_order_always_zero_flag == 1,
-        offset_for_non_ref_pic: sps.offset_for_non_ref_pic,
-        offset_for_top_to_bottom_field: sps.offset_for_top_to_bottom_field,
-        offsets_for_ref_frame: &sps.offsets_for_ref_frame,
-    }
-}
-
-/// `MaxFrameNum` (7.4.2.1.1).
-fn h264_max_frame_num(sps: &H264Sps) -> u32 {
-    1 << (u32::from(sps.log2_max_frame_num_minus4) + 4)
-}
-
-/// `FrameNumWrap` of the short-term reference with `frame_num`, seen from the
-/// picture with `current_frame_num` (8.2.4.1).
-fn h264_frame_num_wrap(frame_num: u32, current_frame_num: u32, max_frame_num: u32) -> i64 {
-    if frame_num > current_frame_num {
-        i64::from(frame_num) - i64::from(max_frame_num)
-    } else {
-        i64::from(frame_num)
-    }
-}
-
-/// `picNumX` of a marking operation on a frame (8.2.5.4.1), whose `CurrPicNum`
-/// is its `frame_num`.
-fn h264_pic_num(frame_num: u32, difference_of_pic_nums_minus1: u32) -> i64 {
-    i64::from(frame_num) - i64::from(difference_of_pic_nums_minus1) - 1
-}
-
-/// `TopFieldOrderCnt` and `BottomFieldOrderCnt` of a frame (8.2.1), from its
-/// `PicOrderCnt` (the smaller of the two) and the syntax that codes their
-/// difference.
-fn h264_field_order_counts(
-    pic_order_cnt: i32,
-    header: &H264SliceHeader,
-    sps: &H264Sps,
-) -> [i32; 2] {
-    let bottom_minus_top = match sps.pic_order_cnt_type {
-        0 => i64::from(header.delta_pic_order_cnt_bottom),
-        1 => {
-            i64::from(sps.offset_for_top_to_bottom_field) + i64::from(header.delta_pic_order_cnt[1])
-        }
-        _ => 0,
-    };
-    let top = i64::from(pic_order_cnt) - bottom_minus_top.min(0);
-    let saturate = |count: i64| count.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
-    [saturate(top), saturate(top + bottom_minus_top)]
-}
-
-/// The order counts of one H.264 picture.
-#[derive(Debug, Clone, Copy)]
-struct H264PictureOrder {
-    meta: PictureMeta,
-    /// The field order counts the picture decodes with.
-    field_order_counts: [i32; 2],
-    /// The field order counts later pictures reference it with, which
-    /// `memory_management_control_operation` 5 resets.
-    stored_field_order_counts: [i32; 2],
-    /// The picture carries `memory_management_control_operation` 5.
-    memory_reset: bool,
-}
-
-/// Run the picture-order-count derivation for the picture `header` opens,
-/// advancing `poc`. A picture with `memory_management_control_operation` 5
-/// restarts the count after it (8.2.1), so it reports as a sequence start whose
-/// order count is its own field counts minus the smaller one.
-fn h264_picture_order(
-    poc: &mut crate::poc::H264PocState,
-    header: &H264SliceHeader,
-    sps: &H264Sps,
-) -> H264PictureOrder {
-    let pic_order_cnt = poc.compute(&h264_poc_context(sps), header);
-    let field_order_counts = h264_field_order_counts(pic_order_cnt, header, sps);
-    let memory_reset = header
-        .ref_pic_marking
-        .is_some_and(|marking| marking.ops().contains(&crate::poc::H264Mmco::AllUnused));
-    let stored_field_order_counts = if memory_reset {
-        *poc = crate::poc::H264PocState::default();
-        field_order_counts.map(|count| count.saturating_sub(pic_order_cnt))
-    } else {
-        field_order_counts
-    };
-    H264PictureOrder {
-        meta: PictureMeta {
-            is_keyframe: header.is_idr || memory_reset,
-            is_random_access: header.is_idr,
-            frame_num: header.frame_num,
-            poc: stored_field_order_counts[0].min(stored_field_order_counts[1]),
-            pic_output_flag: true,
-            discards_prior_pictures: false,
-            dpb: None,
-        },
-        field_order_counts,
-        stored_field_order_counts,
-        memory_reset,
-    }
-}
-
-const H264_SLICE_TYPE_SP: u32 = 3;
-const H264_SLICE_TYPE_SI: u32 = 4;
-
-/// The `pic_parameter_set_id` a slice NAL selects (7.3.3), read before the rest
-/// of the header since the PPS sizes the fields after it.
-fn h264_slice_pic_parameter_set_id(nal: &[u8]) -> Result<u8, VulkanVideoError> {
-    let mut br = BitReader::skipping_emulation_prevention(nal.get(1..).unwrap_or_default());
-    br.read_ue().ok_or(MALFORMED_SLICE_HEADER)?; // first_mb_in_slice
-    br.read_ue().ok_or(MALFORMED_SLICE_HEADER)?; // slice_type
-    let id = br.read_ue().ok_or(MALFORMED_SLICE_HEADER)?;
-    u8::try_from(id).map_err(|_| MALFORMED_SLICE_HEADER)
-}
-
-/// Parse the slice-header prefix of a VCL NAL (type 1 or 5). `sps`/`pps` supply
-/// the variable-length field widths and POC type. Refused on truncation, a
-/// non-VCL NAL, or an unsupported tool (field pictures, SP / SI slices).
-pub fn parse_h264_slice_header(
-    nal: &[u8],
-    sps: &H264Sps,
-    pps: &H264Pps,
-) -> Result<H264SliceHeader, VulkanVideoError> {
-    let pps_poc = [crate::poc::H264PpsPoc {
-        pic_parameter_set_id: pps.pic_parameter_set_id,
-        bottom_field_pic_order_in_frame_present_flag: pps
-            .bottom_field_pic_order_in_frame_present_flag
-            == 1,
-    }];
-    // Parsed through `dec_ref_pic_marking()`: a stream using adaptive marking
-    // (x264 does, for its B-pyramid) evicts references on its own schedule, and a
-    // DPB running the default sliding window instead would hand the driver a
-    // reference list naming pictures it no longer holds.
-    let marking = crate::poc::H264PpsRefMarking {
-        redundant_pic_cnt_present_flag: pps.redundant_pic_cnt_present_flag == 1,
-        weighted_pred_flag: pps.weighted_pred_flag == 1,
-        weighted_bipred_idc: pps.weighted_bipred_idc,
-        num_ref_idx_l0_default_active_minus1: u32::from(pps.num_ref_idx_l0_default_active_minus1),
-        num_ref_idx_l1_default_active_minus1: u32::from(pps.num_ref_idx_l1_default_active_minus1),
-        chroma_array_type: sps.chroma_format_idc,
-    };
-    let slice =
-        crate::poc::parse_h264_slice_marking(nal, &h264_poc_context(sps), &pps_poc, &marking)
-            .ok_or(MALFORMED_SLICE_HEADER)?;
-    // the DPB here holds frames only, a field picture would need field pairing
-    if slice.field_pic_flag {
-        return Err(VulkanVideoError::StreamRefused(
-            "H.264 interlaced field pictures are not supported",
-        ));
-    }
-    if matches!(
-        slice.slice_type % 5,
-        H264_SLICE_TYPE_SP | H264_SLICE_TYPE_SI
-    ) {
-        return Err(VulkanVideoError::StreamRefused(
-            "H.264 SP and SI slices are not supported",
-        ));
-    }
-    Ok(slice)
 }
 
 // ============================================================================
@@ -10227,284 +9747,6 @@ impl core::fmt::Debug for DpbImage {
     }
 }
 
-/// A reference picture held in a DPB slot: the metadata the driver matches
-/// against slice-header reference lists (`FrameNum`, POC).
-#[derive(Debug, Clone, Copy)]
-struct RefPic {
-    frame_num: u32,
-    /// `TopFieldOrderCnt`, `BottomFieldOrderCnt` (8.2.1).
-    field_order_counts: [i32; 2],
-    /// `LongTermFrameIdx` once the picture is marked long-term (8.2.5.4).
-    long_term_frame_idx: Option<u32>,
-    // a frame a frame_num gap inferred (8.2.5.2): it holds a slot but was never decoded
-    non_existing: bool,
-}
-
-const DPB_FULL: VulkanVideoError = VulkanVideoError::StreamRefused(
-    "H.264 stream holds more reference frames than its DPB has slots",
-);
-
-/// The H.264 reference picture marking state of a DPB (8.2.5): which slots hold
-/// reference frames, including the frames a `frame_num` gap inferred, and the
-/// long-term index bound. Holds no GPU state.
-#[derive(Debug, Clone)]
-struct H264References {
-    /// Per-slot reference state: `Some` means the slot holds a reference
-    /// picture, `None` means it is free.
-    slots: alloc::vec::Vec<Option<RefPic>>,
-    /// `PrevRefFrameNum` (7.4.3).
-    prev_ref_frame_num: u32,
-    /// `MaxLongTermFrameIdx` (8.2.5.4), `None` for "no long-term frame indices".
-    max_long_term_frame_idx: Option<u32>,
-    max_num_ref_frames: usize,
-}
-
-impl H264References {
-    fn new(num_slots: usize, max_num_ref_frames: usize) -> Self {
-        Self {
-            slots: alloc::vec![None; num_slots],
-            prev_ref_frame_num: 0,
-            max_long_term_frame_idx: None,
-            max_num_ref_frames,
-        }
-    }
-
-    /// Mark every picture unused for reference, as an IDR does.
-    fn clear(&mut self) {
-        self.slots.fill(None);
-        self.prev_ref_frame_num = 0;
-        self.max_long_term_frame_idx = None;
-    }
-
-    /// Every slot holding a reference picture.
-    fn active(&self) -> alloc::vec::Vec<(usize, RefPic)> {
-        self.slots
-            .iter()
-            .enumerate()
-            .filter_map(|(slot, reference)| reference.map(|r| (slot, r)))
-            .collect()
-    }
-
-    fn free_slot(&self) -> Option<usize> {
-        self.slots.iter().position(|reference| reference.is_none())
-    }
-
-    /// Run the marking for the picture just decoded into `target` (8.2.5.1) and
-    /// store it as a reference, after the stream's own marking operations or the
-    /// sliding window have made room. A non-reference picture (`nal_ref_idc ==
-    /// 0`) leaves its slot free.
-    fn mark_current(
-        &mut self,
-        target: usize,
-        header: &H264SliceHeader,
-        max_frame_num: u32,
-        order: &H264PictureOrder,
-    ) -> Result<(), VulkanVideoError> {
-        if header.nal_ref_idc == 0 || self.max_num_ref_frames == 0 {
-            return Ok(());
-        }
-        let marking = header.ref_pic_marking.ok_or(MALFORMED_SLICE_HEADER)?;
-        let long_term_frame_idx = if header.is_idr {
-            self.max_long_term_frame_idx = marking.long_term_reference.then_some(0);
-            self.max_long_term_frame_idx
-        } else if marking.adaptive {
-            self.apply_ref_pic_marking(header.frame_num, max_frame_num, &marking)
-        } else {
-            self.slide_window(header.frame_num, max_frame_num);
-            None
-        };
-        let frame_num = if order.memory_reset {
-            0
-        } else {
-            header.frame_num
-        };
-        self.prev_ref_frame_num = frame_num;
-        self.slots[target] = Some(RefPic {
-            frame_num,
-            field_order_counts: order.stored_field_order_counts,
-            long_term_frame_idx,
-            non_existing: false,
-        });
-        Ok(())
-    }
-
-    /// Apply a slice's adaptive reference marking (8.2.5.4): the stream names
-    /// which pictures stop being references, or become long-term ones, instead
-    /// of leaving it to the sliding window. Returns the `LongTermFrameIdx` the
-    /// current picture takes (operation 6), if any.
-    fn apply_ref_pic_marking(
-        &mut self,
-        frame_num: u32,
-        max_frame_num: u32,
-        marking: &crate::poc::H264RefPicMarking,
-    ) -> Option<u32> {
-        let mut current_long_term_frame_idx = None;
-        for op in marking.ops() {
-            match *op {
-                crate::poc::H264Mmco::ShortTermUnused {
-                    difference_of_pic_nums_minus1,
-                } => {
-                    let pic_num = h264_pic_num(frame_num, difference_of_pic_nums_minus1);
-                    self.unmark_short_term(pic_num, frame_num, max_frame_num);
-                }
-                crate::poc::H264Mmco::LongTermUnused { long_term_pic_num } => {
-                    self.unmark_long_term(long_term_pic_num);
-                }
-                crate::poc::H264Mmco::AssignLongTerm {
-                    difference_of_pic_nums_minus1,
-                    long_term_frame_idx,
-                } => {
-                    self.unmark_long_term(long_term_frame_idx);
-                    let pic_num = h264_pic_num(frame_num, difference_of_pic_nums_minus1);
-                    if let Some(slot) = self.short_term_slot(pic_num, frame_num, max_frame_num) {
-                        if let Some(reference) = &mut self.slots[slot] {
-                            reference.long_term_frame_idx = Some(long_term_frame_idx);
-                        }
-                    }
-                }
-                crate::poc::H264Mmco::MaxLongTermIndex {
-                    max_long_term_frame_idx_plus1,
-                } => {
-                    self.max_long_term_frame_idx = max_long_term_frame_idx_plus1.checked_sub(1);
-                    let max = self.max_long_term_frame_idx;
-                    for reference in &mut self.slots {
-                        let beyond = reference
-                            .and_then(|r| r.long_term_frame_idx)
-                            .is_some_and(|idx| max.is_none_or(|max| idx > max));
-                        if beyond {
-                            *reference = None;
-                        }
-                    }
-                }
-                crate::poc::H264Mmco::AllUnused => {
-                    self.slots.fill(None);
-                    self.max_long_term_frame_idx = None;
-                }
-                crate::poc::H264Mmco::CurrentAsLongTerm {
-                    long_term_frame_idx,
-                } => {
-                    self.unmark_long_term(long_term_frame_idx);
-                    current_long_term_frame_idx = Some(long_term_frame_idx);
-                }
-            }
-        }
-        current_long_term_frame_idx
-    }
-
-    /// The slot of the short-term reference whose `PicNum` (its `FrameNumWrap`,
-    /// 8.2.4.1) is `pic_num`.
-    fn short_term_slot(&self, pic_num: i64, frame_num: u32, max_frame_num: u32) -> Option<usize> {
-        self.slots.iter().position(|reference| {
-            reference.is_some_and(|r| {
-                r.long_term_frame_idx.is_none()
-                    && h264_frame_num_wrap(r.frame_num, frame_num, max_frame_num) == pic_num
-            })
-        })
-    }
-
-    fn unmark_short_term(&mut self, pic_num: i64, frame_num: u32, max_frame_num: u32) {
-        if let Some(slot) = self.short_term_slot(pic_num, frame_num, max_frame_num) {
-            self.slots[slot] = None;
-        }
-    }
-
-    /// Unmark the long-term reference whose `LongTermFrameIdx` is `idx`; for a
-    /// frame it is also its `LongTermPicNum` (8.2.4.1).
-    fn unmark_long_term(&mut self, idx: u32) {
-        for reference in &mut self.slots {
-            if reference.is_some_and(|r| r.long_term_frame_idx == Some(idx)) {
-                *reference = None;
-            }
-        }
-    }
-
-    /// The sliding window (8.2.5.3): once the short-term and long-term
-    /// references fill `max_num_ref_frames`, the short-term one with the smallest
-    /// `FrameNumWrap` stops being a reference.
-    fn slide_window(&mut self, frame_num: u32, max_frame_num: u32) {
-        let held = self.slots.iter().flatten().count();
-        if held < self.max_num_ref_frames.max(1) {
-            return;
-        }
-        let wrap = |other: u32| h264_frame_num_wrap(other, frame_num, max_frame_num);
-        let oldest_slot = self
-            .slots
-            .iter()
-            .enumerate()
-            .filter_map(|(slot, r)| {
-                r.filter(|r| r.long_term_frame_idx.is_none())
-                    .map(|r| (slot, r))
-            })
-            .min_by_key(|(_, r)| wrap(r.frame_num));
-        if let Some((slot, _)) = oldest_slot {
-            self.slots[slot] = None;
-        }
-    }
-
-    /// Infer the frames a gap in `frame_num` skipped (8.2.5.2): each one runs the
-    /// sliding window and then holds a short-term reference slot, so the real
-    /// references they push out are the ones the encoder expected to be gone.
-    fn fill_frame_num_gap(
-        &mut self,
-        header: &H264SliceHeader,
-        sps: &H264Sps,
-    ) -> Result<(), VulkanVideoError> {
-        let max_frame_num = h264_max_frame_num(sps);
-        let next = (self.prev_ref_frame_num + 1) % max_frame_num;
-        let no_gap = header.is_idr
-            || sps.gaps_in_frame_num_value_allowed_flag == 0
-            || header.frame_num == self.prev_ref_frame_num
-            || header.frame_num == next;
-        if no_gap {
-            return Ok(());
-        }
-        let mut unused = next;
-        while unused != header.frame_num {
-            self.slide_window(unused, max_frame_num);
-            let slot = self.free_slot().ok_or(DPB_FULL)?;
-            self.slots[slot] = Some(RefPic {
-                frame_num: unused,
-                field_order_counts: [0, 0],
-                long_term_frame_idx: None,
-                non_existing: true,
-            });
-            unused = (unused + 1) % max_frame_num;
-        }
-        self.prev_ref_frame_num = (header.frame_num + max_frame_num - 1) % max_frame_num;
-        Ok(())
-    }
-}
-
-/// The newest SPS and PPS of each id an H.264 stream has sent.
-#[derive(Debug, Clone, Default)]
-struct H264ParameterSetTable {
-    sps: alloc::collections::BTreeMap<u8, H264Sps>,
-    pps: alloc::collections::BTreeMap<u8, H264Pps>,
-}
-
-impl H264ParameterSetTable {
-    fn of(ps: &H264ParameterSets) -> Self {
-        let mut table = Self::default();
-        table
-            .sps
-            .insert(ps.sps.seq_parameter_set_id, ps.sps.clone());
-        table
-            .pps
-            .insert(ps.pps.pic_parameter_set_id, ps.pps.clone());
-        table
-    }
-
-    /// The PPS a slice selects and the SPS that PPS names.
-    fn active(&self, pic_parameter_set_id: u8) -> Result<(&H264Sps, &H264Pps), VulkanVideoError> {
-        const MISSING: VulkanVideoError = VulkanVideoError::StreamRefused(
-            "H.264 slice names an SPS or PPS the stream never sent",
-        );
-        let pps = self.pps.get(&pic_parameter_set_id).ok_or(MISSING)?;
-        let sps = self.sps.get(&pps.seq_parameter_set_id).ok_or(MISSING)?;
-        Ok((sps, pps))
-    }
-}
-
 /// Session parameters an [`H264DpbDecoder`] created after the stream changed a
 /// parameter set, destroyed on drop.
 struct ReplacedSessionParameters {
@@ -11701,6 +10943,19 @@ impl core::fmt::Debug for H264DpbDecoder {
     }
 }
 
+fn h264_picture_meta(header: &H264SliceHeader, order: &H264PictureOrder) -> PictureMeta {
+    let [top, bottom] = order.stored_field_order_counts;
+    PictureMeta {
+        is_keyframe: header.is_idr || order.memory_reset,
+        is_random_access: header.is_idr,
+        frame_num: header.frame_num,
+        poc: top.min(bottom),
+        pic_output_flag: true,
+        discards_prior_pictures: false,
+        dpb: None,
+    }
+}
+
 impl H264DpbDecoder {
     /// Pick what the GPU-texture path emits per picture ([`TextureOutput`]).
     pub fn set_texture_output(&mut self, output: TextureOutput) {
@@ -11893,7 +11148,8 @@ impl H264DpbDecoder {
         let pictures = self.split_pictures(stream)?;
         let mut metas = alloc::vec::Vec::with_capacity(pictures.len());
         for picture in &pictures {
-            metas.push(h264_picture_order(&mut self.poc, &picture.header, &picture.sps).meta);
+            let order = h264_picture_order(&mut self.poc, &picture.header, &picture.sps);
+            metas.push(h264_picture_meta(&picture.header, &order));
         }
         // Computing POC advanced the tracking state; reset it for a real decode.
         self.reset();
@@ -12097,7 +11353,7 @@ impl H264DpbDecoder {
         self.references
             .mark_current(target, header, max_frame_num, &order)?;
 
-        Ok((target, order.meta))
+        Ok((target, h264_picture_meta(header, &order)))
     }
 
     // decodes the session's first IDR into every other slot, so a later frame_num
@@ -15472,10 +14728,10 @@ fn parameter_set_fingerprint(codec: VideoCodec, au: &[u8]) -> alloc::vec::Vec<u8
 /// thing that does, so dropping it left a bare `CapsMismatch` with nothing to act
 /// on. Errors before any frame flows (bad caps) stay silent here; this is for the
 /// ones that only appear once the bitstream is read.
-fn decode_refused(err: VulkanVideoError) -> G2gError {
+fn decode_refused(err: impl Into<VulkanVideoError>) -> G2gError {
     let target =
         g2g_core::log::Target::category(g2g_core::log::short_type_name::<VulkanVideoDec>());
-    match err {
+    match err.into() {
         VulkanVideoError::StreamRefused(reason) => {
             g2g_error!(target, "cannot decode this stream: {reason}")
         }
@@ -16760,6 +16016,8 @@ static VULKANVIDEODEC_PROPS: &[PropertySpec] = &[
 mod tests {
     use super::*;
     use crate::annexb::BitWriter;
+    use crate::h264dpb::h264_field_order_counts;
+    use crate::h264parse::H264_SLICE_TYPE_SI;
 
     #[test]
     fn autoplug_compares_h264_at_its_macroblock_coded_size() {
@@ -18254,8 +17512,11 @@ mod tests {
             .expect("test IDR slice parses")
     }
 
-    fn assert_refused<T: core::fmt::Debug>(result: Result<T, VulkanVideoError>, reason: &str) {
-        match result {
+    fn assert_refused<T: core::fmt::Debug>(
+        result: Result<T, impl Into<VulkanVideoError>>,
+        reason: &str,
+    ) {
+        match result.map_err(Into::into) {
             Err(VulkanVideoError::StreamRefused(refusal)) => {
                 assert!(refusal.contains(reason), "{refusal:?} names {reason:?}")
             }
@@ -18464,23 +17725,15 @@ mod tests {
         reset.pic_order_cnt_lsb = RESET_FRAME_POC_LSB;
         let order = h264_picture_order(&mut poc, &reset, &sps);
         assert!(order.memory_reset);
-        assert!(order.meta.is_keyframe, "it starts a new output group");
+        let meta = h264_picture_meta(&reset, &order);
+        assert!(meta.is_keyframe, "it starts a new output group");
         assert_eq!(order.field_order_counts, [RESET_FRAME_POC_LSB as i32; 2]);
         assert_eq!(order.stored_field_order_counts, [0, 0]);
-        assert_eq!(order.meta.poc, 0);
+        assert_eq!(meta.poc, 0);
     }
 
     fn plain_order() -> H264PictureOrder {
         H264PictureOrder {
-            meta: PictureMeta {
-                is_keyframe: false,
-                is_random_access: false,
-                frame_num: 0,
-                poc: 0,
-                pic_output_flag: true,
-                discards_prior_pictures: false,
-                dpb: None,
-            },
             field_order_counts: [0, 0],
             stored_field_order_counts: [0, 0],
             memory_reset: false,

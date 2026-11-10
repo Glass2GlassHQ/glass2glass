@@ -976,6 +976,10 @@ count, not 0, for the driver's own slice-header re-parse. All 500 frames of the
 JCT-VC `LTRPSPS_A_Qualcomm_1` conformance vector decode bit-exact against ffmpeg
 on the 3060, and the GPU-texture path shares the same DPB machinery.
 
+The H.264 parameter-set and slice-header parsing is in `h264parse`, and the
+reference marking, picture order and parameter-set table are in `h264dpb`. Neither
+names a Vulkan type, and `vulkanvideo` maps them onto the `Std*` structs.
+
 ### Reference marking
 
 Which decoded pictures stay available as references is the stream's decision, not

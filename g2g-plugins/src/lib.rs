@@ -175,6 +175,11 @@ pub mod fallbackswitch;
 pub mod fallbacksrc;
 // Decoded-GOP reverser (M897): the presentation half of reverse playback.
 pub mod gopreverse;
+#[cfg(all(
+    any(target_os = "linux", target_os = "windows"),
+    feature = "vulkan-video"
+))]
+mod h264dpb;
 pub mod h264parse;
 pub mod h265parse;
 pub mod identity;
