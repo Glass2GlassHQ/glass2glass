@@ -903,7 +903,7 @@ impl WgpuPreprocess {
     /// the decoder's two-plane `TextureFormat::NV12`. Both produce the same
     /// tensor. Any other format under a `WgpuNv12Texture` is a producer bug, not
     /// something to guess at. Both shaders read only the negotiated picture, so
-    /// an odd size reads the picture region of a texture rounded up past it.
+    /// an odd size reads the picture region of a texture padded past it.
     fn dispatch_nv12_texture(&mut self, owner: &WgpuNv12Texture) -> Result<MemoryDomain, G2gError> {
         let texture = owner.texture();
         let layout = texture_layout(texture).ok_or(G2gError::UnsupportedDomain)?;

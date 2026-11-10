@@ -122,8 +122,8 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
 /// same whichever
 /// NV12 layout the producer hands it: a filtered sample lands a quarter of a
 /// chroma texel off the left-sited 4:2:0 grid and shifts colour across edges.
-/// The picture size comes from the negotiated caps: a decoder may round the
-/// planes up to an even size.
+/// The picture size comes from the negotiated caps: a decoder may pad the
+/// planes past the picture.
 pub(crate) const FRAGMENT_MULTIPLANAR_NV12: &str = r#"
 @group(0) @binding(0) var luma_plane: texture_2d<f32>;
 @group(0) @binding(1) var chroma_plane: texture_2d<f32>;

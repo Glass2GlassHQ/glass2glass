@@ -20,6 +20,9 @@ use g2g_plugins::yuvmatrix::YuvToRgbWeights;
 
 // odd width and height, then each one alone
 const ODD_SIZES: [(u32, u32); 3] = [(7, 5), (6, 5), (7, 6)];
+// 1080p decodes into a 1088-row texture, scaled down here to 6 rows in 16
+const PADDED_PICTURE: (u32, u32) = (8, 6);
+const PADDED_TEXTURE: (u32, u32) = (16, 16);
 // the render target quantizes the shader's float result, the reference rounds it
 const MAX_CHANNEL_DELTA: i32 = 1;
 const LUMA_PLANE: usize = 0;
@@ -165,13 +168,23 @@ fn system_domain(bytes: Vec<u8>) -> MemoryDomain {
     MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice()))
 }
 
-// a decoder-style two-plane texture, even-rounded past the picture
-fn two_plane_domain(ctx: &GpuContext, bytes: &[u8], width: u32, height: u32) -> MemoryDomain {
+fn even_rounded(width: u32, height: u32) -> (u32, u32) {
+    (2 * width.div_ceil(2), 2 * height.div_ceil(2))
+}
+
+// a decoder-style two-plane texture, padded past the picture to `texture_size`
+fn two_plane_domain(
+    ctx: &GpuContext,
+    bytes: &[u8],
+    width: u32,
+    height: u32,
+    texture_size: (u32, u32),
+) -> MemoryDomain {
     let texture = ctx.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("m1722-two-plane"),
         size: wgpu::Extent3d {
-            width: 2 * width.div_ceil(2),
-            height: 2 * height.div_ceil(2),
+            width: texture_size.0,
+            height: texture_size.1,
             depth_or_array_layers: 1,
         },
         mip_level_count: 1,
@@ -275,7 +288,7 @@ fn odd_packed_nv12_renders_only_the_picture() {
 }
 
 #[test]
-fn odd_two_plane_nv12_matches_the_packed_render() {
+fn padded_two_plane_nv12_matches_the_packed_render() {
     let _gpu = gpu_lock();
     let Some(ctx) = open_context() else {
         eprintln!("skip: no wgpu adapter");
@@ -294,16 +307,19 @@ fn odd_two_plane_nv12_matches_the_packed_render() {
         eprintln!("skip: dx12 cannot upload into NV12 planes");
         return;
     }
-    for (width, height) in ODD_SIZES {
-        let label = format!("two-plane {width}x{height}");
+    let padded_case = (PADDED_PICTURE, PADDED_TEXTURE);
+    let odd_cases = ODD_SIZES.map(|(width, height)| ((width, height), even_rounded(width, height)));
+    for ((width, height), texture_size) in odd_cases.into_iter().chain([padded_case]) {
+        let label = format!("two-plane {width}x{height} in {texture_size:?}");
         let bytes = tight_nv12(width, height);
         let packed = present(&ctx, width, height, system_domain(bytes.clone()));
         let two_plane = present(
             &ctx,
             width,
             height,
-            two_plane_domain(&ctx, &bytes, width, height),
+            two_plane_domain(&ctx, &bytes, width, height, texture_size),
         );
         assert_within_one_code(&two_plane, &packed, width, &label);
+        assert_edges_vary(&two_plane, width, height, &label);
     }
 }

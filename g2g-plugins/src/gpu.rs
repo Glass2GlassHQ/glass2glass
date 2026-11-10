@@ -307,7 +307,7 @@ pub enum WgpuTextureLayout {
     PackedNv12,
     /// The two-plane `wgpu::TextureFormat::NV12` (8-bit) or
     /// `wgpu::TextureFormat::P010` (10-bit) a GPU decoder hands out: the
-    /// picture size rounded up to even, sampled through the [`nv12_plane_views`]
+    /// picture size padded up by the decoder, sampled through the [`nv12_plane_views`]
     /// pair, needing the same YCbCr -> RGB convert.
     MultiplanarNv12,
 }
@@ -329,10 +329,8 @@ pub fn texture_holds_picture(
         // sampled whole and scaled to the target
         WgpuTextureLayout::Rgba => true,
         WgpuTextureLayout::PackedNv12 => size == packed_nv12_extent(width, height),
-        // a decoder may round its planes up to an even size
-        WgpuTextureLayout::MultiplanarNv12 => {
-            (size.0.div_ceil(2), size.1.div_ceil(2)) == (width.div_ceil(2), height.div_ceil(2))
-        }
+        // decoders pad the planes past the picture, to an even size or a 16-row multiple
+        WgpuTextureLayout::MultiplanarNv12 => size.0 >= width && size.1 >= height,
     }
 }
 
