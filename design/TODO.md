@@ -235,8 +235,6 @@ libraries installed.
 - Bump retina once a release carries scottlamb/retina PR 167: before it, an
   RTSP camera that never sets the RTP marker bit grows rtspsrc's memory
   without bound.
-- If retina answers scottlamb/retina#166 with a keepalive that runs without
-  polling the session, drop rtspsrc's `push_while_polling` and its held queue.
 - ONVIF metadata tracks with an EXI coding (`vnd.onvif.metadata.exi.onvif`,
   `vnd.onvif.metadata.exi.ext`): g2g has no EXI decoder, so they are skipped.
 - Run the Windows (`mfdevice` / `wasapidevice`) and macOS (`avfdevice` /
