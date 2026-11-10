@@ -1055,7 +1055,8 @@ from the first samples out and kept across a flush. A port's segment starts no
 earlier than its edit-list start plus that presentation start and counts stream
 time from there, so the tracks keep one origin and a position read back seeks to
 its frame. A fragmented file that also keeps samples in its `moov` (ffmpeg's
-`frag_keyframe` without `empty_moov`) fails with `CapsMismatch`.
+`frag_keyframe` without `empty_moov`) is read whole at EOS: the sample-table run
+and the fragments after it, in decode order.
 
 A `moof` can hold one `traf` per track, as ffmpeg and mediamtx write by
 default. A `trun` with a `data_offset` reads its samples at that offset from its

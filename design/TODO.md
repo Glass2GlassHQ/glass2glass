@@ -287,9 +287,6 @@ libraries installed.
 - **WebVTT track writing** (mkv, mp4 `wvtt`): blocked on a reference peer.
   ffmpeg reads only the WebM `D_WEBVTT/*` carriage (different block payload)
   and cannot write WebVTT into MP4 at all; reading both stays supported.
-- **MP4 with samples in both the `moov` and fragments** (ffmpeg's `frag_keyframe`
-  without `empty_moov`): decode the sample-table run, then the fragments.
-  `Mp4DemuxN` fails such a file with `CapsMismatch`.
 - **Corpus sweep bugs** (calliope TESTING techniques 21-23, paths under
   `~/.cache/calliope` on hercules):
   - Demuxers drop streams gst's parsebin exposes: DTS in `filter/242_4.mkv`, TTA,

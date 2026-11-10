@@ -115,6 +115,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M2199: `flvdemux` and `avidemux` declare H.264 and H.265 output as one access unit per buffer.
 - M2200: `matroskademux` trims `CodecDelay` and `DiscardPadding` from AAC, MP2 and MP3 tracks as ffmpeg does, and `matroskamux` writes AAC `CodecDelay`.
 - M2201: `hlssrc` reloads a live playlist whose `#EXT-X-MAP` init segment fails, instead of ending the run.
+- M2202: the MP4 demuxers read a fragmented file that also keeps samples in its `moov`.
 
 Breaking: `TimecodeMeta.frames` is a `u16`, `WIRE_VERSION` is 6, `FrameTiming` gains `end_discard_ns`, and `RtpRecvConfig` gains `parameter_sets`.
 

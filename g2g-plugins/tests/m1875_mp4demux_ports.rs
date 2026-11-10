@@ -41,6 +41,11 @@ const FRAG_KEYFRAME: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/fixtures/h264_aac_frag_keyframe.mp4"
 );
+// ffprobe's packet count per stream of FRAG_KEYFRAME, one line each in stream order
+const FRAG_KEYFRAME_PACKETS: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/h264_aac_frag_keyframe.mp4.packets"
+);
 const NANOS_PER_SECOND: u64 = 1_000_000_000;
 const FRAME_RATE: u64 = 25;
 // x264 with -bf 2 delays presentation by two frames
@@ -204,23 +209,18 @@ async fn a_flush_keeps_the_stream_start_of_a_reread_file() {
 }
 
 #[tokio::test]
-async fn samples_outside_the_fragments_fail_the_run() {
-    let file = std::fs::read(FRAG_KEYFRAME).expect("fixture reads");
-    let mut demux = Mp4Demux::new();
-    demux
-        .configure_pipeline(&Caps::ByteStream {
-            encoding: ByteStreamEncoding::Mp4,
-        })
-        .expect("configure");
-    let mut sink = CollectSink::default();
-    let mut ran = Ok(());
-    for packet in file_chunks(&file).chain([PipelinePacket::Eos]) {
-        ran = demux.process(packet, &mut sink).await;
-        if ran.is_err() {
-            break;
-        }
-    }
-    assert_eq!(ran, Err(G2gError::CapsMismatch));
+async fn samples_in_the_moov_and_in_fragments_all_demux() {
+    let expected: Vec<usize> = std::fs::read_to_string(FRAG_KEYFRAME_PACKETS)
+        .expect("the packet counts are committed")
+        .lines()
+        .map(|count| count.parse().expect("a packet count"))
+        .collect();
+    let demuxed: Vec<usize> = frames_per_track(FRAG_KEYFRAME)
+        .await
+        .iter()
+        .map(Vec::len)
+        .collect();
+    assert_eq!(demuxed, expected);
 }
 
 #[tokio::test]

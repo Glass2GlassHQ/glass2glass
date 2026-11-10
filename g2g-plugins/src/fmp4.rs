@@ -2779,6 +2779,14 @@ fn video_entry_param_sets(stbl: &[u8]) -> Result<Vec<Option<EntryParamSets>>, G2
 /// for files that carry several tracks in classic sample-table layout rather than
 /// fragments. Each track's `stbl` is walked independently against its own
 /// timescale and de-framing; tracks absent from `tracks` are skipped.
+// ffmpeg's frag_keyframe without empty_moov keeps the first fragment's samples in the moov
+pub(crate) fn moov_holds_samples(moov: &[u8]) -> bool {
+    boxes(moov)
+        .filter(|(kind, _)| *kind == b"trak")
+        .filter_map(|(_, trak)| find_path(trak, &[b"mdia", b"minf", b"stbl", b"stsz"]))
+        .any(|stsz| be32(stsz, 8).is_ok_and(|count| count > 0))
+}
+
 pub(crate) fn parse_progressive_multi(
     data: &[u8],
     tracks: &[TrackHeader],

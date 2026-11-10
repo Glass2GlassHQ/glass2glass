@@ -48,12 +48,12 @@ use g2g_core::{
 use crate::demuxseek::{segment_from, with_stream_time};
 use crate::fmp4::{
     clip_stored_pcm, edit_track_samples, every_sample_ends_by, keyframe_index_for,
-    parse_all_tracks, parse_chapters, parse_fragments_multi, parse_progressive_multi,
-    prepend_param_sets, starts_with_param_set, stream_start_ns, track_fragment_framerate_q16,
-    track_framerate_q16, unsupported_pcm_layout, vorbis_headers, FragmentStarts, Sample,
-    TrackHeader, TrackKind,
+    moov_holds_samples, parse_all_tracks, parse_chapters, parse_fragments_multi,
+    parse_progressive_multi, prepend_param_sets, starts_with_param_set, stream_start_ns,
+    track_fragment_framerate_q16, track_framerate_q16, unsupported_pcm_layout, vorbis_headers,
+    FragmentStarts, Sample, TrackHeader, TrackKind,
 };
-use crate::mp4box::{find_box, parse_ilst_tags};
+use crate::mp4box::{boxes_at, find_box, parse_ilst_tags};
 use crate::mp4demux::{StreamSelect, MP4DEMUX_PROPS};
 use crate::pcmclip::within_presentation;
 use crate::typefind::framerate_within_placeholder;
@@ -392,9 +392,9 @@ pub struct Mp4DemuxN {
     /// The file's tracks, parsed once the `moov` is complete (shared by the
     /// progressive emit and the `Eos` whole-file parse).
     tracks: Option<Vec<TrackHeader>>,
-    /// The layout, learned from the `moov`: `Some(true)` fragmented (has `mvex`,
-    /// emit per fragment), `Some(false)` progressive (parse whole at `Eos`),
-    /// `None` until the `moov` is buffered.
+    /// The layout, learned from the `moov`: `Some(true)` fragmented (has `mvex`
+    /// and every sample in a fragment, emit per fragment), `Some(false)` parse
+    /// whole at `Eos`, `None` until the `moov` is buffered.
     fragmented: Option<bool>,
     fragment_starts: FragmentStarts,
     ports: Vec<PortTrack>,
@@ -804,7 +804,7 @@ impl Mp4DemuxN {
             let Some(moov) = find_box(&self.buf, b"moov") else {
                 return Ok(());
             };
-            let fragmented = find_box(moov, b"mvex").is_some();
+            let fragmented = find_box(moov, b"mvex").is_some() && !moov_holds_samples(moov);
             let tracks = parse_all_tracks(&self.buf)?;
             self.resolve_ports(&tracks)?;
             if self.bus.is_some() {
@@ -838,7 +838,7 @@ impl Mp4DemuxN {
                 }
                 b"mdat" => {
                     let Some(start) = frag_start.take() else {
-                        // ffmpeg's frag_keyframe without empty_moov keeps the first fragment's samples in the moov
+                        // no moof describes this mdat, and the moov holds no samples for it
                         g2g_error!(
                             Target::category(short_type_name::<Self>()),
                             "a fragmented file with samples outside its fragments is not supported"
@@ -989,16 +989,25 @@ impl Mp4DemuxN {
         // A `moof` marks a fragmented / CMAF file; its absence is the classic
         // progressive `moov`+`mdat` layout, walked from the sample tables instead.
         let forwarded = self.forwarded_tracks(&tracks);
-        let samples = if find_box(&self.buf, b"moof").is_some() {
-            self.parse_fragments_in(
-                &self.buf,
-                &forwarded,
-                self.drained,
-                &mut FragmentStarts::default(),
-            )?
-        } else {
+        let moov = find_box(&self.buf, b"moov").ok_or(G2gError::CapsMismatch)?;
+        let mut samples = if find_box(moov, b"mvex").is_none() || moov_holds_samples(moov) {
             parse_progressive_multi(&self.buf, &forwarded)?
+        } else {
+            Vec::new()
         };
+        let first_moof =
+            boxes_at(&self.buf).find_map(|(kind, _, at)| (kind == b"moof").then_some(at));
+        if let Some(first_moof) = first_moof {
+            // the moov's own samples sit in an mdat no moof describes
+            samples.extend(self.parse_fragments_in(
+                &self.buf[first_moof..],
+                &forwarded,
+                self.drained.saturating_add(first_moof as u64),
+                &mut FragmentStarts::default(),
+            )?);
+            // stable, so each track keeps its own sample order
+            samples.sort_by_key(|(_, sample)| sample.dts_ns);
+        }
         let samples = edit_track_samples(&forwarded, samples);
         self.learn_presentation_start(&forwarded, &samples);
         let framerates = forwarded
