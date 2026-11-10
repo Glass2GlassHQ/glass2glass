@@ -71,6 +71,7 @@ fn nv12_caps(colorimetry: Colorimetry) -> Caps {
         framerate: Rate::Fixed(30 << 16),
         interlace: g2g_core::Interlace::Any,
         colorimetry,
+        pixel_aspect: g2g_core::PixelAspect::Any,
     }
 }
 
@@ -171,6 +172,7 @@ fn decode_frames(aus: &[Vec<u8>]) -> Vec<Vec<u8>> {
         height: Dim::Fixed(480),
         framerate: Rate::Fixed(30 << 16),
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
         alignment: g2g_core::BitstreamAlignment::Unspecified,
     };
     dec.configure_pipeline(&in_caps)
@@ -218,6 +220,7 @@ fn element_rebuilds_on_same_geometry_parameter_change() {
         height: Dim::Fixed(480),
         framerate: Rate::Fixed(30 << 16),
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
         alignment: g2g_core::BitstreamAlignment::Unspecified,
     };
     dec.configure_pipeline(&in_caps)

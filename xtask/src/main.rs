@@ -1269,6 +1269,7 @@ impl __TYPE__ {
             framerate: Rate::Fixed(30 << 16),
             interlace: Interlace::Any,
             colorimetry: Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         }
     }
 }

@@ -348,6 +348,7 @@ impl MediaCodecDec {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         }
     }
@@ -767,6 +768,7 @@ impl PadTemplates for MediaCodecDec {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         let nv12 = Caps::RawVideo {
@@ -776,6 +778,7 @@ impl PadTemplates for MediaCodecDec {
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         };
         // The source advertises both the default NV12 (CPU) output and the M304
         // RGBA WgpuTexture output (GPU mode); `caps_constraint_as_transform`
@@ -787,6 +790,7 @@ impl PadTemplates for MediaCodecDec {
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         };
         Vec::from([
             PadTemplate::sink(CapsSet::one(h264)),
@@ -826,6 +830,7 @@ fn nv12_caps(w: u32, h: u32, framerate: Rate) -> Caps {
         framerate,
         interlace: g2g_core::Interlace::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
     }
 }
 
@@ -840,6 +845,7 @@ fn rgba_caps(w: u32, h: u32, framerate: Rate) -> Caps {
         framerate,
         interlace: g2g_core::Interlace::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
     }
 }
 
@@ -863,6 +869,7 @@ fn derive_output_caps(codec: VideoCodec, rgba: bool, input: &Caps) -> CapsSet {
             framerate: framerate.clone(),
             interlace: g2g_core::Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         }),
         _ => CapsSet::from_alternatives(Vec::new()),
     }

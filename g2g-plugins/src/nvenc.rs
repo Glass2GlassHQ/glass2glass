@@ -333,6 +333,7 @@ impl NvEnc {
                     framerate: Rate::Any,
                     interlace: g2g_core::Interlace::Any,
                     colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                    pixel_aspect: g2g_core::PixelAspect::Any,
                 })
                 .collect(),
         )
@@ -357,6 +358,7 @@ impl NvEnc {
             height: Dim::Fixed(self.height),
             framerate: self.framerate.clone(),
             colorimetry: self.colorimetry,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         }
     }
@@ -1028,6 +1030,7 @@ impl AsyncElement for NvEnc {
                 height,
                 framerate,
                 colorimetry,
+                pixel_aspect: _,
                 interlace: _,
             } => CapsSet::one(Caps::CompressedVideo {
                 codec,
@@ -1035,6 +1038,7 @@ impl AsyncElement for NvEnc {
                 height: height.clone(),
                 framerate: framerate.clone(),
                 colorimetry: coded_colorimetry(*format, *colorimetry),
+                pixel_aspect: g2g_core::PixelAspect::Any,
                 alignment: g2g_core::BitstreamAlignment::Unspecified,
             }),
             _ => CapsSet::from_alternatives(Vec::new()),
@@ -1055,6 +1059,7 @@ impl AsyncElement for NvEnc {
             height,
             framerate,
             colorimetry,
+            pixel_aspect: _,
             interlace: _,
         } = absolute_caps
         else {
@@ -1190,6 +1195,7 @@ impl PadTemplates for NvEnc {
                     height: Dim::Any,
                     framerate: Rate::Any,
                     colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                    pixel_aspect: g2g_core::PixelAspect::Any,
                     alignment: g2g_core::BitstreamAlignment::Unspecified,
                 })
                 .collect(),
@@ -1753,6 +1759,7 @@ pub(crate) mod tests {
             framerate: Rate::Fixed(30 << 16),
             interlace: g2g_core::Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         }
     }
 
@@ -1799,6 +1806,7 @@ pub(crate) mod tests {
             height: Dim::Fixed(1080),
             framerate: Rate::Fixed(30 << 16),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         }));
         // Non-NV12 (I420) yields an empty set, rejected at solve.
@@ -1809,6 +1817,7 @@ pub(crate) mod tests {
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         };
         assert!(derive(&i420).alternatives().is_empty());
     }
@@ -1830,6 +1839,7 @@ pub(crate) mod tests {
             height: Dim::Fixed(720),
             framerate: Rate::Fixed(30 << 16),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         }));
         assert!(!out.accepts(&Caps::CompressedVideo {
@@ -1838,6 +1848,7 @@ pub(crate) mod tests {
             height: Dim::Fixed(720),
             framerate: Rate::Fixed(30 << 16),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         }));
     }
@@ -1893,6 +1904,7 @@ pub(crate) mod tests {
             framerate: Rate::Fixed(30 << 16),
             interlace: g2g_core::Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         };
         e.configure_pipeline(&p010).unwrap();
         assert_eq!(e.nv_buffer_format(), ffi::NV_ENC_BUFFER_FORMAT_YUV420_10BIT);
@@ -1935,6 +1947,7 @@ pub(crate) mod tests {
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         };
         assert_eq!(
             bad.configure_pipeline(&i420).err(),
@@ -2232,6 +2245,7 @@ pub(crate) mod tests {
                 height: Dim::Fixed(H),
                 framerate: Rate::Fixed(30 << 16),
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                pixel_aspect: g2g_core::PixelAspect::Any,
                 alignment: g2g_core::BitstreamAlignment::Unspecified,
             }],
             "output caps announced once"
@@ -2252,6 +2266,7 @@ pub(crate) mod tests {
             height: Dim::Fixed(H),
             framerate: Rate::Fixed(30 << 16),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         })
         .expect("open H.264 decoder");
@@ -2397,6 +2412,7 @@ pub(crate) mod tests {
             framerate: Rate::Fixed(30 << 16),
             interlace: g2g_core::Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         };
         // 10-bit is HEVC-only on NVENC.
         assert_eq!(
@@ -2434,6 +2450,7 @@ pub(crate) mod tests {
             height: Dim::Fixed(H),
             framerate: Rate::Fixed(30 << 16),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         })
         .expect("open NVDEC");
@@ -2490,7 +2507,8 @@ pub(crate) mod tests {
                 height: Dim::Fixed(H),
                 framerate: Rate::Fixed(30 << 16),
                 interlace: g2g_core::Interlace::Any,
-                colorimetry: g2g_core::Colorimetry::UNKNOWN
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                pixel_aspect: g2g_core::PixelAspect::Any
             }],
             "the encoded stream is 10-bit end to end"
         );

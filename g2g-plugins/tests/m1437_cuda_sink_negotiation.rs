@@ -36,6 +36,7 @@ fn raw_video(format: RawVideoFormat) -> Caps {
         framerate: Rate::Fixed(FRAMERATE_Q16),
         interlace: Interlace::Progressive,
         colorimetry: Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
     }
 }
 

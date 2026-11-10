@@ -795,6 +795,7 @@ mod tests {
             height: Dim::Fixed(480),
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         assert_eq!(sink.intercept_caps(&h264), Ok(h264));
@@ -810,6 +811,7 @@ mod tests {
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         };
         assert_eq!(sink.intercept_caps(&nv12), Ok(nv12));
     }
@@ -831,7 +833,8 @@ mod tests {
                 height: Dim::Any,
                 framerate: Rate::Any,
                 interlace: g2g_core::Interlace::Any,
-                colorimetry: g2g_core::Colorimetry::UNKNOWN
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                pixel_aspect: g2g_core::PixelAspect::Any
             }]
         );
     }
@@ -845,6 +848,7 @@ mod tests {
             height: Dim::Fixed(480),
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         // A native decoder lands NV12 on this link; non-NV12 is a real
@@ -870,6 +874,7 @@ mod tests {
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         };
         // `ConfigureOutcome` doesn't implement `PartialEq`, so match the
         // Err arm explicitly rather than using assert_eq!.

@@ -329,6 +329,7 @@ impl RawVideoParse {
             framerate: Rate::Fixed(self.rate_q16()),
             interlace: Interlace::Progressive,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         }
     }
 
@@ -581,6 +582,7 @@ impl PadTemplates for RawVideoParse {
             framerate: Rate::Any,
             interlace: Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         };
         Vec::from([
             PadTemplate::sink(CapsSet::one(Self::input_caps())),
@@ -728,7 +730,8 @@ mod tests {
                 height: Dim::Fixed(HEIGHT),
                 framerate: Rate::Fixed(50 << 16),
                 interlace: Interlace::Progressive,
-                colorimetry: g2g_core::Colorimetry::UNKNOWN
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                pixel_aspect: g2g_core::PixelAspect::Any
             }]
         );
     }

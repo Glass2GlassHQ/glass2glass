@@ -316,6 +316,7 @@ impl TrackCrop {
             framerate: self.framerate.clone(),
             interlace: g2g_core::Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         }
     }
 }
@@ -339,6 +340,7 @@ impl AsyncElement for TrackCrop {
                 framerate: Rate::Any,
                 interlace: g2g_core::Interlace::Any,
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                pixel_aspect: g2g_core::PixelAspect::Any,
             };
             if let Ok(narrowed) = upstream_caps.intersect(&candidate) {
                 return Ok(narrowed);
@@ -657,6 +659,7 @@ mod tests {
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         };
         element.configure_pipeline(&caps).unwrap();
         let input = element.input.unwrap();

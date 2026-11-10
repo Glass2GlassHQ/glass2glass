@@ -69,6 +69,7 @@ fn any_geometry_sampling_formats() -> CapsSet {
         framerate: Rate::Any,
         interlace: g2g_core::Interlace::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
     })
     .to_vec();
     CapsSet::from_alternatives(alternatives)
@@ -501,6 +502,7 @@ impl St2110VideoSrc {
             framerate: Rate::Fixed(framerate_q16),
             interlace: g2g_core::Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         })
     }
 }
@@ -726,6 +728,7 @@ mod tests {
             framerate: Rate::Fixed(30 << 16),
             interlace: g2g_core::Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         };
 
         let mut src = St2110VideoSrc::new();
@@ -779,6 +782,7 @@ mod tests {
             framerate: Rate::Fixed(60 << 16),
             interlace: g2g_core::Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         };
 
         let mut src = St2110VideoSrc::new();
@@ -832,6 +836,7 @@ mod tests {
             framerate: Rate::Fixed(30 << 16),
             interlace: g2g_core::Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         };
 
         let mut src = St2110VideoSrc::new();
@@ -945,6 +950,7 @@ mod tests {
             framerate: Rate::Fixed(60 << 16),
             interlace: g2g_core::Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         };
         let mut sink = St2110VideoSink::new();
         sink.host = String::from("239.20.30.40");
@@ -1030,6 +1036,7 @@ mod tests {
             framerate: Rate::Fixed(50 << 16), // 20 ms period
             interlace: g2g_core::Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         };
         // A receiver to count the packets that actually arrive.
         let rx = UdpSocket::bind(("127.0.0.1", 0)).unwrap();

@@ -112,6 +112,7 @@ impl WebPDec {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         }
     }
@@ -190,6 +191,7 @@ impl AsyncElement for WebPDec {
                 framerate: framerate.clone(),
                 interlace: g2g_core::Interlace::Any,
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                pixel_aspect: g2g_core::PixelAspect::Any,
             }),
             _ => CapsSet::from_alternatives(Vec::new()),
         }))
@@ -296,6 +298,7 @@ impl PadTemplates for WebPDec {
                 framerate: Rate::Any,
                 interlace: g2g_core::Interlace::Any,
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                pixel_aspect: g2g_core::PixelAspect::Any,
             })),
         ])
     }

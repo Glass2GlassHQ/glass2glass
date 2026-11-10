@@ -163,6 +163,7 @@ fn a_decoder_logs_each_frame_it_clips_to_the_segment() {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: BitstreamAlignment::Unspecified,
         })
         .expect("configures");

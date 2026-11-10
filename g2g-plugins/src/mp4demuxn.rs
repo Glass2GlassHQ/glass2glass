@@ -117,6 +117,7 @@ fn nego_caps(kind: &TrackKind) -> (Caps, bool) {
                 height: Dim::Fixed(*height),
                 framerate: crate::typefind::PLACEHOLDER_FRAMERATE,
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                pixel_aspect: g2g_core::PixelAspect::Any,
                 alignment: crate::annexb::sample_alignment(*codec),
             },
             true,
@@ -1582,6 +1583,7 @@ mod tests {
                     height: Dim::Fixed(240),
                     framerate: Rate::Fixed(30 << 16),
                     colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                    pixel_aspect: g2g_core::PixelAspect::Any,
                     alignment: g2g_core::BitstreamAlignment::Unspecified,
                 },
             )
@@ -1666,6 +1668,7 @@ mod tests {
                     height: Dim::Fixed(240),
                     framerate: Rate::Fixed(30 << 16),
                     colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                    pixel_aspect: g2g_core::PixelAspect::Any,
                     alignment: g2g_core::BitstreamAlignment::Unspecified,
                 },
             )

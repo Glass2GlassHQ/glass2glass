@@ -59,6 +59,7 @@ impl DisplayMode {
             framerate: Rate::Fixed(self.framerate_q16),
             interlace,
             colorimetry: Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         }
     }
 
@@ -296,6 +297,7 @@ pub(crate) fn any_mode_caps() -> CapsSet {
             framerate: Rate::Any,
             interlace: Interlace::Any,
             colorimetry: Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         })
         .collect();
     CapsSet::from_alternatives(caps)

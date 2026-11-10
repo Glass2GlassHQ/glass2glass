@@ -427,6 +427,7 @@ mod tests {
             height: Dim::Fixed(480),
             framerate: Rate::Any,
             colorimetry: crate::Colorimetry::UNKNOWN,
+            pixel_aspect: crate::PixelAspect::Any,
             alignment: crate::BitstreamAlignment::Unspecified,
         };
         let caps = AsyncElement::intercept_caps(&slot, &upstream).unwrap();

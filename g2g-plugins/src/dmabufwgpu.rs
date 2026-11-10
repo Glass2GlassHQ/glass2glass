@@ -67,6 +67,7 @@ pub(crate) fn dmabuf_frame_caps() -> CapsSet {
         framerate: Rate::Any,
         interlace: g2g_core::Interlace::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
     };
     CapsSet::from_alternatives(DMABUF_FRAME_FORMATS.map(any).to_vec())
 }

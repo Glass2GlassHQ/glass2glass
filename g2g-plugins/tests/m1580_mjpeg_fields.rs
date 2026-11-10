@@ -63,6 +63,7 @@ fn mjpeg_caps(width: Dim, height: Dim) -> Caps {
         height,
         framerate: FRAMERATE,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
         alignment: g2g_core::BitstreamAlignment::Unspecified,
     }
 }
@@ -77,6 +78,7 @@ async fn encode_field(rgba: [u8; 4]) -> Vec<u8> {
             framerate: FRAMERATE,
             interlace: Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         })
         .expect("RGBA input");
     let mut sink = CaptureSink::default();

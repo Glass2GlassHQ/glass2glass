@@ -30,6 +30,7 @@ fn h264_any() -> Caps {
         height: Dim::Any,
         framerate: Rate::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
         alignment: g2g_core::BitstreamAlignment::Unspecified,
     }
 }
@@ -49,6 +50,7 @@ fn raw_video() -> Caps {
         framerate: Rate::Any,
         interlace: g2g_core::Interlace::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
     }
 }
 fn raw_audio() -> Caps {
@@ -179,6 +181,7 @@ async fn av_mp4() -> Vec<u8> {
             height: Dim::Fixed(240),
             framerate: Rate::Fixed(30 << 16),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         },
     )
@@ -326,6 +329,7 @@ async fn playbin_graph_has_a_videoconvert(decoded_format: RawVideoFormat) -> boo
                 framerate: Rate::Any,
                 interlace: g2g_core::Interlace::Any,
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                pixel_aspect: g2g_core::PixelAspect::Any,
             })),
         ]),
         |_| Box::new(g2g_plugins::identity::IdentityTransform::new()),

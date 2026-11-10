@@ -482,6 +482,7 @@ fn any_geometry(format: RawVideoFormat) -> Caps {
         framerate: Rate::Any,
         interlace: Interlace::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
     }
 }
 
@@ -1201,6 +1202,7 @@ mod tests {
             framerate: g2g_core::Rate::Any,
             interlace: g2g_core::Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         })
         .unwrap();
         let frame = wgpu_frame(&ctx, w, h, src, 0);
@@ -1245,6 +1247,7 @@ mod tests {
             framerate: g2g_core::Rate::Any,
             interlace: g2g_core::Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         };
         let mut sink = WgpuSink::offscreen(ctx.clone(), w, h);
         sink.configure_pipeline(&caps).unwrap();
@@ -1293,6 +1296,7 @@ mod tests {
             framerate: g2g_core::Rate::Any,
             interlace: g2g_core::Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         }
     }
 
@@ -1600,6 +1604,7 @@ mod tests {
             framerate: g2g_core::Rate::Any,
             interlace: g2g_core::Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         };
 
         // The play anchor stamped at clock 0 makes each frame's deadline its PTS.
@@ -1695,6 +1700,7 @@ mod tests {
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         };
         overlay.configure_pipeline(&rgba_caps).unwrap();
         let mut sink = WgpuSink::offscreen(ctx.clone(), w, h);

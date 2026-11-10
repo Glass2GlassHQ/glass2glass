@@ -247,6 +247,7 @@ fn retarget(caps: &Caps, format: RawVideoFormat, width: u32, height: u32) -> Cap
             framerate: framerate.clone(),
             interlace: *interlace,
             colorimetry: *colorimetry,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         },
         other => other.clone(),
     }

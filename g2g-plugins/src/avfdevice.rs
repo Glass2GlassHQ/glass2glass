@@ -106,6 +106,7 @@ unsafe fn describe(camera: &AVCaptureDevice) -> Device {
             framerate: Rate::Fixed(PRESET_FPS << 16),
             interlace: Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         }),
         element: "avfvideosrc",
         props: Vec::from([("device".to_string(), unique_id.clone())]),

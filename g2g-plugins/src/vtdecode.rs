@@ -321,6 +321,7 @@ impl VtDecode {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         }
     }
@@ -584,6 +585,7 @@ impl PadTemplates for VtDecode {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         let nv12 = Caps::RawVideo {
@@ -593,6 +595,7 @@ impl PadTemplates for VtDecode {
             framerate: Rate::Any,
             interlace: Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         };
         Vec::from([
             PadTemplate::sink(CapsSet::from_alternatives(Vec::from([
@@ -612,6 +615,7 @@ fn nv12_caps(w: u32, h: u32, framerate: Rate) -> Caps {
         framerate,
         interlace: Interlace::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
     }
 }
 
@@ -630,6 +634,7 @@ fn derive_output_caps(codec: VideoCodec, input: &Caps) -> CapsSet {
             framerate: framerate.clone(),
             interlace: Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         }),
         _ => CapsSet::from_alternatives(Vec::new()),
     }

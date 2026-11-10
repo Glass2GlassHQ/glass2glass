@@ -121,6 +121,7 @@ struct InputStream {
     height: u32,
     framerate: Rate,
     colorimetry: Colorimetry,
+    pixel_aspect: g2g_core::PixelAspect,
 }
 
 impl Colorspace {
@@ -177,6 +178,7 @@ impl Colorspace {
             height: Dim::Fixed(h),
             framerate,
             colorimetry,
+            pixel_aspect,
             ..
         } = caps
         else {
@@ -191,6 +193,7 @@ impl Colorspace {
             height: *h,
             framerate: framerate.clone(),
             colorimetry: *colorimetry,
+            pixel_aspect: *pixel_aspect,
         })
     }
 }
@@ -939,6 +942,7 @@ impl AsyncElement for Colorspace {
                 framerate: Rate::Any,
                 interlace: g2g_core::Interlace::Any,
                 colorimetry: Colorimetry::UNKNOWN,
+                pixel_aspect: g2g_core::PixelAspect::Any,
             };
             if let Ok(narrowed) = upstream_caps.intersect(&candidate) {
                 return Ok(narrowed);
@@ -1014,6 +1018,7 @@ impl AsyncElement for Colorspace {
                         width,
                         height,
                         framerate,
+                        pixel_aspect,
                         ..
                     } = self.input.clone().ok_or(G2gError::NotConfigured)?;
                     let bytes = frame
@@ -1039,6 +1044,7 @@ impl AsyncElement for Colorspace {
                         framerate,
                         interlace: g2g_core::Interlace::Any,
                         colorimetry: self.target,
+                        pixel_aspect,
                     };
                     if self.last_caps.as_ref() != Some(&new_caps) {
                         out.push(PipelinePacket::CapsChanged(new_caps.clone()))
@@ -1159,6 +1165,7 @@ impl PadTemplates for Colorspace {
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
             colorimetry: Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         };
         let set = CapsSet::from_alternatives(FORMATS.map(any_geometry).to_vec());
         Vec::from([PadTemplate::sink(set.clone()), PadTemplate::source(set)])

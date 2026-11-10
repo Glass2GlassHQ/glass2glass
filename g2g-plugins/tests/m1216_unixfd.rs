@@ -110,6 +110,7 @@ fn rgba_caps_interlaced(width: u32, height: u32, interlace: Interlace) -> Caps {
         framerate: Rate::Fixed(FRAMERATE << 16),
         interlace,
         colorimetry: Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
     }
 }
 

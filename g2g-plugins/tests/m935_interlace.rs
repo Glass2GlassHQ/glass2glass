@@ -57,6 +57,7 @@ fn raw_caps(format: RawVideoFormat, interlace: Interlace) -> Caps {
         framerate: Rate::Fixed(25 << 16),
         interlace,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
     }
 }
 
@@ -361,6 +362,7 @@ mod ffmpeg_latch {
             height: Dim::Fixed(128),
             framerate: Rate::Fixed(25 << 16),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         })
         .unwrap();

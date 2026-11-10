@@ -66,6 +66,7 @@ pub enum Caps {
         /// Colour description from the bitstream (VUI / `color_config`),
         /// [`Colorimetry::UNKNOWN`] until a parser reads it.
         colorimetry: Colorimetry,
+        pixel_aspect: PixelAspect,
         // GStreamer's H.264 / H.265 `alignment`
         alignment: BitstreamAlignment,
     },
@@ -79,6 +80,7 @@ pub enum Caps {
         /// How the samples map to colour, [`Colorimetry::UNKNOWN`] when the
         /// producer does not know (a sink then applies its own default).
         colorimetry: Colorimetry,
+        pixel_aspect: PixelAspect,
     },
     Audio {
         format: AudioFormat,
@@ -201,6 +203,7 @@ impl Caps {
                     height: ha,
                     framerate: ra,
                     colorimetry: cla,
+                    pixel_aspect: pa,
                     alignment: aa,
                 },
                 Caps::CompressedVideo {
@@ -209,6 +212,7 @@ impl Caps {
                     height: hb,
                     framerate: rb,
                     colorimetry: clb,
+                    pixel_aspect: pb,
                     alignment: ab,
                 },
             ) if ca == cb => Ok(Caps::CompressedVideo {
@@ -217,6 +221,7 @@ impl Caps {
                 height: ha.intersect(hb).ok_or(G2gError::CapsMismatch)?,
                 framerate: ra.intersect(rb).ok_or(G2gError::CapsMismatch)?,
                 colorimetry: cla.intersect(clb).ok_or(G2gError::CapsMismatch)?,
+                pixel_aspect: pa.intersect(pb).ok_or(G2gError::CapsMismatch)?,
                 alignment: aa.intersect(ab).ok_or(G2gError::CapsMismatch)?,
             }),
             (
@@ -227,6 +232,7 @@ impl Caps {
                     framerate: ra,
                     interlace: ia,
                     colorimetry: cla,
+                    pixel_aspect: pa,
                 },
                 Caps::RawVideo {
                     format: fb,
@@ -235,6 +241,7 @@ impl Caps {
                     framerate: rb,
                     interlace: ib,
                     colorimetry: clb,
+                    pixel_aspect: pb,
                 },
             ) if fa == fb => Ok(Caps::RawVideo {
                 format: *fa,
@@ -243,6 +250,7 @@ impl Caps {
                 framerate: ra.intersect(rb).ok_or(G2gError::CapsMismatch)?,
                 interlace: ia.intersect(ib).ok_or(G2gError::CapsMismatch)?,
                 colorimetry: cla.intersect(clb).ok_or(G2gError::CapsMismatch)?,
+                pixel_aspect: pa.intersect(pb).ok_or(G2gError::CapsMismatch)?,
             }),
             (
                 Caps::Audio {
@@ -373,6 +381,7 @@ impl Caps {
                 height,
                 framerate,
                 colorimetry,
+                pixel_aspect,
                 alignment,
             } => Ok(Caps::CompressedVideo {
                 codec: *codec,
@@ -383,6 +392,7 @@ impl Caps {
                 // below: the bitstream refines it later, and collapsing it to a
                 // guess is exactly the wrong-matrix bug this field exists to fix.
                 colorimetry: *colorimetry,
+                pixel_aspect: *pixel_aspect,
                 alignment: *alignment,
             }),
             Caps::RawVideo {
@@ -392,6 +402,7 @@ impl Caps {
                 framerate,
                 interlace,
                 colorimetry,
+                pixel_aspect,
             } => Ok(Caps::RawVideo {
                 format: *format,
                 width: width.fixate().ok_or(G2gError::CapsMismatch)?,
@@ -402,6 +413,7 @@ impl Caps {
                 // collapsing it would only churn solved-caps equalities.
                 interlace: *interlace,
                 colorimetry: *colorimetry,
+                pixel_aspect: *pixel_aspect,
             }),
             // A raw-PCM "any" sample rate carries no value to fixate against
             // (M187); compressed audio's nominal `0` fixates as-is.
@@ -531,6 +543,7 @@ impl Caps {
                 framerate,
                 interlace,
                 colorimetry,
+                pixel_aspect,
             } => {
                 let mut s = format!("video/x-raw,format={}", format.gst_name());
                 push_dim(&mut s, "width", width);
@@ -542,6 +555,7 @@ impl Caps {
                     s.push_str(",interlace-mode=interleaved");
                 }
                 push_colorimetry(&mut s, colorimetry);
+                push_pixel_aspect(&mut s, pixel_aspect);
                 s
             }
             Caps::CompressedVideo {
@@ -550,6 +564,7 @@ impl Caps {
                 height,
                 framerate,
                 colorimetry,
+                pixel_aspect,
                 alignment,
             } => {
                 let mut s = codec_gst_media_type(*codec);
@@ -560,6 +575,7 @@ impl Caps {
                 push_dim(&mut s, "height", height);
                 push_rate(&mut s, framerate);
                 push_colorimetry(&mut s, colorimetry);
+                push_pixel_aspect(&mut s, pixel_aspect);
                 if let Some(name) = alignment.gst_name() {
                     s.push_str(&format!(",alignment={name}"));
                 }
@@ -905,6 +921,17 @@ fn push_colorimetry(s: &mut String, c: &Colorimetry) {
     }
 }
 
+#[cfg(feature = "alloc")]
+fn push_pixel_aspect(s: &mut String, pixel_aspect: &PixelAspect) {
+    if let PixelAspect::Exact(ratio) = pixel_aspect {
+        s.push_str(&format!(
+            ",pixel-aspect-ratio={}/{}",
+            ratio.numerator(),
+            ratio.denominator()
+        ));
+    }
+}
+
 /// Append `,channel-mask=(bitmask)0x...` for a declared layout (an unspecified
 /// one is the absent field). gst prints the mask as 16 hex digits.
 #[cfg(feature = "alloc")]
@@ -1073,6 +1100,57 @@ pub fn greatest_common_divisor(mut a: u64, mut b: u64) -> u64 {
         (a, b) = (b, a % b);
     }
     a
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum PixelAspect {
+    // gst's absent `pixel-aspect-ratio`: it intersects with any value, survives fixation, and gst reads it as 1/1
+    Any,
+    Exact(AspectRatio),
+}
+
+impl PixelAspect {
+    pub const SQUARE: Self = Self::Exact(AspectRatio::SQUARE);
+
+    pub fn intersect(&self, other: &PixelAspect) -> Option<PixelAspect> {
+        match (self, other) {
+            (PixelAspect::Any, other) | (other, PixelAspect::Any) => Some(*other),
+            (PixelAspect::Exact(a), PixelAspect::Exact(b)) => (a == b).then_some(*self),
+        }
+    }
+}
+
+// a pixel's width over its height, nonzero and reduced
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct AspectRatio {
+    numerator: u32,
+    denominator: u32,
+}
+
+impl AspectRatio {
+    pub const SQUARE: Self = Self {
+        numerator: 1,
+        denominator: 1,
+    };
+
+    pub fn new(numerator: u32, denominator: u32) -> Option<Self> {
+        if numerator == 0 || denominator == 0 {
+            return None;
+        }
+        let divisor = greatest_common_divisor(u64::from(numerator), u64::from(denominator)) as u32;
+        Some(Self {
+            numerator: numerator / divisor,
+            denominator: denominator / divisor,
+        })
+    }
+
+    pub fn numerator(self) -> u32 {
+        self.numerator
+    }
+
+    pub fn denominator(self) -> u32 {
+        self.denominator
+    }
 }
 
 /// Scan structure of raw video. `Any` is the unconstrained default
@@ -3159,6 +3237,7 @@ mod tests {
             framerate,
             interlace: crate::Interlace::Any,
             colorimetry: crate::Colorimetry::UNKNOWN,
+            pixel_aspect: crate::PixelAspect::Any,
         }
     }
 
@@ -3359,6 +3438,7 @@ mod tests {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: crate::Colorimetry::UNKNOWN,
+            pixel_aspect: crate::PixelAspect::Any,
             alignment: crate::BitstreamAlignment::Unspecified,
         };
         let b = video(Dim::Any, Dim::Any, Rate::Any); // Rgba8
@@ -3660,6 +3740,7 @@ mod tests {
             framerate: Rate::Any,
             interlace: crate::Interlace::Any,
             colorimetry: crate::Colorimetry::UNKNOWN,
+            pixel_aspect: crate::PixelAspect::Any,
         };
         let h264 = |w| Caps::CompressedVideo {
             codec: VideoCodec::H264,
@@ -3667,6 +3748,7 @@ mod tests {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: crate::Colorimetry::UNKNOWN,
+            pixel_aspect: crate::PixelAspect::Any,
             alignment: crate::BitstreamAlignment::Unspecified,
         };
         let a = CapsSet::from_alternatives(alloc::vec![rgba(Dim::Any), h264(Dim::Any)]);
@@ -3885,6 +3967,7 @@ mod tests {
             framerate: Rate::Fixed(30 << 16),
             interlace: crate::Interlace::Any,
             colorimetry,
+            pixel_aspect: crate::PixelAspect::Any,
         }
     }
 
@@ -4048,9 +4131,66 @@ mod tests {
             height: Dim::Fixed(1080),
             framerate: Rate::Fixed(30 << 16),
             colorimetry: Colorimetry::BT709,
+            pixel_aspect: crate::PixelAspect::Any,
             alignment: crate::BitstreamAlignment::Unspecified,
         };
         assert!(compressed.to_gst_string().contains(",colorimetry=bt709"));
+    }
+
+    fn raw_with_pixel_aspect(pixel_aspect: PixelAspect) -> Caps {
+        Caps::RawVideo {
+            format: RawVideoFormat::I420,
+            width: Dim::Fixed(720),
+            height: Dim::Fixed(480),
+            framerate: Rate::Fixed(30 << 16),
+            interlace: Interlace::Any,
+            colorimetry: Colorimetry::UNKNOWN,
+            pixel_aspect,
+        }
+    }
+
+    #[test]
+    fn aspect_ratio_is_reduced_and_never_zero() {
+        let ntsc_wide = AspectRatio::new(80, 72).expect("nonzero");
+        assert_eq!((ntsc_wide.numerator(), ntsc_wide.denominator()), (10, 9));
+        assert_eq!(AspectRatio::new(0, 1), None);
+        assert_eq!(AspectRatio::new(1, 0), None);
+    }
+
+    #[test]
+    fn pixel_aspect_any_meets_anything_and_exact_values_must_match() {
+        let ntsc = PixelAspect::Exact(AspectRatio::new(10, 11).expect("nonzero"));
+        let any = raw_with_pixel_aspect(PixelAspect::Any);
+        assert_eq!(
+            any.intersect(&raw_with_pixel_aspect(ntsc)),
+            Ok(raw_with_pixel_aspect(ntsc))
+        );
+        assert_eq!(
+            raw_with_pixel_aspect(PixelAspect::SQUARE).intersect(&raw_with_pixel_aspect(ntsc)),
+            Err(G2gError::CapsMismatch)
+        );
+        assert_eq!(
+            any.fixate(),
+            Ok(any.clone()),
+            "gst leaves an absent ratio absent"
+        );
+    }
+
+    #[test]
+    fn pixel_aspect_round_trips_through_the_gst_string() {
+        let ntsc = raw_with_pixel_aspect(PixelAspect::Exact(
+            AspectRatio::new(10, 11).expect("nonzero"),
+        ));
+        let printed = ntsc.to_gst_string();
+        assert!(printed.contains(",pixel-aspect-ratio=10/11"), "{printed}");
+        assert_eq!(CapsSet::from_gst_string(&printed), Some(CapsSet::one(ntsc)));
+        let any = raw_with_pixel_aspect(PixelAspect::Any);
+        assert!(!any.to_gst_string().contains("pixel-aspect-ratio"));
+        assert_eq!(
+            CapsSet::from_gst_string("video/x-raw,format=I420,pixel-aspect-ratio=0/1"),
+            None,
+            "a zero ratio rejects the caps"
+        );
     }
 
     #[test]
@@ -4061,6 +4201,7 @@ mod tests {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: Colorimetry::UNKNOWN,
+            pixel_aspect: crate::PixelAspect::Any,
             alignment,
         };
         let access_unit = h264(crate::BitstreamAlignment::AccessUnit);
@@ -4411,6 +4552,7 @@ mod field_conflict_tests {
             framerate,
             interlace: crate::Interlace::Any,
             colorimetry: crate::Colorimetry::UNKNOWN,
+            pixel_aspect: crate::PixelAspect::Any,
         }
     }
 

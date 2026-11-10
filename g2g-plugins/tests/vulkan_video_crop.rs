@@ -394,6 +394,7 @@ fn the_elements_two_plane_texture_is_the_crop_rectangle() {
             framerate: Rate::Fixed(FRAMES_PER_SECOND << 16),
             interlace: g2g_core::Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         };
         let (_element, collect, decoded) = decode_stream(
             clip.codec,

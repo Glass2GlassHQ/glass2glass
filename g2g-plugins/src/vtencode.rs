@@ -237,6 +237,7 @@ impl VtEncode {
             framerate: Rate::Any,
             interlace: Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         }
     }
 
@@ -507,6 +508,7 @@ impl PadTemplates for VtEncode {
             framerate: Rate::Any,
             interlace: Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         };
         let compressed = |codec| Caps::CompressedVideo {
             codec,
@@ -514,6 +516,7 @@ impl PadTemplates for VtEncode {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         Vec::from([
@@ -536,6 +539,7 @@ fn h264_caps(codec: VideoCodec, w: u32, h: u32, framerate: Rate) -> Caps {
         height: Dim::Fixed(h),
         framerate,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
         alignment: g2g_core::BitstreamAlignment::Unspecified,
     }
 }
@@ -554,6 +558,7 @@ fn derive_output_caps(session_format: SessionFormat, input: &Caps) -> CapsSet {
             height: height.clone(),
             framerate: framerate.clone(),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         }),
         _ => CapsSet::from_alternatives(Vec::new()),

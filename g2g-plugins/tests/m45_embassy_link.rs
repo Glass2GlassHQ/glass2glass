@@ -21,6 +21,7 @@ fn source_streams_through_embassy_sync_channel_to_consumer() {
         framerate: Rate::Fixed(30 << 16),
         interlace: g2g_core::Interlace::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
     })
     .expect("configure");
 

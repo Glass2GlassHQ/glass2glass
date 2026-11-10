@@ -226,6 +226,7 @@ impl<B: InferenceBackend> Inference<B> {
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         };
         Some(Vec::from([
             (video(RawVideoFormat::Rgba8), InputEncoding::Rgba8),
@@ -572,6 +573,7 @@ impl<B: InferenceBackend> g2g_core::PadTemplates for Inference<B> {
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         };
         Vec::from([g2g_core::PadTemplate::sink(CapsSet::from_alternatives(
             Vec::from([video(RawVideoFormat::Rgba8), video(RawVideoFormat::RgbpF32)]),
@@ -803,6 +805,7 @@ mod tests {
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         };
         assert_eq!(
             element.configure_pipeline(&rgba).err(),

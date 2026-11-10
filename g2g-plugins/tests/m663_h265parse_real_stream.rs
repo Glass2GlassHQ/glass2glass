@@ -88,6 +88,7 @@ async fn recovers_geometry_and_vui_framerate_from_a_libx265_stream() {
         height: Dim::Any,
         framerate: Rate::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
         alignment: g2g_core::BitstreamAlignment::Unspecified,
     };
     // Re-framing mode: byte chunks in, one access unit per DataFrame out (the
@@ -123,6 +124,7 @@ async fn recovers_geometry_and_vui_framerate_from_a_libx265_stream() {
                 range: g2g_core::ColorRange::Limited,
                 ..g2g_core::Colorimetry::UNKNOWN
             },
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::AccessUnit,
         }],
         "one CapsChanged with geometry + VUI timing_info framerate"

@@ -106,6 +106,7 @@ async fn vp6_dimension_byte_survives_demux_and_remux() {
                 height: Dim::Fixed(180),
                 framerate: Rate::Fixed(25 << 16),
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                pixel_aspect: g2g_core::PixelAspect::Any,
                 alignment: g2g_core::BitstreamAlignment::Unspecified,
             },
         )

@@ -215,6 +215,7 @@ impl OpenH264Enc {
             framerate: Rate::Any,
             interlace: Interlace::Any,
             colorimetry: Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         }
     }
 
@@ -225,6 +226,7 @@ impl OpenH264Enc {
             height,
             framerate,
             colorimetry: Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: BitstreamAlignment::AccessUnit,
         }
     }
@@ -626,6 +628,7 @@ mod tests {
             framerate: Rate::Fixed(30 << 16),
             interlace: Interlace::Progressive,
             colorimetry: Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         }
     }
 
@@ -678,6 +681,7 @@ mod tests {
             height: Dim::Fixed(HEIGHT),
             framerate: Rate::Fixed(30 << 16),
             colorimetry: Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: BitstreamAlignment::AccessUnit,
         };
         let access_units: Vec<PipelinePacket> = encoded
@@ -773,6 +777,7 @@ mod tests {
             framerate: Rate::Fixed(30 << 16),
             interlace: Interlace::Progressive,
             colorimetry: Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         };
         let frame_bytes = (SLICED_WIDTH * SLICED_HEIGHT * 3 / 2) as usize;
         let frames = (0..FRAME_COUNT).map(|index| {

@@ -2216,6 +2216,7 @@ mod tests {
             height: Dim::Fixed(h),
             framerate: g2g_core::Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         }
     }

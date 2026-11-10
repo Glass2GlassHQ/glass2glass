@@ -177,6 +177,7 @@ impl CapsTransform {
                             // Unknown, not passthrough: a format reshape (YUV ->
                             // RGB) changes what colorimetry means for the output.
                             colorimetry: crate::Colorimetry::UNKNOWN,
+                            pixel_aspect: crate::PixelAspect::Any,
                         },
                     );
                 }
@@ -265,6 +266,7 @@ mod tests {
             framerate: Rate::Fixed(fps << 16),
             interlace: crate::Interlace::Any,
             colorimetry: crate::Colorimetry::UNKNOWN,
+            pixel_aspect: crate::PixelAspect::Any,
         }
     }
 

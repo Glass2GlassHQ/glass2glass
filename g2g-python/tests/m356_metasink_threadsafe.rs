@@ -67,6 +67,7 @@ fn metasink_accepts_cross_thread_staging() {
         framerate: Rate::Fixed(30),
         interlace: g2g_core::Interlace::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
     };
     el.configure_pipeline(&caps).unwrap();
 

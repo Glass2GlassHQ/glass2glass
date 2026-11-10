@@ -44,6 +44,7 @@ fn rgba(w: u32, h: u32) -> Caps {
         framerate: Rate::Fixed(30 << 16),
         interlace: g2g_core::Interlace::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
     }
 }
 
@@ -55,6 +56,7 @@ fn nv12(w: u32, h: u32) -> Caps {
         framerate: Rate::Fixed(30 << 16),
         interlace: g2g_core::Interlace::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
     }
 }
 
@@ -189,6 +191,7 @@ impl DerivedMux {
                 framerate: framerate.clone(),
                 interlace: g2g_core::Interlace::Any,
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                pixel_aspect: g2g_core::PixelAspect::Any,
             },
             None => nv12(2, 2),
         }
@@ -297,6 +300,7 @@ async fn mx1_takes_a_new_input_caps_with_an_unknown_framerate() {
         framerate: Rate::Any,
         interlace: g2g_core::Interlace::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
     };
     let mut src = ReconfigSrc {
         initial: rgba(640, 480),

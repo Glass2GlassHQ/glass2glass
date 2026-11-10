@@ -110,6 +110,7 @@ async fn mpeg4_part2_mp4_demuxes_and_decodes() {
         height: Dim::Any,
         framerate: Rate::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
         alignment: g2g_core::BitstreamAlignment::Unspecified,
     };
     let narrowed = dec

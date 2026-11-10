@@ -240,7 +240,7 @@ const DRM_FOURCC_FORMATS: &[(&str, &str)] = &[
 ///   `caps=` value with the spaces GStreamer inserts after commas would split
 ///   into separate launch tokens (PORTING.md: no quoted values with spaces).
 ///
-/// Fields g2g does not model (`multiview-mode`, `pixel-aspect-ratio`, ...) are
+/// Fields g2g does not model (`multiview-mode`, `chroma-site`, ...) are
 /// carried through harmlessly; the caps reader ignores unknown fields.
 pub fn normalize_gst_caps(s: &str) -> String {
     let (media_type, fields) = s.split_once(',').unwrap_or((s, ""));
@@ -346,6 +346,7 @@ mod tests {
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         }
     }
 
@@ -369,6 +370,7 @@ mod tests {
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         });
         assert_eq!(f.intercept_caps(&nv12(1280, 720)), Ok(nv12(1280, 720)));
 
@@ -378,6 +380,7 @@ mod tests {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         assert_eq!(f.intercept_caps(&h264), Err(G2gError::CapsMismatch));
@@ -405,7 +408,8 @@ mod tests {
                 height: Dim::Fixed(240),
                 framerate: Rate::Fixed(30 << 16),
                 interlace: g2g_core::Interlace::Any,
-                colorimetry: g2g_core::Colorimetry::UNKNOWN
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                pixel_aspect: g2g_core::PixelAspect::Any
             })
         );
         // Omitted dims default to Any; a missing format is rejected.
@@ -417,7 +421,8 @@ mod tests {
                 height: Dim::Any,
                 framerate: Rate::Any,
                 interlace: g2g_core::Interlace::Any,
-                colorimetry: g2g_core::Colorimetry::UNKNOWN
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                pixel_aspect: g2g_core::PixelAspect::Any
             })
         );
         // `parse_caps` yields a single Caps, so a format-less (multi-format) raw
@@ -493,6 +498,7 @@ mod tests {
             framerate: Rate::Fixed(30 << 16),
             interlace: g2g_core::Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         };
         let written = dmabuf_gst_caps(&caps).expect("RGBA has a drm fourcc");
         let read = read_memory_feature(&written).expect("the fourcc is known");

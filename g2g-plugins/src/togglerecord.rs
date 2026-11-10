@@ -646,6 +646,7 @@ mod tests {
             height: Dim::Fixed(2),
             framerate: Rate::Fixed(25 << 16),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         }
     }
@@ -658,6 +659,7 @@ mod tests {
             framerate: Rate::Fixed(25 << 16),
             interlace: g2g_core::Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         }
     }
 

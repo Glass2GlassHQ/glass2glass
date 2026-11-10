@@ -532,6 +532,7 @@ mod tests {
             height: Dim::Fixed(240),
             framerate: Rate::Fixed(25 << 16),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         let audio = Caps::Audio {
@@ -611,6 +612,7 @@ mod tests {
             height: Dim::Fixed(48),
             framerate: Rate::Fixed(25 << 16),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         let mut mux = AviMuxN::new(2);
@@ -634,6 +636,7 @@ mod tests {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         let mut mux = AviMux::new();
@@ -648,6 +651,7 @@ mod tests {
                     height: Dim::Fixed(HEIGHT),
                     framerate: Rate::Fixed(25 << 16),
                     colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                    pixel_aspect: g2g_core::PixelAspect::Any,
                     alignment: g2g_core::BitstreamAlignment::Unspecified,
                 }),
                 &mut sink,
@@ -683,6 +687,7 @@ mod tests {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         let mut mux = AviMux::new();
@@ -703,6 +708,7 @@ mod tests {
             height: Dim::Fixed(48),
             framerate: Rate::Fixed(25 << 16),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         let mut mux = AviMuxN::new(1);

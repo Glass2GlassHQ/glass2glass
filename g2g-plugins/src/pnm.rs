@@ -556,6 +556,7 @@ impl PnmEnc {
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         };
         Vec::from([raw(RawVideoFormat::Rgb8), raw(RawVideoFormat::Rgba8)])
     }
@@ -567,6 +568,7 @@ impl PnmEnc {
             height: Dim::Fixed(self.height),
             framerate: self.framerate.clone(),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         }
     }
@@ -610,6 +612,7 @@ impl AsyncElement for PnmEnc {
                 height: height.clone(),
                 framerate: framerate.clone(),
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                pixel_aspect: g2g_core::PixelAspect::Any,
                 alignment: g2g_core::BitstreamAlignment::Unspecified,
             }),
             _ => CapsSet::from_alternatives(Vec::new()),
@@ -723,6 +726,7 @@ impl PadTemplates for PnmEnc {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         Vec::from([
@@ -772,6 +776,7 @@ impl PnmDec {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         }
     }
@@ -806,6 +811,7 @@ impl AsyncElement for PnmDec {
                 framerate: framerate.clone(),
                 interlace: g2g_core::Interlace::Any,
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                pixel_aspect: g2g_core::PixelAspect::Any,
             }),
             _ => CapsSet::from_alternatives(Vec::new()),
         }))
@@ -888,6 +894,7 @@ impl PadTemplates for PnmDec {
                 framerate: Rate::Any,
                 interlace: g2g_core::Interlace::Any,
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                pixel_aspect: g2g_core::PixelAspect::Any,
             })),
         ])
     }

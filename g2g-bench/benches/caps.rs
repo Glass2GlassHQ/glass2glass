@@ -21,6 +21,7 @@ fn raw(fmt: RawVideoFormat, w: u32, h: u32) -> Caps {
         framerate: Rate::Fixed(30 << 16),
         interlace: Interlace::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
     }
 }
 
@@ -32,6 +33,7 @@ fn raw_ranged(fmt: RawVideoFormat) -> Caps {
         framerate: Rate::Any,
         interlace: Interlace::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
     }
 }
 
@@ -42,6 +44,7 @@ fn h264(w: u32, h: u32) -> Caps {
         height: Dim::Fixed(h),
         framerate: Rate::Fixed(30 << 16),
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
         alignment: g2g_core::BitstreamAlignment::Unspecified,
     }
 }

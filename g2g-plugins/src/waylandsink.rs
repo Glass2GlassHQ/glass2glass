@@ -1306,6 +1306,7 @@ mod tests {
             height: Dim::Fixed(480),
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         assert_eq!(sink.intercept_caps(&h264), Ok(h264));
@@ -1321,6 +1322,7 @@ mod tests {
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         };
         assert_eq!(sink.intercept_caps(&nv12), Ok(nv12));
     }
@@ -1342,7 +1344,8 @@ mod tests {
                 height: Dim::Any,
                 framerate: Rate::Any,
                 interlace: g2g_core::Interlace::Any,
-                colorimetry: g2g_core::Colorimetry::UNKNOWN
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                pixel_aspect: g2g_core::PixelAspect::Any
             }]
         );
     }
@@ -1356,6 +1359,7 @@ mod tests {
             height: Dim::Fixed(480),
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         // A native decoder lands NV12 on this link; a non-NV12 sink input
@@ -1591,6 +1595,7 @@ mod tests {
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
             colorimetry,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         };
         // The worker never spawns: only the table is under test, and a failed
         // worker spawn (no compositor in CI) would mask it.
@@ -1644,6 +1649,7 @@ mod tests {
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         };
         match sink.configure_pipeline(&odd) {
             Err(G2gError::CapsMismatch) => {}

@@ -555,6 +555,7 @@ mod tests {
             height: Dim::Fixed(240),
             framerate: g2g_core::Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         }
     }
@@ -752,6 +753,7 @@ mod tests {
             framerate: g2g_core::Rate::Any,
             interlace: g2g_core::Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         };
         assert!(mux.intercept_caps(0, &raw).is_err());
     }

@@ -136,6 +136,7 @@ fn mode_caps(modes: &[VideoConfig]) -> CapsSet {
             framerate,
             interlace: Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         });
     }
     CapsSet::from_alternatives(alternatives)
@@ -209,6 +210,7 @@ mod tests {
                 framerate: Rate::Fixed(30 << 16),
                 interlace: Interlace::Any,
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                pixel_aspect: g2g_core::PixelAspect::Any,
             }
         );
         assert!(matches!(

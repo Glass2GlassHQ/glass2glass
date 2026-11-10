@@ -30,7 +30,7 @@ struct Received {
     eos: bool,
 }
 
-fn rgba(width: Dim, height: Dim, framerate: Rate) -> Caps {
+fn rgba(width: Dim, height: Dim, framerate: Rate, pixel_aspect: g2g_core::PixelAspect) -> Caps {
     Caps::RawVideo {
         format: RawVideoFormat::Rgba8,
         width,
@@ -38,6 +38,7 @@ fn rgba(width: Dim, height: Dim, framerate: Rate) -> Caps {
         framerate,
         interlace: g2g_core::Interlace::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect,
     }
 }
 
@@ -54,7 +55,12 @@ impl AsyncElement for RecordingSink {
     }
 
     fn caps_constraint_as_sink(&self) -> CapsConstraint<'_> {
-        CapsConstraint::Accepts(CapsSet::one(rgba(Dim::Any, Dim::Any, Rate::Any)))
+        CapsConstraint::Accepts(CapsSet::one(rgba(
+            Dim::Any,
+            Dim::Any,
+            Rate::Any,
+            g2g_core::PixelAspect::Any,
+        )))
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -171,12 +177,22 @@ async fn batches_reach_each_branch_with_their_original_timing() {
     let (first, second, batches) = run_batch_graph(4, 4).await;
     assert_eq!(
         first.caps,
-        Some(rgba(Dim::Fixed(8), Dim::Fixed(8), Rate::Fixed(30 << 16))),
+        Some(rgba(
+            Dim::Fixed(8),
+            Dim::Fixed(8),
+            Rate::Fixed(30 << 16),
+            g2g_core::PixelAspect::SQUARE,
+        )),
         "branch 0 negotiated its own stream, not the batch"
     );
     assert_eq!(
         second.caps,
-        Some(rgba(Dim::Fixed(16), Dim::Fixed(8), Rate::Fixed(25 << 16)))
+        Some(rgba(
+            Dim::Fixed(16),
+            Dim::Fixed(8),
+            Rate::Fixed(25 << 16),
+            g2g_core::PixelAspect::SQUARE,
+        ))
     );
     assert_eq!(pts_and_sequence(&first), expected_frames(30, 4));
     assert_eq!(pts_and_sequence(&second), expected_frames(25, 4));
@@ -285,7 +301,12 @@ fn registry_lists_and_describes_the_batch_elements() {
 
 #[test]
 fn demux_with_more_ports_than_streams_fails_at_configure() {
-    let stream = rgba(Dim::Fixed(8), Dim::Fixed(8), Rate::Fixed(30 << 16));
+    let stream = rgba(
+        Dim::Fixed(8),
+        Dim::Fixed(8),
+        Rate::Fixed(30 << 16),
+        g2g_core::PixelAspect::Any,
+    );
     let batch = Caps::Batch {
         streams: vec![stream.clone(), stream],
     };

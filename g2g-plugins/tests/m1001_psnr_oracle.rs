@@ -106,6 +106,7 @@ mod av1 {
                 height: Dim::Fixed(HEIGHT as u32),
                 framerate: Rate::Any,
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                pixel_aspect: g2g_core::PixelAspect::Any,
                 alignment: g2g_core::BitstreamAlignment::Unspecified,
             })
             .expect("rav1d configures");
@@ -186,6 +187,7 @@ mod mjpeg {
                 height: Dim::Any,
                 framerate: Rate::Fixed(30 << 16),
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                pixel_aspect: g2g_core::PixelAspect::Any,
                 alignment: g2g_core::BitstreamAlignment::Unspecified,
             })
             .expect("mjpegdec configures");

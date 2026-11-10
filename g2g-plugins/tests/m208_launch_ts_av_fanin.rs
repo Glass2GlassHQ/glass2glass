@@ -36,6 +36,7 @@ fn h264_caps() -> Caps {
         // Fixed (not Any): the muxer runner fixates source caps before run.
         framerate: Rate::Fixed(30 << 16),
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
         alignment: g2g_core::BitstreamAlignment::Unspecified,
     }
 }

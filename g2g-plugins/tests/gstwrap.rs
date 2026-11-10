@@ -416,6 +416,7 @@ async fn flips_frames_with_unaligned_rows() {
             framerate: Rate::Fixed(ONE_FRAME_PER_SECOND),
             interlace: Interlace::Any,
             colorimetry: Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         };
         let frame_bytes = format.unpadded_frame_bytes(width, height).unwrap() as usize;
         let input: Vec<u8> = (0..frame_bytes).map(|i| (i % 251) as u8).collect();
@@ -482,6 +483,7 @@ async fn reads_a_padded_frame_where_its_plane_layout_says() {
         framerate: Rate::Fixed(ONE_FRAME_PER_SECOND),
         interlace: Interlace::Any,
         colorimetry: Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
     })
     .expect("gst pipeline builds (needs host GStreamer + gst-plugins-good videoflip)");
     let mut frame = first_frame(MemoryDomain::System(SystemSlice::from_boxed(

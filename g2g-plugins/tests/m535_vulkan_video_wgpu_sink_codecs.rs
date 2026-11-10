@@ -103,6 +103,7 @@ fn drive_wedge(codec: VideoCodec, clip: &[u8]) {
         height: Dim::Fixed(H),
         framerate: Rate::Fixed(30 << 16),
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
         alignment: g2g_core::BitstreamAlignment::Unspecified,
     };
     dec.configure_pipeline(&in_caps)
@@ -119,6 +120,7 @@ fn drive_wedge(codec: VideoCodec, clip: &[u8]) {
         framerate: Rate::Fixed(30 << 16),
         interlace: g2g_core::Interlace::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
     };
     sink.configure_pipeline(&rgba_caps).expect("sink configure");
 

@@ -26,6 +26,7 @@ fn h264_caps(w: u32, h: u32) -> Caps {
         height: Dim::Fixed(h),
         framerate: Rate::Fixed(30 << 16),
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
         alignment: g2g_core::BitstreamAlignment::Unspecified,
     }
 }
@@ -163,6 +164,7 @@ fn rejects_non_h26x_caps() {
         framerate: Rate::Fixed(30 << 16),
         interlace: g2g_core::Interlace::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
     };
     assert!(
         Mp4MuxN::new(1).configure_pipeline(0, &raw).is_err(),
@@ -219,6 +221,7 @@ impl FramerateAny for Caps {
                 height,
                 framerate: Rate::Any,
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                pixel_aspect: g2g_core::PixelAspect::Any,
                 alignment: g2g_core::BitstreamAlignment::AccessUnit,
             },
             other => other,

@@ -182,6 +182,7 @@ async fn an_odd_size_cuda_frame_lands_in_the_packed_texture() {
         framerate: Rate::Fixed(30 << 16),
         interlace: g2g_core::Interlace::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
     };
     let mut up = CudaUpload::new();
     if let Err(e) = up.configure_pipeline(&caps) {

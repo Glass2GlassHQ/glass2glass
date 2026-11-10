@@ -442,6 +442,7 @@ mod tests {
             framerate: g2g_core::Rate::Any,
             interlace: g2g_core::Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         };
         let len = RawVideoFormat::Nv12
             .unpadded_frame_bytes(WIDTH, HEIGHT)

@@ -7,11 +7,12 @@
 use alloc::vec::Vec;
 
 use crate::caps::{
-    batch_alternatives, framerate_q16_from_fraction, pcm_from_gst_format, AudioFormat,
+    batch_alternatives, framerate_q16_from_fraction, pcm_from_gst_format, AspectRatio, AudioFormat,
     BitstreamAlignment, ByteStreamEncoding, Caps, CapsSet, CodecTag, Colorimetry, Dim, Interlace,
-    ProResVariant, Rate, RawVideoFormat, St2038Alignment, SubPictureFormat, TagNamespace,
-    TextFormat, VideoCodec, ANY_CHANNELS, ANY_SAMPLE_RATE, MOV_UNKNOWN_SUBTYPE_PREFIX, PCM_FORMATS,
-    RIFF_AUDIO_TAG_FIELD, RIFF_UNKNOWN_SUBTYPE, RIFF_VIDEO_TAG_FIELD,
+    PixelAspect, ProResVariant, Rate, RawVideoFormat, St2038Alignment, SubPictureFormat,
+    TagNamespace, TextFormat, VideoCodec, ANY_CHANNELS, ANY_SAMPLE_RATE,
+    MOV_UNKNOWN_SUBTYPE_PREFIX, PCM_FORMATS, RIFF_AUDIO_TAG_FIELD, RIFF_UNKNOWN_SUBTYPE,
+    RIFF_VIDEO_TAG_FIELD,
 };
 use crate::channels::ChannelLayout;
 
@@ -188,6 +189,22 @@ fn expand_colorimetry(fv: Option<&FieldVal>) -> Option<Colorimetry> {
     }
 }
 
+// an absent `pixel-aspect-ratio` is the wildcard, matching `to_gst_string`, and a zero or malformed one rejects the caps
+fn expand_pixel_aspect(fv: Option<&FieldVal>) -> Option<PixelAspect> {
+    match fv {
+        None => Some(PixelAspect::Any),
+        Some(FieldVal::One(s)) => {
+            let (numerator, denominator) = s.split_once('/')?;
+            let ratio = AspectRatio::new(
+                numerator.trim().parse().ok()?,
+                denominator.trim().parse().ok()?,
+            )?;
+            Some(PixelAspect::Exact(ratio))
+        }
+        Some(_) => None,
+    }
+}
+
 // An absent `alignment` is the wildcard, matching `to_gst_string`, and an unknown value rejects the caps
 fn expand_alignment(fv: Option<&FieldVal>) -> Option<BitstreamAlignment> {
     match fv {
@@ -277,6 +294,7 @@ impl CapsSet {
                 expand_rate(fv("framerate"))?,
             );
             let colorimetry = expand_colorimetry(fv("colorimetry"))?;
+            let pixel_aspect = expand_pixel_aspect(fv("pixel-aspect-ratio"))?;
             let alignment = match (fv("interlace-mode"), codec, fv("alignment")) {
                 (Some(FieldVal::One(s)), _, _) if *s == "fields" => BitstreamAlignment::FieldPair,
                 // gst svtjpegxsenc, rtpjxsvdepay, tsdemux and mpegtsmux all put alignment=frame on JPEG XS
@@ -295,6 +313,7 @@ impl CapsSet {
                             h.clone(),
                             r.clone(),
                             colorimetry,
+                            pixel_aspect,
                             alignment,
                         ));
                     }
@@ -353,6 +372,7 @@ impl CapsSet {
                     Some(_) => return None,
                 };
                 let colorimetry = expand_colorimetry(fv("colorimetry"))?;
+                let pixel_aspect = expand_pixel_aspect(fv("pixel-aspect-ratio"))?;
                 let mut alts = Vec::new();
                 for &format in &formats {
                     for w in &widths {
@@ -365,6 +385,7 @@ impl CapsSet {
                                     framerate: r.clone(),
                                     interlace,
                                     colorimetry,
+                                    pixel_aspect,
                                 });
                             }
                         }
@@ -563,6 +584,7 @@ fn compressed(
     height: Dim,
     framerate: Rate,
     colorimetry: Colorimetry,
+    pixel_aspect: PixelAspect,
     alignment: BitstreamAlignment,
 ) -> Caps {
     Caps::CompressedVideo {
@@ -571,6 +593,7 @@ fn compressed(
         height,
         framerate,
         colorimetry,
+        pixel_aspect,
         alignment,
     }
 }
@@ -866,6 +889,7 @@ mod tests {
                 height: Dim::Fixed(1080),
                 framerate: Rate::Any,
                 colorimetry: Colorimetry::UNKNOWN,
+                pixel_aspect: crate::PixelAspect::Any,
                 alignment: crate::BitstreamAlignment::Unspecified,
             };
             let printed = caps.to_gst_string();
@@ -917,6 +941,7 @@ mod tests {
                 Dim::Fixed(48),
                 Rate::Any,
                 Colorimetry::UNKNOWN,
+                PixelAspect::Any,
                 BitstreamAlignment::Unspecified,
             ),
             compressed(
@@ -925,6 +950,7 @@ mod tests {
                 Dim::Any,
                 Rate::Any,
                 Colorimetry::UNKNOWN,
+                PixelAspect::Any,
                 BitstreamAlignment::Unspecified,
             ),
             Caps::Audio {
@@ -987,6 +1013,7 @@ mod tests {
             framerate: Rate::Fixed(30 << 16),
             interlace: Interlace::Any,
             colorimetry: Colorimetry::UNKNOWN,
+            pixel_aspect: crate::PixelAspect::Any,
         };
         let nv12 = Caps::RawVideo {
             format: RawVideoFormat::Nv12,
@@ -995,6 +1022,7 @@ mod tests {
             framerate: Rate::Any,
             interlace: Interlace::Any,
             colorimetry: Colorimetry::BT709,
+            pixel_aspect: crate::PixelAspect::Any,
         };
         let batch = Caps::Batch {
             streams: alloc::vec![rgba, nv12],
@@ -1093,6 +1121,7 @@ mod tests {
             framerate: Rate::Fixed(30 << 16),
             interlace: Interlace::Any,
             colorimetry: Colorimetry::BT709,
+            pixel_aspect: crate::PixelAspect::Any,
         };
         let printed = caps.to_gst_string();
         assert_eq!(

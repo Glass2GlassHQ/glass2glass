@@ -63,6 +63,7 @@ fn rgba_caps() -> Caps {
         framerate: Rate::Fixed(30 << 16),
         interlace: g2g_core::Interlace::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
     }
 }
 
@@ -93,6 +94,7 @@ async fn encodes_rgba_to_mjpeg_that_roundtrips_through_mjpegdec() {
             height: Dim::Fixed(H),
             framerate: Rate::Fixed(30 << 16),
             colorimetry: g2g_core::Colorimetry::JPEG,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         }],
         "one CapsChanged announcing the Mjpeg output geometry"
@@ -109,6 +111,7 @@ async fn encodes_rgba_to_mjpeg_that_roundtrips_through_mjpegdec() {
         height: Dim::Any,
         framerate: Rate::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
         alignment: g2g_core::BitstreamAlignment::Unspecified,
     })
     .unwrap();
@@ -170,6 +173,7 @@ async fn encodes_i420_to_mjpeg_that_roundtrips_to_blue() {
         framerate: Rate::Fixed(30 << 16),
         interlace: g2g_core::Interlace::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
     })
     .unwrap();
     let mut esink = CaptureSink::default();
@@ -194,6 +198,7 @@ async fn encodes_i420_to_mjpeg_that_roundtrips_to_blue() {
         height: Dim::Any,
         framerate: Rate::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
         alignment: g2g_core::BitstreamAlignment::Unspecified,
     })
     .unwrap();
@@ -233,6 +238,7 @@ async fn encode_rgba(mut enc: MjpegEnc, pixels: Vec<u8>, w: u32, h: u32) -> Vec<
         framerate: Rate::Fixed(30 << 16),
         interlace: g2g_core::Interlace::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
     })
     .unwrap();
     let mut sink = CaptureSink::default();
@@ -273,6 +279,7 @@ async fn mozjpeg_backend_encodes_a_decodable_jpeg_honouring_quality() {
         height: Dim::Any,
         framerate: Rate::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
         alignment: g2g_core::BitstreamAlignment::Unspecified,
     })
     .unwrap();
@@ -293,7 +300,8 @@ async fn mozjpeg_backend_encodes_a_decodable_jpeg_honouring_quality() {
             height: Dim::Fixed(H),
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
-            colorimetry: g2g_core::Colorimetry::SRGB
+            colorimetry: g2g_core::Colorimetry::SRGB,
+            pixel_aspect: g2g_core::PixelAspect::Any
         }],
         "decoded geometry matches the mozjpeg-encoded source"
     );

@@ -107,6 +107,7 @@ fn drive_codec(codec: VideoCodec, clip: &[u8]) {
         height: Dim::Fixed(480),
         framerate: Rate::Fixed(30 << 16),
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
         alignment: g2g_core::BitstreamAlignment::Unspecified,
     };
     dec.configure_pipeline(&in_caps)
@@ -137,7 +138,8 @@ fn drive_codec(codec: VideoCodec, clip: &[u8]) {
             height: Dim::Fixed(480),
             framerate: Rate::Fixed(30 << 16),
             interlace: g2g_core::Interlace::Any,
-            colorimetry: EXPECTED_COLORIMETRY
+            colorimetry: EXPECTED_COLORIMETRY,
+            pixel_aspect: g2g_core::PixelAspect::Any
         },
         "{codec:?}: emits NV12 640x480 at the input framerate, tagged with the stream colour"
     );

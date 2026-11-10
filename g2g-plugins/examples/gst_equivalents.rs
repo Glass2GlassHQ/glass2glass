@@ -93,6 +93,7 @@ fn main() {
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         };
         let mut g: Graph<GraphNode> = Graph::new();
         let src = g.add_source(GraphNode::source(VideoTestSrc::new(320, 240, 30, 3)));

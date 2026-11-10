@@ -360,6 +360,7 @@ impl AsyncElement for MfDecode {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         upstream_caps.intersect(&supported)
@@ -564,6 +565,7 @@ impl PadTemplates for MfDecode {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         let nv12 = Caps::RawVideo {
@@ -573,6 +575,7 @@ impl PadTemplates for MfDecode {
             framerate: Rate::Any,
             interlace: Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         };
         Vec::from([
             PadTemplate::sink(CapsSet::from_alternatives(Vec::from([
@@ -877,6 +880,7 @@ fn nv12_caps(w: u32, h: u32, framerate: Rate) -> Caps {
         framerate,
         interlace: Interlace::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
     }
 }
 
@@ -900,6 +904,7 @@ fn derive_output_caps(codec: VideoCodec, input: &Caps) -> CapsSet {
             framerate: framerate.clone(),
             interlace: Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         }),
         _ => CapsSet::from_alternatives(Vec::new()),
     }
@@ -921,6 +926,7 @@ mod tests {
                 framerate: Rate::Fixed(30 << 16),
                 interlace: Interlace::Any,
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                pixel_aspect: g2g_core::PixelAspect::Any,
             }
         );
     }
@@ -934,6 +940,7 @@ mod tests {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         assert_eq!(dec.intercept_caps(&vp9), Err(G2gError::CapsMismatch));
@@ -948,6 +955,7 @@ mod tests {
             height: Dim::Fixed(720),
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         assert_eq!(dec.intercept_caps(&proposal), Ok(proposal));
@@ -990,6 +998,7 @@ mod tests {
             height: Dim::Fixed(1080),
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         assert_eq!(dec.intercept_caps(&h265), Ok(h265.clone()));
@@ -999,6 +1008,7 @@ mod tests {
             height: Dim::Fixed(1080),
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         assert_eq!(dec.intercept_caps(&h264), Err(G2gError::CapsMismatch));
@@ -1092,6 +1102,7 @@ mod tests {
             height: Dim::Fixed(1080),
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         let nv12 = Caps::RawVideo {
@@ -1101,6 +1112,7 @@ mod tests {
             framerate: Rate::Any,
             interlace: Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         };
         assert!(matches!(sink.caps, g2g_core::PadCaps::Fixed(ref s) if s.accepts(&h264)));
         assert!(matches!(source.caps, g2g_core::PadCaps::Fixed(ref s) if s.accepts(&nv12)));
@@ -1121,6 +1133,7 @@ mod tests {
             height: Dim::Fixed(1080),
             framerate: Rate::Fixed(30 << 16),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         assert_eq!(
@@ -1132,6 +1145,7 @@ mod tests {
                 framerate: Rate::Fixed(30 << 16),
                 interlace: Interlace::Any,
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                pixel_aspect: g2g_core::PixelAspect::Any,
             }]
         );
 
@@ -1141,6 +1155,7 @@ mod tests {
             height: Dim::Fixed(1080),
             framerate: Rate::Fixed(30 << 16),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         assert!(f(&vp9).is_empty());

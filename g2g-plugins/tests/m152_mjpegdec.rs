@@ -64,6 +64,7 @@ fn mjpeg_caps() -> Caps {
         height: Dim::Any,
         framerate: Rate::Fixed(30 << 16),
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
         alignment: g2g_core::BitstreamAlignment::Unspecified,
     }
 }
@@ -100,7 +101,8 @@ async fn decodes_mjpeg_to_rgba8_with_recovered_geometry() {
             height: Dim::Fixed(16),
             framerate: Rate::Fixed(30 << 16),
             interlace: g2g_core::Interlace::Any,
-            colorimetry: g2g_core::Colorimetry::SRGB
+            colorimetry: g2g_core::Colorimetry::SRGB,
+            pixel_aspect: g2g_core::PixelAspect::Any
         }],
         "one CapsChanged with the decoded 16x16 RGBA geometry, tagged sRGB per JFIF"
     );
@@ -144,7 +146,8 @@ async fn decodes_mjpeg_to_i420() {
             colorimetry: g2g_core::Colorimetry {
                 range: g2g_core::ColorRange::Limited,
                 ..g2g_core::Colorimetry::JPEG
-            }
+            },
+            pixel_aspect: g2g_core::PixelAspect::Any
         }],
         "CapsChanged announces the I420 output format"
     );
@@ -329,6 +332,7 @@ async fn gradient_jpeg(w: u32, h: u32) -> Vec<u8> {
         framerate: Rate::Fixed(30 << 16),
         interlace: g2g_core::Interlace::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
     })
     .unwrap();
     let mut sink = CaptureSink::default();

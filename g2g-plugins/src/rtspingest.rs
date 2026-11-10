@@ -162,6 +162,7 @@ pub(crate) fn ingest_caps(recv: &RtpRecvConfig, width: u32, height: u32, fps: u3
         height: Dim::Fixed(height),
         framerate: Rate::Fixed(fps << 16),
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
         alignment: g2g_core::BitstreamAlignment::Unspecified,
     }
 }

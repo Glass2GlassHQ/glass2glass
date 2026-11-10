@@ -523,6 +523,7 @@ fn es_to_stream(es: &crate::mpegts::ElementaryStream) -> Option<Stream> {
         height: Dim::Any,
         framerate: Rate::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
         alignment: g2g_core::BitstreamAlignment::Unspecified,
     };
     let audio = |format| {
@@ -2026,6 +2027,7 @@ mod tests {
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         };
         assert!(d.intercept_caps(&raw).is_err());
     }

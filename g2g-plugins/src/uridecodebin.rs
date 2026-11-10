@@ -37,6 +37,7 @@ fn h264_any() -> Caps {
         height: g2g_core::Dim::Any,
         framerate: g2g_core::Rate::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
         alignment: g2g_core::BitstreamAlignment::Unspecified,
     }
 }
@@ -284,6 +285,7 @@ pub fn v4l2_handler() -> UriSourceFactory {
                 framerate: g2g_core::Rate::Any,
                 interlace: g2g_core::Interlace::Any,
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                pixel_aspect: g2g_core::PixelAspect::Any,
             },
             has_clean_aperture: false,
         })
@@ -980,6 +982,7 @@ fn build_ps_subpicture_overlay(
                 height: g2g_core::Dim::Fixed(geometry.height),
                 framerate: g2g_core::Rate::Fixed(geometry.framerate_q16),
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                pixel_aspect: g2g_core::PixelAspect::Any,
                 alignment: g2g_core::BitstreamAlignment::Unspecified,
             };
             // Deinterlace on the decoder's own planar output, before the RGBA

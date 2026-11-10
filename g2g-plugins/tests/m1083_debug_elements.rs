@@ -490,6 +490,7 @@ fn raw_video_caps() -> Caps {
         framerate: Rate::Fixed(FAKE_FPS_Q16),
         interlace: Interlace::Progressive,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
     }
 }
 
@@ -500,6 +501,7 @@ fn coded_video_caps() -> Caps {
         height: Dim::Fixed(FAKE_HEIGHT),
         framerate: Rate::Fixed(FAKE_FPS_Q16),
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
         alignment: g2g_core::BitstreamAlignment::Unspecified,
     }
 }

@@ -55,6 +55,7 @@ impl CapturePixelFormat {
                 framerate,
                 interlace: Interlace::Any,
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                pixel_aspect: g2g_core::PixelAspect::SQUARE,
             },
             None => Caps::CompressedVideo {
                 codec: VideoCodec::Mjpeg,
@@ -62,6 +63,7 @@ impl CapturePixelFormat {
                 height,
                 framerate,
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                pixel_aspect: g2g_core::PixelAspect::SQUARE,
                 alignment: g2g_core::BitstreamAlignment::Unspecified,
             },
         }
@@ -146,6 +148,7 @@ mod tests {
                 height: Dim::Fixed(720),
                 framerate: Rate::Fixed(30 << 16),
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                pixel_aspect: g2g_core::PixelAspect::SQUARE,
                 alignment: g2g_core::BitstreamAlignment::Unspecified,
             }
         );

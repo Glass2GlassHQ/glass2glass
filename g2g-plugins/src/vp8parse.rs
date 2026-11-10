@@ -75,6 +75,7 @@ impl AsyncElement for Vp8Parse {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         upstream_caps.intersect(&supported)
@@ -89,6 +90,7 @@ impl AsyncElement for Vp8Parse {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         }))
     }
@@ -125,6 +127,7 @@ impl AsyncElement for Vp8Parse {
                                 height: Dim::Fixed(info.height),
                                 framerate: Rate::Any,
                                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                                pixel_aspect: g2g_core::PixelAspect::Any,
                                 alignment: g2g_core::BitstreamAlignment::Unspecified,
                             };
                             if self.last_emitted_caps.as_ref() != Some(&new_caps) {
@@ -166,6 +169,7 @@ impl PadTemplates for Vp8Parse {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         Vec::from([
@@ -315,6 +319,7 @@ mod tests {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         }
     }
@@ -426,6 +431,7 @@ mod tests {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         assert_eq!(parse.intercept_caps(&vp9), Err(G2gError::CapsMismatch));
@@ -445,6 +451,7 @@ mod tests {
                         height: Dim::Any,
                         framerate: Rate::Any,
                         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                        pixel_aspect: g2g_core::PixelAspect::Any,
                         alignment: g2g_core::BitstreamAlignment::Unspecified,
                     }]
                 );

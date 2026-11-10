@@ -769,6 +769,7 @@ mod simulcast_tests {
             height: Dim::Fixed(480),
             framerate: Rate::Fixed(30 << 16),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         let lo = Caps::CompressedVideo {
@@ -777,6 +778,7 @@ mod simulcast_tests {
             height: Dim::Fixed(240),
             framerate: Rate::Fixed(30 << 16),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         MultiInputElement::configure_pipeline(&mut s, 0, &hi).unwrap();
@@ -867,6 +869,7 @@ mod tests {
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         };
         assert_eq!(s.intercept_caps(0, &raw), Err(G2gError::CapsMismatch));
         assert!(s.intercept_caps(0, &h264_any()).is_ok());

@@ -164,12 +164,12 @@ pub use aggregator::InputAggregator;
 #[cfg(feature = "alloc")]
 pub use caps::{pcm_caps_any_rate_and_channels, st2038_any_alignment};
 pub use caps::{
-    pcm_formats, pcm_from_gst_format, pcm_gst_format, AudioFormat, BitstreamAlignment,
+    pcm_formats, pcm_from_gst_format, pcm_gst_format, AspectRatio, AudioFormat, BitstreamAlignment,
     ByteStreamEncoding, Caps, ClosedCaptionFormat, CodecTag, ColorPrimaries, ColorRange,
     Colorimetry, Dim, Interlace, LumaCoefficients, MatrixCoefficients, PassthroughFields,
-    ProResVariant, Rate, RawVideoFormat, St2038Alignment, SubPictureFormat, TagNamespace,
-    TensorDType, TensorLayout, TensorShape, TextFormat, TransferCharacteristics, VideoCodec,
-    YuvConversion, ANY_CHANNELS, ANY_SAMPLE_RATE, MAX_BATCH_ALTERNATIVES, PCM_FORMATS,
+    PixelAspect, ProResVariant, Rate, RawVideoFormat, St2038Alignment, SubPictureFormat,
+    TagNamespace, TensorDType, TensorLayout, TensorShape, TextFormat, TransferCharacteristics,
+    VideoCodec, YuvConversion, ANY_CHANNELS, ANY_SAMPLE_RATE, MAX_BATCH_ALTERNATIVES, PCM_FORMATS,
 };
 pub use channels::{ChannelLayout, ChannelPosition};
 // `CapsSet` (negotiation-time alternatives) needs alloc; `TensorShape` is

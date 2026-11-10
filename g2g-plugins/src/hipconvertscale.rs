@@ -522,6 +522,7 @@ pub(crate) fn any_size_formats() -> impl Iterator<Item = Caps> {
         framerate: Rate::Any,
         interlace: g2g_core::Interlace::Any,
         colorimetry: Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
     })
 }
 
@@ -777,6 +778,7 @@ impl HipBlender {
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
             colorimetry: Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         })?;
         let module = compile(device, &input, &canvas, Orientation::Identity)?;
         Ok(Self {
@@ -933,6 +935,7 @@ fn swap_dims(caps: &Caps) -> Caps {
             framerate,
             interlace,
             colorimetry,
+            pixel_aspect: _,
         } => Caps::RawVideo {
             format: *format,
             width: height.clone(),
@@ -940,6 +943,7 @@ fn swap_dims(caps: &Caps) -> Caps {
             framerate: framerate.clone(),
             interlace: *interlace,
             colorimetry: *colorimetry,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         },
         other => other.clone(),
     }

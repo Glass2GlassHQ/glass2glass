@@ -81,6 +81,7 @@ async fn a_blocked_push_keeps_the_rtsp_session_alive() {
             height: Dim::Fixed(FIXTURE_HEIGHT),
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         })
         .expect("configure the server");

@@ -15580,6 +15580,7 @@ fn coded_extent_caps(input: &Caps) -> Caps {
         height: Dim::Fixed(height),
         framerate,
         colorimetry,
+        pixel_aspect: _,
         alignment,
     } = input
     else {
@@ -15595,6 +15596,7 @@ fn coded_extent_caps(input: &Caps) -> Caps {
         height: Dim::Fixed(round_up(*height)),
         framerate: framerate.clone(),
         colorimetry: *colorimetry,
+        pixel_aspect: g2g_core::PixelAspect::Any,
         alignment: *alignment,
     }
 }
@@ -15610,6 +15612,7 @@ impl VulkanVideoDec {
                     height: Dim::Any,
                     framerate: Rate::Any,
                     colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                    pixel_aspect: g2g_core::PixelAspect::Any,
                     alignment: g2g_core::BitstreamAlignment::Unspecified,
                 })
                 .collect(),
@@ -15640,6 +15643,7 @@ impl VulkanVideoDec {
                 },
                 framerate: Rate::Any,
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                pixel_aspect: g2g_core::PixelAspect::Any,
                 alignment: g2g_core::BitstreamAlignment::Unspecified,
             });
         }
@@ -16022,6 +16026,7 @@ impl VulkanVideoDec {
             // The two planes leave the decoder unconverted, so the stream's own
             // colour description applies to these samples.
             colorimetry: self.stream_colorimetry,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         };
         if self.last_caps.as_ref() != Some(&caps) {
             out.push(PipelinePacket::CapsChanged(caps.clone())).await?;
@@ -16152,6 +16157,7 @@ impl VulkanVideoDec {
                 framerate: self.framerate.clone(),
                 interlace: g2g_core::Interlace::Any,
                 colorimetry,
+                pixel_aspect: g2g_core::PixelAspect::Any,
             };
             if self.last_caps.as_ref() != Some(&caps) {
                 out.push(PipelinePacket::CapsChanged(caps.clone())).await?;
@@ -16267,6 +16273,7 @@ impl PadTemplates for VulkanVideoDec {
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         };
         alloc::vec::Vec::from([
             // Any of the codecs this element decodes (H.264 / H.265 / AV1).
@@ -16307,6 +16314,7 @@ impl AsyncElement for VulkanVideoDec {
                     height: Dim::Any,
                     framerate: Rate::Any,
                     colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                    pixel_aspect: g2g_core::PixelAspect::Any,
                     alignment: g2g_core::BitstreamAlignment::Unspecified,
                 };
                 upstream_caps
@@ -16342,6 +16350,7 @@ impl AsyncElement for VulkanVideoDec {
                         framerate: framerate.clone(),
                         interlace: g2g_core::Interlace::Any,
                         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                        pixel_aspect: g2g_core::PixelAspect::Any,
                     })
                     .collect(),
             ),
@@ -16721,6 +16730,7 @@ mod tests {
             height: Dim::Fixed(height),
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         const MACROBLOCKS_PER_SIDE: u32 = 4;

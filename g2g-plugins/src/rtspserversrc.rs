@@ -653,6 +653,7 @@ impl PadTemplates for RtspServerSrc {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         });
         Vec::from([PadTemplate::source(CapsSet::from_alternatives(Vec::from(

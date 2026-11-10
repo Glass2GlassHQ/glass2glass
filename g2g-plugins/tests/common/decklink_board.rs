@@ -319,6 +319,7 @@ pub(crate) fn video_caps(format: RawVideoFormat, mode: &DisplayMode, interlace: 
         framerate: Rate::Fixed(framerate),
         interlace,
         colorimetry: Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
     }
 }
 

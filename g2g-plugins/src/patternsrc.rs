@@ -66,6 +66,7 @@ impl PatternSrc {
             framerate: Rate::Fixed(self.fps << 16),
             interlace: Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::SQUARE,
         }
     }
 }

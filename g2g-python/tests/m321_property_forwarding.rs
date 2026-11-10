@@ -74,6 +74,7 @@ fn element_properties_reach_the_python_instance() {
         framerate: Rate::Fixed(30),
         interlace: g2g_core::Interlace::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
     };
     el.configure_pipeline(&caps).unwrap();
 
@@ -129,6 +130,7 @@ fn rgba_2x1() -> Caps {
         framerate: Rate::Fixed(30),
         interlace: g2g_core::Interlace::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
     }
 }
 
@@ -223,6 +225,7 @@ fn a_per_element_property_reaches_the_python_instance() {
         framerate: Rate::Fixed(30),
         interlace: g2g_core::Interlace::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
     };
     el.configure_pipeline(&caps).unwrap();
 

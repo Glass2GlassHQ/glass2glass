@@ -109,6 +109,7 @@ struct InputStream {
     height: u32,
     framerate: Rate,
     colorimetry: Colorimetry,
+    pixel_aspect: g2g_core::PixelAspect,
 }
 
 impl VideoConvert {
@@ -202,6 +203,7 @@ impl VideoConvert {
             height: Dim::Fixed(h),
             framerate,
             colorimetry,
+            pixel_aspect,
             ..
         } = caps
         else {
@@ -217,6 +219,7 @@ impl VideoConvert {
             height: *h,
             framerate: framerate.clone(),
             colorimetry: *colorimetry,
+            pixel_aspect: *pixel_aspect,
         })
     }
 }
@@ -245,6 +248,7 @@ impl AsyncElement for VideoConvert {
                 framerate: Rate::Any,
                 interlace: g2g_core::Interlace::Any,
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                pixel_aspect: g2g_core::PixelAspect::Any,
             };
             if let Ok(narrowed) = upstream_caps.intersect(&candidate) {
                 return Ok(narrowed);
@@ -340,6 +344,7 @@ impl AsyncElement for VideoConvert {
                         width: w,
                         height: h,
                         framerate,
+                        pixel_aspect,
                         ..
                     } = self.input.clone().ok_or(G2gError::NotConfigured)?;
                     let bytes = frame
@@ -457,6 +462,7 @@ impl AsyncElement for VideoConvert {
                         framerate,
                         interlace: g2g_core::Interlace::Any,
                         colorimetry: self.emitted_colorimetry(out_fmt),
+                        pixel_aspect,
                     };
                     if self.last_caps.as_ref() != Some(&new_caps) {
                         out.push(PipelinePacket::CapsChanged(new_caps.clone()))
@@ -563,6 +569,7 @@ impl PadTemplates for VideoConvert {
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         };
         let set = CapsSet::from_alternatives(FORMATS.map(any_geometry).to_vec());
         Vec::from([PadTemplate::sink(set.clone()), PadTemplate::source(set)])
@@ -1633,6 +1640,7 @@ mod tests {
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         }
     }
 
@@ -1678,7 +1686,8 @@ mod tests {
                 height: Dim::Fixed(48),
                 framerate: Rate::Any,
                 interlace: g2g_core::Interlace::Any,
-                colorimetry: g2g_core::Colorimetry::UNKNOWN
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                pixel_aspect: g2g_core::PixelAspect::Any
             }]
         );
         // compressed input is not convertible
@@ -1688,6 +1697,7 @@ mod tests {
             height: Dim::Fixed(48),
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         assert!(f(&h264).is_empty());

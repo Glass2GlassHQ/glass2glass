@@ -107,6 +107,7 @@ async fn svt_av1_hdr_metadata_matches_ffprobe() {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         })
         .expect("configure");

@@ -47,6 +47,7 @@ pub extern "C" fn g2g_min() -> u64 {
         framerate: Rate::Any,
         interlace: Interlace::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
     };
     let b = Caps::RawVideo {
         format: RawVideoFormat::Rgba8,
@@ -55,6 +56,7 @@ pub extern "C" fn g2g_min() -> u64 {
         framerate: Rate::Fixed(30 << 16),
         interlace: Interlace::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
     };
     let narrowed = black_box(&a).intersect(black_box(&b)).is_ok();
 

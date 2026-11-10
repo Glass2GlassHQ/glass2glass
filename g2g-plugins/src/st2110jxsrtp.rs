@@ -69,6 +69,7 @@ fn any_geometry_jpeg_xs() -> Caps {
         height: Dim::Any,
         framerate: Rate::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
         alignment: g2g_core::BitstreamAlignment::Unspecified,
     }
 }
@@ -475,6 +476,7 @@ impl St2110JxsSrc {
             height: Dim::Fixed(self.height),
             framerate: Rate::Fixed(framerate_q16),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         })
     }
@@ -612,6 +614,7 @@ mod tests {
             height: Dim::Fixed(1080),
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::FieldPair,
         };
         assert_eq!(jxs_geometry(&field_pair), Err(G2gError::CapsMismatch));
@@ -664,6 +667,7 @@ mod tests {
             height: Dim::Fixed(1080),
             framerate: Rate::Fixed(60 << 16),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         }
     }
@@ -762,6 +766,7 @@ mod tests {
             height: Dim::Fixed(1080),
             framerate: Rate::Fixed(50 << 16), // 20 ms period
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         let rx = UdpSocket::bind(("127.0.0.1", 0)).unwrap();

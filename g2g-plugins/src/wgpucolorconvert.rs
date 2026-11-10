@@ -203,6 +203,7 @@ impl AsyncElement for WgpuColorConvert {
             framerate: Rate::Any,
             interlace: Interlace::Any,
             colorimetry: Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         };
         upstream_caps.intersect(&nv12_any)
     }
@@ -290,6 +291,7 @@ mod tests {
             framerate: Rate::Any,
             interlace: Interlace::Any,
             colorimetry: Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         }
     }
 

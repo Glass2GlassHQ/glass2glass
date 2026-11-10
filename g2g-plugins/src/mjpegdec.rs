@@ -267,6 +267,7 @@ impl MjpegDec {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         }
     }
@@ -279,6 +280,7 @@ impl MjpegDec {
             framerate: self.framerate.clone(),
             interlace: picture.interlace,
             colorimetry: decoded_colorimetry(self.out_format),
+            pixel_aspect: g2g_core::PixelAspect::Any,
         }
     }
 
@@ -585,6 +587,7 @@ impl AsyncElement for MjpegDec {
                 framerate: framerate.clone(),
                 interlace: g2g_core::Interlace::Any,
                 colorimetry: decoded_colorimetry(out_format),
+                pixel_aspect: g2g_core::PixelAspect::Any,
             }),
             _ => CapsSet::from_alternatives(Vec::new()),
         }))
@@ -754,6 +757,7 @@ impl PadTemplates for MjpegDec {
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
             colorimetry: decoded_colorimetry(format),
+            pixel_aspect: g2g_core::PixelAspect::Any,
         };
         Vec::from([
             PadTemplate::sink(CapsSet::one(Self::input_template())),

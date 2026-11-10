@@ -143,6 +143,7 @@ fn src_caps() -> g2g_core::Caps {
         height: Dim::Fixed(240),
         framerate: Rate::Fixed(15 << 16),
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
         alignment: g2g_core::BitstreamAlignment::Unspecified,
     }
 }

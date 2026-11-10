@@ -243,6 +243,7 @@ mod tests {
             framerate: Rate::Fixed(30 << 16),
             interlace: g2g_core::Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         };
         let buf = [255u8, 0, 0, 255].repeat(4 * 2);
         let v = packet_preview(&frame(buf), &caps).unwrap();
@@ -264,6 +265,7 @@ mod tests {
             framerate: Rate::Fixed(30 << 16),
             interlace: g2g_core::Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         };
         // One BGRA pixel: B=10 G=20 R=30 A=40 -> preview RGBA 30,20,10,40.
         let v = packet_preview(&frame(vec![10, 20, 30, 40]), &caps).unwrap();
@@ -283,6 +285,7 @@ mod tests {
             framerate: Rate::Fixed(30 << 16),
             interlace: g2g_core::Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         };
         let v = packet_preview(&frame(vec![1, 2, 3, 4]), &caps).unwrap();
         assert_eq!(v["kind"], "hex");
@@ -321,6 +324,7 @@ mod tests {
             framerate: Rate::Fixed(30 << 16),
             interlace: g2g_core::Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         };
         // luma + U + V planes = w*h*3/2 bytes, mid-gray chroma.
         let mut buf = vec![128u8; (w * h) as usize];
@@ -342,6 +346,7 @@ mod tests {
             framerate: Rate::Fixed(30 << 16),
             interlace: g2g_core::Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         };
         let mut buf = vec![128u8; (w * h) as usize];
         buf.extend(vec![128u8; (w * h) as usize / 2]);
@@ -361,6 +366,7 @@ mod tests {
             framerate: Rate::Fixed(30 << 16),
             interlace: g2g_core::Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         };
         let buf = vec![128u8; frame_byte_size(RawVideoFormat::Nv12, w, h)];
         let v = packet_preview(&frame(buf), &caps).unwrap();
@@ -377,6 +383,7 @@ mod tests {
             framerate: Rate::Fixed(30 << 16),
             interlace: g2g_core::Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         };
         let v = packet_preview(&frame(vec![1, 2, 3, 4]), &caps).unwrap();
         assert_eq!(v["kind"], "hex");
@@ -389,6 +396,7 @@ mod tests {
             height: Dim::Fixed(1080),
             framerate: Rate::Fixed(30 << 16),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         }
     }
@@ -441,6 +449,7 @@ mod tests {
             height: Dim::Fixed(16),
             framerate: Rate::Fixed(30 << 16),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         let v = packet_preview(&frame(RED16.to_vec()), &caps).unwrap();
@@ -458,6 +467,7 @@ mod tests {
             height: Dim::Fixed(16),
             framerate: Rate::Fixed(30 << 16),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         let v = packet_preview(&frame(vec![0, 1, 2, 3]), &caps).unwrap();

@@ -1714,6 +1714,7 @@ mod link_tests {
             height: Dim::Fixed(720),
             framerate: Rate::Any,
             colorimetry: crate::Colorimetry::UNKNOWN,
+            pixel_aspect: crate::PixelAspect::Any,
             alignment: crate::BitstreamAlignment::Unspecified,
         }
     }

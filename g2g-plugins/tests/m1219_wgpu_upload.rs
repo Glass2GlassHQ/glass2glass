@@ -39,6 +39,7 @@ fn caps(format: RawVideoFormat, width: u32, height: u32) -> Caps {
         framerate: Rate::Fixed(30 << 16),
         interlace: g2g_core::Interlace::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
     }
 }
 

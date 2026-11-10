@@ -65,6 +65,7 @@ fn rgba_2x1() -> Caps {
         framerate: Rate::Fixed(30),
         interlace: Interlace::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
     }
 }
 

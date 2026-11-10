@@ -119,6 +119,7 @@ impl MjpegEnc {
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         };
         Vec::from([
             raw(RawVideoFormat::Rgba8),
@@ -134,6 +135,7 @@ impl MjpegEnc {
             height: Dim::Fixed(self.height),
             framerate: self.framerate.clone(),
             colorimetry: g2g_core::Colorimetry::JPEG,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         }
     }
@@ -265,6 +267,7 @@ impl AsyncElement for MjpegEnc {
                 height: height.clone(),
                 framerate: framerate.clone(),
                 colorimetry: g2g_core::Colorimetry::JPEG,
+                pixel_aspect: g2g_core::PixelAspect::Any,
                 alignment: g2g_core::BitstreamAlignment::Unspecified,
             }),
             _ => CapsSet::from_alternatives(Vec::new()),
@@ -278,6 +281,7 @@ impl AsyncElement for MjpegEnc {
             height,
             framerate,
             colorimetry,
+            pixel_aspect: _,
             interlace: _,
         } = absolute_caps
         else {
@@ -411,6 +415,7 @@ impl PadTemplates for MjpegEnc {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::JPEG,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         Vec::from([

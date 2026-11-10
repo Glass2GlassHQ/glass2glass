@@ -823,6 +823,7 @@ impl<P> CompositorCanvas<P> {
             framerate: Rate::Fixed(self.framerate_q16),
             interlace: g2g_core::Interlace::Any,
             colorimetry: self.colorimetry,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         }
     }
 
@@ -1053,6 +1054,7 @@ impl Compositor {
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         }
     }
 
@@ -1648,6 +1650,7 @@ mod tests {
             framerate: Rate::Fixed(30 << 16),
             interlace: g2g_core::Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         }
     }
 
@@ -2164,6 +2167,7 @@ mod tests {
                 framerate: Rate::Any,
                 interlace: g2g_core::Interlace::Any,
                 colorimetry,
+                pixel_aspect: g2g_core::PixelAspect::Any,
             },
         )
         .unwrap();
@@ -2240,6 +2244,7 @@ mod tests {
             framerate: Rate::Fixed(30 << 16),
             interlace: g2g_core::Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         };
         assert!(
             comp.configure_pipeline(0, &nv12).is_ok(),
@@ -2261,6 +2266,7 @@ mod tests {
             framerate: Rate::Fixed(30 << 16),
             interlace: g2g_core::Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         };
         assert!(matches!(
             comp.configure_pipeline(0, &rgba),
@@ -2503,7 +2509,8 @@ mod tests {
                 height: Dim::Fixed(1080),
                 framerate: Rate::Fixed(60 << 16),
                 interlace: g2g_core::Interlace::Any,
-                colorimetry: g2g_core::Colorimetry::UNKNOWN
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                pixel_aspect: g2g_core::PixelAspect::Any
             }]
         );
         // A non-RGBA input is rejected at configure.
@@ -2514,6 +2521,7 @@ mod tests {
             framerate: Rate::Fixed(30 << 16),
             interlace: g2g_core::Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         };
         let mut comp = comp;
         assert!(matches!(

@@ -114,6 +114,7 @@ mod demo {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         let mut parse = H264Parse::reframing();
@@ -167,6 +168,7 @@ mod demo {
             height: Dim::Fixed(h),
             framerate: Rate::Fixed(30 << 16),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         let narrowed = dec.intercept_caps(&dec_caps).expect("intercept H.264");
@@ -275,6 +277,7 @@ mod demo {
                 framerate: Rate::Fixed(30 << 16),
                 interlace: Interlace::Any,
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                pixel_aspect: g2g_core::PixelAspect::Any,
             };
             sink.configure_pipeline(&caps).expect("sink configure");
             self.sink = Some(sink);

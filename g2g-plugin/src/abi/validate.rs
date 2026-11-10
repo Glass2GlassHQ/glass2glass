@@ -981,6 +981,7 @@ mod tests {
             framerate: Rate::Any,
             interlace: Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         })
         .expect("rgba crosses");
         let alternatives = [ffi];

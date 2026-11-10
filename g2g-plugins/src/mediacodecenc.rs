@@ -372,6 +372,7 @@ impl AsyncElement for MediaCodecEnc {
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         };
         upstream_caps.intersect(&supported)
     }
@@ -549,6 +550,7 @@ impl PadTemplates for MediaCodecEnc {
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         };
         let compressed = |codec| Caps::CompressedVideo {
             codec,
@@ -556,6 +558,7 @@ impl PadTemplates for MediaCodecEnc {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         Vec::from([
@@ -581,6 +584,7 @@ fn compressed_caps(codec: VideoCodec, w: u32, h: u32, framerate: &Rate) -> Caps 
         height: Dim::Fixed(h),
         framerate: framerate.clone(),
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
         alignment: g2g_core::BitstreamAlignment::Unspecified,
     }
 }
@@ -619,6 +623,7 @@ fn derive_output_caps(codec: VideoCodec, input: &Caps) -> CapsSet {
             height: height.clone(),
             framerate: framerate.clone(),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: _,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         }),
         _ => CapsSet::from_alternatives(Vec::new()),

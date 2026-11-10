@@ -237,6 +237,7 @@ impl MfVideoSrc {
             framerate: Rate::Fixed(c.fps() << 16),
             interlace: Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::SQUARE,
         })
     }
 }
@@ -421,6 +422,7 @@ impl PadTemplates for MfVideoSrc {
             framerate: Rate::Any,
             interlace: Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::SQUARE,
         };
         Vec::from([PadTemplate::source(CapsSet::from_alternatives(Vec::from(
             [raw(RawVideoFormat::Nv12), raw(RawVideoFormat::Yuyv)],

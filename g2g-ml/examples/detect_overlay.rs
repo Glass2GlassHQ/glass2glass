@@ -172,6 +172,7 @@ fn rgba_caps(w: u32, h: u32, fps: u32) -> Caps {
         framerate: Rate::Fixed(fps << 16),
         interlace: g2g_core::Interlace::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
     }
 }
 

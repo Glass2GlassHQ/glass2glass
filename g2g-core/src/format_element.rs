@@ -212,6 +212,7 @@ mod tests {
             framerate: r,
             interlace: crate::Interlace::Any,
             colorimetry: crate::Colorimetry::UNKNOWN,
+            pixel_aspect: crate::PixelAspect::Any,
         }
     }
 
@@ -222,6 +223,7 @@ mod tests {
             height: h,
             framerate: r,
             colorimetry: crate::Colorimetry::UNKNOWN,
+            pixel_aspect: crate::PixelAspect::Any,
             alignment: crate::BitstreamAlignment::Unspecified,
         }
     }
@@ -283,6 +285,7 @@ mod tests {
                     framerate: framerate.clone(),
                     interlace: crate::Interlace::Any,
                     colorimetry: crate::Colorimetry::UNKNOWN,
+                    pixel_aspect: crate::PixelAspect::Any,
                 }),
                 _ => CapsSet::from_alternatives(Vec::new()),
             }))

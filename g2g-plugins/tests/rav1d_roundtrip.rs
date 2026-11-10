@@ -37,6 +37,7 @@ fn i420_caps(w: u32, h: u32) -> Caps {
         framerate: Rate::Any,
         interlace: g2g_core::Interlace::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
     }
 }
 
@@ -117,7 +118,8 @@ async fn av1_encode_then_rav1d_decode_round_trips_i420() {
             height: Dim::Fixed(H),
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
-            colorimetry: DECODED_COLORIMETRY
+            colorimetry: DECODED_COLORIMETRY,
+            pixel_aspect: g2g_core::PixelAspect::Any
         }),
         "rav1d announced the 64x64 I420 geometry, got {:?}",
         decoded.caps,
@@ -165,6 +167,7 @@ fn raw_caps(format: RawVideoFormat, w: u32, h: u32) -> Caps {
         framerate: Rate::Any,
         interlace: g2g_core::Interlace::Any,
         colorimetry: DECODED_COLORIMETRY,
+        pixel_aspect: g2g_core::PixelAspect::Any,
     }
 }
 

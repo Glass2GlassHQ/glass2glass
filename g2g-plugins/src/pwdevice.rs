@@ -234,6 +234,7 @@ fn video_caps() -> CapsSet {
             },
             interlace: Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         })
         .collect();
     CapsSet::from_alternatives(alternatives)

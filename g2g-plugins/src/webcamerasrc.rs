@@ -80,6 +80,7 @@ impl WebCameraSrc {
             framerate: Rate::Fixed(30 << 16),
             interlace: Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::SQUARE,
         }
     }
 
@@ -95,6 +96,7 @@ impl WebCameraSrc {
                 framerate: Rate::Fixed(30 << 16),
                 interlace: Interlace::Any,
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                pixel_aspect: g2g_core::PixelAspect::SQUARE,
             };
             out.push(PipelinePacket::CapsChanged(caps)).await?;
             self.last_dims = Some((w, h));

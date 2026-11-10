@@ -65,6 +65,7 @@ async fn the_stream_header_leads_the_first_frame_packet() {
         framerate: Rate::Fixed(25 << 16),
         interlace: Interlace::Progressive,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
     };
     let frame_bytes = format
         .unpadded_frame_bytes(width, height)

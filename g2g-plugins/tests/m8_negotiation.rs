@@ -33,6 +33,7 @@ fn caps_at(width: u32, height: u32) -> Caps {
         framerate: Rate::Fixed(30 << 16),
         interlace: g2g_core::Interlace::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
     }
 }
 
@@ -623,6 +624,7 @@ async fn range_negotiation_intersects_then_fixates_to_minimum() {
         framerate: Rate::Fixed(30 << 16),
         interlace: g2g_core::Interlace::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
     };
     let supported = Caps::RawVideo {
         format: RawVideoFormat::Rgba8,
@@ -634,6 +636,7 @@ async fn range_negotiation_intersects_then_fixates_to_minimum() {
         framerate: Rate::Any,
         interlace: g2g_core::Interlace::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
     };
     let mut src = StaticCapsSrc { proposal };
     let mut snk = IntersectingRecordingSink::new(supported);

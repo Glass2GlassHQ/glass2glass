@@ -176,6 +176,7 @@ impl OrtSegmentation {
                 framerate: Rate::Any,
                 interlace: g2g_core::Interlace::Any,
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                pixel_aspect: g2g_core::PixelAspect::Any,
             }
         })
     }
@@ -467,6 +468,7 @@ impl g2g_core::PadTemplates for OrtSegmentation {
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         });
         Vec::from([
             g2g_core::PadTemplate::sink(any_rgba.clone()),
@@ -491,6 +493,7 @@ mod tests {
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         };
         assert_eq!(
             element.intercept_caps(&rgba),

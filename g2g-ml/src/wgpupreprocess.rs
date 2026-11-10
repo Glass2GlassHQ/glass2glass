@@ -407,6 +407,7 @@ fn any_geometry(format: RawVideoFormat) -> Caps {
         framerate: Rate::Any,
         interlace: g2g_core::Interlace::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
     }
 }
 
@@ -1967,6 +1968,7 @@ mod tests {
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         };
         assert_eq!(
             e.intercept_caps(&raw(RawVideoFormat::Nv12)),
@@ -1995,6 +1997,7 @@ mod tests {
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         };
         let mut e = WgpuPreprocess::new();
         // 4:2:2 subsamples horizontally only, so an odd row count is fine.
@@ -2121,6 +2124,7 @@ mod tests {
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
             colorimetry: Colorimetry::BT709,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         })
         .expect("a tagged NV12 stream configures");
         assert_eq!(e.colorimetry, Colorimetry::BT709);
@@ -2136,6 +2140,7 @@ mod tests {
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         };
         e.configure_pipeline(&odd)
             .expect("the storage-buffer path reads an odd NV12 size");

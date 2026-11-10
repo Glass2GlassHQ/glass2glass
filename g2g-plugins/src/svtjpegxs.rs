@@ -293,6 +293,7 @@ fn jpeg_xs_caps(width: u32, height: u32, fields_per_frame: u32) -> Caps {
         height: Dim::Fixed(height),
         framerate: Rate::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
         alignment,
     }
 }
@@ -329,6 +330,7 @@ fn decoded_caps(input: &Caps) -> Result<Caps, G2gError> {
                 framerate: Rate::Any,
                 interlace: interlace_of(coded_fields_per_frame(input)),
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                pixel_aspect: g2g_core::PixelAspect::Any,
             })
         }
         _ => Err(G2gError::CapsMismatch),
@@ -718,6 +720,7 @@ impl PadTemplates for SvtJpegXsEnc {
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         })
         .to_vec();
         Vec::from([
@@ -728,6 +731,7 @@ impl PadTemplates for SvtJpegXsEnc {
                 height: Dim::Any,
                 framerate: Rate::Any,
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                pixel_aspect: g2g_core::PixelAspect::Any,
                 alignment: g2g_core::BitstreamAlignment::Unspecified,
             })),
         ])
@@ -875,6 +879,7 @@ impl AsyncElement for SvtJpegXsDec {
                             framerate: Rate::Any,
                             interlace: interlace_of(self.layout.fields_per_frame),
                             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                            pixel_aspect: g2g_core::PixelAspect::Any,
                         }))
                         .await?;
                         self.caps_sent = true;
@@ -1052,6 +1057,7 @@ impl PadTemplates for SvtJpegXsDec {
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         })
         .to_vec();
         Vec::from([
@@ -1061,6 +1067,7 @@ impl PadTemplates for SvtJpegXsDec {
                 height: Dim::Any,
                 framerate: Rate::Any,
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                pixel_aspect: g2g_core::PixelAspect::Any,
                 alignment: g2g_core::BitstreamAlignment::Unspecified,
             })),
             PadTemplate::source(CapsSet::from_alternatives(alts)),
@@ -1177,6 +1184,7 @@ mod tests {
             framerate: Rate::Fixed(30 << 16),
             interlace: g2g_core::Interlace::Interleaved,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         };
 
         let mut enc = SvtJpegXsEnc::new();
@@ -1202,6 +1210,7 @@ mod tests {
                 framerate: Rate::Any,
                 interlace: g2g_core::Interlace::Interleaved,
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                pixel_aspect: g2g_core::PixelAspect::Any,
             }]
         );
         let mean_err = mean_10bit_error(&frame, &dec_out.frames[0]);
@@ -1218,6 +1227,7 @@ mod tests {
             framerate: Rate::Fixed(60 << 16),
             interlace: g2g_core::Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         };
         let input = i422p10_ramp(w, h);
 
@@ -1242,6 +1252,7 @@ mod tests {
                 height: Dim::Fixed(h as u32),
                 framerate: Rate::Any,
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                pixel_aspect: g2g_core::PixelAspect::Any,
                 alignment: g2g_core::BitstreamAlignment::Unspecified,
             }
         );
@@ -1261,7 +1272,8 @@ mod tests {
                 height: Dim::Fixed(h as u32),
                 framerate: Rate::Any,
                 interlace: g2g_core::Interlace::Any,
-                colorimetry: g2g_core::Colorimetry::UNKNOWN
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                pixel_aspect: g2g_core::PixelAspect::Any
             }
         );
 

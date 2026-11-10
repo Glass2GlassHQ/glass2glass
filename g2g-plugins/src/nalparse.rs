@@ -300,6 +300,7 @@ impl<C: NalCodec> NalParse<C> {
             height: Dim::Fixed(info.height),
             framerate: self.caps.framerate(info.framerate),
             colorimetry: info.colorimetry,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: self.output_alignment(),
         };
         self.caps.refine(new_caps, out).await
@@ -463,6 +464,7 @@ impl<C: NalCodec> NalParse<C> {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         }
     }

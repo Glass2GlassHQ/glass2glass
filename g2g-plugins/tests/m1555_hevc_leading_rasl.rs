@@ -71,6 +71,7 @@ async fn parse_packets(packets: Vec<PipelinePacket>) -> Vec<u8> {
         height: Dim::Any,
         framerate: Rate::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
         alignment: g2g_core::BitstreamAlignment::Unspecified,
     };
     let mut parser = H265Parse::reframing();

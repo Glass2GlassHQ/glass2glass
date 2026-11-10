@@ -468,6 +468,7 @@ fn derived_fields_inputs(t: &CapsTransform, out: &Caps) -> Option<Vec<Caps>> {
                 framerate,
                 interlace,
                 colorimetry,
+                pixel_aspect,
                 ..
             },
         ) => accept
@@ -479,6 +480,7 @@ fn derived_fields_inputs(t: &CapsTransform, out: &Caps) -> Option<Vec<Caps>> {
                 framerate: framerate.clone(),
                 interlace,
                 colorimetry,
+                pixel_aspect,
             })
             .collect(),
         (
@@ -2405,6 +2407,7 @@ mod tests {
             framerate: r,
             interlace: crate::Interlace::Any,
             colorimetry: crate::Colorimetry::UNKNOWN,
+            pixel_aspect: crate::PixelAspect::Any,
         }
     }
 
@@ -2524,6 +2527,7 @@ mod tests {
             height: h,
             framerate: r,
             colorimetry: crate::Colorimetry::UNKNOWN,
+            pixel_aspect: crate::PixelAspect::Any,
             alignment: crate::BitstreamAlignment::Unspecified,
         }
     }
@@ -2686,6 +2690,7 @@ mod tests {
                 framerate: framerate.clone(),
                 interlace: crate::Interlace::Any,
                 colorimetry: crate::Colorimetry::UNKNOWN,
+                pixel_aspect: crate::PixelAspect::Any,
             }),
             _ => CapsSet::from_alternatives(Vec::new()),
         }));
@@ -2732,6 +2737,7 @@ mod tests {
                 framerate: framerate.clone(),
                 interlace: crate::Interlace::Any,
                 colorimetry: crate::Colorimetry::UNKNOWN,
+                pixel_aspect: crate::PixelAspect::Any,
             }),
             _ => CapsSet::from_alternatives(Vec::new()),
         }));
@@ -3782,6 +3788,7 @@ mod tests {
                 framerate: framerate.clone(),
                 interlace: crate::Interlace::Any,
                 colorimetry: crate::Colorimetry::UNKNOWN,
+                pixel_aspect: crate::PixelAspect::Any,
             }),
             _ => CapsSet::from_alternatives(Vec::new()),
         };

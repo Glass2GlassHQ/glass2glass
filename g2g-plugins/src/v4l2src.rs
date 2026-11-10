@@ -1623,6 +1623,7 @@ impl PadTemplates for V4l2Src {
                     framerate: Rate::Any,
                     interlace: g2g_core::Interlace::Any,
                     colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                    pixel_aspect: g2g_core::PixelAspect::SQUARE,
                 },
                 None => Caps::CompressedVideo {
                     codec: g2g_core::VideoCodec::Mjpeg,
@@ -1630,6 +1631,7 @@ impl PadTemplates for V4l2Src {
                     height: Dim::Any,
                     framerate: Rate::Any,
                     colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                    pixel_aspect: g2g_core::PixelAspect::SQUARE,
                     alignment: g2g_core::BitstreamAlignment::Unspecified,
                 },
             })

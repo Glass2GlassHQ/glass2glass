@@ -182,6 +182,7 @@ impl Av1Enc {
             height: Dim::Fixed(self.height),
             framerate: self.framerate.clone(),
             colorimetry: self.colorimetry,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         }
     }
@@ -552,6 +553,7 @@ impl AsyncElement for Av1Enc {
                     framerate: Rate::Any,
                     interlace: g2g_core::Interlace::Any,
                     colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                    pixel_aspect: g2g_core::PixelAspect::Any,
                 });
             }
         }
@@ -566,6 +568,7 @@ impl AsyncElement for Av1Enc {
                 height,
                 framerate,
                 colorimetry,
+                pixel_aspect: _,
                 interlace: _,
             } if chroma_for(*format).is_some() && codable(*colorimetry, *format) => {
                 CapsSet::one(Caps::CompressedVideo {
@@ -574,6 +577,7 @@ impl AsyncElement for Av1Enc {
                     height: height.clone(),
                     framerate: framerate.clone(),
                     colorimetry: *colorimetry,
+                    pixel_aspect: g2g_core::PixelAspect::Any,
                     alignment: g2g_core::BitstreamAlignment::Unspecified,
                 })
             }
@@ -588,6 +592,7 @@ impl AsyncElement for Av1Enc {
             height,
             framerate,
             colorimetry,
+            pixel_aspect: _,
             interlace: _,
         } = absolute_caps
         else {
@@ -727,6 +732,7 @@ impl PadTemplates for Av1Enc {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         let any = |format| Caps::RawVideo {
@@ -736,6 +742,7 @@ impl PadTemplates for Av1Enc {
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         };
         let sink = CapsSet::from_alternatives(Vec::from([
             any(RawVideoFormat::I420),
@@ -788,6 +795,7 @@ mod tests {
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         }
     }
 
@@ -853,6 +861,7 @@ mod tests {
                 height: Dim::Fixed(64),
                 framerate: Rate::Any,
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                pixel_aspect: g2g_core::PixelAspect::Any,
                 alignment: g2g_core::BitstreamAlignment::Unspecified,
             }]
         );

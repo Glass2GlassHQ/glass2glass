@@ -358,6 +358,7 @@ mod tests {
                 framerate: Rate::Fixed(30 << 16),
                 interlace: crate::Interlace::Any,
                 colorimetry: crate::Colorimetry::UNKNOWN,
+                pixel_aspect: crate::PixelAspect::Any,
             },
         }
     }
@@ -373,6 +374,7 @@ mod tests {
                 height: Dim::Fixed(64),
                 framerate: Rate::Fixed(30 << 16),
                 colorimetry: crate::Colorimetry::UNKNOWN,
+                pixel_aspect: crate::PixelAspect::Any,
                 alignment: crate::BitstreamAlignment::Unspecified,
             },
         }

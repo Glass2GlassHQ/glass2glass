@@ -26,6 +26,7 @@ fn rgba() -> Caps {
         framerate: Rate::Fixed(30 << 16),
         interlace: Interlace::Any,
         colorimetry: Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
     }
 }
 
@@ -408,6 +409,7 @@ async fn video_caps_with_an_unknown_framerate_mid_stream_keep_the_join_running()
         framerate: Rate::Any,
         interlace: Interlace::Any,
         colorimetry: Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
     };
     let mut video = vec![PipelinePacket::CapsChanged(unknown_rate)];
     video.extend((0..DETECTION_STRIDE).map(video_frame));
@@ -477,6 +479,7 @@ async fn a_size_change_reaches_downstream_after_the_frames_held_before_it() {
         framerate: Rate::Fixed(30 << 16),
         interlace: Interlace::Any,
         colorimetry: Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
     };
     let mut video: Vec<PipelinePacket> = (0..WIDE_FRAMES).map(|i| rgba_frame(WIDTH, i)).collect();
     video.push(PipelinePacket::CapsChanged(narrow_caps));

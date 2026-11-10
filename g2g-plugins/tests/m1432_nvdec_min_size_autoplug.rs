@@ -50,6 +50,7 @@ async fn undersized_av1_autoplugs_a_software_decoder_with_nvdec_preferred() {
         height: Dim::Any,
         framerate,
         colorimetry,
+        pixel_aspect: g2g_core::PixelAspect::Any,
         alignment: g2g_core::BitstreamAlignment::Unspecified,
     };
 

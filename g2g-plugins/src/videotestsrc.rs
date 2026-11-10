@@ -284,6 +284,7 @@ const fn raw_caps(format: RawVideoFormat, width: Dim, height: Dim, framerate: Ra
         framerate,
         interlace: g2g_core::Interlace::Any,
         colorimetry: Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::SQUARE,
     }
 }
 

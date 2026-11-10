@@ -148,6 +148,7 @@ fn hosted_yolo_tracking_lands_as_related_tracking_nodes() {
         framerate: Rate::Fixed(30),
         interlace: g2g_core::Interlace::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
     };
     el.configure_pipeline(&caps).unwrap();
 

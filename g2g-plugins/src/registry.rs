@@ -626,6 +626,7 @@ pub fn default_registry() -> Registry {
                 framerate: Rate::Any,
                 interlace: g2g_core::Interlace::Any,
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                pixel_aspect: g2g_core::PixelAspect::Any,
             },
             || Box::new(Camera2Src::new(640, 480, u64::MAX)),
         )
@@ -698,6 +699,7 @@ pub fn default_registry() -> Registry {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         },
         || Box::new(crate::multifilesrc::MultiFileSrc::new("")),
@@ -713,6 +715,7 @@ pub fn default_registry() -> Registry {
             height: Dim::Any,
             framerate: Rate::Fixed(IMAGE_SEQUENCE_FPS << 16),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         },
         || {
@@ -1546,6 +1549,7 @@ pub fn default_registry() -> Registry {
                 framerate: Rate::Fixed(30 << 16),
                 interlace: g2g_core::Interlace::Any,
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                pixel_aspect: g2g_core::PixelAspect::Any,
             },
         ))
     }));
@@ -2536,6 +2540,7 @@ fn register_autoplug_candidates(reg: &mut Registry) {
                 framerate: Rate::Fixed(30 << 16),
                 interlace: g2g_core::Interlace::Any,
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                pixel_aspect: g2g_core::PixelAspect::Any,
             },
             || Box::new(crate::avf::AvfVideoSrc::new(u64::MAX)),
         )
@@ -2570,6 +2575,7 @@ fn register_autoplug_candidates(reg: &mut Registry) {
                 framerate: Rate::Fixed(30 << 16),
                 interlace: g2g_core::Interlace::Any,
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                pixel_aspect: g2g_core::PixelAspect::Any,
             },
             || Box::new(crate::sck::ScreenCaptureSrc::new(u64::MAX)),
         )
@@ -2590,6 +2596,7 @@ fn register_autoplug_candidates(reg: &mut Registry) {
                 framerate: Rate::Fixed(30 << 16),
                 interlace: g2g_core::Interlace::Any,
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                pixel_aspect: g2g_core::PixelAspect::Any,
             },
             || Box::new(crate::mfvideosrc::MfVideoSrc::new()),
         )
@@ -3191,6 +3198,7 @@ fn register_feature_gated(reg: &mut Registry) {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         },
         || Box::new(RtspSrc::new("")),
@@ -3225,6 +3233,7 @@ fn register_feature_gated(reg: &mut Registry) {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         },
         || Box::new(OnvifSrc::new("")),
@@ -3289,6 +3298,7 @@ fn register_feature_gated(reg: &mut Registry) {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         },
         || Box::new(UdpSrc::new("0.0.0.0:5004".parse().unwrap())),
@@ -3305,6 +3315,7 @@ fn register_feature_gated(reg: &mut Registry) {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         },
         || Box::new(WebRtcWhepSrc::new("")),
@@ -3388,6 +3399,7 @@ fn register_feature_gated(reg: &mut Registry) {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         },
         || Box::new(RtspServerSrc::new("0.0.0.0:8554".parse().unwrap())),
@@ -3447,6 +3459,7 @@ fn register_feature_gated(reg: &mut Registry) {
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         },
         || Box::new(RemoteSrc::new("0.0.0.0:9600".parse().unwrap())),
     ));
@@ -3467,6 +3480,7 @@ fn register_feature_gated(reg: &mut Registry) {
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         },
         || Box::new(RemoteWsSrc::new("0.0.0.0:9601".parse().unwrap())),
     ));
@@ -3494,6 +3508,7 @@ fn register_feature_gated(reg: &mut Registry) {
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         },
         || Box::new(RemoteWtSrc::new("0.0.0.0:9603".parse().unwrap())),
     ));
@@ -3549,6 +3564,7 @@ fn register_feature_gated(reg: &mut Registry) {
                 framerate: Rate::Any,
                 interlace: g2g_core::Interlace::Any,
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                pixel_aspect: g2g_core::PixelAspect::Any,
             },
             || Box::new(LocalCudaSrc::new("/tmp/g2g-localcuda.sock")),
         )
@@ -3572,6 +3588,7 @@ fn register_feature_gated(reg: &mut Registry) {
                 framerate: Rate::Any,
                 interlace: g2g_core::Interlace::Any,
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                pixel_aspect: g2g_core::PixelAspect::Any,
             },
             || Box::new(DmaBufSrc::new("/tmp/g2g-dmabuf.sock")),
         )
@@ -3636,6 +3653,7 @@ fn register_feature_gated(reg: &mut Registry) {
                 framerate: Rate::Any,
                 interlace: g2g_core::Interlace::Any,
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                pixel_aspect: g2g_core::PixelAspect::Any,
             },
             || Box::new(V4l2Src::new("/dev/video0")),
         )
@@ -3654,6 +3672,7 @@ fn register_feature_gated(reg: &mut Registry) {
                 framerate: Rate::Any,
                 interlace: g2g_core::Interlace::Any,
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                pixel_aspect: g2g_core::PixelAspect::Any,
             },
             || Box::new(LibCameraSrc::new()),
         )
@@ -4047,6 +4066,7 @@ fn register_feature_gated(reg: &mut Registry) {
                 framerate: Rate::Any,
                 interlace: g2g_core::Interlace::Any,
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                pixel_aspect: g2g_core::PixelAspect::Any,
             },
             || Box::new(DeckLinkVideoSrc::new()),
         )
@@ -4125,6 +4145,7 @@ fn register_feature_gated(reg: &mut Registry) {
                 framerate: Rate::Any,
                 interlace: g2g_core::Interlace::Any,
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                pixel_aspect: g2g_core::PixelAspect::Any,
             },
             || Box::new(PipeWireVideoSrc::new()),
         )
@@ -4186,6 +4207,7 @@ mod domain_aware_autoplug_tests {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         }
     }

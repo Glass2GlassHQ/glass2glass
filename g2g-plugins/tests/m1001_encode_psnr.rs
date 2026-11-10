@@ -110,6 +110,7 @@ fn i420_caps() -> g2g_core::Caps {
         framerate: g2g_core::Rate::Fixed(30 << 16),
         interlace: g2g_core::Interlace::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
     }
 }
 
@@ -319,6 +320,7 @@ mod mjpeg {
             framerate: Rate::Fixed(30 << 16),
             interlace: Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         }
     }
 

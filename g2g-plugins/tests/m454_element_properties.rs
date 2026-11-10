@@ -1302,7 +1302,8 @@ fn shmsrc_socket_and_declared_caps() {
             height: g2g_core::Dim::Fixed(240),
             framerate: g2g_core::Rate::Fixed(30 << 16),
             interlace: g2g_core::Interlace::Any,
-            colorimetry: g2g_core::Colorimetry::UNKNOWN
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any
         }),
         "the caps property is what the source declares"
     );
@@ -1592,6 +1593,7 @@ async fn tsmux_broadcast_knobs() {
                 height: g2g_core::Dim::Any,
                 framerate: g2g_core::Rate::Any,
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                pixel_aspect: g2g_core::PixelAspect::Any,
                 alignment: g2g_core::BitstreamAlignment::Unspecified,
             },
         )
@@ -2017,7 +2019,8 @@ async fn pipewirevideosrc_format_pin_and_geometry() {
             height: Dim::Fixed(720),
             framerate: Rate::Fixed(60 << 16),
             interlace: Interlace::Any,
-            colorimetry: g2g_core::Colorimetry::UNKNOWN
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::SQUARE
         })
     );
     // an empty pin is the open negotiation the element defaults to
@@ -2201,7 +2204,8 @@ fn camera2src_device_geometry_and_num_buffers() {
             height: Dim::Fixed(720),
             framerate: Rate::Any,
             interlace: Interlace::Any,
-            colorimetry: g2g_core::Colorimetry::UNKNOWN
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any
         }
     );
     // Empty returns to the first camera the manager reports.

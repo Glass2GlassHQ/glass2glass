@@ -139,6 +139,7 @@ impl StreamHeader {
             framerate: Rate::Fixed(self.framerate_q16()),
             interlace: self.interlace,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         }
     }
 
@@ -293,6 +294,7 @@ impl Y4mDec {
                     framerate: crate::typefind::PLACEHOLDER_FRAMERATE,
                     interlace: Interlace::Any,
                     colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                    pixel_aspect: g2g_core::PixelAspect::Any,
                 })
                 .collect::<Vec<_>>(),
         )
@@ -527,6 +529,7 @@ impl Y4mEnc {
                     framerate: Rate::Any,
                     interlace: Interlace::Any,
                     colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                    pixel_aspect: g2g_core::PixelAspect::Any,
                 })
                 .collect::<Vec<_>>(),
         )
@@ -874,7 +877,8 @@ mod tests {
                     height: Dim::Fixed(48),
                     framerate: Rate::Fixed(25 << 16),
                     interlace: Interlace::Any,
-                    colorimetry: g2g_core::Colorimetry::UNKNOWN
+                    colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                    pixel_aspect: g2g_core::PixelAspect::Any
                 }),
                 Err(G2gError::CapsMismatch),
                 "{format:?}"

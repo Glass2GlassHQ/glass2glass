@@ -325,6 +325,7 @@ async fn an_mpeg1_program_stream_demuxes_video_and_audio() {
             height: Dim::Fixed(288),
             framerate: Rate::Fixed(25 << 16),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         }),
         "the sequence header's geometry is announced once, concretely"
@@ -406,6 +407,7 @@ async fn a_vob_demuxes_video_audio_and_subpictures() {
             height: Dim::Fixed(VOB_H),
             framerate: Rate::Fixed(25 << 16),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         })
     );
@@ -695,6 +697,7 @@ async fn a_demuxed_program_stream_decodes_to_frames() {
         height: Dim::Fixed(288),
         framerate: Rate::Fixed(25 << 16),
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
         alignment: g2g_core::BitstreamAlignment::Unspecified,
     })
     .expect("libavcodec opens the MPEG-2 decoder");
@@ -741,6 +744,7 @@ async fn a_vob_decodes_and_playbin_builds_its_graph() {
         height: Dim::Fixed(VOB_H),
         framerate: Rate::Fixed(25 << 16),
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
         alignment: g2g_core::BitstreamAlignment::Unspecified,
     })
     .expect("libavcodec opens the MPEG-2 decoder");
@@ -1170,6 +1174,7 @@ async fn a_mid_gop_tune_in_drops_to_the_first_sequence_header() {
             height: Dim::Fixed(480),
             framerate: Rate::Fixed(25 << 16),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         })
     );
@@ -1461,6 +1466,7 @@ async fn composited_frames_carry_the_cue_only_inside_its_window_and_rectangle() 
         framerate: Rate::Fixed(25 << 16),
         interlace: g2g_core::Interlace::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
     };
     for pad in 0..2 {
         comp.configure_pipeline(pad, &rgba).expect("configure");
@@ -1770,6 +1776,7 @@ fn the_source_pad_advertises_every_selection() {
                 max_q16: 240 << 16,
             },
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         },
         Caps::Audio {

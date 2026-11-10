@@ -53,6 +53,7 @@ async fn access_units(es: &[u8]) -> Vec<Frame> {
         height: Dim::Any,
         framerate: Rate::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
         alignment: g2g_core::BitstreamAlignment::Unspecified,
     };
     let mut parse = g2g_plugins::h264parse::H264Parse::reframing();
@@ -106,6 +107,7 @@ async fn cv_output_transcode_never_touches_system_memory() {
         height: Dim::Fixed(480),
         framerate: Rate::Fixed(30 << 16),
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
         alignment: g2g_core::BitstreamAlignment::Unspecified,
     };
     let narrowed = dec.intercept_caps(&caps).expect("intercept H.264");
@@ -139,6 +141,7 @@ async fn cv_output_transcode_never_touches_system_memory() {
         framerate: Rate::Fixed(30 << 16),
         interlace: Interlace::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
     };
     let narrowed = enc.intercept_caps(&nv12).expect("intercept NV12");
     enc.configure_pipeline(&narrowed).expect("encoder session");

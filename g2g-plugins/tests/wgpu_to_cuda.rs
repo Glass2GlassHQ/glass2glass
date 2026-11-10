@@ -103,6 +103,7 @@ async fn wgpu_rgba_texture_encodes_through_nvenc_no_readback() {
         framerate: Rate::Fixed(30 << 16),
         interlace: g2g_core::Interlace::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
     };
     let mut enc = NvEnc::new();
     enc.configure_pipeline(&caps)
@@ -179,6 +180,7 @@ async fn wgpu_rgba_texture_encodes_through_nvenc_no_readback() {
             height: Dim::Fixed(H),
             framerate: Rate::Fixed(30 << 16),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         }],
         "H.264 output caps announced once at the texture geometry"
@@ -279,6 +281,7 @@ async fn wgpu_to_cuda_element_bridges_and_recycles() {
         framerate: Rate::Fixed(30 << 16),
         interlace: g2g_core::Interlace::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
     };
     bridge.configure_pipeline(&caps).expect("configure bridge");
     let mut enc = NvEnc::new();

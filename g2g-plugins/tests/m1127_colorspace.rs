@@ -39,6 +39,7 @@ fn raw_sized(
         framerate: Rate::Fixed(30),
         interlace: g2g_core::Interlace::Any,
         colorimetry,
+        pixel_aspect: g2g_core::PixelAspect::Any,
     }
 }
 

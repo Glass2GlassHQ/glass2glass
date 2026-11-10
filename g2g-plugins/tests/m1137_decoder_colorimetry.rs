@@ -85,6 +85,7 @@ mod av1 {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         }
     }
@@ -265,6 +266,7 @@ async fn encode_av1(colorimetry: g2g_core::Colorimetry) -> Vec<Vec<u8>> {
             framerate: Rate::Fixed(30 << 16),
             interlace: Interlace::Any,
             colorimetry,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         })
         .expect("configure Av1Enc");
     let mut sink = CaptureSink::default();
@@ -359,6 +361,7 @@ mod mjpeg {
                 height: Dim::Any,
                 framerate: Rate::Any,
                 colorimetry: Colorimetry::UNKNOWN,
+                pixel_aspect: g2g_core::PixelAspect::Any,
                 alignment: g2g_core::BitstreamAlignment::Unspecified,
             })
             .expect("configure MjpegDec");

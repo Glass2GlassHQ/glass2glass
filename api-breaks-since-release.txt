@@ -15,4 +15,6 @@ auto_trait_impl_removed: type RunStats is no longer UnwindSafe
 constructible_struct_adds_field: field AllocationParams.host_allocator
 constructible_struct_adds_field: field StageVisit.poll_ns
 derive_trait_impl_removed: type AllocationParams no longer derives Copy
+enum_struct_variant_field_added: field pixel_aspect of variant Caps::CompressedVideo
+enum_struct_variant_field_added: field pixel_aspect of variant Caps::RawVideo
 inherent_method_missing: Registry::domain_converter

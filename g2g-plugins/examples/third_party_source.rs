@@ -57,6 +57,7 @@ impl RampSrc {
             framerate: Rate::Fixed(FRAMERATE << 16),
             interlace: Interlace::Any,
             colorimetry: Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         }
     }
 }

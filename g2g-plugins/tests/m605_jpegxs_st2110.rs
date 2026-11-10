@@ -85,6 +85,7 @@ fn raw_jpegxs_st2110_22_roundtrip() {
         framerate: Rate::Fixed(60 << 16),
         interlace: g2g_core::Interlace::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
     };
     let jxs_caps = Caps::CompressedVideo {
         codec: g2g_core::VideoCodec::JpegXs,
@@ -92,6 +93,7 @@ fn raw_jpegxs_st2110_22_roundtrip() {
         height: Dim::Fixed(h as u32),
         framerate: Rate::Fixed(60 << 16),
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
         alignment: g2g_core::BitstreamAlignment::Unspecified,
     };
     let input = i422p10_ramp(w, h);

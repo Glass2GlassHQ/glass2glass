@@ -91,6 +91,7 @@ fn caps(format: RawVideoFormat, w: usize, h: usize) -> Caps {
         framerate: Rate::Fixed(FPS_Q16),
         interlace: Interlace::Interleaved,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
     }
 }
 
@@ -375,7 +376,8 @@ async fn all_fields_doubles_the_declared_framerate() {
             height: Dim::Fixed(H as u32),
             framerate: Rate::Fixed(50 << 16),
             interlace: Interlace::Progressive,
-            colorimetry: g2g_core::Colorimetry::UNKNOWN
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any
         }]
     );
 
@@ -397,7 +399,8 @@ async fn all_fields_doubles_the_declared_framerate() {
             height: Dim::Fixed(H as u32),
             framerate: Rate::Fixed(FPS_Q16),
             interlace: Interlace::Progressive,
-            colorimetry: g2g_core::Colorimetry::UNKNOWN
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any
         }],
         "the default rate is untouched"
     );
@@ -424,7 +427,8 @@ fn the_derived_output_caps_carry_the_doubled_rate() {
             height: Dim::Fixed(H as u32),
             framerate: Rate::Fixed(50 << 16),
             interlace: Interlace::Progressive,
-            colorimetry: g2g_core::Colorimetry::UNKNOWN
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any
         }]
     );
 
@@ -437,6 +441,7 @@ fn the_derived_output_caps_carry_the_doubled_rate() {
         framerate: Rate::Fixed(FPS_Q16),
         interlace: Interlace::Progressive,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
     };
     assert_eq!(derive(&progressive).alternatives(), &[progressive]);
 }

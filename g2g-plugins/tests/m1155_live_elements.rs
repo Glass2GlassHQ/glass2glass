@@ -59,6 +59,7 @@ fn h264() -> Caps {
         height: Dim::Fixed(240),
         framerate: Rate::Fixed(25 << 16),
         colorimetry: Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
         alignment: g2g_core::BitstreamAlignment::Unspecified,
     }
 }
@@ -80,6 +81,7 @@ fn rgba() -> Caps {
         framerate: Rate::Fixed(25 << 16),
         interlace: Interlace::Any,
         colorimetry: Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
     }
 }
 

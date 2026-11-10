@@ -93,6 +93,7 @@ fn h264_caps() -> Caps {
         height: Dim::Fixed(240),
         framerate: Rate::Fixed(30 << 16),
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
         alignment: g2g_core::BitstreamAlignment::Unspecified,
     }
 }
@@ -298,6 +299,7 @@ fn h265_access_units() -> Vec<Vec<u8>> {
         height: Dim::Any,
         framerate: Rate::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
         alignment: g2g_core::BitstreamAlignment::Unspecified,
     };
     parse
@@ -335,6 +337,7 @@ async fn h265_published_over_tcp_interleaved_reaches_an_h265_record_server() {
             height: Dim::Fixed(180),
             framerate: Rate::Fixed(30 << 16),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         },
         frames: units

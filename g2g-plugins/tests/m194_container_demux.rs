@@ -107,6 +107,7 @@ fn demuxer_then_decoder_is_a_two_hop_chain() {
         height: Dim::Any,
         framerate: Rate::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
         alignment: g2g_core::BitstreamAlignment::Unspecified,
     };
     let raw = Caps::RawVideo {
@@ -116,6 +117,7 @@ fn demuxer_then_decoder_is_a_two_hop_chain() {
         framerate: Rate::Any,
         interlace: g2g_core::Interlace::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
     };
     reg.register(ElementFactory::new(
         "stubdec",

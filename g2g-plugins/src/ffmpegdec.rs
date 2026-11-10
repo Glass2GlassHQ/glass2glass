@@ -1464,6 +1464,7 @@ impl PadTemplates for FfmpegVideoDec {
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         };
         let any_codec = |codec| Caps::CompressedVideo {
             codec,
@@ -1471,6 +1472,7 @@ impl PadTemplates for FfmpegVideoDec {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         Vec::from([
@@ -1533,6 +1535,7 @@ impl AsyncElement for FfmpegVideoDec {
                 height: Dim::Any,
                 framerate: Rate::Any,
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                pixel_aspect: g2g_core::PixelAspect::Any,
                 alignment: g2g_core::BitstreamAlignment::Unspecified,
             };
             if let Ok(narrowed) = upstream_caps.intersect(&candidate) {
@@ -2467,6 +2470,7 @@ fn derive_output_caps(input: &Caps, out: OutputFormat) -> CapsSet {
             height,
             framerate,
             colorimetry,
+            pixel_aspect: _,
             alignment: _,
         } if decodes(*codec) => {
             let mk = |f: RawVideoFormat| Caps::RawVideo {
@@ -2478,6 +2482,7 @@ fn derive_output_caps(input: &Caps, out: OutputFormat) -> CapsSet {
                 // Decode does not change how the samples map to colour, so the
                 // bitstream's colorimetry rides through onto the raw output.
                 colorimetry: *colorimetry,
+                pixel_aspect: g2g_core::PixelAspect::Any,
             };
             match out {
                 // Auto emits whichever chroma / depth the stream carries;
@@ -2529,6 +2534,7 @@ fn yuv420_caps(
         framerate,
         interlace,
         colorimetry,
+        pixel_aspect: g2g_core::PixelAspect::Any,
     }
 }
 
@@ -3696,6 +3702,7 @@ mod tests {
             height: Dim::Fixed(16),
             framerate: Rate::Fixed(30 << 16),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         let set = f(&input);
@@ -3713,6 +3720,7 @@ mod tests {
                 framerate: Rate::Fixed(30 << 16),
                 interlace: g2g_core::Interlace::Any,
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                pixel_aspect: g2g_core::PixelAspect::Any,
             });
             assert!(!set.intersect(&one).is_empty(), "Auto advertises {fmt:?}");
         }
@@ -3747,6 +3755,7 @@ mod tests {
             height: Dim::Fixed(1080),
             framerate: Rate::Fixed(30 << 16),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         let out = f(&h264);
@@ -3758,7 +3767,8 @@ mod tests {
                 height: Dim::Fixed(1080),
                 framerate: Rate::Fixed(30 << 16),
                 interlace: g2g_core::Interlace::Any,
-                colorimetry: g2g_core::Colorimetry::UNKNOWN
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                pixel_aspect: g2g_core::PixelAspect::Any
             }]
         );
 
@@ -3769,6 +3779,7 @@ mod tests {
             height: Dim::Fixed(1080),
             framerate: Rate::Fixed(30 << 16),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         assert_eq!(
@@ -3779,7 +3790,8 @@ mod tests {
                 height: Dim::Fixed(1080),
                 framerate: Rate::Fixed(30 << 16),
                 interlace: g2g_core::Interlace::Any,
-                colorimetry: g2g_core::Colorimetry::UNKNOWN
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                pixel_aspect: g2g_core::PixelAspect::Any
             }]
         );
         // A non-compressed input has no codec to decode → empty CapsSet.
@@ -3790,6 +3802,7 @@ mod tests {
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         };
         assert!(f(&raw).is_empty());
     }
@@ -3811,7 +3824,8 @@ mod tests {
                 height: Dim::Fixed(480),
                 framerate: Rate::Fixed(30 << 16),
                 interlace: Interlace::Progressive,
-                colorimetry: g2g_core::Colorimetry::UNKNOWN
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                pixel_aspect: g2g_core::PixelAspect::Any
             }
         );
     }
@@ -3833,7 +3847,8 @@ mod tests {
                 height: Dim::Fixed(720),
                 framerate: Rate::Fixed(30 << 16),
                 interlace: Interlace::Progressive,
-                colorimetry: g2g_core::Colorimetry::UNKNOWN
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                pixel_aspect: g2g_core::PixelAspect::Any
             }
         );
     }
@@ -3865,6 +3880,7 @@ mod tests {
                 height: Dim::Any,
                 framerate: Rate::Any,
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                pixel_aspect: g2g_core::PixelAspect::Any,
                 alignment: g2g_core::BitstreamAlignment::Unspecified,
             };
             assert_eq!(dec.intercept_caps(&caps), Ok(caps));
@@ -3877,6 +3893,7 @@ mod tests {
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         };
         assert_eq!(dec.intercept_caps(&raw), Err(G2gError::CapsMismatch));
     }
@@ -3890,6 +3907,7 @@ mod tests {
             height: Dim::Fixed(720),
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         assert_eq!(dec.intercept_caps(&proposal), Ok(proposal));
@@ -4050,6 +4068,7 @@ mod tests {
             height: Dim::Fixed(1080),
             framerate: Rate::Fixed(30 << 16),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         let CapsConstraint::DerivedOutput(f_sw) = sw.caps_constraint_as_transform() else {
@@ -4257,6 +4276,7 @@ mod tests {
             height: Dim::Fixed(1080),
             framerate: Rate::Fixed(30 << 16),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         let format_first = FfmpegVideoDec::new()
@@ -4294,6 +4314,7 @@ mod tests {
             height: Dim::Fixed(1080),
             framerate: Rate::Fixed(30 << 16),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         assert_eq!(
@@ -4304,7 +4325,8 @@ mod tests {
                 height: Dim::Fixed(1080),
                 framerate: Rate::Fixed(30 << 16),
                 interlace: g2g_core::Interlace::Any,
-                colorimetry: g2g_core::Colorimetry::UNKNOWN
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                pixel_aspect: g2g_core::PixelAspect::Any
             }]
         );
     }
@@ -4353,6 +4375,7 @@ mod tests {
             height: Dim::Fixed(h),
             framerate: Rate::Fixed(30 << 16),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         }
     }
@@ -4431,6 +4454,7 @@ mod tests {
             framerate: Rate::Fixed(30 << 16),
             interlace: g2g_core::Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         };
         let log = core::cell::RefCell::new(Vec::new());
         let mut rec = RecSink(&log);
@@ -4486,6 +4510,7 @@ mod tests {
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         };
         let log = core::cell::RefCell::new(Vec::new());
         let mut rec = RecSink(&log);

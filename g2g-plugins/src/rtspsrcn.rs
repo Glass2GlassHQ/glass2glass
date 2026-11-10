@@ -302,6 +302,7 @@ impl RtspSrcN {
                 height: Dim::Fixed(h),
                 framerate: PLACEHOLDER_FRAMERATE,
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                pixel_aspect: g2g_core::PixelAspect::Any,
                 alignment: g2g_core::BitstreamAlignment::Unspecified,
             };
         }
@@ -539,6 +540,7 @@ fn video_caps_for(stream: &retina::client::Stream, codec: VideoCodec) -> Option<
         height: Dim::Fixed(h),
         framerate: rate_from_frame_rate(p.frame_rate()),
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
         alignment: g2g_core::BitstreamAlignment::Unspecified,
     })
 }
@@ -552,6 +554,7 @@ fn with_placeholder_framerate(caps: Caps) -> Caps {
             height,
             framerate: Rate::Any,
             colorimetry,
+            pixel_aspect,
             alignment,
         } => Caps::CompressedVideo {
             codec,
@@ -559,6 +562,7 @@ fn with_placeholder_framerate(caps: Caps) -> Caps {
             height,
             framerate: PLACEHOLDER_FRAMERATE,
             colorimetry,
+            pixel_aspect,
             alignment,
         },
         other => other,
@@ -1627,6 +1631,7 @@ mod tests {
                 height: Dim::Fixed(720),
                 framerate: Rate::Fixed(30 << 16),
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                pixel_aspect: g2g_core::PixelAspect::Any,
                 alignment: g2g_core::BitstreamAlignment::Unspecified,
             },
             audio: Some(Caps::Audio {

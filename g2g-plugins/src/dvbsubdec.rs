@@ -145,6 +145,7 @@ impl DvbSubDec {
             framerate: Rate::Fixed(self.framerate_q16),
             interlace: g2g_core::Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         }
     }
 
@@ -429,6 +430,7 @@ impl PadTemplates for DvbSubDec {
                 framerate: Rate::Fixed(25 << 16),
                 interlace: g2g_core::Interlace::Any,
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                pixel_aspect: g2g_core::PixelAspect::Any,
             })),
         ])
     }
@@ -691,7 +693,8 @@ mod tests {
                 height: Dim::Fixed(1080),
                 framerate: Rate::Fixed(25 << 16),
                 interlace: g2g_core::Interlace::Any,
-                colorimetry: g2g_core::Colorimetry::UNKNOWN
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                pixel_aspect: g2g_core::PixelAspect::Any
             }],
             "the display definition segment refines the geometry once"
         );

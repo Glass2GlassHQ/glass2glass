@@ -85,6 +85,7 @@ fn rgba_caps() -> Caps {
         framerate: Rate::Fixed(RECORD_FPS << Q16_SHIFT),
         interlace: Interlace::Progressive,
         colorimetry: Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
     }
 }
 

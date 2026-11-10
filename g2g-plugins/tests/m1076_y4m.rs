@@ -95,6 +95,7 @@ impl Probe {
             framerate: Rate::Fixed(self.framerate_q16),
             interlace: Interlace::Progressive,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         }
     }
 

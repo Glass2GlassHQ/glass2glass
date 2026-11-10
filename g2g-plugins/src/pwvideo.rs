@@ -114,6 +114,7 @@ impl VideoInfo {
             framerate: Rate::Fixed(rate_q16(self.fps_num, self.fps_denom)),
             interlace: g2g_core::Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::SQUARE,
         }
     }
 

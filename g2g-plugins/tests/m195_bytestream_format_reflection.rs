@@ -97,6 +97,7 @@ fn registry_with_vp9_stub() -> Registry {
         height: Dim::Any,
         framerate: Rate::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
         alignment: g2g_core::BitstreamAlignment::Unspecified,
     };
     let raw = Caps::RawVideo {
@@ -106,6 +107,7 @@ fn registry_with_vp9_stub() -> Registry {
         framerate: Rate::Any,
         interlace: g2g_core::Interlace::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
     };
     reg.register(ElementFactory::new(
         "vp9stub",

@@ -52,6 +52,7 @@ async fn decode_fixture(cv: bool) -> Vec<Frame> {
         height: Dim::Any,
         framerate: Rate::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
         alignment: g2g_core::BitstreamAlignment::Unspecified,
     };
     let mut parse = g2g_plugins::h264parse::H264Parse::reframing();
@@ -88,6 +89,7 @@ async fn decode_fixture(cv: bool) -> Vec<Frame> {
         height: Dim::Fixed(480),
         framerate: Rate::Fixed(30 << 16),
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
         alignment: g2g_core::BitstreamAlignment::Unspecified,
     };
     let narrowed = dec.intercept_caps(&dec_caps).expect("intercept H.264");
@@ -115,6 +117,7 @@ async fn present_and_check(frames: Vec<Frame>) -> u64 {
         framerate: Rate::Fixed(30 << 16),
         interlace: Interlace::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
     };
     let narrowed = sink.intercept_caps(&caps).expect("intercept NV12");
     assert!(matches!(

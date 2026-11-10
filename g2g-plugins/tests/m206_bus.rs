@@ -84,6 +84,7 @@ async fn each_source_posts_its_own_stream_start() {
         framerate: Rate::Fixed(30 << 16),
         interlace: g2g_core::Interlace::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
     };
     let (bus, handle) = Bus::new(64);
     let mut a = VideoTestSrc::new(8, 8, 30, 3);
@@ -109,6 +110,7 @@ fn raw_video_caps() -> Caps {
         framerate: Rate::Fixed(30 << 16),
         interlace: g2g_core::Interlace::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
     }
 }
 

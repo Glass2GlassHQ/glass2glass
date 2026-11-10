@@ -255,6 +255,7 @@ async fn flvmux_output_probes_as_playable_h264_flv() {
         height: Dim::Fixed(240),
         framerate: Rate::Fixed(25 << 16),
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
         alignment: g2g_core::BitstreamAlignment::Unspecified,
     };
     let mut mux = FlvMuxN::new(1);

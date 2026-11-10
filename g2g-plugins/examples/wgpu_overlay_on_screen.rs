@@ -60,6 +60,7 @@ fn video_caps() -> Caps {
         framerate: Rate::Fixed(FRAMERATE << 16),
         interlace: Interlace::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
     }
 }
 

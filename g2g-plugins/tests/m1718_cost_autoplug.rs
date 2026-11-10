@@ -120,6 +120,7 @@ mod decoder_choice {
             height: Dim::Fixed(height),
             framerate: Rate::Any,
             colorimetry: Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         }
     }

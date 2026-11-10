@@ -328,6 +328,7 @@ impl UdpSrc {
             height: Dim::Fixed(self.height),
             framerate: Rate::Fixed(self.fps << 16),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         }
     }
@@ -955,6 +956,7 @@ impl PadTemplates for UdpSrc {
                 height: Dim::Any,
                 framerate: Rate::Any,
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                pixel_aspect: g2g_core::PixelAspect::Any,
                 alignment: g2g_core::BitstreamAlignment::Unspecified,
             },
             opus_caps(),

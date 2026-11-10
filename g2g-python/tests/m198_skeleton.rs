@@ -20,6 +20,7 @@ fn rgba(w: u32, h: u32, fps: u32) -> Caps {
         framerate: Rate::Fixed(fps),
         interlace: g2g_core::Interlace::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
     }
 }
 
@@ -61,6 +62,7 @@ fn rejects_a_format_outside_the_accepted_set() {
         framerate: Rate::Fixed(30),
         interlace: g2g_core::Interlace::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
     };
     assert!(el.intercept_caps(&nv12).is_err());
 }
@@ -74,6 +76,7 @@ fn with_accept_hosts_a_different_format() {
         framerate: Rate::Any,
         interlace: g2g_core::Interlace::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
     };
     let el = PyTransform::new("action", "ActionTransform").with_accept(nv12);
     let upstream = Caps::RawVideo {
@@ -83,6 +86,7 @@ fn with_accept_hosts_a_different_format() {
         framerate: Rate::Fixed(25),
         interlace: g2g_core::Interlace::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
     };
     assert_eq!(el.intercept_caps(&upstream).unwrap(), upstream);
 }

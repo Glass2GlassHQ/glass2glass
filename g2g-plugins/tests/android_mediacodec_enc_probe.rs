@@ -83,6 +83,7 @@ async fn encode_into(mut enc: MediaCodecEnc, sink: &mut dyn OutputSink) {
         framerate: Rate::Any,
         interlace: g2g_core::Interlace::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
     };
     let narrowed = enc.intercept_caps(&caps).expect("intercept caps");
     assert!(matches!(

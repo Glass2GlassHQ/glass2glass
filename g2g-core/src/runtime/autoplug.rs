@@ -3565,6 +3565,7 @@ mod tests {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: crate::Colorimetry::UNKNOWN,
+            pixel_aspect: crate::PixelAspect::Any,
             alignment: crate::BitstreamAlignment::Unspecified,
         }
     }
@@ -3577,6 +3578,7 @@ mod tests {
             framerate: Rate::Any,
             interlace: crate::Interlace::Any,
             colorimetry: crate::Colorimetry::UNKNOWN,
+            pixel_aspect: crate::PixelAspect::Any,
         }
     }
 
@@ -3785,6 +3787,7 @@ mod tests {
             height: Dim::Fixed(height),
             framerate: Rate::Any,
             colorimetry: crate::Colorimetry::UNKNOWN,
+            pixel_aspect: crate::PixelAspect::Any,
             alignment: crate::BitstreamAlignment::Unspecified,
         }
     }

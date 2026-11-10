@@ -475,6 +475,7 @@ impl NvDec {
                     height: Dim::Any,
                     framerate: Rate::Any,
                     colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                    pixel_aspect: g2g_core::PixelAspect::Any,
                     alignment: g2g_core::BitstreamAlignment::Unspecified,
                 })
                 .collect(),
@@ -527,6 +528,7 @@ impl NvDec {
             },
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         }))
     }
@@ -569,6 +571,7 @@ impl NvDec {
             framerate: self.framerate.clone(),
             interlace: g2g_core::Interlace::Any,
             colorimetry,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         }
     }
 
@@ -1818,6 +1821,7 @@ fn derive_output_caps(input: &Caps) -> CapsSet {
             height,
             framerate,
             colorimetry,
+            pixel_aspect: _,
             alignment: _,
         } => CapsSet::from_alternatives(
             [RawVideoFormat::Nv12, RawVideoFormat::P010]
@@ -1829,6 +1833,7 @@ fn derive_output_caps(input: &Caps) -> CapsSet {
                     framerate: framerate.clone(),
                     interlace: g2g_core::Interlace::Any,
                     colorimetry: *colorimetry,
+                    pixel_aspect: g2g_core::PixelAspect::Any,
                 })
                 .collect(),
         ),
@@ -1848,6 +1853,7 @@ impl PadTemplates for NvDec {
                     framerate: Rate::Any,
                     interlace: g2g_core::Interlace::Any,
                     colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                    pixel_aspect: g2g_core::PixelAspect::Any,
                 })
                 .collect(),
         );
@@ -2153,6 +2159,7 @@ mod tests {
             height: Dim::Fixed(h),
             framerate: Rate::Fixed(30 << 16),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         }
     }
@@ -2468,7 +2475,8 @@ mod tests {
                 height: Dim::Fixed(1080),
                 framerate: Rate::Fixed(30 << 16),
                 interlace: g2g_core::Interlace::Any,
-                colorimetry: g2g_core::Colorimetry::UNKNOWN
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                pixel_aspect: g2g_core::PixelAspect::Any
             }));
         }
         let compressed = |codec| Caps::CompressedVideo {
@@ -2477,6 +2485,7 @@ mod tests {
             height: Dim::Fixed(480),
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         // VP9 and AV1 (Ampere+) decode too.
@@ -2501,7 +2510,8 @@ mod tests {
                 height: Dim::Fixed(720),
                 framerate: Rate::Fixed(30 << 16),
                 interlace: g2g_core::Interlace::Any,
-                colorimetry: g2g_core::Colorimetry::UNKNOWN
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                pixel_aspect: g2g_core::PixelAspect::Any
             }
         );
         // A 10-bit stream announces the semi-planar 16-bit surface instead.
@@ -2523,6 +2533,7 @@ mod tests {
             height: Dim::Fixed(1080),
             framerate: Rate::Fixed(30 << 16),
             colorimetry: g2g_core::Colorimetry::BT709,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         let raw_colorimetry = |caps: &Caps| match caps {
@@ -2804,6 +2815,7 @@ mod tests {
             height: Dim::Fixed(h),
             framerate: Rate::Fixed(30 << 16),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         match dec.configure_pipeline(&caps) {
@@ -2827,6 +2839,7 @@ mod tests {
             height: Dim::Fixed(480),
             framerate: Rate::Fixed(25 << 16),
             colorimetry: g2g_core::Colorimetry::BT709,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         dec.configure_pipeline(&refined).expect("reconfigure");
@@ -2917,7 +2930,8 @@ mod tests {
                 height: Dim::Fixed(480),
                 framerate: Rate::Fixed(30 << 16),
                 interlace: g2g_core::Interlace::Any,
-                colorimetry: g2g_core::Colorimetry::UNKNOWN
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                pixel_aspect: g2g_core::PixelAspect::Any
             }],
             "a 10-bit stream announces the P010 surface"
         );
@@ -3095,7 +3109,8 @@ mod tests {
                 height: Dim::Fixed(480),
                 framerate: Rate::Fixed(30 << 16),
                 interlace: g2g_core::Interlace::Any,
-                colorimetry: g2g_core::Colorimetry::UNKNOWN
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                pixel_aspect: g2g_core::PixelAspect::Any
             }]
         );
         let head = sink.luma_head.expect("luma read back");
@@ -3315,6 +3330,7 @@ mod tests {
             framerate: Rate::Fixed(30 << 16),
             interlace: g2g_core::Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         };
         let mut enc = NvEnc::new().with_codec(codec);
         enc.configure_pipeline(&nv12_caps).unwrap();
@@ -3402,6 +3418,7 @@ mod tests {
             height: Dim::Fixed(H),
             framerate: Rate::Fixed(30 << 16),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         if dec.configure_pipeline(&in_caps).is_err() {
@@ -3435,7 +3452,8 @@ mod tests {
                 height: Dim::Fixed(H),
                 framerate: Rate::Fixed(30 << 16),
                 interlace: g2g_core::Interlace::Any,
-                colorimetry: g2g_core::Colorimetry::UNKNOWN
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                pixel_aspect: g2g_core::PixelAspect::Any
             }],
             "NV12 output caps announced once at the decoded geometry"
         );

@@ -115,6 +115,7 @@ fn nv12_output_caps() -> Caps {
         framerate: Rate::Fixed(FRAMERATE),
         interlace: g2g_core::Interlace::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
     }
 }
 
@@ -127,6 +128,7 @@ fn refined_output_caps() -> Caps {
         framerate: Rate::Fixed(FRAMERATE),
         interlace: g2g_core::Interlace::Any,
         colorimetry: STREAM_COLORIMETRY,
+        pixel_aspect: g2g_core::PixelAspect::Any,
     }
 }
 
@@ -168,6 +170,7 @@ fn configured_decoder() -> Option<VulkanVideoDec> {
         height: Dim::Fixed(HEIGHT),
         framerate: Rate::Fixed(FRAMERATE),
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
         alignment: g2g_core::BitstreamAlignment::Unspecified,
     })
     .expect("configure opens the decode device");
@@ -225,6 +228,7 @@ fn the_solved_output_caps_are_forwarded_then_refined_once() {
         framerate: Rate::Fixed(FRAMERATE),
         interlace: g2g_core::Interlace::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
     };
     // The system path emits NV12; RGBA belongs to the GPU-texture path this
     // decoder was not steered onto.

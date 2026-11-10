@@ -28,6 +28,7 @@ fn nv12() -> Caps {
         framerate: Rate::Fixed(30),
         interlace: g2g_core::Interlace::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
     }
 }
 
@@ -39,6 +40,7 @@ fn nv12_any() -> CapsSet {
         framerate: Rate::Any,
         interlace: g2g_core::Interlace::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
     })
 }
 
@@ -224,6 +226,7 @@ fn the_upstream_allocation_proposal_names_the_domain_the_hosted_code_reads() {
         framerate: Rate::Any,
         interlace: g2g_core::Interlace::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
     };
     assert!(nv12_element().propose_allocation(&unfixed).is_none());
 }

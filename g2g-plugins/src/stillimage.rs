@@ -113,6 +113,7 @@ impl StillImageOutput {
                 framerate: framerate.clone(),
                 interlace: g2g_core::Interlace::Any,
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                pixel_aspect: g2g_core::PixelAspect::Any,
             }))
             .await?;
             self.out_dims = Some((format, width, height));

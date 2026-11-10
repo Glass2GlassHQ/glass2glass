@@ -220,6 +220,7 @@ mod av1 {
             framerate: Rate::Fixed(FPS << 16),
             interlace: Interlace::Any,
             colorimetry,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         }
     }
 
@@ -256,6 +257,7 @@ mod av1 {
                 height: Dim::Fixed(HEIGHT),
                 framerate: Rate::Fixed(FPS << 16),
                 colorimetry: Colorimetry::BT709,
+                pixel_aspect: g2g_core::PixelAspect::Any,
                 alignment: g2g_core::BitstreamAlignment::Unspecified,
             }],
             "the encoder announces the input colorimetry on its output caps"
@@ -288,6 +290,7 @@ mod av1 {
                 height: Dim::Fixed(HEIGHT),
                 framerate: Rate::Fixed(FPS << 16),
                 colorimetry: Colorimetry::UNKNOWN,
+                pixel_aspect: g2g_core::PixelAspect::Any,
                 alignment: g2g_core::BitstreamAlignment::Unspecified,
             }],
             "an untagged input stays untagged on the output caps"
@@ -337,6 +340,7 @@ mod mjpeg {
             framerate: Rate::Fixed(FPS << 16),
             interlace: Interlace::Any,
             colorimetry,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         }
     }
 
@@ -369,6 +373,7 @@ mod mjpeg {
                     height: Dim::Fixed(HEIGHT),
                     framerate: Rate::Fixed(FPS << 16),
                     colorimetry: Colorimetry::JPEG,
+                    pixel_aspect: g2g_core::PixelAspect::Any,
                     alignment: g2g_core::BitstreamAlignment::Unspecified,
                 }],
                 "a JPEG is JFIF colorimetry whatever fed it ({input:?})"
@@ -420,6 +425,7 @@ mod mjpeg {
                     height: Dim::Any,
                     framerate: Rate::Any,
                     colorimetry: Colorimetry::UNKNOWN,
+                    pixel_aspect: g2g_core::PixelAspect::Any,
                     alignment: g2g_core::BitstreamAlignment::Unspecified,
                 })
                 .expect("configure MjpegDec");
@@ -514,6 +520,7 @@ mod nvenc {
             framerate: Rate::Fixed(FPS << 16),
             interlace: Interlace::Any,
             colorimetry,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         }
     }
 
@@ -572,6 +579,7 @@ mod nvenc {
                 height: Dim::Fixed(HEIGHT),
                 framerate: Rate::Fixed(FPS << 16),
                 colorimetry: Colorimetry::BT709,
+                pixel_aspect: g2g_core::PixelAspect::Any,
                 alignment: g2g_core::BitstreamAlignment::Unspecified,
             }],
             "the encoder announces the input colorimetry on its output caps"

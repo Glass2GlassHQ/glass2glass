@@ -166,6 +166,7 @@ mod tests {
             framerate: Rate::Fixed(30 << 16),
             interlace: crate::Interlace::Any,
             colorimetry: crate::Colorimetry::UNKNOWN,
+            pixel_aspect: crate::PixelAspect::Any,
         }
     }
 
@@ -178,6 +179,7 @@ mod tests {
             framerate: Rate::Any,
             interlace: crate::Interlace::Any,
             colorimetry: crate::Colorimetry::UNKNOWN,
+            pixel_aspect: crate::PixelAspect::Any,
         }
     }
 

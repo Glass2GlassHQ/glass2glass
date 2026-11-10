@@ -39,6 +39,7 @@ fn nv12_caps() -> Caps {
         framerate: Rate::Any,
         interlace: Interlace::Any,
         colorimetry: Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
     }
 }
 

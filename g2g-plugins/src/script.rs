@@ -274,6 +274,7 @@ impl ScriptElement {
                 framerate: Rate::Any,
                 interlace: g2g_core::Interlace::Any,
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                pixel_aspect: g2g_core::PixelAspect::Any,
             },
             fixed: None,
             configured: false,
@@ -700,6 +701,7 @@ impl PadTemplates for ScriptElement {
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         };
         let set = CapsSet::one(rgba);
         std::vec::Vec::from([PadTemplate::sink(set.clone()), PadTemplate::source(set)])
@@ -1213,6 +1215,7 @@ mod tests {
             framerate: Rate::Fixed(30),
             interlace: g2g_core::Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         }
     }
 

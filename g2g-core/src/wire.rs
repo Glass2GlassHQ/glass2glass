@@ -42,10 +42,10 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::caps::{
-    AudioFormat, ByteStreamEncoding, Caps, ClosedCaptionFormat, CodecTag, ColorPrimaries,
-    ColorRange, Colorimetry, Dim, Interlace, MatrixCoefficients, ProResVariant, Rate,
-    RawVideoFormat, St2038Alignment, SubPictureFormat, TagNamespace, TensorDType, TensorLayout,
-    TensorShape, TextFormat, TransferCharacteristics, VideoCodec,
+    AspectRatio, AudioFormat, ByteStreamEncoding, Caps, ClosedCaptionFormat, CodecTag,
+    ColorPrimaries, ColorRange, Colorimetry, Dim, Interlace, MatrixCoefficients, PixelAspect,
+    ProResVariant, Rate, RawVideoFormat, St2038Alignment, SubPictureFormat, TagNamespace,
+    TensorDType, TensorLayout, TensorShape, TextFormat, TransferCharacteristics, VideoCodec,
 };
 use crate::channels::ChannelLayout;
 use crate::frame::{Frame, FrameTiming, PipelinePacket};
@@ -58,8 +58,9 @@ use crate::tensor::MAX_TENSOR_RANK;
 /// incompatible layout change so a decoder rejects a mismatched peer up front
 /// rather than mis-parsing. Version 2 added the four colorimetry bytes to both
 /// video caps; version 3 added the u16 channel-layout mask to audio
-/// caps; version 4 widened the timecode frame count to u16.
-pub const WIRE_VERSION: u8 = 4;
+/// caps; version 4 widened the timecode frame count to u16; version 5 added the
+/// pixel aspect ratio to both video caps.
+pub const WIRE_VERSION: u8 = 5;
 
 /// Failure decoding (or encoding) a [`PipelinePacket`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -781,6 +782,25 @@ fn get_colorimetry(r: &mut Reader) -> Result<Colorimetry, WireError> {
 
 // ---- Caps ----
 
+// numerator then denominator, 0/0 for `PixelAspect::Any`
+fn put_pixel_aspect(w: &mut Writer, pixel_aspect: &PixelAspect) {
+    let (numerator, denominator) = match pixel_aspect {
+        PixelAspect::Any => (0, 0),
+        PixelAspect::Exact(ratio) => (ratio.numerator(), ratio.denominator()),
+    };
+    w.u32(numerator);
+    w.u32(denominator);
+}
+
+fn get_pixel_aspect(r: &mut Reader) -> Result<PixelAspect, WireError> {
+    match (r.u32()?, r.u32()?) {
+        (0, 0) => Ok(PixelAspect::Any),
+        (numerator, denominator) => AspectRatio::new(numerator, denominator)
+            .map(PixelAspect::Exact)
+            .ok_or(WireError::BadTag),
+    }
+}
+
 fn put_caps(w: &mut Writer, c: &Caps) {
     match c {
         Caps::CompressedVideo {
@@ -789,6 +809,7 @@ fn put_caps(w: &mut Writer, c: &Caps) {
             height,
             framerate,
             colorimetry,
+            pixel_aspect,
             alignment: _,
         } => {
             w.u8(0);
@@ -797,6 +818,7 @@ fn put_caps(w: &mut Writer, c: &Caps) {
             put_dim(w, height);
             put_rate(w, framerate);
             put_colorimetry(w, colorimetry);
+            put_pixel_aspect(w, pixel_aspect);
         }
         Caps::RawVideo {
             format,
@@ -805,6 +827,7 @@ fn put_caps(w: &mut Writer, c: &Caps) {
             framerate,
             interlace,
             colorimetry,
+            pixel_aspect,
         } => {
             w.u8(1);
             w.u8(raw_format_to_u8(*format));
@@ -813,6 +836,7 @@ fn put_caps(w: &mut Writer, c: &Caps) {
             put_rate(w, framerate);
             w.u8(interlace_to_u8(*interlace));
             put_colorimetry(w, colorimetry);
+            put_pixel_aspect(w, pixel_aspect);
         }
         Caps::Audio {
             format,
@@ -883,6 +907,7 @@ fn get_caps(r: &mut Reader) -> Result<Caps, WireError> {
             height: get_dim(r)?,
             framerate: get_rate(r)?,
             colorimetry: get_colorimetry(r)?,
+            pixel_aspect: get_pixel_aspect(r)?,
             alignment: crate::BitstreamAlignment::Unspecified,
         },
         1 => Caps::RawVideo {
@@ -892,6 +917,7 @@ fn get_caps(r: &mut Reader) -> Result<Caps, WireError> {
             framerate: get_rate(r)?,
             interlace: interlace_from_u8(r.u8()?)?,
             colorimetry: get_colorimetry(r)?,
+            pixel_aspect: get_pixel_aspect(r)?,
         },
         2 => Caps::Audio {
             format: get_audio_format(r)?,
@@ -1725,6 +1751,9 @@ mod tests {
                 },
                 framerate: Rate::Fixed(30 << 16),
                 colorimetry: crate::Colorimetry::BT709,
+                pixel_aspect: crate::PixelAspect::Exact(
+                    crate::AspectRatio::new(8, 9).expect("nonzero"),
+                ),
                 alignment: crate::BitstreamAlignment::Unspecified,
             },
             Caps::RawVideo {
@@ -1734,6 +1763,7 @@ mod tests {
                 framerate: Rate::Any,
                 interlace: crate::Interlace::Any,
                 colorimetry: crate::Colorimetry::UNKNOWN,
+                pixel_aspect: crate::PixelAspect::Any,
             },
             Caps::RawVideo {
                 format: RawVideoFormat::P010,
@@ -1742,6 +1772,9 @@ mod tests {
                 framerate: Rate::Fixed(60 << 16),
                 interlace: crate::Interlace::Any,
                 colorimetry: crate::Colorimetry::BT2100_PQ,
+                pixel_aspect: crate::PixelAspect::Exact(
+                    crate::AspectRatio::new(10, 11).expect("nonzero"),
+                ),
             },
             Caps::Audio {
                 format: AudioFormat::Opus,
@@ -1833,6 +1866,7 @@ mod tests {
             height: Dim::Fixed(576),
             framerate: Rate::Fixed(25 << 16),
             colorimetry: crate::Colorimetry::UNKNOWN,
+            pixel_aspect: crate::PixelAspect::Any,
             alignment: crate::BitstreamAlignment::Unspecified,
         };
         match roundtrip(&PipelinePacket::CapsChanged(caps.clone())) {

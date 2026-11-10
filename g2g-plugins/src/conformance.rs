@@ -595,6 +595,7 @@ pub fn mp4() -> [MaturityRecord; 2] {
         height: Dim::Fixed(HEIGHT),
         framerate: Rate::Any,
         colorimetry: Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
         alignment: BitstreamAlignment::Unspecified,
     };
     let mut mux = Mp4MuxN::new(1);

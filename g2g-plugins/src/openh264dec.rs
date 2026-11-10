@@ -83,6 +83,7 @@ fn output_caps(width: Dim, height: Dim, framerate: Rate, colorimetry: Colorimetr
         framerate,
         interlace: Interlace::Progressive,
         colorimetry,
+        pixel_aspect: g2g_core::PixelAspect::Any,
     }
 }
 
@@ -142,6 +143,7 @@ impl OpenH264Dec {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: BitstreamAlignment::AccessUnit,
         }
     }
@@ -382,6 +384,7 @@ mod tests {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment,
         }
     }

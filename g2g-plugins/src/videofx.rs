@@ -144,6 +144,7 @@ pub(crate) fn any_geometry(format: RawVideoFormat) -> Caps {
         framerate: Rate::Any,
         interlace: Interlace::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
     }
 }
 
@@ -209,6 +210,7 @@ pub(crate) fn drive<'a, F: PixelFilter>(
                     framerate: rate,
                     interlace: Interlace::Any,
                     colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                    pixel_aspect: g2g_core::PixelAspect::Any,
                 };
                 if filter.state().last_caps.as_ref() != Some(&new_caps) {
                     push_control(out, || PipelinePacket::CapsChanged(new_caps.clone())).await?;
@@ -284,6 +286,7 @@ mod tests {
             framerate: Rate::Any,
             interlace: Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         };
         element.configure_pipeline(&caps).unwrap();
         let mut sink = CollectSink::default();

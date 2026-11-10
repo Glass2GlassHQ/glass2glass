@@ -68,6 +68,7 @@ fn python_writes_into_frame_memory_in_place() {
         framerate: Rate::Fixed(30),
         interlace: g2g_core::Interlace::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
     };
     // Instantiates the Python class under the GIL.
     el.configure_pipeline(&caps).unwrap();
@@ -106,6 +107,7 @@ fn worker_is_reused_across_frames() {
         framerate: Rate::Fixed(30),
         interlace: g2g_core::Interlace::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
     };
     el.configure_pipeline(&caps).unwrap();
 

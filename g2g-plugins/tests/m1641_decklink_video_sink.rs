@@ -184,6 +184,7 @@ fn caps_without_a_mode_fail_at_configure() {
         framerate,
         interlace,
         colorimetry,
+        pixel_aspect: g2g_core::PixelAspect::Any,
     };
     assert_eq!(
         sink.configure_pipeline(&odd_size).err(),

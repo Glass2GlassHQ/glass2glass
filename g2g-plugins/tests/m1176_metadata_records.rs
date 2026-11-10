@@ -70,6 +70,7 @@ fn rgba_caps(width: u32, height: u32, framerate: Rate) -> Caps {
         framerate,
         interlace: Interlace::Progressive,
         colorimetry: Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
     }
 }
 

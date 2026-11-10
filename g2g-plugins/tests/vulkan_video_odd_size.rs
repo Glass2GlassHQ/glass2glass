@@ -323,6 +323,7 @@ fn the_two_plane_texture_output_carries_an_odd_picture_in_an_even_texture() {
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         })
         .expect("download configures");
     let mut sink = CollectSink::default();

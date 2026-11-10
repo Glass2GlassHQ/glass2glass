@@ -61,6 +61,7 @@ fn fourccs_map_to_the_caps_they_produce() {
             height: Dim::Fixed(720),
             framerate: Rate::Fixed(30 << 16),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::SQUARE,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         }
     );
@@ -190,6 +191,7 @@ async fn mjpeg_pinned_chain_captures_jpeg_frames() {
         height: Dim::Any,
         framerate: Rate::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
         alignment: g2g_core::BitstreamAlignment::Unspecified,
     });
     let mut sink = FirstFrameSink::default();

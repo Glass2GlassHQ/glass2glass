@@ -421,6 +421,7 @@ impl MkvDemux {
                     height: Dim::Fixed(track.height),
                     framerate: default_duration_framerate(track.default_duration_ns),
                     colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                    pixel_aspect: g2g_core::PixelAspect::Any,
                     alignment: crate::annexb::sample_alignment(codec),
                 })
             }
@@ -525,6 +526,7 @@ impl MkvDemux {
             height: dim(track.height),
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: crate::annexb::sample_alignment(codec),
         };
         let audio = |format| Caps::Audio {
@@ -2151,6 +2153,7 @@ mod tests {
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         };
         assert!(d.intercept_caps(&raw).is_err());
         // A TS byte stream is the wrong container.
@@ -2174,6 +2177,7 @@ mod tests {
                 height: Dim::Fixed(240),
                 framerate: Rate::Any,
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                pixel_aspect: g2g_core::PixelAspect::Any,
                 alignment: g2g_core::BitstreamAlignment::Unspecified,
             }]
         );

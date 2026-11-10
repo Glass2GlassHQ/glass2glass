@@ -119,6 +119,7 @@ async fn split_and_insert(
         height: Dim::Any,
         framerate: Rate::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
         alignment: g2g_core::BitstreamAlignment::Unspecified,
     };
     parser.configure_pipeline(&caps).expect("parser configures");

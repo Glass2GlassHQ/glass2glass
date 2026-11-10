@@ -377,6 +377,7 @@ impl PipeWireVideoSrc {
             framerate: Rate::Fixed(rate_q16(self.req_fps, 1)),
             interlace: g2g_core::Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::SQUARE,
         })
     }
 }
@@ -836,6 +837,7 @@ impl PadTemplates for PipeWireVideoSrc {
                 framerate: Rate::Any,
                 interlace: g2g_core::Interlace::Any,
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                pixel_aspect: g2g_core::PixelAspect::SQUARE,
             })
             .collect();
         Vec::from([PadTemplate::source(CapsSet::from_alternatives(
@@ -1653,7 +1655,8 @@ mod tests {
                 height: Dim::Fixed(240),
                 framerate: Rate::Fixed(25 << 16),
                 interlace: g2g_core::Interlace::Any,
-                colorimetry: g2g_core::Colorimetry::UNKNOWN
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                pixel_aspect: g2g_core::PixelAspect::SQUARE
             })
         );
         // never advertise Dim::Any / a zero dimension: fixate has to be a no-op
@@ -1836,7 +1839,8 @@ mod tests {
                 height: Dim::Fixed(240),
                 framerate: Rate::Fixed(30 << 16),
                 interlace: g2g_core::Interlace::Any,
-                colorimetry: g2g_core::Colorimetry::UNKNOWN
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                pixel_aspect: g2g_core::PixelAspect::SQUARE
             })
         );
 

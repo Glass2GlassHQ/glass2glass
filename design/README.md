@@ -634,6 +634,21 @@ own size, the chroma plane at its rounded-up size with no resample, as GStreamer
 `videoflip` and ffmpeg's `hflip` / `vflip` / `transpose` do, and matches ffmpeg
 byte for byte.
 
+### Pixel aspect ratio
+
+Both video variants carry `pixel_aspect: PixelAspect`, GStreamer's
+`pixel-aspect-ratio`: `Any`, or `Exact(AspectRatio)`, a pixel's width over its
+height as a reduced nonzero fraction. `Any` is the absent gst field. It intersects
+with any value and survives `fixate`, and a consumer reads it as 1/1, as gst does.
+Two different exact values fail to intersect, so a caps filter asking for a ratio a
+source cannot produce fails the link. Sources whose pixels are square
+(`videotestsrc`, `patternsrc`, the v4l2, libcamera, PipeWire and platform camera
+and screen sources) advertise 1/1. A transform that passes the picture size
+through couples the ratio across the link, and `videoconvert` and `colorspace`
+carry the input's ratio to their output. The caps string field is
+`pixel-aspect-ratio=n/d`, printed only for an exact value. The wire format carries
+it from version 5.
+
 ### The negotiation lifecycle
 
 Because g2g enforces a sans-IO and asynchronous execution model, capability

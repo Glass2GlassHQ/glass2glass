@@ -96,6 +96,7 @@ fn pinned_two_plane_caps(caps: &Caps) -> Caps {
         framerate,
         interlace: g2g_core::Interlace::Any,
         colorimetry,
+        pixel_aspect: g2g_core::PixelAspect::Any,
     }
 }
 

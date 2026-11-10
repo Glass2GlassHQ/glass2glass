@@ -121,6 +121,7 @@ fn video_caps(codec: VideoCodec, width: Dim, height: Dim) -> Caps {
         height,
         framerate: PLACEHOLDER_FRAMERATE,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
         alignment: g2g_core::BitstreamAlignment::Unspecified,
     }
 }

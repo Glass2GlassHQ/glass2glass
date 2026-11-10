@@ -1047,6 +1047,7 @@ pub(crate) fn concrete_caps(stream: &OggLogicalStream) -> Option<Caps> {
                 theora.framerate_denominator,
             )),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         });
     }
@@ -1061,6 +1062,7 @@ pub(crate) fn concrete_caps(stream: &OggLogicalStream) -> Option<Caps> {
                 vp8.framerate_denominator,
             )),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         });
     }
@@ -1828,6 +1830,7 @@ mod tests {
                     framerate_q16_from_fraction(FRAMERATE.0, FRAMERATE.1).unwrap()
                 ),
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                pixel_aspect: g2g_core::PixelAspect::Any,
                 alignment: g2g_core::BitstreamAlignment::Unspecified,
             }]
         );
@@ -1921,6 +1924,7 @@ mod tests {
                 height: Dim::Fixed(200),
                 framerate: Rate::Fixed(25 << 16),
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                pixel_aspect: g2g_core::PixelAspect::Any,
                 alignment: g2g_core::BitstreamAlignment::Unspecified,
             }]
         );
@@ -1957,6 +1961,7 @@ mod tests {
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
         };
         assert!(d.intercept_caps(&raw).is_err());
         // The Matroska byte stream is the wrong container.

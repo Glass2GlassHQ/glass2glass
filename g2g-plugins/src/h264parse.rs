@@ -897,6 +897,7 @@ mod tests {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         }
     }
@@ -946,6 +947,7 @@ mod tests {
             height: Dim::Fixed(720),
             framerate,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         let sps_without_timing = || frame_with_bytes(0, build_test_annexb_sps(1280, 720));
@@ -1111,6 +1113,7 @@ mod tests {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         assert_eq!(parse.intercept_caps(&vp9), Err(G2gError::CapsMismatch));
@@ -1134,6 +1137,7 @@ mod tests {
                         height: Dim::Any,
                         framerate: Rate::Any,
                         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                        pixel_aspect: g2g_core::PixelAspect::Any,
                         alignment: g2g_core::BitstreamAlignment::Unspecified,
                     }]
                 );
@@ -1223,6 +1227,7 @@ mod tests {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::AccessUnit,
         };
         parse.configure_pipeline(&sample_caps).unwrap();

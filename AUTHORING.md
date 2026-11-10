@@ -44,8 +44,8 @@ use g2g_core::pad_template::{PadTemplate, PadTemplates};
 use g2g_core::runtime::{parse_launch, run_graph, LatencyProfile, LaunchFactory, Registry};
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, Colorimetry, ConfigureOutcome, Dim, DomainSet,
-    G2gError, Interlace, MemoryDomain, MemoryDomainKind, OutputSink, PipelinePacket, Rate,
-    RawVideoFormat,
+    G2gError, Interlace, MemoryDomain, MemoryDomainKind, OutputSink, PipelinePacket, PixelAspect,
+    Rate, RawVideoFormat,
 };
 use g2g_plugins::clock::WallClock;
 use g2g_plugins::registry::default_registry;
@@ -61,6 +61,7 @@ fn rgba_any_size() -> Caps {
         framerate: Rate::Any,
         interlace: Interlace::Any,
         colorimetry: Colorimetry::UNKNOWN,
+        pixel_aspect: PixelAspect::Any,
     }
 }
 

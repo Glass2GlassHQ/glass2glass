@@ -12,7 +12,7 @@
 use crate::caps::ANY_SAMPLE_RATE;
 use crate::caps::{
     intersect_channels, intersect_sample_rate, AudioFormat, Caps, CapsSet, Colorimetry, Dim,
-    Interlace, PassthroughFields, Rate, RawVideoFormat, VideoCodec,
+    Interlace, PassthroughFields, PixelAspect, Rate, RawVideoFormat, VideoCodec,
 };
 
 /// Narrow `input` by intersecting each *passthrough* field against the
@@ -22,6 +22,19 @@ use crate::caps::{
 /// independently of its input. Same media variant required; `None` if a
 /// passthrough field has no overlap (the alternative dies) or the variants
 /// differ. Used by the solver's `DerivedFields` backward sweep.
+// a transform that passes the picture size through passes the pixel shape through too
+fn couple_pixel_aspect(
+    input: &PixelAspect,
+    pin: &PixelAspect,
+    mask: PassthroughFields,
+) -> Option<PixelAspect> {
+    if mask.width && mask.height {
+        input.intersect(pin)
+    } else {
+        Some(*input)
+    }
+}
+
 pub(crate) fn couple_passthrough(
     input: &Caps,
     pin: &Caps,
@@ -36,12 +49,14 @@ pub(crate) fn couple_passthrough(
                 framerate: ri,
                 interlace: ii,
                 colorimetry: cli,
+                pixel_aspect: pi,
             },
             Caps::RawVideo {
                 format: fp,
                 width: wp,
                 height: hp,
                 framerate: rp,
+                pixel_aspect: pp,
                 ..
             },
         ) => {
@@ -79,6 +94,7 @@ pub(crate) fn couple_passthrough(
                 interlace: *ii,
                 // Colorimetry is the same kind of runtime-refined hint.
                 colorimetry: *cli,
+                pixel_aspect: couple_pixel_aspect(pi, pp, mask)?,
             })
         }
         (
@@ -88,6 +104,7 @@ pub(crate) fn couple_passthrough(
                 height: hi,
                 framerate: ri,
                 colorimetry: cli,
+                pixel_aspect: pi,
                 alignment: ai,
             },
             Caps::CompressedVideo {
@@ -95,6 +112,7 @@ pub(crate) fn couple_passthrough(
                 width: wp,
                 height: hp,
                 framerate: rp,
+                pixel_aspect: pp,
                 ..
             },
         ) => {
@@ -128,6 +146,7 @@ pub(crate) fn couple_passthrough(
                 framerate,
                 // Kept from the input like RawVideo's (see there).
                 colorimetry: *cli,
+                pixel_aspect: couple_pixel_aspect(pi, pp, mask)?,
                 alignment: *ai,
             })
         }
@@ -221,6 +240,7 @@ pub(crate) fn couple_passthrough_derived(
             format,
             interlace,
             colorimetry,
+            pixel_aspect,
             ..
         } => Some(Caps::RawVideo {
             format: *format,
@@ -229,15 +249,20 @@ pub(crate) fn couple_passthrough_derived(
             framerate,
             interlace: *interlace,
             colorimetry: *colorimetry,
+            pixel_aspect: *pixel_aspect,
         }),
         Caps::CompressedVideo {
-            codec, colorimetry, ..
+            codec,
+            colorimetry,
+            pixel_aspect,
+            ..
         } => Some(Caps::CompressedVideo {
             codec: *codec,
             width,
             height,
             framerate,
             colorimetry: *colorimetry,
+            pixel_aspect: *pixel_aspect,
             alignment: crate::BitstreamAlignment::Unspecified,
         }),
         _ => None,
@@ -283,6 +308,7 @@ pub(crate) fn project_passthrough(out: &Caps, mask: PassthroughFields) -> Option
                 // and no colorimetry one either.
                 interlace: Interlace::Any,
                 colorimetry: Colorimetry::UNKNOWN,
+                pixel_aspect: crate::PixelAspect::Any,
             })
         }
         Caps::CompressedVideo {
@@ -309,6 +335,7 @@ pub(crate) fn project_passthrough(out: &Caps, mask: PassthroughFields) -> Option
                     Rate::Any
                 },
                 colorimetry: Colorimetry::UNKNOWN,
+                pixel_aspect: crate::PixelAspect::Any,
                 alignment: crate::BitstreamAlignment::Unspecified,
             })
         }
@@ -382,6 +409,7 @@ pub(crate) fn project_passthrough_derived(
             framerate,
             interlace: Interlace::Any,
             colorimetry: Colorimetry::UNKNOWN,
+            pixel_aspect: crate::PixelAspect::Any,
         }),
         Caps::CompressedVideo { codec, .. } => Some(Caps::CompressedVideo {
             codec: *codec,
@@ -389,6 +417,7 @@ pub(crate) fn project_passthrough_derived(
             height,
             framerate,
             colorimetry: Colorimetry::UNKNOWN,
+            pixel_aspect: crate::PixelAspect::Any,
             alignment: crate::BitstreamAlignment::Unspecified,
         }),
         _ => None,
@@ -453,6 +482,7 @@ fn concrete_probe_base(sample: &Caps) -> Caps {
             framerate: Rate::Fixed(30 << 16),
             interlace: Interlace::Any,
             colorimetry: Colorimetry::UNKNOWN,
+            pixel_aspect: crate::PixelAspect::Any,
         },
         Caps::CompressedVideo { codec, .. } => Caps::CompressedVideo {
             codec: *codec,
@@ -460,6 +490,7 @@ fn concrete_probe_base(sample: &Caps) -> Caps {
             height: Dim::Fixed(64),
             framerate: Rate::Fixed(30 << 16),
             colorimetry: Colorimetry::UNKNOWN,
+            pixel_aspect: crate::PixelAspect::Any,
             alignment: crate::BitstreamAlignment::Unspecified,
         },
         Caps::Audio { format, .. } => Caps::Audio {
@@ -612,6 +643,7 @@ mod tests {
             framerate,
             interlace: crate::Interlace::Any,
             colorimetry: crate::Colorimetry::UNKNOWN,
+            pixel_aspect: crate::PixelAspect::Any,
         }
     }
 
@@ -631,6 +663,7 @@ mod tests {
                 framerate: framerate.clone(),
                 interlace: crate::Interlace::Any,
                 colorimetry: crate::Colorimetry::UNKNOWN,
+                pixel_aspect: crate::PixelAspect::Any,
             }),
             _ => CapsSet::from_alternatives(Vec::new()),
         };
@@ -640,6 +673,7 @@ mod tests {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: crate::Colorimetry::UNKNOWN,
+            pixel_aspect: crate::PixelAspect::Any,
             alignment: crate::BitstreamAlignment::Unspecified,
         };
         let pt = discover_passthrough(&dec, &sample);
@@ -661,6 +695,7 @@ mod tests {
                 framerate: Rate::Fixed(30 << 16),
                 interlace: crate::Interlace::Any,
                 colorimetry: crate::Colorimetry::UNKNOWN,
+                pixel_aspect: crate::PixelAspect::Any,
             })
         };
         let sample = Caps::CompressedVideo {
@@ -669,6 +704,7 @@ mod tests {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: crate::Colorimetry::UNKNOWN,
+            pixel_aspect: crate::PixelAspect::Any,
             alignment: crate::BitstreamAlignment::Unspecified,
         };
         assert_eq!(discover_passthrough(&dec, &sample), PassthroughFields::NONE);
@@ -696,6 +732,7 @@ mod tests {
                 framerate: framerate.clone(),
                 interlace: crate::Interlace::Any,
                 colorimetry: crate::Colorimetry::UNKNOWN,
+                pixel_aspect: crate::PixelAspect::Any,
             }),
             _ => CapsSet::from_alternatives(Vec::new()),
         };
@@ -735,6 +772,7 @@ mod tests {
                         framerate: framerate.clone(),
                         interlace: crate::Interlace::Any,
                         colorimetry: crate::Colorimetry::UNKNOWN,
+                        pixel_aspect: crate::PixelAspect::Any,
                     });
                 }
             }
@@ -747,6 +785,7 @@ mod tests {
             framerate: Rate::Fixed(30 << 16),
             interlace: crate::Interlace::Any,
             colorimetry: crate::Colorimetry::UNKNOWN,
+            pixel_aspect: crate::PixelAspect::Any,
         };
         let pt = discover_passthrough(&conv, &sample);
         assert!(!pt.format, "the NV12 alternative retargets the format");
@@ -776,6 +815,7 @@ mod tests {
                         framerate: framerate.clone(),
                         interlace: crate::Interlace::Any,
                         colorimetry: crate::Colorimetry::UNKNOWN,
+                        pixel_aspect: crate::PixelAspect::Any,
                     })
                     .collect(),
             ),
@@ -787,6 +827,7 @@ mod tests {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: crate::Colorimetry::UNKNOWN,
+            pixel_aspect: crate::PixelAspect::Any,
             alignment: crate::BitstreamAlignment::Unspecified,
         };
         let pt = discover_passthrough(&dec, &sample);
