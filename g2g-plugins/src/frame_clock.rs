@@ -5,6 +5,7 @@
 use alloc::collections::VecDeque;
 
 use g2g_core::time::ticks_to_ns;
+use g2g_core::FrameTiming;
 
 // matroska and flv stamp blocks in whole milliseconds, so a stamp this close to the count is the count rounded
 const STAMP_ROUNDING_NS: u64 = 1_000_000;
@@ -16,8 +17,35 @@ pub(crate) struct FrameClock {
     samples_since_base: u64,
     // (stream offset, pts) of each timestamped input chunk, oldest first
     pending: VecDeque<(u64, u64)>,
-    // (stream offset of the chunk's end, end discard) of each input chunk that trims its last frame
-    end_discards: VecDeque<(u64, u64)>,
+    // keyed by the start of each input chunk that trims the head of its first frame
+    start_discards: ChunkDiscards,
+    // keyed by the end of each input chunk that trims the tail of its last frame
+    end_discards: ChunkDiscards,
+}
+
+// (stream offset, discard) per input chunk, oldest first
+#[derive(Debug, Default)]
+struct ChunkDiscards(VecDeque<(u64, u32)>);
+
+impl ChunkDiscards {
+    fn note(&mut self, offset: u64, discard_ns: u32) {
+        if discard_ns > 0 {
+            self.0.push_back((offset, discard_ns));
+        }
+    }
+
+    // the discard of the last chunk keyed at or before `offset`, 0 when none is
+    fn take_through(&mut self, offset: u64) -> u32 {
+        let mut discard_ns = 0;
+        while let Some(&(at, ns)) = self.0.front() {
+            if at > offset {
+                break;
+            }
+            discard_ns = ns;
+            self.0.pop_front();
+        }
+        discard_ns
+    }
 }
 
 impl FrameClock {
@@ -60,22 +88,18 @@ impl FrameClock {
             .saturating_add(ticks_to_ns(self.samples_since_base, sample_rate))
     }
 
-    pub(crate) fn note_end_discard(&mut self, chunk_end_offset: u64, end_discard_ns: u64) {
-        self.end_discards
-            .push_back((chunk_end_offset, end_discard_ns));
+    pub(crate) fn note_discards(&mut self, chunk: core::ops::Range<u64>, timing: &FrameTiming) {
+        self.start_discards
+            .note(chunk.start, timing.start_discard_ns);
+        self.end_discards.note(chunk.end, timing.end_discard_ns);
     }
 
-    // the end discard of the chunk that ends within this frame, 0 when none does
-    pub(crate) fn end_discard_ns(&mut self, frame_end_offset: u64) -> u64 {
-        let mut end_discard_ns = 0;
-        while let Some(&(chunk_end_offset, discard_ns)) = self.end_discards.front() {
-            if chunk_end_offset > frame_end_offset {
-                break;
-            }
-            end_discard_ns = discard_ns;
-            self.end_discards.pop_front();
-        }
-        end_discard_ns
+    // the start and end discards of the chunks that begin and end within this frame
+    pub(crate) fn discards(&mut self, frame: core::ops::Range<u64>) -> (u32, u32) {
+        (
+            self.start_discards.take_through(frame.start),
+            self.end_discards.take_through(frame.end),
+        )
     }
 
     // a flush restarts the count, which a seek back to the start never re-bases with a nonzero pts

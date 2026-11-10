@@ -1092,8 +1092,13 @@ back in the media (a QuickTime edit list used as a playlist) is laid out edit
 after edit: each edit decodes from the keyframe at or before its first
 presented sample and presents its media span at the edit's place on the movie
 timeline, samples decoded only as references take pts past the segment stop,
-and the tracks are interleaved by decode time. An audio track with such a list,
-or a list of any other shape, keeps only the first media edit's start. Every sample still goes downstream, because
+and the tracks are interleaved by decode time. An audio track with such a list
+is laid out the same way to the sample: each edit sends the frames its media
+span touches plus the frame before them, whose decode only primes the overlap,
+and `FrameTiming::start_discard_ns` / `end_discard_ns` tell the decoder how much
+of the first and last frame falls outside the span (all of the priming frame).
+An audio track with a list of any other shape keeps only the first media edit's
+start. Every sample still goes downstream, because
 the cut pictures can be references, and every video decoder drops each decoded
 picture whose pts `Segment::presents` rejects:
 before the start, or at or past the stop, the frames ffmpeg drops for the same

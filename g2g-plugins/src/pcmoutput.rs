@@ -153,6 +153,11 @@ impl PcmOutput {
                 .len()
                 .checked_div(pcm.bytes_per_sample_frame())
                 .ok_or(G2gError::CapsMismatch)?;
+            let start_discard_ns = if index == 0 {
+                timing.start_discard_ns
+            } else {
+                0
+            };
             let end_discard_ns = if index == last {
                 timing.end_discard_ns
             } else {
@@ -160,6 +165,7 @@ impl PcmOutput {
             };
             let frame_timing = FrameTiming {
                 pts_ns,
+                start_discard_ns,
                 end_discard_ns,
                 ..timing
             };

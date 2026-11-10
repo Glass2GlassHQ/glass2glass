@@ -914,7 +914,7 @@ pub struct MkvFrame {
     /// `BlockDuration` (scaled). `0` when the block carries none, e.g. a
     /// `SimpleBlock` (so video / audio, paced by PTS deltas, leave it `0`).
     pub duration_ns: u64,
-    pub end_discard_ns: u64,
+    pub end_discard_ns: u32,
     pub keyframe: bool,
     // derived for a reordering H.264 / H.265 track, whose blocks store only presentation times
     pub dts_ns: Option<u64>,
@@ -2151,7 +2151,7 @@ fn apply_discard_padding(frames: &mut [MkvFrame], discard_ns: i64) {
         return;
     };
     if frame.codec != MkvCodec::Opus {
-        frame.end_discard_ns = discard_ns as u64;
+        frame.end_discard_ns = u32::try_from(discard_ns).unwrap_or(u32::MAX);
         return;
     }
     let samples = u64::from(crate::opusparse::packet_samples(&frame.data));

@@ -991,7 +991,8 @@ fn put_timing(w: &mut Writer, t: &FrameTiming) {
     w.u64(t.capture_ns);
     w.u64(t.arrival_ns);
     w.bool(t.keyframe);
-    w.u64(t.end_discard_ns);
+    w.u32(t.start_discard_ns);
+    w.u32(t.end_discard_ns);
 }
 fn get_timing(r: &mut Reader) -> Result<FrameTiming, WireError> {
     Ok(FrameTiming {
@@ -1001,7 +1002,8 @@ fn get_timing(r: &mut Reader) -> Result<FrameTiming, WireError> {
         capture_ns: r.u64()?,
         arrival_ns: r.u64()?,
         keyframe: r.bool()?,
-        end_discard_ns: r.u64()?,
+        start_discard_ns: r.u32()?,
+        end_discard_ns: r.u32()?,
     })
 }
 
@@ -1893,6 +1895,7 @@ mod tests {
             capture_ns: 7,
             arrival_ns: 42,
             keyframe: true,
+            start_discard_ns: 3,
             end_discard_ns: 5,
         };
         let frame = Frame {

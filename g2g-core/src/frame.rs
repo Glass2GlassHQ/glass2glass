@@ -122,8 +122,10 @@ pub struct FrameTiming {
     /// keyframe-aware seeking. `false` when unknown (the safe default: a frame is
     /// treated as a dependent frame unless a producer marks it a keyframe).
     pub keyframe: bool,
+    // decoded audio dropped from the start of this frame, where an MP4 edit begins inside it
+    pub start_discard_ns: u32,
     // decoded audio dropped from the end of this frame, Matroska's `DiscardPadding`
-    pub end_discard_ns: u64,
+    pub end_discard_ns: u32,
 }
 
 impl FrameTiming {
@@ -161,6 +163,7 @@ impl Default for FrameTiming {
             capture_ns: 0,
             arrival_ns: 0,
             keyframe: false,
+            start_discard_ns: 0,
             end_discard_ns: 0,
         }
     }

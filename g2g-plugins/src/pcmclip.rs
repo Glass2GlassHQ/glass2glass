@@ -12,7 +12,7 @@ use g2g_core::{FrameTiming, G2gError, Segment};
 // gst's audio decoder base class clips under this category too.
 const LOG_CATEGORY: &str = "audiodecoder";
 
-// drops the decoded samples the frame discards from its end and those outside the segment, `None` when none are left
+// drops the decoded samples the frame discards from its start and end and those outside the segment, `None` when none are left
 pub(crate) fn clip_pcm_to_segment(
     segment: &Segment,
     mut timing: FrameTiming,
@@ -25,11 +25,19 @@ pub(crate) fn clip_pcm_to_segment(
         .len()
         .checked_div(bytes_per_sample_frame)
         .ok_or(G2gError::CapsMismatch)?;
-    if timing.end_discard_ns > 0 {
-        let discarded_samples = ns_to_ticks(timing.end_discard_ns, sample_rate) as usize;
-        sample_count = sample_count.saturating_sub(discarded_samples);
-        pcm.truncate(sample_count * bytes_per_sample_frame);
+    if timing.start_discard_ns > 0 || timing.end_discard_ns > 0 {
+        let head_samples = (ns_to_ticks(u64::from(timing.start_discard_ns), sample_rate) as usize)
+            .min(sample_count);
+        let tail_samples = ns_to_ticks(u64::from(timing.end_discard_ns), sample_rate) as usize;
+        let end = sample_count.saturating_sub(tail_samples).max(head_samples);
+        pcm.truncate(end * bytes_per_sample_frame);
+        pcm.drain(..head_samples * bytes_per_sample_frame);
+        sample_count = end - head_samples;
+        timing.pts_ns = timing
+            .pts_ns
+            .saturating_add(ticks_to_ns(head_samples as u64, sample_rate));
         timing.duration_ns = ticks_to_ns(sample_count as u64, sample_rate);
+        timing.start_discard_ns = 0;
         timing.end_discard_ns = 0;
     }
     let Some(kept) = segment.kept_samples(timing.pts_ns, sample_count, rate) else {

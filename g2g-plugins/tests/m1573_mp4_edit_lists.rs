@@ -57,21 +57,29 @@ fn movie_ticks(frames: usize) -> u32 {
     frames as u32 * FRAME_TICKS * MOVIE_TIMESCALE / MEDIA_TIMESCALE
 }
 
-fn elst(edits: &[Edit]) -> Vec<u8> {
-    let mut payload = (edits.len() as u32).to_be_bytes().to_vec();
-    for edit in edits {
-        let (duration, media_time) = match edit {
-            Edit::Media(frames) => (
-                movie_ticks(frames.count),
-                (FIRST_PTS_TICKS + frames.first as u32 * FRAME_TICKS) as i32,
-            ),
-            Edit::Empty { count } => (movie_ticks(*count), EMPTY_EDIT),
-        };
+// (segment duration in movie ticks, media time in media ticks) per entry
+fn elst_of(entries: &[(u32, i32)]) -> Vec<u8> {
+    let mut payload = (entries.len() as u32).to_be_bytes().to_vec();
+    for (duration, media_time) in entries {
         payload.extend(duration.to_be_bytes());
         payload.extend(media_time.to_be_bytes());
         payload.extend(NORMAL_RATE.to_be_bytes());
     }
     full_box(b"elst", &payload)
+}
+
+fn elst(edits: &[Edit]) -> Vec<u8> {
+    let entries: Vec<(u32, i32)> = edits
+        .iter()
+        .map(|edit| match edit {
+            Edit::Media(frames) => (
+                movie_ticks(frames.count),
+                (FIRST_PTS_TICKS + frames.first as u32 * FRAME_TICKS) as i32,
+            ),
+            Edit::Empty { count } => (movie_ticks(*count), EMPTY_EDIT),
+        })
+        .collect();
+    elst_of(&entries)
 }
 
 // the boxes with every elst replaced, no chunk offset moving because the moov comes last
@@ -184,4 +192,89 @@ async fn an_empty_first_edit_keeps_the_media_edit_after_it() {
     .await;
     assert_eq!(edited.len(), MEDIA_EDIT.count);
     assert!(edited == presented(&all, &[MEDIA_EDIT]));
+}
+
+// mono AAC-LC at 48 kHz, its moov after its mdat and its one edit starting past the encoder priming
+const AUDIO_FIXTURE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/audio_aac_48000.m4a"
+);
+const AUDIO_RATE: u32 = 48_000;
+const AAC_PRIMING_SAMPLES: u32 = 1_024;
+
+// a media span after the priming, in samples
+struct AudioSpan {
+    first: usize,
+    count: usize,
+}
+
+// the first edit ends inside a frame, and the second goes back to start inside an earlier one
+const FIRST_AUDIO_EDIT: AudioSpan = AudioSpan {
+    first: 0,
+    count: 7_200,
+};
+const SECOND_AUDIO_EDIT: AudioSpan = AudioSpan {
+    first: 3_000,
+    count: 4_800,
+};
+// ffmpeg's AAC decoder carries rounding across the jump back, measured at 2
+const REPLAYED_DECODE_TOLERANCE: u16 = 4;
+
+fn audio_elst(spans: &[AudioSpan]) -> Vec<u8> {
+    let entries: Vec<(u32, i32)> = spans
+        .iter()
+        .map(|span| {
+            (
+                span.count as u32 * MOVIE_TIMESCALE / AUDIO_RATE,
+                (AAC_PRIMING_SAMPLES + span.first as u32) as i32,
+            )
+        })
+        .collect();
+    elst_of(&entries)
+}
+
+async fn decoded_audio(file: &[u8], name: &str) -> Vec<i16> {
+    let input = temp_path(&format!("{name}.m4a"));
+    std::fs::write(&input, file).expect("audio file writes");
+    let output = temp_path(&format!("{name}.s16le"));
+    let line = format!(
+        "filesrc location={} ! decodebin ! audioconvert ! audio/x-raw,format=S16LE ! filesink location={}",
+        input.display(),
+        output.display()
+    );
+    let graph = parse_launch(&default_registry(), &line).expect("launch line parses");
+    run_graph(graph, &ZeroClock, 4).await.expect("decode runs");
+    let raw = std::fs::read(&output).expect("decode output reads");
+    let _ = std::fs::remove_file(&input);
+    let _ = std::fs::remove_file(&output);
+    raw.chunks_exact(2)
+        .map(|sample| i16::from_le_bytes([sample[0], sample[1]]))
+        .collect()
+}
+
+#[tokio::test]
+async fn an_audio_edit_that_goes_back_replays_its_media_to_the_sample() {
+    let fixture = std::fs::read(AUDIO_FIXTURE).expect("fixture reads");
+    let straight = decoded_audio(&fixture, "audio-straight").await;
+    let edited_file = with_elst(
+        &fixture,
+        &audio_elst(&[FIRST_AUDIO_EDIT, SECOND_AUDIO_EDIT]),
+    );
+    let edited = decoded_audio(&edited_file, "audio-replayed").await;
+
+    let first = &straight[FIRST_AUDIO_EDIT.first..FIRST_AUDIO_EDIT.first + FIRST_AUDIO_EDIT.count];
+    let second =
+        &straight[SECOND_AUDIO_EDIT.first..SECOND_AUDIO_EDIT.first + SECOND_AUDIO_EDIT.count];
+    assert_eq!(edited.len(), first.len() + second.len());
+    assert_eq!(&edited[..first.len()], first);
+    let largest_difference = edited[first.len()..]
+        .iter()
+        .zip(second)
+        .map(|(edited, straight)| edited.abs_diff(*straight))
+        .max()
+        .expect("the second edit decodes");
+    assert!(
+        largest_difference <= REPLAYED_DECODE_TOLERANCE,
+        "the second edit plays its own media, off by {largest_difference}"
+    );
 }

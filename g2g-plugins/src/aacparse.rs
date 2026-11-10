@@ -666,11 +666,11 @@ impl AacParse {
                         pts,
                     );
                 }
-                if frame.timing.end_discard_ns > 0 {
-                    let chunk_end_offset = self.buf_offset + (self.buf.len() + bytes.len()) as u64;
-                    self.clock
-                        .note_end_discard(chunk_end_offset, frame.timing.end_discard_ns);
-                }
+                let chunk_start_offset = self.buf_offset + self.buf.len() as u64;
+                self.clock.note_discards(
+                    chunk_start_offset..chunk_start_offset + bytes.len() as u64,
+                    &frame.timing,
+                );
                 self.buf.extend_from_slice(bytes);
                 self.drain(false, out).await?;
             }
@@ -745,7 +745,9 @@ impl AacParse {
             .clock
             .frame_pts(start_offset, frame_samples, header.sample_rate);
         let duration_ns = ticks_to_ns(frame_samples, header.sample_rate);
-        let end_discard_ns = self.clock.end_discard_ns(start_offset + data.len() as u64);
+        let (start_discard_ns, end_discard_ns) = self
+            .clock
+            .discards(start_offset..start_offset + data.len() as u64);
         let frame = Frame::new(
             MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
             FrameTiming {
@@ -754,6 +756,7 @@ impl AacParse {
                 duration_ns,
                 // Every AAC access unit decodes on its own.
                 keyframe: true,
+                start_discard_ns,
                 end_discard_ns,
                 ..FrameTiming::default()
             },

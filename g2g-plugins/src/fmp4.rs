@@ -86,6 +86,8 @@ pub(crate) struct Sample {
     pub(crate) duration_ns: u64,
     /// Whether the access unit carries an IDR picture (a seek snap point).
     pub(crate) keyframe: bool,
+    pub(crate) start_discard_ns: u32,
+    pub(crate) end_discard_ns: u32,
 }
 
 /// The index of the keyframe at or before `target_ns` (GStreamer `SNAP_BEFORE`,
@@ -509,6 +511,63 @@ impl TrackHeader {
         }
     }
 
+    // An audio edit presents its media span to the sample: the frames it starts
+    // and ends inside drop the decoded audio outside it, and the frame before
+    // the span decodes only to give the first one its overlap.
+    fn edited_audio_samples(&self, samples: Vec<Sample>) -> Vec<Sample> {
+        // aac and mp3 decoders overlap each frame with the one before
+        const PREROLL_FRAMES: usize = 1;
+        let mut edited: Vec<Sample> = Vec::new();
+        for edit in &self.replayed_edits {
+            let media_ns = ticks_to_ns(edit.media.start, self.timescale)
+                ..ticks_to_ns(edit.media.end, self.timescale);
+            let presented_ns = ticks_to_ns(
+                self.media_start.saturating_add(edit.presented_from),
+                self.timescale,
+            );
+            let overlaps = |sample: &Sample| {
+                sample.pts_ns < media_ns.end
+                    && sample.pts_ns.saturating_add(sample.duration_ns) > media_ns.start
+            };
+            let (Some(first), Some(last)) = (
+                samples.iter().position(overlaps),
+                samples.iter().rposition(overlaps),
+            ) else {
+                continue;
+            };
+            let from = first.saturating_sub(PREROLL_FRAMES);
+            for (index, sample) in samples.iter().enumerate().take(last + 1).skip(from) {
+                let start_discard_ns = if index < first {
+                    sample.duration_ns
+                } else {
+                    media_ns.start.saturating_sub(sample.pts_ns)
+                };
+                let end_discard_ns = sample
+                    .pts_ns
+                    .saturating_add(sample.duration_ns)
+                    .saturating_sub(media_ns.end);
+                let start_discard_ns = u32::try_from(start_discard_ns).unwrap_or(u32::MAX);
+                let end_discard_ns = u32::try_from(end_discard_ns).unwrap_or(u32::MAX);
+                let pts_ns = presented_ns
+                    .saturating_add(sample.pts_ns)
+                    .saturating_sub(media_ns.start);
+                // the frames an edit starts with present before the previous edit's last ones, and decode after them
+                let dts_ns = edited
+                    .last()
+                    .map_or(pts_ns, |previous| pts_ns.max(previous.dts_ns));
+                edited.push(Sample {
+                    annexb: sample.annexb.clone(),
+                    pts_ns,
+                    dts_ns,
+                    start_discard_ns,
+                    end_discard_ns,
+                    ..*sample
+                });
+            }
+        }
+        edited
+    }
+
     // An edit presents the samples its media span holds, decoded from the
     // keyframe before them. The ones decoded only as references go past the
     // segment's stop, where the decoder drops them.
@@ -521,6 +580,9 @@ impl TrackHeader {
                 .into_iter()
                 .map(|sample| self.edited_sample(sample))
                 .collect();
+        }
+        if matches!(self.kind, TrackKind::Audio { .. }) {
+            return self.edited_audio_samples(samples);
         }
         let mut edited = Vec::new();
         for edit in &self.replayed_edits {
@@ -664,8 +726,9 @@ pub(crate) fn parse_all_tracks(data: &[u8]) -> Result<Vec<TrackHeader>, G2gError
             let spans =
                 movie_timescale.and_then(|movie| presented_spans(&edits, movie, header.timescale));
             let is_video = matches!(header.kind, TrackKind::Video { .. });
+            let is_audio = matches!(header.kind, TrackKind::Audio { .. });
             let replayed = movie_timescale
-                .filter(|_| spans.is_none() && is_video)
+                .filter(|_| spans.is_none() && (is_video || is_audio))
                 .and_then(|movie| replayed_edits(&edits, movie, header.timescale));
             if let Some(spans) = spans {
                 header.media_stop = spans.last().map(|span| span.end);
@@ -678,7 +741,6 @@ pub(crate) fn parse_all_tracks(data: &[u8]) -> Result<Vec<TrackHeader>, G2gError
                 header.replayed_edits = replayed;
             }
             // iTunes writes an AAC encoder's priming and padding as metadata instead of an edit list
-            let is_audio = matches!(header.kind, TrackKind::Audio { .. });
             if let Some(presented) = gapless.clone().filter(|_| is_audio && edits.is_empty()) {
                 header.media_start = presented.start;
                 header.media_stop = Some(presented.end);
@@ -2202,6 +2264,8 @@ pub(crate) fn parse_fragments_multi(
                 dts_ns: sample.timing.dts_ns,
                 duration_ns: sample.timing.duration_ns,
                 keyframe,
+                start_discard_ns: 0,
+                end_discard_ns: 0,
             },
         ));
     }
@@ -2278,6 +2342,8 @@ pub(crate) fn parse_fragments(
             dts_ns: sample.timing.dts_ns,
             duration_ns: sample.timing.duration_ns,
             keyframe,
+            start_discard_ns: 0,
+            end_discard_ns: 0,
         });
     }
     Ok(samples)
@@ -2600,6 +2666,8 @@ fn parse_progressive_track(
             dts_ns: ticks_to_ns(dts, timescale),
             duration_ns: ticks_to_ns(durations[i] as u64, timescale),
             keyframe,
+            start_discard_ns: 0,
+            end_discard_ns: 0,
         });
         if cut {
             break;
@@ -2644,6 +2712,8 @@ fn pcm_chunk_samples(
             dts_ns: ticks_to_ns(dts, timescale),
             duration_ns: ticks_to_ns(duration, timescale),
             keyframe: true,
+            start_discard_ns: 0,
+            end_discard_ns: 0,
         });
         if whole_frames < frames {
             break;
@@ -2722,6 +2792,8 @@ fn quicktime_chunk_samples(
             dts_ns: ticks_to_ns(dts, timescale),
             duration_ns: ticks_to_ns(count, timescale),
             keyframe: true,
+            start_discard_ns: 0,
+            end_discard_ns: 0,
         });
         dts = dts.saturating_add(count);
     }
@@ -3453,6 +3525,8 @@ mod tests {
             dts_ns: ns(dts),
             duration_ns: 0,
             keyframe: false,
+            start_discard_ns: 0,
+            end_discard_ns: 0,
         };
         let in_first = track.edited_sample(sample(first_end - 1, first_end - 2));
         assert_eq!(
@@ -3523,6 +3597,8 @@ mod tests {
             dts_ns: ns(index * FRAME_TICKS),
             duration_ns: ns(FRAME_TICKS),
             keyframe,
+            start_discard_ns: 0,
+            end_discard_ns: 0,
         };
         let samples = Vec::from([sample(0, true), sample(1, false), sample(2, true)]);
         let segment = track.presentation_segment();
