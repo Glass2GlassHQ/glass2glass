@@ -101,6 +101,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M2185: encoders and the MP4, Matroska and y4m writers keep the pixel aspect ratio.
 - M2186: `g2g-inspect` sorts its element list, and colours and pages its output on a terminal.
 - M2187: element metadata `klass` is renamed `classification`, and in-tree elements name Aaron Boxer as author.
+- M2188: bash completion for `g2g-inspect` and `g2g-launch` element and property names.
 
 Breaking: `TimecodeMeta.frames` is a `u16`, `WIRE_VERSION` is 4, and `RtpRecvConfig` gains `parameter_sets`.
 

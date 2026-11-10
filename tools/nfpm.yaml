@@ -16,6 +16,12 @@ contents:
   - src: /opt/glass2glass/g2g-inspect
     dst: /usr/bin/g2g-inspect
     type: symlink
+  - src: /opt/glass2glass/g2g.bash
+    dst: /usr/share/bash-completion/completions/g2g-launch
+    type: symlink
+  - src: /opt/glass2glass/g2g.bash
+    dst: /usr/share/bash-completion/completions/g2g-inspect
+    type: symlink
 overrides:
   deb:
     depends: [libc6, libgcc-s1, libstdc++6]

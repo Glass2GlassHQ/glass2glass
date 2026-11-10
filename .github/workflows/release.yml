@@ -146,6 +146,7 @@ jobs:
           mkdir "$name"
           cp target/${{ matrix.target }}/release/g2g-launch* target/${{ matrix.target }}/release/g2g-inspect* LICENSE LICENSE-THIRD-PARTY.txt "$name/"
           rm -f "$name"/*.d "$name"/*.pdb
+          if [ "${{ runner.os }}" != Windows ]; then cp tools/completions/g2g.bash "$name/"; fi
           if [ "${{ runner.os }}" = Linux ]; then
             mkdir "$name/lib"
             find "$CODEC_PREFIX/lib" -maxdepth 1 -name 'lib*.so.*' ! -name '*.so.*.*' -exec cp -L {} "$name/lib/" \;

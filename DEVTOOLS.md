@@ -694,6 +694,11 @@ The list is sorted by name. On a Unix terminal the output is coloured the way
 `gst-inspect-1.0` colours it and goes through `$PAGER`, or `less` when it is
 unset. Set `NO_COLOR` to turn the colour off.
 
+Bash completes element names for both tools, and property names after an
+element on a `g2g-launch` line. The deb, rpm and Homebrew packages install the
+completion. With a tarball or `cargo install`, source `g2g.bash` from the
+tarball or `tools/completions/g2g.bash` from a checkout in `~/.bashrc`.
+
 `--gst-map` is for a tool comparing g2g's graph against GStreamer's: g2g names a
 graph node after the Rust type (`NalParse0`) where gst names it after the factory
 (`h264parse0`), so pairing the two engines' elements needs the synonyms. Only the

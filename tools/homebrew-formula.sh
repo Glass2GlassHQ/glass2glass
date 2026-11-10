@@ -29,6 +29,8 @@ class Glass2glass < Formula
   def install
     libexec.install Dir["*"]
     bin.install_symlink libexec/"g2g-launch", libexec/"g2g-inspect"
+    bash_completion.install_symlink libexec/"g2g.bash" => "g2g-launch"
+    bash_completion.install_symlink libexec/"g2g.bash" => "g2g-inspect"
   end
 
   test do

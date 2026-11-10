@@ -110,9 +110,9 @@ carries the ffmpeg DLLs, so keep the folder together. The matching ffmpeg source
 is a release asset. They leave out PipeWire and Pulse.
 
 Each release also has `.deb` and `.rpm` packages for x86_64 and arm64, with the
-same contents as the Linux tarballs. They install to `/opt/glass2glass` and put
-`g2g-launch` and `g2g-inspect` in `/usr/bin`. The packages and tarballs need
-glibc 2.28 or newer, which includes RHEL 8.
+same contents as the Linux tarballs. They install to `/opt/glass2glass`, put
+`g2g-launch` and `g2g-inspect` in `/usr/bin` and install their bash completion.
+The packages and tarballs need glibc 2.28 or newer, which includes RHEL 8.
 
 ```sh
 sudo apt install ./glass2glass_*.deb
