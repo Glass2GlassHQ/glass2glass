@@ -540,6 +540,8 @@ pub struct PcrSample {
 #[derive(Debug, Default)]
 pub struct TsDemuxer {
     programs: Vec<TsProgram>,
+    // `None` until the first PAT parses
+    pat_version: Option<u8>,
     /// Program to route (`None` = the first in PAT order). A set number with no
     /// matching program routes nothing (strict, no fallback to the first).
     selected_program: Option<u16>,
@@ -1049,15 +1051,27 @@ impl TsDemuxer {
     }
 
     fn parse_pat(&mut self, section: &[u8]) {
-        if !self.programs.is_empty() {
-            return; // first PAT wins (no version / update handling)
-        }
         if section.first() != Some(&0x00) {
             return; // table_id 0x00 = PAT
         }
-        let Some(body) = Self::section_body(section) else {
+        // a repeat of the PAT in force carries nothing new, and a changed one must pass its CRC
+        let body = match self.pat_version {
+            None => Self::section_body(section),
+            Some(_) => Self::checked_section_body(section),
+        };
+        let Some(body) = body else {
             return;
         };
+        // current_next_indicator 0 marks a version not yet in force
+        if self.pat_version.is_some() && body[5] & 0x01 == 0 {
+            return;
+        }
+        let version = (body[5] >> 1) & 0x1F;
+        if self.pat_version == Some(version) {
+            return;
+        }
+        self.pat_version = Some(version);
+        let previous_programs = core::mem::take(&mut self.programs);
         // Program loop starts at section[8] (after the 8-byte PSI header). The
         // body is already CRC-bounded by section_body, so the walk is bounded.
         let mut i = 8;
@@ -1066,12 +1080,24 @@ impl TsDemuxer {
             let pid = (((body[i + 2] & 0x1F) as u16) << 8) | body[i + 3] as u16;
             // program_number 0 is the NIT pointer, not a program: skip it.
             if program_number != 0 {
-                self.programs.push(TsProgram {
-                    number: program_number,
-                    pmt_pid: pid,
-                    streams: Vec::new(),
-                    pmt_version: None,
-                    pcr_pid: None,
+                let known = previous_programs
+                    .iter()
+                    .find(|p| p.number == program_number);
+                self.programs.push(match known {
+                    Some(known) if known.pmt_pid == pid => known.clone(),
+                    // a PMT on a new PID is read whatever its version
+                    Some(known) => TsProgram {
+                        pmt_pid: pid,
+                        pmt_version: None,
+                        ..known.clone()
+                    },
+                    None => TsProgram {
+                        number: program_number,
+                        pmt_pid: pid,
+                        streams: Vec::new(),
+                        pmt_version: None,
+                        pcr_pid: None,
+                    },
                 });
             }
             i += 4;
@@ -1081,8 +1107,8 @@ impl TsDemuxer {
     /// Parse an SDT section (PID 0x11, `table_id` 0x42) into the per-service
     /// name / provider text: the service loop follows the 8-byte PSI header,
     /// `original_network_id` and a reserved byte, and each entry's descriptor loop
-    /// carries the DVB `service_descriptor`. First SDT wins, the PAT
-    /// discipline (no version handling). The CRC is verified
+    /// carries the DVB `service_descriptor`. First SDT wins (no version
+    /// handling). The CRC is verified
     /// ([`checked_section_body`](Self::checked_section_body)) and every length is
     /// bounds-checked, so a malformed or unrelated section on this PID is ignored
     /// rather than yielding garbled text.
@@ -1120,7 +1146,7 @@ impl TsDemuxer {
     /// are the schedule tables, which carry many events per section and are
     /// segmented, so any `section_number` is valid there.
     ///
-    /// Unlike the PAT / PMT / SDT these tables update mid-stream, so rather than
+    /// Unlike the SDT these tables update mid-stream, so rather than
     /// "first wins" a section is read when its `version_number` differs from the
     /// one last accepted for the same `(service_id, table_id, section_number)`.
     /// The CRC is verified ([`checked_section_body`](Self::checked_section_body))
@@ -1906,7 +1932,8 @@ fn is_dvb_control(c: char) -> bool {
 /// mark a cell that starts / ends an AU) are unverified here: a payload that
 /// already starts with a KLV key is forwarded raw (ffmpeg-authored streams look
 /// like this), and a cell walk is only believed when the cells tile the payload
-/// exactly and every cell payload starts with a KLV key. Anything else forwards
+/// and every cell payload starts with a KLV key. A last cell declared past the
+/// payload end is cut at the end, as gst's tsdemux does. Anything else forwards
 /// raw, so a wrong guess cannot corrupt the output. Every length is
 /// bounds-checked against the (attacker-controlled) payload before slicing.
 pub(crate) fn unwrap_metadata_au_cells(payload: &[u8]) -> Option<Vec<u8>> {
@@ -1919,9 +1946,8 @@ pub(crate) fn unwrap_metadata_au_cells(payload: &[u8]) -> Option<Vec<u8>> {
         let header = payload.get(pos..pos.checked_add(5)?)?;
         let len = ((header[3] as usize) << 8) | header[4] as usize;
         let start = pos.checked_add(5)?;
-        let end = start.checked_add(len)?;
-        // A cell running past the payload end fails the walk (no exact tiling).
-        let cell = payload.get(start..end)?;
+        let end = start.checked_add(len)?.min(payload.len());
+        let cell = &payload[start..end];
         if !cell.starts_with(&KLV_UL_PREFIX) {
             return None;
         }
@@ -3532,6 +3558,57 @@ pub(crate) mod tests {
         assert_eq!(pids, [first_pid, added_pid]);
     }
 
+    // `pat_body_multi` at another version, with the CRC the muxer writes
+    fn pat_version_packet(programs: &[(u16, u16)], version: u8) -> Vec<u8> {
+        let mut body = pat_body_multi(programs);
+        body[2] = 0xC1 | (version << 1);
+        let mut packet = Vec::new();
+        super::psi_packet(PID_PAT, 0x00, &body, 1, &mut packet);
+        packet
+    }
+
+    #[test]
+    fn a_pat_version_change_switches_to_its_program() {
+        let (first_pmt_pid, second_pmt_pid) = (0x1000, 0x1001);
+        let (first_pid, second_pid) = (0x0100, 0x0200);
+        let mut d = TsDemuxer::new();
+        d.push_packet(&psi_packet(PID_PAT, 0x00, &pat_body(1, first_pmt_pid)));
+        d.push_packet(&psi_packet(
+            first_pmt_pid,
+            0x02,
+            &pmt_body(first_pid, STREAM_TYPE_H264),
+        ));
+        d.push_packet(&pat_version_packet(&[(2, second_pmt_pid)], 1));
+        d.push_packet(&psi_packet(
+            second_pmt_pid,
+            0x02,
+            &pmt_body(second_pid, STREAM_TYPE_H264),
+        ));
+        let pids: Vec<u16> = d.streams().iter().map(|es| es.pid).collect();
+        assert_eq!(pids, [second_pid]);
+    }
+
+    #[test]
+    fn a_pat_version_change_moving_the_pmt_reads_the_new_pmt() {
+        let (first_pmt_pid, moved_pmt_pid) = (0x1000, 0x1001);
+        let (first_pid, added_pid) = (0x0100, 0x0200);
+        let mut d = TsDemuxer::new();
+        d.push_packet(&psi_packet(PID_PAT, 0x00, &pat_body(1, first_pmt_pid)));
+        d.push_packet(&psi_packet(
+            first_pmt_pid,
+            0x02,
+            &pmt_body(first_pid, STREAM_TYPE_H264),
+        ));
+        d.push_packet(&pat_version_packet(&[(1, moved_pmt_pid)], 1));
+        d.push_packet(&psi_packet(
+            moved_pmt_pid,
+            0x02,
+            &pmt_body(added_pid, STREAM_TYPE_H264),
+        ));
+        let pids: Vec<u16> = d.streams().iter().map(|es| es.pid).collect();
+        assert_eq!(pids, [first_pid, added_pid]);
+    }
+
     #[test]
     fn a_pmt_version_change_with_a_bad_crc_adds_nothing() {
         let pmt_pid = 0x1000;
@@ -4781,10 +4858,13 @@ pub(crate) mod tests {
         ragged.push(0x00);
         assert_eq!(unwrap_metadata_au_cells(&ragged), None);
 
-        // A cell whose declared length runs past the payload: forward raw.
+        // A cell whose declared length runs past the payload unwraps to the bytes present.
         let mut truncated = au_cell(0, &a);
         truncated.truncate(truncated.len() - 1);
-        assert_eq!(unwrap_metadata_au_cells(&truncated), None);
+        assert_eq!(
+            unwrap_metadata_au_cells(&truncated),
+            Some(a[..a.len() - 1].to_vec())
+        );
 
         // Cells that tile but do not carry KLV: forward raw.
         let junk = au_cell(0, &[0x11, 0x22, 0x33]);
