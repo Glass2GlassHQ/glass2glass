@@ -118,6 +118,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M2202: the MP4 demuxers read a fragmented file that also keeps samples in its `moov`.
 - M2203: an MP4 audio edit list that goes back in the media replays it to the sample.
 - M2204: `matroskamux` writes an Opus end trim shorter than a millisecond.
+- M2205: `d3d11videosink`, `wgpusink`, `kmssink`, `waylandsink` and `metalvideosink` take every format `videoconvert` reads, so `decodebin ! autovideosink` plays without a `videoconvert`.
 
 Breaking: `TimecodeMeta.frames` is a `u16`, `WIRE_VERSION` is 6, `FrameTiming` gains `start_discard_ns` and `end_discard_ns`, and `RtpRecvConfig` gains `parameter_sets`.
 

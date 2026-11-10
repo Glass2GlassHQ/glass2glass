@@ -108,6 +108,7 @@ use smithay_client_toolkit::{
 use crate::clock::wait_to_present;
 use crate::display_aspect::{display_size, FORCE_ASPECT_RATIO_NAME, FORCE_ASPECT_RATIO_PROPERTY};
 use crate::pixel::{frame_byte_size, rgba_rb_offsets};
+use crate::videoconvert::display::{display_sink_caps, DisplayInput};
 use crate::videoconvert::yuv420_to_rgb_into;
 use crate::videoflip::frame_orientation;
 use crate::worker_ready::Handshake;
@@ -119,10 +120,10 @@ use g2g_core::meta::{Orientation, OrientationSet};
 use g2g_core::metrics::{monotonic_ns, LatencyHistogram, LatencySnapshot};
 use g2g_core::{
     AsyncElement, BusHandle, Caps, CapsConstraint, CapsSet, ClockCandidate, ClockPriority,
-    ClockSync, Colorimetry, ConfigureOutcome, Dim, ElementMetadata, G2gError, HardwareError,
-    OutputSink, PadTemplate, PadTemplates, PipelineClock, PipelinePacket, PixelAspect,
-    PresentationPacer, PropError, PropKind, PropValue, PropertySpec, RawVideoFormat,
-    MAX_LATENESS_PROPERTY, QOS_INTERVAL_PROPERTY,
+    ClockSync, Colorimetry, ConfigureOutcome, ElementMetadata, G2gError, HardwareError, OutputSink,
+    PadTemplate, PadTemplates, PipelineClock, PipelinePacket, PixelAspect, PresentationPacer,
+    PropError, PropKind, PropValue, PropertySpec, RawVideoFormat, MAX_LATENESS_PROPERTY,
+    QOS_INTERVAL_PROPERTY,
 };
 
 /// Worker-thread message. `Frame` carries the pre-converted XRGB8888
@@ -284,6 +285,7 @@ pub struct WaylandSink {
     worker: Option<JoinHandle<()>>,
     width: u32,
     height: u32,
+    input: Option<DisplayInput>,
     pixel_aspect: PixelAspect,
     force_aspect_ratio: bool,
     /// NV12 -> XRGB coefficients for the negotiated caps' colorimetry, re-derived
@@ -351,6 +353,7 @@ impl WaylandSink {
             worker: None,
             width: 0,
             height: 0,
+            input: None,
             pixel_aspect: PixelAspect::Any,
             force_aspect_ratio: true,
             matrix: YuvRgbMatrix::new(Colorimetry::UNKNOWN),
@@ -495,8 +498,10 @@ impl PipelineClock for WaylandClock {
     }
 }
 
+const NATIVE_FORMATS: &[RawVideoFormat] = &[RawVideoFormat::Nv12];
+
 fn accepted_caps() -> CapsSet {
-    CapsSet::one(crate::videofx::any_geometry(RawVideoFormat::Nv12))
+    display_sink_caps(NATIVE_FORMATS)
 }
 
 impl PadTemplates for WaylandSink {
@@ -559,43 +564,25 @@ impl AsyncElement for WaylandSink {
     }
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
-        // Pass-through at negotiation; the real NV12 validation happens in
-        // `configure_pipeline`. With the decoder native (`DerivedOutput`),
-        // the solver assigns this link NV12 directly, so configure receives
-        // NV12 at startup rather than the decoder's pre-decode H.264 caps.
         Ok(upstream_caps.clone())
     }
 
-    /// Native NV12-only sink constraint. The solver intersects
-    /// this against the upstream decoder's NV12 `DerivedOutput` and lands
-    /// fixed NV12 on the link at startup, so a non-NV12 (undecoded) display
-    /// chain fails loud in negotiation rather than reaching
-    /// `configure_pipeline`. Geometry stays open (`Dim::Any`); the decoder
-    /// fixates it, and a mid-stream change rebuilds the worker (5j).
     fn caps_constraint_as_sink(&self) -> CapsConstraint<'_> {
         CapsConstraint::Accepts(accepted_caps())
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        // NV12 only. Now that every decoder is a native `DerivedOutput`,
-        // the solver lands NV12 on this link at startup, so the old
-        // accept-H.264-as-no-op workaround is gone: a non-NV12 sink input
-        // is a real pipeline error (e.g. an undecoded display chain) and
-        // fails loud here.
-        let (w, h, colorimetry, pixel_aspect) = match absolute_caps {
-            Caps::RawVideo {
-                format: RawVideoFormat::Nv12,
-                width: Dim::Fixed(w),
-                height: Dim::Fixed(h),
-                colorimetry,
-                pixel_aspect,
-                ..
-            } => (*w, *h, *colorimetry, *pixel_aspect),
-            _ => return Err(G2gError::CapsMismatch),
-        };
+        let input = DisplayInput::from_caps(absolute_caps, NATIVE_FORMATS)?;
+        let (w, h, colorimetry, pixel_aspect) = (
+            input.width,
+            input.height,
+            input.colorimetry,
+            input.pixel_aspect,
+        );
         if w % 2 != 0 || h % 2 != 0 {
             return Err(G2gError::CapsMismatch);
         }
+        self.input = Some(input);
         // A mid-stream colorimetry refinement (the parser's VUI colour
         // description) only re-derives the convert table: the worker's surface
         // is unaffected.
@@ -742,12 +729,6 @@ impl AsyncElement for WaylandSink {
                     let MemoryDomain::System(pixels) = domain else {
                         return Err(G2gError::UnsupportedDomain);
                     };
-                    if pixels.as_slice().len()
-                        < frame_byte_size(RawVideoFormat::Nv12, self.width, self.height)
-                    {
-                        return Err(G2gError::CapsMismatch);
-                    }
-
                     // PTS pacing: hold the frame until its running-time deadline
                     // on the elected clock, or drop it if it is already too late
                     // (the QoS bound) or outside the segment. Unpaced without a
@@ -767,6 +748,16 @@ impl AsyncElement for WaylandSink {
                     if !wait_to_present(pace).await {
                         g2g_core::g2g_log!(self, "late-drop pts={}", timing.pts_ns);
                         return Ok(());
+                    }
+                    let input = self.input.ok_or(G2gError::NotConfigured)?;
+                    let pixels = match input.convert_frame(pixels.as_slice())? {
+                        Some(converted) => SystemSlice::from_boxed(converted),
+                        None => pixels,
+                    };
+                    if pixels.as_slice().len()
+                        < frame_byte_size(RawVideoFormat::Nv12, self.width, self.height)
+                    {
+                        return Err(G2gError::CapsMismatch);
                     }
                     let t_ready = monotonic_ns();
 
@@ -1289,7 +1280,7 @@ const XRGB8888_BYTES_PER_PIXEL: usize = 4;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use g2g_core::{BusMessage, Rate, VideoCodec, VIDEO_SINK_MAX_LATENESS_NS};
+    use g2g_core::{BusMessage, Dim, Rate, VideoCodec, VIDEO_SINK_MAX_LATENESS_NS};
 
     /// Pins all eight descriptors to the transform that makes the compositor
     /// show the picture the way the descriptor asked for. The turn is the
@@ -1379,30 +1370,21 @@ mod tests {
     }
 
     #[test]
-    fn caps_constraint_is_accepts_nv12_any() {
-        // M16 step 5: native sink constraint accepts NV12 at any geometry,
-        // so a fully-native decoder->sink chain rejects non-NV12 in the
-        // solver rather than via the dynamic intercept callback.
+    fn caps_constraint_takes_nv12_first_and_converted_formats() {
         let sink = WaylandSink::new();
         let CapsConstraint::Accepts(set) = sink.caps_constraint_as_sink() else {
             panic!("expected Accepts");
         };
+        let alternatives = set.alternatives();
         assert_eq!(
-            set.alternatives(),
-            &[Caps::RawVideo {
-                format: RawVideoFormat::Nv12,
-                width: Dim::Any,
-                height: Dim::Any,
-                framerate: Rate::Any,
-                interlace: g2g_core::Interlace::Any,
-                colorimetry: g2g_core::Colorimetry::UNKNOWN,
-                pixel_aspect: g2g_core::PixelAspect::Any
-            }]
+            alternatives[0],
+            crate::videofx::any_geometry(RawVideoFormat::Nv12)
         );
+        assert!(alternatives.contains(&crate::videofx::any_geometry(RawVideoFormat::I420)));
     }
 
     #[test]
-    fn configure_rejects_non_nv12() {
+    fn configure_rejects_undecoded_video() {
         let mut sink = WaylandSink::new();
         let h264 = Caps::CompressedVideo {
             codec: VideoCodec::H264,
@@ -1413,8 +1395,6 @@ mod tests {
             pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
-        // A native decoder lands NV12 on this link; a non-NV12 sink input
-        // is a real error (e.g. an undecoded display chain), not a no-op.
         assert_eq!(
             sink.configure_pipeline(&h264).err(),
             Some(G2gError::CapsMismatch)

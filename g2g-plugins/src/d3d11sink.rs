@@ -90,19 +90,20 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WS_OVERLAPPEDWINDOW, WS_VISIBLE,
 };
 
+use crate::videoconvert::display::{display_sink_caps, DisplayInput};
 use crate::videoflip::frame_orientation;
 use crate::worker_ready::Handshake;
 use g2g_core::element::{PresentationStats, QosMessage};
 use g2g_core::frame::Frame;
-use g2g_core::memory::{DomainSet, MemoryDomainKind};
+use g2g_core::memory::{DomainSet, MemoryDomainKind, SystemSlice};
 use g2g_core::meta::{Orientation, OrientationSet};
 use g2g_core::metrics::{monotonic_ns, LatencyHistogram, LatencySnapshot};
 use g2g_core::{
-    AllocationParams, AsyncElement, BusHandle, Caps, CapsConstraint, CapsSet, ClockCandidate,
-    ClockPriority, ClockSync, ConfigureOutcome, Dim, ElementMetadata, G2gError, HardwareError,
-    Interlace, MemoryDomain, OutputSink, OwnedD3D11Texture, PadTemplate, PadTemplates,
-    PipelineClock, PipelinePacket, PresentationPacer, PropError, PropKind, PropValue, PropertySpec,
-    Rate, RawVideoFormat, MAX_LATENESS_PROPERTY, QOS_INTERVAL_PROPERTY,
+    AllocationParams, AsyncElement, BusHandle, Caps, CapsConstraint, ClockCandidate, ClockPriority,
+    ClockSync, ConfigureOutcome, Dim, ElementMetadata, G2gError, HardwareError, MemoryDomain,
+    OutputSink, OwnedD3D11Texture, PadTemplate, PadTemplates, PipelineClock, PipelinePacket,
+    PresentationPacer, PropError, PropKind, PropValue, PropertySpec, RawVideoFormat,
+    MAX_LATENESS_PROPERTY, QOS_INTERVAL_PROPERTY,
 };
 
 use crate::clock::wait_to_present;
@@ -148,6 +149,7 @@ pub struct D3D11Sink {
     worker: Option<JoinHandle<()>>,
     width: u32,
     height: u32,
+    input: Option<DisplayInput>,
     frames_presented: Arc<AtomicU64>,
     window_closed: Arc<AtomicBool>,
     latency: Arc<LatencyHistogram>,
@@ -185,6 +187,7 @@ impl D3D11Sink {
             worker: None,
             width: 0,
             height: 0,
+            input: None,
             frames_presented: Arc::new(AtomicU64::new(0)),
             window_closed: Arc::new(AtomicBool::new(false)),
             latency: Arc::new(LatencyHistogram::new()),
@@ -311,7 +314,7 @@ impl AsyncElement for D3D11Sink {
         ElementMetadata::new(
             "Direct3D11 video sink",
             "Sink/Video",
-            "Presents NV12 video in a window through a D3D11 video processor",
+            "Presents raw video in a window through a D3D11 video processor",
             crate::AARON_BOXER,
         )
     }
@@ -349,22 +352,8 @@ impl AsyncElement for D3D11Sink {
         Ok(upstream_caps.clone())
     }
 
-    /// Native NV12-only sink constraint. With every decoder a
-    /// native `DerivedOutput`, the solver intersects this against the
-    /// decoder's NV12 output and lands fixed NV12 on the link at startup,
-    /// so a non-NV12 display chain fails loud in negotiation rather than
-    /// reaching `configure_pipeline`. Geometry stays open (`Dim::Any`);
-    /// the decoder fixates it.
     fn caps_constraint_as_sink(&self) -> CapsConstraint<'_> {
-        CapsConstraint::Accepts(CapsSet::one(Caps::RawVideo {
-            format: RawVideoFormat::Nv12,
-            width: Dim::Any,
-            height: Dim::Any,
-            framerate: Rate::Any,
-            interlace: Interlace::Any,
-            colorimetry: g2g_core::Colorimetry::UNKNOWN,
-            pixel_aspect: g2g_core::PixelAspect::Any,
-        }))
+        CapsConstraint::Accepts(display_sink_caps(NATIVE_FORMATS))
     }
 
     fn input_domains(&self) -> DomainSet {
@@ -376,11 +365,16 @@ impl AsyncElement for D3D11Sink {
     /// conveys this `MemoryDomainKind::D3D11Texture` proposal to the decoder's
     /// `configure_allocation`. Returns `None` until the geometry is fixed.
     fn propose_allocation(&self, caps: &Caps) -> Option<AllocationParams> {
-        let (w, h, _) = caps.dims()?;
-        let (&Dim::Fixed(w), &Dim::Fixed(h)) = (w, h) else {
+        let Caps::RawVideo {
+            format,
+            width: Dim::Fixed(w),
+            height: Dim::Fixed(h),
+            ..
+        } = caps
+        else {
             return None;
         };
-        let size = crate::pixel::frame_byte_size(RawVideoFormat::Nv12, w, h);
+        let size = crate::pixel::frame_byte_size(*format, *w, *h);
         let mut params = AllocationParams::d3d11(size, D3D11_POOL_HEADROOM, D3D11_ALIGN);
         // a producer that cannot allocate D3D11 textures hands over system memory instead
         params.accepts = self.input_domains();
@@ -388,18 +382,12 @@ impl AsyncElement for D3D11Sink {
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        let (w, h) = match absolute_caps {
-            Caps::RawVideo {
-                format: RawVideoFormat::Nv12,
-                width: Dim::Fixed(w),
-                height: Dim::Fixed(h),
-                ..
-            } => (*w, *h),
-            _ => return Err(G2gError::CapsMismatch),
-        };
+        let input = DisplayInput::from_caps(absolute_caps, NATIVE_FORMATS)?;
+        let (w, h) = (input.width, input.height);
         if w % 2 != 0 || h % 2 != 0 {
             return Err(G2gError::CapsMismatch);
         }
+        self.input = Some(input);
 
         if self.worker.is_some() {
             if w == self.width && h == self.height {
@@ -463,6 +451,17 @@ impl AsyncElement for D3D11Sink {
                     if !wait_to_present(self.pacer.judge(timing.pts_ns, presented)).await {
                         return Ok(());
                     }
+                    let converted = match domain.as_system_slice() {
+                        Some(slice) => self
+                            .input
+                            .ok_or(G2gError::NotConfigured)?
+                            .convert_frame(slice)?,
+                        None => None,
+                    };
+                    let domain = match converted {
+                        Some(native) => MemoryDomain::System(SystemSlice::from_boxed(native)),
+                        None => domain,
+                    };
                     let tx = self.cmd_tx.as_ref().ok_or(G2gError::NotConfigured)?;
                     let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
                     tx.send(WorkerCmd::Frame {
@@ -497,20 +496,14 @@ impl AsyncElement for D3D11Sink {
     }
 }
 
+const NATIVE_FORMATS: &[RawVideoFormat] = &[RawVideoFormat::Nv12];
+
 impl PadTemplates for D3D11Sink {
-    /// A terminal sink: accepts NV12 at any geometry (the memory domain
-    /// D3D11Texture is not encoded in caps). No source pad.
+    /// A terminal sink: accepts NV12, and every other format `videoconvert`
+    /// reads in system memory, at any geometry (the memory domain D3D11Texture
+    /// is not encoded in caps). No source pad.
     fn pad_templates() -> Vec<PadTemplate> {
-        let nv12 = Caps::RawVideo {
-            format: RawVideoFormat::Nv12,
-            width: Dim::Any,
-            height: Dim::Any,
-            framerate: Rate::Any,
-            interlace: Interlace::Any,
-            colorimetry: g2g_core::Colorimetry::UNKNOWN,
-            pixel_aspect: g2g_core::PixelAspect::Any,
-        };
-        Vec::from([PadTemplate::sink(CapsSet::one(nv12))])
+        Vec::from([PadTemplate::sink(display_sink_caps(NATIVE_FORMATS))])
     }
 }
 
@@ -1147,7 +1140,7 @@ fn win_err(e: windows::core::Error) -> G2gError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use g2g_core::{Rate, VideoCodec};
+    use g2g_core::{Interlace, Rate, VideoCodec};
 
     fn nv12(w: u32, h: u32) -> Caps {
         Caps::RawVideo {
@@ -1177,33 +1170,24 @@ mod tests {
     }
 
     #[test]
-    fn caps_constraint_is_accepts_nv12_any() {
-        // M16 step 5: native sink constraint accepts NV12 at any geometry,
-        // so a fully-native decoder->sink chain rejects non-NV12 in the
-        // solver rather than via the dynamic intercept callback.
+    fn caps_constraint_takes_nv12_first_and_converted_formats() {
         let sink = D3D11Sink::new();
         let CapsConstraint::Accepts(set) = sink.caps_constraint_as_sink() else {
             panic!("expected Accepts");
         };
+        let alternatives = set.alternatives();
         assert_eq!(
-            set.alternatives(),
-            &[Caps::RawVideo {
-                format: RawVideoFormat::Nv12,
-                width: Dim::Any,
-                height: Dim::Any,
-                framerate: Rate::Any,
-                interlace: Interlace::Any,
-                colorimetry: g2g_core::Colorimetry::UNKNOWN,
-                pixel_aspect: g2g_core::PixelAspect::Any,
-            }]
+            alternatives[0],
+            crate::videofx::any_geometry(RawVideoFormat::Nv12)
         );
+        assert!(alternatives.contains(&crate::videofx::any_geometry(RawVideoFormat::I420)));
     }
 
     #[test]
-    fn configure_rejects_non_nv12() {
+    fn configure_rejects_a_format_videoconvert_cannot_read() {
         let mut sink = D3D11Sink::new();
-        let i420 = Caps::RawVideo {
-            format: RawVideoFormat::I420,
+        let planar_rgb = Caps::RawVideo {
+            format: RawVideoFormat::Rgbp8,
             width: Dim::Fixed(640),
             height: Dim::Fixed(480),
             framerate: Rate::Any,
@@ -1212,7 +1196,7 @@ mod tests {
             pixel_aspect: g2g_core::PixelAspect::Any,
         };
         assert_eq!(
-            sink.configure_pipeline(&i420).err(),
+            sink.configure_pipeline(&planar_rgb).err(),
             Some(G2gError::CapsMismatch)
         );
         assert!(sink.worker.is_none());

@@ -584,6 +584,167 @@ pub(crate) fn converts_from(format: RawVideoFormat, w: u32, h: u32) -> bool {
     FORMATS.contains(&format) && w != 0 && h != 0
 }
 
+#[cfg(any(
+    feature = "wgpu-sink",
+    all(target_os = "macos", feature = "metal-sink"),
+    all(target_os = "windows", feature = "d3d11-sink"),
+    all(target_os = "linux", feature = "kms-sink"),
+    all(target_os = "linux", feature = "wayland-sink"),
+))]
+pub(crate) mod display {
+    use super::{convert, frame_byte_size, FORMATS};
+    use alloc::boxed::Box;
+    use g2g_core::{Caps, CapsSet, Colorimetry, Dim, G2gError, RawVideoFormat};
+
+    pub(crate) fn display_sink_caps(native: &[RawVideoFormat]) -> CapsSet {
+        let converted = FORMATS
+            .iter()
+            .copied()
+            .filter(|format| !native.contains(format));
+        CapsSet::from_alternatives(
+            native
+                .iter()
+                .copied()
+                .chain(converted)
+                .map(crate::videofx::any_geometry)
+                .collect(),
+        )
+    }
+
+    fn presented_format(
+        format: RawVideoFormat,
+        native: &[RawVideoFormat],
+    ) -> Option<RawVideoFormat> {
+        use RawVideoFormat::*;
+        if native.contains(&format) {
+            return Some(format);
+        }
+        if !FORMATS.contains(&format) {
+            return None;
+        }
+        let rgb_input = matches!(
+            format,
+            Rgba8 | Bgra8 | Rgb8 | Bgr8 | Bgrx8 | Argb8 | R210 | Gbr10Le
+        );
+        if rgb_input && native.contains(&Rgba8) {
+            return Some(Rgba8);
+        }
+        native.first().copied()
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    pub(crate) struct DisplayInput {
+        pub(crate) presented: RawVideoFormat,
+        pub(crate) width: u32,
+        pub(crate) height: u32,
+        pub(crate) colorimetry: Colorimetry,
+        pub(crate) pixel_aspect: g2g_core::PixelAspect,
+        negotiated: RawVideoFormat,
+    }
+
+    impl DisplayInput {
+        pub(crate) fn from_caps(caps: &Caps, native: &[RawVideoFormat]) -> Result<Self, G2gError> {
+            let Caps::RawVideo {
+                format,
+                width: Dim::Fixed(width),
+                height: Dim::Fixed(height),
+                colorimetry,
+                pixel_aspect,
+                ..
+            } = caps
+            else {
+                return Err(G2gError::CapsMismatch);
+            };
+            Ok(Self {
+                presented: presented_format(*format, native).ok_or(G2gError::CapsMismatch)?,
+                width: *width,
+                height: *height,
+                colorimetry: *colorimetry,
+                pixel_aspect: *pixel_aspect,
+                negotiated: *format,
+            })
+        }
+
+        // `None` when the frame is already in the presented format
+        pub(crate) fn convert_frame(&self, bytes: &[u8]) -> Result<Option<Box<[u8]>>, G2gError> {
+            if self.negotiated == self.presented {
+                return Ok(None);
+            }
+            if bytes.len() < frame_byte_size(self.negotiated, self.width, self.height) {
+                return Err(G2gError::CapsMismatch);
+            }
+            Ok(Some(convert(
+                bytes,
+                self.negotiated,
+                self.presented,
+                self.width as usize,
+                self.height as usize,
+                self.colorimetry,
+            )))
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use g2g_core::{Interlace, PixelAspect, Rate};
+
+        fn fixed(format: RawVideoFormat, width: u32, height: u32) -> Caps {
+            Caps::RawVideo {
+                format,
+                width: Dim::Fixed(width),
+                height: Dim::Fixed(height),
+                framerate: Rate::Any,
+                interlace: Interlace::Any,
+                colorimetry: Colorimetry::UNKNOWN,
+                pixel_aspect: PixelAspect::Any,
+            }
+        }
+
+        const NV12_ONLY: &[RawVideoFormat] = &[RawVideoFormat::Nv12];
+        const NV12_AND_RGBA: &[RawVideoFormat] = &[RawVideoFormat::Nv12, RawVideoFormat::Rgba8];
+
+        #[test]
+        fn an_i420_frame_reaches_an_nv12_sink_with_its_chroma_interleaved() {
+            let luma = [10, 11, 12, 13, 14, 15, 16, 17];
+            let (u, v) = ([100, 101], [200, 201]);
+            let i420: alloc::vec::Vec<u8> = luma.iter().chain(&u).chain(&v).copied().collect();
+            let input =
+                DisplayInput::from_caps(&fixed(RawVideoFormat::I420, 4, 2), NV12_ONLY).unwrap();
+            let nv12 = input.convert_frame(&i420).unwrap().expect("I420 converts");
+            assert_eq!(input.presented, RawVideoFormat::Nv12);
+            assert_eq!(&nv12[..8], &luma);
+            assert_eq!(&nv12[8..], &[100, 200, 101, 201]);
+        }
+
+        #[test]
+        fn a_native_frame_is_presented_as_it_arrives() {
+            let input =
+                DisplayInput::from_caps(&fixed(RawVideoFormat::Nv12, 4, 2), NV12_ONLY).unwrap();
+            assert_eq!(input.convert_frame(&[0; 12]).unwrap(), None);
+        }
+
+        #[test]
+        fn rgb_input_lands_on_rgba_only_when_the_sink_takes_it() {
+            let bgr = fixed(RawVideoFormat::Bgr8, 4, 2);
+            let presented = |native| DisplayInput::from_caps(&bgr, native).unwrap().presented;
+            assert_eq!(presented(NV12_AND_RGBA), RawVideoFormat::Rgba8);
+            assert_eq!(presented(NV12_ONLY), RawVideoFormat::Nv12);
+        }
+
+        #[test]
+        fn formats_videoconvert_cannot_read_and_short_frames_are_refused() {
+            assert_eq!(
+                DisplayInput::from_caps(&fixed(RawVideoFormat::Rgbp8, 4, 2), NV12_ONLY),
+                Err(G2gError::CapsMismatch)
+            );
+            let input =
+                DisplayInput::from_caps(&fixed(RawVideoFormat::I420, 4, 2), NV12_ONLY).unwrap();
+            assert_eq!(input.convert_frame(&[0; 11]), Err(G2gError::CapsMismatch));
+        }
+    }
+}
+
 /// Dispatch one frame conversion. `src` is validated to hold at least the
 /// input frame, and `converts_from` holds for both formats at `w x h`.
 /// `colorimetry` is the YUV side's, from its caps: it picks the matrix and range

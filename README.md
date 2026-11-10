@@ -627,7 +627,7 @@ cargo clippy --workspace --all-targets
 | `MediaCodecDec` (H.264 / H.265, zero-copy GPU output via `with_gpu_output`) | `mediacodec`, `mediacodec-wgpu` | Android + NDK MediaCodec (+ wgpu / Vulkan for GPU output) |
 | `WaylandSink` | `wayland-sink` | Linux + Wayland |
 | `KmsSink` | `kms-sink` | Linux + libdrm, needs DRM master / tty |
-| `D3D11Sink` (`d3d11videosink`: owns its window, NV12 from system memory or zero-copy from D3D11 textures) | `d3d11-sink` | Windows |
+| `D3D11Sink` (`d3d11videosink`: owns its window, any raw format from system memory or zero-copy NV12 from D3D11 textures) | `d3d11-sink` | Windows |
 | `MetalVideoSink` (zero-copy from `CVPixelBuffer`) | `metal-sink` | macOS + Metal |
 | `WgpuPresentSink` (`wgpusink`: owns its Wayland window, presents GPU-resident frames with no upload) | `wgpu-present` | Linux + Wayland + wgpu |
 | `NvDec` (native NVDEC H.264 / H.265 / VP9 / AV1 to CUDA NV12 or 10-bit P010) | `nvdec` | Linux or Windows + NVIDIA driver (libnvcuvid / nvcuvid.dll) |

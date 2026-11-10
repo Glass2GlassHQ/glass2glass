@@ -69,14 +69,14 @@ use g2g_core::meta::{Orientation, OrientationSet};
 use g2g_core::metrics::{monotonic_ns, LatencyHistogram, LatencySnapshot};
 use g2g_core::{
     AsyncElement, BusHandle, Caps, CapsConstraint, CapsSet, ClockCandidate, ClockPriority,
-    ClockSync, ConfigureOutcome, Dim, ElementMetadata, G2gError, HardwareError, OutputSink,
-    PadTemplate, PadTemplates, PipelineClock, PipelinePacket, PresentationPacer, PropError,
-    PropKind, PropValue, PropertySpec, RawVideoFormat, MAX_LATENESS_PROPERTY,
-    QOS_INTERVAL_PROPERTY,
+    ClockSync, ConfigureOutcome, ElementMetadata, G2gError, HardwareError, OutputSink, PadTemplate,
+    PadTemplates, PipelineClock, PipelinePacket, PresentationPacer, PropError, PropKind, PropValue,
+    PropertySpec, RawVideoFormat, MAX_LATENESS_PROPERTY, QOS_INTERVAL_PROPERTY,
 };
 
 use crate::clock::wait_to_present;
 use crate::drm_plane_rotation::{primary_plane_rotation, require_unrotated, PlaneRotation};
+use crate::videoconvert::display::{display_sink_caps, DisplayInput};
 use crate::videoflip::frame_orientation;
 
 /// Thin wrapper over `/dev/dri/cardN` implementing the `drm` device traits
@@ -191,6 +191,7 @@ pub struct KmsSink {
     pitch: u32,
     width: u32,
     height: u32,
+    input: Option<DisplayInput>,
     frames_presented: u64,
     /// Glass-to-glass latency distribution. Recorded once per
     /// successful `present()` as `monotonic_ns() - frame.arrival_ns`,
@@ -252,6 +253,7 @@ impl KmsSink {
             pitch: 0,
             width: 0,
             height: 0,
+            input: None,
             frames_presented: 0,
             latency: LatencyHistogram::new(),
             pacer: PresentationPacer::for_video_sink(),
@@ -523,8 +525,10 @@ impl PipelineClock for KmsClock {
     }
 }
 
+const NATIVE_FORMATS: &[RawVideoFormat] = &[RawVideoFormat::Nv12];
+
 fn accepted_caps() -> CapsSet {
-    CapsSet::one(crate::videofx::any_geometry(RawVideoFormat::Nv12))
+    display_sink_caps(NATIVE_FORMATS)
 }
 
 impl PadTemplates for KmsSink {
@@ -584,37 +588,16 @@ impl AsyncElement for KmsSink {
     }
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
-        // Pass-through at negotiation; NV12 is validated in
-        // `configure_pipeline`. See WaylandSink for the rationale: with the
-        // decoder native (`DerivedOutput`), the solver assigns this link
-        // NV12 directly, so configure receives NV12 at startup.
         Ok(upstream_caps.clone())
     }
 
-    /// Native NV12-only sink constraint. The solver intersects
-    /// this against the upstream decoder's NV12 `DerivedOutput` and lands
-    /// fixed NV12 on the link at startup, so a non-NV12 (undecoded) display
-    /// chain fails loud in negotiation rather than reaching
-    /// `configure_pipeline`. Geometry stays open (`Dim::Any`); the decoder
-    /// fixates it.
     fn caps_constraint_as_sink(&self) -> CapsConstraint<'_> {
         CapsConstraint::Accepts(accepted_caps())
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        // NV12 only. Every decoder is now a native `DerivedOutput`, so the
-        // solver lands NV12 on this link at startup; the old
-        // accept-H.264-as-no-op workaround is gone and a non-NV12 sink
-        // input fails loud as a real pipeline error.
-        let (w, h) = match absolute_caps {
-            Caps::RawVideo {
-                format: RawVideoFormat::Nv12,
-                width: Dim::Fixed(w),
-                height: Dim::Fixed(h),
-                ..
-            } => (*w, *h),
-            _ => return Err(G2gError::CapsMismatch),
-        };
+        let input = DisplayInput::from_caps(absolute_caps, NATIVE_FORMATS)?;
+        let (w, h) = (input.width, input.height);
         if w % 2 != 0 || h % 2 != 0 {
             // NV12's UV plane is half-res in both dims; odd extents would
             // need rounded handling we don't bother with in v1.
@@ -628,6 +611,7 @@ impl AsyncElement for KmsSink {
         // (e.g. RtspSrc's `Range` workaround #1, fixated to min) and
         // the real geometry lands via a mid-stream `CapsChanged` after
         // SPS parse.
+        self.input = Some(input);
         if !self.slots.is_empty() {
             if w == self.width && h == self.height {
                 return Ok(ConfigureOutcome::Accepted);
@@ -708,7 +692,9 @@ impl AsyncElement for KmsSink {
                     if !wait_to_present(paced).await {
                         return Ok(());
                     }
-                    self.present(slice, orientation)?;
+                    let input = self.input.ok_or(G2gError::NotConfigured)?;
+                    let converted = input.convert_frame(slice)?;
+                    self.present(converted.as_deref().unwrap_or(slice), orientation)?;
                     // Record glass-to-glass latency after page-flip
                     // submission. Stamped frames only; unstamped
                     // (synthetic or arrival_ns=0) are skipped silently.
@@ -774,7 +760,7 @@ fn copy_nv12(
 mod tests {
     use super::*;
     use alloc::vec;
-    use g2g_core::{Rate, VideoCodec};
+    use g2g_core::{Dim, Rate, VideoCodec};
 
     /// The sink maps its dumb buffer on the CPU, so it has to tell a GPU decoder to
     /// download. The allocation cascade reads this declaration, so getting it
@@ -821,30 +807,21 @@ mod tests {
     }
 
     #[test]
-    fn caps_constraint_is_accepts_nv12_any() {
-        // M16 step 5: native sink constraint accepts NV12 at any geometry,
-        // so a fully-native decoder->sink chain rejects non-NV12 in the
-        // solver rather than via the dynamic intercept callback.
+    fn caps_constraint_takes_nv12_first_and_converted_formats() {
         let sink = KmsSink::new();
         let CapsConstraint::Accepts(set) = sink.caps_constraint_as_sink() else {
             panic!("expected Accepts");
         };
+        let alternatives = set.alternatives();
         assert_eq!(
-            set.alternatives(),
-            &[Caps::RawVideo {
-                format: RawVideoFormat::Nv12,
-                width: Dim::Any,
-                height: Dim::Any,
-                framerate: Rate::Any,
-                interlace: g2g_core::Interlace::Any,
-                colorimetry: g2g_core::Colorimetry::UNKNOWN,
-                pixel_aspect: g2g_core::PixelAspect::Any
-            }]
+            alternatives[0],
+            crate::videofx::any_geometry(RawVideoFormat::Nv12)
         );
+        assert!(alternatives.contains(&crate::videofx::any_geometry(RawVideoFormat::I420)));
     }
 
     #[test]
-    fn configure_rejects_non_nv12() {
+    fn configure_rejects_undecoded_video() {
         let mut sink = KmsSink::new();
         let h264 = Caps::CompressedVideo {
             codec: VideoCodec::H264,
@@ -855,8 +832,6 @@ mod tests {
             pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
-        // A native decoder lands NV12 on this link; non-NV12 is a real
-        // error (e.g. an undecoded display chain), not a deferred no-op.
         assert_eq!(
             sink.configure_pipeline(&h264).err(),
             Some(G2gError::CapsMismatch)

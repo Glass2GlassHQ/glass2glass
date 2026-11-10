@@ -52,14 +52,14 @@ use objc2_quartz_core::{CAMetalDrawable, CAMetalLayer, CATransaction};
 
 use g2g_core::element::{PresentationStats, QosMessage};
 use g2g_core::{
-    AsyncElement, BusHandle, Caps, CapsConstraint, CapsSet, ClockCandidate, ClockPriority,
-    ClockSync, ConfigureOutcome, Dim, DomainSet, ElementMetadata, G2gError, HardwareError,
-    Interlace, MemoryDomain, MemoryDomainKind, OutputSink, PadTemplate, PadTemplates,
-    PipelineClock, PipelinePacket, PresentationPacer, PropError, PropValue, PropertySpec, Rate,
-    RawVideoFormat, PACING_PROPERTIES,
+    AsyncElement, BusHandle, Caps, CapsConstraint, ClockCandidate, ClockPriority, ClockSync,
+    ConfigureOutcome, DomainSet, ElementMetadata, G2gError, HardwareError, MemoryDomain,
+    MemoryDomainKind, OutputSink, PadTemplate, PadTemplates, PipelineClock, PipelinePacket,
+    PresentationPacer, PropError, PropValue, PropertySpec, RawVideoFormat, PACING_PROPERTIES,
 };
 
 use crate::clock::wait_to_present;
+use crate::videoconvert::display::{display_sink_caps, DisplayInput};
 
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -265,6 +265,7 @@ impl core::fmt::Debug for RenderState {
 #[derive(Debug)]
 pub struct MetalVideoSink {
     configured: bool,
+    input: Option<DisplayInput>,
     state: Option<RenderState>,
     /// An app-supplied `CAMetalLayer` (retained at configure); the sink builds
     /// its own standalone layer when absent.
@@ -296,6 +297,7 @@ impl MetalVideoSink {
     pub fn new() -> Self {
         Self {
             configured: false,
+            input: None,
             state: None,
             external_layer: None,
             window: None,
@@ -640,17 +642,15 @@ fn iosurface_plane_texture(
         .ok_or(G2gError::Hardware(HardwareError::Other))
 }
 
-/// NV12 at any geometry, the one format the sink draws.
-fn nv12_any() -> Caps {
-    Caps::RawVideo {
-        format: RawVideoFormat::Nv12,
-        width: Dim::Any,
-        height: Dim::Any,
-        framerate: Rate::Any,
-        interlace: Interlace::Any,
-        colorimetry: g2g_core::Colorimetry::UNKNOWN,
-        pixel_aspect: g2g_core::PixelAspect::Any,
+const NATIVE_FORMATS: &[RawVideoFormat] = &[RawVideoFormat::Nv12];
+
+fn display_input(caps: &Caps) -> Result<DisplayInput, G2gError> {
+    let input = DisplayInput::from_caps(caps, NATIVE_FORMATS)?;
+    let (w, h) = (input.width, input.height);
+    if w % 2 != 0 || h % 2 != 0 || w == 0 || h == 0 {
+        return Err(G2gError::CapsMismatch);
     }
+    Ok(input)
 }
 
 #[derive(Debug)]
@@ -675,14 +675,18 @@ impl AsyncElement for MetalVideoSink {
     }
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
-        upstream_caps.intersect(&nv12_any())
+        display_sink_caps(NATIVE_FORMATS)
+            .alternatives()
+            .iter()
+            .find_map(|accepted| upstream_caps.intersect(accepted).ok())
+            .ok_or(G2gError::CapsMismatch)
     }
 
     fn caps_constraint_as_sink(&self) -> CapsConstraint<'_> {
-        CapsConstraint::Accepts(CapsSet::one(nv12_any()))
+        CapsConstraint::Accepts(display_sink_caps(NATIVE_FORMATS))
     }
 
-    /// Accepts packed System NV12 or the zero-copy CvPixelBuffer domain.
+    /// Accepts packed system memory or the zero-copy CvPixelBuffer domain.
     fn input_domains(&self) -> DomainSet {
         DomainSet::only(MemoryDomainKind::System).with(MemoryDomainKind::CvPixelBuffer)
     }
@@ -731,16 +735,9 @@ impl AsyncElement for MetalVideoSink {
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        let (w, h) = match absolute_caps {
-            Caps::RawVideo {
-                format: RawVideoFormat::Nv12,
-                width: Dim::Fixed(w),
-                height: Dim::Fixed(h),
-                ..
-            } if *w % 2 == 0 && *h % 2 == 0 && *w > 0 && *h > 0 => (*w, *h),
-            _ => return Err(G2gError::CapsMismatch),
-        };
-        self.build_state(w, h)?;
+        let input = display_input(absolute_caps)?;
+        self.build_state(input.width, input.height)?;
+        self.input = Some(input);
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
     }
@@ -771,33 +768,28 @@ impl AsyncElement for MetalVideoSink {
                     // descriptors; a pipeline thread has no run loop draining a
                     // pool, so drain one per frame or they pile up for good.
                     objc2::rc::autoreleasepool(|_| match &frame.domain {
-                        MemoryDomain::System(slice) => self.present_system(slice.as_slice()),
+                        MemoryDomain::System(slice) => {
+                            let input = self.input.ok_or(G2gError::NotConfigured)?;
+                            let converted = input.convert_frame(slice.as_slice())?;
+                            self.present_system(converted.as_deref().unwrap_or(slice.as_slice()))
+                        }
                         MemoryDomain::CvPixelBuffer(buf) => self.present_cv(buf),
                         _ => Err(G2gError::UnsupportedDomain),
                     })?;
                 }
                 PipelinePacket::CapsChanged(c) => {
-                    // A geometry change rebuilds the layer + textures; anything
-                    // that is not our NV12 input shape is rejected loud. (A
-                    // sink has no downstream, so there is no pre-fixed output
-                    // caps case here.)
-                    match &c {
-                        Caps::RawVideo {
-                            format: RawVideoFormat::Nv12,
-                            width: Dim::Fixed(w),
-                            height: Dim::Fixed(h),
-                            ..
-                        } if *w % 2 == 0 && *h % 2 == 0 && *w > 0 && *h > 0 => {
-                            let dims_changed = self
-                                .state
-                                .as_ref()
-                                .is_some_and(|st| (st.width, st.height) != (*w, *h));
-                            if dims_changed {
-                                self.build_state(*w, *h)?;
-                            }
-                        }
-                        _ => return Err(G2gError::CapsMismatch),
+                    // A geometry change rebuilds the layer + textures. (A sink
+                    // has no downstream, so there is no pre-fixed output caps
+                    // case here.)
+                    let input = display_input(&c)?;
+                    let dims_changed = self
+                        .state
+                        .as_ref()
+                        .is_some_and(|st| (st.width, st.height) != (input.width, input.height));
+                    if dims_changed {
+                        self.build_state(input.width, input.height)?;
                     }
+                    self.input = Some(input);
                 }
                 PipelinePacket::Eos => {}
                 // Track the playback segment so PTS maps to running time (correct
@@ -814,8 +806,9 @@ impl AsyncElement for MetalVideoSink {
 }
 
 impl PadTemplates for MetalVideoSink {
-    /// Sink-only: NV12 at any geometry (domain is not in caps).
+    /// Sink-only: NV12, and every other format `videoconvert` reads, at any
+    /// geometry (domain is not in caps).
     fn pad_templates() -> Vec<PadTemplate> {
-        Vec::from([PadTemplate::sink(CapsSet::one(nv12_any()))])
+        Vec::from([PadTemplate::sink(display_sink_caps(NATIVE_FORMATS))])
     }
 }

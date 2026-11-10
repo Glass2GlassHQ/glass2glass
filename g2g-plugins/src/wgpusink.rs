@@ -37,9 +37,9 @@ use g2g_core::element::{PresentationStats, QosMessage};
 use g2g_core::memory::{DomainSet, MemoryDomainKind};
 use g2g_core::{
     AsyncElement, BusHandle, Caps, CapsConstraint, CapsSet, ClockSync, Colorimetry,
-    ConfigureOutcome, Dim, G2gError, Interlace, MemoryDomain, OutputSink, PipelinePacket,
-    PixelAspect, PresentationPacer, PropError, PropValue, PropertySpec, Rate, RawVideoFormat,
-    MAX_LATENESS_PROPERTY, QOS_INTERVAL_PROPERTY,
+    ConfigureOutcome, G2gError, MemoryDomain, OutputSink, PipelinePacket, PixelAspect,
+    PresentationPacer, PropError, PropValue, PropertySpec, RawVideoFormat, MAX_LATENESS_PROPERTY,
+    QOS_INTERVAL_PROPERTY,
 };
 
 use crate::clock::wait_to_present;
@@ -50,6 +50,7 @@ use crate::gpu::{
     nv12_plane_views, packed_nv12_extent, read_texture_plane, texture_holds_picture,
     texture_layout, texture_of, GpuContext, WgpuTextureLayout,
 };
+use crate::videoconvert::display::{display_sink_caps, DisplayInput};
 use crate::yuvmatrix::YuvToRgbWeights;
 
 /// Fullscreen-triangle vertex stage, shared by both fragment stages below. The
@@ -458,7 +459,7 @@ impl BlitResources {
 /// Pixel format + geometry of the frames the sink was configured for.
 #[derive(Debug, Clone, Copy)]
 struct SourceLayout {
-    format: RawVideoFormat,
+    input: DisplayInput,
     layout: WgpuTextureLayout,
     width: u32,
     height: u32,
@@ -488,53 +489,32 @@ impl SourceLayout {
     }
 }
 
-/// The sink's accepted layouts: NV12 (what the decoders produce) and RGBA (what
-/// the GPU overlay / decode elements produce), at any geometry. Shared with the
-/// windowed present sink, which drives this renderer.
-pub(crate) fn accepted_caps() -> CapsSet {
-    CapsSet::from_alternatives(Vec::from([
-        any_geometry(RawVideoFormat::Nv12),
-        any_geometry(RawVideoFormat::Rgba8),
-    ]))
-}
+const NATIVE_FORMATS: &[RawVideoFormat] = &[RawVideoFormat::Nv12, RawVideoFormat::Rgba8];
 
-fn any_geometry(format: RawVideoFormat) -> Caps {
-    Caps::RawVideo {
-        format,
-        width: Dim::Any,
-        height: Dim::Any,
-        framerate: Rate::Any,
-        interlace: Interlace::Any,
-        colorimetry: g2g_core::Colorimetry::UNKNOWN,
-        pixel_aspect: g2g_core::PixelAspect::Any,
-    }
+/// The sink's accepted layouts: NV12 and RGBA as they are, and every other
+/// format `videoconvert` reads, at any geometry. Shared with the windowed
+/// present sink, which drives this renderer.
+pub(crate) fn accepted_caps() -> CapsSet {
+    display_sink_caps(NATIVE_FORMATS)
 }
 
 /// The source layout the negotiated caps settle on, rejecting anything the blit
 /// pipelines cannot read.
 fn source_layout(absolute_caps: &Caps) -> Result<SourceLayout, G2gError> {
-    let Caps::RawVideo {
-        format,
-        width: Dim::Fixed(width),
-        height: Dim::Fixed(height),
-        ..
-    } = absolute_caps
-    else {
-        return Err(G2gError::CapsMismatch);
-    };
-    let layout = match format {
+    let input = DisplayInput::from_caps(absolute_caps, NATIVE_FORMATS)?;
+    let layout = match input.presented {
         RawVideoFormat::Nv12 => WgpuTextureLayout::PackedNv12,
         RawVideoFormat::Rgba8 => WgpuTextureLayout::Rgba,
         _ => return Err(G2gError::CapsMismatch),
     };
-    if *width == 0 || *height == 0 {
+    if input.width == 0 || input.height == 0 {
         return Err(G2gError::CapsMismatch);
     }
     Ok(SourceLayout {
-        format: *format,
+        input,
         layout,
-        width: *width,
-        height: *height,
+        width: input.width,
+        height: input.height,
     })
 }
 
@@ -863,10 +843,13 @@ impl WgpuSink {
     /// chroma rows of different lengths.
     fn upload_system(&mut self, bytes: &[u8]) -> Result<(), G2gError> {
         let source = self.source.ok_or(G2gError::NotConfigured)?;
+        let converted = source.input.convert_frame(bytes)?;
+        let bytes = converted.as_deref().unwrap_or(bytes);
         let (texture_format, size) = source.upload_texture()?;
         let (width, height) = (source.width, source.height);
         let frame_bytes = source
-            .format
+            .input
+            .presented
             .unpadded_frame_bytes(width, height)
             .ok_or(G2gError::CapsMismatch)?;
         if (bytes.len() as u64) < frame_bytes {
@@ -893,17 +876,20 @@ impl WgpuSink {
             .block_copy_size(None)
             .ok_or(G2gError::UnsupportedDomain)?;
         let mut plane_top = 0;
-        for plane in 0..source.format.plane_count() {
+        for plane in 0..source.input.presented.plane_count() {
             let stride = source
-                .format
+                .input
+                .presented
                 .plane_stride(plane, width)
                 .ok_or(G2gError::CapsMismatch)?;
             let rows = source
-                .format
+                .input
+                .presented
                 .plane_rows(plane, height)
                 .ok_or(G2gError::CapsMismatch)?;
             let offset = source
-                .format
+                .input
+                .presented
                 .plane_offset(plane, width, height)
                 .ok_or(G2gError::CapsMismatch)?;
             self.ctx.queue.write_texture(
