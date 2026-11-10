@@ -223,10 +223,13 @@ async fn pcm_aac_mp4_demux_decode_full_circle() {
         encoded.aus.len(),
         "all AUs survive the container"
     );
-    assert_eq!(
-        demuxed.aus, encoded.aus,
-        "AUs byte-exact through the container"
-    );
+    // mp4 stores the access units without their ADTS headers
+    for (demuxed_au, encoded_au) in demuxed.aus.iter().zip(&encoded.aus) {
+        assert!(
+            encoded_au.len() > demuxed_au.len() && encoded_au.ends_with(demuxed_au),
+            "AU payload byte-exact through the container"
+        );
+    }
 
     let mut dec = MfAacDecode::new().with_audio_specific_config(recovered_asc);
     dec.configure_pipeline(&probed).expect("decoder init");

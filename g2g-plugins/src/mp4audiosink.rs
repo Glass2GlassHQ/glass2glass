@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
 //! Audio-only fragmented-MP4 muxer sink. The audio counterpart of
-//! `mp4mux`: wraps a raw AAC-LC elementary stream in a single-`soun`-track
+//! `mp4mux`: wraps an AAC-LC elementary stream in a single-`soun`-track
 //! fMP4 (`ftyp` + `moov` once, then one `moof`+`mdat` fragment per access
 //! unit), so an encoded audio stream is a playable, durable `.m4a`. Pairs with
 //! `MfAacEncode` upstream; `WavSink` remains the uncompressed alternative.
@@ -11,8 +11,8 @@
 //! The `moov`'s `mp4a`/`esds` sample entry needs the stream's
 //! AudioSpecificConfig, which AAC access units do not carry in-band, so it is
 //! supplied with [`Mp4AudioSink::with_audio_specific_config`] (the encoder
-//! exposes it). Audio access units are stored verbatim in the `mdat` (no
-//! length prefix); the media timescale is the sample rate and each AAC-LC
+//! exposes it). Audio access units are stored in the `mdat` without their ADTS
+//! header (no length prefix); the media timescale is the sample rate and each AAC-LC
 //! access unit is 1024 samples.
 
 use core::future::Future;
@@ -159,9 +159,11 @@ impl AsyncElement for Mp4AudioSink {
             }
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let au = frame
-                        .domain
-                        .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
+                    let au = crate::aacparse::strip_adts(
+                        frame
+                            .domain
+                            .require_system_slice(g2g_core::log::short_type_name::<Self>())?,
+                    );
                     if au.is_empty() {
                         return Err(G2gError::CapsMismatch);
                     }

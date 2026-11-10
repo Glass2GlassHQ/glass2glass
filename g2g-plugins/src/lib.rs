@@ -775,7 +775,8 @@ mod pcmclip;
     ),
     feature = "vorbis",
     feature = "aac-decode",
-    feature = "mpeg-audio-decode"
+    feature = "mpeg-audio-decode",
+    all(windows, feature = "mf-aac")
 ))]
 mod pcmoutput;
 // ID3v1 / ID3v2 tag parsing and writing (no_std), shared by id3demux,

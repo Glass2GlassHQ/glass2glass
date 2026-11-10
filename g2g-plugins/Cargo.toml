@@ -385,10 +385,10 @@ wasapi-sink = ["std", "dep:windows", "dep:windows-core"]
 # default audio capture endpoint (shared mode), the input mirror of
 # WasapiSink. Pulls the windows crate; Windows-only, implies std.
 wasapi-src = ["std", "dep:windows", "dep:windows-core"]
-# Windows D3D11 present sink (W1 Phase 4): displays MemoryDomain::D3D11Texture
+# Windows D3D11 present sink: displays system-memory and MemoryDomain::D3D11Texture
 # frames in a Win32 window via a DXGI swapchain + D3D11 video processor
 # (NV12->RGB on the GPU). The Windows analog of CudaGlSink. Windows-only,
-# implies std. Pairs with MfDecode::with_d3d11().
+# implies std.
 d3d11-sink = ["std", "dep:windows"]
 # ffmpeg/libavcodec decode (software, NVDEC, and VAAPI hwaccel backends).
 # Pulls ffmpeg-next + ffmpeg-sys; Linux, macOS and Windows, implies std. Linux needs

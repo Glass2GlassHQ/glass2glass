@@ -80,7 +80,6 @@ async fn pcm_aac_pcm_round_trip_recovers_the_stream() {
     let mut enc = MfAacEncode::new();
     let narrowed = enc.intercept_caps(&in_caps).expect("intercept s16");
     enc.configure_pipeline(&narrowed).expect("encoder init");
-    let asc = enc.audio_specific_config().expect("ASC").to_vec();
 
     let mut encoded = Collect::default();
     for i in 0..BUFFERS {
@@ -95,7 +94,8 @@ async fn pcm_aac_pcm_round_trip_recovers_the_stream() {
     assert!(!encoded.frames.is_empty(), "produced AAC access units");
 
     // --- decode ---
-    let mut dec = MfAacDecode::new().with_audio_specific_config(asc);
+    // the decoder reads its config from the first ADTS header
+    let mut dec = MfAacDecode::new();
     let narrowed = dec.intercept_caps(&aac_caps).expect("intercept aac");
     dec.configure_pipeline(&narrowed).expect("decoder init");
 

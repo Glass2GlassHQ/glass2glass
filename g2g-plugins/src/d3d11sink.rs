@@ -2,21 +2,13 @@
 //
 // SPDX-License-Identifier: MPL-2.0
 
-//! Windows D3D11 present sink (W1 Phase 4): the zero-copy display end of the
-//! DXVA decode path, the analog of [`CudaGlSink`](crate::cudaglsink) on Linux.
+//! Windows D3D11 present sink, the analog of [`CudaGlSink`](crate::cudaglsink)
+//! on Linux.
 //!
-//! Consumes `MemoryDomain::D3D11Texture` frames (from `MfDecode::with_d3d11()`)
-//! and presents them in a Win32 window via a DXGI flip-model swapchain. The
+//! Presents system-memory frames, and `MemoryDomain::D3D11Texture` frames from a
+//! GPU decoder, in a Win32 window via a DXGI flip-model swapchain. The
 //! NV12 -> RGB colour convert runs on the GPU through a D3D11 video processor
-//! (`VideoProcessorBlt`), so the decoded texture never leaves the GPU.
-//!
-//! ## Pipeline shape
-//!
-//! ```text
-//! RtspSrc -> H264Parse -> MfDecode(with_d3d11) -> D3D11Sink
-//!                                                     |
-//!                                                     +-> Win32 window
-//! ```
+//! (`VideoProcessorBlt`), so a decoded texture never leaves the GPU.
 //!
 //! ## Threading
 //!
@@ -24,21 +16,13 @@
 //! thread) and D3D11 is driven single-threaded here, so (like `WaylandSink` /
 //! `CudaGlSink`) all of it lives on a dedicated worker thread spun up at
 //! `configure_pipeline`. The sink struct holds only `Send` handles (an mpsc
-//! sender plus shared atomics). The decoded `OwnedD3D11Texture` is `Send` (its
-//! keep-alive owns the `IMFSample`), so it crosses to the worker and the
-//! texture stays valid until the worker drops it after presenting.
+//! sender plus shared atomics). An `OwnedD3D11Texture` is `Send` (its keep-alive
+//! owns the producer's buffer), so it crosses to the worker and the texture
+//! stays valid until the worker drops it after presenting.
 //!
-//! The swapchain and video processor are created lazily on the first frame
-//! using that frame's `ID3D11Device` (the decoder's device): a D3D11 resource
-//! and the views over it must live on the same device, so the sink reuses the
-//! decoder's rather than creating a second device and sharing textures.
-//!
-//! ## Verification status
-//!
-//! `d3d11-sink` + Windows-gated. The module COMPILES on the Windows dev host
-//! (the COM surface is compiler-checked); the actual present (a real GPU
-//! decoding into textures shown in a window) is owed as a user-side run on a
-//! machine with a GPU, which the dev host can do.
+//! The worker builds its device, swapchain and video processor before the first
+//! frame. A D3D11 resource and the views over it must live on the same device,
+//! so a texture from another device rebuilds them on that device.
 
 use core::future::Future;
 use core::mem::ManuallyDrop;
@@ -360,8 +344,8 @@ impl AsyncElement for D3D11Sink {
         DomainSet::only(MemoryDomainKind::System).with(MemoryDomainKind::D3D11Texture)
     }
 
-    /// Ask the decoder to keep buffers in D3D11 textures so the
-    /// `MfDecode(with_d3d11)` -> sink handoff stays on the GPU. The runner
+    /// Ask the decoder to keep buffers in D3D11 textures so the decoder -> sink
+    /// handoff stays on the GPU. The runner
     /// conveys this `MemoryDomainKind::D3D11Texture` proposal to the decoder's
     /// `configure_allocation`. Returns `None` until the geometry is fixed.
     fn propose_allocation(&self, caps: &Caps) -> Option<AllocationParams> {

@@ -80,6 +80,32 @@ pub(crate) const SAMPLE_RATES: [u32; 13] = [
     7_350,
 ];
 
+// ADTS `profile` for AAC-LC: the audio object type (2) minus one
+#[cfg(any(
+    all(
+        any(target_os = "linux", target_os = "macos", windows),
+        feature = "ffmpeg"
+    ),
+    all(target_os = "macos", feature = "audiotoolbox-aac"),
+    all(windows, feature = "mf-aac")
+))]
+pub(crate) const ADTS_PROFILE_AAC_LC: u8 = 1;
+
+#[cfg(any(
+    all(
+        any(target_os = "linux", target_os = "macos", windows),
+        feature = "ffmpeg"
+    ),
+    all(target_os = "macos", feature = "audiotoolbox-aac"),
+    all(windows, feature = "mf-aac")
+))]
+pub(crate) fn sample_rate_index(rate: u32) -> Option<u8> {
+    SAMPLE_RATES
+        .iter()
+        .position(|&supported| supported == rate)
+        .and_then(|index| u8::try_from(index).ok())
+}
+
 const ADTS_AUDIO_SPECIFIC_CONFIG_LEN: usize = 2;
 
 /// Synthesise the 2-byte AAC AudioSpecificConfig from an ADTS header.
@@ -1232,6 +1258,22 @@ mod tests {
     /// One access unit with a zero payload, the shape most tests here want.
     fn adts_frame(channel_config: u8, freq_index: u8, payload_len: usize) -> Vec<u8> {
         build_adts(channel_config, freq_index, payload_len, 0)
+    }
+
+    #[cfg(any(
+        all(
+            any(target_os = "linux", target_os = "macos", windows),
+            feature = "ffmpeg"
+        ),
+        all(target_os = "macos", feature = "audiotoolbox-aac"),
+        all(windows, feature = "mf-aac")
+    ))]
+    #[test]
+    fn sample_rate_index_table() {
+        assert_eq!(sample_rate_index(48000), Some(3));
+        assert_eq!(sample_rate_index(44100), Some(4));
+        assert_eq!(sample_rate_index(16000), Some(8));
+        assert_eq!(sample_rate_index(12345), None);
     }
 
     #[test]

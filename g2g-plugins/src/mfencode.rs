@@ -77,7 +77,8 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::{
     g2g_warn, AllocationParams, AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim,
     FrameTiming, G2gError, HardwareError, Interlace, MemoryDomain, OutputSink, PadTemplate,
-    PadTemplates, PipelinePacket, PushOutcome, Rate, RawVideoFormat, Reconfigure, VideoCodec,
+    PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, PushOutcome, Rate,
+    RawVideoFormat, Reconfigure, VideoCodec,
 };
 
 /// Default target bitrate (bits/s) when the caller doesn't override it.
@@ -536,6 +537,52 @@ impl AsyncElement for MfEncode {
     /// request is recorded for diagnostics.
     fn configure_allocation(&mut self, params: &AllocationParams) {
         self.requested_alloc = Some(params.clone());
+    }
+
+    fn metadata(&self) -> g2g_core::ElementMetadata {
+        g2g_core::ElementMetadata::new(
+            "Media Foundation H.264 / H.265 encoder",
+            "Codec/Encoder/Video",
+            "Encodes NV12 to Annex-B H.264 or H.265 with a Media Foundation encoder MFT",
+            crate::AARON_BOXER,
+        )
+    }
+
+    fn properties(&self) -> &'static [PropertySpec] {
+        const PROPS: &[PropertySpec] = &[
+            PropertySpec::new("bitrate", PropKind::Uint, "target bitrate, bits/second")
+                .with_default("4000000"),
+            PropertySpec::new(
+                "hardware",
+                PropKind::Bool,
+                "use a hardware encoder MFT for H.264 too (H.265 always enumerates one)",
+            )
+            .with_default("false"),
+        ];
+        PROPS
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        match name {
+            "bitrate" => {
+                let bitrate = value.as_uint().ok_or(PropError::Type)?;
+                self.bitrate = u32::try_from(bitrate).map_err(|_| PropError::Value)?;
+                Ok(())
+            }
+            "hardware" => {
+                self.prefer_hardware = value.as_bool().ok_or(PropError::Type)?;
+                Ok(())
+            }
+            _ => Err(PropError::Unknown),
+        }
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        match name {
+            "bitrate" => Some(PropValue::Uint(u64::from(self.bitrate))),
+            "hardware" => Some(PropValue::Bool(self.prefer_hardware)),
+            _ => None,
+        }
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {

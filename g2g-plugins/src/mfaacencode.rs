@@ -4,9 +4,9 @@
 
 //! Windows AAC audio encode element wrapping the Media Foundation AAC
 //! Encoder MFT. Consumes interleaved 16-bit PCM (`PcmS16Le`) `DataFrame`s and
-//! produces raw AAC-LC access units (`AudioFormat::Aac`, `MemoryDomain::System`,
-//! one access unit per 1024-sample frame, no ADTS header), the compressed-audio
-//! analog of `MfEncode`.
+//! produces ADTS-framed AAC-LC (`AudioFormat::Aac`, `MemoryDomain::System`,
+//! one access unit per 1024-sample frame), the compressed-audio analog of
+//! `MfEncode`.
 //!
 //! The AAC encoder has no fixed CLSID, so it is enumerated by output subtype
 //! via `MFTEnumEx` (the MS AAC encoder is synchronous, so the same
@@ -48,7 +48,7 @@ use g2g_core::time::ticks_to_ns;
 use g2g_core::{
     pcm_caps_any_rate_and_channels, AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet,
     ConfigureOutcome, FrameTiming, G2gError, HardwareError, MemoryDomain, OutputSink, PadTemplate,
-    PadTemplates, PipelinePacket,
+    PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
 };
 
 /// Samples per AAC-LC access unit.
@@ -227,6 +227,47 @@ impl AsyncElement for MfAacEncode {
         }))
     }
 
+    fn metadata(&self) -> g2g_core::ElementMetadata {
+        g2g_core::ElementMetadata::new(
+            "Media Foundation AAC encoder",
+            "Codec/Encoder/Audio",
+            "Encodes PcmS16Le to ADTS AAC-LC with the Media Foundation AAC encoder MFT",
+            crate::AARON_BOXER,
+        )
+    }
+
+    fn properties(&self) -> &'static [PropertySpec] {
+        const PROPS: &[PropertySpec] = &[PropertySpec::new(
+            "bitrate",
+            PropKind::Uint,
+            "target bitrate, bits/second: 96000, 128000, 160000 or 192000",
+        )
+        .with_default("128000")];
+        PROPS
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        match name {
+            "bitrate" => {
+                let bitrate = value.as_uint().ok_or(PropError::Type)?;
+                let bytes_per_sec = u32::try_from(bitrate / 8).map_err(|_| PropError::Value)?;
+                if bitrate % 8 != 0 || !VALID_BYTES_PER_SEC.contains(&bytes_per_sec) {
+                    return Err(PropError::Value);
+                }
+                self.bytes_per_sec = bytes_per_sec;
+                Ok(())
+            }
+            _ => Err(PropError::Unknown),
+        }
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        match name {
+            "bitrate" => Some(PropValue::Uint(u64::from(self.bytes_per_sec) * 8)),
+            _ => None,
+        }
+    }
+
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         let (channels, sample_rate) = match absolute_caps {
             Caps::Audio {
@@ -276,6 +317,7 @@ impl AsyncElement for MfAacEncode {
                 }
                 PipelinePacket::CapsChanged(c) => {
                     // Only the configured PCM format passes; a change is rejected.
+                    // The runner's pre-fixed output caps (AAC) are forwarded, like vtenc.
                     match &c {
                         Caps::Audio {
                             format: AudioFormat::PcmS16Le,
@@ -283,6 +325,13 @@ impl AsyncElement for MfAacEncode {
                             sample_rate,
                             ..
                         } if *channels == self.channels && *sample_rate == self.sample_rate => {}
+                        Caps::Audio {
+                            format: AudioFormat::Aac,
+                            ..
+                        } => {
+                            out.push(PipelinePacket::CapsChanged(c.clone())).await?;
+                            self.last_caps = Some(c);
+                        }
                         _ => return Err(G2gError::CapsMismatch),
                     }
                 }
@@ -319,7 +368,16 @@ impl AsyncElement for MfAacEncode {
             // Each access unit covers AAC_FRAME_SAMPLES; derive pts from the
             // emitted-frame count so the stream is monotonic and gap-free.
             let ns_per_frame = ticks_to_ns(AAC_FRAME_SAMPLES, self.sample_rate.max(1));
+            let rate_index = crate::aacparse::sample_rate_index(self.sample_rate)
+                .ok_or(G2gError::CapsMismatch)?;
             for au in encoded {
+                let au = crate::aacparse::adts_frame(
+                    crate::aacparse::ADTS_PROFILE_AAC_LC,
+                    rate_index,
+                    self.channels,
+                    &au,
+                )
+                .ok_or(G2gError::CapsMismatch)?;
                 if self.last_caps.as_ref() != Some(&aac_caps) {
                     out.push(PipelinePacket::CapsChanged(aac_caps.clone()))
                         .await?;

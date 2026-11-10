@@ -36,6 +36,15 @@ impl DecodedPcm {
     }
 }
 
+#[cfg(any(
+    all(
+        any(target_os = "linux", target_os = "macos", windows),
+        feature = "ffmpeg"
+    ),
+    feature = "vorbis",
+    feature = "aac-decode",
+    feature = "mpeg-audio-decode"
+))]
 pub(crate) fn f32_to_s16(sample: f32) -> i16 {
     // swresample converts float to s16 this way: lrintf at 1<<15 scale, clipped
     (sample * 32768.0)
@@ -72,7 +81,8 @@ impl PcmOutput {
             feature = "ffmpeg"
         ),
         feature = "aac-decode",
-        feature = "mpeg-audio-decode"
+        feature = "mpeg-audio-decode",
+        all(windows, feature = "mf-aac")
     ))]
     pub(crate) fn forget_caps(&mut self) {
         self.announced_caps = None;

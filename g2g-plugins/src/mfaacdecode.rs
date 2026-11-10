@@ -3,13 +3,14 @@
 // SPDX-License-Identifier: MPL-2.0
 
 //! Windows AAC audio decode element wrapping the Media Foundation AAC
-//! Decoder MFT (`CLSID_MSAACDecMFT`). Consumes raw AAC-LC access units
+//! Decoder MFT (`CLSID_MSAACDecMFT`). Consumes AAC-LC access units
 //! (`AudioFormat::Aac`, `MemoryDomain::System`) and produces interleaved 16-bit
 //! PCM (`PcmS16Le`), the decode-side mirror of `MfAacEncode`.
 //!
 //! The decoder needs the stream's AudioSpecificConfig to configure its input
-//! type; supply it with [`MfAacDecode::with_audio_specific_config`] (the
-//! encoder exposes it, and the MP4 `esds` carries it). The MS AAC decoder is
+//! type. An ADTS-framed stream carries it in the first frame's header, and a raw
+//! one needs it from [`MfAacDecode::with_audio_specific_config`] (the MP4 `esds`
+//! carries it). The MS AAC decoder is
 //! synchronous, so the same `ProcessInput`/`ProcessOutput` drain loop as the
 //! H.264 decoder applies.
 //!
@@ -39,14 +40,12 @@ use crate::mfcommon::{
     feed_sample, make_input_sample, mf_err, output_provides_samples, process_output,
     read_sample_bytes, send_drain_command, OutputPull,
 };
-use crate::pcmclip::clip_pcm_to_segment;
-use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
+use crate::pcmoutput::{pcm_s16_decoder_output, DecodedPcm, PcmOutput};
 use g2g_core::time::ticks_to_ns;
 use g2g_core::{
     pcm_caps_any_rate_and_channels, AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet,
-    ConfigureOutcome, FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates,
-    PipelinePacket, Segment,
+    ChannelLayout, ConfigureOutcome, FrameTiming, G2gError, OutputSink, PadTemplate, PadTemplates,
+    PipelinePacket, ANY_CHANNELS, ANY_SAMPLE_RATE,
 };
 
 const PCM_BITS: u32 = 16;
@@ -75,11 +74,9 @@ pub struct MfAacDecode {
     sample_rate: u32,
     /// AudioSpecificConfig supplied before configuration.
     asc: Vec<u8>,
-    last_caps: Option<Caps>,
     /// Running output-sample-frame count, for monotonic PCM timing.
     out_frames: u64,
-    emitted: u64,
-    segment: Segment,
+    output: PcmOutput,
 }
 
 // SAFETY: same contract as `MfDecode`: COM is MTA, the MFT is moved between
@@ -101,15 +98,13 @@ impl MfAacDecode {
             channels: 0,
             sample_rate: 0,
             asc: Vec::new(),
-            last_caps: None,
             out_frames: 0,
-            emitted: 0,
-            segment: Segment::new(),
+            output: PcmOutput::default(),
         }
     }
 
-    /// Supply the stream's AudioSpecificConfig (from the encoder or the MP4
-    /// `esds`). Required before `configure_pipeline`.
+    /// Supply the stream's AudioSpecificConfig (from the MP4 `esds`). Required
+    /// for raw access units, which carry no ADTS header to read it from.
     pub fn with_audio_specific_config(mut self, asc: impl Into<Vec<u8>>) -> Self {
         self.asc = asc.into();
         self
@@ -117,7 +112,16 @@ impl MfAacDecode {
 
     /// Count of decoded PCM `DataFrame`s pushed downstream. Useful in tests.
     pub fn decoded_count(&self) -> u64 {
-        self.emitted
+        self.output.frames_pushed()
+    }
+
+    fn open(&mut self, asc: &[u8]) -> Result<(), G2gError> {
+        let info =
+            crate::aacparse::audio_specific_config_info(asc).ok_or(G2gError::CapsMismatch)?;
+        self.state = Some(init_decoder(info.channels, info.sample_rate, asc)?);
+        self.channels = info.channels;
+        self.sample_rate = info.sample_rate;
+        Ok(())
     }
 
     fn feed(
@@ -189,9 +193,18 @@ impl AsyncElement for MfAacDecode {
         }
     }
 
-    /// Native `DerivedOutput`: AAC in maps to S16 PCM at the same channels/rate.
+    /// Native `DerivedOutput`: AAC in maps to S16 PCM at the same channels/rate,
+    /// or to the decoder placeholders when the input leaves either open.
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
         CapsConstraint::DerivedOutput(Box::new(|input: &Caps| match input {
+            Caps::Audio {
+                format: AudioFormat::Aac,
+                channels,
+                sample_rate,
+                ..
+            } if *channels == ANY_CHANNELS || *sample_rate == ANY_SAMPLE_RATE => {
+                pcm_s16_decoder_output()
+            }
             Caps::Audio {
                 format: AudioFormat::Aac,
                 channels,
@@ -207,17 +220,23 @@ impl AsyncElement for MfAacDecode {
         }))
     }
 
+    fn metadata(&self) -> g2g_core::ElementMetadata {
+        g2g_core::ElementMetadata::new(
+            "Media Foundation AAC decoder",
+            "Codec/Decoder/Audio",
+            "Decodes AAC-LC to interleaved PcmS16Le with the Media Foundation AAC decoder MFT",
+            crate::AARON_BOXER,
+        )
+    }
+
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        let (channels, sample_rate) = match absolute_caps {
+        if !matches!(
+            absolute_caps,
             Caps::Audio {
                 format: AudioFormat::Aac,
-                channels,
-                sample_rate,
                 ..
-            } => (*channels, *sample_rate),
-            _ => return Err(G2gError::CapsMismatch),
-        };
-        if channels == 0 || sample_rate == 0 || self.asc.is_empty() {
+            }
+        ) {
             return Err(G2gError::CapsMismatch);
         }
 
@@ -228,9 +247,11 @@ impl AsyncElement for MfAacDecode {
         }
         self.com_started = true;
 
-        self.state = Some(init_decoder(channels, sample_rate, &self.asc)?);
-        self.channels = channels;
-        self.sample_rate = sample_rate;
+        if !self.asc.is_empty() {
+            let asc = core::mem::take(&mut self.asc);
+            self.open(&asc)?;
+            self.asc = asc;
+        }
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
     }
@@ -250,15 +271,22 @@ impl AsyncElement for MfAacDecode {
                     let slice = frame
                         .domain
                         .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
-                    self.feed(slice, frame.timing.pts_ns, &mut decoded)?;
+                    let adts_config = crate::aacparse::asc_from_adts(slice);
+                    if let (None, Some(asc)) = (&self.state, adts_config) {
+                        self.open(&asc)?;
+                    }
+                    let access_unit = crate::aacparse::strip_adts(slice);
+                    self.feed(access_unit, frame.timing.pts_ns, &mut decoded)?;
                 }
                 PipelinePacket::CapsChanged(c) => match &c {
                     Caps::Audio {
                         format: AudioFormat::Aac,
-                        channels,
-                        sample_rate,
                         ..
-                    } if *channels == self.channels && *sample_rate == self.sample_rate => {}
+                    } => {}
+                    Caps::Audio {
+                        format: AudioFormat::PcmS16Le,
+                        ..
+                    } => self.output.forward_caps(c, out).await?,
                     _ => return Err(G2gError::CapsMismatch),
                 },
                 PipelinePacket::Flush => {
@@ -270,7 +298,7 @@ impl AsyncElement for MfAacDecode {
                                 .map_err(mf_err)?;
                         }
                     }
-                    self.last_caps = None;
+                    self.output.forget_caps();
                     out.push(PipelinePacket::Flush).await?;
                     return Ok(());
                 }
@@ -278,54 +306,30 @@ impl AsyncElement for MfAacDecode {
                     self.drain_eos(&mut decoded)?;
                 }
                 PipelinePacket::Segment(seg) => {
-                    self.segment = seg;
-                    out.push(PipelinePacket::Segment(seg)).await?;
+                    self.output.forward_segment(seg, out).await?;
                 }
                 other => {
                     out.push(other).await?;
                 }
             }
 
-            let pcm_caps = Caps::Audio {
-                format: AudioFormat::PcmS16Le,
-                channels: self.channels,
-                sample_rate: self.sample_rate,
-                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
-            };
-            let frame_bytes = 2 * self.channels.max(1) as u64; // 16-bit
+            let frame_bytes = 2 * u64::from(self.channels.max(1));
             for pcm in decoded {
                 let pts_ns = ticks_to_ns(self.out_frames, self.sample_rate.max(1));
-                let n_frames = pcm.len() as u64 / frame_bytes;
-                self.out_frames += n_frames;
+                self.out_frames += pcm.len() as u64 / frame_bytes;
                 let timing = FrameTiming {
                     pts_ns,
                     dts_ns: pts_ns,
                     capture_ns: pts_ns,
                     ..FrameTiming::default()
                 };
-                let Some((timing, pcm)) = clip_pcm_to_segment(
-                    &self.segment,
-                    timing,
+                let decoded = DecodedPcm {
                     pcm,
-                    frame_bytes as usize,
-                    self.sample_rate,
-                )?
-                else {
-                    continue;
+                    channels: self.channels,
+                    sample_rate: self.sample_rate,
+                    channel_layout: ChannelLayout::UNSPECIFIED,
                 };
-                if self.last_caps.as_ref() != Some(&pcm_caps) {
-                    out.push(PipelinePacket::CapsChanged(pcm_caps.clone()))
-                        .await?;
-                    self.last_caps = Some(pcm_caps.clone());
-                }
-                let frame = Frame {
-                    domain: MemoryDomain::System(SystemSlice::from_boxed(pcm.into_boxed_slice())),
-                    timing,
-                    sequence: self.emitted,
-                    meta: Default::default(),
-                };
-                self.emitted += 1;
-                out.push(PipelinePacket::DataFrame(frame)).await?;
+                self.output.push(timing, decoded, out).await?;
             }
             Ok(())
         })
@@ -519,20 +523,5 @@ mod tests {
         assert_eq!(d.len(), 12 + 2);
         assert_eq!(&d[12..], &asc, "ASC follows the 12-byte info header");
         assert_eq!(u16::from_le_bytes([d[0], d[1]]), 0, "payload type raw AAC");
-    }
-
-    #[test]
-    fn configure_without_asc_fails_loud() {
-        let mut dec = MfAacDecode::new();
-        let aac = Caps::Audio {
-            format: AudioFormat::Aac,
-            channels: 2,
-            sample_rate: 48_000,
-            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
-        };
-        assert!(matches!(
-            dec.configure_pipeline(&aac),
-            Err(G2gError::CapsMismatch)
-        ));
     }
 }

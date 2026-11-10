@@ -155,6 +155,15 @@ libraries installed.
   built to print its `StdVideo*` structs, since Mesa 25.3.6's `RADV_DEBUG=dumpibs`
   prints nothing for video. NVIDIA Turing cannot decode it at all (minimum H.265
   coded extent 144x144).
+- **Windows GPU decode:** native `d3d11h264dec`, `d3d11h265dec` and
+  `d3d11av1dec` (GStreamer's names) on the D3D11 video decoder API, emitting
+  `D3D11Texture` frames for `d3d11videosink`, reusing `vulkanvideodec`'s
+  bitstream parsing and reference handling. The Media Foundation decoder MFT
+  with a DXGI device manager stops producing output after about 120 frames,
+  so `MfDecode` decodes in software only.
+- **`mfh265dec` without an HEVC decoder installed** fails with a bare
+  `Hardware(MediaFoundation(0x80040154))`. Find the call that fails and log
+  that the HEVC Video Extensions are missing.
 ## CUDA / display
 
 - Run `CudaKmsSink` from a bare VT with DRM master and verify the in-tree

@@ -62,7 +62,14 @@ callable from any MTA thread without marshaling.
 `MF_LOW_LATENCY` set, so no B-frames, converting
 `Caps::RawVideo { format: Nv12 }` to `Caps::CompressedVideo { codec: H264 }`,
 Annex-B framed. `MfAacEncode` / `MfAacDecode` (feature `mf-aac`) cover the AAC
-audio path.
+audio path. Like every AAC element in a pipeline they carry ADTS: the encoder
+frames each access unit, and the decoder opens on the AudioSpecificConfig of the
+first ADTS header and strips the headers.
+
+Launch names follow GStreamer's `mediafoundation` plugin: `mfh264enc`,
+`mfh265enc`, `mfaacenc`, `mfaacdec`. GStreamer has no Media Foundation video
+decoder, so `MfDecode` takes `mfh264dec` / `mfh265dec`. None are auto-plug
+candidates.
 
 ## FfmpegH264Dec (ffmpeg / libavcodec)
 

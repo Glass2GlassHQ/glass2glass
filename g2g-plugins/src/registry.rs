@@ -2495,6 +2495,49 @@ fn register_autoplug_candidates(reg: &mut Registry) {
         })
         .with_experimental(),
     );
+    // gstreamer has no media foundation video decoder, so the decoder names follow its mfh264enc / mfaacdec pattern
+    #[cfg(all(target_os = "windows", feature = "mf-decode"))]
+    reg.register_launch(
+        LaunchFactory::of::<crate::mfdecode::MfDecode>("mfh264dec", || {
+            Box::new(crate::mfdecode::MfDecode::new())
+        })
+        .with_experimental(),
+    );
+    #[cfg(all(target_os = "windows", feature = "mf-decode"))]
+    reg.register_launch(
+        LaunchFactory::of::<crate::mfdecode::MfDecode>("mfh265dec", || {
+            Box::new(crate::mfdecode::MfDecode::new().with_codec(g2g_core::VideoCodec::H265))
+        })
+        .with_experimental(),
+    );
+    #[cfg(all(target_os = "windows", feature = "mf-encode"))]
+    reg.register_launch(
+        LaunchFactory::of::<crate::mfencode::MfEncode>("mfh264enc", || {
+            Box::new(crate::mfencode::MfEncode::new())
+        })
+        .with_experimental(),
+    );
+    #[cfg(all(target_os = "windows", feature = "mf-encode"))]
+    reg.register_launch(
+        LaunchFactory::of::<crate::mfencode::MfEncode>("mfh265enc", || {
+            Box::new(crate::mfencode::MfEncode::new().with_codec(g2g_core::VideoCodec::H265))
+        })
+        .with_experimental(),
+    );
+    #[cfg(all(target_os = "windows", feature = "mf-aac"))]
+    reg.register_launch(
+        LaunchFactory::of::<crate::mfaacdecode::MfAacDecode>("mfaacdec", || {
+            Box::new(crate::mfaacdecode::MfAacDecode::new())
+        })
+        .with_experimental(),
+    );
+    #[cfg(all(target_os = "windows", feature = "mf-aac"))]
+    reg.register_launch(
+        LaunchFactory::of::<crate::mfaacencode::MfAacEncode>("mfaacenc", || {
+            Box::new(crate::mfaacencode::MfAacEncode::new())
+        })
+        .with_experimental(),
+    );
     // macOS Metal present sink (M736); the display sink on this platform, so
     // it also backs the `autovideosink` alias below.
     #[cfg(all(target_os = "macos", feature = "metal-sink"))]

@@ -27,23 +27,14 @@ use g2g_core::{
     PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
 };
 
-use crate::aacparse::adts_frame;
+use crate::aacparse::{adts_frame, sample_rate_index, ADTS_PROFILE_AAC_LC};
 
 const DEFAULT_BITRATE_BPS: u32 = 128_000;
 // AAC-LC codes 1024 samples per channel in each access unit
 const SAMPLES_PER_ACCESS_UNIT: usize = 1024;
-// ADTS `profile` for AAC-LC: the audio object type (2) minus one
-const ADTS_PROFILE_AAC_LC: u8 = 1;
 const MAX_CHANNELS: u8 = 2;
 // returned from the input callback when it has handed over all buffered PCM, AudioConverter passes it back unchanged
 const INPUT_EXHAUSTED: i32 = 1;
-
-fn sample_rate_index(rate: u32) -> Option<u8> {
-    crate::aacparse::SAMPLE_RATES
-        .iter()
-        .position(|&supported| supported == rate)
-        .and_then(|index| u8::try_from(index).ok())
-}
 
 fn pcm_description(
     format: AudioFormat,

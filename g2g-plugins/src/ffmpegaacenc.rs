@@ -22,7 +22,7 @@
 //! Threading: like `FfmpegVideoEnc`, the raw `AVCodecContext` is single-owner and
 //! the element asserts `Send` under that contract.
 
-use crate::aacparse::adts_frame;
+use crate::aacparse::{adts_frame, sample_rate_index, ADTS_PROFILE_AAC_LC};
 use core::future::Future;
 use core::pin::Pin;
 
@@ -48,17 +48,6 @@ use g2g_core::{
 
 /// Default constant bitrate: 128 kbps, the usual stereo-AAC streaming target.
 const DEFAULT_BITRATE_BPS: usize = 128_000;
-// ADTS `profile` for AAC-LC: the audio object type (2) minus one
-const ADTS_PROFILE_AAC_LC: u8 = 1;
-
-/// The encoder only opens at a rate in the ADTS sampling-frequency-index table
-/// (libavcodec rejects others).
-fn sample_rate_index(rate: u32) -> Option<u8> {
-    crate::aacparse::SAMPLE_RATES
-        .iter()
-        .position(|&r| r == rate)
-        .map(|i| i as u8)
-}
 
 /// # Example
 ///
@@ -509,13 +498,5 @@ mod tests {
         // frame_length = 16: byte3 low 2 bits 0, byte4 = 16>>3 = 2, byte5 top 3 bits = 0.
         assert_eq!(au[3] >> 6, 2, "channel config 2 in the top 2 bits");
         assert_eq!(au[4], 2, "frame_length[10:3] = 16>>3");
-    }
-
-    #[test]
-    fn sample_rate_index_table() {
-        assert_eq!(sample_rate_index(48000), Some(3));
-        assert_eq!(sample_rate_index(44100), Some(4));
-        assert_eq!(sample_rate_index(16000), Some(8));
-        assert_eq!(sample_rate_index(12345), None);
     }
 }
