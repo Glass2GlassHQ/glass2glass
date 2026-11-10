@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! MPEG-TS demuxers: `Caps::ByteStream{MpegTs}` in, selected
 //! elementary streams out. H.264 / H.265 video leave as `Caps::CompressedVideo`
 //! (Annex-B); AAC audio leaves as `Caps::Audio` (ADTS).

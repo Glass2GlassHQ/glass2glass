@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1175: setting and reading an element's properties while its graph runs. The
 //! `GraphMutator` queues the operation and the arm that owns the element
 //! performs it at its next packet boundary, so the element is only ever touched

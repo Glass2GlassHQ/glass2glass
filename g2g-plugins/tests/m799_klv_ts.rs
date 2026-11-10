@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M799/M800 - STANAG 4609 KLV metadata in MPEG-TS. An H.264 video stream and a
 //! MISB ST 0601 KLV telemetry stream are muxed into one transport stream (the
 //! KLV on a private PES with the 'KLVA' registration descriptor), then each is

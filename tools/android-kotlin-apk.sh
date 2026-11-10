@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+#
+# SPDX-License-Identifier: MPL-2.0
+
 # Build g2g-uniffi/examples/android on the g2g AAR as a debug-signed APK for one
 # ABI and print its path last. Needs what tools/android-aar.sh needs plus SDK
 # build-tools. No Gradle: kotlinc, d8 and aapt2 run directly.

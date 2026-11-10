@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! SRT encrypted end-to-end over loopback: a caller (`SrtSink`) and listener
 //! (`SrtSrc`) sharing a passphrase. The random stream key is wrapped under the
 //! passphrase-derived KEK and exchanged in the handshake KM extension; payloads

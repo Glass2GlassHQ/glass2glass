@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Feasibility probe for zero-copy libcamera -> GPU: capture one frame and
 //! inspect the buffer's plane file descriptor. Tells us whether libcamera hands
 //! out a real dma-buf for this camera (and what backs it), which decides whether

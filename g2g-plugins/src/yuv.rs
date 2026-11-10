@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Pure chroma-resampling helpers for the decode elements. Kept out of the
 //! OS-gated decoder modules (`ffmpegdec`) so the resampling math is
 //! unit-testable on any host; the ffmpeg frame plumbing that feeds it is

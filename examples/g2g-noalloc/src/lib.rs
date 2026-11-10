@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Link-time no-heap proof + panic-free proof: a real g2g
 //! pipeline that links for a bare Cortex-M target with NO global allocator, NO
 //! `alloc` crate dependency, and NO reachable panic path.

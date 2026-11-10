@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 #![cfg(feature = "wgpu")]
 //! design/ml.md (M216): `WgpuInference` runs a linear layer on the GPU directly against
 //! the GPU-resident tensor `WgpuPreprocess::with_gpu_output` (M215) emits, so the

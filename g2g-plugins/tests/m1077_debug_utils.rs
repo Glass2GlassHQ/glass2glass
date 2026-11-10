@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1077 debug utilities: `watchdog` fails a stalled run, `capssetter` rewrites
 //! the caps a stream carries, `taginject` posts a hand-written tag list, and
 //! `rndbuffersize` re-chunks a byte stream at seeded random cut points.

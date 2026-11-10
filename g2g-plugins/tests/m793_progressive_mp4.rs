@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M793: `Mp4MuxN`'s progressive (non-fragmented) layout. `fragmented = false`
 //! buffers the whole movie and writes `ftyp` + one `mdat` + a `moov` carrying
 //! real sample tables (`stts` / `ctts` / `stss` / `stsc` / `stsz` /

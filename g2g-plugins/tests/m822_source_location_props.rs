@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M822: the feature-gated sources the registry default-builds with a
 //! placeholder target must take that target from a launch line. Each test
 //! asserts both halves the parser needs: the property is declared (so

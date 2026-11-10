@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M454: settable element properties for gst-launch parity. Each property newly
 //! exposed for `parse_launch` must (a) appear in `properties()` so the parser can
 //! look up its `PropKind`, and (b) round-trip through `set_property` /

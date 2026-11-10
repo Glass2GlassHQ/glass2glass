@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M566: Vulkan Video AV1 film grain synthesis on real hardware.
 //!
 //! AV1 film grain is applied at output time on the grain-free reconstruction. The

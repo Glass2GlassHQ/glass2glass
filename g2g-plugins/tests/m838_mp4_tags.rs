@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M838 - the MP4 freeform (`----`) and integer (`trkn` / `disk` / `cpil` /
 //! `tmpo`) metadata atoms, and the global / per-stream tag merge policy that
 //! spans the multi-stream containers (`g2g_core::tag`).

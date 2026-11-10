@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Throughput-driven adaptive bitrate (ABR) support, shared by
 //! [`HlsSrc`](crate::hlssrc) and [`DashSrc`](crate::dashsrc).
 //!

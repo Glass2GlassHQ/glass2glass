@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M18 Phase C muxer — per-input re-solve (MX-1) and input-derived output
 //! re-emit (MX-2), driven through `run_muxer_sink`.
 //!

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1058: `VideoFlip` defers the rotation when the sink says it will apply the
 //! descriptor itself.
 //!

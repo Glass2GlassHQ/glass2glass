@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Pure-Rust AV1 decode element (Rav1dDec, `rav1d` feature): `CompressedVideo{Av1}`
 //! in, `RawVideo{I420}` out, via `re_rav1d`, the Rust port of dav1d. Same codec, no
 //! C: `re_rav1d` is a line-for-line safe-Rust reimplementation of the dav1d decoder

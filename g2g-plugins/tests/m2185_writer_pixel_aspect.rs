@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M2185: writers keep the caps pixel aspect ratio. A y4m stream declaring
 //! `A16:15` is encoded and muxed by a launch line, then the written file is read
 //! back by the g2g demuxer and, when it is installed, by ffprobe.

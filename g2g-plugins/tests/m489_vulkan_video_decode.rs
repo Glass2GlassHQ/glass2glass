@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M489: Vulkan Video H.264 IDR frame decode on real hardware.
 //!
 //! Third increment of `VulkanVideoDec` (design/decode.md): actually decode a

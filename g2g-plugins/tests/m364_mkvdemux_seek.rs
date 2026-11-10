@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M364 - Matroska/WebM demuxer seek (`MkvDemux` over a seekable `FileSrc`).
 //! Like the other demuxers, it drives an upstream byte-seek and re-syncs from the
 //! keyframe at or before the target. Matroska blocks carry a keyframe flag, so the

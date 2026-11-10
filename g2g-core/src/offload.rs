@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Element-level cooperative offload. A heavy synchronous element moves
 //! its per-frame compute onto tokio's blocking pool, so its arm future is
 //! pending at the `await` and the cooperative `run_graph` keeps polling the

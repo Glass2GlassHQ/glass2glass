@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+#
+# SPDX-License-Identifier: MPL-2.0
+
 # Host graph-compiler proof (M646/M648): the `g2g-mcugen` compiler is
 # trustworthy only if (1) its output is deterministic and the checked-in
 # generated files are current, and (2) each generated pipeline produces the

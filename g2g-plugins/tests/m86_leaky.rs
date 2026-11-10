@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M86: leaky `LinkPolicy` end-to-end through the DAG runner. A `DropOldest`
 //! link runs to completion without deadlock, and every emitted frame is
 //! accounted for, either delivered to the sink or dropped (the conservation

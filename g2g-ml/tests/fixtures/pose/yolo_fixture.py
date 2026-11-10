@@ -1,3 +1,7 @@
+# Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+#
+# SPDX-License-Identifier: MPL-2.0
+
 # Shared by pose/gen.py and obb/gen.py: export an Ultralytics model to ONNX,
 # letterbox a non-square photo into its input, and run Ultralytics' own
 # predictor on that photo through the same ONNX file as the reference.

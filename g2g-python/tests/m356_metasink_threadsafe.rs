@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M356: the native `g2g.MetaSink` is a `Sync` pyclass (Mutex-backed), not an
 //! `unsendable` `RefCell`, so a hosted element may stage analytics from a thread
 //! other than the one the host created the sink on. This is the precondition for

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Shared software-blend primitive for the CPU overlays and compositor.
 //! Integer source-over, no float intrinsics, `no_std` baseline.
 

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Stream discovery: the available elementary streams of a container (the
 //! GStreamer `GstStreamCollection` analog, the data model playbin is built on).
 //!

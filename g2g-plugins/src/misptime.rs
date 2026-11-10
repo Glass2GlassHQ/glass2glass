@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! MISB ST 0604 MISP precision time stamps carried in the video bitstream
 //! (`no_std`): in a STANAG 4609 motion imagery stream every coded frame
 //! carries an absolute microsecond time in an SEI `user_data_unregistered`

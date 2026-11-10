@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! ST 2110-7 seamless protection: the receive-side reconstruction that
 //! merges two (or more) identical redundant RTP streams into one lossless stream.
 //!

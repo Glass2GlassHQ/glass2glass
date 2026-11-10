@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1057 - the rest of the cue CSS the overlay renders: `-webkit-text-stroke`,
 //! the `::cue(b)` family of type selectors, `<ruby>` annotations, and
 //! `font-family`. Each test renders a frame and asserts on the pixels.

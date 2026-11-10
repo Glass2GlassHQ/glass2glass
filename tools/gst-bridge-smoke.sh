@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+#
+# SPDX-License-Identifier: MPL-2.0
+
 # Build the g2g-bridge GStreamer plugin (libgstglass2glass.so) and validate that
 # the `glass2glass` element runs an embedded g2g sub-graph inside a real
 # gst-launch pipeline. This needs the host's GStreamer (gst-launch-1.0,

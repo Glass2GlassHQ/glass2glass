@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 use alloc::vec::Vec;
 
 use g2g_core::{pcm_caps_any_rate_and_channels, AudioFormat, CapsSet, PadTemplate};

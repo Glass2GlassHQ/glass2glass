@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 #![no_main]
 // ST 2110-40 / SMPTE ST 291 ancillary-data depacketization (RFC 8331) over RTP:
 // hand-written MSB-first 10-bit-word bit reader + parity / checksum over an

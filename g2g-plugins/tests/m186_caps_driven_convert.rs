@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M186: caps-driven videoconvert. A `videoconvert` with no `format` property
 //! takes its output format from a downstream capsfilter (gst's `videoconvert !
 //! video/x-raw,format=NV12`), via the M185 `configure_output` hook. The property

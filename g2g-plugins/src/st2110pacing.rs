@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! ST 2110-21 sender pacing: the traffic-shaping schedule that spreads a
 //! frame's RTP packets across the frame period instead of bursting them, so the
 //! network sees a smooth flow a -21-conformant receiver can absorb.

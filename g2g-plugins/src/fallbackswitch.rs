@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Fallback switch (`fallbackswitch`). Forwards the highest-priority input that
 //! is still delivering and falls back to the next one when it stalls. The input
 //! index is the priority unless `sinkN-priority` says otherwise: input 0 is the

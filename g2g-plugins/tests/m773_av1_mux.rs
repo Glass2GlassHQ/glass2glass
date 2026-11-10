@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M773: AV1 in the fan-in muxers. `MkvMuxN` writes a `V_AV1` track whose
 //! `CodecPrivate` is the `AV1CodecConfigurationRecord` and `Mp4MuxN` an `av01`
 //! sample entry with the `av1C` box, both built from the stream's own sequence

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1950: `set_state(Null)` on a running graph ends the run cleanly. The sink
 //! arms stop at the gate and the arms feeding them end on the closed links, which
 //! is the stop that was asked for, not a pipeline failure.

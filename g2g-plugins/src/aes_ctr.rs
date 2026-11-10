@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 // the keystream runs on across the ranges, as over one buffer of their bytes in order
 pub(crate) fn apply_aes128_ctr(
     buf: &mut [u8],

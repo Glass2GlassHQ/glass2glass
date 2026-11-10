@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M134 VP8 parser, end to end through the DAG runner: a source emits a
 //! synthetic WebM with a VP8 video track, `mkvdemux` selects it, and `vp8parse`
 //! refines the caps from the keyframe before the sink. Exercises the parser

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M436 - HLS closed-caption (CEA-608 / 708) auto-plug: `playbin
 //! uri=hls://...#closed-captions=cc1` overlays the in-SEI captions onto the video,
 //! the HLS analog of the file hooks' caption auto-plug (M430). Captions are not a

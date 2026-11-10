@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Reading the `ffprobe -of json` output checked in beside a media fixture, so a
 //! test asserts against probed values instead of numbers typed into it.
 //!

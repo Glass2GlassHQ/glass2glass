@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M494: full-DPB H.264 decode straight to GPU-resident RGBA `wgpu::Texture`s.
 //!
 //! The zero-copy wedge path: `H264DpbDecoder::decode_all_to_textures` decodes

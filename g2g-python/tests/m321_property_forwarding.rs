@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M321: element-property forwarding to the hosted Python instance.
 //!
 //! `PyTransform` forwards its declared element properties (e.g. `model-name`,

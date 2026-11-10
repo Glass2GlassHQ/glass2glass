@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 #![no_main]
 // Container / codec content sniffing over untrusted leading bytes: the magic
 // signature probes plus Annex-B and text detection FileSrc runs on any input.

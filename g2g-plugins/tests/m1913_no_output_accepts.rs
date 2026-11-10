@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1913: when an element derives no output from its input, the error lists
 //! what the element accepts and names the converter that would fix the line.
 #![cfg(all(feature = "std", unix))]

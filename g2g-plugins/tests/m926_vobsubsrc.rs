@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M926: the VobSub `.idx` / `.sub` sidecar source. The fixture is the
 //! hand-authored pair of the `vobsub_fixture` module, the same one ffmpeg's
 //! `vobsub` demuxer reads in M899, so the bytes `VobSubSrc` indexes into are a

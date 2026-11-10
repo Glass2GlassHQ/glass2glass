@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M4: 100 frames flow through a 4-buffer pool. The fakesink drops each
 //! frame immediately, returning its buffer to the pool, so the pool must
 //! never be exhausted and end at full capacity.

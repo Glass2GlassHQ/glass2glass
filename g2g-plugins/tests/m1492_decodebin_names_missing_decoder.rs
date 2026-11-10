@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1492: a bare `decodebin` on a container whose streams its demuxer cannot
 //! forward names the codec, instead of plugging the demuxer's default port.
 

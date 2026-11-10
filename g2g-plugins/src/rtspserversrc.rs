@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! RTSP server source (RtspServerSrc, `rtsp-server` feature): hosts an RTSP
 //! endpoint that a *publisher* pushes media into (the ANNOUNCE / SETUP / RECORD
 //! direction, the inverse of [`RtspServerSink`](crate::rtspserversink) which

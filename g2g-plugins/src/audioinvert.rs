@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Phase inversion (`audioinvert`). Blends the signal with its own negation:
 //! `degree` 0 leaves it alone, 0.5 cancels it to silence, 1 flips its phase.
 //! Preserves format, channel count, and sample rate. CPU-only `no_std`.

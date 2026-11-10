@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! SRT egress sink (SrtSink, `srt` feature). Calls an SRT listener, waits for a
 //! caller, or meets a rendezvous peer over UDP, runs the HSv5 handshake, then carries an incoming
 //! MPEG-TS byte stream (`Caps::ByteStream{MpegTs}`, as produced by `mpegtsmux`)

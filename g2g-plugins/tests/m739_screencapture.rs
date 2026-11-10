@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M739: ScreenCaptureKit on the macOS CI runner. Screen recording is TCC
 //! permission-gated (and the lookup needs a window server), so this probes
 //! like the camera test: a denied / absent capture surfaces as the structured

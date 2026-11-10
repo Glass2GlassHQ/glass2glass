@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! RFC 4566 SDP: the shared media-section scanner plus the RTP/AVP mapping from
 //! a media description to [`Caps`].
 //!

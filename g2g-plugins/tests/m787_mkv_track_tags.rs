@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M787 - Matroska `Targets`-scoped (per-track) tags, both directions. `MkvMuxN`
 //! writes each input pad's metadata as a `Tag` whose `Targets` names that track's
 //! `TagTrackUID`; the demuxer maps the UID back to the track and posts it as a

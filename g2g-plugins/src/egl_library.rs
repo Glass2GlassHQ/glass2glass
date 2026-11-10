@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 // libEGL is loaded when a GL sink starts, so a binary built with the GL sinks
 // still starts on a machine without it.
 

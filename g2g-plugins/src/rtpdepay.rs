@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Sans-IO H.264 and H.265 RTP depayloaders (RFC 3550 header + RFC 6184 /
 //! RFC 7798 payload), the receive-side inverses of the
 //! [`rtppay`](crate::rtppay) packetizers. They turn a stream of RTP packets

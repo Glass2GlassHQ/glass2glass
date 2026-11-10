@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M373 - Matroska `Cues`-indexed seek. Unlike the M364 re-scan-from-zero seek,
 //! once the `Cues` element has been parsed the demuxer seeks the upstream byte
 //! source straight to the target Cluster's byte offset (mid-segment), keeping its

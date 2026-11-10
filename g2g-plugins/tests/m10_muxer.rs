@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M10 fan-in: a true muxer combines all inputs (vs the Merger selector),
 //! negotiates each input independently, and aggregates EOS, driven through
 //! `run_muxer_sink`.

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M849: the visual builder's YAML export loads through the real declarative
 //! loader. The fixtures below are the verbatim output of `toYAML` in
 //! `tools/builder/src/export.js` (asserted there by `src/import.test.mjs`), so a

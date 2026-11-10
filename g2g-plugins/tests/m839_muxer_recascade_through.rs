@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M839: the β allocation re-cascade walks *through* a muxer.
 //!
 //! M344 made a mid-stream change on one muxer input re-cascade up that pad's

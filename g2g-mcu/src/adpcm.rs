@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! IMA ADPCM fixed-point audio codec: 4 bits per sample (4:1 vs
 //! S16LE), the WAV / DVI block layout, mono. Pure integer step-adaptive
 //! delta modulation: an 89-entry step table and shift/multiply arithmetic,

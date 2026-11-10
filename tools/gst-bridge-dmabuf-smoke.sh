@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+#
+# SPDX-License-Identifier: MPL-2.0
+
 # Validate the bridge's zero-copy dma-buf round-trip: a dma-buf GstBuffer in ->
 # glass2glass (fragment=identity) -> dma-buf GstBuffer out, for packed RGBA and
 # for NV12 at the default and at a padded stride, proving both wiring

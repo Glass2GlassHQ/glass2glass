@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M593 phase B: a locked `PtpClock` is elected pipeline master over local
 //! audio/video clocks and slaved to sinks through the real `run_graph`.
 //!

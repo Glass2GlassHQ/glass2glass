@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! On-tty smoke test for `CudaKmsSink`, the CUDA-GL-on-DRM/KMS display sink.
 //!
 //! Pipeline (file-driven, no RTSP):

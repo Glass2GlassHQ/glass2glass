@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+#
+# SPDX-License-Identifier: MPL-2.0
+
 # Builds the fixture for g2g-ml/tests/yolo_obb.rs: a yolo11n-obb ONNX export, a
 # letterboxed boats.jpg, and Ultralytics' predictions on it as the reference.
 # Run via tools/pose-obb-fixture.sh. Writes (gitignored): model.onnx,

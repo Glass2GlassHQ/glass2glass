@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Fan-in runner for the [`Merger`](crate::fanout::Merger) primitive (M9).
 //!
 //! Drives `N sources → Merger → 1 sink`. Each input is drained by its own

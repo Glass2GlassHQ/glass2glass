@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! A/V offset transform: shifts every `DataFrame`'s PTS/DTS by a signed
 //! nanosecond `offset`, the g2g form of GStreamer playbin's `av-offset`. Put one
 //! on a branch of a multi-stream playback graph (typically the audio branch) to

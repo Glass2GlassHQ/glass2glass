@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M778: Ogg granule timing. `oggdemux stream=vorbis` stamps every audio
 //! packet with sample-accurate pts / duration from the setup header's mode
 //! tables (blockflags recovered by the validated backward scan, no codebook

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M160 DASH source end to end: `DashSrc` parses an MPD, selects a
 //! Representation, and streams its fMP4 init + media segments (SegmentTemplate
 //! $Number$ addressing). A local routing server serves the manifest + segments

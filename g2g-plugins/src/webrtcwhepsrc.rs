@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Native WebRTC ingest source (`WebRtcWhepSrc`): subscribes to a WHEP endpoint
 //! and emits the received video or Opus as `DataFrame`s. The receive-side
 //! inverse of [`crate::webrtcsink::WebRtcSink`], on the same sans-IO `str0m`

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1045 - a `decodebin` line RUN over real media. The other decodebin tests
 //! (M193, M196, M482) stop at parse time: they assert the spliced chain, not that
 //! a single decoded pixel came out. This runs `filesrc ! decodebin ! ...` over the

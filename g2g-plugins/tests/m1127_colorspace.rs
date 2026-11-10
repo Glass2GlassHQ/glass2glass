@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1127: `colorspace` converts the colorimetry of raw video and leaves the
 //! pixel format alone.
 //!

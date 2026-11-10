@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! FLAC stream parser element (`flacparse`): a native `.flac` byte
 //! stream in (`Caps::Audio{Flac}`, arbitrary chunks from `filesrc`),
 //! frame-aligned FLAC out. The audio sibling of the re-framing `h264parse`:

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1827: the encoder delay and padding an MP3's LAME tag or an M4A's
 //! `iTunSMPB` tag records go downstream as a `Segment`, and the decoder drops
 //! the samples outside it, the way ffmpeg and gst trim them.

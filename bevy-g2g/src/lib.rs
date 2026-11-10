@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Bevy + g2g integration: remote rendering over WebRTC and zero-copy video
 //! decode, with no pipeline code in the app.
 //!

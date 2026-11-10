@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 // serves a TS fixture as a one-segment VOD HLS playlist, for lines that read an http master URL
 
 #[path = "http_routes.rs"]

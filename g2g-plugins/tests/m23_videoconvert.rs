@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M23: `VideoConvert` in a real negotiated chain. An RGBA test source
 //! reaches an NV12-only sink through the converter.
 

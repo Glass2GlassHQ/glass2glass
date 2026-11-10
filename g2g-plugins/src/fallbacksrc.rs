@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! The source half of `fallbacksrc`: a wrapper that rebuilds the
 //! source behind it when that source fails, delivers nothing for
 //! `restart-timeout`, or (under `restart-on-eos`) ends. Each life of the inner

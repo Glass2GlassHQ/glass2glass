@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M757 - AC-3 and FLAC audio decode. AC-3 rides MPEG-TS (ATSC stream_type 0x81,
 //! or a DVB private PES 0x06 with an AC-3 descriptor) and Matroska (`A_AC3`);
 //! FLAC rides Matroska (`A_FLAC`, its `CodecPrivate` forwarded in-band as decoder

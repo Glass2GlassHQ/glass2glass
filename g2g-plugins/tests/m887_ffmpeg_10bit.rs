@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M887: 10-bit output from `FfmpegVideoDec`.
 //!
 //! A High 10 H.264 stream decodes to the planar 10-bit format (`I420p10`) under

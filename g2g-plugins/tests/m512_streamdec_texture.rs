@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M512: Tier B (zero-copy) streaming-adapter output.
 //!
 //! Drives [`VulkanStreamDecoder::new_gpu`] the way a wgpu viewer's GPU-texture

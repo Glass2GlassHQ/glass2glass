@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 #![no_main]
 // SRT (Secure Reliable Transport) packet parsing: control packets (handshake CIF,
 // NAK range list, KM) and data-packet headers over an attacker-controlled UDP

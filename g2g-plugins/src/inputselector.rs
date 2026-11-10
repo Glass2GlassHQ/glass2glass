@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Input selector (`input-selector`). Forwards frames from exactly one of its N
 //! inputs, chosen by the `active-pad` property; frames on the other inputs are
 //! dropped. The g2g analog of GStreamer's `input-selector`, switchable live.

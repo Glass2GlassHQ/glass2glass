@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1232: `pysink` hosts a gst-python-ml element as a terminal, so a launch line
 //! can end in a Python class that reads every frame and sends nothing on.
 #![cfg(feature = "analytics")]

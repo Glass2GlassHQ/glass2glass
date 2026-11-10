@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Multi-track WebRTC egress session (`WebRtcSessionSink`): publishes a video
 //! **and** an audio track over a single WHIP PeerConnection, the `webrtcbin`
 //! analog for A/V-on-one-connection. Where [`crate::webrtcsink::WebRtcSink`] is

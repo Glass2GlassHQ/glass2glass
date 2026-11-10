@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M832: CMAF (ISO/IEC 23000-19) signalling on the fragmented-MP4 path.
 //!
 //! `cmaf=true` turns the fMP4 muxers into CMAF track-file writers: the `ftyp`

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Gapless playback source: concatenates a playlist of sources into one
 //! continuous, monotonically-timed stream, the analog of GStreamer playbin's
 //! `about-to-finish` + next-`uri` gapless playback.

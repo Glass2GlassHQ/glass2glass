@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M790: grouped multi-stream Ogg, both directions. `OggDemuxN` splits a file's
 //! logical bitstreams onto one output port each, `oggmuxn` writes several
 //! streams back into one grouped file, and ffmpeg is the reference peer at both

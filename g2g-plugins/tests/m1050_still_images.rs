@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1050 still-image codecs: `PngEnc` / `PngDec` (pure-Rust `png`) and `WebPDec`
 //! (pure-Rust `image-webp`), plus the typefind + decodebin routing that gets a
 //! `.png` / `.webp` file to them.

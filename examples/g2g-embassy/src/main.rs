@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Embassy executor proof: the heap-free camera -> transform ->
 //! SPI-display pipeline (`noalloc-pipeline::run_async`, the same future the
 //! g2g-noalloc symbol proofs wrap) driven by a real Embassy executor on

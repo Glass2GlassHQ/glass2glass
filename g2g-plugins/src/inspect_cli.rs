@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! `g2g-inspect`: the `gst-inspect` analog. Introspects an element registry
 //! (the same one the text-launch parser uses).
 //!

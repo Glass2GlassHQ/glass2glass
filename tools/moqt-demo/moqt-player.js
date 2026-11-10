@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 // Subscribe to a g2g MoQ Transport broadcast and play it.
 //
 // The MoQT client is MOQtail (`moqtail` on npm), a third-party draft-16

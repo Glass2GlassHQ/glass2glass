@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Emulated Cortex-M execution proof: run the heap-free proof pipeline
 //! (the shared `noalloc-pipeline` crate, the same definition the `g2g-noalloc`
 //! no-heap / panic-free symbol proofs wrap) on QEMU's MPS2-AN386 Cortex-M4,

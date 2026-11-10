@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M565: Vulkan Video AV1 alt-ref + show_existing_frame decode on real hardware.
 //!
 //! The earlier fixtures are all-shown (decode order == display order). Real AV1

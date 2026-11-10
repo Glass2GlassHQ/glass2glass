@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1079: raw (non-RTP) UDP byte streams, the broadcast `mpegtsmux ! udpsink`
 //! and `udpsrc port=5000 ! tsdemux` pair, plus the `clients` fan-out gst splits
 //! into `multiudpsink`.

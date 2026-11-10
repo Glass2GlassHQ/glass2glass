@@ -48,6 +48,7 @@ jobs:
         with:
           components: rustfmt
       - run: cargo fmt --all --check
+      - run: bash tools/copyright-check.sh
 
   # the canary image builds g2g-api-soak with --locked
   standalone-lockfiles:

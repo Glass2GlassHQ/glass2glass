@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M888 CMAF chunked consumption: with `low-latency` set, `DashSrc` reads a
 //! segment response as a stream and pushes each complete chunk
 //! (`styp` / `moof`+`mdat`) downstream as it arrives, so a segment a low-latency

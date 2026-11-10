@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Sans-IO RTP jitter buffer (RFC 3550 receive-side), the reordering stage that
 //! sits between a socket and the [`RtpH264Depayloader`](crate::rtpdepay). A UDP
 //! network delivers RTP packets out of order, duplicated, or not at all; feeding

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Why a [`GraphMutator`](crate::runtime::GraphMutator) operation was refused,
 //! and which operation the bus is reporting. Kept out of the `std`-gated
 //! mutator module because [`BusMessage`](crate::BusMessage) carries both.

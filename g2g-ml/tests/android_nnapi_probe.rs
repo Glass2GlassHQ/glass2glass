@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M439: on-device probe for the Android NNAPI / XNNPACK ONNX Runtime EPs.
 //!
 //! Builds an `OrtInference` through `from_memory_for_android` (NNAPI accelerator

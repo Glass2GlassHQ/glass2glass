@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! One-shot worker-readiness latch shared by the platform display sinks
 //! (`D3d11Sink`, `WaylandSink`, `CudaGlSink`): the element thread blocks in
 //! [`Handshake::wait`] until the render worker has opened its window/device and

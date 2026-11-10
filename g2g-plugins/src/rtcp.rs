@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Sans-IO RTCP (RFC 3550) plus the RTPFB Generic NACK feedback message
 //! (RFC 4585), the control-protocol half of the RTP receive-side stack. It
 //! builds and parses the compound packets that flow alongside the media:

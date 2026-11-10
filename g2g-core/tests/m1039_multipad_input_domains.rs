@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1039: a fan-in / fan-out element's `input_domains` reaches the allocation
 //! cascade, the way M1019 made a single-pad element's reach it.
 //!

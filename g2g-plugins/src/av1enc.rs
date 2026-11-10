@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! AV1 software encoder element (Av1Enc, `av1-encode` feature): `RawVideo{I420}`
 //! in, `CompressedVideo{Av1}` out, via the pure-Rust `rav1e` encoder.
 //!

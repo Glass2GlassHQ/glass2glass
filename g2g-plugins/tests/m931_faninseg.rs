@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M931 step 0: a `Segment` reaching a fan-in element.
 //!
 //! A paced sink maps a frame's PTS to running time through the `Segment` in

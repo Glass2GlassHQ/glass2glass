@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 use g2g_core::time::ticks_to_ns;
 use objc2_core_media::{CMTime, CMTimeFlags};
 

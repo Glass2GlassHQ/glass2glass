@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! MPEG-1 / MPEG-2 video elementary-stream parser.
 //!
 //! Frames the stream into one access unit per coded picture (the picture header

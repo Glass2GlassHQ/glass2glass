@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 #![no_main]
 // RTCP compound-packet parsing over untrusted input (the RTP control / feedback
 // channel used by WebRTC and RTP sessions).

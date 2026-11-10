@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! ST 2110-40 ancillary network elements: a sink and source that put the
 //! sans-IO `st2110anc` core on the wire over UDP, with the existing CEA-608/708
 //! caption stack (`crate::cea`) as the bridge and RTP timestamps from the PTP

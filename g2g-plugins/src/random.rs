@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Deterministic pseudo-randomness for the test / debug elements, so the same
 //! seed replays the same bytes and the same buffer sizes.
 

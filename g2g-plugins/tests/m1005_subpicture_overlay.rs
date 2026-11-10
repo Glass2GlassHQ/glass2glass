@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1005: `SubPictureOverlay` puts decoded bitmap-subtitle cues on the picture.
 //!
 //! The subpicture decoders render each cue onto a full-frame transparent RGBA

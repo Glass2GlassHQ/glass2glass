@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 // `hlssrc location=X ! decodebin name=d  d. ! ...  d. ! ...` decodes every muxed stream of the
 // playlist, as gst's `souphttpsrc ! hlsdemux ! decodebin name=d` does.
 #![cfg(all(

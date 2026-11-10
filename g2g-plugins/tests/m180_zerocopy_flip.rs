@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M180: zero-copy strided flip. A shared-memory `VideoTestSrc` hands each RGBA
 //! frame to `VideoFlip` as an `Arc`-backed `SystemView`; the flip composes
 //! strides on that same allocation instead of copying. The proof is twofold:

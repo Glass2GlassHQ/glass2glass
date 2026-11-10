@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+#
+# SPDX-License-Identifier: MPL-2.0
+
 # Fetch the llama chat test fixture (g2g-ml/tests/llama_chat.rs): the 1.2 MB
 # stories260K GGUF llama.cpp's own CI generates with, a tiny TinyStories model
 # with no chat template. Not committed, fetched on demand into a gitignored dir;

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M296 A/V FLV muxer: `FlvMuxN` muxes an H.264 video track and an AAC audio
 //! track into one FLV byte stream, interleaving access units by PTS and writing
 //! the decoder-config sequence headers up front. Drives the multi-input element

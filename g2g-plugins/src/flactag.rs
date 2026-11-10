@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! FLAC tag writer element (`flactag`): a native `.flac` byte stream in, the
 //! same stream with its VORBIS_COMMENT metadata block rewritten out.
 //!

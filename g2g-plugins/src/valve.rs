@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Valve: a pass-through that discards data while it is closed (`drop=true`),
 //! the gst `valve` analog. Use it to mute one branch of a tee without tearing
 //! the graph down.

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 #![cfg(all(
     any(target_os = "linux", target_os = "windows"),
     feature = "vulkan-video"

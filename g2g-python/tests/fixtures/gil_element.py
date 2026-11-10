@@ -1,3 +1,7 @@
+# Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+#
+# SPDX-License-Identifier: MPL-2.0
+
 # Hosted element for the M988 GIL-offload measurement: a deliberately
 # compute-bound *pure Python* frame callback, so the work cannot leave the
 # interpreter (numpy or torch would release the GIL and prove nothing).

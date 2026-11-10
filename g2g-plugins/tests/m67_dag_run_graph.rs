@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! DAG runner D3: `run_graph` over arbitrary source / transform / sink / tee
 //! topologies, negotiated by `solve_graph` (D2) and driven by one arm per node.
 //! Pure-fake elements (no hardware); the `rtspsrc -> tee -> {decode, mux}`

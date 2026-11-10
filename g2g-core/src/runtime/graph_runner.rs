@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! DAG pipeline runner (design/TODO.md "DAG runner" D3).
 //!
 //! [`run_graph`] drives an arbitrary multimedia DAG built with [`Graph`]:

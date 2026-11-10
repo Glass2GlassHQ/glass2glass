@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M805 - KLV metadata over RTP (RFC 6597, the SMPTE ST 336 payload format).
 //! ST 0601 telemetry packets are payloaded into RTP and depayloaded back: the
 //! KLVunits come out bit-exact and still parse to the telemetry they encode,

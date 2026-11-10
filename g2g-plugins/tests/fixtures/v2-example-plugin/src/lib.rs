@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! An out-of-tree third-party g2g plugin on the **v2** ABI.
 //!
 //! The whole author workflow: write a plain `AsyncElement`, add one

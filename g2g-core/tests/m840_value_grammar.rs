@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M840: the launch-line value grammar. Covers the two things a pasted
 //! `gst-launch` line needs beyond bare `key=value`: values carrying spaces
 //! (quoted or escaped) and named choices (an enum nick, or a `+`-joined flag

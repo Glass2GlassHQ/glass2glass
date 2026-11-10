@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M976: pull-based metadata requests. A consumer declares the meta types it
 //! wants ([`AsyncElement::meta_requests`]); the declaration rides the allocation
 //! cascade upstream, joined at every hop under each request's policy, so a producer

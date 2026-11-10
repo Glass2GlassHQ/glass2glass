@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M469 gst-launch equivalence corpus: a regression guard turning "g2g accepts
 //! gst-launch syntax" from a claim into a checked guarantee. Two halves:
 //!

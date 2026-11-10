@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Helpers shared by the `num-buffers` batteries (`m1040_num_buffers_zero`,
 //! `m1042_moqt_whep_num_buffers`, `m1043_num_buffers_sweep`): the gst `basesrc`
 //! property round-trip and the collect-into-Vec sinks a zero-limit run pushes

@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+#
+# SPDX-License-Identifier: MPL-2.0
+
 """Build the ONNX fixtures for examples/g2g-onnx-import and their reference logits.
 
     uv run --with onnx --with onnxruntime --with numpy tools/onnx-fixture.py \

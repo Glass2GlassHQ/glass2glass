@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! YUV <-> RGB coefficients for one stream's colorimetry.
 //!
 //! Every stage in this crate that crosses between YUV and RGB (the CPU

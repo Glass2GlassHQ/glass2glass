@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1717: `vulkanvideodec` refuses an H.264 stream it cannot decode with an
 //! error that names the coding tool, and emits no picture, instead of ending
 //! the stream as an empty success.

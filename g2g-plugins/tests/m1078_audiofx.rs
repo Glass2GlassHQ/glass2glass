@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1078 `audiofx` filters: `audiodynamic`, `audioinvert`, `audiokaraoke`, the
 //! windowed-sinc pair (`audiowsinclimit` / `audiowsincband`) and the Chebyshev
 //! pair (`audiocheblimit` / `audiochebband`). Every assertion is a measurement

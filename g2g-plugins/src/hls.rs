@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! HLS playlist parser (RFC 8216), pure `no_std + alloc`. Parses the two
 //! `.m3u8` forms: a *master* playlist (a set of `#EXT-X-STREAM-INF` variant
 //! streams for ABR selection) and a *media* playlist (an ordered list of

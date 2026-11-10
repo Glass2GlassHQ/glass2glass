@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M106 `gst-launch` text pipeline parser, end to end: a registry, a pipeline
 //! string parsed into a `Graph`, then *run* through `run_graph`. This is the
 //! payoff of the properties + registry track: a pipeline expressed as text,

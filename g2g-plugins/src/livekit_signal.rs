@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! LiveKit signalling seam for the str0m WebRTC stack: the WebSocket + protobuf
 //! layer that sits on top of the T1 engine, the way gst-plugins-rs layers a
 //! signaller over `webrtcbin`. This module is transport + protocol only; the

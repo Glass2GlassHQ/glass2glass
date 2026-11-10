@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Multi-file sink (`multifilesink`). Writes the stream to a series of files
 //! named from a printf-style `location` pattern (e.g. `frame%05d.jpg`), starting
 //! a new file per the `next-file` policy. The g2g analog of GStreamer's

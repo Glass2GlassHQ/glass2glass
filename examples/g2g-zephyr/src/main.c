@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 /* Zephyr executor proof (M637), now via the g2g Zephyr module (M647):
  * Zephyr's main thread runs the exact g2g heap-free pipelines (the g2g-noalloc
  * staticlib the no-heap / panic-free symbol proofs cover) on QEMU's

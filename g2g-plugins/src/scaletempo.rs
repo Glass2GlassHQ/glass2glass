@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Pitch-preserving audio time stretcher (`scaletempo`). A playback rate other
 //! than 1 is played by consuming the input faster or slower while the output
 //! keeps the original pitch, so 2x speech stays speech instead of turning into

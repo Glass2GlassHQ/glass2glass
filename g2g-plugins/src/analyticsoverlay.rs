@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Analytics overlay: draws the [`AnalyticsMeta`] carried on a
 //! frame onto its raw RGBA8 pixels, the visible end of a detector -> overlay
 //! pipeline. The `cairooverlay` / `ovrenderhud` analog for ML analytics.

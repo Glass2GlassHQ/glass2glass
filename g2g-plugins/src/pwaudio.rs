@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Shared PipeWire audio helpers for [`PipeWireSink`](crate::pipewiresink) and
 //! [`PipeWireSrc`](crate::pipewiresrc): map our PCM `Caps` to an SPA audio
 //! format pod for `Stream::connect`. Linux-only (`pipewire` feature).

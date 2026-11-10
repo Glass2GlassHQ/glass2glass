@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M920: segmentation and region-of-interest analytics nodes ride a real
 //! transform chain. A source attaches an `AnalyticsMeta` holding a `Segmentation`
 //! (normalized box plus an owned coverage mask) and a `Roi`; `VideoScale` resizes

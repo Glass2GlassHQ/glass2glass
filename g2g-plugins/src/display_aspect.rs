@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 use g2g_core::{AspectRatio, PixelAspect};
 #[cfg(any(feature = "wgpu-sink", feature = "wayland-sink"))]
 use g2g_core::{PropKind, PropertySpec};

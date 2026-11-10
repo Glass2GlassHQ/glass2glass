@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+#
+# SPDX-License-Identifier: MPL-2.0
+
 # The API breaks g2g-core's unreleased version carries against the last release
 # on crates.io. `record` rewrites the list, `check` fails when it has drifted.
 set -euo pipefail

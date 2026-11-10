@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M988: does one worker thread per hosted element actually parallelize on a
 //! free-threaded (PEP 703) interpreter?
 //!

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M388 - multi-output MPEG-TS demuxer `TsDemuxN`. One TS byte stream in, N
 //! elementary streams out, one per output port; the demuxer parses the transport
 //! stream once and routes each PES access unit to the port whose codec matches the

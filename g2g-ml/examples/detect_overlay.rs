@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! The visual end of the one-graph detector: a real YOLO's structured
 //! detections drawn back onto the picture, the screenshot-able payoff of the
 //! `inference -> AnalyticsMeta -> overlay -> display` story.

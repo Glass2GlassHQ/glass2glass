@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! End-to-end smoke test for the native LiveKit publisher sink (`LiveKitSink`).
 //!
 //! Pipeline: `PacedH264Src -> LiveKitSink` (join a room, publish H.264 video over

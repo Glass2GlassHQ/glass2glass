@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Minimal async pipeline runtime (M1).
 //!
 //! Provides a bounded SPSC channel, a hand-rolled `Join2` combinator (no

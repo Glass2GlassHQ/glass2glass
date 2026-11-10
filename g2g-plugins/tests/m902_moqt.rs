@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M902: native IETF MoQ Transport (draft-16, `0xff000010`) over the M901
 //! WebTransport carrier, and the `moqtsink` publisher on top of it.
 //!

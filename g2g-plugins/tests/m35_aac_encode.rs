@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M35: `MfAacEncode` compresses S16 PCM to AAC access units through the real
 //! MS AAC encoder MFT, and exposes the AudioSpecificConfig the decoder /
 //! container need.

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! MPEG program stream demuxer element: `Caps::ByteStream{MpegPs}` in,
 //! one selected elementary stream out. The `.mpg` / `.vob` sibling of
 //! [`crate::tsdemux::TsDemux`], covering VCD-era MPEG-1 program streams and DVD

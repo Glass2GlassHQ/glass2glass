@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! AIFF / AIFC: `aiffparse` reads a `FORM`/`AIFF` (or `AIFC`) byte stream into
 //! PCM, `aiffmux` writes one. The Mac / interchange sibling of WAVE.
 //!

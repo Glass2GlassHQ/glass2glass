@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1159: a fan-in contributes to the DAG runner's latency fold. The muxer node
 //! used to be skipped, so an element that holds frames back (a fallback switch
 //! waiting out a stall) reported nothing to the pipeline latency query.

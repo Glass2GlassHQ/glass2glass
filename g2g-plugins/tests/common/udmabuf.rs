@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 use g2g_core::memory::OwnedDmaBuf;
 
 /// `UDMABUF_CREATE`: `_IOW('u', 0x42, struct udmabuf_create)`.

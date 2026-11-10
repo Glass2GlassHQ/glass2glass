@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M433: turnkey caption authoring from a subtitle file. Drives the real graph
 //! `subtitlesrc -> subparse -> ccinsert.cue` + `h264 video -> ccinsert.video ->
 //! sink`, then extracts + decodes the captioned output: a `.srt` file becomes

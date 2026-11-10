@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! ST 2110-22 JPEG XS over RTP: the packetizer and depacketizer for
 //! constant-bit-rate compressed video, RFC 9134 (ISO/IEC 21122 / JPEG XS).
 //!

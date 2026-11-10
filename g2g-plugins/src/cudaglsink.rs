@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! CUDA-GL display sink (C3 Phase 3, step 2): the zero-copy-ish payoff.
 //!
 //! Keeps `Backend::NvdecCuda` decoded NV12 resident on the GPU and presents it

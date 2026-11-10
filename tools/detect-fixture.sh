@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+#
+# SPDX-License-Identifier: MPL-2.0
+
 # Build the real-detector test fixtures (g2g-ml/tests/yolo_detect.rs): a real YOLO
 # (Ultralytics YOLO11 / YOLOv8) ONNX + a preprocessed input image. The model is
 # tens of MB and not committed, so this obtains it on demand into a gitignored dir

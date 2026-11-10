@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! G.711 (mu-law / A-law) fixed-point audio codec: the first MCU-fit codec.
 //! Pure integer companding, one byte per sample, no tables beyond
 //! what the expressions fold to, so it runs on the heap-free subset like the

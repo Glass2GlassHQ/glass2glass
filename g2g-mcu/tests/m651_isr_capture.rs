@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M651: the ISR/DMA-driven capture concurrency model. A real MCU captures in
 //! interrupt context (a DMA-completion ISR) while the pipeline runs in the main
 //! context; the two hand frames across that boundary through `SpscFrameRing`.

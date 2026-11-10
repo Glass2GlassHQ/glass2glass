@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! The **v2 plugin ABI**: a frozen `repr(C)` surface a plugin written in any
 //! language (Rust built with a different toolchain, C, C++, Zig) can emit, and
 //! the host can read without trusting the producing compiler.

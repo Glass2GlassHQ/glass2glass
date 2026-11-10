@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Tensor dtype / layout converter: the tensor-domain sibling of
 //! [`VideoConvert`](crate::videoconvert::VideoConvert). Where `VideoConvert`
 //! converts between raw-video pixel formats, `TensorConvert` converts between

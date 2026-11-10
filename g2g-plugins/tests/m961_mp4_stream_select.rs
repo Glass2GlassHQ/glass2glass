@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M961: the MP4 analog of M960. `qtdemux`'s port default is nominal H.264, so
 //! an AV1 mp4 with only a codec-specific decoder compiled in (`rav1ddec`) used
 //! to plug that decoder against nominal H.264 caps and fail startup

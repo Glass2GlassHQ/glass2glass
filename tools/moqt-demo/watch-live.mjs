@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 // Watch a live g2g MoQ Transport broadcast in a browser, from one command.
 //
 // Starts a local `moq-relay-ietf`, publishes the camera into it through

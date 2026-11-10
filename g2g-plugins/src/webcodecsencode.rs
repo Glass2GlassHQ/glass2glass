@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! WebCodecs hardware video encode element (browser/wasm). Wraps the browser
 //! `VideoEncoder`, consuming raw RGBA `System` frames and producing H.264 Annex-B
 //! access units (`CompressedVideo`, `System`): the browser analog of the native

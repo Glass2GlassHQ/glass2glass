@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! WebGPU zero-copy presentation sink (browser/wasm). Consumes decoded frames in
 //! `MemoryDomain::WebGPUExternalTexture` (the output of
 //! [`WebCodecsDecode::with_gpu_output`](crate::webcodecsdecode::WebCodecsDecode::with_gpu_output)),

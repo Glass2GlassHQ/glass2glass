@@ -1,4 +1,8 @@
 #!/usr/bin/perl
+# Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+#
+# SPDX-License-Identifier: MPL-2.0
+
 # usage: tools/windows-test-gate.pl "<enabled features>" <test.rs>...
 # Prints "<stem> run" or "<stem> skip cfg(...)" for each integration test file,
 # evaluating its crate-level #![cfg(...)] gates for x86_64-pc-windows-msvc with

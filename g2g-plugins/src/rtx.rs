@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! RFC 4588 RTP retransmission (RTX) framing. Sans-IO, `no_std + alloc`.
 //!
 //! A retransmission is sent on a distinct payload type (the `apt`'s associated

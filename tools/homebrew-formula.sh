@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+#
+# SPDX-License-Identifier: MPL-2.0
+
 set -euo pipefail
 
 [ $# -eq 4 ] || { echo "usage: tools/homebrew-formula.sh <version> <tarball tag> <base url> <tarball dir>" >&2; exit 2; }

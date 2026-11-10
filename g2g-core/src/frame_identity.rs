@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 const RECENT_IDENTITIES: usize = 64;
 const CADENCE_SAMPLES: usize = 16;
 const REPORT_INTERVAL_NS: i64 = 1_000_000_000;

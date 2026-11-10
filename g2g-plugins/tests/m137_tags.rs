@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M137 stream metadata (tags): end to end through the DAG runner. A source
 //! emits a synthetic Ogg/Opus stream whose `OpusTags` header carries
 //! VorbisComment metadata; `oggdemux` (with a bus attached) surfaces it as a

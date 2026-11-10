@@ -51,3 +51,16 @@ cargo +nightly fuzz run h264parse
 
 MPL-2.0 for the whole repository. By contributing you agree your work is
 licensed the same way.
+
+Every source file starts with a copyright and licence header:
+
+```rust
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+```
+
+Add your own `Copyright (C) <year> <name> <email>` line under the existing ones
+in any file you make substantial changes to, and start new files with the
+header. Use `#` instead of `//` in Python and shell scripts.
+`tools/copyright-check.sh` lists files without a header, and CI runs it.

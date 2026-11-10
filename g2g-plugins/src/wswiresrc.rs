@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Browser WebSocket source for the distributed-graph primitive (`web`): the
 //! wasm receive half, the browser sibling of the native
 //! [`RemoteWsSrc`](crate::remotewssrc) and the inverse of

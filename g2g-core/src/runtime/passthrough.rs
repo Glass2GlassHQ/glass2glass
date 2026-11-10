@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Passthrough-field negotiation helpers for the solver's mid-stream re-solve
 //! (design/caps.md). A transform declares which caps fields it forwards
 //! unchanged (`PassthroughFields`); these functions couple those fields across a

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! macOS Metal present sink (`CAMetalLayer`).
 //!
 //! `MetalVideoSink` is the macOS analog of `WaylandSink` / `D3D11Sink`: it

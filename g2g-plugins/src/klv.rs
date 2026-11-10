@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! MISB ST 0601 UAS Datalink Local Set: the KLV (SMPTE ST 336) metadata
 //! a STANAG 4609 stream carries alongside its video, encoding platform / sensor
 //! telemetry (position, attitude, field of view, frame center), the mission /

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M12: pipeline latency query.
 //!
 //! Each element reports a `LatencyReport`; the linear runners fold the chain

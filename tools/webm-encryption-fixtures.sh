@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+#
+# SPDX-License-Identifier: MPL-2.0
+
 # Regenerate the WebM Encryption fixtures in g2g-plugins/tests/fixtures.
 #
 # ffmpeg encodes the clear VP9 and Opus files, Shaka Packager encrypts them with

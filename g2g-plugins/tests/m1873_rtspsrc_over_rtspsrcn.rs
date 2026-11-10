@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 // `rtspsrc` is `rtspsrcn` with the video pad alone, so what one of them does at negotiation and
 // across a reconnect the other does too.
 #![cfg(all(

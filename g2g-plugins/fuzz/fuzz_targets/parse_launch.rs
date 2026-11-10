@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 #![no_main]
 // gst-launch-style pipeline-description parser (g2g_core::runtime::parse_launch),
 // the untrusted-text surface the g2g-capi `g2g_pipeline_launch` C entry forwards

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! RIFF chunk walking, shared by the RIFF containers g2g reads and writes:
 //! [`wavparse`](crate::wavparse) for `RIFF....WAVE` and
 //! [`avidemux`](crate::avidemux) / [`avimux`](crate::avimux) for `RIFF....AVI `.

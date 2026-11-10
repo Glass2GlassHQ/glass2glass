@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Windows H.264 / H.265 encode element wrapping a Media Foundation encoder
 //! MFT. The encode-side mirror of `mfdecode`. Codec is selected with
 //! [`MfEncode::with_codec`]; the default is H.264.

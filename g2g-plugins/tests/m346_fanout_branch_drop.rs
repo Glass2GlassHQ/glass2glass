@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M346: graceful per-branch drop on fan-out (`FanOutPolicy::AllowBranchDrop`).
 //!
 //! A tee built with `add_tee_with_policy(.., AllowBranchDrop)` lets a branch that

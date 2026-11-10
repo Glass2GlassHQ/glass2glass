@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Aspect-ratio crop (`aspectratiocrop`). Trims equal amounts off two opposite
 //! edges so the picture comes out at the `aspect-ratio` the property names,
 //! keeping the centre. The pixel format is preserved, the geometry is not.

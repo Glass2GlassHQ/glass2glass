@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1914: a caps error shows a caps filter's side as the launch line wrote it,
 //! and `G2G_CAPS_TRACE=trace` expands it into the alternatives it parses to.
 #![cfg(all(feature = "std", unix))]

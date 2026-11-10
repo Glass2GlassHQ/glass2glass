@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! WASAPI endpoint discovery: the Windows audio half of the
 //! [`DeviceMonitor`](g2g_core::runtime::DeviceMonitor), the counterpart of
 //! [`alsadevice`](crate::alsadevice) on Linux. `IMMDeviceEnumerator` lists the

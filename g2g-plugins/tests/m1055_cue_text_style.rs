@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1055 - the cue text styling the overlay renders beyond colour and size:
 //! `<b>` / `<i>` / `<u>` and the `font-weight` / `font-style` /
 //! `text-decoration` / `font-stretch` rules that back them. Each test renders a

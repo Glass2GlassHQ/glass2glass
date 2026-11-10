@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M5: smoke tests for the RTSP source element.
 //!
 //! Construction test runs always (no network). The live-server integration

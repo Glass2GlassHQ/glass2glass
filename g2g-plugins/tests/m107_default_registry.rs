@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M107 coverage broadening: the pre-populated `default_registry` plus the newly
 //! property-enabled video/audio transforms, exercised through `parse_launch` end
 //! to end. A `gst-launch` string now builds and runs a real multi-stage pipeline

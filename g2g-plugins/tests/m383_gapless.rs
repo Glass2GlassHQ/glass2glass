@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M383 - gapless playback. `GaplessSrc` concatenates a playlist of sources into
 //! one continuous, monotonically-timed stream (the playbin `about-to-finish` +
 //! next-`uri` analog): each item's PTS is rebased onto the running timeline, the

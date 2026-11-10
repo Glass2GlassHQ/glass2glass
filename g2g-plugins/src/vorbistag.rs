@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Vorbis comment-header rewriter element (`vorbistag`): a packetized Vorbis
 //! stream in, the same packets out with the comment header replaced.
 //!

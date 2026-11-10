@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! An out-of-tree third-party g2g plugin, built as a dynamically loadable
 //! `cdylib`. This is the whole author workflow for extending a packaged
 //! `g2g-launch` without recompiling g2g (design/TODO.md "Dynamic plugin loading via

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Software raw-video format converter. Converts between the packed
 //! raw formats (`Rgba8`, `Bgra8`) and the 4:2:0 planar/semi-planar formats
 //! (`Nv12`, `I420`) at the same geometry, so chains compose across format

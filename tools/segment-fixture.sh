@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+#
+# SPDX-License-Identifier: MPL-2.0
+
 # Build the real instance-segmentation test fixtures (g2g-ml/tests/yolo_segment.rs):
 # a real YOLO -seg (Ultralytics YOLO11-seg / YOLOv8-seg) ONNX + a sample image at
 # the model's RGBA input geometry. The model is tens of MB and not committed, so

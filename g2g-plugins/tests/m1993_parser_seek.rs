@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1993: a bare `.mp3`, `.aac` or `.ac3` file seeks through its parser, which
 //! rescans from the file start and hands the decoder the frames it needs before
 //! the target, so the decode from the target matches ffmpeg's own decode.

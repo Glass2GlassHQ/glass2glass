@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Generic IIR filter with hand-written coefficients (`audioiirfilter`). `b` is
 //! the numerator of the transfer function and `a` its denominator, applied as a
 //! direct-form-I recurrence with one history per channel. Preserves format,

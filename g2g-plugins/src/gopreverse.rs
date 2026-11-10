@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Decoded-GOP reverser: the presentation half of reverse playback.
 //!
 //! A decoder only runs forward, so a reverse-rate segment (`rate < 0`) is played

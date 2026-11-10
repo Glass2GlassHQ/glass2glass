@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 /* glass2glass C ABI (first slice): parse a gst-launch-style pipeline string,
  * run it, and poll the pipeline bus. See g2g-capi/src/lib.rs for the contract.
  *

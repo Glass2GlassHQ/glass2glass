@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1076 YUV4MPEG2: `y4mdec` reads a `.y4m` file's raw frames, `typefind` and
 //! `decodebin` reach it by content, and `y4menc` writes a file back that ffmpeg
 //! and GStreamer read.

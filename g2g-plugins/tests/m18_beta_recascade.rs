@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M18 β — cross-element allocation re-cascade (single hop).
 //!
 //! α (m18_alpha_realloc) re-derives an element's *own* pool on a

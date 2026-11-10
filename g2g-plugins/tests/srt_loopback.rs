@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! SRT end-to-end over loopback: a caller (`SrtSink`) connects to a listener
 //! (`SrtSrc`) through a lossy proxy that drops one data packet once. The HSv5
 //! handshake completes, the listener detects the gap and NAKs, the caller

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1035: a CPU element that reads its input through `require_system_slice`
 //! declares `input_domains() == {System}`, so the allocation cascade turns a GPU
 //! producer upstream into a download instead of letting the pipeline fail with

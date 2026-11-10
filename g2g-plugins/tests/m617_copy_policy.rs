@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M617: the runner enforces a memory-domain copy budget as a graph-level contract.
 //!
 //! `run_graph_with_copy_policy` runs the copy plan after negotiation and refuses to

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Measured per-element runtime instrumentation.
 //!
 //! `RunStats::report()` folds each element's *declared* `latency()`. This

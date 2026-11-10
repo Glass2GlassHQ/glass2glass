@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M828: the two shapes a one-pad `matroskamux` writes, and what each one buys.
 //!
 //! Streaming (the default, and `streamable`): an unknown-size `Segment` (the

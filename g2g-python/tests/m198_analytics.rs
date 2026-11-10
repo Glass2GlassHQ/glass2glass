@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M198 step 3: analytics metadata routing (`analytics` feature).
 //!
 //! Drives the fixture element, which calls `meta.add_object(...)` through the

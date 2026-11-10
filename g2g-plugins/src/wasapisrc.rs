@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Windows WASAPI capture source: the input mirror of [`WasapiSink`].
 //! Captures interleaved PCM from the default audio capture endpoint (shared
 //! mode) and emits `DataFrame`s, so a live microphone / line-in feeds a g2g

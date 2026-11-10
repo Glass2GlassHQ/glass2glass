@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Mid-session NEW track on the duplex WebRTC session (M784): both peers declare
 //! two active tracks (video + audio) plus one SPARE video pad, which carries no
 //! m-line at the initial handshake. Half a second in, the offerer's spare send

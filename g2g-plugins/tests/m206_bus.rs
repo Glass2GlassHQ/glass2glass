@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M206 - bus breadth: `StreamStart`. The runner's source arm posts one
 //! `BusMessage::StreamStart` per source before it produces, so an application
 //! can bracket each stream's lifetime (StreamStart .. Eos), the

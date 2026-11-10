@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 // Browser-only entry point for loading the wasm caps solver. The virtual module
 // is provided by the g2gSolver Vite plugin (vite.config.js): it embeds the blob
 // as base64 and instantiates from bytes, or resolves to a null loader when the

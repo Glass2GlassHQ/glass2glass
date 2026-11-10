@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+#
+# SPDX-License-Identifier: MPL-2.0
+
 """Fail if any criterion benchmark's `head` baseline regressed beyond a ratio
 vs its `base` baseline. Used by `.github/workflows/bench.yml`.
 

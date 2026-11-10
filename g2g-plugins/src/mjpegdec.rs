@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Motion-JPEG decode element (MjpegDec, `mjpeg` feature): `CompressedVideo{Mjpeg}`
 //! in, `RawVideo{Rgba8}` out, via the pure-Rust `zune-jpeg` decoder.
 //!

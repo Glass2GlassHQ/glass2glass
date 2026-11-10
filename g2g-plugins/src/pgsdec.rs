@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Blu-ray PGS subtitle decoder element: `Caps::SubPicture{Pgs}` in,
 //! `Caps::RawVideo{Rgba8}` canvases out.
 //!

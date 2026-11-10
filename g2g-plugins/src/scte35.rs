@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 use alloc::vec::Vec;
 
 use crate::mpegcrc::{crc32_mpeg2, PSI_SECTION_CRC_INIT};

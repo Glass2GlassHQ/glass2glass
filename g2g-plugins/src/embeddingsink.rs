@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Embedding sink: stores the embedding vector of each frame in a
 //! sqlite index, the gst-python-ml `pyml_embeddingsink` analog. The schema is the
 //! one `embedding_index.py` creates, so a file either side writes is searchable

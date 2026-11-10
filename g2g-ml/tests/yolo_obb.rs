@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1713: a real YOLO11 oriented-box model (DOTA classes) on a letterboxed
 //! wide photo, decoded by `DetectionPostprocess head=obb` and checked against
 //! Ultralytics' own predictions for the same ONNX file: the same boxes after

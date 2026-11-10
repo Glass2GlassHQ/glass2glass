@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Native LiveKit subscriber source (`LiveKitSrc`): joins a room over the
 //! LiveKit WebSocket signalling protocol and emits the subscribed video (`video-codec`, H.264 by default)
 //! and Opus audio on two output pads, from one PeerConnection. The ingest

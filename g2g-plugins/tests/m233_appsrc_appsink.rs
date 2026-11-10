@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M233 appsrc / appsink: the application feeds buffers into a pipeline and
 //! receives them at the other end, by name through the launch DSL. Pre-fills the
 //! feed before running so the whole thing drives on one thread (no background

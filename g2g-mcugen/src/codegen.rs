@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Turn a validated graph into monomorphized `no_std` Rust: the same shape the
 //! hand-written flagship pipeline (`noalloc-pipeline::audio`) has, but with the
 //! ring sizes computed from the graph's frame geometry rather than hard-coded.

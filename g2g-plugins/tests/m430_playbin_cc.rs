@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M430 - `playbin uri=*.mkv#closed-captions=cc1` overlays the in-SEI closed
 //! captions onto the video. Closed captions ride inside the compressed bitstream,
 //! not a container track, so the video is teed: one copy decodes for display, the

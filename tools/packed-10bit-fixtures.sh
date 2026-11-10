@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+#
+# SPDX-License-Identifier: MPL-2.0
+
 # Regenerate the v210 and r210 fixtures in g2g-plugins/tests/fixtures from ffmpeg.
 #
 # Each <name>.v210 is ffmpeg's v210 encode of one testsrc2 frame, and

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 #![allow(dead_code)] // not every test file uses every helper here
 
 // AAC-ELD, 48 kHz, stereo, as ffmpeg's FATE sample er_eld2000np_48_ep0 carries it

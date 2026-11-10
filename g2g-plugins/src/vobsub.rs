@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! VobSub (DVD subpicture) bitstream parsing: the pure half behind
 //! [`VobSubDec`](crate::vobsubdec::VobSubDec).
 //!

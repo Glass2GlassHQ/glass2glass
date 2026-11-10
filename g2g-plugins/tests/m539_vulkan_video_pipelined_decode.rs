@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M539: the pipelined streaming decode API
 //! ([`VulkanStreamDecoder::submit_chunk_push`] + [`flush`](VulkanStreamDecoder::flush),
 //! backed by the per-codec `decode_push` / `decode_flush` ring split).

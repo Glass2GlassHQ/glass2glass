@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M76 - pipeline state machine, integration over a real runner.
 //!
 //! Drives `run_simple_pipeline_stateful` through the `NULL → READY → PAUSED →

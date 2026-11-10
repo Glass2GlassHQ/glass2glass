@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M194: container-demux auto-plug. g2g demuxers are 1-in/1-out (a container
 //! byte stream in, one selected elementary stream out), so the M83 chain search
 //! composes them like any other element: `ByteStream{container}` -> demuxer ->

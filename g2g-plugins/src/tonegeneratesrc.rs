@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Sine-tone source (`tonegeneratesrc`): interleaved S16LE PCM at 44100 Hz
 //! stereo, one sine at `freq` scaled by `volume`. CPU-only `no_std`.
 //!

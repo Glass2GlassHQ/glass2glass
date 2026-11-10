@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 #![allow(dead_code)] // each test file uses a different part of this
 
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Seek requests and the playback segment.
 //!
 //! The pure, `no_std` foundation of the seek track: a [`Seek`] request

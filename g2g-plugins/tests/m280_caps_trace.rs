@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M280: the caps-negotiation explainer end to end. `solve_graph` narrates the
 //! negotiation under the `caps` log category (`G2G_CAPS_TRACE` turns it on); a
 //! capturing `LogSink` here asserts both the success narration (per-node

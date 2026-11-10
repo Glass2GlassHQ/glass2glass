@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M187: caps-driven audioresample. `Caps::Audio.sample_rate` gained an "any"
 //! sentinel (`ANY_SAMPLE_RATE` = 0), so a bare `audioresample` advertises "any
 //! rate" and takes its output rate from a downstream capsfilter

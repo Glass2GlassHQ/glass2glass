@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Edge content preview (dev tooling, `observe` feature): convert a sampled
 //! packet into a small JSON preview for the dashboard. Raw video (packed
 //! RGBA/BGRA and planar NV12/I420 in system memory) becomes a downscaled

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Loopback integration test for the UDP RTP receive path: a sender packetizes
 //! synthetic H.264 access units with `RtpH264Packetizer` and sends them over a
 //! UDP socket to `UdpSrc`, which depayloads them back to Annex-B and pushes

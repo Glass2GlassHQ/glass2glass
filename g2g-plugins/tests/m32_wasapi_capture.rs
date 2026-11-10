@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M32: `WasapiSrc` captures PCM from the default audio endpoint through the
 //! source loop. The input mirror of the M29 `WasapiSink` test.
 //!

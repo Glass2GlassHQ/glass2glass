@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M18 Caps-α — mid-stream caps re-solve over the downstream subgraph
 //! (`run_linear_chain`). See `DESIGN-M18-caps-resolve.md`.
 //!

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M553: the pipelined streaming decode path for H.265, closing the codec gap in
 //! m539 (which guarded only H.264).
 //!

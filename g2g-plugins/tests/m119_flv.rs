@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M119 FLV demux, end to end through `parse_launch`: `filesrc` reads a synthetic
 //! FLV file (its container auto-sniffed via `typefind`), feeds `flvdemux`, and the
 //! selected elementary stream's access units reach the sink. Exercises the new

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Core types for the `glass2glass` multimedia framework.
 //!
 //! This crate is `no_std`. It defines the data carriers (`Frame`,

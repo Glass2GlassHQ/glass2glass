@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! H.264 access-unit parser that refines source-side `Caps`.
 //!
 //! M6: scans each `DataFrame`'s bitstream for an SPS NAL unit, parses

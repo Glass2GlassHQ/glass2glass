@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! AC-3 stream parser element (`ac3parse`): an AC-3 byte stream in
 //! (`Caps::Audio{Ac3}`, arbitrary chunks from `filesrc`), one syncframe per
 //! buffer out.

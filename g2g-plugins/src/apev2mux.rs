@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! APEv2 tag writer element (`apev2mux`): the coded byte stream in, the same
 //! stream with an APEv2 tag at its tail out.
 //!

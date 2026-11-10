@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Lossy-link P2P resilience for the native duplex WebRTC session
 //! ([`WebRtcDuplexSession`]): two sendrecv peers connect over a test-local UDP
 //! relay that deterministically drops ~10% of large video SRTP packets, and we

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M343: diamond allocation join policy + β allocation crossing a muxer.
 //!
 //! Two startup-negotiation gaps in the DAG allocation cascade:

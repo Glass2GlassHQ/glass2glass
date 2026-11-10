@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1156: a reordering H.264 / H.265 stream in a transport stream gets its
 //! display timeline from the first PES stamp alone, as long as the SPS declares
 //! the frame period. The count step per frame follows from the codec (H.265

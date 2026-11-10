@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! HLS SAMPLE-AES sample decryptor (`hls` feature), the post-demux half of HLS
 //! encryption. Unlike whole-segment AES-128 (decrypted by [`HlsSrc`](crate::hlssrc)
 //! before the demuxer), SAMPLE-AES encrypts only the media samples *inside* the

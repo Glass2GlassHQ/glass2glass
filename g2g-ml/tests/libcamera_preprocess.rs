@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M315 end-to-end: a real camera into the GPU/ML preprocess path.
 //! `LibCameraSrc -> VideoConvert(NV12) -> WgpuPreprocess`, producing a
 //! normalized f32 NCHW RGB tensor on the GPU from live camera frames, the

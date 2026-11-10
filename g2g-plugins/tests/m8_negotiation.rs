@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M8: tests for the renegotiation runner primitives.
 //!
 //! Piece 1 — runner-driven `CapsChanged` cascade: when a source pushes a

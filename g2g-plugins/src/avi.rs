@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! AVI (`RIFF....AVI `) reading and writing: the container parse behind
 //! [`avidemux`](crate::avidemux) and the file writer behind
 //! [`avimux`](crate::avimux). Chunk walking comes from [`crate::riff`].

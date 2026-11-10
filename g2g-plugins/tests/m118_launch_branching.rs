@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M118 `gst-launch` branching, end to end: a `tee` written in text fans one
 //! source to several sinks, parsed into a `Graph` and *run* through `run_graph`.
 //! The payoff is the last gst-launch grammar gap closed: a branching pipeline

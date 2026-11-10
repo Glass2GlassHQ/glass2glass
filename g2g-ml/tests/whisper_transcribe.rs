@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! `WhisperTranscribe` against the real whisper.cpp runtime on its own jfk.wav
 //! sample with the quantized tiny.en model, both fetched by
 //! `tools/whisper-fixture.sh` into the gitignored `fixtures/whisper`; skips

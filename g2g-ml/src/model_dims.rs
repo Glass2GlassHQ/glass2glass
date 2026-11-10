@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 use g2g_core::{G2gError, TensorShape};
 
 /// The `(width, height)` of a model input that must be `[N, 3, H, W]` with static

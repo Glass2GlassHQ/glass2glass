@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M738: AVFoundation capture on the macOS CI runner. The runner has no
 //! camera (and capture is TCC permission-gated), so the video test probes the
 //! graceful denial path; the audio test captures for real if the runner

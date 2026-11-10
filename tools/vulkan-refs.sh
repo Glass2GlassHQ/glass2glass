@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+#
+# SPDX-License-Identifier: MPL-2.0
+
 # Software reference dumps for the Vulkan decode tests (M1182): one raw planar
 # ffmpeg decode per fixture, written as <fixture stem>.yuv into the output
 # directory, every decoded frame once and at its own size. Point G2G_VULKAN_REF_DIR at that directory and the tests compare

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M779: AV1 demux. The MP4 demuxers read the `av01` sample entry (config from
 //! the `av1C` record; samples are plain low-overhead OBUs, passed through
 //! verbatim), completing the M773 mux round trip. Oracled two ways: our own

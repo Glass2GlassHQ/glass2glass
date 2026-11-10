@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Shared Wayland window worker for the display sinks that own their window.
 //!
 //! Wayland (and the graphics API drawn on it) is single-thread-affine, so each

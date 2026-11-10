@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M834: multi-client RTSP *ingest* (`RtspServerSrc`). One publisher records at a
 //! time onto the single output pad, but publishers are now sequential: when one
 //! disconnects, tears down, or falls silent, its session is dropped and the next

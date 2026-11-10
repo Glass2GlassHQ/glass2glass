@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M937 - float->s16 audio decode matches ffmpeg bit-exactly. `FfmpegAudioDec`
 //! converted float samples with truncation at 32767 scale where every other
 //! libavcodec consumer (ffmpeg's swresample, GStreamer) rounds to nearest at

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M927: the muxer write paths for a bitmap-subtitle (`Caps::SubPicture`) pad.
 //! Matroska writes the pad as an `S_VOBSUB` or `S_DVBSUB` track carrying the
 //! out-of-band blob each format needs as its `CodecPrivate`; MPEG-TS carries a

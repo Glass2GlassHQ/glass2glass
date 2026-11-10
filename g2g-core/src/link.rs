@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 /// Per-link backpressure policy. Chosen at graph construction time because a
 /// single pipeline may have lossy preview branches and lossless recording
 /// branches sharing an upstream source.

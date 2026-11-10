@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M733: the VideoToolbox elements in the launch registry. `vtdec` /
 //! `vtdech265` decode inside a text pipeline (and `avdec_h264` resolves to
 //! `vtdec` when ffmpeg is absent), and `vtenc_h264` encodes from a text

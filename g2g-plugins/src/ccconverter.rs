@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Closed-caption transport converter (`no_std`): the `ccconverter`
 //! analog. The same `(cc_type, cc_data_1, cc_data_2)` triples travel in four byte
 //! layouts, and each carrier picks a different one: an H.264 SEI and an MP4

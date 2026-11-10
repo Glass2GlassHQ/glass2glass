@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M366 - Ogg/Opus demuxer seek (`OggDemux` over a seekable `FileSrc`). Drives an
 //! upstream byte-seek and re-syncs from the packet at or before the target. The
 //! Ogg demuxer carries no per-packet PTS, so the element now accumulates one from

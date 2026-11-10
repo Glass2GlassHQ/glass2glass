@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 #![no_main]
 // HLS m3u8 playlist parsing (master + media): attribute / tag / duration parsing
 // over an attacker-controlled manifest.

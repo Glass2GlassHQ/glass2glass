@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1013: the CUDA device ordinal the frame carries, and the torch import paths.
 //!
 //! `OwnedCudaBuffer` names the device its pointers live on, so a plane handed to

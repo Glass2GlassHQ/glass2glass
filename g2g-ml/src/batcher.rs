@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Bounded multi-stream tensor batcher (design/ml.md).
 //!
 //! `TensorBatcher` is a `MultiInputElement` that gathers one tensor

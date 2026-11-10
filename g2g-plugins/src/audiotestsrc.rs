@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Synthetic audio source, the audio analog of `VideoTestSrc`. Emits
 //! interleaved signed 16-bit PCM (`AudioFormat::PcmS16Le`) buffers of a
 //! deterministic test waveform at a fixed sample rate. CPU-only, `no_std`.

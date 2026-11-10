@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Buffer re-framer (`audiobuffersplit`). Re-cuts an interleaved PCM stream
 //! into buffers of one fixed duration and re-stamps them off a sample counter,
 //! so a stream arriving in ragged chunks leaves in even ones. Preserves format,

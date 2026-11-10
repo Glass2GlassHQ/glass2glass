@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Tiny WebSocket client for the input backchannel: sends a few input
 //! messages and exits. Doubles as protocol documentation and as the automated
 //! validation peer for `RemoteInputPlugin`.

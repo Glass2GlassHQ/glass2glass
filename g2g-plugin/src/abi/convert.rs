@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Packet, frame, and property conversion across the v2 boundary.
 //!
 //! Both sides need both directions (the host lends a frame down and takes one

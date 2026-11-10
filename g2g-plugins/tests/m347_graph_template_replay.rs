@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M347: `GraphTemplate` for graph re-run / replay. `run_graph` consumes its
 //! elements, so a graph can be run only once; a `GraphTemplate` rebuilds a fresh
 //! graph (fresh elements) per run, the foundation for seek-and-replay and retry.

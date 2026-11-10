@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! In-process links between independent graphs (`intersink` / `intersrc`), the
 //! gst-plugins-rs `intersink` / `intersrc` analog. An `intersink` publishes its
 //! stream under a `producer-name`, and every `intersrc` with that name receives

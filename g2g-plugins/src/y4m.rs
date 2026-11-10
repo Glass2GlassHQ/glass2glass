@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! YUV4MPEG2 (`.y4m`): the uncompressed planar-YUV stream format encoders,
 //! conformance suites and quality tools exchange raw video in. [`Y4mDec`] reads
 //! one (`Caps::ByteStream{Y4m}` in, `Caps::RawVideo` out), [`Y4mEnc`] writes one,

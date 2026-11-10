@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1580 interlaced motion JPEG: an AVI chunk holding two half-height JPEG
 //! fields goes through `jpegparse` as one access unit at the frame height, and
 //! `MjpegDec` weaves the two fields into one interleaved frame.

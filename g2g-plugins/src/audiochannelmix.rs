@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Stereo channel mixer (`audiochannelmix`). Each output channel is a weighted
 //! sum of the two input channels, so the four gains swap, fold to mono, or
 //! cancel a side. Preserves format, channel count, and sample rate. Stereo

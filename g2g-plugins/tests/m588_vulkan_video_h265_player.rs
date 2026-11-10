@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M588: the random-access `VulkanVideoPlayer` scrubs H.265, tuning in at a CRA.
 //!
 //! The pull-based player (`frame_at(t)`) was H.264-only. It now sniffs the codec

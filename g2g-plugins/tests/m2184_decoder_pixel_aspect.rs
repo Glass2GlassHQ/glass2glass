@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M2184: decoders hand the sample aspect the parser read from the H.264 VUI on
 //! to their raw output caps. The oracle is a stream ffmpeg encoded with `setsar`,
 //! so the ratio sits in the bitstream the parser reads. Self-skips where ffmpeg

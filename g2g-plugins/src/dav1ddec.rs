@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! AV1 decode element (Dav1dDec, `dav1d` feature): `CompressedVideo{Av1}` in,
 //! `RawVideo{I420}` out, via the `dav1d` crate's safe bindings to libdav1d (the C
 //! AV1 decoder with hand-written assembly, the speed reference).

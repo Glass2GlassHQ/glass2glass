@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Receive side of the MoQ Transport data plane: decoding one subgroup stream,
 //! and putting the objects from many concurrent subgroup streams back into
 //! (group id, object id) order.

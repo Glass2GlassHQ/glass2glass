@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M80 - the SEGMENT carrier: `PipelinePacket::Segment` propagates through a
 //! transform to a sink and broadcasts across a tee, and a sink records it so
 //! frame timestamps map to running time. The first test injects a SEGMENT via

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M952: per-frame video timestamp synthesis in the TS demuxer for the streams
 //! M948 left alone. MPEG-2 access units take their display slot from the picture
 //! header's `temporal_reference`, and an H.264 / H.265 stream that reorders

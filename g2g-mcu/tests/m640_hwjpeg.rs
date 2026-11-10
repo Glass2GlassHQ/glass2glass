@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M640: the hardware-JPEG codec seam. A scripted mock replays the STM32H7
 //! peripheral contract (accept one JFIF stream, report the header-derived
 //! image parameters, emit MCU-block-ordered bytes), so `HwJpegDec`'s real

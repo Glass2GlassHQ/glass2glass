@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Sans-IO SRT (Secure Reliable Transport) wire layer. Pure `no_std + alloc`,
 //! no sockets. Builds / parses the SRT packet header and the control packets a
 //! caller and listener exchange, per the SRT protocol draft

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M61: native end-to-end ML pipeline on real hardware, the native half of the
 //! cross-target proof. `VideoTestSrc(RGBA) -> VideoConvert(NV12) ->
 //! VideoScale(NV12) -> WgpuPreprocess(GPU) -> OrtInference(tensor-input) ->

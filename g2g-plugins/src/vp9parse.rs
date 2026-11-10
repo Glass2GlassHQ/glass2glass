@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! VP9 frame parser that refines source-side `Caps` from the uncompressed header.
 //!
 //! The VP9 sibling of `vp8parse`: it reads each frame's uncompressed header (the

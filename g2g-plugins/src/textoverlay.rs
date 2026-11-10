@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Subtitle text overlay: renders timed [`Cue`] text onto an RGBA8 frame
 //! at the bottom centre, selecting the active cue by the frame's PTS. The
 //! `textoverlay` / `subtitleoverlay` analog and the visible end of an

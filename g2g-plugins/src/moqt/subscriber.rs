@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! The subscribing half of MoQ Transport, shared by the single-track
 //! [`MoqtSrc`](crate::moqtsrc::MoqtSrc) and the multi-track
 //! [`MoqtSessionSrc`](crate::moqtsessionsrc::MoqtSessionSrc): the session

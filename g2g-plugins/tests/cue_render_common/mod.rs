@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Helpers shared by the cue-rendering tests (`m1055_cue_text_style`,
 //! `m1057_cue_css`, `m1196_vello_vertical_cues`, `m1202_vello_font_variations`):
 //! the one-cue WebVTT document builder, the black frame and sink the CPU and GPU

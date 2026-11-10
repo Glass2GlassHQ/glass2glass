@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M294 A/V Matroska muxer: `MkvMuxN` muxes an H.264 video track and an AAC
 //! audio track into one Matroska byte stream, interleaving access units by PTS.
 //! Drives the multi-input element directly with synthetic video AUs (SPS + PPS +

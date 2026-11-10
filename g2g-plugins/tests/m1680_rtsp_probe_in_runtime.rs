@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 // The parse-time DESCRIBE of an `rtsp://` URI runs from inside a tokio runtime too, so a line
 // parsed by async code still fans out to the session's video and audio pads.
 #![cfg(all(

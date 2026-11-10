@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Output selector (`output-selector`). Routes the single input to exactly one of
 //! its N outputs, chosen by the `active-pad` property; the other outputs receive
 //! no frames. The g2g analog of GStreamer's `output-selector`, switchable live.

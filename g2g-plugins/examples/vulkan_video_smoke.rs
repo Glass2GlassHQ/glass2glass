@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Visual smoke test for the Vulkan Video H.264 decoder.
 //!
 //! Decodes an H.264 Annex-B elementary stream on the GPU via `VK_KHR_video_*`

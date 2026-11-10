@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M171: subtitle text overlay. The `subparse` SRT/WebVTT parsers, the
 //! `TextOverlay` element rendering cues by PTS, and the registry / `gst-launch`
 //! wiring (`textoverlay`, `location=`).

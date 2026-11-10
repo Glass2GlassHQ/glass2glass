@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1244-M1247: the MPEG-TS demuxer keeps timestamps rising across the 33-bit
 //! wrap, drops what a lost packet damaged, reassembles PSI sections spanning
 //! packets, and reads the 192-byte M2TS and 204-byte DVB-ASI packet strides.

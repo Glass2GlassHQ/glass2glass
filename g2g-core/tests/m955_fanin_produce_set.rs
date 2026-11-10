@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M955: the fan-in and duplex runners negotiate a source branch's whole
 //! produce set, like the DAG runner does (M954). A branch source that offers
 //! several formats is selected by what the pad it feeds accepts: the merged

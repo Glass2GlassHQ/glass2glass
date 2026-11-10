@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 // Headless comparison of the two decode paths on one live broadcast (M942).
 //
 // Publishes the same recorded SMPTE clip twice, paced to its captured 30 fps by

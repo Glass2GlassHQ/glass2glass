@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 #[cfg(any(feature = "mf-decode", feature = "mf-encode", feature = "mf-aac"))]
 use core::mem::ManuallyDrop;
 

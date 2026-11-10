@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Runtime fault-recovery proof: the supervisor on the emulated
 //! Cortex-M4. A `capture -> G.711 -> checksum` pipeline is driven by
 //! `run_supervised`, which turns a returned peripheral fault into a bounded

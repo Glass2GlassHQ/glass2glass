@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Native WebRTC egress sink (`WebRtcSink`): publishes a pipeline's encoded
 //! video (H.264, VP8, VP9, H.265 or AV1) or Opus to a WHIP server over a WebRTC PeerConnection, built on the sans-IO
 //! [`str0m`] stack (ICE / DTLS / SRTP / RTP). This is the native counterpart of

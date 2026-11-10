@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M857: `OpusDec` in-band FEC. An Opus stream encoded with FEC carries a
 //! low-bitrate redundant copy (LBRR) of every frame inside the *next* packet, so
 //! a decoder that lost one packet can rebuild it from the packet that follows

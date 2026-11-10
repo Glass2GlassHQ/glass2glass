@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M9 fan-out: a `Gate` closed mid-stream stops the data flow while EOS still
 //! passes, driven through the existing `run_source_transform_sink` runner.
 //!

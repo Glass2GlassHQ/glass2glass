@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M977: the `PlaneLayout` meta removing the GPU compositor's readback repack.
 //!
 //! The compositor's canvas comes back from the GPU at a 256-byte row pitch, and

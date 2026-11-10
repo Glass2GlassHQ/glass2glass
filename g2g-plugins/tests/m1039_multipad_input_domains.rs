@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1039: the fan-in / fan-out halves declare their memory domains too, the
 //! multi-pad counterpart of `m1035_input_domains_declared`. A muxer or demux
 //! that reads host memory has to say so, otherwise the allocation cascade lets a

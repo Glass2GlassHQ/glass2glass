@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 // Headless validation for the Web Worker executor (M1054).
 //
 // Drives WebSocketSrc -> WebCodecsDecode -> WebDetect -> AnalyticsOverlay ->

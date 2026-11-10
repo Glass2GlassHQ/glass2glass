@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! The two media-typed fake sinks, gst's `fakevideosink` and `fakeaudiosink`:
 //! [`FakeSink`]'s counting behaviour behind a pad that takes only raw video or
 //! only raw PCM. Use one to terminate a branch whose decode you still want

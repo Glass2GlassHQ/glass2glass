@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! The `execution-provider` property on `ortinfer`: every provider the build
 //! includes parses by name and survives the model load, and a provider the host
 //! cannot enable fails that load loud instead of dropping to the CPU unnoticed.

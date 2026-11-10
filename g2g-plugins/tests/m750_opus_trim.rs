@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M750: Opus decode applies the container trims. An Opus elementary stream
 //! carries encoder lookahead (pre-skip) at the head and codec padding at the
 //! tail; `OggDemux` + `OpusDec` must discard both so the decoded PCM has the

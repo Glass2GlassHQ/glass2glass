@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M727 terminal fan-out source graph node: `run_graph` over a `FanoutSrc`
 //! (a 0-in / N-out `MultiOutputSource`, the receive-side mirror of the M713
 //! terminal fan-in), so a session source's tracks feed downstream chains

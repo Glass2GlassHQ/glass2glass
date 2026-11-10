@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1494: typefind takes a raw MPEG-4 Part 2 stream for one, whatever its
 //! `.m4v` extension suggests, and does not take start-code runs inside another
 //! format for H.264.

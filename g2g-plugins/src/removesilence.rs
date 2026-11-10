@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Silence remover (`removesilence`). A voice-activity detector classifies each
 //! buffer, and with `remove` on the silent ones are dropped. Preserves format,
 //! channel count, and sample rate. CPU-only `no_std`.

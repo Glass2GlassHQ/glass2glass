@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! ONNX Runtime instance-segmentation element (design/ml.md): the in-tree
 //! producer of the `Segmentation` / `Roi` analytics nodes.
 //!

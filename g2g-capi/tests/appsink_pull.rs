@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! appsink pull mode (M235): the application pulls whole samples out of the
 //! pipeline (blocking), and a pulled sample owns its bytes until freed. The
 //! second test pushes an `appsrc` lend straight through to a pulled sample and

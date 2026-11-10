@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Matroska / WebM demuxer: parse an EBML byte stream into the
 //! elementary-stream frames its Clusters carry (RFC 9559 / the matroska.org
 //! spec).

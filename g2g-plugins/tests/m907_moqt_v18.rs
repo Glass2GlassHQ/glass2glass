@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M907: `moqtsink` and `moqtsrc` speak MoQ Transport draft-18 when the server
 //! selects it.
 //!

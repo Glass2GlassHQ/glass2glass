@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 // libasound is loaded when the first PCM or hint list opens, so a binary built
 // with the ALSA elements still starts on a machine without it.
 

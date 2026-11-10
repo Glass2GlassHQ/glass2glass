@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Embedded Rhai scripting: build a [`Graph`] from a script, the
 //! logic-carrying sibling of the static [`declarative`](crate::declarative)
 //! document. A JSON / YAML file describes a *fixed* graph; a script computes one,

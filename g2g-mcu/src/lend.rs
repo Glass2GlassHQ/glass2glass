@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Shared plumbing for payload-producing codec transforms: validate the
 //! input, convert into an acquired [`StaticLendRing`] slot, publish it
 //! zero-copy (the capture source's lend model applied to a transform's

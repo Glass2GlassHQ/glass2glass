@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 // Pure importers, the inverse of export.js: turn a gst-launch line or a
 // declarative JSON document back into the builder's node/edge shape. Pure ESM,
 // no React, so node can run the round-trip self-check (import.test.mjs).

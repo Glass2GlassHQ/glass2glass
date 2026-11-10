@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! The link between a blocking audio device worker thread and the async element
 //! that feeds it, shared by the ALSA, PulseAudio, WASAPI, Core Audio and AAudio
 //! sinks.

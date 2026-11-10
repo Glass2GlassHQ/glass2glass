@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+#
+# SPDX-License-Identifier: MPL-2.0
+
 # Runs the gst-python-ml people.mp4 clip through YOLO11m twice per side:
 # native `ortinfer execution-provider=cuda ! detectionpostprocess` and the hosted
 # gst-python-ml `ObjectDetector` on cuda:0, both in g2g-launch-py, and prints one

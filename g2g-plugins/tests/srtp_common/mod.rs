@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Helpers shared by the SRTP element batteries (`m1098_srtp`,
 //! `m1099_srtp_session`, `m1100_dtls_srtp`, `m1101_srtp_legacy`): the
 //! one-packet-per-frame source, the collecting sink, the packet builders, and

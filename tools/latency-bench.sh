@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+#
+# SPDX-License-Identifier: MPL-2.0
+
 # Receive-to-present latency, g2g vs GStreamer, on the same live RTSP feed.
 #
 # Needs the standing feed from README "A standing RTSP feed" (mediamtx +

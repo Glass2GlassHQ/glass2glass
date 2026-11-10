@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1172: `togglerecord name=t` takes gst's `sink_%u` / `src_%u` request pads.
 //!
 //! gst spells several streams that start and stop together as one element with a

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! The sync/async impedance matcher ([`BridgeGraph`]). See the crate docs.
 
 use std::fmt;

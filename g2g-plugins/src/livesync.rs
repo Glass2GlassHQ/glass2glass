@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Live gap filler (`livesync`). Passes raw video or PCM audio through and, when
 //! the input stalls, keeps the output going at the input's own cadence: the last
 //! video frame repeated at the next PTS, or a silence buffer the size and length

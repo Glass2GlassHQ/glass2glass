@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Pipeline progress handle: the application's window into a running
 //! pipeline's position and duration, the GStreamer `POSITION` / `DURATION`
 //! query analog.

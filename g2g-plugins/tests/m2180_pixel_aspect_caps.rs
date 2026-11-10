@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M2180: video caps carry gst's `pixel-aspect-ratio`. `videotestsrc` draws
 //! square pixels, so a launch caps filter asking for another ratio refuses to
 //! negotiate, and one asking for 1/1 runs.

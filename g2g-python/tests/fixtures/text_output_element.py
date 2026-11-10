@@ -1,3 +1,7 @@
+# Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+#
+# SPDX-License-Identifier: MPL-2.0
+
 # Hosted elements for the M1241 text_src tests.
 
 EMIT_ERRORS = []

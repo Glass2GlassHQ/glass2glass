@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M190: `queue` / `queue2` in a gst-launch line. g2g has no queue element by
 //! design, per-edge `LinkPolicy` is the leaky-queue analog, so a `queue` node
 //! collapses into the backpressure policy of the edge it sits on: `leaky=`

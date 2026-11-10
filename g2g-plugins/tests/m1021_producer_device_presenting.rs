@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1021: a display sink presents on the device the decoder already opened.
 //!
 //! `VulkanVideoDec` opens its own Vulkan device (video decode needs queues and

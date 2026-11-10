@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! The pixel formats a video capture source hands downstream, and the `Caps`
 //! each one produces. Shared by the capture sources (`V4l2Src`,
 //! `LibCameraSrc`), which sit on different fourcc registries (V4L2 pixel

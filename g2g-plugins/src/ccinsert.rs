@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Closed-caption insertion element (`no_std`): the encode-side counterpart
 //! of [`CcExtract`](crate::ccextract). It takes a compressed H.264 / H.265 access
 //! unit stream and a timed `Caps::Text{Utf8}` cue stream, encodes the cues to

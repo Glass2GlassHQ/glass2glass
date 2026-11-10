@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! `JanusVrSink` and `JanusVrSrc` against a mock Janus VideoRoom on localhost:
 //! a WebSocket server speaking the publisher flow (create / attach / join /
 //! publish / unpublish / leave), whose answer comes from a real str0m peer that receives

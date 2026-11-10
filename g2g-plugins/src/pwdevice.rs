@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! PipeWire device discovery: the [`DeviceProvider`] over the PipeWire
 //! graph. Nodes carrying a capture / render `media.class` become devices whose
 //! element is the matching g2g PipeWire element, selected with `target-object`.

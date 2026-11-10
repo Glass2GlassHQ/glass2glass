@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! ST 2110-40 ancillary data over RTP: SMPTE ST 291 ANC packets (closed
 //! captions, timecode, AFD, ...) carried per RFC 8331, timestamped off the PTP
 //! media clock.

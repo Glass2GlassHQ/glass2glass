@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M415 - `playbin uri=*.mkv` routes an embedded subtitle track through a
 //! `TextOverlayN` onto the video, the Matroska sibling of M412 (MP4). When a probed
 //! MKV carries both a video track and an `S_TEXT/UTF8` subtitle track, `mkv_playbin`

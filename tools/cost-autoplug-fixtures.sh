@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+#
+# SPDX-License-Identifier: MPL-2.0
+
 # Regenerate the UHD H.265 container fixtures m1718_cost_autoplug.rs probes.
 #
 # Each file holds the same black frames, so it stays a few kilobytes. The

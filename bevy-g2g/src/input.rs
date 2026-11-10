@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Input backchannel: viewer input flows back into Bevy over a WebSocket.
 //!
 //! WHIP through an SFU is publish-only and the viewer's WHEP session is a

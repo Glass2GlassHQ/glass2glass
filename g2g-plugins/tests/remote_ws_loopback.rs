@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Distributed-graph primitive over a WebSocket boundary (M554): the WebSocket
 //! sibling of `remote_loopback.rs`. The near side drives a `RemoteWsSink`
 //! (WebSocket client, serializing the `PipelinePacket` stream via the g2g-core

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M376 - stream discovery, the playbin foundation. A demuxer announces *every*
 //! elementary stream the container declares as a `BusMessage::StreamCollection`,
 //! out of band on the bus, regardless of which one(s) it forwards. This is the

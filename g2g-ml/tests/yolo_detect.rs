@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M448: a real object detector end to end through the g2g element graph, the
 //! detection sibling of the M446 classifier. A real YOLO (Ultralytics YOLO11 /
 //! YOLOv8 share the `[1, 4+C, A]` channel-major output) runs through

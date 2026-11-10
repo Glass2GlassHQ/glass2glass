@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! `LlamaChat` against the real llama.cpp runtime on the stories260K GGUF
 //! (`tools/llama-fixture.sh` into the gitignored `fixtures/llama`); skips when
 //! absent. The model is a TinyStories toy with no chat template, so the prompt

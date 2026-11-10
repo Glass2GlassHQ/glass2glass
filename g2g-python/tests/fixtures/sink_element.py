@@ -1,3 +1,7 @@
+# Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+#
+# SPDX-License-Identifier: MPL-2.0
+
 # Hosted sinks for the M1232 pysink tests. Each writes what it saw to the file
 # its `location` property names, one key=value per line.
 

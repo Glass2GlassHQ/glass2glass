@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Strided tensor *view* over a byte buffer: the zero-copy substrate for raw
 //! numeric media. A [`TensorView`] describes how to read a flat `[u8]`
 //! backing as an n-dimensional array, by NumPy-style byte strides plus a byte

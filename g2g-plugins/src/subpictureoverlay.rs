@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Bitmap-subtitle overlay: a video pad and a decoded-subpicture pad in,
 //! the video with the cue on screen blended over it out.
 //!

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1151: the ONVIF analytics metadata path, from the RTSP track to the video
 //! frames the analytics describe.
 //!

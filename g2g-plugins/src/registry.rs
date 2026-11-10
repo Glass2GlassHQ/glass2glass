@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! A pre-populated element [`Registry`], so a `gst-launch` text pipeline
 //! and `gst-inspect` work out of the box without the caller hand-registering
 //! every element.

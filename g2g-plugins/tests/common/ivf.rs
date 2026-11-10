@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 #![allow(dead_code)] // no one test file uses every helper here
 
 const IVF_FILE_HEADER_LEN: usize = 32;

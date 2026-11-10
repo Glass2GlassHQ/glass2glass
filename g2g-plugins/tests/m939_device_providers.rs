@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M939: the standard device-provider assembly. `default_device_monitor`
 //! probes every compiled-in backend on the real host, and each discovered
 //! device is well formed and (when it names an element) buildable through the

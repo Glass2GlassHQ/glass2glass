@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Incident digest (`no_std`): joins the text frames of a time window
 //! into one text frame per window, the gst-python-ml `pyml_digest` analog. A
 //! caption or detection-summary stream becomes one paragraph a minute, which is

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M928: the single-track Matroska muxer takes a subtitle pad. `matroskamux`
 //! with one link writes a `Caps::Text` pad as an `S_TEXT/*` track and a
 //! `Caps::SubPicture` pad as `S_VOBSUB` / `S_DVBSUB`, so a sidecar subtitle file

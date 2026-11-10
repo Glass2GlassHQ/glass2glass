@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Embassy zero-alloc inter-task link: a statically-sized channel carrying
 //! `PipelinePacket`s between embedded tasks (design/README.md "stack channels"),
 //! the embassy-sync counterpart of the spin-based runtime channel. The app owns

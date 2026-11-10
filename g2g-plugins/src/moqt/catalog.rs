@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! The MoQ catalog document (draft-ietf-moq-catalogformat-01), written by the
 //! publisher and read by the subscriber.
 //!

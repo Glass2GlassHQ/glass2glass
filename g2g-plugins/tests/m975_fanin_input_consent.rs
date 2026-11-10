@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M975: an element consents to a runtime-added input. A source attached to a
 //! running fan-in through `DynamicFaninHandle::add_input` is negotiated against
 //! the pad it would feed and then offered to the element itself

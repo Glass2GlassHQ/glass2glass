@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Minimal embedded-slice footprint harness. The `#[no_mangle]` entry below
 //! touches a representative no-alloc embedded path through g2g-core (caps
 //! algebra, a `Frame`, the no-alloc `StaticLendRing` DMA capture ring, the

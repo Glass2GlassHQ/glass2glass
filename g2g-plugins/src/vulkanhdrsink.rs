@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! HDR swapchain present.
 //!
 //! The last HDR layer: present a decoded HDR texture on screen through a

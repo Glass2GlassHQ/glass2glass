@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Windows Media Foundation camera capture source. The video sibling of
 //! [`WasapiSrc`](crate::wasapisrc::WasapiSrc): enumerates video capture devices
 //! and drains frames from one via an `IMFSourceReader`, emitting `DataFrame`s in

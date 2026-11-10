@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M447: a real (non-toy) quantized vision model on the Edge TPU, the device
 //! phase of the M446 host milestone. Where M442 / M444 put a [1,3,4,4] toy conv
 //! on the TPU, this runs the real MobileNetV2 (ImageNet, [1,3,224,224] ->

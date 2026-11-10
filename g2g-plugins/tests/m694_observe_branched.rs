@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M694 branched / threaded telemetry: a muxer fan-in run through the observed
 //! entry points must report per-element telemetry for the structural fan node
 //! too, not just the transforms / sinks. Before M694 the muxer / demux arms held

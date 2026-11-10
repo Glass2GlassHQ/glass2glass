@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 #![no_main]
 // H.264 RTP depayloader over untrusted packets. The input is split into
 // length-prefixed packets (u16 BE length) so cross-packet FU-A / STAP-A

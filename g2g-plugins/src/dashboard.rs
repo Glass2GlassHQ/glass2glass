@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Live pipeline dashboard transport (dev tooling, `observe` feature).
 //!
 //! Serves the [`Observer`] telemetry + [`BusMessage`] events of a running graph

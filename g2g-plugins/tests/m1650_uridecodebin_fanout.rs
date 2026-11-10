@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 // `uridecodebin uri=X name=d  d. ! ...  d. ! ...` decodes every stream the URI carries, one
 // per reference, as gst's does. A bare `d.` reads the next port, whatever kind it is.
 #![cfg(all(

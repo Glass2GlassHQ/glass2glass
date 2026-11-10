@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M205 - content-based demultiplexer fan-out. One `StreamDemux` splits a
 //! multiplexed input onto N typed output ports (the bounded-N "dark slots"),
 //! each branch retyped to its elementary stream's caps via a per-port

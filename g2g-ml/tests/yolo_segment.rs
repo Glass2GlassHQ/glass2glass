@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M992: a real instance-segmentation model end to end through the g2g element
 //! graph, the mask sibling of the M448 detector. A real YOLO `-seg` export runs in
 //! `OrtSegmentation` and the emitted `Segmentation` / `Roi` nodes are checked

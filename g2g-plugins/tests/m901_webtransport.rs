@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M901: the distributed-graph primitive over a WebTransport boundary, the third
 //! carrier of the same `g2g-core` wire codec after TCP (M551) and WebSocket
 //! (M554). A WebTransport session's bidirectional stream is a QUIC byte stream,

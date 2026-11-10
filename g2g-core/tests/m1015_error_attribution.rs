@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1015: a failed run says which element failed. `G2gError` carries no element
 //! identity, so the runners log the name of the arm whose error they report, on
 //! the `runtime` category at error level.

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1019: the allocation cascade reads what a consumer declared it can take.
 //!
 //! An element names its memory domains in `input_domains`, but that used to

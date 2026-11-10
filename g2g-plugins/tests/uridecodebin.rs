@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! uridecodebin front-door tests (M92): URI parsing + scheme dispatch + decode
 //! chain assembly via `Registry::build_uridecodebin`. Assembly is checked
 //! structurally (which elements get spliced), which needs no real media; the

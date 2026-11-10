@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Flight recorder for pipeline errors.
 //!
 //! An hour into a live run something fails and the traffic that caused it is

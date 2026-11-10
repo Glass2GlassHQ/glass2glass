@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! JSON tooling shared by `g2g-inspect --json` and the `g2g-mcp` server: the
 //! registry dump, a launch-line negotiation check, the same graph with the caps
 //! a finished run observed, and a bounded pipeline run (optionally streaming

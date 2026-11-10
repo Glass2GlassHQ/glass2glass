@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! A tiny embedded 8x8 bitmap font for the CPU `TextOverlay`, so the
 //! `no_std` baseline can render subtitle text without a font file or a glyph
 //! rasterizer. Each glyph is 8 rows of 8 bits; the most-significant bit is the

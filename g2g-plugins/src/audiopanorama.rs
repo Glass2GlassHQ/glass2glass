@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Stereo panning (`audiopanorama`). Adjusts the left/right balance of an
 //! interleaved S16LE stereo stream by attenuating the channel opposite the pan
 //! direction, preserving format and rate. CPU-only `no_std`.

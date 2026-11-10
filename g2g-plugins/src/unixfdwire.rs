@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! The wire of GStreamer's `unixfd` plugin (`gst/unixfd` in gst-plugins-bad,
 //! 1.24+), which the `unixfdsink` / `unixfdsrc` pair speaks.
 //!

@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+#
+# SPDX-License-Identifier: MPL-2.0
+
 # Fetch the object-detection demo assets into models/ (git-ignored, ~13 MB):
 #   - yolov8n.onnx : standard COCO YOLOv8n export (input images[1,3,640,640],
 #                    output output0[1,84,8400]). Served same-origin; ort-shim.js

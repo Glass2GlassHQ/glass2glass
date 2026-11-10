@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M304: on-device probe for the Android MediaCodec -> wgpu/Vulkan bridge.
 //!
 //! The linchpin question for the zero-copy decode-to-GPU path: when the decoded

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 #![allow(dead_code)] // no one test file uses every helper here
                      // ffmpeg packetizes an H.265 fixture as RTP, this answers RTSP and relays each datagram
                      // interleaved, one client session at a time

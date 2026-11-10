@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 use core::ffi::{c_char, c_int, CStr};
 use core::ptr;
 use core::slice;

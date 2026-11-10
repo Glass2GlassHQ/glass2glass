@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! FlexFEC (RFC 8627) forward error correction for RTP. Sans-IO, `no_std + alloc`.
 //!
 //! Like ULPFEC ([`crate::ulpfec`]) this XORs a set of media RTP packets into a

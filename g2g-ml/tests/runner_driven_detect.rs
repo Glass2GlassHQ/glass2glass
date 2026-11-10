@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M452: the one-graph detector. The detection sibling of the M451 runner-driven
 //! classifier: a real YOLO and its perception post-processing run as a single
 //! negotiated g2g graph through `run_linear_chain`, not hand-driven element by

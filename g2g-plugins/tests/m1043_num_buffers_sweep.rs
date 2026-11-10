@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1043: the last sources on the old frame-limit builder move to gst
 //! `basesrc`'s `num-buffers`, so -1 runs forever, n emits exactly n, and 0 emits
 //! nothing and goes straight to EOS. The pipewire pair already had the property

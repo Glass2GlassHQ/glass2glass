@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Helpers shared by the browser/wasm elements (`WasmClock`, `WebSocketSrc`,
 //! the canvas sinks). The pure half carries no JS bindings so it is
 //! unit-testable on the host: the `performance.now()` millisecond-to-nanosecond

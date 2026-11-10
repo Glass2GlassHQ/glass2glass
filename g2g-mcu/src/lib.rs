@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! MCU peripheral elements and MCU-fit codecs: heap-free static elements
 //! ([`g2g_core::staticelem`]) written against portable `embedded-hal` 1.0
 //! trait seams instead of chip registers, so each element's real logic

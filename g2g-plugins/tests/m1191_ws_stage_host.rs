@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1191 - hosting a subgraph as the stage a remote transform offloads.
 //!
 //! `RemoteWsTransform` ships each frame to a peer and emits what comes back,

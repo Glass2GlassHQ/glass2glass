@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 // the earliest pts `mkvdemux` gives a file's H.264 track, which is the reorder shift when the video starts at 0
 
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};

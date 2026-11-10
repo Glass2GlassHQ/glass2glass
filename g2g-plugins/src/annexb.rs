@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Annex-B/AVCC NAL splitting, avcC / parameter-set, and RBSP bitstream
 //! helpers, shared by the H.264/H.265 parsers, the WebCodecs payloader
 //! (`h264util`), the RTP packetizer (`rtppay`), and the MP4 / FLV demuxers.

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Native WebSocket <-> wire-codec I/O shared by the `remote-ws` elements
 //! (`RemoteWsSink`, `RemoteWsSrc`, `RemoteWsTransform`): send one
 //! [`PipelinePacket`] as a single binary WebSocket message, and read the next

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M587: H.265 mid-stream random-access tune-in at a CRA (discard RASL followers).
 //!
 //! M577 made full-stream open-GOP HEVC decode correctly (a CRA in continuous

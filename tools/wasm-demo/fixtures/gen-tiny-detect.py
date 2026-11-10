@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+#
+# SPDX-License-Identifier: MPL-2.0
+
 # Generate tiny-detect.onnx: a KB-scale ONNX detector fixture for the browser
 # ort-web MVP (run_websocket_ortdetect_to_canvas). Unlike the real COCO yolov8n
 # (tens of MB, fetched on demand by ../get-detection-assets.sh), this is small

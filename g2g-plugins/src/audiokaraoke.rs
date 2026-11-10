@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Centre-channel removal (`audiokaraoke`). Subtracts each stereo channel from
 //! the other, which cancels whatever is panned centre (usually the voice), and
 //! adds back a band-passed mono sum so the bass and the kick survive.

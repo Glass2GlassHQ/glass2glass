@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Shared PCM helpers for the audio sinks and sources: the `WAVEFORMATEX`
 //! mapping (`WavSink`, `WasapiSink`, `WasapiSrc`) and the linear PCM accept set.
 //! std-gated like its callers.

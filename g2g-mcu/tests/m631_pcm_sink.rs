@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M631: `PcmSink` decodes S16LE interleaved frames and streams them to a
 //! mock `PcmWriter`; the tests assert exact sample reconstruction (including
 //! negative values and chunk boundaries), framing validation before any

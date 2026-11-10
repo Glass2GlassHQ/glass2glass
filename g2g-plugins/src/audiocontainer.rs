@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Shared PCM-file plumbing for AIFF and AU: caps sets, sample emission, and
 //! the muxer loop that writes a header then converts each buffer onto the wire.
 

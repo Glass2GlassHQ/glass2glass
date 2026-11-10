@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M964: per-element property assignments for the auto-plug search
 //! (`AutoplugParams`). Auto-plug picks the elements, so the caller never names
 //! them; these params are how geometry / device / file-path knobs still reach

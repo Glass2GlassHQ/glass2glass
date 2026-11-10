@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Progressive / whole-file MP4 demuxer (Mp4Demux): `ByteStream{Mp4}` in,
 //! one track's access units out, a one-port [`Mp4DemuxN`](crate::mp4demuxn) run
 //! as a single-output element. The whole-file sibling of

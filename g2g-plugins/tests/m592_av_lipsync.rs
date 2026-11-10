@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M592: A/V lip-sync validation (clock-sync track, phase 3).
 //!
 //! M590 built the `DriftClock` (least-squares fit of a real playout rate) and

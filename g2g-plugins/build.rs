@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Builds the `gstwrap` C helper (`csrc/gstwrap_host.c`) into the crate when the
 //! `gstreamer` feature is on. The C file includes the real GStreamer headers (so
 //! struct layouts and macros are correct), and pkg-config supplies the include

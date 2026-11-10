@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M783 - multi-program MPEG-TS muxing. Three elementary streams are muxed into
 //! one transport stream carrying two programs (`prog-map=1,1,2`): program 1 with
 //! H.264 + AAC, program 2 with a second H.264 stream. Each program is recovered

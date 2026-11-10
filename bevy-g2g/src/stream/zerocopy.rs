@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! The NVIDIA zero-copy encode path: Bevy renders on g2g's interop device,
 //! the target texture is copied device->device into a CUDA surface
 //! (`WgpuToCuda`) and encoded by the native `NvEnc`. Only H.264 access units

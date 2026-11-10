@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M934: per-frame video PTS synthesis in the PS demuxer. A DVD stamps roughly
 //! one PES packet per GOP; the pictures in between must not inherit the last
 //! stamp verbatim (a pacing sink plays that as burst-and-freeze), but get

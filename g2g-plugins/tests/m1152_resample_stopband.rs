@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1152: `AudioResample`'s stop-band rejection under heavy downsampling. A
 //! 19 kHz tone at 96 kHz has no representation below the 8 kHz output's
 //! Nyquist, so every sample the resampler emits for it is kernel leakage, and

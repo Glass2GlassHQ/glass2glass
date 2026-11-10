@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Shared stub machinery for the lone-`fallbacksrc` fan-out checks (M1168 MPEG-TS,
 //! M1169 program stream / HLS): a registry that builds a whole fanned-out graph
 //! without any decoder feature compiled in, and the inspectors each check reads

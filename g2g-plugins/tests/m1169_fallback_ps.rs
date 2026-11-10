@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1169: a lone `fallbacksrc uri=file://X.mpg` fans an MPEG program stream out,
 //! the program stream sibling of M1168's MPEG-TS fan-out. The same probe
 //! `playbin` uses reports the disc's MPEG-2 video and MP2 audio, and each gets

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M896 HLS packager sink: `HlsSink` cuts the byte stream a muxer feeds it into
 //! media segment files and publishes an `.m3u8` media playlist beside them, for
 //! both carriers HLS defines:

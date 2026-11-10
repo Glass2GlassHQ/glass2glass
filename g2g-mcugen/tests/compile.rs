@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Compiler behavior: the flagship graph compiles to the expected structure
 //! and ring budget, the emitted source is deterministic (a golden snapshot),
 //! and mis-wired graphs are rejected with the right diagnostic before any Rust

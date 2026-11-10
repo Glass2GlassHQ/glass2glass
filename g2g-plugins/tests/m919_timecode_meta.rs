@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M919: the source's SMPTE 12M timecode, mined from the bitstream and burnt in.
 //! `H265Parse` reads the `time_code` SEI onto the frame as a `TimecodeMeta`, and
 //! `TimeOverlay` draws that count instead of the PTS.

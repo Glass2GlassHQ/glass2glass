@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M814: the ST 0805.1 Sensor Point of Interest event. The conventions under
 //! test (the `b-m-p-s-p-i` type, the platform-uid + sensor-name uid, the
 //! `<link relation="p-p">` back to the platform track, `how="m-p"`, target

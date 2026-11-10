@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M788 - a Matroska track's title and language live in its `TrackEntry`
 //! (`Name` / `Language`), not in the `Targets`-scoped `Tags` element, which is
 //! where ffmpeg writes them and where every player reads them. The muxer routes

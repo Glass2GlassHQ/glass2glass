@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M654: peripheral catalog breadth. A real I2C environmental-sensor driver
 //! (SHT3x: command, datasheet CRC-8, fixed-point conversion) and a UART
 //! transport (egress sink + ingress source that round-trip over a link). Only

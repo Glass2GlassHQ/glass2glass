@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! xdg-desktop-portal `org.freedesktop.portal.ScreenCast` handshake: the D-Bus
 //! half of `pipewirevideosrc portal=true`, so a launch line can capture the
 //! screen on a stock Wayland desktop without the app driving D-Bus itself.

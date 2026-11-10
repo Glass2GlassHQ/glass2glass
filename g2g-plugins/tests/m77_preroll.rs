@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M77 - preroll + live/non-live state changes, over the stateful runner.
 //!
 //! Extends M76's flow gate with GStreamer-style preroll: a *non-live* pipeline

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Browser entry points for the glass2glass WebAssembly pipeline.
 //!
 //! Each `#[wasm_bindgen]` function wires a g2g graph out of `g2g-plugins`' wasm

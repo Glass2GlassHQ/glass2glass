@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Shared libpulse plumbing for the PulseAudio render sink and capture source:
 //! the `Caps::Audio` <-> `pa_sample_spec` mapping and the channel map built from
 //! our interleave order. Both directions want the same explicit map, so the

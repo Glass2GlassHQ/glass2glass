@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 // a missing input file fails as a missing file, logs its open error once, and logs nothing else
 #![cfg(feature = "std")]
 

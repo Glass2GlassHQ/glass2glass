@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M567: Vulkan Video AV1 loop-restoration decode regression on real hardware.
 //!
 //! A libaom `-cpu-used 4` encode enables loop restoration (Wiener / SGR), which

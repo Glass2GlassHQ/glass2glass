@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M482 - `decodebin name=d` fan-out in a `gst-launch` line: the decode-per-port
 //! sibling of the M476 demux fan-out. A file source feeding a `decodebin` with
 //! several `d.` pad refs probes the container, builds the multi-output demuxer, and

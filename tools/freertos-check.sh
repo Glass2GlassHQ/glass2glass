@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+#
+# SPDX-License-Identifier: MPL-2.0
+
 # FreeRTOS executor proof (M633): build the g2g-noalloc staticlib (the exact
 # pipeline the no-heap / panic-free symbol proofs cover), link it into a
 # FreeRTOS application (static allocation only, no FreeRTOS heap either) with

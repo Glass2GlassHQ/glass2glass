@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+#
+# SPDX-License-Identifier: MPL-2.0
+
 # usage: tools/executorch-build.sh <prefix>, builds the ExecuTorch static libraries `executorchinfer` links into <prefix>/cmake-out
 set -euo pipefail
 

@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+#
+# SPDX-License-Identifier: MPL-2.0
+
 # Emulated Cortex-M execution proofs: build `examples/g2g-qemu` (M628, a
 # bare-metal binary wrapping the exact g2g-noalloc pipeline the no-heap /
 # panic-free symbol proofs run on) and `examples/g2g-embassy` (M632, the same

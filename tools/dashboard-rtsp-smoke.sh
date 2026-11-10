@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+#
+# SPDX-License-Identifier: MPL-2.0
+
 # Validate the live dashboard (`g2g-launch --observe`) against a real RTSP feed:
 # the page is served, telemetry names every node with populated latency
 # histograms, each edge carries its negotiated caps and live traffic counters,

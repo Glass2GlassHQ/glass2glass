@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M18 item 5: `SourceLoop::intercept_caps` is async.
 //!
 //! Proves the runner genuinely awaits the source's caps future during

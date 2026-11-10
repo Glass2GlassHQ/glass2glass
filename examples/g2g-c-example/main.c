@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 /* glass2glass C ABI example: drive a pipeline from C end to end.
  *
  * Builds a two-element pipeline (`appsrc ! appsink`), pushes a few synthetic

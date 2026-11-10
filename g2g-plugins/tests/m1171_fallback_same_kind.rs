@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1171: a fanned-out `fallbacksrc` carries several streams of *one* kind. Until
 //! now a repeated kind made the fan-out decline, because two ports of a kind
 //! would need two switches named alike; each port of a kind now takes its

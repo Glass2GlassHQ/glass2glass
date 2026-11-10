@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 // Unbounded-source variant of run-ortdetect.mjs: the ws feed is never stopped,
 // so the source keeps producing while the chain runs. Asserts nothing; it prints
 // every console message and every page error with its stack, for diagnosing

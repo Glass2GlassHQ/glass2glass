@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1915: the display and WebRTC sinks declare the caps they accept as a sink
 //! pad template, so `g2g-inspect` lists them.
 #![cfg(feature = "std")]

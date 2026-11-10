@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Build script for `g2g-core`: computes the dynamic-plugin ABI tag.
 //!
 //! Rust has no stable ABI, so a `.so` plugin and the host that `dlopen`s it

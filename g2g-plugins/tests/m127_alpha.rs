@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M127 `alpha`: the alpha / chroma-key transform is registered in
 //! `default_registry` and runs in a text pipeline with its `Str` / `Double`
 //! properties parsed from text. The per-pixel keying is unit-tested in the

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1549: an MP4 AAC track whose object type ADTS cannot signal (ER AAC, ELD,
 //! USAC) leaves the demuxer as raw access units led by its AudioSpecificConfig,
 //! and `aacparse` forwards both unchanged.

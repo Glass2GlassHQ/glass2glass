@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Vello GPU analytics overlay: the GPU companion to the CPU
 //! [`AnalyticsOverlay`](crate::analyticsoverlay), rendering the `AnalyticsMeta`
 //! with the Vello GPU 2D renderer (wgpu) instead of the CPU blend loop. The HD /

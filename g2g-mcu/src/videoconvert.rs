@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Heap-free raw-video color convert: packed YUYV 4:2:2 (the order a
 //! DCMI/DVP camera like the OV2640 puts on the bus) to planar I420 4:2:0 (what
 //! the hardware H.264 encoder wants), as a `no_std` [`StaticTransform`] that

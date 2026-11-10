@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M81 - the runner emits the opening SEGMENT, and prefers a substantive arm
 //! error over a secondary `Shutdown`.
 //!

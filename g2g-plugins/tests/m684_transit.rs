@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M684: measured per-link transit (queue-residency) time. The observed graph
 //! runner stamps each `DataFrame` as it is queued and pops the stamp when the
 //! consumer pulls it, so `ElementLatency::transit` reports how long frames waited

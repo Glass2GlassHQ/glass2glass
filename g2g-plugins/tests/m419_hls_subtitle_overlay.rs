@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M419 - HLS subtitle-rendition playback fan-out: `build_hls_subtitle_overlay`
 //! assembles the cross-source overlay graph. The video rides the variant's muxed
 //! MPEG-TS segments (`HlsSrc -> TsDemuxN -> decode -> videoconvert(RGBA8) ->

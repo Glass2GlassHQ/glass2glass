@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Record / replay for deterministic repro. `recordsink` writes the packet
 //! stream crossing its input (the negotiated caps, then every `DataFrame`) to a
 //! file as length-prefixed [`g2g_core::wire`] records; `replaysrc` reads that

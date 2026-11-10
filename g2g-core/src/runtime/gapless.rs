@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Gapless playback channel: the app <-> source side-channel a
 //! [`GaplessSrc`](../../../g2g_plugins/gaplesssrc/struct.GaplessSrc.html) uses to
 //! concatenate a playlist of sources into one continuous stream, the analog of

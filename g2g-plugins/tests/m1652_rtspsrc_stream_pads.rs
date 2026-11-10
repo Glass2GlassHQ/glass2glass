@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 // `rtspsrc name=s  s. ! ...  s. ! ...` links a pad per stream, as gst's `rtspsrc` does: video on
 // the first linked pad, audio on the second, off one session. One linked pad stays the
 // video-only source.

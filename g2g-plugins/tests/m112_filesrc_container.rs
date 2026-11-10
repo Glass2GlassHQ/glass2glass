@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M112: `filesrc` declares a container via its `bytestream-format` property, so
 //! a `gst-launch` text pipeline can feed a demuxer from a file. Covers the
 //! explicit `mpegts` form and the `auto` form (sniff the header), both built by

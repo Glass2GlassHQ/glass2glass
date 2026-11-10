@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 /* Host-side behavioral check for the g2g-noalloc proof crate (M626): link the
  * staticlib built for the *host* and actually run the pipeline, so the symbol
  * checks in tools/noalloc-check.sh are backed by a real execution (guards

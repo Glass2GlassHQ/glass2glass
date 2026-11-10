@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M661 integration: the whole new video egress chain as one heap-free static
 //! pipeline, `camera (YUYV) -> YuyvToI420 -> HwH264Enc -> RtpSink`, driven by
 //! the real `run_source_transform_sink` runner. A tag byte stamped at the

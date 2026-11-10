@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M912: FETCH on both sides and both drafts.
 //!
 //! The publisher keeps the last `cache-groups` groups of every track and serves

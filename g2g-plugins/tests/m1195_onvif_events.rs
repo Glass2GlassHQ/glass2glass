@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1195: the `tt:Event` part of an ONVIF metadata document, parsed into
 //! `OnvifEventMeta` and carried onto the video by the combiner.
 //!

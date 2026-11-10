@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M905: MoQ Transport datagram objects, and a live proof that one group
 //! spread across concurrent subgroup streams reassembles in order.
 //!

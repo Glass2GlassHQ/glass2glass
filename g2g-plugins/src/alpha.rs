@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Alpha control / chroma key (`alpha`). Rewrites the alpha channel of a packed
 //! RGBA / BGRA frame, leaving the colour channels untouched. CPU-only `no_std`.
 //!

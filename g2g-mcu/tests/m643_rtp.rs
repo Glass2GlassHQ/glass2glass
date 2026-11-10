@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M643: the RTP egress seam. The mock-sender tests assert the datasheet-
 //! level contract (header fields, PTS -> media-tick timestamping, sequence
 //! wrap, first-packet marker, one-frame-one-packet sizing); the ignored

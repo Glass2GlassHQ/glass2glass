@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Scaffolding for the pipeline coordinator (control channel only).
 //!
 //! Today's linear runners spawn source / transform / sink as

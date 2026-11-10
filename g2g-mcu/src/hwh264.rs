@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Hardware H.264 encoder seam: the [`H264Encoder`] contract, shaped
 //! like the ESP32-P4 (and STM32MP / i.MX) hardware H.264 encoder block (feed
 //! one raw I420 frame, the silicon emits one Annex-B access unit and reports

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Vendor-neutral local zero-copy transport (`local-dmabuf`): the DMABUF
 //! analog of the CUDA [`LocalCudaSink`](crate::localcuda::LocalCudaSink) /
 //! [`LocalCudaSrc`](crate::localcuda::LocalCudaSrc) pair. `DmaBufSink`

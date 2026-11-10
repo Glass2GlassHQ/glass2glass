@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! C seam ABI proof: a C-driven, frame-stepped g2g pipeline. Where
 //! `examples/g2g-freertos` links the whole pipeline as a Rust static library
 //! the C app *calls into*, this crate proves the inverse integration a C/RTOS

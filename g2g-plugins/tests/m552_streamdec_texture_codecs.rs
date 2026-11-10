@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M552: Tier B (zero-copy) streaming-adapter GPU-texture output for H.265 and
 //! AV1, closing the codec gap in m512 (which validated only H.264).
 //!

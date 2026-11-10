@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! What the raw byte-stream carriers (TCP, SRT, RIST, raw UDP) share: the frame shape
 //! a received chunk takes, the MPEG-TS packet geometry that decides how a
 //! datagram is cut, and the container list a wire sink can carry.

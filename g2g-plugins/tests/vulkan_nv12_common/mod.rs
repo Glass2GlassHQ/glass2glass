@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! The `VulkanVideoDec` two-plane decode harness the M1157 and M1180 tests share: the fixture
 //! clip, its caps, the host-capability skip, and a decode run pinned to one
 //! output domain.

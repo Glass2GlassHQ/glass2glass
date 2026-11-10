@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Windows D3D11 present sink (W1 Phase 4): the zero-copy display end of the
 //! DXVA decode path, the analog of [`CudaGlSink`](crate::cudaglsink) on Linux.
 //!

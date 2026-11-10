@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Shared frame-emission helper for the packet-producing encoders
 //! (`opusenc`, `vpxenc`, `av1enc`). They each turn a batch of encoded
 //! `(payload, pts_ns)` packets into downstream `DataFrame`s, announcing the

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Fan-out primitives for the dynamic graph layer (design/runtime.md).
 //!
 //! M9 (1→N slice): a multi-output sink abstraction plus the two routing

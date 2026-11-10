@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+#
+# SPDX-License-Identifier: MPL-2.0
+
 # Provenance + on-demand fetcher for the real-detector test
 # (g2g-ml/tests/yolo_detect.rs). Obtains a real YOLO (Ultralytics YOLO11 / YOLOv8,
 # which share the [1, 4+C, A] channel-major output DetectionPostprocess decodes)

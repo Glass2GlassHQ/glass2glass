@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! SRT ingress source (SrtSrc, `srt` feature). Binds a UDP port, accepts an SRT
 //! caller's HSv5 handshake or calls a listener, then receives the data packets,
 //! reorders them, NAKs gaps for retransmission, and emits the reassembled

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Tensor post-processing element: the classification head that turns
 //! a model's raw logits into something a consumer can act on, in-graph.
 //! Composes after `OrtInference`: `... -> OrtInference -> TensorPostprocess`.

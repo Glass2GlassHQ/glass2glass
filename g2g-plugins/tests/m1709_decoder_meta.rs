@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1709: every decoder puts the metadata and arrival time of an access unit on
 //! the picture that unit decodes to, matched by pts.
 //!

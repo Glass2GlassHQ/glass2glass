@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! On-screen live demo of the Vulkan Video wedge: H.264 decoded on the
 //! GPU via `VK_KHR_video_*`, presented in a real window by [`WgpuSink`].
 //!

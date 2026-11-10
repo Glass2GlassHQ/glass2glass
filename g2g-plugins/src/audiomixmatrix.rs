@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Matrix channel mixer (`audiomixmatrix`). Every output channel is a weighted
 //! sum of every input channel, so one element downmixes 5.1 to stereo, folds
 //! stereo to mono, or reorders channels. Preserves format and sample rate and

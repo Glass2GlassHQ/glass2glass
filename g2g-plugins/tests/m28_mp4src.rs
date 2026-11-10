@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M28: `Mp4Src` reads back what `Mp4MuxN` muxes. Round trip is
 //! byte-exact (Annex-B in, fMP4, Annex-B out), the caps probe recovers the
 //! recorded geometry during negotiation, and on Windows the full circle

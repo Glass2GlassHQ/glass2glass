@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M174 upstream QoS propagation: a sink that runs behind the clock signals QoS
 //! upstream; the source observes it as `PushOutcome::Qos` and skips frames to
 //! shed load. Here a test sink requests QoS on every frame, and `VideoTestSrc`

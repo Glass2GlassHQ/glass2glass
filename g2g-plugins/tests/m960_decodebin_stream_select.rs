@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M960: a bare `decodebin` names the demuxer's `stream=` selection from the
 //! file's actual primary track. The Matroska port's parameterless default is
 //! VP9, so an AV1 webm with only a codec-specific decoder compiled in

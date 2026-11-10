@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M259 driver: a downstream `DerivedOutput` that genuinely re-derives its
 //! output, stacked below another format-changing `DerivedOutput`, on a
 //! mid-stream input change. This is the "decoder below another format-changing

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1096: the caption and subtitle writers. Each one is checked against the
 //! reader that already exists for its format, so the assertion is a round trip
 //! rather than a restatement of the writer's own output:

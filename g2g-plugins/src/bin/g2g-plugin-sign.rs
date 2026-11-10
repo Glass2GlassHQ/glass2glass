@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! `g2g-plugin-sign`: keygen, sign, and verify for detached plugin signatures.
 //!
 //! Usage:

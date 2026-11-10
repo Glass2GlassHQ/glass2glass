@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M386 - stream discovery for MPEG-TS and MP4, the M376 pattern applied beyond
 //! Matroska. `TsDemux` announces every elementary stream the PMT declares, and
 //! `Mp4Src` announces every `moov` track (M1150; it still forwards only the

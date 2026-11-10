@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Helpers shared by the M1001 codec-quality batteries (`m1001_golden_decode`,
 //! `m1001_encode_psnr`, `m1001_psnr_oracle`): the collect-into-Vec sink, the
 //! deterministic synthetic source the encode batteries measure against, the AV1

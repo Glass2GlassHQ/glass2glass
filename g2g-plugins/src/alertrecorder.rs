@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Alert recorder: records a clip of the frames around each alert an
 //! upstream [`AnalyticsAlert`](crate::analyticsalert::AnalyticsAlert) attached,
 //! the gst-python-ml `pyml_alertrecorder` analog. Frames pass through unchanged.

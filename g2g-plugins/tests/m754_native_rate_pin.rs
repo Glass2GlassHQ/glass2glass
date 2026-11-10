@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M754 - a downstream concrete rate pin at the stream's NATIVE rate negotiates
 //! and flows with no resampler. `FfmpegAudioDec` advertises its PCM output rate as
 //! two alternatives (a concrete `48_000` default plus an `ANY_SAMPLE_RATE`

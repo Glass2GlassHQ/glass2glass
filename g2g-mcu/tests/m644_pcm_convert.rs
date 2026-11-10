@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M644: the `convert` stage (32-bit capture slots -> S16LE). The narrowing
 //! is keep-the-top-16-bits (left-justified I2S/SAI slots), so the reference
 //! is trivial and the tests focus on the wire framing: slot boundaries,

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 #![cfg(all(target_os = "linux", feature = "decklink"))]
 
 use g2g_core::{G2gError, HardwareError};

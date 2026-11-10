@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+#
+# SPDX-License-Identifier: MPL-2.0
+
 # Regenerate the QuickTime audio sample entry fixtures in g2g-plugins/tests/fixtures from ffmpeg.
 #
 # Each mov_<entry>_<layout>.mov is ffmpeg's mov muxer writing a short stereo tone

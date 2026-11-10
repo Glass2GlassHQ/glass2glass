@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 // Shared by yolo_pose.rs and yolo_obb.rs (included via `include!`, not a test
 // crate itself, so plain comments only). Runs a fixture built by
 // tools/pose-obb-fixture.sh through OrtInference then DetectionPostprocess and

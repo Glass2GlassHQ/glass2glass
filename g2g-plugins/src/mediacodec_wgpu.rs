@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Android MediaCodec -> wgpu/Vulkan zero-copy bridge.
 //!
 //! The Android analog of [`cudawgpu`](crate::cudawgpu): keep the decoded frame

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Keyframe-request reverse channel: a sink that needs a fresh keyframe (a
 //! WebRTC sink on a remote PLI) returns `Reconfigure::ForceKeyframe` from
 //! `take_reconfigure`; the runner forwards it up the incoming link, and the

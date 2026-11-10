@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M616 -> M1000: this test used to pin the honest boundary of the zero-alloc
 //! claim, the one box `OutputSink::push` allocated per frame through a `dyn`
 //! sink. The poll-based `OutputSink` (M1000) removed that box: `push` builds a

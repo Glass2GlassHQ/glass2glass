@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Shared `YUV_420_888` -> NV12 packer for the Android `ndk`-image elements
 //! (camera2src capture, mediacodecdec decode), whose packing was byte-identical.
 

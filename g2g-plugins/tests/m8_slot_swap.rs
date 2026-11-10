@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M8 piece 6 end-to-end: an `ElementSlot` driven by the real runner, with
 //! its element atomically swapped mid-stream through a detached `SwapHandle`.
 //!

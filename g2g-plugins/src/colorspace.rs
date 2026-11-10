@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Colorimetry converter: changes what a raw frame's samples *mean*
 //! while leaving the pixel format alone, the complement of
 //! [`videoconvert`](crate::videoconvert), which changes the format and carries

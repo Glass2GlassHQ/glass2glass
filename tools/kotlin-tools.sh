@@ -1,3 +1,7 @@
+# Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+#
+# SPDX-License-Identifier: MPL-2.0
+
 # Sourced by the Kotlin and Swift scripts. Downloads kotlinc and JNA once into
 # ~/.cache/g2g-kotlin, checks their sha256, and generates the g2g-uniffi bindings.
 

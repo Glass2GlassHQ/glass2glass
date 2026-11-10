@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 #![cfg(feature = "analytics-json")]
 //! M1176: the metadata record tools. Each element runs for real; the assertions
 //! come from the fixture table below and from reading back what the elements

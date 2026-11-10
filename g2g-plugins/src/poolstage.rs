@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! `PoolStage`: a passthrough transform backed by a buffer pool that is rebuilt
 //! to the downstream allocation proposal, including mid-stream (the β re-cascade).
 //!

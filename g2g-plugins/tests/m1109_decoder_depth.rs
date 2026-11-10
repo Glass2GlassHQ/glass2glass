@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1109 decoder pipeline depth: a zerolatency H.264 stream (no B-frames, so
 //! POC type 2) must leave `FfmpegH264Dec` with at most one access unit of
 //! internal buffering. Feeding one AU at a time and counting outputs catches

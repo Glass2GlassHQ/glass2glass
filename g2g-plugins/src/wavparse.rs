@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! WAV parser: a RIFF/WAVE byte stream in (`Caps::ByteStream{Wav}`), the audio
 //! it carries out (`Caps::Audio`), so `filesrc location=x.wav ! decodebin`
 //! reaches an audio element. The read side of [`crate::wavenc::WavEnc`]. A

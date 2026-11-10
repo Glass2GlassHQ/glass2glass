@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! libcamera capture source. Streams NV12 (else YUYV) frames from a camera via
 //! the libcamera stack, the modern Linux camera path. Linux-only (`libcamera`
 //! feature); links the system libcamera through the `libcamera` crate.

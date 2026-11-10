@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! `g2g-device-monitor`: the `gst-device-monitor-1.0` analog. Lists the devices
 //! every compiled-in provider can see, and optionally follows hotplug.
 //!

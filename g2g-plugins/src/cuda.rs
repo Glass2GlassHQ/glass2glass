@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! CUDA device-memory consumers (C3 Phase 3).
 //!
 //! [`CudaDownload`] is the low-risk Phase 3 bring-up element

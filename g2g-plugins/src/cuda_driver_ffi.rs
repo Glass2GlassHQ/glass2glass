@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 // libcuda exports the `_v2` symbols that cuda.h `#define`s the unsuffixed names to.
 
 use core::ffi::c_void;

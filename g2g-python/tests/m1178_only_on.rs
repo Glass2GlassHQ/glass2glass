@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1178: `pyelement only-on=` gates the Python call (`analytics` feature).
 //!
 //! A frame that does not carry the named blob goes downstream untouched, with no

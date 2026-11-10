@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M153 Motion-JPEG encode: `MjpegEnc` encodes packed RGBA to a baseline JPEG,
 //! round-tripped back through `MjpegDec` (M152) to prove the output is a valid
 //! JPEG carrying the source geometry and the dominant colour.

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M488: Vulkan Video H.264 decode session + parameters on real hardware.
 //!
 //! Second increment of `VulkanVideoDec` (design/decode.md): open a wgpu device

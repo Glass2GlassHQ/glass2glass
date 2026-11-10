@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Break my data: overwrites bytes at random as they pass, the gst
 //! `breakmydata` analog. Put it ahead of a parser or a decoder to prove that
 //! corrupt input fails the parse instead of panicking.

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1155: the two live-stream elements, `togglerecord` and `livesync`.
 //!
 //! `togglerecord` starts and stops several streams on one decision. A

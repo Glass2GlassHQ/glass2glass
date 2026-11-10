@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M495: the zero-copy wedge end to end -- `VulkanVideoDec` -> `WgpuSink`.
 //!
 //! Negotiates the decoder's output domain to `WgpuTexture`, so it decodes each

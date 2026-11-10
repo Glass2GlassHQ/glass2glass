@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Detection post-processing (design/ml.md): the element that turns a
 //! YOLO-style model output tensor into structured bounding-box detections, the
 //! first producer of the per-frame analytics metadata graph (`g2g-core::meta`).

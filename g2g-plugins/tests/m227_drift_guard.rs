@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M227 drift guard: the coupling invariant behind the solver's backward
 //! field-narrowing. A caps-driven transform's passthrough mask must never claim
 //! a field its forward derivation alters. Since M837 both come from one

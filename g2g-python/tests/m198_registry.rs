@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M198 step 4: `pyelement` as a first-class `gst-launch` / autoplug element.
 //!
 //! Proves the registry factory + property parsing: a hosted Python element is

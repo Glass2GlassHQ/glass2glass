@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! The M646/M648 conformance oracle: each `g2g-mcugen`-generated flagship graph
 //! must reproduce its hand-written reference's wire output exactly. Both sides
 //! are driven with identical mock peripherals; the generated pipeline's wire

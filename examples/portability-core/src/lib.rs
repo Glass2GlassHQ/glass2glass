@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! The shared processing core of the portability showcase: proof that the same
 //! g2g graph runs across targets.
 //!

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1015: a file element that cannot open its path logs the path and the OS
 //! message. `Hardware(Io(errno))` alone says neither, so the error a run reports
 //! is only actionable together with this line.

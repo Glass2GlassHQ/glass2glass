@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Local zero-copy IPC over CUDA IPC memory handles (`local-ipc` feature).
 //!
 //! The wire codec ([`g2g_core::wire`]) and its transports (`remote`, `remote-ws`)

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! EBU teletext (ETSI EN 300 706) subtitle-page decoding: the pure half behind
 //! [`TeletextDec`](crate::teletextdec::TeletextDec).
 //!

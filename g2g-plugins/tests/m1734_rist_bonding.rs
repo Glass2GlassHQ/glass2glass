@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 // M1734 / M1735: RIST bonding, multicast and the TR-06-2 RTP header extension
 // on `ristsink` / `ristsrc`. The extension is checked on byte vectors, then g2g
 // runs against itself, GStreamer (`gst-launch-1.0` with the `rist` plugin) and

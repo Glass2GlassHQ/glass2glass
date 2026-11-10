@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M203 - application query system: position + duration.
 //!
 //! A source reports its total duration via `SourceLoop::query_duration`; the

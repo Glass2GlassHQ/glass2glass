@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Frame headers and lengths of the self-syncing audio bitstreams (AC-3 and
 //! MPEG audio), read from a frame's own header.
 //!

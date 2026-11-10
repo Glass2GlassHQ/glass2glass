@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M210 demux node in `run_graph` + `gst-launch` fan-out wiring. A content-
 //! routing `MultiOutputElement` (here `StreamDemux`) becomes a first-class DAG
 //! node via `Graph::add_demux`: structurally a tee (so it negotiates as one at

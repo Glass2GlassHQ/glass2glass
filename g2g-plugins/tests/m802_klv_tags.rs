@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M802 / M803 - the extended ST 0601 tags (identity strings, slant range,
 //! target width, corner offsets, target location) and the nested MISB ST 0102
 //! security local set, against the same published reference packet M801 uses.

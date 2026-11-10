@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Duration-keyed prebuffer window for the adaptive segment loops
 //! ([`HlsSrc`](crate::hlssrc) / [`DashSrc`](crate::dashsrc)): the
 //! [`HttpSrc`](crate::httpsrc) byte-window analog, keyed by segment duration

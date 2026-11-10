@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M884: PulseSink playout-disciplined clock host test, the pulse sibling of
 //! `m591_alsasink_drift_clock`.
 //!

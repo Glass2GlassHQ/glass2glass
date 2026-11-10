@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M361 - `FileSrc` byte-offset seek. A `FileSrc` is a byte source, so a seek it
 //! observes is in BYTES format: `start` is a file offset. On a flushing seek it
 //! emits `Flush`, repositions the read, and resumes from there. This is the

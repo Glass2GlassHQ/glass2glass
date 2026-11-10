@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1568: a bare `decodebin` on Ogg offers a VP8 or Theora stream to a video
 //! consumer ahead of the audio behind it.
 

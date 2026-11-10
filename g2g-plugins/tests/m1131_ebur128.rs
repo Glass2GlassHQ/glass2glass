@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1131: `ebur128` measures ITU-R BS.1770-4 loudness and passes the audio
 //! through untouched.
 //!

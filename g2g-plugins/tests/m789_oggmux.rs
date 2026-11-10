@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M789: `oggmux`, the mux direction of the Ogg container. Each of the three
 //! mappings `oggdemux` speaks (Opus, Vorbis, Ogg-FLAC) survives a g2g demux ->
 //! mux -> demux round trip packet for packet, and ffmpeg is the reference peer

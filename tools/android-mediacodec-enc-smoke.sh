@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+#
+# SPDX-License-Identifier: MPL-2.0
+
 # Build the MediaCodec H.264 ENCODE probe for Android and run it on a connected
 # device. The encoder uses ByteBuffers on both sides (NV12 in, Annex-B out), so
 # the probe runs as a plain native binary from /data/local/tmp, no APK needed.

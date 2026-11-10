@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M175 QoS relay through a transform: a sink that runs behind the clock signals
 //! QoS, and the report must reach the source *through* an intervening transform
 //! so multi-element pipelines shed load at the source, not just one hop up. M174

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M30: HEVC through the codec-aware MF elements. `MfEncode(H265)` ->
 //! `MfDecode(H265)` round trip against the real Media Foundation MFTs.
 //!

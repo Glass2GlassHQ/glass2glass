@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+#
+# SPDX-License-Identifier: MPL-2.0
+
 """glass2glass Python example: drive a pipeline and pull frames zero-copy.
 
 Synthesizes a few solid-color RGBA frames with numpy, feeds them through an

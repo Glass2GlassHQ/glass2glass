@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Opus packet parser that refines source-side `Caps` from the TOC byte.
 //!
 //! The audio sibling of `aacparse`: it reads each `DataFrame`'s leading TOC

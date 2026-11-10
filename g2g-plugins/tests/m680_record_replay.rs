@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M680 record / replay: `recordsink` dumps the packet stream to a file and
 //! `replaysrc` plays it back as a source. The round-trip must preserve frame
 //! data exactly, so a bug that needed a live source can be reproduced from a

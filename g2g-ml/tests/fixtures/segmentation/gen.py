@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+#
+# SPDX-License-Identifier: MPL-2.0
+
 # Provenance + on-demand fetcher for the real instance-segmentation test
 # (g2g-ml/tests/yolo_segment.rs). Obtains a real YOLO -seg export (Ultralytics
 # YOLO11-seg / YOLOv8-seg, which share the two-output layout OrtSegmentation

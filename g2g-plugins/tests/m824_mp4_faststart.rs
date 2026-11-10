@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M824: `mp4mux faststart=true`, the progressive layout with its `moov` ahead
 //! of the `mdat`. A reader then has the whole sample index before it has read
 //! any media, so playback over a network needs no seek to the end of the file

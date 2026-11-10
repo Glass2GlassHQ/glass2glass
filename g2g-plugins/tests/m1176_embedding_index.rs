@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 #![cfg(feature = "embedding-index")]
 //! M1176: the embedding index sink. The rows it writes are read back with
 //! rusqlite in the element's own unit tests (the integration crate cannot reach

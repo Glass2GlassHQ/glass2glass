@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Sans-IO KLV RTP payloader / depayloader (RFC 3550 header + RFC 6597 SMPTE ST
 //! 336 payload format), the low-latency alternative to carrying metadata in a
 //! transport stream. Same shape as the H.264 pair

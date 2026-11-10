@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Motion-JPEG encode element (MjpegEnc, `mjpeg-encode` feature):
 //! `RawVideo{Rgba8|Bgra8|I420}` in, `CompressedVideo{Mjpeg}` out, via the
 //! pure-Rust `jpeg-encoder` crate. The GStreamer `jpegenc` analog.

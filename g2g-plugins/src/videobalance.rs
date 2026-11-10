@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Software colour balance (`videobalance`). Adjusts brightness, contrast, and
 //! saturation of a packed RGBA / BGRA frame per pixel, preserving format and
 //! geometry. CPU-only `no_std` baseline.

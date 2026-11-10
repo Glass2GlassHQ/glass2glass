@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M638: the G.711 fixed-point codec, validated against the reference peer.
 //! The sample conversions are checked bit-exact against ffmpeg over the
 //! *entire* domain (all 65536 encoder inputs, all 256 decoder codes, both

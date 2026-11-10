@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M126 `volume`: the audio-gain transform is registered in `default_registry`
 //! and runs in a text pipeline with its `Double` / `Bool` properties parsed from
 //! text. The per-sample gain math is unit-tested in the module itself.

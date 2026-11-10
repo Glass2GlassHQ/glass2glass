@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! End-to-end smoke test: pull H.264 from a public RTSP server and decode
 //! it to I420 through the ffmpeg software decoder.
 //!

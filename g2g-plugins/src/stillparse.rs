@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Still-image parsers (`jpegparse`, `pngparse`): a JPEG / PNG byte stream in
 //! (arbitrary chunks from `filesrc`, or one image per buffer from
 //! `multifilesrc`), one whole image per buffer out with the geometry its own

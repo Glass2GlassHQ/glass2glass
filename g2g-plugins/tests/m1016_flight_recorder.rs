@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1016 flight recorder: while a run goes, every graph edge keeps a bounded
 //! ring of its most recent packets; when the run ends in an error the rings are
 //! dumped as `replaysrc` recordings, so a crash after an hour of live streaming

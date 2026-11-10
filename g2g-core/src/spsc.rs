@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Single-producer / single-consumer capture ring: the heap-free hand-off across
 //! the interrupt boundary a real MCU capture needs. A DMA-completion (or timer)
 //! ISR produces frames into the ring in *interrupt context*; the pipeline, in

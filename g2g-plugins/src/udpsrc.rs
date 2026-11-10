@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! UDP ingress source for H.264 or Opus over RTP: the receive-side inverse of
 //! [`UdpSink`](crate::udpsink). It binds a UDP socket, receives RTP packets,
 //! and depayloads them (via [`rtpdepay`](crate::rtpdepay)) into Annex-B access

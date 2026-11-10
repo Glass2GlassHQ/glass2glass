@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Bitrate (congestion-control) reverse channel: a sink that learns a target
 //! send bitrate (a WebRTC sink relaying its BWE estimate) returns it from
 //! `take_bitrate`; the runner forwards it up the incoming link, and the

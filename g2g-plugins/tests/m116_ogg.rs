@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M116 Ogg / Opus demux, end to end through `parse_launch`: `filesrc` reads a
 //! synthetic Ogg file (its container auto-sniffed via `typefind`), feeds
 //! `oggdemux`, and the Opus packets reach the sink. Exercises the new

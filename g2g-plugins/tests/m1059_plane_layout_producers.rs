@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1059: the capture / decode producers that declare a `PlaneLayout` instead
 //! of repacking a driver's padded rows.
 //!

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1029: `videoconvertscale` converts and scales in one element.
 //!
 //! The pixels must match what `videoconvert ! videoscale` produces, because the

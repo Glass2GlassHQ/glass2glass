@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+#
+# SPDX-License-Identifier: MPL-2.0
+
 # Build the NNAPI quantized-conv placement probe for Android and run it on a
 # connected device, then surface the Edge TPU / DarwiNN logcat activity. Proves the
 # NNAPI EP actually runs an int8 conv on the accelerator (not just that the EP path

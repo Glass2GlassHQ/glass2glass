@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M924: EBU teletext subtitles in MPEG-TS, validated against ffmpeg's libzvbi
 //! teletext decoder.
 //!

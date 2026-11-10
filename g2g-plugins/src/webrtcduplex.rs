@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Bidirectional (sendrecv) WebRTC session (`WebRtcDuplexSession`): one
 //! PeerConnection that **both** publishes local tracks and receives the peer's
 //! tracks, the `webrtcbin` sendrecv shape. Where [`crate::webrtcsession`] is

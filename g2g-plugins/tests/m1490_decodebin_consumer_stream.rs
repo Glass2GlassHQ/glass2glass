@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1490: a bare `decodebin` on an A/V container decodes the stream the element
 //! after it accepts, so `decodebin ! audioconvert` gets the audio track.
 

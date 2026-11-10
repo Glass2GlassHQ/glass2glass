@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M109 MPEG-TS stream selection, end to end through the DAG runner. A single
 //! TS multiplex carries an H.264 video and an AAC audio elementary stream; two
 //! `TsDemux` instances pick the multiplex apart, one selecting video, one

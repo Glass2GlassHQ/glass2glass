@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! `gst-launch` caps-string parsing: the inverse of [`Caps::to_gst_string`].
 //!
 //! Kept next to the printer so the two stay in step, and so a crate that cannot

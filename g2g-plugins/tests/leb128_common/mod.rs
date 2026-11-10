@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 #![allow(dead_code)] // no one test file uses both directions
 
 /// LEB128 unsigned (AV1 4.10.5) at `offset`: the value and the bytes it occupied.

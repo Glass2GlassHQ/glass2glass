@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Shared plumbing for the CPU video-effect transforms: negotiation,
 //! the `DataFrame` loop, and the caps emit that every one of them repeats.
 //!

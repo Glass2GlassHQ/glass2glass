@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+#
+# SPDX-License-Identifier: MPL-2.0
+
 # Fetch the whisper transcription test fixtures (g2g-ml/tests/whisper_transcribe.rs):
 # whisper.cpp's quantized tiny.en ggml model (32 MB) and its jfk.wav sample
 # (11 s of 16 kHz mono s16 speech). Not committed (repo fixtures are KB-scale),

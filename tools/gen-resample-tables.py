@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+#
+# SPDX-License-Identifier: MPL-2.0
+
 """Generate the fixed-point polyphase coefficient tables for
 g2g-mcu/src/resample_tables.rs (M641). Pure python (no numpy): a
 Blackman-windowed sinc prototype per (L, M) pair over the telephony rate set

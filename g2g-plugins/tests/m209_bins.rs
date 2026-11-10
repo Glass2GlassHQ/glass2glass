@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M209 flattening bins: a `Bin` (a reusable subgraph with ghost pads) flattens
 //! into a host `Graph` via `add_bin` and runs end to end through `run_graph`.
 //! Because flattening is construction-time only (no new `NodeKind`), the runner

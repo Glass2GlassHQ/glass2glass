@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M959: a real demuxed file's placeholder startup caps refine mid-stream
 //! into a strict RGBA-only overlay. The webm's video port fixes nominal
 //! 16x16 caps before any byte is parsed (and the track carries no

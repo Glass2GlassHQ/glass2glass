@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Embedded-CPython host for [`PyTransform`] (`python` feature).
 //!
 //! Bootstraps a single in-process CPython interpreter (pyo3 `auto-initialize`),

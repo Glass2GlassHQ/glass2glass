@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1215: `splitmuxsrc` plays the parts a `splitmuxsink` wrote as one stream.
 //!
 //! This repo's own `splitmuxsink` writes an H.264 fixture into mp4, matroska and

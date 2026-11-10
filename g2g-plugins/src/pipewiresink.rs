@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Linux PipeWire audio render sink. Plays interleaved PCM (`PcmU8` /
 //! `PcmS16Le` / `PcmS24Le` / `PcmS32Le` / `PcmF32Le`) through the PipeWire
 //! graph, the modern Linux media layer and the third Linux audio output

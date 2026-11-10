@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M944: a saved `v4l2src` line names its camera by the device monitor's
 //! persistent id and sets camera controls, both through `parse_launch`. The id
 //! contains spaces and colons (`bus:card:path`), so this is also the check

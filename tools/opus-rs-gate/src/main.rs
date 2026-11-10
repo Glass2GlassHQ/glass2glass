@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Correctness gate for replacing the libopus FFI decode path with a pure-Rust
 //! one. Decodes identical packet sequences through `opus-rs` (the only
 //! complete pure-Rust Opus implementation on crates.io, a port of libopus 1.6)

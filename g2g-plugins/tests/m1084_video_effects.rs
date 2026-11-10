@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1084: the software video-effect transforms ported from GStreamer.
 //!
 //! Each test drives the real element through `configure_pipeline` + `process`

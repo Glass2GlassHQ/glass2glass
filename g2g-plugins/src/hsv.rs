@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! `hsvfilter` and `hsvdetector`. Packed RGBA / BGRA, geometry preserved.
 //! CPU-only `no_std` baseline.
 //!

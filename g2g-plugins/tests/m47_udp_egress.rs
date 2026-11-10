@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 #![cfg(feature = "udp-egress")]
 //! M47: `UdpSink` drives the M46 `RtpH264Packetizer` and sends the RTP packets
 //! over UDP. The test binds a loopback receiver, runs access units through the

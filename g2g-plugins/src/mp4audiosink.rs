@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Audio-only fragmented-MP4 muxer sink. The audio counterpart of
 //! `mp4mux`: wraps a raw AAC-LC elementary stream in a single-`soun`-track
 //! fMP4 (`ftyp` + `moov` once, then one `moof`+`mdat` fragment per access

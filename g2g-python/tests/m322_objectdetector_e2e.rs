@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M322: end-to-end host of the real gst-python-ml `objectdetector` under
 //! `MP_BACKEND=g2g`.
 //!

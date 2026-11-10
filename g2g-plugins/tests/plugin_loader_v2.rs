@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1010: end-to-end load of a **v2-ABI** plugin.
 //!
 //! Builds `tests/fixtures/v2-example-plugin` as a standalone `cdylib`,

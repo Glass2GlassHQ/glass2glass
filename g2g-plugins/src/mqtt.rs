@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! What `mqttsink` and `mqttsrc` share: the broker connection settings and
 //! their properties, the QoS level mapping, and the reconnect delay.
 

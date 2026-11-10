@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M375 - the Matroska muxer writes a `Cues` index, closing the seek round-trip:
 //! `MkvMuxN` output is seekable by `MkvDemux` through the very index the muxer
 //! wrote (the write side of M373's read). The muxer flushes the `Cues` at EOS

@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+#
+# SPDX-License-Identifier: MPL-2.0
+
 # Build the real-MobileNetV2-on-Edge-TPU probe for Android, push the model + a
 # preprocessed input, run it on a connected device, and surface the Edge TPU /
 # DarwiNN logcat. The device phase of the M446 host classifier: a real ImageNet

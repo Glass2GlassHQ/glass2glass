@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+#
+# SPDX-License-Identifier: MPL-2.0
+
 # Offline throughput and CPU cost, g2g vs GStreamer, on one generated fixture.
 #
 # Both lines decode the same H.264 file with libavcodec, convert to I420, and

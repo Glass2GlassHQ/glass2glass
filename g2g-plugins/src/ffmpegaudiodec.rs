@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Linux audio decode element using ffmpeg / libavcodec.
 //!
 //! Consumes compressed audio access units (`Caps::Audio { format: Aac | Mp2 |

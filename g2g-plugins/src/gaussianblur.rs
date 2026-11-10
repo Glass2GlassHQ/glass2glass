@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Gaussian blur / sharpen (`gaussianblur`). Convolves a packed RGBA / BGRA
 //! frame with a separable gaussian of standard deviation `sigma`, preserving
 //! format and geometry. CPU-only `no_std` baseline.

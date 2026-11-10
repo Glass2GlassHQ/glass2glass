@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M982: the decoder's decode-loop caps must not replace the framerate the
 //! parser recovered from the SPS with its own fallback default. The runner
 //! steers the mid-stream refinement, so the decoder learns the real input caps

@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+#
+# SPDX-License-Identifier: MPL-2.0
+
 # Build g2g-uniffi, generate its Kotlin bindings, and run g2g-uniffi/examples/jvm
 # on the desktop JVM. Needs a JDK on PATH.
 set -euo pipefail

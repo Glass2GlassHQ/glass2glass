@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 #![cfg(feature = "burn")]
 //! design/ml.md: `BurnInference` runs a linear layer (`input . W + b`) on burn's wgpu
 //! backend. The test feeds a known RGBA frame through the element on the real

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! RIST receiver (RistSrc, `rist` feature), VSF TR-06-1 Simple Profile. It
 //! listens for RTP MP2T on `address`:`port` and RTCP on `port + 1`, holds every
 //! packet `receiver-buffer` ms and releases the MPEG-TS payloads in order. A gap

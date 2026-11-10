@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1065 MPEG audio playback: `typefind` types an `.mp3` by content,
 //! `mpegaudioparse` splits it into frames with sample-accurate timestamps and
 //! surfaces its ID3 tags, `id3demux` strips the tags for a parser that would

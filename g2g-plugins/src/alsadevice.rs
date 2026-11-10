@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! ALSA device discovery: lists the libasound PCM hints as
 //! [`Device`] records, capture hints driving [`AlsaSrc`](crate::alsasrc) and
 //! playback hints [`AlsaSink`](crate::alsasink). One hint can serve both

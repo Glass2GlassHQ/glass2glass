@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Chebyshev low-pass / high-pass (`audiocheblimit`). An IIR cascade of
 //! second-order sections, `poles` poles with `ripple` dB of ripple, far steeper
 //! per tap than the windowed-sinc filters but without their linear phase.

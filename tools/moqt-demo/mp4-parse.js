@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 // The little bit of ISO-BMFF the WebCodecs path has to read itself.
 //
 // Media Source Extensions takes `moof`+`mdat` whole; WebCodecs does not, so a

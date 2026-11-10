@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M308: on-device probe for the Android Camera2 capture source.
 //!
 //! Camera access needs the `CAMERA` runtime permission, which a bare

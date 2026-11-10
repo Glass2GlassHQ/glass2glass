@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Every video codec the WebRTC elements carry round-trips a P2P duplex session
 //! over localhost UDP: two `WebRtcDuplexSession`s built for the codec negotiate
 //! it, and each received access unit is byte-identical to one that was sent,

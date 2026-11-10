@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+#
+# SPDX-License-Identifier: MPL-2.0
+
 # Build the g2g caps-solver validator into tools/builder/src/wasm/ (target web),
 # so the visual builder can run g2g's real solver client-side under `pnpm dev`
 # (Vite transforms it like any source module; a /public file can't be imported).

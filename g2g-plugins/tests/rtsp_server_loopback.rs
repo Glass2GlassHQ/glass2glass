@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! RtspServerSink end-to-end over loopback: a minimal RTSP player connects,
 //! runs OPTIONS / DESCRIBE / SETUP / PLAY against the server sink, then receives
 //! the RTP it streams and depayloads the access units back. Proves the serving

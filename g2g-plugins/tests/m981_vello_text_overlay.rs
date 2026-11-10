@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M981 - the Vello GPU text overlay, validated on a real GPU. `VelloTextOverlay`
 //! draws the same cue as the CPU `TextOverlay`, but as Vello glyph runs into a
 //! `MemoryDomain::WgpuTexture`, so a keep-on-GPU pipeline overlays subtitles with

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M78 - state machine + preroll over the DAG runner (`run_graph_stateful`).
 //!
 //! Rolls the M76/M77 flow gate into `run_graph`, so an arbitrary topology

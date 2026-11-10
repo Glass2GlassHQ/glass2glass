@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 #![cfg(all(target_os = "linux", feature = "wgpu-sink", feature = "dmabuf-wgpu"))]
 
 use g2g_core::memory::{MemoryDomain, OwnedDmaBuf, OwnedWgpuBuffer};

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! WebVTT (`.vtt`) subtitle writer (`no_std`): the WebVTT half of the
 //! pair [`crate::srtenc`] opens, and the inverse of the WebVTT side of
 //! [`SubParse`](crate::subparse::SubParse). Timed `Caps::Text{Utf8}` cues in, a

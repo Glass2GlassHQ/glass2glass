@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! macOS audio via the AudioToolbox `AudioQueue` C API.
 //!
 //! Two elements, the macOS analog of the WASAPI / ALSA / AAudio audio elements:

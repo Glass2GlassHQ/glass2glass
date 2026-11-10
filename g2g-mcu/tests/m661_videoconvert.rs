@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M661: the heap-free packed-YUYV 4:2:2 -> planar I420 4:2:0 convert, the MCU
 //! twin of the host `VideoConvert`. Asserts the Y/U/V plane layout on a hand
 //! computed vector, rejects a mis-sized frame, and runs a

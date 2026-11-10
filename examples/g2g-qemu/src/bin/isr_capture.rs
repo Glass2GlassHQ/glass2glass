@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! ISR-driven capture proof: the interrupt/DMA concurrency model on the
 //! emulated Cortex-M4. A SysTick interrupt handler is the *producer*, running in
 //! real interrupt context: each tick it fills a frame into a `static`

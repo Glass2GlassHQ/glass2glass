@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! URI-scheme handlers for [`Registry::build_uridecodebin`], the `uridecodebin`
 //! front door. Each maps a URI scheme to one of the concrete g2g sources
 //! and is gated to that source's feature, so an app registers only the schemes

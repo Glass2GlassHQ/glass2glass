@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1544: `decodebin` splices `mpegvideoparse` ahead of the MPEG-2 decoder, so a
 //! transport stream whose PES packets split field pictures decodes bit-exact.
 

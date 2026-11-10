@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Benchmarks for the caps-negotiation hot path, the latency-critical,
 //! hardest code in the framework. Guards regressions in the caps algebra
 //! (`intersect` / `fixate`), the linear solver, and the DAG solver.

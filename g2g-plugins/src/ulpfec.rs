@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! RTP Forward Error Correction (ULPFEC, RFC 5109). Sans-IO, `no_std + alloc`.
 //!
 //! FEC trades bandwidth for latency-free recovery: the sender XORs a group of

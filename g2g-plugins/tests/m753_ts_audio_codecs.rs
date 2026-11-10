@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M753 - MPEG-TS audio beyond AAC: MPEG audio (`mp2`, stream_type 0x03/0x04)
 //! and Opus (private PES 0x06 with an 'Opus' registration descriptor). The demux
 //! forwards mp2 frames raw and unwraps Opus control-header AUs; the primary-stream

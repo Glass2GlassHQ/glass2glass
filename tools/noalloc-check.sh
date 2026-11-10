@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+#
+# SPDX-License-Identifier: MPL-2.0
+
 # Link-time no-heap proof (M625) + panic-free proof (M626): build the
 # `g2g-noalloc` static pipeline for a bare embedded target and assert the linked
 # archive references no allocator symbols AND no `core::panicking` machinery.

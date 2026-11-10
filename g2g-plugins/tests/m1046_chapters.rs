@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1046 - container chapters (the table of contents) for Matroska and MP4,
 //! both directions.
 //!

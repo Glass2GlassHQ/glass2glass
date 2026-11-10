@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M506: Vulkan Video AV1 full-DPB decode on real hardware, the AV1 sibling of
 //! M492 / M503.
 //!

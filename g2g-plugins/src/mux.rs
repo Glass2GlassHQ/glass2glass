@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Interleaving muxer. Combines N input streams into one output, ordering
 //! every input's frames by presentation timestamp. Negotiation is
 //! per-input: each pad accepts and records its own caps; the merged output caps

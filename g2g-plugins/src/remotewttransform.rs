@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Remote WebTransport transform (`webtransport` feature): a media-agnostic
 //! *remote stage* over WebTransport, the sibling of
 //! [`RemoteWsTransform`](crate::remotewstransform). Where the sink / source pair

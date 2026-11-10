@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Presentation pacing for synchronizing sinks: the PTS -> clock deadline, the
 //! play-edge / first-frame anchor, and the QoS late-drop verdict.
 //!

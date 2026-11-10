@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! MoQ Transport subscriber source (`moqtsrc`, `moqt` feature): subscribes
 //! to a broadcast on an IETF MoQT relay over WebTransport and emits the
 //! fragmented-MP4 byte stream it carries.

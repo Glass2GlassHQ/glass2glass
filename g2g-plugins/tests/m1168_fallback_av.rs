@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1168: a lone `fallbacksrc` carries audio and video at once. When the whole
 //! pipeline is a single `fallbacksrc uri=X`, the URI is probed by the same
 //! container hooks a lone `playbin` uses, and every stream kind the probe reports

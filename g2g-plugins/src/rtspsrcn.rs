@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Multi-track RTSP playback (`RtspSrcN`, `rtsp` feature): one retina session,
 //! one output pad per subscribed track. [`RtspSrc`](crate::rtspsrc::RtspSrc) is
 //! this element with the video pad alone.

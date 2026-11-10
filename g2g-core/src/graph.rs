@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! DAG pipeline graph + validation (design/TODO.md "DAG runner" D1).
 //!
 //! `Graph<E>` is the builder for an arbitrary multimedia DAG: linear, fan-out

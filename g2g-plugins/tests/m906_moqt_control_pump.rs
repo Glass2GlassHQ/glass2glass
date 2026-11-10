@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M906: `moqtsink` answers control messages without a frame to ride on.
 //!
 //! The publisher used to decode inbound control messages only while it had a

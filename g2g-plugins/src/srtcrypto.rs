@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! SRT payload encryption (`srt` feature): AES-CTR over the data payload (AES-128
 //! or AES-256), with the Stream Encrypting Key (SEK) derived/exchanged the SRT way:
 //!

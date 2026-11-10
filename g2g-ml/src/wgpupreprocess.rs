@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Inline GPU tensor preprocessing via wgpu compute (design/ml.md).
 //!
 //! `WgpuPreprocess` is the hardware-first preprocessing pillar: an

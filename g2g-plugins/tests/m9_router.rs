@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M9 fan-out: a `Router` switched mid-stream sends frame 0 to branch A and
 //! frames 1.. to branch B, through the `run_source_fanout` runner, with EOS
 //! broadcast to both branches.

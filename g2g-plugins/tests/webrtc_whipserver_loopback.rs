@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! `WhipServerSrc` against the g2g WHIP client (`WebRtcSink`) on localhost, once
 //! per carried video codec and once for Opus audio. Synthetic access units, no
 //! media server and no fixture files, so it runs by default.

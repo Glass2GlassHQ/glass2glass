@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Datagram objects for IETF MoQ Transport draft-18 (§11.3): one object in one
 //! QUIC datagram, unreliable and bounded by the path MTU, with no head-of-line
 //! blocking against anything else on the session.

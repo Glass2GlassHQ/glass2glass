@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! WebRTC data-channel ingest source (browser/wasm). Consumes binary messages
 //! from a provided, already-open `RtcDataChannel` and emits each as a
 //! system-memory `DataFrame` chunk: the second browser ingest path alongside

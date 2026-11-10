@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1058: the `Orientation` descriptor a display sink absorbs.
 //!
 //! Three properties matter: `Orientation` really is the dihedral group of the

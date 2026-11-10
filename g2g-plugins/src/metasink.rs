@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Metadata sink: writes one JSON line per frame holding the frame's
 //! presentation time and whatever analytics it carries, the gst-python-ml
 //! `pyml_metasink` analog. The line goes to a file (appended) or to stdout, and

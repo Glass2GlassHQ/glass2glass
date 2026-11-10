@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Sans-IO RTSP 1.0 server responder (RFC 2326). Pure `no_std + alloc`, no
 //! sockets: feed a complete request with [`RtspResponder::handle_request`] and
 //! get back the response bytes plus an [`RtspEvent`] telling the I/O layer what

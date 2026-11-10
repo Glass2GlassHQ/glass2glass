@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M2179: HDR10+ dynamic metadata. `h265parse` attaches each access unit's
 //! SMPTE ST 2094-40 SEI as `Hdr10PlusMeta`, and `h265seiinserter` writes it back.
 //! hdr10plus_tool is the reference writer: inserting the parsed metadata into the

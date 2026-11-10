@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! P1.2: `VideoRate` in a real negotiated chain. A 30 fps RGBA test source
 //! reaches the sink resampled to the configured target rate, the new
 //! framerate announced via `CapsChanged`. Downsample drops frames, upsample

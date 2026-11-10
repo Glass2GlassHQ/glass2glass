@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Dynamic range control (`audiodynamic`). Compresses samples above the
 //! threshold or expands samples below it, with a hard or a soft knee.
 //! Preserves format, channel count, and sample rate. CPU-only `no_std`.

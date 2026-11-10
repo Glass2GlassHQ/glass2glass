@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Saturating Q15-gain audio mixer: the first fan-in element on the
 //! heap-free subset, and the `mix` stage of the reference audio chain
 //! (capture -> convert -> resample -> mix -> encode -> RTP). Two interleaved

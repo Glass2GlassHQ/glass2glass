@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M971: the Vorbis end-granule trim. A logical bitstream's final granule
 //! position is its count of playable samples: the first audio packet primes the
 //! overlap window and decodes to nothing, and the encoder's tail padding sits

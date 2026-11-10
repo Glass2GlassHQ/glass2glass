@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M493: the `VulkanVideoDec` pipeline element on real hardware.
 //!
 //! Wraps the M492 `H264DpbDecoder` as an `AsyncElement`: H.264 Annex-B in,

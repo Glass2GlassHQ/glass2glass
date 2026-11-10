@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M986: the GPU handoff beyond the single transform.
 //!
 //! Three additions over M984: a Cuda-domain *batch* reaches an aggregator as one

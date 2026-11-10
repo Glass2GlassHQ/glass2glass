@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M827: chained Ogg. A second physical stream (a fresh beginning-of-stream
 //! page after the first one's end-of-stream page, what a recorded radio stream
 //! looks like) plays through on the same output pad: its headers go downstream

@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+#
+# SPDX-License-Identifier: MPL-2.0
+
 # Per-frame timing / jitter report (M645) for the flagship audio graph, the
 # timing sibling of tools/footprint-report.sh: boot examples/g2g-qemu's
 # `timing` binary on QEMU MPS2-AN386 under `-icount shift=0,sleep=off`, where

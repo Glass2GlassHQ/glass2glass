@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! The zero-copy frame buffer lent to a hosted element must not outlive the
 //! `g2g_process` call: a retained `memoryview` / numpy view holds a raw pointer
 //! that dangles once the frame is freed downstream. The host counts outstanding

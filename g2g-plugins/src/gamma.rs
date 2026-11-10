@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Gamma correction (`gamma`). Applies `out = 255 * (in/255)^(1/gamma)` to the
 //! R/G/B channels of a packed RGBA / BGRA frame via a 256-entry lookup table,
 //! leaving alpha and geometry unchanged. `gamma > 1` brightens mid-tones,

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M974: the two claims the dynamic broadcast tee (`run_source_tee_dynamic`)
 //! rests on but never proved. A branch attached while frames are flowing gets the
 //! sticky caps and then only the frames that follow its attach (nothing replayed,

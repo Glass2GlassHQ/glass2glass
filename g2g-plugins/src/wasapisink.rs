@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Windows WASAPI render sink: the audible output end of the audio path
 //! that starts at `AudioTestSrc`. Consumes interleaved PCM
 //! (`PcmS16Le` or `PcmF32Le`) `DataFrame`s and plays them on the default

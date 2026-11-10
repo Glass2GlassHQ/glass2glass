@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Unidirectional stream types and the subgroup data plane for IETF MoQ
 //! Transport draft-18 (§3.4, §11.4).
 //!

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! `g2g-mcugen <graph.yaml> [-o out.rs]`: compile a declarative MCU graph
 //! (audio or video / display) into a monomorphized static MCU pipeline and
 //! report its ring-memory budget. With no `-o`, the generated Rust goes to

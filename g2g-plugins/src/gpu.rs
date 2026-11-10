@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Shared wgpu device context for the GPU elements: the Vello overlay
 //! producer (`vellooverlay`) and the [`WgpuSink`](crate::wgpusink)
 //! consumer.

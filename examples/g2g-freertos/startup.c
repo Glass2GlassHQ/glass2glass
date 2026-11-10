@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 /* Minimal Cortex-M4 startup for QEMU MPS2-AN386 (M633): vector table, FPU
  * enable, .data/.bss init. The SVC/PendSV/SysTick slots point at the FreeRTOS
  * CM4F port handlers (renamed via FreeRTOSConfig.h). */

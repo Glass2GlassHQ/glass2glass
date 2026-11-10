@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+#
+# SPDX-License-Identifier: MPL-2.0
+
 # Regenerate the cargo-fuzz seed corpora. Demuxer / parser targets gate on a
 # magic signature, so the fuzzer needs a valid sample to reach the parsing;
 # rtmp_handshake needs a crypto-valid C1/S1 (see seedgen). The network targets

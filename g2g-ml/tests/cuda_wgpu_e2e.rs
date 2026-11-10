@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 #![cfg(all(target_os = "linux", feature = "cuda-wgpu-e2e"))]
 //! M220 Stage 1 end-to-end: the zero-copy GPU keep-on-GPU pipeline.
 //!

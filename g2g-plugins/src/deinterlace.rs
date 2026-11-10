@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Deinterlace (`deinterlace`). Removes interlacing combs from a raw video frame,
 //! preserving format and geometry. CPU-only `no_std`. Packed RGBA / BGRA,
 //! semi-planar NV12 / P010, and the fully-planar I420 / I422 / I444 family at 8,

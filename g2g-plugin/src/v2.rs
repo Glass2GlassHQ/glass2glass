@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Plugin side of the v2 ABI: everything
 //! [`declare_plugin_v2!`](crate::declare_plugin_v2) needs to turn a plain
 //! [`AsyncElement`] into a `repr(C)` vtable.

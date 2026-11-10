@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+#
+# SPDX-License-Identifier: MPL-2.0
+
 # Install the Kotlin example APK on the connected device, run each of its modes,
 # and check that the frames reach the screen through surfacesink and every frame
 # is consumed. The device must be unlocked, and the back camera must face

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 #![allow(dead_code)] // each test file uses a subset
 
 //! Synthetic access units in every codec the WebRTC elements carry, shaped so

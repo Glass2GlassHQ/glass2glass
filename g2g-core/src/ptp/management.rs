@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! PTP management messages (IEEE 1588-2008 clause 15), the GET half plus the
 //! data sets a client needs to read another clock's sync state.
 //!

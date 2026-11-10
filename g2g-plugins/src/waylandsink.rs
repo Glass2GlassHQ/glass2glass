@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Wayland display sink (desktop dev convenience).
 //!
 //! Opens an `xdg_toplevel` window on the running Wayland compositor and

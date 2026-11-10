@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 // Headless validation for the browser ONNX MVP (M762).
 //
 // Drives the real in-browser chain WebSocketSrc -> WebCodecsDecode -> WebOrtDetect

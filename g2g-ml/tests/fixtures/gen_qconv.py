@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+#
+# SPDX-License-Identifier: MPL-2.0
+
 # Generate the int8 QDQ Conv->ReLU ONNX fixture used by the Android NNAPI / Edge
 # TPU placement probe (`g2g-ml/tests/android_nnapi_conv_probe.rs`). Committed for
 # provenance; the .onnx it writes is the checked-in fixture (the build does not run

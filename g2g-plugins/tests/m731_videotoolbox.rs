@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M731: `VtDecode` / `VtEncode` runtime validation on a real Mac (the macOS CI
 //! runner is the Mac this repo's Linux dev host lacks). Decodes the checked-in
 //! reference fixtures (x264 / x265 encoded, so the decoder is validated against

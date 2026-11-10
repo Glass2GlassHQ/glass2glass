@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! DVB subtitle decoder element: `Caps::SubPicture{DvbSub}` in,
 //! `Caps::RawVideo{Rgba8}` canvases out.
 //!

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M486: Vulkan Video decode capability probe (`vulkan-video` feature).
 //!
 //! First increment of `VulkanVideoDec` (design/decode.md): confirm the machine's

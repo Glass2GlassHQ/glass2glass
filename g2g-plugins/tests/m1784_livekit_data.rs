@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 // M1784: livekitdatasink and livekitdatasrc against a real LiveKit SFU, with the
 // official LiveKit Python SDK (tools/livekit-data-peer.py) as the other participant.
 // Needs a server and uv on PATH, the first run downloads the SDK wheels:

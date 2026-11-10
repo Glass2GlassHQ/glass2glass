@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 // What the two headless runs (run-moqt-play.mjs, run-moqt-latency.mjs) have in
 // common: finding the binaries, driving a real Chromium at the player page, and
 // reading the SMPTE bars back off the canvas.

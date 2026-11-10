@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Janus VideoRoom publisher: `janusvrsink` joins a room over the Janus
 //! WebSocket API (JSON on the `janus-protocol` subprotocol) and publishes one
 //! track, any carried video codec or Opus, through a str0m PeerConnection.

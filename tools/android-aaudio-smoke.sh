@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+#
+# SPDX-License-Identifier: MPL-2.0
+
 # Build the AAudio probe for Android and run it on a connected device. The render
 # (AAudioSink) path needs no permission and runs as a plain native binary from
 # /data/local/tmp; the capture (AAudioSrc) path needs RECORD_AUDIO (an APK), so

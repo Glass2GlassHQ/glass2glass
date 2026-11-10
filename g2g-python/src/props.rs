@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! The property face shared by every hosted gst-python-ml element.
 //!
 //! A `pyelement` and a `pyaggregator` host the same family of Python classes, so

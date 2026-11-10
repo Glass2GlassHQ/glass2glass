@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! AVFoundation camera discovery: the macOS camera half of the
 //! [`DeviceMonitor`](g2g_core::runtime::DeviceMonitor). An
 //! `AVCaptureDeviceDiscoverySession` lists the cameras, each becoming a

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Shared helpers for the str0m-based WebRTC elements (`WebRtcSink` WHIP egress
 //! and `WebRtcWhepSrc` WHEP ingest): ICE host-candidate IP selection, the HTTP
 //! SDP exchange, and trickle ICE (RFC 9725). WHIP and WHEP share the same wire

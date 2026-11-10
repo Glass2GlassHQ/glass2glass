@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Host validation of the flagship audio graph (M644): capture -> convert ->
 //! resample -> mix -> encode -> RTP as one static pipeline.
 //!

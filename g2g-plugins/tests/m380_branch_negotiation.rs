@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M380 - per-branch decoder negotiation. A multi-output demuxer declares each
 //! port's elementary-stream caps (`MultiOutputElement::port_output_caps`), so the
 //! graph solver negotiates each branch against its port's codec rather than

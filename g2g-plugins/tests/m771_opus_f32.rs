@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M771: Opus float (F32) PCM in / out. `OpusEnc` accepts `PcmF32Le` input
 //! (libopus' `opus_encode_float`, no S16 quantize) and `OpusDec` emits
 //! `PcmF32Le` when negotiated (`opus_decode_float`). Round-trips a float tone

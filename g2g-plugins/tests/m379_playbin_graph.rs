@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M379 - `playbin`-equivalent graph builder. `Registry::build_playbin_graph`
 //! assembles `source(uri) -> demux(MkvDemuxN) -> {decode chain -> sink}` per
 //! selected stream: the multi-stream counterpart of `build_uridecodebin`. The app

@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+#
+# SPDX-License-Identifier: MPL-2.0
+
 # Regenerate the AAC fixtures whose object types ADTS cannot signal, for the
 # LOAS-in-MPEG-TS test (g2g-plugins/tests/m1731_ts_loas_aac.rs). Each is half a
 # second of a 440 Hz stereo sine at 48 kHz in an .m4a:

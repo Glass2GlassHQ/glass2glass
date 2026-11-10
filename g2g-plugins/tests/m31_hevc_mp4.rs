@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M31: HEVC through the fMP4 container. `Mp4MuxN` muxes an `hvc1`/`hvcC`
 //! track from synthetic H.265 access units, and `Mp4Src` reads them back
 //! byte-exactly with the codec/geometry recovered during the caps probe. No

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Shared SEI message walk for the H.264 / H.265 elementary streams, plus the
 //! HDR10 static-metadata payloads.
 //!

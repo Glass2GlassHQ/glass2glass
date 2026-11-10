@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+#
+# SPDX-License-Identifier: MPL-2.0
+
 # Regenerate the g2g-plugins/tests/fixtures/<codec>_clean_aperture.* fixtures
 # and ffmpeg's decode of each. Pass the codecs to regenerate (h264, av1, mpeg2,
 # mpeg4), or none for all four.

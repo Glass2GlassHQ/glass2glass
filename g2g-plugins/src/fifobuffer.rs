@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 use alloc::vec::Vec;
 
 // items read from the front through an offset, so a take does not move what is left

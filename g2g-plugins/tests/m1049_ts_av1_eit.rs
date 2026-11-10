@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1049 - AV1 carriage in MPEG-TS, and DVB EIT present/following.
 //!
 //! AV1 has no `stream_type` of its own: the AOM carriage puts it on a private PES

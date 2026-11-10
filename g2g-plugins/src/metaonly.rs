@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! The `meta-only` reply mode the remote-transform elements share.
 //!
 //! A full round trip carries the whole frame both ways. For a stage that only

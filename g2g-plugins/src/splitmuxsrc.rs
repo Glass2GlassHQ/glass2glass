@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Split-muxer source (`splitmuxsrc`): plays the parts a `splitmuxsink` wrote,
 //! in name order, as one continuous elementary stream with a single `Eos`.
 //!

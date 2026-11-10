@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M984: hand a GPU-resident frame to a hosted Python element with no readback.
 //!
 //! A `MemoryDomain::Cuda` frame routes to `g2g_process_cuda`, which receives the

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Localhost P2P data-channel loopback for the native str0m data-channel
 //! elements ([`WebRtcDataSrc`] / [`WebRtcDataSink`]). Two independent channels
 //! carry application bytes in opposite directions: each side sends a fixed set

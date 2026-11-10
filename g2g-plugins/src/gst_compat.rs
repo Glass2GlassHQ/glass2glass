@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! GStreamer-to-g2g porting helpers: a `gst`-element-name map and a
 //! launch-line linter that turns parse failures into porting guidance.
 //!

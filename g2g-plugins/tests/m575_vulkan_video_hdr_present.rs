@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M575: HDR swapchain present - the device-side plumbing, on real hardware.
 //!
 //! The on-screen HDR present (`VulkanHdrSink`) is display + compositor dependent

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Shared access-unit parser core for the start-code elementary streams that
 //! are not NAL streams: MPEG-1 / MPEG-2 video, MPEG-4 Part 2, and VC-1
 //! advanced profile.

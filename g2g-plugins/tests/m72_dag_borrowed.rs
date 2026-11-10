@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! DAG runner: a borrowing `Graph<GraphNodeRef<'a>>` built from `&mut` element
 //! references (the shape the convenience wrappers use to delegate to
 //! `run_graph` without taking ownership). The caller keeps its elements and can

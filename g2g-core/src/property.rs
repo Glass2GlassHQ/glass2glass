@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Runtime element properties: a name/value bag layered over the
 //! compile-time `with_*` builders, the GObject-property analog.
 //!

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M811: the Cursor-on-Target bridge. The builder half asserts the CoT schema
 //! facts (required `<event>` attributes, the W3C `xs:dateTime` timestamp
 //! profile, the `<point>` sentinels) against a known ST 0601 local set, and that

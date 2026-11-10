@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+#
+# SPDX-License-Identifier: MPL-2.0
+
 # Provenance + on-demand fetcher for the real-classifier host test
 # (g2g-ml/tests/mobilenet_classify.rs). The committed toy fixtures (M440-M444)
 # prove the on-NPU *plumbing*; this proves *utility*: the validated int8

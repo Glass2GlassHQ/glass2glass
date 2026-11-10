@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M19: `MfEncode` end-to-end against the real Media Foundation H.264
 //! encoder MFT (the MS software encoder, so no GPU is needed), plus the
 //! encode -> decode round trip through `MfDecode` when both features are on.

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! A bare `decodebin` decode checked frame by frame against ffmpeg's
 //! `-f framemd5` checksums of the same fixture, kept beside it as `<fixture>.framemd5`.
 

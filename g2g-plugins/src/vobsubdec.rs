@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! VobSub (DVD subpicture) decoder element: `Caps::SubPicture{VobSub}` in,
 //! `Caps::RawVideo{Rgba8}` canvases out.
 //!

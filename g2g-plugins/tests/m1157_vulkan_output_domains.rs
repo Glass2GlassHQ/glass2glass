@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1157: `VulkanVideoDec`'s two GPU-resident NV12 outputs. Pinning `NV12` on
 //! the `WgpuTexture` path hands out a two-plane `TextureFormat::NV12` texture
 //! instead of the ycbcr pass's RGBA, and the `VulkanTexture` domain hands out the

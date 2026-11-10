@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Vendor-neutral OpenGL ES display sink: system-memory NV12 or RGBA
 //! presented through EGL on a Wayland `xdg_toplevel`.
 //!

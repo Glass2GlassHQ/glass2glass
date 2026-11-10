@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! The mid-stream β allocation re-cascade driving a *real* resizable pool.
 //!
 //! `m18_beta_recascade` proved the β control path with a probe transform that

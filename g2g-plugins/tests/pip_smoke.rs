@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Live picture-in-picture demo for the compositor (M93). Builds a DAG that
 //! overlays the webcam, scaled down, onto a synthetic full-screen background and
 //! displays the result in a Wayland window:

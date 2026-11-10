@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M124 `videobalance`: the colour-balance transform is registered in
 //! `default_registry` and runs in a text pipeline, with its `Double` properties
 //! parsed from text. The per-pixel math is unit-tested in the module itself.

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M831: the legacy FLV codecs (Sorenson Spark, VP6 with and without alpha, MP3,
 //! Speex) carried by the FLV demuxer and muxer, validated against ffmpeg as the
 //! reference peer in both directions:

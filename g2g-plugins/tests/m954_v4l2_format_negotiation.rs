@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M954 format-flexible `v4l2src`: the device's pixel formats become caps
 //! alternatives, and negotiation picks which one the camera runs in. The
 //! headline case is MJPEG-mode UVC decoded downstream by `mjpegdec`.

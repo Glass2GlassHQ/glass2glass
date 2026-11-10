@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 // `parsebin` demuxes and parses without decoding, so its streams remux into another
 // container, and the remuxed file decodes to the same pictures and samples as the original.
 #![cfg(all(

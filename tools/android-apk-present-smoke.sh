@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+#
+# SPDX-License-Identifier: MPL-2.0
+
 # Build the M742 on-screen present harness as a NativeActivity APK, install it
 # on a connected device, launch it, and check logcat for presented frames. The
 # true SurfaceView present the /data/local/tmp probes cannot do: the APK's

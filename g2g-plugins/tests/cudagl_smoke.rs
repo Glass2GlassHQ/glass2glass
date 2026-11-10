@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! On-display smoke test for `CudaGlSink`, the CUDA-GL zero-copy-ish sink.
 //!
 //! Pipeline (file-driven, no RTSP so it runs fully in-session):

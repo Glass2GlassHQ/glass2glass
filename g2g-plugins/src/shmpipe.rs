@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! GStreamer's `shmpipe` control protocol (`sys/shm/shmpipe.c` in
 //! gst-plugins-bad), the wire the `shmsink` / `shmsrc` pair speaks. A unix
 //! socket carries fixed-size commands; the buffers themselves live in a POSIX

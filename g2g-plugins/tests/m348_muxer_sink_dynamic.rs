@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M348: merged downstream output for dynamic fan-in. `run_aggregator_dynamic`
 //! (M320) drives a *terminal* aggregator (merged output discarded);
 //! `run_muxer_sink_dynamic` extends it to the `run_muxer_sink` shape, a trailing

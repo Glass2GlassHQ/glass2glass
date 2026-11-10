@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1545: a container extension is checked against the file's own header, so a
 //! transport stream saved as `.mpg` demuxes as one, and `mpegpsdemux` fails on
 //! bytes that never show a pack header instead of ending early with success.

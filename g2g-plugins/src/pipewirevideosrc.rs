@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Linux PipeWire video capture source. Connects an input stream to a PipeWire
 //! video node (camera, another client's published node, a screen-capture node)
 //! and streams raw frames downstream in system memory. The video sibling of the

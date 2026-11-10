@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Element-granular logging facade, the `GST_DEBUG` analog.
 //!
 //! A hand-rolled `no_std` logging layer: levels, per-category thresholds, and a

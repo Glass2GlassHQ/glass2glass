@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! MIME multipart (`multipart/x-mixed-replace`): the transport an IP camera or
 //! an `mjpg-streamer`-style server pushes MJPEG over HTTP with.
 //! [`MultipartDemux`] splits the stream into its parts, [`MultipartMux`] writes

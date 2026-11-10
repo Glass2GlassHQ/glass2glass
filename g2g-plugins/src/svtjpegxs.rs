@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! JPEG XS encode / decode via Intel SVT-JPEG-XS: the ST 2110-22 compressed
 //! essence. `SvtJpegXsEnc` takes planar YUV `RawVideo` and emits a
 //! `CompressedVideo{JpegXs}` codestream (one independent codestream per frame, or

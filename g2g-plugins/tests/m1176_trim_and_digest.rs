@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1176: the two `no_std` members of the record set.
 //!
 //! - `trim` keeps the frames of its range, rebases them onto its start, and ends

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M929: MPEG program stream (`.mpg` / `.vob`) demuxing, MPEG-1/2 video, and the
 //! DVD subpicture track a VOB carries.
 //!

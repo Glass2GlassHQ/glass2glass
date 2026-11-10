@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M16 workaround #3 Phase A — ordering regression guard.
 //!
 //! The forward-reconfigure design (`DESIGN-M16-workaround3-reconfigure.md`)

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1066 `audiorate`: a gap in the timestamps is filled with silence, samples
 //! that overlap what was already emitted are dropped, and jitter under the
 //! tolerance is only re-stamped, so the output pts advances by exactly the

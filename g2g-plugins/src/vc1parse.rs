@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! VC-1 (SMPTE 421M) advanced-profile elementary-stream parser.
 //!
 //! Frames the stream into one access unit per frame (`00 00 01 0D`) together

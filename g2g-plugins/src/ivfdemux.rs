@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! IVF demuxer: the simple raw container libvpx / libaom conformance vectors ship
 //! in. A 32-byte `DKIF` header (FourCC codec + geometry + timebase), then before
 //! each frame a 12-byte header (frame byte size + timestamp). One video elementary

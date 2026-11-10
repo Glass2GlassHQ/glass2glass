@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M826: `OpusEnc` frame duration + complexity. Opus codes frames of 2.5, 5, 10,
 //! 20, 40 or 60 ms; the encoder accumulates PCM to whichever the `frame-size`
 //! property selects, steps the output PTS by that duration, and hands libopus a

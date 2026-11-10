@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1178: the hosted element reads what upstream attached (`analytics` feature).
 //!
 //! The `meta` sink handed to `g2g_process` is filled from the incoming frame

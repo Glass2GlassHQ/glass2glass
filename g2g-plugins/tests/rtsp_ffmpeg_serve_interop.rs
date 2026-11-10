@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Real-peer RTSP serving interop: ffmpeg *plays* from the g2g `RtspServerSink`
 //! over TCP-interleaved (`-rtsp_transport tcp`, RFC 2326 §10.12) and decodes the
 //! stream. The sink packetizes a real H.264 fixture and frames the RTP as

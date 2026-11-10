@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! `g2g-docgen`: generate the searchable element reference (`docs/elements.html`)
 //! from an element registry, the web counterpart of `g2g-inspect`. Every card
 //! is built from [`g2g_core::runtime::Registry::describe_all`], so the page is

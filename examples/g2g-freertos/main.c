@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 /* FreeRTOS executor proof (M633): a statically-allocated FreeRTOS task runs
  * the exact g2g heap-free pipeline (the g2g-noalloc staticlib the no-heap /
  * panic-free symbol proofs cover: camera seam -> transform -> SPI display

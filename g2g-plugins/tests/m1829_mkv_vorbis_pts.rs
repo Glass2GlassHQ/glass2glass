@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1829: Vorbis out of Matroska is stamped with each packet's own timestamp,
 //! the frames of a laced block spaced by their lapped durations, as ffmpeg
 //! reports them.

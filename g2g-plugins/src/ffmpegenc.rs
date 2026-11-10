@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Linux H.264 video *encode* element using ffmpeg / libavcodec: the
 //! encode-side mirror of [`crate::ffmpegdec::FfmpegVideoDec`]. `RawVideo` (see
 //! the input formats below) in, `CompressedVideo{H264}` Annex-B out, so the

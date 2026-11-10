@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Vorbis audio decoder element (VorbisDec, `vorbis` feature):
 //! `Audio{Vorbis}` in, interleaved `Audio{PcmS16Le}` out, via symphonia's
 //! pure-Rust decoder (no system library, unlike the libopus-backed

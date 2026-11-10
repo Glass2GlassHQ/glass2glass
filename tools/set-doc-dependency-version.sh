@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+#
+# SPDX-License-Identifier: MPL-2.0
+
 # sets the g2g version requirement in the docs' Cargo.toml lines, in the given files or on stdin
 set -euo pipefail
 version=${1:?usage: set-doc-dependency-version.sh <major.minor> [file...]}

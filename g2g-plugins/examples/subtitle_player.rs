@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Plays a real MP4 with its sidecar subtitle file in a Wayland window, the Rust
 //! form of:
 //!

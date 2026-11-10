@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! `gst-launch`-style text pipeline parser: turn
 //! `"videotestsrc num-buffers=3 ! videoflip method=rotate-180 ! fakesink"` into a
 //! runnable [`Graph`], the front door that makes g2g usable without hand-writing

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! In-process software PTP ordinary clock, SLAVE mode: the UDP transport
 //! around the `g2g-core` PTP servo + wire + slave state machine.
 //!

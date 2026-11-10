@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M198 step 2: the live per-frame path, embedded CPython (`python` feature).
 //!
 //! Drives `PyTransform` against a stdlib-only hosted element fixture and proves

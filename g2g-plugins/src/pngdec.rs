@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! PNG decode element (PngDec, `png` feature): `CompressedVideo{Png}` in,
 //! `RawVideo{Rgba8}` out, via the pure-Rust `png` crate. The GStreamer `pngdec`
 //! analog.

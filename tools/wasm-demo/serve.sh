@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+#
+# SPDX-License-Identifier: MPL-2.0
+
 # Serve tools/wasm-demo over HTTP so the browser can load the ES module + .wasm.
 # No special headers needed: the g2g pipeline is single-threaded, so unlike
 # thread-based wasm (gst.wasm) this needs NO SharedArrayBuffer / COOP+COEP.

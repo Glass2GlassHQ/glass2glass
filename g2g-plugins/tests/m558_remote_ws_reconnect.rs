@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M558: reconnection for the WebSocket transport, the browser-facing sibling of
 //! the TCP reconnect (`m558_remote_reconnect`). A `RemoteWsSink::with_reconnect`
 //! retries the WebSocket handshake until the `RemoteWsSrc` server is up.

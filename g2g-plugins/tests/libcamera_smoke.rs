@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! End-to-end smoke test for the libcamera capture source.
 //!
 //! Pipeline: `LibCameraSrc -> FakeSink`. The source negotiates NV12 (else

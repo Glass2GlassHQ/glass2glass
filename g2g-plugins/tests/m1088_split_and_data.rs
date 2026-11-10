@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1088 sources without one file behind them: `splitfilesrc` reads the parts of
 //! a cut recording as one byte stream, `imagesequencesrc` stamps a file sequence
 //! on a framerate grid, and `dataurisrc` plays the payload carried in a `data:`

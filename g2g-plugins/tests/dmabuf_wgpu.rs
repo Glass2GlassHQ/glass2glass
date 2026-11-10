@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! `DmaBufToWgpu`: a dma-buf frame is imported into a GPU-resident `wgpu::Buffer`
 //! with no CPU copy. Validated on this host (RTX 3060) by *exporting* GPU memory
 //! as a dma-buf fd and re-importing it through the element: a discrete GPU can

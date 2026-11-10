@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! ST 2110 SDP: the Session Description (RFC 4566, SMPTE ST 2110-10/-20/
 //! -30/-40) that describes a stream so a receiver auto-configures instead of being
 //! hand-set. This is the out-of-band half of ST 2110: the essence (-20 video, -30

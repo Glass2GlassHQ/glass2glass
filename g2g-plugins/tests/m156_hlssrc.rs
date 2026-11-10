@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M156 HLS source end to end: `HlsSrc` fetches a master playlist, selects a
 //! variant, fetches its media playlist, then streams the TS segments in order
 //! as `Caps::ByteStream{MpegTs}` `DataFrame`s ending in `Eos`. A local routing

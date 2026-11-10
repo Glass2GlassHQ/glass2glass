@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! `g2g-discover`: the `gst-discoverer-1.0` analog. Reports what a media file
 //! holds without a hand-written pipeline: container, elementary streams with
 //! their caps, duration, and metadata.

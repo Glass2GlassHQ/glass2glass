@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M985: a hosted element declares the memory domain frames actually leave in.
 //!
 //! `PyTransform` forwards the frame untouched, so both pads carry one domain:

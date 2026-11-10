@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M883: MP4 `c608` / `c708` raw closed-caption tracks. The muxer writes a `clcp`
 //! track whose samples carry the caption atoms (`cdat` / `cdt2` byte pairs for
 //! 608, a `ccdp` CDP for 708), the demuxer surfaces such a track as

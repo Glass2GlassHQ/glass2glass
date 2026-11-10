@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+#
+# SPDX-License-Identifier: MPL-2.0
+
 # Build the MediaCodec decode smoke test for Android and run it on a connected
 # device. The decoder is headless (ByteBuffer output, no Surface), so the test
 # runs as a plain native binary from /data/local/tmp, no APK needed.

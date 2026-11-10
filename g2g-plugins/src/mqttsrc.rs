@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! MQTT source: subscribes to a topic filter on an MQTT broker and
 //! emits each message received as one `Caps::Text` frame holding its payload,
 //! the control-message side of `mqttsink`. A message is stamped with its

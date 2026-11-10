@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 #![no_main]
 // IV8 demux over untrusted input: the 16-byte packet headers and the video
 // frame reassembly, driven through the element's buffering and end-of-stream paths.

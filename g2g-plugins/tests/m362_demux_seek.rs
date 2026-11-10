@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M362 - demuxer seek (`Fmp4Demux` over a seekable `FileSrc`). A demuxer is a
 //! transform with no random access; it becomes seek-aware by driving its
 //! upstream byte source. The app seeks the demuxer (time); the demuxer asks

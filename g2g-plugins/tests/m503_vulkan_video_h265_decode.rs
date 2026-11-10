@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M503: Vulkan Video H.265 full-DPB decode on real hardware.
 //!
 //! The HEVC sibling of M492. M501/M502 built the H.265 parse + `Std*` mapping +

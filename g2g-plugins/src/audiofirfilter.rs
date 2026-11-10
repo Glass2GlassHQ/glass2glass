@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Generic FIR filter with a hand-written kernel (`audiofirfilter`). The
 //! kernel is the filter's impulse response; the element convolves it with every
 //! channel. Preserves format, channel count, and sample rate. CPU-only

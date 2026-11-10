@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Embassy RTOS clock backend: [`PipelineClock`] / [`AsyncClock`] over
 //! `embassy-time`, the no_std analog of `WallClock` (std/tokio) and `WasmClock`
 //! (browser). `now_ns` reads `embassy_time::Instant`; `sleep_until_ns` returns

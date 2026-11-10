@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 #![cfg(all(target_os = "linux", feature = "nvdec"))]
 //! M1062: the `cuda-device-id` property on the CUDA producers. Each element that
 //! creates its own CUDA context (`NvDec`, `CudaUpload`, `LocalCudaSrc`,

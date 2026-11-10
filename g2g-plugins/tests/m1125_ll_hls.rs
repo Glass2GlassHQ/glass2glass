@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1125 low-latency HLS: against a local LL-HLS server (a routing HTTP server
 //! that publishes one partial segment every `PART_MS` and holds a playlist
 //! request carrying `_HLS_msn` / `_HLS_part` until that part exists), `HlsSrc`

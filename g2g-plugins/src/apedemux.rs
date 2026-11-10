@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! APEv2 tag stripper (`apedemux`): the tagged byte stream in, the same bytes
 //! without the tag out. The read side of [`crate::apev2mux::ApeV2Mux`].
 //!

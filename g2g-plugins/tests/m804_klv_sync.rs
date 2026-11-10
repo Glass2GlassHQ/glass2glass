@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M804 - synchronous KLV in MPEG-TS. With `klv-sync`, a `Caps::Klv` input is
 //! muxed as metadata-in-PES (`stream_type` 0x15, PES `stream_id` 0xFC, one
 //! ISO 13818-1 metadata AU cell per access unit) instead of the asynchronous

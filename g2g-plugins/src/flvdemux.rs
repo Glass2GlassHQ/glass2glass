@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! FLV demuxer element: `Caps::ByteStream{Flv}` in, one selected
 //! elementary stream out. H.264 video leaves as `Caps::CompressedVideo` in
 //! Annex-B framing with the `avcC` parameter sets prepended in-band to the first

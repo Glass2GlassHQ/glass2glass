@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+#
+# SPDX-License-Identifier: MPL-2.0
+
 # Regenerate the Matroska ContentEncoding fixtures in g2g-plugins/tests/fixtures
 # and check that ffmpeg demuxes each single-encoding file to the same packets
 # and CodecPrivate as its plain file.

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M775: Ogg-FLAC. `oggdemux stream=flac` maps the `\x7fFLAC` logical stream:
 //! caps from the embedded STREAMINFO, the native `fLaC` header forwarded
 //! in-band, one FLAC frame per packet timed by block size, with ffprobe's

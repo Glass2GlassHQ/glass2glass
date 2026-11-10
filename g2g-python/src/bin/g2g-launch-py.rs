@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! `g2g-launch-py`: a `gst-launch` analog that also registers the hosted Python
 //! elements, so a single text pipeline can run a gst-python-ml element end to
 //! end in pure g2g.

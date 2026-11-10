@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1713: a real YOLO11 pose model on a letterboxed portrait photo, decoded by
 //! `DetectionPostprocess head=pose` and checked against Ultralytics' own
 //! predictions for the same ONNX file: the same people, with every box corner

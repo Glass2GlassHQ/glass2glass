@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M759: framework auto-application of the FrameMeta propagation contract. A
 //! transform that declares a [`meta_transform`] gets its input frame's metadata
 //! propagated and re-attached to its fresh (meta-empty) outputs by the runner,

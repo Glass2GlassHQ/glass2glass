@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1106: PipeWireSink playout-disciplined clock host test.
 //!
 //! Drives a real `PipeWireSink` on the host's PipeWire graph and asserts the

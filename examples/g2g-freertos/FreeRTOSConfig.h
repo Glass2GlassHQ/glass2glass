@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 /* FreeRTOS configuration for the M633 proof: Cortex-M4F on QEMU MPS2-AN386,
  * static allocation ONLY (configSUPPORT_DYNAMIC_ALLOCATION = 0, so no
  * FreeRTOS heap implementation is even linked), which keeps the whole image

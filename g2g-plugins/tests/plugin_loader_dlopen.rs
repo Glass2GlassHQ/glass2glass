@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M201: end-to-end dynamic plugin load. Builds the out-of-tree example plugin
 //! (`tests/fixtures/example-plugin`) as a `cdylib` exactly as a third party
 //! would, `dlopen`s the resulting `.so` into a `Registry`, and runs a pipeline

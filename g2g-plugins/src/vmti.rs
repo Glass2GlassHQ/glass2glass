@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! MISB ST 0903 VMTI (Video Moving Target Indicator) Local Set: the
 //! moving-target reports a detector puts alongside the video, either nested in
 //! ST 0601 tag 74 (the usual STANAG 4609 case, where the enclosing set supplies

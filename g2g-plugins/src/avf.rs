@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! AVFoundation capture.
 //!
 //! Two `SourceLoop` sources, the macOS analog of `Camera2Src` / `AAudioSrc`:

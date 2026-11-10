@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M491: Vulkan Video decode -> wgpu RGBA texture, GPU-resident (no CPU copy).
 //!
 //! Fifth increment of `VulkanVideoDec` (design/decode.md): the frame never

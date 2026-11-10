@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1554: `A420` is I420 plus a full-resolution alpha plane, and `videoconvert`
 //! drops that alpha for I420 and carries it into RGBA.
 

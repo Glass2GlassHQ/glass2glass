@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M872 - MPEG-TS tag carriage. A transport stream has no free-form tag element,
 //! so g2g carries the two things TS standardizes: the SDT `service_descriptor`
 //! (service name + provider) for the whole service, and the PMT's

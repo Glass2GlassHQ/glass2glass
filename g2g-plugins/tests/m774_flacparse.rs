@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M774: the native FLAC parse layer. `flacparse` takes a bare `.flac` byte
 //! stream (arbitrary chunks), announces the STREAMINFO caps, forwards the
 //! `fLaC` header block in-band, and splits CRC-validated frames. The framing

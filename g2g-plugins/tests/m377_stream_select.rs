@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M377 - app-driven stream selection, the playbin SELECT_STREAMS analog. After
 //! a demuxer announces its streams (M376), the app names a stream id to forward
 //! via a `StreamSelectController`; the demuxer switches its single output to that

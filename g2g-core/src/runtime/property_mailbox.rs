@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Per-node property requests a running graph's arms answer: a
 //! [`GraphMutator`](crate::runtime::GraphMutator) set or get is queued here and
 //! the arm that owns the element performs it at its next packet boundary, so the

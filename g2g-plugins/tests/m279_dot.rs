@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M279: the pipeline -> Graphviz DOT visualizer (`Graph::to_dot`), end to end
 //! through the launch parser. A pipeline string is parsed against the standard
 //! registry and rendered to DOT, the data behind `g2g-launch --dot`. Asserts the

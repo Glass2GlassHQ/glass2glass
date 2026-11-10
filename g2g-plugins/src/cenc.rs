@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! MPEG Common Encryption (ISO/IEC 23001-7), shared by the HLS fMP4 path
 //! ([`Fmp4Demux`](crate::fmp4demux), `hls` feature) and the multi-track MP4
 //! demuxer ([`Mp4DemuxN`](crate::mp4demuxn), `mp4-cenc` feature).

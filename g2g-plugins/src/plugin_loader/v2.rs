@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Host side of the **v2 plugin ABI**: the wrapper element that drives a
 //! plugin's `repr(C)` vtable as a normal [`AsyncElement`], and the registration
 //! plumbing the loader hands the plugin.

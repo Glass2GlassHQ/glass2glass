@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1491: a bare `decodebin` on an Ogg file whose first logical bitstream is
 //! video selects the audio bitstream behind it, not the Opus default port.
 

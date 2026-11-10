@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M629: `SpiDisplaySink` drives a mock `embedded-hal` SPI bus + D/C pin and
 //! the recorded wire traffic is asserted against the ST7789 datasheet: the
 //! init sequence (opcodes, parameters, D/C phases, reset/wake delays), the

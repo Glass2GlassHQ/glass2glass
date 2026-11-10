@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+#
+# SPDX-License-Identifier: MPL-2.0
+
 # Build the live camera -> quantize -> Edge TPU chain probe and run it on a
 # connected device, then surface the DarwiNN / Edge TPU logcat. A real camera frame
 # flows Camera2Src -> TensorConvert(quantize) -> OrtInference(uint8 model), which

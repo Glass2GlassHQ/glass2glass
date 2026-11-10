@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Streaming-decoder adapter: presents g2g's Vulkan Video hardware decoders in
 //! the chunk-at-a-time, CPU-frame shape a wgpu-based viewer's async video
 //! backend consumes (the wgpu-texture wedge, see the wedge-strategy note).

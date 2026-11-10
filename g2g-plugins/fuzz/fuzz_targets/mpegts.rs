@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 #![no_main]
 // MPEG-TS demux over untrusted input: PAT / PMT / PES parsing. The input is
 // sliced into 188-byte transport packets (the fixed TS packet size) and each is

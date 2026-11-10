@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Application sink (`appsink`): the application receives buffers out of a
 //! running pipeline (by callback or by pull), the `gst-appsink` analog.
 //!

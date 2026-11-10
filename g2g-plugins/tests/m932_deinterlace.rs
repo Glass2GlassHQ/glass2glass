@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M932: the CPU `deinterlace` element, and the MPEG-2 sequence extension's
 //! `progressive_sequence` flag (which decided the `ps_playbin` insertion until
 //! M935 made the insertion universal and the decision the element's `auto` mode).

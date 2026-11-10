@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Software rectangular crop (Tier-1 A1). Removes pixels from each edge of a raw
 //! video frame, preserving the pixel format, for ROI-driven flows (a detector
 //! emits boxes, the cropper extracts patches a classifier sees). No resampling,

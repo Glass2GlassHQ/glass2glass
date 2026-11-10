@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! SPI TFT display sink over the MIPI-DCS command set (ST7789 / ILI9341
 //! family), generic over `embedded-hal` 1.0 [`SpiDevice`] + a data/command
 //! [`OutputPin`], the standard 4-wire panel wiring. The element owns the real

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Native LiveKit publisher sink (`LiveKitSink`): joins a LiveKit room and
 //! publishes video in any carried codec (and optional Opus audio) over one str0m PeerConnection,
 //! so other room participants can subscribe. This is the T4 signaller layered

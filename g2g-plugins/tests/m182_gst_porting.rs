@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M182: gst-launch convention harmonization. Real `gst-launch` spellings,
 //! GStreamer's videoflip method nicknames, uppercase caps format names, the
 //! `bar`/`checkers-8` pattern names, should port to g2g verbatim. The historical

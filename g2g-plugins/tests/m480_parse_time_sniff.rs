@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M480 - parse-time content sniff for `decodebin`. `bytestream-format=auto` now
 //! sniffs the file header at PARSE time (not just run time), so `decodebin` picks
 //! the demuxer from the real content even when the extension lies, the way

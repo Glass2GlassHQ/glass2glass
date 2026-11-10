@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M104 runtime property system: set/get an element's config by string name and
 //! value, the GObject-property analog the `gst-launch` parser + `gst-inspect`
 //! dump build on. Exercises a source (`VideoTestSrc`, on `SourceLoop`) and two

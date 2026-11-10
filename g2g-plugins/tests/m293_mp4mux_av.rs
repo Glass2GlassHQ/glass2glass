@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M293 A/V fragmented-MP4 muxer: `Mp4MuxN` muxes an H.264 video track and an
 //! AAC audio track into one ISO-BMFF byte stream, interleaving access units by
 //! PTS. Drives the multi-input element directly with synthetic video AUs (SPS +

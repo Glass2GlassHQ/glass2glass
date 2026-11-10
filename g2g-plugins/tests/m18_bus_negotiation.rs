@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M18 item 7 — structured negotiation failures on the bus.
 //!
 //! When startup caps negotiation fails, the runner returns the opaque

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Terminal fan-in runner (`run_fanin_session`): drives N sources into one
 //! terminal `MultiInputElement` with no downstream sink (the shape a multi-track
 //! WebRTC session uses). Asserts each input's frames reach the session tagged

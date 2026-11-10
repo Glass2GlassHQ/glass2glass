@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 // Shared two-plane NV12 texture producer for the WgpuPreprocess texture-import
 // tests (included via `include!`, so plain comments only). Needs `wgpu`.
 

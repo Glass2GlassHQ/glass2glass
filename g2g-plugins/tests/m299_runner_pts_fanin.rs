@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M299 - runner-level PTS-ordered fan-in. A muxer that does NO internal
 //! buffering opts into `MultiInputElement::input_pts_ordered`, and the runner's
 //! `muxer_arm_pts` merges its inputs by `DataFrame` PTS: it releases the

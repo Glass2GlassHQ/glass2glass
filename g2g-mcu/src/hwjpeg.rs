@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Hardware JPEG codec seam: the [`JpegDecoder`] contract, shaped
 //! like the STM32H7 JPEG codec peripheral (feed one complete JFIF bitstream,
 //! the silicon parses the header itself and reports the image parameters,

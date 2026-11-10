@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 // Dedicated module worker that runs a whole g2g graph off the main thread
 // (M1054). One wasm instance per worker, the same single-threaded executor, no
 // SharedArrayBuffer and no cross-origin isolation.

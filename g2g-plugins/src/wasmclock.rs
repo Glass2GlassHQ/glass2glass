@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Browser implementation of [`PipelineClock`] / [`AsyncClock`], backed by
 //! `performance.now()` and `setTimeout`. The wasm analog of `WallClock`, which
 //! is tokio-backed and does not tick on `wasm32-unknown-unknown`.

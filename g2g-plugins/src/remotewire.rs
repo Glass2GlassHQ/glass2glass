@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Shared helpers for the distributed-graph transport elements (the `remote` TCP
 //! pair, the `remote-ws` WebSocket pair and the `webtransport` QUIC family):
 //! mapping a [`WireError`] from the `g2g-core` codec to the pipeline error type,

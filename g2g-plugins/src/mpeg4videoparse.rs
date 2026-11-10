@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! MPEG-4 Part 2 (Visual, ISO/IEC 14496-2) elementary-stream parser.
 //!
 //! Frames the stream into one access unit per VOP (`00 00 01 B6`) together with

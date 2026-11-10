@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! DAG runner fan-in: `run_graph` over muxer nodes (`InterleaveMux`), so the
 //! canonical "split, process two ways, recombine" topology runs end to end.
 //! Pure-fake elements (no hardware).

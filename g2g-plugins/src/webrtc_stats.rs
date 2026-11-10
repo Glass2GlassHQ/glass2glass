@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Live statistics of a WebRTC element's PeerConnection, the str0m
 //! `PeerStats` / `MediaIngressStats` / `MediaEgressStats` events folded into one
 //! snapshot. An element hands out a [`WebRtcStatsHandle`] before its run so the

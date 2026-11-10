@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1157: `WgpuSink` presents the two-plane `TextureFormat::NV12` texture
 //! `VulkanVideoDec` hands out when `NV12` is pinned on the `WgpuTexture` domain,
 //! sampling the decoder's picture through its `Plane0` / `Plane1` views with no

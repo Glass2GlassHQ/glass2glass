@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M110 Matroska / WebM demux, end to end through the DAG runner. A source
 //! produces a `Caps::ByteStream{Matroska}` stream (a synthetic WebM with a VP9
 //! video and an Opus audio track); two `MkvDemux` instances pick it apart, one

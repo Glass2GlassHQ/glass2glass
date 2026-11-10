@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1166: `fallbacksrc`'s `manual-unblock`. With an `UnblockHandle` set, every
 //! life of a `RestartSrc` waits for the application to release it before it
 //! delivers, and the wait re-arms on each restart, so a restarted source is held

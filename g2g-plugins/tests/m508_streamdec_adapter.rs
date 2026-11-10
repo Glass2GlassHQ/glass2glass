@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M508: the streaming-decoder adapter ([`g2g_plugins::streamdec`]).
 //!
 //! Drives [`VulkanStreamDecoder`] the way a wgpu viewer's async chunk decoder

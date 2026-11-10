@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M813 - the nested ST 0903 sets a VTarget can carry: VMask (tag 101),
 //! VObject (102), VTracker (104), VChip (105).
 //!

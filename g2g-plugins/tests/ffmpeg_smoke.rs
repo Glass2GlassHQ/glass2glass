@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M13: smoke test for `FfmpegH264Dec` (libavcodec software H.264 decoder).
 //!
 //! Ignored by default — requires:

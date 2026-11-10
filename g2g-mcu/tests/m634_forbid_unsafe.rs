@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M634: the `forbid(unsafe)` posture proof. This test crate is compiled
 //! under `#![forbid(unsafe_code)]` (a hard error even for `#[allow]`d unsafe,
 //! so it cannot be smuggled back in) and still builds and runs a complete

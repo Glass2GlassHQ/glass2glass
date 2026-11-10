@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1153: `colorspace` converts PQ and HLG to and from the SDR transfers,
 //! tone mapping an HDR source down to the 203 cd/m2 reference white that the
 //! SDR curves put at code 255.

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ReactFlow,

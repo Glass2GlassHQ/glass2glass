@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! RTMP "genuine FMS/FP" digest handshake, the HMAC-SHA256 complex
 //! handshake strict CDNs (Adobe FMS, some Wowza / Facebook Live configs) require
 //! in place of the plain byte-echo simple handshake.

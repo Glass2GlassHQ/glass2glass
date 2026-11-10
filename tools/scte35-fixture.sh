@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+#
+# SPDX-License-Identifier: MPL-2.0
+
 # Regenerate g2g-plugins/tests/fixtures/h264_scte35_splice_insert.ts for the
 # SCTE-35 test (g2g-plugins/tests/m2038_scte35.rs): three seconds of 64x64
 # H.264 from ffmpeg, with a TSDuck splice_insert (event 4660, splice at PTS

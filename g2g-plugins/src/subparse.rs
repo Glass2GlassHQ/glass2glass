@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Subtitle cue parsing (`no_std`): SRT (SubRip) and WebVTT text into a
 //! common timed-text [`Cue`] list, the `subparse` analog. Pure parsing with no
 //! OS dependency, so it sits on the `no_std + alloc` baseline; the `TextOverlay`

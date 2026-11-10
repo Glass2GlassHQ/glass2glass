@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Linux PipeWire audio capture source. The capture sibling of
 //! [`PipeWireSink`](crate::pipewiresink::PipeWireSink): connects an input stream
 //! to the PipeWire graph and streams interleaved PCM (`PcmS16Le` / `PcmF32Le`)

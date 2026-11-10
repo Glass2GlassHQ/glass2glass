@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M475 - app-driven stream selection on the MPEG-TS and MP4 multi-output
 //! demuxers, bringing them to parity with `MkvDemuxN` (M381). A
 //! `StreamSelectController` re-maps which stream each port carries: the app names

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M384 - instant (flushing) URI switch on `GaplessSrc`, the `instant-uri` analog
 //! (vs the M383 gapless `enqueue`). `GaplessController::switch_now` preempts the
 //! *currently playing* item: the source races the item's `run` against

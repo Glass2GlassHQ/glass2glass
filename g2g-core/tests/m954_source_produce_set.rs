@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M954: the DAG runner negotiates a source's whole produce set, not just its
 //! preferred alternative. A camera-shaped source offers several formats in
 //! preference order; what downstream accepts decides which one it captures in,

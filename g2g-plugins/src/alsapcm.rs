@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Shared libasound plumbing for the ALSA render sink and capture source: the
 //! `Caps::Audio` <-> `snd_pcm` format mapping and the device channel-map
 //! permutation. Both directions face the same two problems (which ALSA format a

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M917: closed captions survive a transcode as frame metadata. `H264Parse`
 //! attaches each access unit's `cc_data` as a `CaptionMeta`; the runner carries
 //! that meta across an element declaring `Transform::Encode` (which throws the

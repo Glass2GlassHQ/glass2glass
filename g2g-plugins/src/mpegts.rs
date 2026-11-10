@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! MPEG-2 Transport Stream demuxer: parse a TS byte stream into the
 //! elementary-stream access units it carries (ISO/IEC 13818-1).
 //!

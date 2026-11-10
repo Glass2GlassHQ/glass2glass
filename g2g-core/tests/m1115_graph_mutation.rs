@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1115: structural mutation of a running graph. A transform is spliced onto a
 //! live edge, and lifted back off, while frames keep flowing. M1132: a removed
 //! element's internal queue reaches the consumer before the bypass. M1133: the

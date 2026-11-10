@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M479 - progressive / whole-file MP4 through a linear chain. A local `.mp4`
 //! types as `ByteStream{Mp4}` (M478), and the single-output `Mp4Demux` (registered
 //! as `qtdemux` and in the `decodebin` autoplug pool) demuxes it to its video

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M198 step 4d: `PySource`, a Python frame source hosted as a g2g `SourceLoop`.
 //!
 //! Negotiation + launch registration are always testable; the live produce loop

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M766: the Matroska demuxers convert an AVCC / HVCC length-prefixed H.264 /
 //! H.265 track (the container-native framing, declared by the `avcC` / `hvcC`
 //! `CodecPrivate`) to the Annex-B framing the g2g pipeline assumes, prepending

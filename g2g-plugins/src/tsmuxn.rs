@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! MPEG-TS multiplexer element: N elementary streams in (e.g. H.264
 //! video + AAC audio, or one of them alone), one MPEG-TS byte stream out, the
 //! everyday live-streaming container case. Wraps the pure [`crate::mpegts::TsMuxer`],

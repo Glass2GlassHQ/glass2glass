@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Authenticated encryption for SRTP and SRTCP: the RFC 7714 AES-GCM profiles
 //! and the RFC 3711 / RFC 6188 AES counter-mode and HMAC-SHA1 ones.
 //!

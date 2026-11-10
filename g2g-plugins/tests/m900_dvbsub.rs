@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M900: DVB subtitles (ETSI EN 300 743), validated against ffmpeg.
 //!
 //! ffmpeg has a `dvbsub` encoder but refuses text-to-bitmap subtitle encoding,

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M735: the `CVPixelBuffer` zero-copy memory domain on the macOS CI runner.
 //! `VtDecode` in `cv-output` mode emits retained IOSurface-backed pixel
 //! buffers (`MemoryDomain::CvPixelBuffer`), and `VtEncode` consumes them

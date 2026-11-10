@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Instance-segmentation decode (design/ml.md): turns the two output tensors of
 //! a YOLO `-seg` model into [`Segmentation`] and [`Roi`] analytics nodes, the
 //! mask-producing sibling of the box decoder in [`crate::detect`].

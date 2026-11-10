@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M849 preview taps on fan-in arms: an edge whose destination is a muxer /
 //! session takes a [`LinkInterceptor`] through `Observer::edge_probe` exactly
 //! like a linear edge, so the dashboard's edge preview works on a muxer input.

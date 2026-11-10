@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Silence detector (`cutter`). A passthrough that watches the S16LE signal
 //! level and flips between "above" (signal present) and "below" (silence) state,
 //! the g2g analog of GStreamer's `cutter` (which posts the transitions on the

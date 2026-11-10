@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M615: a reference-implementation (`ffmpeg`) conformance oracle that produces
 //! *persisted* `Oracle` evidence, the tier the in-process battery cannot reach.
 //!

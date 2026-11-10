@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M777: Vorbis decode. `oggdemux stream=vorbis` forwards the three header
 //! packets in-band and the audio packets whole; the pure-Rust `vorbisdec`
 //! (symphonia) stashes ident + setup, decodes, and stamps PCM from decoded

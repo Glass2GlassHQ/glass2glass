@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! RtspServerSrc end-to-end over loopback: a minimal RTSP *publisher* connects,
 //! runs OPTIONS / ANNOUNCE / SETUP / RECORD against the server source, then
 //! pushes RTP to the server's negotiated port. Proves the ingest (RECORD)

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1032: a hosted aggregator reads a non-video payload and emits a buffer of a
 //! different size.
 //!

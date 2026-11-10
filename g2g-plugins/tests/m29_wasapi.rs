@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M29: `AudioTestSrc -> WasapiSink` plays a test tone on the default render
 //! endpoint through the real runner. The audible-output mirror of the M25
 //! `WavSink` test.

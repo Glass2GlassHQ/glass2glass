@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M875 / M877: a fan-in arm's deadline tick.
 //!
 //! A fan-in element that declares a `tick_interval_ns` receives

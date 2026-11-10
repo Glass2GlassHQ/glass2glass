@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 #![no_main]
 // MP4 box parsing over untrusted input: g2g-owned pure-Rust demux, prime target.
 use libfuzzer_sys::fuzz_target;

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M135 VP9 parser, end to end through the DAG runner: a source emits a
 //! synthetic WebM with a VP9 video track, `mkvdemux` selects it (the default),
 //! and `vp9parse` refines the caps from the keyframe before the sink. The

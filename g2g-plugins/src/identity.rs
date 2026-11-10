@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Identity transform: forwards every `DataFrame` downstream unchanged.
 //! Useful for validating transform plumbing and as a base for stat-collecting
 //! tee elements.

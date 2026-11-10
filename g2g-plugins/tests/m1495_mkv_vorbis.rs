@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1495: Matroska carries Vorbis (headers Xiph-laced in the `CodecPrivate`),
 //! so a Vorbis WebM decodes through a bare `decodebin` instead of failing on
 //! the demuxer's default video port.

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 #![no_main]
 // SRT keying-material message parsing: the KM control message a peer sends to
 // establish the stream encryption key (header layout, wrapped-key length, salt),

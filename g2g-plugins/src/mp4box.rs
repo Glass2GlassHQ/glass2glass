@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Shared fragmented-MP4 box primitives for the MP4 muxer/demuxer elements
 //! (`fmp4mux`/`mp4src` and their audio counterparts). Writers build
 //! size-prefixed boxes; readers walk the box tree. std-gated like its callers.

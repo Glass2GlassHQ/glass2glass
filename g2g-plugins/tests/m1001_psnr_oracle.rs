@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1001 reference-decoder PSNR oracle: decode a committed fixture with the ffmpeg
 //! CLI and with the in-repo decoder, then measure one against the other.
 //!

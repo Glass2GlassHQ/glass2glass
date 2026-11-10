@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M835 HLS / CMAF Common Encryption: mid-stream `#EXT-X-KEY` rotation, `cbcs`
 //! audio, per-sample IVs (`cenc`), `cens` pattern AES-CTR (M867),
 //! `saiz`/`saio`-located sample auxiliary information and `seig` sample groups at

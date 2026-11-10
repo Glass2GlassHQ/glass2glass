@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1163: `fallbacksrc` rebuilds a dead source. The launch keyword wraps its
 //! `uri=` and `fallback-uri=` sources in `RestartSrc`, which rebuilds the source
 //! when it fails, stalls for `restart-timeout`, or ends under `restart-on-eos`,

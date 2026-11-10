@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! RTSP server sink (RtspServerSink, `rtsp-server` feature): hosts a pipeline's
 //! H.264 as an RTSP endpoint and serves it over RTP to connecting players (the
 //! OBS / surveillance / contribution-server shape), on either transport a player

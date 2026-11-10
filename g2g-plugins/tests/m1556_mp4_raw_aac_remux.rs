@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1556: an AAC-ELD track demuxed as raw access units behind its
 //! AudioSpecificConfig remuxes into MP4 with that config as the `esds` and the
 //! units as the samples, and the MPEG-TS muxer writes it as LOAS rather than

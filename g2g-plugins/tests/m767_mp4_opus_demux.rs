@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M767: Opus in MP4 demuxes. The muxer already wrote the `Opus` sample entry
 //! and `dOps`; now the demux side recognizes it, so an Opus track surfaces as
 //! `Caps::Audio { Opus }` with the raw packets forwarded verbatim (no ADTS

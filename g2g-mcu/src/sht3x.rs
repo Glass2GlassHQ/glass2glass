@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! I2C environmental-sensor source: a real driver for the Sensirion SHT3x
 //! (SHT30 / SHT31 / SHT35 temperature + humidity), over the portable
 //! `embedded-hal` 1.0 [`I2c`] seam. It broadens the peripheral catalog from the

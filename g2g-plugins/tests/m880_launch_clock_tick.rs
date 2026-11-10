@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M880: the fan-in deadline tick reaches a `parse_launch` pipeline.
 //!
 //! `compositor timed-output=true` declares a tick interval, and the cooperative

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! `srtpenc`: SRTP or SRTCP protection for one RTP or RTCP flow.
 //!
 //! Which flow an instance carries comes from the caps the link settled on

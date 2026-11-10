@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Watchdog: fails the pipeline when no packet crosses the element for
 //! `timeout` milliseconds, the gst `watchdog` analog. Put it behind a live
 //! source so a feed that goes silent tears the run down instead of hanging.

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M443: the live chain - Android camera -> quantize -> Edge TPU inference, the
 //! pieces of M308 / M441 / M442 wired end to end on the device.
 //!

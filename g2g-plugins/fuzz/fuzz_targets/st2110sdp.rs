@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 #![no_main]
 // ST 2110 SDP text parsing: the media / rtpmap / fmtp / ptp lines a receiver
 // configures from, attacker-controlled as `from_utf8_lossy` text.

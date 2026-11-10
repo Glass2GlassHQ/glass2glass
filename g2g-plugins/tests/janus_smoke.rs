@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! `JanusVrSink` against a real Janus. Ignored by default: it needs a running
 //! Janus with the videoroom plugin and the WebSocket + HTTP transports, so it
 //! is a user-run harness, not a CI gate.

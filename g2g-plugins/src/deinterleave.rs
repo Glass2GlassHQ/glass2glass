@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Channel splitter (`deinterleave`), the fan-out that turns one N-channel PCM
 //! stream into N mono streams: channel `i` of every sample frame becomes output
 //! pad `i`, keeping the input's pts and duration. CPU-only, `no_std` baseline.

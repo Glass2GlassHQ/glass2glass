@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Multi-file source (`multifilesrc`). Reads a sequence of files named from a
 //! printf-style `location` pattern (e.g. `img%05d.jpg`), emitting each whole file
 //! as one `DataFrame`, until a file in the sequence is missing. The g2g analog of

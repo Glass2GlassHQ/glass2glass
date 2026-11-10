@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! H.265 (HEVC) access-unit parser that refines source-side `Caps`.
 //!
 //! The H.265 sibling of `h264parse`: it scans each `DataFrame` for an SPS NAL

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! HTML canvas presentation sink (browser/wasm). Consumes decoded RGBA
 //! `System` frames and draws them to a `<canvas>` via the 2D context
 //! (`ImageData` + `putImageData`), completing the in-browser glass-to-glass

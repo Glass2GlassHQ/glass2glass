@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M776: a mid-stream `CapsChanged` whose forward re-solve DEFERS (the
 //! element's derived output has several alternatives, e.g. a decoder offering
 //! S16LE | F32LE) must not feed the incoming INPUT caps to `configure_output`,

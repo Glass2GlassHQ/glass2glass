@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1164: a restarting source reports itself on the bus. `RestartSrc` posts
 //! `BusMessage::SourceRestart` as each life starts, as a rebuild is decided, and
 //! when the stream ends, carrying the death's reason and the rebuild tally; the

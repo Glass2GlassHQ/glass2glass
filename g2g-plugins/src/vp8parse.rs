@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! VP8 frame parser that refines source-side `Caps` from the keyframe header.
 //!
 //! The VP8 counterpart of `h264parse`: it reads each `DataFrame`'s 3-byte frame

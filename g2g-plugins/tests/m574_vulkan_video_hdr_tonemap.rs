@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M574: PQ / HLG HDR -> SDR tone-mapping in the GPU-texture converter, on real
 //! hardware.
 //!

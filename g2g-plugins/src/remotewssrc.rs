@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Remote WebSocket transport source (`remote-ws` feature): the WebSocket
 //! receive half of the distributed-graph primitive, the inverse of
 //! [`RemoteWsSink`](crate::remotewssink) and the sibling of the TCP

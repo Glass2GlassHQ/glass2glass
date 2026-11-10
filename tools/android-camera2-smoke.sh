@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+#
+# SPDX-License-Identifier: MPL-2.0
+
 # Build the Camera2 capture probe for Android and run it on a connected device.
 # Camera capture needs the CAMERA permission (an APK), which a bare native binary
 # from /data/local/tmp lacks, so the probe validates the caps + FFI linkage and

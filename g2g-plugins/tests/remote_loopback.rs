@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Distributed-graph primitive end-to-end over loopback (M551): a graph edge
 //! cut across a TCP boundary. The near side drives a `RemoteSink` (serializing
 //! the `PipelinePacket` stream via the g2g-core wire codec); the far side runs a

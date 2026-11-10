@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! HLS source (HlsSrc, `hls` feature): fetches an `.m3u8` playlist, selects a
 //! variant (simple bandwidth-capped ABR), and streams that variant's MPEG-TS
 //! media segments downstream as a `Caps::ByteStream{MpegTs}` for `tsdemux`, then

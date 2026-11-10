@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M980 runtime caps dump: `g2g-launch --run-json` runs the line to EOS and
 //! prints the `--validate-json` shape with each edge's caps as observed while it
 //! ran, so a stream whose geometry only arrives with the data reports what it

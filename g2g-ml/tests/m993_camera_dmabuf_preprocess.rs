@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 #![cfg(all(target_os = "linux", feature = "dmabuf-wgpu"))]
 //! M993: packed YUYV, the format a webcam exports, through the M990 dma-buf
 //! handshake into `WgpuPreprocess`, and the live camera that produces it.

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Stream concatenation (`concat`). Plays its N inputs one after another: input
 //! 0 forwards until it ends, then input 1, and so on, producing a single output
 //! stream (the g2g analog of GStreamer's `concat`). Frames arriving on an input

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Shared helpers for crate-internal tests: collect packets from an
 //! `AsyncElement` without each module reinventing a sink.
 

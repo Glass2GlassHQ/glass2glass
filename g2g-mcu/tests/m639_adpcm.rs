@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M639: the IMA ADPCM codec (WAV / DVI4 block layout, mono), validated
 //! against the reference peer in all three directions: our encode of a
 //! full-range signal is byte-identical to ffmpeg's `adpcm_ima_wav` encoder,

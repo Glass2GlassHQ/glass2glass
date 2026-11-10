@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Remote rendering with zero streaming code: a spinning cube on a lit plane,
 //! rendered headless and streamed by `RemoteRenderPlugins`. With the `nvenc`
 //! feature on an NVIDIA GPU the frames are encoded without ever leaving the

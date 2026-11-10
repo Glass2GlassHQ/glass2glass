@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! V4L2 device discovery: enumerates `/dev/videoN` capture nodes as
 //! [`Device`] records so a [`DeviceMonitor`](g2g_core::runtime::DeviceMonitor)
 //! lists cameras with the modes their driver actually reports.

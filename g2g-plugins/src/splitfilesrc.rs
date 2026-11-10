@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Split-file source (`splitfilesrc`). Reads every file matching a wildcard
 //! pattern, in name order, as one continuous byte stream: the playback half of a
 //! recording that was cut into parts (`multifilesink`, or `splitmuxsink`'s

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1198: `fallbacksrc` runs an application-built source in place of `uri=`.
 //! The application registers a `FallbacksrcSourceFactory` on the registry, and a
 //! `fallbacksrc` line with no `uri=` builds its main branch from it. The factory

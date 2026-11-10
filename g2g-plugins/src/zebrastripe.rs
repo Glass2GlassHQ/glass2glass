@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Zebra stripe overlay (`zebrastripe`). Marks the overexposed parts of a frame
 //! with diagonal black stripes, the exposure aid a camera viewfinder draws.
 //! Format and geometry are preserved. CPU-only `no_std` baseline.

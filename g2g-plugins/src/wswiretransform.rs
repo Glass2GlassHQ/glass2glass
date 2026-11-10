@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Browser remote transform for the distributed-graph primitive (`web`):
 //! the wasm twin of the native [`RemoteWsTransform`](crate::remotewstransform),
 //! and the generic replacement for the bespoke `WebRemoteDetect` shim.

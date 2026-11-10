@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Zero-copy libcamera -> GPU feasibility (the Linux analog of the CUDA /
 //! AHardwareBuffer interop in [`crate::cudawgpu`] / `mediacodec_wgpu`).
 //!

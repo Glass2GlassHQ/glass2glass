@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M568: AV1 film grain on the GPU-texture decode path, on real hardware.
 //!
 //! The zero-copy `decode_all_to_textures` path (M494's AV1 sibling) produces the

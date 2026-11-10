@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! DASH MPD manifest parser (a subset of ISO/IEC 23009-1), driven by
 //! [`DashSrc`](crate::dashsrc). Pure (no I/O), so it is fully unit-testable:
 //! the wall-clock live math takes "now" as an argument.

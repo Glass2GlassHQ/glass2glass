@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1075 `scaletempo`: a segment rate other than 1 stretches the audio to the
 //! playback speed without moving its pitch, re-stamps the output onto a rate-1
 //! timeline, and rewrites the segment it forwards.

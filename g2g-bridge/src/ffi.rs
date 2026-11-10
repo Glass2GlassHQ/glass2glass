@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! C-ABI surface the GStreamer GObject shell (`csrc/gstglass2glass.c`) calls.
 //!
 //! The shell owns all GObject / GStreamer boilerplate (type registration, pad

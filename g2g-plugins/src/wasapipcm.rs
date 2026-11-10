@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! WASAPI pieces shared by the render sink, the capture source, and the
 //! endpoint provider (the Windows sibling of [`alsapcm`](crate::alsapcm)):
 //! selecting an endpoint by id, and reading a `WAVEFORMATEX` as the PCM shape

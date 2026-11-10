@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! DASH source (DashSrc, `dash` feature): fetches an MPD manifest, selects a
 //! Representation (simple bandwidth-capped ABR), and streams its fMP4 init +
 //! media segments downstream as a `Caps::ByteStream{IsoBmff}` for `fmp4demux`,

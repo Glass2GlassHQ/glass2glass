@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Headerless raw-audio framer (`rawaudioparse`): a `ByteStream{Raw}` dump in
 //! (a `.pcm` file, arbitrary chunks from `filesrc`), timestamped `Audio` buffers
 //! out, each holding whole sample frames.

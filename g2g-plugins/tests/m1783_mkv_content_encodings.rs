@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 // Python compressed these files, in tools/mkv-content-encoding-fixtures.sh, and
 // ffmpeg demuxes each single-encoding one like its plain file
 

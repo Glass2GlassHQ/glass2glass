@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M840: enum nicks and flag sets on real elements, through the real launch
 //! parser. An element's declared `enum_values` is the closed set the parser
 //! validates a `key=nick` against, so a typo names the element, the property, and

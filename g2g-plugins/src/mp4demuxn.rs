@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Multi-output fragmented-MP4 demuxer element: one ISO-BMFF byte stream
 //! in, N elementary streams out, one track per output port. The MP4 sibling of
 //! [`MkvDemuxN`](crate::mkvdemux::MkvDemuxN) and

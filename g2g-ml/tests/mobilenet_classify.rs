@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M446: a real (non-toy) quantized vision model end to end through the g2g
 //! element graph. Where the M440-M444 probes proved the on-NPU *plumbing* (a
 //! [1,3,4,4] toy conv on the Edge TPU), this proves *utility*: the validated

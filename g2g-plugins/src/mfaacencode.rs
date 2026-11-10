@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Windows AAC audio encode element wrapping the Media Foundation AAC
 //! Encoder MFT. Consumes interleaved 16-bit PCM (`PcmS16Le`) `DataFrame`s and
 //! produces raw AAC-LC access units (`AudioFormat::Aac`, `MemoryDomain::System`,

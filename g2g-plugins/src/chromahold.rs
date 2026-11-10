@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Chroma hold (`chromahold`). Keeps the colour of every pixel whose hue is
 //! within `tolerance` degrees of the target and turns the rest grey, on a packed
 //! RGBA / BGRA frame. Format and geometry are preserved. CPU-only `no_std`

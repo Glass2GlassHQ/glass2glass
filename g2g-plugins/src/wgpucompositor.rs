@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! wgpu compute compositor: the GPU sibling of the CPU
 //! [`Compositor`](crate::compositor) for HD / many-input scale. Same
 //! N-in-1-out [`MultiInputElement`] surface, same [`CompositorPad`] semantics

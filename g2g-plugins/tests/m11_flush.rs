@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M11 flush: a mid-stream `Flush` packet resets element position so the
 //! stream resumes (here, with a restarted sequence) without terminating.
 

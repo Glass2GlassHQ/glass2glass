@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M745: audio decode-to-PCM from the launch CLI.
 //!
 //! Three things had to line up for a decode-to-raw-PCM line to negotiate and

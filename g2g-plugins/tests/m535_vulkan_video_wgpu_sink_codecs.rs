@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M535: the zero-copy wedge end to end for **all three codecs** --
 //! `VulkanVideoDec` -> `WgpuSink` for H.264, H.265, and AV1.
 //!

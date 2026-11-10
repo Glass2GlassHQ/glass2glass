@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Shared pixel-format helpers for the packed-RGBA element family.
 
 use g2g_core::RawVideoFormat;

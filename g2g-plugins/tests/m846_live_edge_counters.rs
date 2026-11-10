@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M846 live per-edge telemetry: the `Observer` tap carries each link's packet /
 //! byte / drop counters while the run is still going (drops previously only
 //! surfaced in the end-of-run `RunStats`), and the hand-built fan-in runner has

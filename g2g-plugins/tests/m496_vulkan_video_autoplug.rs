@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M496: `vulkanvideodec` is auto-plugged for a WgpuTexture consumer.
 //!
 //! The Vulkan Video decoder is registered as an auto-plug candidate tagged

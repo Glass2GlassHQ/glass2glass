@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! VobSub sidecar source: reads a `.idx` / `.sub` pair from disk and
 //! emits it as a [`Caps::SubPicture`] `VobSub` stream, so DVD subtitles that sit
 //! next to a video as two files play like a muxed track:

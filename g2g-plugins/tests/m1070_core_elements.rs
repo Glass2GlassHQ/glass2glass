@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1070: the gst `coreelements` g2g was missing, driven the way a pipeline
 //! drives them.
 //!

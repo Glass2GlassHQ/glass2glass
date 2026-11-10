@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! RIST sender (RistSink, `rist` feature), VSF TR-06-1 Simple Profile. It takes
 //! an MPEG-TS byte stream and sends it as RTP MP2T (payload type 33, seven TS
 //! packets per RTP packet, like `rtpmp2tpay`) to `address`:`port`, with RTCP

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Software PCM sample-rate converter (the last Tier-1 audio transform, the
 //! resampler `AudioConvert` deliberately left out). Converts interleaved PCM
 //! (`PcmS16Le` / `PcmF32Le`) from its input rate to a configured target rate,

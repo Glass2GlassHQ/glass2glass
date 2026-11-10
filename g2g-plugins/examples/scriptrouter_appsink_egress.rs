@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Live appsink egress: a Rhai `scriptrouter` splits one stream onto two
 //! `appsink` pull channels, and the application pulls each channel *live* while
 //! the pipeline runs, observing real per-frame delivery timing. This is the

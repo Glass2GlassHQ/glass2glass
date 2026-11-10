@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Boundary-scoped time newtypes: distinct types at the clock / PTP / RTP
 //! seam, where three different "just an integer" times meet and are easy to mix up.
 //!

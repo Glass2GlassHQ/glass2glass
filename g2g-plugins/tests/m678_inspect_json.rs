@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M678 machine-readable registry dump: `g2g-inspect --json` emits the element
 //! catalog (identity, role, pads, typed properties) the visual pipeline builder
 //! and the MCP server consume.

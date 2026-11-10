@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1189 - a remote transform that brings back metadata alone.
 //!
 //! The generic round trip ships the whole frame both ways, which is waste for a

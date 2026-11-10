@@ -1,3 +1,7 @@
+# Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+#
+# SPDX-License-Identifier: MPL-2.0
+
 # The other room participant in the m1784_livekit_data peer tests.
 import argparse
 import asyncio

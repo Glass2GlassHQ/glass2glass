@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1550: an FLV VP6 tag's dimension adjustment byte rides at the front of the
 //! unit `flvdemux` emits, and `flvmux` writes it back, so a remux is byte-exact.
 

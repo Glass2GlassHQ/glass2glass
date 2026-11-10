@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M724 mid-stream re-solve through the fan-in session runners: a source that
 //! changes caps mid-stream re-configures its session input pad (both the
 //! standalone `run_fanin_session` and the graph `FaninSink` arm), so a

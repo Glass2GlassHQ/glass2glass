@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M593 phase C: `PtpSystemClock` host smoke test.
 //!
 //! Drives a `PtpSystemClock` against the host's `CLOCK_TAI` and asserts the

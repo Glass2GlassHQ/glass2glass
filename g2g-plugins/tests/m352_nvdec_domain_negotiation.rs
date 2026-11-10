@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M352: prove the M351 two-sided allocation-domain negotiation end-to-end on a
 //! real NVIDIA GPU. `NvDec` is now a multi-domain producer: it can keep decoded
 //! NV12 surfaces resident in CUDA device memory (zero-copy) *or* download them to

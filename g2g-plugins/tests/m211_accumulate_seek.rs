@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M211 - non-flushing (accumulating) seek, end to end. Unlike a flushing seek
 //! (M82), a non-flushing seek does NOT reset the running-time clock or flush the
 //! pipeline: the source emits a new `Segment` whose `base` is the running time

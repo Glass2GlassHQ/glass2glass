@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1100: DTLS-SRTP key delivery, the `dtlssrtpenc` / `dtlssrtpdec` pair.
 //!
 //! A handshake runs over the media socket and the RFC 7714 layer is keyed from

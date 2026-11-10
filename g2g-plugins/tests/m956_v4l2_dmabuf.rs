@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M956 `v4l2src io-mode=dmabuf`: the driver's MMAP capture buffers are exported
 //! once as dma-buf fds and handed downstream with no copy, so a GPU consumer can
 //! import the camera buffer directly.

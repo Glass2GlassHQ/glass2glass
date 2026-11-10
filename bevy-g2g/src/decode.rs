@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Bring-your-own-device decode: a stock windowed Bevy
 //! app keeps its own wgpu device; g2g joins it via `GpuContext::from_wgpu` and
 //! decodes video straight onto it. Every decoded frame is a `wgpu::Texture`

@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+#
+# SPDX-License-Identifier: MPL-2.0
+
 # Build the g2g browser cdylib into tools/wasm-demo/pkg/ with wasm-bindgen glue.
 #
 # Requires: rustup wasm32 target (`rustup target add wasm32-unknown-unknown`) and

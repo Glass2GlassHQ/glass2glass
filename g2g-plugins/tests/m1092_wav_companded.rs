@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1092 `wavenc` writes the payloads `wavparse` reads: mu-law, A-law and IMA
 //! ADPCM, not only PCM.
 //!

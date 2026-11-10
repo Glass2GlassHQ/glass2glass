@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M18 Phase C fan-out — per-branch downstream re-solve (FO-2) with the
 //! FO-1 strict failure default, driven through `run_source_fanout`.
 //!

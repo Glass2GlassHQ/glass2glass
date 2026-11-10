@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Chebyshev band-pass / band-reject (`audiochebband`). An IIR cascade whose
 //! sections are fourth order, `poles` poles with `ripple` dB of ripple.
 //! Preserves format, channel count, and sample rate. CPU-only `no_std`.

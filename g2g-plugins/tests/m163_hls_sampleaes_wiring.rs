@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M163 HLS SAMPLE-AES key auto-wiring. A `METHOD=SAMPLE-AES` playlist makes
 //! `HlsSrc` fetch the `#EXT-X-KEY` key, publish it (with the resolved IV) into a
 //! shared handle for a downstream `SampleAesDecrypt`, and forward the segment

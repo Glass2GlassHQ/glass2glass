@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Android audio via the NDK AAudio API (`AAudioStream`).
 //!
 //! Two elements, the Android analog of the WASAPI / ALSA / PulseAudio audio

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Video playback with zero pipeline code: a stock windowed Bevy app plus
 //! `VideoPlayerPlugin`; the cube is tagged `VideoScreen` so it plays the clip
 //! (decoded by g2g onto Bevy's own wgpu device, zero-copy).

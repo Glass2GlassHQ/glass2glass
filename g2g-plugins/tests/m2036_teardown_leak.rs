@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M2036: building, running and dropping pipelines many times returns the heap,
 //! the open file descriptors and the thread count to where they started.
 #![cfg(all(

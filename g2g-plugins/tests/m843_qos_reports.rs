@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M843: the QoS reports a synchronizing sink posts, through the real
 //! `SyncSink`. Two cadences: the running stats on a report interval (pipeline
 //! clock, not wall clock), and the per-drop report a late frame triggers. Both

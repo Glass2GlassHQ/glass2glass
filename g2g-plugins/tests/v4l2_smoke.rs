@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! End-to-end smoke test for the V4L2 capture source.
 //!
 //! Pipeline: `V4l2Src -> VideoConvert(Yuyv -> Nv12) -> FakeSink`, with an

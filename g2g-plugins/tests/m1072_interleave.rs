@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1072 `interleave` / `deinterleave`: channel routing. N mono streams merge
 //! into one N-channel stream and back, through the launch DSL (fan-in pads and
 //! fan-out pads) and through direct `process` calls for the alignment and

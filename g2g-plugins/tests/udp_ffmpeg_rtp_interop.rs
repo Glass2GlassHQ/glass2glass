@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Real-peer RTP interop (M528): ffmpeg's RTP H.264 payloader (`-f rtp`) streams
 //! into the g2g `UdpSrc`, which depayloads RFC 6184 RTP (single-NAL / FU-A /
 //! STAP-A) back into Annex-B access units. This proves the g2g depayloader +

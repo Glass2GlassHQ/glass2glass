@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 #![cfg(all(target_os = "linux", feature = "cuda-wgpu", feature = "nvenc"))]
 //! M271: the wgpu -> CUDA -> NVENC moat. Proves a GPU-rendered RGBA texture can
 //! be H.264-encoded with no device->host read-back, the path the M267 Bevy demo

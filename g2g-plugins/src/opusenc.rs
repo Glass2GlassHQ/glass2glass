@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Opus audio encoder element (OpusEnc, `opus` feature): `Audio{PcmS16Le}` or
 //! `Audio{PcmF32Le}` in (the float path uses libopus' `opus_encode_float`, no
 //! S16 quantize), `Audio{Opus}` out, via libopus through the `opusic-sys` crate.

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Metadata replay: reattaches the records a
 //! [`MetaSink`](crate::metasink::MetaSink) wrote to the frames at the same
 //! timestamps, the gst-python-ml `pyml_metareplay` analog. Pixels pass through

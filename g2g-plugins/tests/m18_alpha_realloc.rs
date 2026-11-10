@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M18 α — element-local re-allocation on a mid-stream caps change.
 //!
 //! First observable M18 behavior change. Before α, M12 allocation ran

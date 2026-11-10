@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M21: `OrtInference` end-to-end against real ONNX Runtime (CPU EP).
 //!
 //! The model fixture is built in-test by hand-encoding the ONNX protobuf

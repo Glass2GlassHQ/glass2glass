@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M481 - named input / request pads on muxers, the input-side transpose of the
 //! M476 output-pad selection. A `gst-launch` line references a muxer's inputs by
 //! name (`... ! o.video`, `... ! o.text`, `... ! m.audio_0`) instead of relying on

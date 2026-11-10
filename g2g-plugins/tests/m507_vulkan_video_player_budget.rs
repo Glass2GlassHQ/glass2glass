@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M507: `VulkanVideoPlayer` hardening -- memory-budgeted LRU + cache-traversed.
 //!
 //! Two follow-ups to the M499 frame-count LRU:

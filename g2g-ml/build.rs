@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 const LIBRARY_DIRECTORY_VARIABLE: &str = "EXECUTORCH_RS_EXECUTORCH_LIB_DIR";
 
 // the `executorch` crate links the runtime but not the operator kernels a program calls

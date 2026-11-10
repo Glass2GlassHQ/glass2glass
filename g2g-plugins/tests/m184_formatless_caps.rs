@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M184: format-less / partial geometry caps. A `video/x-raw` capsfilter with no
 //! `format` field (the gst-idiomatic geometry-only caps) parses and negotiates,
 //! expanding to all raw formats at the pinned geometry and intersecting down to

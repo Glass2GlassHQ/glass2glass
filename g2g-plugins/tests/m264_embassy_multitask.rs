@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 #![cfg(feature = "embassy-link")]
 //! M264: a three-stage pipeline runs as three *independently spawned* tasks on a
 //! real Embassy executor (`platform-std`), not the single `block_on`-joined

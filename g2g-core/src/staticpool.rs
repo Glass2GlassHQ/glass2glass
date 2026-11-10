@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Strict no-heap buffer pool for `no_std` RTOS targets that cannot tolerate
 //! `alloc`, the counterpart of `crate::pool::BufferPool` (which is
 //! `Arc`/`Vec`-backed). Sized at construction with a fixed `[T; N]`; acquiring

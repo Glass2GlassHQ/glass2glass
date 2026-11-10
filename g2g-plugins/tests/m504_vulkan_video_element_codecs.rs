@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M504: the `VulkanVideoDec` pipeline element decodes H.265 and AV1, not just
 //! H.264.
 //!

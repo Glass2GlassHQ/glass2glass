@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M136 AV1 parser, end to end through the DAG runner: a source emits a
 //! synthetic WebM with a V_AV1 track, `mkvdemux` selects it, and `av1parse`
 //! refines the caps from the sequence-header OBU before the sink. The OBU walk

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! ONVIF analytics metadata (`onvif` feature): the scene description a
 //! camera streams on its `application/vnd.onvif.metadata` RTSP track, turned
 //! into the same [`AnalyticsMeta`] graph a detector writes.

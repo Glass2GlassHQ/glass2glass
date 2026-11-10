@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M899: VobSub (DVD subpicture) bitmap subtitles, validated against ffmpeg.
 //!
 //! The fixture is the hand-authored `.idx` / `.sub` pair of the `vobsub_fixture`

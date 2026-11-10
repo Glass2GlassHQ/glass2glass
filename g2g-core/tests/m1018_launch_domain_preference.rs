@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1018: a launch line's `decodebin` picks its decoder from the memory the
 //! consumer declares it takes, the text-parser counterpart of the graph-side
 //! derivation (M989). Two H.264 decoders are registered, a CPU one first and a

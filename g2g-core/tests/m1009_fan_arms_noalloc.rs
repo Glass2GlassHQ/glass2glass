@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1009: the fan-in / fan-out arms of `run_graph` are heap-free in steady
 //! state, the way M1000 made the transform / sink arms. The demux arm and the
 //! two muxer arms are monomorphized over their element via the `drive_*_arm`

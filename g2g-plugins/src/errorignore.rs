@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Error ignore: passes data through and turns a failure from downstream into
 //! one the run survives, the gst `errorignore` analog. Put it above a branch
 //! that is allowed to die (a preview sink on a display that went away) so the

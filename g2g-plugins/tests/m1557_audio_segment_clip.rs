@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1557: an audio decoder trims its PCM to the upstream segment, sample-accurate
 //! at both edges, and `qtdemux` sends an AAC track's edit list as that segment, so
 //! the priming goes the way ffmpeg drops it.

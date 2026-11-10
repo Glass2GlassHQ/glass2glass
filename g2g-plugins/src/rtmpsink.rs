@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! RTMP egress sink (RtmpSink, `rtmp` feature): connects out to an RTMP server
 //! (`rtmp://host[:port]/app/streamkey`) and *publishes* an incoming FLV byte
 //! stream (`Caps::ByteStream{Flv}`, as produced by `flvmux`). The inverse of

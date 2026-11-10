@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M18 β (Session B) — coordinator control-channel topology.
 //!
 //! Validates the channel scaffolding `run_source_transform_sink` now

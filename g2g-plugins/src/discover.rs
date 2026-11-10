@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Media discovery: what a file or URI contains, without hand-writing a
 //! graph. The `gst-discoverer-1.0` analog behind the `g2g-discover` binary.
 //!

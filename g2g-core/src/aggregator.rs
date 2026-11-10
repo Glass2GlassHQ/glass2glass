@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Per-input collector for `MultiInputElement` aggregators.
 //!
 //! Every N-in-1-out element (muxer, compositor, tensor batcher, the Python

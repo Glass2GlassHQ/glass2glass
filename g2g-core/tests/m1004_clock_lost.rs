@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1004 clock loss + re-election.
 //!
 //! The runner elects a clock once at startup and hands it to every sink. When

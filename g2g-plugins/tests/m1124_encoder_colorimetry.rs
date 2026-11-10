@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1124: `FfmpegVideoEnc` writes the caps colorimetry into the SPS VUI colour
 //! description and carries it on its output caps.
 //!

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! ID3 tag stripper element (`id3demux`): the tagged byte stream in, the same
 //! bytes without the tags out.
 //!

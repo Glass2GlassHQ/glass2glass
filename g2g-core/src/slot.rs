@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Lock-free atomic-swap container for dynamically replaceable elements.
 //!
 //! M8 piece 6: the primary mechanism by which the dynamic graph layer

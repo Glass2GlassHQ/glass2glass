@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Long-running stability soak for the RTSP + ffmpeg decode path.
 //!
 //! Pulls H.264 from a local RTSP server, decodes through `FfmpegH264Dec`,

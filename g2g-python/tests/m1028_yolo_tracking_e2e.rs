@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! End-to-end host of the real gst-python-ml `yolo` element with `track=true`
 //! under `MP_BACKEND=g2g`, the tracking counterpart of the M322 detector test.
 //!

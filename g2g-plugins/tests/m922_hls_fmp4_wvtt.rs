@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M922 - an fMP4 (`wvtt`) HLS subtitle rendition plays like a raw `.vtt` one:
 //! `HlsSrc(text)` fetches the rendition's `#EXT-X-MAP` init segment, de-frames the
 //! ISO 14496-30 cues out of each fragment, and forwards them as the same

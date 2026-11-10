@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M641: the fixed-point polyphase resampler. No external implementation is
 //! bit-comparable (every resampler picks its own filter), so the oracle is
 //! analytic ground truth: the generated tables' invariants (exact per-phase

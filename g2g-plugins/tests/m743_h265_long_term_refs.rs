@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M743: Vulkan Video H.265 long-term reference pictures.
 //!
 //! The decoder used to reject any SPS with `long_term_ref_pics_present_flag`

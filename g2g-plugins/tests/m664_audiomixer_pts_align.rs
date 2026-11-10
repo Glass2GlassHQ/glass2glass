@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M664 `audiomixer` PTS-based alignment. Drives the real `AudioMixer` element
 //! through `MultiInputElement::process`, checking that buffers land on a shared
 //! output timeline by PTS (not arrival): overlapping ranges sum, a PTS gap mixes

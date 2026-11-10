@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M195: reflect a source's `bytestream-format` into `decodebin`'s auto-plug
 //! input. A `filesrc bytestream-format=matroska ! decodebin` now selects
 //! `matroskademux`, not `filesrc`'s factory-default container (MPEG-TS). The

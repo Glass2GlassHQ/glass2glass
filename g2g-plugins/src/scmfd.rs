@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! SCM_RIGHTS file-descriptor passing over a Unix socket (`local-dmabuf`,
 //! `unixfd`).
 //!

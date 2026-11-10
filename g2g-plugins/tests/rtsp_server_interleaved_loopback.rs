@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M532: RtspServerSrc TCP-interleaved ingest (RFC 2326 §10.12) over loopback. A
 //! minimal RTSP *publisher* connects, runs OPTIONS / ANNOUNCE / SETUP (asking for
 //! `RTP/AVP/TCP;interleaved=0-1`) / RECORD, then pushes RTP as `$`-framed binary

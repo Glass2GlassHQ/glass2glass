@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1034: `FileSrc` honours `num-buffers`, the GStreamer `filesrc` property that
 //! caps how many chunks a source emits before EOS.
 

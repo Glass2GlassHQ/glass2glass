@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Mid-session track REMOVE and pad recycling on the duplex WebRTC session
 //! (M785), the inverse of M784's spare-pad ADD. `DuplexControl::remove_track`
 //! stops the track's m-line (port 0, out of the BUNDLE group), which frees its

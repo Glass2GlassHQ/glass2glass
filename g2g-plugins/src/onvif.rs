@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! ONVIF camera discovery + RTSP stream-URI resolution.
 //!
 //! An ONVIF camera does not stream over ONVIF; the ONVIF SOAP services

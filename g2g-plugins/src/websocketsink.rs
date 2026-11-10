@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! WebSocket egress sink (browser/wasm). Opens a `WebSocket` and sends each frame's
 //! bytes as a binary message: the send side of the browser pipeline
 //! (`PatternSrc -> WebCodecsEncode -> WebSocketSink`), the egress analog of

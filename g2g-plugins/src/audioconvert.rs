@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Software PCM converter, the audio analog of `VideoConvert`. Converts
 //! interleaved PCM between sample formats (`PcmU8` / `PcmS16Le` / `PcmS24Le` /
 //! `PcmS32Le` / `PcmF32Le`, all via an f32 intermediate) and

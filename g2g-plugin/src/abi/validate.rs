@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Validation of everything a plugin hands the host.
 //!
 //! Every field below is attacker-controlled: a `.so` on the plugin path may be

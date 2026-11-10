@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! The media the str0m WebRTC elements carry: the video codecs they packetize
 //! and depacketize, the sinks' accepted caps, the sources' placeholder caps, and
 //! the `video-codec` property every receiving element exposes, and the

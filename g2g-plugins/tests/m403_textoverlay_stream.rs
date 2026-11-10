@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M403: `TextOverlayN` overlays a *streamed* subtitle track onto video.
 //!
 //! Drives the real fan-in graph `video -> textoverlayn.video` +

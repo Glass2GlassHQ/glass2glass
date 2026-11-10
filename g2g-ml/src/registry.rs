@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Launch-line registration for the ML elements.
 //!
 //! The stock element registry is assembled in `g2g-plugins`, which does not

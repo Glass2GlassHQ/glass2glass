@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Picture order count (H.264 8.2.1, H.265 8.3.1) for callers outside a decoder.
 //!
 //! Display order is written down in exactly one place in a coded H.264 / H.265

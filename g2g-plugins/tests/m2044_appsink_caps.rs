@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M2044: an appsink pull channel reports the caps of each frame it hands over,
 //! including after a mid-stream resolution change.
 #![cfg(feature = "std")]

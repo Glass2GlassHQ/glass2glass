@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Shared receive-side core for the distributed-graph source elements.
 //!
 //! [`RemoteSrc`](crate::remotesrc) (TCP), [`RemoteWsSrc`](crate::remotewssrc)

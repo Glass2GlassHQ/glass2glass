@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M2042: HTTP serving from the pipeline. `hlssink http-port` answers for the
 //! playlist and the segments it has published, and `httpserversink` streams a
 //! muxed MPEG-TS, fMP4 or live Matroska byte stream to clients that join

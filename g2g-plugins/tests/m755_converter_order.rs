@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M755 - element order between `audioconvert` and `audioresample` must not matter
 //! for a mid-stream rate retarget. A 44.1 kHz decode reaching a `rate=48000` pin
 //! flows to 48 kHz whether the resampler sits before or after the converter.

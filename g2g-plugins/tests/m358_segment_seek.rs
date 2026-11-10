@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M358 - SEGMENT seek (segment playback / gapless looping), end to end.
 //!
 //! A `SeekFlags::SEGMENT` seek asks the source to play `[start, stop]` and, on

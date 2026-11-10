@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M188: forward-resolve walk. Two caps-driven (auto) transforms stacked before
 //! a single far capsfilter now resolve: the downstream pin propagates *back*
 //! through the transforms. The solver does this by filtering each auto

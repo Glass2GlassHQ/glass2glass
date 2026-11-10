@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! The MCU graph document schema. Deliberately a *different* schema from the
 //! dynamic `g2g_plugins::declarative::GraphSpec`, not a copy: this one carries
 //! the frame geometry a static build needs (`frame_ns`, `frames`, per-source

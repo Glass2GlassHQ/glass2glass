@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M858: writing chained Ogg. `oggmux` treats a `Segment` arriving after audio
 //! as a chain boundary: the logical bitstream in progress closes on an
 //! end-of-stream page and the next link opens on a fresh serial. That is exactly

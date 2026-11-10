@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 /* Host-side proof for the C seam ABI (M650): a real C caller that IS the
  * peripheral. It registers a C capture callback (the board's mic/DMA, here the
  * library's shared reference ramp so the input is byte-identical to the Rust

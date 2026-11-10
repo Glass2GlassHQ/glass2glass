@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Manual-unblock channel: the app -> source side-channel a
 //! `fallbacksrc` restart wrapper waits on before each life of its source, so the
 //! application decides when a restarted source's data reaches downstream. This

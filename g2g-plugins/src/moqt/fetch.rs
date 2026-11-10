@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! The FETCH response data stream: the header that opens it and the object
 //! serialization that follows (draft-16 §10.4.4, draft-18 §11.4.4).
 //!

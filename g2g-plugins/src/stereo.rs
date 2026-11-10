@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Stereo widener (`stereo`). Splits each stereo frame into its mono average
 //! and the two per-channel differences, then scales the differences: below 1
 //! the image narrows toward mono, above 1 it widens. Preserves format, channel

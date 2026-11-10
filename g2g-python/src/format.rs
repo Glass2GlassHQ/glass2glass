@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! The shared pixel-format contract between g2g and the gst-python-ml backend.
 //!
 //! gst-python-ml's `tasks/frame_format.py` and its `FrameIO.read_frame(s)`

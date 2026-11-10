@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! ST 2110-30 PCM audio over RTP: the packetizer and depacketizer for
 //! uncompressed linear PCM, AES67-compatible (RFC 3190 L16 / L24).
 //!

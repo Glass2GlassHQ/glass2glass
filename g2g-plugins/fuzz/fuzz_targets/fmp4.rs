@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 #![no_main]
 // Fragmented-MP4 / CMAF demux over untrusted input: the moof / traf / trun / senc
 // box parsing the HLS-fMP4 path runs, distinct from the progressive mp4_streams

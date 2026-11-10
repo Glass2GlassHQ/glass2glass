@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! ESP32-P4 (RISC-V) on-device Tier-1 harness: drive the heap-free g2g display
 //! pipeline (`noalloc_pipeline::run_display_with`, the same camera -> transform
 //! -> `SpiDisplaySink` graph every no_std proof covers) onto the ESP32-P4-EYE's

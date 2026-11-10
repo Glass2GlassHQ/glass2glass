@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! End-to-end zero-copy GPU frame egress across a process boundary:
 //! `WgpuToDmaBuf -> DmaBufSink` in one process, `DmaBufSrc -> DmaBufToWgpu` in
 //! another, with only a dma-buf fd crossing (over a Unix socket via SCM_RIGHTS).

@@ -111,6 +111,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M2195: MPEG-TS demuxing follows a PAT version change to its new programs and PMT PIDs, and unwraps a truncated last KLV cell.
 - M2196: `dashsrc` lands a seek into a gap between timeline segments on the segment after it.
 - M2197: `wavparse` times IMA and MS ADPCM by their block layout rather than the header byte rate.
+- M2198: every source file carries a copyright and SPDX licence header, and CI fails on a file without one.
 
 Breaking: `TimecodeMeta.frames` is a `u16`, `WIRE_VERSION` is 4, and `RtpRecvConfig` gains `parameter_sets`.
 

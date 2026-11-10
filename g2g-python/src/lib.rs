@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Host gst-python-ml elements as first-class glass2glass elements.
 //!
 //! Experimental (Tier 3 in `STABILITY.md`): no stability promise.

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Closed-caption extraction element (`no_std`): tap a compressed
 //! H.264 / H.265 / MPEG-2 video stream, mine the in-band closed-caption `cc_data`
 //! triples from each access unit (SEI, or MPEG-2 picture `user_data`), decode the

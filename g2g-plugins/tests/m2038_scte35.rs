@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M2038: SCTE-35 splice sections ride `PipelinePacket::SpliceInfo` from
 //! `tsdemux` to `mpegtsmux`, which writes them on `scte-35-pid`. The input is a
 //! TSDuck splice_insert (`tools/scte35-fixture.sh`), and ffprobe reads both files:

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1563: `qtdemux stream=aac` reads the audio of a fragmented MP4 from its
 //! fragments, and sends an AAC track with 960-sample frames, which ADTS cannot
 //! signal, as raw access units behind its AudioSpecificConfig.

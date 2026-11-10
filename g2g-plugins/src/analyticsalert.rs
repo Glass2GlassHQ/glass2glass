@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Analytics alert: fires configurable rules on the detections a frame
 //! carries, the gst-python-ml `pyml_alert` analog. A rule names a class, a
 //! minimum score and a zone; a detection matching all three raises an alert.

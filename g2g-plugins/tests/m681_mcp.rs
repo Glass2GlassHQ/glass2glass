@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M681 MCP server: `g2g-mcp` speaks JSON-RPC 2.0 over stdio and exposes the
 //! inspect / validate / launch / run_graph tools for agent-driven dev, plus
 //! live-telemetry progress notifications for the two run tools. Drives the built

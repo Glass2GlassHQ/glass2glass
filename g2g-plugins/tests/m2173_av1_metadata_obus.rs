@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M2173: AV1 metadata OBUs. SVT-AV1 codes the HDR10 mastering display and
 //! content light level as metadata OBUs, `av1parse` attaches them as
 //! `HdrStaticMeta`, and the values must equal what ffprobe reads from the same

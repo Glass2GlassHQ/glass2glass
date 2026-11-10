@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M829: `OpusDec` packet-loss concealment. Nothing upstream marks a lost
 //! packet, so the decoder infers loss from the timeline: each packet's TOC gives
 //! its coded duration, so a packet arriving later than the previous one's end

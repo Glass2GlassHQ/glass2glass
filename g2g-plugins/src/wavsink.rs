@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! WAV file sink. Writes interleaved PCM (`PcmU8`, `PcmS16Le`,
 //! `PcmS24Le`, `PcmS32Le` or `PcmF32Le`)
 //! to a standard RIFF/WAVE file, so an audio pipeline's output is playable

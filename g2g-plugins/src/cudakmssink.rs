@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! CUDA-GL display sink on DRM/KMS (`CudaKmsSink`): the tty / no-compositor
 //! counterpart of [`crate::cudaglsink`].
 //!

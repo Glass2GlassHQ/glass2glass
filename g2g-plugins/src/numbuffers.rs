@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Shared `num-buffers` runtime-property conversion for the source elements.
 //!
 //! gst `basesrc` spells the property as a signed int where -1 means "run

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Audio render seam: the I2S / SAI-shaped [`PcmWriter`] contract plus
 //! [`PcmSink`], the heap-free [`StaticSink`] that streams a frame's
 //! interleaved S16LE payload to the audio peripheral. The element owns the

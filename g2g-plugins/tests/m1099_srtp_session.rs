@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1099: the SRTP session controls a long-running stream needs, on the real
 //! runner: a sized replay window, repeated transmission, MKI-selected keys, and
 //! the counters each element keeps.

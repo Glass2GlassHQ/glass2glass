@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M519: `VulkanVideoDec` reconfigures mid-stream on a resolution change.
 //!
 //! The decode session + DPB are built lazily from the first keyframe's parameter

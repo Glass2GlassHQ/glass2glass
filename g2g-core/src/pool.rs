@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Buffer pools.
 //!
 //! M4 provides the `Arc`-recycled variant for `alloc` targets. A buffer is

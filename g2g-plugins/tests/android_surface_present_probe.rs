@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M305: on-device probe for the Android decode -> GPU -> surface present path.
 //!
 //! M304 took the decoded frame onto the GPU as an RGBA `wgpu::Texture` (no CPU

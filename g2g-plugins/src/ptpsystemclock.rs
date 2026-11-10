@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! PTP system clock: a [`PtpClock`] driven from the OS's
 //! PTP-disciplined system time, the "works with `linuxptp` today" delegate
 //! backend.

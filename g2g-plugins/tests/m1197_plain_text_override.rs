@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1197: `filesrc bytestream-format=text` types a file as plain UTF-8 text
 //! whatever its extension, so a prompt kept as `.md` feeds a text element.
 

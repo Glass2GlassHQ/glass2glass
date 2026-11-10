@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Raw file-descriptor source and sink (`fdsrc` / `fdsink`): read from an
 //! already-open descriptor, write to another, so a g2g pipeline sits in a shell
 //! pipe or takes a descriptor from the process that spawned it.

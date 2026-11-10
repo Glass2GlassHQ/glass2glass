@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Auto-plug: a runtime element registry plus a decode-chain search over the
 //! static pad-template metadata (design/caps.md, design/TODO.md "Auto-plug /
 //! element registry / `decodebin`-equivalent").

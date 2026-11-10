@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Subtitle / text file source: reads a `.srt` / `.vtt` / `.ssa` / `.ttml`
 //! file and emits its contents as a [`Caps::Text`] stream, the streaming
 //! counterpart of the out-of-band file `TextOverlay` loads with `location=`. It is

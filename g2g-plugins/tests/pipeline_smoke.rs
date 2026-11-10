@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 use g2g_core::runtime::{run_simple_pipeline, run_source_transform_sink};
 use g2g_core::{
     AsyncElement, Caps, ConfigureOutcome, G2gError, OutputSink, PipelineClock, PipelinePacket,

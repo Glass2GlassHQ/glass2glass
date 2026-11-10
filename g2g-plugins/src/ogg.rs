@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Ogg demuxer + page writer: parse an Ogg byte stream into the
 //! packets of its logical bitstream (RFC 3533), the Opus / Vorbis carrier, and
 //! frame packets back into pages.

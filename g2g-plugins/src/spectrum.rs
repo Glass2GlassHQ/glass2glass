@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Audio spectrum analyzer (`spectrum`). A passthrough that runs a windowed FFT
 //! over the mono-mixed S16LE signal and exposes per-band magnitudes via a getter,
 //! the g2g analog of GStreamer's `spectrum` (which posts the same values on the

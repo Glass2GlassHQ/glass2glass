@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M569: Vulkan Video H.264 / H.265 B-frame decode with display-order output.
 //!
 //! B-frames make decode order differ from display (presentation) order: a frame is

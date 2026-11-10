@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Peripheral-breadth proof: an I2C sensor -> UART telemetry pipeline on
 //! the emulated Cortex-M4. A mock SHT3x on the I2C bus returns a datasheet
 //! response (raw words + CRC-8); the `Sht3xSrc` driver validates the CRCs and

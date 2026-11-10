@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M859: CMAF low-latency chunking on the fragmented-MP4 muxers.
 //!
 //! `chunk-duration` splits each fragment into CMAF chunks, a `moof`+`mdat` pair

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Software spatial resampler (P1.1). Scales raw video to a configured
 //! output geometry, preserving the pixel format: `1080p -> 720p`,
 //! thumbnails, or fitting a stream to an ML model's fixed input size. Pairs

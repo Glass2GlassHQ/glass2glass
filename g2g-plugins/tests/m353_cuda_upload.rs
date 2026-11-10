@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M353: `CudaUpload` (System NV12 -> CUDA), the host->device mirror of
 //! `CudaDownload` and the converter that lets a CPU-side NV12 stream feed
 //! `NvEnc`, which ingests `MemoryDomain::Cuda` only. Validated on a real NVIDIA

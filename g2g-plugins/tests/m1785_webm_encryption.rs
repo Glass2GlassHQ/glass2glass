@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 // Shaka Packager encrypted these files with a raw key, in tools/webm-encryption-fixtures.sh,
 // and ffmpeg's framemd5 of the clear inputs is what decryption must give back
 

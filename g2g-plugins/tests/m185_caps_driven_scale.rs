@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M185: caps-driven transforms. A `videoscale` with no `width`/`height`
 //! properties takes its output geometry from a downstream capsfilter (the gst
 //! idiom `videoscale ! video/x-raw,width=...,height=...`), via the new

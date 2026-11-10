@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Benchmark for the runner loop's inner transport: the bounded per-edge
 //! channel every frame crosses. The full `run_graph` paces to PTS (wall-clock
 //! bound, unsuitable for a microbench), so this isolates the hot mechanism, a

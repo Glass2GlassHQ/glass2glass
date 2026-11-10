@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! IMA ADPCM elements: `adpcmenc` packs mono or stereo
 //! `Audio{PcmS16Le}` into the WAV / DVI block layout at 4 bits per sample,
 //! `adpcmdec` unpacks it.

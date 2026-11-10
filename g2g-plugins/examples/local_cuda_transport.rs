@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Cross-process validation of the local CUDA transport elements
 //! (`local-ipc`). Two *separate processes* move NV12 frames GPU->GPU with no PCIe
 //! round trip: the producer's VRAM is shared to the consumer through a CUDA IPC

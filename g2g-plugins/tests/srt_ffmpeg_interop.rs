@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Real-peer SRT interop (M522): an `ffmpeg` SRT *caller* (libsrt under the
 //! hood) publishes a short MPEG-TS stream into the g2g `SrtSrc` *listener*. This
 //! is the interop the g2g<->g2g loopback (`srt_loopback`) cannot prove: that the

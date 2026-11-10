@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Fragmented-MP4 demuxer source (H.264 and HEVC), the read-side counterpart
 //! of `mp4mux`: parses a single-video-track fMP4 and emits Annex-B H.264 or
 //! H.265 access units with their recovered timing, so a recording plays back

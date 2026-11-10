@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! RTP ingress seam: the receive-direction inverse of [`RtpSink`](crate::RtpSink).
 //! [`PacketReceiver`] is the thin trait a board's network stack implements (one
 //! datagram in per call, the lwIP `recv` / Zephyr `recvfrom` shape); [`RtpSrc`]

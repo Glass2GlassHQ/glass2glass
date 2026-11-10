@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Three-band audio equalizer (`equalizer-3bands`). Cascades three RBJ peaking
 //! biquads (low / mid / high) over an interleaved S16LE stream, each band's gain
 //! set in dB, preserving format, channels, and rate. CPU-only `no_std`.

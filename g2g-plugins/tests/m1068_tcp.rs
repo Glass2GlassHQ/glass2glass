@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1068: the plain TCP byte-stream elements. Each loopback pairs a g2g client
 //! with a g2g server over `127.0.0.1` on an OS-picked port (`port=0`, read back
 //! through `current-port`) and asserts the received file is byte-for-byte the

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! GStreamer's shared-memory IPC pair (`shm` feature): [`ShmSink`] and
 //! [`ShmSrc`] speak the `shmpipe` protocol of `sys/shm/` in gst-plugins-bad, so
 //! either end can be a `gst-launch-1.0` process. The wire itself is in

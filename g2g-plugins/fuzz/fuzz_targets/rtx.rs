@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 #![no_main]
 // RTP retransmission (RFC 4588) packet parsing: header offset walk (CSRC + one-
 // byte extension), RTX unwrap (OSN strip), and re-wrap over attacker bytes.

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Fan-in fairness / backpressure regression (M93). Two sources feed a
 //! compositor whose output is consumed by a deliberately slow (paced) sink, so
 //! the muxer's input channels stay full and both per-input forwarders block on

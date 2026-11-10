@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+#
+# SPDX-License-Identifier: MPL-2.0
+
 # Build the NNAPI / XNNPACK ONNX Runtime EP probe for Android and run it on a
 # connected device. NNAPI is a system API (no permission, no APK), so this runs as
 # a plain native binary from /data/local/tmp like the AAudio/MediaCodec probes.

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M477 - subtitle handling in a `gst-launch` line: the `subparse` launch element,
 //! the `textoverlay` fan-in muxer (video + text stream join, the analog of
 //! GStreamer's `textoverlay` text_sink request pad), and `d.text_0` subtitle-stream

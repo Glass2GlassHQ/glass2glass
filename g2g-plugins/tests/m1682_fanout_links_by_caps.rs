@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 // A bare `d.` / `s.` branch of a fan-out takes the first free stream its first element
 // accepts, as gst-launch links a delayed pad by caps, so an audio branch written before the
 // video branch still gets the audio.

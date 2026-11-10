@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1098: the `srtpenc` / `srtpdec` elements, RFC 7714 AES-GCM protection on a
 //! pipeline link. Every leg runs the real runner with the elements linked in a
 //! graph.

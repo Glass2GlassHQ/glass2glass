@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! MPEG-1 / MPEG-2 video bitstream headers and the timestamp synthesis they
 //! drive, shared by the program-stream and transport-stream demuxers.
 //!

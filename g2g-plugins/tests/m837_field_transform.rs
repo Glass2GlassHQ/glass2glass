@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M837: closure-free field transforms. A caps-driven transform declares its
 //! forward derivation as data (`CapsTransform`: an ordered list of output shapes,
 //! each field `Identity` / `Fixed` / `Scale`) instead of a closure plus a

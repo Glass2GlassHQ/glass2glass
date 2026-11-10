@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 #![cfg(feature = "mqtt")]
 //! M1179: `mqttsink` and `mqttsrc` against a real broker. mosquitto runs on a
 //! free port with a password file. For the sink, `mosquitto_sub` subscribes and

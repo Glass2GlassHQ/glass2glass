@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M129 `videobox`: the box element is registered in `default_registry` and
 //! runs in a text pipeline (changing geometry), with its signed `Int` / `Str`
 //! properties parsed from text. The canvas math is unit-tested in the module.

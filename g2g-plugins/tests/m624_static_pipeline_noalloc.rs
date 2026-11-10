@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M624: the static element model (`g2g_core::staticelem`, Phase 2 of the
 //! alloc-optional core) runs a whole `source -> transform -> sink` pipeline with
 //! zero heap allocations, proven with a counting global allocator.

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Buffer-time overlay (`timeoverlay`). Burns a timestamp derived from each
 //! frame, formatted as `HH:MM:SS.mmm`, into a packed RGBA / BGRA frame with the
 //! embedded 8x8 [`bitmapfont`], preserving format and geometry. CPU-only

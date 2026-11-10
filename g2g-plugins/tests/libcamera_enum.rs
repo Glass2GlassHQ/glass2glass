@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Diagnostic: print the camera's libcamera-advertised pixel formats and sizes.
 //! Not an assertion test, a probe to understand a device's real capabilities.
 //! `cargo test -p g2g-plugins --features libcamera --test libcamera_enum -- --ignored --nocapture`

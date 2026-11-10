@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 use core::ffi::{c_int, c_uint};
 
 use g2g_core::meta::{PlaneLayout, MAX_PLANES};

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1204: `g2g-launch-py --inspect`, `--docgen` and `--mcp` list the hosted
 //! Python elements, which the g2g-plugins tools cannot see. Drives the built
 //! binary: `cargo test -p g2g-python --features launch --test

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M663 `H265Parse` against a real H.265 elementary stream: ffmpeg (libx265)
 //! encodes a short Annex-B stream with B-frames (so the SPS carries real
 //! short-term RPS sets on the way to the VUI), and the re-framing parser must

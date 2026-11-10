@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Validation against a real STANAG 4609 UAS capture (M806): the public
 //! "Day Flight" sample (samples.ffmpeg.org, MPEG2/mpegts-klv), a 2009 EO
 //! sensor flight muxed by a real airborne encoder: 1280x720 H.264 plus an

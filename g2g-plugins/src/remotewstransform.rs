@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Remote WebSocket transform (`remote-ws` feature): a media-agnostic
 //! *remote stage* over a WebSocket. Where the `RemoteWsSink` / `RemoteWsSrc`
 //! pair cuts an edge one-way, `RemoteWsTransform` keeps the graph shape and

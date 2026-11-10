@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! UDP egress sink for H.264 or Opus over RTP. The I/O half of the live-egress
 //! path whose Sans-IO half is `rtppay::RtpH264Packetizer` /
 //! `rtppay::RtpOpusPacketizer`: this sink drives the packetizer over each

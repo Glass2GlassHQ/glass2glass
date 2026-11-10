@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 // a sink has no output pad, so every way of building a graph refuses to link one to a downstream element
 
 use g2g_core::log::{self, LogLevel, RingSink};

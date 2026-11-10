@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1188 - the Linux audio sinks read a dma-buf in place.
 //!
 //! `AlsaSink` / `PulseSink` / `PipeWireSink` hand a host pointer to their

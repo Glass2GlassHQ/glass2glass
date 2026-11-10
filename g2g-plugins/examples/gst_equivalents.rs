@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! gst-launch <-> g2g worked equivalents.
 //!
 //! `cargo run -p g2g-plugins --features std --example gst_equivalents`

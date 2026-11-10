@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M650: the C FFI seam adapters (`CFrameGrabber` / `CPacketSender`) let C code
 //! be a g2g peripheral. This proves the seam is byte-transparent: the SAME
 //! pipeline (`capture -> G.711 mu-law encode -> RTP`) driven through the C

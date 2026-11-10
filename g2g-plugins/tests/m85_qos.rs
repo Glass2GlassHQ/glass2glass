@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Phase 2 observability: QoS bus messages (M85). A `SyncSink` under a clock
 //! that has already run past every frame's deadline drops the late frames
 //! (instead of presenting them late) and posts a `BusMessage::Qos` per drop.

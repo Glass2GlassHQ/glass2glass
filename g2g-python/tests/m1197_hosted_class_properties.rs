@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1197: a hosted element whose class answers `g2g_properties` lists that
 //! class's properties in its inspection dump, and a launch line naming one the
 //! class lacks is refused at parse. Needs libpython (`python` feature).

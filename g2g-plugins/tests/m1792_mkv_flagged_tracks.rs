@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 // a selected track whose ContentEncoding the demuxer cannot undo fails the stream before any of its stored bytes go out
 
 #![cfg(feature = "std")]

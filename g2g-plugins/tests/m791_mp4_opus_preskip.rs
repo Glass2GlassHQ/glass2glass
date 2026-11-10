@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M791: Opus pre-skip survives MP4 in both directions, and the presentation
 //! timeline it defines is exact.
 //!

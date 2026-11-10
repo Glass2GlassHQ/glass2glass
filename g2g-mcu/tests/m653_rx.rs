@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M653: receive direction on-MCU. The RX chain, `RtpSrc -> JitterBuffer ->
 //! G.711 decode`, reconstructs an ordered media stream from a jumbled RTP wire
 //! (reorder, duplicate, loss) on mock peripherals. The jitter buffer's reorder /

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M748 - bare `decodebin` auto-plugs an audio-only MP4. The single-stream
 //! [`Mp4Demux`](g2g_plugins::mp4demux) fixes its output pad before parsing any
 //! byte, so it defaults to a video port; on an audio-only `.m4a`, `filesrc

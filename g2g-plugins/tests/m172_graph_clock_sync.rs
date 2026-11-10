@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M172: the DAG runner (`run_graph`) hands the elected pipeline clock to its
 //! sinks via `set_clock_sync`, so a sink in a graph pipeline PTS-paces like one
 //! in the linear runners (M169). Before this, `run_graph` elected a clock but

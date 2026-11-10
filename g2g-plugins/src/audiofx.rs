@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Filter kernels shared by the `audiofx` transforms: the PCM boundary every
 //! one of them sits behind, the windowed-sinc FIR (`audiowsinclimit` /
 //! `audiowsincband`) and the Chebyshev IIR cascade (`audiocheblimit` /

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 use alloc::string::{String, ToString};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 

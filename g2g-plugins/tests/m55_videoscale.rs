@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! P1.1: `VideoScale` in a real negotiated chain. An RGBA test source at
 //! one geometry reaches the sink resampled to the configured target dims,
 //! framerate preserved, announced via a `CapsChanged` before the first

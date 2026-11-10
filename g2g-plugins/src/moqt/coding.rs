@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Primitive wire coding for IETF MoQ Transport draft-16: QUIC varints, the
 //! byte/string forms, track namespaces and names, and the delta-coded
 //! Key-Value-Pair sequences that carry every parameter.

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M381 - app-driven stream selection on the multi-output demuxer. A
 //! `StreamSelectController` re-maps which stream each `MkvDemuxN` port carries:
 //! the app names a stream id per port (from the M376 collection), and the demuxer

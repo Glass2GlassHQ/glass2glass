@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! `WgpuColorConvert`: NV12 to RGBA on the GPU, texture in, texture out.
 //!
 //! Takes an NV12 [`MemoryDomain::WgpuTexture`] frame (a

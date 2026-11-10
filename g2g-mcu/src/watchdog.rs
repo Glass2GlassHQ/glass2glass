@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Hardware watchdog seam for the supervised MCU path: the thin trait a board's
 //! watchdog peripheral implements, plus the adapter that lets the
 //! [`Supervisor`](g2g_core::supervise) pet it on every frame of forward progress.

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! KLV-in-TS interop against ffmpeg as the reference peer (M799/M800): ffmpeg
 //! must identify the g2g-muxed metadata stream as KLV (proving the PMT's 'KLVA'
 //! registration parses), extract the packets bit-exact, and a TS re-authored by

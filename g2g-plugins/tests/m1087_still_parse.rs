@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1087 still-image parsers: `jpegparse` and `pngparse` frame a byte stream
 //! back into whole images, and a `.jpg` now types by content because the
 //! auto-plugged decode chain splices the parser ahead of the decoder.

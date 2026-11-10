@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1148: the audio capture sources offer a disciplined clock, the input mirror
 //! of the M1106 sink-side playout clock.
 //!

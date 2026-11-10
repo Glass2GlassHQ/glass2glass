@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M564: Vulkan Video AV1 multi-tile full-DPB decode on real hardware.
 //!
 //! The M506 fixture is single-tile; real AV1 streams split each frame into a

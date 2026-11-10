@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M291 fragmented-MP4 muxer element: `Mp4MuxN` wraps an H.264 elementary stream
 //! into an ISO-BMFF byte stream forwarded downstream (the gst `mp4mux`/`qtmux`
 //! analog: `... ! x264enc ! mp4mux ! filesink`). The strong test is a real

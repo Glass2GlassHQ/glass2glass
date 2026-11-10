@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M761: `UdpSink`'s FEC modes as launch properties. Proves a `gst-launch`-style
 //! property assignment (the same `set_property` path `parse_launch` drives) both
 //! selects the FEC scheme and applies its block geometry: the repair packets that

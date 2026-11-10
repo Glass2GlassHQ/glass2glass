@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! On-screen live demo of the HDR swapchain present: a 10-bit HDR10 (PQ,
 //! BT.2020) clip is decoded on the GPU via `VK_KHR_video_*` into an `Rgba16Float`
 //! texture holding the stream's PQ-encoded R'G'B' (the decoder's passthrough

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! MPEG audio stream parser element (`mpegaudioparse`): an MPEG-1/2/2.5 Layer II
 //! or Layer III byte stream in (`Caps::Audio{Mp2|Mp3}`, arbitrary chunks from
 //! `filesrc`), one frame per buffer out.

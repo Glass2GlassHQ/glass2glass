@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Wall-clock overlay (`clockoverlay`). Burns the current time of day into a
 //! packed RGBA / BGRA frame, the g2g analog of GStreamer's `clockoverlay`. The
 //! text is a strftime-style `time-format` (default `%H:%M:%S`), and the box

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 #![no_main]
 // ST 2110-7 seamless dedup: parses the RTP header of each redundant packet.
 use libfuzzer_sys::fuzz_target;

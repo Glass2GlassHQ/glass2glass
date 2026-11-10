@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M360 - re-preroll after a flushing seek while paused.
 //!
 //! A non-live pipeline in `Paused` prerolls one frame and holds, backpressuring

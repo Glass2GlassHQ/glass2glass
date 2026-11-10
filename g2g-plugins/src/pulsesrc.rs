@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Linux PulseAudio capture source: the input mirror of
 //! [`PulseSink`](crate::pulsesink::PulseSink) and the higher-level sibling of
 //! [`AlsaSrc`](crate::alsasrc::AlsaSrc). Records interleaved PCM from a

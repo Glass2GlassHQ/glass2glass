@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Still-frame stream generator (`imagefreeze`). Holds the first frame it sees
 //! and emits copies of it on a fixed framerate grid, turning one decoded image
 //! into a video stream. Format and geometry pass through; only the framerate is

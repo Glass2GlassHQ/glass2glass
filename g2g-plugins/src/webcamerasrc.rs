@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Camera capture source (browser/wasm). Opens a webcam via `getUserMedia`,
 //! reads the track's frames through a `MediaStreamTrackProcessor`, and emits each
 //! as an RGBA `System` `DataFrame`: the real "capture" side of the browser egress

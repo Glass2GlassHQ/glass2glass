@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1041: `TensorBatcher` stacks a round by concatenating each slot's bytes on
 //! the CPU, so it declares system memory and the allocation cascade downloads a
 //! GPU-resident tensor feeding it rather than letting `process` reject it.

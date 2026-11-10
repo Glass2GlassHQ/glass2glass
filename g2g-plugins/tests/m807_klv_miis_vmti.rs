@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M807 / M808 - the ST 1204 MIIS core identifier (ST 0601 tag 94) and the
 //! nested ST 0903 VMTI local set (tag 74).
 //!

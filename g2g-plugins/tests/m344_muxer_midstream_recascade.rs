@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M344: mid-stream β allocation re-cascade across a muxer.
 //!
 //! M343 made a muxer's per-pad allocation demand cross the boundary at *startup*

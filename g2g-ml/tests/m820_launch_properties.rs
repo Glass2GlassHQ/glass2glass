@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M820: the ML elements from a launch line. Each property `parse_launch` can
 //! set must (a) be declared in `properties()` so the parser knows its kind, and
 //! (b) round-trip through `set_property` / `get_property` onto the field the

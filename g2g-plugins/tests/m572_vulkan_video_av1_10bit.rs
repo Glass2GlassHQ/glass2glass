@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M572: 10-bit AV1 hardware decode on the system path, on real hardware.
 //!
 //! The AV1 sibling of M571 (10-bit HEVC). AV1 Main profile covers 8 and 10-bit

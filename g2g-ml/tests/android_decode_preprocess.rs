@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M304 end-to-end: Android `MediaCodecDec` (GPU output) -> `WgpuPreprocess`,
 //! entirely on the GPU. The decoder emits each frame as an RGBA
 //! `MemoryDomain::WgpuTexture` (the decoded `AHardwareBuffer` converted through

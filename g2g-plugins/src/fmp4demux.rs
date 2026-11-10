@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Fragmented-MP4 / CMAF byte-stream demuxer (Fmp4Demux): `ByteStream{IsoBmff}`
 //! in, `CompressedVideo{H264|H265}` Annex-B access units out. The streaming
 //! counterpart of the file-based [`Mp4Src`](crate::mp4src); both share the

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M972: the progressive MP4 layout with real B-frames. A reordered H.264
 //! stream presents its frames in a different order than it decodes them, which
 //! `ctts` records as `pts - dts` per sample. `Mp4DemuxN` reads the source's

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Read-only CPU mapping of a DMABUF, for the sinks that hand their payload to
 //! a device that takes a host pointer (the Linux audio sinks). Importing the fd
 //! instead of taking a system copy is what keeps a dma-buf producer

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Live macOS capture to an on-screen window: `AvfVideoSrc` (camera) or
 //! `ScreenCaptureSrc` (display) in `cv-output` mode, presented by
 //! [`MetalVideoSink`] with no CPU copy. The live-capture sibling of

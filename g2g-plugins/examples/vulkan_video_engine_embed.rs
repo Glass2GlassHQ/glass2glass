@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Consume Vulkan-Video-decoded frames in an application-owned wgpu render
 //! pipeline (the game-engine / viewer integration surface), and dump the result as PPMs.
 //!

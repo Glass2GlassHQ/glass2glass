@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1214: `intersink` / `intersrc` link independent graphs in one process.
 //!
 //! `default_registry` is `std`-gated, so this file is too.

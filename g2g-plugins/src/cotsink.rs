@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Cursor-on-Target (CoT) bridge: a drone's decoded MISB ST 0601
 //! telemetry becomes a track on a TAK / ATAK situational-awareness network.
 //!

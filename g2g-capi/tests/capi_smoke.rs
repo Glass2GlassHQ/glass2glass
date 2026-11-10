@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Exercises the C ABI through its real entry points (called as Rust fns, the
 //! same symbols a C caller links). Mocks nothing: it parses, runs, and drains
 //! the bus of an actual pipeline.

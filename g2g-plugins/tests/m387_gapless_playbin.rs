@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M387 - gapless playbin convenience builder. `gapless_playbin` assembles a
 //! runnable `GaplessSrc -> decode -> sink` graph from a playlist of URIs and
 //! returns the shared `GaplessController`, so an app gets gapless playback without

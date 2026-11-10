@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Audio mixer (`audiomixer`), the summing fan-in counterpart to the
 //! passthrough `InterleaveMux`. Combines N interleaved S16LE inputs into one
 //! output by adding samples and clamping to the i16 range. CPU-only `no_std`.

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Vulkan Video decode support (`vulkan-video` feature).
 //!
 //! Vendor-neutral, GPU-resident hardware video decode via `VK_KHR_video_queue`

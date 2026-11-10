@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! GPU zero-copy handoff: NV12 CUDA planes described to Python through
 //! `__cuda_array_interface__` v3 (`python` feature).
 //!

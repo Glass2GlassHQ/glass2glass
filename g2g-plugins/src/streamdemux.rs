@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Content-based demultiplexer: one input, N typed output ports.
 //!
 //! The `pad-added` / dynamic-pad analog for the bounded-N case (design/README.md

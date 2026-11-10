@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M749 - a LINEAR audio chain (no tee, so the runner's `Reconfigure` branch
 //! mode) with an infeasible sample-rate pin and no `audioresample` fails loud
 //! instead of silently relabelling native-rate PCM. A `tsdemux stream=aac`

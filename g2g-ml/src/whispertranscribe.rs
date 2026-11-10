@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Speech-to-text on whisper.cpp (`whisper` feature, design/ml.md).
 //!
 //! `WhisperTranscribe` takes 16 kHz mono f32 PCM and emits one UTF-8

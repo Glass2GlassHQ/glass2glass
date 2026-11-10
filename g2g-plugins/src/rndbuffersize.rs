@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Random buffer size: re-chunks a byte stream into buffers of a random length
 //! between `min` and `max`, the gst `rndbuffersize` analog. It exists to prove
 //! a parser or demuxer downstream does not depend on where its input happens to

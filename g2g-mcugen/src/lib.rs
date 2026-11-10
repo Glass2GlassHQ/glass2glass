@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Host graph compiler: turn a declarative MCU graph
 //! document into a monomorphized static pipeline, the codegen resolution of the
 //! "develop-and-test on Linux, ship a bounded static build to the MCU" tension.

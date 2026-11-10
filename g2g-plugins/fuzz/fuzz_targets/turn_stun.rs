@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 #![no_main]
 // TURN / STUN message parsing over untrusted UDP: ChannelData + DATA-INDICATION
 // framing and the XOR-PEER / XOR-MAPPED-ADDRESS + ERROR-CODE attribute walk the

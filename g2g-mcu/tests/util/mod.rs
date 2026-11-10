@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Helpers shared by the codec test binaries (`m638_g711`, `m639_adpcm`):
 //! ring-lent frame construction and payload access, plus the single-poll
 //! driver. One definition, included per test binary via `mod util;`.

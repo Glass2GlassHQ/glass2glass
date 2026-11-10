@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! VP8 / VP9 software encode element (VpxEnc, `vpx` feature): `RawVideo{I420}` in,
 //! `CompressedVideo{Vp8|Vp9}` out, via libvpx with FFI that bindgen generates in
 //! build.rs.

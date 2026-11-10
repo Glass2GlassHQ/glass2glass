@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Chop my data: re-chunks a byte stream into buffers whose length is a random
 //! multiple of `step-size` inside `[min-size, max-size]`, the gst `chopmydata`
 //! analog. Like [`rndbuffersize`](crate::rndbuffersize) it exists to prove a

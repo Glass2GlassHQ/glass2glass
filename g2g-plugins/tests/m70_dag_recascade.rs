@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! DAG runner D4: mid-stream re-solve + β allocation re-cascade over a graph.
 //! A source emits a `CapsChanged` mid-stream; `run_graph` re-solves each branch
 //! independently, walks the sink's re-derived allocation proposal upstream

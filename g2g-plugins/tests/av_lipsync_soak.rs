@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1118: live A/V lip-sync soak on a real display and a real audio device.
 //!
 //! Plays an HLS A/V feed for `G2G_SOAK_SECONDS` (default 60) through

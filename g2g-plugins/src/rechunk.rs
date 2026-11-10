@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Byte-stream re-chunker shared by the `rndbuffersize` and `chopmydata` debug
 //! transforms. Both hold input bytes back until the size they drew is available,
 //! cut that many off the front and push them as one buffer; only the size

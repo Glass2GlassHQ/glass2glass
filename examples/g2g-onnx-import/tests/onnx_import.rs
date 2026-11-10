@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! The ONNX-imported topologies run through `BurnInference` on the real GPU and
 //! match the ONNX Runtime reference for the same input.
 //!

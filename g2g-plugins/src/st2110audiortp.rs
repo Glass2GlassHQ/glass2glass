@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! ST 2110-30 audio network elements: a sink and source that put the
 //! sans-IO `st2110audio` core on the wire over UDP, with RTP timestamps from the
 //! PTP media clock.

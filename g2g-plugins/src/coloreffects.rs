@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Colour lookup-table effects (`coloreffects`). Maps each pixel of a packed
 //! RGBA / BGRA frame through one of GStreamer's five preset 256-entry RGB
 //! tables, preserving format and geometry. CPU-only `no_std` baseline.

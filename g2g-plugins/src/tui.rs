@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! In-terminal live pipeline telemetry (`g2g-launch --tui`).
 //!
 //! The terminal sibling of the browser dashboard: it reads the same

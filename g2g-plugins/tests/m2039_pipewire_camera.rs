@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M2039: `pipewirevideosink` publishes raw video as a PipeWire camera node.
 //! GStreamer's `pipewiresrc` captures from it, and the frames it gets match the
 //! ones g2g renders straight to a file. Skips without a PipeWire daemon or

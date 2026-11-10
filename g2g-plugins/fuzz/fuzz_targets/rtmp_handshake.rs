@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 #![no_main]
 // RTMP handshake parsers over the peer's raw signature bytes (C1 / S1). These
 // run before any size is trusted, so an out-of-bounds read here is wire-reachable.

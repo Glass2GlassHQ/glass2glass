@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1130: `audioreverse` re-emits each chunk of audio with its sample frames in
 //! the opposite order, and flushes the last partial chunk at `Eos`.
 //!

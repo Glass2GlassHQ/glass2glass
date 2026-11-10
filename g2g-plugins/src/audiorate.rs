@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Audio rate corrector (`audiorate`). Keeps an interleaved PCM stream
 //! contiguous: a timestamp gap is filled with silence, samples that overlap
 //! what was already emitted are dropped, and everything else is re-stamped, so

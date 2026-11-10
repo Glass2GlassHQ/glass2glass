@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M605: the full ST 2110-22 JPEG XS path end to end, on real SVT-JPEG-XS and real
 //! UDP: raw I422p10 -> `SvtJpegXsEnc` -> `St2110JxsSink` -> UDP loopback ->
 //! `St2110JxsSrc` -> `SvtJpegXsDec` -> raw. Proves the compressed mezzanine essence

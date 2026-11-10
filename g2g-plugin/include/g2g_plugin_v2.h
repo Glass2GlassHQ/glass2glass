@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 /* glass2glass plugin ABI, generation 2.
  *
  * A v2 plugin is a shared library that exports one data symbol,

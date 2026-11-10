@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! C FFI seam adapters: let existing C code *be* a `g2g-mcu` peripheral
 //! seam, so a shop with a large C driver investment integrates without writing
 //! Rust. The board keeps its C DMA/capture routine and its C network stack; it

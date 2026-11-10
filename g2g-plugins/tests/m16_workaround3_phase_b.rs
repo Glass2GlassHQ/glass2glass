@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M16 workaround #3 Phase B — sink-side downstream subgraph re-solve.
 //!
 //! Builds on Phase A: decoders now stop swallowing input `CapsChanged`

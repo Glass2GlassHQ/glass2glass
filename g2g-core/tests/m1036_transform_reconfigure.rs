@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1036: a transform that originates a `Reconfigure` (rather than relaying one
 //! from downstream) reaches its upstream producer. The graph runner polls
 //! `take_reconfigure` on the transform arm and stores the request on the

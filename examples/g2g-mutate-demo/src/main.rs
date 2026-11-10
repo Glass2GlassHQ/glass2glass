@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Splicing a transform onto a live pipeline, on screen.
 //!
 //! `rtspsrc -> ffmpegdec -> waylandsink` plays an RTSP feed in a window. Every

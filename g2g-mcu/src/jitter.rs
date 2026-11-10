@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Heap-free RTP jitter buffer: the receive-side element that absorbs network
 //! arrival jitter and reordering, so a real-time decode/playout path downstream
 //! sees packets in sequence. It is the RX counterpart of the TX chain's egress

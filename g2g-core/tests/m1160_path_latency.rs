@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1160: the DAG runner's latency fold follows paths. A fan-in waits for its
 //! slowest input branch and a run reports its slowest sink, where the fold used
 //! to sum every node in the graph flat.

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M636: `TensorShape` is a fixed-rank inline array (no heap), so
 //! `Caps::Tensor` is part of the no-alloc MCU subset like every other caps
 //! kind (closing the carve-out the M623 `alloc` feature seam left open).

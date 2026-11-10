@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M989: `Registry::decodebin` takes its memory-domain preference from the
 //! consumer already in the graph. Two H.264 decoders are registered, a CPU one
 //! first and a `Cuda`-producing one second, and only the sink differs between

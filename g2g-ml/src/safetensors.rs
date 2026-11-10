@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! A small, dependency-free reader (and writer) for the `safetensors` weight
 //! format, so trained weights can be imported at runtime into the hand-rolled
 //! inference elements (`WgpuInference::conv2d_from_safetensors`) without pulling

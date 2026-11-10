@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M192: gst-canonical-name aliases. Pasted `gst-launch` lines that use
 //! GStreamer's element names (`autovideosink`, `avdec_h264`, ...) resolve to the
 //! g2g equivalents. Auto sinks fall back through the available display / audio

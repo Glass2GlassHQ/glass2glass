@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M886: Linux audio capture sources (`alsasrc` / `pulsesrc`), the non-PipeWire
 //! mic paths and the input mirrors of `alsasink` / `pulsesink`.
 //!

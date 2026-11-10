@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1101: the RFC 3711 protection policies on `srtpenc` / `srtpdec`, so a peer
 //! that never negotiates RFC 7714 still works: AES counter mode, HMAC-SHA1 at
 //! both tag lengths, and the NULL cipher.

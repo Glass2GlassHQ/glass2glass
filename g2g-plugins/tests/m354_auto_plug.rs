@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M354: domain-converter auto-plug. `auto_plug_domain_converters` splices a
 //! memory-domain converter onto any edge whose producer and consumer cannot agree
 //! on a domain, the structural complement to the M351/M352 in-band negotiation

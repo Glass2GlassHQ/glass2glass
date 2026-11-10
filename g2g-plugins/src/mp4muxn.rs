@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Fragmented-MP4 multiplexer element: N elementary streams in
 //! (H.264 / H.265 video + AAC audio), one ISO-BMFF byte stream out, so a muxed
 //! recording carries video and audio together:

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! WebP decode element (WebPDec, `webp` feature): `CompressedVideo{WebP}` in,
 //! `RawVideo{Rgba8}` out, via the pure-Rust `image-webp` crate. The GStreamer
 //! `webpdec` analog.

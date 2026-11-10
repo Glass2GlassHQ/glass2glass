@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! HLS packaging sink (`hlssink`). Cuts the muxed byte stream arriving on its
 //! sink pad into media segment files and publishes a rolling `.m3u8` media
 //! playlist beside them, so a standard HLS client can play the output live or,

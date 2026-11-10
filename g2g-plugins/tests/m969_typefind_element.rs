@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M969 - `typefind` as a mid-graph element. Content sniffing already types a
 //! file at negotiation (`filesrc`, M478); this is the runtime half, for a byte
 //! stream whose source can only guess: the element holds back the leading

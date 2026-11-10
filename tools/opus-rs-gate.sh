@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+#
+# SPDX-License-Identifier: MPL-2.0
+
 # Correctness gate for a pure-Rust Opus decode path (M916): decode identical
 # packets through `opus-rs` and through libopus and compare the PCM. Fetches the
 # RFC 8251 conformance vectors (~75 MB) once into tools/opus-rs-gate/vectors/.

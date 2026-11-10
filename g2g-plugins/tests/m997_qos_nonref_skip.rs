@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M997: `FfmpegVideoDec` acts on a relayed QoS report instead of only passing
 //! it on, by skipping non-reference pictures (`AVDISCARD_NONREF`) while the sink
 //! reports lateness.

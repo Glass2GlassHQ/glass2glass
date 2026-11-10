@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M945 `clocksync`: a pass-through transform that holds each buffer until its
 //! PTS is due on the pipeline clock, so an upstream running as fast as the CPU
 //! allows feeds downstream at real time.

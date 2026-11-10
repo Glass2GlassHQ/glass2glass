@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Sans-IO RIST (VSF TR-06-1 Simple Profile) pieces on top of [`rtcp`]: the
 //! SSRC rule that marks a retransmission, the range NACK and RTT echo APP
 //! packets, the sender's retransmission history, the receiver's NACK schedule

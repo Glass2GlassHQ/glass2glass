@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! `g2g-latency-reader`: reads raw I420 frames from standard input, decodes the
 //! [`timestampburn`] strip in each one, and reports how long each frame took to
 //! reach here from the moment the strip was written.

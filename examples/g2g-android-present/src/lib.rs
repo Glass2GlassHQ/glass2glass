@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! True on-screen Android present. The APK harness the bare-binary
 //! probes cannot be: a `NativeActivity` owns a real on-screen window (the
 //! `SurfaceView` case), `MediaCodec` decodes the bundled H.264 clip zero-copy

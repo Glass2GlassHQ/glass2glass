@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Fragmented-MP4 / CMAF parsing shared by [`Mp4Src`](crate::mp4src) (file
 //! source) and [`Fmp4Demux`](crate::fmp4demux) (byte-stream demuxer). Pure
 //! `no_std + alloc`: reads the `moov` init (codec, geometry, timescale,

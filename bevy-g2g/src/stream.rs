@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Headless render-and-stream: Bevy renders, g2g encodes and ships H.264.
 //!
 //! Two encode paths behind one plugin group:

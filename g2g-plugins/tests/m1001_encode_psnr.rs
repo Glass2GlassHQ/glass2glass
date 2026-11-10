@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1001 encode / decode PSNR: encode a deterministic synthetic source with an
 //! in-repo encoder, decode it with the matching in-repo decoder, and require the
 //! recovered pixels to stay above a per-codec PSNR floor.

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Remote-transform primitive over a WebSocket (M555): a middle graph stage
 //! offloaded to a remote peer and its processed output brought back, in-graph.
 //! A `CountSrc -> RemoteWsTransform -> CollectSink` pipeline runs against a test

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Tokio-backed [`GraphSpawner`] for the opt-in thread-per-arm graph runner
 //! ([`g2g_core::runtime::run_graph_threaded`]).
 //!

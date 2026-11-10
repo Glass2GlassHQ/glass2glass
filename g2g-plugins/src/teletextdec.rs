@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! EBU teletext subtitle decoder element: `Caps::Text{Teletext}` in,
 //! timed `Caps::Text{Utf8}` cues out.
 //!

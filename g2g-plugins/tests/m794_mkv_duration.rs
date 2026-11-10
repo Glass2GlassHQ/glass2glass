@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M794: the Matroska `Info` `Duration`, so a g2g-written file reports its
 //! length instead of `N/A`.
 //!

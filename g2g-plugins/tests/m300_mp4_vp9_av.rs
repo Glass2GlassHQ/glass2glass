@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M300 VP9-in-MP4: `Mp4MuxN` muxes a VP9 video track and an AAC audio track
 //! into one ISO-BMFF byte stream. VP9 frames are stored verbatim (no AVCC
 //! reframing) behind a `vp09` VisualSampleEntry + `vpcC` VPCodecConfigurationBox;

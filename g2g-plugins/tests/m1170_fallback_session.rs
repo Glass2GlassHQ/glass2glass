@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1170: `fallbacksrc` restarts a dead *session*, a source that produces every
 //! track itself with no demuxer after it. `RestartFanoutSrc` is the multi-output
 //! sibling of M1163's `RestartSrc`: the same policy (rebuild on failure, on a

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M133 Opus parser, end to end through `parse_launch`: `filesrc` reads a
 //! synthetic Ogg file, `oggdemux` splits out the Opus packets, and `opusparse`
 //! refines the caps from each packet's TOC before the sink. Exercises the new

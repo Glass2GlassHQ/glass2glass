@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Tolerance-limited smoothing (`smooth`). Averages each I420 sample with the
 //! neighbours whose level is within `tolerance` of it, so flat areas lose noise
 //! while anything the tolerance cannot bridge, an edge above all, stays put.

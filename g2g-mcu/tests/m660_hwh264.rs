@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M660: the hardware-H.264 encoder seam. A scripted mock replays the encoder
 //! peripheral contract (accept one raw I420 frame, emit one Annex-B access unit,
 //! report its byte count + keyframe flag), so `HwH264Enc`'s real logic is

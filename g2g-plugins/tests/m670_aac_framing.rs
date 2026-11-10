@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M670 `AacParse` validated against real ffmpeg-encoded AAC in both framings:
 //! ADTS (elementary stream) and LOAS/LATM (broadcast). Each fixture is a short
 //! sine encoded by ffmpeg; the parser must recover the channel count and sample

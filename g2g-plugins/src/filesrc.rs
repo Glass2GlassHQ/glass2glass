@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! File source. Reads a file and emits its bytes as `DataFrame` chunks, the
 //! playback half of recording (`FileSink` records, `FileSrc` replays). Feed an
 //! Annex-B `.h264` recording through `H264Parse` to recover access units for

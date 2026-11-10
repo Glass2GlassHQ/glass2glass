@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M725 launch-registry wiring for the WebRTC session sinks: a `gst-launch`
 //! line ends on `webrtcsessionsink` / `livekitsink` as a terminal fan-in node
 //! (the M713 launch shape), with the track kinds read from each linked pad's

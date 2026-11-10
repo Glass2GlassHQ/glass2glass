@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Control-stream and request-stream messages for IETF MoQ Transport draft-18.
 //!
 //! Framing is unchanged from draft-16 (§10):

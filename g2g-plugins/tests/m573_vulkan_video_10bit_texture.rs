@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M573: 10-bit YCbCr -> RGBA GPU-texture path (zero-copy HDR decode), on real
 //! hardware.
 //!

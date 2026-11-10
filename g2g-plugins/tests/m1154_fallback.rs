@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1154: `fallbacksrc` as a launch keyword. `fallbacksrc uri=X` expands to the
 //! URI's decode chain and a second branch, both feeding a `fallbackswitch` whose
 //! input 0 is the main stream. The second branch is `fallback-uri`'s decode chain

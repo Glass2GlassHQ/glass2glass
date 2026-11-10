@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 // RTP jitter buffer over untrusted packets: length-prefixed (u16 BE) datagrams
 // pushed with a monotonic clock, interleaved with pops / gap queries, so RTP
 // header parsing and the reorder / deadline bookkeeping run over attacker bytes.

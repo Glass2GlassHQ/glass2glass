@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 // Shared hand-encoded ONNX fixture builder (included via `include!` by the
 // integration tests; not a test crate itself, so plain comments only).
 // Wire format only needs varints and length-delimited fields. Field numbers

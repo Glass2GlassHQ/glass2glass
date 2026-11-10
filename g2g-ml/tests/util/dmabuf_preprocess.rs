@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 // Shared scaffolding for the dma-buf -> WgpuPreprocess tests (included via
 // `include!` by m990 and m993; not a test crate itself, so plain comments only).
 // Needs `dmabuf-wgpu`, and the including file to be Linux-gated.

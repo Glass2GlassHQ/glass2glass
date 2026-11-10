@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! The NAL / `avcC` / `hvcC` / sample-entry helpers shared by the MP4 muxer
 //! [`Mp4MuxN`](crate::mp4muxn) and the Matroska muxer
 //! [`MkvMuxN`](crate::mkvmuxn). H.264 carries `avc1`/`avcC` with SPS+PPS, H.265

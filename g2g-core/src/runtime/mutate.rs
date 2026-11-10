@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Structural mutation of a running graph: splicing a chain of
 //! transforms onto a live edge and lifting one back off, swapping the source or
 //! the sink at either end of it, attaching and dropping a tee branch and

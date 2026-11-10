@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Pad templates: declarative, pre-instantiation metadata describing the
 //! caps an element *type* can accept or produce.
 //!

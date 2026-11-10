@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M11 bus: an element posts out-of-band messages to the application via a
 //! `BusHandle` while forwarding the data stream transparently.
 //!

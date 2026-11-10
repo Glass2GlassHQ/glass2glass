@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Live multi-rid validation of the WHIP simulcast session
 //! ([`WebRtcSessionSink::with_simulcast`]): publishes three H.264 layers as one
 //! rid-tagged m-line (`f` / `h` / `q`, highest resolution on pad 0) to a WHIP

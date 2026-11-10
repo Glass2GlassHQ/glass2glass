@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Pure FLV (Flash Video) container parser, the byte-stream sibling of
 //! [`crate::mpegts::TsDemuxer`] / [`crate::ogg::OggDemuxer`]. `no_std`, no I/O.
 //!

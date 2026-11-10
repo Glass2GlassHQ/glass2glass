@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M676 - a bare `filesrc` types raw Annex-B elementary streams by extension
 //! (`.h264` / `.264` / `.avc`, `.h265` / `.265` / `.hevc`), found by the
 //! calliope differential harness: the extension map and the sniffer both

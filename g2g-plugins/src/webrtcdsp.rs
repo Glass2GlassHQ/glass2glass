@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! WebRTC voice processing (`webrtcdsp`) and its far-end tap (`webrtcechoprobe`),
 //! the GStreamer elements of the same names, over `sonora`, a pure-Rust port of
 //! WebRTC's audio processing module. The probe sits on the playback path and

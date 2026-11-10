@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Audio amplification (`audioamplify`). Scales every signed-16-bit PCM sample
 //! by an `amplification` factor, choosing how out-of-range results are folded
 //! back into the i16 range via `amplification-method`. Preserves format, channel

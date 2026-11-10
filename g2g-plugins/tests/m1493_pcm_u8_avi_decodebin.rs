@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1493: raw PCM in any sample format counts as decoded, so a bare
 //! `decodebin` on an unsigned 8-bit PCM AVI plugs no decoder.
 

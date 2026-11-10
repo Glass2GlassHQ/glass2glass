@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+#
+# SPDX-License-Identifier: MPL-2.0
+
 """Requirements-traceability checker (M655): verify that every safety
 requirement in docs/safety/REQUIREMENTS.md is backed by evidence that actually
 exists in the repository, and that every proof it cites is wired into CI.

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1030: `wavenc` wraps raw PCM in a RIFF/WAVE byte stream.
 //!
 //! The header has to describe the negotiated stream (a reader takes the rate,

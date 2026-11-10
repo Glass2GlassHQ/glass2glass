@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Sun / NeXT AU (`.au` / `.snd`): `auparse` reads the 24-byte header plus the
 //! samples it describes, `avmux_au` writes one. The Unix sibling of WAVE.
 //!

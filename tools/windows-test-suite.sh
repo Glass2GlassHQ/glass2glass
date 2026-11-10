@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+#
+# SPDX-License-Identifier: MPL-2.0
+
 # Run the whole g2g-plugins test suite on a Windows host with a small disk: one
 # test binary at a time, each deleted once it has run, so the ~800 integration
 # test binaries never sit on disk together (a plain `cargo test` builds all of

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! RFC 3550 RTP fixed header: the 12-byte wire header every RTP
 //! packetizer in the workspace emits, defined once. Pure `const fn`
 //! byte-building, part of the heap-free subset, so the MCU packet sink and

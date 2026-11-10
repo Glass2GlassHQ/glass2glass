@@ -1,3 +1,7 @@
+# Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+#
+# SPDX-License-Identifier: MPL-2.0
+
 # Hosted elements for the M1178 tests: what a native detector upstream attached
 # reaches the hosted class through the `meta` sink, and `only-on` decides whether
 # the class is called at all.

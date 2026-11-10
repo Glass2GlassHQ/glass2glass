@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M212 - reverse playback at the sink. A reverse-rate segment (`rate < 0`)
 //! plays a stream from `stop` down to `start`: the source emits frames in
 //! descending PTS order, and the sink maps each to ascending running time

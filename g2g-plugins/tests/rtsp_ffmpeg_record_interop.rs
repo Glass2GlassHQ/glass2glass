@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Real-peer RTSP ingest interop (M529): ffmpeg *publishes* to the g2g
 //! `RtspServerSrc` over RTSP (the OPTIONS/ANNOUNCE/SETUP/RECORD direction), over
 //! UDP and TCP-interleaved (`-rtsp_transport tcp`, RFC 2326 §10.12) RTP, and the

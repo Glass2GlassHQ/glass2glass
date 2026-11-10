@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Tier-1 A: `VideoFlip` in a real negotiated chain. An 8x4 RGBA test source is
 //! rotated 90 degrees clockwise, the swapped 4x8 geometry announced via
 //! `CapsChanged`.

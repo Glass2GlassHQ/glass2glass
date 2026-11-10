@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! `WebOrtDetect`: Stage 2 of the in-browser YOLO chain (Architecture A) - a
 //! real ONNX YOLOv8 detector running in the browser via ONNX Runtime Web.
 //!

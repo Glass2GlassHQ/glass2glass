@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+#
+# SPDX-License-Identifier: MPL-2.0
+
 # Build the uint8-input QDQ MobileNetV2 for the on-device Edge TPU phase of the
 # real-classifier milestone (g2g-ml/tests/android_mobilenet_tpu_probe.rs).
 #

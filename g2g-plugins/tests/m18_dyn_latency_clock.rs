@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M18 item 4 follow-up — `run_linear_chain` folds clock + latency from its
 //! `dyn` interior elements.
 //!

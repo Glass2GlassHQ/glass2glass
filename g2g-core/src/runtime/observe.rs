@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Live pipeline telemetry tap (dev tooling).
 //!
 //! The end-of-run [`RunStats`](crate::runtime::RunStats) report answers "how did

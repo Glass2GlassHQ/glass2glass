@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M176: presentation base time is stamped at the `Playing` transition, not at
 //! runner startup. Under a `StateController`, the runner arms a `PlayAnchor` on
 //! the elected clock and hands each sink a `ClockSync::with_play_anchor`; the

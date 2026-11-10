@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! DTMF source and detector (`dtmfsrc` / `dtmfdetect`), ITU-T Q.23 dual tones.
 //!
 //! `dtmfsrc` generates 8 kHz mono S16LE (telephony) of the digit in `number`

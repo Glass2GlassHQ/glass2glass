@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M792: Opus pre-skip and end trim survive Matroska in both directions, the MKV
 //! sibling of M791's MP4 work.
 //!

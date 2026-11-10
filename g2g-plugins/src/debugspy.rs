@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Buffer spy (`debugspy`). A 1:1 passthrough that hashes each buffer.
 //! `checksum-type` picks the digest; `silent=true` keeps the hash off the log.
 //! Reuses [`crate::checksumsink::digest_hex`] so the two debug hashers cannot

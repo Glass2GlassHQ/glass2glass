@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M87: `Buffering` bus messages from link occupancy. With a bus attached via
 //! `run_graph_with_bus`, the sink arm samples its input link fill and posts a
 //! `BusMessage::Buffering` level on each quartile crossing. g2g has no

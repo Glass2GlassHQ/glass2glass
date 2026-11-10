@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M485 per-edge queue depth: a `queue max-size-buffers=N` in a `gst-launch`
 //! line sets the depth of the edge it contracts to (the gst per-queue buffer
 //! bound), overriding the runner's graph-wide `link_capacity` for just that link.

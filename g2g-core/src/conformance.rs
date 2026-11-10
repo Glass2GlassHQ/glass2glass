@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Conformance vocabulary + derived maturity.
 //!
 //! g2g grows fast under agent-driven development, so "how validated is this

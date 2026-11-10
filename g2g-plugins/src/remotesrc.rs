@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Remote transport source (`remote` feature): the receive half of the
 //! distributed-graph primitive, the inverse of [`RemoteSink`](crate::remotesink).
 //!

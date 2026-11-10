@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M918: HDR10 static metadata mined from the bitstream. The H.264 / H.265
 //! parser reads the `mastering_display_colour_volume` and
 //! `content_light_level_info` SEI messages and attaches them as an

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! `g2g-mcp`: a Model Context Protocol server over stdio, so an agent can drive
 //! g2g development. Speaks newline-delimited JSON-RPC 2.0 and exposes registry,
 //! one-shot run, and managed live-pipeline tools backed by the same internals as

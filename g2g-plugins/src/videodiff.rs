@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Frame difference marker (`videodiff`). Passes the picture through but marks
 //! every pixel whose brightness moved by more than `threshold` since the
 //! previous frame with a diagonal black-and-white pattern, so motion shows up as

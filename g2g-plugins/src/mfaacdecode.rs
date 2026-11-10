@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Windows AAC audio decode element wrapping the Media Foundation AAC
 //! Decoder MFT (`CLSID_MSAACDecMFT`). Consumes raw AAC-LC access units
 //! (`AudioFormat::Aac`, `MemoryDomain::System`) and produces interleaved 16-bit

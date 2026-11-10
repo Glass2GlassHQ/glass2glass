@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Spill-to-storage byte buffer, the `downloadbuffer` analog: absorbs a
 //! pushed, non-seekable byte stream (HTTP, a pipe) into a temp file and serves
 //! downstream from that file, so the link below it is a *seekable* byte source.

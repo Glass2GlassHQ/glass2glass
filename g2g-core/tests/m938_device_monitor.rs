@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M938: device discovery. The `Device` model (class / caps filtering, launch
 //! fragment, registry construction), the `DeviceMonitor` one-shot probe with
 //! per-provider error isolation, and the started monitor's hotplug paths:

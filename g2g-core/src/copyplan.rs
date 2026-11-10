@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Copy / allocation plan: a static, pre-run analysis of the memory-domain
 //! path a frame takes through a negotiated graph.
 //!

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Hand-built H.264 / H.265 streams shared by the TS video-timestamp tests
 //! (`m952_ts_video_pts`, `m1156_ts_single_stamp_reorder`): parameter sets and
 //! slice headers written bit by bit, and the mux / demux round trip that reports

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M965: per-alternative preference costs decide a chain with competing
 //! constraints. A source prefers NV12, a middle transform declares itself
 //! indifferent, and a sink prefers I420 strongly. Index order alone picks NV12

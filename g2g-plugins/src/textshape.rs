@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Shaped text layout for [`TextOverlay`](crate::textoverlay::TextOverlay) (the
 //! `text-shaping` feature): cosmic-text does harfrust shaping (Arabic
 //! joining, Indic reordering, kerning / ligatures), unicode-bidi reordering, and

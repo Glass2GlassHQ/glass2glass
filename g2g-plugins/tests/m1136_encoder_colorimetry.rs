@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1136: the native encoders write the caps colorimetry into their bitstream
 //! and carry it on their compressed output caps.
 //!

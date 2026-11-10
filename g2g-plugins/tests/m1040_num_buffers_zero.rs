@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1040: the capture and ingest sources spell `num-buffers` the way gst
 //! `basesrc` does, so -1 runs forever, n emits exactly n, and 0 emits nothing
 //! and goes straight to EOS. They used to read 0 as "forever" (v4l2src,

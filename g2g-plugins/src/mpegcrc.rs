@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 const POLYNOMIAL: u32 = 0x04C1_1DB7;
 
 /// Initial value of the MPEG-2 systems CRC that trails every PSI section.

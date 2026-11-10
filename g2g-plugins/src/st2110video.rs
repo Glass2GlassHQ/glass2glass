@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! ST 2110-20 uncompressed video over RTP: the packetizer and
 //! depacketizer for uncompressed active video, RFC 4175.
 //!

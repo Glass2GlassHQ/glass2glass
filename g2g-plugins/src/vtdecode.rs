@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! macOS hardware H.264 / H.265 decode via VideoToolbox
 //! (`VTDecompressionSession`).
 //!

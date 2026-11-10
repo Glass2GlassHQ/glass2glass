@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M936 - `decodebin` on MPEG-TS selects the PMT's video codec. `TsDemux` fixes
 //! its output pad before parsing a byte (defaulting to H.264), so the
 //! primary-stream sniff must name the actual video stream: previously it

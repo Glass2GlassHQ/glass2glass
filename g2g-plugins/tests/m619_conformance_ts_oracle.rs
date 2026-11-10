@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M619: grow the conformance matrix with a second reference-implementation oracle,
 //! the native MPEG-TS muxer (`TsMux`) validated by `ffprobe`. Different container
 //! from the M615 MP4 oracle (transport stream vs ISO-BMFF), so it exercises a

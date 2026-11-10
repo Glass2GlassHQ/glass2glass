@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M451: a runner-driven quantized-inference Graph. The M444 / M447 probes drive
 //! the chain by hand (`element.process(...)` per stage); this hands the *same*
 //! chain to the g2g runner, which negotiates caps across it and pumps frames

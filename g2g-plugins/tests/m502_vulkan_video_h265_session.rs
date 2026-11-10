@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M502: Vulkan Video H.265 decode session + parameters on real hardware.
 //!
 //! The HEVC sibling of M488. Open a wgpu device with a Vulkan Video H.265 decode

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! WebSocket test source for the glass2glass browser demo.
 //!
 //! Streams an H.264 Annex-B elementary stream to any connected browser, **one

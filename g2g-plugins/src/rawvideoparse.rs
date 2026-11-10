@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Headerless raw-video framer (`rawvideoparse`): a `ByteStream{Raw}` dump in
 //! (a `.yuv` file, arbitrary chunks from `filesrc`), one `RawVideo` frame out
 //! per `width * height` frame's worth of bytes.

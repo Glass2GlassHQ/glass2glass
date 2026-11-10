@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Helpers shared by the MoQ Transport test binaries (`m902_moqt`,
 //! `m903_moqt_subscribe`, `m905_moqt_datagram`, `m906_moqt_control_pump`,
 //! `m907_moqt_v18`, `m912_moqt_fetch`, `m913_moqt_publish`,

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1242 QoS relay through the fan arms: a sink's lateness report crosses a tee,
 //! a demux and a muxer on its way to the source, as M175 carried it through a
 //! transform. Each graph puts a QoS-signalling sink behind the fan node and

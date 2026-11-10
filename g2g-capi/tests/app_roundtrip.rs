@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! appsrc -> appsink round trip through the C ABI: the application pushes
 //! buffers in one end and receives them at the other, all by-name through the
 //! launch DSL, exactly as a C caller would.

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Author embedded CEA-608 closed captions into a video from a subtitle file.
 //!
 //!   cargo run -p g2g-plugins --example cc_author -- in.mp4 subs.srt out.ts

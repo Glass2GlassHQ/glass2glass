@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 // The keyword-spotting graph on the emulated Cortex-M4: log-mel -> int8
 // quantize -> the MicroFlow-compiled micro_speech model, with the features
 // digest and the scores compared bit for bit against the host's pinned run.

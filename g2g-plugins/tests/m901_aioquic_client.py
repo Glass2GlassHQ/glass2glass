@@ -1,3 +1,7 @@
+# Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+#
+# SPDX-License-Identifier: MPL-2.0
+
 """Independent WebTransport client for the M901 tests: an aioquic (Python) client
 that pushes a prepared wire stream at our `RemoteWtSrc`.
 

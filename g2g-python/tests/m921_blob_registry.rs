@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M921: the blob-header registry decodes what the Python element host really
 //! produces. `PropEcho` tags its results `model_name` / `device`, and
 //! `EchoTransform` tags an `embedding`; `g2g_core::decode_blob` turns those

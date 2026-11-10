@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1080 MIME multipart: `multipartdemux` splits the
 //! `multipart/x-mixed-replace` stream an MJPEG-over-HTTP server pushes into its
 //! JPEG parts, and `multipartmux` writes one back that ffmpeg and GStreamer read.

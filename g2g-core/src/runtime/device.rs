@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Device discovery: the `GstDeviceProvider` / `GstDeviceMonitor`
 //! analog. A [`DeviceProvider`] probes one backend (v4l2, ALSA, PipeWire,
 //! GPU adapters) for the capture / render / compute devices it can see; a

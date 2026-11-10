@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M105 registry build-by-name + `gst-inspect` dump. Registers a source and two
 //! transforms/sinks under names, then: lists them, inspects their property /
 //! pad-template tables, and constructs them by name with properties applied (the

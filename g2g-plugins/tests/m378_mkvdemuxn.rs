@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M378 - multi-output Matroska demuxer (the decodebin core). One Matroska byte
 //! stream in, N elementary streams out, one per output port. `MkvDemuxN` parses
 //! the container once and routes each track's access units to its port by codec,

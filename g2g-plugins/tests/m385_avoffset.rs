@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M385 - A/V offset transform. `AvOffset` shifts every frame's PTS/DTS by a
 //! signed `offset` (ns), the g2g form of GStreamer playbin's `av-offset`: put one
 //! on a branch of a multi-stream playback graph (typically audio) to re-align it.

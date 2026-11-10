@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M288 regression: stacked auto `videoconvert`s steered toward a format pin must
 //! produce the SAME bytes as a single convert, not corrupt output.
 //!

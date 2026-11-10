@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Shared core for the distributed-graph *remote transform* elements.
 //!
 //! Where a `Remote*Sink` / `Remote*Src` pair cuts an edge one-way (the whole

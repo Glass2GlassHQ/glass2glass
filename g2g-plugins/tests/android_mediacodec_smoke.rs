@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M219: on-device smoke test for `MediaCodecDec` (Android NDK MediaCodec).
 //!
 //! Unlike the cross-compile `cargo check` CI runs, this actually decodes on a

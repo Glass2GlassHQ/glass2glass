@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+#
+# SPDX-License-Identifier: MPL-2.0
+
 # Qualification kit runner (M655): run the full set of MCU safety proofs and
 # print a consolidated requirement -> evidence -> result report, the evidence
 # package an integrator attaches to a product safety case. Each proof also runs

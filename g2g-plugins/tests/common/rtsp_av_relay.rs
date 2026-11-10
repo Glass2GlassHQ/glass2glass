@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 // ffmpeg packetizes a fixture's video and audio as RTP, this answers RTSP and relays each
 // track interleaved on its own channel pair, so a test plays an A/V stream from a real packetizer
 

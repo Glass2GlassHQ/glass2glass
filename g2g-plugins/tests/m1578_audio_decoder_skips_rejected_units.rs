@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1578: `FfmpegAudioDec` drops an access unit libavcodec rejects and decodes
 //! on, as the ffmpeg CLI does, instead of failing the pipeline.
 #![cfg(all(

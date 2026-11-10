@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Byte-stream framing and header geometry for the still-image formats, shared
 //! by the still-image parsers (`jpegparse`, `pngparse`) and decoders (`PngDec`,
 //! `WebPDec`).

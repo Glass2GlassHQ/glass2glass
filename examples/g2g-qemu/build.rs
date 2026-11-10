@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Standard cortex-m-rt dance: put memory.x where the linker finds it.
 use std::env;
 use std::fs;

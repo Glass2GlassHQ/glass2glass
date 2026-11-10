@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Playback-rate changer without pitch correction (`speed`). Resamples each
 //! channel by linear interpolation, so `speed=2` consumes two input frames per
 //! output frame and the stream plays twice as fast an octave higher. The caps

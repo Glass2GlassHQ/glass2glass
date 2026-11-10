@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1149: the source and the sink of a running graph are replaceable in place.
 //! The stream keeps flowing across the swap: the old sink renders what was
 //! queued for it and finalizes before the replacement takes a single frame, and

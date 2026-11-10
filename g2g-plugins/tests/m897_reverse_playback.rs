@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M897 - reverse playback (`rate < 0`) through the MP4 path.
 //!
 //! A reverse seek reaches `Mp4Src`, which walks the sync samples (`stss`)

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! One entry point for running a graph, whatever the run is asked to carry:
 //! a bus, a state controller, progress, a copy budget, an observer, a flight
 //! recorder, a visit recorder, a tick timer, and a [`GraphMutator`] over the running graph, in

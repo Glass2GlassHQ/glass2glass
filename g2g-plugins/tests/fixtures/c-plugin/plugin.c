@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 /* A glass2glass plugin written in plain C against g2g_plugin_v2.h, or
  * g2g_plugin_v3.h when built with G2G_PLUGIN_V3 defined.
  *

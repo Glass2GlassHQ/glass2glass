@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M198 step 4b: `PyAggregator`, a batched Python element hosted as a g2g muxer.
 //!
 //! Negotiation is always testable; the partial-round collection runs on the

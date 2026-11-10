@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! AV1 frame parser that refines source-side `Caps` from the sequence header.
 //!
 //! The AV1 sibling of `vp9parse`: it walks the OBUs of each `DataFrame` (the

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Netpbm still-image codecs (`pnmenc` / `pnmdec`): packed RGB(A) raw video
 //! to a PBM / PGM / PPM file and back. CPU-only `no_std` baseline.
 //!

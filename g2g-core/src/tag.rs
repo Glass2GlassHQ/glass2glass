@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Stream metadata tags (the GStreamer `GstTagList` analog).
 //!
 //! A demuxer surfaces a stream's descriptive metadata (title, artist, encoder,

@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+#
+# SPDX-License-Identifier: MPL-2.0
+
 # Same-metric receive latency, g2g vs GStreamer, on one burned-in clock.
 #
 # Unlike tools/latency-bench.sh (which compares a g2g arrival-to-present

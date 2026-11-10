@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! The heap-free proof pipeline (shared by `g2g-noalloc` and `g2g-qemu`): a
 //! real [`GrabberSrc`] capture source (the camera seam from `g2g-mcu`,
 //! fed by a stub pattern grabber over a `StaticLendRing`) -> pass-through

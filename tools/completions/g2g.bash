@@ -1,3 +1,7 @@
+# Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+#
+# SPDX-License-Identifier: MPL-2.0
+
 _g2g_options() {
     "$1" --help 2>/dev/null | sed '/^$/q' | grep -oE '(^|[[ ])-{1,2}[a-z][a-z-]*' | tr -d '[ ' | sort -u
 }

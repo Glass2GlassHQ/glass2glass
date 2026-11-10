@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! `UdpSrc` caps discovery (M833): an RTP receiver has no in-band stream
 //! description, so `UdpSrc` used to produce a declared geometry hint and leave
 //! the correction to a downstream decoder. It now takes the description from the

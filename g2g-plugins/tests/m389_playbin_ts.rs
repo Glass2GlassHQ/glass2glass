@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M389 - `playbin uri=*.ts` multi-stream fan-out + multi-hook dispatch. A lone
 //! `playbin uri=file://x.ts` probes the transport stream's PMT and auto-builds
 //! `FileSrc -> TsDemuxN -> {decode -> auto sink}`, one branch per stream, the

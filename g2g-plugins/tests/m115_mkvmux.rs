@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M115 Matroska / WebM mux, end to end through the DAG runner: a VP9 source
 //! feeds `MkvMuxN`, whose `Caps::ByteStream{Matroska}` output feeds `MkvDemux`,
 //! which recovers the frames to a sink. Proves the mux/demux pair composes and

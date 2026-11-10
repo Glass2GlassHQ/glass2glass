@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Windowed-sinc band-pass / band-reject (`audiowsincband`). A linear-phase FIR
 //! whose kernel is the sum of a low-pass at `lower-frequency` and a high-pass at
 //! `upper-frequency`, `length` taps long and multiplied by `window`. Preserves

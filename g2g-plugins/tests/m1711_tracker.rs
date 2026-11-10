@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 // M1711: `tracker ! analyticsoverlay show-track=true` through the graph runner.
 // The source attaches detections the way `detectionpostprocess` does, two boxes
 // that cross paths plus a frame with no analytics at all, and the sink reads the

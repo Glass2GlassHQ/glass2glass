@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Seek request channel and segment-done back-channel.
 //!
 //! A cloneable handle carrying a pending [`Seek`] from the application to a

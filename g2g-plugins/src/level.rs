@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Audio level meter (`level`). A passthrough that measures per-channel peak
 //! and RMS of each S16LE buffer and exposes them via getters, the g2g analog of
 //! GStreamer's `level` element (which posts the same values on the bus). Values

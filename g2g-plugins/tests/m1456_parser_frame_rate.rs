@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 #![cfg(all(feature = "std", any(feature = "dav1d", feature = "rav1d")))]
 
 use core::future::Future;

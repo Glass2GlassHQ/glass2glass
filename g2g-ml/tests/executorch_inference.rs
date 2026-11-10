@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! `ExecutorchInference` end-to-end against the real ExecuTorch runtime.
 //!
 //! The fixture is a checked-in `.pte` program computing `x * SCALE + OFFSET`

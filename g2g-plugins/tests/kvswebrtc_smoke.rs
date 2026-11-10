@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! `KvsWebRtcSink` as master and `KvsWebRtcSrc` as viewer against the real
 //! Amazon Kinesis Video Streams signalling service, in one process. Ignored by
 //! default: it needs AWS credentials allowed to use the kinesisvideo signalling

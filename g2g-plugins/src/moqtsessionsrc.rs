@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Multi-track MoQ Transport subscriber (`moqtsessionsrc`, `moqt`
 //! feature): subscribes to several tracks of one broadcast over a single MoQT
 //! session and emits each on its own output pad.

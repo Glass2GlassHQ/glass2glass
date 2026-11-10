@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M365 - FLV demuxer seek (`FlvDemux` over a seekable `FileSrc`). Drives an
 //! upstream byte-seek and re-syncs from the keyframe at or before the target,
 //! using the FLV video tag's frame-type flag.

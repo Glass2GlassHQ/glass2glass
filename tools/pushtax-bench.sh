@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+#
+# SPDX-License-Identifier: MPL-2.0
+
 # Push-tax benchmark (M870): price g2g's push model against GStreamer's pull
 # model on the same batch-demux line, `filesrc ! tsdemux ! h264parse ! fakesink`.
 #

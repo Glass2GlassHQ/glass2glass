@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M913: PUBLISH-initiated subscriptions, both sides and both drafts.
 //!
 //! A publisher normally waits to be asked. With `publish=true` `moqtsink`

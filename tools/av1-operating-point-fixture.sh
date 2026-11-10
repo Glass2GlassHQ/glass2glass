@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+#
+# SPDX-License-Identifier: MPL-2.0
+
 # Regenerate g2g-plugins/tests/fixtures/av1_320x256_l2t3_op0_base.ivf, an AV1
 # stream whose operating point 0 leaves layers out. libaom always codes
 # operating point 0 as every layer, so the script encodes two spatial and three

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M809: MISB ST 0604 MISP time stamps embedded in the video bitstream. Drives
 //! the real graph `h264/h265 source -> misptimeinsert -> misptimeextract -> sink`
 //! through the runner: an absolute microsecond time is written into each access

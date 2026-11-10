@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1056 - DVB EIT schedule tables, and the start time and duration of an event.
 //!
 //! An EIT event entry carries a 5-byte `start_time` (a 16-bit Modified Julian

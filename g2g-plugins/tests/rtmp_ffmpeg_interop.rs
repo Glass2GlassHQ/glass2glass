@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Real-peer RTMP interop (M527): ffmpeg publishes an RTMP stream
 //! (`-f flv rtmp://...`, ffmpeg's native RTMP client) into the g2g `RtmpSrc`
 //! *listener*, which demuxes it to an FLV byte stream. This proves the g2g RTMP

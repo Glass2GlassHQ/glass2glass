@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Channel interleaver (`interleave`), the fan-in that turns N mono PCM inputs
 //! into one N-channel stream: input pad `i` becomes channel `i` of every output
 //! sample frame. Nothing here resamples or converts, so every pad must carry the

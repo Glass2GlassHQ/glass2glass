@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Format conversion and spatial resampling in one element, what the pair
 //! `videoconvert ! videoscale` does in two.
 //!

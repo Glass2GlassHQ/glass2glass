@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Hand-rolled TURN client (RFC 5766 / 8656) for the str0m-based WebRTC
 //! elements, the relay fallback for the NAT cases a STUN server-reflexive
 //! candidate cannot punch through (symmetric NAT, restrictive firewalls). It is

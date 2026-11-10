@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1042: `moqtsrc`, `moqtsessionsrc` and `webrtcwhepsessionsrc` spell
 //! `num-buffers` the way gst `basesrc` does, so -1 runs until the stream ends, n
 //! emits exactly n, and 0 emits nothing and goes straight to EOS. They used to

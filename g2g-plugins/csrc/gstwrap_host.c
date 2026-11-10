@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 /* `gstwrap` C helper: drives a real GStreamer pipeline
  * `appsrc ! <element> ! appsink` so a g2g graph can host an unported GStreamer
  * element (design/README.md §7, the reverse of g2g-bridge). The Rust element

@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+#
+# SPDX-License-Identifier: MPL-2.0
+
 """Worst-case RAM / stack / ROM report for a bare-metal g2g pipeline ELF (M627).
 
 Reads a fully linked (gc-sectioned) ELF and reports the numbers an MCU

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M810: SMPTE ST 2022-1 (Pro-MPEG COP3) FEC for MPEG-TS over RTP.
 
 use g2g_plugins::st2022fec::{

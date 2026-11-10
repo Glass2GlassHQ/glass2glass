@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Zero-copy GPU -> DMABUF *export* element (`wgputodmabuf`), the producer half
 //! that pairs with the [`DmaBufToWgpu`](crate::dmabufwgpu::DmaBufToWgpu) importer
 //! across a process boundary.

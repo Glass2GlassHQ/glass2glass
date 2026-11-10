@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Windows H.264 / H.265 decode element wrapping a Media Foundation decoder
 //! MFT (`CLSID_MSH264DecoderMFT` or `CLSID_MSH265DecoderMFT`, an
 //! `IMFTransform`). Codec is selected with [`MfDecode::with_codec`]; the

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M310: runtime request pads. A dynamic fan-out's branches are attached *while
 //! the pipeline runs* via `DynamicFanoutHandle::add_branch` (the runtime
 //! equivalent of GStreamer tee request pads), not declared at build time. The

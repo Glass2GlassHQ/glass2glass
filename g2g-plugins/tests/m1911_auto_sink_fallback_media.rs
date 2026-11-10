@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 // with no display or audio sink in the build, the auto sinks fall back to a fake sink that still takes only their media
 #![cfg(all(
     feature = "std",

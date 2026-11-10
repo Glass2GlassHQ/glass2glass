@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M589: Linux audio-sink host smoke test (alsasink / pulsesink / pipewiresink).
 //!
 //! These render sinks were unit-tested (caps mapping, pad templates) but never

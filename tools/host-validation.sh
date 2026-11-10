@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+#
+# SPDX-License-Identifier: MPL-2.0
+
 # Pull-based host validation (M1144): a host that owns hardware CI cannot reach
 # (an RTX 3060 desktop, a headless bench box) fast-forwards its own checkout to
 # master on its own schedule, runs one suite, and posts a commit status on the

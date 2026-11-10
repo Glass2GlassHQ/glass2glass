@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Shared HTTP fetch + URL helpers for the adaptive-streaming sources
 //! ([`HlsSrc`](crate::hlssrc), [`DashSrc`](crate::dashsrc)). Thin wrappers over
 //! `reqwest`, with bounded retries for media segments and live playlist reloads,

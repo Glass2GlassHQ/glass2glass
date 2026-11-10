@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1235-M1239: the client surface over a running graph. `RunBuilder` composes
 //! a mutator with the other run options; a handle's timeout bounds the wait for
 //! a packet boundary and withdraws what it asked for; the bus reports every

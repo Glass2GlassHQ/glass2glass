@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Zero-copy lend (M234): the application lends a buffer to `appsrc` and the
 //! pipeline reads it in place. Proven two ways: the `appsink` callback observes
 //! the *same pointer* that was lent (no copy happened), and the free callback

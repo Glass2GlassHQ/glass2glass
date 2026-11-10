@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! ID3v2 tag writer element (`id3v2mux`, gst's other name for it `id3mux`): the
 //! coded byte stream in, the same stream with an ID3v2 tag ahead of it out. An
 //! ID3v2 tag already at the head is replaced, so running the element twice

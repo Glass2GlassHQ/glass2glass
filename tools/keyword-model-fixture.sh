@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+#
+# SPDX-License-Identifier: MPL-2.0
+
 # Regenerate the keyword-spotting model fixtures in g2g-mcu/tests/fixtures/keyword:
 # speech.tflite (the TFLite Micro micro_speech model as MicroFlow 0.1.3 ships it),
 # its ONNX twin speech.onnx (tf2onnx, QDQ int8), quantization.txt (the input

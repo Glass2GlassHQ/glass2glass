@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 #![no_main]
 // FlexFEC recovery over untrusted packets: the stateless recover_packet plus the
 // stateful decoder fed length-prefixed packets (seq parity picks media vs fec).

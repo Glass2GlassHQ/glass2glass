@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1083 debug and test elements: `breakmydata` corrupts bytes on the way past,
 //! `chopmydata` re-chunks a byte stream on a step boundary, `checksumsink`
 //! digests every buffer, `errorignore` absorbs a failure from downstream, the

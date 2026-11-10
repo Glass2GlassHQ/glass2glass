@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M306: on-device probe for the Android MediaCodec H.264 encoder.
 //!
 //! Synthesises NV12 frames (a moving gradient so the encoder has real content),

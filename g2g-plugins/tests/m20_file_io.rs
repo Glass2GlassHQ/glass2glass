@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M20: file I/O elements. `FileSink` records a pipeline's byte stream;
 //! `FileSrc` replays a file as `DataFrame` chunks. Together they close the
 //! record / playback loop (e.g. testsrc -> encode -> filesink, then

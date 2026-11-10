@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M83 (auto-plug, slice a): the runtime element [`Registry`] + decode-chain
 //! search, exercised over real plugin elements and run end-to-end onto
 //! [`run_graph`].

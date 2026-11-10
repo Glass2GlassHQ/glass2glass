@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Software temporal resampler (P1.2). Drops or duplicates whole frames to
 //! hit a configured target framerate: `30 fps -> 10 fps` for ML inference,
 //! `30 fps -> 60 fps` for delivery. Pairs with `VideoScale` (spatial) ahead

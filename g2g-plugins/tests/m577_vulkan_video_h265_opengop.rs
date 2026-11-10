@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M577: Vulkan Video H.265 open-GOP (CRA / RASL) decode.
 //!
 //! x265 defaults to `open-gop=1`, so most HEVC in the wild does random access at a

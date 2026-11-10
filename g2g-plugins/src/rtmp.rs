@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Sans-IO RTMP protocol, both directions. Pure `no_std + alloc`, no sockets.
 //!
 //! - [`RtmpSession`] is the ingest (server) side, the transport half of

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1048: the `deinterlace` element's `fields` and `tff` properties, and the
 //! planar formats at 10 and 12 bits.
 //!

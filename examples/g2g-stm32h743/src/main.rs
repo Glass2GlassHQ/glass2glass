@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! STM32H743 (Cortex-M7) on-device harness: run the heap-free flagship audio
 //! graph (`capture -> convert -> resample -> mix -> encode -> RTP`, the same
 //! `noalloc_pipeline::audio` pipeline every no_std proof covers) and egress its

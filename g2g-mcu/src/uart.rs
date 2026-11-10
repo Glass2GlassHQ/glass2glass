@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! UART transport seams and elements: the byte-stream egress / ingress a real
 //! product uses for telemetry, a console, or a serial sensor, alongside the
 //! packet (RTP) and bus (SPI / I2C / I2S) transports. `embedded-hal` 1.0 keeps

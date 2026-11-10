@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Linux video decode element using ffmpeg / libavcodec.
 //!
 //! Wraps any libavcodec video decoder the

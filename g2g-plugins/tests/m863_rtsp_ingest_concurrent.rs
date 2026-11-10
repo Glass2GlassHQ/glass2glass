@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M863: concurrent multi-publisher RTSP ingest (`RtspServerSrcN`). One RTSP
 //! endpoint, one recording publisher per output pad, all sessions live at the
 //! same time: each pad emits exactly the stream its own publisher pushed, and a

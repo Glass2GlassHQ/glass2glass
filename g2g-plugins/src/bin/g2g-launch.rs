@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! `g2g-launch`: the `gst-launch` analog. Parses a text pipeline against the
 //! standard element registry and runs it to completion.
 //!

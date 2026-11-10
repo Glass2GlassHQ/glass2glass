@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+#
+# SPDX-License-Identifier: MPL-2.0
+
 # Generate the ExecuTorch fixture used by `g2g-ml/tests/executorch_inference.rs`:
 # `affine_2x_plus_1.pte`, a program computing `x * SCALE + OFFSET` on an f32 SHAPE
 # input. Committed for provenance; the .pte it writes is the checked-in fixture

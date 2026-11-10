@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! SLAVE-mode PTP delay-request-response state machine.
 //!
 //! Transport-agnostic: fed each received PTP message (raw bytes + the local time

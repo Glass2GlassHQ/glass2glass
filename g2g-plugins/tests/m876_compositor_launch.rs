@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M876: the compositor as a `gst-launch` element. A text pipeline builds the
 //! fan-in by link degree and configures the whole composite through properties:
 //! the canvas geometry and fill, and the per-pad placement gst expresses as

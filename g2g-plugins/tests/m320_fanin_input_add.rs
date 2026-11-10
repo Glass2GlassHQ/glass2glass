@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M320: fan-in request pads. An input is attached to a *running* aggregator via
 //! `DynamicFaninHandle::add_input` (the runtime equivalent of GStreamer's
 //! aggregator/muxer request **sink** pads), the dual of the M310/M319 dynamic

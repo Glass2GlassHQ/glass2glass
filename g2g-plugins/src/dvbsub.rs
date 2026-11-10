@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! DVB subtitle (ETSI EN 300 743) decoding: the pure half behind
 //! [`DvbSubDec`](crate::dvbsubdec::DvbSubDec).
 //!

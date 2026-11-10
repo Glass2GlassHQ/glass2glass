@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! V4L2 capture source. Streams frames off a `/dev/videoN` device via mmap
 //! streaming I/O. Linux-only (`v4l2` feature).
 //!

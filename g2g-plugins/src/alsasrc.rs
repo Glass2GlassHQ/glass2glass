@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Linux ALSA capture source: the input mirror of
 //! [`AlsaSink`](crate::alsasink::AlsaSink) and the non-PipeWire sibling of
 //! [`PipeWireSrc`](crate::pipewiresrc::PipeWireSrc). Reads interleaved PCM from

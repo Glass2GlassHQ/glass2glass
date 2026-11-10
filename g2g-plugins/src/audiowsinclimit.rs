@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Windowed-sinc low-pass / high-pass (`audiowsinclimit`). A linear-phase FIR
 //! whose kernel is a sinc at `cutoff` multiplied by `window`, `length` taps
 //! long. Preserves format, channel count, and sample rate. CPU-only `no_std`.

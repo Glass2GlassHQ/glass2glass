@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Terminal duplex-session runner (`run_duplex_session`): drives N send-side
 //! sources **and** M recv-side sinks through one terminal `MultiDuplexSession`
 //! (the shape a bidirectional sendrecv WebRTC session uses, where the element is

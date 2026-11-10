@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Small `no_std` float helpers: `core` has no trig intrinsics, so a `libm`-free
 //! sine (Bhaskara I's approximation, max error ~0.0016) covers the elements that
 //! need a little trig (test-signal synthesis, hue rotation) without pulling a

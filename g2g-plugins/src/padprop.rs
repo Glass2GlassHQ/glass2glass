@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! The `sinkN-<knob>` naming a fan-in flattens its per-pad properties into.
 //! [`properties`](g2g_core::MultiInputElement::properties) is a `&'static`
 //! table, so a request pad's own property (gst's `sink_1::priority`) has no

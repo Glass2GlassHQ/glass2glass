@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 // the multi-track fixtures (two video and two audio tracks of one codec each, interleaved, that
 // differ in size or in rate and channels), their checked-in ffprobe streams, and a sink that records decoded caps
 

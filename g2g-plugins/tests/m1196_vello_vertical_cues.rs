@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1196 - vertical cues on the Vello GPU text overlay. A `vertical:rl` / `lr`
 //! cue lays out as top-to-bottom columns, the first line rightmost for `rl` and
 //! leftmost for `lr`, in the same pixels the CPU overlay puts it in. Each test

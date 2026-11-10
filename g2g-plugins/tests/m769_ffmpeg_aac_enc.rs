@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M769: `FfmpegAacEnc` end-to-end encode validation. Encodes a real 440 Hz
 //! stereo tone to ADTS AAC, asserts the ADTS framing (syncword, 48 kHz stereo
 //! header fields, one AU per output frame), then has the ffmpeg CLI decode the

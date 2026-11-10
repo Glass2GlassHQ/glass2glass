@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Audio gain (`volume`). Scales every signed-16-bit PCM sample by a linear
 //! `volume` factor (or zeroes it when `mute` is set), preserving format, channel
 //! count, and sample rate. The audio analog of `videobalance`. CPU-only `no_std`.

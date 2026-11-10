@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Cross-process validation of the vendor-neutral DMABUF transport elements
 //! (`local-dmabuf`). Two *separate processes* move a frame with no copy:
 //! the producer's dma-buf file descriptor is passed to the consumer as

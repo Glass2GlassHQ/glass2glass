@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M179: element-granular logging with instance names. Running a graph through
 //! `run_graph` assigns each element a `<category>N` instance name (the GStreamer
 //! `videotestsrc0` convention), logs each element's addition, and an element that

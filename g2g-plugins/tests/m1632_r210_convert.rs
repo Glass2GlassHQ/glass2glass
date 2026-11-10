@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! `videoconvert` packs and unpacks r210 byte for byte as ffmpeg does, rows laid
 //! out unpadded as GStreamer does, checked against the fixtures
 //! `tools/packed-10bit-fixtures.sh` writes.

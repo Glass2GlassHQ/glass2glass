@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Shared WebRTC send-simulcast machinery for grouped-pad publishing sessions:
 //! groups N video layers under one m-line with N send rids, and routes a remote
 //! per-`(mid, rid)` keyframe request to exactly the source feeding that layer.

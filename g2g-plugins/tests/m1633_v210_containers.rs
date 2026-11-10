@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! QuickTime, AVI and Matroska `v210` tracks demux as v210 raw video, checked
 //! against ffmpeg's stream copy and decode of the fixtures
 //! `tools/packed-10bit-fixtures.sh` writes.

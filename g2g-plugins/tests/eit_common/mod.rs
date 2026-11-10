@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Fixtures shared by the DVB EIT tests (`m1049_ts_av1_eit`, `m1056_eit_schedule`):
 //! hand-built EIT sections with a real MPEG-2 CRC-32, the TS packetization that
 //! carries them, and the collect-into-Vec sink the element legs push into. The CRC

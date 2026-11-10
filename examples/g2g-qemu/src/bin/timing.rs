@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Per-frame timing / jitter report for the flagship audio graph:
 //! run `capture -> convert -> resample -> mix -> encode -> RTP` on the
 //! emulated Cortex-M4 with a SysTick stamp on every emitted packet, and

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M720 reverse-signal relay through intervening transforms: a downstream
 //! keyframe request (`Reconfigure::ForceKeyframe`, the WebRTC PLI path) and a
 //! bitrate target hop upstream past any transform that does not consume them

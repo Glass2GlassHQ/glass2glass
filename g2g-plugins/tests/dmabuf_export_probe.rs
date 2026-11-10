@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Probe: does this host's Vulkan driver support dma-buf *export*
 //! (`vkGetMemoryFdKHR` with `VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT`)?
 //! Import is already exercised by `dmabuftowgpu`; export is the missing half a

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Native WebTransport <-> wire-codec I/O shared by the `webtransport` elements
 //! (`RemoteWtSink`, `RemoteWtSrc`, `RemoteWtTransform`): dial or accept a session,
 //! and carry the [`PipelinePacket`] stream over the single bidirectional stream it

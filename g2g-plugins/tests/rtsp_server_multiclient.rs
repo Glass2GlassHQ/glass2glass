@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! RtspServerSink serving multiple players: two RTSP players connect (one at
 //! startup, one mid-stream) and each receives its own ordered RTP session of the
 //! same H.264. Proves the multi-client serving path (per-client handshake +

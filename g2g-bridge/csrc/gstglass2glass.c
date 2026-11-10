@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 /* GStreamer element `glass2glass`: embeds a g2g sub-graph inside a GStreamer
  * pipeline (design/README.md §7). This is the thin GObject shell over the Rust
  * `BridgeGraph` impedance core; it owns all GStreamer/GObject boilerplate and

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Concurrency-primitive compat layer for loom.
 //!
 //! Under `--cfg loom` the atomics and `UnsafeCell` come from loom, so its model

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! EBU R128 loudness meter (`ebur128`). A passthrough that measures momentary
 //! (400 ms), short-term (3 s) and gated integrated loudness in LUFS per
 //! ITU-R BS.1770-4, and exposes them via getters, the way

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M311: smoke tests for the ONVIF source element.
 //!
 //! The offline tests run always: property round-trip, the unconfigured-source

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 /* glass2glass plugin ABI, generation 3: generation 2 plus a pixel aspect ratio
  * at the end of both video caps bodies. The descriptor symbol and magic are the
  * same, and the host tells the two apart by `abi_version`.

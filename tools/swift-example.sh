@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+#
+# SPDX-License-Identifier: MPL-2.0
+
 # Build g2g-uniffi, generate its Swift bindings, and run g2g-uniffi/examples/swift
 # against the built library. Needs swiftc on PATH.
 set -euo pipefail

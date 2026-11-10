@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M155 HTTP byte-stream source: `HttpSrc` GETs a URL and streams the response
 //! body downstream as `Caps::ByteStream` `DataFrame` chunks, then `Eos`. A
 //! local one-shot TCP server (no extra deps) serves a known payload; the test

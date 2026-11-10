@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M620: prove a multi-stage pipeline (source -> transform -> sink) is zero heap
 //! allocation in steady state when the stages hand off over concrete (non-`dyn`)
 //! calls, extending the single-stage data-path proof of `m616_no_steady_state_alloc`

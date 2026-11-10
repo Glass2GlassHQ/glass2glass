@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Per-frame metadata system: typed blobs that travel with a [`Frame`] (the
 //! GstMeta / GstAnalyticsRelationMeta analog), and the `AnalyticsMeta` relation
 //! graph for ML detection / classification / tracking results.

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M164 fMP4 `cbcs` (MPEG Common Encryption) decryption in `Fmp4Demux`. Builds an
 //! encrypted CMAF stream by hand (an `encv`/`sinf`/`tenc` init segment + a
 //! `moof` whose `senc` maps subsamples over `cbcs`-encrypted `mdat` samples),

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M82 - end-to-end flush seek. A seek-aware source polls a `SeekController`
 //! between frames; on a flushing seek it emits `Flush`, repositions, emits the
 //! post-flush `Segment`, and resumes from the new position. The runner already

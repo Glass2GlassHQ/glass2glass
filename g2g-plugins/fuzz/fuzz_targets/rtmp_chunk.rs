@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 #![no_main]
 // RTMP server-side chunk-stream reassembly + AMF0 command parsing: the remote
 // surface a malicious publisher reaches after the (uncrypto) handshake. The

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 #![cfg(all(feature = "dav1d", feature = "av1-encode"))]
 //! AV1 decode round-trip: encode I420 frames to AV1 with the pure-Rust `Av1Enc`
 //! (rav1e), then decode them back with `Dav1dDec` (libdav1d) and check the

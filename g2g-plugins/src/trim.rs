@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Trim (`no_std`): keeps the frames in a presentation-time range and
 //! rebases them onto it, so `filesrc ! decodebin ! trim start=… stop=… ! …` cuts
 //! a clip out of a decoded file without a seek.

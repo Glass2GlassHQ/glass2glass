@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Audio-only fragmented-MP4 demuxer source, the read-side counterpart of
 //! `Mp4AudioSink`: parses a single-`soun`-track AAC fMP4 and emits the raw AAC
 //! access units with recovered timing, so a recorded `.m4a` plays back through

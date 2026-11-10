@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! "Test source + sync" milestone (M3): verify the SyncSink genuinely
 //! paces presentation to PTS, and that backpressure makes the upstream
 //! VideoTestSrc track the sink's rate without any explicit pacing.

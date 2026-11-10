@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Static (heap-free) element model for the no-alloc / MCU path (Phase 2 of the
 //! alloc-optional core): the generic twin of the object-safe `AsyncElement` /
 //! `OutputSink`, which box a future per frame (`element.rs`, the honest

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Synthetic video source. Emits a deterministic gradient pattern at a
 //! fixed framerate in the system memory domain. CPU-only.
 

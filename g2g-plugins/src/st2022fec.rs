@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! SMPTE ST 2022-1 (Pro-MPEG Code of Practice #3) FEC for RTP. Sans-IO,
 //! `no_std + alloc`.
 //!

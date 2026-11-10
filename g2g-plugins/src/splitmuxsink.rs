@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Splitting muxer sink (`splitmuxsink`). Muxes an H.264 / H.265 elementary
 //! stream into a series of self-contained container files, starting a new file at
 //! a keyframe once the current one reaches `max-size-time` or `max-size-bytes`.

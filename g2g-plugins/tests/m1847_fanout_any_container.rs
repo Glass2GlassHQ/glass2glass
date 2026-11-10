@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 // A `decodebin` or `parsebin` fan-out splits every file the inline bin plays, so each
 // branch carries the same stream the inline bin picks with `current-video` / `current-audio`.
 #![cfg(all(

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Fan-in integration for the compositor (M93): two solid-colour sources are
 //! mixed through `run_muxer_sink` into a capturing sink. Asserts the output
 //! cadence (one frame per input-0 frame), the output geometry, and that the

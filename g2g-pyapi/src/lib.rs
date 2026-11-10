@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Python bindings to drive glass2glass pipelines (the inverse of `g2g-python`,
 //! which hosts Python *elements* inside a pipeline).
 //!

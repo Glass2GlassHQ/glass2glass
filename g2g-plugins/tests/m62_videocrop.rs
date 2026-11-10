@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Tier-1 A1: `VideoCrop` in a real negotiated chain. An RGBA test source is
 //! cropped to a sub-rectangle, the new geometry announced via `CapsChanged`.
 

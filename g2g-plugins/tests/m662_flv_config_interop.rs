@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M662 FLV codec-config side channel, validated against ffmpeg as the
 //! reference peer (both directions):
 //!

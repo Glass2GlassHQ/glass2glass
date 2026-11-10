@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Plain TCP byte-stream elements (`tcp` feature): the four elements of
 //! GStreamer's `tcp` plugin. `TcpServerSrc` / `TcpClientSrc` read a socket and
 //! emit its bytes as `DataFrame` chunks exactly the way [`FileSrc`](crate::filesrc)

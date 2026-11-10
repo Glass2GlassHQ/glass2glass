@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M152 Motion-JPEG decode: `MjpegDec` decodes a baseline JPEG access unit to
 //! RGBA8, recovering geometry from the JPEG headers and emitting it as a
 //! `CapsChanged` before the first frame. The fixture is a 16x16 solid red JPEG.

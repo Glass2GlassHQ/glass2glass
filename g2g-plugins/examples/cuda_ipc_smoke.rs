@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Cross-process zero-copy validation for the CUDA IPC primitive
 //! (`local-ipc`). Proves two *separate processes* map the SAME VRAM: the only
 //! thing transmitted is the 64-byte IPC handle (plus the size), no frame bytes.

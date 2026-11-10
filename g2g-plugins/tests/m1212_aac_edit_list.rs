@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1212: an AAC track's encoder priming survives an MP4 remux. The source's
 //! `elst` says presentation starts 1024 samples into the media; `qtdemux` turns
 //! that into a `Segment` starting past the priming, and `mp4mux` writes it back

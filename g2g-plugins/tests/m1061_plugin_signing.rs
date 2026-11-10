@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1061: detached Ed25519 signatures, checked before the `dlopen`.
 //!
 //! Every case uses the real v2 example plugin: a `cdylib` that loads and

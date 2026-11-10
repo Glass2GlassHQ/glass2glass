@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1113: `VideoConvert` converts with the matrix and range its caps
 //! colorimetry names, not a hardcoded BT.601 limited.
 //!

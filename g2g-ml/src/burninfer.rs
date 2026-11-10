@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Pure-Rust Burn inference element (`burn` backend, design/ml.md).
 //!
 //! `BurnInference` is the no-C++ counterpart of `OrtInference`: it negotiates

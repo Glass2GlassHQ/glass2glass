@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M207 - multi-stream MPEG-TS muxing. A video and an audio source are muxed
 //! into ONE MPEG-TS byte stream (interleaved by PTS), then each elementary
 //! stream is recovered by demuxing it back out with the existing single-output

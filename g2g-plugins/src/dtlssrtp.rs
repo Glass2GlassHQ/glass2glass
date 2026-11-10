@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! DTLS-SRTP key delivery (RFC 5764): the DTLS session the `dtlssrtpenc` /
 //! `dtlssrtpdec` pair share.
 //!

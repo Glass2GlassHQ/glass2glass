@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 #![cfg(feature = "wgpu")]
 //! design/ml.md: `WgpuPreprocess` converts an NV12 frame to a normalized f32 NCHW RGB
 //! tensor in a wgpu compute shader. The test runs a known NV12 frame (distinct

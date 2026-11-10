@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Matroska / WebM demuxer element: `Caps::ByteStream{Matroska}` in, one
 //! selected elementary stream out. Video leaves as `Caps::CompressedVideo`
 //! (H.264 / H.265 / VP8 / VP9 / AV1), audio as `Caps::Audio` (AAC / Opus).

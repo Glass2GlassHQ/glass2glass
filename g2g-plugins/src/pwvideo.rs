@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Shared PipeWire video helpers for
 //! [`PipeWireVideoSrc`](crate::pipewirevideosrc): the SPA <-> `RawVideoFormat`
 //! mapping, the `EnumFormat` pod a video stream connects with, the `Buffers` pod

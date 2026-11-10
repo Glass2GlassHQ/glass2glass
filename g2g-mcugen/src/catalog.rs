@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! The catalog of MCU static elements the compiler understands, and the frame
 //! geometry each imposes. Every kind here maps to a real `g2g-mcu` heap-free
 //! static element; the geometry rules are how the compiler sizes each ring

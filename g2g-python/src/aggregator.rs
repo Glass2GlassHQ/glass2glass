@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! `PyAggregator`: a gst-python-ml batched element hosted as a g2g muxer.
 //!
 //! N-in-1-out: collects one frame from each contributing input (via

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1123: the latency fold's liveness reaches every element, the return path of
 //! the latency query. Each element here records what it was told and how many
 //! frames it had already processed, so a test can check both the answer and that

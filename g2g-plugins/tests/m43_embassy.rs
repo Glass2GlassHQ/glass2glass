@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M43: the no_std core runs under an Embassy executor primitive. Drives a real
 //! `VideoTestSrc -> FakeSink` pipeline to completion with
 //! `embassy_futures::block_on` (the future runner an embedded app uses on bare

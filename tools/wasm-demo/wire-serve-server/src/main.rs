@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Wire-codec server for the glass2glass browser demo's receive direction.
 //!
 //! A browser can only dial out, so the native side listens: this runs

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1217: RIST (VSF TR-06-1 Simple Profile) `ristsink` / `ristsrc`. The wire
 //! pieces are checked on byte vectors, then a g2g sender and receiver run over
 //! loopback UDP through a relay that drops a fixed set of media packets, so

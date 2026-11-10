@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M425: H.265 access-unit re-framing auto-insert + Opus decode auto-plug.
 //!
 //! Two follow-ups to the M421 (H.264 re-framer) / M422 (AAC decode) playback work:

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M878 - per-program service text on MPEG-TS. A multi-program multiplex carries
 //! one SDT entry per program, each with its own `service_name` /
 //! `service_provider_name`: `TsMux::with_program_tags` names a program by its

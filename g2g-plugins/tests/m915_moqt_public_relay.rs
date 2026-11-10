@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M915: interop against a public MoQ Transport relay.
 //!
 //! `mp4mux ! moqtsink` -> a relay on the public internet -> `moqtsrc`, the same

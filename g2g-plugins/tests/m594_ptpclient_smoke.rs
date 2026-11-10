@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M594: in-process software PTP client host smoke test.
 //!
 //! The CI-provable core (wire parser + slave state machine + servo) is unit

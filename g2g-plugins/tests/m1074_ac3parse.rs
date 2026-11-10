@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1074 raw AAC and AC-3 playback: `typefind` types an `.aac` (ADTS) and an
 //! `.ac3` by content, `aacparse` / `ac3parse` split them into frames with
 //! sample-accurate timestamps, and `decodebin` splices the parser ahead of a

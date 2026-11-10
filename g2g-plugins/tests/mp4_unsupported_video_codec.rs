@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! An MP4 whose `vide` track carries a codec the demuxer has no reader for
 //! (MJPEG, which ffmpeg boxes as an `mp4v` sample entry with objectTypeIndication
 //! 0x6C) demuxes its remaining tracks instead of failing the whole file. A

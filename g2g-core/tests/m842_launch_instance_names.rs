@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M842: instance names. A launch line's `name=` is the element's run-time
 //! instance name (not just the handle `t.` references resolve against), unnamed
 //! elements keep the auto `<category>N` numbering, and the bespoke linear runner

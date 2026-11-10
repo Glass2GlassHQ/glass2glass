@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Local zero-copy CUDA transport elements (`local-ipc`): the
 //! GPU-resident analog of the [`RemoteSink`](crate::remotesink) /
 //! [`RemoteSrc`](crate::remotesrc) pair. `LocalCudaSink` (Unix-socket client) and

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! File sink. Writes every `DataFrame`'s system-memory bytes to a file in
 //! arrival order, producing a raw byte stream (e.g. an Annex-B `.h264`
 //! elementary stream when fed from `H264Parse` or `MfEncode`). With

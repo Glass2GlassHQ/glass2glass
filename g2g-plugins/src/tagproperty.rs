@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! The `tags` element property: gst's taglist syntax parsed into a [`TagList`].
 //!
 //! A [`TagList`] travels out of band on the bus

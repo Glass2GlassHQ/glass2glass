@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 use std::io::Write;
 
 // SIGPIPE stays ignored for the sockets, so a closed stdout (`| head`) ends the process here as gst-launch does

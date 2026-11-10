@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Probe: can a *timeline* semaphore be signalled on one wgpu device's queue
 //! (via `wgpu_hal::vulkan::Queue::add_signal_semaphore`) and observed by a host
 //! `vkWaitSemaphores` on a *second* device that imported the same semaphore as an

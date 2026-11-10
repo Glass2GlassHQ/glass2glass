@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 #![cfg(feature = "embassy-link")]
 //! M45: a real source streams packets through an embassy-sync zero-alloc
 //! channel to a consumer, both driven by `embassy_futures::block_on`. Proves

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Software video compositor: overlays N raw RGBA8 input streams onto one
 //! output canvas at configurable positions, z-order, and per-pad alpha, with
 //! alpha blending. The `videomixer` / `compositor` analog (picture-in-picture,

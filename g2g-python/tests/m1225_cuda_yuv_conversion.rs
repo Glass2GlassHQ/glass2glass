@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1225: `g2g_process_cuda` receives the YUV conversion of the frame's current
 //! caps as `(kr, kb, full_range)`, including caps a mid-stream `CapsChanged`
 //! announced after configure. No device memory is touched, so it runs without a

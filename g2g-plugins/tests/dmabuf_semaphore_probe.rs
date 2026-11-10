@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Probe: does this host's Vulkan driver support external *semaphore* fd
 //! export+import (`VK_KHR_external_semaphore_fd`)? This is the primitive a future
 //! zero-stall cross-device / cross-process sync for `WgpuToDmaBuf` would use in

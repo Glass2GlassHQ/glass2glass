@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Shared AV1 decoder element, generated for each backend by [`av1_decoder!`].
 //!
 //! [`Dav1dDec`](crate::dav1ddec) (libdav1d, the C reference with hand-written

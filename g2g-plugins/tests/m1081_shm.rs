@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1081: the shared-memory IPC pair. The loopbacks run a g2g `shmsink` and a
 //! g2g `shmsrc` over one control socket and assert the bytes and the frame count
 //! come through; the codec tests cover what a hostile peer can put on that

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Receive-direction proof: the RX chain on the emulated Cortex-M4. A
 //! mock network receiver hands the pipeline a *reordered* stream of RTP/PCMU
 //! datagrams; `RtpSrc -> JitterBuffer -> G.711 decode -> hash` must reconstruct

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! G.711 companding elements: `mulawenc` / `alawenc` turn
 //! `Audio{PcmS16Le}` into one companded byte per sample, `mulawdec` /
 //! `alawdec` expand it back. The sample math is [`g2g_mcu::g711`], the

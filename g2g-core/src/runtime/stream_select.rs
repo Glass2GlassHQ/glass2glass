@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Stream-selection request channel, the GStreamer `GST_EVENT_SELECT_STREAMS`
 //! analog and the sibling of [`SeekController`](crate::runtime::SeekController).
 //!

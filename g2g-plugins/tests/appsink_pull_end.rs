@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! An `appsink` pull handle ends once its graph is gone, whether the run
 //! finished or failed before the sink configured.
 //!

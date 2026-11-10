@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+#
+# SPDX-License-Identifier: MPL-2.0
+
 # Build the pose and oriented-box fixtures (g2g-ml/tests/yolo_pose.rs,
 # yolo_obb.rs): yolo11n-pose and yolo11n-obb ONNX exports, a letterboxed
 # non-square photo for each, and Ultralytics' own predictions as the reference.

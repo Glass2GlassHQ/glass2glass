@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1546: a bare `decodebin` on an FLV selects the codec the file's tags carry,
 //! so a VP6 FLV no longer plugs a decoder on the default H.264 port.
 

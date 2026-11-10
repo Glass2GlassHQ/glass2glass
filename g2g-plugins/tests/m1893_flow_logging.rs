@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1893: at `log` level the runner logs every packet each element receives
 //! (and each one a source pushes) under that element's category and instance
 //! name, the `GST_DEBUG=GST_SCHEDULING:6,GST_EVENT:6` analog. Paths that drop

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1000: an arbitrary graph through `run_graph` is heap-free in steady state.
 //! The two per-frame boxes the dyn layer used to impose are gone: `OutputSink`
 //! is poll-based (a push through `&mut dyn OutputSink` builds a stack

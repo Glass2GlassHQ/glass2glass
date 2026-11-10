@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1086 headerless raw framers: `rawvideoparse` cuts a `.yuv` dump into frames
 //! and `rawaudioparse` cuts a `.pcm` dump into sample-aligned buffers, both from
 //! the shape their properties declare.

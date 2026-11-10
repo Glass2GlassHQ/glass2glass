@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M570: colour-space-aware YUV -> RGB conversion (the HDR foundation).
 //!
 //! The decoder converted every stream with a fixed BT.601 matrix, so BT.709 (all

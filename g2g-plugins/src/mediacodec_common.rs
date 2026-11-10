@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Shared NDK MediaCodec plumbing for the Android encode / decode elements
 //! (`mediacodecdec`, `mediacodecenc`): the buffer-flag constants and the
 //! dequeue-input-with-retries skeleton, which were duplicated byte-for-byte.

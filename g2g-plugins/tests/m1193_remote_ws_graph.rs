@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1193 - hosting a branching subgraph as the stage a remote transform offloads.
 //!
 //! `serve_ws_stage` takes a `Bin` with one ghost input and one ghost output and

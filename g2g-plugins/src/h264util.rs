@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! H.264 helper for `WebCodecsDecode`: build the WebCodecs `codec` string from
 //! the SPS. NAL splitting is shared via [`crate::annexb`]. Pure and
 //! host-testable; the element itself only runs in a browser.

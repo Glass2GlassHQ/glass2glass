@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Minimal WebAssembly wrapper around g2g's real caps solver.
 //!
 //! `validate_pipeline` parses + negotiates a `gst-launch` line with the standard

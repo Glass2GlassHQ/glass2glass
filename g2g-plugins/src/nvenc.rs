@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Native NVENC H.264 encode element (`nvenc` feature): the zero-copy,
 //! device-resident counterpart of [`crate::ffmpegenc::FfmpegVideoEnc`]. Where the
 //! ffmpeg encoder takes system-memory I420 and copies it into libavcodec, this

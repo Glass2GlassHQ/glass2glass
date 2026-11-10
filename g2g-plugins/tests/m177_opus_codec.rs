@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M177: Opus encode + decode round-trip. `OpusEnc` packs interleaved S16LE PCM
 //! into Opus packets (one per 20 ms frame); `OpusParse` recovers the channel
 //! count from those packets (proving they are a valid Opus stream); `OpusDec`

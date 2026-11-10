@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! WHIP server source (`WhipServerSrc`): accepts one RFC 9725 WHIP publisher
 //! (a browser, OBS, or [`crate::webrtcsink::WebRtcSink`]) and emits its video on
 //! output 0 and its Opus audio on output 1. The g2g counterpart of GStreamer's

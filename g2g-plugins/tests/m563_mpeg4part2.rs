@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M563 - MPEG-4 Part 2 (Visual) decode via the MP4 container + libavcodec.
 //!
 //! A whole-file MP4 whose video track is an `mp4v` sample entry (esds

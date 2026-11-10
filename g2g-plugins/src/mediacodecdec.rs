@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Android hardware H.264 decode via the NDK MediaCodec (`AMediaCodec`).
 //!
 //! `MediaCodecDec` is the Android counterpart of `VtDecode` (macOS VideoToolbox)

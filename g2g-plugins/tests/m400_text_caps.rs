@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M400: `Caps::Text` flows through the pipeline as a first-class media kind.
 //!
 //! Text generalizes "subtitles": a `Caps::Text` link carries any timed-or-untimed

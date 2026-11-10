@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! `data:` URI source (`dataurisrc`). Turns the payload carried inside a URI
 //! (RFC 2397) into a byte stream, so a small media object that arrives in a
 //! manifest, a config file or a launch line plays without a file on disk.

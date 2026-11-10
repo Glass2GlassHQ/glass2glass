@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M736: `MetalVideoSink` on the macOS CI runner. Presents decoded fixture
 //! frames to a standalone `CAMetalLayer` (a real drawable swapchain, headless)
 //! over both input domains: the M735 zero-copy `CvPixelBuffer` path (IOSurface

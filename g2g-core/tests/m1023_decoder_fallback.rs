@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1023: auto-plug around a decoder that turns out not to decode the stream.
 //!
 //! The search picks a decoder from pad templates and memory domains, which say

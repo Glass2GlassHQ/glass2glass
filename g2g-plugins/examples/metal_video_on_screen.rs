@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! On-screen macOS present. H.264 decoded by VideoToolbox in `cv-output`
 //! mode (retained IOSurface-backed `CVPixelBuffer`s, no CPU copy), presented in
 //! a real window by [`MetalVideoSink`]: the app owns the window (winit) and a

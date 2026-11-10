@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 // `decodebin current-video=N` / `current-audio=N` decode the Nth stream of that kind in
 // container order, the stream `ffmpeg -map 0:v:N` / `-map 0:a:N` reads.
 #![cfg(all(

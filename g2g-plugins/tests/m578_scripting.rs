@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M578/M579/M580: the scripting surface, end to end. A declarative YAML graph,
 //! a Rhai builder script, and the `scriptelement` runtime transform are each
 //! built from text and RUN to completion on the real runner, so these exercise

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Median filter (`videomedian`). Replaces each I420 sample with the median of
 //! its neighbourhood, which removes isolated speckles without softening edges
 //! the way an average would. Format and geometry are preserved. CPU-only

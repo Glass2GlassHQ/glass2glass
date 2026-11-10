@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! libavcodec AAC-LC audio encoder: interleaved PCM in
 //! (`Caps::Audio{PcmS16Le|PcmF32Le}`), ADTS-framed AAC out
 //! (`Caps::Audio{Aac}`). The audio companion of [`crate::ffmpegenc::FfmpegVideoEnc`],

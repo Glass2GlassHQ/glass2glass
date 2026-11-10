@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! XML escaping and ISO-8601 UTC formatting shared by the XML-emitting
 //! elements (`cotsink`, `onvif`). Always compiled, no_std + alloc.
 

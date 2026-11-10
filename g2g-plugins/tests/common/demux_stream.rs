@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 // the `stream` property of the demuxer a launch line plugs, the track a primary-stream hook selected
 
 use g2g_core::property::PropValue;

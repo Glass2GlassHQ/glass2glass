@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M363 - MPEG-TS demuxer seek (`TsDemux` over a seekable `FileSrc`). Like the
 //! fMP4 case (M362), the demuxer drives an upstream byte-seek and re-syncs from
 //! the keyframe at or before the target. TS units carry no keyframe flag, so the

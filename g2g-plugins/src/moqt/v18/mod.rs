@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! IETF MoQ Transport draft-18, beside the draft-16 modules it grew out of.
 //!
 //! The version is picked per session: the client offers `moqt-18` and

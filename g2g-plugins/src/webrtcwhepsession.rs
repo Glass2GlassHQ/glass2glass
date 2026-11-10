@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Multi-track WebRTC ingest session (`WebRtcWhepSessionSrc`): subscribes to a
 //! WHEP endpoint and emits the received video (`video-codec`, H.264 by default) **and** Opus audio on two
 //! output pads, from one PeerConnection. The receive-side mirror of

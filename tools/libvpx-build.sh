@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+#
+# SPDX-License-Identifier: MPL-2.0
+
 # usage: tools/libvpx-build.sh <prefix>, builds the static libvpx that the release binaries link into <prefix>
 set -euo pipefail
 

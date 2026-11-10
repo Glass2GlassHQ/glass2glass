@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1187 - the elected clock reaches the sources.
 //!
 //! A capture source stamps its own zero-based timeline (a sample count, the

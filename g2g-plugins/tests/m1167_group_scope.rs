@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1167: a `togglerecord group=` name joins only the elements of the same
 //! `parse_launch` call, so two unrelated pipelines in one process do not start
 //! and stop each other, while an application outside every parse still reaches

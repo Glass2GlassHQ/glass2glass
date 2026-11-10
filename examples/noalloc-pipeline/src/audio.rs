@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! The flagship deterministic audio graph: `capture -> convert ->
 //! resample -> mix -> encode -> RTP` composed as ONE static pipeline from the
 //! real `g2g-mcu` elements, heap-free end to end. This is the reference

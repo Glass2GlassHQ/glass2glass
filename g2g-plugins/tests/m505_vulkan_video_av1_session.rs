@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M505: Vulkan Video AV1 decode session + parameters on real hardware.
 //!
 //! The AV1 sibling of M488 / M502. Open a wgpu device with a Vulkan Video AV1

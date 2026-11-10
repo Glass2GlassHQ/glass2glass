@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! T1-B: per-input reverse-signal routing through the terminal duplex runner
 //! (`run_duplex_session`). A [`MultiDuplexSession`] exposes a per-send-input
 //! [`ReverseChannel`]; the runner clones each before running and polls it after

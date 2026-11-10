@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M33: `MfEncode::with_hardware()` drives an asynchronous (event-driven)
 //! hardware encoder MFT. Hardware H.264/HEVC encoders are commonly async MFTs;
 //! this exercises the event-loop path that M30's sync loop could not.

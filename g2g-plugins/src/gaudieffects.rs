@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! GStreamer `gaudieffects`: per-pixel colour transforms over packed RGBA /
 //! BGRA. Format and geometry are preserved. CPU-only `no_std` baseline.
 //!

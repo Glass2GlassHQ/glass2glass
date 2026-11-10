@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Closed-caption combiner (`no_std`): the `cccombiner` analog. A video
 //! stream on input 0 and a closed-caption stream on input 1 go in, the same video
 //! comes out with each frame carrying the caption triples that belong with it as

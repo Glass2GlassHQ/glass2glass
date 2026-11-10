@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! `ortinfer` on the CUDA or MIGraphX provider takes the tensor `wgpupreprocess`
 //! leaves on the GPU and returns what the same model returns on the CPU from the
 //! read-back tensor. Each test runs when `wgpupreprocess` opens its device on that

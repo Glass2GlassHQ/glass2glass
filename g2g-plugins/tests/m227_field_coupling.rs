@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M227: field-level bidirectional caps coupling. A transform declared
 //! `DerivedFields` passes some caps fields through unchanged; the solver
 //! couples those fields in both directions, so a downstream pin on a

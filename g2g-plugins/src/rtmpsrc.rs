@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! RTMP ingest source (RtmpSrc, `rtmp` feature): accepts one RTMP publisher
 //! (ffmpeg / OBS pushing `rtmp://host/app/key`) over TCP and streams the demuxed
 //! FLV byte stream downstream as `Caps::ByteStream{Flv}` for `flvdemux`, then

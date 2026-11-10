@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M909: a transform whose catch-all arm forwards `Eos` must not produce two
 //! EOS packets. The runner arms forward the sentinel after `process(Eos)`
 //! returns, and now skip that push when the element already sent one.

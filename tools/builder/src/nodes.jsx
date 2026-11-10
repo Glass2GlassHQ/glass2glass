@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 import { Handle, Position } from "@xyflow/react";
 
 // One pipeline element. Input handle unless it's a source; output handle unless

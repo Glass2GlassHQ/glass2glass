@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! PTP (IEEE 1588 / SMPTE ST 2059-2) clock servo, phase A of the `PtpClock`
 //! milestone.
 //!

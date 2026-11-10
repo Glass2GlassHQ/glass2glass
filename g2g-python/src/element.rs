@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! [`PyTransform`]: a gst-python-ml element shell hosted as a g2g transform.
 //!
 //! This is the Rust mirror of gst-python-ml's `backend/gst` `BaseTransform`:

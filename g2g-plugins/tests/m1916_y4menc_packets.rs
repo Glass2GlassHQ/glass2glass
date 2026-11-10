@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1916: `y4menc` sends one packet per frame, the stream header inside the
 //! first, as GStreamer's y4menc does.
 #![cfg(feature = "std")]

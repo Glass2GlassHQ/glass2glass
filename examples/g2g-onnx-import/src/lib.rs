@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! ONNX topology import for g2g's Burn backend.
 //!
 //! `build.rs` runs `burn-onnx`'s `ModelGen` over each fixture in `model/`, which

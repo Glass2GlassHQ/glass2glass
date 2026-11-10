@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 #![cfg(all(target_os = "linux", feature = "dmabuf-wgpu"))]
 //! M990: a `MemoryDomain::DmaBuf` NV12 frame binds into `WgpuPreprocess`'s compute
 //! pass through a Vulkan external-memory import, with no CPU round trip.

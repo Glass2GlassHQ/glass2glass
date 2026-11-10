@@ -1,3 +1,7 @@
+# Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+#
+# SPDX-License-Identifier: MPL-2.0
+
 """Independent WebTransport peer for the M901 tests: an aioquic (Python) server
 that speaks the g2g remote-transform protocol.
 

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! SDK for building **dynamically loadable** glass2glass plugins.
 //!
 //! A third party builds a plugin with plain `cargo` against a published

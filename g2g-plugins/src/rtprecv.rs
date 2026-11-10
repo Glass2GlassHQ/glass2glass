@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Shared RTP receive loop: the jitter-buffer + RTCP RR/NACK +
 //! FEC/RTX + depayload-to-access-unit path used by both [`UdpSrc`](crate::udpsrc)
 //! (raw RTP) and [`RtspServerSrc`](crate::rtspserversrc) (RTSP RECORD ingest).

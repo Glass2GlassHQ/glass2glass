@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Linux KMS/DRM display sink for NV12 frames.
 //!
 //! Direct scanout to a connected display via the primary plane on the

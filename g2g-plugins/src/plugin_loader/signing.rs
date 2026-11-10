@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Detached Ed25519 signatures over a plugin file, checked before `dlopen`.
 //!
 //! # The `.sig` file

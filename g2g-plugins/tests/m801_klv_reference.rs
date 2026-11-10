@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M801 - the ST 0601 parser against a published reference packet. The fixture
 //! is the "Dynamic and Constant MISMMS Packet Data" example (MISB ST 0902, via
 //! the klvdata project's data set), a real 228-byte UAS Datalink Local Set with

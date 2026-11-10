@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M499: `VulkanVideoPlayer` caching -- forward-continue fast path + LRU bound.
 //!
 //! Two follow-ups to the M498 scrubber:

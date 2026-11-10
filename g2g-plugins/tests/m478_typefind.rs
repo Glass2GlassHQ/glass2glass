@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M478 - content/extension typefind. A bare `filesrc` (no `bytestream-format`)
 //! types itself from the `location` extension, so a GStreamer-style line runs
 //! without naming the container / subtitle format:

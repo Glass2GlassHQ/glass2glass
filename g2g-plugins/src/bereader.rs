@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 fn be_array<const N: usize>(data: &[u8], at: usize) -> Option<[u8; N]> {
     data.get(at..at.checked_add(N)?)?.try_into().ok()
 }

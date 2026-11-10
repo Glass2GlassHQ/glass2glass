@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Gap-filling elements end to end through `parse_launch` + `run_graph`: the new
 //! audio DSP (`audioamplify` / `level` / `audioecho` / `cutter`), video utility
 //! (`gamma` / `deinterlace` / `timeoverlay` / `progressreport`), flow-control

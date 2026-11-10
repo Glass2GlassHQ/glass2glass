@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! CEA-608 / CEA-708 closed-caption decoding (`no_std`): mine the
 //! `cc_data` byte triples from H.264 / H.265 SEI `user_data_registered_itu_t_t35`
 //! messages (or MPEG-1 / MPEG-2 picture `user_data`), then decode them into

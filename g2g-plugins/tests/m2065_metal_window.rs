@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 #[cfg(target_os = "macos")]
 fn main() {
     use g2g_core::runtime::{parse_launch, run_graph};

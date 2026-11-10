@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1067 `imagefreeze`: one still frame becomes a stream at the configured
 //! framerate, bounded by `num-buffers` or by the output push failing.
 #![cfg(feature = "std")]

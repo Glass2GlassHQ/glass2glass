@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Software flip / rotate (Tier-1 A). Mirrors or rotates a raw video frame by
 //! a fixed `Orientation`, preserving the pixel format, for portrait-mode mobile
 //! sources fed to a landscape pipeline. No resampling, a per-plane coordinate

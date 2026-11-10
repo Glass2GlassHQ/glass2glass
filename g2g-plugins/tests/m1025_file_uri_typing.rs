@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1025: a `file://` URI is typed from the file's header, not assumed to be MP4.
 //!
 //! The `file` handler declared H.264-in-MP4 for every path it was given, so

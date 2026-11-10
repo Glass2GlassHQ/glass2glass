@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Isolates the PiP webcam branch from the compositor and the Wayland sink, to
 //! pin down "frozen whitish inset" reports: does V4l2Src -> VideoConvert(RGBA)
 //! -> VideoScale actually deliver many *distinct* frames, or stall after one?

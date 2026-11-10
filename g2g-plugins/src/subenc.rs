@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Machinery shared by the subtitle writers, [`crate::srtenc`] and
 //! [`crate::webvttenc`] (the two elements of GStreamer's `subenc` plugin). Both
 //! take timed `Caps::Text{Utf8}` cues and emit one document block per cue; they

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Concurrent multi-publisher RTSP ingest (`RtspServerSrcN`, `rtsp-server`
 //! feature): one RTSP endpoint, N output pads, one recording publisher per pad.
 //! The fan-out sibling of [`RtspServerSrc`](crate::rtspserversrc), which serves

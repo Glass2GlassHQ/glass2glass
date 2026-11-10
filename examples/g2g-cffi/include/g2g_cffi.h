@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 /* C seam ABI (M650): drive a g2g audio egress pipeline
  * (capture -> G.711 mu-law encode -> RTP) from your own C code, with your
  * existing C drivers as the peripheral. You provide two callbacks, register

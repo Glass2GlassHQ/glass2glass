@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Inspecting sink. Counts frames, records the last sequence number,
 //! tracks EOS, and records mid-stream `CapsChanged` events alongside
 //! the frame count at which they arrived. Used by tests and to

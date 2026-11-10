@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M193: `decodebin` in a gst-launch line. decodebin is not an element; the
 //! parser expands it, at parse time, into the chain of decoders / parsers the
 //! auto-plug search (M83) finds from its upstream caps down to raw video or

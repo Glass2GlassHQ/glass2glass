@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M903: the MoQ Transport draft-16 subscriber, `moqtsrc`, on the M902 session
 //! and codec.
 //!

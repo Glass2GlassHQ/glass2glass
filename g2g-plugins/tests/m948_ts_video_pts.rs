@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M948: per-frame video PTS synthesis in the TS demuxer. A transport stream
 //! need only carry a PES timestamp every 700 ms, so the H.264 / H.265 access
 //! units in between arrive unstamped and used to land at PTS 0. They now get

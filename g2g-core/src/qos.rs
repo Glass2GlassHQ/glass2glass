@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Sink-side QoS accounting: the late-frame drop rule and the
 //! [`BusMessage::Qos`] reports that follow from it.
 //!

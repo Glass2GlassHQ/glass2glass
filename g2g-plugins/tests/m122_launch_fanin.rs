@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M122 `gst-launch` muxer fan-in: a text pipeline whose element has several
 //! inbound links builds a muxer node (the `funnel` registered in
 //! `default_registry`), with the input count derived from link degree, and runs

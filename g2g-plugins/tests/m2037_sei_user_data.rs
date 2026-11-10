@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M2037: `h264seiinserter` and `h265seiinserter` write each frame's registered
 //! and unregistered SEI user data into an ffmpeg-encoded stream, and ffmpeg's
 //! `trace_headers` reads every message back byte for byte.

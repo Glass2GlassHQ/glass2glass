@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! `dtlssrtpenc`: runs the DTLS-SRTP handshake and protects the media it keys.
 //!
 //! One input pad per flow, `application/x-rtp` or `application/x-rtcp`, and one

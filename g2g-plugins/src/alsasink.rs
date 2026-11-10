@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Linux ALSA render sink. The audible-output end of the audio path on Linux,
 //! the analog of the Windows-only [`WasapiSink`](crate::wasapisink::WasapiSink).
 //! Consumes interleaved PCM (`PcmU8` / `PcmS16Le` / `PcmS24Le` / `PcmS32Le` /

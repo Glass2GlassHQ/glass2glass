@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+#
+# SPDX-License-Identifier: MPL-2.0
+
 # Stage the plugin SDK a distribution installs beside g2g-launch, so a plugin builds with no network.
 # Usage: tools/plugin-sdk-bundle.sh <prefix>
 set -euo pipefail

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! End-to-end smoke test for the WebRTC WHIP egress sink (`WebRtcSink`).
 //!
 //! Pipeline: `FileSrc(h264) -> H264Parse -> WebRtcSink(WHIP)`.

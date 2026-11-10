@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Progress report (`progressreport`). A 1:1 passthrough that counts frames and
 //! bytes and, every `update-freq` seconds of stream time, logs a progress line
 //! (the g2g analog of GStreamer's `progressreport`). Counts are also exposed via

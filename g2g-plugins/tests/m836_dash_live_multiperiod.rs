@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M836 DASH live + multi-period: the wall-clock `@duration` live profile
 //! (`type="dynamic"`, `availabilityStartTime`, `timeShiftBufferDepth`,
 //! `suggestedPresentationDelay`), live-edge start for a `SegmentTimeline`

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 // A fan-out stream no branch links is dropped and the linked ones play, as gst leaves the
 // extra pad unlinked: one branch on a two-stream URI decodes its stream alone.
 #![cfg(all(

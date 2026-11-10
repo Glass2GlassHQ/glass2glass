@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Audio echo / delay (`audioecho`). Adds a delayed, attenuated copy of the
 //! signal back onto itself, with optional feedback, preserving format, channel
 //! count, and sample rate. CPU-only `no_std`.

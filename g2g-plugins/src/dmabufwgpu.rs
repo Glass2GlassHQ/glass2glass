@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Zero-copy DMABUF -> GPU import element (`dmabuftowgpu`).
 //!
 //! Consumes a [`MemoryDomain::DmaBuf`] frame (e.g. imported into the pipeline by

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Ogg demuxer element: `Caps::ByteStream{Ogg}` in, the selected
 //! elementary stream out (by default the file's first stream of the kind the
 //! consumer takes, `stream=flac` for the Ogg-FLAC mapping, `stream=vorbis`

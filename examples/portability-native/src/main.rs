@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Native (CPU) runner for the portability showcase.
 //!
 //! Builds `VideoTestSrc -> [overlay_transforms] -> FileSink` and writes one

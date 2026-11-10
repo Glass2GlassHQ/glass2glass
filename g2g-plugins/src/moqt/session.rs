@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! MoQ Transport draft-16 session over the WebTransport carrier: the
 //! SETUP exchange, the control stream, and opening subgroup data streams.
 //!

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Growing the pad COUNT of a live duplex WebRTC session (M1014), where M784
 //! needed a spare pad declared up front: both peers start with ONE video track
 //! and no spare, and are driven by the dynamic duplex runner.

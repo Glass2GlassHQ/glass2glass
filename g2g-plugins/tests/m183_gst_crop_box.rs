@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M183: videocrop / videobox property-model alignment with GStreamer. Both now
 //! use per-edge `top`/`bottom`/`left`/`right` properties. videocrop crops off
 //! each edge; videobox is signed (>0 crops, <0 adds a border of `fill`). The old

@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+#
+# SPDX-License-Identifier: MPL-2.0
+
 # Zephyr executor proof (M637) via the g2g Zephyr module (M647): build the
 # g2g-noalloc staticlib (the exact pipeline the no-heap / panic-free symbol
 # proofs cover) for the qemu_cortex_m3 board's ISA (thumbv7m, soft float),

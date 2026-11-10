@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M9 fan-in: a `Merger` forwards the selected input and drains the rest,
 //! emitting one EOS only after every input has ended, driven through
 //! `run_fanin_sink`.

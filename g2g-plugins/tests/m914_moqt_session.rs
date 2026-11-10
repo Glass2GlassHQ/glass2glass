@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M914: multi-track playback over one MoQ Transport session.
 //!
 //! `moqtsessionsrc` subscribes to N tracks of one broadcast and emits each on

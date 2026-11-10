@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1180: the `VulkanVideoDec` two-plane outputs at 10 bits and for AV1 film
 //! grain.
 //!

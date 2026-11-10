@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M652: runtime fault recovery. A supervised `capture -> G.711 -> sink`
 //! pipeline turns a returned fault into a bounded retry / reset / escalate action
 //! instead of aborting, pets a hardware watchdog on forward progress, and stops

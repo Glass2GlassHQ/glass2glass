@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M677 live telemetry tap: `run_graph_observed` shares the running graph's
 //! topology + per-element probes with an [`Observer`], so a dashboard / TUI can
 //! read live `process()` latency and input-link fill while the pipeline runs.

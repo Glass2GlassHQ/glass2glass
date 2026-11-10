@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Fake source: emits `num-buffers` byte buffers of `sizemax` bytes, filled as
 //! `filltype` says. The gst `fakesrc` analog, for driving a graph without a
 //! file, a device or a network.

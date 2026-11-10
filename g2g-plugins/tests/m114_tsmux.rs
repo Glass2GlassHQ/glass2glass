@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M114 MPEG-TS mux, end to end through the DAG runner: an H.264 source feeds a
 //! one-pad `TsMux`, whose `Caps::ByteStream{MpegTs}` output feeds `TsDemux`, which
 //! recovers the access units to a sink. Proves the mux/demux pair composes and

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M420 - HLS three-source subtitle overlay: `build_hls_separate_subtitle_overlay`
 //! assembles a graph for a variant that pairs its (video-only) TS segments with
 //! BOTH a separate audio rendition and a separate WebVTT subtitle rendition. Three

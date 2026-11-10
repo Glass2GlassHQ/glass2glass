@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+#
+# SPDX-License-Identifier: MPL-2.0
+
 # Record the hang fixture (g2g-plugins/tests/fixtures/hang/) off a local moq-relay.
 # MOQ_BIN is a release build directory of github.com/moq-dev/moq holding moq-relay and moq.
 set -euo pipefail

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 use g2g_core::error::G2gError;
 use g2g_core::frame::Frame;
 use g2g_core::memory::MemoryDomain;

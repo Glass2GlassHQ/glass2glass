@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Frames-per-second display sink: wraps a real display sink and reports the
 //! rate it is actually achieving, the gst `fpsdisplaysink` analog. Put it where
 //! the display sink would go (`... ! fpsdisplaysink`) to find out whether a

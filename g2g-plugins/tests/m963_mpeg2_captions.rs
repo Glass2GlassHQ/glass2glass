@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M963: ATSC A/53 closed captions carried in MPEG-2 picture user data. The
 //! `cc_data` structure is the one the H.264 / H.265 SEI path already parses; only
 //! the wrapper differs (a bare `GA94` identifier after the `user_data` start code,

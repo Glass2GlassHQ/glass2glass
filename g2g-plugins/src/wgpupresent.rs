@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Windowed wgpu display sink: the launch-line `wgpusink`.
 //!
 //! [`WgpuSink`] renders and presents, but only to a target the application built.

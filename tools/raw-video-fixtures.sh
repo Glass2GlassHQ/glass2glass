@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+#
+# SPDX-License-Identifier: MPL-2.0
+
 # Regenerate the uncompressed AVI and QuickTime video fixtures in g2g-plugins/tests/fixtures.
 #
 # Each file holds two testsrc2 frames, with ffmpeg's decode of it to the same

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1073: the G.711 (`mulawenc` / `mulawdec` / `alawenc` / `alawdec`) and IMA
 //! ADPCM (`adpcmenc` / `adpcmdec`) elements, checked against ffmpeg in both
 //! directions. The codec math itself is proven bit-exact in `g2g-mcu`

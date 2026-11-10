@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! WebSocket ingest source (browser/wasm). Opens a `WebSocket`, receives
 //! binary messages (`ArrayBuffer`), and emits each as a `DataFrame` chunk in
 //! the system-memory domain: the browser analog of `FileSrc`/`RtspSrc` for

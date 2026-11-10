@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M490: Vulkan Video H.264 decode -> wgpu RGBA texture on real hardware.
 //!
 //! Fourth increment of `VulkanVideoDec` (design/decode.md) and the wedge

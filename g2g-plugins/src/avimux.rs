@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! AVI muxer elements: one video stream plus at most one audio stream
 //! in, a `ByteStream{Avi}` out. [`AviMux`] takes a single input
 //! (`... ! mjpegenc ! avimux ! filesink location=out.avi`), [`AviMuxN`] takes

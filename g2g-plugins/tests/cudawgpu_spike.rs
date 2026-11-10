@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 #![cfg(all(target_os = "linux", feature = "cuda-wgpu"))]
 //! M220 Stage 1 spike: prove the Vulkan-side external-memory plumbing works on
 //! this NVIDIA driver before the CUDA import and the full `CudaToWgpu` element

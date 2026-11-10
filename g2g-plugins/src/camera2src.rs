@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Android camera capture via the NDK Camera2 API (`libcamera2ndk`).
 //!
 //! `Camera2Src` is a `SourceLoop` that captures `YUV_420_888` frames from a

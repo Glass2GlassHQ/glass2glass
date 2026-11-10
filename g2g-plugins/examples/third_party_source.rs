@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! A third-party g2g source element, registered and run via the text launcher.
 //!
 //! `cargo run -p g2g-plugins --features std --example third_party_source`

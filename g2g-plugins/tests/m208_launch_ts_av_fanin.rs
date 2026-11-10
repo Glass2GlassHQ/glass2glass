@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M208 `gst-launch` multi-stream MPEG-TS fan-in: a text pipeline that joins an
 //! H.264 video stream and an AAC audio stream at `mpegtsmux name=m` builds the
 //! multi-input `tsmuxn::TsMux`, and runs end to end through `run_graph`. The

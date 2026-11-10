@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 // runs a launched graph and counts the checksums each named `checksumsink` posts
 
 use std::time::Duration;

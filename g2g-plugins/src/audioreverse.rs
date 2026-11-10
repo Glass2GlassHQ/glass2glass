@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Audio reverser (`audioreverse`), the audio half of reverse playback and the
 //! analog of ffmpeg's `areverse` (GStreamer has no such element). It collects
 //! `chunk-duration` of interleaved PCM and re-emits it as one buffer with the

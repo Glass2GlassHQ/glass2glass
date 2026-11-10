@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M513: real-container ingestion on the streaming adapter.
 //!
 //! A viewer demuxes MP4/CMAF, so its decoder receives the container's

@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+#
+# SPDX-License-Identifier: MPL-2.0
+
 # C seam ABI proof (M650): the inverse of the freertos integration. Where a C
 # app links the whole g2g pipeline and calls into it, here C code IS the
 # peripheral, registered as capture/send function pointers and driving the

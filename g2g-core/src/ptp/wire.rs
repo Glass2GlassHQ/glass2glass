@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! PTP-over-UDP (IEEE 1588-2008 / SMPTE ST 2059-2) wire format, the messages a
 //! SLAVE ordinary clock needs to parse and the Delay_Req it sends.
 //!

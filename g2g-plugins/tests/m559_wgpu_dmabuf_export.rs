@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M559: GPU -> DMABUF export round trip. `WgpuToDmaBuf` exports a GPU-resident
 //! wgpu buffer as a dma-buf fd; `DmaBufToWgpu` re-imports it on a *separate*
 //! wgpu device; the bytes are read back and must match, proving the export

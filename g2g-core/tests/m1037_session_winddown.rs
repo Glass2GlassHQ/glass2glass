@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1037: a session that finishes while one of its send sources is still
 //! streaming ends the run cleanly. The session arm owns the only inbound
 //! receiver, so the source's next push finds a closed channel and stops with

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! C ABI for glass2glass: the language-neutral waist over the `gst-launch`-style
 //! DSL + element registry (PORTING.md §5, design/launch.md).
 //!

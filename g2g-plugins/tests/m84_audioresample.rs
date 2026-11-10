@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Phase 2 breadth: `AudioResample` end-to-end through the DAG runner. A real
 //! `AudioTestSrc` (44.1 kHz S16 stereo) feeds `AudioResample` retargeting to
 //! 48 kHz into a `FakeSink`; the run proves the async `process` path flows

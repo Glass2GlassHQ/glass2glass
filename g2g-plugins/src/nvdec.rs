@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Native NVDEC H.264 decode element (`nvdec` feature): the decode half of the
 //! gst-`nvcodec`-style pair, the counterpart to the native [`crate::nvenc::NvEnc`]
 //! encoder. It promotes NVIDIA hardware decode from a `FfmpegVideoDec` backend

@@ -1,3 +1,7 @@
+# Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+#
+# SPDX-License-Identifier: MPL-2.0
+
 # Minimal stdlib-only hosted element for the M198 step-2 zero-copy test.
 # Stands in for a gst-python-ml `backend/g2g` element shell: it receives the
 # frame as a writable buffer-protocol object and proves an in-place write

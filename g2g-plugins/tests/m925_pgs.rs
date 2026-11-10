@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M925: Blu-ray PGS (HDMV) bitmap subtitles, validated against ffmpeg.
 //!
 //! ffmpeg has no PGS *encoder*, so the fixture is a hand-authored `.sup` file:

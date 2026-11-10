@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 // Unit tests for solve.js's pure applyValidation, with mocked validate results
 // (the wasm solver is not loaded here). Covers the node-index -> builder-id
 // mapping via topoOrder for a linear chain and a tee fan-out, on both the ok

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! ONNX Runtime inference element (`ort` backend, design/ml.md).
 //!
 //! `OrtInference` is the shared [`Inference`] element on [`OrtBackend`]: the

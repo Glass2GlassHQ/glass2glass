@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M130 `audiomixer`: a summing fan-in muxer registered in `default_registry`,
 //! reachable from the M122 text fan-in syntax. Two sources of unequal length mix
 //! into one stream that runs end to end through `run_graph`. The summing math is

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! FLV multiplexer element: a video and an audio elementary stream
 //! in, either one optional (`Caps::CompressedVideo{H264}` Annex-B, `Caps::Audio{Aac}`
 //! ADTS, or one of the legacy Flash codecs: Sorenson, VP6, VP6-alpha, MP3, Speex),

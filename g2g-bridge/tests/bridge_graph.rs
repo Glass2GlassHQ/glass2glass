@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! `BridgeGraph`: an embedded g2g sub-graph driven from synchronous code, the
 //! cross-thread push/pull path a GStreamer `chain` function uses (design/README.md).
 //!

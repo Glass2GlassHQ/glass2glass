@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Opus audio decoder element (OpusDec, `opus` feature): `Audio{Opus}` in,
 //! `Audio{PcmS16Le}` (or negotiated `PcmF32Le`) out, via libopus through the `opusic-sys` crate. The decode
 //! sibling of [`crate::opusenc::OpusEnc`]; it consumes the packets

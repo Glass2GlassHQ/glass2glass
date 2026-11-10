@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M571: 10-bit HEVC (Main 10) hardware decode on the system path, on real hardware.
 //!
 //! HDR content is 10-bit, but the decoder hardcoded 8-bit (NV12), so Main 10 /

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M970: a source declares per-alternative costs over its produce set, the
 //! same channel M965 gave transforms and sinks. Without them the produce-set
 //! order decides the fixation on its own; with them a source can say it does

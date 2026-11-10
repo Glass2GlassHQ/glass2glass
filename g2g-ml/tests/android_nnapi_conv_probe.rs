@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M440: on-device proof that the Android NNAPI EP (Edge TPU / DarwiNN) actually
 //! runs a quantized convolution, the follow-up to the M439 Identity probe (which
 //! proved only that the EP path links / registers / runs, not that an accelerator

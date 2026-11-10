@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M374 - Matroska `SeekHead`-driven `Cues` prefetch. When the `Cues` index sits
 //! at the end of the file (the common layout) it is not parsed during forward
 //! playback, so the demuxer cannot use it for a seek yet. A `SeekHead` at the

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M189: a caps-driven transform re-resolves its output target on a mid-stream
 //! `CapsChanged`, not only at startup. M185/M186 delivered `configure_output`
 //! during startup negotiation (graph + linear-coordinator paths); this wires it

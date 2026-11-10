@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Shot-change detector (`scenechange`). Passes video through and marks a
 //! frame as a keyframe when its luma SAD against the previous picture trips
 //! an adaptive threshold over the last few scores (Jim Easterbrook's

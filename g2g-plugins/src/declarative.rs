@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Declarative graph format: build a runnable [`Graph`] from a JSON or
 //! YAML document, the structured sibling of the `gst-launch` text parser
 //! ([`parse_launch`]). A launch string is the ergonomic one-liner; a declarative

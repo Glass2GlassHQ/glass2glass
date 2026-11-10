@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M382 - `playbin uri=X` auto-fan-out. A lone `playbin uri=file://x.mkv` in a
 //! text pipeline probes the Matroska container, then auto-builds
 //! `FileSrc -> MkvDemuxN -> {decode -> auto sink}` with one branch per forwardable

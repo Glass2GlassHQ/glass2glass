@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Timestamp burn-in (`timestampburn`, `latency-bench` feature): overwrites the
 //! top-left of an I420 frame's luma plane with a 64-block strip carrying the
 //! `CLOCK_MONOTONIC` nanoseconds at which the frame passed through. A consumer

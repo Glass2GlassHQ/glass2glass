@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M947: the per-element summary splits compute from downstream backpressure.
 //!
 //! M399 timed the whole `process()` future, so an element awaiting a full

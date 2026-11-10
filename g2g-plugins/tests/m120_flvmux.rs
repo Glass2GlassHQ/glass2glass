@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M120 FLV mux, end to end through the DAG runner: a source produces H.264
 //! access units, `flvmux` wraps them into an FLV byte stream, `flvdemux` unwraps
 //! them, and the recovered access units reach the sink. Proves the muxer is the

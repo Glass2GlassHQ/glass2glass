@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1122: `RtspSrcN` plays an RTSP stream's audio track alongside its video.
 //!
 //! The offline tests cover the pad layout and the graph the `playbin

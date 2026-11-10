@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! GPU / compute device discovery: the [`DeviceProvider`] for the
 //! `Compute/GPU` class, g2g's extension beyond GStreamer's capture / render
 //! device model.

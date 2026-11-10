@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! ML inference elements for `glass2glass`.
 //!
 //! Experimental (Tier 3 in `STABILITY.md`): no stability promise. Device

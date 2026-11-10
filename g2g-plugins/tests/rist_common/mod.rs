@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 // Helpers the RIST test binaries (`m1217_rist`, `m1734_rist_bonding`) share,
 // included per binary with `mod rist_common;`.
 

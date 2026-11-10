@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Terminal fan-out runner (`run_fanout_session`): drives one terminal
 //! `MultiOutputSource` (0 inputs -> N outputs, the shape a multi-track WHEP
 //! session uses) into N sinks, with no upstream. Asserts each output's frames

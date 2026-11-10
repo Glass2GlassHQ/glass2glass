@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Shared `host`/`address` + `port` runtime-property dispatch for the network
 //! source/sink elements. Each of these elements holds a `SocketAddr` (a bind
 //! address on a source, a destination on a sink) and exposes its IP as a string

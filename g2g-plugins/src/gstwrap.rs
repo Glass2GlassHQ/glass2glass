@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! `gstwrap`: host an unported GStreamer element inside a g2g graph.
 //!
 //! The mirror of `g2g-bridge` (design/README.md). Where the bridge embeds a g2g

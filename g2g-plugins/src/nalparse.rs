@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Shared access-unit parser core for the H.264 and H.265 elementary-stream
 //! parsers.
 //!

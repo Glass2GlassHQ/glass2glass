@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! A/B latency benchmark: `CudaGlSink` (device-resident CUDA-GL present) vs the
 //! `NvdecCuvid -> WaylandSink` baseline (system-memory NV12 + CPU NV12->XRGB
 //! convert + `wl_shm` upload).

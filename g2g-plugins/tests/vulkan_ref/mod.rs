@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! The software reference dumps the Vulkan decode tests compare against:
 //! `G2G_VULKAN_REF_DIR` names a directory of raw planar dumps, one per fixture,
 //! named after the fixture with a `.yuv` extension. `tools/vulkan-refs.sh`

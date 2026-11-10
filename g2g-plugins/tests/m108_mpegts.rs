@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M108 MPEG-TS demux, end to end through the DAG runner: a source that produces
 //! a `Caps::ByteStream{MpegTs}` stream feeds `TsDemux`, which negotiates an H.264
 //! output and forwards the demuxed access units to a sink. Proves the new

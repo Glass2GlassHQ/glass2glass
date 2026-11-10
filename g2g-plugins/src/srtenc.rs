@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! SubRip (`.srt`) subtitle writer (`no_std`): the inverse of
 //! [`SubParse`](crate::subparse::SubParse). Timed `Caps::Text{Utf8}` cues in, a
 //! `Caps::Text{Srt}` byte stream out, one frame per cue holding the numbered

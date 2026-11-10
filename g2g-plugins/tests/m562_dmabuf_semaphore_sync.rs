@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M562: zero-stall GPU->DMABUF sync. `WgpuToDmaBuf::with_external_semaphore(true)`
 //! signals a timeline semaphore on each frame's copy submit (instead of blocking on
 //! `device.poll(Wait)`) and attaches the exported semaphore fd + per-frame value to

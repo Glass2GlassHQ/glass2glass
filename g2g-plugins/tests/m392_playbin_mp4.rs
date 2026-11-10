@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M392 - `playbin uri=*.mp4` multi-stream fan-out + multi-hook dispatch. A lone
 //! `playbin uri=file://x.mp4` probes a fragmented MP4's `moov` and auto-builds
 //! `FileSrc -> Mp4DemuxN -> {decode -> auto sink}`, one branch per track, the MP4

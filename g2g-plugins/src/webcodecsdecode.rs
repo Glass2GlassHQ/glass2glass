@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! WebCodecs hardware video decode element (browser/wasm). Wraps the browser
 //! `VideoDecoder`, consuming Annex-B H.264 access units and producing decoded
 //! RGBA frames in the system-memory domain: the browser analog of `MfDecode`

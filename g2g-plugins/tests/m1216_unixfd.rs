@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1216: the fd-passing IPC pair. The loopbacks run a g2g `unixfdsink` into a
 //! g2g `unixfdsrc` over a real socket, a raw client and a raw server stand in
 //! for a peer that holds buffers or sends garbage, and the `#[ignore]`d interop

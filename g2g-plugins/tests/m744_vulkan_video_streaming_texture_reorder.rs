@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M744: `VulkanVideoDec` streaming display order for AV1 and for the
 //! GPU-texture path.
 //!

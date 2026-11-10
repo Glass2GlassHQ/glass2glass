@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1965: a graph mutated for as long as it runs keeps a flat heap. Each cycle
 //! splices a transform in and lifts it out, then adds a tee branch and drops
 //! it, and the bytes still allocated after many cycles match those after a few.

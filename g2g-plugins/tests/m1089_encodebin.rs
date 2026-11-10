@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1089 `encodebin` / `transcodebin`: an encoding profile expands, at parse
 //! time, into the encoders it names plus the muxer for its container.
 //!

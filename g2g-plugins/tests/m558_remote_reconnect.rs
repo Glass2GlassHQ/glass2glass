@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M558: reconnection for the distributed-graph TCP transport. Two scenarios:
 //!  A. sink connect-retry: a `RemoteSink::with_reconnect` tolerates a peer that is
 //!     not up yet, retrying the connect until the `RemoteSrc` binds.

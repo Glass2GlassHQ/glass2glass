@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Bidirectional LiveKit participant (`LiveKitDuplex`): publishes local
 //! video + Opus audio AND subscribes to the room's remote tracks over one
 //! signalling WebSocket, the real-SFU signaller for the duplex shape.

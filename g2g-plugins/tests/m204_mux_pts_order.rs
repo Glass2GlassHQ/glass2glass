@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M204 - PTS-ordered muxer fan-in. `InterleaveMux` buffers frames per input
 //! and releases the globally earliest-PTS frame once every contributor has one
 //! queued, so two time-skewed inputs merge in timestamp order rather than

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M713 terminal fan-in graph node: `run_graph` over a `FaninSink` (an N-input
 //! `MultiInputElement` with no output, the `run_fanin_session` shape), so a
 //! transform chain can feed a session sink's pads (`src -> tee -> transform per

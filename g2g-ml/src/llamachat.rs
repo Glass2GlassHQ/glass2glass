@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Text generation on llama.cpp (`llama` feature, design/ml.md).
 //!
 //! `LlamaChat` answers each UTF-8 `Caps::Text` frame as one chat turn on a GGUF

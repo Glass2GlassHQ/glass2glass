@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M196: `uridecodebin` in a gst-launch line. `uridecodebin uri=X`
 //! builds its source from the URI scheme handler and auto-plugs the decode chain
 //! to raw, splicing both into the pipeline as pre-built nodes. The `file://` handler uses the

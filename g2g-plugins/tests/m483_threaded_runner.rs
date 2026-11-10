@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M483 opt-in thread-per-arm graph runner: the same parsed pipeline run through
 //! the cooperative `run_graph` and the multicore `run_graph_threaded` (one OS
 //! thread per arm via `TokioThreadSpawner`) must move the same frames to the

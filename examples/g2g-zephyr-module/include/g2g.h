@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 /* Public C interface of the g2g static pipeline library, provided by the g2g
  * Zephyr module (M647). An application that lists this module gets this header
  * on its include path automatically; it need only `#include <g2g.h>` and call

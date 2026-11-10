@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Sans-IO RTP packetizers (RFC 3550 RTP header), the live-egress counterpart
 //! of `RtspSrc`'s receive path. Given one access unit and its RTP timestamp,
 //! each produces complete RTP packets. H.264 (RFC 6184) and H.265 (RFC 7798)

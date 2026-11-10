@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Diagnostic: is g2g's Vulkan Video decoder safe to create + decode + drop on a
 //! worker thread (not the main thread), the way a viewer's pooled decode-thread
 //! wrapper drives a decoder? The M509 viewer PoC saw non-deterministic heap corruption

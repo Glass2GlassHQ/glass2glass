@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! `roundedcorners`: writes alpha so the picture has rounded corners. Packed
 //! RGBA / BGRA. CPU-only `no_std`.
 //!

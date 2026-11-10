@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! `cargo xtask <command>`: the project's dev commands, consolidating the
 //! invocations that were shell-history tribal knowledge (design/TODO.md developer
 //! tooling). It only orchestrates `cargo` and toolchain tools, so it has no

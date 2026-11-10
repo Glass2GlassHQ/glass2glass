@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Live interop tests for the PipeWire capture elements (M890, M894, M957):
 //! capture from a node published by GStreamer's `pipewiresink`, the reference
 //! PipeWire peer.

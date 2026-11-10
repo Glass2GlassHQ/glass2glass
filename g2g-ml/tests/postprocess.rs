@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M27: `TensorPostprocess` element-level behavior, plus the full
 //! classification chain through real ONNX Runtime when `ort` is enabled.
 

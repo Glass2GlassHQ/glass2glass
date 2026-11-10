@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M861 `downloadbuffer`: a pushed, non-seekable byte stream absorbed into a
 //! temp file and served back as a seekable byte source.
 //!

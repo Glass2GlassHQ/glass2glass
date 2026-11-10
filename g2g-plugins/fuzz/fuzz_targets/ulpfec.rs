@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 #![no_main]
 // ULPFEC recovery over untrusted RTP: feed length-prefixed (u16 BE) packets to
 // the FEC decoder, alternating media / repair, so protected-sequence parsing and

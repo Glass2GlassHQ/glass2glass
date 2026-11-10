@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Presentation sink: waits until each frame's PTS arrives on the pipeline
 //! clock before reporting the frame "presented". Records per-frame drift
 //! (current clock minus PTS at presentation time) for end-to-end latency

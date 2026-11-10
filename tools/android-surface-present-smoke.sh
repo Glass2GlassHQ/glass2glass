@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+#
+# SPDX-License-Identifier: MPL-2.0
+
 # Build the M305 decode -> GPU -> surface present probe for Android and run it on
 # a connected device. The probe presents decoded RGBA frames through a wgpu
 # surface built over an Android ANativeWindow; it stands in a headless present

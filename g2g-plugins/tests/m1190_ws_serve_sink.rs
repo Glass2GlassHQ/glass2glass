@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1190 - a native graph that serves its stream to whoever dials in.
 //!
 //! `RemoteWsSink` dials a `RemoteWsSrc`, which is the wrong direction for a

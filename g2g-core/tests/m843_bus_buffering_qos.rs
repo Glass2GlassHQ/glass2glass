@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M843: bus reports that were previously missing.
 //!
 //! - `Buffering` on interior links: every arm with an input link (transform, not

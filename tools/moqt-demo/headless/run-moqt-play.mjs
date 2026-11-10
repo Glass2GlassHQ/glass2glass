@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 // Headless validation that a browser plays a g2g MoQ Transport broadcast (M904).
 //
 // Starts a local `moq-relay-ietf`, publishes video and audio into it with

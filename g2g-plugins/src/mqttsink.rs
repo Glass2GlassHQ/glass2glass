@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! MQTT sink: publishes the record `metasink` writes, one message per
 //! frame, to a topic on an MQTT broker. The payload is the same JSON object,
 //! key for key (`pts`, `detections`, `text`, one key per JSON blob), so a

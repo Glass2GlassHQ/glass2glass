@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 // Round-trip self-check for the importers: build a builder-shaped graph, export
 // it with export.js, re-import with import.js, re-export, and assert the two
 // exports match. Plus a couple of parse-only checks (caps shorthand, caps

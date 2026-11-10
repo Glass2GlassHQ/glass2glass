@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M37: AAC audio through the fMP4 container. `Mp4AudioSink` writes an
 //! `mp4a`/`esds` track from synthetic AAC access units; `Mp4AudioSrc` reads
 //! them back byte-exactly with the codec/channels/rate and AudioSpecificConfig

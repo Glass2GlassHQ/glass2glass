@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Primitive wire coding for IETF MoQ Transport draft-18: the `vi64` variable
 //! length integer, track namespaces and names, the delta-coded Key-Value-Pair
 //! blocks, and the typed control-message parameters.

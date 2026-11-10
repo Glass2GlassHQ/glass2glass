@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M898 - subtitle track muxing: `MkvMuxN` writes a text input as an `S_TEXT/*`
 //! Matroska track (cues as `BlockGroup`s carrying a `BlockDuration`) and `Mp4MuxN`
 //! writes one as a `tx3g` (`mov_text`) track, gaps between cues filled with the

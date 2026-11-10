@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M882 showcase: animating a real element's property over stream time.
 //!
 //! A `parse_launch` line builds the compositor fan-in, then a `ControlProgram`

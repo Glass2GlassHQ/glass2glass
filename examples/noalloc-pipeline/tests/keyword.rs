@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 use noalloc_pipeline::keyword::{run_keyword, EXPECTED_RUN, INPUT_SCALE, INPUT_ZERO_POINT};
 
 const QUANTIZATION: &str = include_str!("../../../g2g-mcu/tests/fixtures/keyword/quantization.txt");

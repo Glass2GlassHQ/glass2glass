@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 #![cfg(feature = "embassy-link")]
 //! M260: a no-alloc DMA-ring capture source streams zero-copy frames through the
 //! embassy-sync stack channel to a consumer, all under `block_on`. Proves the

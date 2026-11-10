@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M282: negotiated caps in the DOT dump. `negotiate_graph` runs the startup
 //! caps solve (source probe + whole-graph CSP) without running the pipeline and
 //! returns the per-edge fixated caps; `ValidatedGraph::to_dot` then renders them

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! The peer side of a remote transform: host a subgraph over one WebSocket.
 //!
 //! [`RemoteWsTransform`](crate::remotewstransform) offloads a middle stage and

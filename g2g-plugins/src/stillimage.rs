@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Shared geometry bounds and packed-RGB(A) output for the still-image codec
 //! elements (`PngDec`, `PngEnc`, `WebPDec`, `PnmDec`). The byte-stream framing
 //! they also share is in [`crate::stillframe`], which the still-image parsers

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1218: `webrtcdsp` and `webrtcechoprobe` driven through `process` with the
 //! real processor. Every signal is generated here from a seeded generator, and
 //! every threshold is a named constant.

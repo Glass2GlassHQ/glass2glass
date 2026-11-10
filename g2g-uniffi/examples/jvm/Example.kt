@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 import dev.g2g.AppSink
 import dev.g2g.AppSrc
 import dev.g2g.Pipeline

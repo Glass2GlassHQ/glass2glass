@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M197 (coverage): complex branching pipelines, end to end. A `decodebin`
 //! feeding a `tee` whose branches process independently, the canonical
 //! "decode once, display on one branch and store on another" shape. Each branch

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M492: Vulkan Video H.264 full-DPB decode on real hardware.
 //!
 //! Fourth increment of `VulkanVideoDec` (design/decode.md). The M489-M491

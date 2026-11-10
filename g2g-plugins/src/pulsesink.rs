@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Linux PulseAudio render sink. Plays interleaved PCM (`PcmU8` / `PcmS16Le` /
 //! `PcmS24Le` / `PcmS32Le` / `PcmF32Le`) on the default PulseAudio (or
 //! PipeWire-pulse) server, the higher-level sibling of

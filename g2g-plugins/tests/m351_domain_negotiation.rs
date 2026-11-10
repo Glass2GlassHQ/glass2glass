@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M351: two-sided allocation-domain negotiation.
 //!
 //! Before M351 the memory domain of an allocation was a one-sided dictate: each

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Frame luma meter (`videoanalyse`). A passthrough that measures the average
 //! brightness and its variance of each frame. I420 (the Y plane) and packed
 //! RGBA / BGRA (BT.709 luma) so `videotestsrc ! videoanalyse` negotiates

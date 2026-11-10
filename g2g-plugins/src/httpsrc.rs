@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! HTTP(S) byte-stream source (HttpSrc, `http-src` feature): the souphttpsrc
 //! analog and the network sibling of [`FileSrc`](crate::filesrc). It issues one
 //! GET and streams the response body downstream as `DataFrame` chunks under the

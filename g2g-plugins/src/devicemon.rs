@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Standard device-provider assembly: [`default_device_monitor`]
 //! mirrors [`registry::default_registry`](crate::registry::default_registry),
 //! registering every discovery backend its feature + target allows, so an

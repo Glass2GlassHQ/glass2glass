@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M18 β N-hop — cross-element allocation re-cascade over a multi-element
 //! chain (`run_linear_chain`).
 //!

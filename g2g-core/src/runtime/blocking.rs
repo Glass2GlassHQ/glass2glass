@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Minimal park-based blocking executor, shared by the synchronous FFI front
 //! ends (`g2g-capi`, `g2g-pyapi`) that need to drive one runtime future to
 //! completion on the calling thread without pulling in a full async runtime.

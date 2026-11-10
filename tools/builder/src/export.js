@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 // Pure export helpers over React Flow's node/edge shape (node.id,
 // node.data.element, node.data.props; edge.source, edge.target). Every output
 // loads back into g2g: the gst-launch line via the text parser, the JSON and the

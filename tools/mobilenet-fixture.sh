@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+#
+# SPDX-License-Identifier: MPL-2.0
+
 # Fetch + preprocess the real-classifier host-test fixtures
 # (g2g-ml/tests/mobilenet_classify.rs): the validated int8 MobileNetV2 from the
 # ONNX model zoo, a sample image, and the preprocessed f32 NCHW input. The 3.6 MB

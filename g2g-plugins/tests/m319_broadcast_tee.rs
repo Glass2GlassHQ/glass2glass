@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M319: dynamic broadcast tee. Unlike the M310 dynamic *router*
 //! (`run_source_router_dynamic`), which routes each frame round-robin to one
 //! branch, `run_source_tee_dynamic` broadcasts every frame to *every* attached

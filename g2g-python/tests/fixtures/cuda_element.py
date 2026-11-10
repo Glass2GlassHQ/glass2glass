@@ -1,3 +1,7 @@
+# Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+#
+# SPDX-License-Identifier: MPL-2.0
+
 # Hosted-element fixtures for the GPU zero-copy paths: elements that take a
 # Cuda-domain frame through
 # `g2g_process_cuda(luma, chroma, w, h, yuv_conversion, meta)` (M984), its batch

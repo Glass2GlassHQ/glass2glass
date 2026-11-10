@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Synthetic animated RGBA source (browser/wasm). Generates a moving colour
 //! gradient as `RawVideo` `Rgba8` `System` frames on a timer, the "capture" side of
 //! the browser send demo (`PatternSrc -> WebCodecsEncode -> WebSocketSink`) when no

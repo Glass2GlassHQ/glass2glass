@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Dynamic duplex-session runner (`run_duplex_session_dynamic`, M1014): the pad
 //! COUNT of a live duplex session grows in both directions, with nothing reserved
 //! up front.

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Query a local `ptp4l`'s sync state over its management socket.
 //!
 //! `PtpSystemClock` reads `CLOCK_TAI`, which is always readable whether or not

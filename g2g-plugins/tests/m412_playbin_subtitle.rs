@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M412 - `playbin uri=*.mp4` routes an embedded subtitle track through a
 //! `TextOverlayN` onto the video. When a probed MP4 carries both a video track and
 //! a `tx3g` timed-text track, `mp4_playbin` builds

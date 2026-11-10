@@ -1,3 +1,7 @@
+# Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+#
+# SPDX-License-Identifier: MPL-2.0
+
 """Type stubs for the `g2g` extension (g2g-pyapi).
 
 Drive glass2glass pipelines from Python: parse a gst-launch-style string, run it

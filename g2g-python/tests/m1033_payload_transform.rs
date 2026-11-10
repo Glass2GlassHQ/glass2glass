@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1033: a hosted 1-in-1-out element changes media type.
 //!
 //! The single-chain gst-python-ml families (transcribe, translate, llm,

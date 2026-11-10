@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M737: Core Audio elements on the macOS CI runner. The runner has no audio
 //! hardware, so these probe like the Android permission-gated tests: a failed
 //! device open is reported and asserted as the graceful error path; with a

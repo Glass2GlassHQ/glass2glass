@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M953: the fan-in deadline tick under the thread-per-arm runner.
 //!
 //! The cooperative runner derives the tick timer from the pipeline clock itself

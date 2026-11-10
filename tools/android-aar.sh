@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+#
+# SPDX-License-Identifier: MPL-2.0
+
 # Build the g2g Android library (AAR) and print its path last. Needs cargo-ndk
 # with ANDROID_NDK_HOME and the rustup target of each ABI, a JDK, and an SDK
 # platform under ANDROID_SDK_ROOT (default ~/Android/sdk). No Gradle.

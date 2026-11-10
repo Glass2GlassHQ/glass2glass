@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! GPU-resident tensor inference via wgpu compute (design/ml.md).
 //!
 //! `WgpuInference` is the consumer half of the keep-on-GPU inference branch

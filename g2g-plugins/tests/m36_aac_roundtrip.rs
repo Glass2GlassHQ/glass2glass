@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M36: `MfAacEncode -> MfAacDecode` round trip through both real MS AAC MFTs.
 //! PCM in, AAC, PCM back; the decoded sample count matches the input within the
 //! codec's priming delay.

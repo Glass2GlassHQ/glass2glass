@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! CUDA<->wgpu zero-copy interop (the GPU keep-on-GPU pillar).
 //!
 //! Joins the NVDEC decode side ([`MemoryDomain::Cuda`](g2g_core::MemoryDomain),

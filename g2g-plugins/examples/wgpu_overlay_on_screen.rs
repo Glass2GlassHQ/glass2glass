@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Turnkey windowed runner for [`WgpuSink`]: a synthetic source, synthetic
 //! analytics metadata, the Vello GPU overlay and the sink presenting into a real
 //! winit window. No media file, no codec, no capture device: run it and watch the

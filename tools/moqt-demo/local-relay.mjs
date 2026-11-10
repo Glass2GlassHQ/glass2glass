@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 // Shared plumbing for the two ways to drive the MoQ demo: the headless
 // assertion run (headless/run-moqt-play.mjs) and the live watch script
 // (watch-live.mjs). Both need the same self-signed certificate, the same

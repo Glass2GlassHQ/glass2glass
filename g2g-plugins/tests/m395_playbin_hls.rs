@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M395 - HLS rendition discovery + `playbin uri=hls://...` fan-out core. The
 //! network probe (`hls_playbin`) is validated live, not in CI; this exercises the
 //! network-free assembly (`build_hls_ts_fanout`) that turns the streams of a

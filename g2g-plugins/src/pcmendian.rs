@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Endian and signedness conversion at the AIFF / AU container boundary.
 //!
 //! g2g's PCM `AudioFormat`s are little-endian (and 8-bit unsigned). AIFF and AU

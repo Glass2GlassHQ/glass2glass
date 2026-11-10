@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M930: every demuxer opens its stream the same way.
 //!
 //! A demuxer used to emit a `Segment` only when resuming from a seek, so a

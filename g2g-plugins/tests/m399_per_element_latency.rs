@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M399: measured per-element latency + input-link fill.
 //!
 //! `RunStats::report()` (M287) folds each element's *declared* latency. M399

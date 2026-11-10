@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1041: the remaining multi-pad elements that touch frame bytes declare the
 //! domains they can read, finishing the sweep `m1039_multipad_input_domains`
 //! started. A fan-in left on the `ALL` default lets the allocation cascade

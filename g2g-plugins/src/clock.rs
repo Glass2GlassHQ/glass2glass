@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Wall-clock implementation of [`PipelineClock`] / [`AsyncClock`] for std
 //! targets. Backed by `std::time::Instant` and `tokio::time::sleep`, which is
 //! also the timer the display sinks hold a frame on until its PTS deadline

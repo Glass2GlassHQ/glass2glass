@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1577: a bare `decodebin` fails at launch naming the codec it has no decoder
 //! for, or the media kind the file lacks, instead of building a chain that fails
 //! mid-run.

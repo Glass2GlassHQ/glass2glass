@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M161 HLS AES-128 segment decryption (`#EXT-X-KEY:METHOD=AES-128`). A local
 //! HTTP server serves a media playlist, a 16-byte key resource, and segments
 //! encrypted with AES-128-CBC. `HlsSrc` fetches the key and decrypts each

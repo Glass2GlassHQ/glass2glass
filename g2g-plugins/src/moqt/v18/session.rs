@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! MoQ Transport draft-18 session over the WebTransport carrier.
 //!
 //! Draft-18 restructured the control plane, and this module is where that shows

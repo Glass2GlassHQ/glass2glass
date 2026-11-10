@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M498: random-access ("pull") scrubbing over the Vulkan Video decoder.
 //!
 //! The wedge for a timeline viewer: instead of the streaming push

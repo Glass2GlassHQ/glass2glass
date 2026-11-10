@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Caps setter: rewrites the caps travelling with a stream without touching a
 //! byte of it, the gst `capssetter` analog. Use it to correct a source that
 //! declares the wrong framerate or format.

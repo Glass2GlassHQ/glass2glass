@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Speaker channel positions and layouts for multichannel PCM. A
 //! [`ChannelLayout`] is a bitmask in the WAV / ffmpeg bit order, and that bit
 //! order (ascending) is also the interleave order of the samples, so a layout

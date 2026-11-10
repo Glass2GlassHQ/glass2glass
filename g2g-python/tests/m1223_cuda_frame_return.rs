@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1223: `g2g_process_cuda` can hand back a new `(luma, chroma)` pair, which the
 //! host sends on in place of the input frame with the input's timing, sequence
 //! and metadata. Returning `None` passes the input frame on. The replacement test

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M517: the streaming adapter ([`g2g_plugins::streamdec::VulkanStreamDecoder`])
 //! streams H.265, not just AV1 (m508) and H.264 (m512 / m513).
 //!

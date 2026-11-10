@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Native P2P WebRTC data-channel elements on the sans-IO [`str0m`] stack
 //! (ICE / DTLS / SCTP), the native unification of the wasm-only browser
 //! data-channel [`crate::webrtcsrc::WebRtcSrc`]. Two elements sharing one

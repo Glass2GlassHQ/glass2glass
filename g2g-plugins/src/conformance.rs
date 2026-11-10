@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Conformance batteries: the cases that produce the [`MaturityRecord`]s the
 //! maturity report is derived from.
 //!

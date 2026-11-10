@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Ogg multiplexer element: N audio elementary streams in
 //! (`Caps::Audio{Opus|Vorbis|Flac}` per pad), one Ogg byte stream out, grouped
 //! when there are several. The inverse of [`crate::oggdemux::OggDemux`] and the

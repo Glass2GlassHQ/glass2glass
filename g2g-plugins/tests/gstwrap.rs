@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M466 `gstwrap`: host a real GStreamer element inside a g2g graph.
 //!
 //! Needs the host GStreamer runtime + dev libs and `gst-plugins-good` (for

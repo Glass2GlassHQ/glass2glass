@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! ID3 metadata parsing and writing, shared by [`crate::id3demux`],
 //! [`crate::mpegaudioparse`], [`crate::flacparse`] and [`crate::id3v2mux`].
 //!

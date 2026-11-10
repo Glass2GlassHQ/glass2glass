@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Regression: an `appsink` downstream of a caps-driven transform must still
 //! deliver frames. A format/size transform (here `videoconvert`) makes the
 //! runner cascade caps a second time, calling the sink's `configure_pipeline`

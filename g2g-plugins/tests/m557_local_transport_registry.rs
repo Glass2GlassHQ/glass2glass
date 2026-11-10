@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M556/M557: the local zero-copy transport pairs are registered in the default
 //! registry (so `gst-inspect` / `parse_launch` see them) and expose their
 //! `location` (Unix socket path) property. Feature-gated: each block only runs

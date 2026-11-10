@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 // A decodebin with no decoder for its input names the stream in gst caps syntax, the
 // codec and picture size, rather than the Rust Debug form of the caps.
 #![cfg(all(feature = "std", feature = "runtime"))]

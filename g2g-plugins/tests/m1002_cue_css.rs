@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1002 - the WebVTT cue CSS the overlay renders beyond colour: per-span
 //! `font-size`, `text-shadow`, and a span-scoped `background-color`. Each test
 //! parses a `STYLE` block, renders a frame, and asserts on the pixels.

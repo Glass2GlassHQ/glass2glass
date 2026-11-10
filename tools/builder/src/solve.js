@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 // Authoritative caps validation via g2g's real solver, compiled to wasm. This
 // module is the pure, node-testable half: applyValidation maps a validate result
 // back onto the builder's edges. Loading the blob lives in solver-load.js (a

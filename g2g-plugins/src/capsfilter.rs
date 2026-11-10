@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Caps filter: a pass-through transform that forces a negotiation-time
 //! narrowing (design/caps.md). Data flows through unchanged;
 //! the element's only job is to constrain the link to a specific

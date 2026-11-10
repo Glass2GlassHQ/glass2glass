@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! ST 2110-10 media clock: the mapping between a PTP/TAI time and an RTP
 //! timestamp, the piece that ties RTP media transport to the pipeline's PTP
 //! clock.

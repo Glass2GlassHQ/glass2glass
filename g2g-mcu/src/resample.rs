@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Fixed-point polyphase audio resampler: the first stage of the
 //! deterministic reference audio chain (capture -> convert -> **resample**
 //! -> mix -> encode -> RTP). Mono S16LE over the telephony rate set

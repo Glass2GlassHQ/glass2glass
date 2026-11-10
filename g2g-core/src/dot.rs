@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Graphviz DOT rendering for a pipeline graph (developer tooling): the
 //! `GST_DEBUG_DUMP_DOT_DIR` analog. [`ValidatedGraph::to_dot`] turns a graph,
 //! plus the solver's per-edge negotiated [`Caps`] and (when known) each link's

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M630: `GrabberSrc` (the `FrameGrabber` camera seam) captures into a
 //! `StaticLendRing` and lends the frames downstream zero-copy. The mock
 //! grabber stands in for the DMA peripheral only; the element under test is

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 #![no_main]
 // SDP text parsing (WebRTC / ST 2110 session description) over untrusted input.
 use libfuzzer_sys::fuzz_target;

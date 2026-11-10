@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M214 - zero-copy GPU fan-out, validated on a real GPU. Builds the canonical
 //! keep-on-GPU graph `source -> VelloAnalyticsOverlay -> tee -> {WgpuSink,
 //! WgpuSink}` and runs it through `run_graph` on an actual wgpu device (the

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 const ADTS_HEADER_LEN: usize = 7;
 /// ADTS `profile` for AAC-LC: the audio object type (2) minus one.
 const PROFILE_AAC_LC: u8 = 1;

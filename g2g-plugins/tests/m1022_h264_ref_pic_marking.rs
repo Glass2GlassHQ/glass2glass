@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1022: H.264 `dec_ref_pic_marking()`, the slice header's adaptive reference
 //! marking.
 //!

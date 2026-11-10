@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M167 RTMP ingest end to end: a test publisher connects to `RtmpSrc` over a
 //! real loopback TCP socket, performs the simple handshake + connect /
 //! createStream / publish flow, and pushes one video message. `RtmpSrc` reframes

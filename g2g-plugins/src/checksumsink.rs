@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Checksum sink: digests every buffer it receives and reports the digest with
 //! the buffer's pts, the gst `checksumsink` analog. It is how a codec change is
 //! checked for bit-exactness: run the pipeline before and after and diff the

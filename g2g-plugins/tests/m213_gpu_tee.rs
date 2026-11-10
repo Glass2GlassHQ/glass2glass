@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M213 - zero-copy GPU fan-out. A frame whose memory lives on the GPU (here a
 //! CUDA device buffer) is broadcast through a `tee` to two branches. Before
 //! M213 the tee deep-copied `System` frames and failed loud

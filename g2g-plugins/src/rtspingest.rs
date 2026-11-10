@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Shared RTSP ingest session machinery: the per-publisher pieces both ingest
 //! elements ride, from the accepted TCP control connection to depayloaded access
 //! units. [`RtspServerSrc`](crate::rtspserversrc) drives one session at a time on

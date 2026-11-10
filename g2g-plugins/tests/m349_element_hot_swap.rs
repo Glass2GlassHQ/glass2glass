@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M349: mid-stream element hot-swap, live under load. `ElementSlot` (M8) is
 //! unit-tested in isolation; this proves a swap works *inside a running graph*:
 //! a slot transform sits in `source -> slot -> sink`, and the element inside it

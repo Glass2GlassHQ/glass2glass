@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Box a packed RGBA / BGRA frame (`videobox`). Follows GStreamer's `videobox`
 //! model: `top` / `bottom` / `left` / `right` are signed pixel counts, a
 //! positive value crops that edge, a negative value adds that many border

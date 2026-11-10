@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Data-stream headers for IETF MoQ Transport draft-16: the subgroup stream
 //! header that opens a unidirectional QUIC stream and the per-object header
 //! that precedes each payload.

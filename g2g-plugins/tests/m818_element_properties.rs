@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M818: runtime properties for every meaningful builder knob (the M454
 //! discipline swept across the elements that had drifted). Each property must
 //! (a) appear in `properties()` so `parse_launch` can look up its `PropKind`,

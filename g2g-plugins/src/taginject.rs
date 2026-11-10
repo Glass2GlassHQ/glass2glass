@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Tag inject: posts a hand-written tag list on the bus, the gst `taginject`
 //! analog. Use it to give a stream a title / artist a muxer downstream can
 //! write, or to exercise an application's tag handling without a tagged file.

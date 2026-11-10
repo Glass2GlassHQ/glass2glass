@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 // ONNX Runtime Web shim for the g2g browser detection pipeline (Stage 2).
 //
 // Rust's `WebOrtDetect` element imports `ort_init` / `ort_run` from this module

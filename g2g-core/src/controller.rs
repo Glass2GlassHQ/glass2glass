@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Animated properties, the `gst-controller` analog: a property's value
 //! becomes a function of stream time instead of a constant set once at build
 //! time. A [`ControlSource`] is a keyframed curve, a [`ControlProgram`] binds

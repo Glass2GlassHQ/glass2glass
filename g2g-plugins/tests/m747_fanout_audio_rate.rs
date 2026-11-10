@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M747 - a `decodebin` fan-out audio branch survives a runtime sample-rate
 //! refinement. A demux advertises the compressed stream with placeholder
 //! channels / rate; the AAC decoder only learns the real rate once it decodes a

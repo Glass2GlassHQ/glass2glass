@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1027: a small coded extent still decodes on the GPU.
 //!
 //! The video session used to be created with `maxCodedExtent` set to the

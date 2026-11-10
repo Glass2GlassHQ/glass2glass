@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Whether a Wayland compositor is reachable, the check the `auto*sink` aliases
 //! use to skip a display sink that is compiled in but has nothing to draw on.
 //!

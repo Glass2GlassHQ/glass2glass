@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Runtime fault recovery for the static heap-free MCU path: a supervisor that
 //! wraps a `source -> sink` chain and turns a returned fault
 //! ([`G2gError`]) into a *bounded, deterministic*

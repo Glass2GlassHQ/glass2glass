@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M476 - explicit-demux fan-out in a `gst-launch` line. A named demuxer fed by a
 //! file source splits the file into its elementary streams, honoring GStreamer's
 //! `d.video_0` / `d.audio_0` pad-name selection:

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! GPU presentation sink: presents [`MemoryDomain::WgpuTexture`] frames
 //! (eg from `VelloAnalyticsOverlay`) by blitting them onto
 //! a target on the **same** wgpu device, with no GPU->CPU readback. The consuming

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! VorbisComment metadata, read and written.
 //!
 //! One block carries a vendor string then a count-prefixed list of `KEY=VALUE`

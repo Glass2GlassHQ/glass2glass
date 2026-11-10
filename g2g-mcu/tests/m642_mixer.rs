@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M642: the saturating Q15-gain mixer and the const-arity fan-in runner it
 //! rides on. The mixer's spec is its own math (unlike the wire codecs there
 //! is no external peer to be bit-exact against), so the oracle is an i64

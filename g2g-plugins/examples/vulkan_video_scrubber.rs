@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! On-screen interactive scrubber for the Vulkan Video wedge: the
 //! random-access ("pull") counterpart of the linear `vulkan_video_on_screen`
 //! demo. Instead of pre-decoding the clip and playing it forward, this drives a

@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! EGL + GL ES renderer for the GL display sinks, over the shared Wayland window
 //! worker ([`crate::waylandwindow`]).
 //!

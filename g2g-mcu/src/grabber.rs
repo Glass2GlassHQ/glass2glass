@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Camera capture seam: the DCMI / CSI-shaped [`FrameGrabber`] contract plus
 //! [`GrabberSrc`], the heap-free [`StaticSource`] that lends each captured
 //! frame downstream zero-copy from a [`StaticLendRing`]. The element owns the

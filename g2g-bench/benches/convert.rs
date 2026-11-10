@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! Benchmarks for the raw-video frame-convert hot path: the per-pixel
 //! `videoconvert::convert` dispatch a software pipeline runs on every frame.
 //! Guards regressions in the conversion inner loops (RGBA<->NV12/I420 and the

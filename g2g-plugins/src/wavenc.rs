@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! WAV encoder: PCM or a companded / ADPCM payload in (`Caps::Audio`), a
 //! RIFF/WAVE byte stream out (`Caps::ByteStream{Wav}`), so a separated or
 //! synthesized track lands as a file an audio tool opens.

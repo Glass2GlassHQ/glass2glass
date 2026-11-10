@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M1567: the MP4 demuxers read QuickTime PCM (`twos`, `sowt`, `raw `, `alaw`,
 //! `ulaw`) into the graph's PCM layout one chunk per frame, and MP3 (`.mp3`, or
 //! `mp4a` with an MPEG-1 / MPEG-2 audio esds) as its frames, so a bare

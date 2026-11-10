@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+//
+// SPDX-License-Identifier: MPL-2.0
+
 //! M18 item 4 — arbitrary-length linear runner (`run_linear_chain`).
 //!
 //! The fixed-arity runners cap at three elements; `run_linear_chain` lifts

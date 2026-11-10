@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Copyright (C) 2026 Aaron Boxer <boxerab@protonmail.com>
+#
+# SPDX-License-Identifier: MPL-2.0
+
 # Build-time worst-case RAM / stack / ROM report (M627) for the heap-free
 # pipeline: link `examples/g2g-noalloc` into a real gc-sectioned ELF for a bare
 # Cortex-M target and have tools/footprint.py report ROM, static RAM, and the
