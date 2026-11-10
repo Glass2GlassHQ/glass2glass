@@ -690,6 +690,10 @@ g2g-inspect --gst-map           # gst-name/g2g-runtime-name pairs, tab separated
 Caps print as gst caps strings, one alternative per line, with ranges as
 `[min,max]` (`video/x-raw,format=RGBA,width=[1,16384],...`).
 
+The list is sorted by name. On a Unix terminal the output is coloured the way
+`gst-inspect-1.0` colours it and goes through `$PAGER`, or `less` when it is
+unset. Set `NO_COLOR` to turn the colour off.
+
 `--gst-map` is for a tool comparing g2g's graph against GStreamer's: g2g names a
 graph node after the Rust type (`NalParse0`) where gst names it after the factory
 (`h264parse0`), so pairing the two engines' elements needs the synonyms. Only the

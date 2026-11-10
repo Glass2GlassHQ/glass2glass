@@ -2569,7 +2569,7 @@ mod factory {
         /// One line per registerable element, `name: Long-name` (the long name
         /// from the element's [`metadata`](crate::AsyncElement::metadata), or just
         /// the name when it declares none), for the `gst-inspect` element index.
-        /// Sources, then transforms / sinks, then muxers, then demuxers. Each element is
+        /// Sorted by name, as `gst-inspect` sorts its index. Each element is
         /// default-built to read its metadata (side-effect-free, like
         /// [`inspect`](Self::inspect)).
         pub fn element_listing(&self) -> Vec<String> {
@@ -2590,17 +2590,15 @@ mod factory {
             };
             let mut lines = Vec::new();
             for s in &self.sources {
-                lines.push(line(
+                lines.push((
                     s.name,
-                    (s.build)().metadata().long_name,
-                    s.experimental,
+                    line(s.name, (s.build)().metadata().long_name, s.experimental),
                 ));
             }
             for f in &self.launch {
-                lines.push(line(
+                lines.push((
                     f.name,
-                    (f.build)().metadata().long_name,
-                    f.experimental,
+                    line(f.name, (f.build)().metadata().long_name, f.experimental),
                 ));
             }
             for m in &self.muxers {
@@ -2608,21 +2606,28 @@ mod factory {
                 // one-input instance carries the metadata, the way `inspect`
                 // reads a muxer's.
                 if !self.launch.iter().any(|f| f.name == m.name) {
-                    lines.push(line(m.name, (m.build)(1).metadata().long_name, false));
+                    lines.push((
+                        m.name,
+                        line(m.name, (m.build)(1).metadata().long_name, false),
+                    ));
                 }
             }
             for d in &self.demuxes {
                 let listed = self.launch.iter().any(|f| f.name == d.name)
                     || self.muxers.iter().any(|m| m.name == d.name);
                 if !listed {
-                    lines.push(line(
+                    lines.push((
                         d.name,
-                        (d.build)(DEMUX_INSPECT_PORTS).metadata().long_name,
-                        false,
+                        line(
+                            d.name,
+                            (d.build)(DEMUX_INSPECT_PORTS).metadata().long_name,
+                            false,
+                        ),
                     ));
                 }
             }
-            lines
+            lines.sort_unstable_by_key(|(name, _)| *name);
+            lines.into_iter().map(|(_, text)| text).collect()
         }
 
         /// What [`inspect`](Self::inspect) and [`describe`](Self::describe)
@@ -4258,6 +4263,20 @@ mod tests {
         reg.register_alias("autosink", &["plainsink"]);
 
         assert_eq!(reg.resolve_alias("autosink"), "plainsink");
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn element_listing_is_sorted_by_name() {
+        let mut reg = Registry::new();
+        reg.register_launch(named_sink("zsink"));
+        reg.register_launch(named_sink("asink"));
+        let names: Vec<alloc::string::String> = reg
+            .element_listing()
+            .iter()
+            .map(|line| line.split(':').next().unwrap_or(line).into())
+            .collect();
+        assert_eq!(names, ["asink", "zsink"]);
     }
 
     #[cfg(feature = "std")]
