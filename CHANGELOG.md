@@ -95,6 +95,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M2179: `h264parse`, `h265parse` and `av1parse` attach HDR10+ metadata, which `nvenc` keeps and `h265seiinserter` writes back.
 - M2180: video caps carry gst's `pixel-aspect-ratio`, and square-pixel sources advertise 1/1.
 - M2181: plugin ABI generation 3 carries the pixel aspect ratio, and generation 2 plugins still load.
+- M2182: video parsers carry the bitstream sample aspect in caps, and an upstream ratio overrides it.
 
 Breaking: `TimecodeMeta.frames` is a `u16`, `WIRE_VERSION` is 4, and `RtpRecvConfig` gains `parameter_sets`.
 

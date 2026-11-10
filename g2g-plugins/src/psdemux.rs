@@ -1179,7 +1179,7 @@ impl PsDemux {
             height: Dim::Fixed(seq.height),
             framerate: Rate::Fixed(seq.framerate_q16),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
-            pixel_aspect: g2g_core::PixelAspect::Any,
+            pixel_aspect: seq.pixel_aspect,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         })
     }
@@ -1842,7 +1842,7 @@ impl PsDemuxN {
                         height: Dim::Fixed(seq.height),
                         framerate: Rate::Fixed(seq.framerate_q16),
                         colorimetry: g2g_core::Colorimetry::UNKNOWN,
-                        pixel_aspect: g2g_core::PixelAspect::Any,
+                        pixel_aspect: seq.pixel_aspect,
                         alignment: g2g_core::BitstreamAlignment::Unspecified,
                     },
                     _ => PsDemux::output_caps(kind),
@@ -1883,7 +1883,7 @@ impl PsDemuxN {
                                 height: Dim::Fixed(seq.height),
                                 framerate: Rate::Fixed(seq.framerate_q16),
                                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
-                                pixel_aspect: g2g_core::PixelAspect::Any,
+                                pixel_aspect: seq.pixel_aspect,
                                 alignment: g2g_core::BitstreamAlignment::Unspecified,
                             }),
                         )
@@ -1942,7 +1942,7 @@ impl MultiOutputElement for PsDemuxN {
                 height: Dim::Fixed(seq.height),
                 framerate: Rate::Fixed(seq.framerate_q16),
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
-                pixel_aspect: g2g_core::PixelAspect::Any,
+                pixel_aspect: seq.pixel_aspect,
                 alignment: g2g_core::BitstreamAlignment::Unspecified,
             }),
             _ => Some(PsDemux::output_caps(stream)),

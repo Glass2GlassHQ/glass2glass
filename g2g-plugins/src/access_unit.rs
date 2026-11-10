@@ -1,7 +1,7 @@
 use alloc::vec::Vec;
 
 use g2g_core::frame::FrameTiming;
-use g2g_core::{Caps, G2gError, OutputSink, PipelinePacket, Rate};
+use g2g_core::{Caps, G2gError, OutputSink, PipelinePacket, PixelAspect, Rate};
 
 use crate::annexb::{find_start_code_prefix, START_CODE_PREFIX};
 
@@ -431,16 +431,24 @@ pub(crate) struct CapsRefinement {
     pub(crate) changes_emitted: u64,
     // read from upstream CapsChanged packets only, configure sees the fixated placeholder
     upstream_framerate_q16: Option<u32>,
+    upstream_pixel_aspect: PixelAspect,
 }
 
 impl CapsRefinement {
     pub(crate) fn observe_upstream(&mut self, caps: &Caps) {
-        self.upstream_framerate_q16 = match caps {
+        (self.upstream_framerate_q16, self.upstream_pixel_aspect) = match caps {
             Caps::CompressedVideo {
-                framerate: Rate::Fixed(q16),
+                framerate,
+                pixel_aspect,
                 ..
-            } => Some(*q16),
-            _ => None,
+            } => {
+                let framerate_q16 = match framerate {
+                    Rate::Fixed(q16) => Some(*q16),
+                    _ => None,
+                };
+                (framerate_q16, *pixel_aspect)
+            }
+            _ => (None, PixelAspect::Any),
         };
     }
 
@@ -449,6 +457,14 @@ impl CapsRefinement {
         bitstream_q16
             .or(self.upstream_framerate_q16)
             .map_or(Rate::Any, Rate::Fixed)
+    }
+
+    // gst's parsers let the ratio a container declared override the bitstream's
+    pub(crate) fn pixel_aspect(&self, bitstream: PixelAspect) -> PixelAspect {
+        match self.upstream_pixel_aspect {
+            PixelAspect::Any => bitstream,
+            upstream => upstream,
+        }
     }
 
     pub(crate) async fn refine(

@@ -1,14 +1,18 @@
 use g2g_core::caps::framerate_q16_from_fraction;
-use g2g_core::Colorimetry;
+use g2g_core::{AspectRatio, Colorimetry, PixelAspect};
 
 use crate::annexb::BitReader;
 use crate::sei::PicTimingContext;
+use crate::startcodeparse::sample_aspect;
 
 /// CICP codepoint 2, "unspecified", for a colour description the VUI omits.
 const UNSPECIFIED_CICP: u8 = 2;
 
 /// `aspect_ratio_idc` that codes `sar_width` / `sar_height` explicitly.
 const EXTENDED_SAR: u32 = 255;
+
+/// The last `aspect_ratio_idc` H.264 Table E-1 and H.265 Table E.1 define.
+const HIGHEST_DEFINED_ASPECT_RATIO_IDC: u32 = 16;
 
 /// `cpb_cnt_minus1` is 0..=31 by spec, a larger value means a desynced parse.
 const MAX_CPB_COUNT_MINUS1: u32 = 31;
@@ -43,23 +47,47 @@ impl VideoSignalType {
     }
 }
 
-/// Read the head of an H.264 / H.265 VUI, laid out the same in both codecs:
-/// aspect ratio, overscan, then `video_signal_type`. Reads from just after
-/// `vui_parameters_present_flag`. `None` on truncation, `Some(None)` when the
-/// VUI carries no `video_signal_type`.
-pub(crate) fn read_vui_signal_type(br: &mut BitReader) -> Option<Option<VideoSignalType>> {
-    // aspect_ratio_info_present_flag
-    if br.read_bit()? == 1 && br.read_bits(8)? == EXTENDED_SAR {
-        br.read_bits(16)?; // sar_width
-        br.read_bits(16)?; // sar_height
+/// The head of an H.264 / H.265 VUI, laid out the same in both codecs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct VuiHead {
+    /// `Any` when the VUI leaves the sample aspect unspecified.
+    pub pixel_aspect: PixelAspect,
+    /// `None` when the VUI carries no `video_signal_type`.
+    pub signal_type: Option<VideoSignalType>,
+}
+
+impl VuiHead {
+    pub(crate) const ABSENT: Self = Self {
+        pixel_aspect: PixelAspect::Any,
+        signal_type: None,
+    };
+
+    pub(crate) fn colorimetry(self) -> Colorimetry {
+        self.signal_type
+            .map_or(Colorimetry::UNKNOWN, VideoSignalType::colorimetry)
     }
+}
+
+/// Read the head of an H.264 / H.265 VUI: aspect ratio, overscan, then
+/// `video_signal_type`. Reads from just after `vui_parameters_present_flag`.
+/// `None` on truncation.
+pub(crate) fn read_vui_head(br: &mut BitReader) -> Option<VuiHead> {
+    // aspect_ratio_info_present_flag
+    let pixel_aspect = if br.read_bit()? == 1 {
+        read_sample_aspect(br)?
+    } else {
+        PixelAspect::Any
+    };
     // overscan_info_present_flag
     if br.read_bit()? == 1 {
         br.read_bit()?; // overscan_appropriate_flag
     }
     // video_signal_type_present_flag
     if br.read_bit()? == 0 {
-        return Some(None);
+        return Some(VuiHead {
+            pixel_aspect,
+            signal_type: None,
+        });
     }
     br.read_bits(3)?; // video_format
     let mut signal = VideoSignalType {
@@ -72,7 +100,22 @@ pub(crate) fn read_vui_signal_type(br: &mut BitReader) -> Option<Option<VideoSig
         signal.transfer_characteristics = br.read_bits(8)? as u8;
         signal.matrix_coefficients = br.read_bits(8)? as u8;
     }
-    Some(Some(signal))
+    Some(VuiHead {
+        pixel_aspect,
+        signal_type: Some(signal),
+    })
+}
+
+fn read_sample_aspect(br: &mut BitReader) -> Option<PixelAspect> {
+    let aspect_ratio_idc = br.read_bits(8)?;
+    let ratio = if aspect_ratio_idc == EXTENDED_SAR {
+        let sar_width = br.read_bits(16)?;
+        let sar_height = br.read_bits(16)?;
+        AspectRatio::new(sar_width, sar_height)
+    } else {
+        sample_aspect(aspect_ratio_idc, HIGHEST_DEFINED_ASPECT_RATIO_IDC)
+    };
+    Some(ratio.map_or(PixelAspect::Any, PixelAspect::Exact))
 }
 
 /// Walk an H.264 `hrd_parameters()` (E.1.2), returning the three delay bit
@@ -97,7 +140,7 @@ pub(crate) fn read_h264_hrd(br: &mut BitReader) -> Option<(u8, u8, u8)> {
     Some((cpb_removal, dpb_output, time_offset))
 }
 
-/// What the rest of an H.264 VUI yields after [`read_vui_signal_type`]. A VUI
+/// What the rest of an H.264 VUI yields after [`read_vui_head`]. A VUI
 /// that ends early keeps whatever was read before the truncation.
 #[derive(Debug, Default)]
 pub(crate) struct H264VuiTail {
@@ -108,7 +151,7 @@ pub(crate) struct H264VuiTail {
     pub max_num_reorder_frames: Option<u8>,
 }
 
-/// Walk an H.264 VUI from where [`read_vui_signal_type`] stopped.
+/// Walk an H.264 VUI from where [`read_vui_head`] stopped.
 pub(crate) fn read_h264_vui_tail(br: &mut BitReader) -> H264VuiTail {
     let mut tail = H264VuiTail::default();
     let _ = walk_h264_vui_tail(br, &mut tail);

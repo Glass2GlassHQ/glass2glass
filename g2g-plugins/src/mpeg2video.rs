@@ -9,8 +9,9 @@
 //! Every offset here comes off the wire, so the scans are bounds-checked and a
 //! truncated or malformed header yields `None` rather than panicking.
 
+use g2g_core::{AspectRatio, PixelAspect};
+
 use crate::annexb::BitReader;
-use crate::startcodeparse::reduce_ratio;
 
 /// The video geometry an MPEG sequence header declares.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,11 +27,8 @@ pub struct SequenceHeader {
     /// missing or malformed, so an unreadable stream plays untouched rather than
     /// being filtered on a guess.
     pub progressive: bool,
-    /// One sample's `(width, height)`, reduced. `Caps` has no field for it, so
-    /// it reaches a pipeline through `mpegvideoparse`'s read-only
-    /// `pixel-aspect-ratio` property. `None` when `aspect_ratio_information` is
-    /// forbidden or reserved.
-    pub pixel_aspect: Option<(u32, u32)>,
+    /// `Any` when `aspect_ratio_information` is forbidden or reserved.
+    pub pixel_aspect: PixelAspect,
 }
 
 /// The MPEG frame_rate_code table (ISO 13818-2 Table 6-4), as exact
@@ -129,7 +127,8 @@ pub fn parse_sequence_header(au: &[u8]) -> Option<SequenceHeader> {
     let pixel_aspect = match extension {
         Some(_) => mpeg2_pixel_aspect(aspect_ratio_information, width, height),
         None => mpeg1_pixel_aspect(aspect_ratio_information),
-    };
+    }
+    .map_or(PixelAspect::Any, PixelAspect::Exact);
     Some(SequenceHeader {
         width,
         height,
@@ -141,9 +140,9 @@ pub fn parse_sequence_header(au: &[u8]) -> Option<SequenceHeader> {
 
 /// One sample's `(width, height)` for an MPEG-1 `aspect_ratio_information`: the
 /// reciprocal of the table's pel aspect ratio, which is coded height over width.
-fn mpeg1_pixel_aspect(aspect_ratio_information: u32) -> Option<(u32, u32)> {
+fn mpeg1_pixel_aspect(aspect_ratio_information: u32) -> Option<AspectRatio> {
     let pel = *MPEG1_PEL_ASPECT_TEN_THOUSANDTHS.get(aspect_ratio_information as usize)?;
-    reduce_ratio(PEL_ASPECT_SCALE, pel)
+    AspectRatio::new(PEL_ASPECT_SCALE, pel)
 }
 
 /// One sample's `(width, height)` for an MPEG-2 `aspect_ratio_information`,
@@ -153,15 +152,15 @@ fn mpeg2_pixel_aspect(
     aspect_ratio_information: u32,
     width: u32,
     height: u32,
-) -> Option<(u32, u32)> {
+) -> Option<AspectRatio> {
     if aspect_ratio_information == ASPECT_RATIO_SQUARE {
-        return Some((1, 1));
+        return Some(AspectRatio::SQUARE);
     }
     let (display_n, display_d) =
         *MPEG2_DISPLAY_ASPECT_BY_CODE.get(aspect_ratio_information as usize)?;
     // The table terms are under 256 and the sizes under 2^14, so the products
     // stay far inside u32; saturate anyway rather than trust the header.
-    reduce_ratio(
+    AspectRatio::new(
         display_n.saturating_mul(height),
         display_d.saturating_mul(width),
     )

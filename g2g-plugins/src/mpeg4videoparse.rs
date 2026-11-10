@@ -17,13 +17,13 @@ use alloc::vec::Vec;
 
 use g2g_core::caps::framerate_q16_from_fraction;
 use g2g_core::time::ticks_to_ns;
-use g2g_core::{PropertySpec, VideoCodec};
+use g2g_core::{AspectRatio, PixelAspect, PropertySpec, VideoCodec};
 
 use crate::access_unit::StartCodeRole;
 use crate::annexb::BitReader;
 use crate::startcodeparse::{
     first_start_code_offset, sample_aspect, start_code_units, StartCodeCodec, StartCodeParse,
-    VideoGeometry, CONFIG_INTERVAL_PROPERTY, PIXEL_ASPECT_PROPERTY,
+    VideoGeometry, CONFIG_INTERVAL_PROPERTY,
 };
 
 /// `visual_object_sequence_start_code`.
@@ -74,7 +74,7 @@ impl StartCodeCodec for Mpeg4VideoCodec {
     const NAME: &'static str = "MPEG-4 Part 2 video parser";
     const DESCRIPTION: &'static str =
         "Frames an MPEG-4 Part 2 stream into access units and reads its VOL header";
-    const PROPERTIES: &'static [PropertySpec] = &[CONFIG_INTERVAL_PROPERTY, PIXEL_ASPECT_PROPERTY];
+    const PROPERTIES: &'static [PropertySpec] = &[CONFIG_INTERVAL_PROPERTY];
 
     fn start_code_role(code: u8) -> StartCodeRole {
         match code {
@@ -115,7 +115,7 @@ impl StartCodeCodec for Mpeg4VideoCodec {
 
 // the `video_object_layer` fields ahead of `fixed_vop_rate`
 struct LayerPrefix {
-    pixel_aspect: Option<(u32, u32)>,
+    pixel_aspect: PixelAspect,
     shape: u32,
     vop_time_increment_resolution: u32,
 }
@@ -136,10 +136,11 @@ fn parse_layer_prefix(bits: &mut BitReader) -> Option<LayerPrefix> {
     let pixel_aspect = if aspect_ratio_info == ASPECT_RATIO_EXTENDED {
         let par_width = bits.read_bits(8)?;
         let par_height = bits.read_bits(8)?;
-        crate::startcodeparse::reduce_ratio(par_width, par_height)
+        AspectRatio::new(par_width, par_height)
     } else {
         sample_aspect(aspect_ratio_info, HIGHEST_DEFINED_ASPECT_CODE)
-    };
+    }
+    .map_or(PixelAspect::Any, PixelAspect::Exact);
 
     if bits.read_bit()? == 1 {
         // vol_control_parameters
@@ -504,7 +505,10 @@ mod tests {
         let info = Mpeg4VideoCodec::geometry(&au).expect("VOL must parse");
         assert_eq!((info.width, info.height), (720, 576));
         assert_eq!(info.framerate, Some(30 << 16));
-        assert_eq!(info.pixel_aspect, Some((12, 11)));
+        assert_eq!(
+            info.pixel_aspect,
+            PixelAspect::Exact(AspectRatio::new(12, 11).expect("nonzero"))
+        );
     }
 
     #[test]
@@ -515,7 +519,7 @@ mod tests {
         let expected = u32::try_from((30_000u64 << 16) / 1001).unwrap();
         assert_eq!(info.framerate, Some(expected));
         assert_eq!(info.framerate.unwrap() >> 16, 29, "~29.97 fps");
-        assert_eq!(info.pixel_aspect, Some((1, 1)));
+        assert_eq!(info.pixel_aspect, PixelAspect::SQUARE);
     }
 
     #[test]
@@ -647,19 +651,20 @@ mod tests {
                 width,
                 height,
                 framerate,
+                pixel_aspect,
                 ..
             }) => {
                 assert_eq!(*width, Dim::Fixed(720));
                 assert_eq!(*height, Dim::Fixed(576));
                 assert_eq!(*framerate, Rate::Fixed(30 << 16));
+                assert_eq!(
+                    *pixel_aspect,
+                    PixelAspect::Exact(AspectRatio::new(12, 11).expect("nonzero"))
+                );
             }
             other => panic!("expected CapsChanged first, got {other:?}"),
         }
         assert_eq!(data_payloads(&sink), vec![first, second]);
-        assert_eq!(
-            parse.get_property("pixel-aspect-ratio"),
-            Some(PropValue::Fraction(12, 11))
-        );
     }
 
     #[tokio::test]

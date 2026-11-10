@@ -27,7 +27,7 @@ use alloc::vec::Vec;
 use alloc::string::String;
 
 use g2g_core::caps::framerate_q16_from_fraction;
-use g2g_core::{Colorimetry, PropKind, PropertySpec, VideoCodec};
+use g2g_core::{Colorimetry, PixelAspect, PropKind, PropertySpec, VideoCodec};
 
 use crate::access_unit::StartCodeRole;
 use crate::annexb::{h265_nal_type, strip_emulation_prevention, BitReader};
@@ -401,6 +401,7 @@ fn parse_sps(rbsp: &[u8]) -> Option<SpsGeometry> {
         height,
         framerate,
         colorimetry: tail.colorimetry,
+        pixel_aspect: tail.pixel_aspect,
         // H.265 codes the `time_code` SEI self-contained, so nothing from the
         // SPS is needed to read it.
         pic_timing: None,
@@ -423,6 +424,7 @@ struct SpsTail {
     /// Colour description from the VUI `video_signal_type` block,
     /// [`Colorimetry::UNKNOWN`] when absent or the walk ends before it.
     colorimetry: Colorimetry,
+    pixel_aspect: PixelAspect,
     /// `log2_max_pic_order_cnt_lsb_minus4 + 4`, the width of the slice header's
     /// order-count lsb.
     log2_max_pic_order_cnt_lsb: Option<u32>,
@@ -456,9 +458,9 @@ fn parse_vui_framerate(
 
     // vui_parameters() (E.2.1) down to timing_info. The head mirrors H.264's,
     // then HEVC inserts four flags and the default display window.
-    if let Some(signal) = crate::vui::read_vui_signal_type(br)? {
-        tail.colorimetry = signal.colorimetry();
-    }
+    let vui_head = crate::vui::read_vui_head(br)?;
+    tail.colorimetry = vui_head.colorimetry();
+    tail.pixel_aspect = vui_head.pixel_aspect;
     skip_vui_display_fields(br)?;
     if br.read_bit()? != 1 {
         return None; // vui_timing_info_present_flag

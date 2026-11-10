@@ -645,7 +645,11 @@ source cannot produce fails the link. Sources whose pixels are square
 (`videotestsrc`, `patternsrc`, the v4l2, libcamera, PipeWire and platform camera
 and screen sources) advertise 1/1. A transform that passes the picture size
 through couples the ratio across the link, and `videoconvert` and `colorspace`
-carry the input's ratio to their output. The caps string field is
+carry the input's ratio to their output. The parsers (`h264parse`, `h265parse`,
+`mpegvideoparse`, `mpeg4videoparse`, `vc1parse`) put the bitstream's sample aspect
+in their refined caps, and a ratio declared by upstream caps overrides it, as in
+gst. `av1parse` passes the upstream ratio through, since AV1 codes none. The caps
+string field is
 `pixel-aspect-ratio=n/d`, printed only for an exact value. The wire format carries
 it from version 5.
 

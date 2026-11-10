@@ -25,9 +25,9 @@ use alloc::vec::Vec;
 use g2g_core::frame::{Frame, FrameTiming};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError,
-    OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropValue, PropertySpec,
-    Rate, VideoCodec,
+    AspectRatio, AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim,
+    ElementMetadata, G2gError, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PixelAspect,
+    PropError, PropValue, PropertySpec, Rate, VideoCodec,
 };
 
 use crate::access_unit::{
@@ -37,9 +37,6 @@ use crate::annexb::{find_start_code_prefix, START_CODE_PREFIX};
 
 /// Name of [`CONFIG_INTERVAL_PROPERTY`], matched in `set_property`.
 const CONFIG_INTERVAL_NAME: &str = "config-interval";
-
-/// Name of [`PIXEL_ASPECT_PROPERTY`], matched in `get_property`.
-const PIXEL_ASPECT_NAME: &str = "pixel-aspect-ratio";
 
 /// The `config-interval` property, for the codecs whose configuration headers
 /// can be re-sent periodically.
@@ -51,15 +48,6 @@ pub(crate) const CONFIG_INTERVAL_PROPERTY: PropertySpec = PropertySpec::new(
 .with_range("-1", "3600")
 .with_default("0");
 
-/// The read-only pixel aspect ratio recovered from the sequence header, as a
-/// `width/height` fraction of one sample. `0/1` until a header has been parsed.
-pub(crate) const PIXEL_ASPECT_PROPERTY: PropertySpec = PropertySpec::new(
-    PIXEL_ASPECT_NAME,
-    g2g_core::PropKind::Fraction,
-    "sample aspect ratio read from the sequence header (0/1 = not signalled yet)",
-)
-.read_only();
-
 /// Coded geometry recovered from a sequence header.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct VideoGeometry {
@@ -67,8 +55,7 @@ pub struct VideoGeometry {
     pub height: u32,
     /// Framerate as Q16 fixed-point fps, `None` when the headers signal none.
     pub framerate: Option<u32>,
-    /// One sample's `(width, height)`, `None` when the headers signal none.
-    pub pixel_aspect: Option<(u32, u32)>,
+    pub pixel_aspect: PixelAspect,
 }
 
 /// Per-codec hooks for [`StartCodeParse`]. Implemented by zero-sized markers.
@@ -147,27 +134,11 @@ pub(crate) fn first_start_code_offset(
     None
 }
 
-/// Reduce a `(numerator, denominator)` pair, `None` if either side is zero (an
-/// aspect ratio with a zero term is no aspect ratio).
-pub(crate) fn reduce_ratio(numerator: u32, denominator: u32) -> Option<(u32, u32)> {
-    if numerator == 0 || denominator == 0 {
-        return None;
-    }
-    let (mut a, mut b) = (numerator, denominator);
-    while b != 0 {
-        let r = a % b;
-        a = b;
-        b = r;
-    }
-    Some((numerator / a, denominator / a))
-}
-
 /// One sample's `(width, height)` for an aspect-ratio code. Codes 1..=5 are
 /// ISO/IEC 14496-2 Table 6-12 (MPEG-4 Part 2); SMPTE 421M (VC-1) keeps those and
-/// defines 6..=13 with the same values as ITU-T H.264 Table E-1. Code 0 is
-/// unspecified, 14 reserved, and 15 a custom pair coded in the header, so all
-/// three read back as no aspect ratio.
-const SAMPLE_ASPECT_BY_CODE: [(u32, u32); 16] = [
+/// defines 6..=13 with the same values as ITU-T H.264 Table E-1, which adds
+/// 14..=16. Code 0 is unspecified and reads back as no aspect ratio.
+const SAMPLE_ASPECT_BY_CODE: [(u32, u32); 17] = [
     (0, 0),
     (1, 1),
     (12, 11),
@@ -182,18 +153,19 @@ const SAMPLE_ASPECT_BY_CODE: [(u32, u32); 16] = [
     (15, 11),
     (64, 33),
     (160, 99),
-    (0, 0),
-    (0, 0),
+    (4, 3),
+    (3, 2),
+    (2, 1),
 ];
 
 /// Look up [`SAMPLE_ASPECT_BY_CODE`], rejecting a code above `highest_defined`
 /// (the codecs share the low codes but define different numbers of them).
-pub(crate) fn sample_aspect(code: u32, highest_defined: u32) -> Option<(u32, u32)> {
+pub(crate) fn sample_aspect(code: u32, highest_defined: u32) -> Option<AspectRatio> {
     if code > highest_defined {
         return None;
     }
     let (w, h) = *SAMPLE_ASPECT_BY_CODE.get(code as usize)?;
-    reduce_ratio(w, h)
+    AspectRatio::new(w, h)
 }
 
 /// Access-unit parser for a start-code elementary stream. See the module docs.
@@ -209,9 +181,6 @@ pub struct StartCodeParse<C: StartCodeCodec> {
     /// Last configuration headers seen, re-inserted before a keyframe that
     /// lacks them.
     cached_config: Vec<u8>,
-    /// Sample aspect ratio from the last sequence header, for the read-only
-    /// `pixel-aspect-ratio` property (caps carry no field for it).
-    pixel_aspect: Option<(u32, u32)>,
     #[cfg(feature = "metadata")]
     input_stamps: crate::inputstamp::PendingInputStamps,
     _codec: PhantomData<C>,
@@ -227,7 +196,6 @@ impl<C: StartCodeCodec> Default for StartCodeParse<C> {
             stream_pts: Default::default(),
             config_interval: ConfigInterval::default(),
             cached_config: Vec::new(),
-            pixel_aspect: None,
             #[cfg(feature = "metadata")]
             input_stamps: crate::inputstamp::PendingInputStamps::default(),
             _codec: PhantomData,
@@ -254,11 +222,6 @@ impl<C: StartCodeCodec> StartCodeParse<C> {
     /// re-emission is suppressed when the geometry is unchanged.
     pub fn caps_changes_emitted(&self) -> u64 {
         self.caps.changes_emitted
-    }
-
-    /// The sample aspect ratio the last sequence header signalled.
-    pub fn pixel_aspect(&self) -> Option<(u32, u32)> {
-        self.pixel_aspect
     }
 
     /// Set the configuration-header re-insertion interval in seconds (`0` off,
@@ -315,14 +278,13 @@ impl<C: StartCodeCodec> StartCodeParse<C> {
         let Some(info) = C::geometry(bytes) else {
             return Ok(());
         };
-        self.pixel_aspect = info.pixel_aspect;
         let new_caps = Caps::CompressedVideo {
             codec: C::CODEC,
             width: Dim::Fixed(info.width),
             height: Dim::Fixed(info.height),
             framerate: self.caps.framerate(info.framerate),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
-            pixel_aspect: g2g_core::PixelAspect::Any,
+            pixel_aspect: self.caps.pixel_aspect(info.pixel_aspect),
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         self.caps.refine(new_caps, out).await
@@ -453,7 +415,6 @@ impl<C: StartCodeCodec> AsyncElement for StartCodeParse<C> {
                 self.config_interval.seconds = seconds as i32;
                 Ok(())
             }
-            PIXEL_ASPECT_NAME => Err(PropError::ReadOnly),
             _ => Err(PropError::Unknown),
         }
     }
@@ -462,10 +423,6 @@ impl<C: StartCodeCodec> AsyncElement for StartCodeParse<C> {
         match name {
             CONFIG_INTERVAL_NAME if Self::declares_config_interval() => {
                 Some(PropValue::Int(self.config_interval.seconds as i64))
-            }
-            PIXEL_ASPECT_NAME => {
-                let (w, h) = self.pixel_aspect.unwrap_or((0, 1));
-                Some(PropValue::Fraction(w as i32, h as i32))
             }
             _ => None,
         }
@@ -530,22 +487,15 @@ mod tests {
     use alloc::vec;
 
     #[test]
-    fn reduce_ratio_divides_by_the_common_factor() {
-        assert_eq!(reduce_ratio(1920, 1080), Some((16, 9)));
-        assert_eq!(reduce_ratio(10000, 6735), Some((2000, 1347)));
-        assert_eq!(reduce_ratio(0, 3), None);
-        assert_eq!(reduce_ratio(3, 0), None);
-    }
-
-    #[test]
     fn sample_aspect_rejects_codes_the_codec_does_not_define() {
         // MPEG-4 Part 2 defines 1..=5; VC-1 goes on to 13.
-        assert_eq!(sample_aspect(5, 5), Some((40, 33)));
+        assert_eq!(sample_aspect(5, 5), AspectRatio::new(40, 33));
         assert_eq!(sample_aspect(6, 5), None, "reserved in MPEG-4 Part 2");
-        assert_eq!(sample_aspect(6, 13), Some((24, 11)));
+        assert_eq!(sample_aspect(6, 13), AspectRatio::new(24, 11));
         assert_eq!(sample_aspect(0, 13), None, "unspecified");
         assert_eq!(sample_aspect(14, 13), None, "reserved in VC-1");
         assert_eq!(sample_aspect(15, 13), None, "custom, coded in the header");
+        assert_eq!(sample_aspect(16, 16), AspectRatio::new(2, 1));
     }
 
     #[test]

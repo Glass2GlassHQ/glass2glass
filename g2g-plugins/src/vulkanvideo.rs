@@ -574,9 +574,9 @@ pub fn parse_h264_sps(rbsp: &[u8]) -> Result<H264Sps, VulkanVideoError> {
     // then continue to the bitstream-restriction reorder bound. Best-effort: a
     // truncated / absent VUI leaves the colour unspecified and the bound `None`.
     let (signal, max_num_reorder_frames) = if br.read_bit().unwrap_or(0) == 1 {
-        match crate::vui::read_vui_signal_type(&mut br) {
-            Some(signal) => (
-                signal.unwrap_or(VideoSignalType::UNSPECIFIED),
+        match crate::vui::read_vui_head(&mut br) {
+            Some(head) => (
+                head.signal_type.unwrap_or(VideoSignalType::UNSPECIFIED),
                 crate::vui::read_h264_vui_tail(&mut br).max_num_reorder_frames,
             ),
             None => (VideoSignalType::UNSPECIFIED, None),
@@ -1103,7 +1103,10 @@ pub fn parse_h265_sps(rbsp: &[u8]) -> Result<H265Sps, VulkanVideoError> {
     // tools a Main / Main 10 session cannot decode.
     let mut signal = VideoSignalType::UNSPECIFIED;
     if br.read_bit().ok_or(MALFORMED_H265_SPS)? == 1 {
-        if let Some(coded) = crate::vui::read_vui_signal_type(&mut br).ok_or(MALFORMED_H265_SPS)? {
+        if let Some(coded) = crate::vui::read_vui_head(&mut br)
+            .ok_or(MALFORMED_H265_SPS)?
+            .signal_type
+        {
             signal = coded;
         }
         crate::h265parse::skip_h265_vui_tail(&mut br, u32::from(sps_max_sub_layers_minus1))

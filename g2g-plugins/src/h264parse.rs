@@ -16,12 +16,12 @@
 //! when the VUI omits it, caps carry the rate an upstream `CapsChanged` declared,
 //! else `Rate::Any`.
 
-use g2g_core::{Colorimetry, PropKind, PropertySpec, VideoCodec};
+use g2g_core::{PropKind, PropertySpec, VideoCodec};
 
 use crate::access_unit::StartCodeRole;
 use crate::annexb::{h264_nal_type, strip_emulation_prevention, BitReader};
 use crate::nalparse::{NalCodec, NalParse, SpsGeometry};
-use crate::vui::{read_h264_vui_tail, read_vui_signal_type, H264VuiTail, VideoSignalType};
+use crate::vui::{read_h264_vui_tail, read_vui_head, H264VuiTail, VuiHead};
 
 /// H.264 access-unit parser: `CompressedVideo{H264}` in and out, refining caps
 /// from the SPS and (in re-framing mode) re-chunking to one access unit per
@@ -261,16 +261,17 @@ fn parse_sps(rbsp: &[u8]) -> Option<SpsGeometry> {
 
     // vui_parameters_present_flag follows frame cropping. Read it without `?`
     // so a stream truncated right here still yields the dimensions.
-    let (colorimetry, vui) = match br.read_bit() {
+    let (vui_head, vui) = match br.read_bit() {
         Some(1) => parse_vui(&mut br),
-        _ => (Colorimetry::UNKNOWN, H264VuiTail::default()),
+        _ => (VuiHead::ABSENT, H264VuiTail::default()),
     };
 
     Some(SpsGeometry {
         width,
         height,
         framerate: vui.framerate,
-        colorimetry,
+        colorimetry: vui_head.colorimetry(),
+        pixel_aspect: vui_head.pixel_aspect,
         pic_timing: vui.pic_timing,
         // POC type 2 derives the picture order count from frame_num alone
         // (H.264 8.2.1.3), so coded order is display order by construction. The
@@ -283,17 +284,13 @@ fn parse_sps(rbsp: &[u8]) -> Option<SpsGeometry> {
     })
 }
 
-/// Walk the VUI parameters for the colour description (`UNKNOWN` when the
-/// `video_signal_type` block is absent or truncated, never a guess) and the
-/// rest of [`H264VuiTail`]. A VUI that ends early yields whatever was read
-/// before the truncation.
-fn parse_vui(br: &mut BitReader) -> (Colorimetry, H264VuiTail) {
-    match read_vui_signal_type(br) {
-        Some(signal) => (
-            signal.map_or(Colorimetry::UNKNOWN, VideoSignalType::colorimetry),
-            read_h264_vui_tail(br),
-        ),
-        None => (Colorimetry::UNKNOWN, H264VuiTail::default()),
+/// Walk the VUI parameters for the [`VuiHead`] ([`VuiHead::ABSENT`] when it is
+/// truncated, never a guess) and the rest of [`H264VuiTail`]. A VUI that ends
+/// early yields whatever was read before the truncation.
+fn parse_vui(br: &mut BitReader) -> (VuiHead, H264VuiTail) {
+    match read_vui_head(br) {
+        Some(head) => (head, read_h264_vui_tail(br)),
+        None => (VuiHead::ABSENT, H264VuiTail::default()),
     }
 }
 
@@ -380,7 +377,10 @@ mod tests {
     use alloc::vec;
     use alloc::vec::Vec;
 
-    use g2g_core::{AsyncElement, Caps, CapsConstraint, Dim, G2gError, PipelinePacket, Rate};
+    use g2g_core::{
+        AspectRatio, AsyncElement, Caps, CapsConstraint, Colorimetry, Dim, G2gError,
+        PipelinePacket, PixelAspect, Rate,
+    };
 
     /// Build a minimal baseline-profile SPS RBSP for `width` x `height`
     /// (both multiples of 16), then frame it in Annex-B. Returns the
@@ -713,6 +713,112 @@ mod tests {
         let mut out = vec![0u8, 0, 0, 1, 0x67];
         out.extend_from_slice(&payload);
         out
+    }
+
+    /// `aspect_ratio_idc` 255, followed by an explicit `sar_width` / `sar_height`.
+    const EXTENDED_SAR: u32 = 255;
+    /// H.264 Table E-1 code 14, past the codes MPEG-4 Part 2 and VC-1 share.
+    const ASPECT_RATIO_IDC_4_3: u32 = 14;
+
+    /// Build an Annex-B SPS whose VUI carries `aspect_ratio_idc` (with `sar`
+    /// coded when it is [`EXTENDED_SAR`]) and then a BT.709 colour description.
+    fn build_annexb_sps_with_sample_aspect(aspect_ratio_idc: u32, sar: (u32, u32)) -> Vec<u8> {
+        let mut w = BitWriter::default();
+        w.write_ue(0); // seq_parameter_set_id
+        w.write_ue(0); // log2_max_frame_num_minus4
+        w.write_ue(0); // pic_order_cnt_type
+        w.write_ue(0); // log2_max_pic_order_cnt_lsb_minus4
+        w.write_ue(1); // max_num_ref_frames
+        w.write_bit(0); // gaps_in_frame_num_value_allowed_flag
+        w.write_ue(720 / 16 - 1); // pic_width_in_mbs_minus1
+        w.write_ue(576 / 16 - 1); // pic_height_in_map_units_minus1
+        w.write_bit(1); // frame_mbs_only_flag
+        w.write_bit(0); // direct_8x8_inference_flag
+        w.write_bit(0); // frame_cropping_flag
+        w.write_bit(1); // vui_parameters_present_flag
+        w.write_bit(1); // aspect_ratio_info_present_flag
+        w.write_bits(aspect_ratio_idc, 8);
+        if aspect_ratio_idc == EXTENDED_SAR {
+            w.write_bits(sar.0, 16);
+            w.write_bits(sar.1, 16);
+        }
+        w.write_bit(0); // overscan_info_present_flag
+        w.write_bit(1); // video_signal_type_present_flag
+        w.write_bits(5, 3); // video_format (unspecified)
+        w.write_bit(0); // video_full_range_flag
+        w.write_bit(1); // colour_description_present_flag
+        w.write_bits(1, 8); // colour_primaries BT.709
+        w.write_bits(1, 8); // transfer_characteristics BT.709
+        w.write_bits(1, 8); // matrix_coefficients BT.709
+        w.write_bit(0); // chroma_loc_info_present_flag
+        w.write_bit(0); // timing_info_present_flag
+        w.write_bit(1); // rbsp_trailing_bits
+        w.align_to_byte();
+        let mut payload = vec![66u8, 0, 30];
+        payload.extend_from_slice(&w.into_bytes());
+        let payload = crate::annexb::add_emulation_prevention(&payload);
+        let mut out = vec![0u8, 0, 0, 1, 0x67];
+        out.extend_from_slice(&payload);
+        out
+    }
+
+    #[test]
+    fn reads_the_vui_sample_aspect() {
+        let coded = build_annexb_sps_with_sample_aspect(ASPECT_RATIO_IDC_4_3, (0, 0));
+        let info = H264Codec::extract_sps_info(&coded).expect("SPS must parse");
+        assert_eq!(
+            info.pixel_aspect,
+            PixelAspect::Exact(AspectRatio::new(4, 3).expect("nonzero"))
+        );
+        assert_eq!(
+            info.colorimetry,
+            Colorimetry::BT709,
+            "the walk stays in step"
+        );
+
+        let extended = build_annexb_sps_with_sample_aspect(EXTENDED_SAR, (128, 90));
+        let info = H264Codec::extract_sps_info(&extended).expect("SPS must parse");
+        assert_eq!(
+            info.pixel_aspect,
+            PixelAspect::Exact(AspectRatio::new(64, 45).expect("nonzero"))
+        );
+        assert_eq!(
+            info.colorimetry,
+            Colorimetry::BT709,
+            "the walk stays in step"
+        );
+
+        let zero_height = build_annexb_sps_with_sample_aspect(EXTENDED_SAR, (16, 0));
+        let info = H264Codec::extract_sps_info(&zero_height).expect("SPS must parse");
+        assert_eq!(
+            info.pixel_aspect,
+            PixelAspect::Any,
+            "H.264 E.2.1 unspecified"
+        );
+    }
+
+    #[tokio::test]
+    async fn emits_the_sample_aspect_in_refined_caps() {
+        let mut parse = H264Parse::new();
+        parse.configure_pipeline(&h264_parse_caps()).unwrap();
+        let mut sink = CollectSink::default();
+        let stream = build_annexb_sps_with_sample_aspect(EXTENDED_SAR, (16, 11));
+        parse
+            .process(
+                PipelinePacket::DataFrame(frame_with_bytes(0, stream)),
+                &mut sink,
+            )
+            .await
+            .unwrap();
+        match &sink.packets[0] {
+            PipelinePacket::CapsChanged(Caps::CompressedVideo { pixel_aspect, .. }) => {
+                assert_eq!(
+                    *pixel_aspect,
+                    PixelAspect::Exact(AspectRatio::new(16, 11).expect("nonzero"))
+                );
+            }
+            other => panic!("expected CapsChanged first, got {other:?}"),
+        }
     }
 
     #[test]

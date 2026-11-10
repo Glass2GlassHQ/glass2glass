@@ -23,13 +23,12 @@
 //! not in the access unit being classified.
 
 use g2g_core::caps::framerate_q16_from_fraction;
-use g2g_core::{PropertySpec, VideoCodec};
+use g2g_core::{AspectRatio, PixelAspect, PropertySpec, VideoCodec};
 
 use crate::access_unit::StartCodeRole;
 use crate::annexb::{strip_emulation_prevention, BitReader};
 use crate::startcodeparse::{
-    reduce_ratio, sample_aspect, start_code_units, StartCodeCodec, StartCodeParse, VideoGeometry,
-    PIXEL_ASPECT_PROPERTY,
+    sample_aspect, start_code_units, StartCodeCodec, StartCodeParse, VideoGeometry,
 };
 
 /// Sequence header BDU type.
@@ -81,7 +80,7 @@ impl StartCodeCodec for Vc1Codec {
     const NAME: &'static str = "VC-1 parser";
     const DESCRIPTION: &'static str =
         "Frames a VC-1 advanced-profile stream into access units and reads its sequence header";
-    const PROPERTIES: &'static [PropertySpec] = &[PIXEL_ASPECT_PROPERTY];
+    const PROPERTIES: &'static [PropertySpec] = &[];
 
     fn start_code_role(code: u8) -> StartCodeRole {
         match code {
@@ -137,7 +136,7 @@ fn parse_sequence_header(header: &[u8]) -> Option<VideoGeometry> {
     }
 
     let mut framerate = None;
-    let mut pixel_aspect = None;
+    let mut pixel_aspect = PixelAspect::Any;
     // DISPLAY_EXT. Read without `?` so a header truncated here still yields the
     // coded size.
     if bits.read_bit() == Some(1) {
@@ -150,10 +149,11 @@ fn parse_sequence_header(header: &[u8]) -> Option<VideoGeometry> {
                 pixel_aspect = if aspect_ratio == ASPECT_RATIO_CUSTOM {
                     let horizontal = bits.read_bits(8)?;
                     let vertical = bits.read_bits(8)?;
-                    reduce_ratio(horizontal, vertical)
+                    AspectRatio::new(horizontal, vertical)
                 } else {
                     sample_aspect(aspect_ratio, HIGHEST_DEFINED_ASPECT_CODE)
-                };
+                }
+                .map_or(PixelAspect::Any, PixelAspect::Exact);
             }
             if bits.read_bit()? == 1 {
                 // FRAMERATE_FLAG
@@ -212,7 +212,7 @@ mod tests {
     use alloc::vec;
     use alloc::vec::Vec;
 
-    use g2g_core::{AsyncElement, Caps, Dim, G2gError, PipelinePacket, PropValue, Rate};
+    use g2g_core::{AsyncElement, Caps, Dim, G2gError, PipelinePacket, Rate};
 
     use crate::annexb::{add_emulation_prevention, BitWriter};
 
@@ -311,7 +311,7 @@ mod tests {
         let info = Vc1Codec::geometry(&au).expect("sequence header must parse");
         assert_eq!((info.width, info.height), (1920, 1080));
         assert_eq!(info.framerate, None);
-        assert_eq!(info.pixel_aspect, None);
+        assert_eq!(info.pixel_aspect, PixelAspect::Any);
     }
 
     #[test]
@@ -330,7 +330,10 @@ mod tests {
         let expected = u32::try_from(((30u64 * 1000) << 16) / 1001).unwrap();
         assert_eq!(info.framerate, Some(expected));
         assert_eq!(info.framerate.unwrap() >> 16, 29, "~29.97 fps");
-        assert_eq!(info.pixel_aspect, Some((10, 11)));
+        assert_eq!(
+            info.pixel_aspect,
+            PixelAspect::Exact(AspectRatio::new(10, 11).expect("nonzero"))
+        );
     }
 
     #[test]
@@ -346,7 +349,7 @@ mod tests {
         );
         let info = Vc1Codec::geometry(&au).expect("sequence header must parse");
         assert_eq!(info.framerate, Some(30 << 16));
-        assert_eq!(info.pixel_aspect, Some((1, 1)));
+        assert_eq!(info.pixel_aspect, PixelAspect::SQUARE);
     }
 
     #[test]
@@ -498,20 +501,18 @@ mod tests {
                 width,
                 height,
                 framerate,
+                pixel_aspect,
                 ..
             }) => {
                 assert_eq!(*width, Dim::Fixed(1280));
                 assert_eq!(*height, Dim::Fixed(720));
                 assert_eq!(*framerate, Rate::Fixed(30 << 16));
+                assert_eq!(*pixel_aspect, PixelAspect::SQUARE);
             }
             other => panic!("expected CapsChanged first, got {other:?}"),
         }
         assert_eq!(data_payloads(&sink), vec![first, second]);
         assert_eq!(parse.caps_changes_emitted(), 1);
-        assert_eq!(
-            parse.get_property("pixel-aspect-ratio"),
-            Some(PropValue::Fraction(1, 1))
-        );
     }
 
     #[tokio::test]

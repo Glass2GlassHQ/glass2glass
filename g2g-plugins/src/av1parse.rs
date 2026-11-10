@@ -109,7 +109,8 @@ impl Av1Parse {
             // the timing_info a sequence header can carry is not read
             framerate: self.caps.framerate(None),
             colorimetry: info.colorimetry,
-            pixel_aspect: g2g_core::PixelAspect::Any,
+            // AV1 has no sample aspect field, the container's ratio passes through
+            pixel_aspect: self.caps.pixel_aspect(g2g_core::PixelAspect::Any),
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         self.caps.refine(new_caps, out).await

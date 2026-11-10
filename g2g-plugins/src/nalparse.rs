@@ -25,7 +25,7 @@ use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{
     AsyncElement, BitstreamAlignment, Caps, CapsConstraint, CapsSet, Colorimetry, ConfigureOutcome,
     Dim, ElementMetadata, G2gError, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
-    PropError, PropValue, PropertySpec, Rate, Segment, VideoCodec,
+    PixelAspect, PropError, PropValue, PropertySpec, Rate, Segment, VideoCodec,
 };
 
 use crate::access_unit::{
@@ -56,6 +56,8 @@ pub struct SpsGeometry {
     /// Colour description from the VUI `video_signal_type` block,
     /// [`Colorimetry::UNKNOWN`] when the SPS carries none.
     pub colorimetry: Colorimetry,
+    /// The VUI sample aspect, `Any` when the SPS carries none.
+    pub pixel_aspect: PixelAspect,
     /// SPS VUI context an H.264 `pic_timing` SEI needs to be parseable. `None`
     /// for H.265, whose `time_code` SEI is self-contained.
     pub pic_timing: Option<crate::sei::PicTimingContext>,
@@ -300,7 +302,7 @@ impl<C: NalCodec> NalParse<C> {
             height: Dim::Fixed(info.height),
             framerate: self.caps.framerate(info.framerate),
             colorimetry: info.colorimetry,
-            pixel_aspect: g2g_core::PixelAspect::Any,
+            pixel_aspect: self.caps.pixel_aspect(info.pixel_aspect),
             alignment: self.output_alignment(),
         };
         self.caps.refine(new_caps, out).await

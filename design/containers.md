@@ -1353,9 +1353,8 @@ Simple and main profile carry no start codes, so there is nothing in the byte
 stream to frame or measure and the parser leaves such a stream alone. There is
 no VC-1 decoder.
 
-`Caps::CompressedVideo` has no pixel-aspect field, so the sample aspect these
-three headers signal is surfaced as the read-only `pixel-aspect-ratio` property
-rather than in caps.
+The sample aspect these three headers signal goes into the caps
+`pixel_aspect`, unless upstream caps already declared one.
 
 `NalParse` and `StartCodeParse` in re-framing mode stamp the units their source
 left unstamped (0 from a byte source, or none) with the synthesis `TsDemux` uses:

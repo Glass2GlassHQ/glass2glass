@@ -1102,9 +1102,10 @@ pub fn greatest_common_divisor(mut a: u64, mut b: u64) -> u64 {
     a
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum PixelAspect {
     // gst's absent `pixel-aspect-ratio`: it intersects with any value, survives fixation, and gst reads it as 1/1
+    #[default]
     Any,
     Exact(AspectRatio),
 }

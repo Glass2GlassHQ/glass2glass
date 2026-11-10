@@ -3911,9 +3911,7 @@ fn m1094_audio_tag_writer_properties() {
 }
 
 /// M1095: the legacy video parsers. `mpeg4videoparse` takes gst's
-/// `config-interval`; all three report the sample aspect their sequence header
-/// signalled through a read-only `pixel-aspect-ratio`, since caps carry no field
-/// for it.
+/// `config-interval`.
 #[test]
 fn legacy_video_parsers_properties() {
     use g2g_plugins::mpeg4videoparse::Mpeg4VideoParse;
@@ -3946,23 +3944,6 @@ fn legacy_video_parsers_properties() {
         "config-interval"
     ));
     assert!(!declares(Vc1Parse::new().properties(), "config-interval"));
-
-    for properties in [
-        MpegVideoParse::new().properties(),
-        Mpeg4VideoParse::new().properties(),
-        Vc1Parse::new().properties(),
-    ] {
-        assert!(declares(properties, "pixel-aspect-ratio"));
-    }
-    let mut mpeg2 = MpegVideoParse::new();
-    assert_eq!(
-        mpeg2.get_property("pixel-aspect-ratio"),
-        Some(PropValue::Fraction(0, 1)),
-        "unknown until a sequence header has been parsed"
-    );
-    assert!(mpeg2
-        .set_property("pixel-aspect-ratio", PropValue::Fraction(1, 1))
-        .is_err());
 }
 
 /// M1096: the subtitle writers' cue-window offsets, the caption converter's

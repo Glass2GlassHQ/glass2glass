@@ -16,7 +16,7 @@
 use g2g_core::{PropertySpec, VideoCodec};
 
 use crate::access_unit::StartCodeRole;
-use crate::startcodeparse::{StartCodeCodec, StartCodeParse, VideoGeometry, PIXEL_ASPECT_PROPERTY};
+use crate::startcodeparse::{StartCodeCodec, StartCodeParse, VideoGeometry};
 
 /// `sequence_header_code`: the sequence header that carries the geometry.
 pub(crate) const SEQUENCE_HEADER_CODE: u8 = 0xB3;
@@ -45,7 +45,7 @@ impl StartCodeCodec for MpegVideoCodec {
     const NAME: &'static str = "MPEG-1/2 video parser";
     const DESCRIPTION: &'static str =
         "Frames an MPEG-1 / MPEG-2 video stream into access units and reads its sequence header";
-    const PROPERTIES: &'static [PropertySpec] = &[PIXEL_ASPECT_PROPERTY];
+    const PROPERTIES: &'static [PropertySpec] = &[];
 
     fn start_code_role(code: u8) -> StartCodeRole {
         match code {
@@ -89,7 +89,9 @@ mod tests {
     use alloc::vec;
     use alloc::vec::Vec;
 
-    use g2g_core::{AsyncElement, Caps, Dim, G2gError, PipelinePacket, PropValue, Rate};
+    use g2g_core::{
+        AspectRatio, AsyncElement, Caps, Dim, G2gError, PipelinePacket, PixelAspect, Rate,
+    };
 
     use crate::annexb::BitWriter;
 
@@ -197,7 +199,7 @@ mod tests {
         let info = MpegVideoCodec::geometry(&au).expect("sequence header must parse");
         assert_eq!((info.width, info.height), (720, 576));
         assert_eq!(info.framerate, Some(25 << 16));
-        assert_eq!(info.pixel_aspect, Some((16, 15)));
+        assert_eq!(info.pixel_aspect, dvd_pal_4_3_sample_aspect());
     }
 
     #[test]
@@ -209,7 +211,7 @@ mod tests {
         let expected = u32::try_from(((30000u64 << 16) * 2) / 1001).unwrap();
         assert_eq!(info.framerate, Some(expected));
         assert_eq!(info.framerate.unwrap() >> 16, 59, "~59.94 fps");
-        assert_eq!(info.pixel_aspect, Some((1, 1)));
+        assert_eq!(info.pixel_aspect, PixelAspect::SQUARE);
     }
 
     #[test]
@@ -222,7 +224,10 @@ mod tests {
         assert_eq!((info.width, info.height), (352, 288));
         assert_eq!(info.framerate, Some(25 << 16));
         // Sample aspect is the reciprocal of the 0.9157 pel aspect: 10000:9157.
-        assert_eq!(info.pixel_aspect, Some((10000, 9157)));
+        assert_eq!(
+            info.pixel_aspect,
+            PixelAspect::Exact(AspectRatio::new(10000, 9157).expect("nonzero"))
+        );
     }
 
     #[test]
@@ -280,6 +285,10 @@ mod tests {
 
     // -- Element-level tests (drive MpegVideoParse::process directly) --------
 
+    fn dvd_pal_4_3_sample_aspect() -> PixelAspect {
+        PixelAspect::Exact(AspectRatio::new(16, 15).expect("nonzero"))
+    }
+
     fn mpeg2_caps() -> Caps {
         Caps::CompressedVideo {
             codec: VideoCodec::Mpeg2,
@@ -331,20 +340,61 @@ mod tests {
                 width,
                 height,
                 framerate,
+                pixel_aspect,
                 ..
             }) => {
                 assert_eq!(*width, Dim::Fixed(720));
                 assert_eq!(*height, Dim::Fixed(576));
                 assert_eq!(*framerate, Rate::Fixed(25 << 16));
+                assert_eq!(*pixel_aspect, dvd_pal_4_3_sample_aspect());
             }
             other => panic!("expected CapsChanged first, got {other:?}"),
         }
         assert_eq!(data_payloads(&sink), vec![first, second]);
         assert_eq!(parse.caps_changes_emitted(), 1);
-        assert_eq!(
-            parse.get_property("pixel-aspect-ratio"),
-            Some(PropValue::Fraction(16, 15))
-        );
+    }
+
+    #[tokio::test]
+    async fn an_upstream_ratio_overrides_the_sequence_header() {
+        let upstream_aspect = PixelAspect::SQUARE;
+        let mut parse = MpegVideoParse::new();
+        parse.configure_pipeline(&mpeg2_caps()).unwrap();
+        let mut sink = CollectSink::default();
+        let upstream = Caps::CompressedVideo {
+            codec: VideoCodec::Mpeg2,
+            width: Dim::Any,
+            height: Dim::Any,
+            framerate: Rate::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: upstream_aspect,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
+        };
+        parse
+            .process(PipelinePacket::CapsChanged(upstream), &mut sink)
+            .await
+            .unwrap();
+        let mut buffer = sequence_header(720, 576, ASPECT_CODE_2, FRAME_RATE_CODE_25);
+        buffer.extend_from_slice(&sequence_extension(0, 0, 0, 0));
+        buffer.extend_from_slice(&picture_header(0, 1));
+        buffer.extend_from_slice(&slice(0xAA));
+        parse
+            .process(
+                PipelinePacket::DataFrame(frame_with_bytes(0, buffer)),
+                &mut sink,
+            )
+            .await
+            .unwrap();
+        parse.process(PipelinePacket::Eos, &mut sink).await.unwrap();
+
+        let refined = sink.packets.iter().find_map(|p| match p {
+            PipelinePacket::CapsChanged(Caps::CompressedVideo {
+                width: Dim::Fixed(_),
+                pixel_aspect,
+                ..
+            }) => Some(*pixel_aspect),
+            _ => None,
+        });
+        assert_eq!(refined, Some(upstream_aspect));
     }
 
     #[tokio::test]
