@@ -45,7 +45,8 @@ pub enum G2gError {
     /// category.
     ControlBinding,
     /// No data reached an element within the time it was given: the `watchdog`
-    /// transform's `timeout` elapsed with the stream stalled.
+    /// transform's `timeout` elapsed with the stream stalled, or a capture
+    /// device did not start within the time its source waits for it.
     Timeout,
     /// A demux built with `ports` output ports was handed a batch of `streams`
     /// streams: each stream needs its own port.
@@ -70,6 +71,8 @@ pub enum G2gError {
     FileNotFound,
     // the user closed the window a display sink presents to
     WindowClosed,
+    // no capture or playback device matches the id or index an element was given, with the selector logged by the element
+    DeviceNotFound,
 }
 
 // the stage of a network session that failed

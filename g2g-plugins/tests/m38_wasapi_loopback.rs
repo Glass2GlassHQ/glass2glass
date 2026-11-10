@@ -91,7 +91,7 @@ async fn loopback_captures_system_playback_or_skips() {
     // background tone.
     let caps = match src.intercept_caps().await {
         Ok(caps) => caps,
-        Err(G2gError::Hardware(_)) => {
+        Err(G2gError::Hardware(_) | G2gError::DeviceNotFound) => {
             std::eprintln!("skipping: no render endpoint for loopback on this host");
             return;
         }

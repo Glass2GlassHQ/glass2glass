@@ -14,17 +14,13 @@
 //!
 //! The end-to-end test opens a real audio device, so on a headless host (no
 //! render endpoint) it skips rather than failing: `configure_pipeline` returns
-//! the `E_NOTFOUND` the endpoint lookup failed with, which surfaces as a
-//! pipeline error here.
+//! `DeviceNotFound`, which surfaces as a pipeline error here.
 
 #![cfg(all(target_os = "windows", feature = "wasapi-sink"))]
 
 use g2g_core::element::AsyncElement;
 use g2g_core::runtime::run_simple_pipeline;
-use g2g_core::{AudioFormat, Caps, G2gError, HardwareError, PipelineClock};
-
-/// `HRESULT_FROM_WIN32(ERROR_NOT_FOUND)`: no default endpoint for the data flow.
-const E_NOTFOUND: i32 = 0x8007_0490_u32 as i32;
+use g2g_core::{AudioFormat, Caps, G2gError, PipelineClock};
 use g2g_plugins::audiotestsrc::AudioTestSrc;
 use g2g_plugins::wasapisink::WasapiSink;
 
@@ -57,7 +53,7 @@ async fn tone_renders_to_the_default_endpoint() {
             );
         }
         // only a missing endpoint skips; a refused format or other device error fails
-        Err(G2gError::Hardware(HardwareError::MediaFoundation(E_NOTFOUND))) => {
+        Err(G2gError::DeviceNotFound) => {
             std::eprintln!("skipping: no audio render endpoint on this host");
         }
         Err(e) => panic!("unexpected pipeline error: {e:?}"),

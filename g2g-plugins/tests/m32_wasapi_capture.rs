@@ -12,7 +12,8 @@
 //! ```
 //!
 //! Opens a real capture endpoint, so on a headless host (no microphone /
-//! capture device) it skips: the probe returns a `Hardware` error.
+//! capture device) it skips: the probe returns `DeviceNotFound` or a
+//! `Hardware` error.
 
 #![cfg(all(target_os = "windows", feature = "wasapi-src"))]
 
@@ -59,7 +60,7 @@ async fn captures_pcm_from_the_default_endpoint_or_skips() {
     let mut src = WasapiSrc::new(BUFFERS);
     let caps = match src.intercept_caps().await {
         Ok(caps) => caps,
-        Err(G2gError::Hardware(_)) => {
+        Err(G2gError::Hardware(_) | G2gError::DeviceNotFound) => {
             std::eprintln!("skipping: no audio capture endpoint on this host");
             return;
         }
@@ -79,4 +80,16 @@ async fn captures_pcm_from_the_default_endpoint_or_skips() {
     assert_eq!(out.data_frames as u64, emitted, "every frame counted");
     assert_eq!(emitted, BUFFERS, "captured the requested number of buffers");
     assert!(out.sample_bytes > 0, "captured non-empty PCM");
+}
+
+#[tokio::test]
+async fn unknown_endpoint_id_fails_as_not_found() {
+    for id in ["{0.0.1.00000000}.{no-such-endpoint}", "bogus"] {
+        let mut src = WasapiSrc::new(1).with_device(id);
+        assert_eq!(
+            src.intercept_caps().await,
+            Err(G2gError::DeviceNotFound),
+            "{id}"
+        );
+    }
 }

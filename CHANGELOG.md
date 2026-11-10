@@ -119,6 +119,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M2203: an MP4 audio edit list that goes back in the media replays it to the sample.
 - M2204: `matroskamux` writes an Opus end trim shorter than a millisecond.
 - M2205: `d3d11videosink`, `wgpusink`, `kmssink`, `waylandsink` and `metalvideosink` take every format `videoconvert` reads, so `decodebin ! autovideosink` plays without a `videoconvert`.
+- M2206: `wasapisink`, `wasapisrc` and `mfvideosrc` fail with the new `G2gError::DeviceNotFound` and log the device they looked for when it is missing.
 
 Breaking: `TimecodeMeta.frames` is a `u16`, `WIRE_VERSION` is 6, `FrameTiming` gains `start_discard_ns` and `end_discard_ns`, and `RtpRecvConfig` gains `parameter_sets`.
 

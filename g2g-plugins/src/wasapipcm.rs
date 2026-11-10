@@ -13,12 +13,14 @@
 use alloc::vec::Vec;
 
 use windows::core::PCWSTR;
+use windows::Win32::Foundation::{ERROR_NOT_FOUND, E_INVALIDARG};
 use windows::Win32::Media::Audio::{
-    eConsole, EDataFlow, IMMDevice, IMMDeviceEnumerator, MMDeviceEnumerator, WAVEFORMATEX,
+    eCapture, eConsole, EDataFlow, IMMDevice, IMMDeviceEnumerator, MMDeviceEnumerator, WAVEFORMATEX,
 };
 use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER};
 
-use g2g_core::{AudioFormat, G2gError, HardwareError};
+use g2g_core::log::Target;
+use g2g_core::{g2g_error, AudioFormat, G2gError, HardwareError};
 
 use crate::audio::{WAVE_FORMAT_IEEE_FLOAT, WAVE_FORMAT_PCM};
 
@@ -51,15 +53,32 @@ pub(crate) unsafe fn open_endpoint(dataflow: EDataFlow, id: &str) -> Result<IMMD
     unsafe {
         let enumerator: IMMDeviceEnumerator =
             CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_INPROC_SERVER).map_err(audio_err)?;
-        if id.is_empty() {
-            return enumerator
-                .GetDefaultAudioEndpoint(dataflow, eConsole)
-                .map_err(audio_err);
-        }
         let wide = wide_z(id);
-        enumerator
-            .GetDevice(PCWSTR(wide.as_ptr()))
-            .map_err(audio_err)
+        let endpoint = if id.is_empty() {
+            enumerator.GetDefaultAudioEndpoint(dataflow, eConsole)
+        } else {
+            enumerator.GetDevice(PCWSTR(wide.as_ptr()))
+        };
+        // wasapi GetDevice fails a malformed id with E_INVALIDARG and a well-formed unknown one with E_NOTFOUND
+        let missing = |e: &windows::core::Error| {
+            e.code() == ERROR_NOT_FOUND.to_hresult() || (!id.is_empty() && e.code() == E_INVALIDARG)
+        };
+        match endpoint {
+            Err(e) if missing(&e) => {
+                let direction = if dataflow == eCapture {
+                    "capture"
+                } else {
+                    "render"
+                };
+                let selector = if id.is_empty() { "default" } else { id };
+                g2g_error!(
+                    Target::category("wasapi"),
+                    "no {direction} endpoint matches {selector}"
+                );
+                Err(G2gError::DeviceNotFound)
+            }
+            other => other.map_err(audio_err),
+        }
     }
 }
 

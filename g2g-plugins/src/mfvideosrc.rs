@@ -55,6 +55,8 @@ use windows::Win32::System::Com::CoTaskMemFree;
 
 use crate::mfcommon::{mf_err, unpack_u32_pair, with_media_foundation};
 use g2g_core::frame::Frame;
+use g2g_core::g2g_error;
+use g2g_core::log::Target;
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
@@ -347,7 +349,7 @@ impl SourceLoop for MfVideoSrc {
             // Worker captures and streams frame payloads here; a ready signal
             // reports whether the device opened.
             let (frame_tx, mut frame_rx) = mpsc::unbounded_channel::<Vec<u8>>();
-            let (ready_tx, ready_rx) = std_mpsc::sync_channel::<Result<(), i32>>(1);
+            let (ready_tx, ready_rx) = std_mpsc::sync_channel::<Result<(), G2gError>>(1);
             let worker = thread::Builder::new()
                 .name(alloc::string::String::from("g2g-mfvideosrc"))
                 .spawn(move || capture_worker(selector, config, limit, frame_tx, ready_tx))
@@ -355,13 +357,13 @@ impl SourceLoop for MfVideoSrc {
 
             match ready_rx.recv_timeout(Duration::from_secs(5)) {
                 Ok(Ok(())) => {}
-                Ok(Err(code)) => {
+                Ok(Err(e)) => {
                     let _ = worker.join();
-                    return Err(G2gError::Hardware(HardwareError::MediaFoundation(code)));
+                    return Err(e);
                 }
                 Err(_) => {
                     let _ = worker.join();
-                    return Err(G2gError::Hardware(HardwareError::MediaFoundation(0)));
+                    return Err(G2gError::Timeout);
                 }
             }
 
@@ -642,10 +644,15 @@ unsafe fn activate_source(selector: &DeviceSelector) -> Result<IMFMediaSource, G
                         == Some(link.as_str())
                 }),
             };
-            chosen
-                .ok_or(G2gError::Hardware(HardwareError::MediaFoundation(0)))?
-                .ActivateObject()
-                .map_err(mf_err)
+            let Some(chosen) = chosen else {
+                g2g_error!(
+                    Target::category("mfvideosrc"),
+                    "no capture device matches {selector:?} among {} devices",
+                    activates.len()
+                );
+                return Err(G2gError::DeviceNotFound);
+            };
+            chosen.ActivateObject().map_err(mf_err)
         })
     }
 }
@@ -718,17 +725,15 @@ fn capture_worker(
     config: VideoConfig,
     limit: u64,
     frame_tx: mpsc::UnboundedSender<Vec<u8>>,
-    ready_tx: std_mpsc::SyncSender<Result<(), i32>>,
+    ready_tx: std_mpsc::SyncSender<Result<(), G2gError>>,
 ) {
     let result = with_media_foundation(|| {
         // SAFETY: `with_media_foundation` started COM + MF on this thread.
         unsafe { run_capture(&selector, config, limit, &frame_tx, &ready_tx) }
     });
-    if let Err(G2gError::Hardware(HardwareError::MediaFoundation(code))) = result {
+    if let Err(e) = result {
         // If we never signalled ready, do so now so `run` stops waiting.
-        let _ = ready_tx.try_send(Err(code));
-    } else if result.is_err() {
-        let _ = ready_tx.try_send(Err(0));
+        let _ = ready_tx.try_send(Err(e));
     }
 }
 
@@ -739,7 +744,7 @@ unsafe fn run_capture(
     config: VideoConfig,
     limit: u64,
     frame_tx: &mpsc::UnboundedSender<Vec<u8>>,
-    ready_tx: &std_mpsc::SyncSender<Result<(), i32>>,
+    ready_tx: &std_mpsc::SyncSender<Result<(), G2gError>>,
 ) -> Result<(), G2gError> {
     // SAFETY: reader setup + read loop on the owning thread.
     unsafe {
@@ -839,6 +844,12 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn missing_device_fails_the_probe_as_not_found() {
+        let mut src = MfVideoSrc::new().with_device_path(r"\\?\no-such-camera");
+        assert_eq!(src.probe(), Err(G2gError::DeviceNotFound));
     }
 
     #[test]
