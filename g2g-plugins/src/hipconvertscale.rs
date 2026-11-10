@@ -1063,12 +1063,7 @@ impl AsyncElement for HipConvertScale {
 
     fn metadata(&self) -> ElementMetadata {
         let (long_name, classification, description) = self.variant.metadata;
-        ElementMetadata::new(
-            long_name,
-            classification,
-            description,
-            crate::AARON_BOXER,
-        )
+        ElementMetadata::new(long_name, classification, description, crate::AARON_BOXER)
     }
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {

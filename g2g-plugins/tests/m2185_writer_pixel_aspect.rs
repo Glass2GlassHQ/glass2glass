@@ -1,7 +1,15 @@
 //! M2185: writers keep the caps pixel aspect ratio. A y4m stream declaring
 //! `A16:15` is encoded and muxed by a launch line, then the written file is read
 //! back by the g2g demuxer and, when it is installed, by ffprobe.
-#![cfg(feature = "std")]
+#![cfg(all(
+    feature = "std",
+    any(
+        feature = "ffmpeg",
+        feature = "vpx",
+        feature = "openh264",
+        feature = "av1-encode"
+    )
+))]
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -13,8 +21,6 @@ use g2g_core::{
     AspectRatio, AsyncElement, ByteStreamEncoding, Caps, G2gError, OutputSink, PipelineClock,
     PixelAspect, PushOutcome,
 };
-use g2g_plugins::mkvdemux::MkvDemux;
-use g2g_plugins::mp4demux::Mp4Demux;
 use g2g_plugins::registry::default_registry;
 
 // 60 columns of 16:15 pixels show as 64, so WebM's whole-pixel display width is exact
@@ -155,12 +161,19 @@ async fn demuxed_pixel_aspect<E: AsyncElement>(
     pixel_aspect.expect("the demuxer announced video caps")
 }
 
+#[cfg(any(feature = "vpx", feature = "openh264", feature = "av1-encode"))]
 async fn mp4_pixel_aspect(file: &[u8]) -> PixelAspect {
-    demuxed_pixel_aspect(&mut Mp4Demux::new(), ByteStreamEncoding::Mp4, file).await
+    demuxed_pixel_aspect(
+        &mut g2g_plugins::mp4demux::Mp4Demux::new(),
+        ByteStreamEncoding::Mp4,
+        file,
+    )
+    .await
 }
 
+#[cfg(any(feature = "ffmpeg", feature = "vpx"))]
 async fn mkv_pixel_aspect(stream: &str, file: &[u8]) -> PixelAspect {
-    let mut demux = MkvDemux::new();
+    let mut demux = g2g_plugins::mkvdemux::MkvDemux::new();
     demux
         .set_property("stream", g2g_core::PropValue::Str(stream.into()))
         .expect("a known stream name");
