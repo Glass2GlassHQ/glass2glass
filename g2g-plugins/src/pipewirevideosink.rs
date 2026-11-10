@@ -215,7 +215,7 @@ impl AsyncElement for PipeWireVideoSink {
             "PipeWire video sink",
             "Sink/Video",
             "Publishes raw video as a PipeWire camera node other applications capture from",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

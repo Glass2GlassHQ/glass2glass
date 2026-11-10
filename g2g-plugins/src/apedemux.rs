@@ -177,7 +177,7 @@ impl AsyncElement for ApeDemux {
             "APEv2 tag reader",
             "Formatter/Metadata",
             "Reads an APEv2 tag from the tail of a stream and strips it",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

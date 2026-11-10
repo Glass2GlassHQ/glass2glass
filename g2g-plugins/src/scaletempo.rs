@@ -396,7 +396,7 @@ impl AsyncElement for ScaleTempo {
             "Scaletempo",
             "Filter/Effect/Rate/Audio",
             "Stretches audio to the playback rate without changing its pitch",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

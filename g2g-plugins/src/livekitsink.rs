@@ -626,7 +626,7 @@ impl MultiInputElement for LiveKitSink {
             "LiveKit sink",
             "Sink/Network/WebRTC",
             "Publishes video (H.264/VP8/VP9/H.265/AV1, + Opus) into a LiveKit room (str0m + WebSocket signalling)",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

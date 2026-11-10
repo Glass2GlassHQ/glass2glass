@@ -618,7 +618,7 @@ impl AsyncElement for KvsWebRtcSink {
             "Kinesis Video Streams WebRTC sink",
             "Sink/Network/WebRTC",
             "Answers a Kinesis Video Streams signalling channel viewer as master and sends it video (H.264/VP8/VP9/H.265/AV1) or Opus over WebRTC (str0m: ICE/DTLS/SRTP)",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

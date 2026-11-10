@@ -247,7 +247,7 @@ impl AsyncElement for AudioEcho {
             "Audio echo",
             "Filter/Effect/Audio",
             "Adds an echo / delay to an audio stream",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

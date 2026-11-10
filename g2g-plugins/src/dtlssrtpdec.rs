@@ -396,7 +396,7 @@ impl MultiOutputElement for DtlsSrtpDec {
             "DTLS-SRTP decoder",
             "Filter/Network/SRTP",
             "Runs a DTLS-SRTP handshake and unprotects the RTP and RTCP it keys",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

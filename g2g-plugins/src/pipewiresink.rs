@@ -320,7 +320,7 @@ impl AsyncElement for PipeWireSink {
             "PipeWire audio sink",
             "Sink/Audio",
             "Plays interleaved PCM through a PipeWire node",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

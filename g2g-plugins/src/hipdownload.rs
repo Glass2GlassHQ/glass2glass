@@ -215,7 +215,7 @@ impl AsyncElement for HipDownload {
             "HIP download",
             "Filter/Converter/Video/GPU",
             "Copies a HIP frame to system memory, or hands it to CUDA on NVIDIA without a copy",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

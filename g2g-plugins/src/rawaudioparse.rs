@@ -206,7 +206,7 @@ impl AsyncElement for RawAudioParse {
             "Raw audio framer",
             "Codec/Parser/Audio",
             "Frames a headerless raw audio dump using its declared format, rate and channels",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

@@ -170,7 +170,7 @@ impl AsyncElement for Id3Demux {
             "ID3 tag demuxer",
             "Codec/Demuxer/Metadata",
             "Strips ID3v1 / ID3v2 tags from a stream and posts them on the bus",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

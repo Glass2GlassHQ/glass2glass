@@ -288,7 +288,7 @@ impl<F: StillImageFormat> AsyncElement for StillImageParse<F> {
             F::LONG_NAME,
             "Codec/Parser/Video",
             "Frames a still-image byte stream into whole images and refines their caps",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

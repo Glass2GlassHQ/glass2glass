@@ -313,7 +313,7 @@ impl AsyncElement for MispTimeInsert {
             "MISP time stamp inserter",
             "Codec/Parser/Video",
             "Writes a MISB ST 0604 MISP microsecond time SEI into each H.264 / H.265 access unit",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 
@@ -487,7 +487,7 @@ impl AsyncElement for MispTimeExtract {
             "MISP time stamp extractor",
             "Codec/Parser/Video",
             "Extracts the MISB ST 0604 MISP time from H.264 / H.265 SEI into timed UTF-8 text",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

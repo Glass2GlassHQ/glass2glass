@@ -418,7 +418,7 @@ impl AsyncElement for VtEncode {
             "VideoToolbox H.264 / H.265 encoder",
             "Codec/Encoder/Video",
             "Hardware H.264 / H.265 encode on macOS via VideoToolbox (NV12, or BGRA for H.265 with alpha -> Annex-B)",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

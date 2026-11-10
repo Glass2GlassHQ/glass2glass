@@ -398,7 +398,7 @@ impl MultiInputElement for WebRtcSessionSink {
             "WebRTC session sink",
             "Sink/Network/WebRTC",
             "Publishes a multi-track WHIP session (video simulcast layers + audio) via str0m",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

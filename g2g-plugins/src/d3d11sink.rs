@@ -308,7 +308,7 @@ impl AsyncElement for D3D11Sink {
             "Direct3D11 video sink",
             "Sink/Video",
             "Presents NV12 video in a window through a D3D11 video processor",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

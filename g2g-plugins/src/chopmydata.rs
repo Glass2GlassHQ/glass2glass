@@ -122,7 +122,7 @@ impl AsyncElement for ChopMyData {
             "ChopMyData",
             "Generic",
             "Re-chunks a byte stream into step-aligned random buffer sizes",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

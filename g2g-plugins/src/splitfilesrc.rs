@@ -289,7 +289,7 @@ impl SourceLoop for SplitFileSrc {
             "Split-file source",
             "Source/File",
             "Reads the files matching a pattern as one continuous byte stream",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

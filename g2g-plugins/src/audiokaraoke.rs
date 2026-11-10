@@ -253,7 +253,7 @@ impl AsyncElement for AudioKaraoke {
             "AudioKaraoke",
             "Filter/Effect/Audio",
             "Removes voice from sound",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

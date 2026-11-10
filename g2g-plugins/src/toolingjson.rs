@@ -50,7 +50,7 @@ pub fn element_json(d: &ElementDoc) -> Value {
     json!({
         "name": d.name,
         "long_name": d.long_name,
-        "klass": d.klass,
+        "classification": d.classification,
         "description": d.description,
         "author": d.author,
         "role": d.role,

@@ -404,7 +404,7 @@ impl AsyncElement for VideoCrop {
             "Video cropper",
             "Filter/Effect/Video",
             "Crops pixels from the edges of raw video",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

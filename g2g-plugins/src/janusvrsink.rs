@@ -459,7 +459,7 @@ impl AsyncElement for JanusVrSink {
             "Janus VideoRoom sink",
             "Sink/Network/WebRTC",
             "Publishes video (H.264/VP8/VP9/H.265/AV1) or Opus into a Janus VideoRoom over WebRTC (str0m: ICE/DTLS/SRTP)",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

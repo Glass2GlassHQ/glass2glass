@@ -112,7 +112,7 @@ impl AsyncElement for VorbisTag {
             "Vorbis tag writer",
             "Formatter/Metadata",
             "Rewrites the comment header packet of a Vorbis stream",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

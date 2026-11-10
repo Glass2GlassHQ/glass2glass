@@ -249,7 +249,7 @@ impl SourceLoop for AlsaSrc {
             "ALSA audio source",
             "Source/Audio",
             "Captures interleaved PCM from an ALSA device",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

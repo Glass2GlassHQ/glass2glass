@@ -2208,7 +2208,7 @@ impl AsyncElement for TextOverlay {
             "Text overlay",
             "Filter/Editor/Video",
             "Renders SRT / WebVTT subtitle cues over video by PTS",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

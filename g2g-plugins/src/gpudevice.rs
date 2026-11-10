@@ -80,7 +80,7 @@ fn gpu_device(
 ) -> Device {
     Device {
         display_name,
-        klass: KLASS.to_string(),
+        classification: KLASS.to_string(),
         persistent_id,
         caps: CapsSet::from_alternatives(vec![]),
         element,

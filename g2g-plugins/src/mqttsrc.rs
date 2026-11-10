@@ -208,7 +208,7 @@ impl SourceLoop for MqttSrc {
             "MQTT source",
             "Source/Network",
             "Emits each message on an MQTT topic filter as a text frame",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

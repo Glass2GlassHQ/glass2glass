@@ -406,7 +406,7 @@ impl AsyncElement for Fmp4Demux {
             "fMP4 / CMAF demuxer",
             "Codec/Demuxer",
             "Demuxes a fragmented-MP4 / CMAF byte stream",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

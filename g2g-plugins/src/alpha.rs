@@ -104,7 +104,7 @@ impl AsyncElement for Alpha {
             "Alpha filter",
             "Filter/Effect/Video",
             "Adds or keys an alpha channel on raw video",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
     type ProcessFuture<'a>

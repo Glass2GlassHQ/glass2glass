@@ -413,7 +413,7 @@ impl AsyncElement for AppSink {
             "Application sink",
             "Sink",
             "Delivers buffers to the application via callback or pull (g2g_appsink_*)",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

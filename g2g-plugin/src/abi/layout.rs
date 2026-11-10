@@ -402,7 +402,9 @@ const _: () = {
     const ELEMENT_METADATA: (usize, usize) = shape(ELEMENT_METADATA_FIELDS);
     assert!(size_of::<FfiElementMetadata>() == ELEMENT_METADATA.0);
     assert!(offset_of!(FfiElementMetadata, long_name) == field_offset(ELEMENT_METADATA_FIELDS, 0));
-    assert!(offset_of!(FfiElementMetadata, klass) == field_offset(ELEMENT_METADATA_FIELDS, 1));
+    assert!(
+        offset_of!(FfiElementMetadata, classification) == field_offset(ELEMENT_METADATA_FIELDS, 1)
+    );
     assert!(
         offset_of!(FfiElementMetadata, description) == field_offset(ELEMENT_METADATA_FIELDS, 2)
     );

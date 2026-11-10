@@ -248,7 +248,7 @@ impl AsyncElement for HipUpload {
             "HIP upload",
             "Filter/Converter/Video/GPU",
             "Copies a system frame into HIP device memory, imports a linear dma-buf on AMD, or wraps a CUDA frame on NVIDIA without a copy",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

@@ -60,7 +60,7 @@ impl AsyncElement for Vp8Parse {
             "VP8 parser",
             "Codec/Parser/Video",
             "Frames a VP8 stream and reads its keyframe geometry",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
     type ProcessFuture<'a>

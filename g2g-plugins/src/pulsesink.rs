@@ -264,7 +264,7 @@ impl AsyncElement for PulseSink {
             "PulseAudio audio sink",
             "Sink/Audio",
             "Plays interleaved PCM via PulseAudio",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

@@ -90,7 +90,7 @@ macro_rules! pixel_element {
                 Self: 'a;
 
             fn metadata(&self) -> ElementMetadata {
-                ElementMetadata::new($name, "Filter/Effect/Video", $desc, "g2g")
+                ElementMetadata::new($name, "Filter/Effect/Video", $desc, crate::AARON_BOXER)
             }
 
             fn input_domains(&self) -> g2g_core::memory::DomainSet {

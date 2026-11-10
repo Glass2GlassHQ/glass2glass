@@ -1718,7 +1718,7 @@ impl AsyncElement for NvDec {
             "NVDEC H.264 / HEVC / VP9 / AV1 decoder",
             "Codec/Decoder/Video/Hardware",
             "Zero-copy H.264 / HEVC / VP9 / AV1 decode to CUDA NV12 / P010 surfaces via the NVIDIA Video Codec SDK (NVCUVID)",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

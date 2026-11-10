@@ -97,7 +97,7 @@ unsafe fn describe(camera: &AVCaptureDevice) -> Device {
         } else {
             name
         },
-        klass: "Video/Source".to_string(),
+        classification: "Video/Source".to_string(),
         persistent_id: unique_id.clone(),
         caps: CapsSet::one(Caps::RawVideo {
             format: RawVideoFormat::Nv12,

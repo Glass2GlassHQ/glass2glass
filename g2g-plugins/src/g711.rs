@@ -68,13 +68,13 @@ impl G711Law for Mulaw {
         "Mu Law audio encoder",
         "Codec/Encoder/Audio",
         "Convert 16bit PCM to 8bit mu law",
-        "g2g",
+        crate::AARON_BOXER,
     );
     const DECODER_METADATA: ElementMetadata = ElementMetadata::new(
         "Mu Law audio decoder",
         "Codec/Decoder/Audio",
         "Convert 8bit mu law to 16bit PCM",
-        "g2g",
+        crate::AARON_BOXER,
     );
 }
 
@@ -84,13 +84,13 @@ impl G711Law for Alaw {
         "A Law audio encoder",
         "Codec/Encoder/Audio",
         "Convert 16bit PCM to 8bit A law",
-        "g2g",
+        crate::AARON_BOXER,
     );
     const DECODER_METADATA: ElementMetadata = ElementMetadata::new(
         "A Law audio decoder",
         "Codec/Decoder/Audio",
         "Convert 8bit A law to 16bit PCM",
-        "g2g",
+        crate::AARON_BOXER,
     );
 }
 

@@ -628,7 +628,7 @@ impl AsyncElement for VelloAnalyticsOverlay {
             "Vello analytics overlay",
             "Filter/Editing/Video",
             "Draws detection boxes, captions, segmentation masks and regions of interest on the GPU, output as a wgpu texture",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 
@@ -1265,7 +1265,7 @@ impl AsyncElement for VelloTextOverlay {
             "Vello text overlay",
             "Filter/Editor/Video",
             "Renders subtitle cues over video on the GPU, output as a wgpu texture",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

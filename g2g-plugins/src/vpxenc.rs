@@ -487,7 +487,7 @@ impl AsyncElement for VpxEnc {
             "VP8 / VP9 encoder",
             "Codec/Encoder/Video",
             "Encodes raw I420 video to VP8 or VP9 via libvpx",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

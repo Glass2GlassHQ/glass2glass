@@ -35,7 +35,7 @@ fn esc(s: &str) -> String {
         .replace('"', "&quot;")
 }
 
-/// A lowercased haystack for the client-side filter: name, long name, klass,
+/// A lowercased haystack for the client-side filter: name, long name, classification,
 /// description, and every property name, so any of them matches a query.
 fn search_key(d: &ElementDoc) -> String {
     let mut k = String::new();
@@ -43,7 +43,7 @@ fn search_key(d: &ElementDoc) -> String {
     k.push(' ');
     k.push_str(&d.long_name);
     k.push(' ');
-    k.push_str(&d.klass);
+    k.push_str(&d.classification);
     k.push(' ');
     k.push_str(&d.description);
     if d.experimental {
@@ -126,8 +126,12 @@ fn render_card(out: &mut String, d: &ElementDoc) {
             ""
         }
     );
-    if !d.klass.is_empty() {
-        let _ = write!(out, "<div class=\"klass\">{}</div>", esc(&d.klass));
+    if !d.classification.is_empty() {
+        let _ = write!(
+            out,
+            "<div class=\"classification\">{}</div>",
+            esc(&d.classification)
+        );
     }
     if !d.description.is_empty() {
         let _ = write!(out, "<p class=\"desc\">{}</p>", esc(&d.description));
@@ -216,7 +220,7 @@ header.top .wrap {{ display:flex; align-items:center; justify-content:space-betw
 .role-el  {{ background:rgba(34,211,238,0.15); color:var(--accent); }}
 .role-mux {{ background:rgba(167,139,250,0.15); color:var(--purple); }}
 .exp {{ background:rgba(251,191,36,0.15); color:var(--amber); }}
-.klass {{ margin-top:4px; font-family:'JetBrains Mono',monospace; font-size:0.72rem; color:var(--t3); }}
+.classification {{ margin-top:4px; font-family:'JetBrains Mono',monospace; font-size:0.72rem; color:var(--t3); }}
 .desc {{ margin-top:10px; font-size:0.85rem; color:var(--t2); }}
 .seg {{ margin-top:14px; }}
 .seg-l {{ display:block; font-size:0.63rem; font-weight:700; letter-spacing:0.07em; text-transform:uppercase; color:var(--t3); margin-bottom:6px; }}

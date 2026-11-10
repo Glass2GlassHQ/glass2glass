@@ -500,7 +500,7 @@ impl AsyncElement for VideoFlip {
             "Video flip / rotate",
             "Filter/Effect/Video",
             "Flips or rotates raw video (mirror, 90/180/270 degree rotations)",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

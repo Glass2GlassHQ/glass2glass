@@ -251,7 +251,7 @@ impl AsyncElement for AudioChebBand {
             "Band-pass and band-reject Chebyshev filter",
             "Filter/Effect/Audio",
             "Chebyshev band-pass and band-reject filter",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

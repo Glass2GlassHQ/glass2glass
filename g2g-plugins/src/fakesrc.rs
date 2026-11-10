@@ -156,7 +156,7 @@ impl SourceLoop for FakeSrc {
             "Fake source",
             "Source",
             "Produces buffers of a chosen size and fill, for testing",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

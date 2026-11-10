@@ -243,7 +243,7 @@ impl MultiInputElement for InterleaveMux {
             "Funnel N-to-1 forwarder",
             "Generic/Muxer",
             "Interleaves N input streams into one output by presentation timestamp; the structural fan-in for text/data streams (the gst `funnel` analog).",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

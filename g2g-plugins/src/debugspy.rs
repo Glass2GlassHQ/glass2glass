@@ -73,7 +73,7 @@ impl AsyncElement for DebugSpy {
             "DebugSpy",
             "Filter/Analyzer/Debug",
             "A spy element that can provide information on buffers going through it",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

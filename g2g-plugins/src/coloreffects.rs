@@ -191,7 +191,7 @@ impl AsyncElement for ColorEffects {
             "Color Look-up Table filter",
             "Filter/Effect/Video",
             "Maps colours of the video input through a preset lookup table",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

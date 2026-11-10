@@ -186,7 +186,7 @@ impl AsyncElement for MultiFileSink {
             "Multi-file sink",
             "Sink/File",
             "Writes buffers to a sequence of files",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

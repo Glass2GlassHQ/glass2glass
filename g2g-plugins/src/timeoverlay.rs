@@ -826,7 +826,7 @@ impl AsyncElement for TimeOverlay {
             "Time overlay",
             "Filter/Editor/Video",
             "Overlays the buffer time on video",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

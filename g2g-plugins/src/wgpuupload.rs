@@ -72,7 +72,7 @@ impl AsyncElement for WgpuUpload {
             "wgpu upload",
             "Filter/Converter/Video/GPU",
             "Copies a system-memory frame into a GPU-resident wgpu buffer",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

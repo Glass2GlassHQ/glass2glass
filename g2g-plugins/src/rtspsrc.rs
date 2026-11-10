@@ -27,7 +27,7 @@ impl RtspSrc {
                 "RTSP source",
                 "Source/Network",
                 "Receives an RTSP / RTP H.264 or H.265 stream via retina",
-                "g2g",
+                crate::AARON_BOXER,
             ),
         )
     }

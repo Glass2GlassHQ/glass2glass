@@ -193,7 +193,7 @@ unsafe fn describe_endpoint(endpoint: &IMMDevice, dataflow: EDataFlow) -> Option
         let id = id?;
 
         let name = friendly_name(endpoint).unwrap_or_else(|| id.clone());
-        let (element, klass) = if dataflow == eRender {
+        let (element, classification) = if dataflow == eRender {
             ("wasapisink", "Audio/Sink")
         } else {
             ("wasapisrc", "Audio/Source")
@@ -217,7 +217,7 @@ unsafe fn describe_endpoint(endpoint: &IMMDevice, dataflow: EDataFlow) -> Option
 
         Some(Device {
             display_name: name,
-            klass: klass.to_string(),
+            classification: classification.to_string(),
             persistent_id: id.clone(),
             caps,
             element,
@@ -458,7 +458,7 @@ mod tests {
     fn endpoint(id: &str) -> Device {
         Device {
             display_name: id.to_string(),
-            klass: "Audio/Source".to_string(),
+            classification: "Audio/Source".to_string(),
             persistent_id: id.to_string(),
             caps: CapsSet::from_alternatives(Vec::new()),
             element: "wasapisrc",

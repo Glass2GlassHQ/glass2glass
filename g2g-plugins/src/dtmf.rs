@@ -210,7 +210,7 @@ impl SourceLoop for DtmfSrc {
             "DTMF tone generator",
             "Source/Audio",
             "Generates DTMF tones",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 
@@ -450,7 +450,7 @@ impl AsyncElement for DtmfDetect {
             "DTMF detector",
             "Filter/Analyzer/Audio",
             "Detects DTMF tones",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

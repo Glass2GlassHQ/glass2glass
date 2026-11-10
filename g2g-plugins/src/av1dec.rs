@@ -388,7 +388,7 @@ macro_rules! av1_decoder {
             }
 
             fn metadata(&self) -> ElementMetadata {
-                ElementMetadata::new($long_name, "Codec/Decoder/Video", $description, "g2g")
+                ElementMetadata::new($long_name, "Codec/Decoder/Video", $description, crate::AARON_BOXER)
             }
 
             fn process<'a>(

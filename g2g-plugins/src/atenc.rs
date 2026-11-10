@@ -404,7 +404,7 @@ impl AsyncElement for AtEnc {
             "AudioToolbox AAC encoder",
             "Codec/Encoder/Audio",
             "Encodes PCM to ADTS-framed AAC-LC with macOS AudioToolbox",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

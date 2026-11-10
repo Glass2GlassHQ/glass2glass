@@ -147,7 +147,7 @@ impl<C: NalCodec> AsyncElement for SeiInsert<C> {
             "SEI user data inserter",
             "Codec/Video/Filter",
             "Writes each frame's Hdr10PlusMeta and SeiUserDataMeta into its access unit as SEI user data messages",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

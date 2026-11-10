@@ -1122,7 +1122,7 @@ impl AsyncElement for NvEnc {
             "NVENC H.264 / HEVC encoder",
             "Codec/Encoder/Video/Hardware",
             "Zero-copy H.264 / HEVC encode of CUDA NV12 / RGBA surfaces via the NVIDIA Video Codec SDK",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

@@ -82,7 +82,7 @@ impl AsyncElement for CapsFilter {
             "Caps filter",
             "Generic",
             "Restricts the caps that may negotiate across a link",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
     type ProcessFuture<'a>

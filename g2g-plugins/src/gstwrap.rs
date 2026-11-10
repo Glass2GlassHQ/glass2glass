@@ -645,7 +645,7 @@ impl AsyncElement for GstWrap {
             "GStreamer element host",
             "Bridge/Wrapper",
             "Hosts an unported GStreamer element (appsrc ! <element> ! appsink) inside a g2g graph",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

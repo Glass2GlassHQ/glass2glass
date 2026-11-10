@@ -796,7 +796,7 @@ impl AsyncElement for AacParse {
             "AAC parser",
             "Codec/Parser/Audio",
             "Parses an AAC ADTS or LOAS/LATM stream and refines caps",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

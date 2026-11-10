@@ -143,7 +143,7 @@ impl AsyncElement for ImageFreeze {
             "Still frame stream generator",
             "Filter/Video",
             "Repeats the first frame at a fixed framerate",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

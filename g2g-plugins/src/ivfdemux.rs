@@ -187,7 +187,7 @@ impl AsyncElement for IvfDemux {
             "IVF demuxer",
             "Codec/Demuxer",
             "Demuxes an IVF file into its VP8 / VP9 / AV1 frames",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
     type ProcessFuture<'a>

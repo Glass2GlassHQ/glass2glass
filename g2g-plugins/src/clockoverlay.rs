@@ -152,7 +152,7 @@ impl AsyncElement for ClockOverlay {
             "Clock overlay",
             "Filter/Editor/Video",
             "Overlays the wall-clock time on video",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

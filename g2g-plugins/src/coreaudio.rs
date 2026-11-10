@@ -587,7 +587,7 @@ impl AsyncElement for CoreAudioSink {
             "Core Audio sink",
             "Sink/Audio",
             "Renders PCM on a Core Audio output device (AudioQueue)",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 
@@ -922,7 +922,7 @@ impl SourceLoop for CoreAudioSrc {
             "Core Audio source",
             "Source/Audio",
             "Captures PCM from a Core Audio input device (AudioQueue)",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

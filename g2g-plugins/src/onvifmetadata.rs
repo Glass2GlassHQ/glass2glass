@@ -715,7 +715,7 @@ impl AsyncElement for OnvifMetadataParse {
             "ONVIF metadata parser",
             "Parser/Metadata",
             "Splits an ONVIF tt:MetadataStream document into per-frame analytics and event metadata",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 
@@ -1222,7 +1222,7 @@ impl MultiInputElement for OnvifMetadataCombiner {
             "ONVIF metadata combiner",
             "Filter/Video/Metadata",
             "Attaches an ONVIF analytics and event stream to the video frames it describes",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

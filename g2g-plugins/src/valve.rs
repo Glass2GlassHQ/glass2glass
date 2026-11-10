@@ -77,7 +77,7 @@ impl AsyncElement for Valve {
             "Valve",
             "Filter",
             "Drops buffers and events or lets them through",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

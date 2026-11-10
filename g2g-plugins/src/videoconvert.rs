@@ -522,7 +522,7 @@ impl AsyncElement for VideoConvert {
             "Video colorspace converter",
             "Filter/Converter/Video",
             "Converts between raw video pixel formats (RGBA, BGRA, NV12, I420)",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

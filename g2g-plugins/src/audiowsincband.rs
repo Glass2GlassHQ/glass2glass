@@ -208,7 +208,7 @@ impl AsyncElement for AudioWsincBand {
             "Windowed sinc band-pass / band-reject filter",
             "Filter/Effect/Audio",
             "Band-pass and band-reject windowed sinc filter",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

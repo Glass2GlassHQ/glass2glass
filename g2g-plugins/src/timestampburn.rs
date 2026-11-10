@@ -164,7 +164,7 @@ impl AsyncElement for TimestampBurn {
             "Monotonic timestamp burn-in",
             "Filter/Effect/Video",
             "Burns the current CLOCK_MONOTONIC time into the luma plane as a block strip",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

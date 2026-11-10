@@ -136,7 +136,7 @@ impl AsyncElement for St2038AncDemux {
             "SMPTE ST-2038 ancillary metadata demuxer",
             "Metadata/Video/Demuxer",
             "Splits individual ancillary metadata streams from an SMPTE ST-2038 stream",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 
@@ -344,7 +344,7 @@ impl MultiOutputElement for St2038AncDemuxN {
             "SMPTE ST-2038 ancillary metadata demuxer",
             "Metadata/Video/Demuxer",
             "Splits individual ancillary metadata streams from an SMPTE ST-2038 stream",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

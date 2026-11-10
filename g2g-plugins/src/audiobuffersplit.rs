@@ -606,7 +606,7 @@ impl AsyncElement for AudioBufferSplit {
             "Audio Buffer Split",
             "Audio/Filter",
             "Splits raw audio buffers into equal sized chunks",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

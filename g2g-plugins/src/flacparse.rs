@@ -546,7 +546,7 @@ impl AsyncElement for FlacParse {
             "FLAC parser",
             "Codec/Parser/Audio",
             "Splits a native FLAC stream into frames and refines caps",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

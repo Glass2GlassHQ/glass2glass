@@ -428,7 +428,7 @@ impl AsyncElement for Deinterleave {
             "Audio channel picker",
             "Filter/Converter/Audio",
             "Emits one channel of an N-channel PCM stream as mono",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

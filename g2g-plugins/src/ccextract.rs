@@ -255,7 +255,7 @@ impl AsyncElement for CcExtract {
             "Closed-caption extractor",
             "Codec/Parser/ClosedCaption",
             "Extracts CEA-608 / CEA-708 captions from H.264 / H.265 SEI, MPEG-2 user data, or a raw-caption track into timed UTF-8 text cues",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

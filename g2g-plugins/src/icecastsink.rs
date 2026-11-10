@@ -469,7 +469,7 @@ impl AsyncElement for IcecastSink {
             "Icecast Sink",
             "Sink/Network",
             "Sends an audio stream to an Icecast server",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

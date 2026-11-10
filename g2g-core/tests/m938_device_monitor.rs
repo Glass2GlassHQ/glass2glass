@@ -34,7 +34,7 @@ fn video_caps(width: u32) -> Caps {
 fn camera(id: &str, name: &str) -> Device {
     Device {
         display_name: name.into(),
-        klass: "Video/Source".into(),
+        classification: "Video/Source".into(),
         persistent_id: id.into(),
         caps: CapsSet::one(video_caps(640)),
         element: "mockcamsrc",
@@ -47,7 +47,7 @@ fn camera(id: &str, name: &str) -> Device {
 fn speaker(id: &str) -> Device {
     Device {
         display_name: "Mock Speaker".into(),
-        klass: "Audio/Sink".into(),
+        classification: "Audio/Sink".into(),
         persistent_id: id.into(),
         caps: CapsSet::from_alternatives(vec![]),
         element: "mockspeakersink",

@@ -457,7 +457,7 @@ impl AsyncElement for RemoveSilence {
             "RemoveSilence",
             "Filter/Effect/Audio",
             "Removes all the silence periods from the audio stream",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

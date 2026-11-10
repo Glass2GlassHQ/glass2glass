@@ -843,9 +843,9 @@ mod registry_launch {
                 );
             }
             assert!(
-                element.metadata().klass.contains("Video"),
-                "`{name}` is filed under {}, not a video klass",
-                element.metadata().klass
+                element.metadata().classification.contains("Video"),
+                "`{name}` is filed under {}, not a video classification",
+                element.metadata().classification
             );
         }
     }

@@ -228,7 +228,7 @@ impl AsyncElement for AuParse {
             "AU parser",
             "Codec/Demuxer/Audio",
             "Reads the PCM stream out of a Sun / NeXT AU byte stream",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 
@@ -359,7 +359,7 @@ impl AsyncElement for AuMux {
             "AU encoder",
             "Codec/Muxer/Audio",
             "Wraps raw PCM in a Sun / NeXT AU byte stream",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 }

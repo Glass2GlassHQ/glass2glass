@@ -136,7 +136,7 @@ impl AsyncElement for Gamma {
             "Gamma",
             "Filter/Effect/Video",
             "Performs gamma correction",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

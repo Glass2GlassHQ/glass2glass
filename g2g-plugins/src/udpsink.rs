@@ -697,7 +697,7 @@ impl AsyncElement for UdpSink {
             "UDP sink",
             "Sink/Network",
             "Sends RTP H.264 or Opus over UDP honoring NACK retransmit, or a byte stream as raw datagrams",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

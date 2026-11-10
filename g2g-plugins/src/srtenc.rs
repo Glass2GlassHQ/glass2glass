@@ -119,7 +119,7 @@ impl AsyncElement for SrtEnc {
             "SubRip subtitle encoder",
             "Codec/Encoder/Subtitle",
             "Writes timed UTF-8 cues as a SubRip (.srt) document",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

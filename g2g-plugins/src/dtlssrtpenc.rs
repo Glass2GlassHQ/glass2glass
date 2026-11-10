@@ -430,7 +430,7 @@ impl MultiInputElement for DtlsSrtpEnc {
             "DTLS-SRTP protector",
             "Filter/Network/SRTP",
             "Runs a DTLS-SRTP handshake and protects the RTP and RTCP it keys",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

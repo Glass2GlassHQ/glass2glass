@@ -952,7 +952,7 @@ impl SourceLoop for DashSrc {
             "DASH source",
             "Source/Network",
             "Reads a DASH MPD and streams its segments",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

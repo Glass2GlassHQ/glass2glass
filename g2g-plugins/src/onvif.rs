@@ -251,7 +251,7 @@ impl SourceLoop for OnvifSrc {
             "ONVIF source",
             "Source/Network",
             "Discovers an ONVIF camera's RTSP stream and receives H.264 via RtspSrc",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

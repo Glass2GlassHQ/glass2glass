@@ -160,7 +160,7 @@ impl AsyncElement for ZebraStripe {
             "Zebra stripe overlay",
             "Filter/Analyzer/Video",
             "Overlays zebra striping on overexposed areas of video",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

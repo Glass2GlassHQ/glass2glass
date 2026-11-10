@@ -222,7 +222,7 @@ impl AsyncElement for PngEnc {
             "PNG encoder",
             "Codec/Encoder/Image",
             "Encodes raw RGBA / RGB video to PNG via the pure-Rust png crate",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

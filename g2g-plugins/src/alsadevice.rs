@@ -123,7 +123,7 @@ fn hint_devices(
 /// One device with everything the hint alone decides; caps and detail come
 /// from the PCM probe.
 fn device_skeleton(name: &str, desc: Option<&str>, dir: Direction) -> Device {
-    let (element, klass) = match dir {
+    let (element, classification) = match dir {
         Direction::Capture => ("alsasrc", "Audio/Source"),
         Direction::Playback => ("alsasink", "Audio/Sink"),
     };
@@ -135,7 +135,7 @@ fn device_skeleton(name: &str, desc: Option<&str>, dir: Direction) -> Device {
         .unwrap_or(name);
     Device {
         display_name: display_name.to_string(),
-        klass: klass.to_string(),
+        classification: classification.to_string(),
         // hint names are built from the card name, so they survive a replug;
         // the direction qualifies it because one hint yields both halves.
         persistent_id: format!("{}:{name}", dir_word(dir)),
@@ -242,7 +242,7 @@ mod tests {
             Direction::Capture,
         );
         assert_eq!(capture.element, "alsasrc");
-        assert_eq!(capture.klass, "Audio/Source");
+        assert_eq!(capture.classification, "Audio/Source");
         assert!(capture.has_classes("Source"));
         assert_eq!(capture.display_name, "HDA Intel PCH, ALC257 Analog");
         assert_eq!(capture.provider, "alsa");
@@ -252,7 +252,7 @@ mod tests {
 
         let playback = device_skeleton("hw:0,0", None, Direction::Playback);
         assert_eq!(playback.element, "alsasink");
-        assert_eq!(playback.klass, "Audio/Sink");
+        assert_eq!(playback.classification, "Audio/Sink");
         // no desc: the hint name is the label.
         assert_eq!(playback.display_name, "hw:0,0");
         assert_eq!(playback.launch_fragment(), "alsasink device=hw:0,0");

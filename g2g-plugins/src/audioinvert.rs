@@ -164,7 +164,7 @@ impl AsyncElement for AudioInvert {
             "Audio inversion",
             "Filter/Effect/Audio",
             "Swaps upper and lower half of audio samples",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

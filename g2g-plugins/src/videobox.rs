@@ -303,7 +303,7 @@ impl AsyncElement for VideoBox {
             "Video box",
             "Filter/Effect/Video",
             "Crops or borders raw video (positive edge crops, negative adds a border)",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

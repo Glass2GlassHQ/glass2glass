@@ -56,10 +56,10 @@ fn inspect_dumps_properties_and_templates() {
         "has the metadata header:\n{src}"
     );
     assert!(
-        src.contains("Long-name   Video test source"),
+        src.contains("Long-name      Video test source"),
         "shows the long name:\n{src}"
     );
-    assert!(src.contains("Role        source"));
+    assert!(src.contains("Role           source"));
     assert!(
         src.contains("pattern"),
         "lists the pattern property:\n{src}"
@@ -79,9 +79,9 @@ fn inspect_dumps_properties_and_templates() {
     );
 
     let flip = reg.inspect("videoflip").expect("element registered");
-    assert!(flip.contains("Role        element"));
+    assert!(flip.contains("Role           element"));
     assert!(
-        flip.contains("Klass       Filter/Effect/Video"),
+        flip.contains("Classification Filter/Effect/Video"),
         "shows the classification:\n{flip}"
     );
     assert!(
@@ -111,7 +111,7 @@ fn inspect_resolves_aliases() {
         "names the resolved element and what it skipped:\n{flip}"
     );
     assert!(
-        flip.contains("Klass       Filter/Effect/Video"),
+        flip.contains("Classification Filter/Effect/Video"),
         "dumps the resolved element:\n{flip}"
     );
     assert!(
@@ -138,10 +138,13 @@ fn inspect_muxer_carries_metadata_and_properties() {
     }));
 
     let f = reg.inspect("funnel").expect("muxer registered");
-    assert!(f.contains("Role        muxer (fan-in)"), "muxer role:\n{f}");
+    assert!(
+        f.contains("Role           muxer (fan-in)"),
+        "muxer role:\n{f}"
+    );
     // Metadata is only present if inspect actually built an instance to read it.
     assert!(
-        f.contains("Long-name   Funnel"),
+        f.contains("Long-name      Funnel"),
         "carries metadata from a built instance:\n{f}"
     );
     assert!(

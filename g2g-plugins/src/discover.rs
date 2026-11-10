@@ -190,7 +190,7 @@ impl AsyncElement for ProbeSink {
             "Discovery probe sink",
             "Sink",
             "Records negotiated caps and stops the probe at the first frame",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

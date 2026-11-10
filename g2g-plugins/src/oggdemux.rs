@@ -1133,7 +1133,7 @@ impl AsyncElement for OggDemux {
             "Ogg demuxer",
             "Codec/Demuxer",
             "Demuxes an Ogg bitstream into its logical streams",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
     type ProcessFuture<'a>

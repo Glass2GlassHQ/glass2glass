@@ -3,7 +3,7 @@
 //! one-shot run, and managed live-pipeline tools backed by the same internals as
 //! `g2g-inspect` / `g2g-launch`.
 //!
-//!   list_elements             -> the registry (name, role, klass per element)
+//!   list_elements             -> the registry (name, role, classification per element)
 //!   inspect  {element}        -> one element's full introspection JSON
 //!   validate {pipeline}       -> parse + negotiate a launch line, no run
 //!   launch   {pipeline, secs} -> run it for up to `secs` and report RunStats
@@ -726,7 +726,7 @@ fn tool_specs() -> Value {
     let mut tools = json!([
         {
             "name": "list_elements",
-            "description": "List every registered g2g element (name, role, klass).",
+            "description": "List every registered g2g element (name, role, classification).",
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
@@ -1095,7 +1095,7 @@ impl McpServer {
                 .as_array()
                 .map(|els| {
                     els.iter()
-                        .map(|e| json!({ "name": e["name"], "role": e["role"], "klass": e["klass"] }))
+                        .map(|e| json!({ "name": e["name"], "role": e["role"], "classification": e["classification"] }))
                         .collect()
                 })
                 .unwrap_or_default();

@@ -488,7 +488,7 @@ mod element {
                 "Cursor-on-Target sink",
                 "Sink/Network",
                 "Sends KLV telemetry as CoT events to a TAK network",
-                "g2g",
+                crate::AARON_BOXER,
             )
         }
 

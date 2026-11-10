@@ -236,7 +236,7 @@ impl AsyncElement for MetaReplay {
             "Metadata replay",
             "Filter/Analytics",
             "Reattaches the detections and blobs a metasink wrote at the same timestamps",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

@@ -371,7 +371,7 @@ impl AsyncElement for WhisperTranscribe {
             "Whisper transcription",
             "Filter/Audio/Text",
             "Transcribes 16 kHz mono speech into timed text with whisper.cpp",
-            "g2g",
+            "Aaron Boxer <boxerab@protonmail.com>",
         )
     }
 

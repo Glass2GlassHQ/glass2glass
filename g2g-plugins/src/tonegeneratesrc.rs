@@ -159,7 +159,7 @@ impl SourceLoop for ToneGenerateSrc {
             "Audio tone source",
             "Source/Audio",
             "Generates a sine tone at freq / volume",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

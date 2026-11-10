@@ -1,11 +1,11 @@
 {
   "elements": [
     {
-      "author": "g2g",
-      "caps": "video/x-raw,format=RGBA,width=[1,16384],height=[1,16384],framerate=[0/1,1000/1]\nvideo/x-raw,format=BGRA,width=[1,16384],height=[1,16384],framerate=[0/1,1000/1]\nvideo/x-raw,format=RGB,width=[1,16384],height=[1,16384],framerate=[0/1,1000/1]\nvideo/x-raw,format=NV12,width=[1,16384],height=[1,16384],framerate=[0/1,1000/1]\nvideo/x-raw,format=I420,width=[1,16384],height=[1,16384],framerate=[0/1,1000/1]\nvideo/x-raw,format=I420_10LE,width=[1,16384],height=[1,16384],framerate=[0/1,1000/1]\nvideo/x-raw,format=I420_12LE,width=[1,16384],height=[1,16384],framerate=[0/1,1000/1]\nvideo/x-raw,format=Y42B,width=[1,16384],height=[1,16384],framerate=[0/1,1000/1]\nvideo/x-raw,format=I422_10LE,width=[1,16384],height=[1,16384],framerate=[0/1,1000/1]\nvideo/x-raw,format=I422_12LE,width=[1,16384],height=[1,16384],framerate=[0/1,1000/1]\nvideo/x-raw,format=Y444,width=[1,16384],height=[1,16384],framerate=[0/1,1000/1]\nvideo/x-raw,format=Y444_10LE,width=[1,16384],height=[1,16384],framerate=[0/1,1000/1]\nvideo/x-raw,format=Y444_12LE,width=[1,16384],height=[1,16384],framerate=[0/1,1000/1]\nvideo/x-raw,format=YUY2,width=[1,16384],height=[1,16384],framerate=[0/1,1000/1]\nvideo/x-raw,format=P010_10LE,width=[1,16384],height=[1,16384],framerate=[0/1,1000/1]\nvideo/x-raw,format=A420,width=[1,16384],height=[1,16384],framerate=[0/1,1000/1]\nvideo/x-raw,format=UYVY,width=[1,16384],height=[1,16384],framerate=[0/1,1000/1]\nvideo/x-raw,format=A444_12LE,width=[1,16384],height=[1,16384],framerate=[0/1,1000/1]\nvideo/x-raw,format=v210,width=[1,16384],height=[1,16384],framerate=[0/1,1000/1]\nvideo/x-raw,format=r210,width=[1,16384],height=[1,16384],framerate=[0/1,1000/1]\nvideo/x-raw,format=GBR_10LE,width=[1,16384],height=[1,16384],framerate=[0/1,1000/1]\nvideo/x-raw,format=GRAY8,width=[1,16384],height=[1,16384],framerate=[0/1,1000/1]\nvideo/x-raw,format=BGR,width=[1,16384],height=[1,16384],framerate=[0/1,1000/1]\nvideo/x-raw,format=BGRx,width=[1,16384],height=[1,16384],framerate=[0/1,1000/1]\nvideo/x-raw,format=ARGB,width=[1,16384],height=[1,16384],framerate=[0/1,1000/1]",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
+      "caps": "video/x-raw,format=RGBA,width=[1,16384],height=[1,16384],framerate=[0/1,1000/1],pixel-aspect-ratio=1/1\nvideo/x-raw,format=BGRA,width=[1,16384],height=[1,16384],framerate=[0/1,1000/1],pixel-aspect-ratio=1/1\nvideo/x-raw,format=RGB,width=[1,16384],height=[1,16384],framerate=[0/1,1000/1],pixel-aspect-ratio=1/1\nvideo/x-raw,format=NV12,width=[1,16384],height=[1,16384],framerate=[0/1,1000/1],pixel-aspect-ratio=1/1\nvideo/x-raw,format=I420,width=[1,16384],height=[1,16384],framerate=[0/1,1000/1],pixel-aspect-ratio=1/1\nvideo/x-raw,format=I420_10LE,width=[1,16384],height=[1,16384],framerate=[0/1,1000/1],pixel-aspect-ratio=1/1\nvideo/x-raw,format=I420_12LE,width=[1,16384],height=[1,16384],framerate=[0/1,1000/1],pixel-aspect-ratio=1/1\nvideo/x-raw,format=Y42B,width=[1,16384],height=[1,16384],framerate=[0/1,1000/1],pixel-aspect-ratio=1/1\nvideo/x-raw,format=I422_10LE,width=[1,16384],height=[1,16384],framerate=[0/1,1000/1],pixel-aspect-ratio=1/1\nvideo/x-raw,format=I422_12LE,width=[1,16384],height=[1,16384],framerate=[0/1,1000/1],pixel-aspect-ratio=1/1\nvideo/x-raw,format=Y444,width=[1,16384],height=[1,16384],framerate=[0/1,1000/1],pixel-aspect-ratio=1/1\nvideo/x-raw,format=Y444_10LE,width=[1,16384],height=[1,16384],framerate=[0/1,1000/1],pixel-aspect-ratio=1/1\nvideo/x-raw,format=Y444_12LE,width=[1,16384],height=[1,16384],framerate=[0/1,1000/1],pixel-aspect-ratio=1/1\nvideo/x-raw,format=YUY2,width=[1,16384],height=[1,16384],framerate=[0/1,1000/1],pixel-aspect-ratio=1/1\nvideo/x-raw,format=P010_10LE,width=[1,16384],height=[1,16384],framerate=[0/1,1000/1],pixel-aspect-ratio=1/1\nvideo/x-raw,format=A420,width=[1,16384],height=[1,16384],framerate=[0/1,1000/1],pixel-aspect-ratio=1/1\nvideo/x-raw,format=UYVY,width=[1,16384],height=[1,16384],framerate=[0/1,1000/1],pixel-aspect-ratio=1/1\nvideo/x-raw,format=A444_12LE,width=[1,16384],height=[1,16384],framerate=[0/1,1000/1],pixel-aspect-ratio=1/1\nvideo/x-raw,format=v210,width=[1,16384],height=[1,16384],framerate=[0/1,1000/1],pixel-aspect-ratio=1/1\nvideo/x-raw,format=r210,width=[1,16384],height=[1,16384],framerate=[0/1,1000/1],pixel-aspect-ratio=1/1\nvideo/x-raw,format=GBR_10LE,width=[1,16384],height=[1,16384],framerate=[0/1,1000/1],pixel-aspect-ratio=1/1\nvideo/x-raw,format=GRAY8,width=[1,16384],height=[1,16384],framerate=[0/1,1000/1],pixel-aspect-ratio=1/1\nvideo/x-raw,format=BGR,width=[1,16384],height=[1,16384],framerate=[0/1,1000/1],pixel-aspect-ratio=1/1\nvideo/x-raw,format=BGRx,width=[1,16384],height=[1,16384],framerate=[0/1,1000/1],pixel-aspect-ratio=1/1\nvideo/x-raw,format=ARGB,width=[1,16384],height=[1,16384],framerate=[0/1,1000/1],pixel-aspect-ratio=1/1",
+      "classification": "Source/Video",
       "description": "Generates a synthetic test pattern (SMPTE bars, snow, moving bar, ball, ...)",
       "experimental": false,
-      "klass": "Source/Video",
       "long_name": "Video test source",
       "name": "videotestsrc",
       "pads": [],
@@ -73,11 +73,11 @@
       "role": "source"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": "audio/x-raw,format=S16LE,channels=2,rate=48000",
+      "classification": "Source/Audio",
       "description": "Generates a synthetic audio test tone",
       "experimental": false,
-      "klass": "Source/Audio",
       "long_name": "Audio test source",
       "name": "audiotestsrc",
       "pads": [],
@@ -136,11 +136,11 @@
       "role": "source"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": "audio/x-raw,format=S16LE,channels=2,rate=44100",
+      "classification": "Source/Audio",
       "description": "Generates a sine tone at freq / volume",
       "experimental": false,
-      "klass": "Source/Audio",
       "long_name": "Audio tone source",
       "name": "tonegeneratesrc",
       "pads": [],
@@ -198,11 +198,11 @@
       "role": "source"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": "audio/x-raw,format=S16LE,channels=1,rate=8000",
+      "classification": "Source/Audio",
       "description": "Generates DTMF tones",
       "experimental": false,
-      "klass": "Source/Audio",
       "long_name": "DTMF tone generator",
       "name": "dtmfsrc",
       "pads": [],
@@ -277,11 +277,11 @@
       "role": "source"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": "video/mpegts",
+      "classification": "Source/File",
       "description": "Reads a local file as a byte stream",
       "experimental": false,
-      "klass": "Source/File",
       "long_name": "File source",
       "name": "filesrc",
       "pads": [],
@@ -336,11 +336,11 @@
       "role": "source"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": "video/mpegts",
+      "classification": "Source",
       "description": "Produces buffers of a chosen size and fill, for testing",
       "experimental": false,
-      "klass": "Source",
       "long_name": "Fake source",
       "name": "fakesrc",
       "pads": [],
@@ -385,11 +385,11 @@
       "role": "source"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": "video/mpegts",
+      "classification": "Source/File",
       "description": "Reads from an open file descriptor as a byte stream",
       "experimental": false,
-      "klass": "Source/File",
       "long_name": "Filedescriptor source",
       "name": "fdsrc",
       "pads": [],
@@ -437,11 +437,11 @@
       "role": "source"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": "application/x-subtitle",
+      "classification": "Source/File/Subtitle",
       "description": "Reads a SubRip / WebVTT / SSA / TTML file as a Text stream",
       "experimental": false,
-      "klass": "Source/File/Subtitle",
       "long_name": "Subtitle file source",
       "name": "subtitlesrc",
       "pads": [],
@@ -470,11 +470,11 @@
       "role": "source"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": "subpicture/x-dvd",
+      "classification": "Source/File/Subtitle",
       "description": "Reads a VobSub .idx / .sub pair as a DVD subpicture stream",
       "experimental": false,
-      "klass": "Source/File/Subtitle",
       "long_name": "VobSub sidecar source",
       "name": "vobsubsrc",
       "pads": [],
@@ -513,11 +513,11 @@
       "role": "source"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": "image/jpeg",
+      "classification": "Source/File",
       "description": "Reads a sequence of files",
       "experimental": false,
-      "klass": "Source/File",
       "long_name": "Multi-file source",
       "name": "multifilesrc",
       "pads": [],
@@ -576,11 +576,11 @@
       "role": "source"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": "image/jpeg,framerate=30/1",
+      "classification": "Source/File",
       "description": "Reads a sequence of files",
       "experimental": false,
-      "klass": "Source/File",
       "long_name": "Multi-file source",
       "name": "imagesequencesrc",
       "pads": [],
@@ -639,11 +639,11 @@
       "role": "source"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": "video/mpegts",
+      "classification": "Source/File",
       "description": "Reads the files matching a pattern as one continuous byte stream",
       "experimental": false,
-      "klass": "Source/File",
       "long_name": "Split-file source",
       "name": "splitfilesrc",
       "pads": [],
@@ -682,11 +682,11 @@
       "role": "source"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": "video/x-h264,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]",
+      "classification": "Source/File",
       "description": "Plays the files a splitmuxsink wrote as one continuous stream",
       "experimental": false,
-      "klass": "Source/File",
       "long_name": "Split-muxer source",
       "name": "splitmuxsrc",
       "pads": [],
@@ -705,11 +705,11 @@
       "role": "source"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": "application/octet-stream",
+      "classification": "Source/Network",
       "description": "Plays the payload carried inside a data: URI",
       "experimental": false,
-      "klass": "Source/Network",
       "long_name": "data: URI source",
       "name": "dataurisrc",
       "pads": [],
@@ -738,11 +738,11 @@
       "role": "source"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": "video/x-raw,format=RGBA,width=320,height=240,framerate=30/1",
+      "classification": "Source",
       "description": "Emits buffers the application pushes in via register_appsrc / g2g_appsrc_push",
       "experimental": false,
-      "klass": "Source",
       "long_name": "Application source",
       "name": "appsrc",
       "pads": [],
@@ -781,11 +781,11 @@
       "role": "source"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": "application/octet-stream",
+      "classification": "Source",
       "description": "Emits the stream of the intersink with the same producer-name",
       "experimental": false,
-      "klass": "Source",
       "long_name": "Inter-graph source",
       "name": "intersrc",
       "pads": [],
@@ -814,11 +814,11 @@
       "role": "source"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": "video/mpegts",
+      "classification": "Source/File",
       "description": "Replays a recorded byte stream at its captured pacing",
       "experimental": false,
-      "klass": "Source/File",
       "long_name": "Replay source",
       "name": "replaysrc",
       "pads": [],
@@ -847,11 +847,11 @@
       "role": "source"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Filter/Converter/Video",
       "description": "Converts between raw video pixel formats (RGBA, BGRA, NV12, I420)",
       "experimental": false,
-      "klass": "Filter/Converter/Video",
       "long_name": "Video colorspace converter",
       "name": "videoconvert",
       "pads": [
@@ -873,11 +873,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Filter/Converter/Video",
       "description": "Converts the matrix, range, transfer and primaries of raw video, keeping the pixel format",
       "experimental": false,
-      "klass": "Filter/Converter/Video",
       "long_name": "Video colorimetry converter",
       "name": "colorspace",
       "pads": [
@@ -912,11 +912,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Filter/Converter/Tensor",
       "description": "Quantizes/dequantizes f32 <-> int8/uint8, narrows/widens f32 <-> f16, transposes NCHW <-> NHWC",
       "experimental": false,
-      "klass": "Filter/Converter/Tensor",
       "long_name": "Tensor dtype / layout converter",
       "name": "tensorconvert",
       "pads": [],
@@ -965,11 +965,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Filter/Converter/Video",
       "description": "Resizes raw video frames",
       "experimental": false,
-      "klass": "Filter/Converter/Video",
       "long_name": "Video scaler",
       "name": "videoscale",
       "pads": [
@@ -1001,11 +1001,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Filter/Converter/Video/Scaler",
       "description": "Converts the pixel format and resizes raw video frames in one element",
       "experimental": false,
-      "klass": "Filter/Converter/Video/Scaler",
       "long_name": "Video converter and scaler",
       "name": "videoconvertscale",
       "pads": [
@@ -1047,11 +1047,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Codec/Muxer/Audio",
       "description": "Wraps raw PCM in a RIFF/WAVE byte stream",
       "experimental": false,
-      "klass": "Codec/Muxer/Audio",
       "long_name": "WAV encoder",
       "name": "wavenc",
       "pads": [
@@ -1073,11 +1073,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Codec/Demuxer/Audio",
       "description": "Reads the PCM stream out of a RIFF/WAVE byte stream",
       "experimental": false,
-      "klass": "Codec/Demuxer/Audio",
       "long_name": "WAV parser",
       "name": "wavparse",
       "pads": [
@@ -1099,11 +1099,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Codec/Muxer/Audio",
       "description": "Wraps raw PCM in an AIFF / AIFC byte stream",
       "experimental": false,
-      "klass": "Codec/Muxer/Audio",
       "long_name": "AIFF encoder",
       "name": "aiffmux",
       "pads": [
@@ -1114,11 +1114,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Codec/Demuxer/Audio",
       "description": "Reads the PCM stream out of an AIFF / AIFC byte stream",
       "experimental": false,
-      "klass": "Codec/Demuxer/Audio",
       "long_name": "AIFF parser",
       "name": "aiffparse",
       "pads": [
@@ -1129,11 +1129,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Codec/Muxer/Audio",
       "description": "Wraps raw PCM in a Sun / NeXT AU byte stream",
       "experimental": false,
-      "klass": "Codec/Muxer/Audio",
       "long_name": "AU encoder",
       "name": "avmux_au",
       "pads": [
@@ -1144,11 +1144,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Codec/Demuxer/Audio",
       "description": "Reads the PCM stream out of a Sun / NeXT AU byte stream",
       "experimental": false,
-      "klass": "Codec/Demuxer/Audio",
       "long_name": "AU parser",
       "name": "auparse",
       "pads": [
@@ -1159,11 +1159,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Codec/Muxer/Video",
       "description": "Wraps raw planar YUV frames in a YUV4MPEG2 byte stream",
       "experimental": false,
-      "klass": "Codec/Muxer/Video",
       "long_name": "YUV4MPEG2 encoder",
       "name": "y4menc",
       "pads": [
@@ -1174,11 +1174,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Codec/Demuxer/Video",
       "description": "Reads the raw planar YUV frames out of a YUV4MPEG2 byte stream",
       "experimental": false,
-      "klass": "Codec/Demuxer/Video",
       "long_name": "YUV4MPEG2 decoder",
       "name": "y4mdec",
       "pads": [
@@ -1189,11 +1189,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Codec/Demuxer",
       "description": "Splits a multipart/x-mixed-replace stream into its JPEG parts",
       "experimental": false,
-      "klass": "Codec/Demuxer",
       "long_name": "Multipart demuxer",
       "name": "multipartdemux",
       "pads": [
@@ -1215,11 +1215,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Codec/Muxer",
       "description": "Wraps JPEG frames in a multipart/x-mixed-replace stream",
       "experimental": false,
-      "klass": "Codec/Muxer",
       "long_name": "Multipart muxer",
       "name": "multipartmux",
       "pads": [
@@ -1241,11 +1241,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Filter/Effect/Video",
       "description": "Crops pixels from the edges of raw video",
       "experimental": false,
-      "klass": "Filter/Effect/Video",
       "long_name": "Video cropper",
       "name": "videocrop",
       "pads": [
@@ -1297,11 +1297,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Filter/Effect/Video",
       "description": "Flips or rotates raw video (mirror, 90/180/270 degree rotations)",
       "experimental": false,
-      "klass": "Filter/Effect/Video",
       "long_name": "Video flip / rotate",
       "name": "videoflip",
       "pads": [
@@ -1323,11 +1323,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Filter/Effect/Video",
       "description": "Adjusts brightness, contrast, hue and saturation",
       "experimental": false,
-      "klass": "Filter/Effect/Video",
       "long_name": "Video balance",
       "name": "videobalance",
       "pads": [
@@ -1379,11 +1379,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Filter/Effect/Video",
       "description": "Crops video to a specified aspect ratio",
       "experimental": false,
-      "klass": "Filter/Effect/Video",
       "long_name": "Aspect ratio crop",
       "name": "aspectratiocrop",
       "pads": [
@@ -1405,11 +1405,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Filter/Effect/Video",
       "description": "Removes all colour information except for one colour",
       "experimental": false,
-      "klass": "Filter/Effect/Video",
       "long_name": "Chroma hold filter",
       "name": "chromahold",
       "pads": [
@@ -1473,11 +1473,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Filter/Effect/Video",
       "description": "Maps colours of the video input through a preset lookup table",
       "experimental": false,
-      "klass": "Filter/Effect/Video",
       "long_name": "Color Look-up Table filter",
       "name": "coloreffects",
       "pads": [
@@ -1499,11 +1499,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Filter/Effect/Video",
       "description": "Performs a gaussian blur or sharpen on video",
       "experimental": false,
-      "klass": "Filter/Effect/Video",
       "long_name": "Gaussian blur",
       "name": "gaussianblur",
       "pads": [
@@ -1528,11 +1528,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Filter/Effect/Video",
       "description": "Smooths raw video without crossing edges",
       "experimental": false,
-      "klass": "Filter/Effect/Video",
       "long_name": "Smooth effect",
       "name": "smooth",
       "pads": [
@@ -1584,11 +1584,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Filter/Analyzer/Video",
       "description": "Marks the pixels that changed between adjacent video frames",
       "experimental": false,
-      "klass": "Filter/Analyzer/Video",
       "long_name": "Video difference",
       "name": "videodiff",
       "pads": [
@@ -1613,11 +1613,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Filter/Effect/Video",
       "description": "Applies a median filter to raw video",
       "experimental": false,
-      "klass": "Filter/Effect/Video",
       "long_name": "Median effect",
       "name": "videomedian",
       "pads": [
@@ -1649,11 +1649,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Filter/Analyzer/Video",
       "description": "Overlays zebra striping on overexposed areas of video",
       "experimental": false,
-      "klass": "Filter/Analyzer/Video",
       "long_name": "Zebra stripe overlay",
       "name": "zebrastripe",
       "pads": [
@@ -1678,11 +1678,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Filter/Analyzer/Video",
       "description": "Analyses video for luma average and variance",
       "experimental": false,
-      "klass": "Filter/Analyzer/Video",
       "long_name": "Video analyser",
       "name": "videoanalyse",
       "pads": [
@@ -1704,11 +1704,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Video/Filter",
       "description": "Detects scene changes in video",
       "experimental": false,
-      "klass": "Video/Filter",
       "long_name": "Scene change detector",
       "name": "scenechange",
       "pads": [
@@ -1719,11 +1719,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Filter/Analyzer/Audio",
       "description": "Detects DTMF tones",
       "experimental": false,
-      "klass": "Filter/Analyzer/Audio",
       "long_name": "DTMF detector",
       "name": "dtmfdetect",
       "pads": [
@@ -1734,11 +1734,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Codec/Encoder/Image",
       "description": "Encodes raw RGB / RGBA video to a Netpbm pixmap",
       "experimental": false,
-      "klass": "Codec/Encoder/Image",
       "long_name": "PNM image encoder",
       "name": "pnmenc",
       "pads": [
@@ -1760,11 +1760,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Codec/Decoder/Image",
       "description": "Decodes Netpbm stills to packed RGB",
       "experimental": false,
-      "klass": "Codec/Decoder/Image",
       "long_name": "PNM image decoder",
       "name": "pnmdec",
       "pads": [
@@ -1775,11 +1775,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Filter/Effect/Video",
       "description": "Solarize tunable inverse in the video signal",
       "experimental": false,
-      "klass": "Filter/Effect/Video",
       "long_name": "Solarize",
       "name": "solarize",
       "pads": [
@@ -1830,11 +1830,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Filter/Effect/Video",
       "description": "Chromium breaks the colors of the video signal",
       "experimental": false,
-      "klass": "Filter/Effect/Video",
       "long_name": "Chromium",
       "name": "chromium",
       "pads": [
@@ -1872,11 +1872,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Filter/Effect/Video",
       "description": "Exclusion exclodes the colors in the video signal",
       "experimental": false,
-      "klass": "Filter/Effect/Video",
       "long_name": "Exclusion",
       "name": "exclusion",
       "pads": [
@@ -1901,11 +1901,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Filter/Effect/Video",
       "description": "Dodge saturates the colors in the video signal",
       "experimental": false,
-      "klass": "Filter/Effect/Video",
       "long_name": "Dodge",
       "name": "dodge",
       "pads": [
@@ -1916,11 +1916,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Filter/Effect/Video",
       "description": "Burn adjusts the colors in the video signal",
       "experimental": false,
-      "klass": "Filter/Effect/Video",
       "long_name": "Burn",
       "name": "burn",
       "pads": [
@@ -1945,11 +1945,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Filter/Effect/Video",
       "description": "Dilate copies the brightest pixel around",
       "experimental": false,
-      "klass": "Filter/Effect/Video",
       "long_name": "Dilate",
       "name": "dilate",
       "pads": [
@@ -1971,11 +1971,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Filter/Effect/Converter/Video",
       "description": "Works within the HSV colorspace to apply transformations to incoming frames",
       "experimental": false,
-      "klass": "Filter/Effect/Converter/Video",
       "long_name": "HSV filter",
       "name": "hsvfilter",
       "pads": [
@@ -2037,11 +2037,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Filter/Effect/Converter/Video",
       "description": "Works within the HSV colorspace to mark positive pixels",
       "experimental": false,
-      "klass": "Filter/Effect/Converter/Video",
       "long_name": "HSV detector",
       "name": "hsvdetector",
       "pads": [
@@ -2128,11 +2128,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Filter/Effect/Converter/Video",
       "description": "Adds rounded corners to video",
       "experimental": false,
-      "klass": "Filter/Effect/Converter/Video",
       "long_name": "Rounded Corners",
       "name": "roundedcorners",
       "pads": [
@@ -2154,11 +2154,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Filter/Effect/Video",
       "description": "Adds or keys an alpha channel on raw video",
       "experimental": false,
-      "klass": "Filter/Effect/Video",
       "long_name": "Alpha filter",
       "name": "alpha",
       "pads": [
@@ -2190,11 +2190,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Filter/Effect/Video",
       "description": "Crops or borders raw video (positive edge crops, negative adds a border)",
       "experimental": false,
-      "klass": "Filter/Effect/Video",
       "long_name": "Video box",
       "name": "videobox",
       "pads": [
@@ -2256,11 +2256,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Filter/Effect/Video",
       "description": "Performs gamma correction",
       "experimental": false,
-      "klass": "Filter/Effect/Video",
       "long_name": "Gamma",
       "name": "gamma",
       "pads": [
@@ -2282,11 +2282,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Filter/Effect/Video/Deinterlace",
       "description": "Deinterlaces video",
       "experimental": false,
-      "klass": "Filter/Effect/Video/Deinterlace",
       "long_name": "Deinterlace",
       "name": "deinterlace",
       "pads": [
@@ -2338,11 +2338,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Filter/Editor/Video",
       "description": "Overlays the buffer time on video",
       "experimental": false,
-      "klass": "Filter/Editor/Video",
       "long_name": "Time overlay",
       "name": "timeoverlay",
       "pads": [
@@ -2464,11 +2464,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Filter/Editor/Video",
       "description": "Overlays the wall-clock time on video",
       "experimental": false,
-      "klass": "Filter/Editor/Video",
       "long_name": "Clock overlay",
       "name": "clockoverlay",
       "pads": [
@@ -2560,11 +2560,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Filter/Editor/Video",
       "description": "Renders SRT / WebVTT subtitle cues over video by PTS",
       "experimental": false,
-      "klass": "Filter/Editor/Video",
       "long_name": "Text overlay",
       "name": "textoverlay",
       "pads": [
@@ -2626,11 +2626,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Codec/Parser/Subtitle",
       "description": "Parses a SubRip / WebVTT document into timed UTF-8 text cues",
       "experimental": false,
-      "klass": "Codec/Parser/Subtitle",
       "long_name": "Subtitle parser",
       "name": "subparse",
       "pads": [
@@ -2641,11 +2641,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Codec/Encoder/Subtitle",
       "description": "Writes timed UTF-8 cues as a SubRip (.srt) document",
       "experimental": false,
-      "klass": "Codec/Encoder/Subtitle",
       "long_name": "SubRip subtitle encoder",
       "name": "srtenc",
       "pads": [
@@ -2677,11 +2677,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Codec/Encoder/Subtitle",
       "description": "Writes timed UTF-8 cues as a WebVTT (.vtt) document",
       "experimental": false,
-      "klass": "Codec/Encoder/Subtitle",
       "long_name": "WebVTT subtitle encoder",
       "name": "webvttenc",
       "pads": [
@@ -2713,11 +2713,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Filter/ClosedCaption",
       "description": "Converts closed captions between the cc_data, CDP, S334-1A and raw CEA-608 layouts",
       "experimental": false,
-      "klass": "Filter/ClosedCaption",
       "long_name": "Closed-caption converter",
       "name": "ccconverter",
       "pads": [
@@ -2772,11 +2772,93 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Generic",
+      "description": "Wraps CEA-708 CDPs and CEA-608 S334-1A captions in SMPTE ST 2038 ancillary packets",
+      "experimental": false,
+      "long_name": "CC to ST-2038 ANC",
+      "name": "cctost2038anc",
+      "pads": [
+        "SINK:\n  closedcaption/x-cea-708,format=cdp\n  closedcaption/x-cea-608,format=s334-1a",
+        "SRC:\n  meta/x-st-2038,alignment=packet\n  meta/x-st-2038,alignment=line\n  meta/x-st-2038,alignment=frame"
+      ],
+      "properties": [
+        {
+          "blurb": "mark the written packets as colour-difference channel data",
+          "default": "false",
+          "enum_values": null,
+          "name": "c-not-y-channel",
+          "range": null,
+          "readable": true,
+          "type": "Boolean",
+          "writable": true
+        },
+        {
+          "blurb": "SDI line number of the written packets",
+          "default": "9",
+          "enum_values": null,
+          "name": "line-number",
+          "range": [
+            "0",
+            "2047"
+          ],
+          "readable": true,
+          "type": "Unsigned Integer",
+          "writable": true
+        },
+        {
+          "blurb": "horizontal offset of the written packets",
+          "default": "0",
+          "enum_values": null,
+          "name": "horizontal-offset",
+          "range": [
+            "0",
+            "4095"
+          ],
+          "readable": true,
+          "type": "Unsigned Integer",
+          "writable": true
+        }
+      ],
+      "role": "element"
+    },
+    {
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
+      "caps": null,
+      "classification": "Generic",
+      "description": "Extracts CEA-708 CDPs or CEA-608 S334-1A captions from SMPTE ST 2038 ancillary packets",
+      "experimental": false,
+      "long_name": "ST-2038 ANC to CC",
+      "name": "st2038anctocc",
+      "pads": [
+        "SINK:\n  meta/x-st-2038,alignment=packet\n  meta/x-st-2038,alignment=line\n  meta/x-st-2038,alignment=frame",
+        "SRC:\n  closedcaption/x-cea-708,format=cdp\n  closedcaption/x-cea-608,format=s334-1a"
+      ],
+      "properties": [],
+      "role": "element"
+    },
+    {
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
+      "caps": null,
+      "classification": "Metadata/Video/Demuxer",
+      "description": "Splits individual ancillary metadata streams from an SMPTE ST-2038 stream",
+      "experimental": false,
+      "long_name": "SMPTE ST-2038 ancillary metadata demuxer",
+      "name": "st2038ancdemux",
+      "pads": [
+        "SINK:\n  meta/x-st-2038,alignment=packet\n  meta/x-st-2038,alignment=line\n  meta/x-st-2038,alignment=frame",
+        "SRC:\n  meta/x-st-2038,alignment=packet"
+      ],
+      "properties": [],
+      "role": "element"
+    },
+    {
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
+      "caps": null,
+      "classification": "Codec/Parser/ClosedCaption",
       "description": "Extracts CEA-608 / CEA-708 captions from H.264 / H.265 SEI, MPEG-2 user data, or a raw-caption track into timed UTF-8 text cues",
       "experimental": false,
-      "klass": "Codec/Parser/ClosedCaption",
       "long_name": "Closed-caption extractor",
       "name": "ccextract",
       "pads": [
@@ -2787,11 +2869,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Codec/Parser/Video",
       "description": "Writes a MISB ST 0604 MISP microsecond time SEI into each H.264 / H.265 access unit",
       "experimental": false,
-      "klass": "Codec/Parser/Video",
       "long_name": "MISP time stamp inserter",
       "name": "misptimeinsert",
       "pads": [
@@ -2823,11 +2905,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Codec/Parser/Video",
       "description": "Extracts the MISB ST 0604 MISP time from H.264 / H.265 SEI into timed UTF-8 text",
       "experimental": false,
-      "klass": "Codec/Parser/Video",
       "long_name": "MISP time stamp extractor",
       "name": "misptimeextract",
       "pads": [
@@ -2838,11 +2920,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Codec/Decoder/Metadata",
       "description": "Decodes SMPTE ST 336 KLV local sets into text key=value cues",
       "experimental": false,
-      "klass": "Codec/Decoder/Metadata",
       "long_name": "KLV metadata decoder",
       "name": "klvdecode",
       "pads": [
@@ -2864,11 +2946,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Codec/Decoder/Subtitle",
       "description": "Decodes DVD subpicture cues into RGBA overlay canvases",
       "experimental": false,
-      "klass": "Codec/Decoder/Subtitle",
       "long_name": "VobSub subpicture decoder",
       "name": "vobsubdec",
       "pads": [
@@ -2910,11 +2992,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Codec/Decoder/Subtitle",
       "description": "Decodes DVB bitmap subtitle display sets into RGBA overlay canvases",
       "experimental": false,
-      "klass": "Codec/Decoder/Subtitle",
       "long_name": "DVB subtitle decoder",
       "name": "dvbsubdec",
       "pads": [
@@ -2966,11 +3048,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Codec/Decoder/Subtitle",
       "description": "Decodes Blu-ray HDMV presentation graphics into RGBA overlay canvases",
       "experimental": false,
-      "klass": "Codec/Decoder/Subtitle",
       "long_name": "PGS subtitle decoder",
       "name": "pgsdec",
       "pads": [
@@ -3022,11 +3104,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Codec/Decoder/Subtitle",
       "description": "Decodes an EBU teletext subtitle page to plain-text cues",
       "experimental": false,
-      "klass": "Codec/Decoder/Subtitle",
       "long_name": "Teletext subtitle decoder",
       "name": "teletextdec",
       "pads": [
@@ -3048,11 +3130,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Filter/Text",
       "description": "Joins the text frames of a time window into one digest per window",
       "experimental": false,
-      "klass": "Filter/Text",
       "long_name": "Incident digest",
       "name": "textdigest",
       "pads": [
@@ -3074,11 +3156,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Filter/Generic",
       "description": "Keeps the frames of a presentation-time range, rebased onto its start",
       "experimental": false,
-      "klass": "Filter/Generic",
       "long_name": "Trim",
       "name": "trim",
       "pads": [],
@@ -3107,11 +3189,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Filter/Video",
       "description": "Repeats the first frame at a fixed framerate",
       "experimental": false,
-      "klass": "Filter/Video",
       "long_name": "Still frame stream generator",
       "name": "imagefreeze",
       "pads": [],
@@ -3140,11 +3222,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Filter/Effect/Video",
       "description": "Drops or repeats frames to reach the negotiated framerate",
       "experimental": false,
-      "klass": "Filter/Effect/Video",
       "long_name": "Video rate adjuster",
       "name": "videorate",
       "pads": [],
@@ -3163,16 +3245,16 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Filter/Converter/Audio",
       "description": "Converts between raw audio sample formats and channel layouts",
       "experimental": false,
-      "klass": "Filter/Converter/Audio",
       "long_name": "Audio format converter",
       "name": "audioconvert",
       "pads": [
-        "SINK:\n  audio/x-raw,format=S16LE,channels=2,rate=48000\n  audio/x-raw,format=F32LE,channels=2,rate=48000\n  audio/x-raw,format=S24LE,channels=2,rate=48000\n  audio/x-raw,format=S32LE,channels=2,rate=48000\n  audio/x-raw,format=U8,channels=2,rate=48000",
-        "SRC:\n  audio/x-raw,format=S16LE,channels=2,rate=48000\n  audio/x-raw,format=F32LE,channels=2,rate=48000\n  audio/x-raw,format=S24LE,channels=2,rate=48000\n  audio/x-raw,format=S32LE,channels=2,rate=48000\n  audio/x-raw,format=U8,channels=2,rate=48000"
+        "SINK:\n  audio/x-raw,format=S16LE\n  audio/x-raw,format=F32LE\n  audio/x-raw,format=S24LE\n  audio/x-raw,format=S32LE\n  audio/x-raw,format=U8",
+        "SRC:\n  audio/x-raw,format=S16LE\n  audio/x-raw,format=F32LE\n  audio/x-raw,format=S24LE\n  audio/x-raw,format=S32LE\n  audio/x-raw,format=U8"
       ],
       "properties": [
         {
@@ -3232,16 +3314,16 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Filter/Converter/Audio",
       "description": "Resamples raw audio to a different sample rate",
       "experimental": false,
-      "klass": "Filter/Converter/Audio",
       "long_name": "Audio resampler",
       "name": "audioresample",
       "pads": [
-        "SINK:\n  audio/x-raw,format=S16LE,channels=2,rate=48000\n  audio/x-raw,format=F32LE,channels=2,rate=48000\n  audio/x-raw,format=S24LE,channels=2,rate=48000\n  audio/x-raw,format=S32LE,channels=2,rate=48000\n  audio/x-raw,format=U8,channels=2,rate=48000",
-        "SRC:\n  audio/x-raw,format=S16LE,channels=2,rate=48000\n  audio/x-raw,format=F32LE,channels=2,rate=48000\n  audio/x-raw,format=S24LE,channels=2,rate=48000\n  audio/x-raw,format=S32LE,channels=2,rate=48000\n  audio/x-raw,format=U8,channels=2,rate=48000"
+        "SINK:\n  audio/x-raw,format=S16LE\n  audio/x-raw,format=F32LE\n  audio/x-raw,format=S24LE\n  audio/x-raw,format=S32LE\n  audio/x-raw,format=U8",
+        "SRC:\n  audio/x-raw,format=S16LE\n  audio/x-raw,format=F32LE\n  audio/x-raw,format=S24LE\n  audio/x-raw,format=S32LE\n  audio/x-raw,format=U8"
       ],
       "properties": [
         {
@@ -3271,11 +3353,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Filter/Effect/Audio",
       "description": "Fills gaps with silence and drops overlapping samples to make a contiguous stream",
       "experimental": false,
-      "klass": "Filter/Effect/Audio",
       "long_name": "Audio rate adjuster",
       "name": "audiorate",
       "pads": [
@@ -3347,11 +3429,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Filter/Effect/Rate/Audio",
       "description": "Stretches audio to the playback rate without changing its pitch",
       "experimental": false,
-      "klass": "Filter/Effect/Rate/Audio",
       "long_name": "Scaletempo",
       "name": "scaletempo",
       "pads": [
@@ -3403,11 +3485,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Filter/Converter/Audio",
       "description": "Emits one channel of an N-channel PCM stream as mono",
       "experimental": false,
-      "klass": "Filter/Converter/Audio",
       "long_name": "Audio channel picker",
       "name": "deinterleave",
       "pads": [
@@ -3429,16 +3511,16 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Filter/Effect/Audio",
       "description": "Adjusts audio volume / gain",
       "experimental": false,
-      "klass": "Filter/Effect/Audio",
       "long_name": "Volume",
       "name": "volume",
       "pads": [
-        "SINK:\n  audio/x-raw,format=S16LE,channels=2,rate=48000",
-        "SRC:\n  audio/x-raw,format=S16LE,channels=2,rate=48000"
+        "SINK:\n  audio/x-raw,format=S16LE",
+        "SRC:\n  audio/x-raw,format=S16LE"
       ],
       "properties": [
         {
@@ -3465,16 +3547,16 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Filter/Effect/Audio",
       "description": "Positions a stereo signal across the left / right field",
       "experimental": false,
-      "klass": "Filter/Effect/Audio",
       "long_name": "Audio panorama",
       "name": "audiopanorama",
       "pads": [
-        "SINK:\n  audio/x-raw,format=S16LE,channels=2,rate=48000",
-        "SRC:\n  audio/x-raw,format=S16LE,channels=2,rate=48000"
+        "SINK:\n  audio/x-raw,format=S16LE,channels=2",
+        "SRC:\n  audio/x-raw,format=S16LE,channels=2"
       ],
       "properties": [
         {
@@ -3491,16 +3573,16 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Filter/Effect/Audio",
       "description": "Amplifies an audio stream",
       "experimental": false,
-      "klass": "Filter/Effect/Audio",
       "long_name": "Audio amplify",
       "name": "audioamplify",
       "pads": [
-        "SINK:\n  audio/x-raw,format=S16LE,channels=2,rate=48000",
-        "SRC:\n  audio/x-raw,format=S16LE,channels=2,rate=48000"
+        "SINK:\n  audio/x-raw,format=S16LE",
+        "SRC:\n  audio/x-raw,format=S16LE"
       ],
       "properties": [
         {
@@ -3527,16 +3609,16 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Filter/Effect/Audio",
       "description": "Adds an echo / delay to an audio stream",
       "experimental": false,
-      "klass": "Filter/Effect/Audio",
       "long_name": "Audio echo",
       "name": "audioecho",
       "pads": [
-        "SINK:\n  audio/x-raw,format=S16LE,channels=2,rate=48000",
-        "SRC:\n  audio/x-raw,format=S16LE,channels=2,rate=48000"
+        "SINK:\n  audio/x-raw,format=S16LE",
+        "SRC:\n  audio/x-raw,format=S16LE"
       ],
       "properties": [
         {
@@ -3583,16 +3665,16 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Filter/Effect/Audio",
       "description": "Compresses or expands the dynamic range of an audio stream",
       "experimental": false,
-      "klass": "Filter/Effect/Audio",
       "long_name": "Dynamic range controller",
       "name": "audiodynamic",
       "pads": [
-        "SINK:\n  audio/x-raw,format=S16LE,channels=2,rate=48000\n  audio/x-raw,format=F32LE,channels=2,rate=48000",
-        "SRC:\n  audio/x-raw,format=S16LE,channels=2,rate=48000\n  audio/x-raw,format=F32LE,channels=2,rate=48000"
+        "SINK:\n  audio/x-raw,format=S16LE\n  audio/x-raw,format=F32LE",
+        "SRC:\n  audio/x-raw,format=S16LE\n  audio/x-raw,format=F32LE"
       ],
       "properties": [
         {
@@ -3642,16 +3724,16 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Filter/Effect/Audio",
       "description": "Swaps upper and lower half of audio samples",
       "experimental": false,
-      "klass": "Filter/Effect/Audio",
       "long_name": "Audio inversion",
       "name": "audioinvert",
       "pads": [
-        "SINK:\n  audio/x-raw,format=S16LE,channels=2,rate=48000\n  audio/x-raw,format=F32LE,channels=2,rate=48000",
-        "SRC:\n  audio/x-raw,format=S16LE,channels=2,rate=48000\n  audio/x-raw,format=F32LE,channels=2,rate=48000"
+        "SINK:\n  audio/x-raw,format=S16LE\n  audio/x-raw,format=F32LE",
+        "SRC:\n  audio/x-raw,format=S16LE\n  audio/x-raw,format=F32LE"
       ],
       "properties": [
         {
@@ -3671,16 +3753,16 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Filter/Effect/Audio",
       "description": "Removes voice from sound",
       "experimental": false,
-      "klass": "Filter/Effect/Audio",
       "long_name": "AudioKaraoke",
       "name": "audiokaraoke",
       "pads": [
-        "SINK:\n  audio/x-raw,format=S16LE,channels=2,rate=48000\n  audio/x-raw,format=F32LE,channels=2,rate=48000",
-        "SRC:\n  audio/x-raw,format=S16LE,channels=2,rate=48000\n  audio/x-raw,format=F32LE,channels=2,rate=48000"
+        "SINK:\n  audio/x-raw,format=S16LE,channels=2\n  audio/x-raw,format=F32LE,channels=2",
+        "SRC:\n  audio/x-raw,format=S16LE,channels=2\n  audio/x-raw,format=F32LE,channels=2"
       ],
       "properties": [
         {
@@ -3739,16 +3821,16 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Filter/Effect/Audio",
       "description": "Low-pass and high-pass windowed sinc filter",
       "experimental": false,
-      "klass": "Filter/Effect/Audio",
       "long_name": "Windowed sinc low-pass / high-pass filter",
       "name": "audiowsinclimit",
       "pads": [
-        "SINK:\n  audio/x-raw,format=S16LE,channels=2,rate=48000\n  audio/x-raw,format=F32LE,channels=2,rate=48000",
-        "SRC:\n  audio/x-raw,format=S16LE,channels=2,rate=48000\n  audio/x-raw,format=F32LE,channels=2,rate=48000"
+        "SINK:\n  audio/x-raw,format=S16LE\n  audio/x-raw,format=F32LE",
+        "SRC:\n  audio/x-raw,format=S16LE\n  audio/x-raw,format=F32LE"
       ],
       "properties": [
         {
@@ -3801,16 +3883,16 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Filter/Effect/Audio",
       "description": "Band-pass and band-reject windowed sinc filter",
       "experimental": false,
-      "klass": "Filter/Effect/Audio",
       "long_name": "Windowed sinc band-pass / band-reject filter",
       "name": "audiowsincband",
       "pads": [
-        "SINK:\n  audio/x-raw,format=S16LE,channels=2,rate=48000\n  audio/x-raw,format=F32LE,channels=2,rate=48000",
-        "SRC:\n  audio/x-raw,format=S16LE,channels=2,rate=48000\n  audio/x-raw,format=F32LE,channels=2,rate=48000"
+        "SINK:\n  audio/x-raw,format=S16LE\n  audio/x-raw,format=F32LE",
+        "SRC:\n  audio/x-raw,format=S16LE\n  audio/x-raw,format=F32LE"
       ],
       "properties": [
         {
@@ -3876,16 +3958,16 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Filter/Effect/Audio",
       "description": "Chebyshev low-pass and high-pass filter",
       "experimental": false,
-      "klass": "Filter/Effect/Audio",
       "long_name": "Low-pass and high-pass Chebyshev filter",
       "name": "audiocheblimit",
       "pads": [
-        "SINK:\n  audio/x-raw,format=S16LE,channels=2,rate=48000\n  audio/x-raw,format=F32LE,channels=2,rate=48000",
-        "SRC:\n  audio/x-raw,format=S16LE,channels=2,rate=48000\n  audio/x-raw,format=F32LE,channels=2,rate=48000"
+        "SINK:\n  audio/x-raw,format=S16LE\n  audio/x-raw,format=F32LE",
+        "SRC:\n  audio/x-raw,format=S16LE\n  audio/x-raw,format=F32LE"
       ],
       "properties": [
         {
@@ -3954,16 +4036,16 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Filter/Effect/Audio",
       "description": "Chebyshev band-pass and band-reject filter",
       "experimental": false,
-      "klass": "Filter/Effect/Audio",
       "long_name": "Band-pass and band-reject Chebyshev filter",
       "name": "audiochebband",
       "pads": [
-        "SINK:\n  audio/x-raw,format=S16LE,channels=2,rate=48000\n  audio/x-raw,format=F32LE,channels=2,rate=48000",
-        "SRC:\n  audio/x-raw,format=S16LE,channels=2,rate=48000\n  audio/x-raw,format=F32LE,channels=2,rate=48000"
+        "SINK:\n  audio/x-raw,format=S16LE\n  audio/x-raw,format=F32LE",
+        "SRC:\n  audio/x-raw,format=S16LE\n  audio/x-raw,format=F32LE"
       ],
       "properties": [
         {
@@ -4045,16 +4127,16 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Filter/Effect/Audio",
       "description": "Mixes left/right channels of stereo audio",
       "experimental": false,
-      "klass": "Filter/Effect/Audio",
       "long_name": "Simple stereo audio mixer",
       "name": "audiochannelmix",
       "pads": [
-        "SINK:\n  audio/x-raw,format=S16LE,channels=2,rate=48000\n  audio/x-raw,format=F32LE,channels=2,rate=48000",
-        "SRC:\n  audio/x-raw,format=S16LE,channels=2,rate=48000\n  audio/x-raw,format=F32LE,channels=2,rate=48000"
+        "SINK:\n  audio/x-raw,format=S16LE,channels=2\n  audio/x-raw,format=F32LE,channels=2",
+        "SRC:\n  audio/x-raw,format=S16LE,channels=2\n  audio/x-raw,format=F32LE,channels=2"
       ],
       "properties": [
         {
@@ -4101,16 +4183,16 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Filter/Audio",
       "description": "Mixes a number of input channels into a number of output channels according to a transformation matrix",
       "experimental": false,
-      "klass": "Filter/Audio",
       "long_name": "Matrix audio mix",
       "name": "audiomixmatrix",
       "pads": [
-        "SINK:\n  audio/x-raw,format=S16LE,channels=2,rate=48000\n  audio/x-raw,format=F32LE,channels=2,rate=48000",
-        "SRC:\n  audio/x-raw,format=S16LE,channels=2,rate=48000\n  audio/x-raw,format=F32LE,channels=2,rate=48000"
+        "SINK:\n  audio/x-raw,format=S16LE\n  audio/x-raw,format=F32LE",
+        "SRC:\n  audio/x-raw,format=S16LE\n  audio/x-raw,format=F32LE"
       ],
       "properties": [
         {
@@ -4163,16 +4245,16 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Filter/Effect/Audio",
       "description": "Muck with the stereo signal to enhance its 'stereo-ness'",
       "experimental": false,
-      "klass": "Filter/Effect/Audio",
       "long_name": "Stereo effect",
       "name": "stereo",
       "pads": [
-        "SINK:\n  audio/x-raw,format=S16LE,channels=2,rate=48000\n  audio/x-raw,format=F32LE,channels=2,rate=48000",
-        "SRC:\n  audio/x-raw,format=S16LE,channels=2,rate=48000\n  audio/x-raw,format=F32LE,channels=2,rate=48000"
+        "SINK:\n  audio/x-raw,format=S16LE,channels=2\n  audio/x-raw,format=F32LE,channels=2",
+        "SRC:\n  audio/x-raw,format=S16LE,channels=2\n  audio/x-raw,format=F32LE,channels=2"
       ],
       "properties": [
         {
@@ -4202,16 +4284,16 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Filter/Effect/Audio",
       "description": "Generic audio FIR filter with custom filter kernel",
       "experimental": false,
-      "klass": "Filter/Effect/Audio",
       "long_name": "Audio FIR filter",
       "name": "audiofirfilter",
       "pads": [
-        "SINK:\n  audio/x-raw,format=S16LE,channels=2,rate=48000\n  audio/x-raw,format=F32LE,channels=2,rate=48000",
-        "SRC:\n  audio/x-raw,format=S16LE,channels=2,rate=48000\n  audio/x-raw,format=F32LE,channels=2,rate=48000"
+        "SINK:\n  audio/x-raw,format=S16LE\n  audio/x-raw,format=F32LE",
+        "SRC:\n  audio/x-raw,format=S16LE\n  audio/x-raw,format=F32LE"
       ],
       "properties": [
         {
@@ -4238,16 +4320,16 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Filter/Effect/Audio",
       "description": "Generic audio IIR filter with custom filter kernel",
       "experimental": false,
-      "klass": "Filter/Effect/Audio",
       "long_name": "Audio IIR filter",
       "name": "audioiirfilter",
       "pads": [
-        "SINK:\n  audio/x-raw,format=S16LE,channels=2,rate=48000\n  audio/x-raw,format=F32LE,channels=2,rate=48000",
-        "SRC:\n  audio/x-raw,format=S16LE,channels=2,rate=48000\n  audio/x-raw,format=F32LE,channels=2,rate=48000"
+        "SINK:\n  audio/x-raw,format=S16LE\n  audio/x-raw,format=F32LE",
+        "SRC:\n  audio/x-raw,format=S16LE\n  audio/x-raw,format=F32LE"
       ],
       "properties": [
         {
@@ -4274,16 +4356,16 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Filter/Effect/Audio",
       "description": "Removes all the silence periods from the audio stream",
       "experimental": false,
-      "klass": "Filter/Effect/Audio",
       "long_name": "RemoveSilence",
       "name": "removesilence",
       "pads": [
-        "SINK:\n  audio/x-raw,format=S16LE,channels=2,rate=48000\n  audio/x-raw,format=F32LE,channels=2,rate=48000",
-        "SRC:\n  audio/x-raw,format=S16LE,channels=2,rate=48000\n  audio/x-raw,format=F32LE,channels=2,rate=48000"
+        "SINK:\n  audio/x-raw,format=S16LE\n  audio/x-raw,format=F32LE",
+        "SRC:\n  audio/x-raw,format=S16LE\n  audio/x-raw,format=F32LE"
       ],
       "properties": [
         {
@@ -4372,11 +4454,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Audio/Filter",
       "description": "Splits raw audio buffers into equal sized chunks",
       "experimental": false,
-      "klass": "Audio/Filter",
       "long_name": "Audio Buffer Split",
       "name": "audiobuffersplit",
       "pads": [
@@ -4464,16 +4546,16 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Filter/Effect/Audio",
       "description": "Set speed/pitch on audio/raw streams (resampler)",
       "experimental": false,
-      "klass": "Filter/Effect/Audio",
       "long_name": "Speed",
       "name": "speed",
       "pads": [
-        "SINK:\n  audio/x-raw,format=S16LE,channels=2,rate=48000\n  audio/x-raw,format=F32LE,channels=2,rate=48000",
-        "SRC:\n  audio/x-raw,format=S16LE,channels=2,rate=48000\n  audio/x-raw,format=F32LE,channels=2,rate=48000"
+        "SINK:\n  audio/x-raw,format=S16LE\n  audio/x-raw,format=F32LE",
+        "SRC:\n  audio/x-raw,format=S16LE\n  audio/x-raw,format=F32LE"
       ],
       "properties": [
         {
@@ -4493,11 +4575,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Filter/Effect/Audio",
       "description": "Re-emits each chunk of audio with its samples in the opposite order",
       "experimental": false,
-      "klass": "Filter/Effect/Audio",
       "long_name": "Audio reverser",
       "name": "audioreverse",
       "pads": [
@@ -4519,16 +4601,16 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Filter/Analyzer/Audio",
       "description": "Measures audio peak / RMS levels",
       "experimental": false,
-      "klass": "Filter/Analyzer/Audio",
       "long_name": "Level",
       "name": "level",
       "pads": [
-        "SINK:\n  audio/x-raw,format=S16LE,channels=2,rate=48000",
-        "SRC:\n  audio/x-raw,format=S16LE,channels=2,rate=48000"
+        "SINK:\n  audio/x-raw,format=S16LE",
+        "SRC:\n  audio/x-raw,format=S16LE"
       ],
       "properties": [
         {
@@ -4545,16 +4627,16 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Filter/Analyzer/Audio",
       "description": "Detects silence in an audio stream",
       "experimental": false,
-      "klass": "Filter/Analyzer/Audio",
       "long_name": "Cutter",
       "name": "cutter",
       "pads": [
-        "SINK:\n  audio/x-raw,format=S16LE,channels=2,rate=48000",
-        "SRC:\n  audio/x-raw,format=S16LE,channels=2,rate=48000"
+        "SINK:\n  audio/x-raw,format=S16LE",
+        "SRC:\n  audio/x-raw,format=S16LE"
       ],
       "properties": [
         {
@@ -4581,16 +4663,16 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Filter/Effect/Audio",
       "description": "Three-band audio equalizer",
       "experimental": false,
-      "klass": "Filter/Effect/Audio",
       "long_name": "3-band equalizer",
       "name": "equalizer-3bands",
       "pads": [
-        "SINK:\n  audio/x-raw,format=S16LE,channels=2,rate=48000",
-        "SRC:\n  audio/x-raw,format=S16LE,channels=2,rate=48000"
+        "SINK:\n  audio/x-raw,format=S16LE",
+        "SRC:\n  audio/x-raw,format=S16LE"
       ],
       "properties": [
         {
@@ -4627,16 +4709,16 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Filter/Analyzer/Audio",
       "description": "FFT spectrum analyzer",
       "experimental": false,
-      "klass": "Filter/Analyzer/Audio",
       "long_name": "Spectrum",
       "name": "spectrum",
       "pads": [
-        "SINK:\n  audio/x-raw,format=S16LE,channels=2,rate=48000",
-        "SRC:\n  audio/x-raw,format=S16LE,channels=2,rate=48000"
+        "SINK:\n  audio/x-raw,format=S16LE",
+        "SRC:\n  audio/x-raw,format=S16LE"
       ],
       "properties": [
         {
@@ -4663,11 +4745,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Filter/Analyzer/Audio",
       "description": "Measures momentary, short-term and gated integrated loudness in LUFS",
       "experimental": false,
-      "klass": "Filter/Analyzer/Audio",
       "long_name": "EBU R128 loudness meter",
       "name": "ebur128",
       "pads": [
@@ -4699,11 +4781,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Codec/Demuxer",
       "description": "Demuxes an MPEG transport stream into the elementary streams its ports select",
       "experimental": false,
-      "klass": "Codec/Demuxer",
       "long_name": "MPEG-TS demuxer",
       "name": "tsdemux",
       "pads": [
@@ -4712,7 +4794,7 @@
       ],
       "properties": [
         {
-          "blurb": "elementary stream to emit: h264 | h265 | av1 | mpeg2 | mpeg4part2 | aac | mp2 | opus | ac3 | klv | dvbsub | teletext",
+          "blurb": "elementary stream to emit: h264 | h265 | av1 | mpeg2 | mpeg4part2 | aac | mp2 (or mp3) | opus | ac3 | klv | dvbsub | teletext | st2038",
           "default": null,
           "enum_values": null,
           "name": "stream",
@@ -4745,11 +4827,40 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Source/Network",
+      "description": "Provides a pipeline clock from the PCR of a live MPEG-TS stream and maps its timestamps onto it",
+      "experimental": false,
+      "long_name": "MPEG-TS live clock",
+      "name": "mpegtslivesrc",
+      "pads": [
+        "SINK:\n  video/mpegts",
+        "SRC:\n  video/mpegts"
+      ],
+      "properties": [
+        {
+          "blurb": "PCR observations the clock's rate and offset are fitted over",
+          "default": "32",
+          "enum_values": null,
+          "name": "window-size",
+          "range": [
+            "2",
+            "1024"
+          ],
+          "readable": true,
+          "type": "Unsigned Integer",
+          "writable": true
+        }
+      ],
+      "role": "element"
+    },
+    {
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
+      "caps": null,
+      "classification": "Codec/Demuxer",
       "description": "Demuxes an MPEG-1 / MPEG-2 program stream (.mpg / .vob): MPEG video, MPEG audio, AC-3, and DVD subpictures",
       "experimental": false,
-      "klass": "Codec/Demuxer",
       "long_name": "MPEG program stream demuxer",
       "name": "mpegpsdemux",
       "pads": [
@@ -4758,7 +4869,7 @@
       ],
       "properties": [
         {
-          "blurb": "elementary stream to emit: mpeg2 | mp2 | ac3 | subpicture",
+          "blurb": "elementary stream to emit: mpeg2 | mp2 (or mp3) | ac3 | subpicture",
           "default": null,
           "enum_values": null,
           "name": "stream",
@@ -4781,20 +4892,20 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Codec/Demuxer",
       "description": "Demuxes Matroska / WebM into one selected elementary stream",
       "experimental": false,
-      "klass": "Codec/Demuxer",
       "long_name": "Matroska demuxer",
       "name": "matroskademux",
       "pads": [
         "SINK:\n  video/x-matroska",
-        "SRC:\n  video/x-h264,width=[16,65535],height=[16,65535],framerate=[1/1,240/1],alignment=au\n  video/x-h265,width=[16,65535],height=[16,65535],framerate=[1/1,240/1],alignment=au\n  video/x-vp8,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]\n  video/x-vp9,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]\n  video/x-av1,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]\n  image/jpeg,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]\n  video/x-theora,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]\n  audio/mpeg\n  audio/x-opus\n  audio/x-ac3\n  audio/x-flac\n  audio/x-vorbis\n  text/x-raw,format=utf8\n  subpicture/x-dvd\n  subpicture/x-dvb\n  subpicture/x-pgs\n  audio/x-raw,format=S16LE\n  audio/x-raw,format=F32LE\n  audio/x-raw,format=S24LE\n  audio/x-raw,format=S32LE\n  audio/x-raw,format=U8\n  video/x-raw,format=I420,width=[1,65535],height=[1,65535],framerate=[1/1,240/1]\n  video/x-raw,format=YUY2,width=[1,65535],height=[1,65535],framerate=[1/1,240/1]\n  video/x-raw,format=UYVY,width=[1,65535],height=[1,65535],framerate=[1/1,240/1]\n  video/x-raw,format=v210,width=[1,65535],height=[1,65535],framerate=[1/1,240/1]\n  video/x-raw,format=GRAY8,width=[1,65535],height=[1,65535],framerate=[1/1,240/1]\n  video/x-raw,format=BGR,width=[1,65535],height=[1,65535],framerate=[1/1,240/1]\n  video/x-raw,format=BGRx,width=[1,65535],height=[1,65535],framerate=[1/1,240/1]\n  video/x-raw,format=RGB,width=[1,65535],height=[1,65535],framerate=[1/1,240/1]\n  video/x-raw,format=ARGB,width=[1,65535],height=[1,65535],framerate=[1/1,240/1]\n  video/x-prores,variant=proxy,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]\n  video/x-prores,variant=lt,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]\n  video/x-prores,variant=standard,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]\n  video/x-prores,variant=hq,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]\n  video/x-prores,variant=4444,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]\n  video/x-prores,variant=4444xq,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]"
+        "SRC:\n  video/x-h264,width=[16,65535],height=[16,65535],framerate=[1/1,240/1],alignment=au\n  video/x-h265,width=[16,65535],height=[16,65535],framerate=[1/1,240/1],alignment=au\n  video/x-vp8,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]\n  video/x-vp9,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]\n  video/x-av1,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]\n  image/jpeg,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]\n  video/x-theora,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]\n  audio/mpeg\n  audio/x-opus\n  audio/x-ac3\n  audio/x-flac\n  audio/x-vorbis\n  audio/mpeg\n  audio/mpeg\n  text/x-raw,format=utf8\n  subpicture/x-dvd\n  subpicture/x-dvb\n  subpicture/x-pgs\n  audio/x-raw,format=S16LE\n  audio/x-raw,format=F32LE\n  audio/x-raw,format=S24LE\n  audio/x-raw,format=S32LE\n  audio/x-raw,format=U8\n  video/x-raw,format=I420,width=[1,65535],height=[1,65535],framerate=[1/1,240/1]\n  video/x-raw,format=YUY2,width=[1,65535],height=[1,65535],framerate=[1/1,240/1]\n  video/x-raw,format=UYVY,width=[1,65535],height=[1,65535],framerate=[1/1,240/1]\n  video/x-raw,format=v210,width=[1,65535],height=[1,65535],framerate=[1/1,240/1]\n  video/x-raw,format=GRAY8,width=[1,65535],height=[1,65535],framerate=[1/1,240/1]\n  video/x-raw,format=BGR,width=[1,65535],height=[1,65535],framerate=[1/1,240/1]\n  video/x-raw,format=BGRx,width=[1,65535],height=[1,65535],framerate=[1/1,240/1]\n  video/x-raw,format=RGB,width=[1,65535],height=[1,65535],framerate=[1/1,240/1]\n  video/x-raw,format=ARGB,width=[1,65535],height=[1,65535],framerate=[1/1,240/1]\n  video/x-prores,variant=proxy,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]\n  video/x-prores,variant=lt,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]\n  video/x-prores,variant=standard,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]\n  video/x-prores,variant=hq,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]\n  video/x-prores,variant=4444,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]\n  video/x-prores,variant=4444xq,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]"
       ],
       "properties": [
         {
-          "blurb": "elementary stream to emit: h264 | h265 | vp8 | vp9 | av1 | mjpeg | theora | prores-proxy | prores-lt | prores-standard | prores-hq | prores-4444 | prores-4444xq | aac | opus | ac3 | flac | vorbis | vobsub | dvbsub | pgs | a raw PCM format (U8 | S16LE | S24LE | S32LE | F32LE) | uncompressed video by layout (raw-i420 | raw-yuy2 | raw-uyvy | raw-v210) | video-riff-<fourcc> | video-mov-<fourcc> | audio-riff-0x<tag> (a codec known only by its tag, with ffmpeg-long-tail)",
+          "blurb": "elementary stream to emit: h264 | h265 | vp8 | vp9 | av1 | mjpeg | theora | prores-proxy | prores-lt | prores-standard | prores-hq | prores-4444 | prores-4444xq | aac | opus | ac3 | flac | vorbis | mp2 | mp3 | vobsub | dvbsub | pgs | a raw PCM format (U8 | S16LE | S24LE | S32LE | F32LE) | uncompressed video by layout (raw-i420 | raw-yuy2 | raw-uyvy | raw-v210) | video-riff-<fourcc> | video-mov-<fourcc> | audio-riff-0x<tag> (a codec known only by its tag, with ffmpeg-long-tail)",
           "default": null,
           "enum_values": null,
           "name": "stream",
@@ -4817,11 +4928,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Codec/Demuxer",
       "description": "Demuxes an IVF file into its VP8 / VP9 / AV1 frames",
       "experimental": false,
-      "klass": "Codec/Demuxer",
       "long_name": "IVF demuxer",
       "name": "ivfdemux",
       "pads": [
@@ -4832,11 +4943,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Codec/Demuxer",
       "description": "Demuxes an IndigoVision 8000 file into its MPEG-4 Part 2 frames",
       "experimental": false,
-      "klass": "Codec/Demuxer",
       "long_name": "IV8 demuxer",
       "name": "iv8demux",
       "pads": [
@@ -4847,11 +4958,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Codec/Demuxer",
       "description": "Demuxes an AVI byte stream to one of its elementary streams",
       "experimental": false,
-      "klass": "Codec/Demuxer",
       "long_name": "AVI demuxer",
       "name": "avidemux",
       "pads": [
@@ -4873,11 +4984,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Codec/Muxer",
       "description": "Writes one elementary stream into an AVI byte stream",
       "experimental": false,
-      "klass": "Codec/Muxer",
       "long_name": "AVI muxer",
       "name": "avimux",
       "pads": [
@@ -4888,11 +4999,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Codec/Demuxer",
       "description": "Demuxes an Ogg bitstream into its logical streams",
       "experimental": false,
-      "klass": "Codec/Demuxer",
       "long_name": "Ogg demuxer",
       "name": "oggdemux",
       "pads": [
@@ -4914,11 +5025,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Codec/Demuxer",
       "description": "Demuxes a fragmented-MP4 / CMAF byte stream",
       "experimental": false,
-      "klass": "Codec/Demuxer",
       "long_name": "fMP4 / CMAF demuxer",
       "name": "fmp4demux",
       "pads": [
@@ -4929,11 +5040,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Codec/Demuxer",
       "description": "Demuxes an MP4 / QuickTime byte stream into the tracks its ports select",
       "experimental": false,
-      "klass": "Codec/Demuxer",
       "long_name": "MP4 demuxer",
       "name": "qtdemux",
       "pads": [
@@ -4965,11 +5076,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Codec/Demuxer",
       "description": "Demuxes a Flash Video stream into one selected elementary stream",
       "experimental": false,
-      "klass": "Codec/Demuxer",
       "long_name": "FLV demuxer",
       "name": "flvdemux",
       "pads": [
@@ -4991,11 +5102,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Codec/Parser/Video",
       "description": "Parses an H.264 Annex-B stream and refines caps from SPS/PPS",
       "experimental": false,
-      "klass": "Codec/Parser/Video",
       "long_name": "H.264 parser",
       "name": "h264parse",
       "pads": [
@@ -5020,11 +5131,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Codec/Parser/Video",
       "description": "Parses an H.265 Annex-B stream and refines caps from VPS/SPS/PPS",
       "experimental": false,
-      "klass": "Codec/Parser/Video",
       "long_name": "H.265 parser",
       "name": "h265parse",
       "pads": [
@@ -5049,71 +5160,71 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Codec/Parser/Audio",
       "description": "Parses an AAC ADTS or LOAS/LATM stream and refines caps",
       "experimental": false,
-      "klass": "Codec/Parser/Audio",
       "long_name": "AAC parser",
       "name": "aacparse",
       "pads": [
-        "SINK:\n  audio/mpeg,channels=2,rate=48000",
-        "SRC:\n  audio/mpeg,channels=2,rate=48000"
+        "SINK:\n  audio/mpeg",
+        "SRC:\n  audio/mpeg"
       ],
       "properties": [],
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Codec/Parser/Audio",
       "description": "Splits a native FLAC stream into frames and refines caps",
       "experimental": false,
-      "klass": "Codec/Parser/Audio",
       "long_name": "FLAC parser",
       "name": "flacparse",
       "pads": [
-        "SINK:\n  audio/x-flac,channels=2,rate=44100",
-        "SRC:\n  audio/x-flac,channels=2,rate=44100"
+        "SINK:\n  audio/x-flac",
+        "SRC:\n  audio/x-flac"
       ],
       "properties": [],
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Codec/Parser/Audio",
       "description": "Splits an MPEG audio stream into frames and refines caps",
       "experimental": false,
-      "klass": "Codec/Parser/Audio",
       "long_name": "MPEG audio parser",
       "name": "mpegaudioparse",
       "pads": [
-        "SINK:\n  audio/mpeg,channels=2,rate=44100",
-        "SRC:\n  audio/mpeg,channels=2,rate=44100"
+        "SINK:\n  audio/mpeg\n  audio/mpeg",
+        "SRC:\n  audio/mpeg\n  audio/mpeg"
       ],
       "properties": [],
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Codec/Parser/Audio",
       "description": "Splits an AC-3 stream into syncframes and refines caps",
       "experimental": false,
-      "klass": "Codec/Parser/Audio",
       "long_name": "AC-3 parser",
       "name": "ac3parse",
       "pads": [
-        "SINK:\n  audio/x-ac3,channels=2,rate=48000",
-        "SRC:\n  audio/x-ac3,channels=2,rate=48000"
+        "SINK:\n  audio/x-ac3",
+        "SRC:\n  audio/x-ac3"
       ],
       "properties": [],
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Codec/Parser/Video",
       "description": "Frames a still-image byte stream into whole images and refines their caps",
       "experimental": false,
-      "klass": "Codec/Parser/Video",
       "long_name": "JPEG parser",
       "name": "jpegparse",
       "pads": [
@@ -5124,11 +5235,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Codec/Parser/Video",
       "description": "Frames a still-image byte stream into whole images and refines their caps",
       "experimental": false,
-      "klass": "Codec/Parser/Video",
       "long_name": "PNG parser",
       "name": "pngparse",
       "pads": [
@@ -5139,11 +5250,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Codec/Parser/Video",
       "description": "Frames a headerless raw video dump using its declared format and geometry",
       "experimental": false,
-      "klass": "Codec/Parser/Video",
       "long_name": "Raw video framer",
       "name": "rawvideoparse",
       "pads": [
@@ -5231,16 +5342,16 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Codec/Parser/Audio",
       "description": "Frames a headerless raw audio dump using its declared format, rate and channels",
       "experimental": false,
-      "klass": "Codec/Parser/Audio",
       "long_name": "Raw audio framer",
       "name": "rawaudioparse",
       "pads": [
         "SINK:\n  application/octet-stream",
-        "SRC:\n  audio/x-raw,format=S16LE,channels=2,rate=44100"
+        "SRC:\n  audio/x-raw,format=S16LE\n  audio/x-raw,format=F32LE\n  audio/x-raw,format=S24LE\n  audio/x-raw,format=S32LE\n  audio/x-raw,format=U8\n  audio/x-alaw\n  audio/x-mulaw"
       ],
       "properties": [
         {
@@ -5293,11 +5404,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Codec/Demuxer/Metadata",
       "description": "Strips ID3v1 / ID3v2 tags from a stream and posts them on the bus",
       "experimental": false,
-      "klass": "Codec/Demuxer/Metadata",
       "long_name": "ID3 tag demuxer",
       "name": "id3demux",
       "pads": [],
@@ -5305,11 +5416,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Formatter/Metadata",
       "description": "Writes an ID3v2 tag ahead of a stream, replacing one already there",
       "experimental": false,
-      "klass": "Formatter/Metadata",
       "long_name": "ID3v2 tag writer",
       "name": "id3v2mux",
       "pads": [],
@@ -5351,11 +5462,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Formatter/Metadata",
       "description": "Writes an APEv2 tag at the tail of a stream, ahead of any ID3v1 block",
       "experimental": false,
-      "klass": "Formatter/Metadata",
       "long_name": "APEv2 tag writer",
       "name": "apev2mux",
       "pads": [],
@@ -5374,11 +5485,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Formatter/Metadata",
       "description": "Reads an APEv2 tag from the tail of a stream and strips it",
       "experimental": false,
-      "klass": "Formatter/Metadata",
       "long_name": "APEv2 tag reader",
       "name": "apedemux",
       "pads": [],
@@ -5386,31 +5497,31 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Formatter/Metadata",
       "description": "Writes the Xing / Info seek header at the head of an MPEG audio stream",
       "experimental": false,
-      "klass": "Formatter/Metadata",
       "long_name": "Xing VBR header writer",
       "name": "xingmux",
       "pads": [
-        "SINK:\n  audio/mpeg,channels=2,rate=44100",
-        "SRC:\n  audio/mpeg,channels=2,rate=44100"
+        "SINK:\n  audio/mpeg",
+        "SRC:\n  audio/mpeg"
       ],
       "properties": [],
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Formatter/Metadata",
       "description": "Rewrites the comment header packet of a Vorbis stream",
       "experimental": false,
-      "klass": "Formatter/Metadata",
       "long_name": "Vorbis tag writer",
       "name": "vorbistag",
       "pads": [
-        "SINK:\n  audio/x-vorbis,channels=2,rate=44100",
-        "SRC:\n  audio/x-vorbis,channels=2,rate=44100"
+        "SINK:\n  audio/x-vorbis",
+        "SRC:\n  audio/x-vorbis"
       ],
       "properties": [
         {
@@ -5427,16 +5538,16 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Formatter/Metadata",
       "description": "Rewrites the VORBIS_COMMENT metadata block of a native FLAC stream",
       "experimental": false,
-      "klass": "Formatter/Metadata",
       "long_name": "FLAC tag writer",
       "name": "flactag",
       "pads": [
-        "SINK:\n  audio/x-flac,channels=2,rate=44100",
-        "SRC:\n  audio/x-flac,channels=2,rate=44100"
+        "SINK:\n  audio/x-flac",
+        "SRC:\n  audio/x-flac"
       ],
       "properties": [
         {
@@ -5453,26 +5564,26 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Codec/Parser/Audio",
       "description": "Refines Opus caps (channel count) from each packet's TOC byte",
       "experimental": false,
-      "klass": "Codec/Parser/Audio",
       "long_name": "Opus parser",
       "name": "opusparse",
       "pads": [
-        "SINK:\n  audio/x-opus,channels=2,rate=48000",
-        "SRC:\n  audio/x-opus,channels=2,rate=48000"
+        "SINK:\n  audio/x-opus",
+        "SRC:\n  audio/x-opus"
       ],
       "properties": [],
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Codec/Parser/Video",
       "description": "Frames a VP8 stream and reads its keyframe geometry",
       "experimental": false,
-      "klass": "Codec/Parser/Video",
       "long_name": "VP8 parser",
       "name": "vp8parse",
       "pads": [
@@ -5483,11 +5594,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Codec/Parser/Video",
       "description": "Frames a VP9 stream and reads its keyframe geometry",
       "experimental": false,
-      "klass": "Codec/Parser/Video",
       "long_name": "VP9 parser",
       "name": "vp9parse",
       "pads": [
@@ -5498,11 +5609,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Codec/Parser/Video",
       "description": "Frames an AV1 OBU stream and reads its sequence header",
       "experimental": false,
-      "klass": "Codec/Parser/Video",
       "long_name": "AV1 parser",
       "name": "av1parse",
       "pads": [
@@ -5513,37 +5624,26 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Codec/Parser/Video",
       "description": "Frames an MPEG-1 / MPEG-2 video stream into access units and reads its sequence header",
       "experimental": false,
-      "klass": "Codec/Parser/Video",
       "long_name": "MPEG-1/2 video parser",
       "name": "mpegvideoparse",
       "pads": [
         "SINK:\n  video/mpeg",
         "SRC:\n  video/mpeg"
       ],
-      "properties": [
-        {
-          "blurb": "sample aspect ratio read from the sequence header (0/1 = not signalled yet)",
-          "default": null,
-          "enum_values": null,
-          "name": "pixel-aspect-ratio",
-          "range": null,
-          "readable": true,
-          "type": "Fraction",
-          "writable": false
-        }
-      ],
+      "properties": [],
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Codec/Parser/Video",
       "description": "Frames an MPEG-4 Part 2 stream into access units and reads its VOL header",
       "experimental": false,
-      "klass": "Codec/Parser/Video",
       "long_name": "MPEG-4 Part 2 video parser",
       "name": "mpeg4videoparse",
       "pads": [
@@ -5563,52 +5663,31 @@
           "readable": true,
           "type": "Integer",
           "writable": true
-        },
-        {
-          "blurb": "sample aspect ratio read from the sequence header (0/1 = not signalled yet)",
-          "default": null,
-          "enum_values": null,
-          "name": "pixel-aspect-ratio",
-          "range": null,
-          "readable": true,
-          "type": "Fraction",
-          "writable": false
         }
       ],
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Codec/Parser/Video",
       "description": "Frames a VC-1 advanced-profile stream into access units and reads its sequence header",
       "experimental": false,
-      "klass": "Codec/Parser/Video",
       "long_name": "VC-1 parser",
       "name": "vc1parse",
       "pads": [
         "SINK:\n  video/x-wmv",
         "SRC:\n  video/x-wmv"
       ],
-      "properties": [
-        {
-          "blurb": "sample aspect ratio read from the sequence header (0/1 = not signalled yet)",
-          "default": null,
-          "enum_values": null,
-          "name": "pixel-aspect-ratio",
-          "range": null,
-          "readable": true,
-          "type": "Fraction",
-          "writable": false
-        }
-      ],
+      "properties": [],
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Generic",
       "description": "Passes buffers through unchanged, for probing and debugging",
       "experimental": false,
-      "klass": "Generic",
       "long_name": "Identity",
       "name": "identity",
       "pads": [],
@@ -5616,11 +5695,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Filter/Analyzer/Debug",
       "description": "A spy element that can provide information on buffers going through it",
       "experimental": false,
-      "klass": "Filter/Analyzer/Debug",
       "long_name": "DebugSpy",
       "name": "debugspy",
       "pads": [],
@@ -5649,11 +5728,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Filter",
       "description": "Drops buffers and events or lets them through",
       "experimental": false,
-      "klass": "Filter",
       "long_name": "Valve",
       "name": "valve",
       "pads": [],
@@ -5682,11 +5761,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Generic",
       "description": "Sniffs the media type of a byte stream and re-declares its caps",
       "experimental": false,
-      "klass": "Generic",
       "long_name": "TypeFind",
       "name": "typefind",
       "pads": [],
@@ -5694,11 +5773,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Generic",
       "description": "Delays each buffer until its PTS is due on the pipeline clock",
       "experimental": false,
-      "klass": "Generic",
       "long_name": "Clock sync",
       "name": "clocksync",
       "pads": [],
@@ -5727,11 +5806,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Generic",
       "description": "Starts and stops several streams together on the main stream's keyframes",
       "experimental": false,
-      "klass": "Generic",
       "long_name": "ToggleRecord",
       "name": "togglerecord",
       "pads": [],
@@ -5790,11 +5869,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Filter/Video",
       "description": "Re-emits each decoded GOP in descending PTS for reverse playback",
       "experimental": false,
-      "klass": "Filter/Video",
       "long_name": "GOP reverser",
       "name": "gopreverse",
       "pads": [],
@@ -5802,11 +5881,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Generic",
       "description": "Spills a pushed byte stream to a temp file and serves it as a seekable byte source",
       "experimental": false,
-      "klass": "Generic",
       "long_name": "Download buffer",
       "name": "downloadbuffer",
       "pads": [
@@ -5874,11 +5953,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Generic",
       "description": "Periodically reports pipeline progress",
       "experimental": false,
-      "klass": "Generic",
       "long_name": "Progress report",
       "name": "progressreport",
       "pads": [],
@@ -5907,11 +5986,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Generic",
       "description": "Fails the pipeline when no data arrives within a timeout",
       "experimental": false,
-      "klass": "Generic",
       "long_name": "Watchdog",
       "name": "watchdog",
       "pads": [],
@@ -5933,11 +6012,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Generic",
       "description": "Overwrites the caps of a stream, passing the data through",
       "experimental": false,
-      "klass": "Generic",
       "long_name": "CapsSetter",
       "name": "capssetter",
       "pads": [],
@@ -5976,11 +6055,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Generic",
       "description": "Posts hand-written stream metadata on the bus",
       "experimental": false,
-      "klass": "Generic",
       "long_name": "TagInject",
       "name": "taginject",
       "pads": [],
@@ -5999,11 +6078,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Generic",
       "description": "Re-chunks a byte stream into randomly sized buffers",
       "experimental": false,
-      "klass": "Generic",
       "long_name": "RndBufferSize",
       "name": "rndbuffersize",
       "pads": [],
@@ -6051,11 +6130,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Generic",
       "description": "Re-chunks a byte stream into step-aligned random buffer sizes",
       "experimental": false,
-      "klass": "Generic",
       "long_name": "ChopMyData",
       "name": "chopmydata",
       "pads": [],
@@ -6103,11 +6182,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Generic",
       "description": "Overwrites bytes at random to exercise error handling downstream",
       "experimental": false,
-      "klass": "Generic",
       "long_name": "BreakMyData",
       "name": "breakmydata",
       "pads": [],
@@ -6168,11 +6247,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Generic",
       "description": "Passes data through, converting a failure from downstream",
       "experimental": false,
-      "klass": "Generic",
       "long_name": "ErrorIgnore",
       "name": "errorignore",
       "pads": [],
@@ -6231,11 +6310,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Filter/Effect",
       "description": "Shifts frame PTS/DTS by a signed offset (the av-offset A/V sync knob)",
       "experimental": false,
-      "klass": "Filter/Effect",
       "long_name": "AvOffset",
       "name": "avoffset",
       "pads": [],
@@ -6254,11 +6333,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Generic",
       "description": "Restricts the caps that may negotiate across a link",
       "experimental": false,
-      "klass": "Generic",
       "long_name": "Caps filter",
       "name": "capsfilter",
       "pads": [],
@@ -6277,11 +6356,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Sink",
       "description": "Discards all buffers (a no-op terminal for testing)",
       "experimental": false,
-      "klass": "Sink",
       "long_name": "Fake sink",
       "name": "fakesink",
       "pads": [
@@ -6291,15 +6370,15 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Sink/Video",
       "description": "Discards raw video buffers, counting them",
       "experimental": false,
-      "klass": "Sink/Video",
       "long_name": "FakeVideoSink",
       "name": "fakevideosink",
       "pads": [
-        "SINK:\n  video/x-raw,format=NV12\n  video/x-raw,format=I420\n  video/x-raw,format=RGBA\n  video/x-raw,format=BGRA\n  video/x-raw,format=RGB\n  video/x-raw,format=YUY2\n  video/x-raw,format=I420_10LE\n  video/x-raw,format=I420_12LE\n  video/x-raw,format=Y42B\n  video/x-raw,format=I422_10LE\n  video/x-raw,format=I422_12LE\n  video/x-raw,format=Y444\n  video/x-raw,format=Y444_10LE\n  video/x-raw,format=Y444_12LE\n  video/x-raw,format=P010_10LE\n  video/x-raw,format=A420\n  video/x-raw,format=UYVY\n  video/x-raw,format=A444_12LE\n  video/x-raw,format=v210\n  video/x-raw,format=r210\n  video/x-raw,format=GBR_10LE\n  video/x-raw,format=GRAY8\n  video/x-raw,format=BGR\n  video/x-raw,format=BGRx\n  video/x-raw,format=ARGB"
+        "SINK:\n  video/x-raw,format=NV12\n  video/x-raw,format=I420\n  video/x-raw,format=RGBA\n  video/x-raw,format=BGRA\n  video/x-raw,format=RGB\n  video/x-raw,format=YUY2\n  video/x-raw,format=I420_10LE\n  video/x-raw,format=I420_12LE\n  video/x-raw,format=Y42B\n  video/x-raw,format=I422_10LE\n  video/x-raw,format=I422_12LE\n  video/x-raw,format=Y444\n  video/x-raw,format=Y444_10LE\n  video/x-raw,format=Y444_12LE\n  video/x-raw,format=P010_10LE\n  video/x-raw,format=A420\n  video/x-raw,format=UYVY\n  video/x-raw,format=A444_12LE\n  video/x-raw,format=v210\n  video/x-raw,format=r210\n  video/x-raw,format=GBR_10LE\n  video/x-raw,format=GRAY8\n  video/x-raw,format=BGR\n  video/x-raw,format=BGRx\n  video/x-raw,format=ARGB\n  video/x-raw,format=RGBP\n  video/x-raw,format=BGRP\n  video/x-raw,format=RGBA_F16LE\n  video/x-raw,format=RGBA_F32LE\n  video/x-raw,format=RGB_F16LE\n  video/x-raw,format=RGB_F32LE\n  video/x-raw,format=RGBP_F16LE\n  video/x-raw,format=RGBP_F32LE"
       ],
       "properties": [
         {
@@ -6326,11 +6405,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Sink/Audio",
       "description": "Discards raw audio buffers, counting them",
       "experimental": false,
-      "klass": "Sink/Audio",
       "long_name": "FakeAudioSink",
       "name": "fakeaudiosink",
       "pads": [
@@ -6361,11 +6440,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Sink",
       "description": "Reports a digest of every buffer, for bit-exactness checks. Each digest goes on the pipeline bus as BusMessage::Checksum, which g2g-launch prints on stdout, and on the debug log (G2G_DEBUG=ChecksumSink:debug)",
       "experimental": false,
-      "klass": "Sink",
       "long_name": "ChecksumSink",
       "name": "checksumsink",
       "pads": [
@@ -6386,11 +6465,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Sink/Video",
       "description": "Reports the frame rate a wrapped display sink achieves",
       "experimental": false,
-      "klass": "Sink/Video",
       "long_name": "FpsDisplaySink",
       "name": "fpsdisplaysink",
       "pads": [],
@@ -6482,11 +6561,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Sink",
       "description": "Delivers buffers to the application via callback or pull (g2g_appsink_*)",
       "experimental": false,
-      "klass": "Sink",
       "long_name": "Application sink",
       "name": "appsink",
       "pads": [
@@ -6527,11 +6606,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Sink",
       "description": "Publishes its stream to every intersrc with the same producer-name",
       "experimental": false,
-      "klass": "Sink",
       "long_name": "Inter-graph sink",
       "name": "intersink",
       "pads": [
@@ -6552,11 +6631,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Sink/File",
       "description": "Writes incoming buffers to a local file",
       "experimental": false,
-      "klass": "Sink/File",
       "long_name": "File sink",
       "name": "filesink",
       "pads": [
@@ -6577,11 +6656,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Sink/File",
       "description": "Writes incoming buffers to an open file descriptor",
       "experimental": false,
-      "klass": "Sink/File",
       "long_name": "Filedescriptor sink",
       "name": "fdsink",
       "pads": [
@@ -6605,15 +6684,15 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Sink/File",
       "description": "Writes interleaved PCM to a RIFF/WAVE file",
       "experimental": false,
-      "klass": "Sink/File",
       "long_name": "WAV file sink",
       "name": "wavsink",
       "pads": [
-        "SINK:\n  audio/x-raw,format=U8,channels=2,rate=48000\n  audio/x-raw,format=S16LE,channels=2,rate=48000\n  audio/x-raw,format=S24LE,channels=2,rate=48000\n  audio/x-raw,format=S32LE,channels=2,rate=48000\n  audio/x-raw,format=F32LE,channels=2,rate=48000"
+        "SINK:\n  audio/x-raw,format=S16LE\n  audio/x-raw,format=F32LE\n  audio/x-raw,format=S24LE\n  audio/x-raw,format=S32LE\n  audio/x-raw,format=U8"
       ],
       "properties": [
         {
@@ -6630,11 +6709,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Sink/File",
       "description": "Records the packet stream to a file for deterministic replay",
       "experimental": false,
-      "klass": "Sink/File",
       "long_name": "Recording sink",
       "name": "recordsink",
       "pads": [
@@ -6655,11 +6734,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Sink/File",
       "description": "Writes buffers to a sequence of files",
       "experimental": false,
-      "klass": "Sink/File",
       "long_name": "Multi-file sink",
       "name": "multifilesink",
       "pads": [
@@ -6710,11 +6789,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Sink/File",
       "description": "Muxes to a series of MP4 files",
       "experimental": false,
-      "klass": "Sink/File",
       "long_name": "Split-muxer sink",
       "name": "splitmuxsink",
       "pads": [
@@ -6765,11 +6844,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Sink/File",
       "description": "Segments a muxed byte stream and writes an HLS media playlist",
       "experimental": false,
-      "klass": "Sink/File",
       "long_name": "HLS sink",
       "name": "hlssink",
       "pads": [
@@ -6817,6 +6896,16 @@
           "writable": true
         },
         {
+          "blurb": "write every segment, and the fMP4 init segment, into this one file, addressed by byte range (empty = one file per segment)",
+          "default": null,
+          "enum_values": null,
+          "name": "single-media-file",
+          "range": null,
+          "readable": true,
+          "type": "String",
+          "writable": true
+        },
+        {
           "blurb": "target segment duration in seconds (0 = cut at every keyframe)",
           "default": null,
           "enum_values": null,
@@ -6850,11 +6939,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Codec/Encoder/Audio",
       "description": "Convert 16bit PCM to 8bit mu law",
       "experimental": false,
-      "klass": "Codec/Encoder/Audio",
       "long_name": "Mu Law audio encoder",
       "name": "mulawenc",
       "pads": [
@@ -6865,26 +6954,26 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Codec/Decoder/Audio",
       "description": "Convert 8bit mu law to 16bit PCM",
       "experimental": false,
-      "klass": "Codec/Decoder/Audio",
       "long_name": "Mu Law audio decoder",
       "name": "mulawdec",
       "pads": [
-        "SINK:\n  audio/x-mulaw\n  audio/x-mulaw,rate=8000",
-        "SRC:\n  audio/x-raw,format=S16LE,channels=1,rate=8000"
+        "SINK:\n  audio/x-mulaw",
+        "SRC:\n  audio/x-raw,format=S16LE"
       ],
       "properties": [],
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Codec/Encoder/Audio",
       "description": "Convert 16bit PCM to 8bit A law",
       "experimental": false,
-      "klass": "Codec/Encoder/Audio",
       "long_name": "A Law audio encoder",
       "name": "alawenc",
       "pads": [
@@ -6895,26 +6984,26 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Codec/Decoder/Audio",
       "description": "Convert 8bit A law to 16bit PCM",
       "experimental": false,
-      "klass": "Codec/Decoder/Audio",
       "long_name": "A Law audio decoder",
       "name": "alawdec",
       "pads": [
-        "SINK:\n  audio/x-alaw\n  audio/x-alaw,rate=8000",
-        "SRC:\n  audio/x-raw,format=S16LE,channels=1,rate=8000"
+        "SINK:\n  audio/x-alaw",
+        "SRC:\n  audio/x-raw,format=S16LE"
       ],
       "properties": [],
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Codec/Encoder/Audio",
       "description": "Encodes mono or stereo S16LE PCM to IMA ADPCM (dvi layout)",
       "experimental": false,
-      "klass": "Codec/Encoder/Audio",
       "long_name": "ADPCM encoder",
       "name": "adpcmenc",
       "pads": [
@@ -6939,11 +7028,11 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Codec/Decoder/Audio",
       "description": "Decodes IMA ADPCM (dvi layout) to S16LE PCM",
       "experimental": false,
-      "klass": "Codec/Decoder/Audio",
       "long_name": "ADPCM decoder",
       "name": "adpcmdec",
       "pads": [
@@ -6968,11 +7057,34 @@
       "role": "element"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
+      "caps": null,
+      "classification": "Metadata/Video/Muxer",
+      "description": "Muxes SMPTE ST-2038 ancillary metadata streams into a single stream",
+      "experimental": false,
+      "long_name": "SMPTE ST-2038 ancillary metadata muxer",
+      "name": "st2038ancmux",
+      "pads": [],
+      "properties": [
+        {
+          "blurb": "nanoseconds a live mux waits past a frame's end for late inputs",
+          "default": "0",
+          "enum_values": null,
+          "name": "latency",
+          "range": null,
+          "readable": true,
+          "type": "Unsigned Integer",
+          "writable": true
+        }
+      ],
+      "role": "muxer (fan-in)"
+    },
+    {
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": "video/x-raw,format=RGBA,width=320,height=240,framerate=30/1",
+      "classification": "Generic/Muxer",
       "description": "Interleaves N input streams into one output by presentation timestamp; the structural fan-in for text/data streams (the gst `funnel` analog).",
       "experimental": false,
-      "klass": "Generic/Muxer",
       "long_name": "Funnel N-to-1 forwarder",
       "name": "funnel",
       "pads": [],
@@ -6980,11 +7092,11 @@
       "role": "muxer (fan-in)"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Generic",
       "description": "Concatenates N streams end to end",
       "experimental": false,
-      "klass": "Generic",
       "long_name": "Concat",
       "name": "concat",
       "pads": [],
@@ -7003,11 +7115,11 @@
       "role": "muxer (fan-in)"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Generic",
       "description": "Forwards one of N inputs",
       "experimental": false,
-      "klass": "Generic",
       "long_name": "Input selector",
       "name": "input-selector",
       "pads": [],
@@ -7026,11 +7138,11 @@
       "role": "muxer (fan-in)"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Generic",
       "description": "Forwards the highest-priority input that is still delivering",
       "experimental": false,
-      "klass": "Generic",
       "long_name": "Fallback switch",
       "name": "fallbackswitch",
       "pads": [],
@@ -7189,11 +7301,11 @@
       "role": "muxer (fan-in)"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Filter",
       "description": "Fills a stalled live stream with repeated frames or audio silence",
       "experimental": false,
-      "klass": "Filter",
       "long_name": "Live sync",
       "name": "livesync",
       "pads": [],
@@ -7282,11 +7394,34 @@
       "role": "muxer (fan-in)"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Generic",
+      "description": "Puts the branches of a framesplit back into the order it split the frames in",
+      "experimental": false,
+      "long_name": "Frame merge",
+      "name": "framemerge",
+      "pads": [],
+      "properties": [
+        {
+          "blurb": "name shared by a framesplit and the framemerge that restores its frame order",
+          "default": "default",
+          "enum_values": null,
+          "name": "dispatch-log",
+          "range": null,
+          "readable": true,
+          "type": "String",
+          "writable": true
+        }
+      ],
+      "role": "muxer (fan-in)"
+    },
+    {
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
+      "caps": null,
+      "classification": "Filter/Editor/Video",
       "description": "Blends decoded bitmap-subtitle canvases onto video by PTS",
       "experimental": false,
-      "klass": "Filter/Editor/Video",
       "long_name": "Subpicture overlay",
       "name": "subpictureoverlay",
       "pads": [],
@@ -7294,11 +7429,11 @@
       "role": "muxer (fan-in)"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": "video/x-raw,format=RGBA,width=320,height=240,framerate=30/1",
+      "classification": "Filter/Editing/Video",
       "description": "Composites several video inputs onto one timed output canvas",
       "experimental": false,
-      "klass": "Filter/Editing/Video",
       "long_name": "Video compositor",
       "name": "compositor",
       "pads": [],
@@ -7427,6 +7562,26 @@
           "writable": true
         },
         {
+          "blurb": "pad 0: blending operator over the pads below it",
+          "default": "over",
+          "enum_values": "source | over",
+          "name": "sink0-operator",
+          "range": null,
+          "readable": true,
+          "type": "String",
+          "writable": true
+        },
+        {
+          "blurb": "pad 0: scale to fill the pad rectangle, or fit and centre keeping the aspect ratio",
+          "default": "none",
+          "enum_values": "none | keep-aspect-ratio",
+          "name": "sink0-sizing-policy",
+          "range": null,
+          "readable": true,
+          "type": "String",
+          "writable": true
+        },
+        {
           "blurb": "pad 1: left edge on the canvas in pixels, may be negative",
           "default": "0",
           "enum_values": null,
@@ -7487,6 +7642,26 @@
           "range": null,
           "readable": true,
           "type": "Unsigned Integer",
+          "writable": true
+        },
+        {
+          "blurb": "pad 1: blending operator over the pads below it",
+          "default": "over",
+          "enum_values": "source | over",
+          "name": "sink1-operator",
+          "range": null,
+          "readable": true,
+          "type": "String",
+          "writable": true
+        },
+        {
+          "blurb": "pad 1: scale to fill the pad rectangle, or fit and centre keeping the aspect ratio",
+          "default": "none",
+          "enum_values": "none | keep-aspect-ratio",
+          "name": "sink1-sizing-policy",
+          "range": null,
+          "readable": true,
+          "type": "String",
           "writable": true
         },
         {
@@ -7553,6 +7728,26 @@
           "writable": true
         },
         {
+          "blurb": "pad 2: blending operator over the pads below it",
+          "default": "over",
+          "enum_values": "source | over",
+          "name": "sink2-operator",
+          "range": null,
+          "readable": true,
+          "type": "String",
+          "writable": true
+        },
+        {
+          "blurb": "pad 2: scale to fill the pad rectangle, or fit and centre keeping the aspect ratio",
+          "default": "none",
+          "enum_values": "none | keep-aspect-ratio",
+          "name": "sink2-sizing-policy",
+          "range": null,
+          "readable": true,
+          "type": "String",
+          "writable": true
+        },
+        {
           "blurb": "pad 3: left edge on the canvas in pixels, may be negative",
           "default": "0",
           "enum_values": null,
@@ -7613,6 +7808,26 @@
           "range": null,
           "readable": true,
           "type": "Unsigned Integer",
+          "writable": true
+        },
+        {
+          "blurb": "pad 3: blending operator over the pads below it",
+          "default": "over",
+          "enum_values": "source | over",
+          "name": "sink3-operator",
+          "range": null,
+          "readable": true,
+          "type": "String",
+          "writable": true
+        },
+        {
+          "blurb": "pad 3: scale to fill the pad rectangle, or fit and centre keeping the aspect ratio",
+          "default": "none",
+          "enum_values": "none | keep-aspect-ratio",
+          "name": "sink3-sizing-policy",
+          "range": null,
+          "readable": true,
+          "type": "String",
           "writable": true
         },
         {
@@ -7679,6 +7894,26 @@
           "writable": true
         },
         {
+          "blurb": "pad 4: blending operator over the pads below it",
+          "default": "over",
+          "enum_values": "source | over",
+          "name": "sink4-operator",
+          "range": null,
+          "readable": true,
+          "type": "String",
+          "writable": true
+        },
+        {
+          "blurb": "pad 4: scale to fill the pad rectangle, or fit and centre keeping the aspect ratio",
+          "default": "none",
+          "enum_values": "none | keep-aspect-ratio",
+          "name": "sink4-sizing-policy",
+          "range": null,
+          "readable": true,
+          "type": "String",
+          "writable": true
+        },
+        {
           "blurb": "pad 5: left edge on the canvas in pixels, may be negative",
           "default": "0",
           "enum_values": null,
@@ -7739,6 +7974,26 @@
           "range": null,
           "readable": true,
           "type": "Unsigned Integer",
+          "writable": true
+        },
+        {
+          "blurb": "pad 5: blending operator over the pads below it",
+          "default": "over",
+          "enum_values": "source | over",
+          "name": "sink5-operator",
+          "range": null,
+          "readable": true,
+          "type": "String",
+          "writable": true
+        },
+        {
+          "blurb": "pad 5: scale to fill the pad rectangle, or fit and centre keeping the aspect ratio",
+          "default": "none",
+          "enum_values": "none | keep-aspect-ratio",
+          "name": "sink5-sizing-policy",
+          "range": null,
+          "readable": true,
+          "type": "String",
           "writable": true
         },
         {
@@ -7805,6 +8060,26 @@
           "writable": true
         },
         {
+          "blurb": "pad 6: blending operator over the pads below it",
+          "default": "over",
+          "enum_values": "source | over",
+          "name": "sink6-operator",
+          "range": null,
+          "readable": true,
+          "type": "String",
+          "writable": true
+        },
+        {
+          "blurb": "pad 6: scale to fill the pad rectangle, or fit and centre keeping the aspect ratio",
+          "default": "none",
+          "enum_values": "none | keep-aspect-ratio",
+          "name": "sink6-sizing-policy",
+          "range": null,
+          "readable": true,
+          "type": "String",
+          "writable": true
+        },
+        {
           "blurb": "pad 7: left edge on the canvas in pixels, may be negative",
           "default": "0",
           "enum_values": null,
@@ -7866,16 +8141,36 @@
           "readable": true,
           "type": "Unsigned Integer",
           "writable": true
+        },
+        {
+          "blurb": "pad 7: blending operator over the pads below it",
+          "default": "over",
+          "enum_values": "source | over",
+          "name": "sink7-operator",
+          "range": null,
+          "readable": true,
+          "type": "String",
+          "writable": true
+        },
+        {
+          "blurb": "pad 7: scale to fill the pad rectangle, or fit and centre keeping the aspect ratio",
+          "default": "none",
+          "enum_values": "none | keep-aspect-ratio",
+          "name": "sink7-sizing-policy",
+          "range": null,
+          "readable": true,
+          "type": "String",
+          "writable": true
         }
       ],
       "role": "muxer (fan-in)"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": "audio/x-raw,format=S16LE,channels=2,rate=48000",
+      "classification": "Filter/Audio",
       "description": "Sums N time-aligned PCM audio inputs into one output stream (the gst `audiomixer` analog).",
       "experimental": false,
-      "klass": "Filter/Audio",
       "long_name": "Audio mixer",
       "name": "audiomixer",
       "pads": [],
@@ -7883,11 +8178,11 @@
       "role": "muxer (fan-in)"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": "audio/x-raw,format=S16LE,channels=1,rate=48000",
+      "classification": "Filter/Converter/Audio",
       "description": "Merges N mono PCM inputs into one N-channel interleaved stream (the gst `interleave` analog).",
       "experimental": false,
-      "klass": "Filter/Converter/Audio",
       "long_name": "Audio interleaver",
       "name": "interleave",
       "pads": [],
@@ -7916,11 +8211,11 @@
       "role": "muxer (fan-in)"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": "video/mpegts",
+      "classification": "Codec/Muxer",
       "description": "Muxes elementary streams into an MPEG transport stream",
       "experimental": false,
-      "klass": "Codec/Muxer",
       "long_name": "MPEG-TS muxer",
       "name": "mpegtsmux",
       "pads": [],
@@ -8041,6 +8336,29 @@
           "writable": true
         },
         {
+          "blurb": "PID that carries the SCTE-35 sections arriving with the streams (0 = drop them)",
+          "default": "0",
+          "enum_values": null,
+          "name": "scte-35-pid",
+          "range": [
+            "0",
+            "8190"
+          ],
+          "readable": true,
+          "type": "Unsigned Integer",
+          "writable": true
+        },
+        {
+          "blurb": "SCTE-35 splice_null heartbeat interval, ticks of the 90kHz clock (0 = none)",
+          "default": "27000000",
+          "enum_values": null,
+          "name": "scte-35-null-interval",
+          "range": null,
+          "readable": true,
+          "type": "Unsigned Integer",
+          "writable": true
+        },
+        {
           "blurb": "carry KLV metadata as synchronous metadata-in-PES (stream_type 0x15) instead of asynchronous private PES",
           "default": "false",
           "enum_values": null,
@@ -8074,11 +8392,11 @@
       "role": "muxer (fan-in)"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": "video/quicktime",
+      "classification": "Codec/Muxer",
       "description": "Muxes video, audio and text tracks into an MP4 / ISO base media file",
       "experimental": false,
-      "klass": "Codec/Muxer",
       "long_name": "MP4 muxer",
       "name": "mp4mux",
       "pads": [],
@@ -8147,11 +8465,11 @@
       "role": "muxer (fan-in)"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": "video/x-matroska",
+      "classification": "Codec/Muxer",
       "description": "Muxes video, audio and subtitle tracks into a Matroska / WebM file",
       "experimental": false,
-      "klass": "Codec/Muxer",
       "long_name": "Matroska muxer",
       "name": "matroskamux",
       "pads": [],
@@ -8200,11 +8518,11 @@
       "role": "muxer (fan-in)"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": "application/ogg",
+      "classification": "Codec/Muxer",
       "description": "Muxes audio streams into an Ogg bitstream",
       "experimental": false,
-      "klass": "Codec/Muxer",
       "long_name": "Ogg muxer",
       "name": "oggmux",
       "pads": [],
@@ -8223,11 +8541,11 @@
       "role": "muxer (fan-in)"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": "video/x-flv",
+      "classification": "Codec/Muxer",
       "description": "Muxes a video and an audio stream into a Flash Video stream",
       "experimental": false,
-      "klass": "Codec/Muxer",
       "long_name": "FLV muxer",
       "name": "flvmux",
       "pads": [],
@@ -8235,11 +8553,23 @@
       "role": "muxer (fan-in)"
     },
     {
-      "author": "g2g",
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
+      "caps": "video/x-flv",
+      "classification": "Codec/Muxer",
+      "description": "Muxes a video and an audio stream into a Flash Video stream",
+      "experimental": false,
+      "long_name": "FLV muxer",
+      "name": "eflvmux",
+      "pads": [],
+      "properties": [],
+      "role": "muxer (fan-in)"
+    },
+    {
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
       "caps": null,
+      "classification": "Generic",
       "description": "Sends the input to the one output the active-pad property picks",
       "experimental": false,
-      "klass": "Generic",
       "long_name": "Output selector",
       "name": "output-selector",
       "pads": [],
@@ -8252,6 +8582,29 @@
           "range": null,
           "readable": true,
           "type": "Unsigned Integer",
+          "writable": true
+        }
+      ],
+      "role": "demuxer (fan-out)"
+    },
+    {
+      "author": "Aaron Boxer <boxerab@protonmail.com>",
+      "caps": null,
+      "classification": "Generic",
+      "description": "Sends each frame to the first output with room, for framemerge to put back in order",
+      "experimental": false,
+      "long_name": "Frame split",
+      "name": "framesplit",
+      "pads": [],
+      "properties": [
+        {
+          "blurb": "name shared by a framesplit and the framemerge that restores its frame order",
+          "default": "default",
+          "enum_values": null,
+          "name": "dispatch-log",
+          "range": null,
+          "readable": true,
+          "type": "String",
           "writable": true
         }
       ],

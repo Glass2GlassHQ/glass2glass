@@ -370,7 +370,7 @@ impl AsyncElement for FfmpegAudioDec {
             "ffmpeg audio decoder",
             "Codec/Decoder/Audio",
             "Decodes AAC / MPEG audio (mp2, mp3) / AC-3 / FLAC (libavcodec) to interleaved PcmS16Le",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

@@ -288,12 +288,14 @@ fn registry_lists_and_describes_the_batch_elements() {
     let docs = reg.describe_all();
     let doc = |name: &str| docs.iter().find(|d| d.name == name).cloned();
     assert_eq!(
-        doc("streammux").expect("streammux described").klass,
+        doc("streammux")
+            .expect("streammux described")
+            .classification,
         "Mux/Batch"
     );
     let demux = doc("streamdemux").expect("streamdemux described");
     assert_eq!(demux.long_name, "Stream demux");
-    assert_eq!(demux.klass, "Demux/Batch");
+    assert_eq!(demux.classification, "Demux/Batch");
     let inspected = reg.inspect("streamdemux").expect("streamdemux inspects");
     assert!(inspected.contains("Stream demux"), "{inspected}");
     assert!(inspected.contains("Demux/Batch"), "{inspected}");

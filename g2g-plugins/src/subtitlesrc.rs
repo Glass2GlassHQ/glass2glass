@@ -180,7 +180,7 @@ impl SourceLoop for SubtitleSrc {
             "Subtitle file source",
             "Source/File/Subtitle",
             "Reads a SubRip / WebVTT / SSA / TTML file as a Text stream",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

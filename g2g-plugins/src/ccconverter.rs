@@ -264,7 +264,7 @@ impl AsyncElement for CcConverter {
             "Closed-caption converter",
             "Filter/ClosedCaption",
             "Converts closed captions between the cc_data, CDP, S334-1A and raw CEA-608 layouts",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

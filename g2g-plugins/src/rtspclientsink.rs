@@ -1517,7 +1517,7 @@ impl MultiInputElement for RtspClientSink {
             "RTSP RECORD client",
             "Sink/Network",
             "Publishes H.264 / H.265 video and AAC / Opus audio to an RTSP server with ANNOUNCE and RECORD",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

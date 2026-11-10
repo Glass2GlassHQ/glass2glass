@@ -378,7 +378,12 @@ impl<C: StartCodeCodec> AsyncElement for StartCodeParse<C> {
         Self: 'a;
 
     fn metadata(&self) -> ElementMetadata {
-        ElementMetadata::new(C::NAME, "Codec/Parser/Video", C::DESCRIPTION, "g2g")
+        ElementMetadata::new(
+            C::NAME,
+            "Codec/Parser/Video",
+            C::DESCRIPTION,
+            crate::AARON_BOXER,
+        )
     }
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {

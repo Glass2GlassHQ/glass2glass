@@ -732,7 +732,7 @@ impl AsyncElement for UnixFdSink {
             "Unix file descriptor sink",
             "Sink/IPC",
             "Sends frames as memfd or dma-buf descriptors over a unix socket to a GStreamer-compatible unixfdsrc",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 
@@ -1374,7 +1374,7 @@ impl SourceLoop for UnixFdSrc {
             "Unix file descriptor source",
             "Source/IPC",
             "Receives frames as memfd or dma-buf descriptors over a unix socket from a GStreamer-compatible unixfdsink",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

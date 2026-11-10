@@ -143,7 +143,7 @@ impl AsyncElement for ClockSyncTransform {
             "Clock sync",
             "Generic",
             "Delays each buffer until its PTS is due on the pipeline clock",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

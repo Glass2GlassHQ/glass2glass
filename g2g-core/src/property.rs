@@ -423,11 +423,11 @@ impl core::fmt::Display for ValueError {
 pub struct ElementMetadata {
     /// Human-readable name, e.g. `"Opus audio encoder"`.
     pub long_name: &'static str,
-    /// Classification (GStreamer's `klass`), e.g. `"Codec/Encoder/Audio"`.
-    pub klass: &'static str,
+    /// `/`-separated kinds, e.g. `"Codec/Encoder/Audio"`.
+    pub classification: &'static str,
     /// One-paragraph description of what the element does.
     pub description: &'static str,
-    /// Author / origin, e.g. `"g2g"`.
+    /// Author / origin, e.g. `"Aaron Boxer <boxerab@protonmail.com>"`.
     pub author: &'static str,
 }
 
@@ -435,13 +435,13 @@ impl ElementMetadata {
     /// A new metadata block (a `const fn` for a `const` declaration on the type).
     pub const fn new(
         long_name: &'static str,
-        klass: &'static str,
+        classification: &'static str,
         description: &'static str,
         author: &'static str,
     ) -> Self {
         Self {
             long_name,
-            klass,
+            classification,
             description,
             author,
         }
@@ -450,14 +450,14 @@ impl ElementMetadata {
     /// Whether any field is set (an element that overrode `metadata()`).
     pub fn is_set(&self) -> bool {
         !(self.long_name.is_empty()
-            && self.klass.is_empty()
+            && self.classification.is_empty()
             && self.description.is_empty()
             && self.author.is_empty())
     }
 
     // as in gst, an element classed `Sink` has no output pad
     pub fn is_sink(&self) -> bool {
-        self.klass.split('/').any(|class| class == "Sink")
+        self.classification.split('/').any(|class| class == "Sink")
     }
 }
 
@@ -530,18 +530,18 @@ pub fn format_metadata(name: &str, meta: &ElementMetadata) -> String {
     use core::fmt::Write;
     let mut out = String::new();
     let _ = writeln!(out, "Factory Details:");
-    let _ = writeln!(out, "  Name        {name}");
+    let _ = writeln!(out, "  Name           {name}");
     if !meta.long_name.is_empty() {
-        let _ = writeln!(out, "  Long-name   {}", meta.long_name);
+        let _ = writeln!(out, "  Long-name      {}", meta.long_name);
     }
-    if !meta.klass.is_empty() {
-        let _ = writeln!(out, "  Klass       {}", meta.klass);
+    if !meta.classification.is_empty() {
+        let _ = writeln!(out, "  Classification {}", meta.classification);
     }
     if !meta.description.is_empty() {
-        let _ = writeln!(out, "  Description {}", meta.description);
+        let _ = writeln!(out, "  Description    {}", meta.description);
     }
     if !meta.author.is_empty() {
-        let _ = writeln!(out, "  Author      {}", meta.author);
+        let _ = writeln!(out, "  Author         {}", meta.author);
     }
     out
 }
@@ -749,10 +749,10 @@ mod tests {
     fn metadata_block_omits_empty_fields() {
         let meta = ElementMetadata::new("Opus encoder", "Codec/Encoder/Audio", "", "g2g");
         let dump = format_metadata("opusenc", &meta);
-        assert!(dump.contains("Name        opusenc"));
-        assert!(dump.contains("Long-name   Opus encoder"));
-        assert!(dump.contains("Klass       Codec/Encoder/Audio"));
-        assert!(dump.contains("Author      g2g"));
+        assert!(dump.contains("Name           opusenc"));
+        assert!(dump.contains("Long-name      Opus encoder"));
+        assert!(dump.contains("Classification Codec/Encoder/Audio"));
+        assert!(dump.contains("Author         g2g"));
         assert!(!dump.contains("Description"), "empty description omitted");
         assert!(!ElementMetadata::default().is_set());
         assert!(meta.is_set());

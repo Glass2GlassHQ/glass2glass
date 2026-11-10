@@ -806,7 +806,7 @@ impl MultiInputElement for MkvMuxN {
             "Matroska muxer",
             "Codec/Muxer",
             "Muxes video, audio and subtitle tracks into a Matroska / WebM file",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

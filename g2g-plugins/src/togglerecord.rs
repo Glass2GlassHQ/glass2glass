@@ -416,7 +416,7 @@ impl AsyncElement for ToggleRecord {
             "ToggleRecord",
             "Generic",
             "Starts and stops several streams together on the main stream's keyframes",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

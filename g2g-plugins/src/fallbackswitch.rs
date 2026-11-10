@@ -339,7 +339,7 @@ impl MultiInputElement for FallbackSwitch {
             "Fallback switch",
             "Generic",
             "Forwards the highest-priority input that is still delivering",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

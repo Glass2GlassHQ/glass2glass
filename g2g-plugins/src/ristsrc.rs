@@ -305,7 +305,7 @@ impl SourceLoop for RistSrc {
             "RIST source",
             "Source/Network",
             "Receives an MPEG-TS byte stream over RIST (TR-06-1 Simple Profile), NACK-recovering loss",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

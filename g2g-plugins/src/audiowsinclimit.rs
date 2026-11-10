@@ -194,7 +194,7 @@ impl AsyncElement for AudioWsincLimit {
             "Windowed sinc low-pass / high-pass filter",
             "Filter/Effect/Audio",
             "Low-pass and high-pass windowed sinc filter",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

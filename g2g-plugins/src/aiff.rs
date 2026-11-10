@@ -390,7 +390,7 @@ impl AsyncElement for AiffParse {
             "AIFF parser",
             "Codec/Demuxer/Audio",
             "Reads the PCM stream out of an AIFF / AIFC byte stream",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 
@@ -521,7 +521,7 @@ impl AsyncElement for AiffMux {
             "AIFF encoder",
             "Codec/Muxer/Audio",
             "Wraps raw PCM in an AIFF / AIFC byte stream",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 }

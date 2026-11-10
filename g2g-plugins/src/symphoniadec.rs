@@ -191,7 +191,12 @@ mod element {
         }
 
         fn metadata(&self) -> ElementMetadata {
-            ElementMetadata::new(C::LONG_NAME, "Codec/Decoder/Audio", C::DESCRIPTION, "g2g")
+            ElementMetadata::new(
+                C::LONG_NAME,
+                "Codec/Decoder/Audio",
+                C::DESCRIPTION,
+                crate::AARON_BOXER,
+            )
         }
 
         fn process<'a>(

@@ -235,7 +235,7 @@ impl AsyncElement for DeckLinkVideoSink {
             "SDI video sink",
             "Sink/Video/Hardware",
             "Plays raw video out of an SDI output for Blackmagic Design DeckLink",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

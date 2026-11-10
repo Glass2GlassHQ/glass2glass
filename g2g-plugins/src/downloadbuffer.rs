@@ -404,7 +404,7 @@ impl AsyncElement for DownloadBuffer {
             "Download buffer",
             "Generic",
             "Spills a pushed byte stream to a temp file and serves it as a seekable byte source",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

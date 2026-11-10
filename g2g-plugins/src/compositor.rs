@@ -1462,7 +1462,7 @@ impl MultiInputElement for Compositor {
             "Video compositor",
             "Filter/Editing/Video",
             "Composites several video inputs onto one timed output canvas",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
     type ProcessFuture<'a>

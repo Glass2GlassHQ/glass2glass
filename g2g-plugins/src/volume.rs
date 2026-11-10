@@ -177,7 +177,7 @@ impl AsyncElement for Volume {
             "Volume",
             "Filter/Effect/Audio",
             "Adjusts audio volume / gain",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

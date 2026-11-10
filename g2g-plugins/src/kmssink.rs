@@ -644,7 +644,7 @@ impl AsyncElement for KmsSink {
             "KMS / DRM video sink",
             "Sink/Video",
             "Presents video via DRM / KMS",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

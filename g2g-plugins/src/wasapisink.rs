@@ -248,7 +248,7 @@ impl AsyncElement for WasapiSink {
             "WASAPI audio sink",
             "Sink/Audio",
             "Renders PCM on a WASAPI endpoint (shared mode)",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

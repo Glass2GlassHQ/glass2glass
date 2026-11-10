@@ -700,7 +700,7 @@ impl AsyncElement for MetalVideoSink {
             "Metal video sink",
             "Sink/Video",
             "Presents NV12 video in an AppKit window through a CAMetalLayer",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

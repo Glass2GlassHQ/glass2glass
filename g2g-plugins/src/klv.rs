@@ -1046,7 +1046,7 @@ impl AsyncElement for KlvDecode {
             "KLV metadata decoder",
             "Codec/Decoder/Metadata",
             "Decodes SMPTE ST 336 KLV local sets into text key=value cues",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
     type ProcessFuture<'a>

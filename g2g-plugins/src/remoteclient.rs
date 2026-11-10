@@ -227,7 +227,12 @@ impl<T: PacketClient> AsyncElement for RemoteClient<T> {
     }
 
     fn metadata(&self) -> ElementMetadata {
-        ElementMetadata::new(T::NAME, "Sink/Network", T::DESCRIPTION, "g2g")
+        ElementMetadata::new(
+            T::NAME,
+            "Sink/Network",
+            T::DESCRIPTION,
+            crate::AARON_BOXER,
+        )
     }
 
     fn properties(&self) -> &'static [PropertySpec] {

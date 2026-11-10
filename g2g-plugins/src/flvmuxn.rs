@@ -450,7 +450,7 @@ impl MultiInputElement for FlvMuxN {
             "FLV muxer",
             "Codec/Muxer",
             "Muxes a video and an audio stream into a Flash Video stream",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

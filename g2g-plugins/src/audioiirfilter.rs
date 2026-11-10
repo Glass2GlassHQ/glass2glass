@@ -301,7 +301,7 @@ impl AsyncElement for AudioIirFilter {
             "Audio IIR filter",
             "Filter/Effect/Audio",
             "Generic audio IIR filter with custom filter kernel",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

@@ -216,7 +216,7 @@ impl AsyncElement for Equalizer3Bands {
             "3-band equalizer",
             "Filter/Effect/Audio",
             "Three-band audio equalizer",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

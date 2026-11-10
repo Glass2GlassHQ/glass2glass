@@ -182,7 +182,7 @@ impl AsyncElement for AudioFirFilter {
             "Audio FIR filter",
             "Filter/Effect/Audio",
             "Generic audio FIR filter with custom filter kernel",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

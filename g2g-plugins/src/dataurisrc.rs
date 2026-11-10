@@ -212,7 +212,7 @@ impl SourceLoop for DataUriSrc {
             "data: URI source",
             "Source/Network",
             "Plays the payload carried inside a data: URI",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

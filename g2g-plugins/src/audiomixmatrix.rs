@@ -356,7 +356,7 @@ impl AsyncElement for AudioMixMatrix {
             "Matrix audio mix",
             "Filter/Audio",
             "Mixes a number of input channels into a number of output channels according to a transformation matrix",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

@@ -395,7 +395,7 @@ impl AsyncElement for RawVideoParse {
             "Raw video framer",
             "Codec/Parser/Video",
             "Frames a headerless raw video dump using its declared format and geometry",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

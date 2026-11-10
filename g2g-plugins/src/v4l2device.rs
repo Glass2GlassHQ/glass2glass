@@ -133,7 +133,7 @@ fn probe_node(path: &str) -> Option<Device> {
 
     Some(Device {
         display_name,
-        klass: "Video/Source".to_string(),
+        classification: "Video/Source".to_string(),
         persistent_id: persistent_id(Some(&caps), path),
         caps: device_caps(&carried),
         element: "v4l2src",
@@ -653,7 +653,7 @@ mod tests {
     fn probed(bus: &str, card: &str, path: &str) -> Device {
         Device {
             display_name: card.to_string(),
-            klass: "Video/Source".to_string(),
+            classification: "Video/Source".to_string(),
             persistent_id: format!("{bus}:{card}:{path}"),
             caps: CapsSet::from_alternatives(Vec::new()),
             element: "v4l2src",

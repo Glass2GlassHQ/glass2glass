@@ -163,7 +163,7 @@ impl AsyncElement for Smooth {
             "Smooth effect",
             "Filter/Effect/Video",
             "Smooths raw video without crossing edges",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

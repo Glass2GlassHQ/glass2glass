@@ -702,7 +702,7 @@ names that actually differ are printed.
 The same facts are available as structured data (`Registry::describe(name)` /
 `describe_all()` returning `ElementDoc` / `PropertyDoc`), which powers a
 searchable web reference. `g2g-docgen` renders every element into a
-self-contained `docs/elements.html` (one card each: role, klass, caps / pads,
+self-contained `docs/elements.html` (one card each: role, classification, caps / pads,
 properties; a client-side search box, shareable via `?q=<term>`):
 
 ```

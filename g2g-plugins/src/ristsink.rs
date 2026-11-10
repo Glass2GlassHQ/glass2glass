@@ -409,7 +409,7 @@ impl AsyncElement for RistSink {
             "RIST sink",
             "Sink/Network",
             "Sends an MPEG-TS byte stream over RIST (TR-06-1 Simple Profile), resending on NACK",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

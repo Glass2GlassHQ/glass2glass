@@ -503,7 +503,12 @@ impl<C: NalCodec> AsyncElement for NalParse<C> {
     }
 
     fn metadata(&self) -> ElementMetadata {
-        ElementMetadata::new(C::NAME, "Codec/Parser/Video", C::DESCRIPTION, "g2g")
+        ElementMetadata::new(
+            C::NAME,
+            "Codec/Parser/Video",
+            C::DESCRIPTION,
+            crate::AARON_BOXER,
+        )
     }
 
     fn properties(&self) -> &'static [PropertySpec] {

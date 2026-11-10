@@ -1396,7 +1396,7 @@ impl MultiOutputElement for Mp4DemuxN {
             "MP4 demuxer",
             "Codec/Demuxer",
             "Demuxes an MP4 / QuickTime byte stream into the tracks its ports select",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

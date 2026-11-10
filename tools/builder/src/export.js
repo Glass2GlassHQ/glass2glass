@@ -5,7 +5,7 @@
 
 // Shared node-shape helpers, used by both the palette (App.jsx) and the
 // importers (import.js), so the two build identical node data.
-export const isSink = (doc) => /Sink/i.test(doc.klass || "");
+export const isSink = (doc) => /Sink/i.test(doc.classification || "");
 export const roleClass = (role) =>
   role === "source" ? "source" : role.startsWith("muxer") ? "muxer" : "element";
 export function nodeData(id, element, doc, props = {}) {

@@ -412,9 +412,9 @@ reads only the constraint ([§4](#4-caps-negotiation)), so keep the two in
 agreement. Templates may leave geometry open (`Dim::Any`).
 
 `metadata()` is the one-line self-description a `g2g-inspect` dump prints: long
-name, classification, description, author. Use the GStreamer classification
-strings (`Filter/Effect/Audio`, `Source/Video`, `Filter/Converter/Video`) so the
-catalog sorts alongside the rest.
+name, classification, description, and the author, `Name <email>` of whoever
+wrote the element. Use the GStreamer classification strings (`Filter/Effect/Audio`,
+`Source/Video`, `Filter/Converter/Video`) so the catalog sorts alongside the rest.
 
 ## 8. The `no_std + alloc` baseline
 

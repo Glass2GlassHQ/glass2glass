@@ -172,7 +172,7 @@ Embassy smoke, CPU render, GPU-resident wgpu, in-browser canvas.
 OS-, GPU-, and device-coupled elements (camera, display, NVDEC / VA-API /
 Vulkan Video, VideoToolbox, MediaCodec, ML device EPs) are **experimental**.
 They compile and some have host tests, but their runtime is not a CI promise.
-`g2g-inspect` prints `Stability   experimental` on those factories. See
+`g2g-inspect` prints `Stability      experimental` on those factories. See
 [STABILITY.md](https://github.com/Glass2GlassHQ/glass2glass/blob/master/STABILITY.md).
 
 ### QNX

@@ -149,7 +149,7 @@ impl MultiInputElement for Concat {
             "Concat",
             "Generic",
             "Concatenates N streams end to end",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

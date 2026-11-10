@@ -230,7 +230,7 @@ impl AsyncElement for VobSubDec {
             "VobSub subpicture decoder",
             "Codec/Decoder/Subtitle",
             "Decodes DVD subpicture cues into RGBA overlay canvases",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
     type ProcessFuture<'a>

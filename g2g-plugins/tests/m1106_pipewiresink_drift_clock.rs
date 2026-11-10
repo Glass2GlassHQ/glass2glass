@@ -75,9 +75,11 @@ fn pcm_frame(bytes: Vec<u8>, seq: u64) -> Frame {
 
 #[test]
 fn pipewiresink_disciplines_its_clock_from_the_stream() {
-    let has_audio_sink = PipeWireDeviceProvider::new()
-        .probe()
-        .is_ok_and(|devices| devices.iter().any(|device| device.klass == "Audio/Sink"));
+    let has_audio_sink = PipeWireDeviceProvider::new().probe().is_ok_and(|devices| {
+        devices
+            .iter()
+            .any(|device| device.classification == "Audio/Sink")
+    });
     if !has_audio_sink {
         eprintln!("skip m1106: PipeWire has no audio sink to play to");
         return;

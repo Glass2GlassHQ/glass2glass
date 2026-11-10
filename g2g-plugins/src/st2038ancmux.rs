@@ -405,7 +405,7 @@ impl MultiInputElement for St2038AncMux {
             "SMPTE ST-2038 ancillary metadata muxer",
             "Metadata/Video/Muxer",
             "Muxes SMPTE ST-2038 ancillary metadata streams into a single stream",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

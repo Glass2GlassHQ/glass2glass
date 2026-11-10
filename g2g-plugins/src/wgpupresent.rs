@@ -439,7 +439,7 @@ impl AsyncElement for WgpuPresentSink {
             "wgpu video sink",
             "Sink/Video",
             "Presents GPU-resident or system-memory video on a Wayland surface through wgpu",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

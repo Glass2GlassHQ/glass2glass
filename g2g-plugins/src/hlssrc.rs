@@ -1696,7 +1696,7 @@ impl SourceLoop for HlsSrc {
             "HLS source",
             "Source/Network",
             "Reads an HLS playlist and streams its media segments",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

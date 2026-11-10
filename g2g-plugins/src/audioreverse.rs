@@ -305,7 +305,7 @@ impl AsyncElement for AudioReverse {
             "Audio reverser",
             "Filter/Effect/Audio",
             "Re-emits each chunk of audio with its samples in the opposite order",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

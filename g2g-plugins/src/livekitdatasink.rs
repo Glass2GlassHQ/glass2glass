@@ -219,7 +219,7 @@ impl AsyncElement for LiveKitDataSink {
             "LiveKit data sink",
             "Sink/Network/WebRTC",
             "Sends each frame as a LiveKit user data packet into a room",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

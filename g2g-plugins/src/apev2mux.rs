@@ -342,7 +342,7 @@ impl AsyncElement for ApeV2Mux {
             "APEv2 tag writer",
             "Formatter/Metadata",
             "Writes an APEv2 tag at the tail of a stream, ahead of any ID3v1 block",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

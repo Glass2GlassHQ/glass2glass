@@ -244,7 +244,7 @@ impl AsyncElement for AudioChebLimit {
             "Low-pass and high-pass Chebyshev filter",
             "Filter/Effect/Audio",
             "Chebyshev low-pass and high-pass filter",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

@@ -288,7 +288,7 @@ impl MultiInputElement for St2038Combiner {
             "ST-2038 Combiner",
             "Filter",
             "Combines video input stream and ST2038 stream in ancillary meta",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

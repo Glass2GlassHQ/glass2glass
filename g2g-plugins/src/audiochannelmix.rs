@@ -202,7 +202,7 @@ impl AsyncElement for AudioChannelMix {
             "Simple stereo audio mixer",
             "Filter/Effect/Audio",
             "Mixes left/right channels of stereo audio",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

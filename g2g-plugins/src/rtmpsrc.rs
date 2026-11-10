@@ -132,7 +132,7 @@ impl SourceLoop for RtmpSrc {
             "RTMP ingest source",
             "Source/Network",
             "Accepts an RTMP publisher and emits an FLV byte stream",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

@@ -88,7 +88,7 @@ impl MultiInputElement for InputSelector {
             "Input selector",
             "Generic",
             "Forwards one of N inputs",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

@@ -178,7 +178,7 @@ impl AsyncElement for ChromaHold {
             "Chroma hold filter",
             "Filter/Effect/Video",
             "Removes all colour information except for one colour",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

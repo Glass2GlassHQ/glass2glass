@@ -46,7 +46,7 @@ impl AsyncElement for IdentityTransform {
             "Identity",
             "Generic",
             "Passes buffers through unchanged, for probing and debugging",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
     type ProcessFuture<'a>

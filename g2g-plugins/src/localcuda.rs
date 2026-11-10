@@ -407,7 +407,7 @@ impl AsyncElement for LocalCudaSink {
             "Local CUDA sink",
             "Sink/Network",
             "Shares NV12 CUDA frames with a same-machine peer over a Unix socket via CUDA IPC (no PCIe round trip)",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 }
@@ -656,7 +656,7 @@ impl SourceLoop for LocalCudaSrc {
             "Local CUDA source",
             "Source/Network",
             "Receives NV12 CUDA frames from a same-machine LocalCudaSink over a Unix socket via CUDA IPC",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

@@ -1616,7 +1616,7 @@ impl AsyncElement for FfmpegVideoDec {
             "FFmpeg video decoder",
             "Codec/Decoder/Video",
             "Decodes H.264 / H.265 / VP8 / VP9 / AV1 via libavcodec",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

@@ -623,7 +623,7 @@ impl AsyncElement for Av1Enc {
             "AV1 encoder",
             "Codec/Encoder/Video",
             "Encodes raw planar YUV (I420/I422/I444) to AV1 via rav1e",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

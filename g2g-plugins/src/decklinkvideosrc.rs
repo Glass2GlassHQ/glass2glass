@@ -384,7 +384,7 @@ impl SourceLoop for DeckLinkVideoSrc {
             "SDI video source",
             "Source/Video/Hardware",
             "Captures raw video from an SDI input for Blackmagic Design DeckLink",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

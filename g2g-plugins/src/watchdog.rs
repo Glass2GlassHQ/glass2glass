@@ -181,7 +181,7 @@ impl AsyncElement for Watchdog {
             "Watchdog",
             "Generic",
             "Fails the pipeline when no data arrives within a timeout",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

@@ -503,7 +503,7 @@ impl SourceLoop for UdpSrc {
             "UDP source",
             "Source/Network",
             "Receives RTP H.264 or Opus over UDP with a jitter buffer, or raw datagrams as a byte stream",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

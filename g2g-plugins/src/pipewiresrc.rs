@@ -237,7 +237,7 @@ impl SourceLoop for PipeWireSrc {
             "PipeWire audio source",
             "Source/Audio",
             "Captures interleaved PCM from a PipeWire node",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

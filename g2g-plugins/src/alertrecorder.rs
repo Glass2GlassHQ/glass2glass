@@ -317,7 +317,7 @@ impl AsyncElement for AlertRecorder {
             "Alert recorder",
             "Filter/Analytics",
             "Records a clip of the frames around each alert on the stream",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

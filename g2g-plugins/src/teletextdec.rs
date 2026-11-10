@@ -231,7 +231,7 @@ impl AsyncElement for TeletextDec {
             "Teletext subtitle decoder",
             "Codec/Decoder/Subtitle",
             "Decodes an EBU teletext subtitle page to plain-text cues",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

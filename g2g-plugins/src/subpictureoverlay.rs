@@ -192,7 +192,7 @@ impl MultiInputElement for SubPictureOverlay {
             "Subpicture overlay",
             "Filter/Editor/Video",
             "Blends decoded bitmap-subtitle canvases onto video by PTS",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

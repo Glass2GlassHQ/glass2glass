@@ -1474,7 +1474,7 @@ impl AsyncElement for PsDemux {
             "Codec/Demuxer",
             "Demuxes an MPEG-1 / MPEG-2 program stream (.mpg / .vob): MPEG video, \
              MPEG audio, AC-3, and DVD subpictures",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

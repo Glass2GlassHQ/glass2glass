@@ -538,7 +538,7 @@ impl AsyncElement for WebRtcSink {
             "WebRTC sink",
             "Sink/Network/WebRTC",
             "Publishes video (H.264/VP8/VP9/H.265/AV1) or Opus to a WHIP server over WebRTC (str0m: ICE/DTLS/SRTP)",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

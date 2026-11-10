@@ -186,7 +186,7 @@ impl AsyncElement for MpegTsLiveSrc {
             "MPEG-TS live clock",
             "Source/Network",
             "Provides a pipeline clock from the PCR of a live MPEG-TS stream and maps its timestamps onto it",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

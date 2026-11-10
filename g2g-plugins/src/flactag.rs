@@ -228,7 +228,7 @@ impl AsyncElement for FlacTag {
             "FLAC tag writer",
             "Formatter/Metadata",
             "Rewrites the VORBIS_COMMENT metadata block of a native FLAC stream",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

@@ -168,7 +168,7 @@ impl AsyncElement for Level {
             "Level",
             "Filter/Analyzer/Audio",
             "Measures audio peak / RMS levels",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

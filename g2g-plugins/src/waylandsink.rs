@@ -678,7 +678,7 @@ impl AsyncElement for WaylandSink {
             "Wayland video sink",
             "Sink/Video",
             "Presents NV12 video to a Wayland surface (software SHM)",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

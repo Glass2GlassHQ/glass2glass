@@ -1706,7 +1706,7 @@ impl MultiOutputElement for TsDemuxN {
             "MPEG-TS demuxer",
             "Codec/Demuxer",
             "Demuxes an MPEG transport stream into the elementary streams its ports select",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

@@ -218,7 +218,7 @@ impl AsyncElement for PngDec {
             "PNG decoder",
             "Codec/Decoder/Image",
             "Decodes PNG stills to RGBA via the pure-Rust png crate",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

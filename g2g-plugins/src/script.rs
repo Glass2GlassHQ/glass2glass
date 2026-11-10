@@ -651,7 +651,7 @@ impl AsyncElement for ScriptElement {
             "Rhai script element",
             "Filter/Effect/Video",
             "Runs a Rhai process(frame) function per frame over a raw-video buffer.",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 
@@ -1003,7 +1003,7 @@ impl MultiOutputElement for ScriptRouter {
             "Rhai script router",
             "Generic",
             "Sends each buffer to the output a Rhai route(frame) function picks",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

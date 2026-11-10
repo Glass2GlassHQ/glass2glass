@@ -512,7 +512,7 @@ impl AsyncElement for LlamaChat {
             "LLM chat",
             "Filter/Text",
             "Answers each text frame as one chat turn on a llama.cpp model",
-            "g2g",
+            "Aaron Boxer <boxerab@protonmail.com>",
         )
     }
 

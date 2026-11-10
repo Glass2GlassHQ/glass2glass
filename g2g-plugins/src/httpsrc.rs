@@ -253,7 +253,7 @@ impl SourceLoop for HttpSrc {
             "HTTP source",
             "Source/Network",
             "Fetches a URL as a byte stream via reqwest",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

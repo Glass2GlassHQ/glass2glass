@@ -216,7 +216,7 @@ impl AsyncElement for WebPDec {
             "WebP decoder",
             "Codec/Decoder/Image",
             "Decodes WebP stills to RGBA via the pure-Rust image-webp crate",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

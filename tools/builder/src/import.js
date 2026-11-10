@@ -107,7 +107,7 @@ function placeholderDoc(name) {
   return {
     name,
     role: "element",
-    klass: "",
+    classification: "",
     long_name: name,
     description: "unresolved: not in the loaded registry",
     caps: "",

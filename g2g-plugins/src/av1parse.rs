@@ -148,7 +148,7 @@ impl AsyncElement for Av1Parse {
             "AV1 parser",
             "Codec/Parser/Video",
             "Frames an AV1 OBU stream and reads its sequence header",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
     type ProcessFuture<'a>

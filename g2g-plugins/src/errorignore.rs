@@ -142,7 +142,7 @@ impl AsyncElement for ErrorIgnore {
             "ErrorIgnore",
             "Generic",
             "Passes data through, converting a failure from downstream",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

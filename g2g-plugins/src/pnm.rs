@@ -650,7 +650,7 @@ impl AsyncElement for PnmEnc {
             "PNM image encoder",
             "Codec/Encoder/Image",
             "Encodes raw RGB / RGBA video to a Netpbm pixmap",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 
@@ -836,7 +836,7 @@ impl AsyncElement for PnmDec {
             "PNM image decoder",
             "Codec/Decoder/Image",
             "Decodes Netpbm stills to packed RGB",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

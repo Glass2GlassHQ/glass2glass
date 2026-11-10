@@ -204,7 +204,7 @@ impl SourceLoop for LiveKitDataSrc {
             "LiveKit data source",
             "Source/Network/WebRTC",
             "Emits each LiveKit user data packet received in a room as a frame",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

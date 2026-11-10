@@ -583,7 +583,7 @@ impl AsyncElement for SvtJpegXsEnc {
             "SVT JPEG XS encoder",
             "Codec/Encoder/Video",
             "Encodes planar YUV to a JPEG XS codestream (ISO/IEC 21122) via SVT-JPEG-XS",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 
@@ -845,7 +845,7 @@ impl AsyncElement for SvtJpegXsDec {
             "SVT JPEG XS decoder",
             "Codec/Decoder/Video",
             "Decodes a JPEG XS codestream (ISO/IEC 21122) to planar YUV via SVT-JPEG-XS",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

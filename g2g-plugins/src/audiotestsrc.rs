@@ -223,7 +223,7 @@ impl SourceLoop for AudioTestSrc {
             "Audio test source",
             "Source/Audio",
             "Generates a synthetic audio test tone",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

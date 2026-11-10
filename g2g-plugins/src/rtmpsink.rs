@@ -303,7 +303,7 @@ impl AsyncElement for RtmpSink {
             "RTMP egress sink",
             "Sink/Network",
             "Publishes an FLV byte stream to an RTMP server",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

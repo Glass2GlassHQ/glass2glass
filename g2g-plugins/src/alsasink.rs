@@ -243,7 +243,7 @@ impl AsyncElement for AlsaSink {
             "ALSA audio sink",
             "Sink/Audio",
             "Plays interleaved PCM via ALSA",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

@@ -59,7 +59,7 @@ impl MultiOutputElement for OutputSelector {
             "Output selector",
             "Generic",
             "Sends the input to the one output the active-pad property picks",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

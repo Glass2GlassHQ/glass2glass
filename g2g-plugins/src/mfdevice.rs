@@ -104,7 +104,7 @@ fn describe(info: &MfDeviceInfo, modes: &[VideoConfig]) -> Device {
     };
     Device {
         display_name,
-        klass: "Video/Source".to_string(),
+        classification: "Video/Source".to_string(),
         persistent_id: info.symbolic_link.clone(),
         caps: mode_caps(modes),
         element: "mfvideosrc",

@@ -193,7 +193,7 @@ impl AsyncElement for SignallingWindowSink {
 }
 
 struct HoldingSink {
-    klass: &'static str,
+    classification: &'static str,
     window_closed: Arc<AtomicBool>,
     frames_rendered: Arc<AtomicU64>,
 }
@@ -211,7 +211,12 @@ impl AsyncElement for HoldingSink {
         Ok(ConfigureOutcome::Accepted)
     }
     fn metadata(&self) -> ElementMetadata {
-        ElementMetadata::new("holding sink", self.klass, "holds its first frame", "test")
+        ElementMetadata::new(
+            "holding sink",
+            self.classification,
+            "holds its first frame",
+            "test",
+        )
     }
     fn process<'a>(
         &'a mut self,
@@ -236,7 +241,7 @@ impl AsyncElement for HoldingSink {
     }
 }
 
-fn frames_rendered_after_closing_the_window(klass: &'static str) -> u64 {
+fn frames_rendered_after_closing_the_window(classification: &'static str) -> u64 {
     let closed = Arc::new(AtomicBool::new(false));
     let frames_rendered = Arc::new(AtomicU64::new(0));
     let mut graph: Graph<GraphNodeRef<'static>> = Graph::new();
@@ -247,7 +252,7 @@ fn frames_rendered_after_closing_the_window(klass: &'static str) -> u64 {
     graph.link(window_source, window_sink).unwrap();
     let other_source = graph.add_source(GraphNodeRef::source(EndlessSource));
     let other_sink = graph.add_sink(GraphNodeRef::element(HoldingSink {
-        klass,
+        classification,
         window_closed: closed,
         frames_rendered: frames_rendered.clone(),
     }));

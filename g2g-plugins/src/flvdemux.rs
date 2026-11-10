@@ -465,7 +465,7 @@ impl AsyncElement for FlvDemux {
             "FLV demuxer",
             "Codec/Demuxer",
             "Demuxes a Flash Video stream into one selected elementary stream",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
     type ProcessFuture<'a>

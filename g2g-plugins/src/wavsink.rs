@@ -130,7 +130,7 @@ impl AsyncElement for WavSink {
             "WAV file sink",
             "Sink/File",
             "Writes interleaved PCM to a RIFF/WAVE file",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

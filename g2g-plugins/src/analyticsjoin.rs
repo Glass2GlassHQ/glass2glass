@@ -176,7 +176,7 @@ impl MultiInputElement for AnalyticsJoin {
             "Analytics join",
             "Filter/Video/Analytics",
             "Attaches the analytics metadata of a detector branch to the video frames at the same time",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

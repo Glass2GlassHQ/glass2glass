@@ -421,7 +421,7 @@ where
         name: FfiStr::borrowed(name),
         metadata: FfiElementMetadata {
             long_name: FfiStr::borrowed(metadata.long_name),
-            klass: FfiStr::borrowed(metadata.klass),
+            classification: FfiStr::borrowed(metadata.classification),
             description: FfiStr::borrowed(metadata.description),
             author: FfiStr::borrowed(metadata.author),
         },

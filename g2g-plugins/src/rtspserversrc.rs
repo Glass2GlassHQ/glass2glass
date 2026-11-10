@@ -323,7 +323,7 @@ impl SourceLoop for RtspServerSrc {
             "RTSP server source",
             "Source/Network",
             "Hosts an RTSP endpoint a publisher pushes H.264 into (ANNOUNCE/RECORD)",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

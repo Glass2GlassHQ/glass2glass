@@ -215,7 +215,7 @@ impl AsyncElement for EmbeddingSink {
             "Embedding sink",
             "Sink",
             "Stores the embedding vector of each frame in a searchable sqlite index",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

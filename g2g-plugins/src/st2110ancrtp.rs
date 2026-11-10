@@ -190,7 +190,7 @@ impl AsyncElement for St2110AncSink {
             "ST 2110-40 caption sink",
             "Sink/Network/ClosedCaption",
             "Sends CEA-608/708 captions as ST 2110-40 ancillary (RFC 8331) RTP over UDP",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

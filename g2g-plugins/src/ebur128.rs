@@ -481,7 +481,7 @@ impl AsyncElement for Ebur128 {
             "EBU R128 loudness meter",
             "Filter/Analyzer/Audio",
             "Measures momentary, short-term and gated integrated loudness in LUFS",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

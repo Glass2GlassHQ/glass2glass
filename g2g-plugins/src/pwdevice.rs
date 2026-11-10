@@ -163,7 +163,7 @@ fn map_node(props: &[(&str, &str)]) -> Option<Device> {
     };
 
     let class = get("media.class")?;
-    let (klass, element) = NODE_CLASSES
+    let (classification, element) = NODE_CLASSES
         .iter()
         .find(|(prefix, _)| class_matches(class, prefix))?;
 
@@ -181,9 +181,9 @@ fn map_node(props: &[(&str, &str)]) -> Option<Device> {
 
     Some(Device {
         display_name: display_name.to_string(),
-        klass: (*klass).to_string(),
+        classification: (*classification).to_string(),
         persistent_id: name.to_string(),
-        caps: if klass.starts_with("Video") {
+        caps: if classification.starts_with("Video") {
             video_caps()
         } else {
             audio_caps()
@@ -388,7 +388,7 @@ mod tests {
     fn audio_source_maps_to_the_capture_element() {
         let device = map_node(&audio_source_props()).expect("audio source maps");
         assert_eq!(device.element, "pipewiresrc");
-        assert_eq!(device.klass, "Audio/Source");
+        assert_eq!(device.classification, "Audio/Source");
         assert_eq!(device.provider, "pipewire");
         assert_eq!(device.display_name, "Built-in Audio Analog Stereo");
         assert_eq!(
@@ -424,7 +424,7 @@ mod tests {
         ])
         .expect("audio sink maps");
         assert_eq!(sink.element, "pipewiresink");
-        assert_eq!(sink.klass, "Audio/Sink");
+        assert_eq!(sink.classification, "Audio/Sink");
 
         let cam = map_node(&[
             ("media.class", "Video/Source"),
@@ -432,7 +432,7 @@ mod tests {
         ])
         .expect("video source maps");
         assert_eq!(cam.element, "pipewirevideosrc");
-        assert_eq!(cam.klass, "Video/Source");
+        assert_eq!(cam.classification, "Video/Source");
         assert_eq!(cam.caps.alternatives().len(), supported_formats().count());
         for caps in cam.caps.alternatives() {
             let Caps::RawVideo {

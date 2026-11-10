@@ -175,7 +175,7 @@ impl AsyncElement for VideoMedian {
             "Median effect",
             "Filter/Effect/Video",
             "Applies a median filter to raw video",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

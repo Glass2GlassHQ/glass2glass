@@ -219,7 +219,7 @@ impl SourceLoop for MultiFileSrc {
             "Multi-file source",
             "Source/File",
             "Reads a sequence of files",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

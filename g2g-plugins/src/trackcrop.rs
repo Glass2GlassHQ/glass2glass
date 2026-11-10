@@ -484,7 +484,7 @@ impl AsyncElement for TrackCrop {
             "Tracking crop",
             "Filter/Effect/Video",
             "Crops a fixed-size window that follows a detected object and scales it to the output size",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

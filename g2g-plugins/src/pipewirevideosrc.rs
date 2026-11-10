@@ -424,7 +424,7 @@ impl SourceLoop for PipeWireVideoSrc {
             "PipeWire video source",
             "Source/Video",
             "Captures raw video from a PipeWire node",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

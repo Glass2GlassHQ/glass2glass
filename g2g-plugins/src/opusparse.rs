@@ -302,7 +302,7 @@ impl AsyncElement for OpusParse {
             "Opus parser",
             "Codec/Parser/Audio",
             "Refines Opus caps (channel count) from each packet's TOC byte",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

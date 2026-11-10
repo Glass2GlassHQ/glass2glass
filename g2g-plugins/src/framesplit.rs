@@ -85,7 +85,7 @@ impl MultiOutputElement for FrameSplit {
             "Frame split",
             "Generic",
             "Sends each frame to the first output with room, for framemerge to put back in order",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 
@@ -271,7 +271,7 @@ impl MultiInputElement for FrameMerge {
             "Frame merge",
             "Generic",
             "Puts the branches of a framesplit back into the order it split the frames in",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

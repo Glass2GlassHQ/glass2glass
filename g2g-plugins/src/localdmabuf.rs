@@ -482,7 +482,7 @@ impl AsyncElement for DmaBufSink {
             "Local DMABUF sink",
             "Sink/Network",
             "Shares dma-buf frames with a same-machine peer over a Unix socket via SCM_RIGHTS fd passing (no copy, vendor-neutral)",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 }
@@ -620,7 +620,7 @@ impl SourceLoop for DmaBufSrc {
             "Local DMABUF source",
             "Source/Network",
             "Receives dma-buf frames from a same-machine DmaBufSink over a Unix socket via SCM_RIGHTS fd passing",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

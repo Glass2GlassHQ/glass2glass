@@ -155,7 +155,7 @@ static FAKE_MEDIA_PROPS: &[PropertySpec] = &[
 /// Both sinks do the same thing with a packet, differing only in what they
 /// accept, so the element bodies are this one macro.
 macro_rules! fake_media_sink {
-    ($name:ident, $accepts:path, $caps:path, $klass:expr, $description:expr) => {
+    ($name:ident, $accepts:path, $caps:path, $classification:expr, $description:expr) => {
         impl Default for $name {
             fn default() -> Self {
                 Self::new()
@@ -192,7 +192,12 @@ macro_rules! fake_media_sink {
                 Self: 'a;
 
             fn metadata(&self) -> ElementMetadata {
-                ElementMetadata::new(stringify!($name), $klass, $description, "g2g")
+                ElementMetadata::new(
+                    stringify!($name),
+                    $classification,
+                    $description,
+                    crate::AARON_BOXER,
+                )
             }
 
             fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {

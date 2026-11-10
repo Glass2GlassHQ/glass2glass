@@ -497,7 +497,7 @@ impl AsyncElement for AudioResample {
             "Audio resampler",
             "Filter/Converter/Audio",
             "Resamples raw audio to a different sample rate",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

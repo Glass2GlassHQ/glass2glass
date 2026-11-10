@@ -601,7 +601,7 @@ impl AsyncElement for ShmSink {
             "Shared memory sink",
             "Sink/IPC",
             "Sends frames over POSIX shared memory to a GStreamer-compatible shmsrc",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 
@@ -907,7 +907,7 @@ impl SourceLoop for ShmSrc {
             "Shared memory source",
             "Source/IPC",
             "Reads frames a GStreamer-compatible shmsink serves over POSIX shared memory",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

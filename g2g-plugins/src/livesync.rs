@@ -470,7 +470,7 @@ impl MultiInputElement for LiveSync {
             "Live sync",
             "Filter",
             "Fills a stalled live stream with repeated frames or audio silence",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

@@ -245,7 +245,7 @@ impl AsyncElement for XingMux {
             "Xing VBR header writer",
             "Formatter/Metadata",
             "Writes the Xing / Info seek header at the head of an MPEG audio stream",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

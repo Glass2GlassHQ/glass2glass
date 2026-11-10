@@ -6,13 +6,15 @@
 //!
 //! OS-, GPU-, and device-coupled elements are experimental (Tier 3 in
 //! `STABILITY.md`): they compile, and some have host tests, but their runtime
-//! is not a CI promise. `g2g-inspect` prints `Stability   experimental` on
+//! is not a CI promise. `g2g-inspect` prints `Stability      experimental` on
 //! those factories. The pure-Rust set is provisional, not frozen.
 
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]
 
 extern crate alloc;
+
+pub(crate) const AARON_BOXER: &str = "Aaron Boxer <boxerab@protonmail.com>";
 
 // runs the rust blocks in AUTHORING.md as doc tests
 #[cfg(all(doctest, feature = "std"))]

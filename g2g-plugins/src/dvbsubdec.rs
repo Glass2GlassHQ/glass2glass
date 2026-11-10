@@ -255,7 +255,7 @@ impl AsyncElement for DvbSubDec {
             "DVB subtitle decoder",
             "Codec/Decoder/Subtitle",
             "Decodes DVB bitmap subtitle display sets into RGBA overlay canvases",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
     type ProcessFuture<'a>

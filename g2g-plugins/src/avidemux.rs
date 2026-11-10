@@ -656,7 +656,7 @@ impl AsyncElement for AviDemux {
             "AVI demuxer",
             "Codec/Demuxer",
             "Demuxes an AVI byte stream to one of its elementary streams",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

@@ -1308,7 +1308,7 @@ impl SourceLoop for V4l2Src {
             "V4L2 camera source",
             "Source/Video",
             "Captures video from a V4L2 device (YUYV / NV12 / I420 / MJPEG)",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

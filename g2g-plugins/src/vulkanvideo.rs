@@ -16437,7 +16437,7 @@ impl AsyncElement for VulkanVideoDec {
             "Vulkan Video decoder",
             "Codec/Decoder/Video/Hardware",
             "Vendor-neutral GPU hardware H.264 / H.265 / AV1 decode via VK_KHR_video_queue",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

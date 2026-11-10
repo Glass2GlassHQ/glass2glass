@@ -23,11 +23,14 @@ fn default_monitor_probes_and_devices_are_well_formed() {
 
     for device in &outcome.devices {
         assert!(!device.display_name.is_empty(), "{device:?}");
-        assert!(!device.klass.is_empty(), "{device:?}");
+        assert!(!device.classification.is_empty(), "{device:?}");
         assert!(!device.persistent_id.is_empty(), "{device:?}");
         assert!(!device.provider.is_empty(), "{device:?}");
         // devices split on '/' classes; each part is non-empty
-        assert!(device.klass.split('/').all(|part| !part.is_empty()));
+        assert!(device
+            .classification
+            .split('/')
+            .all(|part| !part.is_empty()));
         // a device that names an element must name one the registry can
         // introspect (and so build); "" is the documented informational case
         if !device.element.is_empty() {

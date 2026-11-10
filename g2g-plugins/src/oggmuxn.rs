@@ -720,7 +720,7 @@ impl MultiInputElement for OggMuxN {
             "Ogg muxer",
             "Codec/Muxer",
             "Muxes audio streams into an Ogg bitstream",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

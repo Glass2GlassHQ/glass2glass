@@ -81,7 +81,7 @@ impl AsyncElement for PySink {
             "Python sink",
             "Sink",
             "Hosts a gst-python-ml element shell as a g2g sink via embedded CPython.",
-            "g2g",
+            "Aaron Boxer <boxerab@protonmail.com>",
         )
     }
 

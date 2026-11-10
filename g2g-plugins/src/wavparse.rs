@@ -575,7 +575,7 @@ impl AsyncElement for WavParse {
             "WAV parser",
             "Codec/Demuxer/Audio",
             "Reads the PCM stream out of a RIFF/WAVE byte stream",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

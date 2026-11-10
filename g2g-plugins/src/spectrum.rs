@@ -201,7 +201,7 @@ impl AsyncElement for Spectrum {
             "Spectrum",
             "Filter/Analyzer/Audio",
             "FFT spectrum analyzer",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

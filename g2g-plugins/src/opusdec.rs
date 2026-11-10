@@ -683,7 +683,7 @@ impl AsyncElement for OpusDec {
             "Opus audio decoder",
             "Codec/Decoder/Audio",
             "Decodes Opus to raw S16LE / F32LE PCM",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

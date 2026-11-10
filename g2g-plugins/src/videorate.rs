@@ -213,7 +213,7 @@ impl AsyncElement for VideoRate {
             "Video rate adjuster",
             "Filter/Effect/Video",
             "Drops or repeats frames to reach the negotiated framerate",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
     type ProcessFuture<'a>

@@ -450,7 +450,7 @@ impl AsyncElement for FfmpegAacEnc {
             "libavcodec AAC encoder",
             "Codec/Encoder/Audio",
             "Encodes PCM to ADTS-framed AAC-LC via libavcodec",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

@@ -322,7 +322,7 @@ impl AsyncElement for DmaBufToWgpu {
             "DMABUF to wgpu buffer import",
             "Filter/Converter/Video/GPU",
             "Zero-copy import of a dma-buf frame into a GPU-resident wgpu buffer",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

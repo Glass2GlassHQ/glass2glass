@@ -281,7 +281,7 @@ impl SourceLoop for MfVideoSrc {
             "Media Foundation camera source",
             "Source/Video",
             "Captures video from a Media Foundation capture device (NV12 / YUY2)",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

@@ -344,7 +344,7 @@ impl SourceLoop for FileSrc {
             "File source",
             "Source/File",
             "Reads a local file as a byte stream",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

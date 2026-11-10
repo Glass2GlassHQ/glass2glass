@@ -166,7 +166,7 @@ impl AsyncElement for FileSink {
             "File sink",
             "Sink/File",
             "Writes incoming buffers to a local file",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

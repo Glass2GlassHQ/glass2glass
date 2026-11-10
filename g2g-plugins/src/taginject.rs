@@ -92,7 +92,7 @@ impl AsyncElement for TagInject {
             "TagInject",
             "Generic",
             "Posts hand-written stream metadata on the bus",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

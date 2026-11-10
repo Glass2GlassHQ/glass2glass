@@ -138,7 +138,7 @@ impl AsyncElement for RecordSink {
             "Recording sink",
             "Sink/File",
             "Records the packet stream to a file for deterministic replay",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 
@@ -217,7 +217,7 @@ impl SourceLoop for ReplaySrc {
             "Replay source",
             "Source/File",
             "Replays a recorded byte stream at its captured pacing",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
     type RunFuture<'a>

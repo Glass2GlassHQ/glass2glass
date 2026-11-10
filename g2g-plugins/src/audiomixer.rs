@@ -234,7 +234,7 @@ impl MultiInputElement for AudioMixer {
             "Audio mixer",
             "Filter/Audio",
             "Sums N time-aligned PCM audio inputs into one output stream (the gst `audiomixer` analog).",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

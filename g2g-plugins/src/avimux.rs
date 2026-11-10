@@ -202,7 +202,7 @@ impl AsyncElement for AviMux {
             "AVI muxer",
             "Codec/Muxer",
             "Writes one elementary stream into an AVI byte stream",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 
@@ -358,7 +358,7 @@ impl MultiInputElement for AviMuxN {
             "AVI muxer",
             "Codec/Muxer",
             "Writes a video stream and an optional audio stream into an AVI byte stream",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

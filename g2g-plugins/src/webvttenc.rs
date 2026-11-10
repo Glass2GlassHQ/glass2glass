@@ -140,7 +140,7 @@ impl AsyncElement for WebVttEnc {
             "WebVTT subtitle encoder",
             "Codec/Encoder/Subtitle",
             "Writes timed UTF-8 cues as a WebVTT (.vtt) document",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

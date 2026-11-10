@@ -256,7 +256,7 @@ impl SourceLoop for WebRtcWhepSrc {
             "WebRTC source",
             "Source/Network/WebRTC",
             "Subscribes to a WHEP server over WebRTC and emits video (H.264/VP8/VP9/H.265/AV1) or Opus (str0m: ICE/DTLS/SRTP)",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

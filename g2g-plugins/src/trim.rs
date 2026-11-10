@@ -94,7 +94,7 @@ impl AsyncElement for Trim {
             "Trim",
             "Filter/Generic",
             "Keeps the frames of a presentation-time range, rebased onto its start",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

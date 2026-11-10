@@ -294,7 +294,7 @@ impl AsyncElement for AdpcmEnc {
             "ADPCM encoder",
             "Codec/Encoder/Audio",
             "Encodes mono or stereo S16LE PCM to IMA ADPCM (dvi layout)",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 
@@ -583,7 +583,7 @@ impl AsyncElement for AdpcmDec {
             "ADPCM decoder",
             "Codec/Decoder/Audio",
             "Decodes IMA ADPCM (dvi layout) to S16LE PCM",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

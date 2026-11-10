@@ -372,7 +372,7 @@ impl AsyncElement for VideoScale {
             "Video scaler",
             "Filter/Converter/Video",
             "Resizes raw video frames",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

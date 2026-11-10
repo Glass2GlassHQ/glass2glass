@@ -126,7 +126,7 @@ impl MultiInputElement for BatchMux {
             "Stream mux",
             "Mux/Batch",
             "Batches one raw video frame from every input into one frame",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

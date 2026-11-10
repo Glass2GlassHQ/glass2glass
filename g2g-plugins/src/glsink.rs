@@ -300,7 +300,7 @@ impl AsyncElement for GlSink {
             "OpenGL ES video sink",
             "Sink/Video",
             "Presents NV12 / RGBA video through EGL on a Wayland surface",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

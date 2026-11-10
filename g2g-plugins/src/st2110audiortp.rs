@@ -268,7 +268,7 @@ impl AsyncElement for St2110AudioSink {
             "ST 2110-30 audio sink",
             "Sink/Network",
             "Sends PCM as ST 2110-30 (AES67) RTP over UDP",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

@@ -158,7 +158,7 @@ impl AsyncElement for Iv8Demux {
             "IV8 demuxer",
             "Codec/Demuxer",
             "Demuxes an IndigoVision 8000 file into its MPEG-4 Part 2 frames",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
     type ProcessFuture<'a>

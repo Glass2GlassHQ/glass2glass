@@ -194,7 +194,7 @@ impl AsyncElement for Stereo {
             "Stereo effect",
             "Filter/Effect/Audio",
             "Muck with the stereo signal to enhance its 'stereo-ness'",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

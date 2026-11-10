@@ -71,7 +71,7 @@ fn parse_args(raw: impl Iterator<Item = String>) -> Args {
 fn print_device(device: &Device) {
     println!("Device found:\n");
     println!("    name  : {}", device.display_name);
-    println!("    class : {}", device.klass);
+    println!("    class : {}", device.classification);
     println!("    id    : {}", device.persistent_id);
     let alternatives = device.caps.alternatives();
     match alternatives.split_first() {
@@ -122,7 +122,7 @@ fn dump_json(classes: Option<&str>) {
         .map(|d| {
             json!({
                 "provider": d.provider,
-                "klass": d.klass,
+                "classification": d.classification,
                 "display-name": d.display_name,
                 "persistent-id": d.persistent_id,
                 "element": d.element,

@@ -987,7 +987,7 @@ impl MultiInputElement for TsMux {
             "MPEG-TS muxer",
             "Codec/Muxer",
             "Muxes elementary streams into an MPEG transport stream",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

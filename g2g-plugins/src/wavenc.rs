@@ -349,7 +349,7 @@ impl AsyncElement for WavEnc {
             "WAV encoder",
             "Codec/Muxer/Audio",
             "Wraps raw PCM in a RIFF/WAVE byte stream",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 }

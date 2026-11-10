@@ -392,7 +392,7 @@ impl SourceLoop for MoqtSrc {
             "MoQ Transport source",
             "Source/Network",
             "Subscribes to an IETF MoQ Transport broadcast over WebTransport and emits its fragmented-MP4 stream, or the video of a hang broadcast",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

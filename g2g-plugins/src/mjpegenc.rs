@@ -314,7 +314,7 @@ impl AsyncElement for MjpegEnc {
             "JPEG / MJPEG encoder",
             "Codec/Encoder/Video",
             "Encodes raw video to JPEG / Motion-JPEG via jpeg-encoder",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

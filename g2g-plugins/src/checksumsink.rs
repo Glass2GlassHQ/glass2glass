@@ -104,7 +104,7 @@ impl AsyncElement for ChecksumSink {
             "Reports a digest of every buffer, for bit-exactness checks. Each digest goes on the \
              pipeline bus as BusMessage::Checksum, which g2g-launch prints on stdout, and on the \
              debug log (G2G_DEBUG=ChecksumSink:debug)",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

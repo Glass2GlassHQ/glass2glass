@@ -870,7 +870,7 @@ pub struct FfiElementMetadata {
     /// Human-readable name, e.g. `"Example filter"`.
     pub long_name: FfiStr,
     /// Classification, e.g. `"Filter/Effect/Video"`.
-    pub klass: FfiStr,
+    pub classification: FfiStr,
     /// One-paragraph description.
     pub description: FfiStr,
     /// Author / origin.
@@ -881,7 +881,7 @@ impl FfiElementMetadata {
     /// All fields empty.
     pub const EMPTY: FfiElementMetadata = FfiElementMetadata {
         long_name: FfiStr::EMPTY,
-        klass: FfiStr::EMPTY,
+        classification: FfiStr::EMPTY,
         description: FfiStr::EMPTY,
         author: FfiStr::EMPTY,
     };

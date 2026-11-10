@@ -111,7 +111,7 @@ impl AsyncElement for RoundedCorners {
             "Rounded Corners",
             "Filter/Effect/Converter/Video",
             "Adds rounded corners to video",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

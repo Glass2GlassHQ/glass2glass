@@ -303,7 +303,7 @@ impl AsyncElement for AnalyticsAlert {
             "Analytics alert",
             "Filter/Analytics",
             "Fires rules on detections, attaching an alert blob and posting a webhook",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

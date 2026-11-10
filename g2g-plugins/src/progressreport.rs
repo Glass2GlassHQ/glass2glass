@@ -134,7 +134,7 @@ impl AsyncElement for ProgressReport {
             "Progress report",
             "Generic",
             "Periodically reports pipeline progress",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

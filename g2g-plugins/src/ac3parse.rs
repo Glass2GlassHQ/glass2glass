@@ -194,7 +194,7 @@ impl AsyncElement for Ac3Parse {
             "AC-3 parser",
             "Codec/Parser/Audio",
             "Splits an AC-3 stream into syncframes and refines caps",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

@@ -208,7 +208,7 @@ impl SourceLoop for VobSubSrc {
             "VobSub sidecar source",
             "Source/File/Subtitle",
             "Reads a VobSub .idx / .sub pair as a DVD subpicture stream",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

@@ -309,7 +309,7 @@ impl MultiInputElement for CcCombiner {
             "Closed-caption combiner",
             "Filter/Video/ClosedCaption",
             "Attaches a closed-caption stream to the video frames it belongs with",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

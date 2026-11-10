@@ -2844,7 +2844,7 @@ impl AsyncElement for SubParse {
             "Subtitle parser",
             "Codec/Parser/Subtitle",
             "Parses a SubRip / WebVTT document into timed UTF-8 text cues",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

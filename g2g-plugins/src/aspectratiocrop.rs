@@ -188,7 +188,7 @@ impl AsyncElement for AspectRatioCrop {
             "Aspect ratio crop",
             "Filter/Effect/Video",
             "Crops video to a specified aspect ratio",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

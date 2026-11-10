@@ -263,7 +263,7 @@ impl AsyncElement for Speed {
             "Speed",
             "Filter/Effect/Audio",
             "Set speed/pitch on audio/raw streams (resampler)",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

@@ -80,7 +80,7 @@ impl MultiOutputElement for BatchDemux {
             "Stream demux",
             "Demux/Batch",
             "Splits a batch back into one stream per output port",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

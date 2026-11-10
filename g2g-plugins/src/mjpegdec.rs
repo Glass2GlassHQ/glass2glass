@@ -628,7 +628,7 @@ impl AsyncElement for MjpegDec {
             "JPEG / MJPEG decoder",
             "Codec/Decoder/Video",
             "Decodes JPEG / Motion-JPEG to RGBA or I420 via zune-jpeg",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

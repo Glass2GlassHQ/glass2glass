@@ -25,7 +25,7 @@ const DYNAMIC = [
   {
     name: "uridecodebin",
     role: "source",
-    klass: "Source/Dynamic",
+    classification: "Source/Dynamic",
     long_name: "URI decode bin",
     description: "Auto-plugs a source + demux + decode chain for a URI (parse-time macro)",
     caps: "",
@@ -47,7 +47,7 @@ const DYNAMIC = [
   {
     name: "decodebin",
     role: "element",
-    klass: "Codec/Decoder/Dynamic",
+    classification: "Codec/Decoder/Dynamic",
     long_name: "Decode bin",
     description: "Auto-plugs a demux + decode chain for its input (parse-time macro)",
     caps: "",

@@ -644,7 +644,7 @@ impl AsyncElement for HlsSink {
             "HLS sink",
             "Sink/File",
             "Segments a muxed byte stream and writes an HLS media playlist",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

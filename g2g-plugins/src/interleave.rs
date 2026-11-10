@@ -236,7 +236,7 @@ impl MultiInputElement for Interleave {
             "Audio interleaver",
             "Filter/Converter/Audio",
             "Merges N mono PCM inputs into one N-channel interleaved stream (the gst `interleave` analog).",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

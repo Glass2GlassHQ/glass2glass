@@ -152,7 +152,7 @@ impl AsyncElement for TextDigest {
             "Incident digest",
             "Filter/Text",
             "Joins the text frames of a time window into one digest per window",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

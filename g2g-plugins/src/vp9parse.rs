@@ -64,7 +64,7 @@ impl AsyncElement for Vp9Parse {
             "VP9 parser",
             "Codec/Parser/Video",
             "Frames a VP9 stream and reads its keyframe geometry",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
     type ProcessFuture<'a>

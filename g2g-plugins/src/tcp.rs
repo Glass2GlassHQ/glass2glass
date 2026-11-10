@@ -438,7 +438,7 @@ impl SourceLoop for TcpServerSrc {
             "TCP server source",
             "Source/Network",
             "Accepts one TCP client and reads its byte stream",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 
@@ -551,7 +551,7 @@ impl SourceLoop for TcpClientSrc {
             "TCP client source",
             "Source/Network",
             "Connects to a TCP server and reads its byte stream",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 
@@ -740,7 +740,7 @@ impl AsyncElement for TcpServerSink {
             "TCP server sink",
             "Sink/Network",
             "Serves the incoming byte stream to every connected TCP client",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 
@@ -902,7 +902,7 @@ impl AsyncElement for TcpClientSink {
             "TCP client sink",
             "Sink/Network",
             "Connects to a TCP server and sends the incoming byte stream",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

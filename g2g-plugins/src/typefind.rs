@@ -865,7 +865,7 @@ impl AsyncElement for TypeFind {
             "TypeFind",
             "Generic",
             "Sniffs the media type of a byte stream and re-declares its caps",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

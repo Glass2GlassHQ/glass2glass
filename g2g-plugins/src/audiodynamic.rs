@@ -394,7 +394,7 @@ impl AsyncElement for AudioDynamic {
             "Dynamic range controller",
             "Filter/Effect/Audio",
             "Compresses or expands the dynamic range of an audio stream",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

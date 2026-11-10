@@ -263,7 +263,12 @@ impl<T: PacketTransport> SourceLoop for RemoteSource<T> {
     }
 
     fn metadata(&self) -> ElementMetadata {
-        ElementMetadata::new(T::NAME, "Source/Network", T::DESCRIPTION, "g2g")
+        ElementMetadata::new(
+            T::NAME,
+            "Source/Network",
+            T::DESCRIPTION,
+            crate::AARON_BOXER,
+        )
     }
 
     fn properties(&self) -> &'static [PropertySpec] {

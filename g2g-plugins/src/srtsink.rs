@@ -675,7 +675,7 @@ impl AsyncElement for SrtSink {
             "SRT sink",
             "Sink/Network",
             "Sends an MPEG-TS byte stream over SRT (caller, listener or rendezvous), NAK-retransmitting",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

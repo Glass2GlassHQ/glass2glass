@@ -223,7 +223,7 @@ impl<T: PacketDuplex> AsyncElement for RemoteTransform<T> {
             <T as PacketDuplex>::NAME,
             "Filter/Network",
             <T as PacketDuplex>::DESCRIPTION,
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

@@ -234,7 +234,7 @@ impl AsyncElement for CapsSetter {
             "CapsSetter",
             "Generic",
             "Overwrites the caps of a stream, passing the data through",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

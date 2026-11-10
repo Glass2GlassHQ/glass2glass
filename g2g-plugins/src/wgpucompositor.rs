@@ -897,7 +897,7 @@ impl MultiInputElement for WgpuCompositor {
             "GPU video compositor",
             "Filter/Editing/Video",
             "Composites several video inputs onto one timed output canvas on the GPU",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
     type ProcessFuture<'a>

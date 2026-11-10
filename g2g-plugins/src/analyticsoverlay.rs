@@ -662,7 +662,7 @@ impl AsyncElement for AnalyticsOverlay {
             "Analytics overlay",
             "Filter/Editing/Video",
             "Draws detection boxes, segmentation masks and regions of interest onto raw video",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
     type ProcessFuture<'a>

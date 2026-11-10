@@ -369,7 +369,7 @@ impl AsyncElement for SplitMuxSink {
             "Split-muxer sink",
             "Sink/File",
             "Muxes to a series of MP4 files",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

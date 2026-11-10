@@ -569,7 +569,7 @@ impl AsyncElement for Tracker {
             "Tracker",
             "Filter/Analytics",
             "Gives each detection a persistent track id across frames (ByteTrack)",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
     type ProcessFuture<'a>

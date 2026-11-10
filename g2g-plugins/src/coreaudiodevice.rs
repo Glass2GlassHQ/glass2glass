@@ -113,10 +113,10 @@ impl Direction {
 /// One direction of one device as a [`Device`]. Pure, so the mapping is
 /// unit-tested without audio hardware.
 fn describe(uid: &str, name: &str, direction: Direction, channels: u8, rate: u32) -> Device {
-    let (element, klass, tag) = direction.element();
+    let (element, classification, tag) = direction.element();
     Device {
         display_name: name.to_string(),
-        klass: klass.to_string(),
+        classification: classification.to_string(),
         // the UID alone is not unique across a duplex device's two halves, and
         // the monitor's diff key has to be.
         persistent_id: {

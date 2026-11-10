@@ -98,7 +98,7 @@ impl AsyncElement for RndBufferSize {
             "RndBufferSize",
             "Generic",
             "Re-chunks a byte stream into randomly sized buffers",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

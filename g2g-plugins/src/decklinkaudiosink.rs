@@ -194,7 +194,7 @@ impl AsyncElement for DeckLinkAudioSink {
             "SDI audio sink",
             "Sink/Audio/Hardware",
             "Plays interleaved PCM out of an SDI output for Blackmagic Design DeckLink",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

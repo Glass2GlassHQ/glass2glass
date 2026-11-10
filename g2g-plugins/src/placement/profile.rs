@@ -358,7 +358,7 @@ impl AsyncElement for HipSync {
             "HIP sync",
             "Generic",
             "Waits for the GPU work that wrote each frame to finish",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

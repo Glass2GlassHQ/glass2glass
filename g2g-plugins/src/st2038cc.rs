@@ -225,7 +225,7 @@ impl AsyncElement for CcToSt2038Anc {
             "CC to ST-2038 ANC",
             "Generic",
             "Wraps CEA-708 CDPs and CEA-608 S334-1A captions in SMPTE ST 2038 ancillary packets",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 
@@ -382,7 +382,7 @@ impl AsyncElement for St2038AncToCc {
             "ST-2038 ANC to CC",
             "Generic",
             "Extracts CEA-708 CDPs or CEA-608 S334-1A captions from SMPTE ST 2038 ancillary packets",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 
@@ -560,7 +560,7 @@ impl MultiOutputElement for St2038AncToCcDemux {
             "ST-2038 ANC to CC",
             "Generic",
             "Splits CEA-708 CDPs and CEA-608 S334-1A captions out of SMPTE ST 2038 ancillary packets",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

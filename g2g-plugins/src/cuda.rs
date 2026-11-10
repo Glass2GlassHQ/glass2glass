@@ -406,7 +406,7 @@ impl AsyncElement for CudaDownload {
             "CUDA download",
             "Filter/Converter/Video/GPU",
             "Copies a CUDA device frame back to system memory",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 
@@ -764,7 +764,7 @@ impl AsyncElement for CudaUpload {
             "CUDA upload",
             "Filter/Converter/Video/GPU",
             "Copies a system frame into CUDA device memory",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

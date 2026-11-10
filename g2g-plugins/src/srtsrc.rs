@@ -188,7 +188,7 @@ impl SourceLoop for SrtSrc {
             "SRT source",
             "Source/Network",
             "Receives an MPEG-TS byte stream over SRT (listener or caller), NAK-recovering loss",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

@@ -1205,7 +1205,7 @@ impl MultiInputElement for Mp4MuxN {
             "MP4 muxer",
             "Codec/Muxer",
             "Muxes video, audio and text tracks into an MP4 / ISO base media file",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

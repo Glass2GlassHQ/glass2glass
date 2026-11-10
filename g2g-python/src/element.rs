@@ -365,7 +365,7 @@ impl AsyncElement for PyTransform {
             "Python ML element host",
             "Filter/Effect/Video",
             "Hosts a gst-python-ml element shell as a g2g transform via embedded CPython.",
-            "g2g",
+            "Aaron Boxer <boxerab@protonmail.com>",
         )
     }
 

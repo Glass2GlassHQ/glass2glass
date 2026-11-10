@@ -222,7 +222,7 @@ impl AsyncElement for Cutter {
             "Cutter",
             "Filter/Analyzer/Audio",
             "Detects silence in an audio stream",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

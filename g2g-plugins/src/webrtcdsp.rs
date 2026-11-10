@@ -427,7 +427,7 @@ impl AsyncElement for WebrtcEchoProbe {
             "Acoustic Echo Canceller probe",
             "Generic/Audio",
             "Gathers playback buffers for webrtcdsp",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 
@@ -931,7 +931,7 @@ impl AsyncElement for WebrtcDsp {
             "Voice Processor (AGC, AEC, filters, etc.)",
             "Generic/Audio",
             "Pre-processes voice with the WebRTC audio processing module",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

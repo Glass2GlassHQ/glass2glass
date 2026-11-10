@@ -78,7 +78,7 @@ impl AsyncElement for AudioPanorama {
             "Audio panorama",
             "Filter/Effect/Audio",
             "Positions a stereo signal across the left / right field",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
     type ProcessFuture<'a>

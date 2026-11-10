@@ -296,7 +296,7 @@ impl AsyncElement for OpenH264Dec {
             "OpenH264 video decoder",
             "Codec/Decoder/Video",
             "Decodes H.264 to I420 with OpenH264",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

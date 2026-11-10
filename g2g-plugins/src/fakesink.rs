@@ -154,7 +154,7 @@ impl AsyncElement for FakeSink {
             "Fake sink",
             "Sink",
             "Discards all buffers (a no-op terminal for testing)",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

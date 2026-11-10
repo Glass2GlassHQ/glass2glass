@@ -507,7 +507,7 @@ impl AsyncElement for MultipartDemux {
             "Multipart demuxer",
             "Codec/Demuxer",
             "Splits a multipart/x-mixed-replace stream into its JPEG parts",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 
@@ -721,7 +721,7 @@ impl AsyncElement for MultipartMux {
             "Multipart muxer",
             "Codec/Muxer",
             "Wraps JPEG frames in a multipart/x-mixed-replace stream",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

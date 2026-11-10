@@ -924,7 +924,7 @@ impl AsyncElement for Deinterlace {
             "Deinterlace",
             "Filter/Effect/Video/Deinterlace",
             "Deinterlaces video",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

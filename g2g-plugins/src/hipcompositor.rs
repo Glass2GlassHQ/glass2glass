@@ -252,7 +252,7 @@ impl MultiInputElement for HipCompositor {
             "HIP compositor",
             "Filter/Editor/Video/Compositor/Hardware",
             "Composites several Hip video inputs onto one timed output canvas on the GPU",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

@@ -241,7 +241,7 @@ impl AsyncElement for St2110JxsSink {
             "ST 2110-22 JPEG XS sink",
             "Sink/Network",
             "Sends a JPEG XS codestream as ST 2110-22 (RFC 9134) RTP over UDP",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

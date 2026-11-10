@@ -607,7 +607,7 @@ impl AsyncElement for RtspServerSink {
             "RTSP server sink",
             "Sink/Network",
             "Hosts an RTSP endpoint serving H.264 over RTP/UDP to multiple players",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

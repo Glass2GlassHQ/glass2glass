@@ -485,7 +485,7 @@ pub unsafe fn validate_element<C: CapsLayout>(
         // SAFETY: as above.
         long_name: unsafe { leaked_str(&reg.metadata.long_name) }?,
         // SAFETY: as above.
-        klass: unsafe { leaked_str(&reg.metadata.klass) }?,
+        classification: unsafe { leaked_str(&reg.metadata.classification) }?,
         // SAFETY: as above.
         description: unsafe { leaked_str(&reg.metadata.description) }?,
         // SAFETY: as above.

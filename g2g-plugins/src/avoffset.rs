@@ -129,7 +129,7 @@ impl AsyncElement for AvOffset {
             "AvOffset",
             "Filter/Effect",
             "Shifts frame PTS/DTS by a signed offset (the av-offset A/V sync knob)",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

@@ -555,7 +555,7 @@ impl AsyncElement for VideoConvertScale {
             "Video converter and scaler",
             "Filter/Converter/Video/Scaler",
             "Converts the pixel format and resizes raw video frames in one element",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

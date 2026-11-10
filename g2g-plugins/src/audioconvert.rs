@@ -473,7 +473,7 @@ impl AsyncElement for AudioConvert {
             "Audio format converter",
             "Filter/Converter/Audio",
             "Converts between raw audio sample formats and channel layouts",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

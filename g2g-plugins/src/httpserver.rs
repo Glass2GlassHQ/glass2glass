@@ -620,7 +620,7 @@ impl AsyncElement for HttpServerSink {
             "HTTP server sink",
             "Sink/Network",
             "Serves a muxed MPEG-TS, fragmented MP4 or live Matroska stream to HTTP clients",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

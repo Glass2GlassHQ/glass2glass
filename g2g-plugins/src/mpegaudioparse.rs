@@ -384,7 +384,7 @@ impl AsyncElement for MpegAudioParse {
             "MPEG audio parser",
             "Codec/Parser/Audio",
             "Splits an MPEG audio stream into frames and refines caps",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

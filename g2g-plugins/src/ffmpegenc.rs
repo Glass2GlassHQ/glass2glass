@@ -1055,7 +1055,12 @@ impl AsyncElement for FfmpegVideoEnc {
                 "Encodes raw NV12 video to an AV1 OBU stream on a VA-API GPU via libavcodec",
             ),
         };
-        ElementMetadata::new(name, "Codec/Encoder/Video", description, "g2g")
+        ElementMetadata::new(
+            name,
+            "Codec/Encoder/Video",
+            description,
+            crate::AARON_BOXER,
+        )
     }
 
     fn properties(&self) -> &'static [PropertySpec] {

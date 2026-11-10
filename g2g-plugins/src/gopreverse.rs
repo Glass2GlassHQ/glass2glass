@@ -90,7 +90,7 @@ impl AsyncElement for GopReverse {
             "GOP reverser",
             "Filter/Video",
             "Re-emits each decoded GOP in descending PTS for reverse playback",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

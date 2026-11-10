@@ -473,7 +473,7 @@ impl SourceLoop for LibCameraSrc {
             "libcamera camera source",
             "Source/Video",
             "Captures video from a camera via libcamera (NV12 / YUYV / MJPEG)",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

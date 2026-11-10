@@ -218,7 +218,7 @@ impl PixelFilter for HsvFilter {
 }
 
 macro_rules! hsv_element {
-    ($ty:ty, $name:literal, $klass:literal, $desc:literal) => {
+    ($ty:ty, $name:literal, $classification:literal, $desc:literal) => {
         impl AsyncElement for $ty {
             type ProcessFuture<'a>
                 = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
@@ -226,7 +226,7 @@ macro_rules! hsv_element {
                 Self: 'a;
 
             fn metadata(&self) -> ElementMetadata {
-                ElementMetadata::new($name, $klass, $desc, "g2g")
+                ElementMetadata::new($name, $classification, $desc, crate::AARON_BOXER)
             }
 
             fn input_domains(&self) -> g2g_core::memory::DomainSet {

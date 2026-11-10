@@ -203,7 +203,7 @@ impl AsyncElement for AudioAmplify {
             "Audio amplify",
             "Filter/Effect/Audio",
             "Amplifies an audio stream",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

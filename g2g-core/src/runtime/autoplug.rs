@@ -640,8 +640,8 @@ mod factory {
         pub name: String,
         /// Human-readable long name (may be empty).
         pub long_name: String,
-        /// Classification (`klass`), e.g. `"Codec/Encoder/Audio"`.
-        pub klass: String,
+        /// `/`-separated kinds, e.g. `"Codec/Encoder/Audio"`.
+        pub classification: String,
         /// One-paragraph description of what the element does.
         pub description: String,
         /// Author / origin.
@@ -2708,9 +2708,9 @@ mod factory {
                 return Some(out);
             };
             let mut out = format_metadata(name, &facts.metadata);
-            let _ = writeln!(out, "  Role        {}", facts.role);
+            let _ = writeln!(out, "  Role           {}", facts.role);
             if facts.experimental {
-                let _ = writeln!(out, "  Stability   experimental");
+                let _ = writeln!(out, "  Stability      experimental");
             }
             if let Some(caps) = &facts.output_caps {
                 let _ = writeln!(out, "\nOutput caps:\n{}", indented(caps));
@@ -2739,7 +2739,7 @@ mod factory {
             Some(ElementDoc {
                 name: name.to_string(),
                 long_name: m.long_name.to_string(),
-                klass: m.klass.to_string(),
+                classification: m.classification.to_string(),
                 description: m.description.to_string(),
                 author: m.author.to_string(),
                 role: facts.role.to_string(),
@@ -4288,7 +4288,7 @@ mod tests {
 
         let gpu = reg.inspect("gpusink").expect("registered");
         assert!(
-            gpu.contains("Stability   experimental"),
+            gpu.contains("Stability      experimental"),
             "declared experimental: {gpu}"
         );
         assert!(

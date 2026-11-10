@@ -468,7 +468,7 @@ impl SourceLoop for VideoTestSrc {
             "Video test source",
             "Source/Video",
             "Generates a synthetic test pattern (SMPTE bars, snow, moving bar, ball, ...)",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

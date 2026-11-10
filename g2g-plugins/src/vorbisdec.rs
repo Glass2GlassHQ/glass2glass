@@ -184,7 +184,7 @@ impl AsyncElement for VorbisDec {
             "Vorbis audio decoder",
             "Codec/Decoder/Audio",
             "Decodes Vorbis to interleaved PcmS16Le (pure Rust, symphonia)",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

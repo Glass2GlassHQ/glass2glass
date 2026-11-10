@@ -410,7 +410,7 @@ impl AsyncElement for SrtpEnc {
             "Filter/Network/SRTP",
             "Authenticates and encrypts RTP or RTCP packets, RFC 7714 AES-GCM or RFC 3711 \
              counter mode with HMAC-SHA1",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

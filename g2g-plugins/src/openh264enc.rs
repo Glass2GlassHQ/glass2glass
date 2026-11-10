@@ -417,7 +417,7 @@ impl AsyncElement for OpenH264Enc {
             "OpenH264 video encoder",
             "Codec/Encoder/Video",
             "Encodes I420 to H.264 with OpenH264",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

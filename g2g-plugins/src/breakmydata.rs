@@ -113,7 +113,7 @@ impl AsyncElement for BreakMyData {
             "BreakMyData",
             "Generic",
             "Overwrites bytes at random to exercise error handling downstream",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

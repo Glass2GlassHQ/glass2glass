@@ -160,7 +160,7 @@ impl AsyncElement for SceneChange {
             "Scene change detector",
             "Video/Filter",
             "Detects scene changes in video",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

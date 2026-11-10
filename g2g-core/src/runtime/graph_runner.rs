@@ -5116,7 +5116,7 @@ async fn sink_arm_loop<E: AsyncElement>(elem: &mut E, io: SinkArmIo) -> Result<u
     } = io;
     // once the user closes the window, the frames still in flight have nowhere to go
     let mut window_closed = false;
-    let plays_audio = elem.metadata().klass.starts_with("Sink/Audio");
+    let plays_audio = elem.metadata().classification.starts_with("Sink/Audio");
     let mut null = NullSink;
     let mut consumed = 0u64;
     let mut prerolled_self = false;

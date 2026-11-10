@@ -206,7 +206,7 @@ impl AsyncElement for AudioRate {
             "Audio rate adjuster",
             "Filter/Effect/Audio",
             "Fills gaps with silence and drops overlapping samples to make a contiguous stream",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

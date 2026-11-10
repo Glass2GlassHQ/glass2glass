@@ -231,7 +231,7 @@ impl AsyncElement for St2110VideoSink {
             "ST 2110-20 video sink",
             "Sink/Network",
             "Sends uncompressed video as ST 2110-20 (RFC 4175) RTP over UDP",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

@@ -585,7 +585,7 @@ impl AsyncElement for TensorConvert {
             "Tensor dtype / layout converter",
             "Filter/Converter/Tensor",
             "Quantizes/dequantizes f32 <-> int8/uint8, narrows/widens f32 <-> f16, transposes NCHW <-> NHWC",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

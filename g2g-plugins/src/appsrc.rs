@@ -359,7 +359,7 @@ impl SourceLoop for AppSrc {
             "Application source",
             "Source",
             "Emits buffers the application pushes in via register_appsrc / g2g_appsrc_push",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 }

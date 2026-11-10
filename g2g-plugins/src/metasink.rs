@@ -251,7 +251,7 @@ impl AsyncElement for MetaSink {
             "Metadata sink",
             "Sink",
             "Writes the analytics metadata, blobs and text of each frame as one JSON line",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

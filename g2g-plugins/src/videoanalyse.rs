@@ -142,7 +142,7 @@ impl AsyncElement for VideoAnalyse {
             "Video analyser",
             "Filter/Analyzer/Video",
             "Analyses video for luma average and variance",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

@@ -420,7 +420,7 @@ impl AsyncElement for Y4mDec {
             "YUV4MPEG2 decoder",
             "Codec/Demuxer/Video",
             "Reads the raw planar YUV frames out of a YUV4MPEG2 byte stream",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 
@@ -639,7 +639,7 @@ impl AsyncElement for Y4mEnc {
             "YUV4MPEG2 encoder",
             "Codec/Muxer/Video",
             "Wraps raw planar YUV frames in a YUV4MPEG2 byte stream",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

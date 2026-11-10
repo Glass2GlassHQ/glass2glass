@@ -286,7 +286,7 @@ impl AsyncElement for FpsDisplaySink {
             "FpsDisplaySink",
             "Sink/Video",
             "Reports the frame rate a wrapped display sink achieves",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

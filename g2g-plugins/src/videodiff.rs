@@ -179,7 +179,7 @@ impl AsyncElement for VideoDiff {
             "Video difference",
             "Filter/Analyzer/Video",
             "Marks the pixels that changed between adjacent video frames",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

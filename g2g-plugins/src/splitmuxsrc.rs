@@ -363,7 +363,7 @@ impl SourceLoop for SplitMuxSrc {
             "Split-muxer source",
             "Source/File",
             "Plays the files a splitmuxsink wrote as one continuous stream",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

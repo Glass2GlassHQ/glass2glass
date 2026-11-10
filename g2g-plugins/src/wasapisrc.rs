@@ -165,7 +165,7 @@ impl SourceLoop for WasapiSrc {
             "WASAPI audio capture",
             "Source/Audio",
             "Captures PCM from a WASAPI endpoint (shared mode)",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

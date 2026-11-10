@@ -109,7 +109,7 @@ impl AsyncElement for VideoBalance {
             "Video balance",
             "Filter/Effect/Video",
             "Adjusts brightness, contrast, hue and saturation",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
     type ProcessFuture<'a>

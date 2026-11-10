@@ -311,7 +311,7 @@ impl AsyncElement for GaussianBlur {
             "Gaussian blur",
             "Filter/Effect/Video",
             "Performs a gaussian blur or sharpen on video",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

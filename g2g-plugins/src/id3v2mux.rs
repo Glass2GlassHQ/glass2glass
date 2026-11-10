@@ -176,7 +176,7 @@ impl AsyncElement for Id3V2Mux {
             "ID3v2 tag writer",
             "Formatter/Metadata",
             "Writes an ID3v2 tag ahead of a stream, replacing one already there",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

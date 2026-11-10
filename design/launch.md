@@ -37,7 +37,7 @@ build by name.
 
 `inspect(name)` dumps an element's role, properties and pad templates, the
 `gst-inspect` analog. The dump is GStreamer-shaped: a Factory Details header from
-the element type's `metadata()` (`ElementMetadata { long_name, klass,
+the element type's `metadata()` (`ElementMetadata { long_name, classification,
 description, author }`, the `gst_element_class_set_static_metadata` analog and a
 zero-cost opt-in like `properties()`), then pad templates, then an Element
 Properties section where each `PropertySpec` carries its `default`, numeric
@@ -46,7 +46,7 @@ Properties section where each `PropertySpec` carries its `default`, numeric
 
 A factory can declare `with_experimental()` when its runtime is host-validated or
 device-validated rather than a CI promise. The dump then includes
-`Stability   experimental` and the listing suffixes `[experimental]`.
+`Stability      experimental` and the listing suffixes `[experimental]`.
 
 ## The text parser
 

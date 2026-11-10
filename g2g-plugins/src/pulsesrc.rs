@@ -339,7 +339,7 @@ impl SourceLoop for PulseSrc {
             "PulseAudio audio source",
             "Source/Audio",
             "Captures interleaved PCM via PulseAudio",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

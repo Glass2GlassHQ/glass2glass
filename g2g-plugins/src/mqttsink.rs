@@ -232,7 +232,7 @@ impl AsyncElement for MqttSink {
             "MQTT sink",
             "Sink/Network",
             "Publishes the analytics metadata, blobs and text of each frame as one MQTT message",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

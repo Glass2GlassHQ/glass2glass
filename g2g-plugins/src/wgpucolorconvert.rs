@@ -242,7 +242,7 @@ impl AsyncElement for WgpuColorConvert {
             "wgpu colour converter",
             "Filter/Converter/Video/Hardware",
             "Converts NV12 wgpu textures to RGBA wgpu textures on the GPU",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

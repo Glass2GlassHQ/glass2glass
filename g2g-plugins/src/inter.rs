@@ -240,7 +240,7 @@ impl AsyncElement for InterSink {
             "Inter-graph sink",
             "Sink",
             "Publishes its stream to every intersrc with the same producer-name",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 
@@ -433,7 +433,7 @@ impl SourceLoop for InterSrc {
             "Inter-graph source",
             "Source",
             "Emits the stream of the intersink with the same producer-name",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 }

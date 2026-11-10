@@ -196,7 +196,7 @@ impl SourceLoop for FdSrc {
             "Filedescriptor source",
             "Source/File",
             "Reads from an open file descriptor as a byte stream",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 
@@ -314,7 +314,7 @@ impl AsyncElement for FdSink {
             "Filedescriptor sink",
             "Sink/File",
             "Writes incoming buffers to an open file descriptor",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

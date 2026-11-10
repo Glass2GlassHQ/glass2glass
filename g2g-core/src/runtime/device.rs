@@ -42,7 +42,7 @@ pub struct Device {
     /// Human-readable name, e.g. `"Integrated Camera: Integrated C"`.
     pub display_name: String,
     /// `/`-separated class, e.g. `"Video/Source"`; see the module docs.
-    pub klass: String,
+    pub classification: String,
     /// Identity stable across replug / reboot where the backend offers one
     /// (USB bus info, ALSA card longname, PipeWire `object.serial` is NOT
     /// stable, so providers prefer `node.name`). Falls back to the volatile
@@ -90,7 +90,7 @@ impl Device {
             .split('/')
             .filter(|part| !part.is_empty())
             .all(|part| {
-                self.klass
+                self.classification
                     .split('/')
                     .any(|have| have.eq_ignore_ascii_case(part))
             })

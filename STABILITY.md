@@ -171,7 +171,7 @@ The type tiers above translate to per-crate promises:
    since M354.
 3. ~~**Claims match validation**: every advertised capability is either in CI or
    marked experimental.~~ **DONE (M1051)** — `LaunchFactory` / `SourceFactory`
-   take `with_experimental()`; `g2g-inspect` prints `Stability   experimental`
+   take `with_experimental()`; `g2g-inspect` prints `Stability      experimental`
    on host-/device-only runtime paths (capture, display, hardware codecs, ML
    device EPs). Crate rustdocs and the README match. CI-tested pure-Rust and
    software-ffmpeg paths stay unmarked.

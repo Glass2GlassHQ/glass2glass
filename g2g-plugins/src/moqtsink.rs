@@ -2194,7 +2194,7 @@ impl AsyncElement for MoqtSink {
             "MoQ Transport sink",
             "Sink/Network",
             "Publishes a fragmented-MP4 stream to an IETF MoQ Transport relay over WebTransport",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

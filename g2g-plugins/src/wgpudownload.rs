@@ -149,7 +149,7 @@ impl AsyncElement for WgpuDownload {
             "wgpu download",
             "Filter/Converter/Video/GPU",
             "Reads a GPU-resident wgpu texture or buffer back to system memory",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
 

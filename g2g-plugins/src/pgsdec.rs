@@ -222,7 +222,7 @@ impl AsyncElement for PgsDec {
             "PGS subtitle decoder",
             "Codec/Decoder/Subtitle",
             "Decodes Blu-ray HDMV presentation graphics into RGBA overlay canvases",
-            "g2g",
+            crate::AARON_BOXER,
         )
     }
     type ProcessFuture<'a>

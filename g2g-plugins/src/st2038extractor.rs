@@ -55,7 +55,7 @@ fn element_metadata() -> ElementMetadata {
         "Ancillary meta to ST-2038",
         "Generic",
         "Extracts ST2038 stream in ancillary meta from video input stream",
-        "g2g",
+        crate::AARON_BOXER,
     )
 }
 
