@@ -1228,13 +1228,13 @@ mod tests {
     fn pad_template_links_from_an_nv12_source() {
         use g2g_core::{types_can_link, CapsSet, PadCaps, PadDirection, PadTemplate, PadTemplates};
 
-        // The sink exposes one NV12 sink pad and no source pad.
+        // The sink exposes one sink pad and no source pad.
         let t = D3D11Sink::pad_templates();
         assert_eq!(t.len(), 1);
         assert_eq!(t[0].direction, PadDirection::Sink);
         assert!(matches!(t[0].caps, PadCaps::Fixed(ref s) if s.accepts(&nv12(1920, 1080))));
 
-        // A NV12 source links into it; an RGBA one does not.
+        // A NV12 source links into it; a planar RGB one, which videoconvert cannot read, does not.
         struct Nv12Source;
         impl PadTemplates for Nv12Source {
             fn pad_templates() -> Vec<PadTemplate> {
@@ -1249,11 +1249,11 @@ mod tests {
                 }))])
             }
         }
-        struct RgbaSource;
-        impl PadTemplates for RgbaSource {
+        struct PlanarRgbSource;
+        impl PadTemplates for PlanarRgbSource {
             fn pad_templates() -> Vec<PadTemplate> {
                 Vec::from([PadTemplate::source(CapsSet::one(Caps::RawVideo {
-                    format: RawVideoFormat::Rgba8,
+                    format: RawVideoFormat::Rgbp8,
                     width: Dim::Any,
                     height: Dim::Any,
                     framerate: Rate::Any,
@@ -1264,7 +1264,7 @@ mod tests {
             }
         }
         assert!(types_can_link::<Nv12Source, D3D11Sink>());
-        assert!(!types_can_link::<RgbaSource, D3D11Sink>());
+        assert!(!types_can_link::<PlanarRgbSource, D3D11Sink>());
     }
 
     // The turn the processor shows for `stream`, the mirror applied before the clockwise turns.
