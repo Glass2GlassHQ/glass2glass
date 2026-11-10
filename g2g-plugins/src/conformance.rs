@@ -408,8 +408,12 @@ fn h264_access_units() -> [Vec<u8>; 2] {
     const IDR: u8 = 0x65;
     const NON_IDR: u8 = 0x41;
     const IDR_SLICE_BYTES: usize = 900;
+    // Baseline, so the avcC needs no chroma or bit depth fields parsed from the SPS
+    const BASELINE_PROFILE_IDC: u8 = 66;
 
-    let mut idr = annexb(&[SPS], &pattern(12));
+    let mut sps = pattern(12);
+    sps[0] = BASELINE_PROFILE_IDC;
+    let mut idr = annexb(&[SPS], &sps);
     idr.extend(annexb(&[PPS], &pattern(6)));
     let mut slice = Vec::from(FIRST_SLICE_RBSP);
     slice.extend(pattern(IDR_SLICE_BYTES));

@@ -567,6 +567,28 @@ fn find_nalu<'a>(codec: VideoCodec, nalus: &[&'a [u8]], ty: u8) -> Option<&'a [u
     nalus.iter().copied().find(|n| nalu_type(codec, n) == ty)
 }
 
+// ISO/IEC 14496-15 5.3.3.1: only these profiles leave out the avcC chroma and bit depth bytes
+const AVCC_PROFILES_WITHOUT_FORMAT_FIELDS: [u8; 3] = [66, 77, 88];
+// avcC stores each bit depth minus eight in three bits
+const MAX_AVCC_BIT_DEPTH_MINUS8: u32 = 7;
+const AVCC_SEQUENCE_PARAMETER_SET_EXTENSIONS: u8 = 0;
+
+fn avcc_needs_format_fields(sps: &[u8]) -> bool {
+    !AVCC_PROFILES_WITHOUT_FORMAT_FIELDS.contains(&sps[1])
+}
+
+fn avcc_format_fields(sps: &[u8]) -> Option<[u8; 4]> {
+    let rbsp = strip_emulation_prevention(sps.get(1..)?);
+    let (head, _) = crate::h264parse::parse_h264_sps_head(&rbsp)?;
+    let bit_depth_minus8 = |depth: u32| (depth <= MAX_AVCC_BIT_DEPTH_MINUS8).then_some(depth as u8);
+    Some([
+        0xFC | head.chroma_format_idc as u8,
+        0xF8 | bit_depth_minus8(head.bit_depth_luma_minus8)?,
+        0xF8 | bit_depth_minus8(head.bit_depth_chroma_minus8)?,
+        AVCC_SEQUENCE_PARAMETER_SET_EXTENSIONS,
+    ])
+}
+
 pub(crate) struct HvccSpsFields {
     pub profile_tier_level: [u8; 12],
     pub chroma_format_idc: u8,
@@ -621,6 +643,12 @@ pub(crate) fn parameter_sets<'a>(
     if !matches!(codec, VideoCodec::H265) && sets[0].len() < 4 {
         return Err(G2gError::CapsMismatch);
     }
+    if !matches!(codec, VideoCodec::H265)
+        && avcc_needs_format_fields(sets[0])
+        && avcc_format_fields(sets[0]).is_none()
+    {
+        return Err(G2gError::CapsMismatch);
+    }
     if matches!(codec, VideoCodec::H265) && hvcc_sps_fields(sets[1]).is_none() {
         return Err(G2gError::CapsMismatch);
     }
@@ -654,6 +682,11 @@ pub(crate) fn avcc_record(param_sets: &[&[u8]]) -> Vec<u8> {
     p.push(1); // 1 PPS
     p.extend_from_slice(&(pps.len() as u16).to_be_bytes());
     p.extend_from_slice(pps);
+    if avcc_needs_format_fields(sps) {
+        p.extend_from_slice(
+            &avcc_format_fields(sps).expect("parameter_sets refuses an SPS avcC cannot describe"),
+        );
+    }
     p
 }
 
@@ -969,6 +1002,33 @@ mod tests {
         assert_eq!(nals.len(), 2);
         assert_eq!(nals[0], &[0x67, 0x42]);
         assert_eq!(nals[1], &[0x65, 0x88]);
+    }
+
+    #[test]
+    fn avcc_record_carries_the_format_bytes_past_main_profile() {
+        for (fixture, trailer) in [
+            (
+                &include_bytes!("../tests/fixtures/h264_320x180.h264")[..],
+                Some([0xFD, 0xF8, 0xF8, AVCC_SEQUENCE_PARAMETER_SET_EXTENSIONS]),
+            ),
+            (
+                &include_bytes!("../tests/fixtures/h264_640x480.h264")[..],
+                None,
+            ),
+        ] {
+            let nalus = split_annexb(fixture);
+            let sets = parameter_sets(VideoCodec::H264, &nalus).expect("SPS and PPS");
+            let record = avcc_record(&sets);
+            let parameter_set_bytes = 1 + 3 + 1 + 1 + 2 + sets[0].len() + 1 + 2 + sets[1].len();
+            assert_eq!(
+                record.get(parameter_set_bytes..),
+                Some(trailer.as_ref().map_or(&[][..], |bytes| &bytes[..])),
+                "profile {}",
+                sets[0][1]
+            );
+            let parsed = parse_avcc(&record).expect("the record parses back");
+            assert_eq!(parsed.parameter_sets, [sets[0].to_vec(), sets[1].to_vec()]);
+        }
     }
 
     #[test]
