@@ -34,10 +34,14 @@ use g2g_core::memory::{DomainSet, MemoryDomainKind};
 use g2g_core::{
     AsyncElement, BusHandle, Caps, CapsConstraint, CapsSet, ClockSync, Colorimetry,
     ConfigureOutcome, Dim, G2gError, Interlace, MemoryDomain, OutputSink, PipelinePacket,
-    PresentationPacer, PropError, PropValue, PropertySpec, Rate, RawVideoFormat, PACING_PROPERTIES,
+    PixelAspect, PresentationPacer, PropError, PropValue, PropertySpec, Rate, RawVideoFormat,
+    MAX_LATENESS_PROPERTY, QOS_INTERVAL_PROPERTY,
 };
 
 use crate::clock::wait_to_present;
+use crate::display_aspect::{
+    letterbox, ViewportRectangle, FORCE_ASPECT_RATIO_NAME, FORCE_ASPECT_RATIO_PROPERTY,
+};
 use crate::gpu::{
     nv12_plane_views, packed_nv12_extent, read_texture_plane, texture_holds_picture,
     texture_layout, texture_of, GpuContext, WgpuTextureLayout,
@@ -330,8 +334,8 @@ impl BlitPipeline {
         }
     }
 
-    /// Record a pass that draws `src`, stored in `layout`, over the whole of
-    /// `target`.
+    /// Record a pass that draws `src`, stored in `layout`, over `target`'s
+    /// viewport.
     pub(crate) fn encode(
         &self,
         device: &wgpu::Device,
@@ -339,8 +343,9 @@ impl BlitPipeline {
         src: &wgpu::Texture,
         layout: WgpuTextureLayout,
         resources: &BlitResources,
-        target: &wgpu::TextureView,
+        target: BlitTarget<'_>,
     ) {
+        let BlitTarget { view, viewport } = target;
         let bindings = blit_bindings(layout);
         // A two-plane NV12 texture cannot be bound whole, only through its two
         // plane views.
@@ -378,7 +383,7 @@ impl BlitPipeline {
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("wgpu-sink-blit"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: target,
+                view,
                 resolve_target: None,
                 ops: wgpu::Operations {
                     load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
@@ -391,10 +396,25 @@ impl BlitPipeline {
             occlusion_query_set: None,
             multiview_mask: None,
         });
+        pass.set_viewport(
+            viewport.x as f32,
+            viewport.y as f32,
+            viewport.width as f32,
+            viewport.height as f32,
+            0.0,
+            1.0,
+        );
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
         pass.draw(0..3, 0..1);
     }
+}
+
+// the rest of the view outside the viewport is cleared to black
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct BlitTarget<'a> {
+    pub view: &'a wgpu::TextureView,
+    pub viewport: ViewportRectangle,
 }
 
 /// The sampler and picture size uniform a blit binds besides the source planes.
@@ -592,6 +612,8 @@ pub struct WgpuSink {
     /// PTS pacing + QoS late-drop: idle until the runner hands over a clock, and
     /// the default lateness bound is 20 ms.
     pacer: PresentationPacer,
+    pixel_aspect: PixelAspect,
+    force_aspect_ratio: bool,
 }
 
 impl core::fmt::Debug for WgpuSink {
@@ -679,6 +701,8 @@ impl WgpuSink {
             configured: false,
             presented: 0,
             pacer: PresentationPacer::for_video_sink(),
+            pixel_aspect: PixelAspect::Any,
+            force_aspect_ratio: true,
         }
     }
 
@@ -746,6 +770,27 @@ impl WgpuSink {
                 config.height = height;
                 surface.configure(&self.ctx.device, config);
             }
+        }
+    }
+
+    /// Stretch the picture to fill the target (`false`) instead of letterboxing
+    /// it at its display aspect (`true`, the default).
+    pub fn with_force_aspect_ratio(mut self, force_aspect_ratio: bool) -> Self {
+        self.force_aspect_ratio = force_aspect_ratio;
+        self
+    }
+
+    fn viewport(&self) -> ViewportRectangle {
+        let (target_width, target_height) = self.target_size();
+        match (self.force_aspect_ratio, self.source) {
+            (true, Some(source)) => letterbox(
+                source.width,
+                source.height,
+                self.pixel_aspect,
+                target_width,
+                target_height,
+            ),
+            _ => ViewportRectangle::whole(target_width, target_height),
         }
     }
 
@@ -924,6 +969,7 @@ impl WgpuSink {
             (Target::Surface { .. }, None) => unreachable!("returned above on no frame"),
         };
 
+        let viewport = self.viewport();
         let mut encoder = self
             .ctx
             .device
@@ -936,7 +982,10 @@ impl WgpuSink {
             src,
             layout,
             &self.resources,
-            &dst_view,
+            BlitTarget {
+                view: &dst_view,
+                viewport,
+            },
         );
         self.ctx.queue.submit([encoder.finish()]);
         if let Some(frame) = surface_frame {
@@ -1003,8 +1052,14 @@ impl AsyncElement for WgpuSink {
         {
             self.upload = None;
         }
-        if let Caps::RawVideo { colorimetry, .. } = absolute_caps {
+        if let Caps::RawVideo {
+            colorimetry,
+            pixel_aspect,
+            ..
+        } = absolute_caps
+        {
             self.set_nv12_colorimetry(*colorimetry);
+            self.pixel_aspect = *pixel_aspect;
         }
         self.resources
             .write_picture_size(&self.ctx.queue, source.width, source.height);
@@ -1034,17 +1089,31 @@ impl AsyncElement for WgpuSink {
     }
 
     fn properties(&self) -> &'static [PropertySpec] {
-        PACING_PROPERTIES
+        &[
+            MAX_LATENESS_PROPERTY,
+            QOS_INTERVAL_PROPERTY,
+            FORCE_ASPECT_RATIO_PROPERTY,
+        ]
     }
 
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
-        self.pacer
-            .set_property(name, &value)
-            .unwrap_or(Err(PropError::Unknown))
+        match name {
+            FORCE_ASPECT_RATIO_NAME => {
+                self.force_aspect_ratio = value.as_bool().ok_or(PropError::Type)?;
+                Ok(())
+            }
+            _ => self
+                .pacer
+                .set_property(name, &value)
+                .unwrap_or(Err(PropError::Unknown)),
+        }
     }
 
     fn get_property(&self, name: &str) -> Option<PropValue> {
-        self.pacer.get_property(name)
+        match name {
+            FORCE_ASPECT_RATIO_NAME => Some(PropValue::Bool(self.force_aspect_ratio)),
+            _ => self.pacer.get_property(name),
+        }
     }
 
     fn process<'a>(
@@ -1249,7 +1318,7 @@ mod tests {
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
             pixel_aspect: g2g_core::PixelAspect::Any,
         };
-        let mut sink = WgpuSink::offscreen(ctx.clone(), w, h);
+        let mut sink = WgpuSink::offscreen(ctx.clone(), w, h).with_force_aspect_ratio(false);
         sink.configure_pipeline(&caps).unwrap();
         assert_eq!(sink.target_size(), (w, h));
 
@@ -1284,6 +1353,42 @@ mod tests {
             );
         }
         assert_eq!(sink.presented_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn the_picture_is_letterboxed_at_its_display_aspect() {
+        let _gpu = crate::GPU_TEST_LOCK.lock().await;
+        let Some(ctx) = shared_ctx().await else {
+            std::eprintln!("no wgpu adapter; skipping WgpuSink letterbox test");
+            return;
+        };
+        // 8x8 pixels twice as wide as tall show 2:1, so a 16x16 target keeps rows 4..12
+        let (w, h) = (8u32, 8u32);
+        let (target_w, target_h) = (16u32, 16u32);
+        let wide_pixels =
+            g2g_core::PixelAspect::Exact(g2g_core::AspectRatio::new(2, 1).expect("nonzero"));
+        let caps = Caps::RawVideo {
+            format: g2g_core::RawVideoFormat::Rgba8,
+            width: g2g_core::Dim::Fixed(w),
+            height: g2g_core::Dim::Fixed(h),
+            framerate: g2g_core::Rate::Any,
+            interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: wide_pixels,
+        };
+        let mut sink = WgpuSink::offscreen(ctx.clone(), target_w, target_h);
+        sink.configure_pipeline(&caps).unwrap();
+        let pixels = alloc::vec![0u8, 255, 0, 255].repeat((w * h) as usize);
+        let frame = wgpu_frame(&ctx, w, h, source_texture(&ctx, w, h, &pixels), 0);
+        sink.process(PipelinePacket::DataFrame(frame), &mut NullSink)
+            .await
+            .unwrap();
+
+        let out = sink.read_target().unwrap();
+        let green_at = |y: u32| out[((y * target_w + target_w / 2) * 4 + 1) as usize] > 200;
+        assert!(!green_at(0) && !green_at(3), "black bar above");
+        assert!(green_at(4) && green_at(11), "picture in the middle rows");
+        assert!(!green_at(12) && !green_at(15), "black bar below");
     }
 
     /// Caps for a `w` x `h` frame in `format`, the shape negotiation hands the

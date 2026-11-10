@@ -27,11 +27,13 @@ use g2g_core::{
     PipelinePacket, Rate, RawVideoFormat, RawVideoShape,
 };
 
+use crate::display_aspect::ViewportRectangle;
 use crate::gpu::{
     texture_holds_picture, texture_layout, WgpuNv12Texture, WgpuTextureKeepAlive, WgpuTextureLayout,
 };
 use crate::wgpusink::{
-    fragment_nv12, BlitPipeline, BlitResources, FRAGMENT_MULTIPLANAR_NV12, FRAGMENT_PACKED_NV12,
+    fragment_nv12, BlitPipeline, BlitResources, BlitTarget, FRAGMENT_MULTIPLANAR_NV12,
+    FRAGMENT_PACKED_NV12,
 };
 
 const OUTPUT_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
@@ -179,7 +181,17 @@ impl WgpuColorConvert {
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("wgpu-color-convert"),
         });
-        blit.encode(device, &mut encoder, texture, layout, &gpu.resources, &view);
+        blit.encode(
+            device,
+            &mut encoder,
+            texture,
+            layout,
+            &gpu.resources,
+            BlitTarget {
+                view: &view,
+                viewport: ViewportRectangle::whole(output.width(), output.height()),
+            },
+        );
         queue.submit([encoder.finish()]);
         Ok(WgpuTextureKeepAlive::new(
             device.clone(),

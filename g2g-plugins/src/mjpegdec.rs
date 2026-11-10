@@ -214,6 +214,7 @@ pub enum JpegDecodeBackend {
 pub struct MjpegDec {
     out_format: RawVideoFormat,
     framerate: Rate,
+    pixel_aspect: g2g_core::PixelAspect,
     #[cfg(feature = "mozjpeg")]
     backend: JpegDecodeBackend,
     /// Last emitted caps, so `CapsChanged` is sent only on change.
@@ -236,6 +237,7 @@ impl MjpegDec {
         Self {
             out_format: RawVideoFormat::Rgba8,
             framerate: Rate::Any,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             #[cfg(feature = "mozjpeg")]
             backend: JpegDecodeBackend::Zune,
             declared_caps: None,
@@ -280,7 +282,7 @@ impl MjpegDec {
             framerate: self.framerate.clone(),
             interlace: picture.interlace,
             colorimetry: decoded_colorimetry(self.out_format),
-            pixel_aspect: g2g_core::PixelAspect::Any,
+            pixel_aspect: self.pixel_aspect,
         }
     }
 
@@ -579,6 +581,7 @@ impl AsyncElement for MjpegDec {
                 width,
                 height,
                 framerate,
+                pixel_aspect,
                 ..
             } => CapsSet::one(Caps::RawVideo {
                 format: out_format,
@@ -587,7 +590,7 @@ impl AsyncElement for MjpegDec {
                 framerate: framerate.clone(),
                 interlace: g2g_core::Interlace::Any,
                 colorimetry: decoded_colorimetry(out_format),
-                pixel_aspect: g2g_core::PixelAspect::Any,
+                pixel_aspect: *pixel_aspect,
             }),
             _ => CapsSet::from_alternatives(Vec::new()),
         }))
@@ -598,6 +601,7 @@ impl AsyncElement for MjpegDec {
             codec: VideoCodec::Mjpeg,
             height,
             framerate,
+            pixel_aspect,
             ..
         } = absolute_caps
         else {
@@ -610,6 +614,7 @@ impl AsyncElement for MjpegDec {
             return Err(G2gError::CapsMismatch);
         }
         self.framerate = framerate.clone();
+        self.pixel_aspect = *pixel_aspect;
         self.upstream_height = match height {
             Dim::Fixed(height) => Some(*height),
             _ => None,

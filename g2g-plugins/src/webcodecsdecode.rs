@@ -74,6 +74,7 @@ pub struct WebCodecsDecode {
     configured: bool,
     width: u32,
     height: u32,
+    pixel_aspect: g2g_core::PixelAspect,
     decoder: Option<VideoDecoder>,
     inbox: Option<Inbox<VideoFrame>>,
     // Kept alive for the decoder's lifetime; JS holds raw references to them.
@@ -101,6 +102,7 @@ impl WebCodecsDecode {
             configured: false,
             width: 0,
             height: 0,
+            pixel_aspect: g2g_core::PixelAspect::Any,
             decoder: None,
             inbox: None,
             _on_output: None,
@@ -204,7 +206,7 @@ impl WebCodecsDecode {
         h: u32,
         out: &mut dyn OutputSink,
     ) -> Result<(), G2gError> {
-        let new_caps = rgba_caps(w, h);
+        let new_caps = rgba_caps(w, h, self.pixel_aspect);
         if self.last_caps.as_ref() != Some(&new_caps) {
             out.push(PipelinePacket::CapsChanged(new_caps.clone()))
                 .await?;
@@ -312,20 +314,23 @@ impl AsyncElement for WebCodecsDecode {
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        let (codec, w, h) = match absolute_caps {
+        let (codec, w, h, pixel_aspect) = match absolute_caps {
             Caps::CompressedVideo {
                 codec,
                 width,
                 height,
+                pixel_aspect,
                 ..
             } if SUPPORTED_CODECS.contains(codec) => (
                 *codec,
                 width.fixed().unwrap_or(0),
                 height.fixed().unwrap_or(0),
+                *pixel_aspect,
             ),
             _ => return Err(G2gError::CapsMismatch),
         };
         self.codec = codec;
+        self.pixel_aspect = pixel_aspect;
         self.width = w;
         self.height = h;
 
@@ -376,6 +381,9 @@ impl AsyncElement for WebCodecsDecode {
                 // lives in `configure_pipeline`, so swallow this like `FfmpegEnc`
                 // rather than rejecting it. (A mid-stream codec swap is a follow-up;
                 // it would arrive on the input link, not here.)
+                PipelinePacket::CapsChanged(Caps::CompressedVideo { pixel_aspect, .. }) => {
+                    self.pixel_aspect = pixel_aspect;
+                }
                 PipelinePacket::CapsChanged(_) => {}
                 PipelinePacket::Flush => {
                     if let Some(d) = self.decoder.as_ref() {
@@ -509,7 +517,7 @@ fn visible_dims(frame: &VideoFrame) -> (u32, u32) {
     }
 }
 
-fn rgba_caps(w: u32, h: u32) -> Caps {
+fn rgba_caps(w: u32, h: u32, pixel_aspect: g2g_core::PixelAspect) -> Caps {
     Caps::RawVideo {
         format: RawVideoFormat::Rgba8,
         width: Dim::Fixed(w),
@@ -517,7 +525,7 @@ fn rgba_caps(w: u32, h: u32) -> Caps {
         framerate: Rate::Any,
         interlace: Interlace::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
-        pixel_aspect: g2g_core::PixelAspect::Any,
+        pixel_aspect,
     }
 }
 
@@ -539,6 +547,7 @@ fn derive_output_caps(input: &Caps) -> CapsSet {
             width,
             height,
             framerate,
+            pixel_aspect,
             ..
         } if SUPPORTED_CODECS.contains(codec) => CapsSet::one(Caps::RawVideo {
             format: RawVideoFormat::Rgba8,
@@ -547,7 +556,7 @@ fn derive_output_caps(input: &Caps) -> CapsSet {
             framerate: framerate.clone(),
             interlace: Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
-            pixel_aspect: g2g_core::PixelAspect::Any,
+            pixel_aspect: *pixel_aspect,
         }),
         _ => CapsSet::from_alternatives(Vec::new()),
     }

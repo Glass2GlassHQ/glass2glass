@@ -51,6 +51,7 @@ use smithay_client_toolkit::reexports::calloop::channel::{channel, Sender as Cal
 use smithay_client_toolkit::reexports::client::{protocol::wl_surface, Connection, Proxy};
 
 use crate::clock::wait_to_present;
+use crate::display_aspect::{display_size, FORCE_ASPECT_RATIO_NAME, FORCE_ASPECT_RATIO_PROPERTY};
 use crate::gpu::GpuContext;
 use crate::waylandwindow::{
     present_on_worker, run_window, worker_gone, WindowParams, WindowRenderer, WorkerChannels,
@@ -65,8 +66,8 @@ use g2g_core::metrics::{monotonic_ns, LatencyHistogram, LatencySnapshot};
 use g2g_core::{
     g2g_error, AsyncElement, BusHandle, Caps, CapsConstraint, ClockCandidate, ClockPriority,
     ClockSync, ConfigureOutcome, ElementMetadata, Frame, G2gError, HardwareError, OutputSink,
-    PadTemplate, PadTemplates, PipelineClock, PipelinePacket, PresentationPacer, PropError,
-    PropKind, PropValue, PropertySpec, MAX_LATENESS_PROPERTY, QOS_INTERVAL_PROPERTY,
+    PadTemplate, PadTemplates, PipelineClock, PipelinePacket, PixelAspect, PresentationPacer,
+    PropError, PropKind, PropValue, PropertySpec, MAX_LATENESS_PROPERTY, QOS_INTERVAL_PROPERTY,
 };
 
 /// Worker thread name, also the prefix on the worker's error lines.
@@ -111,6 +112,8 @@ pub struct WgpuPresentSink {
     /// Negotiated video geometry, so a mid-stream change reaches the worker once.
     width: u32,
     height: u32,
+    pixel_aspect: PixelAspect,
+    force_aspect_ratio: bool,
     frames_presented: Arc<AtomicU64>,
     window_closed: Arc<AtomicBool>,
     latency: Arc<LatencyHistogram>,
@@ -159,6 +162,8 @@ impl WgpuPresentSink {
             caps: None,
             width: 0,
             height: 0,
+            pixel_aspect: PixelAspect::Any,
+            force_aspect_ratio: true,
             frames_presented: Arc::new(AtomicU64::new(0)),
             window_closed: Arc::default(),
             latency: Arc::new(LatencyHistogram::new()),
@@ -229,21 +234,18 @@ impl WgpuPresentSink {
         self.latency.snapshot()
     }
 
-    /// Window width to ask for: the property when set, else the video's.
-    fn window_width(&self, video_width: u32) -> u32 {
-        if self.window_width == FOLLOW_VIDEO {
-            video_width
-        } else {
-            self.window_width
-        }
-    }
-
-    fn window_height(&self, video_height: u32) -> u32 {
-        if self.window_height == FOLLOW_VIDEO {
-            video_height
-        } else {
-            self.window_height
-        }
+    /// Window size to ask for: the properties when set, else the video's shown
+    /// at its display aspect.
+    fn window_size(&self, width: u32, height: u32, pixel_aspect: PixelAspect) -> (u32, u32) {
+        let (display_width, display_height) = display_size(width, height, pixel_aspect);
+        let follow = |requested: u32, video: u32| match requested {
+            FOLLOW_VIDEO => video,
+            requested => requested,
+        };
+        (
+            follow(self.window_width, display_width),
+            follow(self.window_height, display_height),
+        )
     }
 
     /// Wait for the worker to map its window, or for it to say why it could not.
@@ -281,9 +283,12 @@ impl WgpuPresentSink {
         let presented = Arc::clone(&self.frames_presented);
         let window_closed = Arc::clone(&self.window_closed);
         let latency = Arc::clone(&self.latency);
+        let force_aspect_ratio = self.force_aspect_ratio;
+        let (window_width, window_height) =
+            self.window_size(self.width, self.height, self.pixel_aspect);
         let params = WindowParams {
-            width: self.window_width(self.width),
-            height: self.window_height(self.height),
+            width: window_width,
+            height: window_height,
             title: self.title.clone(),
             app_id: self.app_id.clone(),
             fullscreen: self.fullscreen,
@@ -308,7 +313,14 @@ impl WgpuPresentSink {
                              surface: &wl_surface::WlSurface,
                              window_width,
                              window_height| {
-                    build_renderer(conn, surface, window_width, window_height, &caps)
+                    build_renderer(
+                        conn,
+                        surface,
+                        window_width,
+                        window_height,
+                        &caps,
+                        force_aspect_ratio,
+                    )
                 };
                 if let Err(e) = run_window(build, params, channels) {
                     let _ = error_tx.send(alloc::format!("{e}"));
@@ -450,6 +462,7 @@ impl AsyncElement for WgpuPresentSink {
                 "window height in pixels (0: follow the video)",
             )
             .with_default("0"),
+            FORCE_ASPECT_RATIO_PROPERTY,
             MAX_LATENESS_PROPERTY,
             QOS_INTERVAL_PROPERTY,
         ];
@@ -478,6 +491,10 @@ impl AsyncElement for WgpuPresentSink {
                 self.window_height = value.as_uint().ok_or(PropError::Type)? as u32;
                 Ok(())
             }
+            FORCE_ASPECT_RATIO_NAME => {
+                self.force_aspect_ratio = value.as_bool().ok_or(PropError::Type)?;
+                Ok(())
+            }
             _ => self
                 .pacer
                 .set_property(name, &value)
@@ -492,6 +509,7 @@ impl AsyncElement for WgpuPresentSink {
             "fullscreen" => Some(PropValue::Bool(self.fullscreen)),
             "window-width" => Some(PropValue::Uint(self.window_width as u64)),
             "window-height" => Some(PropValue::Uint(self.window_height as u64)),
+            FORCE_ASPECT_RATIO_NAME => Some(PropValue::Bool(self.force_aspect_ratio)),
             _ => self.pacer.get_property(name),
         }
     }
@@ -499,16 +517,21 @@ impl AsyncElement for WgpuPresentSink {
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         // Reject here what the renderer cannot present, before opening a window.
         let (width, height) = crate::wgpusink::source_geometry(absolute_caps)?;
+        let pixel_aspect = match absolute_caps {
+            Caps::RawVideo { pixel_aspect, .. } => *pixel_aspect,
+            _ => PixelAspect::Any,
+        };
 
         // A running window follows the new caps in place: rebuilding it (and its
         // GPU device) for a mid-stream format change would throw away a working
         // surface and flash a second window.
         if let Some(tx) = self.cmd_tx.as_ref() {
-            if (width, height) != (self.width, self.height) {
+            if (width, height, pixel_aspect) != (self.width, self.height, self.pixel_aspect) {
+                let (window_width, window_height) = self.window_size(width, height, pixel_aspect);
                 tx.send(WorkerCmd::Reconfigure {
                     caps: absolute_caps.clone(),
-                    width: self.window_width(width),
-                    height: self.window_height(height),
+                    width: window_width,
+                    height: window_height,
                 })
                 .map_err(|_| worker_gone(&self.window_closed))?;
             }
@@ -516,6 +539,7 @@ impl AsyncElement for WgpuPresentSink {
         self.caps = Some(absolute_caps.clone());
         self.width = width;
         self.height = height;
+        self.pixel_aspect = pixel_aspect;
         Ok(ConfigureOutcome::Accepted)
     }
 
@@ -606,6 +630,7 @@ fn build_renderer(
     width: u32,
     height: u32,
     caps: &Caps,
+    force_aspect_ratio: bool,
 ) -> Result<SurfaceRenderer, Box<dyn std::error::Error>> {
     // A GPU decoder upstream opens its own device (Vulkan Video needs queues wgpu
     // does not ask for) and its textures bind to no other, so present on that
@@ -639,7 +664,8 @@ fn build_renderer(
             );
         }));
     wgpu_surface.configure(&ctx.device, &config);
-    let mut sink = WgpuSink::with_surface(ctx, wgpu_surface, config);
+    let mut sink = WgpuSink::with_surface(ctx, wgpu_surface, config)
+        .with_force_aspect_ratio(force_aspect_ratio);
     sink.configure_pipeline(caps)
         .map_err(|e| alloc::format!("the sink rejected the negotiated caps: {e:?}"))?;
     Ok(SurfaceRenderer { sink })
@@ -818,14 +844,11 @@ mod tests {
     #[test]
     fn window_size_follows_the_video_unless_a_property_pins_it() {
         let mut sink = WgpuPresentSink::new();
-        assert_eq!(
-            (sink.window_width(1920), sink.window_height(1080)),
-            (1920, 1080)
-        );
+        assert_eq!(sink.window_size(1920, 1080, PixelAspect::Any), (1920, 1080));
+        // PAL 4:3 has 16:15 pixels, so its window is 768 wide
+        let pal_4_3 = PixelAspect::Exact(g2g_core::AspectRatio::new(16, 15).expect("nonzero"));
+        assert_eq!(sink.window_size(720, 576, pal_4_3), (768, 576));
         sink = sink.with_window_size(1280, 720);
-        assert_eq!(
-            (sink.window_width(1920), sink.window_height(1080)),
-            (1280, 720)
-        );
+        assert_eq!(sink.window_size(1920, 1080, PixelAspect::Any), (1280, 720));
     }
 }

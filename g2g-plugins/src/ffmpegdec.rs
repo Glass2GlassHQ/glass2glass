@@ -2015,9 +2015,13 @@ impl AsyncElement for FfmpegVideoDec {
             };
             // The bitstream's colour description rides through decode unchanged
             // (Unknown when the input caps carry none, never a guess here).
-            let out_colorimetry = match &self.input_caps {
-                Some(Caps::CompressedVideo { colorimetry, .. }) => *colorimetry,
-                _ => g2g_core::Colorimetry::UNKNOWN,
+            let (out_colorimetry, out_pixel_aspect) = match &self.input_caps {
+                Some(Caps::CompressedVideo {
+                    colorimetry,
+                    pixel_aspect,
+                    ..
+                }) => (*colorimetry, *pixel_aspect),
+                _ => (g2g_core::Colorimetry::UNKNOWN, g2g_core::PixelAspect::Any),
             };
             for d in decoded {
                 if !self.segment.presents(d.pts_ns) {
@@ -2047,6 +2051,7 @@ impl AsyncElement for FfmpegVideoDec {
                     out_framerate.clone(),
                     interlace,
                     out_colorimetry,
+                    out_pixel_aspect,
                 );
                 if self.last_caps.as_ref() != Some(&new_caps) {
                     // M16 workaround #3 Phase A debug assertion: the
@@ -2470,7 +2475,7 @@ fn derive_output_caps(input: &Caps, out: OutputFormat) -> CapsSet {
             height,
             framerate,
             colorimetry,
-            pixel_aspect: _,
+            pixel_aspect,
             alignment: _,
         } if decodes(*codec) => {
             let mk = |f: RawVideoFormat| Caps::RawVideo {
@@ -2482,7 +2487,7 @@ fn derive_output_caps(input: &Caps, out: OutputFormat) -> CapsSet {
                 // Decode does not change how the samples map to colour, so the
                 // bitstream's colorimetry rides through onto the raw output.
                 colorimetry: *colorimetry,
-                pixel_aspect: g2g_core::PixelAspect::Any,
+                pixel_aspect: *pixel_aspect,
             };
             match out {
                 // Auto emits whichever chroma / depth the stream carries;
@@ -2526,6 +2531,7 @@ fn yuv420_caps(
     framerate: Rate,
     interlace: Interlace,
     colorimetry: g2g_core::Colorimetry,
+    pixel_aspect: g2g_core::PixelAspect,
 ) -> Caps {
     Caps::RawVideo {
         format: format.raw_format(),
@@ -2534,7 +2540,7 @@ fn yuv420_caps(
         framerate,
         interlace,
         colorimetry,
-        pixel_aspect: g2g_core::PixelAspect::Any,
+        pixel_aspect,
     }
 }
 
@@ -3816,7 +3822,8 @@ mod tests {
                 480,
                 Rate::Fixed(30 << 16),
                 Interlace::Progressive,
-                g2g_core::Colorimetry::UNKNOWN
+                g2g_core::Colorimetry::UNKNOWN,
+                g2g_core::PixelAspect::Any
             ),
             Caps::RawVideo {
                 format: RawVideoFormat::I420,
@@ -3839,7 +3846,8 @@ mod tests {
                 720,
                 Rate::Fixed(30 << 16),
                 Interlace::Progressive,
-                g2g_core::Colorimetry::UNKNOWN
+                g2g_core::Colorimetry::UNKNOWN,
+                g2g_core::PixelAspect::Any
             ),
             Caps::RawVideo {
                 format: RawVideoFormat::Nv12,

@@ -75,6 +75,9 @@ pub struct VideoScale {
     /// mid-stream `CapsChanged`. Carries the framerate so the output caps
     /// preserve it (scaling is spatial only).
     input: Option<(RawVideoFormat, u32, u32, Rate)>,
+    input_pixel_aspect: g2g_core::PixelAspect,
+    // the ratio negotiation fixed downstream, `Any` when the output keeps the display aspect
+    output_pixel_aspect: g2g_core::PixelAspect,
     /// Output dims resolved from the negotiated output caps, set by
     /// `configure_output`. Used when the properties are unset (auto); `None`
     /// until then, so `process` falls back to the properties and runners that
@@ -91,6 +94,8 @@ impl VideoScale {
             target_w: target_width,
             target_h: target_height,
             input: None,
+            input_pixel_aspect: g2g_core::PixelAspect::Any,
+            output_pixel_aspect: g2g_core::PixelAspect::Any,
             resolved: None,
             configured: false,
             last_caps: None,
@@ -228,6 +233,9 @@ impl AsyncElement for VideoScale {
             self.validate_target()?;
         }
         self.input = Some((format, w, h, rate));
+        if let Caps::RawVideo { pixel_aspect, .. } = absolute_caps {
+            self.input_pixel_aspect = *pixel_aspect;
+        }
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
     }
@@ -240,6 +248,7 @@ impl AsyncElement for VideoScale {
         let Caps::RawVideo {
             width: Dim::Fixed(w),
             height: Dim::Fixed(h),
+            pixel_aspect,
             ..
         } = output_caps
         else {
@@ -249,6 +258,7 @@ impl AsyncElement for VideoScale {
             return Err(G2gError::CapsMismatch);
         }
         self.resolved = Some((*w, *h));
+        self.output_pixel_aspect = *pixel_aspect;
         Ok(())
     }
 
@@ -289,6 +299,16 @@ impl AsyncElement for VideoScale {
                         out_h as usize,
                     );
 
+                    let pixel_aspect = match self.output_pixel_aspect {
+                        g2g_core::PixelAspect::Any => crate::display_aspect::scaled_pixel_aspect(
+                            in_w,
+                            in_h,
+                            self.input_pixel_aspect,
+                            out_w,
+                            out_h,
+                        ),
+                        pinned => pinned,
+                    };
                     let new_caps = Caps::RawVideo {
                         format,
                         width: Dim::Fixed(out_w),
@@ -296,7 +316,7 @@ impl AsyncElement for VideoScale {
                         framerate: rate,
                         interlace: g2g_core::Interlace::Any,
                         colorimetry: g2g_core::Colorimetry::UNKNOWN,
-                        pixel_aspect: g2g_core::PixelAspect::Any,
+                        pixel_aspect,
                     };
                     if self.last_caps.as_ref() != Some(&new_caps) {
                         out.push(PipelinePacket::CapsChanged(new_caps.clone()))
@@ -740,6 +760,30 @@ mod tests {
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
             pixel_aspect: g2g_core::PixelAspect::Any,
         }
+    }
+
+    #[tokio::test]
+    async fn a_non_uniform_scale_keeps_the_display_aspect() {
+        let mut scaler = VideoScale::new(0, 0);
+        scaler.configure_pipeline(&rgba_caps(320, 240)).unwrap();
+        scaler.configure_output(&rgba_caps(160, 160)).unwrap();
+        let mut sink = crate::testutil::CollectSink::default();
+        let frame = crate::testutil::frame_with_bytes(0, vec![0u8; 320 * 240 * 4]);
+        scaler
+            .process(PipelinePacket::DataFrame(frame), &mut sink)
+            .await
+            .unwrap();
+        let emitted = sink.packets.iter().find_map(|packet| match packet {
+            PipelinePacket::CapsChanged(Caps::RawVideo { pixel_aspect, .. }) => Some(*pixel_aspect),
+            _ => None,
+        });
+        // 4:3 shown in a square frame needs pixels 4:3 wide
+        assert_eq!(
+            emitted,
+            Some(g2g_core::PixelAspect::Exact(
+                g2g_core::AspectRatio::new(4, 3).expect("nonzero")
+            ))
+        );
     }
 
     #[test]

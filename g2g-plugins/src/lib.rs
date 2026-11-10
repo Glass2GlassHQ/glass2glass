@@ -377,6 +377,7 @@ pub mod videodiff;
 // `videoanalyse`: luma average / variance of each frame.
 pub mod videoanalyse;
 // `scenechange`: SAD-based shot-change detector.
+mod display_aspect;
 pub mod scenechange;
 pub mod videoflip;
 // Shared negotiation and frame loop behind the CPU video-effect transforms.

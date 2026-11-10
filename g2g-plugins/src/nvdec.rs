@@ -560,9 +560,13 @@ impl NvDec {
     fn frame_caps(&self, format: RawVideoFormat, w: u32, h: u32) -> Caps {
         // The bitstream's colour description rides through decode unchanged
         // (Unknown when the input caps carry none, never a guess here).
-        let colorimetry = match &self.input_caps {
-            Some(Caps::CompressedVideo { colorimetry, .. }) => *colorimetry,
-            _ => g2g_core::Colorimetry::UNKNOWN,
+        let (colorimetry, pixel_aspect) = match &self.input_caps {
+            Some(Caps::CompressedVideo {
+                colorimetry,
+                pixel_aspect,
+                ..
+            }) => (*colorimetry, *pixel_aspect),
+            _ => (g2g_core::Colorimetry::UNKNOWN, g2g_core::PixelAspect::Any),
         };
         Caps::RawVideo {
             format,
@@ -571,7 +575,7 @@ impl NvDec {
             framerate: self.framerate.clone(),
             interlace: g2g_core::Interlace::Any,
             colorimetry,
-            pixel_aspect: g2g_core::PixelAspect::Any,
+            pixel_aspect,
         }
     }
 
@@ -1821,7 +1825,7 @@ fn derive_output_caps(input: &Caps) -> CapsSet {
             height,
             framerate,
             colorimetry,
-            pixel_aspect: _,
+            pixel_aspect,
             alignment: _,
         } => CapsSet::from_alternatives(
             [RawVideoFormat::Nv12, RawVideoFormat::P010]
@@ -1833,7 +1837,7 @@ fn derive_output_caps(input: &Caps) -> CapsSet {
                     framerate: framerate.clone(),
                     interlace: g2g_core::Interlace::Any,
                     colorimetry: *colorimetry,
-                    pixel_aspect: g2g_core::PixelAspect::Any,
+                    pixel_aspect: *pixel_aspect,
                 })
                 .collect(),
         ),

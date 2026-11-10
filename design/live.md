@@ -209,7 +209,8 @@ against the video frames. A second video or audio sink on one number fails
 configure too.
 
 `mode` takes GStreamer's mode names except the widescreen SD ones, which differ
-from the plain ones only in pixel aspect ratio, and raw caps carry none. `auto`
+from the plain ones only in pixel aspect ratio, and the sink does not read the
+caps ratio. `auto`
 picks the first mode whose size, frame rate and scan match the caps, an
 undeclared scan counting as progressive. An explicit mode narrows the sink's
 caps to its own size and rate, and configure fails on caps of another mode. The

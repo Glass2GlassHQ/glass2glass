@@ -13,7 +13,7 @@ use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::runtime::{parse_launch, run_graph, LatencyProfile};
 use g2g_core::{
     AsyncElement, ByteStreamEncoding, Caps, Dim, G2gError, MultiInputElement, OutputSink,
-    PropValue, PushOutcome, Rate, VideoCodec,
+    PixelAspect, PropValue, PushOutcome, Rate, VideoCodec,
 };
 use g2g_plugins::clock::WallClock;
 use g2g_plugins::fmp4demux::Fmp4Demux;
@@ -215,7 +215,12 @@ async fn demux_mp4(bytes: &[u8]) -> FrameSink {
 
 /// Assert the demuxed track is the AV1 stream: refined caps, every temporal
 /// unit byte-identical to the TD-stripped source, keyframes at the GOP heads.
-fn assert_av1_track(sink: &FrameSink, expected: &[Vec<u8>], framerate: Rate) {
+fn assert_av1_track(
+    sink: &FrameSink,
+    expected: &[Vec<u8>],
+    framerate: Rate,
+    pixel_aspect: PixelAspect,
+) {
     assert_eq!(
         sink.caps.last(),
         Some(&Caps::CompressedVideo {
@@ -224,7 +229,7 @@ fn assert_av1_track(sink: &FrameSink, expected: &[Vec<u8>], framerate: Rate) {
             height: Dim::Fixed(108),
             framerate,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
-            pixel_aspect: g2g_core::PixelAspect::Any,
+            pixel_aspect,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         }),
         "moov-refined AV1 caps"
@@ -276,7 +281,7 @@ async fn av1_mp4_round_trips() {
         .expect("eos");
 
     let expected: Vec<Vec<u8>> = frames.iter().map(|f| strip_tds(f)).collect();
-    assert_av1_track(&sink, &expected, Rate::Any);
+    assert_av1_track(&sink, &expected, Rate::Any, PixelAspect::Any);
 }
 
 /// ffmpeg's own mux of the same stream demuxes to the same temporal units
@@ -302,8 +307,13 @@ async fn av1_ffmpeg_mp4_demuxes() {
 
     let expected: Vec<Vec<u8>> = frames.iter().map(|f| strip_tds(f)).collect();
     let sink = demux_mp4(&mp4).await;
-    // ffmpeg writes one stts entry for the constant-rate clip
-    assert_av1_track(&sink, &expected, Rate::Fixed(CLIP_FPS << 16));
+    // ffmpeg writes one stts entry for the constant-rate clip, and a 1:1 pasp box
+    assert_av1_track(
+        &sink,
+        &expected,
+        Rate::Fixed(CLIP_FPS << 16),
+        PixelAspect::SQUARE,
+    );
 }
 
 /// The mkv element (`matroskademux stream=av1`) round-trips the M773 mux at

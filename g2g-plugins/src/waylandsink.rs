@@ -42,10 +42,11 @@
 //! - NV12 input only.
 //! - Mid-stream geometry change tears down the existing worker and
 //!   spawns a fresh one. Same-dims `CapsChanged` is a no-op.
-//! - No scaling: the window opens at the input video dimensions and
-//!   stays there. If the compositor's `configure` event resizes us we
-//!   ignore the new bounds (the video keeps drawing at its native
-//!   resolution and the compositor letterboxes / clips).
+//! - No scaling beyond the display aspect: the window opens at the video's
+//!   display size (`wp_viewporter` scales a non-square-pixel buffer to it)
+//!   and stays there. If the compositor's `configure` event resizes us we
+//!   ignore the new bounds (the video keeps drawing at that size and the
+//!   compositor letterboxes / clips).
 //! - Once the runner elects a clock, each frame is held until its PTS
 //!   deadline and dropped if it is late beyond the QoS bound. On top of
 //!   that, backpressure is compositor-driven: `process()` blocks until
@@ -77,9 +78,13 @@ use smithay_client_toolkit::{
     },
     reexports::calloop_wayland_source::WaylandSource,
     reexports::client::{
+        delegate_noop,
         globals::registry_queue_init,
         protocol::{wl_output, wl_shm, wl_surface},
         Connection, QueueHandle,
+    },
+    reexports::protocols::wp::viewporter::client::{
+        wp_viewport::WpViewport, wp_viewporter::WpViewporter,
     },
     registry::{ProvidesRegistryState, RegistryState},
     registry_handlers,
@@ -97,6 +102,7 @@ use smithay_client_toolkit::{
 };
 
 use crate::clock::wait_to_present;
+use crate::display_aspect::{display_size, FORCE_ASPECT_RATIO_NAME, FORCE_ASPECT_RATIO_PROPERTY};
 use crate::pixel::{frame_byte_size, rgba_rb_offsets};
 use crate::videoconvert::yuv420_to_rgb_into;
 use crate::videoflip::frame_orientation;
@@ -110,9 +116,9 @@ use g2g_core::metrics::{monotonic_ns, LatencyHistogram, LatencySnapshot};
 use g2g_core::{
     AsyncElement, BusHandle, Caps, CapsConstraint, CapsSet, ClockCandidate, ClockPriority,
     ClockSync, Colorimetry, ConfigureOutcome, Dim, ElementMetadata, G2gError, HardwareError,
-    OutputSink, PadTemplate, PadTemplates, PipelineClock, PipelinePacket, PresentationPacer,
-    PropError, PropKind, PropValue, PropertySpec, RawVideoFormat, MAX_LATENESS_PROPERTY,
-    QOS_INTERVAL_PROPERTY,
+    OutputSink, PadTemplate, PadTemplates, PipelineClock, PipelinePacket, PixelAspect,
+    PresentationPacer, PropError, PropKind, PropValue, PropertySpec, RawVideoFormat,
+    MAX_LATENESS_PROPERTY, QOS_INTERVAL_PROPERTY,
 };
 
 /// Worker-thread message. `Frame` carries the pre-converted XRGB8888
@@ -274,6 +280,8 @@ pub struct WaylandSink {
     worker: Option<JoinHandle<()>>,
     width: u32,
     height: u32,
+    pixel_aspect: PixelAspect,
+    force_aspect_ratio: bool,
     /// NV12 -> XRGB coefficients for the negotiated caps' colorimetry, re-derived
     /// whenever `configure_pipeline` runs.
     matrix: YuvRgbMatrix,
@@ -339,6 +347,8 @@ impl WaylandSink {
             worker: None,
             width: 0,
             height: 0,
+            pixel_aspect: PixelAspect::Any,
+            force_aspect_ratio: true,
             matrix: YuvRgbMatrix::new(Colorimetry::UNKNOWN),
             frames_presented: Arc::new(AtomicU64::new(0)),
             latency: Arc::new(LatencyRecorder::new()),
@@ -568,14 +578,15 @@ impl AsyncElement for WaylandSink {
         // accept-H.264-as-no-op workaround is gone: a non-NV12 sink input
         // is a real pipeline error (e.g. an undecoded display chain) and
         // fails loud here.
-        let (w, h, colorimetry) = match absolute_caps {
+        let (w, h, colorimetry, pixel_aspect) = match absolute_caps {
             Caps::RawVideo {
                 format: RawVideoFormat::Nv12,
                 width: Dim::Fixed(w),
                 height: Dim::Fixed(h),
                 colorimetry,
+                pixel_aspect,
                 ..
-            } => (*w, *h, *colorimetry),
+            } => (*w, *h, *colorimetry, *pixel_aspect),
             _ => return Err(G2gError::CapsMismatch),
         };
         if w % 2 != 0 || h % 2 != 0 {
@@ -593,12 +604,17 @@ impl AsyncElement for WaylandSink {
         // workaround #1, fixated to min) and the real geometry lands
         // via a mid-stream `CapsChanged` after SPS parse.
         if self.worker.is_some() {
-            if w == self.width && h == self.height {
+            if (w, h, pixel_aspect) == (self.width, self.height, self.pixel_aspect) {
                 return Ok(ConfigureOutcome::Accepted);
             }
             self.shutdown();
             // fall through to fresh-worker spawn below.
         }
+        let (surface_width, surface_height) = if self.force_aspect_ratio {
+            display_size(w, h, pixel_aspect)
+        } else {
+            (w, h)
+        };
 
         let (tx, rx) = channel::<WorkerCmd>();
         let presented = Arc::clone(&self.frames_presented);
@@ -624,6 +640,8 @@ impl AsyncElement for WaylandSink {
                 if let Err(e) = worker_main(
                     w,
                     h,
+                    surface_width,
+                    surface_height,
                     title,
                     app_id,
                     rx,
@@ -651,6 +669,7 @@ impl AsyncElement for WaylandSink {
         self.worker = Some(join);
         self.width = w;
         self.height = h;
+        self.pixel_aspect = pixel_aspect;
         Ok(ConfigureOutcome::Accepted)
     }
 
@@ -668,6 +687,7 @@ impl AsyncElement for WaylandSink {
             PropertySpec::new("title", PropKind::Str, "window title").with_default("glass2glass"),
             PropertySpec::new("app-id", PropKind::Str, "Wayland xdg app id")
                 .with_default("io.glass2glass.WaylandSink"),
+            FORCE_ASPECT_RATIO_PROPERTY,
             MAX_LATENESS_PROPERTY,
             QOS_INTERVAL_PROPERTY,
         ];
@@ -684,6 +704,10 @@ impl AsyncElement for WaylandSink {
                 self.app_id = value.as_str().ok_or(PropError::Type)?.into();
                 Ok(())
             }
+            FORCE_ASPECT_RATIO_NAME => {
+                self.force_aspect_ratio = value.as_bool().ok_or(PropError::Type)?;
+                Ok(())
+            }
             _ => self
                 .pacer
                 .set_property(name, &value)
@@ -695,6 +719,7 @@ impl AsyncElement for WaylandSink {
         match name {
             "title" => Some(PropValue::Str(self.title.clone())),
             "app-id" => Some(PropValue::Str(self.app_id.clone())),
+            FORCE_ASPECT_RATIO_NAME => Some(PropValue::Bool(self.force_aspect_ratio)),
             _ => self.pacer.get_property(name),
         }
     }
@@ -872,6 +897,10 @@ struct WorkerState {
     qh: QueueHandle<WorkerState>,
     width: u32,
     height: u32,
+    // the surface size the compositor lays out, the buffer scaled to it when the two differ
+    surface_width: u32,
+    surface_height: u32,
+    viewport: Option<WpViewport>,
     configured: bool,
     exit: bool,
     ready: Option<Arc<Handshake>>,
@@ -902,6 +931,8 @@ struct WorkerState {
 fn worker_main(
     width: u32,
     height: u32,
+    surface_width: u32,
+    surface_height: u32,
     title: String,
     app_id: String,
     rx: Channel<WorkerCmd>,
@@ -927,7 +958,15 @@ fn worker_main(
     let window = xdg_shell.create_window(surface, WindowDecorations::RequestServer, &qh);
     window.set_title(&title);
     window.set_app_id(&app_id);
-    window.set_min_size(Some((width, height)));
+    window.set_min_size(Some((surface_width, surface_height)));
+    let viewport = if (surface_width, surface_height) == (width, height) {
+        None
+    } else {
+        let viewporter: WpViewporter = globals.bind(&qh, 1..=1, ())?;
+        let viewport = viewporter.get_viewport(window.wl_surface(), &qh, ());
+        viewport.set_destination(surface_width as i32, surface_height as i32);
+        Some(viewport)
+    };
     window.commit();
 
     // Allocate enough for a single XRGB8888 buffer at the input dims;
@@ -944,6 +983,9 @@ fn worker_main(
         qh: qh.clone(),
         width,
         height,
+        surface_width,
+        surface_height,
+        viewport,
         configured: false,
         exit: false,
         ready: Some(ready),
@@ -1032,11 +1074,14 @@ impl WorkerState {
             // transposes the picture transposes it. The buffer, and
             // `damage_buffer` with it, stays in buffer coordinates.
             let (surface_w, surface_h) = if orientation.swaps_dims() {
-                (self.height, self.width)
+                (self.surface_height, self.surface_width)
             } else {
-                (self.width, self.height)
+                (self.surface_width, self.surface_height)
             };
             self.window.set_min_size(Some((surface_w, surface_h)));
+            if let Some(viewport) = &self.viewport {
+                viewport.set_destination(surface_w as i32, surface_h as i32);
+            }
         }
         // Subscribe to the compositor's `frame` callback for this commit.
         // SCTK's CompositorHandler::frame routes by the WlSurface udata,
@@ -1169,6 +1214,8 @@ delegate_shm!(WorkerState);
 delegate_xdg_shell!(WorkerState);
 delegate_xdg_window!(WorkerState);
 delegate_registry!(WorkerState);
+delegate_noop!(WorkerState: ignore WpViewporter);
+delegate_noop!(WorkerState: ignore WpViewport);
 
 // =================================================================
 // Orientation descriptor -> wl_surface buffer transform

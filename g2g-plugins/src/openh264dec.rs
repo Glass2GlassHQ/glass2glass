@@ -11,8 +11,8 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::{
     g2g_warn, AsyncElement, BitstreamAlignment, Caps, CapsConstraint, CapsSet, Colorimetry,
     ConfigureOutcome, Dim, ElementMetadata, G2gError, HardwareError, Interlace, MemoryDomain,
-    OutputSink, PadTemplate, PadTemplates, PipelinePacket, Rate, RawVideoFormat, Segment,
-    VideoCodec,
+    OutputSink, PadTemplate, PadTemplates, PipelinePacket, PixelAspect, Rate, RawVideoFormat,
+    Segment, VideoCodec,
 };
 
 use openh264::decoder::{DecodedYUV, Decoder, DecoderConfig, Flush};
@@ -75,7 +75,13 @@ fn sequence_parameter_set(access_unit: &[u8]) -> Option<&[u8]> {
     })
 }
 
-fn output_caps(width: Dim, height: Dim, framerate: Rate, colorimetry: Colorimetry) -> Caps {
+fn output_caps(
+    width: Dim,
+    height: Dim,
+    framerate: Rate,
+    colorimetry: Colorimetry,
+    pixel_aspect: PixelAspect,
+) -> Caps {
     Caps::RawVideo {
         format: RawVideoFormat::I420,
         width,
@@ -83,7 +89,7 @@ fn output_caps(width: Dim, height: Dim, framerate: Rate, colorimetry: Colorimetr
         framerate,
         interlace: Interlace::Progressive,
         colorimetry,
-        pixel_aspect: g2g_core::PixelAspect::Any,
+        pixel_aspect,
     }
 }
 
@@ -91,7 +97,8 @@ pub struct OpenH264Dec {
     decoder: Option<Decoder>,
     framerate: Rate,
     colorimetry: Colorimetry,
-    geometry: Option<(u32, u32)>,
+    pixel_aspect: PixelAspect,
+    emitted_caps: Option<Caps>,
     last_sps: Option<Vec<u8>>,
     // openh264 hands pictures out in presentation order, so each takes the earliest pts still held
     pending_pts: BTreeSet<u64>,
@@ -105,7 +112,7 @@ pub struct OpenH264Dec {
 impl core::fmt::Debug for OpenH264Dec {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("OpenH264Dec")
-            .field("geometry", &self.geometry)
+            .field("emitted_caps", &self.emitted_caps)
             .field("pending", &self.pending_pts.len())
             .field("sequence", &self.sequence)
             .field("configured", &self.configured)
@@ -125,7 +132,8 @@ impl OpenH264Dec {
             decoder: None,
             framerate: Rate::Any,
             colorimetry: Colorimetry::UNKNOWN,
-            geometry: None,
+            pixel_aspect: PixelAspect::Any,
+            emitted_caps: None,
             last_sps: None,
             pending_pts: BTreeSet::new(),
             input_stamps: PendingInputStamps::default(),
@@ -196,16 +204,16 @@ impl OpenH264Dec {
             if pts_ns != FrameTiming::PTS_NONE && !self.segment.presents(pts_ns) {
                 continue;
             }
-            let geometry = (picture.width, picture.height);
-            if self.geometry != Some(geometry) {
-                let caps = output_caps(
-                    Dim::Fixed(picture.width),
-                    Dim::Fixed(picture.height),
-                    self.framerate.clone(),
-                    self.colorimetry,
-                );
-                out.push(PipelinePacket::CapsChanged(caps)).await?;
-                self.geometry = Some(geometry);
+            let caps = output_caps(
+                Dim::Fixed(picture.width),
+                Dim::Fixed(picture.height),
+                self.framerate.clone(),
+                self.colorimetry,
+                self.pixel_aspect,
+            );
+            if self.emitted_caps.as_ref() != Some(&caps) {
+                out.push(PipelinePacket::CapsChanged(caps.clone())).await?;
+                self.emitted_caps = Some(caps);
             }
             let frame = Frame {
                 domain: MemoryDomain::System(SystemSlice::from_boxed(
@@ -249,12 +257,14 @@ impl AsyncElement for OpenH264Dec {
                 height,
                 framerate,
                 colorimetry,
+                pixel_aspect,
                 ..
             } => CapsSet::one(output_caps(
                 width.clone(),
                 height.clone(),
                 framerate.clone(),
                 *colorimetry,
+                *pixel_aspect,
             )),
             _ => CapsSet::from_alternatives(Vec::new()),
         }))
@@ -265,16 +275,15 @@ impl AsyncElement for OpenH264Dec {
             codec: VideoCodec::H264,
             framerate,
             colorimetry,
+            pixel_aspect,
             ..
         } = absolute_caps
         else {
             return Err(G2gError::CapsMismatch);
         };
-        if self.configured && self.framerate != *framerate {
-            self.geometry = None;
-        }
         self.framerate = framerate.clone();
         self.colorimetry = *colorimetry;
+        self.pixel_aspect = *pixel_aspect;
         if self.decoder.is_none() {
             self.decoder = Some(open_decoder()?);
         }
@@ -327,8 +336,13 @@ impl AsyncElement for OpenH264Dec {
                     self.last_timing = frame.timing;
                     self.emit(pictures, frame.timing, out).await?;
                 }
-                PipelinePacket::CapsChanged(Caps::CompressedVideo { colorimetry, .. }) => {
+                PipelinePacket::CapsChanged(Caps::CompressedVideo {
+                    colorimetry,
+                    pixel_aspect,
+                    ..
+                }) => {
                     self.colorimetry = colorimetry;
+                    self.pixel_aspect = pixel_aspect;
                 }
                 PipelinePacket::CapsChanged(_) => {}
                 PipelinePacket::Segment(segment) => {
@@ -366,6 +380,7 @@ impl PadTemplates for OpenH264Dec {
                 Dim::Any,
                 Rate::Any,
                 Colorimetry::UNKNOWN,
+                PixelAspect::Any,
             ))),
         ])
     }

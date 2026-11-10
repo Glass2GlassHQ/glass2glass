@@ -67,6 +67,7 @@ macro_rules! av1_decoder {
             height: &Dim,
             framerate: &Rate,
             colorimetry: g2g_core::Colorimetry,
+            pixel_aspect: g2g_core::PixelAspect,
         ) -> CapsSet {
             CapsSet::from_alternatives(
                 OUTPUT_FORMATS
@@ -78,7 +79,7 @@ macro_rules! av1_decoder {
                         framerate: framerate.clone(),
                         interlace: g2g_core::Interlace::Any,
                         colorimetry,
-                        pixel_aspect: g2g_core::PixelAspect::Any,
+                        pixel_aspect,
                     })
                     .collect(),
             )
@@ -94,8 +95,9 @@ macro_rules! av1_decoder {
             /// two BT.601 primaries apart; it fills in whatever the caps leave
             /// unknown.
             input_colorimetry: g2g_core::Colorimetry,
-            /// Last emitted output shape, so `CapsChanged` is sent only on change.
-            out: Option<OutputShape>,
+            input_pixel_aspect: g2g_core::PixelAspect,
+            /// Last emitted output caps, so `CapsChanged` is sent only on change.
+            emitted_caps: Option<Caps>,
             sequence: u64,
             configured: bool,
             /// Timing of the newest input unit, whose fields other than pts the
@@ -109,7 +111,7 @@ macro_rules! av1_decoder {
             fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
                 // The backend `Decoder` is not Debug; report only the element's own state.
                 f.debug_struct(stringify!($ty))
-                    .field("out", &self.out)
+                    .field("emitted_caps", &self.emitted_caps)
                     .field("sequence", &self.sequence)
                     .field("configured", &self.configured)
                     .finish_non_exhaustive()
@@ -128,7 +130,8 @@ macro_rules! av1_decoder {
                     decoder: None,
                     framerate: Rate::Any,
                     input_colorimetry: g2g_core::Colorimetry::UNKNOWN,
-                    out: None,
+                    input_pixel_aspect: g2g_core::PixelAspect::Any,
+                    emitted_caps: None,
                     sequence: 0,
                     configured: false,
                     last_timing: FrameTiming::default(),
@@ -157,7 +160,7 @@ macro_rules! av1_decoder {
                     framerate: self.framerate.clone(),
                     interlace: g2g_core::Interlace::Any,
                     colorimetry: shape.colorimetry,
-                    pixel_aspect: g2g_core::PixelAspect::Any,
+                    pixel_aspect: self.input_pixel_aspect,
                 }
             }
 
@@ -236,10 +239,10 @@ macro_rules! av1_decoder {
                         );
                         continue;
                     }
-                    if self.out != Some(picture.shape) {
-                        out.push(PipelinePacket::CapsChanged(self.output_caps(picture.shape)))
-                            .await?;
-                        self.out = Some(picture.shape);
+                    let caps = self.output_caps(picture.shape);
+                    if self.emitted_caps.as_ref() != Some(&caps) {
+                        out.push(PipelinePacket::CapsChanged(caps.clone())).await?;
+                        self.emitted_caps = Some(caps);
                     }
                     let decoded = Frame {
                         domain: MemoryDomain::System(SystemSlice::from_boxed(
@@ -349,8 +352,8 @@ macro_rules! av1_decoder {
                 CapsConstraint::DerivedOutput(Box::new(|input: &Caps| match input {
                     // Decode does not change how the samples map to colour, so
                     // the bitstream's tag rides through.
-                    Caps::CompressedVideo { codec: VideoCodec::Av1, width, height, framerate, colorimetry, pixel_aspect: _, alignment: _ } => {
-                        output_alternatives(width, height, framerate, *colorimetry)
+                    Caps::CompressedVideo { codec: VideoCodec::Av1, width, height, framerate, colorimetry, pixel_aspect, alignment: _ } => {
+                        output_alternatives(width, height, framerate, *colorimetry, *pixel_aspect)
                     }
                     _ => CapsSet::from_alternatives(Vec::new()),
                 }))
@@ -360,17 +363,17 @@ macro_rules! av1_decoder {
                 &mut self,
                 absolute_caps: &Caps,
             ) -> Result<ConfigureOutcome, G2gError> {
-                let Caps::CompressedVideo { codec: VideoCodec::Av1, framerate, colorimetry, .. } =
+                let Caps::CompressedVideo { codec: VideoCodec::Av1, framerate, colorimetry, pixel_aspect, .. } =
                     absolute_caps
                 else {
                     return Err(G2gError::CapsMismatch);
                 };
                 // the first call carries the solve's fixated placeholder rate
-                if self.configured && self.framerate != *framerate {
+                if self.configured {
                     self.framerate = framerate.clone();
-                    self.out = None;
                 }
                 self.input_colorimetry = *colorimetry;
+                self.input_pixel_aspect = *pixel_aspect;
                 // a mid-stream reconfigure keeps the decoder and the pictures it still holds
                 if self.decoder.is_none() {
                     let mut settings = Settings::new();
@@ -414,8 +417,9 @@ macro_rules! av1_decoder {
                         }
                         // An upstream parser refines the colour description
                         // mid-stream, after configure saw the container's caps.
-                        PipelinePacket::CapsChanged(Caps::CompressedVideo { colorimetry, .. }) => {
+                        PipelinePacket::CapsChanged(Caps::CompressedVideo { colorimetry, pixel_aspect, .. }) => {
                             self.input_colorimetry = colorimetry;
+                            self.input_pixel_aspect = pixel_aspect;
                         }
                         PipelinePacket::CapsChanged(_) => {}
                         PipelinePacket::Segment(segment) => {
@@ -462,6 +466,7 @@ macro_rules! av1_decoder {
                         &Dim::Any,
                         &Rate::Any,
                         g2g_core::Colorimetry::UNKNOWN,
+                        g2g_core::PixelAspect::Any,
                     )),
                 ])
             }

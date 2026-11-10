@@ -179,6 +179,7 @@ pub struct VtDecode {
     /// our emitted output caps: a downstream transform cannot `fixate()` an
     /// `Any` rate, so we never emit one (mirrors `FfmpegVideoDec`).
     input_framerate: Rate,
+    input_pixel_aspect: g2g_core::PixelAspect,
     /// Zero-copy output: emit decoded frames as retained (IOSurface-backed)
     /// `CVPixelBuffer`s (`MemoryDomain::CvPixelBuffer`) instead of packing NV12
     /// bytes to system memory.
@@ -224,6 +225,7 @@ impl VtDecode {
             state: None,
             last_caps: None,
             input_framerate: Rate::Any,
+            input_pixel_aspect: g2g_core::PixelAspect::Any,
             cv_output: false,
             input_stamps: PendingInputStamps::default(),
             emitted: 0,
@@ -395,12 +397,16 @@ impl AsyncElement for VtDecode {
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         match absolute_caps {
             Caps::CompressedVideo {
-                codec, framerate, ..
+                codec,
+                framerate,
+                pixel_aspect,
+                ..
             } if *codec == self.codec => {
                 // The session is built lazily on the first access unit carrying
                 // parameter sets, since VideoToolbox needs the actual SPS/PPS
                 // bytes (in-band), not just the geometry.
                 self.input_framerate = framerate.clone();
+                self.input_pixel_aspect = *pixel_aspect;
                 self.configured = true;
                 Ok(ConfigureOutcome::Accepted)
             }
@@ -442,9 +448,13 @@ impl AsyncElement for VtDecode {
                     // MfDecode.
                     match &c {
                         Caps::CompressedVideo {
-                            codec, framerate, ..
+                            codec,
+                            framerate,
+                            pixel_aspect,
+                            ..
                         } if *codec == self.codec => {
                             self.input_framerate = framerate.clone();
+                            self.input_pixel_aspect = *pixel_aspect;
                         }
                         Caps::RawVideo {
                             format: RawVideoFormat::Nv12,
@@ -529,7 +539,7 @@ impl VtDecode {
         let framerate = self.input_framerate.clone();
         // Both '420v' and '420f' are the NV12 byte layout, so the caps are the
         // same in either mode; only the memory domain differs.
-        let new_caps = nv12_caps(width, height, framerate);
+        let new_caps = nv12_caps(width, height, framerate, self.input_pixel_aspect);
         if self.last_caps.as_ref() != Some(&new_caps) {
             out.push(PipelinePacket::CapsChanged(new_caps.clone()))
                 .await?;
@@ -607,7 +617,7 @@ impl PadTemplates for VtDecode {
     }
 }
 
-fn nv12_caps(w: u32, h: u32, framerate: Rate) -> Caps {
+fn nv12_caps(w: u32, h: u32, framerate: Rate, pixel_aspect: g2g_core::PixelAspect) -> Caps {
     Caps::RawVideo {
         format: RawVideoFormat::Nv12,
         width: Dim::Fixed(w),
@@ -615,7 +625,7 @@ fn nv12_caps(w: u32, h: u32, framerate: Rate) -> Caps {
         framerate,
         interlace: Interlace::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
-        pixel_aspect: g2g_core::PixelAspect::Any,
+        pixel_aspect,
     }
 }
 
@@ -626,6 +636,7 @@ fn derive_output_caps(codec: VideoCodec, input: &Caps) -> CapsSet {
             width,
             height,
             framerate,
+            pixel_aspect,
             ..
         } if *c == codec => CapsSet::one(Caps::RawVideo {
             format: RawVideoFormat::Nv12,
@@ -634,7 +645,7 @@ fn derive_output_caps(codec: VideoCodec, input: &Caps) -> CapsSet {
             framerate: framerate.clone(),
             interlace: Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
-            pixel_aspect: g2g_core::PixelAspect::Any,
+            pixel_aspect: *pixel_aspect,
         }),
         _ => CapsSet::from_alternatives(Vec::new()),
     }

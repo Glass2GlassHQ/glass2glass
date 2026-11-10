@@ -692,9 +692,13 @@ impl AsyncElement for MediaCodecDec {
             }
 
             // `Any` when the stream declared no rate, never a guess.
-            let out_framerate = match &self.input_caps {
-                Some(Caps::CompressedVideo { framerate, .. }) => framerate.clone(),
-                _ => Rate::Any,
+            let (out_framerate, out_pixel_aspect) = match &self.input_caps {
+                Some(Caps::CompressedVideo {
+                    framerate,
+                    pixel_aspect,
+                    ..
+                }) => (framerate.clone(), *pixel_aspect),
+                _ => (Rate::Any, g2g_core::PixelAspect::Any),
             };
             for d in decoded {
                 let (new_caps, domain, pts_ns) = match d {
@@ -704,7 +708,7 @@ impl AsyncElement for MediaCodecDec {
                         height,
                         pts_ns,
                     } => (
-                        nv12_caps(width, height, out_framerate.clone()),
+                        nv12_caps(width, height, out_framerate.clone(), out_pixel_aspect),
                         MemoryDomain::System(SystemSlice::from_boxed(nv12)),
                         pts_ns,
                     ),
@@ -719,7 +723,7 @@ impl AsyncElement for MediaCodecDec {
                     } => {
                         let domain = self.convert_ahb_to_domain(ahb, width, height).await?;
                         (
-                            rgba_caps(width, height, out_framerate.clone()),
+                            rgba_caps(width, height, out_framerate.clone(), out_pixel_aspect),
                             domain,
                             pts_ns,
                         )
@@ -822,7 +826,7 @@ fn image_to_nv12(img: &Image, pts_ns: u64) -> Option<DecodedFrame> {
     })
 }
 
-fn nv12_caps(w: u32, h: u32, framerate: Rate) -> Caps {
+fn nv12_caps(w: u32, h: u32, framerate: Rate, pixel_aspect: g2g_core::PixelAspect) -> Caps {
     Caps::RawVideo {
         format: RawVideoFormat::Nv12,
         width: Dim::Fixed(w),
@@ -830,14 +834,14 @@ fn nv12_caps(w: u32, h: u32, framerate: Rate) -> Caps {
         framerate,
         interlace: g2g_core::Interlace::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
-        pixel_aspect: g2g_core::PixelAspect::Any,
+        pixel_aspect,
     }
 }
 
 /// Caps for the zero-copy GPU path: RGBA (the converter's output format),
 /// carried on a `MemoryDomain::WgpuTexture` frame.
 #[cfg(feature = "mediacodec-wgpu")]
-fn rgba_caps(w: u32, h: u32, framerate: Rate) -> Caps {
+fn rgba_caps(w: u32, h: u32, framerate: Rate, pixel_aspect: g2g_core::PixelAspect) -> Caps {
     Caps::RawVideo {
         format: RawVideoFormat::Rgba8,
         width: Dim::Fixed(w),
@@ -845,7 +849,7 @@ fn rgba_caps(w: u32, h: u32, framerate: Rate) -> Caps {
         framerate,
         interlace: g2g_core::Interlace::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
-        pixel_aspect: g2g_core::PixelAspect::Any,
+        pixel_aspect,
     }
 }
 
@@ -861,6 +865,7 @@ fn derive_output_caps(codec: VideoCodec, rgba: bool, input: &Caps) -> CapsSet {
             width,
             height,
             framerate,
+            pixel_aspect,
             ..
         } if *c == codec => CapsSet::one(Caps::RawVideo {
             format,
@@ -869,7 +874,7 @@ fn derive_output_caps(codec: VideoCodec, rgba: bool, input: &Caps) -> CapsSet {
             framerate: framerate.clone(),
             interlace: g2g_core::Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
-            pixel_aspect: g2g_core::PixelAspect::Any,
+            pixel_aspect: *pixel_aspect,
         }),
         _ => CapsSet::from_alternatives(Vec::new()),
     }

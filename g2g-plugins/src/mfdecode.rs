@@ -490,9 +490,13 @@ impl AsyncElement for MfDecode {
             }
 
             // `Any` when the stream declared no rate, never a guess.
-            let out_framerate = match &self.input_caps {
-                Some(Caps::CompressedVideo { framerate, .. }) => framerate.clone(),
-                _ => Rate::Any,
+            let (out_framerate, out_pixel_aspect) = match &self.input_caps {
+                Some(Caps::CompressedVideo {
+                    framerate,
+                    pixel_aspect,
+                    ..
+                }) => (framerate.clone(), *pixel_aspect),
+                _ => (Rate::Any, g2g_core::PixelAspect::Any),
             };
             for d in decoded {
                 let input = self.input_stamps.take(d.pts_ns);
@@ -504,7 +508,8 @@ impl AsyncElement for MfDecode {
                     );
                     continue;
                 }
-                let new_caps = nv12_caps(d.width, d.height, out_framerate.clone());
+                let new_caps =
+                    nv12_caps(d.width, d.height, out_framerate.clone(), out_pixel_aspect);
                 if self.last_caps.as_ref() != Some(&new_caps) {
                     // M16 workaround #3 Phase A debug assertion:
                     // decode-time output must overlap the closure's
@@ -872,7 +877,7 @@ impl core::fmt::Debug for SampleOwner {
 
 impl D3D11KeepAlive for SampleOwner {}
 
-fn nv12_caps(w: u32, h: u32, framerate: Rate) -> Caps {
+fn nv12_caps(w: u32, h: u32, framerate: Rate, pixel_aspect: g2g_core::PixelAspect) -> Caps {
     Caps::RawVideo {
         format: RawVideoFormat::Nv12,
         width: Dim::Fixed(w),
@@ -880,7 +885,7 @@ fn nv12_caps(w: u32, h: u32, framerate: Rate) -> Caps {
         framerate,
         interlace: Interlace::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
-        pixel_aspect: g2g_core::PixelAspect::Any,
+        pixel_aspect,
     }
 }
 
@@ -896,6 +901,7 @@ fn derive_output_caps(codec: VideoCodec, input: &Caps) -> CapsSet {
             width,
             height,
             framerate,
+            pixel_aspect,
             ..
         } if *c == codec => CapsSet::one(Caps::RawVideo {
             format: RawVideoFormat::Nv12,
@@ -904,7 +910,7 @@ fn derive_output_caps(codec: VideoCodec, input: &Caps) -> CapsSet {
             framerate: framerate.clone(),
             interlace: Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
-            pixel_aspect: g2g_core::PixelAspect::Any,
+            pixel_aspect: *pixel_aspect,
         }),
         _ => CapsSet::from_alternatives(Vec::new()),
     }
@@ -918,7 +924,7 @@ mod tests {
     #[test]
     fn nv12_caps_are_fixed() {
         assert_eq!(
-            nv12_caps(640, 480, Rate::Fixed(30 << 16)),
+            nv12_caps(640, 480, Rate::Fixed(30 << 16), g2g_core::PixelAspect::Any),
             Caps::RawVideo {
                 format: RawVideoFormat::Nv12,
                 width: Dim::Fixed(640),

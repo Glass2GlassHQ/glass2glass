@@ -15558,6 +15558,7 @@ pub struct VulkanVideoDec {
     /// `color_config`), exported into the output caps. `UNKNOWN` until the
     /// first parameter sets parse.
     stream_colorimetry: g2g_core::Colorimetry,
+    input_pixel_aspect: g2g_core::PixelAspect,
 }
 
 impl core::fmt::Debug for VulkanVideoDec {
@@ -15583,7 +15584,7 @@ fn coded_extent_caps(input: &Caps) -> Caps {
         height: Dim::Fixed(height),
         framerate,
         colorimetry,
-        pixel_aspect: _,
+        pixel_aspect,
         alignment,
     } = input
     else {
@@ -15599,7 +15600,7 @@ fn coded_extent_caps(input: &Caps) -> Caps {
         height: Dim::Fixed(round_up(*height)),
         framerate: framerate.clone(),
         colorimetry: *colorimetry,
-        pixel_aspect: g2g_core::PixelAspect::Any,
+        pixel_aspect: *pixel_aspect,
         alignment: *alignment,
     }
 }
@@ -15695,6 +15696,7 @@ impl VulkanVideoDec {
             dpb_slots: None,
             opened_device: None,
             stream_colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            input_pixel_aspect: g2g_core::PixelAspect::Any,
         }
     }
 
@@ -16029,7 +16031,7 @@ impl VulkanVideoDec {
             // The two planes leave the decoder unconverted, so the stream's own
             // colour description applies to these samples.
             colorimetry: self.stream_colorimetry,
-            pixel_aspect: g2g_core::PixelAspect::Any,
+            pixel_aspect: self.input_pixel_aspect,
         };
         if self.last_caps.as_ref() != Some(&caps) {
             out.push(PipelinePacket::CapsChanged(caps.clone())).await?;
@@ -16160,7 +16162,7 @@ impl VulkanVideoDec {
                 framerate: self.framerate.clone(),
                 interlace: g2g_core::Interlace::Any,
                 colorimetry,
-                pixel_aspect: g2g_core::PixelAspect::Any,
+                pixel_aspect: self.input_pixel_aspect,
             };
             if self.last_caps.as_ref() != Some(&caps) {
                 out.push(PipelinePacket::CapsChanged(caps.clone())).await?;
@@ -16342,6 +16344,7 @@ impl AsyncElement for VulkanVideoDec {
                 width,
                 height,
                 framerate,
+                pixel_aspect,
                 ..
             } if VULKAN_DEC_CODECS.contains(codec) => CapsSet::from_alternatives(
                 formats
@@ -16353,7 +16356,7 @@ impl AsyncElement for VulkanVideoDec {
                         framerate: framerate.clone(),
                         interlace: g2g_core::Interlace::Any,
                         colorimetry: g2g_core::Colorimetry::UNKNOWN,
-                        pixel_aspect: g2g_core::PixelAspect::Any,
+                        pixel_aspect: *pixel_aspect,
                     })
                     .collect(),
             ),
@@ -16386,9 +16389,13 @@ impl AsyncElement for VulkanVideoDec {
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         let codec = match absolute_caps {
             Caps::CompressedVideo {
-                codec, framerate, ..
+                codec,
+                framerate,
+                pixel_aspect,
+                ..
             } if VULKAN_DEC_CODECS.contains(codec) => {
                 self.framerate = framerate.clone();
+                self.input_pixel_aspect = *pixel_aspect;
                 *codec
             }
             _ => return Err(G2gError::CapsMismatch),
@@ -16621,7 +16628,12 @@ impl AsyncElement for VulkanVideoDec {
                     Ok(())
                 }
                 PipelinePacket::CapsChanged(c) => match &c {
-                    Caps::CompressedVideo { codec, .. } if VULKAN_DEC_CODECS.contains(codec) => {
+                    Caps::CompressedVideo {
+                        codec,
+                        pixel_aspect,
+                        ..
+                    } if VULKAN_DEC_CODECS.contains(codec) => {
+                        self.input_pixel_aspect = *pixel_aspect;
                         Ok(())
                     }
                     // The runner hands an interior element the output caps it

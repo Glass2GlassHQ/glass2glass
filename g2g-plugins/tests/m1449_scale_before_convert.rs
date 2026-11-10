@@ -9,8 +9,9 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{run_graph, GraphNode, SourceLoop};
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError,
-    Graph, MemoryDomain, OutputSink, PipelineClock, PipelinePacket, Rate, RawVideoFormat,
+    AspectRatio, AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, FrameTiming,
+    G2gError, Graph, MemoryDomain, OutputSink, PipelineClock, PipelinePacket, PixelAspect, Rate,
+    RawVideoFormat,
 };
 use g2g_plugins::capsfilter::CapsFilter;
 use g2g_plugins::videoconvert::VideoConvert;
@@ -160,10 +161,23 @@ async fn run_chain(transforms: Vec<GraphNode>, pin: &str) -> Received {
     Arc::into_inner(received).unwrap().into_inner().unwrap()
 }
 
+// videoscale keeps the decoded display aspect at the pinned size
+fn display_keeping_pixel_aspect() -> PixelAspect {
+    let (decoded_width, decoded_height) = DECODED_SIZE;
+    let (pinned_width, pinned_height) = PINNED_SIZE;
+    let ratio = AspectRatio::new(decoded_width * pinned_height, decoded_height * pinned_width);
+    PixelAspect::Exact(ratio.expect("nonzero sizes"))
+}
+
 fn assert_scaled_to(received: &Received, format: RawVideoFormat) {
+    let mut expected = raw(format, PINNED_SIZE);
+    let Caps::RawVideo { pixel_aspect, .. } = &mut expected else {
+        unreachable!("raw builds raw video caps");
+    };
+    *pixel_aspect = display_keeping_pixel_aspect();
     assert_eq!(
         received.caps.last(),
-        Some(&raw(format, PINNED_SIZE)),
+        Some(&expected),
         "the sink's last caps are the pinned geometry"
     );
     assert_eq!(
