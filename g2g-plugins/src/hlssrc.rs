@@ -1151,25 +1151,40 @@ impl SourceLoop for HlsSrc {
 
                     // fMP4: (re-)emit the EXT-X-MAP init (ftyp+moov) before any
                     // media fragment, so a downstream fmp4demux sees the moov first.
-                    if !init_emitted {
-                        if let Some(bytes) = init_segment_bytes(&client, &media_url, &media).await?
-                        {
-                            if text_mode {
-                                init_tracks = crate::fmp4::parse_all_tracks(&bytes).ok();
-                            } else if !bytes.is_empty() {
-                                segment_timestamps = crate::fmp4::parse_header(&bytes).map_or(
-                                    SegmentTimestamps::Fmp4WithoutVideo,
-                                    SegmentTimestamps::Fmp4,
-                                );
-                                window.admit(
-                                    QueuedMedia {
-                                        bytes,
-                                        key: None,
-                                        segment: None,
-                                    },
-                                    0,
-                                );
-                            }
+                    let unsent_map = media
+                        .map_uri
+                        .as_ref()
+                        .filter(|_| !init_emitted && idx < media.segments.len());
+                    if let Some(map) = unsent_map {
+                        let map_url = resolve_url(&media_url, map);
+                        let Some(bytes) = self
+                            .media_bytes_skipping_live_fetch_failure(
+                                &client,
+                                &media,
+                                &map_url,
+                                media.map_byte_range,
+                            )
+                            .await?
+                        else {
+                            // fetch nothing more from this playlist, the init is fetched again after the reload
+                            idx = media.segments.len();
+                            continue;
+                        };
+                        if text_mode {
+                            init_tracks = crate::fmp4::parse_all_tracks(&bytes).ok();
+                        } else if !bytes.is_empty() {
+                            segment_timestamps = crate::fmp4::parse_header(&bytes).map_or(
+                                SegmentTimestamps::Fmp4WithoutVideo,
+                                SegmentTimestamps::Fmp4,
+                            );
+                            window.admit(
+                                QueuedMedia {
+                                    bytes,
+                                    key: None,
+                                    segment: None,
+                                },
+                                0,
+                            );
                         }
                         init_emitted = true;
                     }

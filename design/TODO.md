@@ -215,8 +215,6 @@ libraries installed.
   other on the flag position and field widths, so a decode would be an
   unvalidated claim. Revisit with the published spec text or a second
   independent implementation.
-- **HLS live errors:** `hlssrc` fails the run on a live `#EXT-X-MAP` init segment
-  answering 4xx, where gst's adaptivedemux2 reloads the playlist.
 
 ## Capture sources
 

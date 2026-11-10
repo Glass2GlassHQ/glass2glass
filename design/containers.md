@@ -1511,8 +1511,9 @@ from an origin that numbered its segments from the start again. The source sends
 a `Flush` and starts at the new playlist's live edge, as gst's hlsdemux2 does
 when a reloaded playlist no longer overlaps the one before it.
 
-A live segment, part or byte range that still answers 4xx or 5xx, or drops the
-connection, after its retries is skipped and the run goes to the playlist reload,
+A live segment, part, byte range or `#EXT-X-MAP` init segment that still answers
+4xx or 5xx, or drops the connection, after its retries is skipped and the run goes
+to the playlist reload, which fetches a skipped init again ahead of its segments,
 as gst's adaptivedemux2 does for 4xx and 5xx, so a lost session reaches the
 re-resolve above. A reload that fails the same way still ends the run. Nothing is signalled downstream for the
 skipped media, as for an `#EXT-X-GAP` segment. A playlist with `#EXT-X-ENDLIST`
@@ -1534,9 +1535,8 @@ Single-file CMAF is supported through `#EXT-X-BYTERANGE` and `#EXT-X-MAP`'s
 `Range` request, the offset continuing from the previous sub-range of the same
 resource when the tag omits an explicit `@offset`. A server that ignores the
 `Range` and replies `200` is handled by slicing the requested window from the
-full body. `hlssrc::init_segment_bytes` fetches the init segment for both `HlsSrc`
-and the `uridecodebin` fan-out probe, so the probe requests only the map's range
-too.
+full body. `hlssrc::init_segment_bytes` fetches the init segment for the
+`uridecodebin` fan-out probe, which requests only the map's range as `HlsSrc` does.
 
 ### Low-latency HLS
 

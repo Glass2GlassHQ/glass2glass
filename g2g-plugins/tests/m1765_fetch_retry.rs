@@ -397,6 +397,71 @@ async fn assert_live_hls_skips_the_dropped_segment(
     );
 }
 
+const HLS_LIVE_FMP4_PLAYLIST: &str = "#EXTM3U\n\
+    #EXT-X-TARGETDURATION:1\n\
+    #EXT-X-MEDIA-SEQUENCE:0\n\
+    #EXT-X-MAP:URI=\"init.mp4\"\n\
+    #EXTINF:1.0,\n\
+    seg0.m4s\n\
+    #EXTINF:1.0,\n\
+    seg1.m4s\n";
+
+const HLS_ENDED_FMP4_PLAYLIST: &str = "#EXTM3U\n\
+    #EXT-X-TARGETDURATION:1\n\
+    #EXT-X-MEDIA-SEQUENCE:0\n\
+    #EXT-X-MAP:URI=\"init.mp4\"\n\
+    #EXTINF:1.0,\n\
+    seg0.m4s\n\
+    #EXTINF:1.0,\n\
+    seg1.m4s\n\
+    #EXTINF:1.0,\n\
+    seg2.m4s\n\
+    #EXT-X-ENDLIST\n";
+
+#[tokio::test]
+async fn a_live_hls_init_segment_failing_past_the_retry_budget_reloads_the_playlist() {
+    let counts = RequestCounts::default();
+    let seen = Arc::clone(&counts);
+    let origin = serve_answers(move |path| {
+        let attempt = count_request(&seen, path);
+        if path == HLS_PLAYLIST_PATH {
+            let playlist = if attempt == 0 {
+                HLS_LIVE_FMP4_PLAYLIST
+            } else {
+                HLS_ENDED_FMP4_PLAYLIST
+            };
+            return Answer::Body(playlist.as_bytes().to_vec());
+        }
+        if path == INIT_PATH {
+            return if attempt < ATTEMPTS_BEFORE_FAILING {
+                Answer::Status(NOT_FOUND)
+            } else {
+                Answer::Body(INIT_BODY.to_vec())
+            };
+        }
+        match segment_index(path, "m4s") {
+            Some(index) => Answer::Body(segment_body(index)),
+            None => Answer::Status(NOT_FOUND),
+        }
+    });
+    let mut src = HlsSrc::new(format!("{origin}{HLS_PLAYLIST_PATH}"))
+        .with_reload_interval_ms(RELOAD_INTERVAL_MS);
+    src.configure_pipeline(&iso_bmff()).unwrap();
+    let mut sink = CollectSink::default();
+    src.run(&mut sink).await.unwrap();
+
+    let mut expected = INIT_BODY.to_vec();
+    for index in 0..3 {
+        expected.extend(segment_body(index));
+    }
+    assert_eq!(delivered_bytes(&sink), expected);
+    assert_eq!(
+        requests_for(&counts, INIT_PATH),
+        ATTEMPTS_BEFORE_FAILING + 1,
+        "retried to the budget, then fetched again after the reload"
+    );
+}
+
 // the live presentation's three segments once the packager has finished it
 const DASH_ENDED_MPD: &str = "<MPD type=\"static\" mediaPresentationDuration=\"PT12S\">\
        <Period><AdaptationSet mimeType=\"video/mp4\">\
