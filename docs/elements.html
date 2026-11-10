@@ -305,15 +305,15 @@ SRC:
   video/x-h264,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]
   video/mpeg,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]
   video/x-vp6,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]
-  video/x-raw,format=I420,width=[1,65535],height=[1,65535],framerate=[1/1,240/1]
-  video/x-raw,format=YUY2,width=[1,65535],height=[1,65535],framerate=[1/1,240/1]
-  video/x-raw,format=UYVY,width=[1,65535],height=[1,65535],framerate=[1/1,240/1]
-  video/x-raw,format=v210,width=[1,65535],height=[1,65535],framerate=[1/1,240/1]
-  video/x-raw,format=GRAY8,width=[1,65535],height=[1,65535],framerate=[1/1,240/1]
-  video/x-raw,format=BGR,width=[1,65535],height=[1,65535],framerate=[1/1,240/1]
-  video/x-raw,format=BGRx,width=[1,65535],height=[1,65535],framerate=[1/1,240/1]
-  video/x-raw,format=RGB,width=[1,65535],height=[1,65535],framerate=[1/1,240/1]
-  video/x-raw,format=ARGB,width=[1,65535],height=[1,65535],framerate=[1/1,240/1]
+  video/x-raw,format=I420,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]
+  video/x-raw,format=YUY2,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]
+  video/x-raw,format=UYVY,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]
+  video/x-raw,format=v210,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]
+  video/x-raw,format=GRAY8,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]
+  video/x-raw,format=BGR,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]
+  video/x-raw,format=BGRx,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]
+  video/x-raw,format=RGB,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]
+  video/x-raw,format=ARGB,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]
   audio/x-raw,format=U8,channels=2,rate=48000
   audio/x-raw,format=U8
   audio/x-raw,format=S16LE,channels=2,rate=48000
@@ -689,9 +689,9 @@ SRC:
   video/x-vp8,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]
   video/x-vp9,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]
   video/x-av1,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]</pre></div><div class="seg"><span class="seg-l">Properties</span><span class="none">none</span></div></article><article class="el-card" data-search="jpegparse jpeg parser codec/parser/video frames a still-image byte stream into whole images and refines their caps" id="el-jpegparse"><div class="el-head"><h3><a href="#el-jpegparse">jpegparse</a></h3><span class="badge role-el">element</span></div><div class="classification">Codec/Parser/Video</div><p class="desc">Frames a still-image byte stream into whole images and refines their caps</p><div class="seg"><span class="seg-l">Pads</span><pre>SINK:
-  image/jpeg,width=[1,65535],height=[1,65535],framerate=[1/1,240/1]
+  image/jpeg,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]
 SRC:
-  image/jpeg,width=[1,65535],height=[1,65535],framerate=[1/1,240/1]</pre></div><div class="seg"><span class="seg-l">Properties</span><span class="none">none</span></div></article><article class="el-card" data-search="klvdecode klv metadata decoder codec/decoder/metadata decodes smpte st 336 klv local sets into text key=value cues verify-checksum" id="el-klvdecode"><div class="el-head"><h3><a href="#el-klvdecode">klvdecode</a></h3><span class="badge role-el">element</span></div><div class="classification">Codec/Decoder/Metadata</div><p class="desc">Decodes SMPTE ST 336 KLV local sets into text key=value cues</p><div class="seg"><span class="seg-l">Pads</span><pre>SINK:
+  image/jpeg,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]</pre></div><div class="seg"><span class="seg-l">Properties</span><span class="none">none</span></div></article><article class="el-card" data-search="klvdecode klv metadata decoder codec/decoder/metadata decodes smpte st 336 klv local sets into text key=value cues verify-checksum" id="el-klvdecode"><div class="el-head"><h3><a href="#el-klvdecode">klvdecode</a></h3><span class="badge role-el">element</span></div><div class="classification">Codec/Decoder/Metadata</div><p class="desc">Decodes SMPTE ST 336 KLV local sets into text key=value cues</p><div class="seg"><span class="seg-l">Pads</span><pre>SINK:
   meta/x-klv
 SRC:
   text/x-raw,format=utf8</pre></div><div class="seg"><span class="seg-l">Properties</span><div class="props"><div class="prop"><code class="pn">verify-checksum</code> <span class="pt">Boolean</span> <span class="pf">read / write</span><div class="pb">drop a local set whose checksum is missing or wrong</div><div class="pfacts">default: <code>true</code></div></div></div></div></article><article class="el-card" data-search="kmssink kms / drm video sink sink/video presents video via drm / kms experimental device max-lateness qos-interval" id="el-kmssink"><div class="el-head"><h3><a href="#el-kmssink">kmssink</a></h3><span class="badge role-el">element</span> <span class="badge exp">experimental</span></div><div class="classification">Sink/Video</div><p class="desc">Presents video via DRM / KMS</p><div class="seg"><span class="seg-l">Pads</span><pre>SINK:
@@ -724,15 +724,15 @@ SRC:
   audio/x-raw,format=S24LE
   audio/x-raw,format=S32LE
   audio/x-raw,format=U8
-  video/x-raw,format=I420,width=[1,65535],height=[1,65535],framerate=[1/1,240/1]
-  video/x-raw,format=YUY2,width=[1,65535],height=[1,65535],framerate=[1/1,240/1]
-  video/x-raw,format=UYVY,width=[1,65535],height=[1,65535],framerate=[1/1,240/1]
-  video/x-raw,format=v210,width=[1,65535],height=[1,65535],framerate=[1/1,240/1]
-  video/x-raw,format=GRAY8,width=[1,65535],height=[1,65535],framerate=[1/1,240/1]
-  video/x-raw,format=BGR,width=[1,65535],height=[1,65535],framerate=[1/1,240/1]
-  video/x-raw,format=BGRx,width=[1,65535],height=[1,65535],framerate=[1/1,240/1]
-  video/x-raw,format=RGB,width=[1,65535],height=[1,65535],framerate=[1/1,240/1]
-  video/x-raw,format=ARGB,width=[1,65535],height=[1,65535],framerate=[1/1,240/1]
+  video/x-raw,format=I420,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]
+  video/x-raw,format=YUY2,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]
+  video/x-raw,format=UYVY,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]
+  video/x-raw,format=v210,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]
+  video/x-raw,format=GRAY8,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]
+  video/x-raw,format=BGR,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]
+  video/x-raw,format=BGRx,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]
+  video/x-raw,format=RGB,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]
+  video/x-raw,format=ARGB,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]
   video/x-prores,variant=proxy,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]
   video/x-prores,variant=lt,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]
   video/x-prores,variant=standard,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]
@@ -840,9 +840,9 @@ SRC:
   video/x-raw,format=RGB
 SRC:
   image/png</pre></div><div class="seg"><span class="seg-l">Properties</span><div class="props"><div class="prop"><code class="pn">compression-level</code> <span class="pt">Unsigned Integer</span> <span class="pf">read / write</span><div class="pb">PNG compression level, 0 (store) ..= 9 (smallest)</div><div class="pfacts">range 0 – 9 &middot; default: <code>6</code></div></div></div></div></article><article class="el-card" data-search="pngparse png parser codec/parser/video frames a still-image byte stream into whole images and refines their caps" id="el-pngparse"><div class="el-head"><h3><a href="#el-pngparse">pngparse</a></h3><span class="badge role-el">element</span></div><div class="classification">Codec/Parser/Video</div><p class="desc">Frames a still-image byte stream into whole images and refines their caps</p><div class="seg"><span class="seg-l">Pads</span><pre>SINK:
-  image/png,width=[1,65535],height=[1,65535],framerate=[1/1,240/1]
+  image/png,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]
 SRC:
-  image/png,width=[1,65535],height=[1,65535],framerate=[1/1,240/1]</pre></div><div class="seg"><span class="seg-l">Properties</span><span class="none">none</span></div></article><article class="el-card" data-search="pnmdec pnm image decoder codec/decoder/image decodes netpbm stills to packed rgb" id="el-pnmdec"><div class="el-head"><h3><a href="#el-pnmdec">pnmdec</a></h3><span class="badge role-el">element</span></div><div class="classification">Codec/Decoder/Image</div><p class="desc">Decodes Netpbm stills to packed RGB</p><div class="seg"><span class="seg-l">Pads</span><pre>SINK:
+  image/png,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]</pre></div><div class="seg"><span class="seg-l">Properties</span><span class="none">none</span></div></article><article class="el-card" data-search="pnmdec pnm image decoder codec/decoder/image decodes netpbm stills to packed rgb" id="el-pnmdec"><div class="el-head"><h3><a href="#el-pnmdec">pnmdec</a></h3><span class="badge role-el">element</span></div><div class="classification">Codec/Decoder/Image</div><p class="desc">Decodes Netpbm stills to packed RGB</p><div class="seg"><span class="seg-l">Pads</span><pre>SINK:
   image/x-portable-anymap
 SRC:
   video/x-raw,format=RGB</pre></div><div class="seg"><span class="seg-l">Properties</span><span class="none">none</span></div></article><article class="el-card" data-search="pnmenc pnm image encoder codec/encoder/image encodes raw rgb / rgba video to a netpbm pixmap ascii" id="el-pnmenc"><div class="el-head"><h3><a href="#el-pnmenc">pnmenc</a></h3><span class="badge role-el">element</span></div><div class="classification">Codec/Encoder/Image</div><p class="desc">Encodes raw RGB / RGBA video to a Netpbm pixmap</p><div class="seg"><span class="seg-l">Pads</span><pre>SINK:
@@ -880,15 +880,15 @@ SRC:
   video/x-prores,variant=hq,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]
   video/x-prores,variant=4444,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]
   video/x-prores,variant=4444xq,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]
-  video/x-raw,format=I420,width=[1,65535],height=[1,65535],framerate=[1/1,240/1]
-  video/x-raw,format=YUY2,width=[1,65535],height=[1,65535],framerate=[1/1,240/1]
-  video/x-raw,format=UYVY,width=[1,65535],height=[1,65535],framerate=[1/1,240/1]
-  video/x-raw,format=v210,width=[1,65535],height=[1,65535],framerate=[1/1,240/1]
-  video/x-raw,format=GRAY8,width=[1,65535],height=[1,65535],framerate=[1/1,240/1]
-  video/x-raw,format=BGR,width=[1,65535],height=[1,65535],framerate=[1/1,240/1]
-  video/x-raw,format=BGRx,width=[1,65535],height=[1,65535],framerate=[1/1,240/1]
-  video/x-raw,format=RGB,width=[1,65535],height=[1,65535],framerate=[1/1,240/1]
-  video/x-raw,format=ARGB,width=[1,65535],height=[1,65535],framerate=[1/1,240/1]
+  video/x-raw,format=I420,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]
+  video/x-raw,format=YUY2,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]
+  video/x-raw,format=UYVY,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]
+  video/x-raw,format=v210,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]
+  video/x-raw,format=GRAY8,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]
+  video/x-raw,format=BGR,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]
+  video/x-raw,format=BGRx,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]
+  video/x-raw,format=RGB,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]
+  video/x-raw,format=ARGB,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]
   audio/mpeg
   audio/x-opus
   audio/mpeg
@@ -1408,15 +1408,15 @@ SRC:
   audio/mpeg</pre></div><div class="seg"><span class="seg-l">Properties</span><span class="none">none</span></div></article><article class="el-card" data-search="y4mdec yuv4mpeg2 decoder codec/demuxer/video reads the raw planar yuv frames out of a yuv4mpeg2 byte stream" id="el-y4mdec"><div class="el-head"><h3><a href="#el-y4mdec">y4mdec</a></h3><span class="badge role-el">element</span></div><div class="classification">Codec/Demuxer/Video</div><p class="desc">Reads the raw planar YUV frames out of a YUV4MPEG2 byte stream</p><div class="seg"><span class="seg-l">Pads</span><pre>SINK:
   application/x-yuv4mpeg
 SRC:
-  video/x-raw,format=I420,width=[1,16384],height=[1,16384],framerate=[1/1,240/1]
-  video/x-raw,format=Y42B,width=[1,16384],height=[1,16384],framerate=[1/1,240/1]
-  video/x-raw,format=Y444,width=[1,16384],height=[1,16384],framerate=[1/1,240/1]
-  video/x-raw,format=I420_10LE,width=[1,16384],height=[1,16384],framerate=[1/1,240/1]
-  video/x-raw,format=I422_10LE,width=[1,16384],height=[1,16384],framerate=[1/1,240/1]
-  video/x-raw,format=Y444_10LE,width=[1,16384],height=[1,16384],framerate=[1/1,240/1]
-  video/x-raw,format=I420_12LE,width=[1,16384],height=[1,16384],framerate=[1/1,240/1]
-  video/x-raw,format=I422_12LE,width=[1,16384],height=[1,16384],framerate=[1/1,240/1]
-  video/x-raw,format=Y444_12LE,width=[1,16384],height=[1,16384],framerate=[1/1,240/1]</pre></div><div class="seg"><span class="seg-l">Properties</span><span class="none">none</span></div></article><article class="el-card" data-search="y4menc yuv4mpeg2 encoder codec/muxer/video wraps raw planar yuv frames in a yuv4mpeg2 byte stream" id="el-y4menc"><div class="el-head"><h3><a href="#el-y4menc">y4menc</a></h3><span class="badge role-el">element</span></div><div class="classification">Codec/Muxer/Video</div><p class="desc">Wraps raw planar YUV frames in a YUV4MPEG2 byte stream</p><div class="seg"><span class="seg-l">Pads</span><pre>SINK:
+  video/x-raw,format=I420,width=[16,16384],height=[16,16384],framerate=[1/1,240/1]
+  video/x-raw,format=Y42B,width=[16,16384],height=[16,16384],framerate=[1/1,240/1]
+  video/x-raw,format=Y444,width=[16,16384],height=[16,16384],framerate=[1/1,240/1]
+  video/x-raw,format=I420_10LE,width=[16,16384],height=[16,16384],framerate=[1/1,240/1]
+  video/x-raw,format=I422_10LE,width=[16,16384],height=[16,16384],framerate=[1/1,240/1]
+  video/x-raw,format=Y444_10LE,width=[16,16384],height=[16,16384],framerate=[1/1,240/1]
+  video/x-raw,format=I420_12LE,width=[16,16384],height=[16,16384],framerate=[1/1,240/1]
+  video/x-raw,format=I422_12LE,width=[16,16384],height=[16,16384],framerate=[1/1,240/1]
+  video/x-raw,format=Y444_12LE,width=[16,16384],height=[16,16384],framerate=[1/1,240/1]</pre></div><div class="seg"><span class="seg-l">Properties</span><span class="none">none</span></div></article><article class="el-card" data-search="y4menc yuv4mpeg2 encoder codec/muxer/video wraps raw planar yuv frames in a yuv4mpeg2 byte stream" id="el-y4menc"><div class="el-head"><h3><a href="#el-y4menc">y4menc</a></h3><span class="badge role-el">element</span></div><div class="classification">Codec/Muxer/Video</div><p class="desc">Wraps raw planar YUV frames in a YUV4MPEG2 byte stream</p><div class="seg"><span class="seg-l">Pads</span><pre>SINK:
   video/x-raw,format=I420
   video/x-raw,format=Y42B
   video/x-raw,format=Y444
