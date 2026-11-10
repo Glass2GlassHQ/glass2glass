@@ -112,6 +112,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M2196: `dashsrc` lands a seek into a gap between timeline segments on the segment after it.
 - M2197: `wavparse` times IMA and MS ADPCM by their block layout rather than the header byte rate.
 - M2198: every source file carries a copyright and SPDX licence header, and CI fails on a file without one.
+- M2199: `flvdemux` and `avidemux` declare H.264 and H.265 output as one access unit per buffer.
 
 Breaking: `TimecodeMeta.frames` is a `u16`, `WIRE_VERSION` is 4, and `RtpRecvConfig` gains `parameter_sets`.
 

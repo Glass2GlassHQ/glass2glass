@@ -356,7 +356,7 @@ pub fn elementary_video_caps(codec: VideoCodec) -> Caps {
     placeholder_video_caps(codec, g2g_core::BitstreamAlignment::Unspecified)
 }
 
-// MP4 and Matroska tracks carry one access unit per sample
+// MP4, Matroska, FLV and AVI tracks carry one access unit per sample
 pub(crate) fn container_video_caps(codec: VideoCodec) -> Caps {
     placeholder_video_caps(codec, crate::annexb::sample_alignment(codec))
 }

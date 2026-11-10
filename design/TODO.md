@@ -309,8 +309,6 @@ libraries installed.
     mp4mux and matroskamux.
   - `mpegts/pmtchange.ts` audio 0 to 2 decode to other lengths and samples than
     ffmpeg's.
-  - `flvdemux` and `avidemux` H.264/H.265 output declares no `alignment`, where gst's
-    flvdemux declares `au`.
   - An MP4 audio track whose edit list replays media plays its samples once:
     replayed edits need sample-accurate clipping, as the video path lays them out.
 - **MP4 track language and orientation:** `mp4mux` writes `und` in every `mdhd`

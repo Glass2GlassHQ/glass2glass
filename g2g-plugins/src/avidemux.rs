@@ -45,7 +45,7 @@ use crate::avi::{palette_change, parse, parse_streams, AviFile, AviStream, AviSt
 use crate::codectag::{
     audio_from_stream_name, audio_stream_name, video_from_stream_name, video_stream_name,
 };
-use crate::typefind::{elementary_video_caps, PLACEHOLDER_FRAMERATE};
+use crate::typefind::{container_video_caps, PLACEHOLDER_FRAMERATE};
 use crate::uncompressedvideo::{
     copy_raw_video_frame, raw_video_caps, raw_video_formats, raw_video_placeholder_caps,
     raw_video_stream_from_str, raw_video_stream_str, warn_short_raw_video_frame,
@@ -126,7 +126,7 @@ fn video_caps(codec: VideoCodec, width: Dim, height: Dim) -> Caps {
         framerate: PLACEHOLDER_FRAMERATE,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
         pixel_aspect: g2g_core::PixelAspect::Any,
-        alignment: g2g_core::BitstreamAlignment::Unspecified,
+        alignment: crate::annexb::sample_alignment(codec),
     }
 }
 
@@ -567,8 +567,8 @@ impl AviDemux {
     /// The caps the current selection negotiates on, before any byte is read.
     fn nego_alternatives(&self) -> Vec<Caps> {
         match self.select {
-            AviStreamSelect::Video => Vec::from([elementary_video_caps(VideoCodec::H264)]),
-            AviStreamSelect::VideoNamed(codec) => Vec::from([elementary_video_caps(codec)]),
+            AviStreamSelect::Video => Vec::from([container_video_caps(VideoCodec::H264)]),
+            AviStreamSelect::VideoNamed(codec) => Vec::from([container_video_caps(codec)]),
             AviStreamSelect::RawVideo(format) => Vec::from([raw_video_placeholder_caps(format)]),
             AviStreamSelect::Audio => pcm_alternatives(AudioFormat::PcmS16Le),
             AviStreamSelect::AudioNamed(format) if is_pcm(format) => pcm_alternatives(format),
@@ -765,7 +765,7 @@ impl PadTemplates for AviDemux {
     fn pad_templates() -> Vec<PadTemplate> {
         let mut outputs: Vec<Caps> = VIDEO_STREAM_NAMES
             .iter()
-            .map(|(_, codec)| elementary_video_caps(*codec))
+            .map(|(_, codec)| container_video_caps(*codec))
             .chain(raw_video_formats().map(raw_video_placeholder_caps))
             .collect();
         for (_, format) in AUDIO_STREAM_NAMES {

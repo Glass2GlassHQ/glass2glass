@@ -969,7 +969,7 @@ impl BitWriter {
     }
 }
 
-// MP4 and Matroska store one access unit per sample, GStreamer's `alignment=au`
+// MP4, Matroska, FLV and AVI store one access unit per sample, GStreamer's `alignment=au`
 pub(crate) fn sample_alignment(codec: VideoCodec) -> g2g_core::BitstreamAlignment {
     match codec {
         VideoCodec::H264 | VideoCodec::H265 => g2g_core::BitstreamAlignment::AccessUnit,

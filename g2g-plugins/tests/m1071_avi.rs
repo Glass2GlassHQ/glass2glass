@@ -348,6 +348,7 @@ fn demuxes_each_fixture_to_the_streams_ffprobe_reports() {
             codec,
             width,
             height,
+            alignment,
             ..
         }) = &sink.caps[VIDEO_INDEX]
         else {
@@ -368,6 +369,12 @@ fn demuxes_each_fixture_to_the_streams_ffprobe_reports() {
             Dim::Fixed(probe.stream_u64(VIDEO_INDEX, "height") as u32),
             "{name}: video height"
         );
+        // AVI stores one H.264 access unit per chunk, GStreamer's `alignment=au`
+        let expected_alignment = match name {
+            H264_MP3 => g2g_core::BitstreamAlignment::AccessUnit,
+            _ => g2g_core::BitstreamAlignment::Unspecified,
+        };
+        assert_eq!(*alignment, expected_alignment, "{name}: video alignment");
         assert_eq!(
             sink.caps[AUDIO_INDEX],
             Some(Caps::Audio {

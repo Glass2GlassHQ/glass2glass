@@ -376,7 +376,7 @@ impl FlvDemux {
     /// advertises the sentinel channels/rate 0 that `aacparse` accepts
     /// pre-header; the concrete layout is announced at runtime from the ASC.
     pub(crate) fn output_caps(stream: FlvStream) -> Caps {
-        let video = crate::typefind::elementary_video_caps;
+        let video = crate::typefind::container_video_caps;
         // The audio layout is refined at runtime, from the AAC AudioSpecificConfig
         // or the tag flags of the other codecs.
         let audio = |format| Caps::Audio {
@@ -1382,6 +1382,7 @@ mod tests {
             FlvDemux::output_caps(FlvStream::H264),
             Caps::CompressedVideo {
                 codec: VideoCodec::H264,
+                alignment: g2g_core::BitstreamAlignment::AccessUnit,
                 ..
             }
         ));
