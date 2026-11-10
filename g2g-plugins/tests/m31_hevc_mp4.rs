@@ -16,6 +16,9 @@ use g2g_plugins::mp4src::Mp4Src;
 
 use std::path::PathBuf;
 
+#[path = "common/annexb.rs"]
+mod common_annexb;
+
 const WIDTH: u32 = 64;
 const HEIGHT: u32 = 48;
 const FRAMES: usize = 6;
@@ -45,9 +48,8 @@ fn annexb(nalus: &[Vec<u8>]) -> Vec<u8> {
 /// First HEVC access unit: VPS(32)+SPS(33)+PPS(34)+IDR(19). The SPS is padded
 /// past 15 bytes so the sink's hvcC can copy a full profile_tier_level.
 fn keyframe_au() -> Vec<u8> {
-    let vps = hevc_nal(32, &[0x0A, 0x0B]);
-    let sps = hevc_nal(33, &(0u8..20).collect::<Vec<_>>());
-    let pps = hevc_nal(34, &[0xC0, 0xC1]);
+    let [vps, sps, pps] =
+        common_annexb::h265_parameter_sets(include_bytes!("fixtures/h265_640x480.h265"));
     let idr = hevc_nal(19, &[0x11, 0x22, 0x33, 0x44]);
     annexb(&[vps, sps, pps, idr])
 }

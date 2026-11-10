@@ -1,3 +1,5 @@
+#![allow(dead_code)] // no one test file uses every helper here
+
 /// Split an Annex-B stream into NAL units (each retaining its leading start code).
 fn nals(mut data: &[u8]) -> Vec<Vec<u8>> {
     // find the first start code
@@ -43,4 +45,21 @@ pub(crate) fn access_units(data: &[u8]) -> Vec<Vec<u8>> {
         aus.push(cur);
     }
     aus
+}
+
+pub(crate) fn h265_parameter_sets(data: &[u8]) -> [Vec<u8>; 3] {
+    let without_start_codes: Vec<Vec<u8>> = nals(data)
+        .into_iter()
+        .map(|nal| {
+            let start_code_end = nal.iter().position(|&byte| byte == 1).expect("start code") + 1;
+            nal[start_code_end..].to_vec()
+        })
+        .collect();
+    [32, 33, 34].map(|wanted_type| {
+        without_start_codes
+            .iter()
+            .find(|nal| nal.first().map(|header| (header >> 1) & 0x3F) == Some(wanted_type))
+            .expect("the stream carries VPS, SPS and PPS")
+            .clone()
+    })
 }

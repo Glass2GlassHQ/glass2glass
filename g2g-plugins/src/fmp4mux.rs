@@ -145,12 +145,9 @@ pub(crate) fn vp9_keyframe(frame: &[u8]) -> bool {
 }
 
 /// `hvcC` decoder configuration record. `param_sets` is [VPS, SPS, PPS]. The
-/// 12-byte general profile_tier_level is copied from the SPS (it sits right
-/// after the 2-byte NAL header and the 1-byte sps_video_parameter_set_id /
-/// max_sub_layers / nesting field); the remaining descriptive fields are set
-/// to the 4:2:0 8-bit defaults the MS HEVC encoder produces. Parameter sets
-/// stay in-band in each sample regardless, so a player re-parses authoritative
-/// values from the SPS.
+/// general profile_tier_level, chroma format, bit depths and temporal layers
+/// are read from the SPS with its emulation prevention bytes removed. Parameter
+/// sets stay in-band in each sample regardless.
 fn hvcc(param_sets: &[&[u8]]) -> Vec<u8> {
     mp4_box(b"hvcC", &hvcc_record(param_sets))
 }
@@ -162,24 +159,22 @@ pub(crate) fn hvcc_record(param_sets: &[&[u8]]) -> Vec<u8> {
     let vps = param_sets[0];
     let sps = param_sets[1];
     let pps = param_sets[2];
-
-    let mut ptl = [0u8; 12];
-    if let Some(src) = sps.get(3..15) {
-        ptl.copy_from_slice(src);
-    }
+    let fields = crate::annexb::hvcc_sps_fields(sps)
+        .expect("parameter_sets refuses an SPS hvcC cannot describe");
 
     let mut p = Vec::new();
     p.push(1); // configuration version
-    p.extend_from_slice(&ptl); // general profile_tier_level (12 bytes)
+    p.extend_from_slice(&fields.profile_tier_level);
     p.extend_from_slice(&0xF000u16.to_be_bytes()); // reserved + min_spatial_segmentation_idc 0
     p.push(0xFC); // reserved + parallelismType 0
-    p.push(0xFC | 1); // reserved + chromaFormat 4:2:0
-    p.push(0xF8); // reserved + bitDepthLumaMinus8 0
-    p.push(0xF8); // reserved + bitDepthChromaMinus8 0
+    p.push(0xFC | fields.chroma_format_idc);
+    p.push(0xF8 | fields.bit_depth_luma_minus8);
+    p.push(0xF8 | fields.bit_depth_chroma_minus8);
     p.extend_from_slice(&0u16.to_be_bytes()); // avgFrameRate (unspecified)
-                                              // constantFrameRate(2)=0 | numTemporalLayers(3)=1 | temporalIdNested(1)=1
-                                              // | lengthSizeMinusOne(2)=3
-    p.push((1 << 3) | (1 << 2) | 3);
+                                              // constantFrameRate(2)=0 | numTemporalLayers(3) | temporalIdNested(1) | lengthSizeMinusOne(2)=3
+    p.push(
+        ((fields.max_sub_layers_minus1 + 1) << 3) | (u8::from(fields.temporal_id_nesting) << 2) | 3,
+    );
     p.push(3); // numOfArrays: VPS, SPS, PPS
 
     for (ty, nalu) in [(32u8, vps), (33u8, sps), (34u8, pps)] {
@@ -244,27 +239,31 @@ mod tests {
     }
 
     #[test]
-    fn hvcc_carries_three_arrays_and_copies_ptl() {
-        // synthetic VPS(32)/SPS(33)/PPS(34); SPS holds a 12-byte PTL after its
-        // 3-byte prefix so hvcC copies it verbatim.
-        let vps: &[u8] = &[0x40, 0x01, 0xAA];
-        let mut sps_v = vec![0x42u8, 0x01, 0x00];
-        sps_v.extend((1u8..=12).map(|b| b * 7)); // recognisable PTL bytes
-        let sps: &[u8] = &sps_v;
-        let pps: &[u8] = &[0x44, 0x01, 0xCC];
-        let cfg = hvcc(&[vps, sps, pps]);
+    fn hvcc_describes_a_main10_sps_from_its_unescaped_bytes() {
+        let stream = include_bytes!("../tests/fixtures/h265_320x192_main10.hevc");
+        let nalus = split_annexb(stream);
+        let sets = parameter_sets(VideoCodec::H265, &nalus).expect("VPS, SPS and PPS");
+        let (vps, sps, pps) = (sets[0], sets[1], sets[2]);
+        let escaped_ptl = &sps[3..15];
+        let rbsp = crate::annexb::strip_emulation_prevention(&sps[2..]);
+        let ptl = &rbsp[1..13];
+        assert_ne!(
+            escaped_ptl, ptl,
+            "the fixture's SPS escapes a byte in its PTL"
+        );
+
+        let cfg = hvcc(&sets);
         assert_eq!(&cfg[4..8], b"hvcC");
         let payload = &cfg[8..];
         assert_eq!(payload[0], 1, "configuration version");
-        assert_eq!(
-            &payload[1..13],
-            &sps_v[3..15],
-            "general PTL copied from SPS"
-        );
+        assert_eq!(&payload[1..13], ptl, "general PTL without the escape byte");
+        assert_eq!(payload[16] & 0x03, 1, "chroma 4:2:0");
+        assert_eq!(payload[17] & 0x07, 2, "luma bit depth 10");
+        assert_eq!(payload[18] & 0x07, 2, "chroma bit depth 10");
         assert_eq!(payload[22], 3, "numOfArrays = VPS, SPS, PPS");
-        // the three parameter sets must appear in the record
-        assert!(cfg.windows(vps.len()).any(|w| w == vps));
-        assert!(cfg.windows(pps.len()).any(|w| w == pps));
+        for set in [vps, sps, pps] {
+            assert!(cfg.windows(set.len()).any(|w| w == set));
+        }
     }
 
     #[test]

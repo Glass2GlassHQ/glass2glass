@@ -103,6 +103,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M2187: element metadata `klass` is renamed `classification`, and in-tree elements name Aaron Boxer as author.
 - M2188: bash completion for `g2g-inspect` and `g2g-launch` element and property names.
 - M2189: y4m, still-image and raw container video feed an encoder without a capsfilter.
+- M2190: `mp4mux` and `matroskamux` take the H.265 `hvcC` profile, level, chroma format and bit depth from the SPS without its emulation prevention bytes.
 
 Breaking: `TimecodeMeta.frames` is a `u16`, `WIRE_VERSION` is 4, and `RtpRecvConfig` gains `parameter_sets`.
 

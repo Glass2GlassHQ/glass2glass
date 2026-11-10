@@ -567,6 +567,41 @@ fn find_nalu<'a>(codec: VideoCodec, nalus: &[&'a [u8]], ty: u8) -> Option<&'a [u
     nalus.iter().copied().find(|n| nalu_type(codec, n) == ty)
 }
 
+pub(crate) struct HvccSpsFields {
+    pub profile_tier_level: [u8; 12],
+    pub chroma_format_idc: u8,
+    pub bit_depth_luma_minus8: u8,
+    pub bit_depth_chroma_minus8: u8,
+    pub max_sub_layers_minus1: u8,
+    pub temporal_id_nesting: bool,
+}
+
+const H265_NAL_HEADER_BYTES: usize = 2;
+// hvcC stores each bit depth minus eight in three bits
+const MAX_HVCC_BIT_DEPTH_MINUS8: u32 = 7;
+
+pub(crate) fn hvcc_sps_fields(sps: &[u8]) -> Option<HvccSpsFields> {
+    let rbsp = strip_emulation_prevention(sps.get(H265_NAL_HEADER_BYTES..)?);
+    let (head, mut reader) = crate::h265parse::parse_h265_sps_head(&rbsp)?;
+    let mut bit_depth_minus8 = || {
+        reader
+            .read_ue()
+            .filter(|&depth| depth <= MAX_HVCC_BIT_DEPTH_MINUS8)
+    };
+    let bit_depth_luma_minus8 = bit_depth_minus8()? as u8;
+    let bit_depth_chroma_minus8 = bit_depth_minus8()? as u8;
+    // the general profile_tier_level follows the byte holding the VPS id and sub-layer count
+    let profile_tier_level = rbsp.get(1..13)?.try_into().ok()?;
+    Some(HvccSpsFields {
+        profile_tier_level,
+        chroma_format_idc: head.chroma_format_idc as u8,
+        bit_depth_luma_minus8,
+        bit_depth_chroma_minus8,
+        max_sub_layers_minus1: head.sps_max_sub_layers_minus1,
+        temporal_id_nesting: head.sps_temporal_id_nesting_flag,
+    })
+}
+
 /// Ordered parameter-set NALUs the moov needs: H.264 SPS(7)+PPS(8), H.265
 /// VPS(32)+SPS(33)+PPS(34). Missing any one is a loud error.
 pub(crate) fn parameter_sets<'a>(
@@ -584,6 +619,9 @@ pub(crate) fn parameter_sets<'a>(
     // avcC copies profile/compat/level from sps[1..4]; a shorter SPS is
     // malformed, so fail loud instead of writing a truncated record.
     if !matches!(codec, VideoCodec::H265) && sets[0].len() < 4 {
+        return Err(G2gError::CapsMismatch);
+    }
+    if matches!(codec, VideoCodec::H265) && hvcc_sps_fields(sets[1]).is_none() {
         return Err(G2gError::CapsMismatch);
     }
     Ok(sets)

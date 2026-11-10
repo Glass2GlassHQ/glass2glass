@@ -16,6 +16,9 @@ use g2g_core::{
 use g2g_plugins::mkvdemux::{MkvDemux, MkvDemuxN, MkvStream};
 use g2g_plugins::mkvmuxn::MkvMuxN;
 
+#[path = "common/annexb.rs"]
+mod common_annexb;
+
 fn video_caps(codec: VideoCodec) -> Caps {
     Caps::CompressedVideo {
         codec,
@@ -161,15 +164,10 @@ async fn h264_avcc_track_demuxes_as_annexb() {
 
 #[tokio::test]
 async fn h265_hvcc_track_demuxes_as_annexb() {
-    // Minimal HEVC NALs: type in bits 6..1 of byte 0 (VPS 32, SPS 33, PPS 34,
-    // IDR_W_RADL 19, TRAIL_R 1). The SPS body is long enough for the hvcC
-    // record's 12-byte PTL copy.
-    let vps: &[u8] = &[0x40, 0x01, 0x0c, 0x01, 0xff, 0xff];
-    let sps: &[u8] = &[
-        0x42, 0x01, 0x01, 0x01, 0x60, 0x00, 0x00, 0x03, 0x00, 0x90, 0x00, 0x00, 0x03, 0x00, 0x00,
-        0x03, 0x00, 0x5d,
-    ];
-    let pps: &[u8] = &[0x44, 0x01, 0xc1, 0x72, 0xb4];
+    // HEVC NAL type sits in bits 6..1 of byte 0: IDR_W_RADL 19, TRAIL_R 1
+    let [vps, sps, pps] =
+        common_annexb::h265_parameter_sets(include_bytes!("fixtures/h265_640x480.h265"));
+    let (vps, sps, pps) = (vps.as_slice(), sps.as_slice(), pps.as_slice());
     let idr: &[u8] = &[0x26, 0x01, 0xaf, 0x08];
     let trail: &[u8] = &[0x02, 0x01, 0xd0, 0x09];
 
