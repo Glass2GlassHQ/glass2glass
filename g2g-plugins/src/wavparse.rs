@@ -39,6 +39,7 @@ use crate::riff::{
     CHUNK_HEADER_LEN, FOURCC_LEN, INFO_FOURCC, LIST_FOURCC, RIFF_FOURCC, RIFF_HEADER_LEN,
 };
 use crate::waveformat::{audio_format, sample_frame_len, tagged_audio};
+use g2g_mcu::adpcm::samples_per_block_channels;
 
 /// The fields of a `fmt ` chunk this reads: tag, channels, rate, byte rate,
 /// block align, bit depth.
@@ -144,10 +145,14 @@ fn parse_fmt(body: &[u8]) -> Option<WaveFormat> {
         Some(_) => readable_format(tag, bits)?,
         None => tagged_audio(tag)?,
     };
-    // some writers put a wrong nAvgBytesPerSec in valid PCM files
-    let byte_rate = match sample_frame_len(format, channels as u8) {
-        Some(frame_len) => u32::try_from(frame_len).ok()?.checked_mul(sample_rate)?,
-        None => byte_rate,
+    // some writers put a wrong nAvgBytesPerSec in valid PCM and ADPCM files
+    let byte_rate = if let Some(frame_len) = sample_frame_len(format, channels as u8) {
+        u32::try_from(frame_len).ok()?.checked_mul(sample_rate)?
+    } else if let Some(block_samples) = adpcm_block_samples(format, tag, block_align, channels) {
+        let rate = u64::from(sample_rate) * u64::from(block_align) / block_samples;
+        u32::try_from(rate).ok()?
+    } else {
+        byte_rate
     };
     Some(WaveFormat {
         format,
@@ -157,6 +162,26 @@ fn parse_fmt(body: &[u8]) -> Option<WaveFormat> {
         byte_rate,
         block_align,
     })
+}
+
+// samples one channel carries in an ADPCM block, `None` for other payloads
+fn adpcm_block_samples(
+    format: AudioFormat,
+    tag: u16,
+    block_align: u16,
+    channels: u16,
+) -> Option<u64> {
+    if format == AudioFormat::ImaAdpcm {
+        let samples = samples_per_block_channels(usize::from(block_align), usize::from(channels));
+        return Some(samples as u64);
+    }
+    if tag != WAVE_FORMAT_MS_ADPCM {
+        return None;
+    }
+    // MS ADPCM opens each channel with a 7-byte header holding two samples, then packs two samples per byte
+    const MS_ADPCM_CHANNEL_HEADER_LEN: u16 = 7;
+    let data_bytes = block_align.checked_sub(MS_ADPCM_CHANNEL_HEADER_LEN.checked_mul(channels)?)?;
+    Some(u64::from(data_bytes) * 2 / u64::from(channels) + 2)
 }
 
 const BLOCK_ALIGN_OFFSET: usize = 12;
@@ -794,6 +819,37 @@ mod tests {
         assert_eq!(
             data_frames(&out),
             [(0, SAMPLES_BYTES), (expected_pts, SAMPLES_BYTES)]
+        );
+    }
+
+    #[tokio::test]
+    async fn ima_adpcm_is_timed_by_its_block_layout_not_the_declared_byte_rate() {
+        use crate::waveformat::{IMA_ADPCM_BITS, WAVE_FORMAT_IMA_ADPCM};
+        const BLOCK_ALIGN: u16 = 256;
+        // mono IMA ADPCM: the 4-byte block header holds one sample, each of the other 252 bytes two
+        const BLOCK_SAMPLES: u64 = 505;
+        const ADPCM_SAMPLE_RATE: u32 = 10_100;
+        const WRONG_BYTE_RATE: u32 = 4_000;
+        let mut fmt = Vec::new();
+        fmt.extend_from_slice(&WAVE_FORMAT_IMA_ADPCM.to_le_bytes());
+        fmt.extend_from_slice(&1u16.to_le_bytes());
+        fmt.extend_from_slice(&ADPCM_SAMPLE_RATE.to_le_bytes());
+        fmt.extend_from_slice(&WRONG_BYTE_RATE.to_le_bytes());
+        fmt.extend_from_slice(&BLOCK_ALIGN.to_le_bytes());
+        fmt.extend_from_slice(&IMA_ADPCM_BITS.to_le_bytes());
+        let block = [0; BLOCK_ALIGN as usize];
+        let mut head = riff_header();
+        head.extend(chunk(b"fmt ", fmt.len() as u32, &fmt));
+        head.extend(chunk(b"data", 2 * u32::from(BLOCK_ALIGN), &block));
+        let mut parse = parser();
+        let mut out = CollectSink::default();
+        push(&mut parse, head, &mut out).await;
+        push(&mut parse, block.to_vec(), &mut out).await;
+
+        let block_ns = BLOCK_SAMPLES * NANOS_PER_SECOND / u64::from(ADPCM_SAMPLE_RATE);
+        assert_eq!(
+            data_frames(&out),
+            [(0, block.len()), (block_ns, block.len())]
         );
     }
 

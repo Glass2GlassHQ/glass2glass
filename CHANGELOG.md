@@ -110,6 +110,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M2194: the H.264 `avcC` written by `mp4mux`, `matroskamux` and `flvmux` carries the chroma format and bit depth for every profile except Baseline, Main and Extended.
 - M2195: MPEG-TS demuxing follows a PAT version change to its new programs and PMT PIDs, and unwraps a truncated last KLV cell.
 - M2196: `dashsrc` lands a seek into a gap between timeline segments on the segment after it.
+- M2197: `wavparse` times IMA and MS ADPCM by their block layout rather than the header byte rate.
 
 Breaking: `TimecodeMeta.frames` is a `u16`, `WIRE_VERSION` is 4, and `RtpRecvConfig` gains `parameter_sets`.
 

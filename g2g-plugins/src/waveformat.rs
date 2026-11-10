@@ -8,7 +8,7 @@ pub(crate) const WAVE_FORMAT_PCM: u16 = 0x0001;
 pub(crate) const WAVE_FORMAT_IEEE_FLOAT: u16 = 0x0003;
 const WAVE_FORMAT_ALAW: u16 = 0x0006;
 const WAVE_FORMAT_MULAW: u16 = 0x0007;
-const WAVE_FORMAT_IMA_ADPCM: u16 = 0x0011;
+pub(crate) const WAVE_FORMAT_IMA_ADPCM: u16 = 0x0011;
 pub(crate) const WAVE_FORMAT_MP3: u16 = 0x0055;
 const WAVE_FORMAT_AAC: u16 = 0x00FF;
 const WAVE_FORMAT_AC3: u16 = 0x2000;
@@ -17,7 +17,7 @@ const WAVE_FORMAT_AC3: u16 = 0x2000;
 /// reader takes any value for it.
 const COMPRESSED_BITS: u16 = 0;
 const G711_BITS: u16 = 8;
-const IMA_ADPCM_BITS: u16 = 4;
+pub(crate) const IMA_ADPCM_BITS: u16 = 4;
 
 /// Each format a `WAVEFORMATEX` can name: its `wFormatTag` and
 /// `wBitsPerSample`.
