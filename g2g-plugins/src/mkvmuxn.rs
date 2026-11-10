@@ -66,7 +66,7 @@ use crate::matroska::{
 };
 use crate::mux::{
     audio_header_config, audio_track_params, every_track_header_ready, refused_input,
-    require_header_config_at_end, video_header_config, CODEC_CONFIG,
+    require_header_config_at_end, video_header_config, InputPriming, CODEC_CONFIG,
 };
 use crate::opusparse::{is_opus_config, parse_opus_head, synth_opus_head, OPUS_ENCODER_PRE_SKIP};
 use crate::subparse::frame_subtitle_block;
@@ -291,6 +291,7 @@ pub struct MkvMuxN {
     chapters: Vec<Chapter>,
     /// Per-pad ASS event counter: the `ReadOrder` field leading each block.
     text_seq: Vec<u64>,
+    priming: InputPriming,
 }
 
 impl MkvMuxN {
@@ -311,6 +312,7 @@ impl MkvMuxN {
             track_tags: alloc::vec![TagList::new(); inputs],
             chapters: Vec::new(),
             text_seq: alloc::vec![0; inputs],
+            priming: InputPriming::new(inputs),
         }
     }
 
@@ -874,6 +876,7 @@ impl MultiInputElement for MkvMuxN {
                             return Ok(());
                         }
                     }
+                    self.priming.note_frame(input, frame.timing.pts_ns);
                     self.agg.push(input, frame);
                 }
                 PipelinePacket::Eos => {
@@ -891,8 +894,12 @@ impl MultiInputElement for MkvMuxN {
                 PipelinePacket::CapsChanged(_) => return Ok(()),
                 // A per-input `Segment` maps that stream to running time; a muxed
                 // container carries its own timestamps, so it is consumed rather
-                // than forwarded into the byte stream.
-                PipelinePacket::Segment(_) => return Ok(()),
+                // than forwarded into the byte stream. One starting past an AAC
+                // track's first frame becomes the track's `CodecDelay`.
+                PipelinePacket::Segment(seg) => {
+                    self.priming.note_segment_start(input, seg.start);
+                    return Ok(());
+                }
                 other => {
                     out.push(other).await?;
                     return Ok(());
@@ -919,6 +926,12 @@ impl MultiInputElement for MkvMuxN {
                 for (input, tags) in per_track.into_iter().enumerate() {
                     if !tags.is_empty() && self.inits[input].is_some() {
                         mux = mux.with_track_tags(self.track_index(input), tags);
+                    }
+                }
+                for input in 0..self.inputs {
+                    if self.aac_config(input).is_some() {
+                        let delay_ns = self.priming.priming_ns(input);
+                        mux = mux.with_codec_delay(self.track_index(input), delay_ns);
                     }
                 }
                 if self.settings.seekable {

@@ -1017,6 +1017,16 @@ lets the ns element win. Because the packet's own length is needed to turn a
 tail discard into a kept duration, the conversion reads the Opus TOC byte and
 applies to Opus only.
 
+Other audio codecs have no in-band delay. Their `CodecDelay` moves the start of
+the track's segment that far past its first block, so the decoder clips the
+priming as it clips an MP4 edit list. The muxer writes an AAC track's `CodecDelay`
+from how far its input's segment starts past its first frame, as `mp4mux` writes
+its edit list. Their `DiscardPadding` reaches the decoder
+as `FrameTiming::end_discard_ns`, which `aacparse` and `mpegaudioparse` move onto
+the frame that ends the block, and the decoder drops that much from the end of
+its output. Both trims match ffmpeg's sample for sample only because the parsers
+count samples through the millisecond block stamps instead of re-basing on each.
+
 ## MP4 and fMP4
 
 An `mp4v` entry's objectTypeIndication picks the codec in one parse shared by

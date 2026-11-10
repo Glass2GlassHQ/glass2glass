@@ -292,9 +292,6 @@ libraries installed.
 - **MP4 with samples in both the `moov` and fragments** (ffmpeg's `frag_keyframe`
   without `empty_moov`): decode the sample-table run, then the fragments.
   `Mp4DemuxN` fails such a file with `CapsMismatch`.
-- **Matroska `CodecDelay`:** `matroskademux` applies it to Opus only, so AAC, MP2 and
-  MP3 tracks decode with the encoder priming ffmpeg trims (1105 samples on an ffmpeg
-  MP3).
 - **Corpus sweep bugs** (calliope TESTING techniques 21-23, paths under
   `~/.cache/calliope` on hercules):
   - Demuxers drop streams gst's parsebin exposes: DTS in `filter/242_4.mkv`, TTA,

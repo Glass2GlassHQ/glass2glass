@@ -493,6 +493,7 @@ impl SourceLoop for AvfVideoSrc {
                         capture_ns: arrival_ns,
                         arrival_ns,
                         keyframe: false,
+                        ..FrameTiming::default()
                     },
                     sequence: seq,
                     meta: Default::default(),
@@ -760,6 +761,7 @@ impl SourceLoop for AvfAudioSrc {
                         capture_ns: pts_ns,
                         arrival_ns: g2g_core::metrics::monotonic_ns(),
                         keyframe: false,
+                        ..FrameTiming::default()
                     },
                     sequence: seq,
                     meta: Default::default(),

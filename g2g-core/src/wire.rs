@@ -64,7 +64,7 @@ use crate::tensor::MAX_TENSOR_RANK;
 /// video caps; version 3 added the u16 channel-layout mask to audio
 /// caps; version 4 widened the timecode frame count to u16; version 5 added the
 /// pixel aspect ratio to both video caps.
-pub const WIRE_VERSION: u8 = 5;
+pub const WIRE_VERSION: u8 = 6;
 
 /// Failure decoding (or encoding) a [`PipelinePacket`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -991,6 +991,7 @@ fn put_timing(w: &mut Writer, t: &FrameTiming) {
     w.u64(t.capture_ns);
     w.u64(t.arrival_ns);
     w.bool(t.keyframe);
+    w.u64(t.end_discard_ns);
 }
 fn get_timing(r: &mut Reader) -> Result<FrameTiming, WireError> {
     Ok(FrameTiming {
@@ -1000,6 +1001,7 @@ fn get_timing(r: &mut Reader) -> Result<FrameTiming, WireError> {
         capture_ns: r.u64()?,
         arrival_ns: r.u64()?,
         keyframe: r.bool()?,
+        end_discard_ns: r.u64()?,
     })
 }
 
@@ -1891,6 +1893,7 @@ mod tests {
             capture_ns: 7,
             arrival_ns: 42,
             keyframe: true,
+            end_discard_ns: 5,
         };
         let frame = Frame {
             domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.clone().into_boxed_slice())),

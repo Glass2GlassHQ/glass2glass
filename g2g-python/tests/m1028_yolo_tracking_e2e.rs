@@ -170,6 +170,7 @@ fn hosted_yolo_tracking_lands_as_related_tracking_nodes() {
                 capture_ns: 0,
                 arrival_ns: 0,
                 keyframe: sequence == 0,
+                ..FrameTiming::default()
             },
             sequence: sequence as u64,
             meta: Default::default(),

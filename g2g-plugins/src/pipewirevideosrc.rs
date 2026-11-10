@@ -792,6 +792,7 @@ impl SourceLoop for PipeWireVideoSrc {
                         arrival_ns,
                         // raw frames are each independently presentable
                         keyframe: true,
+                        ..FrameTiming::default()
                     },
                     sequence: seq,
                     meta: Default::default(),

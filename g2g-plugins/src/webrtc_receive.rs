@@ -135,6 +135,7 @@ impl ReceivedUnit {
                 capture_ns: self.pts_ns,
                 arrival_ns: g2g_core::metrics::monotonic_ns(),
                 keyframe: self.keyframe,
+                ..FrameTiming::default()
             },
             sequence,
             meta: capture_time_meta(self.capture_unix_ns),

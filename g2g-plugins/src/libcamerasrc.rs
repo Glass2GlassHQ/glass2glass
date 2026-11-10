@@ -662,6 +662,7 @@ impl SourceLoop for LibCameraSrc {
                         capture_ns: pts,
                         arrival_ns,
                         keyframe: true, // raw frames are each independently presentable
+                        ..FrameTiming::default()
                     },
                     sequence: seq,
                     meta: Default::default(),

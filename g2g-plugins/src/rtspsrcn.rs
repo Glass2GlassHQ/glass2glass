@@ -1431,6 +1431,7 @@ async fn run_session(
                 capture_ns: pts_ns,
                 arrival_ns: g2g_core::metrics::monotonic_ns(),
                 keyframe,
+                ..FrameTiming::default()
             },
             sequence: state[port].emitted,
             meta: Default::default(),

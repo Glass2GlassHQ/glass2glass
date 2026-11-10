@@ -503,6 +503,7 @@ impl SourceLoop for Camera2Src {
                         capture_ns: pts_ns,
                         arrival_ns,
                         keyframe: true, // raw frames are independent
+                        ..FrameTiming::default()
                     },
                     sequence: seq,
                     meta: Default::default(),

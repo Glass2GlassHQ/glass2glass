@@ -173,6 +173,7 @@ fn timing(seq: u64, pts_step_ns: u64) -> FrameTiming {
         capture_ns: pts,
         arrival_ns: 0,
         keyframe: false,
+        ..FrameTiming::default()
     }
 }
 

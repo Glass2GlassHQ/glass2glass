@@ -108,6 +108,36 @@ pub(crate) fn every_track_header_ready<I, T>(
         .all(|(input, init)| init.is_some() || aggregator.is_ended(input))
 }
 
+#[cfg(feature = "std")]
+#[derive(Debug)]
+pub(crate) struct InputPriming {
+    first_pts_ns: Vec<Option<u64>>,
+    segment_start_ns: Vec<u64>,
+}
+
+#[cfg(feature = "std")]
+impl InputPriming {
+    pub(crate) fn new(inputs: usize) -> Self {
+        Self {
+            first_pts_ns: vec![None; inputs],
+            segment_start_ns: vec![0; inputs],
+        }
+    }
+
+    pub(crate) fn note_segment_start(&mut self, input: usize, start_ns: u64) {
+        self.segment_start_ns[input] = start_ns;
+    }
+
+    pub(crate) fn note_frame(&mut self, input: usize, pts_ns: u64) {
+        self.first_pts_ns[input].get_or_insert(pts_ns);
+    }
+
+    pub(crate) fn priming_ns(&self, input: usize) -> u64 {
+        let first = self.first_pts_ns[input].unwrap_or(0);
+        self.segment_start_ns[input].saturating_sub(first)
+    }
+}
+
 // the channel count and sample rate an audio track header declares
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct AudioTrackParams {

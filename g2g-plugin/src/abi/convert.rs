@@ -169,6 +169,7 @@ pub unsafe fn packet_from_ffi<C: CapsLayout>(
                     capture_ns: f.capture_ns,
                     arrival_ns: f.arrival_ns,
                     keyframe: f.keyframe != 0,
+                    ..FrameTiming::default()
                 },
                 f.sequence,
             )))

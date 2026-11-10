@@ -415,6 +415,7 @@ impl MultiOutputSource for WebRtcWhepSessionSrc {
                             capture_ns: pts_ns,
                             arrival_ns: g2g_core::metrics::monotonic_ns(),
                             keyframe,
+                            ..FrameTiming::default()
                         },
                         sequence: seq,
                         meta: capture_time_meta(media_capture_unix_ns(&media)),

@@ -261,6 +261,7 @@ impl MpegAudioParse {
             .clock
             .frame_pts(start_offset, frame_samples, header.sample_rate);
         let duration_ns = ticks_to_ns(frame_samples, header.sample_rate);
+        let end_discard_ns = self.clock.end_discard_ns(start_offset + data.len() as u64);
         if let Some(gapless) = self.pending_gapless.take() {
             let presented = presented_segment(gapless, pts_ns, header);
             // ffmpeg -ss counts from the first sample the decoder keeps
@@ -280,6 +281,7 @@ impl MpegAudioParse {
                 duration_ns,
                 // Every MPEG audio frame decodes on its own.
                 keyframe: true,
+                end_discard_ns,
                 ..FrameTiming::default()
             },
             self.sequence,
@@ -418,6 +420,12 @@ impl AsyncElement for MpegAudioParse {
                             self.buf_offset + self.buf.len() as u64,
                             pts,
                         );
+                    }
+                    if frame.timing.end_discard_ns > 0 {
+                        let chunk_end_offset =
+                            self.buf_offset + (self.buf.len() + slice.len()) as u64;
+                        self.clock
+                            .note_end_discard(chunk_end_offset, frame.timing.end_discard_ns);
                     }
                     self.buf.extend_from_slice(slice);
                     self.drain(false, out).await?;

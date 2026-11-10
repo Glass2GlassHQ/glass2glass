@@ -108,6 +108,7 @@ impl SourceLoop for RampSrc {
                         capture_ns: pts_ns,
                         arrival_ns: g2g_core::metrics::monotonic_ns(),
                         keyframe: true,
+                        ..FrameTiming::default()
                     },
                     sequence: emitted,
                     meta: Default::default(),

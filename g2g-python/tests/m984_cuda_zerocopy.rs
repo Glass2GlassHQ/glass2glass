@@ -121,6 +121,7 @@ fn cuda_frame_owned_by(luma_ptr: u64, pitch: u32, owner: Arc<dyn CudaKeepAlive>)
             capture_ns: 0,
             arrival_ns: 0,
             keyframe: true,
+            ..FrameTiming::default()
         },
         sequence: 0,
         meta: Default::default(),

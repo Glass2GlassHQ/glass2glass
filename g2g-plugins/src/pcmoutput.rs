@@ -146,13 +146,23 @@ impl PcmOutput {
         out: &mut dyn OutputSink,
     ) -> Result<(), G2gError> {
         let mut pts_ns = timing.pts_ns;
-        for pcm in decoded {
+        let last = decoded.len().saturating_sub(1);
+        for (index, pcm) in decoded.into_iter().enumerate() {
             let samples = pcm
                 .pcm
                 .len()
                 .checked_div(pcm.bytes_per_sample_frame())
                 .ok_or(G2gError::CapsMismatch)?;
-            let frame_timing = FrameTiming { pts_ns, ..timing };
+            let end_discard_ns = if index == last {
+                timing.end_discard_ns
+            } else {
+                0
+            };
+            let frame_timing = FrameTiming {
+                pts_ns,
+                end_discard_ns,
+                ..timing
+            };
             if pts_ns != FrameTiming::PTS_NONE {
                 pts_ns = pts_ns
                     .saturating_add(g2g_core::time::ticks_to_ns(samples as u64, pcm.sample_rate));

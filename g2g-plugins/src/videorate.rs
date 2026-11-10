@@ -181,6 +181,7 @@ impl VideoRate {
                 capture_ns,
                 arrival_ns,
                 keyframe: false, // raw-video rate conversion; no keyframe semantics
+                ..FrameTiming::default()
             },
             sequence: self.emitted,
             meta: Default::default(),

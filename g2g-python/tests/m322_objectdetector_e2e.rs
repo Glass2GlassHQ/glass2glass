@@ -145,6 +145,7 @@ fn hosted_objectdetector_loads_model_and_detects() {
             capture_ns: 0,
             arrival_ns: 0,
             keyframe: true,
+            ..FrameTiming::default()
         },
         sequence: 0,
         meta: Default::default(),

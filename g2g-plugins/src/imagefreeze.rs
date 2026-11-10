@@ -222,6 +222,7 @@ impl AsyncElement for ImageFreeze {
                             capture_ns: frame.timing.capture_ns,
                             arrival_ns: frame.timing.arrival_ns,
                             keyframe: frame.timing.keyframe,
+                            ..FrameTiming::default()
                         };
                         let copy = Frame::new(domain.share(), timing, self.emitted);
                         self.emitted += 1;

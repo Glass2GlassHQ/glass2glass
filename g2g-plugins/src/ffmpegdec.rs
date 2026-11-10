@@ -2108,6 +2108,7 @@ impl AsyncElement for FfmpegVideoDec {
                         capture_ns: d.pts_ns,
                         arrival_ns: d.input.arrival_ns,
                         keyframe: true, // raw decoded frames are each independently presentable
+                        ..FrameTiming::default()
                     },
                     sequence: self.emitted,
                     meta: d.input.meta,

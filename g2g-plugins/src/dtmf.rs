@@ -194,6 +194,7 @@ impl SourceLoop for DtmfSrc {
                         capture_ns: pts,
                         arrival_ns,
                         keyframe: false,
+                        ..FrameTiming::default()
                     },
                     sequence: seq,
                     meta: Default::default(),

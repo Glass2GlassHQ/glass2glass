@@ -1088,6 +1088,7 @@ impl UnixFdSrc {
             capture_ns: 0,
             arrival_ns: g2g_core::metrics::monotonic_ns(),
             keyframe: buffer.flags & BUFFER_FLAG_DELTA_UNIT == 0,
+            ..FrameTiming::default()
         }
     }
 

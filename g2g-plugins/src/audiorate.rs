@@ -170,6 +170,7 @@ impl AudioRate {
             capture_ns: source.capture_ns,
             arrival_ns: source.arrival_ns,
             keyframe: source.keyframe,
+            ..FrameTiming::default()
         };
         self.next_sample += samples;
         self.out_samples += samples;

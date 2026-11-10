@@ -1225,6 +1225,7 @@ impl Mp4DemuxN {
                 capture_ns: sample.pts_ns,
                 arrival_ns: g2g_core::metrics::monotonic_ns(),
                 keyframe: sample.keyframe,
+                ..FrameTiming::default()
             };
             let clipped = match kind {
                 Some(kind) => clip_stored_pcm(kind, &self.port_segment(port), timing, data)?,

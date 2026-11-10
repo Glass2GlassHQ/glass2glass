@@ -326,6 +326,7 @@ impl AccessUnitEmitter {
                 capture_ns: pts,
                 arrival_ns,
                 keyframe,
+                ..FrameTiming::default()
             },
             sequence: self.seq,
             meta: Default::default(),

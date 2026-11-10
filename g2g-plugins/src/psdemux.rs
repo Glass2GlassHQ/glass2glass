@@ -1861,7 +1861,7 @@ impl PsDemuxN {
             }
             let presented_ns = ns_from_90khz(u.pts_90khz);
             self.segment
-                .send_before_unit(port, dts_ns, presented_ns, out)
+                .send_before_unit(port, dts_ns, presented_ns, 0, out)
                 .await?;
             // A subpicture port opens on the same synthesized `.idx` the single
             // output demuxer sends, so a fan-out subtitle branch renders on the

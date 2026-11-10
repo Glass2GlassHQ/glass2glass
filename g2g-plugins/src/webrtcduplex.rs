@@ -857,6 +857,7 @@ impl MultiDuplexSession for WebRtcDuplexSession {
                             capture_ns: pts_ns,
                             arrival_ns: g2g_core::metrics::monotonic_ns(),
                             keyframe,
+                            ..g2g_core::FrameTiming::default()
                         },
                         sequence: seq,
                         meta: Default::default(),

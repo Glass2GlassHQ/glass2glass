@@ -653,7 +653,7 @@ impl FlvDemuxN {
             };
             let pts_ns = unit.pts_ns();
             self.segment
-                .send_before_unit(port, pts_ns, Some(pts_ns), out)
+                .send_before_unit(port, pts_ns, Some(pts_ns), 0, out)
                 .await?;
             let emitted = self.emitters[port].convert(&self.demux, unit);
             if let Some(caps) = emitted.caps {

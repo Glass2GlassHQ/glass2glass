@@ -78,6 +78,7 @@ fn incomplete_round_emits_nothing() {
             capture_ns: 0,
             arrival_ns: 0,
             keyframe: false,
+            ..FrameTiming::default()
         },
         sequence: 0,
         meta: Default::default(),
@@ -122,6 +123,7 @@ fn batches_two_inputs_into_one_frame_with_metadata() {
             capture_ns: 0,
             arrival_ns: 0,
             keyframe: false,
+            ..FrameTiming::default()
         },
         sequence: 0,
         meta: Default::default(),

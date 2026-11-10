@@ -49,6 +49,7 @@ fn frame_2x1_rgba() -> Frame {
             capture_ns: 0,
             arrival_ns: 0,
             keyframe: false,
+            ..FrameTiming::default()
         },
         sequence: 0,
         meta: Default::default(),

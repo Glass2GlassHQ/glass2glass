@@ -57,6 +57,7 @@ fn frame(bytes: Vec<u8>) -> Frame {
             capture_ns: 0,
             arrival_ns: 0,
             keyframe: true,
+            ..FrameTiming::default()
         },
         sequence: 0,
         meta: Default::default(),

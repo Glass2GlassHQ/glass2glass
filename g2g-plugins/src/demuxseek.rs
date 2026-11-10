@@ -45,6 +45,8 @@ use g2g_core::{
     stream_time_ns, G2gError, MultiOutputSink, OutputSink, PipelinePacket, Seek, SeekFlags, Segment,
 };
 
+use crate::pcmclip::{presentation_after, within_presentation};
+
 // a stream without a keyframe for this many units releases them early, the segment still clips them
 const KEPT_UNITS_MAX: usize = 1024;
 
@@ -85,6 +87,7 @@ pub(crate) fn segment_after_seek(current: Segment, position_ns: u64, seek: &Seek
 pub(crate) struct SharedSegment {
     start_ns: Option<u64>,
     sent: Vec<bool>,
+    presented: Vec<Segment>,
 }
 
 impl SharedSegment {
@@ -92,6 +95,7 @@ impl SharedSegment {
         Self {
             start_ns: None,
             sent: alloc::vec![false; ports],
+            presented: alloc::vec![Segment::new(); ports],
         }
     }
 
@@ -101,6 +105,7 @@ impl SharedSegment {
         port: usize,
         opening_start_ns: u64,
         pts_ns: Option<u64>,
+        priming_ns: u64,
         out: &mut dyn MultiOutputSink,
     ) -> Result<(), G2gError> {
         if let (Some(start_ns), Some(pts_ns)) = (self.start_ns, pts_ns) {
@@ -108,7 +113,8 @@ impl SharedSegment {
                 self.start_ns = Some(pts_ns);
                 let lowered = Segment::for_flush_seek(&Seek::flush_to(pts_ns), None);
                 for opened_port in (0..self.sent.len()).filter(|&port| self.sent[port]) {
-                    out.push_to(opened_port, PipelinePacket::Segment(lowered))
+                    let presented = within_presentation(lowered, &self.presented[opened_port]);
+                    out.push_to(opened_port, PipelinePacket::Segment(presented))
                         .await?;
                 }
             }
@@ -117,9 +123,12 @@ impl SharedSegment {
             return Ok(());
         }
         self.sent[port] = true;
+        self.presented[port] = presentation_after(pts_ns.unwrap_or(opening_start_ns), priming_ns);
         let start_ns = *self.start_ns.get_or_insert(opening_start_ns);
         let opening = Segment::for_flush_seek(&Seek::flush_to(start_ns), None);
-        out.push_to(port, PipelinePacket::Segment(opening)).await?;
+        let presented = within_presentation(opening, &self.presented[port]);
+        out.push_to(port, PipelinePacket::Segment(presented))
+            .await?;
         Ok(())
     }
 }

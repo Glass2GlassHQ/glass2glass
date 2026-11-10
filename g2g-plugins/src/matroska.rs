@@ -877,6 +877,17 @@ pub struct MkvTrack {
     /// would be reading encoded bytes as a bitstream. A chain of the other steps
     /// is undone at demux, on the blocks and the `CodecPrivate`, and never sets this.
     pub unsupported_encoding: bool,
+    pub codec_delay_ns: u64,
+}
+
+impl MkvTrack {
+    // opus decoders drop the pre-skip themselves, and `OpusBlockShift` lines the blocks up with it
+    pub(crate) fn decoder_priming_ns(&self) -> u64 {
+        match self.codec {
+            MkvCodec::Opus => 0,
+            _ => self.codec_delay_ns,
+        }
+    }
 }
 
 /// One `CuePoint` from the Segment `Cues` index: a seekable time and the byte
@@ -903,6 +914,7 @@ pub struct MkvFrame {
     /// `BlockDuration` (scaled). `0` when the block carries none, e.g. a
     /// `SimpleBlock` (so video / audio, paced by PTS deltas, leave it `0`).
     pub duration_ns: u64,
+    pub end_discard_ns: u64,
     pub keyframe: bool,
     // derived for a reordering H.264 / H.265 track, whose blocks store only presentation times
     pub dts_ns: Option<u64>,
@@ -1900,6 +1912,7 @@ fn parse_track_entry(body: &[u8], content_key: ContentKeyLookup<'_>) -> Option<P
             sample_rate,
             default_duration_ns,
             unsupported_encoding,
+            codec_delay_ns,
         },
         codec_private,
         tags,
@@ -2123,9 +2136,10 @@ fn parse_block_group(
 /// the millisecond `TimestampScale` grid exactly, and it wins where both are
 /// present, as in every ffmpeg-written file.
 ///
-/// Only Opus is converted: the packet's own length has to be known to turn a
-/// tail discard into the kept duration, and the Opus TOC byte is the only one
-/// this parser can read. Everything about the value is the file's claim, so a
+/// Opus is converted to a kept duration: the packet's own length has to be
+/// known to turn a tail discard into one, and the Opus TOC byte is the only one
+/// this parser can read. Other codecs carry the discard to their decoder as
+/// `end_discard_ns`. Everything about the value is the file's claim, so a
 /// negative discard (the spec's leading-padding form, which a kept-samples
 /// count cannot express), one no shorter than the packet, or a packet whose
 /// length does not parse leaves the frame's duration untouched.
@@ -2137,6 +2151,7 @@ fn apply_discard_padding(frames: &mut [MkvFrame], discard_ns: i64) {
         return;
     };
     if frame.codec != MkvCodec::Opus {
+        frame.end_discard_ns = discard_ns as u64;
         return;
     }
     let samples = u64::from(crate::opusparse::packet_samples(&frame.data));
@@ -2260,6 +2275,7 @@ fn parse_block(
             codec,
             pts_ns: frame_pts,
             duration_ns,
+            end_discard_ns: 0,
             keyframe,
             dts_ns: None,
             data: data.to_vec(),
@@ -2633,6 +2649,7 @@ pub struct MatroskaMuxer {
     track_tags: Vec<(usize, TagList)>,
     /// The table of contents, written as a `Chapters` element.
     chapters: Vec<Chapter>,
+    codec_delays_ns: Vec<u64>,
     max_cluster_span_ms: u64,
     header_written: bool,
     /// The open Cluster's base Timestamp (ms), or `None` before the first frame.
@@ -2718,6 +2735,7 @@ impl MatroskaMuxer {
             tags: TagList::new(),
             track_tags: Vec::new(),
             chapters: Vec::new(),
+            codec_delays_ns: alloc::vec![0; track_count],
             max_cluster_span_ms: DEFAULT_MAX_CLUSTER_SPAN_MS,
             header_written: false,
             cluster_base_ms: None,
@@ -2771,6 +2789,11 @@ impl MatroskaMuxer {
         if track < self.tracks.len() {
             self.track_tags.push((track, tags));
         }
+        self
+    }
+
+    pub fn with_codec_delay(mut self, track: usize, delay_ns: u64) -> Self {
+        self.codec_delays_ns[track] = delay_ns;
         self
     }
 
@@ -2834,7 +2857,7 @@ impl MatroskaMuxer {
             // Only the two-pass mode can fill a Duration in: it is not known
             // until EOS, and a streaming caller has already emitted the header.
             let (info, duration_at) = info_element(self.two_pass);
-            let tracks = tracks_element(&self.tracks, &self.track_tags);
+            let tracks = tracks_element(&self.tracks, &self.track_tags, &self.codec_delays_ns);
             let chapters = chapters_element(&self.chapters);
             // Empty when every per-track tag went into its TrackEntry instead.
             let tags = tags_element(&self.tags, &self.track_tags);
@@ -3158,7 +3181,11 @@ fn info_element(with_duration: bool) -> (Vec<u8>, Option<usize>) {
 /// the CodecID. A track's [`Tag::Title`] / [`Tag::Language`] ride the entry's own
 /// `Name` / `Language` elements, where ffmpeg and every player look for
 /// them; the rest of its tags go to the `Tags` element.
-fn tracks_element(tracks: &[MkvTrackConfig], track_tags: &[(usize, TagList)]) -> Vec<u8> {
+fn tracks_element(
+    tracks: &[MkvTrackConfig],
+    track_tags: &[(usize, TagList)],
+    codec_delays_ns: &[u64],
+) -> Vec<u8> {
     let display_elements = if is_webm(tracks) {
         display_pixel_elements
     } else {
@@ -3204,6 +3231,8 @@ fn tracks_element(tracks: &[MkvTrackConfig], track_tags: &[(usize, TagList)]) ->
                 ID_SEEK_PRE_ROLL,
                 &uint_bytes(OPUS_SEEK_PRE_ROLL_NS),
             ));
+        } else if codec_delays_ns[i] > 0 {
+            entry.extend_from_slice(&elem_vec(ID_CODEC_DELAY, &uint_bytes(codec_delays_ns[i])));
         }
         // A subtitle TrackEntry has neither child: `Video` / `Audio` describe
         // settings a text track has none of, and a reader rejects the ones it
@@ -4614,6 +4643,7 @@ mod tests {
                     sample_rate: 0,
                     default_duration_ns: 0,
                     unsupported_encoding: false,
+                    codec_delay_ns: 0,
                 },
                 MkvTrack {
                     number: 2,
@@ -4626,6 +4656,7 @@ mod tests {
                     sample_rate: 48_000,
                     default_duration_ns: 0,
                     unsupported_encoding: false,
+                    codec_delay_ns: 0,
                 },
             ]
         );
@@ -4640,6 +4671,7 @@ mod tests {
                 codec: MkvCodec::Vp9,
                 pts_ns: 1_000 * 1_000_000,
                 duration_ns: 0,
+                end_discard_ns: 0,
                 keyframe: true,
                 dts_ns: None,
                 data: vec![0xDE, 0xAD]
@@ -5106,6 +5138,7 @@ mod tests {
                 sample_rate: 0,
                 default_duration_ns: 0,
                 unsupported_encoding: false,
+                codec_delay_ns: 0,
             }]
         );
         let frames = d.take_frames();

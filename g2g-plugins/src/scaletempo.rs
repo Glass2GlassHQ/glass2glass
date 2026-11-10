@@ -380,6 +380,7 @@ impl ScaleTempo {
             capture_ns: source.capture_ns,
             arrival_ns: source.arrival_ns,
             keyframe: source.keyframe,
+            ..FrameTiming::default()
         };
         let domain = MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice()));
         let frame = Frame::new(domain, timing, self.sequence);

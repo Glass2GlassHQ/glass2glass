@@ -1569,6 +1569,7 @@ impl SourceLoop for V4l2Src {
                         // raw frames and MJPEG's per-frame JPEGs are each
                         // independently decodable
                         keyframe: true,
+                        ..FrameTiming::default()
                     },
                     sequence: seq,
                     meta: Default::default(),

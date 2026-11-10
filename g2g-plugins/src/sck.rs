@@ -425,6 +425,7 @@ impl SourceLoop for ScreenCaptureSrc {
                         capture_ns: arrival_ns,
                         arrival_ns,
                         keyframe: false,
+                        ..FrameTiming::default()
                     },
                     sequence: seq,
                     meta: Default::default(),

@@ -241,6 +241,7 @@ pub(crate) async fn run_capture(
                 capture_ns: pts_ns,
                 arrival_ns: g2g_core::metrics::monotonic_ns(),
                 keyframe: false,
+                ..FrameTiming::default()
             },
             sequence,
             meta: Default::default(),

@@ -113,8 +113,9 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M2197: `wavparse` times IMA and MS ADPCM by their block layout rather than the header byte rate.
 - M2198: every source file carries a copyright and SPDX licence header, and CI fails on a file without one.
 - M2199: `flvdemux` and `avidemux` declare H.264 and H.265 output as one access unit per buffer.
+- M2200: `matroskademux` trims `CodecDelay` and `DiscardPadding` from AAC, MP2 and MP3 tracks as ffmpeg does, and `matroskamux` writes AAC `CodecDelay`.
 
-Breaking: `TimecodeMeta.frames` is a `u16`, `WIRE_VERSION` is 4, and `RtpRecvConfig` gains `parameter_sets`.
+Breaking: `TimecodeMeta.frames` is a `u16`, `WIRE_VERSION` is 6, `FrameTiming` gains `end_discard_ns`, and `RtpRecvConfig` gains `parameter_sets`.
 
 ## 0.14.0
 

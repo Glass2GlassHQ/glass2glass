@@ -16025,6 +16025,7 @@ impl VulkanVideoDec {
             capture_ns: src.capture_ns,
             arrival_ns: src.arrival_ns,
             keyframe: src.keyframe,
+            ..FrameTiming::default()
         }
     }
 

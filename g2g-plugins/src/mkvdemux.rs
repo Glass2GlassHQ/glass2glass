@@ -51,7 +51,7 @@ use g2g_core::{
     CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, FrameTiming, G2gError,
     MemoryDomain, MultiOutputElement, MultiOutputSink, OutputSink, PadTemplate, PadTemplates,
     PipelinePacket, ProResVariant, PropError, PropKind, PropValue, PropertySpec, Rate,
-    RawVideoFormat, Seek, Stream, StreamCollection, StreamType, SubPictureFormat, TagList,
+    RawVideoFormat, Seek, Segment, Stream, StreamCollection, StreamType, SubPictureFormat, TagList,
     TextFormat, VideoCodec,
 };
 
@@ -61,6 +61,7 @@ use crate::codectag::{tagged_stream_name, TaggedStream};
 use crate::aacparse::{adts_from_asc, is_raw_aac_config};
 use crate::demuxseek::{DemuxSeek, SharedSegment};
 use crate::matroska::{MatroskaDemuxer, MkvCodec, MkvTrack};
+use crate::pcmclip::{presentation_after, within_presentation};
 use crate::typefind::{container_video_caps, framerate_within_placeholder, with_picture_size};
 use crate::uncompressedvideo::{
     raw_video_caps, raw_video_formats, raw_video_frame_bytes, raw_video_placeholder_caps,
@@ -182,6 +183,7 @@ pub struct MkvDemux {
     upstream: Option<SeekController>,
     /// `Cues`-prefetch state. `Idle` outside a prefetch.
     prefetch: CuePrefetch,
+    presented: Segment,
 }
 
 impl Default for MkvDemux {
@@ -208,6 +210,7 @@ impl MkvDemux {
             app: None,
             upstream: None,
             prefetch: CuePrefetch::Idle,
+            presented: Segment::new(),
         }
     }
 
@@ -679,7 +682,11 @@ impl MkvDemux {
             // Matroska block keyframe flag) until the target, then a segment and them.
             let admitted = self.seek.admit(f.pts_ns, f.keyframe, f);
             if let Some(seg) = admitted.segment {
-                out.push(PipelinePacket::Segment(seg)).await?;
+                out.push(PipelinePacket::Segment(within_presentation(
+                    seg,
+                    &self.presented,
+                )))
+                .await?;
             }
             for f in admitted {
                 // Stream start: map the first emitted timestamp to running time 0.
@@ -688,8 +695,18 @@ impl MkvDemux {
                 // its stream the same way. A frame presenting earlier than the
                 // stream start, an open-GOP B frame, lowers it.
                 let opening = self.seek.opening_segment(f.pts_ns);
+                if opening.is_some() {
+                    let priming_ns =
+                        selected_track_entry(&self.demux, self.stream, self.track_number)
+                            .map_or(0, MkvTrack::decoder_priming_ns);
+                    self.presented = presentation_after(f.pts_ns, priming_ns);
+                }
                 if let Some(seg) = self.seek.lowered_segment(f.pts_ns).or(opening) {
-                    out.push(PipelinePacket::Segment(seg)).await?;
+                    out.push(PipelinePacket::Segment(within_presentation(
+                        seg,
+                        &self.presented,
+                    )))
+                    .await?;
                 }
                 // The track's decoder-init bytes go in band once, ahead of its first
                 // frame (FLAC STREAMINFO, Opus `OpusHead`).
@@ -711,12 +728,7 @@ impl MkvDemux {
                         out.push(PipelinePacket::DataFrame(frame)).await?;
                     }
                 }
-                let timing = FrameTiming {
-                    pts_ns: f.pts_ns,
-                    dts_ns: f.dts_ns.unwrap_or(f.pts_ns),
-                    duration_ns: forwarded_duration_ns(&f),
-                    ..FrameTiming::default()
-                };
+                let timing = block_timing(&f);
                 let Some(payload) = deframe_block(&self.demux, f) else {
                     continue;
                 };
@@ -1292,11 +1304,17 @@ fn config_headers(demux: &MatroskaDemuxer, codec: MkvCodec, track: u64) -> Vec<V
     }
 }
 
-// block timing is millisecond-grained, and VorbisDec trims each packet to the duration it gets
-fn forwarded_duration_ns(frame: &crate::matroska::MkvFrame) -> u64 {
-    match frame.codec {
-        MkvCodec::Vorbis => 0,
-        _ => frame.duration_ns,
+fn block_timing(frame: &crate::matroska::MkvFrame) -> FrameTiming {
+    FrameTiming {
+        pts_ns: frame.pts_ns,
+        dts_ns: frame.dts_ns.unwrap_or(frame.pts_ns),
+        // block timing is millisecond-grained, and VorbisDec trims each packet to the duration it gets
+        duration_ns: match frame.codec {
+            MkvCodec::Vorbis => 0,
+            _ => frame.duration_ns,
+        },
+        end_discard_ns: frame.end_discard_ns,
+        ..FrameTiming::default()
     }
 }
 
@@ -1754,8 +1772,14 @@ impl MkvDemuxN {
             let Some(port) = self.port_for_track(f.codec, f.track) else {
                 continue; // a track no selected port carries
             };
+            let priming_ns = self
+                .demux
+                .tracks()
+                .iter()
+                .find(|track| track.number == f.track)
+                .map_or(0, MkvTrack::decoder_priming_ns);
             self.segment
-                .send_before_unit(port, f.pts_ns, Some(f.pts_ns), out)
+                .send_before_unit(port, f.pts_ns, Some(f.pts_ns), priming_ns, out)
                 .await?;
             if !self.announced[port] {
                 let caps = MkvDemux::concrete_caps_of(
@@ -1785,12 +1809,7 @@ impl MkvDemuxN {
                     out.push_to(port, PipelinePacket::DataFrame(lead)).await?;
                 }
             }
-            let timing = FrameTiming {
-                pts_ns: f.pts_ns,
-                dts_ns: f.dts_ns.unwrap_or(f.pts_ns),
-                duration_ns: forwarded_duration_ns(&f),
-                ..FrameTiming::default()
-            };
+            let timing = block_timing(&f);
             let Some(payload) = deframe_block(&self.demux, f) else {
                 continue;
             };

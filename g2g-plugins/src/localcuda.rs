@@ -154,6 +154,7 @@ fn decode_desc(b: &[u8]) -> Option<FrameDesc> {
             capture_ns: u64_at(72),
             arrival_ns: u64_at(80),
             keyframe: b[88] != 0,
+            ..FrameTiming::default()
         },
         handle,
     })
@@ -864,6 +865,7 @@ mod tests {
                 capture_ns: 5,
                 arrival_ns: 6,
                 keyframe: true,
+                ..FrameTiming::default()
             },
             handle,
         };

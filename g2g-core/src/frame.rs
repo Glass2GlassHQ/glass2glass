@@ -122,6 +122,8 @@ pub struct FrameTiming {
     /// keyframe-aware seeking. `false` when unknown (the safe default: a frame is
     /// treated as a dependent frame unless a producer marks it a keyframe).
     pub keyframe: bool,
+    // decoded audio dropped from the end of this frame, Matroska's `DiscardPadding`
+    pub end_discard_ns: u64,
 }
 
 impl FrameTiming {
@@ -159,6 +161,7 @@ impl Default for FrameTiming {
             capture_ns: 0,
             arrival_ns: 0,
             keyframe: false,
+            end_discard_ns: 0,
         }
     }
 }

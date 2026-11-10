@@ -143,6 +143,7 @@ impl SourceLoop for ToneGenerateSrc {
                         capture_ns: pts,
                         arrival_ns,
                         keyframe: false,
+                        ..FrameTiming::default()
                     },
                     sequence: seq,
                     meta: Default::default(),

@@ -391,6 +391,7 @@ impl SourceLoop for MfVideoSrc {
                         capture_ns: pts,
                         arrival_ns,
                         keyframe: true, // raw frames are each independently presentable
+                        ..FrameTiming::default()
                     },
                     sequence: seq,
                     meta: Default::default(),

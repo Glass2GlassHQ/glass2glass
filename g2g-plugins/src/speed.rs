@@ -221,6 +221,7 @@ impl AsyncElement for Speed {
                         capture_ns: frame.timing.capture_ns,
                         arrival_ns: frame.timing.arrival_ns,
                         keyframe: frame.timing.keyframe,
+                        ..FrameTiming::default()
                     };
                     let out_frame = Frame::new(
                         MemoryDomain::System(SystemSlice::from_boxed(audiofx::encode(

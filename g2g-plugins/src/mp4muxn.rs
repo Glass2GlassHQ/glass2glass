@@ -64,7 +64,8 @@ use crate::mp4box::{
 };
 use crate::mux::{
     audio_header_config, audio_track_params, every_track_header_ready, refused_input,
-    refused_input_because, require_header_config_at_end, video_header_config, CODEC_CONFIG,
+    refused_input_because, require_header_config_at_end, video_header_config, InputPriming,
+    CODEC_CONFIG,
 };
 use crate::opusparse::{
     dops_from_opus_head, is_opus_config, parse_opus_head, synth_opus_head, OPUS_ENCODER_PRE_SKIP,
@@ -166,12 +167,9 @@ pub struct Mp4MuxN {
     decode_time: Vec<u64>,
     /// Per-track previous decode time (ns), for the sample-duration delta.
     prev_dts_ns: Vec<Option<u64>>,
-    /// Per-track first PTS (ns): media time 0 of that track in the file.
-    first_pts_ns: Vec<Option<u64>>,
-    /// Per-track `Segment` start (ns). Past the first PTS, the samples before it
-    /// are priming the presentation skips (an AAC encoder delay, set by a
+    /// Per-track priming the presentation skips (an AAC encoder delay, set by a
     /// demuxer from its source's edit list), written back as an `elst`.
-    segment_start_ns: Vec<u64>,
+    priming: InputPriming,
     /// Per-track CDP sequence counter, for a `c708` track's caption packets.
     cdp_seq: Vec<u16>,
     /// Per-track end (ns) of the last text cue written, so the run before the next
@@ -311,8 +309,7 @@ impl Mp4MuxN {
             agg: InputAggregator::new(inputs),
             decode_time: alloc::vec![0; inputs],
             prev_dts_ns: alloc::vec![None; inputs],
-            first_pts_ns: alloc::vec![None; inputs],
-            segment_start_ns: alloc::vec![0; inputs],
+            priming: InputPriming::new(inputs),
             cdp_seq: alloc::vec![0; inputs],
             text_end_ns: alloc::vec![0; inputs],
             header_written: false,
@@ -551,9 +548,7 @@ impl Mp4MuxN {
                 if self.is_opus_pad(input) {
                     return u64::from(track_pre_skip(init));
                 }
-                let first = self.first_pts_ns[input].unwrap_or(0);
-                let skip_ns = self.segment_start_ns[input].saturating_sub(first);
-                ns_to_ticks(skip_ns, init.timescale())
+                ns_to_ticks(self.priming.priming_ns(input), init.timescale())
             })
             .collect()
     }
@@ -1330,7 +1325,7 @@ impl MultiInputElement for Mp4MuxN {
                             return Ok(());
                         }
                     }
-                    self.first_pts_ns[input].get_or_insert(frame.timing.pts_ns);
+                    self.priming.note_frame(input, frame.timing.pts_ns);
                     self.agg.push(input, frame);
                 }
                 PipelinePacket::Eos => {
@@ -1357,7 +1352,7 @@ impl MultiInputElement for Mp4MuxN {
                 // than forwarded into the byte stream. Its start is kept: one past
                 // the track's first sample becomes the track's edit list.
                 PipelinePacket::Segment(seg) => {
-                    self.segment_start_ns[input] = seg.start;
+                    self.priming.note_segment_start(input, seg.start);
                     return Ok(());
                 }
                 other => {

@@ -168,6 +168,7 @@ impl Record {
                 capture_ns: u64_at(50),
                 arrival_ns: u64_at(58),
                 keyframe: b[66] != 0,
+                ..FrameTiming::default()
             },
             sync_value: u64_at(67),
         }
@@ -734,6 +735,7 @@ mod tests {
                 capture_ns: 5,
                 arrival_ns: 6,
                 keyframe: true,
+                ..FrameTiming::default()
             },
             sync_value: 7,
         };

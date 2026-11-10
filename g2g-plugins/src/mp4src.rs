@@ -416,6 +416,7 @@ impl SourceLoop for Mp4Src {
                         capture_ns: s.pts_ns,
                         arrival_ns: g2g_core::metrics::monotonic_ns(),
                         keyframe: s.keyframe, // MP4 sync-sample (stss) table
+                        ..FrameTiming::default()
                     },
                     sequence,
                     meta: meta.clone(),
