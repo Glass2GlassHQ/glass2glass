@@ -473,16 +473,15 @@ fn admit_seek(
     live_window(mpd, now_unix, segs, timescale)?.admit(seek)
 }
 
-/// The index of the media segment containing `target_ns` (the last whose
-/// `$Time$` start, converted from `timescale` units to ns, is at or before the
-/// target). Segments are time-ordered, so the scan stops at the first start past
-/// the target. A target before the first segment clamps to it; empty input
+/// The index of the media segment playing at `target_ns`: the first whose end,
+/// converted from `timescale` units to ns, is past the target, so a target in a
+/// gap between two segments lands on the one after it. A target before the first
+/// segment clamps to it, one past the last segment to the last, and empty input
 /// returns `0`.
 fn segment_for_time(segs: &[ResolvedSegment], timescale: u32, target_ns: u64) -> usize {
     segs.iter()
-        .take_while(|seg| to_ns(seg.time, timescale) <= target_ns)
-        .count()
-        .saturating_sub(1)
+        .position(|seg| to_ns(seg.time.saturating_add(seg.duration), timescale) > target_ns)
+        .unwrap_or(segs.len().saturating_sub(1))
 }
 
 impl LogSource for DashSrc {
@@ -1062,7 +1061,32 @@ static DASHSRC_PROPS: &[PropertySpec] = &[
 
 #[cfg(test)]
 mod tests {
-    use super::{manifest_reload_ms, DEFAULT_MANIFEST_RELOAD_MS};
+    use super::{manifest_reload_ms, segment_for_time, DEFAULT_MANIFEST_RELOAD_MS};
+    use crate::mpd::parse;
+
+    #[test]
+    fn a_seek_into_a_timeline_gap_lands_on_the_segment_after_it() {
+        const NANOS_PER_MILLISECOND: u64 = 1_000_000;
+        let xml = r#"<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static"
+          mediaPresentationDuration="PT7S"><Period><AdaptationSet mimeType="video/mp4">
+          <SegmentTemplate media="$Time$.m4s" timescale="1000">
+            <SegmentTimeline><S t="0" d="1000"/><S t="5000" d="1000" r="1"/></SegmentTimeline>
+          </SegmentTemplate>
+          <Representation id="r" bandwidth="1"/>
+        </AdaptationSet></Period></MPD>"#;
+        let mpd = parse(xml).unwrap();
+        let representation = &mpd.periods[0].representations[0];
+        let segments = representation.resolved_segments(mpd.duration_secs);
+        let timescale = representation.timescale();
+        let index_at = |milliseconds: u64| {
+            segment_for_time(&segments, timescale, milliseconds * NANOS_PER_MILLISECOND)
+        };
+        assert_eq!(index_at(500), 0);
+        assert_eq!(index_at(2500), 1, "inside the gap");
+        assert_eq!(index_at(5500), 1);
+        assert_eq!(index_at(6500), 2);
+        assert_eq!(index_at(9000), 2, "past the end");
+    }
 
     #[test]
     fn a_zero_minimum_update_period_reloads_no_faster_than_the_default() {

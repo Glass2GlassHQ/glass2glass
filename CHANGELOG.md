@@ -109,6 +109,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M2193: `rtspserversink` and `udpsink` send no RTCP sender report before their first RTP packet, and `udpsink` says goodbye with a receiver report then.
 - M2194: the H.264 `avcC` written by `mp4mux`, `matroskamux` and `flvmux` carries the chroma format and bit depth for every profile except Baseline, Main and Extended.
 - M2195: MPEG-TS demuxing follows a PAT version change to its new programs and PMT PIDs, and unwraps a truncated last KLV cell.
+- M2196: `dashsrc` lands a seek into a gap between timeline segments on the segment after it.
 
 Breaking: `TimecodeMeta.frames` is a `u16`, `WIRE_VERSION` is 4, and `RtpRecvConfig` gains `parameter_sets`.
 

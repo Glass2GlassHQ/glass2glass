@@ -118,7 +118,7 @@ pub struct SegmentUrl {
 
 /// A segment resolved from either addressing mode for the source loop: the URL
 /// (template-expanded or list-explicit; empty means the `BaseURL` resource), an
-/// optional byte range, and the segment start time in `timescale` units.
+/// optional byte range, and the segment start time and duration in `timescale` units.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedSegment {
     pub url: String,
@@ -127,6 +127,7 @@ pub struct ResolvedSegment {
     /// the template's `@presentationTimeOffset`, so a Period always starts at 0
     /// however its media timeline is numbered.
     pub time: u64,
+    pub duration: u64,
 }
 
 /// `SegmentTemplate` with `$Number$` / `$Time$` addressing.
@@ -196,6 +197,7 @@ impl SegmentRun {
             time: self
                 .start_time
                 .saturating_add(index.saturating_mul(self.duration)),
+            duration: self.duration,
         }
     }
 }
@@ -292,12 +294,14 @@ impl LiveAvailability {
     }
 }
 
-/// One resolved media segment: its `$Number$` and its `$Time$` (media-timeline
-/// start time in `timescale` units, so it includes `@presentationTimeOffset`).
+/// One resolved media segment: its `$Number$`, its `$Time$` (media-timeline
+/// start time in `timescale` units, so it includes `@presentationTimeOffset`)
+/// and its duration in `timescale` units.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SegmentRef {
     pub number: u64,
     pub time: u64,
+    pub duration: u64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -615,6 +619,7 @@ impl Sidx {
                         length: e.size,
                     }),
                     time,
+                    duration: e.duration,
                 });
             }
             pos = pos.saturating_add(e.size);
@@ -663,6 +668,7 @@ impl Representation {
                     url: t.media_url(&self.id, s),
                     byte_range: None,
                     time: t.presentation_time(s.time),
+                    duration: s.duration,
                 })
                 .collect(),
             SegmentSource::List(l) => {
@@ -676,6 +682,7 @@ impl Representation {
                         url: su.media.clone(),
                         byte_range: su.media_range,
                         time,
+                        duration: l.duration,
                     });
                     time = time.saturating_add(l.duration);
                 }
@@ -704,6 +711,7 @@ impl Representation {
                         url: t.media_url(&self.id, s),
                         byte_range: None,
                         time: t.presentation_time(s.time),
+                        duration: s.duration,
                     })
                     .collect(),
             ),
@@ -720,6 +728,7 @@ impl Representation {
                                 url: entry.media.clone(),
                                 byte_range: entry.media_range,
                                 time: s.time,
+                                duration: s.duration,
                             }
                         })
                         .collect(),
@@ -1386,7 +1395,14 @@ mod tests {
         assert_eq!(template.segment_count(mpd.duration_secs), 3);
         assert_eq!(template.init_url(&rep.id).as_deref(), Some("init-high.mp4"));
         assert_eq!(
-            template.media_url(&rep.id, SegmentRef { number: 1, time: 0 }),
+            template.media_url(
+                &rep.id,
+                SegmentRef {
+                    number: 1,
+                    time: 0,
+                    duration: 4000
+                }
+            ),
             "seg-high-001.m4s"
         );
         assert_eq!(
@@ -1394,7 +1410,8 @@ mod tests {
                 &rep.id,
                 SegmentRef {
                     number: 12,
-                    time: 0
+                    time: 0,
+                    duration: 4000,
                 }
             ),
             "seg-high-012.m4s"
@@ -1402,12 +1419,20 @@ mod tests {
         // The @duration profile yields startNumber.. with cumulative $Time$.
         let segs = template.segments(mpd.duration_secs);
         assert_eq!(segs.len(), 3);
-        assert_eq!(segs[0], SegmentRef { number: 1, time: 0 });
+        assert_eq!(
+            segs[0],
+            SegmentRef {
+                number: 1,
+                time: 0,
+                duration: 4000
+            }
+        );
         assert_eq!(
             segs[2],
             SegmentRef {
                 number: 3,
-                time: 8000
+                time: 8000,
+                duration: 4000,
             }
         );
     }
@@ -1468,26 +1493,36 @@ mod tests {
         // <S r="2"> = 3 segments of d=180000, then one of d=90000.
         let segs = rep.template().unwrap().segments(mpd.duration_secs);
         assert_eq!(segs.len(), 4);
-        assert_eq!(segs[0], SegmentRef { number: 1, time: 0 });
+        assert_eq!(
+            segs[0],
+            SegmentRef {
+                number: 1,
+                time: 0,
+                duration: 180_000
+            }
+        );
         assert_eq!(
             segs[1],
             SegmentRef {
                 number: 2,
-                time: 180_000
+                time: 180_000,
+                duration: 180_000,
             }
         );
         assert_eq!(
             segs[2],
             SegmentRef {
                 number: 3,
-                time: 360_000
+                time: 360_000,
+                duration: 180_000,
             }
         );
         assert_eq!(
             segs[3],
             SegmentRef {
                 number: 4,
-                time: 540_000
+                time: 540_000,
+                duration: 90_000,
             }
         );
         // $Time$ addressing uses each segment's start time.
@@ -1567,14 +1602,20 @@ mod tests {
         assert_eq!(
             segs,
             [
-                SegmentRef { number: 1, time: 0 },
+                SegmentRef {
+                    number: 1,
+                    time: 0,
+                    duration: 1000
+                },
                 SegmentRef {
                     number: 2,
-                    time: 5000
+                    time: 5000,
+                    duration: 1000,
                 },
                 SegmentRef {
                     number: 3,
-                    time: 6000
+                    time: 6000,
+                    duration: 1000,
                 },
             ]
         );
@@ -1710,6 +1751,7 @@ mod tests {
                     length: 200
                 }),
                 time: 0,
+                duration: 1000,
             }
         );
         assert_eq!(
@@ -2337,10 +2379,14 @@ mod tests {
         );
         let mpd = parse_live_with(&template(MAX_PAD_WIDTH)).unwrap();
         let rep = &mpd.periods[0].representations[0];
-        let url = rep
-            .template()
-            .unwrap()
-            .media_url(&rep.id, SegmentRef { number: 7, time: 0 });
+        let url = rep.template().unwrap().media_url(
+            &rep.id,
+            SegmentRef {
+                number: 7,
+                time: 0,
+                duration: 0,
+            },
+        );
         assert_eq!(url, alloc::format!("s{:020}.m4s", 7));
     }
 
