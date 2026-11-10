@@ -139,6 +139,11 @@ libraries installed.
 
 ## Receive / decode
 
+- **RFC 3640 (`mpeg4-generic`) AAC depayloading in `udpsrc` and `rtspserversrc`:**
+  only `rtspsrc` (through retina) reads the AU headers, so AAC published to the
+  RECORD server or sent as plain RTP is not depayloaded.
+- **Annex B AV1 input to `av1parse`:** read `temporal_unit_size`-prefixed input
+  (gst `stream-format=annexb`) and convert it to the OBU stream.
 - **`VulkanVideoDec` residuals.** Run the `vulkanvideo` GPU tests on Intel ANV.
 - **`VulkanVideoDec` conformance residue on RADV.** `WPP_D_ericsson` (64 wide,
   wavefront parallel processing with dependent slice segments) is refused,
@@ -308,6 +313,10 @@ libraries installed.
     flvdemux declares `au`.
   - An MP4 audio track whose edit list replays media plays its samples once:
     replayed edits need sample-accurate clipping, as the video path lays them out.
+- **MP4 track language and orientation:** `mp4mux` writes `und` in every `mdhd`
+  and an identity `tkhd` matrix, and the MP4 demuxers read neither. Write the
+  track's `Tag::Language` and an orientation tag (gst's `image-orientation`) and
+  read both back.
 - **ST 2038 elements:** `st2038ancdemux` should add a port when a stream no pad
   names appears, once a launch line can link a pad that appears at run time.
 
