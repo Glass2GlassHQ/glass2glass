@@ -302,7 +302,7 @@ SRC:
   video/x-msvideo
 SRC:
   image/jpeg,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]
-  video/x-h264,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]
+  video/x-h264,width=[16,65535],height=[16,65535],framerate=[1/1,240/1],alignment=au
   video/mpeg,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]
   video/x-vp6,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]
   video/x-raw,format=I420,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]
@@ -626,7 +626,7 @@ SRC:
   audio/x-flac</pre></div><div class="seg"><span class="seg-l">Properties</span><div class="props"><div class="prop"><code class="pn">tags</code> <span class="pt">String</span> <span class="pf">read / write</span><div class="pb">tags to write, gst taglist syntax: e.g. title=A Title,artist=Someone</div></div></div></div></article><article class="el-card" data-search="flvdemux flv demuxer codec/demuxer demuxes a flash video stream into one selected elementary stream stream" id="el-flvdemux"><div class="el-head"><h3><a href="#el-flvdemux">flvdemux</a></h3><span class="badge role-el">element</span></div><div class="classification">Codec/Demuxer</div><p class="desc">Demuxes a Flash Video stream into one selected elementary stream</p><div class="seg"><span class="seg-l">Pads</span><pre>SINK:
   video/x-flv
 SRC:
-  video/x-h264,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]
+  video/x-h264,width=[16,65535],height=[16,65535],framerate=[1/1,240/1],alignment=au
   audio/mpeg
   video/x-flash-video,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]
   video/x-vp6-flash,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]
