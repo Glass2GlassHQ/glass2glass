@@ -247,8 +247,10 @@ async fn decoded_audio(file: &[u8], name: &str) -> Vec<i16> {
     let raw = std::fs::read(&output).expect("decode output reads");
     let _ = std::fs::remove_file(&input);
     let _ = std::fs::remove_file(&output);
-    raw.chunks_exact(2)
-        .map(|sample| i16::from_le_bytes([sample[0], sample[1]]))
+    raw.as_chunks::<2>()
+        .0
+        .iter()
+        .map(|sample| i16::from_le_bytes(*sample))
         .collect()
 }
 
