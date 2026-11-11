@@ -58,6 +58,7 @@ use crate::aacparse::{
     muxer_audio_specific_config, opens_loas_frame,
 };
 use crate::dvbsub::{parse_page_ids, PageIds, DEFAULT_PAGE_ID, DEFAULT_SUBTITLING_TYPE};
+use crate::livemux::{wall_clock_ns, LiveMuxDeadline, LIVE_MUX_LATENCY_PROPERTY};
 use crate::mpegts::{
     TsMuxer, DEFAULT_ORIGINAL_NETWORK_ID, DEFAULT_PCR_INTERVAL_90KHZ, DEFAULT_TABLE_INTERVAL_90KHZ,
     DEFAULT_TRANSPORT_STREAM_ID, MAX_TABLES_VERSION, MUX_ES_PID, MUX_PID_RANGE, MUX_PMT_PID,
@@ -122,7 +123,7 @@ impl DvbSubDecl {
 // gst mpegtsmux's default, five minutes
 const DEFAULT_SCTE35_NULL_INTERVAL_90KHZ: u64 = 27_000_000;
 
-const PROPERTIES: [PropertySpec; 15] = [
+const PROPERTIES: [PropertySpec; 16] = [
     PropertySpec::new(
         "pat-interval",
         PropKind::Uint,
@@ -221,6 +222,7 @@ const PROPERTIES: [PropertySpec; 15] = [
         "program number per input, comma separated in pad order (e.g. 1,1,2; default all in program 1)",
     )
     .with_default("1"),
+    LIVE_MUX_LATENCY_PROPERTY,
 ];
 
 #[derive(Debug, Clone, Copy)]
@@ -578,6 +580,7 @@ pub struct TsMux {
     mux: Option<TsMuxer>,
     /// Per-input AU buffer; releases the globally earliest-decode-time AU.
     agg: InputAggregator<Frame>,
+    deadline: LiveMuxDeadline,
     emitted: u64,
     /// The cadences, bitrate and identity knobs, applied to the inner `TsMuxer`
     /// when it is built. The PAT and PMT are emitted together, so `pat-interval`
@@ -626,6 +629,7 @@ impl TsMux {
             stream_types: alloc::vec![None; inputs],
             mux: None,
             agg: InputAggregator::new(inputs),
+            deadline: LiveMuxDeadline::default(),
             emitted: 0,
             settings: TsMuxSettings::default(),
             program_numbers: alloc::vec![1; inputs],
@@ -995,6 +999,14 @@ impl MultiInputElement for TsMux {
         )
     }
 
+    fn configure_liveness(&mut self, live: bool) {
+        self.deadline.configure_liveness(live);
+    }
+
+    fn tick_interval_ns(&self) -> Option<u64> {
+        self.deadline.tick_interval_ns()
+    }
+
     fn properties(&self) -> &'static [PropertySpec] {
         &PROPERTIES
     }
@@ -1039,7 +1051,7 @@ impl MultiInputElement for TsMux {
                 }
                 Ok(())
             }
-            _ => Err(PropError::Unknown),
+            _ => self.deadline.set_property(name, value),
         }
     }
 
@@ -1051,7 +1063,7 @@ impl MultiInputElement for TsMux {
             "prog-map" => Some(PropValue::Str(self.prog_map_string())),
             "klv-sync" => Some(PropValue::Bool(self.klv_sync)),
             "dvbsub-page-id" => Some(PropValue::Uint(self.dvbsub_page_id as u64)),
-            _ => None,
+            _ => self.deadline.get_property(name),
         }
     }
 
@@ -1062,9 +1074,11 @@ impl MultiInputElement for TsMux {
         out: &'a mut dyn OutputSink,
     ) -> Self::ProcessFuture<'a> {
         Box::pin(async move {
+            let now_ns = wall_clock_ns();
             match packet {
                 // M204: buffer the AU; release the globally earliest below.
                 PipelinePacket::DataFrame(frame) => {
+                    self.deadline.note_arrival(input, &frame, now_ns);
                     // A DVB subtitle pad opens on its page-id config blob, which
                     // is what the `subtitling_descriptor` declares and never a
                     // display set to multiplex.
@@ -1127,6 +1141,7 @@ impl MultiInputElement for TsMux {
                 // container carries its own timestamps, so it is consumed rather
                 // than forwarded into the byte stream.
                 PipelinePacket::Segment(_) => return Ok(()),
+                PipelinePacket::Tick => {}
                 other => {
                     out.push(other).await?;
                     return Ok(());
@@ -1140,7 +1155,10 @@ impl MultiInputElement for TsMux {
             let carries_video = (0..self.inputs).any(|i| self.is_video(i));
             // Drain every AU now safe to emit, in global decode order, writing each
             // to its stream's PID.
-            while let Some((stream, frame)) = self.agg.take_earliest_by(decode_time_ns) {
+            while let Some((stream, frame)) = self
+                .agg
+                .take_earliest_or_due_by(decode_time_ns, |f| self.deadline.is_due(f, now_ns))
+            {
                 let muxer = g2g_core::log::short_type_name::<Self>();
                 let slice = frame.domain.require_system_slice(muxer)?;
                 let access_unit = match &self.aac[stream] {

@@ -57,6 +57,7 @@ use crate::fmp4mux::{
     av1c_record, h26x_sample_config, parameter_sets, split_annexb, video_sample,
     visual_sample_entry, VideoGeometry,
 };
+use crate::livemux::{wall_clock_ns, LiveMuxDeadline, LIVE_MUX_LATENCY_PROPERTY};
 use crate::mp4audiosink::esds;
 use crate::mp4box::{
     ftyp, ftyp_cmaf, full_box, mp4_box, prft, put_box_header, styp_cmaf, udta_with_tags,
@@ -163,6 +164,7 @@ pub struct Mp4MuxN {
     /// Per-pad video caps geometry, recorded at configure.
     geometry: Vec<VideoGeometry>,
     agg: InputAggregator<Frame>,
+    deadline: LiveMuxDeadline,
     /// Per-track accumulated decode time in that track's timescale (`tfdt`).
     decode_time: Vec<u64>,
     /// Per-track previous decode time (ns), for the sample-duration delta.
@@ -307,6 +309,7 @@ impl Mp4MuxN {
             inits: alloc::vec![None; inputs],
             geometry: alloc::vec![VideoGeometry::default(); inputs],
             agg: InputAggregator::new(inputs),
+            deadline: LiveMuxDeadline::default(),
             decode_time: alloc::vec![0; inputs],
             prev_dts_ns: alloc::vec![None; inputs],
             priming: InputPriming::new(inputs),
@@ -1208,6 +1211,14 @@ impl MultiInputElement for Mp4MuxN {
         )
     }
 
+    fn configure_liveness(&mut self, live: bool) {
+        self.deadline.configure_liveness(live);
+    }
+
+    fn tick_interval_ns(&self) -> Option<u64> {
+        self.deadline.tick_interval_ns()
+    }
+
     fn properties(&self) -> &'static [PropertySpec] {
         // `fragmented` has no GStreamer counterpart: `mp4mux` switches layout
         // with `fragment-duration = 0`, which g2g already spends on "one
@@ -1250,6 +1261,7 @@ impl MultiInputElement for Mp4MuxN {
                 "write a producer reference time box (prft) ahead of each fragment, mapping its decode time to the wall clock",
             )
             .with_default("false"),
+            LIVE_MUX_LATENCY_PROPERTY,
         ];
         PROPS
     }
@@ -1286,7 +1298,7 @@ impl MultiInputElement for Mp4MuxN {
                 self.write_prft = value.as_bool().ok_or(PropError::Type)?;
                 Ok(())
             }
-            _ => Err(PropError::Unknown),
+            _ => self.deadline.set_property(name, value),
         }
     }
 
@@ -1298,7 +1310,7 @@ impl MultiInputElement for Mp4MuxN {
             "cmaf" => Some(PropValue::Bool(self.cmaf)),
             "chunk-duration" => Some(PropValue::Uint(self.chunk_duration_ms)),
             "write-prft" => Some(PropValue::Bool(self.write_prft)),
-            _ => None,
+            _ => self.deadline.get_property(name),
         }
     }
 
@@ -1309,8 +1321,10 @@ impl MultiInputElement for Mp4MuxN {
         out: &'a mut dyn OutputSink,
     ) -> Self::ProcessFuture<'a> {
         Box::pin(async move {
+            let now_ns = wall_clock_ns();
             match packet {
                 PipelinePacket::DataFrame(frame) => {
+                    self.deadline.note_arrival(input, &frame, now_ns);
                     // Capture this track's init from its first AU before queueing.
                     if let Some(s) = frame.domain.as_system_slice() {
                         self.capture_init(input, s)?;
@@ -1355,6 +1369,7 @@ impl MultiInputElement for Mp4MuxN {
                     self.priming.note_segment_start(input, seg.start);
                     return Ok(());
                 }
+                PipelinePacket::Tick => {}
                 other => {
                     out.push(other).await?;
                     return Ok(());
@@ -1366,7 +1381,10 @@ impl MultiInputElement for Mp4MuxN {
                 return Ok(());
             }
             // Release AUs now safe to emit, in global PTS order.
-            while let Some((track, frame)) = self.agg.take_earliest_by(|f| f.timing.pts_ns) {
+            while let Some((track, frame)) = self
+                .agg
+                .take_earliest_or_due_by(|f| f.timing.pts_ns, |f| self.deadline.is_due(f, now_ns))
+            {
                 self.emit_au(track, frame, out).await?;
             }
             // At EOS (every input ended and drained), close any open batched

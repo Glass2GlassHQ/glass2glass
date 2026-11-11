@@ -200,6 +200,8 @@ pub mod inputselector;
 pub mod inter;
 pub mod interleave;
 pub mod level;
+// the live deadline shared by the muxers that merge their inputs by time
+mod livemux;
 pub mod mux;
 // Access-unit framing shared by the NAL and start-code elementary-stream parsers.
 pub mod access_unit;

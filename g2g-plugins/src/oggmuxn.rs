@@ -68,6 +68,7 @@ use g2g_core::{
     OutputSink, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Segment,
 };
 
+use crate::livemux::{wall_clock_ns, LiveMuxDeadline, LIVE_MUX_LATENCY_PROPERTY};
 use crate::mux::{
     audio_header_config, audio_track_params, every_track_header_ready, refused_input,
     require_header_config_at_end, CODEC_CONFIG,
@@ -518,6 +519,7 @@ pub struct OggMuxN {
     streams: Vec<OggStreamMux>,
     /// Per-input packet buffer; releases the globally earliest-PTS packet.
     agg: InputAggregator<Frame>,
+    deadline: LiveMuxDeadline,
     /// Serial of the first stream; pad `i` takes `serial + i`.
     serial: u32,
     /// Whether the grouped header block has been written.
@@ -546,6 +548,7 @@ impl OggMuxN {
                 .map(|i| OggStreamMux::new(serial_for(DEFAULT_SERIAL, i)))
                 .collect(),
             agg: InputAggregator::new(inputs),
+            deadline: LiveMuxDeadline::default(),
             serial: DEFAULT_SERIAL,
             headers_written: false,
             closed: false,
@@ -728,12 +731,23 @@ impl MultiInputElement for OggMuxN {
         )
     }
 
+    fn configure_liveness(&mut self, live: bool) {
+        self.deadline.configure_liveness(live);
+    }
+
+    fn tick_interval_ns(&self) -> Option<u64> {
+        self.deadline.tick_interval_ns()
+    }
+
     fn properties(&self) -> &'static [PropertySpec] {
-        const PROPS: &[PropertySpec] = &[PropertySpec::new(
-            "serial",
-            PropKind::Uint,
-            "serial number of the first logical bitstream; pad i takes serial + i",
-        )];
+        const PROPS: &[PropertySpec] = &[
+            PropertySpec::new(
+                "serial",
+                PropKind::Uint,
+                "serial number of the first logical bitstream; pad i takes serial + i",
+            ),
+            LIVE_MUX_LATENCY_PROPERTY,
+        ];
         PROPS
     }
 
@@ -749,14 +763,14 @@ impl MultiInputElement for OggMuxN {
                 self.set_serials(u32::try_from(raw).map_err(|_| PropError::Value)?);
                 Ok(())
             }
-            _ => Err(PropError::Unknown),
+            _ => self.deadline.set_property(name, value),
         }
     }
 
     fn get_property(&self, name: &str) -> Option<PropValue> {
         match name {
             "serial" => Some(PropValue::Uint(u64::from(self.serial))),
-            _ => None,
+            _ => self.deadline.get_property(name),
         }
     }
 
@@ -767,8 +781,10 @@ impl MultiInputElement for OggMuxN {
         out: &'a mut dyn OutputSink,
     ) -> Self::ProcessFuture<'a> {
         Box::pin(async move {
+            let now_ns = wall_clock_ns();
             match packet {
                 PipelinePacket::DataFrame(frame) => {
+                    self.deadline.note_arrival(input, &frame, now_ns);
                     let slice = frame
                         .domain
                         .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
@@ -825,6 +841,7 @@ impl MultiInputElement for OggMuxN {
                     }
                     return Ok(());
                 }
+                PipelinePacket::Tick => {}
                 other => {
                     out.push(other).await?;
                     return Ok(());
@@ -843,7 +860,10 @@ impl MultiInputElement for OggMuxN {
             }
             let mut bytes = Vec::new();
             // Drain every packet now safe to emit, in global PTS order.
-            while let Some((stream, frame)) = self.agg.take_earliest_by(|f| f.timing.pts_ns) {
+            while let Some((stream, frame)) = self
+                .agg
+                .take_earliest_or_due_by(|f| f.timing.pts_ns, |f| self.deadline.is_due(f, now_ns))
+            {
                 if !self.headers_written {
                     bytes.extend_from_slice(&self.write_headers());
                 }

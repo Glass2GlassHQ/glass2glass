@@ -179,16 +179,28 @@ impl<T> InputAggregator<T> {
         K: Ord,
         F: Fn(&T) -> K,
     {
+        self.take_earliest_or_due_by(key, |_| false)
+    }
+
+    pub fn take_earliest_or_due_by<K, F, D>(&mut self, key: F, due: D) -> Option<(usize, T)>
+    where
+        K: Ord,
+        F: Fn(&T) -> K,
+        D: FnOnce(&T) -> bool,
+    {
         let contributors = self.contributors();
-        if contributors.is_empty() || contributors.iter().any(|&i| self.queues[i].is_empty()) {
-            return None;
-        }
-        // Every contributor has a head; pick the one with the smallest key.
         // `min_by_key` keeps the first on ties, so the lowest input index wins.
         let winner = contributors
             .iter()
             .copied()
+            .filter(|&i| !self.queues[i].is_empty())
             .min_by_key(|&i| key(self.queues[i].front().expect("checked non-empty")))?;
+        let every_input_has_a_head = contributors.iter().all(|&i| !self.queues[i].is_empty());
+        // gst's aggregator timeout: a live muxer stops waiting on an empty input once the earliest item is due
+        if !every_input_has_a_head && !due(self.queues[winner].front().expect("checked non-empty"))
+        {
+            return None;
+        }
         Some((
             winner,
             self.queues[winner].pop_front().expect("checked non-empty"),
@@ -307,6 +319,25 @@ mod tests {
         // Input 1 delivers a later one; 30 < 40, so input 0's 30 goes next.
         agg.push(1, (40, "b40"));
         assert_eq!(agg.take_earliest_by(|&(p, _)| p), Some((0, (30, "a30"))));
+    }
+
+    #[test]
+    fn a_due_head_is_released_past_an_empty_input() {
+        let mut agg = InputAggregator::new(2);
+        agg.push(0, (10u64, "a10"));
+        agg.push(0, (30, "a30"));
+        let due_until = |limit: u64| move |&(p, _): &(u64, &str)| p <= limit;
+        assert_eq!(agg.take_earliest_or_due_by(|&(p, _)| p, due_until(5)), None);
+        assert_eq!(
+            agg.take_earliest_or_due_by(|&(p, _)| p, due_until(10)),
+            Some((0, (10, "a10")))
+        );
+        agg.push(1, (20, "b20"));
+        assert_eq!(
+            agg.take_earliest_or_due_by(|&(p, _)| p, |_| false),
+            Some((1, (20, "b20"))),
+            "with every input holding a head the earliest goes without being due"
+        );
     }
 
     #[test]

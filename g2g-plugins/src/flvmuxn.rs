@@ -43,12 +43,13 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
     ElementMetadata, FrameTiming, G2gError, InputAggregator, MemoryDomain, MultiInputElement,
-    OutputSink, PipelinePacket, TagList, VideoCodec,
+    OutputSink, PipelinePacket, PropError, PropValue, PropertySpec, TagList, VideoCodec,
 };
 
 use crate::aacparse::{is_leading_aac_config, muxer_access_unit, muxer_audio_specific_config};
 use crate::annexb::{au_is_keyframe, avcc_record, avcc_sample, parameter_sets, split_annexb};
 use crate::flv::{FlvCodec, FlvMuxer, FlvTrack, LEGACY_AUDIO_TRACK};
+use crate::livemux::{wall_clock_ns, LiveMuxDeadline, LIVE_MUX_PROPS};
 use crate::mux::{
     audio_header_config, audio_track_params, every_track_header_ready, refused_input,
     refused_input_because, require_header_config_at_end, video_header_config, CODEC_CONFIG,
@@ -111,6 +112,7 @@ pub struct FlvMuxN {
     written_span_ns: Option<(u64, u64)>,
     // the timestamp of the last tag written, which a frame with no timestamp reuses as gst's flvmux does
     last_tag_ms: u32,
+    deadline: LiveMuxDeadline,
 }
 
 impl FlvMuxN {
@@ -136,6 +138,7 @@ impl FlvMuxN {
             emitted: 0,
             written_span_ns: None,
             last_tag_ms: 0,
+            deadline: LiveMuxDeadline::default(),
         }
     }
 
@@ -462,6 +465,26 @@ impl MultiInputElement for FlvMuxN {
         Ok(Self::output_caps_value())
     }
 
+    fn configure_liveness(&mut self, live: bool) {
+        self.deadline.configure_liveness(live);
+    }
+
+    fn tick_interval_ns(&self) -> Option<u64> {
+        self.deadline.tick_interval_ns()
+    }
+
+    fn properties(&self) -> &'static [PropertySpec] {
+        LIVE_MUX_PROPS
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        self.deadline.set_property(name, value)
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        self.deadline.get_property(name)
+    }
+
     fn metadata(&self) -> ElementMetadata {
         ElementMetadata::new(
             "FLV muxer",
@@ -478,8 +501,10 @@ impl MultiInputElement for FlvMuxN {
         out: &'a mut dyn OutputSink,
     ) -> Self::ProcessFuture<'a> {
         Box::pin(async move {
+            let now_ns = wall_clock_ns();
             match packet {
                 PipelinePacket::DataFrame(frame) => {
+                    self.deadline.note_arrival(input, &frame, now_ns);
                     if let Some(s) = frame.domain.as_system_slice() {
                         self.capture_init(input, s)?;
                         // a raw AAC stream's config became the sequence header above
@@ -510,6 +535,7 @@ impl MultiInputElement for FlvMuxN {
                 // container carries its own timestamps, so it is consumed rather
                 // than forwarded into the byte stream.
                 PipelinePacket::Segment(_) => return Ok(()),
+                PipelinePacket::Tick => {}
                 other => {
                     out.push(other).await?;
                     return Ok(());
@@ -525,7 +551,10 @@ impl MultiInputElement for FlvMuxN {
                 self.mux = Some(self.build_mux()?);
             }
             // `None` sorts first, so a frame with no timestamp is muxed as soon as it reaches the head
-            while let Some((track, frame)) = self.agg.take_earliest_by(|f| f.timing.pts()) {
+            while let Some((track, frame)) = self
+                .agg
+                .take_earliest_or_due_by(|f| f.timing.pts(), |f| self.deadline.is_due(f, now_ns))
+            {
                 self.emit_au(track, frame, out).await?;
             }
             if self.agg.is_drained() {
@@ -690,6 +719,44 @@ mod tests {
         let duration = f64::from_be_bytes(flv[number_at..number_at + 8].try_into().unwrap());
         let span_ns = (aus.len() as u64 - 1) * FRAME_STEP_NS;
         assert_eq!(duration, span_ns as f64 / 1e9);
+    }
+
+    // video keeps coming while audio stalls without Eos, then the runner ticks past the deadline
+    async fn frames_muxed_after_audio_stalls(live: bool) -> u64 {
+        const VIDEO_STEP_NS: u64 = 1_000_000;
+        const PAST_THE_DEADLINE: core::time::Duration = core::time::Duration::from_millis(30);
+        let mut mux = FlvMuxN::new(2);
+        mux.configure_liveness(live);
+        mux.configure_pipeline(0, &video_caps()).unwrap();
+        mux.configure_pipeline(1, &audio_caps()).unwrap();
+        let mut sink = CaptureSink::default();
+        mux.process(0, frame(h264_idr(), 0), &mut sink)
+            .await
+            .unwrap();
+        mux.process(1, frame(aac_adts(), 0), &mut sink)
+            .await
+            .unwrap();
+        for step in 1..=2 {
+            mux.process(0, frame(h264_idr(), step * VIDEO_STEP_NS), &mut sink)
+                .await
+                .unwrap();
+        }
+        let before_tick = mux.emitted();
+        std::thread::sleep(PAST_THE_DEADLINE);
+        mux.process(0, PipelinePacket::Tick, &mut sink)
+            .await
+            .unwrap();
+        mux.emitted() - before_tick
+    }
+
+    #[tokio::test]
+    async fn a_live_mux_stops_waiting_on_a_stalled_input_at_the_deadline() {
+        assert_eq!(
+            frames_muxed_after_audio_stalls(true).await,
+            2,
+            "both video frames queued behind the stalled audio"
+        );
+        assert_eq!(frames_muxed_after_audio_stalls(false).await, 0);
     }
 
     #[tokio::test]

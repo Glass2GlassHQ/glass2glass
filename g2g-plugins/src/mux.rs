@@ -26,9 +26,11 @@ use alloc::vec::Vec;
 use g2g_core::log::Target;
 use g2g_core::{
     g2g_error, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata,
-    Frame, G2gError, InputAggregator, MultiInputElement, OutputSink, PipelinePacket, VideoCodec,
-    ANY_CHANNELS, ANY_SAMPLE_RATE,
+    Frame, G2gError, InputAggregator, MultiInputElement, OutputSink, PipelinePacket, PropError,
+    PropValue, PropertySpec, VideoCodec, ANY_CHANNELS, ANY_SAMPLE_RATE,
 };
+
+use crate::livemux::{wall_clock_ns, LiveMuxDeadline, LIVE_MUX_PROPS};
 
 use crate::aacparse::audio_specific_config_info;
 use crate::opusparse::{parse_opus_head, OPUS_RATE_HZ};
@@ -207,6 +209,7 @@ pub struct InterleaveMux {
     /// Per-input frame buffer; releases the globally earliest-PTS frame once
     /// every contributor has one queued.
     agg: InputAggregator<Frame>,
+    deadline: LiveMuxDeadline,
 }
 
 impl InterleaveMux {
@@ -217,6 +220,7 @@ impl InterleaveMux {
             output,
             configured: vec![None; inputs],
             agg: InputAggregator::new(inputs),
+            deadline: LiveMuxDeadline::default(),
         }
     }
 
@@ -272,6 +276,26 @@ impl MultiInputElement for InterleaveMux {
         Ok(self.output.clone())
     }
 
+    fn configure_liveness(&mut self, live: bool) {
+        self.deadline.configure_liveness(live);
+    }
+
+    fn tick_interval_ns(&self) -> Option<u64> {
+        self.deadline.tick_interval_ns()
+    }
+
+    fn properties(&self) -> &'static [PropertySpec] {
+        LIVE_MUX_PROPS
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        self.deadline.set_property(name, value)
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        self.deadline.get_property(name)
+    }
+
     fn metadata(&self) -> ElementMetadata {
         ElementMetadata::new(
             "Funnel N-to-1 forwarder",
@@ -288,10 +312,15 @@ impl MultiInputElement for InterleaveMux {
         out: &'a mut dyn OutputSink,
     ) -> Self::ProcessFuture<'a> {
         Box::pin(async move {
+            let now_ns = wall_clock_ns();
             match packet {
                 // M204: buffer the frame; release any now globally-earliest
                 // frames (every contributor has a head) in PTS order.
-                PipelinePacket::DataFrame(frame) => self.agg.push(input, frame),
+                PipelinePacket::DataFrame(frame) => {
+                    self.deadline.note_arrival(input, &frame, now_ns);
+                    self.agg.push(input, frame);
+                }
+                PipelinePacket::Tick => {}
                 // M22: a per-input Eos is informational (the runner aggregates
                 // ends and emits the single merged Eos). M204: mark the input
                 // ended so the merge can release frames held waiting on it, and
@@ -304,7 +333,10 @@ impl MultiInputElement for InterleaveMux {
                     return Ok(());
                 }
             }
-            while let Some((_, frame)) = self.agg.take_earliest_by(|f| f.timing.pts_ns) {
+            while let Some((_, frame)) = self
+                .agg
+                .take_earliest_or_due_by(|f| f.timing.pts_ns, |f| self.deadline.is_due(f, now_ns))
+            {
                 out.push(PipelinePacket::DataFrame(frame)).await?;
             }
             Ok(())

@@ -602,6 +602,19 @@ interleaving keys on that instead. This is distinct from the synchronized-*round
 collection (`take_earliest_by`'s sibling `take_round`) a compositor / audio mixer
 uses, where every input contributes one item per output.
 
+In a live pipeline the muxers that merge this way (`InterleaveMux`, `flvmux`,
+`mpegtsmux`, `mp4mux`, `matroskamux`, `oggmux`, `avimux`) stop waiting on an input
+that stalls without Eos, as `GstAggregator` does on its live timeout. They ask for
+a 40 ms deadline tick, gst's step when no frame rate is known, and drain with
+`take_earliest_or_due_by`. It releases the earliest queued frame past the empty
+inputs once that frame is due. `LiveMuxDeadline` (`livemux.rs`) decides due: the
+wall clock has passed the frame's end plus the largest amount by which any
+input's frames have arrived behind their PTS, plus the muxer's `latency`
+property. A frame that arrives after later frames were written is still written,
+as gst's muxers do by default. `flvmux`, `mp4mux`, `matroskamux` and `oggmux`
+keep waiting on a track with no codec config, because their headers name every
+track. The wall clock needs `std`, so a no_std build keeps waiting.
+
 The same PTS merge is also available **at the runner level**: a
 `MultiInputElement` returning `input_pts_ordered() == true` is driven by
 `muxer_arm_pts` instead of the default arrival-order `muxer_arm`. That arm owns an

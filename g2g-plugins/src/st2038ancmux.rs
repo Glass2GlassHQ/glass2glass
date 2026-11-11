@@ -15,21 +15,14 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::{
     g2g_warn, st2038_any_alignment, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
     ElementMetadata, Frame, FrameTiming, G2gError, MemoryDomain, MultiInputElement, OutputSink,
-    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, St2038Alignment,
+    PipelinePacket, PropError, PropValue, PropertySpec, Rate, St2038Alignment,
 };
 
+use crate::livemux::{LIVE_MUX_LATENCY_PROPERTY, UNKNOWN_FRAME_PERIOD_TICK_NS};
 use crate::st2038::{framerate_period_ns, parse_st2038, write_st2038};
 use crate::st291::AncPacket;
 
-// gst's aggregator advances 40 ms at a time while it knows no frame rate
-const UNKNOWN_FRAME_PERIOD_TICK_NS: u64 = 40_000_000;
-
-static ST2038ANCMUX_PROPS: &[PropertySpec] = &[PropertySpec::new(
-    "latency",
-    PropKind::Uint,
-    "nanoseconds a live mux waits past a frame's end for late inputs",
-)
-.with_default("0")];
+static ST2038ANCMUX_PROPS: &[PropertySpec] = &[LIVE_MUX_LATENCY_PROPERTY];
 
 // gst st2038ancmux writes alignment=packet unless downstream asks for another
 fn output_alternatives() -> CapsSet {

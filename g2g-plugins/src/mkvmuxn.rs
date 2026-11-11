@@ -59,6 +59,7 @@ use crate::dvbsub::DEFAULT_PAGE_ID;
 use crate::fmp4mux::{
     avcc_record, hvcc_record, parameter_sets, split_annexb, video_sample, VideoGeometry,
 };
+use crate::livemux::{wall_clock_ns, LiveMuxDeadline, LIVE_MUX_LATENCY_PROPERTY};
 use crate::matroska::{
     default_page_blob, finalize_seekable, subpicture_block, subpicture_config,
     subpicture_mkv_codec, subtitle_format_from_str, subtitle_format_str, text_codec_private,
@@ -135,6 +136,7 @@ pub(crate) const MKV_MUX_PROPS: &[PropertySpec] = &[
         "composition and ancillary page an S_DVBSUB track declares when the stream carries no page-id config",
     )
     .with_default("1"),
+    LIVE_MUX_LATENCY_PROPERTY,
 ];
 
 impl MkvMuxSettings {
@@ -274,6 +276,7 @@ pub struct MkvMuxN {
     /// Per-pad video caps geometry, recorded at configure.
     geometry: Vec<VideoGeometry>,
     agg: InputAggregator<Frame>,
+    deadline: LiveMuxDeadline,
     /// Built lazily once every track has its init (the Tracks element needs all).
     mux: Option<MatroskaMuxer>,
     emitted: u64,
@@ -303,6 +306,7 @@ impl MkvMuxN {
             inits: alloc::vec![None; inputs],
             geometry: alloc::vec![VideoGeometry::default(); inputs],
             agg: InputAggregator::new(inputs),
+            deadline: LiveMuxDeadline::default(),
             mux: None,
             emitted: 0,
             cues_emitted: false,
@@ -816,11 +820,22 @@ impl MultiInputElement for MkvMuxN {
         )
     }
 
+    fn configure_liveness(&mut self, live: bool) {
+        self.deadline.configure_liveness(live);
+    }
+
+    fn tick_interval_ns(&self) -> Option<u64> {
+        self.deadline.tick_interval_ns()
+    }
+
     fn properties(&self) -> &'static [PropertySpec] {
         MKV_MUX_PROPS
     }
 
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        if self.deadline.get_property(name).is_some() {
+            return self.deadline.set_property(name, value);
+        }
         let stale = default_page_blob(self.settings.dvbsub_page_id);
         self.settings.set_property(name, value)?;
         if name != "dvbsub-page-id" {
@@ -844,7 +859,9 @@ impl MultiInputElement for MkvMuxN {
     }
 
     fn get_property(&self, name: &str) -> Option<PropValue> {
-        self.settings.get_property(name)
+        self.settings
+            .get_property(name)
+            .or_else(|| self.deadline.get_property(name))
     }
 
     fn process<'a>(
@@ -854,8 +871,10 @@ impl MultiInputElement for MkvMuxN {
         out: &'a mut dyn OutputSink,
     ) -> Self::ProcessFuture<'a> {
         Box::pin(async move {
+            let now_ns = wall_clock_ns();
             match packet {
                 PipelinePacket::DataFrame(frame) => {
+                    self.deadline.note_arrival(input, &frame, now_ns);
                     // Capture this track's init from its first AU before queueing.
                     if let Some(s) = frame.domain.as_system_slice() {
                         self.capture_init(input, s)?;
@@ -900,6 +919,7 @@ impl MultiInputElement for MkvMuxN {
                     self.priming.note_segment_start(input, seg.start);
                     return Ok(());
                 }
+                PipelinePacket::Tick => {}
                 other => {
                     out.push(other).await?;
                     return Ok(());
@@ -943,7 +963,10 @@ impl MultiInputElement for MkvMuxN {
                 self.mux = Some(mux);
             }
             // Release AUs now safe to emit, in global PTS order.
-            while let Some((track, frame)) = self.agg.take_earliest_by(|f| f.timing.pts_ns) {
+            while let Some((track, frame)) = self
+                .agg
+                .take_earliest_or_due_by(|f| f.timing.pts_ns, |f| self.deadline.is_due(f, now_ns))
+            {
                 self.emit_au(track, frame, out).await?;
             }
             // Once every track has ended and drained, flush the Cues index after

@@ -29,8 +29,10 @@ use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{
     AsyncElement, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim,
     ElementMetadata, G2gError, InputAggregator, MultiInputElement, OutputSink, PadTemplate,
-    PadTemplates, VideoCodec,
+    PadTemplates, PropError, PropValue, PropertySpec, VideoCodec,
 };
+
+use crate::livemux::{wall_clock_ns, LiveMuxDeadline, LIVE_MUX_PROPS};
 
 use crate::avi::{AviWriteStream, AviWriter};
 use crate::mux::{audio_track_params, refused_input, refused_input_because};
@@ -312,6 +314,7 @@ pub struct AviMuxN {
     aggregator: InputAggregator<Frame>,
     writer: Option<AviWriter>,
     finished: bool,
+    deadline: LiveMuxDeadline,
 }
 
 impl AviMuxN {
@@ -323,6 +326,7 @@ impl AviMuxN {
             aggregator: InputAggregator::new(inputs),
             writer: None,
             finished: false,
+            deadline: LiveMuxDeadline::default(),
         }
     }
 
@@ -351,6 +355,26 @@ impl MultiInputElement for AviMuxN {
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
         Self: 'a;
+
+    fn configure_liveness(&mut self, live: bool) {
+        self.deadline.configure_liveness(live);
+    }
+
+    fn tick_interval_ns(&self) -> Option<u64> {
+        self.deadline.tick_interval_ns()
+    }
+
+    fn properties(&self) -> &'static [PropertySpec] {
+        LIVE_MUX_PROPS
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        self.deadline.set_property(name, value)
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        self.deadline.get_property(name)
+    }
 
     /// Writes host memory, so every pad takes system frames only.
     fn input_domains(&self) -> g2g_core::memory::DomainSet {
@@ -435,9 +459,14 @@ impl MultiInputElement for AviMuxN {
         out: &'a mut dyn OutputSink,
     ) -> Self::ProcessFuture<'a> {
         Box::pin(async move {
+            let now_ns = wall_clock_ns();
             match packet {
-                PipelinePacket::DataFrame(frame) => self.aggregator.push(input, frame),
+                PipelinePacket::DataFrame(frame) => {
+                    self.deadline.note_arrival(input, &frame, now_ns);
+                    self.aggregator.push(input, frame);
+                }
                 PipelinePacket::Eos => self.aggregator.mark_ended(input),
+                PipelinePacket::Tick => {}
                 PipelinePacket::CapsChanged(caps) => {
                     // A demuxer refines compressed audio's layout at runtime,
                     // and the `strf` needs the real one, so take it while the
@@ -458,7 +487,10 @@ impl MultiInputElement for AviMuxN {
             }
             // Release access units in global pts order, so the chunks
             // interleave the way a player expects to read them.
-            while let Some((pad, frame)) = self.aggregator.take_earliest_by(|f| f.timing.pts_ns) {
+            while let Some((pad, frame)) = self
+                .aggregator
+                .take_earliest_or_due_by(|f| f.timing.pts_ns, |f| self.deadline.is_due(f, now_ns))
+            {
                 let Some(stream) = self.streams[pad].clone() else {
                     return Err(G2gError::NotConfigured);
                 };
