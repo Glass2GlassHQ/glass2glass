@@ -142,6 +142,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M2226: `mpegtsmux` and `tsdemux` carry JPEG XS with its `JXS_video_descriptor`, as gst does.
 - M2227: `mpegtsmux` and `tsdemux stream=id3` carry timed ID3 metadata as `Caps::Id3`, as gst does.
 - M2228: `mp4mux` and the MP4 demuxers carry track language and `Tag::ImageOrientation`, as gst's `image-orientation`.
+- M2229: `av1parse` and `typefind` read Annex B AV1 and convert it to the OBU stream.
 
 Breaking: `TimecodeMeta.frames` is a `u16`, `WIRE_VERSION` is 6, `FrameTiming` gains `start_discard_ns` and `end_discard_ns`, `RtpRecvConfig` gains `parameter_sets`, `RtmpPublisher::push` fails with a `PublishRefusal`, and `Interlace` gains `InterleavedBottomFieldFirst`.
 

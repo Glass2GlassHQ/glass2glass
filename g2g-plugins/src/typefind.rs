@@ -135,7 +135,7 @@ pub fn sniff_caps(header: &[u8]) -> Option<Caps> {
     if sniff_mpeg_video(header) {
         return Some(elementary_video_caps(VideoCodec::Mpeg2));
     }
-    if crate::av1parse::opens_obu_stream(header) {
+    if crate::av1parse::opens_obu_stream(header) || crate::av1parse::opens_annexb_stream(header) {
         return Some(elementary_video_caps(VideoCodec::Av1));
     }
     // The self-syncing audio streams last of the binary sniffs: their sync
@@ -1317,6 +1317,15 @@ mod tests {
         let mut no_sequence_header = obu_file[..delimiter_len].to_vec();
         no_sequence_header.extend_from_slice(&[0x32, 0x03, 0xAA, 0xBB, 0xCC]);
         assert_eq!(sniff_caps(&no_sequence_header), None);
+    }
+
+    #[test]
+    fn detects_an_annexb_av1_stream() {
+        let annexb_file = include_bytes!("../tests/fixtures/av1_321x181_annexb.obu");
+        assert_eq!(
+            sniff_caps(annexb_file),
+            Some(elementary_video_caps(VideoCodec::Av1))
+        );
     }
 
     /// An ID3v2.3 tag of `body_len` zero bytes, the head an `.mp3` opens with.

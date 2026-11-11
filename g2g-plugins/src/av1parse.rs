@@ -71,6 +71,9 @@ pub struct Av1Parse {
     caps: CapsRefinement,
     reframe: bool,
     framer: TemporalUnitFramer,
+    // `Some` once the first buffer opened an Annex B temporal unit
+    annexb: Option<AnnexBFramer>,
+    first_buffer_seen: bool,
     reframed_sequence: u64,
     #[cfg(feature = "metadata")]
     input_stamps: crate::inputstamp::PendingInputStamps,
@@ -215,6 +218,18 @@ impl AsyncElement for Av1Parse {
                         out.push(PipelinePacket::DataFrame(frame)).await?;
                         return Ok(());
                     };
+                    if !self.first_buffer_seen {
+                        self.first_buffer_seen = true;
+                        if opens_annexb_temporal_unit(bytes) {
+                            self.annexb = Some(AnnexBFramer::default());
+                        }
+                    }
+                    if let Some(annexb) = self.annexb.as_mut() {
+                        for (temporal_unit, timing) in annexb.push(bytes, frame.timing)? {
+                            self.emit_temporal_unit(temporal_unit, timing, out).await?;
+                        }
+                        return Ok(());
+                    }
                     let delimited_input =
                         self.reframe && (self.framer.started || opens_temporal_unit(bytes));
                     if !delimited_input {
@@ -244,6 +259,9 @@ impl AsyncElement for Av1Parse {
                 PipelinePacket::Flush => {
                     self.caps.forget();
                     self.framer = TemporalUnitFramer::default();
+                    if let Some(annexb) = self.annexb.as_mut() {
+                        *annexb = AnnexBFramer::default();
+                    }
                     #[cfg(feature = "metadata")]
                     {
                         self.input_stamps = crate::inputstamp::PendingInputStamps::default();
@@ -255,6 +273,9 @@ impl AsyncElement for Av1Parse {
                     out.push(PipelinePacket::Segment(seg)).await?;
                 }
                 PipelinePacket::Eos => {
+                    if let Some(annexb) = &self.annexb {
+                        annexb.finish()?;
+                    }
                     if let Some((temporal_unit, timing)) = self.framer.finish()? {
                         self.emit_temporal_unit(temporal_unit, timing, out).await?;
                     }
@@ -580,6 +601,162 @@ pub(crate) fn opens_obu_stream(data: &[u8]) -> bool {
         && reserved_bits_clear
         && parse_complete_sequence_header(&data[sequence_header.payload..sequence_header.end])
             .is_some_and(|header| header.profile <= MAX_SEQ_PROFILE)
+}
+
+const OBU_FORBIDDEN_BIT: u8 = 0x80;
+const OBU_EXTENSION_FLAG: u8 = 0x04;
+const OBU_HAS_SIZE_FIELD: u8 = 0x02;
+
+pub(crate) fn write_leb128(mut value: usize, out: &mut Vec<u8>) {
+    loop {
+        let low_bits = (value & 0x7F) as u8;
+        value >>= 7;
+        if value == 0 {
+            out.push(low_bits);
+            return;
+        }
+        out.push(low_bits | 0x80);
+    }
+}
+
+// a leb128 length at `*pos` whose bytes end by `unit_end`, the end of the unit holding it
+fn annexb_length(data: &[u8], pos: &mut usize, unit_end: usize) -> Result<usize, G2gError> {
+    let length = read_leb128(data, pos)
+        .and_then(|length| usize::try_from(length).ok())
+        .ok_or(G2gError::CapsMismatch)?;
+    let fits = pos
+        .checked_add(length)
+        .is_some_and(|whole_end| whole_end <= unit_end);
+    if !fits {
+        return Err(G2gError::CapsMismatch);
+    }
+    Ok(length)
+}
+
+// spec 5.3.1: the low-overhead format codes every OBU's size, which Annex B may leave out
+fn push_low_overhead_obu(obu: &[u8], out: &mut Vec<u8>) -> Result<(), G2gError> {
+    let &header = obu.first().ok_or(G2gError::CapsMismatch)?;
+    if header & OBU_FORBIDDEN_BIT != 0 {
+        return Err(G2gError::CapsMismatch);
+    }
+    let header_len = 1 + usize::from(header & OBU_EXTENSION_FLAG != 0);
+    let header_bytes = obu.get(..header_len).ok_or(G2gError::CapsMismatch)?;
+    if header & OBU_HAS_SIZE_FIELD != 0 {
+        let mut payload = header_len;
+        let size = read_leb128(obu, &mut payload).ok_or(G2gError::CapsMismatch)?;
+        if payload.checked_add(size as usize) != Some(obu.len()) {
+            return Err(G2gError::CapsMismatch);
+        }
+        out.extend_from_slice(obu);
+        return Ok(());
+    }
+    out.push(header | OBU_HAS_SIZE_FIELD);
+    out.extend_from_slice(&header_bytes[1..]);
+    write_leb128(obu.len() - header_len, out);
+    out.extend_from_slice(&obu[header_len..]);
+    Ok(())
+}
+
+// spec annex B: a temporal_unit_size, then frame units each led by a frame_unit_size, each holding
+// OBUs led by an obu_length. The unit at the front of `data` as low-overhead OBUs and the bytes it
+// spanned, or Ok(None) until all of it has arrived
+fn annexb_temporal_unit(data: &[u8]) -> Result<Option<(Vec<u8>, usize)>, G2gError> {
+    let mut pos = 0;
+    let Some(temporal_unit_size) = read_leb128(data, &mut pos) else {
+        return if data.len() < LEB128_MAX_BYTES {
+            Ok(None)
+        } else {
+            Err(G2gError::CapsMismatch)
+        };
+    };
+    let temporal_unit_size = usize::try_from(temporal_unit_size)
+        .ok()
+        .filter(|&size| size <= MAX_TEMPORAL_UNIT_BYTES)
+        .ok_or(G2gError::CapsMismatch)?;
+    let end = pos + temporal_unit_size;
+    let Some(temporal_unit) = data.get(..end) else {
+        return Ok(None);
+    };
+    let mut obus = Vec::with_capacity(temporal_unit_size);
+    while pos < end {
+        let frame_unit_size = annexb_length(temporal_unit, &mut pos, end)?;
+        let frame_unit_end = pos + frame_unit_size;
+        while pos < frame_unit_end {
+            let obu_length = annexb_length(temporal_unit, &mut pos, frame_unit_end)?;
+            push_low_overhead_obu(&temporal_unit[pos..pos + obu_length], &mut obus)?;
+            pos += obu_length;
+        }
+    }
+    Ok(Some((obus, end)))
+}
+
+// the complete OBUs of an Annex B stream's first frame unit, as low-overhead OBUs
+fn annexb_leading_obus(data: &[u8]) -> Option<Vec<u8>> {
+    let mut pos = 0;
+    let temporal_unit_size = read_leb128(data, &mut pos)? as usize;
+    let temporal_unit_end = pos.checked_add(temporal_unit_size)?;
+    let frame_unit_size = annexb_length(data, &mut pos, temporal_unit_end).ok()?;
+    let frame_unit_end = pos + frame_unit_size;
+    let mut obus = Vec::new();
+    while pos < frame_unit_end {
+        let obu_length = annexb_length(data, &mut pos, frame_unit_end).ok()?;
+        let Some(obu) = data.get(pos..pos + obu_length) else {
+            break;
+        };
+        push_low_overhead_obu(obu, &mut obus).ok()?;
+        pos += obu_length;
+    }
+    Some(obus)
+}
+
+// an Annex B stream opens on a temporal delimiter OBU, a header byte with no payload
+fn opens_annexb_temporal_unit(data: &[u8]) -> bool {
+    annexb_leading_obus(data).is_some_and(|obus| {
+        obus.starts_with(&[OBU_TEMPORAL_DELIMITER << 3 | OBU_HAS_SIZE_FIELD, 0])
+    })
+}
+
+// as `opens_obu_stream` asks of a low-overhead file: a temporal delimiter, then a sequence header
+pub(crate) fn opens_annexb_stream(data: &[u8]) -> bool {
+    annexb_leading_obus(data).is_some_and(|obus| opens_obu_stream(&obus))
+}
+
+// the leading temporal units of an Annex B byte stream, each converted to low-overhead OBUs
+#[derive(Debug, Default)]
+struct AnnexBFramer {
+    pending: Vec<u8>,
+    // the timing of the buffer the first pending byte arrived in
+    head_timing: FrameTiming,
+}
+
+impl AnnexBFramer {
+    fn push(
+        &mut self,
+        bytes: &[u8],
+        timing: FrameTiming,
+    ) -> Result<Vec<FramedTemporalUnit>, G2gError> {
+        if self.pending.is_empty() {
+            self.head_timing = timing;
+        }
+        self.pending.extend_from_slice(bytes);
+        let mut consumed = 0;
+        let mut temporal_units = Vec::new();
+        while let Some((obus, len)) = annexb_temporal_unit(&self.pending[consumed..])? {
+            // a unit that completes here ends in this buffer, so the next one starts in it
+            temporal_units.push((obus, core::mem::replace(&mut self.head_timing, timing)));
+            consumed += len;
+        }
+        self.pending.drain(..consumed);
+        Ok(temporal_units)
+    }
+
+    fn finish(&self) -> Result<(), G2gError> {
+        if self.pending.is_empty() {
+            Ok(())
+        } else {
+            Err(G2gError::CapsMismatch)
+        }
+    }
 }
 
 // the last unit waits for the next delimiter unless input proved one unit per buffer
@@ -1513,6 +1690,91 @@ mod tests {
                 .await
                 .unwrap();
         }
+    }
+
+    const OBU_FIXTURE: &[u8] = include_bytes!("../tests/fixtures/av1_321x181.obu");
+    // tools/av1-annexb-fixture.sh: gst's av1parse writes it from OBU_FIXTURE and reads it back to those bytes
+    const ANNEXB_FIXTURE: &[u8] = include_bytes!("../tests/fixtures/av1_321x181_annexb.obu");
+
+    async fn parse_annexb(
+        mut parse: Av1Parse,
+        buffers: &[Vec<u8>],
+    ) -> Result<CollectSink, G2gError> {
+        parse.configure_pipeline(&av1_caps()).unwrap();
+        let mut sink = CollectSink::default();
+        for (sequence, buffer) in buffers.iter().enumerate() {
+            let frame = frame_with_bytes(sequence as u64, buffer.clone());
+            parse
+                .process(PipelinePacket::DataFrame(frame), &mut sink)
+                .await?;
+        }
+        parse.process(PipelinePacket::Eos, &mut sink).await?;
+        Ok(sink)
+    }
+
+    #[tokio::test]
+    async fn annexb_input_comes_out_as_the_obu_stream_gst_converts_it_to() {
+        let delimiters = obu_ranges(OBU_FIXTURE)
+            .unwrap()
+            .iter()
+            .filter(|obu| obu.obu_type == OBU_TEMPORAL_DELIMITER)
+            .count();
+        // lands inside sizes, OBUs and units
+        let chunk_len = 7;
+        for (parse, chunk_len) in [
+            (Av1Parse::reframing(), chunk_len),
+            (Av1Parse::new(), ANNEXB_FIXTURE.len()),
+        ] {
+            let chunks: Vec<Vec<u8>> = ANNEXB_FIXTURE
+                .chunks(chunk_len)
+                .map(<[u8]>::to_vec)
+                .collect();
+            let sink = parse_annexb(parse, &chunks).await.unwrap();
+            let units = data_payloads(&sink);
+            assert_eq!(units.len(), delimiters, "one buffer per temporal unit");
+            assert!(units.iter().all(|unit| opens_temporal_unit(unit)));
+            assert_eq!(units.concat(), OBU_FIXTURE);
+            assert!(matches!(
+                sink.packets[0],
+                PipelinePacket::CapsChanged(Caps::CompressedVideo {
+                    width: Dim::Fixed(321),
+                    height: Dim::Fixed(181),
+                    ..
+                })
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn annexb_lengths_that_overrun_their_unit_fail_the_parse() {
+        let mut first_unit_end = 0;
+        let first_unit_size = read_leb128(ANNEXB_FIXTURE, &mut first_unit_end).unwrap() as usize;
+        first_unit_end += first_unit_size;
+        // a temporal unit of 3 bytes holding a frame unit of 2 whose one OBU claims 2
+        let overrun = [3, 2, 2, OBU_TEMPORAL_DELIMITER << 3];
+        let corrupt = [&ANNEXB_FIXTURE[..first_unit_end], &overrun[..]].concat();
+        assert_eq!(
+            parse_annexb(Av1Parse::reframing(), &[corrupt]).await.err(),
+            Some(G2gError::CapsMismatch)
+        );
+        let truncated = ANNEXB_FIXTURE[..ANNEXB_FIXTURE.len() - 1].to_vec();
+        assert_eq!(
+            parse_annexb(Av1Parse::reframing(), &[truncated])
+                .await
+                .err(),
+            Some(G2gError::CapsMismatch),
+            "a stream that ends inside a unit"
+        );
+    }
+
+    #[test]
+    fn annexb_sniff_wants_a_sequence_header_after_the_delimiter() {
+        assert!(opens_annexb_stream(ANNEXB_FIXTURE));
+        assert!(!opens_annexb_stream(OBU_FIXTURE));
+        // a temporal unit of one frame unit holding only a delimiter OBU
+        let delimiter_only = [3, 2, 1, OBU_TEMPORAL_DELIMITER << 3];
+        assert!(opens_annexb_temporal_unit(&delimiter_only));
+        assert!(!opens_annexb_stream(&delimiter_only));
     }
 
     #[tokio::test]

@@ -1480,6 +1480,19 @@ MP4 and Matroska mappings strip them) passes through untouched. An OBU without
 a size field, or one coding a size past 16 MiB, fails the stream, as does a held
 unit growing past 16 MiB.
 
+The Annex B format (AV1 spec annex B, gst's `stream-format=annexb`) instead
+prefixes each temporal unit, frame unit and OBU with a leb128 length, and its OBUs
+may leave out their size field. `av1parse` takes a stream as Annex B when its
+first buffer opens on a temporal unit whose first OBU is an empty temporal
+delimiter under those lengths, whether or not it re-frames, and then emits each
+whole temporal unit as low-overhead OBUs, adding the size field where one is
+missing. A length that runs past the unit holding it, a unit past 16 MiB, or a
+stream ending inside a unit fails it. `typefind` types an Annex B file as AV1 when
+the first frame unit converts to a delimiter and a sequence header that parses
+whole. The conversion is checked against gst 1.28's `av1parse`, which writes the
+Annex B fixture from the `.obu` one: g2g turns it back into the same bytes, and
+the two files decode to the same frames.
+
 ## deinterlace
 
 Disc content is usually interlaced, and presenting its woven frames as-is combs

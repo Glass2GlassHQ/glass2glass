@@ -142,8 +142,6 @@ libraries installed.
 - **RFC 3640 (`mpeg4-generic`) AAC depayloading in `udpsrc` and `rtspserversrc`:**
   only `rtspsrc` (through retina) reads the AU headers, so AAC published to the
   RECORD server or sent as plain RTP is not depayloaded.
-- **Annex B AV1 input to `av1parse`:** read `temporal_unit_size`-prefixed input
-  (gst `stream-format=annexb`) and convert it to the OBU stream.
 - **`VulkanVideoDec` residuals.** Run the `vulkanvideo` GPU tests on Intel ANV.
 - **`VulkanVideoDec` conformance residue on RADV.** `WPP_D_ericsson` (64 wide,
   wavefront parallel processing with dependent slice segments) is refused,
