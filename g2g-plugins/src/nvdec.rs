@@ -61,6 +61,7 @@ use alloc::vec::Vec;
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
+use crate::annexb::LatestParameterSets;
 use crate::inputstamp::{InputStamp, PendingInputStamps};
 use crate::vp9parse::{frame_header, superframe_frames, Vp9FrameKind};
 use g2g_core::g2g_error;
@@ -118,6 +119,9 @@ pub struct NvDec {
     // the last access unit ended with an H.265 end of sequence NAL unit
     after_end_of_sequence: bool,
     vp9_outputs: PacketOutputs<ReadyFrame>,
+    parameter_sets: LatestParameterSets,
+    // NVDEC's parser forgets the parameter sets when a flush drains it
+    resend_parameter_sets: bool,
     /// Caps of the last frame emitted; a decoded frame whose format / geometry
     /// differs (a mid-stream resolution or bit-depth change) re-announces.
     last_caps: Option<Caps>,
@@ -395,6 +399,8 @@ impl NvDec {
             segment: Segment::new(),
             after_end_of_sequence: false,
             vp9_outputs: PacketOutputs::default(),
+            parameter_sets: LatestParameterSets::default(),
+            resend_parameter_sets: false,
             last_caps: None,
             input_caps: None,
             max_display_delay: DEFAULT_MAX_DISPLAY_DELAY,
@@ -651,6 +657,17 @@ impl NvDec {
         })?;
         self.parser = parser;
         Ok(())
+    }
+
+    fn restore_parameter_sets(&mut self, access_unit: &[u8]) -> Option<Vec<u8>> {
+        let codec = match self.state.codec_cuvid {
+            ffi::CUDA_VIDEO_CODEC_H264 => VideoCodec::H264,
+            ffi::CUDA_VIDEO_CODEC_HEVC => VideoCodec::H265,
+            _ => return None,
+        };
+        let carries_parameter_sets = self.parameter_sets.refresh(codec, access_unit);
+        let resend = core::mem::replace(&mut self.resend_parameter_sets, false);
+        (resend && !carries_parameter_sets).then(|| self.parameter_sets.prepend(codec, access_unit))
     }
 
     // a CRA after an end of sequence drops the pictures still waiting for output,
@@ -1787,6 +1804,8 @@ impl AsyncElement for NvDec {
                         .transpose()?;
                     let cra_as_bla = self.h265_cra_as_bla(slice);
                     let access_unit = cra_as_bla.as_deref().unwrap_or(slice);
+                    let with_parameter_sets = self.restore_parameter_sets(access_unit);
+                    let access_unit = with_parameter_sets.as_deref().unwrap_or(access_unit);
                     let pts_ns = frame.timing.pts_ns;
                     self.input_stamps.insert(pts_ns, InputStamp::of(&frame));
                     let frames = match vp9_plan {
@@ -1811,6 +1830,17 @@ impl AsyncElement for NvDec {
                 PipelinePacket::Segment(segment) => {
                     self.segment = segment;
                     out.push(PipelinePacket::Segment(segment)).await?;
+                }
+                PipelinePacket::Flush => {
+                    // an end-of-stream packet resets NVDEC's parser, references and display queue included
+                    drop(self.parse(&[], 0, true)?);
+                    self.state.vp9_slots = [None; VP9_REFERENCE_SLOTS];
+                    self.vp9_outputs = PacketOutputs::default();
+                    self.input_stamps = PendingInputStamps::default();
+                    self.after_end_of_sequence = false;
+                    self.last_caps = None;
+                    self.resend_parameter_sets = true;
+                    out.push(PipelinePacket::Flush).await?;
                 }
                 other => {
                     out.push(other).await?;
@@ -3125,6 +3155,52 @@ mod tests {
         assert!(
             head.iter().any(|&b| b != head[0]),
             "decoded AV1 luma is uniform; decode likely failed"
+        );
+    }
+
+    #[tokio::test]
+    async fn flush_drops_held_pictures_and_resumes_on_an_idr_without_parameter_sets() {
+        const SECOND_GOP_IDR: usize = 5;
+        const SEEK_PTS_NS: u64 = 10_000_000_000;
+        let Some(mut dec) = open_dec(VideoCodec::H264, 640, 480, 1) else {
+            return;
+        };
+        let units = h264_units(H264_CLIP);
+        let mut sink = RecordSink::default();
+        for (i, au) in units[..SECOND_GOP_IDR - 1].iter().enumerate() {
+            dec.process(
+                PipelinePacket::DataFrame(au_frame(au, i as u64 * 33_000_000)),
+                &mut sink,
+            )
+            .await
+            .expect("decode AU");
+        }
+        dec.process(PipelinePacket::Flush, &mut sink)
+            .await
+            .expect("flush");
+        let before_seek = sink.dims.len();
+        // a demuxer seeking to the second GOP sends its IDR without the SPS and PPS
+        let idr_alone: Vec<u8> = crate::annexb::nal_units(&units[SECOND_GOP_IDR])
+            .filter(|nal| crate::annexb::h264_nal_type(nal) == Some(5))
+            .flat_map(|nal| [&[0u8, 0, 0, 1][..], nal].concat())
+            .collect();
+        let resumed = core::iter::once(&idr_alone).chain(&units[SECOND_GOP_IDR + 1..]);
+        let resumed_count = units.len() - SECOND_GOP_IDR;
+        for (i, au) in resumed.enumerate() {
+            dec.process(
+                PipelinePacket::DataFrame(au_frame(au, SEEK_PTS_NS + i as u64 * 33_000_000)),
+                &mut sink,
+            )
+            .await
+            .expect("decode AU after the flush");
+        }
+        dec.process(PipelinePacket::Eos, &mut sink)
+            .await
+            .expect("drain");
+        assert_eq!(
+            sink.dims.len() - before_seek,
+            resumed_count,
+            "every picture after the seek, none from before it"
         );
     }
 

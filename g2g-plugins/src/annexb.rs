@@ -532,6 +532,48 @@ pub(crate) fn prepend_param_sets(
     out
 }
 
+#[cfg(feature = "std")]
+fn parameter_set_types(codec: VideoCodec) -> &'static [u8] {
+    match codec {
+        VideoCodec::H265 => &[32, 33, 34],
+        _ => &[7, 8],
+    }
+}
+
+// demuxed streams send the parameter sets only before their first frame
+#[cfg(feature = "std")]
+#[derive(Debug, Default)]
+pub(crate) struct LatestParameterSets {
+    // the latest NAL units of each parameter-set type, in the codec's order
+    by_type: Vec<Vec<Vec<u8>>>,
+}
+
+#[cfg(feature = "std")]
+impl LatestParameterSets {
+    // returns whether `au` carries every parameter-set type
+    pub(crate) fn refresh(&mut self, codec: VideoCodec, au: &[u8]) -> bool {
+        let types = parameter_set_types(codec);
+        self.by_type.resize(types.len(), Vec::new());
+        let mut carried = alloc::vec![false; types.len()];
+        for nal in nal_units(au) {
+            let Some(slot) = types.iter().position(|&t| t == nalu_type(codec, nal)) else {
+                continue;
+            };
+            if !carried[slot] {
+                self.by_type[slot].clear();
+                carried[slot] = true;
+            }
+            self.by_type[slot].push(nal.to_vec());
+        }
+        carried.iter().all(|&carries| carries)
+    }
+
+    pub(crate) fn prepend(&self, codec: VideoCodec, au: &[u8]) -> Vec<u8> {
+        let sets: Vec<Vec<u8>> = self.by_type.iter().flatten().cloned().collect();
+        prepend_param_sets(au, &sets, codec)
+    }
+}
+
 /// Split an Annex-B buffer into NALUs (3- and 4-byte start codes).
 pub(crate) fn split_annexb(data: &[u8]) -> Vec<&[u8]> {
     let mut nalus = Vec::new();

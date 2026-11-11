@@ -25,14 +25,14 @@ use std::fs::File;
 use std::io::{BufWriter, Write};
 
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, Frame,
-    G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError,
-    PropKind, PropValue, PropertySpec, PushOutcome, Rate, SystemSlice, VideoCodec,
+    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError,
+    MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
+    PropValue, PropertySpec, PushOutcome, Rate, SystemSlice, VideoCodec,
 };
 
 use g2g_core::runtime::DynMultiInputElement;
 
-use crate::annexb::{nal_units, nalu_type, prepend_param_sets};
+use crate::annexb::LatestParameterSets;
 use crate::filesink::{io_err, path_io_err};
 use g2g_core::log::short_type_name;
 
@@ -116,52 +116,6 @@ impl OutputSink for SegmentSink {
     }
 }
 
-fn parameter_set_types(codec: VideoCodec) -> &'static [u8] {
-    match codec {
-        VideoCodec::H265 => &[32, 33, 34],
-        _ => &[7, 8],
-    }
-}
-
-// each file's muxer needs the parameter sets, which a demuxed stream sends only before its first frame
-#[derive(Debug, Default)]
-struct ParameterSets {
-    // the latest NAL units of each parameter-set type, in the codec's order
-    by_type: Vec<Vec<Vec<u8>>>,
-}
-
-impl ParameterSets {
-    // returns whether `au` carries every parameter-set type
-    fn refresh(&mut self, codec: VideoCodec, au: &[u8]) -> bool {
-        let types = parameter_set_types(codec);
-        self.by_type.resize(types.len(), Vec::new());
-        let mut carried = alloc::vec![false; types.len()];
-        for nal in nal_units(au) {
-            let Some(slot) = types.iter().position(|&t| t == nalu_type(codec, nal)) else {
-                continue;
-            };
-            if !carried[slot] {
-                self.by_type[slot].clear();
-                carried[slot] = true;
-            }
-            self.by_type[slot].push(nal.to_vec());
-        }
-        carried.iter().all(|&carries| carries)
-    }
-
-    fn prepend(&self, codec: VideoCodec, frame: Frame) -> Frame {
-        let Some(au) = frame.domain.as_system_slice() else {
-            return frame;
-        };
-        let sets: Vec<Vec<u8>> = self.by_type.iter().flatten().cloned().collect();
-        let prefixed = prepend_param_sets(au, &sets, codec);
-        Frame {
-            domain: MemoryDomain::System(SystemSlice::from_boxed(prefixed.into_boxed_slice())),
-            ..frame
-        }
-    }
-}
-
 /// # Example
 ///
 /// ```no_run
@@ -182,7 +136,7 @@ pub struct SplitMuxSink {
     segment_start_ns: u64,
     started: bool,
     files_written: u64,
-    parameter_sets: ParameterSets,
+    parameter_sets: LatestParameterSets,
 }
 
 // `dyn DynMultiInputElement` is not Debug, so implement it by hand (like StreamDemux).
@@ -215,7 +169,7 @@ impl SplitMuxSink {
             segment_start_ns: 0,
             started: false,
             files_written: 0,
-            parameter_sets: ParameterSets::default(),
+            parameter_sets: LatestParameterSets::default(),
         }
     }
 
@@ -333,8 +287,14 @@ impl AsyncElement for SplitMuxSink {
                         self.open_segment()?;
                         self.segment_start_ns = pts;
                         self.started = true;
-                        if !carries_parameter_sets {
-                            frame = self.parameter_sets.prepend(codec, frame);
+                        let missing_parameter_sets = (!carries_parameter_sets)
+                            .then(|| frame.domain.as_system_slice())
+                            .flatten();
+                        if let Some(au) = missing_parameter_sets {
+                            let prefixed = self.parameter_sets.prepend(codec, au);
+                            frame.domain = MemoryDomain::System(SystemSlice::from_boxed(
+                                prefixed.into_boxed_slice(),
+                            ));
                         }
                     }
                     let mux = self.mux.as_mut().ok_or(G2gError::NotConfigured)?;
