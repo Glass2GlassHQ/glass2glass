@@ -721,6 +721,8 @@ mod tests {
         assert_eq!(duration, span_ns as f64 / 1e9);
     }
 
+    // `livemux::wall_clock_ns` is `None` without std
+    #[cfg(feature = "std")]
     // video keeps coming while audio stalls without Eos, then the runner ticks past the deadline
     async fn frames_muxed_after_audio_stalls(live: bool) -> u64 {
         const VIDEO_STEP_NS: u64 = 1_000_000;
@@ -749,6 +751,7 @@ mod tests {
         mux.emitted() - before_tick
     }
 
+    #[cfg(feature = "std")]
     #[tokio::test]
     async fn a_live_mux_stops_waiting_on_a_stalled_input_at_the_deadline() {
         assert_eq!(
