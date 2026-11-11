@@ -66,7 +66,7 @@ use g2g_core::time::ticks_to_ns;
 /// Samples per channel one AAC access unit decodes to. An SBR / HE-AAC stream
 /// doubles this against its ADTS-declared rate, which the header cannot tell us,
 /// so the core-rate figure is used throughout.
-const SAMPLES_PER_ACCESS_UNIT: u32 = 1024;
+pub(crate) const SAMPLES_PER_ACCESS_UNIT: u32 = 1024;
 
 /// Bytes of ADTS header before the payload, without and with the CRC that
 /// `protection_absent == 0` adds.

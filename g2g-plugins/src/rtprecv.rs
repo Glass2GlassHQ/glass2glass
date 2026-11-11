@@ -263,7 +263,7 @@ impl AccessUnitEmitter {
     // `seq_base` is the sequence number the first emitted frame carries
     pub(crate) fn new(cfg: &RtpRecvConfig, seq_base: u64, frame_limit: u64) -> Self {
         Self {
-            encoding: cfg.encoding,
+            encoding: cfg.encoding.clone(),
             parameter_sets: cfg.parameter_sets.clone(),
             pts_rebase: RtpPtsRebase::new(),
             pts_offset_ns: 0,
@@ -284,8 +284,8 @@ impl AccessUnitEmitter {
     }
 
     #[cfg(feature = "rtsp-server")]
-    pub(crate) fn encoding(&self) -> RtpEncoding {
-        self.encoding
+    pub(crate) fn encoding(&self) -> &RtpEncoding {
+        &self.encoding
     }
 
     // true once `frame_limit` access units are out and `Eos` is pushed
@@ -380,7 +380,7 @@ impl SenderReceiveState {
     fn new(cfg: &RtpRecvConfig) -> Self {
         Self {
             jitter: RtpJitterBuffer::new(cfg.jitter),
-            depay: RtpDepayloader::new(cfg.encoding),
+            depay: RtpDepayloader::new(&cfg.encoding),
             stats: ReceptionStats::new(0, cfg.encoding.clock_rate_hz()),
             fec_decoder: FecDecoder::default(),
             flexfec_decoder: FlexFecDecoder::default(),

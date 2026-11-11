@@ -139,9 +139,10 @@ libraries installed.
 
 ## Receive / decode
 
-- **RFC 3640 (`mpeg4-generic`) AAC depayloading in `udpsrc` and `rtspserversrc`:**
-  only `rtspsrc` (through retina) reads the AU headers, so AAC published to the
-  RECORD server or sent as plain RTP is not depayloaded.
+- **AAC published to the RTSP RECORD server:** `rtspserversrc` records one video
+  track, and a second SETUP replaces the first one's transport. Route each
+  SETUP to its announced track and depayload an `mpeg4-generic` audio track with
+  `RtpAacDepayloader`.
 - **`VulkanVideoDec` residuals.** Run the `vulkanvideo` GPU tests on Intel ANV.
 - **`VulkanVideoDec` conformance residue on RADV.** `WPP_D_ericsson` (64 wide,
   wavefront parallel processing with dependent slice segments) is refused,

@@ -35,6 +35,7 @@ use g2g_core::rtp::{CaptureTimeExtensionIds, ABS_CAPTURE_TIME_URI, NTP_64_URI};
 use g2g_core::{AudioFormat, Caps, Dim, Rate, VideoCodec};
 
 use crate::nalparse::NalCodec;
+use crate::rtpdepay::Mpeg4GenericAac;
 use crate::rtppay::{AAC_AU_INDEX_BITS, AAC_AU_SIZE_BITS};
 use crate::textencoding::{base64_decode, base64_encode, hex_encode};
 
@@ -227,6 +228,8 @@ pub struct SdpMedia {
     /// carries none.
     pub parameter_sets: Vec<u8>,
     pub extmap: Vec<(NonZeroU8, String)>,
+    // `None` unless the section is mpeg4-generic AAC whose fmtp a depayloader can follow
+    pub mpeg4_generic_aac: Option<Mpeg4GenericAac>,
 }
 
 impl SdpMedia {
@@ -265,6 +268,11 @@ impl SdpMedia {
         }
 
         let mut parameter_sets = Vec::new();
+        let mpeg4_generic_aac = s
+            .fmtp
+            .as_deref()
+            .filter(|_| encoding.eq_ignore_ascii_case(MPEG4_GENERIC))
+            .and_then(|fmtp| mpeg4_generic_aac(fmtp, clock_rate));
         let caps = match encoding_kind(encoding)? {
             Encoding::Video(codec) => {
                 if let Some(fmtp) = s.fmtp.as_deref() {
@@ -306,8 +314,64 @@ impl SdpMedia {
             port: s.port,
             parameter_sets,
             extmap: s.extmap.clone(),
+            mpeg4_generic_aac,
         })
     }
+}
+
+const MPEG4_GENERIC: &str = "mpeg4-generic";
+
+// RFC 3640 4.1: these AU header fields are absent unless the fmtp gives them a length
+const UNSUPPORTED_AU_HEADER_FIELDS: [&str; 5] = [
+    "ctsdeltalength",
+    "dtsdeltalength",
+    "randomaccessindication",
+    "streamstateindication",
+    "auxiliarydatasizelength",
+];
+
+// `None` for a mode other than AAC-hbr / AAC-lbr, an AU header field past size and index, or a
+// config ADTS cannot carry
+fn mpeg4_generic_aac(fmtp: &str, clock_rate_hz: u32) -> Option<Mpeg4GenericAac> {
+    const AAC_MODES: [&str; 2] = ["AAC-hbr", "AAC-lbr"];
+    const MAX_FIELD_BITS: u32 = 16;
+    let mode = fmtp_param(fmtp, "mode")?;
+    if !AAC_MODES
+        .iter()
+        .any(|known| mode.eq_ignore_ascii_case(known))
+    {
+        return None;
+    }
+    let field_bits = |key: &str| -> Option<u32> {
+        match fmtp_param(fmtp, key) {
+            None => Some(0),
+            Some(value) => value
+                .parse::<u32>()
+                .ok()
+                .filter(|&bits| bits <= MAX_FIELD_BITS),
+        }
+    };
+    if UNSUPPORTED_AU_HEADER_FIELDS
+        .iter()
+        .any(|key| field_bits(key) != Some(0))
+    {
+        return None;
+    }
+    let audio_specific_config = crate::textencoding::hex_decode(fmtp_param(fmtp, "config")?)?;
+    crate::aacparse::adts_from_asc(&audio_specific_config, &[])?;
+    let core_rate =
+        crate::aacparse::audio_specific_config_info(&audio_specific_config)?.sample_rate;
+    let ticks_per_access_unit = (u64::from(crate::aacparse::SAMPLES_PER_ACCESS_UNIT)
+        * u64::from(clock_rate_hz))
+    .checked_div(u64::from(core_rate))?;
+    Some(Mpeg4GenericAac {
+        size_length: field_bits("sizelength").filter(|&bits| bits > 0)?,
+        index_length: field_bits("indexlength")?,
+        index_delta_length: field_bits("indexdeltalength")?,
+        clock_rate_hz,
+        audio_specific_config,
+        ticks_per_access_unit: u32::try_from(ticks_per_access_unit).ok()?,
+    })
 }
 
 /// What an `rtpmap` encoding name carries.

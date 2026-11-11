@@ -44,13 +44,26 @@ pub struct AccessUnit {
 /// keyframe.
 const MAX_ASSEMBLY_BYTES: usize = 8 * 1024 * 1024;
 
+// RFC 3640 `mpeg4-generic` AAC in AAC-hbr or AAC-lbr mode, as its SDP fmtp declares it
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Mpeg4GenericAac {
+    pub size_length: u32,
+    pub index_length: u32,
+    pub index_delta_length: u32,
+    pub clock_rate_hz: u32,
+    pub audio_specific_config: Vec<u8>,
+    // RTP clock ticks between consecutive access units in one packet
+    pub ticks_per_access_unit: u32,
+}
+
 // the payload formats the plain RTP receive path depayloads, named as in gst `encoding-name`
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum RtpEncoding {
     #[default]
     H264,
     Opus,
     H265,
+    Aac(Mpeg4GenericAac),
 }
 
 impl RtpEncoding {
@@ -63,35 +76,37 @@ impl RtpEncoding {
         }
     }
 
-    pub fn name(self) -> &'static str {
+    pub fn name(&self) -> &'static str {
         match self {
             RtpEncoding::H264 => "H264",
             RtpEncoding::Opus => "OPUS",
             RtpEncoding::H265 => "H265",
+            RtpEncoding::Aac(_) => "MPEG4-GENERIC",
         }
     }
 
-    pub fn clock_rate_hz(self) -> u32 {
+    pub fn clock_rate_hz(&self) -> u32 {
         match self {
             RtpEncoding::H264 | RtpEncoding::H265 => MediaClock::VIDEO_RATE_HZ,
             RtpEncoding::Opus => OPUS_CLOCK_HZ,
+            RtpEncoding::Aac(format) => format.clock_rate_hz,
         }
     }
 
-    pub fn video_codec(self) -> Option<VideoCodec> {
+    pub fn video_codec(&self) -> Option<VideoCodec> {
         match self {
             RtpEncoding::H264 => Some(VideoCodec::H264),
             RtpEncoding::H265 => Some(VideoCodec::H265),
-            RtpEncoding::Opus => None,
+            RtpEncoding::Opus | RtpEncoding::Aac(_) => None,
         }
     }
 
-    // every Opus packet decodes without the ones before it
-    pub fn is_keyframe(self, unit: &[u8]) -> bool {
+    // every Opus packet and AAC frame decodes without the ones before it
+    pub fn is_keyframe(&self, unit: &[u8]) -> bool {
         match self {
             RtpEncoding::H264 => crate::annexb::au_is_keyframe(VideoCodec::H264, unit),
             RtpEncoding::H265 => crate::annexb::au_is_keyframe(VideoCodec::H265, unit),
-            RtpEncoding::Opus => true,
+            RtpEncoding::Opus | RtpEncoding::Aac(_) => true,
         }
     }
 }
@@ -104,23 +119,177 @@ pub enum RtpDepayloader {
     H264(RtpH264Depayloader),
     Opus,
     H265(RtpH265Depayloader),
+    Aac(RtpAacDepayloader),
 }
 
 impl RtpDepayloader {
-    pub fn new(encoding: RtpEncoding) -> Self {
+    pub fn new(encoding: &RtpEncoding) -> Self {
         match encoding {
             RtpEncoding::H264 => RtpDepayloader::H264(RtpH264Depayloader::new()),
             RtpEncoding::Opus => RtpDepayloader::Opus,
             RtpEncoding::H265 => RtpDepayloader::H265(RtpH265Depayloader::new()),
+            RtpEncoding::Aac(format) => RtpDepayloader::Aac(RtpAacDepayloader::new(format.clone())),
         }
     }
 
-    pub fn depacketize(&mut self, packet: &[u8]) -> AccessUnits {
+    // an AAC-hbr packet can carry many access units, the other formats at most two
+    pub fn depacketize(&mut self, packet: &[u8]) -> Vec<AccessUnit> {
         match self {
-            RtpDepayloader::H264(depayloader) => depayloader.depacketize(packet),
-            RtpDepayloader::H265(depayloader) => depayloader.depacketize(packet),
-            RtpDepayloader::Opus => depacketize_opus(packet).into_iter().chain(None),
+            RtpDepayloader::H264(depayloader) => depayloader.depacketize(packet).collect(),
+            RtpDepayloader::H265(depayloader) => depayloader.depacketize(packet).collect(),
+            RtpDepayloader::Opus => depacketize_opus(packet).into_iter().collect(),
+            RtpDepayloader::Aac(depayloader) => depayloader.depacketize(packet),
         }
+    }
+}
+
+// RFC 3640 3.2.1: the AU-headers-length field ahead of the AU headers, in bits
+const AU_HEADERS_LENGTH_BYTES: usize = 2;
+
+// a fragmented access unit (RFC 3640 3.2.3) still arriving
+#[derive(Debug)]
+struct AacFragment {
+    timestamp: u32,
+    size: usize,
+    data: Vec<u8>,
+}
+
+// RFC 3640 AAC-hbr / AAC-lbr, each access unit ADTS-framed the way rtspsrc delivers AAC
+#[derive(Debug)]
+pub struct RtpAacDepayloader {
+    format: Mpeg4GenericAac,
+    fragment: Option<AacFragment>,
+    last_seq: Option<u16>,
+}
+
+impl RtpAacDepayloader {
+    pub fn new(format: Mpeg4GenericAac) -> Self {
+        Self {
+            format,
+            fragment: None,
+            last_seq: None,
+        }
+    }
+
+    // a packet that does not parse, or a fragment run broken by loss, yields nothing
+    pub fn depacketize(&mut self, packet: &[u8]) -> Vec<AccessUnit> {
+        let Some(parsed) = RtpHeader::parse(packet) else {
+            return Vec::new();
+        };
+        let seq = parsed.header.sequence;
+        if self
+            .last_seq
+            .is_some_and(|prev| seq != prev.wrapping_add(1))
+        {
+            self.fragment = None;
+        }
+        self.last_seq = Some(seq);
+        let payload = packet
+            .get(parsed.payload_offset..parsed.payload_offset + parsed.payload_len)
+            .unwrap_or_default();
+        let Some((sizes, data)) = self.au_sizes(payload) else {
+            self.fragment = None;
+            return Vec::new();
+        };
+        let timestamp = parsed.header.timestamp;
+        match sizes.as_slice() {
+            [size] if *size > data.len() || self.fragment.is_some() => self
+                .continue_fragment(timestamp, *size, data, parsed.header.marker)
+                .into_iter()
+                .collect(),
+            _ => self.whole_access_units(timestamp, &sizes, data),
+        }
+    }
+
+    // the AU sizes the header section lists and the data section behind it
+    fn au_sizes<'a>(&self, payload: &'a [u8]) -> Option<(Vec<usize>, &'a [u8])> {
+        let headers_bits = usize::from(u16::from_be_bytes(
+            payload.get(..AU_HEADERS_LENGTH_BYTES)?.try_into().ok()?,
+        ));
+        let headers_end = AU_HEADERS_LENGTH_BYTES + headers_bits.div_ceil(8);
+        let headers = payload.get(AU_HEADERS_LENGTH_BYTES..headers_end)?;
+        let mut reader = crate::annexb::BitReader::new(headers);
+        let mut sizes = Vec::new();
+        let mut read_bits = 0;
+        while read_bits < headers_bits {
+            let index_bits = if sizes.is_empty() {
+                self.format.index_length
+            } else {
+                self.format.index_delta_length
+            };
+            let size = reader.read_bits(self.format.size_length)?;
+            let index = match index_bits {
+                0 => 0,
+                bits => reader.read_bits(bits)?,
+            };
+            // a nonzero index delta interleaves access units across packets
+            if !sizes.is_empty() && index != 0 {
+                return None;
+            }
+            sizes.push(size as usize);
+            read_bits += (self.format.size_length + index_bits) as usize;
+        }
+        (read_bits == headers_bits && !sizes.is_empty()).then(|| (sizes, &payload[headers_end..]))
+    }
+
+    fn whole_access_units(
+        &mut self,
+        timestamp: u32,
+        sizes: &[usize],
+        mut data: &[u8],
+    ) -> Vec<AccessUnit> {
+        self.fragment = None;
+        let mut units = Vec::with_capacity(sizes.len());
+        for (index, &size) in sizes.iter().enumerate() {
+            let Some(raw) = data.get(..size) else {
+                break;
+            };
+            data = &data[size..];
+            let offset = self.format.ticks_per_access_unit.wrapping_mul(index as u32);
+            units.extend(self.adts_unit(timestamp.wrapping_add(offset), raw));
+        }
+        units
+    }
+
+    fn continue_fragment(
+        &mut self,
+        timestamp: u32,
+        size: usize,
+        data: &[u8],
+        marker: bool,
+    ) -> Option<AccessUnit> {
+        let continues = self
+            .fragment
+            .as_ref()
+            .is_some_and(|fragment| fragment.timestamp == timestamp && fragment.size == size);
+        if !continues {
+            self.fragment = Some(AacFragment {
+                timestamp,
+                size,
+                data: Vec::with_capacity(size),
+            });
+        }
+        let fragment = self.fragment.as_mut()?;
+        fragment.data.extend_from_slice(data);
+        if fragment.data.len() > fragment.size {
+            self.fragment = None;
+            return None;
+        }
+        if !marker {
+            return None;
+        }
+        let whole = self.fragment.take()?;
+        (whole.data.len() == whole.size)
+            .then(|| self.adts_unit(whole.timestamp, &whole.data))
+            .flatten()
+    }
+
+    fn adts_unit(&self, rtp_timestamp: u32, raw: &[u8]) -> Option<AccessUnit> {
+        let data = crate::aacparse::adts_from_asc(&self.format.audio_specific_config, raw)?;
+        Some(AccessUnit {
+            data,
+            rtp_timestamp,
+        })
     }
 }
 
@@ -396,6 +565,99 @@ mod tests {
     use super::*;
     use crate::rtppay::RtpH264Packetizer;
 
+    // AAC-LC, 48 kHz, stereo
+    const AAC_CONFIG: [u8; 2] = [0x11, 0x90];
+    const AAC_RATE_HZ: u32 = 48_000;
+
+    // the format g2g's own AAC-hbr SDP declares, parsed back
+    fn aac_hbr_format() -> Mpeg4GenericAac {
+        let section = crate::sdp::aac_media_section(97, &AAC_CONFIG, AAC_RATE_HZ, 2, 0);
+        crate::sdp::SdpMedia::parse(&crate::sdp::session_description(&[section]))
+            .and_then(|media| media.mpeg4_generic_aac)
+            .expect("an AAC-hbr section")
+    }
+
+    fn adts(raw: &[u8]) -> Vec<u8> {
+        crate::aacparse::adts_from_asc(&AAC_CONFIG, raw).unwrap()
+    }
+
+    #[test]
+    fn aac_hbr_units_come_back_adts_framed_whole_or_fragmented() {
+        let format = aac_hbr_format();
+        assert_eq!((format.size_length, format.index_length), (13, 3));
+        let au: Vec<u8> = (0..40).collect();
+        let mut depay = RtpDepayloader::new(&RtpEncoding::Aac(format));
+        let mut packetizer = crate::rtppay::RtpAacPacketizer::new(97, 1);
+        let whole = packetizer.packetize(&au, 1024).unwrap();
+        assert_eq!(
+            depay.depacketize(&whole[0]),
+            [AccessUnit {
+                data: adts(&au),
+                rtp_timestamp: 1024
+            }]
+        );
+        let mut fragmenting = crate::rtppay::RtpAacPacketizer::new(97, 1).with_max_payload(16);
+        let fragments = fragmenting.packetize(&au, 2048).unwrap();
+        assert!(fragments.len() > 2);
+        let mut units = Vec::new();
+        for fragment in &fragments {
+            units.extend(depay.depacketize(fragment));
+        }
+        assert_eq!(units.len(), 1);
+        assert_eq!(units[0].data, adts(&au));
+        // a lost middle fragment drops the unit
+        let mut lossy = crate::rtppay::RtpAacPacketizer::new(97, 1).with_max_payload(16);
+        let fragments = lossy.packetize(&au, 4096).unwrap();
+        let mut units = Vec::new();
+        for (index, fragment) in fragments.iter().enumerate() {
+            if index != 1 {
+                units.extend(depay.depacketize(fragment));
+            }
+        }
+        assert!(units.is_empty());
+    }
+
+    // ffmpeg's RTP muxer puts several AAC frames behind one AU header section
+    #[test]
+    fn several_aac_hbr_units_in_one_packet_step_their_timestamps() {
+        let format = aac_hbr_format();
+        let ticks = format.ticks_per_access_unit;
+        assert_eq!(ticks, 1024);
+        let first: Vec<u8> = (0..5).collect();
+        let second: Vec<u8> = (10..13).collect();
+        // two 13-bit sizes, each with a zero 3-bit index or index delta
+        let headers_bits: u16 = 2 * 16;
+        let mut payload = headers_bits.to_be_bytes().to_vec();
+        for unit in [&first, &second] {
+            payload.extend_from_slice(&((unit.len() as u16) << 3).to_be_bytes());
+        }
+        payload.extend_from_slice(&first);
+        payload.extend_from_slice(&second);
+        let header = g2g_core::rtp::RtpHeader {
+            marker: true,
+            payload_type: 97,
+            sequence: 7,
+            timestamp: 9000,
+            ssrc: 1,
+        };
+        let mut packet = header.to_bytes().to_vec();
+        packet.extend_from_slice(&payload);
+        let units = RtpDepayloader::new(&RtpEncoding::Aac(format)).depacketize(&packet);
+        assert_eq!(
+            units,
+            [
+                AccessUnit {
+                    data: adts(&first),
+                    rtp_timestamp: 9000
+                },
+                AccessUnit {
+                    data: adts(&second),
+                    rtp_timestamp: 9000 + ticks
+                }
+            ]
+        );
+    }
+
     fn wrap(nals: &[&[u8]]) -> Vec<u8> {
         let mut out = Vec::new();
         for nal in nals {
@@ -647,22 +909,20 @@ mod tests {
     fn opus_payload_round_trips_and_short_packets_drop() {
         let opus = [0xFCu8, 1, 2, 3];
         let packets = crate::rtppay::RtpOpusPacketizer::new(111, 9).packetize(&opus, 960);
-        let mut depay = RtpDepayloader::new(RtpEncoding::Opus);
+        let mut depay = RtpDepayloader::new(&RtpEncoding::Opus);
         let unit = depay
             .depacketize(&packets[0])
+            .into_iter()
             .next()
             .expect("one RTP packet carries one Opus packet");
         assert_eq!(unit.data, opus);
         assert_eq!(unit.rtp_timestamp, 960);
 
         let header_only = &packets[0][..g2g_core::rtp::RTP_HEADER_LEN];
-        assert!(
-            depay.depacketize(header_only).next().is_none(),
-            "empty payload"
-        );
+        assert!(depay.depacketize(header_only).is_empty(), "empty payload");
         for len in 0..g2g_core::rtp::RTP_HEADER_LEN {
             assert!(
-                depay.depacketize(&packets[0][..len]).next().is_none(),
+                depay.depacketize(&packets[0][..len]).is_empty(),
                 "{len} bytes"
             );
         }

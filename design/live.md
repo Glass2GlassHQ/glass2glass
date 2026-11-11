@@ -546,6 +546,19 @@ buffer, RTCP, NACK, RTX and FEC path is shared: `RtpRecvConfig::encoding` picks
 the depayloader and the media clock, and nothing else in the loop depends on the
 codec. `width` / `height` are refused in Opus mode.
 
+An SDP whose first mappable section is `mpeg4-generic` AAC (RFC 3640) in
+AAC-hbr or AAC-lbr mode switches the source to AAC. The fmtp gives the AU header
+field widths and the AudioSpecificConfig, so AAC has no `encoding-name` alone.
+`RtpAacDepayloader` reads the AU headers, cuts the data section into access units
+stepped one frame apart on the RTP clock, and joins a fragmented unit, which
+repeats the whole unit's size in each packet, up to the marker bit. A sequence
+gap drops the fragment in flight. Each unit goes out ADTS-framed from the
+config, as `rtspsrc` delivers AAC, typed `Caps::Audio { format: Aac }` with the
+rate and channels left for the ADTS headers to give. An fmtp with interleaving,
+CTS or DTS fields, auxiliary data, a 960-sample frame or a config ADTS cannot
+carry is refused. Validated live: ffmpeg's RTP muxer, which puts several frames
+in a packet, and gst's `rtpmp4gpay` both arrive frame for frame.
+
 ### Socket reads
 
 `UdpReceiver` (`udprecv.rs`) reads the socket for `udpsrc` and the RTP ingest

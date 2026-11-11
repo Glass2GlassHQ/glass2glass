@@ -8,7 +8,8 @@
 //! units pushed downstream as `CompressedVideo` H.264, ready for a decoder.
 //! `encoding-name=OPUS`, or an SDP with an `opus` rtpmap, selects Opus instead:
 //! each RTP payload goes downstream as one Opus packet, PTS from the 48 kHz RTP
-//! timestamp.
+//! timestamp. An SDP with an `mpeg4-generic` rtpmap in AAC-hbr or AAC-lbr mode
+//! selects AAC (RFC 3640): each access unit goes downstream ADTS-framed.
 //!
 //! Caps come from three places. The `sdp` property takes the description a
 //! sender publishes (`ffmpeg -sdp_file`, an RTSP `DESCRIBE` body) and sets the
@@ -236,6 +237,15 @@ impl UdpSrc {
                 format: AudioFormat::Opus,
                 ..
             } => self.recv.encoding = RtpEncoding::Opus,
+            Caps::Audio {
+                format: AudioFormat::Aac,
+                ..
+            } => {
+                let Some(format) = &media.mpeg4_generic_aac else {
+                    return false;
+                };
+                self.recv.encoding = RtpEncoding::Aac(format.clone());
+            }
             _ => return false,
         }
         // The m= port is where the sender is sending; 0 means the SDP pins none.
@@ -323,8 +333,19 @@ impl UdpSrc {
     }
 
     fn caps(&self) -> Caps {
-        let Some(codec) = self.recv.encoding.video_codec() else {
-            return opus_caps();
+        let codec = match &self.recv.encoding {
+            RtpEncoding::Opus => return opus_caps(),
+            // aacparse and the decoders read the rate and channels off each ADTS header
+            RtpEncoding::Aac(_) => {
+                return Caps::Audio {
+                    format: AudioFormat::Aac,
+                    channels: 0,
+                    sample_rate: 0,
+                    channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
+                }
+            }
+            RtpEncoding::H264 => VideoCodec::H264,
+            RtpEncoding::H265 => VideoCodec::H265,
         };
         Caps::CompressedVideo {
             codec,
@@ -486,9 +507,11 @@ impl SourceLoop for UdpSrc {
     /// can read the output type without negotiating. H.264 keeps the registry's
     /// declared caps.
     fn configured_output_caps(&self) -> Option<Caps> {
-        match (self.bytestream, self.recv.encoding) {
+        match (self.bytestream, &self.recv.encoding) {
             (Some(encoding), _) => Some(Caps::ByteStream { encoding }),
-            (None, RtpEncoding::Opus | RtpEncoding::H265) => Some(self.caps()),
+            (None, RtpEncoding::Opus | RtpEncoding::H265 | RtpEncoding::Aac(_)) => {
+                Some(self.caps())
+            }
             (None, RtpEncoding::H264) => None,
         }
     }
@@ -722,10 +745,11 @@ impl SourceLoop for UdpSrc {
             return Err(PropError::Value);
         }
         let is_geometry = matches!(name, "width" | "height");
-        if self.recv.encoding == RtpEncoding::Opus && is_geometry {
+        if self.recv.encoding.video_codec().is_none() && is_geometry {
             g2g_core::g2g_warn!(
                 self,
-                "`{name}` needs H.264 or H.265, not encoding-name=OPUS"
+                "`{name}` needs H.264 or H.265, not encoding-name={}",
+                self.recv.encoding.name()
             );
             return Err(PropError::Value);
         }
