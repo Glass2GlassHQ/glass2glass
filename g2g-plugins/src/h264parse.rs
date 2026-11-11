@@ -373,7 +373,7 @@ pub struct H264StreamRefused(pub &'static str);
 /// Parsed H.264 sequence parameter set, the fields the `Std*` SPS needs. Plain
 /// data, no bitstream cursor. Baseline / main / high 4:2:0 8-bit; scaling
 /// matrices and separate colour planes are rejected
-/// ([`H264StreamRefused::StreamRefused`]) rather than silently mis-decoded.
+/// ([`H264StreamRefused`]) rather than silently mis-decoded.
 #[derive(Debug, Clone, PartialEq)]
 pub struct H264Sps {
     pub profile_idc: u8,
@@ -475,7 +475,7 @@ const SCALING_MATRICES_REFUSED: H264StreamRefused =
     H264StreamRefused("H.264 scaling matrices are not supported");
 
 /// Parse an SPS RBSP (the bytes after the NAL header, emulation-prevention
-/// already stripped). [`H264StreamRefused::StreamRefused`] on truncation or an
+/// already stripped). [`H264StreamRefused`] on truncation or an
 /// unsupported feature.
 pub fn parse_h264_sps(rbsp: &[u8]) -> Result<H264Sps, H264StreamRefused> {
     let (head, mut br) = parse_h264_sps_head(rbsp).ok_or(MALFORMED_SPS)?;
@@ -557,7 +557,7 @@ pub fn parse_h264_sps(rbsp: &[u8]) -> Result<H264Sps, H264StreamRefused> {
 }
 
 /// Parse a PPS RBSP (bytes after the NAL header, de-emulated).
-/// [`H264StreamRefused::StreamRefused`] on truncation or an unsupported feature
+/// [`H264StreamRefused`] on truncation or an unsupported feature
 /// (slice groups, scaling matrices).
 pub fn parse_h264_pps(rbsp: &[u8]) -> Result<H264Pps, H264StreamRefused> {
     parse_h264_pps_fields(rbsp).ok_or(MALFORMED_PPS)?
