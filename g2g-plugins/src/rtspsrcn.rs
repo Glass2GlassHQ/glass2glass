@@ -1282,6 +1282,16 @@ async fn run_session(
 
         let (port, timestamp, duration_ns, bytes, keyframe) = match item {
             CodecItem::VideoFrame(vf) if vf.stream_id() == video_idx => {
+                // the frames after a loss reference the lost packets
+                if vf.loss() > 0 && seen_keyframe {
+                    g2g_core::g2g_debug!(
+                        Target::category(LOG_CATEGORY),
+                        "{} packets lost, dropping access units until the next keyframe",
+                        vf.loss()
+                    );
+                    seen_keyframe = false;
+                    skipped_before_keyframe = 0;
+                }
                 if !seen_keyframe {
                     if !vf.is_random_access_point() {
                         if skipped_before_keyframe == 0 {

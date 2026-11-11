@@ -35,6 +35,9 @@ pub const PT_APP: u8 = 204;
 /// Transport-layer feedback (RFC 4585); Generic NACK is `FMT == 1`.
 pub const PT_RTPFB: u8 = 205;
 pub const FMT_GENERIC_NACK: u8 = 1;
+// RFC 4585 6.3.1: payload-specific feedback, a picture loss indication has no FCI
+pub const PT_PSFB: u8 = 206;
+pub const FMT_PICTURE_LOSS_INDICATION: u8 = 1;
 
 /// The seven bits byte 1 spends on the RTP payload type, above the marker bit.
 /// An RTCP packet type occupies the whole byte, so the mask reads its low bits.
@@ -284,6 +287,15 @@ pub fn build_nack(sender_ssrc: u32, media_ssrc: u32, missing: &[u16]) -> Vec<u8>
         push_u32(&mut out, (pid as u32) << 16 | blp as u32);
         i = j;
     }
+    patch_length(&mut out, 0);
+    out
+}
+
+pub fn build_picture_loss_indication(sender_ssrc: u32, media_ssrc: u32) -> Vec<u8> {
+    let mut out = Vec::new();
+    header(&mut out, FMT_PICTURE_LOSS_INDICATION, PT_PSFB);
+    push_u32(&mut out, sender_ssrc);
+    push_u32(&mut out, media_ssrc);
     patch_length(&mut out, 0);
     out
 }
@@ -649,6 +661,16 @@ mod tests {
                 rtp_ts: 9000,
                 reports: Vec::new(),
             }]
+        );
+    }
+
+    #[test]
+    fn picture_loss_indication_is_a_payload_specific_feedback_with_no_fci() {
+        let bytes = build_picture_loss_indication(0x0102_0304, 0x0506_0708);
+        assert_eq!(
+            bytes,
+            [0x81, PT_PSFB, 0, 2, 1, 2, 3, 4, 5, 6, 7, 8],
+            "V=2 FMT=1, two words after the header"
         );
     }
 

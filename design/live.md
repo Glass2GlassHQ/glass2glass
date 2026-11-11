@@ -601,7 +601,16 @@ Between the socket and the depayloader sits a sans-IO jitter buffer
 number, the 16-bit RTP sequence unrolled to a monotonic counter so wraparound is
 handled, releases them in order, holds a gap only until its predecessors fill or
 a bounded deadline elapses and then declares loss, and drops duplicates and
-too-late packets.
+too-late packets. Five consecutive packets older than the buffer depth, as gst's
+`rtpjitterbuffer` counts them, mean the sender restarted its sequence numbers on
+the same SSRC: the buffer restarts on them and the receiver rebuilds its
+per-sender state, continuing the timeline as it does when the SSRC changes.
+
+Video access units wait for a keyframe at the start and after every declared
+loss, since the pictures in between reference ones the decoder never got. While
+video waits and RTCP is on, the receiver sends an RFC 4585 picture loss
+indication to the sender once a second. `rtspsrcn` drops video the same way
+after a frame retina reports loss before.
 
 RTCP (`rtcp.rs`) is sans-IO RFC 3550 SR, RR and BYE plus RFC 4585 Generic NACK,
 with `ReceptionStats` carrying loss fraction, cumulative loss and interarrival

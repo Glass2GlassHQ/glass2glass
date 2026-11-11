@@ -81,6 +81,21 @@ struct Buffered {
     arrival_ns: u64,
 }
 
+// gst's rtpjitterbuffer resets after this many consecutive packets outside its window
+const SEQUENCE_RESTART_RUN: usize = 5;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SequenceContinuity {
+    Continues,
+    // the sender started its sequence numbers over, as a restarted encoder keeping its SSRC does
+    Restarted { silence_ns: u64 },
+}
+
+struct RestartCandidate {
+    seq: u16,
+    packet: Buffered,
+}
+
 /// A jitter buffer keyed by *extended* sequence number, so the 16-bit RTP
 /// sequence's wraparound is handled by unrolling it into a monotonic counter.
 pub struct RtpJitterBuffer {
@@ -97,6 +112,9 @@ pub struct RtpJitterBuffer {
     /// gap, so the output runs a constant delay behind the network.
     constant_delay: bool,
     stats: JitterStats,
+    // consecutive packets older than the buffer can hold, emptied by any packet inside it
+    restart_run: Vec<RestartCandidate>,
+    last_accepted_arrival_ns: u64,
 }
 
 impl core::fmt::Debug for RtpJitterBuffer {
@@ -120,6 +138,8 @@ impl RtpJitterBuffer {
             sequence_extender: RtpSequenceExtender::new(),
             constant_delay: false,
             stats: JitterStats::default(),
+            restart_run: Vec::new(),
+            last_accepted_arrival_ns: 0,
         }
     }
 
@@ -138,6 +158,7 @@ impl RtpJitterBuffer {
         self.next = None;
         self.released_any = false;
         self.sequence_extender = RtpSequenceExtender::new();
+        self.restart_run.clear();
     }
 
     pub fn stats(&self) -> JitterStats {
@@ -153,9 +174,9 @@ impl RtpJitterBuffer {
     /// duplicate, and too-late packets are counted and dropped; everything else
     /// is buffered for in-order release. The first packet sets the release
     /// baseline.
-    pub fn push(&mut self, packet: &[u8], now_ns: u64) {
+    pub fn push(&mut self, packet: &[u8], now_ns: u64) -> SequenceContinuity {
         if packet.len() < RTP_HEADER_LEN {
-            return;
+            return SequenceContinuity::Continues;
         }
         let seq = u16::from_be_bytes([packet[2], packet[3]]);
         let prev_high = self.sequence_extender.highest();
@@ -164,17 +185,20 @@ impl RtpJitterBuffer {
         match self.next {
             None => self.next = Some(ext),
             Some(next) if ext < next && !self.released_any => self.next = Some(ext),
-            Some(next) => {
-                if ext < next {
-                    // Already released past this sequence: too late to use.
-                    self.stats.late += 1;
-                    return;
+            Some(next) if ext < next => {
+                // Already released past this sequence: too late to use.
+                self.stats.late += 1;
+                if next - ext > self.config.max_depth as u64 {
+                    return self.extend_restart_run(seq, packet, now_ns);
                 }
+                return SequenceContinuity::Continues;
             }
+            Some(_) => {}
         }
+        self.restart_run.clear();
         if self.packets.contains_key(&ext) {
             self.stats.duplicates += 1;
-            return;
+            return SequenceContinuity::Continues;
         }
         // Out of order if it sits behind a packet we have already seen.
         if matches!(prev_high, Some(high) if ext < high) {
@@ -197,6 +221,39 @@ impl RtpJitterBuffer {
                 arrival_ns,
             },
         );
+        self.last_accepted_arrival_ns = now_ns;
+        SequenceContinuity::Continues
+    }
+
+    fn extend_restart_run(&mut self, seq: u16, packet: &[u8], now_ns: u64) -> SequenceContinuity {
+        let follows_run = self
+            .restart_run
+            .last()
+            .is_some_and(|last| last.seq.wrapping_add(1) == seq);
+        if !follows_run {
+            self.restart_run.clear();
+        }
+        self.restart_run.push(RestartCandidate {
+            seq,
+            packet: Buffered {
+                data: packet.to_vec(),
+                arrival_ns: now_ns,
+            },
+        });
+        if self.restart_run.len() < SEQUENCE_RESTART_RUN {
+            return SequenceContinuity::Continues;
+        }
+        let run = core::mem::take(&mut self.restart_run);
+        let silence_ns = run[0]
+            .packet
+            .arrival_ns
+            .saturating_sub(self.last_accepted_arrival_ns);
+        self.stats.late -= run.len() as u64;
+        self.restart();
+        for candidate in run {
+            self.push(&candidate.packet.data, candidate.packet.arrival_ns);
+        }
+        SequenceContinuity::Restarted { silence_ns }
     }
 
     /// Release the next in-order packet if one is ready: either the next
@@ -394,6 +451,39 @@ mod tests {
             1,
             "after a release an earlier packet is late"
         );
+    }
+
+    #[test]
+    fn a_sender_restarting_its_sequence_behind_the_window_is_followed() {
+        const RELEASED: u16 = 100;
+        const RESTART_SEQ: u16 = 10;
+        const SILENCE_NS: u64 = 2_000_000_000;
+        let config = JitterConfig::new(50, 64);
+        assert!(u64::from(RELEASED - RESTART_SEQ) > config.max_depth as u64);
+        let mut jb = RtpJitterBuffer::new(config);
+        for s in 0..RELEASED {
+            jb.push(&pkt(s, 0), 0);
+            while jb.pop(0).is_some() {}
+        }
+        let run = SEQUENCE_RESTART_RUN as u16;
+        for s in RESTART_SEQ..RESTART_SEQ + run - 1 {
+            assert_eq!(
+                jb.push(&pkt(s, s as u8), SILENCE_NS),
+                SequenceContinuity::Continues
+            );
+        }
+        let last = RESTART_SEQ + run - 1;
+        assert_eq!(
+            jb.push(&pkt(last, last as u8), SILENCE_NS),
+            SequenceContinuity::Restarted {
+                silence_ns: SILENCE_NS
+            }
+        );
+        let released: Vec<u8> =
+            core::iter::from_fn(|| jb.pop(SILENCE_NS).map(|p| tag(&p))).collect();
+        let expected: Vec<u8> = (RESTART_SEQ..=last).map(|s| s as u8).collect();
+        assert_eq!(released, expected);
+        assert_eq!(jb.stats().late, 0);
     }
 
     #[test]

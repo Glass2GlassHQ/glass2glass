@@ -36,7 +36,7 @@ use crate::nalparse::NalCodec;
 use crate::rist::NackScheduler;
 use crate::rtcp::{self, ReceptionStats, RtcpPacket, SenderClock};
 use crate::rtpdepay::{AccessUnit, RtpDepayloader, RtpEncoding};
-use crate::rtpjitter::{JitterConfig, RtpJitterBuffer, RtpPtsRebase};
+use crate::rtpjitter::{JitterConfig, RtpJitterBuffer, RtpPtsRebase, SequenceContinuity};
 use crate::rtx;
 use crate::udprecv::UdpReceiver;
 use crate::ulpfec::FecDecoder;
@@ -303,6 +303,8 @@ pub(crate) struct AccessUnitEmitter<'a> {
     seq_base: u64,
     // u64::MAX never reaches the limit, which is how "run forever" is spelled
     frame_limit: u64,
+    // decoders reject the pictures before the first keyframe and after a loss
+    awaiting_keyframe: bool,
 }
 
 impl<'a> AccessUnitEmitter<'a> {
@@ -324,6 +326,7 @@ impl<'a> AccessUnitEmitter<'a> {
             seq: seq_base,
             seq_base,
             frame_limit,
+            awaiting_keyframe: true,
         }
     }
 
@@ -348,6 +351,12 @@ impl<'a> AccessUnitEmitter<'a> {
         capture_unix_ns: Option<i64>,
         out: &mut dyn OutputSink,
     ) -> Result<bool, G2gError> {
+        // false (the safe default) for H.264 without an IDR NAL.
+        let keyframe = self.encoding.is_keyframe(&au.data);
+        if self.awaiting_keyframe && !keyframe {
+            return Ok(false);
+        }
+        self.awaiting_keyframe = false;
         let arrival_ns = g2g_core::metrics::monotonic_ns();
         if let Some(timeline) = self.timeline.take() {
             self.session_offset_ns = timeline.session_offset_ns(au.rtp_timestamp, arrival_ns);
@@ -361,8 +370,6 @@ impl<'a> AccessUnitEmitter<'a> {
             return Ok(false);
         };
         self.last_pts_ns = pts;
-        // false (the safe default) for H.264 without an IDR NAL.
-        let keyframe = self.encoding.is_keyframe(&au.data);
         let announced = if keyframe {
             core::mem::take(&mut self.parameter_sets)
         } else {
@@ -478,6 +485,8 @@ impl SsrcLock {
     }
 }
 
+const KEYFRAME_REQUEST_INTERVAL_NS: u64 = 1_000_000_000;
+
 /// Run the RTP receive loop on `socket` until `frame_limit` access units
 /// have been emitted (`u64::MAX` = run until a socket error or downstream
 /// shutdown, 0 = emit nothing), pushing each completed access unit downstream
@@ -510,10 +519,18 @@ pub(crate) async fn receive_rtp(
     let mut peer: Option<SocketAddr> = None;
     let mut last_rr_ns = g2g_core::metrics::monotonic_ns();
 
+    let mut last_keyframe_request_ns: Option<u64> = None;
+
     loop {
         // Drain every packet the jitter buffer will release now, turning each
         // completed access unit into a downstream frame.
+        let mut lost = sender.jitter.stats().lost;
         while let Some(packet) = sender.jitter.pop(g2g_core::metrics::monotonic_ns()) {
+            // the pictures after a loss reference the lost one
+            if sender.jitter.stats().lost > lost {
+                lost = sender.jitter.stats().lost;
+                emitter.awaiting_keyframe = true;
+            }
             sender.capture_time.observe(&cfg.capture_time_ids, &packet);
             for au in sender.depay.depacketize(&packet) {
                 if let Some(caps) = refiner.as_mut().and_then(|r| r.refine(&au.data)) {
@@ -526,8 +543,20 @@ pub(crate) async fn receive_rtp(
             }
         }
 
-        // Periodic receiver report back to the peer (best-effort).
         let now = g2g_core::metrics::monotonic_ns();
+        let keyframe_request_due = last_keyframe_request_ns
+            .is_none_or(|sent| now.saturating_sub(sent) >= KEYFRAME_REQUEST_INTERVAL_NS);
+        let request_keyframe = rtcp_on
+            && cfg.encoding.video_codec().is_some()
+            && emitter.awaiting_keyframe
+            && keyframe_request_due;
+        if let (true, Some(dest), Some(media_ssrc)) = (request_keyframe, peer, media_ssrc_seen) {
+            let pli = rtcp::build_picture_loss_indication(LOCAL_SSRC, media_ssrc);
+            let _ = receiver.socket().send_to(&pli, dest).await;
+            last_keyframe_request_ns = Some(now);
+        }
+
+        // Periodic receiver report back to the peer (best-effort).
         if rtcp_on {
             if let Some(dest) = peer {
                 if now.saturating_sub(last_rr_ns) >= rr_interval_ns {
@@ -642,7 +671,15 @@ pub(crate) async fn receive_rtp(
                 sender.stats.on_rtp(media_ssrc, pkt_seq, rtp_ts, now);
             }
             peer = Some(from);
-            sender.jitter.push(pkt, now);
+            if let SequenceContinuity::Restarted { silence_ns } = sender.jitter.push(pkt, now) {
+                let jitter =
+                    core::mem::replace(&mut sender.jitter, RtpJitterBuffer::new(cfg.jitter));
+                sender = SenderReceiveState {
+                    jitter,
+                    ..SenderReceiveState::new(cfg)
+                };
+                emitter.restart_timeline_after(silence_ns);
+            }
             // Record the packet for FEC and inject anything its arrival now lets
             // a buffered repair packet recover.
             if cfg.fec_pt.is_some() {
@@ -707,11 +744,53 @@ mod tests {
         AccessUnitEmitter::new(&cfg, 0, u64::MAX, Some(timeline))
     }
 
+    const H264_IDR: [u8; 5] = [0, 0, 0, 1, 0x65];
+    const H264_NON_IDR_SLICE: [u8; 5] = [0, 0, 0, 1, 0x41];
+
     fn access_unit(rtp_timestamp: u32) -> AccessUnit {
         AccessUnit {
-            data: Vec::from([0u8; 4]),
+            data: Vec::from(H264_IDR),
             rtp_timestamp,
         }
+    }
+
+    #[test]
+    fn video_waits_for_a_keyframe_at_the_start_and_after_a_loss() {
+        let cfg = RtpRecvConfig {
+            encoding: RtpEncoding::H264,
+            ..RtpRecvConfig::default()
+        };
+        let mut emitter = AccessUnitEmitter::new(&cfg, 0, u64::MAX, None);
+        let mut out = CollectSink::default();
+        let units = [
+            H264_NON_IDR_SLICE,
+            H264_IDR,
+            H264_NON_IDR_SLICE,
+            H264_NON_IDR_SLICE,
+            H264_IDR,
+        ];
+        block_on(async {
+            for (index, data) in units.into_iter().enumerate() {
+                // the fourth unit follows a loss
+                if index == 3 {
+                    emitter.awaiting_keyframe = true;
+                }
+                let unit = AccessUnit {
+                    data: Vec::from(data),
+                    rtp_timestamp: index as u32,
+                };
+                emitter.push(unit, None, &mut out).await.unwrap();
+            }
+        });
+        let emitted: Vec<bool> = out
+            .packets
+            .iter()
+            .filter_map(|packet| match packet {
+                PipelinePacket::DataFrame(frame) => Some(frame.timing.keyframe),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(emitted, [true, false, true]);
     }
 
     fn pts_ms(sink: &CollectSink) -> Vec<u64> {

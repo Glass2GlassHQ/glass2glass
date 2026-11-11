@@ -154,6 +154,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M2238: `nvdec` resets on a flush and resends the parameter sets after it.
 - M2240: `tsdemux` reads a spliced stream's PAT and PMT even when their versions repeat.
 - M2241: `tsdemux` keeps the timestamps of a PES header split across TS packets.
+- M2242: RTP receivers follow a sender that restarts its sequence numbers on the same SSRC.
+- M2243: RTP video receivers wait for a keyframe at the start and after a loss, and request one with a PLI.
 
 Breaking: `TimecodeMeta.frames` is a `u16`, `WIRE_VERSION` is 6, `FrameTiming` gains `start_discard_ns` and `end_discard_ns`, `RtpRecvConfig` gains `parameter_sets`, `RtmpPublisher::push` fails with a `PublishRefusal`, and `Interlace` gains `InterleavedBottomFieldFirst`.
 
