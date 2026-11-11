@@ -82,14 +82,24 @@ impl RtpPacketWriter {
             let marker = i + 1 == count;
             // only the first packet, as GStreamer's ntp-64 writer does by default
             let packet_extensions = if i == 0 { extensions } else { &[] };
-            let mut packet = Vec::with_capacity(RTP_HEADER_LEN + payload.len());
-            self.write_header(&mut packet, marker, timestamp, packet_extensions);
-            packet.extend_from_slice(&payload.prefix[..payload.prefix_len]);
-            packet.extend_from_slice(payload.body);
-            packets.push(packet);
-            self.sequence = self.sequence.wrapping_add(1);
+            packets.push(self.write_packet(payload, marker, timestamp, packet_extensions));
         }
         packets
+    }
+
+    fn write_packet(
+        &mut self,
+        payload: &Payload<'_>,
+        marker: bool,
+        timestamp: u32,
+        extensions: &[RtpHeaderExtension<'_>],
+    ) -> Vec<u8> {
+        let mut packet = Vec::with_capacity(RTP_HEADER_LEN + payload.len());
+        self.write_header(&mut packet, marker, timestamp, extensions);
+        packet.extend_from_slice(&payload.prefix[..payload.prefix_len]);
+        packet.extend_from_slice(payload.body);
+        self.sequence = self.sequence.wrapping_add(1);
+        packet
     }
 
     fn write_with_capture_time(
@@ -336,19 +346,31 @@ impl RtpAacPacketizer {
 #[derive(Debug, Clone)]
 pub struct RtpOpusPacketizer {
     writer: RtpPacketWriter,
+    sent_first_packet: bool,
 }
 
 impl RtpOpusPacketizer {
     pub fn new(payload_type: u8, ssrc: u32) -> Self {
         Self {
             writer: RtpPacketWriter::new(payload_type, ssrc),
+            sent_first_packet: false,
         }
+    }
+
+    fn take_marker(&mut self) -> bool {
+        // RFC 3551 4.1 marks the first packet after a gap in transmission
+        !core::mem::replace(&mut self.sent_first_packet, true)
     }
 
     // RFC 7587 has no fragmentation, a packet carries one whole Opus packet
     pub fn packetize(&mut self, opus_packet: &[u8], rtp_timestamp: u32) -> Vec<Vec<u8>> {
-        self.writer
-            .write(&[Payload::whole(opus_packet)], rtp_timestamp, &[])
+        let marker = self.take_marker();
+        alloc::vec![self.writer.write_packet(
+            &Payload::whole(opus_packet),
+            marker,
+            rtp_timestamp,
+            &[]
+        )]
     }
 
     pub fn packetize_with_capture_time(
@@ -358,12 +380,16 @@ impl RtpOpusPacketizer {
         capture_time_ids: CaptureTimeExtensionIds,
         capture_ntp: u64,
     ) -> Vec<Vec<u8>> {
-        self.writer.write_with_capture_time(
-            &[Payload::whole(opus_packet)],
+        let marker = self.take_marker();
+        let capture_ntp_bytes = capture_ntp.to_be_bytes();
+        let extensions: Vec<RtpHeaderExtension<'_>> =
+            capture_time_ids.elements(&capture_ntp_bytes).collect();
+        alloc::vec![self.writer.write_packet(
+            &Payload::whole(opus_packet),
+            marker,
             rtp_timestamp,
-            capture_time_ids,
-            capture_ntp,
-        )
+            &extensions
+        )]
     }
 }
 
@@ -578,13 +604,16 @@ mod tests {
     }
 
     #[test]
-    fn opus_packet_is_one_marked_rtp_packet() {
+    fn opus_packet_is_one_rtp_packet_marked_only_at_stream_start() {
         let opus = [0xFCu8, 1, 2, 3];
         let mut p = RtpOpusPacketizer::new(111, 1);
         let packets = p.packetize(&opus, 960);
         assert_eq!(packets.len(), 1);
         assert_eq!(payload(&packets[0]), &opus);
         assert_eq!(timestamp(&packets[0]), 960);
-        assert!(marker(&packets[0]));
+        assert!(marker(&packets[0]), "the first packet starts a talkspurt");
+        let next = p.packetize(&opus, 1920);
+        assert!(!marker(&next[0]), "contiguous packets stay unmarked");
+        assert_eq!(seq(&next[0]), 1);
     }
 }
