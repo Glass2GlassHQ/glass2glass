@@ -720,6 +720,19 @@ impl AsyncElement for WavParse {
                 // The byte stream carries no sample format; the concrete caps
                 // come from the parsed `fmt ` chunk instead.
                 PipelinePacket::CapsChanged(_) => {}
+                // every byte stream opens with a Segment, so one after a RIFF header starts the next file, as `concat` sends
+                PipelinePacket::Segment(segment) => {
+                    if self.riff_seen {
+                        *self = WavParse {
+                            configured: self.configured,
+                            stream_format: self.stream_format,
+                            bus: self.bus.take(),
+                            emitted: self.emitted,
+                            ..WavParse::default()
+                        };
+                    }
+                    out.push(PipelinePacket::Segment(segment)).await?;
+                }
                 other => {
                     out.push(other).await?;
                 }
@@ -802,6 +815,24 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    #[tokio::test]
+    async fn a_segment_after_a_file_starts_the_next_file() {
+        const SAMPLES_BYTES: usize = 4 * FRAME_LEN as usize;
+        let mut file = riff_header();
+        file.extend(pcm_fmt(BYTE_RATE));
+        file.extend(chunk(b"data", SAMPLES_BYTES as u32, &[0; SAMPLES_BYTES]));
+        let mut parse = parser();
+        let mut out = CollectSink::default();
+        push(&mut parse, file.clone(), &mut out).await;
+        parse
+            .process(PipelinePacket::Segment(g2g_core::Segment::new()), &mut out)
+            .await
+            .unwrap();
+        push(&mut parse, file, &mut out).await;
+
+        assert_eq!(data_frames(&out), [(0, SAMPLES_BYTES), (0, SAMPLES_BYTES)]);
     }
 
     #[tokio::test]
