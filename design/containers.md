@@ -1220,11 +1220,21 @@ frame end, so a source that leaves frame durations at 0 comes out one frame shor
 
 `RtmpPublisher` sends media only after `onStatus` `NetStream.Publish.Start`. An
 `_error` reply to `connect` or `createStream`, or an `onStatus` at level `error`,
-fails the publish with `NetworkFailure::Connect`, and the server's code and
-description are logged. `rtmpsink`'s `extra-connect-args` takes gst rtmp2sink's
+returns a `PublishRefusal` with the server's code and description, which
+`rtmpsink` logs and reports as `NetworkFailure::Connect`. `rtmpsink`'s `extra-connect-args` takes gst rtmp2sink's
 `conn=type:data` items, split on `conn=` so a string keeps its spaces, plus the
 objects and named values librtmp has and gst refuses. They are encoded as AMF0
 values after the connect object.
+
+`rtmpsink` answers Adobe and Limelight (llnw) auth as gst rtmp2sink and ffmpeg
+do, with one new connection per step. In `authmod=auto` the first refusal's
+`code=403 need auth` names the mode. The next `connect` appends
+`?authmod=..&user=..` to `app` and `tcUrl`, and the `reason=needauth` refusal
+supplies the salt and opaque (Adobe) or the nonce (llnw) hashed into the answer.
+A second challenge after the answer fails the publish. Credentials come from
+`username` and `password`, or from the location's `user:pass@` when it has one.
+`rtmpauth.rs` holds the exchange, and a test server in `rtmp.rs` checks the
+answers gst rtmp2sink and ffmpeg send.
 
 ### Enhanced RTMP multitrack audio
 

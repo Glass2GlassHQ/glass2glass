@@ -27,14 +27,9 @@ use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use g2g_core::log::Target;
-use g2g_core::{G2gError, NetworkFailure};
-
 use crate::flv::{
     emit_tag, file_header_len, put_file_header, tag_at, write_u24, FLV_FLAG_AUDIO, FLV_FLAG_VIDEO,
 };
-
-const LOG_CATEGORY: &str = "rtmp";
 
 /// RTMP protocol version (the C0/S0 byte).
 const RTMP_VERSION: u8 = 3;
@@ -749,7 +744,7 @@ impl RtmpPublisher {
     }
 
     /// Feed bytes received from the server and advance the publish ladder.
-    pub fn push(&mut self, data: &[u8]) -> Result<(), G2gError> {
+    pub fn push(&mut self, data: &[u8]) -> Result<(), PublishRefusal> {
         if self.phase == PubPhase::Handshake {
             self.s_inbound.extend_from_slice(data);
             // Wait for the full S0 + S1 + S2 before replying (the simple handshake
@@ -796,7 +791,7 @@ impl RtmpPublisher {
     /// Advance the command ladder on the server's `_result` / `onStatus`. The
     /// command name and (for `createStream`) the assigned stream id are all that
     /// is needed to go on. An `_error` or an error `onStatus` ends the publish.
-    fn handle_message(&mut self, msg_type: u8, payload: &[u8]) -> Result<(), G2gError> {
+    fn handle_message(&mut self, msg_type: u8, payload: &[u8]) -> Result<(), PublishRefusal> {
         // Flow-control control messages (RFC §5.4.3-5.4.4): the server's Window
         // Acknowledgement Size bounds the publisher's in-flight bytes, and each
         // Acknowledgement advances the acknowledged sequence, releasing the window.
@@ -829,7 +824,7 @@ impl RtmpPublisher {
                 self.phase = PubPhase::WaitCreate;
             }
             PubPhase::WaitConnect | PubPhase::WaitCreate if name == "_error" => {
-                return Err(refused(self.phase, &command_info(payload, at)));
+                return Err(PublishRefusal::from_info(command_info(payload, at)));
             }
             PubPhase::WaitCreate if name == "_result" => {
                 // body: "_result", txn(number), NULL, streamId(number)
@@ -846,7 +841,7 @@ impl RtmpPublisher {
             PubPhase::WaitPublish if name == "onStatus" => {
                 let info = command_info(payload, at);
                 if info.get("level").is_some_and(|level| level == "error") {
-                    return Err(refused(self.phase, &info));
+                    return Err(PublishRefusal::from_info(info));
                 }
                 if info
                     .get("code")
@@ -1135,15 +1130,19 @@ fn command_info(payload: &[u8], mut at: usize) -> BTreeMap<String, String> {
     read().unwrap_or_default()
 }
 
-fn refused(phase: PubPhase, info: &BTreeMap<String, String>) -> G2gError {
-    let field = |key: &str| info.get(key).map_or("", String::as_str);
-    g2g_core::g2g_error!(
-        Target::category(LOG_CATEGORY),
-        "the server refused the publish while {phase:?}: {} {}",
-        field("code"),
-        field("description")
-    );
-    G2gError::Network(NetworkFailure::Connect)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublishRefusal {
+    pub code: String,
+    pub description: String,
+}
+
+impl PublishRefusal {
+    fn from_info(mut info: BTreeMap<String, String>) -> Self {
+        Self {
+            code: info.remove("code").unwrap_or_default(),
+            description: info.remove("description").unwrap_or_default(),
+        }
+    }
 }
 
 // gst rtmp2sink's `extra-connect-args`, split on `conn=` as gst does so a string keeps its spaces, plus librtmp's objects and named values
@@ -1610,7 +1609,10 @@ mod tests {
         let rejected = status_reply("_error", "error", "NetConnection.Connect.Rejected");
         assert_eq!(
             publisher.push(&rejected),
-            Err(G2gError::Network(NetworkFailure::Connect))
+            Err(PublishRefusal {
+                code: "NetConnection.Connect.Rejected".into(),
+                description: String::new(),
+            })
         );
         assert!(
             publisher.take_outbound().is_empty(),
@@ -1639,7 +1641,10 @@ mod tests {
         let bad_name = status_reply("onStatus", "error", "NetStream.Publish.BadName");
         assert_eq!(
             publisher.push(&bad_name),
-            Err(G2gError::Network(NetworkFailure::Connect))
+            Err(PublishRefusal {
+                code: "NetStream.Publish.BadName".into(),
+                description: String::new(),
+            })
         );
         assert!(!publisher.is_publishing());
     }
@@ -1813,6 +1818,266 @@ mod tests {
     impl PartialEq<FlvUnitView> for crate::flv::FlvUnit {
         fn eq(&self, o: &FlvUnitView) -> bool {
             self.track() == o.0 && self.data == o.1 && self.pts_ms == o.2
+        }
+    }
+}
+
+#[cfg(all(test, feature = "rtmp"))]
+mod auth_tests {
+    use super::*;
+    use crate::rtmpauth::{adobe_response, llnw_response, query_value};
+    use crate::rtmpsink::RtmpSink;
+    use crate::testutil::{frame, CollectSink};
+    use alloc::format;
+    use alloc::string::ToString;
+    use g2g_core::{
+        AsyncElement, ByteStreamEncoding, Caps, G2gError, NetworkFailure, PipelinePacket, PropValue,
+    };
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::process::Command;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    const USERNAME: &str = "publisher";
+    const PASSWORD: &str = "s3cret";
+    const SALT: &str = "c2FsdA==";
+    const SERVER_CHALLENGE: &str = "Y2hhbA==";
+    const OPAQUE: &str = "b3BhcXVl";
+    const NONCE: &str = "abc123";
+    const PEER_TIMEOUT: Duration = Duration::from_secs(30);
+
+    fn reject(authmod: &str, reason_query: &str) -> String {
+        format!("[ AccessManager.Reject ] : [ authmod={authmod} ] : ?{reason_query}")
+    }
+
+    // the refusal description for one connect, None accepts it
+    fn verdict(authmod: &str, app_with_query: &str) -> Option<String> {
+        let Some((app, query)) = app_with_query.split_once('?') else {
+            return Some(format!(
+                "[ AccessManager.Reject ] : [ code=403 need auth; authmod={authmod} ] : "
+            ));
+        };
+        let field = |key| query_value(query, key);
+        if field("authmod") != Some(authmod) || field("user") != Some(USERNAME) {
+            return Some(reject(authmod, "reason=authfailed"));
+        }
+        let Some(response) = field("response") else {
+            let challenge = match authmod {
+                "adobe" => format!(
+                    "reason=needauth&user={USERNAME}&salt={SALT}&challenge={SERVER_CHALLENGE}&opaque={OPAQUE}"
+                ),
+                _ => format!("reason=needauth&user={USERNAME}&nonce={NONCE}"),
+            };
+            return Some(reject(authmod, &challenge));
+        };
+        let expected = match authmod {
+            "adobe" => adobe_response(
+                USERNAME,
+                PASSWORD,
+                SALT,
+                Some(OPAQUE),
+                field("challenge").unwrap_or_default(),
+            ),
+            _ => llnw_response(
+                USERNAME,
+                PASSWORD,
+                app,
+                field("nonce").unwrap_or_default(),
+                field("cnonce").unwrap_or_default(),
+            ),
+        };
+        (response != expected).then(|| reject(authmod, "reason=authfailed"))
+    }
+
+    fn connect_app(msg_type: u8, payload: &[u8]) -> Option<String> {
+        let mut at = 0;
+        if msg_type != MSG_AMF0_COMMAND || amf0_read_string(payload, &mut at)? != "connect" {
+            return None;
+        }
+        amf0_read_number(payload, &mut at)?;
+        amf0_read_scalar_object(payload, &mut at)?.remove("app")
+    }
+
+    fn serve_connection(mut stream: TcpStream, authmod: &str) -> bool {
+        let mut session = RtmpSession::new();
+        let mut commands = ChunkReader::new();
+        let mut handshake_left = 1 + 2 * HANDSHAKE_SIZE;
+        let mut buf = [0u8; 4096];
+        loop {
+            let n = stream.read(&mut buf).unwrap_or(0);
+            if n == 0 {
+                return session.is_publishing();
+            }
+            let handshake = handshake_left.min(n);
+            handshake_left -= handshake;
+            commands.push(&buf[handshake..n]);
+            session.push(&buf[..n]);
+            let mut reply = session.take_outbound();
+            let rejection = core::iter::from_fn(|| commands.next_message())
+                .find_map(|(msg_type, _, payload)| connect_app(msg_type, &payload))
+                .and_then(|app| verdict(authmod, &app));
+            if let Some(description) = &rejection {
+                let mut body = Vec::new();
+                amf0_string(&mut body, "_error");
+                amf0_number(&mut body, 1.0);
+                body.push(AMF0_NULL);
+                amf0_object(
+                    &mut body,
+                    &[
+                        ("level", AmfVal::Str("error")),
+                        ("code", AmfVal::Str("NetConnection.Connect.Rejected")),
+                        ("description", AmfVal::Str(description)),
+                    ],
+                );
+                reply.clear();
+                write_message(
+                    &mut reply,
+                    3,
+                    MSG_AMF0_COMMAND,
+                    0,
+                    0,
+                    &body,
+                    DEFAULT_CHUNK_SIZE,
+                );
+            }
+            stream.write_all(&reply).unwrap();
+            if rejection.is_some() {
+                // linux resets a socket closed with unread input, which can drop the refusal
+                while stream.read(&mut buf).unwrap_or(0) > 0 {}
+                return false;
+            }
+        }
+    }
+
+    // serves `connects` connections, true when the last one published
+    fn spawn_server(authmod: &'static str, connects: usize) -> (u16, mpsc::Receiver<bool>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (published, receiver) = mpsc::channel();
+        std::thread::spawn(move || {
+            let mut last_published = false;
+            for stream in listener.incoming().take(connects) {
+                last_published = serve_connection(stream.unwrap(), authmod);
+            }
+            published.send(last_published).unwrap();
+        });
+        (port, receiver)
+    }
+
+    fn publish_with_sink(sink: &mut RtmpSink) -> Result<(), G2gError> {
+        let mut flv = Vec::new();
+        put_file_header(&mut flv, FLV_FLAG_VIDEO);
+        emit_tag(&mut flv, MSG_VIDEO, 0, &[&[0x17, 1, 0, 0, 0]]);
+        sink.configure_pipeline(&Caps::ByteStream {
+            encoding: ByteStreamEncoding::Flv,
+        })?;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let mut out = CollectSink::default();
+        runtime.block_on(async {
+            sink.process(PipelinePacket::DataFrame(frame(flv)), &mut out)
+                .await?;
+            sink.process(PipelinePacket::Eos, &mut out).await
+        })
+    }
+
+    fn set(sink: &mut RtmpSink, name: &str, value: &str) {
+        sink.set_property(name, PropValue::Str(value.to_string()))
+            .unwrap();
+    }
+
+    #[test]
+    fn sink_answers_an_adobe_challenge_in_auto_mode() {
+        let (port, published) = spawn_server("adobe", 3);
+        let mut sink = RtmpSink::new(format!("rtmp://127.0.0.1:{port}/live/key"));
+        set(&mut sink, "username", USERNAME);
+        set(&mut sink, "password", PASSWORD);
+        publish_with_sink(&mut sink).unwrap();
+        assert!(published.recv_timeout(PEER_TIMEOUT).unwrap());
+    }
+
+    #[test]
+    fn sink_answers_a_limelight_challenge_with_url_credentials() {
+        let (port, published) = spawn_server("llnw", 2);
+        let mut sink = RtmpSink::new(format!(
+            "rtmp://{USERNAME}:{PASSWORD}@127.0.0.1:{port}/live/key"
+        ));
+        set(&mut sink, "authmod", "llnw");
+        publish_with_sink(&mut sink).unwrap();
+        assert!(published.recv_timeout(PEER_TIMEOUT).unwrap());
+    }
+
+    #[test]
+    fn sink_with_a_wrong_password_fails_the_publish() {
+        let (port, published) = spawn_server("adobe", 3);
+        let mut sink = RtmpSink::new(format!("rtmp://127.0.0.1:{port}/live/key"));
+        set(&mut sink, "username", USERNAME);
+        set(&mut sink, "password", "wrong");
+        assert_eq!(
+            publish_with_sink(&mut sink),
+            Err(G2gError::Network(NetworkFailure::Connect))
+        );
+        assert!(!published.recv_timeout(PEER_TIMEOUT).unwrap());
+    }
+
+    fn reference_client_publishes(authmod: &'static str, client: impl Fn(u16) -> Command) {
+        let (port, published) = spawn_server(authmod, 3);
+        let mut child = client(port).spawn().expect("reference client runs");
+        let result = published.recv_timeout(PEER_TIMEOUT);
+        child.kill().ok();
+        child.wait().unwrap();
+        assert_eq!(result, Ok(true), "{authmod}");
+    }
+
+    #[test]
+    #[ignore = "needs gst-launch-1.0 with rtmp2sink and x264enc, opens a local TCP port"]
+    fn gst_rtmp2sink_passes_the_auth_checks() {
+        for authmod in ["adobe", "llnw"] {
+            reference_client_publishes(authmod, |port| {
+                let mut gst = Command::new("gst-launch-1.0");
+                gst.args([
+                    "-q",
+                    "videotestsrc",
+                    "num-buffers=10",
+                    "!",
+                    "x264enc",
+                    "!",
+                    "flvmux",
+                    "!",
+                    "rtmp2sink",
+                    &format!("location=rtmp://127.0.0.1:{port}/live/key"),
+                    &format!("username={USERNAME}"),
+                    &format!("password={PASSWORD}"),
+                ]);
+                gst
+            });
+        }
+    }
+
+    #[test]
+    #[ignore = "needs ffmpeg with libx264, opens a local TCP port"]
+    fn ffmpeg_passes_the_auth_checks() {
+        for authmod in ["adobe", "llnw"] {
+            reference_client_publishes(authmod, |port| {
+                let mut ffmpeg = Command::new("ffmpeg");
+                ffmpeg.args([
+                    "-loglevel",
+                    "error",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "testsrc=duration=1:size=64x64:rate=10",
+                    "-c:v",
+                    "libx264",
+                    "-f",
+                    "flv",
+                    &format!("rtmp://{USERNAME}:{PASSWORD}@127.0.0.1:{port}/live/key"),
+                ]);
+                ffmpeg
+            });
         }
     }
 }

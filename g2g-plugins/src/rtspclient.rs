@@ -301,7 +301,7 @@ impl Challenge {
     }
 }
 
-fn md5_hex(text: &str) -> String {
+pub(crate) fn md5_hex(text: &str) -> String {
     hex_encode(&Md5::digest(text.as_bytes()))
 }
 

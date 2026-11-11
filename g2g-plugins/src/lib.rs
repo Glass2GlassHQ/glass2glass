@@ -1562,6 +1562,8 @@ pub mod sampleaesdecrypt;
 // RTMP: the sans-IO protocol (always compiled) and the tokio TCP source (ingest)
 // + sink (egress).
 pub mod rtmp;
+#[cfg(feature = "rtmp")]
+mod rtmpauth;
 // RTMP "genuine FMS/FP" HMAC-SHA256 digest (complex) handshake, gated to the
 // rtmp feature that supplies the crypto; the sans-IO core uses the simple one.
 // Icecast source client: sends an encoded audio stream to an Icecast mount.

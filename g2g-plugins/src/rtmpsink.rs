@@ -10,10 +10,12 @@
 //! `createStream` / `publish` command ladder, FLV-tags -> RTMP messages); this
 //! element is the tokio TCP I/O around it.
 //!
-//! Scope: one connection / one stream, the simple handshake, H.264 + AAC, AMF0.
+//! Scope: one stream, H.264 + AAC, AMF0.
 //! The connection is opened lazily on the first buffer (so `flvmux`'s header
 //! tag has been produced) and the publish ladder is driven to completion before
-//! any media is sent. The server's Window Acknowledgement Size is honored as
+//! any media is sent. Each step of Adobe or Limelight authentication opens a new
+//! connection, as gst rtmp2sink and ffmpeg do. The server's Window
+//! Acknowledgement Size is honored as
 //! back-pressure: when the unacknowledged in-flight byte count reaches the
 //! window, the sink blocks on the socket for the server's Acknowledgement before
 //! feeding more media, so a slow server throttles the pipeline instead of the
@@ -30,6 +32,7 @@ use alloc::vec::Vec;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
+use g2g_core::log::Target;
 use g2g_core::{
     AsyncElement, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
     ElementMetadata, G2gError, HardwareError, NetworkFailure, OutputSink, PadTemplate,
@@ -37,7 +40,10 @@ use g2g_core::{
 };
 
 use crate::filesink::io_err;
-use crate::rtmp::{encode_extra_connect_args, RtmpPublisher};
+use crate::rtmp::{encode_extra_connect_args, PublishRefusal, RtmpPublisher};
+use crate::rtmpauth::{AuthFailure, RtmpAuth, RtmpAuthmod};
+
+const LOG_CATEGORY: &str = "rtmpsink";
 
 /// TCP read buffer for draining the server's control messages.
 const READ_BUF: usize = 65_536;
@@ -53,6 +59,8 @@ struct RtmpTarget {
     app: String,
     tc_url: String,
     stream_key: String,
+    // username and password from `rtmp://user:pass@host`
+    credentials: Option<(String, String)>,
 }
 
 /// Parse an RTMP URL into its connection + publish fields. `app` is the first
@@ -65,6 +73,20 @@ fn parse_rtmp_url(url: &str) -> Result<RtmpTarget, G2gError> {
     let (authority, path) = match rest.find('/') {
         Some(i) => (&rest[..i], &rest[i + 1..]),
         None => (rest, ""),
+    };
+    let (credentials, authority) = match authority.rsplit_once('@') {
+        Some((userinfo, host)) => {
+            let decode = |text: &str| {
+                crate::dataurisrc::percent_decode(text)
+                    .and_then(|bytes| String::from_utf8(bytes).ok())
+                    .ok_or(G2gError::Hardware(HardwareError::Other))
+            };
+            let (username, password) = userinfo
+                .split_once(':')
+                .ok_or(G2gError::Hardware(HardwareError::Other))?;
+            (Some((decode(username)?, decode(password)?)), host)
+        }
+        None => (None, authority),
     };
     if authority.is_empty() {
         return Err(G2gError::Hardware(HardwareError::Other));
@@ -82,6 +104,7 @@ fn parse_rtmp_url(url: &str) -> Result<RtmpTarget, G2gError> {
         app: app.clone(),
         tc_url: format!("rtmp://{authority}/{app}"),
         stream_key,
+        credentials,
     })
 }
 
@@ -106,6 +129,9 @@ pub struct RtmpSink {
     complex_handshake: bool,
     extra_connect_args: String,
     extra_connect_amf: Vec<u8>,
+    authmod: RtmpAuthmod,
+    username: String,
+    password: String,
 }
 
 impl RtmpSink {
@@ -123,6 +149,9 @@ impl RtmpSink {
             complex_handshake: true,
             extra_connect_args: String::new(),
             extra_connect_amf: Vec::new(),
+            authmod: RtmpAuthmod::Auto,
+            username: String::new(),
+            password: String::new(),
         }
     }
 
@@ -150,6 +179,67 @@ impl RtmpSink {
             encoding: ByteStreamEncoding::Flv,
         }
     }
+
+    async fn connect_and_publish(&self) -> Result<(TcpStream, RtmpPublisher), G2gError> {
+        let target = self.target.as_ref().ok_or(G2gError::NotConfigured)?;
+        let (username, password) = match &target.credentials {
+            Some((username, password)) => (username, password),
+            None => (&self.username, &self.password),
+        };
+        let mut auth = RtmpAuth::new(self.authmod, username, password);
+        loop {
+            let query = auth.connect_query().map_err(|failure| {
+                g2g_core::g2g_error!(
+                    Target::category(LOG_CATEGORY),
+                    "cannot authenticate with authmod {}: {failure:?}",
+                    self.authmod.name()
+                );
+                G2gError::Network(NetworkFailure::Connect)
+            })?;
+            let (app, tc_url) = match query {
+                Some(query) => (
+                    format!("{}?{query}", target.app),
+                    format!("{}?{query}", target.tc_url),
+                ),
+                None => (target.app.clone(), target.tc_url.clone()),
+            };
+            let mut stream = TcpStream::connect((target.host.as_str(), target.port))
+                .await
+                .map_err(io_err)?;
+            let mut publisher = RtmpPublisher::new(app, tc_url, target.stream_key.clone())
+                .with_complex_handshake(self.complex_handshake)
+                .with_extra_connect_args(self.extra_connect_amf.clone());
+            let refusal = match drive_publish(&mut stream, &mut publisher).await? {
+                Ok(()) => return Ok((stream, publisher)),
+                Err(refusal) => refusal,
+            };
+            let mut client_nonce = [0u8; 4];
+            getrandom::getrandom(&mut client_nonce).expect("OS RNG for the RTMP auth nonce");
+            match auth.answer(&refusal, &target.app, u32::from_ne_bytes(client_nonce)) {
+                Ok(()) => {}
+                Err(AuthFailure::NotAChallenge) => return Err(publish_refused(refusal)),
+                Err(failure) => {
+                    g2g_core::g2g_error!(
+                        Target::category(LOG_CATEGORY),
+                        "authentication failed ({failure:?}) on {} {}",
+                        refusal.code,
+                        refusal.description
+                    );
+                    return Err(G2gError::Network(NetworkFailure::Connect));
+                }
+            }
+        }
+    }
+}
+
+fn publish_refused(refusal: PublishRefusal) -> G2gError {
+    g2g_core::g2g_error!(
+        Target::category(LOG_CATEGORY),
+        "the server refused the publish: {} {}",
+        refusal.code,
+        refusal.description
+    );
+    G2gError::Network(NetworkFailure::Connect)
 }
 
 /// Write the publisher's queued bytes (handshake / commands / media) to the socket.
@@ -166,11 +256,12 @@ async fn flush_out(
 }
 
 /// Drive the C0/C1 handshake and the connect/createStream/publish ladder to
-/// completion, exchanging bytes with the server until media may flow.
+/// completion, exchanging bytes with the server until media may flow or the
+/// server refuses.
 async fn drive_publish(
     stream: &mut TcpStream,
     publisher: &mut RtmpPublisher,
-) -> Result<(), G2gError> {
+) -> Result<Result<(), PublishRefusal>, G2gError> {
     flush_out(stream, publisher).await?; // C0 + C1
     let mut buf = [0u8; READ_BUF];
     while !publisher.is_publishing() {
@@ -178,10 +269,12 @@ async fn drive_publish(
         if n == 0 {
             return Err(G2gError::Network(NetworkFailure::Connect)); // server closed before publish
         }
-        publisher.push(&buf[..n])?;
+        if let Err(refusal) = publisher.push(&buf[..n]) {
+            return Ok(Err(refusal));
+        }
         flush_out(stream, publisher).await?;
     }
-    Ok(())
+    Ok(Ok(()))
 }
 
 /// Non-blocking drain of any server bytes (control messages: window-ack /
@@ -192,7 +285,7 @@ fn drain_incoming(stream: &TcpStream, publisher: &mut RtmpPublisher) -> Result<(
     loop {
         match stream.try_read(&mut buf) {
             Ok(0) => break, // closed; surfaced on the next write
-            Ok(n) => publisher.push(&buf[..n])?,
+            Ok(n) => publisher.push(&buf[..n]).map_err(publish_refused)?,
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
             Err(_) => break,
         }
@@ -214,7 +307,7 @@ async fn await_ack_window(
     while publisher.throttled() {
         match tokio::time::timeout(Duration::from_secs(5), stream.read(&mut buf)).await {
             Ok(Ok(0)) => return Err(G2gError::Network(NetworkFailure::Stream)), // server closed
-            Ok(Ok(n)) => publisher.push(&buf[..n])?,
+            Ok(Ok(n)) => publisher.push(&buf[..n]).map_err(publish_refused)?,
             Ok(Err(e)) => return Err(io_err(e)),
             Err(_) => break, // timed out waiting for an ack: proceed best-effort
         }
@@ -260,15 +353,7 @@ impl AsyncElement for RtmpSink {
                         .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
                     // Lazily connect + publish on the first buffer.
                     if self.stream.is_none() {
-                        let target = self.target.clone().ok_or(G2gError::NotConfigured)?;
-                        let mut stream = TcpStream::connect((target.host.as_str(), target.port))
-                            .await
-                            .map_err(io_err)?;
-                        let mut publisher =
-                            RtmpPublisher::new(target.app, target.tc_url, target.stream_key)
-                                .with_complex_handshake(self.complex_handshake)
-                                .with_extra_connect_args(self.extra_connect_amf.clone());
-                        drive_publish(&mut stream, &mut publisher).await?;
+                        let (stream, publisher) = self.connect_and_publish().await?;
                         self.stream = Some(stream);
                         self.publisher = Some(publisher);
                     }
@@ -333,6 +418,19 @@ impl AsyncElement for RtmpSink {
                 self.extra_connect_args = text.to_string();
                 Ok(())
             }
+            "authmod" => {
+                let name = value.as_str().ok_or(PropError::Type)?;
+                self.authmod = RtmpAuthmod::from_name(name).ok_or(PropError::Value)?;
+                Ok(())
+            }
+            "username" => {
+                self.username = value.as_str().ok_or(PropError::Type)?.to_string();
+                Ok(())
+            }
+            "password" => {
+                self.password = value.as_str().ok_or(PropError::Type)?.to_string();
+                Ok(())
+            }
             _ => Err(PropError::Unknown),
         }
     }
@@ -342,6 +440,9 @@ impl AsyncElement for RtmpSink {
             "location" => Some(PropValue::Str(self.url.clone())),
             "complex-handshake" => Some(PropValue::Bool(self.complex_handshake)),
             "extra-connect-args" => Some(PropValue::Str(self.extra_connect_args.clone())),
+            "authmod" => Some(PropValue::Str(self.authmod.name().to_string())),
+            "username" => Some(PropValue::Str(self.username.clone())),
+            "password" => Some(PropValue::Str(self.password.clone())),
             _ => None,
         }
     }
@@ -363,6 +464,22 @@ static RTMPSINK_PROPS: &[PropertySpec] = &[
         "extra-connect-args",
         PropKind::Str,
         "librtmp-style AMF values appended to the connect command, such as conn=B:1 conn=S:token",
+    ),
+    PropertySpec::new(
+        "authmod",
+        PropKind::Str,
+        "publish authentication: none | auto (the server's choice) | adobe | llnw",
+    )
+    .with_enum_values("none | auto | adobe | llnw"),
+    PropertySpec::new(
+        "username",
+        PropKind::Str,
+        "user name for adobe or llnw authentication",
+    ),
+    PropertySpec::new(
+        "password",
+        PropKind::Str,
+        "password for adobe or llnw authentication",
     ),
 ];
 
@@ -393,6 +510,19 @@ mod tests {
         assert_eq!(t.app, "app");
         assert_eq!(t.stream_key, "path/to/key", "the key keeps its slashes");
         assert_eq!(t.tc_url, "rtmp://host/app");
+    }
+
+    #[test]
+    fn userinfo_becomes_the_credentials() {
+        let t = parse_rtmp_url("rtmp://pub%40lisher:p%3Ass@host:1936/live/key").unwrap();
+        assert_eq!(t.host, "host");
+        assert_eq!(t.port, 1936);
+        assert_eq!(
+            t.credentials,
+            Some(("pub@lisher".to_string(), "p:ss".to_string()))
+        );
+        assert_eq!(t.tc_url, "rtmp://host:1936/live");
+        assert!(parse_rtmp_url("rtmp://useronly@host/live/key").is_err());
     }
 
     #[test]
