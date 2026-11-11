@@ -17,11 +17,17 @@ use core::pin::Pin;
 use g2g_core::element::{AsyncElement, OutputSink, PushOutcome};
 use g2g_core::frame::{Frame, PipelinePacket};
 use g2g_core::memory::MemoryDomain;
-use g2g_core::runtime::{SeekController, SourceLoop};
-use g2g_core::{ByteStreamEncoding, Caps, G2gError, Seek, SeekType};
+use std::time::Duration;
+
+use g2g_core::runtime::{
+    attach_seek, parse_launch, run_graph, RunBuilder, SeekController, SeekOutcome, SeekRefusal,
+    SourceLoop,
+};
+use g2g_core::{ByteStreamEncoding, Caps, G2gError, PipelineClock, Seek, SeekFlags, SeekType};
 use g2g_plugins::filesrc::FileSrc;
 use g2g_plugins::flv::{FlvCodec, FlvMuxer};
 use g2g_plugins::flvdemux::{FlvDemux, FlvStream};
+use g2g_plugins::registry::default_registry;
 
 use std::path::PathBuf;
 
@@ -177,13 +183,19 @@ async fn flvdemux_seeks_to_the_target_keyframe_over_filesrc() {
     );
 }
 
-#[tokio::test]
-async fn flvdemux_ends_the_stream_at_the_seek_stop() {
-    const FRAME_PERIOD_MS: u32 = 40;
+const FRAME_PERIOD_MS: u32 = 40;
+const KEYFRAME_INTERVAL: u32 = 5;
+// the keyframe at 200 ms decodes the 240 ms start, 400 ms is the last frame at or before the stop
+const SPAN_START_NS: u64 = 240_000_000;
+const SPAN_STOP_NS: u64 = 400_000_000;
+const FRAMES_IN_SPAN: usize = 6;
+
+// 50 frames 40 ms apart, a keyframe every fifth, each payload carrying its index
+fn numbered_flv() -> Vec<u8> {
     const FRAMES: u32 = 50;
     let tags: Vec<_> = (0..FRAMES)
         .map(|index| {
-            let keyframe = index % 5 == 0;
+            let keyframe = index % KEYFRAME_INTERVAL == 0;
             let nal_header = if keyframe { 0x65 } else { 0x41 };
             (
                 index * FRAME_PERIOD_MS,
@@ -192,10 +204,15 @@ async fn flvdemux_ends_the_stream_at_the_seek_stop() {
             )
         })
         .collect();
-    let flv = make_flv(&tags);
+    make_flv(&tags)
+}
+
+#[tokio::test]
+async fn flvdemux_ends_the_stream_at_the_seek_stop() {
+    let flv = numbered_flv();
     let total_chunks = flv.len().div_ceil(CHUNK_SIZE);
-    let start_ns = 240_000_000;
-    let stop_ns = 400_000_000;
+    let start_ns = SPAN_START_NS;
+    let stop_ns = SPAN_STOP_NS;
     let seek = Seek {
         stop_type: SeekType::Set,
         stop: stop_ns,
@@ -206,10 +223,95 @@ async fn flvdemux_ends_the_stream_at_the_seek_stop() {
     assert_eq!(capture.segment_stops.last(), Some(&Some(stop_ns)));
     let frame_indexes: Vec<u8> = capture.frames.iter().map(|frame| frame[5]).collect();
     // the keyframe at 200 ms decodes the 240 ms target, 400 ms is the last at or before the stop
+    assert_eq!(frame_indexes.len(), FRAMES_IN_SPAN);
     assert_eq!(frame_indexes, (5..=10).collect::<Vec<u8>>());
     assert_eq!(capture.flushes, 1, "the seek to the end is not forwarded");
     assert!(
         chunks_read < total_chunks / 2,
         "the source stopped reading at the stop, read {chunks_read} of {total_chunks} chunks"
     );
+}
+
+const LINK_CAPACITY: usize = 4;
+
+struct ZeroClock;
+impl PipelineClock for ZeroClock {
+    fn now_ns(&self) -> u64 {
+        0
+    }
+}
+
+fn segment_seek(flags: SeekFlags) -> Seek {
+    Seek {
+        rate: 1.0,
+        flags: flags | SeekFlags::SEGMENT,
+        start_type: SeekType::Set,
+        start: SPAN_START_NS,
+        stop_type: SeekType::Set,
+        stop: SPAN_STOP_NS,
+    }
+}
+
+#[tokio::test]
+async fn flvdemux_loops_a_segment_seek_until_shutdown() {
+    const LOOPS: u64 = 3;
+    let path = temp_path("segment");
+    std::fs::write(&path, numbered_flv()).unwrap();
+    let line = format!("filesrc location={} ! flvdemux ! fakesink", path.display());
+    let mut graph = parse_launch(&default_registry(), &line).expect("the line negotiates");
+    let (app, ticket) =
+        attach_seek(&mut graph, segment_seek(SeekFlags::FLUSH)).expect("flvdemux takes seeks");
+    let looper = {
+        let app = app.clone();
+        async move {
+            for done in 1..=LOOPS {
+                while app.segment_done_count() < done {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+                assert_eq!(
+                    app.take_segment_done(),
+                    Some(SPAN_STOP_NS),
+                    "segment-done reports the stop"
+                );
+                if done < LOOPS {
+                    app.seek(segment_seek(SeekFlags::NONE));
+                }
+            }
+            app.shutdown();
+        }
+    };
+    // the run parks the file source at its end only when it carries the seek controller
+    let run = RunBuilder::new(graph, &ZeroClock, LINK_CAPACITY)
+        .with_seek_controller(&app)
+        .run();
+    let (stats, ()) =
+        tokio::time::timeout(Duration::from_secs(10), async { tokio::join!(run, looper) })
+            .await
+            .expect("the loop ends at the shutdown");
+    let stats = stats.expect("the pipeline runs");
+    assert_eq!(ticket.outcome(), Some(SeekOutcome::Served));
+    assert_eq!(stats.frames_consumed, LOOPS * FRAMES_IN_SPAN as u64);
+    let _ = std::fs::remove_file(&path);
+}
+
+#[tokio::test]
+async fn flvdemux_refuses_a_stop_counted_from_the_end() {
+    let path = temp_path("end");
+    std::fs::write(&path, numbered_flv()).unwrap();
+    let line = format!("filesrc location={} ! flvdemux ! fakesink", path.display());
+    let mut graph = parse_launch(&default_registry(), &line).expect("the line negotiates");
+    let seek = Seek {
+        stop_type: SeekType::End,
+        stop: 0,
+        ..Seek::flush_to(SPAN_START_NS)
+    };
+    let (_app, ticket) = attach_seek(&mut graph, seek).expect("flvdemux takes seeks");
+    run_graph(graph, &ZeroClock, LINK_CAPACITY)
+        .await
+        .expect("the pipeline plays on");
+    assert_eq!(
+        ticket.outcome(),
+        Some(SeekOutcome::Refused(SeekRefusal::UnknownDuration))
+    );
+    let _ = std::fs::remove_file(&path);
 }

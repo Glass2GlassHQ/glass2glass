@@ -820,6 +820,7 @@ impl AsyncElement for MkvDemux {
             // M362/M373/M374: service a pending app seek (direct index hit,
             // SeekHead-located Cues prefetch, or re-scan from 0). Until the
             // resulting flush returns, input is dropped so no stale frames emit.
+            self.seek.hold_at_segment_end().await;
             self.poll_seek();
             match packet {
                 PipelinePacket::DataFrame(frame) => {
@@ -889,7 +890,7 @@ impl AsyncElement for MkvDemux {
                 PipelinePacket::Eos => {
                     let awaiting_flush =
                         self.seek.dropping_input() || self.prefetch != CuePrefetch::Idle;
-                    if self.seek.eos_before_flush(awaiting_flush)? {
+                    if self.seek.eos_before_flush(awaiting_flush).await? {
                         return Ok(());
                     }
                     // Emit any final frames; the runner's transform arm forwards EOS.

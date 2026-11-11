@@ -1591,6 +1591,7 @@ impl MultiOutputElement for TsDemuxN {
         Box::pin(async move {
             // M362: a pending app seek triggers an upstream byte-seek; until its
             // `Flush` returns, drop input so no stale pre-seek units are emitted.
+            self.seek.hold_at_segment_end().await;
             self.seek.poll_request();
             match packet {
                 PipelinePacket::DataFrame(frame) => {
@@ -1660,7 +1661,11 @@ impl MultiOutputElement for TsDemuxN {
                 }
                 PipelinePacket::Eos => {
                     self.withheld_flush = false;
-                    if self.seek.eos_before_flush(self.seek.dropping_input())? {
+                    if self
+                        .seek
+                        .eos_before_flush(self.seek.dropping_input())
+                        .await?
+                    {
                         return Ok(());
                     }
                     // Flush the final in-flight PES, route it; the runner

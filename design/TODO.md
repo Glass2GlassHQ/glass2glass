@@ -297,9 +297,6 @@ libraries installed.
 - **FLV:** Speex decode (no Speex encoder exists anywhere to build a validated
   decode vector, and gst's header-in-tag layout is rejected by libavcodec, so
   wiring a decoder would be an unvalidated claim).
-- **Demuxer seek edges:** the byte-stream demuxers and `mp4demux` end a
-  `SEGMENT` seek with `Eos` instead of segment-done, and leave an `End`-relative
-  stop open, since they know no duration.
 - **Enhanced RTMP:** enhanced video in `flvdemux` / `eflvmux` (H.265, AV1 and
   VP9 fourccs, multitrack `video_N`), the Opus, FLAC and AC-3 audio fourccs, and
   `eflvmux`'s `flv-track-mode` pad property.

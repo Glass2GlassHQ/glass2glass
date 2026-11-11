@@ -4792,6 +4792,14 @@ pub async fn transform_arm<E: AsyncElement>(
     transform_arm_on(&mut elem, io).await
 }
 
+// an element that took a seek while handling the Eos plays on from that seek, so the Eos goes no further
+fn took_seek_at_eos(flush_count: &Option<ArmFlushCount>, seeks_before: Option<u64>) -> bool {
+    flush_count
+        .as_ref()
+        .zip(seeks_before)
+        .is_some_and(|(flush_count, before)| flush_count.seeks_taken() > before)
+}
+
 // As `transform_arm` on a borrowed element, so the caller still has it when the arm ends.
 pub(crate) async fn transform_arm_on<E: AsyncElement>(
     elem: &mut E,
@@ -4893,10 +4901,11 @@ pub(crate) async fn transform_arm_on<E: AsyncElement>(
                     .as_ref()
                     .is_some_and(ArmFlushCount::eos_is_stale) => {}
             Some(PipelinePacket::Eos) => {
+                let seeks_before = flush_count.as_ref().map(ArmFlushCount::seeks_taken);
                 elem.process(PipelinePacket::Eos, &mut adapter).await?;
                 // M909: skip our push when the element's catch-all arm already
                 // forwarded the sentinel, so the sink sees exactly one `Eos`.
-                if !adapter.eos_forwarded() {
+                if !adapter.eos_forwarded() && !took_seek_at_eos(&flush_count, seeks_before) {
                     adapter.push(PipelinePacket::Eos).await?;
                 }
                 if flush_count.is_some() {
@@ -5515,12 +5524,14 @@ pub(crate) async fn demux_arm<E: MultiOutputElement>(
                     .as_ref()
                     .is_some_and(ArmFlushCount::eos_is_stale) => {}
             Some(PipelinePacket::Eos) => {
+                let seeks_before = flush_count.as_ref().map(ArmFlushCount::seeks_taken);
                 demux.process(PipelinePacket::Eos, &mut multi).await?;
+                let stream_continues = took_seek_at_eos(&flush_count, seeks_before);
                 for port in 0..branch_count {
                     // A demux that forwards Eos itself already ended this
                     // port; a second Eos behind it breaks the one-terminal
                     // contract the drain machinery relies on.
-                    if !multi.eos_forwarded(port) {
+                    if !multi.eos_forwarded(port) && !stream_continues {
                         multi.push_to(port, PipelinePacket::Eos).await?;
                     }
                 }

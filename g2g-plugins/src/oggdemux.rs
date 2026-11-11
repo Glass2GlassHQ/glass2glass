@@ -1203,6 +1203,7 @@ impl AsyncElement for OggDemux {
             }
             // M362: a pending app seek triggers an upstream byte-seek; until its
             // `Flush` returns, drop input so no stale pre-seek packets are emitted.
+            self.seek.hold_at_segment_end().await;
             self.poll_seek();
             match packet {
                 PipelinePacket::DataFrame(frame) => {
@@ -1248,7 +1249,11 @@ impl AsyncElement for OggDemux {
                     }
                 }
                 PipelinePacket::Eos => {
-                    if self.seek.eos_before_flush(self.seek.dropping_input())? {
+                    if self
+                        .seek
+                        .eos_before_flush(self.seek.dropping_input())
+                        .await?
+                    {
                         return Ok(());
                     }
                     // Emit any final packets; the runner's transform arm forwards EOS.

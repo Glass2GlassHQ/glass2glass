@@ -80,6 +80,10 @@ impl ArmFlushCount {
     pub(crate) fn eos_is_stale(&self) -> bool {
         self.flushes < self.controller.flushing_seeks_taken()
     }
+
+    pub(crate) fn seeks_taken(&self) -> u64 {
+        self.controller.seeks_taken()
+    }
 }
 
 // a run whose seekable source parks at the end of the stream and takes seeks there

@@ -211,6 +211,7 @@ impl AsyncElement for Ac3Parse {
             if !self.configured {
                 return Err(G2gError::NotConfigured);
             }
+            self.seek.hold_at_segment_end().await;
             self.seek.poll_request();
             match packet {
                 PipelinePacket::DataFrame(frame) => {
@@ -235,7 +236,11 @@ impl AsyncElement for Ac3Parse {
                 // The last frame ends at the end of the stream, so it has no
                 // successor to confirm its sync against.
                 PipelinePacket::Eos => {
-                    if self.seek.eos_before_flush(self.seek.dropping_input())? {
+                    if self
+                        .seek
+                        .eos_before_flush(self.seek.dropping_input())
+                        .await?
+                    {
                         return Ok(());
                     }
                     self.drain(true, out).await?;

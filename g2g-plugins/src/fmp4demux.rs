@@ -426,6 +426,7 @@ impl AsyncElement for Fmp4Demux {
             }
             // M362: a pending app seek triggers an upstream byte-seek; until its
             // `Flush` returns, drop input so no stale pre-seek units are emitted.
+            self.seek.hold_at_segment_end().await;
             self.seek.poll_request();
             match packet {
                 PipelinePacket::DataFrame(frame) => {
@@ -451,7 +452,11 @@ impl AsyncElement for Fmp4Demux {
                 // Nothing to flush (incomplete trailing boxes are dropped); the
                 // runner's transform arm forwards the EOS itself.
                 PipelinePacket::Eos => {
-                    if self.seek.eos_before_flush(self.seek.dropping_input())? {
+                    if self
+                        .seek
+                        .eos_before_flush(self.seek.dropping_input())
+                        .await?
+                    {
                         return Ok(());
                     }
                     self.seek.end_and_wait_for_seek(out).await?;

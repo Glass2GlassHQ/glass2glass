@@ -42,7 +42,8 @@ use g2g_core::{
     g2g_error, AudioFormat, BusHandle, BusMessage, ByteStreamEncoding, Caps, CapsConstraint,
     CapsSet, ConfigureOutcome, Dim, ElementMetadata, FrameTiming, G2gError, LatencyReport,
     MemoryDomain, MultiOutputElement, MultiOutputSink, PipelinePacket, PropError, PropValue,
-    PropertySpec, Rate, Seek, SeekType, Segment, Stream, StreamCollection, StreamType, VideoCodec,
+    PropertySpec, Rate, Seek, SeekFlags, SeekType, Segment, Stream, StreamCollection, StreamType,
+    VideoCodec,
 };
 
 use crate::demuxseek::{segment_from, with_stream_time};
@@ -977,10 +978,11 @@ impl Mp4DemuxN {
     /// one big `mdat` (nothing can emit incrementally). The fragmented path emits in
     /// [`advance`](Self::advance) instead, so this is reached only when `fragmented`
     /// is not `Some(true)`.
+    // the stream time a SEGMENT seek served here ends at, for its segment-done
     async fn parse_and_emit_whole(
         &mut self,
         out: &mut dyn MultiOutputSink,
-    ) -> Result<(), G2gError> {
+    ) -> Result<Option<u64>, G2gError> {
         let tracks = parse_all_tracks(&self.buf)?;
         self.resolve_ports(&tracks)?;
         if self.bus.is_some() {
@@ -1015,41 +1017,64 @@ impl Mp4DemuxN {
             .map(|track| track_framerate_q16(&self.buf, track))
             .collect::<Vec<_>>();
         let seek = self.seek.as_ref().and_then(|app| app.take_seek(Ok));
-        let samples = match (seek, &forwarded[..]) {
-            (None, _) => samples,
+        let (samples, segment_end_ns) = match (seek, &forwarded[..]) {
+            (None, _) => (samples, None),
             (Some(seek), [track]) => {
                 if seek.is_flush() {
                     out.push_to(0, PipelinePacket::Flush).await?;
                     self.need_config[0] = true;
                 }
-                self.seek_to(track, samples, &seek, out).await?
+                let span = self.seek_to(track, samples, &seek, out).await?;
+                let segment_end_ns = seek
+                    .flags
+                    .contains(SeekFlags::SEGMENT)
+                    .then_some(span.end_ns);
+                (span.samples, segment_end_ns)
             }
             (Some(_), _) => unreachable!("only a one-port demuxer seeks"),
         };
         self.emit_samples(&forwarded, &framerates, samples, out)
-            .await
+            .await?;
+        Ok(segment_end_ns)
     }
 
     // the whole file stays buffered, so a seek after every sample went out re-emits from the target
     async fn serve_seeks_after_samples(
         &mut self,
+        mut segment_end_ns: Option<u64>,
         out: &mut dyn MultiOutputSink,
     ) -> Result<(), G2gError> {
         let Some(app) = self.seek.clone() else {
             return Ok(());
         };
         loop {
-            if app.takes_seeks_after_end() {
-                for port in 0..self.ports.len() {
-                    out.push_to(port, PipelinePacket::Eos).await?;
+            match segment_end_ns {
+                Some(position_ns) => {
+                    app.notify_segment_done(position_ns);
+                    app.wait_for_seek().await;
                 }
-                app.wait_for_seek().await;
+                None if app.takes_seeks_after_end() => {
+                    self.end_ports(out).await?;
+                    app.wait_for_seek().await;
+                }
+                None => {}
             }
             if !app.has_pending() {
+                // the runner forwards no Eos for an element that took seeks while handling it
+                if segment_end_ns.is_some() {
+                    self.end_ports(out).await?;
+                }
                 return Ok(());
             }
-            self.parse_and_emit_whole(out).await?;
+            segment_end_ns = self.parse_and_emit_whole(out).await?;
         }
+    }
+
+    async fn end_ports(&self, out: &mut dyn MultiOutputSink) -> Result<(), G2gError> {
+        for port in 0..self.ports.len() {
+            out.push_to(port, PipelinePacket::Eos).await?;
+        }
+        Ok(())
     }
 
     // the one port opens at the target, from the keyframe at or before it
@@ -1059,20 +1084,39 @@ impl Mp4DemuxN {
         samples: Vec<(u32, Sample)>,
         seek: &Seek,
         out: &mut dyn MultiOutputSink,
-    ) -> Result<Vec<(u32, Sample)>, G2gError> {
+    ) -> Result<SeekSpan<(u32, Sample)>, G2gError> {
         let edit = track.presentation_segment();
-        let (samples, segment) = seek_samples(
+        let span = seek_samples(
             samples.into_iter().map(|(_, sample)| sample).collect(),
             edit,
             seek,
         );
+        let segment = if seek.is_flush() {
+            span.segment
+        } else {
+            // a non-flushing seek carries running time on from where the last span ended, as `Mp4Src` does
+            let played_to_ns = self.upstream_segment.stop.unwrap_or(span.stream_end_pts_ns);
+            Segment {
+                base: self
+                    .upstream_segment
+                    .to_running_time(played_to_ns)
+                    .unwrap_or(self.upstream_segment.base),
+                ..span.segment
+            }
+        };
         self.upstream_segment = segment;
         self.port_edit[0] = edit;
         self.send_port_segment(0, out).await?;
-        Ok(samples
-            .into_iter()
-            .map(|sample| (track.track_id, sample))
-            .collect())
+        Ok(SeekSpan {
+            samples: span
+                .samples
+                .into_iter()
+                .map(|sample| (track.track_id, sample))
+                .collect(),
+            segment,
+            end_ns: span.end_ns,
+            stream_end_pts_ns: span.stream_end_pts_ns,
+        })
     }
 
     /// The tracks some port forwards, the only ones worth de-framing.
@@ -1348,8 +1392,8 @@ impl MultiOutputElement for Mp4DemuxN {
                 PipelinePacket::Eos => {
                     self.advance(out).await?;
                     if self.emits_at_eos() {
-                        self.parse_and_emit_whole(out).await?;
-                        self.serve_seeks_after_samples(out).await?;
+                        let segment_end_ns = self.parse_and_emit_whole(out).await?;
+                        self.serve_seeks_after_samples(segment_end_ns, out).await?;
                     }
                 }
                 // A flush discards the buffer and the parse progress (a re-read
@@ -1464,13 +1508,33 @@ fn with_framerate(mut caps: Caps, rate: Rate) -> Caps {
     caps
 }
 
-// the samples from the keyframe at or before the target to the last presenting by the stop, with the segment moved onto them
-fn seek_samples(mut samples: Vec<Sample>, edit: Segment, seek: &Seek) -> (Vec<Sample>, Segment) {
+#[derive(Debug)]
+struct SeekSpan<S> {
+    // from the keyframe at or before the target to the last sample presenting by the stop
+    samples: Vec<S>,
+    segment: Segment,
+    // where the span ends in stream time: the stop, or the end of the stream
+    end_ns: u64,
+    stream_end_pts_ns: u64,
+}
+
+fn seek_samples(mut samples: Vec<Sample>, edit: Segment, seek: &Seek) -> SeekSpan<Sample> {
     // an edit list that starts presentation later moves the start time with it
     let stream_start_ns = edit.start.max(stream_start_ns(&samples));
-    let target_ns = seek.start.saturating_add(stream_start_ns);
-    let seek_stop_ns =
-        (seek.stop_type == SeekType::Set).then(|| seek.stop.saturating_add(stream_start_ns));
+    let stream_end_pts_ns = samples
+        .iter()
+        .map(|sample| sample.pts_ns.saturating_add(sample.duration_ns))
+        .max()
+        .unwrap_or(stream_start_ns);
+    let duration_ns = stream_end_pts_ns.saturating_sub(stream_start_ns);
+    // the whole file is parsed, so an edge counted back from the end lands on a known duration
+    let from_stream_start = |edge_type: SeekType, edge_ns: u64| match edge_type {
+        SeekType::End => duration_ns.saturating_sub(edge_ns),
+        SeekType::Set | SeekType::None => edge_ns,
+    };
+    let target_ns = from_stream_start(seek.start_type, seek.start).saturating_add(stream_start_ns);
+    let seek_stop_ns = (seek.stop_type != SeekType::None)
+        .then(|| from_stream_start(seek.stop_type, seek.stop).saturating_add(stream_start_ns));
     if let Some(stop_ns) = seek_stop_ns {
         // samples come in decode order, so a B frame presenting by the stop can follow one past it
         let end = samples
@@ -1489,7 +1553,14 @@ fn seek_samples(mut samples: Vec<Sample>, edit: Segment, seek: &Seek) -> (Vec<Sa
         stop: edit.stop.into_iter().chain(seek_stop_ns).min(),
         ..segment_from(target_ns, stream_start_ns)
     };
-    (samples, segment)
+    SeekSpan {
+        samples,
+        segment,
+        end_ns: seek_stop_ns
+            .unwrap_or(stream_end_pts_ns)
+            .saturating_sub(stream_start_ns),
+        stream_end_pts_ns,
+    }
 }
 
 #[cfg(test)]

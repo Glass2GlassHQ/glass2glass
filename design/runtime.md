@@ -554,6 +554,13 @@ it byte-seeks the source to its published length, so the source flushes and send
 `Eos` and the demuxer ends through its usual `Eos` path. A source with no length
 reads on and the demuxer drops its units. `Mp4DemuxN` serves seeks from the
 buffered file, so it drops the samples after the last one presenting by the stop.
+A SEGMENT seek's stop posts segment-done instead, and the demuxer waits at the top
+of its next `process` for the app's loop seek, which holds the source behind its
+input. A stop past the last unit posts segment-done at the source's `Eos`. A
+transform or demux arm forwards no `Eos` whose `process` took a seek, since the
+stream plays on from that seek. The byte-stream demuxers refuse an end-relative
+edge with `SeekRefusal::UnknownDuration`, as `gst_segment_do_seek` refuses one
+without a duration, and `Mp4DemuxN` counts it back from the parsed duration.
 
 `HlsSrc` and `DashSrc` are time sources: a seek target is playlist time, or
 presentation time across the Periods for DASH (a segment's time plus its Period's

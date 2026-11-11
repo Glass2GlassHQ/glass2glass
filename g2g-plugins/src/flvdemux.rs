@@ -521,6 +521,7 @@ impl AsyncElement for FlvDemux {
             }
             // M362: a pending app seek triggers an upstream byte-seek; until its
             // `Flush` returns, drop input so no stale pre-seek units are emitted.
+            self.seek.hold_at_segment_end().await;
             self.seek.poll_request();
             match packet {
                 PipelinePacket::DataFrame(frame) => {
@@ -547,7 +548,11 @@ impl AsyncElement for FlvDemux {
                     }
                 }
                 PipelinePacket::Eos => {
-                    if self.seek.eos_before_flush(self.seek.dropping_input())? {
+                    if self
+                        .seek
+                        .eos_before_flush(self.seek.dropping_input())
+                        .await?
+                    {
                         return Ok(());
                     }
                     // Emit any final access units. The runner's transform arm

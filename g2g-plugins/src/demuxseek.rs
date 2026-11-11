@@ -40,7 +40,7 @@ use alloc::vec::Vec;
 use core::iter::Chain;
 
 use g2g_core::log::{ClockTime, Target};
-use g2g_core::runtime::SeekController;
+use g2g_core::runtime::{SeekController, SeekRefusal};
 use g2g_core::{
     stream_time_ns, G2gError, MultiOutputSink, OutputSink, PipelinePacket, Seek, SeekFlags,
     SeekType, Segment,
@@ -134,6 +134,14 @@ impl SharedSegment {
     }
 }
 
+// a byte-stream demuxer knows no duration, and gst_segment_do_seek refuses an end-relative edge without one
+fn refuse_end_edges(seek: Seek) -> Result<Seek, SeekRefusal> {
+    if seek.start_type == SeekType::End || seek.stop_type == SeekType::End {
+        return Err(SeekRefusal::UnknownDuration);
+    }
+    Ok(seek)
+}
+
 #[derive(Debug)]
 pub(crate) struct Admitted<U> {
     // set when a seek completes: the caller sends it before the units
@@ -183,6 +191,8 @@ enum Phase {
     PastStop {
         end_flush_pending: bool,
     },
+    // a SEGMENT seek reached its stop and posted segment-done, input drops until the app's next seek
+    SegmentDone,
 }
 
 // the segment the stream runs under since the last flush
@@ -231,6 +241,8 @@ pub(crate) struct DemuxSeek<U> {
     seek_flushes: bool,
     // the stop edge of the seek in flight, counted from the stream start as its start is
     seek_stop: (SeekType, u64),
+    // whether the last seek taken was a SEGMENT seek, which ends in segment-done instead of Eos
+    segment_mode: bool,
     // the last segment out, the runner's opening one until this sends its own, and the latest pts out under it
     sent_segment: Segment,
     position_ns: Option<u64>,
@@ -249,6 +261,7 @@ impl<U> Default for DemuxSeek<U> {
             segment: StreamSegment::Unsent,
             seek_flushes: true,
             seek_stop: (SeekType::None, 0),
+            segment_mode: false,
             sent_segment: Segment::new(),
             position_ns: None,
         }
@@ -282,8 +295,8 @@ impl<U> DemuxSeek<U> {
         &mut self,
         resolve: impl FnOnce(u64) -> Option<u64>,
     ) -> bool {
-        let past_stop = matches!(self.phase, Phase::PastStop { .. });
-        if (self.phase != Phase::Idle && !past_stop) || self.upstream.is_none() {
+        let stream_ended = matches!(self.phase, Phase::PastStop { .. } | Phase::SegmentDone);
+        if (self.phase != Phase::Idle && !stream_ended) || self.upstream.is_none() {
             return false;
         }
         let Some(seek) = self.take_app_seek() else {
@@ -302,11 +315,19 @@ impl<U> DemuxSeek<U> {
         true
     }
 
+    // the source waits behind this element's input until the app loops the segment or shuts the run down
+    pub(crate) async fn hold_at_segment_end(&self) {
+        if self.phase == Phase::SegmentDone {
+            self.wait_for_seek_or_shutdown().await;
+        }
+    }
+
     // for a caller that repositions before the seek proper, as mkvdemux fetching its Cues does
     pub(crate) fn take_app_seek(&mut self) -> Option<Seek> {
-        let seek = self.app.as_ref()?.take_seek(Ok)?;
+        let seek = self.app.as_ref()?.take_seek(refuse_end_edges)?;
         self.seek_flushes = seek.is_flush();
         self.seek_stop = (seek.stop_type, seek.stop);
+        self.segment_mode = seek.flags.contains(SeekFlags::SEGMENT);
         Some(seek)
     }
 
@@ -451,11 +472,28 @@ impl<U> DemuxSeek<U> {
         self.phase = Phase::AwaitingFlush { target };
     }
 
-    // true for an Eos that came before the flush of a seek already taken, a source that returned at that Eos never flushes
-    pub(crate) fn eos_before_flush(&self, awaiting_flush: bool) -> Result<bool, G2gError> {
+    // true for an Eos the stream goes on after: one before the flush of a seek already taken, or one a SEGMENT loop seek answers
+    pub(crate) async fn eos_before_flush(
+        &mut self,
+        awaiting_flush: bool,
+    ) -> Result<bool, G2gError> {
         // a source parked at its end still serves the seek to the end, and its flush and Eos follow
         if let Phase::PastStop { end_flush_pending } = self.phase {
             return Ok(end_flush_pending && self.takes_seeks_after_end());
+        }
+        // a SEGMENT seek whose stop lies past the last unit ends here, gst posts segment-done at the end of the stream
+        let segment_end_ns = self.sent_segment.stop.or(self.position_ns);
+        if let (Phase::Idle, true, Some(segment_end_ns)) =
+            (self.phase, self.segment_mode, segment_end_ns)
+        {
+            if self.takes_seeks_after_end() {
+                self.end_segment(segment_end_ns);
+            }
+        }
+        if self.phase == Phase::SegmentDone {
+            // a parked source restarts for the app's loop seek, after a shutdown the stream ends here
+            self.wait_for_seek_or_shutdown().await;
+            return Ok(self.poll_request());
         }
         if !awaiting_flush {
             return Ok(false);
@@ -503,7 +541,7 @@ impl<U> DemuxSeek<U> {
     pub(crate) fn dropping_input(&self) -> bool {
         matches!(
             self.phase,
-            Phase::AwaitingFlush { .. } | Phase::PastStop { .. }
+            Phase::AwaitingFlush { .. } | Phase::PastStop { .. } | Phase::SegmentDone
         )
     }
 
@@ -575,7 +613,10 @@ impl<U> DemuxSeek<U> {
     fn discard_target_ns(&mut self, pts_ns: u64) -> Option<u64> {
         let stream_start_ns = *self.stream_start_ns.get_or_insert(pts_ns);
         match self.phase {
-            Phase::Idle | Phase::AwaitingFlush { .. } | Phase::PastStop { .. } => None,
+            Phase::Idle
+            | Phase::AwaitingFlush { .. }
+            | Phase::PastStop { .. }
+            | Phase::SegmentDone => None,
             Phase::Discarding {
                 target: SeekTarget::Pts(target_ns),
             } => Some(target_ns),
@@ -590,12 +631,12 @@ impl<U> DemuxSeek<U> {
         if self.dropping_input() {
             return Admitted::empty();
         }
-        if self
-            .sent_segment
-            .stop
-            .is_some_and(|stop_ns| pts_ns > stop_ns)
-        {
-            self.end_at_stop(pts_ns);
+        if let Some(stop_ns) = self.sent_segment.stop.filter(|stop_ns| pts_ns > *stop_ns) {
+            if self.segment_mode {
+                self.end_segment(stop_ns);
+            } else {
+                self.end_at_stop(pts_ns);
+            }
             return Admitted::empty();
         }
         self.position_ns = Some(
@@ -624,6 +665,25 @@ impl<U> DemuxSeek<U> {
         };
     }
 
+    // the next loop's running time counts on from `end_pts_ns`, so a gapless loop advances by the whole span
+    fn end_segment(&mut self, end_pts_ns: u64) {
+        let stream_start_ns = self
+            .stream_start_ns
+            .expect("a unit out before the segment end set the stream start");
+        let position_ns = end_pts_ns.saturating_sub(stream_start_ns);
+        g2g_core::g2g_debug!(
+            Target::category(LOG_CATEGORY),
+            "the segment ended at {}, posting segment-done",
+            ClockTime(position_ns)
+        );
+        if let Some(app) = &self.app {
+            app.notify_segment_done(position_ns);
+        }
+        self.position_ns = Some(end_pts_ns);
+        self.kept.clear();
+        self.phase = Phase::SegmentDone;
+    }
+
     fn reach_target(&mut self, target_ns: u64, pts_ns: u64, unit: U) -> Admitted<U> {
         let stream_start_ns = self
             .stream_start_ns
@@ -634,10 +694,9 @@ impl<U> DemuxSeek<U> {
             ClockTime(target_ns),
             self.kept.len() + 1
         );
-        // demuxers know no duration to place an End stop, so it keeps the stop in effect as None does
         let (stop_type, stop) = match self.seek_stop {
             (SeekType::Set, stop_ns) => (SeekType::Set, stop_ns.saturating_add(stream_start_ns)),
-            (SeekType::None | SeekType::End, _) => (SeekType::None, 0),
+            (stop_type, stop_ns) => (stop_type, stop_ns),
         };
         let target = Seek {
             flags: if self.seek_flushes {
@@ -679,7 +738,7 @@ impl<U> DemuxSeek<U> {
 mod tests {
     use super::*;
     use alloc::vec;
-    use g2g_core::runtime::SeekController;
+    use g2g_core::runtime::{block_on, SeekController, SeekOutcome};
 
     const TARGET_NS: u64 = 5_000;
 
@@ -706,11 +765,11 @@ mod tests {
         let app = SeekController::new();
         let mut s: DemuxSeek<u64> = DemuxSeek::default();
         s.with(app.clone(), SeekController::new());
-        assert_eq!(s.eos_before_flush(s.dropping_input()), Ok(false));
+        assert_eq!(block_on(s.eos_before_flush(s.dropping_input())), Ok(false));
         app.seek(Seek::flush_to(TARGET_NS));
         assert!(s.poll_request());
         assert_eq!(
-            s.eos_before_flush(s.dropping_input()),
+            block_on(s.eos_before_flush(s.dropping_input())),
             Err(G2gError::SeekRefused),
             "a source that ended at this Eos never repositions"
         );
@@ -755,13 +814,67 @@ mod tests {
             Some(STREAM_LEN)
         );
         assert_eq!(
-            s.eos_before_flush(s.dropping_input()),
+            block_on(s.eos_before_flush(s.dropping_input())),
             Ok(false),
             "a source that ended first ends the stream"
         );
         assert!(
             !s.on_flush(),
             "the flush of the seek to the end stays upstream"
+        );
+    }
+
+    #[test]
+    fn a_segment_seek_posts_segment_done_at_its_stop_and_takes_the_loop_seek() {
+        const STOP_NS: u64 = 8_000;
+        let app = SeekController::new();
+        let upstream = SeekController::new();
+        upstream.set_stream_len(4_096);
+        let mut s = DemuxSeek::default();
+        s.with(app.clone(), upstream.clone());
+        s.note_stream_start(0);
+        let segment_seek = |flags: SeekFlags| Seek {
+            flags: flags | SeekFlags::SEGMENT,
+            stop_type: SeekType::Set,
+            stop: STOP_NS,
+            ..Seek::flush_to(TARGET_NS)
+        };
+        app.seek(segment_seek(SeekFlags::FLUSH));
+        assert!(s.poll_request());
+        upstream.take_seek(Ok);
+        assert!(s.on_flush());
+        assert!(s.admit(TARGET_NS, true, TARGET_NS).segment.is_some());
+        assert_eq!(units(s.admit(STOP_NS + 1, false, 0)), (None, vec![]));
+        assert_eq!(app.take_segment_done(), Some(STOP_NS));
+        assert!(s.dropping_input());
+        assert!(
+            !upstream.has_pending(),
+            "the source is held, not sent to its end"
+        );
+
+        app.seek(segment_seek(SeekFlags::NONE));
+        block_on(s.hold_at_segment_end());
+        assert!(s.poll_request(), "the loop seek restarts the source");
+        assert_eq!(upstream.take_seek(Ok).map(|seek| seek.start), Some(0));
+        assert!(
+            !s.on_flush(),
+            "a non-flushing loop keeps its flush upstream"
+        );
+    }
+
+    #[test]
+    fn an_edge_counted_from_the_end_is_refused() {
+        let app = SeekController::new();
+        let mut s: DemuxSeek<u64> = DemuxSeek::default();
+        s.with(app.clone(), SeekController::new());
+        let ticket = app.seek(Seek {
+            stop_type: SeekType::End,
+            ..Seek::flush_to(TARGET_NS)
+        });
+        assert!(!s.poll_request());
+        assert_eq!(
+            ticket.outcome(),
+            Some(SeekOutcome::Refused(SeekRefusal::UnknownDuration))
         );
     }
 

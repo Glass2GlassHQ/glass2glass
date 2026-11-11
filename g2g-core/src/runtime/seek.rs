@@ -89,6 +89,8 @@ pub enum SeekRefusal {
     // the live window a seek can reach, in stream time
     OutsideLiveWindow { start_ns: u64, stop_ns: u64 },
     NoLiveWindow,
+    // an edge counted back from the end, on a stream whose duration the element does not know
+    UnknownDuration,
 }
 
 impl core::fmt::Display for SeekRefusal {
@@ -102,6 +104,10 @@ impl core::fmt::Display for SeekRefusal {
                 ClockTime(*stop_ns)
             ),
             Self::NoLiveWindow => write!(f, "the live stream lists no window to seek in"),
+            Self::UnknownDuration => write!(
+                f,
+                "the element knows no duration to count an end-relative edge from"
+            ),
         }
     }
 }
@@ -197,6 +203,7 @@ struct SeekInner {
 
 #[derive(Debug, Default, Clone, Copy)]
 struct SeekCounts {
+    seeks_taken: u64,
     flushing_seeks_taken: u64,
     // the flushing seek count at which every sink took the end of the stream
     stream_ended_at: Option<u64>,
@@ -249,9 +256,12 @@ impl SeekController {
         let seek = self.past_relayed_leading_bytes(seek);
         match accept(seek) {
             Ok(seek) => {
+                let mut counts = self.inner.seek_counts.lock();
+                counts.seeks_taken += 1;
                 if seek.is_flush() {
-                    self.inner.seek_counts.lock().flushing_seeks_taken += 1;
+                    counts.flushing_seeks_taken += 1;
                 }
+                drop(counts);
                 ticket.answer(SeekOutcome::Served);
                 Some(seek)
             }
@@ -431,6 +441,11 @@ impl SeekController {
     pub fn stream_ended(&self) -> bool {
         let counts = *self.inner.seek_counts.lock();
         counts.stream_ended_at == Some(counts.flushing_seeks_taken) && !self.has_pending()
+    }
+
+    #[cfg(feature = "std")]
+    pub(crate) fn seeks_taken(&self) -> u64 {
+        self.inner.seek_counts.lock().seeks_taken
     }
 
     #[cfg(feature = "std")]
