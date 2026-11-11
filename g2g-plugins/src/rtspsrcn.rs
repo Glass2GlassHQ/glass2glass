@@ -66,6 +66,7 @@ use crate::reconnect::{
     ReconnectPolicy, ReconnectState, RECONNECT_BACKOFF_MAX_PROP, RECONNECT_BACKOFF_PROP,
     RECONNECT_PTS_GAP_NS, SOURCE_RECONNECT_PROP,
 };
+use crate::rtcp::SenderClock;
 use crate::rtspclient::{transports_from_flags, transports_to_flags, LowerTransport};
 use crate::typefind::{elementary_video_caps, PLACEHOLDER_FRAMERATE};
 
@@ -739,29 +740,6 @@ fn inflate_gzip(data: &[u8]) -> Option<Vec<u8>> {
     miniz_oxide::inflate::decompress_to_vec_with_limit(deflate, MAX_INFLATED_METADATA_LEN).ok()
 }
 
-/// The wall clock a stream's latest sender report pins its RTP clock to: an
-/// instant on the sender's clock and the media timestamp it names.
-#[derive(Debug, Clone, Copy)]
-struct SenderClock {
-    unix_nanos: i64,
-    rtp_timestamp: u32,
-    clock_rate_hz: u32,
-}
-
-impl SenderClock {
-    /// The sender's wall-clock time for the frame stamped `rtp_timestamp`,
-    /// nanoseconds since the Unix epoch. The RTP timestamp wraps at 2^32, so
-    /// the distance from the report is taken as a signed 32-bit difference and
-    /// a frame just before the report reads as earlier rather than as most of a
-    /// wrap ahead.
-    fn wall_clock_ns(&self, rtp_timestamp: u32) -> i64 {
-        const NANOS_PER_SEC: i64 = 1_000_000_000;
-        let delta = rtp_timestamp.wrapping_sub(self.rtp_timestamp) as i32;
-        let rate = i64::from(self.clock_rate_hz.max(1));
-        self.unix_nanos + i64::from(delta) * NANOS_PER_SEC / rate
-    }
-}
-
 fn audio_params_for(streams: &[retina::client::Stream], idx: usize) -> Option<&AudioParameters> {
     match streams[idx].parameters() {
         Some(ParametersRef::Audio(a)) => Some(a),
@@ -1355,17 +1333,15 @@ async fn run_session(
                     .pkts()
                     .next()
                     .and_then(|p| p.as_sender_report().ok().flatten());
-                // RFC 3550 lets a sender without a wall clock report NTP zero.
-                let sr = sr.and_then(|sr| {
-                    Some((g2g_core::unix_nanos_from_ntp(sr.ntp_timestamp().0)?, sr))
+                let clock = sr.and_then(|sr| {
+                    SenderClock::from_report(
+                        sr.ntp_timestamp().0,
+                        sr.rtp_timestamp(),
+                        demuxed.streams()[stream_id].clock_rate_hz(),
+                    )
                 });
-                if let (Some((unix_nanos, sr)), Some(slot)) = (sr, sender_clocks.get_mut(stream_id))
-                {
-                    *slot = Some(SenderClock {
-                        unix_nanos,
-                        rtp_timestamp: sr.rtp_timestamp(),
-                        clock_rate_hz: demuxed.streams()[stream_id].clock_rate_hz(),
-                    });
+                if let (Some(clock), Some(slot)) = (clock, sender_clocks.get_mut(stream_id)) {
+                    *slot = Some(clock);
                 }
                 continue;
             }
@@ -1766,57 +1742,6 @@ mod tests {
             assert_eq!(onvif_metadata_gzip(exi), None);
         }
         assert_eq!(onvif_metadata_gzip("vnd.onvif.metadata.other"), None);
-    }
-
-    /// 2008-10-10T12:24:57.321Z, the instant the ONVIF Analytics Specification's
-    /// first example frame names (section 5.1.3.1, page 13).
-    const SPEC_EXAMPLE_NANOS: i64 = 1_223_641_497_321_000_000;
-    const VIDEO_CLOCK_HZ: u32 = 90_000;
-
-    #[test]
-    fn a_sender_report_puts_frames_on_the_senders_wall_clock() {
-        // The same instant as an NTP timestamp: seconds since 1900 in the high
-        // word, the .321 as a binary fraction in the low.
-        let secs = (SPEC_EXAMPLE_NANOS / 1_000_000_000) as u64 + g2g_core::NTP_TO_UNIX_EPOCH_SECS;
-        let frac = (321_000_000u64 << 32) / 1_000_000_000;
-        let ntp = (secs << 32) | frac;
-        assert_eq!(g2g_core::unix_nanos_from_ntp(ntp), Some(SPEC_EXAMPLE_NANOS));
-
-        let clock = SenderClock {
-            unix_nanos: SPEC_EXAMPLE_NANOS,
-            rtp_timestamp: 1_000_000,
-            clock_rate_hz: VIDEO_CLOCK_HZ,
-        };
-        // The report's own timestamp is the report's own instant.
-        assert_eq!(clock.wall_clock_ns(1_000_000), SPEC_EXAMPLE_NANOS);
-        // One second of 90 kHz ticks after it, and one second before.
-        assert_eq!(
-            clock.wall_clock_ns(1_000_000 + VIDEO_CLOCK_HZ),
-            SPEC_EXAMPLE_NANOS + 1_000_000_000
-        );
-        assert_eq!(
-            clock.wall_clock_ns(1_000_000 - VIDEO_CLOCK_HZ),
-            SPEC_EXAMPLE_NANOS - 1_000_000_000
-        );
-    }
-
-    #[test]
-    fn the_wall_clock_survives_an_rtp_timestamp_wrap() {
-        // A report taken one second of ticks before the 32-bit RTP clock wraps.
-        let clock = SenderClock {
-            unix_nanos: SPEC_EXAMPLE_NANOS,
-            rtp_timestamp: u32::MAX - VIDEO_CLOCK_HZ + 1,
-            clock_rate_hz: VIDEO_CLOCK_HZ,
-        };
-        // A frame a second after it, on the far side of the wrap. Read as an
-        // unsigned difference this would have come out most of a wrap ahead
-        // (about 13 hours) instead of a second.
-        assert_eq!(clock.wall_clock_ns(0), SPEC_EXAMPLE_NANOS + 1_000_000_000);
-        // And one from a second before the report, on the near side.
-        assert_eq!(
-            clock.wall_clock_ns(u32::MAX - 2 * VIDEO_CLOCK_HZ + 1),
-            SPEC_EXAMPLE_NANOS - 1_000_000_000,
-        );
     }
 
     #[test]

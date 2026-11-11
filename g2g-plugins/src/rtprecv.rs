@@ -17,6 +17,8 @@
 //! the RTP port negotiated over an RTSP control channel); the receive path is
 //! identical, so it lives here once.
 
+use core::cell::Cell;
+
 use std::net::SocketAddr;
 use std::vec::Vec;
 
@@ -32,7 +34,7 @@ use crate::filesink::io_err;
 use crate::flexfec::FlexFecDecoder;
 use crate::nalparse::NalCodec;
 use crate::rist::NackScheduler;
-use crate::rtcp::{self, ReceptionStats, RtcpPacket};
+use crate::rtcp::{self, ReceptionStats, RtcpPacket, SenderClock};
 use crate::rtpdepay::{AccessUnit, RtpDepayloader, RtpEncoding};
 use crate::rtpjitter::{JitterConfig, RtpJitterBuffer, RtpPtsRebase};
 use crate::rtx;
@@ -242,10 +244,54 @@ impl CaptureTimeLatch {
     }
 }
 
+// the instants one sender's RTP streams share, so their PTS line up on one timeline
+#[derive(Debug, Default)]
+pub(crate) struct SessionTimeline {
+    // the local monotonic instant PTS zero stands for, set by the session's first frame
+    origin_ns: Cell<Option<i64>>,
+    // the sender's wall clock minus local monotonic time, from the session's first sender report
+    sender_minus_local_ns: Cell<Option<i64>>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct TrackTimeline<'a> {
+    pub(crate) session: &'a SessionTimeline,
+    pub(crate) sender_clock: &'a Cell<Option<SenderClock>>,
+}
+
+impl TrackTimeline<'_> {
+    #[cfg(feature = "rtsp-server")]
+    pub(crate) fn note_sender_report(&self, clock: SenderClock, arrival_ns: u64) {
+        self.sender_clock.set(Some(clock));
+        let offsets = &self.session.sender_minus_local_ns;
+        if offsets.get().is_none() {
+            offsets.set(Some(clock.unix_nanos - arrival_ns as i64));
+        }
+    }
+
+    // where on the session timeline the frame stamped `rtp_timestamp` falls, from the
+    // sender report when one came first and from the frame's arrival otherwise
+    fn session_offset_ns(&self, rtp_timestamp: u32, arrival_ns: u64) -> i64 {
+        let local_ns = match (
+            self.sender_clock.get(),
+            self.session.sender_minus_local_ns.get(),
+        ) {
+            (Some(clock), Some(offset)) => clock.wall_clock_ns(rtp_timestamp) - offset,
+            _ => arrival_ns as i64,
+        };
+        let origin = self.session.origin_ns.get().unwrap_or(local_ns);
+        self.session.origin_ns.set(Some(origin));
+        local_ns - origin
+    }
+}
+
 // turns depayloaded access units into frames with PTS rebased to start at zero,
 // shared by the UDP (`receive_rtp`) and TCP-interleaved (`rtspingest`) ingest paths
 #[derive(Debug)]
-pub(crate) struct AccessUnitEmitter {
+pub(crate) struct AccessUnitEmitter<'a> {
+    // taken by the first access unit, which places this stream on the session timeline
+    timeline: Option<TrackTimeline<'a>>,
+    session_offset_ns: i64,
     encoding: RtpEncoding,
     // emptied at the first keyframe
     parameter_sets: Vec<u8>,
@@ -259,10 +305,17 @@ pub(crate) struct AccessUnitEmitter {
     frame_limit: u64,
 }
 
-impl AccessUnitEmitter {
+impl<'a> AccessUnitEmitter<'a> {
     // `seq_base` is the sequence number the first emitted frame carries
-    pub(crate) fn new(cfg: &RtpRecvConfig, seq_base: u64, frame_limit: u64) -> Self {
+    pub(crate) fn new(
+        cfg: &RtpRecvConfig,
+        seq_base: u64,
+        frame_limit: u64,
+        timeline: Option<TrackTimeline<'a>>,
+    ) -> Self {
         Self {
+            timeline,
+            session_offset_ns: 0,
             encoding: cfg.encoding.clone(),
             parameter_sets: cfg.parameter_sets.clone(),
             pts_rebase: RtpPtsRebase::new(),
@@ -295,12 +348,19 @@ impl AccessUnitEmitter {
         capture_unix_ns: Option<i64>,
         out: &mut dyn OutputSink,
     ) -> Result<bool, G2gError> {
-        let pts = self.pts_offset_ns
+        let arrival_ns = g2g_core::metrics::monotonic_ns();
+        if let Some(timeline) = self.timeline.take() {
+            self.session_offset_ns = timeline.session_offset_ns(au.rtp_timestamp, arrival_ns);
+        }
+        let stream_pts = self.pts_offset_ns
             + self
                 .pts_rebase
                 .pts_ns(au.rtp_timestamp, self.encoding.clock_rate_hz());
+        // a stream that started before the session's first frame drops what precedes it
+        let Ok(pts) = u64::try_from(stream_pts as i64 + self.session_offset_ns) else {
+            return Ok(false);
+        };
         self.last_pts_ns = pts;
-        let arrival_ns = g2g_core::metrics::monotonic_ns();
         // false (the safe default) for H.264 without an IDR NAL.
         let keyframe = self.encoding.is_keyframe(&au.data);
         let announced = if keyframe {
@@ -428,13 +488,14 @@ pub(crate) async fn receive_rtp(
     cfg: &RtpRecvConfig,
     frame_limit: u64,
     seq_base: u64,
+    timeline: Option<TrackTimeline<'_>>,
     out: &mut dyn OutputSink,
 ) -> Result<u64, G2gError> {
     if crate::numbuffers::finished_at_zero_limit(frame_limit, out).await? {
         return Ok(0);
     }
     let mut sender = SenderReceiveState::new(cfg);
-    let mut emitter = AccessUnitEmitter::new(cfg, seq_base, frame_limit);
+    let mut emitter = AccessUnitEmitter::new(cfg, seq_base, frame_limit, timeline);
     let mut ssrc_lock = SsrcLock::default();
     // The original media stream's SSRC, learned from the first non-RTX packet;
     // an RFC 4588 RTX resend is restamped back onto it.
@@ -607,5 +668,129 @@ pub(crate) async fn receive_rtp(
                 }
             }
         }
+    }
+}
+
+#[cfg(all(test, feature = "rtsp-server"))]
+mod tests {
+    use super::*;
+    use crate::testutil::CollectSink;
+    use g2g_core::runtime::block_on;
+
+    const VIDEO_CLOCK_HZ: u32 = 90_000;
+    const AUDIO_CLOCK_HZ: u32 = 48_000;
+    const NANOS_PER_MS: u64 = 1_000_000;
+    // 2026-01-01T00:00:00Z, the instant both sender reports name
+    const REPORT_UNIX_NS: i64 = 1_767_225_600_000_000_000;
+    const VIDEO_REPORT_RTP: u32 = 1_000;
+    const AUDIO_REPORT_RTP: u32 = 5_000;
+    // local monotonic time the first sender report arrived at
+    const REPORT_ARRIVAL_NS: u64 = 1_000_000_000;
+
+    fn report(rtp_timestamp: u32, clock_rate_hz: u32) -> SenderClock {
+        SenderClock {
+            unix_nanos: REPORT_UNIX_NS,
+            rtp_timestamp,
+            clock_rate_hz,
+        }
+    }
+
+    fn ticks_after(base: u32, clock_rate_hz: u32, ms: u64) -> u32 {
+        base + (u64::from(clock_rate_hz) * ms / 1_000) as u32
+    }
+
+    fn emitter<'a>(encoding: RtpEncoding, timeline: TrackTimeline<'a>) -> AccessUnitEmitter<'a> {
+        let cfg = RtpRecvConfig {
+            encoding,
+            ..RtpRecvConfig::default()
+        };
+        AccessUnitEmitter::new(&cfg, 0, u64::MAX, Some(timeline))
+    }
+
+    fn access_unit(rtp_timestamp: u32) -> AccessUnit {
+        AccessUnit {
+            data: Vec::from([0u8; 4]),
+            rtp_timestamp,
+        }
+    }
+
+    fn pts_ms(sink: &CollectSink) -> Vec<u64> {
+        sink.packets
+            .iter()
+            .filter_map(|packet| match packet {
+                PipelinePacket::DataFrame(frame) => Some(frame.timing.pts_ns / NANOS_PER_MS),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn sender_reports_put_both_tracks_on_one_timeline() {
+        let session = SessionTimeline::default();
+        let (video_clock, audio_clock) = (Cell::new(None), Cell::new(None));
+        let video = TrackTimeline {
+            session: &session,
+            sender_clock: &video_clock,
+        };
+        let audio = TrackTimeline {
+            session: &session,
+            sender_clock: &audio_clock,
+        };
+        video.note_sender_report(report(VIDEO_REPORT_RTP, VIDEO_CLOCK_HZ), REPORT_ARRIVAL_NS);
+        // A later arrival of the second report moves nothing: both name one instant.
+        audio.note_sender_report(
+            report(AUDIO_REPORT_RTP, AUDIO_CLOCK_HZ),
+            REPORT_ARRIVAL_NS + 3 * NANOS_PER_MS,
+        );
+        let mut video_emitter = emitter(RtpEncoding::H264, video);
+        let mut audio_emitter = emitter(RtpEncoding::Opus, audio);
+        let (mut video_out, mut audio_out) = (CollectSink::default(), CollectSink::default());
+
+        block_on(async {
+            // Video's first frame, 100 ms after the reports, is the session origin.
+            for ms in [100, 200] {
+                let rtp = ticks_after(VIDEO_REPORT_RTP, VIDEO_CLOCK_HZ, ms);
+                video_emitter
+                    .push(access_unit(rtp), None, &mut video_out)
+                    .await
+                    .unwrap();
+            }
+            // Audio's frame at 40 ms precedes the origin and is dropped.
+            for ms in [40, 140] {
+                let rtp = ticks_after(AUDIO_REPORT_RTP, AUDIO_CLOCK_HZ, ms);
+                audio_emitter
+                    .push(access_unit(rtp), None, &mut audio_out)
+                    .await
+                    .unwrap();
+            }
+        });
+
+        assert_eq!(pts_ms(&video_out), [0, 100]);
+        assert_eq!(pts_ms(&audio_out), [40]);
+    }
+
+    #[test]
+    fn a_track_without_a_sender_report_is_placed_by_arrival() {
+        let session = SessionTimeline::default();
+        let (video_clock, audio_clock) = (Cell::new(None), Cell::new(None));
+        let video = TrackTimeline {
+            session: &session,
+            sender_clock: &video_clock,
+        };
+        let audio = TrackTimeline {
+            session: &session,
+            sender_clock: &audio_clock,
+        };
+        video.note_sender_report(report(VIDEO_REPORT_RTP, VIDEO_CLOCK_HZ), REPORT_ARRIVAL_NS);
+        // The frame the report names maps to the report's own arrival.
+        assert_eq!(
+            video.session_offset_ns(VIDEO_REPORT_RTP, REPORT_ARRIVAL_NS + 7 * NANOS_PER_MS),
+            0
+        );
+        let audio_arrival_ns = REPORT_ARRIVAL_NS + 250 * NANOS_PER_MS;
+        assert_eq!(
+            audio.session_offset_ns(AUDIO_REPORT_RTP, audio_arrival_ns),
+            (250 * NANOS_PER_MS) as i64
+        );
     }
 }

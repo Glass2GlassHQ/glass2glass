@@ -13,8 +13,14 @@
 //! Shape: a contribution endpoint (e.g. an encoder/camera that publishes to an
 //! RTSP server with `ffmpeg -f rtsp -rtsp_transport udp ...`). The TCP listener
 //! is bound in `configure_pipeline`; `run` accepts a publisher, drives the
-//! handshake to RECORD, then depayloads the RTP it receives into H.264 access
-//! units emitted downstream.
+//! handshake to RECORD, then depayloads the RTP it receives into H.264 / H.265
+//! access units emitted downstream.
+//!
+//! Audio: with an audio pad (`with_audio_pad`, or a launch line linking a second
+//! pad) the publisher's first AAC track is recorded onto pad 1 as ADTS. Video and
+//! audio PTS share one timeline, placed from the publisher's RTCP sender reports
+//! (a track with no report before its first frame is placed by arrival time).
+//! Announced tracks no pad records are SETUP and their packets dropped.
 //!
 //! Transport: both unicast UDP (`RTP/AVP;client_port=`, the jitter/RTCP/FEC
 //! receive path shared with `UdpSrc`) and TCP-interleaved (`RTP/AVP/TCP;
@@ -49,20 +55,20 @@ use std::net::{SocketAddr, TcpListener as StdTcpListener};
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
     Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError, LatencyReport,
-    OutputSink, OutputSinkExt, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
-    PropValue, PropertySpec, Rate, VideoCodec,
+    MultiOutputSink, MultiOutputSource, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
+    PropError, PropKind, PropValue, PropertySpec, Rate, VideoCodec,
 };
 
 use crate::filesink::io_err;
-use crate::rtpdepay::RtpEncoding;
+use crate::oneport::OnePortSink;
+use crate::rtpdepay::{RtpEncoding, ADTS_AAC_CAPS};
 use crate::rtpjitter::JitterConfig;
-use crate::rtprecv::{AccessUnitEmitter, RtpRecvConfig};
+use crate::rtprecv::RtpRecvConfig;
 use crate::rtspingest::{
-    handshake, inactive_for, receive_interleaved, refuse_one, session_recv_config, watch_control,
-    RecordTransport, SessionEnd, SessionTap,
+    end_session, forward_pads, handshake, inactive_for, ingest_codec, receive_session, refuse_one,
+    IngestFormat, IngestPad, PadSink, SessionEnd, SessionTap, PAD_QUEUE,
 };
 use crate::rtspserver::{sdp_h264, RtspResponder, DEFAULT_SESSION_TIMEOUT_SECS};
-use crate::udprecv::{UdpReceiveConfig, UdpReceiver};
 
 /// Default dynamic RTP payload type for H.264.
 const DEFAULT_PAYLOAD_TYPE: u8 = 96;
@@ -70,6 +76,8 @@ const DEFAULT_PAYLOAD_TYPE: u8 = 96;
 const DEFAULT_WIDTH: u32 = 1280;
 const DEFAULT_HEIGHT: u32 = 720;
 const DEFAULT_FPS: u32 = 30;
+const VIDEO_PORT: usize = 0;
+const AUDIO_PORT: usize = 1;
 
 /// # Example
 ///
@@ -107,6 +115,7 @@ pub struct RtspServerSrc {
     session_timeout_ns: u64,
     listener: Option<StdTcpListener>,
     configured: bool,
+    audio_pad: bool,
     /// Publishers that reached RECORD, and connections refused (503) because one
     /// was already recording. Readable once `run` returns.
     sessions_served: u64,
@@ -141,6 +150,7 @@ impl RtspServerSrc {
             session_timeout_ns: DEFAULT_SESSION_TIMEOUT_SECS as u64 * 1_000_000_000,
             listener: None,
             configured: false,
+            audio_pad: false,
             sessions_served: 0,
             sessions_refused: 0,
         }
@@ -213,6 +223,13 @@ impl RtspServerSrc {
         self
     }
 
+    /// Record the publisher's first AAC track onto a second output pad, as ADTS.
+    /// Only the multi-output form ([`MultiOutputSource`]) has that pad.
+    pub fn with_audio_pad(mut self, on: bool) -> Self {
+        self.audio_pad = on;
+        self
+    }
+
     /// Per-session inactivity timeout: a publisher that sends neither media nor a
     /// control request within it is torn down and the element returns to
     /// listening, so a peer that vanishes without closing its TCP connection
@@ -258,16 +275,123 @@ impl RtspServerSrc {
         crate::rtspingest::ingest_caps(&self.recv, self.width, self.height, self.fps)
     }
 
-    fn responder(&self, server_rtp_port: u16) -> RtspResponder {
+    fn responder(&self) -> RtspResponder {
         // An ingest server: the publisher describes the stream, not this end, so
         // there are no parameter sets of its own to offer.
         RtspResponder::new(
             sdp_h264(self.payload_type, None, None),
-            server_rtp_port,
+            // the handshake binds and advertises a port pair per announced track
+            0,
             self.ssrc,
         )
-        .accepting_codec(crate::rtspingest::ingest_codec(&self.recv))
+        .accepting_codec(ingest_codec(&self.recv))
         .with_session_timeout_secs(self.session_timeout_secs())
+    }
+
+    /// Serve publishers one at a time onto the ports of `out` (video, then AAC)
+    /// until `max-sessions` of them have recorded (0 = forever) or `num-buffers`
+    /// access units have been emitted on every recorded track. Each session owns
+    /// its sockets and responder, dropped when it ends, and anyone who connects
+    /// mid-session is refused with a 503.
+    async fn serve(&mut self, out: &mut dyn MultiOutputSink) -> Result<u64, G2gError> {
+        let ports = out.port_count();
+        if crate::numbuffers::finished_at_zero_limit_multi(self.frame_limit, ports, out).await? {
+            return Ok(0);
+        }
+        let std_listener = match self.listener.take() {
+            Some(listener) => listener,
+            None => StdTcpListener::bind(self.rtsp_addr).map_err(io_err)?,
+        };
+        std_listener.set_nonblocking(true).map_err(io_err)?;
+        let listener = tokio::net::TcpListener::from_std(std_listener).map_err(io_err)?;
+
+        let this = &*self;
+        let frame_limit = this.frame_limit;
+        let timeout_ns = this.session_timeout_ns;
+        let frame_period_ns = match this.fps {
+            0 => 0,
+            fps => 1_000_000_000 / fps as u64,
+        };
+        let formats = [
+            IngestFormat::Video(ingest_codec(&this.recv)),
+            IngestFormat::Aac,
+        ];
+
+        let activity = Cell::new(g2g_core::metrics::monotonic_ns());
+        let refused = Cell::new(0u64);
+        let served = Cell::new(0u64);
+        let (tx, rx) = g2g_core::runtime::bounded::<(usize, PipelinePacket)>(PAD_QUEUE * ports);
+        let sinks: Vec<PadSink> = (0..ports)
+            .map(|port| PadSink::new(port, tx.clone()))
+            .collect();
+        drop(tx);
+
+        let sessions = async {
+            // Moved in, so the channel closes once the sessions end.
+            let mut sinks = sinks;
+            // One tap per pad for the whole run: a re-publish continues the
+            // sequence numbering and the timeline of the previous publisher.
+            let mut pads: Vec<IngestPad<'_>> = sinks
+                .iter_mut()
+                .zip(formats)
+                .map(|(sink, format)| IngestPad {
+                    format,
+                    tap: SessionTap::new(sink, &activity, frame_period_ns),
+                })
+                .collect();
+            loop {
+                let (control, _peer) = listener.accept().await.map_err(io_err)?;
+                activity.set(g2g_core::metrics::monotonic_ns());
+                // Anyone connecting during the handshake is refused too, so a
+                // second publisher never waits in the backlog.
+                let session = tokio::select! {
+                    r = handshake(control, this.responder(), &activity) => r?,
+                    _ = inactive_for(&activity, timeout_ns) => None,
+                    _ = refuse_extras(&listener, &refused) => unreachable!("refusal never ends"),
+                };
+                let Some(session) = session else {
+                    continue; // gone before RECORD: listen for the next one
+                };
+                let end = tokio::select! {
+                    r = receive_session(session, &mut pads, &this.recv, frame_limit, &activity) => r?,
+                    _ = inactive_for(&activity, timeout_ns) => SessionEnd::PeerGone,
+                    _ = refuse_extras(&listener, &refused) => unreachable!("refusal never ends"),
+                };
+                served.set(served.get().saturating_add(1));
+                match end {
+                    SessionEnd::Limit => break,
+                    SessionEnd::PeerGone => {
+                        end_session(&mut pads);
+                        if this.max_sessions != 0 && served.get() >= this.max_sessions {
+                            break;
+                        }
+                    }
+                }
+            }
+            Ok::<_, G2gError>(
+                pads.iter()
+                    .map(|pad| (pad.tap.frames(), pad.finished(frame_limit)))
+                    .collect::<Vec<_>>(),
+            )
+        };
+
+        let result: Result<u64, G2gError> = async {
+            let pads = forward_pads(sessions, &rx, out).await??;
+            let mut frames = 0u64;
+            for (port, (pad_frames, eos_sent)) in pads.into_iter().enumerate() {
+                frames = frames.saturating_add(pad_frames);
+                // `AccessUnitEmitter::push` already emitted the EOS of a pad at `num-buffers`.
+                if !eos_sent {
+                    out.push_to(port, PipelinePacket::Eos).await?;
+                }
+            }
+            Ok(frames)
+        }
+        .await;
+
+        self.sessions_served = served.get();
+        self.sessions_refused = refused.get();
+        result
     }
 }
 
@@ -289,6 +413,113 @@ async fn refuse_extras(listener: &tokio::net::TcpListener, refused: &Cell<u64>) 
         tokio::spawn(refuse_one(sock));
     }
 }
+
+static SRC_PROPS: &[PropertySpec] = &[
+    PropertySpec::new(
+        "address",
+        PropKind::Str,
+        "IP to listen for an RTSP publisher on",
+    )
+    .with_default("0.0.0.0"),
+    PropertySpec::new("port", PropKind::Uint, "RTSP TCP port to listen on")
+        .with_default("8554")
+        .with_range("0", "65535"),
+    PropertySpec::new(
+        "payload-type",
+        PropKind::Uint,
+        "RTP payload type advertised in the SDP (96..=127)",
+    )
+    .with_default("96")
+    .with_range("0", "127"),
+    PropertySpec::new("ssrc", PropKind::Uint, "RTP synchronization source id"),
+    PropertySpec::new(
+        "width",
+        PropKind::Uint,
+        "declared frame width hint (the in-band SPS corrects it)",
+    )
+    .with_default("1280"),
+    PropertySpec::new(
+        "height",
+        PropKind::Uint,
+        "declared frame height hint (the in-band SPS corrects it)",
+    )
+    .with_default("720"),
+    PropertySpec::new("framerate", PropKind::Uint, "declared frame rate hint, fps")
+        .with_default("30"),
+    crate::rtspingest::ENCODING_NAME_PROPERTY,
+    PropertySpec::new(
+        "num-buffers",
+        PropKind::Int,
+        "access units to emit then EOS (-1 = until the publisher disconnects)",
+    )
+    .with_default("-1")
+    .with_range("-1", "9223372036854775807"),
+    PropertySpec::new(
+        "max-sessions",
+        PropKind::Uint,
+        "publishers to serve in sequence then EOS (0 = keep listening)",
+    )
+    .with_default("0"),
+    PropertySpec::new(
+        "timeout",
+        PropKind::Uint,
+        "session timeout in seconds (a silent publisher is torn down; 0 = never)",
+    )
+    .with_default("60")
+    .with_range("0", "604800"),
+    PropertySpec::new(
+        "jitter-latency",
+        PropKind::Uint,
+        "max time to hold a sequence gap before declaring it lost, milliseconds",
+    )
+    .with_default("50"),
+    PropertySpec::new(
+        "jitter-depth",
+        PropKind::Uint,
+        "max packets buffered for reorder (0 = in-order passthrough)",
+    )
+    .with_default("64"),
+    PropertySpec::new(
+        "rtcp-rr-interval",
+        PropKind::Uint,
+        "RTCP receiver-report interval in milliseconds (0 = off; needs rtcp-mux)",
+    )
+    .with_default("0"),
+    PropertySpec::new(
+        "nack",
+        PropKind::Bool,
+        "request retransmission of detected gaps via RTPFB Generic NACK",
+    )
+    .with_default("false"),
+    PropertySpec::new(
+        "rtx-payload-type",
+        PropKind::Uint,
+        "RFC 4588 RTX stream payload type (0 = off; set rtx-apt too)",
+    )
+    .with_default("0")
+    .with_range("0", "127"),
+    PropertySpec::new(
+        "rtx-apt",
+        PropKind::Uint,
+        "original (associated) payload type RTX packets rebuild to",
+    )
+    .with_default("0")
+    .with_range("0", "127"),
+    PropertySpec::new(
+        "fec-payload-type",
+        PropKind::Uint,
+        "RFC 5109 ULPFEC repair-stream payload type (0 = off)",
+    )
+    .with_default("0")
+    .with_range("0", "127"),
+    PropertySpec::new(
+        "flexfec-payload-type",
+        PropKind::Uint,
+        "RFC 8627 FlexFEC repair-stream payload type (0 = off)",
+    )
+    .with_default("0")
+    .with_range("0", "127"),
+];
 
 impl SourceLoop for RtspServerSrc {
     type RunFuture<'a>
@@ -326,119 +557,13 @@ impl SourceLoop for RtspServerSrc {
         ElementMetadata::new(
             "RTSP server source",
             "Source/Network",
-            "Hosts an RTSP endpoint a publisher pushes H.264 into (ANNOUNCE/RECORD)",
+            "Hosts an RTSP endpoint a publisher pushes H.264 / H.265 and AAC into (ANNOUNCE/RECORD)",
             crate::AARON_BOXER,
         )
     }
 
     fn properties(&self) -> &'static [PropertySpec] {
-        const PROPS: &[PropertySpec] = &[
-            PropertySpec::new(
-                "address",
-                PropKind::Str,
-                "IP to listen for an RTSP publisher on",
-            )
-            .with_default("0.0.0.0"),
-            PropertySpec::new("port", PropKind::Uint, "RTSP TCP port to listen on")
-                .with_default("8554")
-                .with_range("0", "65535"),
-            PropertySpec::new(
-                "payload-type",
-                PropKind::Uint,
-                "RTP payload type advertised in the SDP (96..=127)",
-            )
-            .with_default("96")
-            .with_range("0", "127"),
-            PropertySpec::new("ssrc", PropKind::Uint, "RTP synchronization source id"),
-            PropertySpec::new(
-                "width",
-                PropKind::Uint,
-                "declared frame width hint (the in-band SPS corrects it)",
-            )
-            .with_default("1280"),
-            PropertySpec::new(
-                "height",
-                PropKind::Uint,
-                "declared frame height hint (the in-band SPS corrects it)",
-            )
-            .with_default("720"),
-            PropertySpec::new("framerate", PropKind::Uint, "declared frame rate hint, fps")
-                .with_default("30"),
-            crate::rtspingest::ENCODING_NAME_PROPERTY,
-            PropertySpec::new(
-                "num-buffers",
-                PropKind::Int,
-                "access units to emit then EOS (-1 = until the publisher disconnects)",
-            )
-            .with_default("-1")
-            .with_range("-1", "9223372036854775807"),
-            PropertySpec::new(
-                "max-sessions",
-                PropKind::Uint,
-                "publishers to serve in sequence then EOS (0 = keep listening)",
-            )
-            .with_default("0"),
-            PropertySpec::new(
-                "timeout",
-                PropKind::Uint,
-                "session timeout in seconds (a silent publisher is torn down; 0 = never)",
-            )
-            .with_default("60")
-            .with_range("0", "604800"),
-            PropertySpec::new(
-                "jitter-latency",
-                PropKind::Uint,
-                "max time to hold a sequence gap before declaring it lost, milliseconds",
-            )
-            .with_default("50"),
-            PropertySpec::new(
-                "jitter-depth",
-                PropKind::Uint,
-                "max packets buffered for reorder (0 = in-order passthrough)",
-            )
-            .with_default("64"),
-            PropertySpec::new(
-                "rtcp-rr-interval",
-                PropKind::Uint,
-                "RTCP receiver-report interval in milliseconds (0 = off; needs rtcp-mux)",
-            )
-            .with_default("0"),
-            PropertySpec::new(
-                "nack",
-                PropKind::Bool,
-                "request retransmission of detected gaps via RTPFB Generic NACK",
-            )
-            .with_default("false"),
-            PropertySpec::new(
-                "rtx-payload-type",
-                PropKind::Uint,
-                "RFC 4588 RTX stream payload type (0 = off; set rtx-apt too)",
-            )
-            .with_default("0")
-            .with_range("0", "127"),
-            PropertySpec::new(
-                "rtx-apt",
-                PropKind::Uint,
-                "original (associated) payload type RTX packets rebuild to",
-            )
-            .with_default("0")
-            .with_range("0", "127"),
-            PropertySpec::new(
-                "fec-payload-type",
-                PropKind::Uint,
-                "RFC 5109 ULPFEC repair-stream payload type (0 = off)",
-            )
-            .with_default("0")
-            .with_range("0", "127"),
-            PropertySpec::new(
-                "flexfec-payload-type",
-                PropKind::Uint,
-                "RFC 8627 FlexFEC repair-stream payload type (0 = off)",
-            )
-            .with_default("0")
-            .with_range("0", "127"),
-        ];
-        PROPS
+        SRC_PROPS
     }
 
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
@@ -530,122 +655,52 @@ impl SourceLoop for RtspServerSrc {
         LatencyReport::live(period_ns, None)
     }
 
-    /// Serve publishers one at a time until `max-sessions` of them have recorded
-    /// (0 = forever) or `num-buffers` access units have been emitted. Each session
-    /// owns its own RTP socket / interleaved channel and responder, dropped when
-    /// it ends, and anyone who connects mid-session is refused with a 503.
     fn run<'a>(&'a mut self, out: &'a mut dyn OutputSink) -> Self::RunFuture<'a> {
         Box::pin(async move {
             if !self.configured {
                 return Err(G2gError::NotConfigured);
             }
-            if crate::numbuffers::finished_at_zero_limit(self.frame_limit, out).await? {
-                return Ok(0);
-            }
-            let std_listener = self.listener.take().ok_or(G2gError::NotConfigured)?;
-            std_listener.set_nonblocking(true).map_err(io_err)?;
-            let listener = tokio::net::TcpListener::from_std(std_listener).map_err(io_err)?;
-
-            let recv = self.recv.clone();
-            let frame_limit = self.frame_limit;
-            let max_sessions = self.max_sessions;
-            let timeout_ns = self.session_timeout_ns;
-            let frame_period_ns = match self.fps {
-                0 => 0,
-                fps => 1_000_000_000 / fps as u64,
-            };
-
-            let activity = Cell::new(g2g_core::metrics::monotonic_ns());
-            let refused = Cell::new(0u64);
-            let served = Cell::new(0u64);
-            let mut tap = SessionTap::new(out, &activity, frame_period_ns);
-
-            let result: Result<u64, G2gError> = async {
-                loop {
-                    let (control, _peer) = listener.accept().await.map_err(io_err)?;
-                    activity.set(g2g_core::metrics::monotonic_ns());
-                    // This session's RTP socket: its port is advertised in a UDP
-                    // SETUP, and it is released with the session (bound even for an
-                    // interleaved publisher, which then simply drops it).
-                    let rtp_socket = tokio::net::UdpSocket::bind(("0.0.0.0", 0))
-                        .await
-                        .map_err(io_err)?;
-                    let server_rtp_port = rtp_socket.local_addr().map_err(io_err)?.port();
-                    let responder = self.responder(server_rtp_port);
-
-                    // Anyone connecting during the handshake is refused too, so a
-                    // second publisher never waits in the backlog.
-                    let session = tokio::select! {
-                        r = handshake(control, responder, rtp_socket, &activity) => r?,
-                        _ = inactive_for(&activity, timeout_ns) => None,
-                        _ = refuse_extras(&listener, &refused) => unreachable!("refusal never ends"),
-                    };
-                    let Some(session) = session else {
-                        continue; // gone before RECORD: listen for the next one
-                    };
-
-                    // Remaining budget, so `num-buffers` counts across sessions and
-                    // the sequence numbering continues over a re-publish.
-                    let seq_base = tap.frames();
-                    let remaining = frame_limit.saturating_sub(seq_base);
-                    let end = match session {
-                        // UDP: the jitter + (optional) RTCP + depayload path shared
-                        // with UdpSrc, while the control channel is watched for the
-                        // publisher leaving (datagrams alone never reveal that).
-                        RecordTransport::Udp {
-                            rtp_socket,
-                            mut control,
-                            mut responder,
-                        } => {
-                            let session_recv = session_recv_config(&recv, &responder);
-                            let mut rtp_receiver =
-                                UdpReceiver::new(rtp_socket, UdpReceiveConfig::default()).map_err(io_err)?;
-                            tokio::select! {
-                                r = crate::rtprecv::receive_rtp(&mut rtp_receiver, &session_recv, remaining, seq_base, &mut tap) => {
-                                    r?;
-                                    SessionEnd::Limit
-                                }
-                                _ = watch_control(&mut control, &mut responder, &activity) => SessionEnd::PeerGone,
-                                _ = inactive_for(&activity, timeout_ns) => SessionEnd::PeerGone,
-                                _ = refuse_extras(&listener, &refused) => unreachable!("refusal never ends"),
-                            }
-                        }
-                        // TCP-interleaved: the control stream itself carries the
-                        // `$`-framed RTP, so its close ends the session.
-                        RecordTransport::Interleaved {
-                            mut control,
-                            mut responder,
-                            rtp_channel,
-                            leftover,
-                        } => {
-                            let emitter = AccessUnitEmitter::new(&session_recv_config(&recv, &responder), seq_base, remaining);
-                            tokio::select! {
-                                r = receive_interleaved(&mut control, &mut responder, rtp_channel, leftover, emitter, &mut tap) => r?,
-                                _ = inactive_for(&activity, timeout_ns) => SessionEnd::PeerGone,
-                                _ = refuse_extras(&listener, &refused) => unreachable!("refusal never ends"),
-                            }
-                        }
-                    };
-                    served.set(served.get().saturating_add(1));
-                    match end {
-                        // `AccessUnitEmitter::push` already emitted the EOS.
-                        SessionEnd::Limit => return Ok(tap.frames()),
-                        SessionEnd::PeerGone => {
-                            tap.end_session();
-                            if max_sessions != 0 && served.get() >= max_sessions {
-                                tap.push(PipelinePacket::Eos).await?;
-                                return Ok(tap.frames());
-                            }
-                        }
-                    }
-                }
-            }
-            .await;
-
-            self.sessions_served = served.get();
-            self.sessions_refused = refused.get();
-            result
+            self.serve(&mut OnePortSink(out)).await
         })
+    }
+}
+
+impl MultiOutputSource for RtspServerSrc {
+    type RunFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>
+    where
+        Self: 'a;
+
+    fn output_count(&self) -> usize {
+        1 + usize::from(self.audio_pad)
+    }
+
+    fn output_caps(&self, output: usize) -> Result<Caps, G2gError> {
+        match output {
+            VIDEO_PORT => Ok(self.caps()),
+            AUDIO_PORT if self.audio_pad => Ok(ADTS_AAC_CAPS),
+            _ => Err(G2gError::CapsMismatch),
+        }
+    }
+
+    fn properties(&self) -> &'static [PropertySpec] {
+        SRC_PROPS
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        SourceLoop::set_property(self, name, value)
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        SourceLoop::get_property(self, name)
+    }
+
+    fn latency(&self) -> LatencyReport {
+        SourceLoop::latency(self)
+    }
+
+    fn run<'a>(&'a mut self, out: &'a mut dyn MultiOutputSink) -> Self::RunFuture<'a> {
+        Box::pin(self.serve(out))
     }
 }
 
@@ -660,8 +715,9 @@ impl PadTemplates for RtspServerSrc {
             pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
         });
-        Vec::from([PadTemplate::source(CapsSet::from_alternatives(Vec::from(
-            ingested,
-        )))])
+        Vec::from([
+            PadTemplate::source(CapsSet::from_alternatives(Vec::from(ingested))),
+            PadTemplate::source(CapsSet::one(ADTS_AAC_CAPS)),
+        ])
     }
 }

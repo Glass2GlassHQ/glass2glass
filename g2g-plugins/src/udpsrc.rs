@@ -241,10 +241,10 @@ impl UdpSrc {
                 format: AudioFormat::Aac,
                 ..
             } => {
-                let Some(format) = &media.mpeg4_generic_aac else {
+                let Some(encoding) = media.aac_encoding() else {
                     return false;
                 };
-                self.recv.encoding = RtpEncoding::Aac(format.clone());
+                self.recv.encoding = encoding;
             }
             _ => return false,
         }
@@ -335,15 +335,7 @@ impl UdpSrc {
     fn caps(&self) -> Caps {
         let codec = match &self.recv.encoding {
             RtpEncoding::Opus => return opus_caps(),
-            // aacparse and the decoders read the rate and channels off each ADTS header
-            RtpEncoding::Aac(_) => {
-                return Caps::Audio {
-                    format: AudioFormat::Aac,
-                    channels: 0,
-                    sample_rate: 0,
-                    channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
-                }
-            }
+            RtpEncoding::Aac(_) | RtpEncoding::AacLatm(_) => return crate::rtpdepay::ADTS_AAC_CAPS,
             RtpEncoding::H264 => VideoCodec::H264,
             RtpEncoding::H265 => VideoCodec::H265,
         };
@@ -509,9 +501,13 @@ impl SourceLoop for UdpSrc {
     fn configured_output_caps(&self) -> Option<Caps> {
         match (self.bytestream, &self.recv.encoding) {
             (Some(encoding), _) => Some(Caps::ByteStream { encoding }),
-            (None, RtpEncoding::Opus | RtpEncoding::H265 | RtpEncoding::Aac(_)) => {
-                Some(self.caps())
-            }
+            (
+                None,
+                RtpEncoding::Opus
+                | RtpEncoding::H265
+                | RtpEncoding::Aac(_)
+                | RtpEncoding::AacLatm(_),
+            ) => Some(self.caps()),
             (None, RtpEncoding::H264) => None,
         }
     }
@@ -967,7 +963,7 @@ impl SourceLoop for UdpSrc {
             // H.264 stream's SPS can refine them mid-flight.
             let mut recv = self.recv.clone();
             recv.declared_caps = Some(self.caps());
-            crate::rtprecv::receive_rtp(&mut receiver, &recv, self.frame_limit, 0, out).await
+            crate::rtprecv::receive_rtp(&mut receiver, &recv, self.frame_limit, 0, None, out).await
         })
     }
 }

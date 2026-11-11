@@ -8,8 +8,10 @@
 //! to do (start streaming on `PLAY`, expect media on `RECORD`, tear down).
 //!
 //! Scope: the method set a player (DESCRIBE / SETUP / PLAY / PAUSE / TEARDOWN)
-//! or a publisher (ANNOUNCE / SETUP / RECORD) drives, one session, H.264 over
-//! RTP/AVP. Both transports are negotiated: unicast UDP (the `client_port` range,
+//! or a publisher (ANNOUNCE / SETUP / RECORD) drives, one session. A player is
+//! served one H.264 track over RTP/AVP. A publisher's ANNOUNCE may list several
+//! tracks, and each SETUP is routed to its track by the section's `a=control`
+//! URL. Both transports are negotiated: unicast UDP (the `client_port` range,
 //! `RtspEvent::Setup`) and TCP-interleaved (RFC 2326 §10.12, the `interleaved=`
 //! channels, `RtspEvent::SetupInterleaved`); the ingest I/O layer
 //! (`RtspServerSrc`) serves both, while the serving sink
@@ -19,10 +21,9 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use g2g_core::rtp::CaptureTimeExtensionIds;
 use g2g_core::{Caps, VideoCodec};
 
-use crate::sdp::{h264_media_section, session_description, SdpMedia};
+use crate::sdp::{h264_media_section, scan_sections, session_description, SdpMedia};
 
 /// What the I/O layer should do after a request, beyond sending the response.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,6 +36,9 @@ pub enum RtspEvent {
     /// ride the control TCP connection as `$`-framed binary on these channels,
     /// rather than on their own UDP ports. What `ffmpeg -rtsp_transport tcp` uses.
     SetupInterleaved { rtp_channel: u8, rtcp_channel: u8 },
+    /// `ANNOUNCE` described this many media sections, which the publisher may
+    /// now SETUP one by one.
+    Announce { tracks: usize },
     /// `PLAY`: begin streaming the served media to the SETUP'd client port.
     Play,
     /// `RECORD`: the client will now push media to the server port.
@@ -164,11 +168,27 @@ pub fn sdp_h264(payload_type: u8, sps: Option<&[u8]>, pps: Option<&[u8]>) -> Str
     session_description(&[h264_media_section(payload_type, sps, pps, 0)])
 }
 
-// the ingest path receives one video stream, so that section's extmap names the extensions
-fn announced_video(sdp: &str) -> Option<SdpMedia> {
-    SdpMedia::parse_all(sdp)
-        .into_iter()
-        .find(|media| matches!(media.caps, Caps::CompressedVideo { .. }))
+/// One media section of a publisher's ANNOUNCE.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AnnouncedTrack {
+    pub control: Option<String>,
+    /// `None` when the section's encoding has no g2g caps.
+    pub media: Option<SdpMedia>,
+}
+
+/// How a publisher's SETUP asked for one announced track's RTP to arrive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrackTransport {
+    Udp { client_rtp_port: u16 },
+    Interleaved { rtp_channel: u8, rtcp_channel: u8 },
+}
+
+// a relative control is resolved against the session URL the publisher SETUPs under
+fn uri_names_control(uri: &str, control: &str) -> bool {
+    uri == control
+        || uri
+            .strip_suffix(control)
+            .is_some_and(|base| base.ends_with('/'))
 }
 
 /// Sans-IO RTSP server responder for one session.
@@ -185,8 +205,10 @@ pub struct RtspResponder {
     /// Session timeout advertised at SETUP (RFC 2326 §12.37); the I/O layer reaps
     /// a client silent (no request, no RTCP) past it.
     timeout_secs: u32,
-    capture_time_ids: CaptureTimeExtensionIds,
-    announced_parameter_sets: Vec<u8>,
+    announced: Vec<AnnouncedTrack>,
+    // indexed like `announced`, empty when the I/O layer receives every track on `server_rtp_port`
+    track_server_ports: Vec<u16>,
+    track_transports: Vec<Option<TrackTransport>>,
     // the video codec an ingest server records, a publisher announcing another is refused
     ingest_codec: Option<VideoCodec>,
 }
@@ -208,8 +230,9 @@ impl RtspResponder {
             client_rtp_port: None,
             interleaved: None,
             timeout_secs: DEFAULT_SESSION_TIMEOUT_SECS,
-            capture_time_ids: CaptureTimeExtensionIds::default(),
-            announced_parameter_sets: Vec::new(),
+            announced: Vec::new(),
+            track_server_ports: Vec::new(),
+            track_transports: Vec::new(),
             ingest_codec: None,
         }
     }
@@ -236,14 +259,41 @@ impl RtspResponder {
         self.interleaved
     }
 
-    /// The capture-time extension ids the publisher's ANNOUNCE maps on its
-    /// H.264 stream, empty before an ANNOUNCE.
-    pub fn capture_time_ids(&self) -> CaptureTimeExtensionIds {
-        self.capture_time_ids
+    /// The media sections of the publisher's ANNOUNCE, empty before one.
+    pub fn announced_tracks(&self) -> &[AnnouncedTrack] {
+        &self.announced
     }
 
-    pub fn announced_parameter_sets(&self) -> &[u8] {
-        &self.announced_parameter_sets
+    /// The UDP port each announced track's RTP is received on, in
+    /// [`announced_tracks`](Self::announced_tracks) order, advertised as that
+    /// track's `server_port` in SETUP.
+    pub fn set_track_server_ports(&mut self, ports: Vec<u16>) {
+        self.track_server_ports = ports;
+    }
+
+    /// The transport each announced track was SETUP with, `None` for a track
+    /// the publisher has not SETUP.
+    pub fn track_transports(&self) -> &[Option<TrackTransport>] {
+        &self.track_transports
+    }
+
+    fn announced_track_for(&self, uri: &str) -> Option<usize> {
+        if let [_only] = self.announced.as_slice() {
+            return Some(0);
+        }
+        self.announced.iter().position(|track| {
+            track
+                .control
+                .as_deref()
+                .is_some_and(|control| uri_names_control(uri, control))
+        })
+    }
+
+    fn server_rtp_port_for(&self, track: Option<usize>) -> u16 {
+        track
+            .and_then(|index| self.track_server_ports.get(index))
+            .copied()
+            .unwrap_or(self.server_rtp_port)
     }
 
     /// The session identifier assigned at `SETUP`.
@@ -282,35 +332,49 @@ impl RtspResponder {
             }
             // A publisher describing the stream it is about to RECORD.
             "ANNOUNCE" => {
-                if !req.body.is_empty() {
-                    if let Ok(sdp) = core::str::from_utf8(&req.body) {
-                        let video = announced_video(sdp);
-                        let codec = video.as_ref().and_then(|media| match media.caps {
-                            Caps::CompressedVideo { codec, .. } => Some(codec),
-                            _ => None,
-                        });
-                        if self.ingest_codec.zip(codec).is_some_and(|(want, got)| want != got) {
-                            return (
-                                self.respond(req.cseq, "415 Unsupported Media Type", &[], b""),
-                                RtspEvent::None,
-                            );
-                        }
-                        self.sdp = sdp.to_string();
-                        self.capture_time_ids = video
-                            .as_ref()
-                            .map(|media| media.capture_time_ids())
-                            .unwrap_or_default();
-                        self.announced_parameter_sets = video
-                            .map(|media| media.parameter_sets)
-                            .unwrap_or_default();
-                    }
+                let Some(sdp) = core::str::from_utf8(&req.body).ok().filter(|sdp| !sdp.is_empty())
+                else {
+                    return (self.respond(req.cseq, "200 OK", &[], b""), RtspEvent::None);
+                };
+                let announced: Vec<AnnouncedTrack> = scan_sections(sdp)
+                    .iter()
+                    .map(|section| AnnouncedTrack {
+                        control: section.control.clone(),
+                        media: SdpMedia::from_section(section),
+                    })
+                    .collect();
+                let codec = announced.iter().find_map(|track| match track.media.as_ref()?.caps {
+                    Caps::CompressedVideo { codec, .. } => Some(codec),
+                    _ => None,
+                });
+                if self.ingest_codec.zip(codec).is_some_and(|(want, got)| want != got) {
+                    return (
+                        self.respond(req.cseq, "415 Unsupported Media Type", &[], b""),
+                        RtspEvent::None,
+                    );
                 }
-                (self.respond(req.cseq, "200 OK", &[], b""), RtspEvent::None)
+                self.sdp = sdp.to_string();
+                self.track_transports = alloc::vec![None; announced.len()];
+                self.track_server_ports.clear();
+                self.announced = announced;
+                (
+                    self.respond(req.cseq, "200 OK", &[], b""),
+                    RtspEvent::Announce {
+                        tracks: self.announced.len(),
+                    },
+                )
             }
             "SETUP" => {
                 // RFC 2326 §12.37: the timeout param tells the client how often to
                 // keepalive (GET_PARAMETER / OPTIONS / RTCP) before it is reaped.
                 let session = format!("{};timeout={}", self.session_id, self.timeout_secs);
+                let track = self.announced_track_for(&req.uri);
+                if !self.announced.is_empty() && track.is_none() {
+                    return (
+                        self.respond(req.cseq, "404 Not Found", &[], b""),
+                        RtspEvent::None,
+                    );
+                }
                 // TCP-interleaved transport (RFC 2326 §10.12): RTP / RTCP ride the
                 // control connection on the negotiated channels; no UDP ports.
                 if let Some((rtp_ch, rtcp_ch)) =
@@ -318,6 +382,12 @@ impl RtspResponder {
                 {
                     self.state = State::Ready;
                     self.interleaved = Some((rtp_ch, rtcp_ch));
+                    if let Some(index) = track {
+                        self.track_transports[index] = Some(TrackTransport::Interleaved {
+                            rtp_channel: rtp_ch,
+                            rtcp_channel: rtcp_ch,
+                        });
+                    }
                     let transport = format!(
                         "RTP/AVP/TCP;unicast;interleaved={rtp_ch}-{rtcp_ch};ssrc={:08X}",
                         self.ssrc,
@@ -344,12 +414,18 @@ impl RtspResponder {
                 };
                 self.state = State::Ready;
                 self.client_rtp_port = Some(port);
+                if let Some(index) = track {
+                    self.track_transports[index] = Some(TrackTransport::Udp {
+                        client_rtp_port: port,
+                    });
+                }
+                let server_port = self.server_rtp_port_for(track);
                 let transport = format!(
                     "RTP/AVP;unicast;client_port={}-{};server_port={}-{};ssrc={:08X}",
                     port,
                     port.saturating_add(1),
-                    self.server_rtp_port,
-                    self.server_rtp_port.saturating_add(1),
+                    server_port,
+                    server_port.saturating_add(1),
                     self.ssrc,
                 );
                 let resp = self.respond(
@@ -689,7 +765,7 @@ mod tests {
         assert!(core::str::from_utf8(&resp)
             .unwrap()
             .starts_with("RTSP/1.0 200 OK"));
-        assert_eq!(ev, RtspEvent::None);
+        assert_eq!(ev, RtspEvent::Announce { tracks: 0 });
 
         let (_, ev) = s.handle_request(&request(
             "SETUP rtsp://h/s RTSP/1.0\r\nCSeq: 2\r\nTransport: RTP/AVP;unicast;client_port=7000-7001\r\n\r\n",
@@ -704,6 +780,102 @@ mod tests {
             "RECORD rtsp://h/s RTSP/1.0\r\nCSeq: 3\r\nSession: 12345678\r\n\r\n",
         ));
         assert_eq!(ev, RtspEvent::Record);
+    }
+
+    // the A/V ANNOUNCE `ffmpeg -f rtsp` sends, video then AAC, each named by a relative control
+    const AV_ANNOUNCE_SDP: &str = "v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\ns=No Name\r\n\
+        c=IN IP4 127.0.0.1\r\nt=0 0\r\n\
+        m=video 0 RTP/AVP 96\r\na=rtpmap:96 H264/90000\r\n\
+        a=fmtp:96 packetization-mode=1\r\na=control:streamid=0\r\n\
+        m=audio 0 RTP/AVP 97\r\nb=AS:128\r\na=rtpmap:97 MPEG4-GENERIC/44100/2\r\n\
+        a=fmtp:97 profile-level-id=1;mode=AAC-hbr;sizelength=13;indexlength=3;indexdeltalength=3; config=1210\r\n\
+        a=control:streamid=1\r\n";
+
+    fn announce(s: &mut RtspResponder, sdp: &str) -> RtspEvent {
+        let (_, ev) = s.handle_request(&request(&format!(
+            "ANNOUNCE rtsp://h/s RTSP/1.0\r\nCSeq: 1\r\nContent-Type: application/sdp\r\nContent-Length: {}\r\n\r\n{sdp}",
+            sdp.len()
+        )));
+        ev
+    }
+
+    fn setup(s: &mut RtspResponder, control: &str, transport: &str) -> String {
+        let (resp, _) = s.handle_request(&request(&format!(
+            "SETUP rtsp://h/s/{control} RTSP/1.0\r\nCSeq: 2\r\nTransport: {transport}\r\n\r\n"
+        )));
+        String::from_utf8(resp).unwrap()
+    }
+
+    #[test]
+    fn udp_setup_of_each_announced_track_gets_that_tracks_server_port() {
+        let mut s = responder();
+        assert_eq!(
+            announce(&mut s, AV_ANNOUNCE_SDP),
+            RtspEvent::Announce { tracks: 2 }
+        );
+        assert!(s.announced_tracks()[1]
+            .media
+            .as_ref()
+            .is_some_and(|media| media.mpeg4_generic_aac.is_some()));
+        s.set_track_server_ports(Vec::from([7000, 7002]));
+        // Audio first: a SETUP is routed by its URL, not by the order it arrives in.
+        let audio = setup(
+            &mut s,
+            "streamid=1",
+            "RTP/AVP;unicast;client_port=5002-5003",
+        );
+        assert!(audio.contains("server_port=7002-7003"), "{audio}");
+        let video = setup(
+            &mut s,
+            "streamid=0",
+            "RTP/AVP;unicast;client_port=5000-5001",
+        );
+        assert!(video.contains("server_port=7000-7001"), "{video}");
+        assert_eq!(
+            s.track_transports(),
+            &[
+                Some(TrackTransport::Udp {
+                    client_rtp_port: 5000
+                }),
+                Some(TrackTransport::Udp {
+                    client_rtp_port: 5002
+                }),
+            ]
+        );
+    }
+
+    #[test]
+    fn interleaved_setup_of_each_announced_track_keeps_its_channels() {
+        let mut s = responder();
+        announce(&mut s, AV_ANNOUNCE_SDP);
+        setup(&mut s, "streamid=0", "RTP/AVP/TCP;unicast;interleaved=0-1");
+        setup(&mut s, "streamid=1", "RTP/AVP/TCP;unicast;interleaved=2-3");
+        assert_eq!(
+            s.track_transports(),
+            &[
+                Some(TrackTransport::Interleaved {
+                    rtp_channel: 0,
+                    rtcp_channel: 1
+                }),
+                Some(TrackTransport::Interleaved {
+                    rtp_channel: 2,
+                    rtcp_channel: 3
+                }),
+            ]
+        );
+    }
+
+    #[test]
+    fn setup_of_a_control_the_announce_did_not_name_is_not_found() {
+        let mut s = responder();
+        announce(&mut s, AV_ANNOUNCE_SDP);
+        let resp = setup(
+            &mut s,
+            "streamid=5",
+            "RTP/AVP;unicast;client_port=5000-5001",
+        );
+        assert!(resp.starts_with("RTSP/1.0 404 Not Found"), "{resp}");
+        assert_eq!(s.track_transports(), &[None, None]);
     }
 
     #[test]

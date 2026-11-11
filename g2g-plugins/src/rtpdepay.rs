@@ -56,6 +56,25 @@ pub struct Mpeg4GenericAac {
     pub ticks_per_access_unit: u32,
 }
 
+// RFC 6416 MP4A-LATM AAC whose StreamMuxConfig the SDP fmtp carries (`cpresent=0`)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Mp4aLatmAac {
+    pub clock_rate_hz: u32,
+    // the StreamMuxConfig's AudioSpecificConfig, moved to a byte boundary
+    pub audio_specific_config: Vec<u8>,
+    // RTP clock ticks between consecutive access units in one packet
+    pub ticks_per_access_unit: u32,
+}
+
+// aacparse and the decoders read the rate and channels off each ADTS header
+#[cfg(any(feature = "udp-ingress", feature = "rtsp-server"))]
+pub(crate) const ADTS_AAC_CAPS: g2g_core::Caps = g2g_core::Caps::Audio {
+    format: g2g_core::AudioFormat::Aac,
+    channels: 0,
+    sample_rate: 0,
+    channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
+};
+
 // the payload formats the plain RTP receive path depayloads, named as in gst `encoding-name`
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum RtpEncoding {
@@ -64,6 +83,7 @@ pub enum RtpEncoding {
     Opus,
     H265,
     Aac(Mpeg4GenericAac),
+    AacLatm(Mp4aLatmAac),
 }
 
 impl RtpEncoding {
@@ -82,6 +102,7 @@ impl RtpEncoding {
             RtpEncoding::Opus => "OPUS",
             RtpEncoding::H265 => "H265",
             RtpEncoding::Aac(_) => "MPEG4-GENERIC",
+            RtpEncoding::AacLatm(_) => "MP4A-LATM",
         }
     }
 
@@ -90,6 +111,7 @@ impl RtpEncoding {
             RtpEncoding::H264 | RtpEncoding::H265 => MediaClock::VIDEO_RATE_HZ,
             RtpEncoding::Opus => OPUS_CLOCK_HZ,
             RtpEncoding::Aac(format) => format.clock_rate_hz,
+            RtpEncoding::AacLatm(format) => format.clock_rate_hz,
         }
     }
 
@@ -97,7 +119,7 @@ impl RtpEncoding {
         match self {
             RtpEncoding::H264 => Some(VideoCodec::H264),
             RtpEncoding::H265 => Some(VideoCodec::H265),
-            RtpEncoding::Opus | RtpEncoding::Aac(_) => None,
+            RtpEncoding::Opus | RtpEncoding::Aac(_) | RtpEncoding::AacLatm(_) => None,
         }
     }
 
@@ -106,7 +128,7 @@ impl RtpEncoding {
         match self {
             RtpEncoding::H264 => crate::annexb::au_is_keyframe(VideoCodec::H264, unit),
             RtpEncoding::H265 => crate::annexb::au_is_keyframe(VideoCodec::H265, unit),
-            RtpEncoding::Opus | RtpEncoding::Aac(_) => true,
+            RtpEncoding::Opus | RtpEncoding::Aac(_) | RtpEncoding::AacLatm(_) => true,
         }
     }
 }
@@ -120,6 +142,7 @@ pub enum RtpDepayloader {
     Opus,
     H265(RtpH265Depayloader),
     Aac(RtpAacDepayloader),
+    AacLatm(RtpLatmDepayloader),
 }
 
 impl RtpDepayloader {
@@ -129,16 +152,20 @@ impl RtpDepayloader {
             RtpEncoding::Opus => RtpDepayloader::Opus,
             RtpEncoding::H265 => RtpDepayloader::H265(RtpH265Depayloader::new()),
             RtpEncoding::Aac(format) => RtpDepayloader::Aac(RtpAacDepayloader::new(format.clone())),
+            RtpEncoding::AacLatm(format) => {
+                RtpDepayloader::AacLatm(RtpLatmDepayloader::new(format.clone()))
+            }
         }
     }
 
-    // an AAC-hbr packet can carry many access units, the other formats at most two
+    // an AAC packet can carry many access units, the other formats at most two
     pub fn depacketize(&mut self, packet: &[u8]) -> Vec<AccessUnit> {
         match self {
             RtpDepayloader::H264(depayloader) => depayloader.depacketize(packet).collect(),
             RtpDepayloader::H265(depayloader) => depayloader.depacketize(packet).collect(),
             RtpDepayloader::Opus => depacketize_opus(packet).into_iter().collect(),
             RtpDepayloader::Aac(depayloader) => depayloader.depacketize(packet),
+            RtpDepayloader::AacLatm(depayloader) => depayloader.depacketize(packet),
         }
     }
 }
@@ -246,7 +273,12 @@ impl RtpAacDepayloader {
             };
             data = &data[size..];
             let offset = self.format.ticks_per_access_unit.wrapping_mul(index as u32);
-            units.extend(self.adts_unit(timestamp.wrapping_add(offset), raw));
+            let rtp_timestamp = timestamp.wrapping_add(offset);
+            units.extend(adts_unit(
+                &self.format.audio_specific_config,
+                rtp_timestamp,
+                raw,
+            ));
         }
         units
     }
@@ -280,17 +312,113 @@ impl RtpAacDepayloader {
         }
         let whole = self.fragment.take()?;
         (whole.data.len() == whole.size)
-            .then(|| self.adts_unit(whole.timestamp, &whole.data))
+            .then(|| {
+                adts_unit(
+                    &self.format.audio_specific_config,
+                    whole.timestamp,
+                    &whole.data,
+                )
+            })
             .flatten()
     }
+}
 
-    fn adts_unit(&self, rtp_timestamp: u32, raw: &[u8]) -> Option<AccessUnit> {
-        let data = crate::aacparse::adts_from_asc(&self.format.audio_specific_config, raw)?;
-        Some(AccessUnit {
-            data,
-            rtp_timestamp,
-        })
+fn adts_unit(audio_specific_config: &[u8], rtp_timestamp: u32, raw: &[u8]) -> Option<AccessUnit> {
+    let data = crate::aacparse::adts_from_asc(audio_specific_config, raw)?;
+    Some(AccessUnit {
+        data,
+        rtp_timestamp,
+    })
+}
+
+// RFC 6416 MP4A-LATM, each AAC frame of an AudioMuxElement ADTS-framed like the RFC 3640 path
+#[derive(Debug)]
+pub struct RtpLatmDepayloader {
+    format: Mp4aLatmAac,
+    // the payload of an AudioMuxElement whose last packet, the one with the marker, is still due
+    element: Vec<u8>,
+    // a packet of `element` was lost or it outgrew the assembly cap
+    element_broken: bool,
+    last_seq: Option<u16>,
+}
+
+impl RtpLatmDepayloader {
+    pub fn new(format: Mp4aLatmAac) -> Self {
+        Self {
+            format,
+            element: Vec::new(),
+            element_broken: false,
+            last_seq: None,
+        }
     }
+
+    // an AudioMuxElement missing a packet yields nothing
+    pub fn depacketize(&mut self, packet: &[u8]) -> Vec<AccessUnit> {
+        let Some(parsed) = RtpHeader::parse(packet) else {
+            return Vec::new();
+        };
+        let seq = parsed.header.sequence;
+        if self
+            .last_seq
+            .is_some_and(|prev| seq != prev.wrapping_add(1))
+        {
+            self.element_broken = true;
+        }
+        self.last_seq = Some(seq);
+        let payload = packet
+            .get(parsed.payload_offset..parsed.payload_offset + parsed.payload_len)
+            .unwrap_or_default();
+        self.element.extend_from_slice(payload);
+        if self.element.len() > MAX_ASSEMBLY_BYTES {
+            self.element.clear();
+            self.element_broken = true;
+        }
+        if !parsed.header.marker {
+            return Vec::new();
+        }
+        let element = core::mem::take(&mut self.element);
+        if core::mem::take(&mut self.element_broken) {
+            return Vec::new();
+        }
+        // RFC 3016 4.1 lets one packet carry several AudioMuxElements back to back,
+        // and each is its subframes back to back, so the frames are read in one run
+        let mut units = Vec::new();
+        let mut rest = element.as_slice();
+        while !rest.is_empty() {
+            let Some((frame, after)) = latm_payload(rest) else {
+                break;
+            };
+            rest = after;
+            let offset = self
+                .format
+                .ticks_per_access_unit
+                .wrapping_mul(units.len() as u32);
+            let rtp_timestamp = parsed.header.timestamp.wrapping_add(offset);
+            units.extend(adts_unit(
+                &self.format.audio_specific_config,
+                rtp_timestamp,
+                frame,
+            ));
+        }
+        units
+    }
+}
+
+// ISO/IEC 14496-3 PayloadLengthInfo: 255-valued bytes add up until a smaller one ends the length
+fn latm_payload(element: &[u8]) -> Option<(&[u8], &[u8])> {
+    const LENGTH_CONTINUES: u8 = 0xFF;
+    let mut length = 0usize;
+    let mut position = 0;
+    loop {
+        let byte = *element.get(position)?;
+        position += 1;
+        length += usize::from(byte);
+        if byte != LENGTH_CONTINUES {
+            break;
+        }
+    }
+    let end = position.checked_add(length)?;
+    Some((element.get(position..end)?, element.get(end..)?))
 }
 
 // RFC 7587 never fragments, so each payload is one whole Opus packet
@@ -655,6 +783,106 @@ mod tests {
                     rtp_timestamp: 9000 + ticks
                 }
             ]
+        );
+    }
+
+    fn latm_format() -> Mp4aLatmAac {
+        Mp4aLatmAac {
+            clock_rate_hz: AAC_RATE_HZ,
+            audio_specific_config: AAC_CONFIG.to_vec(),
+            ticks_per_access_unit: crate::aacparse::SAMPLES_PER_ACCESS_UNIT,
+        }
+    }
+
+    // each frame behind its PayloadLengthInfo, as `rtpmp4apay` writes it
+    fn latm_element(frames: &[&[u8]]) -> Vec<u8> {
+        let mut element = Vec::new();
+        for frame in frames {
+            element.extend(core::iter::repeat_n(0xFF, frame.len() / 255));
+            element.push((frame.len() % 255) as u8);
+            element.extend_from_slice(frame);
+        }
+        element
+    }
+
+    fn rtp_packet(sequence: u16, timestamp: u32, marker: bool, payload: &[u8]) -> Vec<u8> {
+        let header = g2g_core::rtp::RtpHeader {
+            marker,
+            payload_type: 96,
+            sequence,
+            timestamp,
+            ssrc: 1,
+        };
+        let mut packet = header.to_bytes().to_vec();
+        packet.extend_from_slice(payload);
+        packet
+    }
+
+    #[test]
+    fn latm_frames_come_back_adts_framed_whole_or_fragmented() {
+        // long enough that its length needs a 255 continuation byte
+        let frame: Vec<u8> = (0..300).map(|byte| byte as u8).collect();
+        let element = latm_element(&[&frame]);
+        assert_eq!(element[..2], [0xFF, 45]);
+        let expected = [AccessUnit {
+            data: adts(&frame),
+            rtp_timestamp: 4800,
+        }];
+
+        let mut depay = RtpDepayloader::new(&RtpEncoding::AacLatm(latm_format()));
+        assert_eq!(
+            depay.depacketize(&rtp_packet(1, 4800, true, &element)),
+            expected
+        );
+
+        let (head, tail) = element.split_at(100);
+        assert!(depay
+            .depacketize(&rtp_packet(2, 4800, false, head))
+            .is_empty());
+        assert_eq!(
+            depay.depacketize(&rtp_packet(3, 4800, true, tail)),
+            expected
+        );
+    }
+
+    #[test]
+    fn two_latm_frames_in_one_packet_step_their_timestamps() {
+        let first: Vec<u8> = (0..5).collect();
+        let second: Vec<u8> = (10..13).collect();
+        let format = latm_format();
+        let ticks = format.ticks_per_access_unit;
+        let packet = rtp_packet(7, 9000, true, &latm_element(&[&first, &second]));
+        assert_eq!(
+            RtpDepayloader::new(&RtpEncoding::AacLatm(format)).depacketize(&packet),
+            [
+                AccessUnit {
+                    data: adts(&first),
+                    rtp_timestamp: 9000
+                },
+                AccessUnit {
+                    data: adts(&second),
+                    rtp_timestamp: 9000 + ticks
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn a_latm_element_missing_a_packet_yields_nothing() {
+        let frame: Vec<u8> = (0..40).collect();
+        let element = latm_element(&[&frame]);
+        let (head, tail) = element.split_at(10);
+        let mut depay = RtpDepayloader::new(&RtpEncoding::AacLatm(latm_format()));
+        assert!(depay.depacketize(&rtp_packet(1, 0, false, head)).is_empty());
+        // sequence 2 is lost
+        assert!(depay.depacketize(&rtp_packet(3, 0, true, tail)).is_empty());
+        // the next whole element comes through
+        assert_eq!(
+            depay.depacketize(&rtp_packet(4, 1024, true, &element)),
+            [AccessUnit {
+                data: adts(&frame),
+                rtp_timestamp: 1024
+            }]
         );
     }
 

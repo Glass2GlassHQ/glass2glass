@@ -35,7 +35,7 @@ use g2g_core::rtp::{CaptureTimeExtensionIds, ABS_CAPTURE_TIME_URI, NTP_64_URI};
 use g2g_core::{AudioFormat, Caps, Dim, Rate, VideoCodec};
 
 use crate::nalparse::NalCodec;
-use crate::rtpdepay::Mpeg4GenericAac;
+use crate::rtpdepay::{Mp4aLatmAac, Mpeg4GenericAac, RtpEncoding};
 use crate::rtppay::{AAC_AU_INDEX_BITS, AAC_AU_SIZE_BITS};
 use crate::textencoding::{base64_decode, base64_encode, hex_encode};
 
@@ -61,6 +61,9 @@ pub struct SdpSection {
     /// `a=ts-refclk:ptp=...` as `(grandmaster identity, domain)`.
     pub ptp: Option<(String, u8)>,
     pub extmap: Vec<(NonZeroU8, String)>,
+    /// `a=control:`, the URL (absolute, or relative to the session URL) an RTSP
+    /// SETUP names this section by.
+    pub control: Option<String>,
 }
 
 /// Scan every media section of an SDP document. Sections whose `m=` line is
@@ -139,6 +142,8 @@ fn scan_one(lines: &[&str]) -> Option<SdpSection> {
             section.ptp = parse_refclk(a);
         } else if let Some(a) = line.strip_prefix("a=extmap:") {
             section.extmap.extend(parse_extmap(a));
+        } else if let Some(a) = line.strip_prefix("a=control:") {
+            section.control = Some(a.trim().to_string());
         }
     }
     if section.rtpmap.is_none() {
@@ -230,6 +235,8 @@ pub struct SdpMedia {
     pub extmap: Vec<(NonZeroU8, String)>,
     // `None` unless the section is mpeg4-generic AAC whose fmtp a depayloader can follow
     pub mpeg4_generic_aac: Option<Mpeg4GenericAac>,
+    // `None` unless the section is MP4A-LATM AAC whose fmtp a depayloader can follow
+    pub mp4a_latm_aac: Option<Mp4aLatmAac>,
 }
 
 impl SdpMedia {
@@ -249,6 +256,15 @@ impl SdpMedia {
             .collect()
     }
 
+    /// The receive path for this section's AAC, `None` when it carries no AAC a
+    /// depayloader can follow.
+    pub fn aac_encoding(&self) -> Option<RtpEncoding> {
+        self.mpeg4_generic_aac
+            .clone()
+            .map(RtpEncoding::Aac)
+            .or_else(|| self.mp4a_latm_aac.clone().map(RtpEncoding::AacLatm))
+    }
+
     pub fn capture_time_ids(&self) -> CaptureTimeExtensionIds {
         let mut ids = CaptureTimeExtensionIds::default();
         for (id, uri) in &self.extmap {
@@ -257,7 +273,7 @@ impl SdpMedia {
         ids
     }
 
-    fn from_section(s: &SdpSection) -> Option<Self> {
+    pub(crate) fn from_section(s: &SdpSection) -> Option<Self> {
         let rtpmap = s.rtpmap.as_deref()?;
         let mut parts = rtpmap.split('/');
         let encoding = parts.next()?;
@@ -273,6 +289,11 @@ impl SdpMedia {
             .as_deref()
             .filter(|_| encoding.eq_ignore_ascii_case(MPEG4_GENERIC))
             .and_then(|fmtp| mpeg4_generic_aac(fmtp, clock_rate));
+        let mp4a_latm_aac = s
+            .fmtp
+            .as_deref()
+            .filter(|_| encoding.eq_ignore_ascii_case(MP4A_LATM))
+            .and_then(|fmtp| mp4a_latm_aac(fmtp, clock_rate));
         let caps = match encoding_kind(encoding)? {
             Encoding::Video(codec) => {
                 if let Some(fmtp) = s.fmtp.as_deref() {
@@ -315,6 +336,7 @@ impl SdpMedia {
             parameter_sets,
             extmap: s.extmap.clone(),
             mpeg4_generic_aac,
+            mp4a_latm_aac,
         })
     }
 }
@@ -358,20 +380,62 @@ fn mpeg4_generic_aac(fmtp: &str, clock_rate_hz: u32) -> Option<Mpeg4GenericAac> 
         return None;
     }
     let audio_specific_config = crate::textencoding::hex_decode(fmtp_param(fmtp, "config")?)?;
-    crate::aacparse::adts_from_asc(&audio_specific_config, &[])?;
-    let core_rate =
-        crate::aacparse::audio_specific_config_info(&audio_specific_config)?.sample_rate;
-    let ticks_per_access_unit = (u64::from(crate::aacparse::SAMPLES_PER_ACCESS_UNIT)
-        * u64::from(clock_rate_hz))
-    .checked_div(u64::from(core_rate))?;
     Some(Mpeg4GenericAac {
         size_length: field_bits("sizelength").filter(|&bits| bits > 0)?,
         index_length: field_bits("indexlength")?,
         index_delta_length: field_bits("indexdeltalength")?,
         clock_rate_hz,
+        ticks_per_access_unit: aac_ticks_per_access_unit(&audio_specific_config, clock_rate_hz)?,
         audio_specific_config,
-        ticks_per_access_unit: u32::try_from(ticks_per_access_unit).ok()?,
     })
+}
+
+// `None` for a configuration ADTS cannot carry
+fn aac_ticks_per_access_unit(audio_specific_config: &[u8], clock_rate_hz: u32) -> Option<u32> {
+    crate::aacparse::adts_from_asc(audio_specific_config, &[])?;
+    let core_rate = crate::aacparse::audio_specific_config_info(audio_specific_config)?.sample_rate;
+    let ticks = (u64::from(crate::aacparse::SAMPLES_PER_ACCESS_UNIT) * u64::from(clock_rate_hz))
+        .checked_div(u64::from(core_rate))?;
+    u32::try_from(ticks).ok()
+}
+
+const MP4A_LATM: &str = "MP4A-LATM";
+
+// RFC 6416 7.1: `cpresent` defaults to 1, the StreamMuxConfig in band, which the depayloader does not read
+fn mp4a_latm_aac(fmtp: &str, clock_rate_hz: u32) -> Option<Mp4aLatmAac> {
+    if fmtp_param(fmtp, "cpresent")? != "0" {
+        return None;
+    }
+    let stream_mux_config = crate::textencoding::hex_decode(fmtp_param(fmtp, "config")?)?;
+    let audio_specific_config = latm_audio_specific_config(&stream_mux_config)?;
+    Some(Mp4aLatmAac {
+        clock_rate_hz,
+        ticks_per_access_unit: aac_ticks_per_access_unit(&audio_specific_config, clock_rate_hz)?,
+        audio_specific_config,
+    })
+}
+
+// ISO/IEC 14496-3 1.7.3 StreamMuxConfig, audioMuxVersion 0 with one program of one layer
+fn latm_audio_specific_config(stream_mux_config: &[u8]) -> Option<Vec<u8>> {
+    let mut reader = crate::annexb::BitReader::new(stream_mux_config);
+    let audio_mux_version = reader.read_bits(1)?;
+    let all_streams_same_time_framing = reader.read_bits(1)?;
+    let _num_sub_frames = reader.read_bits(6)?;
+    let num_program = reader.read_bits(4)?;
+    let num_layer = reader.read_bits(3)?;
+    if audio_mux_version != 0
+        || all_streams_same_time_framing != 1
+        || num_program != 0
+        || num_layer != 0
+    {
+        return None;
+    }
+    // the AudioSpecificConfig starts on bit 15
+    let mut writer = crate::annexb::BitWriter::default();
+    while let Some(bit) = reader.read_bit() {
+        writer.write_bit(bit);
+    }
+    Some(writer.into_bytes())
 }
 
 /// What an `rtpmap` encoding name carries.
@@ -815,5 +879,34 @@ mod tests {
             .map(|w| (w[4] >> 1) & 0x3F)
             .collect();
         assert_eq!(types, alloc::vec![32, 33, 34], "VPS, SPS, then PPS");
+    }
+
+    // the ANNOUNCE gst `rtspclientsink` sends for `avenc_aac` at 48 kHz stereo, through `rtpmp4apay`
+    const GST_LATM_ANNOUNCE: &str = "v=0\r\no=- 836769071 1 IN IP4 127.0.0.1\r\n\
+        s=Session streamed with GStreamer\r\ni=rtspclientsink\r\nt=0 0\r\n\
+        a=tool:GStreamer\r\nm=audio 0 RTP/AVP 96\r\nc=IN IP4 0.0.0.0\r\n\
+        a=rtpmap:96 MP4A-LATM/48000\r\na=fmtp:96 cpresent=0;config=40002320adca00\r\n\
+        a=control:stream=0\r\na=ts-refclk:local\r\na=mediaclk:sender\r\n";
+
+    #[test]
+    fn mp4a_latm_config_yields_the_audio_specific_config_inside_it() {
+        let media = SdpMedia::parse(GST_LATM_ANNOUNCE).expect("an audio section");
+        let latm = media.mp4a_latm_aac.clone().expect("MP4A-LATM AAC");
+        // AAC-LC, 48 kHz, stereo, then ffmpeg's explicit no-SBR extension (sync
+        // word 0x2b7), each shifted up the 15 bits of StreamMuxConfig before it
+        assert_eq!(
+            latm.audio_specific_config,
+            [0x11, 0x90, 0x56, 0xE5, 0x00, 0x00]
+        );
+        assert_eq!(latm.ticks_per_access_unit, 1024);
+        assert_eq!(media.aac_encoding(), Some(RtpEncoding::AacLatm(latm)));
+    }
+
+    #[test]
+    fn mp4a_latm_with_the_config_in_band_maps_to_no_aac() {
+        let in_band = GST_LATM_ANNOUNCE.replace("cpresent=0;", "");
+        let media = SdpMedia::parse(&in_band).expect("an audio section");
+        assert_eq!(media.mp4a_latm_aac, None);
+        assert_eq!(media.aac_encoding(), None);
     }
 }

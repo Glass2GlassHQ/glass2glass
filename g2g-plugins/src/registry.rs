@@ -3487,6 +3487,15 @@ fn register_feature_gated(reg: &mut Registry) {
         },
         || Box::new(RtspServerSrc::new("0.0.0.0:8554".parse().unwrap())),
     ));
+    // the publisher's AAC rides a second pad, the parser builds this form when
+    // several pads are linked or the one linked branch does not take video
+    #[cfg(feature = "rtsp-server")]
+    reg.register_fanout_src(g2g_core::runtime::FanoutSrcFactory::new(
+        "rtspserversrc",
+        |_outputs| {
+            Box::new(RtspServerSrc::new("0.0.0.0:8554".parse().unwrap()).with_audio_pad(true))
+        },
+    ));
     // RTSP publisher: one stream per linked pad, ANNOUNCEd and RECORDed to the
     // server at `location` (`v ! s.sink_0  a ! s.sink_1  rtspclientsink name=s location=...`).
     #[cfg(feature = "rtsp-client-sink")]

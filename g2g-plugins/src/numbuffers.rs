@@ -62,6 +62,7 @@ pub(crate) async fn finished_at_zero_limit(
 #[cfg(any(
     feature = "moqt",
     feature = "rtsp",
+    feature = "rtsp-server",
     feature = "webrtc",
     feature = "webrtc-livekit"
 ))]

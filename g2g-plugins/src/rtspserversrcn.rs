@@ -45,20 +45,19 @@ use tokio::sync::mpsc;
 use g2g_core::element::BoxFuture;
 use g2g_core::runtime::join_all;
 use g2g_core::{
-    Caps, G2gError, MultiOutputSink, MultiOutputSource, OutputSink, PipelinePacket, PropError,
-    PropKind, PropValue, PropertySpec, PushOutcome,
+    Caps, G2gError, MultiOutputSink, MultiOutputSource, PipelinePacket, PropError, PropKind,
+    PropValue, PropertySpec,
 };
 
 use crate::filesink::io_err;
 use crate::rtpdepay::RtpEncoding;
 use crate::rtpjitter::JitterConfig;
-use crate::rtprecv::{AccessUnitEmitter, RtpRecvConfig};
+use crate::rtprecv::RtpRecvConfig;
 use crate::rtspingest::{
-    handshake, inactive_for, receive_interleaved, refuse_one, session_recv_config, watch_control,
-    RecordTransport, SessionEnd, SessionTap,
+    end_session, forward_pads, handshake, inactive_for, ingest_codec, receive_session, refuse_one,
+    IngestFormat, IngestPad, PadSink, SessionEnd, SessionTap, PAD_QUEUE,
 };
 use crate::rtspserver::{sdp_h264, RtspResponder, DEFAULT_SESSION_TIMEOUT_SECS};
-use crate::udprecv::{UdpReceiveConfig, UdpReceiver};
 
 /// Default dynamic RTP payload type for H.264.
 const DEFAULT_PAYLOAD_TYPE: u8 = 96;
@@ -66,9 +65,6 @@ const DEFAULT_PAYLOAD_TYPE: u8 = 96;
 const DEFAULT_WIDTH: u32 = 1280;
 const DEFAULT_HEIGHT: u32 = 720;
 const DEFAULT_FPS: u32 = 30;
-/// Access units a pad may run ahead of the drain loop before its session blocks,
-/// so a stalled branch backs its own publisher up rather than the others.
-const PAD_QUEUE: usize = 4;
 
 /// # Example
 ///
@@ -280,55 +276,16 @@ impl PadConfig {
     /// A fresh responder for one session on `port`. Each pad answers with its own
     /// SSRC, and so its own `Session` id, so concurrent publishers are never
     /// handed the same session identity.
-    fn responder(&self, port: usize, server_rtp_port: u16) -> RtspResponder {
+    fn responder(&self, port: usize) -> RtspResponder {
         RtspResponder::new(
             // Ingest: the publisher describes the stream, not this end.
             sdp_h264(self.payload_type, None, None),
-            server_rtp_port,
+            // the handshake binds and advertises a port pair per announced track
+            0,
             self.ssrc.wrapping_add(port as u32),
         )
         .accepting_codec(crate::rtspingest::ingest_codec(&self.recv))
         .with_session_timeout_secs(self.session_timeout_secs)
-    }
-}
-
-/// One pad's downstream end. The pad sessions are polled concurrently in a single
-/// task, so they cannot each hold the [`MultiOutputSink`]; each pushes onto the
-/// shared channel tagged with its output port, and the drain loop in `run`, which
-/// owns the sink, forwards it.
-#[derive(Debug)]
-struct PadSink {
-    port: usize,
-    tx: g2g_core::runtime::Sender<(usize, PipelinePacket)>,
-    /// The in-flight tagged packet of a blocked push (the drain channel wants
-    /// `(port, packet)`, so the caller's slot cannot hold it directly).
-    staged: Option<(usize, PipelinePacket)>,
-}
-
-impl OutputSink for PadSink {
-    fn begin_push(&mut self) {
-        self.staged = None;
-    }
-
-    fn poll_push(
-        &mut self,
-        cx: &mut core::task::Context<'_>,
-        packet: &mut Option<PipelinePacket>,
-    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
-        use core::task::Poll;
-        if self.staged.is_none() {
-            let taken = packet.take().expect("poll_push without a packet");
-            self.staged = Some((self.port, taken));
-        }
-        // The drain loop is gone only once the graph is shutting down.
-        match self.tx.poll_send(cx, &mut self.staged) {
-            Poll::Pending => Poll::Pending,
-            Poll::Ready(Ok(())) => Poll::Ready(Ok(PushOutcome::Accepted)),
-            Poll::Ready(Err(_)) => {
-                self.staged = None;
-                Poll::Ready(Err(G2gError::Shutdown))
-            }
-        }
     }
 }
 
@@ -344,35 +301,25 @@ async fn pad_worker(
     cfg: &PadConfig,
     tx: g2g_core::runtime::Sender<(usize, PipelinePacket)>,
 ) -> Result<(u64, bool), G2gError> {
-    let mut sink = PadSink {
-        port,
-        tx,
-        staged: None,
-    };
+    let mut sink = PadSink::new(port, tx);
     if crate::numbuffers::finished_at_zero_limit(cfg.frame_limit, &mut sink).await? {
         return Ok((0, true));
     }
     let activity = Cell::new(g2g_core::metrics::monotonic_ns());
     // One tap for the pad's whole life: a publisher taking the pad over continues
     // the sequence numbering and the timeline of the previous one.
-    let mut tap = SessionTap::new(&mut sink, &activity, cfg.frame_period_ns);
+    let mut pads = [IngestPad {
+        format: IngestFormat::Video(ingest_codec(&cfg.recv)),
+        tap: SessionTap::new(&mut sink, &activity, cfg.frame_period_ns),
+    }];
 
     loop {
         let Some(control) = inbox.recv().await else {
-            return Ok((tap.frames(), false)); // no further publisher can arrive
+            return Ok((pads[0].tap.frames(), false)); // no further publisher can arrive
         };
         activity.set(g2g_core::metrics::monotonic_ns());
-        // This session's RTP socket: its port is advertised in a UDP SETUP, and it
-        // is released with the session (bound even for an interleaved publisher,
-        // which then simply drops it).
-        let rtp_socket = tokio::net::UdpSocket::bind(("0.0.0.0", 0))
-            .await
-            .map_err(io_err)?;
-        let server_rtp_port = rtp_socket.local_addr().map_err(io_err)?.port();
-        let responder = cfg.responder(port, server_rtp_port);
-
         let session = tokio::select! {
-            r = handshake(control, responder, rtp_socket, &activity) => r?,
+            r = handshake(control, cfg.responder(port), &activity) => r?,
             _ = inactive_for(&activity, cfg.timeout_ns) => None,
         };
         let Some(session) = session else {
@@ -381,55 +328,15 @@ async fn pad_worker(
         };
         served.set(served.get().saturating_add(1));
 
-        // Remaining budget, so `num-buffers` counts over this pad's publishers and
-        // the sequence numbering continues over a takeover.
-        let seq_base = tap.frames();
-        let remaining = cfg.frame_limit.saturating_sub(seq_base);
-        let end = match session {
-            // UDP: the jitter + (optional) RTCP + depayload path shared with
-            // UdpSrc, while the control channel is watched for the publisher
-            // leaving (datagrams alone never reveal that).
-            RecordTransport::Udp {
-                rtp_socket,
-                mut control,
-                mut responder,
-            } => {
-                let session_recv = session_recv_config(&cfg.recv, &responder);
-                let mut rtp_receiver =
-                    UdpReceiver::new(rtp_socket, UdpReceiveConfig::default()).map_err(io_err)?;
-                tokio::select! {
-                    r = crate::rtprecv::receive_rtp(&mut rtp_receiver, &session_recv, remaining, seq_base, &mut tap) => {
-                        r?;
-                        SessionEnd::Limit
-                    }
-                    _ = watch_control(&mut control, &mut responder, &activity) => SessionEnd::PeerGone,
-                    _ = inactive_for(&activity, cfg.timeout_ns) => SessionEnd::PeerGone,
-                }
-            }
-            // TCP-interleaved: the control stream itself carries the `$`-framed
-            // RTP, so its close ends the session.
-            RecordTransport::Interleaved {
-                mut control,
-                mut responder,
-                rtp_channel,
-                leftover,
-            } => {
-                let emitter = AccessUnitEmitter::new(
-                    &session_recv_config(&cfg.recv, &responder),
-                    seq_base,
-                    remaining,
-                );
-                tokio::select! {
-                    r = receive_interleaved(&mut control, &mut responder, rtp_channel, leftover, emitter, &mut tap) => r?,
-                    _ = inactive_for(&activity, cfg.timeout_ns) => SessionEnd::PeerGone,
-                }
-            }
+        let end = tokio::select! {
+            r = receive_session(session, &mut pads, &cfg.recv, cfg.frame_limit, &activity) => r?,
+            _ = inactive_for(&activity, cfg.timeout_ns) => SessionEnd::PeerGone,
         };
         match end {
             // `AccessUnitEmitter::push` already emitted this pad's EOS.
-            SessionEnd::Limit => return Ok((tap.frames(), true)),
+            SessionEnd::Limit => return Ok((pads[0].tap.frames(), true)),
             SessionEnd::PeerGone => {
-                tap.end_session();
+                end_session(&mut pads);
                 busy.set(false);
             }
         }
@@ -745,33 +652,10 @@ impl MultiOutputSource for RtspServerSrcN {
                 }
             };
 
-            let mut producers = Box::pin(producers);
-            let mut finished = None;
             let result: Result<u64, G2gError> = async {
-                while finished.is_none() {
-                    tokio::select! {
-                        biased;
-                        outcomes = &mut producers => finished = Some(outcomes),
-                        item = rx.recv() => {
-                            if let Some((port, packet)) = item {
-                                out.push_to(port, packet).await?;
-                            }
-                        }
-                    }
-                }
-                // Every sender is gone with its pad: flush what is still queued
-                // before the final EOS.
-                while let Some((port, packet)) = rx.recv().await {
-                    out.push_to(port, packet).await?;
-                }
-
+                let outcomes = forward_pads(producers, &rx, out).await?;
                 let mut frames = 0u64;
-                for (port, outcome) in finished
-                    .take()
-                    .expect("the loop exits with the pads' outcomes")
-                    .into_iter()
-                    .enumerate()
-                {
+                for (port, outcome) in outcomes.into_iter().enumerate() {
                     let (pad_frames, eos_sent) = outcome?;
                     frames = frames.saturating_add(pad_frames);
                     if !eos_sent {
@@ -817,9 +701,6 @@ mod tests {
     #[test]
     fn each_pad_gets_its_own_session_identity() {
         let cfg = src(2).with_rtp(96, 0x1234_5678).pad_config();
-        assert_ne!(
-            cfg.responder(0, 5000).session_id(),
-            cfg.responder(1, 5002).session_id()
-        );
+        assert_ne!(cfg.responder(0).session_id(), cfg.responder(1).session_id());
     }
 }

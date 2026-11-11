@@ -556,7 +556,8 @@ impl RtspServerSink {
 /// Bind the server's RTP/RTCP UDP sockets on adjacent ports, so the SETUP
 /// response's `server_port=N-(N+1)` pair is real on both halves. The ephemeral
 /// RTP port's neighbor may be taken; retry with a fresh pair a few times.
-async fn bind_rtp_pair() -> Result<(tokio::net::UdpSocket, tokio::net::UdpSocket), G2gError> {
+pub(crate) async fn bind_rtp_pair(
+) -> Result<(tokio::net::UdpSocket, tokio::net::UdpSocket), G2gError> {
     for _ in 0..16 {
         let rtp = tokio::net::UdpSocket::bind(("0.0.0.0", 0))
             .await

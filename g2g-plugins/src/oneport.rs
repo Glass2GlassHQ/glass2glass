@@ -207,7 +207,7 @@ impl<E: MultiOutputElement> AsyncElement for OnePortElement<E> {
     }
 }
 
-struct OnePortSink<'a>(&'a mut dyn OutputSink);
+pub(crate) struct OnePortSink<'a>(pub(crate) &'a mut dyn OutputSink);
 
 impl MultiOutputSink for OnePortSink<'_> {
     fn poll_push_to(

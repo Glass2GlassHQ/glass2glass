@@ -614,6 +614,7 @@ cargo clippy --workspace --all-targets
 | :--- | :--- | :--- |
 | `RtspSrc` (video) / `RtspSrcN` (video + audio, plus the ONVIF analytics metadata track under `onvif-metadata=true`) | `rtsp` | retina |
 | `RtspClientSink` (`rtspclientsink`: publishes H.264 / H.265 + AAC / Opus to an RTSP server with ANNOUNCE / RECORD, TCP-interleaved or UDP, Basic / Digest auth, RTCP sender reports, keepalive, reconnect) | `rtsp-client-sink` | none |
+| `RtspServerSink` (serves the pipeline's H.264 to RTSP players) / `RtspServerSrc` (`rtspserversrc`: records a publisher's H.264 / H.265, plus its AAC on a second pad in sync by RTCP sender reports, over UDP or TCP-interleaved) / `RtspServerSrcN` (one video publisher per pad, concurrently) | `rtsp-server` | none |
 | `OnvifSrc` (camera discovery + stream-URI resolution) / `OnvifMetadataParse` / `OnvifMetadataCombiner` | `onvif` | reqwest + roxmltree |
 | `H264Parse` | (default) | none |
 | `FfmpegH264Dec` (sw / `NvdecCuvid` / `NvdecCuda` / `Vaapi`) | `ffmpeg` | Linux + libavcodec, or Windows + a shared ffmpeg named by `FFMPEG_DIR` |
@@ -641,7 +642,7 @@ cargo clippy --workspace --all-targets
 | `CudaGlSink` (CUDA-GL present), `CudaKmsSink` (CUDA-GL on KMS) | `cuda-gl`, `cuda-kms` | Linux + NVIDIA + EGL + GL (+ libdrm for KMS) |
 | `CudaToWgpu` / `WgpuToCuda` (zero-copy bridge) | `cuda-wgpu` | Linux + NVIDIA + Vulkan |
 | `UdpSink` + H.264 / Opus RTP packetizer, or raw datagrams (`multiudpsink` `clients=`) | `udp-egress` | none |
-| `UdpSrc` (`udpsrc2` alias: H.264 / H.265 / Opus / AAC (RFC 3640, from an SDP) RTP ingest + jitter buffer + RTCP / NACK, or raw MPEG-TS datagrams; batched reads, GRO, kernel timestamps, source-specific multicast on several interfaces, a `ReceiveTimeout` bus message after `timeout` with no data) | `udp-ingress` | none |
+| `UdpSrc` (`udpsrc2` alias: H.264 / H.265 / Opus / AAC (RFC 3640 or RFC 6416 MP4A-LATM, from an SDP) RTP ingest + jitter buffer + RTCP / NACK, or raw MPEG-TS datagrams; batched reads, GRO, kernel timestamps, source-specific multicast on several interfaces, a `ReceiveTimeout` bus message after `timeout` with no data) | `udp-ingress` | none |
 | `SrtpEnc` / `SrtpDec` (RFC 3711 / RFC 7714 SRTP and SRTCP, per-SSRC receive contexts) | `srtp` | none |
 | `DtlsSrtpEnc` / `DtlsSrtpDec` (DTLS-SRTP handshake over the media socket keys SRTP) | `dtls-srtp` | none |
 | `SrtSrc` / `SrtSink` (SRT caller, listener and rendezvous, AES-128 / 192 / 256 via `passphrase` and `pbkeylen`, gst's `uri`, a listener that accepts callers by `streamid`) | `srt` | none |

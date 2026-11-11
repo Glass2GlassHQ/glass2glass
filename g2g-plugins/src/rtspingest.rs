@@ -4,33 +4,44 @@
 
 //! Shared RTSP ingest session machinery: the per-publisher pieces both ingest
 //! elements ride, from the accepted TCP control connection to depayloaded access
-//! units. [`RtspServerSrc`](crate::rtspserversrc) drives one session at a time on
-//! its single pad; [`RtspServerSrcN`](crate::rtspserversrcn) drives N of them
-//! concurrently, one per output pad. Each session owns its transport
-//! ([`RecordTransport`]), its inactivity watchdog ([`inactive_for`]) and its
-//! downstream tap ([`SessionTap`]), so nothing carries over to the next
-//! publisher.
+//! units. [`RtspServerSrc`](crate::rtspserversrc) drives one session at a time,
+//! recording its video track and, with an audio pad, its AAC track;
+//! [`RtspServerSrcN`](crate::rtspserversrcn) drives N of them concurrently, one
+//! per output pad. Each session owns its sockets ([`RecordSession`]) and its
+//! inactivity watchdog ([`inactive_for`]); the downstream taps ([`SessionTap`])
+//! span every session on a pad.
 
 use core::cell::Cell;
-
+use core::future::Future;
 use core::time::Duration;
 
+use alloc::boxed::Box;
 use alloc::format;
 use alloc::vec::Vec;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+use g2g_core::element::BoxFuture;
+use g2g_core::rtp::CaptureTimeExtensionIds;
+use g2g_core::runtime::{join_all, Receiver, Sender};
 use g2g_core::{
-    Caps, Dim, G2gError, OutputSink, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
-    PushOutcome, Rate, VideoCodec,
+    Caps, Dim, G2gError, MultiOutputSink, OutputSink, PipelinePacket, PropError, PropKind,
+    PropValue, PropertySpec, PushOutcome, Rate, VideoCodec,
 };
 
+use crate::filesink::io_err;
+use crate::rtcp::{RtcpPacket, SenderClock};
 use crate::rtpdepay::{RtpDepayloader, RtpEncoding};
-use crate::rtprecv::{AccessUnitEmitter, CaptureTimeLatch, RtpRecvConfig};
-use crate::rtspserver::{
-    interleaved_frame, RtspEvent, RtspRequest, RtspResponder, INTERLEAVED_HEADER_LEN,
-    INTERLEAVED_MARKER,
+use crate::rtprecv::{
+    AccessUnitEmitter, CaptureTimeLatch, RtpRecvConfig, SessionTimeline, TrackTimeline,
 };
+use crate::rtspserver::{
+    interleaved_frame, RtspEvent, RtspRequest, RtspResponder, TrackTransport,
+    INTERLEAVED_HEADER_LEN, INTERLEAVED_MARKER,
+};
+use crate::rtspserversink::bind_rtp_pair;
+use crate::sdp::SdpMedia;
+use crate::udprecv::{UdpReceiveConfig, UdpReceiver};
 
 /// TCP read buffer for RTSP control requests.
 const CTRL_BUF: usize = 8192;
@@ -41,16 +52,16 @@ const MAX_PENDING: usize = 64 * 1024;
 /// How long a refused publisher is given to send the request its 503 answers.
 const REFUSE_READ_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Drive one accepted publisher's RTSP handshake to RECORD: bind this session's
-/// RTP UDP receive socket (its port is advertised in a UDP SETUP), run
-/// OPTIONS/ANNOUNCE/SETUP/RECORD over the TCP control channel, and return the
-/// negotiated [`RecordTransport`] once the publisher has issued RECORD. Either
-/// way the control stream is kept (never dropped): a real RTSP publisher (ffmpeg)
-/// holds the control connection open while it records and treats the server
-/// closing it as a fatal "broken pipe", so dropping it would abort the publish.
-/// For TCP-interleaved, that same stream *is* the RTP transport, and any bytes
-/// already buffered past RECORD are handed on as `leftover` so a pipelined first
-/// frame is not lost.
+/// Drive one accepted publisher's RTSP handshake to RECORD: run
+/// OPTIONS/ANNOUNCE/SETUP/RECORD over the TCP control channel, binding an
+/// RTP/RTCP socket pair per announced track (its ports are advertised in a UDP
+/// SETUP of that track), and return the [`RecordSession`] once the publisher has
+/// issued RECORD. The control stream is kept (never dropped): a real RTSP
+/// publisher (ffmpeg) holds the control connection open while it records and
+/// treats the server closing it as a fatal "broken pipe", so dropping it would
+/// abort the publish. For TCP-interleaved, that same stream *is* the RTP
+/// transport, and any bytes already buffered past RECORD are handed on so a
+/// pipelined first frame is not lost.
 ///
 /// `Ok(None)` means this publisher went away before RECORD (closed, tore down, or
 /// overflowed the control buffer): the caller drops it and listens for the next
@@ -58,12 +69,9 @@ const REFUSE_READ_TIMEOUT: Duration = Duration::from_secs(5);
 pub(crate) async fn handshake(
     mut control: tokio::net::TcpStream,
     mut responder: RtspResponder,
-    rtp_socket: tokio::net::UdpSocket,
     activity: &Cell<u64>,
-) -> Result<Option<RecordTransport>, G2gError> {
-    // Set when SETUP negotiated TCP-interleaved: the RTP channel to demux the
-    // `$`-framed control-connection binary on.
-    let mut interleaved_rtp_channel: Option<u8> = None;
+) -> Result<Option<RecordSession>, G2gError> {
+    let mut track_sockets = Vec::new();
     let mut pending: Vec<u8> = Vec::new();
     let mut buf = [0u8; CTRL_BUF];
 
@@ -84,26 +92,24 @@ pub(crate) async fn handshake(
                 return Ok(None);
             }
             match event {
-                RtspEvent::SetupInterleaved { rtp_channel, .. } => {
-                    interleaved_rtp_channel = Some(rtp_channel);
+                RtspEvent::Announce { tracks } => {
+                    track_sockets = Vec::with_capacity(tracks);
+                    for _ in 0..tracks {
+                        track_sockets.push(bind_rtp_pair().await?);
+                    }
+                    let ports = track_sockets
+                        .iter()
+                        .map(|(rtp, _)| rtp.local_addr().map(|addr| addr.port()))
+                        .collect::<Result<Vec<u16>, _>>()
+                        .map_err(io_err)?;
+                    responder.set_track_server_ports(ports);
                 }
                 RtspEvent::Record => {
-                    // Media now flows; hand the control stream back so the caller
-                    // keeps it open for the session (interleaved also receives its
-                    // RTP on it). `pending` holds any bytes read past RECORD (a
-                    // pipelined first interleaved frame).
-                    return Ok(Some(match interleaved_rtp_channel {
-                        Some(rtp_channel) => RecordTransport::Interleaved {
-                            control,
-                            responder,
-                            rtp_channel,
-                            leftover: pending,
-                        },
-                        None => RecordTransport::Udp {
-                            rtp_socket,
-                            control,
-                            responder,
-                        },
+                    return Ok(Some(RecordSession {
+                        control,
+                        responder,
+                        track_sockets,
+                        leftover: pending,
                     }));
                 }
                 RtspEvent::Teardown => return Ok(None),
@@ -116,26 +122,18 @@ pub(crate) async fn handshake(
     }
 }
 
-/// The transport a publisher negotiated by RECORD time. Both keep the control
-/// `TcpStream` (a UDP publisher needs it open; an interleaved one receives its RTP
-/// on it) and the session's responder, so keepalives and a mid-RECORD TEARDOWN
-/// are answered from the same protocol state.
+/// A publisher that reached RECORD. The control `TcpStream` stays open for the
+/// session (a UDP publisher needs it open; an interleaved one sends its RTP on
+/// it), and the session's responder answers keepalives and a mid-RECORD
+/// TEARDOWN from the same protocol state.
 #[derive(Debug)]
-pub(crate) enum RecordTransport {
-    /// Unicast UDP: RTP arrives on `rtp_socket`; `control` is held open.
-    Udp {
-        rtp_socket: tokio::net::UdpSocket,
-        control: tokio::net::TcpStream,
-        responder: RtspResponder,
-    },
-    /// TCP-interleaved (RFC 2326 §10.12): RTP arrives on `control` as `$`-framed
-    /// binary on `rtp_channel`; `leftover` is any binary already buffered.
-    Interleaved {
-        control: tokio::net::TcpStream,
-        responder: RtspResponder,
-        rtp_channel: u8,
-        leftover: Vec<u8>,
-    },
+pub(crate) struct RecordSession {
+    control: tokio::net::TcpStream,
+    responder: RtspResponder,
+    // the RTP and RTCP sockets of each announced track, in announce order
+    track_sockets: Vec<(tokio::net::UdpSocket, tokio::net::UdpSocket)>,
+    // bytes read past RECORD, such as a pipelined first interleaved frame
+    leftover: Vec<u8>,
 }
 
 pub(crate) const ENCODING_NAME_PROPERTY: PropertySpec = PropertySpec::new(
@@ -177,15 +175,34 @@ pub(crate) fn ingest_codec(recv: &RtpRecvConfig) -> VideoCodec {
         .expect("set_encoding_name admits video encodings only")
 }
 
-// the UDP receive path reads the capture-time extensions this publisher announced
-pub(crate) fn session_recv_config(
-    recv: &RtpRecvConfig,
-    responder: &RtspResponder,
-) -> RtpRecvConfig {
-    RtpRecvConfig {
-        capture_time_ids: responder.capture_time_ids(),
-        parameter_sets: responder.announced_parameter_sets().to_vec(),
-        ..recv.clone()
+/// What an ingest pad records: the first announced track of this format.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum IngestFormat {
+    Video(VideoCodec),
+    Aac,
+}
+
+impl IngestFormat {
+    // the receive path for `media`, `None` when this format does not record it
+    fn recv_config(self, recv: &RtpRecvConfig, media: &SdpMedia) -> Option<RtpRecvConfig> {
+        let encoding = match self {
+            IngestFormat::Video(codec) => {
+                let Caps::CompressedVideo {
+                    codec: announced, ..
+                } = media.caps
+                else {
+                    return None;
+                };
+                (announced == codec).then(|| recv.encoding.clone())?
+            }
+            IngestFormat::Aac => media.aac_encoding()?,
+        };
+        Some(RtpRecvConfig {
+            encoding,
+            capture_time_ids: media.capture_time_ids(),
+            parameter_sets: media.parameter_sets.clone(),
+            ..recv.clone()
+        })
     }
 }
 
@@ -224,6 +241,33 @@ impl core::fmt::Debug for SessionTap<'_> {
     }
 }
 
+/// One output pad of an ingest element, across every publisher session on it.
+#[derive(Debug)]
+pub(crate) struct IngestPad<'a> {
+    pub(crate) format: IngestFormat,
+    pub(crate) tap: SessionTap<'a>,
+}
+
+impl IngestPad<'_> {
+    // true once `frame_limit` access units are out, which also pushed the pad's `Eos`
+    pub(crate) fn finished(&self, frame_limit: u64) -> bool {
+        self.tap.frames() >= frame_limit
+    }
+}
+
+/// Close out a session on every pad: the next publisher's timestamps start one
+/// frame past the last one any pad emitted, so its tracks stay in step.
+pub(crate) fn end_session(pads: &mut [IngestPad<'_>]) {
+    let next = pads
+        .iter()
+        .map(|pad| pad.tap.last_pts_ns.saturating_add(pad.tap.frame_period_ns))
+        .max()
+        .unwrap_or(0);
+    for pad in pads {
+        pad.tap.pts_offset_ns = next;
+    }
+}
+
 impl<'a> SessionTap<'a> {
     pub(crate) fn new(
         out: &'a mut dyn OutputSink,
@@ -244,18 +288,6 @@ impl<'a> SessionTap<'a> {
     /// Access units pushed downstream so far, across every session.
     pub(crate) fn frames(&self) -> u64 {
         self.frames
-    }
-
-    /// Note liveness on a session that is receiving bytes but has not completed
-    /// an access unit yet, so the inactivity watchdog does not reap it.
-    pub(crate) fn mark_activity(&self) {
-        self.activity.set(g2g_core::metrics::monotonic_ns());
-    }
-
-    /// Close out a session: the next publisher's timestamps start one frame past
-    /// the last one emitted.
-    pub(crate) fn end_session(&mut self) {
-        self.pts_offset_ns = self.last_pts_ns.saturating_add(self.frame_period_ns);
     }
 }
 
@@ -413,24 +445,34 @@ fn next_interleaved(buf: &[u8]) -> Interleaved {
 // the largest interleaved frame, a 16-bit length of RTP, still waiting for one more read
 const MAX_INTERLEAVED_PENDING: usize = INTERLEAVED_HEADER_LEN + u16::MAX as usize + CTRL_BUF;
 
-/// Receive H.264 over a TCP-interleaved control stream (RFC 2326 §10.12): demux
-/// `$`-framed RTP on `rtp_channel` and depayload it into access units, answering
-/// any RTSP request interleaved between the binary frames. TCP is ordered and
-/// lossless, so no jitter buffer / RTCP / FEC is needed (unlike the UDP path);
-/// packets depayload straight through. Ends on the publisher closing the
-/// connection, a TEARDOWN, or `frame_limit` access units. `leftover` is any
-/// binary already buffered past RECORD.
-pub(crate) async fn receive_interleaved(
+// one recorded track of an interleaved session, demuxed off the control stream
+struct InterleavedTrack<'t, 'o> {
+    rtp_channel: u8,
+    rtcp_channel: u8,
+    depay: RtpDepayloader,
+    capture_time_ids: CaptureTimeExtensionIds,
+    capture_time: CaptureTimeLatch,
+    emitter: AccessUnitEmitter<'t>,
+    timeline: TrackTimeline<'t>,
+    out: &'o mut dyn OutputSink,
+    finished: bool,
+}
+
+/// Receive the recorded tracks of a TCP-interleaved session (RFC 2326 §10.12):
+/// demux `$`-framed RTP by channel and depayload it into access units, read the
+/// sender reports on the RTCP channels, and answer any RTSP request interleaved
+/// between the binary frames. TCP is ordered and lossless, so no jitter buffer /
+/// FEC is needed (unlike the UDP path); packets depayload straight through. Ends
+/// on the publisher closing the connection or a TEARDOWN, or once every track
+/// has emitted its `frame_limit`. `pending` is any binary already buffered past
+/// RECORD.
+async fn receive_interleaved(
     control: &mut tokio::net::TcpStream,
     responder: &mut RtspResponder,
-    rtp_channel: u8,
     mut pending: Vec<u8>,
-    mut emitter: AccessUnitEmitter,
-    out: &mut SessionTap<'_>,
+    tracks: &mut [InterleavedTrack<'_, '_>],
+    activity: &Cell<u64>,
 ) -> Result<SessionEnd, G2gError> {
-    let mut depay = RtpDepayloader::new(emitter.encoding());
-    let capture_time_ids = responder.capture_time_ids();
-    let mut capture_time = CaptureTimeLatch::default();
     let mut buf = [0u8; CTRL_BUF];
     loop {
         // Drain every complete interleaved item currently buffered.
@@ -442,18 +484,32 @@ pub(crate) async fn receive_interleaved(
                     end,
                     consumed,
                 } => {
-                    // Depayload only the RTP channel (skip RTCP / other channels).
-                    if channel == rtp_channel {
-                        let packet = &pending[start..end];
-                        capture_time.observe(&capture_time_ids, packet);
-                        for au in depay.depacketize(packet) {
-                            let capture_unix_ns = capture_time.take(au.rtp_timestamp);
-                            if emitter.push(au, capture_unix_ns, out).await? {
-                                return Ok(SessionEnd::Limit);
+                    let packet = &pending[start..end];
+                    if let Some(track) = tracks
+                        .iter_mut()
+                        .find(|track| track.rtp_channel == channel && !track.finished)
+                    {
+                        track.capture_time.observe(&track.capture_time_ids, packet);
+                        for au in track.depay.depacketize(packet) {
+                            let capture_unix_ns = track.capture_time.take(au.rtp_timestamp);
+                            if track
+                                .emitter
+                                .push(au, capture_unix_ns, &mut *track.out)
+                                .await?
+                            {
+                                track.finished = true;
+                                break;
                             }
                         }
+                    } else if let Some(track) =
+                        tracks.iter().find(|track| track.rtcp_channel == channel)
+                    {
+                        note_sender_reports(packet, track.emitter.encoding(), track.timeline);
                     }
                     pending.drain(..consumed);
+                    if !tracks.is_empty() && tracks.iter().all(|track| track.finished) {
+                        return Ok(SessionEnd::Limit);
+                    }
                 }
                 Interleaved::Rtsp { consumed } => {
                     let teardown = match RtspRequest::parse(&pending) {
@@ -480,10 +536,287 @@ pub(crate) async fn receive_interleaved(
             // the close is what ends the session.
             return Ok(SessionEnd::PeerGone);
         }
-        out.mark_activity();
+        activity.set(g2g_core::metrics::monotonic_ns());
         pending.extend_from_slice(&buf[..n]);
         if pending.len() > MAX_INTERLEAVED_PENDING {
             return Ok(SessionEnd::PeerGone);
         }
     }
+}
+
+fn note_sender_reports(compound: &[u8], encoding: &RtpEncoding, timeline: TrackTimeline<'_>) {
+    let arrival_ns = g2g_core::metrics::monotonic_ns();
+    for packet in crate::rtcp::parse_compound(compound) {
+        if let RtcpPacket::SenderReport { ntp, rtp_ts, .. } = packet {
+            if let Some(clock) = SenderClock::from_report(ntp, rtp_ts, encoding.clock_rate_hz()) {
+                timeline.note_sender_report(clock, arrival_ns);
+            }
+        }
+    }
+}
+
+// the largest RTCP compound packet a publisher sends, well under one MTU
+const RTCP_DATAGRAM_LEN: usize = 1500;
+
+/// Read the sender reports a UDP publisher sends on a track's RTCP port, for
+/// as long as the session runs.
+async fn read_sender_reports(
+    socket: &tokio::net::UdpSocket,
+    encoding: &RtpEncoding,
+    timeline: TrackTimeline<'_>,
+    activity: &Cell<u64>,
+) {
+    let mut buf = [0u8; RTCP_DATAGRAM_LEN];
+    loop {
+        let Ok(n) = socket.recv(&mut buf).await else {
+            // A socket that cannot read right now must not spin the task.
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            continue;
+        };
+        activity.set(g2g_core::metrics::monotonic_ns());
+        note_sender_reports(&buf[..n], encoding, timeline);
+    }
+}
+
+/// Receive one UDP track through the jitter + (optional) RTCP + depayload path
+/// shared with UdpSrc until it has emitted `frame_limit` access units.
+async fn receive_udp_track(
+    (rtp_socket, rtcp_socket): (tokio::net::UdpSocket, tokio::net::UdpSocket),
+    cfg: &RtpRecvConfig,
+    frame_limit: u64,
+    seq_base: u64,
+    timeline: TrackTimeline<'_>,
+    activity: &Cell<u64>,
+    out: &mut dyn OutputSink,
+) -> Result<(), G2gError> {
+    let mut receiver = UdpReceiver::new(rtp_socket, UdpReceiveConfig::default()).map_err(io_err)?;
+    tokio::select! {
+        r = crate::rtprecv::receive_rtp(&mut receiver, cfg, frame_limit, seq_base, Some(timeline), out) => r.map(drop),
+        _ = read_sender_reports(&rtcp_socket, &cfg.encoding, timeline, activity) => {
+            unreachable!("sender reports are read until the session ends")
+        }
+    }
+}
+
+/// Record one publisher session onto `pads`: each pad that has not reached
+/// `frame_limit` takes the first SETUP track of its format, over UDP or
+/// interleaved, and every recorded track is placed on one timeline from the
+/// publisher's sender reports. Tracks no pad records are SETUP but dropped.
+/// Ends `Limit` once every recorded track has emitted `frame_limit` access
+/// units, and `PeerGone` when the publisher tears down or closes.
+pub(crate) async fn receive_session(
+    session: RecordSession,
+    pads: &mut [IngestPad<'_>],
+    recv: &RtpRecvConfig,
+    frame_limit: u64,
+    activity: &Cell<u64>,
+) -> Result<SessionEnd, G2gError> {
+    let RecordSession {
+        mut control,
+        mut responder,
+        track_sockets,
+        leftover,
+    } = session;
+    let transports = responder.track_transports().to_vec();
+    let mut track_sockets: Vec<_> = track_sockets.into_iter().map(Some).collect();
+    let mut claimed = alloc::vec![false; transports.len()];
+    // (pad, track, receive path) for every pad this session records
+    let mut recorded = Vec::new();
+    for (pad_index, pad) in pads.iter().enumerate() {
+        if pad.finished(frame_limit) {
+            continue;
+        }
+        let track = responder
+            .announced_tracks()
+            .iter()
+            .enumerate()
+            .find_map(|(index, track)| {
+                let media = track.media.as_ref()?;
+                let setup = transports[index].is_some() && !claimed[index];
+                setup
+                    .then(|| pad.format.recv_config(recv, media))?
+                    .map(|cfg| (index, cfg))
+            });
+        if let Some((index, cfg)) = track {
+            claimed[index] = true;
+            recorded.push((pad_index, index, cfg));
+        }
+    }
+    let interleaved_setup = transports
+        .iter()
+        .any(|transport| matches!(transport, Some(TrackTransport::Interleaved { .. })));
+
+    let timeline = SessionTimeline::default();
+    let sender_clocks: Vec<Cell<Option<SenderClock>>> =
+        recorded.iter().map(|_| Cell::new(None)).collect();
+    let mut udp_tracks: Vec<BoxFuture<'_, Result<(), G2gError>>> = Vec::new();
+    let mut interleaved_tracks = Vec::new();
+    for (pad_index, pad) in pads.iter_mut().enumerate() {
+        let Some(slot) = recorded
+            .iter()
+            .position(|(recorded_pad, _, _)| *recorded_pad == pad_index)
+        else {
+            continue;
+        };
+        let (_, track, cfg) = &recorded[slot];
+        let track_timeline = TrackTimeline {
+            session: &timeline,
+            sender_clock: &sender_clocks[slot],
+        };
+        let seq_base = pad.tap.frames();
+        let remaining = frame_limit.saturating_sub(seq_base);
+        match transports[*track].expect("recorded tracks were SETUP") {
+            TrackTransport::Udp { .. } => {
+                let sockets = track_sockets[*track]
+                    .take()
+                    .expect("every announced track has its sockets bound");
+                udp_tracks.push(Box::pin(receive_udp_track(
+                    sockets,
+                    cfg,
+                    remaining,
+                    seq_base,
+                    track_timeline,
+                    activity,
+                    &mut pad.tap,
+                )));
+            }
+            TrackTransport::Interleaved {
+                rtp_channel,
+                rtcp_channel,
+            } => interleaved_tracks.push(InterleavedTrack {
+                rtp_channel,
+                rtcp_channel,
+                depay: RtpDepayloader::new(&cfg.encoding),
+                capture_time_ids: cfg.capture_time_ids,
+                capture_time: CaptureTimeLatch::default(),
+                emitter: AccessUnitEmitter::new(cfg, seq_base, remaining, Some(track_timeline)),
+                timeline: track_timeline,
+                out: &mut pad.tap,
+                finished: false,
+            }),
+        }
+    }
+    // Sockets of tracks no pad records stay open, so the publisher's datagrams to
+    // them are dropped here rather than refused.
+    let _unrecorded = track_sockets;
+
+    let records_interleaved = !interleaved_tracks.is_empty();
+    let records_udp = !udp_tracks.is_empty();
+    let mut udp = core::pin::pin!(join_all(udp_tracks));
+    let mut control_end = core::pin::pin!(async {
+        if interleaved_setup {
+            receive_interleaved(
+                &mut control,
+                &mut responder,
+                leftover,
+                &mut interleaved_tracks,
+                activity,
+            )
+            .await
+        } else {
+            watch_control(&mut control, &mut responder, activity).await;
+            Ok(SessionEnd::PeerGone)
+        }
+    });
+    tokio::select! {
+        end = &mut control_end => match end? {
+            SessionEnd::PeerGone => Ok(SessionEnd::PeerGone),
+            SessionEnd::Limit => {
+                for result in udp.await {
+                    result?;
+                }
+                Ok(SessionEnd::Limit)
+            }
+        },
+        results = &mut udp, if records_udp => {
+            for result in results {
+                result?;
+            }
+            if records_interleaved {
+                control_end.await
+            } else {
+                Ok(SessionEnd::Limit)
+            }
+        }
+    }
+}
+
+/// Access units a pad may run ahead of the drain loop before its session blocks,
+/// so a stalled branch backs its own publisher up rather than the others.
+pub(crate) const PAD_QUEUE: usize = 4;
+
+/// One pad's downstream end. The sessions are polled concurrently in a single
+/// task, so they cannot each hold the [`MultiOutputSink`]; each pushes onto the
+/// shared channel tagged with its output port, and [`forward_pads`], which owns
+/// the sink, forwards it.
+#[derive(Debug)]
+pub(crate) struct PadSink {
+    port: usize,
+    tx: Sender<(usize, PipelinePacket)>,
+    /// The in-flight tagged packet of a blocked push (the drain channel wants
+    /// `(port, packet)`, so the caller's slot cannot hold it directly).
+    staged: Option<(usize, PipelinePacket)>,
+}
+
+impl PadSink {
+    pub(crate) fn new(port: usize, tx: Sender<(usize, PipelinePacket)>) -> Self {
+        Self {
+            port,
+            tx,
+            staged: None,
+        }
+    }
+}
+
+impl OutputSink for PadSink {
+    fn begin_push(&mut self) {
+        self.staged = None;
+    }
+
+    fn poll_push(
+        &mut self,
+        cx: &mut core::task::Context<'_>,
+        packet: &mut Option<PipelinePacket>,
+    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+        use core::task::Poll;
+        if self.staged.is_none() {
+            let taken = packet.take().expect("poll_push without a packet");
+            self.staged = Some((self.port, taken));
+        }
+        // The drain loop is gone only once the graph is shutting down.
+        match self.tx.poll_send(cx, &mut self.staged) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Ok(())) => Poll::Ready(Ok(PushOutcome::Accepted)),
+            Poll::Ready(Err(_)) => {
+                self.staged = None;
+                Poll::Ready(Err(G2gError::Shutdown))
+            }
+        }
+    }
+}
+
+/// Run `producers`, which push through [`PadSink`]s, while forwarding what they
+/// queue on `rx` to `out`, then flush the queue once they and their senders are
+/// gone.
+pub(crate) async fn forward_pads<T>(
+    producers: impl Future<Output = T>,
+    rx: &Receiver<(usize, PipelinePacket)>,
+    out: &mut dyn MultiOutputSink,
+) -> Result<T, G2gError> {
+    let mut producers = core::pin::pin!(producers);
+    let finished = loop {
+        tokio::select! {
+            biased;
+            outcome = &mut producers => break outcome,
+            item = rx.recv() => {
+                if let Some((port, packet)) = item {
+                    out.push_to(port, packet).await?;
+                }
+            }
+        }
+    };
+    while let Some((port, packet)) = rx.recv().await {
+        out.push_to(port, packet).await?;
+    }
+    Ok(finished)
 }

@@ -559,6 +559,16 @@ CTS or DTS fields, auxiliary data, a 960-sample frame or a config ADTS cannot
 carry is refused. Validated live: ffmpeg's RTP muxer, which puts several frames
 in a packet, and gst's `rtpmp4gpay` both arrive frame for frame.
 
+`MP4A-LATM` AAC (RFC 6416), what gst's `rtpmp4apay` and so gst's
+`rtspclientsink` send, is read when the fmtp has `cpresent=0` and a `config`
+holding the StreamMuxConfig (audioMuxVersion 0, one program of one layer). The
+AudioSpecificConfig inside it starts on bit 15 and is copied out to a byte
+boundary. `RtpLatmDepayloader` joins packets up to the marker bit into one
+AudioMuxElement and cuts it into frames by their PayloadLengthInfo, stepped one
+frame apart on the RTP clock, then ADTS-frames each as the RFC 3640 path does.
+A sequence gap drops the element in flight. The StreamMuxConfig in band
+(`cpresent=1`, the RFC default) is refused.
+
 ### Socket reads
 
 `UdpReceiver` (`udprecv.rs`) reads the socket for `udpsrc` and the RTP ingest
@@ -758,6 +768,30 @@ reaped when it is silent past the timeout on both the control channel
 mid-stream on an interleaved control connection and are consumed there.
 Validated end to end over loopback: handshake, RTP recovery, SR delivery on both
 transports, RR-extended lifetime, and silent-client reap.
+
+`RtspServerSrc` and `RtspServerSrcN` record what a publisher sends. The
+handshake (`rtspingest.rs`) binds an RTP/RTCP UDP socket pair for each track the
+ANNOUNCE lists, and the responder routes each SETUP by its URL to the track whose
+`a=control` it names. A lone track matches any URL, and an unknown control gets
+a 404. Each output pad records the first SETUP track of its format.
+`rtspserversrc` takes video on pad 0 and, when a second pad is linked, the first
+AAC track (`mpeg4-generic` or `MP4A-LATM`) on pad 1 as ADTS. `rtspserversrcn` records video only,
+one publisher per pad. Tracks no pad records are SETUP and their packets
+dropped, where gst-rtsp-server refuses an ANNOUNCE whose stream count differs
+from its media.
+
+The tracks of one session share a timeline (`SessionTimeline` in `rtprecv.rs`).
+The session's first RTCP sender report fixes the offset between the publisher's
+wall clock and local monotonic time, each track maps its RTP timestamps through
+its own latest report, and the session's first frame is PTS zero. A track with
+no report before its first frame is placed by its arrival time, and frames from
+before the session's first frame are dropped. ffmpeg sends a report before each
+track's first RTP packet. Validated against ffmpeg publishing video and AAC over
+UDP and TCP-interleaved with the audio delayed 500 ms by `-itsoffset`: the
+recorded offset matches within 2 ms. gst's `rtspclientsink` sends its first
+report after its first frames, so its tracks are placed by arrival time: audio
+stamped 500 ms late by `audiotestsrc timestamp-offset` records at the same PTS
+as the video.
 
 ## RTSP publishing
 
