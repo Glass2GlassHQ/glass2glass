@@ -37,8 +37,8 @@ use crate::cenc::{
 #[cfg(any(test, feature = "dash"))]
 use crate::mp4box::next_box_len;
 use crate::mp4box::{
-    be32, be64, boxes, boxes_at, find_box, find_path, itunes_gapless, parse_chpl, parse_esds,
-    parse_esds_decoder_config, parse_ilst_tags,
+    be32, be64, boxes, boxes_at, find_box, find_entry_child, find_path, itunes_gapless, parse_chpl,
+    parse_esds, parse_esds_decoder_config, parse_ilst_tags,
 };
 use crate::opusparse::{opus_head_from_dops, parse_opus_head};
 use crate::pcmclip::clip_pcm_to_segment;
@@ -146,11 +146,11 @@ pub(crate) fn parse_header(data: &[u8]) -> Result<Header, G2gError> {
     // `sinf` (frma original format + cbcs scheme + tenc defaults).
     let (codec, param_sets, cenc) = if let Some(avc1) = find_box(entries, b"avc1") {
         let children = avc1.get(78..).ok_or(G2gError::CapsMismatch)?;
-        let avcc = find_box(children, b"avcC").ok_or(G2gError::CapsMismatch)?;
+        let avcc = find_entry_child(children, b"avcC").ok_or(G2gError::CapsMismatch)?;
         (VideoCodec::H264, parse_avcc(avcc)?.parameter_sets, None)
     } else if let Some(hvc1) = find_box(entries, b"hvc1").or_else(|| find_box(entries, b"hev1")) {
         let children = hvc1.get(78..).ok_or(G2gError::CapsMismatch)?;
-        let hvcc = find_box(children, b"hvcC").ok_or(G2gError::CapsMismatch)?;
+        let hvcc = find_entry_child(children, b"hvcC").ok_or(G2gError::CapsMismatch)?;
         (VideoCodec::H265, parse_hvcc(hvcc)?.parameter_sets, None)
     } else if let Some(mp4v) = find_box(entries, b"mp4v") {
         let (codec, sets) = mp4v_codec(mp4v)?.ok_or(G2gError::CapsMismatch)?;
@@ -159,16 +159,16 @@ pub(crate) fn parse_header(data: &[u8]) -> Result<Header, G2gError> {
         (VideoCodec::Av1, parse_av1c_config(av01)?, None)
     } else if let Some(encv) = find_box(entries, b"encv") {
         let children = encv.get(78..).ok_or(G2gError::CapsMismatch)?;
-        let sinf = find_box(children, b"sinf").ok_or(G2gError::CapsMismatch)?;
+        let sinf = find_entry_child(children, b"sinf").ok_or(G2gError::CapsMismatch)?;
         let cenc = parse_sinf(sinf)?;
         let frma = find_box(sinf, b"frma").ok_or(G2gError::CapsMismatch)?;
         let (codec, param_sets) = match frma.get(0..4) {
             Some(b"avc1") => {
-                let avcc = find_box(children, b"avcC").ok_or(G2gError::CapsMismatch)?;
+                let avcc = find_entry_child(children, b"avcC").ok_or(G2gError::CapsMismatch)?;
                 (VideoCodec::H264, parse_avcc(avcc)?.parameter_sets)
             }
             Some(b"hvc1") | Some(b"hev1") => {
-                let hvcc = find_box(children, b"hvcC").ok_or(G2gError::CapsMismatch)?;
+                let hvcc = find_entry_child(children, b"hvcC").ok_or(G2gError::CapsMismatch)?;
                 (VideoCodec::H265, parse_hvcc(hvcc)?.parameter_sets)
             }
             _ => return Err(G2gError::CapsMismatch),
@@ -986,7 +986,7 @@ const VISUAL_SAMPLE_ENTRY_CHILDREN_AT: usize = 78;
 fn pixel_aspect(entry: &[u8]) -> PixelAspect {
     let spacing = entry
         .get(VISUAL_SAMPLE_ENTRY_CHILDREN_AT..)
-        .and_then(|children| find_box(children, b"pasp"))
+        .and_then(|children| find_entry_child(children, b"pasp"))
         .and_then(|pasp| Some((be32(pasp, 0).ok()?, be32(pasp, 4).ok()?)));
     spacing
         .and_then(|(horizontal, vertical)| AspectRatio::new(horizontal, vertical))
@@ -1001,7 +1001,7 @@ fn first_entry_pixel_aspect(entries: &[u8]) -> PixelAspect {
 
 fn clean_aperture(entries: &[u8]) -> Option<CropRectangle> {
     let (_, entry) = boxes(entries).next()?;
-    let clap = find_box(entry.get(VISUAL_SAMPLE_ENTRY_CHILDREN_AT..)?, b"clap")?;
+    let clap = find_entry_child(entry.get(VISUAL_SAMPLE_ENTRY_CHILDREN_AT..)?, b"clap")?;
     let dimension = |at: usize| {
         let bytes = entry.get(at..at + 2)?;
         Some(u32::from(u16::from_be_bytes([bytes[0], bytes[1]])))
@@ -1073,7 +1073,7 @@ fn clap_axis(picture: u32, aperture: (i32, i32), offset: (i32, i32)) -> Option<(
 /// configOBUs just means the sequence header rides in-band.
 fn parse_av1c_config(av01: &[u8]) -> Result<Vec<Vec<u8>>, G2gError> {
     let children = av01.get(78..).ok_or(G2gError::CapsMismatch)?;
-    let av1c = find_box(children, b"av1C").ok_or(G2gError::CapsMismatch)?;
+    let av1c = find_entry_child(children, b"av1C").ok_or(G2gError::CapsMismatch)?;
     // marker/version, profile/level, tier/depth flags, delay byte: 4 fixed
     // bytes, then configOBUs.
     let config = av1c.get(4..).unwrap_or_default();
@@ -1100,16 +1100,16 @@ fn parse_video_entry(
     // ahead of a clear entry, so ciphertext never decodes as clear
     let (codec, param_sets, cenc) = if let Some(encv) = find_box(entries, b"encv") {
         let children = encv.get(78..).ok_or(G2gError::CapsMismatch)?;
-        let sinf = find_box(children, b"sinf").ok_or(G2gError::CapsMismatch)?;
+        let sinf = find_entry_child(children, b"sinf").ok_or(G2gError::CapsMismatch)?;
         let cenc = parse_sinf(sinf)?;
         let frma = find_box(sinf, b"frma").ok_or(G2gError::CapsMismatch)?;
         let (codec, param_sets) = match frma.get(0..4) {
             Some(b"avc1") => {
-                let avcc = find_box(children, b"avcC").ok_or(G2gError::CapsMismatch)?;
+                let avcc = find_entry_child(children, b"avcC").ok_or(G2gError::CapsMismatch)?;
                 (VideoCodec::H264, parse_avcc(avcc)?.parameter_sets)
             }
             Some(b"hvc1") | Some(b"hev1") => {
-                let hvcc = find_box(children, b"hvcC").ok_or(G2gError::CapsMismatch)?;
+                let hvcc = find_entry_child(children, b"hvcC").ok_or(G2gError::CapsMismatch)?;
                 (VideoCodec::H265, parse_hvcc(hvcc)?.parameter_sets)
             }
             _ => return Err(G2gError::CapsMismatch),
@@ -1117,11 +1117,11 @@ fn parse_video_entry(
         (codec, param_sets, Some(cenc))
     } else if let Some(avc1) = find_box(entries, b"avc1").or_else(|| find_box(entries, b"avc3")) {
         let children = avc1.get(78..).ok_or(G2gError::CapsMismatch)?;
-        let avcc = find_box(children, b"avcC").ok_or(G2gError::CapsMismatch)?;
+        let avcc = find_entry_child(children, b"avcC").ok_or(G2gError::CapsMismatch)?;
         (VideoCodec::H264, parse_avcc(avcc)?.parameter_sets, None)
     } else if let Some(hvc1) = find_box(entries, b"hvc1").or_else(|| find_box(entries, b"hev1")) {
         let children = hvc1.get(78..).ok_or(G2gError::CapsMismatch)?;
-        let hvcc = find_box(children, b"hvcC").ok_or(G2gError::CapsMismatch)?;
+        let hvcc = find_entry_child(children, b"hvcC").ok_or(G2gError::CapsMismatch)?;
         (VideoCodec::H265, parse_hvcc(hvcc)?.parameter_sets, None)
     } else if find_box(entries, b"vp08").is_some() {
         (VideoCodec::Vp8, Vec::new(), None)
@@ -1188,7 +1188,7 @@ fn mp4v_codec(mp4v: &[u8]) -> Result<Option<EntryCodec>, G2gError> {
     let children = mp4v
         .get(VISUAL_SAMPLE_ENTRY_CHILDREN_AT..)
         .ok_or(G2gError::CapsMismatch)?;
-    let esds = find_box(children, b"esds").ok_or(G2gError::CapsMismatch)?;
+    let esds = find_entry_child(children, b"esds").ok_or(G2gError::CapsMismatch)?;
     let (object_type, decoder_config) = parse_esds_decoder_config(esds)?;
     let codec = match object_type {
         MPEG4_VISUAL_OBJECT_TYPE => VideoCodec::Mpeg4Part2,
@@ -1484,7 +1484,7 @@ fn parse_audio_entry(
         (Some(mp4a), _) => (mp4a, None),
         (None, Some(enca)) => {
             let children = enca.get(28..).ok_or(G2gError::CapsMismatch)?;
-            let sinf = find_box(children, b"sinf").ok_or(G2gError::CapsMismatch)?;
+            let sinf = find_entry_child(children, b"sinf").ok_or(G2gError::CapsMismatch)?;
             (enca, Some(parse_sinf(sinf)?))
         }
         // a codec we have no reader for (ALAC, ...): skip the track
@@ -1498,7 +1498,7 @@ fn parse_audio_entry(
         .get(sound_entry_children_at(entry)?..)
         .ok_or(G2gError::CapsMismatch)?;
     // QuickTime nests the esds in a `wave` box
-    let esds = find_box(children, b"esds")
+    let esds = find_entry_child(children, b"esds")
         .or_else(|| find_path(children, &[b"wave", b"esds"]))
         .ok_or(G2gError::CapsMismatch)?;
     if MPEG_AUDIO_OBJECT_TYPES.contains(&parse_esds_decoder_config(esds)?.0) {
@@ -1719,7 +1719,7 @@ fn vorbis_track(entry: &[u8], timescale: u32) -> Result<TrackKind, G2gError> {
         .ok_or(G2gError::CapsMismatch)?;
     let config = entry
         .get(description.children_at..)
-        .and_then(|children| find_box(children, b"glbl"))
+        .and_then(|children| find_entry_child(children, b"glbl"))
         .filter(|laced| vorbis_headers(laced).is_some())
         .ok_or(G2gError::CapsMismatch)?;
     Ok(TrackKind::Audio {
@@ -2831,11 +2831,11 @@ fn video_entry_param_sets(stbl: &[u8]) -> Result<Vec<Option<EntryParamSets>>, G2
         .map(|(kind, entry)| {
             let children = entry.get(78..).unwrap_or_default();
             Ok(match kind {
-                b"avc1" | b"avc3" => match find_box(children, b"avcC") {
+                b"avc1" | b"avc3" => match find_entry_child(children, b"avcC") {
                     Some(avcc) => Some((VideoCodec::H264, parse_avcc(avcc)?.parameter_sets)),
                     None => None,
                 },
-                b"hvc1" | b"hev1" => match find_box(children, b"hvcC") {
+                b"hvc1" | b"hev1" => match find_entry_child(children, b"hvcC") {
                     Some(hvcc) => Some((VideoCodec::H265, parse_hvcc(hvcc)?.parameter_sets)),
                     None => None,
                 },
@@ -3642,6 +3642,30 @@ mod tests {
             .copy_from_slice(&height.to_be_bytes());
         entry.extend_from_slice(&crate::mp4box::mp4_box(child, payload));
         crate::mp4box::mp4_box(b"avc1", &entry)
+    }
+
+    #[test]
+    fn a_zero_sized_box_ahead_of_the_avcc_is_stepped_over() {
+        const SPS: [u8; 4] = [0x67, 0x42, 0x00, 0x1e];
+        const PPS: [u8; 2] = [0x68, 0xce];
+        let mut avcc = alloc::vec![1, 0x42, 0x00, 0x1e, 0xFF, 0xE1];
+        avcc.extend_from_slice(&(SPS.len() as u16).to_be_bytes());
+        avcc.extend_from_slice(&SPS);
+        avcc.push(1);
+        avcc.extend_from_slice(&(PPS.len() as u16).to_be_bytes());
+        avcc.extend_from_slice(&PPS);
+        let mut entry = alloc::vec![0u8; VISUAL_SAMPLE_ENTRY_CHILDREN_AT];
+        entry.extend_from_slice(&[0, 0, 0, 0]);
+        entry.extend_from_slice(b"bmdc");
+        entry.extend_from_slice(&crate::mp4box::mp4_box(b"avcC", &avcc));
+        let entries = crate::mp4box::mp4_box(b"avc1", &entry);
+        let (kind, _) = parse_video_entry(&entries, 320, 240)
+            .expect("the entry parses")
+            .expect("h264 is read");
+        let TrackKind::Video { param_sets, .. } = kind else {
+            panic!("{kind:?}");
+        };
+        assert_eq!(param_sets, [SPS.to_vec(), PPS.to_vec()]);
     }
 
     #[test]

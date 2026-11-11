@@ -152,22 +152,42 @@ pub(crate) fn boxes(data: &[u8]) -> impl Iterator<Item = (&[u8; 4], &[u8])> {
 pub(crate) fn boxes_at(data: &[u8]) -> impl Iterator<Item = (&[u8; 4], &[u8], usize)> {
     let mut i = 0usize;
     core::iter::from_fn(move || {
-        let (size, header_len) = match be_u32(data, i)? {
-            LARGE_SIZE_MARKER => (
-                usize::try_from(be_u64(data, i + BOX_HEADER_LEN)?).ok()?,
-                LARGE_BOX_HEADER_LEN,
-            ),
-            size => (size as usize, BOX_HEADER_LEN),
-        };
-        if size < header_len || i.checked_add(size)? > data.len() {
-            return None;
-        }
-        let kind: &[u8; 4] = data[i + 4..i + 8].try_into().expect("4 bytes");
-        let payload = &data[i + header_len..i + size];
+        let (kind, payload, end) = box_at(data, i)?;
         let start = i;
-        i += size;
+        i = end;
         Some((kind, payload, start))
     })
+}
+
+fn box_at(data: &[u8], i: usize) -> Option<(&[u8; 4], &[u8], usize)> {
+    let (size, header_len) = match be_u32(data, i)? {
+        LARGE_SIZE_MARKER => (
+            usize::try_from(be_u64(data, i + BOX_HEADER_LEN)?).ok()?,
+            LARGE_BOX_HEADER_LEN,
+        ),
+        size => (size as usize, BOX_HEADER_LEN),
+    };
+    if size < header_len || i.checked_add(size)? > data.len() {
+        return None;
+    }
+    let kind: &[u8; 4] = data[i + 4..i + 8].try_into().expect("4 bytes");
+    Some((kind, &data[i + header_len..i + size], i + size))
+}
+
+pub(crate) fn find_entry_child<'a>(children: &'a [u8], kind: &[u8; 4]) -> Option<&'a [u8]> {
+    let mut i = 0usize;
+    loop {
+        // blackmagic ATEM recorders write a zero-sized `bmdc` box ahead of `avcC`, gst steps over its header
+        if be_u32(children, i)? == 0 {
+            i += BOX_HEADER_LEN;
+            continue;
+        }
+        let (child_kind, payload, end) = box_at(children, i)?;
+        if child_kind == kind {
+            return Some(payload);
+        }
+        i = end;
+    }
 }
 
 pub(crate) fn find_box<'a>(data: &'a [u8], kind: &[u8; 4]) -> Option<&'a [u8]> {
