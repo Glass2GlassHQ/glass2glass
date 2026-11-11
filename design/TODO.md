@@ -207,31 +207,15 @@ libraries installed.
 - **RTP receive:**
   - A property to turn off the keyframe gate after loss (gst's
     `wait-for-keyframe`, `request-keyframe`).
-  - `rtpklvdepay` resyncs only at the next marker after a loss, so the unit
-    after a lost one is dropped too. Resync at any packet that starts with the
-    KLV universal label.
-  - A padding-only RTX packet is rebuilt as an empty packet on a sequence read
-    from its padding. Subtract the padding before reading the original sequence.
   - RTCP on the port after RTP (the gst and ffmpeg default) is never read, so
     sender reports are missed, and RR and NACK go to the sender's RTP port.
-  - Every receiver reports under one fixed `LOCAL_SSRC`.
   - `udpsrc` passes no session timeline, so audio and video on two `udpsrc`
     elements lose their offset. Read RFC 6051 in-band NTP-64 for faster sync.
-  - SDP sections with an rtpmap clock rate of 0 are dropped instead of taking
-    the static payload type's rate.
   - `udpsrc`'s `sdp` property ignores `a=source-filter`.
   - VP8, VP9, AV1 and JPEG RTP payloads in `udpsrc`, and MJPEG cameras in
     `rtspsrcn` (retina has a JPEG depacketizer).
   - RED (RFC 2198) receive.
 - **RTSP:**
-  - `rtspserversink` writes to TCP-interleaved players inline with no timeout,
-    so one slow player stalls the pipeline and every other player.
-  - `rtspserversink` sends a new player whatever frame is current. Start each
-    player on a keyframe.
-  - `rtspserversink` keeps sending during PAUSE.
-  - `rtspclientsink` appends the stream control after the URL's query string.
-  - `rtspserversrc` misses a SETUP for `<control>?<query>`, as older gst
-    publishers send it, and answers 404.
   - retina joins an absolute `a=control:/path` onto the base URL. Report it
     upstream.
   - RTSPS in `rtspsrcn` (retina has no TLS) and `rtspclientsink`.

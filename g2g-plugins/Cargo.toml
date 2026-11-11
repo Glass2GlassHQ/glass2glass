@@ -102,7 +102,7 @@ rtsp = ["std", "dep:retina", "dep:futures-util", "dep:url", "dep:bytes"]
 # RTSP server sink (RtspServerSink): hosts a pipeline's H.264 as an RTSP endpoint,
 # serving RTP over UDP to a connecting player. The sans-IO `rtspserver` responder
 # is always compiled; only the tokio TCP/UDP element needs this. Implies std + tokio.
-rtsp-server = ["std", "tokio/net", "tokio/io-util", "tokio/macros", "dep:quinn-udp", "dep:libc"]
+rtsp-server = ["std", "tokio/net", "tokio/io-util", "tokio/macros", "dep:quinn-udp", "dep:libc", "dep:getrandom"]
 # RTSP publishing sink (RtspClientSink): ANNOUNCE + SETUP + RECORD to an RTSP
 # server, RTP over TCP-interleaved or UDP. The sans-IO `rtspclient` request and
 # response layer is always compiled. Implies std + tokio.
@@ -144,7 +144,7 @@ rtmp = ["std", "tokio/net", "tokio/io-util", "dep:hmac", "dep:getrandom"]
 # depayloads H.264 to Annex-B access units, with caps taken from a published SDP
 # or the stream's SPS. Implies std and adds tokio's net feature, plus `metadata` for
 # the capture time a header extension stamps onto each frame.
-udp-ingress = ["std", "metadata", "tokio/net", "dep:socket2", "dep:libc", "dep:quinn-udp"]
+udp-ingress = ["std", "metadata", "tokio/net", "dep:socket2", "dep:libc", "dep:quinn-udp", "dep:getrandom"]
 # Plain TCP byte-stream elements (M1068): the `tcpserversrc` / `tcpclientsrc`
 # sources and the `tcpserversink` / `tcpclientsink` sinks of GStreamer's `tcp`
 # plugin. They carry raw bytes with no framing of their own, so any peer that

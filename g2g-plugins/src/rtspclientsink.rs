@@ -39,6 +39,7 @@ use crate::reconnect::{
     ReconnectPolicy, ReconnectState, DEFAULT_INITIAL_BACKOFF_MS, DEFAULT_MAX_BACKOFF_MS,
     PUBLISHER_RECONNECT_PROP, RECONNECT_BACKOFF_MAX_PROP, RECONNECT_BACKOFF_PROP,
 };
+use crate::rist::random_u32;
 use crate::rtcp::{build_sdes_cname, SenderCounters};
 use crate::rtpcapturetime::{
     get_capture_time_prop, set_capture_time_prop, ABS_CAPTURE_TIME_ID_PROPERTY, NTP_64_ID_PROPERTY,
@@ -855,18 +856,29 @@ fn publish_target(location: &str) -> Result<PublishTarget, PublishError> {
     })
 }
 
+fn stream_control_url(request_url: &str, stream_id: usize) -> String {
+    // gst's rtspclientsink puts the control in the path, ahead of the location's query
+    let (path, query) = match request_url.split_once('?') {
+        Some((path, query)) => (path, Some(query)),
+        None => (request_url, None),
+    };
+    let control_url = format!(
+        "{}/{}",
+        path.trim_end_matches('/'),
+        stream_control(stream_id)
+    );
+    match query {
+        Some(query) => format!("{control_url}?{query}"),
+        None => control_url,
+    }
+}
+
 fn payload_type(index: usize) -> Result<u8, PublishError> {
     u8::try_from(index)
         .ok()
         .and_then(|i| FIRST_DYNAMIC_PAYLOAD_TYPE.checked_add(i))
         .filter(|pt| *pt <= LAST_DYNAMIC_PAYLOAD_TYPE)
         .ok_or(PublishError::TooManyStreams)
-}
-
-fn random_u32() -> u32 {
-    let mut bytes = [0u8; 4];
-    getrandom::getrandom(&mut bytes).expect("OS RNG for the RTP SSRC and RTCP timing");
-    u32::from_be_bytes(bytes)
 }
 
 // RFC 3550 §6.3.1 spreads each report over 0.5 to 1.5 times the nominal interval
@@ -1179,7 +1191,7 @@ impl SessionParameters {
         let mut chosen: Option<LowerTransport> = None;
         let mut streams = Vec::with_capacity(self.configs.len());
         for (i, (config, pt)) in self.configs.iter().zip(&payload_types).enumerate() {
-            let control_url = format!("{url}/{}", stream_control(i));
+            let control_url = stream_control_url(&url, i);
             // the first stream settles the transport the rest of the session uses
             let candidates = match chosen {
                 Some(transport) => Vec::from([transport]),
@@ -1627,5 +1639,22 @@ impl MultiInputElement for RtspClientSink {
             "rtcp-sr-interval" => Some(PropValue::Uint(self.settings.report_interval_ms)),
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stream_control_goes_ahead_of_the_query() {
+        assert_eq!(
+            stream_control_url("rtsp://host/live?token=x", 0),
+            "rtsp://host/live/streamid=0?token=x"
+        );
+        assert_eq!(
+            stream_control_url("rtsp://host/live/", 1),
+            "rtsp://host/live/streamid=1"
+        );
     }
 }

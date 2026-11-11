@@ -28,7 +28,7 @@ use crate::sdp::{h264_media_section, scan_sections, session_description, SdpMedi
 /// What the I/O layer should do after a request, beyond sending the response.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RtspEvent {
-    /// Nothing beyond the response (OPTIONS / DESCRIBE / GET_PARAMETER / PAUSE).
+    /// Nothing beyond the response (OPTIONS / DESCRIBE / GET_PARAMETER).
     None,
     /// `SETUP` negotiated unicast UDP; stream RTP to this client RTP port.
     Setup { client_rtp_port: u16 },
@@ -45,6 +45,8 @@ pub enum RtspEvent {
     Record,
     /// `TEARDOWN`: stop and release the session.
     Teardown,
+    /// `PAUSE`: stop streaming until the next `PLAY`.
+    Pause,
 }
 
 /// RTSP session lifecycle.
@@ -185,8 +187,10 @@ pub enum TrackTransport {
 
 // a relative control is resolved against the session URL the publisher SETUPs under
 fn uri_names_control(uri: &str, control: &str) -> bool {
-    uri == control
-        || uri
+    // older gst publishers append the session URL's query after the control
+    let path = uri.split_once('?').map_or(uri, |(path, _)| path);
+    path == control
+        || path
             .strip_suffix(control)
             .is_some_and(|base| base.ends_with('/'))
 }
@@ -462,7 +466,7 @@ impl RtspResponder {
             "PAUSE" => {
                 self.state = State::Ready;
                 let session = self.session_id.clone();
-                (self.respond(req.cseq, "200 OK", &[("Session", &session)], b""), RtspEvent::None)
+                (self.respond(req.cseq, "200 OK", &[("Session", &session)], b""), RtspEvent::Pause)
             }
             "TEARDOWN" => {
                 self.state = State::Init;
@@ -863,6 +867,18 @@ mod tests {
                 }),
             ]
         );
+    }
+
+    #[test]
+    fn a_setup_control_followed_by_the_session_query_names_the_track() {
+        assert!(uri_names_control(
+            "rtsp://host/live/streamid=1?token=x",
+            "streamid=1"
+        ));
+        assert!(!uri_names_control(
+            "rtsp://host/live/streamid=1?token=x",
+            "streamid=0"
+        ));
     }
 
     #[test]

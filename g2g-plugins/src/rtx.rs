@@ -50,8 +50,10 @@ pub fn build_rtx_packet(
 /// the original payload type / SSRC / sequence number, and strip the OSN. `None`
 /// if the packet is too short to be a valid RTX packet (header + OSN).
 pub fn parse_rtx_packet(rtx: &[u8], original_pt: u8, original_ssrc: u32) -> Option<Vec<u8>> {
-    let payload_off = RtpHeader::parse_header(rtx)?.payload_offset;
-    if rtx.len() < payload_off + 2 {
+    let parsed = RtpHeader::parse(rtx)?;
+    let payload_off = parsed.payload_offset;
+    // libwebrtc probes bandwidth with RTX packets that hold nothing but padding
+    if parsed.payload_len < 2 {
         return None;
     }
     let osn = u16::from_be_bytes([rtx[payload_off], rtx[payload_off + 1]]);
@@ -164,6 +166,15 @@ mod tests {
             "no room for the OSN"
         );
         assert_eq!(build_rtx_packet(&[0x80u8; 4], 97, 1, 0), None);
+    }
+
+    #[test]
+    fn a_padding_only_rtx_packet_is_refused() {
+        const PADDING_BIT: u8 = 0x20;
+        const PADDING: [u8; 4] = [0, 0, 0, 4];
+        let mut probe = alloc::vec![0x80 | PADDING_BIT, 97, 0, 1, 0, 0, 0, 0, 0, 0, 0, 2];
+        probe.extend_from_slice(&PADDING);
+        assert_eq!(parse_rtx_packet(&probe, 96, 1), None);
     }
 
     #[test]

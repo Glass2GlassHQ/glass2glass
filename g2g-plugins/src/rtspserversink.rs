@@ -43,7 +43,7 @@ use tokio::io::AsyncWriteExt;
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError,
     HardwareError, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
-    PropValue, PropertySpec, Rate, VideoCodec,
+    PropValue, PropertySpec, Rate, Reconfigure, VideoCodec,
 };
 
 use crate::filesink::io_err;
@@ -103,6 +103,8 @@ struct Client {
     rtcp_channel: Option<u8>,
     /// This player's own RTP sequence numbering, armed at PLAY.
     next_sequence: Option<u16>,
+    // a player that starts between keyframes has no reference for the frames before the next one
+    awaiting_keyframe: bool,
     /// RFC 3550 sender counters for this player's RTP session.
     sender_counters: rtcp::SenderCounters,
     last_rtp_ts: Option<u32>,
@@ -123,6 +125,7 @@ impl Client {
             interleaved: None,
             rtcp_channel: None,
             next_sequence: None,
+            awaiting_keyframe: false,
             sender_counters: rtcp::SenderCounters::default(),
             last_rtp_ts: None,
             last_sr_ns: 0,
@@ -187,7 +190,11 @@ impl Client {
                     self.interleaved = Some(rtp_channel);
                     self.rtcp_channel = Some(rtcp_channel);
                 }
-                RtspEvent::Play => self.next_sequence = Some(0),
+                RtspEvent::Play => {
+                    self.next_sequence = Some(0);
+                    self.awaiting_keyframe = true;
+                }
+                RtspEvent::Pause => self.next_sequence = None,
                 RtspEvent::Teardown => return false,
                 _ => {}
             }
@@ -228,9 +235,7 @@ impl Client {
             for packet in packets.iter() {
                 push_interleaved(&mut framed, channel, packet);
             }
-            if self.control.write_all(&framed).await.is_err() {
-                return Err(());
-            }
+            write_to_player(&mut self.control, &framed).await?;
             sent = packets.len() as u64;
         } else if let Some(dest) = self.dest {
             for packet in packets.iter() {
@@ -258,9 +263,7 @@ impl Client {
         if let Some(channel) = self.rtcp_channel {
             let mut framed = Vec::with_capacity(INTERLEAVED_HEADER_LEN + packet.len());
             push_interleaved(&mut framed, channel, packet);
-            if self.control.write_all(&framed).await.is_err() {
-                return Err(());
-            }
+            write_to_player(&mut self.control, &framed).await?;
             Ok(true)
         } else if let Some(dest) = self.rtcp_dest {
             if rtcp_socket.send_to(packet, dest).await.is_err() {
@@ -270,6 +273,16 @@ impl Client {
         } else {
             Ok(false)
         }
+    }
+}
+
+// gst-rtsp-server drops a TCP player whose backlog grows, so one slow player does not stall the rest
+const PLAYER_WRITE_TIMEOUT: core::time::Duration = core::time::Duration::from_secs(2);
+
+async fn write_to_player(control: &mut tokio::net::TcpStream, bytes: &[u8]) -> Result<(), ()> {
+    match tokio::time::timeout(PLAYER_WRITE_TIMEOUT, control.write_all(bytes)).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(_)) | Err(_) => Err(()),
     }
 }
 
@@ -303,6 +316,7 @@ pub struct RtspServerSink {
     packets_sent: u64,
     sender_reports_sent: u64,
     eos_seen: bool,
+    keyframe_request_pending: bool,
     /// Last SPS and PPS seen in the stream, offered in the SDP as
     /// `sprop-parameter-sets`. Refreshed as they flow, so a mid-stream
     /// resolution change reaches players that DESCRIBE after it.
@@ -331,6 +345,7 @@ impl RtspServerSink {
             packets_sent: 0,
             sender_reports_sent: 0,
             eos_seen: false,
+            keyframe_request_pending: false,
             sps: None,
             pps: None,
         }
@@ -524,7 +539,12 @@ impl RtspServerSink {
     }
 
     /// Broadcast one frame to every PLAYing client, reaping any whose send fails.
-    async fn broadcast(&mut self, bytes: &[u8], timestamp: u32) -> Result<(), G2gError> {
+    async fn broadcast(
+        &mut self,
+        bytes: &[u8],
+        timestamp: u32,
+        keyframe: bool,
+    ) -> Result<(), G2gError> {
         let socket = self.rtp_socket.as_ref().ok_or(G2gError::NotConfigured)?;
         // packetized once, each player stamps its own sequence numbers
         let mut packets = RtpH264Packetizer::new(self.payload_type, self.ssrc)
@@ -532,7 +552,9 @@ impl RtspServerSink {
             .packetize(bytes, timestamp);
         let mut i = 0;
         while i < self.clients.len() {
-            if !self.clients[i].playing() {
+            let client = &mut self.clients[i];
+            client.awaiting_keyframe &= !keyframe;
+            if !client.playing() || client.awaiting_keyframe {
                 i += 1;
                 continue;
             }
@@ -587,6 +609,11 @@ impl AsyncElement for RtspServerSink {
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
         upstream_caps.intersect(&h264_any())
+    }
+
+    fn take_reconfigure(&mut self) -> Option<Reconfigure> {
+        // gst-rtsp-server's ensure-keyunit-on-start asks the encoder for a keyframe when a player starts
+        core::mem::take(&mut self.keyframe_request_pending).then_some(Reconfigure::ForceKeyframe)
     }
 
     fn caps_constraint_as_sink(&self) -> CapsConstraint<'_> {
@@ -732,8 +759,12 @@ impl AsyncElement for RtspServerSink {
                     self.accept_new().await;
                     self.advance_handshakes().await;
                     let timestamp = Self::rtp_timestamp(frame.timing.pts_ns);
-                    let bytes = slice;
-                    self.broadcast(bytes, timestamp).await?;
+                    let keyframe = crate::annexb::au_is_keyframe(VideoCodec::H264, slice);
+                    self.keyframe_request_pending |= self
+                        .clients
+                        .iter()
+                        .any(|client| client.playing() && client.awaiting_keyframe && !keyframe);
+                    self.broadcast(slice, timestamp, keyframe).await?;
                     self.frames_sent += 1;
                     self.service_rtcp().await;
                 }

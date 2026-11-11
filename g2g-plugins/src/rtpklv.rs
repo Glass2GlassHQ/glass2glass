@@ -184,6 +184,11 @@ impl RtpKlvDepayloader {
             self.dropping = true;
         }
 
+        // gst's rtpklvdepay resyncs at any packet that opens on the universal label
+        if self.dropping && payload.starts_with(&crate::klv::KLV_UL_PREFIX) {
+            self.dropping = false;
+            self.unit.clear();
+        }
         if self.dropping {
             // Nothing in a damaged unit is usable and a fragment carries no
             // header saying which unit it belongs to, so discard through the
@@ -313,17 +318,31 @@ mod tests {
         for p in &packets {
             assert!(depay.depacketize(p).is_none());
         }
-        // The next marker ends the discarded unit; the one after it decodes.
+        // The next unit opens on the universal label, which ends the discarded one.
         let unit = unit_bytes(8);
-        assert!(pay
-            .packetize(&unit, 2)
-            .iter()
-            .all(|p| depay.depacketize(p).is_none()));
-        let next = pay.packetize(&unit, 3);
+        let next = pay.packetize(&unit, 2);
         let out: Vec<_> = next.iter().filter_map(|p| depay.depacketize(p)).collect();
-        assert_eq!(out.len(), 1, "resyncs once the damaged unit is behind us");
+        assert_eq!(out.len(), 1, "resyncs at the next unit's key");
         assert_eq!(out[0].data, unit);
-        assert_eq!(out[0].rtp_timestamp, 3);
+        assert_eq!(out[0].rtp_timestamp, 2);
+    }
+
+    #[test]
+    fn a_lost_single_packet_unit_costs_only_itself() {
+        let mut pay = RtpKlvPacketizer::new(98, 1);
+        let units = [unit_bytes(12), unit_bytes(16), unit_bytes(20)];
+        let packets: Vec<Vec<u8>> = units
+            .iter()
+            .zip(0..)
+            .flat_map(|(unit, timestamp)| pay.packetize(unit, timestamp))
+            .collect();
+        let mut depay = RtpKlvDepayloader::new();
+        let out: Vec<Vec<u8>> = [&packets[0], &packets[2]]
+            .into_iter()
+            .filter_map(|p| depay.depacketize(p))
+            .map(|unit| unit.data)
+            .collect();
+        assert_eq!(out, [units[0].clone(), units[2].clone()]);
     }
 
     #[test]

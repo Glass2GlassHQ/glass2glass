@@ -557,10 +557,15 @@ impl RistExtensionRemover {
 }
 
 /// A random 32-bit value from the OS, for an SSRC or a first sequence number.
-#[cfg(feature = "rist")]
+#[cfg(any(
+    feature = "rist",
+    feature = "rtsp-client-sink",
+    feature = "udp-ingress",
+    feature = "rtsp-server"
+))]
 pub(crate) fn random_u32() -> u32 {
     let mut bytes = [0u8; 4];
-    getrandom::getrandom(&mut bytes).expect("OS RNG for the RIST SSRC");
+    getrandom::getrandom(&mut bytes).expect("OS RNG for an RTP SSRC or nonce");
     u32::from_be_bytes(bytes)
 }
 

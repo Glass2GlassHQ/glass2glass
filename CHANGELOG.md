@@ -172,6 +172,12 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M2256: MP4 demuxers ignore a `ctts` whose offsets exceed twice the track duration.
 - M2257: MP4 demuxers read a size-0 last box, and `mp4demuxn` reads 64-bit box sizes.
 - M2258: HLS playlists keep each segment's `#EXT-X-MAP`, and `hlssrc` fetches a new init segment where it changes.
+- M2259: `rtpklvdepay` resyncs at the next packet that starts with the KLV universal label.
+- M2260: RTX receivers drop padding-only packets.
+- M2261: RTP receivers report under a random SSRC each.
+- M2262: an SDP rtpmap clock rate of 0 takes the encoding's default rate.
+- M2263: `rtspclientsink` puts the stream control ahead of the URL's query, and `rtspserversrc` accepts a SETUP with the query after it.
+- M2264: `rtspserversink` stops sending on PAUSE, starts each player on a keyframe, and drops a TCP player that stops reading for 2 s.
 
 Breaking: `TimecodeMeta.frames` is a `u16`, `WIRE_VERSION` is 6, `FrameTiming` gains `start_discard_ns` and `end_discard_ns`, `RtpRecvConfig` gains `parameter_sets`, `RtmpPublisher::push` fails with a `PublishRefusal`, and `Interlace` gains `InterleavedBottomFieldFirst`.
 

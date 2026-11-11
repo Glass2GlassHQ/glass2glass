@@ -46,8 +46,6 @@ pub const DEFAULT_RR_INTERVAL_MS: u64 = 1000;
 // GStreamer's rtpjitterbuffer, before it has measured jitter and RTT, first requests a loss after 20 ms and retries every 40 ms
 const FIRST_NACK_DELAY_NS: u64 = 20_000_000;
 pub const NACK_RETRY_INTERVAL_NS: u64 = 40_000_000;
-/// Our own SSRC as the RTCP reporter (`g2g` + 1).
-const LOCAL_SSRC: u32 = 0x6732_6701;
 
 /// Receive-path policy shared by the RTP ingest sources. Mirrors the tuning
 /// each source exposes through its `with_jitter` / `with_rtcp` / `with_rtx` /
@@ -505,6 +503,8 @@ pub(crate) async fn receive_rtp(
     }
     let mut sender = SenderReceiveState::new(cfg);
     let mut emitter = AccessUnitEmitter::new(cfg, seq_base, frame_limit, timeline);
+    // RFC 3550 8.1 has every participant pick a random SSRC
+    let local_ssrc = crate::rist::random_u32();
     let mut ssrc_lock = SsrcLock::default();
     // The original media stream's SSRC, learned from the first non-RTX packet;
     // an RFC 4588 RTX resend is restamped back onto it.
@@ -551,7 +551,7 @@ pub(crate) async fn receive_rtp(
             && emitter.awaiting_keyframe
             && keyframe_request_due;
         if let (true, Some(dest), Some(media_ssrc)) = (request_keyframe, peer, media_ssrc_seen) {
-            let pli = rtcp::build_picture_loss_indication(LOCAL_SSRC, media_ssrc);
+            let pli = rtcp::build_picture_loss_indication(local_ssrc, media_ssrc);
             let _ = receiver.socket().send_to(&pli, dest).await;
             last_keyframe_request_ns = Some(now);
         }
@@ -561,7 +561,7 @@ pub(crate) async fn receive_rtp(
             if let Some(dest) = peer {
                 if now.saturating_sub(last_rr_ns) >= rr_interval_ns {
                     let rr =
-                        rtcp::build_receiver_report(LOCAL_SSRC, &[sender.stats.report_block(now)]);
+                        rtcp::build_receiver_report(local_ssrc, &[sender.stats.report_block(now)]);
                     let _ = receiver.socket().send_to(&rr, dest).await;
                     last_rr_ns = now;
                 }
@@ -700,7 +700,7 @@ pub(crate) async fn receive_rtp(
                     .nacks
                     .due(&sender.jitter.missing_seqs(), now, usize::MAX);
                 if !requests.is_empty() {
-                    let nack = rtcp::build_nack(LOCAL_SSRC, media_ssrc, &requests);
+                    let nack = rtcp::build_nack(local_ssrc, media_ssrc, &requests);
                     let _ = receiver.socket().send_to(&nack, from).await;
                 }
             }

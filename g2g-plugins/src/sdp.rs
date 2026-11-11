@@ -277,11 +277,18 @@ impl SdpMedia {
         let rtpmap = s.rtpmap.as_deref()?;
         let mut parts = rtpmap.split('/');
         let encoding = parts.next()?;
-        let clock_rate = parts.next()?.parse::<u32>().ok()?;
+        let declared_clock_rate = parts.next()?.parse::<u32>().ok()?;
         let channels = parts.next().and_then(|c| c.parse::<u8>().ok()).unwrap_or(1);
-        if clock_rate == 0 {
-            return None;
-        }
+        // gst's sdpmessage reads a rate of 0, which some RTSP servers send, as the encoding's default
+        let clock_rate = match (declared_clock_rate, encoding_kind(encoding)?) {
+            (0, Encoding::Video(_)) => VIDEO_CLOCK_HZ,
+            (0, Encoding::Audio(AudioFormat::Opus)) => OPUS_CLOCK_HZ,
+            (0, Encoding::Audio(AudioFormat::Mulaw | AudioFormat::Alaw)) => {
+                crate::g711::G711_CLOCK_RATE_HZ
+            }
+            (0, Encoding::Audio(_)) => return None,
+            (declared, _) => declared,
+        };
 
         let mut parameter_sets = Vec::new();
         let mpeg4_generic_aac = s
@@ -801,8 +808,13 @@ mod tests {
         assert!(SdpMedia::parse("v=0\r\ns=x\r\n").is_none(), "no m= line");
         // A truncated m= line.
         assert!(SdpMedia::parse("m=video 5000\r\na=rtpmap:96 H264/90000\r\n").is_none());
-        // A zero clock rate would divide by zero downstream.
-        assert!(SdpMedia::parse("m=video 5000 RTP/AVP 96\r\na=rtpmap:96 H264/0\r\n").is_none());
+        // A zero clock rate takes the encoding's default, as gst's sdpmessage does.
+        let zero_rate = SdpMedia::parse("m=video 5000 RTP/AVP 96\r\na=rtpmap:96 H264/0\r\n")
+            .expect("H264 at its default rate");
+        assert_eq!(zero_rate.clock_rate, VIDEO_CLOCK_HZ);
+        assert!(
+            SdpMedia::parse("m=audio 5000 RTP/AVP 97\r\na=rtpmap:97 MP4A-LATM/0\r\n").is_none()
+        );
         // Bad base64 in the sprop: the codec still maps, the geometry does not.
         let bad = "m=video 5000 RTP/AVP 96\r\n\
             a=rtpmap:96 H264/90000\r\n\
