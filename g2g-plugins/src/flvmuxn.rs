@@ -109,6 +109,8 @@ pub struct FlvMuxN {
     emitted: u64,
     // the first presentation time and the latest end of the frames written, which span the duration
     written_span_ns: Option<(u64, u64)>,
+    // the timestamp of the last tag written, which a frame with no timestamp reuses as gst's flvmux does
+    last_tag_ms: u32,
 }
 
 impl FlvMuxN {
@@ -133,6 +135,7 @@ impl FlvMuxN {
             tags: TagList::new(),
             emitted: 0,
             written_span_ns: None,
+            last_tag_ms: 0,
         }
     }
 
@@ -276,20 +279,25 @@ impl FlvMuxN {
         let slice = frame
             .domain
             .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
-        let pts_ms = (frame.timing.pts_ns / 1_000_000) as u32;
+        let (dts_ms, cts_ms) = match frame.timing.pts() {
+            Some(_) => FlvMuxer::video_tag_timing(&frame.timing),
+            None => (self.last_tag_ms, 0),
+        };
+        let pts_ms = frame
+            .timing
+            .pts()
+            .map_or(self.last_tag_ms, |pts_ns| (pts_ns / 1_000_000) as u32);
         let track_id = self.audio_track_id(input);
         let mux = self.mux.as_mut().ok_or(G2gError::NotConfigured)?;
         let bytes = match self.kinds[input] {
             Some(FlvCodec::H264) => {
                 let nalus = split_annexb(slice);
                 let keyframe = au_is_keyframe(VideoCodec::H264, slice);
-                let (dts_ms, cts_ms) = FlvMuxer::video_tag_timing(&frame.timing);
                 mux.push_video(&avcc_sample(&nalus), dts_ms, cts_ms, keyframe)
             }
             // The legacy Flash video codecs go into a tag as they arrive, their
             // keyframe flag coming from the producer rather than the bitstream.
             Some(c) if c.track() == FlvTrack::Video => {
-                let (dts_ms, cts_ms) = FlvMuxer::video_tag_timing(&frame.timing);
                 mux.push_video(slice, dts_ms, cts_ms, frame.timing.keyframe)
             }
             // AAC access units are raw frames once any ADTS header is stripped;
@@ -307,12 +315,17 @@ impl FlvMuxN {
             }
         };
 
-        let start_ns = frame.timing.pts_ns;
-        let end_ns = start_ns.saturating_add(frame.timing.duration_ns);
-        self.written_span_ns = Some(match self.written_span_ns {
-            None => (start_ns, end_ns),
-            Some((first, last)) => (first.min(start_ns), last.max(end_ns)),
-        });
+        self.last_tag_ms = match self.kinds[input] {
+            Some(c) if c.track() == FlvTrack::Video => dts_ms,
+            _ => pts_ms,
+        };
+        if let Some(start_ns) = frame.timing.pts() {
+            let end_ns = start_ns.saturating_add(frame.timing.duration_ns);
+            self.written_span_ns = Some(match self.written_span_ns {
+                None => (start_ns, end_ns),
+                Some((first, last)) => (first.min(start_ns), last.max(end_ns)),
+            });
+        }
         let out_frame = Frame::new(
             MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
             FrameTiming {
@@ -511,7 +524,8 @@ impl MultiInputElement for FlvMuxN {
             if self.mux.is_none() {
                 self.mux = Some(self.build_mux()?);
             }
-            while let Some((track, frame)) = self.agg.take_earliest_by(|f| f.timing.pts_ns) {
+            // `None` sorts first, so a frame with no timestamp is muxed as soon as it reaches the head
+            while let Some((track, frame)) = self.agg.take_earliest_by(|f| f.timing.pts()) {
                 self.emit_au(track, frame, out).await?;
             }
             if self.agg.is_drained() {
@@ -739,6 +753,65 @@ mod tests {
             !video[0].data.windows(4).any(|w| w == [0, 0, 0, 1]),
             "AVCC framing"
         );
+    }
+
+    // every tag's type and timestamp, header tags included
+    fn tag_timestamps(flv: &[u8]) -> Vec<(u8, u32)> {
+        let mut at = crate::flv::file_header_len(flv).expect("FLV file header");
+        let mut tags = Vec::new();
+        while let Some((tag, body)) = crate::flv::tag_at(flv, at) {
+            tags.push((tag.tag_type, tag.timestamp_ms));
+            at = body.end;
+        }
+        tags
+    }
+
+    #[tokio::test]
+    async fn header_tags_carry_the_first_media_timestamp() {
+        const TEN_HOURS_NS: u64 = 10 * 3600 * 1_000_000_000;
+        let mut mux = FlvMuxN::new(1);
+        mux.configure_pipeline(0, &video_caps()).unwrap();
+        let mut sink = CaptureSink::default();
+        mux.process(0, frame(h264_idr(), TEN_HOURS_NS), &mut sink)
+            .await
+            .unwrap();
+        let first_ms = (TEN_HOURS_NS / 1_000_000) as u32;
+        let tags = tag_timestamps(&sink.bytes);
+        // onMetaData, the AVC sequence header, then the IDR
+        assert_eq!(tags.len(), 3);
+        assert!(tags
+            .iter()
+            .all(|&(_, timestamp_ms)| timestamp_ms == first_ms));
+    }
+
+    #[tokio::test]
+    async fn a_frame_with_no_timestamp_is_muxed_at_once_with_the_last_timestamp() {
+        let mut mux = FlvMuxN::new(2);
+        mux.configure_pipeline(0, &video_caps()).unwrap();
+        mux.configure_pipeline(1, &audio_caps()).unwrap();
+        let mut sink = CaptureSink::default();
+        mux.process(0, frame(h264_idr(), 0), &mut sink)
+            .await
+            .unwrap();
+        mux.process(1, frame(aac_adts(), 0), &mut sink)
+            .await
+            .unwrap();
+        mux.process(0, frame(h264_idr(), FrameTiming::PTS_NONE), &mut sink)
+            .await
+            .unwrap();
+        mux.process(1, frame(aac_adts(), 21_000_000), &mut sink)
+            .await
+            .unwrap();
+
+        let mut demux = FlvDemuxer::new();
+        demux.push_data(&sink.bytes);
+        let video_pts_ms: Vec<u32> = demux
+            .take_units()
+            .iter()
+            .filter(|u| u.track() == DemuxTrack::Video)
+            .map(|u| u.pts_ms)
+            .collect();
+        assert_eq!(video_pts_ms, [0, 0], "the unstamped frame was not held");
     }
 
     #[test]

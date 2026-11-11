@@ -125,6 +125,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M2209: the H.264 parameter-set, slice-header, reference marking and picture order code moves out of `vulkanvideo` into `h264parse` and `h264dpb`.
 - M2210: `d3d12h264dec` decodes H.264 on a D3D12 GPU into wgpu textures or system memory, and `wgpusink` opens a Win32 window on Windows.
 - M2211: `rtmpsink` writes RTMP extended timestamps, so a publish past 4 h 40 min keeps advancing.
+- M2212: `flvmux` stamps its header tags with the first media timestamp and muxes a frame with no timestamp at once.
 
 Breaking: `TimecodeMeta.frames` is a `u16`, `WIRE_VERSION` is 6, `FrameTiming` gains `start_discard_ns` and `end_discard_ns`, and `RtpRecvConfig` gains `parameter_sets`.
 

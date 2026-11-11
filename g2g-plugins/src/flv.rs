@@ -613,7 +613,7 @@ impl FlvMuxer {
     /// bitstream frame.
     pub fn push_video(&mut self, au: &[u8], dts_ms: u32, cts_ms: i32, keyframe: bool) -> Vec<u8> {
         let mut out = Vec::new();
-        self.write_header(&mut out);
+        self.write_header(&mut out, dts_ms);
         let codec = self.video.unwrap_or(FlvCodec::H264);
         // frame type (1 keyframe, 2 interframe) | codec id.
         let frame_type = if keyframe { 1u8 } else { 2u8 };
@@ -635,7 +635,7 @@ impl FlvMuxer {
     /// frame, MP3 and Speex their own bitstream frame.
     pub fn push_audio(&mut self, au: &[u8], pts_ms: u32) -> Vec<u8> {
         let mut out = Vec::new();
-        self.write_header(&mut out);
+        self.write_header(&mut out, pts_ms);
         let mut body = alloc::vec![self.audio_flags];
         // AAC packet type 1 (a raw frame, as opposed to the config).
         if self.audio == Some(FlvCodec::Aac) {
@@ -647,7 +647,7 @@ impl FlvMuxer {
 
     pub fn push_multitrack_audio(&mut self, track_id: u8, au: &[u8], pts_ms: u32) -> Vec<u8> {
         let mut out = Vec::new();
-        self.write_header(&mut out);
+        self.write_header(&mut out, pts_ms);
         let track = self
             .multitrack_audio
             .iter()
@@ -666,8 +666,9 @@ impl FlvMuxer {
 
     /// Write the FLV file header and the leading tags (an `onMetaData` script tag
     /// carrying the duration and any tags, then each present track's sequence
-    /// header) on the first call; a no-op afterwards.
-    fn write_header(&mut self, out: &mut Vec<u8>) {
+    /// header) on the first call; a no-op afterwards. The leading tags carry the
+    /// first media tag's timestamp.
+    fn write_header(&mut self, out: &mut Vec<u8>, first_tag_ms: u32) {
         if self.header_written {
             return;
         }
@@ -683,7 +684,7 @@ impl FlvMuxer {
 
         let (script, duration_in_script) = on_metadata_body(&self.tags);
         self.duration_at = Some((out.len() + TAG_HEADER_LEN + duration_in_script) as u64);
-        emit_tag(out, TAG_SCRIPT, 0, &[&script]);
+        emit_tag(out, TAG_SCRIPT, first_tag_ms, &[&script]);
         // Sequence headers (AVC packet type 0 / AAC packet type 0) carry the
         // decoder config a player needs before the media frames. Only H.264 and
         // AAC have one: VP6's dimension byte leads each media unit instead.
@@ -691,7 +692,7 @@ impl FlvMuxer {
             emit_tag(
                 out,
                 TAG_VIDEO,
-                0,
+                first_tag_ms,
                 &[&[0x17, 0x00, 0x00, 0x00, 0x00], &self.video_config],
             );
         }
@@ -699,7 +700,7 @@ impl FlvMuxer {
             emit_tag(
                 out,
                 TAG_AUDIO,
-                0,
+                first_tag_ms,
                 &[&[self.audio_flags, 0x00], &self.audio_config],
             );
         }
@@ -709,7 +710,7 @@ impl FlvMuxer {
             .filter(|track| !track.config.is_empty())
         {
             let prefix = track.tag_prefix(AUDIO_PACKET_SEQUENCE_START);
-            emit_tag(out, TAG_AUDIO, 0, &[&prefix, &track.config]);
+            emit_tag(out, TAG_AUDIO, first_tag_ms, &[&prefix, &track.config]);
         }
     }
 }
