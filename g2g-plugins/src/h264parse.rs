@@ -303,9 +303,9 @@ fn parse_vui(br: &mut BitReader) -> (VuiHead, H264VuiTail) {
 /// it, a decoder fed raw Annex-B access units emits the opening IDR early and
 /// drops that GOP's leading pictures (lower POC, displayed before the IDR).
 ///
-/// The value is the level-derived DPB bound for the frame size (0 for a baseline
-/// / constrained profile that cannot reorder), matching how ffmpeg sizes the
-/// buffer. The VUI `max_num_reorder_frames` is deliberately not trusted: a
+/// The value is the level-derived DPB bound for the frame size, raised to the
+/// VUI `max_dec_frame_buffering` and `max_num_ref_frames` when a stream signals
+/// too low a level, as gst's vtdec does. The VUI `max_num_reorder_frames` is deliberately not trusted: a
 /// stream may declare 0 yet still reorder (JVT conformance vectors do), and a
 /// too-low value is exactly what drops the leading pictures. POC type 2 is the
 /// one exception, returning 0: it pins output order to decode order by spec, a
@@ -329,7 +329,7 @@ fn parse_sps_reorder(rbsp: &[u8]) -> Option<u8> {
     // vectors declare Baseline yet still carry pictures libavcodec reorders (it
     // grows its reorder buffer at runtime and drops the GOP's leading pictures if
     // we seed too low). Baseline takes the same level-derived DPB bound below.
-    let (head, _) = parse_h264_sps_head(rbsp)?;
+    let (head, mut br) = parse_h264_sps_head(rbsp)?;
     // POC type 2 pins output order to decode order (H.264 8.2.1.3), a proof the
     // stream cannot reorder, so the level DPB seed below would only buy latency
     // (5 frames at 720p). Live encoders with B-frames off emit this type.
@@ -341,8 +341,17 @@ fn parse_sps_reorder(rbsp: &[u8]) -> Option<u8> {
     let frame_height_in_mbs = (2u32.saturating_sub(u32::from(head.poc.frame_mbs_only_flag)))
         .saturating_mul(pic_height_in_map_units);
     let pic_size_in_mbs = pic_width_in_mbs.saturating_mul(frame_height_in_mbs).max(1);
-    let max_dpb_frames = (max_dpb_mbs(head.level_idc) / pic_size_in_mbs).min(16);
-    Some(max_dpb_frames as u8)
+    let level_dpb_frames = max_dpb_mbs(head.level_idc) / pic_size_in_mbs;
+    // streams that understate their level still buffer what the VUI and the reference count need
+    let declared_dpb_frames = match br.read_bit() {
+        Some(1) => parse_vui(&mut br).1.max_dec_frame_buffering.unwrap_or(0),
+        _ => 0,
+    };
+    let dpb_frames = level_dpb_frames
+        .max(u32::from(declared_dpb_frames))
+        .max(head.max_num_ref_frames)
+        .min(16);
+    Some(dpb_frames as u8)
 }
 
 /// `MaxDpbMbs` for an H.264 level (Table A-1), in macroblocks. The reorder /
@@ -974,6 +983,52 @@ mod tests {
     fn sps_reorder_frames_none_without_sps() {
         // A stream carrying only a slice NAL (type 5 = IDR) has no SPS.
         assert_eq!(sps_reorder_frames(&[0, 0, 0, 1, 0x65, 0x88]), None);
+    }
+
+    #[test]
+    fn sps_reorder_frames_covers_an_understated_level() {
+        const MAIN_PROFILE: u8 = 77;
+        // level 3.0 holds no 1920x1088 frame, so its DPB bound is 0
+        const LEVEL_3_0: u8 = 30;
+        fn sps(max_num_ref_frames: u32, max_dec_frame_buffering: Option<u32>) -> Vec<u8> {
+            let mut w = BitWriter::default();
+            w.write_ue(0); // seq_parameter_set_id
+            w.write_ue(0); // log2_max_frame_num_minus4
+            w.write_ue(0); // pic_order_cnt_type
+            w.write_ue(0); // log2_max_pic_order_cnt_lsb_minus4
+            w.write_ue(max_num_ref_frames);
+            w.write_bit(0); // gaps_in_frame_num_value_allowed_flag
+            w.write_ue(1920 / 16 - 1);
+            w.write_ue(1088 / 16 - 1);
+            w.write_bit(1); // frame_mbs_only_flag
+            w.write_bit(1); // direct_8x8_inference_flag
+            w.write_bit(0); // frame_cropping_flag
+            match max_dec_frame_buffering {
+                None => w.write_bit(0),
+                Some(frames) => {
+                    w.write_bit(1); // vui_parameters_present_flag
+                                    // aspect ratio, overscan, signal type, chroma location, timing, both HRDs, pic_struct
+                    for _ in 0..8 {
+                        w.write_bit(0);
+                    }
+                    w.write_bit(1); // bitstream_restriction_flag
+                    w.write_bit(1); // motion_vectors_over_pic_boundaries_flag
+                    w.write_ue(0); // max_bytes_per_pic_denom
+                    w.write_ue(0); // max_bits_per_mb_denom
+                    w.write_ue(16); // log2_max_mv_length_horizontal
+                    w.write_ue(16); // log2_max_mv_length_vertical
+                    w.write_ue(0); // max_num_reorder_frames
+                    w.write_ue(frames);
+                }
+            }
+            w.write_bit(1); // rbsp_trailing_bits
+            w.align_to_byte();
+            let mut au = vec![0u8, 0, 0, 1, 0x67, MAIN_PROFILE, 0, LEVEL_3_0];
+            au.extend(w.into_bytes());
+            au
+        }
+        assert_eq!(sps_reorder_frames(&sps(4, None)), Some(4));
+        assert_eq!(sps_reorder_frames(&sps(1, Some(3))), Some(3));
     }
 
     #[test]

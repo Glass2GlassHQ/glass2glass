@@ -153,6 +153,7 @@ pub(crate) struct H264VuiTail {
     pub pic_timing: Option<PicTimingContext>,
     /// `bitstream_restriction` `max_num_reorder_frames`.
     pub max_num_reorder_frames: Option<u8>,
+    pub max_dec_frame_buffering: Option<u8>,
 }
 
 /// Walk an H.264 VUI from where [`read_vui_head`] stopped.
@@ -213,6 +214,10 @@ fn walk_h264_vui_tail(br: &mut BitReader, tail: &mut H264VuiTail) -> Option<()> 
     let reorder = br.read_ue()?;
     if reorder <= MAX_REORDER_FRAMES {
         tail.max_num_reorder_frames = Some(reorder as u8);
+    }
+    let dec_frame_buffering = br.read_ue()?;
+    if dec_frame_buffering <= MAX_REORDER_FRAMES {
+        tail.max_dec_frame_buffering = Some(dec_frame_buffering as u8);
     }
     Some(())
 }
