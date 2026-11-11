@@ -17,10 +17,10 @@ conversion need, uses a decoder `AsyncElement` that accepts
 depending on backend.
 
 The parsers `h264parse`, `h265parse`, `av1parse`, `mpegvideoparse`,
-`mpeg4videoparse` and `vc1parse` take the frame rate from the bitstream (the SPS
-VUI `timing_info`, the sequence header or VOL, `av1parse` reads none). When the
-bitstream codes none they keep the rate an upstream `CapsChanged` declared, such
-as a demuxer's container rate, else `Rate::Any`. They never take it from
+`mpeg4videoparse` and `vc1parse` take the frame rate an upstream `CapsChanged`
+declared, such as a demuxer's container rate, as gst's parsers do. Without one
+they take it from the bitstream (the SPS VUI `timing_info`, the sequence header
+or VOL, `av1parse` reads none), else `Rate::Any`. They never take it from
 `configure_pipeline`, whose caps carry the negotiation placeholder fixated to
 1 fps.
 

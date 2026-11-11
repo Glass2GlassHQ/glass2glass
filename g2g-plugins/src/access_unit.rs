@@ -456,10 +456,10 @@ impl CapsRefinement {
         };
     }
 
-    // the bitstream's own rate first, then the one upstream declared
+    // gst's parsers let the rate a container declared override the bitstream's
     pub(crate) fn framerate(&self, bitstream_q16: Option<u32>) -> Rate {
-        bitstream_q16
-            .or(self.upstream_framerate_q16)
+        self.upstream_framerate_q16
+            .or(bitstream_q16)
             .map_or(Rate::Any, Rate::Fixed)
     }
 
@@ -655,6 +655,30 @@ mod tests {
         assert_eq!(
             access_unit_starts(&stream, false, mpeg_classify),
             vec![1, first.len() + 1]
+        );
+    }
+
+    #[test]
+    fn an_upstream_frame_rate_overrides_the_bitstream_rate() {
+        const CONTAINER_FPS_Q16: u32 = 25 << 16;
+        const BOGUS_VUI_FPS_Q16: u32 = 45_000 << 16;
+        let mut refinement = CapsRefinement::default();
+        assert_eq!(
+            refinement.framerate(Some(BOGUS_VUI_FPS_Q16)),
+            Rate::Fixed(BOGUS_VUI_FPS_Q16)
+        );
+        refinement.observe_upstream(&Caps::CompressedVideo {
+            codec: g2g_core::VideoCodec::H264,
+            width: g2g_core::Dim::Any,
+            height: g2g_core::Dim::Any,
+            framerate: Rate::Fixed(CONTAINER_FPS_Q16),
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: PixelAspect::Any,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
+        });
+        assert_eq!(
+            refinement.framerate(Some(BOGUS_VUI_FPS_Q16)),
+            Rate::Fixed(CONTAINER_FPS_Q16)
         );
     }
 
