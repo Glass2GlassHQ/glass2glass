@@ -277,7 +277,7 @@ impl ChunkReader {
         let needs_ext = if fmt == 3 {
             prev_ext
         } else {
-            ts_field == 0xFF_FFFF
+            ts_field == EXTENDED_TIMESTAMP_MARKER
         };
         let ext_len = if needs_ext { 4 } else { 0 };
         if len < basic_len + mh_len + ext_len {
@@ -608,10 +608,6 @@ impl RtmpSession {
 /// The outbound chunk size the publisher negotiates up front (the 128-byte
 /// default would fragment every video keyframe into dozens of chunks).
 const PUB_CHUNK_SIZE: usize = 4096;
-/// A timestamp at/above this triggers the extended-timestamp field; the
-/// publisher clamps below it (it does not emit extended timestamps), good for
-/// streams under ~4.6 hours.
-const TS_MAX: u32 = 0xFF_FFFE;
 
 /// Publisher state machine: handshake, then the `connect` -> `createStream` ->
 /// `publish` command ladder driven by the server's replies, then `Publishing`.
@@ -932,7 +928,7 @@ impl RtmpPublisher {
             csid,
             tag_type,
             self.stream_id,
-            timestamp.min(TS_MAX),
+            timestamp,
             body,
             PUB_CHUNK_SIZE,
         );
@@ -967,6 +963,10 @@ impl FlvTagReader {
     }
 }
 
+/// A 24-bit timestamp field holding this value means a 4-byte extended
+/// timestamp follows the message header.
+const EXTENDED_TIMESTAMP_MARKER: u32 = 0xFF_FFFF;
+
 /// Write an outbound message as RTMP chunks, fragmenting the payload at
 /// `chunk_size`: the first chunk carries an `fmt 0` header (timestamp, length,
 /// type, little-endian message stream id), continuations carry a 1-byte `fmt 3`
@@ -981,18 +981,23 @@ fn write_message(
     chunk_size: usize,
 ) {
     let basic = (csid as u8) & 0x3F;
+    let extended = timestamp >= EXTENDED_TIMESTAMP_MARKER;
     let mut off = 0;
     let mut first = true;
     loop {
         if first {
             out.push(basic); // fmt 0
-            write_u24(out, timestamp);
+            write_u24(out, timestamp.min(EXTENDED_TIMESTAMP_MARKER));
             write_u24(out, payload.len() as u32);
             out.push(msg_type);
             out.extend_from_slice(&msg_stream_id.to_le_bytes());
             first = false;
         } else {
             out.push((3 << 6) | basic); // fmt 3 continuation
+        }
+        // rtmp repeats the extended timestamp on fmt 3 chunks of a message that has one
+        if extended {
+            out.extend_from_slice(&timestamp.to_be_bytes());
         }
         let take = (payload.len() - off).min(chunk_size.max(1));
         out.extend_from_slice(&payload[off..off + take]);
@@ -1258,10 +1263,7 @@ mod tests {
     /// socket proves the egress path: drive the handshake + publish ladder to
     /// completion, then confirm a published access unit survives the RTMP round
     /// trip back into an FLV stream. (The sandbox blocks live RTMP anyway.)
-    #[test]
-    fn publisher_round_trips_media_to_a_server_session() {
-        use crate::flv::{FlvDemuxer, FlvMuxer};
-
+    fn publishing_pair() -> (RtmpPublisher, RtmpSession) {
         let mut publisher = RtmpPublisher::new("live", "rtmp://localhost/live", "secret");
         let mut server = RtmpSession::new();
 
@@ -1281,6 +1283,14 @@ mod tests {
         }
         assert!(publisher.is_publishing(), "publisher reached Publish.Start");
         assert!(server.is_publishing(), "server accepted the publish");
+        (publisher, server)
+    }
+
+    #[test]
+    fn publisher_round_trips_media_to_a_server_session() {
+        use crate::flv::{FlvDemuxer, FlvMuxer};
+
+        let (mut publisher, mut server) = publishing_pair();
 
         // Publish one keyframe access unit as an FLV stream; recover it server-side.
         let au = [0u8, 0, 0, 3, 0x65, 0x11, 0x22]; // 4-byte length=3 + NAL
@@ -1298,6 +1308,39 @@ mod tests {
             "one access unit survived the RTMP round trip"
         );
         assert_eq!(units[0], FlvUnitView(FlvTrack::Video, au.to_vec(), 40));
+    }
+
+    /// A publish running past the 24-bit timestamp range (about 4 h 40 min) keeps
+    /// its real timestamps through the extended-timestamp field, including on the
+    /// continuation chunks of a message larger than the chunk size.
+    #[test]
+    fn publisher_sends_extended_timestamps() {
+        use crate::flv::{FlvDemuxer, FlvMuxer};
+
+        let (mut publisher, mut server) = publishing_pair();
+        let nal: Vec<u8> = (0..2 * PUB_CHUNK_SIZE as u32).map(|i| i as u8).collect();
+        let mut au = (nal.len() as u32).to_be_bytes().to_vec();
+        au.extend_from_slice(&nal);
+        let timestamps_ms = [
+            EXTENDED_TIMESTAMP_MARKER - 1,
+            EXTENDED_TIMESTAMP_MARKER,
+            20_000_000,
+        ];
+        let mut mux = FlvMuxer::new(FlvCodec::H264);
+        for timestamp_ms in timestamps_ms {
+            publisher.push_flv(&mux.push_au(&au, timestamp_ms));
+        }
+        server.push(&publisher.take_outbound());
+
+        let mut demux = FlvDemuxer::new();
+        demux.push_data(&server.take_flv());
+        let units = demux.take_units();
+        let received: Vec<u32> = units.iter().map(|u| u.pts_ms).collect();
+        assert_eq!(received, timestamps_ms);
+        assert!(
+            units.iter().all(|u| u.data == au),
+            "payloads survived the chunking"
+        );
     }
 
     /// The publisher and server negotiate the digest (complex) handshake, not
