@@ -51,7 +51,7 @@ use g2g_core::{
 
 use crate::filesink::{io_err, path_io_err};
 use crate::fmp4::{parse_trun, tfhd_defaults, trun_first_sample_is_sync};
-use crate::hls::{write_media, ByteRange, MediaPlaylist, Segment};
+use crate::hls::{write_media, ByteRange, InitSegment, MediaPlaylist, Segment};
 use crate::mp4box::{be32, boxes, find_box, find_path};
 use crate::multifilesink::expand;
 use g2g_core::log::short_type_name;
@@ -89,7 +89,7 @@ pub struct HlsSink {
     /// track it declares, and the boxes (`styp` / `prft`) that belong ahead of
     /// the next `moof` rather than to the segment already open.
     init: Vec<u8>,
-    init_written: bool,
+    written_init_segment: Option<InitSegment>,
     timescales: Vec<(u32, u32)>,
     pending_header: Vec<u8>,
     /// MPEG-TS only: the PTS the open segment starts at, the last PTS seen, and
@@ -150,7 +150,7 @@ impl HlsSink {
             open_segment: Vec::new(),
             open_duration_ns: 0,
             init: Vec::new(),
-            init_written: false,
+            written_init_segment: None,
             timescales: Vec::new(),
             pending_header: Vec::new(),
             segment_start_pts_ns: 0,
@@ -160,8 +160,6 @@ impl HlsSink {
                 target_duration_secs: 0,
                 media_sequence: 0,
                 segments: Vec::new(),
-                map_uri: None,
-                map_byte_range: None,
                 end_list: false,
                 part_target_ms: None,
                 server_control: None,
@@ -325,18 +323,20 @@ impl HlsSink {
 
     fn write_init(&mut self) -> Result<(), G2gError> {
         let init = core::mem::take(&mut self.init);
-        let path = if self.single_media_file.is_empty() {
+        let (path, byte_range) = if self.single_media_file.is_empty() {
             fs::write(&self.init_location, &init).map_err(|e| {
                 path_io_err(short_type_name::<Self>(), "write", &self.init_location, e)
             })?;
-            self.init_location.clone()
+            (self.init_location.clone(), None)
         } else {
-            self.playlist.map_byte_range = Some(self.append_to_single_file(&init)?);
-            self.single_media_file.clone()
+            let range = self.append_to_single_file(&init)?;
+            (self.single_media_file.clone(), Some(range))
         };
         self.init = init;
-        self.playlist.map_uri = Some(self.playlist_uri(&path));
-        self.init_written = true;
+        self.written_init_segment = Some(InitSegment {
+            uri: self.playlist_uri(&path),
+            byte_range,
+        });
         self.publish(&path, FMP4_CONTENT_TYPE);
         Ok(())
     }
@@ -363,7 +363,7 @@ impl HlsSink {
         if self.open_segment.is_empty() {
             return Ok(());
         }
-        if !self.init.is_empty() && !self.init_written {
+        if !self.init.is_empty() && self.written_init_segment.is_none() {
             self.write_init()?;
         }
         let (path, byte_range) = self.write_segment()?;
@@ -378,6 +378,7 @@ impl HlsSink {
             gap: false,
             discontinuity: false,
             parts: Vec::new(),
+            map: self.written_init_segment.clone(),
         });
         self.open_duration_ns = 0;
 

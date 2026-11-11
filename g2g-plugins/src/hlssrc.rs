@@ -467,7 +467,7 @@ impl HlsSrc {
         let client = self.http_client()?;
         let text = get_text(&client, &self.url, MAX_MANIFEST_BYTES).await?;
         let (media, media_url) = resolve_media(&client, &self.url, &text, self.cap()).await?;
-        let enc = if media.map_uri.is_some() {
+        let enc = if media.first_init_segment().is_some() {
             ByteStreamEncoding::IsoBmff
         } else {
             ByteStreamEncoding::MpegTs
@@ -601,11 +601,11 @@ pub(crate) async fn init_segment_bytes(
     media_url: &str,
     media: &MediaPlaylist,
 ) -> Result<Option<Vec<u8>>, G2gError> {
-    let Some(map) = &media.map_uri else {
+    let Some(map) = media.first_init_segment() else {
         return Ok(None);
     };
-    let url = resolve_url(media_url, map);
-    Ok(Some(media_bytes(client, &url, media.map_byte_range).await?))
+    let url = resolve_url(media_url, &map.uri);
+    Ok(Some(media_bytes(client, &url, map.byte_range).await?))
 }
 
 async fn media_bytes(
@@ -1115,16 +1115,16 @@ impl SourceLoop for HlsSrc {
             // playback follows what is being published; VOD starts at the front. The
             // `full_replay` opt-in starts a live playlist from the window front too.
             let (mut next_seq, mut next_part) = start_position(&media, self.full_replay, ll);
-            // fMP4: the EXT-X-MAP init segment (ftyp+moov) is emitted once, before
-            // any media fragment, so a downstream fmp4demux sees the moov first.
-            let mut init_emitted = false;
+            // fMP4: the EXT-X-MAP init segment (ftyp+moov) goes out before the first
+            // media fragment it describes, so a downstream fmp4demux sees the moov first.
+            let mut emitted_map: Option<crate::hls::InitSegment> = None;
             // Text mode: the init segment is not forwarded but parsed, since an
             // fMP4 (`wvtt`) subtitle rendition needs its `moov` to de-frame the
             // cues out of the fragments that follow.
             let mut init_tracks: Option<Vec<TrackHeader>> = None;
             let mut segment_timestamps = if text_mode {
                 SegmentTimestamps::Text
-            } else if media.map_uri.is_some() {
+            } else if media.first_init_segment().is_some() {
                 SegmentTimestamps::Fmp4WithoutVideo
             } else {
                 SegmentTimestamps::MpegTs
@@ -1166,7 +1166,7 @@ impl SourceLoop for HlsSrc {
                         idx = target_idx;
                         next_seq = media.media_sequence + target_idx as u64;
                         next_part = 0;
-                        init_emitted = false;
+                        emitted_map = None;
                         timeline.seek(seek);
                         continue; // re-evaluate from the repositioned index
                     }
@@ -1174,17 +1174,18 @@ impl SourceLoop for HlsSrc {
                     // fMP4: (re-)emit the EXT-X-MAP init (ftyp+moov) before any
                     // media fragment, so a downstream fmp4demux sees the moov first.
                     let unsent_map = media
-                        .map_uri
-                        .as_ref()
-                        .filter(|_| !init_emitted && idx < media.segments.len());
+                        .segments
+                        .get(idx)
+                        .and_then(|segment| segment.map.clone())
+                        .filter(|map| emitted_map.as_ref() != Some(map));
                     if let Some(map) = unsent_map {
-                        let map_url = resolve_url(&media_url, map);
+                        let map_url = resolve_url(&media_url, &map.uri);
                         let Some(bytes) = self
                             .media_bytes_skipping_live_fetch_failure(
                                 &client,
                                 &media,
                                 &map_url,
-                                media.map_byte_range,
+                                map.byte_range,
                             )
                             .await?
                         else {
@@ -1208,7 +1209,7 @@ impl SourceLoop for HlsSrc {
                                 0,
                             );
                         }
-                        init_emitted = true;
+                        emitted_map = Some(map);
                     }
 
                     // Fetch phase: pull segments into the window while it is
@@ -1474,7 +1475,7 @@ impl SourceLoop for HlsSrc {
                                         media = m;
                                         media_url = new_url;
                                         current_variant = Some(new_uri);
-                                        init_emitted = false;
+                                        emitted_map = None;
                                         idx = 0;
                                     }
                                 }
@@ -1695,7 +1696,7 @@ impl SourceLoop for HlsSrc {
                     ll = self.low_latency && !text_mode && media.low_latency();
                     blocking_misses = 0;
                     (next_seq, next_part) = start_position(&media, self.full_replay, ll);
-                    init_emitted = false;
+                    emitted_map = None;
                     next_reload = None;
                     stall = PlaylistStall::default();
                     continue;

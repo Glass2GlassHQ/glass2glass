@@ -297,8 +297,6 @@ libraries installed.
   other on the flag position and field widths, so a decode would be an
   unvalidated claim. Revisit with the published spec text or a second
   independent implementation.
-- **HLS:** a playlist that declares a new `#EXT-X-MAP` partway through keeps
-  only the last one, so segments before it get the wrong init segment.
 
 ## Capture sources
 

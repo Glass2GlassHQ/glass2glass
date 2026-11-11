@@ -3482,7 +3482,7 @@ impl HlsPlaylists {
     /// network-free [`hls_fmp4_uri_fanout`] / [`hls_ts_uri_fanout`]; the fetch
     /// is here.
     fn fanout(&self) -> Option<UriFanout> {
-        if self.media.map_uri.is_some() {
+        if self.media.first_init_segment().is_some() {
             return hls_fmp4_uri_fanout(&self.source_url, &self.init_segment()?);
         }
         hls_ts_uri_fanout(&self.source_url, &self.first_segment()?)
@@ -3569,7 +3569,7 @@ pub fn hls_playbin(
         media,
         ..
     } = &playlists;
-    if media.map_uri.is_some() {
+    if media.first_init_segment().is_some() {
         let Some(init) = playlists.init_segment() else {
             return Ok(None);
         };

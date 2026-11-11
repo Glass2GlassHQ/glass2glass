@@ -171,6 +171,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M2255: MP4 `mp4a` entries without `esds` or with 0 channels play as AAC-LC, and AC-3 and E-AC-3 take channels from `dac3` and `dec3`.
 - M2256: MP4 demuxers ignore a `ctts` whose offsets exceed twice the track duration.
 - M2257: MP4 demuxers read a size-0 last box, and `mp4demuxn` reads 64-bit box sizes.
+- M2258: HLS playlists keep each segment's `#EXT-X-MAP`, and `hlssrc` fetches a new init segment where it changes.
 
 Breaking: `TimecodeMeta.frames` is a `u16`, `WIRE_VERSION` is 6, `FrameTiming` gains `start_discard_ns` and `end_discard_ns`, `RtpRecvConfig` gains `parameter_sets`, `RtmpPublisher::push` fails with a `PublishRefusal`, and `Interlace` gains `InterleavedBottomFieldFirst`.
 

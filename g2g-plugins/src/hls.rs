@@ -164,6 +164,14 @@ pub struct Segment {
     /// playlist; a low-latency one carries them for the segments near the live
     /// edge.
     pub parts: Vec<Part>,
+    // the `#EXT-X-MAP` in effect, which an ad break or codec switch can change partway through
+    pub map: Option<InitSegment>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InitSegment {
+    pub uri: String,
+    pub byte_range: Option<ByteRange>,
 }
 
 impl Segment {
@@ -209,12 +217,6 @@ pub struct MediaPlaylist {
     pub target_duration_secs: u32,
     pub media_sequence: u64,
     pub segments: Vec<Segment>,
-    /// `#EXT-X-MAP:URI` initialization segment (fMP4/CMAF): the `ftyp`+`moov`
-    /// prepended before the media fragments. `None` for an MPEG-TS playlist.
-    pub map_uri: Option<String>,
-    /// `#EXT-X-MAP:BYTERANGE` sub-range of `map_uri` (single-file CMAF), `None`
-    /// when the init segment is the whole resource.
-    pub map_byte_range: Option<ByteRange>,
     /// `#EXT-X-ENDLIST` present: a complete VOD playlist (no live reload).
     pub end_list: bool,
     /// `#EXT-X-PART-INF:PART-TARGET` in ms, present only on a playlist that
@@ -228,6 +230,13 @@ pub struct MediaPlaylist {
 const PART_HOLD_BACK_TARGETS: u32 = 3;
 
 impl MediaPlaylist {
+    // fMP4 playlists carry an EXT-X-MAP, MPEG-TS ones do not
+    pub fn first_init_segment(&self) -> Option<&InitSegment> {
+        self.segments
+            .iter()
+            .find_map(|segment| segment.map.as_ref())
+    }
+
     /// Whether the playlist offers low-latency delivery: partial segments plus a
     /// server that holds a playlist request until the next part is published.
     /// Both halves are needed, since parts a client can only poll for on the
@@ -353,8 +362,7 @@ pub fn parse(text: &str) -> Result<Playlist, HlsError> {
     let mut segments = Vec::new();
     let mut target_duration_secs = 0u32;
     let mut media_sequence = 0u64;
-    let mut map_uri = None;
-    let mut map_byte_range = None;
+    let mut current_map: Option<InitSegment> = None;
     let mut end_list = false;
     // The `#EXT-X-KEY` carries forward to every following segment until the next
     // one changes or clears it.
@@ -396,11 +404,11 @@ pub fn parse(text: &str) -> Result<Playlist, HlsError> {
                 .map_err(|_| HlsError::MalformedMediaSequence)?;
         } else if let Some(attrs) = line.strip_prefix("#EXT-X-MAP:") {
             let pairs = attr_pairs(attrs);
-            map_uri = pairs
+            let uri = pairs
                 .iter()
                 .find(|(k, _)| *k == "URI")
                 .map(|(_, v)| String::from(v.trim_matches('"')));
-            map_byte_range = pairs
+            let byte_range = pairs
                 .iter()
                 .find(|(k, _)| *k == "BYTERANGE")
                 .and_then(|(_, v)| {
@@ -410,6 +418,7 @@ pub fn parse(text: &str) -> Result<Playlist, HlsError> {
                         length,
                     })
                 });
+            current_map = uri.map(|uri| InitSegment { uri, byte_range });
         } else if let Some(attrs) = line.strip_prefix("#EXT-X-KEY:") {
             current_key = parse_key(attrs)?;
         } else if let Some(attrs) = line.strip_prefix("#EXT-X-PART:") {
@@ -459,6 +468,7 @@ pub fn parse(text: &str) -> Result<Playlist, HlsError> {
                 gap: core::mem::take(&mut pending_gap),
                 discontinuity: core::mem::take(&mut pending_discontinuity),
                 parts: core::mem::take(&mut pending_parts),
+                map: current_map.clone(),
             });
         }
         // a bare URI with no pending tag is ignored
@@ -482,6 +492,7 @@ pub fn parse(text: &str) -> Result<Playlist, HlsError> {
             gap: pending_gap,
             discontinuity: pending_discontinuity,
             parts: pending_parts,
+            map: current_map.clone(),
         });
     }
 
@@ -498,8 +509,6 @@ pub fn parse(text: &str) -> Result<Playlist, HlsError> {
             target_duration_secs,
             media_sequence,
             segments,
-            map_uri,
-            map_byte_range,
             end_list,
             part_target_ms,
             server_control,
@@ -692,7 +701,7 @@ fn parse_secs_ms(value: &str) -> Option<u32> {
 /// only where the key in effect changes, including a `METHOD=NONE` to clear it.
 pub fn write_media(playlist: &MediaPlaylist) -> String {
     let mut out = String::from("#EXTM3U\n");
-    let version = if playlist.map_uri.is_some() {
+    let version = if playlist.first_init_segment().is_some() {
         6
     } else if playlist.segments.iter().any(|s| s.byte_range.is_some()) {
         4
@@ -706,14 +715,8 @@ pub fn write_media(playlist: &MediaPlaylist) -> String {
         playlist.target_duration_secs
     );
     let _ = writeln!(out, "#EXT-X-MEDIA-SEQUENCE:{}", playlist.media_sequence);
-    if let Some(uri) = &playlist.map_uri {
-        let _ = write!(out, "#EXT-X-MAP:URI=\"{uri}\"");
-        if let Some(r) = playlist.map_byte_range {
-            let _ = write!(out, ",BYTERANGE=\"{}@{}\"", r.length, r.offset);
-        }
-        out.push('\n');
-    }
     let mut key_in_effect: Option<&SegmentKey> = None;
+    let mut map_in_effect: Option<&InitSegment> = None;
     for segment in &playlist.segments {
         if segment.key.as_ref() != key_in_effect {
             out.push_str(&key_tag(segment.key.as_ref()));
@@ -721,6 +724,18 @@ pub fn write_media(playlist: &MediaPlaylist) -> String {
         }
         if segment.discontinuity {
             out.push_str("#EXT-X-DISCONTINUITY\n");
+        }
+        if let Some(map) = segment
+            .map
+            .as_ref()
+            .filter(|&map| Some(map) != map_in_effect)
+        {
+            let _ = write!(out, "#EXT-X-MAP:URI=\"{}\"", map.uri);
+            if let Some(r) = map.byte_range {
+                let _ = write!(out, ",BYTERANGE=\"{}@{}\"", r.length, r.offset);
+            }
+            out.push('\n');
+            map_in_effect = Some(map);
         }
         let (secs, millis) = (segment.duration_ms / 1000, segment.duration_ms % 1000);
         let _ = writeln!(out, "#EXTINF:{secs}.{millis:03},");
@@ -807,6 +822,7 @@ mod tests {
                 gap: false,
                 discontinuity: false,
                 parts: Vec::new(),
+                map: None,
             }
         );
         assert_eq!(m.segments[2].duration_ms, 3003);
@@ -824,7 +840,7 @@ mod tests {
             panic!("expected media playlist");
         };
         assert_eq!(
-            m.map_uri.as_deref(),
+            m.first_init_segment().map(|map| map.uri.as_str()),
             Some("init.mp4"),
             "EXT-X-MAP init segment recovered"
         );
@@ -870,12 +886,14 @@ mod tests {
         let Playlist::Media(m) = parse(text).unwrap() else {
             panic!("expected media playlist");
         };
-        assert_eq!(m.map_uri.as_deref(), Some("all.mp4"));
         assert_eq!(
-            m.map_byte_range,
-            Some(ByteRange {
-                offset: 0,
-                length: 800
+            m.first_init_segment(),
+            Some(&InitSegment {
+                uri: "all.mp4".into(),
+                byte_range: Some(ByteRange {
+                    offset: 0,
+                    length: 800
+                })
             })
         );
         assert_eq!(m.segments.len(), 3);
@@ -905,12 +923,32 @@ mod tests {
     }
 
     #[test]
+    fn each_segment_carries_the_map_in_effect() {
+        let text = "#EXTM3U\n\
+            #EXT-X-MAP:URI=\"main.mp4\"\n\
+            #EXTINF:4.0,\nmain0.m4s\n\
+            #EXT-X-DISCONTINUITY\n\
+            #EXT-X-MAP:URI=\"ad.mp4\"\n\
+            #EXTINF:4.0,\nad0.m4s\n\
+            #EXT-X-ENDLIST\n";
+        let Playlist::Media(m) = parse(text).unwrap() else {
+            panic!("expected media playlist");
+        };
+        let maps: Vec<Option<&str>> = m
+            .segments
+            .iter()
+            .map(|segment| segment.map.as_ref().map(|map| map.uri.as_str()))
+            .collect();
+        assert_eq!(maps, [Some("main.mp4"), Some("ad.mp4")]);
+    }
+
+    #[test]
     fn ts_media_playlist_has_no_init_map() {
         let text = "#EXTM3U\n#EXTINF:4.0,\nseg0.ts\n#EXT-X-ENDLIST\n";
         let Playlist::Media(m) = parse(text).unwrap() else {
             panic!("expected media playlist");
         };
-        assert_eq!(m.map_uri, None);
+        assert_eq!(m.first_init_segment(), None);
     }
 
     #[test]
@@ -1099,6 +1137,10 @@ mod tests {
             iv: Some(iv),
             key_id: None,
         };
+        let init = InitSegment {
+            uri: "init.mp4".into(),
+            byte_range: None,
+        };
         let original = MediaPlaylist {
             target_duration_secs: 4,
             media_sequence: 12,
@@ -1111,6 +1153,7 @@ mod tests {
                     gap: false,
                     discontinuity: false,
                     parts: Vec::new(),
+                    map: Some(init.clone()),
                 },
                 Segment {
                     uri: "seg1.m4s".into(),
@@ -1123,6 +1166,7 @@ mod tests {
                     gap: false,
                     discontinuity: false,
                     parts: Vec::new(),
+                    map: Some(init.clone()),
                 },
                 Segment {
                     uri: "seg2.m4s".into(),
@@ -1132,10 +1176,9 @@ mod tests {
                     gap: false,
                     discontinuity: true,
                     parts: Vec::new(),
+                    map: Some(init.clone()),
                 },
             ],
-            map_uri: Some("init.mp4".into()),
-            map_byte_range: None,
             end_list: true,
             part_target_ms: None,
             server_control: None,

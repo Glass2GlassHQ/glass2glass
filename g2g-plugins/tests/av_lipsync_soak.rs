@@ -158,8 +158,8 @@ fn init_segment(url: &str) -> Option<Vec<u8>> {
     let Ok(Playlist::Media(media)) = parse(&text) else {
         return None;
     };
-    let map = media.map_uri?;
-    http_get(&resolve_url(url, &map))
+    let map = media.first_init_segment()?;
+    http_get(&resolve_url(url, &map.uri))
 }
 
 /// The feed's frame rate: `G2G_FEED_FPS` if set, else the master playlist's

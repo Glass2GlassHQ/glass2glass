@@ -389,7 +389,11 @@ async fn ts_segments_cut_at_keyframes_and_concatenate_to_the_mux_output() {
     assert_eq!(playlist.segments.len(), 2);
     assert_eq!(playlist.media_sequence, 0, "nothing has rolled off yet");
     assert!(playlist.end_list, "EOS closes the playlist for VOD");
-    assert_eq!(playlist.map_uri, None, "MPEG-TS needs no init segment");
+    assert_eq!(
+        playlist.first_init_segment(),
+        None,
+        "MPEG-TS needs no init segment"
+    );
     assert_eq!(playlist.target_duration_secs, 1);
     for segment in &playlist.segments {
         assert!(
@@ -493,7 +497,10 @@ async fn fmp4_segments_carry_an_init_map_and_concatenate_to_the_mux_output() {
     package(&mut sink, ByteStreamEncoding::IsoBmff, &muxed).await;
 
     let playlist = read_playlist(&playlist_path);
-    assert_eq!(playlist.map_uri.as_deref(), Some("init.mp4"));
+    assert_eq!(
+        playlist.first_init_segment().map(|map| map.uri.as_str()),
+        Some("init.mp4")
+    );
     assert_eq!(sink.segments_written(), 2, "two 1 s segments from 2 s");
     assert_eq!(playlist.segments.len(), 2);
     for segment in &playlist.segments {
@@ -629,9 +636,10 @@ async fn single_media_file_fmp4_puts_the_init_segment_first() {
     let playlist = read_playlist(&playlist_path);
     let file = std::fs::read(dir.join("all.mp4")).expect("single media file");
     assert_eq!(file, whole, "init + segments is the muxer's byte stream");
-    assert_eq!(playlist.map_uri.as_deref(), Some("all.mp4"));
-    let map = playlist
-        .map_byte_range
+    let init_segment = playlist.first_init_segment().expect("EXT-X-MAP");
+    assert_eq!(init_segment.uri, "all.mp4");
+    let map = init_segment
+        .byte_range
         .expect("EXT-X-MAP names a byte range");
     assert_eq!(map.offset, 0);
     assert_eq!(&file[4..8], b"ftyp", "the file opens with the init segment");
