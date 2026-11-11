@@ -766,6 +766,8 @@ mod demuxseek;
 pub mod demuxstream;
 // MPEG-TS demuxer parsing core (no_std): PAT/PMT/PES -> elementary access units.
 pub mod mpegts;
+// JPEG XS codestream headers and the MPEG-TS JXS_video_descriptor
+mod jpegxs;
 // The CRC-32 the MPEG-2 PSI sections and Ogg pages carry.
 pub mod mpegcrc;
 // MPEG-TS demuxer element (no_std): Caps::ByteStream{MpegTs} -> H.264, wrapping

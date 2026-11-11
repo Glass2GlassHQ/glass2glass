@@ -58,12 +58,14 @@ use crate::aacparse::{
     muxer_audio_specific_config, opens_loas_frame,
 };
 use crate::dvbsub::{parse_page_ids, PageIds, DEFAULT_PAGE_ID, DEFAULT_SUBTITLING_TYPE};
+use crate::jpegxs::JxsVideoDescriptor;
 use crate::livemux::{wall_clock_ns, LiveMuxDeadline, LIVE_MUX_LATENCY_PROPERTY};
 use crate::mpegts::{
     TsMuxer, DEFAULT_ORIGINAL_NETWORK_ID, DEFAULT_PCR_INTERVAL_90KHZ, DEFAULT_TABLE_INTERVAL_90KHZ,
     DEFAULT_TRANSPORT_STREAM_ID, MAX_TABLES_VERSION, MUX_ES_PID, MUX_PID_RANGE, MUX_PMT_PID,
-    PES_CLOCK_HZ, STREAM_TYPE_AAC, STREAM_TYPE_H264, STREAM_TYPE_H265, STREAM_TYPE_METADATA_PES,
-    STREAM_TYPE_PRIVATE_PES, TAG_KEY_SERVICE_NAME, TAG_KEY_SERVICE_PROVIDER,
+    PES_CLOCK_HZ, STREAM_TYPE_AAC, STREAM_TYPE_H264, STREAM_TYPE_H265, STREAM_TYPE_JPEG_XS,
+    STREAM_TYPE_METADATA_PES, STREAM_TYPE_PRIVATE_PES, TAG_KEY_SERVICE_NAME,
+    TAG_KEY_SERVICE_PROVIDER,
 };
 use crate::mux::{audio_track_params, refused_input};
 use crate::opusparse::{is_opus_config, parse_opus_head, OPUS_RATE_HZ};
@@ -453,6 +455,10 @@ fn stream_type_for(caps: &Caps, klv_sync: bool) -> Option<u8> {
             codec: VideoCodec::Av1,
             ..
         } => Some(STREAM_TYPE_PRIVATE_PES),
+        Caps::CompressedVideo {
+            codec: VideoCodec::JpegXs,
+            ..
+        } => Some(STREAM_TYPE_JPEG_XS),
         Caps::Audio {
             format: AudioFormat::Aac,
             ..
@@ -504,6 +510,13 @@ fn opus_channels(caps: &Caps) -> Option<u8> {
         } => Some(*channels),
         _ => None,
     }
+}
+
+// a JPEG XS pad's caps, and the JXS_video_descriptor its first codestream fills in
+#[derive(Debug, Clone)]
+struct JpegXsPad {
+    caps: Caps,
+    descriptor: Option<JxsVideoDescriptor>,
 }
 
 /// Whether an input caps is the DVB subtitle pad, whose PMT entry needs the
@@ -616,6 +629,7 @@ pub struct TsMux {
     st2038: Vec<bool>,
     // per input, how an AAC pad's frames are multiplexed, `None` for any other pad
     aac: Vec<Option<AacCarriage>>,
+    jpeg_xs: Vec<Option<JpegXsPad>>,
 }
 
 impl TsMux {
@@ -643,6 +657,7 @@ impl TsMux {
             opus: alloc::vec![None; inputs],
             st2038: alloc::vec![false; inputs],
             aac: alloc::vec![None; inputs],
+            jpeg_xs: alloc::vec![None; inputs],
         }
     }
 
@@ -778,7 +793,7 @@ impl TsMux {
         self.av1[input]
             || matches!(
                 self.stream_types[input],
-                Some(STREAM_TYPE_H264) | Some(STREAM_TYPE_H265)
+                Some(STREAM_TYPE_H264) | Some(STREAM_TYPE_H265) | Some(STREAM_TYPE_JPEG_XS)
             )
     }
 
@@ -843,6 +858,9 @@ impl TsMux {
             }
             if self.st2038[i] {
                 mux.set_stream_st2038(i);
+            }
+            if let Some(descriptor) = self.jpeg_xs[i].as_ref().and_then(|pad| pad.descriptor) {
+                mux.set_stream_jpeg_xs(i, &descriptor);
             }
             if self.aac[i].as_ref().is_some_and(AacCarriage::is_loas) {
                 mux.set_stream_latm(i);
@@ -983,6 +1001,10 @@ impl MultiInputElement for TsMux {
         self.av1[input] = is_av1(absolute_caps);
         self.opus[input] = opus_channels(absolute_caps);
         self.st2038[input] = matches!(absolute_caps, Caps::St2038 { .. });
+        self.jpeg_xs[input] = (stream_type == STREAM_TYPE_JPEG_XS).then(|| JpegXsPad {
+            caps: absolute_caps.clone(),
+            descriptor: None,
+        });
         Ok(ConfigureOutcome::Accepted)
     }
 
@@ -1079,6 +1101,20 @@ impl MultiInputElement for TsMux {
                 // M204: buffer the AU; release the globally earliest below.
                 PipelinePacket::DataFrame(frame) => {
                     self.deadline.note_arrival(input, &frame, now_ns);
+                    // gst's mpegtsmux states a JPEG XS stream's geometry and sampling in its PMT descriptor
+                    if let Some(pad) = self.jpeg_xs[input]
+                        .as_mut()
+                        .filter(|pad| pad.descriptor.is_none())
+                    {
+                        let slice = frame
+                            .domain
+                            .require_system_slice(short_type_name::<Self>())?;
+                        let descriptor = JxsVideoDescriptor::for_frame(&pad.caps, slice)?;
+                        pad.descriptor = Some(descriptor);
+                        if let Some(mux) = self.mux.as_mut() {
+                            mux.set_stream_jpeg_xs(input, &descriptor);
+                        }
+                    }
                     // A DVB subtitle pad opens on its page-id config blob, which
                     // is what the `subtitling_descriptor` declares and never a
                     // display set to multiplex.
@@ -1161,9 +1197,14 @@ impl MultiInputElement for TsMux {
             {
                 let muxer = g2g_core::log::short_type_name::<Self>();
                 let slice = frame.domain.require_system_slice(muxer)?;
-                let access_unit = match &self.aac[stream] {
-                    Some(aac) => aac.access_unit(slice, muxer)?,
-                    None => Cow::Borrowed(slice),
+                let jxes_box = self.jpeg_xs[stream]
+                    .as_ref()
+                    .and_then(|pad| pad.descriptor)
+                    .map(|descriptor| descriptor.jxes_box(frame.timing.pts_ns));
+                let access_unit = match (&self.aac[stream], jxes_box) {
+                    (Some(aac), _) => aac.access_unit(slice, muxer)?,
+                    (None, Some(jxes_box)) => Cow::Owned([&jxes_box[..], slice].concat()),
+                    (None, None) => Cow::Borrowed(slice),
                 };
                 let pts_90khz = ns_to_ticks(frame.timing.pts_ns, PES_CLOCK_HZ);
                 // a DTS equal to the PTS adds nothing to the PES

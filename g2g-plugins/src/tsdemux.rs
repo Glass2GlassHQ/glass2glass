@@ -47,10 +47,10 @@ use crate::demuxseek::DemuxSeek;
 use crate::mpegts::{
     ticks_90khz_to_ns, unwrap_metadata_au_cells, EitSlot, EsUnit, TsDemuxer, TsPacketSplitter,
     STREAM_TYPE_AAC, STREAM_TYPE_AAC_LATM, STREAM_TYPE_AC3, STREAM_TYPE_H264, STREAM_TYPE_H265,
-    STREAM_TYPE_METADATA_PES, STREAM_TYPE_MPEG1_AUDIO, STREAM_TYPE_MPEG1_VIDEO,
-    STREAM_TYPE_MPEG2_AUDIO, STREAM_TYPE_MPEG2_VIDEO, STREAM_TYPE_MPEG4P2, STREAM_TYPE_PRIVATE_PES,
-    STREAM_TYPE_SCTE35, TAG_KEY_EVENT_DURATION, TAG_KEY_EVENT_NAME, TAG_KEY_EVENT_START,
-    TAG_KEY_EVENT_TEXT, TAG_KEY_NEXT_EVENT_DURATION, TAG_KEY_NEXT_EVENT_NAME,
+    STREAM_TYPE_JPEG_XS, STREAM_TYPE_METADATA_PES, STREAM_TYPE_MPEG1_AUDIO,
+    STREAM_TYPE_MPEG1_VIDEO, STREAM_TYPE_MPEG2_AUDIO, STREAM_TYPE_MPEG2_VIDEO, STREAM_TYPE_MPEG4P2,
+    STREAM_TYPE_PRIVATE_PES, STREAM_TYPE_SCTE35, TAG_KEY_EVENT_DURATION, TAG_KEY_EVENT_NAME,
+    TAG_KEY_EVENT_START, TAG_KEY_EVENT_TEXT, TAG_KEY_NEXT_EVENT_DURATION, TAG_KEY_NEXT_EVENT_NAME,
     TAG_KEY_NEXT_EVENT_START, TAG_KEY_NEXT_EVENT_TEXT, TAG_KEY_SCHEDULE_EVENT_DURATION,
     TAG_KEY_SCHEDULE_EVENT_ID, TAG_KEY_SCHEDULE_EVENT_NAME, TAG_KEY_SCHEDULE_EVENT_START,
     TAG_KEY_SCHEDULE_EVENT_TEXT, TAG_KEY_SERVICE_PROVIDER,
@@ -356,6 +356,8 @@ pub enum TsStream {
     Teletext,
     // a private PES (0x06) with a 'VANC' registration, each PES payload SMPTE ST 2038 ANC packets
     St2038,
+    // the first JPEG XS (0x32) video stream, whose JXS_video_descriptor gives the caps
+    JpegXs,
 }
 
 /// Demuxes an MPEG-TS byte stream into one selected elementary stream.
@@ -452,6 +454,7 @@ fn output_caps(stream: TsStream) -> Caps {
         TsStream::Ac3 => compressed_audio(AudioFormat::Ac3),
         TsStream::Klv => Caps::Klv,
         TsStream::St2038 => st2038_caps(),
+        TsStream::JpegXs => elementary_video_caps(VideoCodec::JpegXs),
         TsStream::Teletext => Caps::Text {
             format: g2g_core::TextFormat::Teletext,
         },
@@ -488,6 +491,7 @@ fn selected_stream_type(stream: TsStream) -> u8 {
         TsStream::DvbSub => STREAM_TYPE_PRIVATE_PES,
         TsStream::Teletext => STREAM_TYPE_PRIVATE_PES,
         TsStream::St2038 => STREAM_TYPE_PRIVATE_PES,
+        TsStream::JpegXs => STREAM_TYPE_JPEG_XS,
     }
 }
 
@@ -554,6 +558,9 @@ fn es_to_stream(es: &crate::mpegts::ElementaryStream) -> Option<Stream> {
         // as Opus (else g2g does not forward it).
         STREAM_TYPE_PRIVATE_PES if es.opus_channels.is_some() => audio(AudioFormat::Opus),
         STREAM_TYPE_PRIVATE_PES if es.av1 => (StreamType::Video, video(VideoCodec::Av1)),
+        STREAM_TYPE_JPEG_XS if es.jpeg_xs.is_some() => {
+            (StreamType::Video, video(VideoCodec::JpegXs))
+        }
         STREAM_TYPE_AC3 => audio(AudioFormat::Ac3),
         STREAM_TYPE_PRIVATE_PES if es.ac3 => audio(AudioFormat::Ac3),
         STREAM_TYPE_PRIVATE_PES if es.subtitling.is_some() => (
@@ -593,7 +600,8 @@ fn is_keyframe(stream: TsStream, au: &[u8]) -> bool {
         | TsStream::Klv
         | TsStream::DvbSub
         | TsStream::Teletext
-        | TsStream::St2038 => true,
+        | TsStream::St2038
+        | TsStream::JpegXs => true,
     }
 }
 
@@ -617,7 +625,7 @@ static ONE_PORT_PROPS: &[PropertySpec] = &[
     PropertySpec::new(
         "stream",
         PropKind::Str,
-        "elementary stream to emit: h264 | h265 | av1 | mpeg2 | mpeg4part2 | aac | mp2 (or mp3) | opus | ac3 | klv | dvbsub | teletext | st2038",
+        "elementary stream to emit: h264 | h265 | av1 | mpeg2 | mpeg4part2 | aac | mp2 (or mp3) | opus | ac3 | klv | dvbsub | teletext | st2038 | jpegxs",
     ),
     PROGRAM_NUMBER_PROP,
     PropertySpec::new(
@@ -664,12 +672,13 @@ fn ts_stream_from_str(s: &str) -> Option<TsStream> {
         "dvbsub" => Some(TsStream::DvbSub),
         "teletext" => Some(TsStream::Teletext),
         "st2038" => Some(TsStream::St2038),
+        "jpegxs" => Some(TsStream::JpegXs),
         _ => None,
     }
 }
 
 #[cfg(feature = "std")]
-const TS_STREAMS: [TsStream; 13] = [
+const TS_STREAMS: [TsStream; 14] = [
     TsStream::H264,
     TsStream::H265,
     TsStream::Mpeg4Part2,
@@ -683,6 +692,7 @@ const TS_STREAMS: [TsStream; 13] = [
     TsStream::DvbSub,
     TsStream::Teletext,
     TsStream::St2038,
+    TsStream::JpegXs,
 ];
 
 // the first stream a consumer with sink caps `accepted` takes
@@ -719,6 +729,7 @@ pub(crate) fn ts_stream_to_str(stream: TsStream) -> &'static str {
         TsStream::DvbSub => "dvbsub",
         TsStream::Teletext => "teletext",
         TsStream::St2038 => "st2038",
+        TsStream::JpegXs => "jpegxs",
     }
 }
 
@@ -735,6 +746,7 @@ fn es_to_ts_stream(es: &crate::mpegts::ElementaryStream) -> Option<TsStream> {
         STREAM_TYPE_MPEG1_AUDIO | STREAM_TYPE_MPEG2_AUDIO => Some(TsStream::Mp2),
         STREAM_TYPE_PRIVATE_PES if es.opus_channels.is_some() => Some(TsStream::Opus),
         STREAM_TYPE_PRIVATE_PES if es.av1 => Some(TsStream::Av1),
+        STREAM_TYPE_JPEG_XS if es.jpeg_xs.is_some() => Some(TsStream::JpegXs),
         STREAM_TYPE_AC3 => Some(TsStream::Ac3),
         STREAM_TYPE_PRIVATE_PES if es.ac3 => Some(TsStream::Ac3),
         // KLV and DVB subtitles stay out: this feeds the playbin fan-out, which
@@ -861,6 +873,7 @@ impl PadTemplates for TsDemux {
             output_caps(TsStream::Klv),
             output_caps(TsStream::DvbSub),
             output_caps(TsStream::Teletext),
+            output_caps(TsStream::JpegXs),
         ]));
         Vec::from([
             PadTemplate::sink(CapsSet::one(input_caps())),
@@ -1397,6 +1410,11 @@ impl TsDemuxN {
         if !self.announced[port] {
             let caps = match stream {
                 TsStream::Opus => opus_stream_caps(&self.demux, u.pid),
+                TsStream::JpegXs => self
+                    .demux
+                    .jpeg_xs(u.pid)
+                    .and_then(|descriptor| descriptor.caps())
+                    .ok_or(G2gError::CapsMismatch)?,
                 stream => output_caps(stream),
             };
             out.push_to(port, PipelinePacket::CapsChanged(caps)).await?;
@@ -1419,6 +1437,11 @@ impl TsDemuxN {
             TsStream::Opus => crate::mpegts::opus_ts_packets(&data)
                 .into_iter()
                 .map(<[u8]>::to_vec)
+                .collect(),
+            // gst's tsdemux drops a PES that does not open with the jxes box
+            TsStream::JpegXs => crate::jpegxs::strip_jxes_box(&data)
+                .map(<[u8]>::to_vec)
+                .into_iter()
                 .collect(),
             _ => alloc::vec![data],
         };
@@ -1518,6 +1541,7 @@ fn resolve_ts_stream_id(demux: &TsDemuxer, id: &str) -> Option<(u16, TsStream)> 
         STREAM_TYPE_MPEG4P2 => TsStream::Mpeg4Part2,
         STREAM_TYPE_MPEG1_VIDEO | STREAM_TYPE_MPEG2_VIDEO => TsStream::Mpeg2,
         STREAM_TYPE_PRIVATE_PES if es.av1 => TsStream::Av1,
+        STREAM_TYPE_JPEG_XS if es.jpeg_xs.is_some() => TsStream::JpegXs,
         STREAM_TYPE_AAC | STREAM_TYPE_AAC_LATM => TsStream::Aac,
         _ => return None,
     };
@@ -1538,6 +1562,7 @@ fn pid_carries(demux: &TsDemuxer, stream: TsStream, pid: u16, stream_type: u8) -
         TsStream::DvbSub => demux.subtitling(pid).is_some(),
         TsStream::Teletext => demux.teletext(pid).is_some(),
         TsStream::St2038 => demux.is_st2038(pid),
+        TsStream::JpegXs => demux.jpeg_xs(pid).is_some(),
         _ => true,
     }
 }
@@ -1806,6 +1831,7 @@ mod tests {
             teletext: None,
             language: None,
             st2038: false,
+            jpeg_xs: None,
         };
         let stream = es_to_stream(&es).expect("0x10 is forwarded");
         assert_eq!(stream.stream_type, StreamType::Video);
@@ -1832,6 +1858,7 @@ mod tests {
                 teletext: None,
                 language: None,
                 st2038: false,
+                jpeg_xs: None,
             }),
             Some(TsStream::Mpeg4Part2)
         );
@@ -1993,6 +2020,7 @@ mod tests {
 
     #[derive(Default)]
     struct CaptureSink {
+        caps: Vec<Caps>,
         frames: Vec<Vec<u8>>,
         pts_ns: Vec<u64>,
         segments: Vec<Segment>,
@@ -2014,6 +2042,7 @@ mod tests {
                         }
                         self.pts_ns.push(f.timing.pts_ns);
                     }
+                    PipelinePacket::CapsChanged(caps) => self.caps.push(caps),
                     PipelinePacket::Segment(seg) => self.segments.push(seg),
                     PipelinePacket::Flush => self.flushes += 1,
                     PipelinePacket::Eos => self.eos = true,
@@ -2671,6 +2700,153 @@ mod tests {
         let mut sink = CaptureSink::default();
         run_demux(&mut d, &stream, &mut sink).await;
         assert_eq!(sink.frames, alloc::vec![syncframe.to_vec()]);
+    }
+
+    // tools/jpegxs-fixtures.sh: SvtJpegxsEncApp, 96x48 8-bit 4:2:2 at 25 fps, three frames
+    const JPEG_XS_FIXTURE: &[u8] =
+        include_bytes!("../tests/fixtures/jpegxs_96x48_i422_3frames.jxs");
+    const JPEG_XS_CODESTREAM_START: [u8; 4] = [0xFF, 0x10, 0xFF, 0x50];
+
+    fn jpeg_xs_caps() -> Caps {
+        Caps::CompressedVideo {
+            codec: VideoCodec::JpegXs,
+            width: Dim::Fixed(96),
+            height: Dim::Fixed(48),
+            framerate: Rate::Fixed(25 << 16),
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
+        }
+    }
+
+    fn jpeg_xs_frames() -> Vec<Vec<u8>> {
+        let starts: Vec<usize> = JPEG_XS_FIXTURE
+            .windows(JPEG_XS_CODESTREAM_START.len())
+            .enumerate()
+            .filter(|(_, window)| *window == JPEG_XS_CODESTREAM_START)
+            .map(|(at, _)| at)
+            .chain([JPEG_XS_FIXTURE.len()])
+            .collect();
+        starts
+            .windows(2)
+            .map(|span| JPEG_XS_FIXTURE[span[0]..span[1]].to_vec())
+            .collect()
+    }
+
+    async fn ts_of_jpeg_xs_frames() -> Vec<u8> {
+        use g2g_core::MultiInputElement;
+        const FRAME_NS: u64 = 40_000_000;
+        let mut mux = crate::tsmuxn::TsMux::new(1);
+        mux.configure_pipeline(0, &jpeg_xs_caps()).unwrap();
+        let mut sink = CaptureSink::default();
+        for (index, codestream) in jpeg_xs_frames().into_iter().enumerate() {
+            let frame = Frame::new(
+                MemoryDomain::System(SystemSlice::from_boxed(codestream.into_boxed_slice())),
+                FrameTiming {
+                    pts_ns: index as u64 * FRAME_NS,
+                    keyframe: true,
+                    ..FrameTiming::default()
+                },
+                index as u64,
+            );
+            mux.process(0, PipelinePacket::DataFrame(frame), &mut sink)
+                .await
+                .unwrap();
+        }
+        mux.process(0, PipelinePacket::Eos, &mut sink)
+            .await
+            .unwrap();
+        sink.frames.concat()
+    }
+
+    async fn demux_jpeg_xs(ts: &[u8]) -> CaptureSink {
+        let mut d = TsDemux::new().with_stream(TsStream::JpegXs);
+        d.configure_pipeline(&input_caps()).unwrap();
+        let mut sink = CaptureSink::default();
+        run_demux(&mut d, ts, &mut sink).await;
+        sink
+    }
+
+    #[tokio::test]
+    async fn jpeg_xs_round_trips_with_its_descriptor_caps() {
+        let frames = jpeg_xs_frames();
+        assert!(frames.len() > 1, "the fixture holds several codestreams");
+        let sink = demux_jpeg_xs(&ts_of_jpeg_xs_frames().await).await;
+        assert_eq!(sink.caps, [jpeg_xs_caps()]);
+        assert_eq!(sink.frames, frames);
+    }
+
+    #[cfg(feature = "std")]
+    fn gst_launch(args: &[&str]) {
+        let status = std::process::Command::new("gst-launch-1.0")
+            .arg("-q")
+            .args(args)
+            .status()
+            .expect("gst-launch-1.0 runs");
+        assert!(status.success(), "gst-launch-1.0 {args:?}");
+    }
+
+    #[cfg(feature = "std")]
+    const GST_JPEG_XS_CAPS: &str = "image/x-jxsc,width=96,height=48,framerate=25/1,sampling=YCbCr-4:2:2,depth=8,interlace-mode=progressive";
+
+    #[cfg(feature = "std")]
+    #[tokio::test]
+    #[ignore = "needs gst-launch-1.0 1.26 or later, writes temp files"]
+    async fn gst_tsdemux_reads_our_jpeg_xs_stream() {
+        let dir = std::env::temp_dir().join("g2g-ts-jpegxs-to-gst");
+        std::fs::create_dir_all(&dir).unwrap();
+        let ts = dir.join("g2g.ts");
+        let out = dir.join("gst.jxs");
+        std::fs::write(&ts, ts_of_jpeg_xs_frames().await).unwrap();
+        let src = alloc::format!("location={}", ts.display());
+        let sink = alloc::format!("location={}", out.display());
+        gst_launch(&[
+            "filesrc",
+            &src,
+            "!",
+            "tsdemux",
+            "!",
+            GST_JPEG_XS_CAPS,
+            "!",
+            "filesink",
+            &sink,
+        ]);
+        assert_eq!(std::fs::read(&out).unwrap(), JPEG_XS_FIXTURE);
+    }
+
+    #[cfg(feature = "std")]
+    #[tokio::test]
+    #[ignore = "needs gst-launch-1.0 1.26 or later, writes temp files"]
+    async fn we_read_gst_mpegtsmux_jpeg_xs() {
+        let dir = std::env::temp_dir().join("g2g-ts-jpegxs-from-gst");
+        std::fs::create_dir_all(&dir).unwrap();
+        let fixture = dir.join("in.jxs");
+        let ts = dir.join("gst.ts");
+        std::fs::write(&fixture, JPEG_XS_FIXTURE).unwrap();
+        let frames = jpeg_xs_frames();
+        let src = alloc::format!("location={}", fixture.display());
+        let blocksize = alloc::format!("blocksize={}", frames[0].len());
+        let caps = alloc::format!(
+            "{GST_JPEG_XS_CAPS},alignment=frame,codestream-length={}",
+            frames[0].len()
+        );
+        let sink = alloc::format!("location={}", ts.display());
+        gst_launch(&[
+            "filesrc",
+            &src,
+            &blocksize,
+            "do-timestamp=true",
+            "!",
+            &caps,
+            "!",
+            "mpegtsmux",
+            "!",
+            "filesink",
+            &sink,
+        ]);
+        let demuxed = demux_jpeg_xs(&std::fs::read(&ts).unwrap()).await;
+        assert_eq!(demuxed.caps, [jpeg_xs_caps()]);
+        assert_eq!(demuxed.frames, frames);
     }
 
     #[tokio::test]

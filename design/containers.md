@@ -345,6 +345,26 @@ GStreamer: a `svtav1enc ! mpegtsmux` stream demuxes to units ffmpeg's `obu`
 demuxer decodes at full size, and `tsdemux ! av1parse ! dav1ddec` decodes the
 g2g mux's output.
 
+### JPEG XS over TS
+
+JPEG XS has stream_type 0x32 (H.222.0 Annex S). Its PMT entry carries a
+`JXS_video_descriptor`, an `extension_descriptor` (tag 0x3F) with extension tag
+0x14. That descriptor gives the size, the rate in `frat`, the depth and sampling
+in `schar`, profile and level, and the colour codes, and the demux builds the
+caps from it alone. Each PES opens with a 30-byte `jxes` box holding the same
+fields plus a timecode, and the demux strips it. `jpegxs.rs` holds the
+descriptor, the box and a reader for the codestream header (the PIH and CDT
+markers). The mux fills the descriptor from the first codestream, as gst's
+`mpegtsmux` fills it from caps, and only 4:2:2 and 4:4:4 have an `schar` code,
+so other samplings are refused. `frat` takes whole rates and their 1000/1001
+forms. An unknown rate goes out as 0/1, as in gst. An interlaced
+stream (`BitstreamAlignment::FieldPair`) is written top field first, since
+compressed caps carry no field order, and its `vertical_size` is the field height
+gst's `tsdemux` doubles. Both directions are validated against gst 1.28 with an
+SVT-JPEG-XS fixture: gst's `tsdemux` reads the g2g mux byte for byte under the
+caps it expects, and the g2g demux reads gst's `mpegtsmux` output. Interlaced
+carriage has no fixture yet.
+
 ### SMPTE ST 2038 over TS
 
 ST 2038 ancillary data (captions, timecode, AFD, SCTE-104) rides a private PES

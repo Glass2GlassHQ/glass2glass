@@ -26,6 +26,7 @@ use alloc::vec::Vec;
 
 use g2g_core::{G2gError, VideoCodec};
 
+use crate::jpegxs::JxsVideoDescriptor;
 use crate::klv::KLV_UL_PREFIX;
 use crate::video_pts_synth::{backfill_leading_pts_90khz, LeadingUnits, VideoPtsSynth};
 
@@ -143,6 +144,7 @@ const MAX_PACKETS_BEFORE_PMT: usize = 8192;
 pub const STREAM_TYPE_H264: u8 = 0x1B;
 /// PMT `stream_type` for H.265 (HEVC) video.
 pub const STREAM_TYPE_H265: u8 = 0x24;
+pub const STREAM_TYPE_JPEG_XS: u8 = 0x32;
 /// PMT `stream_type` for MPEG-4 Part 2 (Visual) video.
 pub const STREAM_TYPE_MPEG4P2: u8 = 0x10;
 /// PMT `stream_type` for MPEG-1 Video (ISO/IEC 11172-2).
@@ -271,6 +273,8 @@ pub struct ElementaryStream {
     pub teletext: Option<TeletextService>,
     // a private (0x06) stream with a 'VANC' registration, SMPTE ST 2038 ancillary data
     pub st2038: bool,
+    // the JXS_video_descriptor of a JPEG XS (0x32) stream, which states its geometry and rate
+    pub jpeg_xs: Option<JxsVideoDescriptor>,
 }
 
 /// One entry of a DVB `teletext_descriptor`: which teletext page a stream
@@ -713,6 +717,13 @@ impl TsDemuxer {
             .iter()
             .find(|s| s.pid == pid)
             .is_some_and(|s| s.klv)
+    }
+
+    pub fn jpeg_xs(&self, pid: u16) -> Option<JxsVideoDescriptor> {
+        self.streams()
+            .iter()
+            .find(|s| s.pid == pid)
+            .and_then(|s| s.jpeg_xs)
     }
 
     pub fn is_st2038(&self, pid: u16) -> bool {
@@ -1353,6 +1364,9 @@ impl TsDemuxer {
                 teletext: private.and_then(parse_teletext_descriptor),
                 language: descriptors.and_then(parse_iso639_language),
                 st2038: private.is_some_and(|d| has_registration(d, &[VANC_REGISTRATION_ID])),
+                jpeg_xs: descriptors
+                    .filter(|_| stream_type == STREAM_TYPE_JPEG_XS)
+                    .and_then(parse_jxs_video_descriptor),
             };
             let streams = &mut self.programs[prog_idx].streams;
             // a PID listed twice takes its last entry's type, as ffmpeg does
@@ -1792,6 +1806,22 @@ fn declares_non_klv_metadata(mut desc: &[u8]) -> bool {
 }
 
 // whether a PMT ES-info descriptor loop has a registration_descriptor (tag 0x05) naming one of `ids`
+fn parse_jxs_video_descriptor(mut desc: &[u8]) -> Option<JxsVideoDescriptor> {
+    while desc.len() >= 2 {
+        let tag = desc[0];
+        let len = desc[1] as usize;
+        let body = desc.get(2..2 + len)?;
+        if let Some(parsed) = JxsVideoDescriptor::is_extension_tag(tag)
+            .then(|| JxsVideoDescriptor::parse(body))
+            .flatten()
+        {
+            return Some(parsed);
+        }
+        desc = &desc[2 + len..];
+    }
+    None
+}
+
 fn has_registration(mut desc: &[u8], ids: &[&[u8; 4]]) -> bool {
     while desc.len() >= 2 {
         let tag = desc[0];
@@ -2154,6 +2184,14 @@ struct MuxStream {
     opus: bool,
     st2038: bool,
     overrun_warned: bool,
+}
+
+impl MuxStream {
+    fn replace_identity(&mut self, descriptor: &[u8]) {
+        self.es_info.drain(..self.identity_len);
+        self.es_info.splice(0..0, descriptor.iter().copied());
+        self.identity_len = descriptor.len();
+    }
 }
 
 /// One program in a [`TsMuxer`]: its `program_number`, the PID its PMT rides on
@@ -2545,15 +2583,24 @@ impl TsMuxer {
     /// separately (a language) are kept whichever order the calls come in, and
     /// setting the identity twice replaces it rather than writing both.
     fn set_private_identity(&mut self, index: usize, descriptor: &[u8]) {
-        let Some(s) = self.streams.get_mut(index) else {
-            return;
-        };
-        if s.stream_type != STREAM_TYPE_PRIVATE_PES {
-            return;
+        if let Some(s) = self
+            .streams
+            .get_mut(index)
+            .filter(|s| s.stream_type == STREAM_TYPE_PRIVATE_PES)
+        {
+            s.replace_identity(descriptor);
         }
-        s.es_info.drain(..s.identity_len);
-        s.es_info.splice(0..0, descriptor.iter().copied());
-        s.identity_len = descriptor.len();
+    }
+
+    // the PMT goes out with the first access unit, so this only takes effect before it
+    pub fn set_stream_jpeg_xs(&mut self, index: usize, descriptor: &JxsVideoDescriptor) {
+        if let Some(s) = self
+            .streams
+            .get_mut(index)
+            .filter(|s| s.stream_type == STREAM_TYPE_JPEG_XS)
+        {
+            s.replace_identity(&descriptor.to_descriptor());
+        }
     }
 
     /// Set the PAT/PMT re-emission cadence in 90 kHz ticks (`0` = once up front).
@@ -3590,6 +3637,7 @@ pub(crate) mod tests {
                 teletext: None,
                 language: None,
                 st2038: false,
+                jpeg_xs: None,
             }]
         );
         assert_eq!(d.video_pid(), Some(es_pid));
