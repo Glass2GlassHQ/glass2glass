@@ -141,6 +141,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M2225: bottom-field-first video is carried in the caps, so `deinterlace tff=auto` weaves DV and SD captures in the right order.
 - M2226: `mpegtsmux` and `tsdemux` carry JPEG XS with its `JXS_video_descriptor`, as gst does.
 - M2227: `mpegtsmux` and `tsdemux stream=id3` carry timed ID3 metadata as `Caps::Id3`, as gst does.
+- M2228: `mp4mux` and the MP4 demuxers carry track language and `Tag::ImageOrientation`, as gst's `image-orientation`.
 
 Breaking: `TimecodeMeta.frames` is a `u16`, `WIRE_VERSION` is 6, `FrameTiming` gains `start_discard_ns` and `end_discard_ns`, `RtpRecvConfig` gains `parameter_sets`, `RtmpPublisher::push` fails with a `PublishRefusal`, and `Interlace` gains `InterleavedBottomFieldFirst`.
 

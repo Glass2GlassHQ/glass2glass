@@ -760,6 +760,19 @@ muxers route `Tag::Title` and `Tag::Language` there instead of writing a
 stream. A missing `Language` stays absent rather than becoming the spec's
 implicit `eng`.
 
+### MP4 track language and orientation
+
+`mp4mux` writes a track's `Tag::Language` into its `mdhd` and a video track's
+`Tag::ImageOrientation` into its `tkhd` matrix, from the track's tags or, when
+it has none, the file's. The language must be three ASCII letters, as in the TS
+mux, and anything else leaves `und`. The matrices are the eight gst's `qtmux`
+writes for its `image-orientation` names, which `Orientation` maps one to one.
+The MP4 demuxers read both back into the track's `StreamTag`, leaving out `und`,
+the identity matrix, a QuickTime Macintosh language code and any matrix that
+scales or shears, as gst's `qtdemux` does except for the Macintosh codes, which it
+maps. Both directions are validated against gst 1.28, and ffprobe reports the
+same language and rotation for a g2g file as for gst's.
+
 ## Chapters
 
 Chapters, the table of contents that GStreamer calls `GstToc`, travel an

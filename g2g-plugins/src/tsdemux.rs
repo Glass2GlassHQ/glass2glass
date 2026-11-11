@@ -2789,16 +2789,6 @@ mod tests {
         assert_eq!(sink.frames, frames);
     }
 
-    #[cfg(feature = "std")]
-    fn gst_launch(args: &[&str]) {
-        let status = std::process::Command::new("gst-launch-1.0")
-            .arg("-q")
-            .args(args)
-            .status()
-            .expect("gst-launch-1.0 runs");
-        assert!(status.success(), "gst-launch-1.0 {args:?}");
-    }
-
     // two ID3v2.4 tags of the same length, so gst's filesrc blocksize splits them
     fn id3_tags() -> Vec<Vec<u8>> {
         ["one", "two"]
@@ -2856,7 +2846,8 @@ mod tests {
         std::fs::write(&ts, ts_of_id3_tags().await).unwrap();
         let src = alloc::format!("location={}", ts.display());
         let sink = alloc::format!("location={}", out.display());
-        gst_launch(&[
+        crate::testutil::gst_launch(&[
+            "-q",
             "filesrc",
             &src,
             "!",
@@ -2883,7 +2874,8 @@ mod tests {
         let src = alloc::format!("location={}", input.display());
         let blocksize = alloc::format!("blocksize={}", tags[0].len());
         let sink = alloc::format!("location={}", ts.display());
-        gst_launch(&[
+        crate::testutil::gst_launch(&[
+            "-q",
             "filesrc",
             &src,
             &blocksize,
@@ -2922,7 +2914,8 @@ mod tests {
         std::fs::write(&ts, ts_of_jpeg_xs_frames().await).unwrap();
         let src = alloc::format!("location={}", ts.display());
         let sink = alloc::format!("location={}", out.display());
-        gst_launch(&[
+        crate::testutil::gst_launch(&[
+            "-q",
             "filesrc",
             &src,
             "!",
@@ -2953,7 +2946,8 @@ mod tests {
             frames[0].len()
         );
         let sink = alloc::format!("location={}", ts.display());
-        gst_launch(&[
+        crate::testutil::gst_launch(&[
+            "-q",
             "filesrc",
             &src,
             &blocksize,

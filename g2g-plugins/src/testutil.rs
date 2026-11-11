@@ -154,6 +154,17 @@ pub(crate) fn flac_streaminfo() -> Vec<u8> {
 const TWO_FRAGMENTS: &[u8] = include_bytes!("../tests/fixtures/h264_two_fragments.mp4");
 
 // the two-fragment fixture as written, and with each tfdt box renamed to `free`, which keeps every offset
+// gst-launch-1.0's stdout, which carries the tags `-t` prints
+#[cfg(feature = "std")]
+pub(crate) fn gst_launch(args: &[&str]) -> alloc::string::String {
+    let output = std::process::Command::new("gst-launch-1.0")
+        .args(args)
+        .output()
+        .expect("gst-launch-1.0 runs");
+    assert!(output.status.success(), "gst-launch-1.0 {args:?}");
+    alloc::string::String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
 #[cfg(feature = "std")]
 pub(crate) fn two_fragments_with_and_without_tfdt() -> (Vec<u8>, Vec<u8>) {
     let with_tfdt = TWO_FRAGMENTS.to_vec();

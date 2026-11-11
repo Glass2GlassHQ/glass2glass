@@ -19,12 +19,12 @@ use core::ops::Range;
 
 use g2g_core::caps::framerate_q16_from_fraction;
 use g2g_core::log::Target;
-use g2g_core::meta::{CropRectangle, FrameMetaSet};
+use g2g_core::meta::{CropRectangle, FrameMetaSet, Orientation};
 use g2g_core::time::ticks_to_ns;
 
 use g2g_core::{
     g2g_warn, AspectRatio, AudioFormat, Chapter, ClosedCaptionFormat, FrameTiming, G2gError,
-    PixelAspect, ProResVariant, RawVideoFormat, Segment, TagList, TextFormat, VideoCodec,
+    PixelAspect, ProResVariant, RawVideoFormat, Segment, Tag, TagList, TextFormat, VideoCodec,
 };
 
 use crate::aiff::audio_from_comm;
@@ -37,8 +37,9 @@ use crate::cenc::{
 #[cfg(any(test, feature = "dash"))]
 use crate::mp4box::next_box_len;
 use crate::mp4box::{
-    be32, be64, boxes, boxes_at, find_box, find_entry_child, find_path, itunes_gapless, parse_chpl,
-    parse_esds, parse_esds_decoder_config, parse_ilst_tags,
+    be32, be64, boxes, boxes_at, find_box, find_entry_child, find_path, itunes_gapless,
+    matrix_orientation, parse_chpl, parse_esds, parse_esds_decoder_config, parse_ilst_tags,
+    unpacked_mdhd_language,
 };
 use crate::opusparse::{opus_head_from_dops, parse_opus_head};
 use crate::pcmclip::clip_pcm_to_segment;
@@ -197,6 +198,7 @@ struct TrackHeaderBox {
     track_id: u32,
     width: u32,
     height: u32,
+    orientation: Option<Orientation>,
 }
 
 // a version 1 tkhd / mdhd widens the creation and modification times to 64 bits
@@ -204,18 +206,25 @@ const VERSION_1_TIME_WIDENING: usize = 8;
 const VERSION_1_DURATION_WIDENING: usize = 4;
 
 fn read_tkhd(tkhd: &[u8]) -> Result<TrackHeaderBox, G2gError> {
-    let (track_id_at, width_at) = match tkhd.first() {
-        Some(0) => (12, 76),
+    const MATRIX_ENTRY_LEN: usize = 4;
+    let (track_id_at, matrix_at) = match tkhd.first() {
+        Some(0) => (12, 40),
         Some(1) => (
             12 + VERSION_1_TIME_WIDENING,
-            76 + VERSION_1_TIME_WIDENING + VERSION_1_DURATION_WIDENING,
+            40 + VERSION_1_TIME_WIDENING + VERSION_1_DURATION_WIDENING,
         ),
         _ => return Err(G2gError::CapsMismatch),
     };
+    let mut matrix = [0u32; 9];
+    for (index, entry) in matrix.iter_mut().enumerate() {
+        *entry = be32(tkhd, matrix_at + index * MATRIX_ENTRY_LEN)?;
+    }
+    let width_at = matrix_at + matrix.len() * MATRIX_ENTRY_LEN;
     Ok(TrackHeaderBox {
         track_id: be32(tkhd, track_id_at)?,
         width: be32(tkhd, width_at)? >> 16,
         height: be32(tkhd, width_at + 4)? >> 16,
+        orientation: matrix_orientation(&matrix),
     })
 }
 
@@ -223,23 +232,30 @@ fn read_tkhd(tkhd: &[u8]) -> Result<TrackHeaderBox, G2gError> {
 struct MediaHeaderBox {
     timescale: u32,
     duration: u64,
+    language: Option<String>,
 }
 
 fn read_mdhd(mdhd: &[u8]) -> Result<MediaHeaderBox, G2gError> {
-    let (timescale, duration) = match mdhd.first() {
-        Some(0) => (be32(mdhd, 12)?, u64::from(be32(mdhd, 16)?)),
+    let (timescale, duration, language_at) = match mdhd.first() {
+        Some(0) => (be32(mdhd, 12)?, u64::from(be32(mdhd, 16)?), 20),
         Some(1) => (
             be32(mdhd, 12 + VERSION_1_TIME_WIDENING)?,
             be64(mdhd, 16 + VERSION_1_TIME_WIDENING)?,
+            20 + VERSION_1_TIME_WIDENING + VERSION_1_DURATION_WIDENING,
         ),
         _ => return Err(G2gError::CapsMismatch),
     };
+    // mvhd shares this reader and has a rate where mdhd has the language
+    let language = mdhd
+        .get(language_at..language_at + 2)
+        .and_then(|packed| unpacked_mdhd_language(u16::from_be_bytes([packed[0], packed[1]])));
     if timescale == 0 {
         return Err(G2gError::CapsMismatch);
     }
     Ok(MediaHeaderBox {
         timescale,
         duration,
+        language,
     })
 }
 
@@ -761,9 +777,14 @@ fn parse_trak(trak: &[u8]) -> Result<Option<TrackHeader>, G2gError> {
         track_id,
         width,
         height,
+        orientation,
     } = read_tkhd(find_box(trak, b"tkhd").ok_or(G2gError::CapsMismatch)?)?;
     let mdia = find_box(trak, b"mdia").ok_or(G2gError::CapsMismatch)?;
-    let timescale = read_mdhd(find_box(mdia, b"mdhd").ok_or(G2gError::CapsMismatch)?)?.timescale;
+    let MediaHeaderBox {
+        timescale,
+        language,
+        ..
+    } = read_mdhd(find_box(mdia, b"mdhd").ok_or(G2gError::CapsMismatch)?)?;
 
     // hdlr handler_type at payload offset 8 (4 version/flags + 4 pre_defined)
     // selects how to read the sample entry.
@@ -810,7 +831,7 @@ fn parse_trak(trak: &[u8]) -> Result<Option<TrackHeader>, G2gError> {
         timescale,
         kind,
         cenc: cenc_track(cenc, stbl)?,
-        tags: parse_ilst_tags(trak),
+        tags: track_tags(trak, language, orientation),
         media_start: edit_media_start(&edit_list(trak)),
         media_stop: None,
         edit_gaps: Vec::new(),
@@ -818,6 +839,18 @@ fn parse_trak(trak: &[u8]) -> Result<Option<TrackHeader>, G2gError> {
         trex_defaults: SampleDefaults::default(),
         clean_aperture,
     }))
+}
+
+// gst's qtdemux leaves an unturned track without an image-orientation tag
+fn track_tags(trak: &[u8], language: Option<String>, orientation: Option<Orientation>) -> TagList {
+    let mut tags = parse_ilst_tags(trak);
+    if let Some(code) = language {
+        tags.push(Tag::Language(code));
+    }
+    if let Some(turned) = orientation.filter(|turn| *turn != Orientation::Identity) {
+        tags.push(Tag::ImageOrientation(turned));
+    }
+    tags
 }
 
 // trex payload: version/flags, track_ID, sample description index, then the defaults

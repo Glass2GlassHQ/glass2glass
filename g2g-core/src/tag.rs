@@ -37,6 +37,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use crate::meta::Orientation;
 use crate::VideoCodec;
 
 /// One stream-metadata tag. The typed variants are the cross-container common
@@ -81,6 +82,8 @@ pub enum Tag {
         codec: VideoCodec,
         data: Vec<u8>,
     },
+    // how a video track is turned for display, GStreamer's `image-orientation` tag
+    ImageOrientation(Orientation),
 }
 
 impl Tag {
@@ -88,6 +91,7 @@ impl Tag {
     pub const TRACK_NUMBER: &'static str = "track-number";
     /// How many tracks the album holds (MP4 `trkn`'s second half).
     pub const TRACK_COUNT: &'static str = "track-count";
+    pub const IMAGE_ORIENTATION: &'static str = "image-orientation";
     /// Position of this disc within its set (MP4 `disk`).
     pub const DISC_NUMBER: &'static str = "album-disc-number";
     /// How many discs the set holds (MP4 `disk`'s second half).
@@ -113,6 +117,7 @@ impl Tag {
             Tag::Number { key, .. } | Tag::Other { key, .. } => Cow::Borrowed(key),
             Tag::Freeform { namespace, key, .. } => Cow::Owned(format!("{namespace}:{key}")),
             Tag::Image { .. } => Cow::Borrowed("image"),
+            Tag::ImageOrientation(_) => Cow::Borrowed(Tag::IMAGE_ORIENTATION),
         }
     }
 
@@ -135,6 +140,9 @@ impl Tag {
                 crate::caps::codec_gst_media_type(*codec),
                 data.len()
             )),
+            Tag::ImageOrientation(orientation) => {
+                Cow::Borrowed(orientation.image_orientation_name())
+            }
         }
     }
 
@@ -171,6 +179,12 @@ impl Tag {
             Tag::Language(v)
         } else if key.eq_ignore_ascii_case("comment") || key.eq_ignore_ascii_case("description") {
             Tag::Comment(v)
+        } else if let Some(orientation) = key
+            .eq_ignore_ascii_case(Tag::IMAGE_ORIENTATION)
+            .then(|| Orientation::from_image_orientation_name(value))
+            .flatten()
+        {
+            Tag::ImageOrientation(orientation)
         } else {
             Tag::Other {
                 key: String::from(key),
@@ -273,6 +287,34 @@ pub fn split_tags(global: &TagList, per_stream: &[TagList]) -> (TagList, Vec<Tag
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // gst's gst_video_orientation_from_tag maps these names to its videoflip methods
+    #[test]
+    fn image_orientation_reads_gst_names() {
+        let gst_mapping = [
+            ("rotate-0", Orientation::Identity),
+            ("rotate-90", Orientation::Rotate90Cw),
+            ("rotate-180", Orientation::Rotate180),
+            ("rotate-270", Orientation::Rotate90Ccw),
+            ("flip-rotate-0", Orientation::HorizontalMirror),
+            ("flip-rotate-90", Orientation::Transverse),
+            ("flip-rotate-180", Orientation::VerticalMirror),
+            ("flip-rotate-270", Orientation::Transpose),
+        ];
+        for (name, orientation) in gst_mapping {
+            let tag = Tag::from_key_value(Tag::IMAGE_ORIENTATION, name);
+            assert_eq!(tag, Tag::ImageOrientation(orientation));
+            assert_eq!(tag.key(), Tag::IMAGE_ORIENTATION);
+            assert_eq!(tag.value_string(), name);
+        }
+        assert_eq!(
+            Tag::from_key_value(Tag::IMAGE_ORIENTATION, "rotate-45"),
+            Tag::Other {
+                key: Tag::IMAGE_ORIENTATION.into(),
+                value: "rotate-45".into()
+            }
+        );
+    }
 
     #[test]
     fn maps_known_keys_case_insensitively() {

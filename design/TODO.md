@@ -324,10 +324,6 @@ libraries installed.
 - **Opus end trim in fragmented MP4:** ffmpeg decodes an `mp4mux` copy of
   `webm/opus_vp9-alpha.webm` 8 samples long, because the trim is only in the
   last sample's duration. Write it where ffmpeg reads it.
-- **MP4 track language and orientation:** `mp4mux` writes `und` in every `mdhd`
-  and an identity `tkhd` matrix, and the MP4 demuxers read neither. Write the
-  track's `Tag::Language` and an orientation tag (gst's `image-orientation`) and
-  read both back.
 - **ST 2038 elements:** `st2038ancdemux` should add a port when a stream no pad
   names appears, once a launch line can link a pad that appears at run time.
 

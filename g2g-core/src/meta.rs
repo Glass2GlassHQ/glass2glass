@@ -114,6 +114,35 @@ impl Orientation {
     const fn bit(self) -> u8 {
         1 << self as u8
     }
+
+    // gst's `image-orientation` tag names the mirror and clockwise quarter turns that `parts` holds
+    const IMAGE_ORIENTATION_TURNS: [&'static str; 4] =
+        ["rotate-0", "rotate-90", "rotate-180", "rotate-270"];
+    const IMAGE_ORIENTATION_MIRRORED_TURNS: [&'static str; 4] = [
+        "flip-rotate-0",
+        "flip-rotate-90",
+        "flip-rotate-180",
+        "flip-rotate-270",
+    ];
+
+    pub const fn image_orientation_name(self) -> &'static str {
+        match self.parts() {
+            (turns, false) => Self::IMAGE_ORIENTATION_TURNS[turns as usize],
+            (turns, true) => Self::IMAGE_ORIENTATION_MIRRORED_TURNS[turns as usize],
+        }
+    }
+
+    pub fn from_image_orientation_name(name: &str) -> Option<Orientation> {
+        let turns_of = |names: [&str; 4]| names.iter().position(|known| *known == name);
+        match (
+            turns_of(Self::IMAGE_ORIENTATION_TURNS),
+            turns_of(Self::IMAGE_ORIENTATION_MIRRORED_TURNS),
+        ) {
+            (Some(turns), _) => Some(Orientation::from_parts(turns as u8, false)),
+            (_, Some(turns)) => Some(Orientation::from_parts(turns as u8, true)),
+            (None, None) => None,
+        }
+    }
 }
 
 // a set of the eight orientations, one bit each

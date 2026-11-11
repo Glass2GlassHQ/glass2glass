@@ -10,12 +10,103 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::ops::Range;
 
+use g2g_core::meta::Orientation;
 use g2g_core::{Chapter, G2gError, Tag, TagList, VideoCodec};
 
 use crate::bereader::{be_u16, be_u32, be_u64};
 
 /// Unity 3x3 transform matrix (16.16 / 2.30 fixed point) for `tkhd`/`mvhd`.
 pub(crate) const MATRIX: [u32; 9] = [0x10000, 0, 0, 0, 0x10000, 0, 0, 0, 0x40000000];
+
+const MATRIX_ONE: u32 = 0x0001_0000;
+const MATRIX_MINUS_ONE: u32 = 0xFFFF_0000;
+
+// the a, b, c, d entries of the tkhd matrix gst's qtmux writes and qtdemux reads for each orientation
+const ORIENTATION_MATRICES: [(Orientation, [u32; 4]); 8] = [
+    (Orientation::Identity, [MATRIX_ONE, 0, 0, MATRIX_ONE]),
+    (
+        Orientation::Rotate90Cw,
+        [0, MATRIX_ONE, MATRIX_MINUS_ONE, 0],
+    ),
+    (
+        Orientation::Rotate180,
+        [MATRIX_MINUS_ONE, 0, 0, MATRIX_MINUS_ONE],
+    ),
+    (
+        Orientation::Rotate90Ccw,
+        [0, MATRIX_MINUS_ONE, MATRIX_ONE, 0],
+    ),
+    (
+        Orientation::HorizontalMirror,
+        [MATRIX_MINUS_ONE, 0, 0, MATRIX_ONE],
+    ),
+    (
+        Orientation::Transverse,
+        [0, MATRIX_MINUS_ONE, MATRIX_MINUS_ONE, 0],
+    ),
+    (
+        Orientation::VerticalMirror,
+        [MATRIX_ONE, 0, 0, MATRIX_MINUS_ONE],
+    ),
+    (Orientation::Transpose, [0, MATRIX_ONE, MATRIX_ONE, 0]),
+];
+
+pub(crate) fn orientation_matrix(orientation: Orientation) -> [u32; 9] {
+    let [a, b, c, d] = ORIENTATION_MATRICES
+        .iter()
+        .find(|(known, _)| *known == orientation)
+        .map(|(_, entries)| *entries)
+        .expect("ORIENTATION_MATRICES lists every orientation");
+    [
+        a, b, MATRIX[2], c, d, MATRIX[5], MATRIX[6], MATRIX[7], MATRIX[8],
+    ]
+}
+
+// `None` for a matrix that scales, shears or projects, as gst's qtdemux leaves those untagged
+pub(crate) fn matrix_orientation(matrix: &[u32; 9]) -> Option<Orientation> {
+    let [a, b, u, c, d, v, _, _, w] = *matrix;
+    if [u, v, w] != [MATRIX[2], MATRIX[5], MATRIX[8]] {
+        return None;
+    }
+    ORIENTATION_MATRICES
+        .iter()
+        .find(|(_, entries)| *entries == [a, b, c, d])
+        .map(|(orientation, _)| *orientation)
+}
+
+const MDHD_LANGUAGE_LETTER_BITS: u32 = 5;
+const MDHD_LANGUAGE_LETTER_OFFSET: u8 = 0x60;
+// mdhd's packed language for "und", the code a track with no language carries
+pub(crate) const UNDETERMINED_MDHD_LANGUAGE: u16 = 0x55C4;
+// QuickTime stores a Macintosh language code below this instead of a packed ISO 639-2 code
+const FIRST_PACKED_MDHD_LANGUAGE: u16 = 0x400;
+
+// `None` for anything but three ASCII letters, as `TsMuxer::set_stream_language` takes
+pub(crate) fn packed_mdhd_language(code: &str) -> Option<u16> {
+    let letters: [u8; 3] = code.as_bytes().try_into().ok()?;
+    letters.iter().try_fold(0u16, |packed, letter| {
+        letter.is_ascii_alphabetic().then(|| {
+            packed << MDHD_LANGUAGE_LETTER_BITS
+                | u16::from(letter.to_ascii_lowercase() - MDHD_LANGUAGE_LETTER_OFFSET)
+        })
+    })
+}
+
+// `None` for "und", a Macintosh language code, or a letter outside a to z
+pub(crate) fn unpacked_mdhd_language(packed: u16) -> Option<String> {
+    if packed == UNDETERMINED_MDHD_LANGUAGE || packed < FIRST_PACKED_MDHD_LANGUAGE {
+        return None;
+    }
+    let letter_mask = (1u16 << MDHD_LANGUAGE_LETTER_BITS) - 1;
+    (0..3)
+        .rev()
+        .map(|place| {
+            let letter = (packed >> (place * MDHD_LANGUAGE_LETTER_BITS)) & letter_mask;
+            let letter = letter as u8 + MDHD_LANGUAGE_LETTER_OFFSET;
+            letter.is_ascii_lowercase().then_some(char::from(letter))
+        })
+        .collect()
+}
 
 // --- writers ---------------------------------------------------------------
 
@@ -704,6 +795,33 @@ fn itunes_atom(tag: &Tag) -> Option<(&'static [u8; 4], &str)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_orientation_round_trips_through_a_tkhd_matrix() {
+        for (orientation, _) in ORIENTATION_MATRICES {
+            assert_eq!(
+                matrix_orientation(&orientation_matrix(orientation)),
+                Some(orientation)
+            );
+        }
+        let mut scaled = MATRIX;
+        scaled[0] = 2 * MATRIX_ONE;
+        assert_eq!(matrix_orientation(&scaled), None);
+    }
+
+    #[test]
+    fn mdhd_language_packs_three_letters_and_skips_the_rest() {
+        assert_eq!(
+            packed_mdhd_language("und"),
+            Some(UNDETERMINED_MDHD_LANGUAGE)
+        );
+        let french = packed_mdhd_language("FRA").unwrap();
+        assert_eq!(unpacked_mdhd_language(french).as_deref(), Some("fra"));
+        assert_eq!(packed_mdhd_language("en"), None);
+        assert_eq!(packed_mdhd_language("en-US"), None);
+        assert_eq!(unpacked_mdhd_language(UNDETERMINED_MDHD_LANGUAGE), None);
+        assert_eq!(unpacked_mdhd_language(0), None, "Macintosh English");
+    }
 
     /// `parse_esds_decoder_config` returns the DecoderConfig objectTypeIndication and the
     /// DecoderSpecificInfo; a missing DSI yields an empty vec (config in-band).

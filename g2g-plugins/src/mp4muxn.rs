@@ -42,10 +42,10 @@ use g2g_core::frame::Frame;
 use g2g_core::log::short_type_name;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    split_tags, AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, Chapter,
-    ClosedCaptionFormat, ConfigureOutcome, ElementMetadata, FrameTiming, G2gError, InputAggregator,
-    MemoryDomain, MultiInputElement, OutputSink, PipelinePacket, PixelAspect, PropError, PropKind,
-    PropValue, PropertySpec, Rate, TagList, TextFormat, VideoCodec,
+    resolve_tags, split_tags, AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, CapsSet,
+    Chapter, ClosedCaptionFormat, ConfigureOutcome, ElementMetadata, FrameTiming, G2gError,
+    InputAggregator, MemoryDomain, MultiInputElement, OutputSink, PipelinePacket, PixelAspect,
+    PropError, PropKind, PropValue, PropertySpec, Rate, Tag, TagList, TextFormat, VideoCodec,
 };
 
 use g2g_core::caps::framerate_q16_period_ns;
@@ -60,8 +60,8 @@ use crate::fmp4mux::{
 use crate::livemux::{wall_clock_ns, LiveMuxDeadline, LIVE_MUX_LATENCY_PROPERTY};
 use crate::mp4audiosink::esds;
 use crate::mp4box::{
-    ftyp, ftyp_cmaf, full_box, mp4_box, prft, put_box_header, styp_cmaf, udta_with_tags,
-    BOX_HEADER_LEN, MATRIX,
+    ftyp, ftyp_cmaf, full_box, mp4_box, orientation_matrix, packed_mdhd_language, prft,
+    put_box_header, styp_cmaf, udta_with_tags, BOX_HEADER_LEN, MATRIX, UNDETERMINED_MDHD_LANGUAGE,
 };
 use crate::mux::{
     audio_header_config, audio_track_params, every_track_header_ready, refused_input,
@@ -1455,6 +1455,8 @@ pub(crate) fn av_moov(
     for (i, track) in tracks.iter().enumerate() {
         let Some(track) = track else { continue };
         let track_tags = metadata.per_track.get(i);
+        // the mdhd language and tkhd matrix take a file-wide tag too, which split_tags moved off the track
+        let header_tags = resolve_tags(&metadata.global, track_tags.unwrap_or(&TagList::new()));
         // A track's presentation start: what the muxer learned per input, or
         // the codec's own delay (Opus pre-skip) when it has nothing better.
         let media_start = media_starts
@@ -1466,6 +1468,7 @@ pub(crate) fn av_moov(
             track,
             table_of(i),
             track_tags,
+            &header_tags,
             media_start,
         ));
     }
@@ -1973,6 +1976,7 @@ fn trak(
     init: &TrackInit,
     tables: Option<&TrackTables>,
     tags: Option<&TagList>,
+    header_tags: &TagList,
     media_start: u64,
 ) -> Vec<u8> {
     let TrakMedia {
@@ -1983,6 +1987,22 @@ fn trak(
         presentation_size,
         is_video,
     } = trak_media(init);
+    let orientation = header_tags
+        .tags()
+        .iter()
+        .find_map(|tag| match tag {
+            Tag::ImageOrientation(orientation) => Some(*orientation),
+            _ => None,
+        })
+        .filter(|_| is_video);
+    let language = header_tags
+        .tags()
+        .iter()
+        .find_map(|tag| match tag {
+            Tag::Language(code) => packed_mdhd_language(code),
+            _ => None,
+        })
+        .unwrap_or(UNDETERMINED_MDHD_LANGUAGE);
     let tkhd = {
         let mut p = Vec::new();
         p.extend_from_slice(&[0u8; 8]); // times
@@ -1996,7 +2016,7 @@ fn trak(
                                                   // audio tracks carry volume 1.0, video tracks 0.
         p.extend_from_slice(&(if is_video { 0u16 } else { 0x0100 }).to_be_bytes());
         p.extend_from_slice(&0u16.to_be_bytes()); // reserved
-        for m in MATRIX {
+        for m in orientation.map_or(MATRIX, orientation_matrix) {
             p.extend_from_slice(&m.to_be_bytes());
         }
         p.extend_from_slice(&presentation_size.0.to_be_bytes()); // 16.16 width
@@ -2010,7 +2030,7 @@ fn trak(
         p.extend_from_slice(&timescale.to_be_bytes());
         let media_duration = tables.map(|t| t.media_duration).unwrap_or(0);
         p.extend_from_slice(&(media_duration as u32).to_be_bytes());
-        p.extend_from_slice(&0x55C4u16.to_be_bytes()); // language "und"
+        p.extend_from_slice(&language.to_be_bytes());
         p.extend_from_slice(&[0u8; 2]);
         full_box(b"mdhd", 0, 0, &p)
     };
@@ -2383,6 +2403,67 @@ mod tests {
     }
 
     #[test]
+    fn track_language_and_orientation_round_trip_through_the_track_headers() {
+        use g2g_core::meta::Orientation;
+        use g2g_core::Tag;
+        let tracks = [
+            Some(TrackInit::Video {
+                codec: VideoCodec::H264,
+                geometry: VideoGeometry {
+                    width: 320,
+                    height: 240,
+                    pixel_aspect: PixelAspect::Any,
+                },
+                param_sets: alloc::vec![
+                    alloc::vec![0x67, 0x42, 0x00, 0x1e],
+                    alloc::vec![0x68, 0xce]
+                ],
+            }),
+            Some(TrackInit::Audio {
+                format: AudioFormat::Aac,
+                channels: 2,
+                rate: 48000,
+                config: alloc::vec![0x11, 0x90],
+            }),
+        ];
+        let metadata = MoovMetadata {
+            global: [
+                Tag::Language("deu".into()),
+                Tag::ImageOrientation(Orientation::Rotate180),
+            ]
+            .into_iter()
+            .collect(),
+            per_track: alloc::vec![
+                [
+                    Tag::Language("fra".into()),
+                    Tag::ImageOrientation(Orientation::Rotate90Cw),
+                ]
+                .into_iter()
+                .collect(),
+                TagList::new(),
+            ],
+            chapters: Vec::new(),
+        };
+        let moov = av_moov(&tracks, None, &metadata, &[]);
+        let parsed = crate::fmp4::parse_all_tracks(&moov).unwrap();
+        let has = |track: usize, tag: &Tag| parsed[track].tags.tags().contains(tag);
+        assert!(has(0, &Tag::Language("fra".into())));
+        assert!(has(0, &Tag::ImageOrientation(Orientation::Rotate90Cw)));
+        assert!(
+            has(1, &Tag::Language("deu".into())),
+            "the file-wide language fills a track that names none"
+        );
+        assert!(
+            !parsed[1]
+                .tags
+                .tags()
+                .iter()
+                .any(|tag| matches!(tag, Tag::ImageOrientation(_))),
+            "only video tracks turn"
+        );
+    }
+
+    #[test]
     fn empty_leading_pad_keeps_track_id_aligned() {
         // Pad slot 0 produced no AU; the audio pad sits in slot 1, so its trak
         // and trex must carry track_ID 2 to match the fragments emit_au writes.
@@ -2563,6 +2644,83 @@ mod tests {
             .await
             .unwrap();
         sink.bytes
+    }
+
+    #[cfg(feature = "std")]
+    #[tokio::test]
+    #[ignore = "needs gst-launch-1.0, writes temp files"]
+    async fn gst_qtdemux_reads_our_language_and_orientation() {
+        use g2g_core::meta::Orientation;
+        use g2g_core::Tag;
+        let sps = [0x67u8, 0x42, 0x00, 0x1e, 0x88];
+        let pps = [0x68u8, 0xce, 0x3c, 0x80];
+        let idr = [0x65u8, 0x88, 0x84, 0x00];
+        let tags = [
+            Tag::Language("fra".into()),
+            Tag::ImageOrientation(Orientation::Rotate90Cw),
+        ]
+        .into_iter()
+        .collect();
+        let mut mux = Mp4MuxN::new(1)
+            .with_fragmented(false)
+            .with_track_tags(0, tags);
+        mux.configure_pipeline(0, &h264_caps(320, 240)).unwrap();
+        let mut sink = CaptureSink::default();
+        mux.process(0, frame(annexb(&[&sps, &pps, &idr]), 0), &mut sink)
+            .await
+            .unwrap();
+        mux.process(0, PipelinePacket::Eos, &mut sink)
+            .await
+            .unwrap();
+        let dir = std::env::temp_dir().join("g2g-mp4-orientation-to-gst");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("g2g.mp4");
+        std::fs::write(&file, &sink.bytes).unwrap();
+        let src = alloc::format!("location={}", file.display());
+        let printed =
+            crate::testutil::gst_launch(&["-t", "filesrc", &src, "!", "qtdemux", "!", "fakesink"]);
+        assert!(
+            printed.contains("image orientation: rotate-90"),
+            "{printed}"
+        );
+        // gst prints the ISO 639-1 form of the code
+        assert!(printed.contains("language code: fr"), "{printed}");
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    #[ignore = "needs gst-launch-1.0 with x264enc, writes temp files"]
+    fn we_read_gst_qtmux_language_and_orientation() {
+        use g2g_core::meta::Orientation;
+        use g2g_core::Tag;
+        let dir = std::env::temp_dir().join("g2g-mp4-orientation-from-gst");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("gst.mp4");
+        let sink = alloc::format!("location={}", file.display());
+        crate::testutil::gst_launch(&[
+            "-q",
+            "videotestsrc",
+            "num-buffers=3",
+            "!",
+            "video/x-raw,width=64,height=48",
+            "!",
+            "x264enc",
+            "!",
+            "taginject",
+            "tags=image-orientation=flip-rotate-90,language-code=fra",
+            "!",
+            "mp4mux",
+            "!",
+            "filesink",
+            &sink,
+        ]);
+        let tracks = crate::fmp4::parse_all_tracks(&std::fs::read(&file).unwrap()).unwrap();
+        let tags = tracks[0].tags.tags();
+        assert!(tags.contains(&Tag::Language("fra".into())), "{tags:?}");
+        assert!(
+            tags.contains(&Tag::ImageOrientation(Orientation::Transverse)),
+            "{tags:?}"
+        );
     }
 
     /// The progressive layout is `ftyp` + one `mdat` + a `moov` with real sample
