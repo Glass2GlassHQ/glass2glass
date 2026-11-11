@@ -15508,6 +15508,23 @@ impl AsyncElement for VulkanVideoDec {
         self.recovery.take_keyframe_request()
     }
 
+    fn latency(&self) -> g2g_core::query::LatencyReport {
+        if !self.reorder_enabled {
+            return g2g_core::query::LatencyReport::ZERO;
+        }
+        let ring_pictures = if self.emit_wgpu || self.low_latency {
+            0
+        } else {
+            DECODE_RING_DEPTH - 1
+        };
+        if self.emit_wgpu {
+            self.reorder_tex
+                .latency(ring_pictures, self.framerate.clone())
+        } else {
+            self.reorder.latency(ring_pictures, self.framerate.clone())
+        }
+    }
+
     fn process<'a>(
         &'a mut self,
         packet: PipelinePacket,

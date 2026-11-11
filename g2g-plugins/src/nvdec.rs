@@ -1778,6 +1778,13 @@ impl AsyncElement for NvDec {
         )
     }
 
+    fn latency(&self) -> g2g_core::query::LatencyReport {
+        let framerate = self.input_caps.as_ref().map_or(Rate::Any, Caps::framerate);
+        // gst's nvdec counts every decode surface and the display delay as held pictures
+        let held = self.state.num_decode_surfaces + self.max_display_delay;
+        g2g_core::query::LatencyReport::held_pictures(held, held, framerate)
+    }
+
     fn properties(&self) -> &'static [PropertySpec] {
         NVDEC_PROPS
     }
@@ -2234,6 +2241,7 @@ mod ffi {
 mod tests {
     use super::*;
     use g2g_core::memory::SystemSlice;
+    use g2g_core::query::LatencyReport;
 
     fn h264(w: u32, h: u32) -> Caps {
         Caps::CompressedVideo {
@@ -2890,13 +2898,15 @@ mod tests {
 
     /// Configure a decoder for `codec` at `w`x`h`, or `None` if NVDEC is
     /// unavailable on this host (the test then skips).
+    const OPEN_DEC_FRAMERATE_Q16: u32 = 30 << 16;
+
     fn open_dec(codec: VideoCodec, w: u32, h: u32, display_delay: u32) -> Option<NvDec> {
         let mut dec = NvDec::new().with_max_display_delay(display_delay);
         let caps = Caps::CompressedVideo {
             codec,
             width: Dim::Fixed(w),
             height: Dim::Fixed(h),
-            framerate: Rate::Fixed(30 << 16),
+            framerate: Rate::Fixed(OPEN_DEC_FRAMERATE_Q16),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
             pixel_aspect: g2g_core::PixelAspect::Any,
             alignment: g2g_core::BitstreamAlignment::Unspecified,
@@ -3253,7 +3263,7 @@ mod tests {
     async fn display_delay_lags_output_by_the_configured_frames() {
         // Same stream, two display delays: the deeper one holds frames back in
         // the parser, so fewer have been emitted by the time the input ends.
-        async fn decode(delay: u32) -> Option<(usize, usize)> {
+        async fn decode(delay: u32) -> Option<(usize, usize, LatencyReport)> {
             let mut dec = open_dec(VideoCodec::H264, 640, 480, delay)?;
             let units = h264_units(H264_CLIP);
             let mut sink = RecordSink::default();
@@ -3269,13 +3279,16 @@ mod tests {
             dec.process(PipelinePacket::Eos, &mut sink)
                 .await
                 .expect("flush");
-            Some((before_flush, sink.dims.len()))
+            Some((before_flush, sink.dims.len(), dec.latency()))
         }
 
-        let Some((low_before, low_total)) = decode(1).await else {
+        const LOW_DELAY: u32 = 1;
+        const DEEP_DELAY: u32 = 8;
+        let Some((low_before, low_total, low_latency)) = decode(LOW_DELAY).await else {
             return;
         };
-        let (deep_before, deep_total) = decode(8).await.expect("second decoder");
+        let (deep_before, deep_total, deep_latency) =
+            decode(DEEP_DELAY).await.expect("second decoder");
         assert!(
             low_total > 0 && low_total == deep_total,
             "same frame count either way, got {low_total} vs {deep_total}"
@@ -3285,6 +3298,14 @@ mod tests {
         assert!(
             low_before > deep_before,
             "a deeper display delay must lag: {low_before} of {low_total} emitted at delay 1 vs {deep_before} at delay 8"
+        );
+        let extra = DEEP_DELAY - LOW_DELAY;
+        let extra_latency =
+            LatencyReport::held_pictures(extra, extra, Rate::Fixed(OPEN_DEC_FRAMERATE_Q16));
+        assert_eq!(
+            deep_latency.min_ns - low_latency.min_ns,
+            extra_latency.min_ns,
+            "the deeper delay reports its extra pictures: {low_latency:?} vs {deep_latency:?}"
         );
     }
 

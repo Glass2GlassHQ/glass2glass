@@ -183,6 +183,12 @@ pub mod fallbackswitch;
     all(target_os = "windows", feature = "d3d12-decode")
 ))]
 mod displayorder;
+#[cfg(any(
+    all(target_os = "android", feature = "mediacodec"),
+    all(target_os = "windows", feature = "mf-decode"),
+    all(target_os = "linux", feature = "openh264"),
+))]
+mod heldpictures;
 // Keeps a hardware decoder going through damaged access units, as gst's videodecoder does.
 #[cfg(any(
     all(

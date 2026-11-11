@@ -21,6 +21,7 @@ use collect_sink::CollectSink;
 
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
+use g2g_core::query::LatencyReport;
 use g2g_core::runtime::block_on;
 use g2g_core::{
     AsyncElement, Caps, Dim, FrameTiming, MemoryDomain, PipelinePacket, PropError, PropValue,
@@ -115,7 +116,8 @@ fn h264_caps() -> Caps {
 
 /// Emitted NV12 buffers, one entry per `process` call (so a caller can see how
 /// many frames each access unit released).
-fn drive_per_au(dec: &mut VulkanVideoDec, aus: Vec<Vec<u8>>) -> Vec<Vec<Vec<u8>>> {
+// the latency is read before EOS, which empties the reorder buffer
+fn drive_per_au(dec: &mut VulkanVideoDec, aus: Vec<Vec<u8>>) -> (Vec<Vec<Vec<u8>>>, LatencyReport) {
     let mut per_au = Vec::new();
     for (i, au) in aus.into_iter().enumerate() {
         let mut sink = CollectSink::default();
@@ -123,10 +125,11 @@ fn drive_per_au(dec: &mut VulkanVideoDec, aus: Vec<Vec<u8>>) -> Vec<Vec<Vec<u8>>
             .expect("decode access unit");
         per_au.push(nv12_buffers(&sink));
     }
+    let latency = dec.latency();
     let mut sink = CollectSink::default();
     block_on(dec.process(PipelinePacket::Eos, &mut sink)).expect("flush at eos");
     per_au.push(nv12_buffers(&sink));
-    per_au
+    (per_au, latency)
 }
 
 fn nv12_buffers(sink: &CollectSink) -> Vec<Vec<u8>> {
@@ -337,7 +340,7 @@ fn low_latency_emits_display_order_earlier() {
     buffered
         .configure_pipeline(&h264_caps())
         .expect("configure opens the decode device");
-    let buffered_per_au = drive_per_au(&mut buffered, aus.clone());
+    let (buffered_per_au, buffered_latency) = drive_per_au(&mut buffered, aus.clone());
     let mut low_latency = VulkanVideoDec::new();
     low_latency
         .set_property("low-latency", PropValue::Bool(true))
@@ -345,7 +348,7 @@ fn low_latency_emits_display_order_earlier() {
     low_latency
         .configure_pipeline(&h264_caps())
         .expect("configure opens the decode device");
-    let low_latency_per_au = drive_per_au(&mut low_latency, aus);
+    let (low_latency_per_au, low_latency_latency) = drive_per_au(&mut low_latency, aus);
 
     let emitted_by_each_au = |per_au: &[Vec<Vec<u8>>]| -> Vec<usize> {
         per_au
@@ -368,6 +371,14 @@ fn low_latency_emits_display_order_earlier() {
     assert!(
         low_latency_emitted != buffered_emitted,
         "low-latency emits some picture earlier: {low_latency_emitted:?}"
+    );
+    assert!(
+        low_latency_latency.min_ns > 0,
+        "low-latency reports the B-frames it held: {low_latency_latency:?}"
+    );
+    assert!(
+        low_latency_latency.min_ns < buffered_latency.min_ns,
+        "low-latency reports less than the default buffering: {low_latency_latency:?} vs {buffered_latency:?}"
     );
     let display_order: Vec<Vec<u8>> = buffered_per_au.into_iter().flatten().collect();
     let got: Vec<Vec<u8>> = low_latency_per_au.into_iter().flatten().collect();

@@ -90,6 +90,36 @@ pub(crate) fn run_packets<E: AsyncElement>(
     sink
 }
 
+pub(crate) fn h264_caps(alignment: g2g_core::BitstreamAlignment) -> Caps {
+    Caps::CompressedVideo {
+        codec: g2g_core::VideoCodec::H264,
+        width: g2g_core::Dim::Any,
+        height: g2g_core::Dim::Any,
+        framerate: g2g_core::Rate::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        pixel_aspect: g2g_core::PixelAspect::Any,
+        alignment,
+    }
+}
+
+pub(crate) fn decode_h264<E: AsyncElement>(decoder: &mut E, annexb: &[u8]) -> Vec<PipelinePacket> {
+    let parsed = run(
+        &mut crate::h264parse::H264Parse::reframing(),
+        &h264_caps(g2g_core::BitstreamAlignment::Unspecified),
+        &[annexb],
+    );
+    let access_units = parsed
+        .packets
+        .into_iter()
+        .filter(|packet| !matches!(packet, PipelinePacket::Eos));
+    run_packets(
+        decoder,
+        &h264_caps(g2g_core::BitstreamAlignment::AccessUnit),
+        access_units,
+    )
+    .packets
+}
+
 /// Mux then parse: the samples that come out must equal `samples`, and the
 /// parser must announce `audio`.
 pub(crate) fn roundtrip<M, P>(

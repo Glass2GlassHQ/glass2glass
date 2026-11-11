@@ -204,7 +204,7 @@ fn assert_refolded(stats: &RunStats, log: &SinkLog) {
     assert_eq!(
         log.startup_path_latency_ns,
         Some(0),
-        "before any unit the demux declares nothing"
+        "before any unit the element declares nothing"
     );
     // the first frame can reach the sink before its arm re-folds
     let after_first = &log.per_frame_path_latency_ns[1..];
@@ -224,6 +224,86 @@ fn assert_refolded(stats: &RunStats, log: &SinkLog) {
 fn a_demux_that_learns_its_latency_retargets_the_running_sink() {
     let log = Arc::new(Mutex::new(SinkLog::default()));
     let stats = block_on(run_graph(demux_graph(&log), &ZeroClock, LINK_CAPACITY)).expect("run");
+    assert_refolded(&stats, &log.lock().unwrap());
+}
+
+// Declares nothing until it has passed a frame on, like a decoder that reads its
+// reorder depth from the stream.
+#[derive(Default)]
+struct LearningTransform {
+    passed: bool,
+}
+
+impl AsyncElement for LearningTransform {
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    where
+        Self: 'a;
+
+    fn intercept_caps(&self, upstream: &Caps) -> Result<Caps, G2gError> {
+        Ok(upstream.clone())
+    }
+
+    fn configure_pipeline(&mut self, _caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
+        Ok(ConfigureOutcome::Accepted)
+    }
+
+    fn process<'a>(
+        &'a mut self,
+        packet: PipelinePacket,
+        out: &'a mut dyn OutputSink,
+    ) -> Self::ProcessFuture<'a> {
+        Box::pin(async move {
+            if matches!(packet, PipelinePacket::DataFrame(_)) {
+                self.passed = true;
+                out.push(packet).await?;
+            }
+            Ok(())
+        })
+    }
+
+    fn latency(&self) -> LatencyReport {
+        if self.passed {
+            HELD_UNIT
+        } else {
+            LatencyReport::ZERO
+        }
+    }
+}
+
+fn transform_graph(log: &Arc<Mutex<SinkLog>>) -> Graph<GraphNode> {
+    let mut graph: Graph<GraphNode> = Graph::new();
+    let src = graph.add_source(GraphNode::source(Src));
+    let transform = graph.add_transform(GraphNode::element(LearningTransform::default()));
+    let sink = graph.add_sink(GraphNode::element(SyncedSink {
+        sync: None,
+        log: log.clone(),
+    }));
+    graph.link(src, transform).expect("link source");
+    graph.link(transform, sink).expect("link sink");
+    graph
+}
+
+#[test]
+fn a_transform_that_learns_its_latency_retargets_the_running_sink() {
+    let log = Arc::new(Mutex::new(SinkLog::default()));
+    let stats = block_on(run_graph(transform_graph(&log), &ZeroClock, LINK_CAPACITY)).expect("run");
+    assert_refolded(&stats, &log.lock().unwrap());
+}
+
+#[cfg(feature = "multi-thread")]
+#[test]
+fn the_threaded_runner_refolds_a_transform_too() {
+    use g2g_core::runtime::{run_graph_threaded, ThreadSpawner};
+
+    let log = Arc::new(Mutex::new(SinkLog::default()));
+    let stats = block_on(run_graph_threaded(
+        transform_graph(&log),
+        &ZeroClock,
+        LINK_CAPACITY,
+        &ThreadSpawner,
+    ))
+    .expect("threaded run");
     assert_refolded(&stats, &log.lock().unwrap());
 }
 

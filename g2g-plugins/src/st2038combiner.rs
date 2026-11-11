@@ -18,7 +18,7 @@ use g2g_core::{
     PropValue, PropertySpec, Rate, St2038Alignment,
 };
 
-use crate::st2038::{framerate_period_ns, parse_st2038, video_framerate};
+use crate::st2038::{framerate_period_ns, parse_st2038};
 use crate::st2038ancmux::{LiveAnchor, MuxInput, QueuedPayload};
 use crate::st291::{sort_by_position, AncPacket, AncillaryMeta};
 
@@ -69,7 +69,7 @@ impl St2038Combiner {
     }
 
     fn frame_period_ns(&self) -> Option<u64> {
-        let framerate = video_framerate(self.video_caps.as_ref()?);
+        let framerate = self.video_caps.as_ref()?.framerate();
         framerate_period_ns(&framerate)
     }
 

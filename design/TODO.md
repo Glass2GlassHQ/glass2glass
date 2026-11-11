@@ -172,12 +172,6 @@ libraries installed.
 - **`mfh265dec` without an HEVC decoder installed** fails with a bare
   `Hardware(MediaFoundation(0x80040154))`. Find the call that fails and log
   that the HEVC Video Extensions are missing.
-- **Decoder robustness** (gst commit sweep 2020-11 to 2023-11, reports in
-  `~/tmp/gst-sweep` on the dev box):
-  - Report the reorder depth times the frame duration as decoder latency
-    (Vulkan, D3D12, NVDEC, VideoToolbox, Media Foundation, MediaCodec,
-    openh264, ffmpegdec's `has_b_frames`). The runner queries latency once
-    before the first frame, so a depth read from the SPS needs a later report.
 - **Decoder features:**
   - H.264 field pictures (PAFF) on `VulkanVideoDec` and `d3d12h264dec`.
   - Field-coded H.265 (`field_seq_flag`): an alternate-field interlace mode in

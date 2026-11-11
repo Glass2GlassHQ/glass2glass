@@ -547,6 +547,11 @@ impl Caps {
         }
     }
 
+    pub fn framerate(&self) -> Rate {
+        self.dims()
+            .map_or(Rate::Any, |(_, _, framerate)| framerate.clone())
+    }
+
     /// Render these caps as a GStreamer caps string, the inverse of
     /// [`CapsSet::from_gst_string`]. For `-v` pipeline dumps, logs, and porting
     /// diagnostics. The fixed media types round-trip through the parser;
@@ -1112,6 +1117,9 @@ pub fn framerate_q16_to_fraction(q16: u32) -> (u32, u32) {
     let divisor = greatest_common_divisor(u64::from(q16), u64::from(Q16_DENOMINATOR)) as u32;
     (q16 / divisor, Q16_DENOMINATOR / divisor)
 }
+
+// GStreamer's video decoders take 25 fps for an unknown rate
+pub const ASSUMED_FRAMERATE_Q16: u32 = 25 << 16;
 
 // rounds down like GStreamer's frame duration, None for a zero rate
 pub fn framerate_q16_period_ns(q16: u32) -> Option<u64> {

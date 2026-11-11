@@ -440,6 +440,11 @@ impl AsyncElement for VtDecode {
         }
     }
 
+    fn latency(&self) -> g2g_core::query::LatencyReport {
+        let held = self.reorder_depth as u32;
+        g2g_core::query::LatencyReport::held_pictures(held, held, self.input_framerate.clone())
+    }
+
     fn process<'a>(
         &'a mut self,
         packet: PipelinePacket,

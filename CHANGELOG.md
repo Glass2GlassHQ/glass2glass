@@ -184,6 +184,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M2268: `nvdec` drops VP9 frames from a size change on a non-keyframe until the next keyframe, instead of failing.
 - M2269: `low-latency` on `vulkanvideodec` and `d3d12h264dec` keeps display order and releases a picture early only where gst's low-latency bump mode does.
 - M2270: `vulkanvideodec` keeps a missing H.265 reference at its index in the reference lists.
+- M2271: video decoders report the pictures they hold back as latency, and the runner re-folds it when it changes mid-stream.
 
 Breaking: `TimecodeMeta.frames` is a `u16`, `WIRE_VERSION` is 6, `FrameTiming` gains `start_discard_ns` and `end_discard_ns`, `RtpRecvConfig` gains `parameter_sets`, `RtmpPublisher::push` fails with a `PublishRefusal`, and `Interlace` gains `InterleavedBottomFieldFirst`.
 

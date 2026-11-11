@@ -2585,6 +2585,7 @@ fn plan_arms<'a>(
                         control: controllers[index].take(),
                         properties,
                         flush_count,
+                        latency: Some(LatencyFold::publisher(latency_fold, node)),
                     },
                     done: element_done(live),
                 }
@@ -4737,6 +4738,8 @@ pub struct TransformArmIo {
     pub(crate) properties: Option<PropertyMailbox>,
     // set when a seek can restart the stream after its Eos, the arm then ends only when its input closes
     pub(crate) flush_count: Option<ArmFlushCount>,
+    // `None` for a spliced element, which takes no part in the latency fold
+    pub(crate) latency: Option<LatencyPublisher>,
 }
 
 /// As [`TransformArmIo`], for the sink arm.
@@ -4819,6 +4822,7 @@ pub(crate) async fn transform_arm_on<E: AsyncElement>(
         control,
         properties,
         mut flush_count,
+        mut latency,
     } = io;
     let mut adapter = SenderSink::new(out_tx);
     // M947: charge time spent blocked on the downstream link to this element's
@@ -5064,6 +5068,10 @@ pub(crate) async fn transform_arm_on<E: AsyncElement>(
                 // producer observes it as `PushOutcome::Reconfigure`.
                 if let Some(reconf) = elem.take_reconfigure() {
                     in_rx.request_reconfigure(reconf);
+                }
+                // decoders learn their reorder depth from the stream
+                if let Some(latency) = &mut latency {
+                    latency.observe(elem.latency());
                 }
             }
             // M1132: a remove closed this element's input to lift it out, so it

@@ -99,6 +99,8 @@ pub(crate) struct ReorderBuffer<T> {
     pub(crate) max_hold: usize,
     pub(crate) low_latency: bool,
     last_output_was_reference: bool,
+    // the most pictures still waiting after any push, since the last reset
+    most_held: usize,
 }
 
 impl<T> ReorderBuffer<T> {
@@ -110,6 +112,7 @@ impl<T> ReorderBuffer<T> {
             max_hold: 0,
             low_latency: false,
             last_output_was_reference: true,
+            most_held: 0,
         }
     }
 
@@ -156,7 +159,26 @@ impl<T> ReorderBuffer<T> {
         {
             release.output.push(self.pop_min());
         }
+        self.most_held = self.most_held.max(self.pending.len());
         release
+    }
+
+    pub(crate) fn latency(
+        &self,
+        extra_pictures: usize,
+        framerate: g2g_core::Rate,
+    ) -> g2g_core::query::LatencyReport {
+        // low latency releases each picture as soon as order allows, so the most it held is its floor
+        let fewest = if self.low_latency {
+            self.most_held
+        } else {
+            self.max_hold
+        };
+        g2g_core::query::LatencyReport::held_pictures(
+            (fewest + extra_pictures) as u32,
+            (self.max_hold + extra_pictures) as u32,
+            framerate,
+        )
     }
 
     // the cases gst_h264_dpb_needs_bump releases early in its low-latency mode
@@ -212,6 +234,7 @@ impl<T> ReorderBuffer<T> {
         self.cvs = 0;
         self.started = false;
         self.last_output_was_reference = true;
+        self.most_held = 0;
     }
 
     /// Remove and return the lowest-`(cvs, poc)` held picture.
@@ -293,5 +316,43 @@ mod tests {
             ]
         );
         assert_eq!(reorder.flush(), [12]);
+    }
+
+    #[test]
+    fn low_latency_reports_the_most_pictures_it_held_as_its_floor() {
+        const LEVEL_REORDER_DEPTH: usize = 4;
+        const RING_PICTURES: usize = 2;
+        // poc 6 and poc 12 both wait until poc 8 arrives
+        const MOST_HELD: u32 = 2;
+        let decode_order = [
+            (0, true),
+            (6, true),
+            (2, false),
+            (4, false),
+            (12, true),
+            (8, false),
+            (10, false),
+        ];
+        let mut reorder = ReorderBuffer::new();
+        reorder.max_hold = LEVEL_REORDER_DEPTH;
+        reorder.low_latency = true;
+        for (poc, is_reference) in decode_order {
+            reorder.push(&picture(poc, is_reference), poc);
+        }
+        let framerate = g2g_core::Rate::Any;
+        let ceiling = (LEVEL_REORDER_DEPTH + RING_PICTURES) as u32;
+        assert_eq!(
+            reorder.latency(RING_PICTURES, framerate.clone()),
+            g2g_core::query::LatencyReport::held_pictures(
+                MOST_HELD + RING_PICTURES as u32,
+                ceiling,
+                framerate.clone()
+            )
+        );
+        reorder.low_latency = false;
+        assert_eq!(
+            reorder.latency(RING_PICTURES, framerate.clone()),
+            g2g_core::query::LatencyReport::held_pictures(ceiling, ceiling, framerate)
+        );
     }
 }

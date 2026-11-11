@@ -17,7 +17,7 @@ use g2g_core::{
     PropError, PropKind, PropValue, PropertySpec, Rate, St2038Alignment,
 };
 
-use crate::st2038::{framerate_period_ns, video_framerate, write_st2038};
+use crate::st2038::{framerate_period_ns, write_st2038};
 use crate::st2038ancdemux::push_to_ports;
 use crate::st291::{sort_by_position, AncillaryMeta};
 
@@ -253,7 +253,7 @@ impl St2038ExtractorN {
         caps: Caps,
         out: &mut dyn MultiOutputSink,
     ) -> Result<(), G2gError> {
-        let framerate = video_framerate(&caps);
+        let framerate = caps.framerate();
         let framerate_changed = framerate != self.framerate;
         self.framerate = framerate;
         let video_ports = self.ports_where(|port| *port == ExtractorPort::Video);
@@ -293,7 +293,7 @@ impl MultiOutputElement for St2038ExtractorN {
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        self.framerate = video_framerate(absolute_caps);
+        self.framerate = absolute_caps.framerate();
         Ok(ConfigureOutcome::Accepted)
     }
 
@@ -302,7 +302,7 @@ impl MultiOutputElement for St2038ExtractorN {
             ExtractorPort::Video => Some(CapsConstraint::IdentityAny),
             ExtractorPort::St2038 { .. } => {
                 Some(CapsConstraint::DerivedOutput(Box::new(|input| {
-                    CapsSet::one(st2038_caps(video_framerate(input)))
+                    CapsSet::one(st2038_caps(input.framerate()))
                 })))
             }
         }

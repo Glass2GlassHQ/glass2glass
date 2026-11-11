@@ -63,6 +63,7 @@ use g2g_core::{
 use g2g_core::{PropError, PropKind, PropValue, PropertySpec};
 
 use crate::annexb::{h264_parameter_sets, h265_parameter_sets};
+use crate::heldpictures::HeldPictures;
 use crate::inputstamp::{InputStamp, PendingInputStamps};
 use crate::mediacodec_common::{queue_input, BUFFER_FLAG_END_OF_STREAM, MAX_OUTPUT_POLLS};
 
@@ -141,6 +142,7 @@ pub struct MediaCodecDec {
     last_caps: Option<Caps>,
     input_caps: Option<Caps>,
     input_stamps: PendingInputStamps,
+    held: HeldPictures,
     emitted: u64,
     segment: Segment,
     /// Probe hook: an owned reference to the first decoded frame's backing
@@ -199,6 +201,7 @@ impl MediaCodecDec {
             last_caps: None,
             input_caps: None,
             input_stamps: PendingInputStamps::default(),
+            held: HeldPictures::default(),
             emitted: 0,
             segment: Segment::new(),
             #[cfg(feature = "mediacodec-wgpu")]
@@ -434,6 +437,9 @@ impl MediaCodecDec {
         let pts_us = pts_ns / 1000;
         // the decoded image carries the microsecond pts back in nanoseconds
         self.input_stamps.insert(pts_us * 1000, stamp);
+        if pts_ns != FrameTiming::PTS_NONE {
+            self.held.fed(pts_us * 1000);
+        }
         self.queue_input(au, pts_us, 0)?;
         self.pump_output(out, false)
     }
@@ -624,6 +630,11 @@ impl AsyncElement for MediaCodecDec {
         }
     }
 
+    fn latency(&self) -> g2g_core::query::LatencyReport {
+        self.held
+            .latency(self.input_caps.as_ref().map_or(Rate::Any, Caps::framerate))
+    }
+
     fn process<'a>(
         &'a mut self,
         packet: PipelinePacket,
@@ -673,6 +684,7 @@ impl AsyncElement for MediaCodecDec {
                         let _ = st.codec.flush();
                     }
                     self.input_stamps = PendingInputStamps::default();
+                    self.held.clear();
                     self.last_caps = None;
                     out.push(PipelinePacket::Flush).await?;
                     return Ok(());
@@ -734,6 +746,7 @@ impl AsyncElement for MediaCodecDec {
                     }
                 };
                 let input = self.input_stamps.take(pts_ns);
+                self.held.output(pts_ns);
                 if !self.segment.presents(pts_ns) {
                     g2g_core::g2g_log!(
                         g2g_core::log::Target::category(g2g_core::AsyncElement::log_category(self)),

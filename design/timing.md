@@ -285,16 +285,24 @@ A demux contributes `MultiOutputElement::latency()`, added once at the demux nod
 so every output branch carries it, and a fan-out source contributes
 `MultiOutputSource::latency()`. A tee is structural and contributes nothing.
 
-A demux only learns what it holds once media flows, so the fold is kept for the
-run instead of computed once. Each demux arm reads its element's `latency()` after
-every `process` and compares it with the last report it published, so an
+A demux only learns what it holds once media flows, and a decoder only learns its
+reorder depth from the stream's parameter sets, so the fold is kept for the run
+instead of computed once. Each demux and transform arm reads its element's
+`latency()` after every `process` and compares it with the last report it published, so an
 unchanged value costs a comparison and no lock. On a change the arm stores the
 report in the run's per-node table, folds the startup topology again under that
 table's lock, and stores the new minimum into the `ClockSync` every sink holds.
 `ClockSync` keeps the minimum in an `Arc<AtomicU64>` shared by all its clones, the
 way `ElectedClock` reaches sinks already inside their arms, so the next deadline a
 sink computes includes it. `RunStats::latency` reports the last fold, and liveness
-stays what the startup fold decided.
+stays what the startup fold decided. An element a `GraphMutator` splices in takes
+no part in the fold, so its arm publishes nothing.
+
+A video decoder reports the pictures it holds back times the frame period
+(`LatencyReport::held_pictures`, 25 fps when the rate is unknown, as GStreamer
+assumes). Decoders that reorder through `ReorderBuffer` count the stream's reorder
+depth. openh264, Media Foundation and MediaCodec reorder inside the codec, so
+`HeldPictures` counts the most units fed and not yet output since the last flush.
 
 `tsdemux` keeps each PES until the next one on its PID starts, so its fan-out
 latches the decode-time step between the first two timestamped units on each audio

@@ -45,6 +45,7 @@ use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
 };
 
+use crate::heldpictures::HeldPictures;
 use crate::inputstamp::{InputStamp, PendingInputStamps};
 use crate::mfcommon::{
     feed_sample, make_input_sample, mf_err, mf_ticks_to_ns, ns_to_mf_ticks,
@@ -122,6 +123,7 @@ pub struct MfDecode {
     /// geometry. See `ffmpegdec.rs` for the same field with full notes.
     input_caps: Option<Caps>,
     input_stamps: PendingInputStamps,
+    held: HeldPictures,
     emitted: u64,
     segment: Segment,
 }
@@ -153,6 +155,7 @@ impl MfDecode {
             last_caps: None,
             input_caps: None,
             input_stamps: PendingInputStamps::default(),
+            held: HeldPictures::default(),
             emitted: 0,
             segment: Segment::new(),
         }
@@ -188,8 +191,11 @@ impl MfDecode {
     ) -> Result<(), G2gError> {
         let sample = make_input_sample(data, pts_ns)?;
         // the decoded sample carries the pts back rounded down to 100 ns ticks
-        self.input_stamps
-            .insert(mf_ticks_to_ns(ns_to_mf_ticks(pts_ns)), stamp);
+        let decoded_pts_ns = mf_ticks_to_ns(ns_to_mf_ticks(pts_ns));
+        self.input_stamps.insert(decoded_pts_ns, stamp);
+        if pts_ns != FrameTiming::PTS_NONE {
+            self.held.fed(decoded_pts_ns);
+        }
         feed_sample(self, &sample, Self::transform, |element| {
             element.drain(decoded)
         })
@@ -311,6 +317,11 @@ impl AsyncElement for MfDecode {
         )
     }
 
+    fn latency(&self) -> g2g_core::query::LatencyReport {
+        self.held
+            .latency(self.input_caps.as_ref().map_or(Rate::Any, Caps::framerate))
+    }
+
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         let (w, h) = match absolute_caps {
             Caps::CompressedVideo {
@@ -393,6 +404,7 @@ impl AsyncElement for MfDecode {
                         }
                     }
                     self.input_stamps = PendingInputStamps::default();
+                    self.held.clear();
                     self.last_caps = None;
                     out.push(PipelinePacket::Flush).await?;
                     return Ok(());
@@ -420,6 +432,7 @@ impl AsyncElement for MfDecode {
             };
             for d in decoded {
                 let input = self.input_stamps.take(d.pts_ns);
+                self.held.output(d.pts_ns);
                 if !self.segment.presents(d.pts_ns) {
                     g2g_core::g2g_log!(
                         g2g_core::log::Target::category(g2g_core::AsyncElement::log_category(self)),
@@ -693,6 +706,26 @@ fn derive_output_caps(codec: VideoCodec, input: &Caps) -> CapsSet {
 mod tests {
     use super::*;
     use alloc::vec;
+
+    #[test]
+    fn latency_counts_the_pictures_the_decoder_holds() {
+        let mut decoder = MfDecode::new();
+        let packets = crate::testutil::decode_h264(
+            &mut decoder,
+            include_bytes!("../tests/fixtures/h264_640x480_bframes.h264"),
+        );
+        assert!(
+            packets
+                .iter()
+                .any(|packet| matches!(packet, PipelinePacket::DataFrame(_))),
+            "the MFT decodes the fixture"
+        );
+        let latency = decoder.latency();
+        assert!(
+            latency.min_ns > 0,
+            "B-frame reordering holds pictures: {latency:?}"
+        );
+    }
 
     #[test]
     fn nv12_caps_are_fixed() {

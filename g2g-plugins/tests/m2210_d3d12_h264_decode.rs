@@ -238,6 +238,24 @@ fn system_output_is_bit_exact_in_display_order() {
 }
 
 #[test]
+fn latency_counts_the_pictures_the_reorder_holds() {
+    let _gpu = gpu_lock();
+    if let Some(reason) = skip_reason() {
+        eprintln!("skipping: {reason}");
+        return;
+    }
+    let (decoder, _, decoded) = decode(&BFRAMES, MemoryDomainKind::System);
+    decoded.expect("decode stream");
+    let latency = decoder.latency();
+    assert!(latency.min_ns > 0, "{latency:?}");
+    assert_eq!(
+        latency.max_ns,
+        Some(latency.min_ns),
+        "the default buffering holds its full depth"
+    );
+}
+
+#[test]
 fn a_flush_resumes_bit_exact_from_the_next_keyframe() {
     let _gpu = gpu_lock();
     if let Some(reason) = skip_reason() {

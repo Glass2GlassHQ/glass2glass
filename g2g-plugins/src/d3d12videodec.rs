@@ -1287,6 +1287,10 @@ impl AsyncElement for D3D12H264Dec {
         self.recovery.take_keyframe_request()
     }
 
+    fn latency(&self) -> g2g_core::query::LatencyReport {
+        self.reorder.latency(0, self.framerate.clone())
+    }
+
     fn process<'a>(
         &'a mut self,
         packet: PipelinePacket,

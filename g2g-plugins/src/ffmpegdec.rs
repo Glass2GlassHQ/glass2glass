@@ -114,7 +114,7 @@ use ffmpeg_next as ffmpeg;
 
 use crate::inputstamp::{InputStamp, PendingInputStamps};
 use crate::yuv::downsample_chroma_420;
-use g2g_core::caps::framerate_q16_period_ns;
+use g2g_core::caps::{framerate_q16_period_ns, ASSUMED_FRAMERATE_Q16};
 use g2g_core::frame::Frame;
 use g2g_core::log::{short_type_name, LogName, LogSource};
 use g2g_core::memory::{OwnedCudaBuffer, SystemSlice};
@@ -141,8 +141,6 @@ pub const AUTO_MAX_THREADS: u32 = 0;
 /// well below this; the limit is here so a launch line cannot ask for a
 /// thread count that is a resource exhaustion rather than a decode setting.
 const MAX_DECODE_THREADS: u32 = 256;
-
-const DEFAULT_FRAMERATE_Q16: u32 = 30 << 16;
 
 /// Pixel layout emitted on the decoder's output side.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -365,8 +363,8 @@ fn conversion_target(requested: OutputFormat, source: Pixel) -> Option<Pixel> {
 /// one picture and releases it as soon as it is done. Frame threading pipelines
 /// whole pictures across the threads, which is far faster on single-slice
 /// content but makes libavcodec hold `thread_count - 1` pictures before
-/// releasing the first: auto-sized to a 16-core machine that is half a second at
-/// 30 fps. [`FfmpegVideoDec::latency`] reports that delay so a paced sink
+/// releasing the first: auto-sized to a 16-core machine that is 0.6 seconds at
+/// 25 fps. [`FfmpegVideoDec::latency`] reports that delay so a paced sink
 /// buffers for it rather than dropping late frames.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ThreadType {
@@ -920,7 +918,7 @@ impl FfmpegVideoDec {
                 framerate: Rate::Fixed(q16),
                 ..
             }) if *q16 > 0 => *q16,
-            _ => DEFAULT_FRAMERATE_Q16,
+            _ => ASSUMED_FRAMERATE_Q16,
         };
         framerate_q16_period_ns(q16).expect("q16 is nonzero")
     }
@@ -1628,16 +1626,19 @@ impl AsyncElement for FfmpegVideoDec {
         )
     }
 
-    /// The pictures frame threading holds back, as time on the negotiated
-    /// framerate. A paced sink that knows about them waits; one that does not
-    /// would call every frame late and drop it. Zero on the default threading,
-    /// and zero until the decoder has opened and reported its `delay`.
+    /// The pictures frame threading and output reordering hold back, as time on
+    /// the negotiated framerate. A paced sink that knows about them waits; one
+    /// that does not would call every frame late and drop it. Zero until the
+    /// decoder has opened.
     fn latency(&self) -> LatencyReport {
-        if self.thread_delay_frames == 0 {
-            return LatencyReport::ZERO;
-        }
-        let ns = self.frame_period_ns() * u64::from(self.thread_delay_frames);
-        LatencyReport::buffered(ns, Some(ns))
+        let reorder_frames = self.decoder.as_ref().map_or(0, |decoder| {
+            // SAFETY: an opened `AVCodecContext`; libavcodec raises `has_b_frames`
+            // during decode when it finds a deeper reorder than the SPS stated.
+            unsafe { (*decoder.as_ptr()).has_b_frames.max(0) as u32 }
+        });
+        let held = self.thread_delay_frames + reorder_frames;
+        let framerate = self.input_caps.as_ref().map_or(Rate::Any, Caps::framerate);
+        LatencyReport::held_pictures(held, held, framerate)
     }
 
     /// What `thread-type=auto` resolves against. The decoder opens on
@@ -2017,10 +2018,7 @@ impl AsyncElement for FfmpegVideoDec {
                 );
             }
             // `Any` when the stream declared no rate, never a guess.
-            let out_framerate = match &self.input_caps {
-                Some(Caps::CompressedVideo { framerate, .. }) => framerate.clone(),
-                _ => Rate::Any,
-            };
+            let out_framerate = self.input_caps.as_ref().map_or(Rate::Any, Caps::framerate);
             // The bitstream's colour description rides through decode unchanged
             // (Unknown when the input caps carry none, never a guess here).
             let (out_colorimetry, out_pixel_aspect) = match &self.input_caps {
@@ -4227,6 +4225,23 @@ mod tests {
                 "reported as time on the negotiated framerate"
             );
         }
+    }
+
+    #[test]
+    fn latency_counts_the_reorder_depth_seeded_from_the_sps() {
+        const FIXTURE: &[u8] = include_bytes!("../tests/fixtures/h264_64x48_bframes.h264");
+        let mut dec = FfmpegVideoDec::new().with_thread_type(ThreadType::Slice);
+        let packets = crate::testutil::decode_h264(&mut dec, FIXTURE);
+        let framerate = crate::testutil::first_caps(&packets)
+            .expect("decoded caps")
+            .framerate();
+        let reorder_frames = u32::from(
+            crate::h264parse::sps_reorder_frames(FIXTURE).expect("the fixture has an SPS"),
+        );
+        assert_eq!(
+            dec.latency(),
+            LatencyReport::held_pictures(reorder_frames, reorder_frames, framerate)
+        );
     }
 
     #[test]

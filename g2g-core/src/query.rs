@@ -372,6 +372,21 @@ impl LatencyReport {
         }
     }
 
+    /// A decoder holding between `min_pictures` and `max_pictures` pictures
+    /// back, at `framerate`: the highest rate of a range, and 25 fps when the
+    /// rate is unknown, as GStreamer's video decoders assume.
+    pub fn held_pictures(min_pictures: u32, max_pictures: u32, framerate: crate::Rate) -> Self {
+        let q16 = match framerate {
+            crate::Rate::Fixed(q16) | crate::Rate::Range { max_q16: q16, .. } if q16 > 0 => q16,
+            _ => crate::caps::ASSUMED_FRAMERATE_Q16,
+        };
+        let period_ns = crate::caps::framerate_q16_period_ns(q16).expect("q16 is nonzero");
+        Self::buffered(
+            period_ns.saturating_mul(u64::from(min_pictures)),
+            Some(period_ns.saturating_mul(u64::from(max_pictures))),
+        )
+    }
+
     /// Fold the next downstream element's contribution into this path
     /// aggregate: minimum and maximum latencies sum (an unbounded max stays
     /// unbounded), and liveness is sticky once any element is live.
@@ -426,6 +441,35 @@ mod tests {
         let r = LatencyReport::live(5, Some(20));
         assert_eq!(LatencyReport::ZERO.combine(r), r);
         assert_eq!(r.combine(LatencyReport::ZERO), r);
+    }
+
+    #[test]
+    fn held_pictures_take_the_frame_period_or_25_fps_without_a_rate() {
+        const PERIOD_AT_50_FPS_NS: u64 = 20_000_000;
+        const PERIOD_AT_25_FPS_NS: u64 = 40_000_000;
+        assert_eq!(
+            LatencyReport::held_pictures(1, 3, crate::Rate::Fixed(50 << 16)),
+            LatencyReport::buffered(PERIOD_AT_50_FPS_NS, Some(3 * PERIOD_AT_50_FPS_NS))
+        );
+        assert_eq!(
+            LatencyReport::held_pictures(
+                2,
+                2,
+                crate::Rate::Range {
+                    min_q16: 1 << 16,
+                    max_q16: 50 << 16
+                }
+            ),
+            LatencyReport::buffered(2 * PERIOD_AT_50_FPS_NS, Some(2 * PERIOD_AT_50_FPS_NS))
+        );
+        assert_eq!(
+            LatencyReport::held_pictures(2, 2, crate::Rate::Any),
+            LatencyReport::buffered(2 * PERIOD_AT_25_FPS_NS, Some(2 * PERIOD_AT_25_FPS_NS))
+        );
+        assert_eq!(
+            LatencyReport::held_pictures(0, 0, crate::Rate::Any),
+            LatencyReport::ZERO
+        );
     }
 
     #[test]

@@ -6,12 +6,12 @@ use core::future::Future;
 use core::pin::Pin;
 
 use alloc::boxed::Box;
-use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 
 use g2g_core::frame::{Frame, FrameTiming};
 use g2g_core::log::{short_type_name, Target};
 use g2g_core::memory::SystemSlice;
+use g2g_core::query::LatencyReport;
 use g2g_core::{
     g2g_warn, AsyncElement, BitstreamAlignment, Caps, CapsConstraint, CapsSet, Colorimetry,
     ConfigureOutcome, Dim, ElementMetadata, G2gError, HardwareError, Interlace, MemoryDomain,
@@ -23,6 +23,7 @@ use openh264::decoder::{DecodedYUV, Decoder, DecoderConfig, Flush};
 use openh264::formats::YUVSource;
 use openh264::OpenH264API;
 
+use crate::heldpictures::HeldPictures;
 use crate::inputstamp::{InputStamp, PendingInputStamps};
 
 struct DecodedPicture {
@@ -105,7 +106,7 @@ pub struct OpenH264Dec {
     emitted_caps: Option<Caps>,
     last_sps: Option<Vec<u8>>,
     // openh264 hands pictures out in presentation order, so each takes the earliest pts still held
-    pending_pts: BTreeSet<u64>,
+    held: HeldPictures,
     input_stamps: PendingInputStamps,
     last_timing: FrameTiming,
     segment: Segment,
@@ -117,7 +118,7 @@ impl core::fmt::Debug for OpenH264Dec {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("OpenH264Dec")
             .field("emitted_caps", &self.emitted_caps)
-            .field("pending", &self.pending_pts.len())
+            .field("held", &self.held)
             .field("sequence", &self.sequence)
             .field("configured", &self.configured)
             .finish_non_exhaustive()
@@ -139,7 +140,7 @@ impl OpenH264Dec {
             pixel_aspect: PixelAspect::Any,
             emitted_caps: None,
             last_sps: None,
-            pending_pts: BTreeSet::new(),
+            held: HeldPictures::default(),
             input_stamps: PendingInputStamps::default(),
             last_timing: FrameTiming::default(),
             segment: Segment::new(),
@@ -172,7 +173,7 @@ impl OpenH264Dec {
                     "skipped a {}-byte access unit openh264 rejects: {error}",
                     access_unit.len()
                 );
-                self.pending_pts.remove(&pts_ns);
+                self.held.remove(pts_ns);
                 Ok(Vec::new())
             }
         }
@@ -200,10 +201,8 @@ impl OpenH264Dec {
         out: &mut dyn OutputSink,
     ) -> Result<(), G2gError> {
         for picture in pictures {
-            let pts_ns = self
-                .pending_pts
-                .pop_first()
-                .unwrap_or(FrameTiming::PTS_NONE);
+            let pts_ns = self.held.earliest().unwrap_or(FrameTiming::PTS_NONE);
+            self.held.output(pts_ns);
             let input = self.input_stamps.take(pts_ns);
             if pts_ns != FrameTiming::PTS_NONE && !self.segment.presents(pts_ns) {
                 continue;
@@ -304,6 +303,11 @@ impl AsyncElement for OpenH264Dec {
         )
     }
 
+    fn latency(&self) -> LatencyReport {
+        // openh264 holds as many pictures as the stream reorders, not the SPS level bound
+        self.held.latency(self.framerate.clone())
+    }
+
     fn process<'a>(
         &'a mut self,
         packet: PipelinePacket,
@@ -320,7 +324,7 @@ impl AsyncElement for OpenH264Dec {
                         .require_system_slice(short_type_name::<Self>())?;
                     let pts_ns = frame.timing.pts_ns;
                     if pts_ns != FrameTiming::PTS_NONE {
-                        self.pending_pts.insert(pts_ns);
+                        self.held.fed(pts_ns);
                         self.input_stamps.insert(pts_ns, InputStamp::of(&frame));
                     }
                     let sps = sequence_parameter_set(access_unit);
@@ -341,10 +345,12 @@ impl AsyncElement for OpenH264Dec {
                     self.emit(pictures, frame.timing, out).await?;
                 }
                 PipelinePacket::CapsChanged(Caps::CompressedVideo {
+                    framerate,
                     colorimetry,
                     pixel_aspect,
                     ..
                 }) => {
+                    self.framerate = framerate;
                     self.colorimetry = colorimetry;
                     self.pixel_aspect = pixel_aspect;
                 }
@@ -362,7 +368,7 @@ impl AsyncElement for OpenH264Dec {
                 PipelinePacket::Flush => {
                     self.drain_and_reopen()?;
                     self.last_sps = None;
-                    self.pending_pts.clear();
+                    self.held.clear();
                     self.input_stamps = PendingInputStamps::default();
                     out.push(PipelinePacket::Flush).await?;
                 }
@@ -393,42 +399,14 @@ impl PadTemplates for OpenH264Dec {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::h264parse::H264Parse;
-    use crate::testutil::{data_bytes, run, run_packets};
-
-    fn h264(alignment: BitstreamAlignment) -> Caps {
-        Caps::CompressedVideo {
-            codec: VideoCodec::H264,
-            width: Dim::Any,
-            height: Dim::Any,
-            framerate: Rate::Any,
-            colorimetry: Colorimetry::UNKNOWN,
-            pixel_aspect: g2g_core::PixelAspect::Any,
-            alignment,
-        }
-    }
-
-    fn decode(annexb: &[u8]) -> Vec<PipelinePacket> {
-        let parsed = run(
-            &mut H264Parse::reframing(),
-            &h264(BitstreamAlignment::Unspecified),
-            &[annexb],
-        );
-        let access_units = parsed
-            .packets
-            .into_iter()
-            .filter(|packet| !matches!(packet, PipelinePacket::Eos));
-        let decoded = run_packets(
-            &mut OpenH264Dec::new(),
-            &h264(BitstreamAlignment::AccessUnit),
-            access_units,
-        );
-        decoded.packets
-    }
+    use crate::testutil::{data_bytes, decode_h264, first_caps};
 
     #[test]
     fn a_b_frame_stream_matches_ffmpeg() {
-        let packets = decode(include_bytes!("../tests/fixtures/h264_64x48_bframes.h264"));
+        let packets = decode_h264(
+            &mut OpenH264Dec::new(),
+            include_bytes!("../tests/fixtures/h264_64x48_bframes.h264"),
+        );
         assert_eq!(
             data_bytes(&packets),
             include_bytes!("../tests/fixtures/h264_64x48_bframes.h264.i420"),
@@ -436,10 +414,35 @@ mod tests {
     }
 
     #[test]
+    fn latency_counts_the_pictures_a_b_frame_stream_holds() {
+        // ffprobe reports has_b_frames=1 for the fixture
+        const FIXTURE_REORDERED_PICTURES: u32 = 1;
+        let mut decoder = OpenH264Dec::new();
+        let packets = decode_h264(
+            &mut decoder,
+            include_bytes!("../tests/fixtures/h264_64x48_bframes.h264"),
+        );
+        let framerate = first_caps(&packets).expect("decoded caps").framerate();
+        assert!(
+            matches!(framerate, Rate::Fixed(_)),
+            "the stream rate reaches the output: {framerate:?}"
+        );
+        assert_eq!(
+            decoder.latency(),
+            LatencyReport::held_pictures(
+                FIXTURE_REORDERED_PICTURES,
+                FIXTURE_REORDERED_PICTURES,
+                framerate
+            )
+        );
+    }
+
+    #[test]
     fn a_resolution_change_keeps_every_picture() {
-        let packets = decode(include_bytes!(
-            "../tests/fixtures/h264_reconfig_640x480_to_320x240.h264"
-        ));
+        let packets = decode_h264(
+            &mut OpenH264Dec::new(),
+            include_bytes!("../tests/fixtures/h264_reconfig_640x480_to_320x240.h264"),
+        );
         let mut pictures_per_geometry: Vec<((Dim, Dim), usize)> = Vec::new();
         for packet in &packets {
             match packet {

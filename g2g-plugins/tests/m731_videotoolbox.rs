@@ -245,6 +245,12 @@ async fn vtdecode_outputs_b_frames_in_presentation_order() {
     let mut presentation_order = input_pts;
     presentation_order.sort_unstable();
     assert_eq!(output_pts, presentation_order);
+    let latency = dec.latency();
+    assert!(
+        latency.min_ns > 0,
+        "the reorder depth is reported: {latency:?}"
+    );
+    assert_eq!(latency.max_ns, Some(latency.min_ns));
 }
 
 #[tokio::test(flavor = "current_thread")]
