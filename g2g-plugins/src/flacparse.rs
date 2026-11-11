@@ -405,7 +405,8 @@ pub(crate) fn parse_frame_header(data: &[u8]) -> Option<FrameHeader> {
     let b3 = *data.get(3)?;
     let channel_assignment = b3 >> 4;
     let sample_size_code = (b3 >> 1) & 0x07;
-    if channel_assignment > 10 || sample_size_code == 3 || sample_size_code == 7 || b3 & 1 != 0 {
+    // FLAC 1.4 defines sample size code 7 as 32 bits per sample
+    if channel_assignment > 10 || sample_size_code == 3 || b3 & 1 != 0 {
         return None; // reserved
     }
     // UTF-8-style coded frame/sample number (1..=7 bytes).
@@ -706,6 +707,16 @@ mod tests {
             Ok(Some(stream.len()))
         );
         assert_eq!(scanned_to, 0);
+    }
+
+    #[test]
+    fn a_32_bit_frame_header_parses() {
+        const BLOCK_SIZE_192_AT_44_1_KHZ: u8 = 0x19;
+        const STEREO_32_BIT: u8 = 0x1E;
+        let mut header = alloc::vec![0xFF, 0xF8, BLOCK_SIZE_192_AT_44_1_KHZ, STEREO_32_BIT, 0];
+        header.push(crc8(&header));
+        let parsed = parse_frame_header(&header).expect("sample size code 7 is 32 bits");
+        assert_eq!(parsed.block_size, 192);
     }
 
     #[test]

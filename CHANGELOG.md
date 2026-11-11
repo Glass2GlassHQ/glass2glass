@@ -148,6 +148,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M2232: `rtspserversrc` records a publisher's AAC track on a second pad, in sync with the video through RTCP sender reports.
 - M2233: `udpsrc` and `rtspserversrc` depayload RFC 6416 MP4A-LATM AAC, the format gst's `rtspclientsink` sends.
 - M2234: RTP Opus packets carry the marker bit only at the start of the stream.
+- M2235: `flacparse` accepts 32-bit FLAC frames.
 
 Breaking: `TimecodeMeta.frames` is a `u16`, `WIRE_VERSION` is 6, `FrameTiming` gains `start_discard_ns` and `end_discard_ns`, `RtpRecvConfig` gains `parameter_sets`, `RtmpPublisher::push` fails with a `PublishRefusal`, and `Interlace` gains `InterleavedBottomFieldFirst`.
 
