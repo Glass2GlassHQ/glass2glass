@@ -27,9 +27,14 @@ use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use g2g_core::log::Target;
+use g2g_core::{G2gError, NetworkFailure};
+
 use crate::flv::{
     emit_tag, file_header_len, put_file_header, tag_at, write_u24, FLV_FLAG_AUDIO, FLV_FLAG_VIDEO,
 };
+
+const LOG_CATEGORY: &str = "rtmp";
 
 /// RTMP protocol version (the C0/S0 byte).
 const RTMP_VERSION: u8 = 3;
@@ -125,6 +130,7 @@ const AMF0_BOOLEAN: u8 = 0x01;
 const AMF0_STRING: u8 = 0x02;
 const AMF0_OBJECT: u8 = 0x03;
 const AMF0_NULL: u8 = 0x05;
+const AMF0_UNDEFINED: u8 = 0x06;
 const AMF0_OBJECT_END: u8 = 0x09;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -657,6 +663,8 @@ pub struct RtmpPublisher {
     /// backlog is `bytes_sent - ack_seq` in 32-bit sequence space.
     bytes_sent: u64,
     ack_seq: u32,
+    // AMF0 values appended to the `connect` command, from `encode_extra_connect_args`
+    extra_connect_args: Vec<u8>,
 }
 
 impl RtmpPublisher {
@@ -682,6 +690,7 @@ impl RtmpPublisher {
             peer_window: 0,
             bytes_sent: 0,
             ack_seq: 0,
+            extra_connect_args: Vec::new(),
         };
         // C0 (version) + C1: a "genuine FP" digest block by default (strict-CDN
         // ready), or a simple deterministic block if the digest is disabled.
@@ -700,6 +709,11 @@ impl RtmpPublisher {
         self.outbound.clear();
         self.outbound.push(RTMP_VERSION);
         self.outbound.extend_from_slice(&client_c1(self.complex));
+        self
+    }
+
+    pub fn with_extra_connect_args(mut self, encoded: Vec<u8>) -> Self {
+        self.extra_connect_args = encoded;
         self
     }
 
@@ -735,13 +749,13 @@ impl RtmpPublisher {
     }
 
     /// Feed bytes received from the server and advance the publish ladder.
-    pub fn push(&mut self, data: &[u8]) {
+    pub fn push(&mut self, data: &[u8]) -> Result<(), G2gError> {
         if self.phase == PubPhase::Handshake {
             self.s_inbound.extend_from_slice(data);
             // Wait for the full S0 + S1 + S2 before replying (the simple handshake
             // servers send all three together after C0/C1).
             if self.s_inbound.len() < 1 + 2 * HANDSHAKE_SIZE {
-                return;
+                return Ok(());
             }
             // C2: a digest response keyed off the server's S1 digest (complex
             // handshake), or an echo of S1 (simple / fallback). S2 is not
@@ -760,8 +774,9 @@ impl RtmpPublisher {
             self.reader.push(data);
         }
         while let Some((msg_type, _ts, payload)) = self.reader.next_message() {
-            self.handle_message(msg_type, &payload);
+            self.handle_message(msg_type, &payload)?;
         }
+        Ok(())
     }
 
     /// Feed an FLV byte stream (from `flvmux`). Its audio/video/script tags are
@@ -780,9 +795,8 @@ impl RtmpPublisher {
 
     /// Advance the command ladder on the server's `_result` / `onStatus`. The
     /// command name and (for `createStream`) the assigned stream id are all that
-    /// is needed; the ladder proceeds even on `_error` so a strict server cannot
-    /// wedge it.
-    fn handle_message(&mut self, msg_type: u8, payload: &[u8]) {
+    /// is needed to go on. An `_error` or an error `onStatus` ends the publish.
+    fn handle_message(&mut self, msg_type: u8, payload: &[u8]) -> Result<(), G2gError> {
         // Flow-control control messages (RFC §5.4.3-5.4.4): the server's Window
         // Acknowledgement Size bounds the publisher's in-flight bytes, and each
         // Acknowledgement advances the acknowledged sequence, releasing the window.
@@ -794,25 +808,28 @@ impl RtmpPublisher {
                     let own_window = (self.peer_window / 2).max(1);
                     self.send_control(MSG_WINDOW_ACK_SIZE, &own_window.to_be_bytes());
                 }
-                return;
+                return Ok(());
             }
             MSG_ACK => {
                 if let Some(w) = payload.get(..4) {
                     self.ack_seq = u32::from_be_bytes([w[0], w[1], w[2], w[3]]);
                 }
-                return;
+                return Ok(());
             }
             MSG_AMF0_COMMAND => {}
-            _ => return, // set-peer-bw / user-control: ignored
+            _ => return Ok(()), // set-peer-bw / user-control: ignored
         }
         let mut at = 0;
         let Some(name) = amf0_read_string(payload, &mut at) else {
-            return;
+            return Ok(());
         };
         match self.phase {
-            PubPhase::WaitConnect if name == "_result" || name == "_error" => {
+            PubPhase::WaitConnect if name == "_result" => {
                 self.send_create_stream();
                 self.phase = PubPhase::WaitCreate;
+            }
+            PubPhase::WaitConnect | PubPhase::WaitCreate if name == "_error" => {
+                return Err(refused(self.phase, &command_info(payload, at)));
             }
             PubPhase::WaitCreate if name == "_result" => {
                 // body: "_result", txn(number), NULL, streamId(number)
@@ -827,6 +844,16 @@ impl RtmpPublisher {
                 self.phase = PubPhase::WaitPublish;
             }
             PubPhase::WaitPublish if name == "onStatus" => {
+                let info = command_info(payload, at);
+                if info.get("level").is_some_and(|level| level == "error") {
+                    return Err(refused(self.phase, &info));
+                }
+                if info
+                    .get("code")
+                    .is_none_or(|code| code != "NetStream.Publish.Start")
+                {
+                    return Ok(());
+                }
                 self.phase = PubPhase::Publishing;
                 let pending = core::mem::take(&mut self.pending_media);
                 for (tag_type, ts, body) in pending {
@@ -835,6 +862,7 @@ impl RtmpPublisher {
             }
             _ => {}
         }
+        Ok(())
     }
 
     fn send_connect(&mut self) {
@@ -850,6 +878,7 @@ impl RtmpPublisher {
                 ("tcUrl", AmfVal::Str(&self.tc_url)),
             ],
         );
+        body.extend_from_slice(&self.extra_connect_args);
         self.send_command(0, &body);
     }
 
@@ -1059,6 +1088,115 @@ fn amf0_read_string(buf: &[u8], at: &mut usize) -> Option<alloc::string::String>
     Some(alloc::string::String::from(s))
 }
 
+// the string entries of an AMF0 object, servers put only scalars in command reply objects
+fn amf0_read_scalar_object(buf: &[u8], at: &mut usize) -> Option<BTreeMap<String, String>> {
+    if *buf.get(*at)? != AMF0_OBJECT {
+        return None;
+    }
+    *at += 1;
+    let mut strings = BTreeMap::new();
+    loop {
+        let key_len = u16::from_be_bytes(buf.get(*at..*at + 2)?.try_into().ok()?) as usize;
+        let key = core::str::from_utf8(buf.get(*at + 2..*at + 2 + key_len)?).ok()?;
+        *at += 2 + key_len;
+        match *buf.get(*at)? {
+            AMF0_OBJECT_END if key_len == 0 => {
+                *at += 1;
+                return Some(strings);
+            }
+            AMF0_STRING => {
+                let value = amf0_read_string(buf, at)?;
+                strings.insert(String::from(key), value);
+            }
+            AMF0_NUMBER => {
+                amf0_read_number(buf, at)?;
+            }
+            AMF0_BOOLEAN => {
+                buf.get(*at + 1)?;
+                *at += 2;
+            }
+            AMF0_NULL | AMF0_UNDEFINED => *at += 1,
+            _ => return None,
+        }
+    }
+}
+
+// `_error` and `onStatus` carry the transaction id, null or a command object, then the info object
+fn command_info(payload: &[u8], mut at: usize) -> BTreeMap<String, String> {
+    let mut read = || {
+        amf0_read_number(payload, &mut at)?;
+        if payload.get(at) == Some(&AMF0_NULL) {
+            at += 1;
+        } else {
+            amf0_read_scalar_object(payload, &mut at)?;
+        }
+        amf0_read_scalar_object(payload, &mut at)
+    };
+    read().unwrap_or_default()
+}
+
+fn refused(phase: PubPhase, info: &BTreeMap<String, String>) -> G2gError {
+    let field = |key: &str| info.get(key).map_or("", String::as_str);
+    g2g_core::g2g_error!(
+        Target::category(LOG_CATEGORY),
+        "the server refused the publish while {phase:?}: {} {}",
+        field("code"),
+        field("description")
+    );
+    G2gError::Network(NetworkFailure::Connect)
+}
+
+// gst rtmp2sink's `extra-connect-args`, split on `conn=` as gst does so a string keeps its spaces, plus librtmp's objects and named values
+pub fn encode_extra_connect_args(text: &str) -> Option<Vec<u8>> {
+    let mut out = Vec::new();
+    let mut object_depth = 0usize;
+    for item in text
+        .split("conn=")
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+    {
+        let (kind, rest) = item.split_once(':')?;
+        let (kind, data) = match kind.strip_prefix('N').filter(|kind| kind.len() == 1) {
+            Some(kind) => {
+                let (name, data) = rest.split_once(':')?;
+                // AMF0 objects hold only named entries, and only objects name them
+                if object_depth == 0 || kind == "O" && data == "0" {
+                    return None;
+                }
+                out.extend_from_slice(&u16::try_from(name.len()).ok()?.to_be_bytes());
+                out.extend_from_slice(name.as_bytes());
+                (kind, data)
+            }
+            None => {
+                let ends_object = kind == "O" && rest == "0";
+                if (object_depth == 0) == ends_object {
+                    return None;
+                }
+                (kind, rest)
+            }
+        };
+        match (kind, data) {
+            ("B", "0" | "1") => out.extend_from_slice(&[AMF0_BOOLEAN, u8::from(data == "1")]),
+            ("N", _) => amf0_number(&mut out, data.parse().ok()?),
+            ("S", _) => {
+                u16::try_from(data.len()).ok()?;
+                amf0_string(&mut out, data);
+            }
+            ("Z", _) => out.push(AMF0_NULL),
+            ("O", "1") => {
+                out.push(AMF0_OBJECT);
+                object_depth += 1;
+            }
+            ("O", "0") => {
+                out.extend_from_slice(&[0, 0, AMF0_OBJECT_END]);
+                object_depth -= 1;
+            }
+            _ => return None,
+        }
+    }
+    (object_depth == 0).then_some(out)
+}
+
 /// Read a marker-prefixed AMF0 number at `*at`, advancing the cursor.
 fn amf0_read_number(buf: &[u8], at: &mut usize) -> Option<f64> {
     if *buf.get(*at)? != AMF0_NUMBER {
@@ -1068,10 +1206,6 @@ fn amf0_read_number(buf: &[u8], at: &mut usize) -> Option<f64> {
     *at += 9;
     Some(v)
 }
-
-// Keep the boolean marker referenced (publishers may send it in command objects,
-// which the reader skips); silences an unused-const warning without hiding it.
-const _: u8 = AMF0_BOOLEAN;
 
 #[cfg(test)]
 mod tests {
@@ -1275,7 +1409,7 @@ mod tests {
             }
             let to_pub = server.take_outbound();
             if !to_pub.is_empty() {
-                publisher.push(&to_pub);
+                publisher.push(&to_pub).unwrap();
             }
             if publisher.is_publishing() {
                 break;
@@ -1376,7 +1510,7 @@ mod tests {
         );
 
         // Feed S0S1S2 back; the client's C2 proves it validated the server's S1.
-        publisher.push(&s);
+        publisher.push(&s).unwrap();
         let c2 = publisher.take_outbound();
         assert!(c2.len() >= SIG_SIZE, "publisher emitted C2");
         let server_s1_digest = own_digest_scheme1(s1);
@@ -1401,7 +1535,7 @@ mod tests {
             }
             let to_pub = server.take_outbound();
             if !to_pub.is_empty() {
-                publisher.push(&to_pub);
+                publisher.push(&to_pub).unwrap();
             }
             if publisher.is_publishing() {
                 break;
@@ -1439,7 +1573,7 @@ mod tests {
             }
             let to_pub = server.take_outbound();
             if !to_pub.is_empty() {
-                publisher.push(&to_pub);
+                publisher.push(&to_pub).unwrap();
             }
             if publisher.is_publishing() {
                 break;
@@ -1447,6 +1581,115 @@ mod tests {
         }
         assert!(publisher.is_publishing());
         publisher
+    }
+
+    // a publisher that has sent `connect` and waits for its reply
+    fn publisher_awaiting_connect(publisher: &mut RtmpPublisher) -> Vec<u8> {
+        let mut server = RtmpSession::new();
+        server.push(&publisher.take_outbound());
+        publisher.push(&server.take_outbound()).unwrap();
+        publisher.take_outbound()
+    }
+
+    fn status_reply(name: &str, level: &str, code: &str) -> Vec<u8> {
+        let mut body = Vec::new();
+        amf_string(&mut body, name);
+        amf_number(&mut body, 0.0);
+        body.push(AMF0_NULL);
+        amf0_object(
+            &mut body,
+            &[("level", AmfVal::Str(level)), ("code", AmfVal::Str(code))],
+        );
+        chunk(3, MSG_AMF0_COMMAND, 0, 0, &body)
+    }
+
+    #[test]
+    fn a_connect_error_fails_the_publish() {
+        let mut publisher = RtmpPublisher::new("live", "rtmp://localhost/live", "k");
+        publisher_awaiting_connect(&mut publisher);
+        let rejected = status_reply("_error", "error", "NetConnection.Connect.Rejected");
+        assert_eq!(
+            publisher.push(&rejected),
+            Err(G2gError::Network(NetworkFailure::Connect))
+        );
+        assert!(
+            publisher.take_outbound().is_empty(),
+            "no createStream follows"
+        );
+    }
+
+    #[test]
+    fn an_error_status_for_publish_fails_the_publish() {
+        let mut publisher = RtmpPublisher::new("live", "rtmp://localhost/live", "k");
+        publisher_awaiting_connect(&mut publisher);
+        let mut connected = Vec::new();
+        amf_string(&mut connected, "_result");
+        amf_number(&mut connected, 1.0);
+        publisher
+            .push(&chunk(3, MSG_AMF0_COMMAND, 0, 0, &connected))
+            .unwrap();
+        let mut created = Vec::new();
+        amf_string(&mut created, "_result");
+        amf_number(&mut created, 2.0);
+        created.push(AMF0_NULL);
+        amf_number(&mut created, 1.0);
+        publisher
+            .push(&chunk(3, MSG_AMF0_COMMAND, 0, 0, &created))
+            .unwrap();
+        let bad_name = status_reply("onStatus", "error", "NetStream.Publish.BadName");
+        assert_eq!(
+            publisher.push(&bad_name),
+            Err(G2gError::Network(NetworkFailure::Connect))
+        );
+        assert!(!publisher.is_publishing());
+    }
+
+    #[test]
+    fn extra_connect_args_follow_the_connect_object() {
+        const ARGS: &str =
+            "conn=B:1 conn=S:auth me conn=O:1 conn=NN:code:1.23 conn=NS:flag:ok conn=O:0 conn=Z:";
+        let encoded = encode_extra_connect_args(ARGS).expect("well formed");
+        let mut expected = vec![AMF0_BOOLEAN, 1];
+        amf_string(&mut expected, "auth me");
+        amf0_object(
+            &mut expected,
+            &[("code", AmfVal::Num(1.23)), ("flag", AmfVal::Str("ok"))],
+        );
+        expected.push(AMF0_NULL);
+        assert_eq!(encoded, expected);
+
+        let mut publisher = RtmpPublisher::new("live", "rtmp://localhost/live", "k")
+            .with_extra_connect_args(encoded.clone());
+        let sent = publisher_awaiting_connect(&mut publisher);
+        let mut reader = ChunkReader::new();
+        reader.push(&sent[HANDSHAKE_SIZE..]);
+        let (_, _, connect) = core::iter::from_fn(|| reader.next_message())
+            .find(|(msg_type, _, _)| *msg_type == MSG_AMF0_COMMAND)
+            .expect("connect was sent");
+        assert!(connect.ends_with(&encoded));
+    }
+
+    #[test]
+    fn malformed_extra_connect_args_are_refused() {
+        for args in [
+            "conn=B:2",
+            "conn=N:x",
+            "conn=N:",
+            "conn=NS:name:v",
+            "conn=O:1 conn=S:unnamed conn=O:0",
+            "conn=O:1",
+            "conn=O:0",
+            "conn=X:1",
+            "B:1 S:x",
+        ] {
+            assert_eq!(encode_extra_connect_args(args), None, "{args}");
+        }
+        // gst reads what comes before the first `conn=` as an item too
+        assert_eq!(encode_extra_connect_args("S:a"), {
+            let mut out = Vec::new();
+            amf_string(&mut out, "a");
+            Some(out)
+        });
     }
 
     #[test]
@@ -1532,7 +1775,7 @@ mod tests {
         assert_eq!(ack[7], MSG_ACK, "message type is Acknowledgement (3)");
 
         // Feeding the ack back to the publisher advances its window and clears it.
-        publisher.push(&ack);
+        publisher.push(&ack).unwrap();
         assert!(
             !publisher.throttled(),
             "the server's acknowledgement released the window"
@@ -1554,7 +1797,7 @@ mod tests {
             let to_server = publisher.take_outbound();
             sent.extend_from_slice(&to_server);
             server.push(&to_server);
-            publisher.push(&server.take_outbound());
+            publisher.push(&server.take_outbound()).unwrap();
         }
         let mut reader = ChunkReader::new();
         reader.push(&sent[1 + 2 * HANDSHAKE_SIZE..]);

@@ -37,7 +37,7 @@ use g2g_core::{
 };
 
 use crate::filesink::io_err;
-use crate::rtmp::RtmpPublisher;
+use crate::rtmp::{encode_extra_connect_args, RtmpPublisher};
 
 /// TCP read buffer for draining the server's control messages.
 const READ_BUF: usize = 65_536;
@@ -104,6 +104,8 @@ pub struct RtmpSink {
     /// Use the digest (complex) handshake strict CDNs require (default on; the
     /// C2 auto-falls-back to an echo against a simple server).
     complex_handshake: bool,
+    extra_connect_args: String,
+    extra_connect_amf: Vec<u8>,
 }
 
 impl RtmpSink {
@@ -119,6 +121,8 @@ impl RtmpSink {
             frames_sent: 0,
             eos_seen: false,
             complex_handshake: true,
+            extra_connect_args: String::new(),
+            extra_connect_amf: Vec::new(),
         }
     }
 
@@ -174,7 +178,7 @@ async fn drive_publish(
         if n == 0 {
             return Err(G2gError::Network(NetworkFailure::Connect)); // server closed before publish
         }
-        publisher.push(&buf[..n]);
+        publisher.push(&buf[..n])?;
         flush_out(stream, publisher).await?;
     }
     Ok(())
@@ -183,16 +187,17 @@ async fn drive_publish(
 /// Non-blocking drain of any server bytes (control messages: window-ack /
 /// set-peer-bw / acknowledgement), so the socket's receive buffer does not back
 /// up mid-stream and the publisher's ack window advances.
-fn drain_incoming(stream: &TcpStream, publisher: &mut RtmpPublisher) {
+fn drain_incoming(stream: &TcpStream, publisher: &mut RtmpPublisher) -> Result<(), G2gError> {
     let mut buf = [0u8; READ_BUF];
     loop {
         match stream.try_read(&mut buf) {
             Ok(0) => break, // closed; surfaced on the next write
-            Ok(n) => publisher.push(&buf[..n]),
+            Ok(n) => publisher.push(&buf[..n])?,
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
             Err(_) => break,
         }
     }
+    Ok(())
 }
 
 /// Honor the server's Window Acknowledgement Size (RFC §5.4.3): while the
@@ -209,7 +214,7 @@ async fn await_ack_window(
     while publisher.throttled() {
         match tokio::time::timeout(Duration::from_secs(5), stream.read(&mut buf)).await {
             Ok(Ok(0)) => return Err(G2gError::Network(NetworkFailure::Stream)), // server closed
-            Ok(Ok(n)) => publisher.push(&buf[..n]),
+            Ok(Ok(n)) => publisher.push(&buf[..n])?,
             Ok(Err(e)) => return Err(io_err(e)),
             Err(_) => break, // timed out waiting for an ack: proceed best-effort
         }
@@ -261,14 +266,15 @@ impl AsyncElement for RtmpSink {
                             .map_err(io_err)?;
                         let mut publisher =
                             RtmpPublisher::new(target.app, target.tc_url, target.stream_key)
-                                .with_complex_handshake(self.complex_handshake);
+                                .with_complex_handshake(self.complex_handshake)
+                                .with_extra_connect_args(self.extra_connect_amf.clone());
                         drive_publish(&mut stream, &mut publisher).await?;
                         self.stream = Some(stream);
                         self.publisher = Some(publisher);
                     }
                     let stream = self.stream.as_mut().ok_or(G2gError::NotConfigured)?;
                     let publisher = self.publisher.as_mut().ok_or(G2gError::NotConfigured)?;
-                    drain_incoming(stream, publisher);
+                    drain_incoming(stream, publisher)?;
                     // Apply the server's ack-window back-pressure before queuing
                     // more media, so the socket buffer does not bloat unboundedly.
                     await_ack_window(stream, publisher).await?;
@@ -321,6 +327,12 @@ impl AsyncElement for RtmpSink {
                 self.complex_handshake = value.as_bool().ok_or(PropError::Type)?;
                 Ok(())
             }
+            "extra-connect-args" => {
+                let text = value.as_str().ok_or(PropError::Type)?;
+                self.extra_connect_amf = encode_extra_connect_args(text).ok_or(PropError::Value)?;
+                self.extra_connect_args = text.to_string();
+                Ok(())
+            }
             _ => Err(PropError::Unknown),
         }
     }
@@ -329,6 +341,7 @@ impl AsyncElement for RtmpSink {
         match name {
             "location" => Some(PropValue::Str(self.url.clone())),
             "complex-handshake" => Some(PropValue::Bool(self.complex_handshake)),
+            "extra-connect-args" => Some(PropValue::Str(self.extra_connect_args.clone())),
             _ => None,
         }
     }
@@ -345,6 +358,11 @@ static RTMPSINK_PROPS: &[PropertySpec] = &[
         "complex-handshake",
         PropKind::Bool,
         "use the digest handshake strict CDNs require (default true)",
+    ),
+    PropertySpec::new(
+        "extra-connect-args",
+        PropKind::Str,
+        "librtmp-style AMF values appended to the connect command, such as conn=B:1 conn=S:token",
     ),
 ];
 

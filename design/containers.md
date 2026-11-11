@@ -1218,6 +1218,14 @@ with a `PipelinePacket::Overwrite` that `filesink` applies by seeking back, as
 gst's `flvmux` does. The duration runs from the first frame's PTS to the latest
 frame end, so a source that leaves frame durations at 0 comes out one frame short.
 
+`RtmpPublisher` sends media only after `onStatus` `NetStream.Publish.Start`. An
+`_error` reply to `connect` or `createStream`, or an `onStatus` at level `error`,
+fails the publish with `NetworkFailure::Connect`, and the server's code and
+description are logged. `rtmpsink`'s `extra-connect-args` takes gst rtmp2sink's
+`conn=type:data` items, split on `conn=` so a string keeps its spaces, plus the
+objects and named values librtmp has and gst refuses. They are encoded as AMF0
+values after the connect object.
+
 ### Enhanced RTMP multitrack audio
 
 Enhanced RTMP v2 audio tags have sound format 9: the low nibble is a packet type,

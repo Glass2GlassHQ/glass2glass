@@ -198,6 +198,8 @@ libraries installed.
 
 - **RTP over QUIC (RoQ):** implement after the draft becomes an RFC with an
   assigned ALPN. Candidate peers: mengelbart/roq (Go), meetecho/imquic.
+- **RTMP authentication:** Adobe and Limelight (llnw) auth with `username` and
+  `password` on `rtmpsink`, as gst rtmp2sink has. Needs a server to test against.
 - **RTMP:** multiple NetStreams over one connection. Deferred by design: it needs
   a dynamic-arity multi-output `RtmpSrc` (the stream count is only known once the
   client `createStream`s at runtime), which collides with g2g's fixed-arity-from-caps
