@@ -171,13 +171,13 @@ fn two_program_ts(p1_aus: u8, p2_aus: u8) -> Vec<u8> {
             pmt2 as u8,
         ],
     ));
-    let pmt = |pmt_pid: u16, es_pid: u16| {
+    let pmt = |pmt_pid: u16, program: u16, es_pid: u16| {
         psi(
             pmt_pid,
             0x02,
             &[
-                0x00,
-                0x01,
+                (program >> 8) as u8,
+                program as u8,
                 0xC1,
                 0x00,
                 0x00,
@@ -193,8 +193,8 @@ fn two_program_ts(p1_aus: u8, p2_aus: u8) -> Vec<u8> {
             ],
         )
     };
-    s.extend_from_slice(&pmt(pmt1, es1));
-    s.extend_from_slice(&pmt(pmt2, es2));
+    s.extend_from_slice(&pmt(pmt1, 1, es1));
+    s.extend_from_slice(&pmt(pmt2, 2, es2));
     for n in 0..p1_aus {
         s.extend_from_slice(&ts_packet(es1, true, &pes(0xE0, &[0, 0, 0, 1, 0x65, n])));
     }

@@ -1312,15 +1312,14 @@ impl Mp4DemuxN {
 
 /// The next complete top-level box at `buf[off..]`: its 4cc and total size (header
 /// plus payload), or `None` if fewer than the whole box is buffered yet, or the
-/// size field is malformed. The 64-bit largesize form is unsupported, the same
-/// limitation as the boxes() walker the fragment parsers use.
+/// size field is malformed.
 fn next_box(buf: &[u8], off: usize) -> Option<([u8; 4], usize)> {
-    let header = buf.get(off..off + 8)?;
-    let size = u32::from_be_bytes(header[0..4].try_into().ok()?) as usize;
-    if size < 8 || off + size > buf.len() {
+    let rest = buf.get(off..)?;
+    let size = crate::mp4box::next_box_len(rest).ok().flatten()?;
+    if size > rest.len() {
         return None;
     }
-    let kind: [u8; 4] = header[4..8].try_into().ok()?;
+    let kind: [u8; 4] = rest[4..8].try_into().ok()?;
     Some((kind, size))
 }
 
@@ -1722,6 +1721,18 @@ mod tests {
                 .unwrap();
             sink.bytes
         })
+    }
+
+    #[test]
+    fn next_box_reads_a_64_bit_size() {
+        const LARGE_HEADER_LEN: u64 = 16;
+        let payload = [0xAB; 4];
+        let mut buf = 1u32.to_be_bytes().to_vec();
+        buf.extend_from_slice(b"mdat");
+        buf.extend_from_slice(&(LARGE_HEADER_LEN + payload.len() as u64).to_be_bytes());
+        buf.extend_from_slice(&payload);
+        assert_eq!(next_box(&buf, 0), Some((*b"mdat", buf.len())));
+        assert_eq!(next_box(&buf[..buf.len() - 1], 0), None, "incomplete");
     }
 
     #[test]

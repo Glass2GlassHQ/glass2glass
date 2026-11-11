@@ -115,7 +115,7 @@ const AC3_RATES_HZ: [u32; 3] = [48_000, 44_100, 32_000];
 
 /// Full-bandwidth channels each `acmod` codes, before `lfeon` adds the LFE one
 /// (ATSC A/52 Table 5.8). Code 0 is the dual-mono `1+1` pair.
-const AC3_ACMOD_CHANNELS: [u8; 8] = [2, 1, 2, 3, 3, 4, 4, 5];
+pub(crate) const AC3_ACMOD_CHANNELS: [u8; 8] = [2, 1, 2, 3, 3, 4, 4, 5];
 
 /// The decoded fields of one AC-3 syncframe header.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -560,7 +560,7 @@ fn es_to_stream(es: &crate::mpegts::ElementaryStream) -> Option<Stream> {
         STREAM_TYPE_MPEG1_AUDIO | STREAM_TYPE_MPEG2_AUDIO => audio(AudioFormat::Mp2),
         // 0x06 is a generic private PES; only an 'Opus' registration marks it
         // as Opus (else g2g does not forward it).
-        STREAM_TYPE_PRIVATE_PES if es.opus_channels.is_some() => audio(AudioFormat::Opus),
+        STREAM_TYPE_PRIVATE_PES if es.opus.is_some() => audio(AudioFormat::Opus),
         STREAM_TYPE_PRIVATE_PES if es.av1 => (StreamType::Video, video(VideoCodec::Av1)),
         STREAM_TYPE_JPEG_XS if es.jpeg_xs.is_some() => {
             (StreamType::Video, video(VideoCodec::JpegXs))
@@ -753,7 +753,7 @@ fn es_to_ts_stream(es: &crate::mpegts::ElementaryStream) -> Option<TsStream> {
         STREAM_TYPE_MPEG1_VIDEO | STREAM_TYPE_MPEG2_VIDEO => Some(TsStream::Mpeg2),
         STREAM_TYPE_AAC | STREAM_TYPE_AAC_LATM => Some(TsStream::Aac),
         STREAM_TYPE_MPEG1_AUDIO | STREAM_TYPE_MPEG2_AUDIO => Some(TsStream::Mp2),
-        STREAM_TYPE_PRIVATE_PES if es.opus_channels.is_some() => Some(TsStream::Opus),
+        STREAM_TYPE_PRIVATE_PES if es.opus.is_some() => Some(TsStream::Opus),
         STREAM_TYPE_PRIVATE_PES if es.av1 => Some(TsStream::Av1),
         STREAM_TYPE_JPEG_XS if es.jpeg_xs.is_some() => Some(TsStream::JpegXs),
         STREAM_TYPE_AC3 => Some(TsStream::Ac3),
@@ -1498,11 +1498,11 @@ fn mpeg2_can_open_here(au: &[u8]) -> bool {
 fn in_band_config(demux: &TsDemuxer, pid: u16, stream: TsStream) -> Option<Vec<u8>> {
     match stream {
         // a transport stream states no pre-skip, which is what ffmpeg's demuxer assumes too
-        TsStream::Opus => Some(crate::opusparse::synth_opus_head(
-            demux.opus_channels(pid)?,
-            crate::opusparse::OPUS_RATE_HZ,
-            0,
-        )),
+        TsStream::Opus => Some(
+            demux
+                .opus_config(pid)?
+                .opus_head(crate::opusparse::OPUS_RATE_HZ, 0),
+        ),
         TsStream::DvbSub => {
             let (subtitling_type, composition, ancillary) = demux.subtitling(pid)?;
             Some(
@@ -1678,6 +1678,9 @@ impl MultiOutputElement for TsDemuxN {
                 PipelinePacket::Segment(seg) => {
                     // an upstream seek, or a discontinuity once the stream is open
                     let stream_opened = self.segment.is_some();
+                    if stream_opened {
+                        self.demux.forget_table_versions();
+                    }
                     let after_upstream_flush = core::mem::take(&mut self.withheld_flush);
                     if after_upstream_flush {
                         for port in 0..self.ports.len() {
@@ -1834,7 +1837,7 @@ mod tests {
         let es = crate::mpegts::ElementaryStream {
             pid: 0x100,
             stream_type: STREAM_TYPE_MPEG4P2,
-            opus_channels: None,
+            opus: None,
             ac3: false,
             klv: false,
             av1: false,
@@ -1862,7 +1865,7 @@ mod tests {
             es_to_ts_stream(&crate::mpegts::ElementaryStream {
                 pid: 0x100,
                 stream_type: STREAM_TYPE_MPEG4P2,
-                opus_channels: None,
+                opus: None,
                 ac3: false,
                 klv: false,
                 av1: false,

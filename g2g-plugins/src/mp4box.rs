@@ -272,7 +272,10 @@ pub(crate) fn boxes_at(data: &[u8]) -> impl Iterator<Item = (&[u8; 4], &[u8], us
 }
 
 fn box_at(data: &[u8], i: usize) -> Option<(&[u8; 4], &[u8], usize)> {
+    const SIZE_TO_END: u32 = 0;
     let (size, header_len) = match be_u32(data, i)? {
+        // ISO/IEC 14496-12 4.2: the last box can run to the end of the file
+        SIZE_TO_END => (data.len().checked_sub(i)?, BOX_HEADER_LEN),
         LARGE_SIZE_MARKER => (
             usize::try_from(be_u64(data, i + BOX_HEADER_LEN)?).ok()?,
             LARGE_BOX_HEADER_LEN,
@@ -893,6 +896,16 @@ mod tests {
         let meta = full_box(b"meta", 0, 0, &ilst);
         let udta = mp4_box(b"udta", &meta);
         mp4_box(b"moov", &udta)
+    }
+
+    #[test]
+    fn a_last_box_of_size_zero_runs_to_the_end() {
+        let mut file = mp4_box(b"ftyp", b"isom");
+        let moov_payload = mp4_box(b"mvhd", &[0; 4]);
+        file.extend_from_slice(&0u32.to_be_bytes());
+        file.extend_from_slice(b"moov");
+        file.extend_from_slice(&moov_payload);
+        assert_eq!(find_box(&file, b"moov"), Some(moov_payload.as_slice()));
     }
 
     #[test]

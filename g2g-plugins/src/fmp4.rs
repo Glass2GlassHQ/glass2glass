@@ -1340,10 +1340,13 @@ fn unread_audio_entry(
     let Ok(description) = SoundDescription::parse(payload, tag.tag) else {
         return Ok(None);
     };
-    let Some(channels) = u8::try_from(description.channels)
-        .ok()
-        .filter(|channels| *channels > 0)
-    else {
+    // TS 102 366 F.4 and F.6: an AC-3 or E-AC-3 entry's channel count is ignored for its dac3 or dec3
+    let declared_channels = ac3_specific_channels(fourcc, payload).or_else(|| {
+        u8::try_from(description.channels)
+            .ok()
+            .filter(|channels| *channels > 0)
+    });
+    let Some(channels) = declared_channels else {
         return Ok(None);
     };
     let kind = TrackKind::Audio {
@@ -1357,6 +1360,38 @@ fn unread_audio_entry(
         stored_pcm: None,
     };
     Ok(Some((kind, None)))
+}
+
+#[cfg(feature = "ffmpeg-long-tail")]
+fn ac3_specific_channels(fourcc: &[u8; 4], entry: &[u8]) -> Option<u8> {
+    let children = entry.get(sound_entry_children_at(entry).ok()?..)?;
+    let mut br = match fourcc {
+        b"ac-3" => {
+            let mut br = crate::annexb::BitReader::new(find_entry_child(children, b"dac3")?);
+            br.skip_bits(2 + 5 + 3)?; // fscod, bsid, bsmod
+            br
+        }
+        b"ec-3" => {
+            let mut br = crate::annexb::BitReader::new(find_entry_child(children, b"dec3")?);
+            br.skip_bits(13)?; // data_rate
+                               // dependent substreams add channels their chan_loc names, which this does not count
+            if br.read_bits(3)? != 0 {
+                return None; // num_ind_sub, so more than one independent substream
+            }
+            br.skip_bits(2 + 5 + 1 + 1 + 3)?; // fscod, bsid, reserved, asvc, bsmod
+            br
+        }
+        _ => return None,
+    };
+    let acmod = br.read_bits(3)? as usize;
+    let lfeon = br.read_bits(1)? as u8;
+    if fourcc == b"ec-3" {
+        br.skip_bits(3)?; // reserved
+        if br.read_bits(4)? != 0 {
+            return None; // num_dep_sub
+        }
+    }
+    Some(crate::audioframe::AC3_ACMOD_CHANNELS[acmod] + lfeon)
 }
 
 #[cfg(not(feature = "ffmpeg-long-tail"))]
@@ -1526,15 +1561,43 @@ fn parse_audio_entry(
         }
         (None, None) => return Err(G2gError::CapsMismatch),
     };
-    let channels = sound_entry_channels(entry)?;
+    let declared_channels = sound_entry_channels(entry).ok();
     let children = entry
         .get(sound_entry_children_at(entry)?..)
         .ok_or(G2gError::CapsMismatch)?;
     // QuickTime nests the esds in a `wave` box
-    let esds = find_entry_child(children, b"esds")
-        .or_else(|| find_path(children, &[b"wave", b"esds"]))
-        .ok_or(G2gError::CapsMismatch)?;
+    let esds =
+        find_entry_child(children, b"esds").or_else(|| find_path(children, &[b"wave", b"esds"]));
+    let Some(esds) = esds else {
+        // gst's qtdemux builds an AAC-LC config from the entry when an old writer left out the esds
+        const AAC_LC_OBJECT_TYPE: u8 = 2;
+        const SEVEN_POINT_ONE_CHANNEL_CONFIG: u8 = 7;
+        let channels = declared_channels.ok_or(G2gError::CapsMismatch)?;
+        let channel_config = match channels {
+            1..=6 => channels,
+            8 => SEVEN_POINT_ONE_CHANNEL_CONFIG,
+            _ => return Err(G2gError::CapsMismatch),
+        };
+        let sample_rate_index =
+            crate::aacparse::sample_rate_index(timescale).ok_or(G2gError::CapsMismatch)?;
+        let config = crate::aacparse::audio_specific_config(
+            AAC_LC_OBJECT_TYPE,
+            sample_rate_index,
+            channel_config,
+        );
+        return Ok(Some((
+            TrackKind::Audio {
+                format: AudioFormat::Aac,
+                channels,
+                sample_rate: timescale,
+                config: config.to_vec(),
+                stored_pcm: None,
+            },
+            cenc,
+        )));
+    };
     if MPEG_AUDIO_OBJECT_TYPES.contains(&parse_esds_decoder_config(esds)?.0) {
+        let channels = declared_channels.ok_or(G2gError::CapsMismatch)?;
         return Ok(Some((
             TrackKind::Audio {
                 format: AudioFormat::Mp3,
@@ -1547,6 +1610,10 @@ fn parse_audio_entry(
         )));
     }
     let config = parse_esds(esds)?;
+    // some writers leave the sample entry's channel count at 0 and state it in the config only
+    let channels = declared_channels
+        .or_else(|| crate::aacparse::audio_specific_config_info(&config).map(|info| info.channels))
+        .ok_or(G2gError::CapsMismatch)?;
     Ok(Some((
         TrackKind::Audio {
             format: AudioFormat::Aac,
@@ -2562,7 +2629,8 @@ fn parse_progressive_track(
     }
     durations.resize(sample_count, 0);
 
-    let ctts_offsets = composition_offsets(stbl, sample_count)?;
+    let media_duration: u64 = durations.iter().map(|&duration| u64::from(duration)).sum();
+    let ctts_offsets = composition_offsets(stbl, sample_count, media_duration)?;
 
     let chunk_offsets = chunk_offsets(stbl)?;
 
@@ -2840,19 +2908,36 @@ const FIRST_SAMPLE_DESCRIPTION: u32 = 1;
 type EntryParamSets = (VideoCodec, Vec<Vec<u8>>);
 
 // encoders write negative offsets into version 0 too, so both versions read signed, as in ffmpeg
-fn composition_offsets(stbl: &[u8], sample_count: usize) -> Result<Vec<i64>, G2gError> {
+fn composition_offsets(
+    stbl: &[u8],
+    sample_count: usize,
+    media_duration: u64,
+) -> Result<Vec<i64>, G2gError> {
+    let no_offsets = alloc::vec![0i64; sample_count];
     let Some(ctts) = find_box(stbl, b"ctts") else {
-        return Ok(alloc::vec![0i64; sample_count]);
+        return Ok(no_offsets);
     };
     let mut out: Vec<i64> = Vec::with_capacity(sample_count);
     for e in 0..be32(ctts, 4)? as usize {
         let cnt = be32(ctts, 8 + e * 8)? as usize;
-        let off = i64::from(be32(ctts, 12 + e * 8)? as i32);
+        let off = read_composition_offset(be32(ctts, 12 + e * 8)?);
+        // gst's qtdemux drops a ctts whose offset passes twice the track duration as corrupt
+        if off.unsigned_abs() / 2 > media_duration {
+            return Ok(no_offsets);
+        }
         let target = out.len().saturating_add(cnt).min(sample_count);
         out.resize(target, off);
     }
     out.resize(sample_count, 0);
     Ok(out)
+}
+
+fn read_composition_offset(field: u32) -> i64 {
+    // ISO/IEC 14496-12 8.6.1.3: i32::MIN marks a sample that is never presented, gst places it at 0
+    match field as i32 {
+        i32::MIN => 0,
+        offset => i64::from(offset),
+    }
 }
 
 // the parameter sets of each H.264 / H.265 sample entry, in stsd order
@@ -3228,7 +3313,7 @@ pub(crate) fn parse_trun(
         }
         let mut composition_offset = 0;
         if flags & 0x800 != 0 {
-            composition_offset = i64::from(be32(trun, at)? as i32);
+            composition_offset = read_composition_offset(be32(trun, at)?);
             at += 4;
         }
         samples.push(TrunSample {
@@ -4135,6 +4220,28 @@ mod tests {
     }
 
     #[test]
+    fn a_ctts_offset_beyond_twice_the_duration_drops_the_table() {
+        use crate::mp4box::full_box;
+        const MEDIA_DURATION: u64 = 4 * 3003;
+        let ctts = |offset: i32| {
+            let mut runs = 1u32.to_be_bytes().to_vec();
+            runs.extend_from_slice(&2u32.to_be_bytes());
+            runs.extend_from_slice(&offset.to_be_bytes());
+            full_box(b"ctts", 0, 0, &runs)
+        };
+        let corrupt = ctts((3 * MEDIA_DURATION) as i32);
+        assert_eq!(
+            composition_offsets(&corrupt, 2, MEDIA_DURATION).expect("ctts parses"),
+            alloc::vec![0, 0]
+        );
+        let never_presented = ctts(i32::MIN);
+        assert_eq!(
+            composition_offsets(&never_presented, 2, MEDIA_DURATION).expect("ctts parses"),
+            alloc::vec![0, 0]
+        );
+    }
+
+    #[test]
     fn composition_offsets_read_signed_in_version_0() {
         use crate::mp4box::full_box;
         const NEGATIVE_OFFSET: i32 = -3003;
@@ -4145,7 +4252,7 @@ mod tests {
         }
         let stbl = full_box(b"ctts", 0, 0, &runs);
         assert_eq!(
-            composition_offsets(&stbl, 4).expect("ctts parses"),
+            composition_offsets(&stbl, 4, 4 * 3003).expect("ctts parses"),
             alloc::vec![
                 3003,
                 i64::from(NEGATIVE_OFFSET),
@@ -4219,6 +4326,66 @@ mod tests {
     /// header (the DecoderSpecificInfo) as its single parameter set; a different
     /// objectTypeIndication in an mp4v box is rejected so another codec is not
     /// mistagged as MPEG-4 Part 2.
+    #[cfg(feature = "ffmpeg-long-tail")]
+    #[test]
+    fn an_ac3_entry_takes_its_channel_count_from_dac3() {
+        use crate::annexb::BitWriter;
+        use crate::mp4box::mp4_box;
+        const ACMOD_3_2: u32 = 7;
+        let mut w = BitWriter::default();
+        w.write_bits(0, 2); // fscod
+        w.write_bits(8, 5); // bsid
+        w.write_bits(0, 3); // bsmod
+        w.write_bits(ACMOD_3_2, 3);
+        w.write_bit(1); // lfeon
+        w.write_bits(0, 5 + 5); // bit_rate_code, reserved
+        let mut entry = vec![0u8; 28];
+        // the stereo count gst's qtmux once wrote for every AC-3 track
+        entry[16..18].copy_from_slice(&2u16.to_be_bytes());
+        entry.extend_from_slice(&mp4_box(b"dac3", &w.into_bytes()));
+        assert_eq!(ac3_specific_channels(b"ac-3", &entry), Some(6));
+    }
+
+    #[test]
+    fn an_mp4a_entry_without_esds_or_channel_count_still_decodes() {
+        use crate::mp4box::{full_box, mp4_box};
+        const SAMPLE_RATE: u32 = 48_000;
+        const STEREO_LC_AT_48_KHZ: [u8; 2] = [0x11, 0x90];
+        let descriptor = |tag: u8, body: &[u8]| {
+            let mut v = vec![tag, body.len() as u8];
+            v.extend_from_slice(body);
+            v
+        };
+        let esds = |asc: &[u8]| {
+            let mut dcd_body = vec![0u8; 13];
+            dcd_body[0] = 0x40; // objectTypeIndication: MPEG-4 audio
+            dcd_body.extend_from_slice(&descriptor(0x05, asc));
+            let mut es_body = vec![0u8; 3];
+            es_body.extend_from_slice(&descriptor(0x04, &dcd_body));
+            full_box(b"esds", 0, 0, &descriptor(0x03, &es_body))
+        };
+        let mp4a = |channels: u16, child: &[u8]| {
+            let mut p = vec![0u8; 28];
+            p[16..18].copy_from_slice(&channels.to_be_bytes());
+            p.extend_from_slice(child);
+            mp4_box(b"mp4a", &p)
+        };
+        let audio = |entry: Vec<u8>| match parse_audio_entry(&entry, SAMPLE_RATE) {
+            Ok(Some((
+                TrackKind::Audio {
+                    channels, config, ..
+                },
+                _,
+            ))) => (channels, config),
+            other => panic!("expected an AAC track, got {other:?}"),
+        };
+        assert_eq!(audio(mp4a(2, &[])), (2, STEREO_LC_AT_48_KHZ.to_vec()));
+        assert_eq!(
+            audio(mp4a(0, &esds(&STEREO_LC_AT_48_KHZ))),
+            (2, STEREO_LC_AT_48_KHZ.to_vec())
+        );
+    }
+
     #[test]
     fn parse_header_reads_mp4v_mpeg4_part2() {
         use crate::mp4box::{full_box, mp4_box};

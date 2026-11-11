@@ -296,10 +296,10 @@ const PES_FLAGS_OFFSET: usize = 6;
 pub struct ElementaryStream {
     pub pid: u16,
     pub stream_type: u8,
-    /// Opus channel count for a private (0x06) stream whose ES descriptors carry
+    /// Opus channel layout for a private (0x06) stream whose ES descriptors carry
     /// the 'Opus' registration + DVB extension descriptor. `Some` marks the stream
     /// as Opus (disambiguating the generic 0x06); `None` for any other 0x06 use.
-    pub opus_channels: Option<u8>,
+    pub opus: Option<crate::opusparse::OpusChannelConfig>,
     /// True for a private (0x06) stream carrying an AC-3 descriptor (tag 0x6A), the
     /// DVB carriage of AC-3 (disambiguating the generic 0x06). ATSC AC-3 rides its
     /// own `stream_type` 0x81 and does not set this.
@@ -751,13 +751,25 @@ impl TsDemuxer {
         self.eit_generation
     }
 
+    pub fn forget_table_versions(&mut self) {
+        // spliced muxers often reuse the same PAT and PMT versions
+        self.pat_version = None;
+        for program in &mut self.programs {
+            program.pmt_version = None;
+        }
+    }
+
     /// Opus channel count for `pid`, if its PMT entry is a private (0x06) stream
     /// carrying the 'Opus' registration descriptor; `None` for any other stream.
     pub fn opus_channels(&self, pid: u16) -> Option<u8> {
+        self.opus_config(pid).map(|config| config.channels)
+    }
+
+    pub fn opus_config(&self, pid: u16) -> Option<crate::opusparse::OpusChannelConfig> {
         self.streams()
             .iter()
             .find(|s| s.pid == pid)
-            .and_then(|s| s.opus_channels)
+            .and_then(|s| s.opus)
     }
 
     /// Whether `pid` is a private (0x06) stream carrying an AC-3 descriptor (the
@@ -904,8 +916,10 @@ impl TsDemuxer {
         if continuity == Continuity::Lost {
             match table {
                 Some(PsiTable::Pat) => self.pat_version = None,
-                Some(PsiTable::Pmt(program_index)) => {
-                    self.programs[program_index].pmt_version = None
+                Some(PsiTable::Pmt(_)) => {
+                    for program in self.programs.iter_mut().filter(|p| p.pmt_pid == pid) {
+                        program.pmt_version = None;
+                    }
                 }
                 _ => {}
             }
@@ -1385,10 +1399,23 @@ impl TsDemuxer {
         self.eit_generation = self.eit_generation.saturating_add(1);
     }
 
-    fn parse_pmt(&mut self, prog_idx: usize, section: &[u8]) {
+    fn parse_pmt(&mut self, pmt_pid_program: usize, section: &[u8]) {
         if section.first() != Some(&0x02) {
             return; // table_id 0x02 = PMT
         }
+        // programs can share one PMT PID, and the section's table_id_extension names its program
+        let pmt_pid = self.programs[pmt_pid_program].pmt_pid;
+        let Some(program_number) = section.get(3..5).map(|n| u16::from_be_bytes([n[0], n[1]]))
+        else {
+            return;
+        };
+        let Some(prog_idx) = self
+            .programs
+            .iter()
+            .position(|p| p.pmt_pid == pmt_pid && p.number == program_number)
+        else {
+            return;
+        };
         let known_version = self.programs[prog_idx].pmt_version;
         // a repeat of the PMT in force carries nothing new, and a changed one must pass its CRC
         let body = match known_version {
@@ -1409,10 +1436,14 @@ impl TsDemuxer {
         if known_version == Some(version) {
             return;
         }
-        self.programs[prog_idx].pmt_version = Some(version);
-        self.programs[prog_idx].pcr_pid = Some((((body[8] & 0x1F) as u16) << 8) | body[9] as u16);
         let program_info_length = (((body[10] & 0x0F) as usize) << 8) | body[11] as usize;
         let mut i = 12usize.saturating_add(program_info_length);
+        // gst skips a PMT that lists no streams, some muxers send one ahead of the real PMT
+        if i.saturating_add(5) > body.len() {
+            return;
+        }
+        self.programs[prog_idx].pmt_version = Some(version);
+        self.programs[prog_idx].pcr_pid = Some((((body[8] & 0x1F) as u16) << 8) | body[9] as u16);
         while i + 5 <= body.len() {
             let stream_type = body[i];
             let pid = (((body[i + 1] & 0x1F) as u16) << 8) | body[i + 2] as u16;
@@ -1424,7 +1455,7 @@ impl TsDemuxer {
             // Opus / AC-3 / KLV apart from an unidentified private stream; the
             // language descriptor rides any stream type.
             let private = descriptors.filter(|_| stream_type == STREAM_TYPE_PRIVATE_PES);
-            let opus_channels = private.and_then(parse_opus_descriptors);
+            let opus = private.and_then(parse_opus_descriptors);
             let ac3 = private.is_some_and(has_ac3_descriptor);
             // A metadata-in-PES (0x15) stream is KLV unless its metadata_descriptor
             // names another format, such as Apple's timed ID3; a private 0x06 needs
@@ -1440,7 +1471,7 @@ impl TsDemuxer {
             let mut es = ElementaryStream {
                 pid,
                 stream_type,
-                opus_channels,
+                opus,
                 ac3,
                 klv,
                 av1: private.is_some_and(|d| {
@@ -1505,6 +1536,7 @@ impl TsDemuxer {
     }
 
     fn read_pes_header(&mut self, index: usize) {
+        const MAX_PTS_DTS_GAP_90KHZ: u64 = 5 * PES_CLOCK_HZ as u64;
         let pending = &self.pending[index];
         if pending.header_read {
             return;
@@ -1512,7 +1544,13 @@ impl TsDemuxer {
         let (pts, dts, es) = parse_pes_header(&pending.data);
         let header_len = pending.data.len() - es.len();
         let pid = pending.pid;
-        let (pts, dts) = self.extend_pes_timestamps(pid, pts, dts);
+        let (mut pts, dts) = self.extend_pes_timestamps(pid, pts, dts);
+        // gst's tsdemux keeps only the DTS when the two are further apart than any reorder
+        if let (Some(raw_pts), Some(raw_dts)) = (pts, dts) {
+            if raw_pts.abs_diff(raw_dts) > MAX_PTS_DTS_GAP_90KHZ {
+                pts = dts;
+            }
+        }
         let pending = &mut self.pending[index];
         pending.pts_90khz = pts;
         pending.dts_90khz = dts;
@@ -1843,13 +1881,12 @@ pub(crate) fn decode_timestamp(b: &[u8]) -> u64 {
 /// Walk a PMT ES-info descriptor list for the Opus carriage (DVB/ETSI): an
 /// `registration_descriptor` (tag 0x05) with format_identifier "Opus", plus a
 /// DVB `extension_descriptor` (tag 0x7F) whose extension tag is 0x80 carrying the
-/// `channel_config_code`. Returns the Opus channel count when the registration is
-/// present (`code == 0` is dual-mono, mapped to 2 channels; `1..=8` is the count;
-/// a missing/unknown extension defaults to stereo), else `None`. Every field is
+/// `channel_config_code`. Returns the channel layout when the registration is
+/// present (a missing extension defaults to stereo), else `None`. Every field is
 /// bounds-checked so a malformed descriptor loop fails to `None`, never panics.
-fn parse_opus_descriptors(mut desc: &[u8]) -> Option<u8> {
+fn parse_opus_descriptors(mut desc: &[u8]) -> Option<crate::opusparse::OpusChannelConfig> {
     let mut is_opus = false;
-    let mut channels: Option<u8> = None;
+    let mut config = Some(crate::opusparse::OpusChannelConfig::vorbis(2));
     while desc.len() >= 2 {
         let tag = desc[0];
         let len = desc[1] as usize;
@@ -1861,14 +1898,73 @@ fn parse_opus_descriptors(mut desc: &[u8]) -> Option<u8> {
             }
             // DVB extension_descriptor: ext tag 0x80 (provisional Opus) + code.
             DESC_TAG_EXTENSION if body.len() >= 2 && body[0] == DESC_EXT_TAG_OPUS => {
-                let code = body[1];
-                channels = Some(if code == 0 { 2 } else { code });
+                config = opus_channel_config(body[1], &body[2..]);
             }
             _ => {}
         }
         desc = &desc[2 + len..];
     }
-    is_opus.then(|| channels.unwrap_or(2))
+    if is_opus {
+        config
+    } else {
+        None
+    }
+}
+
+fn opus_channel_config(code: u8, extension: &[u8]) -> Option<crate::opusparse::OpusChannelConfig> {
+    use crate::opusparse::OpusChannelConfig;
+    // the channel_config_code forms gst's tsdemux reads, from ETSI TS 102 366 Annex I
+    const DUAL_MONO_ONE_STREAM: u8 = 0x00;
+    const DUAL_MONO_TWO_STREAMS: u8 = 0x80;
+    const EXTENDED: u8 = 0x81;
+    const MAPPING_FAMILY_UNDEFINED: u8 = 255;
+    const STEREO: u8 = 2;
+    let mut config = OpusChannelConfig::vorbis(STEREO);
+    match code {
+        DUAL_MONO_ONE_STREAM | DUAL_MONO_TWO_STREAMS => {
+            config.mapping_family = MAPPING_FAMILY_UNDEFINED;
+            (config.stream_count, config.coupled_count) = if code == DUAL_MONO_ONE_STREAM {
+                (1, 1)
+            } else {
+                (2, 0)
+            };
+            config.mapping[..2].copy_from_slice(&[0, 1]);
+        }
+        1..=8 => config = OpusChannelConfig::vorbis(code),
+        0x82..=0x88 => {
+            config.channels = code & 0x0F;
+            config.mapping_family = crate::opusparse::MAPPING_FAMILY_VORBIS;
+            config.stream_count = config.channels;
+            config.coupled_count = 0;
+            for (slot, index) in config.mapping.iter_mut().zip(0..) {
+                *slot = index;
+            }
+        }
+        EXTENDED => {
+            let (&channels, &mapping_family) = (extension.first()?, extension.get(1)?);
+            if channels == 0 || usize::from(channels) > config.mapping.len() {
+                return None;
+            }
+            if mapping_family == crate::opusparse::MAPPING_FAMILY_RTP && channels <= STEREO {
+                return Some(OpusChannelConfig::vorbis(channels));
+            }
+            // each field is as wide as the bit length of its bound
+            let bit_length = |bound: u32| u32::BITS - bound.leading_zeros();
+            let mut br = crate::annexb::BitReader::new(&extension[2..]);
+            let stream_count = br.read_bits(bit_length(u32::from(channels)))? + 1;
+            let coupled_count = br.read_bits(bit_length(stream_count + 1))?;
+            let entry_bits = bit_length(stream_count + coupled_count + 1);
+            config.channels = channels;
+            config.mapping_family = mapping_family;
+            config.stream_count = u8::try_from(stream_count).ok()?;
+            config.coupled_count = u8::try_from(coupled_count).ok()?;
+            for slot in &mut config.mapping[..usize::from(channels)] {
+                *slot = br.read_bits(entry_bits)? as u8;
+            }
+        }
+        _ => return None,
+    }
+    Some(config)
 }
 
 /// Whether a PMT ES-info descriptor list carries an AC-3 descriptor (tag 0x6A,
@@ -3368,7 +3464,7 @@ fn metadata_au_cell(sequence_number: u8, au: &[u8]) -> Vec<u8> {
 /// video), matching what [`parse_pes_header`] reads. A DTS is written (flags
 /// '11', a 10-byte field pair) only when it is present and differs from the PTS;
 /// otherwise PTS-only.
-fn pes_header(
+pub(crate) fn pes_header(
     stream_id: u8,
     payload_len: usize,
     pts_90khz: Option<u64>,
@@ -3655,9 +3751,13 @@ pub(crate) mod tests {
 
     /// PMT body (from section[3]) announcing one elementary stream.
     fn pmt_body(es_pid: u16, stream_type: u8) -> Vec<u8> {
+        pmt_body_for(1, es_pid, stream_type)
+    }
+
+    fn pmt_body_for(program: u16, es_pid: u16, stream_type: u8) -> Vec<u8> {
         alloc::vec![
-            0x00,
-            0x01, // program_number
+            (program >> 8) as u8,
+            program as u8,
             0xC1,
             0x00,
             0x00, // version, section/last
@@ -3779,7 +3879,7 @@ pub(crate) mod tests {
             &[ElementaryStream {
                 pid: es_pid,
                 stream_type: STREAM_TYPE_H264,
-                opus_channels: None,
+                opus: None,
                 ac3: false,
                 klv: false,
                 av1: false,
@@ -3866,7 +3966,7 @@ pub(crate) mod tests {
         d.push_packet(&psi_packet(
             second_pmt_pid,
             0x02,
-            &pmt_body(second_pid, STREAM_TYPE_H264),
+            &pmt_body_for(2, second_pid, STREAM_TYPE_H264),
         ));
         let pids: Vec<u16> = d.streams().iter().map(|es| es.pid).collect();
         assert_eq!(pids, [second_pid]);
@@ -3978,7 +4078,11 @@ pub(crate) mod tests {
             let mut d = TsDemuxer::new();
             d.push_packet(&psi_packet(PID_PAT, 0x00, &pat));
             d.push_packet(&psi_packet(pmt1, 0x02, &pmt_body(es1, STREAM_TYPE_H264)));
-            d.push_packet(&psi_packet(pmt2, 0x02, &pmt_body(es2, STREAM_TYPE_AAC)));
+            d.push_packet(&psi_packet(
+                pmt2,
+                0x02,
+                &pmt_body_for(2, es2, STREAM_TYPE_AAC),
+            ));
             d
         };
 
@@ -4368,18 +4472,47 @@ pub(crate) mod tests {
     #[test]
     fn opus_descriptors_parse_and_reject_malformed() {
         // registration 'Opus' + extension channel code 1 (mono).
+        let channels = |desc: &[u8]| parse_opus_descriptors(desc).map(|config| config.channels);
         let desc = [0x05, 4, b'O', b'p', b'u', b's', 0x7F, 2, 0x80, 1];
-        assert_eq!(parse_opus_descriptors(&desc), Some(1));
+        assert_eq!(channels(&desc), Some(1));
         // registration alone defaults to stereo; dual-mono code 0 maps to 2.
-        assert_eq!(
-            parse_opus_descriptors(&[0x05, 4, b'O', b'p', b'u', b's']),
-            Some(2)
-        );
+        assert_eq!(channels(&[0x05, 4, b'O', b'p', b'u', b's']), Some(2));
         let dual = [0x05, 4, b'O', b'p', b'u', b's', 0x7F, 2, 0x80, 0];
-        assert_eq!(parse_opus_descriptors(&dual), Some(2));
+        assert_eq!(channels(&dual), Some(2));
         // no 'Opus' registration: not Opus. Truncated descriptor: fails to None.
         assert_eq!(parse_opus_descriptors(&[0x7F, 2, 0x80, 2]), None);
         assert_eq!(parse_opus_descriptors(&[0x05, 40, b'O']), None);
+    }
+
+    #[test]
+    fn opus_channel_config_codes_above_0x80_name_the_layout() {
+        let layout = |code: u8, extension: &[u8]| {
+            opus_channel_config(code, extension).map(|config| {
+                (
+                    config.channels,
+                    config.mapping_family,
+                    config.stream_count,
+                    config.coupled_count,
+                    config.mapping[..usize::from(config.channels)].to_vec(),
+                )
+            })
+        };
+        // dual mono as two uncoupled streams
+        assert_eq!(layout(0x80, &[]), Some((2, 255, 2, 0, alloc::vec![0, 1])));
+        // six channels, one uncoupled stream each
+        assert_eq!(
+            layout(0x86, &[]),
+            Some((6, 1, 6, 0, alloc::vec![0, 1, 2, 3, 4, 5]))
+        );
+        // three channels in family 255: two streams, one coupled, mapping 2 0 1
+        // packed in 2, 2 and 3 x 3 bits
+        let extended = [3, 255, 0b0101_0100, 0b0000_1000];
+        assert_eq!(
+            layout(0x81, &extended),
+            Some((3, 255, 2, 1, alloc::vec![2, 0, 1]))
+        );
+        assert_eq!(layout(0x81, &[0, 255]), None, "zero channels");
+        assert_eq!(layout(0x89, &[]), None, "undefined code");
     }
 
     /// The muxer's Opus stream demuxes as Opus: the PMT entry carries the
@@ -5542,6 +5675,58 @@ pub(crate) mod tests {
                 "counter {new_counter} after 6"
             );
         }
+    }
+
+    #[test]
+    fn programs_sharing_a_pmt_pid_keep_their_own_streams_past_an_empty_pmt() {
+        let shared_pmt_pid = 0x1000;
+        let (es1, es2) = (0x0100, 0x0200);
+        let mut d = TsDemuxer::new();
+        d.push_packet(&psi_packet(
+            PID_PAT,
+            0x00,
+            &pat_body_multi(&[(1, shared_pmt_pid), (2, shared_pmt_pid)]),
+        ));
+        let empty_pmt = pmt_body_for(1, es1, STREAM_TYPE_H264)[..9].to_vec();
+        d.push_packet(&psi_packet(shared_pmt_pid, 0x02, &empty_pmt));
+        d.push_packet(&psi_packet(
+            shared_pmt_pid,
+            0x02,
+            &pmt_body_for(1, es1, STREAM_TYPE_H264),
+        ));
+        d.push_packet(&psi_packet(
+            shared_pmt_pid,
+            0x02,
+            &pmt_body_for(2, es2, STREAM_TYPE_AAC),
+        ));
+        let programs: Vec<(u16, Vec<u16>)> = d
+            .programs()
+            .map(|(number, streams)| (number, streams.iter().map(|es| es.pid).collect()))
+            .collect();
+        assert_eq!(programs, [(1, alloc::vec![es1]), (2, alloc::vec![es2])]);
+    }
+
+    #[test]
+    fn a_dts_far_from_its_pts_replaces_it() {
+        const DTS_90KHZ: u64 = 90_000;
+        const BOGUS_PTS_90KHZ: u64 = DTS_90KHZ + 6 * PES_CLOCK_HZ as u64;
+        let pmt_pid = 0x1000;
+        let es_pid = 0x0100;
+        let es = [0, 0, 0, 1, 0x65];
+        let mut pes_bytes = pes_header(0xE0, es.len(), Some(BOGUS_PTS_90KHZ), Some(DTS_90KHZ));
+        pes_bytes.extend_from_slice(&es);
+        let mut d = TsDemuxer::new();
+        d.push_packet(&psi_packet(PID_PAT, 0x00, &pat_body(1, pmt_pid)));
+        d.push_packet(&psi_packet(
+            pmt_pid,
+            0x02,
+            &pmt_body(es_pid, STREAM_TYPE_H264),
+        ));
+        d.push_packet(&ts_packet(es_pid, true, &pes_bytes));
+        d.flush();
+        let units = d.take_units();
+        assert_eq!(units[0].dts_90khz, Some(DTS_90KHZ));
+        assert_eq!(units[0].pts_90khz, Some(DTS_90KHZ));
     }
 
     #[test]

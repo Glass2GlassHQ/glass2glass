@@ -163,6 +163,14 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M2247: H.264 SEI timecodes count frames by `nuit_field_based_flag`.
 - M2248: `h264parse` drops a VUI frame rate above twice what the level allows.
 - M2249: `jpegparse` drops a broken image and resyncs at the next one instead of failing.
+- M2250: `tsdemux` reads every DVB Opus `channel_config_code` layout, dual mono and the extended mapping included.
+- M2251: `tsdemux` matches a PMT to its program by `program_number` and skips a PMT that lists no streams.
+- M2252: `tsdemux` drops a PTS more than 5 s from its DTS, and `psdemux` drops a DTS above the PTS.
+- M2253: `tsdemux` rereads the PAT and PMT after a new segment, such as an HLS discontinuity.
+- M2254: `ivfdemux` leaves the size out of its caps when the header says 0x0.
+- M2255: MP4 `mp4a` entries without `esds` or with 0 channels play as AAC-LC, and AC-3 and E-AC-3 take channels from `dac3` and `dec3`.
+- M2256: MP4 demuxers ignore a `ctts` whose offsets exceed twice the track duration.
+- M2257: MP4 demuxers read a size-0 last box, and `mp4demuxn` reads 64-bit box sizes.
 
 Breaking: `TimecodeMeta.frames` is a `u16`, `WIRE_VERSION` is 6, `FrameTiming` gains `start_discard_ns` and `end_discard_ns`, `RtpRecvConfig` gains `parameter_sets`, `RtmpPublisher::push` fails with a `PublishRefusal`, and `Interlace` gains `InterleavedBottomFieldFirst`.
 

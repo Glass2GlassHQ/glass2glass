@@ -131,7 +131,9 @@ impl IvfDemux {
             self.header = Some(header);
         }
         let header = self.header.expect("parsed above");
-        if !self.caps_sent {
+        // tools that do not know the size write 0x0, which the bitstream parser downstream fills in
+        let header_has_size = header.width > 0 && header.height > 0;
+        if !self.caps_sent && header_has_size {
             // rate / scale is the timestamp timebase, not a frame rate
             out.push(PipelinePacket::CapsChanged(Caps::CompressedVideo {
                 codec: header.codec,
@@ -143,8 +145,8 @@ impl IvfDemux {
                 alignment: g2g_core::BitstreamAlignment::Unspecified,
             }))
             .await?;
-            self.caps_sent = true;
         }
+        self.caps_sent = true;
         loop {
             let pending = self.buf.as_slice();
             if pending.len() < FRAME_HEADER_LEN {
@@ -375,6 +377,22 @@ mod tests {
             payloads(&sink.packets),
             vec![&[1u8, 2, 3][..], &[4, 5, 6, 7]]
         );
+    }
+
+    #[tokio::test]
+    async fn a_header_without_a_size_announces_no_geometry() {
+        let stream = ivf_stream(b"VP90", 0, 0, &[&[1, 2, 3]]);
+        let mut demux = configured();
+        let mut sink = CollectSink::default();
+        demux
+            .process(PipelinePacket::DataFrame(data_frame(stream)), &mut sink)
+            .await
+            .unwrap();
+        assert!(!sink
+            .packets
+            .iter()
+            .any(|packet| matches!(packet, PipelinePacket::CapsChanged(_))));
+        assert_eq!(payloads(&sink.packets), vec![&[1u8, 2, 3][..]]);
     }
 
     #[tokio::test]

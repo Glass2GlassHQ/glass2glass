@@ -92,6 +92,7 @@ pub(crate) const SAMPLE_RATES: [u32; 13] = [
 pub(crate) const ADTS_PROFILE_AAC_LC: u8 = 1;
 
 #[cfg(any(
+    feature = "std",
     all(
         any(target_os = "linux", target_os = "macos", windows),
         feature = "ffmpeg"
@@ -116,10 +117,18 @@ pub(crate) fn asc_from_adts(au: &[u8]) -> Option<[u8; ADTS_AUDIO_SPECIFIC_CONFIG
     let object_type = ((au[2] >> 6) & 0x03) + 1; // profile + 1
     let sr_index = (au[2] >> 2) & 0x0F;
     let channel_config = ((au[2] & 0x01) << 2) | ((au[3] >> 6) & 0x03);
-    Some([
-        (object_type << 3) | (sr_index >> 1),
-        ((sr_index & 1) << 7) | (channel_config << 3),
-    ])
+    Some(audio_specific_config(object_type, sr_index, channel_config))
+}
+
+pub(crate) fn audio_specific_config(
+    object_type: u8,
+    sample_rate_index: u8,
+    channel_config: u8,
+) -> [u8; ADTS_AUDIO_SPECIFIC_CONFIG_LEN] {
+    [
+        (object_type << 3) | (sample_rate_index >> 1),
+        ((sample_rate_index & 1) << 7) | (channel_config << 3),
+    ]
 }
 
 /// Strip the ADTS header (7 bytes, or 9 with CRC) from an AAC access unit.

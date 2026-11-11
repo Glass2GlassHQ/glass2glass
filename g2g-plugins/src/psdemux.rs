@@ -160,11 +160,14 @@ struct PendingSpu {
 /// their own `0010` / `0011` prefixes, which no MPEG-2 header can collide with
 /// (its byte 6 is always 0x80..=0xBF).
 fn ps_pes_payload(packet: &[u8]) -> (Option<u64>, Option<u64>, &[u8]) {
-    match packet.get(6) {
+    let (pts, dts, payload) = match packet.get(6) {
         Some(b) if b & 0xC0 == 0x80 => parse_pes_header(packet),
         Some(_) => mpeg1_pes_payload(packet),
-        None => (None, None, &[]),
-    }
+        None => (None, None, &[][..]),
+    };
+    // gst's mpegpsdemux drops a DTS above the PTS, which no valid stream codes
+    let dts = dts.filter(|&dts| pts.is_none_or(|pts| dts <= pts));
+    (pts, dts, payload)
 }
 
 /// The MPEG-1 (ISO 11172-1) packet header: up to 16 stuffing bytes, an optional
@@ -2017,5 +2020,25 @@ impl MultiOutputElement for PsDemuxN {
 
     fn latency(&self) -> LatencyReport {
         LatencyReport::buffered(self.held_picture_ns, Some(self.held_picture_ns))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_dts_above_the_pts_is_dropped() {
+        const PTS_90KHZ: u64 = 90_000;
+        let es = [0, 0, 1, 0x00];
+        let packet = |dts_90khz: u64| {
+            let mut packet =
+                crate::mpegts::pes_header(0xE0, es.len(), Some(PTS_90KHZ), Some(dts_90khz));
+            packet.extend_from_slice(&es);
+            packet
+        };
+        let below = PTS_90KHZ - 3_000;
+        assert_eq!(ps_pes_payload(&packet(below)).1, Some(below));
+        assert_eq!(ps_pes_payload(&packet(PTS_90KHZ + 3_000)).1, None);
     }
 }

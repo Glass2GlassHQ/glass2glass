@@ -98,29 +98,60 @@ pub(crate) const VORBIS_MAPPINGS: [(u8, u8, &[u8]); 8] = [
     (5, 3, &[0, 6, 1, 2, 3, 4, 5, 7]),
 ];
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OpusChannelConfig {
+    pub channels: u8,
+    pub mapping_family: u8,
+    pub stream_count: u8,
+    pub coupled_count: u8,
+    // OpusHead mapping family 1 covers up to eight channels
+    pub mapping: [u8; VORBIS_MAPPINGS.len()],
+}
+
+impl OpusChannelConfig {
+    // mono and stereo take mapping family 0, three to eight channels family 1 in the Vorbis order
+    pub(crate) fn vorbis(channels: u8) -> Self {
+        let channels = channels.clamp(1, VORBIS_MAPPINGS.len() as u8);
+        let (stream_count, coupled_count, table) = VORBIS_MAPPINGS[usize::from(channels) - 1];
+        let mut mapping = [0; VORBIS_MAPPINGS.len()];
+        mapping[..table.len()].copy_from_slice(table);
+        Self {
+            channels,
+            mapping_family: if channels <= 2 {
+                MAPPING_FAMILY_RTP
+            } else {
+                MAPPING_FAMILY_VORBIS
+            },
+            stream_count,
+            coupled_count,
+            mapping,
+        }
+    }
+
+    pub(crate) fn opus_head(&self, sample_rate: u32, pre_skip: u16) -> Vec<u8> {
+        let mut h = Vec::from(*b"OpusHead");
+        h.push(1); // version
+        h.push(self.channels);
+        h.extend_from_slice(&pre_skip.to_le_bytes());
+        h.extend_from_slice(&sample_rate.max(1).to_le_bytes()); // original input rate
+        h.extend_from_slice(&0i16.to_le_bytes()); // output gain
+        h.push(self.mapping_family);
+        if self.mapping_family == MAPPING_FAMILY_RTP {
+            return h;
+        }
+        h.push(self.stream_count);
+        h.push(self.coupled_count);
+        h.extend_from_slice(&self.mapping[..usize::from(self.channels)]);
+        h
+    }
+}
+
 /// A synthesized `OpusHead` (RFC 7845 §5.1) for a stream that carried none: a
 /// freshly encoded one, whose pre-skip is the encoder's lookahead, or one out of
-/// a transport stream, whose packets start with no pre-skip to state. Mono and
-/// stereo take channel mapping family 0, three to eight channels family 1 in
-/// the Vorbis order, and the count is clamped to that range.
+/// a transport stream, whose packets start with no pre-skip to state. The
+/// channel count is clamped to the one to eight [`OpusChannelConfig::vorbis`] covers.
 pub(crate) fn synth_opus_head(channels: u8, sample_rate: u32, pre_skip: u16) -> Vec<u8> {
-    let channels = channels.clamp(1, VORBIS_MAPPINGS.len() as u8);
-    let mut h = Vec::from(*b"OpusHead");
-    h.push(1); // version
-    h.push(channels);
-    h.extend_from_slice(&pre_skip.to_le_bytes());
-    h.extend_from_slice(&sample_rate.max(1).to_le_bytes()); // original input rate
-    h.extend_from_slice(&0i16.to_le_bytes()); // output gain
-    if channels <= 2 {
-        h.push(MAPPING_FAMILY_RTP);
-        return h;
-    }
-    let (streams, coupled_streams, table) = VORBIS_MAPPINGS[usize::from(channels) - 1];
-    h.push(MAPPING_FAMILY_VORBIS);
-    h.push(streams);
-    h.push(coupled_streams);
-    h.extend_from_slice(table);
-    h
+    OpusChannelConfig::vorbis(channels).opus_head(sample_rate, pre_skip)
 }
 
 /// Fixed part of an RFC 8316 `dOps` payload: the same fields big-endian, with

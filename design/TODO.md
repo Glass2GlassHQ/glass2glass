@@ -299,8 +299,6 @@ libraries installed.
   independent implementation.
 - **HLS:** a playlist that declares a new `#EXT-X-MAP` partway through keeps
   only the last one, so segments before it get the wrong init segment.
-- **HLS:** reset `tsdemux`'s PSI versions at a discontinuity segment as well as
-  on a continuity-counter jump.
 
 ## Capture sources
 
@@ -395,22 +393,8 @@ libraries installed.
 - **ST 2038 elements:** `st2038ancdemux` should add a port when a stream no pad
   names appears, once a launch line can link a pad that appears at run time.
 - **Demuxer bugs** (gst commit sweep 2020-11 to 2023-11):
-  - `tsdemux` reads a nonzero DVB Opus `channel_config_code` as the channel
-    count, so 0x80 to 0x88 give 128 or more channels.
-  - `tsdemux` drops a PMT that follows an empty PMT of the same version, and
-    merges programs that share one PMT PID because it never checks
-    `program_number`.
-  - `tsdemux` and `psdemux` pass DTS through unchecked, and an AU without PTS
-    gets 0 instead of `PTS_NONE`.
-  - An MP4 `mp4a` entry without `esds`, or with channel count 0, fails the whole
-    file. Build an AAC-LC config or skip the track.
-  - MP4 boxes of size 0 (to end of file) are refused, and `mp4demuxn` refuses
-    64-bit box sizes.
-  - `ivfdemux` puts a 0x0 header size into its caps.
-  - MP4 composition offsets have no sanity bound, and a negative PTS clamps to
-    0 instead of shifting the track.
-  - AC-3 and E-AC-3 in MP4 take the channel count from the sample entry, which
-    TS 102 366 says to ignore.
+  - `tsdemux` and `psdemux` give an AU without PTS 0 instead of `PTS_NONE`.
+  - A negative MP4 PTS clamps to 0 instead of shifting the track.
 - **Demuxer features:** VP8 and VP9 alpha from Matroska BlockAdditions, ONVIF
   `metx` tracks and `cstb` start times in MP4, AVC-Intra fourccs in MOV, and
   AC-4 and E-AC-3 in MPEG-TS.
