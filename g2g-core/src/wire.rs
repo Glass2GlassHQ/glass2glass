@@ -700,6 +700,7 @@ fn interlace_to_u8(i: Interlace) -> u8 {
         Interlace::Any => 0,
         Interlace::Progressive => 1,
         Interlace::Interleaved => 2,
+        Interlace::InterleavedBottomFieldFirst => 3,
     }
 }
 fn interlace_from_u8(v: u8) -> Result<Interlace, WireError> {
@@ -707,6 +708,7 @@ fn interlace_from_u8(v: u8) -> Result<Interlace, WireError> {
         0 => Interlace::Any,
         1 => Interlace::Progressive,
         2 => Interlace::Interleaved,
+        3 => Interlace::InterleavedBottomFieldFirst,
         _ => return Err(WireError::BadTag),
     })
 }
@@ -1778,7 +1780,7 @@ mod tests {
                 width: Dim::Fixed(3840),
                 height: Dim::Fixed(2160),
                 framerate: Rate::Fixed(60 << 16),
-                interlace: crate::Interlace::Any,
+                interlace: crate::Interlace::InterleavedBottomFieldFirst,
                 colorimetry: crate::Colorimetry::BT2100_PQ,
                 pixel_aspect: crate::PixelAspect::Exact(
                     crate::AspectRatio::new(10, 11).expect("nonzero"),

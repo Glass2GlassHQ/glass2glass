@@ -110,11 +110,15 @@ async fn run(
     fields: DeinterlaceFields,
     field_order: FieldOrder,
 ) -> CollectSink {
-    let mut element = Deinterlace::new()
+    let element = Deinterlace::new()
         .with_method(method)
         .with_fields(fields)
         .with_field_order(field_order);
-    element.configure_pipeline(&caps(format, w, h)).unwrap();
+    run_configured(element, &caps(format, w, h), input).await
+}
+
+async fn run_configured(mut element: Deinterlace, caps: &Caps, input: &[Vec<u8>]) -> CollectSink {
+    element.configure_pipeline(caps).unwrap();
     let mut out = CollectSink::default();
     for (i, bytes) in input.iter().enumerate() {
         let frame = Frame::new(
@@ -292,6 +296,23 @@ async fn bottom_field_first_matches_ffmpeg_bit_exactly() {
     )
     .await;
     assert_ne!(got.frames(), tff.frames(), "bff must not equal tff");
+}
+
+#[tokio::test]
+async fn auto_field_order_follows_bottom_field_first_caps() {
+    if !have_ffmpeg() {
+        eprintln!("ffmpeg not present: skipping");
+        return;
+    }
+    let input = interlaced_fixture("bff-caps", "yuv420p");
+    let want = ffmpeg_yadif("bff-caps", "yuv420p", "setfield=bff,yadif=0:-1:0", &input);
+    let mut bottom_first = caps(RawVideoFormat::I420, W, H);
+    if let Caps::RawVideo { interlace, .. } = &mut bottom_first {
+        *interlace = Interlace::InterleavedBottomFieldFirst;
+    }
+    let element = Deinterlace::new().with_method(DeinterlaceMethod::Yadif);
+    let got = run_configured(element, &bottom_first, &input).await;
+    assert_bit_exact(&got.frames(), &want, "tff=auto on bottom-field-first caps");
 }
 
 /// Both properties at once: the two passes swap which field they keep, and each

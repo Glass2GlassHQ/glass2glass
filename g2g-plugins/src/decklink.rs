@@ -78,7 +78,7 @@ impl DisplayMode {
         self.width == width
             && self.height == height
             && self.framerate_q16 == framerate_q16
-            && self.interlaced == (interlace == Interlace::Interleaved)
+            && self.interlaced == interlace.is_interleaved()
     }
 }
 

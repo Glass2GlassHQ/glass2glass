@@ -454,4 +454,36 @@ mod ffmpeg_latch {
         let _ = std::fs::remove_file(&interlaced);
         let _ = std::fs::remove_file(&progressive);
     }
+
+    #[tokio::test]
+    async fn decoder_reports_a_bottom_field_first_stream() {
+        if !have_ffmpeg() {
+            eprintln!("ffmpeg not present: skipping");
+            return;
+        }
+        let bottom_first = temp_path("bottom-first.m2v");
+        ffmpeg(&[
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=160x128:rate=50:duration=1",
+            "-vf",
+            "tinterlace=mode=interleave_bottom",
+            "-c:v",
+            "mpeg2video",
+            "-flags",
+            "+ilme+ildct",
+            "-top",
+            "0",
+            "-f",
+            "mpeg2video",
+            bottom_first.to_str().unwrap(),
+        ]);
+        let caps = decode_caps(&bottom_first).await;
+        assert_eq!(
+            interlace_of(caps.last().unwrap()),
+            Interlace::InterleavedBottomFieldFirst,
+            "{caps:?}"
+        );
+    }
 }

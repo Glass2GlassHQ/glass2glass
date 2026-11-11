@@ -555,8 +555,11 @@ impl Caps {
                 push_rate(&mut s, framerate);
                 // Progressive is GStreamer's default for an absent field and
                 // `Any` is the wildcard (absence), so only interleaved prints.
-                if *interlace == Interlace::Interleaved {
+                if interlace.is_interleaved() {
                     s.push_str(",interlace-mode=interleaved");
+                }
+                if *interlace == Interlace::InterleavedBottomFieldFirst {
+                    s.push_str(",field-order=bottom-field-first");
                 }
                 push_colorimetry(&mut s, colorimetry);
                 push_pixel_aspect(&mut s, pixel_aspect);
@@ -1169,9 +1172,12 @@ impl AspectRatio {
 pub enum Interlace {
     Any,
     Progressive,
-    /// Both fields woven into one frame, top field first (ffmpeg's default
-    /// for a stream that declares no field order).
+    /// Both fields woven into one frame, top field first or an undeclared
+    /// order (ffmpeg assumes top first for a stream that declares none).
     Interleaved,
+    /// Both fields woven into one frame, bottom field first, as DV and most SD
+    /// capture write them (GStreamer's `field-order=bottom-field-first`).
+    InterleavedBottomFieldFirst,
 }
 
 impl Interlace {
@@ -1183,6 +1189,13 @@ impl Interlace {
             (a, b) if a == b => Some(*a),
             _ => None,
         }
+    }
+
+    pub fn is_interleaved(self) -> bool {
+        matches!(
+            self,
+            Interlace::Interleaved | Interlace::InterleavedBottomFieldFirst
+        )
     }
 }
 
@@ -4305,6 +4318,9 @@ mod tests {
         assert_eq!(progressive.intersect(&Interlace::Any), Some(progressive));
         assert_eq!(progressive.intersect(&progressive), Some(progressive));
         assert_eq!(progressive.intersect(&interleaved), None);
+        let bottom_first = Interlace::InterleavedBottomFieldFirst;
+        assert_eq!(interleaved.intersect(&bottom_first), None);
+        assert_eq!(Interlace::Any.intersect(&bottom_first), Some(bottom_first));
     }
 
     #[test]

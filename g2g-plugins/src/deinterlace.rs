@@ -22,8 +22,8 @@
 //!
 //! The `mode` property mirrors GStreamer's:
 //! `interlaced` (default) always weaves, `auto` weaves only when the incoming
-//! caps say `Interlace::Interleaved` (the ffmpeg decoder latches that from the
-//! per-picture flag) and passes everything else through untouched, `disabled` is
+//! caps say interleaved, either field order (the ffmpeg decoder latches that
+//! from the per-picture flag) and passes everything else through untouched, `disabled` is
 //! a pure passthrough. The default deviates from GStreamer's `auto` on purpose:
 //! most g2g upstreams do not declare interlacing, so a hand-inserted
 //! `deinterlace` under `auto` would silently do nothing. `playbin` inserts this
@@ -35,9 +35,9 @@
 //! `auto` emits one frame per input frame, built from whichever field comes
 //! first in time. That default deviates from GStreamer's `all`, which would
 //! double the rate of every pipeline that already has this element. `tff=auto`
-//! means top-field-first: `Caps::Interlace` carries no field order, so there is
-//! nothing to detect, and top-first is ffmpeg's assumption for a stream that
-//! declares none.
+//! takes the order from the caps: bottom first for
+//! `Interlace::InterleavedBottomFieldFirst`, otherwise top first, ffmpeg's
+//! assumption for a stream that declares none.
 //!
 //! In `auto` mode negotiation is transparent (any raw video is accepted and
 //! passed through, including formats the kernels cannot process, e.g. packed
@@ -176,8 +176,8 @@ impl DeinterlaceFields {
 /// Which field of an interleaved frame comes first in time (GStreamer's `tff`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FieldOrder {
-    /// Nothing to detect: `Caps::Interlace` carries no field order, so this
-    /// reads as top-field-first, ffmpeg's assumption for an undeclared stream.
+    /// The order the incoming caps declare, top first when they declare none
+    /// (ffmpeg's assumption for an undeclared stream).
     Auto,
     TopFirst,
     BottomFirst,
@@ -471,7 +471,17 @@ impl Deinterlace {
     }
 
     fn top_field_first(&self) -> bool {
-        self.field_order != FieldOrder::BottomFirst
+        match self.field_order {
+            FieldOrder::TopFirst => true,
+            FieldOrder::BottomFirst => false,
+            FieldOrder::Auto => !matches!(
+                self.incoming_caps,
+                Some(Caps::RawVideo {
+                    interlace: g2g_core::Interlace::InterleavedBottomFieldFirst,
+                    ..
+                })
+            ),
+        }
     }
 
     /// The output frames one input frame becomes, in emission order, as the
@@ -680,13 +690,8 @@ fn weaves(mode: DeinterlaceMode, caps: &Caps) -> bool {
         // Only a declared-interleaved stream in a format the kernels handle:
         // progressive, undeclared and unsupported all forward untouched.
         DeinterlaceMode::Auto => {
-            matches!(
-                caps,
-                Caps::RawVideo {
-                    interlace: g2g_core::Interlace::Interleaved,
-                    ..
-                }
-            ) && Deinterlace::weavable(caps).is_some()
+            matches!(caps, Caps::RawVideo { interlace, .. } if interlace.is_interleaved())
+                && Deinterlace::weavable(caps).is_some()
         }
     }
 }

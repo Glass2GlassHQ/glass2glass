@@ -1441,26 +1441,32 @@ from the previous and next frames, plus the cheaper `linear` and `blend`
 methods, over I420 / NV12 / RGBA / BGRA at unchanged format and geometry, one
 frame out per frame in. It is bit-exact against ffmpeg's `yadif=0` on the same
 raw frames, including the 3-column border where ffmpeg drops the directional
-search. Field order is assumed top-field-first, ffmpeg's default for a stream
-that declares nothing.
+search. `tff=auto` takes the field order from the caps, and a stream that
+declares none is treated as top-field-first, ffmpeg's default.
 
 ### Interlace caps
 
 Interlacing is signalled in the caps. `Caps::RawVideo` carries an `Interlace`
-field of `Any`, `Progressive` or `Interleaved`, where the `Any` wildcard
-intersects with anything, survives `fixate`, and reads as "progressive unless
-declared", so the field never blocks a solve and nearly every caps site states
-`Any`. `FfmpegVideoDec` reads libavcodec's per-picture interlaced flag and
-latches `Interleaved` output caps on the first interlaced picture, sticky for
-the stream so telecine content cannot flap `CapsChanged`, covering interlaced
-MPEG-2 over any container and interlaced H.264 alike.
+field of `Any`, `Progressive`, `Interleaved` (top field first or undeclared) or
+`InterleavedBottomFieldFirst`, where the `Any` wildcard intersects with anything,
+survives `fixate`, and reads as "progressive unless declared", so the field
+never blocks a solve and nearly every caps site states `Any`. The two interleaved
+values print as gst's `interlace-mode=interleaved`, the bottom-first one with
+`field-order=bottom-field-first`. `FfmpegVideoDec` reads libavcodec's
+per-picture interlaced and top-field-first flags. The first interlaced picture
+latches interleaved output caps for the rest of the stream, so telecine content
+cannot flap `CapsChanged`, and the field order follows the latest interlaced
+picture, as gst's avviddec renegotiates. This covers interlaced MPEG-2 over any
+container and interlaced H.264 alike. y4m reads and writes `Ib`. The plugin ABI
+has no code for bottom-first yet, so those caps do not cross into a loaded
+plugin.
 
 The element's `mode` property acts on that declaration:
 
 | `mode` | behaviour |
 | :--- | :--- |
 | `interlaced` | the default, always weaves, the contract for hand-written lines whose upstreams declare nothing |
-| `auto` | weaves only a caps-declared `Interleaved` stream in a format the kernels handle, and otherwise forwards packets untouched |
+| `auto` | weaves only a caps-declared interleaved stream in a format the kernels handle, and otherwise forwards packets untouched |
 | `disabled` | pure passthrough |
 
 In `auto` mode negotiation is kept transparent, any raw video passes, so

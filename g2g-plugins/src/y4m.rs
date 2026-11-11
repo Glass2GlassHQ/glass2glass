@@ -242,13 +242,14 @@ fn parse_pixel_aspect(value: &str) -> Result<PixelAspect, G2gError> {
     Ok(ratio.map_or(PixelAspect::Any, PixelAspect::Exact))
 }
 
-/// The scan type an `I` parameter names. `Ib` / `Im` / `I?` have no [`Interlace`]
+/// The scan type an `I` parameter names. `Im` / `I?` have no [`Interlace`]
 /// value, so a file declaring one is rejected rather than decoded as something
 /// else.
 fn parse_interlace(value: &str) -> Result<Interlace, G2gError> {
     match value {
         "p" => Ok(Interlace::Progressive),
         "t" => Ok(Interlace::Interleaved),
+        "b" => Ok(Interlace::InterleavedBottomFieldFirst),
         _ => Err(G2gError::CapsMismatch),
     }
 }
@@ -497,6 +498,7 @@ fn stream_header(header: &StreamHeader) -> Option<Vec<u8>> {
     } = header;
     let scan = match header.interlace {
         Interlace::Interleaved => 't',
+        Interlace::InterleavedBottomFieldFirst => 'b',
         Interlace::Any | Interlace::Progressive => 'p',
     };
     // an unknown pixel aspect writes no `A`, readers then assume square pixels as for `A0:0`
@@ -840,7 +842,6 @@ mod tests {
             "YUV4MPEG2 W64 H48 F25:1 Ip Cmono",
             "YUV4MPEG2 W64 H48 F25:1 Ip C411",
             "YUV4MPEG2 W64 H48 F25:1 Ip C420p16",
-            "YUV4MPEG2 W64 H48 F25:1 Ib C420jpeg",
             "YUV4MPEG2 W64 H48 F25:1 Im C420jpeg",
             "YUV4MPEG2 W64 H48 F25:1 I? C420jpeg",
             "YUV4MPEG2 W64 H48 F0:1 Ip C420jpeg",
@@ -953,6 +954,20 @@ mod tests {
         let parsed = parse_stream_header(&header[..header.len() - 1]).expect("its own header");
         assert_eq!(parsed.interlace, Interlace::Interleaved);
         assert_eq!(parsed.framerate_q16(), ntsc_q16);
+
+        let bottom_first = stream_header(&written_header(
+            RawVideoFormat::I422,
+            ntsc_q16,
+            Interlace::InterleavedBottomFieldFirst,
+        ))
+        .expect("a y4m format");
+        assert_eq!(
+            core::str::from_utf8(&bottom_first),
+            Ok("YUV4MPEG2 W64 H48 F1964115:65536 Ib C422\n")
+        );
+        let parsed =
+            parse_stream_header(&bottom_first[..bottom_first.len() - 1]).expect("its own header");
+        assert_eq!(parsed.interlace, Interlace::InterleavedBottomFieldFirst);
     }
 
     #[test]

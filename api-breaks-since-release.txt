@@ -22,6 +22,7 @@ constructible_struct_adds_field: field StageVisit.poll_ns
 derive_trait_impl_removed: type AllocationParams no longer derives Copy
 enum_struct_variant_field_added: field pixel_aspect of variant Caps::CompressedVideo
 enum_struct_variant_field_added: field pixel_aspect of variant Caps::RawVideo
+enum_variant_added: variant Interlace:InterleavedBottomFieldFirst
 inherent_method_missing: Registry::domain_converter
 struct_pub_field_missing: field klass of struct Device
 struct_pub_field_missing: field klass of struct ElementDoc

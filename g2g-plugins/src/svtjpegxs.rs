@@ -267,10 +267,7 @@ fn raw_geometry(caps: &Caps) -> Result<(RawVideoFormat, u32, u32), G2gError> {
 
 fn raw_fields_per_frame(caps: &Caps) -> u32 {
     match caps {
-        Caps::RawVideo {
-            interlace: g2g_core::Interlace::Interleaved,
-            ..
-        } => 2,
+        Caps::RawVideo { interlace, .. } if interlace.is_interleaved() => 2,
         _ => 1,
     }
 }

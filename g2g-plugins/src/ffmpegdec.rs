@@ -469,6 +469,7 @@ struct DecodedPicture {
     /// libavcodec's per-picture interlaced flag, read before the frame
     /// is packed / moved so every backend reports it.
     interlaced: bool,
+    top_field_first: bool,
 }
 
 /// Where a decoded picture's pixels live.
@@ -565,11 +566,12 @@ pub struct FfmpegVideoDec {
     /// lazily on the first access unit so its parameter sets can seed the decoder
     /// as `extradata` (see [`Self::open_decoder`]).
     codec_kind: Option<VideoCodec>,
-    /// Sticky "this stream has shown an interlaced picture". Telecine /
-    /// mixed streams flip the per-picture flag frame to frame; latching keeps
-    /// the output caps stable (one `CapsChanged` to `Interleaved`) instead of
-    /// flapping, which would reset the downstream deinterlacer's window.
-    saw_interlaced: bool,
+    /// Sticky once the stream has shown an interlaced picture, then the field
+    /// order of the latest one. Telecine / mixed streams flip the per-picture
+    /// flag frame to frame; latching keeps the output caps stable (one
+    /// `CapsChanged` to interleaved) instead of flapping, which would reset the
+    /// downstream deinterlacer's window.
+    latched_interlace: Interlace,
     /// Act on a downstream QoS report by skipping non-reference pictures
     /// (`AVDISCARD_NONREF`) until the reported lateness is made up. Off by
     /// default, and while off the runner relays reports past this element to the
@@ -657,7 +659,7 @@ impl FfmpegVideoDec {
             vaapi_device: None,
             cuda_device_id: crate::cudadeviceid::DEFAULT_CUDA_DEVICE_ID,
             codec_kind: None,
-            saw_interlaced: false,
+            latched_interlace: Interlace::Any,
             qos: false,
             max_skip_frames: DEFAULT_MAX_SKIP_FRAMES,
             skip_budget: 0,
@@ -1121,6 +1123,7 @@ fn drain_frames_into(
                 let height = frame.height();
                 // Read before the CUDA path moves the frame into its keep-alive.
                 let interlaced = frame.is_interlaced();
+                let top_field_first = frame.is_top_first();
                 // `Auto` resolves to each frame's native chroma (a fixed
                 // request passes through), so the packed payload and the
                 // emitted caps agree. Resolved per backend against the real
@@ -1170,6 +1173,7 @@ fn drain_frames_into(
                     pts_ns,
                     input,
                     interlaced,
+                    top_field_first,
                 });
             }
             Err(FfError::Other { errno }) if errno == ffmpeg::error::EAGAIN => {
@@ -2036,16 +2040,18 @@ impl AsyncElement for FfmpegVideoDec {
                     );
                     continue;
                 }
-                self.saw_interlaced |= d.interlaced;
                 // `Any` (not `Progressive`) until the latch trips: it equals the
                 // runner's pre-fixed output caps, so a progressive stream causes
-                // no spurious mid-stream CapsChanged. `Interleaved` is the one
+                // no spurious mid-stream CapsChanged. Interleaved is the one
                 // positive signal `deinterlace mode=auto` needs.
-                let interlace = if self.saw_interlaced {
-                    Interlace::Interleaved
-                } else {
-                    Interlace::Any
-                };
+                if d.interlaced {
+                    self.latched_interlace = if d.top_field_first {
+                        Interlace::Interleaved
+                    } else {
+                        Interlace::InterleavedBottomFieldFirst
+                    };
+                }
+                let interlace = self.latched_interlace;
                 // Use the picture's *resolved* format (native chroma under Auto),
                 // so the emitted caps match the packed payload.
                 let new_caps = yuv420_caps(

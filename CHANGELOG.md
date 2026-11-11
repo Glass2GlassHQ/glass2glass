@@ -138,8 +138,9 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M2222: `rtmpsink` answers Adobe and Limelight auth with `username`, `password` and `authmod`.
 - M2223: the MP4 demuxers step over a zero-sized box in a sample entry, as Blackmagic ATEM recorders write ahead of `avcC`.
 - M2224: live muxers stop waiting on a stalled input once its frames are past a deadline, with a `latency` property for slack.
+- M2225: bottom-field-first video is carried in the caps, so `deinterlace tff=auto` weaves DV and SD captures in the right order.
 
-Breaking: `TimecodeMeta.frames` is a `u16`, `WIRE_VERSION` is 6, `FrameTiming` gains `start_discard_ns` and `end_discard_ns`, `RtpRecvConfig` gains `parameter_sets`, and `RtmpPublisher::push` fails with a `PublishRefusal`.
+Breaking: `TimecodeMeta.frames` is a `u16`, `WIRE_VERSION` is 6, `FrameTiming` gains `start_discard_ns` and `end_discard_ns`, `RtpRecvConfig` gains `parameter_sets`, `RtmpPublisher::push` fails with a `PublishRefusal`, and `Interlace` gains `InterleavedBottomFieldFirst`.
 
 ## 0.14.0
 

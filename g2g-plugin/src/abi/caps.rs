@@ -296,11 +296,15 @@ fn pixel_aspect_from_ffi(ratio: &FfiPixelAspect) -> Result<PixelAspect, CapsCode
         .ok_or(CapsCodeError::BadPixelAspect(*ratio))
 }
 
-fn interlace_into_ffi(interlace: Interlace) -> u32 {
+fn interlace_into_ffi(interlace: Interlace) -> Result<u32, CapsCodeError> {
     match interlace {
-        Interlace::Any => INTERLACE_ANY,
-        Interlace::Progressive => INTERLACE_PROGRESSIVE,
-        Interlace::Interleaved => INTERLACE_INTERLEAVED,
+        Interlace::Any => Ok(INTERLACE_ANY),
+        Interlace::Progressive => Ok(INTERLACE_PROGRESSIVE),
+        Interlace::Interleaved => Ok(INTERLACE_INTERLEAVED),
+        Interlace::InterleavedBottomFieldFirst => Err(CapsCodeError::UnknownFormat {
+            table: "interlace",
+            code: u32::MAX,
+        }),
     }
 }
 
@@ -337,7 +341,7 @@ pub fn caps_into_ffi(caps: &Caps) -> Result<FfiCaps, CapsCodeError> {
                     width: dim_into_ffi(width),
                     height: dim_into_ffi(height),
                     framerate: rate_into_ffi(framerate),
-                    interlace: interlace_into_ffi(*interlace),
+                    interlace: interlace_into_ffi(*interlace)?,
                     pixel_aspect: pixel_aspect_into_ffi(pixel_aspect),
                 },
             },

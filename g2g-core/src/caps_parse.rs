@@ -369,11 +369,18 @@ impl CapsSet {
                 // An absent `interlace-mode` is the wildcard (a filter should not
                 // constrain what it does not name), matching `to_gst_string`, which
                 // prints the field only for `interleaved`.
-                let interlace = match fv("interlace-mode") {
-                    None => Interlace::Any,
-                    Some(FieldVal::One(s)) if *s == "progressive" => Interlace::Progressive,
-                    Some(FieldVal::One(s)) if *s == "interleaved" => Interlace::Interleaved,
-                    Some(_) => return None,
+                let interlace = match (fv("interlace-mode"), fv("field-order")) {
+                    (None, None) => Interlace::Any,
+                    (Some(FieldVal::One(s)), None) if *s == "progressive" => Interlace::Progressive,
+                    (Some(FieldVal::One(s)), None) if *s == "interleaved" => Interlace::Interleaved,
+                    (Some(FieldVal::One(s)), Some(FieldVal::One(order))) if *s == "interleaved" => {
+                        match *order {
+                            "top-field-first" | "unknown" => Interlace::Interleaved,
+                            "bottom-field-first" => Interlace::InterleavedBottomFieldFirst,
+                            _ => return None,
+                        }
+                    }
+                    _ => return None,
                 };
                 let colorimetry = expand_colorimetry(fv("colorimetry"))?;
                 let pixel_aspect = expand_pixel_aspect(fv("pixel-aspect-ratio"))?;
@@ -688,6 +695,40 @@ mod tests {
                 .unwrap_or_else(|| panic!("{printed} does not parse back"));
             assert_eq!(parsed.alternatives(), [caps].as_slice(), "{printed}");
         }
+    }
+
+    #[test]
+    fn every_scan_structure_parses_back_with_its_field_order() {
+        for interlace in [
+            Interlace::Any,
+            Interlace::Interleaved,
+            Interlace::InterleavedBottomFieldFirst,
+        ] {
+            let caps = Caps::RawVideo {
+                format: crate::RawVideoFormat::I420,
+                width: crate::Dim::Fixed(720),
+                height: crate::Dim::Fixed(576),
+                framerate: Rate::Fixed(25 << 16),
+                interlace,
+                colorimetry: crate::Colorimetry::UNKNOWN,
+                pixel_aspect: crate::PixelAspect::Any,
+            };
+            let printed = caps.to_gst_string();
+            let parsed = CapsSet::from_gst_string(&printed)
+                .unwrap_or_else(|| panic!("{printed} does not parse back"));
+            assert_eq!(parsed.alternatives(), [caps].as_slice(), "{printed}");
+        }
+        let top_first = CapsSet::from_gst_string(
+            "video/x-raw,format=I420,interlace-mode=interleaved,field-order=top-field-first",
+        )
+        .unwrap();
+        assert!(matches!(
+            top_first.alternatives(),
+            [Caps::RawVideo {
+                interlace: Interlace::Interleaved,
+                ..
+            }]
+        ));
     }
 
     #[test]
