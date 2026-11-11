@@ -134,7 +134,7 @@ impl AsyncElement for Vp9Parse {
                                 width: Dim::Fixed(info.width),
                                 height: Dim::Fixed(info.height),
                                 framerate: Rate::Any,
-                                colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                                colorimetry: info.colorimetry,
                                 pixel_aspect: g2g_core::PixelAspect::Any,
                                 alignment: g2g_core::BitstreamAlignment::Unspecified,
                             };
@@ -195,6 +195,7 @@ pub struct Vp9KeyFrame {
     /// Bitstream profile (0..=3): bit depth + chroma subsampling support. Not
     /// carried in `Caps`, surfaced for completeness.
     pub profile: u8,
+    pub colorimetry: g2g_core::Colorimetry,
 }
 
 /// Whether `packet` is a shown VP9 key frame with a readable header.
@@ -216,7 +217,25 @@ fn parse_keyframe(packet: &[u8]) -> Option<Vp9KeyFrame> {
         width,
         height,
         profile: color.profile,
+        colorimetry: color_space_cicp(color.color_space).map_or(
+            g2g_core::Colorimetry::UNKNOWN,
+            |[primaries, transfer, matrix]| {
+                g2g_core::Colorimetry::from_cicp(primaries, transfer, matrix, color.full_range)
+            },
+        ),
     })
+}
+
+pub(crate) fn color_space_cicp(color_space: u32) -> Option<[u8; 3]> {
+    // CICP primaries, transfer and matrix of the presets gst's vp9parse picks
+    match color_space {
+        1 | 3 => Some([6, 6, 6]),
+        2 => Some([1, 1, 1]),
+        4 => Some([7, 7, 7]),
+        5 => Some([9, 14, 9]),
+        7 => Some([1, 13, 0]),
+        _ => None,
+    }
 }
 
 // a keyframe's uncompressed header up to and including its color_config
@@ -461,6 +480,7 @@ mod tests {
         let info = parse_keyframe(&keyframe(1920, 1080, 0)).expect("keyframe must parse");
         assert_eq!((info.width, info.height), (1920, 1080));
         assert_eq!(info.profile, 0);
+        assert_eq!(info.colorimetry, g2g_core::Colorimetry::BT709);
     }
 
     #[test]

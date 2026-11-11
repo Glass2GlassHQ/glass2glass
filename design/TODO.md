@@ -423,17 +423,6 @@ libraries installed.
 - Run `vaav1enc` on a GPU with VA-API AV1 encode (AMD RDNA3, Intel Arc).
 - **Pure-Rust / wasm decode** to drop the ffmpeg FFI: VP8 / VP9 decode and a
   pure-Rust Opus path (see the roadmap for why both are blocked).
-- **Parser bugs** (gst commit sweep 2020-11 to 2023-11):
-  - Drop an H.264 or H.265 VUI frame rate above twice what the level allows.
-  - The MJPEG frame splitter merges two images when one loses its EOI, and a
-    stray byte between segments ends the pipeline instead of resyncing.
-  - `av1parse` ignores the sequence header's `timing_info` frame rate.
-  - SEI timecodes ignore `nuit_field_based_flag`, so the frame count doubles
-    when it is 0.
-  - `typefind` takes only ftyp, styp, moov, moof, mdat, free, skip and wide as
-    the first MP4 box, missing sidx, emsg, prft and the rest gst lists.
-  - `vp9parse` reads `color_space` and the range but emits
-    `Colorimetry::UNKNOWN`.
 
 ## Colorimetry
 

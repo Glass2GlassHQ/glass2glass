@@ -234,12 +234,13 @@ pub fn parse_pic_timing(p: &[u8], ctx: PicTimingContext) -> Option<g2g_core::met
             continue;
         }
         br.read_bits(2)?; // ct_type
-        br.read_bit()?; // nuit_field_based_flag
+        let nuit_field_based_flag = br.read_bits(1)? as u16;
         br.read_bits(5)?; // counting_type
         let full = br.read_bit()? == 1;
         br.read_bit()?; // discontinuity_flag
         let drop_frame = br.read_bit()? == 1;
-        let n_frames = br.read_bits(8)? as u16;
+        // H.264 D-1 steps n_frames by num_units_in_tick * (1 + nuit_field_based_flag), and a frame lasts two ticks
+        let n_frames = br.read_bits(8)? as u16 * (1 + nuit_field_based_flag) / 2;
         let (hours, minutes, seconds) = read_hms(&mut br, full)?;
         br.skip_bits(ctx.time_offset_length as usize)?;
         return Some(g2g_core::meta::TimecodeMeta {
@@ -571,23 +572,26 @@ mod tests {
             pic_struct_present: true,
             time_offset_length: 0,
         };
-        let mut w = BitWriter::default();
-        w.write_bits(0, 24); // cpb_removal_delay
-        w.write_bits(0, 24); // dpb_output_delay
-        w.write_bits(0, 4); // pic_struct: one clock timestamp
-        w.write_bit(1); // clock_timestamp_flag
-        w.write_bits(0, 2); // ct_type
-        w.write_bit(0); // nuit_field_based_flag
-        w.write_bits(0, 5); // counting_type
-        w.write_bit(1); // full_timestamp_flag
-        w.write_bit(0); // discontinuity_flag
-        w.write_bit(0); // cnt_dropped_flag
-        w.write_bits(12, 8); // n_frames
-        w.write_bits(34, 6); // seconds_value
-        w.write_bits(56, 6); // minutes_value
-        w.write_bits(7, 5); // hours_value
-        w.align_to_byte();
-        let payload = w.into_bytes();
+        let pic_timing = |nuit_field_based_flag: u32| {
+            let mut w = BitWriter::default();
+            w.write_bits(0, 24); // cpb_removal_delay
+            w.write_bits(0, 24); // dpb_output_delay
+            w.write_bits(0, 4); // pic_struct: one clock timestamp
+            w.write_bit(1); // clock_timestamp_flag
+            w.write_bits(0, 2); // ct_type
+            w.write_bit(nuit_field_based_flag);
+            w.write_bits(0, 5); // counting_type
+            w.write_bit(1); // full_timestamp_flag
+            w.write_bit(0); // discontinuity_flag
+            w.write_bit(0); // cnt_dropped_flag
+            w.write_bits(12, 8); // n_frames
+            w.write_bits(34, 6); // seconds_value
+            w.write_bits(56, 6); // minutes_value
+            w.write_bits(7, 5); // hours_value
+            w.align_to_byte();
+            w.into_bytes()
+        };
+        let payload = pic_timing(1);
 
         let tc = parse_pic_timing(&payload, ctx).expect("pic_timing parsed");
         assert_eq!(
@@ -595,6 +599,8 @@ mod tests {
             (7, 56, 34, 12)
         );
         assert!(!tc.drop_frame);
+        let field_units = parse_pic_timing(&pic_timing(0), ctx).expect("pic_timing parsed");
+        assert_eq!(field_units.frames, 6, "n_frames counts fields");
 
         // Without the VUI flag the message carries no timestamps at all, so the
         // same bytes must not be mined for one.

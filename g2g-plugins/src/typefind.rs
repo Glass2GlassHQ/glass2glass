@@ -478,8 +478,8 @@ pub fn sniff(header: &[u8]) -> Option<ByteStreamEncoding> {
 
 /// True when the header is the start of an ISO Base Media File (MP4 / QuickTime):
 /// a leading box whose 4-byte type at offset 4 is a known top-level box. `ftyp` is
-/// the near-universal first box; `moov` / `mdat` / `styp` / `free` / `skip` / `wide`
-/// cover header-less QuickTime and fragment / mdat-first layouts.
+/// the near-universal first box; the rest cover header-less QuickTime, fragment,
+/// segment-index and mdat-first layouts, the top-level boxes gst's typefinder takes.
 fn looks_like_iso_bmff(header: &[u8]) -> bool {
     const BOX_HEADER_LEN: usize = 8;
     const LARGE_BOX_HEADER_LEN: usize = 16;
@@ -490,7 +490,22 @@ fn looks_like_iso_bmff(header: &[u8]) -> bool {
     };
     let known_first_box = matches!(
         box_type,
-        b"ftyp" | b"styp" | b"moov" | b"moof" | b"mdat" | b"free" | b"skip" | b"wide"
+        b"ftyp"
+            | b"styp"
+            | b"moov"
+            | b"moof"
+            | b"mdat"
+            | b"free"
+            | b"skip"
+            | b"wide"
+            | b"udta"
+            | b"sidx"
+            | b"ssix"
+            | b"prft"
+            | b"emsg"
+            | b"mfra"
+            | b"pdin"
+            | b"meta"
     );
     let size = u32::from_be_bytes([header[0], header[1], header[2], header[3]]);
     let box_len = match size {
@@ -1164,6 +1179,14 @@ mod tests {
         );
         assert_eq!(
             sniff(b"\x00\x00\x01\x00moov\0\0\0\0"),
+            Some(ByteStreamEncoding::IsoBmff)
+        );
+    }
+
+    #[test]
+    fn detects_a_cmaf_segment_that_opens_with_an_event_message() {
+        assert_eq!(
+            sniff(b"\x00\x00\x00\x10emsg\0\0\0\0\0\0\0\0\x00\x00\x00\x10moof"),
             Some(ByteStreamEncoding::IsoBmff)
         );
     }

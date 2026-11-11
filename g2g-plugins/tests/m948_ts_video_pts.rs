@@ -114,7 +114,7 @@ fn h264_sps(pic_order_cnt_type: u32, with_timing: bool) -> Vec<u8> {
         b.bit(0); // bitstream_restriction_flag
     }
     // nal_ref_idc 3 + type 7, then profile_idc / constraint flags / level_idc.
-    let mut nal = Vec::from([0x67u8, 66, 0x00, 30]);
+    let mut nal = Vec::from([0x67u8, 66, 0x00, 31]);
     nal.extend(b.finish());
     annexb_nal(&nal)
 }

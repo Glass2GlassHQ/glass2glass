@@ -223,6 +223,9 @@ pub(crate) fn parse_h264_sps_head(rbsp: &[u8]) -> Option<(H264SpsHead, BitReader
 /// parse failure up to the dimensions; a failure past them leaves only the
 /// framerate unknown.
 fn parse_sps(rbsp: &[u8]) -> Option<SpsGeometry> {
+    // gst's h264parse allows twice the level's rate before calling a VUI rate bogus
+    const LEVEL_RATE_HEADROOM: u64 = 2;
+    const LUMA_SAMPLES_PER_MACROBLOCK: u64 = 256;
     let (head, mut br) = parse_h264_sps_head(rbsp)?;
     let frame_mbs_only_flag = u32::from(head.poc.frame_mbs_only_flag);
     let [crop_left, crop_right, crop_top, crop_bottom] = head.frame_crop_offsets;
@@ -270,10 +273,19 @@ fn parse_sps(rbsp: &[u8]) -> Option<SpsGeometry> {
         _ => (VuiHead::ABSENT, H264VuiTail::default()),
     };
 
+    let luma_samples = u64::from(width) * u64::from(height);
+    let level_luma_rate_limit_q16 = (LEVEL_RATE_HEADROOM
+        * LUMA_SAMPLES_PER_MACROBLOCK
+        * max_macroblocks_per_second(head.level_idc))
+        << 16;
+    let framerate = vui
+        .framerate
+        .filter(|&q16| u64::from(q16).saturating_mul(luma_samples) <= level_luma_rate_limit_q16);
+
     Some(SpsGeometry {
         width,
         height,
-        framerate: vui.framerate,
+        framerate,
         colorimetry: vui_head.colorimetry(),
         pixel_aspect: vui_head.pixel_aspect,
         pic_timing: vui.pic_timing,
@@ -352,6 +364,29 @@ fn parse_sps_reorder(rbsp: &[u8]) -> Option<u8> {
         .max(head.max_num_ref_frames)
         .min(16);
     Some(dpb_frames as u8)
+}
+
+fn max_macroblocks_per_second(level_idc: u8) -> u64 {
+    // MaxMBPS, H.264 table A-1, and gst's highest limit for a level it does not know
+    match level_idc {
+        9 | 10 => 1485,
+        11 => 3000,
+        12 => 6000,
+        13 | 20 => 11880,
+        21 => 19800,
+        22 => 20250,
+        30 => 40500,
+        31 => 108000,
+        32 => 216000,
+        40 | 41 => 245760,
+        42 => 522240,
+        50 => 589824,
+        51 => 983040,
+        52 => 2073600,
+        60 => 4177920,
+        61 => 8355840,
+        _ => 16711680,
+    }
 }
 
 /// `MaxDpbMbs` for an H.264 level (Table A-1), in macroblocks. The reorder /
@@ -1099,8 +1134,8 @@ mod tests {
         let rbsp = w.into_bytes();
 
         // NAL payload after the 0x67 header: profile/constraint/level + RBSP,
-        // emulation-prevented like an encoder's output.
-        let mut payload = vec![66u8, 0, 30];
+        // emulation-prevented like an encoder's output. Level 3.1 carries 720p30.
+        let mut payload = vec![66u8, 0, 31];
         payload.extend_from_slice(&rbsp);
         let payload = crate::annexb::add_emulation_prevention(&payload);
 
@@ -1352,6 +1387,14 @@ mod tests {
         let info = H264Codec::extract_sps_info(&stream).expect("SPS with VUI must parse");
         assert_eq!((info.width, info.height), (1280, 720));
         assert_eq!(info.framerate, Some(30 << 16), "30 fps in Q16");
+    }
+
+    #[test]
+    fn a_vui_framerate_beyond_twice_the_level_limit_is_dropped() {
+        // time_scale 90000 over one tick reads as 45000 fps
+        let stream = build_annexb_sps_with_timing(1280, 720, 1, 90_000);
+        let info = H264Codec::extract_sps_info(&stream).expect("SPS with VUI must parse");
+        assert_eq!(info.framerate, None);
     }
 
     #[test]

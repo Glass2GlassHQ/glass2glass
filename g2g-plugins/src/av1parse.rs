@@ -39,6 +39,8 @@ use core::pin::Pin;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
+use g2g_core::caps::framerate_q16_from_fraction;
+
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
@@ -113,8 +115,7 @@ impl Av1Parse {
             codec: VideoCodec::Av1,
             width: Dim::Fixed(info.width),
             height: Dim::Fixed(info.height),
-            // the timing_info a sequence header can carry is not read
-            framerate: self.caps.framerate(None),
+            framerate: self.caps.framerate(info.framerate_q16),
             colorimetry: info.colorimetry,
             // AV1 has no sample aspect field, the container's ratio passes through
             pixel_aspect: self.caps.pixel_aspect(g2g_core::PixelAspect::Any),
@@ -331,6 +332,8 @@ pub struct Av1SeqHeader {
     /// The `color_config` colour description as caps colorimetry, `UNKNOWN` when
     /// the header codes none (or its tail was truncated).
     pub colorimetry: g2g_core::Colorimetry,
+    // only a timing_info with equal_picture_interval codes a frame rate
+    pub framerate_q16: Option<u32>,
     /// Every other sequence-header field, which a decoder needs. `None` when the
     /// header ends before `film_grain_params_present`.
     pub detail: Option<Av1SeqHeaderDetail>,
@@ -1028,16 +1031,27 @@ fn parse_sequence_header_at(payload: &[u8], strict: bool) -> Option<Av1SeqHeader
     let mut initial_display_delay_present = 0u32;
     let mut operating_points_cnt_minus_1 = 0u32;
     let mut operating_point_idc0 = 0u16;
+    let mut framerate_q16 = None;
     if reduced_still_picture_header == 1 {
         level = br.read_bits(5)? as u8;
     } else {
         timing_info_present = br.read_bit()?;
         let mut buffer_delay_length = 0u32;
         if timing_info_present == 1 {
-            br.read_bits(32)?; // num_units_in_display_tick
-            br.read_bits(32)?; // time_scale
+            let num_units_in_display_tick = br.read_bits(32)?;
+            let time_scale = br.read_bits(32)?;
+            // equal_picture_interval
             if br.read_bit()? == 1 {
-                read_uvlc(&mut br)?; // num_ticks_per_picture_minus_1
+                let num_ticks_per_picture_minus_1 = read_uvlc(&mut br)?;
+                framerate_q16 = num_ticks_per_picture_minus_1
+                    .checked_add(1)
+                    .and_then(|ticks_per_picture| {
+                        num_units_in_display_tick.checked_mul(ticks_per_picture)
+                    })
+                    .and_then(|picture_ticks| {
+                        framerate_q16_from_fraction(time_scale, picture_ticks)
+                    })
+                    .filter(|&q16| q16 > 0);
             }
             decoder_model_info_present = br.read_bit()?;
             if decoder_model_info_present == 1 {
@@ -1094,6 +1108,7 @@ fn parse_sequence_header_at(payload: &[u8], strict: bool) -> Option<Av1SeqHeader
         subsampling_y: true,
         chroma_sample_position: 0,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        framerate_q16,
         detail: None,
     };
     let Some((tools, color)) =
@@ -2062,6 +2077,7 @@ mod tests {
                 CICP_UNSPECIFIED as u8,
                 false,
             ),
+            framerate_q16: None,
             detail: Some(Av1SeqHeaderDetail {
                 still_picture: false,
                 reduced_still_picture_header: false,
@@ -2387,6 +2403,7 @@ mod tests {
         let mut expected = expected_header(0, select_tools());
         expected.level = first_level as u8;
         expected.tier = first_tier as u8;
+        expected.framerate_q16 = framerate_q16_from_fraction(30_000, 1001);
         let expected_detail = detail(&mut expected);
         expected_detail.operating_point_idc0 = first_layers as u16;
         expected_detail.timing_info_present_flag = true;

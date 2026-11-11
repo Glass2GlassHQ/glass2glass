@@ -177,7 +177,7 @@ fn h264_sps_bits(with_timing: bool, frame_mbs_only: bool) -> Vec<u8> {
     b.bit(0); // vcl_hrd_parameters_present_flag
     b.bit(0); // pic_struct_present_flag
     b.bit(0); // bitstream_restriction_flag
-    let mut nal = Vec::from([0x67u8, 66, 0x00, 30]);
+    let mut nal = Vec::from([0x67u8, 66, 0x00, 31]);
     nal.extend(b.finish());
     annexb_nal(&nal)
 }

@@ -62,7 +62,7 @@ impl ImageAssembler {
 
     /// [`Self::push`] for a format whose streams carry padding between images:
     /// bytes before the next `signature` are dropped instead of failing the
-    /// parse.
+    /// parse, and so is an image that turns out broken.
     pub(crate) fn push_skipping_padding(
         &mut self,
         bytes: &[u8],
@@ -77,11 +77,18 @@ impl ImageAssembler {
         let mut images = Vec::new();
         loop {
             self.drop_padding(signature);
-            let Some(length) = frame_length(&self.pending)? else {
-                break;
-            };
-            let rest = self.pending.split_off(length);
-            images.push(core::mem::replace(&mut self.pending, rest));
+            match frame_length(&self.pending) {
+                Ok(None) => break,
+                Ok(Some(length)) => {
+                    let rest = self.pending.split_off(length);
+                    images.push(core::mem::replace(&mut self.pending, rest));
+                }
+                // gst's jpegparse resyncs at the next signature
+                Err(G2gError::CapsMismatch) => {
+                    self.pending.drain(..1);
+                }
+                Err(error) => return Err(error),
+            }
         }
         Ok(images)
     }
@@ -298,6 +305,10 @@ pub(crate) fn jpeg_frame_length(data: &[u8]) -> Result<Option<usize>, G2gError> 
                 return Err(G2gError::CapsMismatch);
             }
             return Ok((data.len() >= images_end).then_some(images_end));
+        }
+        // a start of image before this one's end means its EOI was lost
+        if marker == JPEG_START_OF_IMAGE {
+            return Err(G2gError::CapsMismatch);
         }
         if jpeg_is_standalone(marker) {
             offset = code + 1;
@@ -709,6 +720,23 @@ mod tests {
             0x01,
         ];
         assert_eq!(jpeg_frame_length(&bogus), Err(G2gError::CapsMismatch));
+    }
+
+    #[test]
+    fn a_jpeg_stream_resyncs_past_a_broken_image() {
+        let good = jpeg_bytes(64, 48, &[0x11; 100]);
+        let lost_end = &good[..good.len() - 2];
+        let mut stray_byte = good.clone();
+        // a non-marker byte between the APP0 segment and the frame header
+        stray_byte.insert(7, 0x00);
+        for broken in [lost_end, stray_byte.as_slice()] {
+            let mut stream = broken.to_vec();
+            stream.extend_from_slice(&good);
+            let images = ImageAssembler::default()
+                .push_skipping_padding(&stream, jpeg_frame_length, &JPEG_SIGNATURE)
+                .expect("a broken image is dropped, not fatal");
+            assert_eq!(images, vec![good.clone()]);
+        }
     }
 
     #[test]

@@ -157,6 +157,12 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M2241: `tsdemux` keeps the timestamps of a PES header split across TS packets.
 - M2242: RTP receivers follow a sender that restarts its sequence numbers on the same SSRC.
 - M2243: RTP video receivers wait for a keyframe at the start and after a loss, and request one with a PLI.
+- M2244: `typefind` recognises MP4 files that open with sidx, emsg, prft or the other top-level boxes gst lists.
+- M2245: `vp9parse` puts the stream's colorimetry in its caps.
+- M2246: `av1parse` reads the frame rate from the sequence header's `timing_info`.
+- M2247: H.264 SEI timecodes count frames by `nuit_field_based_flag`.
+- M2248: `h264parse` drops a VUI frame rate above twice what the level allows.
+- M2249: `jpegparse` drops a broken image and resyncs at the next one instead of failing.
 
 Breaking: `TimecodeMeta.frames` is a `u16`, `WIRE_VERSION` is 6, `FrameTiming` gains `start_discard_ns` and `end_discard_ns`, `RtpRecvConfig` gains `parameter_sets`, `RtmpPublisher::push` fails with a `PublishRefusal`, and `Interlace` gains `InterleavedBottomFieldFirst`.
 

@@ -1886,15 +1886,8 @@ fn vp9_vpcc_record(
         (false, false) => VPCC_CHROMA_444,
         (false, true) => return Err(G2gError::CapsMismatch),
     };
-    // VP9 color_space to ISO/IEC 23091-2 matrix coefficients
-    let matrix = match color.color_space {
-        1 | 3 => 6,
-        2 => 1,
-        4 => 7,
-        5 => 9,
-        7 => 0,
-        _ => VPCC_UNSPECIFIED,
-    };
+    let matrix = crate::vp9parse::color_space_cicp(color.color_space)
+        .map_or(VPCC_UNSPECIFIED, |[_, _, matrix]| matrix);
     Ok([
         color.profile,
         0,
