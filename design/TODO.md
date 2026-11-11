@@ -167,12 +167,74 @@ libraries installed.
     which is most of its 6.7 ms per 1080p frame.
   - Rebuild the decoder and heap on a mid-stream size change instead of
     refusing the stream.
-  - Reset the reference state on `Flush` instead of waiting for the next IDR.
   - The Media Foundation decoder MFT with a DXGI device manager stops producing
     output after about 120 frames, so `MfDecode` decodes in software only.
 - **`mfh265dec` without an HEVC decoder installed** fails with a bare
   `Hardware(MediaFoundation(0x80040154))`. Find the call that fails and log
   that the HEVC Video Extensions are missing.
+- **Decoder robustness** (gst commit sweep 2020-11 to 2023-11, reports in
+  `~/tmp/gst-sweep` on the dev box):
+  - `VulkanVideoDec` and `d3d12h264dec` end the pipeline on one malformed
+    slice, unknown PPS or full DPB. Count errors against a limit, drop until
+    the next keyframe and send `Reconfigure::ForceKeyframe` upstream.
+  - `H264References` frees at most one short-term reference per picture, so an
+    MMCO naming a picture the DPB lacks leaves every slot full and the next
+    picture fails with `DPB_FULL`. Trim to `max_num_ref_frames` after marking.
+  - Report the reorder depth times the frame duration as decoder latency
+    (Vulkan, D3D12, NVDEC, VideoToolbox, Media Foundation, MediaCodec,
+    openh264, ffmpegdec's `has_b_frames`). The runner queries latency once
+    before the first frame, so a depth read from the SPS needs a later report.
+  - `low-latency` releases B-frame pictures in decode order. Output early only
+    when the order is provable, as gst's live bump mode does.
+  - `nvdec` fails on a VP9 inter frame larger than the first coded size. Drop
+    frames until the next keyframe and rebuild there.
+  - `nvdec` resends H.264 and H.265 parameter sets after a flush but not the
+    AV1 sequence header.
+  - H.264 `no_output_of_prior_pics_flag` is ignored (`discards_prior_pictures`
+    is always false).
+  - Missing H.265 RPS entries are compacted out of the Vulkan reference lists
+    instead of left in place. Check what the drivers expect.
+  - The `d3d12h264dec` flush test resumes on an IDR, which clears references by
+    itself. Resume on a recovery-point I picture.
+- **Decoder features:**
+  - H.264 field pictures (PAFF) on `VulkanVideoDec` and `d3d12h264dec`.
+  - Field-coded H.265 (`field_seq_flag`): an alternate-field interlace mode in
+    caps, full-frame height and frame rate from the parsers, and decoders that
+    pair fields.
+  - H.264 custom scaling matrices on `VulkanVideoDec` and `d3d12h264dec`.
+  - AV1 and VP9 on `mediacodecdec`.
+  - HEVC 4:4:4 and 12-bit on `nvdec`.
+- **RTP receive:**
+  - A property to turn off the keyframe gate after loss (gst's
+    `wait-for-keyframe`, `request-keyframe`).
+  - `rtpklvdepay` resyncs only at the next marker after a loss, so the unit
+    after a lost one is dropped too. Resync at any packet that starts with the
+    KLV universal label.
+  - A padding-only RTX packet is rebuilt as an empty packet on a sequence read
+    from its padding. Subtract the padding before reading the original sequence.
+  - RTCP on the port after RTP (the gst and ffmpeg default) is never read, so
+    sender reports are missed, and RR and NACK go to the sender's RTP port.
+  - Every receiver reports under one fixed `LOCAL_SSRC`.
+  - `udpsrc` passes no session timeline, so audio and video on two `udpsrc`
+    elements lose their offset. Read RFC 6051 in-band NTP-64 for faster sync.
+  - SDP sections with an rtpmap clock rate of 0 are dropped instead of taking
+    the static payload type's rate.
+  - `udpsrc`'s `sdp` property ignores `a=source-filter`.
+  - VP8, VP9, AV1 and JPEG RTP payloads in `udpsrc`, and MJPEG cameras in
+    `rtspsrcn` (retina has a JPEG depacketizer).
+  - RED (RFC 2198) receive.
+- **RTSP:**
+  - `rtspserversink` writes to TCP-interleaved players inline with no timeout,
+    so one slow player stalls the pipeline and every other player.
+  - `rtspserversink` sends a new player whatever frame is current. Start each
+    player on a keyframe.
+  - `rtspserversink` keeps sending during PAUSE.
+  - `rtspclientsink` appends the stream control after the URL's query string.
+  - `rtspserversrc` misses a SETUP for `<control>?<query>`, as older gst
+    publishers send it, and answers 404.
+  - retina joins an absolute `a=control:/path` onto the base URL. Report it
+    upstream.
+  - RTSPS in `rtspsrcn` (retina has no TLS) and `rtspclientsink`.
 ## CUDA / display
 
 - Run `CudaKmsSink` from a bare VT with DRM master and verify the in-tree
@@ -235,6 +297,10 @@ libraries installed.
   other on the flag position and field widths, so a decode would be an
   unvalidated claim. Revisit with the published spec text or a second
   independent implementation.
+- **HLS:** a playlist that declares a new `#EXT-X-MAP` partway through keeps
+  only the last one, so segments before it get the wrong init segment.
+- **HLS:** reset `tsdemux`'s PSI versions at a discontinuity segment as well as
+  on a continuity-counter jump.
 
 ## Capture sources
 
@@ -328,6 +394,26 @@ libraries installed.
   last sample's duration. Write it where ffmpeg reads it.
 - **ST 2038 elements:** `st2038ancdemux` should add a port when a stream no pad
   names appears, once a launch line can link a pad that appears at run time.
+- **Demuxer bugs** (gst commit sweep 2020-11 to 2023-11):
+  - `tsdemux` reads a nonzero DVB Opus `channel_config_code` as the channel
+    count, so 0x80 to 0x88 give 128 or more channels.
+  - `tsdemux` drops a PMT that follows an empty PMT of the same version, and
+    merges programs that share one PMT PID because it never checks
+    `program_number`.
+  - `tsdemux` and `psdemux` pass DTS through unchecked, and an AU without PTS
+    gets 0 instead of `PTS_NONE`.
+  - An MP4 `mp4a` entry without `esds`, or with channel count 0, fails the whole
+    file. Build an AAC-LC config or skip the track.
+  - MP4 boxes of size 0 (to end of file) are refused, and `mp4demuxn` refuses
+    64-bit box sizes.
+  - `ivfdemux` puts a 0x0 header size into its caps.
+  - MP4 composition offsets have no sanity bound, and a negative PTS clamps to
+    0 instead of shifting the track.
+  - AC-3 and E-AC-3 in MP4 take the channel count from the sample entry, which
+    TS 102 366 says to ignore.
+- **Demuxer features:** VP8 and VP9 alpha from Matroska BlockAdditions, ONVIF
+  `metx` tracks and `cstb` start times in MP4, AVC-Intra fourccs in MOV, and
+  AC-4 and E-AC-3 in MPEG-TS.
 
 ## Codecs
 
@@ -337,6 +423,17 @@ libraries installed.
 - Run `vaav1enc` on a GPU with VA-API AV1 encode (AMD RDNA3, Intel Arc).
 - **Pure-Rust / wasm decode** to drop the ffmpeg FFI: VP8 / VP9 decode and a
   pure-Rust Opus path (see the roadmap for why both are blocked).
+- **Parser bugs** (gst commit sweep 2020-11 to 2023-11):
+  - Drop an H.264 or H.265 VUI frame rate above twice what the level allows.
+  - The MJPEG frame splitter merges two images when one loses its EOI, and a
+    stray byte between segments ends the pipeline instead of resyncing.
+  - `av1parse` ignores the sequence header's `timing_info` frame rate.
+  - SEI timecodes ignore `nuit_field_based_flag`, so the frame count doubles
+    when it is 0.
+  - `typefind` takes only ftyp, styp, moov, moof, mdat, free, skip and wide as
+    the first MP4 box, missing sidx, emsg, prft and the rest gst lists.
+  - `vp9parse` reads `color_space` and the range but emits
+    `Colorimetry::UNKNOWN`.
 
 ## Colorimetry
 
