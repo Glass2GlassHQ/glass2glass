@@ -592,6 +592,12 @@ impl D3D12H264Decoder {
         })
     }
 
+    pub fn reset(&mut self) {
+        self.references.clear();
+        self.poc = crate::poc::H264PocState::default();
+        self.slot_textures.fill(None);
+    }
+
     pub fn gpu_context(&self) -> &GpuContext {
         self.device.gpu_context()
     }
@@ -1339,6 +1345,9 @@ impl AsyncElement for D3D12H264Dec {
                     Ok(())
                 }
                 PipelinePacket::Flush => {
+                    if let Some(decoder) = self.decoder.as_mut() {
+                        decoder.reset();
+                    }
                     self.reorder.reset();
                     self.input_stamps = PendingInputStamps::default();
                     self.last_caps = None;

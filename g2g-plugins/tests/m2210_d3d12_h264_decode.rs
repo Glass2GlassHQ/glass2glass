@@ -223,6 +223,44 @@ fn system_output_is_bit_exact_in_display_order() {
     }
 }
 
+#[test]
+fn a_flush_resumes_bit_exact_from_the_next_keyframe() {
+    let _gpu = gpu_lock();
+    if let Some(reason) = skip_reason() {
+        eprintln!("skipping: {reason}");
+        return;
+    }
+    let (mut decoder, mut collect, decoded) = decode(&BFRAMES, MemoryDomainKind::System);
+    decoded.expect("decode stream");
+    block_on(decoder.process(
+        PipelinePacket::DataFrame(system_frame(BFRAMES.stream)),
+        &mut collect,
+    ))
+    .expect("decode the stream again before the seek");
+    block_on(decoder.process(PipelinePacket::Flush, &mut collect)).expect("flush");
+    let flushed_at = collect.packets.len();
+    block_on(decoder.process(
+        PipelinePacket::DataFrame(system_frame(BFRAMES.stream)),
+        &mut collect,
+    ))
+    .expect("decode after the flush");
+    block_on(decoder.process(PipelinePacket::Eos, &mut collect)).expect("eos drains the reorder");
+    let frames: Vec<Vec<u8>> = collect.packets[flushed_at..]
+        .iter()
+        .filter_map(|packet| match packet {
+            PipelinePacket::DataFrame(frame) => frame.domain.as_system_slice(),
+            _ => None,
+        })
+        .map(|nv12| decode_ref::two_plane_to_planar(nv12, EIGHT_BIT, BFRAMES.picture))
+        .collect();
+    decode_ref::assert_frames_match_reference(
+        &frames,
+        RawVideoFormat::I420,
+        BFRAMES.picture,
+        BFRAMES.name,
+    );
+}
+
 fn texture_sizes_matching_system_output(fixture: &Fixture) -> Vec<(u32, u32)> {
     let expected = system_frames(fixture);
     let (_decoder, collect, decoded) = decode(fixture, MemoryDomainKind::WgpuTexture);
