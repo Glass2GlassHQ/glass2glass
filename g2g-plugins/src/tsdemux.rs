@@ -358,6 +358,8 @@ pub enum TsStream {
     St2038,
     // the first JPEG XS (0x32) video stream, whose JXS_video_descriptor gives the caps
     JpegXs,
+    // the first metadata-in-PES (0x15) stream its descriptors name 'ID3 ', each PES payload one ID3v2 tag
+    Id3,
 }
 
 /// Demuxes an MPEG-TS byte stream into one selected elementary stream.
@@ -455,6 +457,7 @@ fn output_caps(stream: TsStream) -> Caps {
         TsStream::Klv => Caps::Klv,
         TsStream::St2038 => st2038_caps(),
         TsStream::JpegXs => elementary_video_caps(VideoCodec::JpegXs),
+        TsStream::Id3 => Caps::Id3,
         TsStream::Teletext => Caps::Text {
             format: g2g_core::TextFormat::Teletext,
         },
@@ -492,6 +495,7 @@ fn selected_stream_type(stream: TsStream) -> u8 {
         TsStream::Teletext => STREAM_TYPE_PRIVATE_PES,
         TsStream::St2038 => STREAM_TYPE_PRIVATE_PES,
         TsStream::JpegXs => STREAM_TYPE_JPEG_XS,
+        TsStream::Id3 => STREAM_TYPE_METADATA_PES,
     }
 }
 
@@ -578,6 +582,7 @@ fn es_to_stream(es: &crate::mpegts::ElementaryStream) -> Option<Stream> {
         // KLV metadata: no dedicated StreamType kind, the caps classify it.
         _ if es.klv => (StreamType::Unknown, Caps::Klv),
         STREAM_TYPE_PRIVATE_PES if es.st2038 => (StreamType::Unknown, st2038_caps()),
+        _ if es.id3 => (StreamType::Unknown, Caps::Id3),
         _ => return None,
     };
     Some(Stream::new(id, stream_type, caps))
@@ -601,7 +606,8 @@ fn is_keyframe(stream: TsStream, au: &[u8]) -> bool {
         | TsStream::DvbSub
         | TsStream::Teletext
         | TsStream::St2038
-        | TsStream::JpegXs => true,
+        | TsStream::JpegXs
+        | TsStream::Id3 => true,
     }
 }
 
@@ -625,7 +631,7 @@ static ONE_PORT_PROPS: &[PropertySpec] = &[
     PropertySpec::new(
         "stream",
         PropKind::Str,
-        "elementary stream to emit: h264 | h265 | av1 | mpeg2 | mpeg4part2 | aac | mp2 (or mp3) | opus | ac3 | klv | dvbsub | teletext | st2038 | jpegxs",
+        "elementary stream to emit: h264 | h265 | av1 | mpeg2 | mpeg4part2 | aac | mp2 (or mp3) | opus | ac3 | klv | dvbsub | teletext | st2038 | jpegxs | id3",
     ),
     PROGRAM_NUMBER_PROP,
     PropertySpec::new(
@@ -673,12 +679,13 @@ fn ts_stream_from_str(s: &str) -> Option<TsStream> {
         "teletext" => Some(TsStream::Teletext),
         "st2038" => Some(TsStream::St2038),
         "jpegxs" => Some(TsStream::JpegXs),
+        "id3" => Some(TsStream::Id3),
         _ => None,
     }
 }
 
 #[cfg(feature = "std")]
-const TS_STREAMS: [TsStream; 14] = [
+const TS_STREAMS: [TsStream; 15] = [
     TsStream::H264,
     TsStream::H265,
     TsStream::Mpeg4Part2,
@@ -693,6 +700,7 @@ const TS_STREAMS: [TsStream; 14] = [
     TsStream::Teletext,
     TsStream::St2038,
     TsStream::JpegXs,
+    TsStream::Id3,
 ];
 
 // the first stream a consumer with sink caps `accepted` takes
@@ -730,6 +738,7 @@ pub(crate) fn ts_stream_to_str(stream: TsStream) -> &'static str {
         TsStream::Teletext => "teletext",
         TsStream::St2038 => "st2038",
         TsStream::JpegXs => "jpegxs",
+        TsStream::Id3 => "id3",
     }
 }
 
@@ -874,6 +883,7 @@ impl PadTemplates for TsDemux {
             output_caps(TsStream::DvbSub),
             output_caps(TsStream::Teletext),
             output_caps(TsStream::JpegXs),
+            output_caps(TsStream::Id3),
         ]));
         Vec::from([
             PadTemplate::sink(CapsSet::one(input_caps())),
@@ -1563,6 +1573,7 @@ fn pid_carries(demux: &TsDemuxer, stream: TsStream, pid: u16, stream_type: u8) -
         TsStream::Teletext => demux.teletext(pid).is_some(),
         TsStream::St2038 => demux.is_st2038(pid),
         TsStream::JpegXs => demux.jpeg_xs(pid).is_some(),
+        TsStream::Id3 => demux.is_id3(pid),
         _ => true,
     }
 }
@@ -1832,6 +1843,7 @@ mod tests {
             language: None,
             st2038: false,
             jpeg_xs: None,
+            id3: false,
         };
         let stream = es_to_stream(&es).expect("0x10 is forwarded");
         assert_eq!(stream.stream_type, StreamType::Video);
@@ -1859,6 +1871,7 @@ mod tests {
                 language: None,
                 st2038: false,
                 jpeg_xs: None,
+                id3: false,
             }),
             Some(TsStream::Mpeg4Part2)
         );
@@ -2784,6 +2797,115 @@ mod tests {
             .status()
             .expect("gst-launch-1.0 runs");
         assert!(status.success(), "gst-launch-1.0 {args:?}");
+    }
+
+    // two ID3v2.4 tags of the same length, so gst's filesrc blocksize splits them
+    fn id3_tags() -> Vec<Vec<u8>> {
+        ["one", "two"]
+            .into_iter()
+            .map(|title| {
+                let tags: g2g_core::TagList =
+                    [g2g_core::Tag::Title(title.into())].into_iter().collect();
+                crate::id3::write_id3v2(&tags, 4)
+            })
+            .collect()
+    }
+
+    async fn ts_of_id3_tags() -> Vec<u8> {
+        use g2g_core::MultiInputElement;
+        const TAG_INTERVAL_NS: u64 = 1_000_000_000;
+        let mut mux = crate::tsmuxn::TsMux::new(1);
+        mux.configure_pipeline(0, &Caps::Id3).unwrap();
+        let mut sink = CaptureSink::default();
+        for (index, tag) in id3_tags().into_iter().enumerate() {
+            let frame = Frame::new(
+                MemoryDomain::System(SystemSlice::from_boxed(tag.into_boxed_slice())),
+                FrameTiming {
+                    pts_ns: index as u64 * TAG_INTERVAL_NS,
+                    keyframe: true,
+                    ..FrameTiming::default()
+                },
+                index as u64,
+            );
+            mux.process(0, PipelinePacket::DataFrame(frame), &mut sink)
+                .await
+                .unwrap();
+        }
+        mux.process(0, PipelinePacket::Eos, &mut sink)
+            .await
+            .unwrap();
+        sink.frames.concat()
+    }
+
+    async fn demux_id3(ts: &[u8]) -> CaptureSink {
+        let mut d = TsDemux::new().with_stream(TsStream::Id3);
+        d.configure_pipeline(&input_caps()).unwrap();
+        let mut sink = CaptureSink::default();
+        run_demux(&mut d, ts, &mut sink).await;
+        sink
+    }
+
+    #[cfg(feature = "std")]
+    #[tokio::test]
+    #[ignore = "needs gst-launch-1.0 1.26 or later, writes temp files"]
+    async fn gst_tsdemux_reads_our_id3_stream() {
+        let dir = std::env::temp_dir().join("g2g-ts-id3-to-gst");
+        std::fs::create_dir_all(&dir).unwrap();
+        let ts = dir.join("g2g.ts");
+        let out = dir.join("gst.id3");
+        std::fs::write(&ts, ts_of_id3_tags().await).unwrap();
+        let src = alloc::format!("location={}", ts.display());
+        let sink = alloc::format!("location={}", out.display());
+        gst_launch(&[
+            "filesrc",
+            &src,
+            "!",
+            "tsdemux",
+            "!",
+            "meta/x-id3",
+            "!",
+            "filesink",
+            &sink,
+        ]);
+        assert_eq!(std::fs::read(&out).unwrap(), id3_tags().concat());
+    }
+
+    #[cfg(feature = "std")]
+    #[tokio::test]
+    #[ignore = "needs gst-launch-1.0 1.26 or later, writes temp files"]
+    async fn we_read_gst_mpegtsmux_id3() {
+        let dir = std::env::temp_dir().join("g2g-ts-id3-from-gst");
+        std::fs::create_dir_all(&dir).unwrap();
+        let tags = id3_tags();
+        let input = dir.join("in.id3");
+        let ts = dir.join("gst.ts");
+        std::fs::write(&input, tags.concat()).unwrap();
+        let src = alloc::format!("location={}", input.display());
+        let blocksize = alloc::format!("blocksize={}", tags[0].len());
+        let sink = alloc::format!("location={}", ts.display());
+        gst_launch(&[
+            "filesrc",
+            &src,
+            &blocksize,
+            "do-timestamp=true",
+            "!",
+            "meta/x-id3,parsed=true",
+            "!",
+            "mpegtsmux",
+            "!",
+            "filesink",
+            &sink,
+        ]);
+        let demuxed = demux_id3(&std::fs::read(&ts).unwrap()).await;
+        assert_eq!(demuxed.caps, [Caps::Id3]);
+        assert_eq!(demuxed.frames, tags);
+    }
+
+    #[tokio::test]
+    async fn id3_round_trips_through_the_mux() {
+        let demuxed = demux_id3(&ts_of_id3_tags().await).await;
+        assert_eq!(demuxed.caps, [Caps::Id3]);
+        assert_eq!(demuxed.frames, id3_tags());
     }
 
     #[cfg(feature = "std")]

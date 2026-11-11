@@ -437,6 +437,20 @@ named pad exists whenever it is linked. `remove-ancillary-meta` strips the meta
 from the video. The `st2038` input pad name parses as a text pad, which is how
 the combiner tells it from `sink` whatever the link order.
 
+### Timed ID3 over TS
+
+Apple's HLS timed metadata is ID3v2 tags on metadata-in-PES, stream_type 0x15,
+the stream type synchronous KLV also uses. The PMT entry tells them apart: a
+`metadata_descriptor` (tag 0x26) or a `registration_descriptor` naming 'ID3 '
+marks ID3, and anything else on 0x15 stays KLV. `Caps::Id3` (`meta/x-id3`) is the
+stream type and `tsdemux stream=id3` selects it. `mpegtsmux` writes an input of
+those caps as gst's `mpegtsmux` does: `private_stream_1` (0xBD), the PES
+`data_alignment_indicator` set, each tag bare with no metadata AU cell, the
+metadata descriptor and the 'ID3 ' registration in the ES info, and a
+`metadata_pointer_descriptor` (tag 0x25) per ID3 stream in the program info.
+Both directions are validated against gst 1.28 byte for byte, and ffprobe
+reads either file's stream as `timed_id3`.
+
 ### DVB EIT
 
 The DVB EIT on PID 0x12 adds what a service is showing. The demuxers parse the
@@ -482,8 +496,9 @@ On the mux side a `Caps::Klv` input becomes a private PES, stream_type 0x06 on
 PES `private_stream_1`, whose PMT entry carries the `KLVA` registration
 descriptor, the MISB ST 1402 asynchronous carriage ffmpeg keys on. The demux
 side accepts both that and metadata-in-PES, stream_type 0x15, the synchronous
-carriage, via `TsStream::Klv`, `tsdemux stream=klv`, filtering generic 0x06 PIDs
-by the registration the way Opus and DVB AC-3 selection does.
+carriage, unless its descriptors name ID3 (see "Timed ID3 over TS"), via
+`TsStream::Klv`, `tsdemux stream=klv`, filtering generic 0x06 PIDs by the
+registration the way Opus and DVB AC-3 selection does.
 
 `klv-sync` on the mux elements selects the strict synchronous form instead:
 stream_type 0x15 on PES `stream_id` 0xFC, each local set wrapped in one ISO

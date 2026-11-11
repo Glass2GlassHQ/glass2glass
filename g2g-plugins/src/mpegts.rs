@@ -186,23 +186,79 @@ pub const STREAM_TYPE_SCTE35: u8 = 0x86;
 /// byte of zero (reserved bits set). This is what identifies the stream as KLV:
 /// a bare 0x15 with no descriptor reads as an unknown data stream (ffmpeg maps
 /// 0x15 to KLV only through this descriptor's format identifier).
-const KLV_METADATA_DESCRIPTOR: &[u8] = &[
-    DESC_TAG_METADATA,
-    13, // tag, length
-    0xFF,
-    0xFF, // metadata_application_format = 0xFFFF (identifier follows)
-    b'K',
-    b'L',
-    b'V',
-    b'A', // metadata_application_format_identifier
-    0xFF, // metadata_format = 0xFF (identifier follows)
-    b'K',
-    b'L',
-    b'V',
-    b'A', // metadata_format_identifier
-    0x00, // metadata_service_id
-    0x0F, // decoder_config_flags '000', DSM-CC_flag 0, reserved
-];
+const KLV_METADATA_DESCRIPTOR: &[u8] = &metadata_descriptor(KLVA_REGISTRATION_ID);
+
+const fn metadata_descriptor(format: &[u8; 4]) -> [u8; 15] {
+    [
+        DESC_TAG_METADATA,
+        13,
+        // metadata_application_format 0xFFFF, so its identifier follows
+        0xFF,
+        0xFF,
+        format[0],
+        format[1],
+        format[2],
+        format[3],
+        // metadata_format 0xFF, so its identifier follows
+        0xFF,
+        format[0],
+        format[1],
+        format[2],
+        format[3],
+        // metadata_service_id
+        0x00,
+        // decoder_config_flags '000', DSM-CC_flag 0, reserved bits set
+        0x0F,
+    ]
+}
+
+// Apple's timed metadata format identifier, which gst writes and reads for meta/x-id3
+const ID3_FORMAT_ID: &[u8; 4] = b"ID3 ";
+const DESC_TAG_METADATA_POINTER: u8 = 0x25;
+
+// the ES info gst's mpegtsmux writes for an ID3 stream, a metadata_descriptor then a registration
+const ID3_ES_INFO: [u8; 21] = {
+    let metadata = metadata_descriptor(ID3_FORMAT_ID);
+    let mut info = [0; 21];
+    let mut i = 0;
+    while i < metadata.len() {
+        info[i] = metadata[i];
+        i += 1;
+    }
+    info[15] = DESC_TAG_REGISTRATION;
+    info[16] = ID3_FORMAT_ID.len() as u8;
+    info[17] = ID3_FORMAT_ID[0];
+    info[18] = ID3_FORMAT_ID[1];
+    info[19] = ID3_FORMAT_ID[2];
+    info[20] = ID3_FORMAT_ID[3];
+    info
+};
+
+// the program info gst's mpegtsmux writes per ID3 stream, pointing at it by program number
+fn id3_metadata_pointer_descriptor(program_number: u16) -> [u8; 17] {
+    let [number_high, number_low] = program_number.to_be_bytes();
+    [
+        DESC_TAG_METADATA_POINTER,
+        15,
+        0xFF,
+        0xFF,
+        ID3_FORMAT_ID[0],
+        ID3_FORMAT_ID[1],
+        ID3_FORMAT_ID[2],
+        ID3_FORMAT_ID[3],
+        0xFF,
+        ID3_FORMAT_ID[0],
+        ID3_FORMAT_ID[1],
+        ID3_FORMAT_ID[2],
+        ID3_FORMAT_ID[3],
+        // metadata_service_id
+        0x00,
+        // metadata_locator_record_flag 0, MPEG_carriage_flags 0 (same transport stream), reserved bits set
+        0x1F,
+        number_high,
+        number_low,
+    ]
+}
 
 /// The MISB ST 1402 `registration_descriptor` marking a private PES (0x06) as
 /// asynchronous KLV, which is how this muxer writes an unqualified private stream.
@@ -275,6 +331,8 @@ pub struct ElementaryStream {
     pub st2038: bool,
     // the JXS_video_descriptor of a JPEG XS (0x32) stream, which states its geometry and rate
     pub jpeg_xs: Option<JxsVideoDescriptor>,
+    // a metadata-in-PES (0x15) stream whose metadata_descriptor or registration names 'ID3 '
+    pub id3: bool,
 }
 
 /// One entry of a DVB `teletext_descriptor`: which teletext page a stream
@@ -724,6 +782,13 @@ impl TsDemuxer {
             .iter()
             .find(|s| s.pid == pid)
             .and_then(|s| s.jpeg_xs)
+    }
+
+    pub fn is_id3(&self, pid: u16) -> bool {
+        self.streams()
+            .iter()
+            .find(|s| s.pid == pid)
+            .is_some_and(|s| s.id3)
     }
 
     pub fn is_st2038(&self, pid: u16) -> bool {
@@ -1348,8 +1413,13 @@ impl TsDemuxer {
             // A metadata-in-PES (0x15) stream is KLV unless its metadata_descriptor
             // names another format, such as Apple's timed ID3; a private 0x06 needs
             // the 'KLVA' registration.
+            let metadata = descriptors.filter(|_| stream_type == STREAM_TYPE_METADATA_PES);
+            let metadata_format = metadata.and_then(declared_metadata_format);
+            let id3 = metadata_format == Some(ID3_FORMAT_ID.as_slice())
+                || metadata.is_some_and(|d| has_registration(d, &[ID3_FORMAT_ID]));
             let klv = (stream_type == STREAM_TYPE_METADATA_PES
-                && !descriptors.is_some_and(declares_non_klv_metadata))
+                && !id3
+                && metadata_format.is_none_or(|format| format == KLVA_REGISTRATION_ID))
                 || private.is_some_and(|d| has_registration(d, &[KLVA_REGISTRATION_ID]));
             let mut es = ElementaryStream {
                 pid,
@@ -1367,6 +1437,7 @@ impl TsDemuxer {
                 jpeg_xs: descriptors
                     .filter(|_| stream_type == STREAM_TYPE_JPEG_XS)
                     .and_then(parse_jxs_video_descriptor),
+                id3,
             };
             let streams = &mut self.programs[prog_idx].streams;
             // a PID listed twice takes its last entry's type, as ffmpeg does
@@ -1773,36 +1844,33 @@ fn has_ac3_descriptor(mut desc: &[u8]) -> bool {
     false
 }
 
-// whether a PMT ES-info descriptor loop has a metadata_descriptor whose format is not 'KLVA'
-fn declares_non_klv_metadata(mut desc: &[u8]) -> bool {
+// the metadata_format of a metadata_descriptor: its identifier when the code is 0xFF, else the code
+fn declared_metadata_format(mut desc: &[u8]) -> Option<&[u8]> {
     const IDENTIFIER_FOLLOWS_APPLICATION_FORMAT: u16 = 0xFFFF;
     const IDENTIFIER_FOLLOWS_FORMAT: u8 = 0xFF;
     while desc.len() >= 2 {
         let tag = desc[0];
         let len = desc[1] as usize;
-        let Some(body) = desc.get(2..2 + len) else {
-            return false;
-        };
+        let body = desc.get(2..2 + len)?;
         if tag == DESC_TAG_METADATA {
-            let Some(application_format) = body.get(..2) else {
-                return false;
-            };
+            let application_format = body.get(..2)?;
             let format_at = match u16::from_be_bytes([application_format[0], application_format[1]])
             {
                 IDENTIFIER_FOLLOWS_APPLICATION_FORMAT => 6,
                 _ => 2,
             };
             return match body.get(format_at) {
+                // a truncated identifier names no format, so it reads as neither KLV nor ID3
                 Some(&IDENTIFIER_FOLLOWS_FORMAT) => {
-                    body.get(format_at + 1..format_at + 5) != Some(KLVA_REGISTRATION_ID.as_slice())
+                    Some(body.get(format_at + 1..format_at + 5).unwrap_or_default())
                 }
-                Some(_) => true,
-                None => false,
+                Some(_) => body.get(format_at..format_at + 1),
+                None => None,
             };
         }
         desc = &desc[2 + len..];
     }
-    false
+    None
 }
 
 // whether a PMT ES-info descriptor loop has a registration_descriptor (tag 0x05) naming one of `ids`
@@ -2183,6 +2251,7 @@ struct MuxStream {
     /// Opus-in-TS control header that [`opus_ts_packets`] strips.
     opus: bool,
     st2038: bool,
+    id3: bool,
     overrun_warned: bool,
 }
 
@@ -2351,6 +2420,7 @@ impl TsMuxer {
                 teletext: false,
                 opus: false,
                 st2038: false,
+                id3: false,
                 overrun_warned: false,
             });
         }
@@ -2562,6 +2632,20 @@ impl TsMuxer {
         self.set_private_identity(index, &descriptor);
         if let Some(s) = self.streams.get_mut(index) {
             s.st2038 = s.stream_type == STREAM_TYPE_PRIVATE_PES;
+        }
+    }
+
+    // the PMT goes out with the first access unit, so this only takes effect before it
+    pub fn set_stream_id3(&mut self, index: usize) {
+        if let Some(s) = self
+            .streams
+            .get_mut(index)
+            .filter(|s| s.stream_type == STREAM_TYPE_METADATA_PES)
+        {
+            // gst's mpegtsmux carries ID3 on private_stream_1, as Apple's timed metadata spec does
+            s.stream_id = 0xBD;
+            s.replace_identity(&ID3_ES_INFO);
+            s.id3 = true;
         }
     }
 
@@ -2892,11 +2976,12 @@ impl TsMuxer {
         // Synchronous KLV rides one metadata AU cell per access unit. An AU too
         // big for the cell's 16-bit length goes out bare (no ST 0601 local set
         // comes near 64 KiB, and a wrong length would be worse than a bare one).
-        let cell = (s.stream_type == STREAM_TYPE_METADATA_PES && au.len() <= 0xFFFF).then(|| {
-            let c = metadata_au_cell(s.meta_seq, au);
-            s.meta_seq = s.meta_seq.wrapping_add(1);
-            c
-        });
+        let cell = (s.stream_type == STREAM_TYPE_METADATA_PES && !s.id3 && au.len() <= 0xFFFF)
+            .then(|| {
+                let c = metadata_au_cell(s.meta_seq, au);
+                s.meta_seq = s.meta_seq.wrapping_add(1);
+                c
+            });
         // A DVB subtitle access unit is a display set, which a transport stream
         // carries in a data field: the data_identifier ahead of the segments and
         // the end marker behind (EN 300 743 clause 7.1).
@@ -2907,7 +2992,7 @@ impl TsMuxer {
             .or(cell);
         let payload = field.map_or(Cow::Borrowed(au), Cow::Owned);
         let mut header = pes_header(s.stream_id, payload.len(), pts_90khz, dts_90khz);
-        if s.st2038 {
+        if s.st2038 || s.id3 {
             header[PES_FLAGS_OFFSET] |= PES_DATA_ALIGNMENT_INDICATOR;
         }
         (header, payload)
@@ -3055,12 +3140,22 @@ impl TsMuxer {
             pcr_pid as u8, // PCR_PID
         ]);
         let splice_pid = self.splice.filter(|_| prog_idx == 0).map(|(pid, _)| pid);
-        let program_info: &[u8] = match splice_pid {
-            Some(_) => crate::scte35::CUEI_REGISTRATION,
-            None => &[],
-        };
-        body.extend_from_slice(&[0xF0, program_info.len() as u8]);
-        body.extend_from_slice(program_info);
+        let mut program_info = Vec::new();
+        if splice_pid.is_some() {
+            program_info.extend_from_slice(crate::scte35::CUEI_REGISTRATION);
+        }
+        for _ in self
+            .streams
+            .iter()
+            .filter(|s| s.program == prog_idx && s.id3)
+        {
+            program_info.extend_from_slice(&id3_metadata_pointer_descriptor(program_number));
+        }
+        body.extend_from_slice(&[
+            0xF0 | (program_info.len() >> 8) as u8 & 0x0F,
+            program_info.len() as u8,
+        ]);
+        body.extend_from_slice(&program_info);
         // One ES loop entry per stream of this program: stream_type,
         // elementary_PID, ES_info_len, then any ES-info descriptors.
         for s in self.streams.iter().filter(|s| s.program == prog_idx) {
@@ -3576,7 +3671,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_metadata_pes_stream_is_klv_unless_its_descriptor_names_another_format() {
+    fn a_metadata_pes_stream_is_klv_unless_its_descriptors_name_id3_or_another_format() {
         const PMT_PID: u16 = 0x1000;
         const ES_PID: u16 = 0x0100;
         // metadata_application_format 0xFFFF 'ID3 ', metadata_format 0xFF 'ID3 ', service id 0, flags
@@ -3597,7 +3692,9 @@ pub(crate) mod tests {
             0x00,
             0x0F,
         ];
-        let is_klv = |descriptor: &[u8]| {
+        const ID3_REGISTRATION: &[u8] = &[DESC_TAG_REGISTRATION, 4, b'I', b'D', b'3', b' '];
+        // (klv, id3)
+        let kind = |descriptor: &[u8]| {
             let mut body = pmt_body(ES_PID, STREAM_TYPE_METADATA_PES);
             let es_info_length_at = body.len() - 2;
             body[es_info_length_at + 1] = descriptor.len() as u8;
@@ -3605,11 +3702,16 @@ pub(crate) mod tests {
             let mut d = TsDemuxer::new();
             d.push_packet(&psi_packet(PID_PAT, 0x00, &pat_body(1, PMT_PID)));
             d.push_packet(&psi_packet(PMT_PID, 0x02, &body));
-            d.is_klv(ES_PID)
+            (d.is_klv(ES_PID), d.is_id3(ES_PID))
         };
-        assert!(is_klv(&[]), "no descriptor");
-        assert!(is_klv(KLV_METADATA_DESCRIPTOR));
-        assert!(!is_klv(ID3_METADATA_DESCRIPTOR));
+        assert_eq!(kind(&[]), (true, false), "no descriptor");
+        assert_eq!(kind(KLV_METADATA_DESCRIPTOR), (true, false));
+        assert_eq!(kind(ID3_METADATA_DESCRIPTOR), (false, true));
+        assert_eq!(kind(ID3_REGISTRATION), (false, true));
+        assert_eq!(
+            &ID3_ES_INFO[..],
+            [ID3_METADATA_DESCRIPTOR, ID3_REGISTRATION].concat()
+        );
     }
 
     #[test]
@@ -3638,6 +3740,7 @@ pub(crate) mod tests {
                 language: None,
                 st2038: false,
                 jpeg_xs: None,
+                id3: false,
             }]
         );
         assert_eq!(d.video_pid(), Some(es_pid));
@@ -5058,6 +5161,42 @@ pub(crate) mod tests {
             Some(klv),
             "and unwraps back to the packet"
         );
+    }
+
+    // gst's mpegtsmux writes ID3 this way: 0x15 on stream_id 0xBD, data aligned, no metadata AU cell
+    #[test]
+    fn id3_rides_an_aligned_private_stream_with_its_metadata_descriptors() {
+        const PROGRAM_NUMBER: u16 = 1;
+        // an ID3v2.4 header with an empty tag body
+        let tag = [b'I', b'D', b'3', 4, 0, 0, 0, 0, 0, 0];
+        let mut m = TsMuxer::with_streams(&[STREAM_TYPE_METADATA_PES]);
+        m.set_stream_id3(0);
+        let bytes = m.push_au(&tag, Some(9000), None, false);
+        let pes = bytes
+            .windows(4)
+            .position(|w| w == [0x00, 0x00, 0x01, 0xBD])
+            .expect("ID3 rides stream_id 0xBD");
+        assert_ne!(
+            bytes[pes + PES_FLAGS_OFFSET] & PES_DATA_ALIGNMENT_INDICATOR,
+            0
+        );
+        let has = |needle: &[u8]| bytes.windows(needle.len()).any(|w| w == needle);
+        assert!(has(&ID3_ES_INFO), "the ES info names 'ID3 '");
+        assert!(
+            has(&id3_metadata_pointer_descriptor(PROGRAM_NUMBER)),
+            "the program info points at the ID3 stream"
+        );
+        let mut d = TsDemuxer::new();
+        for pkt in bytes.chunks(TS_PACKET_LEN) {
+            d.push_packet(pkt);
+        }
+        d.flush();
+        let pid = d.streams()[0].pid;
+        assert!(d.is_id3(pid));
+        assert!(!d.is_klv(pid));
+        let units = d.take_units();
+        assert_eq!(units.len(), 1);
+        assert_eq!(units[0].data, tag, "the tag goes out bare");
     }
 
     // gst's mpegtsmux and tsdemux carry ST 2038 this way: 0x06, 'VANC', stream_id 0xBD, data aligned

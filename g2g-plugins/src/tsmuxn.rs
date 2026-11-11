@@ -9,7 +9,7 @@
 //!
 //! A [`MultiInputElement`]: each input pad accepts one elementary stream
 //! (`Caps::CompressedVideo{H264|H265|Av1}`, `Caps::Audio{Aac|Opus}`, `Caps::Klv`,
-//! `Caps::St2038`, or the `Caps::SubPicture{DvbSub}` subtitle pad), and the access
+//! `Caps::St2038`, `Caps::Id3`, or the `Caps::SubPicture{DvbSub}` subtitle pad), and the access
 //! units are interleaved into one multiplex by decode time (the DTS when the
 //! frame carries one, else the PTS) before being written to their per-stream
 //! PIDs. Time-ordering reuses the
@@ -482,6 +482,8 @@ fn stream_type_for(caps: &Caps, klv_sync: bool) -> Option<u8> {
         } => Some(STREAM_TYPE_PRIVATE_PES),
         // ST 2038 rides a private PES told apart by its 'VANC' registration
         Caps::St2038 { .. } => Some(STREAM_TYPE_PRIVATE_PES),
+        // ID3 shares 0x15 with synchronous KLV, told apart by its 'ID3 ' metadata_descriptor
+        Caps::Id3 => Some(STREAM_TYPE_METADATA_PES),
         _ => None,
     }
 }
@@ -627,6 +629,7 @@ pub struct TsMux {
     /// descriptors and wraps its access units in the control header.
     opus: Vec<Option<u8>>,
     st2038: Vec<bool>,
+    id3: Vec<bool>,
     // per input, how an AAC pad's frames are multiplexed, `None` for any other pad
     aac: Vec<Option<AacCarriage>>,
     jpeg_xs: Vec<Option<JpegXsPad>>,
@@ -656,6 +659,7 @@ impl TsMux {
             av1: alloc::vec![false; inputs],
             opus: alloc::vec![None; inputs],
             st2038: alloc::vec![false; inputs],
+            id3: alloc::vec![false; inputs],
             aac: alloc::vec![None; inputs],
             jpeg_xs: alloc::vec![None; inputs],
         }
@@ -859,6 +863,9 @@ impl TsMux {
             if self.st2038[i] {
                 mux.set_stream_st2038(i);
             }
+            if self.id3[i] {
+                mux.set_stream_id3(i);
+            }
             if let Some(descriptor) = self.jpeg_xs[i].as_ref().and_then(|pad| pad.descriptor) {
                 mux.set_stream_jpeg_xs(i, &descriptor);
             }
@@ -1001,6 +1008,7 @@ impl MultiInputElement for TsMux {
         self.av1[input] = is_av1(absolute_caps);
         self.opus[input] = opus_channels(absolute_caps);
         self.st2038[input] = matches!(absolute_caps, Caps::St2038 { .. });
+        self.id3[input] = matches!(absolute_caps, Caps::Id3);
         self.jpeg_xs[input] = (stream_type == STREAM_TYPE_JPEG_XS).then(|| JpegXsPad {
             caps: absolute_caps.clone(),
             descriptor: None,
@@ -1785,6 +1793,67 @@ mod tests {
             "AUs recovered through mux + demux"
         );
         assert_eq!(mux.emitted(), 2);
+    }
+
+    // ID3 and synchronous KLV share stream type 0x15, so only their descriptors tell them apart
+    #[tokio::test]
+    async fn id3_and_sync_klv_pads_demux_to_their_own_streams() {
+        use crate::tsdemux::{TsDemux, TsStream};
+        use g2g_core::AsyncElement;
+        const PTS_NS: u64 = 10_000_000;
+        let video = alloc::vec![0u8, 0, 0, 1, 0x65, 0xAA];
+        // an ID3v2.4 header with an empty tag body
+        let id3 = alloc::vec![b'I', b'D', b'3', 4, 0, 0, 0, 0, 0, 0];
+        // the MISB ST 0601 local set key, a one-byte length and one value byte
+        let mut klv = crate::klv::KLV_UL_PREFIX.to_vec();
+        klv.extend_from_slice(&[
+            0x02, 0x0B, 0x01, 0x01, 0x0E, 0x01, 0x03, 0x01, 0x01, 0x00, 0x00, 0x00,
+        ]);
+        klv.extend_from_slice(&[1, 0x7F]);
+
+        let mut mux = TsMux::new(3).with_klv_sync(true);
+        mux.configure_pipeline(0, &h264_caps()).unwrap();
+        mux.configure_pipeline(1, &Caps::Klv).unwrap();
+        mux.configure_pipeline(2, &Caps::Id3).unwrap();
+        let mut ts_sink = CaptureSink::default();
+        mux.process(0, au_frame(video, PTS_NS, true), &mut ts_sink)
+            .await
+            .unwrap();
+        mux.process(1, au_frame(klv.clone(), PTS_NS, true), &mut ts_sink)
+            .await
+            .unwrap();
+        mux.process(2, au_frame(id3.clone(), PTS_NS, true), &mut ts_sink)
+            .await
+            .unwrap();
+        for input in 0..3 {
+            mux.process(input, PipelinePacket::Eos, &mut ts_sink)
+                .await
+                .unwrap();
+        }
+
+        for (stream, want) in [(TsStream::Id3, id3), (TsStream::Klv, klv)] {
+            let mut demux = TsDemux::new().with_stream(stream);
+            demux
+                .configure_pipeline(&TsMux::output_caps_value())
+                .unwrap();
+            let mut au_sink = AuSink::default();
+            let ts_frame = Frame::new(
+                MemoryDomain::System(SystemSlice::from_boxed(
+                    ts_sink.bytes.clone().into_boxed_slice(),
+                )),
+                FrameTiming::default(),
+                0,
+            );
+            demux
+                .process(PipelinePacket::DataFrame(ts_frame), &mut au_sink)
+                .await
+                .unwrap();
+            demux
+                .process(PipelinePacket::Eos, &mut au_sink)
+                .await
+                .unwrap();
+            assert_eq!(au_sink.frames, alloc::vec![want], "{stream:?}");
+        }
     }
 
     #[derive(Default)]

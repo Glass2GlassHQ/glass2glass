@@ -895,6 +895,7 @@ fn put_caps(w: &mut Writer, c: &Caps) {
             w.u8(st2038_alignment_to_u8(*alignment));
             put_rate(w, framerate);
         }
+        Caps::Id3 => w.u8(12),
         Caps::Batch { streams } => {
             w.u8(10);
             w.u32(streams.len() as u32);
@@ -980,6 +981,7 @@ fn get_caps(r: &mut Reader) -> Result<Caps, WireError> {
             alignment: st2038_alignment_from_u8(r.u8()?)?,
             framerate: get_rate(r)?,
         },
+        12 => Caps::Id3,
         _ => return Err(WireError::BadTag),
     })
 }
@@ -1817,6 +1819,7 @@ mod tests {
                 alignment: St2038Alignment::Frame,
                 framerate: Rate::Fixed(25 << 16),
             },
+            Caps::Id3,
             Caps::Batch {
                 streams: alloc::vec![
                     Caps::OnvifMetadata,

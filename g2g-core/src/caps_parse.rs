@@ -472,6 +472,7 @@ impl CapsSet {
             "application/ttml+xml" => text_set(TextFormat::Ttml),
             "private/teletext" => text_set(TextFormat::Teletext),
             "meta/x-klv" => Some(CapsSet::one(Caps::Klv)),
+            "meta/x-id3" => Some(CapsSet::one(Caps::Id3)),
             "application/x-onvif-metadata" => Some(CapsSet::one(Caps::OnvifMetadata)),
             "meta/x-st-2038" => {
                 let alignments = expand_st2038_alignment(fv("alignment"))?;

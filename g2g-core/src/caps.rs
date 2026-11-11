@@ -110,14 +110,18 @@ pub enum Caps {
     /// network source carrying e.g. an MPEG-TS) and a demuxer that splits it into
     /// elementary streams. `encoding` names the wire format so a demuxer only
     /// accepts a stream it understands.
-    ByteStream { encoding: ByteStreamEncoding },
+    ByteStream {
+        encoding: ByteStreamEncoding,
+    },
     /// A text stream (subtitles, captions, transcription, OCR, overlay strings).
     /// `format` names the syntax ([`TextFormat`]); the payload is UTF-8 bytes in
     /// the frame's system buffer, and "subtitle" is just timed `Text` (cue PTS +
     /// duration on [`FrameTiming`](crate::frame::FrameTiming)). One kind, not a
     /// per-use-case variant, so an overlay, a caption sink, and a text analytics
     /// element all negotiate the same caps.
-    Text { format: TextFormat },
+    Text {
+        format: TextFormat,
+    },
     /// A KLV (SMPTE ST 336 key-length-value) metadata stream, each frame one KLV
     /// packet (for STANAG 4609 UAS streams, a MISB ST 0601 local set). The
     /// elementary metadata stream a transport demuxer splits out alongside video,
@@ -132,14 +136,18 @@ pub enum Caps {
     /// therefore which services its triples can hold: 608 line-21 fields, or 708
     /// DTVCC packets. Captions embedded in a coded video stream stay
     /// [`Caps::CompressedVideo`]; this is the separate-track case only.
-    ClosedCaption { format: ClosedCaptionFormat },
+    ClosedCaption {
+        format: ClosedCaptionFormat,
+    },
     /// A coded bitmap-subtitle (subpicture) stream: each frame one cue's coded
     /// bitmap, not pixels. The bitmap subtitle counterpart of [`Caps::Text`],
     /// which stays the timed-text kind. `format` names the coding
     /// ([`SubPictureFormat`]); a subpicture decoder turns it into full-frame
     /// transparent [`Caps::RawVideo`] RGBA canvases a compositor can paint over
     /// video, so nothing downstream needs a bitmap-cue concept.
-    SubPicture { format: SubPictureFormat },
+    SubPicture {
+        format: SubPictureFormat,
+    },
     /// An ONVIF analytics metadata stream: each frame one complete
     /// `tt:MetadataStream` XML document as the camera sent it over its
     /// `application/vnd.onvif.metadata` RTSP track, already decompressed, timed by
@@ -151,7 +159,9 @@ pub enum Caps {
     /// order. The frames ride in the carrier frame's `BatchMeta`, so the
     /// carrier's own buffer is empty.
     #[cfg(feature = "alloc")]
-    Batch { streams: Vec<Caps> },
+    Batch {
+        streams: Vec<Caps>,
+    },
     /// SMPTE ST 2038 ancillary data (captions, timecode, AFD) as MPEG-TS carries
     /// it (GStreamer `meta/x-st-2038`). Each frame holds one ANC packet, one
     /// line's packets or one video frame's packets, as `alignment` says, and
@@ -160,6 +170,7 @@ pub enum Caps {
         alignment: St2038Alignment,
         framerate: Rate,
     },
+    Id3,
 }
 
 impl Caps {
@@ -181,6 +192,7 @@ impl Caps {
             | Caps::Klv
             | Caps::OnvifMetadata
             | Caps::St2038 { .. }
+            | Caps::Id3
             | Caps::ClosedCaption { .. }
             | Caps::SubPicture { .. } => false,
             #[cfg(feature = "alloc")]
@@ -309,6 +321,7 @@ impl Caps {
             (Caps::Text { format: fa }, Caps::Text { format: fb }) if fa == fb => Ok(self.clone()),
             (Caps::Klv, Caps::Klv) => Ok(Caps::Klv),
             (Caps::OnvifMetadata, Caps::OnvifMetadata) => Ok(Caps::OnvifMetadata),
+            (Caps::Id3, Caps::Id3) => Ok(Caps::Id3),
             (
                 Caps::St2038 {
                     alignment: a,
@@ -448,6 +461,7 @@ impl Caps {
             | Caps::Text { .. }
             | Caps::Klv
             | Caps::OnvifMetadata
+            | Caps::Id3
             | Caps::ClosedCaption { .. }
             | Caps::SubPicture { .. } => Ok(self.clone()),
             // gst leaves an ST 2038 framerate out when the video rate is unknown
@@ -524,6 +538,7 @@ impl Caps {
             | Caps::Klv
             | Caps::OnvifMetadata
             | Caps::St2038 { .. }
+            | Caps::Id3
             | Caps::ClosedCaption { .. }
             | Caps::SubPicture { .. } => None,
             Caps::Tensor { .. } => None,
@@ -622,6 +637,7 @@ impl Caps {
             Caps::Text { format } => String::from(text_format_gst_media_type(*format)),
             Caps::Klv => String::from("meta/x-klv"),
             Caps::OnvifMetadata => String::from("application/x-onvif-metadata"),
+            Caps::Id3 => String::from("meta/x-id3"),
             Caps::St2038 {
                 alignment,
                 framerate,
@@ -4255,6 +4271,8 @@ mod tests {
             Caps::OnvifMetadata.intersect(&Caps::OnvifMetadata),
             Ok(Caps::OnvifMetadata)
         );
+        assert_eq!(Caps::Id3.intersect(&Caps::Id3), Ok(Caps::Id3));
+        assert_eq!(Caps::Id3.intersect(&Caps::Klv), Err(G2gError::CapsMismatch));
         let audio = |format| Caps::Audio {
             format,
             channels: 2,

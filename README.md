@@ -717,6 +717,7 @@ switch device while playing and take `continue-on-error`.
 | Telemetry | `klvdecode` (MISB ST 0601 / STANAG 4609) |
 | Ad markers | SCTE-35 splice sections pass from `tsdemux` to `mpegtsmux scte-35-pid` |
 | Broadcast ancillary data | SMPTE ST 2038 (`meta/x-st-2038`) passes from `tsdemux stream=st2038` to `mpegtsmux` |
+| HLS timed metadata | ID3 tags (`meta/x-id3`) pass from `tsdemux stream=id3` to `mpegtsmux` |
 | JPEG XS in MPEG-TS | `mpegtsmux` writes and `tsdemux stream=jpegxs` reads the `JXS_video_descriptor` carriage gst uses |
 | Live MPEG-TS clock | `mpegtslivesrc` paces a live TS pipeline on the sender's PCR (`udpsrc ... ! mpegtslivesrc ! tsdemux`, or gst's `mpegtslivesrc source="udpsrc ..."`) |
 | Subtitles and captions | bitmap decoders `vobsubdec` (alias `dvdsubdec`), `dvbsubdec`, `pgsdec` with `subpictureoverlay` to blend their cues onto video, `teletextdec`, `subparse`, `srtenc`, `webvttenc`, `ccextract` / `cccombiner`, `ccconverter` (between cc_data, CDP, S334-1A, and raw CEA-608), `cctost2038anc` / `st2038anctocc` (captions in SMPTE ST 2038), `st2038ancdemux` / `st2038ancmux`, `st2038combiner` / `st2038extractor` (ST 2038 on video frames) |
