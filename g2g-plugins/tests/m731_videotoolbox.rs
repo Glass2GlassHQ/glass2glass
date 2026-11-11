@@ -205,6 +205,49 @@ async fn vtdecode_h264_fixture() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn vtdecode_outputs_b_frames_in_presentation_order() {
+    const B_FRAME_MP4: &[u8] = include_bytes!("fixtures/h264_64x48_25fps_gop10_bframes_offset.mp4");
+    let mut demux = g2g_plugins::mp4demux::Mp4Demux::new();
+    demux
+        .configure_pipeline(&Caps::ByteStream {
+            encoding: g2g_core::ByteStreamEncoding::Mp4,
+        })
+        .expect("configure demuxer");
+    let mut demuxed = CollectSink::default();
+    drive(&mut demux, B_FRAME_MP4, &mut demuxed).await;
+    let coded = demuxed
+        .caps_changes()
+        .into_iter()
+        .find(|caps| matches!(caps, Caps::CompressedVideo { .. }))
+        .expect("the demuxer reports the video track");
+    let aus = demuxed.into_data_frames();
+    let input_pts: Vec<u64> = aus.iter().map(|au| au.timing.pts_ns).collect();
+    assert!(
+        input_pts.windows(2).any(|pair| pair[1] < pair[0]),
+        "the fixture codes frames out of presentation order"
+    );
+
+    let mut dec = VtDecode::h264();
+    let narrowed = dec.intercept_caps(&coded).expect("intercept codec");
+    dec.configure_pipeline(&narrowed)
+        .expect("VideoToolbox session must be reachable");
+    let mut sink = CollectSink::default();
+    for au in aus {
+        dec.process(PipelinePacket::DataFrame(au), &mut sink)
+            .await
+            .expect("decode access unit");
+    }
+    dec.process(PipelinePacket::Eos, &mut sink)
+        .await
+        .expect("drain at Eos");
+
+    let output_pts: Vec<u64> = sink.data_frames().iter().map(|f| f.timing.pts_ns).collect();
+    let mut presentation_order = input_pts;
+    presentation_order.sort_unstable();
+    assert_eq!(output_pts, presentation_order);
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn vtdecode_h265_fixture() {
     decode_fixture(VtDecode::h265(), VideoCodec::H265, H265_CLIP).await;
 

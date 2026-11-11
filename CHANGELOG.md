@@ -127,6 +127,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M2211: `rtmpsink` writes RTMP extended timestamps, so a publish past 4 h 40 min keeps advancing.
 - M2212: `flvmux` stamps its header tags with the first media timestamp and muxes a frame with no timestamp at once.
 - M2213: `dav1ddec` and `rav1ddec` skip a unit they cannot decode instead of stopping.
+- M2214: `vtdecode` outputs B-frame streams in presentation order and skips frames VideoToolbox cannot decode.
 
 Breaking: `TimecodeMeta.frames` is a `u16`, `WIRE_VERSION` is 6, `FrameTiming` gains `start_discard_ns` and `end_discard_ns`, and `RtpRecvConfig` gains `parameter_sets`.
 

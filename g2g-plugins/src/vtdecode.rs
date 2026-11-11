@@ -102,6 +102,14 @@ enum DecodedFrame {
     },
 }
 
+impl DecodedFrame {
+    fn pts_ns(&self) -> u64 {
+        match self {
+            DecodedFrame::Nv12 { pts_ns, .. } | DecodedFrame::Cv { pts_ns, .. } => *pts_ns,
+        }
+    }
+}
+
 // Manual impl: `CFRetained` has no `Debug`.
 impl core::fmt::Debug for DecodedFrame {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -138,6 +146,8 @@ impl core::fmt::Debug for DecodedFrame {
 struct Collector {
     frames: Vec<DecodedFrame>,
     error: Option<G2gError>,
+    // frames VideoToolbox reported it could not decode, which are skipped as gst's vtdec does
+    undecodable: u64,
     /// `cv-output` mode: retain the decoder's pixel buffer instead of packing
     /// NV12 bytes (set once at session build).
     cv_output: bool,
@@ -191,6 +201,10 @@ pub struct VtDecode {
     input_stamps: PendingInputStamps,
     emitted: u64,
     segment: Segment,
+    // decoded frames waiting for output, which VideoToolbox returns in decode order
+    held: Vec<DecodedFrame>,
+    // how many decoded frames may present before an earlier-decoded one, read from the SPS
+    reorder_depth: usize,
 }
 
 // SAFETY: a `VTDecompressionSession` and the CoreMedia objects are CoreFoundation
@@ -234,6 +248,8 @@ impl VtDecode {
             input_stamps: PendingInputStamps::default(),
             emitted: 0,
             segment: Segment::new(),
+            held: Vec::new(),
+            reorder_depth: 0,
         }
     }
 
@@ -292,6 +308,9 @@ impl VtDecode {
             }
         };
         self.ensure_session(&params)?;
+        if !params.is_empty() {
+            self.reorder_depth = reorder_depth(self.codec, au).ok_or(G2gError::CapsMismatch)?;
+        }
         let Some(state) = self.state.as_mut() else {
             return Ok(()); // pre-keyframe: skip
         };
@@ -312,7 +331,10 @@ impl VtDecode {
         // SAFETY: `state.session` is live; `avcc` outlives the synchronous
         // decode + wait; the refcon points at the boxed collector that lives as
         // long as the session. All FFI args are validated below.
-        unsafe { decode_into(state, &avcc, pts_ns)? };
+        let status = unsafe { decode_into(state, &avcc, pts_ns)? };
+        if status != 0 {
+            state.collector.undecodable += 1;
+        }
 
         if let Some(err) = state.collector.error.take() {
             return Err(err);
@@ -433,13 +455,10 @@ impl AsyncElement for VtDecode {
                         .domain
                         .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
                     self.feed(slice, frame.timing.pts_ns, InputStamp::of(&frame))?;
-                    // Drain whatever the callback packed.
-                    let decoded = match self.state.as_mut() {
-                        Some(st) => core::mem::take(&mut st.collector.frames),
-                        None => Vec::new(),
-                    };
-                    for d in decoded {
-                        self.emit(&d, out).await?;
+                    self.take_decoded();
+                    while self.held.len() > self.reorder_depth {
+                        let earliest = self.pop_earliest();
+                        self.emit(&earliest, out).await?;
                     }
                 }
                 PipelinePacket::CapsChanged(c) => {
@@ -482,6 +501,7 @@ impl AsyncElement for VtDecode {
                         st.collector.frames.clear();
                         st.collector.error = None;
                     }
+                    self.held.clear();
                     self.input_stamps = PendingInputStamps::default();
                     self.last_caps = None;
                     out.push(PipelinePacket::Flush).await?;
@@ -493,12 +513,10 @@ impl AsyncElement for VtDecode {
                             st.session.wait_for_asynchronous_frames();
                         }
                     }
-                    let decoded = match self.state.as_mut() {
-                        Some(st) => core::mem::take(&mut st.collector.frames),
-                        None => Vec::new(),
-                    };
-                    for d in decoded {
-                        self.emit(&d, out).await?;
+                    self.take_decoded();
+                    while !self.held.is_empty() {
+                        let earliest = self.pop_earliest();
+                        self.emit(&earliest, out).await?;
                     }
                 }
                 PipelinePacket::Segment(seg) => {
@@ -515,6 +533,28 @@ impl AsyncElement for VtDecode {
 }
 
 impl VtDecode {
+    // move what the output callback captured into the frames waiting for output
+    fn take_decoded(&mut self) {
+        let Some(state) = self.state.as_mut() else {
+            return;
+        };
+        self.held.append(&mut state.collector.frames);
+        let undecodable = core::mem::take(&mut state.collector.undecodable);
+        if undecodable > 0 {
+            g2g_core::g2g_warn!(
+                g2g_core::log::Target::category(g2g_core::log::short_type_name::<Self>()),
+                "skipped {undecodable} frame(s) VideoToolbox could not decode"
+            );
+        }
+    }
+
+    fn pop_earliest(&mut self) -> DecodedFrame {
+        let earliest = (0..self.held.len())
+            .min_by_key(|&i| self.held[i].pts_ns())
+            .expect("called with frames held");
+        self.held.remove(earliest)
+    }
+
     async fn emit(&mut self, d: &DecodedFrame, out: &mut dyn OutputSink) -> Result<(), G2gError> {
         let (width, height, pts_ns) = match d {
             DecodedFrame::Nv12 {
@@ -621,6 +661,18 @@ impl PadTemplates for VtDecode {
     }
 }
 
+// H.264's level-derived DPB bound, as `FfmpegVideoDec` seeds libavcodec, or H.265's `sps_max_num_reorder_pics`
+fn reorder_depth(codec: VideoCodec, au: &[u8]) -> Option<usize> {
+    use crate::nalparse::NalCodec;
+    let depth = match codec {
+        VideoCodec::H265 => {
+            crate::h265parse::H265Codec::extract_sps_info(au)?.declared_reorder_frames?
+        }
+        _ => crate::h264parse::sps_reorder_frames(au)?,
+    };
+    Some(usize::from(depth))
+}
+
 fn nv12_caps(w: u32, h: u32, framerate: Rate, pixel_aspect: g2g_core::PixelAspect) -> Caps {
     Caps::RawVideo {
         format: RawVideoFormat::Nv12,
@@ -673,8 +725,9 @@ unsafe extern "C-unwind" fn output_callback(
 ) {
     // SAFETY: refcon is the boxed Collector's stable address (see Collector).
     let collector = unsafe { &mut *(refcon as *mut Collector) };
+    // gst's vtdec drops such a frame too: reference-missing after a seek or loss, bad data, and the rest
     if status != 0 {
-        collector.error = Some(G2gError::Hardware(HardwareError::Other));
+        collector.undecodable += 1;
         return;
     }
     if image_buffer.is_null() {
@@ -845,10 +898,16 @@ unsafe fn build_session(
 
 /// Decode one AVCC access unit synchronously: wrap it in a `CMBlockBuffer` +
 /// `CMSampleBuffer` with the frame timing, submit, and wait for the callback.
+/// Returns the status `DecodeFrame` gave, nonzero when VideoToolbox refused the
+/// frame.
 ///
 /// SAFETY: `state.session` is live; `avcc` outlives the synchronous decode; the
 /// created CoreMedia objects are adopted into `CFRetained` and released on drop.
-unsafe fn decode_into(state: &DecoderState, avcc: &[u8], pts_ns: u64) -> Result<(), G2gError> {
+unsafe fn decode_into(
+    state: &DecoderState,
+    avcc: &[u8],
+    pts_ns: u64,
+) -> Result<OSStatus, G2gError> {
     // Block buffer that owns a copy of the AVCC bytes (null memory_block + a
     // length lets VT allocate; ReplaceDataBytes fills it).
     let mut block: *mut CMBlockBuffer = ptr::null_mut();
@@ -931,11 +990,11 @@ unsafe fn decode_into(state: &DecoderState, avcc: &[u8], pts_ns: u64) -> Result<
         )
     };
     if st != 0 {
-        return Err(G2gError::Hardware(HardwareError::Other));
+        return Ok(st);
     }
     // SAFETY: drain so the callback has fired for this frame before we return.
     unsafe {
         state.session.wait_for_asynchronous_frames();
     }
-    Ok(())
+    Ok(0)
 }
