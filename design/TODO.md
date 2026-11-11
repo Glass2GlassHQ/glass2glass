@@ -251,6 +251,9 @@ libraries installed.
 - Bump retina once a release carries scottlamb/retina PR 167: before it, an
   RTSP camera that never sets the RTP marker bit grows rtspsrc's memory
   without bound.
+- Bump retina once a release carries scottlamb/retina PR 170: before it, an
+  SDP `a=rtpmap:96 H264/0` fails the whole rtspsrc session at PLAY, and
+  `a=rtpmap:96 H264` with no clock rate drops the stream.
 - ONVIF metadata tracks with an EXI coding (`vnd.onvif.metadata.exi.onvif`,
   `vnd.onvif.metadata.exi.ext`): g2g has no EXI decoder, so they are skipped.
 - Run the Windows (`mfdevice` / `wasapidevice`) and macOS (`avfdevice` /
