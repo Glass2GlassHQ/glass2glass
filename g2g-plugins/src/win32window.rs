@@ -4,13 +4,14 @@
 
 use windows::core::w;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Graphics::Gdi::{GetStockObject, BLACK_BRUSH, HBRUSH};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
     AdjustWindowRectEx, CreateWindowExW, DefWindowProcW, DispatchMessageW, GetSystemMetrics,
-    GetWindowLongW, PeekMessageW, PostQuitMessage, RegisterClassExW, SetWindowPos,
-    TranslateMessage, CW_USEDEFAULT, GWL_EXSTYLE, GWL_STYLE, MSG, PM_REMOVE, SM_CXSCREEN,
-    SM_CYSCREEN, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, WINDOW_EX_STYLE, WINDOW_STYLE,
-    WM_DESTROY, WM_QUIT, WNDCLASSEXW, WS_OVERLAPPEDWINDOW, WS_POPUP, WS_VISIBLE,
+    GetWindowLongW, LoadCursorW, PeekMessageW, PostQuitMessage, RegisterClassExW, SetWindowPos,
+    TranslateMessage, CW_USEDEFAULT, GWL_EXSTYLE, GWL_STYLE, IDC_ARROW, MSG, PM_REMOVE,
+    SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, WINDOW_EX_STYLE,
+    WINDOW_STYLE, WM_DESTROY, WM_QUIT, WNDCLASSEXW, WS_OVERLAPPEDWINDOW, WS_POPUP, WS_VISIBLE,
 };
 
 #[cfg(feature = "wgpu-present")]
@@ -75,6 +76,8 @@ pub(crate) fn create_window(
             cbSize: core::mem::size_of::<WNDCLASSEXW>() as u32,
             lpfnWndProc: Some(wndproc),
             hInstance: hinstance.into(),
+            hCursor: LoadCursorW(None, IDC_ARROW)?,
+            hbrBackground: HBRUSH(GetStockObject(BLACK_BRUSH).0),
             lpszClassName: class_name,
             ..Default::default()
         };

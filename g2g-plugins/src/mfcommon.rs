@@ -19,7 +19,12 @@ use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_MULTITH
 use g2g_core::{G2gError, HardwareError};
 
 // MF sample times and durations count 100 ns units.
-#[cfg(any(feature = "mf-decode", feature = "mf-encode", feature = "mf-aac"))]
+#[cfg(any(
+    feature = "mf-decode",
+    feature = "mf-encode",
+    feature = "mf-aac",
+    feature = "mf-video-src"
+))]
 const NANOS_PER_MF_TICK: u64 = 100;
 
 // Drain-and-retry rounds before an MFT that keeps refusing input is an error.
@@ -33,7 +38,7 @@ pub(crate) fn mf_err(e: windows::core::Error) -> G2gError {
     G2gError::Hardware(HardwareError::MediaFoundation(e.code().0))
 }
 
-#[cfg(any(feature = "mf-decode", feature = "mf-encode"))]
+#[cfg(any(feature = "mf-decode", feature = "mf-encode", feature = "mf-video-src"))]
 pub(crate) fn mf_ticks_to_ns(ticks: i64) -> u64 {
     (ticks.max(0) as u64).saturating_mul(NANOS_PER_MF_TICK)
 }

@@ -53,16 +53,17 @@ use windows::Win32::Media::MediaFoundation::{
 };
 use windows::Win32::System::Com::CoTaskMemFree;
 
-use crate::mfcommon::{mf_err, unpack_u32_pair, with_media_foundation};
+use crate::mfcommon::{mf_err, mf_ticks_to_ns, unpack_u32_pair, with_media_foundation};
 use g2g_core::frame::Frame;
 use g2g_core::g2g_error;
 use g2g_core::log::Target;
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
-    Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, FrameTiming, G2gError,
-    HardwareError, Interlace, LatencyReport, MemoryDomain, OutputSink, PadTemplate, PadTemplates,
-    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, RawVideoFormat,
+    Caps, CapsConstraint, CapsSet, CaptureAnchor, ClockSync, ConfigureOutcome, Dim,
+    ElementMetadata, FrameTiming, G2gError, HardwareError, Interlace, LatencyReport, MemoryDomain,
+    OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue,
+    PropertySpec, Rate, RawVideoFormat,
 };
 
 /// First video stream index for the Source Reader, as a `u32` (the constant is
@@ -176,6 +177,7 @@ pub struct MfVideoSrc {
     frame_limit: u64,
     config: Option<VideoConfig>,
     configured: bool,
+    clock_sync: Option<ClockSync>,
 }
 
 impl Default for MfVideoSrc {
@@ -194,6 +196,7 @@ impl MfVideoSrc {
             frame_limit: u64::MAX,
             config: None,
             configured: false,
+            clock_sync: None,
         }
     }
 
@@ -323,6 +326,10 @@ impl SourceLoop for MfVideoSrc {
         }
     }
 
+    fn set_clock_sync(&mut self, sync: ClockSync) {
+        self.clock_sync = Some(sync);
+    }
+
     /// Live source: one frame period of latency so the sink keeps a frame in hand.
     fn latency(&self) -> LatencyReport {
         let fps = self.config.map(|c| c.fps()).unwrap_or(30);
@@ -348,7 +355,7 @@ impl SourceLoop for MfVideoSrc {
 
             // Worker captures and streams frame payloads here; a ready signal
             // reports whether the device opened.
-            let (frame_tx, mut frame_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+            let (frame_tx, mut frame_rx) = mpsc::unbounded_channel::<(Vec<u8>, u64)>();
             let (ready_tx, ready_rx) = std_mpsc::sync_channel::<Result<(), G2gError>>(1);
             let worker = thread::Builder::new()
                 .name(alloc::string::String::from("g2g-mfvideosrc"))
@@ -376,14 +383,21 @@ impl SourceLoop for MfVideoSrc {
             let expected = config.format.frame_bytes(config.width, config.height);
             let mut seq = 0u64;
             let mut downstream_open = true;
+            let clock_sync = self.clock_sync.clone();
+            let mut anchor = CaptureAnchor::new();
+            let mut epoch_ns: Option<u64> = None;
 
-            while let Some(bytes) = frame_rx.recv().await {
+            while let Some((bytes, timestamp_ns)) = frame_rx.recv().await {
                 // A short frame (driver hiccup) can't be consumed safely; skip it.
                 if bytes.len() < expected {
                     continue;
                 }
                 let arrival_ns = g2g_core::metrics::monotonic_ns();
-                let pts = seq * pts_step_ns;
+                let elapsed = timestamp_ns.saturating_sub(*epoch_ns.get_or_insert(timestamp_ns));
+                let pts = match &clock_sync {
+                    Some(sync) => anchor.stamp(sync, elapsed, pts_step_ns),
+                    None => elapsed,
+                };
                 let frame = Frame {
                     domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
                     timing: FrameTiming {
@@ -724,7 +738,7 @@ fn capture_worker(
     selector: DeviceSelector,
     config: VideoConfig,
     limit: u64,
-    frame_tx: mpsc::UnboundedSender<Vec<u8>>,
+    frame_tx: mpsc::UnboundedSender<(Vec<u8>, u64)>,
     ready_tx: std_mpsc::SyncSender<Result<(), G2gError>>,
 ) {
     let result = with_media_foundation(|| {
@@ -743,7 +757,7 @@ unsafe fn run_capture(
     selector: &DeviceSelector,
     config: VideoConfig,
     limit: u64,
-    frame_tx: &mpsc::UnboundedSender<Vec<u8>>,
+    frame_tx: &mpsc::UnboundedSender<(Vec<u8>, u64)>,
     ready_tx: &std_mpsc::SyncSender<Result<(), G2gError>>,
 ) -> Result<(), G2gError> {
     // SAFETY: reader setup + read loop on the owning thread.
@@ -794,7 +808,7 @@ unsafe fn run_capture(
             if chunk.is_empty() {
                 continue;
             }
-            if frame_tx.send(chunk).is_err() {
+            if frame_tx.send((chunk, mf_ticks_to_ns(timestamp))).is_err() {
                 break; // consumer dropped
             }
             emitted += 1;
