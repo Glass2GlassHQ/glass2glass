@@ -561,6 +561,8 @@ struct PendingPes {
     pts_90khz: Option<u64>,
     dts_90khz: Option<u64>,
     data: Vec<u8>,
+    // muxers can stretch a PES header past the first TS packet with a long adaptation field
+    header_read: bool,
 }
 
 const CONTINUITY_COUNTER_MODULUS: u8 = 16;
@@ -890,12 +892,23 @@ impl TsDemuxer {
             off = 5 + af_len;
         }
         let payload = pkt.get(off..).unwrap_or_default();
-        match self.check_continuity(pid, continuity_counter, discontinuity, payload) {
+        let continuity = self.check_continuity(pid, continuity_counter, discontinuity, payload);
+        match continuity {
             Continuity::Duplicate => return,
             // a unit start after the gap ends the PES before it, which is whole at a splice of two muxers
             Continuity::Lost if pusi => self.discard_partial_section(pid),
             Continuity::Lost => self.discard_partial(pid),
             Continuity::InSequence => {}
+        }
+        // spliced muxers often reuse the same PAT and PMT versions
+        if continuity == Continuity::Lost {
+            match table {
+                Some(PsiTable::Pat) => self.pat_version = None,
+                Some(PsiTable::Pmt(program_index)) => {
+                    self.programs[program_index].pmt_version = None
+                }
+                _ => {}
+            }
         }
         if payload.is_empty() {
             return; // no payload
@@ -1098,6 +1111,9 @@ impl TsDemuxer {
     /// Finalize any PES still being reassembled (call at end of stream). The
     /// units land in the queue drained by [`take_units`](Self::take_units).
     pub fn flush(&mut self) {
+        for index in 0..self.pending.len() {
+            self.read_pes_header(index);
+        }
         for p in core::mem::take(&mut self.pending) {
             Self::finish(&mut self.completed, p);
         }
@@ -1456,18 +1472,19 @@ impl TsDemuxer {
         if pusi {
             // A new PES starts: finalize the previous one for this PID.
             if let Some(idx) = self.pending.iter().position(|p| p.pid == pid) {
+                self.read_pes_header(idx);
                 let prev = self.pending.swap_remove(idx);
                 Self::finish(&mut self.completed, prev);
             }
-            let (pts, dts, es) = parse_pes_header(payload);
-            let (pts, dts) = self.extend_pes_timestamps(pid, pts, dts);
             self.pending.push(PendingPes {
                 pid,
                 stream_type,
-                pts_90khz: pts,
-                dts_90khz: dts,
-                data: es.to_vec(),
+                pts_90khz: None,
+                dts_90khz: None,
+                data: payload.to_vec(),
+                header_read: false,
             });
+            self.read_complete_pes_header(self.pending.len() - 1);
         } else if let Some(idx) = self.pending.iter().position(|p| p.pid == pid) {
             // Continuation of the current PES. Drop a PES that overruns the cap
             // rather than growing the buffer on an endless continuation run; the
@@ -1476,8 +1493,31 @@ impl TsDemuxer {
                 self.pending.swap_remove(idx);
             } else {
                 self.pending[idx].data.extend_from_slice(payload);
+                self.read_complete_pes_header(idx);
             }
         }
+    }
+
+    fn read_complete_pes_header(&mut self, index: usize) {
+        if pes_header_complete(&self.pending[index].data) {
+            self.read_pes_header(index);
+        }
+    }
+
+    fn read_pes_header(&mut self, index: usize) {
+        let pending = &self.pending[index];
+        if pending.header_read {
+            return;
+        }
+        let (pts, dts, es) = parse_pes_header(&pending.data);
+        let header_len = pending.data.len() - es.len();
+        let pid = pending.pid;
+        let (pts, dts) = self.extend_pes_timestamps(pid, pts, dts);
+        let pending = &mut self.pending[index];
+        pending.pts_90khz = pts;
+        pending.dts_90khz = dts;
+        pending.data.drain(..header_len);
+        pending.header_read = true;
     }
 
     fn extend_pes_timestamps(
@@ -1731,6 +1771,14 @@ fn confirmed_syncs(packet_start: &[u8], stride: usize) -> Option<usize> {
         }
     }
     Some(confirmed)
+}
+
+fn pes_header_complete(data: &[u8]) -> bool {
+    let Some(&header_data_len) = data.get(8) else {
+        return false;
+    };
+    let optional_header = data.starts_with(&[0, 0, 1]) && data[6] & 0xC0 == 0x80;
+    !optional_header || data.len() >= 9 + usize::from(header_data_len)
 }
 
 /// Parse a PES packet header at the start of `payload`, returning the PTS and
@@ -5494,6 +5542,73 @@ pub(crate) mod tests {
                 "counter {new_counter} after 6"
             );
         }
+    }
+
+    #[test]
+    fn a_pes_header_split_across_packets_keeps_its_timestamp() {
+        const PTS_90KHZ: u64 = 90_000;
+        const FIRST_PACKET_PES_BYTES: usize = 12;
+        let pmt_pid = 0x1000;
+        let es_pid = 0x0100;
+        let es = [0x00, 0x00, 0x00, 0x01, 0x65, 0xAA];
+        let pes_bytes = pes(Some(PTS_90KHZ), &es);
+        assert!(
+            FIRST_PACKET_PES_BYTES < pes_bytes.len() - es.len(),
+            "the split falls inside the header"
+        );
+        let mut d = TsDemuxer::new();
+        d.push_packet(&psi_packet(PID_PAT, 0x00, &pat_body(1, pmt_pid)));
+        d.push_packet(&psi_packet(
+            pmt_pid,
+            0x02,
+            &pmt_body(es_pid, STREAM_TYPE_H264),
+        ));
+        d.push_packet(&ts_packet(
+            es_pid,
+            true,
+            &pes_bytes[..FIRST_PACKET_PES_BYTES],
+        ));
+        d.push_packet(&ts_packet(
+            es_pid,
+            false,
+            &pes_bytes[FIRST_PACKET_PES_BYTES..],
+        ));
+        d.flush();
+        let units = d.take_units();
+        assert_eq!(units.len(), 1);
+        assert_eq!(units[0].pts_90khz, Some(PTS_90KHZ));
+        assert_eq!(units[0].data, es);
+    }
+
+    #[test]
+    fn a_splice_reusing_the_pmt_version_announces_the_new_streams() {
+        let pmt_pid = 0x1000;
+        let old_es_pid = 0x0100;
+        let new_es_pid = 0x0101;
+        let jump_counter = |mut packet: Vec<u8>| {
+            packet[3] = (packet[3] & 0xF0) | ((packet[3] + 5) & 0x0F);
+            packet
+        };
+        let mut d = TsDemuxer::new();
+        d.push_packet(&psi_packet(PID_PAT, 0x00, &pat_body(1, pmt_pid)));
+        d.push_packet(&psi_packet(
+            pmt_pid,
+            0x02,
+            &pmt_body(old_es_pid, STREAM_TYPE_H264),
+        ));
+        // the second muxer's tables carry version 0 again, on counters that do not follow on
+        d.push_packet(&jump_counter(psi_packet(
+            PID_PAT,
+            0x00,
+            &pat_body(1, pmt_pid),
+        )));
+        d.push_packet(&jump_counter(psi_packet(
+            pmt_pid,
+            0x02,
+            &pmt_body(new_es_pid, STREAM_TYPE_H265),
+        )));
+        let new_stream = d.streams().iter().find(|es| es.pid == new_es_pid);
+        assert_eq!(new_stream.map(|es| es.stream_type), Some(STREAM_TYPE_H265));
     }
 
     #[test]

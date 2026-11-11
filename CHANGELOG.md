@@ -152,6 +152,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M2236: video parsers keep a container's frame rate over the bitstream's.
 - M2237: the H.264 reorder depth covers the VUI `max_dec_frame_buffering` and the reference frame count.
 - M2238: `nvdec` resets on a flush and resends the parameter sets after it.
+- M2240: `tsdemux` reads a spliced stream's PAT and PMT even when their versions repeat.
+- M2241: `tsdemux` keeps the timestamps of a PES header split across TS packets.
 
 Breaking: `TimecodeMeta.frames` is a `u16`, `WIRE_VERSION` is 6, `FrameTiming` gains `start_discard_ns` and `end_discard_ns`, `RtpRecvConfig` gains `parameter_sets`, `RtmpPublisher::push` fails with a `PublishRefusal`, and `Interlace` gains `InterleavedBottomFieldFirst`.
 
