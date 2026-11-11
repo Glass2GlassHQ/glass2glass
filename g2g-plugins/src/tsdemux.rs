@@ -1533,7 +1533,7 @@ fn pid_carries(demux: &TsDemuxer, stream: TsStream, pid: u16, stream_type: u8) -
     match stream {
         TsStream::Opus => demux.opus_channels(pid).is_some(),
         TsStream::Ac3 => !private || demux.is_dvb_ac3(pid),
-        TsStream::Klv => !private || demux.is_klv(pid),
+        TsStream::Klv => demux.is_klv(pid),
         TsStream::Av1 => demux.is_av1(pid),
         TsStream::DvbSub => demux.subtitling(pid).is_some(),
         TsStream::Teletext => demux.teletext(pid).is_some(),

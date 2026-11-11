@@ -65,6 +65,7 @@ const DESC_TAG_SHORT_EVENT: u8 = 0x4D;
 /// `registration_descriptor` tag: a 4-byte format_identifier naming what a
 /// stream_type on its own does not say (which is every use of a private PES).
 const DESC_TAG_REGISTRATION: u8 = 0x05;
+const DESC_TAG_METADATA: u8 = 0x26;
 /// DVB `AC-3_descriptor` tag, which marks a private PES as AC-3.
 pub(crate) const DESC_TAG_AC3: u8 = 0x6A;
 // DVB extension_descriptor, whose extension tag 0x80 is the Opus channel code
@@ -184,11 +185,19 @@ pub const STREAM_TYPE_SCTE35: u8 = 0x86;
 /// a bare 0x15 with no descriptor reads as an unknown data stream (ffmpeg maps
 /// 0x15 to KLV only through this descriptor's format identifier).
 const KLV_METADATA_DESCRIPTOR: &[u8] = &[
-    0x26, 13, // tag, length
-    0xFF, 0xFF, // metadata_application_format = 0xFFFF (identifier follows)
-    b'K', b'L', b'V', b'A', // metadata_application_format_identifier
+    DESC_TAG_METADATA,
+    13, // tag, length
+    0xFF,
+    0xFF, // metadata_application_format = 0xFFFF (identifier follows)
+    b'K',
+    b'L',
+    b'V',
+    b'A', // metadata_application_format_identifier
     0xFF, // metadata_format = 0xFF (identifier follows)
-    b'K', b'L', b'V', b'A', // metadata_format_identifier
+    b'K',
+    b'L',
+    b'V',
+    b'A', // metadata_format_identifier
     0x00, // metadata_service_id
     0x0F, // decoder_config_flags '000', DSM-CC_flag 0, reserved
 ];
@@ -697,7 +706,8 @@ impl TsDemuxer {
     }
 
     /// Whether `pid` is a KLV metadata stream (a private 0x06 stream with a 'KLVA'
-    /// registration, or a metadata-in-PES 0x15 stream); `false` for any other.
+    /// registration, or a metadata-in-PES 0x15 stream whose metadata_descriptor
+    /// names no other format); `false` for any other.
     pub fn is_klv(&self, pid: u16) -> bool {
         self.streams()
             .iter()
@@ -1324,9 +1334,11 @@ impl TsDemuxer {
             let private = descriptors.filter(|_| stream_type == STREAM_TYPE_PRIVATE_PES);
             let opus_channels = private.and_then(parse_opus_descriptors);
             let ac3 = private.is_some_and(has_ac3_descriptor);
-            // A metadata-in-PES (0x15) stream is KLV without needing a descriptor
-            // (the ffmpeg convention); a private 0x06 needs the 'KLVA' registration.
-            let klv = stream_type == STREAM_TYPE_METADATA_PES
+            // A metadata-in-PES (0x15) stream is KLV unless its metadata_descriptor
+            // names another format, such as Apple's timed ID3; a private 0x06 needs
+            // the 'KLVA' registration.
+            let klv = (stream_type == STREAM_TYPE_METADATA_PES
+                && !descriptors.is_some_and(declares_non_klv_metadata))
                 || private.is_some_and(|d| has_registration(d, &[KLVA_REGISTRATION_ID]));
             let mut es = ElementaryStream {
                 pid,
@@ -1741,6 +1753,38 @@ fn has_ac3_descriptor(mut desc: &[u8]) -> bool {
             DESC_TAG_AC3 => return true,
             DESC_TAG_REGISTRATION if body.len() >= 4 && &body[..4] == b"AC-3" => return true,
             _ => {}
+        }
+        desc = &desc[2 + len..];
+    }
+    false
+}
+
+// whether a PMT ES-info descriptor loop has a metadata_descriptor whose format is not 'KLVA'
+fn declares_non_klv_metadata(mut desc: &[u8]) -> bool {
+    const IDENTIFIER_FOLLOWS_APPLICATION_FORMAT: u16 = 0xFFFF;
+    const IDENTIFIER_FOLLOWS_FORMAT: u8 = 0xFF;
+    while desc.len() >= 2 {
+        let tag = desc[0];
+        let len = desc[1] as usize;
+        let Some(body) = desc.get(2..2 + len) else {
+            return false;
+        };
+        if tag == DESC_TAG_METADATA {
+            let Some(application_format) = body.get(..2) else {
+                return false;
+            };
+            let format_at = match u16::from_be_bytes([application_format[0], application_format[1]])
+            {
+                IDENTIFIER_FOLLOWS_APPLICATION_FORMAT => 6,
+                _ => 2,
+            };
+            return match body.get(format_at) {
+                Some(&IDENTIFIER_FOLLOWS_FORMAT) => {
+                    body.get(format_at + 1..format_at + 5) != Some(KLVA_REGISTRATION_ID.as_slice())
+                }
+                Some(_) => true,
+                None => false,
+            };
         }
         desc = &desc[2 + len..];
     }
@@ -3482,6 +3526,43 @@ pub(crate) mod tests {
             Some(packets[1].as_slice()),
             "the oldest packet is dropped"
         );
+    }
+
+    #[test]
+    fn a_metadata_pes_stream_is_klv_unless_its_descriptor_names_another_format() {
+        const PMT_PID: u16 = 0x1000;
+        const ES_PID: u16 = 0x0100;
+        // metadata_application_format 0xFFFF 'ID3 ', metadata_format 0xFF 'ID3 ', service id 0, flags
+        const ID3_METADATA_DESCRIPTOR: &[u8] = &[
+            DESC_TAG_METADATA,
+            13,
+            0xFF,
+            0xFF,
+            b'I',
+            b'D',
+            b'3',
+            b' ',
+            0xFF,
+            b'I',
+            b'D',
+            b'3',
+            b' ',
+            0x00,
+            0x0F,
+        ];
+        let is_klv = |descriptor: &[u8]| {
+            let mut body = pmt_body(ES_PID, STREAM_TYPE_METADATA_PES);
+            let es_info_length_at = body.len() - 2;
+            body[es_info_length_at + 1] = descriptor.len() as u8;
+            body.extend_from_slice(descriptor);
+            let mut d = TsDemuxer::new();
+            d.push_packet(&psi_packet(PID_PAT, 0x00, &pat_body(1, PMT_PID)));
+            d.push_packet(&psi_packet(PMT_PID, 0x02, &body));
+            d.is_klv(ES_PID)
+        };
+        assert!(is_klv(&[]), "no descriptor");
+        assert!(is_klv(KLV_METADATA_DESCRIPTOR));
+        assert!(!is_klv(ID3_METADATA_DESCRIPTOR));
     }
 
     #[test]
