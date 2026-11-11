@@ -42,7 +42,7 @@ use g2g_core::{
     g2g_error, AudioFormat, BusHandle, BusMessage, ByteStreamEncoding, Caps, CapsConstraint,
     CapsSet, ConfigureOutcome, Dim, ElementMetadata, FrameTiming, G2gError, LatencyReport,
     MemoryDomain, MultiOutputElement, MultiOutputSink, PipelinePacket, PropError, PropValue,
-    PropertySpec, Rate, Segment, Stream, StreamCollection, StreamType, VideoCodec,
+    PropertySpec, Rate, Seek, SeekType, Segment, Stream, StreamCollection, StreamType, VideoCodec,
 };
 
 use crate::demuxseek::{segment_from, with_stream_time};
@@ -1022,7 +1022,7 @@ impl Mp4DemuxN {
                     out.push_to(0, PipelinePacket::Flush).await?;
                     self.need_config[0] = true;
                 }
-                self.seek_to(track, samples, seek.start, out).await?
+                self.seek_to(track, samples, &seek, out).await?
             }
             (Some(_), _) => unreachable!("only a one-port demuxer seeks"),
         };
@@ -1057,14 +1057,14 @@ impl Mp4DemuxN {
         &mut self,
         track: &TrackHeader,
         samples: Vec<(u32, Sample)>,
-        target_ns: u64,
+        seek: &Seek,
         out: &mut dyn MultiOutputSink,
     ) -> Result<Vec<(u32, Sample)>, G2gError> {
         let edit = track.presentation_segment();
         let (samples, segment) = seek_samples(
             samples.into_iter().map(|(_, sample)| sample).collect(),
             edit,
-            target_ns,
+            seek,
         );
         self.upstream_segment = segment;
         self.port_edit[0] = edit;
@@ -1464,11 +1464,21 @@ fn with_framerate(mut caps: Caps, rate: Rate) -> Caps {
     caps
 }
 
-// the samples from the keyframe at or before the target, with the segment moved up to start there
-fn seek_samples(mut samples: Vec<Sample>, edit: Segment, target_ns: u64) -> (Vec<Sample>, Segment) {
+// the samples from the keyframe at or before the target to the last presenting by the stop, with the segment moved onto them
+fn seek_samples(mut samples: Vec<Sample>, edit: Segment, seek: &Seek) -> (Vec<Sample>, Segment) {
     // an edit list that starts presentation later moves the start time with it
     let stream_start_ns = edit.start.max(stream_start_ns(&samples));
-    let target_ns = target_ns.saturating_add(stream_start_ns);
+    let target_ns = seek.start.saturating_add(stream_start_ns);
+    let seek_stop_ns =
+        (seek.stop_type == SeekType::Set).then(|| seek.stop.saturating_add(stream_start_ns));
+    if let Some(stop_ns) = seek_stop_ns {
+        // samples come in decode order, so a B frame presenting by the stop can follow one past it
+        let end = samples
+            .iter()
+            .rposition(|sample| sample.pts_ns <= stop_ns)
+            .map_or(0, |last| last + 1);
+        samples.truncate(end);
+    }
     let first = if every_sample_ends_by(&samples, target_ns) {
         samples.len()
     } else {
@@ -1476,7 +1486,7 @@ fn seek_samples(mut samples: Vec<Sample>, edit: Segment, target_ns: u64) -> (Vec
     };
     samples.drain(..first);
     let segment = Segment {
-        stop: edit.stop,
+        stop: edit.stop.into_iter().chain(seek_stop_ns).min(),
         ..segment_from(target_ns, stream_start_ns)
     };
     (samples, segment)

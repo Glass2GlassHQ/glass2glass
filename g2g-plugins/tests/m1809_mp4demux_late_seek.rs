@@ -10,7 +10,7 @@ use g2g_core::element::{AsyncElement, OutputSink, PushOutcome};
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::runtime::SeekController;
-use g2g_core::{ByteStreamEncoding, Caps, G2gError, Seek};
+use g2g_core::{ByteStreamEncoding, Caps, G2gError, Seek, SeekType};
 use g2g_plugins::mp4demux::Mp4Demux;
 
 // ffmpeg -f lavfi -i testsrc=size=64x48:rate=25:duration=3 -c:v libx264 -g 10 -keyint_min 10 -sc_threshold 0 -bf 0
@@ -24,10 +24,12 @@ const SEEK_NS: u64 = 1_000_000_000;
 const KEYFRAME_BEFORE_SEEK_NS: u64 = 800_000_000;
 const FRAME_PERIOD_NS: u64 = 40_000_000;
 
-// queues a seek once the last sample of the drain has arrived
+// queues `seek` once the last sample of the drain has arrived
 struct SeekAfterLastFrame {
     app: SeekController,
+    seek: Seek,
     frames: usize,
+    segment_stop_ns: Option<u64>,
     // the pts of every frame after the first Flush
     replayed_pts_ns: Option<Vec<u64>>,
 }
@@ -40,13 +42,16 @@ impl OutputSink for SeekAfterLastFrame {
     ) -> Poll<Result<PushOutcome, G2gError>> {
         match (packet_slot.take(), &mut self.replayed_pts_ns) {
             (Some(PipelinePacket::Flush), replayed @ None) => *replayed = Some(Vec::new()),
+            (Some(PipelinePacket::Segment(segment)), Some(_)) => {
+                self.segment_stop_ns = segment.stop
+            }
             (Some(PipelinePacket::DataFrame(frame)), Some(replayed)) => {
                 replayed.push(frame.timing.pts_ns)
             }
             (Some(PipelinePacket::DataFrame(_)), None) => {
                 self.frames += 1;
                 if self.frames == FRAME_COUNT {
-                    self.app.seek(Seek::flush_to(SEEK_NS));
+                    self.app.seek(self.seek);
                 }
             }
             _ => {}
@@ -55,8 +60,7 @@ impl OutputSink for SeekAfterLastFrame {
     }
 }
 
-#[tokio::test]
-async fn a_seek_after_the_drain_replays_from_the_keyframe_before_the_target() {
+async fn run_late_seek(seek: Seek) -> SeekAfterLastFrame {
     let app = SeekController::new();
     let mut demux = Mp4Demux::new();
     AsyncElement::set_buffered_seek(&mut demux, app.clone());
@@ -68,7 +72,9 @@ async fn a_seek_after_the_drain_replays_from_the_keyframe_before_the_target() {
 
     let mut sink = SeekAfterLastFrame {
         app,
+        seek,
         frames: 0,
+        segment_stop_ns: None,
         replayed_pts_ns: None,
     };
     let file = std::fs::read(MP4_FIXTURE).expect("read the fixture");
@@ -85,6 +91,13 @@ async fn a_seek_after_the_drain_replays_from_the_keyframe_before_the_target() {
 
     drained.expect("the demuxer serves the late seek");
     assert_eq!(sink.frames, FRAME_COUNT, "every sample went out first");
+    sink
+}
+
+#[tokio::test]
+async fn a_seek_after_the_drain_replays_from_the_keyframe_before_the_target() {
+    let sink = run_late_seek(Seek::flush_to(SEEK_NS)).await;
+
     let replayed: Vec<u64> = (KEYFRAME_BEFORE_SEEK_NS..FRAME_COUNT as u64 * FRAME_PERIOD_NS)
         .step_by(FRAME_PERIOD_NS as usize)
         .collect();
@@ -93,4 +106,21 @@ async fn a_seek_after_the_drain_replays_from_the_keyframe_before_the_target() {
         Some(replayed),
         "after a Flush the samples play again from the keyframe at or before the target"
     );
+}
+
+#[tokio::test]
+async fn a_seek_stop_ends_the_replay_at_the_last_frame_by_the_stop() {
+    const STOP_NS: u64 = 1_500_000_000;
+    let sink = run_late_seek(Seek {
+        stop_type: SeekType::Set,
+        stop: STOP_NS,
+        ..Seek::flush_to(SEEK_NS)
+    })
+    .await;
+
+    let replayed: Vec<u64> = (KEYFRAME_BEFORE_SEEK_NS..=STOP_NS)
+        .step_by(FRAME_PERIOD_NS as usize)
+        .collect();
+    assert_eq!(sink.replayed_pts_ns, Some(replayed));
+    assert_eq!(sink.segment_stop_ns, Some(STOP_NS));
 }

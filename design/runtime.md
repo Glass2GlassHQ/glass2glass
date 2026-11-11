@@ -549,6 +549,11 @@ continuous running-time line. The byte-stream demuxers serve one through
 `DemuxSeek` as gst's demuxers do in pull mode: they byte-seek their source without
 forwarding its `Flush`, and the `Segment` at the target carries running time on from
 the last pts out (`demuxseek::segment_after_seek`, which `Mp4Src` shares).
+A seek's `Set` stop goes into the `Segment` at the target, and the first unit past
+it byte-seeks the source to its published length, so the source flushes and sends
+`Eos` and the demuxer ends through its usual `Eos` path. A source with no length
+reads on and the demuxer drops its units. `Mp4DemuxN` serves seeks from the
+buffered file, so it drops the samples after the last one presenting by the stop.
 
 `HlsSrc` and `DashSrc` are time sources: a seek target is playlist time, or
 presentation time across the Periods for DASH (a segment's time plus its Period's
