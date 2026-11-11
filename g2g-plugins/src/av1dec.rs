@@ -53,6 +53,14 @@ macro_rules! av1_decoder {
 
         type DecodedFrames = Vec<DecodedPicture>;
 
+        // dav1d follows a corrupt unit with more than one error kind, invalid argument then out of memory
+        fn warn_undecodable(error: $backend::Error) {
+            g2g_core::g2g_warn!(
+                g2g_core::log::Target::category(stringify!($ty)),
+                "skipped AV1 data the decoder could not decode: {error}"
+            );
+        }
+
         // every format `pic_format` yields, I420 first so an unconstrained link fixes to it
         const OUTPUT_FORMATS: [RawVideoFormat; 9] = [
             RawVideoFormat::I420,
@@ -186,7 +194,10 @@ macro_rules! av1_decoder {
                     match send {
                         Ok(()) => break, // input fully consumed
                         Err(e) if e.is_again() => send = decoder.send_pending_data(),
-                        Err(_) => return Err(G2gError::CapsMismatch),
+                        Err(e) => {
+                            warn_undecodable(e);
+                            break;
+                        }
                     }
                 }
                 Ok(frames)
@@ -219,7 +230,7 @@ macro_rules! av1_decoder {
                             });
                         }
                         Err(e) if e.is_again() => return Ok(()),
-                        Err(_) => return Err(G2gError::CapsMismatch),
+                        Err(e) => warn_undecodable(e),
                     }
                 }
             }
@@ -609,6 +620,57 @@ macro_rules! av1_decoder {
                     decoded_pictures(&unflushed),
                     "after the Flush the decoder outputs the restarted stream and nothing held from before"
                 );
+            }
+
+            #[test]
+            fn decoding_continues_past_a_corrupt_unit() {
+                let demuxed = run(
+                    &mut IvfDemux::new(),
+                    &Caps::ByteStream { encoding: ByteStreamEncoding::Ivf },
+                    &[FLUSH_FIXTURE],
+                );
+                let coded = first_caps(&demuxed.packets).expect("the demuxer reports the stream");
+                let units: Vec<(Vec<u8>, FrameTiming)> = demuxed
+                    .packets
+                    .iter()
+                    .filter_map(|packet| match packet {
+                        PipelinePacket::DataFrame(frame) => Some((
+                            frame.domain.require_system_slice("test").unwrap().to_vec(),
+                            frame.timing,
+                        )),
+                        _ => None,
+                    })
+                    .collect();
+                let (first_unit, first_timing) = &units[0];
+                let (second_unit, second_timing) = &units[1];
+                // the second unit cut in half, so its OBU sizes run past its end
+                let corrupt_unit = second_unit[..second_unit.len() / 2].to_vec();
+                // the whole stream again from its keyframe, stamped after the corrupt unit
+                let replay_offset_ns = units.last().unwrap().1.pts_ns + 1;
+                let replay = units.iter().map(|(bytes, timing)| {
+                    let timing = FrameTiming { pts_ns: timing.pts_ns + replay_offset_ns, ..*timing };
+                    (bytes.clone(), timing)
+                });
+                let packets = [(first_unit.clone(), *first_timing), (corrupt_unit, *second_timing)]
+                    .into_iter()
+                    .chain(replay)
+                    .map(|(bytes, timing)| {
+                        PipelinePacket::DataFrame(Frame { timing, ..crate::testutil::frame(bytes) })
+                    });
+
+                let mut decoder = $ty::new();
+                decoder.configure_pipeline(&coded).unwrap();
+                let mut sink = CollectSink::default();
+                let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+                for packet in packets {
+                    runtime.block_on(decoder.process(packet, &mut sink)).unwrap();
+                }
+                runtime.block_on(decoder.process(PipelinePacket::Eos, &mut sink)).unwrap();
+                let replayed = decoded_pictures(&sink.packets)
+                    .iter()
+                    .filter(|(pts_ns, _)| *pts_ns >= replay_offset_ns)
+                    .count();
+                assert_eq!(replayed, units.len(), "every unit after the keyframe decodes");
             }
 
             // tools/av1-operating-point-fixture.sh: a 320x256 L2T3 stream whose operating
