@@ -62,7 +62,7 @@ use smithay_client_toolkit::reexports::calloop::channel::{channel, Sender as Cal
 use crate::clock::wait_to_present;
 use crate::glnv12::{GlMode, GlState};
 use crate::glwindow::{run_gl_window, FramePresenter};
-use crate::waylandwindow::{present_on_worker, WindowParams, WorkerChannels, WorkerCmd};
+use crate::windowworker::{present_on_worker, WindowParams, WorkerChannels, WorkerCmd};
 use crate::worker_ready::Handshake;
 use g2g_core::element::{PresentationStats, QosMessage};
 use g2g_core::memory::{DomainSet, MemoryDomainKind};

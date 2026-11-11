@@ -2,11 +2,14 @@
 //
 // SPDX-License-Identifier: MPL-2.0
 
-use crate::annexb::BitReader;
+use crate::annexb::{h264_nal_type, nal_units_any, strip_emulation_prevention, BitReader};
+use crate::displayorder::PictureMeta;
 use crate::h264parse::{
-    h264_poc_context, H264ParameterSets, H264Pps, H264SliceHeader, H264Sps, H264StreamRefused,
+    h264_poc_context, parse_h264_pps, parse_h264_slice_header, parse_h264_sps, H264Pps,
+    H264SliceHeader, H264Sps, H264StreamRefused, H264_NAL_PPS, H264_NAL_SPS,
     MALFORMED_SLICE_HEADER,
 };
+use g2g_core::meta::CropRectangle;
 
 /// The SPS fields a decode session and its DPB are sized from: a new SPS that
 /// differs in any of them needs a new session, any other change does not.
@@ -36,6 +39,31 @@ impl H264Sps {
             bit_depth_chroma_minus8: self.bit_depth_chroma_minus8,
         }
     }
+}
+
+pub(crate) const CHROMA_420_CROP_UNIT: u32 = 2;
+
+// what is left of `picture` once `[left, right, top, bottom]` crop units of `unit` samples are cut off
+pub(crate) fn crop_rectangle(
+    picture: (u32, u32),
+    unit: (u32, u32),
+    [left, right, top, bottom]: [u32; 4],
+) -> Option<CropRectangle> {
+    let axis = |size: u32, unit: u32, start: u32, end: u32| {
+        let offset = start.checked_mul(unit)?;
+        let kept = size
+            .checked_sub(offset)?
+            .checked_sub(end.checked_mul(unit)?)?;
+        (kept > 0).then_some((offset, kept))
+    };
+    let (left, width) = axis(picture.0, unit.0, left, right)?;
+    let (top, height) = axis(picture.1, unit.1, top, bottom)?;
+    Some(CropRectangle {
+        left,
+        top,
+        width,
+        height,
+    })
 }
 
 pub(crate) const H264_NAL_SLICE: u8 = 1;
@@ -386,7 +414,8 @@ pub(crate) struct H264ParameterSetTable {
 }
 
 impl H264ParameterSetTable {
-    pub(crate) fn of(ps: &H264ParameterSets) -> Self {
+    #[cfg(feature = "vulkan-video")]
+    pub(crate) fn of(ps: &crate::h264parse::H264ParameterSets) -> Self {
         let mut table = Self::default();
         table
             .sps
@@ -408,4 +437,78 @@ impl H264ParameterSetTable {
         let sps = self.sps.get(&pps.seq_parameter_set_id).ok_or(MISSING)?;
         Ok((sps, pps))
     }
+}
+
+pub(crate) fn h264_picture_meta(header: &H264SliceHeader, order: &H264PictureOrder) -> PictureMeta {
+    let [top, bottom] = order.stored_field_order_counts;
+    PictureMeta {
+        is_keyframe: header.is_idr || order.memory_reset,
+        is_random_access: header.is_idr,
+        frame_num: header.frame_num,
+        poc: top.min(bottom),
+        pic_output_flag: true,
+        discards_prior_pictures: false,
+        dpb: None,
+    }
+}
+
+/// One primary coded picture of a stream: its first slice header, its slice
+/// NALs (borrowing the input stream), and the parameter sets it was coded with.
+#[derive(Debug)]
+pub(crate) struct H264Picture<'s> {
+    pub(crate) header: H264SliceHeader,
+    pub(crate) slices: alloc::vec::Vec<&'s [u8]>,
+    pub(crate) sps: H264Sps,
+    pub(crate) pps: H264Pps,
+}
+
+pub(crate) type PictureUnits<'s> = alloc::vec::Vec<H264Picture<'s>>;
+
+/// Split an Annex-B / AVCC stream into primary coded pictures. Access units
+/// break on a VCL NAL with `first_mb_in_slice == 0`. SPS / PPS NALs update
+/// the parameter-set table in stream order, so each picture is parsed against,
+/// and carries, the sets in effect at its first slice. Other non-VCL NALs are
+/// skipped. Borrows `stream`, not the table.
+pub(crate) fn split_h264_pictures<'s>(
+    parsed_sets: &mut H264ParameterSetTable,
+    stream: &'s [u8],
+) -> Result<PictureUnits<'s>, H264StreamRefused> {
+    let mut pictures = alloc::vec::Vec::new();
+    let mut current: Option<H264Picture<'s>> = None;
+
+    for nal in nal_units_any(stream) {
+        let Some(nal_type) = h264_nal_type(nal) else {
+            continue;
+        };
+        match nal_type {
+            H264_NAL_SPS => {
+                let sps = parse_h264_sps(&strip_emulation_prevention(&nal[1..]))?;
+                parsed_sets.sps.insert(sps.seq_parameter_set_id, sps);
+                continue;
+            }
+            H264_NAL_PPS => {
+                let pps = parse_h264_pps(&strip_emulation_prevention(&nal[1..]))?;
+                parsed_sets.pps.insert(pps.pic_parameter_set_id, pps);
+                continue;
+            }
+            H264_NAL_SLICE | H264_NAL_IDR_SLICE => {}
+            _ => continue,
+        }
+        let (sps, pps) = parsed_sets.active(h264_slice_pic_parameter_set_id(nal)?)?;
+        let header = parse_h264_slice_header(nal, sps, pps)?;
+        if header.first_mb_in_slice == 0 {
+            pictures.extend(current.take());
+        }
+        current
+            .get_or_insert_with(|| H264Picture {
+                header,
+                slices: alloc::vec::Vec::new(),
+                sps: sps.clone(),
+                pps: pps.clone(),
+            })
+            .slices
+            .push(nal);
+    }
+    pictures.extend(current);
+    Ok(pictures)
 }

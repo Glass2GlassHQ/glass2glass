@@ -15,7 +15,8 @@ use g2g_plugins::vulkanvideo::{
 };
 
 mod vulkan_ref;
-use vulkan_ref::{assert_frames_match_reference, planar_frames};
+use vulkan_ref::decode_ref::assert_frames_match_reference;
+use vulkan_ref::planar_frames;
 
 // Rotzoom global motion on LAST (later frames code it against their primary
 // reference), a hidden ALTREF and CDEF secondary strengths coded as 3:

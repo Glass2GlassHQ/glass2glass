@@ -18,7 +18,8 @@ use g2g_plugins::vulkanvideo::{
 
 mod vulkan_nv12_common;
 mod vulkan_ref;
-use vulkan_ref::{assert_frames_match_reference, planar_frames, two_plane_to_planar};
+use vulkan_ref::decode_ref::{assert_frames_match_reference, two_plane_to_planar};
+use vulkan_ref::planar_frames;
 
 // ffmpeg -f lavfi -i testsrc=size=321x181:rate=30 -frames:v 10 -pix_fmt yuv420p -c:v libaom-av1 -cpu-used 8 -b:v 200k -f obu av1_321x181.obu
 const CLIP: &[u8] = include_bytes!("fixtures/av1_321x181.obu");

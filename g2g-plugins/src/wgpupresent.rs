@@ -5,10 +5,11 @@
 //! Windowed wgpu display sink: the launch-line `wgpusink`.
 //!
 //! [`WgpuSink`] renders and presents, but only to a target the application built.
-//! This element is that application: it opens its own `xdg_toplevel` on the
-//! shared Wayland worker ([`crate::waylandwindow`]), builds a `wgpu::Surface`
-//! over that surface's raw handles, and drives a surface-target [`WgpuSink`] on
-//! the worker thread. So a text pipeline gets a GPU present with no window /
+//! This element is that application: it opens its own window on a worker thread
+//! (an `xdg_toplevel` through [`crate::waylandwindow`] on Linux, a Win32 window
+//! through [`crate::win32window`] on Windows), builds a `wgpu::Surface` over that
+//! window's raw handles, and drives a surface-target [`WgpuSink`] on the worker
+//! thread. So a text pipeline gets a GPU present with no window /
 //! event-loop code of its own:
 //!
 //! ```text
@@ -27,17 +28,18 @@
 //!
 //! ## Threading
 //!
-//! Wayland and the wgpu surface are both thread-affine, so the window, the device
+//! The window and the wgpu surface are both thread-affine, so the window, the device
 //! and the presents live on a worker thread spun up at `configure_pipeline`. The
-//! sink struct holds only `Send` handles (a `calloop` channel sender plus shared
-//! atomics), so the runner can move it between executor tasks.
+//! sink struct holds only `Send` handles (a channel sender plus shared atomics),
+//! so the runner can move it between executor tasks.
 //!
-//! Linux (Wayland) only, `wgpu-present` feature. The on-screen present is
+//! Linux (Wayland) and Windows, `wgpu-present` feature. The on-screen present is
 //! validated by the display smoke runs, not in CI; the render itself is what the
 //! headless [`WgpuSink`] tests cover.
 
 use core::future::Future;
 use core::pin::Pin;
+#[cfg(target_os = "linux")]
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -48,20 +50,25 @@ use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use raw_window_handle::{
-    RawDisplayHandle, RawWindowHandle, WaylandDisplayHandle, WaylandWindowHandle,
-};
-use smithay_client_toolkit::reexports::calloop::channel::{channel, Sender as CalloopSender};
+use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
+#[cfg(target_os = "linux")]
+use smithay_client_toolkit::reexports::calloop::channel::{channel, Sender as CommandSender};
+#[cfg(target_os = "linux")]
 use smithay_client_toolkit::reexports::client::{protocol::wl_surface, Connection, Proxy};
+#[cfg(target_os = "windows")]
+use std::sync::mpsc::{channel, Sender as CommandSender};
 
 use crate::clock::wait_to_present;
 use crate::display_aspect::{display_size, FORCE_ASPECT_RATIO_NAME, FORCE_ASPECT_RATIO_PROPERTY};
 use crate::gpu::GpuContext;
-use crate::waylandwindow::{
-    present_on_worker, run_window, worker_gone, WindowParams, WindowRenderer, WorkerChannels,
-    WorkerCmd,
-};
+#[cfg(target_os = "linux")]
+use crate::waylandwindow::run_window;
 use crate::wgpusink::WgpuSink;
+#[cfg(target_os = "windows")]
+use crate::win32window::run_window;
+use crate::windowworker::{
+    present_on_worker, worker_gone, WindowParams, WindowRenderer, WorkerChannels, WorkerCmd,
+};
 use crate::worker_ready::Handshake;
 use g2g_core::element::{PresentationStats, QosMessage};
 use g2g_core::log::{short_type_name, LogName, LogSource, Target};
@@ -104,12 +111,13 @@ const FOLLOW_VIDEO: u32 = 0;
 /// ```
 pub struct WgpuPresentSink {
     title: String,
+    #[cfg(target_os = "linux")]
     app_id: String,
     fullscreen: bool,
     /// Requested window size; [`FOLLOW_VIDEO`] means the negotiated geometry.
     window_width: u32,
     window_height: u32,
-    cmd_tx: Option<CalloopSender<WorkerCmd<MemoryDomain>>>,
+    cmd_tx: Option<CommandSender<WorkerCmd<MemoryDomain>>>,
     worker: Option<JoinHandle<()>>,
     /// Caps the window's renderer opens with, from the last `configure_pipeline`.
     caps: Option<Caps>,
@@ -157,6 +165,7 @@ impl WgpuPresentSink {
     pub fn new() -> Self {
         Self {
             title: String::from(DEFAULT_TITLE),
+            #[cfg(target_os = "linux")]
             app_id: String::from(DEFAULT_APP_ID),
             fullscreen: false,
             window_width: FOLLOW_VIDEO,
@@ -182,6 +191,7 @@ impl WgpuPresentSink {
         self
     }
 
+    #[cfg(target_os = "linux")]
     pub fn with_app_id<S: Into<String>>(mut self, app_id: S) -> Self {
         self.app_id = app_id.into();
         self
@@ -294,6 +304,7 @@ impl WgpuPresentSink {
             width: window_width,
             height: window_height,
             title: self.title.clone(),
+            #[cfg(target_os = "linux")]
             app_id: self.app_id.clone(),
             fullscreen: self.fullscreen,
             log_tag: short_type_name::<Self>(),
@@ -313,19 +324,30 @@ impl WgpuPresentSink {
                     ready: ready_for_worker,
                     window_closed,
                 };
+                #[cfg(target_os = "linux")]
                 let build = |conn: &Connection,
                              surface: &wl_surface::WlSurface,
                              window_width,
                              window_height| {
                     build_renderer(
-                        conn,
-                        surface,
+                        |instance: &wgpu::Instance| create_surface_on(instance, conn, surface),
                         window_width,
                         window_height,
                         &caps,
                         force_aspect_ratio,
                     )
                 };
+                #[cfg(target_os = "windows")]
+                let build =
+                    |window: windows::Win32::Foundation::HWND, window_width, window_height| {
+                        build_renderer(
+                            |instance: &wgpu::Instance| create_surface_on(instance, window),
+                            window_width,
+                            window_height,
+                            &caps,
+                            force_aspect_ratio,
+                        )
+                    };
                 if let Err(e) = run_window(build, params, channels) {
                     let _ = error_tx.send(alloc::format!("{e}"));
                 }
@@ -363,6 +385,7 @@ impl Drop for WgpuPresentSink {
 
 /// Default window identity, also the property defaults `gst-inspect` reports.
 const DEFAULT_TITLE: &str = "glass2glass";
+#[cfg(target_os = "linux")]
 const DEFAULT_APP_ID: &str = "io.glass2glass.WgpuSink";
 
 /// Monotonic clock the sink offers, matching the source-side `arrival_ns` epoch
@@ -442,7 +465,7 @@ impl AsyncElement for WgpuPresentSink {
         ElementMetadata::new(
             "wgpu video sink",
             "Sink/Video",
-            "Presents GPU-resident or system-memory video on a Wayland surface through wgpu",
+            "Presents GPU-resident or system-memory video in a window through wgpu",
             crate::AARON_BOXER,
         )
     }
@@ -450,6 +473,7 @@ impl AsyncElement for WgpuPresentSink {
     fn properties(&self) -> &'static [PropertySpec] {
         const PROPS: &[PropertySpec] = &[
             PropertySpec::new("title", PropKind::Str, "window title").with_default(DEFAULT_TITLE),
+            #[cfg(target_os = "linux")]
             PropertySpec::new("app-id", PropKind::Str, "Wayland xdg app id")
                 .with_default(DEFAULT_APP_ID),
             PropertySpec::new("fullscreen", PropKind::Bool, "map the window fullscreen")
@@ -479,6 +503,7 @@ impl AsyncElement for WgpuPresentSink {
                 self.title = value.as_str().ok_or(PropError::Type)?.into();
                 Ok(())
             }
+            #[cfg(target_os = "linux")]
             "app-id" => {
                 self.app_id = value.as_str().ok_or(PropError::Type)?.into();
                 Ok(())
@@ -509,6 +534,7 @@ impl AsyncElement for WgpuPresentSink {
     fn get_property(&self, name: &str) -> Option<PropValue> {
         match name {
             "title" => Some(PropValue::Str(self.title.clone())),
+            #[cfg(target_os = "linux")]
             "app-id" => Some(PropValue::Str(self.app_id.clone())),
             "fullscreen" => Some(PropValue::Bool(self.fullscreen)),
             "window-width" => Some(PropValue::Uint(self.window_width as u64)),
@@ -629,8 +655,9 @@ impl WindowRenderer for SurfaceRenderer {
 /// surface are bound to the thread that made them, and device creation is async,
 /// so this blocks rather than spreading the setup back over the pipeline task).
 fn build_renderer(
-    conn: &Connection,
-    surface: &wl_surface::WlSurface,
+    create_surface: impl Fn(
+        &wgpu::Instance,
+    ) -> Result<wgpu::Surface<'static>, Box<dyn std::error::Error>>,
     width: u32,
     height: u32,
     caps: &Caps,
@@ -639,20 +666,17 @@ fn build_renderer(
     // A GPU decoder upstream opens its own device (Vulkan Video needs queues wgpu
     // does not ask for) and its textures bind to no other, so present on that
     // device when one is offered rather than opening a second.
-    let adopted = crate::gpu::present_on_producer_device(
-        |instance| create_surface_on(instance, conn, surface),
-        width,
-        height,
-    );
+    let adopted = crate::gpu::present_on_producer_device(&create_surface, width, height);
     let (ctx, wgpu_surface, config) = match adopted {
         Some(adopted) => adopted,
         None => {
-            let (instance, wgpu_surface) = create_surface(conn, surface)?;
+            let instance = present_instance();
+            let wgpu_surface = create_surface(&instance)?;
             let ctx = g2g_core::runtime::block_on(open_device(instance, &wgpu_surface))
                 .map_err(|e| alloc::format!("no wgpu device for this surface: {e:?}"))?;
             let config = wgpu_surface
                 .get_default_config(&ctx.adapter, width, height)
-                .ok_or("no GPU adapter here can present to this Wayland display")?;
+                .ok_or("no GPU adapter here can present to this window")?;
             (ctx, wgpu_surface, config)
         }
     };
@@ -667,7 +691,12 @@ fn build_renderer(
                 "gpu error while presenting: {error}"
             );
         }));
+    let configure_errors = ctx.device.push_error_scope(wgpu::ErrorFilter::Validation);
     wgpu_surface.configure(&ctx.device, &config);
+    // a window with no desktop to show on, such as one opened over ssh, cannot be configured
+    if let Some(error) = g2g_core::runtime::block_on(configure_errors.pop()) {
+        return Err(alloc::format!("cannot configure the window's surface: {error}").into());
+    }
     let mut sink = WgpuSink::with_surface(ctx, wgpu_surface, config)
         .with_force_aspect_ratio(force_aspect_ratio);
     sink.configure_pipeline(caps)
@@ -702,12 +731,7 @@ async fn open_device(
 #[cfg(not(feature = "cuda-wgpu"))]
 static PRESENT_INSTANCE: std::sync::OnceLock<wgpu::Instance> = std::sync::OnceLock::new();
 
-/// A `wgpu::Surface` over the worker's `wl_surface`, plus the instance it belongs
-/// to (an adapter is only usable with the surface's own instance).
-fn create_surface(
-    conn: &Connection,
-    surface: &wl_surface::WlSurface,
-) -> Result<(wgpu::Instance, wgpu::Surface<'static>), Box<dyn std::error::Error>> {
+fn present_instance() -> wgpu::Instance {
     #[cfg(feature = "cuda-wgpu")]
     let instance = crate::cudawgpu::vulkan_instance();
     #[cfg(not(feature = "cuda-wgpu"))]
@@ -723,13 +747,12 @@ fn create_surface(
             )
         })
         .clone();
-
-    let wgpu_surface = create_surface_on(&instance, conn, surface)?;
-    Ok((instance, wgpu_surface))
+    instance
 }
 
 /// The worker's `wl_surface` as a `wgpu::Surface` on a given instance, so a
 /// producer's instance can be adopted (see [`crate::gpu::present_on_producer_device`]).
+#[cfg(target_os = "linux")]
 fn create_surface_on(
     instance: &wgpu::Instance,
     conn: &Connection,
@@ -748,10 +771,33 @@ fn create_surface_on(
     // outlives the `wl_surface` it was built over.
     let wgpu_surface = unsafe {
         instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
-            raw_display_handle: Some(RawDisplayHandle::Wayland(WaylandDisplayHandle::new(
-                display,
-            ))),
-            raw_window_handle: RawWindowHandle::Wayland(WaylandWindowHandle::new(window)),
+            raw_display_handle: Some(RawDisplayHandle::Wayland(
+                raw_window_handle::WaylandDisplayHandle::new(display),
+            )),
+            raw_window_handle: RawWindowHandle::Wayland(
+                raw_window_handle::WaylandWindowHandle::new(window),
+            ),
+        })
+    }?;
+    Ok(wgpu_surface)
+}
+
+#[cfg(target_os = "windows")]
+fn create_surface_on(
+    instance: &wgpu::Instance,
+    window: windows::Win32::Foundation::HWND,
+) -> Result<wgpu::Surface<'static>, Box<dyn std::error::Error>> {
+    let handle = core::num::NonZeroIsize::new(window.0 as isize).ok_or("null window handle")?;
+    // SAFETY: `window` is the worker's live HWND. The surface is stored in the
+    // renderer, which `win32window::run_window` drops before it destroys the window.
+    let wgpu_surface = unsafe {
+        instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
+            raw_display_handle: Some(RawDisplayHandle::Windows(
+                raw_window_handle::WindowsDisplayHandle::new(),
+            )),
+            raw_window_handle: RawWindowHandle::Win32(raw_window_handle::Win32WindowHandle::new(
+                handle,
+            )),
         })
     }?;
     Ok(wgpu_surface)

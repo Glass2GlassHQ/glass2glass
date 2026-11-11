@@ -37,8 +37,8 @@ use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use windows::core::{w, Interface};
-use windows::Win32::Foundation::{HMODULE, HWND, LPARAM, LRESULT, WPARAM};
+use windows::core::Interface;
+use windows::Win32::Foundation::{HMODULE, HWND};
 use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
 use windows::Win32::Graphics::Direct3D11::{
     D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D, ID3D11VideoContext,
@@ -66,16 +66,11 @@ use windows::Win32::Graphics::Dxgi::{
     DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_CHAIN_FLAG, DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL,
     DXGI_USAGE_RENDER_TARGET_OUTPUT,
 };
-use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, PeekMessageW,
-    PostQuitMessage, RegisterClassExW, SetWindowPos, TranslateMessage, CW_USEDEFAULT, MSG,
-    PM_REMOVE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, WM_DESTROY, WM_QUIT, WNDCLASSEXW,
-    WS_OVERLAPPEDWINDOW, WS_VISIBLE,
-};
+use windows::Win32::UI::WindowsAndMessaging::DestroyWindow;
 
 use crate::videoconvert::display::{display_sink_caps, DisplayInput};
 use crate::videoflip::frame_orientation;
+use crate::win32window::{create_window, pump_messages, resize_client};
 use crate::worker_ready::Handshake;
 use g2g_core::element::{PresentationStats, QosMessage};
 use g2g_core::frame::Frame;
@@ -532,7 +527,7 @@ fn worker_main(
     reports: WorkerReports,
     ready: Arc<Handshake>,
 ) -> Result<(), G2gError> {
-    let hwnd = create_window(&title, width, height)?;
+    let hwnd = create_window(&title, (width, height), false).map_err(win_err)?;
     // d3d11 device and swapchain creation takes about 300 ms, enough to make the opening frames late when it waits for the first one
     let mut gpu = Some(init_gpu(create_device()?, width, height, hwnd)?);
     ready.notify();
@@ -578,34 +573,6 @@ fn worker_main(
     Ok(())
 }
 
-/// Drain pending window messages so the window stays responsive. False once
-/// the window has been closed.
-fn pump_messages() -> bool {
-    let mut msg = MSG::default();
-    // SAFETY: standard message-pump calls; `msg` is a valid local.
-    unsafe {
-        while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
-            if msg.message == WM_QUIT {
-                return false;
-            }
-            let _ = TranslateMessage(&msg);
-            DispatchMessageW(&msg);
-        }
-    }
-    true
-}
-
-unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
-    // win32 sends WM_DESTROY when the user closes the window
-    if msg == WM_DESTROY {
-        // SAFETY: called on the thread that owns the window's message queue.
-        unsafe { PostQuitMessage(0) };
-        return LRESULT(0);
-    }
-    // SAFETY: forwarded straight to the default handler.
-    unsafe { DefWindowProcW(hwnd, msg, wp, lp) }
-}
-
 /// A hardware D3D11 device for system-memory frames that bring no device of
 /// their own: one with video support when the driver has it, else a plain one
 /// (WARP refuses the video flag with `DXGI_ERROR_UNSUPPORTED`).
@@ -633,46 +600,6 @@ fn create_device_with(flags: D3D11_CREATE_DEVICE_FLAG) -> Result<ID3D11Device, G
         .map_err(win_err)?;
     }
     device.ok_or(G2gError::Hardware(HardwareError::Other))
-}
-
-/// Register the window class (idempotent) and create a visible window at the
-/// video dimensions.
-fn create_window(title: &str, width: u32, height: u32) -> Result<HWND, G2gError> {
-    // SAFETY: standard Win32 window creation on the worker thread.
-    unsafe {
-        let hinstance = GetModuleHandleW(None).map_err(win_err)?;
-        let class_name = w!("g2g_d3d11sink");
-        let wc = WNDCLASSEXW {
-            cbSize: core::mem::size_of::<WNDCLASSEXW>() as u32,
-            lpfnWndProc: Some(wndproc),
-            hInstance: hinstance.into(),
-            lpszClassName: class_name,
-            ..Default::default()
-        };
-        // RegisterClassExW returns 0 on failure; a duplicate registration
-        // (second sink) also "fails" but is harmless, so we ignore the result
-        // and let CreateWindowExW surface a real problem.
-        let _ = RegisterClassExW(&wc);
-
-        let title_w: alloc::vec::Vec<u16> =
-            title.encode_utf16().chain(core::iter::once(0)).collect();
-        let hwnd = CreateWindowExW(
-            Default::default(),
-            class_name,
-            windows::core::PCWSTR(title_w.as_ptr()),
-            WS_OVERLAPPEDWINDOW | WS_VISIBLE,
-            CW_USEDEFAULT,
-            CW_USEDEFAULT,
-            width as i32,
-            height as i32,
-            None,
-            None,
-            Some(hinstance.into()),
-            None,
-        )
-        .map_err(win_err)?;
-        Ok(hwnd)
-    }
 }
 
 /// Build the swapchain, plus the video processor when `device` has D3D11 video,
@@ -1113,17 +1040,8 @@ fn apply_orientation(
                     DXGI_SWAP_CHAIN_FLAG(0),
                 )
                 .map_err(win_err)?;
-            SetWindowPos(
-                hwnd,
-                None,
-                0,
-                0,
-                width as i32,
-                height as i32,
-                SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
-            )
-            .map_err(win_err)?;
         }
+        resize_client(hwnd, (width, height)).map_err(win_err)?;
     }
     gpu.orientation = orientation;
     Ok(())

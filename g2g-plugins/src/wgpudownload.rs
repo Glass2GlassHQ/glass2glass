@@ -76,12 +76,12 @@ fn read_texture_dq(
             .block_copy_size(Some(aspect))
             .ok_or_else(|| gpu_err(()))?;
         let (x_factor, y_factor) = format.subsampling_factors(Some(plane));
-        let extent = (
+        let region = crate::gpu::whole_texture(
             picture_width.div_ceil(x_factor),
             picture_height.div_ceil(y_factor),
         );
         out.extend(read_texture_plane(
-            device, queue, texture, aspect, extent, bpp,
+            device, queue, texture, aspect, region, bpp,
         )?);
     }
     Ok(out)

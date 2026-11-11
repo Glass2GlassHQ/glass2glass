@@ -45,7 +45,7 @@ use g2g_plugins::vulkanvideo::{
 };
 
 mod vulkan_ref;
-use vulkan_ref::reference_yuv;
+use vulkan_ref::decode_ref::reference_yuv;
 
 const CLIP: &[u8] = include_bytes!("fixtures/h265_640x480_opengop.hevc");
 const CLIP_FIXTURE: &str = "h265_640x480_opengop.hevc";

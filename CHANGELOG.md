@@ -123,6 +123,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M2207: `d3d11videosink` builds its device and swapchain at startup, so the opening frames are no longer dropped as late.
 - M2208: `mfh264dec`, `mfh265dec`, `mfh264enc`, `mfh265enc`, `mfaacenc` and `mfaacdec` work in launch lines, the MF AAC pair carries ADTS, and `MfDecode` loses its D3D11 output.
 - M2209: the H.264 parameter-set, slice-header, reference marking and picture order code moves out of `vulkanvideo` into `h264parse` and `h264dpb`.
+- M2210: `d3d12h264dec` decodes H.264 on a D3D12 GPU into wgpu textures or system memory, and `wgpusink` opens a Win32 window on Windows.
 
 Breaking: `TimecodeMeta.frames` is a `u16`, `WIRE_VERSION` is 6, `FrameTiming` gains `start_discard_ns` and `end_discard_ns`, and `RtpRecvConfig` gains `parameter_sets`.
 

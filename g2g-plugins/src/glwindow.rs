@@ -19,8 +19,10 @@ use smithay_client_toolkit::reexports::client::{protocol::wl_surface, Connection
 use wayland_egl::WlEglSurface;
 
 use crate::glnv12::{GlMode, GlState};
-use crate::waylandwindow::{run_window, WindowParams, WindowRenderer, WorkerChannels};
+use crate::waylandwindow::run_window;
+use crate::windowworker::{WindowParams, WindowRenderer, WorkerChannels, WorkerCmd};
 use g2g_core::{Colorimetry, G2gError, HardwareError};
+use smithay_client_toolkit::reexports::calloop::channel::Channel;
 
 /// The per-sink half of the worker: which pixel layout to build the GL state
 /// for, and how to get one frame's pixels into it. The draw itself (program,
@@ -80,7 +82,7 @@ pub(crate) fn open_cuda_display(
 pub(crate) fn run_gl_window<P: FramePresenter>(
     presenter: P,
     params: WindowParams,
-    channels: WorkerChannels<P::Frame>,
+    channels: WorkerChannels<Channel<WorkerCmd<P::Frame>>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     run_window(
         |conn, wl_surface, width, height| {

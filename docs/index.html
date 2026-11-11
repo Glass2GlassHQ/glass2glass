@@ -915,7 +915,7 @@
                 <p class="f-lead">H.264, H.265, VP8, VP9, and AV1 through each platform's native hardware codec. On NVIDIA the frame stays in CUDA memory.</p>
                 <div class="chip-group">
                     <span class="chip-label">Decoders</span>
-                    <div class="chip-row"><span class="chip">FfmpegVideoDec</span><span class="chip">NvDec</span><span class="chip">VulkanVideoDec</span><span class="chip">MfDecode</span><span class="chip">VtDecode</span><span class="chip">MediaCodecDec</span><span class="chip">WebCodecsDecode</span></div>
+                    <div class="chip-row"><span class="chip">FfmpegVideoDec</span><span class="chip">NvDec</span><span class="chip">VulkanVideoDec</span><span class="chip">MfDecode</span><span class="chip">D3D12H264Dec</span><span class="chip">VtDecode</span><span class="chip">MediaCodecDec</span><span class="chip">WebCodecsDecode</span></div>
                 </div>
                 <div class="chip-group">
                     <span class="chip-label">Encoders</span>
@@ -1274,12 +1274,12 @@ g2g-launch <span class="flag">--script</span> build.rhai</div>
             <div class="target-card">
                 <div class="t-icon">&#9729;&#65039;</div>
                 <h3>CPU</h3>
-                <p>Tokio on servers and edge boxes, with the full element and protocol set and each OS's hardware decoder: NVDEC or VAAPI on Linux, Media Foundation on Windows, VideoToolbox on macOS, MediaCodec on Android.</p>
+                <p>Tokio on servers and edge boxes, with the full element and protocol set and each OS's hardware decoder: NVDEC or VAAPI on Linux, D3D12 or Media Foundation on Windows, VideoToolbox on macOS, MediaCodec on Android.</p>
             </div>
             <div class="target-card">
                 <div class="t-icon">&#9889;</div>
                 <h3>GPU</h3>
-                <p>Vulkan Video decode, native NVIDIA codecs, and a CUDA to wgpu bridge keep frames on the card. Plugs into an app's existing wgpu device. Packaged for Bevy as <code>bevy-g2g</code>.</p>
+                <p>Vulkan Video decode, D3D12 video decode on Windows, native NVIDIA codecs, and a CUDA to wgpu bridge keep frames on the card. Plugs into an app's existing wgpu device. Packaged for Bevy as <code>bevy-g2g</code>.</p>
             </div>
             <div class="target-card">
                 <div class="t-icon">&#127760;</div>

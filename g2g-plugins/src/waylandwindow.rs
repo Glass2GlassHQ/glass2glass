@@ -16,12 +16,11 @@
 //! The first `xdg` configure signals the sink's readiness handshake, and a frame
 //! that arrives before the surface is mappable is held and drawn then.
 
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use alloc::boxed::Box;
-use alloc::string::String;
 
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState},
@@ -29,7 +28,7 @@ use smithay_client_toolkit::{
     delegate_xdg_window,
     output::{OutputHandler, OutputState},
     reexports::calloop::{
-        channel::{Channel, Event as ChanEvent, Sender},
+        channel::{Channel, Event as ChanEvent},
         EventLoop,
     },
     reexports::calloop_wayland_source::WaylandSource,
@@ -49,105 +48,14 @@ use smithay_client_toolkit::{
     },
 };
 
+use crate::windowworker::{
+    PresentReports, WindowParams, WindowRenderer, WorkerChannels, WorkerCmd,
+};
 use crate::worker_ready::Handshake;
 use g2g_core::log::Target;
-use g2g_core::metrics::{monotonic_ns, LatencyHistogram};
 #[cfg(feature = "wgpu-present")]
 use g2g_core::Caps;
-use g2g_core::{G2gError, HardwareError};
-
-pub(crate) enum WorkerCmd<F> {
-    Frame {
-        frame: F,
-        arrival_ns: u64,
-        ack: tokio::sync::oneshot::Sender<()>,
-    },
-    /// New negotiated caps for the renderer, plus the size to ask the compositor
-    /// for, so a mid-stream format / geometry change costs a reconfigure instead
-    /// of tearing the window and its GPU device down and building them again.
-    /// Only the wgpu sink follows caps in place; the GL sinks respawn.
-    #[cfg(feature = "wgpu-present")]
-    Reconfigure {
-        caps: Caps,
-        width: u32,
-        height: u32,
-    },
-    Shutdown,
-}
-
-/// The per-sink half of the worker: how one frame's pixels reach the window's
-/// surface. The window, the event loop, the readiness handshake and the pacing
-/// ack are shared.
-pub(crate) trait WindowRenderer: 'static {
-    /// Payload the sink hands over the channel (a byte vector, a GPU frame).
-    type Frame: Send + 'static;
-
-    /// Draw `frame` and present it to the surface.
-    fn present(&mut self, frame: &Self::Frame) -> Result<(), G2gError>;
-
-    /// Take new negotiated caps mid-stream. Default: nothing to do, for a
-    /// renderer whose sink respawns the worker on a caps change instead.
-    #[cfg(feature = "wgpu-present")]
-    fn reconfigure(&mut self, _caps: &Caps) -> Result<(), G2gError> {
-        Ok(())
-    }
-
-    /// Follow the compositor's configured window size. Default: ignore it and
-    /// keep drawing at the size the renderer was built for, letting the
-    /// compositor letterbox.
-    fn resize(&mut self, _width: u32, _height: u32) {}
-}
-
-/// Window geometry + identity the worker opens with.
-pub(crate) struct WindowParams {
-    pub(crate) width: u32,
-    pub(crate) height: u32,
-    pub(crate) title: String,
-    pub(crate) app_id: String,
-    /// Map the window fullscreen rather than as a normal toplevel.
-    pub(crate) fullscreen: bool,
-    /// Log category the worker's error lines go under (the sink's element name).
-    pub(crate) log_tag: &'static str,
-}
-
-/// The handles the sink shares with its worker: the frame channel plus the
-/// counters and readiness handshake the sink reads.
-pub(crate) struct WorkerChannels<F> {
-    pub(crate) rx: Channel<WorkerCmd<F>>,
-    pub(crate) presented: Arc<AtomicU64>,
-    pub(crate) latency: Arc<LatencyHistogram>,
-    pub(crate) ready: Arc<Handshake>,
-    pub(crate) window_closed: Arc<AtomicBool>,
-}
-
-pub(crate) async fn present_on_worker<F>(
-    tx: &Sender<WorkerCmd<F>>,
-    frame: F,
-    arrival_ns: u64,
-    window_closed: &AtomicBool,
-) -> Result<(), G2gError> {
-    let (ack, presented) = tokio::sync::oneshot::channel();
-    if tx
-        .send(WorkerCmd::Frame {
-            frame,
-            arrival_ns,
-            ack,
-        })
-        .is_err()
-        || presented.await.is_err()
-    {
-        return Err(worker_gone(window_closed));
-    }
-    Ok(())
-}
-
-pub(crate) fn worker_gone(window_closed: &AtomicBool) -> G2gError {
-    if window_closed.load(Ordering::Acquire) {
-        G2gError::WindowClosed
-    } else {
-        G2gError::Hardware(HardwareError::Other)
-    }
-}
+use g2g_core::G2gError;
 
 /// Open the Wayland window, build the sink's renderer over its surface, and run
 /// the present loop until the sink sends `Shutdown` (or the compositor closes the
@@ -162,7 +70,7 @@ pub(crate) fn run_window<R: WindowRenderer>(
         u32,
     ) -> Result<R, Box<dyn std::error::Error>>,
     params: WindowParams,
-    channels: WorkerChannels<R::Frame>,
+    channels: WorkerChannels<Channel<WorkerCmd<R::Frame>>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let WindowParams {
         width,
@@ -201,12 +109,14 @@ pub(crate) fn run_window<R: WindowRenderer>(
         renderer,
         window,
         qh: qh.clone(),
-        log_tag,
         configured: false,
         exit: false,
         ready: Some(channels.ready),
-        presented: channels.presented,
-        latency: channels.latency,
+        reports: PresentReports {
+            presented: channels.presented,
+            latency: channels.latency,
+            log_tag,
+        },
         window_closed: channels.window_closed,
         pending: None,
     };
@@ -255,12 +165,10 @@ struct WindowWorker<R: WindowRenderer> {
     renderer: R,
     window: Window,
     qh: QueueHandle<WindowWorker<R>>,
-    log_tag: &'static str,
     configured: bool,
     exit: bool,
     ready: Option<Arc<Handshake>>,
-    presented: Arc<AtomicU64>,
-    latency: Arc<LatencyHistogram>,
+    reports: PresentReports,
     window_closed: Arc<AtomicBool>,
     /// Frame that arrived before the surface was mappable.
     pending: Option<(R::Frame, u64, tokio::sync::oneshot::Sender<()>)>,
@@ -271,26 +179,7 @@ impl<R: WindowRenderer> WindowWorker<R> {
     /// (compositor-paced backpressure).
     fn draw(&mut self, frame: R::Frame, arrival_ns: u64, ack: tokio::sync::oneshot::Sender<()>) {
         let drawn = self.draw_inner(&frame);
-        // Let the frame go before acking. The ack is what lets the pipeline move
-        // on, and at end of stream moving on means tearing the producers down: a
-        // GPU frame whose memory belongs to one of them (a decoder's CUDA
-        // context) must be released while that producer is still alive.
-        drop(frame);
-        if let Err(e) = drawn {
-            g2g_core::g2g_error!(Target::category(self.log_tag), "cannot draw frame: {e:?}");
-            // Release the producer so a transient GPU error doesn't deadlock
-            // the pipeline; the frame just didn't paint.
-            let _ = ack.send(());
-            return;
-        }
-        self.presented.fetch_add(1, Ordering::Relaxed);
-        if arrival_ns != 0 {
-            let now = monotonic_ns();
-            if now >= arrival_ns {
-                self.latency.record(now - arrival_ns);
-            }
-        }
-        let _ = ack.send(());
+        self.reports.acknowledge(drawn, frame, arrival_ns, ack);
     }
 
     #[cfg(feature = "wgpu-present")]
@@ -301,7 +190,7 @@ impl<R: WindowRenderer> WindowWorker<R> {
     fn reconfigure(&mut self, caps: &Caps, width: u32, height: u32) {
         if let Err(e) = self.renderer.reconfigure(caps) {
             g2g_core::g2g_error!(
-                Target::category(self.log_tag),
+                Target::category(self.reports.log_tag),
                 "cannot apply the new caps to the window: {e:?}"
             );
             self.exit = true;
@@ -414,7 +303,9 @@ delegate_registry!(@<R: WindowRenderer> WindowWorker<R>);
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::windowworker::present_on_worker;
     use g2g_core::runtime::block_on;
+    use g2g_core::HardwareError;
     use smithay_client_toolkit::reexports::calloop::channel::channel;
 
     #[test]

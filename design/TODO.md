@@ -155,26 +155,17 @@ libraries installed.
   built to print its `StdVideo*` structs, since Mesa 25.3.6's `RADV_DEBUG=dumpibs`
   prints nothing for video. NVIDIA Turing cannot decode it at all (minimum H.265
   coded extent 144x144).
-- **Windows GPU decode on D3D12:** `d3d12h264dec`, then `d3d12h265dec` and
-  `d3d12av1dec`, on the D3D12 video decode API. 0.15.0 waits for
-  `d3d12h264dec`.
+- **Windows GPU decode on D3D12:** `d3d12h265dec` and `d3d12av1dec` on the D3D12
+  video decode API, with their DXVA structs sized against `dxva.h`.
   - Move the H.265 and AV1 parsing and reference state out of `vulkanvideo.rs`
     with their decoders, as the H.264 code is in `h264parse` and `h264dpb`.
-  - Hand-written `#[repr(C)]` DXVA picture parameter and slice structs, with
-    sizes asserted against `dxva.h`.
-  - Decode on wgpu's own `ID3D12Device` (`wgpu_hal::dx12::Device::raw_device`)
-    and emit each picture as wgpu textures through `texture_from_raw` with a
-    plane override per NV12 plane: transition the output to `COMMON` on the
-    decode command list and make wgpu's queue wait on the decode queue's fence.
-  - Each picture decodes into its own texture from a growing pool, returned
-    once the DPB no longer references it and downstream dropped it, so output
-    needs no copy.
-  - Offer system memory too, read back to NV12 as `vulkanvideodec` does.
-  - Rank `d3d12h264dec` first in `decodebin` on Windows, falling through when
-    its caps refuse the stream, and add it to `release-binary-windows`.
-  - Test on japan: md5 against software decode on the repo fixtures (skipped
-    without a D3D12 video adapter), and the JVT conformance streams through a
-    calliope adapter.
+  - Run the JVT conformance streams through `d3d12h264dec` with a calliope
+    adapter on japan.
+  - Pipeline `d3d12h264dec`: the CPU waits on a fence after every picture,
+    which is most of its 6.7 ms per 1080p frame.
+  - Rebuild the decoder and heap on a mid-stream size change instead of
+    refusing the stream.
+  - Reset the reference state on `Flush` instead of waiting for the next IDR.
   - The Media Foundation decoder MFT with a DXGI device manager stops producing
     output after about 120 frames, so `MfDecode` decodes in software only.
 - **`mfh265dec` without an HEVC decoder installed** fails with a bare

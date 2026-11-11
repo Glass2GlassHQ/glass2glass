@@ -15,9 +15,8 @@ use g2g_plugins::vulkanvideo::{
 };
 
 mod vulkan_ref;
-use vulkan_ref::{
-    assert_frames_match_reference, luma_weights, reference_yuv, rgba16f_to_rgb, two_plane_to_planar,
-};
+use vulkan_ref::decode_ref::{assert_frames_match_reference, reference_yuv, two_plane_to_planar};
+use vulkan_ref::{luma_weights, rgba16f_to_rgb};
 
 mod vulkan_nv12_common;
 use vulkan_nv12_common::read_two_plane;

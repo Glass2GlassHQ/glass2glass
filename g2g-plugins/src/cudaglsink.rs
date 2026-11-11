@@ -87,7 +87,7 @@ use crate::cudadeviceid::{
 };
 use crate::glnv12::{GlMode, GlState};
 use crate::glwindow::{open_cuda_display, run_gl_window, FramePresenter};
-use crate::waylandwindow::{present_on_worker, WindowParams, WorkerChannels, WorkerCmd};
+use crate::windowworker::{present_on_worker, WindowParams, WorkerChannels, WorkerCmd};
 use g2g_core::log::Target;
 
 /// Device-buffer pool headroom the sink asks the producer to keep resident:

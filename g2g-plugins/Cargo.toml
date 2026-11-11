@@ -57,7 +57,7 @@ release-binary-macos = ["release-binary", "vtdecode", "vtencode", "metal-sink", 
 release-aar = ["release-binary", "camera2", "mediacodec-wgpu", "aaudio"]
 release-binary-windows = [
     "release-binary", "mf-decode", "mf-encode", "mf-aac", "wasapi-sink", "wasapi-src", "d3d11-sink", "mf-video-src",
-    "cuda", "nvenc", "nvdec", "vpx", "ffmpeg-long-tail",
+    "cuda", "nvenc", "nvdec", "vpx", "ffmpeg-long-tail", "d3d12-decode", "wgpu-present",
 ]
 # libc lets g2g-launch die on a closed stdout the way gst-launch does
 std = ["g2g-core/std", "dep:tokio", "dep:libc"]
@@ -390,6 +390,9 @@ wasapi-src = ["std", "dep:windows", "dep:windows-core"]
 # (NV12->RGB on the GPU). The Windows analog of CudaGlSink. Windows-only,
 # implies std.
 d3d11-sink = ["std", "dep:windows"]
+# Windows D3D12 hardware video decode through the D3D12 video decode API and
+# DXVA picture parameters. Windows-only, implies std.
+d3d12-decode = ["std", "dep:windows", "dep:wgpu", "dep:wgpu-hal"]
 # ffmpeg/libavcodec decode (software, NVDEC, and VAAPI hwaccel backends).
 # Pulls ffmpeg-next + ffmpeg-sys; Linux, macOS and Windows, implies std. Linux needs
 # system libav* (Fedora: ffmpeg-free-devel; Debian/Ubuntu: libavcodec-dev
@@ -696,11 +699,11 @@ vello-text-overlay = ["vello-overlay", "dep:skrifa"]
 # wgpu::Surface (on-screen). Pulls wgpu 29; implies std.
 wgpu-sink = ["std", "dep:wgpu"]
 # Windowed wgpu present sink (`wgpusink`, M1017): the launch-line display sink
-# built on WgpuSink. It owns an xdg_toplevel on a worker thread (the shared
-# waylandwindow machinery) and builds the wgpu::Surface over it, so a
+# built on WgpuSink. It owns a window on a worker thread (an xdg_toplevel on
+# Linux, a Win32 window on Windows) and builds the wgpu::Surface over it, so a
 # WgpuTexture-domain frame reaches the screen with no upload and a system-memory
-# NV12 / RGBA frame with one write_texture. Linux (Wayland) only.
-wgpu-present = ["wgpu-sink", "dep:smithay-client-toolkit", "dep:wayland-backend", "dep:raw-window-handle"]
+# NV12 / RGBA frame with one write_texture. Linux (Wayland) and Windows.
+wgpu-present = ["wgpu-sink", "dep:smithay-client-toolkit", "dep:wayland-backend", "dep:raw-window-handle", "dep:windows"]
 # AV1 encode via the pure-Rust `rav1e` encoder (Av1Enc, I420 -> CompressedVideo{Av1}).
 # default-features = false drops rav1e's NASM asm, CLI `binaries`, and `threading`
 # features, so it builds with no system deps (no NASM) as a portable software
@@ -1123,7 +1126,15 @@ windows = { version = "0.62", optional = true, features = [
     "Win32_UI_WindowsAndMessaging",
     "Win32_System_LibraryLoader",
     "Win32_Graphics_Gdi",
+    # D3D12 video decode (d3d12-decode): the D3D12 device, queues and resources, and
+    # the event a CPU wait on a fence blocks on.
+    "Win32_Graphics_Direct3D12",
+    "Win32_System_Threading",
+    "Win32_Security",
 ] }
+# wgpu-hal's D3D12 backend, for the raw device and queue the D3D12 decoder shares
+# with wgpu (d3d12-decode).
+wgpu-hal = { version = "30", optional = true, default-features = false, features = ["dx12"] }
 
 # VideoToolbox / Core Media / Core Video bindings are macOS-only; target-gate so
 # other platforms never attempt to resolve the objc2 framework crates (which link

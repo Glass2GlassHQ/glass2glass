@@ -19,6 +19,7 @@
 //! producer's texture in the wgpu -> CUDA bridge element.
 
 use alloc::boxed::Box;
+use g2g_core::meta::CropRectangle;
 
 use g2g_core::memory::OwnedWgpuTexture;
 use g2g_core::{G2gError, HardwareError, WgpuKeepAlive};
@@ -407,20 +408,29 @@ pub(crate) fn read_rgba_texture_dq(
         queue,
         texture,
         wgpu::TextureAspect::All,
-        (texture.width(), texture.height()),
+        whole_texture(texture.width(), texture.height()),
         bpp,
     )
 }
 
-pub(crate) fn read_texture_plane(
+pub fn whole_texture(width: u32, height: u32) -> CropRectangle {
+    CropRectangle {
+        left: 0,
+        top: 0,
+        width,
+        height,
+    }
+}
+
+pub fn read_texture_plane(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     texture: &wgpu::Texture,
     aspect: wgpu::TextureAspect,
-    extent: (u32, u32),
+    region: CropRectangle,
     bpp: u32,
 ) -> Result<alloc::vec::Vec<u8>, G2gError> {
-    let (w, h) = extent;
+    let (w, h) = (region.width, region.height);
     let tight = w as usize * bpp as usize;
     // wgpu requires bytes_per_row be a multiple of 256 for texture->buffer copies.
     let padded = tight.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT as usize)
@@ -436,7 +446,11 @@ pub(crate) fn read_texture_plane(
         wgpu::TexelCopyTextureInfo {
             texture,
             mip_level: 0,
-            origin: wgpu::Origin3d::ZERO,
+            origin: wgpu::Origin3d {
+                x: region.left,
+                y: region.top,
+                z: 0,
+            },
             aspect,
         },
         wgpu::TexelCopyBufferInfo {

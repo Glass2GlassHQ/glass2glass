@@ -520,7 +520,10 @@ fn source_layout(absolute_caps: &Caps) -> Result<SourceLayout, G2gError> {
 
 /// The picture size these caps settle on, rejecting anything the blit pipelines
 /// cannot read. The windowed present sink checks this before opening a window.
-#[cfg(all(target_os = "linux", feature = "wgpu-present"))]
+#[cfg(all(
+    any(target_os = "linux", target_os = "windows"),
+    feature = "wgpu-present"
+))]
 pub(crate) fn source_geometry(absolute_caps: &Caps) -> Result<(u32, u32), G2gError> {
     let source = source_layout(absolute_caps)?;
     Ok((source.width, source.height))
@@ -1001,7 +1004,7 @@ impl WgpuSink {
             &self.ctx.queue,
             texture,
             wgpu::TextureAspect::All,
-            (*width, *height),
+            crate::gpu::whole_texture(*width, *height),
             RGBA_BYTES_PER_PIXEL,
         )
     }

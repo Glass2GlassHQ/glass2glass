@@ -31,7 +31,7 @@ use g2g_plugins::vulkanvideo::{
 };
 
 mod vulkan_ref;
-use vulkan_ref::reference_yuv;
+use vulkan_ref::decode_ref::reference_yuv;
 
 const CLIP: &[u8] = include_bytes!("fixtures/av1_640x480_looprestore.obu");
 const CLIP_FIXTURE: &str = "av1_640x480_looprestore.obu";

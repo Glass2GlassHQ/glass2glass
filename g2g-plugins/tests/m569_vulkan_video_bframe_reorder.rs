@@ -35,7 +35,7 @@ use g2g_plugins::vulkanvideo::{
 };
 
 mod vulkan_ref;
-use vulkan_ref::reference_yuv;
+use vulkan_ref::decode_ref::reference_yuv;
 
 const H264: &[u8] = include_bytes!("fixtures/h264_640x480_bframes.h264");
 const H264_FIXTURE: &str = "h264_640x480_bframes.h264";

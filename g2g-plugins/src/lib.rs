@@ -120,6 +120,7 @@ mod fifobuffer;
     all(target_os = "android", feature = "mediacodec"),
     all(target_os = "macos", feature = "vtdecode"),
     all(target_os = "windows", feature = "mf-decode"),
+    all(target_os = "windows", feature = "d3d12-decode"),
     all(target_os = "linux", feature = "openh264"),
 ))]
 mod inputstamp;
@@ -171,13 +172,24 @@ pub mod fakesrc;
 pub mod fallbackswitch;
 // The `fallbacksrc` source wrapper that rebuilds a dead URI source (M1163). std:
 // the retry delay and stall check sleep on the tokio timer.
+#[cfg(any(
+    all(
+        any(target_os = "linux", target_os = "windows"),
+        feature = "vulkan-video"
+    ),
+    all(target_os = "windows", feature = "d3d12-decode")
+))]
+mod displayorder;
 #[cfg(feature = "std")]
 pub mod fallbacksrc;
 // Decoded-GOP reverser (M897): the presentation half of reverse playback.
 pub mod gopreverse;
-#[cfg(all(
-    any(target_os = "linux", target_os = "windows"),
-    feature = "vulkan-video"
+#[cfg(any(
+    all(
+        any(target_os = "linux", target_os = "windows"),
+        feature = "vulkan-video"
+    ),
+    all(target_os = "windows", feature = "d3d12-decode")
 ))]
 mod h264dpb;
 pub mod h264parse;
@@ -308,7 +320,8 @@ pub mod trim;
     feature = "wgpu-sink",
     feature = "cuda-wgpu",
     feature = "vulkan-video",
-    feature = "mediacodec-wgpu"
+    feature = "mediacodec-wgpu",
+    feature = "d3d12-decode"
 ))]
 pub mod gpu;
 // GPU / compute device discovery (M939): wgpu adapters, CUDA devices, VAAPI nodes.
@@ -341,6 +354,7 @@ pub(crate) static EGL_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(()
         feature = "cuda-wgpu",
         feature = "vulkan-video",
         feature = "mediacodec-wgpu",
+        feature = "d3d12-decode",
         all(target_os = "linux", feature = "dmabuf-wgpu"),
         all(any(target_os = "linux", windows), feature = "cuda"),
         all(target_os = "linux", feature = "ffmpeg")
@@ -441,7 +455,10 @@ pub mod wgpuupload;
 pub mod wgpubuffer;
 // Windowed wgpu display sink (`wgpusink` on a launch line): owns an
 // xdg_toplevel, builds the wgpu::Surface over it, and drives WgpuSink on it.
-#[cfg(all(target_os = "linux", feature = "wgpu-present"))]
+#[cfg(all(
+    any(target_os = "linux", target_os = "windows"),
+    feature = "wgpu-present"
+))]
 pub mod wgpupresent;
 // YUV4MPEG2 (`.y4m`) reader + writer: raw planar YUV in a file, WAV's video
 // counterpart.
@@ -1586,7 +1603,10 @@ pub mod cenc;
     all(target_os = "linux", feature = "wayland-sink"),
     all(target_os = "linux", feature = "cuda-gl"),
     all(target_os = "linux", feature = "gl-sink"),
-    all(target_os = "linux", feature = "wgpu-present"),
+    all(
+        any(target_os = "linux", target_os = "windows"),
+        feature = "wgpu-present"
+    ),
 ))]
 mod worker_ready;
 
@@ -1602,6 +1622,10 @@ mod yuv420;
 // swapchain + D3D11 video processor. Windows-only; the analog of CudaGlSink.
 #[cfg(all(target_os = "windows", feature = "d3d11-sink"))]
 pub mod d3d11sink;
+#[cfg(all(target_os = "windows", feature = "d3d12-decode"))]
+pub mod d3d12videodec;
+#[cfg(all(target_os = "windows", feature = "d3d12-decode"))]
+mod dxva;
 
 // WASAPI render sink: plays PCM on the selected audio endpoint (shared mode).
 // Windows-only; the audible-output end of the M25 audio path.
@@ -1985,6 +2009,19 @@ pub(crate) mod glnv12;
     any(feature = "cuda-gl", feature = "gl-sink", feature = "wgpu-present")
 ))]
 pub(crate) mod waylandwindow;
+#[cfg(all(
+    target_os = "windows",
+    any(feature = "d3d11-sink", feature = "wgpu-present")
+))]
+pub(crate) mod win32window;
+#[cfg(any(
+    all(
+        target_os = "linux",
+        any(feature = "cuda-gl", feature = "gl-sink", feature = "wgpu-present")
+    ),
+    all(target_os = "windows", feature = "wgpu-present")
+))]
+pub(crate) mod windowworker;
 
 // The compositor-reachable check the auto sink aliases resolve through, shared
 // by every display sink that presents on Wayland.

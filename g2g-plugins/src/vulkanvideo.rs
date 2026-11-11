@@ -31,6 +31,7 @@ use crate::inputstamp::{InputStamp, PendingInputStamps};
 use g2g_core::frame::Frame;
 use g2g_core::g2g_error;
 use g2g_core::memory::{DomainSet, MemoryDomainKind, OwnedWgpuTexture, SystemSlice};
+use g2g_core::meta::CropRectangle;
 use g2g_core::runtime::block_on;
 use g2g_core::{
     AllocationParams, AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim,
@@ -409,18 +410,18 @@ use crate::annexb::{
 };
 use crate::vui::VideoSignalType;
 
+pub use crate::displayorder::{H265DpbOccupancy, PictureMeta};
+use crate::displayorder::{ReorderBuffer, MAX_DPB_SLOTS};
 use crate::h264dpb::{
-    h264_max_frame_num, h264_picture_order, h264_slice_pic_parameter_set_id, H264ParameterSetTable,
-    H264PictureOrder, H264References, H264SessionShape, RefPic, DPB_FULL, H264_NAL_IDR_SLICE,
-    H264_NAL_SLICE,
+    crop_rectangle, h264_max_frame_num, h264_picture_meta, h264_picture_order, split_h264_pictures,
+    H264ParameterSetTable, H264Picture, H264References, H264SessionShape, RefPic,
+    CHROMA_420_CROP_UNIT, DPB_FULL,
 };
 pub use crate::h264parse::{
     extract_h264_parameter_sets, parse_h264_pps, parse_h264_slice_header, parse_h264_sps,
     H264ParameterSets, H264Pps, H264SliceHeader, H264Sps, H264StreamRefused,
 };
-use crate::h264parse::{
-    h264_parameter_sets_in, H264_MACROBLOCK_SIZE, H264_NAL_PPS, H264_NAL_SPS, MALFORMED_SPS,
-};
+use crate::h264parse::{h264_parameter_sets_in, H264_MACROBLOCK_SIZE, MALFORMED_SPS};
 
 impl From<H264StreamRefused> for VulkanVideoError {
     fn from(refused: H264StreamRefused) -> Self {
@@ -5012,36 +5013,6 @@ fn two_plane_texture_extent(width: u32, height: u32) -> (u32, u32) {
 }
 
 // H.264 and H.265 count a 4:2:0 crop in chroma samples, two luma samples each
-const CHROMA_420_CROP_UNIT: u32 = 2;
-
-struct CropRectangle {
-    offset: (u32, u32),
-    extent: (u32, u32),
-}
-
-// what is left of `picture` once `[left, right, top, bottom]` crop units of `unit` samples are cut off
-fn crop_rectangle(
-    picture: (u32, u32),
-    unit: (u32, u32),
-    [left, right, top, bottom]: [u32; 4],
-) -> Result<CropRectangle, VulkanVideoError> {
-    let axis = |size: u32, unit: u32, start: u32, end: u32| {
-        let offset = start.checked_mul(unit)?;
-        let kept = size
-            .checked_sub(offset)?
-            .checked_sub(end.checked_mul(unit)?)?;
-        (kept > 0).then_some((offset, kept))
-    };
-    let (x, width) =
-        axis(picture.0, unit.0, left, right).ok_or(VulkanVideoError::UnsupportedStream)?;
-    let (y, height) =
-        axis(picture.1, unit.1, top, bottom).ok_or(VulkanVideoError::UnsupportedStream)?;
-    Ok(CropRectangle {
-        offset: (x, y),
-        extent: (width, height),
-    })
-}
-
 // the luma and chroma plane offsets of a 4:2:0 picture that starts at `offset`
 fn two_plane_image_offsets(offset: (u32, u32)) -> Result<[vk::Offset3D; 2], VulkanVideoError> {
     let plane = |(x, y): (u32, u32)| -> Result<vk::Offset3D, VulkanVideoError> {
@@ -7772,8 +7743,10 @@ impl VulkanVideoDevice {
         // a field-coded stream counts crop rows in pairs of field rows
         let fields_per_frame = ps.sps.fields_per_frame();
         let CropRectangle {
-            offset: output_offset,
-            extent: (out_w, out_h),
+            left: output_left,
+            top: output_top,
+            width: out_w,
+            height: out_h,
         } = crop_rectangle(
             (w, h),
             (
@@ -7786,7 +7759,8 @@ impl VulkanVideoDevice {
                 ps.sps.frame_crop_top_offset,
                 ps.sps.frame_crop_bottom_offset,
             ],
-        )?;
+        )
+        .ok_or(VulkanVideoError::UnsupportedStream)?;
         let coded_extent = self.session_max_coded_extent();
 
         let session_ci = vk::VideoSessionCreateInfoKHR::default()
@@ -7864,7 +7838,7 @@ impl VulkanVideoDevice {
             reference_format,
             coded_extent: (w, h),
             output_extent: (out_w, out_h),
-            output_offset,
+            output_offset: (output_left, output_top),
         })
     }
 
@@ -7892,8 +7866,10 @@ impl VulkanVideoDevice {
 
         let (w, h) = self.session_coded_extent(max_w, max_h);
         let CropRectangle {
-            offset: output_offset,
-            extent: (out_w, out_h),
+            left: output_left,
+            top: output_top,
+            width: out_w,
+            height: out_h,
         } = crop_rectangle(
             (w, h),
             (CHROMA_420_CROP_UNIT, CHROMA_420_CROP_UNIT),
@@ -7903,7 +7879,8 @@ impl VulkanVideoDevice {
                 std.sps.conf_win_top_offset,
                 std.sps.conf_win_bottom_offset,
             ],
-        )?;
+        )
+        .ok_or(VulkanVideoError::UnsupportedStream)?;
         let coded_extent = self.session_max_coded_extent();
 
         let session_ci = vk::VideoSessionCreateInfoKHR::default()
@@ -7984,7 +7961,7 @@ impl VulkanVideoDevice {
             reference_format,
             coded_extent: (w, h),
             output_extent: (out_w, out_h),
-            output_offset,
+            output_offset: (output_left, output_top),
         })
     }
 
@@ -9778,54 +9755,6 @@ impl Drop for ReplacedSessionParameters {
     }
 }
 
-/// Per-coded-picture metadata for random access, built by
-/// [`H264DpbDecoder::index_pictures`] without decoding: whether the picture is a
-/// keyframe (an IDR, a valid seek point to decode forward from), its `frame_num`,
-/// and its picture-order-count (the presentation-order key).
-#[derive(Debug, Clone, Copy)]
-pub struct PictureMeta {
-    /// The picture resets the picture-order-count (an IDR, and for H.265 an IRAP
-    /// with `NoRaslOutputFlag`): the boundary of a coded video sequence, so POC is only comparable within
-    /// the run since the last one. Used to group pictures for display-order sort.
-    pub is_keyframe: bool,
-    /// The picture is an IRAP random-access point decoding can (re)start at: an
-    /// IDR always, and for H.265 also a CRA / BLA. A superset of `is_keyframe`
-    /// (a CRA does not reset POC but is a valid seek target). A seek to a CRA
-    /// discards its RASL leading pictures (they reference now-absent pre-CRA
-    /// frames), so a consumer seeking to a leading picture must use an earlier
-    /// random-access point instead.
-    pub is_random_access: bool,
-    pub frame_num: u32,
-    /// Picture-order-count: pictures are presented in ascending POC order.
-    pub poc: i32,
-    // false for an H.265 picture decoded only as a reference (`pic_output_flag`)
-    pub pic_output_flag: bool,
-    // an H.265 `no_output_of_prior_pics_flag` at a sequence start: the pictures
-    // still waiting for output are dropped (C.5.2.2)
-    pub discards_prior_pictures: bool,
-    // the H.265 DPB once this picture is decoded, which bumps waiting pictures
-    // out when it is full (C.5.2.3)
-    pub dpb: Option<H265DpbOccupancy>,
-}
-
-/// The reference pictures an H.265 DPB holds right after a picture decodes,
-/// the decoded picture included, and the `sps_max_dec_pic_buffering` it may hold.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct H265DpbOccupancy {
-    reference_pocs: [i32; MAX_DPB_SLOTS],
-    reference_count: usize,
-    capacity: usize,
-}
-
-impl H265DpbOccupancy {
-    fn references(&self) -> &[i32] {
-        &self.reference_pocs[..self.reference_count]
-    }
-}
-
-// the `num-dpb-slots` ceiling, past every codec's reference count
-const MAX_DPB_SLOTS: usize = 32;
-
 /// A multi-frame H.264 decoder driving a real DPB: it decodes P (and, given a
 /// stream, B) frames by tracking reference pictures across access units, unlike
 /// the one-shot IDR entry points. Computes picture-order-count, runs H.264
@@ -9854,18 +9783,6 @@ pub struct H264DpbDecoder {
     /// Picture-order-count derivation, carried across pictures in decoding order.
     poc: crate::poc::H264PocState,
 }
-
-/// One primary coded picture of a stream: its first slice header, its slice
-/// NALs (borrowing the input stream), and the parameter sets it was coded with.
-#[derive(Debug)]
-struct H264Picture<'s> {
-    header: H264SliceHeader,
-    slices: alloc::vec::Vec<&'s [u8]>,
-    sps: H264Sps,
-    pps: H264Pps,
-}
-
-type PictureUnits<'s> = alloc::vec::Vec<H264Picture<'s>>;
 
 /// GPU-texture mode context for the `*DpbDecoder`s: the persistent NV12 -> RGBA
 /// converter (which owns the wgpu device the texture is imported into and the
@@ -10943,19 +10860,6 @@ impl core::fmt::Debug for H264DpbDecoder {
     }
 }
 
-fn h264_picture_meta(header: &H264SliceHeader, order: &H264PictureOrder) -> PictureMeta {
-    let [top, bottom] = order.stored_field_order_counts;
-    PictureMeta {
-        is_keyframe: header.is_idr || order.memory_reset,
-        is_random_access: header.is_idr,
-        frame_num: header.frame_num,
-        poc: top.min(bottom),
-        pic_output_flag: true,
-        discards_prior_pictures: false,
-        dpb: None,
-    }
-}
-
 impl H264DpbDecoder {
     /// Pick what the GPU-texture path emits per picture ([`TextureOutput`]).
     pub fn set_texture_output(&mut self, output: TextureOutput) {
@@ -11014,7 +10918,7 @@ impl H264DpbDecoder {
         &mut self,
         stream: &[u8],
     ) -> Result<(alloc::vec::Vec<PictureMeta>, alloc::vec::Vec<Nv12Frame>), VulkanVideoError> {
-        let pictures = self.split_pictures(stream)?;
+        let pictures = split_h264_pictures(&mut self.parsed_sets, stream)?;
         let mut metas = alloc::vec::Vec::with_capacity(pictures.len());
         let mut frames = alloc::vec::Vec::new();
         for picture in pictures {
@@ -11080,7 +10984,7 @@ impl H264DpbDecoder {
             return Err(VulkanVideoError::NoComputeQueue);
         }
         let metas = self.index_pictures(stream)?;
-        let pictures = self.split_pictures(stream)?;
+        let pictures = split_h264_pictures(&mut self.parsed_sets, stream)?;
         let mut textures = alloc::vec::Vec::with_capacity(pictures.len());
         for picture in pictures {
             textures.push(self.decode_picture_to_texture(&picture)?);
@@ -11103,7 +11007,7 @@ impl H264DpbDecoder {
         if self.core.gpu.is_none() {
             return Err(VulkanVideoError::NoComputeQueue);
         }
-        let pictures = self.split_pictures(stream)?;
+        let pictures = split_h264_pictures(&mut self.parsed_sets, stream)?;
         let mut metas = alloc::vec::Vec::with_capacity(pictures.len());
         let mut textures = alloc::vec::Vec::with_capacity(pictures.len());
         for picture in pictures {
@@ -11145,7 +11049,7 @@ impl H264DpbDecoder {
         &mut self,
         stream: &[u8],
     ) -> Result<alloc::vec::Vec<PictureMeta>, VulkanVideoError> {
-        let pictures = self.split_pictures(stream)?;
+        let pictures = split_h264_pictures(&mut self.parsed_sets, stream)?;
         let mut metas = alloc::vec::Vec::with_capacity(pictures.len());
         for picture in &pictures {
             let order = h264_picture_order(&mut self.poc, &picture.header, &picture.sps);
@@ -11172,7 +11076,7 @@ impl H264DpbDecoder {
         if self.core.gpu.is_none() {
             return Err(VulkanVideoError::NoComputeQueue);
         }
-        let pictures = self.split_pictures(stream)?;
+        let pictures = split_h264_pictures(&mut self.parsed_sets, stream)?;
         if start > target || target >= pictures.len() {
             return Err(VulkanVideoError::UnsupportedStream);
         }
@@ -11201,7 +11105,7 @@ impl H264DpbDecoder {
         if self.core.gpu.is_none() {
             return Err(VulkanVideoError::NoComputeQueue);
         }
-        let pictures = self.split_pictures(stream)?;
+        let pictures = split_h264_pictures(&mut self.parsed_sets, stream)?;
         if start > target || target >= pictures.len() {
             return Err(VulkanVideoError::UnsupportedStream);
         }
@@ -11210,58 +11114,6 @@ impl H264DpbDecoder {
             out.push((start + offset, self.decode_picture_to_texture(picture)?));
         }
         Ok(out)
-    }
-
-    /// Split an Annex-B / AVCC stream into primary coded pictures. Access units
-    /// break on a VCL NAL with `first_mb_in_slice == 0`. SPS / PPS NALs update
-    /// the parameter-set table in stream order, so each picture is parsed against,
-    /// and carries, the sets in effect at its first slice. Other non-VCL NALs are
-    /// skipped. Borrows `stream`, not `self`, so the caller can decode with
-    /// `&mut self` afterward.
-    fn split_pictures<'s>(
-        &mut self,
-        stream: &'s [u8],
-    ) -> Result<PictureUnits<'s>, VulkanVideoError> {
-        let mut pictures = alloc::vec::Vec::new();
-        let mut current: Option<H264Picture<'s>> = None;
-
-        for nal in nal_units_any(stream) {
-            let Some(nal_type) = h264_nal_type(nal) else {
-                continue;
-            };
-            match nal_type {
-                H264_NAL_SPS => {
-                    let sps = parse_h264_sps(&strip_emulation_prevention(&nal[1..]))?;
-                    self.parsed_sets.sps.insert(sps.seq_parameter_set_id, sps);
-                    continue;
-                }
-                H264_NAL_PPS => {
-                    let pps = parse_h264_pps(&strip_emulation_prevention(&nal[1..]))?;
-                    self.parsed_sets.pps.insert(pps.pic_parameter_set_id, pps);
-                    continue;
-                }
-                H264_NAL_SLICE | H264_NAL_IDR_SLICE => {}
-                _ => continue,
-            }
-            let (sps, pps) = self
-                .parsed_sets
-                .active(h264_slice_pic_parameter_set_id(nal)?)?;
-            let header = parse_h264_slice_header(nal, sps, pps)?;
-            if header.first_mb_in_slice == 0 {
-                pictures.extend(current.take());
-            }
-            current
-                .get_or_insert_with(|| H264Picture {
-                    header,
-                    slices: alloc::vec::Vec::new(),
-                    sps: sps.clone(),
-                    pps: pps.clone(),
-                })
-                .slices
-                .push(nal);
-        }
-        pictures.extend(current);
-        Ok(pictures)
     }
 
     /// Make the session parameters hold `sps` and `pps` under their ids. A set the
@@ -14510,141 +14362,6 @@ impl core::fmt::Debug for DecodeSessionKind {
     }
 }
 
-/// A streaming display-order reorder buffer for the element's system (NV12)
-/// output. Hardware decode retires pictures in coding order; a viewer needs
-/// presentation (POC) order, which differs for any stream with B-frames. Each
-/// decoded picture is pushed tagged with its (coded-video-sequence, POC) key
-/// (the same key the whole-stream [`reorder_to_display_order`] sorts on) and the
-/// buffer releases pictures in ascending key order once the earliest-display one
-/// of the group is settled.
-///
-/// POC only compares within one coded video sequence (it resets at each
-/// keyframe), so a keyframe both closes the previous CVS (all its pictures are
-/// submitted by then, so they release in POC order) and opens a new one. Within a
-/// CVS the buffer bumps the lowest-key picture once it holds more than `max_hold`
-/// (the DPB slot count, a safe upper bound on the reorder depth), so a long GOP
-/// does not buffer without bound.
-///
-/// Only H.264 / H.265 use this; AV1 (whose display order comes from
-/// `show_existing_frame` / `order_hint`, not a monotonic POC) stays in coding
-/// order. Generic over the payload so the same logic could serve the GPU-texture
-/// path if that becomes AU-streamed.
-/// What one [`ReorderBuffer::push`] releases: pictures to emit in display order,
-/// and pictures dropped without output.
-#[derive(Debug)]
-struct ReorderRelease<T> {
-    output: alloc::vec::Vec<T>,
-    dropped: alloc::vec::Vec<T>,
-}
-
-struct ReorderBuffer<T> {
-    /// Held pictures, each `(cvs, poc, payload)`. Small (<= `max_hold` within a
-    /// CVS), so a Vec + linear min-scan beats a heap.
-    pending: alloc::vec::Vec<(u32, i32, T)>,
-    /// Current coded-video-sequence index, bumped at each keyframe after the first.
-    cvs: u32,
-    /// Whether any picture has been pushed (the first keyframe is not a boundary).
-    started: bool,
-    /// Bump once the current CVS holds more than this many pictures. Set to the
-    /// DPB slot count when the decoder is built.
-    max_hold: usize,
-}
-
-impl<T> ReorderBuffer<T> {
-    fn new() -> Self {
-        Self {
-            pending: alloc::vec::Vec::new(),
-            cvs: 0,
-            started: false,
-            max_hold: 0,
-        }
-    }
-
-    /// Push one decoded picture (in decode order) and return the pictures now
-    /// ready to emit, in display order. A keyframe first releases the whole
-    /// previous CVS (all submitted), or drops it on an H.265
-    /// `no_output_of_prior_pics_flag`, then joins the new CVS. Within a CVS the
-    /// buffer bumps the lowest-key picture while it holds more than `max_hold`,
-    /// or while an H.265 DPB holding the waiting pictures besides its references
-    /// is over capacity (C.5.2.3). A picture with `pic_output_flag` 0 is dropped.
-    fn push(&mut self, meta: &PictureMeta, payload: T) -> ReorderRelease<T> {
-        let mut release = ReorderRelease {
-            output: alloc::vec::Vec::new(),
-            dropped: alloc::vec::Vec::new(),
-        };
-        if meta.is_keyframe && self.started {
-            let previous = self.take_sorted();
-            if meta.discards_prior_pictures {
-                release.dropped = previous;
-            } else {
-                release.output = previous;
-            }
-            self.cvs += 1;
-        }
-        self.started = true;
-        if meta.pic_output_flag {
-            self.pending.push((self.cvs, meta.poc, payload));
-        } else {
-            release.dropped.push(payload);
-        }
-        while !self.pending.is_empty()
-            && (self.pending.len() > self.max_hold || self.dpb_over_capacity(meta.dpb))
-        {
-            release.output.push(self.pop_min());
-        }
-        release
-    }
-
-    // waiting pictures that are no longer references still take DPB room
-    fn dpb_over_capacity(&self, dpb: Option<H265DpbOccupancy>) -> bool {
-        let Some(dpb) = dpb else {
-            return false;
-        };
-        let references = dpb.references();
-        let waiting_only = self
-            .pending
-            .iter()
-            .filter(|(cvs, poc, _)| *cvs != self.cvs || !references.contains(poc))
-            .count();
-        references.len() + waiting_only > dpb.capacity
-    }
-
-    /// Release everything held, in display order (end of stream / a reconfig
-    /// boundary).
-    fn flush(&mut self) -> alloc::vec::Vec<T> {
-        self.take_sorted()
-    }
-
-    /// Discard all held pictures and the CVS state (a seek / flush drops pre-flush
-    /// data; the next keyframe starts a fresh sequence).
-    fn reset(&mut self) {
-        self.pending.clear();
-        self.cvs = 0;
-        self.started = false;
-    }
-
-    /// Remove and return the lowest-`(cvs, poc)` held picture.
-    fn pop_min(&mut self) -> T {
-        let mut min_i = 0;
-        for i in 1..self.pending.len() {
-            let a = (self.pending[i].0, self.pending[i].1);
-            let b = (self.pending[min_i].0, self.pending[min_i].1);
-            if a < b {
-                min_i = i;
-            }
-        }
-        self.pending.remove(min_i).2
-    }
-
-    /// Drain all held pictures, sorted into display order. A stable sort keeps
-    /// decode order among any equal keys (which should not occur).
-    fn take_sorted(&mut self) -> alloc::vec::Vec<T> {
-        let mut items = core::mem::take(&mut self.pending);
-        items.sort_by_key(|a| (a.0, a.1));
-        items.into_iter().map(|(_, _, p)| p).collect()
-    }
-}
-
 /// The sets the first slice of `au` is coded with, looked up in `sets`, which
 /// holds `au`'s sets on top of the stream's earlier ones. `None` when `au`
 /// carries no slice, or no parameter set has arrived yet.
@@ -15644,11 +15361,10 @@ impl AsyncElement for VulkanVideoDec {
         }))
     }
 
-    /// Preferred output domain: the zero-copy `WgpuTexture` (the wedge). The
-    /// runner narrows this against the downstream consumer via
-    /// [`output_domains`](Self::output_domains) + `configure_allocation`.
+    /// The output domain `configure_allocation` settled on against the
+    /// downstream consumer, `System` until then.
     fn output_memory(&self) -> MemoryDomainKind {
-        MemoryDomainKind::WgpuTexture
+        self.out_domain
     }
 
     /// Both domains the decoder can emit: GPU-resident `WgpuTexture` or system
@@ -16016,7 +15732,7 @@ static VULKANVIDEODEC_PROPS: &[PropertySpec] = &[
 mod tests {
     use super::*;
     use crate::annexb::BitWriter;
-    use crate::h264dpb::h264_field_order_counts;
+    use crate::h264dpb::{h264_field_order_counts, H264PictureOrder};
     use crate::h264parse::H264_SLICE_TYPE_SI;
 
     #[test]

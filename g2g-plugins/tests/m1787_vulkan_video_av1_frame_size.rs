@@ -18,7 +18,7 @@ use vulkan_nv12_common::{
     read_two_plane, skip_reason, system_bytes, system_frame, two_plane_frame, Collect,
 };
 mod vulkan_ref;
-use vulkan_ref::{reference_yuv, two_plane_to_planar};
+use vulkan_ref::decode_ref::{reference_yuv, two_plane_to_planar};
 
 #[path = "common/ivf.rs"]
 mod ivf;

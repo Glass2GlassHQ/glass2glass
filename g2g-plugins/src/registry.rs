@@ -2077,6 +2077,11 @@ const VULKANVIDEODEC_FRAME_COST: g2g_core::runtime::FrameCost = g2g_core::runtim
     fixed_us: 3700,
     per_megapixel_us: 0,
 };
+#[cfg(all(target_os = "windows", feature = "d3d12-decode"))]
+const D3D12H264DEC_FRAME_COST: g2g_core::runtime::FrameCost = g2g_core::runtime::FrameCost {
+    fixed_us: 5800,
+    per_megapixel_us: 0,
+};
 #[cfg(all(any(target_os = "linux", windows), feature = "cuda"))]
 const CUDADOWNLOAD_COST: g2g_core::runtime::DomainTransferCost =
     g2g_core::runtime::DomainTransferCost {
@@ -2392,6 +2397,16 @@ fn register_autoplug_candidates(reg: &mut Registry) {
         .accepting_input(crate::vulkanvideo::VulkanVideoDec::accepts_input)
         .cost(VULKANVIDEODEC_FRAME_COST),
     );
+    #[cfg(all(target_os = "windows", feature = "d3d12-decode"))]
+    reg.register(
+        ElementFactory::of::<crate::d3d12videodec::D3D12H264Dec>("d3d12h264dec", |_| {
+            Box::new(crate::d3d12videodec::D3D12H264Dec::new())
+        })
+        .produces(g2g_core::MemoryDomainKind::WgpuTexture)
+        .hardware()
+        .accepting_input(crate::d3d12videodec::D3D12H264Dec::accepts_input)
+        .cost(D3D12H264DEC_FRAME_COST),
+    );
     // Android hardware video decode via the NDK MediaCodec (M219/M302); one
     // factory per codec (the MIME is fixed at construction). Reachable from
     // g2g-launch on-device; the gst analog is `amcviddec-<component>`.
@@ -2507,6 +2522,13 @@ fn register_autoplug_candidates(reg: &mut Registry) {
     reg.register_launch(
         LaunchFactory::of::<crate::mfdecode::MfDecode>("mfh265dec", || {
             Box::new(crate::mfdecode::MfDecode::new().with_codec(g2g_core::VideoCodec::H265))
+        })
+        .with_experimental(),
+    );
+    #[cfg(all(target_os = "windows", feature = "d3d12-decode"))]
+    reg.register_launch(
+        LaunchFactory::of::<crate::d3d12videodec::D3D12H264Dec>("d3d12h264dec", || {
+            Box::new(crate::d3d12videodec::D3D12H264Dec::new())
         })
         .with_experimental(),
     );
@@ -3049,7 +3071,7 @@ pub static FEATURE_GATED_ELEMENTS: &[FeatureGatedElement] = &{
         "wgputodmabuf" => "dmabuf-wgpu" on "linux";
         "waylandsink" => "wayland-sink" on "linux";
         "cudaglsink" => "cuda-gl" on "linux";
-        "wgpusink" => "wgpu-present" on "linux";
+        "wgpusink" => "wgpu-present" on "linux" | "windows";
         "kmssink" => "kms-sink" on "linux";
         "decklinkvideosink" => "decklink" on "linux";
         "decklinkaudiosink" => "decklink" on "linux";
@@ -3084,6 +3106,7 @@ pub static FEATURE_GATED_ELEMENTS: &[FeatureGatedElement] = &{
         "mfvideosrc" => "mf-video-src" on "windows";
         "wasapisrc" => "wasapi-src" on "windows";
         "d3d11videosink" => "d3d11-sink" on "windows";
+        "d3d12h264dec" => "d3d12-decode" on "windows";
         "wasapisink" => "wasapi-sink" on "windows";
     }
 };
@@ -3977,6 +4000,13 @@ fn register_feature_gated(reg: &mut Registry) {
             Box::new(crate::wgpupresent::WgpuPresentSink::new())
         })
         .with_usable(crate::waylanddisplay::compositor_reachable)
+        .with_experimental(),
+    );
+    #[cfg(all(target_os = "windows", feature = "wgpu-present"))]
+    reg.register_launch(
+        LaunchFactory::of::<crate::wgpupresent::WgpuPresentSink>("wgpusink", || {
+            Box::new(crate::wgpupresent::WgpuPresentSink::new())
+        })
         .with_experimental(),
     );
     // WebRTC WHIP egress; the `location` property targets the endpoint. The URL

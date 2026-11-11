@@ -622,6 +622,7 @@ cargo clippy --workspace --all-targets
 | `AacDec` / `MpegAudioDec` (`aacdec` / `mpegaudiodec`, AAC-LC and MP2 / MP3 in pure Rust via symphonia) | `aac-decode`, `mpeg-audio-decode` | none |
 | AVI / QuickTime / Matroska streams g2g has no caps type for (Cinepak, Indeo, Ut Video, QuickTime RLE, ADPCM, MACE, ...), demuxed under their container tag and decoded by `ffmpegdec` / `ffmpegaudiodec` | `ffmpeg-long-tail` | Linux + libavcodec + libavformat |
 | `MfDecode` / `MfEncode` / `MfAacEncode` / `MfAacDecode` | `mf-decode`, `mf-encode`, `mf-aac` | Windows + Media Foundation |
+| `D3D12H264Dec` (`d3d12h264dec`: 8-bit 4:2:0 H.264 on the D3D12 video decode API, zero-copy NV12 wgpu textures or system memory) | `d3d12-decode` | Windows + a GPU with D3D12 video decode |
 | `VtDecode` / `VtEncode` (H.264 / H.265, H.265 with alpha from BGRA, zero-copy `CVPixelBuffer` output via `cv-output`) | `vtdecode`, `vtencode` | macOS + VideoToolbox |
 | `AtEnc` (`atenc`: PCM to ADTS AAC-LC, mono or stereo) | `audiotoolbox-aac` | macOS + AudioToolbox |
 | `MediaCodecDec` (H.264 / H.265, zero-copy GPU output via `with_gpu_output`) | `mediacodec`, `mediacodec-wgpu` | Android + NDK MediaCodec (+ wgpu / Vulkan for GPU output) |
@@ -629,7 +630,7 @@ cargo clippy --workspace --all-targets
 | `KmsSink` | `kms-sink` | Linux + libdrm, needs DRM master / tty |
 | `D3D11Sink` (`d3d11videosink`: owns its window, any raw format from system memory or zero-copy NV12 from D3D11 textures) | `d3d11-sink` | Windows |
 | `MetalVideoSink` (zero-copy from `CVPixelBuffer`) | `metal-sink` | macOS + Metal |
-| `WgpuPresentSink` (`wgpusink`: owns its Wayland window, presents GPU-resident frames with no upload) | `wgpu-present` | Linux + Wayland + wgpu |
+| `WgpuPresentSink` (`wgpusink`: owns its Wayland or Win32 window, presents GPU-resident frames with no upload) | `wgpu-present` | Linux + Wayland, or Windows |
 | `NvDec` (native NVDEC H.264 / H.265 / VP9 / AV1 to CUDA NV12 or 10-bit P010) | `nvdec` | Linux or Windows + NVIDIA driver (libnvcuvid / nvcuvid.dll) |
 | `NvEnc` (native NVENC CUDA NV12 / P010 to H.264 / H.265, incl. HEVC Main 10) | `nvenc` | Linux or Windows + NVIDIA driver (libnvidia-encode / nvEncodeAPI64.dll) |
 | `CudaDownload` (CUDA to System), `CudaUpload` (System to CUDA, offering pinned host buffers upstream) | `cuda` | Linux or Windows + NVIDIA driver (libcuda / nvcuda.dll) |
@@ -955,6 +956,8 @@ negotiate.
 When the input's picture size is known, as for a raw `.h264` / `.hevc` file,
 `decodebin` picks the decoder with the lowest measured per-frame cost, download
 included, so 4K HEVC into a CPU sink takes `nvdec` and 1080p keeps `ffmpegdec`.
+On Windows, `decodebin ! autovideosink` decodes H.264 with `d3d12h264dec` and
+`wgpusink` presents the decoded texture with no copy.
 
 `G2G_PLUGIN_FEATURE_RANK` steers auto-plugging with the syntax of GStreamer's
 `GST_PLUGIN_FEATURE_RANK`. `G2G_PLUGIN_FEATURE_RANK=vulkanvideodec:max` makes

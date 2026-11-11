@@ -15,7 +15,8 @@ use g2g_plugins::vulkanvideo::{
 };
 
 mod vulkan_ref;
-use vulkan_ref::{assert_frames_match_reference, planar_frames};
+use vulkan_ref::decode_ref::assert_frames_match_reference;
+use vulkan_ref::planar_frames;
 
 #[path = "common/ivf.rs"]
 mod ivf;

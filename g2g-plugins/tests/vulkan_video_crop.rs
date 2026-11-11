@@ -22,7 +22,8 @@ use g2g_plugins::vulkanvideo::{
 mod vulkan_nv12_common;
 mod vulkan_ref;
 use vulkan_nv12_common::{decode_stream, read_two_plane, system_bytes, two_plane_frame};
-use vulkan_ref::{assert_frames_match_reference, planar_frames, two_plane_to_planar};
+use vulkan_ref::decode_ref::{assert_frames_match_reference, two_plane_to_planar};
+use vulkan_ref::planar_frames;
 
 #[derive(Clone, Copy)]
 struct Clip {
@@ -480,7 +481,7 @@ fn the_one_shot_idr_decodes_are_the_crop_rectangle() {
     let (_, uncropped) = idr(H264_UNCROPPED);
     assert_rgba_is_the_crop_of(&[cropped], &[uncropped]);
     let planar = planar_frames(vec![frame], clip.size);
-    if let Some(reference) = vulkan_ref::reference_yuv(clip.file) {
+    if let Some(reference) = vulkan_ref::decode_ref::reference_yuv(clip.file) {
         assert!(
             reference.starts_with(&planar[0]),
             "the IDR differs from the reference's first frame"

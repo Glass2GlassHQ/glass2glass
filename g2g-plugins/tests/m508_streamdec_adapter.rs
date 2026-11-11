@@ -26,7 +26,7 @@ use g2g_plugins::vulkanvideo::{open_av1_decode_device, VulkanVideoError};
 use leb128_common::read_leb128;
 
 mod vulkan_ref;
-use vulkan_ref::reference_yuv;
+use vulkan_ref::decode_ref::reference_yuv;
 
 const CLIP: &[u8] = include_bytes!("fixtures/av1_640x480.obu");
 const CLIP_FIXTURE: &str = "av1_640x480.obu";

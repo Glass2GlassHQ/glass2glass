@@ -71,6 +71,46 @@ Launch names follow GStreamer's `mediafoundation` plugin: `mfh264enc`,
 decoder, so `MfDecode` takes `mfh264dec` / `mfh265dec`. None are auto-plug
 candidates.
 
+## D3D12 video decode (Windows)
+
+`D3D12H264Dec` (`g2g-plugins/src/d3d12videodec.rs`, launch name `d3d12h264dec`,
+feature `d3d12-decode`, `cfg(target_os = "windows")`) decodes H.264 with the
+D3D12 video decode API on wgpu's own `ID3D12Device`, reached through
+`wgpu_hal::dx12::Device::raw_device`. The DXVA picture parameter and slice
+structs are hand-written `#[repr(C)]` in `dxva.rs`, and the parameter-set,
+slice-header, reference marking and picture order code is shared with
+`vulkanvideodec` through `h264parse` and `h264dpb`. Only 8-bit 4:2:0 is accepted,
+and a device below decode tier 2 or one that needs reference-only allocations is
+refused.
+
+Each picture decodes into its own NV12 texture from a growing pool. A texture
+goes back to the pool once the DPB no longer references it and downstream
+dropped the frame. The decode queue waits on a fence that wgpu's queue signals,
+so a recycled texture is not overwritten while wgpu still reads it.
+
+Output is either domain. In `WgpuTexture` the texture is wrapped through
+`texture_from_raw` with no copy. It keeps the padded coded size, and the caps
+carry the visible size, as GStreamer's d3d12 decoders do. A crop with a nonzero
+left or top offset is copied on a D3D12 copy queue into a pooled texture of the
+visible size, because wgpu does not copy one plane of an NV12 texture into
+another. In `System` the visible rectangle is read back to tight NV12, as
+`vulkanvideodec` does. Pictures leave in display order through the
+`ReorderBuffer` in `displayorder.rs`, shared with `vulkanvideodec`, and
+`low-latency` releases each one as soon as it decodes.
+
+The decoder publishes its `GpuContext` as the producer context, so `wgpusink`
+presents on the same device. On Windows `wgpusink` builds its surface over a
+Win32 window from `win32window.rs`, which `d3d11videosink` uses too. Verified on
+screen on an Intel UHD 620 and offscreen on an RTX 3090.
+
+wgpu-hal unloads `d3d12.dll` when its last instance, adapter and device drop. Every
+raw D3D12 object must be released before that, so `D3D12DecodeDevice` and
+`D3D12H264Decoder` declare the wgpu handles last, and each pooled texture holds a
+`wgpu::Device` clone.
+
+`decodebin` offers `d3d12h264dec` for H.264 when a probe at 1920x1088 finds D3D12
+video decode support, with the cost in the next section.
+
 ## FfmpegH264Dec (ffmpeg / libavcodec)
 
 `FfmpegH264Dec` (`g2g-plugins/src/ffmpegdec.rs`, feature `ffmpeg`,
@@ -375,7 +415,12 @@ System-memory consumer crosses over at about 8 MP, so 4K HEVC takes `nvdec` and
 1080p keeps `ffmpegdec`. The larger gain at 4K is CPU time: 12.6 s for the clip
 in software against 0.5 s with `nvdec`.
 
-`dav1ddec`, `rav1ddec`, the VA-API decoders and the platform decoders are not
+`d3d12h264dec` was measured the same way on an RTX 3090 under Windows: 6.7 ms
+per frame to system memory on a 300-frame 1080p clip. Its constant is 5800 us
+per frame, the measurement minus the `wgpudownload` price of one 1080p NV12
+frame.
+
+`dav1ddec`, `rav1ddec`, the VA-API decoders and the other platform decoders are not
 measured. Their cost is unknown, so a chain through one is never priced and the
 score order picks as before.
 
