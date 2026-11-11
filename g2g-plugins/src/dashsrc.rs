@@ -83,6 +83,8 @@ use crate::fetch::{
     MAX_SEGMENT_BYTES,
 };
 use crate::fmp4::CmafChunker;
+use crate::httperror::http_err;
+use crate::httpsrc::{cookie_jar, validate_cookies, COOKIES_PROPERTY};
 use crate::mpd::{
     live_start_offset, parse, parse_sidx, ByteRange, LiveEdge, Mpd, Representation, ResolvedSegment,
 };
@@ -313,6 +315,7 @@ pub struct DashSrc {
     /// Consume a segment chunk by chunk as the packager writes it instead
     /// of once its whole response has arrived. Off by default.
     low_latency: bool,
+    cookies: String,
     bus: Option<BusHandle>,
     configured: bool,
 }
@@ -328,6 +331,7 @@ impl DashSrc {
             abr: false,
             prebuffer_ms: 0,
             low_latency: false,
+            cookies: String::new(),
             bus: None,
             configured: false,
         }
@@ -544,7 +548,10 @@ impl SourceLoop for DashSrc {
             if !self.configured {
                 return Err(G2gError::NotConfigured);
             }
-            let client = reqwest::Client::new();
+            let client = reqwest::Client::builder()
+                .cookie_provider(cookie_jar(&self.url, &self.cookies)?)
+                .build()
+                .map_err(http_err)?;
             let cap = (self.max_bandwidth != 0).then_some(self.max_bandwidth);
 
             let (mut mpd, manifest_request) = fetch_manifest(&client, &self.url).await?;
@@ -1007,6 +1014,12 @@ impl SourceLoop for DashSrc {
                 }
                 _ => Err(PropError::Type),
             },
+            "cookies" => {
+                let cookies = value.as_str().ok_or(PropError::Type)?;
+                validate_cookies(cookies)?;
+                self.cookies = String::from(cookies);
+                Ok(())
+            }
             _ => Err(PropError::Unknown),
         }
     }
@@ -1020,6 +1033,7 @@ impl SourceLoop for DashSrc {
             "abr" => Some(PropValue::Bool(self.abr)),
             "prebuffer-ms" => Some(PropValue::Uint(self.prebuffer_ms)),
             "low-latency" => Some(PropValue::Bool(self.low_latency)),
+            "cookies" => Some(PropValue::Str(self.cookies.clone())),
             _ => None,
         }
     }
@@ -1061,6 +1075,7 @@ static DASHSRC_PROPS: &[PropertySpec] = &[
         "consume a segment chunk by chunk as the packager writes it (CMAF chunked transfer)",
     )
     .with_default("false"),
+    COOKIES_PROPERTY,
 ];
 
 #[cfg(test)]

@@ -33,7 +33,9 @@ use core::time::Duration;
 
 use alloc::boxed::Box;
 use alloc::collections::VecDeque;
+use alloc::format;
 use alloc::string::String;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
@@ -41,11 +43,45 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
     BusHandle, BusMessage, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
-    ElementMetadata, FrameTiming, G2gError, MemoryDomain, OutputSink, PipelinePacket, PropError,
-    PropKind, PropValue, PropertySpec,
+    ElementMetadata, FrameTiming, G2gError, HardwareError, HttpTransportFailure, MemoryDomain,
+    OutputSink, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
 };
+use reqwest::cookie::Jar;
 
 use crate::httperror::http_err;
+
+fn cookie_pairs(cookies: &str) -> impl Iterator<Item = &str> {
+    cookies
+        .split(';')
+        .map(str::trim)
+        .filter(|pair| !pair.is_empty())
+}
+
+// `cookies` is a Cookie header value, `name=value` pairs separated by `;`
+pub(crate) fn validate_cookies(cookies: &str) -> Result<(), PropError> {
+    let well_formed = cookie_pairs(cookies).all(|pair| {
+        pair.split_once('=')
+            .is_some_and(|(name, _)| !name.trim().is_empty())
+    });
+    well_formed.then_some(()).ok_or(PropError::Value)
+}
+
+// reqwest stores the Set-Cookie answers in the jar too, so a session cookie set on a playlist goes out with its segments
+pub(crate) fn cookie_jar(location: &str, cookies: &str) -> Result<Arc<Jar>, G2gError> {
+    let jar = Arc::new(Jar::default());
+    let pairs: Vec<&str> = cookie_pairs(cookies).collect();
+    if pairs.is_empty() {
+        return Ok(jar);
+    }
+    let url = reqwest::Url::parse(location).map_err(|_| {
+        G2gError::Hardware(HardwareError::HttpTransport(HttpTransportFailure::Request))
+    })?;
+    for pair in pairs {
+        // cookies without a Path default to the location's directory, and segments can sit elsewhere on the host
+        jar.add_cookie_str(&format!("{pair}; Path=/"), &url);
+    }
+    Ok(jar)
+}
 
 /// # Example
 ///
@@ -64,6 +100,7 @@ pub struct HttpSrc {
     url: String,
     caps: Caps,
     prebuffer_bytes: usize,
+    cookies: String,
     bus: Option<BusHandle>,
     configured: bool,
 }
@@ -77,6 +114,7 @@ impl HttpSrc {
             url: url.into(),
             caps,
             prebuffer_bytes: 0,
+            cookies: String::new(),
             bus: None,
             configured: false,
         }
@@ -150,7 +188,10 @@ impl SourceLoop for HttpSrc {
             if !self.configured {
                 return Err(G2gError::NotConfigured);
             }
-            let mut response = reqwest::Client::new()
+            let mut response = reqwest::Client::builder()
+                .cookie_provider(cookie_jar(&self.url, &self.cookies)?)
+                .build()
+                .map_err(http_err)?
                 .get(&self.url)
                 .send()
                 .await
@@ -281,6 +322,12 @@ impl SourceLoop for HttpSrc {
                 self.prebuffer_bytes = bytes as usize;
                 Ok(())
             }
+            "cookies" => {
+                let cookies = value.as_str().ok_or(PropError::Type)?;
+                validate_cookies(cookies)?;
+                self.cookies = String::from(cookies);
+                Ok(())
+            }
             _ => Err(PropError::Unknown),
         }
     }
@@ -295,6 +342,7 @@ impl SourceLoop for HttpSrc {
                 _ => None,
             },
             "prebuffer-bytes" => Some(PropValue::Uint(self.prebuffer_bytes as u64)),
+            "cookies" => Some(PropValue::Str(self.cookies.clone())),
             _ => None,
         }
     }
@@ -318,7 +366,14 @@ static HTTPSRC_PROPS: &[PropertySpec] = &[
     )
     .with_default("0")
     .with_range("0", "1073741824"),
+    COOKIES_PROPERTY,
 ];
+
+pub(crate) const COOKIES_PROPERTY: PropertySpec = PropertySpec::new(
+    "cookies",
+    PropKind::Str,
+    "cookies sent to the location's host, as a Cookie header: name=value pairs separated by ';'",
+);
 
 fn encoding_from_str(s: &str) -> Option<ByteStreamEncoding> {
     match s {

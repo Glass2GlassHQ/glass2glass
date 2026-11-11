@@ -1472,6 +1472,12 @@ application can pause until `100` and show a buffering indicator on a stall. The
 window never grows past the target, and `0`, the default, streams straight
 through.
 
+`httpsrc`, `hlssrc` and `dashsrc` take `cookies`, a Cookie header value. Its
+pairs go into a reqwest cookie jar for the location's host with `Path=/`, and the
+jar also keeps the servers' `Set-Cookie` answers, so a session cookie set on a
+playlist response goes out with the segments, as in gst's adaptivedemux2.
+`hlssrc` keeps one jar across its negotiation probe and its run.
+
 The segment loops `hlssrc` and `dashsrc` carry the duration-keyed sibling,
 `prebuffer-ms` plus `with_bus`: a `segprebuf::SegmentPrebuffer` window the loop
 fetches into while below its duration target, summed `#EXTINF` or MPD segment

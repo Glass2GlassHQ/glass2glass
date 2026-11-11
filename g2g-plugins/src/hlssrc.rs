@@ -83,6 +83,8 @@ use crate::fmp4::{TrackHeader, TrackKind};
 use crate::hls::{
     parse, ByteRange, KeyMethod, MasterPlaylist, MediaPlaylist, MediaType, Playlist, Variant,
 };
+use crate::httperror::http_err;
+use crate::httpsrc::{cookie_jar, validate_cookies, COOKIES_PROPERTY};
 use crate::sampleaesdecrypt::{SampleAesKey, SampleAesKeyHandle};
 
 /// One decodable stream a master playlist's variant exposes, the unit the
@@ -317,6 +319,9 @@ pub struct HlsSrc {
     /// `CAN-BLOCK-RELOAD` is a server that expects a client to use them; `false`
     /// keeps the whole-segment path on such a playlist.
     low_latency: bool,
+    cookies: String,
+    // shared by the probe and the run, so a cookie the playlist response set reaches the segments
+    cookie_jar: Option<alloc::sync::Arc<reqwest::cookie::Jar>>,
     bus: Option<BusHandle>,
     configured: bool,
 }
@@ -336,9 +341,26 @@ impl HlsSrc {
             full_replay: false,
             prebuffer_ms: None,
             low_latency: true,
+            cookies: String::new(),
+            cookie_jar: None,
             bus: None,
             configured: false,
         }
+    }
+
+    // each run builds its client, since pooled connections belong to the tokio runtime that opened them
+    fn http_client(&mut self) -> Result<reqwest::Client, G2gError> {
+        let jar = match &self.cookie_jar {
+            Some(jar) => jar.clone(),
+            None => self
+                .cookie_jar
+                .insert(cookie_jar(&self.url, &self.cookies)?)
+                .clone(),
+        };
+        reqwest::Client::builder()
+            .cookie_provider(jar)
+            .build()
+            .map_err(http_err)
     }
 
     /// Buffer this many milliseconds of media (summed `#EXTINF` durations)
@@ -442,7 +464,7 @@ impl HlsSrc {
         if let Some(enc) = self.container {
             return Ok(enc);
         }
-        let client = reqwest::Client::new();
+        let client = self.http_client()?;
         let text = get_text(&client, &self.url, MAX_MANIFEST_BYTES).await?;
         let (media, media_url) = resolve_media(&client, &self.url, &text, self.cap()).await?;
         let enc = if media.map_uri.is_some() {
@@ -1037,7 +1059,7 @@ impl SourceLoop for HlsSrc {
             // blank line so the next segment's `WEBVTT` / `X-TIMESTAMP-MAP` header
             // starts a fresh (non-cue) block downstream.
             let text_mode = self.text;
-            let client = reqwest::Client::new();
+            let client = self.http_client()?;
             // ABR keeps the master playlist so the run loop can re-select a variant
             // per segment; `current_variant` tracks the loaded one to detect a
             // switch. Non-ABR reuses the probe's media playlist (one fixed variant).
@@ -1723,6 +1745,14 @@ impl SourceLoop for HlsSrc {
         match name {
             "location" => {
                 self.url = String::from(value.as_str().ok_or(PropError::Type)?);
+                self.cookie_jar = None;
+                Ok(())
+            }
+            "cookies" => {
+                let cookies = value.as_str().ok_or(PropError::Type)?;
+                validate_cookies(cookies)?;
+                self.cookies = String::from(cookies);
+                self.cookie_jar = None;
                 Ok(())
             }
             "max-bandwidth" => match value {
@@ -1782,6 +1812,7 @@ impl SourceLoop for HlsSrc {
                 self.prebuffer_ms.unwrap_or(DEFAULT_PREBUFFER_MS),
             )),
             "low-latency" => Some(PropValue::Bool(self.low_latency)),
+            "cookies" => Some(PropValue::Str(self.cookies.clone())),
             _ => None,
         }
     }
@@ -1822,6 +1853,7 @@ static HLSSRC_PROPS: &[PropertySpec] = &[
         "follow the playlist's LL-HLS tags: fetch EXT-X-PART partial segments and block the reload on the next part",
     )
     .with_default("true"),
+    COOKIES_PROPERTY,
 ];
 
 #[cfg(test)]

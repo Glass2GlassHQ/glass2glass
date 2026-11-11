@@ -131,6 +131,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M2215: `tsdemux` no longer reads a timed ID3 stream (type 0x15) as KLV.
 - M2216: `wavparse` starts over at a `Segment` after a file, so `concat ! wavparse` reads each WAV.
 - M2217: the byte-stream demuxers and `mp4demux` end the stream at a seek's stop.
+- M2218: `httpsrc`, `hlssrc` and `dashsrc` take a `cookies` property and send back the cookies servers set.
 
 Breaking: `TimecodeMeta.frames` is a `u16`, `WIRE_VERSION` is 6, `FrameTiming` gains `start_discard_ns` and `end_discard_ns`, and `RtpRecvConfig` gains `parameter_sets`.
 

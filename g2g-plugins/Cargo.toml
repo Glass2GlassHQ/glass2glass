@@ -783,7 +783,7 @@ mpeg-audio-decode = ["std", "dep:symphonia-core", "dep:symphonia-bundle-mp3"]
 # GET streamed downstream as a `Caps::ByteStream` (or declared codec), the
 # souphttpsrc analog and the fetch layer under HLS/DASH. Implies std + tokio.
 # TLS is rustls on ring with the OS root certificates.
-http-src = ["std", "dep:reqwest", "tokio/time"]
+http-src = ["std", "dep:reqwest", "reqwest/cookies", "tokio/time"]
 # HLS source (HlsSrc): fetches an .m3u8 playlist, selects a variant (simple ABR),
 # and streams its MPEG-TS media segments downstream as a `Caps::ByteStream` for
 # `tsdemux`. Builds on the http-src fetch layer. The playlist parser (`hls`) is
