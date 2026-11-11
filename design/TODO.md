@@ -282,6 +282,10 @@ libraries installed.
 - An example that shows pipeline video inside a Qt/QML window.
 - Move `vulkanhdrsink` off its raw Vulkan swapchain onto a wgpu surface, using
   wgpu 30's `SurfaceConfiguration::color_space` for the HDR10 / scRGB output.
+- Shorten `wgpusink`'s first-frame startup: it creates the wgpu device and
+  surface on the first frame, which takes about 1.3 s on a Windows laptop, so a
+  live camera shows an empty window and late-drops about 40 frames. Measure the
+  split, then open the device at `configure_pipeline`.
 
 ## Containers
 
