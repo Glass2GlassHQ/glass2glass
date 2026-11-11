@@ -197,6 +197,10 @@ pub fn file_handler() -> UriSourceFactory {
         if uri.rest.is_empty() {
             return Err(UriError::Malformed);
         }
+        #[cfg(feature = "hls")]
+        if hls_url(uri.scheme, uri.rest).is_some() {
+            return hls_source(uri);
+        }
         let path = file_uri_rest_to_path(uri.rest);
         let prefix = read_sniff_window(path).ok_or(UriError::Unreadable)?;
         match crate::typefind::sniff_caps(&prefix).ok_or(UriError::UnknownContent)? {
@@ -260,14 +264,14 @@ fn hls_source(uri: &Uri) -> Result<UriSource, UriError> {
 #[cfg(feature = "hls")]
 const HLS_PLAYLIST_EXTENSION: &str = ".m3u8";
 
-// `hls://` fetches over https, an http(s) URL plays only when its path names a playlist
+// `hls://` fetches over https, an http(s) or file URL plays only when its path names a playlist
 #[cfg(feature = "hls")]
 fn hls_url(scheme: &str, rest: &str) -> Option<String> {
     let path = rest.split(['?', '#']).next().unwrap_or(rest);
     let names_playlist = path.to_ascii_lowercase().ends_with(HLS_PLAYLIST_EXTENSION);
     match scheme {
         "hls" => Some(alloc::format!("https://{rest}")),
-        "http" | "https" if names_playlist => Some(alloc::format!("{scheme}://{rest}")),
+        "http" | "https" | "file" if names_playlist => Some(alloc::format!("{scheme}://{rest}")),
         _ => None,
     }
 }
@@ -3060,7 +3064,7 @@ pub fn build_hls_separate_fanout(
 /// [`mp4_playbin`]. The variant's media playlist picks the demuxer: an
 /// `#EXT-X-MAP` init segment is fMP4 (Mp4DemuxN, tracks from the init's moov),
 /// otherwise muxed MPEG-TS (TsDemuxN, ports from the first segment's PMT). The
-/// `hls` scheme maps to an `https` origin, and an `http(s)` URL naming an
+/// `hls` scheme maps to an `https` origin, and an `http(s)` or `file` URL naming an
 /// `.m3u8` is fetched as is.
 ///
 /// Declines (`Ok(None)`, so the single-stream [`hls_handler`] takes over) for a

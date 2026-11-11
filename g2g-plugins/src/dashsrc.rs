@@ -79,8 +79,8 @@ use crate::adaptiveseek::{unless_seek, FinishedOrSeek, LiveWindow};
 use crate::dashclock::{local_now_unix, RequestSpan, ServerClock};
 use crate::fetch::{
     body_read_err, byte_frame, get_bytes_retrying, get_range_bytes_retrying, get_response_retrying,
-    get_text, get_text_retrying, is_origin_failure, resolve_url, FetchRetry, MAX_MANIFEST_BYTES,
-    MAX_SEGMENT_BYTES,
+    get_text, get_text_retrying, is_file_url, is_origin_failure, resolve_url, FetchRetry,
+    MAX_MANIFEST_BYTES, MAX_SEGMENT_BYTES,
 };
 use crate::fmp4::CmafChunker;
 use crate::httperror::http_err;
@@ -762,6 +762,7 @@ impl SourceLoop for DashSrc {
                                     if self.low_latency
                                         && self.prebuffer_ms == 0
                                         && seg.byte_range.is_none()
+                                        && !is_file_url(&url)
                                     {
                                         // no bytes yet, so the media time is taken as the Period-relative time
                                         if let Some(segment) = timeline.segment_ahead(

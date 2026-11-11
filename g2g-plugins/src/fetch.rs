@@ -9,6 +9,8 @@
 
 use core::future::Future;
 use core::time::Duration;
+use std::io::{Read, Seek, SeekFrom};
+use std::path::PathBuf;
 use std::time::Instant;
 
 use alloc::string::String;
@@ -65,6 +67,7 @@ fn body_too_large() -> G2gError {
 enum FetchFailure {
     Request(reqwest::Error),
     BodyTooLarge,
+    File(std::io::Error),
 }
 
 impl FetchFailure {
@@ -72,12 +75,21 @@ impl FetchFailure {
         match self {
             FetchFailure::Request(error) => net_err(error),
             FetchFailure::BodyTooLarge => body_too_large(),
+            FetchFailure::File(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                G2gError::FileNotFound
+            }
+            FetchFailure::File(error) => g2g_core::log::io_err(error),
         }
     }
 
     fn retry_reason(&self) -> Option<RetryReason> {
-        let FetchFailure::Request(error) = self else {
-            return None;
+        let error = match self {
+            FetchFailure::Request(error) => error,
+            // a live packager writing to disk lists a file before some readers see it
+            FetchFailure::File(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Some(RetryReason::NotPublishedYet)
+            }
+            FetchFailure::File(_) | FetchFailure::BodyTooLarge => return None,
         };
         match error.status() {
             Some(reqwest::StatusCode::NOT_FOUND | reqwest::StatusCode::TOO_EARLY) => {
@@ -101,6 +113,7 @@ impl core::fmt::Display for FetchFailure {
         match self {
             FetchFailure::Request(error) => core::fmt::Display::fmt(error, f),
             FetchFailure::BodyTooLarge => f.write_str("response body over its size cap"),
+            FetchFailure::File(error) => core::fmt::Display::fmt(error, f),
         }
     }
 }
@@ -193,6 +206,48 @@ pub(crate) fn is_origin_failure(error: &G2gError) -> bool {
     }
 }
 
+const FILE_SCHEME: &str = "file://";
+
+pub(crate) fn is_file_url(url: &str) -> bool {
+    url.get(..FILE_SCHEME.len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(FILE_SCHEME))
+}
+
+fn file_url_path(url: &str) -> Result<PathBuf, FetchFailure> {
+    reqwest::Url::parse(url)
+        .ok()
+        .and_then(|parsed| parsed.to_file_path().ok())
+        .ok_or_else(|| {
+            FetchFailure::File(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "not a local file URL",
+            ))
+        })
+}
+
+// a `length` past the end reads to the end, as an HTTP server that ignores the Range does
+fn read_file_url(
+    url: &str,
+    offset: u64,
+    length: Option<u64>,
+    max: usize,
+) -> Result<Vec<u8>, FetchFailure> {
+    let mut file = std::fs::File::open(file_url_path(url)?).map_err(FetchFailure::File)?;
+    let file_len = file.metadata().map_err(FetchFailure::File)?.len();
+    let available = file_len.saturating_sub(offset);
+    let wanted = length.map_or(available, |length| length.min(available));
+    if wanted > max as u64 {
+        return Err(FetchFailure::BodyTooLarge);
+    }
+    file.seek(SeekFrom::Start(offset))
+        .map_err(FetchFailure::File)?;
+    let mut body = Vec::with_capacity(wanted as usize);
+    file.take(wanted)
+        .read_to_end(&mut body)
+        .map_err(FetchFailure::File)?;
+    Ok(body)
+}
+
 /// GET `url` and hand back the checked response, whose body the caller reads
 /// chunk by chunk (what [`get_bytes`] does, and what the DASH low-latency path
 /// consumes progressively). The `Content-Length` header (when present) is an
@@ -248,6 +303,9 @@ async fn try_get_bytes(
     url: &str,
     max: usize,
 ) -> Result<Vec<u8>, FetchFailure> {
+    if is_file_url(url) {
+        return read_file_url(url, 0, None, max);
+    }
     read_capped(try_get_response(client, url, max).await?, max).await
 }
 
@@ -291,6 +349,9 @@ async fn try_get_range_bytes(
     }
     if length > max as u64 {
         return Err(FetchFailure::BodyTooLarge);
+    }
+    if is_file_url(url) {
+        return read_file_url(url, offset, Some(length), max);
     }
     // Inclusive end per RFC 7233: bytes=offset-(offset+length-1).
     let end = offset.saturating_add(length).saturating_sub(1);
@@ -366,6 +427,10 @@ pub(crate) async fn get_text_query(
     timeout: core::time::Duration,
     max: usize,
 ) -> Result<String, G2gError> {
+    // a file is complete when read, so there is no part to wait for
+    if is_file_url(url) {
+        return get_text(client, url, max).await;
+    }
     let resp = client
         .get(url)
         .query(query)
@@ -398,7 +463,7 @@ pub(crate) fn byte_frame(bytes: Vec<u8>, sequence: u64) -> Frame {
 /// absolute paths (`/a/b`), and path-relative names; the HLS/DASH cases in
 /// practice. Not a full RFC 3986 resolver (no `..` collapsing).
 pub(crate) fn resolve_url(base: &str, rel: &str) -> String {
-    let has_scheme = ["http://", "https://"].iter().any(|scheme| {
+    let has_scheme = ["http://", "https://", FILE_SCHEME].iter().any(|scheme| {
         rel.get(..scheme.len())
             .is_some_and(|prefix| prefix.eq_ignore_ascii_case(scheme))
     });

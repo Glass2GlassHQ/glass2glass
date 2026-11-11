@@ -1476,7 +1476,9 @@ through.
 pairs go into a reqwest cookie jar for the location's host with `Path=/`, and the
 jar also keeps the servers' `Set-Cookie` answers, so a session cookie set on a
 playlist response goes out with the segments, as in gst's adaptivedemux2.
-`hlssrc` keeps one jar across its negotiation probe and its run.
+`hlssrc` keeps one jar across its negotiation probe and its run. The fetch
+functions read a `file://` playlist, manifest or segment from disk, byte ranges
+included, and `uridecodebin` hands a `file://` URL naming a `.m3u8` to `hlssrc`.
 
 The segment loops `hlssrc` and `dashsrc` carry the duration-keyed sibling,
 `prebuffer-ms` plus `with_bus`: a `segprebuf::SegmentPrebuffer` window the loop
