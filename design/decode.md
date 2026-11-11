@@ -95,8 +95,11 @@ left or top offset is copied on a D3D12 copy queue into a pooled texture of the
 visible size, because wgpu does not copy one plane of an NV12 texture into
 another. In `System` the visible rectangle is read back to tight NV12, as
 `vulkanvideodec` does. Pictures leave in display order through the
-`ReorderBuffer` in `displayorder.rs`, shared with `vulkanvideodec`, and
-`low-latency` releases each one as soon as it decodes.
+`ReorderBuffer` in `displayorder.rs`, shared with `vulkanvideodec`. Under
+`low-latency` it also releases a picture before the reorder depth fills in the
+cases gst's `gst_h264_dpb_needs_bump` does: consecutive non-reference pictures,
+a non-reference lowest picture, a negative POC once a positive one arrives, and
+the picture after an IDR.
 
 The decoder publishes its `GpuContext` as the producer context, so `wgpusink`
 presents on the same device. On Windows `wgpusink` builds its surface over a

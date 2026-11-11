@@ -1074,11 +1074,8 @@ impl D3D12H264Dec {
     }
 
     fn apply_reorder_depth(&mut self) {
-        self.reorder.max_hold = if self.low_latency {
-            0
-        } else {
-            self.stream_reorder_depth
-        };
+        self.reorder.max_hold = self.stream_reorder_depth;
+        self.reorder.low_latency = self.low_latency;
     }
 
     // false while no SPS has arrived to build the decoder from
@@ -1394,5 +1391,5 @@ impl AsyncElement for D3D12H264Dec {
 static D3D12H264DEC_PROPERTIES: &[PropertySpec] = &[PropertySpec::new(
     "low-latency",
     PropKind::Bool,
-    "emit each picture as it decodes, in coding order (no display reorder)",
+    "emit each picture as soon as its display position is certain, as gst's low-latency bump mode does",
 )];

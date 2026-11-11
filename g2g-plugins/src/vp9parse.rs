@@ -210,9 +210,7 @@ pub(crate) fn is_keyframe(packet: &[u8]) -> bool {
 fn parse_keyframe(packet: &[u8]) -> Option<Vp9KeyFrame> {
     let mut br = BitReader::new(packet);
     let color = read_keyframe_head(&mut br)?;
-    // frame_size: 16-bit minus-1 fields.
-    let width = br.read_bits(16)? + 1;
-    let height = br.read_bits(16)? + 1;
+    let (width, height) = read_frame_size(&mut br)?;
     Some(Vp9KeyFrame {
         width,
         height,
@@ -325,9 +323,12 @@ pub(crate) enum Vp9FrameKind {
         slot: u8,
     },
     Decoded {
+        key_frame: bool,
         shown: bool,
         intra: bool,
         refresh_slots: u8,
+        // `None` when an inter frame takes the size of a reference
+        coded_size: Option<(u32, u32)>,
     },
 }
 
@@ -338,7 +339,25 @@ pub(crate) struct Vp9FrameHeader {
     pub(crate) kind: Vp9FrameKind,
 }
 
-// the uncompressed header up to refresh_frame_flags
+// frame_size: 16-bit minus-1 fields
+fn read_frame_size(br: &mut BitReader) -> Option<(u32, u32)> {
+    Some((br.read_bits(16)? + 1, br.read_bits(16)? + 1))
+}
+
+// frame_size_with_refs, after the reference indices and sign biases
+#[cfg(all(any(target_os = "linux", windows), feature = "nvdec"))]
+fn inter_frame_size(br: &mut BitReader) -> Option<(u32, u32)> {
+    const REFS_PER_FRAME: u32 = 3;
+    br.read_bits(REFS_PER_FRAME * 4)?; // ref_frame_idx and ref_frame_sign_bias
+    for _ in 0..REFS_PER_FRAME {
+        if br.read_bit()? == 1 {
+            return None; // found_ref
+        }
+    }
+    read_frame_size(br)
+}
+
+// the uncompressed header up to the frame size
 #[cfg(all(any(target_os = "linux", windows), feature = "nvdec"))]
 pub(crate) fn frame_header(frame: &[u8]) -> Option<Vp9FrameHeader> {
     const KEY_FRAME_REFRESHES_EVERY_SLOT: u8 = 0xFF;
@@ -363,8 +382,11 @@ pub(crate) fn frame_header(frame: &[u8]) -> Option<Vp9FrameHeader> {
     let shown = br.read_bit()? == 1;
     let error_resilient = br.read_bit()? == 1;
     let intra_only = !key_frame && !shown && br.read_bit()? == 1;
-    let refresh_slots = if key_frame {
-        KEY_FRAME_REFRESHES_EVERY_SLOT
+    let (refresh_slots, coded_size) = if key_frame {
+        let coded_size = read_sync_code(&mut br)
+            .and_then(|()| read_color_config(&mut br, profile))
+            .and_then(|_| read_frame_size(&mut br));
+        (KEY_FRAME_REFRESHES_EVERY_SLOT, coded_size)
     } else {
         if !error_resilient {
             br.read_bits(2)?; // reset_frame_context
@@ -375,14 +397,22 @@ pub(crate) fn frame_header(frame: &[u8]) -> Option<Vp9FrameHeader> {
                 read_color_config(&mut br, profile)?;
             }
         }
-        br.read_bits(8)? as u8
+        let refresh_slots = br.read_bits(8)? as u8;
+        let coded_size = if intra_only {
+            read_frame_size(&mut br)
+        } else {
+            inter_frame_size(&mut br)
+        };
+        (refresh_slots, coded_size)
     };
     Some(Vp9FrameHeader {
         profile,
         kind: Vp9FrameKind::Decoded {
+            key_frame,
             shown,
             intra: key_frame || intra_only,
             refresh_slots,
+            coded_size,
         },
     })
 }
@@ -682,7 +712,12 @@ mod tests {
     }
 
     #[cfg(all(any(target_os = "linux", windows), feature = "nvdec"))]
-    fn inter_frame(shown: bool, intra_only: bool, refresh_slots: u8) -> Vec<u8> {
+    fn inter_frame(
+        shown: bool,
+        intra_only: bool,
+        refresh_slots: u8,
+        coded_size: Option<(u32, u32)>,
+    ) -> Vec<u8> {
         let mut w = BitWriter::default();
         w.write_bits(2, 2); // frame_marker
         w.write_bits(0, 2); // profile 0
@@ -700,27 +735,46 @@ mod tests {
             w.write_bits(0x42, 8);
         }
         w.write_bits(u32::from(refresh_slots), 8);
+        if !intra_only {
+            w.write_bits(0, 12); // ref_frame_idx and ref_frame_sign_bias
+            w.write_bits(0, 2); // found_ref for the first two references
+            w.write_bit(coded_size.is_none() as u32);
+        }
+        if let Some((width, height)) = coded_size {
+            w.write_bits(width - 1, 16);
+            w.write_bits(height - 1, 16);
+        }
         w.align_to_byte();
         w.into_bytes()
     }
 
     #[cfg(all(any(target_os = "linux", windows), feature = "nvdec"))]
     #[test]
-    fn frame_header_reads_what_each_frame_shows_and_refreshes() {
-        let decoded = |shown, intra, refresh_slots| Vp9FrameKind::Decoded {
+    fn frame_header_reads_what_each_frame_shows_refreshes_and_codes() {
+        let decoded = |key_frame, shown, intra, refresh_slots, coded_size| Vp9FrameKind::Decoded {
+            key_frame,
             shown,
             intra,
             refresh_slots,
+            coded_size,
         };
         let kind = |frame: &[u8]| frame_header(frame).map(|header| header.kind);
-        assert_eq!(kind(&keyframe(64, 64, 0)), Some(decoded(true, true, 0xFF)));
         assert_eq!(
-            kind(&inter_frame(true, false, 0b0000_0101)),
-            Some(decoded(true, false, 0b0000_0101))
+            kind(&keyframe(64, 64, 0)),
+            Some(decoded(true, true, true, 0xFF, Some((64, 64))))
         );
         assert_eq!(
-            kind(&inter_frame(false, true, 0b1000_0000)),
-            Some(decoded(false, true, 0b1000_0000))
+            kind(&inter_frame(true, false, 0b0000_0101, None)),
+            Some(decoded(false, true, false, 0b0000_0101, None)),
+            "a frame that takes a reference's size codes none"
+        );
+        assert_eq!(
+            kind(&inter_frame(true, false, 0b0000_0101, Some((640, 360)))),
+            Some(decoded(false, true, false, 0b0000_0101, Some((640, 360))))
+        );
+        assert_eq!(
+            kind(&inter_frame(false, true, 0b1000_0000, Some((32, 16)))),
+            Some(decoded(false, false, true, 0b1000_0000, Some((32, 16))))
         );
         // frame_marker 2, profile 0, show_existing_frame 1, frame_to_show_map_idx 5
         assert_eq!(

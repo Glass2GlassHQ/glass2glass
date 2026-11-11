@@ -24,6 +24,8 @@ pub struct PictureMeta {
     pub poc: i32,
     // false for an H.265 picture decoded only as a reference (`pic_output_flag`)
     pub pic_output_flag: bool,
+    // false only for an H.264 picture with nal_ref_idc 0
+    pub is_reference: bool,
     // an H.265 `no_output_of_prior_pics_flag` at a sequence start: the pictures
     // still waiting for output are dropped (C.5.2.2)
     pub discards_prior_pictures: bool,
@@ -77,10 +79,17 @@ pub(crate) struct ReorderRelease<T> {
     pub(crate) dropped: alloc::vec::Vec<T>,
 }
 
+struct WaitingPicture<T> {
+    cvs: u32,
+    poc: i32,
+    is_reference: bool,
+    payload: T,
+}
+
 pub(crate) struct ReorderBuffer<T> {
-    /// Held pictures, each `(cvs, poc, payload)`. Small (<= `max_hold` within a
+    /// Held pictures, in decode order. Small (<= `max_hold` within a
     /// CVS), so a Vec + linear min-scan beats a heap.
-    pending: alloc::vec::Vec<(u32, i32, T)>,
+    pending: alloc::vec::Vec<WaitingPicture<T>>,
     /// Current coded-video-sequence index, bumped at each keyframe after the first.
     cvs: u32,
     /// Whether any picture has been pushed (the first keyframe is not a boundary).
@@ -88,6 +97,8 @@ pub(crate) struct ReorderBuffer<T> {
     /// Bump once the current CVS holds more than this many pictures. Set to the
     /// DPB slot count when the decoder is built.
     pub(crate) max_hold: usize,
+    pub(crate) low_latency: bool,
+    last_output_was_reference: bool,
 }
 
 impl<T> ReorderBuffer<T> {
@@ -97,6 +108,8 @@ impl<T> ReorderBuffer<T> {
             cvs: 0,
             started: false,
             max_hold: 0,
+            low_latency: false,
+            last_output_was_reference: true,
         }
     }
 
@@ -122,17 +135,54 @@ impl<T> ReorderBuffer<T> {
             self.cvs += 1;
         }
         self.started = true;
+        // gst's h264decoder checks before the current picture joins the waiting ones and again after
+        while self.low_latency && self.early_release_is_safe(Some(meta)) {
+            release.output.push(self.pop_min());
+        }
         if meta.pic_output_flag {
-            self.pending.push((self.cvs, meta.poc, payload));
+            self.pending.push(WaitingPicture {
+                cvs: self.cvs,
+                poc: meta.poc,
+                is_reference: meta.is_reference,
+                payload,
+            });
         } else {
             release.dropped.push(payload);
         }
         while !self.pending.is_empty()
-            && (self.pending.len() > self.max_hold || self.dpb_over_capacity(meta.dpb))
+            && (self.pending.len() > self.max_hold
+                || self.dpb_over_capacity(meta.dpb)
+                || (self.low_latency && self.early_release_is_safe(None)))
         {
             release.output.push(self.pop_min());
         }
         release
+    }
+
+    // the cases gst_h264_dpb_needs_bump releases early in its low-latency mode
+    fn early_release_is_safe(&self, next: Option<&PictureMeta>) -> bool {
+        let Some(lowest) = self
+            .pending
+            .iter()
+            .min_by_key(|waiting| (waiting.cvs, waiting.poc))
+        else {
+            return false;
+        };
+        // H.264 7.4.1.2.2: non-reference pictures in consecutive access units never decrease in POC
+        if !self.last_output_was_reference && !lowest.is_reference {
+            return true;
+        }
+        // no picture with a negative POC follows one with a positive POC
+        if next.is_some_and(|next| next.poc > 0) && lowest.poc < 0 {
+            return true;
+        }
+        if lowest.poc == 0 && self.pending.len() == 1 {
+            return next.is_some_and(|next| next.poc > lowest.poc);
+        }
+        if !lowest.is_reference {
+            return true;
+        }
+        next.is_some_and(|next| !next.is_reference && lowest.poc < next.poc)
     }
 
     // waiting pictures that are no longer references still take DPB room
@@ -144,7 +194,7 @@ impl<T> ReorderBuffer<T> {
         let waiting_only = self
             .pending
             .iter()
-            .filter(|(cvs, poc, _)| *cvs != self.cvs || !references.contains(poc))
+            .filter(|waiting| waiting.cvs != self.cvs || !references.contains(&waiting.poc))
             .count();
         references.len() + waiting_only > dpb.capacity
     }
@@ -161,26 +211,87 @@ impl<T> ReorderBuffer<T> {
         self.pending.clear();
         self.cvs = 0;
         self.started = false;
+        self.last_output_was_reference = true;
     }
 
     /// Remove and return the lowest-`(cvs, poc)` held picture.
     fn pop_min(&mut self) -> T {
         let mut min_i = 0;
         for i in 1..self.pending.len() {
-            let a = (self.pending[i].0, self.pending[i].1);
-            let b = (self.pending[min_i].0, self.pending[min_i].1);
+            let a = (self.pending[i].cvs, self.pending[i].poc);
+            let b = (self.pending[min_i].cvs, self.pending[min_i].poc);
             if a < b {
                 min_i = i;
             }
         }
-        self.pending.remove(min_i).2
+        let lowest = self.pending.remove(min_i);
+        self.last_output_was_reference = lowest.is_reference;
+        lowest.payload
     }
 
     /// Drain all held pictures, sorted into display order. A stable sort keeps
     /// decode order among any equal keys (which should not occur).
     pub(crate) fn take_sorted(&mut self) -> alloc::vec::Vec<T> {
         let mut items = core::mem::take(&mut self.pending);
-        items.sort_by_key(|a| (a.0, a.1));
-        items.into_iter().map(|(_, _, p)| p).collect()
+        items.sort_by_key(|waiting| (waiting.cvs, waiting.poc));
+        if let Some(last) = items.last() {
+            self.last_output_was_reference = last.is_reference;
+        }
+        items.into_iter().map(|waiting| waiting.payload).collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::vec;
+    use alloc::vec::Vec;
+
+    fn picture(poc: i32, is_reference: bool) -> PictureMeta {
+        PictureMeta {
+            is_keyframe: poc == 0,
+            is_random_access: poc == 0,
+            frame_num: 0,
+            poc,
+            pic_output_flag: true,
+            is_reference,
+            discards_prior_pictures: false,
+            dpb: None,
+        }
+    }
+
+    #[test]
+    fn low_latency_releases_each_picture_once_its_display_position_is_certain() {
+        const LEVEL_REORDER_DEPTH: usize = 4;
+        // decode order of an IDR, P, B, B, P, B, B stream with non-reference B pictures
+        let decode_order = [
+            (0, true),
+            (6, true),
+            (2, false),
+            (4, false),
+            (12, true),
+            (8, false),
+            (10, false),
+        ];
+        let mut reorder = ReorderBuffer::new();
+        reorder.max_hold = LEVEL_REORDER_DEPTH;
+        reorder.low_latency = true;
+        let released: Vec<Vec<i32>> = decode_order
+            .iter()
+            .map(|&(poc, is_reference)| reorder.push(&picture(poc, is_reference), poc).output)
+            .collect();
+        assert_eq!(
+            released,
+            [
+                vec![],
+                vec![0],
+                vec![2],
+                vec![4],
+                vec![],
+                vec![6, 8],
+                vec![10]
+            ]
+        );
+        assert_eq!(reorder.flush(), [12]);
     }
 }

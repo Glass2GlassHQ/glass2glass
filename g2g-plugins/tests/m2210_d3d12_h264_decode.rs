@@ -60,6 +60,12 @@ const TWO_GOPS: Fixture = Fixture {
     stream: include_bytes!("fixtures/h264_640x480.h264"),
     picture: (640, 480),
 };
+// the second GOP opens on a non-IDR I picture with a recovery point SEI, then one leading B picture
+const OPEN_GOP: Fixture = Fixture {
+    name: "h264_320x240_opengop.h264",
+    stream: include_bytes!("fixtures/h264_320x240_opengop.h264"),
+    picture: (320, 240),
+};
 const EIGHT_BIT: u8 = 8;
 // the render target quantizes the shader's float result differently per NV12 layout
 #[cfg(feature = "wgpu-sink")]
@@ -436,7 +442,7 @@ struct AccessUnitDecode {
     keyframe_requests: Vec<usize>,
 }
 
-fn decode_access_units(access_units: Vec<Vec<u8>>) -> AccessUnitDecode {
+fn system_decoder(fixture: &Fixture) -> D3D12H264Dec {
     let mut decoder = D3D12H264Dec::new();
     decoder.configure_allocation(&AllocationParams {
         size_bytes: 0,
@@ -447,8 +453,13 @@ fn decode_access_units(access_units: Vec<Vec<u8>>) -> AccessUnitDecode {
         ..Default::default()
     });
     decoder
-        .configure_pipeline(&h264_caps(TWO_GOPS.picture))
+        .configure_pipeline(&h264_caps(fixture.picture))
         .expect("configure opens the decode device");
+    decoder
+}
+
+fn decode_access_units(fixture: &Fixture, access_units: Vec<Vec<u8>>) -> AccessUnitDecode {
+    let mut decoder = system_decoder(fixture);
     let mut collect = Collect::default();
     let mut keyframe_requests = Vec::new();
     for (index, access_unit) in access_units.iter().enumerate() {
@@ -490,13 +501,13 @@ fn a_damaged_access_unit_drops_pictures_to_the_next_keyframe_and_asks_for_one() 
         return;
     }
     let access_units = annexb::access_units(TWO_GOPS.stream);
-    let clean = decode_access_units(access_units.clone());
+    let clean = decode_access_units(&TWO_GOPS, access_units.clone());
     assert_eq!(clean.pictures.len(), access_units.len());
     assert!(clean.keyframe_requests.is_empty());
 
     let mut damaged_units = access_units;
     damaged_units[DAMAGED_ACCESS_UNIT] = TRUNCATED_SLICE.to_vec();
-    let damaged = decode_access_units(damaged_units);
+    let damaged = decode_access_units(&TWO_GOPS, damaged_units);
 
     let expected: Vec<&Vec<u8>> = clean.pictures[..DAMAGED_ACCESS_UNIT]
         .iter()
@@ -512,4 +523,60 @@ fn a_damaged_access_unit_drops_pictures_to_the_next_keyframe_and_asks_for_one() 
         "the pictures around the gap match a clean decode"
     );
     assert_eq!(damaged.keyframe_requests, [DAMAGED_ACCESS_UNIT]);
+}
+
+#[test]
+fn a_flush_resumes_bit_exact_from_a_recovery_point_i_picture() {
+    const RECOVERY_POINT_ACCESS_UNIT: usize = 9;
+    const LEADING_PICTURE_ACCESS_UNIT: usize = 10;
+    // the leading B picture shows before the I picture
+    const RECOVERY_POINT_DISPLAY_INDEX: usize = 10;
+    let _gpu = gpu_lock();
+    if let Some(reason) = skip_reason() {
+        eprintln!("skipping: {reason}");
+        return;
+    }
+    let access_units = annexb::access_units(OPEN_GOP.stream);
+    let clean = decode_access_units(&OPEN_GOP, access_units.clone());
+    assert_eq!(clean.pictures.len(), access_units.len());
+
+    let mut decoder = system_decoder(&OPEN_GOP);
+    let mut collect = Collect::default();
+    for access_unit in &access_units {
+        block_on(decoder.process(
+            PipelinePacket::DataFrame(system_frame(access_unit)),
+            &mut collect,
+        ))
+        .expect("decode before the seek");
+    }
+    block_on(decoder.process(PipelinePacket::Flush, &mut collect)).expect("flush");
+    let flushed_at = collect.packets.len();
+    // a seek to the recovery point skips the leading picture, which predicts from the GOP before
+    let resumed = access_units[RECOVERY_POINT_ACCESS_UNIT..]
+        .iter()
+        .enumerate()
+        .filter(|&(offset, _)| offset + RECOVERY_POINT_ACCESS_UNIT != LEADING_PICTURE_ACCESS_UNIT);
+    for (offset, access_unit) in resumed {
+        let mut frame = system_frame(access_unit);
+        frame.timing.pts_ns = offset as u64 * 33_000_000;
+        block_on(decoder.process(PipelinePacket::DataFrame(frame), &mut collect))
+            .expect("decode after the seek");
+    }
+    block_on(decoder.process(PipelinePacket::Eos, &mut collect)).expect("eos drains the reorder");
+    let resumed_pictures: Vec<&[u8]> = collect.packets[flushed_at..]
+        .iter()
+        .filter_map(|packet| match packet {
+            PipelinePacket::DataFrame(frame) => frame.domain.as_system_slice(),
+            _ => None,
+        })
+        .collect();
+    let expected: Vec<&[u8]> = clean.pictures[RECOVERY_POINT_DISPLAY_INDEX..]
+        .iter()
+        .map(Vec::as_slice)
+        .collect();
+    assert_eq!(resumed_pictures.len(), expected.len());
+    assert!(
+        resumed_pictures == expected,
+        "the pictures from the recovery point match a clean decode"
+    );
 }

@@ -309,10 +309,10 @@ fn num_dpb_slots_grows_the_dpb() {
     eprintln!("m821 num-dpb-slots: default {default_slots}, requested {want}");
 }
 
-/// `low-latency` turns off display-order reordering: a B-frame clip comes out in
-/// coding order, one frame per access unit, instead of being held until its
-/// display position is settled.
-fn low_latency_emits_in_coding_order_one_frame_per_au() {
+/// `low-latency` releases a picture as soon as its display position is certain:
+/// a B-frame clip still comes out in display order, but no later than the
+/// default buffering at any access unit and earlier at some.
+fn low_latency_emits_display_order_earlier() {
     let Some(device) = h264_device_or_skip("low-latency") else {
         return;
     };
@@ -321,9 +321,6 @@ fn low_latency_emits_in_coding_order_one_frame_per_au() {
     let mut oracle_dec = device
         .create_h264_dpb_decoder(&session, &ps)
         .expect("decoder");
-
-    // The fixture must genuinely reorder, else coding order == display order and
-    // the property would be untestable here.
     let pocs: Vec<i32> = oracle_dec
         .index_pictures(BFRAMES)
         .expect("index")
@@ -335,57 +332,49 @@ fn low_latency_emits_in_coding_order_one_frame_per_au() {
         "fixture has no B-frame reorder (POC monotonic)"
     );
 
-    // Coding-order oracle: the pipelined decode as it retires, no reordering.
-    let mut coding_order: Vec<Vec<u8>> = oracle_dec
-        .decode_push(BFRAMES)
-        .expect("decode_push")
-        .1
-        .iter()
-        .map(planes)
-        .collect();
-    coding_order.extend(oracle_dec.decode_flush().expect("flush").iter().map(planes));
-
     let aus = split_access_units(BFRAMES);
-    assert_eq!(aus.len(), coding_order.len(), "one AU per coded picture");
-
-    let mut dec = VulkanVideoDec::new();
-    dec.set_property("low-latency", PropValue::Bool(true))
-        .unwrap();
-    dec.configure_pipeline(&h264_caps())
-        .expect("configure opens the decode device");
-    let per_au = drive_per_au(&mut dec, aus.clone());
-
-    for (i, frames) in per_au.iter().take(aus.len()).enumerate() {
-        assert_eq!(
-            frames.len(),
-            1,
-            "low-latency emits access unit {i}'s own frame from that process call"
-        );
-    }
-    assert!(
-        per_au[aus.len()].is_empty(),
-        "nothing is left buffered at eos"
-    );
-    let got: Vec<Vec<u8>> = per_au.into_iter().flatten().collect();
-    assert_eq!(got, coding_order, "low-latency output is in coding order");
-
-    // The default (property off) element reorders the same clip, so the two
-    // orders really do differ: low-latency is not a no-op.
-    let mut ordered = VulkanVideoDec::new();
-    ordered
+    let mut buffered = VulkanVideoDec::new();
+    buffered
         .configure_pipeline(&h264_caps())
         .expect("configure opens the decode device");
-    let display_order: Vec<Vec<u8>> = drive_per_au(&mut ordered, aus)
-        .into_iter()
-        .flatten()
-        .collect();
-    assert_eq!(
-        display_order.len(),
-        got.len(),
-        "same frame count either way"
+    let buffered_per_au = drive_per_au(&mut buffered, aus.clone());
+    let mut low_latency = VulkanVideoDec::new();
+    low_latency
+        .set_property("low-latency", PropValue::Bool(true))
+        .unwrap();
+    low_latency
+        .configure_pipeline(&h264_caps())
+        .expect("configure opens the decode device");
+    let low_latency_per_au = drive_per_au(&mut low_latency, aus);
+
+    let emitted_by_each_au = |per_au: &[Vec<Vec<u8>>]| -> Vec<usize> {
+        per_au
+            .iter()
+            .scan(0, |emitted, frames| {
+                *emitted += frames.len();
+                Some(*emitted)
+            })
+            .collect()
+    };
+    let buffered_emitted = emitted_by_each_au(&buffered_per_au);
+    let low_latency_emitted = emitted_by_each_au(&low_latency_per_au);
+    assert!(
+        low_latency_emitted
+            .iter()
+            .zip(&buffered_emitted)
+            .all(|(low, buffered)| low >= buffered),
+        "low-latency never emits later: {low_latency_emitted:?} vs {buffered_emitted:?}"
     );
-    assert_ne!(display_order, got, "default reorders, low-latency does not");
-    eprintln!("m821 low-latency: {} frames in coding order", got.len());
+    assert!(
+        low_latency_emitted != buffered_emitted,
+        "low-latency emits some picture earlier: {low_latency_emitted:?}"
+    );
+    let display_order: Vec<Vec<u8>> = buffered_per_au.into_iter().flatten().collect();
+    let got: Vec<Vec<u8>> = low_latency_per_au.into_iter().flatten().collect();
+    assert!(
+        got == display_order,
+        "low-latency output is in display order"
+    );
 }
 
 /// Both construction-time properties are refused once the state they size is
@@ -432,6 +421,6 @@ fn construction_properties_are_refused_once_built() {
 fn the_properties_apply_on_a_real_decode_device() {
     device_index_selects_the_decode_gpu();
     num_dpb_slots_grows_the_dpb();
-    low_latency_emits_in_coding_order_one_frame_per_au();
+    low_latency_emits_display_order_earlier();
     construction_properties_are_refused_once_built();
 }

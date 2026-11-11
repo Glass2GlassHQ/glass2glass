@@ -119,6 +119,8 @@ pub struct NvDec {
     // the last access unit ended with an H.265 end of sequence NAL unit
     after_end_of_sequence: bool,
     vp9_outputs: PacketOutputs<ReadyFrame>,
+    vp9_coded_size: Option<(u32, u32)>,
+    vp9_awaiting_keyframe: bool,
     parameter_sets: LatestParameterSets,
     // NVDEC's parser forgets the parameter sets when a flush drains it
     resend_parameter_sets: bool,
@@ -235,9 +237,9 @@ struct Vp9PacketPlan {
     existing_slot: Option<u8>,
 }
 
-fn vp9_packet_plan(packet: &[u8]) -> Result<Vp9PacketPlan, G2gError> {
+fn vp9_packet_plan(frames: &[&[u8]]) -> Result<Vp9PacketPlan, G2gError> {
     let mut plan = Vp9PacketPlan::default();
-    for frame in superframe_frames(packet) {
+    for frame in frames {
         let Some(header) = frame_header(frame) else {
             g2g_error!(
                 Target::category(short_type_name::<NvDec>()),
@@ -251,6 +253,7 @@ fn vp9_packet_plan(packet: &[u8]) -> Result<Vp9PacketPlan, G2gError> {
                 shown,
                 intra,
                 refresh_slots,
+                ..
             } => {
                 plan.decodes.push_back(Vp9Decode {
                     refresh_slots,
@@ -399,6 +402,8 @@ impl NvDec {
             segment: Segment::new(),
             after_end_of_sequence: false,
             vp9_outputs: PacketOutputs::default(),
+            vp9_coded_size: None,
+            vp9_awaiting_keyframe: false,
             parameter_sets: LatestParameterSets::default(),
             resend_parameter_sets: false,
             last_caps: None,
@@ -703,23 +708,53 @@ impl NvDec {
         rewritten
     }
 
+    fn drop_vp9_frames_until_a_keyframe_after_a_size_change<'a>(
+        &mut self,
+        packet: &'a [u8],
+    ) -> Vec<&'a [u8]> {
+        // gst's nvvp9dec drops these too, NVDEC outputs broken frames after the size changes
+        let mut admitted = superframe_frames(packet);
+        admitted.retain(|frame| {
+            let Some(header) = frame_header(frame) else {
+                return true;
+            };
+            match header.kind {
+                Vp9FrameKind::Decoded {
+                    key_frame: true,
+                    coded_size,
+                    ..
+                } => {
+                    self.vp9_awaiting_keyframe = false;
+                    self.vp9_coded_size = coded_size.or(self.vp9_coded_size);
+                    true
+                }
+                Vp9FrameKind::Decoded { coded_size, .. } if !self.vp9_awaiting_keyframe => {
+                    let changes_size = coded_size
+                        .zip(self.vp9_coded_size)
+                        .is_some_and(|(coded, current)| coded != current);
+                    self.vp9_awaiting_keyframe = changes_size;
+                    !changes_size
+                }
+                _ => !self.vp9_awaiting_keyframe,
+            }
+        });
+        admitted
+    }
+
     // NVDEC's parser shows every shown frame of a superframe, never repeats a
     // show_existing_frame, and stamps frames after a hidden one with the wrong pts
     fn vp9_parse(
         &mut self,
-        packet: &[u8],
+        frames: &[&[u8]],
         pts_ns: u64,
         plan: Vp9PacketPlan,
     ) -> Result<Vec<ReadyFrame>, G2gError> {
         self.state.vp9_decodes = plan.decodes;
         // NVDEC rejects some superframes parsed whole, such as two hidden frames then a show_existing_frame
-        let displayed =
-            superframe_frames(packet)
-                .into_iter()
-                .try_fold(Vec::new(), |mut displayed, frame| {
-                    displayed.extend(self.parse(frame, pts_ns, false)?);
-                    Ok::<_, G2gError>(displayed)
-                });
+        let displayed = frames.iter().try_fold(Vec::new(), |mut displayed, frame| {
+            displayed.extend(self.parse(frame, pts_ns, false)?);
+            Ok::<_, G2gError>(displayed)
+        });
         // frames NVDEC skipped, such as those before the first keyframe, refresh no slot
         self.state.vp9_decodes.clear();
         let displayed = displayed?;
@@ -1799,17 +1834,25 @@ impl AsyncElement for NvDec {
                         .domain
                         .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
                     check_coding_tools(self.state.codec_cuvid, slice)?;
-                    let vp9_plan = (self.state.codec_cuvid == ffi::CUDA_VIDEO_CODEC_VP9)
-                        .then(|| vp9_packet_plan(slice))
-                        .transpose()?;
+                    let vp9_packet = if self.state.codec_cuvid == ffi::CUDA_VIDEO_CODEC_VP9 {
+                        let frames =
+                            self.drop_vp9_frames_until_a_keyframe_after_a_size_change(slice);
+                        if frames.is_empty() {
+                            return Ok(());
+                        }
+                        let plan = vp9_packet_plan(&frames)?;
+                        Some((frames, plan))
+                    } else {
+                        None
+                    };
                     let cra_as_bla = self.h265_cra_as_bla(slice);
                     let access_unit = cra_as_bla.as_deref().unwrap_or(slice);
                     let with_parameter_sets = self.restore_parameter_sets(access_unit);
                     let access_unit = with_parameter_sets.as_deref().unwrap_or(access_unit);
                     let pts_ns = frame.timing.pts_ns;
                     self.input_stamps.insert(pts_ns, InputStamp::of(&frame));
-                    let frames = match vp9_plan {
-                        Some(plan) => self.vp9_parse(access_unit, pts_ns, plan)?,
+                    let frames = match vp9_packet {
+                        Some((vp9_frames, plan)) => self.vp9_parse(&vp9_frames, pts_ns, plan)?,
                         None => self.parse(access_unit, pts_ns, false)?,
                     };
                     self.emit(frames, out).await?;
@@ -1836,6 +1879,8 @@ impl AsyncElement for NvDec {
                     drop(self.parse(&[], 0, true)?);
                     self.state.vp9_slots = [None; VP9_REFERENCE_SLOTS];
                     self.vp9_outputs = PacketOutputs::default();
+                    self.vp9_coded_size = None;
+                    self.vp9_awaiting_keyframe = false;
                     self.input_stamps = PendingInputStamps::default();
                     self.after_end_of_sequence = false;
                     self.last_caps = None;
@@ -2232,7 +2277,7 @@ mod tests {
         // frame_marker 2, profile 0, then show_existing_frame 1 and slot 6
         let show_existing = [0b1000_1110, 0];
         assert_eq!(
-            vp9_packet_plan(&show_existing),
+            vp9_packet_plan(&[&show_existing]),
             Ok(Vp9PacketPlan {
                 decodes: VecDeque::new(),
                 displays: 0,
@@ -2242,7 +2287,7 @@ mod tests {
         // frame_marker 2, profile 0, keyframe, shown, then the sync code
         let keyframe = [0b1000_0010, 0x49, 0x83, 0x42];
         assert_eq!(
-            vp9_packet_plan(&keyframe),
+            vp9_packet_plan(&[&keyframe]),
             Ok(Vp9PacketPlan {
                 decodes: VecDeque::from([Vp9Decode {
                     refresh_slots: 0xFF,
@@ -2252,7 +2297,7 @@ mod tests {
                 existing_slot: None,
             })
         );
-        assert_eq!(vp9_packet_plan(&[0]), Err(G2gError::CapsMismatch));
+        assert_eq!(vp9_packet_plan(&[&[0]]), Err(G2gError::CapsMismatch));
     }
 
     #[test]

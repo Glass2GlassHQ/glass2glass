@@ -14,7 +14,7 @@ use ivf::ivf_frames;
 
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
-use g2g_core::{AsyncElement, Caps, Dim, G2gError, RawVideoFormat};
+use g2g_core::{AsyncElement, Caps, Dim, RawVideoFormat};
 use g2g_plugins::ivfdemux::IvfDemux;
 use g2g_plugins::nvdec::NvDec;
 
@@ -25,7 +25,7 @@ const REPEATS_SHOWN_FRAMES: &[u8] = include_bytes!("fixtures/vp90-2-10-show-exis
 // a superframe of two hidden frames and a repeat, then a one-byte repeat
 const HIDDEN_FRAMES_THEN_A_REPEAT: &[u8] =
     include_bytes!("fixtures/vp90-2-10-show-existing-frame_3packets.ivf");
-// a 320x180 keyframe, then 640x360 and 1280x720 frames that predict from it
+// one packet: a 320x180 keyframe, then 640x360 and 1280x720 frames that predict from it
 const SPATIAL_LAYERS: &[u8] = include_bytes!("fixtures/vp90-2-22-svc_1280x720_3_1packet.ivf");
 const FRAME_PERIOD_NS: u64 = 33_333_333;
 
@@ -93,22 +93,49 @@ async fn nvdec_decodes_vp9() {
 }
 
 #[tokio::test]
-async fn nvdec_refuses_a_vp9_frame_that_outgrows_its_references() {
+async fn nvdec_drops_vp9_frames_that_change_size_until_the_next_keyframe() {
     let caps = IvfDemux::stream_caps(SPATIAL_LAYERS).expect("an IVF header");
     let mut decoder = NvDec::new();
     if decoder.configure_pipeline(&caps).is_err() {
         eprintln!("skipping: NVDEC unavailable on this host");
         return;
     }
-    let frames = ivf_frames(SPATIAL_LAYERS);
+    let layered = ivf_frames(SPATIAL_LAYERS);
     let mut sink = CollectSink::default();
-    let result = decoder
-        .process(
-            PipelinePacket::DataFrame(coded_frame(frames[0], 0)),
-            &mut sink,
-        )
-        .await;
-    assert_eq!(result, Err(G2gError::CapsMismatch));
+    for (index, bytes) in layered.iter().enumerate() {
+        decoder
+            .process(
+                PipelinePacket::DataFrame(coded_frame(bytes, index as u64)),
+                &mut sink,
+            )
+            .await
+            .expect("NVDEC drops the frames it cannot decode");
+    }
+    let resumed = ivf_frames(FIXTURE);
+    for (index, bytes) in resumed.iter().enumerate() {
+        let index = (layered.len() + index) as u64;
+        decoder
+            .process(
+                PipelinePacket::DataFrame(coded_frame(bytes, index)),
+                &mut sink,
+            )
+            .await
+            .expect("NVDEC decodes from the next keyframe");
+    }
+    decoder
+        .process(PipelinePacket::Eos, &mut sink)
+        .await
+        .expect("flush");
+    let decoded = sink
+        .packets
+        .iter()
+        .filter(|packet| matches!(packet, PipelinePacket::DataFrame(_)))
+        .count();
+    assert_eq!(
+        decoded,
+        layered.len() + resumed.len(),
+        "each packet shows one frame, the layered one its 320x180 base"
+    );
 }
 
 // the decoded frame count and the packet count, or None without NVDEC

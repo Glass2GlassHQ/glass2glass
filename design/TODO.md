@@ -178,18 +178,6 @@ libraries installed.
     (Vulkan, D3D12, NVDEC, VideoToolbox, Media Foundation, MediaCodec,
     openh264, ffmpegdec's `has_b_frames`). The runner queries latency once
     before the first frame, so a depth read from the SPS needs a later report.
-  - `low-latency` releases B-frame pictures in decode order. Output early only
-    when the order is provable, as gst's live bump mode does.
-  - `nvdec` fails on a VP9 inter frame larger than the first coded size. Drop
-    frames until the next keyframe and rebuild there.
-  - `nvdec` resends H.264 and H.265 parameter sets after a flush but not the
-    AV1 sequence header.
-  - H.264 `no_output_of_prior_pics_flag` is ignored (`discards_prior_pictures`
-    is always false).
-  - Missing H.265 RPS entries are compacted out of the Vulkan reference lists
-    instead of left in place. Check what the drivers expect.
-  - The `d3d12h264dec` flush test resumes on an IDR, which clears references by
-    itself. Resume on a recovery-point I picture.
 - **Decoder features:**
   - H.264 field pictures (PAFF) on `VulkanVideoDec` and `d3d12h264dec`.
   - Field-coded H.265 (`field_seq_flag`): an alternate-field interlace mode in

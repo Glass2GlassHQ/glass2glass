@@ -11886,6 +11886,7 @@ impl H265DpbDecoder {
             frame_num: 0,
             poc: order.pic_order_cnt,
             pic_output_flag: hdr.pic_output_flag,
+            is_reference: true,
             // a CRA starting a sequence infers NoOutputOfPriorPicsFlag 1 (C.5.2.2)
             discards_prior_pictures: starts_sequence
                 && (hdr.no_output_of_prior_pics_flag || hdr.is_cra()),
@@ -11947,7 +11948,7 @@ impl H265DpbDecoder {
         for r in self.refs.iter_mut().flatten() {
             r.is_long_term = false;
         }
-        let mut lt_resolved: alloc::vec::Vec<(usize, bool)> = alloc::vec::Vec::new();
+        let mut lt_resolved: alloc::vec::Vec<(Option<usize>, bool)> = alloc::vec::Vec::new();
         for e in &hdr.lt {
             let slot = if e.has_msb_cycle {
                 long_term_entry_poc(poc, e, max_lsb, hdr.slice_pic_order_cnt_lsb)
@@ -11957,12 +11958,10 @@ impl H265DpbDecoder {
                     |r| matches!(r, Some(rp) if rp.poc & (max_lsb - 1) == e.poc_lsb as i32),
                 )
             };
-            if let Some(s) = slot {
-                if let Some(rp) = self.refs[s].as_mut() {
-                    rp.is_long_term = true;
-                }
-                lt_resolved.push((s, e.used_by_curr));
+            if let Some(rp) = slot.and_then(|s| self.refs[s].as_mut()) {
+                rp.is_long_term = true;
             }
+            lt_resolved.push((slot, e.used_by_curr));
         }
 
         if hdr.is_irap && no_rasl_output {
@@ -11976,8 +11975,8 @@ impl H265DpbDecoder {
                 keep.push(poc + hdr.st_rps.delta_poc_s1[i]);
             }
             // Long-term-listed pictures are kept too (used-by-current or not).
-            for (s, _) in &lt_resolved {
-                if let Some(rp) = self.refs[*s] {
+            for s in lt_resolved.iter().filter_map(|(slot, _)| *slot) {
+                if let Some(rp) = self.refs[s] {
                     keep.push(rp.poc);
                 }
             }
@@ -11990,44 +11989,48 @@ impl H265DpbDecoder {
             }
         }
 
-        // The current reference slot lists (indices into the DPB). Only used-by-
-        // current entries populate them; unused entries stay 0xff (no picture).
-        let mut before = [0xffu8; 8];
-        let mut after = [0xffu8; 8];
-        if !hdr.is_irap {
-            let mut nb = 0usize;
-            for i in 0..hdr.st_rps.num_negative_pics as usize {
-                if hdr.st_rps.used_s0[i] {
-                    if let Some(slot) = self.slot_of_poc(poc + hdr.st_rps.delta_poc_s0[i]) {
-                        if nb < 8 {
-                            before[nb] = slot as u8;
-                            nb += 1;
-                        }
-                    }
+        // The current reference slot lists (indices into the DPB), one entry per
+        // used-by-current RPS entry. H.265 8.3.2 leaves a missing picture at its
+        // index as "no reference picture" (0xff), so the slices' reference indices
+        // still name the right entries after it.
+        let slot_list = |slots: alloc::vec::Vec<Option<usize>>| {
+            let mut list = [0xffu8; 8];
+            for (entry, slot) in list.iter_mut().zip(slots) {
+                if let Some(slot) = slot {
+                    *entry = slot as u8;
                 }
             }
-            let mut na = 0usize;
-            for i in 0..hdr.st_rps.num_positive_pics as usize {
-                if hdr.st_rps.used_s1[i] {
-                    if let Some(slot) = self.slot_of_poc(poc + hdr.st_rps.delta_poc_s1[i]) {
-                        if na < 8 {
-                            after[na] = slot as u8;
-                            na += 1;
-                        }
-                    }
-                }
-            }
-        }
-        let mut lt = [0xffu8; 8];
-        if !hdr.is_irap {
-            let mut nl = 0usize;
-            for (s, used) in &lt_resolved {
-                if *used && nl < 8 {
-                    lt[nl] = *s as u8;
-                    nl += 1;
-                }
-            }
-        }
+            list
+        };
+        let st_used_slots = |count: u8, used: &[bool], delta_poc: &[i32]| {
+            (0..usize::from(count))
+                .filter(|&i| used[i])
+                .map(|i| self.slot_of_poc(poc + delta_poc[i]))
+                .collect::<alloc::vec::Vec<_>>()
+        };
+        let (before, after, lt) = if hdr.is_irap {
+            ([0xffu8; 8], [0xffu8; 8], [0xffu8; 8])
+        } else {
+            (
+                slot_list(st_used_slots(
+                    hdr.st_rps.num_negative_pics,
+                    &hdr.st_rps.used_s0,
+                    &hdr.st_rps.delta_poc_s0,
+                )),
+                slot_list(st_used_slots(
+                    hdr.st_rps.num_positive_pics,
+                    &hdr.st_rps.used_s1,
+                    &hdr.st_rps.delta_poc_s1,
+                )),
+                slot_list(
+                    lt_resolved
+                        .iter()
+                        .filter(|(_, used)| *used)
+                        .map(|(slot, _)| *slot)
+                        .collect(),
+                ),
+            )
+        };
 
         // Active references = every slot holding a picture after the prune.
         let active: alloc::vec::Vec<(usize, H265RefPic)> = self
@@ -14540,12 +14543,11 @@ pub struct VulkanVideoDec {
     /// AV1's texture path needs none: its display order is the op order.
     reorder_tex: ReorderBuffer<(FrameTiming, wgpu::Texture)>,
     /// The reorder depth the current stream asks for (`ensure_decoder` derives it
-    /// from the parameter sets). `low_latency` overrides the buffers' `max_hold`
-    /// to 0; this keeps the stream's own value so turning it back off restores it.
+    /// from the parameter sets).
     reorder_hold: usize,
-    /// `low-latency` property: emit each picture as soon as it is decoded, in
-    /// coding order, instead of holding it for display-order reordering. Also
-    /// drains the decode ring per access unit, so a frame in is a frame out.
+    /// `low-latency` property: emit each picture as soon as its display position
+    /// is certain, by gst's low-latency bump rules. Also drains the decode ring
+    /// per access unit, so a frame in is a frame out.
     low_latency: bool,
     /// `device-index` property: which decode-capable Vulkan adapter to open, or
     /// `None` for the default pick. Read once, at `configure_pipeline`.
@@ -14703,18 +14705,14 @@ impl VulkanVideoDec {
         }
     }
 
-    /// Point both display-order buffers at the current hold depth: the stream's
-    /// own reorder bound, or 0 under `low-latency` (every picture releases as it
-    /// arrives, in coding order). Cheap enough to re-apply whenever either input
+    /// Point both display-order buffers at the stream's own reorder bound and
+    /// the `low-latency` setting. Cheap enough to re-apply whenever either input
     /// changes, including mid-stream.
     fn apply_reorder_hold(&mut self) {
-        let hold = if self.low_latency {
-            0
-        } else {
-            self.reorder_hold
-        };
-        self.reorder.max_hold = hold;
-        self.reorder_tex.max_hold = hold;
+        self.reorder.max_hold = self.reorder_hold;
+        self.reorder.low_latency = self.low_latency;
+        self.reorder_tex.max_hold = self.reorder_hold;
+        self.reorder_tex.low_latency = self.low_latency;
     }
 
     /// The pixel formats the decoder can emit on the resolved output domain, in
@@ -15092,6 +15090,7 @@ impl VulkanVideoDec {
                     frame_num: 0,
                     poc: 0,
                     pic_output_flag: true,
+                    is_reference: true,
                     discards_prior_pictures: false,
                     dpb: None,
                 },
@@ -15756,7 +15755,7 @@ static VULKANVIDEODEC_PROPS: &[PropertySpec] = &[
     PropertySpec::new(
         "low-latency",
         PropKind::Bool,
-        "emit each picture as it decodes, in coding order (no display reorder)",
+        "emit each picture as soon as its display position is certain, as gst's low-latency bump mode does",
     ),
     PropertySpec::new(
         "device-index",
@@ -17485,9 +17484,27 @@ mod tests {
         assert!(order.memory_reset);
         let meta = h264_picture_meta(&reset, &order);
         assert!(meta.is_keyframe, "it starts a new output group");
+        assert!(
+            !meta.discards_prior_pictures,
+            "a memory reset outputs the pictures before it"
+        );
         assert_eq!(order.field_order_counts, [RESET_FRAME_POC_LSB as i32; 2]);
         assert_eq!(order.stored_field_order_counts, [0, 0]);
         assert_eq!(meta.poc, 0);
+    }
+
+    #[test]
+    fn h264_idr_with_no_output_of_prior_pics_discards_the_pictures_before_it() {
+        let sps = test_sps(TestSps {
+            max_num_ref_frames: 1,
+            ..TestSps::default()
+        });
+        let mut idr = idr_slice(&sps);
+        assert!(!h264_picture_meta(&idr, &plain_order()).discards_prior_pictures);
+        let mut marking = idr.ref_pic_marking.expect("the IDR's marking was parsed");
+        marking.no_output_of_prior_pics = true;
+        idr.ref_pic_marking = Some(marking);
+        assert!(h264_picture_meta(&idr, &plain_order()).discards_prior_pictures);
     }
 
     fn plain_order() -> H264PictureOrder {

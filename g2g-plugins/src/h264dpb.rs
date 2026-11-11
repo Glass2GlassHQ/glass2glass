@@ -462,7 +462,12 @@ pub(crate) fn h264_picture_meta(header: &H264SliceHeader, order: &H264PictureOrd
         frame_num: header.frame_num,
         poc: top.min(bottom),
         pic_output_flag: true,
-        discards_prior_pictures: false,
+        is_reference: header.nal_ref_idc != 0,
+        // H.264 C.4.4: an IDR with this flag empties the DPB without output
+        discards_prior_pictures: header.is_idr
+            && header
+                .ref_pic_marking
+                .is_some_and(|marking| marking.no_output_of_prior_pics),
         dpb: None,
     }
 }
