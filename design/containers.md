@@ -107,6 +107,12 @@ them as LATM. On LATM it drops frames until one carries a StreamMuxConfig it can
 read, so no frame goes out before its caps, and fails with `CapsMismatch` at EOS
 when none did, as gst's `aacparse` fails with "No valid frames found".
 
+`amrparse` splits an AMR-NB or AMR-WB storage file (`#!AMR\n` or `#!AMR-WB\n`)
+into frames sized by each frame's TOC byte, carried as the `samr` / `sawb`
+`AudioFormat::Tagged` caps an MP4 track has. It sends an MP4 sample entry ahead
+of the first frame, since `ffmpegaudiodec` opens a tagged stream on one. Input
+that does not open on the magic, an MP4 track's samples, passes through.
+
 ## Uncompressed video in containers
 
 `avidemux`, `matroskademux` and `qtdemux` emit an uncompressed video stream as

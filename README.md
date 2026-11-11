@@ -708,7 +708,7 @@ switch device while playing and take `continue-on-error`.
 | Group | Elements |
 | :--- | :--- |
 | Container demuxers and muxers | `qtdemux` / `mp4mux`, `tsdemux` / `mpegtsmux` (188, 192 and 204-byte packets in, constant bitrate out), `matroskademux` / `matroskamux`, `flvdemux` / `flvmux` / `eflvmux` (Enhanced RTMP multitrack audio), `oggdemux` / `oggmux`, `avidemux` / `avimux`, `fmp4demux`, `mpegpsdemux`, `multipartdemux` / `multipartmux`, `y4mdec` / `y4menc`, `aiffparse` / `aiffmux`, `auparse` / `avmux_au` |
-| Bitstream parsers | `h264parse`, `h265parse`, `aacparse`, `mpegaudioparse` + `id3demux` / `apedemux`, `ac3parse`, `opusparse`, `vp8parse`, `vp9parse`, `av1parse`, `jpegparse`, `pngparse` |
+| Bitstream parsers | `h264parse`, `h265parse`, `aacparse`, `mpegaudioparse` + `id3demux` / `apedemux`, `ac3parse`, `amrparse`, `opusparse`, `vp8parse`, `vp9parse`, `av1parse`, `jpegparse`, `pngparse` |
 | Headerless framers | `rawvideoparse` / `rawaudioparse`: a `.yuv` / `.pcm` dump cut into buffers from declared properties |
 | Audio codecs | G.711 `mulawenc` / `mulawdec`, `alawenc` / `alawdec`, IMA ADPCM `adpcmenc` / `adpcmdec` |
 | Video transforms | `videoscale`, `videorate`, `imagefreeze`, `videocrop`, `videoflip`, `videobalance`, `videobox`, `colorspace`, `alpha`, `gamma`, `deinterlace`, `timeoverlay`, `aspectratiocrop`, `gaussianblur`, `videomedian`, `smooth`, `coloreffects`, `chromahold`, `zebrastripe`, `videodiff`, `solarize`, `chromium`, `dilate`, `dodge`, `exclusion`, `burn` |

@@ -69,6 +69,18 @@ pub(crate) const WEBP_MAGIC: [u8; 4] = *b"WEBP";
 /// YUV4MPEG2 (`.y4m`) stream signature, the separating space included so a file
 /// that merely starts with the word does not match.
 const Y4M_MAGIC: [u8; 10] = *b"YUV4MPEG2 ";
+// RFC 4867 section 5: a single-channel AMR storage file opens on one of these
+pub(crate) const AMR_NB_MAGIC: &[u8] = b"#!AMR\n";
+pub(crate) const AMR_WB_MAGIC: &[u8] = b"#!AMR-WB\n";
+// the sample entry fourccs MP4 stores AMR under, which libavformat's MOV table decodes
+pub(crate) const AMR_NB_TAG: g2g_core::CodecTag = g2g_core::CodecTag {
+    namespace: g2g_core::TagNamespace::Mov,
+    tag: u32::from_le_bytes(*b"samr"),
+};
+pub(crate) const AMR_WB_TAG: g2g_core::CodecTag = g2g_core::CodecTag {
+    namespace: g2g_core::TagNamespace::Mov,
+    tag: u32::from_le_bytes(*b"sawb"),
+};
 /// PNG signature (ISO/IEC 15948 5.2): the 8 bytes every PNG opens with.
 const PNG_MAGIC: [u8; 8] = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
 
@@ -121,6 +133,12 @@ pub fn sniff_caps(header: &[u8]) -> Option<Caps> {
         .unwrap_or_default();
     if behind_id3v2.starts_with(b"fLaC") {
         return Some(elementary_audio_caps(AudioFormat::Flac));
+    }
+    if header.starts_with(AMR_NB_MAGIC) {
+        return Some(elementary_audio_caps(AudioFormat::Tagged(AMR_NB_TAG)));
+    }
+    if header.starts_with(AMR_WB_MAGIC) {
+        return Some(elementary_audio_caps(AudioFormat::Tagged(AMR_WB_TAG)));
     }
     if let Some(codec) = sniff_still_image(header) {
         return Some(elementary_video_caps(codec));

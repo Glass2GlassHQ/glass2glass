@@ -419,7 +419,7 @@ unless it says otherwise.
 - **Audio decoders:** `speexdec`, `wavpackdec`, `gsmdec`, `amrnbdec` / `amrwbdec`,
   `sbcdec`, `lc3dec`, `musepackdec`, `sfdec`, `gmedec` / `openmptdec` / `modplug`,
   `dvdlpcmdec`, `dsdconvert`, `sirendec` / `isacdec`.
-- **Audio parsers:** `amrparse`, `dcaparse`, `sbcparse`, `wavpackparse`,
+- **Audio parsers:** `dcaparse`, `sbcparse`, `wavpackparse`,
   `vorbisparse`, `theoraparse`, `icydemux` (SHOUTcast metadata in `httpsrc`).
 - **Audio filters:** `audiointerleave`, `audiolatency`, `rganalysis` /
   `rgvolume` / `rglimiter`, `bs2b`, `freeverb`, `pitch` / `bpmdetect`,

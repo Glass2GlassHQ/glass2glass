@@ -67,7 +67,10 @@ pub(crate) fn fuzz_process<E: g2g_core::AsyncElement>(
 pub mod aacparse;
 // IMA ADPCM codec elements (M1073), wrapping the heap-free `g2g-mcu` block math.
 pub mod ac3parse;
+// AMR storage files split into frames for the libavcodec AMR decoders
 pub mod adpcm;
+#[cfg(feature = "std")]
+pub mod amrparse;
 // Native FLAC stream parser (M774): frame-splits a `.flac` byte stream (the
 // re-framing `h264parse` analog for audio) and refines caps from STREAMINFO.
 pub mod flacparse;

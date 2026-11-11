@@ -110,6 +110,27 @@ pub(crate) fn unpacked_mdhd_language(packed: u16) -> Option<String> {
 
 // --- writers ---------------------------------------------------------------
 
+/// An `AudioSampleEntry` box (`mp4a` / `Opus`): the shared sample-entry header
+/// then the codec-specific config box (`esds` / `dOps`).
+pub(crate) fn audio_sample_entry(
+    fourcc: &[u8; 4],
+    channels: u8,
+    rate: u32,
+    config: &[u8],
+) -> Vec<u8> {
+    let mut p = Vec::new();
+    p.extend_from_slice(&[0u8; 6]); // reserved
+    p.extend_from_slice(&1u16.to_be_bytes()); // data reference index
+    p.extend_from_slice(&[0u8; 8]); // reserved
+    p.extend_from_slice(&(channels as u16).to_be_bytes());
+    p.extend_from_slice(&16u16.to_be_bytes()); // sample size
+    p.extend_from_slice(&0u16.to_be_bytes()); // pre_defined
+    p.extend_from_slice(&0u16.to_be_bytes()); // reserved
+    p.extend_from_slice(&(rate << 16).to_be_bytes()); // 16.16 sample rate
+    p.extend_from_slice(config);
+    mp4_box(fourcc, &p)
+}
+
 /// A size-prefixed box: `[u32 size][4cc kind][payload]`.
 pub(crate) fn mp4_box(kind: &[u8; 4], payload: &[u8]) -> Vec<u8> {
     let mut b = Vec::with_capacity(BOX_HEADER_LEN + payload.len());

@@ -40,6 +40,7 @@ use crate::ac3parse::Ac3Parse;
 use crate::adpcm::{AdpcmDec, AdpcmEnc};
 use crate::aiff::{AiffMux, AiffParse};
 use crate::alpha::Alpha;
+use crate::amrparse::AmrParse;
 use crate::apedemux::ApeDemux;
 use crate::au::{AuMux, AuParse};
 use crate::audioconvert::AudioConvert;
@@ -321,6 +322,12 @@ fn decode_parser_provider(input: &Caps) -> Option<&'static str> {
             format: AudioFormat::Ac3,
             ..
         } => Some("ac3parse"),
+        Caps::Audio {
+            format: AudioFormat::Tagged(tag),
+            ..
+        } if [crate::typefind::AMR_NB_TAG, crate::typefind::AMR_WB_TAG].contains(tag) => {
+            Some("amrparse")
+        }
         Caps::CompressedVideo {
             codec: g2g_core::VideoCodec::Mjpeg,
             ..
@@ -1378,6 +1385,9 @@ pub fn default_registry() -> Registry {
     reg.register_launch(LaunchFactory::of::<Ac3Parse>("ac3parse", || {
         Box::new(Ac3Parse::new())
     }));
+    reg.register_launch(LaunchFactory::of::<AmrParse>("amrparse", || {
+        Box::new(AmrParse::new())
+    }));
     // Still-image framers (M1087): a JPEG / PNG byte stream into whole images,
     // which is what `mjpegdec` / `pngdec` need (they take one image per buffer).
     reg.register_launch(LaunchFactory::of::<JpegParse>("jpegparse", || {
@@ -2118,6 +2128,9 @@ fn register_autoplug_candidates(reg: &mut Registry) {
     ));
     reg.register(ElementFactory::of::<Ac3Parse>("ac3parse", |_| {
         Box::new(Ac3Parse::new())
+    }));
+    reg.register(ElementFactory::of::<AmrParse>("amrparse", |_| {
+        Box::new(AmrParse::new())
     }));
     reg.register(ElementFactory::of::<AacParse>("aacparse", |_| {
         Box::new(AacParse::new())

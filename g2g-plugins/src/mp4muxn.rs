@@ -60,8 +60,9 @@ use crate::fmp4mux::{
 use crate::livemux::{wall_clock_ns, LiveMuxDeadline, LIVE_MUX_LATENCY_PROPERTY};
 use crate::mp4audiosink::esds;
 use crate::mp4box::{
-    ftyp, ftyp_cmaf, full_box, mp4_box, orientation_matrix, packed_mdhd_language, prft,
-    put_box_header, styp_cmaf, udta_with_tags, BOX_HEADER_LEN, MATRIX, UNDETERMINED_MDHD_LANGUAGE,
+    audio_sample_entry, ftyp, ftyp_cmaf, full_box, mp4_box, orientation_matrix,
+    packed_mdhd_language, prft, put_box_header, styp_cmaf, udta_with_tags, BOX_HEADER_LEN, MATRIX,
+    UNDETERMINED_MDHD_LANGUAGE,
 };
 use crate::mux::{
     audio_header_config, audio_track_params, every_track_header_ready, refused_input,
@@ -1904,22 +1905,6 @@ fn vp9_vpcc_record(
         0,
         0,
     ])
-}
-
-/// An `AudioSampleEntry` box (`mp4a` / `Opus`): the shared sample-entry header
-/// then the codec-specific config box (`esds` / `dOps`).
-fn audio_sample_entry(fourcc: &[u8; 4], channels: u8, rate: u32, config: &[u8]) -> Vec<u8> {
-    let mut p = Vec::new();
-    p.extend_from_slice(&[0u8; 6]); // reserved
-    p.extend_from_slice(&1u16.to_be_bytes()); // data reference index
-    p.extend_from_slice(&[0u8; 8]); // reserved
-    p.extend_from_slice(&(channels as u16).to_be_bytes());
-    p.extend_from_slice(&16u16.to_be_bytes()); // sample size
-    p.extend_from_slice(&0u16.to_be_bytes()); // pre_defined
-    p.extend_from_slice(&0u16.to_be_bytes()); // reserved
-    p.extend_from_slice(&(rate << 16).to_be_bytes()); // 16.16 sample rate
-    p.extend_from_slice(config);
-    mp4_box(fourcc, &p)
 }
 
 /// The `dOps` OpusSpecificBox (RFC 8316): the Opus init data in an MP4 audio

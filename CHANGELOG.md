@@ -144,6 +144,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M2228: `mp4mux` and the MP4 demuxers carry track language and `Tag::ImageOrientation`, as gst's `image-orientation`.
 - M2229: `av1parse` and `typefind` read Annex B AV1 and convert it to the OBU stream.
 - M2230: `udpsrc` depayloads RFC 3640 AAC from an `mpeg4-generic` SDP.
+- M2231: `amrparse` splits AMR-NB and AMR-WB storage files into frames, and `typefind` detects them.
 
 Breaking: `TimecodeMeta.frames` is a `u16`, `WIRE_VERSION` is 6, `FrameTiming` gains `start_discard_ns` and `end_discard_ns`, `RtpRecvConfig` gains `parameter_sets`, `RtmpPublisher::push` fails with a `PublishRefusal`, and `Interlace` gains `InterleavedBottomFieldFirst`.
 
