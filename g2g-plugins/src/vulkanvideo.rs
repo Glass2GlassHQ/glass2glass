@@ -750,6 +750,8 @@ const MALFORMED_H265_SPS: VulkanVideoError = VulkanVideoError::StreamRefused("ma
 const MALFORMED_H265_PPS: VulkanVideoError = VulkanVideoError::StreamRefused("malformed H.265 PPS");
 const MALFORMED_H265_SLICE_HEADER: VulkanVideoError =
     VulkanVideoError::StreamRefused("malformed H.265 slice segment header");
+const MISSING_H265_PARAMETER_SET: VulkanVideoError =
+    VulkanVideoError::StreamRefused("H.265 slice names a VPS, SPS or PPS the stream never sent");
 // the decode sessions are created for the Main and Main 10 profiles only
 const H265_MAIN_CHROMA_FORMAT_IDC: u32 = 1;
 const H265_MAX_BIT_DEPTH_MINUS8: u32 = 2;
@@ -1173,15 +1175,18 @@ impl H265ParameterSetTable {
 
     /// The PPS a slice selects with the SPS and VPS it names.
     fn active(&self, pps_pic_parameter_set_id: u8) -> Result<H265ParameterSets, VulkanVideoError> {
-        const MISSING: VulkanVideoError = VulkanVideoError::StreamRefused(
-            "H.265 slice names a VPS, SPS or PPS the stream never sent",
-        );
-        let pps = self.pps.get(&pps_pic_parameter_set_id).ok_or(MISSING)?;
-        let sps = self.sps.get(&pps.pps_seq_parameter_set_id).ok_or(MISSING)?;
+        let pps = self
+            .pps
+            .get(&pps_pic_parameter_set_id)
+            .ok_or(MISSING_H265_PARAMETER_SET)?;
+        let sps = self
+            .sps
+            .get(&pps.pps_seq_parameter_set_id)
+            .ok_or(MISSING_H265_PARAMETER_SET)?;
         let vps = self
             .vps
             .get(&sps.sps_video_parameter_set_id)
-            .ok_or(MISSING)?;
+            .ok_or(MISSING_H265_PARAMETER_SET)?;
         // decodes wrong here (JCT-VC WPP_D), so it is refused
         if pps.entropy_coding_sync_enabled_flag == 1 && sps.picture_width_in_ctbs() == 1 {
             return Err(VulkanVideoError::StreamRefused(
@@ -14509,6 +14514,7 @@ pub struct VulkanVideoDec {
     /// GPU-texture path, which stays synchronous (one picture in, its frames out).
     pending_timings: alloc::collections::VecDeque<FrameTiming>,
     input_stamps: PendingInputStamps,
+    recovery: crate::decoderecovery::DecodeErrorRecovery,
     /// A mid-stream reconfig (`ensure_decoder` rebuilding for a new resolution)
     /// flushes the OUTGOING decoder's pipelined tail here before it drops, so those
     /// frames are not lost; `process` emits them (against the old geometry) before
@@ -14681,6 +14687,7 @@ impl VulkanVideoDec {
             emit_wgpu: false,
             pending_timings: alloc::collections::VecDeque::new(),
             input_stamps: PendingInputStamps::default(),
+            recovery: crate::decoderecovery::DecodeErrorRecovery::default(),
             reconfig_tail: alloc::vec::Vec::new(),
             reorder_enabled: false,
             pending_meta: alloc::collections::VecDeque::new(),
@@ -15293,6 +15300,15 @@ impl PadTemplates for VulkanVideoDec {
     }
 }
 
+fn is_stream_damage(error: &VulkanVideoError) -> bool {
+    const H265_DAMAGE_REFUSALS: [VulkanVideoError; 2] =
+        [MALFORMED_H265_SLICE_HEADER, MISSING_H265_PARAMETER_SET];
+    H265_DAMAGE_REFUSALS.contains(error)
+        || crate::h264dpb::H264_DAMAGE_REFUSALS
+            .iter()
+            .any(|&refused| *error == VulkanVideoError::from(refused))
+}
+
 impl AsyncElement for VulkanVideoDec {
     type ProcessFuture<'a>
         = core::pin::Pin<
@@ -15489,6 +15505,10 @@ impl AsyncElement for VulkanVideoDec {
         }
     }
 
+    fn take_reconfigure(&mut self) -> Option<g2g_core::Reconfigure> {
+        self.recovery.take_keyframe_request()
+    }
+
     fn process<'a>(
         &'a mut self,
         packet: PipelinePacket,
@@ -15503,6 +15523,13 @@ impl AsyncElement for VulkanVideoDec {
                     let src_timing = frame.timing;
                     if !self.ensure_decoder(au)? {
                         // No SPS/PPS yet (a leading non-keyframe AU); skip it.
+                        return Ok(());
+                    }
+                    let codec = self.codec;
+                    if !self
+                        .recovery
+                        .admits(|| crate::annexb::au_is_keyframe(codec, au))
+                    {
                         return Ok(());
                     }
                     self.input_stamps
@@ -15552,12 +15579,18 @@ impl AsyncElement for VulkanVideoDec {
                             // texture analog of the system path (a keyframe also
                             // releases the previous sequence, so a reconfig's
                             // old-geometry stragglers emit first).
-                            let (metas, textures) = self
-                                .decoder
-                                .as_mut()
-                                .expect("decoder built")
-                                .decode_push_to_textures(au)
-                                .map_err(decode_refused)?;
+                            let decoder = self.decoder.as_mut().expect("decoder built");
+                            let (metas, textures) = match decoder.decode_push_to_textures(au) {
+                                Ok(decoded) => decoded,
+                                Err(error) if is_stream_damage(&error) => {
+                                    self.recovery.failed().map_err(|_| decode_refused(error))?;
+                                    decoder.reset();
+                                    self.input_stamps.take(src_timing.pts_ns);
+                                    return Ok(());
+                                }
+                                Err(error) => return Err(decode_refused(error)),
+                            };
+                            self.recovery.decoded();
                             let mut ready = alloc::vec::Vec::new();
                             for (meta, tex) in metas.into_iter().zip(textures) {
                                 let release = self.reorder_tex.push(&meta, (src_timing, tex));
@@ -15578,12 +15611,20 @@ impl AsyncElement for VulkanVideoDec {
                     // is queued so the retired frame (which belongs to an earlier
                     // AU) is re-paired with its own and placed in display order.
                     if self.reorder_enabled {
-                        let (metas, mut decoded) = self
-                            .decoder
-                            .as_mut()
-                            .expect("decoder built")
-                            .decode_push_meta(au)
-                            .map_err(decode_refused)?;
+                        let decoder = self.decoder.as_mut().expect("decoder built");
+                        let (metas, mut decoded) = match decoder.decode_push_meta(au) {
+                            Ok(decoded) => decoded,
+                            Err(error) if is_stream_damage(&error) => {
+                                self.recovery.failed().map_err(|_| decode_refused(error))?;
+                                // pictures already in the decode ring decoded fine
+                                let in_flight = decoder.decode_flush().map_err(decode_refused)?;
+                                decoder.reset();
+                                self.input_stamps.take(src_timing.pts_ns);
+                                return self.emit_reordered(in_flight, out).await;
+                            }
+                            Err(error) => return Err(decode_refused(error)),
+                        };
+                        self.recovery.decoded();
                         for meta in metas {
                             self.pending_meta.push_back((src_timing, meta));
                         }
@@ -15689,6 +15730,7 @@ impl AsyncElement for VulkanVideoDec {
                     self.pending_meta.clear();
                     self.reorder.reset();
                     self.reorder_tex.reset();
+                    self.recovery = crate::decoderecovery::DecodeErrorRecovery::default();
                     self.last_caps = None;
                     out.push(PipelinePacket::Flush).await?;
                     Ok(())
@@ -17545,6 +17587,37 @@ mod tests {
         );
         mark(&mut references, &unmark, &plain_order());
         assert_eq!(held_frame_nums(&references), [(4, None)]);
+    }
+
+    #[test]
+    fn h264_an_mmco_naming_a_missing_picture_still_leaves_room() {
+        const MAX_NUM_REF_FRAMES: u32 = 2;
+        // picNum frame_num - 6, which the DPB never held
+        const MISSING_PICTURE_DIFFERENCE: u32 = 5;
+        let sps = test_sps(TestSps {
+            max_num_ref_frames: MAX_NUM_REF_FRAMES,
+            ..TestSps::default()
+        });
+        let mut references = H264References::new(3, MAX_NUM_REF_FRAMES as usize);
+        mark(&mut references, &idr_slice(&sps), &plain_order());
+        mark(
+            &mut references,
+            &reference_slice(&sps, 1, TestMarking::SlidingWindow),
+            &plain_order(),
+        );
+        let broken = reference_slice(
+            &sps,
+            2,
+            TestMarking::Adaptive(&[(MMCO_SHORT_TERM_UNUSED, &[MISSING_PICTURE_DIFFERENCE])]),
+        );
+        mark(&mut references, &broken, &plain_order());
+        assert_eq!(held_frame_nums(&references), [(1, None), (2, None)]);
+        mark(
+            &mut references,
+            &reference_slice(&sps, 3, TestMarking::SlidingWindow),
+            &plain_order(),
+        );
+        assert_eq!(held_frame_nums(&references), [(2, None), (3, None)]);
     }
 
     #[test]

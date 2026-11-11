@@ -174,12 +174,6 @@ libraries installed.
   that the HEVC Video Extensions are missing.
 - **Decoder robustness** (gst commit sweep 2020-11 to 2023-11, reports in
   `~/tmp/gst-sweep` on the dev box):
-  - `VulkanVideoDec` and `d3d12h264dec` end the pipeline on one malformed
-    slice, unknown PPS or full DPB. Count errors against a limit, drop until
-    the next keyframe and send `Reconfigure::ForceKeyframe` upstream.
-  - `H264References` frees at most one short-term reference per picture, so an
-    MMCO naming a picture the DPB lacks leaves every slot full and the next
-    picture fails with `DPB_FULL`. Trim to `max_num_ref_frames` after marking.
   - Report the reorder depth times the frame duration as decoder latency
     (Vulkan, D3D12, NVDEC, VideoToolbox, Media Foundation, MediaCodec,
     openh264, ffmpegdec's `has_b_frames`). The runner queries latency once

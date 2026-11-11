@@ -4,6 +4,8 @@
 
 #![cfg(all(target_os = "windows", feature = "d3d12-decode"))]
 
+#[path = "common/annexb.rs"]
+mod annexb;
 mod decode_ref;
 
 use g2g_core::frame::Frame;
@@ -12,7 +14,7 @@ use g2g_core::runtime::block_on;
 use g2g_core::{
     AllocationParams, AsyncElement, BitstreamAlignment, Caps, Colorimetry, Dim, FrameTiming,
     G2gError, MemoryDomain, OutputSink, PipelinePacket, PixelAspect, PushOutcome, Rate,
-    RawVideoFormat, VideoCodec,
+    RawVideoFormat, Reconfigure, VideoCodec,
 };
 use g2g_plugins::d3d12videodec::{
     open_d3d12_decode_device, D3D12H264Dec, D3D12H264Decoder, D3D12VideoError,
@@ -51,6 +53,12 @@ const HIGH10: Fixture = Fixture {
     name: "h264_high10_320x240.h264",
     stream: include_bytes!("fixtures/h264_high10_320x240.h264"),
     picture: (320, 240),
+};
+// IDR P P P P, IDR P P P P
+const TWO_GOPS: Fixture = Fixture {
+    name: "h264_640x480.h264",
+    stream: include_bytes!("fixtures/h264_640x480.h264"),
+    picture: (640, 480),
 };
 const EIGHT_BIT: u8 = 8;
 // the render target quantizes the shader's float result differently per NV12 layout
@@ -421,4 +429,87 @@ fn decodebin_offers_it_for_h264_on_a_d3d12_gpu() {
         return;
     }
     assert!(D3D12H264Dec::accepts_input(&h264_caps(BFRAMES.picture)));
+}
+
+struct AccessUnitDecode {
+    pictures: Vec<Vec<u8>>,
+    keyframe_requests: Vec<usize>,
+}
+
+fn decode_access_units(access_units: Vec<Vec<u8>>) -> AccessUnitDecode {
+    let mut decoder = D3D12H264Dec::new();
+    decoder.configure_allocation(&AllocationParams {
+        size_bytes: 0,
+        min_buffers: 1,
+        align: 1,
+        domain: MemoryDomainKind::System,
+        accepts: DomainSet::only(MemoryDomainKind::System),
+        ..Default::default()
+    });
+    decoder
+        .configure_pipeline(&h264_caps(TWO_GOPS.picture))
+        .expect("configure opens the decode device");
+    let mut collect = Collect::default();
+    let mut keyframe_requests = Vec::new();
+    for (index, access_unit) in access_units.iter().enumerate() {
+        let mut frame = system_frame(access_unit);
+        frame.timing.pts_ns = index as u64 * 33_000_000;
+        block_on(decoder.process(PipelinePacket::DataFrame(frame), &mut collect))
+            .expect("decode access unit");
+        if decoder.take_reconfigure() == Some(Reconfigure::ForceKeyframe) {
+            keyframe_requests.push(index);
+        }
+    }
+    block_on(decoder.process(PipelinePacket::Eos, &mut collect)).expect("eos drains the reorder");
+    let pictures = collect
+        .into_frames()
+        .iter()
+        .map(|frame| {
+            frame
+                .domain
+                .as_system_slice()
+                .expect("system frame")
+                .to_vec()
+        })
+        .collect();
+    AccessUnitDecode {
+        pictures,
+        keyframe_requests,
+    }
+}
+
+#[test]
+fn a_damaged_access_unit_drops_pictures_to_the_next_keyframe_and_asks_for_one() {
+    const DAMAGED_ACCESS_UNIT: usize = 2;
+    const SECOND_KEYFRAME: usize = 5;
+    // a P slice NAL header with no slice header after it
+    const TRUNCATED_SLICE: &[u8] = &[0x00, 0x00, 0x00, 0x01, 0x41];
+    let _gpu = gpu_lock();
+    if let Some(reason) = skip_reason() {
+        eprintln!("skipping: {reason}");
+        return;
+    }
+    let access_units = annexb::access_units(TWO_GOPS.stream);
+    let clean = decode_access_units(access_units.clone());
+    assert_eq!(clean.pictures.len(), access_units.len());
+    assert!(clean.keyframe_requests.is_empty());
+
+    let mut damaged_units = access_units;
+    damaged_units[DAMAGED_ACCESS_UNIT] = TRUNCATED_SLICE.to_vec();
+    let damaged = decode_access_units(damaged_units);
+
+    let expected: Vec<&Vec<u8>> = clean.pictures[..DAMAGED_ACCESS_UNIT]
+        .iter()
+        .chain(&clean.pictures[SECOND_KEYFRAME..])
+        .collect();
+    assert_eq!(damaged.pictures.len(), expected.len());
+    assert!(
+        damaged
+            .pictures
+            .iter()
+            .zip(expected)
+            .all(|(got, want)| got == want),
+        "the pictures around the gap match a clean decode"
+    );
+    assert_eq!(damaged.keyframe_requests, [DAMAGED_ACCESS_UNIT]);
 }

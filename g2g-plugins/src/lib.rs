@@ -183,6 +183,15 @@ pub mod fallbackswitch;
     all(target_os = "windows", feature = "d3d12-decode")
 ))]
 mod displayorder;
+// Keeps a hardware decoder going through damaged access units, as gst's videodecoder does.
+#[cfg(any(
+    all(
+        any(target_os = "linux", target_os = "windows"),
+        feature = "vulkan-video"
+    ),
+    all(target_os = "windows", feature = "d3d12-decode")
+))]
+mod decoderecovery;
 #[cfg(feature = "std")]
 pub mod fallbacksrc;
 // Decoded-GOP reverser (M897): the presentation half of reverse playback.

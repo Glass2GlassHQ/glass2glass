@@ -178,6 +178,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M2262: an SDP rtpmap clock rate of 0 takes the encoding's default rate.
 - M2263: `rtspclientsink` puts the stream control ahead of the URL's query, and `rtspserversrc` accepts a SETUP with the query after it.
 - M2264: `rtspserversink` stops sending on PAUSE, starts each player on a keyframe, and drops a TCP player that stops reading for 2 s.
+- M2265: H.264 reference marking trims the DPB to `max_num_ref_frames` after an MMCO that names a missing picture.
+- M2266: `vulkanvideodec` and `d3d12h264dec` drop pictures to the next keyframe after a damaged access unit and request one, ending only after 10 failures in a row.
 
 Breaking: `TimecodeMeta.frames` is a `u16`, `WIRE_VERSION` is 6, `FrameTiming` gains `start_discard_ns` and `end_discard_ns`, `RtpRecvConfig` gains `parameter_sets`, `RtmpPublisher::push` fails with a `PublishRefusal`, and `Interlace` gains `InterleavedBottomFieldFirst`.
 

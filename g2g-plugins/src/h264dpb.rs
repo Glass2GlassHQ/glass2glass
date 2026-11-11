@@ -174,6 +174,14 @@ pub(crate) struct RefPic {
 
 pub(crate) const DPB_FULL: H264StreamRefused =
     H264StreamRefused("H.264 stream holds more reference frames than its DPB has slots");
+const MISSING_PARAMETER_SET: H264StreamRefused =
+    H264StreamRefused("H.264 slice names an SPS or PPS the stream never sent");
+// what a lost or corrupt packet leaves behind, which the next keyframe repairs
+pub(crate) const H264_DAMAGE_REFUSALS: [H264StreamRefused; 3] = [
+    crate::h264parse::MALFORMED_SLICE_HEADER,
+    MISSING_PARAMETER_SET,
+    DPB_FULL,
+];
 
 /// The H.264 reference picture marking state of a DPB (8.2.5): which slots hold
 /// reference frames, including the frames a `frame_num` gap inferred, and the
@@ -239,7 +247,11 @@ impl H264References {
             self.max_long_term_frame_idx = marking.long_term_reference.then_some(0);
             self.max_long_term_frame_idx
         } else if marking.adaptive {
-            self.apply_ref_pic_marking(header.frame_num, max_frame_num, &marking)
+            let long_term_frame_idx =
+                self.apply_ref_pic_marking(header.frame_num, max_frame_num, &marking);
+            // gst's h264decoder slides the window too when a broken MMCO leaves the DPB full
+            self.slide_window(header.frame_num, max_frame_num);
+            long_term_frame_idx
         } else {
             self.slide_window(header.frame_num, max_frame_num);
             None
@@ -353,21 +365,20 @@ impl H264References {
     /// references fill `max_num_ref_frames`, the short-term one with the smallest
     /// `FrameNumWrap` stops being a reference.
     fn slide_window(&mut self, frame_num: u32, max_frame_num: u32) {
-        let held = self.slots.iter().flatten().count();
-        if held < self.max_num_ref_frames.max(1) {
-            return;
-        }
         let wrap = |other: u32| h264_frame_num_wrap(other, frame_num, max_frame_num);
-        let oldest_slot = self
-            .slots
-            .iter()
-            .enumerate()
-            .filter_map(|(slot, r)| {
-                r.filter(|r| r.long_term_frame_idx.is_none())
-                    .map(|r| (slot, r))
-            })
-            .min_by_key(|(_, r)| wrap(r.frame_num));
-        if let Some((slot, _)) = oldest_slot {
+        while self.slots.iter().flatten().count() >= self.max_num_ref_frames.max(1) {
+            let oldest_slot = self
+                .slots
+                .iter()
+                .enumerate()
+                .filter_map(|(slot, r)| {
+                    r.filter(|r| r.long_term_frame_idx.is_none())
+                        .map(|r| (slot, r))
+                })
+                .min_by_key(|(_, r)| wrap(r.frame_num));
+            let Some((slot, _)) = oldest_slot else {
+                return;
+            };
             self.slots[slot] = None;
         }
     }
@@ -431,10 +442,14 @@ impl H264ParameterSetTable {
         &self,
         pic_parameter_set_id: u8,
     ) -> Result<(&H264Sps, &H264Pps), H264StreamRefused> {
-        const MISSING: H264StreamRefused =
-            H264StreamRefused("H.264 slice names an SPS or PPS the stream never sent");
-        let pps = self.pps.get(&pic_parameter_set_id).ok_or(MISSING)?;
-        let sps = self.sps.get(&pps.seq_parameter_set_id).ok_or(MISSING)?;
+        let pps = self
+            .pps
+            .get(&pic_parameter_set_id)
+            .ok_or(MISSING_PARAMETER_SET)?;
+        let sps = self
+            .sps
+            .get(&pps.seq_parameter_set_id)
+            .ok_or(MISSING_PARAMETER_SET)?;
         Ok((sps, pps))
     }
 }

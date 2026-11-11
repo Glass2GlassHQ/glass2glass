@@ -42,6 +42,7 @@ use windows::Win32::Media::MediaFoundation::{
 };
 use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject, INFINITE};
 
+use crate::decoderecovery::DecodeErrorRecovery;
 pub use crate::displayorder::PictureMeta;
 use crate::displayorder::ReorderBuffer;
 use crate::dxva::{
@@ -51,7 +52,7 @@ use crate::gpu::{GpuContext, WgpuNv12Texture};
 use crate::h264dpb::{
     crop_rectangle, h264_max_frame_num, h264_picture_meta, h264_picture_order, split_h264_pictures,
     H264ParameterSetTable, H264Picture, H264References, H264SessionShape, CHROMA_420_CROP_UNIT,
-    DPB_FULL,
+    DPB_FULL, H264_DAMAGE_REFUSALS,
 };
 use crate::h264parse::{
     h264_parameter_sets_in, sps_reorder_frames, H264Sps, H264StreamRefused, MALFORMED_SPS,
@@ -1000,6 +1001,7 @@ pub struct D3D12H264Dec {
     stream_reorder_depth: usize,
     low_latency: bool,
     input_stamps: PendingInputStamps,
+    recovery: DecodeErrorRecovery,
     segment: Segment,
     last_caps: Option<Caps>,
     emitted: u64,
@@ -1036,6 +1038,7 @@ impl D3D12H264Dec {
             stream_reorder_depth: 0,
             low_latency: false,
             input_stamps: PendingInputStamps::default(),
+            recovery: DecodeErrorRecovery::default(),
             segment: Segment::new(),
             last_caps: None,
             emitted: 0,
@@ -1283,6 +1286,10 @@ impl AsyncElement for D3D12H264Dec {
         }
     }
 
+    fn take_reconfigure(&mut self) -> Option<g2g_core::Reconfigure> {
+        self.recovery.take_keyframe_request()
+    }
+
     fn process<'a>(
         &'a mut self,
         packet: PipelinePacket,
@@ -1297,15 +1304,30 @@ impl AsyncElement for D3D12H264Dec {
                     if !self.ensure_decoder(au)? {
                         return Ok(());
                     }
+                    if !self
+                        .recovery
+                        .admits(|| crate::annexb::au_is_keyframe(VideoCodec::H264, au))
+                    {
+                        return Ok(());
+                    }
+                    let decoder = self.decoder.as_mut().ok_or(G2gError::NotConfigured)?;
+                    let pictures = match decoder.decode_access_unit(au) {
+                        Ok(pictures) => pictures,
+                        Err(D3D12VideoError::StreamRefused(reason))
+                            if H264_DAMAGE_REFUSALS.contains(&H264StreamRefused(reason)) =>
+                        {
+                            self.recovery.failed().map_err(|_| {
+                                decode_refused(D3D12VideoError::StreamRefused(reason))
+                            })?;
+                            decoder.reset();
+                            return Ok(());
+                        }
+                        Err(error) => return Err(decode_refused(error)),
+                    };
+                    self.recovery.decoded();
                     let timing = frame.timing;
                     self.input_stamps
                         .insert(timing.pts_ns, InputStamp::of(&frame));
-                    let pictures = self
-                        .decoder
-                        .as_mut()
-                        .ok_or(G2gError::NotConfigured)?
-                        .decode_access_unit(au)
-                        .map_err(decode_refused)?;
                     let mut ready = Vec::new();
                     for picture in pictures {
                         let meta = picture.meta;
@@ -1350,6 +1372,7 @@ impl AsyncElement for D3D12H264Dec {
                     }
                     self.reorder.reset();
                     self.input_stamps = PendingInputStamps::default();
+                    self.recovery = DecodeErrorRecovery::default();
                     self.last_caps = None;
                     out.push(PipelinePacket::Flush).await?;
                     Ok(())
