@@ -80,6 +80,12 @@ impl Recorder {
     fn pts(&self) -> Vec<u64> {
         self.frames.iter().map(|(_, pts)| *pts).collect()
     }
+
+    fn pts_from_first(&self) -> Vec<u64> {
+        let pts = self.pts();
+        // udpsrc running time starts when the runner starts, not at the first packet
+        pts.iter().map(|stamp| stamp - pts[0]).collect()
+    }
 }
 
 impl AsyncElement for Recorder {
@@ -209,11 +215,10 @@ async fn opusenc_udpsink_into_opus_udpsrc() {
         "the received Opus packets differ from the encoded ones"
     );
     assert_eq!(
-        received.pts(),
+        received.pts_from_first(),
         reference.pts(),
         "PTS survives the 48 kHz clock"
     );
-    assert_eq!(received.pts().first(), Some(&0), "PTS starts at zero");
     assert_even_spacing(&received.pts(), OpusFrameSize::default().nanos());
 }
 
@@ -389,8 +394,7 @@ async fn gst_rtpopuspay_feeds_opus_udpsrc() {
         .payloads()
         .iter()
         .all(|payload| !payload.is_empty()));
-    let pts = received.pts();
-    assert_eq!(pts.first(), Some(&0), "PTS starts at zero");
+    let pts = received.pts_from_first();
     // gst opusenc stamps its first packet shorter by the encoder lookahead
     assert!(
         pts[1] > 0 && pts[1] < frame.nanos(),

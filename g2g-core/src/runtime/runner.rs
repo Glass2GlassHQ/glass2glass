@@ -35,7 +35,7 @@ use crate::runtime::seek::{SeekController, SeekFormat};
 #[cfg(feature = "std")]
 use crate::runtime::solver::{solve_linear, NegotiationFailure};
 #[cfg(feature = "std")]
-use crate::runtime::state::StateController;
+use crate::runtime::state::{fallback_source_sync, pipeline_clock_sync, StateController};
 #[cfg(feature = "std")]
 use crate::segment::Segment;
 #[cfg(feature = "std")]
@@ -730,19 +730,18 @@ where
     // M176: under a state controller, arm a Playing-transition anchor so the
     // sink bases presentation on the play edge, not on startup / the preroll
     // frame; without one, the eager startup base time stands.
-    if let Some(c) = &elected {
-        let sync = match &state {
-            Some(sc) => ClockSync::with_play_anchor(
-                c.clock.clone(),
-                base_time_ns,
-                sc.arm_play_anchor(c.clock.clone()),
-            ),
-            None => ClockSync::new(c.clock.clone(), base_time_ns),
-        };
-        let sync = sync.with_path_latency(latency);
-        // The source gets it too, so a live capture stamps running time rather
-        // than its own zero.
-        SourceLoop::set_clock_sync(source, sync.clone());
+    let elected_sync = elected
+        .as_ref()
+        .map(|c| pipeline_clock_sync(c.clock.clone(), base_time_ns, state.as_ref(), latency));
+    // The source gets it too, so a live capture stamps running time rather
+    // than its own zero, on a fallback clock when none was elected.
+    let source_sync = elected_sync
+        .clone()
+        .or_else(|| fallback_source_sync(state.as_ref(), latency));
+    if let Some(sync) = source_sync {
+        SourceLoop::set_clock_sync(source, sync);
+    }
+    if let Some(sync) = elected_sync {
         AsyncElement::set_clock_sync(sink, sync);
     }
 

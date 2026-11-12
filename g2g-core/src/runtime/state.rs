@@ -48,7 +48,8 @@ use portable_atomic::AtomicU64;
 use spin::Mutex;
 
 use crate::bus::{BusHandle, BusMessage};
-use crate::clock::{PipelineClock, PlayAnchor};
+use crate::clock::{ClockSync, PipelineClock, PlayAnchor};
+use crate::query::LatencyReport;
 use crate::state::{PipelineState, StateChangeReturn};
 
 struct Inner {
@@ -389,6 +390,41 @@ impl StateController {
             inner: self.inner.clone(),
         }
     }
+}
+
+pub(crate) fn pipeline_clock_sync(
+    clock: Arc<dyn PipelineClock + Send + Sync>,
+    base_time_ns: u64,
+    state: Option<&StateController>,
+    latency: LatencyReport,
+) -> ClockSync {
+    let sync = match state {
+        Some(controller) => {
+            let anchor = controller.arm_play_anchor(clock.clone());
+            ClockSync::with_play_anchor(clock, base_time_ns, anchor)
+        }
+        None => ClockSync::new(clock, base_time_ns),
+    };
+    sync.with_path_latency(latency)
+}
+
+#[cfg(feature = "std")]
+pub(crate) fn fallback_source_sync(
+    state: Option<&StateController>,
+    latency: LatencyReport,
+) -> Option<ClockSync> {
+    // gst hands live sources its system clock when no element provides one
+    let clock = Arc::new(crate::clock::MonotonicClock);
+    let base_time_ns = clock.now_ns();
+    Some(pipeline_clock_sync(clock, base_time_ns, state, latency))
+}
+
+#[cfg(not(feature = "std"))]
+pub(crate) fn fallback_source_sync(
+    _state: Option<&StateController>,
+    _latency: LatencyReport,
+) -> Option<ClockSync> {
+    None
 }
 
 /// What a sink arm should do after awaiting [`StateController::flow_gate`].

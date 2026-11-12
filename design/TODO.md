@@ -180,9 +180,6 @@ libraries installed.
   - AV1 and VP9 on `mediacodecdec`.
   - HEVC 4:4:4 and 12-bit on `nvdec`.
 - **RTP receive:**
-  - Sources in a graph with no element offering a clock (two `udpsrc` into a
-    muxer and `filesink`) each start at PTS zero, so their tracks lose their
-    offset.
   - Place frames from RFC 6051 in-band NTP-64 before the first sender report,
     for faster sync.
   - VP8, VP9, AV1 and JPEG RTP payloads in `udpsrc`, and MJPEG cameras in

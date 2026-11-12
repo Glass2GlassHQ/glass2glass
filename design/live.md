@@ -642,11 +642,11 @@ loss from the repair plus the survivors and injects it into the jitter buffer.
 That costs no round trip, which is the better fit for one-way or high-RTT
 paths. NACK, RTX and FEC compose.
 
-When the runner elects a pipeline clock, `UdpSrc` stamps PTS as running time:
-the frame's local instant, from the sender report or from its arrival before
-one, minus the base time, so several `udpsrc` elements share one timeline, as
-gst's `udpsrc` does. A late sender report moves the track as it does for RTSP
-ingest. Without a clock each `udpsrc` starts at PTS zero on its first frame.
+`UdpSrc` stamps PTS as running time on the `ClockSync` the runner hands it: the
+frame's local instant, from the sender report or from its arrival before one,
+minus the base time, so several `udpsrc` elements share one timeline, as gst's
+`udpsrc` does. A late sender report moves the track as it does for RTSP ingest.
+Run without a runner, `udpsrc` starts at PTS zero on its first frame.
 Validated against ffmpeg sending H.264 and Opus to two `udpsrc` with the audio
 delayed 500 ms: the recorded offset matches the delay less Opus's 6.5 ms
 lookahead within 1 ms, where arrival times alone give 0 ms.

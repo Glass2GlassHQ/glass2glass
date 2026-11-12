@@ -110,7 +110,7 @@ use crate::runtime::solver::{
     graph_downstream_feasibility, resolve_forward_output, solve_graph_preferred, solve_linear,
     ForwardResolve, NegotiationFailure, NodeConstraint,
 };
-use crate::runtime::state::{Flow, StateController};
+use crate::runtime::state::{fallback_source_sync, pipeline_clock_sync, Flow, StateController};
 use crate::runtime::FlightRecorder;
 use crate::runtime::Observer;
 use crate::runtime::SeekController;
@@ -1917,33 +1917,28 @@ async fn prepare_graph<'a>(
     // as fast as backpressure allows. Transforms get it too: `clocksync` paces on
     // it, and `mpegtslivesrc` maps stream time onto running time with its base.
     // The same sync is kept for a sink the mutator later splices in (M1149).
-    let mut sink_clock_sync = None;
-    if let Some(c) = &elected {
+    // M176: under a state controller, arm one Playing-transition anchor
+    // (shared across sinks) so each bases presentation on the play edge,
+    // not on startup / its preroll frame; without one, the eager base time
+    // stands. Armed once outside the loop; the anchor is cheaply cloned.
+    let sink_clock_sync = elected.as_ref().map(|c| {
         let sink_clock: alloc::sync::Arc<dyn PipelineClock + Send + Sync> = match &elected_clock {
             Some(handle) => handle.clone(),
             None => c.clock.clone(),
         };
-        // M176: under a state controller, arm one Playing-transition anchor
-        // (shared across sinks) so each bases presentation on the play edge,
-        // not on startup / its preroll frame; without one, the eager base time
-        // stands. Armed once outside the loop; the anchor is cheaply cloned.
-        let anchor = state
-            .as_ref()
-            .map(|sc| sc.arm_play_anchor(sink_clock.clone()));
-        let sync = match &anchor {
-            Some(a) => ClockSync::with_play_anchor(sink_clock.clone(), base_time_ns, a.clone()),
-            None => ClockSync::new(sink_clock.clone(), base_time_ns),
-        };
-        let sync = sync.with_path_latency(latency);
-        for &node in topo {
-            match vg.element_mut(node) {
-                // A live capture source stamps running time off the same sync.
-                Some(GraphNodeRef::Source(src)) => src.set_clock_sync(sync.clone()),
-                Some(GraphNodeRef::Element(elem)) => elem.set_clock_sync(sync.clone()),
-                _ => {}
-            }
+        pipeline_clock_sync(sink_clock, base_time_ns, state.as_ref(), latency)
+    });
+    // A live capture source stamps running time off the same sync, or off a
+    // fallback clock when none was elected.
+    let source_clock_sync = sink_clock_sync
+        .clone()
+        .or_else(|| fallback_source_sync(state.as_ref(), latency));
+    for &node in topo {
+        match (vg.element_mut(node), &source_clock_sync, &sink_clock_sync) {
+            (Some(GraphNodeRef::Source(src)), Some(sync), _) => src.set_clock_sync(sync.clone()),
+            (Some(GraphNodeRef::Element(elem)), _, Some(sync)) => elem.set_clock_sync(sync.clone()),
+            _ => {}
         }
-        sink_clock_sync = Some(sync);
     }
     latency_fold.sink_clock_sync = sink_clock_sync.clone();
 

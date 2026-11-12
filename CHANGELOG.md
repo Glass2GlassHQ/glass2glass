@@ -198,6 +198,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M2282: an RTSP ingest track placed by arrival time moves onto its sender report's timeline when its first report arrives.
 - M2283: `udpsrc` reads RTCP on `rtcp-port`, by default the port after RTP, and sends its feedback to the sender's RTCP address.
 - M2284: `udpsrc` stamps PTS as running time on the pipeline clock, so several `udpsrc` elements share one timeline.
+- M2285: with no element offering a clock, the runner hands sources a monotonic fallback clock, so live sources still share a running time.
 
 Breaking: `TimecodeMeta.frames` is a `u16`, `WIRE_VERSION` is 6, `FrameTiming` gains `start_discard_ns` and `end_discard_ns`, `RtpRecvConfig` gains `parameter_sets`, `RtmpPublisher::push` fails with a `PublishRefusal`, and `Interlace` gains `InterleavedBottomFieldFirst`.
 

@@ -191,32 +191,53 @@ fn a_source_stamps_running_time_on_the_elected_clock() {
     );
 }
 
-/// Without an elected clock the source keeps its own zero, the pre-M1187 path.
 #[test]
-fn a_source_with_no_elected_clock_keeps_its_own_zero() {
+fn sources_with_no_elected_clock_share_a_fallback_running_time() {
     let clock = g2g_core::clock::MonotonicClock;
-    let mut src = CaptureSrc {
+    let capture = || CaptureSrc {
         anchor: CaptureAnchor::new(),
         sync: None,
         stamps: Vec::new(),
     };
-    let mut sink = SilentSink;
+    let mut sources = [capture(), capture()];
+    let mut sinks = [SilentSink::default(), SilentSink::default()];
 
     let mut g: Graph<GraphNodeRef<'_>> = Graph::new();
-    let s = g.add_source(GraphNodeRef::source_ref(&mut src));
-    let k = g.add_sink(GraphNodeRef::element_ref(&mut sink));
-    g.link(s, k).expect("link source to sink");
+    for (src, sink) in sources.iter_mut().zip(sinks.iter_mut()) {
+        let s = g.add_source(GraphNodeRef::source_ref(src));
+        let k = g.add_sink(GraphNodeRef::element_ref(sink));
+        g.link(s, k).expect("link source to sink");
+    }
     block_on(run_graph(g, &clock, 2)).expect("graph run");
 
-    assert!(src.sync.is_none(), "nothing offered a clock");
+    let base_times: Vec<u64> = sources
+        .iter()
+        .map(|src| {
+            src.sync
+                .as_ref()
+                .expect("the runner handed each source a clock")
+                .base_time()
+        })
+        .collect();
     assert_eq!(
-        src.stamps,
-        (0..FRAMES).map(|n| n * PERIOD_NS).collect::<Vec<_>>()
+        base_times[0], base_times[1],
+        "both sources share one base time"
     );
+    assert!(
+        sinks.iter().all(|sink| !sink.got_clock),
+        "sinks get no clock to pace on"
+    );
+    for src in &sources {
+        let spacing: Vec<u64> = src.stamps.windows(2).map(|w| w[1] - w[0]).collect();
+        assert_eq!(spacing, [PERIOD_NS; FRAMES as usize - 1]);
+    }
 }
 
 /// A sink that offers no clock, so the election finds no candidate.
-struct SilentSink;
+#[derive(Default)]
+struct SilentSink {
+    got_clock: bool,
+}
 
 impl AsyncElement for SilentSink {
     type ProcessFuture<'a>
@@ -230,6 +251,10 @@ impl AsyncElement for SilentSink {
 
     fn configure_pipeline(&mut self, _caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         Ok(ConfigureOutcome::Accepted)
+    }
+
+    fn set_clock_sync(&mut self, _sync: ClockSync) {
+        self.got_clock = true;
     }
 
     fn process<'a>(

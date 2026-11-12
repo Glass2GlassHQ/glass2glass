@@ -31,7 +31,11 @@ samples the running time at the first captured buffer and every stamp after it i
 that anchor plus the source's own elapsed time. The anchor walks back the lead
 between capture and delivery (one period for an audio read, one interval for a
 camera frame). `AlsaSrc`, `PulseSrc`, `PipeWireSrc`, `PipeWireVideoSrc` and
-`V4l2Src` take that path; a source the runner hands no clock keeps its own zero.
+`V4l2Src` take that path. When no element offers a clock, the runner still hands
+every source one `ClockSync` on `MonotonicClock` based at startup (`std` builds),
+as gst gives live sources its system clock, so the sources of one graph share a
+running time while the sinks, handed nothing, present as fast as backpressure
+allows. A source run with no runner keeps its own zero.
 
 An elected clock can lose the reference it is disciplined to, a PTP servo going
 free-running when its grandmaster disappears, which `PipelineClock::healthy`
