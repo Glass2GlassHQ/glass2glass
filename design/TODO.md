@@ -347,9 +347,12 @@ libraries installed.
 - **LATM AAC into `flvmux`, `mp4mux` and `matroskamux`:** convert LOAS/LATM to
   raw AAC with its AudioSpecificConfig ahead of those muxers, which refuse it
   (`aac/latm_stereo_to_51.ts`, `mpegts/loewe.ts`).
-- **Opus end trim in fragmented MP4:** ffmpeg decodes an `mp4mux` copy of
-  `webm/opus_vp9-alpha.webm` 8 samples long, because the trim is only in the
-  last sample's duration. Write it where ffmpeg reads it.
+- **Opus end trim in fragmented MP4:** the fragmented `mp4mux` layout writes
+  its `moov` before the stream ends, so the `elst` duration is 0 and the end
+  trim is only in the last sample's duration, which gst's `qtdemux` ignores (a
+  48144-sample Opus stream decodes to 48648 samples in gst). Rewrite the `moov`
+  at EOS with the `elst` duration when the sink can seek back. ffmpeg's `mov`
+  demuxer reads no end trim from any MP4, so it cannot check this.
 - **ST 2038 elements:** `st2038ancdemux` should add a port when a stream no pad
   names appears, once a launch line can link a pad that appears at run time.
 - **Demuxer bugs** (gst commit sweep 2020-11 to 2023-11):
