@@ -25,6 +25,8 @@ default = []
 python = [
     "dep:pyo3",
     "dep:tokio",
+    "dep:g2g-core",
+    "dep:g2g-plugins",
     "g2g-core/std",
     "g2g-core/runtime",
     "g2g-core/multi-thread",
@@ -35,8 +37,8 @@ release-wheel-macos = ["python", "pyo3/extension-module", "pyo3/abi3-py311", "g2
 release-wheel-windows = ["python", "pyo3/extension-module", "pyo3/abi3-py311", "g2g-plugins/release-binary-windows"]
 
 [dependencies]
-g2g-core = { workspace = true }
-g2g-plugins = { workspace = true, features = ["std"] }
+g2g-core = { workspace = true, optional = true }
+g2g-plugins = { workspace = true, optional = true, features = ["std"] }
 pyo3 = { version = "0.26", optional = true, features = ["auto-initialize"] }
 # Drive the run future on a single-thread runtime, like g2g-launch / g2g-capi.
 tokio = { version = "1", optional = true, features = ["rt", "time"] }
