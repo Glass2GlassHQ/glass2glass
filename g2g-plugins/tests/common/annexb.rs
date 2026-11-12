@@ -38,7 +38,9 @@ pub(crate) fn access_units(data: &[u8]) -> Vec<Vec<u8>> {
         let sc_len = if nal.starts_with(&[0, 0, 0, 1]) { 4 } else { 3 };
         let nal_type = nal.get(sc_len).map(|b| b & 0x1F).unwrap_or(0);
         let is_vcl = (1..=5).contains(&nal_type);
-        if is_vcl && cur_has_vcl {
+        // h264 7.4.1.2.3: SEI, SPS, PPS, AUD and types 14 to 18 after a slice open the next access unit
+        let opens_access_unit = matches!(nal_type, 6..=9 | 14..=18);
+        if (is_vcl || opens_access_unit) && cur_has_vcl {
             aus.push(core::mem::take(&mut cur));
             cur_has_vcl = false;
         }

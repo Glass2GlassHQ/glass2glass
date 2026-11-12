@@ -13,9 +13,7 @@ use g2g_core::{
 use g2g_plugins::mp4demux::Mp4Demux;
 use g2g_plugins::mp4demuxn::{forwardable_streams, Mp4DemuxN, Mp4Port};
 
-use crate::collect_sink::CollectSink;
-
-const READ_CHUNK_LEN: usize = 4096;
+use crate::collect_sink::{feed_in_chunks, CollectSink};
 
 #[derive(Debug, Default)]
 pub(crate) struct Demuxed {
@@ -106,21 +104,7 @@ async fn demux_with(mut demux: Mp4Demux, file: &[u8]) -> Demuxed {
         })
         .expect("configure");
     let mut sink = CollectSink::default();
-    for chunk in file.chunks(READ_CHUNK_LEN) {
-        let frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(chunk.to_vec().into_boxed_slice())),
-            FrameTiming::default(),
-            0,
-        );
-        demux
-            .process(PipelinePacket::DataFrame(frame), &mut sink)
-            .await
-            .expect("demux");
-    }
-    demux
-        .process(PipelinePacket::Eos, &mut sink)
-        .await
-        .expect("eos");
+    feed_in_chunks(&mut demux, file, &mut sink).await;
     let mut out = Demuxed::default();
     for packet in sink.packets {
         out.record(packet);

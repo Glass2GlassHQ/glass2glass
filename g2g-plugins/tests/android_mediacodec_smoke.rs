@@ -24,13 +24,16 @@
 mod collect_sink;
 use collect_sink::CollectSink;
 
+#[path = "common/parsed_access_units.rs"]
+mod parsed_access_units;
+use parsed_access_units::parsed_access_units;
+
 #[path = "common/android_binder.rs"]
 mod android_binder;
 use android_binder::start_binder_threadpool;
 
 use g2g_core::element::AsyncElement;
-use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
+use g2g_core::frame::PipelinePacket;
 use g2g_core::{Caps, ConfigureOutcome, Dim, Rate, RawVideoFormat, VideoCodec};
 use g2g_plugins::mediacodecdec::MediaCodecDec;
 
@@ -41,91 +44,10 @@ use g2g_plugins::mediacodecdec::MediaCodecDec;
 const H264: &[u8] = include_bytes!("fixtures/h264_640x480.h264");
 const H265: &[u8] = include_bytes!("fixtures/h265_640x480.h265");
 
-/// Split an Annex-B byte stream into access units. A new AU begins at the first
-/// VCL NAL once the current AU already holds one, so each AU groups its leading
-/// parameter sets / SEI with the slice. This matters because `MediaCodecDec`
-/// reads the parameter sets from the AU it is fed: the first AU must carry them
-/// alongside the IDR for the codec to configure. Returns contiguous sub-slices
-/// of `s` (NALs are already contiguous in the stream). `codec` selects the NAL
-/// header parse: H.264 uses the low 5 bits (VCL = 1..=5); H.265 uses bits 1..=6
-/// (VCL = 0..=31).
-fn access_units(s: &[u8], codec: VideoCodec) -> Vec<&[u8]> {
-    let is_h265 = codec == VideoCodec::H265;
-    let nal_type = |hdr: u8| {
-        if is_h265 {
-            (hdr >> 1) & 0x3f
-        } else {
-            hdr & 0x1f
-        }
-    };
-    let is_vcl = |t: u8| {
-        if is_h265 {
-            t <= 31
-        } else {
-            (1..=5).contains(&t)
-        }
-    };
-
-    // Offsets of each NAL's start code, paired with the NAL type.
-    let mut nals: Vec<(usize, u8)> = Vec::new();
-    let mut i = 0;
-    while i + 3 <= s.len() {
-        let sc_len =
-            if i + 4 <= s.len() && s[i] == 0 && s[i + 1] == 0 && s[i + 2] == 0 && s[i + 3] == 1 {
-                Some(4)
-            } else if s[i] == 0 && s[i + 1] == 0 && s[i + 2] == 1 {
-                Some(3)
-            } else {
-                None
-            };
-        match sc_len {
-            Some(len) => {
-                let hdr = i + len;
-                if hdr < s.len() {
-                    nals.push((i, nal_type(s[hdr])));
-                }
-                i = hdr + 1;
-            }
-            None => i += 1,
-        }
-    }
-
-    // Byte offset where each access unit begins.
-    let mut starts: Vec<usize> = Vec::new();
-    let mut has_vcl = false;
-    for &(off, t) in &nals {
-        let vcl = is_vcl(t);
-        if starts.is_empty() {
-            starts.push(off);
-            has_vcl = vcl;
-        } else if vcl && has_vcl {
-            starts.push(off); // new frame: start a new AU
-        } else if vcl {
-            has_vcl = true; // first VCL of the current AU
-        }
-    }
-
-    starts
-        .iter()
-        .enumerate()
-        .map(|(k, &start)| {
-            let end = starts.get(k + 1).copied().unwrap_or(s.len());
-            &s[start..end]
-        })
-        .collect()
-}
-
 /// Drive `dec` with the access units of `stream` and assert it emits NV12 frames
 /// of the right geometry. Shared by the H.264 and H.265 tests.
 async fn decode_to_nv12(mut dec: MediaCodecDec, stream: &[u8], codec: VideoCodec, w: u32, h: u32) {
     start_binder_threadpool(1);
-
-    let aus = access_units(stream, codec);
-    assert!(
-        aus.len() > 1,
-        "fixture must split into multiple access units, got {}",
-        aus.len()
-    );
 
     // Negotiation surrogate: upstream caps carry the fixture's geometry, as a
     // parser would emit from the SPS. MediaCodec's `configure()` requires
@@ -173,23 +95,12 @@ async fn decode_to_nv12(mut dec: MediaCodecDec, stream: &[u8], codec: VideoCodec
         sink.packets.first()
     );
 
-    let mut pts_ns = 0u64;
-    for au in aus {
-        let frame = Frame {
-            domain: MemoryDomain::System(SystemSlice::from_boxed(au.to_vec().into_boxed_slice())),
-            timing: FrameTiming {
-                pts_ns,
-                dts_ns: pts_ns,
-                capture_ns: pts_ns,
-                ..FrameTiming::default()
-            },
-            sequence: 0,
-            meta: Default::default(),
-        };
-        dec.process(PipelinePacket::DataFrame(frame), &mut sink)
+    let access_units = parsed_access_units(codec, stream).await;
+    let fed = access_units.len();
+    for access_unit in access_units {
+        dec.process(PipelinePacket::DataFrame(access_unit), &mut sink)
             .await
             .expect("process access unit");
-        pts_ns += 33_366_700; // ~29.97 fps
     }
     // EOS drains any frames the codec is still holding.
     dec.process(PipelinePacket::Eos, &mut sink)
@@ -223,10 +134,13 @@ async fn decode_to_nv12(mut dec: MediaCodecDec, stream: &[u8], codec: VideoCodec
         !caps_changes.is_empty(),
         "expected at least one NV12 CapsChanged"
     );
+    assert_eq!(data_frames.len(), fed, "every access unit decodes");
+    let latency = dec.latency();
     assert!(
-        !data_frames.is_empty(),
-        "expected at least one decoded frame"
+        latency.min_ns > 0,
+        "the pictures MediaCodec holds are reported: {latency:?}"
     );
+    assert_eq!(latency.max_ns, Some(latency.min_ns));
     let decoded_caps = caps_changes.last().unwrap();
     assert!(
         matches!(

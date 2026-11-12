@@ -28,13 +28,19 @@
 
 #![cfg(all(target_os = "android", feature = "mediacodec-wgpu"))]
 
+#[path = "common/collect_sink.rs"]
+mod collect_sink;
+
+#[path = "common/parsed_access_units.rs"]
+mod parsed_access_units;
+use parsed_access_units::parsed_access_units;
+
 #[path = "common/android_binder.rs"]
 mod android_binder;
 use android_binder::start_binder_threadpool;
 
 use g2g_core::element::{AsyncElement, OutputSink, PushOutcome};
-use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
+use g2g_core::frame::PipelinePacket;
 use g2g_core::{Caps, ConfigureOutcome, Dim, G2gError, Rate, RawVideoFormat, VideoCodec};
 use g2g_plugins::mediacodec_wgpu::{create_android_interop_device, create_android_surface};
 use g2g_plugins::mediacodecdec::MediaCodecDec;
@@ -87,59 +93,6 @@ impl OutputSink for PresentRelay<'_> {
             core::task::Poll::Pending => panic!("element future did not resolve in one poll"),
         }
     }
-}
-
-/// Split an H.264 Annex-B stream into access units (the first AU carries the
-/// parameter sets alongside the IDR, as `MediaCodecDec` requires).
-fn access_units(s: &[u8]) -> Vec<&[u8]> {
-    let nal_type = |hdr: u8| hdr & 0x1f;
-    let is_vcl = |t: u8| (1..=5).contains(&t);
-
-    let mut nals: Vec<(usize, u8)> = Vec::new();
-    let mut i = 0;
-    while i + 3 <= s.len() {
-        let sc_len =
-            if i + 4 <= s.len() && s[i] == 0 && s[i + 1] == 0 && s[i + 2] == 0 && s[i + 3] == 1 {
-                Some(4)
-            } else if s[i] == 0 && s[i + 1] == 0 && s[i + 2] == 1 {
-                Some(3)
-            } else {
-                None
-            };
-        match sc_len {
-            Some(len) => {
-                let hdr = i + len;
-                if hdr < s.len() {
-                    nals.push((i, nal_type(s[hdr])));
-                }
-                i = hdr + 1;
-            }
-            None => i += 1,
-        }
-    }
-
-    let mut starts: Vec<usize> = Vec::new();
-    let mut has_vcl = false;
-    for &(off, t) in &nals {
-        let vcl = is_vcl(t);
-        if starts.is_empty() {
-            starts.push(off);
-            has_vcl = vcl;
-        } else if vcl && has_vcl {
-            starts.push(off);
-        } else if vcl {
-            has_vcl = true;
-        }
-    }
-
-    starts
-        .iter()
-        .enumerate()
-        .map(|(k, &start)| {
-            let end = starts.get(k + 1).copied().unwrap_or(s.len());
-            &s[start..end]
-        })
-        .collect()
 }
 
 fn rgba_caps(w: u32, h: u32) -> Caps {
@@ -210,25 +163,10 @@ async fn present_decoded_frames_to_android_surface() {
     // decode -> present, frame by frame, through the relay.
     {
         let mut relay = PresentRelay { sink: &mut sink };
-        let mut pts_ns = 0u64;
-        for au in access_units(H264) {
-            let frame = Frame {
-                domain: MemoryDomain::System(SystemSlice::from_boxed(
-                    au.to_vec().into_boxed_slice(),
-                )),
-                timing: FrameTiming {
-                    pts_ns,
-                    dts_ns: pts_ns,
-                    capture_ns: pts_ns,
-                    ..FrameTiming::default()
-                },
-                sequence: 0,
-                meta: Default::default(),
-            };
-            dec.process(PipelinePacket::DataFrame(frame), &mut relay)
+        for access_unit in parsed_access_units(VideoCodec::H264, H264).await {
+            dec.process(PipelinePacket::DataFrame(access_unit), &mut relay)
                 .await
                 .expect("decode + present access unit");
-            pts_ns += 33_366_700;
         }
         dec.process(PipelinePacket::Eos, &mut relay)
             .await
