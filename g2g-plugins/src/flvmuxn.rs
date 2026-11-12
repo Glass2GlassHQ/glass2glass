@@ -360,6 +360,74 @@ impl FlvMuxN {
             .await?;
         Ok(())
     }
+
+    async fn process_at(
+        &mut self,
+        input: usize,
+        packet: PipelinePacket,
+        out: &mut dyn OutputSink,
+        now_ns: Option<u64>,
+    ) -> Result<(), G2gError> {
+        match packet {
+            PipelinePacket::DataFrame(frame) => {
+                self.deadline.note_arrival(input, &frame, now_ns);
+                if let Some(s) = frame.domain.as_system_slice() {
+                    self.capture_init(input, s)?;
+                    // a raw AAC stream's config became the sequence header above
+                    if self.inits[input]
+                        .as_ref()
+                        .and_then(TrackInit::asc)
+                        .is_some_and(|config| is_leading_aac_config(config, s))
+                    {
+                        return Ok(());
+                    }
+                }
+                self.agg.push(input, frame);
+            }
+            PipelinePacket::Eos => {
+                require_header_config_at_end(
+                    short_type_name::<Self>(),
+                    input,
+                    &self.inits,
+                    self.agg.queued(input),
+                    self.header_config(input),
+                )?;
+                self.agg.mark_ended(input)
+            }
+            // CapsChanged is consumed by the runner's muxer arm; the sequence
+            // headers are fixed from the first AU's in-band init.
+            PipelinePacket::CapsChanged(_) => return Ok(()),
+            // A per-input `Segment` maps that stream to running time; a muxed
+            // container carries its own timestamps, so it is consumed rather
+            // than forwarded into the byte stream.
+            PipelinePacket::Segment(_) => return Ok(()),
+            PipelinePacket::Tick => {}
+            other => {
+                out.push(other).await?;
+                return Ok(());
+            }
+        }
+
+        // Hold every AU until all tracks have their init (the sequence headers
+        // are written before any media frame).
+        if !every_track_header_ready(&self.inits, &self.agg) {
+            return Ok(());
+        }
+        if self.mux.is_none() {
+            self.mux = Some(self.build_mux()?);
+        }
+        // `None` sorts first, so a frame with no timestamp is muxed as soon as it reaches the head
+        while let Some((track, frame)) = self
+            .agg
+            .take_earliest_or_due_by(|f| f.timing.pts(), |f| self.deadline.is_due(f, now_ns))
+        {
+            self.emit_au(track, frame, out).await?;
+        }
+        if self.agg.is_drained() {
+            self.overwrite_duration(out).await?;
+        }
+        Ok(())
+    }
 }
 
 impl MultiInputElement for FlvMuxN {
@@ -500,68 +568,7 @@ impl MultiInputElement for FlvMuxN {
         packet: PipelinePacket,
         out: &'a mut dyn OutputSink,
     ) -> Self::ProcessFuture<'a> {
-        Box::pin(async move {
-            let now_ns = wall_clock_ns();
-            match packet {
-                PipelinePacket::DataFrame(frame) => {
-                    self.deadline.note_arrival(input, &frame, now_ns);
-                    if let Some(s) = frame.domain.as_system_slice() {
-                        self.capture_init(input, s)?;
-                        // a raw AAC stream's config became the sequence header above
-                        if self.inits[input]
-                            .as_ref()
-                            .and_then(TrackInit::asc)
-                            .is_some_and(|config| is_leading_aac_config(config, s))
-                        {
-                            return Ok(());
-                        }
-                    }
-                    self.agg.push(input, frame);
-                }
-                PipelinePacket::Eos => {
-                    require_header_config_at_end(
-                        short_type_name::<Self>(),
-                        input,
-                        &self.inits,
-                        self.agg.queued(input),
-                        self.header_config(input),
-                    )?;
-                    self.agg.mark_ended(input)
-                }
-                // CapsChanged is consumed by the runner's muxer arm; the sequence
-                // headers are fixed from the first AU's in-band init.
-                PipelinePacket::CapsChanged(_) => return Ok(()),
-                // A per-input `Segment` maps that stream to running time; a muxed
-                // container carries its own timestamps, so it is consumed rather
-                // than forwarded into the byte stream.
-                PipelinePacket::Segment(_) => return Ok(()),
-                PipelinePacket::Tick => {}
-                other => {
-                    out.push(other).await?;
-                    return Ok(());
-                }
-            }
-
-            // Hold every AU until all tracks have their init (the sequence headers
-            // are written before any media frame).
-            if !every_track_header_ready(&self.inits, &self.agg) {
-                return Ok(());
-            }
-            if self.mux.is_none() {
-                self.mux = Some(self.build_mux()?);
-            }
-            // `None` sorts first, so a frame with no timestamp is muxed as soon as it reaches the head
-            while let Some((track, frame)) = self
-                .agg
-                .take_earliest_or_due_by(|f| f.timing.pts(), |f| self.deadline.is_due(f, now_ns))
-            {
-                self.emit_au(track, frame, out).await?;
-            }
-            if self.agg.is_drained() {
-                self.overwrite_duration(out).await?;
-            }
-            Ok(())
-        })
+        Box::pin(self.process_at(input, packet, out, wall_clock_ns()))
     }
 }
 
@@ -721,37 +728,38 @@ mod tests {
         assert_eq!(duration, span_ns as f64 / 1e9);
     }
 
-    // `livemux::wall_clock_ns` is `None` without std
-    #[cfg(feature = "std")]
     // video keeps coming while audio stalls without Eos, then the runner ticks past the deadline
     async fn frames_muxed_after_audio_stalls(live: bool) -> u64 {
         const VIDEO_STEP_NS: u64 = 1_000_000;
-        const PAST_THE_DEADLINE: core::time::Duration = core::time::Duration::from_millis(30);
+        const LATENCY_NS: u64 = 10_000_000;
         let mut mux = FlvMuxN::new(2);
         mux.configure_liveness(live);
+        mux.set_property("latency", PropValue::Uint(LATENCY_NS))
+            .unwrap();
         mux.configure_pipeline(0, &video_caps()).unwrap();
         mux.configure_pipeline(1, &audio_caps()).unwrap();
         let mut sink = CaptureSink::default();
-        mux.process(0, frame(h264_idr(), 0), &mut sink)
+        mux.process_at(0, frame(h264_idr(), 0), &mut sink, Some(0))
             .await
             .unwrap();
-        mux.process(1, frame(aac_adts(), 0), &mut sink)
+        mux.process_at(1, frame(aac_adts(), 0), &mut sink, Some(0))
             .await
             .unwrap();
-        for step in 1..=2 {
-            mux.process(0, frame(h264_idr(), step * VIDEO_STEP_NS), &mut sink)
+        const VIDEO_FRAMES_BEHIND_AUDIO: u64 = 2;
+        for step in 1..=VIDEO_FRAMES_BEHIND_AUDIO {
+            let pts_ns = step * VIDEO_STEP_NS;
+            mux.process_at(0, frame(h264_idr(), pts_ns), &mut sink, Some(pts_ns))
                 .await
                 .unwrap();
         }
         let before_tick = mux.emitted();
-        std::thread::sleep(PAST_THE_DEADLINE);
-        mux.process(0, PipelinePacket::Tick, &mut sink)
+        let last_deadline_ns = VIDEO_FRAMES_BEHIND_AUDIO * VIDEO_STEP_NS + LATENCY_NS;
+        mux.process_at(0, PipelinePacket::Tick, &mut sink, Some(last_deadline_ns))
             .await
             .unwrap();
         mux.emitted() - before_tick
     }
 
-    #[cfg(feature = "std")]
     #[tokio::test]
     async fn a_live_mux_stops_waiting_on_a_stalled_input_at_the_deadline() {
         assert_eq!(
