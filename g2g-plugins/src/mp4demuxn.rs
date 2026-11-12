@@ -452,6 +452,14 @@ pub struct Mp4DemuxN {
 // no real fragment runs this long
 const MAX_HELD_FRAGMENT_NS: u64 = 30_000_000_000;
 
+fn follow_composition_shifts(tracks: &mut [TrackHeader], fragment_starts: &FragmentStarts) {
+    for track in tracks {
+        if let Some(shift) = fragment_starts.composition_shift(track.track_id) {
+            track.follow_composition_shift(shift);
+        }
+    }
+}
+
 impl Mp4DemuxN {
     /// A demuxer with one output port per entry of `ports`, in port order. Panics
     /// if `ports` is empty (a fan-out needs a port).
@@ -821,11 +829,11 @@ impl Mp4DemuxN {
 
         // Take the tracks out so the per-sample emit can borrow `self` mutably while
         // reading the (now local) track headers.
-        let tracks = self
+        let mut tracks = self
             .tracks
             .take()
             .expect("tracks set once fragmented is known");
-        let forwarded = self.forwarded_tracks(&tracks);
+        let mut forwarded = self.forwarded_tracks(&tracks);
         let mut off = 0usize;
         let mut consumed = 0usize; // bytes safe to drain (a pending moof is kept)
         let mut frag_start: Option<usize> = None;
@@ -854,6 +862,8 @@ impl Mp4DemuxN {
                         self.drained.saturating_add(start as u64),
                         &mut fragment_starts,
                     );
+                    follow_composition_shifts(&mut tracks, &fragment_starts);
+                    follow_composition_shifts(&mut forwarded, &fragment_starts);
                     self.fragment_starts = fragment_starts;
                     let samples = samples?;
                     self.learn_held_fragment(&samples);
@@ -990,7 +1000,7 @@ impl Mp4DemuxN {
         }
         // A `moof` marks a fragmented / CMAF file; its absence is the classic
         // progressive `moov`+`mdat` layout, walked from the sample tables instead.
-        let forwarded = self.forwarded_tracks(&tracks);
+        let mut forwarded = self.forwarded_tracks(&tracks);
         let moov = find_box(&self.buf, b"moov").ok_or(G2gError::CapsMismatch)?;
         let mut samples = if find_box(moov, b"mvex").is_none() || moov_holds_samples(moov) {
             parse_progressive_multi(&self.buf, &forwarded)?
@@ -1001,12 +1011,14 @@ impl Mp4DemuxN {
             boxes_at(&self.buf).find_map(|(kind, _, at)| (kind == b"moof").then_some(at));
         if let Some(first_moof) = first_moof {
             // the moov's own samples sit in an mdat no moof describes
+            let mut fragment_starts = FragmentStarts::default();
             samples.extend(self.parse_fragments_in(
                 &self.buf[first_moof..],
                 &forwarded,
                 self.drained.saturating_add(first_moof as u64),
-                &mut FragmentStarts::default(),
+                &mut fragment_starts,
             )?);
+            follow_composition_shifts(&mut forwarded, &fragment_starts);
             // stable, so each track keeps its own sample order
             samples.sort_by_key(|(_, sample)| sample.dts_ns);
         }
@@ -1605,6 +1617,7 @@ mod tests {
         caps: Vec<Option<Caps>>,
         frames: Vec<Vec<Vec<u8>>>,
         ptss: Vec<Vec<u64>>,
+        segments: Vec<Vec<Segment>>,
     }
     impl PortCapture {
         fn new(ports: usize) -> Self {
@@ -1612,6 +1625,7 @@ mod tests {
                 caps: alloc::vec![None; ports],
                 frames: alloc::vec![Vec::new(); ports],
                 ptss: alloc::vec![Vec::new(); ports],
+                segments: alloc::vec![Vec::new(); ports],
             }
         }
     }
@@ -1630,6 +1644,7 @@ mod tests {
             core::task::Poll::Ready({
                 match packet {
                     PipelinePacket::CapsChanged(c) => self.caps[port] = Some(c),
+                    PipelinePacket::Segment(segment) => self.segments[port].push(segment),
                     PipelinePacket::DataFrame(f) => {
                         self.ptss[port].push(f.timing.pts_ns);
                         if let Some(s) = f.domain.as_system_slice() {
@@ -1896,6 +1911,40 @@ mod tests {
             out.ptss.remove(0)
         };
         assert_eq!(demux(&without_tfdt), demux(&with_tfdt));
+    }
+
+    #[test]
+    fn a_negative_trun_offset_moves_the_segment_with_the_samples() {
+        // the fixture's most negative trun offset, in its track's 1/12800 timescale
+        const LEAST_OFFSET_TICKS: u64 = 512;
+        let file = include_bytes!("../tests/fixtures/h264_64x48_negative_cts_frag.mp4");
+        let ports: Vec<Mp4Port> = forwardable_streams(file)
+            .iter()
+            .map(|s| Mp4Port {
+                track_id: s.track_id,
+                caps: s.caps.clone(),
+            })
+            .collect();
+        let mut demux = Mp4DemuxN::new(ports);
+        let mut out = PortCapture::new(1);
+        block_on(async {
+            demux
+                .process(vframe(file.to_vec(), 0), &mut out)
+                .await
+                .unwrap();
+            demux.process(PipelinePacket::Eos, &mut out).await.unwrap();
+        });
+        let timescale = parse_all_tracks(file).unwrap()[0].timescale;
+        let segment = out.segments[0].last().expect("the port's segment");
+        assert_eq!(
+            segment.start,
+            g2g_core::time::ticks_to_ns(LEAST_OFFSET_TICKS, timescale)
+        );
+        assert_eq!(
+            out.ptss[0].iter().min(),
+            Some(&segment.start),
+            "the first picture still opens the presentation"
+        );
     }
 
     #[test]

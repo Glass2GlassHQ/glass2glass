@@ -355,10 +355,9 @@ libraries installed.
   demuxer reads no end trim from any MP4, so it cannot check this.
 - **ST 2038 elements:** `st2038ancdemux` should add a port when a stream no pad
   names appears, once a launch line can link a pad that appears at run time.
-- **Demuxer bugs** (gst commit sweep 2020-11 to 2023-11):
-  - A fragmented MP4 whose `trun` composition offset puts a PTS below 0
-    clamps it to 0. Shift the track and its segment as gst's qtdemux does
-    per `moof`, in `fmp4demux` and `mp4demuxn`.
+- **`mp4demuxn` CENC unit test:** `encrypted_track_decrypts_with_the_cenc_key`
+  fails with `CapsMismatch` under `--features std,mp4-cenc`, and no CI job runs
+  the lib tests with `mp4-cenc`. Fix it and run them in CI.
 - **Demuxer features:** VP8 and VP9 alpha from Matroska BlockAdditions, ONVIF
   `metx` tracks and `cstb` start times in MP4, AVC-Intra fourccs in MOV, and
   AC-4 and E-AC-3 in MPEG-TS.

@@ -447,6 +447,8 @@ pub(crate) struct TrackHeader {
     /// fragment falls back to when its `tfhd` does not declare them.
     pub(crate) trex_defaults: SampleDefaults,
     pub(crate) clean_aperture: Option<CropRectangle>,
+    // ticks the edit list has moved by to follow its fragments' composition shift
+    composition_shift: u64,
 }
 
 // media ticks: where the edit starts presenting, counted from the first edit's start, and the media it presents
@@ -479,6 +481,26 @@ pub(crate) fn clean_aperture_meta(_clean_aperture: Option<CropRectangle>) -> Fra
 }
 
 impl TrackHeader {
+    // gst's qtdemux moves a track's segment by the shift its samples take, so A/V stay in sync
+    pub(crate) fn follow_composition_shift(&mut self, shift: u64) {
+        let added = shift as i64 - self.composition_shift as i64;
+        if added == 0 {
+            return;
+        }
+        self.composition_shift = shift;
+        let added_ns = ticks_to_ns(added.unsigned_abs(), self.timescale) as i64 * added.signum();
+        let moved = |ticks: u64| ticks.saturating_add_signed(added);
+        let moved_ns = |ns: u64| ns.saturating_add_signed(added_ns);
+        self.media_start = moved(self.media_start);
+        self.media_stop = self.media_stop.map(moved);
+        for gap in &mut self.edit_gaps {
+            gap.media_ns = moved_ns(gap.media_ns.start)..moved_ns(gap.media_ns.end);
+        }
+        for edit in &mut self.replayed_edits {
+            edit.media = moved(edit.media.start)..moved(edit.media.end);
+        }
+    }
+
     // the stream time the edit list presents, on the timeline `edited_sample` moves samples to
     fn edit_segment(&self) -> Segment {
         Segment {
@@ -852,6 +874,7 @@ fn parse_trak(trak: &[u8]) -> Result<Option<TrackHeader>, G2gError> {
         replayed_edits: Vec::new(),
         trex_defaults: SampleDefaults::default(),
         clean_aperture,
+        composition_shift: 0,
     }))
 }
 
@@ -2089,9 +2112,28 @@ const DEFAULT_BASE_IS_MOOF: u32 = 0x02_0000;
 /// A `trun` with a `data_offset` starts there, counted from its `traf`'s base
 /// data offset. One without starts where the previous `trun` ended, the first
 /// at the start of the following `mdat` payload.
-// per track, where the next fragment starts when it carries no tfdt, kept across the fragments of one stream
+// per track, kept across the fragments of one stream
 #[derive(Debug, Clone, Default)]
-pub(crate) struct FragmentStarts(Vec<(Option<u32>, u64)>);
+pub(crate) struct FragmentStarts(Vec<TrackFragmentStart>);
+
+impl FragmentStarts {
+    // ticks, `None` until a fragment of the track arrives
+    pub(crate) fn composition_shift(&self, track_id: u32) -> Option<u64> {
+        self.0
+            .iter()
+            .find(|start| start.track_id == Some(track_id))
+            .map(|start| start.composition_shift)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct TrackFragmentStart {
+    track_id: Option<u32>,
+    // where the next fragment starts when it carries no tfdt
+    next_decode_ticks: u64,
+    // gst's qtdemux moves presentation times up until the most negative composition offset lands on its decode time
+    composition_shift: u64,
+}
 
 pub(crate) fn moof_samples<'a, 't>(
     data: &'a [u8],
@@ -2101,7 +2143,7 @@ pub(crate) fn moof_samples<'a, 't>(
 ) -> Result<Vec<MoofSample<'a>>, G2gError> {
     let mut out = Vec::new();
     let mut open: Option<Vec<OpenTraf>> = None;
-    let fragment_end_ticks = &mut fragment_starts.0;
+    let track_starts = &mut fragment_starts.0;
     for (kind, payload, box_at) in boxes_at(data) {
         match kind {
             b"moof" => {
@@ -2150,14 +2192,14 @@ pub(crate) fn moof_samples<'a, 't>(
                         });
                         continue;
                     };
-                    let previous_end = fragment_end_ticks
+                    let previous = track_starts
                         .iter()
-                        .position(|(id, _)| *id == track_id);
+                        .position(|start| start.track_id == track_id);
                     let base_time = match find_box(traf, b"tfdt").map(|tfdt| (tfdt.first(), tfdt)) {
                         Some((Some(1), tfdt)) => be64(tfdt, 4)?,
                         Some((Some(0), tfdt)) => be32(tfdt, 4)? as u64,
                         Some(_) => return Err(G2gError::CapsMismatch),
-                        None => previous_end.map_or(0, |at| fragment_end_ticks[at].1),
+                        None => previous.map_or(0, |at| track_starts[at].next_decode_ticks),
                     };
                     // The `tfhd` is where a CMAF fragment declares the sample duration
                     // its `trun` then omits.
@@ -2183,10 +2225,25 @@ pub(crate) fn moof_samples<'a, 't>(
                     let end = trun_samples.iter().fold(base_time, |end, sample| {
                         end.saturating_add(u64::from(sample.duration))
                     });
-                    match previous_end {
-                        Some(at) => fragment_end_ticks[at].1 = end,
-                        None => fragment_end_ticks.push((track_id, end)),
-                    }
+                    // latched from the track's first fragment, so a later fragment without reordering keeps its place
+                    let composition_shift = match previous {
+                        Some(at) => {
+                            track_starts[at].next_decode_ticks = end;
+                            track_starts[at].composition_shift
+                        }
+                        None => {
+                            let least = trun_samples
+                                .iter()
+                                .map(|sample| sample.composition_offset)
+                                .fold(0, i64::min);
+                            track_starts.push(TrackFragmentStart {
+                                track_id,
+                                next_decode_ticks: end,
+                                composition_shift: least.unsigned_abs(),
+                            });
+                            least.unsigned_abs()
+                        }
+                    };
                     // An encrypted track's per-sample IVs / subsample maps live in the
                     // fragment's aux info, addressed from the start of this `moof`.
                     let crypt = match cenc {
@@ -2199,7 +2256,12 @@ pub(crate) fn moof_samples<'a, 't>(
                     trafs.push(OpenTraf {
                         fragment: Some(OpenFragment {
                             track_id,
-                            timings: fragment_sample_timings(base_time, &trun_samples, timescale),
+                            timings: fragment_sample_timings(
+                                base_time,
+                                &trun_samples,
+                                timescale,
+                                composition_shift,
+                            ),
                             crypt,
                             fragment_at: base_offset.saturating_add(box_at as u64),
                         }),
@@ -3382,6 +3444,7 @@ fn fragment_sample_timings(
     base_time: u64,
     samples: &[TrunSample],
     timescale: u32,
+    composition_shift: u64,
 ) -> Vec<FragmentSampleTiming> {
     let mut decode_time = base_time;
     samples
@@ -3392,7 +3455,9 @@ fn fragment_sample_timings(
                 sync: sample.sync,
                 dts_ns: ticks_to_ns(decode_time, timescale),
                 pts_ns: ticks_to_ns(
-                    decode_time.saturating_add_signed(sample.composition_offset),
+                    decode_time
+                        .saturating_add(composition_shift)
+                        .saturating_add_signed(sample.composition_offset),
                     timescale,
                 ),
                 duration_ns: ticks_to_ns(u64::from(sample.duration), timescale),
@@ -3674,6 +3739,7 @@ mod tests {
             replayed_edits: Vec::new(),
             trex_defaults: SampleDefaults::default(),
             clean_aperture: None,
+            composition_shift: 0,
         };
         let gap_ns = ns(u64::from(SECOND_EDIT_MEDIA)) - ns(first_end);
         let segment = track.presentation_segment();
@@ -3750,6 +3816,7 @@ mod tests {
             replayed_edits: replayed,
             trex_defaults: SampleDefaults::default(),
             clean_aperture: None,
+            composition_shift: 0,
         };
         let ns = |ticks: u32| ticks_to_ns(u64::from(ticks), TIMESCALE);
         let sample = |index: u32, keyframe: bool| Sample {
@@ -4048,9 +4115,9 @@ mod tests {
     const BFRAME_FRAGMENTED_PTS_DTS: &str =
         include_str!("../tests/fixtures/h264_64x48_bframes_frag.mp4.pts_dts");
 
-    fn probed_pts_dts_ns(timescale: u32) -> Vec<(u64, u64)> {
+    fn probed_pts_dts_ns(probe: &str, timescale: u32) -> Vec<(u64, u64)> {
         let ticks_ns = |ticks: &str| ticks_to_ns(ticks.parse().unwrap(), timescale);
-        BFRAME_FRAGMENTED_PTS_DTS
+        probe
             .lines()
             .map(|line| {
                 let (pts, dts) = line.split_once(',').unwrap();
@@ -4073,7 +4140,10 @@ mod tests {
         )
         .unwrap();
         let pts_dts: Vec<(u64, u64)> = samples.iter().map(|s| (s.pts_ns, s.dts_ns)).collect();
-        assert_eq!(pts_dts, probed_pts_dts_ns(header.timescale));
+        assert_eq!(
+            pts_dts,
+            probed_pts_dts_ns(BFRAME_FRAGMENTED_PTS_DTS, header.timescale)
+        );
     }
 
     #[test]
@@ -4088,7 +4158,35 @@ mod tests {
         )
         .unwrap();
         let pts_dts: Vec<(u64, u64)> = samples.iter().map(|(_, s)| (s.pts_ns, s.dts_ns)).collect();
-        assert_eq!(pts_dts, probed_pts_dts_ns(tracks[0].timescale));
+        assert_eq!(
+            pts_dts,
+            probed_pts_dts_ns(BFRAME_FRAGMENTED_PTS_DTS, tracks[0].timescale)
+        );
+    }
+
+    // ffmpeg testsrc 64x48, libx264 -bf 2 -g 6, -movflags frag_keyframe+empty_moov+negative_cts_offsets
+    const NEGATIVE_CTS_FRAGMENTED: &[u8] =
+        include_bytes!("../tests/fixtures/h264_64x48_negative_cts_frag.mp4");
+    // ffmpeg's mov demuxer shifts these by the most negative trun offset, as gst's qtdemux does
+    const NEGATIVE_CTS_FRAGMENTED_PTS_DTS: &str =
+        include_str!("../tests/fixtures/h264_64x48_negative_cts_frag.mp4.pts_dts");
+
+    #[test]
+    fn negative_trun_offsets_shift_presentation_times() {
+        let tracks = parse_all_tracks(NEGATIVE_CTS_FRAGMENTED).unwrap();
+        let samples = parse_fragments_multi(
+            NEGATIVE_CTS_FRAGMENTED,
+            &tracks,
+            0,
+            &mut FragmentStarts::default(),
+            None,
+        )
+        .unwrap();
+        let pts_dts: Vec<(u64, u64)> = samples.iter().map(|(_, s)| (s.pts_ns, s.dts_ns)).collect();
+        assert_eq!(
+            pts_dts,
+            probed_pts_dts_ns(NEGATIVE_CTS_FRAGMENTED_PTS_DTS, tracks[0].timescale)
+        );
     }
 
     #[test]

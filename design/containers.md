@@ -1204,6 +1204,14 @@ own, or one past its PTS, which `ctts` version 0 cannot express, decodes when it
 presents. A sample with no duration of its own lasts from the previous sample's
 decode time, since a reordered stream's PTS deltas skip around.
 
+Negative composition offsets move a track's presentation times up until the
+most negative one lands on its decode time, as gst's `qtdemux` does with its
+`cslg_shift`, and `Mp4DemuxN` moves the track's edit-list segment by the same
+amount, so A/V sync holds. A progressive file takes the shift from its `ctts`.
+A fragmented one takes it from the track's first `trun` and keeps it, so a
+later fragment without reordering keeps its place where gst recomputes it per
+`trun`.
+
 Compressed audio negotiates with the `0/0` "unknown until parsed" caps, so
 `Mp4MuxN` adopts the concrete channel count and rate from the runtime
 `CapsChanged` a demuxer emits, while the `moov` is still unwritten. Without it a

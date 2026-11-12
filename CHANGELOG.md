@@ -191,6 +191,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M2275: RTP receivers take `wait-for-keyframe` and `request-keyframe` to turn off the keyframe gate and its PLI.
 - M2276: a test covers a listening `srtsink` answering a caller's repeated conclusion.
 - M2277: a bare fan-in ref after a typed demuxer pad (`d.text_0 ! o.`) takes the input of that kind.
+- M2278: fragmented MP4 tracks with negative composition offsets shift with their segment instead of clamping PTS to 0.
 
 Breaking: `TimecodeMeta.frames` is a `u16`, `WIRE_VERSION` is 6, `FrameTiming` gains `start_discard_ns` and `end_discard_ns`, `RtpRecvConfig` gains `parameter_sets`, `RtmpPublisher::push` fails with a `PublishRefusal`, and `Interlace` gains `InterleavedBottomFieldFirst`.
 
