@@ -33,7 +33,7 @@ use crate::filesink::io_err;
 use crate::rtcp::SenderClock;
 use crate::rtpdepay::{RtpDepayloader, RtpEncoding};
 use crate::rtprecv::{
-    AccessUnitEmitter, CaptureTimeLatch, RtpRecvConfig, SessionTimeline, TrackTimeline,
+    AccessUnitEmitter, CaptureTimeLatch, RtcpSocket, RtpRecvConfig, SessionTimeline, TrackTimeline,
 };
 use crate::rtspserver::{
     interleaved_frame, RtspEvent, RtspRequest, RtspResponder, TrackTransport,
@@ -556,12 +556,16 @@ async fn receive_udp_track(
     frame_limit: u64,
     seq_base: u64,
     timeline: TrackTimeline<'_>,
+    activity: &Cell<u64>,
     out: &mut dyn OutputSink,
 ) -> Result<(), G2gError> {
     let mut receiver = UdpReceiver::new(rtp_socket, UdpReceiveConfig::default()).map_err(io_err)?;
     crate::rtprecv::receive_rtp(
         &mut receiver,
-        Some(&rtcp_socket),
+        Some(RtcpSocket {
+            socket: &rtcp_socket,
+            activity: Some(activity),
+        }),
         cfg,
         frame_limit,
         seq_base,
@@ -650,6 +654,7 @@ pub(crate) async fn receive_session(
                     remaining,
                     seq_base,
                     track_timeline,
+                    activity,
                     &mut pad.tap,
                 )));
             }

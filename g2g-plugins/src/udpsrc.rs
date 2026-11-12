@@ -55,7 +55,7 @@ use crate::rtpcapturetime::{
 };
 use crate::rtpdepay::RtpEncoding;
 use crate::rtpjitter::JitterConfig;
-use crate::rtprecv::{RtpRecvConfig, SessionTimeline, TrackTimeline};
+use crate::rtprecv::{RtcpSocket, RtpRecvConfig, SessionTimeline, TrackTimeline};
 use crate::sdp::{SdpMedia, OPUS_CLOCK_HZ, OPUS_RTPMAP_CHANNELS};
 use crate::udprecv::{IdleReport, UdpReceiveConfig, UdpReceiver, MAX_DATAGRAM};
 use crate::udpsocket::{bind_udp_socket, unspecified_address, MulticastJoin, UdpBind};
@@ -1038,7 +1038,10 @@ impl SourceLoop for UdpSrc {
             });
             crate::rtprecv::receive_rtp(
                 &mut receiver,
-                rtcp_socket.as_ref(),
+                rtcp_socket.as_ref().map(|socket| RtcpSocket {
+                    socket,
+                    activity: None,
+                }),
                 &recv,
                 self.frame_limit,
                 0,

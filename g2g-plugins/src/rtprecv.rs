@@ -661,6 +661,13 @@ fn feedback_socket<'a>(
     rtcp_socket.unwrap_or_else(|| receiver.socket())
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct RtcpSocket<'a> {
+    pub(crate) socket: &'a tokio::net::UdpSocket,
+    // set to each RTCP packet's arrival, so a sender sending only RTCP stays alive
+    pub(crate) activity: Option<&'a Cell<u64>>,
+}
+
 /// Run the RTP receive loop on `socket` until `frame_limit` access units
 /// have been emitted (`u64::MAX` = run until a socket error or downstream
 /// shutdown, 0 = emit nothing), pushing each completed access unit downstream
@@ -668,7 +675,7 @@ fn feedback_socket<'a>(
 /// first emitted frame carries. Returns the number of access units pushed.
 pub(crate) async fn receive_rtp(
     receiver: &mut UdpReceiver,
-    rtcp_socket: Option<&tokio::net::UdpSocket>,
+    rtcp: Option<RtcpSocket<'_>>,
     cfg: &RtpRecvConfig,
     frame_limit: u64,
     seq_base: u64,
@@ -691,6 +698,8 @@ pub(crate) async fn receive_rtp(
 
     // RTCP feedback state: the sender's RTP and RTCP addresses (learned from
     // their first datagrams) and report timers.
+    let rtcp_socket = rtcp.map(|rtcp| rtcp.socket);
+    let rtcp_activity = rtcp.and_then(|rtcp| rtcp.activity);
     let rtcp_on = cfg.rtcp_rr_interval_ms > 0;
     let rr_interval_ns = cfg.rtcp_rr_interval_ms * 1_000_000;
     let mut peer: Option<SocketAddr> = None;
@@ -819,6 +828,9 @@ pub(crate) async fn receive_rtp(
         // the session timeline.
         if rtcp::is_rtcp(payload) {
             sender_rtcp = Some(from);
+            if let Some(activity) = rtcp_activity {
+                activity.set(now);
+            }
             if rtcp_on {
                 for p in rtcp::parse_compound(payload) {
                     if let RtcpPacket::SenderReport { ntp, .. } = p {
@@ -1200,6 +1212,7 @@ mod tests {
     async fn first_receiver_report_source(
         rtp: tokio::net::UdpSocket,
         rtcp: tokio::net::UdpSocket,
+        rtcp_activity: &Cell<u64>,
         report_inbox: &tokio::net::UdpSocket,
     ) -> SocketAddr {
         let cfg = RtpRecvConfig {
@@ -1218,7 +1231,15 @@ mod tests {
                 assert!(matches!(packets[0], RtcpPacket::ReceiverReport { .. }));
                 from
             }
-            ended = receive_rtp(&mut receiver, Some(&rtcp), &cfg, u64::MAX, 0, None, &mut out) => {
+            ended = receive_rtp(
+                &mut receiver,
+                Some(RtcpSocket { socket: &rtcp, activity: Some(rtcp_activity) }),
+                &cfg,
+                u64::MAX,
+                0,
+                None,
+                &mut out,
+            ) => {
                 panic!("the receive loop ended before reporting: {ended:?}")
             }
         }
@@ -1238,8 +1259,11 @@ mod tests {
                 .send_to(&RTP_HEADER_ONLY, loopback(&rtp))
                 .await
                 .unwrap();
-            let source = first_receiver_report_source(rtp, rtcp, &sender_rtcp).await;
+            let rtcp_activity = Cell::new(0);
+            let source =
+                first_receiver_report_source(rtp, rtcp, &rtcp_activity, &sender_rtcp).await;
             assert_eq!(source.port(), receiver_rtcp.port());
+            assert_eq!(rtcp_activity.get(), 0, "no RTCP came in");
         });
     }
 
@@ -1262,7 +1286,13 @@ mod tests {
                 .send_to(&RTP_HEADER_ONLY, loopback(&rtp))
                 .await
                 .unwrap();
-            first_receiver_report_source(rtp, rtcp, &sender_rtcp_elsewhere).await;
+            let rtcp_activity = Cell::new(0);
+            first_receiver_report_source(rtp, rtcp, &rtcp_activity, &sender_rtcp_elsewhere).await;
+            assert_ne!(
+                rtcp_activity.get(),
+                0,
+                "the sender report marks the sender active"
+            );
         });
     }
 
