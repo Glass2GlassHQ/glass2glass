@@ -1932,11 +1932,11 @@ async fn prepare_graph<'a>(
     // fallback clock when none was elected.
     let source_clock_sync = sink_clock_sync
         .clone()
-        .or_else(|| fallback_source_sync(state.as_ref(), latency));
+        .unwrap_or_else(|| fallback_source_sync(state.as_ref(), latency));
     for &node in topo {
-        match (vg.element_mut(node), &source_clock_sync, &sink_clock_sync) {
-            (Some(GraphNodeRef::Source(src)), Some(sync), _) => src.set_clock_sync(sync.clone()),
-            (Some(GraphNodeRef::Element(elem)), _, Some(sync)) => elem.set_clock_sync(sync.clone()),
+        match (vg.element_mut(node), &sink_clock_sync) {
+            (Some(GraphNodeRef::Source(src)), _) => src.set_clock_sync(source_clock_sync.clone()),
+            (Some(GraphNodeRef::Element(elem)), Some(sync)) => elem.set_clock_sync(sync.clone()),
             _ => {}
         }
     }

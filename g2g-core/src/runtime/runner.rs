@@ -737,10 +737,8 @@ where
     // than its own zero, on a fallback clock when none was elected.
     let source_sync = elected_sync
         .clone()
-        .or_else(|| fallback_source_sync(state.as_ref(), latency));
-    if let Some(sync) = source_sync {
-        SourceLoop::set_clock_sync(source, sync);
-    }
+        .unwrap_or_else(|| fallback_source_sync(state.as_ref(), latency));
+    SourceLoop::set_clock_sync(source, source_sync);
     if let Some(sync) = elected_sync {
         AsyncElement::set_clock_sync(sink, sync);
     }
