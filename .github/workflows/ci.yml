@@ -264,6 +264,9 @@ jobs:
         run: cargo test -p g2g-plugins --locked --features ffmpeg,opus --test m753_ts_audio_codecs --test m757_ac3_flac --test m1731_ts_loas_aac
       - name: decodebin picks a stream by index
         run: cargo test -p g2g-plugins --locked --features ffmpeg --test m1803_decodebin_stream_index
+      # the conformance job builds rav1d alone, these build both AV1 decoders
+      - name: decodebin stream selection with ffmpeg and rav1d
+        run: cargo test -p g2g-plugins --locked --features ffmpeg,rav1d --test m960_decodebin_stream_select --test m961_mp4_stream_select -- --nocapture
       - name: fan-outs carry each track of a shared codec
         run: cargo test -p g2g-plugins --locked --features ffmpeg --test m1808_fanout_same_codec_tracks
       - name: parsebin remuxes without decoding

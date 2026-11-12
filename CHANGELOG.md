@@ -193,6 +193,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M2277: a bare fan-in ref after a typed demuxer pad (`d.text_0 ! o.`) takes the input of that kind.
 - M2278: fragmented MP4 tracks with negative composition offsets shift with their segment instead of clamping PTS to 0.
 - M2279: the `mp4demuxn` CENC unit test writes the `mvex` its fragments need and runs in CI.
+- M2280: CI runs the decodebin stream-selection tests with both `ffmpeg` and `rav1d` built.
 
 Breaking: `TimecodeMeta.frames` is a `u16`, `WIRE_VERSION` is 6, `FrameTiming` gains `start_discard_ns` and `end_discard_ns`, `RtpRecvConfig` gains `parameter_sets`, `RtmpPublisher::push` fails with a `PublishRefusal`, and `Interlace` gains `InterleavedBottomFieldFirst`.
 
