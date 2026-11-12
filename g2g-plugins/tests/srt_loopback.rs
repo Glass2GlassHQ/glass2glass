@@ -864,6 +864,52 @@ async fn a_caller_srtsrc_receives_from_a_listening_srtsink() {
     assert_eq!(received_from(&mut src, sink).await, payloads_then_eos());
 }
 
+// libsrt resends its conclusion when the listener's reply is lost
+#[tokio::test]
+async fn a_listening_srtsink_answers_a_repeated_conclusion() {
+    const CALLER_SOCKET_ID: u32 = 0x0123_4567;
+    let port = free_port();
+    let mut sink = sink_with_uri(format!("srt://127.0.0.1:{port}?mode=listener"));
+    let caller = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    caller.connect(("127.0.0.1", port)).await.unwrap();
+    let calling = async {
+        let mut handshake =
+            srt::SrtHandshake::new_caller(CALLER_SOCKET_ID, 0, LATENCY_MS, None, None);
+        let mut last_sent = handshake.start().expect("a caller opens the handshake");
+        caller.send(&last_sent).await.unwrap();
+        let mut buf = [0u8; 2048];
+        while !handshake.is_established() {
+            let n = caller.recv(&mut buf).await.unwrap();
+            if let Some(reply) = handshake.on_packet(&buf[..n]).reply {
+                caller.send(&reply).await.unwrap();
+                last_sent = reply;
+            }
+        }
+        caller.send(&last_sent).await.unwrap();
+        loop {
+            let n = caller.recv(&mut buf).await.unwrap();
+            if let Some(srt::Control::Handshake(answer)) = srt::parse_control(&buf[..n]) {
+                return answer.hs_type;
+            }
+        }
+    };
+    let sending = async {
+        for tag in 0..=u8::MAX {
+            send_tagged(&mut sink, tag).await.expect("send");
+            tokio::time::sleep(PAYLOAD_SPACING).await;
+        }
+    };
+    let answer = tokio::time::timeout(RUN_TIMEOUT, async {
+        tokio::select! {
+            answer = calling => answer,
+            () = sending => panic!("the sink never answered the repeated conclusion"),
+        }
+    })
+    .await
+    .expect("answers within the timeout");
+    assert_eq!(answer, srt::URQ_CONCLUSION);
+}
+
 #[tokio::test]
 async fn rendezvous_srtsink_and_srtsrc_meet_and_stream() {
     for _ in 0..RENDEZVOUS_MEETINGS {
