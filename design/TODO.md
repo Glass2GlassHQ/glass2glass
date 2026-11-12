@@ -334,9 +334,6 @@ libraries installed.
   - The fan-in muxers refuse codecs the gst muxer of the same name takes:
     `matroskamux` PCM, Vorbis, Theora and VP6, `mp4mux` ADTS AAC and VP8,
     `flvmux` and `mpegtsmux` VP8 (calliope TESTING technique 23 lists the rest).
-- **LATM AAC into `flvmux`, `mp4mux` and `matroskamux`:** convert LOAS/LATM to
-  raw AAC with its AudioSpecificConfig ahead of those muxers, which refuse it
-  (`aac/latm_stereo_to_51.ts`, `mpegts/loewe.ts`).
 - **Opus end trim in fragmented MP4:** the fragmented `mp4mux` layout writes
   its `moov` before the stream ends, so the `elst` duration is 0 and the end
   trim is only in the last sample's duration, which gst's `qtdemux` ignores (a
