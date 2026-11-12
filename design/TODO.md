@@ -138,11 +138,6 @@ libraries installed.
 
 ## Receive / decode
 
-- **RTSP ingest sync from a late sender report:** a track whose first frame
-  comes before its first RTCP sender report stays placed by arrival time, so
-  publisher sources that start apart (gst `rtspclientsink` sends 1 to 2 s
-  before its first report) record without their start gap. Move such a track
-  onto the report's timeline once its first report arrives.
 - **`VulkanVideoDec` residuals.** Run the `vulkanvideo` GPU tests on Intel ANV.
 - **`VulkanVideoDec` conformance residue on RADV.** `WPP_D_ericsson` (64 wide,
   wavefront parallel processing with dependent slice segments) is refused,

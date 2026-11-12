@@ -800,14 +800,17 @@ The tracks of one session share a timeline (`SessionTimeline` in `rtprecv.rs`).
 The session's first RTCP sender report fixes the offset between the publisher's
 wall clock and local monotonic time, each track maps its RTP timestamps through
 its own latest report, and the session's first frame is PTS zero. A track with
-no report before its first frame is placed by its arrival time, and frames from
-before the session's first frame are dropped. ffmpeg sends a report before each
-track's first RTP packet. Validated against ffmpeg publishing video and AAC over
-UDP and TCP-interleaved with the audio delayed 500 ms by `-itsoffset`: the
-recorded offset matches within 2 ms. gst's `rtspclientsink` sends its first
-report after its first frames, so its tracks are placed by arrival time: audio
-stamped 500 ms late by `audiotestsrc timestamp-offset` records at the same PTS
-as the video.
+no report before its first frame is placed by its arrival time until its first
+report arrives, and the frames after that report are placed by it, as gst's
+`rtpbin` does with `rtcp-sync=always`. Moving forward leaves a gap. Moving back
+drops frames until their PTS passes the last one emitted. Frames from before the
+session's first frame are dropped. ffmpeg sends a report before each track's
+first RTP packet. A UDP track reads a waiting report before its RTP, but the two
+ports wake separately, so the report can still be read after the packet.
+Validated against ffmpeg publishing video and AAC over UDP and TCP-interleaved
+with the audio delayed 500 ms by `-itsoffset`: the recorded offset matches
+within 2 ms. gst's `rtspclientsink` sends its first report 1 to 2 s after its
+first frames, so those frames are placed by arrival time.
 
 ## RTSP publishing
 

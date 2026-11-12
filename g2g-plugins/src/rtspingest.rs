@@ -591,10 +591,12 @@ async fn receive_udp_track(
 ) -> Result<(), G2gError> {
     let mut receiver = UdpReceiver::new(rtp_socket, UdpReceiveConfig::default()).map_err(io_err)?;
     tokio::select! {
-        r = crate::rtprecv::receive_rtp(&mut receiver, cfg, frame_limit, seq_base, Some(timeline), out) => r.map(drop),
+        // sender reports already received are noted before the RTP sent after them
+        biased;
         _ = read_sender_reports(&rtcp_socket, &cfg.encoding, timeline, activity) => {
             unreachable!("sender reports are read until the session ends")
         }
+        r = crate::rtprecv::receive_rtp(&mut receiver, cfg, frame_limit, seq_base, Some(timeline), out) => r.map(drop),
     }
 }
 

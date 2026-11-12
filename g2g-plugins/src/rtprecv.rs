@@ -296,29 +296,47 @@ impl TrackTimeline<'_> {
         }
     }
 
-    // where on the session timeline the frame stamped `rtp_timestamp` falls, from the
-    // sender report when one came first and from the frame's arrival otherwise
-    fn session_offset_ns(&self, rtp_timestamp: u32, arrival_ns: u64) -> i64 {
-        let local_ns = match (
-            self.sender_clock.get(),
-            self.session.sender_minus_local_ns.get(),
-        ) {
-            (Some(clock), Some(offset)) => clock.wall_clock_ns(rtp_timestamp) - offset,
-            _ => arrival_ns as i64,
-        };
+    // the local monotonic instant of the frame stamped `rtp_timestamp`, once this
+    // track has a sender report
+    fn reported_local_ns(&self, rtp_timestamp: u32) -> Option<i64> {
+        let clock = self.sender_clock.get()?;
+        let sender_minus_local_ns = self.session.sender_minus_local_ns.get()?;
+        Some(clock.wall_clock_ns(rtp_timestamp) - sender_minus_local_ns)
+    }
+
+    // the session timeline position of a local monotonic instant, the first one asked becoming zero
+    fn session_ns(&self, local_ns: i64) -> i64 {
         let origin = self.session.origin_ns.get().unwrap_or(local_ns);
         self.session.origin_ns.set(Some(origin));
         local_ns - origin
     }
+
+    // where on the session timeline the frame stamped `rtp_timestamp` falls, from the
+    // sender report when one came first and from the frame's arrival otherwise
+    fn session_offset_ns(&self, rtp_timestamp: u32, arrival_ns: u64) -> i64 {
+        let local_ns = self
+            .reported_local_ns(rtp_timestamp)
+            .unwrap_or(arrival_ns as i64);
+        self.session_ns(local_ns)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum TimelinePlacement<'a> {
+    BeforeFirstFrame(TrackTimeline<'a>),
+    // moved onto the sender report's timeline when the track's first report arrives
+    ByArrival(TrackTimeline<'a>),
+    Fixed,
 }
 
 // turns depayloaded access units into frames with PTS rebased to start at zero,
 // shared by the UDP (`receive_rtp`) and TCP-interleaved (`rtspingest`) ingest paths
 #[derive(Debug)]
 pub(crate) struct AccessUnitEmitter<'a> {
-    // taken by the first access unit, which places this stream on the session timeline
-    timeline: Option<TrackTimeline<'a>>,
+    placement: TimelinePlacement<'a>,
     session_offset_ns: i64,
+    // frames before this PTS are dropped after a late sender report moves the track back
+    min_pts_ns: u64,
     encoding: RtpEncoding,
     // emptied at the first keyframe
     parameter_sets: Vec<u8>,
@@ -344,8 +362,12 @@ impl<'a> AccessUnitEmitter<'a> {
         timeline: Option<TrackTimeline<'a>>,
     ) -> Self {
         Self {
-            timeline,
+            placement: match timeline {
+                Some(timeline) => TimelinePlacement::BeforeFirstFrame(timeline),
+                None => TimelinePlacement::Fixed,
+            },
             session_offset_ns: 0,
+            min_pts_ns: 0,
             encoding: cfg.encoding.clone(),
             parameter_sets: cfg.parameter_sets.clone(),
             pts_rebase: RtpPtsRebase::new(),
@@ -366,6 +388,31 @@ impl<'a> AccessUnitEmitter<'a> {
     fn restart_timeline_after(&mut self, silence_ns: u64) {
         self.pts_offset_ns = self.last_pts_ns.saturating_add(silence_ns);
         self.pts_rebase = RtpPtsRebase::new();
+    }
+
+    fn place_on_session_timeline(&mut self, rtp_timestamp: u32, arrival_ns: u64, stream_pts: u64) {
+        match self.placement {
+            TimelinePlacement::Fixed => {}
+            TimelinePlacement::BeforeFirstFrame(timeline) => {
+                self.session_offset_ns =
+                    timeline.session_offset_ns(rtp_timestamp, arrival_ns) - stream_pts as i64;
+                self.placement = match timeline.reported_local_ns(rtp_timestamp) {
+                    Some(_) => TimelinePlacement::Fixed,
+                    None => TimelinePlacement::ByArrival(timeline),
+                };
+            }
+            TimelinePlacement::ByArrival(timeline) => {
+                let Some(local_ns) = timeline.reported_local_ns(rtp_timestamp) else {
+                    return;
+                };
+                let session_offset_ns = timeline.session_ns(local_ns) - stream_pts as i64;
+                if session_offset_ns < self.session_offset_ns {
+                    self.min_pts_ns = self.last_pts_ns + 1;
+                }
+                self.session_offset_ns = session_offset_ns;
+                self.placement = TimelinePlacement::Fixed;
+            }
+        }
     }
 
     #[cfg(feature = "rtsp-server")]
@@ -389,17 +436,18 @@ impl<'a> AccessUnitEmitter<'a> {
             self.awaiting_keyframe = false;
         }
         let arrival_ns = g2g_core::metrics::monotonic_ns();
-        if let Some(timeline) = self.timeline.take() {
-            self.session_offset_ns = timeline.session_offset_ns(au.rtp_timestamp, arrival_ns);
-        }
         let stream_pts = self.pts_offset_ns
             + self
                 .pts_rebase
                 .pts_ns(au.rtp_timestamp, self.encoding.clock_rate_hz());
+        self.place_on_session_timeline(au.rtp_timestamp, arrival_ns, stream_pts);
         // a stream that started before the session's first frame drops what precedes it
         let Ok(pts) = u64::try_from(stream_pts as i64 + self.session_offset_ns) else {
             return Ok(false);
         };
+        if pts < self.min_pts_ns {
+            return Ok(false);
+        }
         self.last_pts_ns = pts;
         let announced = if keyframe {
             core::mem::take(&mut self.parameter_sets)
@@ -913,6 +961,89 @@ mod tests {
 
         assert_eq!(pts_ms(&video_out), [0, 100]);
         assert_eq!(pts_ms(&audio_out), [40]);
+    }
+
+    fn push_all(
+        emitter: &mut AccessUnitEmitter<'_>,
+        rtp_timestamps: &[u32],
+        out: &mut CollectSink,
+    ) {
+        block_on(async {
+            for &rtp in rtp_timestamps {
+                emitter.push(access_unit(rtp), None, out).await.unwrap();
+            }
+        });
+    }
+
+    #[test]
+    fn a_late_sender_report_moves_its_track_forward_onto_the_session_timeline() {
+        // far enough ahead that the audio frame placed by its real arrival precedes the origin
+        const FAR_FUTURE_ARRIVAL_NS: u64 = 1_000 * 3_600 * 1_000 * NANOS_PER_MS;
+        let session = SessionTimeline::default();
+        let (video_clock, audio_clock) = (Cell::new(None), Cell::new(None));
+        let video = TrackTimeline {
+            session: &session,
+            sender_clock: &video_clock,
+        };
+        let audio = TrackTimeline {
+            session: &session,
+            sender_clock: &audio_clock,
+        };
+        video.note_sender_report(
+            report(VIDEO_REPORT_RTP, VIDEO_CLOCK_HZ),
+            FAR_FUTURE_ARRIVAL_NS,
+        );
+        let mut video_emitter = emitter(RtpEncoding::H264, video);
+        let mut audio_emitter = emitter(RtpEncoding::Opus, audio);
+        let (mut video_out, mut audio_out) = (CollectSink::default(), CollectSink::default());
+
+        push_all(&mut video_emitter, &[VIDEO_REPORT_RTP], &mut video_out);
+        push_all(&mut audio_emitter, &[AUDIO_REPORT_RTP], &mut audio_out);
+        audio.note_sender_report(
+            report(AUDIO_REPORT_RTP, AUDIO_CLOCK_HZ),
+            FAR_FUTURE_ARRIVAL_NS,
+        );
+        let after_report = [40, 140].map(|ms| ticks_after(AUDIO_REPORT_RTP, AUDIO_CLOCK_HZ, ms));
+        push_all(&mut audio_emitter, &after_report, &mut audio_out);
+
+        assert_eq!(pts_ms(&audio_out), [40, 140]);
+    }
+
+    #[test]
+    fn a_late_sender_report_moving_its_track_back_drops_frames_already_passed() {
+        const HOUR_MS: u64 = 3_600_000;
+        let session = SessionTimeline::default();
+        let (video_clock, audio_clock) = (Cell::new(None), Cell::new(None));
+        let video = TrackTimeline {
+            session: &session,
+            sender_clock: &video_clock,
+        };
+        let audio = TrackTimeline {
+            session: &session,
+            sender_clock: &audio_clock,
+        };
+        // a report arriving at monotonic zero puts the origin at or before any real arrival
+        video.note_sender_report(report(VIDEO_REPORT_RTP, VIDEO_CLOCK_HZ), 0);
+        let mut video_emitter = emitter(RtpEncoding::H264, video);
+        let mut audio_emitter = emitter(RtpEncoding::Opus, audio);
+        let (mut video_out, mut audio_out) = (CollectSink::default(), CollectSink::default());
+
+        push_all(&mut video_emitter, &[VIDEO_REPORT_RTP], &mut video_out);
+        let first_audio_rtp = AUDIO_REPORT_RTP;
+        push_all(&mut audio_emitter, &[first_audio_rtp], &mut audio_out);
+        // the report places audio 20 ms after its first frame at the origin, behind its arrival
+        let origin_audio_rtp = ticks_after(first_audio_rtp, AUDIO_CLOCK_HZ, 20);
+        audio.note_sender_report(report(origin_audio_rtp, AUDIO_CLOCK_HZ), 0);
+        let an_hour_later_rtp = ticks_after(origin_audio_rtp, AUDIO_CLOCK_HZ, HOUR_MS);
+        push_all(
+            &mut audio_emitter,
+            &[origin_audio_rtp, an_hour_later_rtp],
+            &mut audio_out,
+        );
+
+        let audio_pts_ms = pts_ms(&audio_out);
+        assert_eq!(audio_pts_ms.len(), 2, "the frame at the origin is dropped");
+        assert_eq!(audio_pts_ms[1], HOUR_MS);
     }
 
     #[test]

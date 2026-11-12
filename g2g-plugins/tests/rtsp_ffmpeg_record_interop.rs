@@ -224,9 +224,14 @@ const VIDEO_PORT: usize = 0;
 const AUDIO_PORT: usize = 1;
 // what `-itsoffset` delays ffmpeg's audio input by
 const AUDIO_DELAY_MS: i64 = 500;
-// ffmpeg's aac encoder starts one 1024-sample frame early, 21 ms at 48 kHz
-const AAC_PRIMING_MS: i64 = 21;
-// both first PTS are truncated to whole milliseconds
+const AV_VIDEO_FPS: u64 = 15;
+const AUDIO_SAMPLE_RATE_HZ: u64 = 48_000;
+const AAC_FRAME_SAMPLES: u64 = 1024;
+const NANOS_PER_SEC: f64 = 1e9;
+const NANOS_PER_MS: f64 = 1e6;
+// ffmpeg's aac encoder starts one frame early
+const AAC_PRIMING_MS: i64 = (AAC_FRAME_SAMPLES * 1_000 / AUDIO_SAMPLE_RATE_HZ) as i64;
+// both start estimates are truncated to whole milliseconds
 const SYNC_TOLERANCE_MS: i64 = 2;
 const AV_ACCESS_UNITS: u64 = 30;
 
@@ -314,14 +319,14 @@ fn ffmpeg_av_publisher(rtsp_transport: &'static str) -> impl FnOnce(&str) -> Com
                 "-f",
                 "lavfi",
                 "-i",
-                "testsrc=size=320x240:rate=15:duration=4",
+                &format!("testsrc=size=320x240:rate={AV_VIDEO_FPS}:duration=4"),
             ])
             .args(["-itsoffset", &format!("{AUDIO_DELAY_MS}ms")])
             .args([
                 "-f",
                 "lavfi",
                 "-i",
-                "sine=frequency=440:sample_rate=48000:duration=4",
+                &format!("sine=frequency=440:sample_rate={AUDIO_SAMPLE_RATE_HZ}:duration=4"),
             ])
             .args(["-map", "0:v", "-map", "1:a"])
             .args(H264.encoder_args)
@@ -357,9 +362,19 @@ fn gst_av_publisher(protocols: &'static str) -> impl FnOnce(&str) -> Command {
     }
 }
 
+// a track's first frame can come before its sender report and keep its arrival
+// time, so its start is counted back from its last frame
+fn start_ms_from_last_frame(pts_ns: &[u64], frame_period_ns: f64) -> i64 {
+    let last_ns = *pts_ns.last().expect("the track recorded frames") as f64;
+    let frames_before_last = (pts_ns.len() - 1) as f64;
+    ((last_ns - frames_before_last * frame_period_ns) / NANOS_PER_MS) as i64
+}
+
 fn assert_audio_follows_video_by_the_publish_offset(recorded: &PortPts) {
-    let first_ms = |port: usize| recorded.pts_ns[port][0] as i64 / 1_000_000;
-    let offset_ms = first_ms(AUDIO_PORT) - first_ms(VIDEO_PORT);
+    let video_frame_ns = NANOS_PER_SEC / AV_VIDEO_FPS as f64;
+    let audio_frame_ns = NANOS_PER_SEC * AAC_FRAME_SAMPLES as f64 / AUDIO_SAMPLE_RATE_HZ as f64;
+    let offset_ms = start_ms_from_last_frame(&recorded.pts_ns[AUDIO_PORT], audio_frame_ns)
+        - start_ms_from_last_frame(&recorded.pts_ns[VIDEO_PORT], video_frame_ns);
     let expected_ms = AUDIO_DELAY_MS - AAC_PRIMING_MS;
     assert!(
         (offset_ms - expected_ms).abs() <= SYNC_TOLERANCE_MS,
