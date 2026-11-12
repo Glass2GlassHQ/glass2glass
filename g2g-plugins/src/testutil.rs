@@ -90,6 +90,14 @@ pub(crate) fn run_packets<E: AsyncElement>(
     sink
 }
 
+#[cfg(any(
+    all(
+        any(target_os = "linux", target_os = "macos", windows),
+        feature = "ffmpeg"
+    ),
+    all(target_os = "windows", feature = "mf-decode"),
+    all(target_os = "linux", feature = "openh264"),
+))]
 pub(crate) fn h264_caps(alignment: g2g_core::BitstreamAlignment) -> Caps {
     Caps::CompressedVideo {
         codec: g2g_core::VideoCodec::H264,
@@ -102,6 +110,14 @@ pub(crate) fn h264_caps(alignment: g2g_core::BitstreamAlignment) -> Caps {
     }
 }
 
+#[cfg(any(
+    all(
+        any(target_os = "linux", target_os = "macos", windows),
+        feature = "ffmpeg"
+    ),
+    all(target_os = "windows", feature = "mf-decode"),
+    all(target_os = "linux", feature = "openh264"),
+))]
 pub(crate) fn decode_h264<E: AsyncElement>(decoder: &mut E, annexb: &[u8]) -> Vec<PipelinePacket> {
     let parsed = run(
         &mut crate::h264parse::H264Parse::reframing(),
