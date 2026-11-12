@@ -584,7 +584,9 @@ clock is subtracted from the monotonic clock to give its `arrival_ns`.
 
 `source-filter` drops datagrams by sender, its host names resolved when the
 socket binds, and an inclusive filter on a multicast group also joins only those
-senders (source-specific multicast), as gst's `udpsrc2` does. `multicast-iface`
+senders (source-specific multicast), as gst's `udpsrc2` does. An
+`a=source-filter` in the `sdp` property (RFC 4570) sets the same filter, the
+media-level line replacing the session-level one. `multicast-iface`
 lists interfaces to join the group on. With exactly one the socket is also bound
 to it (`SO_BINDTODEVICE`). Binding, port reuse and the group joins live in
 `udpsocket.rs`, shared with the RIST links and `PtpClient`. `timeout` posts

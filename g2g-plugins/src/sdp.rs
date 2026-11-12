@@ -64,11 +64,46 @@ pub struct SdpSection {
     /// `a=control:`, the URL (absolute, or relative to the session URL) an RTSP
     /// SETUP names this section by.
     pub control: Option<String>,
+    pub source_filter: Option<SourceFilter>,
 }
 
-/// Scan every media section of an SDP document. Sections whose `m=` line is
-/// malformed are skipped; the session-level `c=` and `a=ts-refclk` lines (those
-/// before the first `m=`) are inherited by sections that carry none.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SourceFilter {
+    pub exclusive: bool,
+    pub sources: Vec<String>,
+}
+
+// `<mode> IN <addrtype> <dest-address> <source>...`, RFC 4570 section 3
+fn parse_source_filter(a: &str) -> Option<(String, SourceFilter)> {
+    let mut fields = a.split_whitespace();
+    let exclusive = match fields.next()? {
+        "incl" => false,
+        "excl" => true,
+        _ => return None,
+    };
+    if fields.next()? != "IN" || !matches!(fields.next()?, "IP4" | "IP6" | "*") {
+        return None;
+    }
+    let destination = fields.next()?.to_string();
+    let sources: Vec<String> = fields.map(String::from).collect();
+    if sources.is_empty() {
+        return None;
+    }
+    Some((destination, SourceFilter { exclusive, sources }))
+}
+
+fn source_filters(lines: &[&str]) -> Option<Vec<(String, SourceFilter)>> {
+    lines
+        .iter()
+        .filter_map(|line| line.strip_prefix("a=source-filter:"))
+        .map(parse_source_filter)
+        .collect()
+}
+
+/// Scan every media section of an SDP document. Sections whose `m=` or
+/// `a=source-filter` line is malformed are skipped; the session-level `c=`,
+/// `a=ts-refclk` and `a=source-filter` lines (those before the first `m=`) are
+/// inherited by sections that carry none.
 pub fn scan_sections(text: &str) -> Vec<SdpSection> {
     let lines: Vec<&str> = text.lines().map(|l| l.trim_end_matches('\r')).collect();
     let starts: Vec<usize> = lines
@@ -91,10 +126,17 @@ pub fn scan_sections(text: &str) -> Vec<SdpSection> {
         }
     }
 
+    let Some(session_filters) = source_filters(&lines[..first]) else {
+        return Vec::new();
+    };
+
     let mut out = Vec::new();
     for (k, &start) in starts.iter().enumerate() {
         let end = starts.get(k + 1).copied().unwrap_or(lines.len());
         let Some(mut section) = scan_one(&lines[start..end]) else {
+            continue;
+        };
+        let Some(media_filters) = source_filters(&lines[start..end]) else {
             continue;
         };
         if section.address.is_none() {
@@ -103,6 +145,18 @@ pub fn scan_sections(text: &str) -> Vec<SdpSection> {
         if section.ptp.is_none() {
             section.ptp = session_ptp.clone();
         }
+        // RFC 4570: media-level source filters replace the session-level ones
+        let filters = if media_filters.is_empty() {
+            &session_filters
+        } else {
+            &media_filters
+        };
+        section.source_filter = filters
+            .iter()
+            .find(|(destination, _)| {
+                destination == "*" || section.address.as_deref() == Some(destination.as_str())
+            })
+            .map(|(_, filter)| filter.clone());
         out.push(section);
     }
     out
@@ -237,6 +291,7 @@ pub struct SdpMedia {
     pub mpeg4_generic_aac: Option<Mpeg4GenericAac>,
     // `None` unless the section is MP4A-LATM AAC whose fmtp a depayloader can follow
     pub mp4a_latm_aac: Option<Mp4aLatmAac>,
+    pub source_filter: Option<SourceFilter>,
 }
 
 impl SdpMedia {
@@ -344,6 +399,7 @@ impl SdpMedia {
             extmap: s.extmap.clone(),
             mpeg4_generic_aac,
             mp4a_latm_aac,
+            source_filter: s.source_filter.clone(),
         })
     }
 }
@@ -713,6 +769,44 @@ mod tests {
                 .windows(5)
                 .any(|w| w == [0, 0, 0, 1, 0x68]),
             "PPS follows the SPS"
+        );
+    }
+
+    #[test]
+    fn a_media_source_filter_replaces_the_session_one_for_its_address() {
+        let text = "v=0\r\n\
+            c=IN IP4 232.0.0.1\r\n\
+            a=source-filter: incl IN IP4 * 192.0.2.1 192.0.2.2\r\n\
+            m=video 5000 RTP/AVP 96\r\n\
+            a=rtpmap:96 H264/90000\r\n\
+            m=video 5002 RTP/AVP 96\r\n\
+            a=rtpmap:96 H264/90000\r\n\
+            a=source-filter: excl IN IP4 232.0.0.9 192.0.2.3\r\n\
+            a=source-filter: excl IN IP4 232.0.0.1 192.0.2.4\r\n\
+            m=video 5004 RTP/AVP 96\r\n\
+            a=rtpmap:96 H264/90000\r\n\
+            a=source-filter: incl IN IP4 232.0.0.1\r\n";
+        let sections = scan_sections(text);
+        assert_eq!(
+            sections.len(),
+            2,
+            "a filter with no source drops its section"
+        );
+        assert_eq!(
+            sections[0].source_filter,
+            Some(SourceFilter {
+                exclusive: false,
+                sources: alloc::vec!["192.0.2.1".to_string(), "192.0.2.2".to_string()],
+            }),
+            "the session filter covers every address"
+        );
+        assert_eq!(
+            sections[1].source_filter,
+            Some(SourceFilter {
+                exclusive: true,
+                sources: alloc::vec!["192.0.2.4".to_string()],
+            }),
+            "the media filter for the section's own address applies"
         );
     }
 

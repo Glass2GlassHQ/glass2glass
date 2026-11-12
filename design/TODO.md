@@ -187,7 +187,6 @@ libraries installed.
     sender reports are missed, and RR and NACK go to the sender's RTP port.
   - `udpsrc` passes no session timeline, so audio and video on two `udpsrc`
     elements lose their offset. Read RFC 6051 in-band NTP-64 for faster sync.
-  - `udpsrc`'s `sdp` property ignores `a=source-filter`.
   - VP8, VP9, AV1 and JPEG RTP payloads in `udpsrc`, and MJPEG cameras in
     `rtspsrcn` (retina has a JPEG depacketizer).
   - RED (RFC 2198) receive.

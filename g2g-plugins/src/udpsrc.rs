@@ -195,7 +195,8 @@ impl UdpSrc {
     /// Configure from an SDP: either the document text or the path to a `.sdp`
     /// file. The first mappable media section sets the codec (H.264 or Opus) and
     /// the receive port, and an H.264 section also sets the output geometry /
-    /// frame rate (from its `fmtp` parameter sets and `a=framerate`), so a
+    /// frame rate (from its `fmtp` parameter sets and `a=framerate`). An
+    /// `a=source-filter` sets the senders it accepts or drops. So a
     /// published description is all a receiver needs. Fields the SDP leaves out
     /// keep their declared values.
     pub fn with_sdp(mut self, sdp: &str) -> Result<Self, G2gError> {
@@ -254,6 +255,10 @@ impl UdpSrc {
         }
         for &(id, ref uri) in &media.extmap {
             self.recv.capture_time_ids.assign_extmap(id, uri);
+        }
+        if let Some(filter) = &media.source_filter {
+            self.source_filter = filter.sources.clone();
+            self.udp.source_filter_exclusive = filter.exclusive;
         }
         true
     }
@@ -557,7 +562,7 @@ impl SourceLoop for UdpSrc {
             PropertySpec::new(
                 "sdp",
                 PropKind::Str,
-                "SDP describing the stream (document text or a .sdp file path): sets codec, geometry, frame rate, and port",
+                "SDP describing the stream (document text or a .sdp file path): sets codec, geometry, frame rate, port, and source filter",
             ),
             PropertySpec::new(
                 "encoding-name",
@@ -1022,6 +1027,23 @@ mod tests {
         assert!(
             resolved.contains(&"192.0.2.7".parse().unwrap()),
             "{resolved:?}"
+        );
+    }
+
+    #[test]
+    fn sdp_source_filter_sets_the_sender_filter() {
+        let sdp = "v=0\r\n\
+            c=IN IP4 232.0.0.1\r\n\
+            m=video 5000 RTP/AVP 96\r\n\
+            a=rtpmap:96 H264/90000\r\n\
+            a=source-filter: excl IN IP4 232.0.0.1 192.0.2.7\r\n";
+        let src = UdpSrc::new("0.0.0.0:5000".parse().unwrap())
+            .with_sdp(sdp)
+            .expect("sdp applies");
+        assert_eq!(src.source_filter, ["192.0.2.7"]);
+        assert!(
+            src.udp.source_filter_exclusive,
+            "excl drops the listed sender"
         );
     }
 

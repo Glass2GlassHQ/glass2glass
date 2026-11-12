@@ -187,6 +187,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M2271: video decoders report the pictures they hold back as latency, and the runner re-folds it when it changes mid-stream.
 - M2272: `tsdemux` and `psdemux` send a unit without a PTS untimed instead of at 0, holding units ahead of the first timestamp.
 - M2273: `mp4demux` shifts a track with negative composition offsets and its segment instead of clamping its PTS to 0.
+- M2274: `udpsrc` takes its source filter from an SDP's `a=source-filter`.
 
 Breaking: `TimecodeMeta.frames` is a `u16`, `WIRE_VERSION` is 6, `FrameTiming` gains `start_discard_ns` and `end_discard_ns`, `RtpRecvConfig` gains `parameter_sets`, `RtmpPublisher::push` fails with a `PublishRefusal`, and `Interlace` gains `InterleavedBottomFieldFirst`.
 
