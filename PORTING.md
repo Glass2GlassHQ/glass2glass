@@ -247,7 +247,9 @@ g2g-inspect videoconvert         # one element's properties + pad templates
 ```
 
 Common mappings: `jpegenc`/`jpegdec` → `mjpegenc`/`mjpegdec`; `souphttpsrc` →
-`httpsrc`; `rtph264depay` → built into `udpsrc`/`rtspsrc`; `rtpopusdepay` /
+`httpsrc`; `rtph264depay` → built into `udpsrc`/`rtspsrc`, with its
+`wait-for-keyframe` and `request-keyframe` on `udpsrc` and `rtspserversrc`,
+both on by default where gst's are off; `rtpopusdepay` /
 `rtpopuspay` → `udpsrc encoding-name=OPUS` / `udpsink`. RIST keeps its gst
 names but drops the MPEG-TS payloader around it: `mpegtsmux ! rtpmp2tpay !
 ristsink` is `mpegtsmux ! ristsink`, and `ristsrc ! rtpmp2tdepay ! tsdemux` is

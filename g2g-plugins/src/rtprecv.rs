@@ -27,7 +27,7 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::rtp::{CaptureTimeExtensionIds, RtpHeader};
 use g2g_core::{
     Caps, Dim, FrameTiming, G2gError, MemoryDomain, OutputSink, PipelinePacket, PropError,
-    PropValue, Rate,
+    PropKind, PropValue, PropertySpec, Rate,
 };
 
 use crate::filesink::io_err;
@@ -73,6 +73,8 @@ pub struct RtpRecvConfig {
     pub encoding: RtpEncoding,
     // ffmpeg's RTSP publisher sends the parameter sets only in the SDP sprop attributes
     pub parameter_sets: Vec<u8>,
+    pub wait_for_keyframe: bool,
+    pub request_keyframe: bool,
 }
 
 impl Default for RtpRecvConfig {
@@ -88,6 +90,8 @@ impl Default for RtpRecvConfig {
             capture_time_ids: CaptureTimeExtensionIds::default(),
             encoding: RtpEncoding::default(),
             parameter_sets: Vec::new(),
+            wait_for_keyframe: true,
+            request_keyframe: true,
         }
     }
 }
@@ -148,9 +152,24 @@ impl SpsCapsRefiner {
     }
 }
 
+pub(crate) const WAIT_FOR_KEYFRAME_PROPERTY: PropertySpec = PropertySpec::new(
+    "wait-for-keyframe",
+    PropKind::Bool,
+    "drop video access units before the first keyframe and after a packet loss",
+)
+.with_default("true");
+
+pub(crate) const REQUEST_KEYFRAME_PROPERTY: PropertySpec = PropertySpec::new(
+    "request-keyframe",
+    PropKind::Bool,
+    "send an RTCP PLI while video waits for a keyframe (needs rtcp-rr-interval above 0)",
+)
+.with_default("true");
+
 /// Handle the receive-tuning half of an RTP ingest source's `set_property`
 /// (`jitter-latency`, `jitter-depth`, `rtcp-rr-interval`, `nack`,
-/// `rtx-payload-type`, `rtx-apt`, `fec-payload-type`, `flexfec-payload-type`),
+/// `rtx-payload-type`, `rtx-apt`, `fec-payload-type`, `flexfec-payload-type`,
+/// `wait-for-keyframe`, `request-keyframe`),
 /// the [`crate::netprop`] pattern applied to [`RtpRecvConfig`]. Returns
 /// `Some(result)` when `name` is one of these, `None` otherwise. A payload type
 /// of 0 disables the corresponding recovery stream (dynamic PTs are 96..=127,
@@ -198,6 +217,14 @@ pub(crate) fn set_recv_prop(
         }),
         "fec-payload-type" => pt(value).map(|v| cfg.fec_pt = (v != 0).then_some(v)),
         "flexfec-payload-type" => pt(value).map(|v| cfg.flexfec_pt = (v != 0).then_some(v)),
+        "wait-for-keyframe" => value
+            .as_bool()
+            .ok_or(PropError::Type)
+            .map(|b| cfg.wait_for_keyframe = b),
+        "request-keyframe" => value
+            .as_bool()
+            .ok_or(PropError::Type)
+            .map(|b| cfg.request_keyframe = b),
         _ => return None,
     })
 }
@@ -213,6 +240,8 @@ pub(crate) fn get_recv_prop(cfg: &RtpRecvConfig, name: &str) -> Option<PropValue
         "rtx-apt" => PropValue::Uint(cfg.rtx.map(|(_, apt)| apt).unwrap_or(0) as u64),
         "fec-payload-type" => PropValue::Uint(cfg.fec_pt.unwrap_or(0) as u64),
         "flexfec-payload-type" => PropValue::Uint(cfg.flexfec_pt.unwrap_or(0) as u64),
+        "wait-for-keyframe" => PropValue::Bool(cfg.wait_for_keyframe),
+        "request-keyframe" => PropValue::Bool(cfg.request_keyframe),
         _ => return None,
     })
 }
@@ -303,6 +332,7 @@ pub(crate) struct AccessUnitEmitter<'a> {
     frame_limit: u64,
     // decoders reject the pictures before the first keyframe and after a loss
     awaiting_keyframe: bool,
+    wait_for_keyframe: bool,
 }
 
 impl<'a> AccessUnitEmitter<'a> {
@@ -325,6 +355,7 @@ impl<'a> AccessUnitEmitter<'a> {
             seq_base,
             frame_limit,
             awaiting_keyframe: true,
+            wait_for_keyframe: cfg.wait_for_keyframe,
         }
     }
 
@@ -351,10 +382,12 @@ impl<'a> AccessUnitEmitter<'a> {
     ) -> Result<bool, G2gError> {
         // false (the safe default) for H.264 without an IDR NAL.
         let keyframe = self.encoding.is_keyframe(&au.data);
-        if self.awaiting_keyframe && !keyframe {
+        if self.wait_for_keyframe && self.awaiting_keyframe && !keyframe {
             return Ok(false);
         }
-        self.awaiting_keyframe = false;
+        if keyframe {
+            self.awaiting_keyframe = false;
+        }
         let arrival_ns = g2g_core::metrics::monotonic_ns();
         if let Some(timeline) = self.timeline.take() {
             self.session_offset_ns = timeline.session_offset_ns(au.rtp_timestamp, arrival_ns);
@@ -547,6 +580,7 @@ pub(crate) async fn receive_rtp(
         let keyframe_request_due = last_keyframe_request_ns
             .is_none_or(|sent| now.saturating_sub(sent) >= KEYFRAME_REQUEST_INTERVAL_NS);
         let request_keyframe = rtcp_on
+            && cfg.request_keyframe
             && cfg.encoding.video_codec().is_some()
             && emitter.awaiting_keyframe
             && keyframe_request_due;
@@ -782,15 +816,48 @@ mod tests {
                 emitter.push(unit, None, &mut out).await.unwrap();
             }
         });
-        let emitted: Vec<bool> = out
-            .packets
+        assert_eq!(emitted_keyframe_flags(&out), [true, false, true]);
+    }
+
+    #[test]
+    fn without_wait_for_keyframe_video_passes_but_still_awaits_one() {
+        let cfg = RtpRecvConfig {
+            encoding: RtpEncoding::H264,
+            wait_for_keyframe: false,
+            ..RtpRecvConfig::default()
+        };
+        let mut emitter = AccessUnitEmitter::new(&cfg, 0, u64::MAX, None);
+        let mut out = CollectSink::default();
+        let mut awaiting = Vec::new();
+        block_on(async {
+            for (index, data) in [H264_NON_IDR_SLICE, H264_IDR, H264_NON_IDR_SLICE]
+                .into_iter()
+                .enumerate()
+            {
+                let unit = AccessUnit {
+                    data: Vec::from(data),
+                    rtp_timestamp: index as u32,
+                };
+                emitter.push(unit, None, &mut out).await.unwrap();
+                awaiting.push(emitter.awaiting_keyframe);
+            }
+        });
+        assert_eq!(emitted_keyframe_flags(&out), [false, true, false]);
+        assert_eq!(
+            awaiting,
+            [true, false, false],
+            "a PLI goes out until the keyframe"
+        );
+    }
+
+    fn emitted_keyframe_flags(sink: &CollectSink) -> Vec<bool> {
+        sink.packets
             .iter()
             .filter_map(|packet| match packet {
                 PipelinePacket::DataFrame(frame) => Some(frame.timing.keyframe),
                 _ => None,
             })
-            .collect();
-        assert_eq!(emitted, [true, false, true]);
+            .collect()
     }
 
     fn pts_ms(sink: &CollectSink) -> Vec<u64> {

@@ -145,6 +145,7 @@ impl RtspServerSrc {
                 capture_time_ids: Default::default(),
                 encoding: RtpEncoding::H264,
                 parameter_sets: Vec::new(),
+                ..RtpRecvConfig::default()
             },
             max_sessions: 0,
             session_timeout_ns: DEFAULT_SESSION_TIMEOUT_SECS as u64 * 1_000_000_000,
@@ -519,6 +520,8 @@ static SRC_PROPS: &[PropertySpec] = &[
     )
     .with_default("0")
     .with_range("0", "127"),
+    crate::rtprecv::WAIT_FOR_KEYFRAME_PROPERTY,
+    crate::rtprecv::REQUEST_KEYFRAME_PROPERTY,
 ];
 
 impl SourceLoop for RtspServerSrc {

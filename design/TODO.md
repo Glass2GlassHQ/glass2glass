@@ -163,12 +163,19 @@ libraries installed.
     with their decoders, as the H.264 code is in `h264parse` and `h264dpb`.
   - Run the JVT conformance streams through `d3d12h264dec` with a calliope
     adapter on japan.
+  - Run `m2210` on japan: its access-unit split in `tests/common/annexb.rs`
+    changed after its last run.
   - Pipeline `d3d12h264dec`: the CPU waits on a fence after every picture,
     which is most of its 6.7 ms per 1080p frame.
   - Rebuild the decoder and heap on a mid-stream size change instead of
     refusing the stream.
   - The Media Foundation decoder MFT with a DXGI device manager stops producing
     output after about 120 frames, so `MfDecode` decodes in software only.
+- **Decoder test splitters:** m1018, m897, m160, m156, m836, m887 and m997 split
+  their fixtures with their own access-unit splitters. Check whether a fixture
+  repeats its parameter sets mid-stream and the splitter puts them at the tail
+  of the previous unit, and move them to `tests/common/parsed_access_units.rs`.
+  Move m731 there too (it builds only on macOS CI).
 - **`mfh265dec` without an HEVC decoder installed** fails with a bare
   `Hardware(MediaFoundation(0x80040154))`. Find the call that fails and log
   that the HEVC Video Extensions are missing.
@@ -181,8 +188,6 @@ libraries installed.
   - AV1 and VP9 on `mediacodecdec`.
   - HEVC 4:4:4 and 12-bit on `nvdec`.
 - **RTP receive:**
-  - A property to turn off the keyframe gate after loss (gst's
-    `wait-for-keyframe`, `request-keyframe`).
   - RTCP on the port after RTP (the gst and ffmpeg default) is never read, so
     sender reports are missed, and RR and NACK go to the sender's RTP port.
   - `udpsrc` passes no session timeline, so audio and video on two `udpsrc`

@@ -611,8 +611,10 @@ per-sender state, continuing the timeline as it does when the SSRC changes.
 Video access units wait for a keyframe at the start and after every declared
 loss, since the pictures in between reference ones the decoder never got. While
 video waits and RTCP is on, the receiver sends an RFC 4585 picture loss
-indication to the sender once a second. `rtspsrcn` drops video the same way
-after a frame retina reports loss before.
+indication to the sender once a second. `wait-for-keyframe=false` passes those
+pictures through, for a stream with no keyframes such as periodic intra refresh,
+and `request-keyframe=false` stops the indication. `rtspsrcn` drops video the
+same way after a frame retina reports loss before.
 
 RTCP (`rtcp.rs`) is sans-IO RFC 3550 SR, RR and BYE plus RFC 4585 Generic NACK,
 with `ReceptionStats` carrying loss fraction, cumulative loss and interarrival

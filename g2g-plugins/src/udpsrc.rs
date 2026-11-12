@@ -654,6 +654,8 @@ impl SourceLoop for UdpSrc {
             )
             .with_default("0")
             .with_range("0", "127"),
+            crate::rtprecv::WAIT_FOR_KEYFRAME_PROPERTY,
+            crate::rtprecv::REQUEST_KEYFRAME_PROPERTY,
             PropertySpec::new(
                 "buffer-size",
                 PropKind::Uint,
