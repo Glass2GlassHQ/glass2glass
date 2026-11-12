@@ -200,10 +200,7 @@ impl Client {
             }
         }
         // A partial request that never completes must not grow without bound.
-        if self.pending.len() > MAX_PENDING {
-            return false;
-        }
-        true
+        self.pending.len() <= MAX_PENDING
     }
 
     /// Stamp this player's sequence numbers on the access unit's `packets` and

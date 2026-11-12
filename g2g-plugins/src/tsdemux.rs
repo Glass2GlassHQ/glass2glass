@@ -1443,8 +1443,8 @@ impl TsDemuxN {
         // another stream can start before the first unit out, gst's tsdemux opens at the lowest first pts
         if let Some(lowered) = self.seek.lowered_segment(pts_ns) {
             self.segment = Some(lowered);
-            for opened_port in 0..self.ports.len() {
-                if self.segment_sent[opened_port] {
+            for (opened_port, sent) in self.segment_sent.iter().enumerate() {
+                if *sent {
                     out.push_to(opened_port, PipelinePacket::Segment(lowered))
                         .await?;
                 }

@@ -4518,7 +4518,6 @@ name = "g2g-mcugen"
 version = "0.15.0"
 dependencies = [
  "serde",
- "serde_json",
  "serde_yaml",
 ]
 

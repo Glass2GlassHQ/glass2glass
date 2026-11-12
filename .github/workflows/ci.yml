@@ -346,7 +346,8 @@ jobs:
       # the linux-full test binaries leave no disk for the steps below
       - name: drop the linux-full test binaries
         run: |
-          find target/debug/deps -maxdepth 1 -type f -executable ! -name '*.so' -delete
+          find target/debug/build -path '*/out/*' -type f -executable \
+            -regextype posix-extended -regex '.*-[0-9a-f]{16}' -delete
           df -h /
       - name: check g2g-plugins (linux feature set)
         run: >
