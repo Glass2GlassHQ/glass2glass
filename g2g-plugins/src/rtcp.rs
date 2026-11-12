@@ -556,7 +556,6 @@ pub(crate) struct SenderClock {
 #[cfg(any(feature = "rtsp", feature = "udp-ingress", feature = "rtsp-server"))]
 impl SenderClock {
     // RFC 3550 lets a sender without a wall clock report NTP zero
-    #[cfg(any(feature = "rtsp", feature = "rtsp-server"))]
     pub(crate) fn from_report(ntp: u64, rtp_timestamp: u32, clock_rate_hz: u32) -> Option<Self> {
         Some(Self {
             unix_nanos: g2g_core::unix_nanos_from_ntp(ntp)?,

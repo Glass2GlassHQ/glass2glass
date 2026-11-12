@@ -127,6 +127,7 @@ impl UdpReceiver {
         &self.socket
     }
 
+    #[cfg(any(test, feature = "udp-ingress"))]
     pub(crate) async fn recv(&mut self) -> io::Result<Datagram<'_>> {
         loop {
             if let Some(position) = self.advance() {
@@ -137,7 +138,6 @@ impl UdpReceiver {
     }
 
     // the datagrams already read off the socket by the last batch, without waiting for more
-    #[cfg(feature = "udp-ingress")]
     pub(crate) fn next_buffered(&mut self) -> Option<Datagram<'_>> {
         let position = self.advance()?;
         Some(self.datagram_at(position))
@@ -179,7 +179,7 @@ impl UdpReceiver {
     }
 
     // the quiet time lives in self, since the RTP loop drops a pending recv at every jitter or report deadline
-    async fn fill(&mut self) -> io::Result<()> {
+    pub(crate) async fn fill(&mut self) -> io::Result<()> {
         let filled = loop {
             let Some(timeout_ns) = self.idle_report.as_ref().map(|report| report.timeout_ns) else {
                 break self.read_batch().await?;

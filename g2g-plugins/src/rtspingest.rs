@@ -30,7 +30,7 @@ use g2g_core::{
 };
 
 use crate::filesink::io_err;
-use crate::rtcp::{RtcpPacket, SenderClock};
+use crate::rtcp::SenderClock;
 use crate::rtpdepay::{RtpDepayloader, RtpEncoding};
 use crate::rtprecv::{
     AccessUnitEmitter, CaptureTimeLatch, RtpRecvConfig, SessionTimeline, TrackTimeline,
@@ -504,7 +504,11 @@ async fn receive_interleaved(
                     } else if let Some(track) =
                         tracks.iter().find(|track| track.rtcp_channel == channel)
                     {
-                        note_sender_reports(packet, track.emitter.encoding(), track.timeline);
+                        track.timeline.note_sender_reports(
+                            packet,
+                            track.emitter.encoding().clock_rate_hz(),
+                            g2g_core::metrics::monotonic_ns(),
+                        );
                     }
                     pending.drain(..consumed);
                     if !tracks.is_empty() && tracks.iter().all(|track| track.finished) {
@@ -544,40 +548,6 @@ async fn receive_interleaved(
     }
 }
 
-fn note_sender_reports(compound: &[u8], encoding: &RtpEncoding, timeline: TrackTimeline<'_>) {
-    let arrival_ns = g2g_core::metrics::monotonic_ns();
-    for packet in crate::rtcp::parse_compound(compound) {
-        if let RtcpPacket::SenderReport { ntp, rtp_ts, .. } = packet {
-            if let Some(clock) = SenderClock::from_report(ntp, rtp_ts, encoding.clock_rate_hz()) {
-                timeline.note_sender_report(clock, arrival_ns);
-            }
-        }
-    }
-}
-
-// the largest RTCP compound packet a publisher sends, well under one MTU
-const RTCP_DATAGRAM_LEN: usize = 1500;
-
-/// Read the sender reports a UDP publisher sends on a track's RTCP port, for
-/// as long as the session runs.
-async fn read_sender_reports(
-    socket: &tokio::net::UdpSocket,
-    encoding: &RtpEncoding,
-    timeline: TrackTimeline<'_>,
-    activity: &Cell<u64>,
-) {
-    let mut buf = [0u8; RTCP_DATAGRAM_LEN];
-    loop {
-        let Ok(n) = socket.recv(&mut buf).await else {
-            // A socket that cannot read right now must not spin the task.
-            tokio::time::sleep(Duration::from_millis(10)).await;
-            continue;
-        };
-        activity.set(g2g_core::metrics::monotonic_ns());
-        note_sender_reports(&buf[..n], encoding, timeline);
-    }
-}
-
 /// Receive one UDP track through the jitter + (optional) RTCP + depayload path
 /// shared with UdpSrc until it has emitted `frame_limit` access units.
 async fn receive_udp_track(
@@ -586,18 +556,20 @@ async fn receive_udp_track(
     frame_limit: u64,
     seq_base: u64,
     timeline: TrackTimeline<'_>,
-    activity: &Cell<u64>,
     out: &mut dyn OutputSink,
 ) -> Result<(), G2gError> {
     let mut receiver = UdpReceiver::new(rtp_socket, UdpReceiveConfig::default()).map_err(io_err)?;
-    tokio::select! {
-        // sender reports already received are noted before the RTP sent after them
-        biased;
-        _ = read_sender_reports(&rtcp_socket, &cfg.encoding, timeline, activity) => {
-            unreachable!("sender reports are read until the session ends")
-        }
-        r = crate::rtprecv::receive_rtp(&mut receiver, cfg, frame_limit, seq_base, Some(timeline), out) => r.map(drop),
-    }
+    crate::rtprecv::receive_rtp(
+        &mut receiver,
+        Some(&rtcp_socket),
+        cfg,
+        frame_limit,
+        seq_base,
+        Some(timeline),
+        out,
+    )
+    .await
+    .map(drop)
 }
 
 /// Record one publisher session onto `pads`: each pad that has not reached
@@ -678,7 +650,6 @@ pub(crate) async fn receive_session(
                     remaining,
                     seq_base,
                     track_timeline,
-                    activity,
                     &mut pad.tap,
                 )));
             }

@@ -28,6 +28,7 @@
 //! A multicast `address` is joined on every interface when `auto-multicast` is
 //! left on.
 
+use core::cell::Cell;
 use core::future::Future;
 use core::pin::Pin;
 
@@ -38,6 +39,7 @@ use alloc::vec::Vec;
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs, UdpSocket as StdUdpSocket};
 
 use g2g_core::bus::BusHandle;
+use g2g_core::clock::ClockSync;
 use g2g_core::log::LogSource;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
@@ -53,7 +55,7 @@ use crate::rtpcapturetime::{
 };
 use crate::rtpdepay::RtpEncoding;
 use crate::rtpjitter::JitterConfig;
-use crate::rtprecv::RtpRecvConfig;
+use crate::rtprecv::{RtpRecvConfig, SessionTimeline, TrackTimeline};
 use crate::sdp::{SdpMedia, OPUS_CLOCK_HZ, OPUS_RTPMAP_CHANNELS};
 use crate::udprecv::{IdleReport, UdpReceiveConfig, UdpReceiver, MAX_DATAGRAM};
 use crate::udpsocket::{bind_udp_socket, unspecified_address, MulticastJoin, UdpBind};
@@ -95,6 +97,13 @@ const MAX_BATCH_SIZE: usize = 1024;
 ///     .with_video_size(1920, 1080)
 ///     .with_framerate(30);
 /// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RtcpPort {
+    AfterRtp,
+    Muxed,
+    Port(u16),
+}
+
 #[derive(Debug)]
 pub struct UdpSrc {
     bind: SocketAddr,
@@ -115,6 +124,9 @@ pub struct UdpSrc {
     /// `from_socket`); promoted to a tokio socket in `run`, where a runtime
     /// context is guaranteed.
     std_socket: Option<StdUdpSocket>,
+    rtcp_port: RtcpPort,
+    rtcp_std_socket: Option<StdUdpSocket>,
+    clock_sync: Option<ClockSync>,
     configured: bool,
     /// Set by `bytestream-format`: each datagram is pushed as it arrived, typed
     /// with this container. `None` is RTP mode, the default.
@@ -146,6 +158,9 @@ impl UdpSrc {
             recv: RtpRecvConfig::default(),
             sdp: None,
             std_socket: None,
+            rtcp_port: RtcpPort::AfterRtp,
+            rtcp_std_socket: None,
+            clock_sync: None,
             configured: false,
             bytestream: None,
             auto_multicast: DEFAULT_AUTO_MULTICAST,
@@ -164,12 +179,14 @@ impl UdpSrc {
     }
 
     /// Use an already-bound socket instead of binding `bind` ourselves. Lets a
-    /// caller (e.g. a test) pick an ephemeral port and learn it up front.
+    /// caller (e.g. a test) pick an ephemeral port and learn it up front. RTCP
+    /// stays muxed on that socket unless `rtcp-port` names a port.
     pub fn from_socket(socket: StdUdpSocket) -> Result<Self, G2gError> {
         let bind = socket.local_addr().map_err(io_err)?;
         socket.set_nonblocking(true).map_err(io_err)?;
         Ok(Self {
             std_socket: Some(socket),
+            rtcp_port: RtcpPort::Muxed,
             ..Self::new(bind)
         })
     }
@@ -368,8 +385,10 @@ impl UdpSrc {
     /// and the geometry hints (a byte stream carries no geometry). `framerate`
     /// is not one of them, it still sets the live latency report.
     fn is_rtp_only(&self, name: &str) -> bool {
-        matches!(name, "sdp" | "width" | "height" | "encoding-name")
-            || crate::rtprecv::get_recv_prop(&self.recv, name).is_some()
+        matches!(
+            name,
+            "sdp" | "width" | "height" | "encoding-name" | "rtcp-port"
+        ) || crate::rtprecv::get_recv_prop(&self.recv, name).is_some()
             || get_capture_time_prop(&self.recv.capture_time_ids, name).is_some()
     }
 
@@ -380,7 +399,7 @@ impl UdpSrc {
         (self.auto_multicast && ip.is_multicast()).then_some(ip)
     }
 
-    fn bind_socket(&self) -> Result<StdUdpSocket, G2gError> {
+    fn bind_socket(&self, port: u16) -> Result<StdUdpSocket, G2gError> {
         let group = self.multicast_group();
         // gst joins only the listed senders when the filter is inclusive, and filters the rest per packet
         let ssm_sources: &[IpAddr] = if self.udp.source_filter_exclusive {
@@ -391,8 +410,8 @@ impl UdpSrc {
         // A multicast receiver binds the port on every interface and then joins
         // the group; binding the group address itself drops unicast to the port.
         let local = match group {
-            Some(_) => unspecified_address(self.bind, self.bind.port()),
-            None => self.bind,
+            Some(_) => unspecified_address(self.bind, port),
+            None => SocketAddr::new(self.bind.ip(), port),
         };
         let socket = bind_udp_socket(UdpBind {
             local,
@@ -520,7 +539,19 @@ impl SourceLoop for UdpSrc {
     fn configure_pipeline(&mut self, _absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         self.udp.source_filter = resolve_source_filter(&self.source_filter)?;
         if self.std_socket.is_none() {
-            self.std_socket = Some(self.bind_socket()?);
+            self.std_socket = Some(self.bind_socket(self.bind.port())?);
+        }
+        let rtcp_on = self.bytestream.is_none() && self.recv.rtcp_rr_interval_ms > 0;
+        let rtcp_port = match self.rtcp_port {
+            RtcpPort::Muxed => None,
+            RtcpPort::Port(port) => Some(port),
+            RtcpPort::AfterRtp => {
+                let rtp_port = self.local_port().ok_or(G2gError::NotConfigured)?;
+                Some(rtp_port.checked_add(1).ok_or(G2gError::NotConfigured)?)
+            }
+        };
+        if let (true, Some(port), None) = (rtcp_on, rtcp_port, &self.rtcp_std_socket) {
+            self.rtcp_std_socket = Some(self.bind_socket(port)?);
         }
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
@@ -620,6 +651,11 @@ impl SourceLoop for UdpSrc {
                 "RTCP receiver-report interval in milliseconds (0 = RTCP off)",
             )
             .with_default("1000"),
+            PropertySpec::new(
+                "rtcp-port",
+                PropKind::Uint,
+                "local port RTCP is read on and sent from, default the port after port (0 = RTCP only muxed on the RTP port)",
+            ),
             PropertySpec::new(
                 "nack",
                 PropKind::Bool,
@@ -797,6 +833,14 @@ impl SourceLoop for UdpSrc {
                 self.recv.encoding = RtpEncoding::from_name(text).ok_or(PropError::Value)?;
                 Ok(())
             }
+            "rtcp-port" => {
+                let port = value.as_uint().ok_or(PropError::Type)?;
+                self.rtcp_port = match u16::try_from(port).map_err(|_| PropError::Value)? {
+                    0 => RtcpPort::Muxed,
+                    port => RtcpPort::Port(port),
+                };
+                Ok(())
+            }
             "num-buffers" => crate::numbuffers::set_num_buffers(&mut self.frame_limit, &value),
             "bytestream-format" => {
                 let text = value.as_str().ok_or(PropError::Type)?;
@@ -886,6 +930,11 @@ impl SourceLoop for UdpSrc {
             return Some(v);
         }
         match name {
+            "rtcp-port" => Some(PropValue::Uint(match self.rtcp_port {
+                RtcpPort::AfterRtp => u64::from(self.bind.port()) + 1,
+                RtcpPort::Muxed => 0,
+                RtcpPort::Port(port) => u64::from(port),
+            })),
             "width" => Some(PropValue::Uint(self.width as u64)),
             "height" => Some(PropValue::Uint(self.height as u64)),
             "framerate" => Some(PropValue::Uint(self.fps as u64)),
@@ -930,6 +979,10 @@ impl SourceLoop for UdpSrc {
         self.bus = Some(bus);
     }
 
+    fn set_clock_sync(&mut self, sync: ClockSync) {
+        self.clock_sync = Some(sync);
+    }
+
     fn set_instance_name(&mut self, name: String) {
         self.instance_name = name;
     }
@@ -970,7 +1023,29 @@ impl SourceLoop for UdpSrc {
             // H.264 stream's SPS can refine them mid-flight.
             let mut recv = self.recv.clone();
             recv.declared_caps = Some(self.caps());
-            crate::rtprecv::receive_rtp(&mut receiver, &recv, self.frame_limit, 0, None, out).await
+            let rtcp_socket = match self.rtcp_std_socket.take() {
+                Some(std) => Some(tokio::net::UdpSocket::from_std(std).map_err(io_err)?),
+                None => None,
+            };
+            let session = self
+                .clock_sync
+                .clone()
+                .map(SessionTimeline::on_pipeline_clock);
+            let sender_clock = Cell::new(None);
+            let timeline = session.as_ref().map(|session| TrackTimeline {
+                session,
+                sender_clock: &sender_clock,
+            });
+            crate::rtprecv::receive_rtp(
+                &mut receiver,
+                rtcp_socket.as_ref(),
+                &recv,
+                self.frame_limit,
+                0,
+                timeline,
+                out,
+            )
+            .await
         })
     }
 }

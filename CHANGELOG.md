@@ -196,6 +196,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M2280: CI runs the decodebin stream-selection tests with both `ffmpeg` and `rav1d` built.
 - M2281: `rtspserversrcn audio=true` records each publisher's AAC track on the pad after its video.
 - M2282: an RTSP ingest track placed by arrival time moves onto its sender report's timeline when its first report arrives.
+- M2283: `udpsrc` reads RTCP on `rtcp-port`, by default the port after RTP, and sends its feedback to the sender's RTCP address.
+- M2284: `udpsrc` stamps PTS as running time on the pipeline clock, so several `udpsrc` elements share one timeline.
 
 Breaking: `TimecodeMeta.frames` is a `u16`, `WIRE_VERSION` is 6, `FrameTiming` gains `start_discard_ns` and `end_discard_ns`, `RtpRecvConfig` gains `parameter_sets`, `RtmpPublisher::push` fails with a `PublishRefusal`, and `Interlace` gains `InterleavedBottomFieldFirst`.
 

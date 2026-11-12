@@ -618,7 +618,13 @@ same way after a frame retina reports loss before.
 
 RTCP (`rtcp.rs`) is sans-IO RFC 3550 SR, RR and BYE plus RFC 4585 Generic NACK,
 with `ReceptionStats` carrying loss fraction, cumulative loss and interarrival
-jitter. It runs RTP/RTCP-muxed on the one socket (RFC 5761). `UdpSrc` sends
+jitter. `UdpSrc` reads RTCP on `rtcp-port`, by default the port after its RTP
+port as gst and ffmpeg send it, and also muxed on the RTP port (RFC 5761).
+`rtcp-port=0` reads only the muxed RTCP. A source built on a caller's socket
+(`from_socket`) defaults to muxed only. Feedback goes out from the RTCP port to
+the address the sender's RTCP comes from, and before any arrives to the port
+after the sender's RTP port. A sender report already received is read before
+the RTP behind it. `UdpSrc` sends
 periodic receiver reports and requests each detected gap through RIST's
 `NackScheduler` on GStreamer `rtpjitterbuffer`'s timing before it has measured
 jitter and RTT: first after 20 ms, so a reordered packet is not requested, then
@@ -635,6 +641,15 @@ repair packet (`with_fec`), and the receiver reconstructs a single per-group
 loss from the repair plus the survivors and injects it into the jitter buffer.
 That costs no round trip, which is the better fit for one-way or high-RTT
 paths. NACK, RTX and FEC compose.
+
+When the runner elects a pipeline clock, `UdpSrc` stamps PTS as running time:
+the frame's local instant, from the sender report or from its arrival before
+one, minus the base time, so several `udpsrc` elements share one timeline, as
+gst's `udpsrc` does. A late sender report moves the track as it does for RTSP
+ingest. Without a clock each `udpsrc` starts at PTS zero on its first frame.
+Validated against ffmpeg sending H.264 and Opus to two `udpsrc` with the audio
+delayed 500 ms: the recorded offset matches the delay less Opus's 6.5 ms
+lookahead within 1 ms, where arrival times alone give 0 ms.
 
 This is raw RTP with no RTSP or SDP, so there is no out-of-band stream
 description. The output geometry is a declared hint (`with_video_size`,

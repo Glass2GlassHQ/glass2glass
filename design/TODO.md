@@ -180,10 +180,11 @@ libraries installed.
   - AV1 and VP9 on `mediacodecdec`.
   - HEVC 4:4:4 and 12-bit on `nvdec`.
 - **RTP receive:**
-  - RTCP on the port after RTP (the gst and ffmpeg default) is never read, so
-    sender reports are missed, and RR and NACK go to the sender's RTP port.
-  - `udpsrc` passes no session timeline, so audio and video on two `udpsrc`
-    elements lose their offset. Read RFC 6051 in-band NTP-64 for faster sync.
+  - Sources in a graph with no element offering a clock (two `udpsrc` into a
+    muxer and `filesink`) each start at PTS zero, so their tracks lose their
+    offset.
+  - Place frames from RFC 6051 in-band NTP-64 before the first sender report,
+    for faster sync.
   - VP8, VP9, AV1 and JPEG RTP payloads in `udpsrc`, and MJPEG cameras in
     `rtspsrcn` (retina has a JPEG depacketizer).
   - RED (RFC 2198) receive.

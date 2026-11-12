@@ -151,3 +151,123 @@ fn src_caps() -> g2g_core::Caps {
         alignment: g2g_core::BitstreamAlignment::Unspecified,
     }
 }
+
+#[derive(Default)]
+struct PtsCollect {
+    pts_ns: Vec<u64>,
+}
+
+impl OutputSink for PtsCollect {
+    fn poll_push(
+        &mut self,
+        _cx: &mut core::task::Context<'_>,
+        packet_slot: &mut Option<PipelinePacket>,
+    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+        if let Some(PipelinePacket::DataFrame(frame)) = packet_slot.take() {
+            self.pts_ns.push(frame.timing.pts_ns);
+        }
+        core::task::Poll::Ready(Ok(PushOutcome::Accepted))
+    }
+}
+
+// an RTP port whose next port is free too, for ffmpeg's RTCP
+fn free_rtp_port() -> u16 {
+    loop {
+        let rtp = StdUdpSocket::bind("127.0.0.1:0").expect("bind udp");
+        let port = rtp.local_addr().unwrap().port();
+        let Some(rtcp_port) = port.checked_add(1) else {
+            continue;
+        };
+        if StdUdpSocket::bind(("127.0.0.1", rtcp_port)).is_ok() {
+            return port;
+        }
+    }
+}
+
+// what `-itsoffset` delays ffmpeg's audio input by
+const AUDIO_DELAY_MS: u64 = 500;
+const AV_FRAMES: u64 = 30;
+const NANOS_PER_MS: u64 = 1_000_000;
+const NANOS_PER_SEC: u64 = 1_000_000_000;
+const OPUS_SAMPLE_RATE_HZ: u64 = 48_000;
+// libopus's lookahead at 48 kHz, which ffmpeg starts the stream early by
+const OPUS_LOOKAHEAD_SAMPLES: u64 = 312;
+// each udpsrc fixes the sender's clock offset from the arrival of its own first report
+const SYNC_TOLERANCE_NS: u64 = 2 * NANOS_PER_MS;
+
+#[tokio::test]
+#[ignore = "needs ffmpeg with libx264 and libopus; opens local UDP sockets"]
+async fn two_udpsrc_keep_ffmpegs_audio_offset_on_the_pipeline_clock() {
+    use g2g_core::clock::{ClockSync, MonotonicClock, PipelineClock};
+    use g2g_core::PropValue;
+
+    let sync = ClockSync::new(std::sync::Arc::new(MonotonicClock), MonotonicClock.now_ns());
+    let (video_port, audio_port) = (free_rtp_port(), free_rtp_port());
+    let mut video = UdpSrc::new(([127, 0, 0, 1], video_port).into())
+        .with_video_size(320, 240)
+        .with_frame_limit(AV_FRAMES);
+    let mut audio = UdpSrc::new(([127, 0, 0, 1], audio_port).into()).with_frame_limit(AV_FRAMES);
+    audio
+        .set_property("encoding-name", PropValue::Str("OPUS".into()))
+        .expect("opus");
+    for src in [&mut video, &mut audio] {
+        src.set_clock_sync(sync.clone());
+        let caps = src.intercept_caps().await.expect("caps");
+        src.configure_pipeline(&caps).expect("configure");
+    }
+
+    // ffmpeg maps each output's PTS zero to the time that output's header was
+    // written unless both are given one start time
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap();
+    // a second ahead, since ffmpeg's encoder setup before its first packet must
+    // not put PTS zero before running-time zero
+    let start_us = (now + Duration::from_secs(1)).as_micros().to_string();
+    // without -re ffmpeg sends as fast as it encodes, so arrival times alone put
+    // the audio right on top of the video
+    let ffmpeg = tokio::task::spawn_blocking(move || {
+        Command::new("ffmpeg")
+            .args(["-hide_banner", "-loglevel", "error"])
+            .args([
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=320x240:rate=15:duration=4",
+            ])
+            .args(["-itsoffset", &format!("{AUDIO_DELAY_MS}ms")])
+            .args([
+                "-f",
+                "lavfi",
+                "-i",
+                &format!("sine=frequency=440:sample_rate={OPUS_SAMPLE_RATE_HZ}:duration=4"),
+            ])
+            .args(["-map", "0:v", "-c:v", "libx264", "-preset", "ultrafast"])
+            .args(["-tune", "zerolatency", "-payload_type", "96"])
+            .args(["-start_time_realtime", &start_us, "-f", "rtp"])
+            .arg(format!("rtp://127.0.0.1:{video_port}"))
+            .args(["-map", "1:a", "-c:a", "libopus", "-payload_type", "97"])
+            .args(["-start_time_realtime", &start_us, "-f", "rtp"])
+            .arg(format!("rtp://127.0.0.1:{audio_port}"))
+            .status()
+    });
+
+    let (mut video_out, mut audio_out) = (PtsCollect::default(), PtsCollect::default());
+    let (video_run, audio_run) = tokio::time::timeout(Duration::from_secs(20), async {
+        tokio::join!(video.run(&mut video_out), audio.run(&mut audio_out))
+    })
+    .await
+    .expect("both udpsrc receive their frames within 20s");
+    video_run.expect("video runs");
+    audio_run.expect("audio runs");
+    let _ = ffmpeg.await;
+
+    let offset_ns = audio_out.pts_ns[0] as i64 - video_out.pts_ns[0] as i64;
+    let expected_ns = (AUDIO_DELAY_MS * NANOS_PER_MS
+        - OPUS_LOOKAHEAD_SAMPLES * NANOS_PER_SEC / OPUS_SAMPLE_RATE_HZ)
+        as i64;
+    assert!(
+        offset_ns.abs_diff(expected_ns) <= SYNC_TOLERANCE_NS,
+        "audio starts {offset_ns} ns after video, expected {expected_ns} ns"
+    );
+}

@@ -432,6 +432,26 @@ fn udpsrc_address_and_port() {
     );
 }
 
+// M2283: RTCP follows the RTP port unless `rtcp-port` names one, and 0 means muxed only
+#[cfg(feature = "udp-ingress")]
+#[test]
+fn udpsrc_rtcp_port() {
+    use g2g_core::runtime::SourceLoop;
+    use g2g_plugins::udpsrc::UdpSrc;
+    let mut s = UdpSrc::new("0.0.0.0:5004".parse().unwrap());
+    assert!(declares(s.properties(), "rtcp-port"));
+    s.set_property("port", PropValue::Uint(6000)).unwrap();
+    assert_eq!(s.get_property("rtcp-port"), Some(PropValue::Uint(6001)));
+    s.set_property("rtcp-port", PropValue::Uint(7001)).unwrap();
+    assert_eq!(s.get_property("rtcp-port"), Some(PropValue::Uint(7001)));
+    s.set_property("rtcp-port", PropValue::Uint(0)).unwrap();
+    assert_eq!(s.get_property("rtcp-port"), Some(PropValue::Uint(0)));
+    assert!(
+        s.set_property("rtcp-port", PropValue::Uint(70000)).is_err(),
+        "rejects out-of-range port"
+    );
+}
+
 // M1734 / M1735: the RIST bonding, multicast and header extension knobs, GStreamer's names
 #[cfg(feature = "rist")]
 #[test]

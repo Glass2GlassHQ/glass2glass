@@ -22,6 +22,7 @@ use core::cell::Cell;
 use std::net::SocketAddr;
 use std::vec::Vec;
 
+use g2g_core::clock::ClockSync;
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::rtp::{CaptureTimeExtensionIds, RtpHeader};
@@ -38,7 +39,7 @@ use crate::rtcp::{self, ReceptionStats, RtcpPacket, SenderClock};
 use crate::rtpdepay::{AccessUnit, RtpDepayloader, RtpEncoding};
 use crate::rtpjitter::{JitterConfig, RtpJitterBuffer, RtpPtsRebase, SequenceContinuity};
 use crate::rtx;
-use crate::udprecv::UdpReceiver;
+use crate::udprecv::{Datagram, UdpReceiver};
 use crate::ulpfec::FecDecoder;
 
 /// Default receiver-report cadence.
@@ -278,6 +279,34 @@ pub(crate) struct SessionTimeline {
     origin_ns: Cell<Option<i64>>,
     // the sender's wall clock minus local monotonic time, from the session's first sender report
     sender_minus_local_ns: Cell<Option<i64>>,
+    // with a pipeline clock, PTS zero is running-time zero instead of the first frame
+    pipeline_clock: Option<ClockSync>,
+}
+
+impl SessionTimeline {
+    #[cfg(feature = "udp-ingress")]
+    pub(crate) fn on_pipeline_clock(sync: ClockSync) -> Self {
+        Self {
+            pipeline_clock: Some(sync),
+            ..Self::default()
+        }
+    }
+
+    // the local monotonic instant PTS zero stands for, `first_frame_ns` without a pipeline clock
+    fn origin_ns(&self, first_frame_ns: i64) -> i64 {
+        let origin = self
+            .origin_ns
+            .get()
+            .unwrap_or_else(|| match &self.pipeline_clock {
+                Some(sync) => {
+                    let running_ns = sync.now_ns() as i64 - sync.base_time() as i64;
+                    g2g_core::metrics::monotonic_ns() as i64 - running_ns
+                }
+                None => first_frame_ns,
+            });
+        self.origin_ns.set(Some(origin));
+        origin
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -287,8 +316,17 @@ pub(crate) struct TrackTimeline<'a> {
 }
 
 impl TrackTimeline<'_> {
-    #[cfg(feature = "rtsp-server")]
-    pub(crate) fn note_sender_report(&self, clock: SenderClock, arrival_ns: u64) {
+    pub(crate) fn note_sender_reports(&self, compound: &[u8], clock_rate_hz: u32, arrival_ns: u64) {
+        for packet in rtcp::parse_compound(compound) {
+            if let RtcpPacket::SenderReport { ntp, rtp_ts, .. } = packet {
+                if let Some(clock) = SenderClock::from_report(ntp, rtp_ts, clock_rate_hz) {
+                    self.note_sender_report(clock, arrival_ns);
+                }
+            }
+        }
+    }
+
+    fn note_sender_report(&self, clock: SenderClock, arrival_ns: u64) {
         self.sender_clock.set(Some(clock));
         let offsets = &self.session.sender_minus_local_ns;
         if offsets.get().is_none() {
@@ -304,11 +342,8 @@ impl TrackTimeline<'_> {
         Some(clock.wall_clock_ns(rtp_timestamp) - sender_minus_local_ns)
     }
 
-    // the session timeline position of a local monotonic instant, the first one asked becoming zero
     fn session_ns(&self, local_ns: i64) -> i64 {
-        let origin = self.session.origin_ns.get().unwrap_or(local_ns);
-        self.session.origin_ns.set(Some(origin));
-        local_ns - origin
+        local_ns - self.session.origin_ns(local_ns)
     }
 
     // where on the session timeline the frame stamped `rtp_timestamp` falls, from the
@@ -565,6 +600,66 @@ impl SsrcLock {
 }
 
 const KEYFRAME_REQUEST_INTERVAL_NS: u64 = 1_000_000_000;
+// the largest RTCP compound packet a sender sends, well under one MTU
+const RTCP_DATAGRAM_LEN: usize = 1500;
+
+enum Waited {
+    Filled(std::io::Result<()>),
+    Rtcp(std::io::Result<(usize, SocketAddr)>),
+}
+
+async fn wait_for_datagram(
+    receiver: &mut UdpReceiver,
+    rtcp_socket: Option<&tokio::net::UdpSocket>,
+    rtcp_buf: &mut [u8],
+) -> Waited {
+    let Some(rtcp_socket) = rtcp_socket else {
+        return Waited::Filled(receiver.fill().await);
+    };
+    tokio::select! {
+        biased;
+        r = rtcp_socket.recv_from(rtcp_buf) => Waited::Rtcp(r),
+        r = receiver.fill() => Waited::Filled(r),
+    }
+}
+
+fn try_recv_rtcp(
+    rtcp_socket: Option<&tokio::net::UdpSocket>,
+    rtcp_buf: &mut [u8],
+) -> std::io::Result<Option<(usize, SocketAddr)>> {
+    let Some(rtcp_socket) = rtcp_socket else {
+        return Ok(None);
+    };
+    match rtcp_socket.try_recv_from(rtcp_buf) {
+        Ok(received) => Ok(Some(received)),
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+fn feedback_address(
+    sender_rtcp: Option<SocketAddr>,
+    sender_rtp: Option<SocketAddr>,
+    rtcp_on_own_port: bool,
+) -> Option<SocketAddr> {
+    if sender_rtcp.is_some() {
+        return sender_rtcp;
+    }
+    let rtp = sender_rtp?;
+    if !rtcp_on_own_port {
+        return Some(rtp);
+    }
+    // gst and ffmpeg send RTCP from the port after their RTP port
+    let port = rtp.port().checked_add(1)?;
+    Some(SocketAddr::new(rtp.ip(), port))
+}
+
+fn feedback_socket<'a>(
+    receiver: &'a UdpReceiver,
+    rtcp_socket: Option<&'a tokio::net::UdpSocket>,
+) -> &'a tokio::net::UdpSocket {
+    rtcp_socket.unwrap_or_else(|| receiver.socket())
+}
 
 /// Run the RTP receive loop on `socket` until `frame_limit` access units
 /// have been emitted (`u64::MAX` = run until a socket error or downstream
@@ -573,6 +668,7 @@ const KEYFRAME_REQUEST_INTERVAL_NS: u64 = 1_000_000_000;
 /// first emitted frame carries. Returns the number of access units pushed.
 pub(crate) async fn receive_rtp(
     receiver: &mut UdpReceiver,
+    rtcp_socket: Option<&tokio::net::UdpSocket>,
     cfg: &RtpRecvConfig,
     frame_limit: u64,
     seq_base: u64,
@@ -593,11 +689,13 @@ pub(crate) async fn receive_rtp(
     // In-band caps discovery: correct the declared geometry from the stream's SPS.
     let mut refiner = cfg.declared_caps.clone().map(SpsCapsRefiner::new);
 
-    // RTCP feedback state (RTP/RTCP-muxed on this socket): the peer to report to
-    // (learned from the first datagram) and report timers.
+    // RTCP feedback state: the sender's RTP and RTCP addresses (learned from
+    // their first datagrams) and report timers.
     let rtcp_on = cfg.rtcp_rr_interval_ms > 0;
     let rr_interval_ns = cfg.rtcp_rr_interval_ms * 1_000_000;
     let mut peer: Option<SocketAddr> = None;
+    let mut sender_rtcp: Option<SocketAddr> = None;
+    let mut rtcp_buf = [0u8; RTCP_DATAGRAM_LEN];
     let mut last_rr_ns = g2g_core::metrics::monotonic_ns();
 
     let mut last_keyframe_request_ns: Option<u64> = None;
@@ -632,19 +730,26 @@ pub(crate) async fn receive_rtp(
             && cfg.encoding.video_codec().is_some()
             && emitter.awaiting_keyframe
             && keyframe_request_due;
-        if let (true, Some(dest), Some(media_ssrc)) = (request_keyframe, peer, media_ssrc_seen) {
+        let feedback_to = feedback_address(sender_rtcp, peer, rtcp_socket.is_some());
+        if let (true, Some(dest), Some(media_ssrc)) =
+            (request_keyframe, feedback_to, media_ssrc_seen)
+        {
             let pli = rtcp::build_picture_loss_indication(local_ssrc, media_ssrc);
-            let _ = receiver.socket().send_to(&pli, dest).await;
+            let _ = feedback_socket(receiver, rtcp_socket)
+                .send_to(&pli, dest)
+                .await;
             last_keyframe_request_ns = Some(now);
         }
 
         // Periodic receiver report back to the peer (best-effort).
         if rtcp_on {
-            if let Some(dest) = peer {
+            if let Some(dest) = feedback_to {
                 if now.saturating_sub(last_rr_ns) >= rr_interval_ns {
                     let rr =
                         rtcp::build_receiver_report(local_ssrc, &[sender.stats.report_block(now)]);
-                    let _ = receiver.socket().send_to(&rr, dest).await;
+                    let _ = feedback_socket(receiver, rtcp_socket)
+                        .send_to(&rr, dest)
+                        .await;
                     last_rr_ns = now;
                 }
             }
@@ -666,33 +771,63 @@ pub(crate) async fn receive_rtp(
             (None, None) => None,
         };
 
-        let received = match timeout {
-            Some(delay) if delay > 0 => {
-                // Err (deadline elapsed, no packet) => None: loop to flush / report.
-                tokio::time::timeout(core::time::Duration::from_nanos(delay), receiver.recv())
-                    .await
-                    .ok()
-            }
-            // Deadline already elapsed (delay == 0): don't block on recv; loop
-            // back so the jitter flush / receiver report at the top of the loop
-            // fires now instead of waiting for a packet.
-            Some(_) => None,
-            None => Some(receiver.recv().await),
+        let rtcp_datagram = |payload, from| Datagram {
+            payload,
+            from,
+            arrival_ns: g2g_core::metrics::monotonic_ns(),
         };
-
-        let Some(r) = received else { continue };
-        let datagram = r.map_err(io_err)?;
+        // sender reports already received are read before the RTP sent after them
+        let datagram = match try_recv_rtcp(rtcp_socket, &mut rtcp_buf).map_err(io_err)? {
+            Some((len, from)) => rtcp_datagram(&rtcp_buf[..len], from),
+            None => match receiver.next_buffered() {
+                Some(datagram) => datagram,
+                None => {
+                    let waited = match timeout {
+                        Some(delay) if delay > 0 => {
+                            // Err (deadline elapsed, no packet) => None: loop to flush / report.
+                            tokio::time::timeout(
+                                core::time::Duration::from_nanos(delay),
+                                wait_for_datagram(receiver, rtcp_socket, &mut rtcp_buf),
+                            )
+                            .await
+                            .ok()
+                        }
+                        // Deadline already elapsed (delay == 0): don't block on recv; loop
+                        // back so the jitter flush / receiver report at the top of the loop
+                        // fires now instead of waiting for a packet.
+                        Some(_) => None,
+                        None => Some(wait_for_datagram(receiver, rtcp_socket, &mut rtcp_buf).await),
+                    };
+                    match waited {
+                        None => continue,
+                        Some(Waited::Filled(filled)) => {
+                            filled.map_err(io_err)?;
+                            continue;
+                        }
+                        Some(Waited::Rtcp(received)) => {
+                            let (len, from) = received.map_err(io_err)?;
+                            rtcp_datagram(&rtcp_buf[..len], from)
+                        }
+                    }
+                }
+            },
+        };
         let (payload, from, now) = (datagram.payload, datagram.from, datagram.arrival_ns);
 
-        // RTCP (muxed) feedback from the sender: a sender report fills the
-        // LSR/DLSR fields for round-trip estimation.
+        // RTCP from the sender, on its own port or muxed: a sender report fills
+        // the LSR/DLSR fields for round-trip estimation and places the stream on
+        // the session timeline.
         if rtcp::is_rtcp(payload) {
+            sender_rtcp = Some(from);
             if rtcp_on {
                 for p in rtcp::parse_compound(payload) {
                     if let RtcpPacket::SenderReport { ntp, .. } = p {
                         sender.stats.on_sender_report(ntp, now);
                     }
                 }
+            }
+            if let Some(timeline) = timeline {
+                timeline.note_sender_reports(payload, cfg.encoding.clock_rate_hz(), now);
             }
             continue;
         }
@@ -781,9 +916,12 @@ pub(crate) async fn receive_rtp(
                 let requests = sender
                     .nacks
                     .due(&sender.jitter.missing_seqs(), now, usize::MAX);
-                if !requests.is_empty() {
+                let feedback_to = feedback_address(sender_rtcp, Some(from), rtcp_socket.is_some());
+                if let (false, Some(dest)) = (requests.is_empty(), feedback_to) {
                     let nack = rtcp::build_nack(local_ssrc, media_ssrc, &requests);
-                    let _ = receiver.socket().send_to(&nack, from).await;
+                    let _ = feedback_socket(receiver, rtcp_socket)
+                        .send_to(&nack, dest)
+                        .await;
                 }
             }
         }
@@ -1044,6 +1182,88 @@ mod tests {
         let audio_pts_ms = pts_ms(&audio_out);
         assert_eq!(audio_pts_ms.len(), 2, "the frame at the origin is dropped");
         assert_eq!(audio_pts_ms[1], HOUR_MS);
+    }
+
+    // a bare RTP header, enough to teach the receiver the sender's address
+    const RTP_HEADER_ONLY: [u8; 12] = [0x80, 96, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1];
+    const REPORT_WAIT: core::time::Duration = core::time::Duration::from_secs(2);
+
+    async fn bound_pair() -> (tokio::net::UdpSocket, tokio::net::UdpSocket) {
+        crate::rtspserversink::bind_rtp_pair().await.unwrap()
+    }
+
+    fn loopback(socket: &tokio::net::UdpSocket) -> SocketAddr {
+        SocketAddr::from(([127, 0, 0, 1], socket.local_addr().unwrap().port()))
+    }
+
+    // runs the receive loop until `report_inbox` gets a receiver report, and returns where it came from
+    async fn first_receiver_report_source(
+        rtp: tokio::net::UdpSocket,
+        rtcp: tokio::net::UdpSocket,
+        report_inbox: &tokio::net::UdpSocket,
+    ) -> SocketAddr {
+        let cfg = RtpRecvConfig {
+            encoding: RtpEncoding::Opus,
+            rtcp_rr_interval_ms: 1,
+            ..RtpRecvConfig::default()
+        };
+        let mut receiver = UdpReceiver::new(rtp, Default::default()).unwrap();
+        let mut out = CollectSink::default();
+        let mut buf = [0u8; RTCP_DATAGRAM_LEN];
+        let report = tokio::time::timeout(REPORT_WAIT, report_inbox.recv_from(&mut buf));
+        tokio::select! {
+            received = report => {
+                let (len, from) = received.expect("a receiver report arrives").unwrap();
+                let packets = rtcp::parse_compound(&buf[..len]);
+                assert!(matches!(packets[0], RtcpPacket::ReceiverReport { .. }));
+                from
+            }
+            ended = receive_rtp(&mut receiver, Some(&rtcp), &cfg, u64::MAX, 0, None, &mut out) => {
+                panic!("the receive loop ended before reporting: {ended:?}")
+            }
+        }
+    }
+
+    #[test]
+    fn receiver_reports_go_from_the_rtcp_port_to_the_port_after_the_senders_rtp() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let (rtp, rtcp) = bound_pair().await;
+            let (sender_rtp, sender_rtcp) = bound_pair().await;
+            let receiver_rtcp = loopback(&rtcp);
+            sender_rtp
+                .send_to(&RTP_HEADER_ONLY, loopback(&rtp))
+                .await
+                .unwrap();
+            let source = first_receiver_report_source(rtp, rtcp, &sender_rtcp).await;
+            assert_eq!(source.port(), receiver_rtcp.port());
+        });
+    }
+
+    #[test]
+    fn receiver_reports_go_where_the_senders_rtcp_comes_from() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let (rtp, rtcp) = bound_pair().await;
+            let (sender_rtp, _) = bound_pair().await;
+            let sender_rtcp_elsewhere = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let sender_report = rtcp::build_sender_report(1, 0, 0, 0, 0, &[]);
+            sender_rtcp_elsewhere
+                .send_to(&sender_report, loopback(&rtcp))
+                .await
+                .unwrap();
+            sender_rtp
+                .send_to(&RTP_HEADER_ONLY, loopback(&rtp))
+                .await
+                .unwrap();
+            first_receiver_report_source(rtp, rtcp, &sender_rtcp_elsewhere).await;
+        });
     }
 
     #[test]
