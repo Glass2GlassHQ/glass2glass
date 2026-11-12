@@ -351,8 +351,9 @@ libraries installed.
 - **ST 2038 elements:** `st2038ancdemux` should add a port when a stream no pad
   names appears, once a launch line can link a pad that appears at run time.
 - **Demuxer bugs** (gst commit sweep 2020-11 to 2023-11):
-  - `tsdemux` and `psdemux` give an AU without PTS 0 instead of `PTS_NONE`.
-  - A negative MP4 PTS clamps to 0 instead of shifting the track.
+  - A fragmented MP4 whose `trun` composition offset puts a PTS below 0
+    clamps it to 0. Shift the track and its segment as gst's qtdemux does
+    per `moof`, in `fmp4demux` and `mp4demuxn`.
 - **Demuxer features:** VP8 and VP9 alpha from Matroska BlockAdditions, ONVIF
   `metx` tracks and `cstb` start times in MP4, AVC-Intra fourccs in MOV, and
   AC-4 and E-AC-3 in MPEG-TS.

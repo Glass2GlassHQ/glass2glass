@@ -362,12 +362,8 @@ async fn an_mpeg1_program_stream_demuxes_video_and_audio() {
         Vec::new(),
         "an audio pad has nothing to refine"
     );
-    // a unit whose packet carried no stamp goes out at 0, for the parser to count on from the last stamp
-    let apts: Vec<u64> = aframes
-        .iter()
-        .map(|f| f.timing.pts_ns)
-        .filter(|pts| *pts != 0)
-        .collect();
+    // a unit whose packet carried no stamp goes out without one, for the parser to count on from the last stamp
+    let apts: Vec<u64> = aframes.iter().filter_map(|f| f.timing.pts()).collect();
     assert!(apts.windows(2).all(|w| w[1] > w[0]), "audio pts rise");
     let _ = std::fs::remove_file(path);
 }
@@ -1909,12 +1905,12 @@ async fn an_audio_packet_without_a_stamp_does_not_reuse_the_last_one() {
         file.extend_from_slice(&pes(0xC0, pts, &payload));
     }
     let out = demux(&file, PsStream::Mp2).await;
-    // an unstamped unit goes out at 0, which the audio parsers read as no stamp and count on from the last one
+    // the audio parsers count on from the last stamp over an unstamped unit
     assert_eq!(
         frame_pts(&out),
         [
             ticks_to_ns(FIRST_PTS),
-            0,
+            FrameTiming::PTS_NONE,
             ticks_to_ns(FIRST_PTS + 4 * MP2_FRAME_TICKS)
         ]
     );
@@ -1950,7 +1946,7 @@ async fn a_stamp_held_behind_a_straddling_frame_names_the_frame_after_it() {
         units,
         [
             (frames[0].clone(), ticks_to_ns(FIRST_PTS)),
-            (frames[1].clone(), 0),
+            (frames[1].clone(), FrameTiming::PTS_NONE),
             (
                 [frames[2].clone(), frames[3].clone()].concat(),
                 ticks_to_ns(SECOND_PTS)

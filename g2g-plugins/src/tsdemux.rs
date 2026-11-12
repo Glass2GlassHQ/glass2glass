@@ -57,6 +57,7 @@ use crate::mpegts::{
 };
 use crate::oneport::OnePortElement;
 use crate::typefind::{elementary_video_caps, sized_by_sps};
+use crate::video_pts_synth::LeadingUnits;
 
 const LOG_CATEGORY: &str = "tsdemux";
 
@@ -970,6 +971,16 @@ pub struct TsDemuxN {
     // SCTE-35 sections waiting for the next unit on the splice port
     splice_sections: Vec<Vec<u8>>,
     splice_port_pts_ns: Option<u64>,
+    // 13818-1 lets a PES go unstamped, and such a unit seeks as if at the last stamp
+    last_stamp: Option<UnitStamp>,
+    // gst's tsdemux holds units until the program shows a timestamp
+    unstamped_ahead_of_first_stamp: LeadingUnits<EsUnit>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct UnitStamp {
+    pts_ns: u64,
+    dts_ns: u64,
 }
 
 // the PID a port carries among those carrying its stream
@@ -1072,6 +1083,8 @@ impl TsDemuxN {
             withheld_flush: false,
             splice_sections: Vec::new(),
             splice_port_pts_ns: None,
+            last_stamp: None,
+            unstamped_ahead_of_first_stamp: LeadingUnits::default(),
             bus: None,
             collection_posted: false,
             tags: TagPoster::default(),
@@ -1238,6 +1251,8 @@ impl TsDemuxN {
         self.mpeg2_tuned_in.fill(false);
         self.mpeg2_skipped_before_tune_in.fill(0);
         self.last_unit_dts_ns.fill(None);
+        self.last_stamp = None;
+        self.unstamped_ahead_of_first_stamp = LeadingUnits::default();
     }
 
     // ffmpeg -ss counts from the earliest stream's start, and a file can carry that stream last
@@ -1288,6 +1303,7 @@ impl TsDemuxN {
     async fn route_units(
         &mut self,
         units: Vec<EsUnit>,
+        ended: bool,
         out: &mut dyn MultiOutputSink,
     ) -> Result<(), G2gError> {
         for u in units {
@@ -1295,37 +1311,65 @@ impl TsDemuxN {
                 self.splice_sections.push(u.data);
                 continue;
             }
-            let pts_ns = u.pts_90khz.map(ticks_90khz_to_ns);
-            if let Some(pts_ns) = pts_ns {
-                self.seek.note_stream_start(pts_ns);
-            }
-            let Some(port) = self.port_for_pid(u.pid)? else {
-                continue; // a stream no selected port carries
-            };
-            let stream = self.ports[port];
-            // MPEG-2 tune-in: nothing before the first sequence header can be
-            // sized, let alone decoded.
-            if stream == TsStream::Mpeg2 && !self.mpeg2_tuned_in[port] {
-                if !mpeg2_can_open_here(&u.data) {
-                    self.mpeg2_skipped_before_tune_in[port] += 1;
-                    continue;
+            let stamp = u.pts_90khz.map(|pts_90khz| {
+                let pts_ns = ticks_90khz_to_ns(pts_90khz);
+                UnitStamp {
+                    pts_ns,
+                    dts_ns: u.dts_90khz.map_or(pts_ns, ticks_90khz_to_ns),
                 }
-                self.mpeg2_tuned_in[port] = true;
-                g2g_core::g2g_debug!(
-                    Target::category(LOG_CATEGORY),
-                    "port {port} tuned in at the first sequence header after dropping {} units",
-                    self.mpeg2_skipped_before_tune_in[port]
-                );
-                self.mpeg2_skipped_before_tune_in[port] = 0;
+            });
+            let released = self
+                .unstamped_ahead_of_first_stamp
+                .pass(u, stamp.is_some(), |_, _| {});
+            if let Some(stamp) = stamp {
+                self.seek.note_stream_start(stamp.pts_ns);
+                self.last_stamp = Some(stamp);
             }
-            let keyframe = is_keyframe(stream, &u.data);
-            let admitted = self.seek.admit(pts_ns.unwrap_or(0), keyframe, u);
-            if admitted.segment.is_some() {
-                self.segment = admitted.segment;
+            for u in released {
+                self.route_unit(u, out).await?;
             }
-            for u in admitted {
-                self.emit_unit(port, u, out).await?;
+        }
+        if ended {
+            for u in self.unstamped_ahead_of_first_stamp.release() {
+                self.route_unit(u, out).await?;
             }
+        }
+        Ok(())
+    }
+
+    async fn route_unit(
+        &mut self,
+        u: EsUnit,
+        out: &mut dyn MultiOutputSink,
+    ) -> Result<(), G2gError> {
+        let Some(port) = self.port_for_pid(u.pid)? else {
+            return Ok(()); // a stream no selected port carries
+        };
+        let stream = self.ports[port];
+        // MPEG-2 tune-in: nothing before the first sequence header can be
+        // sized, let alone decoded.
+        if stream == TsStream::Mpeg2 && !self.mpeg2_tuned_in[port] {
+            if !mpeg2_can_open_here(&u.data) {
+                self.mpeg2_skipped_before_tune_in[port] += 1;
+                return Ok(());
+            }
+            self.mpeg2_tuned_in[port] = true;
+            g2g_core::g2g_debug!(
+                Target::category(LOG_CATEGORY),
+                "port {port} tuned in at the first sequence header after dropping {} units",
+                self.mpeg2_skipped_before_tune_in[port]
+            );
+            self.mpeg2_skipped_before_tune_in[port] = 0;
+        }
+        // a stream that never shows a stamp starts at 0, as gst's tsdemux does
+        let position_ns = self.last_stamp.map_or(0, |stamp| stamp.pts_ns);
+        let keyframe = is_keyframe(stream, &u.data);
+        let admitted = self.seek.admit(position_ns, keyframe, u);
+        if admitted.segment.is_some() {
+            self.segment = admitted.segment;
+        }
+        for u in admitted {
+            self.emit_unit(port, u, out).await?;
         }
         Ok(())
     }
@@ -1376,21 +1420,16 @@ impl TsDemuxN {
         Ok(())
     }
 
-    /// Emit one access unit on `port` as frames (Annex-B for H.264 / H.265, ADTS
-    /// for AAC, raw MPEG-audio frames for Mp2, and control-header-unwrapped raw
-    /// Opus packets for Opus), preceded by the port's opening `Segment`,
-    /// `CapsChanged` and in-band config when it has not sent them yet.
-    async fn emit_unit(
+    async fn place_on_timeline(
         &mut self,
-        port: usize,
-        u: EsUnit,
+        pts_90khz: u64,
+        dts_90khz: Option<u64>,
         out: &mut dyn MultiOutputSink,
-    ) -> Result<(), G2gError> {
-        let stream = self.ports[port];
-        let pts_ns = u.pts_90khz.map_or(0, ticks_90khz_to_ns);
+    ) -> Result<(u64, u64), G2gError> {
+        let pts_ns = ticks_90khz_to_ns(pts_90khz);
         // Reordered video carries a separate DTS; fall back to the PTS when
         // absent (the no-DTS convention shared with the fmp4 / mkv demux).
-        let dts_ns = u.dts_90khz.map_or(pts_ns, ticks_90khz_to_ns);
+        let dts_ns = dts_90khz.map_or(pts_ns, ticks_90khz_to_ns);
         let resuming = self.timeline.resuming();
         let (pts_ns, dts_ns) = self.timeline.map(pts_ns, dts_ns);
         // Stream start: map the first emitted DTS to running time 0, since
@@ -1402,8 +1441,7 @@ impl TsDemuxN {
             self.segment = Some(opening);
         }
         // another stream can start before the first unit out, gst's tsdemux opens at the lowest first pts
-        let lowered = u.pts_90khz.and_then(|_| self.seek.lowered_segment(pts_ns));
-        if let Some(lowered) = lowered {
+        if let Some(lowered) = self.seek.lowered_segment(pts_ns) {
             self.segment = Some(lowered);
             for opened_port in 0..self.ports.len() {
                 if self.segment_sent[opened_port] {
@@ -1412,6 +1450,33 @@ impl TsDemuxN {
                 }
             }
         }
+        Ok((pts_ns, dts_ns))
+    }
+
+    /// Emit one access unit on `port` as frames (Annex-B for H.264 / H.265, ADTS
+    /// for AAC, raw MPEG-audio frames for Mp2, and control-header-unwrapped raw
+    /// Opus packets for Opus), preceded by the port's opening `Segment`,
+    /// `CapsChanged` and in-band config when it has not sent them yet.
+    async fn emit_unit(
+        &mut self,
+        port: usize,
+        u: EsUnit,
+        out: &mut dyn MultiOutputSink,
+    ) -> Result<(), G2gError> {
+        let stream = self.ports[port];
+        let (pts_ns, dts_ns) = match u.pts_90khz {
+            Some(pts_90khz) => self.place_on_timeline(pts_90khz, u.dts_90khz, out).await?,
+            None => {
+                // a held unit goes out just ahead of the stamped unit that released it, on the segment that unit opens
+                if let Some(opening) = self
+                    .seek
+                    .opening_segment(self.last_stamp.map_or(0, |stamp| stamp.dts_ns))
+                {
+                    self.segment = Some(opening);
+                }
+                (FrameTiming::PTS_NONE, FrameTiming::DTS_NONE)
+            }
+        };
         if !self.segment_sent[port] {
             self.segment_sent[port] = true;
             let segment = self.segment.expect("the stream opened with a segment");
@@ -1438,7 +1503,7 @@ impl TsDemuxN {
         if holds_timed_units(stream) {
             self.learn_held_unit(port, u.pts_90khz.map(|_| dts_ns));
         }
-        if port == self.splice_port() {
+        if port == self.splice_port() && u.pts_90khz.is_some() {
             self.splice_port_pts_ns = Some(pts_ns);
             self.emit_splice_sections(out).await?;
         }
@@ -1648,7 +1713,7 @@ impl MultiOutputElement for TsDemuxN {
                     self.apply_stream_selection();
                     let units = self.demux.take_units();
                     let units = self.past_stream_start_probe(units, false);
-                    self.route_units(units, out).await?;
+                    self.route_units(units, false, out).await?;
                 }
                 // The upstream byte-seek's flush or a source restart: reset the
                 // parser, then re-sync from the re-read stream. Broadcast it to
@@ -1713,7 +1778,7 @@ impl MultiOutputElement for TsDemuxN {
                     self.demux.flush();
                     let units = self.demux.take_units();
                     let units = self.past_stream_start_probe(units, true);
-                    self.route_units(units, out).await?;
+                    self.route_units(units, true, out).await?;
                     self.emit_splice_sections(out).await?;
                     for port in 0..self.ports.len() {
                         if let (PortPid::Required(pid), None) =
@@ -2983,6 +3048,35 @@ mod tests {
         let mut sink = CaptureSink::default();
         run_demux(&mut d, &stream, &mut sink).await;
         assert_eq!(sink.frames, alloc::vec![ANC.to_vec()]);
+    }
+
+    #[tokio::test]
+    async fn an_unstamped_unit_has_no_pts() {
+        const ANC: [u8; 6] = [0x00, 0x02, 0x40, 0x00, 0x18, 0x5A];
+        const LATER_ANC: [u8; 6] = [0x00, 0x02, 0x40, 0x00, 0x18, 0x5B];
+        let mut m =
+            crate::mpegts::TsMuxer::with_streams(&[STREAM_TYPE_H264, STREAM_TYPE_PRIVATE_PES]);
+        m.set_stream_st2038(1);
+        let mut stream = m.push_au_on(1, &ANC, None, None, false);
+        stream.extend(m.push_au_on(0, &[0, 0, 0, 1, 0x65, 0x11], Some(900_000), None, true));
+        stream.extend(m.push_au_on(1, &LATER_ANC, None, None, false));
+
+        let mut d = TsDemux::new().with_stream(TsStream::St2038);
+        d.configure_pipeline(&input_caps()).unwrap();
+        let mut sink = CaptureSink::default();
+        run_demux(&mut d, &stream, &mut sink).await;
+        assert_eq!(
+            sink.frames,
+            [ANC.to_vec(), LATER_ANC.to_vec()],
+            "the unit ahead of the first timestamp waits for it"
+        );
+        assert_eq!(sink.pts_ns, [FrameTiming::PTS_NONE, FrameTiming::PTS_NONE]);
+        let delay = crate::mpegts::TsMuxer::with_streams(&[STREAM_TYPE_H264]).decoder_delay_90khz();
+        let video_pts_ns = ticks_90khz_to_ns(900_000 + delay);
+        assert_eq!(
+            sink.segments[0].start, video_pts_ns,
+            "the held unit opens the segment where the stamp does"
+        );
     }
 
     /// The one-port demuxer posts the tags a transport stream carries:

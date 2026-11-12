@@ -738,7 +738,21 @@ pub(crate) fn parse_all_tracks(data: &[u8]) -> Result<Vec<TrackHeader>, G2gError
         }
         if let Some(mut header) = parse_trak(trak)? {
             header.trex_defaults = trex_defaults(moov, header.track_id);
-            let edits = edit_list(trak);
+            let stbl =
+                find_path(trak, &[b"mdia", b"minf", b"stbl"]).ok_or(G2gError::CapsMismatch)?;
+            // gst's qtdemux moves a track's segment by the shift its samples take, so A/V stay in sync
+            let shift = composition_shift(stbl)?;
+            header.media_start = header.media_start.saturating_add(shift);
+            let edits: Vec<Edit> = edit_list(trak)
+                .into_iter()
+                .map(|edit| Edit {
+                    media_time: match edit.media_time {
+                        media_time if media_time >= 0 => media_time.saturating_add_unsigned(shift),
+                        empty => empty,
+                    },
+                    ..edit
+                })
+                .collect();
             let spans =
                 movie_timescale.and_then(|movie| presented_spans(&edits, movie, header.timescale));
             let is_video = matches!(header.kind, TrackKind::Video { .. });
@@ -758,8 +772,8 @@ pub(crate) fn parse_all_tracks(data: &[u8]) -> Result<Vec<TrackHeader>, G2gError
             }
             // iTunes writes an AAC encoder's priming and padding as metadata instead of an edit list
             if let Some(presented) = gapless.clone().filter(|_| is_audio && edits.is_empty()) {
-                header.media_start = presented.start;
-                header.media_stop = Some(presented.end);
+                header.media_start = presented.start.saturating_add(shift);
+                header.media_stop = Some(presented.end.saturating_add(shift));
             }
             tracks.push(header);
         }
@@ -2631,6 +2645,7 @@ fn parse_progressive_track(
 
     let media_duration: u64 = durations.iter().map(|&duration| u64::from(duration)).sum();
     let ctts_offsets = composition_offsets(stbl, sample_count, media_duration)?;
+    let shift = composition_shift(stbl)?;
 
     let chunk_offsets = chunk_offsets(stbl)?;
 
@@ -2734,7 +2749,8 @@ fn parse_progressive_track(
                 _ => break,
             },
         };
-        let pts = (dts as i64).saturating_add(ctts_offsets[i]).max(0) as u64;
+        // a corrupt ctts the shift ignores can still reach below 0
+        let pts = dts.saturating_add_signed(ctts_offsets[i].saturating_add_unsigned(shift));
         let keyframe = match &sync {
             Some(list) => list.binary_search(&((i + 1) as u32)).is_ok(),
             None => true,
@@ -2921,8 +2937,7 @@ fn composition_offsets(
     for e in 0..be32(ctts, 4)? as usize {
         let cnt = be32(ctts, 8 + e * 8)? as usize;
         let off = read_composition_offset(be32(ctts, 12 + e * 8)?);
-        // gst's qtdemux drops a ctts whose offset passes twice the track duration as corrupt
-        if off.unsigned_abs() / 2 > media_duration {
+        if composition_offset_is_corrupt(off, media_duration) {
             return Ok(no_offsets);
         }
         let target = out.len().saturating_add(cnt).min(sample_count);
@@ -2930,6 +2945,34 @@ fn composition_offsets(
     }
     out.resize(sample_count, 0);
     Ok(out)
+}
+
+fn composition_offset_is_corrupt(offset: i64, media_duration: u64) -> bool {
+    // gst's qtdemux drops a ctts whose offset passes twice the track duration as corrupt
+    offset.unsigned_abs() / 2 > media_duration
+}
+
+fn composition_shift(stbl: &[u8]) -> Result<u64, G2gError> {
+    // gst's qtdemux moves every presentation time up until the most negative composition offset lands on its decode time
+    let Some(ctts) = find_box(stbl, b"ctts") else {
+        return Ok(0);
+    };
+    let stts = find_box(stbl, b"stts").ok_or(G2gError::CapsMismatch)?;
+    let mut media_duration: u64 = 0;
+    for e in 0..be32(stts, 4)? as usize {
+        let count = u64::from(be32(stts, 8 + e * 8)?);
+        let delta = u64::from(be32(stts, 12 + e * 8)?);
+        media_duration = media_duration.saturating_add(count.saturating_mul(delta));
+    }
+    let mut least: i64 = 0;
+    for e in 0..be32(ctts, 4)? as usize {
+        let offset = read_composition_offset(be32(ctts, 12 + e * 8)?);
+        if composition_offset_is_corrupt(offset, media_duration) {
+            return Ok(0);
+        }
+        least = least.min(offset);
+    }
+    Ok(least.unsigned_abs())
 }
 
 fn read_composition_offset(field: u32) -> i64 {
@@ -4134,6 +4177,32 @@ mod tests {
     /// A minimal progressive (`moov` + `mdat`, no `moof`) file with two AVCC
     /// samples in one chunk parses to two Annex-B samples with the right sizes,
     /// timing, and sync flag (sample 1 only, from `stss`).
+    #[test]
+    fn a_negative_composition_offset_shifts_the_track_and_its_segment() {
+        // ffprobe -show_entries packet=pts, in the track's 1/12800 timebase
+        const FFPROBE_PTS_TICKS: [u64; 10] =
+            [0, 1536, 512, 1024, 3072, 2048, 2560, 4608, 3584, 4096];
+        let file = include_bytes!("../tests/fixtures/h264_64x48_negative_cts.mp4");
+        let tracks = parse_all_tracks(file).expect("moov parses");
+        let start_ns = tracks[0].presentation_segment().start;
+        let samples = parse_progressive_multi(file, &tracks).expect("samples parse");
+        let running: Vec<u64> = samples
+            .iter()
+            .map(|(_, sample)| sample.pts_ns - start_ns)
+            .collect();
+        let expected: Vec<u64> = FFPROBE_PTS_TICKS
+            .iter()
+            .map(|&ticks| ticks_to_ns(ticks, tracks[0].timescale))
+            .collect();
+        assert_eq!(running, expected, "the segment moves with the samples");
+        assert!(
+            samples
+                .iter()
+                .all(|(_, sample)| sample.pts_ns >= sample.dts_ns),
+            "no sample presents before it decodes"
+        );
+    }
+
     #[test]
     fn parse_progressive_reads_stbl_sample_tables() {
         use crate::mp4box::{full_box, mp4_box};

@@ -1060,6 +1060,35 @@ pub enum PsStream {
     SubPicture,
 }
 
+#[derive(Debug, Default)]
+struct HeldUntilFirstStamp {
+    // gst's demuxers hold units until the program shows a timestamp
+    held: LeadingUnits<PsUnit>,
+    first_stamp_dts_ns: Option<u64>,
+}
+
+impl HeldUntilFirstStamp {
+    fn pass(&mut self, units: Vec<PsUnit>, ended: bool) -> Vec<PsUnit> {
+        let mut ready = Vec::with_capacity(units.len());
+        for u in units {
+            let stamp_ns = ns_from_90khz(u.dts_90khz.or(u.pts_90khz));
+            if self.first_stamp_dts_ns.is_none() {
+                self.first_stamp_dts_ns = stamp_ns;
+            }
+            ready.extend(self.held.pass(u, stamp_ns.is_some(), |_, _| {}));
+        }
+        if ended {
+            ready.extend(self.held.release());
+        }
+        ready
+    }
+
+    fn opening_ns(&self) -> u64 {
+        // a stream that never shows a stamp starts at 0, as gst's tsdemux does
+        self.first_stamp_dts_ns.unwrap_or(0)
+    }
+}
+
 /// Demuxes an MPEG program stream into one selected elementary stream.
 ///
 /// # Example
@@ -1095,6 +1124,7 @@ pub struct PsDemux {
     /// of seconds), so the first frame's PTS must be mapped to running time 0
     /// or a paced sink holds every frame until that wall-clock offset passes.
     segment_sent: bool,
+    held_until_first_stamp: HeldUntilFirstStamp,
 }
 
 impl Default for PsDemux {
@@ -1116,6 +1146,7 @@ impl PsDemux {
             last_caps: None,
             config_sent: false,
             segment_sent: false,
+            held_until_first_stamp: HeldUntilFirstStamp::default(),
         }
     }
 
@@ -1255,16 +1286,19 @@ impl PsDemux {
             if self.selected_stream() != Some(es) {
                 continue; // a stream other than the selected one
             }
-            let pts_ns = ns_from_90khz(u.pts_90khz).unwrap_or(0);
+            let pts_ns = ns_from_90khz(u.pts_90khz);
             // Reordered video carries a separate DTS; fall back to the PTS when
             // the packet had none (the convention the TS / mkv demuxers share).
-            let dts_ns = ns_from_90khz(u.dts_90khz).unwrap_or(pts_ns);
+            let dts_ns = ns_from_90khz(u.dts_90khz).or(pts_ns);
             // the DTS, since open-GOP B frames after the first I frame present before it
             if !self.segment_sent {
+                let start_ns = dts_ns.unwrap_or(self.held_until_first_stamp.opening_ns());
                 self.segment_sent = true;
-                let seg = Segment::for_flush_seek(&Seek::flush_to(dts_ns), None);
+                let seg = Segment::for_flush_seek(&Seek::flush_to(start_ns), None);
                 out.push(PipelinePacket::Segment(seg)).await?;
             }
+            let pts_ns = pts_ns.unwrap_or(FrameTiming::PTS_NONE);
+            let dts_ns = dts_ns.unwrap_or(FrameTiming::DTS_NONE);
             // The sequence header is only known once a video packet has been
             // parsed, so the refinement rides ahead of the frame it describes,
             // and follows a mid-stream splice that changes it.
@@ -1443,17 +1477,22 @@ impl AsyncElement for PsDemux {
                     if self.bus.is_some() {
                         self.post_stream_collection();
                     }
-                    let units = self.demux.take_units();
+                    let units = self
+                        .held_until_first_stamp
+                        .pass(self.demux.take_units(), false);
                     self.emit_units(units, out).await?;
                 }
                 PipelinePacket::Flush => {
                     self.demux = PsDemuxer::new();
+                    self.held_until_first_stamp = HeldUntilFirstStamp::default();
                     self.config_sent = false;
                     out.push(PipelinePacket::Flush).await?;
                 }
                 PipelinePacket::Eos => {
                     self.demux.flush()?;
-                    let units = self.demux.take_units();
+                    let units = self
+                        .held_until_first_stamp
+                        .pass(self.demux.take_units(), true);
                     self.emit_units(units, out).await?;
                     if let (Some(id), None) = (self.stream_id, self.selected_stream()) {
                         g2g_error!(
@@ -1684,6 +1723,7 @@ pub struct PsDemuxN {
     /// ahead of its first cue (subpicture ports only), the per-port form of
     /// [`PsDemux`]'s `config_sent`.
     config_sent: Vec<bool>,
+    held_until_first_stamp: HeldUntilFirstStamp,
     /// Video geometry known before the run, from a probe that already read the
     /// sequence header. A video port otherwise advertises a fixatable `Range`
     /// (the size is unknown until a unit parses) and the solver fixates a range
@@ -1718,6 +1758,7 @@ impl PsDemuxN {
             emitted: 0,
             segment,
             config_sent,
+            held_until_first_stamp: HeldUntilFirstStamp::default(),
             seed_geometry: None,
             held_picture_ns: 0,
         }
@@ -1826,8 +1867,13 @@ impl PsDemuxN {
     /// Route each completed access unit to the port carrying its stream,
     /// emitting that port's opening `CapsChanged` before its first frame and the
     /// sequence header's geometry once it is known.
-    async fn route_units(&mut self, out: &mut dyn MultiOutputSink) -> Result<(), G2gError> {
-        for u in self.demux.take_units() {
+    async fn route_units(
+        &mut self,
+        ended: bool,
+        out: &mut dyn MultiOutputSink,
+    ) -> Result<(), G2gError> {
+        let units = self.demux.take_units();
+        for u in self.held_until_first_stamp.pass(units, ended) {
             let es = PsElementaryStream {
                 stream_id: u.stream_id,
                 substream_id: u.substream_id,
@@ -1836,8 +1882,11 @@ impl PsDemuxN {
                 continue; // a stream no selected port carries
             };
             let kind = self.ports[port];
-            let pts_ns = ns_from_90khz(u.pts_90khz).unwrap_or(0);
-            let dts_ns = ns_from_90khz(u.dts_90khz).unwrap_or(pts_ns);
+            let presented_ns = ns_from_90khz(u.pts_90khz);
+            let decoded_ns = ns_from_90khz(u.dts_90khz).or(presented_ns);
+            let opening_start_ns = decoded_ns.unwrap_or(self.held_until_first_stamp.opening_ns());
+            let pts_ns = presented_ns.unwrap_or(FrameTiming::PTS_NONE);
+            let dts_ns = decoded_ns.unwrap_or(FrameTiming::DTS_NONE);
             if !self.announced[port] {
                 // Announce what `port_output_caps` declared: a seeded video
                 // port solved at its Fixed geometry, and the runner's
@@ -1862,9 +1911,8 @@ impl PsDemuxN {
                     self.refined[port] = Some(seq);
                 }
             }
-            let presented_ns = ns_from_90khz(u.pts_90khz);
             self.segment
-                .send_before_unit(port, dts_ns, presented_ns, 0, out)
+                .send_before_unit(port, opening_start_ns, presented_ns, 0, out)
                 .await?;
             // A subpicture port opens on the same synthesized `.idx` the single
             // output demuxer sends, so a fan-out subtitle branch renders on the
@@ -1978,10 +2026,11 @@ impl MultiOutputElement for PsDemuxN {
                         self.post_stream_collection();
                     }
                     self.apply_stream_selection();
-                    self.route_units(out).await?;
+                    self.route_units(false, out).await?;
                 }
                 PipelinePacket::Flush => {
                     self.demux = PsDemuxer::new();
+                    self.held_until_first_stamp = HeldUntilFirstStamp::default();
                     for port in 0..self.ports.len() {
                         self.config_sent[port] = false;
                         out.push_to(port, PipelinePacket::Flush).await?;
@@ -1994,7 +2043,7 @@ impl MultiOutputElement for PsDemuxN {
                 }
                 PipelinePacket::Eos => {
                     self.demux.flush()?;
-                    self.route_units(out).await?;
+                    self.route_units(true, out).await?;
                 }
                 // The input's (byte-stream) CapsChanged is consumed: each port
                 // defines its own caps, announced per port above.
@@ -2026,6 +2075,75 @@ impl MultiOutputElement for PsDemuxN {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_unstamped_unit_has_no_pts() {
+        use crate::audioframe::test_frames::mp3_frame;
+        const MPEG_AUDIO_STREAM_ID: u8 = 0xC0;
+        // an MPEG-2 pack header with a zero SCR, its marker bits set, and no stuffing
+        const PACK_HEADER: [u8; 14] = [
+            0x00, 0x00, 0x01, 0xBA, 0x44, 0x00, 0x04, 0x00, 0x04, 0x01, 0x01, 0x89, 0xC3, 0xF8,
+        ];
+        const STAMP_90KHZ: u64 = 90_000;
+        let packet = |pts_90khz: Option<u64>, frame: &[u8]| {
+            let mut packet = PACK_HEADER.to_vec();
+            packet.extend(crate::mpegts::pes_header(
+                MPEG_AUDIO_STREAM_ID,
+                frame.len(),
+                pts_90khz,
+                None,
+            ));
+            packet.extend_from_slice(frame);
+            packet
+        };
+        let frames = [
+            mp3_frame(false, 1),
+            mp3_frame(false, 2),
+            mp3_frame(false, 3),
+        ];
+        let stream = [
+            packet(None, &frames[0]),
+            packet(Some(STAMP_90KHZ), &frames[1]),
+            packet(None, &frames[2]),
+        ]
+        .concat();
+        let sink = crate::testutil::run(
+            &mut PsDemux::new().with_stream(PsStream::Mp2),
+            &Caps::ByteStream {
+                encoding: ByteStreamEncoding::MpegPs,
+            },
+            &[&stream],
+        );
+        let stamp_ns = ns_from_90khz(Some(STAMP_90KHZ)).unwrap();
+        let timed: Vec<(Vec<u8>, u64)> = sink
+            .packets
+            .iter()
+            .filter_map(|packet| match packet {
+                PipelinePacket::DataFrame(frame) => Some((
+                    frame.domain.as_system_slice()?.to_vec(),
+                    frame.timing.pts_ns,
+                )),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            timed,
+            [
+                (frames[0].clone(), FrameTiming::PTS_NONE),
+                (frames[1].clone(), stamp_ns),
+                (frames[2].clone(), FrameTiming::PTS_NONE),
+            ]
+        );
+        let opening = sink.packets.iter().find_map(|packet| match packet {
+            PipelinePacket::Segment(segment) => Some(*segment),
+            _ => None,
+        });
+        assert_eq!(
+            opening.map(|segment| segment.start),
+            Some(stamp_ns),
+            "the unit ahead of the first timestamp opens the stream where the stamp does"
+        );
+    }
 
     #[test]
     fn a_dts_above_the_pts_is_dropped() {
