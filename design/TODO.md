@@ -429,6 +429,9 @@ libraries installed.
 ## Properties / introspection / DSL
 
 - A GUI / tooling introspection surface beyond the text dump.
+- `g2g-inspect` and `docs/elements.html` leave out the elements registered only
+  as fan-out sources (`rtspsrcn`, `rtspserversrcn`, `uridecodebin`):
+  `g2g-inspect rtspserversrcn` answers "No such element".
 - Register URI schemes for bare `scheme://` launch stages beyond `ice+http(s)`:
   `udp`, `srt`, `rtsp`, `rtmp`, `http(s)`, and `file` (as a path for `filesrc` /
   `filesink`), each with the property its element takes the URI in.
