@@ -494,7 +494,9 @@ jobs:
       # CENC decrypt shapes (M164 / M835 / M867): hand-built fixtures run
       # everywhere; the ffmpeg-authored oracle cases skip without ffmpeg.
       - name: test g2g-plugins (cenc decrypt)
-        run: cargo test -p g2g-plugins --locked --features std,hls,mp4-cenc --test m835_hls_cenc --test m164_fmp4_cbcs
+        run: |
+          cargo test -p g2g-plugins --locked --features std,hls,mp4-cenc --test m835_hls_cenc --test m164_fmp4_cbcs
+          cargo test -p g2g-plugins --locked --features std,hls,mp4-cenc --lib cenc
       # MJPEG codec paths (M152 / M153 / M871), incl. the mozjpeg FFI backend
       # (needs nasm above) so the feature-gated C path cannot rot silently.
       - name: test g2g-plugins (mjpeg codecs)

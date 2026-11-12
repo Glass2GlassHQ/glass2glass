@@ -2301,7 +2301,14 @@ mod tests {
             let mdia = mp4_box(b"mdia", &[mdhd(90_000), hdlr(b"vide"), minf].concat());
             mp4_box(b"trak", &[tkhd(1, 320, 240), mdia].concat())
         };
-        let moov = mp4_box(b"moov", &trak);
+        // a fragmented file declares its fragments with an mvex, which ffmpeg needs too
+        let trex = {
+            let mut c = 1u32.to_be_bytes().to_vec(); // track_ID
+            c.extend_from_slice(&1u32.to_be_bytes()); // default_sample_description_index
+            c.extend_from_slice(&[0u8; 12]); // default duration, size, flags
+            full_box(b"trex", 0, 0, &c)
+        };
+        let moov = mp4_box(b"moov", &[trak, mp4_box(b"mvex", &trex)].concat());
 
         // moof: tfhd(track 1) + tfdt(0) + trun(1 sample) + senc(1 sample, whole-AU).
         let tfhd = full_box(b"tfhd", 0, 0, &1u32.to_be_bytes());
