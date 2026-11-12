@@ -101,9 +101,11 @@ the same multi-pad element under its own name.
 
 **Named input / request pads** let a fan-in reference its inputs by name in any
 order: `d.video_0 ! ... ! o.video   d.text_0 ! o.text   textoverlay name=o ! ...`
-and `... ! m.video_0   ... ! m.audio_0   matroskamux name=m ! ...`. Bare `m.`
-inputs stay positional (by reference order). The muxer defines the pad scheme, so
-`textoverlay`'s video always lands on its primary pad regardless of write order.
+and `... ! m.video_0   ... ! m.audio_0   matroskamux name=m ! ...`. A bare `o.`
+straight after a typed demuxer pad (`d.text_0 ! o.`) takes the input of that
+kind, and other bare refs stay positional (by reference order). The muxer
+defines the pad scheme, so `textoverlay`'s video always lands on its primary
+pad regardless of write order.
 
 **Subtitle overlay** uses `textoverlay` as a fan-in, the analog of GStreamer's
 `textoverlay` text_sink request pad: link a video branch and a text branch into

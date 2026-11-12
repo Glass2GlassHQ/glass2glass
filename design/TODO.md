@@ -432,7 +432,6 @@ libraries installed.
 
 ## Properties / introspection / DSL
 
-- **Bare refs into `textoverlay` fill its inputs in link order.** `TextOverlayN` expects video on input 0, so `d.text ! o.  d.video ! o.` with bare `o.` refs puts text on the video input. Assign a bare muxer-side ref to the input whose kind its stream has.
 - A GUI / tooling introspection surface beyond the text dump.
 - Register URI schemes for bare `scheme://` launch stages beyond `ice+http(s)`:
   `udp`, `srt`, `rtsp`, `rtmp`, `http(s)`, and `file` (as a path for `filesrc` /

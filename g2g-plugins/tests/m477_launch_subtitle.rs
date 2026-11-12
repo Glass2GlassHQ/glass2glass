@@ -124,6 +124,43 @@ fn matroskademux_text_pad_selects_subtitle_stream() {
     );
 }
 
+// textoverlay merges video on input 0, so a bare `o.` from `d.text_0` written first must not take it
+#[test]
+fn bare_refs_from_typed_demux_pads_reach_the_overlay_input_of_their_kind() {
+    let bytes = mkv_video_plus_subtitle();
+    let path = std::env::temp_dir().join(format!("g2g-m477-{}-bare.mkv", std::process::id()));
+    std::fs::write(&path, &bytes).expect("write mkv");
+    let p = path.display();
+
+    let reg = default_registry();
+    let line = format!(
+        "filesrc location={p} bytestream-format=matroska ! matroskademux name=d  \
+         d.text_0 ! o.  d.video_0 ! o.  textoverlay name=o ! fakesink"
+    );
+    let graph = parse_launch(&reg, &line).unwrap_or_else(|e| panic!("parses `{line}`: {e}"));
+    std::fs::remove_file(&path).ok();
+    // the demux opens a port per reference, in the order the line writes them
+    const TEXT_PORT: u8 = 0;
+    const VIDEO_PORT: u8 = 1;
+    const OVERLAY_VIDEO_INPUT: u8 = 0;
+    const OVERLAY_TEXT_INPUT: u8 = 1;
+    let overlay = graph.node_by_name("o").expect("the overlay node");
+    let mut inputs: Vec<(u8, u8)> = graph
+        .edges()
+        .iter()
+        .filter(|edge| edge.dst.node == overlay)
+        .map(|edge| (edge.dst.index, edge.src.index))
+        .collect();
+    inputs.sort();
+    assert_eq!(
+        inputs,
+        [
+            (OVERLAY_VIDEO_INPUT, VIDEO_PORT),
+            (OVERLAY_TEXT_INPUT, TEXT_PORT)
+        ]
+    );
+}
+
 // --- synthetic Matroska builder (mirrors the mkvdemux / m415 unit fixtures) ---
 fn vint(value: u64) -> Vec<u8> {
     let mut len = 1usize;

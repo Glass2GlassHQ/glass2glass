@@ -3161,6 +3161,8 @@ fn build_graph(
     // (`... ! mux.audio_0`) carries a request; a bare `mux.` or an inline consumer
     // carries `None` (positional). The transpose of `demux_pads` (output side).
     let mut raw_dest_req: Vec<Option<PadRequest>> = Vec::new();
+    // the kind a link's source pad names (`d.text`), `Any` for a bare or inline source
+    let mut raw_src_kind: Vec<PadKind> = Vec::new();
     for eps in &chain_eps {
         let mut idxs: Vec<usize> = Vec::with_capacity(eps.len());
         // The pad suffix of each endpoint that is a reference (`None` for a
@@ -3199,6 +3201,7 @@ fn build_graph(
                     index: ordinal,
                 },
             };
+            raw_src_kind.push(req.kind);
             demux_pads[s].push(req);
             output_pad_names[s].push(pads[w].unwrap_or(""));
             // The destination's input-pad request: a named ref (`mux.audio_0`)
@@ -3246,6 +3249,7 @@ fn build_graph(
     // `links`; taken from the raw link that lands on the terminal consumer (so a
     // `... ! queue ! mux.audio_0` keeps its named pad through the queue contraction).
     let mut link_dest_req: Vec<Option<PadRequest>> = Vec::new();
+    let mut link_src_kind: Vec<PadKind> = Vec::new();
     for (li, &(s, d)) in raw_links.iter().enumerate() {
         if is_queue(s) {
             continue;
@@ -3272,6 +3276,7 @@ fn build_graph(
         }
         links.push((s, cur, policy, capacity));
         link_dest_req.push(raw_dest_req[src_li].clone());
+        link_src_kind.push(raw_src_kind[li]);
     }
 
     // Link degree per element fixes its role and any tee's output width. Computed
@@ -3650,9 +3655,10 @@ fn build_graph(
             apply_props(&mut mux, &spec.name, &spec.props)?;
             // Resolve named input-pad refs (M481) to concrete indices via the
             // muxer's own scheme, so `... ! mux.audio_0  ... ! mux.video_0` routes
-            // by name regardless of order. Named refs claim their index first;
-            // bare refs fill the remaining slots in link order (the historical
-            // positional behavior).
+            // by name regardless of order. Named refs claim their index first,
+            // then a bare ref straight from a typed source pad (`d.text ! o.`)
+            // claims the input for that kind, and the other bare refs fill the
+            // remaining slots in link order.
             let n = in_deg[ei];
             let incoming: Vec<usize> = links
                 .iter()
@@ -3674,8 +3680,28 @@ fn build_graph(
                 }
                 mux_pad_of_link[k] = Some(idx as u8);
             }
+            let typed_bare =
+                |k: usize| link_dest_req[k].is_none() && link_src_kind[k] != PadKind::Any;
+            for (ord, &k) in incoming.iter().enumerate() {
+                if !typed_bare(k) {
+                    continue;
+                }
+                let kind = link_src_kind[k];
+                let index = incoming[..ord]
+                    .iter()
+                    .filter(|&&earlier| typed_bare(earlier) && link_src_kind[earlier] == kind)
+                    .count();
+                let Some(idx) = mux
+                    .input_pad_index(&PadRequest { kind, index }, ord)
+                    .filter(|&i| i < n && !used[i])
+                else {
+                    continue;
+                };
+                used[idx] = true;
+                mux_pad_of_link[k] = Some(idx as u8);
+            }
             for &k in &incoming {
-                if link_dest_req[k].is_none() {
+                if mux_pad_of_link[k].is_none() {
                     let idx = used
                         .iter()
                         .position(|u| !u)
