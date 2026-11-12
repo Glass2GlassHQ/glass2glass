@@ -333,12 +333,9 @@ async fn two_tracks_round_trip_through_the_reference_relay() {
     let emitted = emitted.expect("subscribe and play");
 
     assert!(emitted >= 2, "both pads got at least their init segment");
-    for port in 0..2 {
-        assert!(
-            !captured.ports[port].is_empty(),
-            "pad {port} received the broadcast"
-        );
-        for payload in &captured.ports[port] {
+    for (port, payloads) in captured.ports.iter().enumerate() {
+        assert!(!payloads.is_empty(), "pad {port} received the broadcast");
+        for payload in payloads {
             assert!(
                 published.windows(payload.len()).any(|w| w == payload),
                 "pad {port} emitted bytes that were published"
