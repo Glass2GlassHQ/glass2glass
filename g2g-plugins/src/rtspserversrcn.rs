@@ -15,6 +15,9 @@
 //! contribution server can ingest several encoders at once
 //! (`rtspserversrcn name=s port=8554  s. ! ...  s. ! ...`).
 //!
+//! With `audio=true` each publisher records onto two pads, its video and then
+//! its first AAC track as ADTS, so publisher k owns pads 2k and 2k+1.
+//!
 //! Pad lifecycle: the pad count is fixed at construction (`max-sessions`, the
 //! linked pad count on a launch line). One acceptor binds each new publisher to
 //! the first free pad and hands it to that pad's session; the pads then run
@@ -43,14 +46,15 @@ use std::net::{SocketAddr, TcpListener as StdTcpListener};
 use tokio::sync::mpsc;
 
 use g2g_core::element::BoxFuture;
+use g2g_core::log::Target;
 use g2g_core::runtime::join_all;
 use g2g_core::{
-    Caps, G2gError, MultiOutputSink, MultiOutputSource, PipelinePacket, PropError, PropKind,
-    PropValue, PropertySpec,
+    g2g_error, Caps, G2gError, MultiOutputSink, MultiOutputSource, PipelinePacket, PropError,
+    PropKind, PropValue, PropertySpec,
 };
 
 use crate::filesink::io_err;
-use crate::rtpdepay::RtpEncoding;
+use crate::rtpdepay::{RtpEncoding, ADTS_AAC_CAPS};
 use crate::rtpjitter::JitterConfig;
 use crate::rtprecv::RtpRecvConfig;
 use crate::rtspingest::{
@@ -90,8 +94,12 @@ pub struct RtspServerSrcN {
     /// Receive-path tuning (jitter reorder + optional RTCP/NACK), shared with
     /// [`UdpSrc`](crate::udpsrc) via [`crate::rtprecv`], applied to every pad.
     recv: RtpRecvConfig,
-    /// Output pads = publishers that can record at the same time.
-    pads: usize,
+    // the output pad count, the linked pad count on a launch line
+    outputs: usize,
+    // set by `max-sessions`, which then fixes the pad count whatever `audio` is set to
+    max_sessions: Option<usize>,
+    // each publisher's AAC track rides the pad after its video pad
+    audio: bool,
     /// Per-session inactivity budget: a publisher that sends neither media nor a
     /// control request within it is torn down and its pad freed. `u64::MAX`
     /// disables reaping.
@@ -129,7 +137,9 @@ impl RtspServerSrcN {
                 parameter_sets: Vec::new(),
                 ..RtpRecvConfig::default()
             },
-            pads: pads.max(1),
+            outputs: pads.max(1),
+            max_sessions: None,
+            audio: false,
             session_timeout_ns: DEFAULT_SESSION_TIMEOUT_SECS as u64 * 1_000_000_000,
             listener: None,
             sessions_served: 0,
@@ -194,11 +204,32 @@ impl RtspServerSrcN {
         self
     }
 
-    /// Serve `n` publishers concurrently, one per output pad. Takes effect on the
-    /// next run; on a launch line the pad count is the number of linked pads.
+    /// Serve `n` publishers concurrently, each on its own output pads. Takes
+    /// effect on the next run; on a launch line the pad count is the number of
+    /// linked pads.
     pub fn with_max_sessions(mut self, n: usize) -> Self {
-        self.pads = n.max(1);
+        self.max_sessions = Some(n.max(1));
         self
+    }
+
+    /// Record each publisher's first AAC track, as ADTS, on the pad after its
+    /// video pad.
+    pub fn with_audio(mut self, audio: bool) -> Self {
+        self.audio = audio;
+        self
+    }
+
+    fn pads_per_publisher(&self) -> usize {
+        1 + usize::from(self.audio)
+    }
+
+    fn publisher_formats(&self) -> Vec<IngestFormat> {
+        let video = IngestFormat::Video(ingest_codec(&self.recv));
+        if self.audio {
+            alloc::vec![video, IngestFormat::Aac]
+        } else {
+            alloc::vec![video]
+        }
     }
 
     /// Per-session inactivity timeout: a publisher that sends neither media nor a
@@ -290,37 +321,57 @@ impl PadConfig {
     }
 }
 
-/// Serve one output pad: take each publisher the acceptor binds to it, drive the
-/// handshake, receive until that publisher leaves, then free the pad for the next
-/// one. Returns the access units this pad emitted and whether it already pushed
-/// its `Eos` (the `num-buffers` path does).
-async fn pad_worker(
-    port: usize,
+// per pad, the access units it emitted and whether it pushed its own `Eos`
+type PadOutcomes = Vec<(u64, bool)>;
+
+/// Serve one publisher's pads, starting at `first_port`: take each publisher the
+/// acceptor binds to them, drive the handshake, receive until that publisher
+/// leaves, then free the pads for the next one. Returns, per pad, the access
+/// units it emitted and whether it already pushed its `Eos` (the `num-buffers`
+/// path does).
+async fn publisher_worker(
+    first_port: usize,
+    formats: &[IngestFormat],
     mut inbox: mpsc::Receiver<tokio::net::TcpStream>,
     busy: &Cell<bool>,
     served: &Cell<u64>,
     cfg: &PadConfig,
     tx: g2g_core::runtime::Sender<(usize, PipelinePacket)>,
-) -> Result<(u64, bool), G2gError> {
-    let mut sink = PadSink::new(port, tx);
-    if crate::numbuffers::finished_at_zero_limit(cfg.frame_limit, &mut sink).await? {
-        return Ok((0, true));
+) -> Result<PadOutcomes, G2gError> {
+    let mut sinks: Vec<PadSink> = (first_port..first_port + formats.len())
+        .map(|port| PadSink::new(port, tx.clone()))
+        .collect();
+    drop(tx);
+    if cfg.frame_limit == 0 {
+        for sink in &mut sinks {
+            crate::numbuffers::finished_at_zero_limit(cfg.frame_limit, sink).await?;
+        }
+        return Ok(alloc::vec![(0, true); formats.len()]);
     }
     let activity = Cell::new(g2g_core::metrics::monotonic_ns());
-    // One tap for the pad's whole life: a publisher taking the pad over continues
-    // the sequence numbering and the timeline of the previous one.
-    let mut pads = [IngestPad {
-        format: IngestFormat::Video(ingest_codec(&cfg.recv)),
-        tap: SessionTap::new(&mut sink, &activity, cfg.frame_period_ns),
-    }];
+    // One tap per pad for its whole life: a publisher taking the pads over
+    // continues the sequence numbering and the timeline of the previous one.
+    let mut pads: Vec<IngestPad<'_>> = sinks
+        .iter_mut()
+        .zip(formats)
+        .map(|(sink, &format)| IngestPad {
+            format,
+            tap: SessionTap::new(sink, &activity, cfg.frame_period_ns),
+        })
+        .collect();
+    let outcomes = |pads: &[IngestPad<'_>]| {
+        pads.iter()
+            .map(|pad| (pad.tap.frames(), pad.finished(cfg.frame_limit)))
+            .collect::<Vec<_>>()
+    };
 
     loop {
         let Some(control) = inbox.recv().await else {
-            return Ok((pads[0].tap.frames(), false)); // no further publisher can arrive
+            return Ok(outcomes(&pads)); // no further publisher can arrive
         };
         activity.set(g2g_core::metrics::monotonic_ns());
         let session = tokio::select! {
-            r = handshake(control, cfg.responder(port), &activity) => r?,
+            r = handshake(control, cfg.responder(first_port), &activity) => r?,
             _ = inactive_for(&activity, cfg.timeout_ns) => None,
         };
         let Some(session) = session else {
@@ -334,8 +385,8 @@ async fn pad_worker(
             _ = inactive_for(&activity, cfg.timeout_ns) => SessionEnd::PeerGone,
         };
         match end {
-            // `AccessUnitEmitter::push` already emitted this pad's EOS.
-            SessionEnd::Limit => return Ok((pads[0].tap.frames(), true)),
+            // `AccessUnitEmitter::push` already emitted the EOS of each pad at `num-buffers`.
+            SessionEnd::Limit => return Ok(outcomes(&pads)),
             SessionEnd::PeerGone => {
                 end_session(&mut pads);
                 busy.set(false);
@@ -426,10 +477,16 @@ static SRCN_PROPS: &[PropertySpec] = &[
     PropertySpec::new(
         "max-sessions",
         PropKind::Uint,
-        "publishers served at once, one per output pad (the linked pad count)",
+        "publishers served at once, each on its own output pads (the linked pad count)",
     )
     .with_default("2")
     .with_range("1", "65535"),
+    PropertySpec::new(
+        "audio",
+        PropKind::Bool,
+        "record each publisher's first AAC track, as ADTS, on the pad after its video pad",
+    )
+    .with_default("false"),
     PropertySpec::new(
         "timeout",
         PropKind::Uint,
@@ -500,16 +557,22 @@ impl MultiOutputSource for RtspServerSrcN {
         Self: 'a;
 
     fn output_count(&self) -> usize {
-        self.pads.max(1)
+        match self.max_sessions {
+            Some(publishers) => publishers * self.pads_per_publisher(),
+            None => self.outputs,
+        }
     }
 
-    /// Every pad carries one publisher's `encoding-name` video, so they all declare
-    /// the same hint caps; a downstream decoder corrects the geometry from the in-band SPS.
+    /// Every video pad declares the same `encoding-name` hint caps; a downstream
+    /// decoder corrects the geometry from the in-band SPS.
     fn output_caps(&self, output: usize) -> Result<Caps, G2gError> {
         if output >= self.output_count() {
             return Err(G2gError::CapsMismatch);
         }
-        Ok(self.caps())
+        match self.publisher_formats()[output % self.pads_per_publisher()] {
+            IngestFormat::Video(_) => Ok(self.caps()),
+            IngestFormat::Aac => Ok(ADTS_AAC_CAPS),
+        }
     }
 
     fn properties(&self) -> &'static [PropertySpec] {
@@ -556,7 +619,11 @@ impl MultiOutputSource for RtspServerSrcN {
                 if n == 0 || n > u16::MAX as u64 {
                     return Err(PropError::Value);
                 }
-                self.pads = n as usize;
+                self.max_sessions = Some(n as usize);
+                Ok(())
+            }
+            "audio" => {
+                self.audio = value.as_bool().ok_or(PropError::Type)?;
                 Ok(())
             }
             "timeout" => {
@@ -589,7 +656,10 @@ impl MultiOutputSource for RtspServerSrcN {
             "framerate" => Some(PropValue::Uint(self.fps as u64)),
             "encoding-name" => Some(PropValue::Str(self.recv.encoding.name().into())),
             "num-buffers" => Some(crate::numbuffers::get_num_buffers(self.frame_limit)),
-            "max-sessions" => Some(PropValue::Uint(self.output_count() as u64)),
+            "max-sessions" => Some(PropValue::Uint(
+                (self.output_count() / self.pads_per_publisher()) as u64,
+            )),
+            "audio" => Some(PropValue::Bool(self.audio)),
             "timeout" => Some(PropValue::Uint(match self.session_timeout_ns {
                 u64::MAX => 0,
                 _ => self.session_timeout_secs() as u64,
@@ -611,30 +681,42 @@ impl MultiOutputSource for RtspServerSrcN {
             std_listener.set_nonblocking(true).map_err(io_err)?;
             let listener = tokio::net::TcpListener::from_std(std_listener).map_err(io_err)?;
 
-            let pads = self.output_count();
+            let outputs = self.output_count();
+            let pads_per_publisher = self.pads_per_publisher();
+            if !outputs.is_multiple_of(pads_per_publisher) {
+                g2g_error!(
+                    Target::category("rtspserversrcn"),
+                    "audio=true takes two pads per publisher, but {outputs} pads are linked"
+                );
+                return Err(G2gError::NotConfigured);
+            }
+            let publishers = outputs / pads_per_publisher;
+            let formats = self.publisher_formats();
             let cfg = self.pad_config();
-            let busy: Vec<Cell<bool>> = (0..pads).map(|_| Cell::new(false)).collect();
+            let busy: Vec<Cell<bool>> = (0..publishers).map(|_| Cell::new(false)).collect();
             let served = Cell::new(0u64);
             let refused = Cell::new(0u64);
 
             // Per-pad handover of an accepted control connection, and the shared
             // channel every pad pushes its packets onto.
-            let mut dispatch = Vec::with_capacity(pads);
-            let mut inboxes = Vec::with_capacity(pads);
-            for _ in 0..pads {
+            let mut dispatch = Vec::with_capacity(publishers);
+            let mut inboxes = Vec::with_capacity(publishers);
+            for _ in 0..publishers {
                 let (tx, rx) = mpsc::channel::<tokio::net::TcpStream>(1);
                 dispatch.push(tx);
                 inboxes.push(rx);
             }
-            let (tx, rx) = g2g_core::runtime::bounded::<(usize, PipelinePacket)>(PAD_QUEUE * pads);
-            let workers: Vec<BoxFuture<'_, Result<(u64, bool), G2gError>>> = inboxes
+            let (tx, rx) =
+                g2g_core::runtime::bounded::<(usize, PipelinePacket)>(PAD_QUEUE * outputs);
+            let workers: Vec<BoxFuture<'_, Result<PadOutcomes, G2gError>>> = inboxes
                 .into_iter()
                 .enumerate()
-                .map(|(port, inbox)| {
-                    Box::pin(pad_worker(
-                        port,
+                .map(|(publisher, inbox)| {
+                    Box::pin(publisher_worker(
+                        publisher * pads_per_publisher,
+                        &formats,
                         inbox,
-                        &busy[port],
+                        &busy[publisher],
                         &served,
                         &cfg,
                         tx.clone(),
@@ -657,9 +739,12 @@ impl MultiOutputSource for RtspServerSrcN {
 
             let result: Result<u64, G2gError> = async {
                 let outcomes = forward_pads(producers, &rx, out).await?;
+                let mut pad_outcomes = Vec::with_capacity(outputs);
+                for outcome in outcomes {
+                    pad_outcomes.extend(outcome?);
+                }
                 let mut frames = 0u64;
-                for (port, outcome) in outcomes.into_iter().enumerate() {
-                    let (pad_frames, eos_sent) = outcome?;
+                for (port, (pad_frames, eos_sent)) in pad_outcomes.into_iter().enumerate() {
                     frames = frames.saturating_add(pad_frames);
                     if !eos_sent {
                         out.push_to(port, PipelinePacket::Eos).await?;
@@ -699,6 +784,37 @@ mod tests {
         assert!(s.output_caps(3).is_err());
         // A pad count of zero would leave the element with no output at all.
         assert_eq!(src(0).output_count(), 1);
+    }
+
+    #[test]
+    fn audio_gives_each_publisher_a_video_pad_then_an_aac_pad() {
+        let s = src(4).with_audio(true);
+        let caps: Vec<Caps> = (0..s.output_count())
+            .map(|port| s.output_caps(port).unwrap())
+            .collect();
+        assert_eq!(caps, [s.caps(), ADTS_AAC_CAPS, s.caps(), ADTS_AAC_CAPS]);
+        assert_eq!(s.get_property("max-sessions"), Some(PropValue::Uint(2)));
+    }
+
+    #[test]
+    fn max_sessions_counts_publishers_whichever_property_comes_first() {
+        const PUBLISHERS: u64 = 3;
+        let mut audio_last = src(1);
+        audio_last
+            .set_property("max-sessions", PropValue::Uint(PUBLISHERS))
+            .unwrap();
+        audio_last
+            .set_property("audio", PropValue::Bool(true))
+            .unwrap();
+        let mut audio_first = src(1);
+        audio_first
+            .set_property("audio", PropValue::Bool(true))
+            .unwrap();
+        audio_first
+            .set_property("max-sessions", PropValue::Uint(PUBLISHERS))
+            .unwrap();
+        assert_eq!(audio_last.output_count(), 2 * PUBLISHERS as usize);
+        assert_eq!(audio_first.output_count(), 2 * PUBLISHERS as usize);
     }
 
     #[test]

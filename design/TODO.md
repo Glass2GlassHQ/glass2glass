@@ -138,8 +138,6 @@ libraries installed.
 
 ## Receive / decode
 
-- **AAC on `rtspserversrcn`:** record each publisher's AAC track on a pad of
-  its own, as `rtspserversrc` does.
 - **RTSP ingest sync from a late sender report:** a track whose first frame
   comes before its first RTCP sender report stays placed by arrival time, so
   publisher sources that start apart (gst `rtspclientsink` sends 1 to 2 s

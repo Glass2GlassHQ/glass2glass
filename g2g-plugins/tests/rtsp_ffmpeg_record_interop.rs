@@ -32,6 +32,7 @@ use g2g_core::{
 };
 
 use g2g_plugins::rtspserversrc::RtspServerSrc;
+use g2g_plugins::rtspserversrcn::RtspServerSrcN;
 
 const ACCESS_UNITS: u64 = 20;
 
@@ -258,15 +259,32 @@ impl MultiOutputSink for PortPts {
     }
 }
 
-// `publisher` is the command that publishes video and AAC to the URL it is given
-async fn record_av(publisher: impl FnOnce(&str) -> Command) -> PortPts {
-    let listener = StdTcpListener::bind("127.0.0.1:0").expect("bind rtsp control");
-    let port = listener.local_addr().unwrap().port();
-    let mut src = RtspServerSrc::from_listener(listener)
+fn av_server(listener: StdTcpListener) -> RtspServerSrc {
+    RtspServerSrc::from_listener(listener)
         .expect("adopt listener")
         .with_video_size(320, 240)
         .with_audio_pad(true)
-        .with_frame_limit(AV_ACCESS_UNITS);
+        .with_frame_limit(AV_ACCESS_UNITS)
+}
+
+// one publisher's video and AAC pads
+fn av_server_n(listener: StdTcpListener) -> RtspServerSrcN {
+    const VIDEO_AND_AUDIO_PADS: usize = 2;
+    RtspServerSrcN::from_listener(listener, VIDEO_AND_AUDIO_PADS)
+        .expect("adopt listener")
+        .with_video_size(320, 240)
+        .with_audio(true)
+        .with_frame_limit(AV_ACCESS_UNITS)
+}
+
+// `publisher` is the command that publishes video and AAC to the URL it is given
+async fn record_av<S: MultiOutputSource>(
+    server: impl FnOnce(StdTcpListener) -> S,
+    publisher: impl FnOnce(&str) -> Command,
+) -> PortPts {
+    let listener = StdTcpListener::bind("127.0.0.1:0").expect("bind rtsp control");
+    let port = listener.local_addr().unwrap().port();
+    let mut src = server(listener);
 
     let url = format!("rtsp://127.0.0.1:{port}/stream");
     let mut publisher = publisher(&url);
@@ -278,8 +296,8 @@ async fn record_av(publisher: impl FnOnce(&str) -> Command) -> PortPts {
         MultiOutputSource::run(&mut src, &mut sink),
     )
     .await
-    .expect("RtspServerSrc receives both tracks within 25s")
-    .expect("RtspServerSrc runs");
+    .expect("the server receives both tracks within 25s")
+    .expect("the server runs");
     let _ = publish.await;
     assert_eq!(received, 2 * AV_ACCESS_UNITS);
     sink
@@ -352,21 +370,28 @@ fn assert_audio_follows_video_by_the_publish_offset(recorded: &PortPts) {
 #[tokio::test]
 #[ignore = "needs ffmpeg with RTSP; opens local TCP + UDP sockets"]
 async fn ffmpeg_av_publish_over_udp_keeps_the_audio_offset() {
-    let recorded = record_av(ffmpeg_av_publisher("udp")).await;
+    let recorded = record_av(av_server, ffmpeg_av_publisher("udp")).await;
     assert_audio_follows_video_by_the_publish_offset(&recorded);
 }
 
 #[tokio::test]
 #[ignore = "needs ffmpeg with RTSP; opens a local TCP socket"]
 async fn ffmpeg_av_publish_interleaved_keeps_the_audio_offset() {
-    let recorded = record_av(ffmpeg_av_publisher("tcp")).await;
+    let recorded = record_av(av_server, ffmpeg_av_publisher("tcp")).await;
+    assert_audio_follows_video_by_the_publish_offset(&recorded);
+}
+
+#[tokio::test]
+#[ignore = "needs ffmpeg with RTSP; opens local TCP + UDP sockets"]
+async fn rtspserversrcn_records_a_publishers_aac_on_its_second_pad() {
+    let recorded = record_av(av_server_n, ffmpeg_av_publisher("udp")).await;
     assert_audio_follows_video_by_the_publish_offset(&recorded);
 }
 
 #[tokio::test]
 #[ignore = "needs gst-launch-1.0 with rtspclientsink, x264enc and avenc_aac; opens local TCP + UDP sockets"]
 async fn gst_av_publish_over_udp_records_decodable_aac() {
-    let recorded = record_av(gst_av_publisher("udp")).await;
+    let recorded = record_av(av_server, gst_av_publisher("udp")).await;
     assert_eq!(
         ffprobe_decoded_frames("aac", "a:0", &recorded.audio),
         AV_ACCESS_UNITS
@@ -376,7 +401,7 @@ async fn gst_av_publish_over_udp_records_decodable_aac() {
 #[tokio::test]
 #[ignore = "needs gst-launch-1.0 with rtspclientsink, x264enc and avenc_aac; opens a local TCP socket"]
 async fn gst_av_publish_interleaved_records_decodable_aac() {
-    let recorded = record_av(gst_av_publisher("tcp")).await;
+    let recorded = record_av(av_server, gst_av_publisher("tcp")).await;
     assert_eq!(
         ffprobe_decoded_frames("aac", "a:0", &recorded.audio),
         AV_ACCESS_UNITS

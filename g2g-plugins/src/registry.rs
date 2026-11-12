@@ -3503,7 +3503,8 @@ fn register_feature_gated(reg: &mut Registry) {
         Box::new(crate::rtspclientsink::RtspClientSink::new(inputs, ""))
     }));
     // Concurrent multi-publisher ingest (M863): one endpoint, one recording
-    // publisher per linked pad (`rtspserversrcn name=s  s. ! ...  s. ! ...`).
+    // publisher per linked pad, or per two with `audio=true`
+    // (`rtspserversrcn name=s  s. ! ...  s. ! ...`).
     #[cfg(feature = "rtsp-server")]
     reg.register_fanout_src(g2g_core::runtime::FanoutSrcFactory::new(
         "rtspserversrcn",

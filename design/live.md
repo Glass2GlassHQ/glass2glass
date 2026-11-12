@@ -788,8 +788,11 @@ ANNOUNCE lists, and the responder routes each SETUP by its URL to the track whos
 `a=control` it names. A lone track matches any URL, and an unknown control gets
 a 404. Each output pad records the first SETUP track of its format.
 `rtspserversrc` takes video on pad 0 and, when a second pad is linked, the first
-AAC track (`mpeg4-generic` or `MP4A-LATM`) on pad 1 as ADTS. `rtspserversrcn` records video only,
-one publisher per pad. Tracks no pad records are SETUP and their packets
+AAC track (`mpeg4-generic` or `MP4A-LATM`) on pad 1 as ADTS. `rtspserversrcn`
+gives each publisher one video pad, or with `audio=true` a video pad and then an
+AAC pad, so publisher k records on pads 2k and 2k+1. Its `max-sessions` counts
+publishers, so the pad count does not depend on which of the two properties is
+set first. Tracks no pad records are SETUP and their packets
 dropped, where gst-rtsp-server refuses an ANNOUNCE whose stream count differs
 from its media.
 
