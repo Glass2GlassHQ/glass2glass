@@ -31,8 +31,6 @@ use g2g_plugins::vtdecode::VtDecode;
 const H264_CLIP: &[u8] = include_bytes!("fixtures/h264_640x480.h264");
 const H265_CLIP: &[u8] = include_bytes!("fixtures/h265_640x480.h265");
 
-const FRAME_DURATION_NS: u64 = 33_333_333;
-
 impl CollectSink {
     fn caps_changes(&self) -> Vec<Caps> {
         self.packets
@@ -242,6 +240,7 @@ mod encode {
     use g2g_core::{Interlace, OutputSink};
     use g2g_plugins::vtencode::VtEncode;
 
+    const FRAME_DURATION_NS: u64 = 33_333_333;
     const WIDTH: u32 = 320;
     const HEIGHT: u32 = 240;
     const FPS_Q16: u32 = 30 << 16;
