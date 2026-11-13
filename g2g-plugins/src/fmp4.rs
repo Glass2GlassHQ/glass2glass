@@ -1593,7 +1593,7 @@ fn parse_audio_entry(
             .or_else(|| find_path(children, &[b"wave", b"alac"]))
             .ok_or(G2gError::CapsMismatch)?;
         let config = crate::mp4box::mp4_box(b"alac", payload);
-        let alac = crate::mp4box::alac_config(&config)?;
+        let alac = crate::alac::alac_config(&config)?;
         if alac.channels == 0 || alac.sample_rate == 0 {
             return Err(G2gError::CapsMismatch);
         }

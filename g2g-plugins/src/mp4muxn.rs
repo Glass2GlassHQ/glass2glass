@@ -721,7 +721,7 @@ impl Mp4MuxN {
                     if !is_audio_config_packet(format, au) {
                         return Ok(());
                     }
-                    let alac = crate::mp4box::alac_config(au)?;
+                    let alac = crate::alac::alac_config(au)?;
                     self.inits[input] = Some(TrackInit::Audio {
                         format,
                         channels: alac.channels,
@@ -1816,7 +1816,7 @@ fn trak_media(init: &TrackInit) -> TrakMedia {
                 AudioFormat::Alac => (
                     b"alac",
                     u16::from(
-                        crate::mp4box::alac_config(config)
+                        crate::alac::alac_config(config)
                             .expect("capture_init takes only an alac atom")
                             .bit_depth,
                     ),

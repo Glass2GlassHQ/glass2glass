@@ -804,6 +804,8 @@ mod video_pts_synth;
 // by the audio decoder's frame splitting, psdemux's frame realignment and
 // mpegaudioparse.
 mod audioframe;
+// The `alac` atom that carries the ALAC decoder config.
+mod alac;
 // Trims decoded PCM to the upstream segment, shared by every audio decoder.
 mod frame_clock;
 // The caps the compressed-audio parsers and taggers share.

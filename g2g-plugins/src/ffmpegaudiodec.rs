@@ -430,7 +430,7 @@ impl AsyncElement for FfmpegAudioDec {
                     // decoder whole, since FLAC frame boundaries are not cheaply
                     // self-syncing so g2g relies on the container framing.
                     // libavcodec takes the whole `alac` atom as extradata
-                    if self.format == AudioFormat::Alac && crate::mp4box::is_alac_atom(buf) {
+                    if self.format == AudioFormat::Alac && crate::alac::is_alac_atom(buf) {
                         self.open_decoder(Some(buf))?;
                         return Ok(());
                     }
