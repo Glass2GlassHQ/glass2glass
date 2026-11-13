@@ -16,8 +16,24 @@ use g2g_core::runtime::{parse_launch, run_graph};
 use g2g_core::PipelineClock;
 use g2g_plugins::registry::default_registry;
 
+#[derive(Clone, Copy)]
+enum Kind {
+    Audio,
+    Video,
+}
+
+impl Kind {
+    fn name(self) -> &'static str {
+        match self {
+            Kind::Audio => "audio",
+            Kind::Video => "video",
+        }
+    }
+}
+
 struct Remux {
     fixture: &'static str,
+    kind: Kind,
     muxer: &'static str,
     extension: &'static str,
 }
@@ -25,8 +41,18 @@ struct Remux {
 const fn mkv_audio(fixture: &'static str) -> Remux {
     Remux {
         fixture,
+        kind: Kind::Audio,
         muxer: "matroskamux",
         extension: "mkv",
+    }
+}
+
+const fn ts(fixture: &'static str, kind: Kind) -> Remux {
+    Remux {
+        fixture,
+        kind,
+        muxer: "mpegtsmux",
+        extension: "ts",
     }
 }
 
@@ -44,6 +70,11 @@ const REMUXES: &[Remux] = &[
     mkv_audio("sine_8k_mono_alaw.wav"),
     mkv_audio("sine_8k_mono_mulaw.wav"),
     mkv_audio("sine_8k_stereo_imaadpcm.wav"),
+    ts("av_mpeg2_mp2.mpg", Kind::Video),
+    ts("av_mpeg2_mp2.mpg", Kind::Audio),
+    ts("mpeg4part2_640x480.mp4", Kind::Video),
+    ts("avi_h264_mp3.avi", Kind::Audio),
+    ts("ac3_stereo_48000.ac3", Kind::Audio),
 ];
 
 struct ZeroClock;
@@ -71,11 +102,12 @@ async fn run(line: &str) {
         .unwrap_or_else(|e| panic!("runs `{line}`: {e:?}"));
 }
 
-async fn decoded(path: &Path) -> Vec<u8> {
+async fn decoded(path: &Path, kind: Kind) -> Vec<u8> {
     let out = temp_path("decoded.raw");
     run(&format!(
-        "filesrc location={} ! decodebin current-audio=0 ! filesink location={}",
+        "filesrc location={} ! decodebin current-{}=0 ! filesink location={}",
         path.display(),
+        kind.name(),
         out.display()
     ))
     .await;
@@ -91,14 +123,15 @@ async fn each_codec_remuxes_and_decodes_like_its_source() {
         let source = fixture(remux.fixture);
         let remuxed = temp_path(&format!("remux.{}", remux.extension));
         run(&format!(
-            "filesrc location={} ! parsebin name=p  p.audio_0 ! queue ! m.  {} name=m ! filesink location={}",
+            "filesrc location={} ! parsebin name=p  p.{}_0 ! queue ! m.  {} name=m ! filesink location={}",
             source.display(),
+            remux.kind.name(),
             remux.muxer,
             remuxed.display()
         ))
         .await;
-        let original = decoded(&source).await;
-        let copy = decoded(&remuxed).await;
+        let original = decoded(&source, remux.kind).await;
+        let copy = decoded(&remuxed, remux.kind).await;
         std::fs::remove_file(&remuxed).ok();
         assert!(
             copy == original,

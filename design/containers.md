@@ -277,6 +277,13 @@ parser builds `tsmuxn::TsMux` for `! mpegtsmux !` and for
 of the access unit it packetizes, from the video pads only when there is one, so
 an audio-only multiplex keeps every sync sample for a segmenter to cut on.
 
+Each input's caps pick its stream type, matching what ffmpeg and gst write:
+H.264, H.265, MPEG-2 video (0x02), MPEG-4 Part 2 (0x10), AAC, MP2 and MP3 both
+as MPEG-1 audio (0x03), and AC-3 as ATSC 0x81 on `private_stream_1` with an
+`AC-3` registration descriptor. AV1, Opus, KLV, DVB subtitles and ST 2038 ride
+the private PES their own sections below describe. The demuxer declares 0x03
+and 0x04 as MP2, and `mpegaudioparse` refines that to MP3 from the layer bits.
+
 Tables repeat. The PAT and every PMT go out together every `pat-interval`
 (`pmt-interval` is the same cadence), and the SDT every `si-interval`, both in
 90 kHz ticks with GStreamer's default of 9000 (100 ms). 0 writes a table once.

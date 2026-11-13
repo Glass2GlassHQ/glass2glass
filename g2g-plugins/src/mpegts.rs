@@ -263,14 +263,21 @@ fn id3_metadata_pointer_descriptor(program_number: u16) -> [u8; 17] {
 /// The MISB ST 1402 `registration_descriptor` marking a private PES (0x06) as
 /// asynchronous KLV, which is how this muxer writes an unqualified private stream.
 const KLVA_REGISTRATION_ID: &[u8; 4] = b"KLVA";
-const KLVA_REGISTRATION: &[u8] = &[
-    DESC_TAG_REGISTRATION,
-    KLVA_REGISTRATION_ID.len() as u8,
-    KLVA_REGISTRATION_ID[0],
-    KLVA_REGISTRATION_ID[1],
-    KLVA_REGISTRATION_ID[2],
-    KLVA_REGISTRATION_ID[3],
-];
+const KLVA_REGISTRATION: &[u8] = &registration_descriptor(KLVA_REGISTRATION_ID);
+// ffmpeg and gst both mark an ATSC AC-3 (0x81) stream with this registration
+const AC3_REGISTRATION_ID: &[u8; 4] = b"AC-3";
+const AC3_REGISTRATION: &[u8] = &registration_descriptor(AC3_REGISTRATION_ID);
+
+const fn registration_descriptor(format: &[u8; 4]) -> [u8; 6] {
+    [
+        DESC_TAG_REGISTRATION,
+        format.len() as u8,
+        format[0],
+        format[1],
+        format[2],
+        format[3],
+    ]
+}
 
 /// The `registration_descriptor` format_identifier the AOM "Carriage of AV1 in
 /// MPEG-2 TS" spec assigns AV1 on a private PES (0x06). AV1 has no `stream_type`
@@ -1980,7 +1987,9 @@ fn has_ac3_descriptor(mut desc: &[u8]) -> bool {
         };
         match tag {
             DESC_TAG_AC3 => return true,
-            DESC_TAG_REGISTRATION if body.len() >= 4 && &body[..4] == b"AC-3" => return true,
+            DESC_TAG_REGISTRATION if body.len() >= 4 && &body[..4] == AC3_REGISTRATION_ID => {
+                return true
+            }
             _ => {}
         }
         desc = &desc[2 + len..];
@@ -2533,22 +2542,28 @@ impl TsMuxer {
             // carries the 'KLVA' registration descriptor the demux side keys on.
             // Synchronous KLV rides metadata-in-PES (0x15) with the 13818-1
             // metadata stream_id (0xFC) and a metadata_descriptor instead.
-            let stream_id = if stream_type == STREAM_TYPE_PRIVATE_PES {
-                0xBD
-            } else if stream_type == STREAM_TYPE_METADATA_PES {
-                0xFC
-            } else if stream_type == STREAM_TYPE_AAC {
-                let id = 0xC0 + *audio_n;
-                *audio_n += 1;
-                id
-            } else {
-                let id = 0xE0 + *video_n;
-                *video_n += 1;
-                id
-            };
+            // ATSC A/52 puts AC-3 on private_stream_1 too, as ffmpeg writes it.
+            let stream_id =
+                if stream_type == STREAM_TYPE_PRIVATE_PES || stream_type == STREAM_TYPE_AC3 {
+                    0xBD
+                } else if stream_type == STREAM_TYPE_METADATA_PES {
+                    0xFC
+                } else if matches!(
+                    stream_type,
+                    STREAM_TYPE_AAC | STREAM_TYPE_MPEG1_AUDIO | STREAM_TYPE_MPEG2_AUDIO
+                ) {
+                    let id = 0xC0 + *audio_n;
+                    *audio_n += 1;
+                    id
+                } else {
+                    let id = 0xE0 + *video_n;
+                    *video_n += 1;
+                    id
+                };
             let es_info: &[u8] = match stream_type {
                 STREAM_TYPE_PRIVATE_PES => KLVA_REGISTRATION,
                 STREAM_TYPE_METADATA_PES => KLV_METADATA_DESCRIPTOR,
+                STREAM_TYPE_AC3 => AC3_REGISTRATION,
                 _ => &[],
             };
             mux_streams.push(MuxStream {
@@ -3420,10 +3435,14 @@ fn advance_continuity_counter(cc: u8) -> u8 {
 }
 
 /// Whether a `stream_type` the mux writes is video, for the SDT `service_type`.
-fn mux_stream_type_is_video(stream_type: u8) -> bool {
+pub(crate) fn mux_stream_type_is_video(stream_type: u8) -> bool {
     matches!(
         stream_type,
-        STREAM_TYPE_H264 | STREAM_TYPE_H265 | STREAM_TYPE_MPEG4P2
+        STREAM_TYPE_H264
+            | STREAM_TYPE_H265
+            | STREAM_TYPE_MPEG4P2
+            | STREAM_TYPE_MPEG2_VIDEO
+            | STREAM_TYPE_JPEG_XS
     )
 }
 

@@ -8,7 +8,8 @@
 //! the inverse of [`crate::tsdemux::TsDemux`].
 //!
 //! A [`MultiInputElement`]: each input pad accepts one elementary stream
-//! (`Caps::CompressedVideo{H264|H265|Av1}`, `Caps::Audio{Aac|Opus}`, `Caps::Klv`,
+//! (`Caps::CompressedVideo{H264|H265|Av1|JpegXs|Mpeg2|Mpeg4Part2}`,
+//! `Caps::Audio{Aac|Opus|Mp2|Mp3|Ac3}`, `Caps::Klv`,
 //! `Caps::St2038`, `Caps::Id3`, or the `Caps::SubPicture{DvbSub}` subtitle pad), and the access
 //! units are interleaved into one multiplex by decode time (the DTS when the
 //! frame carries one, else the PTS) before being written to their per-stream
@@ -61,10 +62,11 @@ use crate::dvbsub::{parse_page_ids, PageIds, DEFAULT_PAGE_ID, DEFAULT_SUBTITLING
 use crate::jpegxs::JxsVideoDescriptor;
 use crate::livemux::{wall_clock_ns, LiveMuxDeadline, LIVE_MUX_LATENCY_PROPERTY};
 use crate::mpegts::{
-    TsMuxer, DEFAULT_ORIGINAL_NETWORK_ID, DEFAULT_PCR_INTERVAL_90KHZ, DEFAULT_TABLE_INTERVAL_90KHZ,
-    DEFAULT_TRANSPORT_STREAM_ID, MAX_TABLES_VERSION, MUX_ES_PID, MUX_PID_RANGE, MUX_PMT_PID,
-    PES_CLOCK_HZ, STREAM_TYPE_AAC, STREAM_TYPE_H264, STREAM_TYPE_H265, STREAM_TYPE_JPEG_XS,
-    STREAM_TYPE_METADATA_PES, STREAM_TYPE_PRIVATE_PES, TAG_KEY_SERVICE_NAME,
+    mux_stream_type_is_video, TsMuxer, DEFAULT_ORIGINAL_NETWORK_ID, DEFAULT_PCR_INTERVAL_90KHZ,
+    DEFAULT_TABLE_INTERVAL_90KHZ, DEFAULT_TRANSPORT_STREAM_ID, MAX_TABLES_VERSION, MUX_ES_PID,
+    MUX_PID_RANGE, MUX_PMT_PID, PES_CLOCK_HZ, STREAM_TYPE_AAC, STREAM_TYPE_AC3, STREAM_TYPE_H264,
+    STREAM_TYPE_H265, STREAM_TYPE_JPEG_XS, STREAM_TYPE_METADATA_PES, STREAM_TYPE_MPEG1_AUDIO,
+    STREAM_TYPE_MPEG2_VIDEO, STREAM_TYPE_MPEG4P2, STREAM_TYPE_PRIVATE_PES, TAG_KEY_SERVICE_NAME,
     TAG_KEY_SERVICE_PROVIDER,
 };
 use crate::mux::{audio_track_params, refused_input};
@@ -459,10 +461,27 @@ fn stream_type_for(caps: &Caps, klv_sync: bool) -> Option<u8> {
             codec: VideoCodec::JpegXs,
             ..
         } => Some(STREAM_TYPE_JPEG_XS),
+        Caps::CompressedVideo {
+            codec: VideoCodec::Mpeg2,
+            ..
+        } => Some(STREAM_TYPE_MPEG2_VIDEO),
+        Caps::CompressedVideo {
+            codec: VideoCodec::Mpeg4Part2,
+            ..
+        } => Some(STREAM_TYPE_MPEG4P2),
         Caps::Audio {
             format: AudioFormat::Aac,
             ..
         } => Some(STREAM_TYPE_AAC),
+        // ffmpeg and gst both write MP2 and MP3 as MPEG-1 audio
+        Caps::Audio {
+            format: AudioFormat::Mp2 | AudioFormat::Mp3,
+            ..
+        } => Some(STREAM_TYPE_MPEG1_AUDIO),
+        Caps::Audio {
+            format: AudioFormat::Ac3,
+            ..
+        } => Some(STREAM_TYPE_AC3),
         // Opus has no stream_type of its own: it rides a private PES told apart
         // by the 'Opus' registration + extension descriptors the muxer writes.
         Caps::Audio {
@@ -794,11 +813,7 @@ impl TsMux {
     }
 
     fn is_video(&self, input: usize) -> bool {
-        self.av1[input]
-            || matches!(
-                self.stream_types[input],
-                Some(STREAM_TYPE_H264) | Some(STREAM_TYPE_H265) | Some(STREAM_TYPE_JPEG_XS)
-            )
+        self.av1[input] || self.stream_types[input].is_some_and(mux_stream_type_is_video)
     }
 
     /// The metadata that applies to input `i`: its own tags over its program's

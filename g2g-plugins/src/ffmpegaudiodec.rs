@@ -358,6 +358,10 @@ impl AsyncElement for FfmpegAudioDec {
         if !Self::decodes(*format) {
             return Err(G2gError::CapsMismatch);
         }
+        // mpegaudioparse refines a TS or PS demuxer's Mp2 to Mp3, and libavcodec's MP2 decoder is fixed-point where its MP3 one is float
+        if *format != self.format {
+            self.decoder = None;
+        }
         self.format = *format;
         // FLAC opens lazily on its `fLaC` STREAMINFO header (needed as extradata)
         // and a tagged codec on its container header. The rest open eagerly,

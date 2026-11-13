@@ -333,8 +333,8 @@ libraries installed.
     `wc4-xan` AVIs.
   - The fan-in muxers refuse codecs the gst muxer of the same name takes:
     `matroskamux` MPEG-2, MPEG-4 Part 2, Theora, ProRes, DV and raw video,
-    `mp4mux` MP2, MP3, AC-3, ALAC and MPEG-4 Part 2, `mpegtsmux` MPEG-2 video,
-    MPEG-4 Part 2, MP2, MP3 and AC-3, and `flvmux` PCM, A-law and mu-law.
+    `mp4mux` MP2, MP3, AC-3, ALAC and MPEG-4 Part 2, and `flvmux` PCM, A-law
+    and mu-law.
 - **Opus end trim in fragmented MP4:** the fragmented `mp4mux` layout writes
   its `moov` before the stream ends, so the `elst` duration is 0 and the end
   trim is only in the last sample's duration, which gst's `qtdemux` ignores (a
