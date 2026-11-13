@@ -149,6 +149,7 @@ async fn client(flags: Flags) -> Result<(), Box<dyn Error>> {
 }
 
 fn main() -> ExitCode {
+    g2g_core::log::init_from_env();
     let mut args = std::env::args().skip(1);
     let command = args.next();
     let runtime = tokio::runtime::Builder::new_current_thread()

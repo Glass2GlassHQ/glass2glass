@@ -221,7 +221,7 @@ stay shared and are tested without a desktop.
 
 | Edge | Capture | Inject |
 | :--- | :--- | :--- |
-| Linux | the client window's keyboard and pointer, plus `/dev/input` for grab | `/dev/uinput`. The host user is in the `input` group, or the process has a writable `/dev/uinput`. |
+| Linux | the client window's keyboard and pointer, plus `/dev/input` for grab | `/dev/uinput`, which Fedora creates as root-only `0600`, so the host needs a udev rule that gives the `input` group write access. |
 | Windows | Raw Input on the client window | `SendInput` in the interactive session. The service injects when the interactive process cannot, which is the secure desktop. |
 | macOS | the client window | `CGEvent`, which needs the accessibility permission. Screen recording stays the permission `screencapturesrc` already needs. |
 
