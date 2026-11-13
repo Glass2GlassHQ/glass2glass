@@ -115,6 +115,14 @@ send and recv halves share `&mut self` directly with no detached task, unlike
 the send-only session, which spawns the `Rtc` onto its own task to avoid
 `process` and run-loop aliasing.
 
+`WebRtcDuplexSession::open_data_channel(label)` adds one reliable, ordered data
+channel on the same `Rtc` and returns an unbounded sender and receiver of
+messages. The offerer puts the channel in its first offer, and the answerer
+binds the channel whose label matches its own. Messages sent before the
+channel opens wait in the sender, and a write the SCTP send buffer refuses is
+retried every 5 ms. A message over `datachannel::MAX_MESSAGE_SIZE` fails the
+session.
+
 ### Growing the pad count live
 
 `run_duplex_session_dynamic` is the renegotiating sibling: its arms run under a

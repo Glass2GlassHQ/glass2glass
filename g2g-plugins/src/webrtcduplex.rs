@@ -60,6 +60,7 @@ use tokio::sync::mpsc;
 
 use str0m::bwe::{Bitrate, BweKind};
 use str0m::change::SdpAnswer;
+use str0m::channel::ChannelId;
 use str0m::crypto::from_feature_flags;
 use str0m::media::{Direction, MediaKind, Mid, Pt};
 use str0m::{Event, IceConnectionState, Input, Output, RtcConfig};
@@ -86,6 +87,7 @@ use crate::webrtc_util::{
     set_linger_ms_property, DEFAULT_LINGER_MS, LINGER_MS_PROP, STUN_SERVER_PROP, TURN_PASS_PROP,
     TURN_SERVER_PROP, TURN_USER_PROP,
 };
+use crate::webrtcdata::{flush_channel_message, ChannelSettings, CHANNEL_RETRY_INTERVAL};
 
 /// The tracks a duplex session offers at the handshake, in pad order: video on
 /// pad 0, audio on pad 1. `track_count` selects how many are active (1 = video
@@ -268,6 +270,20 @@ pub struct WebRtcDuplexSession {
     /// Mid-session renegotiation control (track enable/disable), shared with
     /// [`Self::control`] handles.
     control: DuplexControl,
+    data_channel: Option<DataChannelLane>,
+}
+
+#[derive(Debug)]
+pub struct DataChannelEnds {
+    pub outgoing: mpsc::UnboundedSender<Vec<u8>>,
+    pub incoming: mpsc::UnboundedReceiver<Vec<u8>>,
+}
+
+#[derive(Debug)]
+struct DataChannelLane {
+    label: String,
+    outgoing: mpsc::UnboundedReceiver<Vec<u8>>,
+    incoming: mpsc::UnboundedSender<Vec<u8>>,
 }
 
 impl core::fmt::Debug for WebRtcDuplexSession {
@@ -307,7 +323,19 @@ impl WebRtcDuplexSession {
             reverse: (0..track_count).map(|_| ReverseChannel::new()).collect(),
             nacks_seen: Arc::new(AtomicU64::new(0)),
             control: DuplexControl::default(),
+            data_channel: None,
         }
+    }
+
+    pub fn open_data_channel(&mut self, label: impl Into<String>) -> DataChannelEnds {
+        let (outgoing, outgoing_receiver) = mpsc::unbounded_channel();
+        let (incoming_sender, incoming) = mpsc::unbounded_channel();
+        self.data_channel = Some(DataChannelLane {
+            label: label.into(),
+            outgoing: outgoing_receiver,
+            incoming: incoming_sender,
+        });
+        DataChannelEnds { outgoing, incoming }
     }
 
     /// Reserve `video` + `audio` extra pads beyond the active tracks.
@@ -586,6 +614,7 @@ impl MultiDuplexSession for WebRtcDuplexSession {
         // m-line routes back to the source feeding that m-line's send pad.
         let mut reverse = self.reverse.clone();
         let nacks_seen = self.nacks_seen.clone();
+        let data_channel = self.data_channel.take();
         Box::pin(async move {
             let hw = || G2gError::Hardware(HardwareError::Other);
             let log = g2g_core::log::Target::category(DUPLEX_CATEGORY);
@@ -649,6 +678,11 @@ impl MultiDuplexSession for WebRtcDuplexSession {
                                 out_pad: Some(o),
                             });
                         }
+                        if let Some(lane) = &data_channel {
+                            let mut settings = ChannelSettings::default();
+                            settings.label = lane.label.clone();
+                            api.add_channel_with_config(settings.to_config());
+                        }
                         let (offer, pending) = api.apply().ok_or_else(hw)?;
                         (offer.to_sdp_string(), pending)
                     };
@@ -707,6 +741,13 @@ impl MultiDuplexSession for WebRtcDuplexSession {
             // lookup cannot happen where the pad is learned: that is inside the
             // select below, which holds `inbound` borrowed for its `recv`.
             let mut pending_reverse: Vec<usize> = Vec::new();
+            let (data_channel_label, mut outgoing_messages, incoming_messages) = match data_channel
+            {
+                Some(lane) => (Some(lane.label), Some(lane.outgoing), Some(lane.incoming)),
+                None => (None, None, None),
+            };
+            let mut data_channel_id: Option<ChannelId> = None;
+            let mut pending_message: Option<Vec<u8>> = None;
 
             // Run after every SDP application: drop the bindings whose m-line
             // str0m no longer has (a retracted ADD, e.g. one this side yielded on
@@ -826,6 +867,24 @@ impl MultiDuplexSession for WebRtcDuplexSession {
                         // as a receiver (ingress) and nacks received as a sender
                         // (egress). Keep the peak so a caller can confirm RTX was
                         // exercised under loss.
+                        Ok(Output::Event(Event::ChannelOpen(id, label))) => {
+                            if data_channel_label.as_deref() == Some(label.as_str()) {
+                                data_channel_id = Some(id);
+                            }
+                        }
+                        Ok(Output::Event(Event::ChannelData(data)))
+                            if data_channel_id == Some(data.id) =>
+                        {
+                            if let Some(incoming) = &incoming_messages {
+                                // a closed receiver means the caller stopped reading
+                                let _ = incoming.send(data.data);
+                            }
+                        }
+                        Ok(Output::Event(Event::ChannelClose(id)))
+                            if data_channel_id == Some(id) =>
+                        {
+                            data_channel_id = None;
+                        }
                         Ok(Output::Event(Event::MediaIngressStats(s))) => {
                             nacks_seen.fetch_max(s.nacks, Ordering::Relaxed);
                         }
@@ -921,8 +980,23 @@ impl MultiDuplexSession for WebRtcDuplexSession {
                     }
                 }
 
-                let timeout = deadline.saturating_duration_since(Instant::now());
+                flush_channel_message(&mut rtc, data_channel_id, &mut pending_message)
+                    .map_err(|_| hw())?;
+
+                let mut timeout = deadline.saturating_duration_since(Instant::now());
+                if pending_message.is_some() {
+                    timeout = timeout.min(CHANNEL_RETRY_INTERVAL);
+                }
+                let outgoing_ready = data_channel_id.is_some()
+                    && pending_message.is_none()
+                    && outgoing_messages.is_some();
                 tokio::select! {
+                    message = async { outgoing_messages.as_mut()?.recv().await }, if outgoing_ready => {
+                        match message {
+                            Some(message) => pending_message = Some(message),
+                            None => outgoing_messages = None,
+                        }
+                    }
                     msg = sig.rx.recv() => {
                         match msg {
                             // Peer signalling closed: media keeps flowing (the

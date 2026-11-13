@@ -103,12 +103,9 @@ One client at a time, held by `SessionSlot`.
 
 ## Data channel
 
-Added inside `WebRtcDuplexSession::run`, on the `Rtc` that session already
-owns, created by the offerer with `ChannelConfig` label `input`, `ordered:
-true`, `Reliability::Reliable`. Bytes in and out are a pair of channels the
-desktop crate holds. The duplex session gains no knowledge of keycodes. The
-packets are built: [transports.md](transports.md), "Input packets" and "Input
-router".
+The channel is `WebRtcDuplexSession::open_data_channel("input")`, built:
+[transports.md](transports.md), "Duplex sessions". So are the packets that
+cross it: "Input packets" and "Input router".
 
 Devices of one type share a producer. The host destroys the virtual device a
 removal packet names.
@@ -322,8 +319,6 @@ frame was counted in `livesync`'s `drop`.
 Each slice builds and is reviewable on its own. Later slices depend on earlier
 ones.
 
-2. **Data channel on `WebRtcDuplexSession`.** An in-process loopback sends a
-   packet across the channel while a video frame crosses the same `Rtc`.
 3. **Linux host and Linux client on one machine.** Portal or `ximagesrc`,
    software or VA-API encode, `livesync` on the client, uinput inject with the
    HID mapping tables, window capture. `inputs=false` when both run on the

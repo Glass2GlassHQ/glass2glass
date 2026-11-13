@@ -4,7 +4,7 @@
 
 //! Native P2P WebRTC data-channel elements on the sans-IO [`str0m`] stack
 //! (ICE / DTLS / SCTP), the native unification of the wasm-only browser
-//! data-channel [`crate::webrtcsrc::WebRtcSrc`]. Two elements sharing one
+//! data-channel `webrtcsrc::WebRtcSrc`. Two elements sharing one
 //! handshake:
 //!
 //! - [`WebRtcDataSrc`] (`SourceLoop`): owns an `Rtc` + `UdpSocket`, does the
@@ -21,7 +21,9 @@
 //!   receiver defers it until that data has arrived, so the src sees
 //!   [`Event::ChannelClose`] after the last message.
 //!
-//! Why standalone elements, not a lane folded into [`WebRtcDuplexSession`]: that
+//! Why standalone elements, besides the channel
+//! [`crate::webrtcduplex::WebRtcDuplexSession::open_data_channel`] adds to a
+//! media session: that
 //! session is a media element (H.264 / Opus RTP writers, NACK / RTX counters,
 //! PLI / BWE reverse channels). A data channel is SCTP bytes with none of that,
 //! and the existing element taxonomy already pairs a `SourceLoop` ingest with an
@@ -30,7 +32,7 @@
 //! [`SdpChannel`] signalling seam and the shared handshake below, so the offer /
 //! answer logic is written once.
 //!
-//! The offerer adds the channel ([`SdpApi::add_channel_with_config`]); the
+//! The offerer adds the channel ([`str0m::change::SdpApi::add_channel_with_config`]); the
 //! answerer inherits it from the offer. Reliability (`ordered` / retransmits /
 //! packet-lifetime) is set by the channel creator, so it applies in the Offerer
 //! role and is inherited from the peer as the Answerer, exactly as the browser
@@ -59,7 +61,7 @@ use tokio::sync::mpsc;
 use str0m::channel::{ChannelConfig, ChannelId, Reliability};
 use str0m::crypto::from_feature_flags;
 use str0m::net::{Protocol, Receive};
-use str0m::{Event, IceConnectionState, Input, Output, Rtc, RtcConfig};
+use str0m::{Event, IceConnectionState, Input, Output, Rtc, RtcConfig, RtcError};
 
 use g2g_core::frame::Frame;
 use g2g_core::log::{short_type_name, LogSource, Target};
@@ -89,8 +91,8 @@ const DEFAULT_QUEUE_DEPTH: usize = 256;
 /// whichever peer creates the channel (the Offerer); the Answerer inherits the
 /// peer's settings. Mirrors the browser `RTCDataChannelInit`.
 #[derive(Debug, Clone)]
-struct ChannelSettings {
-    label: String,
+pub(crate) struct ChannelSettings {
+    pub(crate) label: String,
     ordered: bool,
     /// Max retransmits before giving up (`None` = reliable, unbounded).
     max_retransmits: Option<u16>,
@@ -113,7 +115,7 @@ impl ChannelSettings {
     /// Resolve to a str0m [`ChannelConfig`]. Packet-lifetime wins over
     /// retransmits (the two SCTP reliability modes are mutually exclusive);
     /// neither set means reliable.
-    fn to_config(&self) -> ChannelConfig {
+    pub(crate) fn to_config(&self) -> ChannelConfig {
         let reliability = if let Some(lifetime) = self.max_packet_lifetime {
             Reliability::MaxPacketLifetime { lifetime }
         } else if let Some(retransmits) = self.max_retransmits {
@@ -662,6 +664,27 @@ impl AsyncElement for WebRtcDataSink {
     }
 }
 
+// str0m rejects a channel write while its send buffer is full
+pub(crate) const CHANNEL_RETRY_INTERVAL: Duration = Duration::from_millis(5);
+
+pub(crate) fn flush_channel_message(
+    rtc: &mut Rtc,
+    channel: Option<ChannelId>,
+    pending: &mut Option<Vec<u8>>,
+) -> Result<(), RtcError> {
+    let (Some(id), Some(message)) = (channel, pending.take()) else {
+        return Ok(());
+    };
+    match rtc.channel(id).map(|mut c| c.write(true, &message)) {
+        Some(Ok(true)) => Ok(()),
+        Some(Ok(false)) | None => {
+            *pending = Some(message);
+            Ok(())
+        }
+        Some(Err(error)) => Err(error),
+    }
+}
+
 /// The sans-IO egress loop: owns the `Rtc` + socket, writes queued messages on
 /// the data channel once it opens, and after the input ends closes the channel
 /// and lingers so the last messages and the stream reset reach the peer.
@@ -705,12 +728,8 @@ async fn run_egress(
 
         // Flush a pending data message once the channel is open. `write` returns
         // Ok(false) when the send buffer cannot hold it; keep it and retry.
-        if let (Some(id), Some(msg)) = (channel, pending.take()) {
-            match rtc.channel(id).map(|mut c| c.write(true, &msg)) {
-                Some(Ok(true)) => {}
-                Some(Ok(false)) | None => pending = Some(msg),
-                Some(Err(_)) => return,
-            }
+        if flush_channel_message(&mut rtc, channel, &mut pending).is_err() {
+            return;
         }
 
         // Input ended and all data is queued: close the channel (sctp-proto sends
@@ -729,7 +748,7 @@ async fn run_egress(
         // Retry quickly while a message is waiting on buffer space.
         let base = deadline.saturating_duration_since(Instant::now());
         let timeout = if pending.is_some() || (input_done && !channel_closed) {
-            base.min(Duration::from_millis(5))
+            base.min(CHANNEL_RETRY_INTERVAL)
         } else {
             base
         };

@@ -11,125 +11,24 @@
 
 #![cfg(all(target_os = "linux", feature = "webrtc"))]
 
+mod webrtc_duplex_common;
 mod webrtc_streams_common;
 
-use core::future::{ready, Future, Ready};
-use core::pin::Pin;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use g2g_core::element::DynAsyncElement;
-use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
-use g2g_core::runtime::{run_duplex_session, DynSourceLoop, SourceLoop};
-use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, ConfigureOutcome, FrameTiming, G2gError, MemoryDomain,
-    OutputSink, PipelineClock, PipelinePacket,
-};
+use g2g_core::Caps;
 use g2g_plugins::webrtc_codec::WebRtcVideoCodec;
 use g2g_plugins::webrtcduplex::{SdpChannel, SignalRole, WebRtcDuplexSession};
 
-use webrtc_streams_common::{fixed_caps, synthetic_stream};
+use webrtc_duplex_common::{run_peer, Received, ZeroClock};
+use webrtc_streams_common::synthetic_stream;
 
 const FRAMES: usize = 60;
-const FRAME_INTERVAL: Duration = Duration::from_millis(33);
 /// The handshake drops the first units, so most but not all arrive.
 const MIN_RECEIVED: usize = FRAMES / 2;
 const RUN_TIMEOUT: Duration = Duration::from_secs(40);
-
-struct ZeroClock;
-impl PipelineClock for ZeroClock {
-    fn now_ns(&self) -> u64 {
-        0
-    }
-}
-
-/// Paces the synthetic units at frame rate, then EOS.
-struct PacedSrc {
-    codec: WebRtcVideoCodec,
-    units: Arc<Vec<Vec<u8>>>,
-}
-
-impl SourceLoop for PacedSrc {
-    type RunFuture<'a> = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>;
-    type CapsFuture<'a> = Ready<Result<Caps, G2gError>>;
-
-    fn intercept_caps(&mut self) -> Self::CapsFuture<'_> {
-        ready(Ok(fixed_caps(self.codec)))
-    }
-    fn configure_pipeline(&mut self, _c: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        Ok(ConfigureOutcome::Accepted)
-    }
-    fn run<'a>(&'a mut self, out: &'a mut dyn OutputSink) -> Self::RunFuture<'a> {
-        Box::pin(async move {
-            out.push(PipelinePacket::CapsChanged(fixed_caps(self.codec)))
-                .await?;
-            for (seq, unit) in self.units.iter().enumerate() {
-                let frame = Frame::new(
-                    MemoryDomain::System(SystemSlice::from_boxed(unit.clone().into_boxed_slice())),
-                    FrameTiming {
-                        pts_ns: seq as u64 * FRAME_INTERVAL.as_nanos() as u64,
-                        ..FrameTiming::default()
-                    },
-                    seq as u64,
-                );
-                out.push(PipelinePacket::DataFrame(frame)).await?;
-                tokio::time::sleep(FRAME_INTERVAL).await;
-            }
-            out.push(PipelinePacket::Eos).await?;
-            Ok(self.units.len() as u64)
-        })
-    }
-}
-
-#[derive(Default)]
-struct Received {
-    caps: Option<Caps>,
-    units: Vec<(Vec<u8>, bool)>,
-}
-
-struct RecordingSink {
-    received: Arc<Mutex<Received>>,
-}
-
-impl AsyncElement for RecordingSink {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>;
-
-    fn intercept_caps(&self, c: &Caps) -> Result<Caps, G2gError> {
-        Ok(c.clone())
-    }
-    fn caps_constraint_as_sink(&self) -> CapsConstraint<'_> {
-        CapsConstraint::AcceptsAny
-    }
-    fn configure_pipeline(&mut self, _c: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        Ok(ConfigureOutcome::Accepted)
-    }
-    fn process<'a>(
-        &'a mut self,
-        packet: PipelinePacket,
-        _out: &'a mut dyn OutputSink,
-    ) -> Self::ProcessFuture<'a> {
-        Box::pin(async move {
-            let mut received = self.received.lock().unwrap();
-            match packet {
-                PipelinePacket::CapsChanged(caps) => {
-                    received.caps.get_or_insert(caps);
-                }
-                PipelinePacket::DataFrame(frame) => {
-                    let bytes = frame
-                        .domain
-                        .as_system_slice()
-                        .expect("system memory")
-                        .to_vec();
-                    received.units.push((bytes, frame.timing.keyframe));
-                }
-                _ => {}
-            }
-            Ok(())
-        })
-    }
-}
 
 async fn round_trip(codec: WebRtcVideoCodec) -> (Arc<Vec<Vec<u8>>>, Received, Received) {
     let units = Arc::new(synthetic_stream(codec, FRAMES));
@@ -142,29 +41,16 @@ async fn round_trip(codec: WebRtcVideoCodec) -> (Arc<Vec<Vec<u8>>>, Received, Re
     let received_b = Arc::new(Mutex::new(Received::default()));
     let clock = ZeroClock;
 
-    async fn peer(
-        codec: WebRtcVideoCodec,
-        units: Arc<Vec<Vec<u8>>>,
-        session: &mut WebRtcDuplexSession,
-        received: Arc<Mutex<Received>>,
-        clock: &ZeroClock,
-    ) -> Result<g2g_core::runtime::RunStats, G2gError> {
-        let mut src = PacedSrc { codec, units };
-        let mut sink = RecordingSink { received };
-        let sources: Vec<&mut dyn DynSourceLoop> = vec![&mut src];
-        let sinks: Vec<&mut dyn DynAsyncElement> = vec![&mut sink];
-        run_duplex_session(sources, session, sinks, clock, 8).await
-    }
     let (result_a, result_b) = tokio::time::timeout(RUN_TIMEOUT, async {
         tokio::join!(
-            peer(
+            run_peer(
                 codec,
                 units.clone(),
                 &mut session_a,
                 received_a.clone(),
                 &clock
             ),
-            peer(
+            run_peer(
                 codec,
                 units.clone(),
                 &mut session_b,
