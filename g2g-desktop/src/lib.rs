@@ -2,7 +2,11 @@
 //
 // SPDX-License-Identifier: MPL-2.0
 
+#[cfg(feature = "session")]
+pub mod client;
 pub mod hid;
+#[cfg(all(target_os = "linux", feature = "session"))]
+pub mod host;
 pub mod packet;
 pub mod router;
 pub mod signaling;

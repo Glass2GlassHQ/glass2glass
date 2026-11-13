@@ -578,6 +578,23 @@ the window has no focus. A key-down whose usage is in the shortcut list returns
 sends a key-up for every forwarded key still down and a button-up for every
 button still down, because the host holds a key until its key-up arrives.
 
+### Host session
+
+`host::run_session` serves one client on an accepted TCP connection. It reads
+the token and the offer first, with a 10 second limit, so a client with a bad
+token never starts the capture. It then runs one graph: the capture nodes, a
+pass-through that publishes the capture size, `videoconvert`, `ffmpegenc
+backend=software` at the configured bitrate, and a `WebRtcDuplexSession`
+answerer whose received video drains into a `fakesink`. The answer goes back on
+the TCP connection, which then closes. Messages on the `input` data channel are
+read as client packets and sent to the caller's event channel, and a malformed
+packet is logged and dropped. `client::exchange_sdp` is the client half of the
+same exchange.
+
+`host::inject` builds a uinput `Injector` once the capture size is known, and a
+new one whenever the size changes. Events that arrive before the first size are
+logged and dropped.
+
 ### Key mapping and injection
 
 `hid::usage_from_scancode` maps an evdev, Windows set 1 or macOS virtual

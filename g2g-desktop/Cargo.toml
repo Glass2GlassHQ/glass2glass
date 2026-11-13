@@ -9,7 +9,21 @@ authors.workspace = true
 repository.workspace = true
 publish = false
 
+[features]
+session = [
+    "dep:g2g-core",
+    "g2g-plugins/webrtc",
+    "g2g-plugins/ffmpeg",
+    "g2g-plugins/portal",
+    "tokio/net",
+    "tokio/io-util",
+    "tokio/time",
+    "tokio/macros",
+    "tokio/rt-multi-thread",
+]
+
 [dependencies]
+g2g-core = { workspace = true, features = ["std"], optional = true }
 g2g-plugins = { workspace = true }
 keycode = "1.0"
 subtle = "2.6"

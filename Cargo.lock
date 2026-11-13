@@ -4524,6 +4524,7 @@ name = "g2g-desktop"
 version = "0.21.0"
 dependencies = [
  "evdev",
+ "g2g-core",
  "g2g-plugins",
  "keycode",
  "subtle",
