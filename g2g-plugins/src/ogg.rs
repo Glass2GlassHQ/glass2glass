@@ -169,6 +169,26 @@ pub fn parse_vp8_stream_info(packet: &[u8]) -> Option<OggVp8Info> {
 }
 
 const THEORA_IDENTIFICATION_MAGIC: &[u8] = b"\x80theora";
+#[cfg(feature = "std")]
+pub(crate) const THEORA_MAGIC: &[u8] = b"theora";
+pub(crate) const VORBIS_MAGIC: &[u8] = b"vorbis";
+// the identification, comment and setup header packet types
+#[cfg(feature = "std")]
+pub(crate) const THEORA_HEADER_TYPES: [u8; 3] = [0x80, 0x81, 0x82];
+
+// a Theora header packet sets the top bit of its first byte, a frame never does
+#[cfg(feature = "std")]
+pub(crate) fn is_theora_header(packet: &[u8]) -> bool {
+    packet.first().is_some_and(|byte| byte & 0x80 != 0)
+}
+
+// a Theora frame packet clears its second bit when it is intra coded
+pub(crate) fn theora_keyframe(packet: &[u8]) -> bool {
+    const INTER_FRAME_BIT: u8 = 0x40;
+    packet
+        .first()
+        .is_some_and(|byte| byte & INTER_FRAME_BIT == 0)
+}
 const THEORA_IDENTIFICATION_LEN: usize = 42;
 const THEORA_PICTURE_WIDTH_OFFSET: usize = 14;
 const THEORA_PICTURE_HEIGHT_OFFSET: usize = 17;

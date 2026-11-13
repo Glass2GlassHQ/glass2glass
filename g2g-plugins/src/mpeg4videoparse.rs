@@ -102,11 +102,13 @@ impl StartCodeCodec for Mpeg4VideoCodec {
         crate::annexb::au_is_keyframe(VideoCodec::Mpeg4Part2, au)
     }
 
-    /// Everything from the start of `au` up to its first VOP, when that prefix
-    /// carries a VOL header. A decoder needs the VOL to configure itself, so a
-    /// prefix without one is no configuration.
+    /// Everything from the start of `au` up to its first GOV or VOP, when that
+    /// prefix carries a VOL header. A decoder needs the VOL to configure itself,
+    /// so a prefix without one is no configuration.
     fn config_headers(au: &[u8]) -> Option<Vec<u8>> {
-        let vop = first_start_code_offset(au, |code| code == VOP_START_CODE)?;
+        let vop = first_start_code_offset(au, |code| {
+            code == GROUP_OF_VOP_START_CODE || code == VOP_START_CODE
+        })?;
         if vop == 0 {
             return None;
         }
@@ -603,6 +605,15 @@ mod tests {
         assert_eq!(Mpeg4VideoCodec::config_headers(&au), Some(config));
         // A bare VOP carries no configuration to cache.
         assert_eq!(Mpeg4VideoCodec::config_headers(&vop(0, 0xAA)), None);
+    }
+
+    #[test]
+    fn config_headers_stop_at_a_group_of_vop() {
+        let config = configuration(720, 576);
+        let mut au = config.clone();
+        au.extend_from_slice(&[0, 0, 1, GROUP_OF_VOP_START_CODE, 0x00, 0x00, 0x0C]);
+        au.extend_from_slice(&vop(0, 0xAA));
+        assert_eq!(Mpeg4VideoCodec::config_headers(&au), Some(config));
     }
 
     // -- Element-level tests (drive Mpeg4VideoParse::process directly) -------

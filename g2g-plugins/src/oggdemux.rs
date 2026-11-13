@@ -75,7 +75,8 @@ use g2g_core::{
 
 use crate::demuxseek::{Admitted, DemuxSeek};
 use crate::ogg::{
-    parse_theora_identification, parse_vp8_stream_info, OggCodec, OggDemuxer, OggLogicalStream,
+    parse_theora_identification, parse_vp8_stream_info, theora_keyframe, OggCodec, OggDemuxer,
+    OggLogicalStream,
 };
 use crate::opusparse::packet_samples as opus_packet_samples;
 use crate::typefind::framerate_within_placeholder;
@@ -1001,7 +1002,6 @@ impl StreamEmitter {
         packets: Vec<Vec<u8>>,
         ready: &mut StreamReady,
     ) {
-        const INTER_FRAME_BIT: u8 = 0x40;
         let Some(theora) = stream.head_header().and_then(parse_theora_identification) else {
             return;
         };
@@ -1018,16 +1018,17 @@ impl StreamEmitter {
             let pts_ns = start_ns.saturating_add(self.chain_offset_ns);
             self.playable_end_ns = start_ns.saturating_add(duration_ns);
             self.position_ns = pts_ns.saturating_add(duration_ns);
-            let Some(&first) = packet.first() else {
+            if packet.is_empty() {
                 continue;
-            };
+            }
+            let keyframe = theora_keyframe(&packet);
             ready.frames.push((
                 packet,
                 FrameTiming {
                     pts_ns,
                     dts_ns: pts_ns,
                     duration_ns,
-                    keyframe: first & INTER_FRAME_BIT == 0,
+                    keyframe,
                     ..FrameTiming::default()
                 },
                 false,

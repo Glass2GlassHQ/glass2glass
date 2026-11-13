@@ -753,6 +753,19 @@ none arrives. FLAC's is the in-band `fLaC` header. The demuxer reads an
 track's pad declares the track's rate, since PCM caps leave the rate open and
 an open rate does not fixate into a muxer or `wavenc`.
 
+Video tracks take H.264, H.265, VP8, VP9, AV1, MJPEG, MPEG-2, MPEG-4 Part 2,
+Theora, ProRes and raw video. MPEG-2 and MPEG-4 Part 2 take their
+`CodecPrivate` from the start-code headers ahead of the first keyframe's GOP or
+picture, and the headers stay in band in the blocks, as ffmpeg and gst write
+them. Theora is remux only, like Vorbis: the identification, comment and setup
+headers are Xiph-laced into `CodecPrivate` and dropped from the blocks. ProRes
+writes the profile fourcc as `CodecPrivate` and strips the 8-byte size and
+`icpf` header from each frame, which the demuxer restores. Raw video is
+`V_UNCOMPRESSED` with a `ColourSpace` fourcc for I420, YUY2 and UYVY, rows
+tight. ffmpeg reads tight rows, but gst writes and reads I420 rows padded to
+four bytes per plane, so an odd-width I420 track decodes differently in gst.
+v210 is refused, since ffmpeg reads it only from `V_MS/VFW/FOURCC`.
+
 The muxer also has a `seekable` two-pass mode: the element buffers the file
 and finalizes it at EOS with a front `SeekHead`, fixed-layout entries indexing
 Info / Tracks / Chapters / Tags / Cues with the Cues position patched in place

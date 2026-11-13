@@ -550,6 +550,7 @@ SRC:
   audio/mpeg
   audio/x-ac3
   audio/x-flac
+  audio/x-alac
 SRC:
   audio/x-raw,format=S16LE</pre></div><div class="seg"><span class="seg-l">Properties</span><span class="none">none</span></div></article><article class="el-card" data-search="ffmpegdec ffmpeg video decoder codec/decoder/video decodes h.264 / h.265 / vp8 / vp9 / av1 via libavcodec device output-format backend cuda-device-id cuvid-surfaces low-delay max-threads thread-type qos max-skip-frames" id="el-ffmpegdec"><div class="el-head"><h3><a href="#el-ffmpegdec">ffmpegdec</a></h3><span class="badge role-el">element</span></div><div class="classification">Codec/Decoder/Video</div><p class="desc">Decodes H.264 / H.265 / VP8 / VP9 / AV1 via libavcodec</p><div class="seg"><span class="seg-l">Pads</span><pre>SINK:
   video/x-h264
@@ -736,6 +737,8 @@ SRC:
   video/x-vp9,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]
   video/x-av1,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]
   image/jpeg,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]
+  video/mpeg,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]
+  video/mpeg,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]
   video/x-theora,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]
   audio/mpeg
   audio/x-opus
@@ -753,6 +756,9 @@ SRC:
   audio/x-raw,format=S24LE
   audio/x-raw,format=S32LE
   audio/x-raw,format=U8
+  audio/x-alaw
+  audio/x-mulaw
+  audio/x-adpcm
   video/x-raw,format=I420,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]
   video/x-raw,format=YUY2,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]
   video/x-raw,format=UYVY,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]
@@ -921,6 +927,8 @@ SRC:
   audio/mpeg
   audio/x-opus
   audio/mpeg
+  audio/x-ac3
+  audio/x-alac
   audio/x-raw,format=U8,channels=2,rate=48000
   audio/x-raw,format=U8
   audio/x-raw,format=S16LE,channels=2,rate=48000

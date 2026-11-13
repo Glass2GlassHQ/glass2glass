@@ -1834,12 +1834,14 @@ impl AsyncElement for FfmpegVideoDec {
                             return Ok(());
                         }
                     }
-                    if codec_kind == VideoCodec::Theora && is_theora_header(slice) {
+                    if codec_kind == VideoCodec::Theora && crate::ogg::is_theora_header(slice) {
                         // the headers a demuxer re-sends after a flush reach an open decoder
                         if self.decoder.is_none() {
                             self.theora_headers.push(slice.to_vec());
                             if self.theora_headers.len() == THEORA_HEADERS {
-                                let extradata = xiph_laced(&self.theora_headers);
+                                let headers: Vec<&[u8]> =
+                                    self.theora_headers.iter().map(Vec::as_slice).collect();
+                                let extradata = crate::matroska::xiph_codec_private(&headers);
                                 self.open_decoder(
                                     DecoderCodec::Typed(codec_kind),
                                     Some(&extradata),
@@ -2354,25 +2356,6 @@ fn decodes(codec: VideoCodec) -> bool {
 
 /// The libavcodec `AVCodecID` for a g2g codec (generic + CUDA-hwaccel path).
 const THEORA_HEADERS: usize = 3;
-
-// a Theora header packet sets the top bit of its first byte, a frame never does
-fn is_theora_header(packet: &[u8]) -> bool {
-    packet.first().is_some_and(|byte| byte & 0x80 != 0)
-}
-
-// the packet count less one, the 255-run sizes of all but the last, then the packets
-fn xiph_laced(packets: &[Vec<u8>]) -> Vec<u8> {
-    const LACE_RUN: usize = 255;
-    let mut out = Vec::from([(packets.len() - 1) as u8]);
-    for packet in &packets[..packets.len() - 1] {
-        out.extend(core::iter::repeat_n(u8::MAX, packet.len() / LACE_RUN));
-        out.push((packet.len() % LACE_RUN) as u8);
-    }
-    for packet in packets {
-        out.extend_from_slice(packet);
-    }
-    out
-}
 
 /// Build libavcodec `extradata` from an access unit's Annex-B parameter sets
 /// (H.264 SPS+PPS, H.265 VPS+SPS+PPS), each prefixed with a 4-byte start code so
@@ -3938,9 +3921,12 @@ mod tests {
             [b"\x81theora".as_slice(), &[7; LONGER_THAN_ONE_LACE]].concat(),
             b"\x82theora\x55".to_vec(),
         ];
-        assert!(headers.iter().all(|header| is_theora_header(header)));
-        assert!(!is_theora_header(&[0x40, 0x11]));
-        let extradata = xiph_laced(&headers);
+        assert!(headers
+            .iter()
+            .all(|header| crate::ogg::is_theora_header(header)));
+        assert!(!crate::ogg::is_theora_header(&[0x40, 0x11]));
+        let refs: Vec<&[u8]> = headers.iter().map(Vec::as_slice).collect();
+        let extradata = crate::matroska::xiph_codec_private(&refs);
         let split = crate::matroska::split_xiph_codec_private(&extradata).expect("laced");
         assert_eq!(split, headers.iter().map(Vec::as_slice).collect::<Vec<_>>());
     }

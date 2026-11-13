@@ -38,10 +38,10 @@ struct Remux {
     extension: &'static str,
 }
 
-const fn mkv_audio(fixture: &'static str) -> Remux {
+const fn mkv(fixture: &'static str, kind: Kind) -> Remux {
     Remux {
         fixture,
-        kind: Kind::Audio,
+        kind,
         muxer: "matroskamux",
         extension: "mkv",
     }
@@ -66,19 +66,24 @@ const fn ts(fixture: &'static str, kind: Kind) -> Remux {
 }
 
 const REMUXES: &[Remux] = &[
-    mkv_audio("vorbis_stereo_48k.ogg"),
-    mkv_audio("flac_stereo_48k.mka"),
-    mkv_audio("mp3_stereo_44100_id3v2.mp3"),
-    mkv_audio("mkv_mp3_codec_delay.mka"),
-    mkv_audio("av_mpeg2_mp2.mpg"),
-    mkv_audio("ac3_stereo_48000.ac3"),
-    mkv_audio("sine_8k_stereo_s16le.wav"),
-    mkv_audio("sine_8k_mono_u8.mka"),
-    mkv_audio("mov_lpcm_s24be.mov"),
-    mkv_audio("mov_fl32_le.mov"),
-    mkv_audio("sine_8k_mono_alaw.wav"),
-    mkv_audio("sine_8k_mono_mulaw.wav"),
-    mkv_audio("sine_8k_stereo_imaadpcm.wav"),
+    mkv("vorbis_stereo_48k.ogg", Kind::Audio),
+    mkv("flac_stereo_48k.mka", Kind::Audio),
+    mkv("mp3_stereo_44100_id3v2.mp3", Kind::Audio),
+    mkv("mkv_mp3_codec_delay.mka", Kind::Audio),
+    mkv("av_mpeg2_mp2.mpg", Kind::Audio),
+    mkv("ac3_stereo_48000.ac3", Kind::Audio),
+    mkv("sine_8k_stereo_s16le.wav", Kind::Audio),
+    mkv("sine_8k_mono_u8.mka", Kind::Audio),
+    mkv("mov_lpcm_s24be.mov", Kind::Audio),
+    mkv("mov_fl32_le.mov", Kind::Audio),
+    mkv("sine_8k_mono_alaw.wav", Kind::Audio),
+    mkv("sine_8k_mono_mulaw.wav", Kind::Audio),
+    mkv("sine_8k_stereo_imaadpcm.wav", Kind::Audio),
+    mkv("av_mpeg2_mp2.mpg", Kind::Video),
+    mkv("mpeg4part2_640x480.mp4", Kind::Video),
+    mkv("theora_64x48.ogv", Kind::Video),
+    mkv("prores_64x48.mov", Kind::Video),
+    mkv("avi_yuy2_64x48.avi", Kind::Video),
     ts("av_mpeg2_mp2.mpg", Kind::Video),
     ts("av_mpeg2_mp2.mpg", Kind::Audio),
     ts("mpeg4part2_640x480.mp4", Kind::Video),

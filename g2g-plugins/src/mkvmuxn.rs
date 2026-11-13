@@ -25,8 +25,12 @@
 //! Reachable from the `gst-launch` fan-in syntax: registered as the `matroskamux`
 //! muxer in `default_registry`, so any number of input links builds this element,
 //! the way gst's request sink pads do. Video is H.264/H.265 (avcC/hvcC + AVCC samples), VP8/VP9 (raw
-//! frames, no CodecPrivate) or AV1 (`V_AV1`, av1C `CodecPrivate` from the
-//! sequence header, temporal delimiters stripped); audio is AAC (ASC),
+//! frames, no CodecPrivate), AV1 (`V_AV1`, av1C `CodecPrivate` from the
+//! sequence header, temporal delimiters stripped), MPEG-2 and MPEG-4 Part 2
+//! (the start-code headers ahead of the first GOP or picture as `CodecPrivate`),
+//! Theora (the in-band headers Xiph-laced), ProRes (the profile fourcc, each
+//! frame without its `icpf` header) or I420, YUY2 and UYVY raw video
+//! (`V_UNCOMPRESSED` with a `ColourSpace` fourcc); audio is AAC (ASC),
 //! Opus (an in-band `OpusHead` verbatim, else a synthesised one, plus the
 //! `CodecDelay` / `SeekPreRoll` its mapping needs), Vorbis (the in-band
 //! identification, comment and setup headers Xiph-laced), FLAC (the in-band
@@ -54,7 +58,7 @@ use g2g_core::{
     split_tags, AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, Chapter,
     ConfigureOutcome, ElementMetadata, FrameTiming, G2gError, InputAggregator, MemoryDomain,
     MultiInputElement, OutputSink, PipelinePacket, PixelAspect, PropError, PropKind, PropValue,
-    PropertySpec, SubPictureFormat, TagList, TextFormat, VideoCodec,
+    PropertySpec, RawVideoFormat, SubPictureFormat, TagList, TextFormat, VideoCodec,
 };
 
 use crate::aacparse::{is_leading_aac_config, muxer_access_unit, muxer_audio_specific_config};
@@ -64,17 +68,22 @@ use crate::fmp4mux::{
 };
 use crate::livemux::{wall_clock_ns, LiveMuxDeadline, LIVE_MUX_LATENCY_PROPERTY};
 use crate::matroska::{
-    default_page_blob, finalize_seekable, subpicture_block, subpicture_config,
-    subpicture_mkv_codec, subtitle_format_from_str, subtitle_format_str, text_codec_private,
-    xiph_codec_private, MatroskaMuxer, MkvCodec, MkvTrackConfig, MkvTrackSpec,
+    default_page_blob, finalize_seekable, prores_frame_without_header, subpicture_block,
+    subpicture_config, subpicture_mkv_codec, subtitle_format_from_str, subtitle_format_str,
+    text_codec_private, xiph_codec_private, MatroskaMuxer, MkvCodec, MkvTrackConfig, MkvTrackSpec,
 };
+use crate::mpeg4videoparse::Mpeg4VideoCodec;
+use crate::mpegvideoparse::MpegVideoCodec;
 use crate::mux::{
     audio_header_config, audio_track_params, every_track_header_ready, is_audio_config_packet,
-    refused_input, require_header_config_at_end, video_header_config, vorbis_header, InputPriming,
+    refused_input, require_header_config_at_end, video_header_config, xiph_header, InputPriming,
     CODEC_CONFIG,
 };
+use crate::ogg::{is_theora_header, THEORA_HEADER_TYPES, THEORA_MAGIC, VORBIS_MAGIC};
 use crate::opusparse::{is_opus_config, parse_opus_head, synth_opus_head, OPUS_ENCODER_PRE_SKIP};
+use crate::startcodeparse::StartCodeCodec;
 use crate::subparse::frame_subtitle_block;
+use crate::uncompressedvideo::raw_video_fourcc;
 use crate::vorbiscomment::empty_vorbis_comment;
 use crate::waveformat::wave_format_ex;
 
@@ -215,6 +224,7 @@ impl MkvMuxSettings {
 #[derive(Debug, Clone, Copy)]
 enum PadKind {
     Video(VideoCodec),
+    RawVideo(RawVideoFormat),
     Audio {
         format: AudioFormat,
         channels: u8,
@@ -241,6 +251,10 @@ enum TrackInit {
         codec: VideoCodec,
         geometry: VideoGeometry,
         param_sets: Vec<Vec<u8>>,
+    },
+    RawVideo {
+        format: RawVideoFormat,
+        geometry: VideoGeometry,
     },
     Audio {
         format: AudioFormat,
@@ -301,8 +315,8 @@ pub struct MkvMuxN {
     /// Per-pad ASS event counter: the `ReadOrder` field leading each block.
     text_seq: Vec<u64>,
     priming: InputPriming,
-    // the Vorbis header packets each pad sent before its identification and setup headers were both in
-    vorbis_headers: Vec<Vec<Vec<u8>>>,
+    // the Vorbis or Theora header packets each pad sent before the ones its CodecPrivate needs were all in
+    xiph_headers: Vec<Vec<Vec<u8>>>,
 }
 
 impl MkvMuxN {
@@ -325,7 +339,7 @@ impl MkvMuxN {
             chapters: Vec::new(),
             text_seq: alloc::vec![0; inputs],
             priming: InputPriming::new(inputs),
-            vorbis_headers: alloc::vec![Vec::new(); inputs],
+            xiph_headers: alloc::vec![Vec::new(); inputs],
         }
     }
 
@@ -429,9 +443,19 @@ impl MkvMuxN {
                     | VideoCodec::Vp8
                     | VideoCodec::Vp9
                     | VideoCodec::Av1
-                    | VideoCodec::Mjpeg),
+                    | VideoCodec::Mjpeg
+                    | VideoCodec::Mpeg2
+                    | VideoCodec::Mpeg4Part2
+                    | VideoCodec::Theora
+                    | VideoCodec::ProRes { .. }),
                 ..
             } => Some(PadKind::Video(*c)),
+            // ffmpeg reads v210 only from a `V_MS/VFW/FOURCC` track
+            Caps::RawVideo { format, .. }
+                if *format != RawVideoFormat::V210 && raw_video_fourcc(*format).is_some() =>
+            {
+                Some(PadKind::RawVideo(*format))
+            }
             Caps::Audio {
                 format,
                 channels,
@@ -523,6 +547,40 @@ impl MkvMuxN {
                             });
                         }
                     }
+                    // the CodecPrivate is the start-code headers a keyframe leads with
+                    VideoCodec::Mpeg2 | VideoCodec::Mpeg4Part2 => {
+                        let headers = match codec {
+                            VideoCodec::Mpeg2 => MpegVideoCodec::config_headers(au),
+                            _ => Mpeg4VideoCodec::config_headers(au),
+                        };
+                        if let Some(headers) = headers {
+                            self.inits[input] = Some(TrackInit::Video {
+                                codec,
+                                geometry,
+                                param_sets: alloc::vec![headers],
+                            });
+                        }
+                    }
+                    // the identification, comment and setup headers lead the frames in band
+                    VideoCodec::Theora => {
+                        if !is_theora_header(au) {
+                            return Ok(());
+                        }
+                        self.xiph_headers[input].push(au.to_vec());
+                        let headers = &self.xiph_headers[input];
+                        let [ident, comment, setup] = THEORA_HEADER_TYPES
+                            .map(|kind| xiph_header(headers, kind, THEORA_MAGIC));
+                        let (Some(ident), Some(comment), Some(setup)) = (ident, comment, setup)
+                        else {
+                            return Ok(());
+                        };
+                        let config = xiph_codec_private(&[ident, comment, setup]);
+                        self.inits[input] = Some(TrackInit::Video {
+                            codec,
+                            geometry,
+                            param_sets: alloc::vec![config],
+                        });
+                    }
                     // VP8/VP9 carry no out-of-band parameter sets; the track is
                     // ready at the first frame (its CodecPrivate stays empty).
                     _ => {
@@ -596,14 +654,15 @@ impl MkvMuxN {
                     if !is_audio_config_packet(format, au) {
                         return Ok(());
                     }
-                    self.vorbis_headers[input].push(au.to_vec());
-                    let headers = &self.vorbis_headers[input];
-                    let (Some(ident), Some(setup)) =
-                        (vorbis_header(headers, 1), vorbis_header(headers, 5))
-                    else {
+                    self.xiph_headers[input].push(au.to_vec());
+                    let headers = &self.xiph_headers[input];
+                    let (Some(ident), Some(setup)) = (
+                        xiph_header(headers, 1, VORBIS_MAGIC),
+                        xiph_header(headers, 5, VORBIS_MAGIC),
+                    ) else {
                         return Ok(());
                     };
-                    let comment = vorbis_header(headers, 3)
+                    let comment = xiph_header(headers, 3, VORBIS_MAGIC)
                         .map(<[u8]>::to_vec)
                         .unwrap_or_else(|| empty_vorbis_comment(b"\x03vorbis"));
                     let params = audio_track_params(
@@ -669,10 +728,13 @@ impl MkvMuxN {
                     });
                 }
             },
-            // A text or bitmap subtitle track's init is fixed at configure; the
+            // A raw video, text or bitmap subtitle track's init is fixed at configure; the
             // bitmap one's `CodecPrivate` is refined by an in-band config blob
             // instead (see `adopt_subpicture_config`).
-            Some(PadKind::Text) | Some(PadKind::SubPicture(_)) | None => {}
+            Some(PadKind::RawVideo(_))
+            | Some(PadKind::Text)
+            | Some(PadKind::SubPicture(_))
+            | None => {}
         }
         Ok(())
     }
@@ -688,6 +750,9 @@ impl MkvMuxN {
             return (muxer_access_unit(config, au).to_vec(), true);
         }
         match self.kinds[input] {
+            Some(PadKind::Video(VideoCodec::ProRes { .. })) => {
+                (prores_frame_without_header(au).to_vec(), true)
+            }
             Some(PadKind::Video(codec)) => video_sample(codec, au),
             Some(PadKind::Text) => (
                 self.settings.text_block(au, &mut self.text_seq[input]),
@@ -777,6 +842,25 @@ fn track_config(init: &TrackInit, subtitle_format: TextFormat) -> MkvTrackConfig
                 VideoCodec::Vp8 => (MkvCodec::Vp8, Vec::new()),
                 VideoCodec::Vp9 => (MkvCodec::Vp9, Vec::new()),
                 VideoCodec::Mjpeg => (MkvCodec::Mjpeg, Vec::new()),
+                VideoCodec::ProRes { variant } => {
+                    (MkvCodec::ProRes(*variant), variant.fourcc().to_vec())
+                }
+                VideoCodec::Theora => (
+                    MkvCodec::Theora,
+                    refs.first()
+                        .expect("capture_init stores the laced headers")
+                        .to_vec(),
+                ),
+                VideoCodec::Mpeg2 | VideoCodec::Mpeg4Part2 => (
+                    if *codec == VideoCodec::Mpeg2 {
+                        MkvCodec::Mpeg2
+                    } else {
+                        MkvCodec::Mpeg4Part2
+                    },
+                    refs.first()
+                        .expect("capture_init stores the start-code headers")
+                        .to_vec(),
+                ),
                 // The captured init is the sequence-header OBU; its parse
                 // succeeded at capture, so the re-parse here cannot fail.
                 VideoCodec::Av1 => {
@@ -820,6 +904,17 @@ fn track_config(init: &TrackInit, subtitle_format: TextFormat) -> MkvTrackConfig
                 codec_private: config.clone(),
             }
         }
+        TrackInit::RawVideo { format, geometry } => MkvTrackConfig {
+            spec: MkvTrackSpec {
+                codec: MkvCodec::RawVideo(*format),
+                width: geometry.width,
+                height: geometry.height,
+                pixel_aspect: geometry.pixel_aspect,
+                channels: 0,
+                sample_rate: 0,
+            },
+            codec_private: Vec::new(),
+        },
         TrackInit::Text => MkvTrackConfig {
             spec: MkvTrackSpec::subtitle(MkvCodec::Subtitle(subtitle_format)),
             codec_private: text_codec_private(subtitle_format),
@@ -896,6 +991,12 @@ impl MultiInputElement for MkvMuxN {
         // (which waits on every track) would hold the A/V until then.
         if matches!(kind, PadKind::Text) {
             self.inits[input] = Some(TrackInit::Text);
+        }
+        if let PadKind::RawVideo(format) = kind {
+            self.inits[input] = Some(TrackInit::RawVideo {
+                format,
+                geometry: self.geometry[input],
+            });
         }
         // Same for a bitmap subtitle track, whose configuration arrives in band:
         // it starts on what the muxer knows (nothing for VobSub, the
@@ -989,7 +1090,11 @@ impl MultiInputElement for MkvMuxN {
                         // `CodecPrivate` above and must never be written as a Block (M792).
                         let header_packet = self
                             .audio_format(input)
-                            .is_some_and(|format| is_audio_config_packet(format, s));
+                            .is_some_and(|format| is_audio_config_packet(format, s))
+                            || (matches!(
+                                self.kinds[input],
+                                Some(PadKind::Video(VideoCodec::Theora))
+                            ) && is_theora_header(s));
                         let aac_config = self
                             .aac_config(input)
                             .is_some_and(|config| is_leading_aac_config(config, s));

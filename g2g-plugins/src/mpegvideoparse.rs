@@ -17,10 +17,14 @@
 //! sample aspect is derived from the coded size. Both decode with the same
 //! `VideoCodec::Mpeg2` link.
 
+use alloc::vec::Vec;
+
 use g2g_core::{PropertySpec, VideoCodec};
 
 use crate::access_unit::StartCodeRole;
-use crate::startcodeparse::{StartCodeCodec, StartCodeParse, VideoGeometry};
+use crate::startcodeparse::{
+    first_start_code_offset, start_code_units, StartCodeCodec, StartCodeParse, VideoGeometry,
+};
 
 /// `sequence_header_code`: the sequence header that carries the geometry.
 pub(crate) const SEQUENCE_HEADER_CODE: u8 = 0xB3;
@@ -76,6 +80,16 @@ impl StartCodeCodec for MpegVideoCodec {
 
     fn au_is_keyframe(au: &[u8]) -> bool {
         crate::annexb::au_is_keyframe(VideoCodec::Mpeg2, au)
+    }
+
+    fn config_headers(au: &[u8]) -> Option<Vec<u8>> {
+        let end = first_start_code_offset(au, |code| {
+            code == GROUP_START_CODE || code == PICTURE_START_CODE
+        })?;
+        let prefix = &au[..end];
+        let carries_sequence =
+            start_code_units(prefix).any(|(code, _)| code == SEQUENCE_HEADER_CODE);
+        carries_sequence.then(|| prefix.to_vec())
     }
 }
 

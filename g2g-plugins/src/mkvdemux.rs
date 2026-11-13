@@ -60,7 +60,7 @@ use crate::codectag::{tagged_stream_name, TaggedStream};
 
 use crate::aacparse::{adts_from_asc, is_raw_aac_config};
 use crate::demuxseek::{DemuxSeek, SharedSegment};
-use crate::matroska::{MatroskaDemuxer, MkvCodec, MkvTrack};
+use crate::matroska::{prores_frame_with_header, MatroskaDemuxer, MkvCodec, MkvTrack};
 use crate::pcmclip::{presentation_after, within_presentation};
 use crate::typefind::{container_video_caps, framerate_within_placeholder, with_picture_size};
 use crate::uncompressedvideo::{
@@ -128,6 +128,8 @@ pub enum MkvStream {
     Mp3,
     // the first `A_MS/ACM` track whose WAVEFORMATEX names this format
     AcmAudio(AudioFormat),
+    Mpeg2,
+    Mpeg4Part2,
 }
 
 /// A Matroska `Cues` prefetch in flight: an end-of-file `Cues` index
@@ -331,6 +333,8 @@ impl MkvDemux {
             MkvStream::Vp9 => container_video_caps(VideoCodec::Vp9),
             MkvStream::Av1 => container_video_caps(VideoCodec::Av1),
             MkvStream::Mjpeg => container_video_caps(VideoCodec::Mjpeg),
+            MkvStream::Mpeg2 => container_video_caps(VideoCodec::Mpeg2),
+            MkvStream::Mpeg4Part2 => container_video_caps(VideoCodec::Mpeg4Part2),
             MkvStream::Theora => container_video_caps(VideoCodec::Theora),
             MkvStream::ProRes(variant) => container_video_caps(VideoCodec::ProRes { variant }),
             MkvStream::Aac => Caps::Audio {
@@ -552,6 +556,8 @@ impl MkvDemux {
             MkvCodec::Vp9 => (StreamType::Video, video(VideoCodec::Vp9)),
             MkvCodec::Av1 => (StreamType::Video, video(VideoCodec::Av1)),
             MkvCodec::Mjpeg => (StreamType::Video, video(VideoCodec::Mjpeg)),
+            MkvCodec::Mpeg2 => (StreamType::Video, video(VideoCodec::Mpeg2)),
+            MkvCodec::Mpeg4Part2 => (StreamType::Video, video(VideoCodec::Mpeg4Part2)),
             MkvCodec::Theora => (StreamType::Video, video(VideoCodec::Theora)),
             MkvCodec::ProRes(variant) => (StreamType::Video, video(VideoCodec::ProRes { variant })),
             MkvCodec::Aac => (StreamType::Audio, audio(AudioFormat::Aac)),
@@ -969,6 +975,8 @@ fn codec_to_stream(codec: MkvCodec) -> Option<MkvStream> {
         MkvCodec::Vp9 => Some(MkvStream::Vp9),
         MkvCodec::Av1 => Some(MkvStream::Av1),
         MkvCodec::Mjpeg => Some(MkvStream::Mjpeg),
+        MkvCodec::Mpeg2 => Some(MkvStream::Mpeg2),
+        MkvCodec::Mpeg4Part2 => Some(MkvStream::Mpeg4Part2),
         MkvCodec::Theora => Some(MkvStream::Theora),
         MkvCodec::ProRes(variant) => Some(MkvStream::ProRes(variant)),
         MkvCodec::Aac => Some(MkvStream::Aac),
@@ -1040,27 +1048,6 @@ fn deframe_block(demux: &MatroskaDemuxer, f: crate::matroska::MkvFrame) -> Optio
         }
         _ => f.data,
     })
-}
-
-// Matroska strips the size and `icpf` tag a ProRes frame opens with, which libavcodec reads
-fn prores_frame_with_header(data: Vec<u8>) -> Vec<u8> {
-    const FRAME_TAG: &[u8; 4] = b"icpf";
-    const HEADER_LEN: usize = 8;
-    if data.get(4..HEADER_LEN) == Some(FRAME_TAG.as_slice()) {
-        return data;
-    }
-    let Some(size) = data
-        .len()
-        .checked_add(HEADER_LEN)
-        .and_then(|size| u32::try_from(size).ok())
-    else {
-        return data;
-    };
-    let mut framed = Vec::with_capacity(size as usize);
-    framed.extend_from_slice(&size.to_be_bytes());
-    framed.extend_from_slice(FRAME_TAG);
-    framed.extend_from_slice(&data);
-    framed
 }
 
 /// Convert a length-prefixed (AVCC / HVCC, the Matroska-native H.26x framing
@@ -1189,6 +1176,8 @@ pub fn forwardable_streams(demux: &MatroskaDemuxer) -> Vec<MkvStreamInfo> {
                     | MkvStream::Vp9
                     | MkvStream::Av1
                     | MkvStream::Mjpeg
+                    | MkvStream::Mpeg2
+                    | MkvStream::Mpeg4Part2
                     | MkvStream::RawVideo(_)
                     | MkvStream::Theora
                     | MkvStream::ProRes(_)
@@ -1311,6 +1300,8 @@ fn config_headers(demux: &MatroskaDemuxer, codec: MkvCodec, track: u64) -> Vec<V
         MkvCodec::Theora => xiph_headers(private, [0x80, 0x81, 0x82], b"theora"),
         MkvCodec::Aac => whole(is_raw_aac_config(private)),
         MkvCodec::TaggedVideo(_) | MkvCodec::TaggedAudio(_) => whole(true),
+        // the start-code headers lead the frames in band, where the parser and decoder read them
+        MkvCodec::Mpeg2 | MkvCodec::Mpeg4Part2 => whole(true),
         _ => Vec::new(),
     }
 }
@@ -1502,6 +1493,8 @@ fn mkv_stream_from_str(s: &str) -> Option<MkvStream> {
         "vp9" => Some(MkvStream::Vp9),
         "av1" => Some(MkvStream::Av1),
         "mjpeg" => Some(MkvStream::Mjpeg),
+        "mpeg2" => Some(MkvStream::Mpeg2),
+        "mpeg4part2" => Some(MkvStream::Mpeg4Part2),
         "theora" => Some(MkvStream::Theora),
         "aac" => Some(MkvStream::Aac),
         "opus" => Some(MkvStream::Opus),
@@ -1538,6 +1531,8 @@ pub fn mkv_stream_str(stream: MkvStream) -> alloc::string::String {
         MkvStream::Vp9 => "vp9",
         MkvStream::Av1 => "av1",
         MkvStream::Mjpeg => "mjpeg",
+        MkvStream::Mpeg2 => "mpeg2",
+        MkvStream::Mpeg4Part2 => "mpeg4part2",
         MkvStream::Theora => "theora",
         MkvStream::ProRes(variant) => prores_stream_str(variant),
         MkvStream::Aac => "aac",
@@ -1574,13 +1569,15 @@ const ACM_STREAM_NAMES: [(&str, AudioFormat); 3] = [
 ];
 
 // the streams a name selects without a sample format, layout or tag
-const CODEC_STREAMS: [MkvStream; 18] = [
+const CODEC_STREAMS: [MkvStream; 20] = [
     MkvStream::H264,
     MkvStream::H265,
     MkvStream::Vp8,
     MkvStream::Vp9,
     MkvStream::Av1,
     MkvStream::Mjpeg,
+    MkvStream::Mpeg2,
+    MkvStream::Mpeg4Part2,
     MkvStream::Theora,
     MkvStream::Aac,
     MkvStream::Opus,

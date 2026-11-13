@@ -33,12 +33,18 @@ pub(crate) struct VideoGeometry {
 impl VideoGeometry {
     // `None` for anything but compressed video of fixed size
     pub(crate) fn from_caps(caps: &Caps) -> Option<Self> {
-        let Caps::CompressedVideo {
+        let (Caps::CompressedVideo {
             width: Dim::Fixed(width),
             height: Dim::Fixed(height),
             pixel_aspect,
             ..
-        } = caps
+        }
+        | Caps::RawVideo {
+            width: Dim::Fixed(width),
+            height: Dim::Fixed(height),
+            pixel_aspect,
+            ..
+        }) = caps
         else {
             return None;
         };
@@ -107,8 +113,9 @@ pub(crate) fn video_sample(codec: VideoCodec, au: &[u8]) -> (Vec<u8>, bool) {
         VideoCodec::H264 | VideoCodec::H265 => {
             (avcc_sample(&split_annexb(au)), au_is_keyframe(codec, au))
         }
-        VideoCodec::Mpeg4Part2 => (au.to_vec(), au_is_keyframe(codec, au)),
+        VideoCodec::Mpeg4Part2 | VideoCodec::Mpeg2 => (au.to_vec(), au_is_keyframe(codec, au)),
         VideoCodec::Vp8 => (au.to_vec(), vp8_keyframe(au)),
+        VideoCodec::Theora => (au.to_vec(), crate::ogg::theora_keyframe(au)),
         // JPEG has no inter prediction
         VideoCodec::Mjpeg => (au.to_vec(), true),
         VideoCodec::Av1 => (

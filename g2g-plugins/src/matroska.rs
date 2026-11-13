@@ -229,6 +229,10 @@ pub enum MkvCodec {
     Mp3,
     // `A_MS/ACM` naming a format g2g models, its `CodecPrivate` the WAVEFORMATEX
     AcmAudio(AudioFormat),
+    // `V_MPEG1` or `V_MPEG2`, its `CodecPrivate` the sequence header and extensions
+    Mpeg2,
+    // `V_MPEG4/ISO/SP`, `ASP` or `AP`, its `CodecPrivate` the VOS, VO and VOL headers
+    Mpeg4Part2,
 }
 
 impl MkvCodec {
@@ -252,6 +256,10 @@ impl MkvCodec {
             MkvCodec::Mjpeg
         } else if id == b"V_THEORA" {
             MkvCodec::Theora
+        } else if id == b"V_MPEG1" || id == b"V_MPEG2" {
+            MkvCodec::Mpeg2
+        } else if id.starts_with(b"V_MPEG4/ISO/") {
+            MkvCodec::Mpeg4Part2
         } else if id == b"A_VORBIS" {
             MkvCodec::Vorbis
         } else if id.starts_with(b"A_AAC") {
@@ -293,6 +301,12 @@ impl MkvCodec {
             MkvCodec::Vp9 => b"V_VP9",
             MkvCodec::Av1 => b"V_AV1",
             MkvCodec::Mjpeg => b"V_MJPEG",
+            MkvCodec::Mpeg2 => b"V_MPEG2",
+            MkvCodec::Theora => b"V_THEORA",
+            MkvCodec::ProRes(_) => b"V_PRORES",
+            MkvCodec::RawVideo(_) => b"V_UNCOMPRESSED",
+            // ffmpeg and gst both write the Advanced Simple profile's ID for any profile
+            MkvCodec::Mpeg4Part2 => b"V_MPEG4/ISO/ASP",
             MkvCodec::Vorbis => b"A_VORBIS",
             MkvCodec::Aac => b"A_AAC",
             MkvCodec::Opus => b"A_OPUS",
@@ -320,9 +334,6 @@ impl MkvCodec {
             MkvCodec::Pgs => b"S_HDMV/PGS",
             MkvCodec::Subtitle(_)
             | MkvCodec::Other
-            | MkvCodec::RawVideo(_)
-            | MkvCodec::Theora
-            | MkvCodec::ProRes(_)
             | MkvCodec::TaggedVideo(_)
             | MkvCodec::TaggedAudio(_) => return None,
         })
@@ -2028,6 +2039,41 @@ fn vfw_codec(codec_id: &[u8], codec_private: &[u8]) -> Option<MkvCodec> {
     crate::uncompressedvideo::raw_video_format(fourcc.try_into().ok()?).map(MkvCodec::RawVideo)
 }
 
+const PRORES_FRAME_TAG: &[u8; 4] = b"icpf";
+const PRORES_FRAME_HEADER_LEN: usize = 8;
+
+fn has_prores_frame_header(frame: &[u8]) -> bool {
+    frame.get(4..PRORES_FRAME_HEADER_LEN) == Some(PRORES_FRAME_TAG.as_slice())
+}
+
+// Matroska strips the size and `icpf` tag a ProRes frame opens with, which libavcodec reads
+pub(crate) fn prores_frame_with_header(data: Vec<u8>) -> Vec<u8> {
+    if has_prores_frame_header(&data) {
+        return data;
+    }
+    let Some(size) = data
+        .len()
+        .checked_add(PRORES_FRAME_HEADER_LEN)
+        .and_then(|size| u32::try_from(size).ok())
+    else {
+        return data;
+    };
+    let mut framed = Vec::with_capacity(size as usize);
+    framed.extend_from_slice(&size.to_be_bytes());
+    framed.extend_from_slice(PRORES_FRAME_TAG);
+    framed.extend_from_slice(&data);
+    framed
+}
+
+#[cfg(feature = "std")]
+pub(crate) fn prores_frame_without_header(frame: &[u8]) -> &[u8] {
+    if has_prores_frame_header(frame) {
+        &frame[PRORES_FRAME_HEADER_LEN..]
+    } else {
+        frame
+    }
+}
+
 fn prores_codec(codec_id: &[u8], codec_private: &[u8]) -> Option<MkvCodec> {
     if without_nul_padding(codec_id) != b"V_PRORES" {
         return None;
@@ -3316,6 +3362,11 @@ fn tracks_element(
                 let mut v = elem_vec(ID_PIXEL_WIDTH, &uint_bytes(spec.width as u64));
                 v.extend_from_slice(&elem_vec(ID_PIXEL_HEIGHT, &uint_bytes(spec.height as u64)));
                 v.extend_from_slice(&display_elements(spec));
+                if let MkvCodec::RawVideo(format) = spec.codec {
+                    let fourcc = crate::uncompressedvideo::raw_video_fourcc(format)
+                        .expect("a raw video track is built only for a format with a fourcc");
+                    v.extend_from_slice(&elem_vec(ID_COLOUR_SPACE, &fourcc));
+                }
                 entry.extend_from_slice(&elem_vec(ID_VIDEO, &v));
             }
             2 => {

@@ -64,6 +64,7 @@ pub(crate) fn video_header_config(codec: VideoCodec) -> &'static str {
         VideoCodec::H265 => "VPS, SPS and PPS",
         VideoCodec::Av1 => "AV1 sequence header",
         VideoCodec::Mpeg4Part2 => "VOL header",
+        VideoCodec::Mpeg2 => "MPEG video sequence header",
         _ => CODEC_CONFIG,
     }
 }
@@ -96,11 +97,15 @@ pub(crate) fn is_audio_config_packet(format: AudioFormat, packet: &[u8]) -> bool
     }
 }
 
-// the Vorbis header packet of packet type `kind` (1 identification, 3 comment, 5 setup) among `headers`
-pub(crate) fn vorbis_header(headers: &[Vec<u8>], kind: u8) -> Option<&[u8]> {
+// the Xiph header packet of `packet_type` among `headers`, its type byte followed by the codec's `magic`
+pub(crate) fn xiph_header<'a>(
+    headers: &'a [Vec<u8>],
+    packet_type: u8,
+    magic: &[u8],
+) -> Option<&'a [u8]> {
     headers
         .iter()
-        .find(|h| h.first() == Some(&kind) && h[1..].starts_with(b"vorbis"))
+        .find(|h| h.first() == Some(&packet_type) && h[1..].starts_with(magic))
         .map(|h| h.as_slice())
 }
 

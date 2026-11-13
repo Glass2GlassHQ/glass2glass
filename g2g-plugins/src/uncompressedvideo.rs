@@ -46,6 +46,14 @@ pub(crate) fn raw_video_format(fourcc: [u8; 4]) -> Option<RawVideoFormat> {
         .map(|(_, format)| *format)
 }
 
+// the fourcc a writer names a format by, the first `RAW_VIDEO_FOURCCS` entry for it
+pub(crate) fn raw_video_fourcc(format: RawVideoFormat) -> Option<[u8; 4]> {
+    RAW_VIDEO_FOURCCS
+        .iter()
+        .find(|(_, candidate)| *candidate == format)
+        .map(|(code, _)| *code)
+}
+
 // how a container stores a frame the graph carries tight and top-down
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RawVideoStorage {
