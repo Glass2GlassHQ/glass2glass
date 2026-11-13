@@ -771,6 +771,8 @@ impl MultiDuplexSession for WebRtcDuplexSession {
             };
             let mut data_channel_id: Option<ChannelId> = None;
             let mut pending_message: Option<Vec<u8>> = None;
+            // tokio returns None at once from a closed receiver on every poll
+            let mut signaling_open = true;
 
             // Run after every SDP application: drop the bindings whose m-line
             // str0m no longer has (a retracted ADD, e.g. one this side yielded on
@@ -1024,11 +1026,11 @@ impl MultiDuplexSession for WebRtcDuplexSession {
                             None => outgoing_messages = None,
                         }
                     }
-                    msg = sig.rx.recv() => {
+                    msg = sig.rx.recv(), if signaling_open => {
                         match msg {
                             // Peer signalling closed: media keeps flowing (the
                             // channel is only needed for renegotiation).
-                            None => {}
+                            None => signaling_open = false,
                             Some(m) => {
                                 if let Some(sdp) = m.strip_prefix(RENEGO_ANSWER) {
                                     if let (Some(pending), Ok(answer)) = (
