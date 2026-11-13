@@ -227,6 +227,8 @@ pub enum MkvCodec {
     Mp2,
     // `A_MPEG/L3`
     Mp3,
+    // `A_MS/ACM` naming a format g2g models, its `CodecPrivate` the WAVEFORMATEX
+    AcmAudio(AudioFormat),
 }
 
 impl MkvCodec {
@@ -296,6 +298,17 @@ impl MkvCodec {
             MkvCodec::Opus => b"A_OPUS",
             MkvCodec::Ac3 => b"A_AC3",
             MkvCodec::Flac => b"A_FLAC",
+            MkvCodec::Mp2 => b"A_MPEG/L2",
+            MkvCodec::Mp3 => b"A_MPEG/L3",
+            MkvCodec::Pcm {
+                format: AudioFormat::PcmF32Le,
+                ..
+            } => b"A_PCM/FLOAT/IEEE",
+            MkvCodec::Pcm {
+                big_endian: true, ..
+            } => b"A_PCM/INT/BIG",
+            MkvCodec::Pcm { .. } => b"A_PCM/INT/LIT",
+            MkvCodec::AcmAudio(_) => ACM_CODEC_ID.as_bytes(),
             MkvCodec::Subtitle(TextFormat::Utf8) => b"S_TEXT/UTF8",
             MkvCodec::Subtitle(TextFormat::Ssa) => b"S_TEXT/ASS",
             // No `S_TEXT/WEBVTT`: it is a read-side mapping only. ffmpeg writes and
@@ -305,12 +318,8 @@ impl MkvCodec {
             MkvCodec::VobSub => b"S_VOBSUB",
             MkvCodec::DvbSub => b"S_DVBSUB",
             MkvCodec::Pgs => b"S_HDMV/PGS",
-            // `A_PCM/*` is a read-side mapping only: the muxer writes no `BitDepth`.
             MkvCodec::Subtitle(_)
-            | MkvCodec::Mp2
-            | MkvCodec::Mp3
             | MkvCodec::Other
-            | MkvCodec::Pcm { .. }
             | MkvCodec::RawVideo(_)
             | MkvCodec::Theora
             | MkvCodec::ProRes(_)
@@ -337,6 +346,7 @@ impl MkvCodec {
             | MkvCodec::Vorbis
             | MkvCodec::Pcm { .. }
             | MkvCodec::TaggedAudio(_)
+            | MkvCodec::AcmAudio(_)
             | MkvCodec::Mp2
             | MkvCodec::Mp3 => 2,
             MkvCodec::Subtitle(_) | MkvCodec::VobSub | MkvCodec::DvbSub | MkvCodec::Pgs => 0x11,
@@ -1885,6 +1895,7 @@ fn parse_track_entry(body: &[u8], content_key: ContentKeyLookup<'_>) -> Option<P
             .or_else(|| vfw_codec(codec_id, &codec_private))
             .or_else(|| uncompressed_codec(codec_id, colour_space?))
             .or_else(|| prores_codec(codec_id, &codec_private))
+            .or_else(|| acm_codec(codec_id, &codec_private))
             .or_else(|| tagged_codec(codec_id, &codec_private))
             .unwrap_or(MkvCodec::Other),
         codec => codec,
@@ -1974,6 +1985,27 @@ fn pcm_codec(codec_id: &[u8], bit_depth: u64) -> Option<MkvCodec> {
 }
 
 const VFW_CODEC_ID: &str = "V_MS/VFW/FOURCC";
+const ACM_CODEC_ID: &str = "A_MS/ACM";
+
+// AAC is left out, a WAVEFORMATEX carries no AudioSpecificConfig to decode it with
+fn acm_codec(codec_id: &[u8], codec_private: &[u8]) -> Option<MkvCodec> {
+    if without_nul_padding(codec_id) != ACM_CODEC_ID.as_bytes() {
+        return None;
+    }
+    let tag = u16::from_le_bytes(codec_private.get(0..2)?.try_into().ok()?);
+    let bits = u16::from_le_bytes(codec_private.get(14..16)?.try_into().ok()?);
+    let format = crate::waveformat::audio_format(tag, bits)?;
+    match format {
+        AudioFormat::Aac => None,
+        AudioFormat::Mp3 => Some(MkvCodec::Mp3),
+        AudioFormat::Ac3 => Some(MkvCodec::Ac3),
+        _ if g2g_core::pcm_formats().contains(&format) => Some(MkvCodec::Pcm {
+            format,
+            big_endian: false,
+        }),
+        _ => Some(MkvCodec::AcmAudio(format)),
+    }
+}
 const BITMAPINFO_COMPRESSION: core::ops::Range<usize> = 16..20;
 
 fn without_nul_padding(codec_id: &[u8]) -> &[u8] {
@@ -2037,10 +2069,9 @@ fn tagged_codec(codec_id: &[u8], codec_private: &[u8]) -> Option<MkvCodec> {
                 &codec_private[BITMAPINFO_COMPRESSION],
             )))
         }
-        b"A_MS/ACM" if codec_private.len() >= WAVEFORMAT_LEN => Some(MkvCodec::TaggedAudio(tag(
-            TagNamespace::Riff,
-            &codec_private[WAVEFORMAT_TAG],
-        ))),
+        id if id == ACM_CODEC_ID.as_bytes() && codec_private.len() >= WAVEFORMAT_LEN => Some(
+            MkvCodec::TaggedAudio(tag(TagNamespace::Riff, &codec_private[WAVEFORMAT_TAG])),
+        ),
         b"V_QUICKTIME" if codec_private.len() >= VISUAL_SAMPLE_ENTRY_LEN => Some(
             MkvCodec::TaggedVideo(tag(TagNamespace::Mov, &codec_private[SAMPLE_ENTRY_FOURCC])),
         ),
@@ -2054,6 +2085,23 @@ fn tagged_codec(_codec_id: &[u8], _codec_private: &[u8]) -> Option<MkvCodec> {
 }
 
 // the packet count less one, the 255-run sizes of all but the last packet, then the packets
+#[cfg(feature = "std")]
+pub(crate) fn xiph_codec_private(packets: &[&[u8]]) -> Vec<u8> {
+    let Some((last, leading)) = packets.split_last() else {
+        return Vec::new();
+    };
+    let mut private = alloc::vec![leading.len() as u8];
+    for packet in leading {
+        private.extend(core::iter::repeat_n(0xFF, packet.len() / 255));
+        private.push((packet.len() % 255) as u8);
+    }
+    for packet in leading {
+        private.extend_from_slice(packet);
+    }
+    private.extend_from_slice(last);
+    private
+}
+
 pub(crate) fn split_xiph_codec_private(private: &[u8]) -> Option<Vec<&[u8]>> {
     let (&count_less_one, laced) = private.split_first()?;
     split_xiph(laced, usize::from(count_less_one) + 1)
@@ -2643,6 +2691,8 @@ pub struct SizePatch {
 pub struct MatroskaMuxer {
     /// One or more tracks; the Nth (0-based) writes Matroska TrackNumber N+1.
     tracks: Vec<MkvTrackConfig>,
+    // per track, set for a Vorbis track whose headers parse
+    vorbis_lapping: Vec<Option<crate::ogg::VorbisLapping>>,
     tags: TagList,
     /// Per-track tags (track index, tags), each written as a `Targets`-scoped
     /// `Tag` inside the same `Tags` element.
@@ -2710,6 +2760,16 @@ pub struct MatroskaMuxer {
     prev_ts_ticks: Vec<Option<u64>>,
 }
 
+// a Vorbis track's lapping state, from the identification and setup headers its CodecPrivate laces
+fn vorbis_track_lapping(track: &MkvTrackConfig) -> Option<crate::ogg::VorbisLapping> {
+    if track.spec.codec != MkvCodec::Vorbis {
+        return None;
+    }
+    let packets = split_xiph_codec_private(&track.codec_private)?;
+    let timing = crate::ogg::VorbisTiming::parse(packets.first()?, packets.get(2)?)?;
+    Some(crate::ogg::VorbisLapping::new(timing))
+}
+
 impl MatroskaMuxer {
     /// A single-track muxer (no `CodecPrivate`, the codecs that need none).
     pub fn new(spec: MkvTrackSpec) -> Self {
@@ -2730,7 +2790,9 @@ impl MatroskaMuxer {
             .position(|t| t.spec.codec.track_type() == 1)
             .unwrap_or(0);
         let track_count = tracks.len();
+        let vorbis_lapping = tracks.iter().map(vorbis_track_lapping).collect();
         Self {
+            vorbis_lapping,
             tracks,
             tags: TagList::new(),
             track_tags: Vec::new(),
@@ -3014,14 +3076,28 @@ impl MatroskaMuxer {
     /// not. Only Opus is judged: its packet length is readable from the TOC byte,
     /// so a trimmed tail is recognizable, which is exactly the end-of-stream trim
     /// an Ogg granule or an MP4 sample table carries.
-    fn trimmed_block(&self, track: usize, data: &[u8], duration_ns: u64) -> Option<(u64, i64)> {
-        if duration_ns == 0 || self.tracks.get(track)?.spec.codec != MkvCodec::Opus {
-            return None;
-        }
-        let samples = u64::from(crate::opusparse::packet_samples(data));
-        let packet_ns = samples * 1_000_000_000 / u64::from(crate::opusparse::OPUS_RATE_HZ);
-        let discard_ns = packet_ns.checked_sub(duration_ns)?;
-        if discard_ns == 0 {
+    fn trimmed_block(&mut self, track: usize, data: &[u8], duration_ns: u64) -> Option<(u64, i64)> {
+        let spec = self.tracks.get(track)?.spec;
+        let discard_ns = match spec.codec {
+            MkvCodec::Opus => {
+                let samples = u64::from(crate::opusparse::packet_samples(data));
+                let packet_ns = samples * 1_000_000_000 / u64::from(crate::opusparse::OPUS_RATE_HZ);
+                packet_ns.checked_sub(duration_ns)?
+            }
+            MkvCodec::Mp2 | MkvCodec::Mp3 => {
+                let samples = crate::audioframe::mpa_header(data)?.samples_per_frame;
+                g2g_core::time::ticks_to_ns(u64::from(samples), spec.sample_rate)
+                    .checked_sub(duration_ns)?
+            }
+            // every packet advances the lapping, an untimed one included
+            MkvCodec::Vorbis => {
+                let samples = self.vorbis_lapping[track].as_mut()?.packet_samples(data)?;
+                let declared = g2g_core::time::ns_to_ticks(duration_ns, spec.sample_rate);
+                g2g_core::time::ticks_to_ns(samples.checked_sub(declared)?, spec.sample_rate)
+            }
+            _ => return None,
+        };
+        if duration_ns == 0 || discard_ns == 0 {
             return None;
         }
         // BlockDuration rounds to the nearest tick, as ffmpeg does (a 6.5 ms tail
@@ -3248,6 +3324,11 @@ fn tracks_element(
                     ID_SAMPLING_FREQ,
                     &(spec.sample_rate as f64).to_be_bytes(),
                 ));
+                if let MkvCodec::Pcm { format, .. } = spec.codec {
+                    if let Some((_, bits)) = crate::waveformat::wave_format_tag(format) {
+                        a.extend_from_slice(&elem_vec(ID_BIT_DEPTH, &uint_bytes(u64::from(bits))));
+                    }
+                }
                 entry.extend_from_slice(&elem_vec(ID_AUDIO, &a));
             }
             _ => {}

@@ -735,6 +735,17 @@ Clusters, with the `webm` DocType for the WebM codec subset. It takes one track
 per input pad. `matroskamux` and `mp4mux` are registered only as fan-in muxers,
 so the parser builds `MkvMuxN` and `Mp4MuxN` for a single input link too.
 
+Audio tracks take AAC, Opus, Vorbis, FLAC, MP2, MP3, AC-3 and PCM under their
+native codec IDs, PCM with a `BitDepth`. A-law, mu-law and IMA ADPCM have no
+native ID and go out as `A_MS/ACM` with a WAVEFORMATEX `CodecPrivate`. IMA
+ADPCM caps carry no block size, so the header declares `adpcmdec`'s default.
+Vorbis is remux only: its `CodecPrivate` is the in-band identification, comment
+and setup headers Xiph-laced, with an empty comment header synthesized when
+none arrives. FLAC's is the in-band `fLaC` header. The demuxer reads an
+`A_MS/ACM` track carrying PCM, MP3 or AC-3 as the native codec, and a PCM
+track's pad declares the track's rate, since PCM caps leave the rate open and
+an open rate does not fixate into a muxer or `wavenc`.
+
 The muxer also has a `seekable` two-pass mode: the element buffers the file
 and finalizes it at EOS with a front `SeekHead`, fixed-layout entries indexing
 Info / Tracks / Chapters / Tags / Cues with the Cues position patched in place
@@ -1069,17 +1080,19 @@ The end trim, with no granule to carry it, is the final block's
 6.5 ms tail becomes 7. The muxer writes both for any trim, even one under a
 millisecond, as ffmpeg does, and the demuxer
 lets the ns element win. Because the packet's own length is needed to turn a
-tail discard into a kept duration, the conversion reads the Opus TOC byte and
-applies to Opus only.
+tail discard into a kept duration, the conversion applies to codecs whose
+packet length the muxer can read: Opus from its TOC byte, MP2 and MP3 from the
+frame header, and Vorbis from the lapped block size.
 
 Other audio codecs have no in-band delay. Their `CodecDelay` moves the start of
 the track's segment that far past its first block, so the decoder clips the
-priming as it clips an MP4 edit list. The muxer writes an AAC track's `CodecDelay`
+priming as it clips an MP4 edit list. The muxer writes any audio track's `CodecDelay`
 from how far its input's segment starts past its first frame, as `mp4mux` writes
-its edit list. Their `DiscardPadding` reaches the decoder
+its edit list. The end trim comes from the segment stop or the frame's own
+`end_discard_ns`, whichever cuts more. Their `DiscardPadding` reaches the decoder
 as `FrameTiming::end_discard_ns`, which `aacparse` and `mpegaudioparse` move onto
-the frame that ends the block, and the decoder drops that much from the end of
-its output. Both trims match ffmpeg's sample for sample only because the parsers
+the frame that ends the block, and the decoder, `vorbisdec` included, drops that
+much from the end of its output. Both trims match ffmpeg's sample for sample only because the parsers
 count samples through the millisecond block stamps instead of re-basing on each.
 
 ## MP4 and fMP4

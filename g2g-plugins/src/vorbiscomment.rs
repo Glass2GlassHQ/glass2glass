@@ -40,6 +40,12 @@ const PICTURE_FIELD_KEY: &str = "METADATA_BLOCK_PICTURE";
 /// 24-bit big-endian body length.
 pub(crate) const FLAC_BLOCK_HEADER_LEN: usize = 4;
 
+/// A minimal VorbisComment header behind `magic`: the vendor string and no
+/// fields, for a mapping that mandates the packet when the source carried none.
+pub(crate) fn empty_vorbis_comment(magic: &[u8]) -> Vec<u8> {
+    vorbis_comment(magic, VENDOR, &TagList::new())
+}
+
 /// A VorbisComment block behind `magic`: `vendor`, then one `KEY=VALUE` field
 /// per tag. The Vorbis flavour gets the framing bit its own mapping mandates;
 /// `OpusTags` and the FLAC block do not carry one.

@@ -126,6 +126,8 @@ pub enum MkvStream {
     TaggedAudio(CodecTag),
     Mp2,
     Mp3,
+    // the first `A_MS/ACM` track whose WAVEFORMATEX names this format
+    AcmAudio(AudioFormat),
 }
 
 /// A Matroska `Cues` prefetch in flight: an end-of-file `Cues` index
@@ -378,7 +380,7 @@ impl MkvDemux {
             MkvStream::Pgs => Caps::SubPicture {
                 format: SubPictureFormat::Pgs,
             },
-            MkvStream::Pcm(format) => Caps::Audio {
+            MkvStream::Pcm(format) | MkvStream::AcmAudio(format) => Caps::Audio {
                 format,
                 channels: 0,
                 sample_rate: 0,
@@ -559,7 +561,9 @@ impl MkvDemux {
             MkvCodec::Vorbis => (StreamType::Audio, audio(AudioFormat::Vorbis)),
             MkvCodec::Mp2 => (StreamType::Audio, audio(AudioFormat::Mp2)),
             MkvCodec::Mp3 => (StreamType::Audio, audio(AudioFormat::Mp3)),
-            MkvCodec::Pcm { format, .. } => (StreamType::Audio, audio(format)),
+            MkvCodec::Pcm { format, .. } | MkvCodec::AcmAudio(format) => {
+                (StreamType::Audio, audio(format))
+            }
             MkvCodec::RawVideo(format) => (
                 StreamType::Video,
                 raw_video_caps(
@@ -982,6 +986,7 @@ fn codec_to_stream(codec: MkvCodec) -> Option<MkvStream> {
         MkvCodec::RawVideo(format) => Some(MkvStream::RawVideo(format)),
         MkvCodec::TaggedVideo(tag) => Some(MkvStream::TaggedVideo(tag)),
         MkvCodec::TaggedAudio(tag) => Some(MkvStream::TaggedAudio(tag)),
+        MkvCodec::AcmAudio(format) => Some(MkvStream::AcmAudio(format)),
         MkvCodec::Other => None,
     }
 }
@@ -1196,6 +1201,7 @@ pub fn forwardable_streams(demux: &MatroskaDemuxer) -> Vec<MkvStreamInfo> {
             // The sample rate stays the "unknown until parsed" placeholder (0):
             // compressed-audio caps intersect the rate strictly (only PCM has the
             // wildcard), so a concrete rate would not match a `rate: 0` decoder pad.
+            // PCM takes the track's rate, since its wildcard rate cannot fixate.
             let caps = match MkvDemux::output_caps(stream) {
                 Caps::Audio {
                     format,
@@ -1204,7 +1210,11 @@ pub fn forwardable_streams(demux: &MatroskaDemuxer) -> Vec<MkvStreamInfo> {
                 } => Caps::Audio {
                     format,
                     channels: t.channels.max(1),
-                    sample_rate,
+                    sample_rate: if g2g_core::pcm_formats().contains(&format) {
+                        t.sample_rate
+                    } else {
+                        sample_rate
+                    },
                     channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
                 },
                 // the track's pixel size lets auto-plug weigh decoders by cost
@@ -1505,6 +1515,11 @@ fn mkv_stream_from_str(s: &str) -> Option<MkvStream> {
         "pgs" | "hdmvpgs" => Some(MkvStream::Pgs),
         _ => g2g_core::pcm_from_gst_format(s)
             .map(MkvStream::Pcm)
+            .or_else(|| {
+                ACM_STREAM_NAMES
+                    .iter()
+                    .find_map(|(name, format)| (*name == s).then_some(MkvStream::AcmAudio(*format)))
+            })
             .or_else(|| raw_video_stream_from_str(s).map(MkvStream::RawVideo))
             .or_else(|| prores_stream_from_str(s).map(MkvStream::ProRes))
             .or_else(|| match crate::codectag::tagged_stream_from_name(s)? {
@@ -1543,9 +1558,20 @@ pub fn mkv_stream_str(stream: MkvStream) -> alloc::string::String {
             .expect("an uncompressed stream names a layout from the fourcc table"),
         MkvStream::TaggedVideo(tag) => return tagged_stream_name(TaggedStream::Video(tag)),
         MkvStream::TaggedAudio(tag) => return tagged_stream_name(TaggedStream::Audio(tag)),
+        MkvStream::AcmAudio(format) => ACM_STREAM_NAMES
+            .iter()
+            .find_map(|(name, known)| (*known == format).then_some(*name))
+            .expect("an A_MS/ACM stream names a format from the ACM table"),
     };
     alloc::string::String::from(name)
 }
+
+// the formats Matroska carries only as `A_MS/ACM`, by `stream` name
+const ACM_STREAM_NAMES: [(&str, AudioFormat); 3] = [
+    ("alaw", AudioFormat::Alaw),
+    ("mulaw", AudioFormat::Mulaw),
+    ("ima-adpcm", AudioFormat::ImaAdpcm),
+];
 
 // the streams a name selects without a sample format, layout or tag
 const CODEC_STREAMS: [MkvStream; 18] = [
@@ -1573,6 +1599,7 @@ fn codec_and_pcm_streams() -> impl Iterator<Item = MkvStream> {
     CODEC_STREAMS
         .into_iter()
         .chain(g2g_core::pcm_formats().map(MkvStream::Pcm))
+        .chain(ACM_STREAM_NAMES.map(|(_, format)| MkvStream::AcmAudio(format)))
 }
 
 #[cfg(feature = "std")]
@@ -1637,6 +1664,8 @@ pub struct MkvDemuxN {
     ports: Vec<MkvStream>,
     // the TrackNumber port `i` carries, `None` for the first track of its stream's codec
     port_tracks: Vec<Option<u64>>,
+    // the probed caps of the PCM track port `i` carries, whose wildcard rate would not fixate
+    port_caps: Vec<Option<Caps>>,
     /// Whether port `i` has emitted its opening `CapsChanged` yet.
     announced: Vec<bool>,
     /// Whether port `i` has forwarded its track's `CodecPrivate` in band yet
@@ -1669,11 +1698,13 @@ impl MkvDemuxN {
         let announced = alloc::vec![false; ports.len()];
         let config_sent = alloc::vec![false; ports.len()];
         let port_tracks = alloc::vec![None; ports.len()];
+        let port_caps = alloc::vec![None; ports.len()];
         let segment = SharedSegment::new(ports.len());
         Self {
             demux: MatroskaDemuxer::new(),
             ports,
             port_tracks,
+            port_caps,
             announced,
             config_sent,
             segment,
@@ -1689,6 +1720,10 @@ impl MkvDemuxN {
     pub fn from_stream_infos(infos: &[MkvStreamInfo]) -> Self {
         let mut demux = Self::new(infos.iter().map(|info| info.stream).collect());
         demux.port_tracks = infos.iter().map(|info| Some(info.track_number)).collect();
+        demux.port_caps = infos
+            .iter()
+            .map(|info| matches!(info.stream, MkvStream::Pcm(_)).then(|| info.caps.clone()))
+            .collect();
         demux
     }
 
@@ -1886,9 +1921,12 @@ impl MultiOutputElement for MkvDemuxN {
     /// the port configures against it (geometry is a placeholder `Range`, refined
     /// at runtime by the port's `CapsChanged`). `None` for an out-of-range port.
     fn port_output_caps(&self, port: usize) -> Option<Caps> {
-        self.ports
-            .get(port)
-            .map(|&stream| MkvDemux::output_caps(stream))
+        let stream = *self.ports.get(port)?;
+        Some(
+            self.port_caps[port]
+                .clone()
+                .unwrap_or_else(|| MkvDemux::output_caps(stream)),
+        )
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {

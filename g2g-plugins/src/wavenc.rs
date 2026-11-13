@@ -37,9 +37,9 @@ use g2g_core::{
     PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
 };
 
-use g2g_mcu::adpcm::{samples_per_block_channels, BLOCK_HEADER};
+use g2g_mcu::adpcm::BLOCK_HEADER;
 
-use crate::waveformat::{wav_header, wave_format_tag, WaveFormatEx};
+use crate::waveformat::{wav_header, wave_format_ex, wave_format_tag};
 
 /// Size fields of a stream whose length is not known when the header is written.
 /// A reader takes the `data` chunk as running to the end of the file.
@@ -78,42 +78,9 @@ fn header(
     sample_rate: u32,
     block_align_property: usize,
 ) -> Option<Vec<u8>> {
-    let (tag, bits) = wave_format(format)?;
-    let samples_per_block = match format {
-        AudioFormat::ImaAdpcm => Some(samples_per_block_channels(
-            block_align_property,
-            channels.max(1) as usize,
-        )),
-        _ => None,
-    };
-    let block_align = match format {
-        // One block, not one sample, is ADPCM's addressable unit.
-        AudioFormat::ImaAdpcm => u16::try_from(block_align_property).ok()?,
-        _ => channels * bits / 8,
-    };
-    let byte_rate = match samples_per_block {
-        // The coded rate: how many block-sized chunks a second of audio needs.
-        // Folded in one expression, since a block holds thousands of samples and
-        // dividing first would round the rate away. (ffmpeg writes the decoded
-        // PCM rate in this field instead, which readers ignore either way.)
-        // `samples` counts one channel, so the block already spans them all.
-        Some(samples) => {
-            u32::try_from(u64::from(sample_rate) * u64::from(block_align) / samples as u64).ok()?
-        }
-        None => sample_rate * block_align as u32,
-    };
-    let extension: Vec<u8> = match samples_per_block {
-        Some(samples) => Vec::from(u16::try_from(samples).ok()?.to_le_bytes()),
-        None => Vec::new(),
-    };
-    let wave_format = WaveFormatEx {
-        tag,
-        channels,
-        sample_rate,
-        byte_rate,
-        block_align,
-        bits,
-    };
+    wave_format(format)?;
+    let (wave_format, extension) =
+        wave_format_ex(format, channels, sample_rate, block_align_property)?;
     Some(wav_header(
         &wave_format,
         &extension,

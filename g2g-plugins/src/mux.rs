@@ -33,7 +33,7 @@ use g2g_core::{
 use crate::livemux::{wall_clock_ns, LiveMuxDeadline, LIVE_MUX_PROPS};
 
 use crate::aacparse::audio_specific_config_info;
-use crate::opusparse::{parse_opus_head, OPUS_RATE_HZ};
+use crate::opusparse::{is_opus_config, parse_opus_head, OPUS_RATE_HZ};
 
 // the solver lets any caps onto a fan-in muxer pad and reports no refusal itself
 pub(crate) fn refused_input(muxer: &'static str, caps: &Caps) -> G2gError {
@@ -77,6 +77,29 @@ pub(crate) fn audio_header_config(format: AudioFormat) -> &'static str {
     }
 }
 
+// whether a packet of a `format` stream is in-band codec config rather than audio
+pub(crate) fn is_audio_config_packet(format: AudioFormat, packet: &[u8]) -> bool {
+    match format {
+        // `OpusHead` / `OpusTags` (RFC 7845); audio packets start with a TOC.
+        AudioFormat::Opus => is_opus_config(packet),
+        // Vorbis header packets have bit 0 of the packet type set and carry
+        // the "vorbis" magic; audio packets have it clear.
+        AudioFormat::Vorbis => packet.len() > 7 && packet[0] & 1 == 1 && &packet[1..7] == b"vorbis",
+        // The native `fLaC` marker + metadata blocks; audio frames start on
+        // the 0xFF sync.
+        AudioFormat::Flac => packet.starts_with(b"fLaC"),
+        _ => false,
+    }
+}
+
+// the Vorbis header packet of packet type `kind` (1 identification, 3 comment, 5 setup) among `headers`
+pub(crate) fn vorbis_header(headers: &[Vec<u8>], kind: u8) -> Option<&[u8]> {
+    headers
+        .iter()
+        .find(|h| h.first() == Some(&kind) && h[1..].starts_with(b"vorbis"))
+        .map(|h| h.as_slice())
+}
+
 pub(crate) fn missing_header_config(muxer: &'static str, input: usize, awaited: &str) -> G2gError {
     g2g_error!(
         Target::category(muxer),
@@ -115,6 +138,7 @@ pub(crate) fn every_track_header_ready<I, T>(
 pub(crate) struct InputPriming {
     first_pts_ns: Vec<Option<u64>>,
     segment_start_ns: Vec<u64>,
+    segment_stop_ns: Vec<Option<u64>>,
 }
 
 #[cfg(feature = "std")]
@@ -123,7 +147,23 @@ impl InputPriming {
         Self {
             first_pts_ns: vec![None; inputs],
             segment_start_ns: vec![0; inputs],
+            segment_stop_ns: vec![None; inputs],
         }
+    }
+
+    pub(crate) fn note_segment_stop(&mut self, input: usize, stop_ns: Option<u64>) {
+        self.segment_stop_ns[input] = stop_ns;
+    }
+
+    // the part of a frame's duration past its input's segment stop
+    pub(crate) fn end_clip_ns(&self, input: usize, pts_ns: u64, duration_ns: u64) -> u64 {
+        let Some(stop_ns) = self.segment_stop_ns[input] else {
+            return 0;
+        };
+        pts_ns
+            .saturating_add(duration_ns)
+            .saturating_sub(stop_ns)
+            .min(duration_ns)
     }
 
     pub(crate) fn note_segment_start(&mut self, input: usize, start_ns: u64) {
@@ -147,7 +187,7 @@ pub(crate) struct AudioTrackParams {
     pub(crate) sample_rate: u32,
 }
 
-// the caps' channels and rate where known, else the ones the AAC or Opus config states
+// the caps' channels and rate where known, else the ones the codec's config header states
 pub(crate) fn audio_track_params(
     muxer: &'static str,
     format: AudioFormat,
@@ -165,6 +205,18 @@ pub(crate) fn audio_track_params(
             parse_opus_head(config).map(|(channels, _)| channels),
             Some(OPUS_RATE_HZ),
         ),
+        AudioFormat::Vorbis => {
+            let ident = crate::ogg::detect(config);
+            let known = ident.codec == crate::ogg::OggCodec::Vorbis;
+            (
+                known.then_some(ident.channels),
+                known.then_some(ident.sample_rate),
+            )
+        }
+        AudioFormat::Flac => match crate::flacparse::parse_streaminfo(config) {
+            Some(info) => (Some(info.channels), Some(info.sample_rate)),
+            None => (None, None),
+        },
         _ => (None, None),
     };
     let channels = (channels != ANY_CHANNELS)

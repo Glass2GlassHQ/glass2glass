@@ -70,14 +70,14 @@ use g2g_core::{
 
 use crate::livemux::{wall_clock_ns, LiveMuxDeadline, LIVE_MUX_LATENCY_PROPERTY};
 use crate::mux::{
-    audio_header_config, audio_track_params, every_track_header_ready, refused_input,
-    require_header_config_at_end, CODEC_CONFIG,
+    audio_header_config, audio_track_params, every_track_header_ready, is_audio_config_packet,
+    refused_input, require_header_config_at_end, vorbis_header, CODEC_CONFIG,
 };
-use crate::ogg::{OggPageWriter, VorbisTiming};
+use crate::ogg::{OggPageWriter, VorbisLapping, VorbisTiming};
 use crate::opusparse::{
-    is_opus_config, packet_samples as opus_packet_samples, synth_opus_head, OPUS_ENCODER_PRE_SKIP,
-    OPUS_RATE_HZ,
+    packet_samples as opus_packet_samples, synth_opus_head, OPUS_ENCODER_PRE_SKIP, OPUS_RATE_HZ,
 };
+use crate::vorbiscomment::empty_vorbis_comment;
 use g2g_core::log::short_type_name;
 
 /// Default serial number of the first logical bitstream, overridable via the
@@ -135,10 +135,7 @@ struct OggStreamMux {
     /// as a bound on the granule position.
     untimed: bool,
     /// Vorbis packet-duration tables, parsed once ident + setup have landed.
-    vorbis: Option<VorbisTiming>,
-    /// The previous Vorbis packet's block size. The first audio packet has no
-    /// predecessor to lap against, so it decodes to nothing and adds 0.
-    prev_blocksize: Option<u32>,
+    vorbis: Option<VorbisLapping>,
 }
 
 impl OggStreamMux {
@@ -156,7 +153,6 @@ impl OggStreamMux {
             declared_ns: 0,
             untimed: false,
             vorbis: None,
-            prev_blocksize: None,
         }
     }
 
@@ -228,8 +224,11 @@ impl OggStreamMux {
     fn write_bos(&mut self, (bos, rest): HeaderPackets) -> Vec<u8> {
         // Vorbis timing needs the mode tables from ident + setup.
         if self.format == Some(AudioFormat::Vorbis) {
-            self.vorbis = match (self.vorbis_header(1), self.vorbis_header(5)) {
-                (Some(i), Some(s)) => VorbisTiming::parse(i, s),
+            self.vorbis = match (
+                vorbis_header(&self.headers, 1),
+                vorbis_header(&self.headers, 5),
+            ) {
+                (Some(i), Some(s)) => VorbisTiming::parse(i, s).map(VorbisLapping::new),
                 _ => None,
             };
         }
@@ -279,33 +278,6 @@ impl OggStreamMux {
         tail
     }
 
-    /// Whether `packet` is codec config rather than audio, for the configured
-    /// codec's in-band convention.
-    fn is_header(&self, packet: &[u8]) -> bool {
-        match self.format {
-            // `OpusHead` / `OpusTags` (RFC 7845); audio packets start with a TOC.
-            Some(AudioFormat::Opus) => is_opus_config(packet),
-            // Vorbis header packets have bit 0 of the packet type set and carry
-            // the "vorbis" magic; audio packets have it clear.
-            Some(AudioFormat::Vorbis) => {
-                packet.len() > 7 && packet[0] & 1 == 1 && &packet[1..7] == b"vorbis"
-            }
-            // The native `fLaC` marker + metadata blocks; audio frames start on
-            // the 0xFF sync.
-            Some(AudioFormat::Flac) => packet.starts_with(b"fLaC"),
-            _ => false,
-        }
-    }
-
-    /// The header packet with the given Vorbis packet type (1 ident, 3 comment,
-    /// 5 setup), if it arrived in-band.
-    fn vorbis_header(&self, kind: u8) -> Option<&[u8]> {
-        self.headers
-            .iter()
-            .find(|h| h.first() == Some(&kind) && h[1..].starts_with(b"vorbis"))
-            .map(|h| h.as_slice())
-    }
-
     /// The header packets that go before the audio: the beginning-of-stream
     /// packet, then the rest (which share the following page). `None` when the
     /// codec's mandatory in-band config has not arrived.
@@ -333,20 +305,21 @@ impl OggStreamMux {
                     .iter()
                     .find(|h| h.starts_with(b"OpusTags"))
                     .cloned()
-                    .unwrap_or_else(|| vorbis_comment(b"OpusTags"));
+                    .unwrap_or_else(|| empty_vorbis_comment(b"OpusTags"));
                 Ok(Some((head, Vec::from([tags]))))
             }
             AudioFormat::Vorbis => {
                 // Remux only: without the codebooks there is no decodable stream
                 // to write, so the ident and setup headers must arrive in-band.
-                let (Some(ident), Some(setup)) = (self.vorbis_header(1), self.vorbis_header(5))
-                else {
+                let (Some(ident), Some(setup)) = (
+                    vorbis_header(&self.headers, 1),
+                    vorbis_header(&self.headers, 5),
+                ) else {
                     return Ok(None);
                 };
-                let comment = self
-                    .vorbis_header(3)
+                let comment = vorbis_header(&self.headers, 3)
                     .map(|c| c.to_vec())
-                    .unwrap_or_else(|| vorbis_comment(b"\x03vorbis"));
+                    .unwrap_or_else(|| empty_vorbis_comment(b"\x03vorbis"));
                 Ok(Some((ident.to_vec(), Vec::from([comment, setup.to_vec()]))))
             }
             AudioFormat::Flac => Ok(self.headers.first().and_then(|first| flac_headers(first))),
@@ -366,26 +339,11 @@ impl OggStreamMux {
             Some(AudioFormat::Flac) => crate::flacparse::parse_frame_header(packet)
                 .map(|h| u64::from(h.block_size))
                 .unwrap_or(0),
-            // The lapped Vorbis overlap: packet n outputs the second half of
-            // window n-1 plus the first half of window n, and the stream's first
-            // packet (no predecessor) outputs nothing.
-            Some(AudioFormat::Vorbis) => {
-                match self
-                    .vorbis
-                    .as_ref()
-                    .and_then(|t| t.packet_blocksize(packet))
-                {
-                    Some(cur) => {
-                        let step = match self.prev_blocksize {
-                            Some(prev) => u64::from((prev + cur) / 4),
-                            None => 0,
-                        };
-                        self.prev_blocksize = Some(cur);
-                        step
-                    }
-                    None => 0,
-                }
-            }
+            Some(AudioFormat::Vorbis) => self
+                .vorbis
+                .as_mut()
+                .and_then(|lapping| lapping.packet_samples(packet))
+                .unwrap_or(0),
             _ => 0,
         };
         self.natural_samples = self.natural_samples.saturating_add(natural);
@@ -439,16 +397,6 @@ fn declared_samples(duration_ns: u64, rate: u32) -> Option<u64> {
     Some((ns / 1_000_000_000) as u64)
 }
 
-/// A minimal VorbisComment header behind `magic`: the vendor string and no
-/// fields, for a mapping that mandates the packet when the source carried none.
-fn vorbis_comment(magic: &[u8]) -> Vec<u8> {
-    crate::vorbiscomment::vorbis_comment(
-        magic,
-        crate::vorbiscomment::VENDOR,
-        &g2g_core::TagList::new(),
-    )
-}
-
 /// Split a native FLAC header (`fLaC` + metadata blocks) into the Ogg-FLAC
 /// mapping's beginning-of-stream packet and the header packets that follow.
 ///
@@ -461,7 +409,7 @@ fn vorbis_comment(magic: &[u8]) -> Vec<u8> {
 fn flac_headers(native: &[u8]) -> Option<HeaderPackets> {
     let streaminfo = native.get(4..42)?;
     let comment = comment_block(native).unwrap_or_else(|| {
-        let body = vorbis_comment(b"");
+        let body = empty_vorbis_comment(b"");
         let mut b = Vec::from([0x84u8]); // VORBIS_COMMENT, last metadata block
         b.extend_from_slice(&(body.len() as u32).to_be_bytes()[1..]);
         b.extend_from_slice(&body);
@@ -791,7 +739,10 @@ impl MultiInputElement for OggMuxN {
                     // Codec config arrives in-band ahead of the audio. It never
                     // enters the merge: the header block needs every stream's
                     // config before any of it can be written.
-                    if !self.headers_written && self.streams[input].is_header(slice) {
+                    let is_config = self.streams[input]
+                        .format
+                        .is_some_and(|format| is_audio_config_packet(format, slice));
+                    if !self.headers_written && is_config {
                         self.streams[input].push_header(slice);
                         return Ok(());
                     }

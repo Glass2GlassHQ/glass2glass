@@ -773,6 +773,34 @@ impl VorbisTiming {
     }
 }
 
+// the PCM a Vorbis stream's audio packets decode to, one packet after another
+#[derive(Debug, Clone)]
+pub(crate) struct VorbisLapping {
+    timing: VorbisTiming,
+    prev_blocksize: Option<u32>,
+}
+
+impl VorbisLapping {
+    pub(crate) fn new(timing: VorbisTiming) -> Self {
+        Self {
+            timing,
+            prev_blocksize: None,
+        }
+    }
+
+    pub(crate) fn packet_samples(&mut self, packet: &[u8]) -> Option<u64> {
+        let cur = self.timing.packet_blocksize(packet)?;
+        // The lapped Vorbis overlap: packet n outputs the second half of
+        // window n-1 plus the first half of window n, and the stream's first
+        // packet (no predecessor) outputs nothing.
+        let step = self
+            .prev_blocksize
+            .map_or(0, |prev| u64::from((prev + cur) / 4));
+        self.prev_blocksize = Some(cur);
+        Some(step)
+    }
+}
+
 /// Extract each mode's blockflag from a `\x05vorbis` setup header by scanning
 /// the mode section backwards from the framing bit, without parsing the
 /// variable-length codebooks before it (ffmpeg's `vorbis_parser` technique).
@@ -815,7 +843,7 @@ fn mode_blockflags(setup: &[u8]) -> Option<Vec<bool>> {
 }
 
 /// Identify the logical stream from its first packet's magic.
-fn detect(packet: &[u8]) -> OggStreamInfo {
+pub(crate) fn detect(packet: &[u8]) -> OggStreamInfo {
     if let Some((channels, pre_skip)) = crate::opusparse::parse_opus_head(packet) {
         // Opus always decodes at 48 kHz regardless of the original input rate.
         OggStreamInfo {

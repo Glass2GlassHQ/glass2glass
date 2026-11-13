@@ -258,6 +258,8 @@ impl AsyncElement for VorbisDec {
                         pts_ns,
                         dts_ns: pts_ns,
                         duration_ns,
+                        // a Matroska block's DiscardPadding, which the output clips off
+                        end_discard_ns: frame.timing.end_discard_ns,
                         ..FrameTiming::default()
                     };
                     self.output.push(timing, decoded, out).await?;

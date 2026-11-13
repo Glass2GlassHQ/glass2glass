@@ -26,10 +26,13 @@
 //! muxer in `default_registry`, so any number of input links builds this element,
 //! the way gst's request sink pads do. Video is H.264/H.265 (avcC/hvcC + AVCC samples), VP8/VP9 (raw
 //! frames, no CodecPrivate) or AV1 (`V_AV1`, av1C `CodecPrivate` from the
-//! sequence header, temporal delimiters stripped); audio is AAC (ASC) or
+//! sequence header, temporal delimiters stripped); audio is AAC (ASC),
 //! Opus (an in-band `OpusHead` verbatim, else a synthesised one, plus the
-//! `CodecDelay` / `SeekPreRoll` its mapping needs), so VP9 + Opus muxes a
-//! WebM. A `Caps::Text{Utf8}` pad adds a subtitle track: one cue per frame,
+//! `CodecDelay` / `SeekPreRoll` its mapping needs), Vorbis (the in-band
+//! identification, comment and setup headers Xiph-laced), FLAC (the in-band
+//! `fLaC` header), MP2, MP3, AC-3, PCM (`A_PCM/*` with its `BitDepth`), or
+//! A-law, mu-law and IMA ADPCM (`A_MS/ACM` behind a WAVEFORMATEX), so VP9 + Opus
+//! muxes a WebM. A `Caps::Text{Utf8}` pad adds a subtitle track: one cue per frame,
 //! written as a `BlockGroup` whose `BlockDuration` is the cue's display window, in
 //! the `S_TEXT/*` syntax the `subtitle-format` property picks. A `Caps::SubPicture`
 //! pad adds a bitmap subtitle track: `S_VOBSUB` or `S_DVBSUB` by the pad's
@@ -63,14 +66,17 @@ use crate::livemux::{wall_clock_ns, LiveMuxDeadline, LIVE_MUX_LATENCY_PROPERTY};
 use crate::matroska::{
     default_page_blob, finalize_seekable, subpicture_block, subpicture_config,
     subpicture_mkv_codec, subtitle_format_from_str, subtitle_format_str, text_codec_private,
-    MatroskaMuxer, MkvCodec, MkvTrackConfig, MkvTrackSpec,
+    xiph_codec_private, MatroskaMuxer, MkvCodec, MkvTrackConfig, MkvTrackSpec,
 };
 use crate::mux::{
-    audio_header_config, audio_track_params, every_track_header_ready, refused_input,
-    require_header_config_at_end, video_header_config, InputPriming, CODEC_CONFIG,
+    audio_header_config, audio_track_params, every_track_header_ready, is_audio_config_packet,
+    refused_input, require_header_config_at_end, video_header_config, vorbis_header, InputPriming,
+    CODEC_CONFIG,
 };
 use crate::opusparse::{is_opus_config, parse_opus_head, synth_opus_head, OPUS_ENCODER_PRE_SKIP};
 use crate::subparse::frame_subtitle_block;
+use crate::vorbiscomment::empty_vorbis_comment;
+use crate::waveformat::wave_format_ex;
 
 /// The properties the Matroska muxer exposes.
 #[derive(Debug, Clone, Copy)]
@@ -295,6 +301,8 @@ pub struct MkvMuxN {
     /// Per-pad ASS event counter: the `ReadOrder` field leading each block.
     text_seq: Vec<u64>,
     priming: InputPriming,
+    // the Vorbis header packets each pad sent before its identification and setup headers were both in
+    vorbis_headers: Vec<Vec<Vec<u8>>>,
 }
 
 impl MkvMuxN {
@@ -317,6 +325,7 @@ impl MkvMuxN {
             chapters: Vec::new(),
             text_seq: alloc::vec![0; inputs],
             priming: InputPriming::new(inputs),
+            vorbis_headers: alloc::vec![Vec::new(); inputs],
         }
     }
 
@@ -391,6 +400,26 @@ impl MkvMuxN {
         }
     }
 
+    fn mkv_audio_codec(format: AudioFormat) -> Option<MkvCodec> {
+        Some(match format {
+            AudioFormat::Aac => MkvCodec::Aac,
+            AudioFormat::Opus => MkvCodec::Opus,
+            AudioFormat::Vorbis => MkvCodec::Vorbis,
+            AudioFormat::Flac => MkvCodec::Flac,
+            AudioFormat::Mp2 => MkvCodec::Mp2,
+            AudioFormat::Mp3 => MkvCodec::Mp3,
+            AudioFormat::Ac3 => MkvCodec::Ac3,
+            AudioFormat::Alaw | AudioFormat::Mulaw | AudioFormat::ImaAdpcm => {
+                MkvCodec::AcmAudio(format)
+            }
+            _ if g2g_core::pcm_formats().contains(&format) => MkvCodec::Pcm {
+                format,
+                big_endian: false,
+            },
+            _ => return None,
+        })
+    }
+
     fn pad_kind_for(caps: &Caps) -> Option<PadKind> {
         match caps {
             Caps::CompressedVideo {
@@ -404,11 +433,11 @@ impl MkvMuxN {
                 ..
             } => Some(PadKind::Video(*c)),
             Caps::Audio {
-                format: format @ (AudioFormat::Aac | AudioFormat::Opus),
+                format,
                 channels,
                 sample_rate,
                 ..
-            } => Some(PadKind::Audio {
+            } if Self::mkv_audio_codec(*format).is_some() => Some(PadKind::Audio {
                 format: *format,
                 channels: *channels,
                 rate: *sample_rate,
@@ -427,16 +456,11 @@ impl MkvMuxN {
         }
     }
 
-    /// Whether the pad carries Opus, whose in-band headers are config rather
-    /// than audio and so are dropped instead of muxed.
-    fn is_opus_pad(&self, input: usize) -> bool {
-        matches!(
-            self.kinds[input],
-            Some(PadKind::Audio {
-                format: AudioFormat::Opus,
-                ..
-            })
-        )
+    fn audio_format(&self, input: usize) -> Option<AudioFormat> {
+        match self.kinds[input] {
+            Some(PadKind::Audio { format, .. }) => Some(format),
+            _ => None,
+        }
     }
 
     // the AudioSpecificConfig captured for an AAC pad, None before its first frame
@@ -541,7 +565,7 @@ impl MkvMuxN {
                 // verbatim so the source's real pre-skip survives; a freshly
                 // encoded one has none, so the header is synthesized with
                 // libopus' lookahead (M792).
-                _ => {
+                AudioFormat::Opus => {
                     let head = match parse_opus_head(au) {
                         Some(_) => Some(au.to_vec()),
                         // An `OpusTags` before the identification header is not
@@ -559,6 +583,84 @@ impl MkvMuxN {
                     let config = head.unwrap_or_else(|| {
                         synth_opus_head(params.channels, params.sample_rate, OPUS_ENCODER_PRE_SKIP)
                     });
+                    self.inits[input] = Some(TrackInit::Audio {
+                        format,
+                        channels: params.channels,
+                        rate: params.sample_rate,
+                        config,
+                    });
+                }
+                // Remux only: without the codebooks there is no decodable stream
+                // to write, so the identification and setup headers must arrive in band.
+                AudioFormat::Vorbis => {
+                    if !is_audio_config_packet(format, au) {
+                        return Ok(());
+                    }
+                    self.vorbis_headers[input].push(au.to_vec());
+                    let headers = &self.vorbis_headers[input];
+                    let (Some(ident), Some(setup)) =
+                        (vorbis_header(headers, 1), vorbis_header(headers, 5))
+                    else {
+                        return Ok(());
+                    };
+                    let comment = vorbis_header(headers, 3)
+                        .map(<[u8]>::to_vec)
+                        .unwrap_or_else(|| empty_vorbis_comment(b"\x03vorbis"));
+                    let params = audio_track_params(
+                        short_type_name::<Self>(),
+                        format,
+                        channels,
+                        rate,
+                        ident,
+                    )?;
+                    let config = xiph_codec_private(&[ident, &comment, setup]);
+                    self.inits[input] = Some(TrackInit::Audio {
+                        format,
+                        channels: params.channels,
+                        rate: params.sample_rate,
+                        config,
+                    });
+                }
+                AudioFormat::Flac => {
+                    if !is_audio_config_packet(format, au) {
+                        return Ok(());
+                    }
+                    let params =
+                        audio_track_params(short_type_name::<Self>(), format, channels, rate, au)?;
+                    self.inits[input] = Some(TrackInit::Audio {
+                        format,
+                        channels: params.channels,
+                        rate: params.sample_rate,
+                        config: au.to_vec(),
+                    });
+                }
+                _ => {
+                    let params =
+                        audio_track_params(short_type_name::<Self>(), format, channels, rate, &[])?;
+                    let config = match Self::mkv_audio_codec(format) {
+                        // caps carry no ADPCM block size, so `adpcmdec`'s default stands
+                        Some(MkvCodec::AcmAudio(_)) => {
+                            let (wave_format, extension) = wave_format_ex(
+                                format,
+                                u16::from(params.channels),
+                                params.sample_rate,
+                                crate::adpcm::DEFAULT_BLOCK_ALIGN,
+                            )
+                            .ok_or_else(|| {
+                                refused_input(
+                                    short_type_name::<Self>(),
+                                    &Caps::Audio {
+                                        format,
+                                        channels: params.channels,
+                                        sample_rate: params.sample_rate,
+                                        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
+                                    },
+                                )
+                            })?;
+                            wave_format.to_bytes(Some(&extension))
+                        }
+                        _ => Vec::new(),
+                    };
                     self.inits[input] = Some(TrackInit::Audio {
                         format,
                         channels: params.channels,
@@ -630,8 +732,14 @@ impl MkvMuxN {
         let pts_ns = frame.timing.pts_ns;
         let (sample, is_key) = self.sample_for(input, slice);
         let track = self.track_index(input);
+        // a frame running past the segment stop or carrying an end discard is written short, which the muxer turns into DiscardPadding
+        let end_trim_ns = self
+            .priming
+            .end_clip_ns(input, pts_ns, frame.timing.duration_ns)
+            .max(u64::from(frame.timing.end_discard_ns));
+        let duration_ns = frame.timing.duration_ns.saturating_sub(end_trim_ns);
         let mux = self.mux.as_mut().ok_or(G2gError::NotConfigured)?;
-        let bytes = mux.push_frame_on(track, &sample, pts_ns, is_key, frame.timing.duration_ns);
+        let bytes = mux.push_frame_on(track, &sample, pts_ns, is_key, duration_ns);
 
         // Seekable (two-pass) mode: hold the whole file until every input drains.
         if self.settings.seekable {
@@ -698,10 +806,8 @@ fn track_config(init: &TrackInit, subtitle_format: TextFormat) -> MkvTrackConfig
             rate,
             config,
         } => {
-            let mkv_codec = match format {
-                AudioFormat::Opus => MkvCodec::Opus,
-                _ => MkvCodec::Aac,
-            };
+            let mkv_codec = MkvMuxN::mkv_audio_codec(*format)
+                .expect("pad_kind_for admits only audio formats with a Matroska mapping");
             MkvTrackConfig {
                 spec: MkvTrackSpec {
                     codec: mkv_codec,
@@ -878,14 +984,16 @@ impl MultiInputElement for MkvMuxN {
                     // Capture this track's init from its first AU before queueing.
                     if let Some(s) = frame.domain.as_system_slice() {
                         self.capture_init(input, s)?;
-                        // An in-band Opus header or a raw AAC stream's config is
-                        // codec config, not audio: it became the `CodecPrivate`
-                        // above and must never be written as a Block (M792).
-                        let opus_config = self.is_opus_pad(input) && is_opus_config(s);
+                        // An in-band Opus, Vorbis or FLAC header or a raw AAC
+                        // stream's config is codec config, not audio: it became the
+                        // `CodecPrivate` above and must never be written as a Block (M792).
+                        let header_packet = self
+                            .audio_format(input)
+                            .is_some_and(|format| is_audio_config_packet(format, s));
                         let aac_config = self
                             .aac_config(input)
                             .is_some_and(|config| is_leading_aac_config(config, s));
-                        if opus_config || aac_config {
+                        if header_packet || aac_config {
                             return Ok(());
                         }
                         // A bitmap subtitle pad opens on its config blob (the
@@ -913,10 +1021,12 @@ impl MultiInputElement for MkvMuxN {
                 PipelinePacket::CapsChanged(_) => return Ok(()),
                 // A per-input `Segment` maps that stream to running time; a muxed
                 // container carries its own timestamps, so it is consumed rather
-                // than forwarded into the byte stream. One starting past an AAC
-                // track's first frame becomes the track's `CodecDelay`.
+                // than forwarded into the byte stream. One starting past an audio
+                // track's first frame becomes the track's `CodecDelay`, and its stop
+                // trims the frame it falls in.
                 PipelinePacket::Segment(seg) => {
                     self.priming.note_segment_start(input, seg.start);
+                    self.priming.note_segment_stop(input, seg.stop);
                     return Ok(());
                 }
                 PipelinePacket::Tick => {}
@@ -949,7 +1059,7 @@ impl MultiInputElement for MkvMuxN {
                     }
                 }
                 for input in 0..self.inputs {
-                    if self.aac_config(input).is_some() {
+                    if matches!(self.inits[input], Some(TrackInit::Audio { .. })) {
                         let delay_ns = self.priming.priming_ns(input);
                         mux = mux.with_codec_delay(self.track_index(input), delay_ns);
                     }

@@ -6,6 +6,8 @@ use alloc::vec::Vec;
 
 use g2g_core::AudioFormat;
 
+use g2g_mcu::adpcm::samples_per_block_channels;
+
 use crate::riff::{chunk_len, put_chunk, put_chunk_header, FourCc, RIFF_FOURCC, RIFF_HEADER_LEN};
 
 pub(crate) const WAVE_FORMAT_PCM: u16 = 0x0001;
@@ -87,6 +89,52 @@ pub(crate) fn sample_frame_len(format: AudioFormat, channels: u8) -> Option<usiz
         WAVE_FORMAT_PCM | WAVE_FORMAT_IEEE_FLOAT | WAVE_FORMAT_ALAW | WAVE_FORMAT_MULAW
     );
     constant_width.then(|| usize::from(bits / 8) * usize::from(channels.max(1)))
+}
+
+// a stream's WAVEFORMATEX and its `cbSize` extension, which for ADPCM is the samples one block holds
+pub(crate) fn wave_format_ex(
+    format: AudioFormat,
+    channels: u16,
+    sample_rate: u32,
+    block_align_property: usize,
+) -> Option<(WaveFormatEx, Vec<u8>)> {
+    let (tag, bits) = wave_format_tag(format)?;
+    let samples_per_block = match format {
+        AudioFormat::ImaAdpcm => Some(samples_per_block_channels(
+            block_align_property,
+            channels.max(1) as usize,
+        )),
+        _ => None,
+    };
+    let block_align = match format {
+        // One block, not one sample, is ADPCM's addressable unit.
+        AudioFormat::ImaAdpcm => u16::try_from(block_align_property).ok()?,
+        _ => channels * bits / 8,
+    };
+    let byte_rate = match samples_per_block {
+        // The coded rate: how many block-sized chunks a second of audio needs.
+        // Folded in one expression, since a block holds thousands of samples and
+        // dividing first would round the rate away. (ffmpeg writes the decoded
+        // PCM rate in this field instead, which readers ignore either way.)
+        // `samples` counts one channel, so the block already spans them all.
+        Some(samples) => {
+            u32::try_from(u64::from(sample_rate) * u64::from(block_align) / samples as u64).ok()?
+        }
+        None => sample_rate * block_align as u32,
+    };
+    let extension: Vec<u8> = match samples_per_block {
+        Some(samples) => Vec::from(u16::try_from(samples).ok()?.to_le_bytes()),
+        None => Vec::new(),
+    };
+    let wave_format = WaveFormatEx {
+        tag,
+        channels,
+        sample_rate,
+        byte_rate,
+        block_align,
+        bits,
+    };
+    Some((wave_format, extension))
 }
 
 /// The fields of a `WAVEFORMATEX`.
