@@ -63,6 +63,7 @@ pub(crate) fn video_header_config(codec: VideoCodec) -> &'static str {
         VideoCodec::H264 => "SPS and PPS",
         VideoCodec::H265 => "VPS, SPS and PPS",
         VideoCodec::Av1 => "AV1 sequence header",
+        VideoCodec::Mpeg4Part2 => "VOL header",
         _ => CODEC_CONFIG,
     }
 }
@@ -73,6 +74,7 @@ pub(crate) fn audio_header_config(format: AudioFormat) -> &'static str {
         AudioFormat::Aac => "ADTS header or leading AudioSpecificConfig",
         AudioFormat::Vorbis => "Vorbis identification and setup headers",
         AudioFormat::Flac => "fLaC stream header",
+        AudioFormat::Ac3 => "AC-3 syncframe header",
         _ => CODEC_CONFIG,
     }
 }

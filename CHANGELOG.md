@@ -202,6 +202,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M2286: RTSP ingest over UDP counts the publisher's RTCP as session activity again.
 - M2287: `matroskamux` takes Vorbis, FLAC, MP2, MP3, AC-3, PCM, A-law, mu-law and IMA ADPCM, and `matroskademux` PCM pads declare the track's rate.
 - M2288: `mpegtsmux` takes MPEG-2 video, MPEG-4 Part 2, MP2, MP3 and AC-3, and `ffmpegaudiodec` reopens when its input format changes, so MP3 from TS decodes as MP3.
+- M2289: `mp4mux` takes MPEG-4 Part 2, MP2, MP3 and AC-3, and `qtdemux` reads `ac-3` tracks as AC-3.
 
 Breaking: `TimecodeMeta.frames` is a `u16`, `WIRE_VERSION` is 6, `FrameTiming` gains `start_discard_ns` and `end_discard_ns`, `RtpRecvConfig` gains `parameter_sets`, `RtmpPublisher::push` fails with a `PublishRefusal`, and `Interlace` gains `InterleavedBottomFieldFirst`.
 

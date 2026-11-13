@@ -266,16 +266,24 @@ fn descriptor(tag: u8, payload: &[u8]) -> Vec<u8> {
     d
 }
 
-/// The `esds` (ES_Descriptor) box carrying the AAC AudioSpecificConfig.
-pub(crate) fn esds(asc: &[u8]) -> Vec<u8> {
-    let dec_specific = descriptor(0x05, asc);
+// ISO/IEC 14496-1 objectTypeIndication of Audio ISO/IEC 14496-3 (AAC)
+pub(crate) const AAC_OBJECT_TYPE: u8 = 0x40;
+// ISO/IEC 14496-1 streamType values
+pub(crate) const VISUAL_STREAM_TYPE: u8 = 0x04;
+pub(crate) const AUDIO_STREAM_TYPE: u8 = 0x05;
+
+/// The `esds` (ES_Descriptor) box, with no DecoderSpecificInfo when
+/// `decoder_specific_info` is empty, as ffmpeg and gst write MP3.
+pub(crate) fn esds(object_type: u8, stream_type: u8, decoder_specific_info: &[u8]) -> Vec<u8> {
     let mut dcd = Vec::new();
-    dcd.push(0x40); // objectTypeIndication: Audio ISO/IEC 14496-3 (AAC)
-    dcd.push(0x15); // streamType audio (0x05 << 2) | upstream 0 | reserved 1
+    dcd.push(object_type);
+    dcd.push(stream_type << 2 | 1); // upstream 0, reserved 1
     dcd.extend_from_slice(&[0, 0, 0]); // bufferSizeDB
     dcd.extend_from_slice(&0u32.to_be_bytes()); // maxBitrate
     dcd.extend_from_slice(&0u32.to_be_bytes()); // avgBitrate
-    dcd.extend_from_slice(&dec_specific);
+    if !decoder_specific_info.is_empty() {
+        dcd.extend_from_slice(&descriptor(0x05, decoder_specific_info));
+    }
     let dec_config = descriptor(0x04, &dcd);
 
     let sl = descriptor(0x06, &[0x02]); // SLConfigDescriptor: predefined 2
@@ -299,7 +307,7 @@ mod tests {
     fn esds_carries_the_asc() {
         // AAC-LC 48 kHz stereo ASC is typically [0x11, 0x90].
         let asc = [0x11u8, 0x90];
-        let b = esds(&asc);
+        let b = esds(AAC_OBJECT_TYPE, AUDIO_STREAM_TYPE, &asc);
         assert_eq!(&b[4..8], b"esds");
         // the ASC appears inside a DecoderSpecificInfo (tag 0x05).
         let pos = b.windows(2).position(|w| w == asc).expect("asc present");
@@ -311,7 +319,7 @@ mod tests {
     fn esds_sizes_a_config_past_one_size_byte() {
         // a descriptor size past 127 takes a second size byte
         let asc: Vec<u8> = (0..200u8).collect();
-        let b = esds(&asc);
+        let b = esds(AAC_OBJECT_TYPE, AUDIO_STREAM_TYPE, &asc);
         assert_eq!(crate::mp4box::parse_esds(&b[8..]).expect("parses"), asc);
     }
 

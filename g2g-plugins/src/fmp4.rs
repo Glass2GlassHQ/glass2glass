@@ -1245,7 +1245,7 @@ fn parse_video_entry(
 }
 
 // ISO/IEC 14496-1 objectTypeIndication values of an `mp4v` entry's decoder config
-const MPEG4_VISUAL_OBJECT_TYPE: u8 = 0x20;
+pub(crate) const MPEG4_VISUAL_OBJECT_TYPE: u8 = 0x20;
 // the simple, main, SNR, spatial, high and 4:2:2 profiles
 const MPEG2_VISUAL_OBJECT_TYPES: core::ops::RangeInclusive<u8> = 0x60..=0x65;
 const MPEG1_VISUAL_OBJECT_TYPE: u8 = 0x6A;
@@ -1399,7 +1399,6 @@ fn unread_audio_entry(
     Ok(Some((kind, None)))
 }
 
-#[cfg(feature = "ffmpeg-long-tail")]
 fn ac3_specific_channels(fourcc: &[u8; 4], entry: &[u8]) -> Option<u8> {
     let children = entry.get(sound_entry_children_at(entry).ok()?..)?;
     let mut br = match fourcc {
@@ -1571,6 +1570,19 @@ fn parse_audio_entry(
     }
     if let Some(vorbis) = find_box(entries, b"msVo") {
         return Ok(Some((vorbis_track(vorbis, timescale)?, None)));
+    }
+    if let Some(ac3) = find_box(entries, b"ac-3") {
+        let channels = ac3_specific_channels(b"ac-3", ac3).ok_or(G2gError::CapsMismatch)?;
+        return Ok(Some((
+            TrackKind::Audio {
+                format: AudioFormat::Ac3,
+                channels,
+                sample_rate: timescale,
+                config: Vec::new(),
+                stored_pcm: None,
+            },
+            None,
+        )));
     }
     if let Some(mp3) = find_box(entries, b".mp3") {
         let channels = sound_entry_channels(mp3)?;
@@ -1880,7 +1892,8 @@ pub(crate) fn vorbis_headers(laced: &[u8]) -> Option<Vec<&[u8]>> {
 }
 
 // esds objectTypeIndication of MPEG-2 and MPEG-1 audio (MP3) in an `mp4a` entry
-const MPEG_AUDIO_OBJECT_TYPES: [u8; 2] = [0x69, 0x6B];
+const MPEG_AUDIO_OBJECT_TYPES: [u8; 2] = [0x69, MPEG1_AUDIO_OBJECT_TYPE];
+pub(crate) const MPEG1_AUDIO_OBJECT_TYPE: u8 = 0x6B;
 
 // QuickTime sound description versions 1 and 2 add fields before the child boxes
 const SOUND_ENTRY_V0_CHILDREN_AT: usize = 28;

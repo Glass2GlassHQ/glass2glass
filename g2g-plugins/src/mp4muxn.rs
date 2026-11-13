@@ -26,8 +26,9 @@
 //! Reachable from the `gst-launch` fan-in syntax: registered as the `mp4mux`
 //! muxer in `default_registry`, so any number of input links builds this element,
 //! the way gst's request sink pads do. Video is H.264/H.265 (avc1/hvc1), VP8/VP9
-//! (vp08/vp09 + vpcC) or AV1 (av01 + av1C from the sequence header);
-//! audio is AAC (mp4a/esds) or Opus (Opus/dOps), sync-sample audio. A
+//! (vp08/vp09 + vpcC), AV1 (av01 + av1C from the sequence header) or MPEG-4
+//! Part 2 (mp4v/esds); audio is AAC, MP2 or MP3 (mp4a/esds), Opus (Opus/dOps)
+//! or AC-3 (ac-3/dac3), sync-sample audio. A
 //! `Caps::Text{Utf8}` pad adds a `tx3g` timed-text track (ffmpeg's
 //! `mov_text`): one cue per sample, with the runs between cues filled by empty
 //! samples, since a text sample presents where the durations before it end.
@@ -53,17 +54,19 @@ use g2g_core::time::ns_to_ticks;
 
 use crate::aacparse::{is_leading_aac_config, muxer_access_unit, muxer_audio_specific_config};
 use crate::cea::{build_cdp, parse_cc_data, CcTriple};
+use crate::fmp4::{MPEG1_AUDIO_OBJECT_TYPE, MPEG4_VISUAL_OBJECT_TYPE};
 use crate::fmp4mux::{
     av1c_record, h26x_sample_config, parameter_sets, split_annexb, video_sample,
     visual_sample_entry, VideoGeometry,
 };
 use crate::livemux::{wall_clock_ns, LiveMuxDeadline, LIVE_MUX_LATENCY_PROPERTY};
-use crate::mp4audiosink::esds;
+use crate::mp4audiosink::{esds, AAC_OBJECT_TYPE, AUDIO_STREAM_TYPE, VISUAL_STREAM_TYPE};
 use crate::mp4box::{
     audio_sample_entry, ftyp, ftyp_cmaf, full_box, mp4_box, orientation_matrix,
     packed_mdhd_language, prft, put_box_header, styp_cmaf, udta_with_tags, BOX_HEADER_LEN, MATRIX,
     UNDETERMINED_MDHD_LANGUAGE,
 };
+use crate::mpeg4videoparse::Mpeg4VideoCodec;
 use crate::mux::{
     audio_header_config, audio_track_params, every_track_header_ready, refused_input,
     refused_input_because, require_header_config_at_end, video_header_config, InputPriming,
@@ -73,6 +76,7 @@ use crate::opusparse::{
     dops_from_opus_head, is_opus_config, parse_opus_head, synth_opus_head, OPUS_ENCODER_PRE_SKIP,
 };
 use crate::rtcp;
+use crate::startcodeparse::StartCodeCodec;
 
 /// Video tracks use a 90 kHz media timescale; audio tracks use the sample rate.
 pub(crate) const VIDEO_TIMESCALE: u32 = 90_000;
@@ -467,7 +471,8 @@ impl Mp4MuxN {
                     | VideoCodec::H265
                     | VideoCodec::Vp8
                     | VideoCodec::Vp9
-                    | VideoCodec::Av1),
+                    | VideoCodec::Av1
+                    | VideoCodec::Mpeg4Part2),
                 framerate,
                 ..
             } => Some(PadKind::Video {
@@ -480,7 +485,12 @@ impl Mp4MuxN {
                 },
             }),
             Caps::Audio {
-                format: format @ (AudioFormat::Aac | AudioFormat::Opus),
+                format:
+                    format @ (AudioFormat::Aac
+                    | AudioFormat::Opus
+                    | AudioFormat::Mp2
+                    | AudioFormat::Mp3
+                    | AudioFormat::Ac3),
                 channels,
                 sample_rate,
                 ..
@@ -632,6 +642,16 @@ impl Mp4MuxN {
                             });
                         }
                     }
+                    // the `esds` carries the VOS, VO and VOL headers a keyframe leads with
+                    VideoCodec::Mpeg4Part2 => {
+                        if let Some(config) = Mpeg4VideoCodec::config_headers(au) {
+                            self.inits[input] = Some(TrackInit::Video {
+                                codec,
+                                geometry,
+                                param_sets: alloc::vec![config],
+                            });
+                        }
+                    }
                     // VP8 carries no out-of-band parameter sets; the track is
                     // ready at the first frame (the vpcC uses caps geometry).
                     _ => {
@@ -673,7 +693,7 @@ impl Mp4MuxN {
                 // container (M791), and the `dOps` is built from it; a freshly
                 // encoded one has none, so the track is ready at the first packet
                 // and the `dOps` falls back to the caps + libopus' lookahead.
-                _ => {
+                AudioFormat::Opus => {
                     let config = match parse_opus_head(au) {
                         Some(_) => au.to_vec(),
                         // An `OpusTags` ahead of the identification header is not
@@ -688,6 +708,24 @@ impl Mp4MuxN {
                         rate,
                         &config,
                     )?;
+                    self.inits[input] = Some(TrackInit::Audio {
+                        format,
+                        channels: params.channels,
+                        rate: params.sample_rate,
+                        config,
+                    });
+                }
+                // MP2 and MP3 frames describe themselves, and an AC-3 frame's header fills the `dac3`
+                _ => {
+                    let config = match format {
+                        AudioFormat::Ac3 => match crate::audioframe::ac3_specific_box(au) {
+                            Some(record) => record,
+                            None => return Ok(()),
+                        },
+                        _ => Vec::new(),
+                    };
+                    let params =
+                        audio_track_params(short_type_name::<Self>(), format, channels, rate, &[])?;
                     self.inits[input] = Some(TrackInit::Audio {
                         format,
                         channels: params.channels,
@@ -1696,6 +1734,15 @@ fn trak_media(init: &TrackInit) -> TrakMedia {
                         .unwrap_or_default();
                     (b"av01", mp4_box(b"av1C", &record))
                 }
+                VideoCodec::Mpeg4Part2 => {
+                    let headers = param_sets
+                        .first()
+                        .expect("capture_init stores the VOL headers");
+                    (
+                        b"mp4v",
+                        esds(MPEG4_VISUAL_OBJECT_TYPE, VISUAL_STREAM_TYPE, headers),
+                    )
+                }
                 _ => {
                     let refs: Vec<&[u8]> = param_sets.iter().map(|v| v.as_slice()).collect();
                     h26x_sample_config(*codec, &refs)
@@ -1738,7 +1785,21 @@ fn trak_media(init: &TrackInit) -> TrakMedia {
                 AudioFormat::Opus => {
                     audio_sample_entry(b"Opus", *channels, *rate, &dops(*channels, *rate, config))
                 }
-                _ => audio_sample_entry(b"mp4a", *channels, *rate, &esds(config)),
+                AudioFormat::Mp2 | AudioFormat::Mp3 => audio_sample_entry(
+                    b"mp4a",
+                    *channels,
+                    *rate,
+                    &esds(MPEG1_AUDIO_OBJECT_TYPE, AUDIO_STREAM_TYPE, &[]),
+                ),
+                AudioFormat::Ac3 => {
+                    audio_sample_entry(b"ac-3", *channels, *rate, &mp4_box(b"dac3", config))
+                }
+                _ => audio_sample_entry(
+                    b"mp4a",
+                    *channels,
+                    *rate,
+                    &esds(AAC_OBJECT_TYPE, AUDIO_STREAM_TYPE, config),
+                ),
             };
             TrakMedia {
                 handler: b"soun",

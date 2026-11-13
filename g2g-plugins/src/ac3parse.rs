@@ -120,7 +120,7 @@ impl Ac3Parse {
     ) -> Result<(), G2gError> {
         let caps = Caps::Audio {
             format: AudioFormat::Ac3,
-            channels: header.channels,
+            channels: header.channels(),
             sample_rate: header.sample_rate,
             channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
@@ -553,7 +553,7 @@ mod tests {
         let mut frame = ac3_frame(0);
         frame[6] = (7 << 5) | 1;
         let header = ac3_header(&frame).expect("a 5.1 header parses");
-        assert_eq!(header.channels, 6);
+        assert_eq!(header.channels(), 6);
         assert_eq!(header.frame_len, AC3_192K_48000_LEN);
         // A reserved fscod has no frame length at all.
         let mut reserved = ac3_frame(0);

@@ -47,6 +47,15 @@ const fn mkv_audio(fixture: &'static str) -> Remux {
     }
 }
 
+const fn mp4(fixture: &'static str, kind: Kind) -> Remux {
+    Remux {
+        fixture,
+        kind,
+        muxer: "mp4mux",
+        extension: "mp4",
+    }
+}
+
 const fn ts(fixture: &'static str, kind: Kind) -> Remux {
     Remux {
         fixture,
@@ -75,6 +84,10 @@ const REMUXES: &[Remux] = &[
     ts("mpeg4part2_640x480.mp4", Kind::Video),
     ts("avi_h264_mp3.avi", Kind::Audio),
     ts("ac3_stereo_48000.ac3", Kind::Audio),
+    mp4("av_mpeg2_mp2.mpg", Kind::Audio),
+    mp4("avi_h264_mp3.avi", Kind::Audio),
+    mp4("ac3_stereo_48000.ac3", Kind::Audio),
+    mp4("mpeg4part2_640x480.mp4", Kind::Video),
 ];
 
 struct ZeroClock;

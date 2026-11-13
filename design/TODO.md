@@ -333,14 +333,17 @@ libraries installed.
     `wc4-xan` AVIs.
   - The fan-in muxers refuse codecs the gst muxer of the same name takes:
     `matroskamux` MPEG-2, MPEG-4 Part 2, Theora, ProRes, DV and raw video,
-    `mp4mux` MP2, MP3, AC-3, ALAC and MPEG-4 Part 2, and `flvmux` PCM, A-law
-    and mu-law.
+    `mp4mux` ALAC, and `flvmux` PCM, A-law and mu-law.
 - **Opus end trim in fragmented MP4:** the fragmented `mp4mux` layout writes
   its `moov` before the stream ends, so the `elst` duration is 0 and the end
   trim is only in the last sample's duration, which gst's `qtdemux` ignores (a
   48144-sample Opus stream decodes to 48648 samples in gst). Rewrite the `moov`
   at EOS with the `elst` duration when the sink can seek back. ffmpeg's `mov`
-  demuxer reads no end trim from any MP4, so it cannot check this.
+  demuxer reads no end trim from any MP4, so it cannot check this. ffmpeg also
+  applies no start trim from that `elst`, so a fragmented remux of a gapless
+  MP3 keeps its 1105-sample encoder delay in ffmpeg.
+- **`clap` in `mp4mux`:** the MP4 reader crops to a `clap` box, and `mp4mux`
+  writes none, so a remuxed file decodes uncropped.
 - **ST 2038 elements:** `st2038ancdemux` should add a port when a stream no pad
   names appears, once a launch line can link a pad that appears at run time.
 - **Demuxer features:** VP8 and VP9 alpha from Matroska BlockAdditions, ONVIF

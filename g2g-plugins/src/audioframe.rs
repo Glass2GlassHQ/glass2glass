@@ -121,10 +121,11 @@ pub(crate) const AC3_ACMOD_CHANNELS: [u8; 8] = [2, 1, 2, 3, 3, 4, 4, 5];
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Ac3Header {
     pub(crate) sample_rate: u32,
-    pub(crate) channels: u8,
     pub(crate) frame_len: usize,
     // `frmsizecod` without its low bit, which pads a 44.1 kHz frame by one word
     bit_rate_code: u8,
+    acmod: u8,
+    lfeon: u8,
 }
 
 impl Ac3Header {
@@ -135,6 +136,10 @@ impl Ac3Header {
     /// is one word longer.
     pub(crate) fn same_stream(&self, other: &Self) -> bool {
         self.sample_rate == other.sample_rate && self.bit_rate_code == other.bit_rate_code
+    }
+
+    pub(crate) fn channels(&self) -> u8 {
+        AC3_ACMOD_CHANNELS[usize::from(self.acmod)] + self.lfeon
     }
 }
 
@@ -185,10 +190,27 @@ pub(crate) fn ac3_header(buf: &[u8]) -> Option<Ac3Header> {
     let lfeon = (head[6] >> (7 - bits)) & 1;
     Some(Ac3Header {
         sample_rate: AC3_RATES_HZ[fscod],
-        channels: AC3_ACMOD_CHANNELS[acmod] + lfeon,
         frame_len,
         bit_rate_code: (frmsizecod >> 1) as u8,
+        acmod: acmod as u8,
+        lfeon,
     })
+}
+
+/// The AC3SpecificBox payload (ETSI TS 102 366 F.4) an MP4 `ac-3` entry carries,
+/// from the syncframe at the start of `frame`.
+#[cfg(feature = "std")]
+pub(crate) fn ac3_specific_box(frame: &[u8]) -> Option<alloc::vec::Vec<u8>> {
+    let header = ac3_header(frame)?;
+    let mut w = crate::annexb::BitWriter::default();
+    w.write_bits(u32::from(frame[4] >> 6), 2); // fscod
+    w.write_bits(u32::from(frame[5] >> 3), 5); // bsid
+    w.write_bits(u32::from(frame[5] & 0x07), 3); // bsmod
+    w.write_bits(u32::from(header.acmod), 3);
+    w.write_bits(u32::from(header.lfeon), 1);
+    w.write_bits(u32::from(header.bit_rate_code), 5);
+    w.write_bits(0, 5); // reserved
+    Some(w.into_bytes())
 }
 
 /// Length in bytes of the AC-3 syncframe starting at `buf`, for the callers that

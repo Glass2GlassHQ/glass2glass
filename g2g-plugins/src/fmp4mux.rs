@@ -101,12 +101,13 @@ fn avcc(param_sets: &[&[u8]]) -> Vec<u8> {
 
 /// One Annex-B video access unit as the MP4 and Matroska muxers store it, and
 /// whether it is a sync sample: H.26x as AVCC length-prefixed NALUs, AV1 without
-/// temporal delimiters, VP8 / VP9 verbatim.
+/// temporal delimiters, VP8 / VP9 / MPEG-4 Part 2 verbatim.
 pub(crate) fn video_sample(codec: VideoCodec, au: &[u8]) -> (Vec<u8>, bool) {
     match codec {
         VideoCodec::H264 | VideoCodec::H265 => {
             (avcc_sample(&split_annexb(au)), au_is_keyframe(codec, au))
         }
+        VideoCodec::Mpeg4Part2 => (au.to_vec(), au_is_keyframe(codec, au)),
         VideoCodec::Vp8 => (au.to_vec(), vp8_keyframe(au)),
         // JPEG has no inter prediction
         VideoCodec::Mjpeg => (au.to_vec(), true),
