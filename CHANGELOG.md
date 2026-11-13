@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2298: `g2g-desktop` maps scancodes to HID usages and injects input through uinput on Linux.
 - M2297: `Graph::add_duplex` runs a `MultiDuplexSession` as a graph node, and `run_duplex_session` is built on it.
 - M2296: `WebRtcDuplexSession::open_data_channel` carries a reliable, ordered data channel on the session's own connection.
 - M2295: `g2g-desktop` crate with the remote-desktop input packets, input router and TCP signaling handshake.

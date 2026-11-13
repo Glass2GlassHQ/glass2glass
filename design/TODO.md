@@ -30,8 +30,8 @@ Highest leverage first:
 
 The plan is [remote.md](remote.md).
 
-- `ximagesrc` for unattended X11 capture, and a Linux `g2g-desktop` host and
-  client that inject through `/dev/uinput`.
+- `ximagesrc` for unattended X11 capture, keyboard and pointer events from the
+  Wayland window sinks, and a Linux `g2g-desktop` host and client.
 - `dxgisrc` (system NV12, then a CUDA surface for `nvenc`) and Windows
   `SendInput`.
 - `display-index` on `screencapturesrc`, and a macOS host through `vtencode`.

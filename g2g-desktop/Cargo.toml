@@ -11,8 +11,12 @@ publish = false
 
 [dependencies]
 g2g-plugins = { workspace = true }
+keycode = "1.0"
 subtle = "2.6"
 tokio = { version = "1", features = ["sync"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+evdev = "0.13"
 
 [lints]
 workspace = true

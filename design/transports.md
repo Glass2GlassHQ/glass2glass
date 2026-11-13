@@ -571,6 +571,22 @@ the window has no focus. A key-down whose usage is in the shortcut list returns
 sends a key-up for every forwarded key still down and a button-up for every
 button still down, because the host holds a key until its key-up arrives.
 
+### Key mapping and injection
+
+`hid::usage_from_scancode` maps an evdev, Windows set 1 or macOS virtual
+keycode to a keyboard-page usage, through the `keycode` crate's copy of
+Chromium's key table. A consumer-page key such as play/pause has no keyboard
+usage and maps to `None`. `hid::evdev_from_usage` fails with `UnknownUsage`
+for a usage with no evdev key instead of returning code 0.
+
+On Linux, `uinput::Injector` writes events to `/dev/uinput`. It creates one
+virtual keyboard per key-packet `device`, created on that device's first key
+and destroyed by its removal packet. The kernel then releases any key that
+keyboard still held. Relative moves, buttons and wheel go to one relative
+mouse. The wheel sends the high-resolution axes and a notch for every 120
+units. Positions go to an absolute pointer sized to the captured screen, and
+a position outside it or on a display other than 0 fails the call.
+
 ## Distributed graphs
 
 A graph is normally one process, but a pipeline stage is not bound to the

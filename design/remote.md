@@ -303,12 +303,6 @@ service. They do not build ffmpeg or a media player.
 
 ## Tests
 
-These run without a GPU or a desktop, in `g2g-desktop`:
-
-- HID mapping tables: a key that exists on both platforms maps to the same
-  usage, and an unknown usage fails the inject call rather than sending a
-  zero.
-
 Hardware checks are probes, the same shape as `m739_screencapture`. A denied
 capture permission asserts the error path. A granted desktop is manual: move
 the pointer, hold a key, confirm the key-up arrives, confirm a late video
@@ -320,8 +314,7 @@ Each slice builds and is reviewable on its own. Later slices depend on earlier
 ones.
 
 3. **Linux host and Linux client on one machine.** Portal or `ximagesrc`,
-   software or VA-API encode, `livesync` on the client, uinput inject with the
-   HID mapping tables, window capture. `inputs=false` when both run on the
+   software or VA-API encode, `livesync` on the client, window capture. `inputs=false` when both run on the
    same seat, or the pointer feeds itself.
 4. **`dxgisrc` system-memory path and the Windows client.** `mfencode`,
    `SendInput`. Then the D3D11-to-CUDA output and `nvenc`.

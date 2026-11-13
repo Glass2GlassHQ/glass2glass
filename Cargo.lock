@@ -305,6 +305,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "arraydeque"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7d902e3d592a523def97af8f317b08ce16b7ab854c1985a0c671e6f15cebc236"
+
+[[package]]
 name = "arrayref"
 version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3961,6 +3967,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "evdev"
+version = "0.13.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "25b686663ba7f08d92880ff6ba22170f1df4e83629341cba34cf82cd65ebea99"
+dependencies = [
+ "bitvec",
+ "cfg-if",
+ "libc",
+ "nix",
+]
+
+[[package]]
 name = "event-listener"
 version = "5.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4505,7 +4523,9 @@ dependencies = [
 name = "g2g-desktop"
 version = "0.21.0"
 dependencies = [
+ "evdev",
  "g2g-plugins",
+ "keycode",
  "subtle",
  "tokio",
 ]
@@ -5977,6 +5997,30 @@ dependencies = [
  "hashbrown 0.16.1",
  "portable-atomic",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "keycode"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "29541831d33940ea1c68a1b8980382c1a507c95a528a98c0e335b361b9726975"
+dependencies = [
+ "arraydeque",
+ "arrayvec",
+ "bitflags 2.13.2",
+ "keycode_macro",
+]
+
+[[package]]
+name = "keycode_macro"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4facccc788054d521c263b66648eee8caf470f59cf8340d8cd0cce4a74ebcab2"
+dependencies = [
+ "anyhow",
+ "heck",
+ "proc-macro2",
+ "quote",
 ]
 
 [[package]]
