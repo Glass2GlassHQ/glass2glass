@@ -80,7 +80,7 @@ use crate::webrtc_codec::{
     enable_tracks, get_video_codec_property, opus_caps, set_video_codec_property, Track,
     WebRtcVideoCodec, VIDEO_CODEC_PROP,
 };
-use crate::webrtc_receive::UDP_RECV_BYTES;
+use crate::webrtc_receive::{KeyframeGate, UDP_RECV_BYTES};
 use crate::webrtc_util::{
     accept_answer_sdp, accept_offer_sdp, add_ice_candidates, connect_failed, feed_datagram,
     get_linger_ms_property, media_time_ns, non_empty, select_host_ip, send_transmit,
@@ -480,6 +480,7 @@ struct Binding {
     pt: Option<Pt>,
     in_pad: Option<usize>,
     out_pad: Option<usize>,
+    gate: KeyframeGate,
 }
 
 fn binding_of_mid(bindings: &[Binding], mid: Mid) -> Option<usize> {
@@ -698,6 +699,7 @@ impl MultiDuplexSession for WebRtcDuplexSession {
                                 pt: None,
                                 in_pad,
                                 out_pad: Some(o),
+                                gate: KeyframeGate::new(),
                             });
                         }
                         if let Some(lane) = &data_channel {
@@ -810,6 +812,12 @@ impl MultiDuplexSession for WebRtcDuplexSession {
                     }
                 }
 
+                for binding in &mut bindings {
+                    if matches!(binding.kind, Track::Video(_)) && binding.out_pad.is_some() {
+                        binding.gate.request_keyframe_if_due(&mut rtc, binding.mid);
+                    }
+                }
+
                 // (output port, pts_ns, data) collected while draining poll_output.
                 let mut frames: Vec<(usize, u64, Vec<u8>)> = Vec::new();
                 let deadline = loop {
@@ -842,6 +850,7 @@ impl MultiDuplexSession for WebRtcDuplexSession {
                                         pt: None,
                                         in_pad,
                                         out_pad: Some(out_pad),
+                                        gate: KeyframeGate::new(),
                                     });
                                 }
                             }
@@ -881,12 +890,19 @@ impl MultiDuplexSession for WebRtcDuplexSession {
                         Ok(Output::Event(Event::MediaData(d))) => {
                             let pts_ns = media_time_ns(d.time);
                             // Unknown mid, or an m-line with no output pad: skip.
-                            let Some(port) =
-                                binding_of_mid(&bindings, d.mid).and_then(|b| bindings[b].out_pad)
-                            else {
+                            let Some(index) = binding_of_mid(&bindings, d.mid) else {
                                 continue;
                             };
-                            frames.push((port, pts_ns, pad_kinds[port].pipeline_unit(&d.data)));
+                            let binding = &mut bindings[index];
+                            let Some(port) = binding.out_pad else {
+                                continue;
+                            };
+                            let unit = pad_kinds[port].pipeline_unit(&d.data);
+                            let is_video = matches!(binding.kind, Track::Video(_));
+                            if is_video && !binding.gate.admit(binding.kind.is_keyframe(&unit)) {
+                                continue;
+                            }
+                            frames.push((port, pts_ns, unit));
                         }
                         // Loss-recovery feedback counters (cumulative): nacks sent
                         // as a receiver (ingress) and nacks received as a sender
@@ -1174,6 +1190,7 @@ impl MultiDuplexSession for WebRtcDuplexSession {
                                                             pt: None,
                                                             in_pad: Some(idx),
                                                             out_pad: Some(out_pad),
+                                                            gate: KeyframeGate::new(),
                                                         });
                                                     }
                                                 }

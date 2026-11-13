@@ -20,14 +20,51 @@ use crate::webrtc_util::media_time_ns;
 pub(crate) const PLI_INTERVAL: Duration = Duration::from_secs(1);
 pub(crate) const UDP_RECV_BYTES: usize = 2000;
 
-// one PeerConnection's receive side: which mids carry video and audio, the keyframe gate, the pli timer
+// one video m-line's wait for its first keyframe, asking the sender with a PLI every PLI_INTERVAL
+#[derive(Debug)]
+pub(crate) struct KeyframeGate {
+    open: bool,
+    last_pli: Instant,
+}
+
+impl KeyframeGate {
+    pub(crate) fn new() -> Self {
+        Self {
+            open: false,
+            last_pli: Instant::now(),
+        }
+    }
+
+    pub(crate) fn is_open(&self) -> bool {
+        self.open
+    }
+
+    // mid-GOP join: drop until the first keyframe
+    pub(crate) fn admit(&mut self, keyframe: bool) -> bool {
+        self.open |= keyframe;
+        self.open
+    }
+
+    pub(crate) fn request_keyframe_if_due(&mut self, rtc: &mut Rtc, mid: Mid) -> bool {
+        if self.open || self.last_pli.elapsed() < PLI_INTERVAL {
+            return false;
+        }
+        self.last_pli = Instant::now();
+        if let Some(stream) = rtc.direct_api().stream_rx_by_mid(mid, None) {
+            stream.request_keyframe(KeyframeRequestKind::Pli);
+            return true;
+        }
+        false
+    }
+}
+
+// one PeerConnection's receive side: which mids carry video and audio, and the video keyframe gate
 #[derive(Debug)]
 pub(crate) struct MediaReceiver {
     video_codec: WebRtcVideoCodec,
     video_mid: Option<Mid>,
     audio_mid: Option<Mid>,
-    video_keyframed: bool,
-    last_pli: Instant,
+    video_gate: KeyframeGate,
 }
 
 #[derive(Debug)]
@@ -47,8 +84,7 @@ impl MediaReceiver {
             video_codec,
             video_mid: None,
             audio_mid: None,
-            video_keyframed: false,
-            last_pli: Instant::now(),
+            video_gate: KeyframeGate::new(),
         }
     }
 
@@ -77,13 +113,12 @@ impl MediaReceiver {
         let pts_ns = media_time_ns(data.time);
         let capture_unix_ns = media_capture_unix_ns(data);
         if Some(data.mid) == self.video_mid {
-            let first_keyframe = !self.video_keyframed;
-            if first_keyframe {
-                // mid-GOP join: drop until the first keyframe
-                if !self.video_codec.is_keyframe(&data.data) {
-                    return None;
-                }
-                self.video_keyframed = true;
+            let first_keyframe = !self.video_gate.is_open();
+            if !self
+                .video_gate
+                .admit(self.video_codec.is_keyframe(&data.data))
+            {
+                return None;
             }
             let converted = self.video_codec.pipeline_unit(&data.data);
             return Some(ReceivedUnit {
@@ -112,15 +147,7 @@ impl MediaReceiver {
         let Some(mid) = self.video_mid else {
             return false;
         };
-        if self.video_keyframed || self.last_pli.elapsed() < PLI_INTERVAL {
-            return false;
-        }
-        self.last_pli = Instant::now();
-        if let Some(stream) = rtc.direct_api().stream_rx_by_mid(mid, None) {
-            stream.request_keyframe(KeyframeRequestKind::Pli);
-            return true;
-        }
-        false
+        self.video_gate.request_keyframe_if_due(rtc, mid)
     }
 }
 
