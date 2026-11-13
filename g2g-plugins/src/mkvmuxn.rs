@@ -29,13 +29,15 @@
 //! sequence header, temporal delimiters stripped), MPEG-2 and MPEG-4 Part 2
 //! (the start-code headers ahead of the first GOP or picture as `CodecPrivate`),
 //! Theora (the in-band headers Xiph-laced), ProRes (the profile fourcc, each
-//! frame without its `icpf` header) or I420, YUY2 and UYVY raw video
-//! (`V_UNCOMPRESSED` with a `ColourSpace` fourcc); audio is AAC (ASC),
+//! frame without its `icpf` header), I420, YUY2 and UYVY raw video
+//! (`V_UNCOMPRESSED` with a `ColourSpace` fourcc) or a tagged long-tail codec
+//! (`V_MS/VFW/FOURCC` or `V_QUICKTIME` behind its in-band container header);
+//! audio is AAC (ASC),
 //! Opus (an in-band `OpusHead` verbatim, else a synthesised one, plus the
 //! `CodecDelay` / `SeekPreRoll` its mapping needs), Vorbis (the in-band
 //! identification, comment and setup headers Xiph-laced), FLAC (the in-band
 //! `fLaC` header), MP2, MP3, AC-3, PCM (`A_PCM/*` with its `BitDepth`), or
-//! A-law, mu-law and IMA ADPCM (`A_MS/ACM` behind a WAVEFORMATEX), so VP9 + Opus
+//! A-law, mu-law, IMA ADPCM and RIFF-tagged audio (`A_MS/ACM` behind a WAVEFORMATEX), so VP9 + Opus
 //! muxes a WebM. A `Caps::Text{Utf8}` pad adds a subtitle track: one cue per frame,
 //! written as a `BlockGroup` whose `BlockDuration` is the cue's display window, in
 //! the `S_TEXT/*` syntax the `subtitle-format` property picks. A `Caps::SubPicture`
@@ -58,7 +60,7 @@ use g2g_core::{
     split_tags, AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, Chapter,
     ConfigureOutcome, ElementMetadata, FrameTiming, G2gError, InputAggregator, MemoryDomain,
     MultiInputElement, OutputSink, PipelinePacket, PixelAspect, PropError, PropKind, PropValue,
-    PropertySpec, RawVideoFormat, SubPictureFormat, TagList, TextFormat, VideoCodec,
+    PropertySpec, RawVideoFormat, SubPictureFormat, TagList, TagNamespace, TextFormat, VideoCodec,
 };
 
 use crate::aacparse::{is_leading_aac_config, muxer_access_unit, muxer_audio_specific_config};
@@ -426,6 +428,10 @@ impl MkvMuxN {
             AudioFormat::Alaw | AudioFormat::Mulaw | AudioFormat::ImaAdpcm => {
                 MkvCodec::AcmAudio(format)
             }
+            // a MOV sample entry has no Matroska audio codec ID ffmpeg or gst reads
+            AudioFormat::Tagged(tag) if tag.namespace == TagNamespace::Riff => {
+                MkvCodec::TaggedAudio(tag)
+            }
             _ if g2g_core::pcm_formats().contains(&format) => MkvCodec::Pcm {
                 format,
                 big_endian: false,
@@ -447,7 +453,8 @@ impl MkvMuxN {
                     | VideoCodec::Mpeg2
                     | VideoCodec::Mpeg4Part2
                     | VideoCodec::Theora
-                    | VideoCodec::ProRes { .. }),
+                    | VideoCodec::ProRes { .. }
+                    | VideoCodec::Tagged(_)),
                 ..
             } => Some(PadKind::Video(*c)),
             // ffmpeg reads v210 only from a `V_MS/VFW/FOURCC` track
@@ -560,6 +567,14 @@ impl MkvMuxN {
                                 param_sets: alloc::vec![headers],
                             });
                         }
+                    }
+                    // the container header leads a tagged stream in band
+                    VideoCodec::Tagged(_) => {
+                        self.inits[input] = Some(TrackInit::Video {
+                            codec,
+                            geometry,
+                            param_sets: alloc::vec![au.to_vec()],
+                        });
                     }
                     // the identification, comment and setup headers lead the frames in band
                     VideoCodec::Theora => {
@@ -678,6 +693,17 @@ impl MkvMuxN {
                         channels: params.channels,
                         rate: params.sample_rate,
                         config,
+                    });
+                }
+                // the WAVEFORMATEX leads a tagged stream in band
+                AudioFormat::Tagged(_) => {
+                    let params =
+                        audio_track_params(short_type_name::<Self>(), format, channels, rate, &[])?;
+                    self.inits[input] = Some(TrackInit::Audio {
+                        format,
+                        channels: params.channels,
+                        rate: params.sample_rate,
+                        config: au.to_vec(),
                     });
                 }
                 AudioFormat::Flac => {
@@ -845,6 +871,12 @@ fn track_config(init: &TrackInit, subtitle_format: TextFormat) -> MkvTrackConfig
                 VideoCodec::ProRes { variant } => {
                     (MkvCodec::ProRes(*variant), variant.fourcc().to_vec())
                 }
+                VideoCodec::Tagged(tag) => (
+                    MkvCodec::TaggedVideo(*tag),
+                    refs.first()
+                        .expect("capture_init stores the container header")
+                        .to_vec(),
+                ),
                 VideoCodec::Theora => (
                     MkvCodec::Theora,
                     refs.first()
@@ -1084,6 +1116,15 @@ impl MultiInputElement for MkvMuxN {
                     self.deadline.note_arrival(input, &frame, now_ns);
                     // Capture this track's init from its first AU before queueing.
                     if let Some(s) = frame.domain.as_system_slice() {
+                        let tagged_header = self.inits[input].is_none()
+                            && matches!(
+                                self.kinds[input],
+                                Some(PadKind::Video(VideoCodec::Tagged(_)))
+                                    | Some(PadKind::Audio {
+                                        format: AudioFormat::Tagged(_),
+                                        ..
+                                    })
+                            );
                         self.capture_init(input, s)?;
                         // An in-band Opus, Vorbis or FLAC header or a raw AAC
                         // stream's config is codec config, not audio: it became the
@@ -1098,7 +1139,7 @@ impl MultiInputElement for MkvMuxN {
                         let aac_config = self
                             .aac_config(input)
                             .is_some_and(|config| is_leading_aac_config(config, s));
-                        if header_packet || aac_config {
+                        if header_packet || aac_config || tagged_header {
                             return Ok(());
                         }
                         // A bitmap subtitle pad opens on its config blob (the

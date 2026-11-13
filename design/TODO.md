@@ -326,7 +326,10 @@ libraries installed.
   - Demuxers drop streams gst's parsebin exposes: DTS in `filter/242_4.mkv`, TTA,
     pcm_dvd LPCM in `coolitnow-partial.vob`, and the xan_dpcm audio of
     `wc4-xan` AVIs.
-  - `matroskamux` refuses DV, which gst's `matroskamux` takes.
+- **MOV-tagged DV in `matroskamux`:** a `.mov` DV stream (`dvc `) goes out as
+  `V_QUICKTIME`, which gst's `matroskademux` cannot read. Write a MOV tag that
+  has an AVI fourcc as `V_MS/VFW/FOURCC` with a built BITMAPINFOHEADER, as
+  ffmpeg does.
 - **Opus end trim in fragmented MP4:** the fragmented `mp4mux` layout writes
   its `moov` before the stream ends, so the `elst` duration is 0 and the end
   trim is only in the last sample's duration, which gst's `qtdemux` ignores (a

@@ -38,11 +38,9 @@ use alloc::vec::Vec;
 use g2g_core::caps::greatest_common_divisor;
 use g2g_core::log::Target;
 use g2g_core::time::ticks_to_ns;
-#[cfg(feature = "ffmpeg-long-tail")]
-use g2g_core::TagNamespace;
 use g2g_core::{
     g2g_warn, AspectRatio, AudioFormat, Chapter, CodecTag, PixelAspect, ProResVariant,
-    RawVideoFormat, SubPictureFormat, Tag, TagList, TextFormat,
+    RawVideoFormat, SubPictureFormat, Tag, TagList, TagNamespace, TextFormat,
 };
 
 use crate::decodetimestamper::DecodeTimestamper;
@@ -323,6 +321,18 @@ impl MkvCodec {
             } => b"A_PCM/INT/BIG",
             MkvCodec::Pcm { .. } => b"A_PCM/INT/LIT",
             MkvCodec::AcmAudio(_) => ACM_CODEC_ID.as_bytes(),
+            MkvCodec::TaggedVideo(CodecTag {
+                namespace: TagNamespace::Riff,
+                ..
+            }) => VFW_CODEC_ID.as_bytes(),
+            MkvCodec::TaggedVideo(CodecTag {
+                namespace: TagNamespace::Mov,
+                ..
+            }) => QUICKTIME_CODEC_ID.as_bytes(),
+            MkvCodec::TaggedAudio(CodecTag {
+                namespace: TagNamespace::Riff,
+                ..
+            }) => ACM_CODEC_ID.as_bytes(),
             MkvCodec::Subtitle(TextFormat::Utf8) => b"S_TEXT/UTF8",
             MkvCodec::Subtitle(TextFormat::Ssa) => b"S_TEXT/ASS",
             // No `S_TEXT/WEBVTT`: it is a read-side mapping only. ffmpeg writes and
@@ -334,8 +344,10 @@ impl MkvCodec {
             MkvCodec::Pgs => b"S_HDMV/PGS",
             MkvCodec::Subtitle(_)
             | MkvCodec::Other
-            | MkvCodec::TaggedVideo(_)
-            | MkvCodec::TaggedAudio(_) => return None,
+            | MkvCodec::TaggedAudio(CodecTag {
+                namespace: TagNamespace::Mov,
+                ..
+            }) => return None,
         })
     }
 
@@ -1997,6 +2009,7 @@ fn pcm_codec(codec_id: &[u8], bit_depth: u64) -> Option<MkvCodec> {
 
 const VFW_CODEC_ID: &str = "V_MS/VFW/FOURCC";
 const ACM_CODEC_ID: &str = "A_MS/ACM";
+const QUICKTIME_CODEC_ID: &str = "V_QUICKTIME";
 
 // AAC is left out, a WAVEFORMATEX carries no AudioSpecificConfig to decode it with
 fn acm_codec(codec_id: &[u8], codec_private: &[u8]) -> Option<MkvCodec> {
@@ -2118,9 +2131,14 @@ fn tagged_codec(codec_id: &[u8], codec_private: &[u8]) -> Option<MkvCodec> {
         id if id == ACM_CODEC_ID.as_bytes() && codec_private.len() >= WAVEFORMAT_LEN => Some(
             MkvCodec::TaggedAudio(tag(TagNamespace::Riff, &codec_private[WAVEFORMAT_TAG])),
         ),
-        b"V_QUICKTIME" if codec_private.len() >= VISUAL_SAMPLE_ENTRY_LEN => Some(
-            MkvCodec::TaggedVideo(tag(TagNamespace::Mov, &codec_private[SAMPLE_ENTRY_FOURCC])),
-        ),
+        id if id == QUICKTIME_CODEC_ID.as_bytes()
+            && codec_private.len() >= VISUAL_SAMPLE_ENTRY_LEN =>
+        {
+            Some(MkvCodec::TaggedVideo(tag(
+                TagNamespace::Mov,
+                &codec_private[SAMPLE_ENTRY_FOURCC],
+            )))
+        }
         _ => None,
     }
 }

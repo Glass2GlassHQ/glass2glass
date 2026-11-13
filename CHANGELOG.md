@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2294: `matroskamux` writes tagged long-tail codecs, DV included, as `V_MS/VFW/FOURCC`, `V_QUICKTIME` and `A_MS/ACM` tracks.
+
 ## 0.20.0
 
 - M2093: `analyticsjoin` attaches a detector branch's `AnalyticsMeta` to the full-resolution video frames at the same time.

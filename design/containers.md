@@ -766,6 +766,16 @@ tight. ffmpeg reads tight rows, but gst writes and reads I420 rows padded to
 four bytes per plane, so an odd-width I420 track decodes differently in gst.
 v210 is refused, since ffmpeg reads it only from `V_MS/VFW/FOURCC`.
 
+Tagged long-tail codecs, DV among them, are remux only. Their in-band
+container header becomes the `CodecPrivate` and is dropped from the blocks.
+A RIFF-tagged video stream goes out as `V_MS/VFW/FOURCC` behind its
+BITMAPINFOHEADER and a RIFF-tagged audio stream as `A_MS/ACM` behind its
+WAVEFORMATEX, both byte-identical to ffmpeg's. A MOV-tagged video stream goes
+out as `V_QUICKTIME` behind its sample entry, which ffmpeg decodes but gst's
+`matroskademux` does not read. ffmpeg instead rewrites a MOV tag that has an
+AVI fourcc, such as DV's `dvc `, into a `V_MS/VFW/FOURCC` track. MOV-tagged
+audio is refused.
+
 The muxer also has a `seekable` two-pass mode: the element buffers the file
 and finalizes it at EOS with a front `SeekHead`, fixed-layout entries indexing
 Info / Tracks / Chapters / Tags / Cues with the Cues position patched in place
