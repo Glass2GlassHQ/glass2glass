@@ -115,7 +115,7 @@ dependencies = [
 
 [[package]]
 name = "g2g-core"
-version = "0.15.0"
+version = "0.20.0"
 dependencies = [
  "loom",
  "portable-atomic",
@@ -125,7 +125,7 @@ dependencies = [
 
 [[package]]
 name = "g2g-mcu"
-version = "0.15.0"
+version = "0.20.0"
 dependencies = [
  "embedded-hal",
  "g2g-core",
@@ -134,14 +134,14 @@ dependencies = [
 
 [[package]]
 name = "g2g-ml"
-version = "0.15.0"
+version = "0.20.0"
 dependencies = [
  "g2g-core",
 ]
 
 [[package]]
 name = "g2g-plugins"
-version = "0.15.0"
+version = "0.20.0"
 dependencies = [
  "cc",
  "g2g-core",
