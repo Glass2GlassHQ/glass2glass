@@ -54,6 +54,9 @@ pub(crate) trait WindowRenderer: 'static {
     /// keep drawing at the size the renderer was built for, letting the
     /// compositor letterbox.
     fn resize(&mut self, _width: u32, _height: u32) {}
+
+    #[cfg(target_os = "linux")]
+    fn picture_point(&self, surface_x: f64, surface_y: f64) -> Option<(u32, u32)>;
 }
 
 /// Window geometry + identity the worker opens with.
@@ -77,6 +80,8 @@ pub(crate) struct WorkerChannels<Receiver> {
     pub(crate) latency: Arc<LatencyHistogram>,
     pub(crate) ready: Arc<Handshake>,
     pub(crate) window_closed: Arc<AtomicBool>,
+    #[cfg(target_os = "linux")]
+    pub(crate) input: Option<tokio::sync::mpsc::UnboundedSender<crate::windowinput::WindowInput>>,
 }
 
 // the channel types the window workers take commands on

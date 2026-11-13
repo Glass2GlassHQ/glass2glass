@@ -346,6 +346,11 @@ impl GlState {
         }
     }
 
+    #[cfg(any(feature = "cuda-gl", feature = "gl-sink"))]
+    pub(crate) fn size(&self) -> (u32, u32) {
+        (self.width, self.height)
+    }
+
     /// The GL context the state renders with, for a caller that needs its own
     /// calls (the headless render test's framebuffer + readback).
     #[cfg(all(test, feature = "gl-sink"))]

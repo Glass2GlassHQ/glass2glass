@@ -43,6 +43,8 @@ use g2g_core::{
 };
 
 use crate::clock::wait_to_present;
+#[cfg(all(target_os = "linux", feature = "wgpu-present"))]
+use crate::display_aspect::picture_point_in;
 use crate::display_aspect::{
     letterbox, ViewportRectangle, FORCE_ASPECT_RATIO_NAME, FORCE_ASPECT_RATIO_PROPERTY,
 };
@@ -765,6 +767,18 @@ impl WgpuSink {
     pub fn with_force_aspect_ratio(mut self, force_aspect_ratio: bool) -> Self {
         self.force_aspect_ratio = force_aspect_ratio;
         self
+    }
+
+    #[cfg(all(target_os = "linux", feature = "wgpu-present"))]
+    pub(crate) fn picture_point(&self, target_x: f64, target_y: f64) -> Option<(u32, u32)> {
+        let source = self.source?;
+        picture_point_in(
+            self.viewport(),
+            source.width,
+            source.height,
+            target_x,
+            target_y,
+        )
     }
 
     fn viewport(&self) -> ViewportRectangle {

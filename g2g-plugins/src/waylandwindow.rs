@@ -24,8 +24,8 @@ use alloc::boxed::Box;
 
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState},
-    delegate_compositor, delegate_output, delegate_registry, delegate_xdg_shell,
-    delegate_xdg_window,
+    delegate_compositor, delegate_keyboard, delegate_output, delegate_pointer, delegate_registry,
+    delegate_seat, delegate_xdg_shell, delegate_xdg_window,
     output::{OutputHandler, OutputState},
     reexports::calloop::{
         channel::{Channel, Event as ChanEvent},
@@ -34,11 +34,19 @@ use smithay_client_toolkit::{
     reexports::calloop_wayland_source::WaylandSource,
     reexports::client::{
         globals::registry_queue_init,
-        protocol::{wl_output, wl_surface},
+        protocol::{wl_keyboard, wl_output, wl_pointer, wl_seat, wl_surface},
         Connection, QueueHandle,
     },
     registry::{ProvidesRegistryState, RegistryState},
     registry_handlers,
+    seat::{
+        keyboard::{KeyEvent, KeyboardHandler, Keysym, Modifiers, RawModifiers},
+        pointer::{
+            AxisScroll, PointerEvent, PointerEventKind, PointerHandler, BTN_LEFT, BTN_MIDDLE,
+            BTN_RIGHT,
+        },
+        Capability, SeatHandler, SeatState,
+    },
     shell::{
         xdg::{
             window::{Window, WindowConfigure, WindowDecorations, WindowHandler},
@@ -48,6 +56,7 @@ use smithay_client_toolkit::{
     },
 };
 
+use crate::windowinput::{PointerButton, WindowInput};
 use crate::windowworker::{
     PresentReports, WindowParams, WindowRenderer, WorkerChannels, WorkerCmd,
 };
@@ -119,6 +128,10 @@ pub(crate) fn run_window<R: WindowRenderer>(
         },
         window_closed: channels.window_closed,
         pending: None,
+        seat_state: SeatState::new(&globals, &qh),
+        input: channels.input,
+        keyboard: None,
+        pointer: None,
     };
 
     loop_handle.insert_source(
@@ -172,6 +185,10 @@ struct WindowWorker<R: WindowRenderer> {
     window_closed: Arc<AtomicBool>,
     /// Frame that arrived before the surface was mappable.
     pending: Option<(R::Frame, u64, tokio::sync::oneshot::Sender<()>)>,
+    seat_state: SeatState,
+    input: Option<tokio::sync::mpsc::UnboundedSender<WindowInput>>,
+    keyboard: Option<wl_keyboard::WlKeyboard>,
+    pointer: Option<wl_pointer::WlPointer>,
 }
 
 impl<R: WindowRenderer> WindowWorker<R> {
@@ -198,6 +215,15 @@ impl<R: WindowRenderer> WindowWorker<R> {
         }
         self.window.set_min_size(Some((width, height)));
         self.window.commit();
+    }
+
+    fn send_input(&mut self, event: WindowInput) {
+        let Some(input) = &self.input else {
+            return;
+        };
+        if input.send(event).is_err() {
+            self.input = None;
+        }
     }
 
     fn draw_inner(&mut self, frame: &R::Frame) -> Result<(), G2gError> {
@@ -291,7 +317,212 @@ impl<R: WindowRenderer> ProvidesRegistryState for WindowWorker<R> {
     fn registry(&mut self) -> &mut RegistryState {
         &mut self.registry_state
     }
-    registry_handlers![OutputState,];
+    registry_handlers![OutputState, SeatState,];
+}
+
+impl<R: WindowRenderer> SeatHandler for WindowWorker<R> {
+    fn seat_state(&mut self) -> &mut SeatState {
+        &mut self.seat_state
+    }
+
+    fn new_seat(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_seat::WlSeat) {}
+
+    fn new_capability(
+        &mut self,
+        _: &Connection,
+        qh: &QueueHandle<Self>,
+        seat: wl_seat::WlSeat,
+        capability: Capability,
+    ) {
+        if self.input.is_none() {
+            return;
+        }
+        let log = Target::category(self.reports.log_tag);
+        match capability {
+            Capability::Keyboard if self.keyboard.is_none() => {
+                match self.seat_state.get_keyboard(qh, &seat, None) {
+                    Ok(keyboard) => self.keyboard = Some(keyboard),
+                    Err(e) => g2g_core::g2g_error!(log, "cannot read the keyboard: {e}"),
+                }
+            }
+            Capability::Pointer if self.pointer.is_none() => {
+                match self.seat_state.get_pointer(qh, &seat) {
+                    Ok(pointer) => self.pointer = Some(pointer),
+                    Err(e) => g2g_core::g2g_error!(log, "cannot read the pointer: {e}"),
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn remove_capability(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: wl_seat::WlSeat,
+        capability: Capability,
+    ) {
+        match capability {
+            Capability::Keyboard => {
+                if let Some(keyboard) = self.keyboard.take() {
+                    keyboard.release();
+                }
+            }
+            Capability::Pointer => {
+                if let Some(pointer) = self.pointer.take() {
+                    pointer.release();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn remove_seat(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_seat::WlSeat) {}
+}
+
+impl<R: WindowRenderer> KeyboardHandler for WindowWorker<R> {
+    fn enter(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_keyboard::WlKeyboard,
+        _: &wl_surface::WlSurface,
+        _: u32,
+        _: &[u32],
+        _: &[Keysym],
+    ) {
+        self.send_input(WindowInput::Focus(true));
+    }
+
+    fn leave(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_keyboard::WlKeyboard,
+        _: &wl_surface::WlSurface,
+        _: u32,
+    ) {
+        self.send_input(WindowInput::Focus(false));
+    }
+
+    fn press_key(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_keyboard::WlKeyboard,
+        _: u32,
+        event: KeyEvent,
+    ) {
+        self.send_input(WindowInput::Key {
+            scancode: event.raw_code,
+            down: true,
+        });
+    }
+
+    fn repeat_key(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_keyboard::WlKeyboard,
+        _: u32,
+        _: KeyEvent,
+    ) {
+    }
+
+    fn release_key(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_keyboard::WlKeyboard,
+        _: u32,
+        event: KeyEvent,
+    ) {
+        self.send_input(WindowInput::Key {
+            scancode: event.raw_code,
+            down: false,
+        });
+    }
+
+    fn update_modifiers(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_keyboard::WlKeyboard,
+        _: u32,
+        _: Modifiers,
+        _: RawModifiers,
+        _: u32,
+    ) {
+    }
+}
+
+const WHEEL_UNITS_PER_NOTCH: i32 = 120;
+// weston and mutter scroll 10 pixels per wheel notch
+const WHEEL_PIXELS_PER_NOTCH: f64 = 10.0;
+
+fn pointer_button(code: u32) -> Option<PointerButton> {
+    match code {
+        BTN_LEFT => Some(PointerButton::Left),
+        BTN_RIGHT => Some(PointerButton::Right),
+        BTN_MIDDLE => Some(PointerButton::Middle),
+        _ => None,
+    }
+}
+
+fn wheel_units(scroll: &AxisScroll) -> i32 {
+    if scroll.value120 != 0 {
+        return scroll.value120;
+    }
+    if scroll.discrete != 0 {
+        return scroll.discrete.saturating_mul(WHEEL_UNITS_PER_NOTCH);
+    }
+    let notches = scroll.absolute / WHEEL_PIXELS_PER_NOTCH;
+    (notches * f64::from(WHEEL_UNITS_PER_NOTCH)).round() as i32
+}
+
+fn wheel_input(horizontal: &AxisScroll, vertical: &AxisScroll) -> Option<WindowInput> {
+    let dx = wheel_units(horizontal);
+    // wayland scrolls down for a positive vertical value, linux REL_WHEEL scrolls up
+    let dy = wheel_units(vertical).saturating_neg();
+    (dx != 0 || dy != 0).then_some(WindowInput::Wheel { dx, dy })
+}
+
+impl<R: WindowRenderer> PointerHandler for WindowWorker<R> {
+    fn pointer_frame(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_pointer::WlPointer,
+        events: &[PointerEvent],
+    ) {
+        for event in events {
+            match event.kind {
+                PointerEventKind::Enter { .. } | PointerEventKind::Motion { .. } => {
+                    let (x, y) = event.position;
+                    if let Some((x, y)) = self.renderer.picture_point(x, y) {
+                        self.send_input(WindowInput::Pointer { x, y });
+                    }
+                }
+                PointerEventKind::Press { button, .. }
+                | PointerEventKind::Release { button, .. } => {
+                    let down = matches!(event.kind, PointerEventKind::Press { .. });
+                    if let Some(button) = pointer_button(button) {
+                        self.send_input(WindowInput::Button { button, down });
+                    }
+                }
+                PointerEventKind::Axis {
+                    horizontal,
+                    vertical,
+                    ..
+                } => {
+                    if let Some(wheel) = wheel_input(&horizontal, &vertical) {
+                        self.send_input(wheel);
+                    }
+                }
+                PointerEventKind::Leave { .. } => {}
+            }
+        }
+    }
 }
 
 delegate_compositor!(@<R: WindowRenderer> WindowWorker<R>);
@@ -299,6 +530,9 @@ delegate_output!(@<R: WindowRenderer> WindowWorker<R>);
 delegate_xdg_shell!(@<R: WindowRenderer> WindowWorker<R>);
 delegate_xdg_window!(@<R: WindowRenderer> WindowWorker<R>);
 delegate_registry!(@<R: WindowRenderer> WindowWorker<R>);
+delegate_seat!(@<R: WindowRenderer> WindowWorker<R>);
+delegate_keyboard!(@<R: WindowRenderer> WindowWorker<R>);
+delegate_pointer!(@<R: WindowRenderer> WindowWorker<R>);
 
 #[cfg(test)]
 mod tests {
@@ -307,6 +541,49 @@ mod tests {
     use g2g_core::runtime::block_on;
     use g2g_core::HardwareError;
     use smithay_client_toolkit::reexports::calloop::channel::channel;
+
+    fn scroll(value120: i32, discrete: i32, absolute: f64) -> AxisScroll {
+        AxisScroll {
+            absolute,
+            discrete,
+            value120,
+            ..AxisScroll::default()
+        }
+    }
+
+    #[test]
+    fn wheel_down_one_notch_is_minus_120_and_falls_back_to_discrete_then_pixels() {
+        let none = AxisScroll::default();
+        let one_notch_down = scroll(WHEEL_UNITS_PER_NOTCH, 1, WHEEL_PIXELS_PER_NOTCH);
+        assert_eq!(
+            wheel_input(&none, &one_notch_down),
+            Some(WindowInput::Wheel {
+                dx: 0,
+                dy: -WHEEL_UNITS_PER_NOTCH
+            })
+        );
+        let old_compositor_right = scroll(0, 2, 2.0 * WHEEL_PIXELS_PER_NOTCH);
+        assert_eq!(
+            wheel_input(&old_compositor_right, &none),
+            Some(WindowInput::Wheel {
+                dx: 2 * WHEEL_UNITS_PER_NOTCH,
+                dy: 0
+            })
+        );
+        let touchpad_half_notch_up = scroll(0, 0, -WHEEL_PIXELS_PER_NOTCH / 2.0);
+        assert_eq!(
+            wheel_input(&none, &touchpad_half_notch_up),
+            Some(WindowInput::Wheel {
+                dx: 0,
+                dy: WHEEL_UNITS_PER_NOTCH / 2
+            })
+        );
+        assert_eq!(
+            wheel_input(&none, &none),
+            None,
+            "a scroll stop moves nothing"
+        );
+    }
 
     #[test]
     fn a_frame_for_a_window_the_user_closed_fails_with_window_closed() {

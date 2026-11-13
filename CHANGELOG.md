@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2300: `wgpusink` on Linux reports keyboard, pointer and wheel input from its window.
 - M2299: `WebRtcDuplexSession::with_receive_only` runs a duplex session with no send sources, and a lingering session closes its peer.
 - M2298: `g2g-desktop` maps scancodes to HID usages and injects input through uinput on Linux.
 - M2297: `Graph::add_duplex` runs a `MultiDuplexSession` as a graph node, and `run_duplex_session` is built on it.

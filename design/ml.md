@@ -987,6 +987,18 @@ which reconfigures the swapchain or reallocates the offscreen texture at the new
 size. The frame's negotiated geometry is untouched and the blit just scales it to
 whatever the target now is.
 
+### Window input
+
+On Linux, `WgpuPresentSink::input_events()` returns a receiver of
+`windowinput::WindowInput` from the window the sink opens: keyboard focus, keys
+as evdev codes, pointer positions, the left, right and middle buttons, and wheel
+steps. A pointer position is in picture pixels, mapped back through the
+letterbox, and a point over the bars around the picture is not sent. Wheel steps
+are 120 per notch, and a positive `dy` scrolls up, the sign of Linux
+`REL_WHEEL`. A compositor that sends neither high-resolution nor discrete steps
+is read at 10 pixels per notch. Held keys are sent once, with no repeat. The GL
+sinks share the window code but offer no receiver.
+
 ### Bring your own device
 
 The same `GpuContext` sharing extends one step further out, to an embedding

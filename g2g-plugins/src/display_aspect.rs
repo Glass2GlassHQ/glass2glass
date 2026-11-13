@@ -99,7 +99,10 @@ pub(crate) fn scaled_pixel_aspect(
     }
 }
 
-#[cfg(feature = "wgpu-sink")]
+#[cfg(any(
+    feature = "wgpu-sink",
+    all(target_os = "linux", any(feature = "cuda-gl", feature = "gl-sink"))
+))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ViewportRectangle {
     pub x: u32,
@@ -108,7 +111,10 @@ pub(crate) struct ViewportRectangle {
     pub height: u32,
 }
 
-#[cfg(feature = "wgpu-sink")]
+#[cfg(any(
+    feature = "wgpu-sink",
+    all(target_os = "linux", any(feature = "cuda-gl", feature = "gl-sink"))
+))]
 impl ViewportRectangle {
     pub(crate) fn whole(width: u32, height: u32) -> Self {
         Self {
@@ -118,6 +124,27 @@ impl ViewportRectangle {
             height,
         }
     }
+}
+
+// the picture pixel drawn at a point of the target, or none in the bars around the picture
+#[cfg(all(
+    target_os = "linux",
+    any(feature = "wgpu-present", feature = "cuda-gl", feature = "gl-sink")
+))]
+pub(crate) fn picture_point_in(
+    viewport: ViewportRectangle,
+    picture_width: u32,
+    picture_height: u32,
+    target_x: f64,
+    target_y: f64,
+) -> Option<(u32, u32)> {
+    let column =
+        (target_x - f64::from(viewport.x)) * f64::from(picture_width) / f64::from(viewport.width);
+    let row =
+        (target_y - f64::from(viewport.y)) * f64::from(picture_height) / f64::from(viewport.height);
+    let inside = |value: f64, extent: u32| (0.0..f64::from(extent)).contains(&value);
+    (inside(column, picture_width) && inside(row, picture_height))
+        .then_some((column as u32, row as u32))
 }
 
 // the largest rectangle with the picture's display aspect, centred in the target
@@ -219,5 +246,32 @@ mod tests {
             letterbox(1280, 720, PixelAspect::Any, 1280, 720),
             ViewportRectangle::whole(1280, 720)
         );
+    }
+
+    #[cfg(all(target_os = "linux", feature = "wgpu-present"))]
+    #[test]
+    fn a_point_in_the_bars_is_off_the_picture_and_one_inside_scales_to_it() {
+        let picture_width = 1920;
+        let picture_height = 1080;
+        let viewport = letterbox(picture_width, picture_height, PixelAspect::Any, 1000, 1000);
+        let top_bar = f64::from(viewport.y) - 1.0;
+        assert_eq!(
+            picture_point_in(viewport, picture_width, picture_height, 500.0, top_bar),
+            None
+        );
+        let centre_x = f64::from(viewport.x) + f64::from(viewport.width) / 2.0;
+        let centre_y = f64::from(viewport.y) + f64::from(viewport.height) / 2.0;
+        assert_eq!(
+            picture_point_in(viewport, picture_width, picture_height, centre_x, centre_y),
+            Some((picture_width / 2, picture_height / 2))
+        );
+        let bottom_right = picture_point_in(
+            viewport,
+            picture_width,
+            picture_height,
+            f64::from(viewport.x + viewport.width) - 0.5,
+            f64::from(viewport.y + viewport.height) - 0.5,
+        );
+        assert_eq!(bottom_right, Some((picture_width - 1, picture_height - 1)));
     }
 }

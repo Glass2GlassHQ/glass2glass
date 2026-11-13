@@ -18,6 +18,7 @@ use khronos_egl as egl;
 use smithay_client_toolkit::reexports::client::{protocol::wl_surface, Connection, Proxy};
 use wayland_egl::WlEglSurface;
 
+use crate::display_aspect::{picture_point_in, ViewportRectangle};
 use crate::glnv12::{GlMode, GlState};
 use crate::waylandwindow::run_window;
 use crate::windowworker::{WindowParams, WindowRenderer, WorkerChannels, WorkerCmd};
@@ -118,6 +119,17 @@ impl<P: FramePresenter> WindowRenderer for GlRenderer<P> {
     fn present(&mut self, frame: &Self::Frame) -> Result<(), G2gError> {
         self.presenter.present(&mut self.gl, frame)?;
         self.egl.swap()
+    }
+
+    fn picture_point(&self, surface_x: f64, surface_y: f64) -> Option<(u32, u32)> {
+        let (width, height) = self.gl.size();
+        picture_point_in(
+            ViewportRectangle::whole(width, height),
+            width,
+            height,
+            surface_x,
+            surface_y,
+        )
     }
 }
 

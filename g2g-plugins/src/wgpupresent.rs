@@ -128,6 +128,8 @@ pub struct WgpuPresentSink {
     force_aspect_ratio: bool,
     frames_presented: Arc<AtomicU64>,
     window_closed: Arc<AtomicBool>,
+    #[cfg(target_os = "linux")]
+    input: Option<tokio::sync::mpsc::UnboundedSender<crate::windowinput::WindowInput>>,
     latency: Arc<LatencyHistogram>,
     /// Why the worker could not bring its window up, sent once by the worker and
     /// read while waiting for the readiness handshake, so a setup failure is
@@ -179,11 +181,22 @@ impl WgpuPresentSink {
             force_aspect_ratio: true,
             frames_presented: Arc::new(AtomicU64::new(0)),
             window_closed: Arc::default(),
+            #[cfg(target_os = "linux")]
+            input: None,
             latency: Arc::new(LatencyHistogram::new()),
             startup_error: None,
             log_name: LogName::new(),
             pacer: PresentationPacer::for_video_sink(),
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn input_events(
+        &mut self,
+    ) -> tokio::sync::mpsc::UnboundedReceiver<crate::windowinput::WindowInput> {
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        self.input = Some(sender);
+        receiver
     }
 
     pub fn with_title<S: Into<String>>(mut self, title: S) -> Self {
@@ -298,6 +311,8 @@ impl WgpuPresentSink {
         let window_closed = Arc::clone(&self.window_closed);
         let latency = Arc::clone(&self.latency);
         let force_aspect_ratio = self.force_aspect_ratio;
+        #[cfg(target_os = "linux")]
+        let input = self.input.clone();
         let (window_width, window_height) =
             self.window_size(self.width, self.height, self.pixel_aspect);
         let params = WindowParams {
@@ -323,6 +338,8 @@ impl WgpuPresentSink {
                     latency,
                     ready: ready_for_worker,
                     window_closed,
+                    #[cfg(target_os = "linux")]
+                    input,
                 };
                 #[cfg(target_os = "linux")]
                 let build = |conn: &Connection,
@@ -644,6 +661,11 @@ impl WindowRenderer for SurfaceRenderer {
 
     fn resize(&mut self, width: u32, height: u32) {
         self.sink.resize(width, height);
+    }
+
+    #[cfg(target_os = "linux")]
+    fn picture_point(&self, surface_x: f64, surface_y: f64) -> Option<(u32, u32)> {
+        self.sink.picture_point(surface_x, surface_y)
     }
 
     fn reconfigure(&mut self, caps: &Caps) -> Result<(), G2gError> {
