@@ -24,7 +24,7 @@
 //! This module also owns the text-box renderer, the strftime formatter
 //! ([`strftime_utc`]) and the placement / styling knobs (`halignment`,
 //! `valignment`, `xpad`, `ypad`, `color`, `shaded-background`) that the
-//! wall-clock sibling [`clockoverlay`](crate::clockoverlay) shares, since the
+//! wall-clock sibling `clockoverlay` shares, since the
 //! two elements differ only in the string they draw. Unlike GStreamer's
 //! Pango-backed base class, the box is shaded by default
 //! (`shaded-background=true`) and hugs the aligned corner (`xpad`/`ypad` default

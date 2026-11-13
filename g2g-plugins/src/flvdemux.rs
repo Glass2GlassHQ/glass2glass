@@ -320,7 +320,7 @@ impl FlvDemux {
     }
 
     /// Make the demuxer seekable: `app` carries app time seeks; `upstream`
-    /// is the byte source's ([`FileSrc`](crate::filesrc)) byte-seek controller.
+    /// is the byte source's (`FileSrc`) byte-seek controller.
     /// On a time seek the demuxer rewinds the source and re-syncs from the
     /// keyframe at/before the target.
     pub fn with_seek(mut self, app: SeekController, upstream: SeekController) -> Self {

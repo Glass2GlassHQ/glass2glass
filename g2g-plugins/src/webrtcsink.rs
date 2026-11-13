@@ -5,7 +5,7 @@
 //! Native WebRTC egress sink (`WebRtcSink`): publishes a pipeline's encoded
 //! video (H.264, VP8, VP9, H.265 or AV1) or Opus to a WHIP server over a WebRTC PeerConnection, built on the sans-IO
 //! [`str0m`] stack (ICE / DTLS / SRTP / RTP). This is the native counterpart of
-//! the browser-only data-channel [`crate::webrtcsrc::WebRtcSrc`], and the
+//! the browser-only data-channel `webrtcsrc::WebRtcSrc`, and the
 //! WebRTC analog of `RtmpSink` (publish encoded media to a server endpoint).
 //!
 //! Shape, mirroring the other tokio network sinks (`UdpSink`, `SrtSink`):

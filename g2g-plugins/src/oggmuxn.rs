@@ -51,7 +51,7 @@
 //! concatenating pipeline (gapless playback, an icecast-style feed) looks like.
 //!
 //! Registered only as the `oggmux` muxer in
-//! [`default_registry`](crate::registry::default_registry), so any number of
+//! `default_registry`, so any number of
 //! input links builds this element.
 
 use core::future::Future;

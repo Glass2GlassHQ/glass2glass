@@ -413,7 +413,7 @@ impl TsDemux {
     }
 
     /// Make the demuxer seekable: `app` carries app time seeks; `upstream`
-    /// is the byte source's ([`FileSrc`](crate::filesrc)) byte-seek controller.
+    /// is the byte source's (`FileSrc`) byte-seek controller.
     /// On a time seek the demuxer rewinds the source and re-syncs from the
     /// keyframe at/before the target.
     pub fn with_seek(mut self, app: SeekController, upstream: SeekController) -> Self {
@@ -899,7 +899,7 @@ impl PadTemplates for TsDemux {
 /// one port.
 ///
 /// A [`MultiOutputElement`] driven by
-/// [`run_source_fanout`](g2g_core::runtime::run_source_fanout): it parses the
+/// `run_source_fanout`: it parses the
 /// transport stream once and routes each PES access unit to the port whose
 /// selected codec matches the unit's PMT `stream_type` (and whose PID matches, for
 /// ports built with `from_stream_infos`), so one demuxer feeds

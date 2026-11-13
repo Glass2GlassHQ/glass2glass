@@ -219,7 +219,7 @@ impl MkvDemux {
     }
 
     /// Make the demuxer seekable: `app` carries app time seeks; `upstream`
-    /// is the byte source's ([`FileSrc`](crate::filesrc)) byte-seek controller.
+    /// is the byte source's (`FileSrc`) byte-seek controller.
     /// On a time seek the demuxer rewinds the source and re-syncs from the
     /// keyframe at/before the target; with a `Cues` index (parsed, or located via a
     /// `SeekHead` and prefetched) it jumps straight to the Cluster.
@@ -1628,10 +1628,10 @@ impl PadTemplates for MkvDemux {
 /// Multi-output Matroska / WebM demuxer: one Matroska byte stream in, N
 /// elementary streams out, one per output port (the decodebin core). The
 /// multi-output counterpart of [`MkvDemux`] (which forwards a single selected
-/// stream); the read-side analog of [`crate::mkvmuxn::MkvMuxN`].
+/// stream); the read-side analog of `MkvMuxN`.
 ///
 /// A [`MultiOutputElement`] driven by
-/// [`run_source_fanout`](g2g_core::runtime::run_source_fanout): each port carries
+/// `run_source_fanout`: each port carries
 /// one selected [`MkvStream`] (the "dark slots", design/runtime.md), so one demuxer feeds
 /// several decode branches in one pipeline rather than instantiating a
 /// single-output demuxer per stream. The demuxer parses the container once and

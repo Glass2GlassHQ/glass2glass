@@ -232,7 +232,7 @@ impl OggDemux {
     }
 
     /// Make the demuxer seekable: `app` carries app time seeks; `upstream`
-    /// is the byte source's ([`FileSrc`](crate::filesrc)) byte-seek controller.
+    /// is the byte source's (`FileSrc`) byte-seek controller.
     /// On a time seek the demuxer repositions the source and re-syncs from the
     /// packet at/before the target (every audio packet is a resync point).
     pub fn with_seek(mut self, app: SeekController, upstream: SeekController) -> Self {
@@ -1388,7 +1388,7 @@ impl OggPort {
 /// of [`crate::oggmuxn::OggMuxN`].
 ///
 /// A [`MultiOutputElement`] driven by
-/// [`run_source_fanout`](g2g_core::runtime::run_source_fanout). Routing is
+/// `run_source_fanout`. Routing is
 /// **positional**: each [`OggPort`] names the slot of the logical bitstream it
 /// carries, in beginning-of-stream order. Ogg groups streams rather than typing
 /// them, and a file with two streams of the same codec is ordinary, so there is

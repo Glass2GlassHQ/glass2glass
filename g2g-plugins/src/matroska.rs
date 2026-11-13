@@ -2624,7 +2624,7 @@ impl MkvTrackSpec {
     }
 }
 
-// --- Subtitle track mapping for `crate::mkvmuxn::MkvMuxN` (M898 / M927 / M928).
+// --- Subtitle track mapping for `MkvMuxN` (M898 / M927 / M928).
 
 /// The Matroska codec a bitmap subtitle format is written as, or `None` for one
 /// these muxers do not write (a `S_HDMV/PGS` block needs the `.sup` framing
@@ -2750,7 +2750,7 @@ pub struct SizePatch {
 ///
 /// Scope: default TimestampScale (1 ms). One or more tracks (see
 /// [`MatroskaMuxer::new_multi`], the A/V case driven by
-/// [`crate::mkvmuxn::MkvMuxN`]).
+/// `MkvMuxN`).
 #[derive(Debug)]
 pub struct MatroskaMuxer {
     /// One or more tracks; the Nth (0-based) writes Matroska TrackNumber N+1.

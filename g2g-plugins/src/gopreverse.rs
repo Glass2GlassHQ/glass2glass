@@ -6,7 +6,7 @@
 //!
 //! A decoder only runs forward, so a reverse-rate segment (`rate < 0`) is played
 //! by feeding it whole GOPs in decode order, newest GOP first
-//! ([`Mp4Src`](crate::mp4src)), and reversing each decoded GOP afterwards. This
+//! (`Mp4Src`), and reversing each decoded GOP afterwards. This
 //! element is that second half: it sits after the decoder, buffers the frames of
 //! one GOP, and re-emits them in descending PTS, so the frames reaching the sink
 //! are in reverse presentation order and the reverse `Segment` maps them to

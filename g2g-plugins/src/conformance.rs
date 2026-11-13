@@ -20,7 +20,7 @@
 //! always-on battery.
 //!
 //! The measurement helpers those `Quality` batteries share live here too:
-//! [`fnv1a_64`] for a committed golden digest, and [`psnr_db`] / [`pooled_psnr_db`]
+//! [`fnv1a_64`] for a committed golden digest, and `psnr_db` / `pooled_psnr_db`
 //! for a fidelity floor against a reference image.
 
 use alloc::vec::Vec;

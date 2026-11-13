@@ -1686,7 +1686,7 @@ pub fn subpicture_streams(demux: &PsDemuxer) -> Vec<PsElementaryStream> {
 /// Multi-output MPEG program stream demuxer: one PS byte stream in, N elementary
 /// streams out, one selected [`PsStream`] per output port. The program stream
 /// sibling of [`TsDemuxN`](crate::tsdemux::TsDemuxN), driven by
-/// [`run_source_fanout`](g2g_core::runtime::run_source_fanout).
+/// `run_source_fanout`.
 ///
 /// # Example
 ///

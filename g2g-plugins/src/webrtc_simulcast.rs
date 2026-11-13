@@ -6,7 +6,7 @@
 //! groups N video layers under one m-line with N send rids, and routes a remote
 //! per-`(mid, rid)` keyframe request to exactly the source feeding that layer.
 //! str0m-generic on purpose: the same code serves any egress session (LiveKit
-//! today via [`crate::livekitsink`], a WHIP grouped-pad session later). The rid
+//! today via `livekitsink`, a WHIP grouped-pad session later). The rid
 //! naming follows the LiveKit / browser convention so the SFU maps each rid to
 //! the right spatial layer; the SFU-specific quality metadata lives in the sink.
 

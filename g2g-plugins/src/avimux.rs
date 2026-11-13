@@ -11,7 +11,7 @@
 //! chunk's offset, so nothing can be written before the last access unit
 //! arrives: both elements queue their inputs, interleave them by pts, and emit
 //! the whole file as one frame at `Eos` (the layout
-//! [`Mp4MuxN`](crate::mp4muxn::Mp4MuxN) uses in its progressive mode).
+//! `Mp4MuxN` uses in its progressive mode).
 //!
 //! Access units are written as they arrive: H.264 stays Annex-B under the
 //! `H264` FourCC, and audio keeps its container framing. There is no OpenDML

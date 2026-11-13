@@ -13,7 +13,7 @@
 //! (absolute or relative); the caller resolves them against the playlist URL.
 //!
 //! [`write_media`] is the other direction, rendering a [`MediaPlaylist`] back to
-//! `.m3u8` text for [`HlsSink`](crate::hlssink) to publish.
+//! `.m3u8` text for `HlsSink` to publish.
 
 use alloc::string::String;
 use alloc::vec::Vec;

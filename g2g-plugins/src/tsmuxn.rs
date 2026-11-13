@@ -31,7 +31,7 @@
 //! its first stream's PID, on the `pcr-interval` cadence (see
 //! [`crate::mpegts::TsMuxer`]). Reachable from
 //! the `gst-launch` fan-in syntax: registered only as the `mpegtsmux` muxer
-//! in [`default_registry`](crate::registry::default_registry), so
+//! in `default_registry`, so
 //! `... ! h264parse ! mpegtsmux ! filesink` and `v.! m.  a.! m.  mpegtsmux name=m ! sink`
 //! both build this element. Also runs programmatically through `run_muxer_sink`
 //! / a `run_graph` muxer node.

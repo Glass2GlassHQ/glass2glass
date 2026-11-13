@@ -6,7 +6,7 @@
 //! and emits the received video or Opus as `DataFrame`s. The receive-side
 //! inverse of [`crate::webrtcsink::WebRtcSink`], on the same sans-IO `str0m`
 //! stack (ICE / DTLS / SRTP), and distinct from the wasm-only data-channel
-//! [`crate::webrtcsrc::WebRtcSrc`].
+//! `webrtcsrc::WebRtcSrc`.
 //!
 //! WHEP is client-offers-recvonly: the source builds a str0m `Rtc` with a single
 //! recv-only m-line for the chosen track, POSTs the SDP offer to the WHEP

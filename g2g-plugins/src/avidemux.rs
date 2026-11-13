@@ -6,11 +6,11 @@
 //! the `movi` chunks carry out. [`AviDemux`] emits one stream (the `stream=`
 //! selection, `filesrc location=x.avi ! avidemux ! ...`), [`AviDemuxN`] emits
 //! one per output port (`avidemux name=d  d.video_0 ! ...  d.audio_0 ! ...`),
-//! the same pair as `qtdemux` / [`Mp4DemuxN`](crate::mp4demuxn::Mp4DemuxN).
+//! the same pair as `qtdemux` / `Mp4DemuxN`.
 //!
 //! AVI keeps its stream headers at the front but its `idx1` at the end, and a
 //! chunk's keyframe flag lives only in that index, so the whole file is
-//! buffered and parsed at `Eos` (what [`Mp4Demux`](crate::mp4demux) does for a
+//! buffered and parsed at `Eos` (what `Mp4Demux` does for a
 //! progressive `.mp4`). A file with no `idx1` still plays: `movi` is walked in
 //! order and only an all-intra stream claims keyframes.
 //!
