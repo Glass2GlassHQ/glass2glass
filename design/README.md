@@ -84,7 +84,8 @@ document.
 | [embedded.md](embedded.md) | the heap-free core, MCU elements, RTOS executors, footprint proofs. |
 
 Open work is in [TODO.md](TODO.md). Shipped milestones are logged
-in [CHANGELOG.md](../CHANGELOG.md).
+in [CHANGELOG.md](../CHANGELOG.md). The remote-desktop session is a plan,
+not a built track: [remote.md](remote.md).
 
 ---
 

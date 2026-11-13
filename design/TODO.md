@@ -26,6 +26,24 @@ Highest leverage first:
    device on wasm); it would need raw `web_sys` WebGPU + hand-rolled
    onnxruntime-web bindings.
 
+## Remote desktop
+
+The plan is [remote.md](remote.md).
+
+- Packet, router, and signaling state machine in a new `g2g-desktop` crate.
+- A reliable ordered data channel on `WebRtcDuplexSession`'s existing `Rtc`.
+- `ximagesrc` for unattended X11 capture, and a Linux `g2g-desktop` host and
+  client that inject through `/dev/uinput`.
+- `dxgisrc` (system NV12, then a CUDA surface for `nvenc`) and Windows
+  `SendInput`.
+- `display-index` on `screencapturesrc`, and a macOS host through `vtencode`.
+- Cursor, clipboard, grab, and `force-keyframe` on `vtencode`, `mfencode`, and
+  `ffmpegenc`, pulsed from the duplex PLI reverse channel.
+- Gamepad injection on Linux and Windows, and a Windows service that injects
+  on the secure desktop.
+- A Chrome client on the same signaling and the same data channel.
+- OIDC in front of the bearer token, a `g2g://` URL, and install packages.
+
 ## Architecture guarantees (validation-first)
 
 - **Grow the conformance matrix.** Persist evidence from the resource-owning
