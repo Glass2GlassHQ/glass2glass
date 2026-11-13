@@ -1332,8 +1332,8 @@ g2g-launch <span class="flag">--script</span> build.rhai</div>
 
 <div class="tab-panel active" id="rtsp-wayland"><pre><span class="cmt"># Cargo.toml</span>
 [dependencies]
-g2g-core    = "0.14"
-g2g-plugins = { version = "0.14", features = [<span class="str">"rtsp"</span>, <span class="str">"ffmpeg"</span>, <span class="str">"wayland-sink"</span>] }
+g2g-core    = "0.20"
+g2g-plugins = { version = "0.20", features = [<span class="str">"rtsp"</span>, <span class="str">"ffmpeg"</span>, <span class="str">"wayland-sink"</span>] }
 
 <span class="cmt">// main.rs</span>
 <span class="kw">use</span> g2g_core::runtime::{<span class="fn">run_source_transform_sink</span>, <span class="ty">LatencyProfile</span>};
@@ -1347,7 +1347,7 @@ g2g-plugins = { version = "0.14", features = [<span class="str">"rtsp"</span>, <
 
 <div class="tab-panel" id="nvdec-gl"><pre><span class="cmt"># Linux + NVIDIA; zero PCIe round-trip after decode.</span>
 [dependencies]
-g2g-plugins = { version = "0.14", features = [<span class="str">"rtsp"</span>, <span class="str">"ffmpeg"</span>, <span class="str">"cuda"</span>, <span class="str">"cuda-gl"</span>] }
+g2g-plugins = { version = "0.20", features = [<span class="str">"rtsp"</span>, <span class="str">"ffmpeg"</span>, <span class="str">"cuda"</span>, <span class="str">"cuda-gl"</span>] }
 
 <span class="kw">use</span> g2g_plugins::{<span class="ty">RtspSrc</span>, ffmpegdec::{<span class="ty">FfmpegH264Dec</span>, <span class="ty">Backend</span>}, <span class="ty">CudaGlSink</span>};
 
@@ -1359,8 +1359,8 @@ g2g-plugins = { version = "0.14", features = [<span class="str">"rtsp"</span>, <
 
 <div class="tab-panel" id="ml-chain"><pre><span class="cmt"># RTSP -> decode -> GPU preprocess -> ORT (CUDA EP) -> classification.</span>
 [dependencies]
-g2g-plugins = { version = "0.14", features = [<span class="str">"rtsp"</span>, <span class="str">"ffmpeg"</span>] }
-g2g-ml      = { version = "0.14", features = [<span class="str">"wgpu"</span>, <span class="str">"cuda"</span>] }
+g2g-plugins = { version = "0.20", features = [<span class="str">"rtsp"</span>, <span class="str">"ffmpeg"</span>] }
+g2g-ml      = { version = "0.20", features = [<span class="str">"wgpu"</span>, <span class="str">"cuda"</span>] }
 
 <span class="kw">use</span> g2g_core::runtime::<span class="fn">run_linear_chain</span>;
 <span class="kw">use</span> g2g_ml::{<span class="ty">WgpuPreprocess</span>, <span class="ty">OrtInference</span>, <span class="ty">TensorPostprocess</span>};
@@ -1376,7 +1376,7 @@ g2g-ml      = { version = "0.14", features = [<span class="str">"wgpu"</span>, <
 
 <div class="tab-panel" id="rtp-egress"><pre><span class="cmt"># Loopback-verified; honors receive-side NACK by retransmit.</span>
 [dependencies]
-g2g-plugins = { version = "0.14", features = [<span class="str">"udp-egress"</span>, <span class="str">"mf-encode"</span>] }
+g2g-plugins = { version = "0.20", features = [<span class="str">"udp-egress"</span>, <span class="str">"mf-encode"</span>] }
 
 <span class="kw">use</span> g2g_plugins::{<span class="ty">VideoTestSrc</span>, <span class="ty">MfEncode</span>, <span class="ty">UdpSink</span>};
 
@@ -1389,7 +1389,7 @@ g2g-plugins = { version = "0.14", features = [<span class="str">"udp-egress"</sp
 
 <div class="tab-panel" id="browser"><pre><span class="cmt"># wasm32-unknown-unknown; needs --cfg=web_sys_unstable_apis for WebCodecs.</span>
 [dependencies]
-g2g-plugins = { version = "0.14", features = [<span class="str">"web"</span>, <span class="str">"web-codecs"</span>] }
+g2g-plugins = { version = "0.20", features = [<span class="str">"web"</span>, <span class="str">"web-codecs"</span>] }
 
 <span class="kw">use</span> g2g_plugins::{<span class="ty">WebSocketSrc</span>, <span class="ty">H264Parse</span>, <span class="ty">WebCodecsDecode</span>, <span class="ty">CanvasSink</span>};
 
