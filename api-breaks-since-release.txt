@@ -6,24 +6,4 @@
 # CI job verifies nothing until the next publish. This list is what still holds
 # a break to a deliberate act during that window, and it is the raw material for
 # the release notes when the bump ships.
-auto_trait_impl_removed: type AllocationParams is no longer RefUnwindSafe
-auto_trait_impl_removed: type AllocationParams is no longer UnwindSafe
-auto_trait_impl_removed: type CoordinatorEvent is no longer RefUnwindSafe
-auto_trait_impl_removed: type CoordinatorEvent is no longer UnwindSafe
-auto_trait_impl_removed: type RunStats is no longer RefUnwindSafe
-auto_trait_impl_removed: type RunStats is no longer UnwindSafe
-constructible_struct_adds_field: field AllocationParams.host_allocator
-constructible_struct_adds_field: field Device.classification
-constructible_struct_adds_field: field ElementDoc.classification
-constructible_struct_adds_field: field ElementMetadata.classification
-constructible_struct_adds_field: field FrameTiming.end_discard_ns
-constructible_struct_adds_field: field FrameTiming.start_discard_ns
-constructible_struct_adds_field: field StageVisit.poll_ns
-derive_trait_impl_removed: type AllocationParams no longer derives Copy
-enum_struct_variant_field_added: field pixel_aspect of variant Caps::CompressedVideo
-enum_struct_variant_field_added: field pixel_aspect of variant Caps::RawVideo
-enum_variant_added: variant Interlace:InterleavedBottomFieldFirst
-inherent_method_missing: Registry::domain_converter
-struct_pub_field_missing: field klass of struct Device
-struct_pub_field_missing: field klass of struct ElementDoc
-struct_pub_field_missing: field klass of struct ElementMetadata
+
