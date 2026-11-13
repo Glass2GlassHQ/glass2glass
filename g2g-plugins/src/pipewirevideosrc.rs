@@ -722,6 +722,7 @@ impl SourceLoop for PipeWireVideoSrc {
             };
             let mut seq = 0u64;
             let mut elapsed = 0u64;
+            let mut previous_arrival_ns: Option<u64> = None;
             let mut downstream_open = true;
             let clock_sync = self.clock_sync.clone();
             let mut anchor = CaptureAnchor::new();
@@ -776,6 +777,11 @@ impl SourceLoop for PipeWireVideoSrc {
                     }
                 };
                 let arrival_ns = g2g_core::metrics::monotonic_ns();
+                // variable-rate nodes (0/1), such as screen shares, send a frame only when the picture changes
+                if period_ns == 0 {
+                    elapsed += previous_arrival_ns.map_or(0, |previous| arrival_ns - previous);
+                }
+                previous_arrival_ns = Some(arrival_ns);
                 // The first frame finished exposing one period before it
                 // arrived, which is the lead the anchor has to walk back.
                 let pts = match &clock_sync {
