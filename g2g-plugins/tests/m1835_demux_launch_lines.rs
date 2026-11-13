@@ -70,6 +70,33 @@ fn assert_demux_picks_stream(file: &str, demux: &str, consumer: &str, stream: &s
     );
 }
 
+fn assert_named_pad_picks_stream(file: &str, demux: &str, pad: &str, stream: &str) {
+    let location = fixture(file);
+    let picked = checksum_lines(&format!(
+        "filesrc location={location} ! {demux} name=d d.{pad} ! queue ! checksumsink hash=md5"
+    ));
+    let named = checksum_lines(&format!(
+        "filesrc location={location} ! {demux} stream={stream} ! queue ! checksumsink hash=md5"
+    ));
+    assert!(!named.is_empty(), "{demux} stream={stream} reads {file}");
+    assert_eq!(picked, named, "{demux} d.{pad} takes the {stream} stream");
+}
+
+#[test]
+fn flvdemux_audio_pad_takes_the_audio_stream() {
+    assert_named_pad_picks_stream("flv_h264_aac.flv", "flvdemux", "audio_0", "aac");
+}
+
+#[test]
+fn matroskademux_audio_pad_takes_the_audio_stream() {
+    assert_named_pad_picks_stream("multitrack_h264_aac.mkv", "matroskademux", "audio_0", "aac");
+}
+
+#[test]
+fn qtdemux_audio_pad_takes_the_audio_stream() {
+    assert_named_pad_picks_stream("av_h264_aac.mp4", "qtdemux", "audio_0", "aac");
+}
+
 #[test]
 fn tsdemux_feeds_aacparse_without_a_stream_property() {
     assert_demux_picks_stream("av_h264_aac44100.ts", "tsdemux", "aacparse ! ", "aac");

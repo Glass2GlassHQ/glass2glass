@@ -3345,9 +3345,14 @@ fn build_graph(
     // into its elementary streams, honoring `d.video_0` / `d.audio_0` selection.
     let mut demux_select_node: Vec<Option<Box<dyn crate::runtime::DynMultiOutputElement>>> =
         (0..specs.len()).map(|_| None).collect();
+    // one link that names its pad (`d.audio_0`) selects by kind, not by what its consumer accepts
+    let selects_ports = |ei: usize| {
+        out_deg[ei] > 1
+            || (out_deg[ei] == 1 && demux_pads[ei].iter().any(|req| req.kind != PadKind::Any))
+    };
     if !registry.demux_select_hooks().is_empty() {
         for ei in 0..specs.len() {
-            if is_tee(ei) || is_demux(ei) || out_deg[ei] <= 1 || prebuilt[ei].is_some() {
+            if is_tee(ei) || is_demux(ei) || !selects_ports(ei) || prebuilt[ei].is_some() {
                 continue;
             }
             // The upstream file location (the source linking into this demux).
@@ -3372,7 +3377,7 @@ fn build_graph(
         if demux_select_node[ei].is_some()
             || is_tee(ei)
             || is_demux(ei)
-            || out_deg[ei] <= 1
+            || !selects_ports(ei)
             || prebuilt[ei].is_some()
         {
             continue;

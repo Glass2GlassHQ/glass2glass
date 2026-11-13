@@ -87,7 +87,9 @@ built at parse time with one port per branch. A file upstream is probed for its
 streams by a `DemuxSelectHook`. A network source has nothing to probe before the
 run, so a `DemuxCapsSelectHook` gets each branch's first element's sink-pad caps
 (`Registry::declared_input_caps`) and picks the stream per port by codec, the
-static form of gst linking a dynamic pad by caps.
+static form of gst linking a dynamic pad by caps. One branch from a pad that
+names a kind (`d.audio_0`) is built the same way, so the pad name picks the
+stream even when the consumer, like `queue`, accepts any caps.
 
 A name registered both as a launch element and as a demux is built as the
 launch element when it has one output link. A `DemuxFactory` marked
