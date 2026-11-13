@@ -113,7 +113,7 @@ impl SeekAfterEnd {
         let has_fan_in = nodes().any(|node| {
             matches!(
                 graph.node_kind(node),
-                Some(NodeKind::Muxer(_) | NodeKind::FaninSink(_))
+                Some(NodeKind::Muxer(_) | NodeKind::FaninSink(_) | NodeKind::Duplex { .. })
             )
         });
         let has_finalizing_sink = nodes().any(|node| match graph.element(node) {

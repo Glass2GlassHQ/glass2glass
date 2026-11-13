@@ -49,7 +49,7 @@ terminal runner from the fan-in / fan-out family
 | `WebRtcWhepSrc` | 1 | recv (WHEP) | `SourceLoop` | linear |
 | `WebRtcSessionSink` | N | send (WHIP) | `MultiInputElement` | `run_fanin_session` |
 | `WebRtcWhepSessionSrc` | N | recv (WHEP) | `MultiOutputSource` | `run_fanout_session` |
-| `WebRtcDuplexSession` | N | sendrecv | `MultiDuplexSession` | `run_duplex_session` |
+| `WebRtcDuplexSession` | N | sendrecv | `MultiDuplexSession` | `run_duplex_session`, `Graph::add_duplex` |
 
 The one-track sink and source keep the `Rtc` on a spawned task and hand access
 units over a bounded channel, so the element never touches the `Rtc` and stays
@@ -114,6 +114,17 @@ packets (`DuplexInbound`) and the network, pushing received frames to `out`. The
 send and recv halves share `&mut self` directly with no detached task, unlike
 the send-only session, which spawns the `Rtc` onto its own task to avoid
 `process` and run-loop aliasing.
+
+`NodeKind::Duplex { inputs, outputs }`, added by `Graph::add_duplex`, runs the
+session as a graph node, so a transform chain feeds each input and drains each
+output. `run_duplex_session` is that graph with one source per input and one
+sink per output. Inputs negotiate like a fan-in session's pads, and outputs
+like a fan-out source's ports, from `output_caps`. The arm opens every port
+with a `Segment`, reads the input edges round-robin through `DuplexInbound`, and
+relays each pad's reverse channel onto its in-edge. When `run` returns, the arm
+asks every source to end its stream and drains the inputs to `Eos`, which ends
+the run cleanly on a peer hang-up. The node has no `parse_launch` form, because
+`WebRtcDuplexSession` needs an `SdpChannel` and a launch line cannot build one.
 
 `WebRtcDuplexSession::open_data_channel(label)` adds one reliable, ordered data
 channel on the same `Rtc` and returns an unbounded sender and receiver of

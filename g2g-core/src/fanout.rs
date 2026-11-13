@@ -575,6 +575,115 @@ pub trait MultiDuplexSession: ElementBound {
     }
 }
 
+pub trait DynMultiDuplexSession: ElementBound {
+    fn input_count(&self) -> usize;
+    fn output_count(&self) -> usize;
+    fn type_name(&self) -> &'static str {
+        core::any::type_name::<Self>()
+    }
+    fn configure_input(
+        &mut self,
+        input: usize,
+        absolute_caps: &Caps,
+    ) -> Result<ConfigureOutcome, G2gError>;
+    fn output_caps(&self, output: usize) -> Result<Caps, G2gError>;
+    fn reverse_channel(&self, input: usize) -> Option<ReverseChannel>;
+    fn caps_constraint_as_input(&self, input: usize) -> CapsConstraint<'_>;
+    fn run<'a>(
+        &'a mut self,
+        inbound: &'a mut dyn DuplexInbound,
+        out: &'a mut dyn MultiOutputSink,
+    ) -> BoxFuture<'a, Result<u64, G2gError>>;
+    fn properties(&self) -> &'static [PropertySpec];
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError>;
+    fn get_property(&self, name: &str) -> Option<PropValue>;
+}
+
+impl<T: MultiDuplexSession> DynMultiDuplexSession for T {
+    fn input_count(&self) -> usize {
+        MultiDuplexSession::input_count(self)
+    }
+    fn output_count(&self) -> usize {
+        MultiDuplexSession::output_count(self)
+    }
+    fn configure_input(
+        &mut self,
+        input: usize,
+        absolute_caps: &Caps,
+    ) -> Result<ConfigureOutcome, G2gError> {
+        MultiDuplexSession::configure_input(self, input, absolute_caps)
+    }
+    fn output_caps(&self, output: usize) -> Result<Caps, G2gError> {
+        MultiDuplexSession::output_caps(self, output)
+    }
+    fn reverse_channel(&self, input: usize) -> Option<ReverseChannel> {
+        MultiDuplexSession::reverse_channel(self, input)
+    }
+    fn caps_constraint_as_input(&self, input: usize) -> CapsConstraint<'_> {
+        MultiDuplexSession::caps_constraint_as_input(self, input)
+    }
+    fn run<'a>(
+        &'a mut self,
+        inbound: &'a mut dyn DuplexInbound,
+        out: &'a mut dyn MultiOutputSink,
+    ) -> BoxFuture<'a, Result<u64, G2gError>> {
+        Box::pin(MultiDuplexSession::run(self, inbound, out))
+    }
+    fn properties(&self) -> &'static [PropertySpec] {
+        MultiDuplexSession::properties(self)
+    }
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        MultiDuplexSession::set_property(self, name, value)
+    }
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        MultiDuplexSession::get_property(self, name)
+    }
+}
+
+impl<'b> DynMultiDuplexSession for &'b mut (dyn DynMultiDuplexSession + 'b) {
+    fn input_count(&self) -> usize {
+        (**self).input_count()
+    }
+    fn output_count(&self) -> usize {
+        (**self).output_count()
+    }
+    fn type_name(&self) -> &'static str {
+        (**self).type_name()
+    }
+    fn configure_input(
+        &mut self,
+        input: usize,
+        absolute_caps: &Caps,
+    ) -> Result<ConfigureOutcome, G2gError> {
+        (**self).configure_input(input, absolute_caps)
+    }
+    fn output_caps(&self, output: usize) -> Result<Caps, G2gError> {
+        (**self).output_caps(output)
+    }
+    fn reverse_channel(&self, input: usize) -> Option<ReverseChannel> {
+        (**self).reverse_channel(input)
+    }
+    fn caps_constraint_as_input(&self, input: usize) -> CapsConstraint<'_> {
+        (**self).caps_constraint_as_input(input)
+    }
+    fn run<'a>(
+        &'a mut self,
+        inbound: &'a mut dyn DuplexInbound,
+        out: &'a mut dyn MultiOutputSink,
+    ) -> BoxFuture<'a, Result<u64, G2gError>> {
+        (**self).run(inbound, out)
+    }
+    fn properties(&self) -> &'static [PropertySpec] {
+        (**self).properties()
+    }
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        (**self).set_property(name, value)
+    }
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        (**self).get_property(name)
+    }
+}
+
 /// Multi-output element trait variant: identical negotiation to
 /// [`AsyncElement`], but `process` emits into a [`MultiOutputSink`] rather
 /// than a single downstream. [`Router`] is the first implementor; user code

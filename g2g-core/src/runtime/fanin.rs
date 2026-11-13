@@ -1681,8 +1681,7 @@ where
 
 /// The per-input reverse-signal handles a duplex run shares with its session.
 /// The dynamic runner fills a slot when it attaches a send track mid-run, and the
-/// session reads it back through [`DuplexInbound::reverse_channel`]; the
-/// fixed-arity runner leaves it empty, having handed every channel over up front.
+/// session reads it back through [`DuplexInbound::reverse_channel`].
 type ReverseMap = Arc<Mutex<Vec<Option<crate::fanout::ReverseChannel>>>>;
 
 /// [`DuplexInbound`] backed by the runner's shared tagged inbound channel, so a
@@ -1715,13 +1714,12 @@ impl DuplexInbound for InboundReceiver {
 /// Negotiation mirrors both halves: each source is narrowed against the session
 /// input pad it feeds and configures it (send side, like [`run_fanin_session`]); each
 /// recv-side output's caps configure the matching sink (like
-/// [`run_fanout_session`](crate::runtime::run_fanout_session)). At runtime the
-/// sources push `(input, packet)` into one shared tagged channel; the single
-/// session arm owns `&mut session` and calls `session.run(inbound, out)`, so the
-/// send and recv halves share state with no aliasing (no detached task needed);
-/// the M sink arms drain the per-output branch links. The run ends when the
-/// session's `run` returns (e.g. on peer disconnect), which closes the branch
-/// links and lets the sinks finish.
+/// [`run_fanout_session`](crate::runtime::run_fanout_session)). The run is a
+/// one-node graph built with [`Graph::add_duplex`]: the single session arm owns
+/// `&mut session` and calls `session.run(inbound, out)`, so the send and recv
+/// halves share state with no aliasing. The run ends when the session's `run`
+/// returns (e.g. on peer disconnect): every source still streaming is asked to
+/// end its stream, and the session's per-output `Eos` lets the sinks finish.
 ///
 /// Per-input reverse signals (a remote PLI / BWE arriving on a track's m-line)
 /// are routed back to the matching send source via
@@ -1768,12 +1766,11 @@ where
     .await
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn run_duplex_session_inner<Sess, Clk>(
     sources: Vec<&mut dyn DynSourceLoop>,
     session: &mut Sess,
     sinks: Vec<&mut dyn DynAsyncElement>,
-    _clock: &Clk,
+    clock: &Clk,
     link_capacity: impl Into<LinkCapacity>,
     observer: Option<&Observer>,
 ) -> Result<RunStats, G2gError>
@@ -1781,222 +1778,56 @@ where
     Sess: MultiDuplexSession,
     Clk: PipelineClock,
 {
-    let link_capacity: usize = link_capacity.into().get();
-    let input_count = sources.len();
-    let output_count = sinks.len();
     assert!(
-        input_count > 0,
+        !sources.is_empty(),
         "duplex session needs at least one send source"
     );
     assert!(
-        output_count > 0,
+        !sinks.is_empty(),
         "duplex session needs at least one recv sink"
     );
     assert!(
-        session.input_count() == input_count,
+        session.input_count() == sources.len(),
         "session input count must match the number of send sources"
     );
     assert!(
-        session.output_count() == output_count,
+        session.output_count() == sinks.len(),
         "session output count must match the number of recv sinks"
     );
-
-    // M846: instance naming + one measured-latency probe per recv sink (the
-    // session drives itself through `run`, so it has no `process()` to time).
-    let mut sources = sources;
-    let visit_recorder = observer.and_then(Observer::visit_recorder);
-    let mut sinks = sinks;
-    let mut namer = crate::log::InstanceNamer::new();
-    let mut source_names: Vec<alloc::string::String> = Vec::with_capacity(input_count);
-    let mut source_probes: Vec<Probe> = Vec::with_capacity(input_count);
-    for source in sources.iter_mut() {
-        let name = namer.add(source.log_category(), None);
-        source.set_instance_name(name.clone());
-        let log_name = ElementLogName::new(source.log_category(), name.clone());
-        source_probes.push(traced_source_probe(&log_name, visit_recorder));
-        source_names.push(name);
-    }
-    let session_category = crate::log::short_type_name::<Sess>();
-    let session_name = namer.add(session_category, None);
-    let session_probe = traced_source_probe(
-        &ElementLogName::new(session_category, session_name.clone()),
-        visit_recorder,
+    let inputs = u8::try_from(sources.len()).map_err(|_| G2gError::CapsMismatch)?;
+    let outputs = u8::try_from(sinks.len()).map_err(|_| G2gError::CapsMismatch)?;
+    let mut g: Graph<GraphNodeRef<'_>> = Graph::new();
+    let duplex = g.add_duplex(GraphNodeRef::duplex_ref(session), inputs, outputs);
+    g.set_node_name(
+        duplex.node(),
+        crate::log::InstanceNamer::new().add(crate::log::short_type_name::<Sess>(), None),
     );
-    let mut sink_probes = Vec::with_capacity(output_count);
-    for sink in sinks.iter_mut() {
-        let category = sink.log_category();
-        let name = namer.add(category, None);
-        sink.set_instance_name(name.clone());
-        sink_probes.push(ElementProbe::recording(
-            ElementLogName::new(category, name),
-            None,
-            visit_recorder.cloned(),
-        ));
+    for (pad, source) in (0..inputs).zip(sources) {
+        let node = g.add_source(GraphNodeRef::source_ref(source));
+        g.link(node, duplex.input(pad))
+            .map_err(|_| G2gError::CapsMismatch)?;
     }
-
-    // Negotiate the send inputs (like run_fanin_session): each source is narrowed
-    // against the send input pad it feeds, and the fixated caps configure both
-    // the source and that pad.
-    let mut input_caps: Vec<Caps> = Vec::with_capacity(input_count);
-    for (i, source) in sources.iter_mut().enumerate() {
-        let produced = source.produced_caps().await?;
-        let fixated = {
-            let pad_constraint = MultiDuplexSession::caps_constraint_as_input(session, i);
-            select_branch_caps(&produced, &pad_constraint)?
-        };
-        source.configure_pipeline(&fixated)?.reject_refixate()?;
-        session.configure_input(i, &fixated)?.reject_refixate()?;
-        input_caps.push(fixated);
+    for (port, sink) in (0..outputs).zip(sinks) {
+        let node = g.add_sink(GraphNodeRef::element_ref(sink));
+        g.link(duplex.output(port), node)
+            .map_err(|_| G2gError::CapsMismatch)?;
     }
-    // Negotiate the recv outputs (like run_fanout_session): the session self-
-    // fixates each output's caps and configures the matching sink.
-    let mut output_caps: Vec<Caps> = Vec::with_capacity(output_count);
-    for (o, sink) in sinks.iter_mut().enumerate() {
-        let fixated = session.output_caps(o)?.fixate()?;
-        sink.configure_pipeline(&fixated)?.reject_refixate()?;
-        output_caps.push(fixated);
-    }
-
-    // Inbound: one shared tagged channel; every send source pushes (its index, packet).
-    let (in_tx, in_rx) = bounded::<(usize, PipelinePacket)>(link_capacity);
-    // Per-input edge counters and content-inspection slots ride the
-    // `TaggingSink`s, the shared channel carries no per-edge state itself.
-    let in_counters: Vec<Option<Arc<EdgeCounters>>> = (0..input_count)
-        .map(|_| observer.map(|_| Arc::new(EdgeCounters::default())))
-        .collect();
-    let in_probes: Vec<Option<ProbeSlot>> = (0..input_count)
-        .map(|_| observer.map(|_| ProbeSlot::default()))
-        .collect();
-    // Outbound: one branch link per recv output.
-    let tap = observer.is_some();
-    let mut branch_senders = Vec::with_capacity(output_count);
-    let mut branch_receivers = Vec::with_capacity(output_count);
-    let mut branch_taps = Vec::with_capacity(output_count);
-    for _ in 0..output_count {
-        let (tx, rx, edge) = link_tapped(link_capacity, tap);
-        branch_senders.push(SenderSink::new(tx));
-        branch_receivers.push(rx);
-        branch_taps.push(edge);
-    }
-
-    if let Some(obs) = observer {
-        let session_id = input_count;
-        let mut nodes: Vec<TapNode> = source_names
-            .iter()
-            .map(|n| (n.clone(), NodeRole::Source, None))
-            .collect();
-        nodes.push((session_name, NodeRole::Muxer, None));
-        for probe in &sink_probes {
-            nodes.push((
-                alloc::string::String::from(probe.name()),
-                NodeRole::Sink,
-                Some(probe.clone()),
-            ));
-        }
-        let mut edges: Vec<TapEdge> = Vec::with_capacity(input_count + output_count);
-        for (i, ((caps, c), p)) in input_caps
-            .iter()
-            .zip(in_counters.iter())
-            .zip(in_probes.iter())
-            .enumerate()
-        {
-            edges.push((
-                i,
-                session_id,
-                caps.clone(),
-                EdgeTap {
-                    probe: p.clone().unwrap_or_default(),
-                    counters: c.clone(),
-                },
-            ));
-        }
-        for (o, (caps, edge)) in output_caps
-            .iter()
-            .zip(core::mem::take(&mut branch_taps))
-            .enumerate()
-        {
-            edges.push((session_id, session_id + 1 + o, caps.clone(), edge));
-        }
-        register_runner_tap(obs, nodes, edges);
-    }
-
-    // Per-input reverse-signal handles (WebRTC PLI / BWE), cloned before the
-    // session moves into its arm so a signal for track i (a remote PLI on that
-    // m-line, or a BWE estimate) reaches send source i, the duplex analog of the
-    // fan-in session's per-input routing.
-    let reverse: Vec<Option<crate::fanout::ReverseChannel>> = (0..input_count)
-        .map(|i| session.reverse_channel(i))
-        .collect();
-
-    let mut source_arms: Vec<BoxFuture<'_, Result<u64, G2gError>>> =
-        Vec::with_capacity(input_count);
-    for ((i, source), source_probe) in sources.into_iter().enumerate().zip(source_probes) {
-        let tx_i = in_tx.clone();
-        let reverse_i = reverse[i].clone();
-        let counters_i = in_counters[i].clone();
-        let probe_i = in_probes[i].clone();
-        source_arms.push(Box::pin(async move {
-            let mut adapter = TaggingSink::new(i, tx_i, reverse_i, counters_i, probe_i);
-            let result = source
-                .run(&mut SourceFrameSpans::new(&mut adapter, source_probe))
-                .await;
-            wind_down_when_session_ended(result, &adapter)
-        }));
-    }
-    // Drop the runner's own sender so the inbound channel closes once all sources
-    // end (the session sees `recv() == None` and can stop publishing).
-    drop(in_tx);
-
-    let session_arm: BoxFuture<'_, Result<u64, G2gError>> = Box::pin(async move {
-        let mut inbound = InboundReceiver {
-            rx: in_rx,
-            reverse: Arc::new(Mutex::new(Vec::new())),
-        };
-        let mut multi = MultiSenderSink::new(branch_senders);
-        multi.set_push_wait_probe(session_probe.clone());
-        session
-            .run(
-                &mut inbound,
-                &mut SourceFrameSpans::new(&mut multi, session_probe),
-            )
-            .await
-    });
-
-    let mut sink_arms: Vec<BoxFuture<'_, Result<u64, G2gError>>> = Vec::with_capacity(output_count);
-    for ((sink, rx), probe) in sinks
-        .into_iter()
-        .zip(branch_receivers)
-        .zip(sink_probes.iter().cloned())
-    {
-        sink_arms.push(sink.drive_sink_arm_borrowed(SinkArmIo::standalone(rx, Some(probe))));
-    }
-
-    // Arm order: [source0..N, session, sink0..M].
-    let mut arms = Vec::with_capacity(input_count + 1 + output_count);
-    arms.extend(source_arms);
-    arms.push(session_arm);
-    arms.extend(sink_arms);
-
-    let results = join_all(arms).await;
-    let mut counts = Vec::with_capacity(results.len());
-    for r in results {
-        counts.push(r?);
-    }
-    let emitted: u64 = counts[0..input_count].iter().copied().sum();
-    let consumed: u64 = counts[input_count + 1..].iter().copied().sum();
-    Ok(RunStats {
-        frames_emitted: emitted,
-        frames_consumed: consumed,
-        frames_dropped: 0,
-        latency: LatencyReport::ZERO,
-        allocation: None,
-        clock_priority: ClockPriority::SystemFallback,
-        base_time_ns: 0,
-        coordinator_events: 0,
-        per_element: crate::runtime::snapshot_all(
-            &sink_probes.into_iter().map(Some).collect::<Vec<_>>(),
-        ),
-    })
+    crate::runtime::graph_runner::run_graph_inner(
+        g,
+        clock,
+        link_capacity,
+        None,
+        None,
+        None,
+        None,
+        observer,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
 }
 
 /// Drives `N sources → muxer → 1 sink` (true fan-in). Unlike

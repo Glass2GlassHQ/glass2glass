@@ -46,7 +46,10 @@ impl From<NodeId> for PadId {
 /// 1-in/n-out, `Muxer(n)` is n-in/1-out, `FaninSink(n)` is n-in/0-out (a
 /// terminal fan-in element: a multi-input sink with no merged output), and
 /// `FanoutSrc(n)` is 0-in/n-out (a terminal fan-out source generating each
-/// output itself, e.g. a WebRTC session receiving several tracks).
+/// output itself, e.g. a WebRTC session receiving several tracks). `Duplex` is
+/// `inputs`-in/`outputs`-out with no stream passing from one side to the other
+/// (a sendrecv WebRTC session publishing its inputs and emitting the peer's
+/// tracks).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NodeKind {
     Source,
@@ -56,6 +59,7 @@ pub enum NodeKind {
     Muxer(u8),
     FaninSink(u8),
     FanoutSrc(u8),
+    Duplex { inputs: u8, outputs: u8 },
 }
 
 impl NodeKind {
@@ -65,6 +69,7 @@ impl NodeKind {
             NodeKind::Source | NodeKind::FanoutSrc(_) => 0,
             NodeKind::Transform | NodeKind::Sink | NodeKind::Tee(_) => 1,
             NodeKind::Muxer(n) | NodeKind::FaninSink(n) => n,
+            NodeKind::Duplex { inputs, .. } => inputs,
         }
     }
 
@@ -74,6 +79,7 @@ impl NodeKind {
             NodeKind::Sink | NodeKind::FaninSink(_) => 0,
             NodeKind::Source | NodeKind::Transform | NodeKind::Muxer(_) => 1,
             NodeKind::Tee(n) | NodeKind::FanoutSrc(n) => n,
+            NodeKind::Duplex { outputs, .. } => outputs,
         }
     }
 }
@@ -244,6 +250,27 @@ impl FanoutSrc {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct Duplex(NodeId);
+
+impl Duplex {
+    pub fn node(self) -> NodeId {
+        self.0
+    }
+    pub fn input(self, index: u8) -> PadId {
+        PadId {
+            node: self.0,
+            index,
+        }
+    }
+    pub fn output(self, index: u8) -> PadId {
+        PadId {
+            node: self.0,
+            index,
+        }
+    }
+}
+
 /// Validation failures from [`Graph::link`] and [`Graph::finish`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -377,6 +404,10 @@ impl<E> Graph<E> {
     /// way: the element pushes to each port and owes every port an `Eos`.
     pub fn add_fanout_src(&mut self, element: E, outputs: u8) -> FanoutSrc {
         FanoutSrc(self.push(NodeKind::FanoutSrc(outputs), Some(element)))
+    }
+
+    pub fn add_duplex(&mut self, element: E, inputs: u8, outputs: u8) -> Duplex {
+        Duplex(self.push(NodeKind::Duplex { inputs, outputs }, Some(element)))
     }
 
     /// Add a content-routing demultiplexer: 1 input, `outputs` outputs. The node
@@ -648,6 +679,8 @@ impl<E> Graph<E> {
                     | NodeKind::Muxer(0)
                     | NodeKind::FaninSink(0)
                     | NodeKind::FanoutSrc(0)
+                    | NodeKind::Duplex { inputs: 0, .. }
+                    | NodeKind::Duplex { outputs: 0, .. }
             ) {
                 return Err(GraphError::DegenerateFanNode(id));
             }

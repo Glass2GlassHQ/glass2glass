@@ -885,6 +885,13 @@ pub enum NodeConstraint<'a> {
     /// [`Demux`](Self::Demux), and output port `i` carries stream `i` of the
     /// input's [`Caps::Batch`].
     BatchDemux { input: CapsConstraint<'a> },
+    /// Duplex session: `inputs[i]` is input pad `i`'s constraint as in
+    /// [`Muxer`](Self::Muxer), and `ports[i]` is output port `i`'s `Produces`
+    /// constraint as in [`Demux`](Self::Demux). No input caps reach an output.
+    Duplex {
+        inputs: Vec<CapsConstraint<'a>>,
+        ports: Vec<CapsConstraint<'a>>,
+    },
 }
 
 /// Solve caps for an arbitrary DAG (design/TODO.md "DAG runner" D2). Generalizes
@@ -1478,7 +1485,11 @@ fn node_consistent<E>(
     let get = |e: usize| assign[e].as_ref().expect("checked all assigned");
     match graph.kind(node) {
         // Membership is already ensured by arc consistency; nothing cross-edge.
-        NodeKind::Source | NodeKind::Sink | NodeKind::FaninSink(_) | NodeKind::FanoutSrc(_) => true,
+        NodeKind::Source
+        | NodeKind::Sink
+        | NodeKind::FaninSink(_)
+        | NodeKind::FanoutSrc(_)
+        | NodeKind::Duplex { .. } => true,
         NodeKind::Muxer(_) => match &constraints[node.0 as usize] {
             NodeConstraint::BatchMuxer { .. } => {
                 let streams = pads_in_order(graph, node)
@@ -1547,6 +1558,7 @@ fn kind_short(kind: NodeKind) -> &'static str {
         NodeKind::Muxer(_) => "mux",
         NodeKind::FaninSink(_) => "fanin-sink",
         NodeKind::FanoutSrc(_) => "fanout-src",
+        NodeKind::Duplex { .. } => "duplex",
     }
 }
 
@@ -1635,6 +1647,9 @@ fn fmt_constraint(nc: &NodeConstraint<'_>) -> String {
             alloc::format!("batch mux {} inputs -> batch of their caps", inputs.len())
         }
         NodeConstraint::BatchDemux { .. } => "batch demux -> one port per stream".to_string(),
+        NodeConstraint::Duplex { inputs, ports } => {
+            alloc::format!("duplex {} inputs, {} ports", inputs.len(), ports.len())
+        }
     }
 }
 
@@ -1722,9 +1737,10 @@ pub(crate) fn graph_downstream_feasibility<E>(
             // A muxer and a terminal fan-in both take their input pads' accept
             // sets independently (a muxer's output does not feed back to its
             // inputs; a terminal fan-in has no output at all).
-            NodeKind::Muxer(_) | NodeKind::FaninSink(_) => {
+            NodeKind::Muxer(_) | NodeKind::FaninSink(_) | NodeKind::Duplex { .. } => {
                 if let NodeConstraint::Muxer { inputs, .. }
-                | NodeConstraint::BatchMuxer { inputs } = &constraints[idx]
+                | NodeConstraint::BatchMuxer { inputs }
+                | NodeConstraint::Duplex { inputs, .. } = &constraints[idx]
                 {
                     for &ie in graph.in_edges(node) {
                         let pad = graph.edge(ie).dst.index as usize;
@@ -1812,21 +1828,37 @@ fn apply_node<E>(
         // produce set (the demux constraint shape with the input half unused:
         // there is no input edge).
         NodeKind::FanoutSrc(_) => match nc {
-            NodeConstraint::Demux { ports, .. } => {
-                for &oe in out_e {
-                    let port = graph.edge(oe).src.index as usize;
-                    match ports.get(port) {
-                        Some(CapsConstraint::Produces(set)) => {
-                            narrow_edge(graph, edges, oe, set, node)?
-                        }
-                        _ => return Err(shape_err),
-                    }
-                }
-                Ok(())
+            NodeConstraint::Demux { ports, .. } => narrow_produced_ports(graph, node, ports, edges),
+            _ => Err(shape_err),
+        },
+        NodeKind::Duplex { .. } => match nc {
+            NodeConstraint::Duplex { inputs, ports } => {
+                narrow_muxer_inputs(graph, node, inputs, edges)?;
+                narrow_produced_ports(graph, node, ports, edges)
             }
             _ => Err(shape_err),
         },
     }
+}
+
+fn narrow_produced_ports<E>(
+    graph: &ValidatedGraph<E>,
+    node: NodeId,
+    ports: &[CapsConstraint<'_>],
+    edges: &mut [Option<CapsSet>],
+) -> Result<(), NegotiationFailure> {
+    for &oe in graph.out_edges(node) {
+        let port = graph.edge(oe).src.index as usize;
+        match ports.get(port) {
+            Some(CapsConstraint::Produces(set)) => narrow_edge(graph, edges, oe, set, node)?,
+            _ => {
+                return Err(NegotiationFailure::EndpointShapeMismatch {
+                    index: node.0 as usize,
+                })
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Narrow one edge by `contrib`, the set node `by` imposes on it. `by` is what

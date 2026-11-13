@@ -175,6 +175,7 @@ pub fn kind_label(kind: NodeKind) -> &'static str {
         NodeKind::Muxer(_) => "mux",
         NodeKind::FaninSink(_) => "fanin-sink",
         NodeKind::FanoutSrc(_) => "fanout-src",
+        NodeKind::Duplex { .. } => "duplex",
     }
 }
 
@@ -190,6 +191,7 @@ fn node_style(kind: NodeKind) -> &'static str {
         NodeKind::Muxer(_) => ", shape=trapezium, style=filled, fillcolor=\"#f0e8cd\"",
         NodeKind::FaninSink(_) => ", shape=trapezium, style=filled, fillcolor=\"#f0cdcd\"",
         NodeKind::FanoutSrc(_) => ", shape=invtrapezium, style=filled, fillcolor=\"#f0cdcd\"",
+        NodeKind::Duplex { .. } => ", shape=hexagon, style=filled, fillcolor=\"#f0cdcd\"",
     }
 }
 

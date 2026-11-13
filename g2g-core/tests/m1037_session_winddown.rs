@@ -3,9 +3,10 @@
 // SPDX-License-Identifier: MPL-2.0
 
 //! M1037: a session that finishes while one of its send sources is still
-//! streaming ends the run cleanly. The session arm owns the only inbound
+//! streaming ends the run cleanly. A fan-in session arm owns the only inbound
 //! receiver, so the source's next push finds a closed channel and stops with
-//! `Shutdown`; that wind-down is what a finished session looks like from
+//! `Shutdown`. A duplex session that returns asks every source to end its
+//! stream. Either wind-down is what a finished session looks like from
 //! upstream, not a failed run.
 #![cfg(all(feature = "std", feature = "runtime"))]
 
@@ -18,10 +19,11 @@ use g2g_core::element::DynAsyncElement;
 use g2g_core::frame::{Frame, FrameTiming};
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{
-    block_on, run_duplex_session, run_fanin_session, DynSourceLoop, SourceLoop,
+    block_on, run_duplex_session, run_fanin_session, run_graph, DynSourceLoop, GraphNodeRef,
+    SourceLoop,
 };
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, ConfigureOutcome, Dim, DuplexInbound, G2gError,
+    AsyncElement, Caps, CapsConstraint, ConfigureOutcome, Dim, DuplexInbound, G2gError, Graph,
     MemoryDomain, MultiDuplexSession, MultiInputElement, MultiOutputSink, OutputSink,
     PipelineClock, PipelinePacket, Rate, RawVideoFormat,
 };
@@ -139,6 +141,33 @@ impl AsyncElement for CountingSink {
     }
 }
 
+struct ForwardFrames;
+
+impl AsyncElement for ForwardFrames {
+    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>;
+
+    fn intercept_caps(&self, upstream: &Caps) -> Result<Caps, G2gError> {
+        Ok(upstream.clone())
+    }
+
+    fn configure_pipeline(&mut self, _absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
+        Ok(ConfigureOutcome::Accepted)
+    }
+
+    fn process<'a>(
+        &'a mut self,
+        packet: PipelinePacket,
+        out: &'a mut dyn OutputSink,
+    ) -> Self::ProcessFuture<'a> {
+        Box::pin(async move {
+            if matches!(packet, PipelinePacket::DataFrame(_)) {
+                out.push(packet).await?;
+            }
+            Ok(())
+        })
+    }
+}
+
 /// Duplex session that hangs up on its own schedule: it echoes `takes` frames
 /// to its recv output, then ends the call while its send source is mid-stream.
 struct HangsUpSession {
@@ -248,11 +277,10 @@ impl MultiInputElement for CountingFaninSession {
 
 #[test]
 fn a_duplex_session_that_ends_first_winds_its_send_source_down() {
-    let wound_down = Arc::new(AtomicBool::new(false));
     let pushed = Arc::new(AtomicU64::new(0));
     let mut source = EndlessSource {
         eos_at: None,
-        wound_down: wound_down.clone(),
+        wound_down: Arc::new(AtomicBool::new(false)),
         pushed: pushed.clone(),
     };
     let mut session = HangsUpSession {
@@ -273,10 +301,6 @@ fn a_duplex_session_that_ends_first_winds_its_send_source_down() {
         Err(e) => panic!("a completed session must not fail the run: {e:?}"),
     };
 
-    assert!(
-        wound_down.load(Ordering::SeqCst),
-        "the source was still streaming when the session ended, so it hit the closed channel"
-    );
     assert_eq!(
         stats.frames_consumed, SESSION_TAKES,
         "the recv sink took every frame the session echoed"
@@ -331,5 +355,45 @@ fn a_fanin_session_that_ends_first_winds_its_source_down() {
         stats.frames_emitted,
         pushed.load(Ordering::SeqCst),
         "the wound-down source still reports every frame it delivered"
+    );
+}
+
+#[test]
+fn a_duplex_node_between_transforms_that_ends_first_ends_the_run() {
+    let pushed = Arc::new(AtomicU64::new(0));
+    let mut g: Graph<GraphNodeRef<'static>> = Graph::new();
+    let source = g.add_source(GraphNodeRef::source(EndlessSource {
+        eos_at: None,
+        wound_down: Arc::new(AtomicBool::new(false)),
+        pushed: pushed.clone(),
+    }));
+    let send_transform = g.add_transform(GraphNodeRef::element(ForwardFrames));
+    let duplex = g.add_duplex(
+        GraphNodeRef::duplex(HangsUpSession {
+            takes: SESSION_TAKES,
+        }),
+        1,
+        1,
+    );
+    let recv_transform = g.add_transform(GraphNodeRef::element(ForwardFrames));
+    let sink = g.add_sink(GraphNodeRef::element(CountingSink));
+    g.link(source, send_transform).expect("link source");
+    g.link(send_transform, duplex.input(0)).expect("link send");
+    g.link(duplex.output(0), recv_transform).expect("link recv");
+    g.link(recv_transform, sink).expect("link sink");
+
+    let stats = match block_on(run_graph(g, &ZeroClock, LINK_CAPACITY)) {
+        Ok(stats) => stats,
+        Err(e) => panic!("a completed session must not fail the run: {e:?}"),
+    };
+
+    assert_eq!(
+        stats.frames_consumed, SESSION_TAKES,
+        "the recv sink took every frame the session echoed through the recv transform"
+    );
+    assert_eq!(
+        stats.frames_emitted,
+        pushed.load(Ordering::SeqCst),
+        "the source reports every frame it got into the send transform"
     );
 }

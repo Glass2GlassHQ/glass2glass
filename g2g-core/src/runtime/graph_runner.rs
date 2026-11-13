@@ -68,8 +68,9 @@ use crate::element::{
 };
 use crate::error::G2gError;
 use crate::fanout::{
-    DynMultiOutputSource, MultiInputElement, MultiOutputElement, MultiOutputSink,
-    MultiOutputSinkExt, MultiOutputSource, MultiSenderSink, ReverseChannel,
+    DuplexInbound, DynMultiDuplexSession, DynMultiOutputSource, MultiDuplexSession,
+    MultiInputElement, MultiOutputElement, MultiOutputSink, MultiOutputSinkExt, MultiOutputSource,
+    MultiSenderSink, ReverseChannel,
 };
 use crate::format_element::{CapsConstraint, CapsPreferences};
 use crate::frame::{Frame, PipelinePacket};
@@ -140,6 +141,7 @@ pub enum GraphNodeRef<'a> {
     /// output instead of broadcasting, and emits per-output `CapsChanged` so each
     /// branch retypes from the byte-stream input. `Graph::add_demux`.
     Demux(Box<dyn DynMultiOutputElement + 'a>),
+    Duplex(Box<dyn DynMultiDuplexSession + 'a>),
 }
 
 /// The owning, `'static` graph payload: what most callers build directly.
@@ -196,6 +198,14 @@ impl<'a> GraphNodeRef<'a> {
         GraphNodeRef::Demux(Box::new(demux))
     }
 
+    pub fn duplex<S: MultiDuplexSession + 'static>(session: S) -> Self {
+        GraphNodeRef::Duplex(Box::new(session))
+    }
+
+    pub fn duplex_ref(session: &'a mut (dyn DynMultiDuplexSession + 'a)) -> Self {
+        GraphNodeRef::Duplex(Box::new(session))
+    }
+
     /// The element's log category, its short type name, e.g.
     /// `videotestsrc`. The runner uses it to derive instance names
     /// (`<category>N`); a DOT dump uses it as the node label before the run
@@ -209,6 +219,7 @@ impl<'a> GraphNodeRef<'a> {
             GraphNodeRef::Muxer(_) => "mux",
             GraphNodeRef::FanoutSource(_) => "session-src",
             GraphNodeRef::Demux(_) => "demux",
+            GraphNodeRef::Duplex(_) => "duplex",
         }
     }
 
@@ -223,7 +234,7 @@ impl<'a> GraphNodeRef<'a> {
             GraphNodeRef::Source(s) => s.output_memory(),
             GraphNodeRef::Element(e) => e.output_memory(),
             GraphNodeRef::Muxer(m) => m.output_domains().preferred().unwrap_or_default(),
-            GraphNodeRef::FanoutSource(_) | GraphNodeRef::Demux(_) => {
+            GraphNodeRef::FanoutSource(_) | GraphNodeRef::Demux(_) | GraphNodeRef::Duplex(_) => {
                 crate::memory::MemoryDomainKind::System
             }
         }
@@ -239,7 +250,7 @@ impl<'a> GraphNodeRef<'a> {
             GraphNodeRef::Source(s) => s.output_domains(),
             GraphNodeRef::Element(e) => e.output_domains(),
             GraphNodeRef::Muxer(m) => m.output_domains(),
-            GraphNodeRef::FanoutSource(_) | GraphNodeRef::Demux(_) => {
+            GraphNodeRef::FanoutSource(_) | GraphNodeRef::Demux(_) | GraphNodeRef::Duplex(_) => {
                 crate::memory::DomainSet::only(crate::memory::MemoryDomainKind::System)
             }
         }
@@ -255,6 +266,7 @@ impl<'a> GraphNodeRef<'a> {
             GraphNodeRef::Muxer(m) => m.properties(),
             GraphNodeRef::FanoutSource(s) => s.properties(),
             GraphNodeRef::Demux(d) => d.properties(),
+            GraphNodeRef::Duplex(d) => d.properties(),
         }
     }
 
@@ -265,6 +277,7 @@ impl<'a> GraphNodeRef<'a> {
             GraphNodeRef::Muxer(m) => m.get_property(name),
             GraphNodeRef::FanoutSource(s) => s.get_property(name),
             GraphNodeRef::Demux(d) => d.get_property(name),
+            GraphNodeRef::Duplex(d) => d.get_property(name),
         }
     }
 
@@ -275,6 +288,7 @@ impl<'a> GraphNodeRef<'a> {
             GraphNodeRef::Muxer(m) => m.set_property(name, value),
             GraphNodeRef::FanoutSource(s) => s.set_property(name, value),
             GraphNodeRef::Demux(d) => d.set_property(name, value),
+            GraphNodeRef::Duplex(d) => d.set_property(name, value),
         }
     }
 
@@ -287,7 +301,7 @@ impl<'a> GraphNodeRef<'a> {
             GraphNodeRef::Element(e) => e.input_domains(),
             GraphNodeRef::Muxer(m) => m.input_domains(),
             GraphNodeRef::Demux(d) => d.input_domains(),
-            GraphNodeRef::Source(_) | GraphNodeRef::FanoutSource(_) => {
+            GraphNodeRef::Source(_) | GraphNodeRef::FanoutSource(_) | GraphNodeRef::Duplex(_) => {
                 crate::memory::DomainSet::ALL
             }
         }
@@ -297,9 +311,10 @@ impl<'a> GraphNodeRef<'a> {
         match self {
             GraphNodeRef::Element(e) => e.gpu_device(),
             GraphNodeRef::Muxer(m) => m.gpu_device(),
-            GraphNodeRef::Source(_) | GraphNodeRef::FanoutSource(_) | GraphNodeRef::Demux(_) => {
-                None
-            }
+            GraphNodeRef::Source(_)
+            | GraphNodeRef::FanoutSource(_)
+            | GraphNodeRef::Demux(_)
+            | GraphNodeRef::Duplex(_) => None,
         }
     }
 
@@ -310,6 +325,7 @@ impl<'a> GraphNodeRef<'a> {
             GraphNodeRef::Source(s) => s.type_name(),
             GraphNodeRef::FanoutSource(s) => s.type_name(),
             GraphNodeRef::Demux(d) => d.type_name(),
+            GraphNodeRef::Duplex(d) => d.type_name(),
         }
     }
 }
@@ -322,6 +338,7 @@ impl core::fmt::Debug for GraphNodeRef<'_> {
             GraphNodeRef::Muxer(_) => f.write_str("GraphNodeRef::Muxer(..)"),
             GraphNodeRef::FanoutSource(_) => f.write_str("GraphNodeRef::FanoutSource(..)"),
             GraphNodeRef::Demux(_) => f.write_str("GraphNodeRef::Demux(..)"),
+            GraphNodeRef::Duplex(_) => f.write_str("GraphNodeRef::Duplex(..)"),
         }
     }
 }
@@ -1642,6 +1659,25 @@ fn configure_nodes(
                     elem.configure_output(&solution[out_edge])?;
                 }
             }
+            // Only the input pads configure: the outputs carry caps the session
+            // declared in `output_caps`.
+            NodeKind::Duplex { .. } => {
+                let in_edges: Vec<usize> = vg.in_edges(node).to_vec();
+                for &eid in &in_edges {
+                    let pad = vg.edge(eid).dst.index as usize;
+                    let caps = solution[eid].clone();
+                    let GraphNodeRef::Duplex(session) =
+                        vg.element_mut(node).ok_or(G2gError::CapsMismatch)?
+                    else {
+                        return Err(G2gError::CapsMismatch);
+                    };
+                    if let ConfigureOutcome::ReFixate(counter) =
+                        session.configure_input(pad, &caps)?
+                    {
+                        return Ok(Some((vg.edge(eid).src.node, counter)));
+                    }
+                }
+            }
         }
     }
     Ok(None)
@@ -1738,6 +1774,7 @@ async fn prepare_graph<'a>(
                     Some(GraphNodeRef::Muxer(_)) => "mux",
                     Some(GraphNodeRef::FanoutSource(_)) => FANOUT_SOURCE_CATEGORY,
                     Some(GraphNodeRef::Demux(_)) => "demux",
+                    Some(GraphNodeRef::Duplex(_)) => "duplex",
                     None => continue, // no element and no structural name of its own
                 },
             };
@@ -1753,7 +1790,7 @@ async fn prepare_graph<'a>(
                     Some(GraphNodeRef::Muxer(mux)) => mux.set_log_category(over),
                     Some(GraphNodeRef::FanoutSource(src)) => src.set_log_category(over),
                     Some(GraphNodeRef::Demux(demux)) => demux.set_log_category(over),
-                    None => {}
+                    Some(GraphNodeRef::Duplex(_)) | None => {}
                 }
             }
             let name = namer.add(category, vg.node_name(node));
@@ -1769,7 +1806,7 @@ async fn prepare_graph<'a>(
                 Some(GraphNodeRef::Muxer(mux)) => mux.set_instance_name(name.clone()),
                 Some(GraphNodeRef::FanoutSource(src)) => src.set_instance_name(name.clone()),
                 Some(GraphNodeRef::Demux(demux)) => demux.set_instance_name(name.clone()),
-                None => {}
+                Some(GraphNodeRef::Duplex(_)) | None => {}
             }
             // M1164: a source reports out of band about itself, a fanned-out
             // session included (M1170); a transform or sink posts what it
@@ -2314,6 +2351,10 @@ enum ArmPlan<'a> {
         muxer: Box<dyn DynMultiInputElement + 'a>,
         parts: MuxerArmParts,
     },
+    Duplex {
+        session: Box<dyn DynMultiDuplexSession + 'a>,
+        io: DuplexArmIo,
+    },
 }
 
 impl<'a> ArmPlan<'a> {
@@ -2378,6 +2419,7 @@ impl<'a> ArmPlan<'a> {
                 probe,
             } => Box::pin(fanout_src_arm(source, ports, bus, probe)),
             ArmPlan::Muxer { muxer, parts } => drive_muxer(muxer, parts),
+            ArmPlan::Duplex { session, io } => Box::pin(duplex_arm(session, io)),
         };
         #[cfg(feature = "std")]
         if let Some(probe) = probe {
@@ -2397,6 +2439,7 @@ impl<'a> ArmPlan<'a> {
             ArmPlan::FaninSink { io, .. } => &io.probe,
             ArmPlan::FanoutSrc { probe, .. } => probe,
             ArmPlan::Muxer { parts, .. } => &parts.probe,
+            ArmPlan::Duplex { io, .. } => &io.probe,
         };
         probe.clone().filter(|probe| probe.records_visits())
     }
@@ -2630,7 +2673,8 @@ fn plan_arms<'a>(
                 flush_count,
             },
             (NodeKind::FaninSink(_), Some(GraphNodeRef::Muxer(session))) => {
-                let (pad_rxs, reverse) = fanin_sink_pads(vg, node, in_rxs, &*session);
+                let (pad_rxs, reverse) =
+                    fanin_sink_pads(vg, node, in_rxs, |pad| session.reverse_channel(pad));
                 ArmPlan::FaninSink {
                     session,
                     io: FaninSinkArmIo {
@@ -2654,6 +2698,33 @@ fn plan_arms<'a>(
                         &ElementLogName::new(FANOUT_SOURCE_CATEGORY, names[index].clone()),
                         visit_recorder,
                     ),
+                }
+            }
+            (NodeKind::Duplex { .. }, Some(GraphNodeRef::Duplex(session))) => {
+                let (pad_rxs, reverse) =
+                    fanin_sink_pads(vg, node, in_rxs, |pad| session.reverse_channel(pad));
+                let input_count = pad_rxs.len();
+                ArmPlan::Duplex {
+                    session,
+                    io: DuplexArmIo {
+                        inbound: DuplexPads {
+                            pad_rxs,
+                            reverse,
+                            open: alloc::vec![true; input_count],
+                            next: 0,
+                        },
+                        ports: MultiSenderSink::new(
+                            out_txs_by_port(vg, node, out_txs)
+                                .into_iter()
+                                .map(SenderSink::new)
+                                .collect(),
+                        ),
+                        probe: traced_source_probe(
+                            &ElementLogName::new("duplex", names[index].clone()),
+                            visit_recorder,
+                        ),
+                        run_end: run_end.clone(),
+                    },
                 }
             }
             _ => return Err(G2gError::CapsMismatch),
@@ -3750,7 +3821,8 @@ fn source_ref<'g, 'a>(
         GraphNodeRef::Element(_)
         | GraphNodeRef::Muxer(_)
         | GraphNodeRef::FanoutSource(_)
-        | GraphNodeRef::Demux(_) => None,
+        | GraphNodeRef::Demux(_)
+        | GraphNodeRef::Duplex(_) => None,
     }
 }
 
@@ -3765,7 +3837,8 @@ fn element_ref<'g, 'a>(
         GraphNodeRef::Source(_)
         | GraphNodeRef::Muxer(_)
         | GraphNodeRef::FanoutSource(_)
-        | GraphNodeRef::Demux(_) => None,
+        | GraphNodeRef::Demux(_)
+        | GraphNodeRef::Duplex(_) => None,
     }
 }
 
@@ -3887,6 +3960,24 @@ fn build_node_constraints<'g, 'a>(
                     output: CapsConstraint::AcceptsAny,
                     follows: None,
                 }
+            }
+            NodeKind::Duplex { inputs, outputs } => {
+                let GraphNodeRef::Duplex(session) =
+                    vg.element(node).ok_or(G2gError::CapsMismatch)?
+                else {
+                    return Err(G2gError::CapsMismatch);
+                };
+                let inputs: Vec<CapsConstraint<'g>> = (0..inputs as usize)
+                    .map(|pad| session.caps_constraint_as_input(pad))
+                    .collect();
+                let ports: Vec<CapsConstraint<'g>> = (0..outputs as usize)
+                    .map(|p| {
+                        session
+                            .output_caps(p)
+                            .map(|c| CapsConstraint::Produces(CapsSet::one(c)))
+                    })
+                    .collect::<Result<_, _>>()?;
+                NodeConstraint::Duplex { inputs, ports }
             }
         };
         constraints.push(nc);
@@ -4131,7 +4222,7 @@ fn cascade_allocation(
             }
             // A terminal fan-out source exposes no allocation hook (its
             // outputs are network-generated System bytes).
-            NodeKind::FanoutSrc(_) => {}
+            NodeKind::FanoutSrc(_) | NodeKind::Duplex { .. } => {}
             NodeKind::Muxer(_) | NodeKind::FaninSink(_) => {
                 // A muxer / terminal fan-in asks each input pad for the allocation
                 // it wants (most are content-agnostic and propose nothing), storing
@@ -5769,17 +5860,15 @@ fn fanin_sink_pads<'a>(
     vg: &ValidatedGraph<GraphNodeRef<'a>>,
     node: NodeId,
     in_rxs: Vec<LinkReceiver>,
-    session: &dyn DynMultiInputElement,
+    reverse_channel: impl Fn(usize) -> Option<ReverseChannel>,
 ) -> (Vec<(usize, LinkReceiver)>, Vec<Option<ReverseChannel>>) {
     let pads: Vec<usize> = vg
         .in_edges(node)
         .iter()
         .map(|&eid| vg.edge(eid).dst.index as usize)
         .collect();
-    let reverse: Vec<Option<ReverseChannel>> = pads
-        .iter()
-        .map(|&pad| session.reverse_channel(pad))
-        .collect();
+    let reverse: Vec<Option<ReverseChannel>> =
+        pads.iter().map(|&pad| reverse_channel(pad)).collect();
     let pad_rxs: Vec<(usize, LinkReceiver)> = in_rxs
         .into_iter()
         .zip(pads)
@@ -5845,6 +5934,69 @@ async fn fanout_src_arm<'a>(
     source
         .run(&mut SourceFrameSpans::new(&mut sinks, probe))
         .await
+}
+
+struct DuplexPads {
+    pad_rxs: Vec<(usize, LinkReceiver)>,
+    reverse: Vec<Option<ReverseChannel>>,
+    open: Vec<bool>,
+    next: usize,
+}
+
+impl DuplexInbound for DuplexPads {
+    fn recv(&mut self) -> BoxFuture<'_, Option<(usize, PipelinePacket)>> {
+        Box::pin(async move {
+            relay_reverse(&self.pad_rxs, &self.reverse);
+            let (slot, packet) = match muxer_try_recv(&self.pad_rxs, &self.open, self.next) {
+                Some(picked) => picked,
+                None => {
+                    if !self.open.contains(&true) {
+                        return None;
+                    }
+                    let (slot, maybe) = muxer_recv_any(&self.pad_rxs, &self.open, self.next).await;
+                    // A closed channel with no `Eos` is an upstream end.
+                    (slot, maybe.unwrap_or(PipelinePacket::Eos))
+                }
+            };
+            self.next = (slot + 1) % self.pad_rxs.len();
+            if matches!(packet, PipelinePacket::Eos) {
+                self.open[slot] = false;
+            }
+            Some((self.pad_rxs[slot].0, packet))
+        })
+    }
+}
+
+struct DuplexArmIo {
+    inbound: DuplexPads,
+    ports: MultiSenderSink,
+    probe: Probe,
+    run_end: RunEndRequest,
+}
+
+async fn duplex_arm<'a>(
+    mut session: Box<dyn DynMultiDuplexSession + 'a>,
+    io: DuplexArmIo,
+) -> Result<u64, G2gError> {
+    let DuplexArmIo {
+        mut inbound,
+        mut ports,
+        probe,
+        run_end,
+    } = io;
+    for port in 0..ports.port_count() {
+        ports
+            .push_to(port, PipelinePacket::Segment(Segment::new()))
+            .await?;
+    }
+    ports.set_push_wait_probe(probe.clone());
+    let received = session
+        .run(&mut inbound, &mut SourceFrameSpans::new(&mut ports, probe))
+        .await?;
+    // sources pushing into a dropped receiver fail the run with `Shutdown`
+    run_end.request();
+    while inbound.recv().await.is_some() {}
+    Ok(received)
 }
 
 /// Everything a terminal fan-in arm needs besides its element.

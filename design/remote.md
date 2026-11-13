@@ -85,7 +85,7 @@ that is not on the same network.
 | Software encode | `ffmpegenc`. |
 | Audio capture | `pulsesrc`, `wasapisrc`, `coreaudiosrc`. |
 | Audio encode | `opusenc`. |
-| Picture | `WebRtcDuplexSession`, `run_duplex_session`. Reverse-channel PLI is wired to `NvEnc::force_keyframe`. |
+| Picture | `WebRtcDuplexSession`, `Graph::add_duplex`. Reverse-channel PLI is wired to `NvEnc::force_keyframe`. |
 | Present | `autovideosink`, and directly `waylandsink`, `metalvideosink`, `d3d11sink`. |
 | Drop late frames | `livesync`. |
 | Browser decode and draw | `g2g-web` WebCodecs and `canvassink`. The page needs the same data channel the native client uses. |
