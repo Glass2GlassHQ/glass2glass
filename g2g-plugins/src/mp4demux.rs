@@ -133,6 +133,7 @@ const AUDIO_STREAM_NAMES: &[(&str, AudioFormat)] = &[
     ("opus", AudioFormat::Opus),
     ("mp3", AudioFormat::Mp3),
     ("ac3", AudioFormat::Ac3),
+    ("alac", AudioFormat::Alac),
     ("pcm-u8", AudioFormat::PcmU8),
     ("pcm-s16le", AudioFormat::PcmS16Le),
     ("pcm-s24le", AudioFormat::PcmS24Le),

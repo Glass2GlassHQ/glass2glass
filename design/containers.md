@@ -1106,12 +1106,17 @@ count samples through the millisecond block stamps instead of re-basing on each.
 
 An `mp4v` entry's objectTypeIndication picks the codec in one parse shared by
 every MP4 reader: 0x20 is MPEG-4 Part 2, 0x60-0x65 and 0x6A are MPEG-2 / MPEG-1.
-An `ac-3` entry is AC-3, its channel count read from the `dac3`.
+An `ac-3` entry is AC-3, its channel count read from the `dac3`. An `alac`
+entry is `AudioFormat::Alac`, with channels and rate from the `alac` atom's
+ALACSpecificConfig, and the whole atom leads the stream in-band, which is the
+extradata libavcodec's decoder takes.
 
 `mp4mux` writes MPEG-4 Part 2 as `mp4v` with objectTypeIndication 0x20 and the
 VOS, VO and VOL headers of the first keyframe as the decoder config, MP2 and
 MP3 as `mp4a` with 0x6B and no decoder config, and AC-3 as `ac-3` with a `dac3`
-filled from the first syncframe header, as ffmpeg and gst write them. ffmpeg
+filled from the first syncframe header, as ffmpeg and gst write them. ALAC
+goes out as `alac` with the in-band atom as its child box and the bit depth as
+the entry's sample size, as ffmpeg writes it. ffmpeg
 reads 0x6B as MP3, so it decodes an MP2 track through its float decoder, where
 the source decodes through the fixed-point one.
 

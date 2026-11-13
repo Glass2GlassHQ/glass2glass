@@ -127,6 +127,7 @@ impl FfmpegAudioDec {
                     | AudioFormat::Mp3
                     | AudioFormat::Ac3
                     | AudioFormat::Flac
+                    | AudioFormat::Alac
             ),
         }
     }
@@ -163,6 +164,7 @@ impl FfmpegAudioDec {
             AudioFormat::Mp3 => Id::MP3,
             AudioFormat::Ac3 => Id::AC3,
             AudioFormat::Flac => Id::FLAC,
+            AudioFormat::Alac => Id::ALAC,
             _ => Id::AAC,
         }
     }
@@ -363,10 +365,13 @@ impl AsyncElement for FfmpegAudioDec {
             self.decoder = None;
         }
         self.format = *format;
-        // FLAC opens lazily on its `fLaC` STREAMINFO header (needed as extradata)
-        // and a tagged codec on its container header. The rest open eagerly,
-        // their frames being self-describing.
-        if !matches!(self.format, AudioFormat::Flac | AudioFormat::Tagged(_)) {
+        // FLAC opens lazily on its `fLaC` STREAMINFO header (needed as extradata),
+        // ALAC on its `alac` atom and a tagged codec on its container header. The
+        // rest open eagerly, their frames being self-describing.
+        if !matches!(
+            self.format,
+            AudioFormat::Flac | AudioFormat::Alac | AudioFormat::Tagged(_)
+        ) {
             self.open_decoder(None)?;
         }
         self.configured = true;
@@ -424,6 +429,11 @@ impl AsyncElement for FfmpegAudioDec {
                     // nothing (it is codec config, not audio). Later frames go to the
                     // decoder whole, since FLAC frame boundaries are not cheaply
                     // self-syncing so g2g relies on the container framing.
+                    // libavcodec takes the whole `alac` atom as extradata
+                    if self.format == AudioFormat::Alac && crate::mp4box::is_alac_atom(buf) {
+                        self.open_decoder(Some(buf))?;
+                        return Ok(());
+                    }
                     if self.format == AudioFormat::Flac {
                         if buf.starts_with(b"fLaC") {
                             self.open_decoder(Some(buf))?;
@@ -459,6 +469,7 @@ impl AsyncElement for FfmpegAudioDec {
                                 split_frames(buf, crate::audioframe::mpa_frame_len)
                             }
                             AudioFormat::Ac3 => split_frames(buf, crate::audioframe::ac3_frame_len),
+                            AudioFormat::Alac => alloc::vec![buf],
                             _ if self.loas => split_frames(buf, crate::aacparse::loas_frame_len),
                             _ if self.lead_config.is_some() => alloc::vec![buf],
                             _ => split_frames(buf, crate::aacparse::adts_frame_len),
@@ -521,6 +532,7 @@ impl PadTemplates for FfmpegAudioDec {
             AudioFormat::Mp3,
             AudioFormat::Ac3,
             AudioFormat::Flac,
+            AudioFormat::Alac,
         ]
         .map(crate::typefind::elementary_audio_caps);
         Vec::from([

@@ -847,6 +847,7 @@ fn audio_gst_media_type(f: AudioFormat) -> (String, Option<&'static str>) {
         AudioFormat::Ac3 => ("audio/x-ac3", None),
         AudioFormat::Flac => ("audio/x-flac", None),
         AudioFormat::Vorbis => ("audio/x-vorbis", None),
+        AudioFormat::Alac => ("audio/x-alac", None),
         // Named in `PCM_FORMATS`, but still listed so a format added to the enum
         // has to be given a media type here rather than falling into a wildcard.
         AudioFormat::PcmS16Le
@@ -3027,6 +3028,8 @@ pub enum AudioFormat {
     ImaAdpcm,
     // a codec no variant above names, known only by its container's tag
     Tagged(CodecTag),
+    // Apple Lossless (GStreamer `audio/x-alac`), container-framed, its `alac` atom riding in-band ahead of the audio
+    Alac,
 }
 
 impl AudioFormat {
@@ -3048,6 +3051,7 @@ impl AudioFormat {
             | AudioFormat::Flac
             | AudioFormat::Vorbis
             | AudioFormat::ImaAdpcm
+            | AudioFormat::Alac
             | AudioFormat::Tagged(_) => None,
         }
     }

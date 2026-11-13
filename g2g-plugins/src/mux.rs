@@ -75,6 +75,7 @@ pub(crate) fn audio_header_config(format: AudioFormat) -> &'static str {
         AudioFormat::Vorbis => "Vorbis identification and setup headers",
         AudioFormat::Flac => "fLaC stream header",
         AudioFormat::Ac3 => "AC-3 syncframe header",
+        AudioFormat::Alac => "alac atom",
         _ => CODEC_CONFIG,
     }
 }
@@ -90,6 +91,7 @@ pub(crate) fn is_audio_config_packet(format: AudioFormat, packet: &[u8]) -> bool
         // The native `fLaC` marker + metadata blocks; audio frames start on
         // the 0xFF sync.
         AudioFormat::Flac => packet.starts_with(b"fLaC"),
+        AudioFormat::Alac => crate::mp4box::is_alac_atom(packet),
         _ => false,
     }
 }

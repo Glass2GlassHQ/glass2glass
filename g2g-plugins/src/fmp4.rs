@@ -1584,6 +1584,30 @@ fn parse_audio_entry(
             None,
         )));
     }
+    if let Some(entry) = find_box(entries, b"alac") {
+        let children = entry
+            .get(sound_entry_children_at(entry)?..)
+            .ok_or(G2gError::CapsMismatch)?;
+        // QuickTime nests the `alac` atom in a `wave` box
+        let payload = find_entry_child(children, b"alac")
+            .or_else(|| find_path(children, &[b"wave", b"alac"]))
+            .ok_or(G2gError::CapsMismatch)?;
+        let config = crate::mp4box::mp4_box(b"alac", payload);
+        let alac = crate::mp4box::alac_config(&config)?;
+        if alac.channels == 0 || alac.sample_rate == 0 {
+            return Err(G2gError::CapsMismatch);
+        }
+        return Ok(Some((
+            TrackKind::Audio {
+                format: AudioFormat::Alac,
+                channels: alac.channels,
+                sample_rate: alac.sample_rate,
+                config,
+                stored_pcm: None,
+            },
+            None,
+        )));
+    }
     if let Some(mp3) = find_box(entries, b".mp3") {
         let channels = sound_entry_channels(mp3)?;
         return Ok(Some((

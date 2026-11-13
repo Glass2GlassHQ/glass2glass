@@ -456,6 +456,7 @@ impl CapsSet {
             "audio/x-alaw" => audio_set(&[AudioFormat::Alaw]),
             "audio/x-adpcm" => audio_set(&[AudioFormat::ImaAdpcm]),
             "audio/x-vorbis" => audio_set(&[AudioFormat::Vorbis]),
+            "audio/x-alac" => audio_set(&[AudioFormat::Alac]),
             // gst names AAC `audio/mpeg` (with mpegversion=4, which we don't require).
             "audio/mpeg" => audio_set(&[AudioFormat::Aac]),
             // The text media types `Caps::to_gst_string` prints, so a caps a g2g

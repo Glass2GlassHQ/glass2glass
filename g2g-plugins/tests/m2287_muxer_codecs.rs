@@ -88,6 +88,7 @@ const REMUXES: &[Remux] = &[
     mp4("avi_h264_mp3.avi", Kind::Audio),
     mp4("ac3_stereo_48000.ac3", Kind::Audio),
     mp4("mpeg4part2_640x480.mp4", Kind::Video),
+    mp4("alac_stereo_8k.m4a", Kind::Audio),
 ];
 
 struct ZeroClock;

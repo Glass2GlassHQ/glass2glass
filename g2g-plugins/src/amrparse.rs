@@ -150,7 +150,13 @@ impl AmrBand {
 
     // the sample entry an MP4 track of this band carries, which the tagged decoder opens on
     fn sample_entry(self) -> Vec<u8> {
-        crate::mp4box::audio_sample_entry(&self.tag().tag.to_le_bytes(), 1, self.sample_rate(), &[])
+        crate::mp4box::audio_sample_entry(
+            &self.tag().tag.to_le_bytes(),
+            1,
+            crate::mp4box::ISO_AUDIO_SAMPLE_SIZE,
+            self.sample_rate(),
+            &[],
+        )
     }
 
     fn locate(self, buf: &[u8], eos: bool) -> Located {

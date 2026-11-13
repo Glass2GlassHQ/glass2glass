@@ -27,8 +27,8 @@
 //! muxer in `default_registry`, so any number of input links builds this element,
 //! the way gst's request sink pads do. Video is H.264/H.265 (avc1/hvc1), VP8/VP9
 //! (vp08/vp09 + vpcC), AV1 (av01 + av1C from the sequence header) or MPEG-4
-//! Part 2 (mp4v/esds); audio is AAC, MP2 or MP3 (mp4a/esds), Opus (Opus/dOps)
-//! or AC-3 (ac-3/dac3), sync-sample audio. A
+//! Part 2 (mp4v/esds); audio is AAC, MP2 or MP3 (mp4a/esds), Opus (Opus/dOps),
+//! AC-3 (ac-3/dac3) or ALAC (alac/alac), sync-sample audio. A
 //! `Caps::Text{Utf8}` pad adds a `tx3g` timed-text track (ffmpeg's
 //! `mov_text`): one cue per sample, with the runs between cues filled by empty
 //! samples, since a text sample presents where the durations before it end.
@@ -63,14 +63,14 @@ use crate::livemux::{wall_clock_ns, LiveMuxDeadline, LIVE_MUX_LATENCY_PROPERTY};
 use crate::mp4audiosink::{esds, AAC_OBJECT_TYPE, AUDIO_STREAM_TYPE, VISUAL_STREAM_TYPE};
 use crate::mp4box::{
     audio_sample_entry, ftyp, ftyp_cmaf, full_box, mp4_box, orientation_matrix,
-    packed_mdhd_language, prft, put_box_header, styp_cmaf, udta_with_tags, BOX_HEADER_LEN, MATRIX,
-    UNDETERMINED_MDHD_LANGUAGE,
+    packed_mdhd_language, prft, put_box_header, styp_cmaf, udta_with_tags, BOX_HEADER_LEN,
+    ISO_AUDIO_SAMPLE_SIZE, MATRIX, UNDETERMINED_MDHD_LANGUAGE,
 };
 use crate::mpeg4videoparse::Mpeg4VideoCodec;
 use crate::mux::{
-    audio_header_config, audio_track_params, every_track_header_ready, refused_input,
-    refused_input_because, require_header_config_at_end, video_header_config, InputPriming,
-    CODEC_CONFIG,
+    audio_header_config, audio_track_params, every_track_header_ready, is_audio_config_packet,
+    refused_input, refused_input_because, require_header_config_at_end, video_header_config,
+    InputPriming, CODEC_CONFIG,
 };
 use crate::opusparse::{
     dops_from_opus_head, is_opus_config, parse_opus_head, synth_opus_head, OPUS_ENCODER_PRE_SKIP,
@@ -490,7 +490,8 @@ impl Mp4MuxN {
                     | AudioFormat::Opus
                     | AudioFormat::Mp2
                     | AudioFormat::Mp3
-                    | AudioFormat::Ac3),
+                    | AudioFormat::Ac3
+                    | AudioFormat::Alac),
                 channels,
                 sample_rate,
                 ..
@@ -713,6 +714,19 @@ impl Mp4MuxN {
                         channels: params.channels,
                         rate: params.sample_rate,
                         config,
+                    });
+                }
+                // the `alac` atom leading the stream is the sample entry's child box verbatim
+                AudioFormat::Alac => {
+                    if !is_audio_config_packet(format, au) {
+                        return Ok(());
+                    }
+                    let alac = crate::mp4box::alac_config(au)?;
+                    self.inits[input] = Some(TrackInit::Audio {
+                        format,
+                        channels: alac.channels,
+                        rate: alac.sample_rate,
+                        config: au.to_vec(),
                     });
                 }
                 // MP2 and MP3 frames describe themselves, and an AC-3 frame's header fills the `dac3`
@@ -1367,14 +1381,19 @@ impl MultiInputElement for Mp4MuxN {
                     // Capture this track's init from its first AU before queueing.
                     if let Some(s) = frame.domain.as_system_slice() {
                         self.capture_init(input, s)?;
-                        // An in-band Opus header or a raw AAC stream's config is
-                        // codec config, not audio: it built the sample entry above
-                        // and must never reach the `mdat`.
-                        let opus_config = self.is_opus_pad(input) && is_opus_config(s);
+                        // An in-band Opus header, ALAC atom or a raw AAC stream's
+                        // config is codec config, not audio: it built the sample
+                        // entry above and must never reach the `mdat`.
+                        let header_packet = match self.kinds[input] {
+                            Some(PadKind::Audio { format, .. }) => {
+                                is_audio_config_packet(format, s)
+                            }
+                            _ => false,
+                        };
                         let aac_config = self
                             .aac_config(input)
                             .is_some_and(|config| is_leading_aac_config(config, s));
-                        if opus_config || aac_config {
+                        if header_packet || aac_config {
                             return Ok(());
                         }
                     }
@@ -1781,26 +1800,36 @@ fn trak_media(init: &TrackInit) -> TrakMedia {
             rate,
             config,
         } => {
-            let sample_entry = match format {
-                AudioFormat::Opus => {
-                    audio_sample_entry(b"Opus", *channels, *rate, &dops(*channels, *rate, config))
-                }
-                AudioFormat::Mp2 | AudioFormat::Mp3 => audio_sample_entry(
-                    b"mp4a",
-                    *channels,
-                    *rate,
-                    &esds(MPEG1_AUDIO_OBJECT_TYPE, AUDIO_STREAM_TYPE, &[]),
+            let (fourcc, sample_size, codec_box): (&[u8; 4], u16, Vec<u8>) = match format {
+                AudioFormat::Opus => (
+                    b"Opus",
+                    ISO_AUDIO_SAMPLE_SIZE,
+                    dops(*channels, *rate, config),
                 ),
-                AudioFormat::Ac3 => {
-                    audio_sample_entry(b"ac-3", *channels, *rate, &mp4_box(b"dac3", config))
-                }
-                _ => audio_sample_entry(
+                AudioFormat::Mp2 | AudioFormat::Mp3 => (
                     b"mp4a",
-                    *channels,
-                    *rate,
-                    &esds(AAC_OBJECT_TYPE, AUDIO_STREAM_TYPE, config),
+                    ISO_AUDIO_SAMPLE_SIZE,
+                    esds(MPEG1_AUDIO_OBJECT_TYPE, AUDIO_STREAM_TYPE, &[]),
+                ),
+                AudioFormat::Ac3 => (b"ac-3", ISO_AUDIO_SAMPLE_SIZE, mp4_box(b"dac3", config)),
+                // ffmpeg writes an ALAC entry's bit depth as its sample size
+                AudioFormat::Alac => (
+                    b"alac",
+                    u16::from(
+                        crate::mp4box::alac_config(config)
+                            .expect("capture_init takes only an alac atom")
+                            .bit_depth,
+                    ),
+                    config.clone(),
+                ),
+                _ => (
+                    b"mp4a",
+                    ISO_AUDIO_SAMPLE_SIZE,
+                    esds(AAC_OBJECT_TYPE, AUDIO_STREAM_TYPE, config),
                 ),
             };
+            let sample_entry =
+                audio_sample_entry(fourcc, *channels, sample_size, *rate, &codec_box);
             TrakMedia {
                 handler: b"soun",
                 media_header: full_box(b"smhd", 0, 0, &[0u8; 4]),
