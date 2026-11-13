@@ -49,6 +49,15 @@ const SOUND_FORMAT_AAC: u8 = 10;
 const SOUND_FORMAT_EX_HEADER: u8 = 9;
 // MP3 at 8 kHz, a rate the 2-bit rate field cannot express
 const SOUND_FORMAT_MP3_8KHZ: u8 = 14;
+// PCM in the writer's byte order, which every reader takes as little-endian
+const SOUND_FORMAT_PCM_PLATFORM: u8 = 0;
+const SOUND_FORMAT_PCM_LE: u8 = 3;
+const SOUND_FORMAT_ALAW: u8 = 7;
+const SOUND_FORMAT_MULAW: u8 = 8;
+// the audio flags bit set for 16-bit samples, clear for 8-bit
+const SOUND_SIZE_16_BIT: u8 = 0x02;
+// FLV's G.711 formats ignore the rate field and always run at 8 kHz
+const G711_RATE_HZ: u32 = 8_000;
 const AUDIO_PACKET_SEQUENCE_START: u8 = 0;
 const AUDIO_PACKET_CODED_FRAMES: u8 = 1;
 const AUDIO_PACKET_MULTITRACK: u8 = 5;
@@ -78,6 +87,14 @@ pub enum FlvCodec {
     Aac,
     /// Speex (audio sound format 11), fixed at 16 kHz mono.
     Speex,
+    /// 8-bit unsigned PCM (audio sound format 0 or 3, 8-bit samples).
+    PcmU8,
+    /// 16-bit little-endian PCM (audio sound format 0 or 3, 16-bit samples).
+    PcmS16Le,
+    /// G.711 A-law (audio sound format 7), fixed at 8 kHz.
+    Alaw,
+    /// G.711 mu-law (audio sound format 8), fixed at 8 kHz.
+    Mulaw,
 }
 
 impl FlvCodec {
@@ -87,7 +104,13 @@ impl FlvCodec {
             FlvCodec::SorensonH263 | FlvCodec::Vp6 | FlvCodec::Vp6Alpha | FlvCodec::H264 => {
                 FlvTrack::Video
             }
-            FlvCodec::Mp3 | FlvCodec::Aac | FlvCodec::Speex => FlvTrack::Audio,
+            FlvCodec::Mp3
+            | FlvCodec::Aac
+            | FlvCodec::Speex
+            | FlvCodec::PcmU8
+            | FlvCodec::PcmS16Le
+            | FlvCodec::Alaw
+            | FlvCodec::Mulaw => FlvTrack::Audio,
         }
     }
 
@@ -103,6 +126,9 @@ impl FlvCodec {
             FlvCodec::Mp3 => 2,
             FlvCodec::Aac => SOUND_FORMAT_AAC,
             FlvCodec::Speex => 11,
+            FlvCodec::PcmU8 | FlvCodec::PcmS16Le => SOUND_FORMAT_PCM_LE,
+            FlvCodec::Alaw => SOUND_FORMAT_ALAW,
+            FlvCodec::Mulaw => SOUND_FORMAT_MULAW,
         }
     }
 
@@ -134,15 +160,21 @@ impl FlvCodec {
         }
     }
 
-    /// The audio codec for an audio tag's sound format, or `None` for one this
-    /// parser does not carry (PCM, ADPCM, Nellymoser, G.711).
-    fn from_sound_format(format: u8) -> Option<Self> {
-        match format {
+    /// The audio codec for a legacy audio tag's first byte, or `None` for a
+    /// sound format this parser does not carry (ADPCM, Nellymoser).
+    fn from_audio_flags(first: u8) -> Option<Self> {
+        match first >> 4 {
             // 14 is MP3 at 8 kHz: the same bitstream, a rate the 2-bit rate field
             // cannot express.
             2 | SOUND_FORMAT_MP3_8KHZ => Some(FlvCodec::Mp3),
             SOUND_FORMAT_AAC => Some(FlvCodec::Aac),
             11 => Some(FlvCodec::Speex),
+            SOUND_FORMAT_PCM_PLATFORM | SOUND_FORMAT_PCM_LE if first & SOUND_SIZE_16_BIT != 0 => {
+                Some(FlvCodec::PcmS16Le)
+            }
+            SOUND_FORMAT_PCM_PLATFORM | SOUND_FORMAT_PCM_LE => Some(FlvCodec::PcmU8),
+            SOUND_FORMAT_ALAW => Some(FlvCodec::Alaw),
+            SOUND_FORMAT_MULAW => Some(FlvCodec::Mulaw),
             _ => None,
         }
     }
@@ -161,8 +193,17 @@ fn payload_offset(codec: FlvCodec) -> usize {
         | FlvCodec::Vp6
         | FlvCodec::Vp6Alpha
         | FlvCodec::Mp3
-        | FlvCodec::Speex => 0,
+        | FlvCodec::Speex
+        | FlvCodec::PcmU8
+        | FlvCodec::PcmS16Le
+        | FlvCodec::Alaw
+        | FlvCodec::Mulaw => 0,
     }
+}
+
+// the 2-bit rate field counts 5512, 11025, 22050 and 44100 Hz
+fn declared_rate(rate_bits: u8) -> u32 {
+    44_100 >> (3 - rate_bits)
 }
 
 /// Channel count and sample rate an audio tag's first byte declares, for the
@@ -172,14 +213,27 @@ fn payload_offset(codec: FlvCodec) -> usize {
 /// `None` for AAC, whose real layout comes from the `AudioSpecificConfig`.
 fn audio_tag_params(codec: FlvCodec, first: u8) -> Option<(u8, u32)> {
     let channels = if first & 0x01 == 1 { 2 } else { 1 };
-    let rate = 44_100u32 >> (3 - ((first >> 2) & 0x03));
+    let rate = declared_rate((first >> 2) & 0x03);
     match codec {
         FlvCodec::Mp3 if first >> 4 == SOUND_FORMAT_MP3_8KHZ => Some((channels, 8_000)),
-        FlvCodec::Mp3 => Some((channels, rate)),
+        FlvCodec::Mp3 | FlvCodec::PcmU8 | FlvCodec::PcmS16Le => Some((channels, rate)),
+        FlvCodec::Alaw | FlvCodec::Mulaw => Some((channels, G711_RATE_HZ)),
         FlvCodec::Speex => Some((1, 16_000)),
         FlvCodec::Aac => None,
         _ => None,
     }
+}
+
+// whether the legacy tag flags declare this layout, for the codecs whose layout is only there
+pub(crate) fn tag_flags_declare(codec: FlvCodec, channels: u8, sample_rate: u32) -> bool {
+    let rate_declared = match codec {
+        FlvCodec::PcmU8 | FlvCodec::PcmS16Le => {
+            (0..=3u8).any(|bits| declared_rate(bits) == sample_rate)
+        }
+        FlvCodec::Alaw | FlvCodec::Mulaw => sample_rate == G711_RATE_HZ,
+        _ => return true,
+    };
+    rate_declared && matches!(channels, 1 | 2)
 }
 
 /// The first byte of an audio tag: sound format, then the rate / sample-size /
@@ -190,21 +244,28 @@ fn audio_tag_params(codec: FlvCodec, first: u8) -> Option<(u8, u32)> {
 /// 8 kHz MP3 is its own sound format.
 fn audio_tag_flags(codec: FlvCodec, channels: u8, sample_rate: u32) -> u8 {
     if codec == FlvCodec::Mp3 && sample_rate == 8_000 {
-        return (SOUND_FORMAT_MP3_8KHZ << 4) | 0x02 | u8::from(channels >= 2);
+        return (SOUND_FORMAT_MP3_8KHZ << 4) | SOUND_SIZE_16_BIT | u8::from(channels >= 2);
     }
     let (rate_bits, stereo) = match codec {
         FlvCodec::Aac => (3, 1),
         FlvCodec::Speex => (1, 0),
+        // ffmpeg and gst both write the 5.5 kHz bits, which readers ignore for G.711
+        FlvCodec::Alaw | FlvCodec::Mulaw => (0, u8::from(channels >= 2)),
         _ => {
             // 44100 >> (3 - bits): the largest declared rate not above the real one.
             let bits = (0..=3u8)
                 .rev()
-                .find(|&b| 44_100u32 >> (3 - b) <= sample_rate)
+                .find(|&b| declared_rate(b) <= sample_rate)
                 .unwrap_or(0);
             (bits, u8::from(channels >= 2))
         }
     };
-    (codec.tag_id() << 4) | (rate_bits << 2) | 0x02 | stereo
+    let sample_size = if codec == FlvCodec::PcmU8 {
+        0
+    } else {
+        SOUND_SIZE_16_BIT
+    };
+    (codec.tag_id() << 4) | (rate_bits << 2) | sample_size | stereo
 }
 
 /// The FLV header (`FLV` signature + version + flags) plus the first
@@ -821,7 +882,7 @@ fn audio_packets(body: &[u8]) -> Vec<AudioPacket<'_>> {
 }
 
 fn legacy_audio_packet(first: u8, body: &[u8]) -> Option<AudioPacket<'_>> {
-    let codec = FlvCodec::from_sound_format(first >> 4)?;
+    let codec = FlvCodec::from_audio_flags(first)?;
     if codec != FlvCodec::Aac {
         return Some(AudioPacket {
             track_id: LEGACY_AUDIO_TRACK,
@@ -910,15 +971,11 @@ fn ex_audio_packet<'a>(
 
 // FLV sound formats this parser does not carry, by the codec name ffmpeg gives them
 #[cfg(feature = "std")]
-const UNSUPPORTED_SOUND_FORMATS: [(u8, &str); 8] = [
-    (0, "pcm"),
+const UNSUPPORTED_SOUND_FORMATS: [(u8, &str); 4] = [
     (1, "adpcm_swf"),
-    (3, "pcm_s16le"),
     (4, "nellymoser"),
     (5, "nellymoser"),
     (6, "nellymoser"),
-    (7, "pcm_alaw"),
-    (8, "pcm_mulaw"),
 ];
 // enhanced FLV puts a fourcc after this flag instead of a codec id in the low nibble
 const VIDEO_EX_HEADER: u8 = 0x80;
@@ -945,7 +1002,7 @@ pub(crate) fn unsupported_codecs(data: &[u8]) -> Vec<alloc::string::String> {
             TAG_VIDEO if FlvCodec::from_video_id(first & 0x0F).is_none() => {
                 alloc::format!("flv video codec id {}", first & 0x0F)
             }
-            TAG_AUDIO if FlvCodec::from_sound_format(first >> 4).is_none() => {
+            TAG_AUDIO if FlvCodec::from_audio_flags(first).is_none() => {
                 let format = first >> 4;
                 UNSUPPORTED_SOUND_FORMATS
                     .iter()
@@ -1522,6 +1579,11 @@ mod tests {
             (FlvCodec::Mp3, 1, 22_050),
             (FlvCodec::Mp3, 1, 8_000),
             (FlvCodec::Speex, 1, 16_000),
+            (FlvCodec::PcmU8, 1, 11_025),
+            (FlvCodec::PcmS16Le, 2, 44_100),
+            (FlvCodec::PcmS16Le, 1, 5_512),
+            (FlvCodec::Alaw, 1, G711_RATE_HZ),
+            (FlvCodec::Mulaw, 2, G711_RATE_HZ),
         ] {
             let mut mux = FlvMuxer::new(codec);
             mux.set_audio_params(channels, rate);
@@ -1535,6 +1597,16 @@ mod tests {
             assert_eq!(units[0].pts_ms, 10);
             assert_eq!(d.audio_params(), Some((channels, rate)), "{codec:?}");
         }
+    }
+
+    #[test]
+    fn platform_order_pcm_reads_by_sample_size() {
+        // the first audio tag byte ffmpeg writes for 5.5 kHz mono U8 and S16 PCM
+        assert_eq!(FlvCodec::from_audio_flags(0x00), Some(FlvCodec::PcmU8));
+        assert_eq!(
+            FlvCodec::from_audio_flags(SOUND_SIZE_16_BIT),
+            Some(FlvCodec::PcmS16Le)
+        );
     }
 
     fn multitrack_body(multitrack: u8, tracks: &[(&[u8; 4], u8, &[u8])]) -> Vec<u8> {

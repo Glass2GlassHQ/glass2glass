@@ -2149,7 +2149,7 @@ fn flv_select(
     location: &str,
     select: impl FnOnce(&[PadKind]) -> Option<Vec<usize>>,
 ) -> Option<(Box<dyn DynMultiOutputElement>, Vec<Caps>)> {
-    use crate::flvdemux::{forwardable_ports, FlvDemux, FlvDemuxN};
+    use crate::flvdemux::{forwardable_ports, FlvDemux, FlvDemuxN, FlvPort};
     let ports = forwardable_ports(&read_prefix(location)?);
     let kinds: Vec<PadKind> = ports
         .iter()
@@ -2165,10 +2165,7 @@ fn flv_select(
     if selected.is_empty() {
         return None;
     }
-    let caps = selected
-        .iter()
-        .map(|port| FlvDemux::output_caps(port.stream))
-        .collect();
+    let caps = selected.iter().map(FlvPort::caps).collect();
     Some((Box::new(FlvDemuxN::new(&selected)), caps))
 }
 
@@ -2216,6 +2213,7 @@ pub fn flv_demux_caps_select(
             Some(FlvPort {
                 stream: stream_carrying(accepted)?,
                 track_id,
+                legacy_audio_layout: None,
             })
         })
         .collect();

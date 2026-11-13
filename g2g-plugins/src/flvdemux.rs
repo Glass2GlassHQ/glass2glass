@@ -51,6 +51,7 @@ use crate::aacparse::{adts_from_asc, audio_specific_config_info, is_raw_aac_conf
 use crate::annexb::{
     length_prefixed_nal_units, parse_avcc, prepend_param_sets, starts_with_param_set,
 };
+use crate::avidemux::{is_pcm, pcm_alternatives};
 use crate::bereader::{take_be_u16, take_be_u32};
 use crate::demuxseek::{DemuxSeek, SharedSegment};
 use crate::flv::{FlvCodec, FlvDemuxer, FlvTrack, FlvUnit, LEGACY_AUDIO_TRACK};
@@ -75,6 +76,14 @@ pub enum FlvStream {
     Mp3,
     /// The Speex audio track.
     Speex,
+    /// The 8-bit unsigned PCM audio track.
+    PcmU8,
+    /// The 16-bit little-endian PCM audio track.
+    PcmS16Le,
+    /// The G.711 A-law audio track.
+    Alaw,
+    /// The G.711 mu-law audio track.
+    Mulaw,
 }
 
 /// The video track's decoder config, parsed from the `avcC` side channel.
@@ -213,7 +222,13 @@ impl StreamEmitter {
             // Sorenson frames are already the codec's own bitstream, and VP6
             // frames keep their leading dimension byte for the decoder.
             FlvCodec::SorensonH263 | FlvCodec::Vp6 | FlvCodec::Vp6Alpha => unit.data,
-            FlvCodec::Aac | FlvCodec::Mp3 | FlvCodec::Speex => {
+            FlvCodec::Aac
+            | FlvCodec::Mp3
+            | FlvCodec::Speex
+            | FlvCodec::PcmU8
+            | FlvCodec::PcmS16Le
+            | FlvCodec::Alaw
+            | FlvCodec::Mulaw => {
                 // Announce the concrete channel layout / sample rate once,
                 // refining the sentinel negotiation caps, before the first
                 // audio frame (the MP4-demuxer pattern). AAC's real layout is
@@ -393,6 +408,10 @@ impl FlvDemux {
             FlvStream::Aac => audio(AudioFormat::Aac),
             FlvStream::Mp3 => audio(AudioFormat::Mp3),
             FlvStream::Speex => audio(AudioFormat::Speex),
+            FlvStream::PcmU8 => audio(AudioFormat::PcmU8),
+            FlvStream::PcmS16Le => audio(AudioFormat::PcmS16Le),
+            FlvStream::Alaw => audio(AudioFormat::Alaw),
+            FlvStream::Mulaw => audio(AudioFormat::Mulaw),
         }
     }
 
@@ -406,6 +425,10 @@ impl FlvDemux {
             FlvStream::Aac => FlvCodec::Aac,
             FlvStream::Mp3 => FlvCodec::Mp3,
             FlvStream::Speex => FlvCodec::Speex,
+            FlvStream::PcmU8 => FlvCodec::PcmU8,
+            FlvStream::PcmS16Le => FlvCodec::PcmS16Le,
+            FlvStream::Alaw => FlvCodec::Alaw,
+            FlvStream::Mulaw => FlvCodec::Mulaw,
         }
     }
 
@@ -492,7 +515,13 @@ impl AsyncElement for FlvDemux {
         CapsConstraint::DerivedOutput(Box::new(move |input: &Caps| match input {
             Caps::ByteStream {
                 encoding: ByteStreamEncoding::Flv,
-            } => CapsSet::one(Self::output_caps(stream)),
+            } => match Self::output_caps(stream) {
+                // a lone rate and channel wildcard cannot fixate
+                Caps::Audio { format, .. } if is_pcm(format) => {
+                    CapsSet::from_alternatives(pcm_alternatives(format))
+                }
+                caps => CapsSet::one(caps),
+            },
             _ => CapsSet::from_alternatives(Vec::new()),
         }))
     }
@@ -602,6 +631,30 @@ pub struct FlvPort {
     pub stream: FlvStream,
     // the Enhanced RTMP track of an audio stream, `LEGACY_AUDIO_TRACK` for video and legacy audio
     pub track_id: u8,
+    // the channels and sample rate the probed legacy audio tags declare
+    pub legacy_audio_layout: Option<(u8, u32)>,
+}
+
+impl FlvPort {
+    pub(crate) fn caps(&self) -> Caps {
+        match (FlvDemux::output_caps(self.stream), self.legacy_audio_layout) {
+            // PCM takes the probed layout, since its wildcard rate cannot fixate
+            (
+                Caps::Audio {
+                    format,
+                    channel_layout,
+                    ..
+                },
+                Some((channels, sample_rate)),
+            ) if g2g_core::pcm_formats().contains(&format) => Caps::Audio {
+                format,
+                channels,
+                sample_rate,
+                channel_layout,
+            },
+            (caps, _) => caps,
+        }
+    }
 }
 
 // the ports the units in an FLV prefix fill, video first, then audio by track id
@@ -613,6 +666,10 @@ pub fn forwardable_ports(prefix: &[u8]) -> Vec<FlvPort> {
         let port = FlvPort {
             stream: stream_of_codec(unit.codec),
             track_id: unit.track_id,
+            legacy_audio_layout: demux.audio_params().filter(|_| {
+                unit.track_id == LEGACY_AUDIO_TRACK
+                    && !FlvDemux::is_video(stream_of_codec(unit.codec))
+            }),
         };
         if !ports.contains(&port) {
             ports.push(port);
@@ -627,6 +684,7 @@ pub fn forwardable_ports(prefix: &[u8]) -> Vec<FlvPort> {
 pub struct FlvDemuxN {
     demux: FlvDemuxer,
     emitters: Vec<StreamEmitter>,
+    port_caps: Vec<Caps>,
     segment: SharedSegment,
     emitted: u64,
 }
@@ -643,6 +701,7 @@ impl FlvDemuxN {
                 .iter()
                 .map(|port| StreamEmitter::new(port.stream, port.track_id))
                 .collect(),
+            port_caps: ports.iter().map(FlvPort::caps).collect(),
             segment: SharedSegment::new(ports.len()),
             emitted: 0,
         }
@@ -697,9 +756,7 @@ impl MultiOutputElement for FlvDemuxN {
     }
 
     fn port_output_caps(&self, port: usize) -> Option<Caps> {
-        self.emitters
-            .get(port)
-            .map(|emitter| FlvDemux::output_caps(emitter.stream))
+        self.port_caps.get(port).cloned()
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -747,7 +804,7 @@ impl MultiOutputElement for FlvDemuxN {
 static FLVDEMUX_PROPS: &[PropertySpec] = &[PropertySpec::new(
     "stream",
     PropKind::Str,
-    "elementary stream to emit: h264 | sorenson | vp6 | vp6a | aac | mp3 | speex",
+    "elementary stream to emit: h264 | sorenson | vp6 | vp6a | aac | mp3 | speex | pcm-u8 | pcm-s16le | alaw | mulaw",
 )];
 
 /// The stream each codec an FLV tag names is forwarded on, the inverse of
@@ -761,6 +818,10 @@ fn stream_of_codec(codec: FlvCodec) -> FlvStream {
         FlvCodec::Aac => FlvStream::Aac,
         FlvCodec::Mp3 => FlvStream::Mp3,
         FlvCodec::Speex => FlvStream::Speex,
+        FlvCodec::PcmU8 => FlvStream::PcmU8,
+        FlvCodec::PcmS16Le => FlvStream::PcmS16Le,
+        FlvCodec::Alaw => FlvStream::Alaw,
+        FlvCodec::Mulaw => FlvStream::Mulaw,
     }
 }
 
@@ -768,16 +829,13 @@ fn stream_of_codec(codec: FlvCodec) -> FlvStream {
 /// caps [`FlvDemux`] emits for it. Empty when the prefix holds no audio or
 /// video tag g2g reads.
 pub fn forwardable_streams(prefix: &[u8]) -> Vec<(FlvStream, Caps)> {
-    let mut streams: Vec<FlvStream> = Vec::new();
+    let mut streams: Vec<(FlvStream, Caps)> = Vec::new();
     for port in forwardable_ports(prefix) {
-        if !streams.contains(&port.stream) {
-            streams.push(port.stream);
+        if !streams.iter().any(|(stream, _)| *stream == port.stream) {
+            streams.push((port.stream, port.caps()));
         }
     }
     streams
-        .into_iter()
-        .map(|stream| (stream, FlvDemux::output_caps(stream)))
-        .collect()
 }
 
 /// Parse a `stream` property string to an [`FlvStream`].
@@ -790,6 +848,10 @@ fn flv_stream_from_str(s: &str) -> Option<FlvStream> {
         "aac" => Some(FlvStream::Aac),
         "mp3" => Some(FlvStream::Mp3),
         "speex" => Some(FlvStream::Speex),
+        "pcm-u8" => Some(FlvStream::PcmU8),
+        "pcm-s16le" => Some(FlvStream::PcmS16Le),
+        "alaw" => Some(FlvStream::Alaw),
+        "mulaw" => Some(FlvStream::Mulaw),
         _ => None,
     }
 }
@@ -804,12 +866,16 @@ pub(crate) fn flv_stream_to_str(stream: FlvStream) -> &'static str {
         FlvStream::Aac => "aac",
         FlvStream::Mp3 => "mp3",
         FlvStream::Speex => "speex",
+        FlvStream::PcmU8 => "pcm-u8",
+        FlvStream::PcmS16Le => "pcm-s16le",
+        FlvStream::Alaw => "alaw",
+        FlvStream::Mulaw => "mulaw",
     }
 }
 
 // H.264 first: the auto-plugger prefers the leading alternative, and it is the codec a
 // modern FLV carries
-const FLV_STREAMS: [FlvStream; 7] = [
+const FLV_STREAMS: [FlvStream; 11] = [
     FlvStream::H264,
     FlvStream::Aac,
     FlvStream::SorensonH263,
@@ -817,6 +883,10 @@ const FLV_STREAMS: [FlvStream; 7] = [
     FlvStream::Vp6Alpha,
     FlvStream::Mp3,
     FlvStream::Speex,
+    FlvStream::PcmU8,
+    FlvStream::PcmS16Le,
+    FlvStream::Alaw,
+    FlvStream::Mulaw,
 ];
 
 // the first stream a consumer with sink caps `accepted` takes

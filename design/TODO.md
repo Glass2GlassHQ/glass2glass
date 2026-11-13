@@ -331,8 +331,10 @@ libraries installed.
   - Demuxers drop streams gst's parsebin exposes: DTS in `filter/242_4.mkv`, TTA,
     pcm_dvd LPCM in `coolitnow-partial.vob`, and the xan_dpcm audio of
     `wc4-xan` AVIs.
-  - The fan-in muxers refuse codecs the gst muxer of the same name takes:
-    `matroskamux` DV, and `flvmux` PCM, A-law and mu-law.
+  - `matroskamux` refuses DV, which gst's `matroskamux` takes.
+- **Audio-only FLV through `flvdemux name=d d.audio_0`:** the pipeline writes no
+  bytes and reports no error, for AAC and PCM alike, while a file with video
+  demuxes its audio. `decodebin` on the same file decodes it.
 - **Opus end trim in fragmented MP4:** the fragmented `mp4mux` layout writes
   its `moov` before the stream ends, so the `elst` duration is 0 and the end
   trim is only in the last sample's duration, which gst's `qtdemux` ignores (a

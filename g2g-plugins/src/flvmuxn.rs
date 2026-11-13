@@ -4,7 +4,8 @@
 
 //! FLV multiplexer element: a video and an audio elementary stream
 //! in, either one optional (`Caps::CompressedVideo{H264}` Annex-B, `Caps::Audio{Aac}`
-//! ADTS, or one of the legacy Flash codecs: Sorenson, VP6, VP6-alpha, MP3, Speex),
+//! ADTS, or one of the legacy Flash codecs: Sorenson, VP6, VP6-alpha, MP3, Speex,
+//! U8 or S16LE PCM, A-law, mu-law),
 //! one FLV byte stream out:
 //!
 //! ```text
@@ -39,16 +40,17 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
+use g2g_core::log::Target;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
+    g2g_error, AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
     ElementMetadata, FrameTiming, G2gError, InputAggregator, MemoryDomain, MultiInputElement,
     OutputSink, PipelinePacket, PropError, PropValue, PropertySpec, TagList, VideoCodec,
 };
 
 use crate::aacparse::{is_leading_aac_config, muxer_access_unit, muxer_audio_specific_config};
 use crate::annexb::{au_is_keyframe, avcc_record, avcc_sample, parameter_sets, split_annexb};
-use crate::flv::{FlvCodec, FlvMuxer, FlvTrack, LEGACY_AUDIO_TRACK};
+use crate::flv::{tag_flags_declare, FlvCodec, FlvMuxer, FlvTrack, LEGACY_AUDIO_TRACK};
 use crate::livemux::{wall_clock_ns, LiveMuxDeadline, LIVE_MUX_PROPS};
 use crate::mux::{
     audio_header_config, audio_track_params, every_track_header_ready, refused_input,
@@ -172,6 +174,10 @@ impl FlvMuxN {
                 AudioFormat::Aac => Some(FlvCodec::Aac),
                 AudioFormat::Mp3 => Some(FlvCodec::Mp3),
                 AudioFormat::Speex => Some(FlvCodec::Speex),
+                AudioFormat::PcmU8 => Some(FlvCodec::PcmU8),
+                AudioFormat::PcmS16Le => Some(FlvCodec::PcmS16Le),
+                AudioFormat::Alaw => Some(FlvCodec::Alaw),
+                AudioFormat::Mulaw => Some(FlvCodec::Mulaw),
                 _ => None,
             },
             _ => None,
@@ -266,6 +272,15 @@ impl FlvMuxN {
                     sample_rate,
                     &[],
                 )?;
+            }
+            if let Some(codec) =
+                audio.filter(|&codec| !tag_flags_declare(codec, channels, sample_rate))
+            {
+                g2g_error!(
+                    Target::category(short_type_name::<Self>()),
+                    "FLV declares PCM at 5512, 11025, 22050 or 44100 Hz and G.711 at 8000 Hz, mono or stereo, not {codec:?} at {sample_rate} Hz with {channels} channels"
+                );
+                return Err(G2gError::CapsMismatch);
             }
             mux.set_audio_params(channels, sample_rate);
         }

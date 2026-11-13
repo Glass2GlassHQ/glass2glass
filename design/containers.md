@@ -1326,6 +1326,15 @@ with a `PipelinePacket::Overwrite` that `filesink` applies by seeking back, as
 gst's `flvmux` does. The duration runs from the first frame's PTS to the latest
 frame end, so a source that leaves frame durations at 0 comes out one frame short.
 
+PCM goes out as sound format 3, U8 or S16LE by the sample-size flag, as gst
+writes it. ffmpeg writes format 0, and the demuxer reads both. The 2-bit rate
+field holds only 5512, 11025, 22050 or 44100 Hz, so `flvmux` refuses PCM at
+any other rate, as gst does. ffmpeg instead writes the nearest lower rate, and
+the file plays back at that wrong rate. A-law and mu-law run at 8 kHz, with the
+5.5 kHz rate bits both ffmpeg and gst write. Readers ignore those bits for
+G.711. The demuxer's PCM pads take the probed tag layout, since a PCM wildcard
+rate does not fixate.
+
 `RtmpPublisher` sends media only after `onStatus` `NetStream.Publish.Start`. An
 `_error` reply to `connect` or `createStream`, or an `onStatus` at level `error`,
 returns a `PublishRefusal` with the server's code and description, which

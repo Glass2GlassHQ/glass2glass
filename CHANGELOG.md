@@ -205,6 +205,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M2289: `mp4mux` takes MPEG-4 Part 2, MP2, MP3 and AC-3, and `qtdemux` reads `ac-3` tracks as AC-3.
 - M2290: `AudioFormat::Alac`, read by `qtdemux`, decoded by `ffmpegaudiodec` and written by `mp4mux`.
 - M2291: `matroskamux` takes MPEG-2, MPEG-4 Part 2, Theora, ProRes and I420, YUY2 and UYVY raw video, and `matroskademux` reads MPEG-1, MPEG-2 and MPEG-4 Part 2 tracks.
+- M2292: `flvmux` and `flvdemux` take U8 and S16LE PCM, A-law and mu-law.
 
 Breaking: `TimecodeMeta.frames` is a `u16`, `WIRE_VERSION` is 6, `FrameTiming` gains `start_discard_ns` and `end_discard_ns`, `RtpRecvConfig` gains `parameter_sets`, `RtmpPublisher::push` fails with a `PublishRefusal`, and `Interlace` gains `InterleavedBottomFieldFirst`.
 
