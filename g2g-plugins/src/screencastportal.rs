@@ -166,6 +166,8 @@ pub struct PortalScreenCast {
     /// Present when the portal persisted the grant; feeding it back into
     /// [`PortalRequest::restore_token`] skips the dialog next time.
     pub restore_token: Option<String>,
+    // xdg-desktop-portal closes a session when the D-Bus connection that created it closes
+    pub connection: Connection,
 }
 
 /// Run the whole handshake and return the granted stream.
@@ -241,6 +243,7 @@ pub fn open_screen_cast(request: &PortalRequest) -> Result<PortalScreenCast, Por
         remote_fd: OwnedFd::from(remote_fd),
         node_id,
         restore_token,
+        connection,
     })
 }
 

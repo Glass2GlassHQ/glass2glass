@@ -911,17 +911,14 @@ async fn await_setup(
 #[cfg(feature = "portal")]
 fn run_portal_handshake(
     request: &PortalRequest,
-) -> Result<(std::os::fd::OwnedFd, u32, Option<String>), i32> {
-    match open_screen_cast(request) {
-        Ok(granted) => Ok((granted.remote_fd, granted.node_id, granted.restore_token)),
-        Err(e) => {
-            g2g_core::g2g_error!(
-                g2g_core::log::Target::category("PipeWireVideoSrc"),
-                "screencast portal handshake failed: {e}"
-            );
-            Err(-1)
-        }
-    }
+) -> Result<crate::screencastportal::PortalScreenCast, i32> {
+    open_screen_cast(request).map_err(|e| {
+        g2g_core::g2g_error!(
+            g2g_core::log::Target::category("PipeWireVideoSrc"),
+            "screencast portal handshake failed: {e}"
+        );
+        -1
+    })
 }
 
 /// What the `process` callback needs to turn a buffer into a frame, refreshed by
@@ -976,7 +973,15 @@ fn build_and_run(
     // on the worker rather than on the executor. It is bounded by its own
     // per-step timeout, so this thread always gets to report a result.
     #[cfg(feature = "portal")]
-    let portal = portal.as_ref().map(run_portal_handshake).transpose()?;
+    let granted = portal.as_ref().map(run_portal_handshake).transpose()?;
+    #[cfg(feature = "portal")]
+    let (portal, _portal_connection) = match granted {
+        Some(granted) => (
+            Some((granted.remote_fd, granted.node_id, granted.restore_token)),
+            Some(granted.connection),
+        ),
+        None => (None, None),
+    };
     #[cfg(not(feature = "portal"))]
     let portal: Option<(std::os::fd::OwnedFd, u32, Option<String>)> = {
         let () = portal;
@@ -1029,7 +1034,11 @@ fn build_and_run(
         // reported as a stream error, not a failed connect: surface it so the
         // capture fails instead of waiting for frames that never come.
         .state_changed(|_, user_data, _old, new| {
-            if let pw::stream::StreamState::Error(_) = new {
+            if let pw::stream::StreamState::Error(message) = new {
+                g2g_core::g2g_error!(
+                    g2g_core::log::Target::category("PipeWireVideoSrc"),
+                    "capture stream failed: {message}"
+                );
                 let _ = user_data
                     .tx
                     .send(FromWorker::Failed(G2gError::Hardware(
