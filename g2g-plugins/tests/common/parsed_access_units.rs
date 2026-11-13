@@ -54,3 +54,18 @@ pub(crate) async fn parsed_access_units(codec: VideoCodec, stream: &[u8]) -> Vec
     );
     access_units
 }
+
+#[allow(dead_code)] // not every test file that splits a stream wants the bytes alone
+pub(crate) async fn parsed_access_unit_bytes(codec: VideoCodec, stream: &[u8]) -> Vec<Vec<u8>> {
+    parsed_access_units(codec, stream)
+        .await
+        .into_iter()
+        .map(|frame| {
+            frame
+                .domain
+                .as_system_slice()
+                .expect("the parser emits system memory")
+                .to_vec()
+        })
+        .collect()
+}

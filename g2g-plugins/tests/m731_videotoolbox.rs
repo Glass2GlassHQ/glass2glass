@@ -13,6 +13,9 @@
 #[path = "common/collect_sink.rs"]
 mod collect_sink;
 use collect_sink::CollectSink;
+#[path = "common/parsed_access_units.rs"]
+mod parsed_access_units;
+use parsed_access_units::parsed_access_units;
 #[cfg(feature = "vtencode")]
 #[path = "common/keyframe_request_sink.rs"]
 mod keyframe_request_sink;
@@ -67,37 +70,6 @@ fn platform_tag() -> String {
     format!("macOS {} VideoToolbox", std::env::consts::ARCH)
 }
 
-/// Split an Annex-B elementary stream into access units with the real
-/// re-framing parser (`H264Parse` / `H265Parse`), the element a pipeline would
-/// put in front of the decoder.
-async fn access_units(codec: VideoCodec, es: &[u8]) -> Vec<Frame> {
-    let caps = Caps::CompressedVideo {
-        codec,
-        width: Dim::Any,
-        height: Dim::Any,
-        framerate: Rate::Any,
-        colorimetry: g2g_core::Colorimetry::UNKNOWN,
-        pixel_aspect: g2g_core::PixelAspect::Any,
-        alignment: g2g_core::BitstreamAlignment::Unspecified,
-    };
-    let mut sink = CollectSink::default();
-    match codec {
-        VideoCodec::H265 => {
-            let mut parse = g2g_plugins::h265parse::H265Parse::reframing();
-            parse.configure_pipeline(&caps).expect("configure parser");
-            drive(&mut parse, es, &mut sink).await;
-        }
-        _ => {
-            let mut parse = g2g_plugins::h264parse::H264Parse::reframing();
-            parse.configure_pipeline(&caps).expect("configure parser");
-            drive(&mut parse, es, &mut sink).await;
-        }
-    }
-    let aus = sink.into_data_frames();
-    assert!(aus.len() > 1, "parser split the fixture into access units");
-    aus
-}
-
 async fn drive<E: AsyncElement>(el: &mut E, es: &[u8], sink: &mut CollectSink) {
     for (i, chunk) in es.chunks(4096).enumerate() {
         let frame = Frame::new(
@@ -115,7 +87,7 @@ async fn drive<E: AsyncElement>(el: &mut E, es: &[u8], sink: &mut CollectSink) {
 /// Decode `es` through `dec` and assert a full, plausible NV12 picture stream
 /// at the expected geometry comes out.
 async fn decode_fixture(mut dec: VtDecode, codec: VideoCodec, es: &[u8]) {
-    let aus = access_units(codec, es).await;
+    let aus = parsed_access_units(codec, es).await;
     let fed = aus.len();
 
     let upstream = Caps::CompressedVideo {
@@ -134,10 +106,7 @@ async fn decode_fixture(mut dec: VtDecode, codec: VideoCodec, es: &[u8]) {
     assert!(matches!(outcome, ConfigureOutcome::Accepted));
 
     let mut sink = CollectSink::default();
-    for (i, mut au) in aus.into_iter().enumerate() {
-        // Distinct, monotonic PTS per access unit (the parser leaves the
-        // fixture's frames untimed).
-        au.timing.pts_ns = i as u64 * FRAME_DURATION_NS;
+    for au in aus {
         dec.process(PipelinePacket::DataFrame(au), &mut sink)
             .await
             .expect("decode access unit");

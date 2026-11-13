@@ -18,6 +18,9 @@
 #[path = "common/collect_sink.rs"]
 mod collect_sink;
 use collect_sink::CollectSink;
+#[path = "common/parsed_access_units.rs"]
+mod parsed_access_units;
+use parsed_access_units::parsed_access_unit_bytes;
 
 use std::path::{Path, PathBuf};
 
@@ -99,55 +102,15 @@ impl OutputSink for NullSink {
     }
 }
 
-/// Byte offsets of each NAL payload (just past its start code).
-fn start_code_offsets(data: &[u8]) -> Vec<usize> {
-    let mut offs = Vec::new();
-    let mut i = 0;
-    while i + 3 <= data.len() {
-        if data[i] == 0 && data[i + 1] == 0 {
-            if data[i + 2] == 1 {
-                offs.push(i + 3);
-                i += 3;
-                continue;
-            }
-            if i + 4 <= data.len() && data[i + 2] == 0 && data[i + 3] == 1 {
-                offs.push(i + 4);
-                i += 4;
-                continue;
-            }
-        }
-        i += 1;
-    }
-    offs
-}
-
-/// Split an Annex-B stream into per-picture access units: a VCL NAL (type 1/5)
-/// closes an AU, carrying any preceding SPS/PPS/SEI with it.
-fn split_access_units(stream: &[u8]) -> Vec<Vec<u8>> {
-    let mut units = Vec::new();
-    let mut cur = Vec::new();
-    let starts = start_code_offsets(stream);
-    for (k, &begin) in starts.iter().enumerate() {
-        let end = starts.get(k + 1).copied().unwrap_or(stream.len());
-        let nal = &stream[begin..end];
-        cur.extend_from_slice(&[0, 0, 0, 1]);
-        cur.extend_from_slice(nal);
-        if matches!(nal.first().map(|b| b & 0x1F), Some(1) | Some(5)) {
-            units.push(core::mem::take(&mut cur));
-        }
-    }
-    units
-}
-
 /// The repo's ten-frame clip (two IDR-led GOPs of five) played twice, so the
 /// fixture has four GOPs and a mid-stream seek has somewhere to land.
-fn access_units() -> Vec<Vec<u8>> {
+async fn access_units() -> Vec<Vec<u8>> {
     let path = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/tests/fixtures/h264_640x480.h264"
     );
     let es = std::fs::read(path).expect("read the H.264 fixture");
-    let once = split_access_units(&es);
+    let once = parsed_access_unit_bytes(VideoCodec::H264, &es).await;
     assert_eq!(once.len(), 2 * GOP, "the clip is two GOPs of five");
     let mut aus = once.clone();
     aus.extend(once);
@@ -197,7 +160,7 @@ async fn fixture_mp4(name: &str) -> PathBuf {
     let mut mux = Mp4MuxN::new(1).with_fragmented(false);
     mux.configure_pipeline(0, &h264_caps()).expect("configure");
     let mut sink = ByteSink::default();
-    for (i, au) in access_units().into_iter().enumerate() {
+    for (i, au) in access_units().await.into_iter().enumerate() {
         mux.process(0, au_frame(au, i), &mut sink)
             .await
             .expect("mux");

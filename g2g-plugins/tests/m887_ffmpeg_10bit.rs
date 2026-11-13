@@ -24,13 +24,15 @@
 #[path = "common/collect_sink.rs"]
 mod collect_sink;
 use collect_sink::CollectSink;
+#[path = "common/parsed_access_units.rs"]
+mod parsed_access_units;
+use parsed_access_units::parsed_access_unit_bytes;
 
 use g2g_core::element::AsyncElement;
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{Caps, Dim, G2gError, Rate, RawVideoFormat, VideoCodec};
 use g2g_plugins::ffmpegdec::{FfmpegVideoDec, OutputFormat};
-use g2g_plugins::h264parse::H264Parse;
 
 const FIXTURE: &[u8] = include_bytes!("fixtures/h264_high10_320x240.h264");
 const W: usize = 320;
@@ -79,23 +81,8 @@ fn data_frame(bytes: Vec<u8>) -> PipelinePacket {
     })
 }
 
-/// Split the fixture into access units with the real `H264Parse`, the framing the
-/// decoder sees in a pipeline.
 async fn access_units() -> Vec<Vec<u8>> {
-    let mut parse = H264Parse::reframing();
-    parse
-        .configure_pipeline(&h264_caps())
-        .expect("h264parse accepts the stream");
-    let mut sink = CollectSink::default();
-    parse
-        .process(data_frame(FIXTURE.to_vec()), &mut sink)
-        .await
-        .expect("parse the fixture");
-    parse
-        .process(PipelinePacket::Eos, &mut sink)
-        .await
-        .expect("drain at EOS");
-    let aus = sink.frame_bytes();
+    let aus = parsed_access_unit_bytes(VideoCodec::H264, FIXTURE).await;
     assert!(
         aus.len() >= FRAMES,
         "expected one AU per picture, got {}",

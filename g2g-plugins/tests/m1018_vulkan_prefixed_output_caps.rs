@@ -25,6 +25,9 @@
 #[path = "common/collect_sink.rs"]
 mod collect_sink;
 use collect_sink::CollectSink;
+#[path = "common/parsed_access_units.rs"]
+mod parsed_access_units;
+use parsed_access_units::parsed_access_unit_bytes;
 
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
@@ -73,40 +76,6 @@ impl CollectSink {
             .filter(|p| matches!(p, PipelinePacket::DataFrame(_)))
             .count()
     }
-}
-
-/// The clip's access units, each closed by its VCL NAL (type 1/5) and carrying
-/// the SPS/PPS/SEI ahead of it. The first builds the decode session; the second
-/// is what proves the refined caps are not re-emitted per picture.
-fn access_units() -> Vec<Vec<u8>> {
-    let mut starts = Vec::new();
-    let mut i = 0;
-    while i + 3 <= CLIP.len() {
-        if CLIP[i] == 0 && CLIP[i + 1] == 0 {
-            if CLIP[i + 2] == 1 {
-                starts.push(i + 3);
-                i += 3;
-                continue;
-            }
-            if i + 4 <= CLIP.len() && CLIP[i + 2] == 0 && CLIP[i + 3] == 1 {
-                starts.push(i + 4);
-                i += 4;
-                continue;
-            }
-        }
-        i += 1;
-    }
-    let mut units = Vec::new();
-    let mut current = Vec::new();
-    for (k, &begin) in starts.iter().enumerate() {
-        let end = starts.get(k + 1).copied().unwrap_or(CLIP.len());
-        current.extend_from_slice(&[0, 0, 0, 1]);
-        current.extend_from_slice(&CLIP[begin..end]);
-        if matches!(CLIP[begin] & 0x1F, 1 | 5) {
-            units.push(core::mem::take(&mut current));
-        }
-    }
-    units
 }
 
 /// The caps the runner solves for a launch line: the geometry it negotiated, no
@@ -200,7 +169,7 @@ fn the_solved_output_caps_are_forwarded_then_refined_once() {
     );
 
     // Two pictures: the first refines the colour, the second must add nothing.
-    let aus = access_units();
+    let aus = block_on(parsed_access_unit_bytes(VideoCodec::H264, CLIP));
     assert!(aus.len() >= 2, "the fixture carries at least two pictures");
     for (i, au) in aus.iter().take(2).enumerate() {
         let frame = Frame {

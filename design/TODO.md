@@ -163,11 +163,6 @@ libraries installed.
     refusing the stream.
   - The Media Foundation decoder MFT with a DXGI device manager stops producing
     output after about 120 frames, so `MfDecode` decodes in software only.
-- **Decoder test splitters:** m1018, m897, m160, m156, m836, m887 and m997 split
-  their fixtures with their own access-unit splitters. Check whether a fixture
-  repeats its parameter sets mid-stream and the splitter puts them at the tail
-  of the previous unit, and move them to `tests/common/parsed_access_units.rs`.
-  Move m731 there too (it builds only on macOS CI).
 - **`mfh265dec` without an HEVC decoder installed** fails with a bare
   `Hardware(MediaFoundation(0x80040154))`. Find the call that fails and log
   that the HEVC Video Extensions are missing.

@@ -27,6 +27,12 @@
     feature = "ffmpeg"
 ))]
 
+#[path = "common/collect_sink.rs"]
+mod collect_sink;
+#[path = "common/parsed_access_units.rs"]
+mod parsed_access_units;
+use parsed_access_units::parsed_access_unit_bytes;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -40,7 +46,6 @@ use g2g_core::{
     Rate, VideoCodec,
 };
 use g2g_plugins::ffmpegdec::FfmpegVideoDec;
-use g2g_plugins::h264parse::H264Parse;
 use g2g_plugins::syncsink::SyncSink;
 
 const FIXTURE: &[u8] = include_bytes!("fixtures/h264_640x480_bframes.h264");
@@ -92,10 +97,6 @@ impl QosSink {
             pressure,
         }
     }
-
-    fn idle() -> Self {
-        Self::new(Arc::new(AtomicBool::new(false)))
-    }
 }
 
 impl OutputSink for QosSink {
@@ -125,23 +126,9 @@ impl OutputSink for QosSink {
     }
 }
 
-/// Split the fixture into access units with the real `H264Parse`, the framing the
-/// decoder sees in a pipeline, then repeat it `PASSES` times.
+/// The fixture's access units, repeated `PASSES` times.
 async fn access_units() -> Vec<Vec<u8>> {
-    let mut parse = H264Parse::reframing();
-    parse
-        .configure_pipeline(&h264_caps())
-        .expect("h264parse accepts the stream");
-    let mut sink = QosSink::idle();
-    parse
-        .process(data_frame(FIXTURE.to_vec(), 0), &mut sink)
-        .await
-        .expect("parse the fixture");
-    parse
-        .process(PipelinePacket::Eos, &mut sink)
-        .await
-        .expect("drain at EOS");
-    let pass: Vec<Vec<u8>> = sink.frames.into_iter().map(|(_, b)| b).collect();
+    let pass = parsed_access_unit_bytes(VideoCodec::H264, FIXTURE).await;
     assert_eq!(pass.len(), FIXTURE_FRAMES, "one access unit per picture");
     let mut aus = Vec::with_capacity(FRAMES);
     for _ in 0..PASSES {
