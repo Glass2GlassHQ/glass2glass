@@ -9,12 +9,18 @@ authors.workspace = true
 repository.workspace = true
 publish = false
 
+[[bin]]
+name = "g2g-desktop"
+path = "src/main.rs"
+required-features = ["session"]
+
 [features]
 session = [
     "dep:g2g-core",
     "g2g-plugins/webrtc",
     "g2g-plugins/ffmpeg",
     "g2g-plugins/portal",
+    "g2g-plugins/wgpu-present",
     "tokio/net",
     "tokio/io-util",
     "tokio/time",

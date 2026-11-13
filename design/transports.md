@@ -595,6 +595,21 @@ same exchange.
 new one whenever the size changes. Events that arrive before the first size are
 logged and dropped.
 
+### Client session
+
+`client::run_client` runs a receive-only `WebRtcDuplexSession` offerer whose
+video passes through `h264parse`, `ffmpegdec` and `livesync` into a `wgpusink`
+window. With `inputs` on, the window's input goes through an `InputRouter` and
+out as packets on the `input` data channel. Keys map from evdev codes to HID
+usages on device 0, a pointer position goes out as an absolute position on
+display 0, and losing keyboard focus releases the keys and buttons still held.
+
+`g2g-desktop host` serves one client at a time and captures a monitor through
+the ScreenCast portal, which asks the user on every session. A second
+connection while a session runs is closed. `g2g-desktop client` connects and
+opens the window, and closing the window ends it. Running `g2g-desktop` with
+no arguments prints the flags.
+
 ### Key mapping and injection
 
 `hid::usage_from_scancode` maps an evdev, Windows set 1 or macOS virtual
