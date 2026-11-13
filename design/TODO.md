@@ -30,7 +30,6 @@ Highest leverage first:
 
 The plan is [remote.md](remote.md).
 
-- Packet, router, and signaling state machine in a new `g2g-desktop` crate.
 - A reliable ordered data channel on `WebRtcDuplexSession`'s existing `Rtc`.
 - `ximagesrc` for unattended X11 capture, and a Linux `g2g-desktop` host and
   client that inject through `/dev/uinput`.

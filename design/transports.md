@@ -473,6 +473,85 @@ BUNDLE, sendrecv, PLI and BWE, which is `webrtcbin` parity. What remains is
 maturity rather than architecture, and `TODO.md`'s "WebRTC" item carries
 the tiered list.
 
+## Remote desktop session
+
+`g2g-desktop` holds the remote-desktop wire protocol. Each part runs on byte
+slices and owns no socket. The rest of the session is planned in
+[remote.md](remote.md).
+
+### Desktop signaling
+
+`HostSignaling` and `ClientSignaling` run the SDP exchange over one TCP
+connection. Every message is `u32be length | payload`, and the client sends
+first.
+
+1. Client sends the token, 1 to 256 bytes.
+2. Host compares it in constant time (`subtle`) and fails with `BadToken` on a
+   mismatch. Otherwise it replies with one byte, `0x01`.
+3. Client sends the SDP offer.
+4. Host sends the SDP answer.
+
+A length prefix over its limit fails before the body is buffered: 256 bytes
+for the token, 1 for the accept byte, 64 KiB for an SDP. A byte that arrives
+when no message is due fails with `UnexpectedMessage`. `connection_closed`
+before the answer fails with `HungUp`. `SessionSlot::claim` fails with `Busy`
+while another connection holds the slot.
+
+### Input packets
+
+`PacketWriter` writes and `PacketReader` reads one packet per data-channel
+message:
+
+```
+u8  type
+u8  flags
+u32le sequence
+u16le payload_len
+payload[payload_len]
+```
+
+`sequence` is per direction, starting at 0. The receiver drops a packet whose
+sequence is older than the newest applied packet of that type, which is how a
+stale absolute mouse position loses to a newer one. Reliable and ordered
+delivery makes that rare. The rule still holds for a later unreliable mode.
+
+| type | name | payload |
+| :--- | :--- | :--- |
+| 1 | key | `u8 device`, `u16le usage`, `u8 down` |
+| 2 | button | `u8 button`, `u8 down` |
+| 3 | move | `i32le dx`, `i32le dy` |
+| 4 | position | `i32le x`, `i32le y`, `u8 display` |
+| 5 | wheel | `i32le dx`, `i32le dy` |
+| 6 | gamepad | `u8 device`, `u32le buttons`, six `i16le` axes (`lx ly rx ry lt rt`) |
+| 7 | rumble | `u8 device`, `u16le low`, `u16le high`, `u16le duration_ms` |
+| 8 | cursor | `u16le w`, `u16le h`, `i16le hot_x`, `i16le hot_y`, RGBA bytes `w*h*4` |
+| 9 | clipboard | UTF-8 |
+
+`usage` is the USB HID usage, not an OS keycode. Button 0 is left, 1 is right,
+2 is middle. `flags` bit 0 marks a packet from the host, and the reader fails a
+packet whose bit 0 names the reading side as its sender. `flags` bit 1 on a key
+or gamepad packet means that device is gone, and the payload is then only `u8
+device`. `sequence` counts per direction from 0, and the reader drops a packet
+whose sequence is not newer than the last one it returned of the same type.
+
+The writer fails a packet over `datachannel::MAX_MESSAGE_SIZE` (64 KiB), so a
+cursor above about 127x127 is not sent. The reader fails a payload whose length
+does not match its type, a `down` byte other than 0 or 1, a cursor whose RGBA
+length is not `w*h*4`, and clipboard text that is not UTF-8.
+
+### Input router
+
+`InputRouter` delivers an event to every consumer subscribed to its type and
+origin. Local producers push `Origin::Local`, which the network consumes.
+Events from `PacketReader` are pushed as `Origin::Remote` and reach the local
+consumers. `inputs=false` and `clipboard=false` leave those types unsubscribed.
+
+Local key, button, move, position, wheel and gamepad events are dropped while
+the window has no focus. A key-down whose usage is in the shortcut list returns
+`ShortcutPressed` and is not forwarded, and neither is its key-up. Losing focus
+sends a key-up for every forwarded key still down and a button-up for every
+button still down, because the host holds a key until its key-up arrives.
+
 ## Distributed graphs
 
 A graph is normally one process, but a pipeline stage is not bound to the

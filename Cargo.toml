@@ -8,6 +8,7 @@ members = [
     "g2g-plugins",
     "g2g-ml",
     "g2g-bridge",
+    "g2g-desktop",
     "g2g-python",
     "g2g-capi",
     "g2g-pyapi",

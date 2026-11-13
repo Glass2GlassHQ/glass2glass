@@ -4502,6 +4502,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "g2g-desktop"
+version = "0.21.0"
+dependencies = [
+ "g2g-plugins",
+ "subtle",
+ "tokio",
+]
+
+[[package]]
 name = "g2g-mcu"
 version = "0.21.0"
 dependencies = [

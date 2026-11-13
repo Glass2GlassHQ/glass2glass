@@ -43,7 +43,7 @@ that is not on the same network.
 2. Input rides a reliable, ordered data channel on that same `Rtc`, label
    `input`. Video stays RTP, so a lost picture does not sit in front of a key
    release. str0m caps one data-channel message at 64 KiB
-   (`webrtcdata::MAX_MESSAGE_SIZE`). A payload over that is dropped.
+   (`datachannel::MAX_MESSAGE_SIZE`). A payload over that is dropped.
 3. The client is the offerer. It connects out. The host is the answerer and
    listens. `SdpChannel::from_halves` is the seam: the desktop crate moves the
    SDP strings across one TCP connection, and the duplex session never learns
@@ -93,80 +93,25 @@ that is not on the same network.
 
 ## Signaling
 
-One TCP connection, default port 8080. The client sends first.
-
-```
-u32be length | payload
-```
-
-1. Client sends the token, UTF-8, at most 256 bytes.
-2. Host compares it and closes on a mismatch. Then it sends one byte, `0x01`.
-3. Client sends the SDP offer.
-4. Host sends the SDP answer.
-
-Both SDP blobs are the strings `SdpChannel` already exchanges. ICE host
-candidates are inside them, which is how the duplex session connects on one
-machine today. Trickle ICE is a later slice: further messages with a leading
-`u8` tag `1` for an ICE candidate and `2` for the SDP, once a peer off the LAN
-needs them. Until then a message after the answer is a protocol error and
-closes the connection.
+The handshake is built: [transports.md](transports.md), "Desktop signaling".
+Trickle ICE is a later slice: further messages with a leading `u8` tag `1` for
+an ICE candidate and `2` for the SDP, once a peer off the LAN needs them.
 
 The host binds the TCP port before it builds the graph. The graph starts when
 the answer is sent, and stops when the TCP connection or the ICE state drops.
-One client at a time. A second TCP connection is refused while the first is up.
+One client at a time, held by `SessionSlot`.
 
 ## Data channel
 
 Added inside `WebRtcDuplexSession::run`, on the `Rtc` that session already
 owns, created by the offerer with `ChannelConfig` label `input`, `ordered:
 true`, `Reliability::Reliable`. Bytes in and out are a pair of channels the
-desktop crate holds. The duplex session gains no knowledge of keycodes.
+desktop crate holds. The duplex session gains no knowledge of keycodes. The
+packets are built: [transports.md](transports.md), "Input packets" and "Input
+router".
 
-Every message is one packet:
-
-```
-u8  type
-u8  flags
-u32le sequence
-u16le payload_len
-payload[payload_len]
-```
-
-`sequence` is per direction, starting at 0. The receiver drops a packet whose
-sequence is older than the newest applied packet of that type, which is how a
-stale absolute mouse position loses to a newer one. Reliable and ordered
-delivery makes that rare. The rule still holds for a later unreliable mode.
-
-| type | name | payload |
-| :--- | :--- | :--- |
-| 1 | key | `u8 device`, `u16le hid`, `u8 down` |
-| 2 | button | `u8 button`, `u8 down` |
-| 3 | move | `i32le dx`, `i32le dy` |
-| 4 | position | `i32le x`, `i32le y`, `u8 display` |
-| 5 | wheel | `i32le dx`, `i32le dy` |
-| 6 | gamepad | `u8 device`, `u32le buttons`, six `i16le` axes (`lx ly rx ry lt rt`) |
-| 7 | rumble | `u8 device`, `u16le low`, `u16le high`, `u16le duration_ms` |
-| 8 | cursor | `u16le w`, `u16le h`, `i16le hot_x`, `i16le hot_y`, RGBA bytes `w*h*4` |
-| 9 | clipboard | UTF-8 |
-
-`hid` is the USB HID usage, not an OS keycode. Each platform maps at its edge.
-Button 0 is left, 1 is right, 2 is middle. `flags` bit 0 means the packet is
-from the host. Cursor and rumble set it. A cursor whose RGBA length is not
-`w*h*4`, or whose encoded size exceeds 64 KiB, is dropped.
-
-## Router
-
-One router on each side. Producers push packets in. Consumers subscribe by
-type. The network is both: it consumes local packets and produces remote ones.
-
-The client router drops a packet before it is sent when the video window has
-no focus, when a local shortcut matches, or when `inputs=false`. A swallowed
-shortcut is not forwarded. The host router delivers every packet it is willing
-to inject. `clipboard=false` unsubscribes both directions from type 9.
-
-Devices of one type share a producer. A gamepad packet carries `device`.
-Hot-plug is a packet with `flags` bit 1 set and an empty payload, meaning the
-device is gone. The host destroys that virtual device.
+Devices of one type share a producer. The host destroys the virtual device a
+removal packet names.
 
 ## Host graphs
 
@@ -363,16 +308,9 @@ service. They do not build ffmpeg or a media player.
 
 These run without a GPU or a desktop, in `g2g-desktop`:
 
-- Packet round trip for every type, including a truncated payload, a length
-  that does not match the body, a sequence that goes backwards, and a cursor
-  whose RGBA length is wrong.
-- The router drops while unfocused, drops a matching shortcut, and delivers a
-  cursor packet from the network side to the cursor consumer only.
 - HID mapping tables: a key that exists on both platforms maps to the same
   usage, and an unknown usage fails the inject call rather than sending a
   zero.
-- The signaling state machine: bad token, offer before the accept byte, a
-  second connection refused, a hang-up before the answer.
 
 Hardware checks are probes, the same shape as `m739_screencapture`. A denied
 capture permission asserts the error path. A granted desktop is manual: move
@@ -384,15 +322,12 @@ frame was counted in `livesync`'s `drop`.
 Each slice builds and is reviewable on its own. Later slices depend on earlier
 ones.
 
-1. **Packet, router, signaling state machine, and the tests above.** No
-   sockets yet beyond the state machine fed from byte slices. Crate
-   `g2g-desktop` added to the workspace.
 2. **Data channel on `WebRtcDuplexSession`.** An in-process loopback sends a
    packet across the channel while a video frame crosses the same `Rtc`.
 3. **Linux host and Linux client on one machine.** Portal or `ximagesrc`,
-   software or VA-API encode, `livesync` on the client, uinput inject, window
-   capture. `inputs=false` when both run on the same seat, or the pointer
-   feeds itself.
+   software or VA-API encode, `livesync` on the client, uinput inject with the
+   HID mapping tables, window capture. `inputs=false` when both run on the
+   same seat, or the pointer feeds itself.
 4. **`dxgisrc` system-memory path and the Windows client.** `mfencode`,
    `SendInput`. Then the D3D11-to-CUDA output and `nvenc`.
 5. **macOS client, then the macOS host** on `screencapturesrc` `display-index`

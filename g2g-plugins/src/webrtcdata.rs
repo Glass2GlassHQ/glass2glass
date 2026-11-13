@@ -79,14 +79,11 @@ use crate::webrtc_util::{
 };
 use crate::webrtcduplex::{SdpChannel, SignalRole};
 
+pub use crate::datachannel::MAX_MESSAGE_SIZE;
+
 /// Bounded depth of the element->session channel in the sink: backpressures the
 /// pipeline if the SCTP association falls behind.
 const DEFAULT_QUEUE_DEPTH: usize = 256;
-
-/// The largest single message str0m accepts on a data channel (sctp-proto's
-/// default max receive message size, 64 KiB). SCTP fragments and reassembles up
-/// to this; a larger payload is rejected on write.
-pub const MAX_MESSAGE_SIZE: usize = 65536;
 
 /// Reliability knobs for the data channel, shared by both elements. Applied by
 /// whichever peer creates the channel (the Offerer); the Answerer inherits the

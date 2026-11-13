@@ -115,7 +115,7 @@ The type tiers above translate to per-crate promises:
 | `g2g-plugin` | **2** | The dynamic-plugin SDK (`declare_plugin!` + ABI tag). ABI is versioned separately via its own tag. |
 | `g2g-ml`, `g2g-bridge` | **3** | Experimental; no stability promise pre-1.0. |
 | `g2g-capi`, `g2g-pyapi`, `g2g-python` | **3** | Bindings; surface tracks `g2g-core` but is itself experimental. |
-| `xtask`, `g2g-bench`, `g2g-web` | n/a | Dev/demo crates, `publish = false`. |
+| `xtask`, `g2g-bench`, `g2g-web`, `g2g-desktop` | n/a | Dev/demo crates, `publish = false`. |
 
 ## Versioning & MSRV policy
 

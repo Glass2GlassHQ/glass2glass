@@ -158,6 +158,7 @@ pub mod chopmydata;
 pub mod concat;
 pub mod cutter;
 // Source reading the payload carried inside a `data:` URI.
+pub mod datachannel;
 pub mod dataurisrc;
 pub mod deinterleave;
 // `ebur128`: EBU R128 / ITU-R BS.1770 loudness meter.
