@@ -679,7 +679,6 @@ impl<E> Graph<E> {
                     | NodeKind::Muxer(0)
                     | NodeKind::FaninSink(0)
                     | NodeKind::FanoutSrc(0)
-                    | NodeKind::Duplex { inputs: 0, .. }
                     | NodeKind::Duplex { outputs: 0, .. }
             ) {
                 return Err(GraphError::DegenerateFanNode(id));

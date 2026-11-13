@@ -1779,10 +1779,6 @@ where
     Clk: PipelineClock,
 {
     assert!(
-        !sources.is_empty(),
-        "duplex session needs at least one send source"
-    );
-    assert!(
         !sinks.is_empty(),
         "duplex session needs at least one recv sink"
     );

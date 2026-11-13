@@ -122,6 +122,12 @@ static WEBRTCDUPLEX_PROPS: &[PropertySpec] = &[
         "audio pads reserved beyond the active tracks, bound when an audio track is added mid-session",
     )
     .with_default(DEFAULT_SPARE_TRACKS_TEXT),
+    PropertySpec::new(
+        "receive-only",
+        PropKind::Bool,
+        "offer every m-line recvonly and take no send pads",
+    )
+    .with_default("false"),
 ];
 
 fn spare_track_count(value: &PropValue) -> Result<usize, PropError> {
@@ -271,6 +277,7 @@ pub struct WebRtcDuplexSession {
     /// [`Self::control`] handles.
     control: DuplexControl,
     data_channel: Option<DataChannelLane>,
+    media_direction: Direction,
 }
 
 #[derive(Debug)]
@@ -293,6 +300,7 @@ impl core::fmt::Debug for WebRtcDuplexSession {
             .field("track_count", &self.track_count)
             .field("pad_kinds", &self.pad_kinds)
             .field("inputs", &self.inputs)
+            .field("media_direction", &self.media_direction)
             .finish()
     }
 }
@@ -324,6 +332,7 @@ impl WebRtcDuplexSession {
             nacks_seen: Arc::new(AtomicU64::new(0)),
             control: DuplexControl::default(),
             data_channel: None,
+            media_direction: Direction::SendRecv,
         }
     }
 
@@ -336,6 +345,11 @@ impl WebRtcDuplexSession {
             incoming: incoming_sender,
         });
         DataChannelEnds { outgoing, incoming }
+    }
+
+    pub fn with_receive_only(mut self) -> Self {
+        self.media_direction = Direction::RecvOnly;
+        self
     }
 
     /// Reserve `video` + `audio` extra pads beyond the active tracks.
@@ -506,6 +520,9 @@ impl MultiDuplexSession for WebRtcDuplexSession {
     type RunFuture<'a> = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>;
 
     fn input_count(&self) -> usize {
+        if !self.media_direction.is_sending() {
+            return 0;
+        }
         self.pad_kinds.len()
     }
 
@@ -565,6 +582,14 @@ impl MultiDuplexSession for WebRtcDuplexSession {
                 self.set_video_codec(codec);
             }
             "linger-ms" => set_linger_ms_property(&mut self.linger, &value)?,
+            "receive-only" => {
+                let receive_only = value.as_bool().ok_or(PropError::Type)?;
+                self.media_direction = if receive_only {
+                    Direction::RecvOnly
+                } else {
+                    Direction::SendRecv
+                };
+            }
             "spare-video-tracks" => {
                 self.set_spare_tracks(spare_track_count(&value)?, self.spare_audio_tracks)
             }
@@ -584,6 +609,7 @@ impl MultiDuplexSession for WebRtcDuplexSession {
             "turn-pass" => PropValue::Str(self.turn_pass.clone()),
             "video-codec" => get_video_codec_property(self.video_codec),
             "linger-ms" => get_linger_ms_property(self.linger),
+            "receive-only" => PropValue::Bool(!self.media_direction.is_sending()),
             "spare-video-tracks" => PropValue::Uint(self.spare_video_tracks as u64),
             "spare-audio-tracks" => PropValue::Uint(self.spare_audio_tracks as u64),
             _ => return None,
@@ -615,6 +641,7 @@ impl MultiDuplexSession for WebRtcDuplexSession {
         let mut reverse = self.reverse.clone();
         let nacks_seen = self.nacks_seen.clone();
         let data_channel = self.data_channel.take();
+        let media_direction = self.media_direction;
         Box::pin(async move {
             let hw = || G2gError::Hardware(HardwareError::Other);
             let log = g2g_core::log::Target::category(DUPLEX_CATEGORY);
@@ -662,13 +689,8 @@ impl MultiDuplexSession for WebRtcDuplexSession {
                     let (offer_sdp, pending) = {
                         let mut api = rtc.sdp_api();
                         for (o, kind) in pad_kinds.iter().enumerate().take(track_count) {
-                            let mid = api.add_media(
-                                kind.media_kind(),
-                                Direction::SendRecv,
-                                None,
-                                None,
-                                None,
-                            );
+                            let mid =
+                                api.add_media(kind.media_kind(), media_direction, None, None, None);
                             let in_pad = free_in_pad(&bindings, &inputs, *kind);
                             bindings.push(Binding {
                                 mid,
@@ -726,7 +748,8 @@ impl MultiDuplexSession for WebRtcDuplexSession {
             let mut buf = alloc::vec![0u8; UDP_RECV_BYTES];
             let mut seq = 0u64;
             let mut received = 0u64;
-            let mut send_done = false;
+            // receive-only sessions have no send sources
+            let mut send_done = !media_direction.is_sending();
             // Set when the local send side ends; the loop finishes after it.
             let mut drain_deadline: Option<Instant> = None;
             // Mid-session renegotiation: pending toggles and removes come in via
@@ -928,7 +951,11 @@ impl MultiDuplexSession for WebRtcDuplexSession {
 
                 if let Some(dl) = drain_deadline {
                     if Instant::now() >= dl {
-                        finish!();
+                        drain_deadline = None;
+                        // str0m sends close_notify, without which the peer only ends on an ICE timeout
+                        if rtc.close().is_err() {
+                            finish!();
+                        }
                     }
                 }
 

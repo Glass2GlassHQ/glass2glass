@@ -134,6 +134,13 @@ channel opens wait in the sender, and a write the SCTP send buffer refuses is
 retried every 5 ms. A message over `datachannel::MAX_MESSAGE_SIZE` fails the
 session.
 
+`with_receive_only()`, or the `receive-only` property, offers every m-line
+recvonly and reports zero inputs, so a peer that only watches runs with no send
+sources. That session ends when the peer closes or ICE disconnects. When the
+linger after the last send source expires, the session calls `Rtc::close`,
+which sends DTLS close_notify, and the peer ends within a poll instead of on
+str0m's ICE timeout of about 25 seconds.
+
 ### Growing the pad count live
 
 `run_duplex_session_dynamic` is the renegotiating sibling: its arms run under a

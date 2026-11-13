@@ -138,6 +138,7 @@ pub(crate) fn sample_property_value(spec: &PropertySpec) -> PropValue {
     match spec.kind {
         PropKind::Uint => PropValue::Uint(SAMPLE_PROPERTY_NUMBER.into()),
         PropKind::Int => PropValue::Int(SAMPLE_PROPERTY_NUMBER.into()),
+        PropKind::Bool => PropValue::Bool(true),
         PropKind::Str => PropValue::Str(spec.enum_nicks().last().unwrap_or(spec.name).into()),
         kind => panic!("no sample value for {} of kind {kind:?}", spec.name),
     }
