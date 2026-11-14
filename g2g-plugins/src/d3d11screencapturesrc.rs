@@ -29,7 +29,8 @@ use windows::Win32::Graphics::Dxgi::Common::{
 };
 use windows::Win32::Graphics::Dxgi::{
     CreateDXGIFactory1, IDXGIAdapter1, IDXGIFactory1, IDXGIOutput, IDXGIOutput1,
-    IDXGIOutputDuplication, DXGI_ERROR_NOT_FOUND, DXGI_ERROR_WAIT_TIMEOUT, DXGI_OUTDUPL_FRAME_INFO,
+    IDXGIOutputDuplication, DXGI_ERROR_NOT_CURRENTLY_AVAILABLE, DXGI_ERROR_NOT_FOUND,
+    DXGI_ERROR_WAIT_TIMEOUT, DXGI_OUTDUPL_FRAME_INFO,
 };
 use windows::Win32::Graphics::Gdi::{MonitorFromPoint, MONITOR_DEFAULTTOPRIMARY};
 use windows::Win32::UI::HiDpi::{
@@ -97,6 +98,10 @@ fn desktop_outputs() -> Result<Vec<(IDXGIAdapter1, IDXGIOutput)>, G2gError> {
                 match adapter.EnumOutputs(output_index) {
                     Ok(output) => outputs.push((adapter.clone(), output)),
                     Err(e) if e.code() == DXGI_ERROR_NOT_FOUND => break,
+                    // EnumOutputs fails this way in a session with no desktop, such as ssh
+                    Err(e) if e.code() == DXGI_ERROR_NOT_CURRENTLY_AVAILABLE => {
+                        return Err(G2gError::DeviceNotFound)
+                    }
                     Err(e) => return Err(mf_err(e)),
                 }
             }
