@@ -519,6 +519,34 @@ fn derived_fields_inputs(t: &CapsTransform, out: &Caps) -> Option<Vec<Caps>> {
     )
 }
 
+#[cfg(feature = "std")]
+fn fixate_with_unknown_rate(input: &Caps) -> Option<Caps> {
+    let mut fixated = input.clone();
+    let (Caps::CompressedVideo {
+        width,
+        height,
+        framerate,
+        ..
+    }
+    | Caps::RawVideo {
+        width,
+        height,
+        framerate,
+        ..
+    }) = &mut fixated
+    else {
+        return None;
+    };
+    if framerate.is_fixed() {
+        return None;
+    }
+    *width = width.fixate()?;
+    *height = height.fixate()?;
+    // parsers take a fixed upstream rate over the SPS rate
+    *framerate = crate::caps::Rate::Any;
+    Some(fixated)
+}
+
 /// Caps-α: derive the forwarded output for an interior element on a
 /// mid-stream caps change (design/caps.md). `input` is
 /// the new fixated caps the element receives; `downstream_feasible` is its
@@ -545,6 +573,8 @@ pub(crate) fn resolve_forward_output(
     downstream_feasible: Option<&CapsSet>,
     prev_output: Option<&Caps>,
 ) -> ForwardResolve {
+    let fixated_with_unknown_rate = fixate_with_unknown_rate(input);
+    let input = fixated_with_unknown_rate.as_ref().unwrap_or(input);
     // Index 1 is a placeholder: the link position is meaningful only inside
     // a full-chain solve. Mid-stream the failure is link-local to this arm.
     // `forward_propagate` fixates the input first (the startup contract), which
@@ -556,6 +586,7 @@ pub(crate) fn resolve_forward_output(
         .or_else(|| match constraint {
             CapsConstraint::DerivedOutput(f) => Some(f(input)),
             CapsConstraint::DerivedFields(t) => Some(t.derive(input)),
+            CapsConstraint::Identity(s) => Some(CapsSet::one(input.clone()).intersect(s)),
             _ => None,
         })
         .filter(|c| !c.is_empty());
