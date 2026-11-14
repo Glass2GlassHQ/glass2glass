@@ -25,7 +25,6 @@
 //! so a texture from another device rebuilds them on that device.
 
 use core::future::Future;
-use core::mem::ManuallyDrop;
 use core::pin::Pin;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
@@ -41,25 +40,18 @@ use windows::core::Interface;
 use windows::Win32::Foundation::{HMODULE, HWND};
 use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
 use windows::Win32::Graphics::Direct3D11::{
-    D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D, ID3D11VideoContext,
-    ID3D11VideoContext1, ID3D11VideoDevice, ID3D11VideoProcessor, ID3D11VideoProcessorEnumerator,
-    ID3D11VideoProcessorInputView, ID3D11VideoProcessorOutputView, D3D11_BIND_RENDER_TARGET,
-    D3D11_BIND_SHADER_RESOURCE, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_FLAG,
-    D3D11_CREATE_DEVICE_VIDEO_SUPPORT, D3D11_SDK_VERSION, D3D11_TEX2D_VPIV, D3D11_TEX2D_VPOV,
-    D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
-    D3D11_VIDEO_PROCESSOR_CAPS, D3D11_VIDEO_PROCESSOR_CONTENT_DESC,
+    D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D, ID3D11VideoContext1,
+    D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+    D3D11_CREATE_DEVICE_FLAG, D3D11_CREATE_DEVICE_VIDEO_SUPPORT, D3D11_SDK_VERSION,
+    D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT, D3D11_VIDEO_PROCESSOR_CAPS,
     D3D11_VIDEO_PROCESSOR_FEATURE_CAPS, D3D11_VIDEO_PROCESSOR_FEATURE_CAPS_MIRROR,
-    D3D11_VIDEO_PROCESSOR_FEATURE_CAPS_ROTATION, D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC,
-    D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0, D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC,
-    D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0, D3D11_VIDEO_PROCESSOR_ROTATION,
+    D3D11_VIDEO_PROCESSOR_FEATURE_CAPS_ROTATION, D3D11_VIDEO_PROCESSOR_ROTATION,
     D3D11_VIDEO_PROCESSOR_ROTATION_180, D3D11_VIDEO_PROCESSOR_ROTATION_270,
     D3D11_VIDEO_PROCESSOR_ROTATION_90, D3D11_VIDEO_PROCESSOR_ROTATION_IDENTITY,
-    D3D11_VIDEO_PROCESSOR_STREAM, D3D11_VIDEO_USAGE_PLAYBACK_NORMAL,
-    D3D11_VPIV_DIMENSION_TEXTURE2D, D3D11_VPOV_DIMENSION_TEXTURE2D,
 };
 use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_ALPHA_MODE_UNSPECIFIED, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_NV12, DXGI_FORMAT_UNKNOWN,
-    DXGI_RATIONAL, DXGI_SAMPLE_DESC,
+    DXGI_SAMPLE_DESC,
 };
 use windows::Win32::Graphics::Dxgi::{
     CreateDXGIFactory1, IDXGIFactory2, IDXGISwapChain1, DXGI_PRESENT, DXGI_SCALING_STRETCH,
@@ -79,22 +71,15 @@ use g2g_core::meta::{Orientation, OrientationSet};
 use g2g_core::metrics::{monotonic_ns, LatencyHistogram, LatencySnapshot};
 use g2g_core::{
     AllocationParams, AsyncElement, BusHandle, Caps, CapsConstraint, ClockCandidate, ClockPriority,
-    ClockSync, ConfigureOutcome, Dim, ElementMetadata, G2gError, HardwareError, MemoryDomain,
-    OutputSink, OwnedD3D11Texture, PadTemplate, PadTemplates, PipelineClock, PipelinePacket,
-    PresentationPacer, PropError, PropKind, PropValue, PropertySpec, RawVideoFormat,
-    MAX_LATENESS_PROPERTY, QOS_INTERVAL_PROPERTY,
+    ClockSync, ConfigureOutcome, ElementMetadata, G2gError, HardwareError, MemoryDomain,
+    OutputSink, PadTemplate, PadTemplates, PipelineClock, PipelinePacket, PresentationPacer,
+    PropError, PropKind, PropValue, PropertySpec, RawVideoFormat, MAX_LATENESS_PROPERTY,
+    QOS_INTERVAL_PROPERTY,
 };
 
 use crate::clock::wait_to_present;
-
-/// Texture-pool headroom the sink asks the decoder to keep resident: the frame
-/// in flight on the present thread plus the one the runner link holds, so the
-/// MFT's output texture pool does not starve under live pacing.
-const D3D11_POOL_HEADROOM: usize = 3;
-
-/// GPU surface alignment the sink requests (256 bytes is the common D3D11 /
-/// DXVA texture alignment).
-const D3D11_ALIGN: usize = 256;
+use crate::d3d11texture::{texture_objects, texture_proposal};
+use crate::d3d11video::VideoProcessor;
 
 /// Worker-thread command. `Frame` carries the frame's memory (a decoded D3D11
 /// texture, still GPU-resident, or packed system NV12) plus the source-side
@@ -344,20 +329,8 @@ impl AsyncElement for D3D11Sink {
     /// conveys this `MemoryDomainKind::D3D11Texture` proposal to the decoder's
     /// `configure_allocation`. Returns `None` until the geometry is fixed.
     fn propose_allocation(&self, caps: &Caps) -> Option<AllocationParams> {
-        let Caps::RawVideo {
-            format,
-            width: Dim::Fixed(w),
-            height: Dim::Fixed(h),
-            ..
-        } = caps
-        else {
-            return None;
-        };
-        let size = crate::pixel::frame_byte_size(*format, *w, *h);
-        let mut params = AllocationParams::d3d11(size, D3D11_POOL_HEADROOM, D3D11_ALIGN);
         // a producer that cannot allocate D3D11 textures hands over system memory instead
-        params.accepts = self.input_domains();
-        Some(params)
+        texture_proposal(caps, self.input_domains())
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -499,18 +472,10 @@ struct GpuState {
     device: ID3D11Device,
     // `None` on a device without D3D11 video (WARP, a GPU-less VM or CI runner):
     // system-memory frames are then converted to BGRA on the CPU
-    video: Option<VideoPath>,
+    video: Option<VideoProcessor>,
     swapchain: IDXGISwapChain1,
     // the turn the processor applies to the stream
     orientation: Orientation,
-}
-
-/// The D3D11 video processor that converts NV12 to the RGB backbuffer.
-struct VideoPath {
-    video_device: ID3D11VideoDevice,
-    video_context: ID3D11VideoContext,
-    vp_enum: ID3D11VideoProcessorEnumerator,
-    processor: ID3D11VideoProcessor,
 }
 
 struct WorkerReports {
@@ -613,7 +578,7 @@ fn init_gpu(
     // SAFETY: COM object creation on the worker thread, every object from `device`.
     unsafe {
         let context = device.GetImmediateContext().map_err(win_err)?;
-        let video = init_video(&device, &context, width, height).ok();
+        let video = VideoProcessor::new(&device, &context, width, height).ok();
 
         let factory: IDXGIFactory2 = CreateDXGIFactory1().map_err(win_err)?;
         let desc = DXGI_SWAP_CHAIN_DESC1 {
@@ -644,65 +609,6 @@ fn init_gpu(
             swapchain,
             orientation: Orientation::Identity,
         })
-    }
-}
-
-/// The NV12 -> RGB video processor for `device`, which fails on a device
-/// created without video support.
-fn init_video(
-    device: &ID3D11Device,
-    context: &ID3D11DeviceContext,
-    width: u32,
-    height: u32,
-) -> Result<VideoPath, G2gError> {
-    // SAFETY: COM object creation on the worker thread, every object from `device`.
-    unsafe {
-        let video_device: ID3D11VideoDevice = device.cast().map_err(win_err)?;
-        let video_context: ID3D11VideoContext = context.cast().map_err(win_err)?;
-
-        let rate = DXGI_RATIONAL {
-            Numerator: 60,
-            Denominator: 1,
-        };
-        let content = D3D11_VIDEO_PROCESSOR_CONTENT_DESC {
-            InputFrameFormat: D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
-            InputFrameRate: rate,
-            InputWidth: width,
-            InputHeight: height,
-            OutputFrameRate: rate,
-            OutputWidth: width,
-            OutputHeight: height,
-            Usage: D3D11_VIDEO_USAGE_PLAYBACK_NORMAL,
-        };
-        let vp_enum = video_device
-            .CreateVideoProcessorEnumerator(&content)
-            .map_err(win_err)?;
-        let processor = video_device
-            .CreateVideoProcessor(&vp_enum, 0)
-            .map_err(win_err)?;
-        Ok(VideoPath {
-            video_device,
-            video_context,
-            vp_enum,
-            processor,
-        })
-    }
-}
-
-/// The D3D11 objects a decoded frame carries, as owned references.
-fn decoded_texture(
-    texture: &OwnedD3D11Texture,
-) -> Result<(ID3D11Device, ID3D11Texture2D), G2gError> {
-    // SAFETY: both pointers come from a live decoded frame whose keep-alive holds
-    // the owning IMFSample, and cloning takes a reference of our own.
-    unsafe {
-        let device_raw = texture.device as *mut core::ffi::c_void;
-        let texture_raw = texture.texture as *mut core::ffi::c_void;
-        let device = ID3D11Device::from_raw_borrowed(&device_raw)
-            .ok_or(G2gError::Hardware(HardwareError::Other))?;
-        let input = ID3D11Texture2D::from_raw_borrowed(&texture_raw)
-            .ok_or(G2gError::Hardware(HardwareError::Other))?;
-        Ok((device.clone(), input.clone()))
     }
 }
 
@@ -768,7 +674,7 @@ fn present_frame(
     orientation: Orientation,
 ) -> Result<(), G2gError> {
     let decoded = match domain {
-        MemoryDomain::D3D11Texture(texture) => Some((texture, decoded_texture(texture)?)),
+        MemoryDomain::D3D11Texture(texture) => Some((texture, texture_objects(texture)?)),
         _ => None,
     };
     let foreign_device = match (&decoded, gpu.as_ref()) {
@@ -816,75 +722,8 @@ fn present_frame(
     // SAFETY: `input_tex` holds its own reference for this call, and a decoded
     // frame's keep-alive in `domain` outlives it; all COM objects belong to the same device.
     unsafe {
-        let in_desc = D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC {
-            FourCC: 0,
-            ViewDimension: D3D11_VPIV_DIMENSION_TEXTURE2D,
-            Anonymous: D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0 {
-                Texture2D: D3D11_TEX2D_VPIV {
-                    MipSlice: 0,
-                    ArraySlice: subresource,
-                },
-            },
-        };
-        let mut input_view: Option<ID3D11VideoProcessorInputView> = None;
-        video
-            .video_device
-            .CreateVideoProcessorInputView(
-                &input_tex,
-                &video.vp_enum,
-                &in_desc,
-                Some(&mut input_view),
-            )
-            .map_err(win_err)?;
-        let input_view = input_view.ok_or(G2gError::Hardware(HardwareError::Other))?;
-
         let backbuffer: ID3D11Texture2D = gpu.swapchain.GetBuffer(0).map_err(win_err)?;
-        let out_desc = D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC {
-            ViewDimension: D3D11_VPOV_DIMENSION_TEXTURE2D,
-            Anonymous: D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0 {
-                Texture2D: D3D11_TEX2D_VPOV { MipSlice: 0 },
-            },
-        };
-        let mut output_view: Option<ID3D11VideoProcessorOutputView> = None;
-        video
-            .video_device
-            .CreateVideoProcessorOutputView(
-                &backbuffer,
-                &video.vp_enum,
-                &out_desc,
-                Some(&mut output_view),
-            )
-            .map_err(win_err)?;
-        let output_view = output_view.ok_or(G2gError::Hardware(HardwareError::Other))?;
-
-        let mut streams = [D3D11_VIDEO_PROCESSOR_STREAM {
-            Enable: true.into(),
-            OutputIndex: 0,
-            InputFrameOrField: 0,
-            PastFrames: 0,
-            FutureFrames: 0,
-            ppPastSurfaces: core::ptr::null_mut(),
-            pInputSurface: ManuallyDrop::new(Some(input_view)),
-            ppFutureSurfaces: core::ptr::null_mut(),
-            ppPastSurfacesRight: core::ptr::null_mut(),
-            pInputSurfaceRight: ManuallyDrop::new(None),
-            ppFutureSurfacesRight: core::ptr::null_mut(),
-        }];
-        let blt =
-            video
-                .video_context
-                .VideoProcessorBlt(&video.processor, &output_view, 0, &streams);
-        // Release the input-view refs we placed in the stream struct.
-        drop(ManuallyDrop::into_inner(core::mem::replace(
-            &mut streams[0].pInputSurface,
-            ManuallyDrop::new(None),
-        )));
-        drop(ManuallyDrop::into_inner(core::mem::replace(
-            &mut streams[0].pInputSurfaceRight,
-            ManuallyDrop::new(None),
-        )));
-        blt.map_err(win_err)?;
-
+        video.blt(&input_tex, subresource, &backbuffer)?;
         gpu.swapchain
             .Present(1, DXGI_PRESENT(0))
             .ok()
@@ -1055,7 +894,7 @@ fn win_err(e: windows::core::Error) -> G2gError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use g2g_core::{Interlace, Rate, VideoCodec};
+    use g2g_core::{Dim, Interlace, Rate, VideoCodec};
 
     fn nv12(w: u32, h: u32) -> Caps {
         Caps::RawVideo {
@@ -1226,7 +1065,7 @@ mod tests {
             .expect("fixed-geometry NV12 yields a proposal");
         assert_eq!(p.domain, MemoryDomainKind::D3D11Texture);
         assert_eq!(p.size_bytes, 1920 * 1080 * 3 / 2);
-        assert_eq!(p.align, D3D11_ALIGN);
-        assert_eq!(p.min_buffers, D3D11_POOL_HEADROOM);
+        assert_eq!(p.align, crate::d3d11texture::D3D11_ALIGN);
+        assert_eq!(p.min_buffers, crate::d3d11texture::D3D11_POOL_HEADROOM);
     }
 }

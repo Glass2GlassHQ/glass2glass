@@ -2722,6 +2722,13 @@ fn register_autoplug_candidates(reg: &mut Registry) {
         })
         .with_experimental(),
     );
+    #[cfg(all(target_os = "windows", feature = "d3d11-convert"))]
+    reg.register_launch(
+        LaunchFactory::of::<crate::d3d11convert::D3D11Convert>("d3d11convert", || {
+            Box::new(crate::d3d11convert::D3D11Convert::new())
+        })
+        .with_experimental(),
+    );
     #[cfg(all(target_os = "windows", feature = "wasapi-sink"))]
     reg.register_launch(
         LaunchFactory::of::<crate::wasapisink::WasapiSink>("wasapisink", || {
@@ -3137,6 +3144,7 @@ pub static FEATURE_GATED_ELEMENTS: &[FeatureGatedElement] = &{
         "wasapisrc" => "wasapi-src" on "windows";
         "d3d11videosink" => "d3d11-sink" on "windows";
         "d3d11screencapturesrc" => "d3d11-screen-capture" on "windows";
+        "d3d11convert" => "d3d11-convert" on "windows";
         "d3d12h264dec" => "d3d12-decode" on "windows";
         "wasapisink" => "wasapi-sink" on "windows";
     }

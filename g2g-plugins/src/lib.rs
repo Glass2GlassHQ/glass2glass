@@ -1356,7 +1356,9 @@ pub mod moqtsrc;
         feature = "mf-encode",
         feature = "mf-aac",
         feature = "mf-video-src",
-        feature = "d3d11-screen-capture"
+        feature = "d3d11-screen-capture",
+        feature = "d3d11-sink",
+        feature = "d3d11-convert"
     )
 ))]
 mod mfcommon;
@@ -1648,14 +1650,42 @@ mod yuv420;
 
 // D3D11 present sink: displays MemoryDomain::D3D11Texture frames via a DXGI
 // swapchain + D3D11 video processor. Windows-only; the analog of CudaGlSink.
+#[cfg(all(target_os = "windows", feature = "d3d11-convert"))]
+pub mod d3d11convert;
 #[cfg(all(target_os = "windows", feature = "d3d11-screen-capture"))]
 pub mod d3d11screencapturesrc;
 #[cfg(all(target_os = "windows", feature = "d3d11-sink"))]
 pub mod d3d11sink;
+#[cfg(all(
+    target_os = "windows",
+    any(
+        feature = "d3d11-convert",
+        feature = "d3d11-screen-capture",
+        feature = "d3d11-sink",
+        feature = "mf-encode"
+    )
+))]
+mod d3d11texture;
+#[cfg(all(
+    target_os = "windows",
+    any(feature = "d3d11-sink", feature = "d3d11-convert")
+))]
+mod d3d11video;
 #[cfg(all(target_os = "windows", feature = "d3d12-decode"))]
 pub mod d3d12videodec;
+#[cfg(all(target_os = "windows", feature = "d3d11-screen-capture"))]
+mod desktopcapture;
 #[cfg(all(target_os = "windows", feature = "d3d12-decode"))]
 mod dxva;
+#[cfg(all(
+    target_os = "windows",
+    any(
+        feature = "d3d11-convert",
+        feature = "d3d11-screen-capture",
+        feature = "d3d12-decode"
+    )
+))]
+mod texturepool;
 
 // WASAPI render sink: plays PCM on the selected audio endpoint (shared mode).
 // Windows-only; the audible-output end of the M25 audio path.

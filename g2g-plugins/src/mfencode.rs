@@ -15,7 +15,8 @@
 //! from the MFT's `MF_TRANSFORM_ASYNC` attribute at `configure_pipeline`.
 //!
 //! Consumes raw NV12 `DataFrame`s (`MemoryDomain::System`, tightly
-//! packed) and produces Annex-B H.264 access units, also
+//! packed, or with `hardware=true` a `MemoryDomain::D3D11Texture` the encoder
+//! reads in place) and produces Annex-B H.264 access units, also
 //! `MemoryDomain::System` (one encoded sample per input picture; the MFT
 //! emits NALUs with start codes, SPS/PPS attached to each IDR). A
 //! `CapsChanged(H264, w, h)` is emitted before the first encoded frame.
@@ -42,19 +43,22 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use windows::core::Interface;
+use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11Texture2D};
 use windows::Win32::Media::MediaFoundation::{
     eAVEncH264VProfile_Main, CLSID_MSH264EncoderMFT, CODECAPI_AVEncVideoForceKeyFrame, ICodecAPI,
-    IMFActivate, IMFMediaEventGenerator, IMFSample, IMFTransform, METransformDrainComplete,
-    METransformHaveOutput, METransformNeedInput, MFCreateMediaType, MFMediaType_Video, MFShutdown,
-    MFStartup, MFTEnumEx, MFVideoFormat_H264, MFVideoFormat_HEVC, MFVideoFormat_NV12,
-    MFVideoInterlace_Progressive, MEDIA_EVENT_GENERATOR_GET_EVENT_FLAGS, MFSTARTUP_FULL,
-    MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG_ASYNCMFT, MFT_ENUM_FLAG_HARDWARE,
+    IMF2DBuffer, IMFActivate, IMFDXGIDeviceManager, IMFMediaEventGenerator, IMFSample,
+    IMFTransform, METransformDrainComplete, METransformHaveOutput, METransformNeedInput,
+    MFCreateDXGIDeviceManager, MFCreateDXGISurfaceBuffer, MFCreateMediaType, MFCreateSample,
+    MFMediaType_Video, MFShutdown, MFStartup, MFTEnumEx, MFVideoFormat_H264, MFVideoFormat_HEVC,
+    MFVideoFormat_NV12, MFVideoInterlace_Progressive, MEDIA_EVENT_GENERATOR_GET_EVENT_FLAGS,
+    MFSTARTUP_FULL, MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG_ASYNCMFT, MFT_ENUM_FLAG_HARDWARE,
     MFT_ENUM_FLAG_SORTANDFILTER, MFT_ENUM_FLAG_SYNCMFT, MFT_MESSAGE_COMMAND_DRAIN,
     MFT_MESSAGE_COMMAND_FLUSH, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING,
-    MFT_MESSAGE_NOTIFY_END_OF_STREAM, MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_REGISTER_TYPE_INFO,
-    MF_EVENT_FLAG_NO_WAIT, MF_E_NO_EVENTS_AVAILABLE, MF_LOW_LATENCY, MF_MT_AVG_BITRATE,
-    MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE,
-    MF_MT_MPEG2_PROFILE, MF_MT_SUBTYPE, MF_TRANSFORM_ASYNC, MF_TRANSFORM_ASYNC_UNLOCK, MF_VERSION,
+    MFT_MESSAGE_NOTIFY_END_OF_STREAM, MFT_MESSAGE_NOTIFY_START_OF_STREAM,
+    MFT_MESSAGE_SET_D3D_MANAGER, MFT_REGISTER_TYPE_INFO, MF_EVENT_FLAG_NO_WAIT,
+    MF_E_NO_EVENTS_AVAILABLE, MF_LOW_LATENCY, MF_MT_AVG_BITRATE, MF_MT_FRAME_RATE,
+    MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE, MF_MT_MPEG2_PROFILE, MF_MT_SUBTYPE,
+    MF_SA_D3D11_AWARE, MF_TRANSFORM_ASYNC, MF_TRANSFORM_ASYNC_UNLOCK, MF_VERSION,
 };
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, CLSCTX_INPROC_SERVER,
@@ -65,6 +69,7 @@ use windows::Win32::System::Variant::{VARIANT, VARIANT_0, VARIANT_0_0, VARIANT_0
 use alloc::collections::VecDeque;
 
 use crate::annexb::au_is_keyframe;
+use crate::d3d11texture::{texture_objects, texture_proposal};
 use crate::mfcommon::{
     feed_sample, make_input_sample, mf_err, mf_ticks_to_ns, ns_to_mf_ticks,
     output_provides_samples, pack_u32_pair, process_output, read_sample_bytes, sample_time_ns,
@@ -73,12 +78,12 @@ use crate::mfcommon::{
 use g2g_core::caps::framerate_q16_to_fraction;
 use g2g_core::frame::Frame;
 use g2g_core::log::Target;
-use g2g_core::memory::SystemSlice;
+use g2g_core::memory::{DomainSet, MemoryDomainKind, SystemSlice};
 use g2g_core::{
-    g2g_warn, AllocationParams, AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim,
-    FrameTiming, G2gError, HardwareError, Interlace, MemoryDomain, OutputSink, PadTemplate,
-    PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, PushOutcome, Rate,
-    RawVideoFormat, Reconfigure, VideoCodec,
+    g2g_error, g2g_warn, AllocationParams, AsyncElement, Caps, CapsConstraint, CapsSet,
+    ConfigureOutcome, Dim, FrameTiming, G2gError, HardwareError, Interlace, MemoryDomain,
+    OutputSink, OwnedD3D11Texture, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
+    PropValue, PropertySpec, PushOutcome, Rate, RawVideoFormat, Reconfigure, VideoCodec,
 };
 
 /// Default target bitrate (bits/s) when the caller doesn't override it.
@@ -117,6 +122,24 @@ struct EncoderState {
     /// Outstanding `METransformNeedInput` events with no input queued to
     /// satisfy them: the next handed-in sample is fed immediately.
     need_input_credits: u32,
+    // input sample time in MF ticks and the texture frame it reads, held until its output arrives
+    held_textures: VecDeque<(i64, OwnedD3D11Texture)>,
+    texture_device: Option<TextureDevice>,
+    fed: bool,
+}
+
+#[derive(Debug)]
+struct TextureDevice {
+    device: ID3D11Device,
+    // the MFT reads textures through this manager, which must stay alive with it
+    _manager: IMFDXGIDeviceManager,
+}
+
+#[derive(Debug, Clone)]
+enum EncoderBackend {
+    Software,
+    Hardware,
+    HardwareOnDevice(ID3D11Device),
 }
 
 /// One encoded access unit plus the caps fields it was produced under, so
@@ -278,15 +301,30 @@ impl MfEncode {
     /// release into `encoded`.
     fn feed(
         &mut self,
-        data: &[u8],
+        domain: &MemoryDomain,
         timing: &FrameTiming,
         encoded: &mut Vec<EncodedChunk>,
     ) -> Result<(), G2gError> {
+        let sample = match domain {
+            MemoryDomain::D3D11Texture(texture) => {
+                self.use_texture_device(texture, encoded)?;
+                let sample = make_texture_sample(texture, timing.pts_ns)?;
+                let st = self.state.as_mut().ok_or(G2gError::NotConfigured)?;
+                // media foundation encoders read the input texture after ProcessInput returns
+                st.held_textures
+                    .push_back((ns_to_mf_ticks(timing.pts_ns), texture.clone()));
+                sample
+            }
+            _ => make_input_sample(
+                domain.require_system_slice(g2g_core::log::short_type_name::<Self>())?,
+                timing.pts_ns,
+            )?,
+        };
         let (rate_duration_hns, async_mode) = {
-            let st = self.state.as_ref().ok_or(G2gError::NotConfigured)?;
+            let st = self.state.as_mut().ok_or(G2gError::NotConfigured)?;
+            st.fed = true;
             (st.duration_hns, st.async_mode)
         };
-        let sample = make_input_sample(data, timing.pts_ns)?;
         let duration_hns = sample_duration_hns(timing.duration_ns, rate_duration_hns);
         // SAFETY: setting an attribute on the sample just built, on the owning thread.
         unsafe { sample.SetSampleDuration(duration_hns) }.map_err(mf_err)?;
@@ -304,6 +342,53 @@ impl MfEncode {
         feed_sample(self, &sample, Self::transform, |element| {
             element.drain(encoded)
         })
+    }
+
+    fn backend(&self) -> EncoderBackend {
+        let texture_device = self
+            .state
+            .as_ref()
+            .and_then(|st| st.texture_device.as_ref());
+        match (texture_device, self.prefer_hardware) {
+            (Some(texture_device), _) => {
+                EncoderBackend::HardwareOnDevice(texture_device.device.clone())
+            }
+            (None, true) => EncoderBackend::Hardware,
+            (None, false) => EncoderBackend::Software,
+        }
+    }
+
+    fn use_texture_device(
+        &mut self,
+        texture: &OwnedD3D11Texture,
+        encoded: &mut Vec<EncodedChunk>,
+    ) -> Result<(), G2gError> {
+        // input_domains offers textures only to the hardware encoder
+        if !self.prefer_hardware {
+            return Err(G2gError::UnsupportedDomain);
+        }
+        let (device, _) = texture_objects(texture)?;
+        let st = self.state.as_ref().ok_or(G2gError::NotConfigured)?;
+        if st
+            .texture_device
+            .as_ref()
+            .is_some_and(|current| current.device == device)
+        {
+            return Ok(());
+        }
+        let (width, height, fed) = (st.width, st.height, st.fed);
+        if fed {
+            self.drain_eos(encoded)?;
+        }
+        self.state = Some(init_encoder(
+            self.codec,
+            width,
+            height,
+            rate_to_ratio(&self.framerate),
+            self.bitrate,
+            &EncoderBackend::HardwareOnDevice(device),
+        )?);
+        Ok(())
     }
 
     fn force_next_keyframe(&self) -> Result<(), G2gError> {
@@ -457,13 +542,23 @@ impl MfEncode {
         Ok(PumpResult::Pumped)
     }
 
-    fn process_output(&self) -> Result<OutputStep, G2gError> {
-        let st = self.state.as_ref().ok_or(G2gError::NotConfigured)?;
+    fn process_output(&mut self) -> Result<OutputStep, G2gError> {
+        let st = self.state.as_mut().ok_or(G2gError::NotConfigured)?;
         let sample = match process_output(&st.transform, st.provides_samples, st.out_size)? {
             OutputPull::Sample(sample) => sample,
             OutputPull::NeedInput => return Ok(OutputStep::NeedInput),
             OutputPull::StreamChange => return Ok(OutputStep::StreamChange),
         };
+        let pts_ns = sample_time_ns(&sample);
+        let output_ticks = ns_to_mf_ticks(pts_ns);
+        // MF_LOW_LATENCY encoders emit outputs in input order
+        while st
+            .held_textures
+            .front()
+            .is_some_and(|(ticks, _)| *ticks <= output_ticks)
+        {
+            st.held_textures.pop_front();
+        }
         // SAFETY: reading an attribute off a valid sample on the owning thread.
         let duration_ns = unsafe { sample.GetSampleDuration() }
             .map(mf_ticks_to_ns)
@@ -473,7 +568,7 @@ impl MfEncode {
             width: st.width,
             height: st.height,
             framerate: self.framerate.clone(),
-            pts_ns: sample_time_ns(&sample),
+            pts_ns,
             duration_ns,
         }))
     }
@@ -500,10 +595,14 @@ impl AsyncElement for MfEncode {
         true
     }
 
-    /// Reads host memory, so it takes system frames only. The allocation
-    /// cascade turns that into a download demand on a GPU producer.
-    fn input_domains(&self) -> g2g_core::memory::DomainSet {
-        g2g_core::memory::DomainSet::only(g2g_core::memory::MemoryDomainKind::System)
+    /// The software encoder reads host memory, so it takes system frames only,
+    /// and the allocation cascade turns that into a download demand on a GPU
+    /// producer. A hardware encoder also reads D3D11 textures in place.
+    fn input_domains(&self) -> DomainSet {
+        match self.prefer_hardware {
+            true => DomainSet::only(MemoryDomainKind::System).with(MemoryDomainKind::D3D11Texture),
+            false => DomainSet::only(MemoryDomainKind::System),
+        }
     }
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
@@ -535,6 +634,13 @@ impl AsyncElement for MfEncode {
     /// Record the downstream consumer's allocation proposal. The encoder
     /// emits system-memory bitstream buffers sized per encoded frame, so the
     /// request is recorded for diagnostics.
+    fn propose_allocation(&self, caps: &Caps) -> Option<AllocationParams> {
+        match self.prefer_hardware {
+            true => texture_proposal(caps, self.input_domains()),
+            false => None,
+        }
+    }
+
     fn configure_allocation(&mut self, params: &AllocationParams) {
         self.requested_alloc = Some(params.clone());
     }
@@ -617,7 +723,7 @@ impl AsyncElement for MfEncode {
             h,
             rate_to_ratio(&framerate),
             self.bitrate,
-            self.prefer_hardware,
+            &self.backend(),
         )?);
         self.framerate = framerate;
         self.configured = true;
@@ -636,10 +742,7 @@ impl AsyncElement for MfEncode {
             let mut encoded = Vec::new();
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let slice = frame
-                        .domain
-                        .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
-                    self.feed(slice, &frame.timing, &mut encoded)?;
+                    self.feed(&frame.domain, &frame.timing, &mut encoded)?;
                 }
                 PipelinePacket::CapsChanged(c) => {
                     // The runner's pre-fixed output caps (our compressed codec)
@@ -673,6 +776,7 @@ impl AsyncElement for MfEncode {
                         .as_ref()
                         .is_some_and(|st| (st.width, st.height) != (w, h));
                     if geometry_changed {
+                        let backend = self.backend();
                         self.drain_eos(&mut encoded)?;
                         self.state = Some(init_encoder(
                             self.codec,
@@ -680,7 +784,7 @@ impl AsyncElement for MfEncode {
                             h,
                             rate_to_ratio(&framerate),
                             self.bitrate,
-                            self.prefer_hardware,
+                            &backend,
                         )?);
                     }
                     // Track the rate even on a framerate-only change (no rebuild),
@@ -698,6 +802,7 @@ impl AsyncElement for MfEncode {
                         }
                         // Drop any input the async MFT never accepted.
                         st.pending_input.clear();
+                        st.held_textures.clear();
                         st.need_input_credits = 0;
                     }
                     self.last_caps = None;
@@ -928,10 +1033,15 @@ fn init_encoder(
     height: u32,
     fps: (u32, u32),
     bitrate: u32,
-    prefer_hardware: bool,
+    backend: &EncoderBackend,
 ) -> Result<EncoderState, G2gError> {
     let out_subtype = encoder_subtype(codec)?;
-    let (transform, async_mode) = create_encoder_transform(codec, prefer_hardware)?;
+    let hardware = !matches!(backend, EncoderBackend::Software);
+    let (transform, async_mode) = create_encoder_transform(codec, hardware)?;
+    let texture_device = match backend {
+        EncoderBackend::HardwareOnDevice(device) => Some(attach_device(&transform, device)?),
+        EncoderBackend::Software | EncoderBackend::Hardware => None,
+    };
 
     // Low-latency mode (the attribute alias of CODECAPI_AVLowLatencyMode):
     // no B-frames / lookahead, one output per input. Best-effort, set before
@@ -1028,7 +1138,61 @@ fn init_encoder(
         event_gen,
         pending_input: VecDeque::new(),
         need_input_credits: 0,
+        held_textures: VecDeque::new(),
+        texture_device,
+        fed: false,
     })
+}
+
+fn attach_device(
+    transform: &IMFTransform,
+    device: &ID3D11Device,
+) -> Result<TextureDevice, G2gError> {
+    // SAFETY: attribute, device-manager and message calls on the owning thread, every argument valid for the call.
+    unsafe {
+        let attributes = transform.GetAttributes().map_err(mf_err)?;
+        if attributes.GetUINT32(&MF_SA_D3D11_AWARE) != Ok(1) {
+            g2g_error!(
+                Target::category("mfencode"),
+                "the hardware encoder MFT does not read D3D11 textures"
+            );
+            return Err(G2gError::UnsupportedDomain);
+        }
+        let mut reset_token = 0u32;
+        let mut manager = None;
+        MFCreateDXGIDeviceManager(&mut reset_token, &mut manager).map_err(mf_err)?;
+        let manager = manager.ok_or(G2gError::Hardware(HardwareError::Other))?;
+        manager.ResetDevice(device, reset_token).map_err(mf_err)?;
+        transform
+            .ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER, manager.as_raw() as usize)
+            .map_err(mf_err)?;
+        Ok(TextureDevice {
+            device: device.clone(),
+            _manager: manager,
+        })
+    }
+}
+
+fn make_texture_sample(texture: &OwnedD3D11Texture, pts_ns: u64) -> Result<IMFSample, G2gError> {
+    let (_, surface) = texture_objects(texture)?;
+    // SAFETY: the buffer takes its own reference to `surface`, and every call runs on the owning thread.
+    unsafe {
+        let buffer =
+            MFCreateDXGISurfaceBuffer(&ID3D11Texture2D::IID, &surface, texture.subresource, false)
+                .map_err(mf_err)?;
+        let length = buffer
+            .cast::<IMF2DBuffer>()
+            .map_err(mf_err)?
+            .GetContiguousLength()
+            .map_err(mf_err)?;
+        buffer.SetCurrentLength(length).map_err(mf_err)?;
+        let sample = MFCreateSample().map_err(mf_err)?;
+        sample.AddBuffer(&buffer).map_err(mf_err)?;
+        sample
+            .SetSampleTime(ns_to_mf_ticks(pts_ns))
+            .map_err(mf_err)?;
+        Ok(sample)
+    }
 }
 
 /// Re-select the configured output subtype from the MFT's available types

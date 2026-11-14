@@ -56,7 +56,7 @@ release-binary-linux = [
 release-binary-macos = ["release-binary", "vtdecode", "vtencode", "metal-sink", "coreaudio", "audiotoolbox-aac", "avfoundation", "screencapture", "vpx", "ffmpeg-long-tail"]
 release-aar = ["release-binary", "camera2", "mediacodec-wgpu", "aaudio"]
 release-binary-windows = [
-    "release-binary", "mf-decode", "mf-encode", "mf-aac", "wasapi-sink", "wasapi-src", "d3d11-sink", "d3d11-screen-capture", "mf-video-src",
+    "release-binary", "mf-decode", "mf-encode", "mf-aac", "wasapi-sink", "wasapi-src", "d3d11-sink", "d3d11-screen-capture", "d3d11-convert", "mf-video-src",
     "cuda", "nvenc", "nvdec", "vpx", "ffmpeg-long-tail", "d3d12-decode", "wgpu-present",
 ]
 # libc lets g2g-launch die on a closed stdout the way gst-launch does
@@ -391,8 +391,11 @@ wasapi-src = ["std", "dep:windows", "dep:windows-core"]
 # implies std.
 d3d11-sink = ["std", "dep:windows"]
 # Windows desktop capture through DXGI Desktop Duplication, BGRA in system
-# memory (d3d11screencapturesrc). Windows-only, implies std.
+# memory or a D3D11 texture (d3d11screencapturesrc). Windows-only, implies std.
 d3d11-screen-capture = ["std", "dep:windows"]
+# Windows GPU colour conversion of D3D11 textures through a D3D11 video
+# processor (d3d11convert). Windows-only, implies std.
+d3d11-convert = ["std", "dep:windows"]
 # Windows D3D12 hardware video decode through the D3D12 video decode API and
 # DXVA picture parameters. Windows-only, implies std.
 d3d12-decode = ["std", "dep:windows", "dep:wgpu", "dep:wgpu-hal"]

@@ -41,9 +41,9 @@ const SIGNALING_READ_BYTES: usize = 4096;
 const LINK_CAPACITY: usize = 2;
 const SDP_CHANNEL_DEPTH: usize = 4;
 #[cfg(target_os = "linux")]
-const ENCODER: &str = "ffmpegenc backend=software";
+const ENCODE: &str = "videoconvert ! ffmpegenc backend=software";
 #[cfg(target_os = "windows")]
-const ENCODER: &str = "mfh264enc";
+const ENCODE: &str = "d3d11convert ! mfh264enc hardware=true";
 
 #[derive(Debug, Clone)]
 pub struct TurnServer {
@@ -146,6 +146,10 @@ impl AsyncElement for CaptureSize {
         CapsConstraint::IdentityAny
     }
 
+    fn output_domain_follows_input(&self) -> bool {
+        true
+    }
+
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         self.publish(absolute_caps)?;
         Ok(ConfigureOutcome::Accepted)
@@ -193,7 +197,7 @@ fn host_graph(
     session: WebRtcDuplexSession,
     sizes: watch::Sender<Option<ScreenSize>>,
 ) -> Result<Graph<GraphNode>, HostError> {
-    let encode = format!("videoconvert ! {ENCODER} bitrate={}", settings.bitrate);
+    let encode = format!("{ENCODE} bitrate={}", settings.bitrate);
     let encode = parse_chain(&default_registry(), &encode).map_err(HostError::Launch)?;
     let mut capture = capture.into_iter();
     let mut graph = Graph::new();

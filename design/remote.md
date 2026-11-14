@@ -51,7 +51,7 @@ LAN, and a host off the LAN needs a forwarded UDP port.
 4. The first slice encodes whatever memory the capture element already
    produces. In-place GPU encode is the next slice on each OS, and the session
    runs before it lands. `nvenc` rejects anything other than
-   `MemoryDomain::Cuda`. `mfencode` takes tightly packed system NV12.
+   `MemoryDomain::Cuda`. `mfencode hardware=true` takes a D3D11 NV12 texture.
    `ffmpegenc` VA-API takes a drm buffer. `vtencode` takes the
    `screencapturesrc` `cv-output` path.
 5. The client puts `livesync` in front of the video sink. A frame that arrives
@@ -70,6 +70,11 @@ LAN, and a host off the LAN needs a forwarded UDP port.
    compared in constant time before capture starts. A bad token closes the
    connection. OIDC, a URL scheme, and installers do not
    block the first LAN session.
+10. A network that blocks UDP falls back to WebSocket over TLS on the same
+    port number over TCP. The client dials `quic://` and dials `wss://` when
+    the QUIC handshake has not finished after 1 s. The `wss://` location is a
+    third scheme of the `remotewt` elements, so the message channel and
+    keyframe requests are the same code on both transports.
 
 ## What the session builds on
 
@@ -77,12 +82,13 @@ LAN, and a host off the LAN needs a forwarded UDP port.
 | :--- | :--- |
 | Wayland screen | `pipewirevideosrc` `portal=true`, `portal-restore-token`, `portal-timeout`. `io-mode=dmabuf` or `mmap`. |
 | macOS screen | `screencapturesrc`. `cv-output` keeps the IOSurface. It captures the first display until `display-index` exists. |
-| Windows screen | `d3d11screencapturesrc`, `monitor-index`, `fps`, tight BGRA system memory. |
+| Windows screen | `d3d11screencapturesrc`, `monitor-index`, `fps`, BGRA in system memory or a D3D11 texture. |
+| Windows GPU colour convert | `d3d11convert`, BGRA D3D11 texture to NV12 on the video processor. |
 | NVIDIA encode | `nvenc`. CUDA NV12 in, Annex-B out, no B-frames, `gop-size=-1` by default, `force_keyframe()` latched and set on the first frame. |
 | Upload into CUDA | `cudaupload`, Linux and Windows. |
 | VA-API encode | `ffmpegenc` backend `h264_vaapi` / `hevc_vaapi`. |
 | macOS encode | `vtencode`. |
-| Windows encode | `mfencode`, system NV12, `MF_LOW_LATENCY` so the MFT releases one output per input. |
+| Windows encode | `mfencode`, `MF_LOW_LATENCY` so the MFT releases one output per input. `hardware=true` reads D3D11 NV12 textures in place. |
 | Software encode | `ffmpegenc`. |
 | Audio capture | `pulsesrc`, `wasapisrc`, `coreaudiosrc`. |
 | Audio encode | `opusenc`. |
@@ -113,6 +119,26 @@ LAN, and a host off the LAN needs a forwarded UDP port.
 - The WebRTC session path is deleted from `g2g-desktop` once QUIC runs.
   `WebRtcDuplexSession` stays in `g2g-plugins`.
 
+## WebSocket fallback
+
+- `remotewtsink mode=listener` binds TCP beside UDP on the same port number,
+  with the same certificate. `remotewtsrc` takes `fallback-location=wss://...`
+  and dials it when `quic://` has not connected after 1 s.
+- One WebSocket connection carries video and the message channel. Each binary
+  message is one wire packet with a one-byte tag naming video or the message
+  channel. Input runs client to host, opposite to video, so it does not queue
+  behind a frame.
+- There is no datagram mode on WebSocket. `video-mode=datagrams` sends one
+  message per frame there.
+- The socket sets `TCP_NODELAY`. The host keeps at most one frame queued: a
+  delta frame that arrives while the previous frame is still being written is
+  dropped, and the encoder gets `force-keyframe` once the socket drains.
+  Without the drop, delay on a congested link grows instead of frames dropping.
+- The native client pins the certificate by SHA-256 on the TLS layer, as on
+  raw QUIC. A browser WebSocket accepts no pinned hash, so the Chrome page's
+  fallback needs a CA-signed certificate or plain `ws://` on a LAN.
+- `g2g-desktop client --transport auto|quic|websocket`, default `auto`.
+
 ## Host graphs
 
 The host sends video, and audio once slice 6 adds it, through `remotewtsink`
@@ -134,24 +160,23 @@ pipewirevideosrc portal=true ! videoconvert ! ffmpegenc
 or `ffmpegenc` with the VA-API backend when `io-mode=dmabuf` yields a buffer
 that backend accepts. If it does not, the software line is the one that ships.
 
-Windows, first slice, a copy:
+Windows, every frame on the GPU from capture to the encoder:
 
 ```
-d3d11screencapturesrc ! videoconvert ! mfh264enc
+d3d11screencapturesrc ! d3d11convert ! mfh264enc hardware=true
 wasapisrc ! audioconvert ! opusenc
 ```
 
-Windows, in-place, after the bridge exists:
+Windows with NVIDIA, after the bridge exists:
 
 ```
-d3d11screencapturesrc zero-copy=true ! nvenc
+d3d11screencapturesrc ! d3d11convert ! nvenc
 ```
 
-`d3d11screencapturesrc` in that mode converts BGRA to NV12 on the GPU and produces `MemoryDomain::Cuda` by registering the D3D11
-texture with `cuGraphicsD3D11RegisterResource` and wrapping the mapped pointer
-the way `nvenc` already requires: one NV12 base pointer, chroma at
-`luma + pitch * height`. There is no D3D11 memory domain. The bridge is the
-source's output, not a new domain.
+The bridge turns the NV12 D3D11 texture into `MemoryDomain::Cuda` by
+registering it with `cuGraphicsD3D11RegisterResource` and wrapping the mapped
+pointer the way `nvenc` already requires: one NV12 base pointer, chroma at
+`luma + pitch * height`.
 
 macOS:
 
@@ -188,12 +213,12 @@ session is solid.
 
 ## Capture sources to add
 
-### d3d11screencapturesrc zero-copy
+### D3D11 to CUDA for nvenc
 
-`zero-copy` (bool, default false) on `d3d11screencapturesrc`. `zero-copy=true`
-without CUDA fails at configure time. Capture runs in the interactive session,
-never in session 0, and the host rebuilds the graph after `AccessLost` fails
-the source.
+An element after `d3d11convert` that registers each NV12 texture with CUDA and
+emits `MemoryDomain::Cuda`, so `nvenc` encodes it in place. It fails at
+configure time without CUDA. Capture runs in the interactive session, never in
+session 0, and the host rebuilds the graph after `AccessLost` fails the source.
 
 ### ximagesrc
 
@@ -280,6 +305,7 @@ Client flags:
 | `--inputs` | send input | true |
 | `--clipboard` | sync clipboard | true |
 | `--keyboard-grab` | grab on focus | true |
+| `--transport` | `auto` (QUIC, then WebSocket), `quic` or `websocket` | `auto` |
 
 A URL `g2g://host:port/?token=...` parses onto those flags. The query keys
 match the flag names with underscores. Unknown keys are an error and the
@@ -316,7 +342,8 @@ ones.
    `mfencode`, `SendInput`. Then raw QUIC and WebTransport carriers in
    `remotewt`, stream-per-frame and FEC datagram video, the message channel,
    keyframe requests with `force-keyframe` on `mfencode` and `ffmpegenc`, and
-   `g2g-desktop` moved onto it with the WebRTC path deleted. Then the Windows
+   `g2g-desktop` moved onto it with the WebRTC path deleted. Then the
+   WebSocket fallback. Then the Windows
    client, then the D3D11-to-CUDA output and `nvenc`.
 5. **macOS client, then the macOS host** on `screencapturesrc` `display-index`
    and `vtencode`.

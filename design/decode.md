@@ -61,7 +61,13 @@ callable from any MTA thread without marshaling.
 `MfEncode` (feature `mf-encode`) wraps `CLSID_MSH264EncoderMFT` with
 `MF_LOW_LATENCY` set, so no B-frames, converting
 `Caps::RawVideo { format: Nv12 }` to `Caps::CompressedVideo { codec: H264 }`,
-Annex-B framed. `MfAacEncode` / `MfAacDecode` (feature `mf-aac`) cover the AAC
+Annex-B framed. `hardware=true` enumerates a hardware encoder MFT instead,
+which also takes NV12 as `MemoryDomain::D3D11Texture` and proposes that domain
+upstream. The first texture frame rebuilds the MFT with an
+`IMFDXGIDeviceManager` on the texture's device (`MFT_MESSAGE_SET_D3D_MANAGER`),
+and each frame enters as an `MFCreateDXGISurfaceBuffer` sample, so the picture
+is not copied. An MFT without `MF_SA_D3D11_AWARE` fails the frame with
+`UnsupportedDomain`. `MfAacEncode` / `MfAacDecode` (feature `mf-aac`) cover the AAC
 audio path. Like every AAC element in a pipeline they carry ADTS: the encoder
 frames each access unit, and the decoder opens on the AudioSpecificConfig of the
 first ADTS header and strips the headers.

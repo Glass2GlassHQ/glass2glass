@@ -5,23 +5,21 @@
 use core::future::Future;
 use core::pin::Pin;
 
-use std::sync::mpsc as std_mpsc;
-use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use alloc::boxed::Box;
-use alloc::string::String;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
-
-use tokio::sync::watch;
 
 use windows::core::Interface;
 use windows::Win32::Foundation::{HMODULE, POINT};
 use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_UNKNOWN;
 use windows::Win32::Graphics::Direct3D11::{
-    D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D, D3D11_CPU_ACCESS_READ,
-    D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ, D3D11_SDK_VERSION,
-    D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING,
+    D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Multithread, ID3D11Texture2D,
+    D3D11_BIND_FLAG, D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_CPU_ACCESS_READ,
+    D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_FLAG, D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
+    D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE,
+    D3D11_USAGE_DEFAULT, D3D11_USAGE_STAGING,
 };
 use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_MODE_ROTATION_IDENTITY, DXGI_MODE_ROTATION_UNSPECIFIED,
@@ -37,17 +35,19 @@ use windows::Win32::UI::HiDpi::{
     SetThreadDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
 
+use crate::d3d11texture::{texture_frame, TextureOwner};
+use crate::desktopcapture::{run_desktop_capture, DesktopCaptureSettings, DesktopGrabber};
 use crate::mfcommon::mf_err;
-use g2g_core::frame::Frame;
+use crate::texturepool::take_from_pool;
 use g2g_core::g2g_error;
 use g2g_core::log::Target;
-use g2g_core::memory::SystemSlice;
+use g2g_core::memory::{DomainSet, MemoryDomainKind, SystemSlice};
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
-    Caps, CapsConstraint, CapsSet, CaptureAnchor, ClockSync, Colorimetry, ConfigureOutcome, Dim,
-    ElementMetadata, FrameTiming, G2gError, HardwareError, Interlace, LatencyReport, MemoryDomain,
-    OutputSink, PadTemplate, PadTemplates, PipelinePacket, PixelAspect, PropError, PropKind,
-    PropValue, PropertySpec, Rate, RawVideoFormat,
+    AllocationParams, Caps, CapsConstraint, CapsSet, ClockSync, Colorimetry, ConfigureOutcome, Dim,
+    ElementMetadata, G2gError, HardwareError, Interlace, LatencyReport, MemoryDomain, OutputSink,
+    PadTemplate, PadTemplates, PixelAspect, PropError, PropKind, PropValue, PropertySpec, Rate,
+    RawVideoFormat,
 };
 
 const CATEGORY: &str = "d3d11screencapturesrc";
@@ -55,7 +55,8 @@ const PRIMARY_MONITOR: i32 = -1;
 const DEFAULT_FPS: u32 = 60;
 const BYTES_PER_PIXEL: usize = 4;
 const NANOS_PER_SECOND: u64 = 1_000_000_000;
-const WORKER_START_TIMEOUT: Duration = Duration::from_secs(5);
+const OUTPUT_DOMAINS: DomainSet =
+    DomainSet::only(MemoryDomainKind::System).with(MemoryDomainKind::D3D11Texture);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MonitorBounds {
@@ -170,6 +171,7 @@ pub struct D3D11ScreenCaptureSrc {
     bounds: Option<MonitorBounds>,
     configured: bool,
     clock_sync: Option<ClockSync>,
+    out_domain: MemoryDomainKind,
 }
 
 impl Default for D3D11ScreenCaptureSrc {
@@ -187,6 +189,7 @@ impl D3D11ScreenCaptureSrc {
             bounds: None,
             configured: false,
             clock_sync: None,
+            out_domain: MemoryDomainKind::System,
         }
     }
 
@@ -284,7 +287,7 @@ impl SourceLoop for D3D11ScreenCaptureSrc {
         ElementMetadata::new(
             "Direct3D11 screen capture source",
             "Source/Video",
-            "Captures a desktop monitor through DXGI Desktop Duplication as BGRA",
+            "Captures a desktop monitor through DXGI Desktop Duplication as BGRA, in system memory or a D3D11 texture",
             crate::AARON_BOXER,
         )
     }
@@ -326,6 +329,20 @@ impl SourceLoop for D3D11ScreenCaptureSrc {
         self.clock_sync = Some(sync);
     }
 
+    fn output_memory(&self) -> MemoryDomainKind {
+        self.out_domain
+    }
+
+    fn output_domains(&self) -> DomainSet {
+        OUTPUT_DOMAINS
+    }
+
+    fn configure_allocation(&mut self, params: &AllocationParams) {
+        if let Ok(resolved) = params.clone().resolve_for_producer(OUTPUT_DOMAINS) {
+            self.out_domain = resolved.domain;
+        }
+    }
+
     fn latency(&self) -> LatencyReport {
         LatencyReport::live(self.period().as_nanos() as u64, None)
     }
@@ -340,84 +357,26 @@ impl SourceLoop for D3D11ScreenCaptureSrc {
             if crate::numbuffers::finished_at_zero_limit(limit, out).await? {
                 return Ok(0);
             }
-            let period = self.period();
             let monitor_index = self.monitor_index;
-            // a frame the pipeline has not taken yet is replaced by the newer one
-            let (frame_sender, mut frame_receiver) = watch::channel::<Option<CapturedFrame>>(None);
-            let (ready_sender, ready_receiver) = std_mpsc::sync_channel(1);
-            let worker = thread::Builder::new()
-                .name(String::from("g2g-d3d11screencapturesrc"))
-                .spawn(move || {
-                    let result = with_physical_pixels(|| {
-                        capture(monitor_index, bounds, period, &frame_sender, &ready_sender)
-                    });
-                    if let Err(e) = &result {
-                        let _ = ready_sender.try_send(Err(e.clone()));
-                    }
-                    result
+            let out_domain = self.out_domain;
+            let settings = DesktopCaptureSettings {
+                thread_name: "g2g-d3d11screencapturesrc",
+                period: self.period(),
+                frame_limit: limit,
+                clock_sync: self.clock_sync.clone(),
+            };
+            run_desktop_capture(settings, out, move |worker| {
+                with_physical_pixels(|| {
+                    let mut duplication = open_duplication(monitor_index, bounds, out_domain)?;
+                    worker.pace(&mut duplication).inspect_err(|e| {
+                        g2g_error!(
+                            Target::category(CATEGORY),
+                            "desktop duplication failed: {e:?}"
+                        )
+                    })
                 })
-                .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
-            match ready_receiver.recv_timeout(WORKER_START_TIMEOUT) {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => {
-                    let _ = worker.join();
-                    return Err(e);
-                }
-                Err(_) => return Err(G2gError::Timeout),
-            }
-
-            let period_ns = period.as_nanos() as u64;
-            let clock_sync = self.clock_sync.clone();
-            let mut anchor = CaptureAnchor::new();
-            let mut first_capture_ns = None;
-            let mut sequence = 0u64;
-            let mut downstream_open = true;
-            while sequence < limit {
-                if frame_receiver.changed().await.is_err() {
-                    break;
-                }
-                let captured = match frame_receiver.borrow_and_update().as_ref() {
-                    Some(captured) => CapturedFrame {
-                        image: captured.image.share(),
-                        capture_ns: captured.capture_ns,
-                    },
-                    None => continue,
-                };
-                let elapsed =
-                    captured.capture_ns - *first_capture_ns.get_or_insert(captured.capture_ns);
-                let pts = match &clock_sync {
-                    Some(sync) => anchor.stamp(sync, elapsed, period_ns),
-                    None => elapsed,
-                };
-                let frame = Frame {
-                    domain: captured.image,
-                    timing: FrameTiming {
-                        pts_ns: pts,
-                        dts_ns: pts,
-                        duration_ns: period_ns,
-                        capture_ns: pts,
-                        arrival_ns: captured.capture_ns,
-                        keyframe: true,
-                        ..FrameTiming::default()
-                    },
-                    sequence,
-                    meta: Default::default(),
-                };
-                if out.push(PipelinePacket::DataFrame(frame)).await.is_err() {
-                    downstream_open = false;
-                    break;
-                }
-                sequence += 1;
-            }
-            drop(frame_receiver);
-            let captured = worker
-                .join()
-                .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
-            if downstream_open {
-                captured?;
-                out.push(PipelinePacket::Eos).await?;
-            }
-            Ok(sequence)
+            })
+            .await
         })
     }
 }
@@ -437,21 +396,25 @@ impl PadTemplates for D3D11ScreenCaptureSrc {
 }
 
 #[derive(Debug)]
-struct CapturedFrame {
-    image: MemoryDomain,
-    capture_ns: u64,
+enum ImageCopy {
+    System { staging: ID3D11Texture2D },
+    Texture { pool: Vec<Arc<TextureOwner>> },
 }
 
 #[derive(Debug)]
 struct Duplication {
     duplication: IDXGIOutputDuplication,
+    device: ID3D11Device,
     context: ID3D11DeviceContext,
-    staging: ID3D11Texture2D,
+    copy: ImageCopy,
     width: u32,
     height: u32,
 }
 
-fn create_device(adapter: &IDXGIAdapter1) -> Result<ID3D11Device, G2gError> {
+fn create_device(
+    adapter: &IDXGIAdapter1,
+    flags: D3D11_CREATE_DEVICE_FLAG,
+) -> Result<ID3D11Device, G2gError> {
     let mut device = None;
     // SAFETY: the out-param is a valid local, written by the call before it is read.
     unsafe {
@@ -459,7 +422,7 @@ fn create_device(adapter: &IDXGIAdapter1) -> Result<ID3D11Device, G2gError> {
             adapter,
             D3D_DRIVER_TYPE_UNKNOWN,
             HMODULE::default(),
-            D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+            flags,
             None,
             D3D11_SDK_VERSION,
             Some(&mut device),
@@ -471,12 +434,59 @@ fn create_device(adapter: &IDXGIAdapter1) -> Result<ID3D11Device, G2gError> {
     device.ok_or(G2gError::Hardware(HardwareError::Other))
 }
 
-fn duplicate(selected: &SelectedOutput) -> Result<Duplication, G2gError> {
+fn bgra_texture(
+    device: &ID3D11Device,
+    width: u32,
+    height: u32,
+    usage: D3D11_USAGE,
+    bind: D3D11_BIND_FLAG,
+    cpu_access: u32,
+) -> Result<ID3D11Texture2D, G2gError> {
+    let desc = D3D11_TEXTURE2D_DESC {
+        Width: width,
+        Height: height,
+        MipLevels: 1,
+        ArraySize: 1,
+        Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+        SampleDesc: DXGI_SAMPLE_DESC {
+            Count: 1,
+            Quality: 0,
+        },
+        Usage: usage,
+        BindFlags: bind.0 as u32,
+        CPUAccessFlags: cpu_access,
+        MiscFlags: 0,
+    };
+    let mut texture = None;
+    // SAFETY: `desc` and the out-param are valid locals for the call.
+    unsafe {
+        device
+            .CreateTexture2D(&desc, None, Some(&mut texture))
+            .map_err(mf_err)?;
+    }
+    texture.ok_or(G2gError::Hardware(HardwareError::Other))
+}
+
+fn duplicate(
+    selected: &SelectedOutput,
+    out_domain: MemoryDomainKind,
+) -> Result<Duplication, G2gError> {
     let log = Target::category(CATEGORY);
-    let device = create_device(&selected.adapter)?;
+    let to_texture = out_domain == MemoryDomainKind::D3D11Texture;
+    let flags = match to_texture {
+        // the texture goes to a d3d11 video processor on this device
+        true => D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
+        false => D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+    };
+    let device = create_device(&selected.adapter, flags)?;
     // SAFETY: COM calls on interfaces this thread created, with out-params that are valid locals.
     unsafe {
         let context = device.GetImmediateContext().map_err(mf_err)?;
+        if to_texture {
+            // d3d11 immediate contexts are not thread safe, and the consumer of the texture uses this one too
+            let multithread: ID3D11Multithread = context.cast().map_err(mf_err)?;
+            let _ = multithread.SetMultithreadProtected(true);
+        }
         let output: IDXGIOutput1 = selected.output.cast().map_err(mf_err)?;
         let duplication = output.DuplicateOutput(&device).map_err(mf_err)?;
         let mode = duplication.GetDesc().ModeDesc;
@@ -492,29 +502,24 @@ fn duplicate(selected: &SelectedOutput) -> Result<Duplication, G2gError> {
             );
             return Err(G2gError::CapsMismatch);
         }
-        let desc = D3D11_TEXTURE2D_DESC {
-            Width: mode.Width,
-            Height: mode.Height,
-            MipLevels: 1,
-            ArraySize: 1,
-            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
-            SampleDesc: DXGI_SAMPLE_DESC {
-                Count: 1,
-                Quality: 0,
+        let copy = match to_texture {
+            true => ImageCopy::Texture { pool: Vec::new() },
+            false => ImageCopy::System {
+                staging: bgra_texture(
+                    &device,
+                    mode.Width,
+                    mode.Height,
+                    D3D11_USAGE_STAGING,
+                    D3D11_BIND_FLAG(0),
+                    D3D11_CPU_ACCESS_READ.0 as u32,
+                )?,
             },
-            Usage: D3D11_USAGE_STAGING,
-            BindFlags: 0,
-            CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
-            MiscFlags: 0,
         };
-        let mut staging = None;
-        device
-            .CreateTexture2D(&desc, None, Some(&mut staging))
-            .map_err(mf_err)?;
         Ok(Duplication {
             duplication,
+            device,
             context,
-            staging: staging.ok_or(G2gError::Hardware(HardwareError::Other))?,
+            copy,
             width: mode.Width,
             height: mode.Height,
         })
@@ -522,39 +527,72 @@ fn duplicate(selected: &SelectedOutput) -> Result<Duplication, G2gError> {
 }
 
 impl Duplication {
-    fn copy_out(&self, texture: &ID3D11Texture2D) -> Result<Vec<u8>, G2gError> {
+    fn copy_out(&mut self, texture: &ID3D11Texture2D) -> Result<MemoryDomain, G2gError> {
+        let staging = match &self.copy {
+            ImageCopy::System { staging } => staging,
+            ImageCopy::Texture { .. } => return self.copy_to_texture(texture),
+        };
         let row_bytes = self.width as usize * BYTES_PER_PIXEL;
         let rows = self.height as usize;
         let mut image = Vec::with_capacity(row_bytes * rows);
         // SAFETY: the staging texture is mapped for reading between Map and Unmap, and each row read
         // stays inside RowPitch * height bytes of the mapping.
         unsafe {
-            self.context.CopyResource(&self.staging, texture);
+            self.context.CopyResource(staging, texture);
             let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
             self.context
-                .Map(&self.staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
+                .Map(staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
                 .map_err(mf_err)?;
             let base = mapped.pData.cast::<u8>().cast_const();
             for row in 0..rows {
                 let start = base.add(row * mapped.RowPitch as usize);
                 image.extend_from_slice(core::slice::from_raw_parts(start, row_bytes));
             }
-            self.context.Unmap(&self.staging, 0);
+            self.context.Unmap(staging, 0);
         }
-        Ok(image)
+        Ok(MemoryDomain::System(SystemSlice::from_boxed(
+            image.into_boxed_slice(),
+        )))
     }
 
-    fn next_image(&self, timeout: Duration) -> Result<Option<Vec<u8>>, G2gError> {
-        // AcquireNextFrame counts whole milliseconds, and rounding down returns before the repeat is due
-        let timeout_ms = u32::try_from(timeout.as_micros().div_ceil(1000))
-            .expect("a capture period fits in u32 milliseconds");
+    fn copy_to_texture(&mut self, texture: &ID3D11Texture2D) -> Result<MemoryDomain, G2gError> {
+        let ImageCopy::Texture { pool } = &mut self.copy else {
+            unreachable!("copy_out sends only texture capture here");
+        };
+        // dxgi reuses the duplicated texture for the next frame, so each frame gets a copy
+        let copy = take_from_pool(pool, || {
+            bgra_texture(
+                &self.device,
+                self.width,
+                self.height,
+                D3D11_USAGE_DEFAULT,
+                D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE,
+                0,
+            )
+            .map(TextureOwner)
+        })?;
+        // SAFETY: both textures belong to this device and match in size and format.
+        unsafe { self.context.CopyResource(&copy.0, texture) };
+        Ok(texture_frame(
+            &self.device,
+            copy,
+            self.width,
+            self.height,
+            DXGI_FORMAT_B8G8R8A8_UNORM,
+        ))
+    }
+}
+
+impl DesktopGrabber for Duplication {
+    fn next_image(&mut self) -> Result<Option<MemoryDomain>, G2gError> {
         let mut info = DXGI_OUTDUPL_FRAME_INFO::default();
         let mut resource = None;
         // SAFETY: both out-params are valid locals, and every acquired frame is released below.
         unsafe {
+            // AcquireNextFrame holds the device lock while it waits, and the converter and encoder share the device
             match self
                 .duplication
-                .AcquireNextFrame(timeout_ms, &mut info, &mut resource)
+                .AcquireNextFrame(0, &mut info, &mut resource)
             {
                 Ok(()) => {}
                 Err(e) if e.code() == DXGI_ERROR_WAIT_TIMEOUT => return Ok(None),
@@ -575,66 +613,21 @@ impl Duplication {
     }
 }
 
-fn capture(
+fn open_duplication(
     monitor_index: i32,
     bounds: MonitorBounds,
-    period: Duration,
-    frames: &watch::Sender<Option<CapturedFrame>>,
-    ready: &std_mpsc::SyncSender<Result<(), G2gError>>,
-) -> Result<(), G2gError> {
-    let log = Target::category(CATEGORY);
+    out_domain: MemoryDomainKind,
+) -> Result<Duplication, G2gError> {
     let selected = select_output(monitor_index)?;
     if selected.bounds != bounds {
         g2g_error!(
-            log,
+            Target::category(CATEGORY),
             "monitor {monitor_index} changed from {bounds:?} to {:?}",
             selected.bounds
         );
         return Err(G2gError::CapsMismatch);
     }
-    let duplication = duplicate(&selected)?;
-    let _ = ready.try_send(Ok(()));
-    let mut last_image: Option<MemoryDomain> = None;
-    let mut last_change: Option<Instant> = None;
-    let mut last_sent = Instant::now();
-    loop {
-        if let Some(changed_at) = last_change {
-            let next_change = changed_at + period;
-            let now = Instant::now();
-            if next_change > now {
-                thread::sleep(next_change - now);
-            }
-        }
-        let repeat_due = last_sent + period;
-        let changed =
-            match duplication.next_image(repeat_due.saturating_duration_since(Instant::now())) {
-                Ok(changed) => changed,
-                Err(e) => {
-                    g2g_error!(log, "desktop duplication failed: {e:?}");
-                    return Err(e);
-                }
-            };
-        let now = Instant::now();
-        if let Some(image) = changed {
-            let mut image = MemoryDomain::System(SystemSlice::from_boxed(image.into_boxed_slice()));
-            image.make_shareable();
-            last_image = Some(image);
-            last_change = Some(now);
-        } else if now < repeat_due {
-            continue;
-        }
-        let Some(image) = &last_image else {
-            continue;
-        };
-        let captured = CapturedFrame {
-            image: image.share(),
-            capture_ns: g2g_core::metrics::monotonic_ns(),
-        };
-        if frames.send(Some(captured)).is_err() {
-            return Ok(());
-        }
-        last_sent = now;
-    }
+    duplicate(&selected, out_domain)
 }
 
 #[cfg(test)]

@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2316: `mfencode hardware=true` encodes D3D11 NV12 textures in place, so the Windows `g2g-desktop` host keeps frames on the GPU.
+- M2315: `d3d11convert` converts D3D11 BGRA textures to NV12 on the GPU, and `d3d11screencapturesrc` can output D3D11 textures.
 - M2314: str0m 0.25, so WebRTC receivers keep single-packet frames recovered by retransmission instead of dropping them.
 - M2313: WebRTC elements send str0m packets without waiting for a timer tick, which capped Windows senders at about 40 packets per second.
 - M2312: Mid-stream caps with a placeholder framerate forward it as unknown, so parsers keep the bitstream rate.

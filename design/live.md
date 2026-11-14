@@ -160,6 +160,19 @@ has not taken is replaced.
 exclusive app) fails the source. `monitor_bounds` gives a monitor's position on
 the virtual desktop for input injection.
 
+When the next element accepts `MemoryDomain::D3D11Texture`, the device is
+created with video support and multithread protection, and each changed image
+is copied into a new BGRA texture instead of system memory. DXGI reuses the
+duplicated texture for the next frame, which is why each frame gets its own.
+
+`D3D11Convert` (`d3d11convert`, `d3d11-convert`, Windows) converts those BGRA
+textures to NV12 with a D3D11 video processor on the texture's device, shared
+with `d3d11videosink` in `d3d11video.rs`. Output is a new NV12 texture per
+frame, or tight system NV12 read back through a staging texture when the
+consumer takes only system memory. The matrix and range come from the output
+caps, BT.601 limited range when they are untagged, which is what
+`videoconvert` writes for the same caps.
+
 ## PipeWire camera output
 
 `PipeWireVideoSink` (`pipewirevideosink`, `pipewire` feature) publishes raw

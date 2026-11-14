@@ -589,9 +589,10 @@ button still down, because the host holds a key until its key-up arrives.
 `host::run_session` serves one client on an accepted TCP connection. It reads
 the token and the offer first, with a 10 second limit, so a client with a bad
 token never starts the capture. It then runs one graph: the capture nodes, a
-pass-through that publishes the capture size, `videoconvert`, the encoder at
-the configured bitrate (`ffmpegenc backend=software` on Linux, `mfh264enc` on
-Windows), and a `WebRtcDuplexSession`
+pass-through that publishes the capture size, the colour conversion and the
+encoder at the configured bitrate (`videoconvert ! ffmpegenc backend=software`
+on Linux, `d3d11convert ! mfh264enc hardware=true` on Windows, which keeps the
+frame on the GPU), and a `WebRtcDuplexSession`
 answerer whose received video drains into a `fakesink`. The answer goes back on
 the TCP connection, which then closes. Messages on the `input` data channel are
 read as client packets and sent to the caller's event channel, and a malformed

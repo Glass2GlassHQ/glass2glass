@@ -58,6 +58,7 @@ use crate::h264parse::{
     h264_parameter_sets_in, sps_reorder_frames, H264Sps, H264StreamRefused, MALFORMED_SPS,
 };
 use crate::inputstamp::{InputStamp, PendingInputStamps};
+use crate::texturepool::take_from_pool;
 use alloc::boxed::Box;
 use g2g_core::frame::Frame;
 use g2g_core::g2g_error;
@@ -484,21 +485,15 @@ fn chroma_rectangle(luma: CropRectangle) -> CropRectangle {
     }
 }
 
-fn take_from_pool(
-    pool: &mut Vec<Arc<DecodeTexture>>,
+fn decode_texture(
     device: &D3D12DecodeDevice,
     extent: (u32, u32),
-) -> Result<Arc<DecodeTexture>, D3D12VideoError> {
-    if let Some(free) = pool.iter().find(|texture| Arc::strong_count(texture) == 1) {
-        return Ok(free.clone());
-    }
-    let texture = Arc::new(DecodeTexture {
+) -> Result<DecodeTexture, D3D12VideoError> {
+    Ok(DecodeTexture {
         resource: device.create_nv12_texture(extent)?,
         extent,
         _wgpu_device: device.gpu.device.clone(),
-    });
-    pool.push(texture.clone());
-    Ok(texture)
+    })
 }
 
 pub struct D3D12H264Decoder {
@@ -688,7 +683,9 @@ impl D3D12H264Decoder {
             self.picture.width.next_multiple_of(2),
             self.picture.height.next_multiple_of(2),
         );
-        let cropped = take_from_pool(&mut self.cropped_pool, &self.device, cropped_extent)?;
+        let cropped = take_from_pool(&mut self.cropped_pool, || {
+            decode_texture(&self.device, cropped_extent)
+        })?;
         self.device
             .copy_picture(&decoded.resource, &cropped.resource, self.picture)?;
         let texture = self.wgpu_texture(&cropped);
@@ -762,7 +759,9 @@ impl D3D12H264Decoder {
     }
 
     fn take_texture(&mut self) -> Result<Arc<DecodeTexture>, D3D12VideoError> {
-        take_from_pool(&mut self.pool, &self.device, self.texture_extent)
+        take_from_pool(&mut self.pool, || {
+            decode_texture(&self.device, self.texture_extent)
+        })
     }
 
     fn upload_bitstream(

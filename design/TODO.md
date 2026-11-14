@@ -34,7 +34,8 @@ The plan is [remote.md](remote.md).
 - QUIC transport in `remotewt`: stream-per-frame and Reed-Solomon datagram
   video, a message channel, keyframe requests, then `g2g-desktop` on it with its
   WebRTC path removed.
-- The Windows client, then a CUDA surface from `d3d11screencapturesrc` for
+- WebSocket fallback on `wss://` in `remotewt` when UDP is blocked.
+- The Windows client, then a D3D11-to-CUDA element after `d3d11convert` for
   `nvenc`.
 - `display-index` on `screencapturesrc`, and a macOS host through `vtencode`.
 - Cursor, clipboard, grab, and `force-keyframe` on `vtencode`.
