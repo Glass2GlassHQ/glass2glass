@@ -126,6 +126,10 @@ impl<T: PacketClient> RemoteClient<T> {
         self.sent
     }
 
+    pub(crate) fn transport_mut(&mut self) -> &mut T {
+        &mut self.transport
+    }
+
     /// Ensure the connection is up and the current caps are sent, then send
     /// `packet` (when `Some`). On any failure, if reconnect is enabled and the
     /// budget is not spent, drop the connection, back off, and retry the whole

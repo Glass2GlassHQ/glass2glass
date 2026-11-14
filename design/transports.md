@@ -786,6 +786,20 @@ and a client that will not trust a system root names the certificate by SHA-256
 digest in `server-certificate-hashes`, the browser API's
 `serverCertificateHashes`.
 
+A `quic://` location dials raw QUIC instead, with the ALPN `g2g-remote` and no
+HTTP/3 exchange. `web_transport_quinn::Session::raw` wraps that connection, so
+the stream, datagram and framing code is the same for both. A listening side
+offers both ALPNs (`h3` and `g2g-remote`) on one UDP port and branches per
+connection on the one the handshake negotiated. The raw client checks a pinned
+certificate by SHA-256, or the system roots when no digest is given, and gets
+the same `congestion-control` choice as WebTransport.
+
+`mode` swaps which side listens. `RemoteWtSink mode=listener` binds its
+`location` (an IP literal and port) with `certificate` / `private-key` and waits
+for one client. `RemoteWtSrc mode=caller` dials its `location` with
+`server-certificate-hashes`. The sender always opens the stream, whichever side
+dialed, because it writes the leading caps.
+
 ### Shared carrier machinery
 
 The three carriers share their machinery rather than repeating it. `RemoteClient`

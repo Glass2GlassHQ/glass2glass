@@ -7,7 +7,8 @@
 //! [`RemoteWtSink`](crate::remotewtsink) and the sibling of the TCP
 //! [`RemoteSrc`](crate::remotesrc) / WebSocket [`RemoteWsSrc`](crate::remotewssrc).
 //!
-//! `RemoteWtSrc` is the WebTransport *server*: it binds a QUIC endpoint, accepts
+//! `RemoteWtSrc` is the server by default (`mode=caller` makes it dial a
+//! listening sink at `location` instead): it binds a QUIC endpoint, accepts
 //! one session (answering its HTTP/3 CONNECT with 200 whatever path it asks for,
 //! since the element is media-agnostic), takes the client's single bidirectional
 //! stream, and reconstructs the `PipelinePacket` stream the sender serialized
@@ -37,15 +38,17 @@ use alloc::string::{String, ToString};
 
 use std::net::{SocketAddr, TcpListener as StdTcpListener};
 
-use web_transport_quinn::{Server, ServerBuilder};
+use web_transport_quinn::quinn::Endpoint;
 
 use g2g_core::runtime::SourceLoop;
-use g2g_core::{Caps, G2gError, PipelinePacket, PropError, PropKind, PropValue, PropertySpec};
+use g2g_core::{Caps, PipelinePacket, PropError, PropKind, PropValue, PropertySpec};
 
 use crate::remotesource::{leading_caps, PacketTransport, RemoteSource, TransportFuture};
 use crate::remotewtio::{
-    congestion_control, load_certificate, set_congestion, wt_err, WtStream, CONGESTION_PROP,
+    self, load_certificate, set_congestion, wt_err, QuicMode, WtStream, CERTIFICATE_PROP,
+    CONGESTION_PROP, PRIVATE_KEY_PROP,
 };
+use crate::remotewtsink::CERT_HASHES_PROP;
 
 /// WebTransport `RemoteWtSrc`: a length-framed [`g2g_core::wire`] stream over one
 /// bidirectional WebTransport stream, from a [`RemoteWtSink`](crate::remotewtsink)
@@ -57,6 +60,20 @@ impl RemoteWtSrc {
     /// presents. Required: there is no plaintext WebTransport. The same knobs as
     /// the `certificate` / `private-key` properties, set through the same path so
     /// a builder and a launch line cannot drift.
+    pub fn with_caller(mut self, location: impl Into<String>, hashes: impl Into<String>) -> Self {
+        SourceLoop::set_property(&mut self, "mode", PropValue::Str("caller".into()))
+            .expect("mode is a string");
+        SourceLoop::set_property(&mut self, "location", PropValue::Str(location.into()))
+            .expect("location is a string");
+        SourceLoop::set_property(
+            &mut self,
+            "server-certificate-hashes",
+            PropValue::Str(hashes.into()),
+        )
+        .expect("server-certificate-hashes is a string");
+        self
+    }
+
     pub fn with_certificate(mut self, cert: impl Into<String>, key: impl Into<String>) -> Self {
         SourceLoop::set_property(&mut self, "certificate", PropValue::Str(cert.into()))
             .expect("certificate is a string");
@@ -69,6 +86,9 @@ impl RemoteWtSrc {
 /// WebTransport transport for [`RemoteSource`].
 #[derive(Debug)]
 pub struct WtTransport {
+    mode: QuicMode,
+    location: String,
+    cert_hashes: String,
     cert: String,
     key: String,
     /// The `congestion-control` nick applied to accepted connections.
@@ -78,6 +98,9 @@ pub struct WtTransport {
 impl Default for WtTransport {
     fn default() -> Self {
         Self {
+            mode: QuicMode::Listener,
+            location: String::new(),
+            cert_hashes: String::new(),
             cert: String::new(),
             key: String::new(),
             congestion: "default".to_string(),
@@ -85,9 +108,22 @@ impl Default for WtTransport {
     }
 }
 
+#[derive(Debug)]
+pub struct WtListener(ListenerKind);
+
+#[derive(Debug)]
+enum ListenerKind {
+    Bound(Endpoint),
+    Caller {
+        location: String,
+        cert_hashes: String,
+        congestion: String,
+    },
+}
+
 impl PacketTransport for WtTransport {
     type Conn = WtStream;
-    type Listener = Server;
+    type Listener = WtListener;
     const NAME: &'static str = "Remote WebTransport source";
     const DESCRIPTION: &'static str =
         "Receives a serialized PipelinePacket stream over WebTransport from a remote RemoteWtSink";
@@ -110,17 +146,22 @@ impl PacketTransport for WtTransport {
             "accept a replacement client when one drops without Eos",
         )
         .with_default("false"),
-        PropertySpec::new(
-            "certificate",
-            PropKind::Str,
-            "path to the TLS certificate chain (PEM) the QUIC server presents",
-        ),
-        PropertySpec::new(
-            "private-key",
-            PropKind::Str,
-            "path to the TLS private key (PEM) for `certificate`",
-        ),
+        CERTIFICATE_PROP,
+        PRIVATE_KEY_PROP,
         CONGESTION_PROP,
+        PropertySpec::new(
+            "mode",
+            PropKind::Str,
+            "listener binds address:port and waits for one sender, caller dials location",
+        )
+        .with_default("listener")
+        .with_enum_values("caller | listener"),
+        PropertySpec::new(
+            "location",
+            PropKind::Str,
+            "in caller mode, the sender's URL: https:// for WebTransport or quic:// for raw QUIC",
+        ),
+        CERT_HASHES_PROP,
     ];
 
     fn listen(
@@ -132,23 +173,36 @@ impl PacketTransport for WtTransport {
         _adopt: Option<StdTcpListener>,
     ) -> TransportFuture<'_, Self::Listener> {
         Box::pin(async move {
+            if self.mode == QuicMode::Caller {
+                return Ok(WtListener(ListenerKind::Caller {
+                    location: self.location.clone(),
+                    cert_hashes: self.cert_hashes.clone(),
+                    congestion: self.congestion.clone(),
+                }));
+            }
             let (chain, key) = load_certificate(&self.cert, &self.key)?;
-            ServerBuilder::new()
-                .with_addr(bind)
-                .with_congestion_control(congestion_control(&self.congestion))
-                .with_certificate(chain, key)
-                .map_err(wt_err)
+            let endpoint = remotewtio::listen(bind, chain, key, &self.congestion)?;
+            Ok(WtListener(ListenerKind::Bound(endpoint)))
         })
     }
 
     fn listen_addr(listener: &Self::Listener) -> Option<SocketAddr> {
-        listener.local_addr().ok()
+        match &listener.0 {
+            ListenerKind::Bound(endpoint) => endpoint.local_addr().ok(),
+            ListenerKind::Caller { .. } => None,
+        }
     }
 
     fn accept(listener: &mut Self::Listener) -> TransportFuture<'_, (Self::Conn, Caps)> {
         Box::pin(async move {
-            let request = listener.accept().await.ok_or(G2gError::NotConfigured)?;
-            let session = request.ok().await.map_err(wt_err)?;
+            let session = match &listener.0 {
+                ListenerKind::Bound(endpoint) => remotewtio::accept(endpoint).await?,
+                ListenerKind::Caller {
+                    location,
+                    cert_hashes,
+                    congestion,
+                } => remotewtio::dial(location, cert_hashes, &[], congestion).await?,
+            };
             // The sender opens exactly one bidirectional stream and writes the
             // wire codec into it.
             let (tx, rx) = session.accept_bi().await.map_err(wt_err)?;
@@ -169,12 +223,16 @@ impl PacketTransport for WtTransport {
         name: &str,
         value: &PropValue,
     ) -> Option<Result<(), PropError>> {
-        if name == "congestion-control" {
-            return Some(set_congestion(&mut self.congestion, value));
+        match name {
+            "congestion-control" => return Some(set_congestion(&mut self.congestion, value)),
+            "mode" => return Some(remotewtio::set_mode(&mut self.mode, value)),
+            _ => {}
         }
         let target = match name {
             "certificate" => &mut self.cert,
             "private-key" => &mut self.key,
+            "location" => &mut self.location,
+            "server-certificate-hashes" => &mut self.cert_hashes,
             _ => return None,
         };
         Some(match value.as_str() {
@@ -191,6 +249,9 @@ impl PacketTransport for WtTransport {
             "certificate" => Some(PropValue::Str(self.cert.clone())),
             "private-key" => Some(PropValue::Str(self.key.clone())),
             "congestion-control" => Some(PropValue::Str(self.congestion.clone())),
+            "mode" => Some(PropValue::Str(self.mode.name().to_string())),
+            "location" => Some(PropValue::Str(self.location.clone())),
+            "server-certificate-hashes" => Some(PropValue::Str(self.cert_hashes.clone())),
             _ => None,
         }
     }

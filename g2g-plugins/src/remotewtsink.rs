@@ -23,7 +23,9 @@
 //! [`G2gError::UnsupportedDomain`](g2g_core::G2gError), exactly as any CPU sink
 //! already requires.
 //!
-//! `RemoteWtSink` is the client (it dials the [`RemoteWtSrc`] server). The QUIC +
+//! `RemoteWtSink` is the client by default (it dials the [`RemoteWtSrc`]
+//! server); `mode=listener` makes it bind `location` and wait for a calling
+//! source instead. A `quic://` location is raw QUIC, `https://` WebTransport. The QUIC +
 //! HTTP/3 CONNECT handshake is async, so as with the WebSocket sink the connect is
 //! deferred to the first `process` call, where a runtime context is guaranteed.
 //! QUIC is always TLS: the server's certificate must chain to a system root, or be
@@ -45,13 +47,17 @@
 use alloc::boxed::Box;
 use alloc::string::{String, ToString};
 
+use std::net::SocketAddr;
+
+use web_transport_quinn::quinn::Endpoint;
+
 use g2g_core::{
     AsyncElement, G2gError, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
 };
 
 use crate::remoteclient::{PacketClient, RemoteClient};
 use crate::remotesource::TransportFuture;
-use crate::remotewtio::{self, WtStream};
+use crate::remotewtio::{self, QuicMode, WtStream};
 
 /// WebTransport `RemoteWtSink`: a length-framed [`g2g_core::wire`] stream over one
 /// bidirectional WebTransport stream, received by
@@ -82,6 +88,21 @@ impl RemoteWtSink {
     /// Carry data frames as QUIC datagrams (see the module docs). The same knob
     /// as the `datagrams` property, set through the same path so a builder and a
     /// launch line cannot drift.
+    pub fn with_listener(mut self, cert: impl Into<String>, key: impl Into<String>) -> Self {
+        let transport = self.transport_mut();
+        transport.mode = QuicMode::Listener;
+        transport.cert = cert.into();
+        transport.key = key.into();
+        self
+    }
+
+    pub fn listen(&mut self) -> Result<SocketAddr, G2gError> {
+        self.transport_mut()
+            .listener_endpoint()?
+            .local_addr()
+            .map_err(remotewtio::wt_err)
+    }
+
     pub fn with_datagrams(mut self, datagrams: bool) -> Self {
         AsyncElement::set_property(&mut self, "datagrams", PropValue::Bool(datagrams))
             .expect("datagrams is a boolean");
@@ -100,6 +121,10 @@ pub struct WtClient {
     cert_hashes: String,
     /// The `congestion-control` nick applied to the QUIC connection.
     congestion: String,
+    mode: QuicMode,
+    cert: String,
+    key: String,
+    endpoint: Option<Endpoint>,
     /// Send data frames as QUIC datagrams (the `datagrams` property).
     datagrams: bool,
     /// Cumulative across reconnects, so it outlives any one session.
@@ -115,6 +140,10 @@ impl WtClient {
             url: url.into(),
             cert_hashes: String::new(),
             congestion: "default".to_string(),
+            mode: QuicMode::Caller,
+            cert: String::new(),
+            key: String::new(),
+            endpoint: None,
             datagrams: false,
             datagrams_sent: 0,
             stream: None,
@@ -122,6 +151,15 @@ impl WtClient {
     }
 
     /// The live session stream, for the transform's reply read.
+    fn listener_endpoint(&mut self) -> Result<&Endpoint, G2gError> {
+        if self.endpoint.is_none() {
+            let (chain, key) = remotewtio::load_certificate(&self.cert, &self.key)?;
+            let bind = remotewtio::bind_address(&self.url)?;
+            self.endpoint = Some(remotewtio::listen(bind, chain, key, &self.congestion)?);
+        }
+        self.endpoint.as_ref().ok_or(G2gError::NotConfigured)
+    }
+
     pub(crate) fn stream_mut(&mut self) -> Option<&mut WtStream> {
         self.stream.as_mut()
     }
@@ -148,11 +186,14 @@ impl WtClient {
                 })
             }
             "datagrams-sent" => return Some(Err(PropError::ReadOnly)),
+            "mode" => return Some(remotewtio::set_mode(&mut self.mode, value)),
             _ => {}
         }
         let target = match name {
             "location" => &mut self.url,
             "server-certificate-hashes" => &mut self.cert_hashes,
+            "certificate" => &mut self.cert,
+            "private-key" => &mut self.key,
             _ => return None,
         };
         Some(match value.as_str() {
@@ -171,6 +212,9 @@ impl WtClient {
             "congestion-control" => Some(PropValue::Str(self.congestion.clone())),
             "datagrams" => Some(PropValue::Bool(self.datagrams)),
             "datagrams-sent" => Some(PropValue::Uint(self.datagrams_sent)),
+            "mode" => Some(PropValue::Str(self.mode.name().to_string())),
+            "certificate" => Some(PropValue::Str(self.cert.clone())),
+            "private-key" => Some(PropValue::Str(self.key.clone())),
             _ => None,
         }
     }
@@ -191,10 +235,19 @@ impl PacketClient for WtClient {
         PropertySpec::new(
             "location",
             PropKind::Str,
-            "WebTransport URL of the RemoteWtSrc server (e.g. https://host:port)",
+            "URL of the RemoteWtSrc server, https:// for WebTransport or quic:// for raw QUIC; in listener mode the address to bind",
         )
         .with_default("https://127.0.0.1:9603"),
+        PropertySpec::new(
+            "mode",
+            PropKind::Str,
+            "caller dials location, listener binds it and waits for one client",
+        )
+        .with_default("caller")
+        .with_enum_values("caller | listener"),
         CERT_HASHES_PROP,
+        remotewtio::CERTIFICATE_PROP,
+        remotewtio::PRIVATE_KEY_PROP,
         remotewtio::CONGESTION_PROP,
         PropertySpec::new(
             "reconnect-attempts",
@@ -222,15 +275,13 @@ impl PacketClient for WtClient {
 
     fn connect(&mut self) -> TransportFuture<'_, ()> {
         Box::pin(async move {
-            self.stream = Some(
-                remotewtio::connect(
-                    &self.url,
-                    &self.cert_hashes,
-                    self.datagrams,
-                    &self.congestion,
-                )
-                .await?,
-            );
+            let session = match self.mode {
+                QuicMode::Caller => {
+                    remotewtio::dial(&self.url, &self.cert_hashes, &[], &self.congestion).await?
+                }
+                QuicMode::Listener => remotewtio::accept(self.listener_endpoint()?).await?,
+            };
+            self.stream = Some(remotewtio::open_stream(session, self.datagrams).await?);
             Ok(())
         })
     }

@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: MPL-2.0
 
-//! Native WebTransport <-> wire-codec I/O shared by the `webtransport` elements
+//! Native WebTransport and raw QUIC <-> wire-codec I/O shared by the `webtransport` elements
 //! (`RemoteWtSink`, `RemoteWtSrc`, `RemoteWtTransform`): dial or accept a session,
 //! and carry the [`PipelinePacket`] stream over the single bidirectional stream it
 //! opens.
@@ -22,14 +22,28 @@
 //! mode-free, [`WtStream::recv`] takes packets from whichever the peer used.
 
 use alloc::string::{String, ToString};
+use alloc::vec;
 use alloc::vec::Vec;
 use core::time::Duration;
 
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::sync::Arc;
 use web_transport_quinn::proto::ConnectRequest;
 use web_transport_quinn::quinn::rustls::pki_types::pem::PemObject;
 use web_transport_quinn::quinn::rustls::pki_types::{CertificateDer, PrivateKeyDer};
-use web_transport_quinn::quinn::Connection;
-use web_transport_quinn::{ClientBuilder, CongestionControl, RecvStream, SendStream, Session};
+
+use web_transport_quinn::quinn::crypto::rustls::{
+    HandshakeData, QuicClientConfig, QuicServerConfig,
+};
+use web_transport_quinn::quinn::rustls;
+use web_transport_quinn::quinn::rustls::client::danger::{
+    HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier,
+};
+use web_transport_quinn::quinn::rustls::pki_types::{ServerName, UnixTime};
+use web_transport_quinn::quinn::{self, Connection, Endpoint};
+use web_transport_quinn::{
+    crypto, ClientBuilder, CongestionControl, RecvStream, Request, SendStream, Session,
+};
 
 use g2g_core::wire::{decode_packet, encode_packet};
 use g2g_core::{
@@ -144,18 +158,9 @@ impl WtStream {
     }
 }
 
-/// Dial `url` (e.g. `https://127.0.0.1:9603`) and open the session's single
-/// bidirectional stream. `hashes` is the `server-certificate-hashes` property:
-/// empty accepts any certificate a system root signs, otherwise only the listed
-/// certificates are accepted. `datagrams` puts data frames on the datagram
-/// carrier (see the module docs).
-pub(crate) async fn connect(
-    url: &str,
-    hashes: &str,
-    datagrams: bool,
-    congestion: &str,
-) -> Result<WtStream, G2gError> {
-    let session = dial(url, hashes, &[], congestion).await?;
+/// Open the sender's single bidirectional stream on `session`. `datagrams` puts
+/// data frames on the datagram carrier (see the module docs).
+pub(crate) async fn open_stream(session: Session, datagrams: bool) -> Result<WtStream, G2gError> {
     // `Session::max_datagram_size` panics on a peer that refused datagram
     // support, so the configured mode is checked once here rather than per frame.
     if datagrams && Connection::max_datagram_size(&session).is_none() {
@@ -165,9 +170,225 @@ pub(crate) async fn connect(
     Ok(WtStream::new(session, tx, rx, datagrams))
 }
 
-/// Dial `url` and complete the HTTP/3 CONNECT handshake, leaving stream opening
-/// to the caller. `hashes` is the `server-certificate-hashes` property (see
-/// [`connect`]); `protocols` names the WebTransport subprotocols offered in
+pub(crate) const RAW_QUIC_ALPN: &str = "g2g-remote";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuicMode {
+    Caller,
+    Listener,
+}
+
+impl QuicMode {
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            QuicMode::Caller => "caller",
+            QuicMode::Listener => "listener",
+        }
+    }
+
+    pub(crate) fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "caller" => Some(QuicMode::Caller),
+            "listener" => Some(QuicMode::Listener),
+            _ => None,
+        }
+    }
+}
+
+pub(crate) fn set_mode(target: &mut QuicMode, value: &PropValue) -> Result<(), PropError> {
+    let name = value.as_str().ok_or(PropError::Type)?;
+    *target = QuicMode::from_name(name).ok_or(PropError::Value)?;
+    Ok(())
+}
+
+fn url_host(url: &url::Url) -> Result<&str, G2gError> {
+    // url leaves the host of a non-special scheme such as quic:// unparsed, brackets included
+    let host = url.host_str().ok_or(G2gError::NotConfigured)?;
+    Ok(host.trim_start_matches('[').trim_end_matches(']'))
+}
+
+pub(crate) fn bind_address(location: &str) -> Result<SocketAddr, G2gError> {
+    let url = url::Url::parse(location).map_err(|_| G2gError::NotConfigured)?;
+    let port = url.port().ok_or(G2gError::NotConfigured)?;
+    let ip: core::net::IpAddr = url_host(&url)?
+        .parse()
+        .map_err(|_| G2gError::NotConfigured)?;
+    Ok(SocketAddr::new(ip, port))
+}
+const RAW_QUIC_SCHEME: &str = "quic";
+
+fn transport_config(congestion: &str) -> Arc<quinn::TransportConfig> {
+    let mut transport = quinn::TransportConfig::default();
+    // web-transport-quinn keeps its factory mapping private, so raw QUIC repeats it
+    match congestion_control(congestion) {
+        CongestionControl::LowLatency => {
+            transport
+                .congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()));
+        }
+        CongestionControl::Throughput => {
+            transport
+                .congestion_controller_factory(Arc::new(quinn::congestion::CubicConfig::default()));
+        }
+        CongestionControl::Default => {}
+    }
+    Arc::new(transport)
+}
+
+#[derive(Debug)]
+struct PinnedCertificates {
+    provider: crypto::Provider,
+    hashes: Vec<Vec<u8>>,
+}
+
+impl ServerCertVerifier for PinnedCertificates {
+    fn verify_server_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: UnixTime,
+    ) -> Result<ServerCertVerified, rustls::Error> {
+        let hash = crypto::sha256(&self.provider, end_entity);
+        if self
+            .hashes
+            .iter()
+            .any(|pinned| pinned.as_slice() == hash.as_ref())
+        {
+            return Ok(ServerCertVerified::assertion());
+        }
+        Err(rustls::Error::InvalidCertificate(
+            rustls::CertificateError::UnknownIssuer,
+        ))
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        signature: &rustls::DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls12_signature(
+            message,
+            cert,
+            signature,
+            &self.provider.signature_verification_algorithms,
+        )
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        signature: &rustls::DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            signature,
+            &self.provider.signature_verification_algorithms,
+        )
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        self.provider
+            .signature_verification_algorithms
+            .supported_schemes()
+    }
+}
+
+fn raw_client_tls(hashes: Vec<Vec<u8>>) -> Result<rustls::ClientConfig, G2gError> {
+    let provider = crypto::default_provider();
+    let builder = rustls::ClientConfig::builder_with_provider(provider.clone())
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .map_err(wt_err)?;
+    let mut tls = if hashes.is_empty() {
+        let mut roots = rustls::RootCertStore::empty();
+        for cert in rustls_native_certs::load_native_certs().certs {
+            roots.add(cert).map_err(wt_err)?;
+        }
+        builder.with_root_certificates(roots).with_no_client_auth()
+    } else {
+        builder
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(PinnedCertificates { provider, hashes }))
+            .with_no_client_auth()
+    };
+    tls.alpn_protocols = vec![RAW_QUIC_ALPN.as_bytes().to_vec()];
+    Ok(tls)
+}
+
+async fn dial_raw(url: &url::Url, hashes: &str, congestion: &str) -> Result<Session, G2gError> {
+    let host = url_host(url)?;
+    let port = url.port().ok_or(G2gError::NotConfigured)?;
+    let address = tokio::net::lookup_host((host, port))
+        .await
+        .map_err(wt_err)?
+        .next()
+        .ok_or(G2gError::Network(NetworkFailure::Stream))?;
+    let tls = raw_client_tls(parse_cert_hashes(hashes)?)?;
+    let mut config =
+        quinn::ClientConfig::new(Arc::new(QuicClientConfig::try_from(tls).map_err(wt_err)?));
+    config.transport_config(transport_config(congestion));
+    let unspecified: SocketAddr = match address {
+        SocketAddr::V4(_) => (Ipv4Addr::UNSPECIFIED, 0).into(),
+        SocketAddr::V6(_) => (Ipv6Addr::UNSPECIFIED, 0).into(),
+    };
+    // quinn keeps the endpoint running while any of its connections is open
+    let endpoint = Endpoint::client(unspecified).map_err(wt_err)?;
+    let connection = endpoint
+        .connect_with(config, address, host)
+        .map_err(wt_err)?
+        .await
+        .map_err(wt_err)?;
+    Ok(Session::raw(connection))
+}
+
+pub(crate) fn listen(
+    bind: SocketAddr,
+    chain: Vec<CertificateDer<'static>>,
+    key: PrivateKeyDer<'static>,
+    congestion: &str,
+) -> Result<Endpoint, G2gError> {
+    let mut tls = rustls::ServerConfig::builder_with_provider(crypto::default_provider())
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .map_err(wt_err)?
+        .with_no_client_auth()
+        .with_single_cert(chain, key)
+        .map_err(wt_err)?;
+    tls.alpn_protocols = vec![
+        web_transport_quinn::ALPN.as_bytes().to_vec(),
+        RAW_QUIC_ALPN.as_bytes().to_vec(),
+    ];
+    let mut config = quinn::ServerConfig::with_crypto(Arc::new(
+        QuicServerConfig::try_from(tls).map_err(wt_err)?,
+    ));
+    config.transport_config(transport_config(congestion));
+    Endpoint::server(config, bind).map_err(wt_err)
+}
+
+fn negotiated_alpn(connection: &Connection) -> Option<Vec<u8>> {
+    connection
+        .handshake_data()?
+        .downcast::<HandshakeData>()
+        .ok()?
+        .protocol
+}
+
+pub(crate) async fn accept(endpoint: &Endpoint) -> Result<Session, G2gError> {
+    let incoming = endpoint.accept().await.ok_or(G2gError::NotConfigured)?;
+    let connection = incoming.await.map_err(wt_err)?;
+    if negotiated_alpn(&connection).as_deref() == Some(RAW_QUIC_ALPN.as_bytes()) {
+        return Ok(Session::raw(connection));
+    }
+    let request = Request::accept(connection).await.map_err(wt_err)?;
+    request.ok().await.map_err(wt_err)
+}
+
+/// Dial `url` and complete the HTTP/3 CONNECT handshake, or the raw QUIC
+/// handshake for a `quic://` URL, leaving stream opening to the caller. `hashes`
+/// is the `server-certificate-hashes` property: empty accepts any certificate a
+/// system root signs, otherwise only the listed certificates. `protocols` names the WebTransport subprotocols offered in
 /// preference order, which is how a protocol layered on the carrier (MoQT's
 /// `moqt-16` / `moqt-18`) states its version, since the QUIC ALPN is always
 /// `h3`. The server's pick is `session.response().protocol`. `congestion` is a
@@ -179,6 +400,13 @@ pub(crate) async fn dial(
     congestion: &str,
 ) -> Result<Session, G2gError> {
     let url = url::Url::parse(url).map_err(wt_err)?;
+    if url.scheme() == RAW_QUIC_SCHEME {
+        // raw QUIC states its version in the ALPN, so it has no subprotocols to offer
+        if !protocols.is_empty() {
+            return Err(G2gError::NotConfigured);
+        }
+        return dial_raw(&url, hashes, congestion).await;
+    }
     let hashes = parse_cert_hashes(hashes)?;
     let builder = ClientBuilder::new().with_congestion_control(congestion_control(congestion));
     let client = if hashes.is_empty() {
@@ -194,6 +422,18 @@ pub(crate) async fn dial(
     }
     client.connect(request).await.map_err(wt_err)
 }
+
+pub(crate) const CERTIFICATE_PROP: PropertySpec = PropertySpec::new(
+    "certificate",
+    PropKind::Str,
+    "path to the TLS certificate chain (PEM) the listening side presents",
+);
+
+pub(crate) const PRIVATE_KEY_PROP: PropertySpec = PropertySpec::new(
+    "private-key",
+    PropKind::Str,
+    "path to the TLS private key (PEM) for `certificate`",
+);
 
 /// The `congestion-control` spec, shared by the WebTransport client and server
 /// elements (`web-transport-quinn` takes the same choice on both builders).
@@ -277,6 +517,25 @@ pub(crate) fn parse_cert_hashes(spec: &str) -> Result<Vec<Vec<u8>>, G2gError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn listener_location_binds_an_ip_literal_for_either_scheme() {
+        let v4: SocketAddr = "127.0.0.1:4433".parse().unwrap();
+        let v6: SocketAddr = "[::1]:4433".parse().unwrap();
+        assert_eq!(bind_address("quic://127.0.0.1:4433"), Ok(v4));
+        assert_eq!(bind_address("https://127.0.0.1:4433"), Ok(v4));
+        assert_eq!(bind_address("quic://[::1]:4433"), Ok(v6));
+        assert_eq!(bind_address("https://[::1]:4433/path"), Ok(v6));
+        // a listener binds an address, so a name or a missing port is refused
+        assert_eq!(
+            bind_address("quic://localhost:4433"),
+            Err(G2gError::NotConfigured)
+        );
+        assert_eq!(
+            bind_address("quic://127.0.0.1"),
+            Err(G2gError::NotConfigured)
+        );
+    }
 
     #[test]
     fn cert_hashes_parse_and_reject_malformed() {

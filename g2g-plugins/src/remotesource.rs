@@ -167,6 +167,14 @@ impl<T: PacketTransport> RemoteSource<T> {
     /// address it actually bound: a caller that asked for port 0 learns the
     /// ephemeral port this way, and a peer can connect before `accept` runs.
     pub async fn listen(&mut self) -> Result<SocketAddr, G2gError> {
+        self.ensure_listener().await?;
+        self.listener
+            .as_ref()
+            .and_then(T::listen_addr)
+            .ok_or(G2gError::NotConfigured)
+    }
+
+    async fn ensure_listener(&mut self) -> Result<(), G2gError> {
         if self.listener.is_none() {
             let listener = self
                 .transport
@@ -174,10 +182,7 @@ impl<T: PacketTransport> RemoteSource<T> {
                 .await?;
             self.listener = Some(listener);
         }
-        self.listener
-            .as_ref()
-            .and_then(T::listen_addr)
-            .ok_or(G2gError::NotConfigured)
+        Ok(())
     }
 
     /// Tolerate a sender that drops without a clean `Eos`: keep the listener open
@@ -210,7 +215,7 @@ impl<T: PacketTransport> RemoteSource<T> {
         if let Some(caps) = &self.discovered {
             return Ok(caps.clone());
         }
-        self.listen().await?;
+        self.ensure_listener().await?;
         // Keep the listener after the accept so a dropped client can be replaced
         // (keep_listening).
         let listener = self.listener.as_mut().ok_or(G2gError::NotConfigured)?;

@@ -21,33 +21,33 @@ A host and a client for Linux, Windows, and macOS, plus a Chrome page.
 - Opus audio from the host's default capture device.
 - Keyboard, mouse (relative and absolute), wheel, cursor bitmap back to the
   client, clipboard text, gamepad and rumble on Linux and Windows.
-- A bearer token on the signaling connection. OIDC mints that token in a later slice.
+- A bearer token on the message channel. OIDC mints that token in a later slice.
 - The client shows the newest frame. Audio uses a short queue and does not hold the picture.
 - A Windows service whose only job is input injection on the secure desktop.
   Capture stays in the interactive user session.
 - Packages that install the host and the client. No media-library build.
 
 Out of this plan: phones, headsets, USB forwarding, a graphical client, file
-transfer, AV1 as a default, and a relay. ICE host candidates cover a LAN.
-`stun-server` and `turn-server` on the duplex session are forwarded for a host
-that is not on the same network.
+transfer, AV1 as a default, and a relay. A direct QUIC connection covers a
+LAN, and a host off the LAN needs a forwarded UDP port.
 
 ## Decisions
 
-1. One `WebRtcDuplexSession` per session. It already publishes and receives on
-   one `Rtc`, with host ICE candidates in the SDP, PLI and bandwidth estimate
-   on a reverse channel, and `stun-server` / `turn-server` properties.
-   `webrtcsink` is WHIP: the viewer would be a second peer, and a data channel
-   cannot cross that media server. `WebRtcDataSink` opens its own `Rtc` and its
-   own ICE gathering, so a second one would be a second connection.
-2. Input rides a reliable, ordered data channel on that same `Rtc`, label
-   `input`. Video stays RTP, so a lost picture does not sit in front of a key
-   release. str0m caps one data-channel message at 64 KiB
-   (`datachannel::MAX_MESSAGE_SIZE`). A payload over that is dropped.
-3. The client is the offerer. It connects out. The host is the answerer and
-   listens. `SdpChannel::from_halves` is the seam: the desktop crate moves the
-   SDP strings across one TCP connection, and the duplex session never learns
-   about that socket.
+1. The session runs over one QUIC connection, not WebRTC. Native clients dial
+   raw QUIC (`quic://`, a g2g ALPN), the browser dials WebTransport
+   (`https://`), and the host accepts both ALPNs on one UDP port. The
+   transport is a mode of the `remotewt` elements, so any g2g pipeline can use
+   it: `remotewtsink` on the host, `remotewtsrc` on the client.
+2. Video goes either one frame per unidirectional stream, newest first, or as
+   datagrams with Reed-Solomon repair (`reed-solomon-simd`). Input, the token
+   and keyframe requests ride a reliable message channel the `remotewt`
+   elements open on the same connection, so a lost picture does not sit in
+   front of a key release.
+3. The client dials the host's address. There is no ICE, so a host behind NAT
+   needs a forwarded port until a relay slice. The host makes a self-signed
+   ECDSA P-256 certificate valid under 14 days (what WebTransport's
+   `serverCertificateHashes` accepts) and prints its SHA-256 hash, which the
+   client pins with `--cert-hash`.
 4. The first slice encodes whatever memory the capture element already
    produces. In-place GPU encode is the next slice on each OS, and the session
    runs before it lands. `nvenc` rejects anything other than
@@ -66,8 +66,9 @@ that is not on the same network.
 8. Wayland capture is `pipewirevideosrc portal=true` with
    `portal-restore-token`, so a later start reuses the grant. Unattended X11
    gets its own source. The portal dialog is the wrong tool for a service.
-9. The bearer token is compared in constant time before any SDP is read. A bad
-   token closes the TCP connection. OIDC, a URL scheme, and installers do not
+9. The bearer token is the first message on the message channel and is
+   compared in constant time before capture starts. A bad token closes the
+   connection. OIDC, a URL scheme, and installers do not
    block the first LAN session.
 
 ## What the session builds on
@@ -85,37 +86,37 @@ that is not on the same network.
 | Software encode | `ffmpegenc`. |
 | Audio capture | `pulsesrc`, `wasapisrc`, `coreaudiosrc`. |
 | Audio encode | `opusenc`. |
-| Picture | `WebRtcDuplexSession`, `Graph::add_duplex`. Reverse-channel PLI is wired to `NvEnc::force_keyframe`. |
 | Present | `autovideosink`, and directly `waylandsink`, `metalvideosink`, `d3d11sink`. |
 | Drop late frames | `livesync`. |
 | Browser decode and draw | `g2g-web` WebCodecs and `canvassink`. The page needs the same data channel the native client uses. |
-| Signaling seam | `SdpChannel`. |
+| QUIC carrier | `remotewtsink`, `remotewtsrc` over `web-transport-quinn` (quinn 0.11). |
 
-## Signaling
+## QUIC session
 
-The handshake is built: [transports.md](transports.md), "Desktop signaling".
-Trickle ICE is a later slice: further messages with a leading `u8` tag `1` for
-an ICE candidate and `2` for the SDP, once a peer off the LAN needs them.
-
-The host binds the TCP port before it builds the graph. The graph starts when
-the answer is sent, and stops when the TCP connection or the ICE state drops.
-One client at a time, held by `SessionSlot`.
-
-## Data channel
-
-The channel is `WebRtcDuplexSession::open_data_channel("input")`, built:
-[transports.md](transports.md), "Duplex sessions". So are the packets that
-cross it: "Input packets" and "Input router".
-
-Devices of one type share a producer. The host destroys the virtual device a
-removal packet names.
+- The host runs `remotewtsink mode=listener`, the client `remotewtsrc
+  mode=caller` (built: [transports.md](transports.md), "WebTransport carrier").
+- `g2g-desktop` sets `congestion-control=low-latency` (BBR, marked experimental
+  in quinn). Encoder bitrate stays fixed until a later slice feeds it the
+  bandwidth estimate.
+- Stream-per-frame mode: a frame the client has not finished when a newer
+  keyframe is queued is reset, since nothing after the keyframe needs it.
+- Datagram mode replaces the old one-frame-per-datagram `datagrams` mode. A
+  frame splits into shards plus a repair percentage, and the client drops a
+  frame still incomplete after one frame period (`frame-timeout`).
+- Frames carry a sequence number. A gap or a dropped frame makes the client
+  send a keyframe request, and the host pulses `force-keyframe` on the
+  encoder (`mfencode`, `ffmpegenc`, `nvenc`).
+- The message channel carries the token, input packets and keyframe requests.
+  The host destroys the virtual device a removal packet names.
+- Loss tests run host and client through a seeded UDP relay in the test
+  process that drops, delays and reorders packets.
+- The WebRTC session path is deleted from `g2g-desktop` once QUIC runs.
+  `WebRtcDuplexSession` stays in `g2g-plugins`.
 
 ## Host graphs
 
-The host offers two send tracks, video then audio, and opens no receive media
-track. `WebRtcDuplexSession::new(answerer, channel, 2)` matches a client that
-offers two sendrecv m-lines. Confirm the pad count against `with_spare_tracks`
-when the second display arrives. One display needs no spare.
+The host sends video, and audio once slice 6 adds it, through `remotewtsink`
+in listening mode. A second display is a second track on the same connection.
 
 Linux, NVIDIA, the fast path once `cudaupload` accepts the capture format:
 
@@ -162,15 +163,14 @@ coreaudiosrc ! audioconvert ! opusenc
 `screencapturesrc` today takes the first display and has no `display-index`.
 That property is part of this plan.
 
-On PLI the host calls `NvEnc::force_keyframe`. The other encoders need the same
-latch: `vtencode`, `mfencode`, and `ffmpegenc` gain `force-keyframe` if they
-do not have it, and the host pulses it. The first frame is an IDR, which
+On a keyframe request the host calls `NvEnc::force_keyframe`. The other
+encoders need the same latch: `vtencode`, `mfencode`, and `ffmpegenc` gain
+`force-keyframe` if they do not have it, and the host pulses it. The first frame is an IDR, which
 `nvenc` already does.
 
 ## Client graphs
 
-The client offers the same two sendrecv m-lines and discards its own send
-pads (it sends no media). Receive pads:
+The client dials with `remotewtsrc` and sends no media. Receive side:
 
 ```
 h264parse ! <decoder> ! livesync ! autovideosink
@@ -181,24 +181,19 @@ The decoder is `nvdec`, `mfdecode`, `vtdecode`, or `ffmpegdec`, chosen by the
 same auto-plug `decodebin` uses. `livesync latency=0`. `software-decode=true`
 forces `ffmpegdec`.
 
-The browser client is the same SDP and the same data channel, decoded with
+The browser client is the same WebTransport session and message channel, decoded with
 WebCodecs into a canvas. Pointer lock and `navigator.keyboard.lock` are the
 capture side. Chrome is the target. Firefox stays untested until the native
 session is solid.
 
 ## Capture sources to add
 
-### dxgisrc
+### d3d11screencapturesrc zero-copy
 
-`dxgi` feature, `cfg(windows)`, the `windows` crate, same MTA rule as
-`mfencode`. Desktop Duplication on the output selected by `display-index`.
-Default output is tightly packed system NV12 at a requested `fps` (default
-60). An unchanged frame repeats the last image so the encoder's rate stays
-steady. `AccessLost` fails the source. The host tears the graph down and
-rebuilds it. Capture runs in the interactive session, never in session 0.
-
-Properties: `display-index` (u32), `fps` (u32), `zero-copy` (bool, default
-false). `zero-copy=true` without CUDA fails at configure time.
+`zero-copy` (bool, default false) on `d3d11screencapturesrc`. `zero-copy=true`
+without CUDA fails at configure time. Capture runs in the interactive session,
+never in session 0, and the host rebuilds the graph after `AccessLost` fails
+the source.
 
 ### ximagesrc
 
@@ -249,7 +244,7 @@ message cap is dropped.
 
 The service process is installed separately, runs as SYSTEM, and accepts
 injection packets on a named pipe from the interactive host. It does not
-capture, encode, or speak WebRTC. The interactive host captures. When
+capture, encode, or speak QUIC. The interactive host captures. When
 `SendInput` from the interactive process fails because the secure desktop is
 up, the host forwards the same packets down the pipe. The service is optional
 at build time and required for the UAC slice.
@@ -263,21 +258,22 @@ Host flags, all of them real properties the process applies:
 
 | flag | meaning | default |
 | :--- | :--- | :--- |
-| `--port` | TCP signaling port | 8080 |
+| `--port` | UDP port for QUIC and WebTransport | 8080 |
 | `--token` | bearer token | required |
-| `--display-index` | which display to capture | 0 |
+| `--monitor-index` | which monitor to capture, Windows | -1 |
 | `--fps` | capture rate | 60 |
 | `--bitrate` | bits per second, passed to the encoder | 4000000 |
 | `--audio` | capture and send audio | true |
-| `--stun-server` | forwarded to the duplex session | unset |
-| `--turn-server`, `--turn-user`, `--turn-pass` | forwarded | unset |
+| `--video-mode` | `streams` or `datagrams` | `streams` |
+| `--congestion-control` | `low-latency` (BBR), `throughput` or `default` (Cubic) | `low-latency` |
 
 Client flags:
 
 | flag | meaning | default |
 | :--- | :--- | :--- |
 | `--host` | host address | required |
-| `--port` | signaling port | 8080 |
+| `--port` | host UDP port | 8080 |
+| `--cert-hash` | SHA-256 of the host certificate | required |
 | `--token` | bearer token | required |
 | `--software-decode` | force `ffmpegdec` | false |
 | `--audio` | play audio | true |
@@ -316,14 +312,17 @@ ones.
 3. **Linux host and Linux client on one machine.** Portal or `ximagesrc`,
    software or VA-API encode, `livesync` on the client, window capture. `inputs=false` when both run on the
    same seat, or the pointer feeds itself.
-4. **`dxgisrc` system-memory path and the Windows client.** `mfencode`,
-   `SendInput`. Then the D3D11-to-CUDA output and `nvenc`.
+4. **Windows host, then the QUIC transport.** `d3d11screencapturesrc`,
+   `mfencode`, `SendInput`. Then raw QUIC and WebTransport carriers in
+   `remotewt`, stream-per-frame and FEC datagram video, the message channel,
+   keyframe requests with `force-keyframe` on `mfencode` and `ffmpegenc`, and
+   `g2g-desktop` moved onto it with the WebRTC path deleted. Then the Windows
+   client, then the D3D11-to-CUDA output and `nvenc`.
 5. **macOS client, then the macOS host** on `screencapturesrc` `display-index`
    and `vtencode`.
-6. **Audio, clipboard, cursor, grab, `force-keyframe` on every encoder, PLI
-   wired through.**
+6. **Audio, clipboard, cursor, grab, `force-keyframe` on `vtencode`.**
 7. **Gamepad** on Linux and Windows, and the Windows service.
-8. **Chrome page** speaking the same TCP signaling and the same data channel.
+8. **Chrome page** on the same WebTransport session and message channel.
 9. **OIDC, the URL scheme, packages.**
 
 A LAN session that moves a pointer is slice 3. Matching the done list above is

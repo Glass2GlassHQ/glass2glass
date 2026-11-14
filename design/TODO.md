@@ -30,13 +30,14 @@ Highest leverage first:
 
 The plan is [remote.md](remote.md).
 
-- `ximagesrc` for unattended X11 capture, and a Linux `g2g-desktop` host and
-  client.
-- `dxgisrc` (system NV12, then a CUDA surface for `nvenc`) and Windows
-  `SendInput`.
+- `ximagesrc` for unattended X11 capture, and window capture.
+- QUIC transport in `remotewt`: stream-per-frame and Reed-Solomon datagram
+  video, a message channel, keyframe requests, then `g2g-desktop` on it with its
+  WebRTC path removed.
+- The Windows client, then a CUDA surface from `d3d11screencapturesrc` for
+  `nvenc`.
 - `display-index` on `screencapturesrc`, and a macOS host through `vtencode`.
-- Cursor, clipboard, grab, and `force-keyframe` on `vtencode`, `mfencode`, and
-  `ffmpegenc`, pulsed from the duplex PLI reverse channel.
+- Cursor, clipboard, grab, and `force-keyframe` on `vtencode`.
 - Gamepad injection on Linux and Windows, and a Windows service that injects
   on the secure desktop.
 - A Chrome client on the same signaling and the same data channel.
