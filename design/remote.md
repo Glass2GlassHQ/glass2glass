@@ -137,7 +137,7 @@ that backend accepts. If it does not, the software line is the one that ships.
 Windows, first slice, a copy:
 
 ```
-d3d11screencapturesrc ! videoconvert ! mfencode
+d3d11screencapturesrc ! videoconvert ! mfh264enc
 wasapisrc ! audioconvert ! opusenc
 ```
 

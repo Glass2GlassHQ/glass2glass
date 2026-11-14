@@ -590,7 +590,7 @@ button still down, because the host holds a key until its key-up arrives.
 the token and the offer first, with a 10 second limit, so a client with a bad
 token never starts the capture. It then runs one graph: the capture nodes, a
 pass-through that publishes the capture size, `videoconvert`, the encoder at
-the configured bitrate (`ffmpegenc backend=software` on Linux, `mfencode` on
+the configured bitrate (`ffmpegenc backend=software` on Linux, `mfh264enc` on
 Windows), and a `WebRtcDuplexSession`
 answerer whose received video drains into a `fakesink`. The answer goes back on
 the TCP connection, which then closes. Messages on the `input` data channel are

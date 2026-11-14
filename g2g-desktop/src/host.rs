@@ -43,7 +43,7 @@ const SDP_CHANNEL_DEPTH: usize = 4;
 #[cfg(target_os = "linux")]
 const ENCODER: &str = "ffmpegenc backend=software";
 #[cfg(target_os = "windows")]
-const ENCODER: &str = "mfencode";
+const ENCODER: &str = "mfh264enc";
 
 #[derive(Debug, Clone)]
 pub struct TurnServer {
