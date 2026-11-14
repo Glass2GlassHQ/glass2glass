@@ -6,10 +6,13 @@ use core::fmt;
 use core::future::Future;
 use core::pin::Pin;
 use std::io;
+use std::sync::Arc;
 use std::time::Duration;
 
 use g2g_core::log::Target;
-use g2g_core::runtime::{parse_chain, run_graph, GraphNode, GraphNodeRef, ParseError, RunStats};
+use g2g_core::runtime::{
+    parse_chain, GraphNode, GraphNodeRef, ParseError, RunBuilder, RunStats, VisitRecorder,
+};
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, ConfigureOutcome, Dim, G2gError, Graph, OutputSink,
     PipelinePacket,
@@ -251,6 +254,7 @@ pub async fn run_session(
     settings: &HostSettings,
     events: mpsc::UnboundedSender<Event>,
     sizes: watch::Sender<Option<ScreenSize>>,
+    trace: Option<Arc<dyn VisitRecorder>>,
 ) -> Result<RunStats, HostError> {
     let mut signaling = HostSignaling::new(&settings.token)?;
     let offer = tokio::time::timeout(SIGNALING_TIMEOUT, read_offer(&mut stream, &mut signaling))
@@ -280,8 +284,12 @@ pub async fn run_session(
         Ok::<(), HostError>(())
     };
     let clock = WallClock::new();
+    let mut run = RunBuilder::new(graph, &clock, LINK_CAPACITY);
+    if let Some(trace) = trace {
+        run = run.with_visit_recorder(trace);
+    }
     let (run, answered, ()) = tokio::join!(
-        run_graph(graph, &clock, LINK_CAPACITY),
+        run.run(),
         send_answer,
         forward_input(input.incoming, events)
     );

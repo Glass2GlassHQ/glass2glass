@@ -4,10 +4,12 @@
 
 use std::collections::BTreeMap;
 use std::error::Error;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::str::FromStr;
+use std::sync::Arc;
 
-use g2g_core::runtime::GraphNodeRef;
+use g2g_core::runtime::{GraphNodeRef, VisitRecorder};
 #[cfg(target_os = "linux")]
 use g2g_core::G2gError;
 #[cfg(target_os = "linux")]
@@ -20,6 +22,7 @@ use g2g_desktop::signaling::SessionSlot;
 use g2g_desktop::uinput::Injector;
 #[cfg(target_os = "windows")]
 use g2g_plugins::d3d11screencapturesrc::{monitor_bounds, D3D11ScreenCaptureSrc};
+use g2g_plugins::perfetto_trace::PerfettoTrace;
 #[cfg(target_os = "linux")]
 use g2g_plugins::pipewirevideosrc::PipeWireVideoSrc;
 #[cfg(target_os = "linux")]
@@ -28,16 +31,17 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, watch};
 
 const HOST_USAGE: &str = "  g2g-desktop host --token TOKEN [--port 8080] [--fps 60] [--bitrate 4000000]
-                   [--stun-server HOST:PORT] [--turn-server HOST:PORT --turn-user USER --turn-pass PASS]";
+                   [--stun-server HOST:PORT] [--turn-server HOST:PORT --turn-user USER --turn-pass PASS]
+                   [--trace FILE]";
 #[cfg(target_os = "linux")]
 const PLATFORM_USAGE: &str =
-    "  g2g-desktop client --host HOST --token TOKEN [--port 8080] [--inputs true]";
+    "  g2g-desktop client --host HOST --token TOKEN [--port 8080] [--inputs true] [--trace FILE]";
 #[cfg(target_os = "windows")]
 const PLATFORM_USAGE: &str = "                   [--monitor-index -1]";
 const DEFAULT_PORT: u16 = 8080;
 const DEFAULT_FPS: u32 = 60;
 const DEFAULT_BITRATE: u32 = 4_000_000;
-const HOST_FLAGS: [&str; 8] = [
+const HOST_FLAGS: [&str; 9] = [
     "port",
     "token",
     "fps",
@@ -46,6 +50,7 @@ const HOST_FLAGS: [&str; 8] = [
     "turn-server",
     "turn-user",
     "turn-pass",
+    "trace",
 ];
 #[cfg(target_os = "linux")]
 const PLATFORM_HOST_FLAGS: [&str; 0] = [];
@@ -54,7 +59,7 @@ const PLATFORM_HOST_FLAGS: [&str; 1] = ["monitor-index"];
 #[cfg(target_os = "windows")]
 const PRIMARY_MONITOR: i32 = -1;
 #[cfg(target_os = "linux")]
-const CLIENT_FLAGS: [&str; 4] = ["host", "port", "token", "inputs"];
+const CLIENT_FLAGS: [&str; 5] = ["host", "port", "token", "inputs", "trace"];
 
 type Flags = BTreeMap<String, String>;
 
@@ -116,7 +121,26 @@ struct CaptureSettings {
     monitor_index: i32,
 }
 
-async fn host_one(stream: TcpStream, settings: HostSettings, capture: CaptureSettings) {
+fn open_trace(path: Option<&Path>) -> Result<Option<Arc<PerfettoTrace>>, Box<dyn Error>> {
+    path.map(|path| {
+        PerfettoTrace::create(path).map_err(|e| format!("--trace {}: {e}", path.display()).into())
+    })
+    .transpose()
+}
+
+async fn host_one(
+    stream: TcpStream,
+    settings: HostSettings,
+    capture: CaptureSettings,
+    trace_path: Option<PathBuf>,
+) {
+    let trace = match open_trace(trace_path.as_deref()) {
+        Ok(trace) => trace,
+        Err(e) => {
+            eprintln!("g2g-desktop host: {e}");
+            return;
+        }
+    };
     let (events, event_receiver) = mpsc::unbounded_channel();
     let (sizes, size_receiver) = watch::channel(None);
     #[cfg(target_os = "linux")]
@@ -147,7 +171,14 @@ async fn host_one(stream: TcpStream, settings: HostSettings, capture: CaptureSet
         )
     };
     let (session, injected) = tokio::join!(
-        run_session(stream, vec![source], &settings, events, sizes),
+        run_session(
+            stream,
+            vec![source],
+            &settings,
+            events,
+            sizes,
+            trace.clone().map(|trace| trace as Arc<dyn VisitRecorder>),
+        ),
         inject(event_receiver, size_receiver, open_injector)
     );
     if let Err(e) = session {
@@ -155,6 +186,9 @@ async fn host_one(stream: TcpStream, settings: HostSettings, capture: CaptureSet
     }
     if let Err(e) = injected {
         eprintln!("g2g-desktop host: input injection: {e}");
+    }
+    if let Some(Err(e)) = trace.map(PerfettoTrace::finish) {
+        eprintln!("g2g-desktop host: --trace: {e}");
     }
 }
 
@@ -171,6 +205,7 @@ async fn host(flags: Flags) -> Result<(), Box<dyn Error>> {
         stun_server: flags.get("stun-server").cloned(),
         turn_server: turn_server(&flags)?,
     };
+    let trace_path = flags.get("trace").map(PathBuf::from);
     let listener = TcpListener::bind(("0.0.0.0", port)).await?;
     let slot = SessionSlot::default();
     loop {
@@ -180,8 +215,9 @@ async fn host(flags: Flags) -> Result<(), Box<dyn Error>> {
             continue;
         };
         let settings = settings.clone();
+        let trace_path = trace_path.clone();
         tokio::task::spawn_local(async move {
-            host_one(stream, settings, capture).await;
+            host_one(stream, settings, capture, trace_path).await;
             drop(guard);
         });
     }
@@ -195,8 +231,18 @@ async fn client(flags: Flags) -> Result<(), Box<dyn Error>> {
         token: required(&flags, "token")?,
         inputs: parsed(&flags, "inputs", true)?,
     };
+    let trace = open_trace(flags.get("trace").map(Path::new))?;
     let stream = TcpStream::connect((host.as_str(), port)).await?;
-    match run_client(stream, &settings).await {
+    let session = run_client(
+        stream,
+        &settings,
+        trace.clone().map(|trace| trace as Arc<dyn VisitRecorder>),
+    )
+    .await;
+    if let Some(trace) = trace {
+        trace.finish()?;
+    }
+    match session {
         Ok(_) | Err(ClientError::Session(G2gError::WindowClosed)) => Ok(()),
         Err(e) => Err(e.into()),
     }

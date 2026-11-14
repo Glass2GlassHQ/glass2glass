@@ -3,7 +3,11 @@
 // SPDX-License-Identifier: MPL-2.0
 
 use g2g_core::log::Target;
-use g2g_core::runtime::{parse_chain, run_graph, GraphNode, GraphNodeRef, ParseError, RunStats};
+use std::sync::Arc;
+
+use g2g_core::runtime::{
+    parse_chain, GraphNode, GraphNodeRef, ParseError, RunBuilder, RunStats, VisitRecorder,
+};
 use g2g_core::{G2gError, Graph};
 use g2g_plugins::clock::WallClock;
 use g2g_plugins::livesync::LiveSync;
@@ -222,6 +226,7 @@ fn client_graph(
 pub async fn run_client(
     stream: TcpStream,
     settings: &ClientSettings,
+    trace: Option<Arc<dyn VisitRecorder>>,
 ) -> Result<RunStats, ClientError> {
     let (offer_sender, offers) = mpsc::channel(SDP_CHANNEL_DEPTH);
     let (answers, answer_receiver) = mpsc::channel(SDP_CHANNEL_DEPTH);
@@ -242,9 +247,13 @@ pub async fn run_client(
         }
     };
     let clock = WallClock::new();
+    let mut run = RunBuilder::new(graph, &clock, LINK_CAPACITY);
+    if let Some(trace) = trace {
+        run = run.with_visit_recorder(trace);
+    }
     let (exchanged, run, ()) = tokio::join!(
         exchange_sdp(stream, &settings.token, offers, answers),
-        run_graph(graph, &clock, LINK_CAPACITY),
+        run.run(),
         forward
     );
     exchanged.map_err(ClientError::Exchange)?;

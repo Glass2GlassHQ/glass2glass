@@ -89,7 +89,7 @@ async fn client_sees_host_video_and_host_receives_client_input() {
     let (size_sender, sizes) = watch::channel(None);
     let host = async {
         let (stream, _) = listener.accept().await.unwrap();
-        run_session(stream, capture, &settings, event_sender, size_sender).await
+        run_session(stream, capture, &settings, event_sender, size_sender, None).await
     };
 
     let (offer_sender, offers) = mpsc::channel(SDP_CHANNEL_DEPTH);
