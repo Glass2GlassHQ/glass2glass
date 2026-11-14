@@ -4529,6 +4529,7 @@ dependencies = [
  "keycode",
  "subtle",
  "tokio",
+ "windows",
 ]
 
 [[package]]

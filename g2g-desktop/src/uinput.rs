@@ -13,8 +13,9 @@ use evdev::{
     RelativeAxisCode, RelativeAxisEvent, UinputAbsSetup,
 };
 
-use crate::hid::{evdev_from_usage, UnknownUsage};
-use crate::packet::{Event, EventKind, RemovableDevice};
+use crate::hid::evdev_from_usage;
+use crate::injection::{check_position, InjectError, ScreenSize};
+use crate::packet::{Event, RemovableDevice};
 
 pub const KEYBOARD_NAME_PREFIX: &str = "g2g-desktop keyboard";
 
@@ -22,45 +23,6 @@ pub const KEYBOARD_NAME_PREFIX: &str = "g2g-desktop keyboard";
 const HI_RES_UNITS_PER_NOTCH: i32 = 120;
 
 const BUTTONS: [KeyCode; 3] = [KeyCode::BTN_LEFT, KeyCode::BTN_RIGHT, KeyCode::BTN_MIDDLE];
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ScreenSize {
-    pub width: u16,
-    pub height: u16,
-}
-
-#[derive(Debug)]
-pub enum InjectError {
-    UnknownUsage(UnknownUsage),
-    UnknownButton(u8),
-    UnknownDisplay(u8),
-    OutsideScreen { x: i32, y: i32 },
-    NotInjected(EventKind),
-    Device(io::Error),
-}
-
-impl fmt::Display for InjectError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            InjectError::UnknownUsage(usage) => usage.fmt(f),
-            InjectError::UnknownButton(button) => write!(f, "button {button} has no evdev code"),
-            InjectError::UnknownDisplay(display) => write!(f, "display {display} is not captured"),
-            InjectError::OutsideScreen { x, y } => {
-                write!(f, "position ({x}, {y}) is outside the captured display")
-            }
-            InjectError::NotInjected(kind) => write!(f, "{kind:?} events are not injected"),
-            InjectError::Device(e) => write!(f, "uinput: {e}"),
-        }
-    }
-}
-
-impl std::error::Error for InjectError {}
-
-impl From<io::Error> for InjectError {
-    fn from(e: io::Error) -> Self {
-        InjectError::Device(e)
-    }
-}
 
 fn keyboard_keys() -> AttributeSet<KeyCode> {
     let mut keys = AttributeSet::new();
@@ -179,13 +141,7 @@ impl Injector {
                 *RelativeAxisEvent::new(RelativeAxisCode::REL_Y, dy),
             ])?,
             Event::Position { x, y, display } => {
-                if display != 0 {
-                    return Err(InjectError::UnknownDisplay(display));
-                }
-                let inside = |value: i32, extent: u16| (0..i32::from(extent)).contains(&value);
-                if !inside(x, self.screen.width) || !inside(y, self.screen.height) {
-                    return Err(InjectError::OutsideScreen { x, y });
-                }
+                check_position(x, y, display, self.screen)?;
                 self.tablet.emit(&[
                     *AbsoluteAxisEvent::new(AbsoluteAxisCode::ABS_X, x),
                     *AbsoluteAxisEvent::new(AbsoluteAxisCode::ABS_Y, y),

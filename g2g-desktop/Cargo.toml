@@ -20,6 +20,9 @@ session = [
     "g2g-plugins/webrtc",
     "g2g-plugins/ffmpeg",
     "g2g-plugins/portal",
+    "g2g-plugins/d3d11-screen-capture",
+    "g2g-plugins/mf-encode",
+    "dep:windows",
     "g2g-plugins/wgpu-present",
     "tokio/net",
     "tokio/io-util",
@@ -37,6 +40,13 @@ tokio = { version = "1", features = ["sync"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 evdev = "0.13"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.62", optional = true, features = [
+    "Win32_Foundation",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 [lints]
 workspace = true

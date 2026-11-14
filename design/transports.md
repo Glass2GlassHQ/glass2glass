@@ -583,16 +583,17 @@ button still down, because the host holds a key until its key-up arrives.
 `host::run_session` serves one client on an accepted TCP connection. It reads
 the token and the offer first, with a 10 second limit, so a client with a bad
 token never starts the capture. It then runs one graph: the capture nodes, a
-pass-through that publishes the capture size, `videoconvert`, `ffmpegenc
-backend=software` at the configured bitrate, and a `WebRtcDuplexSession`
+pass-through that publishes the capture size, `videoconvert`, the encoder at
+the configured bitrate (`ffmpegenc backend=software` on Linux, `mfencode` on
+Windows), and a `WebRtcDuplexSession`
 answerer whose received video drains into a `fakesink`. The answer goes back on
 the TCP connection, which then closes. Messages on the `input` data channel are
 read as client packets and sent to the caller's event channel, and a malformed
 packet is logged and dropped. `client::exchange_sdp` is the client half of the
 same exchange.
 
-`host::inject` builds a uinput `Injector` once the capture size is known, and a
-new one whenever the size changes. Events that arrive before the first size are
+`host::inject` builds the platform `Injector` through the caller's constructor
+once the capture size is known, and a new one whenever the size changes. Events that arrive before the first size are
 logged and dropped.
 
 ### Client session
@@ -604,8 +605,10 @@ out as packets on the `input` data channel. Keys map from evdev codes to HID
 usages on device 0, a pointer position goes out as an absolute position on
 display 0, and losing keyboard focus releases the keys and buttons still held.
 
-`g2g-desktop host` serves one client at a time and captures a monitor through
-the ScreenCast portal, which asks the user on every session. A second
+`g2g-desktop host` serves one client at a time. On Linux it captures a monitor
+through the ScreenCast portal, which asks the user on every session. On
+Windows it captures the monitor named by `--monitor-index` (-1 for the
+primary) with `d3d11screencapturesrc`. A second
 connection while a session runs is closed. `g2g-desktop client` connects and
 opens the window, and closing the window ends it. Running `g2g-desktop` with
 no arguments prints the flags.
@@ -616,7 +619,8 @@ no arguments prints the flags.
 keycode to a keyboard-page usage, through the `keycode` crate's copy of
 Chromium's key table. A consumer-page key such as play/pause has no keyboard
 usage and maps to `None`. `hid::evdev_from_usage` fails with `UnknownUsage`
-for a usage with no evdev key instead of returning code 0.
+for a usage with no evdev key instead of returning code 0, and
+`hid::windows_scancode_from_usage` does the same for Windows scancodes.
 
 On Linux, `uinput::Injector` writes events to `/dev/uinput`. It creates one
 virtual keyboard per key-packet `device`, created on that device's first key
@@ -625,6 +629,15 @@ keyboard still held. Relative moves, buttons and wheel go to one relative
 mouse. The wheel sends the high-resolution axes and a notch for every 120
 units. Positions go to an absolute pointer sized to the captured screen, and
 a position outside it or on a display other than 0 fails the call.
+
+On Windows, `sendinput::Injector` sends keys as scancodes through `SendInput`,
+with `KEYEVENTF_EXTENDEDKEY` for the keys whose code has an `0xe0` prefix. It
+tracks the keys each `device` holds and releases them when that device is
+removed. A position is offset by the captured monitor's place on the virtual
+desktop and sent as an absolute move aimed at the pixel's centre. The injector
+fails to build when the capture size differs from the monitor's size. A
+`SendInput` call the OS refuses, such as while the secure desktop is up, is
+logged and the session goes on.
 
 ## Distributed graphs
 

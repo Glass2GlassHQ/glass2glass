@@ -19,8 +19,8 @@ use g2g_core::{
 };
 use g2g_desktop::client::exchange_sdp;
 use g2g_desktop::host::{run_session, HostSettings, INPUT_LABEL};
+use g2g_desktop::injection::ScreenSize;
 use g2g_desktop::packet::{Event, PacketWriter, Side};
-use g2g_desktop::uinput::ScreenSize;
 use g2g_plugins::clock::WallClock;
 use g2g_plugins::registry::default_registry;
 use g2g_plugins::webrtcduplex::{SdpChannel, SignalRole, WebRtcDuplexSession};

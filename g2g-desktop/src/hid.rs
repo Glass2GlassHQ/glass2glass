@@ -47,3 +47,12 @@ pub fn evdev_from_usage(usage: u16) -> Result<u16, UnknownUsage> {
         .filter(|&code| code != 0)
         .ok_or(UnknownUsage(usage))
 }
+
+pub fn windows_scancode_from_usage(usage: u16) -> Result<u16, UnknownUsage> {
+    // keycode gives the usb error usages windows codes too, and those rows have no browser key code
+    KeyMap::from_usb_code(KEYBOARD_PAGE, usage)
+        .ok()
+        .filter(|key| key.code.is_some() && key.win != 0)
+        .map(|key| key.win)
+        .ok_or(UnknownUsage(usage))
+}

@@ -2,7 +2,9 @@
 //
 // SPDX-License-Identifier: MPL-2.0
 
-use g2g_desktop::hid::{evdev_from_usage, usage_from_scancode, ScancodeSet, UnknownUsage};
+use g2g_desktop::hid::{
+    evdev_from_usage, usage_from_scancode, windows_scancode_from_usage, ScancodeSet, UnknownUsage,
+};
 
 struct PlatformKey {
     name: &'static str,
@@ -65,6 +67,12 @@ fn a_key_maps_to_one_usage_from_every_platform() {
             "{}",
             key.name
         );
+        assert_eq!(
+            windows_scancode_from_usage(key.usage),
+            Ok(key.windows as u16),
+            "{}",
+            key.name
+        );
     }
 }
 
@@ -83,12 +91,27 @@ fn every_injectable_usage_captures_back_to_itself() {
 }
 
 #[test]
+fn every_windows_injectable_usage_captures_back_to_itself() {
+    for usage in 0..=u16::MAX {
+        let Ok(scancode) = windows_scancode_from_usage(usage) else {
+            continue;
+        };
+        assert_eq!(
+            usage_from_scancode(ScancodeSet::Windows, u32::from(scancode)),
+            Some(usage),
+            "usage {usage:#06x} injects as windows scancode {scancode:#06x}"
+        );
+    }
+}
+
+#[test]
 fn unknown_usage_fails_instead_of_mapping_to_zero() {
     const RESERVED: u16 = 0x00;
     const ERROR_ROLL_OVER: u16 = 0x01;
     const PAST_KEYBOARD_PAGE: u16 = 0xffff;
     for usage in [RESERVED, ERROR_ROLL_OVER, PAST_KEYBOARD_PAGE] {
         assert_eq!(evdev_from_usage(usage), Err(UnknownUsage(usage)));
+        assert_eq!(windows_scancode_from_usage(usage), Err(UnknownUsage(usage)));
     }
 }
 

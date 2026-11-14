@@ -22,9 +22,13 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, watch};
 
+use crate::injection::{InjectError, ScreenSize};
 use crate::packet::{Event, PacketReader, Side};
+#[cfg(target_os = "windows")]
+use crate::sendinput::Injector;
 use crate::signaling::{HostEvent, HostSignaling, SignalingError};
-use crate::uinput::{InjectError, Injector, ScreenSize};
+#[cfg(target_os = "linux")]
+use crate::uinput::Injector;
 
 pub const INPUT_LABEL: &str = "input";
 const HOST_CATEGORY: &str = "g2g-desktop-host";
@@ -33,6 +37,10 @@ const SIGNALING_READ_BYTES: usize = 4096;
 // glass-to-glass latency grows with link depth
 const LINK_CAPACITY: usize = 2;
 const SDP_CHANNEL_DEPTH: usize = 4;
+#[cfg(target_os = "linux")]
+const ENCODER: &str = "ffmpegenc backend=software";
+#[cfg(target_os = "windows")]
+const ENCODER: &str = "mfencode";
 
 #[derive(Debug, Clone)]
 pub struct TurnServer {
@@ -182,10 +190,7 @@ fn host_graph(
     session: WebRtcDuplexSession,
     sizes: watch::Sender<Option<ScreenSize>>,
 ) -> Result<Graph<GraphNode>, HostError> {
-    let encode = format!(
-        "videoconvert ! ffmpegenc backend=software bitrate={}",
-        settings.bitrate
-    );
+    let encode = format!("videoconvert ! {ENCODER} bitrate={}", settings.bitrate);
     let encode = parse_chain(&default_registry(), &encode).map_err(HostError::Launch)?;
     let mut capture = capture.into_iter();
     let mut graph = Graph::new();
@@ -287,6 +292,7 @@ pub async fn run_session(
 pub async fn inject(
     mut events: mpsc::UnboundedReceiver<Event>,
     mut sizes: watch::Receiver<Option<ScreenSize>>,
+    open_injector: impl Fn(ScreenSize) -> Result<Injector, InjectError>,
 ) -> Result<(), InjectError> {
     let log = Target::category(HOST_CATEGORY);
     let mut injector: Option<Injector> = None;
@@ -297,7 +303,7 @@ pub async fn inject(
                     return Ok(());
                 }
                 let size = *sizes.borrow_and_update();
-                injector = size.map(Injector::new).transpose()?;
+                injector = size.map(&open_injector).transpose()?;
             }
             event = events.recv() => {
                 let Some(event) = event else {
