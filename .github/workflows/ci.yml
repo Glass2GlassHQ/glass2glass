@@ -143,7 +143,8 @@ jobs:
             | jq -r '.packages[] | . as $p | (.metadata.docs.rs.features // [])[] | "\($p.name)/\(.)"' \
             | paste -sd,)
           echo "docs.rs features: $features"
-          cargo doc --workspace --no-deps --locked --features "$features"
+          # cargo applies a workspace-wide g2g-plugins/std to g2g-desktop's optional linux g2g-plugins entry, which needs pipewire
+          cargo doc --workspace --exclude g2g-desktop --no-deps --locked --features "$features"
 
   # MSRV floor of the embedded-facing surface (M999). g2g-core / g2g-mcu /
   # g2g-mcugen / g2g-plugin declare rust-version 1.86 while the host crates are
