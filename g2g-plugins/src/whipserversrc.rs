@@ -67,7 +67,7 @@ use crate::webrtc_receive::{ArrivalStamp, MediaReceiver, ReceivedUnit, UDP_RECV_
 use crate::webrtc_stats::{WebRtcStatsHandle, STATS_INTERVAL};
 use crate::webrtc_util::{
     add_ice_candidates, feed_datagram, parse_restart_answer_frag, random_hex_id, select_host_ip,
-    send_transmit, STUN_SERVER_PROP,
+    send_transmit, wait_rtc_timeout, STUN_SERVER_PROP,
 };
 
 // each publisher slot owns a pad pair: slot * PORTS_PER_PUBLISHER + VIDEO_PORT / AUDIO_PORT
@@ -686,7 +686,7 @@ impl MultiOutputSource for WhipServerSrc {
                         }
                     }
                     pending = requests.recv() => answer!(pending),
-                    _ = tokio::time::sleep(timeout) => {
+                    _ = wait_rtc_timeout(timeout) => {
                         let now = Instant::now();
                         let mut failed = Vec::new();
                         for s in sessions.iter_mut().flatten() {

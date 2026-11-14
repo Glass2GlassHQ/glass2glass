@@ -46,7 +46,7 @@ use crate::webrtc_receive::UDP_RECV_BYTES;
 use crate::webrtc_stats::{WebRtcStatsHandle, STATS_INTERVAL};
 use crate::webrtc_util::{
     accept_offer_sdp, connect_failed, drain_pacer, feed_datagram, select_host_ip, send_transmit,
-    IceTransportPolicy, ICE_TRANSPORT_POLICY_PROP,
+    wait_rtc_timeout, IceTransportPolicy, ICE_TRANSPORT_POLICY_PROP,
 };
 use crate::webrtcsink::{MediaUnit, DEFAULT_QUEUE_DEPTH, INITIAL_BITRATE_BPS};
 
@@ -566,7 +566,7 @@ async fn run_session(m: &mut Master, mut s: Session) -> SessionEnd {
                 refresh_at = Instant::now() + REFRESH_INTERVAL;
             }
             _ = wake(m.reconnect_at), if m.reconnect_at.is_some() => reconnect(m).await,
-            _ = tokio::time::sleep(timeout) => {
+            _ = wait_rtc_timeout(timeout) => {
                 if s.rtc.handle_input(Input::Timeout(Instant::now())).is_err() {
                     return SessionEnd::ViewerLeft;
                 }

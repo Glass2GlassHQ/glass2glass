@@ -732,6 +732,13 @@ pub(crate) async fn add_ice_candidates(
     Ok(())
 }
 
+pub(crate) async fn wait_rtc_timeout(timeout: Duration) {
+    // str0m's pacer sends one packet per timeout, and tokio rounds even a zero sleep up to a timer tick, 15.6 ms on windows
+    if !timeout.is_zero() {
+        tokio::time::sleep(timeout).await;
+    }
+}
+
 /// Drive `rtc` briefly after the media ends so packets still queued in str0m's
 /// pacer reach the wire before the socket drops (graceful EOS flush).
 /// Bounded to a short window: the media is done, this only flushes the tail.
@@ -746,11 +753,7 @@ pub(crate) async fn drain_pacer(rtc: &mut Rtc, socket: &UdpSocket, turn: &mut Tu
         match rtc.poll_output() {
             Ok(Output::Transmit(t)) => send_transmit(socket, turn, &t).await,
             Ok(Output::Timeout(t)) => {
-                let wake = t.min(deadline);
-                let wait = wake.saturating_duration_since(Instant::now());
-                if !wait.is_zero() {
-                    tokio::time::sleep(wait).await;
-                }
+                wait_rtc_timeout(t.min(deadline).saturating_duration_since(Instant::now())).await;
                 let _ = rtc.handle_input(Input::Timeout(Instant::now()));
             }
             Ok(Output::Event(_)) => {}
@@ -1173,5 +1176,13 @@ mod tests {
         let handle = ResourceHandle::default();
         assert_eq!(handle.url(), None);
         handle.delete_once(None).await;
+    }
+
+    #[tokio::test]
+    async fn a_due_rtc_timeout_is_ready_without_a_timer_tick() {
+        use core::future::Future;
+        let wait = core::pin::pin!(wait_rtc_timeout(Duration::ZERO));
+        let mut context = core::task::Context::from_waker(core::task::Waker::noop());
+        assert!(wait.poll(&mut context).is_ready());
     }
 }

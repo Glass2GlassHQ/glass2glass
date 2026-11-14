@@ -77,7 +77,7 @@ use crate::filesink::io_err;
 use crate::turn::TurnSet;
 use crate::webrtc_util::{
     accept_answer_sdp, accept_offer_sdp, add_ice_candidates, connect_failed, select_host_ip,
-    send_transmit,
+    send_transmit, wait_rtc_timeout,
 };
 use crate::webrtcduplex::{SdpChannel, SignalRole};
 
@@ -458,7 +458,7 @@ impl SourceLoop for WebRtcDataSrc {
                             break 'outer;
                         }
                     }
-                    _ = tokio::time::sleep(timeout) => {
+                    _ = wait_rtc_timeout(timeout) => {
                         if rtc.handle_input(Input::Timeout(Instant::now())).is_err() {
                             break 'outer;
                         }
@@ -766,7 +766,7 @@ async fn run_egress(
                     None => input_done = true,
                 }
             }
-            _ = tokio::time::sleep(timeout) => {
+            _ = wait_rtc_timeout(timeout) => {
                 if rtc.handle_input(Input::Timeout(Instant::now())).is_err() {
                     return;
                 }

@@ -66,7 +66,7 @@ use crate::webrtc_codec::{
 use crate::webrtc_receive::{ArrivalStamp, MediaReceiver, ReceivedUnit, UDP_RECV_BYTES};
 use crate::webrtc_util::{
     accept_answer_sdp, connect_failed, feed_datagram, get_linger_ms_property, send_transmit,
-    set_linger_ms_property, DEFAULT_LINGER_MS, LINGER_MS_PROP,
+    set_linger_ms_property, wait_rtc_timeout, DEFAULT_LINGER_MS, LINGER_MS_PROP,
 };
 
 /// Send input / recv output pad layout: 0 = video, 1 = audio.
@@ -652,7 +652,7 @@ impl MultiDuplexSession for LiveKitDuplex {
                         let _ = send_signal(&mut ws, &SignalRequest::Ping(ping_timestamp())).await;
                         next_ping = Instant::now() + ping_interval;
                     }
-                    _ = tokio::time::sleep(timeout) => {
+                    _ = wait_rtc_timeout(timeout) => {
                         let now = Instant::now();
                         let _ = pub_rtc.handle_input(Input::Timeout(now));
                         let _ = sub_rtc.handle_input(Input::Timeout(now));

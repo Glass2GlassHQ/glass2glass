@@ -84,6 +84,7 @@ use crate::webrtc_simulcast::{
 };
 use crate::webrtc_util::{
     accept_answer_sdp, connect_failed, feed_datagram, select_host_ip, send_transmit,
+    wait_rtc_timeout,
 };
 
 /// Default bounded depth of the element->session media channel (per direction).
@@ -922,7 +923,7 @@ async fn run_session(mut a: SessionArgs) {
                     .await;
                 ping_at = Instant::now() + a.ping_interval;
             }
-            _ = tokio::time::sleep(timeout) => {
+            _ = wait_rtc_timeout(timeout) => {
                 if a.rtc.handle_input(Input::Timeout(Instant::now())).is_err() {
                     return;
                 }

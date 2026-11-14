@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2313: WebRTC elements send str0m packets without waiting for a timer tick, which capped Windows senders at about 40 packets per second.
 - M2312: Mid-stream caps with a placeholder framerate forward it as unknown, so parsers keep the bitstream rate.
 - M2311: WebRTC receivers stamp frames with the local arrival time and report themselves live.
 - M2305: `remotewtsink` / `remotewtsrc` carry raw QUIC on `quic://` beside WebTransport, and `mode` swaps which side listens.

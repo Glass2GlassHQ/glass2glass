@@ -84,8 +84,8 @@ use crate::webrtc_receive::{ArrivalStamp, KeyframeGate, UDP_RECV_BYTES};
 use crate::webrtc_util::{
     accept_answer_sdp, accept_offer_sdp, add_ice_candidates, connect_failed, feed_datagram,
     get_linger_ms_property, non_empty, select_host_ip, send_transmit, set_linger_ms_property,
-    DEFAULT_LINGER_MS, LINGER_MS_PROP, STUN_SERVER_PROP, TURN_PASS_PROP, TURN_SERVER_PROP,
-    TURN_USER_PROP,
+    wait_rtc_timeout, DEFAULT_LINGER_MS, LINGER_MS_PROP, STUN_SERVER_PROP, TURN_PASS_PROP,
+    TURN_SERVER_PROP, TURN_USER_PROP,
 };
 use crate::webrtcdata::{flush_channel_message, ChannelSettings, CHANNEL_RETRY_INTERVAL};
 
@@ -1221,7 +1221,7 @@ impl MultiDuplexSession for WebRtcDuplexSession {
                             Some(_) => {}
                         }
                     }
-                    _ = tokio::time::sleep(timeout) => {
+                    _ = wait_rtc_timeout(timeout) => {
                         if rtc.handle_input(Input::Timeout(Instant::now())).is_err() {
                             finish!();
                         }

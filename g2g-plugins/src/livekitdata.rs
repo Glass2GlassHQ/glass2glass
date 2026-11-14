@@ -33,6 +33,7 @@ use crate::turn::TurnSet;
 use crate::webrtc_receive::UDP_RECV_BYTES;
 use crate::webrtc_util::{
     accept_answer_sdp, connect_failed, feed_datagram, select_host_ip, send_transmit,
+    wait_rtc_timeout,
 };
 
 const RELIABLE_LABEL: &str = "_reliable";
@@ -273,7 +274,7 @@ impl DataSession {
                 self.turn_refresh_at = Instant::now() + crate::turn::REFRESH_INTERVAL;
                 Wake::Network
             }
-            _ = tokio::time::sleep(timeout) => {
+            _ = wait_rtc_timeout(timeout) => {
                 if self.rtc.handle_input(Input::Timeout(Instant::now())).is_err() {
                     return Wake::Closed;
                 }

@@ -65,7 +65,7 @@ use crate::webrtc_codec::{
     WebRtcVideoCodec, VIDEO_CODEC_PROP,
 };
 use crate::webrtc_receive::{ArrivalStamp, MediaReceiver, ReceivedUnit, UDP_RECV_BYTES};
-use crate::webrtc_util::{accept_offer_sdp, send_transmit};
+use crate::webrtc_util::{accept_offer_sdp, send_transmit, wait_rtc_timeout};
 
 /// Output port for the video track.
 const VIDEO_PORT: usize = 0;
@@ -435,7 +435,7 @@ impl MultiOutputSource for LiveKitSrc {
                         let _ = send_signal(&mut ws, &SignalRequest::Ping(ping_timestamp())).await;
                         next_ping = Instant::now() + ping_interval;
                     }
-                    _ = tokio::time::sleep(timeout) => {
+                    _ = wait_rtc_timeout(timeout) => {
                         let _ = rtc.handle_input(Input::Timeout(Instant::now()));
                     }
                 }

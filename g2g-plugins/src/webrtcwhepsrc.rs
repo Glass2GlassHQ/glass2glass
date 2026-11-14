@@ -67,7 +67,7 @@ use crate::webrtc_receive::{ArrivalStamp, MediaReceiver, ReceivedUnit, UDP_RECV_
 use crate::webrtc_stats::{WebRtcStatsHandle, STATS_INTERVAL};
 use crate::webrtc_util::{
     add_host_candidate, delete_resource, feed_datagram, ice_restart, negotiate_over_http,
-    select_host_ip, send_transmit, trickle_candidates, TricklePatch, TurnConfig,
+    select_host_ip, send_transmit, trickle_candidates, wait_rtc_timeout, TricklePatch, TurnConfig,
     ICE_RESTART_TIMEOUT, STUN_SERVER_PROP, TURN_PASS_PROP, TURN_SERVER_PROP, TURN_USER_PROP,
 };
 
@@ -597,7 +597,7 @@ impl WebRtcWhepSrc {
                     session.turn.refresh_all(&session.socket).await;
                     session.refresh_at = Instant::now() + turn::REFRESH_INTERVAL;
                 }
-                _ = tokio::time::sleep(timeout) => {
+                _ = wait_rtc_timeout(timeout) => {
                     let _ = session.rtc.handle_input(Input::Timeout(Instant::now()));
                 }
             }

@@ -43,7 +43,7 @@ use crate::webrtc_codec::{
 use crate::webrtc_receive::{ArrivalStamp, MediaReceiver, ReceivedUnit, UDP_RECV_BYTES};
 use crate::webrtc_util::{
     accept_answer_sdp, connect_failed, drain_pacer, feed_datagram, random_hex_id, select_host_ip,
-    send_transmit, IceTransportPolicy, ICE_TRANSPORT_POLICY_PROP,
+    send_transmit, wait_rtc_timeout, IceTransportPolicy, ICE_TRANSPORT_POLICY_PROP,
 };
 
 const VIDEO_PORT: usize = 0;
@@ -491,7 +491,7 @@ impl MultiOutputSource for KvsWebRtcSrc {
                         s.turn.refresh_all(&s.socket).await;
                         refresh_at = Instant::now() + REFRESH_INTERVAL;
                     }
-                    _ = tokio::time::sleep(timeout) => {
+                    _ = wait_rtc_timeout(timeout) => {
                         if s.rtc.handle_input(Input::Timeout(Instant::now())).is_err() {
                             g2g_warn!(self, "rtc timeout handling failed, ending run");
                             finish!();

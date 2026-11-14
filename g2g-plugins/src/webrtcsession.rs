@@ -66,8 +66,9 @@ use crate::webrtc_simulcast::{
 };
 use crate::webrtc_util::{
     add_host_candidate, drain_pacer, feed_datagram, ice_restart, negotiate_over_http,
-    select_host_ip, send_transmit, trickle_candidates, ResourceHandle, TricklePatch, TurnConfig,
-    ICE_RESTART_TIMEOUT, STUN_SERVER_PROP, TURN_PASS_PROP, TURN_SERVER_PROP, TURN_USER_PROP,
+    select_host_ip, send_transmit, trickle_candidates, wait_rtc_timeout, ResourceHandle,
+    TricklePatch, TurnConfig, ICE_RESTART_TIMEOUT, STUN_SERVER_PROP, TURN_PASS_PROP,
+    TURN_SERVER_PROP, TURN_USER_PROP,
 };
 
 /// Default bounded depth of the element->session media channel (per direction).
@@ -734,7 +735,7 @@ async fn run_session(mut a: SessionArgs) {
                 a.turn.refresh_all(&a.socket).await;
                 refresh_at = Instant::now() + turn::REFRESH_INTERVAL;
             }
-            _ = tokio::time::sleep(timeout) => {
+            _ = wait_rtc_timeout(timeout) => {
                 if a.rtc.handle_input(Input::Timeout(Instant::now())).is_err() {
                     a.resource.delete_once(a.bearer.as_deref()).await;
                     return;

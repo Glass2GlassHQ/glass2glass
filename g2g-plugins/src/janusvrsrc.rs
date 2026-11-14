@@ -44,7 +44,7 @@ use crate::webrtc_codec::{
 use crate::webrtc_receive::{ArrivalStamp, MediaReceiver, ReceivedUnit, UDP_RECV_BYTES};
 use crate::webrtc_util::{
     accept_offer_sdp, add_ice_candidates, feed_datagram, select_host_ip, send_transmit,
-    STUN_SERVER_PROP,
+    wait_rtc_timeout, STUN_SERVER_PROP,
 };
 
 const VIDEO_PORT: usize = 0;
@@ -571,7 +571,7 @@ impl MultiOutputSource for JanusVrSrc {
                         }
                         keepalive_at = Instant::now() + KEEPALIVE_INTERVAL;
                     }
-                    _ = tokio::time::sleep(timeout) => {
+                    _ = wait_rtc_timeout(timeout) => {
                         if s.rtc.handle_input(Input::Timeout(Instant::now())).is_err() {
                             g2g_warn!(self, "rtc timeout handling failed, ending run");
                             finish!();

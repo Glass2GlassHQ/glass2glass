@@ -81,8 +81,9 @@ use crate::webrtc_receive::UDP_RECV_BYTES;
 use crate::webrtc_stats::{WebRtcStatsHandle, STATS_INTERVAL};
 use crate::webrtc_util::{
     add_host_candidate, drain_pacer, feed_datagram, ice_restart, negotiate_over_http,
-    select_host_ip, send_transmit, trickle_candidates, ResourceHandle, TricklePatch, TurnConfig,
-    ICE_RESTART_TIMEOUT, STUN_SERVER_PROP, TURN_PASS_PROP, TURN_SERVER_PROP, TURN_USER_PROP,
+    select_host_ip, send_transmit, trickle_candidates, wait_rtc_timeout, ResourceHandle,
+    TricklePatch, TurnConfig, ICE_RESTART_TIMEOUT, STUN_SERVER_PROP, TURN_PASS_PROP,
+    TURN_SERVER_PROP, TURN_USER_PROP,
 };
 
 /// Default bounded depth of the element->session media channel. Backpressures
@@ -839,7 +840,7 @@ async fn run_session(
                 }
             }
             // str0m's timer fired.
-            _ = tokio::time::sleep(timeout) => {
+            _ = wait_rtc_timeout(timeout) => {
                 if let Err(error) = rtc.handle_input(Input::Timeout(Instant::now())) {
                     resource.delete_once(bearer).await;
                     return SessionEnd::Lost(format!("str0m timeout handling failed: {error}"));

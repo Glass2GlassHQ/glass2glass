@@ -56,7 +56,7 @@ use crate::webrtc_receive::UDP_RECV_BYTES;
 use crate::webrtc_stats::{WebRtcStatsHandle, STATS_INTERVAL};
 use crate::webrtc_util::{
     accept_answer_sdp, add_ice_candidates, connect_failed, drain_pacer, feed_datagram,
-    select_host_ip, send_transmit, STUN_SERVER_PROP,
+    select_host_ip, send_transmit, wait_rtc_timeout, STUN_SERVER_PROP,
 };
 use crate::webrtcsink::{MediaUnit, DEFAULT_QUEUE_DEPTH, INITIAL_BITRATE_BPS};
 
@@ -379,7 +379,7 @@ async fn run_session(mut a: SessionArgs) {
                 }
                 keepalive_at = Instant::now() + KEEPALIVE_INTERVAL;
             }
-            _ = tokio::time::sleep(timeout) => {
+            _ = wait_rtc_timeout(timeout) => {
                 if a.rtc.handle_input(Input::Timeout(Instant::now())).is_err() {
                     return leave(&mut a).await;
                 }
