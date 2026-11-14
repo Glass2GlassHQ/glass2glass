@@ -35,6 +35,7 @@ impl PipelineClock for ZeroClock {
 pub(crate) struct PacedSrc {
     pub(crate) codec: WebRtcVideoCodec,
     pub(crate) units: Arc<Vec<Vec<u8>>>,
+    pub(crate) first_pts_ns: u64,
 }
 
 impl SourceLoop for PacedSrc {
@@ -55,7 +56,7 @@ impl SourceLoop for PacedSrc {
                 let frame = Frame::new(
                     MemoryDomain::System(SystemSlice::from_boxed(unit.clone().into_boxed_slice())),
                     FrameTiming {
-                        pts_ns: seq as u64 * FRAME_INTERVAL.as_nanos() as u64,
+                        pts_ns: self.first_pts_ns + seq as u64 * FRAME_INTERVAL.as_nanos() as u64,
                         ..FrameTiming::default()
                     },
                     seq as u64,
@@ -73,6 +74,7 @@ impl SourceLoop for PacedSrc {
 pub(crate) struct Received {
     pub(crate) caps: Option<Caps>,
     pub(crate) units: Vec<(Vec<u8>, bool)>,
+    pub(crate) pts_ns: Vec<u64>,
 }
 
 pub(crate) struct RecordingSink {
@@ -109,6 +111,7 @@ impl AsyncElement for RecordingSink {
                         .expect("system memory")
                         .to_vec();
                     received.units.push((bytes, frame.timing.keyframe));
+                    received.pts_ns.push(frame.timing.pts_ns);
                 }
                 _ => {}
             }
@@ -124,7 +127,11 @@ pub(crate) async fn run_peer(
     received: Arc<Mutex<Received>>,
     clock: &ZeroClock,
 ) -> Result<g2g_core::runtime::RunStats, G2gError> {
-    let mut src = PacedSrc { codec, units };
+    let mut src = PacedSrc {
+        codec,
+        units,
+        first_pts_ns: 0,
+    };
     let mut sink = RecordingSink { received };
     let sources: Vec<&mut dyn DynSourceLoop> = vec![&mut src];
     let sinks: Vec<&mut dyn DynAsyncElement> = vec![&mut sink];

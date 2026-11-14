@@ -21,7 +21,9 @@ use str0m::crypto::from_feature_flags;
 use str0m::media::{Direction, MediaKind};
 use str0m::{Candidate, Event, IceConnectionState, Input, Output, Rtc, RtcConfig};
 
+use g2g_core::clock::ClockSync;
 use g2g_core::log::{short_type_name, LogName, LogSource};
+use g2g_core::query::LatencyReport;
 use g2g_core::{
     g2g_debug, g2g_info, g2g_warn, Caps, G2gError, MultiOutputSink, MultiOutputSource,
     PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
@@ -38,7 +40,7 @@ use crate::webrtc_codec::{
     enable_tracks, get_video_codec_property, opus_caps, set_video_codec_property, Track,
     WebRtcVideoCodec, VIDEO_CODEC_PROP,
 };
-use crate::webrtc_receive::{MediaReceiver, ReceivedUnit, UDP_RECV_BYTES};
+use crate::webrtc_receive::{ArrivalStamp, MediaReceiver, ReceivedUnit, UDP_RECV_BYTES};
 use crate::webrtc_util::{
     accept_answer_sdp, connect_failed, drain_pacer, feed_datagram, random_hex_id, select_host_ip,
     send_transmit, IceTransportPolicy, ICE_TRANSPORT_POLICY_PROP,
@@ -58,6 +60,7 @@ pub struct KvsWebRtcSrc {
     video_codec: WebRtcVideoCodec,
     frame_limit: u64,
     log_name: LogName,
+    clock_sync: Option<ClockSync>,
 }
 
 impl core::fmt::Debug for KvsWebRtcSrc {
@@ -79,6 +82,7 @@ impl Default for KvsWebRtcSrc {
 impl KvsWebRtcSrc {
     pub fn new() -> Self {
         Self {
+            clock_sync: None,
             settings: KvsSettings::default(),
             client_id: format!("{CLIENT_ID_PREFIX}{}", random_hex_id()),
             video_codec: WebRtcVideoCodec::default(),
@@ -353,6 +357,14 @@ impl MultiOutputSource for KvsWebRtcSrc {
         }
     }
 
+    fn latency(&self) -> LatencyReport {
+        LatencyReport::live(0, None)
+    }
+
+    fn set_clock_sync(&mut self, sync: ClockSync) {
+        self.clock_sync = Some(sync);
+    }
+
     fn run<'a>(&'a mut self, out: &'a mut dyn MultiOutputSink) -> Self::RunFuture<'a> {
         Box::pin(async move {
             if crate::numbuffers::finished_at_zero_limit_multi(self.frame_limit, OUTPUT_COUNT, out)
@@ -378,6 +390,7 @@ impl MultiOutputSource for KvsWebRtcSrc {
             let mut refresh_at = Instant::now() + REFRESH_INTERVAL;
             let mut buf = alloc::vec![0u8; UDP_RECV_BYTES];
             let mut seq = 0u64;
+            let mut stamp = ArrivalStamp::new(self.clock_sync.clone());
             macro_rules! finish {
                 () => {{
                     // close_notify tells the master now, not at the ice timeout
@@ -435,7 +448,7 @@ impl MultiOutputSource for KvsWebRtcSrc {
                 }
 
                 for (port, unit) in frames {
-                    let frame = unit.into_frame(seq);
+                    let frame = unit.into_frame(&mut stamp, seq);
                     out.push_to(port, PipelinePacket::DataFrame(frame)).await?;
                     seq += 1;
                     if seq >= self.frame_limit {

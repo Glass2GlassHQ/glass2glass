@@ -45,7 +45,9 @@ use str0m::crypto::from_feature_flags;
 use str0m::media::MediaKind;
 use str0m::{Candidate, Event, IceConnectionState, Input, Output, Rtc, RtcConfig};
 
+use g2g_core::clock::ClockSync;
 use g2g_core::log::{short_type_name, LogName, LogSource};
+use g2g_core::query::LatencyReport;
 use g2g_core::{
     g2g_warn, Caps, G2gError, MultiOutputSink, MultiOutputSource, NetworkFailure, PipelinePacket,
     PropError, PropKind, PropValue, PropertySpec,
@@ -62,7 +64,7 @@ use crate::webrtc_codec::{
     enable_tracks, get_video_codec_property, opus_caps, set_video_codec_property, Track,
     WebRtcVideoCodec, VIDEO_CODEC_PROP,
 };
-use crate::webrtc_receive::{MediaReceiver, ReceivedUnit, UDP_RECV_BYTES};
+use crate::webrtc_receive::{ArrivalStamp, MediaReceiver, ReceivedUnit, UDP_RECV_BYTES};
 use crate::webrtc_util::{accept_offer_sdp, send_transmit};
 
 /// Output port for the video track.
@@ -93,6 +95,7 @@ pub struct LiveKitSrc {
     frame_limit: u64,
     ice: IceSettings,
     log_name: LogName,
+    clock_sync: Option<ClockSync>,
 }
 
 impl LogSource for LiveKitSrc {
@@ -128,6 +131,7 @@ impl LiveKitSrc {
         identity: impl Into<String>,
     ) -> Self {
         Self {
+            clock_sync: None,
             room_settings: RoomSettings::new(url, room, identity),
             video_codec: WebRtcVideoCodec::default(),
             frame_limit: u64::MAX,
@@ -281,6 +285,14 @@ impl MultiOutputSource for LiveKitSrc {
         }
     }
 
+    fn latency(&self) -> LatencyReport {
+        LatencyReport::live(0, None)
+    }
+
+    fn set_clock_sync(&mut self, sync: ClockSync) {
+        self.clock_sync = Some(sync);
+    }
+
     fn run<'a>(&'a mut self, out: &'a mut dyn MultiOutputSink) -> Self::RunFuture<'a> {
         Box::pin(async move {
             if crate::numbuffers::finished_at_zero_limit_multi(
@@ -326,6 +338,7 @@ impl MultiOutputSource for LiveKitSrc {
 
             let mut buf = alloc::vec![0u8; UDP_RECV_BYTES];
             let mut seq = 0u64;
+            let mut stamp = ArrivalStamp::new(self.clock_sync.clone());
             macro_rules! finish {
                 () => {{
                     let _ = send_signal(&mut ws, &SignalRequest::Leave).await;
@@ -368,7 +381,7 @@ impl MultiOutputSource for LiveKitSrc {
                 media_receiver.request_keyframe_if_due(&mut rtc);
 
                 for (port, unit) in frames {
-                    let frame = unit.into_frame(seq);
+                    let frame = unit.into_frame(&mut stamp, seq);
                     out.push_to(port, PipelinePacket::DataFrame(frame)).await?;
                     seq += 1;
                     if seq >= self.frame_limit {

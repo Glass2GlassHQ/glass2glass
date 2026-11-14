@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2311: WebRTC receivers stamp frames with the local arrival time and report themselves live.
 - M2305: `remotewtsink` / `remotewtsrc` carry raw QUIC on `quic://` beside WebTransport, and `mode` swaps which side listens.
 - M2304: `g2g-desktop host` runs on Windows, capturing with `d3d11screencapturesrc`, encoding with `mfencode` and injecting input through `SendInput`.
 - M2303: `d3d11screencapturesrc` captures a Windows monitor through DXGI Desktop Duplication.

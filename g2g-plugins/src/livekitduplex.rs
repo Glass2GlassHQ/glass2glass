@@ -41,8 +41,10 @@ use str0m::crypto::from_feature_flags;
 use str0m::media::{Direction, MediaKind, Mid, Pt};
 use str0m::{Event, IceConnectionState, Input, Output, RtcConfig};
 
+use g2g_core::clock::ClockSync;
 use g2g_core::fanout::{DuplexInbound, MultiDuplexSession};
 use g2g_core::log::{short_type_name, LogName, LogSource};
+use g2g_core::query::LatencyReport;
 use g2g_core::{
     Caps, CapsConstraint, CapsSet, ConfigureOutcome, G2gError, HardwareError, MultiOutputSink,
     PipelinePacket, PropError, PropKind, PropValue, PropertySpec, ReverseChannel,
@@ -61,7 +63,7 @@ use crate::webrtc_codec::{
     set_video_codec_property, sink_caps_alternatives, stamp_capture_time, Track, WebRtcVideoCodec,
     VIDEO_CODEC_PROP,
 };
-use crate::webrtc_receive::{MediaReceiver, ReceivedUnit, UDP_RECV_BYTES};
+use crate::webrtc_receive::{ArrivalStamp, MediaReceiver, ReceivedUnit, UDP_RECV_BYTES};
 use crate::webrtc_util::{
     accept_answer_sdp, connect_failed, feed_datagram, get_linger_ms_property, send_transmit,
     set_linger_ms_property, DEFAULT_LINGER_MS, LINGER_MS_PROP,
@@ -117,6 +119,7 @@ pub struct LiveKitDuplex {
     linger: Duration,
     ice: IceSettings,
     log_name: LogName,
+    clock_sync: Option<ClockSync>,
 }
 
 impl LogSource for LiveKitDuplex {
@@ -151,6 +154,7 @@ impl LiveKitDuplex {
         identity: impl Into<String>,
     ) -> Self {
         Self {
+            clock_sync: None,
             room_settings: RoomSettings::new(url, room, identity),
             inputs: alloc::vec![None; 2],
             video_codec: WebRtcVideoCodec::default(),
@@ -302,6 +306,14 @@ impl MultiDuplexSession for LiveKitDuplex {
         }
     }
 
+    fn latency(&self) -> LatencyReport {
+        LatencyReport::live(0, None)
+    }
+
+    fn set_clock_sync(&mut self, sync: ClockSync) {
+        self.clock_sync = Some(sync);
+    }
+
     fn run<'a>(
         &'a mut self,
         inbound: &'a mut dyn DuplexInbound,
@@ -448,6 +460,7 @@ impl MultiDuplexSession for LiveKitDuplex {
             let mut buf = alloc::vec![0u8; UDP_RECV_BYTES];
             let mut sub_buf = alloc::vec![0u8; UDP_RECV_BYTES];
             let mut received = 0u64;
+            let mut stamp = ArrivalStamp::new(self.clock_sync.clone());
             macro_rules! finish {
                 () => {{
                     let _ = send_signal(&mut ws, &SignalRequest::Leave).await;
@@ -521,7 +534,7 @@ impl MultiDuplexSession for LiveKitDuplex {
                 media_receiver.request_keyframe_if_due(&mut sub_rtc);
 
                 for (port, unit) in frames {
-                    let frame = unit.into_frame(received);
+                    let frame = unit.into_frame(&mut stamp, received);
                     out.push_to(port, PipelinePacket::DataFrame(frame)).await?;
                     received += 1;
                     if received >= self.frame_limit {

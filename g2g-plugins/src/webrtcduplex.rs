@@ -65,9 +65,9 @@ use str0m::crypto::from_feature_flags;
 use str0m::media::{Direction, MediaKind, Mid, Pt};
 use str0m::{Event, IceConnectionState, Input, Output, RtcConfig};
 
-use g2g_core::frame::Frame;
+use g2g_core::clock::ClockSync;
 use g2g_core::g2g_warn;
-use g2g_core::memory::SystemSlice;
+use g2g_core::query::LatencyReport;
 use g2g_core::{
     Caps, CapsConstraint, ConfigureOutcome, DuplexInbound, G2gError, HardwareError, MemoryDomain,
     MultiDuplexSession, MultiOutputSink, NetworkFailure, PipelinePacket, PropError, PropKind,
@@ -80,12 +80,12 @@ use crate::webrtc_codec::{
     enable_tracks, get_video_codec_property, opus_caps, set_video_codec_property, Track,
     WebRtcVideoCodec, VIDEO_CODEC_PROP,
 };
-use crate::webrtc_receive::{KeyframeGate, UDP_RECV_BYTES};
+use crate::webrtc_receive::{ArrivalStamp, KeyframeGate, UDP_RECV_BYTES};
 use crate::webrtc_util::{
     accept_answer_sdp, accept_offer_sdp, add_ice_candidates, connect_failed, feed_datagram,
-    get_linger_ms_property, media_time_ns, non_empty, select_host_ip, send_transmit,
-    set_linger_ms_property, DEFAULT_LINGER_MS, LINGER_MS_PROP, STUN_SERVER_PROP, TURN_PASS_PROP,
-    TURN_SERVER_PROP, TURN_USER_PROP,
+    get_linger_ms_property, non_empty, select_host_ip, send_transmit, set_linger_ms_property,
+    DEFAULT_LINGER_MS, LINGER_MS_PROP, STUN_SERVER_PROP, TURN_PASS_PROP, TURN_SERVER_PROP,
+    TURN_USER_PROP,
 };
 use crate::webrtcdata::{flush_channel_message, ChannelSettings, CHANNEL_RETRY_INTERVAL};
 
@@ -278,6 +278,7 @@ pub struct WebRtcDuplexSession {
     control: DuplexControl,
     data_channel: Option<DataChannelLane>,
     media_direction: Direction,
+    clock_sync: Option<ClockSync>,
 }
 
 #[derive(Debug)]
@@ -333,6 +334,7 @@ impl WebRtcDuplexSession {
             control: DuplexControl::default(),
             data_channel: None,
             media_direction: Direction::SendRecv,
+            clock_sync: None,
         }
     }
 
@@ -519,6 +521,14 @@ impl WebRtcDuplexSession {
 
 impl MultiDuplexSession for WebRtcDuplexSession {
     type RunFuture<'a> = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>;
+
+    fn latency(&self) -> LatencyReport {
+        LatencyReport::live(0, None)
+    }
+
+    fn set_clock_sync(&mut self, sync: ClockSync) {
+        self.clock_sync = Some(sync);
+    }
 
     fn input_count(&self) -> usize {
         if !self.media_direction.is_sending() {
@@ -749,6 +759,7 @@ impl MultiDuplexSession for WebRtcDuplexSession {
 
             let mut buf = alloc::vec![0u8; UDP_RECV_BYTES];
             let mut seq = 0u64;
+            let mut stamp = ArrivalStamp::new(self.clock_sync.clone());
             let mut received = 0u64;
             // receive-only sessions have no send sources
             let mut send_done = !media_direction.is_sending();
@@ -819,7 +830,7 @@ impl MultiDuplexSession for WebRtcDuplexSession {
                 }
 
                 // (output port, pts_ns, data) collected while draining poll_output.
-                let mut frames: Vec<(usize, u64, Vec<u8>)> = Vec::new();
+                let mut frames: Vec<(usize, Vec<u8>)> = Vec::new();
                 let deadline = loop {
                     match rtc.poll_output() {
                         // after a DTLS close_notify str0m returns a timeout that never fires
@@ -888,7 +899,6 @@ impl MultiDuplexSession for WebRtcDuplexSession {
                             }
                         }
                         Ok(Output::Event(Event::MediaData(d))) => {
-                            let pts_ns = media_time_ns(d.time);
                             // Unknown mid, or an m-line with no output pad: skip.
                             let Some(index) = binding_of_mid(&bindings, d.mid) else {
                                 continue;
@@ -902,7 +912,7 @@ impl MultiDuplexSession for WebRtcDuplexSession {
                             if is_video && !binding.gate.admit(binding.kind.is_keyframe(&unit)) {
                                 continue;
                             }
-                            frames.push((port, pts_ns, unit));
+                            frames.push((port, unit));
                         }
                         // Loss-recovery feedback counters (cumulative): nacks sent
                         // as a receiver (ingress) and nacks received as a sender
@@ -937,7 +947,7 @@ impl MultiDuplexSession for WebRtcDuplexSession {
                     }
                 };
 
-                for (port, pts_ns, data) in frames {
+                for (port, data) in frames {
                     // A pad bound mid-session announces its caps before its first
                     // frame (the active pads were announced at session start).
                     if !announced[port] {
@@ -946,22 +956,7 @@ impl MultiDuplexSession for WebRtcDuplexSession {
                         announced[port] = true;
                     }
                     let keyframe = pad_kinds[port].is_keyframe(&data);
-                    let frame = Frame {
-                        domain: MemoryDomain::System(SystemSlice::from_boxed(
-                            data.into_boxed_slice(),
-                        )),
-                        timing: g2g_core::FrameTiming {
-                            pts_ns,
-                            dts_ns: pts_ns,
-                            duration_ns: 0,
-                            capture_ns: pts_ns,
-                            arrival_ns: g2g_core::metrics::monotonic_ns(),
-                            keyframe,
-                            ..g2g_core::FrameTiming::default()
-                        },
-                        sequence: seq,
-                        meta: Default::default(),
-                    };
+                    let frame = stamp.frame(data, keyframe, seq, Default::default());
                     out.push_to(port, PipelinePacket::DataFrame(frame)).await?;
                     seq += 1;
                     received += 1;

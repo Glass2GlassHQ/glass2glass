@@ -349,6 +349,8 @@ pub trait MultiOutputSource: ElementBound {
         crate::query::LatencyReport::ZERO
     }
 
+    fn set_clock_sync(&mut self, _sync: crate::clock::ClockSync) {}
+
     // awaited before negotiation reads `output_caps`, for a source that learns them over the network
     fn resolve_output_caps<'a>(
         &'a mut self,
@@ -388,6 +390,7 @@ pub trait DynMultiOutputSource: ElementBound {
     fn latency(&self) -> crate::query::LatencyReport {
         crate::query::LatencyReport::ZERO
     }
+    fn set_clock_sync(&mut self, _sync: crate::clock::ClockSync) {}
     fn resolve_output_caps(&mut self) -> BoxFuture<'_, Result<(), G2gError>> {
         Box::pin(async { Ok(()) })
     }
@@ -427,6 +430,9 @@ impl<T: MultiOutputSource> DynMultiOutputSource for T {
     fn latency(&self) -> crate::query::LatencyReport {
         MultiOutputSource::latency(self)
     }
+    fn set_clock_sync(&mut self, sync: crate::clock::ClockSync) {
+        MultiOutputSource::set_clock_sync(self, sync)
+    }
     fn resolve_output_caps(&mut self) -> BoxFuture<'_, Result<(), G2gError>> {
         Box::pin(MultiOutputSource::resolve_output_caps(self))
     }
@@ -461,6 +467,9 @@ impl<'b> DynMultiOutputSource for &'b mut (dyn DynMultiOutputSource + 'b) {
     }
     fn latency(&self) -> crate::query::LatencyReport {
         (**self).latency()
+    }
+    fn set_clock_sync(&mut self, sync: crate::clock::ClockSync) {
+        (**self).set_clock_sync(sync)
     }
     fn resolve_output_caps(&mut self) -> BoxFuture<'_, Result<(), G2gError>> {
         (**self).resolve_output_caps()
@@ -573,6 +582,12 @@ pub trait MultiDuplexSession: ElementBound {
     fn get_property(&self, _name: &str) -> Option<PropValue> {
         None
     }
+
+    fn latency(&self) -> crate::query::LatencyReport {
+        crate::query::LatencyReport::ZERO
+    }
+
+    fn set_clock_sync(&mut self, _sync: crate::clock::ClockSync) {}
 }
 
 pub trait DynMultiDuplexSession: ElementBound {
@@ -597,6 +612,8 @@ pub trait DynMultiDuplexSession: ElementBound {
     fn properties(&self) -> &'static [PropertySpec];
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError>;
     fn get_property(&self, name: &str) -> Option<PropValue>;
+    fn latency(&self) -> crate::query::LatencyReport;
+    fn set_clock_sync(&mut self, sync: crate::clock::ClockSync);
 }
 
 impl<T: MultiDuplexSession> DynMultiDuplexSession for T {
@@ -637,6 +654,12 @@ impl<T: MultiDuplexSession> DynMultiDuplexSession for T {
     }
     fn get_property(&self, name: &str) -> Option<PropValue> {
         MultiDuplexSession::get_property(self, name)
+    }
+    fn latency(&self) -> crate::query::LatencyReport {
+        MultiDuplexSession::latency(self)
+    }
+    fn set_clock_sync(&mut self, sync: crate::clock::ClockSync) {
+        MultiDuplexSession::set_clock_sync(self, sync)
     }
 }
 
@@ -681,6 +704,12 @@ impl<'b> DynMultiDuplexSession for &'b mut (dyn DynMultiDuplexSession + 'b) {
     }
     fn get_property(&self, name: &str) -> Option<PropValue> {
         (**self).get_property(name)
+    }
+    fn latency(&self) -> crate::query::LatencyReport {
+        (**self).latency()
+    }
+    fn set_clock_sync(&mut self, sync: crate::clock::ClockSync) {
+        (**self).set_clock_sync(sync)
     }
 }
 

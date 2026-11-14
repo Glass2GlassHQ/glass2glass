@@ -108,52 +108,8 @@ impl ReconnectState {
 
 /// Gap inserted in the emitted timeline at a reconnect boundary, so downstream
 /// sees the discontinuity as a jump rather than as overlapping timestamps.
-#[cfg(any(feature = "rtsp", feature = "webrtc"))]
+#[cfg(feature = "rtsp")]
 pub(crate) const RECONNECT_PTS_GAP_NS: u64 = 1_000_000_000;
-
-// the first session keeps its own timestamps, each later one starts a gap past the latest emitted
-#[cfg(feature = "webrtc")]
-#[derive(Debug, Default)]
-pub(crate) struct ReconnectTimeline {
-    latest_ns: Option<u64>,
-    session_origin: Option<SessionOrigin>,
-}
-
-// a session's first timestamp, as received and as emitted
-#[cfg(feature = "webrtc")]
-#[derive(Debug, Clone, Copy)]
-struct SessionOrigin {
-    received_ns: u64,
-    emitted_ns: u64,
-}
-
-#[cfg(feature = "webrtc")]
-impl ReconnectTimeline {
-    pub(crate) fn pts_ns(&mut self, received_ns: u64) -> u64 {
-        let latest_ns = self.latest_ns;
-        let origin = *self.session_origin.get_or_insert_with(|| SessionOrigin {
-            received_ns,
-            emitted_ns: latest_ns.map_or(received_ns, |latest| {
-                latest.saturating_add(RECONNECT_PTS_GAP_NS)
-            }),
-        });
-        let pts_ns = if received_ns >= origin.received_ns {
-            origin
-                .emitted_ns
-                .saturating_add(received_ns - origin.received_ns)
-        } else {
-            origin
-                .emitted_ns
-                .saturating_sub(origin.received_ns - received_ns)
-        };
-        self.latest_ns = Some(latest_ns.map_or(pts_ns, |latest| latest.max(pts_ns)));
-        pts_ns
-    }
-
-    pub(crate) fn next_session(&mut self) {
-        self.session_origin = None;
-    }
-}
 
 // the `reconnect` of a source, whose budget starts again once a new session carries media
 #[cfg(any(feature = "rtsp", feature = "webrtc"))]
@@ -187,11 +143,10 @@ pub(crate) const RECONNECT_BACKOFF_MAX_PROP: PropertySpec = PropertySpec::new(
 )
 .with_default("5000");
 
-#[cfg(all(test, any(feature = "rtsp", feature = "webrtc")))]
+#[cfg(all(test, feature = "rtsp"))]
 mod tests {
     use super::*;
 
-    #[cfg(feature = "rtsp")]
     #[test]
     fn each_recovered_loss_gets_the_whole_reconnect_budget() {
         let policy = ReconnectPolicy {
@@ -215,43 +170,5 @@ mod tests {
             None,
             "within one loss the budget holds"
         );
-    }
-
-    #[cfg(feature = "webrtc")]
-    #[test]
-    fn a_session_after_a_reconnect_starts_a_gap_past_the_latest_timestamp() {
-        const FRAME_NS: u64 = 33_333_333;
-        const FIRST_SESSION_START_NS: u64 = 7_000_000_000_000;
-        const SECOND_SESSION_START_NS: u64 = 500_000_000;
-        let mut timeline = ReconnectTimeline::default();
-        let first =
-            [0, 1, 2].map(|frame| timeline.pts_ns(FIRST_SESSION_START_NS + frame * FRAME_NS));
-        timeline.next_session();
-        let second = timeline.pts_ns(SECOND_SESSION_START_NS);
-        let after = timeline.pts_ns(SECOND_SESSION_START_NS + FRAME_NS);
-
-        assert_eq!(
-            first,
-            [
-                FIRST_SESSION_START_NS,
-                FIRST_SESSION_START_NS + FRAME_NS,
-                FIRST_SESSION_START_NS + 2 * FRAME_NS
-            ],
-            "the first session keeps the timestamps it received"
-        );
-        assert_eq!(second, first[2] + RECONNECT_PTS_GAP_NS);
-        assert_eq!(after, second + FRAME_NS);
-    }
-
-    #[cfg(feature = "webrtc")]
-    #[test]
-    fn a_session_that_emitted_nothing_does_not_move_the_timeline() {
-        const START_NS: u64 = 1_000_000_000;
-        let mut timeline = ReconnectTimeline::default();
-        let first = timeline.pts_ns(START_NS);
-        timeline.next_session();
-        timeline.next_session();
-
-        assert_eq!(timeline.pts_ns(START_NS), first + RECONNECT_PTS_GAP_NS);
     }
 }

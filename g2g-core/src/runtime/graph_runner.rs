@@ -1965,14 +1965,20 @@ async fn prepare_graph<'a>(
         };
         pipeline_clock_sync(sink_clock, base_time_ns, state.as_ref(), latency)
     });
-    // A live capture source stamps running time off the same sync, or off a
-    // fallback clock when none was elected.
+    // A live capture source or network session stamps running time off the
+    // same sync, or off a fallback clock when none was elected.
     let source_clock_sync = sink_clock_sync
         .clone()
         .unwrap_or_else(|| fallback_source_sync(state.as_ref(), latency));
     for &node in topo {
         match (vg.element_mut(node), &sink_clock_sync) {
             (Some(GraphNodeRef::Source(src)), _) => src.set_clock_sync(source_clock_sync.clone()),
+            (Some(GraphNodeRef::FanoutSource(src)), _) => {
+                src.set_clock_sync(source_clock_sync.clone())
+            }
+            (Some(GraphNodeRef::Duplex(session)), _) => {
+                session.set_clock_sync(source_clock_sync.clone())
+            }
             (Some(GraphNodeRef::Element(elem)), Some(sync)) => elem.set_clock_sync(sync.clone()),
             _ => {}
         }
@@ -4367,6 +4373,7 @@ fn element_latency(vg: &ValidatedGraph<GraphNodeRef<'_>>, node: NodeId) -> Optio
         Some(GraphNodeRef::Element(elem)) => Some(elem.latency()),
         Some(GraphNodeRef::Muxer(mux)) => Some(mux.latency()),
         Some(GraphNodeRef::Demux(demux)) => Some(demux.latency()),
+        Some(GraphNodeRef::Duplex(session)) => Some(session.latency()),
         _ => None,
     }
 }

@@ -44,6 +44,7 @@ use str0m::crypto::from_feature_flags;
 use str0m::media::Direction;
 use str0m::{Event, IceConnectionState, Input, Output, Rtc, RtcConfig};
 
+use g2g_core::clock::ClockSync;
 use g2g_core::log::{short_type_name, LogName, LogSource};
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
@@ -54,16 +55,15 @@ use g2g_core::{
 
 use crate::filesink::io_err;
 use crate::reconnect::{
-    ReconnectPolicy, ReconnectState, ReconnectTimeline, DEFAULT_INITIAL_BACKOFF_MS,
-    DEFAULT_MAX_BACKOFF_MS, RECONNECT_BACKOFF_MAX_PROP, RECONNECT_BACKOFF_PROP,
-    SOURCE_RECONNECT_PROP,
+    ReconnectPolicy, ReconnectState, DEFAULT_INITIAL_BACKOFF_MS, DEFAULT_MAX_BACKOFF_MS,
+    RECONNECT_BACKOFF_MAX_PROP, RECONNECT_BACKOFF_PROP, SOURCE_RECONNECT_PROP,
 };
 use crate::turn::{self, TurnSet};
 use crate::webrtc_codec::{
     enable_tracks, get_video_codec_property, opus_caps, set_video_codec_property, Track,
     WebRtcVideoCodec, VIDEO_CODEC_PROP,
 };
-use crate::webrtc_receive::{MediaReceiver, ReceivedUnit, UDP_RECV_BYTES};
+use crate::webrtc_receive::{ArrivalStamp, MediaReceiver, ReceivedUnit, UDP_RECV_BYTES};
 use crate::webrtc_stats::{WebRtcStatsHandle, STATS_INTERVAL};
 use crate::webrtc_util::{
     add_host_candidate, delete_resource, feed_datagram, ice_restart, negotiate_over_http,
@@ -116,6 +116,7 @@ pub struct WebRtcWhepSrc {
     configured: bool,
     stats: WebRtcStatsHandle,
     log_name: LogName,
+    clock_sync: Option<ClockSync>,
 }
 
 impl core::fmt::Debug for WebRtcWhepSrc {
@@ -132,6 +133,7 @@ impl WebRtcWhepSrc {
     /// `http://localhost:8889/mystream/whep` on a mediamtx server).
     pub fn new(whep_url: impl Into<String>) -> Self {
         Self {
+            clock_sync: None,
             whep_url: whep_url.into(),
             bearer: None,
             stun_server: None,
@@ -270,6 +272,10 @@ impl SourceLoop for WebRtcWhepSrc {
         LatencyReport::live(0, None)
     }
 
+    fn set_clock_sync(&mut self, sync: ClockSync) {
+        self.clock_sync = Some(sync);
+    }
+
     fn properties(&self) -> &'static [PropertySpec] {
         WEBRTCSRC_PROPS
     }
@@ -378,14 +384,13 @@ impl SourceLoop for WebRtcWhepSrc {
 
             let mut buf = alloc::vec![0u8; UDP_RECV_BYTES];
             let mut seq = 0u64;
-            let mut timeline = ReconnectTimeline::default();
+            let mut stamp = ArrivalStamp::new(self.clock_sync.clone());
             loop {
                 let loss = match self.receive(&mut session, &mut buf).await {
                     Ok(units) => {
                         retry.recovered(&self.reconnect);
-                        for mut unit in units {
-                            unit.pts_ns = timeline.pts_ns(unit.pts_ns);
-                            out.push(PipelinePacket::DataFrame(unit.into_frame(seq)))
+                        for unit in units {
+                            out.push(PipelinePacket::DataFrame(unit.into_frame(&mut stamp, seq)))
                                 .await?;
                             seq += 1;
                             if seq >= self.frame_limit {
@@ -406,7 +411,6 @@ impl SourceLoop for WebRtcWhepSrc {
                 }
                 // the flush resets the decoder, the next session starts at a keyframe
                 out.push(PipelinePacket::Flush).await?;
-                timeline.next_session();
                 session = self.resubscribe(&mut retry, loss).await?;
             }
         })

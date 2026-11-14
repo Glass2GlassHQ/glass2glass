@@ -48,7 +48,9 @@ use str0m::crypto::from_feature_flags;
 use str0m::media::MediaKind;
 use str0m::{Candidate, Event, IceConnectionState, IceCreds, Input, Output, Rtc, RtcConfig};
 
+use g2g_core::clock::ClockSync;
 use g2g_core::log::{short_type_name, LogName, LogSource, Target};
+use g2g_core::query::LatencyReport;
 use g2g_core::{
     g2g_debug, g2g_info, g2g_warn, Caps, G2gError, HardwareError, MultiOutputSink,
     MultiOutputSource, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
@@ -61,7 +63,7 @@ use crate::webrtc_codec::{
     enable_tracks, get_video_codec_property, opus_caps, set_video_codec_property, Track,
     WebRtcVideoCodec, VIDEO_CODEC_PROP,
 };
-use crate::webrtc_receive::{MediaReceiver, ReceivedUnit, UDP_RECV_BYTES};
+use crate::webrtc_receive::{ArrivalStamp, MediaReceiver, ReceivedUnit, UDP_RECV_BYTES};
 use crate::webrtc_stats::{WebRtcStatsHandle, STATS_INTERVAL};
 use crate::webrtc_util::{
     add_ice_candidates, feed_datagram, parse_restart_answer_frag, random_hex_id, select_host_ip,
@@ -123,6 +125,7 @@ pub struct WhipServerSrc {
     /// One per publisher slot.
     stats: Vec<WebRtcStatsHandle>,
     log_name: LogName,
+    clock_sync: Option<ClockSync>,
 }
 
 impl core::fmt::Debug for WhipServerSrc {
@@ -138,6 +141,7 @@ impl WhipServerSrc {
     /// Serve WHIP on the host and port of `host_addr` (an `http://` URL).
     pub fn new(host_addr: impl Into<String>) -> Self {
         Self {
+            clock_sync: None,
             host_addr: host_addr.into(),
             bearer: None,
             stun_server: None,
@@ -462,6 +466,14 @@ impl MultiOutputSource for WhipServerSrc {
         }
     }
 
+    fn latency(&self) -> LatencyReport {
+        LatencyReport::live(0, None)
+    }
+
+    fn set_clock_sync(&mut self, sync: ClockSync) {
+        self.clock_sync = Some(sync);
+    }
+
     fn run<'a>(&'a mut self, out: &'a mut dyn MultiOutputSink) -> Self::RunFuture<'a> {
         Box::pin(async move {
             let output_count = self.output_count();
@@ -510,6 +522,7 @@ impl MultiOutputSource for WhipServerSrc {
             let (datagram_tx, mut datagrams) = mpsc::channel(DATAGRAM_QUEUE_DEPTH);
             let mut turn = TurnSet::empty();
             let mut seq = 0u64;
+            let mut stamp = ArrivalStamp::new(self.clock_sync.clone());
             macro_rules! finish {
                 () => {{
                     for port in 0..output_count {
@@ -642,7 +655,7 @@ impl MultiOutputSource for WhipServerSrc {
                 }
 
                 for (port, unit) in frames {
-                    let frame = unit.into_frame(seq);
+                    let frame = unit.into_frame(&mut stamp, seq);
                     out.push_to(port, PipelinePacket::DataFrame(frame)).await?;
                     seq += 1;
                     if seq >= self.frame_limit {

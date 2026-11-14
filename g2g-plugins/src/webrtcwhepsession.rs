@@ -37,11 +37,11 @@ use str0m::crypto::from_feature_flags;
 use str0m::media::{Direction, MediaData};
 use str0m::{Event, IceConnectionState, Input, Output, RtcConfig};
 
-use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
+use g2g_core::clock::ClockSync;
+use g2g_core::query::LatencyReport;
 use g2g_core::{
-    Caps, FrameTiming, G2gError, HardwareError, MemoryDomain, MultiOutputSink, MultiOutputSource,
-    PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
+    Caps, G2gError, HardwareError, MultiOutputSink, MultiOutputSource, PipelinePacket, PropError,
+    PropKind, PropValue, PropertySpec,
 };
 
 use crate::filesink::io_err;
@@ -50,13 +50,14 @@ use crate::webrtc_codec::{
     enable_tracks, get_video_codec_property, opus_caps, set_video_codec_property, Track,
     WebRtcVideoCodec, VIDEO_CODEC_PROP,
 };
-use crate::webrtc_receive::{capture_time_meta, media_capture_unix_ns, UDP_RECV_BYTES};
+use crate::webrtc_receive::{
+    capture_time_meta, media_capture_unix_ns, ArrivalStamp, UDP_RECV_BYTES,
+};
 use crate::webrtc_stats::{WebRtcStatsHandle, STATS_INTERVAL};
 use crate::webrtc_util::{
-    add_host_candidate, delete_resource, feed_datagram, ice_restart, media_time_ns,
-    negotiate_over_http, select_host_ip, send_transmit, trickle_candidates, TricklePatch,
-    TurnConfig, ICE_RESTART_TIMEOUT, STUN_SERVER_PROP, TURN_PASS_PROP, TURN_SERVER_PROP,
-    TURN_USER_PROP,
+    add_host_candidate, delete_resource, feed_datagram, ice_restart, negotiate_over_http,
+    select_host_ip, send_transmit, trickle_candidates, TricklePatch, TurnConfig,
+    ICE_RESTART_TIMEOUT, STUN_SERVER_PROP, TURN_PASS_PROP, TURN_SERVER_PROP, TURN_USER_PROP,
 };
 
 /// Output port for the video track.
@@ -88,6 +89,7 @@ pub struct WebRtcWhepSessionSrc {
     /// (`u64::MAX` = unbounded). For tests / bounded runs.
     frame_limit: u64,
     stats: WebRtcStatsHandle,
+    clock_sync: Option<ClockSync>,
 }
 
 impl core::fmt::Debug for WebRtcWhepSessionSrc {
@@ -112,6 +114,7 @@ impl WebRtcWhepSessionSrc {
             video_codec: WebRtcVideoCodec::default(),
             frame_limit: u64::MAX,
             stats: WebRtcStatsHandle::default(),
+            clock_sync: None,
         }
     }
 
@@ -243,6 +246,14 @@ impl MultiOutputSource for WebRtcWhepSessionSrc {
         }
     }
 
+    fn latency(&self) -> LatencyReport {
+        LatencyReport::live(0, None)
+    }
+
+    fn set_clock_sync(&mut self, sync: ClockSync) {
+        self.clock_sync = Some(sync);
+    }
+
     fn run<'a>(&'a mut self, out: &'a mut dyn MultiOutputSink) -> Self::RunFuture<'a> {
         Box::pin(async move {
             if crate::numbuffers::finished_at_zero_limit_multi(
@@ -332,6 +343,7 @@ impl MultiOutputSource for WebRtcWhepSessionSrc {
 
             let mut buf = alloc::vec![0u8; UDP_RECV_BYTES];
             let mut seq = 0u64;
+            let mut stamp = ArrivalStamp::new(self.clock_sync.clone());
             // Emit EOS to both outputs, DELETE the WHEP resource (RFC 9725
             // teardown), and finish.
             macro_rules! finish {
@@ -397,29 +409,14 @@ impl MultiOutputSource for WebRtcWhepSessionSrc {
                 }
 
                 for (port, media) in frames {
-                    let pts_ns = media_time_ns(media.time);
                     let data = if port == VIDEO_PORT {
                         video_codec.pipeline_unit(&media.data)
                     } else {
                         media.data.to_vec()
                     };
                     let keyframe = port == VIDEO_PORT && video_codec.is_keyframe(&data);
-                    let frame = Frame {
-                        domain: MemoryDomain::System(SystemSlice::from_boxed(
-                            data.into_boxed_slice(),
-                        )),
-                        timing: FrameTiming {
-                            pts_ns,
-                            dts_ns: pts_ns,
-                            duration_ns: 0,
-                            capture_ns: pts_ns,
-                            arrival_ns: g2g_core::metrics::monotonic_ns(),
-                            keyframe,
-                            ..FrameTiming::default()
-                        },
-                        sequence: seq,
-                        meta: capture_time_meta(media_capture_unix_ns(&media)),
-                    };
+                    let meta = capture_time_meta(media_capture_unix_ns(&media));
+                    let frame = stamp.frame(data, keyframe, seq, meta);
                     out.push_to(port, PipelinePacket::DataFrame(frame)).await?;
                     seq += 1;
                     if seq >= self.frame_limit {

@@ -18,14 +18,17 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{run_duplex_session, DynSourceLoop, SourceLoop};
 use g2g_core::{
-    Caps, ConfigureOutcome, FrameTiming, G2gError, MemoryDomain, OutputSink, PipelinePacket,
-    PushOutcome, Reconfigure,
+    Caps, ConfigureOutcome, FrameTiming, G2gError, MemoryDomain, OutputSink, PipelineClock,
+    PipelinePacket, PushOutcome, Reconfigure,
 };
+use g2g_plugins::clock::WallClock;
 use g2g_plugins::webrtc_codec::WebRtcVideoCodec;
 use g2g_plugins::webrtcduplex::{SdpChannel, SignalRole, WebRtcDuplexSession};
 use tokio::sync::mpsc;
 
-use webrtc_duplex_common::{run_peer, Received, RecordingSink, ZeroClock, FRAME_INTERVAL};
+use webrtc_duplex_common::{
+    run_peer, PacedSrc, Received, RecordingSink, ZeroClock, FRAME_INTERVAL,
+};
 use webrtc_streams_common::{fixed_caps, synthetic_stream, GOP};
 
 const FRAMES: usize = 60;
@@ -91,6 +94,78 @@ async fn receive_only_client_gets_host_video_with_no_send_source() {
         "client: {received} of {FRAMES} video units arrived"
     );
     assert_eq!(host_video.lock().unwrap().units.len(), 0);
+}
+
+// a sender timeline an hour ahead of the receiver's, as a peer that has been up longer has
+const SENDER_FIRST_PTS: Duration = Duration::from_secs(3600);
+
+#[tokio::test]
+async fn received_frames_are_stamped_on_the_receiver_clock() {
+    let codec = WebRtcVideoCodec::default();
+    let units = Arc::new(synthetic_stream(codec, FRAMES));
+    let (client_offer_tx, mut client_offer_rx) = mpsc::channel(SIGNALING_DEPTH);
+    let (host_offer_tx, host_offer_rx) = mpsc::channel(SIGNALING_DEPTH);
+    let (host_answer_tx, client_answer_rx) = mpsc::channel(SIGNALING_DEPTH);
+    let mut client = WebRtcDuplexSession::new(
+        SignalRole::Offerer,
+        SdpChannel::from_halves(client_offer_tx, client_answer_rx),
+        1,
+    )
+    .with_receive_only();
+    let mut host = WebRtcDuplexSession::new(
+        SignalRole::Answerer,
+        SdpChannel::from_halves(host_answer_tx, host_offer_rx),
+        1,
+    );
+
+    let client_video = Arc::new(Mutex::new(Received::default()));
+    let mut client_sink = RecordingSink {
+        received: client_video.clone(),
+    };
+    let mut host_src = PacedSrc {
+        codec,
+        units,
+        first_pts_ns: SENDER_FIRST_PTS.as_nanos() as u64,
+    };
+    let mut host_sink = RecordingSink {
+        received: Arc::new(Mutex::new(Received::default())),
+    };
+    let client_clock = WallClock::new();
+    let relay_offer = async {
+        let offer: String = client_offer_rx.recv().await.expect("client offer");
+        host_offer_tx.send(offer).await.expect("host reads");
+    };
+    let run_client = async {
+        let sources: Vec<&mut dyn DynSourceLoop> = Vec::new();
+        let sinks: Vec<&mut dyn DynAsyncElement> = vec![&mut client_sink];
+        run_duplex_session(sources, &mut client, sinks, &client_clock, LINK_CAPACITY).await
+    };
+    let run_host = async {
+        let sources: Vec<&mut dyn DynSourceLoop> = vec![&mut host_src];
+        let sinks: Vec<&mut dyn DynAsyncElement> = vec![&mut host_sink];
+        run_duplex_session(sources, &mut host, sinks, &ZeroClock, LINK_CAPACITY).await
+    };
+    let ((), client_result, host_result) = tokio::time::timeout(RUN_TIMEOUT, async {
+        tokio::join!(relay_offer, run_client, run_host)
+    })
+    .await
+    .expect("client ends on the host's close, before an ICE timeout");
+    client_result.expect("client session");
+    host_result.expect("host session");
+
+    let pts_ns = client_video.lock().unwrap().pts_ns.clone();
+    assert!(
+        pts_ns.len() >= MIN_RECEIVED,
+        "{} frames arrived",
+        pts_ns.len()
+    );
+    let run_ns = client_clock.now_ns();
+    assert!(
+        pts_ns.iter().all(|&pts| pts <= run_ns),
+        "received PTS {:?} is past the receiver's running time {run_ns}",
+        pts_ns.iter().max()
+    );
+    assert!(pts_ns.windows(2).all(|pair| pair[0] <= pair[1]));
 }
 
 // sends one keyframe at the start, then a keyframe only when one is requested

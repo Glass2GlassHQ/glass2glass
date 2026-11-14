@@ -282,9 +282,15 @@ once. str0m takes about 22 s to call a silent peer disconnected, so that is the
 floor on detecting a server that died without one.
 
 `whepsrc` with `reconnect` set POSTs a new offer after it loses its session the
-same way, and flushes downstream first. The new session's frames continue one
-second past the last timestamp of the old one (`ReconnectTimeline`), and its
-retry budget starts again once a session carries media, like `rtspsrc`.
+same way, and flushes downstream first. Its retry budget starts again once a
+session carries media, like `rtspsrc`.
+
+Every WebRTC receiver (`whepsrc`, the WHEP session, `janusvrsrc`,
+`kvswebrtcsrc`, the LiveKit elements, `whipserversrc` and the duplex session)
+stamps a frame with the local running time at its arrival (`ArrivalStamp`), not
+the sender's RTP time, and reports itself live with zero latency. A sink
+presents each frame as it arrives, and a reconnected session's frames continue
+on the same local timeline.
 
 After a close_notify str0m runs no more timers, so every str0m poll loop checks
 `Rtc::is_alive` when it reaches a timeout and ends that session the way it ends

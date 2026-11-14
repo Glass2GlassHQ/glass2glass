@@ -10,12 +10,12 @@ use std::time::Instant;
 use str0m::media::{KeyframeRequestKind, MediaAdded, MediaData, MediaKind, Mid};
 use str0m::Rtc;
 
+use g2g_core::clock::{CaptureAnchor, ClockSync};
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{FrameMetaSet, FrameTiming, MemoryDomain};
 
 use crate::webrtc_codec::{capture_unix_ns, WebRtcVideoCodec};
-use crate::webrtc_util::media_time_ns;
 
 pub(crate) const PLI_INTERVAL: Duration = Duration::from_secs(1);
 pub(crate) const UDP_RECV_BYTES: usize = 2000;
@@ -70,7 +70,6 @@ pub(crate) struct MediaReceiver {
 #[derive(Debug)]
 pub(crate) struct ReceivedUnit {
     pub(crate) kind: MediaKind,
-    pub(crate) pts_ns: u64,
     pub(crate) capture_unix_ns: Option<i64>,
     pub(crate) data: Vec<u8>,
     // true on the unit that opened the keyframe gate (callers log it)
@@ -110,7 +109,6 @@ impl MediaReceiver {
     }
 
     pub(crate) fn media_data(&mut self, data: &MediaData) -> Option<ReceivedUnit> {
-        let pts_ns = media_time_ns(data.time);
         let capture_unix_ns = media_capture_unix_ns(data);
         if Some(data.mid) == self.video_mid {
             let first_keyframe = !self.video_gate.is_open();
@@ -123,7 +121,6 @@ impl MediaReceiver {
             let converted = self.video_codec.pipeline_unit(&data.data);
             return Some(ReceivedUnit {
                 kind: MediaKind::Video,
-                pts_ns,
                 capture_unix_ns,
                 keyframe: self.video_codec.is_keyframe(&converted),
                 data: converted,
@@ -133,7 +130,6 @@ impl MediaReceiver {
         if Some(data.mid) == self.audio_mid {
             return Some(ReceivedUnit {
                 kind: MediaKind::Audio,
-                pts_ns,
                 capture_unix_ns,
                 data: data.data.to_vec(),
                 first_keyframe: false,
@@ -152,20 +148,58 @@ impl MediaReceiver {
 }
 
 impl ReceivedUnit {
-    pub(crate) fn into_frame(self, sequence: u64) -> Frame {
+    pub(crate) fn into_frame(self, stamp: &mut ArrivalStamp, sequence: u64) -> Frame {
+        stamp.frame(
+            self.data,
+            self.keyframe,
+            sequence,
+            capture_time_meta(self.capture_unix_ns),
+        )
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct ArrivalStamp {
+    clock_sync: Option<ClockSync>,
+    anchor: CaptureAnchor,
+    first_arrival_ns: Option<u64>,
+}
+
+impl ArrivalStamp {
+    pub(crate) fn new(clock_sync: Option<ClockSync>) -> Self {
+        Self {
+            clock_sync,
+            anchor: CaptureAnchor::new(),
+            first_arrival_ns: None,
+        }
+    }
+
+    pub(crate) fn frame(
+        &mut self,
+        data: Vec<u8>,
+        keyframe: bool,
+        sequence: u64,
+        meta: FrameMetaSet,
+    ) -> Frame {
+        let arrival_ns = g2g_core::metrics::monotonic_ns();
+        let elapsed_ns = arrival_ns - *self.first_arrival_ns.get_or_insert(arrival_ns);
+        let pts_ns = match &self.clock_sync {
+            Some(sync) => self.anchor.stamp(sync, elapsed_ns, 0),
+            None => elapsed_ns,
+        };
         Frame {
-            domain: MemoryDomain::System(SystemSlice::from_boxed(self.data.into_boxed_slice())),
+            domain: MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
             timing: FrameTiming {
-                pts_ns: self.pts_ns,
-                dts_ns: self.pts_ns,
+                pts_ns,
+                dts_ns: pts_ns,
                 duration_ns: 0,
-                capture_ns: self.pts_ns,
-                arrival_ns: g2g_core::metrics::monotonic_ns(),
-                keyframe: self.keyframe,
+                capture_ns: pts_ns,
+                arrival_ns,
+                keyframe,
                 ..FrameTiming::default()
             },
             sequence,
-            meta: capture_time_meta(self.capture_unix_ns),
+            meta,
         }
     }
 }
