@@ -18,8 +18,6 @@ required-features = ["session"]
 session = [
     "dep:g2g-core",
     "g2g-plugins/webrtc",
-    "g2g-plugins/ffmpeg",
-    "g2g-plugins/portal",
     "g2g-plugins/d3d11-screen-capture",
     "g2g-plugins/mf-encode",
     "dep:windows",
@@ -40,6 +38,8 @@ tokio = { version = "1", features = ["sync"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 evdev = "0.13"
+# cargo merges this optional entry only on linux, once a g2g-plugins feature in session turns it on
+g2g-plugins = { workspace = true, optional = true, features = ["ffmpeg", "portal"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.62", optional = true, features = [
