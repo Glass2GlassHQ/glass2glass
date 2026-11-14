@@ -30,7 +30,7 @@ use serde_json::json;
 use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, oneshot};
 
-use str0m::bwe::{Bitrate, BweKind};
+use str0m::bwe::Bitrate;
 use str0m::crypto::from_feature_flags;
 use str0m::media::{Direction, Mid, Pt};
 use str0m::{Event, IceConnectionState, Input, Output, Rtc, RtcConfig};
@@ -55,8 +55,8 @@ use crate::webrtc_codec::{
 use crate::webrtc_receive::UDP_RECV_BYTES;
 use crate::webrtc_stats::{WebRtcStatsHandle, STATS_INTERVAL};
 use crate::webrtc_util::{
-    accept_answer_sdp, add_ice_candidates, connect_failed, drain_pacer, feed_datagram,
-    select_host_ip, send_transmit, wait_rtc_timeout, STUN_SERVER_PROP,
+    accept_answer_sdp, add_ice_candidates, connect_failed, drain_pacer, estimate_bps,
+    feed_datagram, select_host_ip, send_transmit, wait_rtc_timeout, STUN_SERVER_PROP,
 };
 use crate::webrtcsink::{MediaUnit, DEFAULT_QUEUE_DEPTH, INITIAL_BITRATE_BPS};
 
@@ -318,11 +318,7 @@ async fn run_session(mut a: SessionArgs) {
                     a.keyframe_requested.store(true, Ordering::Relaxed);
                 }
                 Ok(Output::Event(Event::EgressBitrateEstimate(kind))) => {
-                    let bps = match kind {
-                        BweKind::Twcc(b) | BweKind::Remb(_, b) => Some(b.as_u64()),
-                        // `BweKind` is non-exhaustive; ignore unknown future kinds.
-                        _ => None,
-                    };
+                    let bps = estimate_bps(&kind);
                     if let Some(bps) = bps {
                         a.bitrate_estimate.store(bps, Ordering::Relaxed);
                     }

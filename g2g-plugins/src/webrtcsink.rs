@@ -53,7 +53,7 @@ use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 
-use str0m::bwe::{Bitrate, BweKind};
+use str0m::bwe::Bitrate;
 use str0m::change::SdpPendingOffer;
 use str0m::crypto::from_feature_flags;
 use str0m::media::{Direction, Mid, Pt};
@@ -80,7 +80,7 @@ use crate::webrtc_codec::{
 use crate::webrtc_receive::UDP_RECV_BYTES;
 use crate::webrtc_stats::{WebRtcStatsHandle, STATS_INTERVAL};
 use crate::webrtc_util::{
-    add_host_candidate, drain_pacer, feed_datagram, ice_restart, negotiate_over_http,
+    add_host_candidate, drain_pacer, estimate_bps, feed_datagram, ice_restart, negotiate_over_http,
     select_host_ip, send_transmit, trickle_candidates, wait_rtc_timeout, ResourceHandle,
     TricklePatch, TurnConfig, ICE_RESTART_TIMEOUT, STUN_SERVER_PROP, TURN_PASS_PROP,
     TURN_SERVER_PROP, TURN_USER_PROP,
@@ -748,11 +748,7 @@ async fn run_session(
                 // Congestion-control estimate: stash the latest target bitrate
                 // (TWCC or REMB carry a `Bitrate`); `take_bitrate` relays changes.
                 Ok(Output::Event(Event::EgressBitrateEstimate(kind))) => {
-                    let bps = match kind {
-                        BweKind::Twcc(b) | BweKind::Remb(_, b) => Some(b.as_u64()),
-                        // `BweKind` is non-exhaustive; ignore unknown future kinds.
-                        _ => None,
-                    };
+                    let bps = estimate_bps(&kind);
                     if let Some(bps) = bps {
                         shared.bitrate_estimate.store(bps, Ordering::Relaxed);
                     }

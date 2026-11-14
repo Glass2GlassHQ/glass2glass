@@ -51,7 +51,7 @@ use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 
-use str0m::bwe::{Bitrate, BweKind};
+use str0m::bwe::Bitrate;
 use str0m::change::SdpPendingOffer;
 use str0m::crypto::from_feature_flags;
 use str0m::media::{Direction, MediaKind, Mid, Pt, Rid};
@@ -83,7 +83,7 @@ use crate::webrtc_simulcast::{
     rids_high_to_low, send_simulcast, KeyframeRoutes, LayerAllocator, SimulcastPads,
 };
 use crate::webrtc_util::{
-    accept_answer_sdp, connect_failed, feed_datagram, select_host_ip, send_transmit,
+    accept_answer_sdp, connect_failed, estimate_bps, feed_datagram, select_host_ip, send_transmit,
     wait_rtc_timeout,
 };
 
@@ -774,10 +774,7 @@ async fn run_session(mut a: SessionArgs) {
                     a.keyframe_routes.request_keyframe(req.mid, req.rid);
                 }
                 Ok(Output::Event(Event::EgressBitrateEstimate(kind))) => {
-                    let bps = match kind {
-                        BweKind::Twcc(b) | BweKind::Remb(_, b) => Some(b.as_u64()),
-                        _ => None,
-                    };
+                    let bps = estimate_bps(&kind);
                     match (bps, a.allocator.as_mut()) {
                         // Simulcast: budget the layer set, then hand each layer
                         // its share (0 = shed-layer idle) so every encoder in

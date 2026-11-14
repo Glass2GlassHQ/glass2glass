@@ -47,7 +47,7 @@ use str0m::{Event, IceConnectionState, Input, Output, Rtc, RtcConfig};
 
 use core::time::Duration;
 
-use str0m::bwe::{Bitrate, BweKind};
+use str0m::bwe::Bitrate;
 
 use g2g_core::{
     Caps, CapsConstraint, CapsSet, ConfigureOutcome, G2gError, HardwareError, MultiInputElement,
@@ -65,7 +65,7 @@ use crate::webrtc_simulcast::{
     rids_high_to_low, send_simulcast, KeyframeRoutes, LayerAllocator, SimulcastPads,
 };
 use crate::webrtc_util::{
-    add_host_candidate, drain_pacer, feed_datagram, ice_restart, negotiate_over_http,
+    add_host_candidate, drain_pacer, estimate_bps, feed_datagram, ice_restart, negotiate_over_http,
     select_host_ip, send_transmit, trickle_candidates, wait_rtc_timeout, ResourceHandle,
     TricklePatch, TurnConfig, ICE_RESTART_TIMEOUT, STUN_SERVER_PROP, TURN_PASS_PROP,
     TURN_SERVER_PROP, TURN_USER_PROP,
@@ -617,10 +617,7 @@ async fn run_session(mut a: SessionArgs) {
                 // simulcast layer set and hand each layer its share (0 = shed
                 // idle); a single stream gets the whole estimate.
                 Ok(Output::Event(Event::EgressBitrateEstimate(kind))) => {
-                    let bps = match kind {
-                        BweKind::Twcc(b) | BweKind::Remb(_, b) => Some(b.as_u64()),
-                        _ => None,
-                    };
+                    let bps = estimate_bps(&kind);
                     match (bps, a.allocator.as_mut()) {
                         (Some(bps), Some(alloc)) => {
                             last_estimate = Some(bps);

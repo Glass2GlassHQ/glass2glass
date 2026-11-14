@@ -65,8 +65,8 @@ use crate::webrtc_codec::{
 };
 use crate::webrtc_receive::{ArrivalStamp, MediaReceiver, ReceivedUnit, UDP_RECV_BYTES};
 use crate::webrtc_util::{
-    accept_answer_sdp, connect_failed, feed_datagram, get_linger_ms_property, send_transmit,
-    set_linger_ms_property, wait_rtc_timeout, DEFAULT_LINGER_MS, LINGER_MS_PROP,
+    accept_answer_sdp, connect_failed, estimate_bps, feed_datagram, get_linger_ms_property,
+    send_transmit, set_linger_ms_property, wait_rtc_timeout, DEFAULT_LINGER_MS, LINGER_MS_PROP,
 };
 
 /// Send input / recv output pad layout: 0 = video, 1 = audio.
@@ -487,11 +487,7 @@ impl MultiDuplexSession for LiveKitDuplex {
                             }
                         }
                         Ok(Output::Event(Event::EgressBitrateEstimate(kind))) => {
-                            use str0m::bwe::BweKind;
-                            let bps = match kind {
-                                BweKind::Twcc(b) | BweKind::Remb(_, b) => Some(b.as_u64()),
-                                _ => None,
-                            };
+                            let bps = estimate_bps(&kind);
                             if let Some(bps) = bps {
                                 self.reverse[VIDEO].set_bitrate(bps.min(u32::MAX as u64) as u32);
                             }

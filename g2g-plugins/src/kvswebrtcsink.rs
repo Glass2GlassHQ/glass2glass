@@ -19,7 +19,7 @@ use futures_util::{SinkExt, StreamExt};
 use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, oneshot};
 
-use str0m::bwe::{Bitrate, BweKind};
+use str0m::bwe::Bitrate;
 use str0m::crypto::from_feature_flags;
 use str0m::media::{MediaKind, Mid, Pt};
 use str0m::{Candidate, Event, IceConnectionState, Input, Output, Rtc, RtcConfig};
@@ -45,8 +45,8 @@ use crate::webrtc_codec::{
 use crate::webrtc_receive::UDP_RECV_BYTES;
 use crate::webrtc_stats::{WebRtcStatsHandle, STATS_INTERVAL};
 use crate::webrtc_util::{
-    accept_offer_sdp, connect_failed, drain_pacer, feed_datagram, select_host_ip, send_transmit,
-    wait_rtc_timeout, IceTransportPolicy, ICE_TRANSPORT_POLICY_PROP,
+    accept_offer_sdp, connect_failed, drain_pacer, estimate_bps, feed_datagram, select_host_ip,
+    send_transmit, wait_rtc_timeout, IceTransportPolicy, ICE_TRANSPORT_POLICY_PROP,
 };
 use crate::webrtcsink::{MediaUnit, DEFAULT_QUEUE_DEPTH, INITIAL_BITRATE_BPS};
 
@@ -495,11 +495,7 @@ async fn run_session(m: &mut Master, mut s: Session) -> SessionEnd {
                     m.keyframe_requested.store(true, Ordering::Relaxed);
                 }
                 Ok(Output::Event(Event::EgressBitrateEstimate(kind))) => {
-                    let bps = match kind {
-                        BweKind::Twcc(b) | BweKind::Remb(_, b) => Some(b.as_u64()),
-                        // `BweKind` is non-exhaustive
-                        _ => None,
-                    };
+                    let bps = estimate_bps(&kind);
                     if let Some(bps) = bps {
                         m.bitrate_estimate.store(bps, Ordering::Relaxed);
                     }

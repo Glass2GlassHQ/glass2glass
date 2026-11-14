@@ -338,7 +338,7 @@ fn subscriber_offer() -> (PublisherPeer, String) {
         .set_crypto_provider(Arc::new(from_feature_flags()))
         .clear_codecs()
         .enable_h264(true)
-        .enable_opus(true)
+        .enable_opus(true, false)
         .build(Instant::now());
     let mut api = rtc.sdp_api();
     let video_mid = api.add_media(MediaKind::Video, Direction::SendOnly, None, None, None);

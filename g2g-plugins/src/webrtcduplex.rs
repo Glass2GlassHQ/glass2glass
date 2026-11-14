@@ -58,7 +58,7 @@ use std::time::Instant;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 
-use str0m::bwe::{Bitrate, BweKind};
+use str0m::bwe::Bitrate;
 use str0m::change::SdpAnswer;
 use str0m::channel::ChannelId;
 use str0m::crypto::from_feature_flags;
@@ -82,10 +82,10 @@ use crate::webrtc_codec::{
 };
 use crate::webrtc_receive::{ArrivalStamp, KeyframeGate, UDP_RECV_BYTES};
 use crate::webrtc_util::{
-    accept_answer_sdp, accept_offer_sdp, add_ice_candidates, connect_failed, feed_datagram,
-    get_linger_ms_property, non_empty, select_host_ip, send_transmit, set_linger_ms_property,
-    wait_rtc_timeout, DEFAULT_LINGER_MS, LINGER_MS_PROP, STUN_SERVER_PROP, TURN_PASS_PROP,
-    TURN_SERVER_PROP, TURN_USER_PROP,
+    accept_answer_sdp, accept_offer_sdp, add_ice_candidates, connect_failed, estimate_bps,
+    feed_datagram, get_linger_ms_property, non_empty, select_host_ip, send_transmit,
+    set_linger_ms_property, wait_rtc_timeout, DEFAULT_LINGER_MS, LINGER_MS_PROP, STUN_SERVER_PROP,
+    TURN_PASS_PROP, TURN_SERVER_PROP, TURN_USER_PROP,
 };
 use crate::webrtcdata::{flush_channel_message, ChannelSettings, CHANNEL_RETRY_INTERVAL};
 
@@ -885,10 +885,7 @@ impl MultiDuplexSession for WebRtcDuplexSession {
                         // (Opus bitrate adaptation is a separate follow-up), as the
                         // fan-in session does.
                         Ok(Output::Event(Event::EgressBitrateEstimate(kind))) => {
-                            let bps = match kind {
-                                BweKind::Twcc(b) | BweKind::Remb(_, b) => Some(b.as_u64()),
-                                _ => None,
-                            };
+                            let bps = estimate_bps(&kind);
                             let rc = bindings
                                 .iter()
                                 .find(|b| b.kind.is_video())

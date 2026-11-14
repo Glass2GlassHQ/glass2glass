@@ -242,7 +242,7 @@ impl Track {
     fn enable(self, config: RtcConfig) -> RtcConfig {
         match self {
             Track::Video(codec) => codec.enable(config),
-            Track::Audio => config.enable_opus(true),
+            Track::Audio => config.enable_opus(true, false),
         }
     }
 

@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2314: str0m 0.25, so WebRTC receivers keep single-packet frames recovered by retransmission instead of dropping them.
 - M2313: WebRTC elements send str0m packets without waiting for a timer tick, which capped Windows senders at about 40 packets per second.
 - M2312: Mid-stream caps with a placeholder framerate forward it as unknown, so parsers keep the bitstream rate.
 - M2311: WebRTC receivers stamp frames with the local arrival time and report themselves live.

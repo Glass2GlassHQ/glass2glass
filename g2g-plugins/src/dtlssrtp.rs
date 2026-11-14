@@ -370,6 +370,9 @@ impl DtlsSrtpConnection {
         // DTLS 1.2 only: OpenSSL-backed peers may lack the 1.3 version negotiation.
         let mut dtls = Dtls::new_12(Arc::new(config), certificate, now);
         dtls.set_active(self.is_client);
+        // dimpl sets the handshake random on the first handle_timeout, and its server unwraps it
+        dtls.handle_timeout(now)
+            .map_err(|error| DtlsSrtpError::Dtls(error.to_string()))?;
         self.dtls = Some(dtls);
         self.state = DtlsSrtpState::Connecting;
         Ok(())

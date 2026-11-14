@@ -19,10 +19,12 @@
 
 #![cfg(all(target_os = "linux", feature = "webrtc"))]
 
+mod webrtc_duplex_common;
 mod webrtc_streams_common;
 
 use g2g_plugins::webrtc_codec::WebRtcVideoCodec;
-use webrtc_streams_common::synthetic_stream;
+use webrtc_duplex_common::{PacedSrc, Received, RecordingSink};
+use webrtc_streams_common::{synthetic_stream, synthetic_stream_sized, Sizes, KEYFRAME_PAYLOAD};
 
 use core::future::{ready, Future, Ready};
 use core::pin::Pin;
@@ -451,4 +453,80 @@ async fn duplex_relay_with_loss_recovers_via_rtx() {
         r.a_nacks,
         r.b_nacks
     );
+}
+
+// one RTP packet carries the whole unit, as it does for a static desktop's P-frames
+const ONE_PACKET_INTER_PAYLOAD: usize = 700;
+const RECEIVE_ONLY_FRAMES: usize = 120;
+const RECEIVE_ONLY_DROP_EVERY: u64 = 11;
+const RECEIVE_ONLY_TIMEOUT: Duration = Duration::from_secs(30);
+const LINK_CAPACITY: usize = 8;
+
+#[tokio::test]
+async fn receive_only_client_recovers_lost_single_packet_frames() {
+    let units = Arc::new(synthetic_stream_sized(
+        WebRtcVideoCodec::H264,
+        RECEIVE_ONLY_FRAMES,
+        Sizes {
+            keyframe: KEYFRAME_PAYLOAD,
+            inter: ONE_PACKET_INTER_PAYLOAD,
+        },
+    ));
+    let (offer_channel, answer_channel, stats) =
+        spliced_channels(Some(RECEIVE_ONLY_DROP_EVERY)).await;
+    let mut client =
+        WebRtcDuplexSession::new(SignalRole::Offerer, offer_channel, 1).with_receive_only();
+    let mut host = WebRtcDuplexSession::new(SignalRole::Answerer, answer_channel, 1);
+    let received = Arc::new(Mutex::new(Received::default()));
+    let mut client_sink = RecordingSink {
+        received: received.clone(),
+    };
+    let mut host_src = PacedSrc {
+        codec: WebRtcVideoCodec::H264,
+        units: units.clone(),
+        first_pts_ns: 0,
+    };
+    let mut host_sink = RecordingSink {
+        received: Arc::new(Mutex::new(Received::default())),
+    };
+    let clock = ZeroClock;
+    let run_client = async {
+        let sources: Vec<&mut dyn DynSourceLoop> = Vec::new();
+        let sinks: Vec<&mut dyn DynAsyncElement> = std::vec![&mut client_sink];
+        run_duplex_session(sources, &mut client, sinks, &clock, LINK_CAPACITY).await
+    };
+    let run_host = async {
+        let sources: Vec<&mut dyn DynSourceLoop> = std::vec![&mut host_src];
+        let sinks: Vec<&mut dyn DynAsyncElement> = std::vec![&mut host_sink];
+        run_duplex_session(sources, &mut host, sinks, &clock, LINK_CAPACITY).await
+    };
+    let (client_result, host_result) = tokio::time::timeout(RECEIVE_ONLY_TIMEOUT, async {
+        tokio::join!(run_client, run_host)
+    })
+    .await
+    .expect("both sessions end after the host's units run out");
+    client_result.expect("client session");
+    host_result.expect("host session");
+
+    let indices: Vec<usize> = received
+        .lock()
+        .unwrap()
+        .units
+        .iter()
+        .map(|(bytes, _)| {
+            units
+                .iter()
+                .position(|unit| unit == bytes)
+                .expect("each received frame is a sent unit")
+        })
+        .collect();
+    let first = *indices.first().expect("frames arrive");
+    let missing: Vec<usize> = (first..units.len())
+        .filter(|index| !indices.contains(index))
+        .collect();
+    assert!(
+        stats.dropped.load(Ordering::Relaxed) > 0,
+        "the relay dropped nothing"
+    );
+    assert!(missing.is_empty(), "frames {missing:?} never arrived");
 }

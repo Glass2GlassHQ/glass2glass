@@ -22,6 +22,7 @@ use std::time::Instant;
 
 use tokio::net::UdpSocket;
 
+use str0m::bwe::BweKind;
 use str0m::change::{SdpAnswer, SdpOffer, SdpPendingOffer};
 use str0m::net::{Protocol, Receive, Transmit};
 use str0m::{Candidate, IceCreds, Input, Rtc};
@@ -730,6 +731,13 @@ pub(crate) async fn add_ice_candidates(
         }
     }
     Ok(())
+}
+
+pub(crate) fn estimate_bps(kind: &BweKind) -> Option<u64> {
+    match kind {
+        BweKind::Twcc { estimate, .. } | BweKind::Remb { estimate, .. } => Some(estimate.as_u64()),
+        _ => None,
+    }
 }
 
 pub(crate) async fn wait_rtc_timeout(timeout: Duration) {

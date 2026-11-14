@@ -221,7 +221,7 @@ tui = ["std", "tokio/time", "tokio/macros", "dep:ratatui"]
 # sans-IO WebRTC stack; we drive its handle_input / poll_output loop on a tokio
 # UDP socket, using its pure-Rust `rust-crypto` backend so there is no OpenSSL
 # system dep. WHIP signaling (HTTP offer/answer) reuses reqwest. Implies std +
-# tokio. str0m 0.22 requires rustc 1.85, within the workspace MSRV; the feature
+# tokio. str0m 0.25 requires rustc 1.89, within the workspace MSRV; the feature
 # is off by default, so the no_std baseline is unaffected.
 webrtc = ["std", "tokio/net", "tokio/time", "tokio/macros", "tokio/io-util", "dep:str0m", "dep:reqwest", "dep:hmac", "dep:tokio-rustls", "dep:rustls-native-certs"]
 # Native LiveKit publisher (LiveKitSink, T4): joins a LiveKit room and publishes
@@ -981,7 +981,7 @@ rumqttc = { version = "0.25", optional = true, default-features = false, feature
 # Drives the native WebRtcSink (the `webrtc` feature). 0.22 is the first release
 # that sends media packets unpadded (LiveKit's forwarder mangled the padding for
 # browser subscribers).
-str0m = { version = "0.22", optional = true, default-features = false, features = ["rust-crypto"] }
+str0m = { version = "0.25", optional = true, default-features = false, features = ["rust-crypto"] }
 # Read-only XML DOM for the DASH MPD parser (dash feature). Pure Rust (only
 # xmlparser), no system deps.
 roxmltree = { version = "0.21", optional = true }
@@ -1022,7 +1022,7 @@ zeroize = { version = "1.9", optional = true, default-features = false, features
 # a build with both resolves one copy. `rcgen` supplies the self-signed ECDSA
 # certificate an element generates when no `pem` is set, and pulls aws-lc-rs,
 # which dimpl then prefers as its crypto provider.
-dimpl = { version = "0.7", optional = true, default-features = false, features = ["rust-crypto", "rcgen"] }
+dimpl = { version = "0.9", optional = true, default-features = false, features = ["rust-crypto", "rcgen"] }
 # OS RNG for the random stream key + salt the SRT caller generates, and the
 # WS-Security nonce the ONVIF UsernameToken digest needs.
 getrandom = { version = "0.2", optional = true }
