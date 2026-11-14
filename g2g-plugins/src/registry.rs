@@ -2684,6 +2684,23 @@ fn register_autoplug_candidates(reg: &mut Registry) {
         )
         .with_experimental(),
     );
+    #[cfg(all(target_os = "windows", feature = "d3d11-screen-capture"))]
+    reg.register_source(
+        SourceFactory::new(
+            "d3d11screencapturesrc",
+            Caps::RawVideo {
+                format: RawVideoFormat::Bgra8,
+                width: Dim::Fixed(1920),
+                height: Dim::Fixed(1080),
+                framerate: Rate::Fixed(60 << 16),
+                interlace: g2g_core::Interlace::Progressive,
+                colorimetry: g2g_core::Colorimetry::SRGB,
+                pixel_aspect: g2g_core::PixelAspect::SQUARE,
+            },
+            || Box::new(crate::d3d11screencapturesrc::D3D11ScreenCaptureSrc::new()),
+        )
+        .with_experimental(),
+    );
     #[cfg(all(target_os = "windows", feature = "wasapi-src"))]
     reg.register_source(
         SourceFactory::new(
@@ -3119,6 +3136,7 @@ pub static FEATURE_GATED_ELEMENTS: &[FeatureGatedElement] = &{
         "mfvideosrc" => "mf-video-src" on "windows";
         "wasapisrc" => "wasapi-src" on "windows";
         "d3d11videosink" => "d3d11-sink" on "windows";
+        "d3d11screencapturesrc" => "d3d11-screen-capture" on "windows";
         "d3d12h264dec" => "d3d12-decode" on "windows";
         "wasapisink" => "wasapi-sink" on "windows";
     }

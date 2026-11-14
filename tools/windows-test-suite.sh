@@ -16,7 +16,7 @@
 # usage (Git Bash):
 #   tools/windows-test-suite.sh <log> [features]
 # features default to every Windows element that needs no extra install:
-#   mf-decode mf-encode mf-aac wasapi-sink wasapi-src d3d11-sink mf-video-src
+#   mf-decode mf-encode mf-aac wasapi-sink wasapi-src d3d11-sink d3d11-screen-capture mf-video-src
 #   plugin-loader plugin-signing
 # Add `ffmpeg` with FFMPEG_DIR and LIBCLANG_PATH set (see the `ffmpeg` feature in
 # g2g-plugins/Cargo.toml) and the ffmpeg DLLs on PATH.
@@ -25,7 +25,7 @@
 #   grep '^test result' <log> | awk '{p+=$4; f+=$6; i+=$8} END {print p, f, i}'
 set -u
 LOG="${1:?usage: $0 <log> [features]}"
-FEATURES="${2:-mf-decode mf-encode mf-aac wasapi-sink wasapi-src d3d11-sink mf-video-src plugin-loader plugin-signing}"
+FEATURES="${2:-mf-decode mf-encode mf-aac wasapi-sink wasapi-src d3d11-sink d3d11-screen-capture mf-video-src plugin-loader plugin-signing}"
 TOOLS=$(cd "$(dirname "$0")" && pwd)
 REPO=$(dirname "$TOOLS")
 # no incremental cache, and line tables only: a one-off run needs neither

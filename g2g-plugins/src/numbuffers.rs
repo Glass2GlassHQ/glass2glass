@@ -38,6 +38,7 @@ pub(crate) fn get_num_buffers(limit: u64) -> PropValue {
     feature = "mqtt",
     all(target_os = "linux", feature = "v4l2"),
     all(target_os = "windows", feature = "mf-video-src"),
+    all(target_os = "windows", feature = "d3d11-screen-capture"),
     feature = "moqt",
     feature = "webrtc",
     all(target_os = "linux", feature = "pipewire"),

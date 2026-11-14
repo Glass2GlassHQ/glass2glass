@@ -265,7 +265,6 @@ libraries installed.
 
 - `mfvideosrc`: first Windows build + camera smoke test; D3D11 zero-copy;
   size/rate request beyond device default.
-- Screen capture: Windows DXGI Desktop Duplication.
 - Device discovery on Android (Camera2 id list) and web (enumerateDevices)
   providers.
 - Camera controls (exposure, focus, white balance) as element properties on

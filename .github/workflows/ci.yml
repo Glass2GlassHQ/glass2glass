@@ -796,7 +796,7 @@ jobs:
       - name: check g2g-plugins (windows feature set)
         run: >
           cargo check -p g2g-plugins --locked --all-targets --features
-          mf-decode,mf-encode,mf-aac,wasapi-sink,wasapi-src,d3d11-sink,mf-video-src,wgpu-sink
+          mf-decode,mf-encode,mf-aac,wasapi-sink,wasapi-src,d3d11-sink,d3d11-screen-capture,mf-video-src,wgpu-sink
       - name: libvpx
         shell: bash
         run: tools/libvpx-build.sh "$HOME/g2g-codecs" | sed 's/^export //' >> "$GITHUB_ENV"

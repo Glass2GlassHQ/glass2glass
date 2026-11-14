@@ -143,6 +143,23 @@ grant without asking.
 enumerates video capture devices and drains NV12 and YUY2 frames through an
 `IMFSourceReader` on a COM/MTA worker thread.
 
+### D3D11ScreenCaptureSrc
+
+`D3D11ScreenCaptureSrc` (`d3d11screencapturesrc`, `d3d11-screen-capture`,
+Windows) captures one desktop monitor through DXGI Desktop Duplication.
+`monitor-index` counts the desktop-attached outputs of every adapter in DXGI
+order, and -1 picks the primary monitor. A rotated monitor fails the probe.
+Geometry is read with the thread set to per-monitor DPI awareness, so the caps
+are physical pixels. A worker thread blocks in `AcquireNextFrame` and copies a
+changed image through a staging texture into tight BGRA system memory, then
+sends it at once, at most one changed image per `1/fps`. After a full period
+with no change, the last image goes out again as a refcounted share. The
+channel to the `run` loop holds only the newest frame, so a frame the pipeline
+has not taken is replaced.
+`DXGI_ERROR_ACCESS_LOST` (a mode change, the secure desktop, a full-screen
+exclusive app) fails the source. `monitor_bounds` gives a monitor's position on
+the virtual desktop for input injection.
+
 ## PipeWire camera output
 
 `PipeWireVideoSink` (`pipewirevideosink`, `pipewire` feature) publishes raw

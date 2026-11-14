@@ -76,7 +76,7 @@ that is not on the same network.
 | :--- | :--- |
 | Wayland screen | `pipewirevideosrc` `portal=true`, `portal-restore-token`, `portal-timeout`. `io-mode=dmabuf` or `mmap`. |
 | macOS screen | `screencapturesrc`. `cv-output` keeps the IOSurface. It captures the first display until `display-index` exists. |
-| Windows camera, not the screen | `mfvideosrc`. There is no desktop-duplication source yet. |
+| Windows screen | `d3d11screencapturesrc`, `monitor-index`, `fps`, tight BGRA system memory. |
 | NVIDIA encode | `nvenc`. CUDA NV12 in, Annex-B out, no B-frames, `gop-size=-1` by default, `force_keyframe()` latched and set on the first frame. |
 | Upload into CUDA | `cudaupload`, Linux and Windows. |
 | VA-API encode | `ffmpegenc` backend `h264_vaapi` / `hevc_vaapi`. |
@@ -136,17 +136,17 @@ that backend accepts. If it does not, the software line is the one that ships.
 Windows, first slice, a copy:
 
 ```
-dxgisrc ! videoconvert ! mfencode
+d3d11screencapturesrc ! videoconvert ! mfencode
 wasapisrc ! audioconvert ! opusenc
 ```
 
 Windows, in-place, after the bridge exists:
 
 ```
-dxgisrc zero-copy=true ! nvenc
+d3d11screencapturesrc zero-copy=true ! nvenc
 ```
 
-`dxgisrc` in that mode produces `MemoryDomain::Cuda` by registering the D3D11
+`d3d11screencapturesrc` in that mode converts BGRA to NV12 on the GPU and produces `MemoryDomain::Cuda` by registering the D3D11
 texture with `cuGraphicsD3D11RegisterResource` and wrapping the mapped pointer
 the way `nvenc` already requires: one NV12 base pointer, chroma at
 `luma + pitch * height`. There is no D3D11 memory domain. The bridge is the

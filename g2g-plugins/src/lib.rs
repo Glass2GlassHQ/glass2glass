@@ -1355,7 +1355,8 @@ pub mod moqtsrc;
         feature = "mf-decode",
         feature = "mf-encode",
         feature = "mf-aac",
-        feature = "mf-video-src"
+        feature = "mf-video-src",
+        feature = "d3d11-screen-capture"
     )
 ))]
 mod mfcommon;
@@ -1647,6 +1648,8 @@ mod yuv420;
 
 // D3D11 present sink: displays MemoryDomain::D3D11Texture frames via a DXGI
 // swapchain + D3D11 video processor. Windows-only; the analog of CudaGlSink.
+#[cfg(all(target_os = "windows", feature = "d3d11-screen-capture"))]
+pub mod d3d11screencapturesrc;
 #[cfg(all(target_os = "windows", feature = "d3d11-sink"))]
 pub mod d3d11sink;
 #[cfg(all(target_os = "windows", feature = "d3d12-decode"))]

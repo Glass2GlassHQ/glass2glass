@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2303: `d3d11screencapturesrc` captures a Windows monitor through DXGI Desktop Duplication.
 - M2302: `g2g-desktop` client and the `g2g-desktop host` / `client` binary.
 - M2301: `g2g-desktop` host session sends x264 video over the duplex session and receives client input.
 - M2300: `wgpusink` on Linux reports keyboard, pointer and wheel input from its window.
