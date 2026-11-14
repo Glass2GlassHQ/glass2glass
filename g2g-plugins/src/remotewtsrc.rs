@@ -37,16 +37,20 @@ use alloc::boxed::Box;
 use alloc::string::{String, ToString};
 
 use std::net::{SocketAddr, TcpListener as StdTcpListener};
+use std::sync::Arc;
+
+use tokio::sync::Mutex;
 
 use web_transport_quinn::quinn::Endpoint;
 
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{Caps, PipelinePacket, PropError, PropKind, PropValue, PropertySpec};
 
+use crate::datachannel::{data_channel, DataChannelEnds};
 use crate::remotesource::{leading_caps, PacketTransport, RemoteSource, TransportFuture};
 use crate::remotewtio::{
-    self, load_certificate, set_congestion, wt_err, QuicMode, WtStream, CERTIFICATE_PROP,
-    CONGESTION_PROP, PRIVATE_KEY_PROP,
+    self, load_certificate, set_congestion, wt_err, QuicMode, SharedDataChannel, WtStream,
+    CERTIFICATE_PROP, CONGESTION_PROP, PRIVATE_KEY_PROP,
 };
 use crate::remotewtsink::CERT_HASHES_PROP;
 
@@ -74,6 +78,17 @@ impl RemoteWtSrc {
         self
     }
 
+    pub fn open_data_channel(&mut self) -> DataChannelEnds {
+        let transport = self.transport_mut();
+        assert!(
+            !transport.listened,
+            "the data channel opens before the source listens"
+        );
+        let (application, transport_ends) = data_channel();
+        transport.data_channel = Some(Arc::new(Mutex::new(transport_ends)));
+        application
+    }
+
     pub fn with_certificate(mut self, cert: impl Into<String>, key: impl Into<String>) -> Self {
         SourceLoop::set_property(&mut self, "certificate", PropValue::Str(cert.into()))
             .expect("certificate is a string");
@@ -93,6 +108,8 @@ pub struct WtTransport {
     key: String,
     /// The `congestion-control` nick applied to accepted connections.
     congestion: String,
+    data_channel: Option<SharedDataChannel>,
+    listened: bool,
 }
 
 impl Default for WtTransport {
@@ -104,12 +121,17 @@ impl Default for WtTransport {
             cert: String::new(),
             key: String::new(),
             congestion: "default".to_string(),
+            data_channel: None,
+            listened: false,
         }
     }
 }
 
 #[derive(Debug)]
-pub struct WtListener(ListenerKind);
+pub struct WtListener {
+    kind: ListenerKind,
+    data_channel: Option<SharedDataChannel>,
+}
 
 #[derive(Debug)]
 enum ListenerKind {
@@ -173,21 +195,27 @@ impl PacketTransport for WtTransport {
         _adopt: Option<StdTcpListener>,
     ) -> TransportFuture<'_, Self::Listener> {
         Box::pin(async move {
-            if self.mode == QuicMode::Caller {
-                return Ok(WtListener(ListenerKind::Caller {
+            self.listened = true;
+            let kind = match self.mode {
+                QuicMode::Caller => ListenerKind::Caller {
                     location: self.location.clone(),
                     cert_hashes: self.cert_hashes.clone(),
                     congestion: self.congestion.clone(),
-                }));
-            }
-            let (chain, key) = load_certificate(&self.cert, &self.key)?;
-            let endpoint = remotewtio::listen(bind, chain, key, &self.congestion)?;
-            Ok(WtListener(ListenerKind::Bound(endpoint)))
+                },
+                QuicMode::Listener => {
+                    let (chain, key) = load_certificate(&self.cert, &self.key)?;
+                    ListenerKind::Bound(remotewtio::listen(bind, chain, key, &self.congestion)?)
+                }
+            };
+            Ok(WtListener {
+                kind,
+                data_channel: self.data_channel.clone(),
+            })
         })
     }
 
     fn listen_addr(listener: &Self::Listener) -> Option<SocketAddr> {
-        match &listener.0 {
+        match &listener.kind {
             ListenerKind::Bound(endpoint) => endpoint.local_addr().ok(),
             ListenerKind::Caller { .. } => None,
         }
@@ -195,7 +223,7 @@ impl PacketTransport for WtTransport {
 
     fn accept(listener: &mut Self::Listener) -> TransportFuture<'_, (Self::Conn, Caps)> {
         Box::pin(async move {
-            let session = match &listener.0 {
+            let session = match &listener.kind {
                 ListenerKind::Bound(endpoint) => remotewtio::accept(endpoint).await?,
                 ListenerKind::Caller {
                     location,
@@ -203,12 +231,16 @@ impl PacketTransport for WtTransport {
                     congestion,
                 } => remotewtio::dial(location, cert_hashes, &[], congestion).await?,
             };
+            let pump = listener
+                .data_channel
+                .as_ref()
+                .map(|channel| remotewtio::open_data_channel(&session, channel.clone()));
             // The sender opens exactly one bidirectional stream and writes the
             // wire codec into it.
             let (tx, rx) = session.accept_bi().await.map_err(wt_err)?;
             // Receiving is mode-free: `WtStream::recv` takes packets off the
             // stream or the datagram flow, whichever the sender used.
-            let mut conn = WtStream::new(session, tx, rx, false);
+            let mut conn = WtStream::new(session, tx, rx, false, pump);
             let caps = leading_caps(conn.recv().await?)?;
             Ok((conn, caps))
         })

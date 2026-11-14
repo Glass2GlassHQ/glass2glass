@@ -20,6 +20,10 @@
 //! frame. A frame too large for the path falls back to the stream: truncating it
 //! or dropping it silently would both be worse than arriving late. Receiving is
 //! mode-free, [`WtStream::recv`] takes packets from whichever the peer used.
+//!
+//! A data channel (`open_data_channel` on the sink and source) is a second
+//! bidirectional stream carrying length-framed byte messages, opened by the
+//! source and accepted by the sink.
 
 use alloc::string::{String, ToString};
 use alloc::vec;
@@ -45,12 +49,16 @@ use web_transport_quinn::{
     crypto, ClientBuilder, CongestionControl, RecvStream, Request, SendStream, Session,
 };
 
+use g2g_core::g2g_warn;
+use g2g_core::log::Target;
 use g2g_core::wire::{decode_packet, encode_packet};
 use g2g_core::{
     G2gError, NetworkFailure, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
 };
 
-use crate::remotewire::{map_wire, send_framed, FramedRead};
+use crate::abortondrop::AbortOnDrop;
+use crate::datachannel::{DataChannelTransportEnds, MAX_MESSAGE_SIZE};
+use crate::remotewire::{map_wire, send_frame_bytes, send_framed, FramedRead};
 use crate::textencoding::hex_decode;
 
 /// Any WebTransport / QUIC / TLS failure ends the session.
@@ -81,10 +89,17 @@ pub struct WtStream {
     datagrams: bool,
     /// Whether the peer's first packet is still outstanding. See [`Self::recv`].
     leading: bool,
+    _data_channel: Option<AbortOnDrop>,
 }
 
 impl WtStream {
-    pub(crate) fn new(session: Session, tx: SendStream, rx: RecvStream, datagrams: bool) -> Self {
+    pub(crate) fn new(
+        session: Session,
+        tx: SendStream,
+        rx: RecvStream,
+        datagrams: bool,
+        data_channel: Option<AbortOnDrop>,
+    ) -> Self {
         Self {
             session,
             tx,
@@ -92,6 +107,7 @@ impl WtStream {
             reader: FramedRead::default(),
             datagrams,
             leading: true,
+            _data_channel: data_channel,
         }
     }
 
@@ -160,14 +176,77 @@ impl WtStream {
 
 /// Open the sender's single bidirectional stream on `session`. `datagrams` puts
 /// data frames on the datagram carrier (see the module docs).
-pub(crate) async fn open_stream(session: Session, datagrams: bool) -> Result<WtStream, G2gError> {
+pub(crate) async fn open_stream(
+    session: Session,
+    datagrams: bool,
+    data_channel: Option<&SharedDataChannel>,
+) -> Result<WtStream, G2gError> {
     // `Session::max_datagram_size` panics on a peer that refused datagram
     // support, so the configured mode is checked once here rather than per frame.
     if datagrams && Connection::max_datagram_size(&session).is_none() {
         return Err(G2gError::NotConfigured);
     }
+    let pump = data_channel.map(|channel| accept_data_channel(&session, channel.clone()));
     let (tx, rx) = session.open_bi().await.map_err(wt_err)?;
-    Ok(WtStream::new(session, tx, rx, datagrams))
+    Ok(WtStream::new(session, tx, rx, datagrams, pump))
+}
+
+pub(crate) type SharedDataChannel = Arc<tokio::sync::Mutex<DataChannelTransportEnds>>;
+
+pub(crate) fn open_data_channel(session: &Session, channel: SharedDataChannel) -> AbortOnDrop {
+    let session = session.clone();
+    AbortOnDrop(tokio::spawn(async move {
+        if let Ok((tx, rx)) = session.open_bi().await {
+            carry_messages(tx, rx, channel).await;
+        }
+    }))
+}
+
+fn accept_data_channel(session: &Session, channel: SharedDataChannel) -> AbortOnDrop {
+    let session = session.clone();
+    AbortOnDrop(tokio::spawn(async move {
+        if let Ok((tx, rx)) = session.accept_bi().await {
+            carry_messages(tx, rx, channel).await;
+        }
+    }))
+}
+
+async fn carry_messages(mut tx: SendStream, mut rx: RecvStream, channel: SharedDataChannel) {
+    // tokio releases the lock when a replaced connection's task is aborted
+    let mut ends = channel.lock().await;
+    let DataChannelTransportEnds { outgoing, incoming } = &mut *ends;
+    let mut reader = FramedRead::default();
+    let mut sending = true;
+    loop {
+        tokio::select! {
+            message = outgoing.recv(), if sending => match message {
+                Some(message) => {
+                    if send_frame_bytes(&mut tx, &message).await.is_err() {
+                        return;
+                    }
+                }
+                None => {
+                    let _ = tx.finish();
+                    sending = false;
+                }
+            },
+            received = reader.recv_bytes(&mut rx, MAX_MESSAGE_SIZE) => match received {
+                Ok(Some(message)) => {
+                    if incoming.send(message.to_vec()).is_err() {
+                        return;
+                    }
+                }
+                Ok(None) => return,
+                Err(error) => {
+                    g2g_warn!(
+                        Target::category("remotewt"),
+                        "data channel closed on a bad message: {error:?}"
+                    );
+                    return;
+                }
+            },
+        }
+    }
 }
 
 pub(crate) const RAW_QUIC_ALPN: &str = "g2g-remote";

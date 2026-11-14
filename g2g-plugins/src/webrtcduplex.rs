@@ -74,6 +74,7 @@ use g2g_core::{
     PropValue, PropertySpec, ReverseChannel,
 };
 
+use crate::datachannel::{data_channel, DataChannelEnds, DataChannelTransportEnds};
 use crate::filesink::io_err;
 use crate::turn::TurnSet;
 use crate::webrtc_codec::{
@@ -282,16 +283,9 @@ pub struct WebRtcDuplexSession {
 }
 
 #[derive(Debug)]
-pub struct DataChannelEnds {
-    pub outgoing: mpsc::UnboundedSender<Vec<u8>>,
-    pub incoming: mpsc::UnboundedReceiver<Vec<u8>>,
-}
-
-#[derive(Debug)]
 struct DataChannelLane {
     label: String,
-    outgoing: mpsc::UnboundedReceiver<Vec<u8>>,
-    incoming: mpsc::UnboundedSender<Vec<u8>>,
+    ends: DataChannelTransportEnds,
 }
 
 impl core::fmt::Debug for WebRtcDuplexSession {
@@ -339,14 +333,12 @@ impl WebRtcDuplexSession {
     }
 
     pub fn open_data_channel(&mut self, label: impl Into<String>) -> DataChannelEnds {
-        let (outgoing, outgoing_receiver) = mpsc::unbounded_channel();
-        let (incoming_sender, incoming) = mpsc::unbounded_channel();
+        let (application, transport) = data_channel();
         self.data_channel = Some(DataChannelLane {
             label: label.into(),
-            outgoing: outgoing_receiver,
-            incoming: incoming_sender,
+            ends: transport,
         });
-        DataChannelEnds { outgoing, incoming }
+        application
     }
 
     pub fn with_receive_only(mut self) -> Self {
@@ -779,7 +771,11 @@ impl MultiDuplexSession for WebRtcDuplexSession {
             let mut pending_reverse: Vec<usize> = Vec::new();
             let (data_channel_label, mut outgoing_messages, incoming_messages) = match data_channel
             {
-                Some(lane) => (Some(lane.label), Some(lane.outgoing), Some(lane.incoming)),
+                Some(lane) => (
+                    Some(lane.label),
+                    Some(lane.ends.outgoing),
+                    Some(lane.ends.incoming),
+                ),
                 None => (None, None, None),
             };
             let mut data_channel_id: Option<ChannelId> = None;

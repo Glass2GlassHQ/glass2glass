@@ -56,8 +56,9 @@ use g2g_core::{
     MultiOutputSource, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
 };
 
+use crate::abortondrop::AbortOnDrop;
 use crate::filesink::io_err;
-use crate::httprequest::{read_request, AbortOnDrop, HttpRequest, RequestError};
+use crate::httprequest::{read_request, HttpRequest, RequestError};
 use crate::turn::TurnSet;
 use crate::webrtc_codec::{
     enable_tracks, get_video_codec_property, opus_caps, set_video_codec_property, Track,

@@ -6,21 +6,11 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use tokio::io::{AsyncRead, AsyncReadExt};
-use tokio::task::JoinHandle;
 
 pub(crate) const HEAD_TERMINATOR: &[u8] = b"\r\n\r\n";
 pub(crate) const MAX_HEAD_BYTES: usize = 64 * 1024;
 pub(crate) const MAX_BODY_BYTES: usize = 1024 * 1024;
 pub(crate) const READ_CHUNK_BYTES: usize = 4096;
-
-#[derive(Debug)]
-pub(crate) struct AbortOnDrop(pub(crate) JoinHandle<()>);
-
-impl Drop for AbortOnDrop {
-    fn drop(&mut self) {
-        self.0.abort();
-    }
-}
 
 #[derive(Debug, Default)]
 pub(crate) struct HttpRequest {

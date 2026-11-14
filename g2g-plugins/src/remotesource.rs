@@ -193,6 +193,11 @@ impl<T: PacketTransport> RemoteSource<T> {
         self
     }
 
+    #[cfg(feature = "webtransport")]
+    pub(crate) fn transport_mut(&mut self) -> &mut T {
+        &mut self.transport
+    }
+
     /// Stop after `n` data frames and emit EOS (the bounded / test path).
     pub fn with_frame_limit(mut self, n: u64) -> Self {
         self.frame_limit = n;

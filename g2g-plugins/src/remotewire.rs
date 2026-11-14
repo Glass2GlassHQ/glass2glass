@@ -63,7 +63,7 @@ mod framed {
     use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
     use g2g_core::wire::{decode_packet, encode_packet, WireError};
-    use g2g_core::{G2gError, PipelinePacket};
+    use g2g_core::{G2gError, NetworkFailure, PipelinePacket};
 
     use crate::filesink::io_err;
     use crate::remotewire::map_wire;
@@ -78,11 +78,20 @@ mod framed {
         packet: &PipelinePacket,
     ) -> Result<(), G2gError> {
         let body: Vec<u8> = encode_packet(packet).map_err(map_wire)?;
-        let length = (body.len() as u32).to_le_bytes();
+        send_frame_bytes(sink, &body).await
+    }
+
+    pub(crate) async fn send_frame_bytes<W: AsyncWrite + Unpin>(
+        sink: &mut W,
+        body: &[u8],
+    ) -> Result<(), G2gError> {
+        let length = u32::try_from(body.len())
+            .map_err(|_| G2gError::Network(NetworkFailure::Stream))?
+            .to_le_bytes();
         // prefix and body in one write, two writes let Nagle hold the body back
         let mut written = 0;
         while written < LENGTH_PREFIX_LEN {
-            let parts = [IoSlice::new(&length[written..]), IoSlice::new(&body)];
+            let parts = [IoSlice::new(&length[written..]), IoSlice::new(body)];
             let n = sink.write_vectored(&parts).await.map_err(io_err)?;
             if n == 0 {
                 return Err(io_err(io::ErrorKind::WriteZero.into()));
@@ -104,6 +113,8 @@ mod framed {
     pub(crate) struct FramedRead {
         /// The current frame so far: the 4-byte length prefix, then its body.
         buf: Vec<u8>,
+        /// The frame in `buf` was handed out whole, so the next read starts over.
+        delivered: bool,
     }
 
     impl FramedRead {
@@ -138,6 +149,22 @@ mod framed {
             &mut self,
             src: &mut R,
         ) -> Result<Option<PipelinePacket>, G2gError> {
+            match self.recv_bytes(src, usize::MAX).await? {
+                Some(body) => Ok(Some(decode_packet(body).map_err(map_wire)?)),
+                None => Ok(None),
+            }
+        }
+
+        /// Read the next length-framed body. A peer that claims more than
+        /// `max_body` bytes fails the read before any of the body is taken.
+        pub(crate) async fn recv_bytes<R: AsyncRead + Unpin>(
+            &mut self,
+            src: &mut R,
+            max_body: usize,
+        ) -> Result<Option<&[u8]>, G2gError> {
+            if core::mem::take(&mut self.delivered) {
+                self.buf.clear();
+            }
             if !self.fill_to(src, LENGTH_PREFIX_LEN).await? {
                 return Ok(None);
             }
@@ -145,19 +172,23 @@ mod framed {
             // stream that ends short of it fails as a truncation.
             let n =
                 u32::from_le_bytes([self.buf[0], self.buf[1], self.buf[2], self.buf[3]]) as usize;
+            if n > max_body {
+                return Err(G2gError::Network(NetworkFailure::Stream));
+            }
             if !self
                 .fill_to(src, n.saturating_add(LENGTH_PREFIX_LEN))
                 .await?
             {
                 return Err(map_wire(WireError::Truncated));
             }
-            let packet = decode_packet(&self.buf[LENGTH_PREFIX_LEN..]).map_err(map_wire)?;
-            self.buf.clear();
-            Ok(Some(packet))
+            self.delivered = true;
+            Ok(Some(&self.buf[LENGTH_PREFIX_LEN..]))
         }
     }
 }
 
+#[cfg(any(feature = "webtransport", all(test, feature = "remote")))]
+pub(crate) use framed::send_frame_bytes;
 #[cfg(any(feature = "remote", feature = "webtransport"))]
 pub(crate) use framed::{send_framed, FramedRead};
 
@@ -231,6 +262,29 @@ mod tests {
             Some(PipelinePacket::Eos)
         ));
         assert!(framed.recv(&mut reader).await.unwrap().is_none());
+        sending.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn framed_bytes_arrive_whole_and_a_length_over_the_cap_fails() {
+        const MAX_BODY: usize = 4;
+        let (mut writer, mut reader) = tokio::io::duplex(PIPE_CAPACITY);
+        let sending = tokio::spawn(async move {
+            send_frame_bytes(&mut writer, b"ab").await.unwrap();
+            send_frame_bytes(&mut writer, b"").await.unwrap();
+            // the reader stops at the length prefix, so this body never drains
+            let _ = send_frame_bytes(&mut writer, b"abcde").await;
+        });
+        let mut framed = FramedRead::default();
+        let first = framed.recv_bytes(&mut reader, MAX_BODY).await.unwrap();
+        assert_eq!(first, Some(&b"ab"[..]));
+        let second = framed.recv_bytes(&mut reader, MAX_BODY).await.unwrap();
+        assert_eq!(second, Some(&b""[..]));
+        assert_eq!(
+            framed.recv_bytes(&mut reader, MAX_BODY).await,
+            Err(G2gError::Network(NetworkFailure::Stream))
+        );
+        drop(reader);
         sending.await.unwrap();
     }
 }

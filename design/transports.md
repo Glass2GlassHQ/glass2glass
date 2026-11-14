@@ -807,6 +807,17 @@ for one client. `RemoteWtSrc mode=caller` dials its `location` with
 `server-certificate-hashes`. The sender always opens the stream, whichever side
 dialed, because it writes the leading caps.
 
+`open_data_channel()` on `RemoteWtSink` and `RemoteWtSrc` adds a second
+bidirectional stream for application messages, returned as the same
+`DataChannelEnds` (an outgoing sender and an incoming receiver of byte
+messages) that `WebRtcDuplexSession::open_data_channel` returns. The source
+opens the stream as soon as the session is up, before it reads any video, and
+the sink accepts it. QUIC shows a stream to the peer only once the opener writes
+to it, so the sink sees the channel after the source's first message. Each
+message is `u32` length-framed like the packets, and a message over 64 KiB
+(`MAX_MESSAGE_SIZE`) closes the channel. A message never waits behind a video
+frame, since each stream is ordered on its own.
+
 ### Shared carrier machinery
 
 The three carriers share their machinery rather than repeating it. `RemoteClient`

@@ -23,9 +23,10 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 
+use crate::abortondrop::AbortOnDrop;
 use crate::filesink::io_err;
 use crate::hlssink::{fragment_info, track_timescales};
-use crate::httprequest::{read_request, AbortOnDrop, HttpRequest};
+use crate::httprequest::{read_request, HttpRequest};
 use crate::mp4box::boxes;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

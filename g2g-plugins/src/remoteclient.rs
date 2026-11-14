@@ -126,6 +126,7 @@ impl<T: PacketClient> RemoteClient<T> {
         self.sent
     }
 
+    #[cfg(feature = "webtransport")]
     pub(crate) fn transport_mut(&mut self) -> &mut T {
         &mut self.transport
     }

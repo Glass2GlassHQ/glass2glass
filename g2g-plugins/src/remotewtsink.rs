@@ -48,6 +48,9 @@ use alloc::boxed::Box;
 use alloc::string::{String, ToString};
 
 use std::net::SocketAddr;
+use std::sync::Arc;
+
+use tokio::sync::Mutex;
 
 use web_transport_quinn::quinn::Endpoint;
 
@@ -55,9 +58,10 @@ use g2g_core::{
     AsyncElement, G2gError, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
 };
 
+use crate::datachannel::{data_channel, DataChannelEnds};
 use crate::remoteclient::{PacketClient, RemoteClient};
 use crate::remotesource::TransportFuture;
-use crate::remotewtio::{self, QuicMode, WtStream};
+use crate::remotewtio::{self, QuicMode, SharedDataChannel, WtStream};
 
 /// WebTransport `RemoteWtSink`: a length-framed [`g2g_core::wire`] stream over one
 /// bidirectional WebTransport stream, received by
@@ -103,6 +107,12 @@ impl RemoteWtSink {
             .map_err(remotewtio::wt_err)
     }
 
+    pub fn open_data_channel(&mut self) -> DataChannelEnds {
+        let (application, transport) = data_channel();
+        self.transport_mut().data_channel = Some(Arc::new(Mutex::new(transport)));
+        application
+    }
+
     pub fn with_datagrams(mut self, datagrams: bool) -> Self {
         AsyncElement::set_property(&mut self, "datagrams", PropValue::Bool(datagrams))
             .expect("datagrams is a boolean");
@@ -131,6 +141,7 @@ pub struct WtClient {
     datagrams_sent: u64,
     /// Opened lazily on the first send (the QUIC / CONNECT handshake is async).
     stream: Option<WtStream>,
+    data_channel: Option<SharedDataChannel>,
 }
 
 impl WtClient {
@@ -147,6 +158,7 @@ impl WtClient {
             datagrams: false,
             datagrams_sent: 0,
             stream: None,
+            data_channel: None,
         }
     }
 
@@ -281,7 +293,10 @@ impl PacketClient for WtClient {
                 }
                 QuicMode::Listener => remotewtio::accept(self.listener_endpoint()?).await?,
             };
-            self.stream = Some(remotewtio::open_stream(session, self.datagrams).await?);
+            self.stream = Some(
+                remotewtio::open_stream(session, self.datagrams, self.data_channel.as_ref())
+                    .await?,
+            );
             Ok(())
         })
     }
