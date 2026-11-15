@@ -364,6 +364,54 @@ async fn lost_datagrams_skip_to_a_requested_keyframe() {
 }
 
 #[tokio::test]
+async fn repair_shards_rebuild_frames_the_path_loses_pieces_of() {
+    const FRAMES: u16 = 300;
+    const LOSS_PERCENT: u64 = 5;
+    // without repair about a quarter of six-datagram frames lose a piece at 5% loss
+    const MULTI_SHARD_FRAME_LEN: usize = 6_000;
+    const DELIVERED_AT_LEAST_PERCENT: usize = 97;
+    let Host {
+        mut sink,
+        port,
+        hash,
+    } = host(VideoMode::Datagrams);
+    let relay = UdpRelay::start(([127, 0, 0, 1], port).into(), LOSS_PERCENT).await;
+    let mut source = client(format!("quic://{}", relay.address), hash);
+    let mut out = RecordingOut::default();
+
+    let send = async {
+        sink.connect().await.expect("accept the client");
+        sink.configure_pipeline(&test_caps()).expect("configure");
+        for sequence in 0..u64::from(FRAMES) {
+            // keyframes depend on no earlier frame
+            let mut frame = test_frame(sequence as u8, MULTI_SHARD_FRAME_LEN);
+            frame.sequence = sequence;
+            frame.timing.keyframe = true;
+            sink.process(PipelinePacket::DataFrame(frame), &mut NullOut)
+                .await
+                .expect("send a frame");
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+        sink.process(PipelinePacket::Eos, &mut NullOut)
+            .await
+            .expect("eos");
+    };
+    tokio::time::timeout(SESSION_TIMEOUT, async {
+        tokio::join!(send, receive(&mut source, &mut out))
+    })
+    .await
+    .expect("the session finishes in time");
+
+    assert_decodable(&out.frames);
+    assert!(
+        out.frames.len() * 100 >= usize::from(FRAMES) * DELIVERED_AT_LEAST_PERCENT,
+        "{} of {FRAMES} frames arrived",
+        out.frames.len()
+    );
+    assert_eq!(out.controls.last(), Some(&"eos"));
+}
+
+#[tokio::test]
 async fn a_stalled_link_resets_old_frames_behind_a_new_keyframe() {
     const FRAMES: u8 = 120;
     const STALL_AT: u8 = 20;

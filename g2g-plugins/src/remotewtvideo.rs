@@ -129,6 +129,10 @@ impl PacketReorder {
         Ok(())
     }
 
+    pub(crate) fn next_frame(&self) -> u64 {
+        self.next_frame
+    }
+
     pub(crate) fn take_keyframe_wanted(&mut self) -> bool {
         core::mem::take(&mut self.keyframe_wanted)
     }

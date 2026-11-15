@@ -14,10 +14,10 @@
 //!
 //! The other video modes ride the same session. `stream-per-frame` puts every
 //! packet after the leading caps on its own unidirectional stream, and a
-//! keyframe resets the frame streams not yet acknowledged. `datagrams` sends a
-//! data frame that fits the path as one QUIC datagram and anything else as a
-//! unidirectional stream. Each packet carries a [`PacketOrder`], from which the
-//! receiver restores send order and skips frames that will not arrive. Receiving
+//! keyframe resets the frame streams not yet acknowledged. `datagrams` splits each
+//! data frame into Reed-Solomon shards, one QUIC datagram each, plus repair shards
+//! sized to the path's loss, and sends anything else as a unidirectional stream.
+//! Each packet carries a [`PacketOrder`], from which the receiver restores send order and skips frames that will not arrive. Receiving
 //! is mode-free, [`WtStream::recv`] takes packets from whichever the peer used.
 //! The receiver writes keyframe requests on its half of the bidirectional stream.
 //!
@@ -69,6 +69,7 @@ use g2g_core::{
 use crate::abortondrop::AbortOnDrop;
 use crate::datachannel::{DataChannelTransportEnds, MAX_MESSAGE_SIZE};
 use crate::remotewire::{send_frame_bytes, send_framed, FramedRead};
+use crate::remotewtfec::{shard_frame, PathCounts, PathLoss, ShardAssembly};
 use crate::remotewtvideo::{NextPacket, PacketOrder, PacketReorder, VideoMode, KEYFRAME_REQUEST};
 use crate::textencoding::{hex_decode, hex_encode};
 
@@ -112,6 +113,7 @@ struct SendOrdering {
     controls_sent: u64,
     unacknowledged: VecDeque<UnacknowledgedStream>,
     stall_keyframe_requested: bool,
+    path_loss: PathLoss,
 }
 
 #[derive(Debug)]
@@ -164,6 +166,7 @@ impl SendOrdering {
 struct ReceiveOrdering {
     frame_timeout: Option<Duration>,
     reorder: PacketReorder,
+    shards: ShardAssembly,
     reads: JoinSet<Result<Vec<u8>, ReadToEndError>>,
     ordered: bool,
     datagrams_seen: bool,
@@ -237,10 +240,12 @@ impl WtStream {
                 controls_sent: 0,
                 unacknowledged: VecDeque::new(),
                 stall_keyframe_requested: false,
+                path_loss: PathLoss::new(Instant::now()),
             },
             receiving: ReceiveOrdering {
                 frame_timeout: settings.missing_frame_timeout,
                 reorder: PacketReorder::default(),
+                shards: ShardAssembly::default(),
                 reads: JoinSet::new(),
                 ordered: false,
                 datagrams_seen: false,
@@ -255,7 +260,8 @@ impl WtStream {
     /// Serialize and send one packet. The leading caps and every packet in
     /// `stream` mode go length-framed on the bidirectional stream. In the other
     /// modes each packet carries a [`PacketOrder`] and goes on its own
-    /// unidirectional stream, or as one datagram for a data frame that fits.
+    /// unidirectional stream, or as datagram shards for a data frame in
+    /// `datagrams` mode.
     pub(crate) async fn send(&mut self, packet: &PipelinePacket) -> Result<(), G2gError> {
         self.sending.forget_acknowledged();
         if self.leading || self.sending.mode == VideoMode::Stream {
@@ -280,10 +286,25 @@ impl WtStream {
         if frame.timing.keyframe {
             self.sending.reset_unfinished_frames();
         }
-        if self.sending.mode == VideoMode::Datagrams
-            && bytes.len() <= self.session.max_datagram_size()
-        {
-            return self.session.send_datagram(bytes.into()).map_err(wt_err);
+        if self.sending.mode == VideoMode::Datagrams {
+            let path = Connection::stats(&self.session).path;
+            self.sending.path_loss.observe(
+                Instant::now(),
+                PathCounts {
+                    lost_packets: path.lost_packets,
+                    sent_packets: path.sent_packets,
+                },
+            );
+            let max_datagram_len = self.session.max_datagram_size();
+            for shard in shard_frame(
+                order.frames_before,
+                &bytes,
+                max_datagram_len,
+                &self.sending.path_loss,
+            )? {
+                self.session.send_datagram(shard).map_err(wt_err)?;
+            }
+            return Ok(());
         }
         let stream = self.send_on_new_stream(&bytes).await?;
         self.sending.unacknowledged.push_back(UnacknowledgedStream {
@@ -393,7 +414,10 @@ impl WtStream {
                 ReceiveEvent::Datagram(Ok(bytes)) => {
                     self.receiving.ordered = true;
                     self.receiving.datagrams_seen = true;
-                    self.receiving.insert(&bytes)?;
+                    let next_frame = self.receiving.reorder.next_frame();
+                    if let Some(packet) = self.receiving.shards.insert(&bytes, next_frame)? {
+                        self.receiving.insert(&packet)?;
+                    }
                 }
                 ReceiveEvent::Datagram(Err(_)) => self.receiving.datagrams_closed = true,
                 ReceiveEvent::UniStream(Ok(mut stream)) => {

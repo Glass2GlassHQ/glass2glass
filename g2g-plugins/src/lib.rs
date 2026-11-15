@@ -1347,6 +1347,8 @@ pub mod remotewstransform;
 // speaks WebTransport (a browser, or a native QUIC client) joins the same
 // distributed primitive. Behind `webtransport`.
 #[cfg(feature = "webtransport")]
+mod remotewtfec;
+#[cfg(feature = "webtransport")]
 pub mod remotewtio;
 #[cfg(feature = "webtransport")]
 pub mod remotewtsink;

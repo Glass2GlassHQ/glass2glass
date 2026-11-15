@@ -106,8 +106,6 @@ LAN, and a host off the LAN needs a forwarded UDP port.
   estimate.
 - Stream-per-frame mode: a frame the client has not finished when a newer
   keyframe is queued is reset, since nothing after the keyframe needs it.
-- Datagram mode splits a frame larger than one datagram into shards plus a
-  repair percentage, instead of sending it on a stream.
 - The host destroys the virtual device a removal packet names.
 
 ## WebSocket fallback

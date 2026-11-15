@@ -300,7 +300,7 @@ impl PacketClient for WtClient {
         PropertySpec::new(
             "video-mode",
             PropKind::Str,
-            "stream sends every packet in order on one stream; stream-per-frame sends each frame on its own stream and resets unacknowledged frames when a keyframe goes out; datagrams sends each frame that fits as one unreliable datagram",
+            "stream sends every packet in order on one stream; stream-per-frame sends each frame on its own stream and resets unacknowledged frames when a keyframe goes out; datagrams splits each frame into unreliable datagram shards plus Reed-Solomon repair sized to the path's loss",
         )
         .with_default("stream")
         .with_enum_values("stream | stream-per-frame | datagrams"),

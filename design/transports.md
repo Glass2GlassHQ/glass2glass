@@ -837,8 +837,16 @@ unless `--send-window` is set.
 `video-mode` on `RemoteWtSink` picks how packets after the leading caps
 travel. `stream`, the default, keeps them all in order on the one
 bidirectional stream. `stream-per-frame` sends each packet on its own
-unidirectional stream. `datagrams` sends each data frame that fits the path as
-one QUIC datagram and everything else on its own unidirectional stream. In the
+unidirectional stream. `datagrams` splits each data frame into equal shards of
+one QUIC datagram each, adds Reed-Solomon repair shards (`reed-solomon-simd`),
+and sends everything else on its own unidirectional stream. The receiver
+rebuilds a frame once as many of its shards as it has originals are in, from
+any mix of original and repair shards. Every frame gets the fewest repair shards,
+at least one, that keep the chance of losing it under 1% at the path's loss
+rate. That rate is smoothed from quinn's lost and sent packet counts every
+250 ms and starts at 5%. quinn packs datagrams that fit together into one
+packet, so a frame under half a datagram can share a packet with its repair
+shard and be lost with it. In the
 two new modes every packet starts with two little-endian `u64`s, the data
 frames and the control packets sent before it, and `RemoteWtSrc` restores send
 order from them whatever mode the sender runs. A data frame never waits on one
