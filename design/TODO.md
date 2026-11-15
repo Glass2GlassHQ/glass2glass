@@ -36,7 +36,8 @@ The plan is [remote.md](remote.md).
   not ask for the screen again.
 - Opus audio from the host's default capture device, on a short queue that
   does not hold the picture.
-- A D3D11-to-CUDA element after `d3d11convert` for `nvenc`.
+- Encode with `d3d11convert ! nvenc` on a Windows host with an NVIDIA GPU,
+  falling back to `mfh264enc`, and rebuild the host graph after `AccessLost`.
 - The macOS client, then `display-index` on `screencapturesrc` and a macOS
   host through `vtencode`.
 - Cursor from the Wayland portal host and on the Windows client, clipboard,

@@ -19,6 +19,9 @@
 //! The incoming `OwnedCudaBuffer` must be a contiguous NV12 surface (chroma at
 //! `luma_ptr + luma_pitch * height`, a single base pointer + pitch), which is how
 //! NVDEC lays out its hwframe pool; NVENC registers that one device pointer.
+//! On Windows an NV12 `MemoryDomain::D3D11Texture` (eg from `d3d11convert`) is
+//! accepted too: the session then opens on the texture's `ID3D11Device` and
+//! NVENC registers the texture itself, with no CUDA involved.
 //!
 //! Bindings are a thin hand-rolled FFI linking `libnvidia-encode` and `libcuda`
 //! directly (no `cudarc`), matching the decision in DESIGN-C3-cuda.md §6 and the
@@ -75,6 +78,8 @@ use alloc::sync::Arc;
 
 use g2g_core::caps::framerate_q16_to_fraction;
 use g2g_core::memory::{CudaKeepAlive, DomainSet, MemoryDomainKind, OwnedCudaBuffer};
+#[cfg(target_os = "windows")]
+use g2g_core::OwnedD3D11Texture;
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError,
     HardwareError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
@@ -135,7 +140,7 @@ pub struct NvEnc {
     /// WebRTC BWE drop). `None` until a session is open.
     applied: Option<LiveConfig>,
     /// Open NVENC session (lazy): the SDK function table, the encoder handle, and
-    /// the CUDA context it was opened on. `None` until the first frame.
+    /// the device it was opened on. `None` until the first frame.
     session: Option<Session>,
     /// Monotonic input frame index stamped into `NV_ENC_PIC_PARAMS::frameIdx`.
     frame_no: u32,
@@ -157,34 +162,127 @@ struct LiveConfig {
 }
 
 /// A live NVENC session: the loaded API function table, the opaque encoder
-/// handle, and the CUDA context the handle and all input surfaces live in.
+/// handle, and the device the handle and all input surfaces live on.
 struct Session {
     funcs: Box<ffi::NvEncodeApiFunctionList>,
     encoder: *mut core::ffi::c_void,
-    context: u64,
+    device: SessionDevice,
     /// Output bitstream buffer, created once at session open and reused every
     /// frame: NVENC runs in sync mode (one locked + copied output per
     /// encode), so a single buffer suffices and the per-frame create / destroy
     /// the v1 path paid is gone. Destroyed with the session.
     output: *mut core::ffi::c_void,
-    /// Shared-ownership pin on the producer of the first input frame, so the CUDA
-    /// `context` (owned upstream, eg by a `CudaUpload` or `NvDec`) outlives this
-    /// session. Without it a producer that created the context can be torn down
-    /// (destroying the context) before `Drop` here destroys the encoder in it, a
-    /// use-after-free when the producer and encoder run in separate runner arms.
-    _keep_alive: Arc<dyn CudaKeepAlive>,
     /// Input surfaces registered with NVENC, oldest first. An upstream pool hands
     /// the same few surfaces round, so each is registered once, not every frame.
     registrations: alloc::collections::VecDeque<InputRegistration>,
 }
 
+enum SessionDevice {
+    Cuda {
+        context: u64,
+        /// Shared-ownership pin on the producer of the first input frame, so the CUDA
+        /// `context` (owned upstream, eg by a `CudaUpload` or `NvDec`) outlives this
+        /// session. Without it a producer that created the context can be torn down
+        /// (destroying the context) before `Drop` here destroys the encoder in it, a
+        /// use-after-free when the producer and encoder run in separate runner arms.
+        _keep_alive: Arc<dyn CudaKeepAlive>,
+    },
+    // the first frame: its keep-alive pins the texture, and its device is the session's ID3D11Device
+    #[cfg(target_os = "windows")]
+    D3D11(OwnedD3D11Texture),
+}
+
+impl SessionDevice {
+    fn of(input: EncodeInput<'_>) -> Self {
+        match input {
+            EncodeInput::Cuda(buf) => Self::Cuda {
+                context: buf.context,
+                _keep_alive: buf.keep_alive_arc(),
+            },
+            #[cfg(target_os = "windows")]
+            EncodeInput::D3D11(texture) => Self::D3D11(texture.clone()),
+        }
+    }
+
+    fn device_type_and_handle(&self) -> (u32, *mut core::ffi::c_void) {
+        match self {
+            Self::Cuda { context, .. } => (
+                ffi::NV_ENC_DEVICE_TYPE_CUDA,
+                *context as *mut core::ffi::c_void,
+            ),
+            #[cfg(target_os = "windows")]
+            Self::D3D11(texture) => (
+                ffi::NV_ENC_DEVICE_TYPE_DIRECTX,
+                texture.device as *mut core::ffi::c_void,
+            ),
+        }
+    }
+
+    fn opened_on(&self, input: EncodeInput<'_>) -> bool {
+        match (self, input) {
+            (Self::Cuda { context, .. }, EncodeInput::Cuda(buf)) => *context == buf.context,
+            #[cfg(target_os = "windows")]
+            (Self::D3D11(first), EncodeInput::D3D11(texture)) => first.device == texture.device,
+            #[cfg(target_os = "windows")]
+            _ => false,
+        }
+    }
+
+    fn make_current(&self) -> Result<Option<ContextGuard>, G2gError> {
+        match self {
+            Self::Cuda { context, .. } => ContextGuard::push(*context).map(Some),
+            #[cfg(target_os = "windows")]
+            Self::D3D11(_) => Ok(None),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum EncodeInput<'a> {
+    Cuda(&'a OwnedCudaBuffer),
+    #[cfg(target_os = "windows")]
+    D3D11(&'a OwnedD3D11Texture),
+}
+
+impl EncodeInput<'_> {
+    fn resource(self) -> InputResource {
+        match self {
+            Self::Cuda(buf) => InputResource {
+                resource_type: ffi::NV_ENC_INPUT_RESOURCE_TYPE_CUDADEVICEPTR,
+                resource: buf.luma_ptr,
+                pitch: buf.luma_pitch,
+                sub_resource_index: 0,
+            },
+            // nvEncodeAPI.h: a DirectX resource registers with a pitch of 0
+            #[cfg(target_os = "windows")]
+            Self::D3D11(texture) => InputResource {
+                resource_type: ffi::NV_ENC_INPUT_RESOURCE_TYPE_DIRECTX,
+                resource: texture.texture,
+                pitch: 0,
+                sub_resource_index: texture.subresource,
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct InputResource {
+    resource_type: u32,
+    resource: u64,
+    pitch: u32,
+    sub_resource_index: u32,
+}
+
 /// One input surface's NVENC registration and the surface it registers.
 struct InputRegistration {
-    device_pointer: u64,
-    pitch: u32,
+    resource: InputResource,
     buffer_format: u32,
     handle: *mut core::ffi::c_void,
 }
+
+// dxgiformat.h
+#[cfg(target_os = "windows")]
+const DXGI_FORMAT_NV12: u32 = 103;
 
 /// Registrations kept before the oldest is released for a new surface. Covers
 /// the decode and upload pools upstream, so a steady stream registers nothing.
@@ -386,11 +484,11 @@ impl NvEnc {
     /// config, tweaks rate control + GOP, and initializes the encoder for the
     /// negotiated geometry. Fails loud (`HardwareError::Other`) if NVENC is
     /// unavailable so the caller can fall back to `FfmpegVideoEnc`.
-    fn open_session(&mut self, buf: &OwnedCudaBuffer) -> Result<(), G2gError> {
+    fn open_session(&mut self, input: EncodeInput<'_>) -> Result<(), G2gError> {
         if let Some(file) = missing_driver_library() {
             return Err(G2gError::Hardware(HardwareError::LibraryNotFound(file)));
         }
-        let context = buf.context;
+        let device = SessionDevice::of(input);
         let encode_guid = self.encode_guid();
         // Load the SDK dispatch table.
         let mut funcs: Box<ffi::NvEncodeApiFunctionList> =
@@ -402,16 +500,14 @@ impl NvEnc {
         // SDK fills it with entry points and only reads `version`.
         nvchk(unsafe { ffi::nv_encode_api_create_instance(funcs.as_mut()) })?;
 
-        // Everything below runs in `context` (push now, pop at the end).
-        let _ctx = ContextGuard::push(context)?;
+        // Everything below runs in a CUDA session's context (push now, pop at the end).
+        let _ctx = device.make_current()?;
 
-        // Open a CUDA encode session.
         // SAFETY: the NVENC param structs are plain old data (ints, pointers,
         // reserved arrays); all-zero is a valid initial state we then version-tag.
         let mut open: ffi::OpenEncodeSessionExParams = unsafe { core::mem::zeroed() };
         open.version = ffi::NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS_VER;
-        open.device_type = ffi::NV_ENC_DEVICE_TYPE_CUDA;
-        open.device = context as *mut core::ffi::c_void;
+        (open.device_type, open.device) = device.device_type_and_handle();
         open.api_version = ffi::NVENCAPI_VERSION;
         let open_fn = funcs.nv_enc_open_encode_session_ex.ok_or(hw())?;
         let mut encoder: *mut core::ffi::c_void = core::ptr::null_mut();
@@ -427,10 +523,8 @@ impl NvEnc {
         self.session = Some(Session {
             funcs,
             encoder,
-            context,
+            device,
             output: core::ptr::null_mut(),
-            // Pin the producer's context for the session's life (see field docs).
-            _keep_alive: buf.keep_alive_arc(),
             registrations: alloc::collections::VecDeque::new(),
         });
 
@@ -593,7 +687,7 @@ impl NvEnc {
             .funcs
             .nv_enc_get_encode_preset_config_ex
             .ok_or(hw())?;
-        let _ctx = ContextGuard::push(session.context)?;
+        let _ctx = session.device.make_current()?;
 
         // Re-derive the preset config, then overlay the (new) rate control, exactly
         // as session open does, so only the bitrate differs from the live config.
@@ -628,53 +722,58 @@ impl NvEnc {
         Ok(())
     }
 
-    /// Encode one CUDA NV12 surface, returning any ready `(annex_b, pts_ns)`
-    /// access units. Opens the session lazily on `buf.context`.
+    /// Encode one input surface, returning any ready `(annex_b, pts_ns)`
+    /// access units. Opens the session lazily on the input's device.
     fn encode(
         &mut self,
-        buf: &OwnedCudaBuffer,
+        input: EncodeInput<'_>,
         pts_ns: u64,
     ) -> Result<Vec<(Vec<u8>, u64)>, G2gError> {
         if self.session.is_none() {
-            self.open_session(buf)?;
+            self.open_session(input)?;
         }
-        // nvenc reads the input on the legacy default stream, which does not wait on non-blocking streams
-        buf.keep_alive().wait_until_ready()?;
+        match input {
+            // nvenc reads the input on the legacy default stream, which does not wait on non-blocking streams
+            EncodeInput::Cuda(buf) => buf.keep_alive().wait_until_ready()?,
+            #[cfg(target_os = "windows")]
+            EncodeInput::D3D11(_) => {}
+        }
         // Apply any pending rate-control / GOP change before encoding.
         if self.applied != Some(self.live_config()) {
             self.reconfigure_live()?;
         }
         let session = self.session.as_ref().ok_or(G2gError::NotConfigured)?;
-        if session.context != buf.context {
+        if !session.device.opened_on(input) {
             // The NVDEC pool keeps one context for the stream; a mid-stream
-            // context change is unsupported (would need a session re-open).
+            // change of CUDA context or D3D11 device is unsupported (would need a
+            // session re-open).
             return Err(hw());
         }
-        let _ctx = ContextGuard::push(buf.context)?;
+        let _ctx = session.device.make_current()?;
 
         let force = core::mem::take(&mut self.force_keyframe);
-        // SAFETY: `buf`'s NV12 device pointer is valid in the pushed context for
-        // the life of this call (the frame's keep-alive pins it); the session
+        // SAFETY: the input surface is valid on the session's device for the
+        // life of this call (the frame's keep-alive pins it); the session
         // handle and function table are live.
-        let pkt = unsafe { self.encode_locked(buf, pts_ns, force) }?;
+        let pkt = unsafe { self.encode_locked(input, pts_ns, force) }?;
         Ok(pkt)
     }
 
-    /// Register -> map -> encode -> drain one surface. Must run with `buf.context`
-    /// current.
+    /// Register -> map -> encode -> drain one surface. A CUDA input must run
+    /// with its context current.
     ///
     /// # Safety
-    /// `buf`'s pointers must be valid device memory in the current CUDA context,
-    /// and a session must be open.
+    /// The input surface must be valid on the session's device (for CUDA, device
+    /// memory in the current context), and a session must be open.
     unsafe fn encode_locked(
         &mut self,
-        buf: &OwnedCudaBuffer,
+        input: EncodeInput<'_>,
         pts_ns: u64,
         force_keyframe: bool,
     ) -> Result<Vec<(Vec<u8>, u64)>, G2gError> {
         let buffer_format = self.nv_buffer_format();
         // SAFETY: forwarded from this fn's contract.
-        let registered = unsafe { self.registered_input(buf, buffer_format) }?;
+        let registered = unsafe { self.registered_input(input.resource(), buffer_format) }?;
         let session = self.session.as_ref().ok_or(G2gError::NotConfigured)?;
         let enc = session.encoder;
         let f = &session.funcs;
@@ -706,7 +805,12 @@ impl NvEnc {
         pic.version = ffi::NV_ENC_PIC_PARAMS_VER;
         pic.input_width = self.width;
         pic.input_height = self.height;
-        pic.input_pitch = buf.luma_pitch;
+        pic.input_pitch = match input {
+            EncodeInput::Cuda(buf) => buf.luma_pitch,
+            // nvEncodeAPI.h: an unknown input pitch is passed as the input width
+            #[cfg(target_os = "windows")]
+            EncodeInput::D3D11(_) => self.width,
+        };
         pic.frame_idx = self.frame_no;
         pic.input_time_stamp = pts_ns;
         pic.input_buffer = mapped;
@@ -798,27 +902,26 @@ impl NvEnc {
         }
     }
 
-    /// The session's registration of `buf`'s input surface, registering it (and
+    /// The session's registration of an input surface, registering it (and
     /// releasing the oldest registration once [`MAX_INPUT_REGISTRATIONS`] are
     /// held) the first time the surface arrives. For RGBA the pitch is the full
     /// row in bytes and the single plane lives at `luma_ptr`; NVENC color
     /// converts internally.
     ///
     /// # Safety
-    /// `buf`'s pointers must be valid device memory in the current CUDA context,
-    /// and a session must be open.
+    /// `resource` must be valid on the session's device (for CUDA, device memory
+    /// in the current context), and a session must be open.
     unsafe fn registered_input(
         &mut self,
-        buf: &OwnedCudaBuffer,
+        resource: InputResource,
         buffer_format: u32,
     ) -> Result<*mut core::ffi::c_void, G2gError> {
         let (width, height) = (self.width, self.height);
         let session = self.session.as_mut().ok_or(G2gError::NotConfigured)?;
-        let cached = session.registrations.iter().find(|r| {
-            r.device_pointer == buf.luma_ptr
-                && r.pitch == buf.luma_pitch
-                && r.buffer_format == buffer_format
-        });
+        let cached = session
+            .registrations
+            .iter()
+            .find(|r| r.resource == resource && r.buffer_format == buffer_format);
         if let Some(registration) = cached {
             return Ok(registration.handle);
         }
@@ -833,19 +936,19 @@ impl NvEnc {
         // reserved arrays); all-zero is a valid initial state we then version-tag.
         let mut reg: ffi::RegisterResource = unsafe { core::mem::zeroed() };
         reg.version = ffi::NV_ENC_REGISTER_RESOURCE_VER;
-        reg.resource_type = ffi::NV_ENC_INPUT_RESOURCE_TYPE_CUDADEVICEPTR;
+        reg.resource_type = resource.resource_type;
         reg.width = width;
         reg.height = height;
-        reg.pitch = buf.luma_pitch;
-        reg.resource_to_register = buf.luma_ptr as *mut core::ffi::c_void;
+        reg.pitch = resource.pitch;
+        reg.sub_resource_index = resource.sub_resource_index;
+        reg.resource_to_register = resource.resource as *mut core::ffi::c_void;
         reg.buffer_format = buffer_format;
         reg.buffer_usage = ffi::NV_ENC_INPUT_IMAGE;
         let register = session.funcs.nv_enc_register_resource.ok_or(hw())?;
         // SAFETY: valid encoder + fully-initialized register struct.
         nvchk(unsafe { register(session.encoder, &mut reg) })?;
         session.registrations.push_back(InputRegistration {
-            device_pointer: buf.luma_ptr,
-            pitch: buf.luma_pitch,
+            resource,
             buffer_format,
             handle: reg.registered_resource,
         });
@@ -887,7 +990,7 @@ impl Drop for NvEnc {
     fn drop(&mut self) {
         if let Some(s) = self.session.take() {
             // Destroy on the session's context, best-effort.
-            if let Ok(_ctx) = ContextGuard::push(s.context) {
+            if let Ok(_ctx) = s.device.make_current() {
                 for registration in &s.registrations {
                     // SAFETY: a live registration of this session, unmapped.
                     unsafe { s.unregister(registration.handle) };
@@ -1069,11 +1172,15 @@ impl AsyncElement for NvEnc {
         }))
     }
 
-    /// NVENC ingests device-resident frames only (`MemoryDomain::Cuda`); a System
-    /// frame is rejected at `process`. Declaring it lets the converter
-    /// auto-plug splice a `CudaUpload` ahead of a CPU-side NV12 source.
+    /// NVENC ingests device-resident frames only (`MemoryDomain::Cuda`, plus
+    /// `MemoryDomain::D3D11Texture` on Windows); a System frame is rejected at
+    /// `process`. Declaring it lets the converter auto-plug splice a `CudaUpload`
+    /// ahead of a CPU-side NV12 source.
     fn input_domains(&self) -> DomainSet {
-        DomainSet::only(MemoryDomainKind::Cuda)
+        let domains = DomainSet::only(MemoryDomainKind::Cuda);
+        #[cfg(target_os = "windows")]
+        let domains = domains.with(MemoryDomainKind::D3D11Texture);
+        domains
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -1189,10 +1296,20 @@ impl AsyncElement for NvEnc {
             }
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let MemoryDomain::Cuda(buf) = &frame.domain else {
-                        return Err(G2gError::UnsupportedDomain);
+                    let input = match &frame.domain {
+                        MemoryDomain::Cuda(buf) => EncodeInput::Cuda(buf),
+                        #[cfg(target_os = "windows")]
+                        MemoryDomain::D3D11Texture(texture) => {
+                            let nv12 = texture.dxgi_format == DXGI_FORMAT_NV12
+                                && self.input_format == RawVideoFormat::Nv12;
+                            if !nv12 {
+                                return Err(G2gError::CapsMismatch);
+                            }
+                            EncodeInput::D3D11(texture)
+                        }
+                        _ => return Err(G2gError::UnsupportedDomain),
                     };
-                    let packets = self.encode(buf, frame.timing.pts_ns)?;
+                    let packets = self.encode(input, frame.timing.pts_ns)?;
                     self.emit(packets, out).await?;
                 }
                 PipelinePacket::Eos => {
@@ -1307,6 +1424,10 @@ mod ffi {
     // Enum values used (all int-sized C enums).
     pub const NV_ENC_DEVICE_TYPE_CUDA: u32 = 0x1;
     pub const NV_ENC_INPUT_RESOURCE_TYPE_CUDADEVICEPTR: u32 = 0x1;
+    #[cfg(target_os = "windows")]
+    pub const NV_ENC_DEVICE_TYPE_DIRECTX: u32 = 0x0;
+    #[cfg(target_os = "windows")]
+    pub const NV_ENC_INPUT_RESOURCE_TYPE_DIRECTX: u32 = 0x0;
     pub const NV_ENC_INPUT_IMAGE: u32 = 0x0;
     pub const NV_ENC_BUFFER_FORMAT_NV12: u32 = 0x1;
     /// Packed `A8R8G8B8` (word order), byte order B,G,R,A on little-endian.
@@ -2063,6 +2184,110 @@ pub(crate) mod tests {
     pub(crate) async fn encode_session_lock() -> tokio::sync::MutexGuard<'static, ()> {
         static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
         LOCK.lock().await
+    }
+
+    #[cfg(all(
+        target_os = "windows",
+        feature = "d3d11-convert",
+        feature = "mf-decode"
+    ))]
+    #[test]
+    fn a_d3d11_nv12_texture_encodes_and_decodes_back() {
+        use g2g_core::frame::Frame;
+        use g2g_core::FrameTiming;
+        use windows::Win32::Graphics::Direct3D11::{
+            D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_SUBRESOURCE_DATA,
+            D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
+        };
+        use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_NV12, DXGI_SAMPLE_DESC};
+
+        const W: u32 = 320;
+        const H: u32 = 240;
+        const FRAMES: u64 = 10;
+        // measured 0.001 on an RTX 3090, and consecutive patterns differ by 7
+        const MAX_MEAN_LUMA_ERROR: f64 = 1.0;
+
+        let _lock = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime")
+            .block_on(encode_session_lock());
+        if missing_driver_library().is_some() {
+            return;
+        }
+        let Some(device) = crate::d3d11convert::tests::video_device() else {
+            return;
+        };
+        let frames: Vec<PipelinePacket> = (0..FRAMES)
+            .map(|seq| {
+                let pixels = nv12_pattern(W, H, seq);
+                // the bind flags d3d11convert gives its output textures
+                let desc = D3D11_TEXTURE2D_DESC {
+                    Width: W,
+                    Height: H,
+                    MipLevels: 1,
+                    ArraySize: 1,
+                    Format: DXGI_FORMAT_NV12,
+                    SampleDesc: DXGI_SAMPLE_DESC {
+                        Count: 1,
+                        Quality: 0,
+                    },
+                    Usage: D3D11_USAGE_DEFAULT,
+                    BindFlags: (D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE).0 as u32,
+                    CPUAccessFlags: 0,
+                    MiscFlags: 0,
+                };
+                let data = D3D11_SUBRESOURCE_DATA {
+                    pSysMem: pixels.as_ptr().cast(),
+                    SysMemPitch: W,
+                    SysMemSlicePitch: 0,
+                };
+                let mut texture = None;
+                // SAFETY: `pixels` is a tight NV12 frame, its chroma rows right after the luma rows at the stated pitch.
+                unsafe {
+                    device
+                        .CreateTexture2D(&desc, Some(&data), Some(&mut texture))
+                        .expect("create the nv12 texture");
+                }
+                let domain = crate::d3d11texture::texture_frame(
+                    &device,
+                    Arc::new(crate::d3d11texture::TextureOwner(texture.expect("texture"))),
+                    W,
+                    H,
+                    DXGI_FORMAT_NV12,
+                );
+                PipelinePacket::DataFrame(Frame::new(domain, FrameTiming::default(), seq))
+            })
+            .collect();
+
+        let encoded = crate::testutil::run_packets(&mut NvEnc::new(), &nv12(W, H), frames);
+        let stream = crate::testutil::data_bytes(&encoded.packets);
+        let decoded = crate::testutil::decode_h264(&mut crate::mfdecode::MfDecode::new(), &stream);
+        let pictures: Vec<&[u8]> = decoded
+            .iter()
+            .filter_map(|packet| match packet {
+                PipelinePacket::DataFrame(frame) => frame.domain.as_system_slice(),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            pictures.len(),
+            FRAMES as usize,
+            "every texture decodes back"
+        );
+        let luma_len = (W * H) as usize;
+        for (seq, picture) in pictures.iter().enumerate() {
+            let expected = nv12_pattern(W, H, seq as u64);
+            let total_error: u64 = picture[..luma_len]
+                .iter()
+                .zip(&expected[..luma_len])
+                .map(|(decoded, source)| u64::from(decoded.abs_diff(*source)))
+                .sum();
+            let mean_error = total_error as f64 / luma_len as f64;
+            assert!(
+                mean_error <= MAX_MEAN_LUMA_ERROR,
+                "frame {seq} luma is {mean_error} off the texture it was encoded from"
+            );
+        }
     }
 
     /// A tight NV12 frame (pitch == width) holding a moving diagonal ramp over

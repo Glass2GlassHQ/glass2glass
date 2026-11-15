@@ -435,7 +435,7 @@ impl PadTemplates for D3D11Convert {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use windows::Win32::Foundation::HMODULE;
     use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
@@ -461,7 +461,7 @@ mod tests {
     // gpu and cpu conversions round differently
     const TOLERANCE: u8 = 2;
 
-    fn video_device() -> Option<ID3D11Device> {
+    pub(crate) fn video_device() -> Option<ID3D11Device> {
         let mut device = None;
         // SAFETY: the out-param is a valid local, written by the call before it is read.
         unsafe {

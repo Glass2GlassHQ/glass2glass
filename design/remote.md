@@ -15,7 +15,7 @@ with the picture free to drop frames and the input required to arrive.
 A host and a client for Linux, Windows, and macOS, plus a Chrome page.
 
 - One display, chosen by index. Several displays come after the first session runs.
-- H.264 from `nvenc` where a CUDA surface is available, from `ffmpegenc` VA-API
+- H.264 from `nvenc` on an NVIDIA GPU, from `ffmpegenc` VA-API
   on a Linux drm buffer, from `vtencode` on macOS, from `mfencode` on Windows,
   and from `ffmpegenc` software where none of those open.
 - Opus audio from the host's default capture device.
@@ -52,8 +52,8 @@ LAN, and a host off the LAN needs a forwarded UDP port.
    client pins with `--cert-hash`.
 4. The first slice encodes whatever memory the capture element already
    produces. In-place GPU encode is the next slice on each OS, and the session
-   runs before it lands. `nvenc` rejects anything other than
-   `MemoryDomain::Cuda`. `mfencode hardware=true` takes a D3D11 NV12 texture.
+   runs before it lands. `nvenc` takes `MemoryDomain::Cuda`, and a D3D11 NV12
+   texture on Windows. `mfencode hardware=true` takes a D3D11 NV12 texture.
    `ffmpegenc` VA-API takes a drm buffer. `vtencode` takes the
    `screencapturesrc` `cv-output` path.
 5. The client's video sink presents each frame as it is decoded, with
@@ -87,7 +87,7 @@ LAN, and a host off the LAN needs a forwarded UDP port.
 | macOS screen | `screencapturesrc`. `cv-output` keeps the IOSurface. It captures the first display until `display-index` exists. |
 | Windows screen | `d3d11screencapturesrc`, `monitor-index`, `fps`, BGRA in system memory or a D3D11 texture. |
 | Windows GPU colour convert | `d3d11convert`, BGRA D3D11 texture to NV12 on the video processor. |
-| NVIDIA encode | `nvenc`. CUDA NV12 in, Annex-B out, no B-frames, `gop-size=-1` by default, `force_keyframe()` latched and set on the first frame. |
+| NVIDIA encode | `nvenc`. CUDA NV12, or a D3D11 NV12 texture on Windows, in, Annex-B out, no B-frames, `gop-size=-1` by default, `force_keyframe()` latched and set on the first frame. |
 | Upload into CUDA | `cudaupload`, Linux and Windows. |
 | VA-API encode | `ffmpegenc` backend `h264_vaapi` / `hevc_vaapi`. |
 | macOS encode | `vtencode`. |
@@ -145,16 +145,14 @@ d3d11screencapturesrc ! d3d11convert ! mfh264enc hardware=true
 wasapisrc ! audioconvert ! opusenc
 ```
 
-Windows with NVIDIA, after the bridge exists:
+Windows with NVIDIA:
 
 ```
 d3d11screencapturesrc ! d3d11convert ! nvenc
 ```
 
-The bridge turns the NV12 D3D11 texture into `MemoryDomain::Cuda` by
-registering it with `cuGraphicsD3D11RegisterResource` and wrapping the mapped
-pointer the way `nvenc` already requires: one NV12 base pointer, chroma at
-`luma + pitch * height`.
+`nvenc` opens its session on the texture's `ID3D11Device` and registers the
+texture itself, so the frame never passes through CUDA.
 
 macOS:
 
@@ -189,11 +187,10 @@ session is solid.
 
 ## Capture sources to add
 
-### D3D11 to CUDA for nvenc
+### nvenc on the Windows host
 
-An element after `d3d11convert` that registers each NV12 texture with CUDA and
-emits `MemoryDomain::Cuda`, so `nvenc` encodes it in place. It fails at
-configure time without CUDA. Capture runs in the interactive session, never in
+The host encodes with `d3d11convert ! nvenc` on an NVIDIA GPU and falls back to
+`mfh264enc hardware=true`. Capture runs in the interactive session, never in
 session 0, and the host rebuilds the graph after `AccessLost` fails the source.
 
 ### ximagesrc
@@ -321,7 +318,7 @@ ones.
 4. **Windows host, then the QUIC transport.** `d3d11screencapturesrc`,
    `mfencode`, `SendInput`. Then FEC datagram video in `remotewt`. Then the
    WebSocket fallback. Then the Windows
-   client, then the D3D11-to-CUDA output and `nvenc`.
+   client, then D3D11 input on `nvenc`.
 5. **macOS client, then the macOS host** on `screencapturesrc` `display-index`
    and `vtencode`.
 6. **Audio, clipboard, cursor, grab.**

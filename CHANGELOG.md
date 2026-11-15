@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2332: `nvenc` encodes D3D11 NV12 textures on Windows, opening its session on the texture's device.
 - M2331: `g2g-desktop client` runs on Windows, decoding with `d3d12h264dec` and forwarding the window's keyboard, mouse and wheel input.
 - M2330: `remotewt` falls back to a WebSocket over TLS on the same port when UDP is blocked, and `g2g-desktop client` takes `--transport`.
 - M2329: `remotewt` datagram video splits frames into Reed-Solomon shards with repair sized to the measured path loss.
