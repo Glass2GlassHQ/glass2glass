@@ -27,7 +27,15 @@ const CLIENT_CATEGORY: &str = "g2g-desktop-client";
 const WINDOW_TITLE: &str = "g2g-desktop";
 // glass-to-glass latency grows with link depth
 const LINK_CAPACITY: usize = 2;
+#[cfg(target_os = "linux")]
 const DECODE: &str = "h264parse ! ffmpegdec";
+// d3d12h264dec decodes into textures wgpusink presents on the decoder's device
+#[cfg(target_os = "windows")]
+const DECODE: &str = "h264parse ! d3d12h264dec";
+#[cfg(target_os = "linux")]
+const WINDOW_SCANCODES: ScancodeSet = ScancodeSet::Evdev;
+#[cfg(target_os = "windows")]
+const WINDOW_SCANCODES: ScancodeSet = ScancodeSet::Windows;
 const KEYBOARD_DEVICE: u8 = 0;
 const DISPLAY: u8 = 0;
 const FORWARDED_KINDS: [EventKind; 4] = [
@@ -73,7 +81,7 @@ fn event_from(input: WindowInput) -> Option<Event> {
     match input {
         WindowInput::Focus(_) => None,
         WindowInput::Key { scancode, down } => {
-            let usage = usage_from_scancode(ScancodeSet::Evdev, scancode)?;
+            let usage = usage_from_scancode(WINDOW_SCANCODES, scancode)?;
             Some(Event::Key {
                 device: KEYBOARD_DEVICE,
                 usage,

@@ -21,6 +21,7 @@ session = [
     "g2g-plugins/d3d11-screen-capture",
     "g2g-plugins/d3d11-convert",
     "g2g-plugins/mf-encode",
+    "g2g-plugins/d3d12-decode",
     "dep:windows",
     "g2g-plugins/wgpu-present",
     "g2g-plugins/metadata",

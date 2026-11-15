@@ -10,12 +10,9 @@ use std::process::ExitCode;
 use std::str::FromStr;
 use std::sync::Arc;
 
-#[cfg(target_os = "linux")]
 use g2g_core::runtime::Observer;
 use g2g_core::runtime::{GraphNodeRef, VisitRecorder};
-#[cfg(target_os = "linux")]
 use g2g_core::G2gError;
-#[cfg(target_os = "linux")]
 use g2g_desktop::client::{run_client, ClientError, ClientSettings, ClientTransport};
 use g2g_desktop::host::{
     check_token_len, inject, run_session, HostCapture, HostListener, HostSettings,
@@ -38,12 +35,14 @@ const HOST_USAGE: &str =
     "  g2g-desktop host --token TOKEN [--port 8080] [--fps 60] [--bitrate 4000000]
                    [--send-window BYTES] [--video-mode stream|stream-per-frame|datagrams]
                    [--trace FILE]";
-#[cfg(target_os = "linux")]
-const PLATFORM_USAGE: &str =
+const CLIENT_USAGE: &str =
     "  g2g-desktop client --host HOST --cert-hash SHA256 --token TOKEN [--port 8080] [--inputs true]
                      [--transport auto|quic|websocket] [--trace FILE]";
+#[cfg(target_os = "linux")]
+const PLATFORM_HOST_USAGE: &str = "";
 #[cfg(target_os = "windows")]
-const PLATFORM_USAGE: &str = "                   [--monitor-index -1] [--quality-vs-speed 0-100]";
+const PLATFORM_HOST_USAGE: &str =
+    "\n                   [--monitor-index -1] [--quality-vs-speed 0-100]";
 const DEFAULT_PORT: u16 = 8080;
 const DEFAULT_FPS: u32 = 60;
 const DEFAULT_BITRATE: u32 = 4_000_000;
@@ -62,7 +61,6 @@ const PLATFORM_HOST_FLAGS: [&str; 0] = [];
 const PLATFORM_HOST_FLAGS: [&str; 2] = ["monitor-index", "quality-vs-speed"];
 #[cfg(target_os = "windows")]
 const PRIMARY_MONITOR: i32 = -1;
-#[cfg(target_os = "linux")]
 const CLIENT_FLAGS: [&str; 7] = [
     "host",
     "port",
@@ -237,7 +235,6 @@ async fn host(flags: Flags) -> Result<(), Box<dyn Error>> {
     }
 }
 
-#[cfg(target_os = "linux")]
 async fn client(flags: Flags) -> Result<(), Box<dyn Error>> {
     let host = required(&flags, "host")?;
     let port = parsed(&flags, "port", DEFAULT_PORT)?;
@@ -302,10 +299,9 @@ fn main() -> ExitCode {
     let result = match command.as_deref() {
         Some("host") => parse_flags(args, &[&HOST_FLAGS[..], &PLATFORM_HOST_FLAGS].concat())
             .and_then(|flags| runtime.block_on(local.run_until(host(flags)))),
-        #[cfg(target_os = "linux")]
         Some("client") => parse_flags(args, &CLIENT_FLAGS)
             .and_then(|flags| runtime.block_on(local.run_until(client(flags)))),
-        _ => Err(format!("usage:\n{HOST_USAGE}\n{PLATFORM_USAGE}").into()),
+        _ => Err(format!("usage:\n{HOST_USAGE}{PLATFORM_HOST_USAGE}\n{CLIENT_USAGE}").into()),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

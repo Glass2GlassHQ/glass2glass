@@ -127,9 +127,12 @@ impl ViewportRectangle {
 }
 
 // the picture pixel drawn at a point of the target, or none in the bars around the picture
-#[cfg(all(
-    target_os = "linux",
-    any(feature = "wgpu-present", feature = "cuda-gl", feature = "gl-sink")
+#[cfg(any(
+    all(
+        target_os = "linux",
+        any(feature = "wgpu-present", feature = "cuda-gl", feature = "gl-sink")
+    ),
+    all(target_os = "windows", feature = "wgpu-present")
 ))]
 pub(crate) fn picture_point_in(
     viewport: ViewportRectangle,

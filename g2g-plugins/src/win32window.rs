@@ -15,6 +15,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 #[cfg(feature = "wgpu-present")]
+use crate::windowinput::{PointerButton, WindowInput};
+#[cfg(feature = "wgpu-present")]
 use crate::windowworker::{
     PresentReports, WindowParams, WindowRenderer, WorkerChannels, WorkerCmd,
 };
@@ -36,7 +38,86 @@ pub(crate) fn pump_messages() -> bool {
     true
 }
 
+#[cfg(feature = "wgpu-present")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WindowMessage {
+    Input(WindowInput),
+    PointerAt { x: i32, y: i32 },
+}
+
+#[cfg(feature = "wgpu-present")]
+std::thread_local! {
+    // win32 runs wndproc on the thread that created the window, the present worker
+    static WINDOW_MESSAGES: core::cell::RefCell<alloc::vec::Vec<WindowMessage>> =
+        const { core::cell::RefCell::new(alloc::vec::Vec::new()) };
+}
+
+#[cfg(feature = "wgpu-present")]
+fn low_word(value: usize) -> i32 {
+    i32::from(value as u16 as i16)
+}
+
+#[cfg(feature = "wgpu-present")]
+fn high_word(value: usize) -> i32 {
+    low_word(value >> 16)
+}
+
+#[cfg(feature = "wgpu-present")]
+fn window_message(msg: u32, wp: WPARAM, lp: LPARAM) -> Option<WindowMessage> {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        KF_EXTENDED, KF_REPEAT, WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP,
+        WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN,
+        WM_RBUTTONUP, WM_SETFOCUS, WM_SYSKEYDOWN, WM_SYSKEYUP,
+    };
+    // the windows scancode set marks an extended key with an E0 prefix byte
+    const EXTENDED_PREFIX: u32 = 0xE000;
+    const SCANCODE_MASK: u32 = 0xFF;
+    let button = |button, down| Some(WindowMessage::Input(WindowInput::Button { button, down }));
+    match msg {
+        WM_KEYDOWN | WM_SYSKEYDOWN | WM_KEYUP | WM_SYSKEYUP => {
+            let key_flags = (lp.0 as usize >> 16) as u32;
+            let down = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
+            // the host repeats a held key itself
+            if down && key_flags & KF_REPEAT != 0 {
+                return None;
+            }
+            let prefix = if key_flags & KF_EXTENDED != 0 {
+                EXTENDED_PREFIX
+            } else {
+                0
+            };
+            let scancode = prefix | (key_flags & SCANCODE_MASK);
+            Some(WindowMessage::Input(WindowInput::Key { scancode, down }))
+        }
+        WM_MOUSEMOVE => Some(WindowMessage::PointerAt {
+            x: low_word(lp.0 as usize),
+            y: high_word(lp.0 as usize),
+        }),
+        WM_LBUTTONDOWN => button(PointerButton::Left, true),
+        WM_LBUTTONUP => button(PointerButton::Left, false),
+        WM_RBUTTONDOWN => button(PointerButton::Right, true),
+        WM_RBUTTONUP => button(PointerButton::Right, false),
+        WM_MBUTTONDOWN => button(PointerButton::Middle, true),
+        WM_MBUTTONUP => button(PointerButton::Middle, false),
+        WM_MOUSEWHEEL => Some(WindowMessage::Input(WindowInput::Wheel {
+            dx: 0,
+            dy: high_word(wp.0),
+        })),
+        WM_MOUSEHWHEEL => Some(WindowMessage::Input(WindowInput::Wheel {
+            dx: high_word(wp.0),
+            dy: 0,
+        })),
+        WM_SETFOCUS => Some(WindowMessage::Input(WindowInput::Focus(true))),
+        WM_KILLFOCUS => Some(WindowMessage::Input(WindowInput::Focus(false))),
+        _ => None,
+    }
+}
+
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    #[cfg(feature = "wgpu-present")]
+    if let Some(message) = window_message(msg, wp, lp) {
+        WINDOW_MESSAGES.with_borrow_mut(|messages| messages.push(message));
+    }
     // win32 sends WM_DESTROY when the user closes the window
     if msg == WM_DESTROY {
         // SAFETY: called on the thread that owns the window's message queue.
@@ -188,10 +269,26 @@ fn present_loop<R: WindowRenderer>(
         log_tag: params.log_tag,
     };
     channels.ready.notify();
+    let mut input = channels.input;
     loop {
         if !pump_messages() {
             channels.window_closed.store(true, Ordering::Release);
             return Ok(());
+        }
+        let messages = WINDOW_MESSAGES.with_borrow_mut(core::mem::take);
+        if let Some(sender) = &input {
+            let window_inputs = messages.into_iter().filter_map(|message| match message {
+                WindowMessage::Input(window_input) => Some(window_input),
+                WindowMessage::PointerAt { x, y } => renderer
+                    .picture_point(f64::from(x), f64::from(y))
+                    .map(|(x, y)| WindowInput::Pointer { x, y }),
+            });
+            for window_input in window_inputs {
+                if sender.send(window_input).is_err() {
+                    input = None;
+                    break;
+                }
+            }
         }
         let current = client_size(hwnd)?;
         // a minimized window has an empty client area

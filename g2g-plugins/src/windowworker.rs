@@ -55,7 +55,7 @@ pub(crate) trait WindowRenderer: 'static {
     /// compositor letterbox.
     fn resize(&mut self, _width: u32, _height: u32) {}
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     fn picture_point(&self, surface_x: f64, surface_y: f64) -> Option<(u32, u32)>;
 }
 
@@ -80,7 +80,7 @@ pub(crate) struct WorkerChannels<Receiver> {
     pub(crate) latency: Arc<LatencyHistogram>,
     pub(crate) ready: Arc<Handshake>,
     pub(crate) window_closed: Arc<AtomicBool>,
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     pub(crate) input: Option<tokio::sync::mpsc::UnboundedSender<crate::windowinput::WindowInput>>,
     #[cfg(target_os = "linux")]
     pub(crate) cursor_shapes: Option<CursorShapes>,

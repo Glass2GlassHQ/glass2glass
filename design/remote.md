@@ -179,6 +179,8 @@ opusdec ! audioconvert ! autoaudiosink
 
 The decoder is `nvdec`, `mfdecode`, `vtdecode`, or `ffmpegdec`, chosen by the
 same auto-plug `decodebin` uses. `software-decode=true` forces `ffmpegdec`.
+The Linux client decodes with `ffmpegdec` and the Windows client with
+`d3d12h264dec`, whose textures `wgpusink` presents on the decoder's device.
 
 The browser client is the same WebTransport session and message channel, decoded with
 WebCodecs into a canvas. Pointer lock and `navigator.keyboard.lock` are the
@@ -216,7 +218,7 @@ stay shared and are tested without a desktop.
 | Edge | Capture | Inject |
 | :--- | :--- | :--- |
 | Linux | the client window's keyboard and pointer, plus `/dev/input` for grab | `/dev/uinput`, which Fedora creates as root-only `0600`, so the host needs a udev rule that gives the `input` group write access. |
-| Windows | Raw Input on the client window | `SendInput` in the interactive session. The service injects when the interactive process cannot, which is the secure desktop. |
+| Windows | the client window's key and mouse messages, plus Raw Input for grab | `SendInput` in the interactive session. The service injects when the interactive process cannot, which is the secure desktop. |
 | macOS | the client window | `CGEvent`, which needs the accessibility permission. Screen recording stays the permission `screencapturesrc` already needs. |
 
 Relative move is `EV_REL` on Linux and `MOUSEEVENTF_MOVE` on Windows.

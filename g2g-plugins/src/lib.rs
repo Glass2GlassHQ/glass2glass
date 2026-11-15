@@ -2099,9 +2099,12 @@ pub(crate) mod waylandwindow;
     any(feature = "d3d11-sink", feature = "wgpu-present")
 ))]
 pub(crate) mod win32window;
-#[cfg(all(
-    target_os = "linux",
-    any(feature = "cuda-gl", feature = "gl-sink", feature = "wgpu-present")
+#[cfg(any(
+    all(
+        target_os = "linux",
+        any(feature = "cuda-gl", feature = "gl-sink", feature = "wgpu-present")
+    ),
+    all(target_os = "windows", feature = "wgpu-present")
 ))]
 pub mod windowinput;
 #[cfg(any(

@@ -132,7 +132,7 @@ pub struct WgpuPresentSink {
     present_mode: wgpu::PresentMode,
     frames_presented: Arc<AtomicU64>,
     window_closed: Arc<AtomicBool>,
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     input: Option<tokio::sync::mpsc::UnboundedSender<crate::windowinput::WindowInput>>,
     #[cfg(target_os = "linux")]
     cursor_shapes: Option<CursorShapes>,
@@ -189,7 +189,7 @@ impl WgpuPresentSink {
             present_mode: wgpu::PresentMode::Fifo,
             frames_presented: Arc::new(AtomicU64::new(0)),
             window_closed: Arc::default(),
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "windows"))]
             input: None,
             #[cfg(target_os = "linux")]
             cursor_shapes: None,
@@ -200,7 +200,7 @@ impl WgpuPresentSink {
         }
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     pub fn input_events(
         &mut self,
     ) -> tokio::sync::mpsc::UnboundedReceiver<crate::windowinput::WindowInput> {
@@ -339,7 +339,7 @@ impl WgpuPresentSink {
         let latency = Arc::clone(&self.latency);
         let force_aspect_ratio = self.force_aspect_ratio;
         let present_mode = self.present_mode;
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
         let input = self.input.clone();
         #[cfg(target_os = "linux")]
         let cursor_shapes = self.cursor_shapes.clone();
@@ -368,7 +368,7 @@ impl WgpuPresentSink {
                     latency,
                     ready: ready_for_worker,
                     window_closed,
-                    #[cfg(target_os = "linux")]
+                    #[cfg(any(target_os = "linux", target_os = "windows"))]
                     input,
                     #[cfg(target_os = "linux")]
                     cursor_shapes,
@@ -727,7 +727,7 @@ impl WindowRenderer for SurfaceRenderer {
         self.sink.resize(width, height);
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     fn picture_point(&self, surface_x: f64, surface_y: f64) -> Option<(u32, u32)> {
         self.sink.picture_point(surface_x, surface_y)
     }
