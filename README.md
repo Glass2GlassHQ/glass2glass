@@ -526,10 +526,12 @@ no-heap targets (MISRA, certification processes).
   frame through a `TensorModel` backend seam, output into a static ring slot.
   The `microflow` feature compiles a `.tflite` into Rust at build time with
   [MicroFlow](https://github.com/matteocarnelos/microflow-rs), so the model
-  needs no allocator and no arena. `LogMelSpectrogram`, `ImageResize` and
+  needs no allocator and no arena. `MicroFrontend` (the TFLite Micro audio
+  frontend, bit-exact with TensorFlow's), `LogMelSpectrogram`, `ImageResize` and
   `Int8Quantize` are the heap-free audio and vision front ends. A keyword graph
-  (spoken clip -> log-mel -> int8 -> the TFLite Micro `micro_speech` model)
+  (spoken clip -> `MicroFrontend` -> int8 -> the TFLite Micro `micro_speech` model)
   gives the same features and scores on the host and on emulated Cortex-M4,
+  detects spoken yes and no live on a XIAO ESP32S3 Sense's microphone,
   scores equal to the TFLite interpreter's and within 5 int8 steps of ONNX
   Runtime on the model's ONNX twin.
 - **Reference deterministic-audio graph.** `capture -> convert -> resample ->

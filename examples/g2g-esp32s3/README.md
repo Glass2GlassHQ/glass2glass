@@ -35,9 +35,10 @@ OK audio: 214749012174 (expected 214749012174), 261805 us
 OK keyword: 16635284155892619601 (expected 16635284155892619601), 214923 us
 PASS
 listening: say yes or no
-no       silence 0.00 unknown 0.02 yes 0.02 no 0.96 peak 634
+silence  silence 0.86 unknown 0.03 yes 0.01 no 0.09 peak 362
+yes      silence 0.00 unknown 0.00 yes 1.00 no 0.00 peak 3659
+no       silence 0.00 unknown 0.00 yes 0.00 no 1.00 peak 2322
 ```
 
-`LogMelSpectrogram` has none of the noise reduction and gain control of the
-TFLite Micro front end that micro_speech was trained on, so live scores favour
-"no" even in a quiet room.
+Scores are per window with no averaging, so background noise sometimes leans
+"no" at 0.4 to 0.75.

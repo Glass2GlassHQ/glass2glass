@@ -8,7 +8,8 @@
 # its ONNX twin speech.onnx (tf2onnx, QDQ int8), quantization.txt (the input
 # and output tensor scale and zero point), and yes.s16le, the one-clip input of
 # the keyword graph (espeak-ng 1.51 saying "yes", 150 ms in, 15840 samples at
-# 16 kHz). The
+# 16 kHz), and frontend.f32le, TensorFlow's audio_microfrontend features for that
+# clip with the speech_commands training settings. The
 # files are committed because MicroFlow's proc macro reads the .tflite at
 # compile time, and they are small. features.i8 and scores.f32le in the same
 # directory are not written here: they are the keyword graph's pinned output
@@ -52,6 +53,14 @@ espeak-ng -v en-us -s 140 -w "$WORK/yes.wav" "yes"
 ffmpeg -v error -y -i "$WORK/yes.wav" \
   -af "aresample=16000,adelay=150,apad=whole_len=15840,atrim=end_sample=15840" \
   -f s16le -ac 1 "$FIX/yes.s16le"
+
+"$VENV/bin/python" -I -c '
+import sys, numpy as np, tensorflow as tf
+from tensorflow.lite.experimental.microfrontend.python.ops import audio_microfrontend_op as frontend_op
+audio = tf.constant(np.fromfile(sys.argv[1], dtype="<i2"))
+features = frontend_op.audio_microfrontend(audio, sample_rate=16000, window_size=30, window_step=20, num_channels=40, out_scale=1, out_type=tf.float32)
+tf.multiply(features, 10.0 / 256.0).numpy().astype("<f4").tofile(sys.argv[2])
+' "$FIX/yes.s16le" "$FIX/frontend.f32le"
 
 "$VENV/bin/python" -I -c '
 import sys, numpy as np, tensorflow as tf

@@ -30,6 +30,7 @@ mod lend;
 pub mod logmel;
 #[cfg(feature = "microflow")]
 pub mod microflow_backend;
+pub mod microfrontend;
 pub mod mixer;
 pub mod pcm;
 pub mod quantize;
@@ -57,6 +58,7 @@ pub use jitter::JitterBuffer;
 pub use logmel::{LogMelSettings, LogMelSpectrogram};
 #[cfg(feature = "microflow")]
 pub use microflow_backend::MicroFlowModel;
+pub use microfrontend::MicroFrontend;
 pub use mixer::Mixer;
 pub use pcm::{PcmConvert, PcmSink, PcmWriter};
 pub use quantize::Int8Quantize;

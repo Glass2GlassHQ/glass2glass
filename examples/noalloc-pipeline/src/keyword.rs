@@ -10,7 +10,7 @@ use g2g_core::staticpool::StaticLendRing;
 use g2g_core::{drive_ready, run_source_transform_sink, Chain, StaticSink, StaticTransform};
 use g2g_mcu::logmel::MICRO_SPEECH_SETTINGS;
 use g2g_mcu::{
-    FrameGrabber, GrabberSrc, Int8Quantize, LogMelSpectrogram, MicroFlowModel, TensorInference,
+    FrameGrabber, GrabberSrc, Int8Quantize, MicroFlowModel, MicroFrontend, TensorInference,
 };
 use microflow::model;
 
@@ -24,14 +24,14 @@ const EXPECTED_FEATURES: &[u8; FEATURES] =
 const EXPECTED_SCORE_BYTES: &[u8; KEYWORDS * SCORE_BYTES] =
     include_bytes!("../../../g2g-mcu/tests/fixtures/keyword/scores.f32le");
 
-const MELS: usize = 40;
-const FEATURES: usize = MICRO_SPEECH_SETTINGS.frames * MELS;
+const CHANNELS: usize = 40;
+const FEATURES: usize = MICRO_SPEECH_SETTINGS.frames * CHANNELS;
 pub const KEYWORDS: usize = 4;
 // speech.tflite's output order.
 pub const LABELS: [&str; KEYWORDS] = ["silence", "unknown", "yes", "no"];
 const SCORE_BYTES: usize = 4;
 pub const CLIP_BYTES: usize = MICRO_SPEECH_SETTINGS.clip_samples() * 2;
-const LOG_MEL_BYTES: usize = FEATURES * 4;
+const FRONTEND_BYTES: usize = FEATURES * 4;
 // One clip, so the frame period only stamps PTS 0.
 const CLIP_INTERVAL_NS: u64 = 1_000_000_000;
 
@@ -143,20 +143,23 @@ pub async fn run_keyword_graph(
     on_scores: impl FnMut([f32; KEYWORDS]),
 ) -> Result<u64, G2gError> {
     let clip_ring: StaticLendRing<1, CLIP_BYTES> = StaticLendRing::new();
-    let log_mel_ring: StaticLendRing<1, LOG_MEL_BYTES> = StaticLendRing::new();
+    let frontend_ring: StaticLendRing<1, FRONTEND_BYTES> = StaticLendRing::new();
     let feature_ring: StaticLendRing<1, FEATURES> = StaticLendRing::new();
     let score_ring: StaticLendRing<1, { KEYWORDS * SCORE_BYTES }> = StaticLendRing::new();
     let digest = Cell::new(FNV_OFFSET_BASIS);
 
     // SAFETY (every `with_ring` below): the rings are locals of this function
     // and outlive the pipeline run, which drains before returning.
-    let log_mel = unsafe {
-        LogMelSpectrogram::<MELS, 1, LOG_MEL_BYTES>::with_ring(MICRO_SPEECH_SETTINGS, &log_mel_ring)
+    let frontend = unsafe {
+        MicroFrontend::<CHANNELS, 1, FRONTEND_BYTES>::with_ring(
+            MICRO_SPEECH_SETTINGS,
+            &frontend_ring,
+        )
     }?;
     // SAFETY: as above.
     let quantize = unsafe {
         Int8Quantize::with_ring(
-            log_mel.output_format(),
+            frontend.output_format(),
             INPUT_SCALE,
             INPUT_ZERO_POINT,
             &feature_ring,
@@ -176,7 +179,7 @@ pub async fn run_keyword_graph(
         None => source,
     };
     let transform = Chain(
-        log_mel,
+        frontend,
         Chain(
             quantize,
             Chain(FeatureDigest { digest: &digest }, inference),

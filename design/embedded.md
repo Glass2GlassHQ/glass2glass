@@ -217,6 +217,17 @@ about 1e-5. `Int8Quantize` maps an f32 tensor to int8 with the model's input
 scale and zero point, `round(x / scale) + zero_point` saturated, the formula
 `g2g_core::tensor::quantize` that the host `TensorConvert` also uses.
 
+`MicroFrontend` is the front end keyword models trained with TensorFlow's
+speech_commands expect: the TFLite Micro audio frontend (Hann window, KISS FFT's
+fixed-point real FFT, a mel filterbank, per-channel noise reduction, PCAN gain
+control and a fixed-point log), ported to Rust integer for integer, with the
+noise estimate reset at the start of each clip as TensorFlow's
+`audio_microfrontend` op does. It emits the op's output times 10/256, the scale
+speech_commands trains on, as an f32 `[1, frames * channels]` tensor. Its
+features for the "yes" clip equal the op's bit for bit (`frontend.f32le`, from
+TensorFlow 2.15.1). `LogMelSpectrogram` features are a plain log-mel, which
+micro_speech scores as "no" in a quiet room.
+
 For vision, `ImageResize` scales a packed 8-bit image of one to four channels
 to the model's input size with bilinear interpolation on half-pixel centres, the
 placement TFLite's and OpenCV's resize use, in integer math with 1/2048 weight
@@ -226,7 +237,7 @@ so a model with scale 1/255 and zero point -128 gets `p - 128`.
 
 The keyword graph puts these together as one static pipeline
 (`noalloc-pipeline::keyword`): a one-clip capture of a spoken "yes" ->
-`LogMelSpectrogram` (49 windows, 40 bands) -> `Int8Quantize` -> a digest stage
+`MicroFrontend` (49 windows, 40 channels) -> `Int8Quantize` -> a digest stage
 -> `TensorInference` over the MicroFlow-compiled micro_speech model, four
 keyword scores out. Its features and scores on the host are pinned in
 `g2g-mcu/tests/fixtures/keyword` (`features.i8`, `scores.f32le`), and the same
@@ -234,10 +245,10 @@ graph reproduces them bit for bit on QEMU's Cortex-M4 (`examples/g2g-qemu`'s
 `keyword` bin, in `tools/qemu-check.sh`). `g2g-noalloc` exports it as
 `g2g_keyword_run`, so the zero-allocator and zero-panic symbol proofs cover
 MicroFlow's generated code on both `thumbv7em` and RISC-V, and it has a
-footprint budget row: 69164 B ROM, 0 B static RAM, 116312 B stack on
+footprint budget row: 73606 B ROM, 0 B static RAM, 91936 B stack on
 `thumbv7em`. The 31680-byte clip and the 16 KB of model weights are most of
-the ROM, and the clip, log-mel and feature rings (41 KB) plus the log-mel
-element's tables and FFT scratch are most of the stack. The graph runs as one
+the ROM, and the clip, frontend and feature rings (41 KB) plus the frontend's
+tables and FFT scratch are most of the stack. The graph runs as one
 future, into which LLVM inlines MicroFlow's operators with their constant
 shapes, so nalgebra's index bounds checks fold away. `tools/noalloc-check.sh`
 fails if one stays.
@@ -422,5 +433,8 @@ and later ones miscompile it (esp-rs/rust issue 283).
 The same binary then runs the keyword graph on the board's PDM microphone
 through esp-hal's I2S PDM receive mode with hardware PDM-to-PCM conversion. A
 `FrameGrabber` over the DMA stream buffer slides a one-second window forward by
-500 ms per capture, and each window takes about 220 ms to score.
+500 ms per capture, and each window takes about 240 ms to score. With
+`MicroFrontend` the board scores spoken "yes" and "no" at 0.93 to 1.00 and a
+quiet room as "silence", though single windows of background noise sometimes
+lean "no" at 0.4 to 0.75 because the harness does not average scores over time.
 

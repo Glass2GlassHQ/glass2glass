@@ -136,9 +136,6 @@ libraries installed.
     ARM and RISC-V disassembly).
   - Boot the heap-free pipeline on Espressif's QEMU fork (`-machine esp32s3`),
     as `tools/qemu-check.sh` does for Cortex-M.
-  - Port the TFLite Micro audio front end (noise reduction, PCAN gain control,
-    log scale) into `g2g-mcu`, so the live microphone keyword graph detects
-    words instead of scoring a quiet room as "no".
   - OV2640 camera source on esp-hal's `lcd_cam` camera driver, with the
     sensor's I2C register setup ported from Espressif's `esp32-camera`. Then
     96x96 MobileNet v1 person detection through `ImageResize`, `Int8Quantize`

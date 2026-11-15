@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2336: `MicroFrontend`, the TFLite Micro audio frontend bit-exact with TensorFlow's, so the ESP32-S3 keyword graph detects spoken yes and no.
 - M2335: `examples/g2g-esp32s3` runs the keyword graph live on the board's PDM microphone.
 - M2334: `g2g-desktop host` on Linux saves the portal restore token, so a restarted host does not ask for the screen again.
 - M2333: `examples/g2g-esp32s3` runs the heap-free display, audio and keyword graphs on a XIAO ESP32S3 Sense with checksums matching the host.

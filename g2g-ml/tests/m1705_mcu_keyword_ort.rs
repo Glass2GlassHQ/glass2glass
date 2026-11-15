@@ -12,7 +12,7 @@ use g2g_core::memory::MemoryDomain;
 use g2g_core::staticpool::StaticLendRing;
 use g2g_core::{drive_ready, StaticTransform};
 use g2g_mcu::logmel::MICRO_SPEECH_SETTINGS;
-use g2g_mcu::{Int8Quantize, LogMelSpectrogram, MicroFlowModel, TensorInference};
+use g2g_mcu::{Int8Quantize, MicroFlowModel, MicroFrontend, TensorInference};
 use microflow::model;
 use ort::session::Session;
 use ort::value::Tensor;
@@ -21,8 +21,8 @@ use ort::value::Tensor;
 #[model("g2g-mcu/tests/fixtures/keyword/speech.tflite")]
 struct Speech;
 
-const MELS: usize = 40;
-const FEATURES: usize = MICRO_SPEECH_SETTINGS.frames * MELS;
+const CHANNELS: usize = 40;
+const FEATURES: usize = MICRO_SPEECH_SETTINGS.frames * CHANNELS;
 const KEYWORDS: usize = 4;
 const CLIP_BYTES: usize = MICRO_SPEECH_SETTINGS.clip_samples() * 2;
 // ONNX Runtime runs the QDQ twin in float between quantize steps, while MicroFlow
@@ -64,20 +64,20 @@ fn step<T: StaticTransform>(element: &mut T, frame: Frame) -> Vec<u8> {
 #[test]
 fn keyword_graph_on_onnx_runtime_matches_the_heap_free_elements() {
     let clip_ring: StaticLendRing<1, CLIP_BYTES> = StaticLendRing::new();
-    let log_mel_ring: StaticLendRing<1, { FEATURES * 4 }> = StaticLendRing::new();
+    let frontend_ring: StaticLendRing<1, { FEATURES * 4 }> = StaticLendRing::new();
     let feature_ring: StaticLendRing<1, FEATURES> = StaticLendRing::new();
     let score_ring: StaticLendRing<1, { KEYWORDS * 4 }> = StaticLendRing::new();
     let input_scale = quantization("input_scale") as f32;
     let input_zero_point = quantization("input_zero_point") as i32;
     // SAFETY: the rings outlive every frame in this test.
-    let (mut log_mel, mut quantize, mut inference) = unsafe {
-        let log_mel = LogMelSpectrogram::<MELS, 1, { FEATURES * 4 }>::with_ring(
+    let (mut frontend, mut quantize, mut inference) = unsafe {
+        let frontend = MicroFrontend::<CHANNELS, 1, { FEATURES * 4 }>::with_ring(
             MICRO_SPEECH_SETTINGS,
-            &log_mel_ring,
+            &frontend_ring,
         )
         .unwrap();
         let quantize = Int8Quantize::with_ring(
-            log_mel.output_format(),
+            frontend.output_format(),
             input_scale,
             input_zero_point,
             &feature_ring,
@@ -85,12 +85,12 @@ fn keyword_graph_on_onnx_runtime_matches_the_heap_free_elements() {
         .unwrap();
         let inference =
             TensorInference::with_ring(MicroFlowModel::new(Speech::predict_quantized), &score_ring);
-        (log_mel, quantize, inference)
+        (frontend, quantize, inference)
     };
 
     // Preprocessing: the same bytes the QEMU Cortex-M4 run is checked against.
-    let log_mel_bytes = step(&mut log_mel, lend(&clip_ring, &fixture("yes.s16le")));
-    let features = step(&mut quantize, lend(&log_mel_ring, &log_mel_bytes));
+    let frontend_bytes = step(&mut frontend, lend(&clip_ring, &fixture("yes.s16le")));
+    let features = step(&mut quantize, lend(&frontend_ring, &frontend_bytes));
     assert_eq!(
         features,
         fixture("features.i8"),
