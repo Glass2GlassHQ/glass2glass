@@ -190,9 +190,15 @@ async fn remote_transport_carries_a_split_graph_edge() {
 
     // Each frame's sequence, timing, and bytes survived byte-for-byte.
     assert_eq!(sink.frames.len(), N as usize);
+    assert!(stats.latency.live, "a remote receiver is a live source");
+    let first_pts_ns = sink.frames[0].1.pts_ns;
     for (i, (seq, timing, bytes)) in sink.frames.iter().enumerate() {
         assert_eq!(*seq, i as u64, "sequence preserved");
-        assert_eq!(timing.pts_ns, i as u64 * 1_000_000, "pts preserved");
+        assert_eq!(
+            timing.pts_ns - first_pts_ns,
+            i as u64 * 1_000_000,
+            "pts spacing preserved"
+        );
         assert_eq!(timing.keyframe, i == 0, "keyframe flag preserved");
         assert_eq!(bytes.len(), FRAME_LEN, "frame length preserved");
         assert_eq!(bytes[0], i as u8, "payload tag preserved (correct framing)");

@@ -52,6 +52,7 @@ use objc2_foundation::{NSDictionary, NSNumber, NSObject, NSObjectProtocol, NSStr
 
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
+use g2g_core::query::LatencyReport;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::time::ticks_to_ns;
 use g2g_core::{
@@ -229,6 +230,7 @@ unsafe fn open_session(
 
 /// Delivered camera geometry (VGA), pinned by the session preset and the
 /// data output's videoSettings.
+const NOMINAL_FPS: u32 = 30;
 const CAMERA_WIDTH: u32 = 640;
 const CAMERA_HEIGHT: u32 = 480;
 
@@ -296,7 +298,7 @@ impl AvfVideoSrc {
             format: RawVideoFormat::Nv12,
             width: Dim::Fixed(CAMERA_WIDTH),
             height: Dim::Fixed(CAMERA_HEIGHT),
-            framerate: Rate::Fixed(30 << 16),
+            framerate: Rate::Fixed(NOMINAL_FPS << 16),
             interlace: Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
             pixel_aspect: g2g_core::PixelAspect::SQUARE,
@@ -369,6 +371,10 @@ impl SourceLoop for AvfVideoSrc {
         = core::future::Ready<Result<Caps, G2gError>>
     where
         Self: 'a;
+
+    fn latency(&self) -> LatencyReport {
+        LatencyReport::live(g2g_core::caps::fps_period_ns(NOMINAL_FPS), None)
+    }
 
     fn intercept_caps<'a>(&'a mut self) -> Self::CapsFuture<'a> {
         core::future::ready(Ok(self.caps()))
@@ -633,6 +639,10 @@ impl SourceLoop for AvfAudioSrc {
         = core::future::Ready<Result<Caps, G2gError>>
     where
         Self: 'a;
+
+    fn latency(&self) -> LatencyReport {
+        LatencyReport::live(0, None)
+    }
 
     fn intercept_caps<'a>(&'a mut self) -> Self::CapsFuture<'a> {
         core::future::ready(Ok(self.caps()))

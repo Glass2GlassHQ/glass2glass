@@ -47,6 +47,7 @@ use tokio::sync::mpsc;
 
 use g2g_core::element::BoxFuture;
 use g2g_core::log::Target;
+use g2g_core::query::LatencyReport;
 use g2g_core::runtime::join_all;
 use g2g_core::{
     g2g_error, Caps, G2gError, MultiOutputSink, MultiOutputSource, PipelinePacket, PropError,
@@ -282,10 +283,7 @@ impl RtspServerSrcN {
             recv: self.recv.clone(),
             frame_limit: self.frame_limit,
             timeout_ns: self.session_timeout_ns,
-            frame_period_ns: match self.fps {
-                0 => 0,
-                fps => 1_000_000_000 / fps as u64,
-            },
+            frame_period_ns: g2g_core::caps::fps_period_ns(self.fps),
             session_timeout_secs: self.session_timeout_secs(),
         }
     }
@@ -573,6 +571,10 @@ impl MultiOutputSource for RtspServerSrcN {
             IngestFormat::Video(_) => Ok(self.caps()),
             IngestFormat::Aac => Ok(ADTS_AAC_CAPS),
         }
+    }
+
+    fn latency(&self) -> LatencyReport {
+        LatencyReport::live(g2g_core::caps::fps_period_ns(self.fps), None)
     }
 
     fn properties(&self) -> &'static [PropertySpec] {

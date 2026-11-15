@@ -333,12 +333,7 @@ impl SourceLoop for MfVideoSrc {
     /// Live source: one frame period of latency so the sink keeps a frame in hand.
     fn latency(&self) -> LatencyReport {
         let fps = self.config.map(|c| c.fps()).unwrap_or(30);
-        let period_ns = if fps > 0 {
-            1_000_000_000 / fps as u64
-        } else {
-            0
-        };
-        LatencyReport::live(period_ns, None)
+        LatencyReport::live(g2g_core::caps::fps_period_ns(fps), None)
     }
 
     fn run<'a>(&'a mut self, out: &'a mut dyn OutputSink) -> Self::RunFuture<'a> {
@@ -375,11 +370,7 @@ impl SourceLoop for MfVideoSrc {
             }
 
             let fps = config.fps();
-            let pts_step_ns = if fps > 0 {
-                1_000_000_000 / fps as u64
-            } else {
-                0
-            };
+            let pts_step_ns = g2g_core::caps::fps_period_ns(fps);
             let expected = config.format.frame_bytes(config.width, config.height);
             let mut seq = 0u64;
             let mut downstream_open = true;

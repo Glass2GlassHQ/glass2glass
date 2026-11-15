@@ -41,6 +41,7 @@ use objc2_screen_capture_kit::{
 
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
+use g2g_core::query::LatencyReport;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
     Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError, HardwareError,
@@ -57,6 +58,7 @@ use alloc::boxed::Box;
 
 /// How long the run loop waits for the delegate before checking liveness, and
 /// how long the shareable-content lookup may take.
+const NOMINAL_FPS: u32 = 30;
 const IO_TIMEOUT: Duration = Duration::from_secs(1);
 /// Consecutive empty waits, with no idle heartbeat either, before the source
 /// surfaces a dead capture.
@@ -283,7 +285,7 @@ fn nv12_caps(w: u32, h: u32) -> Caps {
         format: RawVideoFormat::Nv12,
         width: Dim::Fixed(w),
         height: Dim::Fixed(h),
-        framerate: Rate::Fixed(30 << 16),
+        framerate: Rate::Fixed(NOMINAL_FPS << 16),
         interlace: Interlace::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
         pixel_aspect: g2g_core::PixelAspect::SQUARE,
@@ -300,6 +302,10 @@ impl SourceLoop for ScreenCaptureSrc {
         = core::future::Ready<Result<Caps, G2gError>>
     where
         Self: 'a;
+
+    fn latency(&self) -> LatencyReport {
+        LatencyReport::live(g2g_core::caps::fps_period_ns(NOMINAL_FPS), None)
+    }
 
     fn intercept_caps<'a>(&'a mut self) -> Self::CapsFuture<'a> {
         core::future::ready(self.ensure_open())

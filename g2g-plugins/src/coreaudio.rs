@@ -48,6 +48,7 @@ use objc2_core_audio_types::{
 use objc2_core_foundation::CFString;
 
 use g2g_core::frame::Frame;
+use g2g_core::query::LatencyReport;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
     AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ClockCandidate, ClockSync,
@@ -894,6 +895,16 @@ impl SourceLoop for CoreAudioSrc {
         = core::future::Ready<Result<Caps, G2gError>>
     where
         Self: 'a;
+
+    fn latency(&self) -> LatencyReport {
+        let stream_description = asbd(AudioFormat::PcmS16Le, self.channels, self.sample_rate)
+            .expect("S16 PCM has a stream description");
+        let buffer_frames = u64::from(BUF_BYTES / stream_description.mBytesPerFrame);
+        LatencyReport::live(
+            crate::audioconvert::samples_to_ns(buffer_frames, self.sample_rate),
+            None,
+        )
+    }
 
     fn intercept_caps<'a>(&'a mut self) -> Self::CapsFuture<'a> {
         core::future::ready(Ok(self.caps()))

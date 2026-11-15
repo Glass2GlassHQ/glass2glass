@@ -1076,6 +1076,17 @@ pub mod udpsink;
 // behind the std `webrtc` feature. WebRtcSink = WHIP egress, WebRtcWhepSrc =
 // WHEP ingest; webrtc_util holds the shared ICE/SDP-POST helpers. Distinct from
 // the wasm-only data-channel webrtcsrc.
+#[cfg(any(
+    feature = "webrtc",
+    feature = "remote",
+    feature = "remote-ws",
+    feature = "webtransport",
+    all(
+        target_os = "linux",
+        any(feature = "local-ipc", feature = "local-dmabuf")
+    )
+))]
+mod arrivalstamp;
 #[cfg(feature = "webrtc")]
 mod turn;
 #[cfg(feature = "webrtc")]

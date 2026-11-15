@@ -1426,12 +1426,7 @@ impl SourceLoop for V4l2Src {
             .or_else(|| self.modes.first().copied())
             .map(|m| m.fps)
             .unwrap_or(self.req_fps);
-        let period_ns = if fps > 0 {
-            1_000_000_000 / fps as u64
-        } else {
-            0
-        };
-        LatencyReport::live(period_ns, None)
+        LatencyReport::live(g2g_core::caps::fps_period_ns(fps), None)
     }
 
     fn run<'a>(&'a mut self, out: &'a mut dyn OutputSink) -> Self::RunFuture<'a> {
@@ -1509,11 +1504,7 @@ impl SourceLoop for V4l2Src {
                 Ok(())
             });
 
-            let pts_step_ns = if fps > 0 {
-                1_000_000_000 / fps as u64
-            } else {
-                0
-            };
+            let pts_step_ns = g2g_core::caps::fps_period_ns(fps);
             // The driver stamps every buffer with the time of capture, so the
             // PTS tracks the rate the camera actually held rather than the one
             // that was asked for. The two differ whenever the camera cannot

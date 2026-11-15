@@ -10,11 +10,10 @@ use std::time::Instant;
 use str0m::media::{KeyframeRequestKind, MediaAdded, MediaData, MediaKind, Mid};
 use str0m::Rtc;
 
-use g2g_core::clock::{CaptureAnchor, ClockSync};
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
-use g2g_core::{FrameMetaSet, FrameTiming, MemoryDomain};
+use g2g_core::FrameMetaSet;
 
+use crate::arrivalstamp::ArrivalStamp;
 use crate::webrtc_codec::{capture_unix_ns, WebRtcVideoCodec};
 
 pub(crate) const PLI_INTERVAL: Duration = Duration::from_secs(1);
@@ -155,52 +154,6 @@ impl ReceivedUnit {
             sequence,
             capture_time_meta(self.capture_unix_ns),
         )
-    }
-}
-
-#[derive(Debug)]
-pub(crate) struct ArrivalStamp {
-    clock_sync: Option<ClockSync>,
-    anchor: CaptureAnchor,
-    first_arrival_ns: Option<u64>,
-}
-
-impl ArrivalStamp {
-    pub(crate) fn new(clock_sync: Option<ClockSync>) -> Self {
-        Self {
-            clock_sync,
-            anchor: CaptureAnchor::new(),
-            first_arrival_ns: None,
-        }
-    }
-
-    pub(crate) fn frame(
-        &mut self,
-        data: Vec<u8>,
-        keyframe: bool,
-        sequence: u64,
-        meta: FrameMetaSet,
-    ) -> Frame {
-        let arrival_ns = g2g_core::metrics::monotonic_ns();
-        let elapsed_ns = arrival_ns - *self.first_arrival_ns.get_or_insert(arrival_ns);
-        let pts_ns = match &self.clock_sync {
-            Some(sync) => self.anchor.stamp(sync, elapsed_ns, 0),
-            None => elapsed_ns,
-        };
-        Frame {
-            domain: MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
-            timing: FrameTiming {
-                pts_ns,
-                dts_ns: pts_ns,
-                duration_ns: 0,
-                capture_ns: pts_ns,
-                arrival_ns,
-                keyframe,
-                ..FrameTiming::default()
-            },
-            sequence,
-            meta,
-        }
     }
 }
 

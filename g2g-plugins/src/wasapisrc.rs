@@ -44,6 +44,7 @@ use windows::Win32::System::Com::{
     CoInitializeEx, CoTaskMemFree, CoUninitialize, CLSCTX_ALL, COINIT_MULTITHREADED,
 };
 
+use g2g_core::query::LatencyReport;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
     pcm_caps_any_rate_and_channels, AudioFormat, Caps, CapsConstraint, CapsSet, ClockSync,
@@ -58,6 +59,7 @@ use crate::wasapipcm::{audio_config_from_format, audio_err, open_endpoint, Audio
 
 /// Shared-mode endpoint buffer span (100-ns units), 200 ms.
 const BUFFER_DURATION_HNS: i64 = 2_000_000;
+const PACKET_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 // WASAPI failures carry an HRESULT, not an errno, so the ready handshake reports this
 const ENDPOINT_FAILED_CODE: i32 = -1;
@@ -141,6 +143,10 @@ impl SourceLoop for WasapiSrc {
         = core::future::Ready<Result<Caps, G2gError>>
     where
         Self: 'a;
+
+    fn latency(&self) -> LatencyReport {
+        LatencyReport::live(PACKET_POLL_INTERVAL.as_nanos() as u64, None)
+    }
 
     fn intercept_caps<'a>(&'a mut self) -> Self::CapsFuture<'a> {
         core::future::ready(self.probe())
@@ -387,7 +393,7 @@ unsafe fn pump_endpoint(
         // SAFETY: packet query on the owning thread.
         let packet = unsafe { capture.GetNextPacketSize() }.map_err(audio_err)?;
         if packet == 0 {
-            thread::sleep(Duration::from_millis(10));
+            thread::sleep(PACKET_POLL_INTERVAL);
             continue;
         }
 

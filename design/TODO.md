@@ -43,6 +43,9 @@ The plan is [remote.md](remote.md).
   on the secure desktop.
 - A Chrome client on the same signaling and the same data channel.
 - OIDC in front of the bearer token, a `g2g://` URL, and install packages.
+- Report `remotewtsrc`'s wait for a missing frame in `datagrams` mode as
+  latency. The receiver learns the mode from the first datagram, after the
+  latency query, so a source needs a way to change its latency mid-stream.
 
 ## Architecture guarantees (validation-first)
 
@@ -243,6 +246,17 @@ libraries installed.
   - A data channel signalled through a WHIP / WHEP session.
   - Move the bevy-g2g input backchannel from its WebSocket side channel to
     `livekitdatasink` / `livekitdatasrc`.
+- **Live receivers that still report non-live:**
+  - `moqtsrc` and `moqtsessionsrc`: report live, and decide whether their
+    container timestamps move onto the local clock, then check `fmp4demux`
+    with the result.
+  - The ST 2110 RTP receivers: report live, and decide whether their rebased
+    RTP timestamps move onto the local clock, given the TAI time computed
+    from the base time.
+  - The server half of `remotewsstage`: report live without changing the
+    timestamps it sends back to the client.
+  - `shmsrc` and `tcpclientsrc`: decide whether each is live, or takes an
+    `is-live` property.
 - **RIST bonding test flake:** `ristsender_broadcast_bonding_feeds_ristsrc`
   failed once in 50 runs on hercules, after 2.4 s. Capture its failure output
   and fix the cause.
@@ -256,6 +270,9 @@ libraries installed.
 
 ## Adaptive streaming (HLS / DASH)
 
+- `hlssrc` and `dashsrc` report live for a live playlist (HLS without
+  `EXT-X-ENDLIST`, DASH `type=dynamic`) with the distance behind the live edge
+  as latency, and non-live for VOD.
 - **HLS / CENC:** the multi-key shapes (`senc` v1/v2, multi-key `seig`
   entries) stay declined fail-loud: the 23001-7:2023 syntax is paywalled and
   the two available sources (the MPEG proposal and GPAC) contradict each
@@ -436,6 +453,8 @@ libraries installed.
 ## Properties / introspection / DSL
 
 - A GUI / tooling introspection surface beyond the text dump.
+- `is-live` on `videotestsrc` and `audiotestsrc`, as GStreamer has, so they
+  report live and pace to the clock.
 - `g2g-inspect` and `docs/elements.html` leave out the elements registered only
   as fan-out sources (`rtspsrcn`, `rtspserversrcn`, `uridecodebin`):
   `g2g-inspect rtspserversrcn` answers "No such element".
@@ -528,6 +547,9 @@ unless it says otherwise.
 
 ## Browser / Wasm
 
+- `wswiresrc`, `websocketsrc` and the browser `webrtcsrc` report live.
+  `wswiresrc` also needs the remote receivers' timestamp shift, which needs a
+  monotonic clock on wasm.
 - Raw-`web_sys` WebGPU path (only if the GPU-resident browser claim is revived):
   external-texture import + compute + `ort.Tensor.fromGpuBuffer` on one
   ORT-owned `GPUDevice`. Large, browser-unverifiable on the dev host.

@@ -24,6 +24,7 @@ use std::net::{SocketAddr, UdpSocket as StdUdpSocket};
 use g2g_core::frame::Frame;
 use g2g_core::log::Target;
 use g2g_core::memory::SystemSlice;
+use g2g_core::query::LatencyReport;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
     Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata, FrameTiming, G2gError,
@@ -165,6 +166,10 @@ impl SourceLoop for SrtSrc {
         = core::future::Ready<Result<Caps, G2gError>>
     where
         Self: 'a;
+
+    fn latency(&self) -> LatencyReport {
+        LatencyReport::live(u64::from(self.latency_ms) * 1_000_000, None)
+    }
 
     fn intercept_caps<'a>(&'a mut self) -> Self::CapsFuture<'a> {
         core::future::ready(Ok(mpegts_caps()))

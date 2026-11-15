@@ -638,12 +638,7 @@ impl SourceLoop for PipeWireVideoSrc {
     }
 
     fn latency(&self) -> LatencyReport {
-        let period_ns = if self.req_fps > 0 {
-            1_000_000_000 / u64::from(self.req_fps)
-        } else {
-            0
-        };
-        LatencyReport::live(period_ns, None)
+        LatencyReport::live(g2g_core::caps::fps_period_ns(self.req_fps), None)
     }
 
     fn run<'a>(&'a mut self, out: &'a mut dyn OutputSink) -> Self::RunFuture<'a> {

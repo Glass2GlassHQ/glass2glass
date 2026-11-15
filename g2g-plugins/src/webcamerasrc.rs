@@ -27,6 +27,7 @@ use alloc::boxed::Box;
 
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
+use g2g_core::query::LatencyReport;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
     Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError, HardwareError,
@@ -42,6 +43,8 @@ use web_sys::{
 };
 
 use crate::webcodecsdecode::copy_out_rgba;
+
+const NOMINAL_FPS: u32 = 30;
 
 /// # Example
 ///
@@ -81,7 +84,7 @@ impl WebCameraSrc {
             // A fixable placeholder, not `Rate::Any` (which `fixate()` rejects at
             // negotiation): the true capture rate is not known until frames arrive,
             // and the paired encoder just needs a sane rate to configure with.
-            framerate: Rate::Fixed(30 << 16),
+            framerate: Rate::Fixed(NOMINAL_FPS << 16),
             interlace: Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
             pixel_aspect: g2g_core::PixelAspect::SQUARE,
@@ -97,7 +100,7 @@ impl WebCameraSrc {
                 format: RawVideoFormat::Rgba8,
                 width: Dim::Fixed(w),
                 height: Dim::Fixed(h),
-                framerate: Rate::Fixed(30 << 16),
+                framerate: Rate::Fixed(NOMINAL_FPS << 16),
                 interlace: Interlace::Any,
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
                 pixel_aspect: g2g_core::PixelAspect::SQUARE,
@@ -119,6 +122,10 @@ impl SourceLoop for WebCameraSrc {
         = core::future::Ready<Result<Caps, G2gError>>
     where
         Self: 'a;
+
+    fn latency(&self) -> LatencyReport {
+        LatencyReport::live(g2g_core::caps::fps_period_ns(NOMINAL_FPS), None)
+    }
 
     fn intercept_caps<'a>(&'a mut self) -> Self::CapsFuture<'a> {
         core::future::ready(Ok(self.caps()))

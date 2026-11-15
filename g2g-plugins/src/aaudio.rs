@@ -34,6 +34,7 @@ use ndk::audio::{
 };
 
 use g2g_core::frame::Frame;
+use g2g_core::query::LatencyReport;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
     AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ClockCandidate, ClockSync,
@@ -514,6 +515,10 @@ impl SourceLoop for AAudioSrc {
         = core::future::Ready<Result<Caps, G2gError>>
     where
         Self: 'a;
+
+    fn latency(&self) -> LatencyReport {
+        LatencyReport::live(CAPTURE_MS * 1_000_000, None)
+    }
 
     fn intercept_caps<'a>(&'a mut self) -> Self::CapsFuture<'a> {
         core::future::ready(self.ensure_open())

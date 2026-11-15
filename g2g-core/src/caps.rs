@@ -1127,6 +1127,12 @@ pub fn framerate_q16_period_ns(q16: u32) -> Option<u64> {
     (crate::time::NANOS_PER_SECOND << Q16_FRACTION_BITS).checked_div(u64::from(q16))
 }
 
+pub fn fps_period_ns(fps: u32) -> u64 {
+    crate::time::NANOS_PER_SECOND
+        .checked_div(u64::from(fps))
+        .unwrap_or(0)
+}
+
 pub fn greatest_common_divisor(mut a: u64, mut b: u64) -> u64 {
     while b != 0 {
         (a, b) = (b, a % b);

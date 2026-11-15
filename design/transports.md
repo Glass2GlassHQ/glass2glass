@@ -599,10 +599,9 @@ logged and dropped.
 `client::run_client` dials the host's `quic://` location with a caller-mode
 `remotewtsrc`, pinned to the host certificate's SHA-256, and sends the token as
 the first data channel message. Video passes through `h264parse` and
-`ffmpegdec thread-type=slice` into a `wgpusink` window that presents each frame
-as it arrives (`sync=false`, mailbox). `remotewtsrc` does not report a live
-source, so `ffmpegdec`'s auto choice is frame threading, which holds 15 pictures
-on a 16-thread machine, about 265 ms at 58 fps. With `inputs` on, the window's input goes through an
+`ffmpegdec` into a `wgpusink` window that presents each frame as it arrives
+(`sync=false`, mailbox). `remotewtsrc` reports a live source, so `ffmpegdec`'s
+auto choice is slice threading, which holds no pictures. With `inputs` on, the window's input goes through an
 `InputRouter` and out as packets on the data channel. Keys map from evdev codes
 to HID usages on device 0, a pointer position goes out as an absolute position
 on display 0, and losing keyboard focus releases the keys and buttons still
@@ -685,7 +684,12 @@ the receiver learns the media type from the stream.
 `RemoteSrc` is the TCP listener. It accepts one connection and discovers its
 output caps from that first `CapsChanged`, the async caps-discovery pattern
 `RtspSrc` uses, then re-emits the leading caps and every subsequent packet
-downstream, ending on the sender's `Eos` or a clean close. A `metadata`-off
+downstream, ending on the sender's `Eos` or a clean close. It reports a live
+source and shifts the sender's timestamps by one offset, fixed at the first
+frame, that puts that frame's decode time at its local arrival on the pipeline
+clock. Frame spacing and the sender's decode order survive, and network jitter
+stays out of the timestamps. The frame age the wire carries is kept, so frame
+ages still count from the sender's capture. A `metadata`-off
 receiver ignores a `metadata`-on sender's meta payload, the last field of a
 `DataFrame` body, rather than mis-parsing it, so a mixed-feature deployment
 degrades to no metadata and never to corruption.

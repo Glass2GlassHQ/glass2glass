@@ -649,6 +649,12 @@ impl MultiOutputSource for RestartFanoutSrc {
         }
     }
 
+    fn latency(&self) -> LatencyReport {
+        self.current
+            .as_ref()
+            .map_or(LatencyReport::ZERO, |source| source.latency())
+    }
+
     fn set_instance_name(&mut self, name: String) {
         self.log_name.set_instance(name);
     }

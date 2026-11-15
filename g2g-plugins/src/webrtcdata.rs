@@ -66,6 +66,7 @@ use str0m::{Event, IceConnectionState, Input, Output, Rtc, RtcConfig, RtcError};
 use g2g_core::frame::Frame;
 use g2g_core::log::{short_type_name, LogSource, Target};
 use g2g_core::memory::SystemSlice;
+use g2g_core::query::LatencyReport;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
     AsyncElement, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome, FrameTiming,
@@ -371,6 +372,10 @@ impl WebRtcDataSrc {
 impl SourceLoop for WebRtcDataSrc {
     type RunFuture<'a> = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>;
     type CapsFuture<'a> = core::future::Ready<Result<Caps, G2gError>>;
+
+    fn latency(&self) -> LatencyReport {
+        LatencyReport::live(0, None)
+    }
 
     fn intercept_caps(&mut self) -> Self::CapsFuture<'_> {
         core::future::ready(Ok(self.caps()))

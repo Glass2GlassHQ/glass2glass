@@ -128,9 +128,15 @@ async fn webtransport_carries_a_split_graph_edge() {
 
     // Each frame's sequence, timing, and bytes survived byte-for-byte.
     assert_eq!(sink.frames.len(), N as usize);
+    assert!(stats.latency.live, "a remote receiver is a live source");
+    let first_pts_ns = sink.frames[0].1.pts_ns;
     for (i, (seq, timing, bytes)) in sink.frames.iter().enumerate() {
         assert_eq!(*seq, i as u64, "sequence preserved");
-        assert_eq!(timing.pts_ns, i as u64 * 1_000_000, "pts preserved");
+        assert_eq!(
+            timing.pts_ns - first_pts_ns,
+            i as u64 * 1_000_000,
+            "pts spacing preserved"
+        );
         assert_eq!(timing.keyframe, i == 0, "keyframe flag preserved");
         assert_eq!(bytes.len(), FRAME_LEN, "frame length preserved");
         assert_eq!(bytes[0], i as u8, "payload tag preserved (correct framing)");
@@ -295,6 +301,7 @@ async fn webtransport_datagram_carrier_delivers_frames_and_falls_back_when_too_l
         "caps still discovered from the stream half of the carrier"
     );
 
+    let first_pts_ns = sink.frames[0].1.pts_ns;
     for (i, (sequence, timing, bytes)) in (0..=N).zip(&sink.frames) {
         assert_eq!(*sequence, u64::from(i), "frames arrive in send order");
         let want = if i == N { BIG_LEN } else { FRAME_LEN };
@@ -302,9 +309,9 @@ async fn webtransport_datagram_carrier_delivers_frames_and_falls_back_when_too_l
         assert_eq!(bytes[0], i, "frame {i} payload tag preserved");
         assert_eq!(bytes[1], 0xAB, "frame {i} second marker preserved");
         assert_eq!(
-            timing.pts_ns,
+            timing.pts_ns - first_pts_ns,
             i as u64 * 1_000_000,
-            "frame {i} pts preserved"
+            "frame {i} pts spacing preserved"
         );
     }
 }
@@ -671,9 +678,14 @@ async fn webtransport_source_accepts_an_aioquic_client() {
         Some(&test_caps()),
         "caps discovered from the foreign client's leading wire packet"
     );
+    let first_pts_ns = sink.frames[0].1.pts_ns;
     for (i, (seq, timing, bytes)) in sink.frames.iter().enumerate() {
         assert_eq!(*seq, i as u64, "sequence intact");
-        assert_eq!(timing.pts_ns, i as u64 * 1_000_000, "timing intact");
+        assert_eq!(
+            timing.pts_ns - first_pts_ns,
+            i as u64 * 1_000_000,
+            "timing spacing intact"
+        );
         assert_eq!(bytes[0], i as u8, "payload tag intact");
         assert_eq!(bytes[1], 0xAB, "second marker intact (no mis-framing)");
     }

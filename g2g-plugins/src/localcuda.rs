@@ -49,9 +49,11 @@ use std::os::unix::net::UnixListener as StdUnixListener;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::UnixStream;
 
+use g2g_core::clock::ClockSync;
 use g2g_core::log::io_err;
 use g2g_core::memory::{CudaKeepAlive, OwnedCudaBuffer};
 use g2g_core::pad_template::{PadTemplate, PadTemplates};
+use g2g_core::query::LatencyReport;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, Frame,
@@ -77,6 +79,7 @@ const SRC_PROPS: &[PropertySpec] = &[
     crate::cudadeviceid::CUDA_DEVICE_ID_PROP,
 ];
 
+use crate::arrivalstamp::SenderTimelineShift;
 use crate::localipc;
 
 // ---- wire framing over the Unix socket ----
@@ -517,6 +520,7 @@ pub struct LocalCudaSrc {
     /// frame. The sender's frames live on this device: an IPC handle only opens
     /// on the device that exported it.
     cuda_device_id: i32,
+    clock_sync: Option<ClockSync>,
 }
 
 impl LocalCudaSrc {
@@ -533,6 +537,7 @@ impl LocalCudaSrc {
             frame_limit: u64::MAX,
             direct: false,
             cuda_device_id: crate::cudadeviceid::DEFAULT_CUDA_DEVICE_ID,
+            clock_sync: None,
         }
     }
 
@@ -603,6 +608,14 @@ impl SourceLoop for LocalCudaSrc {
         = Pin<Box<dyn Future<Output = Result<Caps, G2gError>> + 'a>>
     where
         Self: 'a;
+
+    fn latency(&self) -> LatencyReport {
+        LatencyReport::live(0, None)
+    }
+
+    fn set_clock_sync(&mut self, sync: ClockSync) {
+        self.clock_sync = Some(sync);
+    }
 
     fn intercept_caps<'a>(&'a mut self) -> Self::CapsFuture<'a> {
         Box::pin(async move { self.ensure_connected().await })
@@ -677,6 +690,7 @@ impl SourceLoop for LocalCudaSrc {
             let ctx = self.ctx.clone().ok_or(G2gError::NotConfigured)?;
             let direct = self.direct;
             let device_ordinal = self.cuda_device_id;
+            let mut timeline = SenderTimelineShift::new(self.clock_sync.clone());
             // Split so a frame descriptor can be read while the ack for the
             // previous frame is written (the zero-copy path waits on consumption
             // between the read and the ack).
@@ -734,7 +748,7 @@ impl SourceLoop for LocalCudaSrc {
                             );
                             out.push(PipelinePacket::DataFrame(Frame {
                                 domain: MemoryDomain::Cuda(buf),
-                                timing: desc.timing,
+                                timing: timeline.apply(desc.timing),
                                 sequence: desc.sequence,
                                 meta: Default::default(),
                             }))
@@ -805,7 +819,7 @@ impl SourceLoop for LocalCudaSrc {
                             );
                             out.push(PipelinePacket::DataFrame(Frame {
                                 domain: MemoryDomain::Cuda(buf),
-                                timing: desc.timing,
+                                timing: timeline.apply(desc.timing),
                                 sequence: desc.sequence,
                                 meta: Default::default(),
                             }))

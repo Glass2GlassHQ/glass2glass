@@ -44,15 +44,14 @@ use g2g_core::{
     PropKind, PropValue, PropertySpec,
 };
 
+use crate::arrivalstamp::ArrivalStamp;
 use crate::filesink::io_err;
 use crate::turn::{self, TurnSet};
 use crate::webrtc_codec::{
     enable_tracks, get_video_codec_property, opus_caps, set_video_codec_property, Track,
     WebRtcVideoCodec, VIDEO_CODEC_PROP,
 };
-use crate::webrtc_receive::{
-    capture_time_meta, media_capture_unix_ns, ArrivalStamp, UDP_RECV_BYTES,
-};
+use crate::webrtc_receive::{capture_time_meta, media_capture_unix_ns, UDP_RECV_BYTES};
 use crate::webrtc_stats::{WebRtcStatsHandle, STATS_INTERVAL};
 use crate::webrtc_util::{
     add_host_candidate, delete_resource, feed_datagram, ice_restart, negotiate_over_http,

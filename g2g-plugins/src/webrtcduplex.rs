@@ -74,6 +74,7 @@ use g2g_core::{
     PropValue, PropertySpec, ReverseChannel,
 };
 
+use crate::arrivalstamp::ArrivalStamp;
 use crate::datachannel::{data_channel, DataChannelEnds, DataChannelTransportEnds};
 use crate::filesink::io_err;
 use crate::turn::TurnSet;
@@ -82,7 +83,7 @@ use crate::webrtc_codec::{
     set_video_codec_property, stamp_capture_time, Track, WebRtcVideoCodec, VIDEO_CODEC_PROP,
 };
 use crate::webrtc_receive::{
-    capture_time_meta, media_capture_unix_ns, ArrivalStamp, KeyframeGate, UDP_RECV_BYTES,
+    capture_time_meta, media_capture_unix_ns, KeyframeGate, UDP_RECV_BYTES,
 };
 use crate::webrtc_util::{
     accept_answer_sdp, accept_offer_sdp, add_ice_candidates, connect_failed, estimate_bps,

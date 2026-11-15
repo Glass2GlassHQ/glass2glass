@@ -45,9 +45,11 @@ use std::os::unix::net::UnixListener as StdUnixListener;
 use tokio::io::Interest;
 use tokio::net::UnixStream;
 
+use g2g_core::clock::ClockSync;
 use g2g_core::log::io_err;
 use g2g_core::memory::{MemoryDomain, MemoryDomainKind, OwnedDmaBuf, SyncFd};
 use g2g_core::pad_template::{PadTemplate, PadTemplates};
+use g2g_core::query::LatencyReport;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
     raw_format_from_u8, raw_format_to_u8, AsyncElement, Caps, CapsConstraint, CapsSet,
@@ -72,6 +74,7 @@ const SRC_PROPS: &[PropertySpec] = &[
     .with_range("-1", "9223372036854775807"),
 ];
 
+use crate::arrivalstamp::SenderTimelineShift;
 use crate::scmfd;
 
 // ---- fixed-size wire records over the Unix socket ----
@@ -511,6 +514,7 @@ pub struct DmaBufSrc {
     /// `u64::MAX` runs until the sender ends the stream; otherwise stop after
     /// this many frames and emit EOS.
     frame_limit: u64,
+    clock_sync: Option<ClockSync>,
 }
 
 impl DmaBufSrc {
@@ -524,6 +528,7 @@ impl DmaBufSrc {
             discovered: None,
             configured: false,
             frame_limit: u64::MAX,
+            clock_sync: None,
         }
     }
 
@@ -574,6 +579,14 @@ impl SourceLoop for DmaBufSrc {
         = Pin<Box<dyn Future<Output = Result<Caps, G2gError>> + 'a>>
     where
         Self: 'a;
+
+    fn latency(&self) -> LatencyReport {
+        LatencyReport::live(0, None)
+    }
+
+    fn set_clock_sync(&mut self, sync: ClockSync) {
+        self.clock_sync = Some(sync);
+    }
 
     fn intercept_caps<'a>(&'a mut self) -> Self::CapsFuture<'a> {
         Box::pin(async move { self.ensure_connected().await })
@@ -643,6 +656,7 @@ impl SourceLoop for DmaBufSrc {
 
             let limit = self.frame_limit;
             let mut emitted = 0u64;
+            let mut timeline = SenderTimelineShift::new(self.clock_sync.clone());
             // The stream's GPU-completion timeline semaphore, received once (TAG_SYNC)
             // and shared (refcounted) into every synced frame; a sem-aware consumer
             // (`DmaBufToWgpu`) host-waits each frame's value before reading.
@@ -691,7 +705,7 @@ impl SourceLoop for DmaBufSrc {
                         }
                         out.push(PipelinePacket::DataFrame(Frame {
                             domain: MemoryDomain::DmaBuf(dmabuf),
-                            timing: rec.timing,
+                            timing: timeline.apply(rec.timing),
                             sequence: rec.sequence,
                             meta: Default::default(),
                         }))

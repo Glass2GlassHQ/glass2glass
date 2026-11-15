@@ -25,12 +25,15 @@ use alloc::boxed::Box;
 
 use std::net::{SocketAddr, TcpListener as StdTcpListener};
 
+use g2g_core::clock::ClockSync;
+use g2g_core::query::LatencyReport;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
     Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata, G2gError, HardwareError,
     OutputSink, PipelinePacket, PropError, PropValue, PropertySpec, PushOutcome, Reconfigure,
 };
 
+use crate::arrivalstamp::SenderTimelineShift;
 use crate::filesink::io_err;
 
 /// A future returned by a [`PacketTransport`] method, borrowing its argument for
@@ -139,6 +142,7 @@ pub struct RemoteSource<T: PacketTransport> {
     /// leading caps) and continues. Only an explicit `Eos` (or `frame_limit`) ends
     /// it.
     keep_listening: bool,
+    clock_sync: Option<ClockSync>,
 }
 
 impl<T: PacketTransport> core::fmt::Debug for RemoteSource<T> {
@@ -165,6 +169,7 @@ impl<T: PacketTransport> RemoteSource<T> {
             configured: false,
             frame_limit: 0,
             keep_listening: false,
+            clock_sync: None,
         }
     }
 
@@ -281,6 +286,14 @@ impl<T: PacketTransport> SourceLoop for RemoteSource<T> {
         Ok(ConfigureOutcome::Accepted)
     }
 
+    fn latency(&self) -> LatencyReport {
+        LatencyReport::live(0, None)
+    }
+
+    fn set_clock_sync(&mut self, sync: ClockSync) {
+        self.clock_sync = Some(sync);
+    }
+
     fn metadata(&self) -> ElementMetadata {
         ElementMetadata::new(
             T::NAME,
@@ -331,6 +344,7 @@ impl<T: PacketTransport> SourceLoop for RemoteSource<T> {
 
             let limit = self.frame_limit;
             let mut emitted = 0u64;
+            let mut timeline = SenderTimelineShift::new(self.clock_sync.clone());
             loop {
                 let conn = self.conn.as_mut().ok_or(G2gError::NotConfigured)?;
                 let pkt = match T::recv(conn).await? {
@@ -358,7 +372,8 @@ impl<T: PacketTransport> SourceLoop for RemoteSource<T> {
                         out.push(PipelinePacket::Eos).await?;
                         break;
                     }
-                    PipelinePacket::DataFrame(frame) => {
+                    PipelinePacket::DataFrame(mut frame) => {
+                        frame.timing = timeline.apply(frame.timing);
                         let outcome = out.push(PipelinePacket::DataFrame(frame)).await?;
                         if outcome == PushOutcome::Reconfigure(Reconfigure::ForceKeyframe) {
                             let conn = self.conn.as_mut().ok_or(G2gError::NotConfigured)?;

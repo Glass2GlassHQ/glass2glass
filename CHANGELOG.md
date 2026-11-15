@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2327: Remote, local IPC, SRT, RTMP, RTSP ingest and the Android, Apple, Windows and web capture sources report themselves live, and remote receivers move the sender's timestamps onto the local clock.
 - M2326: `remotewtsink video-mode` adds stream-per-frame and ordered datagram video, with keyframe requests from `remotewtsrc` back to the encoder.
 - M2325: `remotewtsrc` frame age includes the network leg, plus `send-window` on `remotewtsink` and `quality-vs-speed` on `mfencode`.
 - M2324: `g2g-desktop` runs over raw QUIC with a pinned self-signed certificate instead of WebRTC.

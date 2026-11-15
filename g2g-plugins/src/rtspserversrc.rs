@@ -309,10 +309,7 @@ impl RtspServerSrc {
         let this = &*self;
         let frame_limit = this.frame_limit;
         let timeout_ns = this.session_timeout_ns;
-        let frame_period_ns = match this.fps {
-            0 => 0,
-            fps => 1_000_000_000 / fps as u64,
-        };
+        let frame_period_ns = g2g_core::caps::fps_period_ns(this.fps);
         let formats = [
             IngestFormat::Video(ingest_codec(&this.recv)),
             IngestFormat::Aac,
@@ -650,12 +647,7 @@ impl SourceLoop for RtspServerSrc {
     /// Live source: contributes one frame period so the sink keeps a frame in
     /// hand and never runs dry waiting on the network.
     fn latency(&self) -> LatencyReport {
-        let period_ns = if self.fps > 0 {
-            1_000_000_000 / self.fps as u64
-        } else {
-            0
-        };
-        LatencyReport::live(period_ns, None)
+        LatencyReport::live(g2g_core::caps::fps_period_ns(self.fps), None)
     }
 
     fn run<'a>(&'a mut self, out: &'a mut dyn OutputSink) -> Self::RunFuture<'a> {

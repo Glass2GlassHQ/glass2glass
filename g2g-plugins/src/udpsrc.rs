@@ -967,12 +967,7 @@ impl SourceLoop for UdpSrc {
     /// Live source: contributes one frame period so the sink keeps a frame in
     /// hand and never runs dry waiting on the network.
     fn latency(&self) -> LatencyReport {
-        let period_ns = if self.fps > 0 {
-            1_000_000_000 / self.fps as u64
-        } else {
-            0
-        };
-        LatencyReport::live(period_ns, None)
+        LatencyReport::live(g2g_core::caps::fps_period_ns(self.fps), None)
     }
 
     fn set_bus(&mut self, bus: BusHandle) {
