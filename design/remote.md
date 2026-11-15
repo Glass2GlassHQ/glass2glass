@@ -138,6 +138,11 @@ pipewirevideosrc portal=true ! videoconvert ! ffmpegenc
 or `ffmpegenc` with the VA-API backend when `io-mode=dmabuf` yields a buffer
 that backend accepts. If it does not, the software line is the one that ships.
 
+The Linux host reads `portal-restore-token` from
+`$XDG_STATE_HOME/g2g-desktop/portal-restore-token` before each connection and
+writes each token `PipeWireVideoSrc::portal_restore_tokens` publishes back to
+that file. Portal tokens are single-use, so the file always holds the newest one.
+
 Windows, every frame on the GPU from capture to the encoder:
 
 ```

@@ -122,11 +122,37 @@ where
     Ok(optional(flags, name)?.unwrap_or(default))
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct CaptureSettings {
     fps: u32,
+    #[cfg(target_os = "linux")]
+    portal_restore_token_path: PathBuf,
     #[cfg(target_os = "windows")]
     monitor_index: i32,
+}
+
+#[cfg(target_os = "linux")]
+fn portal_restore_token_path() -> Result<PathBuf, Box<dyn Error>> {
+    // XDG base directory spec: an unset or empty XDG_STATE_HOME means $HOME/.local/state
+    let state_home = match std::env::var_os("XDG_STATE_HOME").filter(|dir| !dir.is_empty()) {
+        Some(dir) => PathBuf::from(dir),
+        None => {
+            PathBuf::from(std::env::var_os("HOME").ok_or("HOME is not set")?).join(".local/state")
+        }
+    };
+    Ok(state_home.join("g2g-desktop/portal-restore-token"))
+}
+
+#[cfg(target_os = "linux")]
+async fn save_portal_restore_tokens(
+    mut tokens: watch::Receiver<String>,
+    path: &Path,
+) -> std::io::Result<()> {
+    while tokens.changed().await.is_ok() {
+        let token = tokens.borrow_and_update().clone();
+        std::fs::write(path, token)?;
+    }
+    Ok(())
 }
 
 fn open_trace(path: Option<&Path>) -> Result<Option<Arc<PerfettoTrace>>, Box<dyn Error>> {
@@ -152,19 +178,32 @@ async fn host_one(
     let (events, event_receiver) = mpsc::unbounded_channel();
     let (sizes, size_receiver) = watch::channel(None);
     #[cfg(target_os = "linux")]
-    let (host_capture, open_injector) = (
-        HostCapture {
-            nodes: vec![GraphNodeRef::source(
-                PipeWireVideoSrc::new()
-                    .with_portal(PortalSourceTypes::Monitor)
-                    .with_fps(capture.fps),
-            )],
-            cursor_shapes: None,
-        },
-        Injector::new,
-    );
+    let (host_capture, open_injector, saved_tokens) = {
+        let path = &capture.portal_restore_token_path;
+        let token = match std::fs::read_to_string(path) {
+            Ok(token) => token,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(e) => {
+                eprintln!("g2g-desktop host: {}: {e}", path.display());
+                return;
+            }
+        };
+        let source = PipeWireVideoSrc::new()
+            .with_portal(PortalSourceTypes::Monitor)
+            .with_portal_restore_token(token)
+            .with_fps(capture.fps);
+        let saved_tokens = save_portal_restore_tokens(source.portal_restore_tokens(), path);
+        (
+            HostCapture {
+                nodes: vec![GraphNodeRef::source(source)],
+                cursor_shapes: None,
+            },
+            Injector::new,
+            saved_tokens,
+        )
+    };
     #[cfg(target_os = "windows")]
-    let (host_capture, open_injector) = {
+    let (host_capture, open_injector, saved_tokens) = {
         let monitor = match monitor_bounds(capture.monitor_index) {
             Ok(monitor) => monitor,
             Err(e) => {
@@ -181,9 +220,10 @@ async fn host_one(
                 nodes: vec![GraphNodeRef::source(source)],
             },
             move |screen| Injector::new(screen, monitor),
+            std::future::ready(std::io::Result::Ok(())),
         )
     };
-    let (session, injected) = tokio::join!(
+    let (session, injected, saved) = tokio::join!(
         run_session(
             listener,
             host_capture,
@@ -192,7 +232,8 @@ async fn host_one(
             sizes,
             trace.clone().map(|trace| trace as Arc<dyn VisitRecorder>),
         ),
-        inject(event_receiver, size_receiver, open_injector)
+        inject(event_receiver, size_receiver, open_injector),
+        saved_tokens
     );
     match session {
         Ok(stats) => eprintln!("{}", stats.report()),
@@ -200,6 +241,9 @@ async fn host_one(
     }
     if let Err(e) = injected {
         eprintln!("g2g-desktop host: input injection: {e}");
+    }
+    if let Err(e) = saved {
+        eprintln!("g2g-desktop host: saving the portal restore token: {e}");
     }
     if let Some(Err(e)) = trace.map(PerfettoTrace::finish) {
         eprintln!("g2g-desktop host: --trace: {e}");
@@ -210,6 +254,8 @@ async fn host(flags: Flags) -> Result<(), Box<dyn Error>> {
     let port = parsed(&flags, "port", DEFAULT_PORT)?;
     let capture = CaptureSettings {
         fps: parsed(&flags, "fps", DEFAULT_FPS)?,
+        #[cfg(target_os = "linux")]
+        portal_restore_token_path: portal_restore_token_path()?,
         #[cfg(target_os = "windows")]
         monitor_index: parsed(&flags, "monitor-index", PRIMARY_MONITOR)?,
     };
@@ -222,6 +268,13 @@ async fn host(flags: Flags) -> Result<(), Box<dyn Error>> {
         quality_vs_speed: optional(&flags, "quality-vs-speed")?,
     };
     check_token_len(&settings.token)?;
+    #[cfg(target_os = "linux")]
+    std::fs::create_dir_all(
+        capture
+            .portal_restore_token_path
+            .parent()
+            .expect("the token path is joined onto a state directory"),
+    )?;
     let trace_path = flags.get("trace").map(PathBuf::from);
     let certificate = generate_certificate()?;
     let address = SocketAddr::from((Ipv4Addr::UNSPECIFIED, port));
@@ -231,7 +284,13 @@ async fn host(flags: Flags) -> Result<(), Box<dyn Error>> {
     );
     loop {
         let listener = HostListener::bind(address, certificate.clone(), &settings)?;
-        host_one(listener, settings.clone(), capture, trace_path.clone()).await;
+        host_one(
+            listener,
+            settings.clone(),
+            capture.clone(),
+            trace_path.clone(),
+        )
+        .await;
     }
 }
 

@@ -225,7 +225,7 @@ pub struct PipeWireVideoSrc {
     /// Empty = ask the user; else re-open the grant this token names. Replaced by
     /// the granted token once a handshake succeeds.
     #[cfg(feature = "portal")]
-    portal_restore_token: String,
+    portal_restore_token: tokio::sync::watch::Sender<String>,
     #[cfg(feature = "portal")]
     portal_timeout_secs: u64,
     /// Whether a consumer asked where the rows are, so a padded mapped
@@ -257,7 +257,7 @@ impl PipeWireVideoSrc {
             #[cfg(feature = "portal")]
             portal_source_types: PortalSourceTypes::Monitor,
             #[cfg(feature = "portal")]
-            portal_restore_token: String::new(),
+            portal_restore_token: tokio::sync::watch::channel(String::new()).0,
             #[cfg(feature = "portal")]
             portal_timeout_secs: DEFAULT_PORTAL_TIMEOUT_SECS,
             keep_row_padding: false,
@@ -322,9 +322,15 @@ impl PipeWireVideoSrc {
     /// Re-open the grant `token` names instead of asking the user again. A stale
     /// or unknown token just means the portal asks.
     #[cfg(feature = "portal")]
-    pub fn with_portal_restore_token(mut self, token: impl Into<String>) -> Self {
-        self.portal_restore_token = token.into();
+    pub fn with_portal_restore_token(self, token: impl Into<String>) -> Self {
+        self.portal_restore_token.send_replace(token.into());
         self
+    }
+
+    #[cfg(feature = "portal")]
+    pub fn portal_restore_tokens(&self) -> tokio::sync::watch::Receiver<String> {
+        // xdg-desktop-portal restore tokens are single-use, only the newest one restores
+        self.portal_restore_token.subscribe()
     }
 
     /// How long each portal step may take, the consent dialog included.
@@ -345,10 +351,10 @@ impl PipeWireVideoSrc {
     /// What the handshake should ask for, or `None` when the portal is off.
     #[cfg(feature = "portal")]
     fn portal_request(&self) -> Option<PortalRequest> {
+        let restore_token = self.portal_restore_token.borrow();
         self.portal.then(|| PortalRequest {
             source_types: self.portal_source_types,
-            restore_token: (!self.portal_restore_token.is_empty())
-                .then(|| self.portal_restore_token.clone()),
+            restore_token: (!restore_token.is_empty()).then(|| restore_token.clone()),
             timeout: core::time::Duration::from_secs(self.portal_timeout_secs),
         })
     }
@@ -585,7 +591,8 @@ impl SourceLoop for PipeWireVideoSrc {
             }
             #[cfg(feature = "portal")]
             "portal-restore-token" => {
-                self.portal_restore_token = value.as_str().ok_or(PropError::Type)?.to_string();
+                self.portal_restore_token
+                    .send_replace(value.as_str().ok_or(PropError::Type)?.to_string());
                 Ok(())
             }
             #[cfg(feature = "portal")]
@@ -617,7 +624,9 @@ impl SourceLoop for PipeWireVideoSrc {
             #[cfg(feature = "portal")]
             "portal-source-types" => Some(PropValue::Str(self.portal_source_types.as_str().into())),
             #[cfg(feature = "portal")]
-            "portal-restore-token" => Some(PropValue::Str(self.portal_restore_token.clone())),
+            "portal-restore-token" => {
+                Some(PropValue::Str(self.portal_restore_token.borrow().clone()))
+            }
             #[cfg(feature = "portal")]
             "portal-timeout" => Some(PropValue::Uint(self.portal_timeout_secs)),
             _ => None,
@@ -727,7 +736,7 @@ impl SourceLoop for PipeWireVideoSrc {
                             g2g_core::log::Target::category("PipeWireVideoSrc"),
                             "portal restore token: {token} (pass as portal-restore-token to skip the dialog)"
                         );
-                        self.portal_restore_token = token;
+                        self.portal_restore_token.send_replace(token);
                     }
                 }
                 Err(e) => {

@@ -32,8 +32,6 @@ The plan is [remote.md](remote.md).
 
 - `ximagesrc` for unattended X11 capture, and window capture.
 - VA-API encode on the Linux host through `ffmpegenc`.
-- Reuse the portal restore token on the Linux host, so a restarted host does
-  not ask for the screen again.
 - Opus audio from the host's default capture device, on a short queue that
   does not hold the picture.
 - Encode with `d3d11convert ! nvenc` on a Windows host with an NVIDIA GPU,
