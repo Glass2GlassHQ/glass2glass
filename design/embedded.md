@@ -411,3 +411,9 @@ pure-Rust `embassy-net`/smoltcp stack, the whole g2g-to-network bridge being one
 embassy-net `UdpSocket`, with no C in the network path unlike the P4's WiFi. It
 compiles for `thumbv7em` and stays outside CI because of embassy's build weight.
 
+`examples/g2g-esp32s3` runs the display, audio and keyword graphs on a XIAO
+ESP32S3 Sense (Xtensa LX7 at 240 MHz) and prints each result next to the pinned
+constant. All three match the host bit for bit, including the keyword graph's
+f32 scores. One run takes 1.4 ms for the display graph, 262 ms for the 50-frame
+audio graph and 215 ms for the keyword graph. The firmware image is 121 KB.
+

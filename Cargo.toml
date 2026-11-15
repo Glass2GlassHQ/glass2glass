@@ -78,6 +78,9 @@ exclude = [
     # git `main` (its esp32p4 support is not yet in a release), so it is kept out
     # of the normal build / CI. Standalone, own Cargo.lock. See its README.
     "examples/g2g-esp32p4",
+    # ESP32-S3 (Xtensa) board harness for the XIAO ESP32S3 Sense: needs the esp
+    # toolchain from espup. Standalone, own Cargo.lock. See its README.
+    "examples/g2g-esp32s3",
     # STM32H743 (Cortex-M7) on-device harness: the flagship audio graph egressing
     # RTP over on-chip Ethernet via a pure-Rust embassy-net/smoltcp stack. Heavy
     # embassy deps + board-specific bring-up, kept out of the normal build / CI.

@@ -519,8 +519,9 @@ no-heap targets (MISRA, certification processes).
 - **ARM, RISC-V and Xtensa.** The no-alloc core and `g2g-mcu` build unchanged for
   `riscv32imafc` (ESP32-P4 class). The symbol proofs and the footprint report
   run on both `thumbv7em` and RISC-V, and the heap-free, panic-free proof also
-  runs on the ESP32-S3 (Xtensa). The `alloc` core builds for targets without
-  64-bit atomics.
+  runs on the ESP32-S3 (Xtensa). `examples/g2g-esp32s3` runs those graphs on a
+  XIAO ESP32S3 Sense with checksums matching the host. The `alloc` core builds
+  for targets without 64-bit atomics.
 - **TinyML inference.** `TensorInference` runs a model on each `Caps::Tensor`
   frame through a `TensorModel` backend seam, output into a static ring slot.
   The `microflow` feature compiles a `.tflite` into Rust at build time with

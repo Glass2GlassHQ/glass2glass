@@ -1,0 +1,24 @@
+# ESP32-S3 on-device harness for the XIAO ESP32S3 Sense. Not a workspace member
+# (see root `exclude`): it needs Espressif's xtensa toolchain from espup.
+[package]
+name = "g2g-esp32s3"
+version = "0.1.0"
+edition = "2021"
+license = "MPL-2.0"
+publish = false
+
+[workspace]
+
+[dependencies]
+noalloc-pipeline = { path = "../noalloc-pipeline" }
+esp-hal = { version = "1.2.2", features = ["esp32s3"] }
+esp-println = { version = "0.18.0", default-features = false, features = ["esp32s3", "jtag-serial"] }
+esp-backtrace = { version = "0.20.0", features = ["esp32s3", "panic-handler", "println"] }
+esp-bootloader-esp-idf = { version = "0.6.0", features = ["esp32s3"] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+debug = true
