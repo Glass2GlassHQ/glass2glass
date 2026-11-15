@@ -882,7 +882,10 @@ dependencies = [
  "esp-bootloader-esp-idf",
  "esp-hal",
  "esp-println",
+ "g2g-core",
+ "g2g-mcu",
  "noalloc-pipeline",
+ "static_cell",
 ]
 
 [[package]]

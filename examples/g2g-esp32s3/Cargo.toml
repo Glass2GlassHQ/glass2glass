@@ -11,14 +11,19 @@ publish = false
 
 [dependencies]
 noalloc-pipeline = { path = "../noalloc-pipeline" }
-esp-hal = { version = "1.2.2", features = ["esp32s3"] }
+g2g-core = { path = "../../g2g-core", default-features = false }
+g2g-mcu = { path = "../../g2g-mcu" }
+# i2s is behind esp-hal's `unstable` feature.
+esp-hal = { version = "1.2.2", features = ["esp32s3", "unstable"] }
 esp-println = { version = "0.18.0", default-features = false, features = ["esp32s3", "jtag-serial"] }
 esp-backtrace = { version = "0.20.0", features = ["esp32s3", "panic-handler", "println"] }
 esp-bootloader-esp-idf = { version = "0.6.0", features = ["esp32s3"] }
+static_cell = "2"
 
 [profile.release]
 opt-level = "s"
-lto = true
+# esp 1.94 to 1.98.0 fail with "Cannot select PCREL_WRAPPER" under LTO, esp-rs/rust issue 283
+lto = false
 codegen-units = 1
 panic = "abort"
 debug = true

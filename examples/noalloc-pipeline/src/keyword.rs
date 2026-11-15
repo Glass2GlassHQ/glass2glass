@@ -8,10 +8,10 @@ use g2g_core::error::G2gError;
 use g2g_core::frame::Frame;
 use g2g_core::staticpool::StaticLendRing;
 use g2g_core::{drive_ready, run_source_transform_sink, Chain, StaticSink, StaticTransform};
+use g2g_mcu::logmel::MICRO_SPEECH_SETTINGS;
 use g2g_mcu::{
     FrameGrabber, GrabberSrc, Int8Quantize, LogMelSpectrogram, MicroFlowModel, TensorInference,
 };
-use g2g_mcu::logmel::MICRO_SPEECH_SETTINGS;
 use microflow::model;
 
 // rustc runs from this crate's directory, and the macro reads the path as given.
@@ -27,8 +27,10 @@ const EXPECTED_SCORE_BYTES: &[u8; KEYWORDS * SCORE_BYTES] =
 const MELS: usize = 40;
 const FEATURES: usize = MICRO_SPEECH_SETTINGS.frames * MELS;
 pub const KEYWORDS: usize = 4;
+// speech.tflite's output order.
+pub const LABELS: [&str; KEYWORDS] = ["silence", "unknown", "yes", "no"];
 const SCORE_BYTES: usize = 4;
-const CLIP_BYTES: usize = MICRO_SPEECH_SETTINGS.clip_samples() * 2;
+pub const CLIP_BYTES: usize = MICRO_SPEECH_SETTINGS.clip_samples() * 2;
 const LOG_MEL_BYTES: usize = FEATURES * 4;
 // One clip, so the frame period only stamps PTS 0.
 const CLIP_INTERVAL_NS: u64 = 1_000_000_000;
@@ -112,11 +114,11 @@ impl StaticTransform for FeatureDigest<'_> {
     }
 }
 
-struct ScoreSink<'a> {
-    scores: &'a Cell<[f32; KEYWORDS]>,
+struct ScoreSink<F: FnMut([f32; KEYWORDS])> {
+    on_scores: F,
 }
 
-impl StaticSink for ScoreSink<'_> {
+impl<F: FnMut([f32; KEYWORDS])> StaticSink for ScoreSink<F> {
     async fn consume(&mut self, frame: Frame) -> Result<(), G2gError> {
         let Some(bytes) = frame.domain.as_system_slice() else {
             return Err(G2gError::UnsupportedDomain);
@@ -128,24 +130,29 @@ impl StaticSink for ScoreSink<'_> {
             };
             *score = f32::from_le_bytes([b0, b1, b2, b3]);
         }
-        self.scores.set(scores);
+        (self.on_scores)(scores);
         Ok(())
     }
 }
 
-async fn run_keyword_async() -> Option<KeywordRun> {
+// Returns the digest of every clip's int8 features.
+pub async fn run_keyword_graph(
+    grabber: impl FrameGrabber,
+    clip_limit: Option<u32>,
+    clip_interval_ns: u64,
+    on_scores: impl FnMut([f32; KEYWORDS]),
+) -> Result<u64, G2gError> {
     let clip_ring: StaticLendRing<1, CLIP_BYTES> = StaticLendRing::new();
     let log_mel_ring: StaticLendRing<1, LOG_MEL_BYTES> = StaticLendRing::new();
     let feature_ring: StaticLendRing<1, FEATURES> = StaticLendRing::new();
     let score_ring: StaticLendRing<1, { KEYWORDS * SCORE_BYTES }> = StaticLendRing::new();
     let digest = Cell::new(FNV_OFFSET_BASIS);
-    let scores = Cell::new([0.0f32; KEYWORDS]);
 
     // SAFETY (every `with_ring` below): the rings are locals of this function
     // and outlive the pipeline run, which drains before returning.
-    let log_mel =
-        unsafe { LogMelSpectrogram::<MELS, 1, LOG_MEL_BYTES>::with_ring(MICRO_SPEECH_SETTINGS, &log_mel_ring) }
-            .ok()?;
+    let log_mel = unsafe {
+        LogMelSpectrogram::<MELS, 1, LOG_MEL_BYTES>::with_ring(MICRO_SPEECH_SETTINGS, &log_mel_ring)
+    }?;
     // SAFETY: as above.
     let quantize = unsafe {
         Int8Quantize::with_ring(
@@ -154,17 +161,20 @@ async fn run_keyword_async() -> Option<KeywordRun> {
             INPUT_ZERO_POINT,
             &feature_ring,
         )
-    }
-    .ok()?;
+    }?;
     // SAFETY: as above.
     let inference = unsafe {
         TensorInference::with_ring(MicroFlowModel::new(Speech::predict_quantized), &score_ring)
     };
     if quantize.output_format() != inference.input_format() {
-        return None;
+        return Err(G2gError::CapsMismatch);
     }
     // SAFETY: as above.
-    let source = unsafe { GrabberSrc::with_ring(ClipGrabber, &clip_ring, CLIP_INTERVAL_NS) };
+    let source = unsafe { GrabberSrc::with_ring(grabber, &clip_ring, clip_interval_ns) };
+    let source = match clip_limit {
+        Some(clips) => source.with_frame_limit(clips),
+        None => source,
+    };
     let transform = Chain(
         log_mel,
         Chain(
@@ -172,16 +182,21 @@ async fn run_keyword_async() -> Option<KeywordRun> {
             Chain(FeatureDigest { digest: &digest }, inference),
         ),
     );
-    run_source_transform_sink(
-        source.with_frame_limit(1),
-        transform,
-        ScoreSink { scores: &scores },
-    )
-    .await
-    .ok()?;
+    run_source_transform_sink(source, transform, ScoreSink { on_scores }).await?;
+    Ok(digest.get())
+}
+
+async fn run_keyword_async() -> Option<KeywordRun> {
+    let mut scores = [0.0f32; KEYWORDS];
+    let features_digest =
+        run_keyword_graph(ClipGrabber, Some(1), CLIP_INTERVAL_NS, |clip_scores| {
+            scores = clip_scores
+        })
+        .await
+        .ok()?;
     Some(KeywordRun {
-        features_digest: digest.get(),
-        scores: scores.get(),
+        features_digest,
+        scores,
     })
 }
 

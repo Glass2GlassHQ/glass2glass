@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2335: `examples/g2g-esp32s3` runs the keyword graph live on the board's PDM microphone.
 - M2333: `examples/g2g-esp32s3` runs the heap-free display, audio and keyword graphs on a XIAO ESP32S3 Sense with checksums matching the host.
 - M2332: `nvenc` encodes D3D11 NV12 textures on Windows, opening its session on the texture's device.
 - M2331: `g2g-desktop client` runs on Windows, decoding with `d3d12h264dec` and forwarding the window's keyboard, mouse and wheel input.

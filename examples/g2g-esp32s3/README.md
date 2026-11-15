@@ -2,7 +2,8 @@
 
 Runs the heap-free display, audio and keyword graphs from `noalloc-pipeline` on a
 Seeed XIAO ESP32S3 Sense and prints each checksum next to the value the host
-computes. The last line is `PASS` or `FAIL`.
+computes, then runs the keyword graph on the board's PDM microphone, printing
+the scores for a one-second window every 500 ms.
 
 ## Setup
 
@@ -33,4 +34,10 @@ OK display: 2261 (expected 2261), 1405 us
 OK audio: 214749012174 (expected 214749012174), 261805 us
 OK keyword: 16635284155892619601 (expected 16635284155892619601), 214923 us
 PASS
+listening: say yes or no
+no       silence 0.00 unknown 0.02 yes 0.02 no 0.96 peak 634
 ```
+
+`LogMelSpectrogram` has none of the noise reduction and gain control of the
+TFLite Micro front end that micro_speech was trained on, so live scores favour
+"no" even in a quiet room.

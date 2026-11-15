@@ -415,5 +415,12 @@ compiles for `thumbv7em` and stays outside CI because of embassy's build weight.
 ESP32S3 Sense (Xtensa LX7 at 240 MHz) and prints each result next to the pinned
 constant. All three match the host bit for bit, including the keyword graph's
 f32 scores. One run takes 1.4 ms for the display graph, 262 ms for the 50-frame
-audio graph and 215 ms for the keyword graph. The firmware image is 121 KB.
+audio graph and 215 ms for the keyword graph. The firmware is built without LTO,
+because esp toolchains 1.94 to 1.98.0 fail to compile esp-hal's DMA code under LTO
+and later ones miscompile it (esp-rs/rust issue 283).
+
+The same binary then runs the keyword graph on the board's PDM microphone
+through esp-hal's I2S PDM receive mode with hardware PDM-to-PCM conversion. A
+`FrameGrabber` over the DMA stream buffer slides a one-second window forward by
+500 ms per capture, and each window takes about 220 ms to score.
 
