@@ -66,6 +66,8 @@ use crate::waylandwindow::run_window;
 use crate::wgpusink::WgpuSink;
 #[cfg(target_os = "windows")]
 use crate::win32window::run_window;
+#[cfg(target_os = "linux")]
+use crate::windowworker::CursorShapes;
 use crate::windowworker::{
     present_on_worker, worker_gone, WindowParams, WindowRenderer, WorkerChannels, WorkerCmd,
 };
@@ -130,6 +132,8 @@ pub struct WgpuPresentSink {
     window_closed: Arc<AtomicBool>,
     #[cfg(target_os = "linux")]
     input: Option<tokio::sync::mpsc::UnboundedSender<crate::windowinput::WindowInput>>,
+    #[cfg(target_os = "linux")]
+    cursor_shapes: Option<CursorShapes>,
     latency: Arc<LatencyHistogram>,
     /// Why the worker could not bring its window up, sent once by the worker and
     /// read while waiting for the readiness handshake, so a setup failure is
@@ -183,6 +187,8 @@ impl WgpuPresentSink {
             window_closed: Arc::default(),
             #[cfg(target_os = "linux")]
             input: None,
+            #[cfg(target_os = "linux")]
+            cursor_shapes: None,
             latency: Arc::new(LatencyHistogram::new()),
             startup_error: None,
             log_name: LogName::new(),
@@ -197,6 +203,13 @@ impl WgpuPresentSink {
         let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
         self.input = Some(sender);
         receiver
+    }
+
+    // the window's pointer shows each shape, and None hides it
+    #[cfg(target_os = "linux")]
+    pub fn with_cursor_shapes(mut self, shapes: CursorShapes) -> Self {
+        self.cursor_shapes = Some(shapes);
+        self
     }
 
     pub fn with_title<S: Into<String>>(mut self, title: S) -> Self {
@@ -313,6 +326,8 @@ impl WgpuPresentSink {
         let force_aspect_ratio = self.force_aspect_ratio;
         #[cfg(target_os = "linux")]
         let input = self.input.clone();
+        #[cfg(target_os = "linux")]
+        let cursor_shapes = self.cursor_shapes.clone();
         let (window_width, window_height) =
             self.window_size(self.width, self.height, self.pixel_aspect);
         let params = WindowParams {
@@ -340,6 +355,8 @@ impl WgpuPresentSink {
                     window_closed,
                     #[cfg(target_os = "linux")]
                     input,
+                    #[cfg(target_os = "linux")]
+                    cursor_shapes,
                 };
                 #[cfg(target_os = "linux")]
                 let build = |conn: &Connection,

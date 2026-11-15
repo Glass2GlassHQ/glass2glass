@@ -18,6 +18,7 @@ use g2g_core::{
     PipelinePacket,
 };
 use g2g_plugins::clock::WallClock;
+use g2g_plugins::cursorshape::CursorShape;
 use g2g_plugins::fakesink::FakeSink;
 use g2g_plugins::registry::default_registry;
 use g2g_plugins::webrtcduplex::{SdpChannel, SignalRole, WebRtcDuplexSession};
@@ -26,7 +27,7 @@ use tokio::net::TcpStream;
 use tokio::sync::{mpsc, watch};
 
 use crate::injection::{InjectError, ScreenSize};
-use crate::packet::{Event, PacketReader, Side};
+use crate::packet::{CursorImage, Event, PacketError, PacketReader, PacketWriter, Side};
 #[cfg(target_os = "windows")]
 use crate::sendinput::Injector;
 use crate::signaling::{HostEvent, HostSignaling, SignalingError};
@@ -233,6 +234,66 @@ fn duplex_session(settings: &HostSettings, sdp: SdpChannel) -> WebRtcDuplexSessi
     session
 }
 
+pub struct HostCapture {
+    pub nodes: Vec<GraphNode>,
+    pub cursor_shapes: Option<watch::Receiver<Option<CursorShape>>>,
+}
+
+impl fmt::Debug for HostCapture {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("HostCapture")
+            .field("nodes", &self.nodes.len())
+            .field("cursor_shapes", &self.cursor_shapes)
+            .finish()
+    }
+}
+
+fn cursor_image(shape: Option<&CursorShape>) -> Result<CursorImage, PacketError> {
+    let Some(shape) = shape else {
+        return CursorImage::new(0, 0, 0, 0, Vec::new());
+    };
+    let too_large = || PacketError::TooLarge {
+        len: shape.rgba.len(),
+    };
+    CursorImage::new(
+        u16::try_from(shape.width).map_err(|_| too_large())?,
+        u16::try_from(shape.height).map_err(|_| too_large())?,
+        i16::try_from(shape.hotspot_x).map_err(|_| too_large())?,
+        i16::try_from(shape.hotspot_y).map_err(|_| too_large())?,
+        shape.rgba.clone(),
+    )
+}
+
+async fn forward_cursor(
+    shapes: Option<watch::Receiver<Option<CursorShape>>>,
+    outgoing: &mpsc::UnboundedSender<Vec<u8>>,
+) {
+    let Some(mut shapes) = shapes else {
+        return;
+    };
+    let log = Target::category(HOST_CATEGORY);
+    let mut writer = PacketWriter::new(Side::Host);
+    loop {
+        tokio::select! {
+            changed = shapes.changed() => {
+                if changed.is_err() {
+                    return;
+                }
+            }
+            () = outgoing.closed() => return,
+        }
+        let image = cursor_image(shapes.borrow_and_update().as_ref());
+        match image.and_then(|image| writer.write(&Event::Cursor(image))) {
+            Ok(packet) => {
+                if outgoing.send(packet).is_err() {
+                    return;
+                }
+            }
+            Err(e) => g2g_core::g2g_warn!(log, "dropped a cursor shape: {e}"),
+        }
+    }
+}
+
 async fn forward_input(
     mut messages: mpsc::UnboundedReceiver<Vec<u8>>,
     events: mpsc::UnboundedSender<Event>,
@@ -254,7 +315,7 @@ async fn forward_input(
 
 pub async fn run_session(
     mut stream: TcpStream,
-    capture: Vec<GraphNode>,
+    capture: HostCapture,
     settings: &HostSettings,
     events: mpsc::UnboundedSender<Event>,
     sizes: watch::Sender<Option<ScreenSize>>,
@@ -276,7 +337,7 @@ pub async fn run_session(
         SdpChannel::from_halves(answer_sender, offer_receiver),
     );
     let input = session.open_data_channel(INPUT_LABEL);
-    let graph = host_graph(capture, settings, session, sizes)?;
+    let graph = host_graph(capture.nodes, settings, session, sizes)?;
 
     let send_answer = async move {
         let answer = answer_receiver
@@ -292,10 +353,11 @@ pub async fn run_session(
     if let Some(trace) = trace {
         run = run.with_visit_recorder(trace);
     }
-    let (run, answered, ()) = tokio::join!(
+    let (run, answered, (), ()) = tokio::join!(
         run.run(),
         send_answer,
-        forward_input(input.incoming, events)
+        forward_input(input.incoming, events),
+        forward_cursor(capture.cursor_shapes, &input.outgoing)
     );
     answered?;
     run.map_err(HostError::Session)

@@ -18,10 +18,11 @@ use g2g_core::{
     AsyncElement, Caps, CapsConstraint, ConfigureOutcome, G2gError, OutputSink, PipelinePacket,
 };
 use g2g_desktop::client::exchange_sdp;
-use g2g_desktop::host::{run_session, HostSettings, INPUT_LABEL};
+use g2g_desktop::host::{run_session, HostCapture, HostSettings, INPUT_LABEL};
 use g2g_desktop::injection::ScreenSize;
-use g2g_desktop::packet::{Event, PacketWriter, Side};
+use g2g_desktop::packet::{CursorImage, Event, PacketReader, PacketWriter, Side};
 use g2g_plugins::clock::WallClock;
+use g2g_plugins::cursorshape::{CursorShape, CURSOR_BYTES_PER_PIXEL};
 use g2g_plugins::registry::default_registry;
 use g2g_plugins::webrtcduplex::{SdpChannel, SignalRole, WebRtcDuplexSession};
 use tokio::net::{TcpListener, TcpStream};
@@ -38,6 +39,7 @@ const RUN_TIMEOUT: Duration = Duration::from_secs(30);
 const SDP_CHANNEL_DEPTH: usize = 4;
 const LINK_CAPACITY: usize = 2;
 const HID_A: u16 = 0x04;
+const CURSOR_SIDE: u32 = 4;
 
 struct CountingSink {
     frames: Arc<AtomicU64>,
@@ -70,7 +72,7 @@ impl AsyncElement for CountingSink {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn client_sees_host_video_and_host_receives_client_input() {
+async fn client_sees_host_video_and_cursor_and_host_receives_client_input() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let settings = HostSettings {
@@ -81,10 +83,24 @@ async fn client_sees_host_video_and_host_receives_client_input() {
     };
     let registry = default_registry();
     let source = format!("videotestsrc num-buffers={FRAMES} width={WIDTH} height={HEIGHT}");
-    let capture = vec![
-        GraphNodeRef::Source(parse_source(&registry, &source).unwrap()),
-        GraphNodeRef::Element(parse_element(&registry, "clocksync").unwrap()),
-    ];
+    let cursor_shape = CursorShape {
+        width: CURSOR_SIDE,
+        height: CURSOR_SIDE,
+        hotspot_x: 1,
+        hotspot_y: 2,
+        rgba: (0..CURSOR_SIDE * CURSOR_SIDE * CURSOR_BYTES_PER_PIXEL as u32)
+            .map(|i| i as u8)
+            .collect(),
+    };
+    let (cursor_sender, cursor_shapes) = watch::channel(None);
+    cursor_sender.send_replace(Some(cursor_shape.clone()));
+    let capture = HostCapture {
+        nodes: vec![
+            GraphNodeRef::Source(parse_source(&registry, &source).unwrap()),
+            GraphNodeRef::Element(parse_element(&registry, "clocksync").unwrap()),
+        ],
+        cursor_shapes: Some(cursor_shapes),
+    };
     let (event_sender, mut host_events) = mpsc::unbounded_channel();
     let (size_sender, sizes) = watch::channel(None);
     let host = async {
@@ -100,7 +116,7 @@ async fn client_sees_host_video_and_host_receives_client_input() {
         1,
     )
     .with_receive_only();
-    let input = client.open_data_channel(INPUT_LABEL);
+    let mut input = client.open_data_channel(INPUT_LABEL);
     let sent = [
         Event::Key {
             device: 0,
@@ -150,6 +166,19 @@ async fn client_sees_host_video_and_host_receives_client_input() {
         delivered.push(event);
     }
     assert_eq!(delivered, sent);
+    let mut reader = PacketReader::new(Side::Client);
+    let from_host = reader
+        .read(&input.incoming.try_recv().expect("the host sent the cursor"))
+        .expect("a valid host packet");
+    let expected = CursorImage::new(
+        CURSOR_SIDE as u16,
+        CURSOR_SIDE as u16,
+        1,
+        2,
+        cursor_shape.rgba,
+    )
+    .unwrap();
+    assert_eq!(from_host, Some(Event::Cursor(expected)));
     assert_eq!(
         *sizes.borrow(),
         Some(ScreenSize {

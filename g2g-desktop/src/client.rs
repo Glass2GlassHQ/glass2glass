@@ -10,6 +10,7 @@ use g2g_core::runtime::{
 };
 use g2g_core::{G2gError, Graph};
 use g2g_plugins::clock::WallClock;
+use g2g_plugins::cursorshape::CursorShape;
 use g2g_plugins::livesync::LiveSync;
 use g2g_plugins::registry::default_registry;
 use g2g_plugins::webrtcduplex::{SdpChannel, SignalRole, WebRtcDuplexSession};
@@ -17,11 +18,11 @@ use g2g_plugins::wgpupresent::WgpuPresentSink;
 use g2g_plugins::windowinput::{PointerButton, WindowInput};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 use crate::hid::{usage_from_scancode, ScancodeSet};
 use crate::host::INPUT_LABEL;
-use crate::packet::{Event, EventKind, PacketWriter, Side};
+use crate::packet::{CursorImage, Event, EventKind, PacketReader, PacketWriter, Side};
 use crate::router::{InputRouter, Origin};
 use crate::signaling::{ClientEvent, ClientSignaling, SignalingError};
 
@@ -199,6 +200,62 @@ pub async fn forward_window_input(
     }
 }
 
+fn cursor_shape(image: &CursorImage) -> Option<CursorShape> {
+    if image.width() == 0 || image.height() == 0 {
+        return None;
+    }
+    let (hotspot_x, hotspot_y) = image.hotspot();
+    Some(CursorShape {
+        width: image.width().into(),
+        height: image.height().into(),
+        hotspot_x: hotspot_x.into(),
+        hotspot_y: hotspot_y.into(),
+        rgba: image.rgba().to_vec(),
+    })
+}
+
+pub async fn follow_host_events(
+    mut messages: mpsc::UnboundedReceiver<Vec<u8>>,
+    cursor_shapes: Option<watch::Sender<Option<CursorShape>>>,
+) {
+    let log = Target::category(CLIENT_CATEGORY);
+    let mut reader = PacketReader::new(Side::Client);
+    while let Some(message) = messages.recv().await {
+        match reader.read(&message) {
+            Ok(Some(Event::Cursor(image))) => {
+                if let Some(shapes) = &cursor_shapes {
+                    shapes.send_replace(cursor_shape(&image));
+                }
+            }
+            Ok(Some(event)) => {
+                g2g_core::g2g_warn!(log, "the client does not handle {:?}", event.kind());
+            }
+            Ok(None) => {}
+            Err(e) => g2g_core::g2g_warn!(log, "dropped a host packet: {e:?}"),
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn show_host_cursor(
+    sink: WgpuPresentSink,
+    inputs: bool,
+) -> (Option<watch::Sender<Option<CursorShape>>>, WgpuPresentSink) {
+    if !inputs {
+        return (None, sink);
+    }
+    let (sender, shapes) = watch::channel(None);
+    (Some(sender), sink.with_cursor_shapes(shapes))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn show_host_cursor(
+    sink: WgpuPresentSink,
+    _inputs: bool,
+) -> (Option<watch::Sender<Option<CursorShape>>>, WgpuPresentSink) {
+    (None, sink)
+}
+
 fn client_graph(
     session: WebRtcDuplexSession,
     sink: WgpuPresentSink,
@@ -237,7 +294,10 @@ pub async fn run_client(
     )
     .with_receive_only();
     let data_channel = session.open_data_channel(INPUT_LABEL);
-    let mut sink = WgpuPresentSink::new().with_title(WINDOW_TITLE);
+    let (cursor_shapes, mut sink) = show_host_cursor(
+        WgpuPresentSink::new().with_title(WINDOW_TITLE),
+        settings.inputs,
+    );
     let window_input = settings.inputs.then(|| sink.input_events());
     let graph = client_graph(session, sink)?;
 
@@ -246,15 +306,17 @@ pub async fn run_client(
             forward_window_input(window_input, data_channel.outgoing).await;
         }
     };
+    let follow = follow_host_events(data_channel.incoming, cursor_shapes);
     let clock = WallClock::new();
     let mut run = RunBuilder::new(graph, &clock, LINK_CAPACITY);
     if let Some(trace) = trace {
         run = run.with_visit_recorder(trace);
     }
-    let (exchanged, run, ()) = tokio::join!(
+    let (exchanged, run, (), ()) = tokio::join!(
         exchange_sdp(stream, &settings.token, offers, answers),
         run.run(),
-        forward
+        forward,
+        follow
     );
     exchanged.map_err(ClientError::Exchange)?;
     run.map_err(ClientError::Session)

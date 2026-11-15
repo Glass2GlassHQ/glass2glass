@@ -255,10 +255,15 @@ gamepad on Linux and ViGEm on Windows. macOS injection waits until a virtual
 HID device is chosen. The packet still parses there, and the router counts it
 as undelivered.
 
-Cursor: the host sends type 8 on change, and at least once when the session
-starts. The client hides its cursor over the video while grabbed and draws the
-bitmap at the hotspot. Grab is pointer lock on the web client and a window
-grab on the native client. Escape releases the grab locally and is not
+Cursor: the host sends type 8 each time the pointer shape or its visibility
+changes, starting with the first captured frame, and a 0x0 shape while the
+pointer is hidden. `d3d11screencapturesrc` reads the shape from DXGI and
+publishes it on `cursor_shapes()`. Windows inverts the screen under some pixels
+of monochrome and masked-color pointers, and those pixels arrive black. The
+Wayland client sets the bitmap as its window's pointer cursor through
+`WgpuPresentSink::with_cursor_shapes`, so the pointer moves at the
+compositor's rate with no video delay. Grab is pointer lock on the web client
+and a window grab on the native client. Escape releases the grab locally and is not
 forwarded.
 
 Clipboard: each side watches its clipboard and sends type 9 when the text

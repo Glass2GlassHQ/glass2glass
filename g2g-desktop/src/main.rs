@@ -14,7 +14,7 @@ use g2g_core::runtime::{GraphNodeRef, VisitRecorder};
 use g2g_core::G2gError;
 #[cfg(target_os = "linux")]
 use g2g_desktop::client::{run_client, ClientError, ClientSettings};
-use g2g_desktop::host::{inject, run_session, HostSettings, TurnServer};
+use g2g_desktop::host::{inject, run_session, HostCapture, HostSettings, TurnServer};
 #[cfg(target_os = "windows")]
 use g2g_desktop::sendinput::Injector;
 use g2g_desktop::signaling::SessionSlot;
@@ -144,16 +144,19 @@ async fn host_one(
     let (events, event_receiver) = mpsc::unbounded_channel();
     let (sizes, size_receiver) = watch::channel(None);
     #[cfg(target_os = "linux")]
-    let (source, open_injector) = (
-        GraphNodeRef::source(
-            PipeWireVideoSrc::new()
-                .with_portal(PortalSourceTypes::Monitor)
-                .with_fps(capture.fps),
-        ),
+    let (host_capture, open_injector) = (
+        HostCapture {
+            nodes: vec![GraphNodeRef::source(
+                PipeWireVideoSrc::new()
+                    .with_portal(PortalSourceTypes::Monitor)
+                    .with_fps(capture.fps),
+            )],
+            cursor_shapes: None,
+        },
         Injector::new,
     );
     #[cfg(target_os = "windows")]
-    let (source, open_injector) = {
+    let (host_capture, open_injector) = {
         let monitor = match monitor_bounds(capture.monitor_index) {
             Ok(monitor) => monitor,
             Err(e) => {
@@ -161,19 +164,21 @@ async fn host_one(
                 return;
             }
         };
+        let source = D3D11ScreenCaptureSrc::new()
+            .with_monitor_index(capture.monitor_index)
+            .with_fps(capture.fps);
         (
-            GraphNodeRef::source(
-                D3D11ScreenCaptureSrc::new()
-                    .with_monitor_index(capture.monitor_index)
-                    .with_fps(capture.fps),
-            ),
+            HostCapture {
+                cursor_shapes: Some(source.cursor_shapes()),
+                nodes: vec![GraphNodeRef::source(source)],
+            },
             move |screen| Injector::new(screen, monitor),
         )
     };
     let (session, injected) = tokio::join!(
         run_session(
             stream,
-            vec![source],
+            host_capture,
             &settings,
             events,
             sizes,

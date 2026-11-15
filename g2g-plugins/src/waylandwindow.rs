@@ -25,7 +25,7 @@ use alloc::boxed::Box;
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState},
     delegate_compositor, delegate_keyboard, delegate_output, delegate_pointer, delegate_registry,
-    delegate_seat, delegate_xdg_shell, delegate_xdg_window,
+    delegate_seat, delegate_shm, delegate_xdg_shell, delegate_xdg_window,
     output::{OutputHandler, OutputState},
     reexports::calloop::{
         channel::{Channel, Event as ChanEvent},
@@ -34,7 +34,7 @@ use smithay_client_toolkit::{
     reexports::calloop_wayland_source::WaylandSource,
     reexports::client::{
         globals::registry_queue_init,
-        protocol::{wl_keyboard, wl_output, wl_pointer, wl_seat, wl_surface},
+        protocol::{wl_keyboard, wl_output, wl_pointer, wl_seat, wl_shm, wl_surface},
         Connection, QueueHandle,
     },
     registry::{ProvidesRegistryState, RegistryState},
@@ -54,8 +54,13 @@ use smithay_client_toolkit::{
         },
         WaylandSurface,
     },
+    shm::{
+        slot::{Buffer, SlotPool},
+        Shm, ShmHandler,
+    },
 };
 
+use crate::cursorshape::{CursorShape, CURSOR_BYTES_PER_PIXEL};
 use crate::windowinput::{PointerButton, WindowInput};
 use crate::windowworker::{
     PresentReports, WindowParams, WindowRenderer, WorkerChannels, WorkerCmd,
@@ -99,6 +104,8 @@ pub(crate) fn run_window<R: WindowRenderer>(
 
     let compositor = CompositorState::bind(&globals, &qh)?;
     let xdg_shell = XdgShell::bind(&globals, &qh)?;
+    let shm = Shm::bind(&globals, &qh)?;
+    let cursor_surface = compositor.create_surface(&qh);
 
     let surface = compositor.create_surface(&qh);
     let window = xdg_shell.create_window(surface, WindowDecorations::RequestServer, &qh);
@@ -132,6 +139,14 @@ pub(crate) fn run_window<R: WindowRenderer>(
         input: channels.input,
         keyboard: None,
         pointer: None,
+        shm,
+        cursor: PointerCursor {
+            shapes: channels.cursor_shapes,
+            surface: cursor_surface,
+            pool: None,
+            buffer: None,
+            enter_serial: None,
+        },
     };
 
     loop_handle.insert_source(
@@ -162,6 +177,7 @@ pub(crate) fn run_window<R: WindowRenderer>(
 
     while !state.exit {
         event_loop.dispatch(Some(Duration::from_millis(100)), &mut state)?;
+        state.follow_cursor_shape();
     }
     Ok(())
 }
@@ -189,6 +205,28 @@ struct WindowWorker<R: WindowRenderer> {
     input: Option<tokio::sync::mpsc::UnboundedSender<WindowInput>>,
     keyboard: Option<wl_keyboard::WlKeyboard>,
     pointer: Option<wl_pointer::WlPointer>,
+    shm: Shm,
+    cursor: PointerCursor,
+}
+
+struct PointerCursor {
+    shapes: Option<crate::windowworker::CursorShapes>,
+    surface: wl_surface::WlSurface,
+    pool: Option<SlotPool>,
+    // wayland reads the attached buffer until another replaces it
+    buffer: Option<Buffer>,
+    enter_serial: Option<u32>,
+}
+
+fn premultiplied_argb(rgba: &[u8]) -> impl Iterator<Item = [u8; 4]> + '_ {
+    // wl_shm ARGB8888 is premultiplied and little-endian, so each pixel is B, G, R, A in memory
+    rgba.as_chunks::<CURSOR_BYTES_PER_PIXEL>()
+        .0
+        .iter()
+        .map(|&[r, g, b, a]| {
+            let scale = |c: u8| (u16::from(c) * u16::from(a) / u16::from(u8::MAX)) as u8;
+            [scale(b), scale(g), scale(r), a]
+        })
 }
 
 impl<R: WindowRenderer> WindowWorker<R> {
@@ -215,6 +253,75 @@ impl<R: WindowRenderer> WindowWorker<R> {
         }
         self.window.set_min_size(Some((width, height)));
         self.window.commit();
+    }
+
+    fn follow_cursor_shape(&mut self) {
+        let Some(shapes) = &mut self.cursor.shapes else {
+            return;
+        };
+        if shapes.has_changed().unwrap_or(false) {
+            shapes.mark_unchanged();
+            self.show_cursor();
+        }
+    }
+
+    fn show_cursor(&mut self) {
+        let (Some(shapes), Some(pointer), Some(serial)) =
+            (&self.cursor.shapes, &self.pointer, self.cursor.enter_serial)
+        else {
+            return;
+        };
+        let shape = shapes.borrow().clone();
+        let Some(shape) = shape else {
+            pointer.set_cursor(serial, None, 0, 0);
+            return;
+        };
+        if let Err(e) = self.draw_cursor(&shape) {
+            g2g_core::g2g_warn!(
+                Target::category(self.reports.log_tag),
+                "cannot draw the {}x{} cursor: {e}",
+                shape.width,
+                shape.height
+            );
+            return;
+        }
+        if let Some(pointer) = &self.pointer {
+            pointer.set_cursor(
+                serial,
+                Some(&self.cursor.surface),
+                shape.hotspot_x,
+                shape.hotspot_y,
+            );
+        }
+    }
+
+    fn draw_cursor(&mut self, shape: &CursorShape) -> Result<(), Box<dyn std::error::Error>> {
+        let width = i32::try_from(shape.width)?;
+        let height = i32::try_from(shape.height)?;
+        let stride = width * CURSOR_BYTES_PER_PIXEL as i32;
+        let pool = match &mut self.cursor.pool {
+            Some(pool) => pool,
+            None => self
+                .cursor
+                .pool
+                .insert(SlotPool::new(shape.rgba.len().max(1), &self.shm)?),
+        };
+        let (buffer, canvas) =
+            pool.create_buffer(width, height, stride, wl_shm::Format::Argb8888)?;
+        for (target, pixel) in canvas
+            .as_chunks_mut::<CURSOR_BYTES_PER_PIXEL>()
+            .0
+            .iter_mut()
+            .zip(premultiplied_argb(&shape.rgba))
+        {
+            *target = pixel;
+        }
+        let surface = &self.cursor.surface;
+        surface.attach(Some(buffer.wl_buffer()), 0, 0);
+        surface.damage_buffer(0, 0, width, height);
+        surface.commit();
+        self.cursor.buffer = Some(buffer);
+        Ok(())
     }
 
     fn send_input(&mut self, event: WindowInput) {
@@ -498,6 +605,10 @@ impl<R: WindowRenderer> PointerHandler for WindowWorker<R> {
         for event in events {
             match event.kind {
                 PointerEventKind::Enter { .. } | PointerEventKind::Motion { .. } => {
+                    if let PointerEventKind::Enter { serial } = event.kind {
+                        self.cursor.enter_serial = Some(serial);
+                        self.show_cursor();
+                    }
                     let (x, y) = event.position;
                     if let Some((x, y)) = self.renderer.picture_point(x, y) {
                         self.send_input(WindowInput::Pointer { x, y });
@@ -533,6 +644,13 @@ delegate_registry!(@<R: WindowRenderer> WindowWorker<R>);
 delegate_seat!(@<R: WindowRenderer> WindowWorker<R>);
 delegate_keyboard!(@<R: WindowRenderer> WindowWorker<R>);
 delegate_pointer!(@<R: WindowRenderer> WindowWorker<R>);
+delegate_shm!(@<R: WindowRenderer> WindowWorker<R>);
+
+impl<R: WindowRenderer> ShmHandler for WindowWorker<R> {
+    fn shm_state(&mut self) -> &mut Shm {
+        &mut self.shm
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -549,6 +667,16 @@ mod tests {
             value120,
             ..AxisScroll::default()
         }
+    }
+
+    #[test]
+    fn cursor_pixels_become_premultiplied_bgra_in_memory() {
+        let rgba = [[200, 100, 50, 255], [200, 100, 50, 0], [255, 0, 255, 128]].concat();
+        let argb: alloc::vec::Vec<[u8; 4]> = premultiplied_argb(&rgba).collect();
+        assert_eq!(
+            argb,
+            [[50, 100, 200, 255], [0, 0, 0, 0], [128, 0, 128, 128]]
+        );
     }
 
     #[test]

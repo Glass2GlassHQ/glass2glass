@@ -405,6 +405,7 @@ impl AsyncElement for CudaGlSink {
                     ready: ready_for_worker,
                     window_closed,
                     input: None,
+                    cursor_shapes: None,
                 };
                 let presenter = CudaPresenter {
                     colorimetry,

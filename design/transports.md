@@ -567,7 +567,7 @@ device`. `sequence` counts per direction from 0, and the reader drops a packet
 whose sequence is not newer than the last one it returned of the same type.
 
 The writer fails a packet over `datachannel::MAX_MESSAGE_SIZE` (64 KiB), so a
-cursor above about 127x127 is not sent. The reader fails a payload whose length
+cursor above about 127x127 is not sent. A 0x0 cursor hides the pointer. The reader fails a payload whose length
 does not match its type, a `down` byte other than 0 or 1, a cursor whose RGBA
 length is not `w*h*4`, and clipboard text that is not UTF-8.
 

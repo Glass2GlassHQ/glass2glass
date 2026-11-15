@@ -9,7 +9,10 @@ use std::time::Duration;
 
 use alloc::boxed::Box;
 use alloc::sync::Arc;
+use alloc::vec;
 use alloc::vec::Vec;
+
+use tokio::sync::watch;
 
 use windows::core::Interface;
 use windows::Win32::Foundation::{HMODULE, POINT};
@@ -28,21 +31,24 @@ use windows::Win32::Graphics::Dxgi::Common::{
 use windows::Win32::Graphics::Dxgi::{
     CreateDXGIFactory1, IDXGIAdapter1, IDXGIFactory1, IDXGIOutput, IDXGIOutput1,
     IDXGIOutputDuplication, DXGI_ERROR_NOT_CURRENTLY_AVAILABLE, DXGI_ERROR_NOT_FOUND,
-    DXGI_ERROR_WAIT_TIMEOUT, DXGI_OUTDUPL_FRAME_INFO,
+    DXGI_ERROR_WAIT_TIMEOUT, DXGI_OUTDUPL_FRAME_INFO, DXGI_OUTDUPL_POINTER_SHAPE_INFO,
+    DXGI_OUTDUPL_POINTER_SHAPE_TYPE, DXGI_OUTDUPL_POINTER_SHAPE_TYPE_COLOR,
+    DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MASKED_COLOR, DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MONOCHROME,
 };
 use windows::Win32::Graphics::Gdi::{MonitorFromPoint, MONITOR_DEFAULTTOPRIMARY};
 use windows::Win32::UI::HiDpi::{
     SetThreadDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
 
+use crate::cursorshape::CursorShape;
 use crate::d3d11texture::{texture_frame, TextureOwner};
 use crate::desktopcapture::{run_desktop_capture, DesktopCaptureSettings, DesktopGrabber};
 use crate::mfcommon::mf_err;
 use crate::texturepool::take_from_pool;
-use g2g_core::g2g_error;
 use g2g_core::log::Target;
 use g2g_core::memory::{DomainSet, MemoryDomainKind, SystemSlice};
 use g2g_core::runtime::SourceLoop;
+use g2g_core::{g2g_error, g2g_warn};
 use g2g_core::{
     AllocationParams, Caps, CapsConstraint, CapsSet, ClockSync, Colorimetry, ConfigureOutcome, Dim,
     ElementMetadata, G2gError, HardwareError, Interlace, LatencyReport, MemoryDomain, OutputSink,
@@ -172,6 +178,7 @@ pub struct D3D11ScreenCaptureSrc {
     configured: bool,
     clock_sync: Option<ClockSync>,
     out_domain: MemoryDomainKind,
+    cursor: watch::Sender<Option<CursorShape>>,
 }
 
 impl Default for D3D11ScreenCaptureSrc {
@@ -190,7 +197,13 @@ impl D3D11ScreenCaptureSrc {
             configured: false,
             clock_sync: None,
             out_domain: MemoryDomainKind::System,
+            cursor: watch::channel(None).0,
         }
+    }
+
+    // None while the pointer is hidden or before the first frame reports it
+    pub fn cursor_shapes(&self) -> watch::Receiver<Option<CursorShape>> {
+        self.cursor.subscribe()
     }
 
     pub fn with_monitor_index(mut self, monitor_index: i32) -> Self {
@@ -359,6 +372,7 @@ impl SourceLoop for D3D11ScreenCaptureSrc {
             }
             let monitor_index = self.monitor_index;
             let out_domain = self.out_domain;
+            let cursor = self.cursor.clone();
             let settings = DesktopCaptureSettings {
                 thread_name: "g2g-d3d11screencapturesrc",
                 period: self.period(),
@@ -367,7 +381,8 @@ impl SourceLoop for D3D11ScreenCaptureSrc {
             };
             run_desktop_capture(settings, out, move |worker| {
                 with_physical_pixels(|| {
-                    let mut duplication = open_duplication(monitor_index, bounds, out_domain)?;
+                    let mut duplication =
+                        open_duplication(monitor_index, bounds, out_domain, cursor)?;
                     worker.pace(&mut duplication).inspect_err(|e| {
                         g2g_error!(
                             Target::category(CATEGORY),
@@ -409,6 +424,100 @@ struct Duplication {
     copy: ImageCopy,
     width: u32,
     height: u32,
+    pointer: PointerTracker,
+}
+
+#[derive(Debug)]
+struct PointerTracker {
+    shape: Option<CursorShape>,
+    visible: bool,
+    published: watch::Sender<Option<CursorShape>>,
+}
+
+impl PointerTracker {
+    fn publish(&self) {
+        let shown = self.shape.clone().filter(|_| self.visible);
+        self.published.send_if_modified(|current| {
+            let changed = *current != shown;
+            *current = shown;
+            changed
+        });
+    }
+}
+
+fn shape_rows(buffer: &[u8], pitch: usize, row_bytes: usize, rows: usize) -> Option<Vec<&[u8]>> {
+    (0..rows)
+        .map(|row| buffer.get(row * pitch..)?.get(..row_bytes))
+        .collect()
+}
+
+fn mask_bit(row: &[u8], x: usize) -> bool {
+    row[x / 8] & (0x80 >> (x % 8)) != 0
+}
+
+const OPAQUE_BLACK: [u8; 4] = [0, 0, 0, 0xff];
+const OPAQUE_WHITE: [u8; 4] = [0xff, 0xff, 0xff, 0xff];
+const TRANSPARENT: [u8; 4] = [0, 0, 0, 0];
+const MASK_XOR: u8 = 0xff;
+
+fn cursor_shape(info: &DXGI_OUTDUPL_POINTER_SHAPE_INFO, buffer: &[u8]) -> Option<CursorShape> {
+    let width = info.Width as usize;
+    let pitch = info.Pitch as usize;
+    let color_rows = |rows| shape_rows(buffer, pitch, width * BYTES_PER_PIXEL, rows);
+    let (height, pixels): (u32, Vec<[u8; 4]>) =
+        match DXGI_OUTDUPL_POINTER_SHAPE_TYPE(info.Type as i32) {
+            DXGI_OUTDUPL_POINTER_SHAPE_TYPE_COLOR => {
+                let rows = color_rows(info.Height as usize)?;
+                let pixels = rows
+                    .iter()
+                    .flat_map(|row| row.as_chunks::<BYTES_PER_PIXEL>().0)
+                    .map(|bgra| [bgra[2], bgra[1], bgra[0], bgra[3]])
+                    .collect();
+                (info.Height, pixels)
+            }
+            DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MASKED_COLOR => {
+                let rows = color_rows(info.Height as usize)?;
+                let pixels = rows
+                    .iter()
+                    .flat_map(|row| row.as_chunks::<BYTES_PER_PIXEL>().0)
+                    .map(|bgra| match (bgra[3], bgra[..3] == [0, 0, 0]) {
+                        (MASK_XOR, true) => TRANSPARENT,
+                        // windows inverts the screen under xor pixels, which a client cursor draws black
+                        (MASK_XOR, false) => OPAQUE_BLACK,
+                        _ => [bgra[2], bgra[1], bgra[0], 0xff],
+                    })
+                    .collect();
+                (info.Height, pixels)
+            }
+            DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MONOCHROME => {
+                // monochrome shapes stack the AND mask rows above the XOR mask rows
+                let height = info.Height / 2;
+                let rows = shape_rows(buffer, pitch, width.div_ceil(8), info.Height as usize)?;
+                let (and_rows, xor_rows) = rows.split_at(height as usize);
+                let pixels = and_rows
+                    .iter()
+                    .zip(xor_rows)
+                    .flat_map(|(and_row, xor_row)| {
+                        (0..width).map(|x| match (mask_bit(and_row, x), mask_bit(xor_row, x)) {
+                            (false, false) => OPAQUE_BLACK,
+                            (false, true) => OPAQUE_WHITE,
+                            (true, false) => TRANSPARENT,
+                            // windows inverts the screen under these, which a client cursor draws black
+                            (true, true) => OPAQUE_BLACK,
+                        })
+                    })
+                    .collect();
+                (height, pixels)
+            }
+            _ => return None,
+        };
+    Some(CursorShape {
+        width: info.Width,
+        height,
+        hotspot_x: info.HotSpot.x,
+        hotspot_y: info.HotSpot.y,
+        rgba: pixels.concat(),
+    })
 }
 
 fn create_device(
@@ -470,6 +579,7 @@ fn bgra_texture(
 fn duplicate(
     selected: &SelectedOutput,
     out_domain: MemoryDomainKind,
+    cursor: watch::Sender<Option<CursorShape>>,
 ) -> Result<Duplication, G2gError> {
     let log = Target::category(CATEGORY);
     let to_texture = out_domain == MemoryDomainKind::D3D11Texture;
@@ -522,6 +632,11 @@ fn duplicate(
             copy,
             width: mode.Width,
             height: mode.Height,
+            pointer: PointerTracker {
+                shape: None,
+                visible: false,
+                published: cursor,
+            },
         })
     }
 }
@@ -583,6 +698,36 @@ impl Duplication {
     }
 }
 
+impl Duplication {
+    fn update_pointer(&mut self, info: &DXGI_OUTDUPL_FRAME_INFO) {
+        if info.LastMouseUpdateTime != 0 {
+            self.pointer.visible = info.PointerPosition.Visible.as_bool();
+        }
+        if info.PointerShapeBufferSize > 0 {
+            let mut buffer = vec![0u8; info.PointerShapeBufferSize as usize];
+            let mut required = 0;
+            let mut shape_info = DXGI_OUTDUPL_POINTER_SHAPE_INFO::default();
+            // SAFETY: the buffer holds the size DXGI reported for this frame, and the out-params are valid locals.
+            let read = unsafe {
+                self.duplication.GetFramePointerShape(
+                    info.PointerShapeBufferSize,
+                    buffer.as_mut_ptr().cast(),
+                    &mut required,
+                    &mut shape_info,
+                )
+            };
+            match read.ok().and_then(|()| cursor_shape(&shape_info, &buffer)) {
+                Some(shape) => self.pointer.shape = Some(shape),
+                None => g2g_warn!(
+                    Target::category(CATEGORY),
+                    "cannot read the pointer shape {shape_info:?}"
+                ),
+            }
+        }
+        self.pointer.publish();
+    }
+}
+
 impl DesktopGrabber for Duplication {
     fn next_image(&mut self) -> Result<Option<MemoryDomain>, G2gError> {
         let mut info = DXGI_OUTDUPL_FRAME_INFO::default();
@@ -598,6 +743,7 @@ impl DesktopGrabber for Duplication {
                 Err(e) if e.code() == DXGI_ERROR_WAIT_TIMEOUT => return Ok(None),
                 Err(e) => return Err(mf_err(e)),
             }
+            self.update_pointer(&info);
             // DXGI reports a frame with only a pointer update with LastPresentTime 0
             let image = match resource {
                 Some(resource) if info.LastPresentTime != 0 => resource
@@ -617,6 +763,7 @@ fn open_duplication(
     monitor_index: i32,
     bounds: MonitorBounds,
     out_domain: MemoryDomainKind,
+    cursor: watch::Sender<Option<CursorShape>>,
 ) -> Result<Duplication, G2gError> {
     let selected = select_output(monitor_index)?;
     if selected.bounds != bounds {
@@ -627,7 +774,7 @@ fn open_duplication(
         );
         return Err(G2gError::CapsMismatch);
     }
-    duplicate(&selected, out_domain)
+    duplicate(&selected, out_domain, cursor)
 }
 
 #[cfg(test)]
@@ -654,6 +801,58 @@ mod tests {
                 spec.name
             );
         }
+    }
+
+    fn shape_info(
+        shape_type: DXGI_OUTDUPL_POINTER_SHAPE_TYPE,
+        width: u32,
+        height: u32,
+        pitch: u32,
+    ) -> DXGI_OUTDUPL_POINTER_SHAPE_INFO {
+        DXGI_OUTDUPL_POINTER_SHAPE_INFO {
+            Type: shape_type.0 as u32,
+            Width: width,
+            Height: height,
+            Pitch: pitch,
+            HotSpot: POINT { x: 1, y: 0 },
+        }
+    }
+
+    #[test]
+    fn color_pointer_rows_skip_the_pitch_padding_and_swap_to_rgba() {
+        const PADDING: [u8; 4] = [9, 9, 9, 9];
+        let buffer = [[1, 2, 3, 4], [5, 6, 7, 8], PADDING].concat();
+        let info = shape_info(DXGI_OUTDUPL_POINTER_SHAPE_TYPE_COLOR, 2, 1, 12);
+        let shape = cursor_shape(&info, &buffer).expect("color shape");
+        assert_eq!((shape.width, shape.height), (2, 1));
+        assert_eq!((shape.hotspot_x, shape.hotspot_y), (1, 0));
+        assert_eq!(shape.rgba, [3, 2, 1, 4, 7, 6, 5, 8]);
+    }
+
+    #[test]
+    fn monochrome_pointer_masks_map_to_black_white_and_transparent() {
+        // AND row 0011, XOR row 0101, one byte per row
+        let buffer = [0b0011_0000, 0b0101_0000];
+        let info = shape_info(DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MONOCHROME, 4, 2, 1);
+        let shape = cursor_shape(&info, &buffer).expect("monochrome shape");
+        assert_eq!((shape.width, shape.height), (4, 1));
+        let expected = [OPAQUE_BLACK, OPAQUE_WHITE, TRANSPARENT, OPAQUE_BLACK].concat();
+        assert_eq!(shape.rgba, expected);
+    }
+
+    #[test]
+    fn masked_color_pointer_keeps_opaque_pixels_and_drops_empty_xor_pixels() {
+        let buffer = [[1, 2, 3, 0], [0, 0, 0, MASK_XOR], [4, 5, 6, MASK_XOR]].concat();
+        let info = shape_info(DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MASKED_COLOR, 3, 1, 12);
+        let shape = cursor_shape(&info, &buffer).expect("masked shape");
+        let expected = [[3, 2, 1, 0xff], TRANSPARENT, OPAQUE_BLACK].concat();
+        assert_eq!(shape.rgba, expected);
+    }
+
+    #[test]
+    fn a_pointer_buffer_shorter_than_its_rows_is_refused() {
+        let info = shape_info(DXGI_OUTDUPL_POINTER_SHAPE_TYPE_COLOR, 2, 2, 8);
+        assert_eq!(cursor_shape(&info, &[0; 12]), None);
     }
 
     #[test]

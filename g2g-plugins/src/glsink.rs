@@ -405,6 +405,7 @@ impl AsyncElement for GlSink {
                     ready: ready_for_worker,
                     window_closed,
                     input: None,
+                    cursor_shapes: None,
                 };
                 let presenter = SystemPresenter { mode, colorimetry };
                 if let Err(e) = run_gl_window(presenter, params, channels) {

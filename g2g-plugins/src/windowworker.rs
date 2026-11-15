@@ -82,7 +82,13 @@ pub(crate) struct WorkerChannels<Receiver> {
     pub(crate) window_closed: Arc<AtomicBool>,
     #[cfg(target_os = "linux")]
     pub(crate) input: Option<tokio::sync::mpsc::UnboundedSender<crate::windowinput::WindowInput>>,
+    #[cfg(target_os = "linux")]
+    pub(crate) cursor_shapes: Option<CursorShapes>,
 }
+
+#[cfg(target_os = "linux")]
+pub(crate) type CursorShapes =
+    tokio::sync::watch::Receiver<Option<crate::cursorshape::CursorShape>>;
 
 // the channel types the window workers take commands on
 pub(crate) trait CommandSender<F> {

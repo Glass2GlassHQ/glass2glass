@@ -38,7 +38,8 @@ The plan is [remote.md](remote.md).
 - The Windows client, then a D3D11-to-CUDA element after `d3d11convert` for
   `nvenc`.
 - `display-index` on `screencapturesrc`, and a macOS host through `vtencode`.
-- Cursor, clipboard, grab, and `force-keyframe` on `vtencode`.
+- Cursor from the Wayland portal host and on the Windows client, clipboard,
+  grab, and `force-keyframe` on `vtencode`.
 - Gamepad injection on Linux and Windows, and a Windows service that injects
   on the secure desktop.
 - A Chrome client on the same signaling and the same data channel.
