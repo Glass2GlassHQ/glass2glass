@@ -131,6 +131,16 @@ impl<T: PacketClient> RemoteClient<T> {
         &mut self.transport
     }
 
+    pub async fn connect(&mut self) -> Result<(), G2gError> {
+        self.transport
+            .connect()
+            .await
+            .map_err(G2gError::during_connect)?;
+        // A new connection needs the caps re-sent as its first packet.
+        self.caps.forget_sent();
+        Ok(())
+    }
+
     /// Ensure the connection is up and the current caps are sent, then send
     /// `packet` (when `Some`). On any failure, if reconnect is enabled and the
     /// budget is not spent, drop the connection, back off, and retry the whole
@@ -140,12 +150,7 @@ impl<T: PacketClient> RemoteClient<T> {
         loop {
             let attempt = async {
                 if !self.transport.is_connected() {
-                    self.transport
-                        .connect()
-                        .await
-                        .map_err(G2gError::during_connect)?;
-                    // A new connection needs the caps re-sent as its first packet.
-                    self.caps.forget_sent();
+                    self.connect().await?;
                 }
                 if let Some(caps) = self.caps.take_unsent() {
                     self.transport

@@ -827,6 +827,10 @@ message is `u32` length-framed like the packets, and a message over 64 KiB
 (`MAX_MESSAGE_SIZE`) closes the channel. A message never waits behind a video
 frame, since each stream is ordered on its own.
 
+A sink otherwise connects on its first packet. `RemoteClient::connect` connects
+before the graph runs, so a listening sink can read the client's first data
+channel message, such as a bearer token, before any video is sent.
+
 ### Shared carrier machinery
 
 The three carriers share their machinery rather than repeating it. `RemoteClient`
