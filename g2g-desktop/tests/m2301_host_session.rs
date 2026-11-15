@@ -108,6 +108,7 @@ async fn client_sees_host_video_and_cursor_and_host_receives_client_input() {
         token: TOKEN.into(),
         bitrate: BITRATE,
         send_window: None,
+        video_mode: None,
     };
     let (listener, cert_hash) = host_listener(&settings);
     let source = format!("videotestsrc num-buffers={FRAMES} width={WIDTH} height={HEIGHT}");
@@ -203,6 +204,7 @@ async fn a_wrong_token_closes_the_connection_before_any_video() {
         token: TOKEN.into(),
         bitrate: BITRATE,
         send_window: None,
+        video_mode: None,
     };
     let (listener, cert_hash) = host_listener(&settings);
     let source = format!("videotestsrc num-buffers={FRAMES} width={WIDTH} height={HEIGHT}");

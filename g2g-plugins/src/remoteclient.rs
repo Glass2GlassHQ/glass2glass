@@ -28,7 +28,7 @@ use tokio::time::sleep;
 
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, ConfigureOutcome, ElementMetadata, G2gError, OutputSink,
-    PadTemplate, PadTemplates, PipelinePacket, PropError, PropValue, PropertySpec,
+    PadTemplate, PadTemplates, PipelinePacket, PropError, PropValue, PropertySpec, Reconfigure,
 };
 
 use crate::remotesource::TransportFuture;
@@ -58,6 +58,11 @@ pub trait PacketClient: Send + 'static {
     fn send<'a>(&'a mut self, packet: &'a PipelinePacket) -> TransportFuture<'a, ()>;
     /// Drop the connection so the next [`connect`](Self::connect) reconnects.
     fn reset(&mut self);
+    /// Whether the receiving peer asked for a keyframe since the last call.
+    /// Only the QUIC carrier has a channel back from the receiver.
+    fn take_keyframe_request(&mut self) -> bool {
+        false
+    }
     /// Half-close the connection after `Eos` so the far side reads the end.
     fn close(&mut self) -> TransportFuture<'_, ()>;
     /// Connect eagerly at configure time when `eager` (a synchronous dial, so a
@@ -238,6 +243,12 @@ impl<T: PacketClient> AsyncElement for RemoteClient<T> {
             }
             Ok(())
         })
+    }
+
+    fn take_reconfigure(&mut self) -> Option<Reconfigure> {
+        self.transport
+            .take_keyframe_request()
+            .then_some(Reconfigure::ForceKeyframe)
     }
 
     fn metadata(&self) -> ElementMetadata {

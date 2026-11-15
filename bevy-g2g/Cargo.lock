@@ -3554,6 +3554,7 @@ version = "0.21.0"
 dependencies = [
  "ab_glyph",
  "ash",
+ "bytes",
  "cc",
  "cosmic-text",
  "ffmpeg-next",

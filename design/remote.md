@@ -38,11 +38,13 @@ LAN, and a host off the LAN needs a forwarded UDP port.
    (`https://`), and the host accepts both ALPNs on one UDP port. The
    transport is a mode of the `remotewt` elements, so any g2g pipeline can use
    it: `remotewtsink` on the host, `remotewtsrc` on the client.
-2. Video goes either one frame per unidirectional stream, newest first, or as
-   datagrams with Reed-Solomon repair (`reed-solomon-simd`). Input, the token
-   and keyframe requests ride a reliable message channel the `remotewt`
-   elements open on the same connection, so a lost picture does not sit in
-   front of a key release.
+2. Video goes either one frame per unidirectional stream or as datagrams with
+   Reed-Solomon repair (`reed-solomon-simd`). Input and the token ride a
+   reliable message channel the `remotewt` elements open on the same
+   connection, so a lost picture does not sit in front of a key release.
+   Keyframe requests go from `remotewtsrc` to `remotewtsink` on the video
+   stream's return direction and reach the encoder as a downstream
+   `ForceKeyframe`, which every encoder already handles.
 3. The client dials the host's address. There is no ICE, so a host behind NAT
    needs a forwarded port until a relay slice. The host makes a self-signed
    ECDSA P-256 certificate valid under 14 days (what WebTransport's
@@ -104,16 +106,9 @@ LAN, and a host off the LAN needs a forwarded UDP port.
   estimate.
 - Stream-per-frame mode: a frame the client has not finished when a newer
   keyframe is queued is reset, since nothing after the keyframe needs it.
-- Datagram mode replaces the old one-frame-per-datagram `datagrams` mode. A
-  frame splits into shards plus a repair percentage, and the client drops a
-  frame still incomplete after one frame period (`frame-timeout`).
-- Frames carry a sequence number. A gap or a dropped frame makes the client
-  send a keyframe request, and the host pulses `force-keyframe` on the
-  encoder (`mfencode`, `ffmpegenc`, `nvenc`).
-- Keyframe requests ride the message channel beside the input packets. The
-  host destroys the virtual device a removal packet names.
-- Loss tests run host and client through a seeded UDP relay in the test
-  process that drops, delays and reorders packets.
+- Datagram mode splits a frame larger than one datagram into shards plus a
+  repair percentage, instead of sending it on a stream.
+- The host destroys the virtual device a removal packet names.
 
 ## WebSocket fallback
 
@@ -184,10 +179,7 @@ coreaudiosrc ! audioconvert ! opusenc
 `screencapturesrc` today takes the first display and has no `display-index`.
 That property is part of this plan.
 
-On a keyframe request the host calls `NvEnc::force_keyframe`. The other
-encoders need the same latch: `vtencode`, `mfencode`, and `ffmpegenc` gain
-`force-keyframe` if they do not have it, and the host pulses it. The first frame is an IDR, which
-`nvenc` already does.
+The first frame is an IDR, which `nvenc` already does.
 
 ## Client graphs
 
@@ -289,7 +281,7 @@ Host flags, all of them real properties the process applies:
 | `--fps` | capture rate | 60 |
 | `--bitrate` | bits per second, passed to the encoder | 4000000 |
 | `--audio` | capture and send audio | true |
-| `--video-mode` | `streams` or `datagrams` | `streams` |
+| `--video-mode` | `stream`, `stream-per-frame` or `datagrams` | `stream` |
 | `--congestion-control` | `low-latency` (BBR), `throughput` or `default` (Cubic) | `low-latency` |
 
 Client flags:
@@ -338,14 +330,12 @@ ones.
    software or VA-API encode, window capture. `inputs=false` when both run on the
    same seat, or the pointer feeds itself.
 4. **Windows host, then the QUIC transport.** `d3d11screencapturesrc`,
-   `mfencode`, `SendInput`. Then raw QUIC and WebTransport carriers in
-   `remotewt`, stream-per-frame and FEC datagram video, and keyframe requests
-   with `force-keyframe` on `mfencode` and `ffmpegenc`. Then the WebSocket
-   fallback. Then the Windows
+   `mfencode`, `SendInput`. Then FEC datagram video in `remotewt`. Then the
+   WebSocket fallback. Then the Windows
    client, then the D3D11-to-CUDA output and `nvenc`.
 5. **macOS client, then the macOS host** on `screencapturesrc` `display-index`
    and `vtencode`.
-6. **Audio, clipboard, cursor, grab, `force-keyframe` on `vtencode`.**
+6. **Audio, clipboard, cursor, grab.**
 7. **Gamepad** on Linux and Windows, and the Windows service.
 8. **Chrome page** on the same WebTransport session and message channel.
 9. **OIDC, the URL scheme, packages.**

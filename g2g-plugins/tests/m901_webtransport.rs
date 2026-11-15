@@ -43,6 +43,7 @@ use g2g_core::{AsyncElement, MemoryDomain, PipelinePacket, PropValue};
 use g2g_plugins::remotewtsink::RemoteWtSink;
 use g2g_plugins::remotewtsrc::RemoteWtSrc;
 use g2g_plugins::remotewttransform::RemoteWtTransform;
+use g2g_plugins::remotewtvideo::VideoMode;
 
 mod webtransport_common;
 
@@ -209,11 +210,11 @@ async fn webtransport_sink_retries_connect_until_the_server_is_up() {
 
 // ------------------------------------------------- leg 1b: datagram carrier (M911)
 
-/// The drop-tolerant carrier: with `datagrams=true` each data frame is one QUIC
-/// datagram and the control packets stay on the session's stream, so the receiver
+/// The drop-tolerant carrier: with `video-mode=datagrams` each data frame is one
+/// QUIC datagram and the control packets go on reliable streams, so the receiver
 /// still discovers the caps and still sees the end. The last frame is deliberately
-/// larger than any path MTU, which is the documented fallback: it goes on the
-/// stream rather than being truncated or dropped, and `datagrams-sent` says so.
+/// larger than any path MTU: it goes on a stream rather than being truncated or
+/// dropped, and still arrives in send order.
 ///
 /// Both ends also run `congestion-control=low-latency`, so the nick is proven to
 /// reach a builder that still produces a working endpoint, not just to round-trip
@@ -225,9 +226,8 @@ async fn webtransport_datagram_carrier_delivers_frames_and_falls_back_when_too_l
 
     let tls = TestCert::generate("datagram");
 
-    let mut src = RemoteWtSrc::new("127.0.0.1:0".parse().unwrap())
-        .with_certificate(tls.cert(), tls.key())
-        .with_frame_limit(N as u64 + 1);
+    let mut src =
+        RemoteWtSrc::new("127.0.0.1:0".parse().unwrap()).with_certificate(tls.cert(), tls.key());
     SourceLoop::set_property(
         &mut src,
         "congestion-control",
@@ -241,7 +241,7 @@ async fn webtransport_datagram_carrier_delivers_frames_and_falls_back_when_too_l
     let sender = async {
         let mut remote = RemoteWtSink::new(format!("https://127.0.0.1:{port}"))
             .with_server_certificate_hashes(tls.hash_hex.clone())
-            .with_datagrams(true);
+            .with_video_mode(VideoMode::Datagrams);
         AsyncElement::set_property(
             &mut remote,
             "congestion-control",
@@ -267,7 +267,6 @@ async fn webtransport_datagram_carrier_delivers_frames_and_falls_back_when_too_l
             .process(PipelinePacket::DataFrame(test_frame(N, BIG_LEN)), &mut null)
             .await;
         let _ = remote.process(PipelinePacket::Eos, &mut null).await;
-        AsyncElement::get_property(&remote, "datagrams-sent")
     };
 
     let recv = tokio::time::timeout(
@@ -280,16 +279,11 @@ async fn webtransport_datagram_carrier_delivers_frames_and_falls_back_when_too_l
         ),
     );
 
-    let (recv_res, datagrams_sent) = tokio::join!(recv, sender);
+    let (recv_res, ()) = tokio::join!(recv, sender);
     let stats = recv_res
         .expect("receiver finishes within 20s")
         .expect("receive pipeline ok");
 
-    assert_eq!(
-        datagrams_sent,
-        Some(PropValue::Uint(N as u64)),
-        "every frame that fits went out as a datagram, the oversized one did not"
-    );
     assert_eq!(
         stats.frames_emitted,
         N as u64 + 1,
@@ -301,13 +295,8 @@ async fn webtransport_datagram_carrier_delivers_frames_and_falls_back_when_too_l
         "caps still discovered from the stream half of the carrier"
     );
 
-    // Datagrams are unordered against the stream, so match by sequence.
-    for i in 0..=N {
-        let (_, timing, bytes) = sink
-            .frames
-            .iter()
-            .find(|(seq, _, _)| *seq == i as u64)
-            .unwrap_or_else(|| panic!("frame {i} arrived"));
+    for (i, (sequence, timing, bytes)) in (0..=N).zip(&sink.frames) {
+        assert_eq!(*sequence, u64::from(i), "frames arrive in send order");
         let want = if i == N { BIG_LEN } else { FRAME_LEN };
         assert_eq!(bytes.len(), want, "frame {i} length preserved");
         assert_eq!(bytes[0], i, "frame {i} payload tag preserved");
@@ -804,36 +793,25 @@ fn webtransport_elements_expose_the_datagram_and_congestion_knobs() {
     }
 
     let mut sink = RemoteWtSink::new("https://127.0.0.1:9603");
-    assert!(spec(AsyncElement::properties(&sink), "datagrams").is_some());
     assert_eq!(
-        AsyncElement::get_property(&sink, "datagrams"),
-        Some(PropValue::Bool(false)),
+        AsyncElement::get_property(&sink, "video-mode"),
+        Some(PropValue::Str("stream".into())),
         "the reliable stream stays the default carrier"
     );
-    AsyncElement::set_property(&mut sink, "datagrams", PropValue::Bool(true)).unwrap();
+    for mode in ["stream-per-frame", "datagrams", "stream"] {
+        AsyncElement::set_property(&mut sink, "video-mode", PropValue::Str(mode.into())).unwrap();
+        assert_eq!(
+            AsyncElement::get_property(&sink, "video-mode"),
+            Some(PropValue::Str(mode.into()))
+        );
+    }
     assert_eq!(
-        AsyncElement::get_property(&sink, "datagrams"),
-        Some(PropValue::Bool(true))
-    );
-    // Nothing sent yet, and the counter is readable but not settable.
-    assert_eq!(
-        AsyncElement::get_property(&sink, "datagrams-sent"),
-        Some(PropValue::Uint(0))
-    );
-    assert_eq!(
-        AsyncElement::set_property(&mut sink, "datagrams-sent", PropValue::Uint(7)),
-        Err(g2g_core::PropError::ReadOnly)
-    );
-    assert!(
-        !spec(AsyncElement::properties(&sink), "datagrams-sent")
-            .expect("declared")
-            .flags
-            .writable,
-        "datagrams-sent is a status readout"
+        AsyncElement::set_property(&mut sink, "video-mode", PropValue::Str("udp".into())),
+        Err(g2g_core::PropError::Value)
     );
     // The FIFO round trip has no drop-tolerant mode to offer.
     let xform = RemoteWtTransform::new("https://127.0.0.1:9604");
-    assert!(spec(AsyncElement::properties(&xform), "datagrams").is_none());
+    assert!(spec(AsyncElement::properties(&xform), "video-mode").is_none());
 
     // congestion-control: the same closed nick set on client, server, transform.
     let cc = spec(AsyncElement::properties(&sink), "congestion-control").expect("declared");

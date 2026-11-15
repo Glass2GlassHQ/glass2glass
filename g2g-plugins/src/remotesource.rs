@@ -28,7 +28,7 @@ use std::net::{SocketAddr, TcpListener as StdTcpListener};
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
     Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata, G2gError, HardwareError,
-    OutputSink, PipelinePacket, PropError, PropValue, PropertySpec,
+    OutputSink, PipelinePacket, PropError, PropValue, PropertySpec, PushOutcome, Reconfigure,
 };
 
 use crate::filesink::io_err;
@@ -71,6 +71,11 @@ pub trait PacketTransport: Default + Send + Sync + 'static {
     /// Read the next decoded packet, or `Ok(None)` on a clean close at a message
     /// boundary (the stream's natural end).
     fn recv(conn: &mut Self::Conn) -> TransportFuture<'_, Option<PipelinePacket>>;
+    /// Ask the sender for a keyframe. Only the QUIC carrier has a channel back
+    /// to the sender, the others have nothing to send it on.
+    fn request_keyframe(_conn: &mut Self::Conn) -> TransportFuture<'_, ()> {
+        Box::pin(async { Ok(()) })
+    }
 
     /// Handle the transport-specific half of `set_property`; `None` if `name` is
     /// not one of this transport's knobs (the caller's `match` falls through).
@@ -354,7 +359,11 @@ impl<T: PacketTransport> SourceLoop for RemoteSource<T> {
                         break;
                     }
                     PipelinePacket::DataFrame(frame) => {
-                        out.push(PipelinePacket::DataFrame(frame)).await?;
+                        let outcome = out.push(PipelinePacket::DataFrame(frame)).await?;
+                        if outcome == PushOutcome::Reconfigure(Reconfigure::ForceKeyframe) {
+                            let conn = self.conn.as_mut().ok_or(G2gError::NotConfigured)?;
+                            T::request_keyframe(conn).await?;
+                        }
                         emitted += 1;
                         if limit != 0 && emitted >= limit {
                             out.push(PipelinePacket::Eos).await?;

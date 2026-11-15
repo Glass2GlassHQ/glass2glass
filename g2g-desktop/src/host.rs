@@ -48,6 +48,7 @@ pub struct HostSettings {
     pub token: String,
     pub bitrate: u32,
     pub send_window: Option<u64>,
+    pub video_mode: Option<String>,
     #[cfg(target_os = "windows")]
     pub quality_vs_speed: Option<u32>,
 }
@@ -56,6 +57,7 @@ pub struct HostSettings {
 pub enum HostError {
     TokenLength(usize),
     SendWindow(PropError),
+    VideoMode(PropError),
     TokenTimeout,
     BadToken,
     HungUp,
@@ -70,6 +72,7 @@ impl fmt::Display for HostError {
                 write!(f, "token is {len} bytes, must be 1 to {MAX_TOKEN_LEN}")
             }
             HostError::SendWindow(e) => write!(f, "send window: {e:?}"),
+            HostError::VideoMode(e) => write!(f, "video mode: {e:?}"),
             HostError::TokenTimeout => write!(
                 f,
                 "client sent no token within {} seconds",
@@ -116,6 +119,10 @@ impl HostListener {
         if let Some(bytes) = settings.send_window {
             AsyncElement::set_property(&mut sink, "send-window", PropValue::Uint(bytes))
                 .map_err(HostError::SendWindow)?;
+        }
+        if let Some(mode) = &settings.video_mode {
+            AsyncElement::set_property(&mut sink, "video-mode", PropValue::Str(mode.clone()))
+                .map_err(HostError::VideoMode)?;
         }
         let channel = sink.open_data_channel();
         let address = sink.listen().map_err(HostError::Session)?;

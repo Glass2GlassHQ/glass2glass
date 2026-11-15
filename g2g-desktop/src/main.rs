@@ -36,7 +36,8 @@ use tokio::sync::{mpsc, watch};
 
 const HOST_USAGE: &str =
     "  g2g-desktop host --token TOKEN [--port 8080] [--fps 60] [--bitrate 4000000]
-                   [--send-window BYTES] [--trace FILE]";
+                   [--send-window BYTES] [--video-mode stream|stream-per-frame|datagrams]
+                   [--trace FILE]";
 #[cfg(target_os = "linux")]
 const PLATFORM_USAGE: &str =
     "  g2g-desktop client --host HOST --cert-hash SHA256 --token TOKEN [--port 8080] [--inputs true]
@@ -46,7 +47,15 @@ const PLATFORM_USAGE: &str = "                   [--monitor-index -1] [--quality
 const DEFAULT_PORT: u16 = 8080;
 const DEFAULT_FPS: u32 = 60;
 const DEFAULT_BITRATE: u32 = 4_000_000;
-const HOST_FLAGS: [&str; 6] = ["port", "token", "fps", "bitrate", "send-window", "trace"];
+const HOST_FLAGS: [&str; 7] = [
+    "port",
+    "token",
+    "fps",
+    "bitrate",
+    "send-window",
+    "video-mode",
+    "trace",
+];
 #[cfg(target_os = "linux")]
 const PLATFORM_HOST_FLAGS: [&str; 0] = [];
 #[cfg(target_os = "windows")]
@@ -202,6 +211,7 @@ async fn host(flags: Flags) -> Result<(), Box<dyn Error>> {
         token: required(&flags, "token")?,
         bitrate: parsed(&flags, "bitrate", DEFAULT_BITRATE)?,
         send_window: optional(&flags, "send-window")?,
+        video_mode: optional(&flags, "video-mode")?,
         #[cfg(target_os = "windows")]
         quality_vs_speed: optional(&flags, "quality-vs-speed")?,
     };

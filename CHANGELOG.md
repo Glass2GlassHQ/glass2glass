@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2326: `remotewtsink video-mode` adds stream-per-frame and ordered datagram video, with keyframe requests from `remotewtsrc` back to the encoder.
 - M2325: `remotewtsrc` frame age includes the network leg, plus `send-window` on `remotewtsink` and `quality-vs-speed` on `mfencode`.
 - M2324: `g2g-desktop` runs over raw QUIC with a pinned self-signed certificate instead of WebRTC.
 - M2323: `remotewtsink` can listen with a generated self-signed certificate that browsers accept by hash.

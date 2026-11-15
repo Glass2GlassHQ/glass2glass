@@ -32,13 +32,12 @@
 //! named by its SHA-256 digest in `server-certificate-hashes` (what a browser's
 //! `serverCertificateHashes` option does for a self-signed certificate).
 //!
-//! `datagrams=true` switches the drop-tolerant carrier on: each data frame goes
-//! out as one QUIC datagram, unacknowledged and unretransmitted, while the
-//! control packets stay on the stream. A frame larger than the path's datagram
-//! limit falls back to the stream, and `datagrams-sent` reports how many actually
-//! took the datagram path, so a stream of frames that never fit is visible rather
-//! than silent. `congestion-control` picks the QUIC controller (CUBIC by
-//! default, BBR under `low-latency`).
+//! `video-mode` picks how frames travel, see [`remotewtio`](crate::remotewtio).
+//! In the modes that reset or drop frames, `frame-timeout` asks the encoder for
+//! a keyframe once a frame stream goes unacknowledged that long, and a keyframe
+//! request from the receiving source reaches the encoder the same way.
+//! `congestion-control` picks the QUIC controller (CUBIC by default, BBR under
+//! `low-latency`).
 //!
 //! The shared client machinery (caps-dedup, the reconnect/retry `deliver` loop,
 //! the `AsyncElement` glue) lives in [`RemoteClient`](crate::remoteclient); this
@@ -46,6 +45,7 @@
 
 use alloc::boxed::Box;
 use alloc::string::{String, ToString};
+use core::time::Duration;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -61,7 +61,10 @@ use g2g_core::{
 use crate::datachannel::{data_channel, DataChannelEnds};
 use crate::remoteclient::{PacketClient, RemoteClient};
 use crate::remotesource::TransportFuture;
-use crate::remotewtio::{self, QuicMode, SelfSignedCertificate, SharedDataChannel, WtStream};
+use crate::remotewtio::{
+    self, QuicMode, SelfSignedCertificate, SharedDataChannel, VideoSettings, WtStream,
+};
+use crate::remotewtvideo::{set_video_mode, VideoMode};
 
 /// WebTransport `RemoteWtSink`: a length-framed [`g2g_core::wire`] stream over one
 /// bidirectional WebTransport stream, received by
@@ -89,9 +92,6 @@ impl RemoteWtSink {
         self
     }
 
-    /// Carry data frames as QUIC datagrams (see the module docs). The same knob
-    /// as the `datagrams` property, set through the same path so a builder and a
-    /// launch line cannot drift.
     pub fn with_listener(mut self, cert: impl Into<String>, key: impl Into<String>) -> Self {
         let transport = self.transport_mut();
         transport.mode = QuicMode::Listener;
@@ -120,9 +120,9 @@ impl RemoteWtSink {
         application
     }
 
-    pub fn with_datagrams(mut self, datagrams: bool) -> Self {
-        AsyncElement::set_property(&mut self, "datagrams", PropValue::Bool(datagrams))
-            .expect("datagrams is a boolean");
+    pub fn with_video_mode(mut self, mode: VideoMode) -> Self {
+        AsyncElement::set_property(&mut self, "video-mode", PropValue::Str(mode.name().into()))
+            .expect("video-mode names a mode");
         self
     }
 }
@@ -143,11 +143,9 @@ pub struct WtClient {
     key: String,
     self_signed: Option<SelfSignedCertificate>,
     endpoint: Option<Endpoint>,
-    /// Send data frames as QUIC datagrams (the `datagrams` property).
-    datagrams: bool,
+    video_mode: VideoMode,
+    frame_timeout_ms: u64,
     send_window: u64,
-    /// Cumulative across reconnects, so it outlives any one session.
-    datagrams_sent: u64,
     /// Opened lazily on the first send (the QUIC / CONNECT handshake is async).
     stream: Option<WtStream>,
     data_channel: Option<SharedDataChannel>,
@@ -165,9 +163,9 @@ impl WtClient {
             key: String::new(),
             self_signed: None,
             endpoint: None,
-            datagrams: false,
+            video_mode: VideoMode::Stream,
+            frame_timeout_ms: DEFAULT_FRAME_TIMEOUT_MS,
             send_window: QUINN_SEND_WINDOW,
-            datagrams_sent: 0,
             stream: None,
             data_channel: None,
         }
@@ -193,9 +191,9 @@ impl WtClient {
         self.stream.as_mut()
     }
 
-    /// Shared by the sink and the transform: the knobs a client has. `datagrams`
-    /// is the sink's alone (see the transform's module docs), but it is stored
-    /// here because the transport is.
+    /// Shared by the sink and the transform: the knobs a client has. `video-mode`
+    /// and `frame-timeout` are the sink's alone (see the transform's module docs),
+    /// but they are stored here because the transport is.
     pub(crate) fn set_client_prop(
         &mut self,
         name: &str,
@@ -205,16 +203,16 @@ impl WtClient {
             "congestion-control" => {
                 return Some(remotewtio::set_congestion(&mut self.congestion, value))
             }
-            "datagrams" => {
-                return Some(match value.as_bool() {
-                    Some(on) => {
-                        self.datagrams = on;
+            "video-mode" => return Some(set_video_mode(&mut self.video_mode, value)),
+            "frame-timeout" => {
+                return Some(match value.as_uint() {
+                    Some(milliseconds) => {
+                        self.frame_timeout_ms = milliseconds;
                         Ok(())
                     }
                     None => Err(PropError::Type),
                 })
             }
-            "datagrams-sent" => return Some(Err(PropError::ReadOnly)),
             "send-window" => {
                 return Some(match value.as_uint() {
                     Some(0) => Err(PropError::Value),
@@ -249,8 +247,8 @@ impl WtClient {
             "location" => Some(PropValue::Str(self.url.clone())),
             "server-certificate-hashes" => Some(PropValue::Str(self.cert_hashes.clone())),
             "congestion-control" => Some(PropValue::Str(self.congestion.clone())),
-            "datagrams" => Some(PropValue::Bool(self.datagrams)),
-            "datagrams-sent" => Some(PropValue::Uint(self.datagrams_sent)),
+            "video-mode" => Some(PropValue::Str(self.video_mode.name().to_string())),
+            "frame-timeout" => Some(PropValue::Uint(self.frame_timeout_ms)),
             "send-window" => Some(PropValue::Uint(self.send_window)),
             "mode" => Some(PropValue::Str(self.mode.name().to_string())),
             "certificate" => Some(PropValue::Str(self.cert.clone())),
@@ -262,6 +260,7 @@ impl WtClient {
 
 // quinn's TransportConfig default, eight times its 1.25 MB stream receive window
 const QUINN_SEND_WINDOW: u64 = 10_000_000;
+const DEFAULT_FRAME_TIMEOUT_MS: u64 = 100;
 
 /// The `server-certificate-hashes` spec, shared by the sink and the transform.
 pub(crate) const CERT_HASHES_PROP: PropertySpec = PropertySpec::new(
@@ -299,23 +298,24 @@ impl PacketClient for WtClient {
         )
         .with_default("0"),
         PropertySpec::new(
-            "datagrams",
-            PropKind::Bool,
-            "carry data frames in QUIC datagrams instead of the session's stream: unreliable and MTU-bounded, with a frame too large for the path falling back to the stream",
+            "video-mode",
+            PropKind::Str,
+            "stream sends every packet in order on one stream; stream-per-frame sends each frame on its own stream and resets unacknowledged frames when a keyframe goes out; datagrams sends each frame that fits as one unreliable datagram",
         )
-        .with_default("false"),
+        .with_default("stream")
+        .with_enum_values("stream | stream-per-frame | datagrams"),
+        PropertySpec::new(
+            "frame-timeout",
+            PropKind::Uint,
+            "milliseconds a frame stream may go unacknowledged before the encoder is asked for a keyframe (0 = never)",
+        )
+        .with_default("100"),
         PropertySpec::new(
             "send-window",
             PropKind::Uint,
             "bytes written but not yet acknowledged before a send blocks; smaller keeps a stalled link from queueing video",
         )
         .with_default("10000000"),
-        PropertySpec::new(
-            "datagrams-sent",
-            PropKind::Uint,
-            "frames sent as datagrams so far (the rest fell back to the stream)",
-        )
-        .read_only(),
     ];
 
     fn is_connected(&self) -> bool {
@@ -331,29 +331,33 @@ impl PacketClient for WtClient {
                 QuicMode::Listener => remotewtio::accept(self.listener_endpoint()?).await?,
             };
             session.set_send_window(self.send_window);
-            self.stream = Some(
-                remotewtio::open_stream(session, self.datagrams, self.data_channel.as_ref())
-                    .await?,
-            );
+            let settings = VideoSettings {
+                mode: self.video_mode,
+                stall_timeout: (self.frame_timeout_ms != 0)
+                    .then(|| Duration::from_millis(self.frame_timeout_ms)),
+                missing_frame_timeout: None,
+            };
+            self.stream =
+                Some(remotewtio::open_stream(session, settings, self.data_channel.as_ref()).await?);
             Ok(())
         })
     }
 
     fn send<'a>(&'a mut self, packet: &'a PipelinePacket) -> TransportFuture<'a, ()> {
         Box::pin(async move {
-            let as_datagram = {
-                let stream = self.stream.as_mut().ok_or(G2gError::NotConfigured)?;
-                stream.send(packet).await?
-            };
-            if as_datagram {
-                self.datagrams_sent += 1;
-            }
-            Ok(())
+            let stream = self.stream.as_mut().ok_or(G2gError::NotConfigured)?;
+            stream.send(packet).await
         })
     }
 
     fn reset(&mut self) {
         self.stream = None;
+    }
+
+    fn take_keyframe_request(&mut self) -> bool {
+        self.stream
+            .as_mut()
+            .is_some_and(WtStream::take_keyframe_request)
     }
 
     fn close(&mut self) -> TransportFuture<'_, ()> {

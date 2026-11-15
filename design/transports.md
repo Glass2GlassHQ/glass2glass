@@ -609,8 +609,8 @@ on display 0, and losing keyboard focus releases the keys and buttons still
 held.
 
 `g2g-desktop host` makes a self-signed certificate at start, prints its
-SHA-256, and serves one client at a time on `--port`. `--send-window` sets the
-sink's `send-window`, and on Windows `--quality-vs-speed` sets `mfh264enc
+SHA-256, and serves one client at a time on `--port`. `--send-window` and
+`--video-mode` set the sink's properties of the same names, and on Windows `--quality-vs-speed` sets `mfh264enc
 quality-vs-speed`. On Linux it captures a
 monitor through the ScreenCast portal, which asks the user on every session.
 On Windows it captures the monitor named by `--monitor-index` (-1 for the
@@ -826,6 +826,34 @@ and not yet acknowledged before a write blocks. quinn's default of 10 MB holds
 about 20 s of 4 Mbps video. On the laptop's Wi-Fi, a 50 KB window raised the
 `g2g-desktop` p99 frame age from 83 to 322 ms, so the host keeps the default
 unless `--send-window` is set.
+
+`video-mode` on `RemoteWtSink` picks how packets after the leading caps
+travel. `stream`, the default, keeps them all in order on the one
+bidirectional stream. `stream-per-frame` sends each packet on its own
+unidirectional stream. `datagrams` sends each data frame that fits the path as
+one QUIC datagram and everything else on its own unidirectional stream. In the
+two new modes every packet starts with two little-endian `u64`s, the data
+frames and the control packets sent before it, and `RemoteWtSrc` restores send
+order from them whatever mode the sender runs. A data frame never waits on one
+that will not arrive: a sender resets every frame stream not yet acknowledged
+when it sends a keyframe, so the source skips a missing frame once a later
+keyframe is in, and in datagram mode it also skips one still missing after the
+source's `frame-timeout` (default one frame period of the caps). After a skip
+the source drops delta frames until the next keyframe. Control packets are
+never skipped. On the sender, `frame-timeout` (default 100 ms) asks the encoder
+for a keyframe when a frame stream has gone that long unacknowledged, so a
+stalled link drops the frames it holds instead of delivering them late. The
+sender closes the connection only after the source closes it on reading `Eos`,
+since quinn fails reads of acknowledged but unread stream data once the
+connection closes.
+
+Keyframe requests travel back on the source's half of the bidirectional
+stream, one byte each. The source writes one when it skips a frame that is not
+a keyframe, and when its downstream answers a pushed frame with
+`Reconfigure::ForceKeyframe`. `RemoteWtSink` returns each one from
+`take_reconfigure`, and the runner relays it to the encoder. The loss tests in
+`m2326_quic_video_modes.rs` run the session through a seeded UDP relay in the
+test process.
 
 A sink otherwise connects on its first packet. `RemoteClient::connect` connects
 before the graph runs, so a listening sink can read the client's first data

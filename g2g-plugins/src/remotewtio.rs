@@ -12,26 +12,33 @@
 //! (shared with it in [`crate::remotewire`]), not the WebSocket pair's
 //! one-message-per-packet.
 //!
-//! The datagram carrier rides the same session: with `datagrams` set, a
-//! sender puts each data frame in one QUIC datagram (unreliable, unordered,
-//! MTU-bounded) and keeps the control packets (caps, segment, flush, `Eos`) on
-//! the stream, since losing one of those loses the stream itself. One datagram is
-//! one packet, so a receiver reassembles nothing and a drop simply loses that
-//! frame. A frame too large for the path falls back to the stream: truncating it
-//! or dropping it silently would both be worse than arriving late. Receiving is
-//! mode-free, [`WtStream::recv`] takes packets from whichever the peer used.
+//! The other video modes ride the same session. `stream-per-frame` puts every
+//! packet after the leading caps on its own unidirectional stream, and a
+//! keyframe resets the frame streams not yet acknowledged. `datagrams` sends a
+//! data frame that fits the path as one QUIC datagram and anything else as a
+//! unidirectional stream. Each packet carries a [`PacketOrder`], from which the
+//! receiver restores send order and skips frames that will not arrive. Receiving
+//! is mode-free, [`WtStream::recv`] takes packets from whichever the peer used.
+//! The receiver writes keyframe requests on its half of the bidirectional stream.
 //!
 //! A data channel (`open_data_channel` on the sink and source) is a second
 //! bidirectional stream carrying length-framed byte messages, opened by the
 //! source and accepted by the sink.
 
+use alloc::collections::VecDeque;
 use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
+use core::future::Future;
+use core::pin::pin;
+use core::task::{Context, Poll, Waker};
 use core::time::Duration;
 
+use bytes::Bytes;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
+use tokio::task::{JoinError, JoinSet};
+use tokio::time::Instant;
 use web_transport_quinn::proto::ConnectRequest;
 use web_transport_quinn::quinn::rustls::pki_types::pem::PemObject;
 use web_transport_quinn::quinn::rustls::pki_types::{CertificateDer, PrivateKeyDer};
@@ -46,19 +53,22 @@ use web_transport_quinn::quinn::rustls::client::danger::{
 use web_transport_quinn::quinn::rustls::pki_types::{ServerName, UnixTime};
 use web_transport_quinn::quinn::{self, Connection, Endpoint};
 use web_transport_quinn::{
-    crypto, ClientBuilder, CongestionControl, RecvStream, Request, SendStream, Session,
+    crypto, ClientBuilder, CongestionControl, ReadToEndError, RecvStream, Request, SendStream,
+    Session, SessionError,
 };
 
+use g2g_core::caps::framerate_q16_period_ns;
 use g2g_core::g2g_warn;
 use g2g_core::log::Target;
-use g2g_core::wire::{decode_packet, encode_packet};
 use g2g_core::{
-    G2gError, NetworkFailure, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
+    Caps, G2gError, NetworkFailure, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
+    Rate,
 };
 
 use crate::abortondrop::AbortOnDrop;
 use crate::datachannel::{DataChannelTransportEnds, MAX_MESSAGE_SIZE};
-use crate::remotewire::{map_wire, send_frame_bytes, send_framed, FramedRead};
+use crate::remotewire::{send_frame_bytes, send_framed, FramedRead};
+use crate::remotewtvideo::{NextPacket, PacketOrder, PacketReorder, VideoMode, KEYFRAME_REQUEST};
 use crate::textencoding::{hex_decode, hex_encode};
 
 /// Any WebTransport / QUIC / TLS failure ends the session.
@@ -74,22 +84,135 @@ const FLUSH_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// A WebTransport session plus the one bidirectional stream carrying the wire
 /// codec. The session is held alongside the stream because dropping it closes the
-/// QUIC connection underneath, and because the datagram carrier sends and reads
-/// on it. Opaque: it is the `RemoteWtSrc` connection type, so it has to be
-/// nameable, but nothing outside the crate operates on it.
+/// QUIC connection underneath, and because the datagram and stream-per-frame
+/// carriers send and read on it. Opaque: it is the `RemoteWtSrc` connection type,
+/// so it has to be nameable, but nothing outside the crate operates on it.
 #[derive(Debug)]
 pub struct WtStream {
     session: Session,
     tx: SendStream,
     rx: RecvStream,
     /// Stream-side read state, kept across calls so [`Self::recv`] survives being
-    /// cancelled by the datagram branch of its `select!`.
+    /// cancelled by the other branches of its `select!`.
     reader: FramedRead,
-    /// Send data frames as datagrams (the sender's `datagrams` property).
-    datagrams: bool,
-    /// Whether the peer's first packet is still outstanding. See [`Self::recv`].
+    /// Whether the first packet, the negotiated caps, is still outstanding. It
+    /// always travels on the bidirectional stream.
     leading: bool,
+    sending: SendOrdering,
+    receiving: ReceiveOrdering,
     _data_channel: Option<AbortOnDrop>,
+}
+
+#[derive(Debug)]
+struct SendOrdering {
+    mode: VideoMode,
+    stall_timeout: Option<Duration>,
+    frames_sent: u64,
+    controls_sent: u64,
+    unacknowledged: VecDeque<UnacknowledgedStream>,
+    stall_keyframe_requested: bool,
+}
+
+#[derive(Debug)]
+struct UnacknowledgedStream {
+    stream: SendStream,
+    // None for a control packet, which is never reset
+    frame_sent_at: Option<Instant>,
+}
+
+const FRAME_SUPERSEDED: u32 = 0;
+
+impl SendOrdering {
+    fn forget_acknowledged(&mut self) {
+        let mut context = Context::from_waker(Waker::noop());
+        self.unacknowledged.retain(|entry| {
+            let stopped = pin!(entry.stream.stopped());
+            stopped.poll(&mut context).is_pending()
+        });
+    }
+
+    fn reset_unfinished_frames(&mut self) {
+        self.stall_keyframe_requested = false;
+        self.unacknowledged.retain_mut(|entry| {
+            if entry.frame_sent_at.is_none() {
+                return true;
+            }
+            // quinn refuses a reset once every byte is acknowledged, and the frame then arrived anyway
+            let _ = entry.stream.reset(FRAME_SUPERSEDED);
+            false
+        });
+    }
+
+    fn stalled(&mut self) -> bool {
+        let Some(timeout) = self.stall_timeout else {
+            return false;
+        };
+        if self.stall_keyframe_requested {
+            return false;
+        }
+        let oldest = self
+            .unacknowledged
+            .iter()
+            .find_map(|entry| entry.frame_sent_at);
+        self.stall_keyframe_requested = oldest.is_some_and(|sent| sent.elapsed() >= timeout);
+        self.stall_keyframe_requested
+    }
+}
+
+#[derive(Debug)]
+struct ReceiveOrdering {
+    frame_timeout: Option<Duration>,
+    reorder: PacketReorder,
+    reads: JoinSet<Result<Vec<u8>, ReadToEndError>>,
+    ordered: bool,
+    datagrams_seen: bool,
+    stream_done: bool,
+    datagrams_closed: bool,
+    uni_closed: bool,
+}
+
+#[derive(Debug)]
+enum ReceiveEvent {
+    Datagram(Result<Bytes, SessionError>),
+    UniStream(Result<RecvStream, SessionError>),
+    UniRead(Result<Result<Vec<u8>, ReadToEndError>, JoinError>),
+    Stream(Result<Option<PipelinePacket>, G2gError>),
+    Deadline,
+}
+
+impl ReceiveOrdering {
+    fn insert(&mut self, bytes: &[u8]) -> Result<(), G2gError> {
+        let (order, packet) = PacketOrder::decode(bytes)?;
+        self.reorder.insert(order, packet)
+    }
+
+    fn insert_read(
+        &mut self,
+        read: Result<Result<Vec<u8>, ReadToEndError>, JoinError>,
+    ) -> Result<(), G2gError> {
+        match read.map_err(wt_err)? {
+            Ok(bytes) => self.insert(&bytes),
+            // senders reset a frame stream that a newer keyframe replaces
+            Err(_) => Ok(()),
+        }
+    }
+
+    fn missing_frame_timeout(&self) -> Result<Option<Duration>, G2gError> {
+        if !self.datagrams_seen {
+            return Ok(None);
+        }
+        if self.frame_timeout.is_none() {
+            g2g_warn!(
+                Target::category("remotewt"),
+                "datagram video needs frame-timeout when the caps have no fixed framerate"
+            );
+        }
+        self.frame_timeout.map(Some).ok_or(G2gError::NotConfigured)
+    }
+
+    fn finished(&self) -> bool {
+        self.stream_done && self.datagrams_closed && self.uni_closed && self.reads.is_empty()
+    }
 }
 
 impl WtStream {
@@ -97,7 +220,7 @@ impl WtStream {
         session: Session,
         tx: SendStream,
         rx: RecvStream,
-        datagrams: bool,
+        settings: VideoSettings,
         data_channel: Option<AbortOnDrop>,
     ) -> Self {
         Self {
@@ -105,32 +228,112 @@ impl WtStream {
             tx,
             rx,
             reader: FramedRead::default(),
-            datagrams,
             leading: true,
+            sending: SendOrdering {
+                mode: settings.mode,
+                stall_timeout: settings.stall_timeout,
+                frames_sent: 0,
+                controls_sent: 0,
+                unacknowledged: VecDeque::new(),
+                stall_keyframe_requested: false,
+            },
+            receiving: ReceiveOrdering {
+                frame_timeout: settings.missing_frame_timeout,
+                reorder: PacketReorder::default(),
+                reads: JoinSet::new(),
+                ordered: false,
+                datagrams_seen: false,
+                stream_done: false,
+                datagrams_closed: false,
+                uni_closed: false,
+            },
             _data_channel: data_channel,
         }
     }
 
-    /// Serialize and send one packet: length-framed on the session's stream, or,
-    /// in datagram mode, a data frame that fits the path as one QUIC datagram.
-    /// `Ok(true)` when it went out as a datagram.
-    pub(crate) async fn send(&mut self, packet: &PipelinePacket) -> Result<bool, G2gError> {
-        if self.datagrams && matches!(packet, PipelinePacket::DataFrame(_)) {
-            let body = encode_packet(packet).map_err(map_wire)?;
-            if body.len() <= self.session.max_datagram_size() {
-                self.session.send_datagram(body.into()).map_err(wt_err)?;
-                return Ok(true);
-            }
-            // Too large for the path: the reliable stream carries it instead of
-            // the frame being truncated or silently dropped.
+    /// Serialize and send one packet. The leading caps and every packet in
+    /// `stream` mode go length-framed on the bidirectional stream. In the other
+    /// modes each packet carries a [`PacketOrder`] and goes on its own
+    /// unidirectional stream, or as one datagram for a data frame that fits.
+    pub(crate) async fn send(&mut self, packet: &PipelinePacket) -> Result<(), G2gError> {
+        self.sending.forget_acknowledged();
+        if self.leading || self.sending.mode == VideoMode::Stream {
+            self.leading = false;
+            return send_framed(&mut self.tx, packet).await;
         }
-        send_framed(&mut self.tx, packet).await?;
-        Ok(false)
+        let order = PacketOrder {
+            frames_before: self.sending.frames_sent,
+            controls_before: self.sending.controls_sent,
+        };
+        let bytes = order.encode(packet)?;
+        let PipelinePacket::DataFrame(frame) = packet else {
+            self.sending.controls_sent += 1;
+            let stream = self.send_on_new_stream(&bytes).await?;
+            self.sending.unacknowledged.push_back(UnacknowledgedStream {
+                stream,
+                frame_sent_at: None,
+            });
+            return Ok(());
+        };
+        self.sending.frames_sent += 1;
+        if frame.timing.keyframe {
+            self.sending.reset_unfinished_frames();
+        }
+        if self.sending.mode == VideoMode::Datagrams
+            && bytes.len() <= self.session.max_datagram_size()
+        {
+            return self.session.send_datagram(bytes.into()).map_err(wt_err);
+        }
+        let stream = self.send_on_new_stream(&bytes).await?;
+        self.sending.unacknowledged.push_back(UnacknowledgedStream {
+            stream,
+            frame_sent_at: Some(Instant::now()),
+        });
+        Ok(())
     }
 
-    /// Read the next packet, from the session's stream or its datagram flow
-    /// (whichever the peer used). `Ok(None)` once the peer finishes its send
-    /// stream.
+    async fn send_on_new_stream(&mut self, bytes: &[u8]) -> Result<SendStream, G2gError> {
+        let mut stream = self.session.open_uni().await.map_err(wt_err)?;
+        stream.write_all(bytes).await.map_err(wt_err)?;
+        stream.finish().map_err(wt_err)?;
+        Ok(stream)
+    }
+
+    /// Whether the receiver asked for a keyframe, or a frame stream has gone
+    /// unacknowledged past the stall timeout, since the last call.
+    pub(crate) fn take_keyframe_request(&mut self) -> bool {
+        let requested = self.read_keyframe_requests();
+        self.sending.forget_acknowledged();
+        self.sending.stalled() || requested
+    }
+
+    fn read_keyframe_requests(&mut self) -> bool {
+        let mut context = Context::from_waker(Waker::noop());
+        let mut bytes = [0u8; 64];
+        let mut requested = false;
+        loop {
+            let polled = pin!(self.rx.read(&mut bytes)).poll(&mut context);
+            let Poll::Ready(Ok(Some(count))) = polled else {
+                return requested;
+            };
+            let received = &bytes[..count];
+            if received.iter().any(|byte| *byte != KEYFRAME_REQUEST) {
+                g2g_warn!(
+                    Target::category("remotewt"),
+                    "ignoring unknown bytes on the keyframe request stream"
+                );
+            }
+            requested |= received.contains(&KEYFRAME_REQUEST);
+        }
+    }
+
+    pub(crate) async fn request_keyframe(&mut self) -> Result<(), G2gError> {
+        self.tx.write_all(&[KEYFRAME_REQUEST]).await.map_err(wt_err)
+    }
+
+    /// Read the next packet, from the bidirectional stream or, once the peer
+    /// sends in another video mode, from its unidirectional streams and
+    /// datagrams in send order. `Ok(None)` once the peer finishes sending.
     pub(crate) async fn recv(&mut self) -> Result<Option<PipelinePacket>, G2gError> {
         let mut packet = self.recv_packet().await?;
         let stamped = match &mut packet {
@@ -147,62 +350,144 @@ impl WtStream {
 
     async fn recv_packet(&mut self) -> Result<Option<PipelinePacket>, G2gError> {
         if self.leading {
-            // A peer's first packet is its negotiated caps, and those are always
-            // on the stream: taking a datagram ahead of them would lose the
-            // receiver's caps discovery.
             let packet = self.reader.recv(&mut self.rx).await?;
             self.leading = false;
+            if let Some(PipelinePacket::CapsChanged(caps)) = &packet {
+                if self.receiving.frame_timeout.is_none() {
+                    self.receiving.frame_timeout = frame_period(caps);
+                }
+            }
             return Ok(packet);
         }
-        let datagram = {
-            let Self {
-                session,
-                rx,
-                reader,
-                ..
-            } = self;
-            tokio::select! {
-                // Datagrams first: a stream keeps whatever it buffered until it
-                // is read, while an undrained datagram queue loses frames, and
-                // taking the stream's Eos first would end the flow with frames
-                // still queued.
-                biased;
-                datagram = session.read_datagram() => datagram,
-                framed = reader.recv(rx) => return framed,
+        loop {
+            while let Some(read) = self.receiving.reads.try_join_next() {
+                self.receiving.insert_read(read)?;
             }
-        };
-        match datagram {
-            Ok(bytes) => Ok(Some(decode_packet(&bytes).map_err(map_wire)?)),
-            // The datagram flow ends with the session, well before the stream has
-            // been read out: let the stream say how this ended.
-            Err(_) => self.reader.recv(&mut self.rx).await,
+            let timeout = self.receiving.missing_frame_timeout()?;
+            let next = self.receiving.reorder.pop(Instant::now(), timeout);
+            if self.receiving.reorder.take_keyframe_wanted() {
+                self.request_keyframe().await?;
+            }
+            let deadline = match next {
+                NextPacket::Ready(PipelinePacket::Eos) => {
+                    // the sender waits for this close before closing, so its last streams are read
+                    self.session.close(0, b"eos");
+                    return Ok(Some(PipelinePacket::Eos));
+                }
+                NextPacket::Ready(packet) => return Ok(Some(packet)),
+                NextPacket::Wait { deadline } => deadline,
+            };
+            if self.receiving.finished() {
+                return Ok(None);
+            }
+            match self.next_event(deadline).await {
+                ReceiveEvent::Datagram(Ok(bytes)) => {
+                    self.receiving.ordered = true;
+                    self.receiving.datagrams_seen = true;
+                    self.receiving.insert(&bytes)?;
+                }
+                ReceiveEvent::Datagram(Err(_)) => self.receiving.datagrams_closed = true,
+                ReceiveEvent::UniStream(Ok(mut stream)) => {
+                    self.receiving.ordered = true;
+                    // wire bodies carry their own length checks, the stream end bounds the read
+                    self.receiving
+                        .reads
+                        .spawn(async move { stream.read_to_end(usize::MAX).await });
+                }
+                ReceiveEvent::UniStream(Err(_)) => self.receiving.uni_closed = true,
+                ReceiveEvent::UniRead(read) => self.receiving.insert_read(read)?,
+                ReceiveEvent::Stream(Ok(Some(packet))) => return Ok(Some(packet)),
+                ReceiveEvent::Stream(Ok(None)) => {
+                    self.receiving.stream_done = true;
+                    if !self.receiving.ordered {
+                        return Ok(None);
+                    }
+                }
+                ReceiveEvent::Stream(Err(error)) => return Err(error),
+                ReceiveEvent::Deadline => {}
+            }
+        }
+    }
+
+    async fn next_event(&mut self, deadline: Option<Instant>) -> ReceiveEvent {
+        let Self {
+            session,
+            rx,
+            reader,
+            receiving,
+            ..
+        } = self;
+        let ReceiveOrdering {
+            reads,
+            stream_done,
+            datagrams_closed,
+            uni_closed,
+            ..
+        } = receiving;
+        let wake_at = deadline.unwrap_or_else(Instant::now);
+        tokio::select! {
+            // Datagrams first: a stream keeps whatever it buffered until it is
+            // read, while an undrained datagram queue loses frames.
+            biased;
+            datagram = session.read_datagram(), if !*datagrams_closed => ReceiveEvent::Datagram(datagram),
+            Some(read) = reads.join_next(), if !reads.is_empty() => ReceiveEvent::UniRead(read),
+            stream = session.accept_uni(), if !*uni_closed => ReceiveEvent::UniStream(stream),
+            framed = reader.recv(rx), if !*stream_done => ReceiveEvent::Stream(framed),
+            () = tokio::time::sleep_until(wake_at), if deadline.is_some() => ReceiveEvent::Deadline,
         }
     }
 
     /// Half-close: finish our send direction and wait (bounded) for the peer to
-    /// acknowledge the data, so the far side reads the stream to its end.
+    /// acknowledge the data, so the far side reads every stream to its end.
     pub(crate) async fn finish(&mut self) {
         let _ = self.tx.finish();
-        let _ = tokio::time::timeout(FLUSH_TIMEOUT, self.tx.stopped()).await;
+        let unacknowledged = core::mem::take(&mut self.sending.unacknowledged);
+        let tx = &self.tx;
+        let session = &self.session;
+        let ordered = self.sending.mode != VideoMode::Stream;
+        let acknowledged = async {
+            let _ = tx.stopped().await;
+            for entry in &unacknowledged {
+                let _ = entry.stream.stopped().await;
+            }
+            if ordered {
+                // quinn fails reads of acknowledged but unread stream data once the connection closes
+                session.closed().await;
+            }
+        };
+        let _ = tokio::time::timeout(FLUSH_TIMEOUT, acknowledged).await;
         self.session.close(0, b"eos");
     }
 }
 
-/// Open the sender's single bidirectional stream on `session`. `datagrams` puts
-/// data frames on the datagram carrier (see the module docs).
+fn frame_period(caps: &Caps) -> Option<Duration> {
+    let Rate::Fixed(q16) = caps.framerate() else {
+        return None;
+    };
+    framerate_q16_period_ns(q16).map(Duration::from_nanos)
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct VideoSettings {
+    pub(crate) mode: VideoMode,
+    pub(crate) stall_timeout: Option<Duration>,
+    pub(crate) missing_frame_timeout: Option<Duration>,
+}
+
+/// Open the sender's bidirectional stream on `session`.
 pub(crate) async fn open_stream(
     session: Session,
-    datagrams: bool,
+    settings: VideoSettings,
     data_channel: Option<&SharedDataChannel>,
 ) -> Result<WtStream, G2gError> {
     // `Session::max_datagram_size` panics on a peer that refused datagram
     // support, so the configured mode is checked once here rather than per frame.
-    if datagrams && Connection::max_datagram_size(&session).is_none() {
+    if settings.mode == VideoMode::Datagrams && Connection::max_datagram_size(&session).is_none() {
         return Err(G2gError::NotConfigured);
     }
     let pump = data_channel.map(|channel| accept_data_channel(&session, channel.clone()));
     let (tx, rx) = session.open_bi().await.map_err(wt_err)?;
-    Ok(WtStream::new(session, tx, rx, datagrams, pump))
+    Ok(WtStream::new(session, tx, rx, settings, pump))
 }
 
 pub(crate) type SharedDataChannel = Arc<tokio::sync::Mutex<DataChannelTransportEnds>>;

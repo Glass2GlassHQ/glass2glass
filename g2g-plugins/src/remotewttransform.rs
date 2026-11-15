@@ -14,8 +14,8 @@
 //! file supplies only the WebTransport transport's transform role. The transport
 //! itself is the sink's [`WtClient`](crate::remotewtsink::WtClient).
 //!
-//! The sink's `datagrams` carrier is deliberately not offered here: the round
-//! trip pairs one reply with each request, so a dropped request would leave the
+//! The sink's `video-mode` is deliberately not offered here: the round trip
+//! pairs one reply with each request, so a dropped request would leave the
 //! stage waiting for a reply that is never sent. `congestion-control` is offered,
 //! it is a property of the connection rather than of the framing.
 

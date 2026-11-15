@@ -31,14 +31,14 @@ Highest leverage first:
 The plan is [remote.md](remote.md).
 
 - `ximagesrc` for unattended X11 capture, and window capture.
-- QUIC transport in `remotewt`: stream-per-frame and Reed-Solomon datagram
-  video, keyframe requests.
+- Reed-Solomon repair for `remotewt` datagram video, so a frame larger than
+  one datagram is split into shards instead of going on a stream.
 - WebSocket fallback on `wss://` in `remotewt` when UDP is blocked.
 - The Windows client, then a D3D11-to-CUDA element after `d3d11convert` for
   `nvenc`.
 - `display-index` on `screencapturesrc`, and a macOS host through `vtencode`.
 - Cursor from the Wayland portal host and on the Windows client, clipboard,
-  grab, and `force-keyframe` on `vtencode`.
+  and grab.
 - Gamepad injection on Linux and Windows, and a Windows service that injects
   on the secure desktop.
 - A Chrome client on the same signaling and the same data channel.

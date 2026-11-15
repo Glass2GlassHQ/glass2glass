@@ -24,17 +24,20 @@
 //! (`serverCertificateHashes`) requires the certificate be ECDSA P-256 and valid
 //! for at most 14 days, a peer-side constraint this element does not police.
 //!
-//! There is no receive-side carrier switch: a sender running the `datagrams`
-//! carrier of [`RemoteWtSink`](crate::remotewtsink) puts its data frames in QUIC
-//! datagrams and its control packets on the stream, and this source takes packets
-//! from both, so the two sides cannot be configured out of step. Drops are the
-//! sender's chosen trade there and simply leave gaps.
+//! There is no receive-side carrier switch: whichever `video-mode` the
+//! [`RemoteWtSink`](crate::remotewtsink) runs, this source takes its packets and
+//! restores send order, so the two sides cannot be configured out of step. A
+//! datagram frame still missing after `frame-timeout` is skipped, with the
+//! frames after it up to the next keyframe, and the sender is asked for a
+//! keyframe. A keyframe request from downstream, a decoder that lost its
+//! reference, goes to the sender the same way.
 //!
 //! The shared server machinery lives in [`RemoteSource`](crate::remotesource);
 //! this file supplies only the WebTransport transport (`WtTransport`).
 
 use alloc::boxed::Box;
 use alloc::string::{String, ToString};
+use core::time::Duration;
 
 use std::net::{SocketAddr, TcpListener as StdTcpListener};
 use std::sync::Arc;
@@ -49,10 +52,11 @@ use g2g_core::{Caps, PipelinePacket, PropError, PropKind, PropValue, PropertySpe
 use crate::datachannel::{data_channel, DataChannelEnds};
 use crate::remotesource::{leading_caps, PacketTransport, RemoteSource, TransportFuture};
 use crate::remotewtio::{
-    self, load_certificate, set_congestion, wt_err, QuicMode, SharedDataChannel, WtStream,
-    CERTIFICATE_PROP, CONGESTION_PROP, PRIVATE_KEY_PROP,
+    self, load_certificate, set_congestion, wt_err, QuicMode, SharedDataChannel, VideoSettings,
+    WtStream, CERTIFICATE_PROP, CONGESTION_PROP, PRIVATE_KEY_PROP,
 };
 use crate::remotewtsink::CERT_HASHES_PROP;
+use crate::remotewtvideo::VideoMode;
 
 /// WebTransport `RemoteWtSrc`: a length-framed [`g2g_core::wire`] stream over one
 /// bidirectional WebTransport stream, from a [`RemoteWtSink`](crate::remotewtsink)
@@ -108,6 +112,7 @@ pub struct WtTransport {
     key: String,
     /// The `congestion-control` nick applied to accepted connections.
     congestion: String,
+    frame_timeout_ms: u64,
     data_channel: Option<SharedDataChannel>,
     listened: bool,
 }
@@ -121,6 +126,7 @@ impl Default for WtTransport {
             cert: String::new(),
             key: String::new(),
             congestion: "default".to_string(),
+            frame_timeout_ms: 0,
             data_channel: None,
             listened: false,
         }
@@ -130,6 +136,7 @@ impl Default for WtTransport {
 #[derive(Debug)]
 pub struct WtListener {
     kind: ListenerKind,
+    frame_timeout_ms: u64,
     data_channel: Option<SharedDataChannel>,
 }
 
@@ -184,6 +191,12 @@ impl PacketTransport for WtTransport {
             "in caller mode, the sender's URL: https:// for WebTransport or quic:// for raw QUIC",
         ),
         CERT_HASHES_PROP,
+        PropertySpec::new(
+            "frame-timeout",
+            PropKind::Uint,
+            "milliseconds a missing datagram frame is waited for before it is skipped and a keyframe requested (0 = one frame period of the caps)",
+        )
+        .with_default("0"),
     ];
 
     fn listen(
@@ -209,6 +222,7 @@ impl PacketTransport for WtTransport {
             };
             Ok(WtListener {
                 kind,
+                frame_timeout_ms: self.frame_timeout_ms,
                 data_channel: self.data_channel.clone(),
             })
         })
@@ -240,7 +254,13 @@ impl PacketTransport for WtTransport {
             let (tx, rx) = session.accept_bi().await.map_err(wt_err)?;
             // Receiving is mode-free: `WtStream::recv` takes packets off the
             // stream or the datagram flow, whichever the sender used.
-            let mut conn = WtStream::new(session, tx, rx, false, pump);
+            let settings = VideoSettings {
+                mode: VideoMode::Stream,
+                stall_timeout: None,
+                missing_frame_timeout: (listener.frame_timeout_ms != 0)
+                    .then(|| Duration::from_millis(listener.frame_timeout_ms)),
+            };
+            let mut conn = WtStream::new(session, tx, rx, settings, pump);
             let caps = leading_caps(conn.recv().await?)?;
             Ok((conn, caps))
         })
@@ -248,6 +268,10 @@ impl PacketTransport for WtTransport {
 
     fn recv(conn: &mut Self::Conn) -> TransportFuture<'_, Option<PipelinePacket>> {
         Box::pin(async move { conn.recv().await })
+    }
+
+    fn request_keyframe(conn: &mut Self::Conn) -> TransportFuture<'_, ()> {
+        Box::pin(async move { conn.request_keyframe().await })
     }
 
     fn set_transport_prop(
@@ -258,6 +282,15 @@ impl PacketTransport for WtTransport {
         match name {
             "congestion-control" => return Some(set_congestion(&mut self.congestion, value)),
             "mode" => return Some(remotewtio::set_mode(&mut self.mode, value)),
+            "frame-timeout" => {
+                return Some(match value.as_uint() {
+                    Some(milliseconds) => {
+                        self.frame_timeout_ms = milliseconds;
+                        Ok(())
+                    }
+                    None => Err(PropError::Type),
+                })
+            }
             _ => {}
         }
         let target = match name {
@@ -282,6 +315,7 @@ impl PacketTransport for WtTransport {
             "private-key" => Some(PropValue::Str(self.key.clone())),
             "congestion-control" => Some(PropValue::Str(self.congestion.clone())),
             "mode" => Some(PropValue::Str(self.mode.name().to_string())),
+            "frame-timeout" => Some(PropValue::Uint(self.frame_timeout_ms)),
             "location" => Some(PropValue::Str(self.location.clone())),
             "server-certificate-hashes" => Some(PropValue::Str(self.cert_hashes.clone())),
             _ => None,
