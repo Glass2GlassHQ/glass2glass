@@ -52,8 +52,6 @@ use std::sync::Arc;
 
 use tokio::sync::Mutex;
 
-use web_transport_quinn::quinn::Endpoint;
-
 use g2g_core::{
     AsyncElement, G2gError, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
 };
@@ -62,9 +60,11 @@ use crate::datachannel::{data_channel, DataChannelEnds};
 use crate::remoteclient::{PacketClient, RemoteClient};
 use crate::remotesource::TransportFuture;
 use crate::remotewtio::{
-    self, QuicMode, SelfSignedCertificate, SharedDataChannel, VideoSettings, WtStream,
+    self, Connected, Listeners, QuicMode, SelfSignedCertificate, SharedDataChannel, VideoSettings,
+    WtStream,
 };
 use crate::remotewtvideo::{set_video_mode, VideoMode};
+use crate::remotewtws::WsLink;
 
 /// WebTransport `RemoteWtSink`: a length-framed [`g2g_core::wire`] stream over one
 /// bidirectional WebTransport stream, received by
@@ -108,10 +108,7 @@ impl RemoteWtSink {
     }
 
     pub fn listen(&mut self) -> Result<SocketAddr, G2gError> {
-        self.transport_mut()
-            .listener_endpoint()?
-            .local_addr()
-            .map_err(remotewtio::wt_err)
+        self.transport_mut().listeners()?.local_addr()
     }
 
     pub fn open_data_channel(&mut self) -> DataChannelEnds {
@@ -142,7 +139,7 @@ pub struct WtClient {
     cert: String,
     key: String,
     self_signed: Option<SelfSignedCertificate>,
-    endpoint: Option<Endpoint>,
+    listeners: Option<Listeners>,
     video_mode: VideoMode,
     frame_timeout_ms: u64,
     send_window: u64,
@@ -162,7 +159,7 @@ impl WtClient {
             cert: String::new(),
             key: String::new(),
             self_signed: None,
-            endpoint: None,
+            listeners: None,
             video_mode: VideoMode::Stream,
             frame_timeout_ms: DEFAULT_FRAME_TIMEOUT_MS,
             send_window: QUINN_SEND_WINDOW,
@@ -172,8 +169,8 @@ impl WtClient {
     }
 
     /// The live session stream, for the transform's reply read.
-    fn listener_endpoint(&mut self) -> Result<&Endpoint, G2gError> {
-        if self.endpoint.is_none() {
+    fn listeners(&mut self) -> Result<&Listeners, G2gError> {
+        if self.listeners.is_none() {
             let (chain, key) = match &self.self_signed {
                 Some(certificate) => remotewtio::parse_certificate(
                     certificate.certificate_pem.as_bytes(),
@@ -182,9 +179,14 @@ impl WtClient {
                 None => remotewtio::load_certificate(&self.cert, &self.key)?,
             };
             let bind = remotewtio::bind_address(&self.url)?;
-            self.endpoint = Some(remotewtio::listen(bind, chain, key, &self.congestion)?);
+            self.listeners = Some(remotewtio::listen_with_fallback(
+                bind,
+                chain,
+                key,
+                &self.congestion,
+            )?);
         }
-        self.endpoint.as_ref().ok_or(G2gError::NotConfigured)
+        self.listeners.as_ref().ok_or(G2gError::NotConfigured)
     }
 
     pub(crate) fn stream_mut(&mut self) -> Option<&mut WtStream> {
@@ -324,11 +326,19 @@ impl PacketClient for WtClient {
 
     fn connect(&mut self) -> TransportFuture<'_, ()> {
         Box::pin(async move {
-            let session = match self.mode {
-                QuicMode::Caller => {
-                    remotewtio::dial(&self.url, &self.cert_hashes, &[], &self.congestion).await?
+            let connected = match self.mode {
+                QuicMode::Caller => Connected::Quic(Box::new(
+                    remotewtio::dial(&self.url, &self.cert_hashes, &[], &self.congestion).await?,
+                )),
+                QuicMode::Listener => remotewtio::accept_either(self.listeners()?).await?,
+            };
+            let session = match connected {
+                Connected::Quic(session) => *session,
+                Connected::WebSocket(websocket) => {
+                    let link = WsLink::new(*websocket, self.data_channel.as_ref()).await;
+                    self.stream = Some(WtStream::WebSocket(link));
+                    return Ok(());
                 }
-                QuicMode::Listener => remotewtio::accept(self.listener_endpoint()?).await?,
             };
             session.set_send_window(self.send_window);
             let settings = VideoSettings {
@@ -337,8 +347,9 @@ impl PacketClient for WtClient {
                     .then(|| Duration::from_millis(self.frame_timeout_ms)),
                 missing_frame_timeout: None,
             };
-            self.stream =
-                Some(remotewtio::open_stream(session, settings, self.data_channel.as_ref()).await?);
+            let stream =
+                remotewtio::open_stream(session, settings, self.data_channel.as_ref()).await?;
+            self.stream = Some(WtStream::Quic(Box::new(stream)));
             Ok(())
         })
     }

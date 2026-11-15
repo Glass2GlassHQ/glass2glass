@@ -53,11 +53,13 @@ use g2g_core::{Caps, PipelinePacket, PropError, PropKind, PropValue, PropertySpe
 use crate::datachannel::{data_channel, DataChannelEnds};
 use crate::remotesource::{leading_caps, PacketTransport, RemoteSource, TransportFuture};
 use crate::remotewtio::{
-    self, load_certificate, set_congestion, wt_err, QuicMode, SharedDataChannel, VideoSettings,
-    WtStream, CERTIFICATE_PROP, CONGESTION_PROP, PRIVATE_KEY_PROP,
+    self, load_certificate, set_congestion, wt_err, Connected, QuicMode, QuicStream,
+    SharedDataChannel, VideoSettings, WtStream, CERTIFICATE_PROP, CONGESTION_PROP,
+    PRIVATE_KEY_PROP,
 };
 use crate::remotewtsink::CERT_HASHES_PROP;
 use crate::remotewtvideo::VideoMode;
+use crate::remotewtws::WsLink;
 
 /// WebTransport `RemoteWtSrc`: a length-framed [`g2g_core::wire`] stream over one
 /// bidirectional WebTransport stream, from a [`RemoteWtSink`](crate::remotewtsink)
@@ -80,6 +82,16 @@ impl RemoteWtSrc {
             PropValue::Str(hashes.into()),
         )
         .expect("server-certificate-hashes is a string");
+        self
+    }
+
+    pub fn with_fallback_location(mut self, location: impl Into<String>) -> Self {
+        SourceLoop::set_property(
+            &mut self,
+            "fallback-location",
+            PropValue::Str(location.into()),
+        )
+        .expect("fallback-location is a string");
         self
     }
 
@@ -108,6 +120,7 @@ impl RemoteWtSrc {
 pub struct WtTransport {
     mode: QuicMode,
     location: String,
+    fallback_location: String,
     cert_hashes: String,
     cert: String,
     key: String,
@@ -123,6 +136,7 @@ impl Default for WtTransport {
         Self {
             mode: QuicMode::Listener,
             location: String::new(),
+            fallback_location: String::new(),
             cert_hashes: String::new(),
             cert: String::new(),
             key: String::new(),
@@ -146,6 +160,7 @@ enum ListenerKind {
     Bound(Endpoint),
     Caller {
         location: String,
+        fallback_location: String,
         cert_hashes: String,
         congestion: String,
     },
@@ -189,7 +204,12 @@ impl PacketTransport for WtTransport {
         PropertySpec::new(
             "location",
             PropKind::Str,
-            "in caller mode, the sender's URL: https:// for WebTransport or quic:// for raw QUIC",
+            "in caller mode, the sender's URL: https:// for WebTransport, quic:// for raw QUIC, or wss:// for WebSocket over TLS",
+        ),
+        PropertySpec::new(
+            "fallback-location",
+            PropKind::Str,
+            "in caller mode, a wss:// URL dialed when location has not connected after one second, for networks that block UDP",
         ),
         CERT_HASHES_PROP,
         PropertySpec::new(
@@ -213,6 +233,7 @@ impl PacketTransport for WtTransport {
             let kind = match self.mode {
                 QuicMode::Caller => ListenerKind::Caller {
                     location: self.location.clone(),
+                    fallback_location: self.fallback_location.clone(),
                     cert_hashes: self.cert_hashes.clone(),
                     congestion: self.congestion.clone(),
                 },
@@ -238,13 +259,33 @@ impl PacketTransport for WtTransport {
 
     fn accept(listener: &mut Self::Listener) -> TransportFuture<'_, (Self::Conn, Caps)> {
         Box::pin(async move {
-            let session = match &listener.kind {
-                ListenerKind::Bound(endpoint) => remotewtio::accept(endpoint).await?,
+            let connected = match &listener.kind {
+                ListenerKind::Bound(endpoint) => {
+                    Connected::Quic(Box::new(remotewtio::accept(endpoint).await?))
+                }
                 ListenerKind::Caller {
                     location,
+                    fallback_location,
                     cert_hashes,
                     congestion,
-                } => remotewtio::dial(location, cert_hashes, &[], congestion).await?,
+                } => {
+                    remotewtio::dial_with_fallback(
+                        location,
+                        fallback_location,
+                        cert_hashes,
+                        congestion,
+                    )
+                    .await?
+                }
+            };
+            let session = match connected {
+                Connected::Quic(session) => *session,
+                Connected::WebSocket(websocket) => {
+                    let link = WsLink::new(*websocket, listener.data_channel.as_ref()).await;
+                    let mut conn = WtStream::WebSocket(link);
+                    let caps = leading_caps(conn.recv().await?)?;
+                    return Ok((conn, caps));
+                }
             };
             let pump = listener
                 .data_channel
@@ -261,7 +302,8 @@ impl PacketTransport for WtTransport {
                 missing_frame_timeout: (listener.frame_timeout_ms != 0)
                     .then(|| Duration::from_millis(listener.frame_timeout_ms)),
             };
-            let mut conn = WtStream::new(session, tx, rx, settings, pump);
+            let mut conn =
+                WtStream::Quic(Box::new(QuicStream::new(session, tx, rx, settings, pump)));
             let caps = leading_caps(conn.recv().await?)?;
             Ok((conn, caps))
         })
@@ -302,6 +344,7 @@ impl PacketTransport for WtTransport {
             "certificate" => &mut self.cert,
             "private-key" => &mut self.key,
             "location" => &mut self.location,
+            "fallback-location" => &mut self.fallback_location,
             "server-certificate-hashes" => &mut self.cert_hashes,
             _ => return None,
         };
@@ -322,6 +365,7 @@ impl PacketTransport for WtTransport {
             "mode" => Some(PropValue::Str(self.mode.name().to_string())),
             "frame-timeout" => Some(PropValue::Uint(self.frame_timeout_ms)),
             "location" => Some(PropValue::Str(self.location.clone())),
+            "fallback-location" => Some(PropValue::Str(self.fallback_location.clone())),
             "server-certificate-hashes" => Some(PropValue::Str(self.cert_hashes.clone())),
             _ => None,
         }

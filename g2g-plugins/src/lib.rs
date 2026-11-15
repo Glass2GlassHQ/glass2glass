@@ -1358,6 +1358,8 @@ pub mod remotewtsrc;
 pub mod remotewttransform;
 #[cfg(feature = "webtransport")]
 pub mod remotewtvideo;
+#[cfg(feature = "webtransport")]
+mod remotewtws;
 
 // Native IETF MoQ Transport draft-16 (M902 / M903): the wire codec plus the
 // session driver over the M901 carrier, the `moqtsink` publisher that maps a

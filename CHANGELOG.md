@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2330: `remotewt` falls back to a WebSocket over TLS on the same port when UDP is blocked, and `g2g-desktop client` takes `--transport`.
 - M2329: `remotewt` datagram video splits frames into Reed-Solomon shards with repair sized to the measured path loss.
 - M2328: Sources can change their reported latency mid-run, `videotestsrc`, `audiotestsrc` and `shmsrc` gain `is-live`, and the MoQ, ST 2110, browser, wire-stage and live HLS / DASH sources report live.
 - M2327: Remote, local IPC, SRT, RTMP, RTSP ingest and the Android, Apple, Windows and web capture sources report themselves live, and remote receivers move the sender's timestamps onto the local clock.

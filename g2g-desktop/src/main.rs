@@ -16,7 +16,7 @@ use g2g_core::runtime::{GraphNodeRef, VisitRecorder};
 #[cfg(target_os = "linux")]
 use g2g_core::G2gError;
 #[cfg(target_os = "linux")]
-use g2g_desktop::client::{run_client, ClientError, ClientSettings};
+use g2g_desktop::client::{run_client, ClientError, ClientSettings, ClientTransport};
 use g2g_desktop::host::{
     check_token_len, inject, run_session, HostCapture, HostListener, HostSettings,
 };
@@ -41,7 +41,7 @@ const HOST_USAGE: &str =
 #[cfg(target_os = "linux")]
 const PLATFORM_USAGE: &str =
     "  g2g-desktop client --host HOST --cert-hash SHA256 --token TOKEN [--port 8080] [--inputs true]
-                     [--trace FILE]";
+                     [--transport auto|quic|websocket] [--trace FILE]";
 #[cfg(target_os = "windows")]
 const PLATFORM_USAGE: &str = "                   [--monitor-index -1] [--quality-vs-speed 0-100]";
 const DEFAULT_PORT: u16 = 8080;
@@ -63,7 +63,15 @@ const PLATFORM_HOST_FLAGS: [&str; 2] = ["monitor-index", "quality-vs-speed"];
 #[cfg(target_os = "windows")]
 const PRIMARY_MONITOR: i32 = -1;
 #[cfg(target_os = "linux")]
-const CLIENT_FLAGS: [&str; 6] = ["host", "port", "cert-hash", "token", "inputs", "trace"];
+const CLIENT_FLAGS: [&str; 7] = [
+    "host",
+    "port",
+    "cert-hash",
+    "token",
+    "inputs",
+    "transport",
+    "trace",
+];
 
 type Flags = BTreeMap<String, String>;
 
@@ -220,7 +228,7 @@ async fn host(flags: Flags) -> Result<(), Box<dyn Error>> {
     let certificate = generate_certificate()?;
     let address = SocketAddr::from((Ipv4Addr::UNSPECIFIED, port));
     eprintln!(
-        "g2g-desktop host: listening on UDP port {port}, certificate sha256 {}",
+        "g2g-desktop host: listening on UDP and TCP port {port}, certificate sha256 {}",
         certificate.sha256_hex
     );
     loop {
@@ -237,13 +245,19 @@ async fn client(flags: Flags) -> Result<(), Box<dyn Error>> {
         token: required(&flags, "token")?,
         cert_hash: required(&flags, "cert-hash")?,
         inputs: parsed(&flags, "inputs", true)?,
+        transport: match flags.get("transport").map(String::as_str) {
+            None | Some("auto") => ClientTransport::Auto,
+            Some("quic") => ClientTransport::Quic,
+            Some("websocket") => ClientTransport::WebSocket,
+            Some(other) => return Err(format!("unknown --transport {other}").into()),
+        },
     };
     let trace = open_trace(flags.get("trace").map(Path::new))?;
-    let location = format!("quic://{host}:{port}");
     let observer = Observer::new();
     let session = tokio::select! {
         session = run_client(
-            &location,
+            &host,
+            port,
             &settings,
             trace.clone().map(|trace| trace as Arc<dyn VisitRecorder>),
             &observer,

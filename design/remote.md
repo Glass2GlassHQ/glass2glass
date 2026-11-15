@@ -110,23 +110,12 @@ LAN, and a host off the LAN needs a forwarded UDP port.
 
 ## WebSocket fallback
 
-- `remotewtsink mode=listener` binds TCP beside UDP on the same port number,
-  with the same certificate. `remotewtsrc` takes `fallback-location=wss://...`
-  and dials it when `quic://` has not connected after 1 s.
-- One WebSocket connection carries video and the message channel. Each binary
-  message is one wire packet with a one-byte tag naming video or the message
-  channel. Input runs client to host, opposite to video, so it does not queue
-  behind a frame.
-- There is no datagram mode on WebSocket. `video-mode=datagrams` sends one
-  message per frame there.
-- The socket sets `TCP_NODELAY`. The host keeps at most one frame queued: a
-  delta frame that arrives while the previous frame is still being written is
-  dropped, and the encoder gets `force-keyframe` once the socket drains.
-  Without the drop, delay on a congested link grows instead of frames dropping.
-- The native client pins the certificate by SHA-256 on the TLS layer, as on
-  raw QUIC. A browser WebSocket accepts no pinned hash, so the Chrome page's
-  fallback needs a CA-signed certificate or plain `ws://` on a LAN.
-- `g2g-desktop client --transport auto|quic|websocket`, default `auto`.
+`remotewtsink mode=listener` accepts a WebSocket over TLS on the same port
+number when UDP is blocked, and `g2g-desktop client` dials it when QUIC has not
+connected after 1 s. The carrier is described under the `remotewt` elements in
+[transports.md](transports.md). A browser WebSocket accepts no pinned hash, so
+the Chrome page's fallback needs a CA-signed certificate or plain `ws://` on a
+LAN.
 
 ## Host graphs
 
@@ -273,7 +262,7 @@ Host flags, all of them real properties the process applies:
 
 | flag | meaning | default |
 | :--- | :--- | :--- |
-| `--port` | UDP port for QUIC and WebTransport | 8080 |
+| `--port` | UDP port for QUIC and WebTransport, TCP port for the WebSocket fallback | 8080 |
 | `--token` | bearer token | required |
 | `--monitor-index` | which monitor to capture, Windows | -1 |
 | `--fps` | capture rate | 60 |
@@ -287,7 +276,8 @@ Client flags:
 | flag | meaning | default |
 | :--- | :--- | :--- |
 | `--host` | host address | required |
-| `--port` | host UDP port | 8080 |
+| `--port` | host UDP and TCP port | 8080 |
+| `--transport` | `auto` (QUIC, then `wss://` after 1 s), `quic` or `websocket` | `auto` |
 | `--cert-hash` | SHA-256 of the host certificate | required |
 | `--token` | bearer token | required |
 | `--software-decode` | force `ffmpegdec` | false |
@@ -295,7 +285,6 @@ Client flags:
 | `--inputs` | send input | true |
 | `--clipboard` | sync clipboard | true |
 | `--keyboard-grab` | grab on focus | true |
-| `--transport` | `auto` (QUIC, then WebSocket), `quic` or `websocket` | `auto` |
 
 A URL `g2g://host:port/?token=...` parses onto those flags. The query keys
 match the flag names with underscores. Unknown keys are an error and the

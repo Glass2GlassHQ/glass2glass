@@ -42,6 +42,14 @@ pub struct ClientSettings {
     pub token: String,
     pub cert_hash: String,
     pub inputs: bool,
+    pub transport: ClientTransport,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClientTransport {
+    Auto,
+    Quic,
+    WebSocket,
 }
 
 #[derive(Debug)]
@@ -199,14 +207,24 @@ fn client_graph(
 }
 
 pub async fn run_client(
-    location: &str,
+    host: &str,
+    port: u16,
     settings: &ClientSettings,
     trace: Option<Arc<dyn VisitRecorder>>,
     observer: &Observer,
 ) -> Result<RunStats, ClientError> {
     // a caller-mode source binds nothing, the address is unused
     let unbound = SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0));
-    let mut source = RemoteWtSrc::new(unbound).with_caller(location, settings.cert_hash.as_str());
+    let quic = format!("quic://{host}:{port}");
+    let websocket = format!("wss://{host}:{port}");
+    let hash = settings.cert_hash.as_str();
+    let mut source = match settings.transport {
+        ClientTransport::Auto => RemoteWtSrc::new(unbound)
+            .with_caller(quic, hash)
+            .with_fallback_location(websocket),
+        ClientTransport::Quic => RemoteWtSrc::new(unbound).with_caller(quic, hash),
+        ClientTransport::WebSocket => RemoteWtSrc::new(unbound).with_caller(websocket, hash),
+    };
     let data_channel = source.open_data_channel();
     data_channel
         .outgoing

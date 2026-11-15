@@ -32,12 +32,16 @@ The plan is [remote.md](remote.md).
 
 - `ximagesrc` for unattended X11 capture, and window capture.
 - VA-API encode on the Linux host through `ffmpegenc`.
+- Reuse the portal restore token on the Linux host, so a restarted host does
+  not ask for the screen again.
+- Run the Linux host on a real Wayland desktop: the portal dialog, the uinput
+  permission, and the client window.
 - Opus audio from the host's default capture device, on a short queue that
   does not hold the picture.
-- WebSocket fallback on `wss://` in `remotewt` when UDP is blocked.
 - The Windows client, then a D3D11-to-CUDA element after `d3d11convert` for
   `nvenc`.
-- `display-index` on `screencapturesrc`, and a macOS host through `vtencode`.
+- The macOS client, then `display-index` on `screencapturesrc` and a macOS
+  host through `vtencode`.
 - Cursor from the Wayland portal host and on the Windows client, clipboard,
   and grab.
 - Gamepad injection on Linux and Windows, and a Windows service that injects

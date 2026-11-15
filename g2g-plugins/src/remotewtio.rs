@@ -18,13 +18,14 @@
 //! data frame into Reed-Solomon shards, one QUIC datagram each, plus repair shards
 //! sized to the path's loss, and sends anything else as a unidirectional stream.
 //! Each packet carries a [`PacketOrder`], from which the receiver restores send order and skips frames that will not arrive. Receiving
-//! is mode-free, [`WtStream::recv`] takes packets from whichever the peer used.
+//! is mode-free, [`QuicStream::recv`] takes packets from whichever the peer used.
 //! The receiver writes keyframe requests on its half of the bidirectional stream.
 //!
 //! A data channel (`open_data_channel` on the sink and source) is a second
 //! bidirectional stream carrying length-framed byte messages, opened by the
 //! source and accepted by the sink.
 
+use alloc::boxed::Box;
 use alloc::collections::VecDeque;
 use alloc::string::{String, ToString};
 use alloc::vec;
@@ -71,6 +72,7 @@ use crate::datachannel::{DataChannelTransportEnds, MAX_MESSAGE_SIZE};
 use crate::remotewire::{send_frame_bytes, send_framed, FramedRead};
 use crate::remotewtfec::{shard_frame, PathCounts, PathLoss, ShardAssembly};
 use crate::remotewtvideo::{NextPacket, PacketOrder, PacketReorder, VideoMode, KEYFRAME_REQUEST};
+use crate::remotewtws::{TlsWebSocket, WsLink, WEBSOCKET_SCHEME};
 use crate::textencoding::{hex_decode, hex_encode};
 
 /// Any WebTransport / QUIC / TLS failure ends the session.
@@ -84,13 +86,62 @@ pub(crate) fn wt_err<E>(_: E) -> G2gError {
 /// reading cannot wedge the pipeline.
 const FLUSH_TIMEOUT: Duration = Duration::from_millis(500);
 
+#[derive(Debug)]
+pub enum WtStream {
+    Quic(Box<QuicStream>),
+    WebSocket(WsLink),
+}
+
+impl WtStream {
+    pub(crate) async fn send(&mut self, packet: &PipelinePacket) -> Result<(), G2gError> {
+        match self {
+            WtStream::Quic(stream) => stream.send(packet).await,
+            WtStream::WebSocket(link) => link.send(packet).await,
+        }
+    }
+
+    pub(crate) fn take_keyframe_request(&mut self) -> bool {
+        match self {
+            WtStream::Quic(stream) => stream.take_keyframe_request(),
+            WtStream::WebSocket(link) => link.take_keyframe_request(),
+        }
+    }
+
+    pub(crate) async fn request_keyframe(&mut self) -> Result<(), G2gError> {
+        match self {
+            WtStream::Quic(stream) => stream.request_keyframe().await,
+            WtStream::WebSocket(link) => link.request_keyframe(),
+        }
+    }
+
+    pub(crate) fn latency(&self) -> LatencyReport {
+        match self {
+            WtStream::Quic(stream) => stream.latency(),
+            WtStream::WebSocket(_) => LatencyReport::live(0, None),
+        }
+    }
+
+    pub(crate) async fn recv(&mut self) -> Result<Option<PipelinePacket>, G2gError> {
+        match self {
+            WtStream::Quic(stream) => stream.recv().await,
+            WtStream::WebSocket(link) => link.recv().await,
+        }
+    }
+
+    pub(crate) async fn finish(&mut self) {
+        match self {
+            WtStream::Quic(stream) => stream.finish().await,
+            WtStream::WebSocket(link) => link.finish(FLUSH_TIMEOUT).await,
+        }
+    }
+}
+
 /// A WebTransport session plus the one bidirectional stream carrying the wire
 /// codec. The session is held alongside the stream because dropping it closes the
 /// QUIC connection underneath, and because the datagram and stream-per-frame
-/// carriers send and read on it. Opaque: it is the `RemoteWtSrc` connection type,
-/// so it has to be nameable, but nothing outside the crate operates on it.
+/// carriers send and read on it.
 #[derive(Debug)]
-pub struct WtStream {
+pub struct QuicStream {
     session: Session,
     tx: SendStream,
     rx: RecvStream,
@@ -219,7 +270,7 @@ impl ReceiveOrdering {
     }
 }
 
-impl WtStream {
+impl QuicStream {
     pub(crate) fn new(
         session: Session,
         tx: SendStream,
@@ -512,7 +563,7 @@ pub(crate) async fn open_stream(
     session: Session,
     settings: VideoSettings,
     data_channel: Option<&SharedDataChannel>,
-) -> Result<WtStream, G2gError> {
+) -> Result<QuicStream, G2gError> {
     // `Session::max_datagram_size` panics on a peer that refused datagram
     // support, so the configured mode is checked once here rather than per frame.
     if settings.mode == VideoMode::Datagrams && Connection::max_datagram_size(&session).is_none() {
@@ -520,7 +571,7 @@ pub(crate) async fn open_stream(
     }
     let pump = data_channel.map(|channel| accept_data_channel(&session, channel.clone()));
     let (tx, rx) = session.open_bi().await.map_err(wt_err)?;
-    Ok(WtStream::new(session, tx, rx, settings, pump))
+    Ok(QuicStream::new(session, tx, rx, settings, pump))
 }
 
 pub(crate) type SharedDataChannel = Arc<tokio::sync::Mutex<DataChannelTransportEnds>>;
@@ -612,7 +663,7 @@ pub(crate) fn set_mode(target: &mut QuicMode, value: &PropValue) -> Result<(), P
     Ok(())
 }
 
-fn url_host(url: &url::Url) -> Result<&str, G2gError> {
+pub(crate) fn url_host(url: &url::Url) -> Result<&str, G2gError> {
     // url leaves the host of a non-special scheme such as quic:// unparsed, brackets included
     let host = url.host_str().ok_or(G2gError::NotConfigured)?;
     Ok(host.trim_start_matches('[').trim_end_matches(']'))
@@ -708,12 +759,12 @@ impl ServerCertVerifier for PinnedCertificates {
     }
 }
 
-fn raw_client_tls(hashes: Vec<Vec<u8>>) -> Result<rustls::ClientConfig, G2gError> {
+pub(crate) fn client_tls(hashes: Vec<Vec<u8>>) -> Result<rustls::ClientConfig, G2gError> {
     let provider = crypto::default_provider();
     let builder = rustls::ClientConfig::builder_with_provider(provider.clone())
         .with_protocol_versions(&[&rustls::version::TLS13])
         .map_err(wt_err)?;
-    let mut tls = if hashes.is_empty() {
+    let tls = if hashes.is_empty() {
         let mut roots = rustls::RootCertStore::empty();
         for cert in rustls_native_certs::load_native_certs().certs {
             roots.add(cert).map_err(wt_err)?;
@@ -725,7 +776,6 @@ fn raw_client_tls(hashes: Vec<Vec<u8>>) -> Result<rustls::ClientConfig, G2gError
             .with_custom_certificate_verifier(Arc::new(PinnedCertificates { provider, hashes }))
             .with_no_client_auth()
     };
-    tls.alpn_protocols = vec![RAW_QUIC_ALPN.as_bytes().to_vec()];
     Ok(tls)
 }
 
@@ -737,7 +787,8 @@ async fn dial_raw(url: &url::Url, hashes: &str, congestion: &str) -> Result<Sess
         .map_err(wt_err)?
         .next()
         .ok_or(G2gError::Network(NetworkFailure::Stream))?;
-    let tls = raw_client_tls(parse_cert_hashes(hashes)?)?;
+    let mut tls = client_tls(parse_cert_hashes(hashes)?)?;
+    tls.alpn_protocols = vec![RAW_QUIC_ALPN.as_bytes().to_vec()];
     let mut config =
         quinn::ClientConfig::new(Arc::new(QuicClientConfig::try_from(tls).map_err(wt_err)?));
     config.transport_config(transport_config(congestion));
@@ -776,6 +827,118 @@ pub(crate) fn listen(
     ));
     config.transport_config(transport_config(congestion));
     Endpoint::server(config, bind).map_err(wt_err)
+}
+
+#[derive(Debug)]
+pub(crate) struct Listeners {
+    quic: Endpoint,
+    tcp: tokio::net::TcpListener,
+    tls: Arc<rustls::ServerConfig>,
+}
+
+impl Listeners {
+    pub(crate) fn local_addr(&self) -> Result<SocketAddr, G2gError> {
+        self.quic.local_addr().map_err(wt_err)
+    }
+}
+
+// a port the OS picked for UDP can already be taken on TCP
+const SAME_PORT_ATTEMPTS: usize = 8;
+
+pub(crate) fn listen_with_fallback(
+    bind: SocketAddr,
+    chain: Vec<CertificateDer<'static>>,
+    key: PrivateKeyDer<'static>,
+    congestion: &str,
+) -> Result<Listeners, G2gError> {
+    let tls = crate::remotewtws::server_tls(chain.clone(), key.clone_key())?;
+    let attempts = if bind.port() == 0 {
+        SAME_PORT_ATTEMPTS
+    } else {
+        1
+    };
+    let mut last_error = G2gError::NotConfigured;
+    for _ in 0..attempts {
+        let quic = listen(bind, chain.clone(), key.clone_key(), congestion)?;
+        let port = quic.local_addr().map_err(wt_err)?.port();
+        match std::net::TcpListener::bind(SocketAddr::new(bind.ip(), port)) {
+            Ok(tcp) => {
+                tcp.set_nonblocking(true).map_err(wt_err)?;
+                let tcp = tokio::net::TcpListener::from_std(tcp).map_err(wt_err)?;
+                return Ok(Listeners { quic, tcp, tls });
+            }
+            Err(error) => last_error = wt_err(error),
+        }
+    }
+    Err(last_error)
+}
+
+#[derive(Debug)]
+pub(crate) enum Connected {
+    Quic(Box<Session>),
+    WebSocket(Box<TlsWebSocket<tokio::net::TcpStream>>),
+}
+
+pub(crate) async fn accept_either(listeners: &Listeners) -> Result<Connected, G2gError> {
+    loop {
+        tokio::select! {
+            session = accept(&listeners.quic) => return session.map(|session| Connected::Quic(Box::new(session))),
+            websocket = crate::remotewtws::accept(&listeners.tcp, &listeners.tls) => match websocket {
+                Ok(websocket) => return Ok(Connected::WebSocket(Box::new(websocket))),
+                Err(_) => g2g_warn!(
+                    Target::category("remotewt"),
+                    "dropped a TCP connection that did not complete the WebSocket handshake"
+                ),
+            },
+        }
+    }
+}
+
+async fn dial_websocket(
+    url: &url::Url,
+    hashes: &str,
+) -> Result<TlsWebSocket<tokio::net::TcpStream>, G2gError> {
+    if url.scheme() != WEBSOCKET_SCHEME {
+        return Err(G2gError::NotConfigured);
+    }
+    crate::remotewtws::dial(url, client_tls(parse_cert_hashes(hashes)?)?).await
+}
+
+const FALLBACK_DELAY: Duration = Duration::from_secs(1);
+
+pub(crate) async fn dial_with_fallback(
+    location: &str,
+    fallback_location: &str,
+    hashes: &str,
+    congestion: &str,
+) -> Result<Connected, G2gError> {
+    let url = url::Url::parse(location).map_err(wt_err)?;
+    if url.scheme() == WEBSOCKET_SCHEME {
+        return dial_websocket(&url, hashes)
+            .await
+            .map(|websocket| Connected::WebSocket(Box::new(websocket)));
+    }
+    if fallback_location.is_empty() {
+        return dial(location, hashes, &[], congestion)
+            .await
+            .map(|session| Connected::Quic(Box::new(session)));
+    }
+    let fallback = url::Url::parse(fallback_location).map_err(wt_err)?;
+    let mut quic = pin!(dial(location, hashes, &[], congestion));
+    let mut websocket = pin!(async {
+        tokio::time::sleep(FALLBACK_DELAY).await;
+        dial_websocket(&fallback, hashes).await
+    });
+    tokio::select! {
+        session = &mut quic => match session {
+            Ok(session) => Ok(Connected::Quic(Box::new(session))),
+            Err(_) => websocket.await.map(|websocket| Connected::WebSocket(Box::new(websocket))),
+        },
+        websocket_dialed = &mut websocket => match websocket_dialed {
+            Ok(websocket) => Ok(Connected::WebSocket(Box::new(websocket))),
+            Err(_) => quic.await.map(|session| Connected::Quic(Box::new(session))),
+        },
+    }
 }
 
 fn negotiated_alpn(connection: &Connection) -> Option<Vec<u8>> {

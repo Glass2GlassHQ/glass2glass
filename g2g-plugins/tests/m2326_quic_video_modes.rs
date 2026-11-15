@@ -412,6 +412,135 @@ async fn repair_shards_rebuild_frames_the_path_loses_pieces_of() {
 }
 
 #[tokio::test]
+async fn blocked_udp_falls_back_to_websocket() {
+    const FRAMES: u8 = 40;
+    const ASK_AT: u64 = 10;
+    const TO_HOST: &[u8] = b"input for the host";
+    const TO_CLIENT: &[u8] = b"cursor for the client";
+    let Host {
+        mut sink,
+        port,
+        hash,
+    } = host(VideoMode::Stream);
+    let mut host_messages = sink.open_data_channel();
+    let relay = UdpRelay::start(([127, 0, 0, 1], port).into(), 0).await;
+    relay.blackhole.store(true, Ordering::Relaxed);
+    let mut source = client(format!("quic://{}", relay.address), hash);
+    SourceLoop::set_property(
+        &mut source,
+        "fallback-location",
+        PropValue::Str(format!("wss://127.0.0.1:{port}")),
+    )
+    .expect("fallback-location");
+    let mut client_messages = source.open_data_channel();
+    client_messages
+        .outgoing
+        .send(TO_HOST.to_vec())
+        .expect("queue a message for the host");
+    let mut out = RecordingOut {
+        ask_for_keyframe_at: Some(ASK_AT),
+        ..RecordingOut::default()
+    };
+
+    let send = async {
+        sink.connect().await.expect("accept the client");
+        sink.configure_pipeline(&test_caps()).expect("configure");
+        host_messages
+            .outgoing
+            .send(TO_CLIENT.to_vec())
+            .expect("queue a message for the client");
+        let mut encoder = FakeEncoder::new();
+        for _ in 0..FRAMES {
+            encoder.send_next(&mut sink).await;
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+        sink.process(PipelinePacket::Eos, &mut NullOut)
+            .await
+            .expect("eos");
+        let from_client = host_messages.incoming.recv().await;
+        (encoder.keyframe_requests, from_client)
+    };
+    let ((keyframe_requests, from_client), _) = tokio::time::timeout(SESSION_TIMEOUT, async {
+        tokio::join!(send, receive(&mut source, &mut out))
+    })
+    .await
+    .expect("the session finishes in time");
+
+    let sequences: Vec<u64> = out.frames.iter().map(|frame| frame.sequence).collect();
+    assert_eq!(sequences, (0..u64::from(FRAMES)).collect::<Vec<_>>());
+    assert_eq!(out.controls.last(), Some(&"eos"));
+    assert_eq!(
+        keyframe_requests, 1,
+        "the keyframe request crossed the websocket"
+    );
+    assert_eq!(from_client.as_deref(), Some(TO_HOST));
+    assert_eq!(
+        client_messages.incoming.recv().await.as_deref(),
+        Some(TO_CLIENT)
+    );
+    assert_eq!(
+        relay.host_to_client_bytes.load(Ordering::Relaxed),
+        0,
+        "nothing crossed the blocked UDP path"
+    );
+}
+
+#[tokio::test]
+async fn a_slow_websocket_reader_drops_delta_frames_until_a_keyframe() {
+    const FRAMES: u16 = 200;
+    // big enough that a paused reader fills the loopback TCP buffers within the pause
+    const LARGE_FRAME_LEN: usize = 64_000;
+    const READER_PAUSE: Duration = Duration::from_secs(1);
+    let Host {
+        mut sink,
+        port,
+        hash,
+    } = host(VideoMode::Stream);
+    let mut source = client(format!("wss://127.0.0.1:{port}"), hash);
+    let mut out = RecordingOut::default();
+
+    let send = async {
+        sink.connect().await.expect("accept the client");
+        sink.configure_pipeline(&test_caps()).expect("configure");
+        let mut encoder = FakeEncoder::with_frame_len(LARGE_FRAME_LEN);
+        for _ in 0..FRAMES {
+            encoder.send_next(&mut sink).await;
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+        sink.process(PipelinePacket::Eos, &mut NullOut)
+            .await
+            .expect("eos");
+        encoder.keyframe_requests
+    };
+    let receive_late = async {
+        let caps = source
+            .intercept_caps()
+            .await
+            .expect("connect and read caps");
+        source
+            .configure_pipeline(&caps)
+            .expect("configure the source");
+        tokio::time::sleep(READER_PAUSE).await;
+        source.run(&mut out).await.expect("receive until eos")
+    };
+    let (keyframe_requests, _) =
+        tokio::time::timeout(SESSION_TIMEOUT, async { tokio::join!(send, receive_late) })
+            .await
+            .expect("the session finishes in time");
+
+    assert!(
+        keyframe_requests > 0,
+        "a dropped frame asked for a keyframe"
+    );
+    assert!(
+        out.frames.len() < usize::from(FRAMES),
+        "frames that found the queue full were dropped"
+    );
+    assert_decodable(&out.frames);
+    assert_eq!(out.controls.last(), Some(&"eos"));
+}
+
+#[tokio::test]
 async fn a_stalled_link_resets_old_frames_behind_a_new_keyframe() {
     const FRAMES: u8 = 120;
     const STALL_AT: u8 = 20;

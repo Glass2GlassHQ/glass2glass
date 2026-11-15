@@ -828,6 +828,23 @@ message is `u32` length-framed like the packets, and a message over 64 KiB
 (`MAX_MESSAGE_SIZE`) closes the channel. A message never waits behind a video
 frame, since each stream is ordered on its own.
 
+A network that blocks UDP gets a WebSocket fallback. `RemoteWtSink
+mode=listener` also binds TCP on the same port number and accepts a WebSocket
+over TLS 1.3 with the same certificate, taking whichever client arrives first.
+`RemoteWtSrc mode=caller` dials its `fallback-location` (`wss://...`) when its
+QUIC `location` has not connected after one second, and a `wss://` location
+dials the WebSocket alone. The client pins the certificate by SHA-256 as on raw
+QUIC. One socket carries everything: each binary message is a one-byte tag
+(video, data channel message, keyframe request) followed by a wire packet or a
+message. The socket's reader and writer are separate tasks, so input from the
+client is read while video is being written. Both ends set `TCP_NODELAY`. There
+is no datagram or stream-per-frame mode on the socket, so `video-mode` does not
+apply. The sink keeps one video packet queued behind the one being written. A
+delta frame that finds the queue full is dropped with every delta after it
+until a keyframe, and the encoder is asked for that keyframe. Keyframes and
+control packets wait for room, so a slow link drops frames instead of building
+delay.
+
 `send-window` on `RemoteWtSink` sets quinn's send window, the bytes written
 and not yet acknowledged before a write blocks. quinn's default of 10 MB holds
 about 20 s of 4 Mbps video. On the laptop's Wi-Fi, a 50 KB window raised the
