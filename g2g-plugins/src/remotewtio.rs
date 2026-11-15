@@ -132,6 +132,20 @@ impl WtStream {
     /// (whichever the peer used). `Ok(None)` once the peer finishes its send
     /// stream.
     pub(crate) async fn recv(&mut self) -> Result<Option<PipelinePacket>, G2gError> {
+        let mut packet = self.recv_packet().await?;
+        let stamped = match &mut packet {
+            Some(PipelinePacket::DataFrame(frame)) if frame.timing.arrival_ns != 0 => Some(frame),
+            _ => None,
+        };
+        if let Some(frame) = stamped {
+            // the wire age stops at the sender, quinn's smoothed round trip covers the path
+            let one_way_ns = u64::try_from((self.session.rtt() / 2).as_nanos()).unwrap_or(u64::MAX);
+            frame.timing.arrival_ns = frame.timing.arrival_ns.saturating_sub(one_way_ns).max(1);
+        }
+        Ok(packet)
+    }
+
+    async fn recv_packet(&mut self) -> Result<Option<PipelinePacket>, G2gError> {
         if self.leading {
             // A peer's first packet is its negotiated caps, and those are always
             // on the stream: taking a datagram ahead of them would lose the

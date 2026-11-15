@@ -15,7 +15,7 @@ use g2g_core::runtime::{
 };
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, ConfigureOutcome, Dim, G2gError, Graph, OutputSink,
-    PipelinePacket, PropValue,
+    PipelinePacket, PropError, PropValue,
 };
 use g2g_plugins::clock::WallClock;
 use g2g_plugins::cursorshape::CursorShape;
@@ -47,11 +47,15 @@ const ENCODE: &str = "d3d11convert ! mfh264enc hardware=true";
 pub struct HostSettings {
     pub token: String,
     pub bitrate: u32,
+    pub send_window: Option<u64>,
+    #[cfg(target_os = "windows")]
+    pub quality_vs_speed: Option<u32>,
 }
 
 #[derive(Debug)]
 pub enum HostError {
     TokenLength(usize),
+    SendWindow(PropError),
     TokenTimeout,
     BadToken,
     HungUp,
@@ -65,6 +69,7 @@ impl fmt::Display for HostError {
             HostError::TokenLength(len) => {
                 write!(f, "token is {len} bytes, must be 1 to {MAX_TOKEN_LEN}")
             }
+            HostError::SendWindow(e) => write!(f, "send window: {e:?}"),
             HostError::TokenTimeout => write!(
                 f,
                 "client sent no token within {} seconds",
@@ -98,6 +103,7 @@ impl HostListener {
     pub fn bind(
         address: SocketAddr,
         certificate: SelfSignedCertificate,
+        settings: &HostSettings,
     ) -> Result<Self, HostError> {
         let mut sink =
             RemoteWtSink::new(format!("quic://{address}")).with_self_signed_listener(certificate);
@@ -107,6 +113,10 @@ impl HostListener {
             PropValue::Str("low-latency".into()),
         )
         .expect("low-latency is a congestion-control value");
+        if let Some(bytes) = settings.send_window {
+            AsyncElement::set_property(&mut sink, "send-window", PropValue::Uint(bytes))
+                .map_err(HostError::SendWindow)?;
+        }
         let channel = sink.open_data_channel();
         let address = sink.listen().map_err(HostError::Session)?;
         Ok(Self {
@@ -200,7 +210,14 @@ fn host_graph(
     sink: RemoteWtSink,
     sizes: watch::Sender<Option<ScreenSize>>,
 ) -> Result<Graph<GraphNode>, HostError> {
-    let encode = format!("{ENCODE} bitrate={}", settings.bitrate);
+    #[cfg(target_os = "windows")]
+    let encoder_speed = settings
+        .quality_vs_speed
+        .map(|quality| format!(" quality-vs-speed={quality}"))
+        .unwrap_or_default();
+    #[cfg(not(target_os = "windows"))]
+    let encoder_speed = "";
+    let encode = format!("{ENCODE} bitrate={}{encoder_speed}", settings.bitrate);
     let encode = parse_chain(&default_registry(), &encode).map_err(HostError::Launch)?;
     let mut capture = capture.into_iter();
     let mut graph = Graph::new();

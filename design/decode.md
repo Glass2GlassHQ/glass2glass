@@ -71,7 +71,10 @@ is not copied. An MFT without `MF_SA_D3D11_AWARE` fails the frame with
 output, so `process()` blocks until the MFT has taken the frame, or a stall
 would leave a backlog that never drains, and then waits up to one frame period
 for that frame's output. A downstream `PushOutcome::Bitrate` retargets the MFT
-in place through `CODECAPI_AVEncCommonMeanBitRate`. `MfAacEncode` / `MfAacDecode` (feature `mf-aac`) cover the AAC
+in place through `CODECAPI_AVEncCommonMeanBitRate`. `quality-vs-speed` (0 to
+100, default 50 as in gst) sets `CODECAPI_AVEncCommonQualityVsSpeed` before the
+media types. On Intel's UHD 620 MFT, 100 takes 14.9 ms per 1080p frame against
+9.4 ms at 50, and 0 is no faster than 50. `MfAacEncode` / `MfAacDecode` (feature `mf-aac`) cover the AAC
 audio path. Like every AAC element in a pipeline they carry ADTS: the encoder
 frames each access unit, and the decoder opens on the AudioSpecificConfig of the
 first ADTS header and strips the headers.

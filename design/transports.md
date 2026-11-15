@@ -599,15 +599,19 @@ logged and dropped.
 `client::run_client` dials the host's `quic://` location with a caller-mode
 `remotewtsrc`, pinned to the host certificate's SHA-256, and sends the token as
 the first data channel message. Video passes through `h264parse` and
-`ffmpegdec` into a `wgpusink` window that presents each frame as it arrives
-(`sync=false`, mailbox). With `inputs` on, the window's input goes through an
+`ffmpegdec thread-type=slice` into a `wgpusink` window that presents each frame
+as it arrives (`sync=false`, mailbox). `remotewtsrc` does not report a live
+source, so `ffmpegdec`'s auto choice is frame threading, which holds 15 pictures
+on a 16-thread machine, about 265 ms at 58 fps. With `inputs` on, the window's input goes through an
 `InputRouter` and out as packets on the data channel. Keys map from evdev codes
 to HID usages on device 0, a pointer position goes out as an absolute position
 on display 0, and losing keyboard focus releases the keys and buttons still
 held.
 
 `g2g-desktop host` makes a self-signed certificate at start, prints its
-SHA-256, and serves one client at a time on `--port`. On Linux it captures a
+SHA-256, and serves one client at a time on `--port`. `--send-window` sets the
+sink's `send-window`, and on Windows `--quality-vs-speed` sets `mfh264enc
+quality-vs-speed`. On Linux it captures a
 monitor through the ScreenCast portal, which asks the user on every session.
 On Windows it captures the monitor named by `--monitor-index` (-1 for the
 primary) with `d3d11screencapturesrc`. `g2g-desktop client --cert-hash` takes
@@ -816,6 +820,12 @@ to it, so the sink sees the channel after the source's first message. Each
 message is `u32` length-framed like the packets, and a message over 64 KiB
 (`MAX_MESSAGE_SIZE`) closes the channel. A message never waits behind a video
 frame, since each stream is ordered on its own.
+
+`send-window` on `RemoteWtSink` sets quinn's send window, the bytes written
+and not yet acknowledged before a write blocks. quinn's default of 10 MB holds
+about 20 s of 4 Mbps video. On the laptop's Wi-Fi, a 50 KB window raised the
+`g2g-desktop` p99 frame age from 83 to 322 ms, so the host keeps the default
+unless `--send-window` is set.
 
 A sink otherwise connects on its first packet. `RemoteClient::connect` connects
 before the graph runs, so a listening sink can read the client's first data

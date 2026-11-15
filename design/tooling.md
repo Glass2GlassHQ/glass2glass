@@ -250,7 +250,9 @@ end-to-end figure, and the first element whose `age-in` jumps holds the queue.
 sends a frame's age rather than the sender's `arrival_ns`, because each
 process's monotonic clock starts at its own epoch, and the decoder restamps
 `arrival_ns` on its own clock, so ages keep counting across the `remote*`
-carriers. The network transit itself is not in that age.
+carriers. The TCP and WebSocket carriers leave the network transit out of
+that age. `remotewtsrc` adds half of quinn's smoothed round trip, and the time
+a frame waits in the sender's QUIC send buffer is still left out.
 
 ### Edge probes
 

@@ -46,13 +46,13 @@ use windows::core::Interface;
 use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11Texture2D};
 use windows::Win32::Media::MediaFoundation::{
     eAVEncH264VProfile_Main, CLSID_MSH264EncoderMFT, CODECAPI_AVEncCommonMeanBitRate,
-    CODECAPI_AVEncVideoForceKeyFrame, ICodecAPI, IMF2DBuffer, IMFActivate, IMFDXGIDeviceManager,
-    IMFMediaEventGenerator, IMFSample, IMFTransform, METransformDrainComplete,
-    METransformHaveOutput, METransformNeedInput, MFCreateDXGIDeviceManager,
-    MFCreateDXGISurfaceBuffer, MFCreateMediaType, MFCreateSample, MFMediaType_Video, MFShutdown,
-    MFStartup, MFTEnumEx, MFVideoFormat_H264, MFVideoFormat_HEVC, MFVideoFormat_NV12,
-    MFVideoInterlace_Progressive, MEDIA_EVENT_GENERATOR_GET_EVENT_FLAGS, MFSTARTUP_FULL,
-    MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG_ASYNCMFT, MFT_ENUM_FLAG_HARDWARE,
+    CODECAPI_AVEncCommonQualityVsSpeed, CODECAPI_AVEncVideoForceKeyFrame, ICodecAPI, IMF2DBuffer,
+    IMFActivate, IMFDXGIDeviceManager, IMFMediaEventGenerator, IMFSample, IMFTransform,
+    METransformDrainComplete, METransformHaveOutput, METransformNeedInput,
+    MFCreateDXGIDeviceManager, MFCreateDXGISurfaceBuffer, MFCreateMediaType, MFCreateSample,
+    MFMediaType_Video, MFShutdown, MFStartup, MFTEnumEx, MFVideoFormat_H264, MFVideoFormat_HEVC,
+    MFVideoFormat_NV12, MFVideoInterlace_Progressive, MEDIA_EVENT_GENERATOR_GET_EVENT_FLAGS,
+    MFSTARTUP_FULL, MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG_ASYNCMFT, MFT_ENUM_FLAG_HARDWARE,
     MFT_ENUM_FLAG_SORTANDFILTER, MFT_ENUM_FLAG_SYNCMFT, MFT_MESSAGE_COMMAND_DRAIN,
     MFT_MESSAGE_COMMAND_FLUSH, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING,
     MFT_MESSAGE_NOTIFY_END_OF_STREAM, MFT_MESSAGE_NOTIFY_START_OF_STREAM,
@@ -91,6 +91,9 @@ use g2g_core::{
 
 /// Default target bitrate (bits/s) when the caller doesn't override it.
 const DEFAULT_BITRATE: u32 = 4_000_000;
+// gst mfh264enc's default, the middle of the codec API's 0 to 100 range
+const DEFAULT_QUALITY_VS_SPEED: u32 = 50;
+const MAX_QUALITY_VS_SPEED: u64 = 100;
 // the encoder types need an MF_MT_FRAME_RATE even when the caps declare none
 const ENCODER_FRAMERATE_WHEN_UNDECLARED: (u32, u32) = (30, 1);
 
@@ -199,6 +202,7 @@ pub struct MfEncode {
     com_started: bool,
     configured: bool,
     bitrate: u32,
+    quality_vs_speed: u32,
     /// Prefer a hardware encoder MFT (enumerated via `MFTEnumEx`) even for
     /// H.264, which otherwise uses the fixed-CLSID MS software encoder. A
     /// hardware encoder is commonly an asynchronous MFT, driven by the
@@ -242,6 +246,7 @@ impl MfEncode {
             com_started: false,
             configured: false,
             bitrate: DEFAULT_BITRATE,
+            quality_vs_speed: DEFAULT_QUALITY_VS_SPEED,
             prefer_hardware: false,
             framerate: Rate::Any,
             last_caps: None,
@@ -336,7 +341,9 @@ impl MfEncode {
         // SAFETY: setting an attribute on the sample just built, on the owning thread.
         unsafe { sample.SetSampleDuration(duration_hns) }.map_err(mf_err)?;
         if core::mem::take(&mut self.force_keyframe) {
-            if let Err(error) = self.set_codec_value(&CODECAPI_AVEncVideoForceKeyFrame, 1) {
+            if let Err(error) =
+                set_codec_value(self.transform()?, &CODECAPI_AVEncVideoForceKeyFrame, 1)
+            {
                 g2g_warn!(
                     Target::category("mfencode"),
                     "the encoder MFT cannot force a keyframe: {error:?}"
@@ -393,26 +400,10 @@ impl MfEncode {
             height,
             rate_to_ratio(&self.framerate),
             self.bitrate,
+            self.quality_vs_speed,
             &EncoderBackend::HardwareOnDevice(device),
         )?);
         Ok(())
-    }
-
-    fn set_codec_value(&self, property: &windows::core::GUID, value: u32) -> Result<(), G2gError> {
-        let codec_api: ICodecAPI = self.transform()?.cast().map_err(mf_err)?;
-        let variant = VARIANT {
-            Anonymous: VARIANT_0 {
-                Anonymous: core::mem::ManuallyDrop::new(VARIANT_0_0 {
-                    vt: VT_UI4,
-                    wReserved1: 0,
-                    wReserved2: 0,
-                    wReserved3: 0,
-                    Anonymous: VARIANT_0_0_0 { ulVal: value },
-                }),
-            },
-        };
-        // SAFETY: the codec API call runs on the owning thread and `variant` outlives it.
-        unsafe { codec_api.SetValue(property, &variant) }.map_err(mf_err)
     }
 
     fn transform(&self) -> Result<&IMFTransform, G2gError> {
@@ -703,6 +694,13 @@ impl AsyncElement for MfEncode {
                 "use a hardware encoder MFT for H.264 too (H.265 always enumerates one)",
             )
             .with_default("false"),
+            PropertySpec::new(
+                "quality-vs-speed",
+                PropKind::Uint,
+                "encoder quality against speed, 0 fastest to 100 best (CODECAPI_AVEncCommonQualityVsSpeed)",
+            )
+            .with_default("50")
+            .with_range("0", "100"),
         ];
         PROPS
     }
@@ -718,6 +716,14 @@ impl AsyncElement for MfEncode {
                 self.prefer_hardware = value.as_bool().ok_or(PropError::Type)?;
                 Ok(())
             }
+            "quality-vs-speed" => {
+                let quality = value.as_uint().ok_or(PropError::Type)?;
+                if quality > MAX_QUALITY_VS_SPEED {
+                    return Err(PropError::Value);
+                }
+                self.quality_vs_speed = quality as u32;
+                Ok(())
+            }
             _ => Err(PropError::Unknown),
         }
     }
@@ -726,6 +732,7 @@ impl AsyncElement for MfEncode {
         match name {
             "bitrate" => Some(PropValue::Uint(u64::from(self.bitrate))),
             "hardware" => Some(PropValue::Bool(self.prefer_hardware)),
+            "quality-vs-speed" => Some(PropValue::Uint(u64::from(self.quality_vs_speed))),
             _ => None,
         }
     }
@@ -762,6 +769,7 @@ impl AsyncElement for MfEncode {
             h,
             rate_to_ratio(&framerate),
             self.bitrate,
+            self.quality_vs_speed,
             &self.backend(),
         )?);
         self.framerate = framerate;
@@ -828,6 +836,7 @@ impl AsyncElement for MfEncode {
                             h,
                             rate_to_ratio(&framerate),
                             self.bitrate,
+                            self.quality_vs_speed,
                             &backend,
                         )?);
                     }
@@ -909,7 +918,7 @@ impl AsyncElement for MfEncode {
                     }
                     // zero asks a simulcast layer to go idle, which has no meaning for one encoder
                     PushOutcome::Bitrate(bps) if bps != 0 && bps != self.bitrate => {
-                        self.set_codec_value(&CODECAPI_AVEncCommonMeanBitRate, bps)?;
+                        set_codec_value(self.transform()?, &CODECAPI_AVEncCommonMeanBitRate, bps)?;
                         self.bitrate = bps;
                     }
                     _ => {}
@@ -1078,6 +1087,27 @@ fn activate_encoder(
     Ok((transform, is_async))
 }
 
+fn set_codec_value(
+    transform: &IMFTransform,
+    property: &windows::core::GUID,
+    value: u32,
+) -> Result<(), G2gError> {
+    let codec_api: ICodecAPI = transform.cast().map_err(mf_err)?;
+    let variant = VARIANT {
+        Anonymous: VARIANT_0 {
+            Anonymous: core::mem::ManuallyDrop::new(VARIANT_0_0 {
+                vt: VT_UI4,
+                wReserved1: 0,
+                wReserved2: 0,
+                wReserved3: 0,
+                Anonymous: VARIANT_0_0_0 { ulVal: value },
+            }),
+        },
+    };
+    // SAFETY: the codec API call runs on the owning thread and `variant` outlives it.
+    unsafe { codec_api.SetValue(property, &variant) }.map_err(mf_err)
+}
+
 /// Create the encoder MFT for `codec`, set the output type then the NV12 input
 /// type (the encoder contract requires output before input), and put it into
 /// streaming mode.
@@ -1087,6 +1117,7 @@ fn init_encoder(
     height: u32,
     fps: (u32, u32),
     bitrate: u32,
+    quality_vs_speed: u32,
     backend: &EncoderBackend,
 ) -> Result<EncoderState, G2gError> {
     let out_subtype = encoder_subtype(codec)?;
@@ -1105,6 +1136,16 @@ fn init_encoder(
         if let Ok(attrs) = transform.GetAttributes() {
             let _ = attrs.SetUINT32(&MF_LOW_LATENCY, 1);
         }
+    }
+    if let Err(error) = set_codec_value(
+        &transform,
+        &CODECAPI_AVEncCommonQualityVsSpeed,
+        quality_vs_speed,
+    ) {
+        g2g_warn!(
+            Target::category("mfencode"),
+            "the encoder MFT ignores quality-vs-speed: {error:?}"
+        );
     }
 
     let (num, den) = fps;

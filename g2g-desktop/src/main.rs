@@ -36,21 +36,21 @@ use tokio::sync::{mpsc, watch};
 
 const HOST_USAGE: &str =
     "  g2g-desktop host --token TOKEN [--port 8080] [--fps 60] [--bitrate 4000000]
-                   [--trace FILE]";
+                   [--send-window BYTES] [--trace FILE]";
 #[cfg(target_os = "linux")]
 const PLATFORM_USAGE: &str =
     "  g2g-desktop client --host HOST --cert-hash SHA256 --token TOKEN [--port 8080] [--inputs true]
                      [--trace FILE]";
 #[cfg(target_os = "windows")]
-const PLATFORM_USAGE: &str = "                   [--monitor-index -1]";
+const PLATFORM_USAGE: &str = "                   [--monitor-index -1] [--quality-vs-speed 0-100]";
 const DEFAULT_PORT: u16 = 8080;
 const DEFAULT_FPS: u32 = 60;
 const DEFAULT_BITRATE: u32 = 4_000_000;
-const HOST_FLAGS: [&str; 5] = ["port", "token", "fps", "bitrate", "trace"];
+const HOST_FLAGS: [&str; 6] = ["port", "token", "fps", "bitrate", "send-window", "trace"];
 #[cfg(target_os = "linux")]
 const PLATFORM_HOST_FLAGS: [&str; 0] = [];
 #[cfg(target_os = "windows")]
-const PLATFORM_HOST_FLAGS: [&str; 1] = ["monitor-index"];
+const PLATFORM_HOST_FLAGS: [&str; 2] = ["monitor-index", "quality-vs-speed"];
 #[cfg(target_os = "windows")]
 const PRIMARY_MONITOR: i32 = -1;
 #[cfg(target_os = "linux")]
@@ -86,16 +86,25 @@ fn required(flags: &Flags, name: &str) -> Result<String, Box<dyn Error>> {
         .ok_or_else(|| format!("--{name} is required").into())
 }
 
+fn optional<T: FromStr>(flags: &Flags, name: &str) -> Result<Option<T>, Box<dyn Error>>
+where
+    T::Err: Error + 'static,
+{
+    flags
+        .get(name)
+        .map(|value| {
+            value
+                .parse()
+                .map_err(|e| format!("--{name} {value}: {e}").into())
+        })
+        .transpose()
+}
+
 fn parsed<T: FromStr>(flags: &Flags, name: &str, default: T) -> Result<T, Box<dyn Error>>
 where
     T::Err: Error + 'static,
 {
-    match flags.get(name) {
-        Some(value) => value
-            .parse()
-            .map_err(|e| format!("--{name} {value}: {e}").into()),
-        None => Ok(default),
-    }
+    Ok(optional(flags, name)?.unwrap_or(default))
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -192,6 +201,9 @@ async fn host(flags: Flags) -> Result<(), Box<dyn Error>> {
     let settings = HostSettings {
         token: required(&flags, "token")?,
         bitrate: parsed(&flags, "bitrate", DEFAULT_BITRATE)?,
+        send_window: optional(&flags, "send-window")?,
+        #[cfg(target_os = "windows")]
+        quality_vs_speed: optional(&flags, "quality-vs-speed")?,
     };
     check_token_len(&settings.token)?;
     let trace_path = flags.get("trace").map(PathBuf::from);
@@ -202,7 +214,7 @@ async fn host(flags: Flags) -> Result<(), Box<dyn Error>> {
         certificate.sha256_hex
     );
     loop {
-        let listener = HostListener::bind(address, certificate.clone())?;
+        let listener = HostListener::bind(address, certificate.clone(), &settings)?;
         host_one(listener, settings.clone(), capture, trace_path.clone()).await;
     }
 }

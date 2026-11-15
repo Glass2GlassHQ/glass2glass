@@ -145,6 +145,7 @@ pub struct WtClient {
     endpoint: Option<Endpoint>,
     /// Send data frames as QUIC datagrams (the `datagrams` property).
     datagrams: bool,
+    send_window: u64,
     /// Cumulative across reconnects, so it outlives any one session.
     datagrams_sent: u64,
     /// Opened lazily on the first send (the QUIC / CONNECT handshake is async).
@@ -165,6 +166,7 @@ impl WtClient {
             self_signed: None,
             endpoint: None,
             datagrams: false,
+            send_window: QUINN_SEND_WINDOW,
             datagrams_sent: 0,
             stream: None,
             data_channel: None,
@@ -213,6 +215,16 @@ impl WtClient {
                 })
             }
             "datagrams-sent" => return Some(Err(PropError::ReadOnly)),
+            "send-window" => {
+                return Some(match value.as_uint() {
+                    Some(0) => Err(PropError::Value),
+                    Some(bytes) => {
+                        self.send_window = bytes;
+                        Ok(())
+                    }
+                    None => Err(PropError::Type),
+                })
+            }
             "mode" => return Some(remotewtio::set_mode(&mut self.mode, value)),
             _ => {}
         }
@@ -239,6 +251,7 @@ impl WtClient {
             "congestion-control" => Some(PropValue::Str(self.congestion.clone())),
             "datagrams" => Some(PropValue::Bool(self.datagrams)),
             "datagrams-sent" => Some(PropValue::Uint(self.datagrams_sent)),
+            "send-window" => Some(PropValue::Uint(self.send_window)),
             "mode" => Some(PropValue::Str(self.mode.name().to_string())),
             "certificate" => Some(PropValue::Str(self.cert.clone())),
             "private-key" => Some(PropValue::Str(self.key.clone())),
@@ -246,6 +259,9 @@ impl WtClient {
         }
     }
 }
+
+// quinn's TransportConfig default, eight times its 1.25 MB stream receive window
+const QUINN_SEND_WINDOW: u64 = 10_000_000;
 
 /// The `server-certificate-hashes` spec, shared by the sink and the transform.
 pub(crate) const CERT_HASHES_PROP: PropertySpec = PropertySpec::new(
@@ -289,6 +305,12 @@ impl PacketClient for WtClient {
         )
         .with_default("false"),
         PropertySpec::new(
+            "send-window",
+            PropKind::Uint,
+            "bytes written but not yet acknowledged before a send blocks; smaller keeps a stalled link from queueing video",
+        )
+        .with_default("10000000"),
+        PropertySpec::new(
             "datagrams-sent",
             PropKind::Uint,
             "frames sent as datagrams so far (the rest fell back to the stream)",
@@ -308,6 +330,7 @@ impl PacketClient for WtClient {
                 }
                 QuicMode::Listener => remotewtio::accept(self.listener_endpoint()?).await?,
             };
+            session.set_send_window(self.send_window);
             self.stream = Some(
                 remotewtio::open_stream(session, self.datagrams, self.data_channel.as_ref())
                     .await?,

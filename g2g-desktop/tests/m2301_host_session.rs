@@ -66,11 +66,15 @@ impl AsyncElement for CountingSink {
     }
 }
 
-fn host_listener() -> (HostListener, String) {
+fn host_listener(settings: &HostSettings) -> (HostListener, String) {
     let certificate = generate_certificate().unwrap();
     let cert_hash = certificate.sha256_hex.clone();
-    let listener =
-        HostListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)), certificate).unwrap();
+    let listener = HostListener::bind(
+        SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+        certificate,
+        settings,
+    )
+    .unwrap();
     (listener, cert_hash)
 }
 
@@ -100,11 +104,12 @@ fn capture(registry_source: &str) -> HostCapture {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn client_sees_host_video_and_cursor_and_host_receives_client_input() {
-    let (listener, cert_hash) = host_listener();
     let settings = HostSettings {
         token: TOKEN.into(),
         bitrate: BITRATE,
+        send_window: None,
     };
+    let (listener, cert_hash) = host_listener(&settings);
     let source = format!("videotestsrc num-buffers={FRAMES} width={WIDTH} height={HEIGHT}");
     let cursor_shape = CursorShape {
         width: CURSOR_SIDE,
@@ -194,11 +199,12 @@ async fn client_sees_host_video_and_cursor_and_host_receives_client_input() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_wrong_token_closes_the_connection_before_any_video() {
-    let (listener, cert_hash) = host_listener();
     let settings = HostSettings {
         token: TOKEN.into(),
         bitrate: BITRATE,
+        send_window: None,
     };
+    let (listener, cert_hash) = host_listener(&settings);
     let source = format!("videotestsrc num-buffers={FRAMES} width={WIDTH} height={HEIGHT}");
     let (mut client, _input) = client_source(&listener, &cert_hash, "wrong token");
     let (event_sender, _host_events) = mpsc::unbounded_channel();

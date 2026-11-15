@@ -27,7 +27,7 @@ const CLIENT_CATEGORY: &str = "g2g-desktop-client";
 const WINDOW_TITLE: &str = "g2g-desktop";
 // glass-to-glass latency grows with link depth
 const LINK_CAPACITY: usize = 2;
-const DECODE: &str = "h264parse ! ffmpegdec";
+const DECODE: &str = "h264parse ! ffmpegdec thread-type=slice";
 const KEYBOARD_DEVICE: u8 = 0;
 const DISPLAY: u8 = 0;
 const FORWARDED_KINDS: [EventKind; 4] = [
