@@ -19,7 +19,8 @@ use g2g_core::memory::SystemSlice;
         target_os = "linux",
         any(feature = "local-ipc", feature = "local-dmabuf")
     ),
-    all(target_arch = "wasm32", feature = "web")
+    all(target_arch = "wasm32", feature = "web"),
+    all(target_os = "linux", feature = "shm")
 ))]
 use g2g_core::FrameTiming;
 #[cfg(feature = "webrtc")]
@@ -49,6 +50,17 @@ impl ArrivalStamp {
         }
     }
 
+    #[cfg(any(feature = "webrtc", all(target_os = "linux", feature = "shm")))]
+    pub(crate) fn stamp(&mut self, timing: FrameTiming) -> FrameTiming {
+        let pts_ns = self.running_time_ns(timing.arrival_ns);
+        FrameTiming {
+            pts_ns,
+            dts_ns: pts_ns,
+            capture_ns: pts_ns,
+            ..timing
+        }
+    }
+
     #[cfg(feature = "webrtc")]
     pub(crate) fn frame(
         &mut self,
@@ -57,19 +69,13 @@ impl ArrivalStamp {
         sequence: u64,
         meta: FrameMetaSet,
     ) -> Frame {
-        let arrival_ns = g2g_core::metrics::monotonic_ns();
-        let pts_ns = self.running_time_ns(arrival_ns);
         Frame {
             domain: MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
-            timing: FrameTiming {
-                pts_ns,
-                dts_ns: pts_ns,
-                duration_ns: 0,
-                capture_ns: pts_ns,
-                arrival_ns,
+            timing: self.stamp(FrameTiming {
+                arrival_ns: g2g_core::metrics::monotonic_ns(),
                 keyframe,
                 ..FrameTiming::default()
-            },
+            }),
             sequence,
             meta,
         }

@@ -21,14 +21,18 @@ use std::process::{Child, Command};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
-use g2g_core::runtime::{parse_launch, run_graph, run_simple_pipeline, LatencyProfile};
-use g2g_core::PipelineClock;
+use g2g_core::runtime::{parse_launch, run_graph, run_simple_pipeline, LatencyProfile, SourceLoop};
+use g2g_core::{PipelineClock, PipelinePacket, PropValue};
 
 use g2g_plugins::fakesink::FakeSink;
 use g2g_plugins::registry::default_registry;
 use g2g_plugins::shm::{ShmSink, ShmSrc};
 use g2g_plugins::shmpipe::{buffer_range, Command as ShmCommand, COMMAND_BYTES};
 use g2g_plugins::videotestsrc::VideoTestSrc;
+
+#[path = "common/collect_sink.rs"]
+mod collect_sink;
+use collect_sink::CollectSink;
 
 /// The transfer the byte-exact loopback carries.
 const FIXTURE: &str = "tests/fixtures/av_h264_aac44100.ts";
@@ -252,6 +256,57 @@ async fn shmsrc_emits_whole_frames() {
         written,
         RGBA_FRAME_BYTES as u64 * TEST_FRAMES,
         "those frames weigh exactly {TEST_FRAMES} whole frames"
+    );
+}
+
+#[tokio::test]
+async fn a_live_shmsrc_stamps_each_frame_at_its_arrival() {
+    let socket_path = unique_path("live.sock");
+    let registry = default_registry();
+
+    let send = async {
+        let graph = parse_launch(
+            &registry,
+            &format!(
+                "videotestsrc num-buffers={TEST_FRAMES} width={TEST_WIDTH} height={TEST_HEIGHT} \
+                 framerate={TEST_FRAMERATE}/1 ! shmsink socket-path={} shm-size={VIDEO_SHM_SIZE}",
+                socket_path.display()
+            ),
+        )
+        .expect("the sender pipeline parses");
+        run_graph(graph, &ZeroClock, 4).await
+    };
+
+    let mut source = ShmSrc::new(&socket_path);
+    source
+        .set_property("is-live", PropValue::Bool(true))
+        .expect("shmsrc takes is-live");
+    assert!(source.latency().live, "is-live makes shmsrc report live");
+    let caps = source.intercept_caps().await.expect("shmsrc declares caps");
+    source.configure_pipeline(&caps).expect("shmsrc configures");
+    let mut sink = CollectSink::default();
+    let receive = source.run(&mut sink);
+
+    let (sent, received) =
+        tokio::time::timeout(LOOPBACK_DEADLINE, async { tokio::join!(send, receive) })
+            .await
+            .expect("the loopback finishes");
+    sent.expect("the send pipeline runs");
+    received.expect("the receive pipeline runs");
+
+    let pts: Vec<u64> = sink
+        .packets
+        .iter()
+        .filter_map(|packet| match packet {
+            PipelinePacket::DataFrame(frame) => Some(frame.timing.pts_ns),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(pts.len() as u64, TEST_FRAMES, "every frame arrived");
+    assert_eq!(pts[0], 0, "the first frame starts the running time");
+    assert!(
+        pts.windows(2).all(|pair| pair[0] < pair[1]),
+        "each frame is stamped later than the one before: {pts:?}"
     );
 }
 

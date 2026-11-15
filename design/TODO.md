@@ -31,6 +31,9 @@ Highest leverage first:
 The plan is [remote.md](remote.md).
 
 - `ximagesrc` for unattended X11 capture, and window capture.
+- VA-API encode on the Linux host through `ffmpegenc`.
+- Opus audio from the host's default capture device, on a short queue that
+  does not hold the picture.
 - Reed-Solomon repair for `remotewt` datagram video, so a frame larger than
   one datagram is split into shards instead of going on a stream.
 - WebSocket fallback on `wss://` in `remotewt` when UDP is blocked.

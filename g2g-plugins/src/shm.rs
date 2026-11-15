@@ -50,11 +50,12 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::query::LatencyReport;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
-    AsyncElement, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
+    AsyncElement, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ClockSync, ConfigureOutcome,
     ElementMetadata, FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates,
     PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
 };
 
+use crate::arrivalstamp::ArrivalStamp;
 use crate::capsfilter::parse_caps;
 use crate::filesrc::{encoding_from_str, encoding_to_str};
 use crate::shmpipe::{
@@ -730,6 +731,7 @@ pub struct ShmSrc {
     area_name: Option<String>,
     configured: bool,
     is_live: bool,
+    clock_sync: Option<ClockSync>,
 }
 
 impl Default for ShmSrc {
@@ -744,6 +746,7 @@ impl Default for ShmSrc {
             area_name: None,
             configured: false,
             is_live: false,
+            clock_sync: None,
         }
     }
 }
@@ -823,6 +826,10 @@ impl SourceLoop for ShmSrc {
         }
     }
 
+    fn set_clock_sync(&mut self, sync: ClockSync) {
+        self.clock_sync = Some(sync);
+    }
+
     fn intercept_caps<'a>(&'a mut self) -> Self::CapsFuture<'a> {
         core::future::ready(Ok(self.caps.clone()))
     }
@@ -858,6 +865,9 @@ impl SourceLoop for ShmSrc {
             let mut stream = self.connect().await?;
             let mut areas: Vec<MappedArea> = Vec::new();
             let mut sequence = 0u64;
+            let mut arrival_stamp = self
+                .is_live
+                .then(|| ArrivalStamp::new(self.clock_sync.clone()));
             while sequence < self.frame_limit {
                 let mut raw = [0u8; COMMAND_BYTES];
                 match stream.read_exact(&mut raw).await {
@@ -898,8 +908,11 @@ impl SourceLoop for ShmSrc {
                             .write_all(&Command::AckBuffer { area_id, offset }.encode())
                             .await
                             .map_err(io_err)?;
-                        out.push(PipelinePacket::DataFrame(byte_frame(bytes, sequence)))
-                            .await?;
+                        let mut frame = byte_frame(bytes, sequence);
+                        if let Some(arrival_stamp) = &mut arrival_stamp {
+                            frame.timing = arrival_stamp.stamp(frame.timing);
+                        }
+                        out.push(PipelinePacket::DataFrame(frame)).await?;
                         sequence += 1;
                     }
                     // Only a client sends this, and this is the client.
