@@ -1011,6 +1011,7 @@ mod tests {
             push_wait: stats(0, 0, 0),
             transit: stats(2, 500, 900),
             age_at_emit: stats(0, 0, 0),
+            age_at_process: stats(0, 0, 0),
             fill_mean_pct: fill_max / 2,
             fill_max_pct: fill_max,
             presentation: None,
