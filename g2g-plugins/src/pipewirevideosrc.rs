@@ -157,13 +157,27 @@ enum Ctrl {
     Terminate,
 }
 
+#[derive(Debug)]
+struct CopiedFrame {
+    info: VideoInfo,
+    bytes: Vec<u8>,
+    // 0 means the rows were packed tight on the way out
+    first_stride: usize,
+}
+
+type NewestFrameSlot = alloc::sync::Arc<std::sync::Mutex<Option<CopiedFrame>>>;
+
+fn lock_newest(slot: &NewestFrameSlot) -> std::sync::MutexGuard<'_, Option<CopiedFrame>> {
+    slot.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// Loop-thread to element messages.
 enum FromWorker {
     /// The negotiated format, sent on every change (so before the first frame).
     Format(VideoInfo),
-    /// One frame copied out of a mapped buffer, and the row pitch it carries.
-    /// A pitch of 0 means the rows were packed tight on the way out.
-    Frame { bytes: Vec<u8>, first_stride: usize },
+    // sent only when the newest frame slot was empty
+    FrameReady,
     /// One frame still in the producer's dma-buf. The loop thread keeps a share of
     /// its own and recycles the buffer once this one is dropped.
     DmaBuf(OwnedDmaBuf),
@@ -671,6 +685,8 @@ impl SourceLoop for PipeWireVideoSrc {
 
             // Frames and format changes cross from the loop thread to here.
             let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<FromWorker>();
+            let newest_frame = NewestFrameSlot::default();
+            let worker_newest_frame = alloc::sync::Arc::clone(&newest_frame);
             // Control + a setup-result handshake (surface a connect failure).
             let (ctrl_tx, ctrl_rx) = pw::channel::channel::<Ctrl>();
             let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<SetupResult>(1);
@@ -678,7 +694,18 @@ impl SourceLoop for PipeWireVideoSrc {
             let handle = std::thread::Builder::new()
                 .name(String::from("g2g-pipewirevideosrc"))
                 .spawn(move || {
-                    match build_and_run(&target, &pod, policy, portal, tx, ctrl_rx, &ready_tx) {
+                    match build_and_run(
+                        &target,
+                        &pod,
+                        policy,
+                        portal,
+                        WorkerToElement {
+                            tx,
+                            newest_frame: worker_newest_frame,
+                        },
+                        ctrl_rx,
+                        &ready_tx,
+                    ) {
                         Ok(()) => {}
                         Err(code) => {
                             let _ = ready_tx.send(Err(code));
@@ -754,14 +781,24 @@ impl SourceLoop for PipeWireVideoSrc {
                         }
                         continue;
                     }
-                    FromWorker::Frame {
-                        bytes,
-                        first_stride,
-                    } => (
-                        MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-                        0,
-                        first_stride,
-                    ),
+                    FromWorker::FrameReady => {
+                        // a frame in a newer format has a second notice queued behind its Format message
+                        let taken = lock_newest(&newest_frame)
+                            .take_if(|frame| Some(frame.info) == current_format);
+                        let Some(CopiedFrame {
+                            bytes,
+                            first_stride,
+                            ..
+                        }) = taken
+                        else {
+                            continue;
+                        };
+                        (
+                            MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
+                            0,
+                            first_stride,
+                        )
+                    }
                     // The producer's own buffer, so its rows sit at the
                     // producer's pitch whether or not anybody asked: a consumer
                     // that maps it reads them off the frame instead of the
@@ -957,8 +994,15 @@ struct BufferPolicy {
 struct UserData {
     negotiated: Option<Negotiated>,
     tx: tokio::sync::mpsc::UnboundedSender<FromWorker>,
+    newest_frame: NewestFrameSlot,
     policy: BufferPolicy,
     held: HeldBuffers,
+}
+
+#[derive(Debug)]
+struct WorkerToElement {
+    tx: tokio::sync::mpsc::UnboundedSender<FromWorker>,
+    newest_frame: NewestFrameSlot,
 }
 
 fn build_and_run(
@@ -966,7 +1010,7 @@ fn build_and_run(
     pod: &[u8],
     policy: BufferPolicy,
     portal: PortalSetup,
-    tx: tokio::sync::mpsc::UnboundedSender<FromWorker>,
+    to_element: WorkerToElement,
     ctrl_rx: pw::channel::Receiver<Ctrl>,
     ready: &std::sync::mpsc::SyncSender<SetupResult>,
 ) -> Result<(), i32> {
@@ -1022,9 +1066,11 @@ fn build_and_run(
     let stream = pw::stream::StreamRc::new(core, "g2g-pipewirevideosrc", props).map_err(|_| -1)?;
 
     let held: HeldBuffers = Rc::new(RefCell::new(Vec::new()));
+    let WorkerToElement { tx, newest_frame } = to_element;
     let user_data = UserData {
         negotiated: None,
         tx,
+        newest_frame,
         policy,
         held: Rc::clone(&held),
     };
@@ -1077,6 +1123,7 @@ fn build_and_run(
                         }
                     }
                     if changed {
+                        lock_newest(&user_data.newest_frame).take();
                         let _ = user_data.tx.send(FromWorker::Format(info));
                     }
                 }
@@ -1196,6 +1243,7 @@ fn copy_mapped_frame(stream: &pw::stream::Stream, user_data: &mut UserData) {
     let Some(negotiated) = user_data.negotiated.as_ref() else {
         return; // no usable format: drop the buffer rather than guess
     };
+    let info = negotiated.info;
     let Some(mut buffer) = stream.dequeue_buffer() else {
         return;
     };
@@ -1248,10 +1296,14 @@ fn copy_mapped_frame(stream: &pw::stream::Stream, user_data: &mut UserData) {
         user_data.negotiated = None;
         return;
     };
-    let _ = user_data.tx.send(FromWorker::Frame {
+    let replaced = lock_newest(&user_data.newest_frame).replace(CopiedFrame {
+        info,
         bytes,
         first_stride,
     });
+    if replaced.is_none() {
+        let _ = user_data.tx.send(FromWorker::FrameReady);
+    }
 }
 
 /// Share one dma-buf buffer downstream and hold it until every share of the frame

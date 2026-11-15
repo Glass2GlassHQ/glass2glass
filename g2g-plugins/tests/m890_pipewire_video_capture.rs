@@ -32,8 +32,9 @@ mod collect_sink;
 use collect_sink::CollectSink;
 
 use std::process::{Child, Command, Stdio};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use g2g_core::element::{OutputSink, PushOutcome};
 use g2g_core::frame::PipelinePacket;
 use g2g_core::memory::MemoryDomain;
 use g2g_core::runtime::SourceLoop;
@@ -163,14 +164,12 @@ fn host_can_run() -> bool {
     true
 }
 
-/// Capture `limit` frames from `node` with the requested geometry / rate, plus
-/// whatever else `props` sets (a pinned `format`, an `io-mode`).
-async fn capture(
+async fn configured_source(
     node: &str,
     req: (u32, u32, u32),
     limit: u64,
     props: &[(&str, &str)],
-) -> (Vec<PipelinePacket>, Result<u64, G2gError>) {
+) -> PipeWireVideoSrc {
     let (w, h, fps) = req;
     let mut src = PipeWireVideoSrc::new()
         .with_target(node)
@@ -183,6 +182,18 @@ async fn capture(
     }
     let advertised = src.intercept_caps().await.expect("advertised caps");
     src.configure_pipeline(&advertised).expect("configure");
+    src
+}
+
+/// Capture `limit` frames from `node` with the requested geometry / rate, plus
+/// whatever else `props` sets (a pinned `format`, an `io-mode`).
+async fn capture(
+    node: &str,
+    req: (u32, u32, u32),
+    limit: u64,
+    props: &[(&str, &str)],
+) -> (Vec<PipelinePacket>, Result<u64, G2gError>) {
+    let mut src = configured_source(node, req, limit, props).await;
     let mut out = CollectSink::default();
     let result = tokio::time::timeout(Duration::from_secs(30), src.run(&mut out))
         .await
@@ -472,5 +483,67 @@ async fn audio_properties_drive_a_live_capture() {
     assert!(
         matches!(out.packets.last(), Some(PipelinePacket::Eos)),
         "a bounded capture ends with EOS"
+    );
+}
+
+#[derive(Debug)]
+struct StallingSink {
+    stall: Duration,
+    stall_end: Option<Instant>,
+    frame_arrivals: Vec<Instant>,
+}
+
+impl OutputSink for StallingSink {
+    fn poll_push(
+        &mut self,
+        _cx: &mut core::task::Context<'_>,
+        packet_slot: &mut Option<PipelinePacket>,
+    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+        let packet = packet_slot.take().expect("poll_push without a packet");
+        if matches!(packet, PipelinePacket::DataFrame(_)) {
+            self.frame_arrivals.push(Instant::now());
+            if self.stall_end.is_none() {
+                std::thread::sleep(self.stall);
+                self.stall_end = Some(Instant::now());
+            }
+        }
+        core::task::Poll::Ready(Ok(PushOutcome::Accepted))
+    }
+}
+
+#[tokio::test]
+async fn a_stalled_downstream_gets_the_newest_frame_instead_of_a_backlog() {
+    const FPS: u32 = 30;
+    const STALL: Duration = Duration::from_secs(1);
+    const FRAMES_AFTER_STALL: u64 = 6;
+    if !host_can_run() {
+        return;
+    }
+    let pub_ = match Publisher::spawn("stall", "I420", 320, 240, FPS) {
+        Some(p) => p,
+        None => return,
+    };
+    assert!(pub_.wait_until_registered().await, "node never registered");
+
+    let mut src = configured_source(&pub_.node, (320, 240, FPS), 1 + FRAMES_AFTER_STALL, &[]).await;
+    let mut out = StallingSink {
+        stall: STALL,
+        stall_end: None,
+        frame_arrivals: Vec::new(),
+    };
+    let result = tokio::time::timeout(Duration::from_secs(30), src.run(&mut out))
+        .await
+        .expect("capture finishes within 30s");
+    assert_eq!(result, Ok(1 + FRAMES_AFTER_STALL));
+    let stall_end = out.stall_end.expect("the first frame stalled the sink");
+    let last_arrival = *out.frame_arrivals.last().expect("frames arrived");
+    // the one frame kept through the stall arrives at once, the rest arrive at the node rate
+    let frame_period = Duration::from_secs(1) / FPS;
+    let paced = frame_period * (FRAMES_AFTER_STALL as u32 - 3);
+    let spread = last_arrival - stall_end;
+    eprintln!("{FRAMES_AFTER_STALL} frames after the stall spread over {spread:?}");
+    assert!(
+        spread >= paced,
+        "frames captured during the stall were queued: {spread:?} < {paced:?}"
     );
 }
