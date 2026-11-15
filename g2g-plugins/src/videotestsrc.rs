@@ -13,9 +13,11 @@ use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use g2g_core::caps::framerate_q16_from_fraction;
+use g2g_core::caps::{framerate_q16_from_fraction, framerate_q16_period_ns};
+use g2g_core::clock::ClockSync;
 use g2g_core::frame::Frame;
 use g2g_core::memory::{SystemSlice, SystemView};
+use g2g_core::query::LatencyReport;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::tensor::TensorView;
 use g2g_core::{
@@ -24,6 +26,7 @@ use g2g_core::{
     PropError, PropKind, PropValue, PropertySpec, PushOutcome, Rate, RawVideoFormat, TensorDType,
 };
 
+use crate::livesource::LivePacer;
 use crate::videoconvert::{convert, FORMATS};
 
 /// Synthetic content drawn into each frame. Some animate with the frame index
@@ -101,6 +104,8 @@ pub struct VideoTestSrc {
     /// Only populated in `shared` mode; test-only bookkeeping, independent of
     /// the zero-copy claim.
     emitted_frames: Vec<Vec<u8>>,
+    is_live: bool,
+    clock_sync: Option<ClockSync>,
 }
 
 /// How many shared frames [`VideoTestSrc::emitted_frames`] keeps.
@@ -126,6 +131,8 @@ impl VideoTestSrc {
             shared: false,
             emitted_ptrs: Vec::new(),
             emitted_frames: Vec::new(),
+            is_live: false,
+            clock_sync: None,
         }
     }
 
@@ -165,6 +172,8 @@ impl VideoTestSrc {
             shared: false,
             emitted_ptrs: Vec::new(),
             emitted_frames: Vec::new(),
+            is_live: false,
+            clock_sync: None,
         }
     }
 
@@ -303,6 +312,18 @@ impl SourceLoop for VideoTestSrc {
     where
         Self: 'a;
 
+    fn latency(&self) -> LatencyReport {
+        if !self.is_live {
+            return LatencyReport::ZERO;
+        }
+        let period_ns = framerate_q16_period_ns(self.framerate_q16).unwrap_or(0);
+        LatencyReport::live(period_ns, None)
+    }
+
+    fn set_clock_sync(&mut self, sync: ClockSync) {
+        self.clock_sync = Some(sync);
+    }
+
     fn intercept_caps<'a>(&'a mut self) -> Self::CapsFuture<'a> {
         core::future::ready(Ok(self.caps()))
     }
@@ -364,6 +385,12 @@ impl SourceLoop for VideoTestSrc {
                 vec![0u8; bytes_per_frame]
             };
 
+            let mut pacer = if self.is_live {
+                let sync = self.clock_sync.clone().ok_or(G2gError::NotConfigured)?;
+                Some(LivePacer::new(sync))
+            } else {
+                None
+            };
             let mut seq = 0u64;
             let mut pushed = 0u64;
             // num-buffers counts frames pushed, as in gst, so a QoS skip does not use it up
@@ -415,7 +442,11 @@ impl SourceLoop for VideoTestSrc {
                     MemoryDomain::System(SystemSlice::from_boxed(converted))
                 };
 
-                let pts = seq * pts_step_ns;
+                let stream_time_ns = seq * pts_step_ns;
+                let pts = match &mut pacer {
+                    Some(pacer) => pacer.wait_for(stream_time_ns).await?,
+                    None => stream_time_ns,
+                };
                 // Source-side wall-clock stamp so downstream sinks can
                 // record glass-to-glass latency via
                 // `monotonic_ns() - arrival_ns`. Matches the convention
@@ -485,6 +516,10 @@ impl SourceLoop for VideoTestSrc {
                 Ok(())
             }
             "num-buffers" => crate::numbuffers::set_num_buffers(&mut self.target_frames, &value),
+            "is-live" => {
+                self.is_live = value.as_bool().ok_or(PropError::Type)?;
+                Ok(())
+            }
             "width" => {
                 self.width = requested_dimension(&value)?;
                 self.width_pinned = true;
@@ -518,6 +553,7 @@ impl SourceLoop for VideoTestSrc {
         match name {
             "pattern" => Some(PropValue::Str(pattern_to_str(self.pattern).into())),
             "num-buffers" => Some(crate::numbuffers::get_num_buffers(self.target_frames)),
+            "is-live" => Some(PropValue::Bool(self.is_live)),
             "width" => Some(PropValue::Uint(self.width as u64)),
             "height" => Some(PropValue::Uint(self.height as u64)),
             // Report the integral fps numerator over /1 (Q16 stores fps*65536).
@@ -529,6 +565,7 @@ impl SourceLoop for VideoTestSrc {
 
 /// `VideoTestSrc`'s settable properties.
 static VIDEOTESTSRC_PROPS: &[PropertySpec] = &[
+    crate::livesource::IS_LIVE_PROPERTY,
     PropertySpec::new("pattern", PropKind::Str, "drawn pattern")
         .with_enum_values(
             "gradient | snow | bar | moving-bar | smpte | checkers-8 | checker | ball | zone-plate | black",

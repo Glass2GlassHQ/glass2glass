@@ -20,7 +20,6 @@
 
 use core::future::Future;
 use core::pin::Pin;
-use core::time::Duration;
 
 use alloc::boxed::Box;
 use alloc::sync::Arc;
@@ -108,27 +107,16 @@ impl ClockSyncTransform {
     /// Hold the buffer until its deadline. A buffer with no deadline (clipped
     /// outside the segment, or carrying `FrameTiming::PTS_NONE`) is forwarded
     /// now instead: see the module note.
-    async fn hold_until_due(&mut self, pts_ns: u64) {
+    async fn hold_until_due(&mut self, pts_ns: u64) -> Result<(), G2gError> {
         let sync = self.clock_sync();
         let Some(deadline) = self.pacer.deadline_ns(pts_ns) else {
-            return;
+            return Ok(());
         };
         // Shift the deadline, not the wait: a `ts-offset` larger than the frame
         // period would otherwise be spent again on every buffer instead of once
         // on the schedule.
         let due = shift(deadline, self.ts_offset_ns);
-        let now = sync.now_ns();
-        if due <= now {
-            return;
-        }
-        // Sleep on the clock's own timer when it has one, so the pacing follows
-        // that timeline (and a test clock can skip the wait). An elected clock
-        // that cannot sleep (an audio or PTP clock) still yields a deadline, so
-        // wait out the interval on the tokio timer instead.
-        match sync.clock.as_ticker() {
-            Some(ticker) => ticker.sleep_until_ns(due).await,
-            None => tokio::time::sleep(Duration::from_nanos(due - now)).await,
-        }
+        crate::livesource::sleep_until(&sync, due).await
     }
 }
 
@@ -211,7 +199,7 @@ impl AsyncElement for ClockSyncTransform {
             match packet {
                 PipelinePacket::DataFrame(frame) => {
                     if self.sync {
-                        self.hold_until_due(frame.timing.pts_ns).await;
+                        self.hold_until_due(frame.timing.pts_ns).await?;
                     }
                     self.forwarded += 1;
                     out.push(PipelinePacket::DataFrame(frame)).await?;

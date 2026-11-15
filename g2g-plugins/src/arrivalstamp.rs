@@ -10,6 +10,17 @@ use g2g_core::clock::{CaptureAnchor, ClockSync};
 use g2g_core::frame::Frame;
 #[cfg(feature = "webrtc")]
 use g2g_core::memory::SystemSlice;
+#[cfg(any(
+    feature = "webrtc",
+    feature = "remote",
+    feature = "remote-ws",
+    feature = "webtransport",
+    all(
+        target_os = "linux",
+        any(feature = "local-ipc", feature = "local-dmabuf")
+    ),
+    all(target_arch = "wasm32", feature = "web")
+))]
 use g2g_core::FrameTiming;
 #[cfg(feature = "webrtc")]
 use g2g_core::{FrameMetaSet, MemoryDomain};
@@ -72,7 +83,9 @@ impl ArrivalStamp {
     all(
         target_os = "linux",
         any(feature = "local-ipc", feature = "local-dmabuf")
-    )
+    ),
+    feature = "st2110",
+    all(target_arch = "wasm32", feature = "web")
 ))]
 #[derive(Debug)]
 pub(crate) struct SenderTimelineShift {
@@ -87,7 +100,9 @@ pub(crate) struct SenderTimelineShift {
     all(
         target_os = "linux",
         any(feature = "local-ipc", feature = "local-dmabuf")
-    )
+    ),
+    feature = "st2110",
+    all(target_arch = "wasm32", feature = "web")
 ))]
 impl SenderTimelineShift {
     pub(crate) fn new(clock_sync: Option<ClockSync>) -> Self {
@@ -97,7 +112,7 @@ impl SenderTimelineShift {
         }
     }
 
-    pub(crate) fn apply(&mut self, mut timing: FrameTiming) -> FrameTiming {
+    pub(crate) fn shift_ns(&mut self, sender_ns: u64) -> u64 {
         let offset_ns = match self.offset_ns {
             Some(offset_ns) => offset_ns,
             None => {
@@ -105,26 +120,49 @@ impl SenderTimelineShift {
                 let local_ns = self.arrival.running_time_ns(arrival_ns);
                 *self
                     .offset_ns
-                    .insert(i128::from(local_ns) - i128::from(timing.dts_ns))
+                    .insert(i128::from(local_ns) - i128::from(sender_ns))
             }
         };
-        timing.pts_ns = shifted(timing.pts_ns, offset_ns);
-        timing.dts_ns = shifted(timing.dts_ns, offset_ns);
+        (i128::from(sender_ns) + offset_ns).clamp(0, i128::from(u64::MAX)) as u64
+    }
+
+    #[cfg(any(
+        feature = "remote",
+        feature = "remote-ws",
+        feature = "webtransport",
+        all(
+            target_os = "linux",
+            any(feature = "local-ipc", feature = "local-dmabuf")
+        ),
+        all(target_arch = "wasm32", feature = "web")
+    ))]
+    pub(crate) fn apply(&mut self, mut timing: FrameTiming) -> FrameTiming {
+        timing.dts_ns = self.shift_ns(timing.dts_ns);
+        timing.pts_ns = self.shift_ns(timing.pts_ns);
         timing
     }
 }
 
-#[cfg(any(
-    feature = "remote",
-    feature = "remote-ws",
-    feature = "webtransport",
-    all(
-        target_os = "linux",
-        any(feature = "local-ipc", feature = "local-dmabuf")
-    )
-))]
-fn shifted(time_ns: u64, offset_ns: i128) -> u64 {
-    (i128::from(time_ns) + offset_ns).clamp(0, i128::from(u64::MAX)) as u64
+#[cfg(feature = "st2110")]
+#[derive(Debug)]
+pub(crate) struct RtpArrivalTimeline {
+    rebase: crate::rtpjitter::RtpPtsRebase,
+    shift: SenderTimelineShift,
+}
+
+#[cfg(feature = "st2110")]
+impl RtpArrivalTimeline {
+    pub(crate) fn new(clock_sync: Option<ClockSync>) -> Self {
+        Self {
+            rebase: crate::rtpjitter::RtpPtsRebase::new(),
+            shift: SenderTimelineShift::new(clock_sync),
+        }
+    }
+
+    pub(crate) fn pts_ns(&mut self, rtp_timestamp: u32, clock_rate: u32) -> u64 {
+        let sender_ns = self.rebase.pts_ns(rtp_timestamp, clock_rate);
+        self.shift.shift_ns(sender_ns)
+    }
 }
 
 #[cfg(all(
@@ -136,7 +174,8 @@ fn shifted(time_ns: u64, offset_ns: i128) -> u64 {
         all(
             target_os = "linux",
             any(feature = "local-ipc", feature = "local-dmabuf")
-        )
+        ),
+        all(target_arch = "wasm32", feature = "web")
     )
 ))]
 mod tests {

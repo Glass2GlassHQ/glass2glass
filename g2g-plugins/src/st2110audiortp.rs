@@ -32,6 +32,7 @@ use std::time::Duration;
 
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
+use g2g_core::query::LatencyReport;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::time::ns_to_ticks;
 use g2g_core::{
@@ -41,8 +42,8 @@ use g2g_core::{
     ANY_SAMPLE_RATE,
 };
 
+use crate::arrivalstamp::RtpArrivalTimeline;
 use crate::filesink::io_err;
-use crate::rtpjitter::RtpPtsRebase;
 use crate::st2110audio::{SampleDepth, St2110AudioDepacketizer, St2110AudioPacketizer};
 use crate::st2110dup::spawn_rtp_receiver;
 use crate::st2110sdp::{St2110Essence, St2110Sdp};
@@ -395,6 +396,7 @@ pub struct St2110AudioSrc {
     sample_rate: u32,
     recv_timeout_ms: u64,
     socket: Option<UdpSocket>,
+    clock_sync: Option<ClockSync>,
 }
 
 impl core::fmt::Debug for St2110AudioSrc {
@@ -426,6 +428,7 @@ impl St2110AudioSrc {
             sample_rate: 48_000,
             recv_timeout_ms: 500,
             socket: None,
+            clock_sync: None,
         }
     }
 
@@ -485,6 +488,14 @@ impl SourceLoop for St2110AudioSrc {
     where
         Self: 'a;
 
+    fn latency(&self) -> LatencyReport {
+        LatencyReport::live(0, None)
+    }
+
+    fn set_clock_sync(&mut self, sync: ClockSync) {
+        self.clock_sync = Some(sync);
+    }
+
     fn intercept_caps(&mut self) -> Self::CapsFuture<'_> {
         ready(Ok(self.caps()))
     }
@@ -501,7 +512,7 @@ impl SourceLoop for St2110AudioSrc {
             let depth = wire_depth(self.format).ok_or(G2gError::CapsMismatch)?;
             let depack = St2110AudioDepacketizer::new(u16::from(self.channels), depth);
             let clock = MediaClock::audio(self.sample_rate);
-            let mut pts_rebase = RtpPtsRebase::new();
+            let mut timeline = RtpArrivalTimeline::new(self.clock_sync.clone());
             let mut count = 0u64;
             let paths = alloc::vec![sock.try_clone().map_err(io_err)?];
             let idle = Duration::from_millis(self.recv_timeout_ms);
@@ -510,10 +521,11 @@ impl SourceLoop for St2110AudioSrc {
                     .map_err(io_err)?;
             while let Some(p) = units.recv().await {
                 let p = p.map_err(io_err)?;
-                // PTS = the packet's media-clock offset from the first packet, so
-                // the receiver reproduces the sender's timing without needing a
-                // shared epoch here (the PTP clock supplies absolute time upstream).
-                let pts_ns = pts_rebase.pts_ns(p.rtp_timestamp, clock.rate_hz());
+                // PTS = the packet's media-clock offset from the first packet,
+                // which lands at its local arrival, so the receiver reproduces the
+                // sender's timing without needing a shared epoch here (the PTP
+                // clock supplies absolute time upstream).
+                let pts_ns = timeline.pts_ns(p.rtp_timestamp, clock.rate_hz());
 
                 let bytes = samples_to_pcm(self.format, &p.samples);
                 let frame = Frame {

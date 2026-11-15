@@ -34,6 +34,7 @@ use core::pin::Pin;
 
 use alloc::boxed::Box;
 
+use g2g_core::query::LatencyReport;
 use g2g_core::runtime::{
     select2, DynSourceLoop, Either, GaplessController, GraphNode, Registry, SourceLoop, UriError,
     UriSource,
@@ -291,6 +292,10 @@ impl OutputSink for ShiftSink<'_> {
     fn begin_push(&mut self) {
         self.shifted = false;
         self.out.begin_push();
+    }
+
+    fn latency_changed(&mut self, latency: LatencyReport) {
+        self.out.latency_changed(latency);
     }
 
     fn poll_push(

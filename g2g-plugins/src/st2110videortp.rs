@@ -33,6 +33,7 @@ use std::time::Duration;
 use g2g_core::caps::{framerate_q16_from_fraction, framerate_q16_period_ns};
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
+use g2g_core::query::LatencyReport;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ClockSync, ConfigureOutcome, Dim, ElementMetadata,
@@ -40,8 +41,8 @@ use g2g_core::{
     PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, RawVideoFormat,
 };
 
+use crate::arrivalstamp::RtpArrivalTimeline;
 use crate::filesink::io_err;
-use crate::rtpjitter::RtpPtsRebase;
 use crate::st2110dup::spawn_rtp_receiver;
 use crate::st2110pacing::{PacedSender, Pacer, PacingProfile};
 use crate::st2110sdp::{St2110Essence, St2110Sdp};
@@ -389,6 +390,7 @@ pub struct St2110VideoSrc {
     redundant_address: String,
     redundant_port: u16,
     socket2: Option<UdpSocket>,
+    clock_sync: Option<ClockSync>,
 }
 
 /// Build one output `Frame` from a reassembled -20 frame's bytes and RTP timestamp,
@@ -398,10 +400,10 @@ fn build_frame(
     bytes: Vec<u8>,
     rtp_timestamp: u32,
     clock: &MediaClock,
-    pts_rebase: &mut RtpPtsRebase,
+    timeline: &mut RtpArrivalTimeline,
     count: u64,
 ) -> Frame {
-    let pts_ns = pts_rebase.pts_ns(rtp_timestamp, clock.rate_hz());
+    let pts_ns = timeline.pts_ns(rtp_timestamp, clock.rate_hz());
     Frame {
         domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
         timing: FrameTiming {
@@ -447,6 +449,7 @@ impl St2110VideoSrc {
             redundant_address: String::from("0.0.0.0"),
             redundant_port: 5009,
             socket2: None,
+            clock_sync: None,
         }
     }
 
@@ -521,6 +524,14 @@ impl SourceLoop for St2110VideoSrc {
     where
         Self: 'a;
 
+    fn latency(&self) -> LatencyReport {
+        LatencyReport::live(0, None)
+    }
+
+    fn set_clock_sync(&mut self, sync: ClockSync) {
+        self.clock_sync = Some(sync);
+    }
+
     fn intercept_caps(&mut self) -> Self::CapsFuture<'_> {
         ready(self.caps())
     }
@@ -545,7 +556,7 @@ impl SourceLoop for St2110VideoSrc {
             let mut depack = St2110VideoDepacketizer::new(self.format, self.width, self.height)
                 .ok_or(G2gError::CapsMismatch)?;
             let clock = MediaClock::video();
-            let mut pts_rebase = RtpPtsRebase::new();
+            let mut timeline = RtpArrivalTimeline::new(self.clock_sync.clone());
             let mut count = 0u64;
             let socket = self.socket.as_ref().ok_or(G2gError::NotConfigured)?;
             let mut paths = alloc::vec![socket.try_clone().map_err(io_err)?];
@@ -564,7 +575,7 @@ impl SourceLoop for St2110VideoSrc {
                     vframe.bytes,
                     vframe.rtp_timestamp,
                     &clock,
-                    &mut pts_rebase,
+                    &mut timeline,
                     count,
                 );
                 out.push(PipelinePacket::DataFrame(frame)).await?;

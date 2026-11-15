@@ -155,6 +155,11 @@ async fn a_hang_broadcast_plays_as_annexb_access_units_with_their_timestamps() {
             ));
         }
     }
+    // moqtsrc shifts the first frame to running time zero
+    let first_pts_ns = expected[0].0;
+    for frame in &mut expected {
+        frame.0 -= first_pts_ns;
+    }
     assert_eq!(played, expected);
     assert_eq!(src.selected_track(), VIDEO_TRACK);
 }

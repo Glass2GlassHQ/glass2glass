@@ -60,6 +60,7 @@ use web_transport_quinn::{
 use g2g_core::caps::framerate_q16_period_ns;
 use g2g_core::g2g_warn;
 use g2g_core::log::Target;
+use g2g_core::query::LatencyReport;
 use g2g_core::{
     Caps, G2gError, NetworkFailure, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
     Rate,
@@ -334,6 +335,14 @@ impl WtStream {
     /// Read the next packet, from the bidirectional stream or, once the peer
     /// sends in another video mode, from its unidirectional streams and
     /// datagrams in send order. `Ok(None)` once the peer finishes sending.
+    pub(crate) fn latency(&self) -> LatencyReport {
+        let held_ns = match (self.receiving.datagrams_seen, self.receiving.frame_timeout) {
+            (true, Some(timeout)) => timeout.as_nanos() as u64,
+            _ => 0,
+        };
+        LatencyReport::live(held_ns, None)
+    }
+
     pub(crate) async fn recv(&mut self) -> Result<Option<PipelinePacket>, G2gError> {
         let mut packet = self.recv_packet().await?;
         let stamped = match &mut packet {

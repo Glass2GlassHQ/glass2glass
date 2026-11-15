@@ -146,6 +146,8 @@ pub trait OutputSink {
     /// Discard any phase a cancelled earlier push left behind. Runs once per
     /// [`PushFuture`] construction; stateless sinks keep the no-op.
     fn begin_push(&mut self) {}
+
+    fn latency_changed(&mut self, _latency: LatencyReport) {}
 }
 
 /// `push` for concrete (sized) sinks. Separate from [`OutputSink`] because a

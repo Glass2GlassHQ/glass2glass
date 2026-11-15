@@ -281,6 +281,7 @@ mod mathf;
 mod paint;
 mod xmlutil;
 // Shared gst `num-buffers` property conversion used by the source elements.
+mod livesource;
 mod numbuffers;
 // Shared `cuda-device-id` property used by the elements that open a CUDA context.
 #[cfg(any(
@@ -1084,7 +1085,9 @@ pub mod udpsink;
     all(
         target_os = "linux",
         any(feature = "local-ipc", feature = "local-dmabuf")
-    )
+    ),
+    feature = "st2110",
+    all(target_arch = "wasm32", feature = "web")
 ))]
 mod arrivalstamp;
 #[cfg(feature = "webrtc")]

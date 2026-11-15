@@ -62,6 +62,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use g2g_core::log::LogSource;
+use g2g_core::query::LatencyReport;
 use g2g_core::runtime::{
     eos_then_wait_for_seek, flushing_only, SeekController, SeekFormat, SeekRefusal, SourceLoop,
 };
@@ -324,6 +325,7 @@ pub struct HlsSrc {
     cookie_jar: Option<alloc::sync::Arc<reqwest::cookie::Jar>>,
     bus: Option<BusHandle>,
     configured: bool,
+    latency: LatencyReport,
 }
 
 impl HlsSrc {
@@ -345,7 +347,12 @@ impl HlsSrc {
             cookie_jar: None,
             bus: None,
             configured: false,
+            latency: LatencyReport::ZERO,
         }
+    }
+
+    fn plays_parts(&self, media: &MediaPlaylist) -> bool {
+        self.low_latency && !self.text && media.low_latency()
     }
 
     // each run builds its client, since pooled connections belong to the tokio runtime that opened them
@@ -473,6 +480,11 @@ impl HlsSrc {
             ByteStreamEncoding::MpegTs
         };
         self.container = Some(enc);
+        if !media.end_list {
+            let target_ms =
+                prebuffer_target_ms(self.prebuffer_ms, &media, self.plays_parts(&media));
+            self.latency = LatencyReport::live(target_ms.saturating_mul(1_000_000), None);
+        }
         self.probed = Some((media, media_url));
         Ok(enc)
     }
@@ -1017,6 +1029,10 @@ impl SourceLoop for HlsSrc {
 
     /// Probe the playlist at negotiation to discover the segment container
     /// (TS vs fMP4), the way `RtspSrc` does its DESCRIBE. The probe is memoized.
+    fn latency(&self) -> LatencyReport {
+        self.latency
+    }
+
     fn intercept_caps<'a>(&'a mut self) -> Self::CapsFuture<'a> {
         Box::pin(async move {
             // Probe regardless (it memoizes the media playlist for `run`); a text
@@ -1091,7 +1107,7 @@ impl SourceLoop for HlsSrc {
             // holds a reload until the next one, so parts are fetched and emitted
             // as they appear. A subtitle rendition stays on the segment path (its
             // text is rewritten per segment, not per part).
-            let mut ll = self.low_latency && !text_mode && media.low_latency();
+            let mut ll = self.plays_parts(&media);
             // Blocking reloads answered with nothing new: a server that ignores
             // the delivery directives drops the run back to timed reloads.
             let mut blocking_misses = 0u32;

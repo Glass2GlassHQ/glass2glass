@@ -1651,6 +1651,10 @@ durations, and emits from otherwise. It posts the same quartile `Buffering`
 levels during the startup and post-seek fill and stays silent in steady state.
 Init segments ride the window with duration 0 so an ABR re-init stays ordered
 behind queued media, and a flushing seek clears the window and re-arms the fill.
+A live playlist (HLS without `#EXT-X-ENDLIST`, DASH `type="dynamic"`) makes the
+source report itself live with the prebuffer target as latency, read at
+negotiation, so `dashsrc` fetches its MPD there as `hlssrc` already did. VOD
+reports non-live.
 
 A manifest or segment URL is attacker-controlled, so the shared
 `fetch::get_bytes` and `get_text` never buffer an unbounded body. Each

@@ -9,6 +9,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use g2g_core::caps::framerate_q16_period_ns;
+use g2g_core::query::LatencyReport;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
     AsyncElement, G2gError, OutputSink, PipelinePacket, PropValue, PushOutcome, Reconfigure,
@@ -92,9 +94,14 @@ struct RecordingOut {
     frames: Vec<Received>,
     controls: Vec<&'static str>,
     ask_for_keyframe_at: Option<u64>,
+    latency: Option<LatencyReport>,
 }
 
 impl OutputSink for RecordingOut {
+    fn latency_changed(&mut self, latency: LatencyReport) {
+        self.latency = Some(latency);
+    }
+
     fn poll_push(
         &mut self,
         _context: &mut core::task::Context<'_>,
@@ -344,6 +351,16 @@ async fn lost_datagrams_skip_to_a_requested_keyframe() {
         "a requested keyframe arrived"
     );
     assert_eq!(out.controls.last(), Some(&"eos"));
+    let g2g_core::Rate::Fixed(framerate_q16) = test_caps().framerate() else {
+        panic!("the test caps have a fixed framerate");
+    };
+    let frame_period_ns =
+        framerate_q16_period_ns(framerate_q16).expect("the test caps have a framerate");
+    assert_eq!(
+        out.latency,
+        Some(LatencyReport::live(frame_period_ns, None)),
+        "datagram video reports the wait for a missing frame"
+    );
 }
 
 #[tokio::test]

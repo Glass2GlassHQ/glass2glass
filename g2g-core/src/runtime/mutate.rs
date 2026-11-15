@@ -1989,6 +1989,7 @@ impl<'a, 'f, 's> MutationService<'a, 'f, 's> {
             probe: traced_source_probe(&log_name, self.visit_recorder.as_ref()),
             log_name,
             run_end: self.run_end.clone(),
+            latency: None,
         };
         let arm = (self.spawn.source)(source, io, done_tx);
         if self.arms.send(arm).await.is_err() {
@@ -2339,6 +2340,7 @@ impl<'a, 'f, 's> MutationService<'a, 'f, 's> {
             probe: traced_source_probe(&log_name, self.visit_recorder.as_ref()),
             log_name,
             run_end: self.run_end.clone(),
+            latency: None,
         };
         let arm = (self.spawn.source)(source, io, done_tx);
         if self.arms.send(arm).await.is_err() {

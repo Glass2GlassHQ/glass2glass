@@ -18,6 +18,7 @@ use std::thread;
 use g2g_core::element::AsyncElement;
 use g2g_core::frame::{Frame, FrameTiming};
 use g2g_core::memory::SystemSlice;
+use g2g_core::query::LatencyReport;
 use g2g_core::runtime::{SeekController, SeekOutcome, SeekTicket, SourceLoop};
 use g2g_core::{
     ByteStreamEncoding, Caps, Dim, G2gError, MemoryDomain, MultiInputElement, OutputSink,
@@ -1060,4 +1061,23 @@ async fn dash_seek_drops_the_segment_download_in_flight() {
         [init.clone(), segs[0].clone(), init, segs[2].clone()].concat(),
         "nothing of the stalled segment goes out"
     );
+}
+
+#[tokio::test]
+async fn a_dynamic_mpd_reports_its_prebuffer_as_live_latency() {
+    const PREBUFFER_MS: u64 = 1_500;
+    let mut src = DashSrc::new(serve_live(Vec::new(), Vec::new())).with_prebuffer_ms(PREBUFFER_MS);
+    src.intercept_caps().await.expect("probe the manifest");
+    assert_eq!(
+        src.latency(),
+        LatencyReport::live(PREBUFFER_MS * 1_000_000, None),
+        "a dynamic MPD is live and holds the prebuffer"
+    );
+}
+
+#[tokio::test]
+async fn a_static_mpd_reports_no_latency() {
+    let mut src = DashSrc::new(serve(Vec::new(), Vec::new()));
+    src.intercept_caps().await.expect("probe the manifest");
+    assert_eq!(src.latency(), LatencyReport::ZERO);
 }

@@ -64,6 +64,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use g2g_core::log::LogSource;
+use g2g_core::query::LatencyReport;
 use g2g_core::runtime::{
     eos_then_wait_for_seek, flushing_only, SeekController, SeekFormat, SeekRefusal, SourceLoop,
 };
@@ -318,6 +319,8 @@ pub struct DashSrc {
     cookies: String,
     bus: Option<BusHandle>,
     configured: bool,
+    probed: Option<(Mpd, RequestSpan)>,
+    latency: LatencyReport,
 }
 
 impl DashSrc {
@@ -334,6 +337,8 @@ impl DashSrc {
             cookies: String::new(),
             bus: None,
             configured: false,
+            probed: None,
+            latency: LatencyReport::ZERO,
         }
     }
 
@@ -507,6 +512,27 @@ fn manifest_reload_ms(minimum_update_period_secs: Option<f64>) -> u64 {
     declared_ms.max(DEFAULT_MANIFEST_RELOAD_MS)
 }
 
+impl DashSrc {
+    fn http_client(&self) -> Result<reqwest::Client, G2gError> {
+        reqwest::Client::builder()
+            .cookie_provider(cookie_jar(&self.url, &self.cookies)?)
+            .build()
+            .map_err(http_err)
+    }
+
+    async fn probe(&mut self) -> Result<(), G2gError> {
+        if self.probed.is_some() {
+            return Ok(());
+        }
+        let (mpd, manifest_request) = fetch_manifest(&self.http_client()?, &self.url).await?;
+        if mpd.dynamic {
+            self.latency = LatencyReport::live(self.prebuffer_ms.saturating_mul(1_000_000), None);
+        }
+        self.probed = Some((mpd, manifest_request));
+        Ok(())
+    }
+}
+
 impl SourceLoop for DashSrc {
     type RunFuture<'a>
         = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>
@@ -514,20 +540,24 @@ impl SourceLoop for DashSrc {
         Self: 'a;
 
     type CapsFuture<'a>
-        = core::future::Ready<Result<Caps, G2gError>>
+        = Pin<Box<dyn Future<Output = Result<Caps, G2gError>> + 'a>>
     where
         Self: 'a;
 
-    fn intercept_caps<'a>(&'a mut self) -> Self::CapsFuture<'a> {
-        core::future::ready(Ok(Self::output_caps()))
+    fn latency(&self) -> LatencyReport {
+        self.latency
     }
 
-    fn caps_constraint<'a>(
-        &'a mut self,
-    ) -> impl Future<Output = Result<CapsConstraint<'a>, G2gError>> + 'a {
-        core::future::ready(Ok(CapsConstraint::Produces(CapsSet::one(
-            Self::output_caps(),
-        ))))
+    fn intercept_caps<'a>(&'a mut self) -> Self::CapsFuture<'a> {
+        Box::pin(async move {
+            self.probe().await?;
+            Ok(Self::output_caps())
+        })
+    }
+
+    async fn caps_constraint(&mut self) -> Result<CapsConstraint<'_>, G2gError> {
+        let caps = self.intercept_caps().await?;
+        Ok(CapsConstraint::Produces(CapsSet::one(caps)))
     }
 
     fn configure_pipeline(&mut self, _absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -548,13 +578,13 @@ impl SourceLoop for DashSrc {
             if !self.configured {
                 return Err(G2gError::NotConfigured);
             }
-            let client = reqwest::Client::builder()
-                .cookie_provider(cookie_jar(&self.url, &self.cookies)?)
-                .build()
-                .map_err(http_err)?;
+            let client = self.http_client()?;
             let cap = (self.max_bandwidth != 0).then_some(self.max_bandwidth);
 
-            let (mut mpd, manifest_request) = fetch_manifest(&client, &self.url).await?;
+            let (mut mpd, manifest_request) = match self.probed.take() {
+                Some(probed) => probed,
+                None => fetch_manifest(&client, &self.url).await?,
+            };
             // every live availability is computed on the server's clock
             let mut clock = ServerClock::default();
             if mpd.dynamic {

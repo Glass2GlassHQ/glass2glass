@@ -278,6 +278,10 @@ impl OutputSink for AliveSink<'_> {
         self.out.begin_push();
     }
 
+    fn latency_changed(&mut self, latency: LatencyReport) {
+        self.out.latency_changed(latency);
+    }
+
     fn poll_push(
         &mut self,
         cx: &mut Context<'_>,

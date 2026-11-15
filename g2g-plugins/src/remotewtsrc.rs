@@ -46,6 +46,7 @@ use tokio::sync::Mutex;
 
 use web_transport_quinn::quinn::Endpoint;
 
+use g2g_core::query::LatencyReport;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{Caps, PipelinePacket, PropError, PropKind, PropValue, PropertySpec};
 
@@ -272,6 +273,10 @@ impl PacketTransport for WtTransport {
 
     fn request_keyframe(conn: &mut Self::Conn) -> TransportFuture<'_, ()> {
         Box::pin(async move { conn.request_keyframe().await })
+    }
+
+    fn latency(conn: &Self::Conn) -> LatencyReport {
+        conn.latency()
     }
 
     fn set_transport_prop(

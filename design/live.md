@@ -1077,7 +1077,7 @@ clock.
 like `uridecodebin`: the URI's source auto-plugged to raw on input 0, and on
 input 1 the decode chain of `fallback-uri` or of an application-built fallback
 source, or else a dummy generator, `videotestsrc pattern=black` or `audiotestsrc wave=silence` behind a
-`clocksync`. Neither test source is live, so without the pacer the dummy would
+`clocksync`. Neither test source is live by default, so without the pacer the dummy would
 run as fast as the CPU allows. `timeout` and `immediate-fallback` pass through to
 the switch, and a `name=` names the switch, so a line can hang a further branch
 off it by pad reference. Inline, the expansion is single-stream, as

@@ -17,8 +17,10 @@ use core::pin::Pin;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
+use g2g_core::clock::ClockSync;
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
+use g2g_core::query::LatencyReport;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::time::ticks_to_ns;
 use g2g_core::{
@@ -26,6 +28,8 @@ use g2g_core::{
     ElementMetadata, FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates,
     PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
 };
+
+use crate::livesource::LivePacer;
 
 /// Samples per emitted buffer: 10 ms at the configured rate.
 const BUFFER_MS: u64 = 10;
@@ -62,6 +66,8 @@ pub struct AudioTestSrc {
     wave: Wave,
     target_buffers: u64,
     configured: bool,
+    is_live: bool,
+    clock_sync: Option<ClockSync>,
 }
 
 impl AudioTestSrc {
@@ -77,7 +83,13 @@ impl AudioTestSrc {
             wave: Wave::Sine,
             target_buffers,
             configured: false,
+            is_live: false,
+            clock_sync: None,
         }
+    }
+
+    fn samples_per_buffer(&self) -> u64 {
+        (self.sample_rate as u64 * BUFFER_MS / 1000).max(1)
     }
 
     pub fn with_wave(mut self, wave: Wave) -> Self {
@@ -158,6 +170,20 @@ impl SourceLoop for AudioTestSrc {
     where
         Self: 'a;
 
+    fn latency(&self) -> LatencyReport {
+        if !self.is_live {
+            return LatencyReport::ZERO;
+        }
+        LatencyReport::live(
+            ticks_to_ns(self.samples_per_buffer(), self.sample_rate),
+            None,
+        )
+    }
+
+    fn set_clock_sync(&mut self, sync: ClockSync) {
+        self.clock_sync = Some(sync);
+    }
+
     fn intercept_caps<'a>(&'a mut self) -> Self::CapsFuture<'a> {
         core::future::ready(Ok(self.caps()))
     }
@@ -178,8 +204,14 @@ impl SourceLoop for AudioTestSrc {
             if !self.configured {
                 return Err(G2gError::NotConfigured);
             }
-            let samples_per_buffer = (self.sample_rate as u64 * BUFFER_MS / 1000).max(1);
+            let samples_per_buffer = self.samples_per_buffer();
             let buffer_duration_ns = ticks_to_ns(samples_per_buffer, self.sample_rate);
+            let mut pacer = if self.is_live {
+                let sync = self.clock_sync.clone().ok_or(G2gError::NotConfigured)?;
+                Some(LivePacer::new(sync))
+            } else {
+                None
+            };
 
             for seq in 0..self.target_buffers {
                 let base = seq * samples_per_buffer;
@@ -192,7 +224,11 @@ impl SourceLoop for AudioTestSrc {
                     }
                 }
 
-                let pts = seq * buffer_duration_ns;
+                let stream_time_ns = seq * buffer_duration_ns;
+                let pts = match &mut pacer {
+                    Some(pacer) => pacer.wait_for(stream_time_ns).await?,
+                    None => stream_time_ns,
+                };
                 #[cfg(feature = "std")]
                 let arrival_ns = g2g_core::metrics::monotonic_ns();
                 #[cfg(not(feature = "std"))]
@@ -238,6 +274,7 @@ impl SourceLoop for AudioTestSrc {
             "channels" => self.channels = value.as_uint().ok_or(PropError::Type)? as u8,
             "freq" => self.tone_hz = value.as_uint().ok_or(PropError::Type)? as u32,
             "num-buffers" => crate::numbuffers::set_num_buffers(&mut self.target_buffers, &value)?,
+            "is-live" => self.is_live = value.as_bool().ok_or(PropError::Type)?,
             "wave" => {
                 let s = value.as_str().ok_or(PropError::Type)?;
                 self.wave = wave_from_str(s).ok_or(PropError::Value)?;
@@ -253,6 +290,7 @@ impl SourceLoop for AudioTestSrc {
             "channels" => Some(PropValue::Uint(self.channels as u64)),
             "freq" => Some(PropValue::Uint(self.tone_hz as u64)),
             "num-buffers" => Some(crate::numbuffers::get_num_buffers(self.target_buffers)),
+            "is-live" => Some(PropValue::Bool(self.is_live)),
             "wave" => Some(PropValue::Str(wave_to_str(self.wave).into())),
             _ => None,
         }
@@ -261,6 +299,7 @@ impl SourceLoop for AudioTestSrc {
 
 /// `AudioTestSrc`'s settable properties.
 static AUDIOTESTSRC_PROPS: &[PropertySpec] = &[
+    crate::livesource::IS_LIVE_PROPERTY,
     PropertySpec::new("samplerate", PropKind::Uint, "samples per second"),
     PropertySpec::new("channels", PropKind::Uint, "channel count"),
     PropertySpec::new("freq", PropKind::Uint, "test tone frequency in Hz"),

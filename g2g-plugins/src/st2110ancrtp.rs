@@ -34,6 +34,7 @@ use alloc::vec::Vec;
 use std::net::UdpSocket;
 use std::time::Duration;
 
+use g2g_core::query::LatencyReport;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ClockSync, ConfigureOutcome, Dim, ElementMetadata,
@@ -41,10 +42,10 @@ use g2g_core::{
     PropKind, PropValue, PropertySpec, Rate, VideoCodec,
 };
 
+use crate::arrivalstamp::RtpArrivalTimeline;
 use crate::ccextract::push_cue_frames;
 use crate::cea::{build_cdp, extract_cc_data, parse_cdp, CaptionDecoder, CcSource};
 use crate::filesink::io_err;
-use crate::rtpjitter::RtpPtsRebase;
 use crate::st2110anc::{AncField, St2110AncDepacketizer, St2110AncPacketizer};
 use crate::st2110dup::spawn_rtp_receiver;
 use crate::st2110sdp::{St2110Essence, St2110Sdp};
@@ -323,6 +324,7 @@ pub struct St2110AncSrc {
     source: CcSource,
     recv_timeout_ms: u64,
     socket: Option<UdpSocket>,
+    clock_sync: Option<ClockSync>,
 }
 
 impl core::fmt::Debug for St2110AncSrc {
@@ -355,6 +357,7 @@ impl St2110AncSrc {
             source,
             recv_timeout_ms: 500,
             socket: None,
+            clock_sync: None,
         }
     }
 
@@ -391,6 +394,14 @@ impl SourceLoop for St2110AncSrc {
     where
         Self: 'a;
 
+    fn latency(&self) -> LatencyReport {
+        LatencyReport::live(0, None)
+    }
+
+    fn set_clock_sync(&mut self, sync: ClockSync) {
+        self.clock_sync = Some(sync);
+    }
+
     fn intercept_caps(&mut self) -> Self::CapsFuture<'_> {
         ready(Ok(Caps::Text {
             format: g2g_core::TextFormat::Utf8,
@@ -409,7 +420,7 @@ impl SourceLoop for St2110AncSrc {
             let depack = St2110AncDepacketizer::new();
             let mut decoder = CaptionDecoder::new(self.source);
             let clock = MediaClock::video();
-            let mut pts_rebase = RtpPtsRebase::new();
+            let mut timeline = RtpArrivalTimeline::new(self.clock_sync.clone());
             let mut last_pts = 0u64;
             let mut caps_emitted = false;
             let mut sequence = 0u64;
@@ -420,9 +431,10 @@ impl SourceLoop for St2110AncSrc {
                     .map_err(io_err)?;
             while let Some(anc_frame) = units.recv().await {
                 let anc_frame = anc_frame.map_err(io_err)?;
-                // PTS = the packet's media-clock offset from the first packet (the
-                // PTP grandmaster supplies absolute time upstream).
-                let pts_ns = pts_rebase.pts_ns(anc_frame.rtp_timestamp, clock.rate_hz());
+                // PTS = the packet's media-clock offset from the first packet, which
+                // lands at its local arrival (the PTP grandmaster supplies absolute
+                // time upstream).
+                let pts_ns = timeline.pts_ns(anc_frame.rtp_timestamp, clock.rate_hz());
                 last_pts = pts_ns;
                 for anc in &anc_frame.packets {
                     // Only CEA caption ANC packets carry a CDP.

@@ -34,6 +34,7 @@ use std::time::Duration;
 use g2g_core::caps::{framerate_q16_from_fraction, framerate_q16_period_ns};
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
+use g2g_core::query::LatencyReport;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ClockSync, ConfigureOutcome, Dim, ElementMetadata,
@@ -41,8 +42,8 @@ use g2g_core::{
     PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, VideoCodec,
 };
 
+use crate::arrivalstamp::RtpArrivalTimeline;
 use crate::filesink::io_err;
-use crate::rtpjitter::RtpPtsRebase;
 use crate::st2110dup::spawn_rtp_receiver;
 use crate::st2110jxs::{St2110JxsDepacketizer, St2110JxsPacketizer};
 use crate::st2110pacing::{PacedSender, Pacer, PacingProfile};
@@ -405,6 +406,7 @@ pub struct St2110JxsSrc {
     recv_timeout_ms: u64,
     max_frame_bytes: usize,
     socket: Option<UdpSocket>,
+    clock_sync: Option<ClockSync>,
 }
 
 impl core::fmt::Debug for St2110JxsSrc {
@@ -436,6 +438,7 @@ impl St2110JxsSrc {
             recv_timeout_ms: 500,
             max_frame_bytes: DEFAULT_MAX_FRAME_BYTES,
             socket: None,
+            clock_sync: None,
         }
     }
 
@@ -496,6 +499,14 @@ impl SourceLoop for St2110JxsSrc {
     where
         Self: 'a;
 
+    fn latency(&self) -> LatencyReport {
+        LatencyReport::live(0, None)
+    }
+
+    fn set_clock_sync(&mut self, sync: ClockSync) {
+        self.clock_sync = Some(sync);
+    }
+
     fn intercept_caps(&mut self) -> Self::CapsFuture<'_> {
         ready(self.caps())
     }
@@ -511,7 +522,7 @@ impl SourceLoop for St2110JxsSrc {
             let sock = self.socket.as_ref().ok_or(G2gError::NotConfigured)?;
             let mut depack = St2110JxsDepacketizer::new(self.max_frame_bytes);
             let clock = MediaClock::video();
-            let mut pts_rebase = RtpPtsRebase::new();
+            let mut timeline = RtpArrivalTimeline::new(self.clock_sync.clone());
             let mut count = 0u64;
             let paths = alloc::vec![sock.try_clone().map_err(io_err)?];
             let idle = Duration::from_millis(self.recv_timeout_ms);
@@ -520,9 +531,10 @@ impl SourceLoop for St2110JxsSrc {
                     .map_err(io_err)?;
             while let Some(jxs) = units.recv().await {
                 let jxs = jxs.map_err(io_err)?;
-                // PTS = the frame's media-clock offset from the first frame (the PTP
-                // grandmaster supplies absolute time upstream).
-                let pts_ns = pts_rebase.pts_ns(jxs.rtp_timestamp, clock.rate_hz());
+                // PTS = the frame's media-clock offset from the first frame, which
+                // lands at its local arrival (the PTP grandmaster supplies absolute
+                // time upstream).
+                let pts_ns = timeline.pts_ns(jxs.rtp_timestamp, clock.rate_hz());
                 let frame = Frame {
                     domain: MemoryDomain::System(SystemSlice::from_boxed(
                         jxs.codestream.into_boxed_slice(),

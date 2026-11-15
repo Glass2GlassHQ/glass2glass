@@ -80,6 +80,10 @@ pub trait PacketTransport: Default + Send + Sync + 'static {
         Box::pin(async { Ok(()) })
     }
 
+    fn latency(_conn: &Self::Conn) -> LatencyReport {
+        LatencyReport::live(0, None)
+    }
+
     /// Handle the transport-specific half of `set_property`; `None` if `name` is
     /// not one of this transport's knobs (the caller's `match` falls through).
     fn set_transport_prop(
@@ -287,7 +291,9 @@ impl<T: PacketTransport> SourceLoop for RemoteSource<T> {
     }
 
     fn latency(&self) -> LatencyReport {
-        LatencyReport::live(0, None)
+        self.conn
+            .as_ref()
+            .map_or(LatencyReport::live(0, None), T::latency)
     }
 
     fn set_clock_sync(&mut self, sync: ClockSync) {
@@ -347,7 +353,9 @@ impl<T: PacketTransport> SourceLoop for RemoteSource<T> {
             let mut timeline = SenderTimelineShift::new(self.clock_sync.clone());
             loop {
                 let conn = self.conn.as_mut().ok_or(G2gError::NotConfigured)?;
-                let pkt = match T::recv(conn).await? {
+                let received = T::recv(conn).await?;
+                out.latency_changed(T::latency(conn));
+                let pkt = match received {
                     Some(p) => p,
                     // Sender closed the connection without a clean Eos.
                     None => {

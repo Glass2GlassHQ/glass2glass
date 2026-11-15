@@ -47,6 +47,7 @@ use tokio::net::{UnixListener, UnixStream};
 use g2g_core::frame::Frame;
 use g2g_core::log::io_err;
 use g2g_core::memory::SystemSlice;
+use g2g_core::query::LatencyReport;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
     AsyncElement, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
@@ -728,6 +729,7 @@ pub struct ShmSrc {
     frame_limit: u64,
     area_name: Option<String>,
     configured: bool,
+    is_live: bool,
 }
 
 impl Default for ShmSrc {
@@ -741,6 +743,7 @@ impl Default for ShmSrc {
             frame_limit: u64::MAX,
             area_name: None,
             configured: false,
+            is_live: false,
         }
     }
 }
@@ -811,6 +814,14 @@ impl SourceLoop for ShmSrc {
         = core::future::Ready<Result<Caps, G2gError>>
     where
         Self: 'a;
+
+    fn latency(&self) -> LatencyReport {
+        if self.is_live {
+            LatencyReport::live(0, None)
+        } else {
+            LatencyReport::ZERO
+        }
+    }
 
     fn intercept_caps<'a>(&'a mut self) -> Self::CapsFuture<'a> {
         core::future::ready(Ok(self.caps.clone()))
@@ -935,6 +946,10 @@ impl SourceLoop for ShmSrc {
                 Ok(())
             }
             "num-buffers" => crate::numbuffers::set_num_buffers(&mut self.frame_limit, &value),
+            "is-live" => {
+                self.is_live = value.as_bool().ok_or(PropError::Type)?;
+                Ok(())
+            }
             _ => Err(PropError::Unknown),
         }
     }
@@ -952,6 +967,7 @@ impl SourceLoop for ShmSrc {
             },
             "caps" if !self.caps_text.is_empty() => Some(PropValue::Str(self.caps_text.clone())),
             "num-buffers" => Some(crate::numbuffers::get_num_buffers(self.frame_limit)),
+            "is-live" => Some(PropValue::Bool(self.is_live)),
             "shm-area-name" => Some(PropValue::Str(
                 self.shm_area_name().unwrap_or_default().to_string(),
             )),
@@ -961,6 +977,7 @@ impl SourceLoop for ShmSrc {
 }
 
 static SRC_PROPS: &[PropertySpec] = &[
+    crate::livesource::IS_LIVE_PROPERTY,
     PropertySpec::new(
         "socket-path",
         PropKind::Str,

@@ -26,6 +26,8 @@ use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use g2g_core::clock::ClockSync;
+use g2g_core::query::LatencyReport;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::wire::decode_packet;
 use g2g_core::{
@@ -37,6 +39,7 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use web_sys::{BinaryType, CloseEvent, Event, MessageEvent, WebSocket};
 
+use crate::arrivalstamp::SenderTimelineShift;
 use crate::remotewire::map_wire;
 use crate::webutil::Inbox;
 
@@ -60,6 +63,7 @@ pub struct WsWireSrc {
     /// leading packet of `run`.
     discovered: Option<Caps>,
     configured: bool,
+    clock_sync: Option<ClockSync>,
 }
 
 impl core::fmt::Debug for WsWireSrc {
@@ -85,6 +89,7 @@ impl WsWireSrc {
             _on_error: None,
             discovered: None,
             configured: false,
+            clock_sync: None,
         }
     }
 
@@ -168,6 +173,14 @@ impl SourceLoop for WsWireSrc {
     /// Discovers the media from the wire: the sender's leading `CapsChanged` is
     /// the first message, so negotiation waits for it (the async caps-discovery
     /// pattern `RemoteWsSrc` uses).
+    fn latency(&self) -> LatencyReport {
+        LatencyReport::live(0, None)
+    }
+
+    fn set_clock_sync(&mut self, sync: ClockSync) {
+        self.clock_sync = Some(sync);
+    }
+
     fn intercept_caps(&mut self) -> Self::CapsFuture<'_> {
         Box::pin(async move {
             if let Some(caps) = self.discovered.clone() {
@@ -205,6 +218,7 @@ impl SourceLoop for WsWireSrc {
                 out.push(PipelinePacket::CapsChanged(caps)).await?;
             }
             let mut frames = 0u64;
+            let mut timeline = SenderTimelineShift::new(self.clock_sync.clone());
             // A failed push must not return early: the callbacks are still
             // installed on the socket, so they are detached below either way.
             let mut push_result = Ok(());
@@ -221,6 +235,13 @@ impl SourceLoop for WsWireSrc {
                 if matches!(packet, PipelinePacket::Eos) {
                     break;
                 }
+                let packet = match packet {
+                    PipelinePacket::DataFrame(mut frame) => {
+                        frame.timing = timeline.apply(frame.timing);
+                        PipelinePacket::DataFrame(frame)
+                    }
+                    other => other,
+                };
                 let is_frame = matches!(packet, PipelinePacket::DataFrame(_));
                 if let Err(e) = out.push(packet).await {
                     push_result = Err(e);

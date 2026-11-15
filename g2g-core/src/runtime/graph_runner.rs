@@ -2602,6 +2602,7 @@ fn plan_arms<'a>(
                         probe: traced_source_probe(&log_name, visit_recorder),
                         log_name,
                         run_end: run_end.clone(),
+                        latency: Some(LatencyFold::publisher(latency_fold, node)),
                     },
                     source,
                     done: live.as_mut().map(|topology| {
@@ -4647,6 +4648,7 @@ pub(crate) struct SourceArmIo {
     pub(crate) log_name: ElementLogName,
     pub(crate) probe: Probe,
     pub(crate) run_end: RunEndRequest,
+    pub(crate) latency: Option<LatencyPublisher>,
 }
 
 pub(crate) fn traced_source_probe(
@@ -4664,6 +4666,7 @@ pub(crate) struct SourceFrameSpans<'o, S: ?Sized> {
     span_start_ns: Option<u64>,
     pushing_stamp: Option<FrameStamp>,
     pushed_frames: u64,
+    latency: Option<LatencyPublisher>,
 }
 
 impl<'o, S: ?Sized> SourceFrameSpans<'o, S> {
@@ -4674,7 +4677,13 @@ impl<'o, S: ?Sized> SourceFrameSpans<'o, S> {
             probe,
             pushing_stamp: None,
             pushed_frames: 0,
+            latency: None,
         }
+    }
+
+    fn with_latency(mut self, latency: Option<LatencyPublisher>) -> Self {
+        self.latency = latency;
+        self
     }
 
     // an output that takes the packet on its first poll leaves the slot empty on the later ones
@@ -4704,6 +4713,12 @@ impl<S: OutputSink + ?Sized> OutputSink for SourceFrameSpans<'_, S> {
     fn begin_push(&mut self) {
         self.pushing_stamp = None;
         self.output.begin_push();
+    }
+
+    fn latency_changed(&mut self, latency: LatencyReport) {
+        if let Some(publisher) = &mut self.latency {
+            publisher.observe(latency);
+        }
     }
 
     fn poll_push(
@@ -4765,6 +4780,7 @@ pub(crate) async fn run_source(
         log_name,
         probe,
         run_end,
+        latency,
     } = io;
     // M206: announce the stream start before any data, one per source, so an
     // application can bracket each stream's lifetime (StreamStart .. Eos).
@@ -4792,7 +4808,7 @@ pub(crate) async fn run_source(
     // downstream branch maps timestamps to running time from the first frame.
     let _ = adapter.push(PipelinePacket::Segment(segment)).await?;
     adapter.set_push_wait_probe(probe.clone());
-    let mut spans = SourceFrameSpans::new(&mut adapter, probe);
+    let mut spans = SourceFrameSpans::new(&mut adapter, probe).with_latency(latency);
     let ended = select2(src.run(&mut spans), run_end.requested()).await;
     match ended {
         Either::Left(result) => result,

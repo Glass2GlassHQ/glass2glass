@@ -373,3 +373,49 @@ fn a_fan_out_source_reaches_the_fold() {
         Some(HELD_UNIT_NS)
     );
 }
+
+struct LearningSource;
+
+impl SourceLoop for LearningSource {
+    type RunFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>
+    where
+        Self: 'a;
+    type CapsFuture<'a>
+        = core::future::Ready<Result<Caps, G2gError>>
+    where
+        Self: 'a;
+
+    fn intercept_caps(&mut self) -> Self::CapsFuture<'_> {
+        core::future::ready(Ok(caps()))
+    }
+
+    fn configure_pipeline(&mut self, _caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
+        Ok(ConfigureOutcome::Accepted)
+    }
+
+    fn run<'a>(&'a mut self, out: &'a mut dyn OutputSink) -> Self::RunFuture<'a> {
+        Box::pin(async move {
+            for i in 0..FRAME_COUNT {
+                out.push(frame(i)).await?;
+                out.latency_changed(HELD_UNIT);
+            }
+            out.push(PipelinePacket::Eos).await?;
+            Ok(FRAME_COUNT)
+        })
+    }
+}
+
+#[test]
+fn a_source_that_learns_its_latency_retargets_the_running_sink() {
+    let log = Arc::new(Mutex::new(SinkLog::default()));
+    let mut graph: Graph<GraphNode> = Graph::new();
+    let src = graph.add_source(GraphNode::source(LearningSource));
+    let sink = graph.add_sink(GraphNode::element(SyncedSink {
+        sync: None,
+        log: log.clone(),
+    }));
+    graph.link(src, sink).expect("link source");
+    let stats = block_on(run_graph(graph, &ZeroClock, LINK_CAPACITY)).expect("run");
+    assert_refolded(&stats, &log.lock().unwrap());
+}

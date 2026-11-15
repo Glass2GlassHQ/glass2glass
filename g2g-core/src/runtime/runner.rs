@@ -709,6 +709,7 @@ where
         log_name: ElementLogName::new(source_category, source_name.clone()),
         probe: None,
         run_end: sink_io.run_end.clone(),
+        latency: None,
     };
     let (src_res, snk_res) =
         Join2::new(run_source(source, source_io), sink_arm_on(sink, sink_io)).await;

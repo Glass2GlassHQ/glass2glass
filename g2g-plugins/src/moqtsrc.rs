@@ -45,8 +45,10 @@ use alloc::boxed::Box;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
+use g2g_core::clock::ClockSync;
 use g2g_core::frame::Frame;
 use g2g_core::log::LogSource;
+use g2g_core::query::LatencyReport;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
     g2g_warn, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata,
@@ -54,6 +56,7 @@ use g2g_core::{
     PropValue, PropertySpec,
 };
 
+use crate::arrivalstamp::SenderTimelineShift;
 use crate::moqt::catalog::CatalogTrack;
 use crate::moqt::hang::{self, HangVideoTrack};
 use crate::moqt::subscriber::{
@@ -91,6 +94,7 @@ pub struct MoqtSrc {
     // opened at negotiation, since the catalog decides the caps
     hang: Option<HangSession>,
     configured_caps: Option<Caps>,
+    clock_sync: Option<ClockSync>,
 }
 
 #[derive(Debug)]
@@ -125,6 +129,7 @@ impl MoqtSrc {
             objects_dropped: 0,
             hang: None,
             configured_caps: None,
+            clock_sync: None,
         }
     }
 
@@ -227,6 +232,7 @@ impl MoqtSrc {
             .subscribe_media(&track.track, self.cfg.catchup_groups)
             .await?;
         out.push(PipelinePacket::CapsChanged(caps)).await?;
+        let mut timeline = SenderTimelineShift::new(self.clock_sync.clone());
         let emitted = self
             .pump_media(&mut driver, media, out, 0, &mut |object, sequence| {
                 let unit = hang::access_unit(&track, &object).map_err(|e| {
@@ -235,7 +241,7 @@ impl MoqtSrc {
                 })?;
                 Ok(unit.map(|unit| {
                     let mut frame = byte_frame(unit.annexb, sequence);
-                    frame.timing.pts_ns = unit.pts_ns;
+                    frame.timing.pts_ns = timeline.shift_ns(unit.pts_ns);
                     frame.timing.keyframe = unit.keyframe;
                     frame
                 }))
@@ -309,6 +315,14 @@ impl SourceLoop for MoqtSrc {
         = Pin<Box<dyn Future<Output = Result<Caps, G2gError>> + 'a>>
     where
         Self: 'a;
+
+    fn latency(&self) -> LatencyReport {
+        LatencyReport::live(0, None)
+    }
+
+    fn set_clock_sync(&mut self, sync: ClockSync) {
+        self.clock_sync = Some(sync);
+    }
 
     fn intercept_caps<'a>(&'a mut self) -> Self::CapsFuture<'a> {
         Box::pin(async move {

@@ -18,6 +18,7 @@ use std::thread;
 use g2g_core::element::AsyncElement;
 use g2g_core::frame::{Frame, FrameTiming};
 use g2g_core::memory::SystemSlice;
+use g2g_core::query::LatencyReport;
 use g2g_core::runtime::{
     Registry, SeekController, SeekOutcome, SeekRefusal, SeekTicket, SourceLoop,
 };
@@ -1715,4 +1716,28 @@ async fn a_seek_drops_the_part_download_in_flight() {
         [ll_whole_segments(), ll_parts(0..LL_PARTS)].concat(),
         "neither the queued part nor the stalled one goes out"
     );
+}
+
+#[tokio::test]
+async fn a_live_playlist_reports_its_prebuffer_as_live_latency() {
+    const PREBUFFER_MS: u64 = 1_500;
+    let segs: Vec<Vec<u8>> = (0..4u8).map(segment_bytes).collect();
+    let mut src = HlsSrc::new(serve_live(segs)).with_prebuffer_ms(PREBUFFER_MS);
+    src.intercept_caps().await.expect("probe the playlist");
+    assert_eq!(
+        src.latency(),
+        LatencyReport::live(PREBUFFER_MS * 1_000_000, None),
+        "a playlist without ENDLIST is live and holds the prebuffer"
+    );
+}
+
+#[tokio::test]
+async fn a_vod_playlist_reports_no_latency() {
+    let mut src = HlsSrc::new(serve(segment_bytes(0), segment_bytes(1)));
+    src.intercept_caps().await.expect("probe the playlist");
+    assert_eq!(src.latency(), LatencyReport::ZERO);
+}
+
+fn segment_bytes(tag: u8) -> Vec<u8> {
+    (0..1000u32).map(|i| (i as u8) ^ tag).collect()
 }

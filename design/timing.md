@@ -77,6 +77,14 @@ system clock and a necessity here, since the runners deliver `ClockSync` to sink
 nodes only and a `clocksync` sits mid-graph. `sync=false` reduces it to an
 identity, and `ts-offset` shifts the whole schedule.
 
+`videotestsrc` and `audiotestsrc` with `is-live=true` pace themselves instead,
+as GStreamer's do. `LivePacer` stamps each frame's running time through a
+`CaptureAnchor` and waits until it is due, and the source reports one frame or
+buffer period as live latency. The wait, `livesource::sleep_until`, uses the
+clock's ticker when it has one, so an MCU clock with a HAL tick paces without
+std. Without a ticker it uses the tokio timer under std and fails otherwise.
+`clocksync` waits through the same function.
+
 ## Audio as the sync master
 
 For playback the audio sink should drive timing, because samples leave the DAC at
@@ -301,6 +309,12 @@ way `ElectedClock` reaches sinks already inside their arms, so the next deadline
 sink computes includes it. `RunStats::latency` reports the last fold, and liveness
 stays what the startup fold decided. An element a `GraphMutator` splices in takes
 no part in the fold, so its arm publishes nothing.
+
+A source can learn its latency mid-run too, as `remotewtsrc` does from its first
+datagram. It calls `OutputSink::latency_changed` on its output, and the graph
+runner's source arm publishes the report into the same table. The linear runner
+and spliced-in sources ignore the call. Wrapper sinks inside `gaplesssrc` and
+`fallbacksrc` forward it to the arm.
 
 A video decoder reports the pictures it holds back times the frame period
 (`LatencyReport::held_pictures`, 25 fps when the rate is unknown, as GStreamer

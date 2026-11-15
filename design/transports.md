@@ -720,7 +720,8 @@ wire codec compiles unchanged on `wasm32`, the browser and the native server
 share the serializer. `WsWireSrc` is the receive half of the same pair: it dials
 a serving `RemoteWsSink`, discovers the caps from the leading wire message, and
 emits the frames the peer pushes, so a native graph can cut an edge and run its
-tail in a browser (`run_wire_ingest_to_canvas` in `g2g-web`).
+tail in a browser (`run_wire_ingest_to_canvas` in `g2g-web`). It reports a live
+source and shifts the sender's timestamps the way `RemoteSrc` does.
 `tools/wasm-demo/headless/run-wireingest.mjs` runs that in a real Chromium
 against `wire-serve-server`, asserting the browser consumed every frame the
 native side served and painted them.
@@ -752,7 +753,9 @@ native transforms and the wasm `WsWireTransform` (`with_meta_only`).
 `serve_ws_stage` is the peer half. It takes a `Bin` with exactly one ghost
 input and one ghost output, accepts one client and splits the connection. The
 read half backs a source that discovers the caps from the leading message and
-links to the ghost input. The write half backs a sink on the ghost output that
+links to the ghost input. That source reports itself live with zero latency
+and passes the client's timestamps through unchanged, so each reply carries the
+timestamps of the frame that caused it. The write half backs a sink on the ghost output that
 returns frames only, since a reply pairs with the frame that caused it. The
 flattened graph runs on `run_graph`, so the offloaded stage can branch: tees,
 side branches that end in local sinks, muxers that rejoin. A linear chain is
@@ -842,7 +845,9 @@ order from them whatever mode the sender runs. A data frame never waits on one
 that will not arrive: a sender resets every frame stream not yet acknowledged
 when it sends a keyframe, so the source skips a missing frame once a later
 keyframe is in, and in datagram mode it also skips one still missing after the
-source's `frame-timeout` (default one frame period of the caps). After a skip
+source's `frame-timeout` (default one frame period of the caps). Once the
+first datagram arrives the source reports `frame-timeout` as its live latency
+through `OutputSink::latency_changed`. After a skip
 the source drops delta frames until the next keyframe. Control packets are
 never skipped. On the sender, `frame-timeout` (default 100 ms) asks the encoder
 for a keyframe when a frame stream has gone that long unacknowledged, so a
@@ -1062,7 +1067,8 @@ reads the `.catalog` track to learn the media tracks and their init track,
 falling back to the reference defaults `0.mp4` and `{track_id}.m4s` when the
 publisher publishes none, emits the init object as the first frame, then each
 media object as it comes into order. `track-name` picks a track other than the
-catalog's first.
+catalog's first. `moqtsrc` and `moqtsessionsrc` report a live source with zero
+latency, and on the fMP4 path the demuxer sets the timestamps.
 
 A namespace ending in `.hang` is read as hang (draft-lcurley-moq-hang), the
 packaging moq.dev's relay carries, which is also how the reference `moq` CLI
@@ -1071,7 +1077,8 @@ so `moqtsrc` opens the session at negotiation, reads the catalog, and offers
 H.264 or H.265 caps for the chosen video rendition: `track-name`, else the
 highest `preference` among the enabled renditions, then the highest bitrate.
 Each object of the legacy container is a QUIC varint timestamp in microseconds,
-which becomes the frame's PTS, followed by the access unit. A rendition with a
+followed by the access unit. The timestamp becomes the frame's PTS after the
+`RemoteSrc` shift onto the local running time, fixed at the first object. A rendition with a
 `description` (an `avcC` or `hvcC`) carries length-prefixed NALs, converted to
 Annex-B with the parameter sets put in front of each keyframe. An object with an
 empty payload only marks the previous frame's end and is dropped. The `cmaf` and
@@ -1418,8 +1425,10 @@ receive.
 The sans-IO cores get network element wrappers. `st2110audiortp`, giving
 `St2110AudioSink` and `St2110AudioSrc` behind the `st2110` feature, puts -30 audio
 on the wire over UDP, with the sink mapping each frame's PTS through the elected PTP
-clock to the media-clock timestamp and the source reconstructing PTS from it, so a
-receiver on the same grandmaster stays in sync. `AudioFormat::PcmS16Le` rides as L16
+clock to the media-clock timestamp. The source rebuilds PTS from the RTP timestamps
+and shifts them once so the first frame lands at its local arrival on the pipeline
+clock (`RtpArrivalTimeline`). Every ST 2110 receiver does the same and reports a
+live source with zero latency. `AudioFormat::PcmS16Le` rides as L16
 and `PcmF32Le` as L24, the float scaled to the 24-bit wire, and
 `AudioFormat::PcmS24Le`, integer 24-bit, rides the L24 wire directly.
 

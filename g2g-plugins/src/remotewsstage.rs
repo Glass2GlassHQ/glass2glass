@@ -52,6 +52,7 @@ use tokio_tungstenite::{accept_async, MaybeTlsStream, WebSocketStream};
 
 use g2g_core::frame::Frame;
 use g2g_core::memory::{MemoryDomain, SystemSlice};
+use g2g_core::query::LatencyReport;
 use g2g_core::runtime::{run_graph, GraphNodeRef, LinkCapacity, RunStats, SourceLoop};
 use g2g_core::wire::{decode_packet, encode_packet};
 use g2g_core::{
@@ -142,6 +143,10 @@ impl SourceLoop for WireStageSrc {
         = Pin<Box<dyn Future<Output = Result<Caps, G2gError>> + 'a>>
     where
         Self: 'a;
+
+    fn latency(&self) -> LatencyReport {
+        LatencyReport::live(0, None)
+    }
 
     fn intercept_caps(&mut self) -> Self::CapsFuture<'_> {
         Box::pin(async move {

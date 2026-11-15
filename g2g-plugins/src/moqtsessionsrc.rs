@@ -32,6 +32,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use g2g_core::log::LogSource;
+use g2g_core::query::LatencyReport;
 use g2g_core::{
     ByteStreamEncoding, Caps, G2gError, MultiOutputSink, MultiOutputSource, PipelinePacket,
     PropError, PropKind, PropValue, PropertySpec,
@@ -160,6 +161,10 @@ impl MultiOutputSource for MoqtSessionSrc {
 
     fn output_count(&self) -> usize {
         self.outputs.max(self.named_tracks().len()).max(1)
+    }
+
+    fn latency(&self) -> LatencyReport {
+        LatencyReport::live(0, None)
     }
 
     fn output_caps(&self, output: usize) -> Result<Caps, G2gError> {
