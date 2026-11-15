@@ -128,6 +128,8 @@ pub struct WgpuPresentSink {
     height: u32,
     pixel_aspect: PixelAspect,
     force_aspect_ratio: bool,
+    sync: bool,
+    present_mode: wgpu::PresentMode,
     frames_presented: Arc<AtomicU64>,
     window_closed: Arc<AtomicBool>,
     #[cfg(target_os = "linux")]
@@ -183,6 +185,8 @@ impl WgpuPresentSink {
             height: 0,
             pixel_aspect: PixelAspect::Any,
             force_aspect_ratio: true,
+            sync: true,
+            present_mode: wgpu::PresentMode::Fifo,
             frames_presented: Arc::new(AtomicU64::new(0)),
             window_closed: Arc::default(),
             #[cfg(target_os = "linux")]
@@ -234,6 +238,16 @@ impl WgpuPresentSink {
     pub fn with_window_size(mut self, width: u32, height: u32) -> Self {
         self.window_width = width;
         self.window_height = height;
+        self
+    }
+
+    pub fn with_sync(mut self, sync: bool) -> Self {
+        self.sync = sync;
+        self
+    }
+
+    pub fn with_present_mode(mut self, present_mode: wgpu::PresentMode) -> Self {
+        self.present_mode = present_mode;
         self
     }
 
@@ -324,6 +338,7 @@ impl WgpuPresentSink {
         let window_closed = Arc::clone(&self.window_closed);
         let latency = Arc::clone(&self.latency);
         let force_aspect_ratio = self.force_aspect_ratio;
+        let present_mode = self.present_mode;
         #[cfg(target_os = "linux")]
         let input = self.input.clone();
         #[cfg(target_os = "linux")]
@@ -369,6 +384,7 @@ impl WgpuPresentSink {
                         window_height,
                         &caps,
                         force_aspect_ratio,
+                        present_mode,
                     )
                 };
                 #[cfg(target_os = "windows")]
@@ -380,6 +396,7 @@ impl WgpuPresentSink {
                             window_height,
                             &caps,
                             force_aspect_ratio,
+                            present_mode,
                         )
                     };
                 if let Err(e) = run_window(build, params, channels) {
@@ -421,6 +438,9 @@ impl Drop for WgpuPresentSink {
 const DEFAULT_TITLE: &str = "glass2glass";
 #[cfg(target_os = "linux")]
 const DEFAULT_APP_ID: &str = "io.glass2glass.WgpuSink";
+
+const FIFO_PRESENT_MODE: &str = "fifo";
+const MAILBOX_PRESENT_MODE: &str = "mailbox";
 
 /// Monotonic clock the sink offers, matching the source-side `arrival_ns` epoch
 /// so the latency histogram is meaningful.
@@ -525,6 +545,15 @@ impl AsyncElement for WgpuPresentSink {
             )
             .with_default("0"),
             FORCE_ASPECT_RATIO_PROPERTY,
+            PropertySpec::new(
+                "sync",
+                PropKind::Bool,
+                "present each frame at its timestamp on the pipeline clock",
+            )
+            .with_default("true"),
+            PropertySpec::new("present-mode", PropKind::Str, "wgpu surface present mode")
+                .with_default(FIFO_PRESENT_MODE)
+                .with_enum_values("fifo | mailbox"),
             MAX_LATENESS_PROPERTY,
             QOS_INTERVAL_PROPERTY,
         ];
@@ -558,6 +587,18 @@ impl AsyncElement for WgpuPresentSink {
                 self.force_aspect_ratio = value.as_bool().ok_or(PropError::Type)?;
                 Ok(())
             }
+            "sync" => {
+                self.sync = value.as_bool().ok_or(PropError::Type)?;
+                Ok(())
+            }
+            "present-mode" => {
+                self.present_mode = match value.as_str().ok_or(PropError::Type)? {
+                    FIFO_PRESENT_MODE => wgpu::PresentMode::Fifo,
+                    MAILBOX_PRESENT_MODE => wgpu::PresentMode::Mailbox,
+                    _ => return Err(PropError::Value),
+                };
+                Ok(())
+            }
             _ => self
                 .pacer
                 .set_property(name, &value)
@@ -574,6 +615,10 @@ impl AsyncElement for WgpuPresentSink {
             "window-width" => Some(PropValue::Uint(self.window_width as u64)),
             "window-height" => Some(PropValue::Uint(self.window_height as u64)),
             FORCE_ASPECT_RATIO_NAME => Some(PropValue::Bool(self.force_aspect_ratio)),
+            "sync" => Some(PropValue::Bool(self.sync)),
+            "present-mode" => Some(PropValue::Str(
+                alloc::format!("{:?}", self.present_mode).to_lowercase(),
+            )),
             _ => self.pacer.get_property(name),
         }
     }
@@ -621,7 +666,9 @@ impl AsyncElement for WgpuPresentSink {
                     // bound) or outside the segment. Unpaced without a clock:
                     // present as fast as the compositor allows.
                     let presented = self.frames_presented.load(Ordering::Relaxed);
-                    if !wait_to_present(self.pacer.judge(timing.pts_ns, presented)).await {
+                    if self.sync
+                        && !wait_to_present(self.pacer.judge(timing.pts_ns, presented)).await
+                    {
                         return Ok(());
                     }
                     let tx = self.cmd_tx.as_ref().ok_or(G2gError::NotConfigured)?;
@@ -701,12 +748,13 @@ fn build_renderer(
     height: u32,
     caps: &Caps,
     force_aspect_ratio: bool,
+    present_mode: wgpu::PresentMode,
 ) -> Result<SurfaceRenderer, Box<dyn std::error::Error>> {
     // A GPU decoder upstream opens its own device (Vulkan Video needs queues wgpu
     // does not ask for) and its textures bind to no other, so present on that
     // device when one is offered rather than opening a second.
     let adopted = crate::gpu::present_on_producer_device(&create_surface, width, height);
-    let (ctx, wgpu_surface, config) = match adopted {
+    let (ctx, wgpu_surface, mut config) = match adopted {
         Some(adopted) => adopted,
         None => {
             let instance = present_instance();
@@ -730,6 +778,14 @@ fn build_renderer(
                 "gpu error while presenting: {error}"
             );
         }));
+    let present_modes = wgpu_surface.get_capabilities(&ctx.adapter).present_modes;
+    if !present_modes.contains(&present_mode) {
+        return Err(alloc::format!(
+            "this window presents only in {present_modes:?}, not {present_mode:?}"
+        )
+        .into());
+    }
+    config.present_mode = present_mode;
     let configure_errors = ctx.device.push_error_scope(wgpu::ErrorFilter::Validation);
     wgpu_surface.configure(&ctx.device, &config);
     // a window with no desktop to show on, such as one opened over ssh, cannot be configured

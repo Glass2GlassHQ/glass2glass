@@ -54,9 +54,10 @@ LAN, and a host off the LAN needs a forwarded UDP port.
    `MemoryDomain::Cuda`. `mfencode hardware=true` takes a D3D11 NV12 texture.
    `ffmpegenc` VA-API takes a drm buffer. `vtencode` takes the
    `screencapturesrc` `cv-output` path.
-5. The client puts `livesync` in front of the video sink. A frame that arrives
-   behind the timeline is dropped. A frame later than `late-threshold` rebases
-   the timeline instead of being dropped forever. Audio does not gate that.
+5. The client's video sink presents each frame as it is decoded, with
+   `sync=false` and `present-mode=mailbox`. No `livesync`: receivers stamp
+   frames with their arrival time, so network jitter puts frames closer than
+   one frame period and `livesync` drops them as early.
 6. Input types live in the `g2g-desktop` crate, not in `g2g-core`. Capture
    elements live in `g2g-plugins` behind their OS feature. `g2g-desktop` is a
    workspace member, uses `std`, and is not on the 1.86 MSRV line.
@@ -93,7 +94,7 @@ LAN, and a host off the LAN needs a forwarded UDP port.
 | Audio capture | `pulsesrc`, `wasapisrc`, `coreaudiosrc`. |
 | Audio encode | `opusenc`. |
 | Present | `autovideosink`, and directly `waylandsink`, `metalvideosink`, `d3d11sink`. |
-| Drop late frames | `livesync`. |
+| Present without queueing | `wgpusink sync=false present-mode=mailbox`. |
 | Browser decode and draw | `g2g-web` WebCodecs and `canvassink`. The page needs the same data channel the native client uses. |
 | QUIC carrier | `remotewtsink`, `remotewtsrc` over `web-transport-quinn` (quinn 0.11). |
 
@@ -198,13 +199,12 @@ encoders need the same latch: `vtencode`, `mfencode`, and `ffmpegenc` gain
 The client dials with `remotewtsrc` and sends no media. Receive side:
 
 ```
-h264parse ! <decoder> ! livesync ! autovideosink
+h264parse ! <decoder> ! wgpusink sync=false present-mode=mailbox
 opusdec ! audioconvert ! autoaudiosink
 ```
 
 The decoder is `nvdec`, `mfdecode`, `vtdecode`, or `ffmpegdec`, chosen by the
-same auto-plug `decodebin` uses. `livesync latency=0`. `software-decode=true`
-forces `ffmpegdec`.
+same auto-plug `decodebin` uses. `software-decode=true` forces `ffmpegdec`.
 
 The browser client is the same WebTransport session and message channel, decoded with
 WebCodecs into a canvas. Pointer lock and `navigator.keyboard.lock` are the
@@ -332,8 +332,7 @@ service. They do not build ffmpeg or a media player.
 
 Hardware checks are probes, the same shape as `m739_screencapture`. A denied
 capture permission asserts the error path. A granted desktop is manual: move
-the pointer, hold a key, confirm the key-up arrives, confirm a late video
-frame was counted in `livesync`'s `drop`.
+the pointer, hold a key, confirm the key-up arrives.
 
 ## Order
 
@@ -341,7 +340,7 @@ Each slice builds and is reviewable on its own. Later slices depend on earlier
 ones.
 
 3. **Linux host and Linux client on one machine.** Portal or `ximagesrc`,
-   software or VA-API encode, `livesync` on the client, window capture. `inputs=false` when both run on the
+   software or VA-API encode, window capture. `inputs=false` when both run on the
    same seat, or the pointer feeds itself.
 4. **Windows host, then the QUIC transport.** `d3d11screencapturesrc`,
    `mfencode`, `SendInput`. Then raw QUIC and WebTransport carriers in

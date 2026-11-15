@@ -11,9 +11,9 @@ use g2g_core::runtime::{
 use g2g_core::{G2gError, Graph};
 use g2g_plugins::clock::WallClock;
 use g2g_plugins::cursorshape::CursorShape;
-use g2g_plugins::livesync::LiveSync;
 use g2g_plugins::registry::default_registry;
 use g2g_plugins::webrtcduplex::{SdpChannel, SignalRole, WebRtcDuplexSession};
+use g2g_plugins::wgpu;
 use g2g_plugins::wgpupresent::WgpuPresentSink;
 use g2g_plugins::windowinput::{PointerButton, WindowInput};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -271,12 +271,10 @@ fn client_graph(
             .expect("transforms have one input and one output pad");
         previous = node.into();
     }
-    let live = graph.add_muxer(GraphNodeRef::muxer(LiveSync::new()), 1);
     let display = graph.add_sink(GraphNodeRef::element(sink));
     graph
-        .link(previous, live.input(0))
-        .and_then(|()| graph.link(live.output(), display))
-        .expect("livesync has one input and one output pad");
+        .link(previous, display)
+        .expect("the display sink has one input pad");
     Ok(graph)
 }
 
@@ -295,7 +293,10 @@ pub async fn run_client(
     .with_receive_only();
     let data_channel = session.open_data_channel(INPUT_LABEL);
     let (cursor_shapes, mut sink) = show_host_cursor(
-        WgpuPresentSink::new().with_title(WINDOW_TITLE),
+        WgpuPresentSink::new()
+            .with_title(WINDOW_TITLE)
+            .with_sync(false)
+            .with_present_mode(wgpu::PresentMode::Mailbox),
         settings.inputs,
     );
     let window_input = settings.inputs.then(|| sink.input_events());

@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2319: `wgpusink` gains `sync` and `present-mode`, and the `g2g-desktop` client presents every frame on arrival without `livesync`.
 - M2318: The `g2g-desktop` client window shows the Windows host's cursor shape.
 - M2317: `remotewtsink` and `remotewtsrc` carry a data channel of byte messages beside the video.
 - M2316: `mfencode hardware=true` encodes D3D11 NV12 textures in place, so the Windows `g2g-desktop` host keeps frames on the GPU.

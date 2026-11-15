@@ -606,8 +606,8 @@ logged and dropped.
 ### Client session
 
 `client::run_client` runs a receive-only `WebRtcDuplexSession` offerer whose
-video passes through `h264parse`, `ffmpegdec` and `livesync` into a `wgpusink`
-window. With `inputs` on, the window's input goes through an `InputRouter` and
+video passes through `h264parse` and `ffmpegdec` into a `wgpusink` window that
+presents each frame as it arrives (`sync=false`, mailbox). With `inputs` on, the window's input goes through an `InputRouter` and
 out as packets on the `input` data channel. Keys map from evdev codes to HID
 usages on device 0, a pointer position goes out as an absolute position on
 display 0, and losing keyboard focus releases the keys and buttons still held.
