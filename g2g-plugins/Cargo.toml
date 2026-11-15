@@ -188,7 +188,7 @@ remote-ws = ["std", "tokio/net", "tokio/io-util", "dep:tokio-tungstenite", "futu
 # the framing is the `remote` pair's u32 length prefix. QUIC is always TLS, so
 # the server takes a certificate / private-key PEM pair. Pulls
 # web-transport-quinn; implies std + tokio net/io-util.
-webtransport = ["std", "tokio/net", "tokio/io-util", "tokio/time", "dep:web-transport-quinn", "dep:url", "dep:rustls-native-certs"]
+webtransport = ["std", "tokio/net", "tokio/io-util", "tokio/time", "dep:web-transport-quinn", "dep:url", "dep:rustls-native-certs", "dep:rcgen", "dep:time"]
 # Native IETF MoQ Transport draft-16 (M902 / M903): the `moqt` protocol modules
 # (wire codec + session driver), the `moqtsink` publisher and the `moqtsrc`
 # subscriber, layered on the M901 WebTransport carrier. The dialect is the IETF
@@ -1049,6 +1049,10 @@ web-transport-quinn = { version = "0.12", optional = true, default-features = fa
 tokio-rustls = { version = "0.26", optional = true, default-features = false, features = ["ring", "logging", "tls12"] }
 # The OS root certificates the TLS clients verify servers against.
 rustls-native-certs = { version = "0.8", optional = true }
+# The self-signed listener certificate (webtransport feature), on ring like
+# web-transport-quinn. `time` is the type rcgen takes for the validity dates.
+rcgen = { version = "0.14", optional = true }
+time = { version = "0.3", optional = true, default-features = false, features = ["std"] }
 url = { version = "2", optional = true }
 bytes = { version = "1", optional = true }
 # TrueType / OpenType font parser + rasterizer (truetype-overlay feature, M409).

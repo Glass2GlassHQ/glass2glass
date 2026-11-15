@@ -4682,6 +4682,7 @@ dependencies = [
  "symphonia-codec-aac",
  "symphonia-codec-vorbis",
  "symphonia-core",
+ "time",
  "tokio",
  "tokio-rustls",
  "tokio-tungstenite",

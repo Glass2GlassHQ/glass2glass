@@ -8,28 +8,28 @@ use std::time::Duration;
 
 use g2g_core::runtime::{run_simple_pipeline, LatencyProfile};
 use g2g_core::{AsyncElement, PipelinePacket};
+use g2g_plugins::remotewtio::generate_certificate;
 use g2g_plugins::remotewtsink::RemoteWtSink;
 use g2g_plugins::remotewtsrc::RemoteWtSrc;
 
 mod webtransport_common;
 
-use webtransport_common::{
-    test_caps, test_frame, CollectSink, NullOut, TestCert, ZeroClock, FRAME_LEN,
-};
+use webtransport_common::{test_caps, test_frame, CollectSink, NullOut, ZeroClock, FRAME_LEN};
 
 const FRAMES: u8 = 3;
 const SESSION_TIMEOUT: Duration = Duration::from_secs(20);
 const TOKEN: &[u8] = b"bearer token";
 
 async fn listener_reads_the_token_before_any_video(scheme: &str) {
-    let tls = TestCert::generate(&format!("m2322-{scheme}"));
+    let certificate = generate_certificate().expect("generate the host certificate");
+    let hash = certificate.sha256_hex.clone();
     let mut remote =
-        RemoteWtSink::new(format!("{scheme}://127.0.0.1:0")).with_listener(tls.cert(), tls.key());
+        RemoteWtSink::new(format!("{scheme}://127.0.0.1:0")).with_self_signed_listener(certificate);
     let mut host_channel = remote.open_data_channel();
     let port = remote.listen().expect("bind the listening sink").port();
 
     let mut source = RemoteWtSrc::new("127.0.0.1:0".parse().unwrap())
-        .with_caller(format!("{scheme}://127.0.0.1:{port}"), tls.hash_hex.clone())
+        .with_caller(format!("{scheme}://127.0.0.1:{port}"), hash)
         .with_frame_limit(u64::from(FRAMES));
     let client_channel = source.open_data_channel();
     client_channel

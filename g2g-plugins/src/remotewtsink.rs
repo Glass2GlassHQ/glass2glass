@@ -61,7 +61,7 @@ use g2g_core::{
 use crate::datachannel::{data_channel, DataChannelEnds};
 use crate::remoteclient::{PacketClient, RemoteClient};
 use crate::remotesource::TransportFuture;
-use crate::remotewtio::{self, QuicMode, SharedDataChannel, WtStream};
+use crate::remotewtio::{self, QuicMode, SelfSignedCertificate, SharedDataChannel, WtStream};
 
 /// WebTransport `RemoteWtSink`: a length-framed [`g2g_core::wire`] stream over one
 /// bidirectional WebTransport stream, received by
@@ -100,6 +100,13 @@ impl RemoteWtSink {
         self
     }
 
+    pub fn with_self_signed_listener(mut self, certificate: SelfSignedCertificate) -> Self {
+        let transport = self.transport_mut();
+        transport.mode = QuicMode::Listener;
+        transport.self_signed = Some(certificate);
+        self
+    }
+
     pub fn listen(&mut self) -> Result<SocketAddr, G2gError> {
         self.transport_mut()
             .listener_endpoint()?
@@ -134,6 +141,7 @@ pub struct WtClient {
     mode: QuicMode,
     cert: String,
     key: String,
+    self_signed: Option<SelfSignedCertificate>,
     endpoint: Option<Endpoint>,
     /// Send data frames as QUIC datagrams (the `datagrams` property).
     datagrams: bool,
@@ -154,6 +162,7 @@ impl WtClient {
             mode: QuicMode::Caller,
             cert: String::new(),
             key: String::new(),
+            self_signed: None,
             endpoint: None,
             datagrams: false,
             datagrams_sent: 0,
@@ -165,7 +174,13 @@ impl WtClient {
     /// The live session stream, for the transform's reply read.
     fn listener_endpoint(&mut self) -> Result<&Endpoint, G2gError> {
         if self.endpoint.is_none() {
-            let (chain, key) = remotewtio::load_certificate(&self.cert, &self.key)?;
+            let (chain, key) = match &self.self_signed {
+                Some(certificate) => remotewtio::parse_certificate(
+                    certificate.certificate_pem.as_bytes(),
+                    certificate.private_key_pem.as_bytes(),
+                )?,
+                None => remotewtio::load_certificate(&self.cert, &self.key)?,
+            };
             let bind = remotewtio::bind_address(&self.url)?;
             self.endpoint = Some(remotewtio::listen(bind, chain, key, &self.congestion)?);
         }

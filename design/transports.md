@@ -800,7 +800,10 @@ TLS-terminating proxy in front. QUIC is always TLS, so unlike the other two
 servers this one cannot start without a `certificate` / `private-key` PEM pair,
 and a client that will not trust a system root names the certificate by SHA-256
 digest in `server-certificate-hashes`, the browser API's
-`serverCertificateHashes`.
+`serverCertificateHashes`. `remotewtio::generate_certificate` makes a
+self-signed ECDSA P-256 certificate valid for 13 days, the kind
+`serverCertificateHashes` accepts, and `RemoteWtSink::with_self_signed_listener`
+listens with it without writing the key to a file.
 
 A `quic://` location dials raw QUIC instead, with the ALPN `g2g-remote` and no
 HTTP/3 exchange. `web_transport_quinn::Session::raw` wraps that connection, so

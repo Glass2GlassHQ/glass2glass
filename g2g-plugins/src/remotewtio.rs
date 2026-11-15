@@ -59,7 +59,7 @@ use g2g_core::{
 use crate::abortondrop::AbortOnDrop;
 use crate::datachannel::{DataChannelTransportEnds, MAX_MESSAGE_SIZE};
 use crate::remotewire::{map_wire, send_frame_bytes, send_framed, FramedRead};
-use crate::textencoding::hex_decode;
+use crate::textencoding::{hex_decode, hex_encode};
 
 /// Any WebTransport / QUIC / TLS failure ends the session.
 pub(crate) fn wt_err<E>(_: E) -> G2gError {
@@ -561,15 +561,58 @@ pub(crate) fn load_certificate(
     if cert.is_empty() || key.is_empty() {
         return Err(G2gError::NotConfigured);
     }
-    let chain: Vec<CertificateDer<'static>> = CertificateDer::pem_file_iter(cert)
-        .map_err(wt_err)?
+    let cert = std::fs::read(cert).map_err(wt_err)?;
+    let key = std::fs::read(key).map_err(wt_err)?;
+    parse_certificate(&cert, &key)
+}
+
+pub(crate) fn parse_certificate(
+    cert: &[u8],
+    key: &[u8],
+) -> Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>), G2gError> {
+    let chain: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(cert)
         .collect::<Result<_, _>>()
         .map_err(wt_err)?;
     if chain.is_empty() {
         return Err(G2gError::NotConfigured);
     }
-    let key = PrivateKeyDer::from_pem_file(key).map_err(wt_err)?;
+    let key = PrivateKeyDer::from_pem_slice(key).map_err(wt_err)?;
     Ok((chain, key))
+}
+
+#[derive(Clone)]
+pub struct SelfSignedCertificate {
+    pub certificate_pem: String,
+    pub private_key_pem: String,
+    pub sha256_hex: String,
+}
+
+impl core::fmt::Debug for SelfSignedCertificate {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("SelfSignedCertificate")
+            .field("sha256_hex", &self.sha256_hex)
+            .finish_non_exhaustive()
+    }
+}
+
+// browsers accept a serverCertificateHashes certificate only when it is valid for at most 14 days
+const CERTIFICATE_LIFETIME: time::Duration = time::Duration::days(13);
+// clients whose clock runs behind the host's still see the certificate as valid
+const CERTIFICATE_BACKDATE: time::Duration = time::Duration::hours(1);
+
+pub fn generate_certificate() -> Result<SelfSignedCertificate, rcgen::Error> {
+    let mut params = rcgen::CertificateParams::new(vec!["localhost".to_string()])?;
+    let now = time::OffsetDateTime::now_utc();
+    params.not_before = now - CERTIFICATE_BACKDATE;
+    params.not_after = now + CERTIFICATE_LIFETIME;
+    let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)?;
+    let certificate = params.self_signed(&key)?;
+    let digest = crypto::sha256(&crypto::default_provider(), certificate.der());
+    Ok(SelfSignedCertificate {
+        certificate_pem: certificate.pem(),
+        private_key_pem: key.serialize_pem(),
+        sha256_hex: hex_encode(digest.as_ref()),
+    })
 }
 
 /// Parse a comma-separated list of hex SHA-256 certificate digests (the browser

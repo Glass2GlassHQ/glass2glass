@@ -296,22 +296,15 @@ pub(crate) struct TestCert {
 
 impl TestCert {
     pub(crate) fn generate() -> Self {
-        let issued = rcgen::generate_simple_self_signed(vec![
-            "localhost".to_string(),
-            "127.0.0.1".to_string(),
-        ])
-        .expect("self-signed certificate");
+        let issued =
+            g2g_plugins::remotewtio::generate_certificate().expect("self-signed certificate");
         let dir = std::env::temp_dir();
         let unique = format!("{}-{:?}", std::process::id(), std::thread::current().id());
         let cert_path = dir.join(format!("g2g-moqt-{unique}.crt"));
         let key_path = dir.join(format!("g2g-moqt-{unique}.key"));
-        write_file(&cert_path, issued.cert.pem().as_bytes());
-        write_file(&key_path, issued.signing_key.serialize_pem().as_bytes());
-
-        let der = CertificateDer::from(issued.cert.der().to_vec());
-        let provider = web_transport_quinn::crypto::default_provider();
-        let digest = web_transport_quinn::crypto::sha256(&provider, &der);
-        let hash_hex = digest.as_ref().iter().map(|b| format!("{b:02x}")).collect();
+        write_file(&cert_path, issued.certificate_pem.as_bytes());
+        write_file(&key_path, issued.private_key_pem.as_bytes());
+        let hash_hex = issued.sha256_hex;
         Self {
             cert_path,
             key_path,
