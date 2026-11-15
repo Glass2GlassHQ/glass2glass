@@ -134,6 +134,14 @@ channel opens wait in the sender, and a write the SCTP send buffer refuses is
 retried every 5 ms. A message over `datachannel::MAX_MESSAGE_SIZE` fails the
 session.
 
+`start-bitrate` is the bandwidth estimate str0m starts from, and
+`bandwidth-estimation=false` turns the estimate and str0m's pacer off. str0m
+paces sends at 1.1 times its estimate and holds up to 2 s of media behind it.
+On Wi-Fi the delay-based estimate falls from 4 Mbps to 0.5 Mbps within a second
+and frames wait 1.4 s, so `g2g-desktop host` turns it off. A frame's
+`WallClockMeta` goes out as `abs-capture-time` and the receiver attaches it
+back as `WallClockMeta`.
+
 `with_receive_only()`, or the `receive-only` property, offers every m-line
 recvonly and reports zero inputs, so a peer that only watches runs with no send
 sources. That session ends when the peer closes or ICE disconnects. When the

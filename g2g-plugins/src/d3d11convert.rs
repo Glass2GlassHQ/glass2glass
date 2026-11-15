@@ -401,7 +401,7 @@ impl AsyncElement for D3D11Convert {
                         domain,
                         timing: frame.timing,
                         sequence: frame.sequence,
-                        meta: Default::default(),
+                        meta: frame.meta,
                     }))
                     .await?;
                 }

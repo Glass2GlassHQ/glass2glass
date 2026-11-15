@@ -61,6 +61,7 @@ use g2g_core::{
     PropertySpec, Rate, VideoCodec,
 };
 
+use crate::clock::attach_wall_clock;
 use crate::g711::{G711_CLOCK_RATE_HZ, G711_DEFAULT_CHANNELS};
 use crate::reconnect::{
     ReconnectPolicy, ReconnectState, RECONNECT_BACKOFF_MAX_PROP, RECONNECT_BACKOFF_PROP,
@@ -1497,16 +1498,6 @@ async fn push_while_polling(
     }
     push.await
 }
-
-/// Attach the sender's wall clock to a frame. A no-op without the `metadata`
-/// feature, where a frame has nowhere to carry it.
-#[cfg(feature = "metadata")]
-fn attach_wall_clock(frame: &mut Frame, unix_nanos: i64) {
-    frame.meta.attach(g2g_core::WallClockMeta { unix_nanos });
-}
-
-#[cfg(not(feature = "metadata"))]
-fn attach_wall_clock(_frame: &mut Frame, _unix_nanos: i64) {}
 
 // `elapsed` is signed because a server's RTP-Info rtptime can be ahead of its first packets
 fn session_pts_ns(

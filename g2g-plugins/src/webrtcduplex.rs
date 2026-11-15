@@ -78,10 +78,12 @@ use crate::datachannel::{data_channel, DataChannelEnds, DataChannelTransportEnds
 use crate::filesink::io_err;
 use crate::turn::TurnSet;
 use crate::webrtc_codec::{
-    enable_tracks, get_video_codec_property, opus_caps, set_video_codec_property, Track,
-    WebRtcVideoCodec, VIDEO_CODEC_PROP,
+    enable_tracks, frame_capture_time, get_video_codec_property, opus_caps,
+    set_video_codec_property, stamp_capture_time, Track, WebRtcVideoCodec, VIDEO_CODEC_PROP,
 };
-use crate::webrtc_receive::{ArrivalStamp, KeyframeGate, UDP_RECV_BYTES};
+use crate::webrtc_receive::{
+    capture_time_meta, media_capture_unix_ns, ArrivalStamp, KeyframeGate, UDP_RECV_BYTES,
+};
 use crate::webrtc_util::{
     accept_answer_sdp, accept_offer_sdp, add_ice_candidates, connect_failed, estimate_bps,
     feed_datagram, get_linger_ms_property, non_empty, select_host_ip, send_transmit,
@@ -89,6 +91,7 @@ use crate::webrtc_util::{
     TURN_PASS_PROP, TURN_SERVER_PROP, TURN_USER_PROP,
 };
 use crate::webrtcdata::{flush_channel_message, ChannelSettings, CHANNEL_RETRY_INTERVAL};
+use crate::webrtcsink::INITIAL_BITRATE_BPS;
 
 /// The tracks a duplex session offers at the handshake, in pad order: video on
 /// pad 0, audio on pad 1. `track_count` selects how many are active (1 = video
@@ -104,7 +107,21 @@ const MAX_ACTIVE_TRACKS: usize = 2;
 const DEFAULT_SPARE_TRACKS: usize = 0;
 const DEFAULT_SPARE_TRACKS_TEXT: &str = "0";
 
+const INITIAL_BITRATE_TEXT: &str = "2000000";
+
 static WEBRTCDUPLEX_PROPS: &[PropertySpec] = &[
+    PropertySpec::new(
+        "start-bitrate",
+        PropKind::Uint,
+        "bandwidth estimate the send pacer starts from, bits/second",
+    )
+    .with_default(INITIAL_BITRATE_TEXT),
+    PropertySpec::new(
+        "bandwidth-estimation",
+        PropKind::Bool,
+        "estimate the send bandwidth, pace sends to it and report it to the encoder",
+    )
+    .with_default("true"),
     STUN_SERVER_PROP,
     TURN_SERVER_PROP,
     TURN_USER_PROP,
@@ -264,6 +281,8 @@ pub struct WebRtcDuplexSession {
     /// How long to keep draining the peer after the local send side ends (its
     /// sources reached EOS), so in-flight received frames are not cut off.
     linger: Duration,
+    start_bitrate_bps: u64,
+    bandwidth_estimation: bool,
     /// Track kind per send input pad, set in `configure_input`.
     inputs: Vec<Option<Track>>,
     /// Per send-input reverse channel: a remote PLI / BWE that names a track's
@@ -322,6 +341,8 @@ impl WebRtcDuplexSession {
             turn_user: String::new(),
             turn_pass: String::new(),
             linger: Duration::from_millis(DEFAULT_LINGER_MS),
+            start_bitrate_bps: INITIAL_BITRATE_BPS,
+            bandwidth_estimation: true,
             inputs: alloc::vec![None; track_count],
             reverse: (0..track_count).map(|_| ReverseChannel::new()).collect(),
             nacks_seen: Arc::new(AtomicU64::new(0)),
@@ -367,6 +388,16 @@ impl WebRtcDuplexSession {
     /// Carry `codec` on every video m-line instead of H.264. A video send pad
     /// configured with another codec is refused, since the m-line it would
     /// share with the matching recv pad negotiates one codec for both ways.
+    pub fn with_bandwidth_estimation(mut self, enabled: bool) -> Self {
+        self.bandwidth_estimation = enabled;
+        self
+    }
+
+    pub fn with_start_bitrate(mut self, bits_per_second: u64) -> Self {
+        self.start_bitrate_bps = bits_per_second;
+        self
+    }
+
     pub fn with_video_codec(mut self, codec: WebRtcVideoCodec) -> Self {
         self.set_video_codec(codec);
         self
@@ -585,6 +616,10 @@ impl MultiDuplexSession for WebRtcDuplexSession {
                 self.set_video_codec(codec);
             }
             "linger-ms" => set_linger_ms_property(&mut self.linger, &value)?,
+            "start-bitrate" => self.start_bitrate_bps = value.as_uint().ok_or(PropError::Type)?,
+            "bandwidth-estimation" => {
+                self.bandwidth_estimation = value.as_bool().ok_or(PropError::Type)?
+            }
             "receive-only" => {
                 let receive_only = value.as_bool().ok_or(PropError::Type)?;
                 self.media_direction = if receive_only {
@@ -612,6 +647,8 @@ impl MultiDuplexSession for WebRtcDuplexSession {
             "turn-pass" => PropValue::Str(self.turn_pass.clone()),
             "video-codec" => get_video_codec_property(self.video_codec),
             "linger-ms" => get_linger_ms_property(self.linger),
+            "start-bitrate" => PropValue::Uint(self.start_bitrate_bps),
+            "bandwidth-estimation" => PropValue::Bool(self.bandwidth_estimation),
             "receive-only" => PropValue::Bool(!self.media_direction.is_sending()),
             "spare-video-tracks" => PropValue::Uint(self.spare_video_tracks as u64),
             "spare-audio-tracks" => PropValue::Uint(self.spare_audio_tracks as u64),
@@ -659,7 +696,11 @@ impl MultiDuplexSession for WebRtcDuplexSession {
                 .clear_codecs()
                 // Congestion control so the peer's BWE estimate arrives as
                 // `Event::EgressBitrateEstimate`, routed to the video track below.
-                .enable_bwe(Some(Bitrate::bps(2_000_000)))
+                // str0m paces sends at 1.1 times its estimate, queueing frames an encoder sends faster
+                .enable_bwe(
+                    self.bandwidth_estimation
+                        .then(|| Bitrate::bps(self.start_bitrate_bps)),
+                )
                 // Periodic stats surface NACK counts (loss-recovery feedback), read
                 // back via `nacks_seen`.
                 .set_stats_interval(Some(Duration::from_millis(500)));
@@ -826,7 +867,7 @@ impl MultiDuplexSession for WebRtcDuplexSession {
                 }
 
                 // (output port, pts_ns, data) collected while draining poll_output.
-                let mut frames: Vec<(usize, Vec<u8>)> = Vec::new();
+                let mut frames: Vec<(usize, Vec<u8>, Option<i64>)> = Vec::new();
                 let deadline = loop {
                     match rtc.poll_output() {
                         // after a DTLS close_notify str0m returns a timeout that never fires
@@ -882,6 +923,7 @@ impl MultiDuplexSession for WebRtcDuplexSession {
                         // fan-in session does.
                         Ok(Output::Event(Event::EgressBitrateEstimate(kind))) => {
                             let bps = estimate_bps(&kind);
+                            g2g_core::g2g_debug!(log, "bandwidth estimate {kind:?}");
                             let rc = bindings
                                 .iter()
                                 .find(|b| b.kind.is_video())
@@ -905,7 +947,7 @@ impl MultiDuplexSession for WebRtcDuplexSession {
                             if is_video && !binding.gate.admit(binding.kind.is_keyframe(&unit)) {
                                 continue;
                             }
-                            frames.push((port, unit));
+                            frames.push((port, unit, media_capture_unix_ns(&d)));
                         }
                         // Loss-recovery feedback counters (cumulative): nacks sent
                         // as a receiver (ingress) and nacks received as a sender
@@ -940,7 +982,7 @@ impl MultiDuplexSession for WebRtcDuplexSession {
                     }
                 };
 
-                for (port, data) in frames {
+                for (port, data, capture_unix_ns) in frames {
                     // A pad bound mid-session announces its caps before its first
                     // frame (the active pads were announced at session start).
                     if !announced[port] {
@@ -949,7 +991,8 @@ impl MultiDuplexSession for WebRtcDuplexSession {
                         announced[port] = true;
                     }
                     let keyframe = pad_kinds[port].is_keyframe(&data);
-                    let frame = stamp.frame(data, keyframe, seq, Default::default());
+                    let frame =
+                        stamp.frame(data, keyframe, seq, capture_time_meta(capture_unix_ns));
                     out.push_to(port, PipelinePacket::DataFrame(frame)).await?;
                     seq += 1;
                     received += 1;
@@ -1125,9 +1168,15 @@ impl MultiDuplexSession for WebRtcDuplexSession {
                                             if let Some(p) = b.pt {
                                                 let rtp_time =
                                                     kind.media_time(frame.timing.pts_ns);
+                                                let capture_time = frame_capture_time(&frame);
                                                 if let Some(w) = rtc.writer(b.mid) {
-                                                    let _ = w.write(p, Instant::now(), rtp_time,
-                                                        slice.as_slice().to_vec());
+                                                    let _ = stamp_capture_time(w, capture_time)
+                                                    .write(
+                                                        p,
+                                                        Instant::now(),
+                                                        rtp_time,
+                                                        slice.as_slice().to_vec(),
+                                                    );
                                                 }
                                             }
                                         }

@@ -45,13 +45,14 @@ use alloc::vec::Vec;
 use windows::core::Interface;
 use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11Texture2D};
 use windows::Win32::Media::MediaFoundation::{
-    eAVEncH264VProfile_Main, CLSID_MSH264EncoderMFT, CODECAPI_AVEncVideoForceKeyFrame, ICodecAPI,
-    IMF2DBuffer, IMFActivate, IMFDXGIDeviceManager, IMFMediaEventGenerator, IMFSample,
-    IMFTransform, METransformDrainComplete, METransformHaveOutput, METransformNeedInput,
-    MFCreateDXGIDeviceManager, MFCreateDXGISurfaceBuffer, MFCreateMediaType, MFCreateSample,
-    MFMediaType_Video, MFShutdown, MFStartup, MFTEnumEx, MFVideoFormat_H264, MFVideoFormat_HEVC,
-    MFVideoFormat_NV12, MFVideoInterlace_Progressive, MEDIA_EVENT_GENERATOR_GET_EVENT_FLAGS,
-    MFSTARTUP_FULL, MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG_ASYNCMFT, MFT_ENUM_FLAG_HARDWARE,
+    eAVEncH264VProfile_Main, CLSID_MSH264EncoderMFT, CODECAPI_AVEncCommonMeanBitRate,
+    CODECAPI_AVEncVideoForceKeyFrame, ICodecAPI, IMF2DBuffer, IMFActivate, IMFDXGIDeviceManager,
+    IMFMediaEventGenerator, IMFSample, IMFTransform, METransformDrainComplete,
+    METransformHaveOutput, METransformNeedInput, MFCreateDXGIDeviceManager,
+    MFCreateDXGISurfaceBuffer, MFCreateMediaType, MFCreateSample, MFMediaType_Video, MFShutdown,
+    MFStartup, MFTEnumEx, MFVideoFormat_H264, MFVideoFormat_HEVC, MFVideoFormat_NV12,
+    MFVideoInterlace_Progressive, MEDIA_EVENT_GENERATOR_GET_EVENT_FLAGS, MFSTARTUP_FULL,
+    MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG_ASYNCMFT, MFT_ENUM_FLAG_HARDWARE,
     MFT_ENUM_FLAG_SORTANDFILTER, MFT_ENUM_FLAG_SYNCMFT, MFT_MESSAGE_COMMAND_DRAIN,
     MFT_MESSAGE_COMMAND_FLUSH, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING,
     MFT_MESSAGE_NOTIFY_END_OF_STREAM, MFT_MESSAGE_NOTIFY_START_OF_STREAM,
@@ -67,9 +68,11 @@ use windows::Win32::System::Com::{
 use windows::Win32::System::Variant::{VARIANT, VARIANT_0, VARIANT_0_0, VARIANT_0_0_0, VT_UI4};
 
 use alloc::collections::VecDeque;
+use std::time::{Duration, Instant};
 
 use crate::annexb::au_is_keyframe;
 use crate::d3d11texture::{texture_objects, texture_proposal};
+use crate::inputstamp::{InputStamp, PendingInputStamps};
 use crate::mfcommon::{
     feed_sample, make_input_sample, mf_err, mf_ticks_to_ns, ns_to_mf_ticks,
     output_provides_samples, pack_u32_pair, process_output, read_sample_bytes, sample_time_ns,
@@ -122,6 +125,8 @@ struct EncoderState {
     /// Outstanding `METransformNeedInput` events with no input queued to
     /// satisfy them: the next handed-in sample is fed immediately.
     need_input_credits: u32,
+    // inputs ProcessInput took whose encoded frame has not been pulled yet
+    awaiting_output: usize,
     // input sample time in MF ticks and the texture frame it reads, held until its output arrives
     held_textures: VecDeque<(i64, OwnedD3D11Texture)>,
     texture_device: Option<TextureDevice>,
@@ -208,6 +213,7 @@ pub struct MfEncode {
     /// declared `DerivedOutput` closure, as in `mfdecode`.
     input_caps: Option<Caps>,
     emitted: u64,
+    input_stamps: PendingInputStamps,
     /// The downstream consumer's allocation proposal, recorded in
     /// `configure_allocation`. The encoder emits system-memory bitstream
     /// buffers, so the request is informational.
@@ -241,6 +247,7 @@ impl MfEncode {
             last_caps: None,
             input_caps: None,
             emitted: 0,
+            input_stamps: PendingInputStamps::default(),
             requested_alloc: None,
             force_keyframe: false,
         }
@@ -329,7 +336,7 @@ impl MfEncode {
         // SAFETY: setting an attribute on the sample just built, on the owning thread.
         unsafe { sample.SetSampleDuration(duration_hns) }.map_err(mf_err)?;
         if core::mem::take(&mut self.force_keyframe) {
-            if let Err(error) = self.force_next_keyframe() {
+            if let Err(error) = self.set_codec_value(&CODECAPI_AVEncVideoForceKeyFrame, 1) {
                 g2g_warn!(
                     Target::category("mfencode"),
                     "the encoder MFT cannot force a keyframe: {error:?}"
@@ -391,21 +398,21 @@ impl MfEncode {
         Ok(())
     }
 
-    fn force_next_keyframe(&self) -> Result<(), G2gError> {
+    fn set_codec_value(&self, property: &windows::core::GUID, value: u32) -> Result<(), G2gError> {
         let codec_api: ICodecAPI = self.transform()?.cast().map_err(mf_err)?;
-        let force = VARIANT {
+        let variant = VARIANT {
             Anonymous: VARIANT_0 {
                 Anonymous: core::mem::ManuallyDrop::new(VARIANT_0_0 {
                     vt: VT_UI4,
                     wReserved1: 0,
                     wReserved2: 0,
                     wReserved3: 0,
-                    Anonymous: VARIANT_0_0_0 { ulVal: 1 },
+                    Anonymous: VARIANT_0_0_0 { ulVal: value },
                 }),
             },
         };
-        // SAFETY: the codec API call runs on the owning thread and `force` outlives it.
-        unsafe { codec_api.SetValue(&CODECAPI_AVEncVideoForceKeyFrame, &force) }.map_err(mf_err)
+        // SAFETY: the codec API call runs on the owning thread and `variant` outlives it.
+        unsafe { codec_api.SetValue(property, &variant) }.map_err(mf_err)
     }
 
     fn transform(&self) -> Result<&IMFTransform, G2gError> {
@@ -455,8 +462,35 @@ impl MfEncode {
                 st.need_input_credits -= 1;
                 // SAFETY: ProcessInput on the owning thread; `sample` is valid.
                 unsafe { st.transform.ProcessInput(0, &sample, 0) }.map_err(mf_err)?;
+                st.awaiting_output += 1;
             } else {
                 st.pending_input.push_back(sample);
+            }
+        }
+        // async MFTs ask for one input per output, so a queued backlog never shrinks
+        while !self
+            .state
+            .as_ref()
+            .ok_or(G2gError::NotConfigured)?
+            .pending_input
+            .is_empty()
+        {
+            self.pump_one(encoded, true)?;
+        }
+        const OUTPUT_POLL_INTERVAL: Duration = Duration::from_micros(250);
+        let st = self.state.as_ref().ok_or(G2gError::NotConfigured)?;
+        // encoders that hold frames back never answer, so the wait ends after one frame period
+        let deadline = Instant::now() + Duration::from_nanos(st.duration_hns as u64 * 100);
+        while self
+            .state
+            .as_ref()
+            .ok_or(G2gError::NotConfigured)?
+            .awaiting_output
+            > 0
+            && Instant::now() < deadline
+        {
+            if matches!(self.pump_one(encoded, false)?, PumpResult::NoEvents) {
+                std::thread::sleep(OUTPUT_POLL_INTERVAL);
             }
         }
         while matches!(self.pump_one(encoded, false)?, PumpResult::Pumped) {}
@@ -527,12 +561,17 @@ impl MfEncode {
             if let Some(s) = st.pending_input.pop_front() {
                 // SAFETY: ProcessInput on the owning thread.
                 unsafe { st.transform.ProcessInput(0, &s, 0) }.map_err(mf_err)?;
+                st.awaiting_output += 1;
             } else {
                 st.need_input_credits += 1;
             }
         } else if ty == METransformHaveOutput.0 {
             match self.process_output()? {
-                OutputStep::Frame(c) => encoded.push(c),
+                OutputStep::Frame(c) => {
+                    encoded.push(c);
+                    let st = self.state.as_mut().ok_or(G2gError::NotConfigured)?;
+                    st.awaiting_output -= 1;
+                }
                 OutputStep::NeedInput => {}
                 OutputStep::StreamChange => self.renegotiate()?,
             }
@@ -742,6 +781,11 @@ impl AsyncElement for MfEncode {
             let mut encoded = Vec::new();
             match packet {
                 PipelinePacket::DataFrame(frame) => {
+                    // the encoded sample carries the pts back rounded down to 100 ns ticks
+                    self.input_stamps.insert(
+                        mf_ticks_to_ns(ns_to_mf_ticks(frame.timing.pts_ns)),
+                        InputStamp::of(&frame),
+                    );
                     self.feed(&frame.domain, &frame.timing, &mut encoded)?;
                 }
                 PipelinePacket::CapsChanged(c) => {
@@ -804,7 +848,9 @@ impl AsyncElement for MfEncode {
                         st.pending_input.clear();
                         st.held_textures.clear();
                         st.need_input_credits = 0;
+                        st.awaiting_output = 0;
                     }
+                    self.input_stamps = PendingInputStamps::default();
                     self.last_caps = None;
                     out.push(PipelinePacket::Flush).await?;
                     return Ok(());
@@ -841,6 +887,7 @@ impl AsyncElement for MfEncode {
                     self.last_caps = Some(new_caps);
                 }
                 let keyframe = au_is_keyframe(self.codec, &c.data);
+                let input = self.input_stamps.take(c.pts_ns);
                 let frame = Frame {
                     domain: MemoryDomain::System(SystemSlice::from_boxed(c.data)),
                     timing: FrameTiming {
@@ -848,17 +895,24 @@ impl AsyncElement for MfEncode {
                         dts_ns: c.pts_ns,
                         duration_ns: c.duration_ns,
                         capture_ns: c.pts_ns,
+                        arrival_ns: input.arrival_ns,
                         keyframe,
                         ..FrameTiming::default()
                     },
                     sequence: self.emitted,
-                    meta: Default::default(),
+                    meta: input.meta,
                 };
                 self.emitted += 1;
-                if let PushOutcome::Reconfigure(Reconfigure::ForceKeyframe) =
-                    out.push(PipelinePacket::DataFrame(frame)).await?
-                {
-                    self.force_keyframe = true;
+                match out.push(PipelinePacket::DataFrame(frame)).await? {
+                    PushOutcome::Reconfigure(Reconfigure::ForceKeyframe) => {
+                        self.force_keyframe = true;
+                    }
+                    // zero asks a simulcast layer to go idle, which has no meaning for one encoder
+                    PushOutcome::Bitrate(bps) if bps != 0 && bps != self.bitrate => {
+                        self.set_codec_value(&CODECAPI_AVEncCommonMeanBitRate, bps)?;
+                        self.bitrate = bps;
+                    }
+                    _ => {}
                 }
             }
             Ok(())
@@ -1138,6 +1192,7 @@ fn init_encoder(
         event_gen,
         pending_input: VecDeque::new(),
         need_input_credits: 0,
+        awaiting_output: 0,
         held_textures: VecDeque::new(),
         texture_device,
         fed: false,

@@ -67,7 +67,11 @@ upstream. The first texture frame rebuilds the MFT with an
 `IMFDXGIDeviceManager` on the texture's device (`MFT_MESSAGE_SET_D3D_MANAGER`),
 and each frame enters as an `MFCreateDXGISurfaceBuffer` sample, so the picture
 is not copied. An MFT without `MF_SA_D3D11_AWARE` fails the frame with
-`UnsupportedDomain`. `MfAacEncode` / `MfAacDecode` (feature `mf-aac`) cover the AAC
+`UnsupportedDomain`. A hardware MFT is asynchronous and asks for one input per
+output, so `process()` blocks until the MFT has taken the frame, or a stall
+would leave a backlog that never drains, and then waits up to one frame period
+for that frame's output. A downstream `PushOutcome::Bitrate` retargets the MFT
+in place through `CODECAPI_AVEncCommonMeanBitRate`. `MfAacEncode` / `MfAacDecode` (feature `mf-aac`) cover the AAC
 audio path. Like every AAC element in a pipeline they carry ADTS: the encoder
 frames each access unit, and the decoder opens on the AudioSpecificConfig of the
 first ADTS header and strips the headers.

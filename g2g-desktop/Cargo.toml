@@ -23,6 +23,7 @@ session = [
     "g2g-plugins/mf-encode",
     "dep:windows",
     "g2g-plugins/wgpu-present",
+    "g2g-plugins/metadata",
     "tokio/net",
     "tokio/io-util",
     "tokio/time",

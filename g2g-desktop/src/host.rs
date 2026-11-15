@@ -223,7 +223,9 @@ fn host_graph(
 }
 
 fn duplex_session(settings: &HostSettings, sdp: SdpChannel) -> WebRtcDuplexSession {
-    let mut session = WebRtcDuplexSession::new(SignalRole::Answerer, sdp, 1);
+    let mut session = WebRtcDuplexSession::new(SignalRole::Answerer, sdp, 1)
+        .with_start_bitrate(settings.bitrate.into())
+        .with_bandwidth_estimation(false);
     if let Some(server) = &settings.stun_server {
         session = session.with_stun_server(server.clone());
     }

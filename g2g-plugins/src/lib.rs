@@ -123,6 +123,7 @@ mod fifobuffer;
     all(target_os = "android", feature = "mediacodec"),
     all(target_os = "macos", feature = "vtdecode"),
     all(target_os = "windows", feature = "mf-decode"),
+    all(target_os = "windows", feature = "mf-encode"),
     all(target_os = "windows", feature = "d3d12-decode"),
     all(target_os = "linux", feature = "openh264"),
 ))]

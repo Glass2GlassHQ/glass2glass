@@ -101,6 +101,24 @@ impl PipelineClock for UnixEpochClock {
     }
 }
 
+/// Attach the sender's wall clock to a frame. A no-op without the `metadata`
+/// feature, where a frame has nowhere to carry it.
+#[cfg(any(
+    feature = "rtsp",
+    all(target_os = "windows", feature = "d3d11-screen-capture")
+))]
+#[cfg(feature = "metadata")]
+pub(crate) fn attach_wall_clock(frame: &mut g2g_core::frame::Frame, unix_nanos: i64) {
+    frame.meta.attach(g2g_core::WallClockMeta { unix_nanos });
+}
+
+#[cfg(any(
+    feature = "rtsp",
+    all(target_os = "windows", feature = "d3d11-screen-capture")
+))]
+#[cfg(not(feature = "metadata"))]
+pub(crate) fn attach_wall_clock(_frame: &mut g2g_core::frame::Frame, _unix_nanos: i64) {}
+
 #[cfg(test)]
 mod tests {
     use super::*;

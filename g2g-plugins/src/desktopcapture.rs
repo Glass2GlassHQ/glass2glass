@@ -13,8 +13,10 @@ use tokio::sync::watch;
 use g2g_core::frame::Frame;
 use g2g_core::{
     CaptureAnchor, ClockSync, FrameTiming, G2gError, HardwareError, MemoryDomain, OutputSink,
-    PipelinePacket,
+    PipelineClock, PipelinePacket,
 };
+
+use crate::clock::{attach_wall_clock, UnixEpochClock};
 
 const WORKER_START_TIMEOUT: Duration = Duration::from_secs(5);
 const POLL_INTERVAL: Duration = Duration::from_millis(1);
@@ -170,7 +172,7 @@ pub(crate) async fn run_desktop_capture(
             Some(sync) => anchor.stamp(sync, elapsed, period_ns),
             None => elapsed,
         };
-        let frame = Frame {
+        let mut frame = Frame {
             domain: captured.image,
             timing: FrameTiming {
                 pts_ns: pts,
@@ -184,6 +186,8 @@ pub(crate) async fn run_desktop_capture(
             sequence,
             meta: Default::default(),
         };
+        let age_ns = g2g_core::metrics::monotonic_ns() - captured.capture_ns;
+        attach_wall_clock(&mut frame, (UnixEpochClock.now_ns() - age_ns) as i64);
         if out.push(PipelinePacket::DataFrame(frame)).await.is_err() {
             downstream_open = false;
             break;
