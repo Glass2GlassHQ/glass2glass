@@ -28,6 +28,7 @@ session = [
     "tokio/io-util",
     "tokio/time",
     "tokio/macros",
+    "tokio/signal",
     "tokio/rt-multi-thread",
 ]
 

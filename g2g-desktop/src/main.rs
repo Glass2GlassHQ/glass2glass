@@ -9,6 +9,8 @@ use std::process::ExitCode;
 use std::str::FromStr;
 use std::sync::Arc;
 
+#[cfg(target_os = "linux")]
+use g2g_core::runtime::Observer;
 use g2g_core::runtime::{GraphNodeRef, VisitRecorder};
 #[cfg(target_os = "linux")]
 use g2g_core::G2gError;
@@ -186,8 +188,9 @@ async fn host_one(
         ),
         inject(event_receiver, size_receiver, open_injector)
     );
-    if let Err(e) = session {
-        eprintln!("g2g-desktop host: {e}");
+    match session {
+        Ok(stats) => eprintln!("{}", stats.report()),
+        Err(e) => eprintln!("g2g-desktop host: {e}"),
     }
     if let Err(e) = injected {
         eprintln!("g2g-desktop host: input injection: {e}");
@@ -238,18 +241,39 @@ async fn client(flags: Flags) -> Result<(), Box<dyn Error>> {
     };
     let trace = open_trace(flags.get("trace").map(Path::new))?;
     let stream = TcpStream::connect((host.as_str(), port)).await?;
-    let session = run_client(
-        stream,
-        &settings,
-        trace.clone().map(|trace| trace as Arc<dyn VisitRecorder>),
-    )
-    .await;
+    let observer = Observer::new();
+    let session = tokio::select! {
+        session = run_client(
+            stream,
+            &settings,
+            trace.clone().map(|trace| trace as Arc<dyn VisitRecorder>),
+            &observer,
+        ) => Some(session),
+        interrupted = tokio::signal::ctrl_c() => {
+            interrupted?;
+            None
+        }
+    };
+    match &session {
+        Some(Ok(stats)) => eprintln!("{}", stats.report()),
+        None => {
+            eprintln!("g2g-desktop client: interrupted, per-element [measured]:");
+            for node in observer.snapshot().nodes {
+                if let Some(latency) = node.latency {
+                    eprintln!("{}", latency.report_line());
+                }
+            }
+        }
+        Some(Err(_)) => {}
+    }
+    // the observer's element probes hold the trace writer until they drop
+    drop(observer);
     if let Some(trace) = trace {
         trace.finish()?;
     }
     match session {
-        Ok(_) | Err(ClientError::Session(G2gError::WindowClosed)) => Ok(()),
-        Err(e) => Err(e.into()),
+        None | Some(Ok(_)) | Some(Err(ClientError::Session(G2gError::WindowClosed))) => Ok(()),
+        Some(Err(e)) => Err(e.into()),
     }
 }
 

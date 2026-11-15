@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2321: Run reports and traces show each element's frame age, and the wire codec carries frame age across `remote*` carriers.
 - M2320: `mfencode` hardware encode keeps no input backlog and follows bitrate feedback, and WebRTC duplex sessions gain `start-bitrate` and `bandwidth-estimation`.
 - M2319: `wgpusink` gains `sync` and `present-mode`, and the `g2g-desktop` client presents every frame on arrival without `livesync`.
 - M2318: The `g2g-desktop` client window shows the Windows host's cursor shape.

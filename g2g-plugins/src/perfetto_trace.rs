@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex};
 use g2g_core::runtime::{StageVisit, VisitRecorder};
 
 const NANOSECONDS_PER_MICROSECOND: f64 = 1.0e3;
+const NANOSECONDS_PER_MILLISECOND: f64 = 1.0e6;
 
 #[derive(Debug)]
 pub struct PerfettoTrace {
@@ -88,6 +89,13 @@ impl TraceState {
             ))?;
         }
         let begin = microseconds(visit.enter_ns);
+        // perfetto draws "C" events as a graph per process, so a growing queue shows as a ramp
+        if let Some(age_ns) = visit.age_ns {
+            let age = age_ns as f64 / NANOSECONDS_PER_MILLISECOND;
+            self.write_event(format_args!(
+                r#"{{"ph":"C","name":"frame age ms","pid":{process},"ts":{begin},"args":{{"age":{age:.3}}}}}"#
+            ))?;
+        }
         let duration = microseconds(visit.exit_ns - visit.enter_ns);
         let push_wait_ns = visit.push_wait_ns;
         self.write_event(format_args!(

@@ -76,6 +76,8 @@ pub struct ElementProbe {
     /// buffering frames internally (a decoder's reorder queue), which `proc_ns`
     /// misses entirely: every call stays cheap while frames age inside.
     age_at_emit_ns: LatencyHistogram,
+    // age of each DataFrame as process() starts on it, the end-to-end number for a sink
+    age_at_process_ns: LatencyHistogram,
     /// Input-link occupancy sampled at each pull (0-100), an indicator of where
     /// backpressure pools: a consistently-full input means this element is the
     /// bottleneck; a consistently-empty one means it is starved.
@@ -126,6 +128,7 @@ impl ElementProbe {
             last_frame_proc_ns: AtomicU64::new(0),
             transit_ns: LatencyHistogram::new(),
             age_at_emit_ns: LatencyHistogram::new(),
+            age_at_process_ns: LatencyHistogram::new(),
             fill: FillGauge::default(),
             journeys,
             #[cfg(feature = "std")]
@@ -268,7 +271,14 @@ impl ElementProbe {
     /// when the probe records no journeys and has no visit recorder, under
     /// `no_std`, or when `enter` is `None`.
     #[inline]
-    pub fn record_visit(&self, sequence: u64, wait_ns: u64, enter: Option<u64>, push_wait_ns: u64) {
+    pub fn record_visit(
+        &self,
+        sequence: u64,
+        wait_ns: u64,
+        enter: Option<u64>,
+        push_wait_ns: u64,
+        age_ns: Option<u64>,
+    ) {
         #[cfg(feature = "std")]
         if let (true, Some(enter_ns)) = (self.records_visits(), enter) {
             let exit_ns = crate::metrics::monotonic_ns();
@@ -279,27 +289,41 @@ impl ElementProbe {
                 exit_ns,
                 push_wait_ns,
                 poll_ns: self.take_poll_ns(exit_ns),
+                age_ns,
             });
         }
         #[cfg(not(feature = "std"))]
-        let _ = (sequence, wait_ns, enter, push_wait_ns);
+        let _ = (sequence, wait_ns, enter, push_wait_ns, age_ns);
     }
 
     // `record_proc_since` and `record_visit` on one clock read.
     #[cfg(feature = "std")]
-    pub(crate) fn record_frame_processed(&self, sequence: u64, wait_ns: u64, start: Option<u64>) {
+    pub(crate) fn record_frame_processed(
+        &self,
+        stamp: FrameStamp,
+        wait_ns: u64,
+        start: Option<u64>,
+    ) {
         let waited = self.push_wait_accum.swap(0, Ordering::Relaxed);
         let Some(enter_ns) = start else { return };
         let exit_ns = crate::metrics::monotonic_ns();
         self.record_proc(exit_ns.saturating_sub(enter_ns).saturating_sub(waited));
         self.push_wait_ns.record(waited);
+        // a source's span starts before the frame it pushes arrives, so it has no age here
+        let age_ns = (stamp.arrival_ns != 0)
+            .then(|| enter_ns.checked_sub(stamp.arrival_ns))
+            .flatten();
+        if let Some(age_ns) = age_ns {
+            self.age_at_process_ns.record(age_ns);
+        }
         self.push_visit(StageVisit {
-            sequence,
+            sequence: stamp.sequence,
             wait_ns,
             enter_ns,
             exit_ns,
             push_wait_ns: waited,
             poll_ns: self.take_poll_ns(exit_ns),
+            age_ns,
         });
     }
 
@@ -340,6 +364,7 @@ impl ElementProbe {
             push_wait: self.push_wait_ns.snapshot(),
             transit: self.transit_ns.snapshot(),
             age_at_emit: self.age_at_emit_ns.snapshot(),
+            age_at_process: self.age_at_process_ns.snapshot(),
             fill_mean_pct: self.fill.mean(),
             fill_max_pct: self.fill.max(),
             presentation: *self.presentation.lock(),
@@ -412,12 +437,31 @@ pub struct StageVisit {
     pub push_wait_ns: u64,
     // the arm's polls since its previous visit, which leave out time it spent awaiting
     pub poll_ns: u64,
+    // source-side arrival_ns to enter_ns, None for unstamped frames and for sources
+    pub age_ns: Option<u64>,
 }
 
 #[cfg(feature = "std")]
-pub(crate) fn frame_sequence(packet: &crate::frame::PipelinePacket) -> Option<u64> {
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct FrameStamp {
+    pub(crate) sequence: u64,
+    pub(crate) arrival_ns: u64,
+}
+
+#[cfg(feature = "std")]
+impl FrameStamp {
+    pub(crate) fn of(frame: &crate::frame::Frame) -> Self {
+        Self {
+            sequence: frame.sequence,
+            arrival_ns: frame.timing.arrival_ns,
+        }
+    }
+}
+
+#[cfg(feature = "std")]
+pub(crate) fn frame_stamp(packet: &crate::frame::PipelinePacket) -> Option<FrameStamp> {
     match packet {
-        crate::frame::PipelinePacket::DataFrame(frame) => Some(frame.sequence),
+        crate::frame::PipelinePacket::DataFrame(frame) => Some(FrameStamp::of(frame)),
         _ => None,
     }
 }
@@ -457,6 +501,8 @@ pub struct ElementLatency {
     /// yet a high age here. `count == 0` for sinks (no output adapter),
     /// unstamped frames, uninstrumented arms, or under `no_std`.
     pub age_at_emit: LatencySnapshot,
+    // age of each DataFrame as process() starts on it (source-side arrival_ns to that moment), the end-to-end number for a sink
+    pub age_at_process: LatencySnapshot,
     /// Mean input-link fill percent observed across the run (0-100).
     pub fill_mean_pct: u8,
     /// Peak input-link fill percent (0-100); 100 means the element's input was
@@ -465,6 +511,77 @@ pub struct ElementLatency {
     /// A paced sink's cumulative presented / dropped counters, `None` for
     /// elements that don't present.
     pub presentation: Option<PresentationStats>,
+}
+
+impl ElementLatency {
+    pub fn report_line(&self) -> alloc::string::String {
+        use alloc::format;
+        let ms = |ns: u64| ns as f64 / 1.0e6;
+        // proc.count == 0 means fill was sampled but no `process()` timing
+        // was taken (no_std, no clock); show fill alone in that case.
+        if self.proc.count > 0 {
+            // Include measured input-link queue-residency (transit) when
+            // the edge was instrumented; it is the "wait" half of the
+            // per-stage latency, complementing the `process()` "work".
+            let transit = if self.transit.count > 0 {
+                format!(
+                    ", wait p50 {:.2} ms / p99 {:.2} ms",
+                    ms(self.transit.p50_ns),
+                    ms(self.transit.p99_ns)
+                )
+            } else {
+                alloc::string::String::new()
+            };
+            // M947: what the element spent parked on a full output link.
+            // `proc` excludes it, so a back-pressured element reads as
+            // blocked rather than as expensive. Absent for an element the
+            // runner does not attribute output pushes to (every sink).
+            let blocked = if self.push_wait.max_ns > 0 {
+                format!(
+                    ", blocked p50 {:.2} ms / p99 {:.2} ms",
+                    ms(self.push_wait.p50_ns),
+                    ms(self.push_wait.p99_ns)
+                )
+            } else {
+                alloc::string::String::new()
+            };
+            let age_in = if self.age_at_process.count > 0 {
+                format!(
+                    ", age-in p50 {:.2} ms / p99 {:.2} ms",
+                    ms(self.age_at_process.p50_ns),
+                    ms(self.age_at_process.p99_ns)
+                )
+            } else {
+                alloc::string::String::new()
+            };
+            // Frame age at this element's output push: the number that
+            // exposes internal buffering (a decoder's reorder queue),
+            // which cheap `proc` percentiles hide.
+            let age = if self.age_at_emit.count > 0 {
+                format!(
+                    ", age-out p50 {:.2} ms / p99 {:.2} ms",
+                    ms(self.age_at_emit.p50_ns),
+                    ms(self.age_at_emit.p99_ns)
+                )
+            } else {
+                alloc::string::String::new()
+            };
+            format!(
+                "    {:<16} proc p50 {:.2} ms / p99 {:.2} ms (n={}){blocked}{transit}{age_in}{age}, in-fill {}%/{}% avg/max",
+                self.name,
+                ms(self.proc.p50_ns),
+                ms(self.proc.p99_ns),
+                self.proc.count,
+                self.fill_mean_pct,
+                self.fill_max_pct,
+            )
+        } else {
+            format!(
+                "    {:<16} in-fill {}%/{}% avg/max",
+                self.name, self.fill_mean_pct, self.fill_max_pct,
+            )
+        }
+    }
 }
 
 /// Per-edge live traffic counters plus the last caps that crossed,
@@ -615,7 +732,7 @@ mod tests {
         // nothing per frame.
         let p = ElementProbe::new(crate::log::ElementLogName::new("x", String::from("x0")));
         for i in 0..4 {
-            p.record_visit(i, 10, Some(100 + i), 0);
+            p.record_visit(i, 10, Some(100 + i), 0, None);
         }
         assert!(p.visits().is_empty());
     }
@@ -626,7 +743,7 @@ mod tests {
         let p =
             ElementProbe::with_journeys(crate::log::ElementLogName::new("x", String::from("x0")));
         for i in 0..(JOURNEY_RING as u64 * 2) {
-            p.record_visit(i, i, Some(1_000 + i), 0);
+            p.record_visit(i, i, Some(1_000 + i), 0, None);
         }
         let v = p.visits();
         assert_eq!(v.len(), JOURNEY_RING, "ring is bounded");
@@ -647,12 +764,12 @@ mod tests {
         let t0 = ElementProbe::mark();
         p.add_push_wait(700);
         assert_eq!(p.record_proc_since(t0), 700, "the drained bank comes back");
-        p.record_visit(1, 10, t0, 700);
+        p.record_visit(1, 10, t0, 700, None);
         // A second call banks nothing, so its visit reads as pure compute.
         let t1 = ElementProbe::mark();
         let waited = p.record_proc_since(t1);
         assert_eq!(waited, 0, "the bank was drained by the first call");
-        p.record_visit(2, 10, t1, waited);
+        p.record_visit(2, 10, t1, waited, None);
 
         let v = p.visits();
         assert_eq!(v.len(), 2);

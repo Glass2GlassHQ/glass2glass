@@ -49,7 +49,7 @@ use crate::runtime::coordinator::log_caps_rejected;
 use crate::runtime::graph_runner::{
     run_graph_inner, sink_arm_on, traced_source_probe, GraphNodeRef, SinkArmIo, SourceFrameSpans,
 };
-use crate::runtime::instrument::{frame_sequence, EdgeCounters, ElementProbe, Probe};
+use crate::runtime::instrument::{frame_stamp, EdgeCounters, ElementProbe, Probe};
 use crate::runtime::join::{dynamic_join, join_all, select2, Either};
 use crate::runtime::observe::{link_tapped, register_runner_tap, EdgeTap, TapEdge, TapNode};
 use crate::runtime::packet_log::log_received;
@@ -1639,15 +1639,15 @@ where
                         .await?;
                 }
                 Some((idx, packet)) => {
-                    let sequence = frame_sequence(&packet);
-                    if sequence.is_some() {
+                    let stamp = frame_stamp(&packet);
+                    if stamp.is_some() {
                         consumed += 1;
                         probe_for_session.record_fill(rx.fill_percent());
                     }
-                    let t0 = sequence.and_then(|_| ElementProbe::mark());
+                    let t0 = stamp.and_then(|_| ElementProbe::mark());
                     session.process(idx, packet, &mut null).await?;
-                    if let Some(sequence) = sequence {
-                        probe_for_session.record_frame_processed(sequence, 0, t0);
+                    if let Some(stamp) = stamp {
+                        probe_for_session.record_frame_processed(stamp, 0, t0);
                     }
                 }
                 None => return Ok(consumed),
@@ -2235,15 +2235,15 @@ where
                                 .await?;
                         }
                         Either::Left(Some((pad, packet))) => {
-                            let sequence = frame_sequence(&packet);
-                            if sequence.is_some() {
+                            let stamp = frame_stamp(&packet);
+                            if stamp.is_some() {
                                 consumed += 1;
                                 probe_for_agg.record_fill(tagged_rx.fill_percent());
                             }
-                            let t0 = sequence.and_then(|_| ElementProbe::mark());
+                            let t0 = stamp.and_then(|_| ElementProbe::mark());
                             aggregator.process(pad, packet, &mut null).await?;
-                            if let Some(sequence) = sequence {
-                                probe_for_agg.record_frame_processed(sequence, 0, t0);
+                            if let Some(stamp) = stamp {
+                                probe_for_agg.record_frame_processed(stamp, 0, t0);
                             }
                         }
                         // Unreachable while `keepalive` is held (a live sender keeps
@@ -2273,15 +2273,15 @@ where
                                 .await?;
                         }
                         Some((pad, packet)) => {
-                            let sequence = frame_sequence(&packet);
-                            if sequence.is_some() {
+                            let stamp = frame_stamp(&packet);
+                            if stamp.is_some() {
                                 consumed += 1;
                                 probe_for_agg.record_fill(tagged_rx.fill_percent());
                             }
-                            let t0 = sequence.and_then(|_| ElementProbe::mark());
+                            let t0 = stamp.and_then(|_| ElementProbe::mark());
                             aggregator.process(pad, packet, &mut null).await?;
-                            if let Some(sequence) = sequence {
-                                probe_for_agg.record_frame_processed(sequence, 0, t0);
+                            if let Some(stamp) = stamp {
+                                probe_for_agg.record_frame_processed(stamp, 0, t0);
                             }
                         }
                         None => return Ok(FaninArmOut::Aggregator(consumed)),
@@ -2468,15 +2468,15 @@ where
                     }
                     PipelinePacket::Eos => break,
                     other => {
-                        let sequence = frame_sequence(&other);
-                        if sequence.is_some() {
+                        let stamp = frame_stamp(&other);
+                        if stamp.is_some() {
                             consumed += 1;
                             probe_for_sink.record_fill(out_rx.fill_percent());
                         }
-                        let t0 = sequence.and_then(|_| ElementProbe::mark());
+                        let t0 = stamp.and_then(|_| ElementProbe::mark());
                         sink.process(other, &mut null).await?;
-                        if let Some(sequence) = sequence {
-                            probe_for_sink.record_frame_processed(sequence, 0, t0);
+                        if let Some(stamp) = stamp {
+                            probe_for_sink.record_frame_processed(stamp, 0, t0);
                         }
                     }
                 }
@@ -2530,8 +2530,8 @@ where
                         mux.process(pad, PipelinePacket::Eos, &mut out).await?;
                     }
                     Some((pad, packet)) => {
-                        let sequence = frame_sequence(&packet);
-                        if sequence.is_some() {
+                        let stamp = frame_stamp(&packet);
+                        if stamp.is_some() {
                             // Couple the merged output to the sink: emit one
                             // `CapsChanged` whenever the derived output firms up or
                             // shifts (a newly attached pad can change it), before
@@ -2557,10 +2557,10 @@ where
                             consumed += 1;
                             probe_for_mux.record_fill(tagged_rx.fill_percent());
                         }
-                        let t0 = sequence.and_then(|_| ElementProbe::mark());
+                        let t0 = stamp.and_then(|_| ElementProbe::mark());
                         mux.process(pad, packet, &mut out).await?;
-                        if let Some(sequence) = sequence {
-                            probe_for_mux.record_frame_processed(sequence, 0, t0);
+                        if let Some(stamp) = stamp {
+                            probe_for_mux.record_frame_processed(stamp, 0, t0);
                         }
                     }
                     None => break,

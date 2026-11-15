@@ -625,8 +625,9 @@ through the ScreenCast portal, which asks the user on every session. On
 Windows it captures the monitor named by `--monitor-index` (-1 for the
 primary) with `d3d11screencapturesrc`. A second
 connection while a session runs is closed. `g2g-desktop client` connects and
-opens the window, and closing the window ends it. Running `g2g-desktop` with
-no arguments prints the flags.
+opens the window, and closing the window ends it. Both print the run's
+per-element report when the session ends, and the client also prints it on
+Ctrl-C. Running `g2g-desktop` with no arguments prints the flags.
 
 ### Key mapping and injection
 

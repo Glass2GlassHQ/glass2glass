@@ -63,8 +63,9 @@ use crate::tensor::MAX_TENSOR_RANK;
 /// rather than mis-parsing. Version 2 added the four colorimetry bytes to both
 /// video caps; version 3 added the u16 channel-layout mask to audio
 /// caps; version 4 widened the timecode frame count to u16; version 5 added the
-/// pixel aspect ratio to both video caps.
-pub const WIRE_VERSION: u8 = 6;
+/// pixel aspect ratio to both video caps; version 7 sends a frame's age since
+/// arrival instead of the sender's own arrival stamp.
+pub const WIRE_VERSION: u8 = 7;
 
 /// Failure decoding (or encoding) a [`PipelinePacket`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -995,18 +996,52 @@ fn put_timing(w: &mut Writer, t: &FrameTiming) {
     w.u64(t.dts_ns);
     w.u64(t.duration_ns);
     w.u64(t.capture_ns);
-    w.u64(t.arrival_ns);
+    let age_ns = age_since_arrival(t.arrival_ns);
+    w.bool(age_ns.is_some());
+    w.u64(age_ns.unwrap_or_default());
     w.bool(t.keyframe);
     w.u32(t.start_discard_ns);
     w.u32(t.end_discard_ns);
 }
+// each process's monotonic clock starts at its own epoch, so an arrival stamp means nothing to the peer
+#[cfg(feature = "std")]
+fn age_since_arrival(arrival_ns: u64) -> Option<u64> {
+    (arrival_ns != 0).then(|| crate::metrics::monotonic_ns().saturating_sub(arrival_ns))
+}
+
+#[cfg(not(feature = "std"))]
+fn age_since_arrival(_arrival_ns: u64) -> Option<u64> {
+    None
+}
+
+#[cfg(feature = "std")]
+fn arrival_from_age(age_ns: u64) -> u64 {
+    // a frame older than this process keeps only the age it gained here
+    crate::metrics::monotonic_ns()
+        .checked_sub(age_ns)
+        .unwrap_or(1)
+}
+
+#[cfg(not(feature = "std"))]
+fn arrival_from_age(_age_ns: u64) -> u64 {
+    0
+}
+
 fn get_timing(r: &mut Reader) -> Result<FrameTiming, WireError> {
     Ok(FrameTiming {
         pts_ns: r.u64()?,
         dts_ns: r.u64()?,
         duration_ns: r.u64()?,
         capture_ns: r.u64()?,
-        arrival_ns: r.u64()?,
+        arrival_ns: {
+            let stamped = r.bool()?;
+            let age_ns = r.u64()?;
+            if stamped {
+                arrival_from_age(age_ns)
+            } else {
+                0
+            }
+        },
         keyframe: r.bool()?,
         start_discard_ns: r.u32()?,
         end_discard_ns: r.u32()?,
@@ -1893,6 +1928,45 @@ mod tests {
         assert_eq!(video_codec_to_u8(VideoCodec::Mpeg4Part2), 6);
     }
 
+    #[cfg(feature = "std")]
+    #[test]
+    fn a_frame_keeps_its_age_across_the_wire() {
+        extern crate std;
+        const AGE_NS: u64 = 5_000_000;
+        const SLACK_NS: u64 = 1_000_000_000;
+        let started = crate::metrics::monotonic_ns();
+        std::thread::sleep(core::time::Duration::from_nanos(2 * AGE_NS));
+        let frame = |arrival_ns| Frame {
+            domain: MemoryDomain::System(SystemSlice::from_boxed(Box::new([0u8; 4]))),
+            timing: FrameTiming {
+                arrival_ns,
+                ..FrameTiming::default()
+            },
+            sequence: 0,
+            meta: FrameMetaSet::new(),
+        };
+        let arrival_ns = crate::metrics::monotonic_ns() - AGE_NS;
+        assert!(arrival_ns > started);
+        let PipelinePacket::DataFrame(got) =
+            roundtrip(&PipelinePacket::DataFrame(frame(arrival_ns)))
+        else {
+            panic!("expected DataFrame");
+        };
+        let age_ns = crate::metrics::monotonic_ns() - got.timing.arrival_ns;
+        assert!(
+            (AGE_NS..AGE_NS + SLACK_NS).contains(&age_ns),
+            "the decoded frame is as old as the sent one, {age_ns} ns"
+        );
+        let PipelinePacket::DataFrame(unstamped) = roundtrip(&PipelinePacket::DataFrame(frame(0)))
+        else {
+            panic!("expected DataFrame");
+        };
+        assert_eq!(
+            unstamped.timing.arrival_ns, 0,
+            "an unstamped frame stays unstamped"
+        );
+    }
+
     #[test]
     fn data_frame_round_trips_bytes_timing_and_sequence() {
         let bytes: Vec<u8> = (0u8..=200).collect();
@@ -1915,7 +1989,13 @@ mod tests {
         match roundtrip(&PipelinePacket::DataFrame(frame)) {
             PipelinePacket::DataFrame(got) => {
                 assert_eq!(got.sequence, 12_345);
-                assert_eq!(got.timing, timing);
+                assert_eq!(
+                    FrameTiming {
+                        arrival_ns: timing.arrival_ns,
+                        ..got.timing
+                    },
+                    timing
+                );
                 match got.domain {
                     MemoryDomain::System(s) => assert_eq!(s.as_slice(), &bytes[..]),
                     other => panic!("expected System, got {other:?}"),

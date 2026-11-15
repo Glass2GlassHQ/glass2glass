@@ -6,6 +6,9 @@
 # CI job verifies nothing until the next publish. This list is what still holds
 # a break to a deliberate act during that window, and it is the raw material for
 # the release notes when the bump ships.
+constructible_struct_adds_field: field ElementLatency.age_at_process
+constructible_struct_adds_field: field StageVisit.age_ns
 enum_variant_added: variant GraphNodeRef:Duplex
 enum_variant_added: variant NodeConstraint:Duplex
 enum_variant_added: variant NodeKind:Duplex
+method_parameter_count_changed: g2g_core::runtime::ElementProbe::record_visit takes 4 parameters

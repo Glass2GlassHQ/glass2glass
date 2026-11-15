@@ -6,7 +6,7 @@ use g2g_core::log::Target;
 use std::sync::Arc;
 
 use g2g_core::runtime::{
-    parse_chain, GraphNode, GraphNodeRef, ParseError, RunBuilder, RunStats, VisitRecorder,
+    parse_chain, GraphNode, GraphNodeRef, Observer, ParseError, RunBuilder, RunStats, VisitRecorder,
 };
 use g2g_core::{G2gError, Graph};
 use g2g_plugins::clock::WallClock;
@@ -282,6 +282,7 @@ pub async fn run_client(
     stream: TcpStream,
     settings: &ClientSettings,
     trace: Option<Arc<dyn VisitRecorder>>,
+    observer: &Observer,
 ) -> Result<RunStats, ClientError> {
     let (offer_sender, offers) = mpsc::channel(SDP_CHANNEL_DEPTH);
     let (answers, answer_receiver) = mpsc::channel(SDP_CHANNEL_DEPTH);
@@ -309,7 +310,7 @@ pub async fn run_client(
     };
     let follow = follow_host_events(data_channel.incoming, cursor_shapes);
     let clock = WallClock::new();
-    let mut run = RunBuilder::new(graph, &clock, LINK_CAPACITY);
+    let mut run = RunBuilder::new(graph, &clock, LINK_CAPACITY).with_observer(observer);
     if let Some(trace) = trace {
         run = run.with_visit_recorder(trace);
     }

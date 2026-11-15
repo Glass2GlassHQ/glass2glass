@@ -240,6 +240,18 @@ simply not measured, and it is `Option`-gated so an uninstrumented run carries
 no stamp and pays nothing. `RunStats::report()` prints `wait p50/p99` beside
 `proc`, and the dashboard stacks the two per stage into a latency waterfall.
 
+Frame age locates a queue that sits inside an element or across a network. A
+source stamps `FrameTiming::arrival_ns` when the frame enters the pipeline, and
+each element row reports `age-in`, the frame's age when `process()` starts on
+it, and `age-out`, its age at the output push. A sink's `age-in` is the
+end-to-end figure, and the first element whose `age-in` jumps holds the queue.
+`ElementLatency::report_line` prints one row, so a caller can print a live
+`Observer` snapshot the same way `report()` prints the final one. The wire codec
+sends a frame's age rather than the sender's `arrival_ns`, because each
+process's monotonic clock starts at its own epoch, and the decoder restamps
+`arrival_ns` on its own clock, so ages keep counting across the `remote*`
+carriers. The network transit itself is not in that age.
+
 ### Edge probes
 
 Every link also carries a per-edge content-inspection slot, `LinkSender::probe`,
@@ -319,7 +331,9 @@ Each element is one Perfetto process named after its instance. Its `work` thread
 has one complete event per `process()` call, with the frame's `sequence` and the
 call's `push_wait_ns` in the args. Its `wait` track has async events for the
 frame's queue residency on the input link, because waits overlap each other and
-the previous frame's work.
+the previous frame's work. A `frame age ms` counter per element plots each
+frame's `age-in` over the run, where a queue that builds and drains shows as a
+ramp.
 
 Every arm of the cooperative and threaded graph runners records visits, and so do
 the elements a `GraphMutator` adds. Transforms, sinks, demuxers, muxers and

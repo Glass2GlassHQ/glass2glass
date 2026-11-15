@@ -464,61 +464,8 @@ impl RunStats {
         if !self.per_element.is_empty() {
             s.push_str("  per-element [measured]:\n");
             for e in &self.per_element {
-                // proc.count == 0 means fill was sampled but no `process()` timing
-                // was taken (no_std, no clock); show fill alone in that case.
-                if e.proc.count > 0 {
-                    // Include measured input-link queue-residency (transit) when
-                    // the edge was instrumented; it is the "wait" half of the
-                    // per-stage latency, complementing the `process()` "work".
-                    let transit = if e.transit.count > 0 {
-                        format!(
-                            ", wait p50 {:.2} ms / p99 {:.2} ms",
-                            ms(e.transit.p50_ns),
-                            ms(e.transit.p99_ns)
-                        )
-                    } else {
-                        alloc::string::String::new()
-                    };
-                    // M947: what the element spent parked on a full output link.
-                    // `proc` excludes it, so a back-pressured element reads as
-                    // blocked rather than as expensive. Absent for an element the
-                    // runner does not attribute output pushes to (every sink).
-                    let blocked = if e.push_wait.max_ns > 0 {
-                        format!(
-                            ", blocked p50 {:.2} ms / p99 {:.2} ms",
-                            ms(e.push_wait.p50_ns),
-                            ms(e.push_wait.p99_ns)
-                        )
-                    } else {
-                        alloc::string::String::new()
-                    };
-                    // Frame age at this element's output push: the number that
-                    // exposes internal buffering (a decoder's reorder queue),
-                    // which cheap `proc` percentiles hide.
-                    let age = if e.age_at_emit.count > 0 {
-                        format!(
-                            ", age-out p50 {:.2} ms / p99 {:.2} ms",
-                            ms(e.age_at_emit.p50_ns),
-                            ms(e.age_at_emit.p99_ns)
-                        )
-                    } else {
-                        alloc::string::String::new()
-                    };
-                    s.push_str(&format!(
-                        "    {:<16} proc p50 {:.2} ms / p99 {:.2} ms (n={}){blocked}{transit}{age}, in-fill {}%/{}% avg/max\n",
-                        e.name,
-                        ms(e.proc.p50_ns),
-                        ms(e.proc.p99_ns),
-                        e.proc.count,
-                        e.fill_mean_pct,
-                        e.fill_max_pct,
-                    ));
-                } else {
-                    s.push_str(&format!(
-                        "    {:<16} in-fill {}%/{}% avg/max\n",
-                        e.name, e.fill_mean_pct, e.fill_max_pct,
-                    ));
-                }
+                s.push_str(&e.report_line());
+                s.push('\n');
             }
         }
         // What a paced sink actually put on the display, vs what it shed: a

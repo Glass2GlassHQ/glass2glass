@@ -89,7 +89,7 @@ use crate::runtime::coordinator::{
 };
 use crate::runtime::fanin::{select_branch_caps, DynMultiInputElement, DynSourceLoop};
 use crate::runtime::instrument::{
-    frame_sequence, journey_ring, snapshot_all, ElementProbe, Probe, VisitRecorder,
+    frame_stamp, journey_ring, snapshot_all, ElementProbe, FrameStamp, Probe, VisitRecorder,
 };
 use crate::runtime::join::{dynamic_join_open, join_all, select2, Either};
 use crate::runtime::mutate::{
@@ -4662,7 +4662,7 @@ pub(crate) struct SourceFrameSpans<'o, S: ?Sized> {
     output: &'o mut S,
     probe: Probe,
     span_start_ns: Option<u64>,
-    pushing_sequence: Option<u64>,
+    pushing_stamp: Option<FrameStamp>,
     pushed_frames: u64,
 }
 
@@ -4672,15 +4672,15 @@ impl<'o, S: ?Sized> SourceFrameSpans<'o, S> {
             output,
             span_start_ns: probe.as_ref().and_then(|_| ElementProbe::mark()),
             probe,
-            pushing_sequence: None,
+            pushing_stamp: None,
             pushed_frames: 0,
         }
     }
 
     // an output that takes the packet on its first poll leaves the slot empty on the later ones
     fn start_poll(&mut self, packet: &Option<PipelinePacket>) {
-        if let Some(sequence) = packet.as_ref().and_then(frame_sequence) {
-            self.pushing_sequence = Some(sequence);
+        if let Some(stamp) = packet.as_ref().and_then(frame_stamp) {
+            self.pushing_stamp = Some(stamp);
         }
     }
 
@@ -4688,21 +4688,21 @@ impl<'o, S: ?Sized> SourceFrameSpans<'o, S> {
         if !matches!(outcome, core::task::Poll::Ready(Ok(_))) {
             return;
         }
-        let Some(sequence) = self.pushing_sequence.take() else {
+        let Some(stamp) = self.pushing_stamp.take() else {
             return;
         };
         self.pushed_frames += 1;
         let Some(probe) = &self.probe else {
             return;
         };
-        probe.record_frame_processed(sequence, 0, self.span_start_ns);
+        probe.record_frame_processed(stamp, 0, self.span_start_ns);
         self.span_start_ns = ElementProbe::mark();
     }
 }
 
 impl<S: OutputSink + ?Sized> OutputSink for SourceFrameSpans<'_, S> {
     fn begin_push(&mut self) {
-        self.pushing_sequence = None;
+        self.pushing_stamp = None;
         self.output.begin_push();
     }
 
@@ -4720,7 +4720,7 @@ impl<S: OutputSink + ?Sized> OutputSink for SourceFrameSpans<'_, S> {
 
 impl<S: MultiOutputSink + ?Sized> MultiOutputSink for SourceFrameSpans<'_, S> {
     fn begin_push_to(&mut self, port: usize) {
-        self.pushing_sequence = None;
+        self.pushing_stamp = None;
         self.output.begin_push_to(port);
     }
 
@@ -5122,8 +5122,8 @@ pub(crate) async fn transform_arm_on<E: AsyncElement>(
                 // M399: time the data-frame `process()` and sample input fill;
                 // control packets (segment/flush) are excluded so the histogram
                 // reflects real per-frame work, not cheap signalling.
-                let seq = frame_sequence(&packet);
-                let timed = probe.as_deref().filter(|_| seq.is_some());
+                let stamp = frame_stamp(&packet);
+                let timed = probe.as_deref().filter(|_| stamp.is_some());
                 // One clock read times the frame's queue residency and its process start.
                 let t0 = timed.and_then(|_| ElementProbe::mark());
                 let mut wait_ns = 0;
@@ -5148,12 +5148,12 @@ pub(crate) async fn transform_arm_on<E: AsyncElement>(
                     &probe,
                 )?;
                 elem.process(packet, &mut adapter).await?;
-                if let (Some(p), Some(seq)) = (timed, seq) {
+                if let (Some(p), Some(stamp)) = (timed, stamp) {
                     // M851: this frame's own wait + work, joined across stages
                     // by sequence id at snapshot time. M951: the push-wait the
                     // call just banked is charged to this visit too, so the
                     // journey's work segment is compute.
-                    p.record_frame_processed(seq, wait_ns, t0);
+                    p.record_frame_processed(stamp, wait_ns, t0);
                 }
                 // M1036: renegotiation a transform originates rather than
                 // relays (a decoder that read a new resolution out of the
@@ -5406,8 +5406,8 @@ async fn sink_arm_loop<E: AsyncElement>(elem: &mut E, io: SinkArmIo) -> Result<u
                     }
                     _ => {}
                 }
-                let seq = frame_sequence(&packet);
-                let is_buffer = seq.is_some();
+                let stamp = frame_stamp(&packet);
+                let is_buffer = stamp.is_some();
                 if is_buffer {
                     consumed += 1;
                 }
@@ -5443,10 +5443,10 @@ async fn sink_arm_loop<E: AsyncElement>(elem: &mut E, io: SinkArmIo) -> Result<u
                     }
                     result => result?,
                 }
-                if let (Some(p), Some(seq)) = (timed, seq) {
+                if let (Some(p), Some(stamp)) = (timed, stamp) {
                     // M851: the last hop of a frame's journey. A sink pushes
                     // nowhere, so the banked wait is always 0 here.
-                    p.record_frame_processed(seq, wait_ns, t0);
+                    p.record_frame_processed(stamp, wait_ns, t0);
                 }
                 #[cfg(feature = "metadata")]
                 if let Some(capture_unix_ns) = capture_unix_ns {
@@ -5646,8 +5646,8 @@ pub(crate) async fn demux_arm<E: MultiOutputElement>(
                 }
                 // M694: time the data-frame `process()` and sample input fill;
                 // control packets are excluded so the histogram reflects real work.
-                let sequence = frame_sequence(&packet);
-                let timed = probe.as_deref().filter(|_| sequence.is_some());
+                let stamp = frame_stamp(&packet);
+                let timed = probe.as_deref().filter(|_| stamp.is_some());
                 let t0 = timed.and_then(|_| ElementProbe::mark());
                 let mut wait_ns = 0;
                 if let Some(p) = timed {
@@ -5658,8 +5658,8 @@ pub(crate) async fn demux_arm<E: MultiOutputElement>(
                     }
                 }
                 demux.process(packet, &mut multi).await?;
-                if let (Some(p), Some(sequence)) = (timed, sequence) {
-                    p.record_frame_processed(sequence, wait_ns, t0);
+                if let (Some(p), Some(stamp)) = (timed, stamp) {
+                    p.record_frame_processed(stamp, wait_ns, t0);
                 }
                 latency.observe(demux.latency());
             }
@@ -6097,9 +6097,9 @@ pub(crate) async fn fanin_sink_arm<E: MultiInputElement>(
                 }
             }
             packet => {
-                let sequence = frame_sequence(&packet);
-                let timed = probe.as_deref().filter(|_| sequence.is_some());
-                if sequence.is_some() {
+                let stamp = frame_stamp(&packet);
+                let timed = probe.as_deref().filter(|_| stamp.is_some());
+                if stamp.is_some() {
                     consumed += 1;
                 }
                 let t0 = ElementProbe::mark();
@@ -6112,8 +6112,8 @@ pub(crate) async fn fanin_sink_arm<E: MultiInputElement>(
                     }
                 }
                 session.process(pad, packet, &mut null).await?;
-                if let (Some(p), Some(sequence)) = (timed, sequence) {
-                    p.record_frame_processed(sequence, wait_ns, t0);
+                if let (Some(p), Some(stamp)) = (timed, stamp) {
+                    p.record_frame_processed(stamp, wait_ns, t0);
                 }
                 // The session may have raised a reverse signal for this track
                 // during `process`; relay it up its pad now.
@@ -6707,9 +6707,9 @@ pub(crate) async fn muxer_arm<E: MultiInputElement>(
             packet => {
                 // M694: time the data-frame `process()` and sample this pad's
                 // input fill and queue residency.
-                let sequence = frame_sequence(&packet);
-                let transit_ns = sequence.and_then(|_| pad_rxs[slot].1.pop_transit_ns());
-                let timed = probe.as_deref().filter(|_| sequence.is_some());
+                let stamp = frame_stamp(&packet);
+                let transit_ns = stamp.and_then(|_| pad_rxs[slot].1.pop_transit_ns());
+                let timed = probe.as_deref().filter(|_| stamp.is_some());
                 if let Some(p) = timed {
                     p.record_fill(pad_rxs[slot].1.fill_percent());
                     if let Some(t) = transit_ns {
@@ -6730,8 +6730,8 @@ pub(crate) async fn muxer_arm<E: MultiInputElement>(
                 )?;
                 let t0 = ElementProbe::mark();
                 mux.process(pad, packet, &mut adapter).await?;
-                if let (Some(p), Some(sequence)) = (timed, sequence) {
-                    p.record_frame_processed(sequence, transit_ns.unwrap_or(0), t0);
+                if let (Some(p), Some(stamp)) = (timed, stamp) {
+                    p.record_frame_processed(stamp, transit_ns.unwrap_or(0), t0);
                 }
             }
         }
@@ -6832,7 +6832,7 @@ pub(crate) async fn muxer_arm_pts<E: MultiInputElement>(
                 frame.timing.pts_ns,
                 &probe,
             )?;
-            let sequence = frame.sequence;
+            let stamp = FrameStamp::of(&frame);
             let t0 = ElementProbe::mark();
             mux.process(pad, PipelinePacket::DataFrame(frame), &mut adapter)
                 .await?;
@@ -6841,7 +6841,7 @@ pub(crate) async fn muxer_arm_pts<E: MultiInputElement>(
                 let wait_ns = t0
                     .zip(sent_ns)
                     .map_or(0, |(enter, sent)| enter.saturating_sub(sent));
-                p.record_frame_processed(sequence, wait_ns, t0);
+                p.record_frame_processed(stamp, wait_ns, t0);
             }
         }
         // Once every input has ended, the loop above has drained the aggregator
