@@ -3558,6 +3558,7 @@ dependencies = [
  "cc",
  "cosmic-text",
  "ffmpeg-next",
+ "futures-util",
  "g2g-core",
  "g2g-mcu",
  "hmac 0.12.1",
@@ -3568,6 +3569,7 @@ dependencies = [
  "miniz_oxide",
  "pkg-config",
  "rcgen",
+ "reed-solomon-simd",
  "reqwest",
  "rustls-native-certs",
  "serde",
@@ -3579,6 +3581,7 @@ dependencies = [
  "time",
  "tokio",
  "tokio-rustls",
+ "tokio-tungstenite",
  "url",
  "vello",
  "web-transport-quinn",
@@ -6124,6 +6127,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "readme-rustdocifier"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "08ad765b21a08b1a8e5cdce052719188a23772bcbefb3c439f0baaf62c56ceac"
+
+[[package]]
 name = "rectangle-pack"
 version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6154,6 +6163,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "07507be7b4a5f9f26eeb41eeaebb1f5a7ff29dfb29739facc21d35bf8b11c21e"
 dependencies = [
  "bitflags 2.13.1",
+]
+
+[[package]]
+name = "reed-solomon-simd"
+version = "3.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cffef0520d30fbd4151fb20e262947ae47fb0ab276a744a19b6398438105a072"
+dependencies = [
+ "cpufeatures 0.2.17",
+ "fixedbitset",
+ "once_cell",
+ "readme-rustdocifier",
 ]
 
 [[package]]
