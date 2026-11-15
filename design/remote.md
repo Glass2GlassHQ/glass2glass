@@ -100,11 +100,8 @@ LAN, and a host off the LAN needs a forwarded UDP port.
 
 ## QUIC session
 
-- The host runs `remotewtsink mode=listener`, the client `remotewtsrc
-  mode=caller` (built: [transports.md](transports.md), "WebTransport carrier").
-- `g2g-desktop` sets `congestion-control=low-latency` (BBR, marked experimental
-  in quinn). Encoder bitrate stays fixed until a later slice feeds it the
-  bandwidth estimate.
+- Encoder bitrate stays fixed until a later slice feeds it the bandwidth
+  estimate.
 - Stream-per-frame mode: a frame the client has not finished when a newer
   keyframe is queued is reset, since nothing after the keyframe needs it.
 - Datagram mode replaces the old one-frame-per-datagram `datagrams` mode. A
@@ -113,12 +110,10 @@ LAN, and a host off the LAN needs a forwarded UDP port.
 - Frames carry a sequence number. A gap or a dropped frame makes the client
   send a keyframe request, and the host pulses `force-keyframe` on the
   encoder (`mfencode`, `ffmpegenc`, `nvenc`).
-- The message channel carries the token, input packets and keyframe requests.
-  The host destroys the virtual device a removal packet names.
+- Keyframe requests ride the message channel beside the input packets. The
+  host destroys the virtual device a removal packet names.
 - Loss tests run host and client through a seeded UDP relay in the test
   process that drops, delays and reorders packets.
-- The WebRTC session path is deleted from `g2g-desktop` once QUIC runs.
-  `WebRtcDuplexSession` stays in `g2g-plugins`.
 
 ## WebSocket fallback
 
@@ -344,10 +339,9 @@ ones.
    same seat, or the pointer feeds itself.
 4. **Windows host, then the QUIC transport.** `d3d11screencapturesrc`,
    `mfencode`, `SendInput`. Then raw QUIC and WebTransport carriers in
-   `remotewt`, stream-per-frame and FEC datagram video, the message channel,
-   keyframe requests with `force-keyframe` on `mfencode` and `ffmpegenc`, and
-   `g2g-desktop` moved onto it with the WebRTC path deleted. Then the
-   WebSocket fallback. Then the Windows
+   `remotewt`, stream-per-frame and FEC datagram video, and keyframe requests
+   with `force-keyframe` on `mfencode` and `ffmpegenc`. Then the WebSocket
+   fallback. Then the Windows
    client, then the D3D11-to-CUDA output and `nvenc`.
 5. **macOS client, then the macOS host** on `screencapturesrc` `display-index`
    and `vtencode`.

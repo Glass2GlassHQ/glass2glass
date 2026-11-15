@@ -4,6 +4,7 @@
 
 use std::collections::BTreeMap;
 use std::error::Error;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::str::FromStr;
@@ -16,10 +17,11 @@ use g2g_core::runtime::{GraphNodeRef, VisitRecorder};
 use g2g_core::G2gError;
 #[cfg(target_os = "linux")]
 use g2g_desktop::client::{run_client, ClientError, ClientSettings};
-use g2g_desktop::host::{inject, run_session, HostCapture, HostSettings, TurnServer};
+use g2g_desktop::host::{
+    check_token_len, inject, run_session, HostCapture, HostListener, HostSettings,
+};
 #[cfg(target_os = "windows")]
 use g2g_desktop::sendinput::Injector;
-use g2g_desktop::signaling::SessionSlot;
 #[cfg(target_os = "linux")]
 use g2g_desktop::uinput::Injector;
 #[cfg(target_os = "windows")]
@@ -27,33 +29,24 @@ use g2g_plugins::d3d11screencapturesrc::{monitor_bounds, D3D11ScreenCaptureSrc};
 use g2g_plugins::perfetto_trace::PerfettoTrace;
 #[cfg(target_os = "linux")]
 use g2g_plugins::pipewirevideosrc::PipeWireVideoSrc;
+use g2g_plugins::remotewtio::generate_certificate;
 #[cfg(target_os = "linux")]
 use g2g_plugins::screencastportal::PortalSourceTypes;
-use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, watch};
 
-const HOST_USAGE: &str = "  g2g-desktop host --token TOKEN [--port 8080] [--fps 60] [--bitrate 4000000]
-                   [--stun-server HOST:PORT] [--turn-server HOST:PORT --turn-user USER --turn-pass PASS]
+const HOST_USAGE: &str =
+    "  g2g-desktop host --token TOKEN [--port 8080] [--fps 60] [--bitrate 4000000]
                    [--trace FILE]";
 #[cfg(target_os = "linux")]
 const PLATFORM_USAGE: &str =
-    "  g2g-desktop client --host HOST --token TOKEN [--port 8080] [--inputs true] [--trace FILE]";
+    "  g2g-desktop client --host HOST --cert-hash SHA256 --token TOKEN [--port 8080] [--inputs true]
+                     [--trace FILE]";
 #[cfg(target_os = "windows")]
 const PLATFORM_USAGE: &str = "                   [--monitor-index -1]";
 const DEFAULT_PORT: u16 = 8080;
 const DEFAULT_FPS: u32 = 60;
 const DEFAULT_BITRATE: u32 = 4_000_000;
-const HOST_FLAGS: [&str; 9] = [
-    "port",
-    "token",
-    "fps",
-    "bitrate",
-    "stun-server",
-    "turn-server",
-    "turn-user",
-    "turn-pass",
-    "trace",
-];
+const HOST_FLAGS: [&str; 5] = ["port", "token", "fps", "bitrate", "trace"];
 #[cfg(target_os = "linux")]
 const PLATFORM_HOST_FLAGS: [&str; 0] = [];
 #[cfg(target_os = "windows")]
@@ -61,7 +54,7 @@ const PLATFORM_HOST_FLAGS: [&str; 1] = ["monitor-index"];
 #[cfg(target_os = "windows")]
 const PRIMARY_MONITOR: i32 = -1;
 #[cfg(target_os = "linux")]
-const CLIENT_FLAGS: [&str; 5] = ["host", "port", "token", "inputs", "trace"];
+const CLIENT_FLAGS: [&str; 6] = ["host", "port", "cert-hash", "token", "inputs", "trace"];
 
 type Flags = BTreeMap<String, String>;
 
@@ -105,17 +98,6 @@ where
     }
 }
 
-fn turn_server(flags: &Flags) -> Result<Option<TurnServer>, Box<dyn Error>> {
-    let Some(server) = flags.get("turn-server") else {
-        return Ok(None);
-    };
-    Ok(Some(TurnServer {
-        server: server.clone(),
-        user: required(flags, "turn-user")?,
-        pass: required(flags, "turn-pass")?,
-    }))
-}
-
 #[derive(Debug, Clone, Copy)]
 struct CaptureSettings {
     fps: u32,
@@ -131,7 +113,7 @@ fn open_trace(path: Option<&Path>) -> Result<Option<Arc<PerfettoTrace>>, Box<dyn
 }
 
 async fn host_one(
-    stream: TcpStream,
+    listener: HostListener,
     settings: HostSettings,
     capture: CaptureSettings,
     trace_path: Option<PathBuf>,
@@ -179,7 +161,7 @@ async fn host_one(
     };
     let (session, injected) = tokio::join!(
         run_session(
-            stream,
+            listener,
             host_capture,
             &settings,
             events,
@@ -210,24 +192,18 @@ async fn host(flags: Flags) -> Result<(), Box<dyn Error>> {
     let settings = HostSettings {
         token: required(&flags, "token")?,
         bitrate: parsed(&flags, "bitrate", DEFAULT_BITRATE)?,
-        stun_server: flags.get("stun-server").cloned(),
-        turn_server: turn_server(&flags)?,
     };
+    check_token_len(&settings.token)?;
     let trace_path = flags.get("trace").map(PathBuf::from);
-    let listener = TcpListener::bind(("0.0.0.0", port)).await?;
-    let slot = SessionSlot::default();
+    let certificate = generate_certificate()?;
+    let address = SocketAddr::from((Ipv4Addr::UNSPECIFIED, port));
+    eprintln!(
+        "g2g-desktop host: listening on UDP port {port}, certificate sha256 {}",
+        certificate.sha256_hex
+    );
     loop {
-        let (stream, peer) = listener.accept().await?;
-        let Ok(guard) = slot.claim() else {
-            eprintln!("g2g-desktop host: {peer} refused, a session is already running");
-            continue;
-        };
-        let settings = settings.clone();
-        let trace_path = trace_path.clone();
-        tokio::task::spawn_local(async move {
-            host_one(stream, settings, capture, trace_path).await;
-            drop(guard);
-        });
+        let listener = HostListener::bind(address, certificate.clone())?;
+        host_one(listener, settings.clone(), capture, trace_path.clone()).await;
     }
 }
 
@@ -237,14 +213,15 @@ async fn client(flags: Flags) -> Result<(), Box<dyn Error>> {
     let port = parsed(&flags, "port", DEFAULT_PORT)?;
     let settings = ClientSettings {
         token: required(&flags, "token")?,
+        cert_hash: required(&flags, "cert-hash")?,
         inputs: parsed(&flags, "inputs", true)?,
     };
     let trace = open_trace(flags.get("trace").map(Path::new))?;
-    let stream = TcpStream::connect((host.as_str(), port)).await?;
+    let location = format!("quic://{host}:{port}");
     let observer = Observer::new();
     let session = tokio::select! {
         session = run_client(
-            stream,
+            &location,
             &settings,
             trace.clone().map(|trace| trace as Arc<dyn VisitRecorder>),
             &observer,

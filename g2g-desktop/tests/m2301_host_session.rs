@@ -6,37 +6,32 @@
 
 use core::future::Future;
 use core::pin::Pin;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use g2g_core::element::DynAsyncElement;
-use g2g_core::runtime::{
-    parse_element, parse_source, run_duplex_session, DynSourceLoop, GraphNodeRef,
-};
+use g2g_core::runtime::{parse_element, parse_source, run_simple_pipeline, GraphNodeRef};
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, ConfigureOutcome, G2gError, OutputSink, PipelinePacket,
 };
-use g2g_desktop::client::exchange_sdp;
-use g2g_desktop::host::{run_session, HostCapture, HostSettings, INPUT_LABEL};
+use g2g_desktop::host::{run_session, HostCapture, HostError, HostListener, HostSettings};
 use g2g_desktop::injection::ScreenSize;
 use g2g_desktop::packet::{CursorImage, Event, PacketReader, PacketWriter, Side};
 use g2g_plugins::clock::WallClock;
 use g2g_plugins::cursorshape::{CursorShape, CURSOR_BYTES_PER_PIXEL};
+use g2g_plugins::datachannel::DataChannelEnds;
 use g2g_plugins::registry::default_registry;
-use g2g_plugins::webrtcduplex::{SdpChannel, SignalRole, WebRtcDuplexSession};
-use tokio::net::{TcpListener, TcpStream};
+use g2g_plugins::remotewtio::generate_certificate;
+use g2g_plugins::remotewtsrc::RemoteWtSrc;
 use tokio::sync::{mpsc, watch};
 
 const TOKEN: &str = "correct horse battery staple";
 const WIDTH: u16 = 320;
 const HEIGHT: u16 = 240;
 const FRAMES: usize = 90;
-// the handshake drops the first frames
-const MIN_RECEIVED: u64 = FRAMES as u64 / 3;
 const BITRATE: u32 = 1_000_000;
 const RUN_TIMEOUT: Duration = Duration::from_secs(30);
-const SDP_CHANNEL_DEPTH: usize = 4;
 const LINK_CAPACITY: usize = 2;
 const HID_A: u16 = 0x04;
 const CURSOR_SIDE: u32 = 4;
@@ -71,17 +66,45 @@ impl AsyncElement for CountingSink {
     }
 }
 
+fn host_listener() -> (HostListener, String) {
+    let certificate = generate_certificate().unwrap();
+    let cert_hash = certificate.sha256_hex.clone();
+    let listener =
+        HostListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)), certificate).unwrap();
+    (listener, cert_hash)
+}
+
+fn client_source(
+    listener: &HostListener,
+    cert_hash: &str,
+    token: &str,
+) -> (RemoteWtSrc, DataChannelEnds) {
+    let location = format!("quic://{}", listener.local_addr());
+    let mut source = RemoteWtSrc::new(SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0)))
+        .with_caller(location, cert_hash);
+    let channel = source.open_data_channel();
+    channel.outgoing.send(token.as_bytes().to_vec()).unwrap();
+    (source, channel)
+}
+
+fn capture(registry_source: &str) -> HostCapture {
+    let registry = default_registry();
+    HostCapture {
+        nodes: vec![
+            GraphNodeRef::Source(parse_source(&registry, registry_source).unwrap()),
+            GraphNodeRef::Element(parse_element(&registry, "clocksync").unwrap()),
+        ],
+        cursor_shapes: None,
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn client_sees_host_video_and_cursor_and_host_receives_client_input() {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
+    let (listener, cert_hash) = host_listener();
     let settings = HostSettings {
         token: TOKEN.into(),
         bitrate: BITRATE,
-        stun_server: None,
-        turn_server: None,
     };
-    let registry = default_registry();
     let source = format!("videotestsrc num-buffers={FRAMES} width={WIDTH} height={HEIGHT}");
     let cursor_shape = CursorShape {
         width: CURSOR_SIDE,
@@ -95,28 +118,21 @@ async fn client_sees_host_video_and_cursor_and_host_receives_client_input() {
     let (cursor_sender, cursor_shapes) = watch::channel(None);
     cursor_sender.send_replace(Some(cursor_shape.clone()));
     let capture = HostCapture {
-        nodes: vec![
-            GraphNodeRef::Source(parse_source(&registry, &source).unwrap()),
-            GraphNodeRef::Element(parse_element(&registry, "clocksync").unwrap()),
-        ],
         cursor_shapes: Some(cursor_shapes),
+        ..capture(&source)
     };
+    let (client, mut input) = client_source(&listener, &cert_hash, TOKEN);
     let (event_sender, mut host_events) = mpsc::unbounded_channel();
     let (size_sender, sizes) = watch::channel(None);
-    let host = async {
-        let (stream, _) = listener.accept().await.unwrap();
-        run_session(stream, capture, &settings, event_sender, size_sender, None).await
-    };
+    let host = run_session(
+        listener,
+        capture,
+        &settings,
+        event_sender,
+        size_sender,
+        None,
+    );
 
-    let (offer_sender, offers) = mpsc::channel(SDP_CHANNEL_DEPTH);
-    let (answers, answer_receiver) = mpsc::channel(SDP_CHANNEL_DEPTH);
-    let mut client = WebRtcDuplexSession::new(
-        SignalRole::Offerer,
-        SdpChannel::from_halves(offer_sender, answer_receiver),
-        1,
-    )
-    .with_receive_only();
-    let mut input = client.open_data_channel(INPUT_LABEL);
     let sent = [
         Event::Key {
             device: 0,
@@ -137,30 +153,18 @@ async fn client_sees_host_video_and_cursor_and_host_receives_client_input() {
     let mut sink = CountingSink {
         frames: frames.clone(),
     };
+    let mut client = client;
     let clock = WallClock::new();
-    let client_run = async {
-        let stream = TcpStream::connect(address).await.unwrap();
-        let sources: Vec<&mut dyn DynSourceLoop> = Vec::new();
-        let sinks: Vec<&mut dyn DynAsyncElement> = vec![&mut sink];
-        tokio::join!(
-            exchange_sdp(stream, TOKEN, offers, answers),
-            run_duplex_session(sources, &mut client, sinks, &clock, LINK_CAPACITY)
-        )
-    };
+    let client_run = run_simple_pipeline(&mut client, &mut sink, &clock, LINK_CAPACITY);
 
-    let (host_result, (exchanged, client_result)) =
+    let (host_result, client_result) =
         tokio::time::timeout(RUN_TIMEOUT, async { tokio::join!(host, client_run) })
             .await
             .expect("the session ends after the host's capture ends");
     host_result.expect("host session");
-    exchanged.expect("SDP exchange");
     client_result.expect("client session");
 
-    let received = frames.load(Ordering::Relaxed);
-    assert!(
-        received >= MIN_RECEIVED,
-        "client: {received} of {FRAMES} frames"
-    );
+    assert_eq!(frames.load(Ordering::Relaxed), FRAMES as u64);
     let mut delivered = Vec::new();
     while let Ok(event) = host_events.try_recv() {
         delivered.push(event);
@@ -186,4 +190,40 @@ async fn client_sees_host_video_and_cursor_and_host_receives_client_input() {
             height: HEIGHT
         })
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_wrong_token_closes_the_connection_before_any_video() {
+    let (listener, cert_hash) = host_listener();
+    let settings = HostSettings {
+        token: TOKEN.into(),
+        bitrate: BITRATE,
+    };
+    let source = format!("videotestsrc num-buffers={FRAMES} width={WIDTH} height={HEIGHT}");
+    let (mut client, _input) = client_source(&listener, &cert_hash, "wrong token");
+    let (event_sender, _host_events) = mpsc::unbounded_channel();
+    let (size_sender, sizes) = watch::channel(None);
+    let host = run_session(
+        listener,
+        capture(&source),
+        &settings,
+        event_sender,
+        size_sender,
+        None,
+    );
+    let frames = Arc::new(AtomicU64::new(0));
+    let mut sink = CountingSink {
+        frames: frames.clone(),
+    };
+    let clock = WallClock::new();
+    let client_run = run_simple_pipeline(&mut client, &mut sink, &clock, LINK_CAPACITY);
+
+    let (host_result, client_result) =
+        tokio::time::timeout(RUN_TIMEOUT, async { tokio::join!(host, client_run) })
+            .await
+            .expect("the host closes the connection");
+    assert!(matches!(host_result, Err(HostError::BadToken)));
+    assert!(client_result.is_err());
+    assert_eq!(frames.load(Ordering::Relaxed), 0);
+    assert_eq!(*sizes.borrow(), None);
 }

@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
 use g2g_core::log::Target;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
 use g2g_core::runtime::{
@@ -12,24 +13,18 @@ use g2g_core::{G2gError, Graph};
 use g2g_plugins::clock::WallClock;
 use g2g_plugins::cursorshape::CursorShape;
 use g2g_plugins::registry::default_registry;
-use g2g_plugins::webrtcduplex::{SdpChannel, SignalRole, WebRtcDuplexSession};
+use g2g_plugins::remotewtsrc::RemoteWtSrc;
 use g2g_plugins::wgpu;
 use g2g_plugins::wgpupresent::WgpuPresentSink;
 use g2g_plugins::windowinput::{PointerButton, WindowInput};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
 use tokio::sync::{mpsc, watch};
 
 use crate::hid::{usage_from_scancode, ScancodeSet};
-use crate::host::INPUT_LABEL;
 use crate::packet::{CursorImage, Event, EventKind, PacketReader, PacketWriter, Side};
 use crate::router::{InputRouter, Origin};
-use crate::signaling::{ClientEvent, ClientSignaling, SignalingError};
 
-const SIGNALING_READ_BYTES: usize = 4096;
 const CLIENT_CATEGORY: &str = "g2g-desktop-client";
 const WINDOW_TITLE: &str = "g2g-desktop";
-const SDP_CHANNEL_DEPTH: usize = 4;
 // glass-to-glass latency grows with link depth
 const LINK_CAPACITY: usize = 2;
 const DECODE: &str = "h264parse ! ffmpegdec";
@@ -42,88 +37,15 @@ const FORWARDED_KINDS: [EventKind; 4] = [
     EventKind::Wheel,
 ];
 
-#[derive(Debug)]
-pub enum ExchangeError {
-    Signaling(SignalingError),
-    Io(std::io::Error),
-    SessionGone,
-}
-
-impl core::fmt::Display for ExchangeError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            ExchangeError::Signaling(e) => write!(f, "signaling: {e}"),
-            ExchangeError::Io(e) => write!(f, "signaling connection: {e}"),
-            ExchangeError::SessionGone => write!(f, "the session ended before the SDP exchange"),
-        }
-    }
-}
-
-impl std::error::Error for ExchangeError {}
-
-impl From<SignalingError> for ExchangeError {
-    fn from(e: SignalingError) -> Self {
-        ExchangeError::Signaling(e)
-    }
-}
-
-impl From<std::io::Error> for ExchangeError {
-    fn from(e: std::io::Error) -> Self {
-        ExchangeError::Io(e)
-    }
-}
-
-async fn next_event(
-    stream: &mut TcpStream,
-    signaling: &mut ClientSignaling,
-) -> Result<ClientEvent, ExchangeError> {
-    let mut buffer = [0u8; SIGNALING_READ_BYTES];
-    loop {
-        let read = stream.read(&mut buffer).await?;
-        if read == 0 {
-            return Err(ExchangeError::Signaling(SignalingError::HungUp));
-        }
-        if let Some(event) = signaling.receive(&buffer[..read])?.into_iter().next() {
-            return Ok(event);
-        }
-    }
-}
-
-pub async fn exchange_sdp(
-    mut stream: TcpStream,
-    token: &str,
-    mut offers: mpsc::Receiver<String>,
-    answers: mpsc::Sender<String>,
-) -> Result<(), ExchangeError> {
-    let (mut signaling, framed_token) = ClientSignaling::new(token)?;
-    stream.write_all(&framed_token).await?;
-    if next_event(&mut stream, &mut signaling).await? != ClientEvent::Accepted {
-        return Err(ExchangeError::Signaling(SignalingError::UnexpectedMessage));
-    }
-    let offer = offers.recv().await.ok_or(ExchangeError::SessionGone)?;
-    stream.write_all(&signaling.offer(&offer)?).await?;
-    let ClientEvent::Answer(answer) = next_event(&mut stream, &mut signaling).await? else {
-        return Err(ExchangeError::Signaling(SignalingError::UnexpectedMessage));
-    };
-    answers
-        .send(answer)
-        .await
-        .map_err(|_| ExchangeError::SessionGone)?;
-    let mut rest = Vec::new();
-    stream.read_to_end(&mut rest).await?;
-    signaling.receive(&rest)?;
-    Ok(signaling.connection_closed()?)
-}
-
 #[derive(Debug, Clone)]
 pub struct ClientSettings {
     pub token: String,
+    pub cert_hash: String,
     pub inputs: bool,
 }
 
 #[derive(Debug)]
 pub enum ClientError {
-    Exchange(ExchangeError),
     Launch(ParseError),
     Session(G2gError),
 }
@@ -131,7 +53,6 @@ pub enum ClientError {
 impl core::fmt::Display for ClientError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            ClientError::Exchange(e) => e.fmt(f),
             ClientError::Launch(e) => write!(f, "decode pipeline: {e}"),
             ClientError::Session(e) => write!(f, "session: {e:?}"),
         }
@@ -257,19 +178,18 @@ fn show_host_cursor(
 }
 
 fn client_graph(
-    session: WebRtcDuplexSession,
+    source: RemoteWtSrc,
     sink: WgpuPresentSink,
 ) -> Result<Graph<GraphNode>, ClientError> {
     let decode = parse_chain(&default_registry(), DECODE).map_err(ClientError::Launch)?;
     let mut graph = Graph::new();
-    let duplex = graph.add_duplex(GraphNodeRef::duplex(session), 0, 1);
-    let mut previous = duplex.output(0);
+    let mut previous = graph.add_source(GraphNodeRef::source(source));
     for element in decode {
         let node = graph.add_transform(GraphNodeRef::Element(element));
         graph
             .link(previous, node)
             .expect("transforms have one input and one output pad");
-        previous = node.into();
+        previous = node;
     }
     let display = graph.add_sink(GraphNodeRef::element(sink));
     graph
@@ -279,20 +199,19 @@ fn client_graph(
 }
 
 pub async fn run_client(
-    stream: TcpStream,
+    location: &str,
     settings: &ClientSettings,
     trace: Option<Arc<dyn VisitRecorder>>,
     observer: &Observer,
 ) -> Result<RunStats, ClientError> {
-    let (offer_sender, offers) = mpsc::channel(SDP_CHANNEL_DEPTH);
-    let (answers, answer_receiver) = mpsc::channel(SDP_CHANNEL_DEPTH);
-    let mut session = WebRtcDuplexSession::new(
-        SignalRole::Offerer,
-        SdpChannel::from_halves(offer_sender, answer_receiver),
-        1,
-    )
-    .with_receive_only();
-    let data_channel = session.open_data_channel(INPUT_LABEL);
+    // a caller-mode source binds nothing, the address is unused
+    let unbound = SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0));
+    let mut source = RemoteWtSrc::new(unbound).with_caller(location, settings.cert_hash.as_str());
+    let data_channel = source.open_data_channel();
+    data_channel
+        .outgoing
+        .send(settings.token.as_bytes().to_vec())
+        .expect("the source holds the data channel until it runs");
     let (cursor_shapes, mut sink) = show_host_cursor(
         WgpuPresentSink::new()
             .with_title(WINDOW_TITLE)
@@ -301,7 +220,7 @@ pub async fn run_client(
         settings.inputs,
     );
     let window_input = settings.inputs.then(|| sink.input_events());
-    let graph = client_graph(session, sink)?;
+    let graph = client_graph(source, sink)?;
 
     let forward = async {
         if let Some(window_input) = window_input {
@@ -314,12 +233,6 @@ pub async fn run_client(
     if let Some(trace) = trace {
         run = run.with_visit_recorder(trace);
     }
-    let (exchanged, run, (), ()) = tokio::join!(
-        exchange_sdp(stream, &settings.token, offers, answers),
-        run.run(),
-        forward,
-        follow
-    );
-    exchanged.map_err(ClientError::Exchange)?;
+    let (run, (), ()) = tokio::join!(run.run(), forward, follow);
     run.map_err(ClientError::Session)
 }

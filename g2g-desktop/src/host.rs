@@ -5,7 +5,7 @@
 use core::fmt;
 use core::future::Future;
 use core::pin::Pin;
-use std::io;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -15,57 +15,46 @@ use g2g_core::runtime::{
 };
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, ConfigureOutcome, Dim, G2gError, Graph, OutputSink,
-    PipelinePacket,
+    PipelinePacket, PropValue,
 };
 use g2g_plugins::clock::WallClock;
 use g2g_plugins::cursorshape::CursorShape;
-use g2g_plugins::fakesink::FakeSink;
+use g2g_plugins::datachannel::DataChannelEnds;
 use g2g_plugins::registry::default_registry;
-use g2g_plugins::webrtcduplex::{SdpChannel, SignalRole, WebRtcDuplexSession};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
+use g2g_plugins::remotewtio::SelfSignedCertificate;
+use g2g_plugins::remotewtsink::RemoteWtSink;
+use subtle::ConstantTimeEq;
 use tokio::sync::{mpsc, watch};
 
 use crate::injection::{InjectError, ScreenSize};
 use crate::packet::{CursorImage, Event, PacketError, PacketReader, PacketWriter, Side};
 #[cfg(target_os = "windows")]
 use crate::sendinput::Injector;
-use crate::signaling::{HostEvent, HostSignaling, SignalingError};
 #[cfg(target_os = "linux")]
 use crate::uinput::Injector;
 
-pub const INPUT_LABEL: &str = "input";
 const HOST_CATEGORY: &str = "g2g-desktop-host";
-const SIGNALING_TIMEOUT: Duration = Duration::from_secs(10);
-const SIGNALING_READ_BYTES: usize = 4096;
+const TOKEN_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_TOKEN_LEN: usize = 256;
 // glass-to-glass latency grows with link depth
 const LINK_CAPACITY: usize = 2;
-const SDP_CHANNEL_DEPTH: usize = 4;
 #[cfg(target_os = "linux")]
 const ENCODE: &str = "videoconvert ! ffmpegenc backend=software";
 #[cfg(target_os = "windows")]
 const ENCODE: &str = "d3d11convert ! mfh264enc hardware=true";
 
 #[derive(Debug, Clone)]
-pub struct TurnServer {
-    pub server: String,
-    pub user: String,
-    pub pass: String,
-}
-
-#[derive(Debug, Clone)]
 pub struct HostSettings {
     pub token: String,
     pub bitrate: u32,
-    pub stun_server: Option<String>,
-    pub turn_server: Option<TurnServer>,
 }
 
 #[derive(Debug)]
 pub enum HostError {
-    Signaling(SignalingError),
-    SignalingTimeout,
-    Io(io::Error),
+    TokenLength(usize),
+    TokenTimeout,
+    BadToken,
+    HungUp,
     Launch(ParseError),
     Session(G2gError),
 }
@@ -73,13 +62,16 @@ pub enum HostError {
 impl fmt::Display for HostError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            HostError::Signaling(e) => write!(f, "signaling: {e}"),
-            HostError::SignalingTimeout => write!(
+            HostError::TokenLength(len) => {
+                write!(f, "token is {len} bytes, must be 1 to {MAX_TOKEN_LEN}")
+            }
+            HostError::TokenTimeout => write!(
                 f,
-                "client sent no offer within {} seconds",
-                SIGNALING_TIMEOUT.as_secs()
+                "client sent no token within {} seconds",
+                TOKEN_TIMEOUT.as_secs()
             ),
-            HostError::Io(e) => write!(f, "signaling connection: {e}"),
+            HostError::BadToken => write!(f, "client token does not match"),
+            HostError::HungUp => write!(f, "client closed the connection before its token"),
             HostError::Launch(e) => write!(f, "capture pipeline: {e}"),
             HostError::Session(e) => write!(f, "session: {e:?}"),
         }
@@ -88,15 +80,44 @@ impl fmt::Display for HostError {
 
 impl std::error::Error for HostError {}
 
-impl From<SignalingError> for HostError {
-    fn from(e: SignalingError) -> Self {
-        HostError::Signaling(e)
+pub fn check_token_len(token: &str) -> Result<(), HostError> {
+    if token.is_empty() || token.len() > MAX_TOKEN_LEN {
+        return Err(HostError::TokenLength(token.len()));
     }
+    Ok(())
 }
 
-impl From<io::Error> for HostError {
-    fn from(e: io::Error) -> Self {
-        HostError::Io(e)
+#[derive(Debug)]
+pub struct HostListener {
+    sink: RemoteWtSink,
+    channel: DataChannelEnds,
+    address: SocketAddr,
+}
+
+impl HostListener {
+    pub fn bind(
+        address: SocketAddr,
+        certificate: SelfSignedCertificate,
+    ) -> Result<Self, HostError> {
+        let mut sink =
+            RemoteWtSink::new(format!("quic://{address}")).with_self_signed_listener(certificate);
+        AsyncElement::set_property(
+            &mut sink,
+            "congestion-control",
+            PropValue::Str("low-latency".into()),
+        )
+        .expect("low-latency is a congestion-control value");
+        let channel = sink.open_data_channel();
+        let address = sink.listen().map_err(HostError::Session)?;
+        Ok(Self {
+            sink,
+            channel,
+            address,
+        })
+    }
+
+    pub fn local_addr(&self) -> SocketAddr {
+        self.address
     }
 }
 
@@ -173,29 +194,10 @@ impl AsyncElement for CaptureSize {
     }
 }
 
-async fn read_offer(
-    stream: &mut TcpStream,
-    signaling: &mut HostSignaling,
-) -> Result<String, HostError> {
-    let mut buffer = [0u8; SIGNALING_READ_BYTES];
-    loop {
-        let read = stream.read(&mut buffer).await?;
-        if read == 0 {
-            return Err(HostError::Signaling(SignalingError::HungUp));
-        }
-        for event in signaling.receive(&buffer[..read])? {
-            match event {
-                HostEvent::Reply(bytes) => stream.write_all(&bytes).await?,
-                HostEvent::Offer(sdp) => return Ok(sdp),
-            }
-        }
-    }
-}
-
 fn host_graph(
     capture: Vec<GraphNode>,
     settings: &HostSettings,
-    session: WebRtcDuplexSession,
+    sink: RemoteWtSink,
     sizes: watch::Sender<Option<ScreenSize>>,
 ) -> Result<Graph<GraphNode>, HostError> {
     let encode = format!("{ENCODE} bitrate={}", settings.bitrate);
@@ -213,27 +215,11 @@ fn host_graph(
             .expect("transforms have one input and one output pad");
         previous = node;
     }
-    let duplex = graph.add_duplex(GraphNodeRef::duplex(session), 1, 1);
-    let drain = graph.add_sink(GraphNodeRef::element(FakeSink::new()));
+    let network = graph.add_sink(GraphNodeRef::element(sink));
     graph
-        .link(previous, duplex.input(0))
-        .and_then(|()| graph.link(duplex.output(0), drain))
-        .expect("the duplex node has one input and one output pad");
+        .link(previous, network)
+        .expect("the network sink has one input pad");
     Ok(graph)
-}
-
-fn duplex_session(settings: &HostSettings, sdp: SdpChannel) -> WebRtcDuplexSession {
-    let mut session = WebRtcDuplexSession::new(SignalRole::Answerer, sdp, 1)
-        .with_start_bitrate(settings.bitrate.into())
-        .with_bandwidth_estimation(false);
-    if let Some(server) = &settings.stun_server {
-        session = session.with_stun_server(server.clone());
-    }
-    if let Some(turn) = &settings.turn_server {
-        session =
-            session.with_turn_server(turn.server.clone(), turn.user.clone(), turn.pass.clone());
-    }
-    session
 }
 
 pub struct HostCapture {
@@ -316,52 +302,37 @@ async fn forward_input(
 }
 
 pub async fn run_session(
-    mut stream: TcpStream,
+    listener: HostListener,
     capture: HostCapture,
     settings: &HostSettings,
     events: mpsc::UnboundedSender<Event>,
     sizes: watch::Sender<Option<ScreenSize>>,
     trace: Option<Arc<dyn VisitRecorder>>,
 ) -> Result<RunStats, HostError> {
-    let mut signaling = HostSignaling::new(&settings.token)?;
-    let offer = tokio::time::timeout(SIGNALING_TIMEOUT, read_offer(&mut stream, &mut signaling))
+    let HostListener {
+        mut sink,
+        mut channel,
+        ..
+    } = listener;
+    sink.connect().await.map_err(HostError::Session)?;
+    let token = tokio::time::timeout(TOKEN_TIMEOUT, channel.incoming.recv())
         .await
-        .map_err(|_| HostError::SignalingTimeout)??;
-
-    let (offer_sender, offer_receiver) = mpsc::channel(SDP_CHANNEL_DEPTH);
-    let (answer_sender, mut answer_receiver) = mpsc::channel(SDP_CHANNEL_DEPTH);
-    offer_sender
-        .send(offer)
-        .await
-        .expect("the session holds the offer receiver");
-    let mut session = duplex_session(
-        settings,
-        SdpChannel::from_halves(answer_sender, offer_receiver),
-    );
-    let input = session.open_data_channel(INPUT_LABEL);
-    let graph = host_graph(capture.nodes, settings, session, sizes)?;
-
-    let send_answer = async move {
-        let answer = answer_receiver
-            .recv()
-            .await
-            .ok_or(HostError::Signaling(SignalingError::HungUp))?;
-        stream.write_all(&signaling.answer(&answer)?).await?;
-        signaling.connection_closed()?;
-        Ok::<(), HostError>(())
-    };
+        .map_err(|_| HostError::TokenTimeout)?
+        .ok_or(HostError::HungUp)?;
+    if !bool::from(settings.token.as_bytes().ct_eq(&token)) {
+        return Err(HostError::BadToken);
+    }
+    let graph = host_graph(capture.nodes, settings, sink, sizes)?;
     let clock = WallClock::new();
     let mut run = RunBuilder::new(graph, &clock, LINK_CAPACITY);
     if let Some(trace) = trace {
         run = run.with_visit_recorder(trace);
     }
-    let (run, answered, (), ()) = tokio::join!(
+    let (run, (), ()) = tokio::join!(
         run.run(),
-        send_answer,
-        forward_input(input.incoming, events),
-        forward_cursor(capture.cursor_shapes, &input.outgoing)
+        forward_input(channel.incoming, events),
+        forward_cursor(capture.cursor_shapes, &channel.outgoing)
     );
-    answered?;
     run.map_err(HostError::Session)
 }
 

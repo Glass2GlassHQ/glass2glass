@@ -32,8 +32,7 @@ The plan is [remote.md](remote.md).
 
 - `ximagesrc` for unattended X11 capture, and window capture.
 - QUIC transport in `remotewt`: stream-per-frame and Reed-Solomon datagram
-  video, keyframe requests, then `g2g-desktop` on it with its WebRTC path
-  removed.
+  video, keyframe requests.
 - WebSocket fallback on `wss://` in `remotewt` when UDP is blocked.
 - The Windows client, then a D3D11-to-CUDA element after `d3d11convert` for
   `nvenc`.

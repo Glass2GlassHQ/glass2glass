@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2324: `g2g-desktop` runs over raw QUIC with a pinned self-signed certificate instead of WebRTC.
 - M2323: `remotewtsink` can listen with a generated self-signed certificate that browsers accept by hash.
 - M2322: `remote*` sinks can connect before the graph runs, so a listening `remotewtsink` reads the data channel before sending video.
 - M2321: Run reports and traces show each element's frame age, and the wire codec carries frame age across `remote*` carriers.

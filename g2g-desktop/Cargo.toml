@@ -17,15 +17,13 @@ required-features = ["session"]
 [features]
 session = [
     "dep:g2g-core",
-    "g2g-plugins/webrtc",
+    "g2g-plugins/webtransport",
     "g2g-plugins/d3d11-screen-capture",
     "g2g-plugins/d3d11-convert",
     "g2g-plugins/mf-encode",
     "dep:windows",
     "g2g-plugins/wgpu-present",
     "g2g-plugins/metadata",
-    "tokio/net",
-    "tokio/io-util",
     "tokio/time",
     "tokio/macros",
     "tokio/signal",

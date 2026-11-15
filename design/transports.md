@@ -515,27 +515,10 @@ the tiered list.
 
 ## Remote desktop session
 
-`g2g-desktop` holds the remote-desktop wire protocol. Each part runs on byte
-slices and owns no socket. The rest of the session is planned in
-[remote.md](remote.md).
-
-### Desktop signaling
-
-`HostSignaling` and `ClientSignaling` run the SDP exchange over one TCP
-connection. Every message is `u32be length | payload`, and the client sends
-first.
-
-1. Client sends the token, 1 to 256 bytes.
-2. Host compares it in constant time (`subtle`) and fails with `BadToken` on a
-   mismatch. Otherwise it replies with one byte, `0x01`.
-3. Client sends the SDP offer.
-4. Host sends the SDP answer.
-
-A length prefix over its limit fails before the body is buffered: 256 bytes
-for the token, 1 for the accept byte, 64 KiB for an SDP. A byte that arrives
-when no message is due fails with `UnexpectedMessage`. `connection_closed`
-before the answer fails with `HungUp`. `SessionSlot::claim` fails with `Busy`
-while another connection holds the slot.
+`g2g-desktop` holds the remote-desktop wire protocol and the host and client
+sessions. The session runs over one raw QUIC connection from the `remotewt`
+elements: video on its stream, and the token and input packets on its data
+channel. The rest of the session is planned in [remote.md](remote.md).
 
 ### Input packets
 
@@ -594,18 +577,18 @@ button still down, because the host holds a key until its key-up arrives.
 
 ### Host session
 
-`host::run_session` serves one client on an accepted TCP connection. It reads
-the token and the offer first, with a 10 second limit, so a client with a bad
-token never starts the capture. It then runs one graph: the capture nodes, a
-pass-through that publishes the capture size, the colour conversion and the
-encoder at the configured bitrate (`videoconvert ! ffmpegenc backend=software`
-on Linux, `d3d11convert ! mfh264enc hardware=true` on Windows, which keeps the
-frame on the GPU), and a `WebRtcDuplexSession`
-answerer whose received video drains into a `fakesink`. The answer goes back on
-the TCP connection, which then closes. Messages on the `input` data channel are
-read as client packets and sent to the caller's event channel, and a malformed
-packet is logged and dropped. `client::exchange_sdp` is the client half of the
-same exchange.
+`host::HostListener::bind` binds a listening `remotewtsink` on a UDP address
+with `congestion-control=low-latency` (BBR) and opens its data channel.
+`host::run_session` accepts one client on it and reads the first data channel
+message as the token, with a 10 second limit, and compares it in constant time
+(`subtle`). A bad token returns `BadToken` and closes the connection, so the
+capture never starts. It then runs one graph: the capture nodes, a pass-through
+that publishes the capture size, the colour conversion and the encoder at the
+configured bitrate (`videoconvert ! ffmpegenc backend=software` on Linux,
+`d3d11convert ! mfh264enc hardware=true` on Windows, which keeps the frame on
+the GPU), and the sink. Later data channel messages are read as client packets
+and sent to the caller's event channel, and a malformed packet is logged and
+dropped.
 
 `host::inject` builds the platform `Injector` through the caller's constructor
 once the capture size is known, and a new one whenever the size changes. Events that arrive before the first size are
@@ -613,21 +596,25 @@ logged and dropped.
 
 ### Client session
 
-`client::run_client` runs a receive-only `WebRtcDuplexSession` offerer whose
-video passes through `h264parse` and `ffmpegdec` into a `wgpusink` window that
-presents each frame as it arrives (`sync=false`, mailbox). With `inputs` on, the window's input goes through an `InputRouter` and
-out as packets on the `input` data channel. Keys map from evdev codes to HID
-usages on device 0, a pointer position goes out as an absolute position on
-display 0, and losing keyboard focus releases the keys and buttons still held.
+`client::run_client` dials the host's `quic://` location with a caller-mode
+`remotewtsrc`, pinned to the host certificate's SHA-256, and sends the token as
+the first data channel message. Video passes through `h264parse` and
+`ffmpegdec` into a `wgpusink` window that presents each frame as it arrives
+(`sync=false`, mailbox). With `inputs` on, the window's input goes through an
+`InputRouter` and out as packets on the data channel. Keys map from evdev codes
+to HID usages on device 0, a pointer position goes out as an absolute position
+on display 0, and losing keyboard focus releases the keys and buttons still
+held.
 
-`g2g-desktop host` serves one client at a time. On Linux it captures a monitor
-through the ScreenCast portal, which asks the user on every session. On
-Windows it captures the monitor named by `--monitor-index` (-1 for the
-primary) with `d3d11screencapturesrc`. A second
-connection while a session runs is closed. `g2g-desktop client` connects and
-opens the window, and closing the window ends it. Both print the run's
-per-element report when the session ends, and the client also prints it on
-Ctrl-C. Running `g2g-desktop` with no arguments prints the flags.
+`g2g-desktop host` makes a self-signed certificate at start, prints its
+SHA-256, and serves one client at a time on `--port`. On Linux it captures a
+monitor through the ScreenCast portal, which asks the user on every session.
+On Windows it captures the monitor named by `--monitor-index` (-1 for the
+primary) with `d3d11screencapturesrc`. `g2g-desktop client --cert-hash` takes
+the printed hash, connects and opens the window, and closing the window ends
+it. Both print the run's per-element report when the session ends, and the
+client also prints it on Ctrl-C. Running `g2g-desktop` with no arguments
+prints the flags.
 
 ### Key mapping and injection
 

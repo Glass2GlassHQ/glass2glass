@@ -12,6 +12,5 @@ pub mod packet;
 pub mod router;
 #[cfg(all(target_os = "windows", feature = "session"))]
 pub mod sendinput;
-pub mod signaling;
 #[cfg(target_os = "linux")]
 pub mod uinput;

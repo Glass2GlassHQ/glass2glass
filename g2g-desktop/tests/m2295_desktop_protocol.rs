@@ -7,9 +7,6 @@ use g2g_desktop::packet::{
     RemovableDevice, Side,
 };
 use g2g_desktop::router::{InputRouter, Origin, Routed};
-use g2g_desktop::signaling::{
-    ClientEvent, ClientSignaling, HostEvent, HostSignaling, SessionSlot, SignalingError,
-};
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::mpsc::UnboundedReceiver;
 
@@ -18,9 +15,6 @@ const HID_A: u16 = 0x04;
 const HID_ESCAPE: u16 = 0x29;
 const HEADER_LEN: usize = 8;
 const PAYLOAD_LEN_OFFSET: usize = 6;
-const TOKEN: &str = "correct horse battery staple";
-const OFFER: &str = "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\n";
-const ANSWER: &str = "v=0\r\no=- 2 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\n";
 
 fn cursor(width: u16, height: u16) -> CursorImage {
     let rgba = vec![0x7f; usize::from(width) * usize::from(height) * 4];
@@ -326,95 +320,4 @@ fn an_event_type_nobody_subscribed_to_is_not_delivered() {
     let clipboard = Event::Clipboard("not synced".to_string());
     assert_eq!(router.push(Origin::Local, clipboard), Routed::NoConsumer);
     assert!(drained(&mut network).is_empty());
-}
-
-fn host_receive_bytewise(host: &mut HostSignaling, bytes: &[u8]) -> Vec<HostEvent> {
-    let mut events = Vec::new();
-    for byte in bytes {
-        events.extend(host.receive(&[*byte]).unwrap());
-    }
-    events
-}
-
-#[test]
-fn a_session_signals_byte_by_byte() {
-    let mut host = HostSignaling::new(TOKEN).unwrap();
-    let (mut client, token) = ClientSignaling::new(TOKEN).unwrap();
-
-    let [HostEvent::Reply(accept)] = &host_receive_bytewise(&mut host, &token)[..] else {
-        panic!("host did not reply to a correct token");
-    };
-    assert_eq!(client.receive(accept).unwrap(), [ClientEvent::Accepted]);
-
-    let offer = client.offer(OFFER).unwrap();
-    assert_eq!(
-        host_receive_bytewise(&mut host, &offer),
-        [HostEvent::Offer(OFFER.to_string())]
-    );
-
-    let answer = host.answer(ANSWER).unwrap();
-    assert_eq!(
-        client.receive(&answer).unwrap(),
-        [ClientEvent::Answer(ANSWER.to_string())]
-    );
-    assert_eq!(host.connection_closed(), Ok(()));
-    assert_eq!(client.connection_closed(), Ok(()));
-}
-
-#[test]
-fn a_bad_token_is_refused() {
-    let mut host = HostSignaling::new(TOKEN).unwrap();
-    let (_, wrong_token) = ClientSignaling::new("wrong").unwrap();
-    assert_eq!(host.receive(&wrong_token), Err(SignalingError::BadToken));
-}
-
-#[test]
-fn an_oversized_token_is_refused_from_its_length_prefix() {
-    let mut host = HostSignaling::new(TOKEN).unwrap();
-    let declared = 257u32;
-    assert_eq!(
-        host.receive(&declared.to_be_bytes()),
-        Err(SignalingError::MessageTooLong { len: 257, max: 256 })
-    );
-}
-
-#[test]
-fn an_offer_before_the_accept_byte_fails() {
-    let (mut client, _) = ClientSignaling::new(TOKEN).unwrap();
-    assert_eq!(client.offer(OFFER), Err(SignalingError::OfferBeforeAccept));
-}
-
-fn signaled_up_to_the_offer() -> (HostSignaling, ClientSignaling, Vec<u8>) {
-    let mut host = HostSignaling::new(TOKEN).unwrap();
-    let (mut client, token) = ClientSignaling::new(TOKEN).unwrap();
-    let [HostEvent::Reply(accept)] = &host.receive(&token).unwrap()[..] else {
-        panic!("host did not reply to a correct token");
-    };
-    client.receive(accept).unwrap();
-    let offer = client.offer(OFFER).unwrap();
-    host.receive(&offer).unwrap();
-    (host, client, offer)
-}
-
-#[test]
-fn a_message_after_the_answer_is_a_protocol_error() {
-    let (mut host, _, offer) = signaled_up_to_the_offer();
-    host.answer(ANSWER).unwrap();
-    assert_eq!(host.receive(&offer), Err(SignalingError::UnexpectedMessage));
-}
-
-#[test]
-fn a_hang_up_before_the_answer_fails_the_session() {
-    let (host, client, _) = signaled_up_to_the_offer();
-    assert_eq!(host.connection_closed(), Err(SignalingError::HungUp));
-    assert_eq!(client.connection_closed(), Err(SignalingError::HungUp));
-}
-
-#[test]
-fn a_second_connection_is_refused_while_the_first_is_up() {
-    let slot = SessionSlot::default();
-    let first = slot.claim().unwrap();
-    assert_eq!(slot.claim().unwrap_err(), SignalingError::Busy);
-    drop(first);
-    assert!(slot.claim().is_ok());
 }
