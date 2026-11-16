@@ -1480,8 +1480,9 @@ line whose packet was lost shows the most recent row received for it, and
 frames are dropped until one arrives complete. `st2110videortp`, giving
 `St2110VideoSink` and `St2110VideoSrc`, puts it on UDP with the 90 kHz
 media-clock timestamp shared by every packet of a frame. `st2110videosrc` is a
-`g2g-launch` element, and its `idle-timeout` sets how long without a packet
-ends the stream.
+`g2g-launch` element. Every ST 2110 receive source waits for packets until it
+is stopped, and a nonzero `idle-timeout` ends the stream after that long
+without a packet.
 
 Each sampling is a `Layout` reading or writing one pgroup at a time, so the
 packetizer and depacketizer stay layout-agnostic across four mappings: RGBA 8-bit,

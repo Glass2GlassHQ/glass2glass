@@ -17,8 +17,8 @@
 //!
 //! `PcmS16Le` rides the wire as L16 and `PcmF32Le` as L24 (float carries more than
 //! 16 bits, so it maps to the 24-bit wire, scaled from [-1, 1]). The blocking recv
-//! in the source runs with a read timeout so it stays cooperative and ends cleanly
-//! on a silence gap.
+//! in the source waits for packets until stopped, and its `idle-timeout` ends the
+//! stream after a silence gap.
 
 use core::future::{ready, Future, Ready};
 use core::pin::Pin;
@@ -28,7 +28,6 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use std::net::UdpSocket;
-use std::time::Duration;
 
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
@@ -45,7 +44,7 @@ use g2g_core::{
 use crate::arrivalstamp::RtpArrivalTimeline;
 use crate::filesink::io_err;
 use crate::st2110audio::{SampleDepth, St2110AudioDepacketizer, St2110AudioPacketizer};
-use crate::st2110dup::spawn_rtp_receiver;
+use crate::st2110dup::{spawn_rtp_receiver, IDLE_TIMEOUT_PROPERTY};
 use crate::st2110sdp::{St2110Essence, St2110Sdp};
 use g2g_core::pcm_caps_any_rate_and_channels;
 
@@ -394,7 +393,7 @@ pub struct St2110AudioSrc {
     format: AudioFormat,
     channels: u8,
     sample_rate: u32,
-    recv_timeout_ms: u64,
+    idle_timeout_ns: u64,
     socket: Option<UdpSocket>,
     clock_sync: Option<ClockSync>,
 }
@@ -418,7 +417,7 @@ impl Default for St2110AudioSrc {
 }
 
 impl St2110AudioSrc {
-    /// A source binding `0.0.0.0:5004`, stereo 48 kHz, 500 ms silence-gap timeout.
+    /// A source binding `0.0.0.0:5004`, stereo 48 kHz, waiting for packets until stopped.
     pub fn new() -> Self {
         Self {
             address: String::from("0.0.0.0"),
@@ -426,7 +425,7 @@ impl St2110AudioSrc {
             format: AudioFormat::PcmS16Le,
             channels: 2,
             sample_rate: 48_000,
-            recv_timeout_ms: 500,
+            idle_timeout_ns: 0,
             socket: None,
             clock_sync: None,
         }
@@ -492,6 +491,27 @@ impl SourceLoop for St2110AudioSrc {
         LatencyReport::live(0, None)
     }
 
+    fn properties(&self) -> &'static [PropertySpec] {
+        &[IDLE_TIMEOUT_PROPERTY]
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        match name {
+            "idle-timeout" => {
+                self.idle_timeout_ns = value.as_uint().ok_or(PropError::Type)?;
+                Ok(())
+            }
+            _ => Err(PropError::Unknown),
+        }
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        match name {
+            "idle-timeout" => Some(PropValue::Uint(self.idle_timeout_ns)),
+            _ => None,
+        }
+    }
+
     fn set_clock_sync(&mut self, sync: ClockSync) {
         self.clock_sync = Some(sync);
     }
@@ -515,10 +535,10 @@ impl SourceLoop for St2110AudioSrc {
             let mut timeline = RtpArrivalTimeline::new(self.clock_sync.clone());
             let mut count = 0u64;
             let paths = alloc::vec![sock.try_clone().map_err(io_err)?];
-            let idle = Duration::from_millis(self.recv_timeout_ms);
-            let mut units =
-                spawn_rtp_receiver(paths, idle, move |datagram| depack.depacketize(datagram))
-                    .map_err(io_err)?;
+            let mut units = spawn_rtp_receiver(paths, self.idle_timeout_ns, move |datagram| {
+                depack.depacketize(datagram)
+            })
+            .map_err(io_err)?;
             while let Some(p) = units.recv().await {
                 let p = p.map_err(io_err)?;
                 // PTS = the packet's media-clock offset from the first packet,
@@ -627,7 +647,7 @@ mod tests {
     // regression: the receive loop once blocked the executor for the whole read timeout
     #[tokio::test(flavor = "current_thread")]
     async fn waiting_for_packets_leaves_the_executor_free() {
-        const RECV_TIMEOUT_MS: u64 = 2_000;
+        const IDLE_TIMEOUT_MS: u64 = 2_000;
         const TICK: std::time::Duration = std::time::Duration::from_millis(10);
         let caps = Caps::Audio {
             format: AudioFormat::PcmS16Le,
@@ -638,14 +658,14 @@ mod tests {
         let mut src = St2110AudioSrc::new();
         src.address = String::from("127.0.0.1");
         src.port = 0;
-        src.recv_timeout_ms = RECV_TIMEOUT_MS;
+        src.idle_timeout_ns = IDLE_TIMEOUT_MS * 1_000_000;
         src.configure_pipeline(&caps).expect("src binds");
         let mut cap = Capture::default();
         let start = std::time::Instant::now();
         let ticked = tokio::time::timeout(TICK, src.run(&mut cap)).await;
         assert!(ticked.is_err(), "the source is still waiting for packets");
         assert!(
-            start.elapsed() < std::time::Duration::from_millis(RECV_TIMEOUT_MS / 2),
+            start.elapsed() < std::time::Duration::from_millis(IDLE_TIMEOUT_MS / 2),
             "a timer on the same thread fired while the source waited: {:?}",
             start.elapsed()
         );
@@ -666,7 +686,7 @@ mod tests {
         let mut src = St2110AudioSrc::new();
         src.address = String::from("127.0.0.1");
         src.port = 0;
-        src.recv_timeout_ms = 300;
+        src.idle_timeout_ns = 300_000_000;
         src.configure_pipeline(&caps).expect("src binds");
         let port = src.local_port().expect("bound port");
 
@@ -775,7 +795,7 @@ mod tests {
         src.address = String::from("127.0.0.1");
         src.port = 0;
         src.format = AudioFormat::PcmF32Le;
-        src.recv_timeout_ms = 300;
+        src.idle_timeout_ns = 300_000_000;
         src.configure_pipeline(&caps).expect("src binds");
         let port = src.local_port().expect("bound port");
 
@@ -837,7 +857,7 @@ mod tests {
         src.address = String::from("127.0.0.1");
         src.port = 0;
         src.format = AudioFormat::PcmS24Le;
-        src.recv_timeout_ms = 300;
+        src.idle_timeout_ns = 300_000_000;
         src.configure_pipeline(&caps).expect("src binds");
         let port = src.local_port().expect("bound port");
 

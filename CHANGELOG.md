@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2343: ST 2110 receive sources wait for packets until stopped unless `idle-timeout` is set, and the audio, ancillary and JPEG XS sources gain that property.
 - M2342: The ESP32-S3 runs its graphs on sleeping embassy executors, with the keyword graph and the camera's RTP sender on the second core.
 - M2341: Paced video sinks and `fpsdisplaysink` gain gst's `sync`, so `sync=false` presents every frame on arrival.
 - M2340: `st2110videosrc` runs in `g2g-launch` with an `idle-timeout`, and lost RFC 4175 rows show the previous frame's rows instead of black.

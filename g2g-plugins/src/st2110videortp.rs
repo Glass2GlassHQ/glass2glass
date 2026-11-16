@@ -28,7 +28,6 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use std::net::UdpSocket;
-use std::time::Duration;
 
 use g2g_core::caps::{framerate_q16_from_fraction, framerate_q16_period_ns};
 use g2g_core::frame::Frame;
@@ -43,7 +42,7 @@ use g2g_core::{
 
 use crate::arrivalstamp::RtpArrivalTimeline;
 use crate::filesink::io_err;
-use crate::st2110dup::spawn_rtp_receiver;
+use crate::st2110dup::{spawn_rtp_receiver, IDLE_TIMEOUT_PROPERTY};
 use crate::st2110pacing::{PacedSender, Pacer, PacingProfile};
 use crate::st2110sdp::{St2110Essence, St2110Sdp};
 use g2g_core::caps_parse::parse_raw_format;
@@ -434,7 +433,7 @@ impl Default for St2110VideoSrc {
 }
 
 impl St2110VideoSrc {
-    /// A source binding `0.0.0.0:5008`, 1280x720 YUYV at 60 fps, ending the stream after 500 ms without a packet.
+    /// A source binding `0.0.0.0:5008`, 1280x720 YUYV at 60 fps, waiting for packets until stopped.
     pub fn new() -> Self {
         Self {
             address: String::from("0.0.0.0"),
@@ -443,7 +442,7 @@ impl St2110VideoSrc {
             width: 1280,
             height: 720,
             framerate_fps: 60,
-            idle_timeout_ns: DEFAULT_IDLE_TIMEOUT_NS,
+            idle_timeout_ns: 0,
             socket: None,
             redundant: false,
             redundant_address: String::from("0.0.0.0"),
@@ -608,12 +607,7 @@ impl SourceLoop for St2110VideoSrc {
                 Ok(())
             }
             "idle-timeout" => {
-                let nanoseconds = value.as_uint().ok_or(PropError::Type)?;
-                // std's set_read_timeout refuses a zero duration
-                if nanoseconds == 0 {
-                    return Err(PropError::Value);
-                }
-                self.idle_timeout_ns = nanoseconds;
+                self.idle_timeout_ns = value.as_uint().ok_or(PropError::Type)?;
                 Ok(())
             }
             _ => Err(PropError::Unknown),
@@ -650,10 +644,10 @@ impl SourceLoop for St2110VideoSrc {
                 let redundant_socket = self.socket2.as_ref().ok_or(G2gError::NotConfigured)?;
                 paths.push(redundant_socket.try_clone().map_err(io_err)?);
             }
-            let idle = Duration::from_nanos(self.idle_timeout_ns);
-            let mut frames =
-                spawn_rtp_receiver(paths, idle, move |datagram| depack.depacketize(datagram))
-                    .map_err(io_err)?;
+            let mut frames = spawn_rtp_receiver(paths, self.idle_timeout_ns, move |datagram| {
+                depack.depacketize(datagram)
+            })
+            .map_err(io_err)?;
             while let Some(vframe) = frames.recv().await {
                 let vframe = vframe.map_err(io_err)?;
                 let frame = build_frame(
@@ -695,15 +689,8 @@ static ST2110_VIDEO_SRC_PROPS: &[PropertySpec] = &[
     PropertySpec::new("redundant-address", PropKind::Str, "Blue-path bind address")
         .with_default("0.0.0.0"),
     PropertySpec::new("redundant-port", PropKind::Uint, "Blue-path UDP port").with_default("5009"),
-    PropertySpec::new(
-        "idle-timeout",
-        PropKind::Uint,
-        "end the stream after this many nanoseconds without a packet",
-    )
-    .with_default("500000000"),
+    IDLE_TIMEOUT_PROPERTY,
 ];
-
-const DEFAULT_IDLE_TIMEOUT_NS: u64 = 500_000_000;
 
 impl PadTemplates for St2110VideoSrc {
     fn pad_templates() -> Vec<PadTemplate> {
@@ -1047,21 +1034,6 @@ mod tests {
         assert_eq!(
             src.get_property("format"),
             Some(PropValue::Str("RGBA".into()))
-        );
-    }
-
-    #[test]
-    fn src_idle_timeout_round_trips_and_refuses_zero() {
-        let mut src = St2110VideoSrc::new();
-        assert_eq!(
-            src.set_property("idle-timeout", PropValue::Uint(0)),
-            Err(PropError::Value)
-        );
-        src.set_property("idle-timeout", PropValue::Uint(2_000_000_000))
-            .unwrap();
-        assert_eq!(
-            src.get_property("idle-timeout"),
-            Some(PropValue::Uint(2_000_000_000))
         );
     }
 

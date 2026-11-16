@@ -115,6 +115,7 @@ impl SeamlessDedup {
 #[cfg(feature = "st2110")]
 mod net {
     use super::SeamlessDedup;
+    use g2g_core::property::{PropKind, PropertySpec};
     use std::io;
     use std::net::UdpSocket;
     use std::thread;
@@ -125,22 +126,30 @@ mod net {
 
     // a UDP datagram tops out at 65507 payload bytes
     const MAX_DATAGRAM: usize = 65_536;
-    // how often each redundant path is checked while the other is idle
-    const REDUNDANT_POLL: Duration = Duration::from_millis(20);
+    // how often an idle socket is checked for a dropped source or an expired idle timeout
+    const RECEIVE_POLL: Duration = Duration::from_millis(20);
     // depacketized units waiting for the source loop, socket buffers absorb the rest
     const RECEIVED_QUEUE_DEPTH: usize = 64;
     const RECEIVE_THREAD_NAME: &str = "st2110-receive";
 
-    // the channel closes once every path has been idle for `idle`
+    pub const IDLE_TIMEOUT_PROPERTY: PropertySpec = PropertySpec::new(
+        "idle-timeout",
+        PropKind::Uint,
+        "end the stream after this many nanoseconds without a packet, 0 waits forever",
+    )
+    .with_default("0");
+
+    // the channel closes after idle_timeout_ns without a packet on any path, never when it is zero
     pub fn spawn_rtp_receiver<T, D>(
         paths: Vec<UdpSocket>,
-        idle: Duration,
+        idle_timeout_ns: u64,
         depacketize: D,
     ) -> io::Result<mpsc::Receiver<io::Result<T>>>
     where
         T: Send + 'static,
         D: FnMut(&[u8]) -> Option<T> + Send + 'static,
     {
+        let idle = (idle_timeout_ns != 0).then(|| Duration::from_nanos(idle_timeout_ns));
         let (units, received) = mpsc::channel(RECEIVED_QUEUE_DEPTH);
         thread::Builder::new()
             .name(RECEIVE_THREAD_NAME.into())
@@ -155,7 +164,7 @@ mod net {
 
     fn receive_until_idle<T, D>(
         paths: &[UdpSocket],
-        idle: Duration,
+        idle: Option<Duration>,
         mut depacketize: D,
         units: &mpsc::Sender<io::Result<T>>,
     ) -> io::Result<()>
@@ -167,27 +176,39 @@ mod net {
             Some(unit) => units.blocking_send(Ok(unit)).is_ok(),
             None => true,
         };
+        let poll = idle.map_or(RECEIVE_POLL, |limit| limit.min(RECEIVE_POLL));
         if let [path] = paths {
-            path.set_read_timeout(Some(idle))?;
+            path.set_read_timeout(Some(poll))?;
+            let mut quiet = Duration::ZERO;
             loop {
-                let n = match path.recv_from(&mut buf) {
-                    Ok((n, _)) => n,
-                    Err(e) if is_timeout(&e) => return Ok(()),
+                match path.recv_from(&mut buf) {
+                    Ok((n, _)) => {
+                        quiet = Duration::ZERO;
+                        if !forward(&buf[..n]) {
+                            return Ok(());
+                        }
+                    }
+                    Err(e) if is_timeout(&e) => {
+                        quiet = quiet.saturating_add(poll);
+                        let timed_out = idle.is_some_and(|limit| quiet >= limit);
+                        if timed_out || units.is_closed() {
+                            return Ok(());
+                        }
+                    }
                     Err(e) => return Err(e),
-                };
-                if !forward(&buf[..n]) {
-                    return Ok(());
                 }
             }
         }
         let sockets: Vec<&UdpSocket> = paths.iter().collect();
-        let mut receiver = RedundantRtpReceiver::new(&sockets, idle.min(REDUNDANT_POLL), idle)?;
-        while let Some(n) = receiver.recv_novel(&mut buf)? {
-            if !forward(&buf[..n]) {
-                break;
+        let mut receiver = RedundantRtpReceiver::new(&sockets, poll, idle.unwrap_or(poll))?;
+        loop {
+            match receiver.recv_novel(&mut buf)? {
+                Some(n) if !forward(&buf[..n]) => return Ok(()),
+                Some(_) => {}
+                None if idle.is_none() && !units.is_closed() => {}
+                None => return Ok(()),
             }
         }
-        Ok(())
     }
 
     fn is_timeout(error: &io::Error) -> bool {
@@ -283,7 +304,7 @@ mod net {
 }
 
 #[cfg(feature = "st2110")]
-pub use net::{spawn_rtp_receiver, RedundantRtpReceiver};
+pub use net::{spawn_rtp_receiver, RedundantRtpReceiver, IDLE_TIMEOUT_PROPERTY};
 
 #[cfg(test)]
 mod tests {
@@ -428,5 +449,31 @@ mod tests {
             f.bytes, frame,
             "the RGBA frame is reconstructed byte-exact via -7 merge"
         );
+    }
+
+    #[cfg(feature = "st2110")]
+    const LATE_SENDER_DELAY: std::time::Duration = std::time::Duration::from_millis(600);
+
+    #[cfg(feature = "st2110")]
+    #[test]
+    fn zero_idle_timeout_waits_for_a_late_sender() {
+        use std::net::UdpSocket;
+        let receive_socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let address = receive_socket.local_addr().unwrap();
+        let mut received = spawn_rtp_receiver(vec![receive_socket], 0, |datagram: &[u8]| {
+            Some(datagram.to_vec())
+        })
+        .unwrap();
+        std::thread::sleep(LATE_SENDER_DELAY);
+        let packet = pkt(7, 9);
+        UdpSocket::bind("127.0.0.1:0")
+            .unwrap()
+            .send_to(&packet, address)
+            .unwrap();
+        let unit = received
+            .blocking_recv()
+            .expect("the receiver is still open")
+            .expect("the datagram arrives");
+        assert_eq!(unit, packet);
     }
 }

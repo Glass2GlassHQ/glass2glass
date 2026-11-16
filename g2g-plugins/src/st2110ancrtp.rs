@@ -20,9 +20,8 @@
 //!
 //! Together they carry closed captions end to end over ST 2110-40: because the RTP
 //! timestamp is the shared 90 kHz video media clock, a receiver on the same
-//! grandmaster aligns the captions with the video frame. The blocking recv in the
-//! source runs with a read timeout so it stays cooperative and ends cleanly on a
-//! gap.
+//! grandmaster aligns the captions with the video frame. The source waits for
+//! packets until stopped, and its `idle-timeout` ends the stream after a gap.
 
 use core::future::{ready, Future, Ready};
 use core::pin::Pin;
@@ -32,7 +31,6 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use std::net::UdpSocket;
-use std::time::Duration;
 
 use g2g_core::query::LatencyReport;
 use g2g_core::runtime::SourceLoop;
@@ -47,7 +45,7 @@ use crate::ccextract::push_cue_frames;
 use crate::cea::{build_cdp, extract_cc_data, parse_cdp, CaptionDecoder, CcSource};
 use crate::filesink::io_err;
 use crate::st2110anc::{AncField, St2110AncDepacketizer, St2110AncPacketizer};
-use crate::st2110dup::spawn_rtp_receiver;
+use crate::st2110dup::{spawn_rtp_receiver, IDLE_TIMEOUT_PROPERTY};
 use crate::st2110sdp::{St2110Essence, St2110Sdp};
 use crate::st291::{AncPacket, CAPTION_DID, CEA708_CDP_SDID};
 
@@ -322,7 +320,7 @@ pub struct St2110AncSrc {
     address: String,
     port: u16,
     source: CcSource,
-    recv_timeout_ms: u64,
+    idle_timeout_ns: u64,
     socket: Option<UdpSocket>,
     clock_sync: Option<ClockSync>,
 }
@@ -344,7 +342,7 @@ impl Default for St2110AncSrc {
 }
 
 impl St2110AncSrc {
-    /// A source binding `0.0.0.0:5006`, rendering CEA-608 CC1, 500 ms gap timeout.
+    /// A source binding `0.0.0.0:5006`, rendering CEA-608 CC1, waiting for packets until stopped.
     pub fn new() -> Self {
         Self::for_source(CcSource::default())
     }
@@ -355,7 +353,7 @@ impl St2110AncSrc {
             address: String::from("0.0.0.0"),
             port: 5006,
             source,
-            recv_timeout_ms: 500,
+            idle_timeout_ns: 0,
             socket: None,
             clock_sync: None,
         }
@@ -398,6 +396,27 @@ impl SourceLoop for St2110AncSrc {
         LatencyReport::live(0, None)
     }
 
+    fn properties(&self) -> &'static [PropertySpec] {
+        &[IDLE_TIMEOUT_PROPERTY]
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        match name {
+            "idle-timeout" => {
+                self.idle_timeout_ns = value.as_uint().ok_or(PropError::Type)?;
+                Ok(())
+            }
+            _ => Err(PropError::Unknown),
+        }
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        match name {
+            "idle-timeout" => Some(PropValue::Uint(self.idle_timeout_ns)),
+            _ => None,
+        }
+    }
+
     fn set_clock_sync(&mut self, sync: ClockSync) {
         self.clock_sync = Some(sync);
     }
@@ -425,10 +444,10 @@ impl SourceLoop for St2110AncSrc {
             let mut caps_emitted = false;
             let mut sequence = 0u64;
             let paths = alloc::vec![sock.try_clone().map_err(io_err)?];
-            let idle = Duration::from_millis(self.recv_timeout_ms);
-            let mut units =
-                spawn_rtp_receiver(paths, idle, move |datagram| depack.depacketize(datagram))
-                    .map_err(io_err)?;
+            let mut units = spawn_rtp_receiver(paths, self.idle_timeout_ns, move |datagram| {
+                depack.depacketize(datagram)
+            })
+            .map_err(io_err)?;
             while let Some(anc_frame) = units.recv().await {
                 let anc_frame = anc_frame.map_err(io_err)?;
                 // PTS = the packet's media-clock offset from the first packet, which
@@ -559,7 +578,7 @@ mod tests {
         let mut src = St2110AncSrc::new();
         src.address = String::from("127.0.0.1");
         src.port = 0;
-        src.recv_timeout_ms = 300;
+        src.idle_timeout_ns = 300_000_000;
         src.configure_pipeline(&caps).expect("src binds");
         let port = src.local_port().expect("bound port");
 

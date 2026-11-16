@@ -18,8 +18,8 @@
 //! frame-locked to the source.
 //!
 //! The codestream is opaque to this layer (the codec is `ffmpegjpegxs`); this is the
-//! -20 sibling for compressed mezzanine video. The blocking recv in the source runs
-//! with a read timeout so it stays cooperative and ends cleanly on a gap.
+//! -20 sibling for compressed mezzanine video. The source waits for packets until
+//! stopped, and its `idle-timeout` ends the stream after a gap.
 
 use core::future::{ready, Future, Ready};
 use core::pin::Pin;
@@ -29,7 +29,6 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use std::net::UdpSocket;
-use std::time::Duration;
 
 use g2g_core::caps::{framerate_q16_from_fraction, framerate_q16_period_ns};
 use g2g_core::frame::Frame;
@@ -44,7 +43,7 @@ use g2g_core::{
 
 use crate::arrivalstamp::RtpArrivalTimeline;
 use crate::filesink::io_err;
-use crate::st2110dup::spawn_rtp_receiver;
+use crate::st2110dup::{spawn_rtp_receiver, IDLE_TIMEOUT_PROPERTY};
 use crate::st2110jxs::{St2110JxsDepacketizer, St2110JxsPacketizer};
 use crate::st2110pacing::{PacedSender, Pacer, PacingProfile};
 use crate::st2110sdp::{St2110Essence, St2110Sdp};
@@ -403,7 +402,7 @@ pub struct St2110JxsSrc {
     width: u32,
     height: u32,
     framerate_fps: u32,
-    recv_timeout_ms: u64,
+    idle_timeout_ns: u64,
     max_frame_bytes: usize,
     socket: Option<UdpSocket>,
     clock_sync: Option<ClockSync>,
@@ -427,7 +426,7 @@ impl Default for St2110JxsSrc {
 }
 
 impl St2110JxsSrc {
-    /// A source binding `0.0.0.0:5010`, 1920x1080 at 60 fps, 500 ms gap timeout.
+    /// A source binding `0.0.0.0:5010`, 1920x1080 at 60 fps, waiting for packets until stopped.
     pub fn new() -> Self {
         Self {
             address: String::from("0.0.0.0"),
@@ -435,7 +434,7 @@ impl St2110JxsSrc {
             width: 1920,
             height: 1080,
             framerate_fps: 60,
-            recv_timeout_ms: 500,
+            idle_timeout_ns: 0,
             max_frame_bytes: DEFAULT_MAX_FRAME_BYTES,
             socket: None,
             clock_sync: None,
@@ -525,10 +524,10 @@ impl SourceLoop for St2110JxsSrc {
             let mut timeline = RtpArrivalTimeline::new(self.clock_sync.clone());
             let mut count = 0u64;
             let paths = alloc::vec![sock.try_clone().map_err(io_err)?];
-            let idle = Duration::from_millis(self.recv_timeout_ms);
-            let mut units =
-                spawn_rtp_receiver(paths, idle, move |datagram| depack.depacketize(datagram))
-                    .map_err(io_err)?;
+            let mut units = spawn_rtp_receiver(paths, self.idle_timeout_ns, move |datagram| {
+                depack.depacketize(datagram)
+            })
+            .map_err(io_err)?;
             while let Some(jxs) = units.recv().await {
                 let jxs = jxs.map_err(io_err)?;
                 // PTS = the frame's media-clock offset from the first frame, which
@@ -571,6 +570,7 @@ impl St2110JxsSrc {
         PropertySpec::new("width", PropKind::Uint, "Frame width in pixels").with_default("1920"),
         PropertySpec::new("height", PropKind::Uint, "Frame height in pixels").with_default("1080"),
         PropertySpec::new("framerate", PropKind::Uint, "Frame rate in fps").with_default("60"),
+        IDLE_TIMEOUT_PROPERTY,
     ];
 
     /// Set a geometry property (mirrors the [`AsyncElement`] property convention on
@@ -598,6 +598,10 @@ impl St2110JxsSrc {
                 self.framerate_fps = value.as_uint().ok_or(PropError::Type)? as u32;
                 Ok(())
             }
+            "idle-timeout" => {
+                self.idle_timeout_ns = value.as_uint().ok_or(PropError::Type)?;
+                Ok(())
+            }
             _ => Err(PropError::Unknown),
         }
     }
@@ -610,6 +614,7 @@ impl St2110JxsSrc {
             "width" => Some(PropValue::Uint(u64::from(self.width))),
             "height" => Some(PropValue::Uint(u64::from(self.height))),
             "framerate" => Some(PropValue::Uint(u64::from(self.framerate_fps))),
+            "idle-timeout" => Some(PropValue::Uint(self.idle_timeout_ns)),
             _ => None,
         }
     }
@@ -697,7 +702,7 @@ mod tests {
         src.set_property("address", PropValue::Str("127.0.0.1".into()))
             .unwrap();
         src.set_property("port", PropValue::Uint(0)).unwrap();
-        src.recv_timeout_ms = 300;
+        src.idle_timeout_ns = 300_000_000;
         src.configure_pipeline(&caps()).expect("src binds");
         let port = src.local_port().expect("bound port");
 

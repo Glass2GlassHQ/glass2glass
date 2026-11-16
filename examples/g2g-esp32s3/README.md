@@ -73,7 +73,7 @@ leans "no" at 0.4 to 0.75.
 With g2g (`g2g-plugins` built with `std,wayland-sink,st2110`):
 
 ```bash
-g2g-launch st2110videosrc port=5004 format=gray8 width=96 height=96 idle-timeout=3000000000 ! videoconvert ! videoscale ! video/x-raw,width=480,height=480 ! fpsdisplaysink video-sink=autovideosink sync=false
+g2g-launch st2110videosrc port=5004 format=gray8 width=96 height=96 ! videoconvert ! videoscale ! video/x-raw,width=480,height=480 ! fpsdisplaysink video-sink=autovideosink sync=false
 ```
 
 With GStreamer:
