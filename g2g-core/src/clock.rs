@@ -197,9 +197,22 @@ impl core::fmt::Debug for ClockCandidate {
 ///
 /// `u64::MAX` is the unset sentinel (a base time that large is never a real
 /// clock reading in this epoch).
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct PlayAnchor {
-    inner: Arc<AtomicU64>,
+    inner: Arc<PlayAnchorTimes>,
+}
+
+#[derive(Debug)]
+struct PlayAnchorTimes {
+    base_time_ns: AtomicU64,
+    paused_at_ns: AtomicU64,
+    paused_total_ns: AtomicU64,
+}
+
+impl Default for PlayAnchor {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl PlayAnchor {
@@ -208,28 +221,58 @@ impl PlayAnchor {
     /// A fresh, unstamped anchor.
     pub fn new() -> Self {
         Self {
-            inner: Arc::new(AtomicU64::new(Self::UNSET)),
+            inner: Arc::new(PlayAnchorTimes {
+                base_time_ns: AtomicU64::new(Self::UNSET),
+                paused_at_ns: AtomicU64::new(Self::UNSET),
+                paused_total_ns: AtomicU64::new(0),
+            }),
         }
     }
 
     /// Stamp the base time (the elected clock's `now_ns()` at the `Playing`
     /// edge). Latest-wins so a re-`Playing` after a stop re-anchors.
     pub fn stamp(&self, base_time_ns: u64) {
-        self.inner.store(base_time_ns, Ordering::Release);
+        self.inner
+            .base_time_ns
+            .store(base_time_ns, Ordering::Release);
     }
 
     /// Clear the anchor (a transition down to `Ready`/`Null`), so the next
     /// `Playing` re-stamps rather than reusing a stale epoch.
     pub fn clear(&self) {
-        self.inner.store(Self::UNSET, Ordering::Release);
+        self.inner
+            .base_time_ns
+            .store(Self::UNSET, Ordering::Release);
+        self.inner
+            .paused_at_ns
+            .store(Self::UNSET, Ordering::Release);
+        self.inner.paused_total_ns.store(0, Ordering::Release);
     }
 
     /// The stamped base time, or `None` until `Playing` stamps it.
     pub fn get(&self) -> Option<u64> {
-        match self.inner.load(Ordering::Acquire) {
+        match self.inner.base_time_ns.load(Ordering::Acquire) {
             Self::UNSET => None,
             v => Some(v),
         }
+    }
+
+    pub fn pause(&self, now_ns: u64) {
+        self.inner.paused_at_ns.store(now_ns, Ordering::Release);
+    }
+
+    pub fn resume(&self, now_ns: u64) {
+        let paused_at_ns = self.inner.paused_at_ns.swap(Self::UNSET, Ordering::AcqRel);
+        if paused_at_ns != Self::UNSET {
+            // gst moves the base time forward by the length of a pause
+            self.inner
+                .paused_total_ns
+                .fetch_add(now_ns.saturating_sub(paused_at_ns), Ordering::AcqRel);
+        }
+    }
+
+    pub fn paused_total_ns(&self) -> u64 {
+        self.inner.paused_total_ns.load(Ordering::Acquire)
     }
 }
 
@@ -339,6 +382,12 @@ impl ClockSync {
             Some(a) => a.get().unwrap_or(self.base_time_ns),
             None => self.base_time_ns,
         }
+    }
+
+    pub fn paused_total_ns(&self) -> u64 {
+        self.play_anchor
+            .as_ref()
+            .map_or(0, PlayAnchor::paused_total_ns)
     }
 
     /// Whether a `Playing` anchor is armed and has been stamped. A sink uses

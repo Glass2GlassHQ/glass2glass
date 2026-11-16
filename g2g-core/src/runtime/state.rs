@@ -245,7 +245,10 @@ impl StateController {
                 // M176: stamp the presentation base time at the play edge, so a
                 // sink anchors to when streaming began (not startup / preroll).
                 if let Some((clock, anchor)) = &*self.inner.play_anchor.lock() {
-                    anchor.stamp(clock.now_ns());
+                    match anchor.get() {
+                        Some(_) => anchor.resume(clock.now_ns()),
+                        None => anchor.stamp(clock.now_ns()),
+                    }
                 }
                 self.inner.pending_preroll.store(0, Ordering::Release);
                 self.complete_preroll();
@@ -264,6 +267,11 @@ impl StateController {
                     Ordering::Release,
                 );
                 self.inner.prerolled.store(false, Ordering::Release);
+            }
+            PipelineState::Paused if old == PipelineState::Playing => {
+                if let Some((clock, anchor)) = &*self.inner.play_anchor.lock() {
+                    anchor.pause(clock.now_ns());
+                }
             }
             PipelineState::Paused => {}
         }
@@ -809,6 +817,29 @@ mod tests {
         assert_eq!(anchor.get(), None, "cleared on the way down");
         sc.set_state(PipelineState::Playing);
         assert_eq!(anchor.get(), Some(6000), "re-stamped on the next play");
+    }
+
+    #[test]
+    fn resuming_after_a_pause_keeps_the_base_time_and_counts_the_pause() {
+        use crate::clock::PipelineClock;
+        struct Settable(Arc<core::sync::atomic::AtomicU64>);
+        impl PipelineClock for Settable {
+            fn now_ns(&self) -> u64 {
+                self.0.load(Ordering::SeqCst)
+            }
+        }
+        let now = Arc::new(core::sync::atomic::AtomicU64::new(1_000));
+        let sc = StateController::new(PipelineState::Paused);
+        let anchor = sc.arm_play_anchor(Arc::new(Settable(now.clone())));
+
+        sc.set_state(PipelineState::Playing);
+        now.store(3_000, Ordering::SeqCst);
+        sc.set_state(PipelineState::Paused);
+        now.store(7_000, Ordering::SeqCst);
+        sc.set_state(PipelineState::Playing);
+
+        assert_eq!(anchor.get(), Some(1_000));
+        assert_eq!(anchor.paused_total_ns(), 4_000);
     }
 
     #[test]

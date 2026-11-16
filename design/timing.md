@@ -275,6 +275,9 @@ So when a `StateController` drives the run, the runner arms a `PlayAnchor`, a
 shared cell, on the elected clock and hands each sink `ClockSync::with_play_anchor`.
 `set_state(Playing)` stamps the anchor with `clock.now_ns()` at the exact play
 edge, and a transition down to `Ready` or `Null` clears it so a replay re-bases.
+`Playing -> Paused` marks the anchor paused and the next `Playing` adds the paused
+span to `paused_total_ns`, which `PresentationPacer` adds to every deadline, so
+frames after a resume present at their running time instead of being dropped as late.
 `ClockSync::base_time()` then resolves to the play-edge stamp once armed, else the
 eager startup base time. `WaylandSink` reads it per frame: it first-frame-anchors a
 preroll frame consumed during `Paused`, presenting it immediately, then re-bases

@@ -243,7 +243,8 @@ impl PresentationPacer {
         let deadline =
             Self::presentation_anchor(sync, rt, anchor_ns, anchor_pre_play, seek_reanchor)
                 .saturating_add(as_signed(rt))
-                .saturating_add(as_signed(sync.path_latency_min_ns()));
+                .saturating_add(as_signed(sync.path_latency_min_ns()))
+                .saturating_add(as_signed(sync.paused_total_ns()));
         // A deadline below the clock's zero is simply already due.
         deadline.max(0) as u64
     }
@@ -448,7 +449,9 @@ impl PresentationPacer {
         let anchor = if use_play {
             as_signed(sync.base_time())
         } else {
-            as_signed(sync.now_ns()).saturating_sub(as_signed(rt))
+            as_signed(sync.now_ns())
+                .saturating_sub(as_signed(rt))
+                .saturating_sub(as_signed(sync.paused_total_ns()))
         };
         *anchor_ns = Some(anchor);
         // Mark provisional only if anchored before `Playing` stamped, so it
@@ -720,6 +723,26 @@ mod tests {
         p.flush();
         assert_eq!(anchor_of(&mut p, &sync, 200), 7_800);
         assert!(!p.seek_reanchor, "seek re-anchor consumed");
+    }
+
+    #[test]
+    fn a_pause_moves_every_later_deadline_by_its_length() {
+        let clock = Arc::new(AtomicU64::new(1_000));
+        let anchor = PlayAnchor::new();
+        let sync =
+            ClockSync::with_play_anchor(Arc::new(ManualClock(clock.clone())), 0, anchor.clone());
+        let mut p = PresentationPacer::new();
+        p.set_clock_sync(sync);
+        anchor.stamp(1_000);
+        assert_eq!(p.judge(0, 0), Pace::Now);
+
+        let pause_ns = 8_000;
+        anchor.pause(1_000);
+        clock.store(1_000 + pause_ns, Ordering::Relaxed);
+        anchor.resume(1_000 + pause_ns);
+
+        let next_pts = 500;
+        assert_eq!(p.judge(next_pts, 1), Pace::Wait(next_pts));
     }
 
     #[test]
