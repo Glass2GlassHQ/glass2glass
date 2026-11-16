@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2357: `g2g-player` stays open at the end of a seekable file, paused on the last frame with `eof-reached` set, and a paused seek after the end prerolls its target frame.
 - M2356: `gl-render` builds on Windows and macOS, and the GL renderer compiles beside `smartstring`.
 - M2355: `httpsrc bytestream-format=mp4` names a whole MP4 file as `filesrc` does, so `httpsrc ! qtdemux` plays and seeks.
 - M2354: `flvdemux`, `oggdemux`, `tsdemux` and `mpegpsdemux` report their duration, the last three by reading the tail of the file first in a run that takes seeks.

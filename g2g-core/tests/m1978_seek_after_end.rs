@@ -13,8 +13,9 @@ use std::sync::{Arc, Mutex};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::runtime::{
     attach_seek, attach_seek_controller, block_on, eos_then_wait_for_seek, GraphNode, Join2,
-    RunBuilder, RunStats, SeekController, SeekFormat, SourceLoop,
+    RunBuilder, RunStats, SeekController, SeekFormat, SourceLoop, StateController,
 };
+use g2g_core::state::PipelineState;
 use g2g_core::{
     AsyncElement, Caps, ConfigureOutcome, Dim, Frame, FrameTiming, G2gError, Graph, OutputSink,
     PipelineClock, PipelinePacket, Rate, RawVideoFormat, Seek,
@@ -253,6 +254,53 @@ fn a_parked_source_takes_a_seek_after_the_end_and_the_run_continues() {
         .with_seek_controller(&controller)
         .run();
     run_with_a_seek_after_the_end(run, &controller);
+    assert_eq!(*seen.lock().unwrap(), played_through_then_from_the_target());
+}
+
+// the sink waits for packets after its Eos, so the seek's Flush reaches it before the paused gate does
+#[test]
+fn a_paused_seek_after_the_end_prerolls_the_target_frame() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let mut graph = seekable_graph(&seen);
+    let controller = attach_seek_controller(&mut graph).expect("the source can seek");
+    controller.keep_run_open();
+    let state = StateController::new(PipelineState::Playing);
+    let run = RunBuilder::new(graph, &ZeroClock, LINK_CAPACITY)
+        .with_seek_controller(&controller)
+        .with_state(&state)
+        .run();
+    let preroll_then_play = async {
+        core::future::poll_fn(|cx| {
+            if controller.stream_ended() {
+                return Poll::Ready(());
+            }
+            cx.waker().wake_by_ref();
+            Poll::Pending
+        })
+        .await;
+        state.set_state(PipelineState::Paused);
+        state.request_repreroll();
+        controller.seek(Seek::flush_to(SEEK_TARGET_NS));
+        let target_frame = Seen::Frame(SEEK_TARGET_NS);
+        core::future::poll_fn(|cx| {
+            if seen.lock().unwrap().ends_with(&[Seen::Flush, target_frame])
+                || controller.stream_ended()
+            {
+                return Poll::Ready(());
+            }
+            cx.waker().wake_by_ref();
+            Poll::Pending
+        })
+        .await;
+        let prerolled: Vec<Seen> = frames_from(0)
+            .chain([Seen::Eos, Seen::Flush, target_frame])
+            .collect();
+        assert_eq!(*seen.lock().unwrap(), prerolled);
+        state.set_state(PipelineState::Playing);
+        controller.let_run_end();
+    };
+    let (stats, ()) = block_on(Join2::new(run, preroll_then_play));
+    stats.expect("the run ends once nothing more is sought");
     assert_eq!(*seen.lock().unwrap(), played_through_then_from_the_target());
 }
 

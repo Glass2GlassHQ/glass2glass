@@ -46,6 +46,7 @@ pub enum Property {
     Pause,
     TimePos,
     Duration,
+    EofReached,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,6 +54,7 @@ pub enum PropertyChange {
     Pause(bool),
     TimePos(Option<Duration>),
     Duration(Option<Duration>),
+    EofReached(bool),
 }
 
 impl PropertyChange {
@@ -61,6 +63,7 @@ impl PropertyChange {
             PropertyChange::Pause(_) => Property::Pause,
             PropertyChange::TimePos(_) => Property::TimePos,
             PropertyChange::Duration(_) => Property::Duration,
+            PropertyChange::EofReached(_) => Property::EofReached,
         }
     }
 }
@@ -163,6 +166,7 @@ pub(crate) struct Shared {
     events: EventQueue,
     frames: FrameSlot,
     paused: AtomicBool,
+    eof_reached: AtomicBool,
     // the last value reported for each observed property
     observed: Mutex<Vec<PropertyChange>>,
 }
@@ -182,6 +186,28 @@ impl Shared {
         *last = value;
         drop(observed);
         self.events.push(Event::PropertyChange(value));
+    }
+
+    fn set_paused(&self, paused: bool, state: Option<&StateController>) {
+        self.paused.store(paused, Ordering::SeqCst);
+        if let Some(state) = state {
+            state.set_state(if paused {
+                PipelineState::Paused
+            } else {
+                PipelineState::Playing
+            });
+        }
+        self.report(PropertyChange::Pause(paused));
+    }
+
+    fn set_eof_reached(&self, reached: bool) {
+        self.eof_reached.store(reached, Ordering::SeqCst);
+        self.report(PropertyChange::EofReached(reached));
+    }
+
+    fn reach_end(&self, state: &StateController) {
+        self.set_paused(true, Some(state));
+        self.set_eof_reached(true);
     }
 
     fn report_progress(&self, progress: &PipelineProgress) {
@@ -244,6 +270,10 @@ impl Player {
         }
         // a source that cannot seek still plays, seek() refuses it
         let seek = attach_seek_controller(&mut graph).ok();
+        if let Some(seek) = &seek {
+            seek.keep_run_open();
+        }
+        self.shared.set_eof_reached(false);
         let state = StateController::new(if self.shared.paused.load(Ordering::SeqCst) {
             PipelineState::Paused
         } else {
@@ -282,6 +312,10 @@ impl Player {
             return;
         };
         playback.stopping.store(true, Ordering::SeqCst);
+        // g2g-core ends a run held open at the end of the stream only on shutdown
+        if let Some(seek) = &playback.seek {
+            seek.shutdown();
+        }
         playback.state.set_state(PipelineState::Null);
         playback
             .thread
@@ -298,15 +332,9 @@ impl Player {
     }
 
     fn set_paused(&self, paused: bool) {
-        self.shared.paused.store(paused, Ordering::SeqCst);
-        if let Some(playback) = &*self.playback.lock().expect("playback lock") {
-            playback.state.set_state(if paused {
-                PipelineState::Paused
-            } else {
-                PipelineState::Playing
-            });
-        }
-        self.shared.report(PropertyChange::Pause(paused));
+        let playback = self.playback.lock().expect("playback lock");
+        self.shared
+            .set_paused(paused, playback.as_ref().map(|playback| &playback.state));
     }
 
     pub fn seek(&self, position: Duration) -> Result<(), SeekError> {
@@ -337,6 +365,9 @@ impl Player {
                     .and_then(PipelineProgress::duration)
                     .map(Duration::from_nanos),
             ),
+            Property::EofReached => {
+                PropertyChange::EofReached(self.shared.eof_reached.load(Ordering::SeqCst))
+            }
         }
     }
 
@@ -451,6 +482,7 @@ impl PlaybackRun {
                         }
                         let nanos = u64::try_from(position.as_nanos()).unwrap_or(u64::MAX);
                         pending_seek = Some(controller.seek(Seek::flush_to(nanos)));
+                        shared.set_eof_reached(false);
                         shared.events.push(Event::Seek);
                     }
                     outcome = async { pending_seek.as_ref().expect("guarded by is_some").wait().await }, if pending_seek.is_some() => {
@@ -459,14 +491,24 @@ impl PlaybackRun {
                             shared.events.push(Event::PlaybackRestart);
                         }
                     }
-                    _ = poll.tick() => shared.report_progress(&progress),
+                    _ = poll.tick() => {
+                        shared.report_progress(&progress);
+                        let parked_at_end = seek.as_ref().is_some_and(SeekController::stream_ended);
+                        if parked_at_end && !shared.eof_reached.load(Ordering::SeqCst) {
+                            shared.reach_end(&state);
+                        }
+                    }
                 }
             }
         });
         shared.report_progress(&progress);
         let end = match outcome {
             Ok(_) if stopping.load(Ordering::SeqCst) => EndFile::Stop,
-            Ok(_) => EndFile::Eof,
+            // a run with a muxer or a source that cannot seek ends at the end of the stream
+            Ok(_) => {
+                shared.reach_end(&state);
+                EndFile::Eof
+            }
             Err(error) => EndFile::Error(RunFailure::Error(error).to_string()),
         };
         shared.events.push(Event::EndFile(end));

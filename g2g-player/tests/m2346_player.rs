@@ -16,6 +16,11 @@ const CLIP: &str = concat!(
 );
 const CLIP_WIDTH: u32 = 64;
 const CLIP_HEIGHT: u32 = 48;
+const CLIP_FRAMES_PER_SECOND: u32 = 25;
+// time-pos at the end is the last frame's start, one frame before the duration
+const END_POSITION_TOLERANCE: Duration = Duration::from_secs(2)
+    .checked_div(CLIP_FRAMES_PER_SECOND)
+    .unwrap();
 const PLAYED_BEFORE_PAUSE: Duration = Duration::from_millis(400);
 const RGBA_BYTES_PER_PIXEL: u32 = 4;
 const EVENT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -65,12 +70,13 @@ fn wait_until(mut condition: impl FnMut() -> bool) {
 }
 
 #[test]
-fn a_clip_renders_pauses_seeks_and_ends() {
+fn a_clip_renders_pauses_seeks_and_stays_open_at_the_end() {
     let Ok(context) = pollster::block_on(GpuContext::headless()) else {
         return;
     };
     let player = Player::new();
     player.observe(Property::Duration);
+    player.observe(Property::EofReached);
     let mut render = WgpuRenderContext::new(&player, context.clone());
     let (frame_arrived, frames) = mpsc::channel();
     player.set_update_callback(move || {
@@ -133,9 +139,32 @@ fn a_clip_renders_pauses_seeks_and_ends() {
     events.wait_for(&Event::PlaybackRestart);
     wait_until(|| time_pos(&player) < resumed);
 
-    events.wait_for(&Event::EndFile(EndFile::Eof));
+    events.wait_for(&Event::PropertyChange(PropertyChange::EofReached(true)));
     assert!(events.seen.iter().any(|event| matches!(
         event,
         Event::PropertyChange(PropertyChange::Duration(Some(_)))
     )));
+    assert_eq!(
+        player.property(Property::Pause),
+        PropertyChange::Pause(true)
+    );
+    let PropertyChange::Duration(Some(duration)) = player.property(Property::Duration) else {
+        panic!("no duration at the end");
+    };
+    let end_position = time_pos(&player);
+    assert!(
+        duration.abs_diff(end_position) <= END_POSITION_TOLERANCE,
+        "stopped at {end_position:?} of a {duration:?} clip"
+    );
+
+    player.seek(PLAYED_BEFORE_PAUSE).unwrap();
+    events.wait_for(&Event::PlaybackRestart);
+    assert_eq!(
+        player.property(Property::EofReached),
+        PropertyChange::EofReached(false)
+    );
+    wait_until(|| time_pos(&player) < end_position);
+
+    player.stop();
+    events.wait_for(&Event::EndFile(EndFile::Stop));
 }

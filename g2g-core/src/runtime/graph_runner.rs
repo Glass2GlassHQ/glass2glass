@@ -5487,6 +5487,14 @@ async fn sink_arm_loop<E: AsyncElement>(elem: &mut E, io: SinkArmIo) -> Result<u
             // DataFrame becomes the new visible preroll.
             Some(PipelinePacket::Flush) => {
                 flushing = false;
+                // a sink waiting for packets takes the Flush before the paused gate sees the new generation
+                if let Some(sc) = &state {
+                    let gen = sc.preroll_generation();
+                    if gen != preroll_gen {
+                        preroll_gen = gen;
+                        prerolled_self = false;
+                    }
+                }
                 if let Some(stream_end) = &stream_end {
                     stream_end.flushed();
                 }

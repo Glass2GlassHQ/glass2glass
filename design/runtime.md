@@ -756,7 +756,10 @@ preroll generation, and `flow_gate` takes the arm's generation and reopens for a
 stale one, so each sink arm re-prerolls. The arm drains the stale pre-seek frames,
 discarding rather than presenting, until the `Flush`, then prerolls the post-flush
 target and re-fires `AsyncDone`, so scrubbing a paused pipeline updates the shown
-frame.
+frame. A sink that took its `Eos` while playing waits on its link
+rather than in `flow_gate`, so the seek's `Flush` can reach it before it reads the
+new generation. A `Flush` therefore also takes a newer generation, and the next
+frame is the preroll.
 
 `FileSrc` is BYTES-format seekable through `with_seek`: a flushing seek repositions
 the file read to a byte offset and emits `Flush`.
@@ -953,8 +956,15 @@ runs needs no lock.
 `g2g-player` is a libmpv-style library over `playbin` and `parse_launch`. `Player`
 loads a URI or a launch line and runs it on a `g2g-player` thread under a
 `StateController`. It reports through one event queue (`wait_event`, a wakeup
-callback) and the `pause`, `time-pos` and `duration` properties, read from
-`PipelineProgress` every 50 ms and posted to observers on change.
+callback) and the `pause`, `time-pos`, `duration` and `eof-reached` properties,
+read from `PipelineProgress` every 50 ms and posted to observers on change.
+
+The end of the file behaves as mpv's `keep-open`. When the source can seek, `load`
+holds the run open with `keep_run_open`. Once `stream_ended()` is true the player
+pauses on the last frame and sets `eof-reached`, which a seek or the next `load`
+clears. `stop` calls `shutdown` on the seek controller, since a run held open ends
+only then. A run that ends by itself (a source that cannot seek, or a muxer in the
+graph) also pauses and sets `eof-reached`, then posts `EndFile::Eof`.
 
 The host draws the frame due now into its own target, as with libmpv's render API.
 A URI load builds `playbin uri=... video-sink=playervideosink`, and a launch line
