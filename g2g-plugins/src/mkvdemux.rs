@@ -51,7 +51,7 @@ use g2g_core::{
     CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, FrameTiming, G2gError,
     MemoryDomain, MultiOutputElement, MultiOutputSink, OutputSink, PadTemplate, PadTemplates,
     PipelinePacket, ProResVariant, PropError, PropKind, PropValue, PropertySpec, Rate,
-    RawVideoFormat, Seek, Segment, Stream, StreamCollection, StreamType, SubPictureFormat, TagList,
+    RawVideoFormat, Segment, Stream, StreamCollection, StreamType, SubPictureFormat, TagList,
     TextFormat, VideoCodec,
 };
 
@@ -146,6 +146,82 @@ enum CuePrefetch {
     },
 }
 
+impl CuePrefetch {
+    /// Service a pending app seek. Three paths, cheapest first:
+    /// `Cues` already parsed -> seek straight to the target Cluster; only a
+    /// `SeekHead` locating `Cues` -> prefetch them (byte-seek to `Cues`, then to
+    /// the target); neither -> re-scan from offset 0. A no-op while a seek or
+    /// prefetch is already in flight, or with no pending app seek.
+    fn poll(&mut self, seek: &mut DemuxSeek<crate::matroska::MkvFrame>, demux: &MatroskaDemuxer) {
+        if *self != CuePrefetch::Idle || seek.is_seeking() || !seek.app_seek_pending() {
+            return;
+        }
+        if !demux.cues().is_empty() {
+            // Index known: seek directly to the target Cluster.
+            seek.poll_request_indexed(|t| demux.cue_seek_offset(t));
+        } else if let (Some(cues_off), Some(stream_start_ns)) =
+            (demux.cue_index_offset(), seek.stream_start_ns())
+        {
+            // Index located but not parsed: prefetch it before the real seek.
+            if let Some(app_seek) = seek.take_app_seek() {
+                seek.seek_upstream(cues_off);
+                *self = CuePrefetch::Fetching {
+                    target_pts_ns: app_seek.start.saturating_add(stream_start_ns),
+                    flushed: false,
+                };
+            }
+        } else {
+            // No index at all, or no first frame yet to count the target from:
+            // re-scan from the start (M364).
+            seek.poll_request_indexed(|_| None);
+        }
+    }
+
+    fn take_bytes(
+        &mut self,
+        seek: &mut DemuxSeek<crate::matroska::MkvFrame>,
+        demux: &mut MatroskaDemuxer,
+        slice: &[u8],
+    ) -> bool {
+        match *self {
+            // Awaiting the prefetch byte-seek's flush: drop in-flight
+            // pre-seek bytes (the same as `dropping_input`).
+            CuePrefetch::Fetching { flushed: false, .. } => true,
+            // Reading the Cues element: parse it (emit nothing); once
+            // the index is populated, seek to the real target Cluster.
+            CuePrefetch::Fetching {
+                flushed: true,
+                target_pts_ns,
+            } => {
+                demux.push_data(slice);
+                if !demux.cues().is_empty() {
+                    let off = demux.cue_seek_offset(target_pts_ns).unwrap_or(0);
+                    seek.begin_indexed_seek(target_pts_ns, off);
+                    *self = CuePrefetch::Idle;
+                }
+                true
+            }
+            CuePrefetch::Idle => false,
+        }
+    }
+
+    fn take_flush(&mut self, demux: &mut MatroskaDemuxer) -> bool {
+        let CuePrefetch::Fetching {
+            target_pts_ns,
+            flushed: false,
+        } = *self
+        else {
+            return false;
+        };
+        *self = CuePrefetch::Fetching {
+            target_pts_ns,
+            flushed: true,
+        };
+        demux.reset_keeping_tracks();
+        true
+    }
+}
+
 /// Demuxes a Matroska / WebM byte stream into one selected elementary stream.
 ///
 /// # Example
@@ -180,11 +256,6 @@ pub struct MkvDemux {
     /// Whether the selected track's `CodecPrivate` has been forwarded in-band,
     /// once, before its first frame (see [`config_headers`]). Re-armed on a flush.
     config_sent: bool,
-    /// Clones of the seek controllers: the `Cues` prefetch consumes the app
-    /// seek and drives the two-hop upstream byte-seek directly, so it needs the
-    /// same channels `seek` holds. `None` unless `with_seek` wired them.
-    app: Option<SeekController>,
-    upstream: Option<SeekController>,
     /// `Cues`-prefetch state. `Idle` outside a prefetch.
     prefetch: CuePrefetch,
     presented: Segment,
@@ -211,8 +282,6 @@ impl MkvDemux {
             stream_select: None,
             seek: DemuxSeek::default(),
             config_sent: false,
-            app: None,
-            upstream: None,
             prefetch: CuePrefetch::Idle,
             presented: Segment::new(),
         }
@@ -226,43 +295,6 @@ impl MkvDemux {
     pub fn with_seek(mut self, app: SeekController, upstream: SeekController) -> Self {
         AsyncElement::set_seek(&mut self, app, upstream);
         self
-    }
-
-    /// Service a pending app seek. Three paths, cheapest first:
-    /// `Cues` already parsed -> seek straight to the target Cluster; only a
-    /// `SeekHead` locating `Cues` -> prefetch them (byte-seek to `Cues`, then to
-    /// the target); neither -> re-scan from offset 0. A no-op while a seek or
-    /// prefetch is already in flight, or with no pending app seek.
-    fn poll_seek(&mut self) {
-        if self.prefetch != CuePrefetch::Idle || self.seek.is_seeking() {
-            return;
-        }
-        match &self.app {
-            Some(app) if app.has_pending() => {}
-            _ => return,
-        }
-        if !self.demux.cues().is_empty() {
-            // Index known: seek directly to the target Cluster.
-            let demux = &self.demux;
-            self.seek.poll_request_indexed(|t| demux.cue_seek_offset(t));
-        } else if let (Some(cues_off), Some(stream_start_ns)) =
-            (self.demux.cue_index_offset(), self.seek.stream_start_ns())
-        {
-            // Index located but not parsed: prefetch it before the real seek.
-            if let Some(upstream) = &self.upstream {
-                if let Some(seek) = self.seek.take_app_seek() {
-                    upstream.seek(Seek::flush_to(cues_off));
-                    self.prefetch = CuePrefetch::Fetching {
-                        target_pts_ns: seek.start.saturating_add(stream_start_ns),
-                        flushed: false,
-                    };
-                }
-            }
-        } else {
-            // No index at all, or no first frame yet to count the target from:
-            // re-scan from the start (M364).
-            self.seek.poll_request_indexed(|_| None);
-        }
     }
 
     /// Reset the parser for a discontinuity (a `Flush` / seek): drop the
@@ -761,8 +793,6 @@ impl AsyncElement for MkvDemux {
     }
 
     fn set_seek(&mut self, app: SeekController, upstream: SeekController) {
-        self.app = Some(app.clone());
-        self.upstream = Some(upstream.clone());
         self.seek.with(app, upstream);
     }
 
@@ -831,31 +861,17 @@ impl AsyncElement for MkvDemux {
             // SeekHead-located Cues prefetch, or re-scan from 0). Until the
             // resulting flush returns, input is dropped so no stale frames emit.
             self.seek.hold_at_segment_end().await;
-            self.poll_seek();
+            self.prefetch.poll(&mut self.seek, &self.demux);
             match packet {
                 PipelinePacket::DataFrame(frame) => {
                     let slice = frame
                         .domain
                         .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
-                    match self.prefetch {
-                        // Awaiting the prefetch byte-seek's flush: drop in-flight
-                        // pre-seek bytes (the same as `dropping_input`).
-                        CuePrefetch::Fetching { flushed: false, .. } => return Ok(()),
-                        // Reading the Cues element: parse it (emit nothing); once
-                        // the index is populated, seek to the real target Cluster.
-                        CuePrefetch::Fetching {
-                            flushed: true,
-                            target_pts_ns,
-                        } => {
-                            self.demux.push_data(slice);
-                            if !self.demux.cues().is_empty() {
-                                let off = self.demux.cue_seek_offset(target_pts_ns).unwrap_or(0);
-                                self.seek.begin_indexed_seek(target_pts_ns, off);
-                                self.prefetch = CuePrefetch::Idle;
-                            }
-                            return Ok(());
-                        }
-                        CuePrefetch::Idle => {}
+                    if self
+                        .prefetch
+                        .take_bytes(&mut self.seek, &mut self.demux, slice)
+                    {
+                        return Ok(());
                     }
                     if self.seek.dropping_input() {
                         return Ok(());
@@ -872,16 +888,7 @@ impl AsyncElement for MkvDemux {
                 // ask for is an upstream discontinuity: reset outright, since the
                 // new bytes may be anything.
                 PipelinePacket::Flush => {
-                    if let CuePrefetch::Fetching {
-                        target_pts_ns,
-                        flushed: false,
-                    } = self.prefetch
-                    {
-                        self.prefetch = CuePrefetch::Fetching {
-                            target_pts_ns,
-                            flushed: true,
-                        };
-                        self.demux.reset_keeping_tracks();
+                    if self.prefetch.take_flush(&mut self.demux) {
                         return Ok(());
                     }
                     let ours = self.seek.dropping_input();
@@ -909,7 +916,7 @@ impl AsyncElement for MkvDemux {
                     if self.seek.takes_seeks_after_end() {
                         out.push(PipelinePacket::Eos).await?;
                         self.seek.wait_for_seek_or_shutdown().await;
-                        self.poll_seek();
+                        self.prefetch.poll(&mut self.seek, &self.demux);
                     }
                 }
                 // ByteStream caps carry no geometry; nothing to forward.
@@ -1683,6 +1690,7 @@ pub struct MkvDemuxN {
     /// running time 0, so the ports share one running-time origin.
     segment: SharedSegment,
     seek: DemuxSeek<crate::matroska::MkvFrame>,
+    prefetch: CuePrefetch,
 }
 
 impl MkvDemuxN {
@@ -1712,6 +1720,7 @@ impl MkvDemuxN {
             stream_select: None,
             emitted: 0,
             seek: DemuxSeek::default(),
+            prefetch: CuePrefetch::Idle,
         }
     }
 
@@ -1969,17 +1978,19 @@ impl MultiOutputElement for MkvDemuxN {
     ) -> Self::ProcessFuture<'a> {
         Box::pin(async move {
             self.seek.hold_at_segment_end().await;
-            let demux = &self.demux;
-            self.seek
-                .poll_request_indexed(|target_pts_ns| demux.cue_seek_offset(target_pts_ns));
+            self.prefetch.poll(&mut self.seek, &self.demux);
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    if self.seek.dropping_input() {
-                        return Ok(());
-                    }
                     let slice = frame
                         .domain
                         .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
+                    if self
+                        .prefetch
+                        .take_bytes(&mut self.seek, &mut self.demux, slice)
+                        || self.seek.dropping_input()
+                    {
+                        return Ok(());
+                    }
                     self.demux.push_data(slice);
                     if self.bus.is_some() {
                         self.post_stream_collection();
@@ -1996,6 +2007,9 @@ impl MultiOutputElement for MkvDemuxN {
                 // Flush / Segment apply to every branch (the parser resets on a
                 // flush, as the single-output demuxer does).
                 PipelinePacket::Flush => {
+                    if self.prefetch.take_flush(&mut self.demux) {
+                        return Ok(());
+                    }
                     let rescan = self.seek.dropping_input() && !self.seek.keeps_state();
                     let forward = self.seek.on_flush();
                     if rescan {
@@ -2023,11 +2037,9 @@ impl MultiOutputElement for MkvDemuxN {
                 PipelinePacket::CapsChanged(_) => {}
                 // The runner broadcasts the single merged Eos to every port.
                 PipelinePacket::Eos => {
-                    if self
-                        .seek
-                        .eos_before_flush(self.seek.dropping_input())
-                        .await?
-                    {
+                    let awaiting_flush =
+                        self.seek.dropping_input() || self.prefetch != CuePrefetch::Idle;
+                    if self.seek.eos_before_flush(awaiting_flush).await? {
                         return Ok(());
                     }
                     self.demux.finish();
@@ -2035,6 +2047,7 @@ impl MultiOutputElement for MkvDemuxN {
                     self.seek
                         .end_ports_and_wait_for_seek(self.ports.len(), out)
                         .await?;
+                    self.prefetch.poll(&mut self.seek, &self.demux);
                 }
                 // future PipelinePacket variants: no-op.
                 _ => {}

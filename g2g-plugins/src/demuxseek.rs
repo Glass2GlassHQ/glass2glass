@@ -383,6 +383,12 @@ impl<U> DemuxSeek<U> {
     }
 
     // for a caller that repositions before the seek proper, as mkvdemux fetching its Cues does
+    pub(crate) fn seek_upstream(&self, offset: u64) {
+        if let Some(upstream) = &self.upstream {
+            upstream.seek(Seek::flush_to(offset));
+        }
+    }
+
     pub(crate) fn take_app_seek(&mut self) -> Option<Seek> {
         let duration_ns = self.duration_ns;
         let seek = self
@@ -638,7 +644,7 @@ impl<U> DemuxSeek<U> {
     }
 
     pub(crate) async fn end_ports_and_wait_for_seek(
-        &mut self,
+        &self,
         port_count: usize,
         out: &mut dyn MultiOutputSink,
     ) -> Result<(), G2gError> {
@@ -649,7 +655,6 @@ impl<U> DemuxSeek<U> {
             out.push_to(port, PipelinePacket::Eos).await?;
         }
         self.wait_for_seek_or_shutdown().await;
-        self.poll_request();
         Ok(())
     }
 

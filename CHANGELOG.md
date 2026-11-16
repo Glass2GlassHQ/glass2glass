@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2348: `MkvDemuxN` seeks through `Cues` a `SeekHead` locates, `OggDemuxN` guesses the landing byte offset for audio, and AVI keyframes after a seek carry the H.264 parameter sets.
 - M2347: Every multi-output demuxer seeks across all its ports, so A/V files in TS, Matroska, FLV, Ogg, MPEG-PS, AVI and MP4 seek in `playbin`.
 - M2346: `g2g-player`, a libmpv-style player that draws video into the host's OpenGL framebuffer or wgpu texture, with demuxers reporting their duration and seeking through demux nodes.
 - M2345: Pausing and resuming a pipeline no longer drops the frames after the resume as late.

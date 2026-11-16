@@ -28,7 +28,9 @@ use g2g_core::memory::MemoryDomain;
 use g2g_core::runtime::{SeekController, SourceLoop};
 use g2g_core::{ByteStreamEncoding, Caps, G2gError, Seek};
 use g2g_plugins::filesrc::FileSrc;
-use g2g_plugins::oggdemux::OggDemux;
+use g2g_plugins::ogg::OggCodec;
+use g2g_plugins::oggdemux::{OggDemux, OggDemuxN, OggPort};
+use g2g_plugins::oneport::OnePortElement;
 
 use std::path::PathBuf;
 
@@ -196,8 +198,8 @@ impl OutputSink for Capture {
 /// (the evidence that a seek did not re-read the file), records every byte
 /// offset the demuxer asked the source to seek to, and arms the app seek once
 /// enough of the file has played for the demuxer to have anchors.
-struct Chain<'a> {
-    demux: &'a mut OggDemux,
+struct Chain<'a, D> {
+    demux: &'a mut D,
     capture: &'a mut Capture,
     bytes: u64,
     arm: Option<(u64, u64, SeekController)>,
@@ -207,7 +209,7 @@ struct Chain<'a> {
     byte: SeekController,
     requested: Vec<u64>,
 }
-impl OutputSink for Chain<'_> {
+impl<D: AsyncElement> OutputSink for Chain<'_, D> {
     fn poll_push(
         &mut self,
         cx: &mut core::task::Context<'_>,
@@ -221,15 +223,13 @@ impl OutputSink for Chain<'_> {
         {
             self.bytes += s.as_slice().len() as u64;
         }
-        let mut fut = self.demux.process(packet, self.capture);
-        match fut.as_mut().poll(cx) {
+        match core::pin::pin!(self.demux.process(packet, self.capture)).poll(cx) {
             core::task::Poll::Ready(Ok(())) => {}
             core::task::Poll::Ready(Err(e)) => return core::task::Poll::Ready(Err(e)),
             // In-memory test elements never block: their only awaits are
             // pushes into always-ready capture sinks.
             core::task::Poll::Pending => panic!("element future did not resolve in one poll"),
         }
-        drop(fut);
         if let Some(seek) = self.byte.take_seek(Ok) {
             self.requested.push(seek.start);
             self.byte.seek(seek);
@@ -249,7 +249,7 @@ impl OutputSink for Chain<'_> {
 /// the last flush, how many bytes the source read in total, and every byte
 /// offset the demuxer asked the source to seek to.
 async fn play(path: &PathBuf, seek: Option<(u64, u64)>, chunk: usize) -> (Capture, u64, Vec<u64>) {
-    play_stream(path, seek, chunk, "opus").await
+    play_through(stream_demux("opus"), path, seek, chunk).await
 }
 
 async fn play_stream(
@@ -257,6 +257,31 @@ async fn play_stream(
     seek: Option<(u64, u64)>,
     chunk: usize,
     stream: &str,
+) -> (Capture, u64, Vec<u64>) {
+    play_through(stream_demux(stream), path, seek, chunk).await
+}
+
+fn stream_demux(stream: &str) -> OggDemux {
+    let mut demux = OggDemux::new();
+    demux
+        .set_property("stream", g2g_core::PropValue::Str(stream.into()))
+        .expect("stream property");
+    demux
+}
+
+fn one_port_multi_output_demux() -> OnePortElement<OggDemuxN> {
+    let port = OggPort {
+        stream: 0,
+        codec: OggCodec::Opus,
+    };
+    OnePortElement::wrap(OggDemuxN::new(vec![port]), "oggdemux")
+}
+
+async fn play_through(
+    mut demux: impl AsyncElement,
+    path: &PathBuf,
+    seek: Option<(u64, u64)>,
+    chunk: usize,
 ) -> (Capture, u64, Vec<u64>) {
     let byte = SeekController::new();
     let time = SeekController::new();
@@ -269,10 +294,7 @@ async fn play_stream(
     )
     .with_chunk_size(chunk)
     .with_seek(byte.clone());
-    let mut demux = OggDemux::new().with_seek(time.clone(), byte.clone());
-    demux
-        .set_property("stream", g2g_core::PropValue::Str(stream.into()))
-        .expect("stream property");
+    demux.set_seek(time.clone(), byte.clone());
 
     let caps = {
         let c: Pin<Box<dyn Future<Output = _>>> = Box::pin(src.intercept_caps());
@@ -404,14 +426,27 @@ async fn oggdemux_seeks_to_the_target_packet_over_filesrc() {
 /// from zero.
 #[tokio::test]
 async fn oggdemux_guessed_seek_matches_a_full_scan_without_rereading() {
-    let path = temp_path("guess");
+    guessed_seek_matches_a_full_scan_without_rereading(|| stream_demux("opus"), "guess").await;
+}
+
+#[tokio::test]
+async fn the_multi_output_demuxer_guesses_the_seek_landing_too() {
+    guessed_seek_matches_a_full_scan_without_rereading(one_port_multi_output_demux, "guess-n")
+        .await;
+}
+
+async fn guessed_seek_matches_a_full_scan_without_rereading<D: AsyncElement>(
+    demux: impl Fn() -> D,
+    file_name: &str,
+) {
+    let path = temp_path(file_name);
     // 3000 packets of 20 ms = 60 s, four to a page: ~620 kB.
     let count = 3000u32;
     std::fs::write(&path, opus_chain(0x0BAD_F00D, 0, count, 4, 200)).unwrap();
     let file_len = std::fs::metadata(&path).unwrap().len();
 
     // Reference: the whole file, no seek.
-    let (reference, scanned, _) = play(&path, None, 8 * 1024).await;
+    let (reference, scanned, _) = play_through(demux(), &path, None, 8 * 1024).await;
     assert_eq!(
         reference.frames.len() as u32,
         count + 1,
@@ -421,7 +456,8 @@ async fn oggdemux_guessed_seek_matches_a_full_scan_without_rereading() {
 
     // Seek to 50 s, armed once ~96 kB has played (enough for two anchors).
     let target_ns = 50 * 1_000_000_000;
-    let (seeked, bytes, _) = play(&path, Some((target_ns, 96 * 1024)), 8 * 1024).await;
+    let (seeked, bytes, _) =
+        play_through(demux(), &path, Some((target_ns, 96 * 1024)), 8 * 1024).await;
 
     assert_eq!(seeked.flushes, 1, "one byte-seek, no fallback re-scan");
     assert_eq!(

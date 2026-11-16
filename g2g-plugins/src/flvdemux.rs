@@ -841,6 +841,7 @@ impl MultiOutputElement for FlvDemuxN {
                     self.seek
                         .end_ports_and_wait_for_seek(self.emitters.len(), out)
                         .await?;
+                    self.seek.poll_request();
                 }
                 _ => {}
             }

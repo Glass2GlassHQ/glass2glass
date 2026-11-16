@@ -61,7 +61,7 @@ use alloc::vec::Vec;
 
 use g2g_core::caps::framerate_q16_from_fraction;
 use g2g_core::frame::Frame;
-use g2g_core::log::{short_type_name, LogName, LogSource};
+use g2g_core::log::{short_type_name, LogName, LogSource, Target};
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{ElementSeekRoute, PadKind, SeekController};
 use g2g_core::time::ticks_to_ns;
@@ -163,6 +163,153 @@ struct GuessedSeek {
     chain: u32,
 }
 
+#[derive(Debug, Default)]
+struct OggSeekGuess {
+    /// Byte offset of the next source byte: the seek guess is
+    /// proportional in bytes, so the element tracks where in the file it reads.
+    read_offset: u64,
+    /// Earliest and latest observed `(parsed byte offset, stream time ns)`, the
+    /// pair a seek guess interpolates through.
+    anchor_first: Option<(u64, u64)>,
+    anchor_last: Option<(u64, u64)>,
+    /// The byte-offset guess in flight, if any.
+    guess: GuessedSeek,
+}
+
+impl OggSeekGuess {
+    /// Service a pending app time seek. Ogg carries no index, so the
+    /// byte offset to land at is guessed proportionally: the granule positions
+    /// seen so far give `(byte offset, stream time)` anchors, and the target
+    /// interpolates through them. The landing is deliberately early, and the
+    /// scan from it to the last packet at/before the target delivers exactly
+    /// what a re-scan from the file start would. Without usable anchors (too
+    /// little played, a chained file, headers not yet in hand) it re-scans from
+    /// offset `0`.
+    fn poll<U>(&mut self, seek: &mut DemuxSeek<U>, chain: u32, resumable: bool) {
+        if seek.is_seeking() {
+            return;
+        }
+        let anchors = self
+            .anchor_first
+            .zip(self.anchor_last)
+            .filter(|_| resumable);
+        let stream_len = seek.upstream_len();
+        let mut chosen: Option<(u64, u64)> = None;
+        let started = seek.poll_request_indexed(|target_ns| {
+            let (first, last) = anchors?;
+            let offset = guess_offset(first, last, target_ns, stream_len)?;
+            chosen = Some((target_ns, offset));
+            Some(offset)
+        });
+        if !started {
+            return;
+        }
+        self.guess = match chosen {
+            Some((target_ns, offset)) => GuessedSeek {
+                landing: Some(offset),
+                attempts: 1,
+                target_ns,
+                chain,
+            },
+            None => GuessedSeek::default(),
+        };
+    }
+
+    fn note_read(&mut self, bytes: usize) {
+        self.read_offset = self.read_offset.saturating_add(bytes as u64);
+    }
+
+    /// Note where the parse has reached, as the `(byte offset, stream time)`
+    /// pair a later seek guess interpolates through. Only while playing
+    /// normally: mid-seek the two are not the same position.
+    fn note_anchor<U>(&mut self, seek: &DemuxSeek<U>, demux: &OggDemuxer, time_ns: u64) {
+        if seek.is_seeking() || demux.chain() != 0 {
+            return;
+        }
+        let offset = self.read_offset.saturating_sub(demux.buffered() as u64);
+        if time_ns == 0 || offset == 0 {
+            return;
+        }
+        if self.anchor_first.is_none() {
+            self.anchor_first = Some((offset, time_ns));
+        }
+        self.anchor_last = Some((offset, time_ns));
+    }
+
+    /// Whether a landing that cannot serve the seek has been reached: it left
+    /// the physical stream that was resumed (a chained file), or it is scanning
+    /// through a region with no parseable page.
+    fn landing_lost<U>(
+        &self,
+        seek: &DemuxSeek<U>,
+        demux: &OggDemuxer,
+        awaiting_anchor: bool,
+    ) -> bool {
+        if !seek.is_seeking() || self.guess.landing.is_none() {
+            return false;
+        }
+        if demux.foreign_page() || demux.chain() != self.guess.chain {
+            return true;
+        }
+        let scanned = self
+            .read_offset
+            .saturating_sub(self.guess.landing.unwrap_or(0));
+        awaiting_anchor && scanned > RESUME_SCAN_LIMIT
+    }
+
+    fn landed_past_target(&self, at_ns: u64) -> bool {
+        self.guess.landing.is_some() && at_ns > self.guess.target_ns
+    }
+
+    /// Re-seek after a landing that cannot serve the target. `landed` is the
+    /// stream time the landing turned out to be at, when known: it makes one
+    /// corrected guess possible (the same interpolation against a true point
+    /// this time). Otherwise, and after the correction, re-scan from the file
+    /// start, which always works.
+    fn reseek<U>(&mut self, seek: &mut DemuxSeek<U>, landed: Option<u64>) {
+        let target_ns = self.guess.target_ns;
+        let corrected = match (self.guess.landing, landed, self.anchor_first) {
+            (Some(landing), Some(at), Some(first)) if self.guess.attempts < MAX_GUESSES => {
+                guess_offset(first, (landing, at), target_ns, seek.upstream_len())
+                    .filter(|off| *off < landing)
+            }
+            _ => None,
+        };
+        match corrected {
+            Some(offset) => {
+                g2g_debug!(
+                    Target::category("oggdemux"),
+                    "seek guess landed past {target_ns} ns, retrying at {offset}"
+                );
+                self.guess.landing = Some(offset);
+                self.guess.attempts = self.guess.attempts.saturating_add(1);
+                seek.begin_seek_at(target_ns, offset, true);
+            }
+            None => {
+                g2g_debug!(
+                    Target::category("oggdemux"),
+                    "seek guess abandoned, re-scanning from the start"
+                );
+                self.guess = GuessedSeek::default();
+                seek.begin_seek_at(target_ns, 0, false);
+            }
+        }
+    }
+
+    fn on_flush(&mut self, ours: bool) {
+        if ours {
+            self.read_offset = self.guess.landing.unwrap_or(0);
+            return;
+        }
+        // An upstream discontinuity we did not ask for: the byte
+        // position is no longer known, so the anchors go too.
+        *self = Self {
+            guess: self.guess,
+            ..Self::default()
+        };
+    }
+}
+
 /// Demuxes an Ogg byte stream into one of its elementary streams.
 ///
 /// # Example
@@ -192,15 +339,7 @@ pub struct OggDemux {
     /// Seek support: app time seeks drive an upstream byte-seek and a
     /// re-sync. Inert unless `with_seek` wired the controllers.
     seek: DemuxSeek<(Vec<u8>, FrameTiming)>,
-    /// Byte offset of the next source byte: the seek guess is
-    /// proportional in bytes, so the element tracks where in the file it reads.
-    read_offset: u64,
-    /// Earliest and latest observed `(parsed byte offset, stream time ns)`, the
-    /// pair a seek guess interpolates through.
-    anchor_first: Option<(u64, u64)>,
-    anchor_last: Option<(u64, u64)>,
-    /// The byte-offset guess in flight, if any.
-    guess: GuessedSeek,
+    guess: OggSeekGuess,
     /// Runner-assigned instance name plus any category override, for logging.
     log_name: LogName,
 }
@@ -223,10 +362,7 @@ impl OggDemux {
             output_kind: PadKind::Any,
             emitter: StreamEmitter::default(),
             seek: DemuxSeek::default(),
-            read_offset: 0,
-            anchor_first: None,
-            anchor_last: None,
-            guess: GuessedSeek::default(),
+            guess: OggSeekGuess::default(),
             log_name: LogName::new(),
         }
     }
@@ -240,127 +376,26 @@ impl OggDemux {
         self
     }
 
-    /// Service a pending app time seek. Ogg carries no index, so the
-    /// byte offset to land at is guessed proportionally: the granule positions
-    /// seen so far give `(byte offset, stream time)` anchors, and the target
-    /// interpolates through them. The landing is deliberately early, and the
-    /// scan from it to the last packet at/before the target delivers exactly
-    /// what a re-scan from the file start would. Without usable anchors (too
-    /// little played, a chained file, headers not yet in hand) it re-scans from
-    /// offset `0`.
-    fn poll_seek(&mut self) {
-        if self.seek.is_seeking() {
-            return;
-        }
-        // Planned before the request is taken: `poll_request_indexed` borrows
-        // the seek state, so its closure cannot look at the rest of the element.
-        let anchors = self.guess_anchors();
-        let stream_len = self.seek.upstream_len();
-        let chain = self.demux.chain();
-        let mut chosen: Option<(u64, u64)> = None;
-        let started = self.seek.poll_request_indexed(|target_ns| {
-            let (first, last) = anchors?;
-            let offset = guess_offset(first, last, target_ns, stream_len)?;
-            chosen = Some((target_ns, offset));
-            Some(offset)
-        });
-        if !started {
-            return;
-        }
-        self.guess = match chosen {
-            Some((target_ns, offset)) => GuessedSeek {
-                landing: Some(offset),
-                attempts: 1,
-                target_ns,
-                chain,
-            },
-            None => GuessedSeek::default(),
-        };
-    }
-
-    /// The two anchors a seek guess interpolates through, or `None` when this
-    /// file cannot take one: a chained file (a chain boundary breaks a single
-    /// global proportion, so it re-scans), a stream whose codec headers are not
-    /// in hand (a mid-file landing has no beginning-of-stream page to re-read
-    /// them from), or nothing played yet.
-    fn guess_anchors(&self) -> Option<((u64, u64), (u64, u64))> {
-        if self.demux.chain() != 0 {
-            return None;
-        }
-        let stream = &self.demux.streams()[self.selected()?];
-        let codec = stream.info()?.codec;
-        if in_band_headers(codec, stream).is_empty() || !self.emitter.can_resume(codec) {
-            return None;
-        }
-        Some((self.anchor_first?, self.anchor_last?))
-    }
-
-    /// Note where the parse has reached, as the `(byte offset, stream time)`
-    /// pair a later seek guess interpolates through. Only while playing
-    /// normally: mid-seek the two are not the same position.
-    fn note_anchor(&mut self) {
-        if self.seek.is_seeking() || self.demux.chain() != 0 {
-            return;
-        }
-        let time_ns = self.emitter.position_ns();
-        let offset = self
-            .read_offset
-            .saturating_sub(self.demux.buffered() as u64);
-        if time_ns == 0 || offset == 0 {
-            return;
-        }
-        if self.anchor_first.is_none() {
-            self.anchor_first = Some((offset, time_ns));
-        }
-        self.anchor_last = Some((offset, time_ns));
-    }
-
-    /// Whether a landing that cannot serve the seek has been reached: it left
-    /// the physical stream that was resumed (a chained file), or it is scanning
-    /// through a region with no parseable page.
-    fn landing_lost(&self) -> bool {
-        if !self.seek.is_seeking() || self.guess.landing.is_none() {
+    /// Whether a seek can land mid-file instead of re-scanning: not in a
+    /// chained file (a chain boundary breaks a single global proportion), and
+    /// not before the stream's codec headers are in hand (a mid-file landing has
+    /// no beginning-of-stream page to re-read them from).
+    fn resumable(&self) -> bool {
+        let Some(stream) = self.selected().map(|i| &self.demux.streams()[i]) else {
             return false;
-        }
-        if self.demux.foreign_page() || self.demux.chain() != self.guess.chain {
-            return true;
-        }
-        let scanned = self
-            .read_offset
-            .saturating_sub(self.guess.landing.unwrap_or(0));
-        self.emitter.awaiting_anchor() && scanned > RESUME_SCAN_LIMIT
+        };
+        let Some(codec) = stream.info().map(|info| info.codec) else {
+            return false;
+        };
+        self.demux.chain() == 0
+            && !in_band_headers(codec, stream).is_empty()
+            && self.emitter.can_resume(codec)
     }
 
-    /// Re-seek after a landing that cannot serve the target. `landed` is the
-    /// stream time the landing turned out to be at, when known: it makes one
-    /// corrected guess possible (the same interpolation against a true point
-    /// this time). Otherwise, and after the correction, re-scan from the file
-    /// start, which always works.
-    fn reseek(&mut self, landed: Option<u64>) {
-        let target_ns = self.guess.target_ns;
-        let corrected = match (self.guess.landing, landed, self.anchor_first) {
-            (Some(landing), Some(at), Some(first)) if self.guess.attempts < MAX_GUESSES => {
-                guess_offset(first, (landing, at), target_ns, self.seek.upstream_len())
-                    .filter(|off| *off < landing)
-            }
-            _ => None,
-        };
-        match corrected {
-            Some(offset) => {
-                g2g_debug!(
-                    self,
-                    "seek guess landed past {target_ns} ns, retrying at {offset}"
-                );
-                self.guess.landing = Some(offset);
-                self.guess.attempts = self.guess.attempts.saturating_add(1);
-                self.seek.begin_seek_at(target_ns, offset, true);
-            }
-            None => {
-                g2g_debug!(self, "seek guess abandoned, re-scanning from the start");
-                self.guess = GuessedSeek::default();
-                self.seek.begin_seek_at(target_ns, 0, false);
-            }
-        }
+    fn poll_seek(&mut self) {
+        let resumable = self.resumable();
+        self.guess
+            .poll(&mut self.seek, self.demux.chain(), resumable);
     }
 
     /// Reset the parser for a discontinuity (a `Flush` / seek): drop the Ogg
@@ -541,11 +576,12 @@ impl OggDemux {
             // re-scan would, so nothing of this batch goes out (the codec
             // headers included: the re-seek sends them again) and the seek
             // starts over closer to the target.
-            if let Some(at) = ready.resumed_at {
-                if self.guess.landing.is_some() && at > self.guess.target_ns {
-                    self.reseek(Some(at));
-                    return Ok(());
-                }
+            if let Some(at) = ready
+                .resumed_at
+                .filter(|&at| self.guess.landed_past_target(at))
+            {
+                self.guess.reseek(&mut self.seek, Some(at));
+                return Ok(());
             }
             if let Some(caps) = ready.caps {
                 out.push(PipelinePacket::CapsChanged(caps)).await?;
@@ -1214,13 +1250,18 @@ impl AsyncElement for OggDemux {
                     let slice = frame
                         .domain
                         .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
-                    self.read_offset = self.read_offset.saturating_add(slice.len() as u64);
+                    self.guess.note_read(slice.len());
                     self.demux.push_data(slice);
                     self.emit_ready(out).await?;
-                    if self.landing_lost() {
-                        self.reseek(None);
+                    let awaiting_anchor = self.emitter.awaiting_anchor();
+                    if self
+                        .guess
+                        .landing_lost(&self.seek, &self.demux, awaiting_anchor)
+                    {
+                        self.guess.reseek(&mut self.seek, None);
                     } else {
-                        self.note_anchor();
+                        let time_ns = self.emitter.position_ns();
+                        self.guess.note_anchor(&self.seek, &self.demux, time_ns);
                     }
                 }
                 // The upstream byte-seek's flush: re-sync from the repositioned
@@ -1230,15 +1271,7 @@ impl AsyncElement for OggDemux {
                 PipelinePacket::Flush => {
                     let ours = self.seek.dropping_input();
                     let forward = self.seek.on_flush();
-                    if ours {
-                        self.read_offset = self.guess.landing.unwrap_or(0);
-                    } else {
-                        // An upstream discontinuity we did not ask for: the byte
-                        // position is no longer known, so the anchors go too.
-                        self.read_offset = 0;
-                        self.anchor_first = None;
-                        self.anchor_last = None;
-                    }
+                    self.guess.on_flush(ours);
                     if ours && self.seek.keeps_state() {
                         self.demux.resume_mid_stream();
                         self.emitter.begin_resume();
@@ -1435,6 +1468,7 @@ pub struct OggDemuxN {
     // a page's packets emit only once the whole page has parsed
     held_page_ns: Vec<Option<u64>>,
     seek: DemuxSeek<(Vec<u8>, FrameTiming)>,
+    guess: OggSeekGuess,
 }
 
 // twice ffmpeg's default page duration
@@ -1461,6 +1495,7 @@ impl OggDemuxN {
             emitted: 0,
             held_page_ns,
             seek: DemuxSeek::default(),
+            guess: OggSeekGuess::default(),
         }
     }
 
@@ -1469,6 +1504,31 @@ impl OggDemuxN {
     pub fn with_bus(mut self, bus: BusHandle) -> Self {
         self.bus = Some(bus);
         self
+    }
+
+    fn resumable(&self) -> bool {
+        let first_chain = self.demux.streams().iter().filter(|s| s.chain() == 0);
+        let port_resumes = |port: &OggPort, emitter: &StreamEmitter| {
+            let Some(stream) = first_chain.clone().find(|s| s.slot() == port.stream) else {
+                return false;
+            };
+            let Some(codec) = stream.info().map(|info| info.codec) else {
+                return false;
+            };
+            !in_band_headers(codec, stream).is_empty() && emitter.can_resume(codec)
+        };
+        self.demux.chain() == 0
+            && self
+                .ports
+                .iter()
+                .zip(&self.emitters)
+                .all(|(port, emitter)| port_resumes(port, emitter))
+    }
+
+    fn poll_seek(&mut self) {
+        let resumable = self.resumable();
+        self.guess
+            .poll(&mut self.seek, self.demux.chain(), resumable);
     }
 
     /// Number of output ports.
@@ -1599,7 +1659,7 @@ impl MultiOutputElement for OggDemuxN {
     ) -> Self::ProcessFuture<'a> {
         Box::pin(async move {
             self.seek.hold_at_segment_end().await;
-            self.seek.poll_request();
+            self.poll_seek();
             let ended = matches!(packet, PipelinePacket::Eos);
             match packet {
                 PipelinePacket::DataFrame(frame) => {
@@ -1609,13 +1669,23 @@ impl MultiOutputElement for OggDemuxN {
                     let slice = frame
                         .domain
                         .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
+                    self.guess.note_read(slice.len());
                     self.demux.push_data(slice);
                 }
                 PipelinePacket::Flush => {
+                    let ours = self.seek.dropping_input();
                     let forward = self.seek.on_flush();
-                    self.demux = OggDemuxer::new();
-                    for emitter in &mut self.emitters {
-                        emitter.reset();
+                    self.guess.on_flush(ours);
+                    if ours && self.seek.keeps_state() {
+                        self.demux.resume_mid_stream();
+                        for emitter in &mut self.emitters {
+                            emitter.begin_resume();
+                        }
+                    } else {
+                        self.demux = OggDemuxer::new();
+                        for emitter in &mut self.emitters {
+                            emitter.reset();
+                        }
                     }
                     if forward {
                         for port in 0..self.ports.len() {
@@ -1668,6 +1738,14 @@ impl MultiOutputElement for OggDemuxN {
                     continue;
                 }
                 let ready = self.emitters[port].step(&self.demux.streams()[index], packets);
+                // nothing of this batch goes out, the re-seek sends the codec headers again
+                if let Some(at) = ready
+                    .resumed_at
+                    .filter(|&at| self.guess.landed_past_target(at))
+                {
+                    self.guess.reseek(&mut self.seek, Some(at));
+                    return Ok(());
+                }
                 if self.held_page_ns[port].is_none() {
                     self.held_page_ns[port] = ready
                         .first_page_ns
@@ -1713,6 +1791,18 @@ impl MultiOutputElement for OggDemuxN {
                 self.seek
                     .end_ports_and_wait_for_seek(self.ports.len(), out)
                     .await?;
+                self.poll_seek();
+                return Ok(());
+            }
+            let awaiting_anchor = self.emitters.iter().any(StreamEmitter::awaiting_anchor);
+            if self
+                .guess
+                .landing_lost(&self.seek, &self.demux, awaiting_anchor)
+            {
+                self.guess.reseek(&mut self.seek, None);
+            } else {
+                let time_ns = self.emitters[0].position_ns();
+                self.guess.note_anchor(&self.seek, &self.demux, time_ns);
             }
             Ok(())
         })

@@ -2098,6 +2098,7 @@ impl MultiOutputElement for PsDemuxN {
                     self.seek
                         .end_ports_and_wait_for_seek(self.ports.len(), out)
                         .await?;
+                    self.seek.poll_request();
                 }
                 // The input's (byte-stream) CapsChanged is consumed: each port
                 // defines its own caps, announced per port above.

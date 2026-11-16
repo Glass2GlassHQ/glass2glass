@@ -17,7 +17,8 @@ use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::runtime::SeekController;
 use g2g_core::{ByteStreamEncoding, Caps, G2gError, Seek};
-use g2g_plugins::mkvdemux::{MkvDemux, MkvStream};
+use g2g_plugins::mkvdemux::{MkvDemux, MkvDemuxN, MkvStream};
+use g2g_plugins::oneport::OnePortElement;
 
 // --- minimal EBML/WebM builders ---
 fn vint(value: u64) -> Vec<u8> {
@@ -218,13 +219,21 @@ fn data_frame(bytes: &[u8]) -> PipelinePacket {
 
 #[tokio::test]
 async fn mkvdemux_prefetches_cues_via_seekhead_then_seeks() {
+    prefetches_cues_via_seekhead_then_seeks(MkvDemux::new().with_stream(MkvStream::Vp9)).await;
+}
+
+#[tokio::test]
+async fn the_multi_output_demuxer_prefetches_cues_via_seekhead_then_seeks() {
+    let demux = MkvDemuxN::new(vec![MkvStream::Vp9]);
+    prefetches_cues_via_seekhead_then_seeks(OnePortElement::wrap(demux, "mkvdemux")).await;
+}
+
+async fn prefetches_cues_via_seekhead_then_seeks(mut demux: impl AsyncElement) {
     let b = webm_with_seekhead();
 
     let byte = SeekController::new();
     let time = SeekController::new();
-    let mut demux = MkvDemux::new()
-        .with_stream(MkvStream::Vp9)
-        .with_seek(time.clone(), byte.clone());
+    demux.set_seek(time.clone(), byte.clone());
     demux
         .configure_pipeline(&Caps::ByteStream {
             encoding: ByteStreamEncoding::Matroska,
@@ -302,3 +311,4 @@ async fn mkvdemux_prefetches_cues_via_seekhead_then_seeks() {
         "re-synced from Cluster1's 120 ms keyframe after the SeekHead -> Cues -> target hops"
     );
 }
+

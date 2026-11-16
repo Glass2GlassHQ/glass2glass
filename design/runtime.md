@@ -782,8 +782,11 @@ emit it at EOS, so they take the seek through `DemuxSeek::with_held_stream`
 (`ElementSeekRoute::Buffered`): a seek pending while the file goes out stops the
 emission, and `replay_held_stream` flushes every port and emits the file again
 through the same per-port keyframe selection, with an end-relative edge counted
-from the duration `Mp4DemuxN` reads from `mvhd`. The multi-output `OggDemuxN`
-re-scans from offset 0, without the single-output element's byte-offset guess.
+from the duration `Mp4DemuxN` reads from `mvhd`. `MkvDemux` and `MkvDemuxN` share
+the `Cues` prefetch (`CuePrefetch`), and `OggDemux` and `OggDemuxN` share the
+byte-offset guess (`OggSeekGuess`), which `OggDemuxN` takes only when every port's
+stream can resume mid-file, an audio-only file, since VP8 and Theora are timed by
+counting frames from the start.
 Each demuxer uses its own keyframe signal: the container flag, or
 `annexb::au_is_keyframe` for TS whose units have none, while every audio packet is a
 resync point and `oggdemux` accumulates an Opus PTS from the TOC byte. Where the

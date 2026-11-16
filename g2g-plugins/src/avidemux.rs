@@ -41,7 +41,7 @@ use g2g_core::runtime::{ElementSeekRoute, SeekController};
 
 use crate::aacparse::{adts_from_asc, is_raw_aac_config};
 use crate::annexb::{
-    is_annex_b, length_prefixed_to_annexb, parse_avcc, prepend_param_sets, starts_with_param_set,
+    is_annex_b, length_prefixed_to_annexb, parse_avcc, prepend_param_sets, LatestParameterSets,
 };
 use crate::avi::{palette_change, parse, parse_streams, AviFile, AviStream, AviStreamKind};
 use crate::codectag::{
@@ -322,13 +322,19 @@ fn h264_config(stream: &AviStream) -> H264Config {
 /// ADTS where ADTS can carry its config, uncompressed video cut to its pixels,
 /// everything else untouched. `first` is set only for the stream's opening
 /// chunk. `None` drops an uncompressed frame too short for its geometry.
-fn deframe(stream: &AviStream, h264: &H264Config, data: &[u8], first: bool) -> Option<Vec<u8>> {
+fn deframe(
+    stream: &AviStream,
+    h264: &H264Config,
+    parameter_sets: &mut LatestParameterSets,
+    data: &[u8],
+    keyframe: bool,
+) -> Option<Vec<u8>> {
     Some(match &stream.kind {
         AviStreamKind::Video {
             codec: VideoCodec::H264,
             ..
         } => {
-            let mut annexb = match h264.nal_length_size {
+            let annexb = match h264.nal_length_size {
                 // The lengths come from the file, so a walk that does not consume
                 // the chunk exactly leaves the original bytes rather than
                 // emitting a mis-framed stream.
@@ -337,13 +343,11 @@ fn deframe(stream: &AviStream, h264: &H264Config, data: &[u8], first: bool) -> O
                 }
                 None => Vec::from(data),
             };
-            if first
-                && !h264.param_sets.is_empty()
-                && !starts_with_param_set(&annexb, VideoCodec::H264)
-            {
-                annexb = prepend_param_sets(&annexb, &h264.param_sets, VideoCodec::H264);
+            // a decoder starting at a later keyframe, after a seek, needs the sets the stream sent before it
+            if parameter_sets.refresh(VideoCodec::H264, &annexb) || !keyframe {
+                return Some(annexb);
             }
-            annexb
+            parameter_sets.prepend(VideoCodec::H264, &annexb)
         }
         AviStreamKind::Audio {
             format: AudioFormat::Aac,
@@ -436,6 +440,15 @@ fn emittable<'a>(
     let mut first = alloc::vec![true; file.streams.len()];
     let mut palette_changes: Vec<Vec<(u8, [u8; 3])>> = alloc::vec![Vec::new(); file.streams.len()];
     let h264_configs: Vec<H264Config> = file.streams.iter().map(h264_config).collect();
+    let mut parameter_sets: Vec<LatestParameterSets> = h264_configs
+        .iter()
+        .map(|config| {
+            let mut latest = LatestParameterSets::default();
+            let config_sets = prepend_param_sets(&[], &config.param_sets, VideoCodec::H264);
+            latest.refresh(VideoCodec::H264, &config_sets);
+            latest
+        })
+        .collect();
     file.chunks
         .iter()
         .filter(move |chunk| {
@@ -465,8 +478,9 @@ fn emittable<'a>(
             let payload = deframe(
                 stream,
                 &h264_configs[chunk.stream],
+                &mut parameter_sets[chunk.stream],
                 bytes,
-                first[chunk.stream],
+                chunk.keyframe,
             );
             let timing = FrameTiming {
                 pts_ns,
@@ -1230,6 +1244,62 @@ mod tests {
         // the change chunk takes no frame slot on the stream's clock
         let second_pts = emitted[1].timing.pts_ns;
         assert_eq!(second_pts, file.streams[0].timing(1, 1).0);
+    }
+
+    #[test]
+    fn a_later_keyframe_carries_the_parameter_sets_the_stream_sent_first() {
+        use crate::annexb::ANNEX_B_START_CODE;
+        let annexb = |nals: &[&[u8]]| -> Vec<u8> {
+            nals.iter()
+                .flat_map(|nal| ANNEX_B_START_CODE.iter().chain(nal.iter()).copied())
+                .collect()
+        };
+        let sps = [0x67u8, 0x42, 0x00, 0x1E];
+        let pps = [0x68u8, 0xCE, 0x3C, 0x80];
+        let idr = [0x65u8, 0x88];
+        let slice = [0x41u8, 0x9A];
+        let chunks = [
+            annexb(&[&sps, &pps, &idr]),
+            annexb(&[&slice]),
+            annexb(&[&idr]),
+        ];
+        let data = chunks.concat();
+        let mut at = 0;
+        let file = AviFile {
+            streams: vec![AviStream {
+                kind: AviStreamKind::Video {
+                    codec: VideoCodec::H264,
+                    width: 16,
+                    height: 16,
+                },
+                scale: 1,
+                rate: 25,
+                start: 0,
+                sample_size: 0,
+                codec_config: Vec::new(),
+            }],
+            chunks: chunks
+                .iter()
+                .map(|chunk| {
+                    let body = at..at + chunk.len();
+                    at = body.end;
+                    AviChunk {
+                        stream: 0,
+                        keyframe: chunk.ends_with(&idr),
+                        body,
+                        palette_change: false,
+                    }
+                })
+                .collect(),
+            ..AviFile::default()
+        };
+        let payloads: Vec<Vec<u8>> = emittable(&data, &file, &[0])
+            .map(|emitted| emitted.data)
+            .collect();
+        assert_eq!(
+            payloads,
+            [chunks[0].clone(), chunks[1].clone(), chunks[0].clone()]
+        );
     }
 
     #[test]

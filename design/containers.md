@@ -1017,6 +1017,12 @@ libavcodec needs to output an ER AAC frame. USAC decodes only on libavcodec 62
 same stream from the FLV sequence header, the AVI `strf` config and the
 Matroska `CodecPrivate`.
 
+An H.264 stream in AVI often sends its SPS and PPS only in its first chunk.
+`avidemux` keeps the latest of each (`annexb::LatestParameterSets`, seeded from an
+`strf` `avcC`) and prepends them to any keyframe that does not carry its own, as
+`matroskademux` does from `CodecPrivate`, so a decoder starting at a later
+keyframe after a seek can decode it.
+
 QuickTime PCM entries resolve to a layout (bits, float, signed, endian, packed),
 from the fourcc (`in24`, `in32`, `fl32` and `fl64`, with `enda` inside `wave`
 selecting little-endian) or from version 2 `lpcm` flags. A layout with no

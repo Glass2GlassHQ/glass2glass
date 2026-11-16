@@ -532,7 +532,6 @@ pub(crate) fn prepend_param_sets(
     out
 }
 
-#[cfg(feature = "std")]
 fn parameter_set_types(codec: VideoCodec) -> &'static [u8] {
     match codec {
         VideoCodec::H265 => &[32, 33, 34],
@@ -541,14 +540,12 @@ fn parameter_set_types(codec: VideoCodec) -> &'static [u8] {
 }
 
 // demuxed streams send the parameter sets only before their first frame
-#[cfg(feature = "std")]
 #[derive(Debug, Default)]
 pub(crate) struct LatestParameterSets {
     // the latest NAL units of each parameter-set type, in the codec's order
     by_type: Vec<Vec<Vec<u8>>>,
 }
 
-#[cfg(feature = "std")]
 impl LatestParameterSets {
     // returns whether `au` carries every parameter-set type
     pub(crate) fn refresh(&mut self, codec: VideoCodec, au: &[u8]) -> bool {
