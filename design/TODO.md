@@ -51,10 +51,6 @@ The plan is [remote.md](remote.md).
 
 - `AviDemuxN` reads a progressive file by byte offset instead of holding it
   whole until EOS, so playback starts before the file is read.
-- `Mp4DemuxN` byte-seeks past the `mdat` to a `moov` that follows it, then back,
-  so such a file streams too. A demux arm forwards the source's `Eos` to every
-  port when no app seek was taken, so the arm has to keep its ports open through
-  a byte-seek the demuxer starts on its own.
 - Duration from the TS, PS, Ogg, FLV and AVI demuxers.
 - Track selection and the `track-list` property.
 - guikit's controls: `keep-open` and `eof-reached`, `loadfile` `start=` and

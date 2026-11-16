@@ -252,16 +252,21 @@ impl SeekController {
         &self,
         accept: impl FnOnce(Seek) -> Result<Seek, SeekRefusal>,
     ) -> Option<Seek> {
-        let (seek, ticket) = self.inner.pending.lock().take()?;
+        let mut pending = self.inner.pending.lock();
+        let (seek, ticket) = pending.take()?;
         let seek = self.past_relayed_leading_bytes(seek);
-        match accept(seek) {
+        let accepted = accept(seek);
+        if let Ok(seek) = &accepted {
+            // `flushing_seeks_requested` reads the pending slot and the counts together under this lock
+            let mut counts = self.inner.seek_counts.lock();
+            counts.seeks_taken += 1;
+            if seek.is_flush() {
+                counts.flushing_seeks_taken += 1;
+            }
+        }
+        drop(pending);
+        match accepted {
             Ok(seek) => {
-                let mut counts = self.inner.seek_counts.lock();
-                counts.seeks_taken += 1;
-                if seek.is_flush() {
-                    counts.flushing_seeks_taken += 1;
-                }
-                drop(counts);
                 ticket.answer(SeekOutcome::Served);
                 Some(seek)
             }
@@ -453,6 +458,21 @@ impl SeekController {
         self.inner.seek_counts.lock().flushing_seeks_taken
     }
 
+    // the flushing seeks taken, plus one still pending, each answered by a Flush from the source
+    #[cfg(feature = "std")]
+    pub(crate) fn flushing_seeks_requested(&self) -> u64 {
+        let pending = self.inner.pending.lock();
+        let pending_flush = pending.as_ref().is_some_and(|(seek, _)| seek.is_flush());
+        let taken = self.inner.seek_counts.lock().flushing_seeks_taken;
+        taken + u64::from(pending_flush)
+    }
+
+    // this controller and its followers, in the order of `SeekTargets::all`
+    #[cfg(feature = "std")]
+    pub(crate) fn target_controllers(&self) -> impl Iterator<Item = &SeekController> {
+        core::iter::once(self).chain(self.inner.followers.iter())
+    }
+
     #[cfg(feature = "std")]
     pub(crate) fn mark_stream_ended(&self, flushing_seeks_taken: u64) {
         self.inner.seek_counts.lock().stream_ended_at = Some(flushing_seeks_taken);
@@ -469,7 +489,7 @@ impl SeekController {
         }
     }
 
-    fn upstream(&self) -> Option<SeekController> {
+    pub(crate) fn upstream(&self) -> Option<SeekController> {
         self.inner.upstream.lock().clone()
     }
 
@@ -580,17 +600,10 @@ impl SeekableNode {
             Self::Demuxer { demuxer, .. } => demuxer,
         }
     }
-
-    pub(crate) fn byte_source(self) -> Option<NodeId> {
-        match self {
-            Self::TimeSource(_) | Self::BufferedElement(_) => None,
-            Self::Demuxer { byte_source, .. } => Some(byte_source),
-        }
-    }
 }
 
 #[cfg(feature = "std")]
-fn upstream_node<N>(graph: &Graph<N>, node: NodeId) -> Option<NodeId> {
+pub(crate) fn upstream_node<N>(graph: &Graph<N>, node: NodeId) -> Option<NodeId> {
     Some(
         graph
             .edges()

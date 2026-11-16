@@ -737,7 +737,13 @@ controller counts, and the element that took it always pushes a `Flush` downstre
 `AviDemuxN` included for a seek it serves before its first sample. Each arm counts the
 `Flush` packets it has received, and an `Eos` that reaches an arm with fewer than the
 seeks taken is stale: the source sent it before the `Flush` of a seek already taken,
-so the arm drops it, and a decoder never drains frames the `Flush` would discard. Each
+so the arm drops it, and a decoder never drains frames the `Flush` would discard. A
+byte-stream demuxer and the relays in front of it count against the byte source's
+controller instead, its flushing seeks taken plus one still pending, since their
+`Flush` packets come from the byte source. That covers a byte seek the demuxer asks for
+on its own, to read an index at the end of the file: an `Eos` the source sent before
+that seek's `Flush`, or one the demuxer answered by asking for the seek, does not end
+its ports. Each
 sink downstream of the seekable node records its `Flush` count and whether an `Eos`
 came after its latest `Flush`. A future the runner drives next to the arms sees every
 such sink at a current `Eos` with no seek pending, marks `stream_ended()` on the

@@ -388,7 +388,9 @@ pub struct Mp4DemuxN {
     /// lands (so a live stream neither stalls until `Eos` nor grows unbounded). A
     /// *progressive* (non-fragmented) `moov`+`mdat` file streams by sample
     /// offset when a seekable byte source gives its length, and is otherwise
-    /// accumulated whole and parsed at `Eos`.
+    /// accumulated whole and parsed at `Eos`. A `moov` stored after the `mdat`
+    /// is read by seeking the byte source past the `mdat` and back, when the run
+    /// parks the source at the end of the stream.
     buf: Vec<u8>,
     /// The file's tracks, parsed once the `moov` is complete (shared by the
     /// progressive emit and the `Eos` whole-file parse).
@@ -448,6 +450,9 @@ pub struct Mp4DemuxN {
     seek: DemuxSeek<Sample>,
     duration_ns: Option<u64>,
     progressive: Option<ProgressiveStream>,
+    // the byte a seek this demuxer asked its byte source for lands on, input before that seek's Flush is dropped
+    own_seek_landing: Option<u64>,
+    read_moov_past_mdat: bool,
 }
 
 // no real fragment runs this long
@@ -646,6 +651,8 @@ impl Mp4DemuxN {
             seek: DemuxSeek::default(),
             duration_ns: None,
             progressive: None,
+            own_seek_landing: None,
+            read_moov_past_mdat: false,
         }
     }
 
@@ -769,6 +776,9 @@ impl Mp4DemuxN {
     }
 
     fn poll_seek(&mut self) {
+        if self.own_seek_landing.is_some() {
+            return;
+        }
         let (Some(stream), Some(tracks)) = (self.progressive.as_mut(), self.tracks.as_ref()) else {
             self.seek.poll_request();
             return;
@@ -939,6 +949,30 @@ impl Mp4DemuxN {
         parse_fragments_multi(data, tracks, base_offset, fragment_starts, None)
     }
 
+    // a source parked at the end of the stream can still seek back to the mdat after the moov is read
+    fn seek_past_leading_mdat(&mut self) {
+        let Some(stream_len) = self
+            .seek
+            .upstream_len()
+            .filter(|_| self.seek.takes_seeks_after_end())
+        else {
+            return;
+        };
+        let Some(mdat_end) = leading_mdat_end(&self.buf)
+            .and_then(|end| self.drained.checked_add(end as u64))
+            .filter(|end| *end < stream_len)
+        else {
+            return;
+        };
+        self.seek_byte_source(mdat_end);
+        self.read_moov_past_mdat = true;
+    }
+
+    fn seek_byte_source(&mut self, offset: u64) {
+        self.seek.seek_upstream(offset);
+        self.own_seek_landing = Some(offset);
+    }
+
     /// Make progress on the buffered bytes: learn the layout from the `moov`,
     /// then for a *fragmented* file emit every complete `moof`+`mdat` fragment that
     /// has landed and drain it, so captions / audio / video flow as segments arrive
@@ -954,6 +988,7 @@ impl Mp4DemuxN {
         // progressive, so keep accumulating. A fragmented file carries `mvex`.
         if self.fragmented.is_none() {
             let Some(moov) = find_box(&self.buf, b"moov") else {
+                self.seek_past_leading_mdat();
                 return Ok(());
             };
             let fragmented = find_box(moov, b"mvex").is_some() && !moov_holds_samples(moov);
@@ -978,6 +1013,14 @@ impl Mp4DemuxN {
             }
             self.fragmented = Some(fragmented);
             self.tracks = Some(tracks);
+            if self.read_moov_past_mdat {
+                let first_sample_offset = self
+                    .progressive
+                    .as_ref()
+                    .map_or(0, |stream| stream.lowest_offset_from[0]);
+                self.seek_byte_source(first_sample_offset);
+                return Ok(());
+            }
         }
         if let Some(mut stream) = self.progressive.take() {
             let tracks = self
@@ -1496,6 +1539,20 @@ fn presented_pts(samples: &[(u32, Sample)]) -> impl Iterator<Item = (u32, u64)> 
         .map(|(track_id, sample)| (*track_id, sample.pts_ns))
 }
 
+// the end of an mdat stored ahead of the moov, once the mdat's header is buffered
+fn leading_mdat_end(buf: &[u8]) -> Option<usize> {
+    let mut off = 0usize;
+    loop {
+        let rest = buf.get(off..)?;
+        let size = crate::mp4box::next_box_len(rest).ok().flatten()?;
+        match rest.get(4..8)? {
+            b"mdat" => return off.checked_add(size),
+            b"moov" | b"moof" => return None,
+            _ => off = off.checked_add(size)?,
+        }
+    }
+}
+
 /// The next complete top-level box at `buf[off..]`: its 4cc and total size (header
 /// plus payload), or `None` if fewer than the whole box is buffered yet, or the
 /// size field is malformed.
@@ -1565,7 +1622,7 @@ impl MultiOutputElement for Mp4DemuxN {
                 // landed (a fragmented file streams; a progressive one streams
                 // by sample offset or waits for Eos).
                 PipelinePacket::DataFrame(frame) => {
-                    if self.seek.dropping_input() {
+                    if self.seek.dropping_input() || self.own_seek_landing.is_some() {
                         return Ok(());
                     }
                     let slice = frame
@@ -1581,7 +1638,8 @@ impl MultiOutputElement for Mp4DemuxN {
                 // (non-fragmented) file parse the whole buffer now; the runner
                 // broadcasts the merged Eos to every port after this.
                 PipelinePacket::Eos => {
-                    let awaiting_flush = self.seek.dropping_input();
+                    let awaiting_flush =
+                        self.seek.dropping_input() || self.own_seek_landing.is_some();
                     if self.seek.eos_before_flush(awaiting_flush).await? {
                         return Ok(());
                     }
@@ -1600,6 +1658,11 @@ impl MultiOutputElement for Mp4DemuxN {
                 // parse and reads on from where it landed, any other restarts the
                 // file, so the layout resets.
                 PipelinePacket::Flush => {
+                    if let Some(landing) = self.own_seek_landing.take() {
+                        self.buf.clear();
+                        self.drained = landing;
+                        return Ok(());
+                    }
                     let landed = self.seek.dropping_input() && self.seek.keeps_state();
                     let forward = self.seek.on_flush();
                     self.buf.clear();

@@ -15,7 +15,7 @@ use crate::element::BoxFuture;
 use crate::error::G2gError;
 use crate::graph::{Graph, NodeId, NodeKind};
 use crate::log::{Target, RUNTIME_CATEGORY};
-use crate::runtime::seek::seek_targets;
+use crate::runtime::seek::{seek_targets, upstream_node, SeekableNode};
 use crate::runtime::{GraphNodeRef, SeekController};
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -68,6 +68,8 @@ impl SinkEndReport {
 #[derive(Debug)]
 pub(crate) struct ArmFlushCount {
     controller: SeekController,
+    // set for a demuxer and the relays in front of it, whose Flushes come from the byte source's seeks
+    byte_source: Option<SeekController>,
     flushes: u64,
 }
 
@@ -76,9 +78,12 @@ impl ArmFlushCount {
         self.flushes += 1;
     }
 
-    // an Eos sent before the Flush of a seek already taken, the stream continues after that Flush
+    // an Eos sent before the Flush of a seek already requested, the stream continues after that Flush
     pub(crate) fn eos_is_stale(&self) -> bool {
-        self.flushes < self.controller.flushing_seeks_taken()
+        match &self.byte_source {
+            Some(byte_source) => self.flushes < byte_source.flushing_seeks_requested(),
+            None => self.flushes < self.controller.flushing_seeks_taken(),
+        }
     }
 
     pub(crate) fn seeks_taken(&self) -> u64 {
@@ -92,6 +97,8 @@ pub(crate) struct SeekAfterEnd {
     run: Arc<SeekableRun>,
     // by node index: the seekable node, its byte source, and everything downstream
     participants: Vec<bool>,
+    // by node index: the controller of the byte source feeding a demuxer or relay
+    byte_sources: Vec<Option<SeekController>>,
     sink_slots: Vec<Option<usize>>,
 }
 
@@ -141,8 +148,21 @@ impl SeekAfterEnd {
                     .map(|edge| edge.dst.node),
             );
         }
-        for byte_source in targets.all().filter_map(|target| target.byte_source()) {
+        let mut byte_sources = alloc::vec![None; node_count];
+        for (target, target_controller) in targets.all().zip(controller.target_controllers()) {
+            let SeekableNode::Demuxer {
+                demuxer,
+                byte_source,
+            } = target
+            else {
+                continue;
+            };
             participants[byte_source.0 as usize] = true;
+            let mut byte_node = Some(demuxer);
+            while let Some(node) = byte_node.filter(|node| *node != byte_source) {
+                byte_sources[node.0 as usize] = target_controller.upstream();
+                byte_node = upstream_node(graph, node);
+            }
         }
         let mut sink_slots = alloc::vec![None; node_count];
         let mut sink_count = 0;
@@ -159,6 +179,7 @@ impl SeekAfterEnd {
                 sinks: (0..sink_count).map(|_| Mutex::default()).collect(),
             }),
             participants,
+            byte_sources,
             sink_slots,
         }))
     }
@@ -170,6 +191,7 @@ impl SeekAfterEnd {
     pub(crate) fn arm_flush_count(&self, node: NodeId) -> Option<ArmFlushCount> {
         self.participates(node).then(|| ArmFlushCount {
             controller: self.run.controller.clone(),
+            byte_source: self.byte_sources[node.0 as usize].clone(),
             flushes: 0,
         })
     }

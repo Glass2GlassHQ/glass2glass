@@ -1167,8 +1167,10 @@ fragment. A progressive file streams from its `stbl` index once the `moov` is
 parsed (`fmp4::ProgressiveTrackIndex`), each sample going out in decode order
 when its bytes arrive, if a seekable byte source published the stream length,
 which bounds the sample count, and the file has no `mvex` and no edit list that
-replays media. Any other file is read whole at EOS. A `moov` after the `mdat`
-still buffers the file until the `moov` arrives. `Mp4DemuxN` seeks by
+replays media. Any other file is read whole at EOS. When the run parks the
+source at the end of the stream, a `moov` after the `mdat` is read by
+byte-seeking the source past the `mdat`, and then back to the first sample, or
+to byte 0 for a file that is read whole. `Mp4DemuxN` seeks by
 byte-seeking its source (`ElementSeekRoute::UpstreamBytes`). The ports share one presentation start, the earliest among
 the forwarded tracks of a track's first pts past its edit-list start, learned
 from the first samples out and kept across a flush. A port's segment starts no

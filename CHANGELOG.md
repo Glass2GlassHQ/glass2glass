@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2352: `qtdemux` streams an MP4 whose `moov` follows the `mdat` by seeking its source to the `moov` and back, in a run that takes seeks.
 - M2351: `httpsrc` seeks with HTTP range requests, so a demuxer after it seeks as it does after `filesrc`.
 - M2350: `matroskademux` prefetches its `Cues` for a seek only when the run parks its source at the end, so a seek in a pipeline with a muxer no longer fails.
 - M2349: `qtdemux` streams a progressive MP4 from its sample tables when `filesrc` feeds it, and seeks to the keyframe the index names.
