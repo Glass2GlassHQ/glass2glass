@@ -674,6 +674,26 @@ pub fn default_registry() -> Registry {
         },
         || Box::new(crate::fd::FdSrc::default()),
     ));
+    // RFC 4175 raw video over RTP/UDP: `st2110videosrc port=5004 format=gray8
+    // width=96 height=96 ! videoconvert ! autovideosink`. The geometry comes from
+    // properties, the stream carries none of it.
+    #[cfg(feature = "st2110")]
+    reg.register_source(
+        SourceFactory::new(
+            "st2110videosrc",
+            Caps::RawVideo {
+                format: RawVideoFormat::Yuyv,
+                width: Dim::Fixed(1280),
+                height: Dim::Fixed(720),
+                framerate: Rate::Any,
+                interlace: g2g_core::Interlace::Any,
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                pixel_aspect: g2g_core::PixelAspect::Any,
+            },
+            || Box::new(crate::st2110videortp::St2110VideoSrc::new()),
+        )
+        .with_template_outputs::<crate::st2110videortp::St2110VideoSrc>(),
+    );
     // Subtitle / text file source (M433): a `.srt` / `.vtt` / `.ssa` / `.ttml`
     // file as a `Text` stream, feeding `subparse` (overlay or caption authoring).
     // The `format` is sniffed from the `location` extension unless set explicitly.

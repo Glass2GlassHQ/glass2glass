@@ -550,8 +550,10 @@ pub struct St2110VideoDepacketizer {
     groups_per_line: usize,
     /// The frame under reassembly; runs are written in place, the marker bit ends it.
     frame: Vec<u8>,
-    /// RTP timestamp of the frame under reassembly, `None` while `frame` is blank.
+    /// RTP timestamp of the frame under reassembly, `None` between frames.
     frame_timestamp: Option<u32>,
+    groups_written: usize,
+    complete_frame_sent: bool,
 }
 
 #[cfg(feature = "alloc")]
@@ -566,14 +568,18 @@ impl St2110VideoDepacketizer {
             groups_per_line: layout.groups_per_line(),
             frame: alloc::vec![0u8; layout.frame_size()],
             frame_timestamp: None,
+            groups_written: 0,
+            complete_frame_sent: false,
         })
     }
 
     /// Feed one RTP packet. Writes its SRD runs into the frame under reassembly and,
-    /// when the packet carries the marker bit (end of frame), returns the completed
-    /// frame. Returns `None` while a frame is still incomplete or if the packet is
-    /// malformed (too short, wrong version, or an SRD that would write out of
-    /// bounds), in which case the packet is dropped.
+    /// when the packet carries the marker bit (end of frame), returns the frame.
+    /// Lines a lost packet never wrote show the most recent rows received for
+    /// them. Returns `None` while a frame is still incomplete, for a frame missing
+    /// packets before any complete frame has gone out (no rows to fill the gap
+    /// with), or if the packet is malformed (too short, wrong version, or an SRD
+    /// that would write out of bounds), in which case the packet is dropped.
     pub fn depacketize(&mut self, packet: &[u8]) -> Option<St2110VideoFrame> {
         let parsed = RtpHeader::parse(packet)?;
         let marker = parsed.header.marker;
@@ -591,7 +597,7 @@ impl St2110VideoDepacketizer {
             .frame_timestamp
             .is_some_and(|timestamp| timestamp != rtp_timestamp)
         {
-            self.frame.fill(0);
+            self.groups_written = 0;
         }
         self.frame_timestamp = Some(rtp_timestamp);
 
@@ -625,18 +631,23 @@ impl St2110VideoDepacketizer {
                 self.layout
                     .write_group(&mut self.frame, line, group + gi, g);
             }
+            self.groups_written += len / opg;
             di += len;
         }
 
         if !marker {
             return None;
         }
-        // the finished frame goes downstream, reassembly restarts in a fresh buffer
         self.frame_timestamp = None;
-        let fresh = alloc::vec![0u8; self.frame.len()];
+        let complete = self.groups_written >= self.height * self.groups_per_line;
+        self.groups_written = 0;
+        if !complete && !self.complete_frame_sent {
+            return None;
+        }
+        self.complete_frame_sent = true;
         Some(St2110VideoFrame {
             rtp_timestamp,
-            bytes: core::mem::replace(&mut self.frame, fresh),
+            bytes: self.frame.clone(),
         })
     }
 }
@@ -706,7 +717,44 @@ mod tests {
     }
 
     #[test]
-    fn a_frame_that_lost_its_marker_packet_is_not_merged_into_the_next() {
+    fn lost_rows_show_the_most_recent_rows_received_for_those_lines() {
+        let (w, h) = (8usize, 4usize);
+        let stride = w * 4;
+        let first = ramp(stride * h);
+        let second = alloc::vec![0x55u8; stride * h];
+        let third = alloc::vec![0xAAu8; stride * h];
+        let max_packet = RTP_HEADER_LEN + EXT_SEQ_LEN + SRD_HEADER_LEN + stride;
+        let mut tx = St2110VideoPacketizer::new(96, 1, Sampling::Rgba8, max_packet);
+        let first_packets = tx.packetize(&first, w, h, 0).unwrap();
+        let second_packets = tx.packetize(&second, w, h, 1_000_000_000).unwrap();
+        let third_packets = tx.packetize(&third, w, h, 2_000_000_000).unwrap();
+        assert_eq!(third_packets.len(), h, "precondition: one line per packet");
+
+        let mut rx = St2110VideoDepacketizer::new(RawVideoFormat::Rgba8, w, h).unwrap();
+        let lost_marker = &second_packets[..second_packets.len() - 1];
+        let lost_first_line = &third_packets[1..];
+        let frames: Vec<_> = first_packets
+            .iter()
+            .chain(lost_marker)
+            .chain(lost_first_line)
+            .filter_map(|p| rx.depacketize(p))
+            .collect();
+        assert_eq!(
+            frames.len(),
+            2,
+            "the frame without its marker never completes"
+        );
+        assert_eq!(frames[0].bytes, first);
+        assert_eq!(
+            frames[1].bytes[..stride],
+            second[..stride],
+            "the lost line 0 shows the last line 0 received"
+        );
+        assert_eq!(frames[1].bytes[stride..], third[stride..]);
+    }
+
+    #[test]
+    fn drops_incomplete_frames_until_one_arrives_whole() {
         let (w, h) = (8usize, 4usize);
         let stride = w * 4;
         let first = ramp(stride * h);
@@ -715,23 +763,16 @@ mod tests {
         let mut tx = St2110VideoPacketizer::new(96, 1, Sampling::Rgba8, max_packet);
         let first_packets = tx.packetize(&first, w, h, 0).unwrap();
         let second_packets = tx.packetize(&second, w, h, 1_000_000_000).unwrap();
-        assert_eq!(second_packets.len(), h, "precondition: one line per packet");
 
         let mut rx = St2110VideoDepacketizer::new(RawVideoFormat::Rgba8, w, h).unwrap();
-        let lost_marker = &first_packets[..first_packets.len() - 1];
-        let lost_first_line = &second_packets[1..];
-        let frames: Vec<_> = lost_marker
+        let joined_late = &first_packets[1..];
+        let frames: Vec<_> = joined_late
             .iter()
-            .chain(lost_first_line)
+            .chain(&second_packets)
             .filter_map(|p| rx.depacketize(p))
             .collect();
         assert_eq!(frames.len(), 1);
-        assert_eq!(
-            frames[0].bytes[..stride],
-            [0; 32],
-            "the first frame's line 0 is gone"
-        );
-        assert_eq!(frames[0].bytes[stride..], second[stride..]);
+        assert_eq!(frames[0].bytes, second);
     }
 
     #[test]

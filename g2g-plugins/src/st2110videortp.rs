@@ -382,7 +382,7 @@ pub struct St2110VideoSrc {
     width: usize,
     height: usize,
     framerate_fps: u32,
-    recv_timeout_ms: u64,
+    idle_timeout_ns: u64,
     socket: Option<UdpSocket>,
     /// ST 2110-7 seamless protection: when set, a second ("blue") path is bound and
     /// the two streams are merged by RTP sequence number (see [`RedundantRtpReceiver`]).
@@ -434,7 +434,7 @@ impl Default for St2110VideoSrc {
 }
 
 impl St2110VideoSrc {
-    /// A source binding `0.0.0.0:5008`, 1280x720 YUYV at 60 fps, 500 ms gap timeout.
+    /// A source binding `0.0.0.0:5008`, 1280x720 YUYV at 60 fps, ending the stream after 500 ms without a packet.
     pub fn new() -> Self {
         Self {
             address: String::from("0.0.0.0"),
@@ -443,7 +443,7 @@ impl St2110VideoSrc {
             width: 1280,
             height: 720,
             framerate_fps: 60,
-            recv_timeout_ms: 500,
+            idle_timeout_ns: DEFAULT_IDLE_TIMEOUT_NS,
             socket: None,
             redundant: false,
             redundant_address: String::from("0.0.0.0"),
@@ -551,75 +551,20 @@ impl SourceLoop for St2110VideoSrc {
         Ok(ConfigureOutcome::Accepted)
     }
 
-    fn run<'a>(&'a mut self, out: &'a mut dyn OutputSink) -> Self::RunFuture<'a> {
-        Box::pin(async move {
-            let mut depack = St2110VideoDepacketizer::new(self.format, self.width, self.height)
-                .ok_or(G2gError::CapsMismatch)?;
-            let clock = MediaClock::video();
-            let mut timeline = RtpArrivalTimeline::new(self.clock_sync.clone());
-            let mut count = 0u64;
-            let socket = self.socket.as_ref().ok_or(G2gError::NotConfigured)?;
-            let mut paths = alloc::vec![socket.try_clone().map_err(io_err)?];
-            // ST 2110-7: a packet lost on one path arrives on the other
-            if self.redundant {
-                let redundant_socket = self.socket2.as_ref().ok_or(G2gError::NotConfigured)?;
-                paths.push(redundant_socket.try_clone().map_err(io_err)?);
-            }
-            let idle = Duration::from_millis(self.recv_timeout_ms);
-            let mut frames =
-                spawn_rtp_receiver(paths, idle, move |datagram| depack.depacketize(datagram))
-                    .map_err(io_err)?;
-            while let Some(vframe) = frames.recv().await {
-                let vframe = vframe.map_err(io_err)?;
-                let frame = build_frame(
-                    vframe.bytes,
-                    vframe.rtp_timestamp,
-                    &clock,
-                    &mut timeline,
-                    count,
-                );
-                out.push(PipelinePacket::DataFrame(frame)).await?;
-                count += 1;
-            }
-            out.push(PipelinePacket::Eos).await?;
-            Ok(count)
-        })
+    fn properties(&self) -> &'static [PropertySpec] {
+        ST2110_VIDEO_SRC_PROPS
     }
-}
 
-impl PadTemplates for St2110VideoSrc {
-    fn pad_templates() -> Vec<PadTemplate> {
-        Vec::from([PadTemplate::source(any_geometry_sampling_formats())])
-    }
-}
-
-// The source's geometry is set via properties (the -20 stream description is out
-// of band); expose them so `gst-launch`-style config works.
-impl St2110VideoSrc {
-    /// The runtime property specs for the source geometry.
-    pub const PROPS: &'static [PropertySpec] = &[
-        PropertySpec::new("address", PropKind::Str, "Local bind address").with_default("0.0.0.0"),
-        PropertySpec::new("port", PropKind::Uint, "Local UDP port").with_default("5008"),
-        PropertySpec::new("format", PropKind::Str, "Raw video format (rgba / yuyv)")
-            .with_default("yuyv"),
-        PropertySpec::new("width", PropKind::Uint, "Frame width in pixels").with_default("1280"),
-        PropertySpec::new("height", PropKind::Uint, "Frame height in pixels").with_default("720"),
-        PropertySpec::new("framerate", PropKind::Uint, "Frame rate in fps").with_default("60"),
-        PropertySpec::new(
-            "redundant",
-            PropKind::Bool,
-            "ST 2110-7 seamless protection: join a second (blue) path",
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::new(
+            "ST 2110-20 video source",
+            "Source/Network",
+            "Receives RFC 4175 raw video over RTP/UDP into frames",
+            crate::AARON_BOXER,
         )
-        .with_default("false"),
-        PropertySpec::new("redundant-address", PropKind::Str, "Blue-path bind address")
-            .with_default("0.0.0.0"),
-        PropertySpec::new("redundant-port", PropKind::Uint, "Blue-path UDP port")
-            .with_default("5009"),
-    ];
+    }
 
-    /// Set a geometry property (mirrors the [`AsyncElement`] property convention on
-    /// this [`SourceLoop`], so `parse_launch` can configure it).
-    pub fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
         match name {
             "address" => {
                 self.address = value.as_str().ok_or(PropError::Type)?.into();
@@ -662,12 +607,20 @@ impl St2110VideoSrc {
                     .map_err(|_| PropError::Value)?;
                 Ok(())
             }
+            "idle-timeout" => {
+                let nanoseconds = value.as_uint().ok_or(PropError::Type)?;
+                // std's set_read_timeout refuses a zero duration
+                if nanoseconds == 0 {
+                    return Err(PropError::Value);
+                }
+                self.idle_timeout_ns = nanoseconds;
+                Ok(())
+            }
             _ => Err(PropError::Unknown),
         }
     }
 
-    /// Read a geometry property.
-    pub fn get_property(&self, name: &str) -> Option<PropValue> {
+    fn get_property(&self, name: &str) -> Option<PropValue> {
         match name {
             "address" => Some(PropValue::Str(self.address.clone())),
             "port" => Some(PropValue::Uint(u64::from(self.port))),
@@ -678,8 +631,83 @@ impl St2110VideoSrc {
             "redundant" => Some(PropValue::Bool(self.redundant)),
             "redundant-address" => Some(PropValue::Str(self.redundant_address.clone())),
             "redundant-port" => Some(PropValue::Uint(u64::from(self.redundant_port))),
+            "idle-timeout" => Some(PropValue::Uint(self.idle_timeout_ns)),
             _ => None,
         }
+    }
+
+    fn run<'a>(&'a mut self, out: &'a mut dyn OutputSink) -> Self::RunFuture<'a> {
+        Box::pin(async move {
+            let mut depack = St2110VideoDepacketizer::new(self.format, self.width, self.height)
+                .ok_or(G2gError::CapsMismatch)?;
+            let clock = MediaClock::video();
+            let mut timeline = RtpArrivalTimeline::new(self.clock_sync.clone());
+            let mut count = 0u64;
+            let socket = self.socket.as_ref().ok_or(G2gError::NotConfigured)?;
+            let mut paths = alloc::vec![socket.try_clone().map_err(io_err)?];
+            // ST 2110-7: a packet lost on one path arrives on the other
+            if self.redundant {
+                let redundant_socket = self.socket2.as_ref().ok_or(G2gError::NotConfigured)?;
+                paths.push(redundant_socket.try_clone().map_err(io_err)?);
+            }
+            let idle = Duration::from_nanos(self.idle_timeout_ns);
+            let mut frames =
+                spawn_rtp_receiver(paths, idle, move |datagram| depack.depacketize(datagram))
+                    .map_err(io_err)?;
+            while let Some(vframe) = frames.recv().await {
+                let vframe = vframe.map_err(io_err)?;
+                let frame = build_frame(
+                    vframe.bytes,
+                    vframe.rtp_timestamp,
+                    &clock,
+                    &mut timeline,
+                    count,
+                );
+                out.push(PipelinePacket::DataFrame(frame)).await?;
+                count += 1;
+            }
+            out.push(PipelinePacket::Eos).await?;
+            Ok(count)
+        })
+    }
+}
+
+// The source's geometry is set via properties (the -20 stream description is out
+// of band); expose them so `gst-launch`-style config works.
+static ST2110_VIDEO_SRC_PROPS: &[PropertySpec] = &[
+    PropertySpec::new("address", PropKind::Str, "Local bind address").with_default("0.0.0.0"),
+    PropertySpec::new("port", PropKind::Uint, "Local UDP port").with_default("5008"),
+    PropertySpec::new(
+        "format",
+        PropKind::Str,
+        "Raw video format (rgba / yuyv / i422_10le / gray8)",
+    )
+    .with_default("yuyv"),
+    PropertySpec::new("width", PropKind::Uint, "Frame width in pixels").with_default("1280"),
+    PropertySpec::new("height", PropKind::Uint, "Frame height in pixels").with_default("720"),
+    PropertySpec::new("framerate", PropKind::Uint, "Frame rate in fps").with_default("60"),
+    PropertySpec::new(
+        "redundant",
+        PropKind::Bool,
+        "ST 2110-7 seamless protection: join a second (blue) path",
+    )
+    .with_default("false"),
+    PropertySpec::new("redundant-address", PropKind::Str, "Blue-path bind address")
+        .with_default("0.0.0.0"),
+    PropertySpec::new("redundant-port", PropKind::Uint, "Blue-path UDP port").with_default("5009"),
+    PropertySpec::new(
+        "idle-timeout",
+        PropKind::Uint,
+        "end the stream after this many nanoseconds without a packet",
+    )
+    .with_default("500000000"),
+];
+
+const DEFAULT_IDLE_TIMEOUT_NS: u64 = 500_000_000;
+
+impl PadTemplates for St2110VideoSrc {
+    fn pad_templates() -> Vec<PadTemplate> {
+        Vec::from([PadTemplate::source(any_geometry_sampling_formats())])
     }
 }
 
@@ -756,7 +784,8 @@ mod tests {
             .unwrap();
         src.set_property("height", PropValue::Uint(h as u64))
             .unwrap();
-        src.recv_timeout_ms = 300;
+        src.set_property("idle-timeout", PropValue::Uint(300_000_000))
+            .unwrap();
         src.configure_pipeline(&caps).expect("src binds");
         let port = src.local_port().expect("bound port");
 
@@ -810,7 +839,8 @@ mod tests {
             .unwrap();
         src.set_property("height", PropValue::Uint(h as u64))
             .unwrap();
-        src.recv_timeout_ms = 300;
+        src.set_property("idle-timeout", PropValue::Uint(300_000_000))
+            .unwrap();
         src.configure_pipeline(&caps).expect("src binds");
         let port = src.local_port().expect("bound port");
 
@@ -870,7 +900,8 @@ mod tests {
             .unwrap();
         src.set_property("height", PropValue::Uint(h as u64))
             .unwrap();
-        src.recv_timeout_ms = 300;
+        src.set_property("idle-timeout", PropValue::Uint(300_000_000))
+            .unwrap();
         src.configure_pipeline(&caps).expect("src binds both paths");
         let red = src.local_port().expect("red bound");
         let blue = src.redundant_local_port().expect("blue bound");
@@ -1016,6 +1047,21 @@ mod tests {
         assert_eq!(
             src.get_property("format"),
             Some(PropValue::Str("RGBA".into()))
+        );
+    }
+
+    #[test]
+    fn src_idle_timeout_round_trips_and_refuses_zero() {
+        let mut src = St2110VideoSrc::new();
+        assert_eq!(
+            src.set_property("idle-timeout", PropValue::Uint(0)),
+            Err(PropError::Value)
+        );
+        src.set_property("idle-timeout", PropValue::Uint(2_000_000_000))
+            .unwrap();
+        assert_eq!(
+            src.get_property("idle-timeout"),
+            Some(PropValue::Uint(2_000_000_000))
         );
     }
 

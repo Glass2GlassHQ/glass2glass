@@ -1469,21 +1469,29 @@ in a CDP, emits timed `Caps::Text{Utf8}` cues. So captions travel end to end ove
 
 ### Uncompressed video
 
-`st2110video` (ST 2110-20, RFC 4175) carries uncompressed active video. The
-packetizer slices a packed frame into Sample Row Data line runs, an Extended
+`g2g_core::st2110video` (ST 2110-20, RFC 4175) carries uncompressed active video.
+The packetizer slices a packed frame into Sample Row Data line runs, an Extended
 Sequence Number then per-run headers giving scan line, pixel offset and octet
-length, sized to the MTU, and the depacketizer writes each run back into the frame,
-completing it on the RTP marker bit. `st2110videortp`, giving `St2110VideoSink` and
-`St2110VideoSrc`, puts it on UDP with the 90 kHz media-clock timestamp shared by
-every packet of a frame.
+length, sized to the MTU. It writes each packet into a caller's buffer, so the
+heap-free `g2g-mcu` `RawVideoRtpSend` sends video from a microcontroller with
+the same code. The depacketizer writes each run back into the frame, completing
+it on the RTP marker bit. Each frame is written over the previous one, so a
+line whose packet was lost shows the most recent row received for it, and
+frames are dropped until one arrives complete. `st2110videortp`, giving
+`St2110VideoSink` and `St2110VideoSrc`, puts it on UDP with the 90 kHz
+media-clock timestamp shared by every packet of a frame. `st2110videosrc` is a
+`g2g-launch` element, and its `idle-timeout` sets how long without a packet
+ends the stream.
 
 Each sampling is a `Layout` reading or writing one pgroup at a time, so the
-packetizer and depacketizer stay layout-agnostic across three mappings: RGBA 8-bit,
+packetizer and depacketizer stay layout-agnostic across four mappings: RGBA 8-bit,
 packed and byte-identical, YCbCr-4:2:2 8-bit, packed `Yuyv` with luma and chroma
 bytes swapped to the wire, and YCbCr-4:2:2 10-bit, the broadcast norm, from the
 planar `I422p10` buffer where the four 10-bit samples Cb0 Y0 Cr0 Y1 are MSB-first
 bit-packed into a 5-octet pgroup, crossing both a planar-to-packed and a
-byte-to-bit boundary.
+byte-to-bit boundary. RFC 4175 has no grayscale sampling, so a `Gray8`
+frame goes out as YCbCr-4:2:2 8-bit with both chroma samples at 128, and a
+`Gray8` receiver keeps the luma.
 
 ### SDP
 
