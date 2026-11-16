@@ -19,7 +19,10 @@ Highest leverage first:
    path), and the one complete pure-Rust Opus, `opus-rs` 0.1.26, fails the
    RFC 8251 vectors (re-run `tools/opus-rs-gate` to revisit on a new release).
    `VulkanVideoDec` residuals: Intel validation runs (see "Receive / decode").
-4. **Browser demo (speculative product path).** A deployed reference app for the
+4. **Embeddable player.** `g2g-player`, a libmpv-style library that renders
+   any URI or graph into a texture the host app owns, starting with Bevy /
+   wgpu hosts (see "Embeddable player").
+5. **Browser demo (speculative product path).** A deployed reference app for the
    in-browser `ort-web` ONNX chain, plus a native sibling running the same graph.
    The GPU-resident in-browser chain is not achievable from idiomatic Rust (wgpu
    can't import a WebCodecs `VideoFrame` as an external texture or adopt ORT's
@@ -44,6 +47,29 @@ The plan is [remote.md](remote.md).
   on the secure desktop.
 - A Chrome client on the same signaling and the same data channel.
 - OIDC in front of the bearer token, a `g2g://` URL, and install packages.
+
+## Embeddable player (`g2g-player`)
+
+A libmpv-style library: a new `g2g-player` crate with a Rust API and a
+versioned C ABI (`g2g_player.h`), on top of `playbin` and `parse_launch`.
+`g2g-capi` stays pipeline-shaped.
+
+- Player core: load a URI or a launch string, play, pause, seek (refused when
+  the source cannot seek), and select tracks. State is read through named
+  properties (`time-pos`, `duration`, `pause`, `track-list`) with get, set and
+  observe, and reported through one event queue.
+- Video reaches the host as a GPU texture on the host's device. The library
+  raises an update callback, and the host calls render on its own render
+  thread to receive the frame due at that vsync.
+- Audio plays through `autoaudiosink` by default, with the audio clock driving
+  A/V sync. An option hands PCM to the host instead.
+- Stage 1: the player core, the C ABI, and Bevy / wgpu hosts on Linux,
+  Windows, macOS and Android, with one texture export per platform (dmabuf,
+  shared D3D handle, IOSurface, AHardwareBuffer).
+- Stage 2: Qt hosts. Stage 3: Flutter hosts through the texture registry.
+  Stage 4: Android native apps drawing into an app-owned `Surface`. Each stage
+  reuses the stage 1 texture exports.
+- Wrap `g2g_player.h` in the C#, C++, Kotlin and Python bindings.
 
 ## Architecture guarantees (validation-first)
 
