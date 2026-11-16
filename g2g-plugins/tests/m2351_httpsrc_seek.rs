@@ -104,11 +104,11 @@ fn serve(
     (format!("http://127.0.0.1:{port}/av.mkv"), starts)
 }
 
-fn launch(url: &str, options: &[&str]) -> Output {
-    let pipeline = format!(
-        "httpsrc location={url} bytestream-format=matroska ! matroskademux name=d \
-         d.video_0 ! checksumsink d.audio_0 ! fakesink"
-    );
+const MKV_DEMUX: &str =
+    "bytestream-format=matroska ! matroskademux name=d d.video_0 ! checksumsink d.audio_0 ! fakesink";
+
+fn launch(url: &str, demux: &str, options: &[&str]) -> Output {
+    let pipeline = format!("httpsrc location={url} {demux}");
     Command::new(env!("CARGO_BIN_EXE_g2g-launch"))
         .arg("-q")
         .args(options)
@@ -169,11 +169,11 @@ fn a_seek_during_playback_fetches_the_rest_with_a_range_request() {
         RangeAnswer::PartialContent,
         Some(PACED_WRITE_LEN),
     );
-    let unseeked = checksum_lines(&launch(&url, &[]));
+    let unseeked = checksum_lines(&launch(&url, MKV_DEMUX, &[]));
     assert_eq!(unseeked.len(), VIDEO_FRAME_COUNT);
     starts.lock().unwrap().clear();
     let seek = seek_at(BACKWARD_SEEK_POSITION_NS, BACKWARD_SEEK_TARGET_NS);
-    let seeked = checksum_lines(&launch(&url, &["--seek-at", &seek]));
+    let seeked = checksum_lines(&launch(&url, MKV_DEMUX, &["--seek-at", &seek]));
     assert!(
         starts.lock().unwrap().iter().any(|&start| start > 0),
         "the seek reads on from a byte past the start, requests {:?}",
@@ -185,11 +185,11 @@ fn a_seek_during_playback_fetches_the_rest_with_a_range_request() {
 #[test]
 fn a_seek_after_the_end_fetches_from_the_parked_source() {
     let (url, starts) = serve(fixture(), RangeAnswer::PartialContent, None);
-    let unseeked = checksum_lines(&launch(&url, &[]));
+    let unseeked = checksum_lines(&launch(&url, MKV_DEMUX, &[]));
     starts.lock().unwrap().clear();
     let last_frame_ns = (VIDEO_FRAME_COUNT - 1) as u64 * FRAME_PERIOD_NS;
     let seek = seek_at(last_frame_ns, TARGET_NS);
-    let seeked = checksum_lines(&launch(&url, &["--seek-at", &seek]));
+    let seeked = checksum_lines(&launch(&url, MKV_DEMUX, &["--seek-at", &seek]));
     assert_eq!(
         seeked[..unseeked.len()],
         unseeked,
@@ -203,7 +203,11 @@ fn a_seek_after_the_end_fetches_from_the_parked_source() {
 fn a_server_that_ignores_the_range_fails_the_seek() {
     let (url, _) = serve(fixture(), RangeAnswer::WholeResource, None);
     let last_frame_ns = (VIDEO_FRAME_COUNT - 1) as u64 * FRAME_PERIOD_NS;
-    let output = launch(&url, &["--seek-at", &seek_at(last_frame_ns, TARGET_NS)]);
+    let output = launch(
+        &url,
+        MKV_DEMUX,
+        &["--seek-at", &seek_at(last_frame_ns, TARGET_NS)],
+    );
     assert!(
         !output.status.success(),
         "the unserved seek went unreported"
@@ -213,4 +217,39 @@ fn a_server_that_ignores_the_range_fails_the_seek() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+// ffmpeg's default mp4 layout, the moov after the mdat, the same 2 s of video
+const MP4_FIXTURE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/av_seek_h264_aac.mp4"
+);
+const MP4_DEMUX: &str = "bytestream-format=mp4 ! qtdemux ! checksumsink";
+
+#[test]
+fn a_one_port_qtdemux_reads_a_moov_last_mp4_with_range_requests_and_seeks() {
+    let mp4 = std::fs::read(MP4_FIXTURE).expect("the fixture reads");
+    let (url, starts) = serve(mp4, RangeAnswer::PartialContent, None);
+    let unseeked = checksum_lines(&launch(&url, MP4_DEMUX, &[]));
+    assert_eq!(unseeked.len(), VIDEO_FRAME_COUNT);
+    starts.lock().unwrap().clear();
+    let last_frame_ns = (VIDEO_FRAME_COUNT - 1) as u64 * FRAME_PERIOD_NS;
+    let seeked = checksum_lines(&launch(
+        &url,
+        MP4_DEMUX,
+        &["--seek-at", &seek_at(last_frame_ns, TARGET_NS)],
+    ));
+    assert_eq!(seeked[..unseeked.len()], unseeked);
+    assert!(
+        starts
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|&&start| start > 0)
+            .count()
+            > 1,
+        "the moov and the seek each read from past the start, requests {:?}",
+        starts.lock().unwrap()
+    );
+    assert_resumes_at_the_keyframe(&seeked, &unseeked, TARGET_NS);
 }

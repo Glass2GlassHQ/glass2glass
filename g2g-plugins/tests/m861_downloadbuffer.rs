@@ -436,7 +436,7 @@ mod pushed_over_http {
         let graph = parse_launch(
             &reg,
             &format!(
-                "httpsrc location={url} bytestream-format=mp4 \
+                "httpsrc location={url} bytestream-format=isobmff \
              ! downloadbuffer temp-template=g2g-m861-acceptXXXXXX \
              ! qtdemux ! filesink location={}",
                 got.display()

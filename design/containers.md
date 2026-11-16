@@ -1665,7 +1665,9 @@ length from `Content-Length`, or from the total in a 206 answer's
 `Content-Range`, and a seek at or past that length ends the stream without a
 request. A server that answers a ranged request with the whole resource fails
 the run with `SeekRefused`, as souphttpsrc errors when the server does not
-accept `Range`.
+accept `Range`. Its `bytestream-format` names containers as `filesrc` does, so
+`mp4` is the whole-file `ByteStream{Mp4}` the one-port `qtdemux` reads, and
+`isobmff`, `fmp4` or `cmaf` the streaming `ByteStream{IsoBmff}`.
 
 `httpsrc`, `hlssrc` and `dashsrc` take `cookies`, a Cookie header value. Its
 pairs go into a reqwest cookie jar for the location's host with `Path=/`, and the

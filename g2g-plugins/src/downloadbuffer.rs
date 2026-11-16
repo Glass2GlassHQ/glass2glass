@@ -18,9 +18,9 @@
 //!   incremental form HLS / DASH / `httpsrc` produce) becomes `ByteStream{Mp4}`
 //!   on the output, because a spilled stream is a whole file with random access,
 //!   exactly the rewrite `FileSrc` applies to a sniffed ISO-BMFF header. That is
-//!   what lets `httpsrc bytestream-format=mp4 ! downloadbuffer ! qtdemux` play a
-//!   moov-at-end MP4 that `httpsrc ! qtdemux` cannot even negotiate. Every other
-//!   encoding passes through unchanged.
+//!   what lets `httpsrc bytestream-format=isobmff ! downloadbuffer ! qtdemux`
+//!   play an MP4 the source sends as a stream. Every other encoding passes
+//!   through unchanged.
 //!
 //! Temp file lifecycle: created at `configure_pipeline` from `temp-template`
 //! (a trailing `XXXXXX` is replaced, `mkstemp`-style, and a bare filename is

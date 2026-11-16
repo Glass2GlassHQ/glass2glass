@@ -46,14 +46,15 @@ use g2g_core::runtime::{
     eos_then_wait_for_seek, flushing_only, SeekController, SeekFormat, SourceLoop,
 };
 use g2g_core::{
-    g2g_error, BusHandle, BusMessage, ByteStreamEncoding, Caps, CapsConstraint, CapsSet,
-    ConfigureOutcome, ElementMetadata, FrameTiming, G2gError, HardwareError, HttpTransportFailure,
-    MemoryDomain, OutputSink, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
+    g2g_error, BusHandle, BusMessage, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
+    ElementMetadata, FrameTiming, G2gError, HardwareError, HttpTransportFailure, MemoryDomain,
+    OutputSink, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
 };
 use reqwest::cookie::Jar;
 use reqwest::header::{CONTENT_RANGE, RANGE};
 use reqwest::StatusCode;
 
+use crate::filesrc::{encoding_from_str, encoding_to_str};
 use crate::httperror::http_err;
 
 fn cookie_pairs(cookies: &str) -> impl Iterator<Item = &str> {
@@ -454,7 +455,7 @@ static HTTPSRC_PROPS: &[PropertySpec] = &[
     PropertySpec::new(
         "bytestream-format",
         PropKind::Str,
-        "container of the fetched byte stream: mpegts | matroska | ogg | flv | multipart",
+        "container of the fetched byte stream, as filesrc names it: mpegts | matroska | ogg | flv | mp4 (a whole file) | isobmff (fragments) | multipart",
     ),
     PropertySpec::new(
         "prebuffer-bytes",
@@ -471,28 +472,3 @@ pub(crate) const COOKIES_PROPERTY: PropertySpec = PropertySpec::new(
     PropKind::Str,
     "cookies sent to the location's host, as a Cookie header: name=value pairs separated by ';'",
 );
-
-fn encoding_from_str(s: &str) -> Option<ByteStreamEncoding> {
-    match s {
-        "mpegts" | "ts" => Some(ByteStreamEncoding::MpegTs),
-        "matroska" | "mkv" | "webm" => Some(ByteStreamEncoding::Matroska),
-        "ogg" | "opus" => Some(ByteStreamEncoding::Ogg),
-        "flv" => Some(ByteStreamEncoding::Flv),
-        "mp4" | "isobmff" | "cmaf" | "fmp4" => Some(ByteStreamEncoding::IsoBmff),
-        "multipart" | "mpjpeg" => Some(ByteStreamEncoding::Multipart),
-        _ => None,
-    }
-}
-
-fn encoding_to_str(encoding: ByteStreamEncoding) -> &'static str {
-    match encoding {
-        ByteStreamEncoding::MpegTs => "mpegts",
-        ByteStreamEncoding::Matroska => "matroska",
-        ByteStreamEncoding::Ogg => "ogg",
-        ByteStreamEncoding::Flv => "flv",
-        ByteStreamEncoding::IsoBmff => "mp4",
-        ByteStreamEncoding::Multipart => "multipart",
-        ByteStreamEncoding::Mp4 => "mp4",
-        _ => unreachable!("httpsrc encoding is set only via encoding_from_str"),
-    }
-}
