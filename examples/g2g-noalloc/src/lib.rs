@@ -61,14 +61,14 @@ pub extern "C" fn g2g_audio_expected() -> u64 {
     noalloc_pipeline::audio::AUDIO_EXPECTED_CHECKSUM
 }
 
-// The keyword-spotting graph (log-mel -> int8 quantize -> MicroFlow micro_speech
-// model), digested over its features and scores, 0 when the run fails.
+// The keyword graph's front end (MicroFrontend -> int8 quantize), digested over
+// its features, 0 when the run fails.
 #[no_mangle]
 pub extern "C" fn g2g_keyword_run() -> u64 {
-    noalloc_pipeline::keyword::run_keyword().map_or(0, |run| run.digest())
+    noalloc_pipeline::keyword::run_keyword().unwrap_or(0)
 }
 
 #[no_mangle]
 pub extern "C" fn g2g_keyword_expected() -> u64 {
-    noalloc_pipeline::keyword::EXPECTED_RUN.digest()
+    noalloc_pipeline::keyword::EXPECTED_FEATURES_DIGEST
 }

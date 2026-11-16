@@ -18,6 +18,12 @@
 
 #![no_std]
 
+use g2g_core::error::{G2gError, HardwareError};
+
+pub(crate) fn peripheral() -> G2gError {
+    G2gError::Hardware(HardwareError::Peripheral)
+}
+
 pub mod adpcm;
 pub mod cffi;
 pub mod g711;
@@ -28,8 +34,6 @@ pub mod inference;
 pub mod jitter;
 mod lend;
 pub mod logmel;
-#[cfg(feature = "microflow")]
-pub mod microflow_backend;
 pub mod microfrontend;
 pub mod mixer;
 pub mod pcm;
@@ -56,12 +60,10 @@ pub use hwjpeg::{HwJpegDec, JpegDecoder, JpegImageInfo, JpegSubsampling};
 pub use inference::{TensorFormat, TensorInference, TensorModel};
 pub use jitter::JitterBuffer;
 pub use logmel::{LogMelSettings, LogMelSpectrogram};
-#[cfg(feature = "microflow")]
-pub use microflow_backend::MicroFlowModel;
 pub use microfrontend::MicroFrontend;
 pub use mixer::Mixer;
 pub use pcm::{PcmConvert, PcmSink, PcmWriter};
-pub use quantize::Int8Quantize;
+pub use quantize::{Int8Quantize, PixelMapping};
 pub use resample::{Resampler, SampleRate};
 pub use resize::{ImageResize, ImageSize};
 pub use rtp::{PacketSender, RtpSink};

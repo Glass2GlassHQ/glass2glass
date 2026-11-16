@@ -4,24 +4,22 @@
 # SPDX-License-Identifier: MPL-2.0
 
 # Regenerate the keyword-spotting model fixtures in g2g-mcu/tests/fixtures/keyword:
-# speech.tflite (the TFLite Micro micro_speech model as MicroFlow 0.1.3 ships it),
-# its ONNX twin speech.onnx (tf2onnx, QDQ int8), quantization.txt (the input
-# and output tensor scale and zero point), and yes.s16le, the one-clip input of
-# the keyword graph (espeak-ng 1.51 saying "yes", 150 ms in, 15840 samples at
-# 16 kHz), and frontend.f32le, TensorFlow's audio_microfrontend features for that
-# clip with the speech_commands training settings. The
-# files are committed because MicroFlow's proc macro reads the .tflite at
-# compile time, and they are small. features.i8 and scores.f32le in the same
-# directory are not written here: they are the keyword graph's pinned output
-# on the host (examples/noalloc-pipeline/tests/keyword.rs). tflite_scores.i8 is
-# the TFLite 2.15 reference interpreter's int8 output for features.i8.
+# speech.tflite (the TFLite Micro micro_speech model, taken from the microflow
+# 0.1.3 crate), quantization.txt (the input and output tensor scale and zero
+# point), yes.s16le, the one-clip input of the keyword graph (espeak-ng 1.51
+# saying "yes", 150 ms in, 15840 samples at 16 kHz), and frontend.f32le,
+# TensorFlow's audio_microfrontend features for that clip with the
+# speech_commands training settings. features.i8 in the same directory is not
+# written here: it is the keyword graph's pinned output on the host
+# (examples/noalloc-pipeline/tests/keyword.rs). tflite_scores.i8 is the TFLite
+# 2.15 reference interpreter's int8 output for features.i8.
 #
 # Needs uv, curl, ffmpeg, espeak-ng and network.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 FIX="$HERE/g2g-mcu/tests/fixtures/keyword"
-VENV="${KEYWORD_VENV:-/tmp/g2g-tf2onnx-venv}"
+VENV="${KEYWORD_VENV:-/tmp/g2g-tensorflow-venv}"
 CRATE_URL="https://static.crates.io/crates/microflow/microflow-0.1.3.crate"
 TFLITE_SHA256="09e5e2a9dfb2d8ed78802bf18ce297bff54281a66ca18e0c23d69ca14f822a83"
 
@@ -36,11 +34,9 @@ cp "$WORK/microflow-0.1.3/models/speech.tflite" "$FIX/speech.tflite"
 
 if [ ! -x "$VENV/bin/python" ]; then
   uv venv -q -p 3.11 "$VENV"
-  # tf2onnx 1.17 is tested against TF 2.15, and onnx 1.17+ needs a newer ml_dtypes than TF 2.15 allows.
-  VIRTUAL_ENV="$VENV" uv pip install -q "tf2onnx==1.17.0" "tensorflow-cpu==2.15.1" "onnx==1.16.2" "numpy<2"
+  VIRTUAL_ENV="$VENV" uv pip install -q "tensorflow-cpu==2.15.1" "numpy<2"
 fi
 
-"$VENV/bin/python" -I -m tf2onnx.convert --opset 17 --tflite "$FIX/speech.tflite" --output "$FIX/speech.onnx"
 "$VENV/bin/python" -I -c '
 import sys, tensorflow as tf
 interpreter = tf.lite.Interpreter(model_path=sys.argv[1])

@@ -43,7 +43,7 @@ int main(void) {
     printf("host run OK: flagship audio graph, checksum %llu\n",
            (unsigned long long)asum);
 
-    /* The keyword graph: log-mel -> int8 quantize -> MicroFlow model. */
+    /* The keyword graph's front end: MicroFrontend -> int8 quantize. */
     uint64_t kdigest = g2g_keyword_run();
     uint64_t kwant = g2g_keyword_expected();
     if (kdigest != kwant) {
@@ -51,6 +51,6 @@ int main(void) {
                 (unsigned long long)kdigest, (unsigned long long)kwant);
         return 1;
     }
-    printf("host run OK: keyword graph, digest %llu\n", (unsigned long long)kdigest);
+    printf("host run OK: keyword features, digest %llu\n", (unsigned long long)kdigest);
     return 0;
 }

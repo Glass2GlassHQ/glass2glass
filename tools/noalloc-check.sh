@@ -120,6 +120,6 @@ cargo test --manifest-path "$ROOT/examples/noalloc-pipeline/Cargo.toml" --quiet
 
 echo "PASS: g2g-noalloc links the video pipeline, the flagship audio graph"
 echo "      (capture->convert->resample->mix->encode->RTP) and the keyword graph"
-echo "      (log-mel->int8 quantize->MicroFlow model) with zero allocator"
+echo "      front end (MicroFrontend->int8 quantize) with zero allocator"
 echo "      symbols and zero panic symbols on ${TARGETS[*]}."
 echo "      The heap-free + panic-free guarantees hold at link time, cross-ISA."

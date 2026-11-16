@@ -18,18 +18,13 @@
 //! than trusted (the parser-discipline rule applied to a sensor).
 
 use embedded_hal::i2c::I2c;
-use g2g_core::error::{G2gError, HardwareError};
+use g2g_core::error::G2gError;
 use g2g_core::frame::{Frame, FrameTiming};
 use g2g_core::staticpool::StaticLendRing;
 use g2g_core::StaticSource;
 
 use crate::lend::lend_slot;
-
-/// A bus / sensor-integrity fault (an I2C error, or a CRC that does not match
-/// the sensor's data, so the reading cannot be trusted).
-fn peripheral() -> G2gError {
-    G2gError::Hardware(HardwareError::Peripheral)
-}
+use crate::peripheral;
 
 /// The SHT3x default I2C address (ADDR pin low). The alternate (ADDR high) is
 /// `0x45`; a board picks one at construction.

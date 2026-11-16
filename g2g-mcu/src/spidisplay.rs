@@ -23,9 +23,11 @@
 use embedded_hal::delay::DelayNs;
 use embedded_hal::digital::OutputPin;
 use embedded_hal::spi::SpiDevice;
-use g2g_core::error::{G2gError, HardwareError};
+use g2g_core::error::G2gError;
 use g2g_core::frame::Frame;
 use g2g_core::StaticSink;
+
+use crate::peripheral;
 
 // MIPI-DCS opcodes shared by the ST7789 / ILI9341 controller family.
 const SWRESET: u8 = 0x01;
@@ -46,10 +48,6 @@ const COLMOD_RGB565: u8 = 0x55;
 /// Pixels converted per SPI write burst; the whole element needs only this
 /// 2-bytes-per-pixel stack buffer regardless of frame size.
 const CHUNK_PX: usize = 64;
-
-fn peripheral() -> G2gError {
-    G2gError::Hardware(HardwareError::Peripheral)
-}
 
 /// A heap-free [`StaticSink`] presenting RGBA8888 frames on an SPI TFT panel
 /// (ST7789 / ILI9341 family), converting to RGB565 big-endian on the fly.

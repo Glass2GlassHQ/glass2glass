@@ -37,6 +37,20 @@ pub trait TensorModel {
     async fn run(&mut self, input: &[u8], output: &mut [u8]) -> Result<(), G2gError>;
 }
 
+impl<M: TensorModel> TensorModel for &mut M {
+    fn input(&self) -> TensorFormat {
+        (**self).input()
+    }
+
+    fn output(&self) -> TensorFormat {
+        (**self).output()
+    }
+
+    async fn run(&mut self, input: &[u8], output: &mut [u8]) -> Result<(), G2gError> {
+        (**self).run(input, output).await
+    }
+}
+
 pub struct TensorInference<'r, M, const N: usize, const BYTES: usize> {
     model: M,
     ring: &'r StaticLendRing<N, BYTES>,

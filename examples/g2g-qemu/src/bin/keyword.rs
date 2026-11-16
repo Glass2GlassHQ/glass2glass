@@ -2,16 +2,15 @@
 //
 // SPDX-License-Identifier: MPL-2.0
 
-// The keyword-spotting graph on the emulated Cortex-M4: log-mel -> int8
-// quantize -> the MicroFlow-compiled micro_speech model, with the features
-// digest and the scores compared bit for bit against the host's pinned run.
+// The keyword graph's front end on the emulated Cortex-M4: MicroFrontend ->
+// int8 quantize, with the features digest compared against the host's pinned run.
 
 #![no_std]
 #![no_main]
 
 use cortex_m_rt::entry;
 use cortex_m_semihosting::{debug, hio};
-use noalloc_pipeline::keyword::{run_keyword, EXPECTED_RUN};
+use noalloc_pipeline::keyword::{run_keyword, EXPECTED_FEATURES_DIGEST};
 
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! {
@@ -20,20 +19,15 @@ fn panic(_: &core::panic::PanicInfo) -> ! {
 
 #[entry]
 fn main() -> ! {
-    let run = run_keyword();
-    let features_ok = run.map(|run| run.features_digest) == Some(EXPECTED_RUN.features_digest);
-    let scores_ok =
-        run.map(|run| run.scores.map(f32::to_bits)) == Some(EXPECTED_RUN.scores.map(f32::to_bits));
+    let features_ok = run_keyword() == Some(EXPECTED_FEATURES_DIGEST);
     if let Ok(mut out) = hio::hstdout() {
-        let _ = out.write_all(match (features_ok, scores_ok) {
-            (true, true) => {
-                b"g2g-keyword: features and scores bit-exact with the host OK\n".as_slice()
-            }
-            (false, _) => b"g2g-keyword: FAIL, features differ from the host\n".as_slice(),
-            (_, false) => b"g2g-keyword: FAIL, scores differ from the host\n".as_slice(),
+        let _ = out.write_all(if features_ok {
+            b"g2g-keyword: features bit-exact with the host OK\n".as_slice()
+        } else {
+            b"g2g-keyword: FAIL, features differ from the host\n".as_slice()
         });
     }
-    debug::exit(if features_ok && scores_ok {
+    debug::exit(if features_ok {
         debug::EXIT_SUCCESS
     } else {
         debug::EXIT_FAILURE

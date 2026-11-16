@@ -2,7 +2,9 @@
 //
 // SPDX-License-Identifier: MPL-2.0
 
-use noalloc_pipeline::keyword::{run_keyword, EXPECTED_RUN, INPUT_SCALE, INPUT_ZERO_POINT};
+use noalloc_pipeline::keyword::{
+    run_keyword, EXPECTED_FEATURES_DIGEST, INPUT_SCALE, INPUT_ZERO_POINT,
+};
 
 const QUANTIZATION: &str = include_str!("../../../g2g-mcu/tests/fixtures/keyword/quantization.txt");
 
@@ -14,16 +16,9 @@ fn quantization(name: &str) -> f64 {
 }
 
 #[test]
-fn keyword_graph_reproduces_the_pinned_features_and_scores() {
-    let run = run_keyword().expect("keyword graph run");
-    assert_eq!(
-        run.features_digest, EXPECTED_RUN.features_digest,
-        "features differ from features.i8"
-    );
-    assert_eq!(
-        run.scores, EXPECTED_RUN.scores,
-        "scores differ from scores.f32le"
-    );
+fn keyword_graph_reproduces_the_pinned_features() {
+    let digest = run_keyword().expect("keyword graph run");
+    assert_eq!(digest, EXPECTED_FEATURES_DIGEST, "features differ from features.i8");
 }
 
 #[test]

@@ -45,14 +45,11 @@ MAX_STATIC_RAM=0
 AUDIO_MAX_ROM=12288
 AUDIO_MAX_STACK=8192
 AUDIO_MAX_STATIC_RAM=0
-# Keyword graph (one clip -> log-mel -> int8 quantize -> MicroFlow micro_speech
-# model): measured 2026-10 at 69164 ROM / 0 static / 116312 stack (RISC-V
-# 72476 / 0 / 116352). The
-# 31680-byte input clip and the model's 16 KB of weights are most of the ROM.
-# The clip, log-mel and feature rings (41 KB) and the log-mel element's tables
-# and FFT scratch are most of the stack.
-KEYWORD_MAX_ROM=81920
-KEYWORD_MAX_STACK=131072
+# Keyword graph front end (one clip -> MicroFrontend -> int8 quantize). The
+# 31680-byte input clip is most of the ROM. The clip, frontend and feature
+# rings (41 KB) and the frontend's tables and FFT scratch are most of the stack.
+KEYWORD_MAX_ROM=61440
+KEYWORD_MAX_STACK=98304
 KEYWORD_MAX_STATIC_RAM=0
 
 echo "== building g2g-noalloc for $TARGET =="
