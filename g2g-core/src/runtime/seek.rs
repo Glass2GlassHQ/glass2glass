@@ -410,7 +410,7 @@ impl SeekController {
     }
 
     #[cfg(feature = "std")]
-    pub(crate) fn enable_seeks_after_end(&self) {
+    pub fn enable_seeks_after_end(&self) {
         self.inner
             .takes_seeks_after_end
             .store(true, Ordering::SeqCst);

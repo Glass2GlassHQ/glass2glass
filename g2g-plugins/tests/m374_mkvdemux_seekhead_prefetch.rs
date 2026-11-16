@@ -233,6 +233,8 @@ async fn prefetches_cues_via_seekhead_then_seeks(mut demux: impl AsyncElement) {
 
     let byte = SeekController::new();
     let time = SeekController::new();
+    // the prefetch reads to the end of the file, so it needs a source that parks there
+    time.enable_seeks_after_end();
     demux.set_seek(time.clone(), byte.clone());
     demux
         .configure_pipeline(&Caps::ByteStream {
@@ -312,3 +314,90 @@ async fn prefetches_cues_via_seekhead_then_seeks(mut demux: impl AsyncElement) {
     );
 }
 
+// ffmpeg's matroska muxer writes a SeekHead at the start that locates the Cues at the end
+const AV_FIXTURE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/av_seek_h264_aac.mkv"
+);
+// small enough that the demuxer has not read the Cues when the seek arrives
+const BLOCKSIZE: usize = 256;
+// once the sink has the frame at 0.2 s, to 1.02 s, between the keyframes at 0.8 s and 1.2 s
+const SEEK_AT: &str = "0.2:1.02";
+// the fixture's video: 25 fps, encoded with -g 10
+const KEYFRAME_BEFORE_TARGET: usize = 20;
+
+fn launch(pipeline: &str, options: &[&str]) -> std::process::Output {
+    std::process::Command::new(env!("CARGO_BIN_EXE_g2g-launch"))
+        .env("G2G_DEBUG", "demuxseek:6")
+        .arg("-q")
+        .args(options)
+        .args(pipeline.split_whitespace())
+        .output()
+        .expect("g2g-launch starts")
+}
+
+fn succeeded(output: &std::process::Output) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert!(output.status.success(), "g2g-launch fails: {stderr}");
+    stderr
+}
+
+fn checksum_lines(output: &std::process::Output) -> Vec<String> {
+    succeeded(output);
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
+#[test]
+fn a_seek_during_playback_prefetches_the_cues_through_a_parked_source() {
+    let pipeline = format!(
+        "filesrc location={AV_FIXTURE} blocksize={BLOCKSIZE} ! matroskademux name=d \
+         d.video_0 ! checksumsink d.audio_0 ! fakesink"
+    );
+    let unseeked = checksum_lines(&launch(&pipeline, &[]));
+    let output = launch(&pipeline, &["--seek-at", SEEK_AT]);
+    let seeked = checksum_lines(&output);
+    // demuxseek logs the byte each seek reads from, a re-scan reads from byte 0
+    let landings: Vec<u64> = String::from_utf8_lossy(&output.stderr)
+        .split("from byte ")
+        .skip(1)
+        .filter_map(|rest| rest.split(',').next()?.parse().ok())
+        .collect();
+    assert!(
+        !landings.is_empty() && landings.iter().all(|&byte| byte > 0),
+        "the prefetched Cues place the seek, landings {landings:?}"
+    );
+    let resumed = seeked
+        .iter()
+        .zip(&unseeked)
+        .position(|(seeked, unseeked)| seeked != unseeked)
+        .expect("the seek changed the output");
+    let expected = &unseeked[KEYFRAME_BEFORE_TARGET..];
+    let pts = |lines: &[String]| {
+        lines
+            .iter()
+            .map(|line| line.split_whitespace().next().map(str::to_string))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        pts(&seeked[resumed..]),
+        pts(expected),
+        "the run resumes at the keyframe before the target"
+    );
+    // the first frame after the flush carries the codec config, so its digest differs
+    assert_eq!(seeked[resumed + 1..], expected[1..]);
+}
+
+#[test]
+fn a_seek_during_playback_in_a_muxer_pipeline_is_served() {
+    let output_location = format!("{}/m374_remuxed.ts", env!("CARGO_TARGET_TMPDIR"));
+    // a muxer keeps the run from parking filesrc at the end, so reading the Cues there would end the stream
+    let pipeline = format!(
+        "filesrc location={AV_FIXTURE} blocksize={BLOCKSIZE} ! matroskademux ! h264parse \
+         ! mpegtsmux ! filesink location={output_location}"
+    );
+    succeeded(&launch(&pipeline, &["--seek-at", SEEK_AT]));
+    let _ = std::fs::remove_file(&output_location);
+}

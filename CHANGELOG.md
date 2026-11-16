@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2350: `matroskademux` prefetches its `Cues` for a seek only when the run parks its source at the end, so a seek in a pipeline with a muxer no longer fails.
 - M2349: `qtdemux` streams a progressive MP4 from its sample tables when `filesrc` feeds it, and seeks to the keyframe the index names.
 - M2348: `MkvDemuxN` seeks through `Cues` a `SeekHead` locates, `OggDemuxN` guesses the landing byte offset for audio, and AVI keyframes after a seek carry the H.264 parameter sets.
 - M2347: Every multi-output demuxer seeks across all its ports, so A/V files in TS, Matroska, FLV, Ogg, MPEG-PS, AVI and MP4 seek in `playbin`.

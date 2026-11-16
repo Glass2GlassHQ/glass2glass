@@ -789,7 +789,9 @@ lands on the earliest of the forwarded tracks' last keyframes at or before the
 target, read from the index, and the parse carries on from that byte. Otherwise
 it re-scans from byte 0. An end-relative edge counts from the duration
 `Mp4DemuxN` reads from `mvhd`. `MkvDemux` and `MkvDemuxN` share
-the `Cues` prefetch (`CuePrefetch`), and `OggDemux` and `OggDemuxN` share the
+the `Cues` prefetch (`CuePrefetch`), taken only when the run parks the source at
+its end, since the source reads on past the `Cues` to the end of the file and
+returns there otherwise. Without it the seek re-scans from byte 0. `OggDemux` and `OggDemuxN` share the
 byte-offset guess (`OggSeekGuess`), which `OggDemuxN` takes only when every port's
 stream can resume mid-file, an audio-only file, since VP8 and Theora are timed by
 counting frames from the start.

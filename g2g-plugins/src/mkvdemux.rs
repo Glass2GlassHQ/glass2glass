@@ -159,9 +159,13 @@ impl CuePrefetch {
         if !demux.cues().is_empty() {
             // Index known: seek directly to the target Cluster.
             seek.poll_request_indexed(|t| demux.cue_seek_offset(t));
-        } else if let (Some(cues_off), Some(stream_start_ns)) =
-            (demux.cue_index_offset(), seek.stream_start_ns())
-        {
+        } else if let (Some(cues_off), Some(stream_start_ns)) = (
+            // filesrc reads on to the end of the file after the Cues, and returns there unless the run parks it
+            demux
+                .cue_index_offset()
+                .filter(|_| seek.takes_seeks_after_end()),
+            seek.stream_start_ns(),
+        ) {
             // Index located but not parsed: prefetch it before the real seek.
             if let Some(app_seek) = seek.take_app_seek() {
                 seek.seek_upstream(cues_off);
