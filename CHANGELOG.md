@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2338: `Ov3660` camera driver, and the ESP32-S3 runs live person detection on it with TFLite Micro and ESP-NN.
 - M2337: MicroFlow is removed, the ESP32-S3 runs TFLite Micro models outside ESP-IDF, and `Int8Quantize` gains `PixelMapping::Int8Range`.
 - M2336: `MicroFrontend`, the TFLite Micro audio frontend bit-exact with TensorFlow's, so the ESP32-S3 keyword graph detects spoken yes and no.
 - M2335: `examples/g2g-esp32s3` runs the keyword graph live on the board's PDM microphone.
