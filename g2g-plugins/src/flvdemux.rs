@@ -446,7 +446,7 @@ impl FlvDemux {
             }
             // M362 seek: hold units from the keyframe at/before the target (the
             // FLV frame-type flag) until the target, then a fresh segment and them.
-            let admitted = self.seek.admit(u.pts_ns(), u.keyframe, u);
+            let admitted = self.seek.admit(0, u.pts_ns(), u.keyframe, u);
             if let Some(seg) = admitted.segment {
                 out.push(PipelinePacket::Segment(seg)).await?;
             }
@@ -687,6 +687,7 @@ pub struct FlvDemuxN {
     port_caps: Vec<Caps>,
     segment: SharedSegment,
     emitted: u64,
+    seek: DemuxSeek<FlvUnit>,
 }
 
 impl FlvDemuxN {
@@ -704,6 +705,7 @@ impl FlvDemuxN {
             port_caps: ports.iter().map(FlvPort::caps).collect(),
             segment: SharedSegment::new(ports.len()),
             emitted: 0,
+            seek: DemuxSeek::default(),
         }
     }
 
@@ -712,26 +714,44 @@ impl FlvDemuxN {
             emitter.sync_configs(&self.demux);
         }
         for unit in self.demux.take_units() {
+            self.seek
+                .note_track_unit(unit.track() as u64, unit.pts_ns());
             let Some(port) = self.emitters.iter().position(|e| e.carries(&unit)) else {
                 continue;
             };
-            let pts_ns = unit.pts_ns();
-            self.segment
-                .send_before_unit(port, pts_ns, Some(pts_ns), 0, out)
-                .await?;
-            let emitted = self.emitters[port].convert(&self.demux, unit);
-            if let Some(caps) = emitted.caps {
-                out.push_to(port, PipelinePacket::CapsChanged(caps)).await?;
+            let admitted = self.seek.admit(port, unit.pts_ns(), unit.keyframe, unit);
+            if let Some(seek_segment) = admitted.segment {
+                self.segment.restart_at(seek_segment);
             }
-            for (payload, timing) in emitted.payloads {
-                let frame = Frame::new(
-                    MemoryDomain::System(SystemSlice::from_boxed(payload.into_boxed_slice())),
-                    timing,
-                    self.emitted,
-                );
-                self.emitted += 1;
-                out.push_to(port, PipelinePacket::DataFrame(frame)).await?;
+            for unit in admitted {
+                self.emit_unit(port, unit, out).await?;
             }
+        }
+        Ok(())
+    }
+
+    async fn emit_unit(
+        &mut self,
+        port: usize,
+        unit: FlvUnit,
+        out: &mut dyn MultiOutputSink,
+    ) -> Result<(), G2gError> {
+        let pts_ns = unit.pts_ns();
+        self.segment
+            .send_before_unit(port, pts_ns, Some(pts_ns), 0, out)
+            .await?;
+        let emitted = self.emitters[port].convert(&self.demux, unit);
+        if let Some(caps) = emitted.caps {
+            out.push_to(port, PipelinePacket::CapsChanged(caps)).await?;
+        }
+        for (payload, timing) in emitted.payloads {
+            let frame = Frame::new(
+                MemoryDomain::System(SystemSlice::from_boxed(payload.into_boxed_slice())),
+                timing,
+                self.emitted,
+            );
+            self.emitted += 1;
+            out.push_to(port, PipelinePacket::DataFrame(frame)).await?;
         }
         Ok(())
     }
@@ -765,14 +785,27 @@ impl MultiOutputElement for FlvDemuxN {
             .map(|_| ConfigureOutcome::Accepted)
     }
 
+    fn seek_route(&self) -> Option<ElementSeekRoute> {
+        Some(ElementSeekRoute::UpstreamBytes)
+    }
+
+    fn set_seek(&mut self, app: SeekController, upstream: SeekController) {
+        self.seek.with(app, upstream);
+    }
+
     fn process<'a>(
         &'a mut self,
         packet: PipelinePacket,
         out: &'a mut dyn MultiOutputSink,
     ) -> Self::ProcessFuture<'a> {
         Box::pin(async move {
+            self.seek.hold_at_segment_end().await;
+            self.seek.poll_request();
             match packet {
                 PipelinePacket::DataFrame(frame) => {
+                    if self.seek.dropping_input() {
+                        return Ok(());
+                    }
                     let slice = frame
                         .domain
                         .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
@@ -780,7 +813,11 @@ impl MultiOutputElement for FlvDemuxN {
                     self.route_units(out).await?;
                 }
                 PipelinePacket::Flush => {
+                    let forward = self.seek.on_flush();
                     self.demux = FlvDemuxer::new();
+                    if !forward {
+                        return Ok(());
+                    }
                     for port in 0..self.emitters.len() {
                         self.emitters[port].need_param_sets = true;
                         out.push_to(port, PipelinePacket::Flush).await?;
@@ -792,7 +829,19 @@ impl MultiOutputElement for FlvDemuxN {
                     }
                 }
                 // the runner sends the merged Eos to every port
-                PipelinePacket::Eos => self.route_units(out).await?,
+                PipelinePacket::Eos => {
+                    if self
+                        .seek
+                        .eos_before_flush(self.seek.dropping_input())
+                        .await?
+                    {
+                        return Ok(());
+                    }
+                    self.route_units(out).await?;
+                    self.seek
+                        .end_ports_and_wait_for_seek(self.emitters.len(), out)
+                        .await?;
+                }
                 _ => {}
             }
             Ok(())

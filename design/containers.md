@@ -162,8 +162,7 @@ as an `AsyncElement`, its port 0 the single output, defaulting to H.264.
 the demuxer accepts to its port's caps, and forwards the demuxer's properties,
 latency and seek. A one-port `TsDemuxN` exposes `stream` and `pid` for its port,
 and a second `tsdemux` selecting another stream demuxes the rest of the
-multiplex. Only a one-port `TsDemuxN` seeks, since the seek re-syncs on one
-stream's keyframes, and the graph runner reaches it through `TsDemux`.
+multiplex.
 
 Selection is by codec, not by a runtime-discovered "first video", because the
 output pad's media type is fixed at negotiation before any packet is parsed.
@@ -1158,10 +1157,9 @@ port takes the first track `stream` matches, the first video track by default,
 or the one `track-id` names among them, once the `moov` arrives. It reads only
 the whole-file `ByteStream{Mp4}`, where an `Mp4DemuxN` with probed ports also
 reads the streaming `IsoBmff`. Either emits a fragmented file fragment by
-fragment and a progressive one at EOS. A one-port `Mp4DemuxN` serves a time seek
-from the whole file (`ElementSeekRoute::Buffered`), so a seek holds a fragmented
-file until EOS too. A seek taken while the samples go out stops the emission, and
-the file is emitted again from the target. The ports share one presentation start, the earliest among
+fragment and a progressive one at EOS. `Mp4DemuxN` serves a time seek from the
+whole file (`ElementSeekRoute::Buffered`), so a seek holds a fragmented file until
+EOS too. The ports share one presentation start, the earliest among
 the forwarded tracks of a track's first pts past its edit-list start, learned
 from the first samples out and kept across a flush. A port's segment starts no
 earlier than its edit-list start plus that presentation start and counts stream

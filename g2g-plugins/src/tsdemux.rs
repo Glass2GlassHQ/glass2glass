@@ -1364,7 +1364,7 @@ impl TsDemuxN {
         // a stream that never shows a stamp starts at 0, as gst's tsdemux does
         let position_ns = self.last_stamp.map_or(0, |stamp| stamp.pts_ns);
         let keyframe = is_keyframe(stream, &u.data);
-        let admitted = self.seek.admit(position_ns, keyframe, u);
+        let admitted = self.seek.admit(port, position_ns, keyframe, u);
         if admitted.segment.is_some() {
             self.segment = admitted.segment;
         }
@@ -1787,13 +1787,9 @@ impl MultiOutputElement for TsDemuxN {
                             return Err(no_pinned_stream(pid, self.ports[port]));
                         }
                     }
-                    if self.seek.takes_seeks_after_end() {
-                        for port in 0..self.ports.len() {
-                            out.push_to(port, PipelinePacket::Eos).await?;
-                        }
-                        self.seek.wait_for_seek_or_shutdown().await;
-                        self.seek.poll_request();
-                    }
+                    self.seek
+                        .end_ports_and_wait_for_seek(self.ports.len(), out)
+                        .await?;
                 }
                 // The input's (byte-stream) CapsChanged is consumed: each port
                 // defines its own caps, announced per port above.
@@ -1806,8 +1802,7 @@ impl MultiOutputElement for TsDemuxN {
     }
 
     fn seek_route(&self) -> Option<ElementSeekRoute> {
-        // a seek re-syncs on one stream's keyframes
-        (self.ports.len() == 1).then_some(ElementSeekRoute::UpstreamBytes)
+        Some(ElementSeekRoute::UpstreamBytes)
     }
 
     fn set_seek(&mut self, app: SeekController, upstream: SeekController) {

@@ -319,7 +319,7 @@ impl Fmp4Demux {
                     for s in samples {
                         // M362 seek: hold samples from the keyframe at/before the
                         // target until the target, then a fresh segment and them.
-                        let admitted = self.seek.admit(s.pts_ns, s.keyframe, s);
+                        let admitted = self.seek.admit(0, s.pts_ns, s.keyframe, s);
                         if let Some(seg) = admitted.segment {
                             out.push(PipelinePacket::Segment(seg)).await?;
                         }

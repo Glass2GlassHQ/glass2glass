@@ -42,17 +42,15 @@ use g2g_core::{
     g2g_error, AudioFormat, BusHandle, BusMessage, ByteStreamEncoding, Caps, CapsConstraint,
     CapsSet, ConfigureOutcome, Dim, ElementMetadata, FrameTiming, G2gError, LatencyReport,
     MemoryDomain, MultiOutputElement, MultiOutputSink, PipelinePacket, PropError, PropValue,
-    PropertySpec, Rate, Seek, SeekFlags, SeekType, Segment, Stream, StreamCollection, StreamType,
-    VideoCodec,
+    PropertySpec, Rate, Segment, Stream, StreamCollection, StreamType, VideoCodec,
 };
 
-use crate::demuxseek::{segment_from, with_stream_time};
+use crate::demuxseek::{with_stream_time, DemuxSeek};
 use crate::fmp4::{
-    clip_stored_pcm, edit_track_samples, every_sample_ends_by, keyframe_index_for,
-    moov_holds_samples, movie_duration_ns, parse_all_tracks, parse_chapters, parse_fragments_multi,
-    parse_progressive_multi, prepend_param_sets, starts_with_param_set, stream_start_ns,
-    track_fragment_framerate_q16, track_framerate_q16, unsupported_pcm_layout, vorbis_headers,
-    FragmentStarts, Sample, TrackHeader, TrackKind,
+    clip_stored_pcm, edit_track_samples, moov_holds_samples, movie_duration_ns, parse_all_tracks,
+    parse_chapters, parse_fragments_multi, parse_progressive_multi, prepend_param_sets,
+    starts_with_param_set, track_fragment_framerate_q16, track_framerate_q16,
+    unsupported_pcm_layout, vorbis_headers, FragmentStarts, Sample, TrackHeader, TrackKind,
 };
 use crate::mp4box::{boxes_at, find_box, parse_ilst_tags};
 use crate::mp4demux::{StreamSelect, MP4DEMUX_PROPS};
@@ -446,7 +444,7 @@ pub struct Mp4DemuxN {
     port_first_presented_ns: Vec<Option<u64>>,
     segment_sent: Vec<Segment>,
     // a seek holds a fragmented file whole too, since it is served from the whole file at Eos
-    seek: Option<SeekController>,
+    seek: DemuxSeek<Sample>,
     duration_ns: Option<u64>,
 }
 
@@ -523,7 +521,7 @@ impl Mp4DemuxN {
             port_edit,
             presentation_start_ns: None,
             port_first_presented_ns,
-            seek: None,
+            seek: DemuxSeek::default(),
             duration_ns: None,
         }
     }
@@ -693,7 +691,7 @@ impl Mp4DemuxN {
 
     // every sample of a whole file goes out at Eos, and a seek holds a fragmented file whole
     fn emits_at_eos(&self) -> bool {
-        self.fragmented != Some(true) || self.seek.is_some()
+        self.fragmented != Some(true) || self.seek.seekable()
     }
 
     /// Announce the file's streams and metadata on the bus, once: the
@@ -817,6 +815,7 @@ impl Mp4DemuxN {
             };
             let fragmented = find_box(moov, b"mvex").is_some() && !moov_holds_samples(moov);
             self.duration_ns = movie_duration_ns(moov);
+            self.seek.set_duration(self.duration_ns);
             let tracks = parse_all_tracks(&self.buf)?;
             self.resolve_ports(&tracks)?;
             if self.bus.is_some() {
@@ -991,11 +990,10 @@ impl Mp4DemuxN {
     /// one big `mdat` (nothing can emit incrementally). The fragmented path emits in
     /// [`advance`](Self::advance) instead, so this is reached only when `fragmented`
     /// is not `Some(true)`.
-    // the stream time a SEGMENT seek served here ends at, for its segment-done
     async fn parse_and_emit_whole(
         &mut self,
         out: &mut dyn MultiOutputSink,
-    ) -> Result<Option<u64>, G2gError> {
+    ) -> Result<(), G2gError> {
         let tracks = parse_all_tracks(&self.buf)?;
         self.resolve_ports(&tracks)?;
         if self.bus.is_some() {
@@ -1031,109 +1029,8 @@ impl Mp4DemuxN {
             .iter()
             .map(|track| track_framerate_q16(&self.buf, track))
             .collect::<Vec<_>>();
-        let seek = self.seek.as_ref().and_then(|app| app.take_seek(Ok));
-        let (samples, segment_end_ns) = match (seek, &forwarded[..]) {
-            (None, _) => (samples, None),
-            (Some(seek), [track]) => {
-                if seek.is_flush() {
-                    out.push_to(0, PipelinePacket::Flush).await?;
-                    self.need_config[0] = true;
-                }
-                let span = self.seek_to(track, samples, &seek, out).await?;
-                let segment_end_ns = seek
-                    .flags
-                    .contains(SeekFlags::SEGMENT)
-                    .then_some(span.end_ns);
-                (span.samples, segment_end_ns)
-            }
-            (Some(_), _) => unreachable!("only a one-port demuxer seeks"),
-        };
         self.emit_samples(&forwarded, &framerates, samples, out)
-            .await?;
-        Ok(segment_end_ns)
-    }
-
-    // the whole file stays buffered, so a seek after every sample went out re-emits from the target
-    async fn serve_seeks_after_samples(
-        &mut self,
-        mut segment_end_ns: Option<u64>,
-        out: &mut dyn MultiOutputSink,
-    ) -> Result<(), G2gError> {
-        let Some(app) = self.seek.clone() else {
-            return Ok(());
-        };
-        loop {
-            // a seek that arrived while the samples went out cut the span short
-            match (segment_end_ns, app.has_pending()) {
-                (_, true) => {}
-                (Some(position_ns), false) => {
-                    app.notify_segment_done(position_ns);
-                    app.wait_for_seek().await;
-                }
-                (None, false) if app.takes_seeks_after_end() => {
-                    self.end_ports(out).await?;
-                    app.wait_for_seek().await;
-                }
-                (None, false) => {}
-            }
-            if !app.has_pending() {
-                // the runner forwards no Eos for an element that took seeks while handling it
-                if segment_end_ns.is_some() {
-                    self.end_ports(out).await?;
-                }
-                return Ok(());
-            }
-            segment_end_ns = self.parse_and_emit_whole(out).await?;
-        }
-    }
-
-    async fn end_ports(&self, out: &mut dyn MultiOutputSink) -> Result<(), G2gError> {
-        for port in 0..self.ports.len() {
-            out.push_to(port, PipelinePacket::Eos).await?;
-        }
-        Ok(())
-    }
-
-    // the one port opens at the target, from the keyframe at or before it
-    async fn seek_to(
-        &mut self,
-        track: &TrackHeader,
-        samples: Vec<(u32, Sample)>,
-        seek: &Seek,
-        out: &mut dyn MultiOutputSink,
-    ) -> Result<SeekSpan<(u32, Sample)>, G2gError> {
-        let edit = track.presentation_segment();
-        let span = seek_samples(
-            samples.into_iter().map(|(_, sample)| sample).collect(),
-            edit,
-            seek,
-        );
-        let segment = if seek.is_flush() {
-            span.segment
-        } else {
-            // a non-flushing seek carries running time on from where the last span ended, as `Mp4Src` does
-            let played_to_ns = self.upstream_segment.stop.unwrap_or(span.stream_end_pts_ns);
-            Segment {
-                base: self
-                    .upstream_segment
-                    .to_running_time(played_to_ns)
-                    .unwrap_or(self.upstream_segment.base),
-                ..span.segment
-            }
-        };
-        self.upstream_segment = segment;
-        self.port_edit[0] = edit;
-        self.send_port_segment(0, out).await?;
-        Ok(SeekSpan {
-            samples: span
-                .samples
-                .into_iter()
-                .map(|sample| (track.track_id, sample))
-                .collect(),
-            segment,
-            end_ns: span.end_ns,
-            stream_end_pts_ns: span.stream_end_pts_ns,
-        })
+            .await
     }
 
     /// The tracks some port forwards, the only ones worth de-framing.
@@ -1159,161 +1056,189 @@ impl Mp4DemuxN {
         out: &mut dyn MultiOutputSink,
     ) -> Result<(), G2gError> {
         for (track_id, sample) in samples {
-            if self.seek.as_ref().is_some_and(SeekController::has_pending) {
+            if self.seek.app_seek_pending() {
                 return Ok(());
             }
             let Some(port) = self.port_of(track_id) else {
                 continue; // a track no port forwards
             };
-            let track_index = tracks.iter().position(|t| t.track_id == track_id);
-            let track = track_index.map(|index| &tracks[index]);
-            let kind = track.map(|t| &t.kind);
-            // Announce the port's real caps once (refining the looser negotiation
-            // caps the branch solved against, e.g. concrete AAC channels/rate).
-            if !self.announced[port] {
-                let caps = match track_index {
-                    Some(index) => with_framerate(
-                        real_caps(&tracks[index].kind),
-                        framerate_within_placeholder(framerates_q16[index]),
-                    ),
-                    None => self.port_caps(port).alternatives()[0].clone(),
+            self.seek
+                .note_track_unit(u64::from(track_id), sample.pts_ns);
+            let admitted = self
+                .seek
+                .admit(port, sample.pts_ns, sample.keyframe, sample);
+            if let Some(seek_segment) = admitted.segment {
+                self.upstream_segment = seek_segment;
+                for announced_port in 0..self.announced.len() {
+                    if self.announced[announced_port] {
+                        self.send_port_segment(announced_port, out).await?;
+                    }
+                }
+            }
+            for sample in admitted {
+                self.emit_sample(tracks, framerates_q16, port, track_id, sample, out)
+                    .await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn emit_sample(
+        &mut self,
+        tracks: &[TrackHeader],
+        framerates_q16: &[Option<u32>],
+        port: usize,
+        track_id: u32,
+        sample: Sample,
+        out: &mut dyn MultiOutputSink,
+    ) -> Result<(), G2gError> {
+        let track_index = tracks.iter().position(|t| t.track_id == track_id);
+        let track = track_index.map(|index| &tracks[index]);
+        let kind = track.map(|t| &t.kind);
+        // Announce the port's real caps once (refining the looser negotiation
+        // caps the branch solved against, e.g. concrete AAC channels/rate).
+        if !self.announced[port] {
+            let caps = match track_index {
+                Some(index) => with_framerate(
+                    real_caps(&tracks[index].kind),
+                    framerate_within_placeholder(framerates_q16[index]),
+                ),
+                None => self.port_caps(port).alternatives()[0].clone(),
+            };
+            out.push_to(port, PipelinePacket::CapsChanged(caps)).await?;
+            self.announced[port] = true;
+            self.port_edit[port] = track.map_or(Segment::new(), TrackHeader::presentation_segment);
+            if self.port_segment(port) != self.segment_sent[port] {
+                self.send_port_segment(port, out).await?;
+            }
+        }
+
+        let mut data = sample.annexb;
+        // An Opus, Vorbis, ALAC, raw AAC or tagged track's config goes downstream as
+        // frames of its own ahead of the samples, so they are built here and pushed below.
+        let mut lead_frames: Vec<Vec<u8>> = Vec::new();
+        match kind {
+            // a tagged codec's whole sample entry leads it as a frame of its own
+            Some(TrackKind::Video {
+                codec: VideoCodec::Tagged(_),
+                param_sets,
+                ..
+            }) => {
+                if self.need_config[port] {
+                    lead_frames.extend(param_sets.first().cloned());
+                }
+            }
+            Some(TrackKind::Audio {
+                format: AudioFormat::Tagged(_) | AudioFormat::Alac,
+                config,
+                ..
+            }) => {
+                if self.need_config[port] {
+                    lead_frames.push(config.clone());
+                }
+            }
+            // Prepend out-of-band parameter sets to the first video frame if
+            // it carries none (our own muxer keeps them in-band; CMAF may not).
+            Some(TrackKind::Video {
+                codec, param_sets, ..
+            }) => {
+                if self.need_config[port] && !starts_with_param_set(&data, *codec) {
+                    data = prepend_param_sets(&data, param_sets, *codec);
+                }
+            }
+            // Opus packets are stored raw; the `dOps`-derived `OpusHead`
+            // (M791) leads them in-band, the convention `OggDemux` uses, so
+            // `OpusDec` trims the pre-skip and a remux writes the real value.
+            Some(TrackKind::Audio {
+                format: AudioFormat::Opus,
+                config,
+                ..
+            }) => {
+                if self.need_config[port] && !config.is_empty() {
+                    lead_frames.push(config.clone());
+                }
+            }
+            // the three Vorbis headers lead the packets, the way `OggDemux` forwards them
+            Some(TrackKind::Audio {
+                format: AudioFormat::Vorbis,
+                config,
+                ..
+            }) => {
+                if self.need_config[port] {
+                    let headers = vorbis_headers(config).expect("read with the track");
+                    lead_frames.extend(headers.into_iter().map(<[u8]>::to_vec));
+                }
+            }
+            Some(TrackKind::Audio {
+                format: AudioFormat::Aac,
+                config,
+                ..
+            }) if is_raw_aac_config(config) => {
+                if self.need_config[port] {
+                    lead_frames.push(config.clone());
+                }
+            }
+            // ADTS-frame every AAC access unit from the track's ASC, so the
+            // audio elementary stream is self-describing (carries its profile
+            // / rate / channels per frame) and a decoder can start without the
+            // out-of-band config, symmetric with the in-band video param sets.
+            Some(TrackKind::Audio {
+                format: AudioFormat::Aac,
+                config,
+                ..
+            }) => {
+                data = require_adts(config, &data, short_type_name::<Self>())?;
+            }
+            // MP3 frames carry their own headers, and the sample parse already
+            // turned PCM into the graph's byte layout
+            Some(TrackKind::Audio { .. }) => {}
+            // the sample parse already put the rows in the graph's layout
+            Some(TrackKind::RawVideo {
+                format,
+                width,
+                height,
+                ..
+            }) => {
+                let Some(pixels) = raw_video_frame_bytes(*format, *width, *height, data.len())
+                else {
+                    warn_short_raw_video_frame("qtdemux", *format, *width, *height, data.len());
+                    return Ok(());
                 };
-                out.push_to(port, PipelinePacket::CapsChanged(caps)).await?;
-                self.announced[port] = true;
-                self.port_edit[port] =
-                    track.map_or(Segment::new(), TrackHeader::presentation_segment);
-                if self.port_segment(port) != self.segment_sent[port] {
-                    self.send_port_segment(port, out).await?;
-                }
+                data.truncate(pixels);
             }
+            // Text cues and caption cc_data arrive already de-framed by the
+            // sample parse (the tx3g length prefix stripped, the caption atoms
+            // unwrapped); forward the payload as is.
+            Some(TrackKind::Text { .. }) | Some(TrackKind::ClosedCaption { .. }) | None => {}
+        }
+        self.need_config[port] = false;
 
-            let mut data = sample.annexb;
-            // An Opus, Vorbis, ALAC, raw AAC or tagged track's config goes downstream as
-            // frames of its own ahead of the samples, so they are built here and pushed below.
-            let mut lead_frames: Vec<Vec<u8>> = Vec::new();
-            match kind {
-                // a tagged codec's whole sample entry leads it as a frame of its own
-                Some(TrackKind::Video {
-                    codec: VideoCodec::Tagged(_),
-                    param_sets,
-                    ..
-                }) => {
-                    if self.need_config[port] {
-                        lead_frames.extend(param_sets.first().cloned());
-                    }
-                }
-                Some(TrackKind::Audio {
-                    format: AudioFormat::Tagged(_) | AudioFormat::Alac,
-                    config,
-                    ..
-                }) => {
-                    if self.need_config[port] {
-                        lead_frames.push(config.clone());
-                    }
-                }
-                // Prepend out-of-band parameter sets to the first video frame if
-                // it carries none (our own muxer keeps them in-band; CMAF may not).
-                Some(TrackKind::Video {
-                    codec, param_sets, ..
-                }) => {
-                    if self.need_config[port] && !starts_with_param_set(&data, *codec) {
-                        data = prepend_param_sets(&data, param_sets, *codec);
-                    }
-                }
-                // Opus packets are stored raw; the `dOps`-derived `OpusHead`
-                // (M791) leads them in-band, the convention `OggDemux` uses, so
-                // `OpusDec` trims the pre-skip and a remux writes the real value.
-                Some(TrackKind::Audio {
-                    format: AudioFormat::Opus,
-                    config,
-                    ..
-                }) => {
-                    if self.need_config[port] && !config.is_empty() {
-                        lead_frames.push(config.clone());
-                    }
-                }
-                // the three Vorbis headers lead the packets, the way `OggDemux` forwards them
-                Some(TrackKind::Audio {
-                    format: AudioFormat::Vorbis,
-                    config,
-                    ..
-                }) => {
-                    if self.need_config[port] {
-                        let headers = vorbis_headers(config).expect("read with the track");
-                        lead_frames.extend(headers.into_iter().map(<[u8]>::to_vec));
-                    }
-                }
-                Some(TrackKind::Audio {
-                    format: AudioFormat::Aac,
-                    config,
-                    ..
-                }) if is_raw_aac_config(config) => {
-                    if self.need_config[port] {
-                        lead_frames.push(config.clone());
-                    }
-                }
-                // ADTS-frame every AAC access unit from the track's ASC, so the
-                // audio elementary stream is self-describing (carries its profile
-                // / rate / channels per frame) and a decoder can start without the
-                // out-of-band config, symmetric with the in-band video param sets.
-                Some(TrackKind::Audio {
-                    format: AudioFormat::Aac,
-                    config,
-                    ..
-                }) => {
-                    data = require_adts(config, &data, short_type_name::<Self>())?;
-                }
-                // MP3 frames carry their own headers, and the sample parse already
-                // turned PCM into the graph's byte layout
-                Some(TrackKind::Audio { .. }) => {}
-                // the sample parse already put the rows in the graph's layout
-                Some(TrackKind::RawVideo {
-                    format,
-                    width,
-                    height,
-                    ..
-                }) => {
-                    let Some(pixels) = raw_video_frame_bytes(*format, *width, *height, data.len())
-                    else {
-                        warn_short_raw_video_frame("qtdemux", *format, *width, *height, data.len());
-                        continue;
-                    };
-                    data.truncate(pixels);
-                }
-                // Text cues and caption cc_data arrive already de-framed by the
-                // sample parse (the tx3g length prefix stripped, the caption atoms
-                // unwrapped); forward the payload as is.
-                Some(TrackKind::Text { .. }) | Some(TrackKind::ClosedCaption { .. }) | None => {}
-            }
-            self.need_config[port] = false;
-
-            for head in lead_frames {
-                let frame = self.next_frame(head, FrameTiming::default());
-                out.push_to(port, PipelinePacket::DataFrame(frame)).await?;
-            }
-            let timing = FrameTiming {
-                pts_ns: sample.pts_ns,
-                dts_ns: sample.dts_ns,
-                duration_ns: sample.duration_ns,
-                capture_ns: sample.pts_ns,
-                arrival_ns: g2g_core::metrics::monotonic_ns(),
-                keyframe: sample.keyframe,
-                start_discard_ns: sample.start_discard_ns,
-                end_discard_ns: sample.end_discard_ns,
-            };
-            let clipped = match kind {
-                Some(kind) => clip_stored_pcm(kind, &self.port_segment(port), timing, data)?,
-                None => Some((timing, data)),
-            };
-            let Some((timing, data)) = clipped else {
-                continue;
-            };
-            let mut frame = self.next_frame(data, timing);
-            if let Some(track) = track {
-                frame.meta = crate::fmp4::clean_aperture_meta(track.clean_aperture);
-            }
+        for head in lead_frames {
+            let frame = self.next_frame(head, FrameTiming::default());
             out.push_to(port, PipelinePacket::DataFrame(frame)).await?;
         }
+        let timing = FrameTiming {
+            pts_ns: sample.pts_ns,
+            dts_ns: sample.dts_ns,
+            duration_ns: sample.duration_ns,
+            capture_ns: sample.pts_ns,
+            arrival_ns: g2g_core::metrics::monotonic_ns(),
+            keyframe: sample.keyframe,
+            start_discard_ns: sample.start_discard_ns,
+            end_discard_ns: sample.end_discard_ns,
+        };
+        let clipped = match kind {
+            Some(kind) => clip_stored_pcm(kind, &self.port_segment(port), timing, data)?,
+            None => Some((timing, data)),
+        };
+        let Some((timing, data)) = clipped else {
+            return Ok(());
+        };
+        let mut frame = self.next_frame(data, timing);
+        if let Some(track) = track {
+            frame.meta = crate::fmp4::clean_aperture_meta(track.clean_aperture);
+        }
+        out.push_to(port, PipelinePacket::DataFrame(frame)).await?;
         Ok(())
     }
 
@@ -1410,9 +1335,22 @@ impl MultiOutputElement for Mp4DemuxN {
                 // broadcasts the merged Eos to every port after this.
                 PipelinePacket::Eos => {
                     self.advance(out).await?;
-                    if self.emits_at_eos() {
-                        let segment_end_ns = self.parse_and_emit_whole(out).await?;
-                        self.serve_seeks_after_samples(segment_end_ns, out).await?;
+                    if !self.emits_at_eos() {
+                        return Ok(());
+                    }
+                    let mut replayed = false;
+                    loop {
+                        self.parse_and_emit_whole(out).await?;
+                        let port_count = self.ports.len();
+                        if !self
+                            .seek
+                            .replay_held_stream(replayed, port_count, out)
+                            .await?
+                        {
+                            break;
+                        }
+                        replayed = true;
+                        self.need_config.fill(true);
                     }
                 }
                 // A flush discards the buffer and the parse progress (a re-read
@@ -1461,12 +1399,11 @@ impl MultiOutputElement for Mp4DemuxN {
     }
 
     fn seek_route(&self) -> Option<ElementSeekRoute> {
-        // the seek is served at Eos, where the samples of every port go out together
-        (self.ports.len() == 1).then_some(ElementSeekRoute::Buffered)
+        Some(ElementSeekRoute::Buffered)
     }
 
     fn set_buffered_seek(&mut self, app: SeekController) {
-        self.seek = Some(app);
+        self.seek.with_held_stream(app);
     }
 
     fn query_duration(&self) -> Option<u64> {
@@ -1529,61 +1466,6 @@ fn with_framerate(mut caps: Caps, rate: Rate) -> Caps {
         *framerate = rate;
     }
     caps
-}
-
-#[derive(Debug)]
-struct SeekSpan<S> {
-    // from the keyframe at or before the target to the last sample presenting by the stop
-    samples: Vec<S>,
-    segment: Segment,
-    // where the span ends in stream time: the stop, or the end of the stream
-    end_ns: u64,
-    stream_end_pts_ns: u64,
-}
-
-fn seek_samples(mut samples: Vec<Sample>, edit: Segment, seek: &Seek) -> SeekSpan<Sample> {
-    // an edit list that starts presentation later moves the start time with it
-    let stream_start_ns = edit.start.max(stream_start_ns(&samples));
-    let stream_end_pts_ns = samples
-        .iter()
-        .map(|sample| sample.pts_ns.saturating_add(sample.duration_ns))
-        .max()
-        .unwrap_or(stream_start_ns);
-    let duration_ns = stream_end_pts_ns.saturating_sub(stream_start_ns);
-    // the whole file is parsed, so an edge counted back from the end lands on a known duration
-    let from_stream_start = |edge_type: SeekType, edge_ns: u64| match edge_type {
-        SeekType::End => duration_ns.saturating_sub(edge_ns),
-        SeekType::Set | SeekType::None => edge_ns,
-    };
-    let target_ns = from_stream_start(seek.start_type, seek.start).saturating_add(stream_start_ns);
-    let seek_stop_ns = (seek.stop_type != SeekType::None)
-        .then(|| from_stream_start(seek.stop_type, seek.stop).saturating_add(stream_start_ns));
-    if let Some(stop_ns) = seek_stop_ns {
-        // samples come in decode order, so a B frame presenting by the stop can follow one past it
-        let end = samples
-            .iter()
-            .rposition(|sample| sample.pts_ns <= stop_ns)
-            .map_or(0, |last| last + 1);
-        samples.truncate(end);
-    }
-    let first = if every_sample_ends_by(&samples, target_ns) {
-        samples.len()
-    } else {
-        keyframe_index_for(&samples, target_ns)
-    };
-    samples.drain(..first);
-    let segment = Segment {
-        stop: edit.stop.into_iter().chain(seek_stop_ns).min(),
-        ..segment_from(target_ns, stream_start_ns)
-    };
-    SeekSpan {
-        samples,
-        segment,
-        end_ns: seek_stop_ns
-            .unwrap_or(stream_end_pts_ns)
-            .saturating_sub(stream_start_ns),
-        stream_end_pts_ns,
-    }
 }
 
 #[cfg(test)]

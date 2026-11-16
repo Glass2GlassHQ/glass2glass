@@ -37,7 +37,7 @@ use alloc::vec::Vec;
 use g2g_core::frame::Frame;
 use g2g_core::log::Target;
 use g2g_core::memory::SystemSlice;
-use g2g_core::runtime::StreamSelectController;
+use g2g_core::runtime::{ElementSeekRoute, SeekController, StreamSelectController};
 use g2g_core::{
     g2g_error, AsyncElement, AudioFormat, BusHandle, BusMessage, ByteStreamEncoding, Caps,
     CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, FrameTiming, G2gError,
@@ -46,7 +46,7 @@ use g2g_core::{
     Segment, Stream, StreamCollection, StreamType, SubPictureFormat, VideoCodec,
 };
 
-use crate::demuxseek::SharedSegment;
+use crate::demuxseek::{DemuxSeek, SharedSegment};
 use crate::mpeg2video::Mpeg2TimestampSynth;
 pub use crate::mpeg2video::{parse_sequence_header, SequenceHeader};
 use crate::mpegts::{decode_timestamp, parse_pes_header};
@@ -1734,6 +1734,9 @@ pub struct PsDemuxN {
     seed_geometry: Option<SequenceHeader>,
     // the video reframer holds a picture until the next one starts
     held_picture_ns: u64,
+    seek: DemuxSeek<PsUnit>,
+    // the last pts out, which times a unit its PES left unstamped
+    last_presented_ns: u64,
 }
 
 impl PsDemuxN {
@@ -1761,6 +1764,8 @@ impl PsDemuxN {
             held_until_first_stamp: HeldUntilFirstStamp::default(),
             seed_geometry: None,
             held_picture_ns: 0,
+            seek: DemuxSeek::default(),
+            last_presented_ns: 0,
         }
     }
 
@@ -1881,87 +1886,109 @@ impl PsDemuxN {
             let Some(port) = self.port_for_stream(es) else {
                 continue; // a stream no selected port carries
             };
-            let kind = self.ports[port];
-            let presented_ns = ns_from_90khz(u.pts_90khz);
-            let decoded_ns = ns_from_90khz(u.dts_90khz).or(presented_ns);
-            let opening_start_ns = decoded_ns.unwrap_or(self.held_until_first_stamp.opening_ns());
-            let pts_ns = presented_ns.unwrap_or(FrameTiming::PTS_NONE);
-            let dts_ns = decoded_ns.unwrap_or(FrameTiming::DTS_NONE);
-            if !self.announced[port] {
-                // Announce what `port_output_caps` declared: a seeded video
-                // port solved at its Fixed geometry, and the runner's
-                // mid-stream check rejects a Range placeholder on that link.
-                let caps = match (kind, self.seed_geometry) {
-                    (PsStream::Mpeg2, Some(seq)) => Caps::CompressedVideo {
-                        codec: VideoCodec::Mpeg2,
-                        width: Dim::Fixed(seq.width),
-                        height: Dim::Fixed(seq.height),
-                        framerate: Rate::Fixed(seq.framerate_q16),
-                        colorimetry: g2g_core::Colorimetry::UNKNOWN,
-                        pixel_aspect: seq.pixel_aspect,
-                        alignment: g2g_core::BitstreamAlignment::Unspecified,
-                    },
-                    _ => PsDemux::output_caps(kind),
-                };
-                out.push_to(port, PipelinePacket::CapsChanged(caps)).await?;
-                self.announced[port] = true;
-                // A seeded announce already names the geometry; the parsed
-                // sequence header then only re-announces a real change.
-                if let (PsStream::Mpeg2, Some(seq)) = (kind, self.seed_geometry) {
-                    self.refined[port] = Some(seq);
-                }
+            if let Some(presented_ns) = ns_from_90khz(u.pts_90khz) {
+                self.seek
+                    .note_track_unit(u64::from(u.stream_id), presented_ns);
+                self.last_presented_ns = presented_ns;
             }
-            self.segment
-                .send_before_unit(port, opening_start_ns, presented_ns, 0, out)
-                .await?;
-            // A subpicture port opens on the same synthesized `.idx` the single
-            // output demuxer sends, so a fan-out subtitle branch renders on the
-            // video's geometry rather than the decoder's default.
-            if kind == PsStream::SubPicture && !self.config_sent[port] {
-                if let Some(blob) = idx_config_blob(&self.demux) {
-                    self.config_sent[port] = true;
-                    let frame = config_frame(blob, pts_ns, self.emitted);
-                    self.emitted += 1;
-                    out.push_to(port, PipelinePacket::DataFrame(frame)).await?;
-                }
+            let keyframe = unit_is_keyframe(self.ports[port], &u.data);
+            let admitted = self.seek.admit(port, self.last_presented_ns, keyframe, u);
+            if let Some(seek_segment) = admitted.segment {
+                self.segment.restart_at(seek_segment);
             }
-            if kind == PsStream::Mpeg2 {
-                if let Some(seq) = u.sequence {
-                    self.held_picture_ns = crate::compositor::frame_period_ns(seq.framerate_q16);
-                    if self.refined[port] != Some(seq) {
-                        self.refined[port] = Some(seq);
-                        out.push_to(
-                            port,
-                            PipelinePacket::CapsChanged(Caps::CompressedVideo {
-                                codec: VideoCodec::Mpeg2,
-                                width: Dim::Fixed(seq.width),
-                                height: Dim::Fixed(seq.height),
-                                framerate: Rate::Fixed(seq.framerate_q16),
-                                colorimetry: g2g_core::Colorimetry::UNKNOWN,
-                                pixel_aspect: seq.pixel_aspect,
-                                alignment: g2g_core::BitstreamAlignment::Unspecified,
-                            }),
-                        )
-                        .await?;
-                    }
-                }
+            for u in admitted {
+                self.emit_unit(port, u, out).await?;
             }
-            let duration_ns = cue_duration_ns(kind, &u.data);
-            let keyframe = unit_is_keyframe(kind, &u.data);
-            let frame = Frame::new(
-                MemoryDomain::System(SystemSlice::from_boxed(u.data.into_boxed_slice())),
-                FrameTiming {
-                    pts_ns,
-                    dts_ns,
-                    duration_ns,
-                    keyframe,
-                    ..FrameTiming::default()
-                },
-                self.emitted,
-            );
-            self.emitted += 1;
-            out.push_to(port, PipelinePacket::DataFrame(frame)).await?;
         }
+        Ok(())
+    }
+
+    async fn emit_unit(
+        &mut self,
+        port: usize,
+        u: PsUnit,
+        out: &mut dyn MultiOutputSink,
+    ) -> Result<(), G2gError> {
+        let kind = self.ports[port];
+        let presented_ns = ns_from_90khz(u.pts_90khz);
+        let decoded_ns = ns_from_90khz(u.dts_90khz).or(presented_ns);
+        let opening_start_ns = decoded_ns.unwrap_or(self.held_until_first_stamp.opening_ns());
+        let pts_ns = presented_ns.unwrap_or(FrameTiming::PTS_NONE);
+        let dts_ns = decoded_ns.unwrap_or(FrameTiming::DTS_NONE);
+        if !self.announced[port] {
+            // Announce what `port_output_caps` declared: a seeded video
+            // port solved at its Fixed geometry, and the runner's
+            // mid-stream check rejects a Range placeholder on that link.
+            let caps = match (kind, self.seed_geometry) {
+                (PsStream::Mpeg2, Some(seq)) => Caps::CompressedVideo {
+                    codec: VideoCodec::Mpeg2,
+                    width: Dim::Fixed(seq.width),
+                    height: Dim::Fixed(seq.height),
+                    framerate: Rate::Fixed(seq.framerate_q16),
+                    colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                    pixel_aspect: seq.pixel_aspect,
+                    alignment: g2g_core::BitstreamAlignment::Unspecified,
+                },
+                _ => PsDemux::output_caps(kind),
+            };
+            out.push_to(port, PipelinePacket::CapsChanged(caps)).await?;
+            self.announced[port] = true;
+            // A seeded announce already names the geometry; the parsed
+            // sequence header then only re-announces a real change.
+            if let (PsStream::Mpeg2, Some(seq)) = (kind, self.seed_geometry) {
+                self.refined[port] = Some(seq);
+            }
+        }
+        self.segment
+            .send_before_unit(port, opening_start_ns, presented_ns, 0, out)
+            .await?;
+        // A subpicture port opens on the same synthesized `.idx` the single
+        // output demuxer sends, so a fan-out subtitle branch renders on the
+        // video's geometry rather than the decoder's default.
+        if kind == PsStream::SubPicture && !self.config_sent[port] {
+            if let Some(blob) = idx_config_blob(&self.demux) {
+                self.config_sent[port] = true;
+                let frame = config_frame(blob, pts_ns, self.emitted);
+                self.emitted += 1;
+                out.push_to(port, PipelinePacket::DataFrame(frame)).await?;
+            }
+        }
+        if kind == PsStream::Mpeg2 {
+            if let Some(seq) = u.sequence {
+                self.held_picture_ns = crate::compositor::frame_period_ns(seq.framerate_q16);
+                if self.refined[port] != Some(seq) {
+                    self.refined[port] = Some(seq);
+                    out.push_to(
+                        port,
+                        PipelinePacket::CapsChanged(Caps::CompressedVideo {
+                            codec: VideoCodec::Mpeg2,
+                            width: Dim::Fixed(seq.width),
+                            height: Dim::Fixed(seq.height),
+                            framerate: Rate::Fixed(seq.framerate_q16),
+                            colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                            pixel_aspect: seq.pixel_aspect,
+                            alignment: g2g_core::BitstreamAlignment::Unspecified,
+                        }),
+                    )
+                    .await?;
+                }
+            }
+        }
+        let duration_ns = cue_duration_ns(kind, &u.data);
+        let keyframe = unit_is_keyframe(kind, &u.data);
+        let frame = Frame::new(
+            MemoryDomain::System(SystemSlice::from_boxed(u.data.into_boxed_slice())),
+            FrameTiming {
+                pts_ns,
+                dts_ns,
+                duration_ns,
+                keyframe,
+                ..FrameTiming::default()
+            },
+            self.emitted,
+        );
+        self.emitted += 1;
+        out.push_to(port, PipelinePacket::DataFrame(frame)).await?;
         Ok(())
     }
 }
@@ -2010,14 +2037,27 @@ impl MultiOutputElement for PsDemuxN {
             .map(|_| ConfigureOutcome::Accepted)
     }
 
+    fn seek_route(&self) -> Option<ElementSeekRoute> {
+        Some(ElementSeekRoute::UpstreamBytes)
+    }
+
+    fn set_seek(&mut self, app: SeekController, upstream: SeekController) {
+        self.seek.with(app, upstream);
+    }
+
     fn process<'a>(
         &'a mut self,
         packet: PipelinePacket,
         out: &'a mut dyn MultiOutputSink,
     ) -> Self::ProcessFuture<'a> {
         Box::pin(async move {
+            self.seek.hold_at_segment_end().await;
+            self.seek.poll_request();
             match packet {
                 PipelinePacket::DataFrame(frame) => {
+                    if self.seek.dropping_input() {
+                        return Ok(());
+                    }
                     let slice = frame
                         .domain
                         .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
@@ -2029,8 +2069,12 @@ impl MultiOutputElement for PsDemuxN {
                     self.route_units(false, out).await?;
                 }
                 PipelinePacket::Flush => {
+                    let forward = self.seek.on_flush();
                     self.demux = PsDemuxer::new();
                     self.held_until_first_stamp = HeldUntilFirstStamp::default();
+                    if !forward {
+                        return Ok(());
+                    }
                     for port in 0..self.ports.len() {
                         self.config_sent[port] = false;
                         out.push_to(port, PipelinePacket::Flush).await?;
@@ -2042,8 +2086,18 @@ impl MultiOutputElement for PsDemuxN {
                     }
                 }
                 PipelinePacket::Eos => {
+                    if self
+                        .seek
+                        .eos_before_flush(self.seek.dropping_input())
+                        .await?
+                    {
+                        return Ok(());
+                    }
                     self.demux.flush()?;
                     self.route_units(true, out).await?;
+                    self.seek
+                        .end_ports_and_wait_for_seek(self.ports.len(), out)
+                        .await?;
                 }
                 // The input's (byte-stream) CapsChanged is consumed: each port
                 // defines its own caps, announced per port above.

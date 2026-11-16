@@ -197,7 +197,7 @@ impl FlacParse {
         }
         // every FLAC frame decodes on its own
         crate::compressed_audio_passthrough::push_admitted(
-            self.seek.admit(pts_ns, true, frame),
+            self.seek.admit(0, pts_ns, true, frame),
             out,
         )
         .await

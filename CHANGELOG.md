@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2347: Every multi-output demuxer seeks across all its ports, so A/V files in TS, Matroska, FLV, Ogg, MPEG-PS, AVI and MP4 seek in `playbin`.
 - M2346: `g2g-player`, a libmpv-style player that draws video into the host's OpenGL framebuffer or wgpu texture, with demuxers reporting their duration and seeking through demux nodes.
 - M2345: Pausing and resuming a pipeline no longer drops the frames after the resume as late.
 - M2344: RFC 4175 frames carry a classification label that `st2110videosrc` attaches as analytics meta and the overlays caption, and the ESP32-S3 sends its person label with each frame and no longer stalls its Wi-Fi stream.

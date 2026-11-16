@@ -37,6 +37,8 @@ use g2g_core::{
     ANY_SAMPLE_RATE,
 };
 
+use g2g_core::runtime::{ElementSeekRoute, SeekController};
+
 use crate::aacparse::{adts_from_asc, is_raw_aac_config};
 use crate::annexb::{
     is_annex_b, length_prefixed_to_annexb, parse_avcc, prepend_param_sets, starts_with_param_set,
@@ -45,6 +47,7 @@ use crate::avi::{palette_change, parse, parse_streams, AviFile, AviStream, AviSt
 use crate::codectag::{
     audio_from_stream_name, audio_stream_name, video_from_stream_name, video_stream_name,
 };
+use crate::demuxseek::{Admitted, DemuxSeek};
 use crate::typefind::{container_video_caps, PLACEHOLDER_FRAMERATE};
 use crate::uncompressedvideo::{
     copy_raw_video_frame, raw_video_caps, raw_video_formats, raw_video_placeholder_caps,
@@ -371,6 +374,7 @@ struct Emitted {
     data: Vec<u8>,
     timing: FrameTiming,
     meta: FrameMetaSet,
+    config: bool,
 }
 
 impl Emitted {
@@ -479,6 +483,7 @@ fn emittable<'a>(
                     data: Vec::from(config),
                     timing: FrameTiming::default(),
                     meta: FrameMetaSet::new(),
+                    config: true,
                 });
             first[chunk.stream] = false;
             let meta = palette_meta(core::mem::take(&mut palette_changes[chunk.stream]));
@@ -487,6 +492,7 @@ fn emittable<'a>(
                 data,
                 timing,
                 meta,
+                config: false,
             }))
         })
 }
@@ -794,6 +800,7 @@ pub struct AviDemuxN {
     bus: Option<BusHandle>,
     drained: bool,
     emitted: u64,
+    seek: DemuxSeek<Emitted>,
 }
 
 impl AviDemuxN {
@@ -811,6 +818,7 @@ impl AviDemuxN {
             bus: None,
             drained: false,
             emitted: 0,
+            seek: DemuxSeek::default(),
         }
     }
 
@@ -858,12 +866,35 @@ impl AviDemuxN {
             out.push_to(port, PipelinePacket::CapsChanged(caps)).await?;
         }
         for emitted in emittable(&self.buffer, &file, &self.ports) {
+            if self.seek.app_seek_pending() {
+                return Ok(());
+            }
             let Some(port) = self.ports.iter().position(|s| *s == emitted.stream) else {
                 continue;
             };
-            let frame = emitted.into_frame(self.emitted);
-            self.emitted += 1;
-            out.push_to(port, PipelinePacket::DataFrame(frame)).await?;
+            let admitted = if emitted.config {
+                Admitted::emit(emitted)
+            } else {
+                let pts_ns = emitted.timing.pts_ns;
+                self.seek.note_track_unit(emitted.stream as u64, pts_ns);
+                let audio = matches!(
+                    file.streams[emitted.stream].kind,
+                    AviStreamKind::Audio { .. }
+                );
+                let resync_point = emitted.timing.keyframe || audio;
+                self.seek.admit(port, pts_ns, resync_point, emitted)
+            };
+            if let Some(seek_segment) = admitted.segment {
+                for port in 0..self.ports.len() {
+                    out.push_to(port, PipelinePacket::Segment(seek_segment))
+                        .await?;
+                }
+            }
+            for emitted in admitted {
+                let frame = emitted.into_frame(self.emitted);
+                self.emitted += 1;
+                out.push_to(port, PipelinePacket::DataFrame(frame)).await?;
+            }
         }
         Ok(())
     }
@@ -893,6 +924,14 @@ impl MultiOutputElement for AviDemuxN {
         self.port_caps.get(port).cloned()
     }
 
+    fn seek_route(&self) -> Option<ElementSeekRoute> {
+        Some(ElementSeekRoute::Buffered)
+    }
+
+    fn set_buffered_seek(&mut self, app: SeekController) {
+        self.seek.with_held_stream(app);
+    }
+
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         if !matches!(
             absolute_caps,
@@ -918,7 +957,22 @@ impl MultiOutputElement for AviDemuxN {
                         .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
                     self.buffer.extend_from_slice(slice);
                 }
-                PipelinePacket::Eos => self.drain(out).await?,
+                PipelinePacket::Eos => {
+                    let mut replayed = false;
+                    loop {
+                        self.drain(out).await?;
+                        let port_count = self.ports.len();
+                        if !self
+                            .seek
+                            .replay_held_stream(replayed, port_count, out)
+                            .await?
+                        {
+                            break;
+                        }
+                        replayed = true;
+                        self.drained = false;
+                    }
+                }
                 PipelinePacket::Flush => {
                     self.buffer.clear();
                     self.drained = false;

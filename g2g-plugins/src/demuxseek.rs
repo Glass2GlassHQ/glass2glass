@@ -89,6 +89,8 @@ pub(crate) struct SharedSegment {
     start_ns: Option<u64>,
     sent: Vec<bool>,
     presented: Vec<Segment>,
+    // every port opens with a seek's segment, and no unit lowers it
+    seek_segment: Option<Segment>,
 }
 
 impl SharedSegment {
@@ -97,7 +99,13 @@ impl SharedSegment {
             start_ns: None,
             sent: alloc::vec![false; ports],
             presented: alloc::vec![Segment::new(); ports],
+            seek_segment: None,
         }
+    }
+
+    pub(crate) fn restart_at(&mut self, seek_segment: Segment) {
+        self.seek_segment = Some(seek_segment);
+        self.sent.fill(false);
     }
 
     // a unit presenting before the start lowers it on every opened port first, as matroskademux does
@@ -109,6 +117,15 @@ impl SharedSegment {
         priming_ns: u64,
         out: &mut dyn MultiOutputSink,
     ) -> Result<(), G2gError> {
+        if let Some(seek_segment) = self.seek_segment {
+            if !self.sent[port] {
+                self.sent[port] = true;
+                let presented = within_presentation(seek_segment, &self.presented[port]);
+                out.push_to(port, PipelinePacket::Segment(presented))
+                    .await?;
+            }
+            return Ok(());
+        }
         if let (Some(start_ns), Some(pts_ns)) = (self.start_ns, pts_ns) {
             if pts_ns < start_ns {
                 self.start_ns = Some(pts_ns);
@@ -134,12 +151,23 @@ impl SharedSegment {
     }
 }
 
-// a byte-stream demuxer knows no duration, and gst_segment_do_seek refuses an end-relative edge without one
-fn refuse_end_edges(seek: Seek) -> Result<Seek, SeekRefusal> {
-    if seek.start_type == SeekType::End || seek.stop_type == SeekType::End {
-        return Err(SeekRefusal::UnknownDuration);
-    }
-    Ok(seek)
+// gst_segment_do_seek counts an end-relative edge back from the duration, and refuses one without it
+fn edges_from_stream_start(seek: Seek, duration_ns: Option<u64>) -> Result<Seek, SeekRefusal> {
+    let from_stream_start = |edge_type: SeekType, edge_ns: u64| match edge_type {
+        SeekType::End => duration_ns
+            .map(|duration_ns| (SeekType::Set, duration_ns.saturating_sub(edge_ns)))
+            .ok_or(SeekRefusal::UnknownDuration),
+        edge_type => Ok((edge_type, edge_ns)),
+    };
+    let (start_type, start) = from_stream_start(seek.start_type, seek.start)?;
+    let (stop_type, stop) = from_stream_start(seek.stop_type, seek.stop)?;
+    Ok(Seek {
+        start_type,
+        start,
+        stop_type,
+        stop,
+        ..seek
+    })
 }
 
 #[derive(Debug)]
@@ -217,6 +245,13 @@ enum SeekTarget {
     FromStreamStart(u64),
 }
 
+#[derive(Debug)]
+struct PortDiscard<U> {
+    // empty until the port's first keyframe after the flush, since nothing before it decodes
+    kept: Vec<U>,
+    reached_target: bool,
+}
+
 /// Seek state a demuxer embeds, generic over the demuxer's decoded unit. Inert
 /// (`Idle`, zero controllers) unless [`with`](DemuxSeek::with) wired it, so a
 /// demuxer with no seek controller pays nothing.
@@ -232,8 +267,10 @@ pub(crate) struct DemuxSeek<U> {
     /// in its `Flush` handler to decide whether to keep mid-stream parser state
     /// (a mid-segment landing) or fully reset (a from-start re-scan).
     keep_state: bool,
-    // empty until the first keyframe after the flush, since nothing before it decodes
-    kept: Vec<U>,
+    // by output port, each port re-syncs on its own keyframes
+    ports: Vec<PortDiscard<U>>,
+    // set once the first port reaches the seek target, the other ports discard up to it until they reach it too
+    reached_target_ns: Option<u64>,
     stream_start_ns: Option<u64>,
     started_tracks: Vec<u64>,
     segment: StreamSegment,
@@ -246,6 +283,9 @@ pub(crate) struct DemuxSeek<U> {
     // the last segment out, the runner's opening one until this sends its own, and the latest pts out under it
     sent_segment: Segment,
     position_ns: Option<u64>,
+    // the demuxer holds the whole stream and replays it for a seek, with no byte source to reposition
+    holds_stream: bool,
+    duration_ns: Option<u64>,
 }
 
 impl<U> Default for DemuxSeek<U> {
@@ -255,7 +295,8 @@ impl<U> Default for DemuxSeek<U> {
             upstream: None,
             phase: Phase::Idle,
             keep_state: false,
-            kept: Vec::new(),
+            ports: Vec::new(),
+            reached_target_ns: None,
             stream_start_ns: None,
             started_tracks: Vec::new(),
             segment: StreamSegment::Unsent,
@@ -264,6 +305,8 @@ impl<U> Default for DemuxSeek<U> {
             segment_mode: false,
             sent_segment: Segment::new(),
             position_ns: None,
+            holds_stream: false,
+            duration_ns: None,
         }
     }
 }
@@ -276,6 +319,21 @@ impl<U> DemuxSeek<U> {
         self.upstream = Some(upstream);
         // a seek queued before the run reaches the source before its first chunk
         self.poll_request();
+    }
+
+    pub(crate) fn with_held_stream(&mut self, app: SeekController) {
+        self.app = Some(app);
+        self.holds_stream = true;
+    }
+
+    #[cfg(feature = "std")]
+    pub(crate) fn set_duration(&mut self, duration_ns: Option<u64>) {
+        self.duration_ns = duration_ns;
+    }
+
+    #[cfg(feature = "std")]
+    pub(crate) fn seekable(&self) -> bool {
+        self.app.is_some()
     }
 
     /// Poll for a pending time seek, re-scanning from the file start
@@ -296,7 +354,9 @@ impl<U> DemuxSeek<U> {
         resolve: impl FnOnce(u64) -> Option<u64>,
     ) -> bool {
         let stream_ended = matches!(self.phase, Phase::PastStop { .. } | Phase::SegmentDone);
-        if (self.phase != Phase::Idle && !stream_ended) || self.upstream.is_none() {
+        if (self.phase != Phase::Idle && !stream_ended)
+            || !(self.holds_stream || self.upstream.is_some())
+        {
             return false;
         }
         let Some(seek) = self.take_app_seek() else {
@@ -324,7 +384,11 @@ impl<U> DemuxSeek<U> {
 
     // for a caller that repositions before the seek proper, as mkvdemux fetching its Cues does
     pub(crate) fn take_app_seek(&mut self) -> Option<Seek> {
-        let seek = self.app.as_ref()?.take_seek(refuse_end_edges)?;
+        let duration_ns = self.duration_ns;
+        let seek = self
+            .app
+            .as_ref()?
+            .take_seek(|seek| edges_from_stream_start(seek, duration_ns))?;
         self.seek_flushes = seek.is_flush();
         self.seek_stop = (seek.stop_type, seek.stop);
         self.segment_mode = seek.flags.contains(SeekFlags::SEGMENT);
@@ -468,7 +532,7 @@ impl<U> DemuxSeek<U> {
             upstream.seek(Seek::flush_to(offset));
         }
         self.keep_state = keep_state;
-        self.kept.clear();
+        self.forget_kept_units();
         self.phase = Phase::AwaitingFlush { target };
     }
 
@@ -508,6 +572,43 @@ impl<U> DemuxSeek<U> {
         Err(G2gError::SeekRefused)
     }
 
+    pub(crate) fn app_seek_pending(&self) -> bool {
+        self.app.as_ref().is_some_and(SeekController::has_pending)
+    }
+
+    pub(crate) async fn replay_held_stream(
+        &mut self,
+        replayed: bool,
+        port_count: usize,
+        out: &mut dyn MultiOutputSink,
+    ) -> Result<bool, G2gError> {
+        self.hold_at_segment_end().await;
+        let mut ports_ended = false;
+        let parks = self.phase != Phase::SegmentDone && self.takes_seeks_after_end();
+        if parks && !self.app_seek_pending() {
+            for port in 0..port_count {
+                out.push_to(port, PipelinePacket::Eos).await?;
+            }
+            ports_ended = true;
+            self.wait_for_seek_or_shutdown().await;
+        }
+        if !self.poll_request() {
+            // the runner sends no Eos for an element that took a seek while handling its Eos
+            if replayed && !ports_ended {
+                for port in 0..port_count {
+                    out.push_to(port, PipelinePacket::Eos).await?;
+                }
+            }
+            return Ok(false);
+        }
+        if self.on_flush() {
+            for port in 0..port_count {
+                out.push_to(port, PipelinePacket::Flush).await?;
+            }
+        }
+        Ok(true)
+    }
+
     // the run keeps the source parked after the end of the stream, so a seek can still restart it
     pub(crate) fn takes_seeks_after_end(&self) -> bool {
         self.app
@@ -531,6 +632,22 @@ impl<U> DemuxSeek<U> {
             return Ok(());
         }
         out.push(PipelinePacket::Eos).await?;
+        self.wait_for_seek_or_shutdown().await;
+        self.poll_request();
+        Ok(())
+    }
+
+    pub(crate) async fn end_ports_and_wait_for_seek(
+        &mut self,
+        port_count: usize,
+        out: &mut dyn MultiOutputSink,
+    ) -> Result<(), G2gError> {
+        if !self.takes_seeks_after_end() {
+            return Ok(());
+        }
+        for port in 0..port_count {
+            out.push_to(port, PipelinePacket::Eos).await?;
+        }
         self.wait_for_seek_or_shutdown().await;
         self.poll_request();
         Ok(())
@@ -565,29 +682,67 @@ impl<U> DemuxSeek<U> {
             };
             forward = false;
         }
-        self.kept.clear();
+        self.forget_kept_units();
         self.segment = StreamSegment::Unsent;
         forward
     }
 
-    /// Classify a decoded `unit` by its `pts_ns` and whether it is a keyframe.
-    /// Idle emits it. While discarding, a keyframe at or before the target
-    /// restarts the kept units, and the first unit at or after the target
-    /// releases them with the segment start, after which the helper is idle.
-    pub(crate) fn admit(&mut self, pts_ns: u64, keyframe: bool, unit: U) -> Admitted<U> {
-        let Some(target_ns) = self.discard_target_ns(pts_ns) else {
+    fn forget_kept_units(&mut self) {
+        self.ports.clear();
+        self.reached_target_ns = None;
+    }
+
+    fn port_discard(&mut self, port: usize) -> &mut PortDiscard<U> {
+        if self.ports.len() <= port {
+            self.ports.resize_with(port + 1, || PortDiscard {
+                kept: Vec::new(),
+                reached_target: false,
+            });
+        }
+        &mut self.ports[port]
+    }
+
+    fn port_target_ns(&self, port: usize) -> Option<u64> {
+        let reached = self
+            .ports
+            .get(port)
+            .is_some_and(|discard| discard.reached_target);
+        self.reached_target_ns
+            .filter(|_| !reached && self.phase == Phase::Idle)
+    }
+
+    /// Classify a decoded `unit` of output `port` by its `pts_ns` and whether it
+    /// is a keyframe. Idle emits it. While discarding, a keyframe at or before
+    /// the target restarts the port's kept units, and the port's first unit at or
+    /// after the target releases them. The first port to get there also releases
+    /// the segment start, after which the helper is idle.
+    pub(crate) fn admit(
+        &mut self,
+        port: usize,
+        pts_ns: u64,
+        keyframe: bool,
+        unit: U,
+    ) -> Admitted<U> {
+        let seek_target_ns = self.discard_target_ns(pts_ns);
+        let Some(target_ns) = seek_target_ns.or_else(|| self.port_target_ns(port)) else {
             return self.pass(pts_ns, unit);
         };
+        let kept = &mut self.port_discard(port).kept;
         if keyframe && pts_ns <= target_ns {
-            self.kept.clear();
-        } else if self.kept.is_empty() && !keyframe {
+            kept.clear();
+        } else if kept.is_empty() && !keyframe {
             return Admitted::empty();
         }
-        if pts_ns < target_ns && self.kept.len() < KEPT_UNITS_MAX {
-            self.kept.push(unit);
+        if pts_ns < target_ns && kept.len() < KEPT_UNITS_MAX {
+            kept.push(unit);
             return Admitted::empty();
         }
-        self.reach_target(target_ns, pts_ns, unit)
+        if seek_target_ns.is_some() {
+            return self.reach_target(port, target_ns, pts_ns, unit);
+        }
+        let discard = self.port_discard(port);
+        discard.reached_target = true;
+        Admitted::release(None, core::mem::take(&mut discard.kept), Some(unit))
     }
 
     // for a stream of units that each decode once the decoder has seen the `preroll` units before them
@@ -601,12 +756,13 @@ impl<U> DemuxSeek<U> {
             return self.pass(pts_ns, unit);
         };
         if pts_ns >= target_ns {
-            return self.reach_target(target_ns, pts_ns, unit);
+            return self.reach_target(0, target_ns, pts_ns, unit);
         }
         // the last unit before the target can hold it, so it stays with the units it needs
-        self.kept.push(unit);
-        let unneeded = self.kept.len().saturating_sub(preroll + 1);
-        self.kept.drain(..unneeded);
+        let kept = &mut self.port_discard(0).kept;
+        kept.push(unit);
+        let unneeded = kept.len().saturating_sub(preroll + 1);
+        kept.drain(..unneeded);
         Admitted::empty()
     }
 
@@ -659,7 +815,7 @@ impl<U> DemuxSeek<U> {
             upstream.seek(Seek::flush_to(stream_len));
         }
         self.keep_state = false;
-        self.kept.clear();
+        self.forget_kept_units();
         self.phase = Phase::PastStop {
             end_flush_pending: stream_len.is_some(),
         };
@@ -680,11 +836,11 @@ impl<U> DemuxSeek<U> {
             app.notify_segment_done(position_ns);
         }
         self.position_ns = Some(end_pts_ns);
-        self.kept.clear();
+        self.forget_kept_units();
         self.phase = Phase::SegmentDone;
     }
 
-    fn reach_target(&mut self, target_ns: u64, pts_ns: u64, unit: U) -> Admitted<U> {
+    fn reach_target(&mut self, port: usize, target_ns: u64, pts_ns: u64, unit: U) -> Admitted<U> {
         let stream_start_ns = self
             .stream_start_ns
             .expect("discard_target_ns set the stream start");
@@ -692,7 +848,7 @@ impl<U> DemuxSeek<U> {
             Target::category(LOG_CATEGORY),
             "reached the seek target at {}, releasing {} units from the first one it needs",
             ClockTime(target_ns),
-            self.kept.len() + 1
+            self.port_discard(port).kept.len() + 1
         );
         let (stop_type, stop) = match self.seek_stop {
             (SeekType::Set, stop_ns) => (SeekType::Set, stop_ns.saturating_add(stream_start_ns)),
@@ -730,7 +886,14 @@ impl<U> DemuxSeek<U> {
         };
         self.sent_segment = segment;
         self.position_ns = Some(pts_ns);
-        Admitted::release(Some(segment), core::mem::take(&mut self.kept), Some(unit))
+        self.reached_target_ns = Some(target_ns);
+        let discard = self.port_discard(port);
+        discard.reached_target = true;
+        Admitted::release(
+            Some(segment),
+            core::mem::take(&mut discard.kept),
+            Some(unit),
+        )
     }
 }
 
@@ -797,16 +960,16 @@ mod tests {
 
         let target_pts_ns = TARGET_NS + STREAM_START_NS;
         let stop_pts_ns = STOP_NS + STREAM_START_NS;
-        let reached = s.admit(target_pts_ns, true, target_pts_ns);
+        let reached = s.admit(0, target_pts_ns, true, target_pts_ns);
         assert_eq!(
             reached.segment.and_then(|segment| segment.stop),
             Some(stop_pts_ns)
         );
         assert_eq!(
-            units(s.admit(stop_pts_ns, false, stop_pts_ns)).1,
+            units(s.admit(0, stop_pts_ns, false, stop_pts_ns)).1,
             vec![stop_pts_ns]
         );
-        assert_eq!(units(s.admit(stop_pts_ns + 1, false, 0)), (None, vec![]));
+        assert_eq!(units(s.admit(0, stop_pts_ns + 1, false, 0)), (None, vec![]));
         assert!(s.dropping_input());
         assert!(!s.is_seeking(), "a new seek can start after the stop");
         assert_eq!(
@@ -843,8 +1006,8 @@ mod tests {
         assert!(s.poll_request());
         upstream.take_seek(Ok);
         assert!(s.on_flush());
-        assert!(s.admit(TARGET_NS, true, TARGET_NS).segment.is_some());
-        assert_eq!(units(s.admit(STOP_NS + 1, false, 0)), (None, vec![]));
+        assert!(s.admit(0, TARGET_NS, true, TARGET_NS).segment.is_some());
+        assert_eq!(units(s.admit(0, STOP_NS + 1, false, 0)), (None, vec![]));
         assert_eq!(app.take_segment_done(), Some(STOP_NS));
         assert!(s.dropping_input());
         assert!(
@@ -881,8 +1044,8 @@ mod tests {
     #[test]
     fn idle_admits_everything() {
         let mut s = DemuxSeek::default();
-        assert_eq!(units(s.admit(0, false, 1)), (None, vec![1]));
-        assert_eq!(units(s.admit(1000, true, 2)), (None, vec![2]));
+        assert_eq!(units(s.admit(0, 0, false, 1)), (None, vec![1]));
+        assert_eq!(units(s.admit(0, 1000, true, 2)), (None, vec![2]));
         assert!(!s.dropping_input());
     }
 
@@ -900,31 +1063,31 @@ mod tests {
         assert_eq!(upstream_src.take_seek(Ok).map(|k| k.start), Some(0));
         // Awaiting the flush: input is dropped and units are not emitted.
         assert!(s.dropping_input());
-        assert_eq!(units(s.admit(0, true, 0)), (None, vec![]));
+        assert_eq!(units(s.admit(0, 0, true, 0)), (None, vec![]));
 
         assert!(s.on_flush());
         assert!(!s.dropping_input());
-        assert_eq!(units(s.admit(0, true, 0)), (None, vec![]));
-        assert_eq!(units(s.admit(1_000, false, 1_000)), (None, vec![]));
+        assert_eq!(units(s.admit(0, 0, true, 0)), (None, vec![]));
+        assert_eq!(units(s.admit(0, 1_000, false, 1_000)), (None, vec![]));
         // a later keyframe before the target restarts the kept units
-        assert_eq!(units(s.admit(4_000, true, 4_000)), (None, vec![]));
-        assert_eq!(units(s.admit(4_500, false, 4_500)), (None, vec![]));
+        assert_eq!(units(s.admit(0, 4_000, true, 4_000)), (None, vec![]));
+        assert_eq!(units(s.admit(0, 4_500, false, 4_500)), (None, vec![]));
         assert_eq!(
-            units(s.admit(6_000, false, 6_000)),
+            units(s.admit(0, 6_000, false, 6_000)),
             (Some(TARGET_NS), vec![4_000, 4_500, 6_000]),
             "the first unit at or after the target releases the kept ones"
         );
         // reordered B frames below the target follow in decode order, the segment clips them
-        assert_eq!(units(s.admit(4_800, false, 4_800)), (None, vec![4_800]));
+        assert_eq!(units(s.admit(0, 4_800, false, 4_800)), (None, vec![4_800]));
     }
 
     #[test]
     fn units_before_the_first_keyframe_never_go_out() {
         let mut s = discarding_to_target(0);
-        assert_eq!(units(s.admit(1_000, false, 1_000)), (None, vec![]));
-        assert_eq!(units(s.admit(6_000, false, 6_000)), (None, vec![]));
+        assert_eq!(units(s.admit(0, 1_000, false, 1_000)), (None, vec![]));
+        assert_eq!(units(s.admit(0, 6_000, false, 6_000)), (None, vec![]));
         assert_eq!(
-            units(s.admit(7_000, true, 7_000)),
+            units(s.admit(0, 7_000, true, 7_000)),
             (Some(TARGET_NS), vec![7_000]),
             "a landing past the target resumes on its first keyframe"
         );
@@ -953,9 +1116,9 @@ mod tests {
     #[test]
     fn a_keyframe_on_the_target_starts_there() {
         let mut s = discarding_to_target(0);
-        assert_eq!(units(s.admit(0, true, 0)), (None, vec![]));
+        assert_eq!(units(s.admit(0, 0, true, 0)), (None, vec![]));
         assert_eq!(
-            units(s.admit(TARGET_NS, true, TARGET_NS)),
+            units(s.admit(0, TARGET_NS, true, TARGET_NS)),
             (Some(TARGET_NS), vec![TARGET_NS])
         );
     }
@@ -963,11 +1126,11 @@ mod tests {
     #[test]
     fn a_long_run_without_keyframes_releases_early() {
         let mut s = discarding_to_target(0);
-        assert_eq!(units(s.admit(0, true, 0)), (None, vec![]));
+        assert_eq!(units(s.admit(0, 0, true, 0)), (None, vec![]));
         for unit in 1..KEPT_UNITS_MAX as u64 {
-            assert_eq!(units(s.admit(1, false, unit)), (None, vec![]));
+            assert_eq!(units(s.admit(0, 1, false, unit)), (None, vec![]));
         }
-        let (segment_start, released) = units(s.admit(1, false, KEPT_UNITS_MAX as u64));
+        let (segment_start, released) = units(s.admit(0, 1, false, KEPT_UNITS_MAX as u64));
         assert_eq!(segment_start, Some(TARGET_NS));
         assert_eq!(released, (0..=KEPT_UNITS_MAX as u64).collect::<Vec<_>>());
     }
@@ -978,14 +1141,14 @@ mod tests {
         let mut s = discarding_to_target(STREAM_START_NS);
         // a later unit does not move the start
         s.note_stream_start(0);
-        assert_eq!(units(s.admit(STREAM_START_NS, true, 0)), (None, vec![]));
+        assert_eq!(units(s.admit(0, STREAM_START_NS, true, 0)), (None, vec![]));
         assert_eq!(
-            units(s.admit(TARGET_NS, false, 1)),
+            units(s.admit(0, TARGET_NS, false, 1)),
             (None, vec![]),
             "the target pts is the start plus the seek time"
         );
         assert_eq!(
-            units(s.admit(TARGET_NS + STREAM_START_NS, false, 2)),
+            units(s.admit(0, TARGET_NS + STREAM_START_NS, false, 2)),
             (Some(TARGET_NS + STREAM_START_NS), vec![0, 1, 2])
         );
     }
@@ -994,9 +1157,9 @@ mod tests {
     fn segments_count_stream_time_from_the_stream_start() {
         const STREAM_START_NS: u64 = 1_000;
         let mut s = discarding_to_target(STREAM_START_NS);
-        s.admit(STREAM_START_NS, true, 0);
+        s.admit(0, STREAM_START_NS, true, 0);
         let resume = s
-            .admit(TARGET_NS + STREAM_START_NS, false, 1)
+            .admit(0, TARGET_NS + STREAM_START_NS, false, 1)
             .segment
             .expect("the seek resumes");
         assert_eq!(resume.to_stream_time(resume.start), Some(TARGET_NS));
@@ -1045,12 +1208,12 @@ mod tests {
         s.on_flush();
 
         s.note_track_unit(VIDEO, VIDEO_START_NS);
-        assert_eq!(units(s.admit(VIDEO_START_NS, true, 0)), (None, vec![]));
+        assert_eq!(units(s.admit(0, VIDEO_START_NS, true, 0)), (None, vec![]));
         s.note_track_unit(AUDIO, AUDIO_START_NS);
         // a later unit of a started track does not move the start
         s.note_track_unit(AUDIO, 0);
         assert_eq!(
-            units(s.admit(TARGET_NS + VIDEO_START_NS - 1, false, 1)),
+            units(s.admit(0, TARGET_NS + VIDEO_START_NS - 1, false, 1)),
             (Some(TARGET_NS + AUDIO_START_NS), vec![0, 1],),
             "the target counts from the audio's start"
         );
@@ -1083,8 +1246,8 @@ mod tests {
     fn a_seek_or_restart_segment_is_never_lowered() {
         const STREAM_START_NS: u64 = 1_000;
         let mut s = discarding_to_target(STREAM_START_NS);
-        s.admit(STREAM_START_NS, true, 0);
-        s.admit(TARGET_NS + STREAM_START_NS, false, 1)
+        s.admit(0, STREAM_START_NS, true, 0);
+        s.admit(0, TARGET_NS + STREAM_START_NS, false, 1)
             .segment
             .expect("the seek resumes");
         assert_eq!(s.lowered_segment(0), None, "the seek's segment stays");
@@ -1109,8 +1272,8 @@ mod tests {
         assert_eq!(upstream.take_seek(Ok).map(|seek| seek.start), Some(0));
         assert!(!s.keeps_state(), "a re-scan from the file start");
         s.on_flush();
-        s.admit(STREAM_START_NS, true, 0);
-        s.admit(TARGET_NS + STREAM_START_NS, true, 1);
+        s.admit(0, STREAM_START_NS, true, 0);
+        s.admit(0, TARGET_NS + STREAM_START_NS, true, 1);
 
         let mut looked_up = None;
         app.seek(Seek::flush_to(TARGET_NS));
@@ -1132,6 +1295,6 @@ mod tests {
         // A plain flush (no seek pending) still asks the caller to reset, but
         // stays idle so normal emission continues.
         assert!(s.on_flush());
-        assert_eq!(units(s.admit(0, false, 0)), (None, vec![0]));
+        assert_eq!(units(s.admit(0, 0, false, 0)), (None, vec![0]));
     }
 }

@@ -778,8 +778,8 @@ pub mod avidemux;
 // AVI muxer elements (M1071): one video plus an optional audio stream in, a
 // `ByteStream{Avi}` out.
 pub mod avimux;
-// Shared seek helper for byte-stream demuxers (M362): drives an upstream
-// byte-seek (FileSrc) and re-syncs from the returned Flush.
+// Shared seek helper for demuxers (M362): drives an upstream byte-seek
+// (FileSrc) and re-syncs from the returned Flush, or replays a held stream.
 mod demuxseek;
 // A single-output demuxer's `stream` for the one consumer a launch line links it to.
 #[cfg(feature = "std")]

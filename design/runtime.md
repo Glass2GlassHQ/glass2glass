@@ -655,7 +655,7 @@ An application seeks a pipeline built from a launch string through
 `runtime::attach_seek(graph, seek)`. A source reports `seek_format()`, `Time` for
 `Mp4Src` and `Bytes` for `FileSrc`. A transform or a multi-output demux reports
 `seek_route()`: `Buffered` when it serves a time seek from the whole stream it holds
-(`Mp4Demux`, a one-port `Mp4DemuxN`),
+(`Mp4Demux`, `Mp4DemuxN`, `AviDemuxN`),
 `UpstreamBytes` when it byte-seeks the source that feeds it (the byte-stream
 demuxers, and the audio parsers `flacparse`, `mpegaudioparse`, `aacparse` and `ac3parse`,
 which rescan a bare file from its start and restart their sample count there), and
@@ -771,8 +771,20 @@ the same segment. That is correct
 for any container without an index, being a re-scan, with an index-derived offset a
 later optimization.
 
-All five demuxers carry it, `fmp4demux`, `tsdemux`, `mkvdemux`, `flvdemux` and
-`oggdemux`, each using its own keyframe signal: the container flag, or
+Every demuxer carries it, the single-output `fmp4demux`, `mkvdemux`, `flvdemux` and
+`oggdemux` and the multi-output `TsDemuxN`, `MkvDemuxN`, `FlvDemuxN`, `OggDemuxN`,
+`PsDemuxN`, `AviDemuxN` and `Mp4DemuxN`. Each output port keeps its own units
+from its own last keyframe at or before the target, so an audio port restarts at
+its last packet before the target while the video port restarts at its keyframe,
+and the first port to reach the target releases the seek's `Segment` that every
+port then opens with. `AviDemuxN` and `Mp4DemuxN` hold the whole file and
+emit it at EOS, so they take the seek through `DemuxSeek::with_held_stream`
+(`ElementSeekRoute::Buffered`): a seek pending while the file goes out stops the
+emission, and `replay_held_stream` flushes every port and emits the file again
+through the same per-port keyframe selection, with an end-relative edge counted
+from the duration `Mp4DemuxN` reads from `mvhd`. The multi-output `OggDemuxN`
+re-scans from offset 0, without the single-output element's byte-offset guess.
+Each demuxer uses its own keyframe signal: the container flag, or
 `annexb::au_is_keyframe` for TS whose units have none, while every audio packet is a
 resync point and `oggdemux` accumulates an Opus PTS from the TOC byte. Where the
 container has no index at all, `oggdemux` guesses the landing byte offset by

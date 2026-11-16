@@ -564,7 +564,7 @@ impl OggDemux {
                     let resync_point =
                         timing.keyframe || !self.stream().is_some_and(is_video_codec);
                     self.seek
-                        .admit(timing.pts_ns, resync_point, (payload, timing))
+                        .admit(0, timing.pts_ns, resync_point, (payload, timing))
                 };
                 if let Some(seg) = admitted.segment {
                     out.push(PipelinePacket::Segment(seg)).await?;
@@ -1434,6 +1434,7 @@ pub struct OggDemuxN {
     emitted: u64,
     // a page's packets emit only once the whole page has parsed
     held_page_ns: Vec<Option<u64>>,
+    seek: DemuxSeek<(Vec<u8>, FrameTiming)>,
 }
 
 // twice ffmpeg's default page duration
@@ -1459,6 +1460,7 @@ impl OggDemuxN {
             tags_posted: Vec::new(),
             emitted: 0,
             held_page_ns,
+            seek: DemuxSeek::default(),
         }
     }
 
@@ -1582,21 +1584,56 @@ impl MultiOutputElement for OggDemuxN {
             .map(|_| ConfigureOutcome::Accepted)
     }
 
+    fn seek_route(&self) -> Option<ElementSeekRoute> {
+        Some(ElementSeekRoute::UpstreamBytes)
+    }
+
+    fn set_seek(&mut self, app: SeekController, upstream: SeekController) {
+        self.seek.with(app, upstream);
+    }
+
     fn process<'a>(
         &'a mut self,
         packet: PipelinePacket,
         out: &'a mut dyn MultiOutputSink,
     ) -> Self::ProcessFuture<'a> {
         Box::pin(async move {
+            self.seek.hold_at_segment_end().await;
+            self.seek.poll_request();
+            let ended = matches!(packet, PipelinePacket::Eos);
             match packet {
                 PipelinePacket::DataFrame(frame) => {
+                    if self.seek.dropping_input() {
+                        return Ok(());
+                    }
                     let slice = frame
                         .domain
                         .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
                     self.demux.push_data(slice);
                 }
+                PipelinePacket::Flush => {
+                    let forward = self.seek.on_flush();
+                    self.demux = OggDemuxer::new();
+                    for emitter in &mut self.emitters {
+                        emitter.reset();
+                    }
+                    if forward {
+                        for port in 0..self.ports.len() {
+                            out.push_to(port, PipelinePacket::Flush).await?;
+                        }
+                    }
+                    return Ok(());
+                }
                 // Emit any final packets; the runner forwards EOS to every port.
-                PipelinePacket::Eos => {}
+                PipelinePacket::Eos => {
+                    if self
+                        .seek
+                        .eos_before_flush(self.seek.dropping_input())
+                        .await?
+                    {
+                        return Ok(());
+                    }
+                }
                 PipelinePacket::CapsChanged(_) => return Ok(()),
                 _ => return Ok(()),
             }
@@ -1642,15 +1679,40 @@ impl MultiOutputElement for OggDemuxN {
                 if let Some(seg) = ready.segment {
                     out.push_to(port, PipelinePacket::Segment(seg)).await?;
                 }
-                for (payload, timing, _) in ready.frames {
-                    let frame = Frame::new(
-                        MemoryDomain::System(SystemSlice::from_boxed(payload.into_boxed_slice())),
-                        timing,
-                        self.emitted,
-                    );
-                    self.emitted += 1;
-                    out.push_to(port, PipelinePacket::DataFrame(frame)).await?;
+                let video = is_video_codec(self.ports[port].codec);
+                for (payload, timing, config) in ready.frames {
+                    // the decoder needs the in-band codec config whatever the seek target
+                    let admitted = if config {
+                        Admitted::emit((payload, timing))
+                    } else {
+                        self.seek.note_track_unit(slot as u64, timing.pts_ns);
+                        let resync_point = timing.keyframe || !video;
+                        self.seek
+                            .admit(port, timing.pts_ns, resync_point, (payload, timing))
+                    };
+                    if let Some(seek_segment) = admitted.segment {
+                        for port in 0..self.ports.len() {
+                            out.push_to(port, PipelinePacket::Segment(seek_segment))
+                                .await?;
+                        }
+                    }
+                    for (payload, timing) in admitted {
+                        let frame = Frame::new(
+                            MemoryDomain::System(SystemSlice::from_boxed(
+                                payload.into_boxed_slice(),
+                            )),
+                            timing,
+                            self.emitted,
+                        );
+                        self.emitted += 1;
+                        out.push_to(port, PipelinePacket::DataFrame(frame)).await?;
+                    }
                 }
+            }
+            if ended {
+                self.seek
+                    .end_ports_and_wait_for_seek(self.ports.len(), out)
+                    .await?;
             }
             Ok(())
         })

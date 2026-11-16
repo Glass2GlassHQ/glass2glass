@@ -49,10 +49,10 @@ The plan is [remote.md](remote.md).
 
 ## Embeddable player (`g2g-player`)
 
-- Seek A/V files: every multi-port demuxer (`MkvDemuxN`, `TsDemuxN`,
-  `PsDemuxN`, `OggDemuxN`, `FlvDemuxN`, `AviDemuxN`) seeks across all its ports
-  through a shared `DemuxSeek`, and `Mp4DemuxN` reads a progressive file by byte
-  offset instead of holding it whole until EOS.
+- `Mp4DemuxN` and `AviDemuxN` read a progressive file by byte offset instead of
+  holding it whole until EOS, so playback starts before the file is read.
+- `MkvDemuxN` prefetches `Cues` through a `SeekHead` the way `MkvDemux` does, and
+  `OggDemuxN` guesses the landing byte offset the way `OggDemux` does.
 - Duration from the TS, PS, Ogg, FLV and AVI demuxers.
 - Track selection and the `track-list` property.
 - guikit's controls: `keep-open` and `eof-reached`, `loadfile` `start=` and
