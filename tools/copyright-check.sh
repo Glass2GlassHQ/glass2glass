@@ -11,7 +11,7 @@ missing=0
 while read -r file; do
   header=$(head -n 20 "$file")
   if ! grep -q '^\(//\|#\) Copyright (C) ' <<<"$header" ||
-    ! grep -q '^\(//\|#\) SPDX-License-Identifier: MPL-2.0$' <<<"$header"; then
+    ! grep -q '^\(//\|#\) SPDX-License-Identifier: MPL-2.0\( AND .*\)\?$' <<<"$header"; then
     echo "$file"
     missing=1
   fi
