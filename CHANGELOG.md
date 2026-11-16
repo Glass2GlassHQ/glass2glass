@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2342: The ESP32-S3 runs its graphs on sleeping embassy executors, with the keyword graph and the camera's RTP sender on the second core.
 - M2341: Paced video sinks and `fpsdisplaysink` gain gst's `sync`, so `sync=false` presents every frame on arrival.
 - M2340: `st2110videosrc` runs in `g2g-launch` with an `idle-timeout`, and lost RFC 4175 rows show the previous frame's rows instead of black.
 - M2339: `RawVideoRtpSend` sends RFC 4175 video from a heap-free MCU graph, and the ESP32-S3 streams its camera over Wi-Fi to a host window.

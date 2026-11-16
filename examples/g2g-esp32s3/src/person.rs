@@ -5,6 +5,9 @@
 use core::mem::MaybeUninit;
 use core::ptr::addr_of;
 
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::mutex::Mutex;
+use embassy_sync::signal::Signal;
 use esp_hal::time::Instant;
 use esp_println::println;
 use g2g_core::error::G2gError;
@@ -16,12 +19,12 @@ use g2g_core::{
     TensorShape,
 };
 use g2g_mcu::{
-    CTensorModel, FrameGrabber, GrabberSrc, Int8Quantize, PacketSender, PixelMapping,
-    RawVideoRtpSend, TensorFormat, TensorInference,
+    FrameGrabber, GrabberSrc, Int8Quantize, PacketSender, PixelMapping, RawVideoRtpSend,
+    TensorFormat, TensorInference,
 };
 
 use crate::network::RTP_PACKET_BYTES;
-use crate::tflm;
+use crate::tflm::{self, TflmModel};
 
 pub const SIDE: usize = 96;
 pub const IMAGE_BYTES: usize = SIDE * SIDE;
@@ -91,7 +94,7 @@ extern "C" {
     static g_person_detect_model_data_len: i32;
 }
 
-pub fn load_model(arena: &'static mut [MaybeUninit<u8>]) -> Result<CTensorModel, G2gError> {
+pub fn load_model(arena: &'static mut [MaybeUninit<u8>]) -> Result<TflmModel, G2gError> {
     // SAFETY: person_detect_model_data.cc defines both symbols, an 8-byte aligned array and its length.
     let model = unsafe {
         core::slice::from_raw_parts(
@@ -124,7 +127,7 @@ pub async fn run_person_graph(
     grabber: impl FrameGrabber,
     image_limit: Option<u32>,
     image_interval_ns: u64,
-    model: &mut CTensorModel,
+    model: &mut TflmModel,
     front: impl StaticTransform,
     sink: impl StaticSink,
 ) -> Result<(), G2gError> {
@@ -174,7 +177,7 @@ impl FrameGrabber for SampleImages {
     }
 }
 
-pub fn check_samples(model: &mut CTensorModel) -> bool {
+pub fn check_samples(model: &mut TflmModel) -> bool {
     let mut matches = 0;
     let mut index = 0;
     let start = Instant::now();
@@ -209,20 +212,45 @@ const CAMERA_FRAME_INTERVAL_NS: u64 = 64_000_000;
 const RTP_PAYLOAD_TYPE: u8 = 96;
 const RTP_SSRC: u32 = 0x6732_6732;
 
+pub struct FrameHandoff {
+    frame: Mutex<CriticalSectionRawMutex, &'static mut [u8; IMAGE_BYTES]>,
+    ready: Signal<CriticalSectionRawMutex, ()>,
+}
+
+impl FrameHandoff {
+    pub fn new(frame: &'static mut [u8; IMAGE_BYTES]) -> Self {
+        Self {
+            frame: Mutex::new(frame),
+            ready: Signal::new(),
+        }
+    }
+}
+
+struct HandOff<'h> {
+    handoff: &'h FrameHandoff,
+}
+
+impl StaticTransform for HandOff<'_> {
+    async fn process(&mut self, input: Frame) -> Result<Option<Frame>, G2gError> {
+        let pixels: &[u8; IMAGE_BYTES] = input
+            .domain
+            .as_system_slice()
+            .and_then(|pixels| pixels.try_into().ok())
+            .ok_or(G2gError::CapsMismatch)?;
+        // the sender holds the lock while it copies the previous frame out
+        if let Ok(mut slot) = self.handoff.frame.try_lock() {
+            slot.copy_from_slice(pixels);
+            self.handoff.ready.signal(());
+        }
+        Ok(Some(input))
+    }
+}
+
 pub async fn watch(
-    model: &mut CTensorModel,
+    model: &mut TflmModel,
     camera: impl FrameGrabber,
-    sender: impl PacketSender,
+    handoff: &FrameHandoff,
 ) -> Result<(), G2gError> {
-    let stream = RawVideoRtpSend::<_, RTP_PACKET_BYTES>::new(
-        sender,
-        Sampling::Gray8,
-        SIDE,
-        SIDE,
-        RTP_PAYLOAD_TYPE,
-        RTP_SSRC,
-    )
-    .ok_or(G2gError::CapsMismatch)?;
     let mut last = Instant::now();
     let sink = ScoreSink {
         on_scores: |scores: [i8; CLASSES]| {
@@ -240,5 +268,46 @@ pub async fn watch(
             last = now;
         },
     };
-    run_person_graph(camera, None, CAMERA_FRAME_INTERVAL_NS, model, stream, sink).await
+    let front = HandOff { handoff };
+    run_person_graph(camera, None, CAMERA_FRAME_INTERVAL_NS, model, front, sink).await
+}
+
+struct HandedFrames<'h> {
+    handoff: &'h FrameHandoff,
+}
+
+impl FrameGrabber for HandedFrames<'_> {
+    async fn capture(&mut self, buf: &mut [u8]) -> Result<usize, G2gError> {
+        self.handoff.ready.wait().await;
+        let slot = self.handoff.frame.lock().await;
+        buf.get_mut(..IMAGE_BYTES)
+            .ok_or(G2gError::CapsMismatch)?
+            .copy_from_slice(slot.as_slice());
+        Ok(IMAGE_BYTES)
+    }
+}
+
+struct DiscardFrames;
+
+impl StaticSink for DiscardFrames {
+    async fn consume(&mut self, _frame: Frame) -> Result<(), G2gError> {
+        Ok(())
+    }
+}
+
+pub async fn stream(handoff: &FrameHandoff, sender: impl PacketSender) -> Result<(), G2gError> {
+    let rtp = RawVideoRtpSend::<_, RTP_PACKET_BYTES>::new(
+        sender,
+        Sampling::Gray8,
+        SIDE,
+        SIDE,
+        RTP_PAYLOAD_TYPE,
+        RTP_SSRC,
+    )
+    .ok_or(G2gError::CapsMismatch)?;
+    let ring: StaticLendRing<1, IMAGE_BYTES> = StaticLendRing::new();
+    // SAFETY: the ring is a local of this function and outlives the graph run.
+    let source =
+        unsafe { GrabberSrc::with_ring(HandedFrames { handoff }, &ring, CAMERA_FRAME_INTERVAL_NS) };
+    run_source_transform_sink(source, rtp, DiscardFrames).await
 }

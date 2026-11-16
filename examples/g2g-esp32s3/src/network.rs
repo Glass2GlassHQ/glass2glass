@@ -26,17 +26,11 @@ pub const RTP_PACKET_BYTES: usize = 1400;
 const SEND_QUEUE_PACKETS: usize = 8;
 const DHCP_AND_RTP_SOCKETS: usize = 2;
 
-pub struct Network {
-    pub controller: WifiController<'static>,
-    pub stack: Stack<'static>,
-    pub runner: Runner<'static, Interface>,
-}
-
 pub fn start(
     wifi: WIFI<'static>,
     timer_group: TIMG0<'static>,
     interrupt: FROM_CPU_INTR0<'static>,
-) -> Result<Network, G2gError> {
+) -> Result<WifiController<'static>, G2gError> {
     // esp-radio peaks at 47 KB of heap on this board, measured with esp-alloc's heap stats
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 72 * 1024);
     esp_rtos::start(TimerGroup::new(timer_group).timer0, interrupt);
@@ -50,20 +44,19 @@ pub fn start(
     controller
         .set_config(&Config::Station(station))
         .map_err(|_| connect_failure())?;
+    Ok(controller)
+}
+
+pub fn ip_stack() -> (Stack<'static>, Runner<'static, Interface>) {
     static RESOURCES: StaticCell<StackResources<DHCP_AND_RTP_SOCKETS>> = StaticCell::new();
     let rng = Rng::new();
     let seed = u64::from(rng.random()) << 32 | u64::from(rng.random());
-    let (stack, runner) = embassy_net::new(
+    embassy_net::new(
         Interface::station(),
         embassy_net::Config::dhcpv4(Default::default()),
         RESOURCES.init(StackResources::new()),
         seed,
-    );
-    Ok(Network {
-        controller,
-        stack,
-        runner,
-    })
+    )
 }
 
 fn connect_failure() -> G2gError {

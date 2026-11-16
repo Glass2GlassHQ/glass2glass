@@ -1158,9 +1158,10 @@ name = "g2g-esp32s3"
 version = "0.1.0"
 dependencies = [
  "cc",
- "embassy-futures",
+ "embassy-executor",
  "embassy-net",
- "embassy-time-queue-utils",
+ "embassy-sync 0.8.0",
+ "embassy-time",
  "esp-alloc",
  "esp-backtrace",
  "esp-bootloader-esp-idf",

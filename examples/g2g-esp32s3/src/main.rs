@@ -12,16 +12,21 @@ mod person;
 mod tflm;
 
 use core::mem::MaybeUninit;
-use core::pin::pin;
+use core::ptr;
 
+use embassy_executor::raw::TaskStorage;
 use esp_backtrace as _;
 use esp_hal::clock::CpuClock;
 use esp_hal::psram::{Psram, PsramConfig};
+use esp_hal::system::Stack;
 use esp_hal::time::Instant;
 use esp_println::println;
+use esp_radio::wifi::WifiController;
+use esp_rtos::embassy::Executor;
 use g2g_core::error::{G2gError, HardwareError};
-use g2g_mcu::CTensorModel;
 use noalloc_pipeline::keyword::CLIP_BYTES;
+use static_cell::StaticCell;
+use tflm::TflmModel;
 
 // espflash refuses images without the esp-idf application descriptor.
 esp_bootloader_esp_idf::esp_app_desc!();
@@ -40,46 +45,72 @@ fn report(name: &str, run: impl FnOnce() -> u64, expected: u64) -> bool {
     matches
 }
 
+// holds core 1's task futures, the keyword task's alone about 61 KB, plus the frames their polls call into
+const SECOND_CORE_STACK_BYTES: usize = 128 * 1024;
+
 struct PsramBuffers {
+    second_core_stack: &'static mut Stack<SECOND_CORE_STACK_BYTES>,
     speech_arena: &'static mut [MaybeUninit<u8>],
     person_arena: &'static mut [MaybeUninit<u8>],
     microphone_window: &'static mut [u8; CLIP_BYTES],
     camera_frame: &'static mut [u8; person::IMAGE_BYTES],
+    handoff_frame: &'static mut [u8; person::IMAGE_BYTES],
 }
 
 fn psram_buffers(psram: &Psram) -> PsramBuffers {
     let (start, bytes) = psram.raw_parts();
     assert!(
-        bytes >= keyword::ARENA_BYTES + person::ARENA_BYTES + CLIP_BYTES + person::IMAGE_BYTES,
+        bytes
+            >= SECOND_CORE_STACK_BYTES
+                + keyword::ARENA_BYTES
+                + person::ARENA_BYTES
+                + CLIP_BYTES
+                + 2 * person::IMAGE_BYTES,
         "PSRAM holds {bytes} bytes"
     );
     // SAFETY: Psram maps `bytes` bytes at `start` for the life of the program, and only this function hands them out.
     let memory = unsafe { core::slice::from_raw_parts_mut(start.cast::<MaybeUninit<u8>>(), bytes) };
-    let (speech_arena, rest) = memory.split_at_mut(keyword::ARENA_BYTES);
+    let (stack, rest) = memory.split_at_mut(SECOND_CORE_STACK_BYTES);
+    assert!(stack
+        .as_ptr()
+        .cast::<Stack<SECOND_CORE_STACK_BYTES>>()
+        .is_aligned());
+    // SAFETY: the slice is aligned for Stack and as long as it, and Stack is uninitialized memory.
+    let second_core_stack =
+        unsafe { &mut *stack.as_mut_ptr().cast::<Stack<SECOND_CORE_STACK_BYTES>>() };
+    let (speech_arena, rest) = rest.split_at_mut(keyword::ARENA_BYTES);
     let (person_arena, rest) = rest.split_at_mut(person::ARENA_BYTES);
     let (window, rest) = rest.split_at_mut(CLIP_BYTES);
-    let frame = &mut rest[..person::IMAGE_BYTES];
-    for byte in window.iter_mut().chain(frame.iter_mut()) {
+    let (frame, rest) = rest.split_at_mut(person::IMAGE_BYTES);
+    let handoff = &mut rest[..person::IMAGE_BYTES];
+    for byte in window
+        .iter_mut()
+        .chain(frame.iter_mut())
+        .chain(handoff.iter_mut())
+    {
         byte.write(0);
     }
-    // SAFETY: every byte of both buffers was just written.
-    let (microphone_window, camera_frame) = unsafe {
+    // SAFETY: every byte of the three buffers was just written.
+    let (microphone_window, camera_frame, handoff_frame) = unsafe {
         (
             &mut *window.as_mut_ptr().cast::<[u8; CLIP_BYTES]>(),
             &mut *frame.as_mut_ptr().cast::<[u8; person::IMAGE_BYTES]>(),
+            &mut *handoff.as_mut_ptr().cast::<[u8; person::IMAGE_BYTES]>(),
         )
     };
     PsramBuffers {
+        second_core_stack,
         speech_arena,
         person_arena,
         microphone_window,
         camera_frame,
+        handoff_frame,
     }
 }
 
 // without LTO, rustc gives main one stack frame for everything inlined into it
 #[inline(never)]
-fn run_checks(speech: &mut CTensorModel, person_model: &mut CTensorModel) -> bool {
+fn run_checks(speech: &mut TflmModel, person_model: &mut TflmModel) -> bool {
     let display = report(
         "display",
         noalloc_pipeline::run,
@@ -100,31 +131,63 @@ fn run_checks(speech: &mut CTensorModel, person_model: &mut CTensorModel) -> boo
     display && audio && features && speech_scores && person_scores
 }
 
+fn run_second_core(
+    speech: &'static mut TflmModel,
+    microphone: keyword::Microphone,
+    mut controller: WifiController<'static>,
+    handoff: &'static person::FrameHandoff,
+) -> ! {
+    let (stack, mut runner) = network::ip_stack();
+    let network_task = TaskStorage::new();
+    let stream_task = TaskStorage::new();
+    let listen_task = TaskStorage::new();
+    // SAFETY: Executor::run below never returns, so this frame outlives every task.
+    let (network_task, stream_task, listen_task) = unsafe {
+        (
+            &*ptr::from_ref(&network_task),
+            &*ptr::from_ref(&stream_task),
+            &*ptr::from_ref(&listen_task),
+        )
+    };
+    static SECOND_CORE_EXECUTOR: StaticCell<Executor> = StaticCell::new();
+    SECOND_CORE_EXECUTOR.init(Executor::new()).run(|spawner| {
+        let networking = network_task.spawn(|| async move { runner.run().await });
+        spawner.spawn(networking.expect("network task"));
+        let streaming = stream_task.spawn(|| async move {
+            let stopped = async {
+                network::connect(&mut controller, stack).await?;
+                person::stream(handoff, network::udp_sender(stack)?).await
+            }
+            .await;
+            println!("camera stream stopped: {stopped:?}");
+        });
+        spawner.spawn(streaming.expect("stream task"));
+        let listening = listen_task.spawn(|| async move {
+            let stopped = keyword::listen(speech, microphone).await;
+            println!("keyword graph stopped: {stopped:?}");
+        });
+        spawner.spawn(listening.expect("keyword task"));
+    })
+}
+
+// without LTO, rustc gives main one stack frame for everything inlined into it
 #[inline(never)]
 fn run_live(
-    speech: &mut CTensorModel,
-    person_model: &mut CTensorModel,
-    microphone: keyword::Microphone,
+    person_model: &'static mut TflmModel,
     camera: camera::CameraGrabber,
-    network: network::Network,
-) {
-    let network::Network {
-        mut controller,
-        stack,
-        mut runner,
-    } = network;
-    let networking = pin!(runner.run());
-    let listening = pin!(keyword::listen(speech, microphone));
-    let watching = pin!(async {
-        network::connect(&mut controller, stack).await?;
-        person::watch(person_model, camera, network::udp_sender(stack)?).await
-    });
-    let graphs = embassy_futures::join::join(listening, watching);
-    let embassy_futures::select::Either::Second((keyword_stopped, person_stopped)) =
-        embassy_futures::block_on(embassy_futures::select::select(networking, graphs));
-    println!(
-        "keyword graph stopped: {keyword_stopped:?}, person graph stopped: {person_stopped:?}"
-    );
+    handoff: &'static person::FrameHandoff,
+) -> ! {
+    let watch_task = TaskStorage::new();
+    // SAFETY: Executor::run below never returns, so this frame outlives the task.
+    let watch_task = unsafe { &*ptr::from_ref(&watch_task) };
+    static EXECUTOR: StaticCell<Executor> = StaticCell::new();
+    EXECUTOR.init(Executor::new()).run(|spawner| {
+        let watching = watch_task.spawn(|| async move {
+            let stopped = person::watch(person_model, camera, handoff).await;
+            println!("person graph stopped: {stopped:?}");
+        });
+        spawner.spawn(watching.expect("person task"));
+    })
 }
 
 #[esp_hal::main]
@@ -136,7 +199,7 @@ fn main() -> ! {
     let buffers = psram_buffers(&psram);
     let mut speech = keyword::load_model(buffers.speech_arena).expect("speech model");
     let mut person_model = person::load_model(buffers.person_arena).expect("person_detect model");
-    let network = network::start(
+    let controller = network::start(
         peripherals.WIFI,
         peripherals.TIMG0,
         peripherals.FROM_CPU_INTR0,
@@ -180,6 +243,17 @@ fn main() -> ! {
         data: peripherals.GPIO41,
         window: buffers.microphone_window,
     };
-    run_live(&mut speech, &mut person_model, microphone, camera, network);
-    loop {}
+    static SPEECH: StaticCell<TflmModel> = StaticCell::new();
+    static PERSON_MODEL: StaticCell<TflmModel> = StaticCell::new();
+    static HANDOFF: StaticCell<person::FrameHandoff> = StaticCell::new();
+    let speech = SPEECH.init(speech);
+    let handoff: &'static person::FrameHandoff =
+        HANDOFF.init(person::FrameHandoff::new(buffers.handoff_frame));
+    esp_rtos::start_second_core(
+        peripherals.CPU_CTRL,
+        peripherals.FROM_CPU_INTR1,
+        buffers.second_core_stack,
+        move || run_second_core(speech, microphone, controller, handoff),
+    );
+    run_live(PERSON_MODEL.init(person_model), camera, handoff)
 }

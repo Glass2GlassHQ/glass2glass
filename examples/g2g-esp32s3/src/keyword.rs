@@ -5,6 +5,7 @@
 use core::cell::Cell;
 use core::mem::MaybeUninit;
 
+use embassy_time::{Duration, Timer};
 use esp_hal::dma::DmaRxStreamBuf;
 use esp_hal::dma_rx_stream_buffer;
 use esp_hal::i2s::master::{I2s, I2sRxDmaTransfer, PdmConfig, PdmRxConfig, PdmSlotMode};
@@ -16,11 +17,11 @@ use g2g_core::error::G2gError;
 use g2g_core::frame::Frame;
 use g2g_core::staticpool::StaticLendRing;
 use g2g_core::{StaticSink, TensorDType, TensorLayout, TensorShape};
-use g2g_mcu::{CTensorModel, FrameGrabber, TensorFormat, TensorInference, TensorModel};
+use g2g_mcu::{FrameGrabber, TensorFormat, TensorInference, TensorModel};
 use noalloc_pipeline::keyword::{run_keyword_graph, CLIP_BYTES, FEATURES, FEATURE_FORMAT};
 
 use crate::peripheral;
-use crate::tflm::{self, Aligned};
+use crate::tflm::{self, Aligned, TflmModel};
 
 const KEYWORDS: usize = 4;
 // speech.tflite's output order.
@@ -53,12 +54,13 @@ const STRIDE_NS: u64 = STRIDE_MILLISECONDS as u64 * 1_000_000;
 const DMA_CHUNK_BYTES: usize = 4000;
 
 const DMA_BYTES: usize = CLIP_BYTES;
+const POLL_INTERVAL: Duration = Duration::from_millis(10);
 
-pub fn load_model(arena: &'static mut [MaybeUninit<u8>]) -> Result<CTensorModel, G2gError> {
+pub fn load_model(arena: &'static mut [MaybeUninit<u8>]) -> Result<TflmModel, G2gError> {
     tflm::load("speech", &MODEL.0, arena, FEATURE_FORMAT, OUTPUT_FORMAT)
 }
 
-pub fn check_model(model: &mut CTensorModel) -> bool {
+pub fn check_model(model: &mut TflmModel) -> bool {
     let mut scores = [0u8; KEYWORDS];
     let result = g2g_core::drive_ready(model.run(FEATURES_FIXTURE, &mut scores));
     let passed = matches!(result, Some(Ok(()))) && &scores == TFLITE_SCORES;
@@ -68,38 +70,46 @@ pub fn check_model(model: &mut CTensorModel) -> bool {
 }
 
 struct MicWindow<'d, 'a> {
-    transfer: I2sRxDmaTransfer<'d, Blocking, DmaRxStreamBuf>,
+    transfer: Option<I2sRxDmaTransfer<'d, Blocking, DmaRxStreamBuf>>,
     window: &'static mut [u8; CLIP_BYTES],
     filled: bool,
     peak: &'a Cell<i16>,
 }
 
 impl MicWindow<'_, '_> {
-    async fn read_exact(&mut self, from: usize) -> Result<(), G2gError> {
+    async fn read_exact(&mut self, from: usize) -> Result<bool, G2gError> {
         let mut at = from;
         while at < CLIP_BYTES {
+            let transfer = self.transfer.as_mut().ok_or_else(peripheral)?;
             // esp-hal stops the DMA when every descriptor is full and unread.
-            if self.transfer.is_done() {
-                return Err(peripheral());
+            if transfer.is_done() {
+                let (i2s_rx, ring) = self.transfer.take().ok_or_else(peripheral)?.stop();
+                self.transfer = Some(i2s_rx.read(ring).map_err(|_| peripheral())?);
+                return Ok(false);
             }
-            let popped = self.transfer.pop(&mut self.window[at..]);
+            let popped = transfer.pop(&mut self.window[at..]);
             if popped == 0 {
-                embassy_futures::yield_now().await;
+                Timer::after(POLL_INTERVAL).await;
             }
             at += popped;
         }
-        Ok(())
+        Ok(true)
     }
 }
 
 impl FrameGrabber for MicWindow<'_, '_> {
     async fn capture(&mut self, buf: &mut [u8]) -> Result<usize, G2gError> {
-        if self.filled {
-            self.window.copy_within(STRIDE_BYTES.., 0);
-            self.read_exact(CLIP_BYTES - STRIDE_BYTES).await?;
-        } else {
-            self.read_exact(0).await?;
-            self.filled = true;
+        loop {
+            let from = if self.filled {
+                self.window.copy_within(STRIDE_BYTES.., 0);
+                CLIP_BYTES - STRIDE_BYTES
+            } else {
+                0
+            };
+            self.filled = self.read_exact(from).await?;
+            if self.filled {
+                break;
+            }
         }
         let Some(slot) = buf.get_mut(..CLIP_BYTES) else {
             return Err(G2gError::CapsMismatch);
@@ -156,7 +166,7 @@ pub struct Microphone {
     pub window: &'static mut [u8; CLIP_BYTES],
 }
 
-pub async fn listen(model: &mut CTensorModel, microphone: Microphone) -> Result<(), G2gError> {
+pub async fn listen(model: &mut TflmModel, microphone: Microphone) -> Result<(), G2gError> {
     let pdm = PdmConfig::rx_only(PdmRxConfig::new_pcm_default(
         Rate::from_hz(SAMPLE_RATE_HZ),
         PdmSlotMode::Mono,
@@ -173,7 +183,7 @@ pub async fn listen(model: &mut CTensorModel, microphone: Microphone) -> Result<
 
     let peak = Cell::new(0);
     let window = MicWindow {
-        transfer,
+        transfer: Some(transfer),
         window: microphone.window,
         filled: false,
         peak: &peak,

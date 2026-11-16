@@ -442,11 +442,28 @@ Its 72 KB heap sits in the RAM the bootloader frees after boot, and its measured
 peak is 47 KB.
 
 The camera frames also go to the laptop. `G2G_WIFI_SSID`, `G2G_WIFI_PASSWORD`
-and `G2G_RTP_DESTINATION` are read at build time, and the person graph starts
-with `RawVideoRtpSend`, which sends each frame as RFC 4175 RTP through
-embassy-net UDP on esp-radio and passes it on to inference. The 96x96 gray
-frame goes out as YCbCr-4:2:2 with neutral chroma, 14 packets of at most 1400
-bytes. A host shows it with `st2110videosrc format=gray8` or GStreamer's
-`rtpvrawdepay`. At -74 dBm the board sends 7 to 9 frames per second, and the
-waits in `send_to` stretch the person graph to 100 to 300 ms per frame.
+and `G2G_RTP_DESTINATION` are read at build time. The person graph's first stage
+copies each frame into a slot in PSRAM and passes it on to inference, dropping
+the copy while the sender still holds the previous frame. A second graph reads
+the slot through a `FrameGrabber` and sends each frame with `RawVideoRtpSend` as
+RFC 4175 RTP through embassy-net UDP on esp-radio. The 96x96 gray frame goes out
+as YCbCr-4:2:2 with neutral chroma, 14 packets of at most 1400 bytes. A host
+shows it with `st2110videosrc format=gray8` or GStreamer's `rtpvrawdepay`. At
+-74 dBm the person graph takes a median of 71 ms per frame and 82 ms at the 90th
+percentile, against 64 ms for person_detect alone.
+
+The graphs run as tasks on esp-rtos's embassy executors, which suspend their
+core while every task waits, so the Wi-Fi driver threads run as soon as they are
+ready. Core 0 runs only the person graph. Core 1 runs the keyword graph, the
+sender graph and the embassy-net runner. A TFLite Micro call is one synchronous
+poll that holds its executor for 65 ms, so a runner on core 0 would move no
+packets to the Wi-Fi driver during inference. The Wi-Fi driver task itself stays
+on core 0, the core that started it. Core 1's 128 KB stack sits in PSRAM, and
+each task's future stays in the stack frame of the executor that never returns,
+so the boot checks and the live graphs reuse the same internal RAM. The camera
+and microphone grabbers poll their DMA rings every 2 ms and 10 ms, because
+esp-hal has no async wait for either stream. ESP-NN keeps its conv, depthwise
+conv and softmax scratch pointers in C globals, so an async mutex lets only one
+TFLite Micro interpreter run at a time. When a stall such as Wi-Fi connect
+leaves the microphone DMA ring full, the DMA stops and the grabber restarts it.
 

@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: MPL-2.0
 
+use embassy_time::{Duration, Timer};
 use esp_hal::delay::Delay;
 use esp_hal::dma::DmaRxStreamBuf;
 use esp_hal::dma_rx_stream_buffer;
@@ -26,6 +27,7 @@ const SCCB_KHZ: u32 = 100;
 const DMA_BYTES: usize = 32 * DMA_CHUNK_BYTES;
 // each frame starts a new DMA descriptor
 const DMA_CHUNK_BYTES: usize = 1024;
+const POLL_INTERVAL: Duration = Duration::from_millis(2);
 
 pub struct CameraPins {
     // the XIAO ESP32S3 Sense connector, from arduino-esp32's camera_pins.h
@@ -141,7 +143,7 @@ impl FrameGrabber for CameraGrabber {
                 self.aligned = false;
                 self.frame_bytes = 0;
             }
-            embassy_futures::yield_now().await;
+            Timer::after(POLL_INTERVAL).await;
         }
     }
 }

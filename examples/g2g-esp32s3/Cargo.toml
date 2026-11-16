@@ -23,9 +23,9 @@ esp-radio = { version = "1.0.0-beta.1", features = ["esp32s3", "wifi", "esp-allo
 esp-rtos = { version = "0.4.0", features = ["esp32s3", "esp-radio", "esp-alloc", "embassy"] }
 esp-alloc = { version = "0.11.0", features = ["esp32s3"] }
 embassy-net = { version = "0.9.1", features = ["udp", "dhcpv4", "medium-ethernet", "proto-ipv4"] }
-# embassy-time-queue-utils' default queue panics on wakers not made by embassy-executor
-embassy-time-queue-utils = { version = "0.3.2", features = ["generic-queue-16"] }
-embassy-futures = "0.1.2"
+embassy-executor = "0.10.0"
+embassy-time = "0.5.1"
+embassy-sync = "0.8.0"
 
 [build-dependencies]
 cc = "1.11.2"

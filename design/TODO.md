@@ -138,8 +138,6 @@ libraries installed.
     as `tools/qemu-check.sh` does for Cortex-M.
   - Run a detector larger than person_detect (MobileNet v2, FOMO) through
     TFLite Micro and ESP-NN.
-  - Send the camera's RTP from its own task, so Wi-Fi send waits stop
-    stretching the person graph past 64 ms per frame.
   - Stream the microphone over Wi-Fi to a host graph ending in
     `whispertranscribe`.
 - **Pure-Rust MCU inference backend.** Portable int8 kernels matching TFLite
