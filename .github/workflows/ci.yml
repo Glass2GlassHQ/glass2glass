@@ -597,6 +597,9 @@ jobs:
       # machine-checkable form of the heap-free + panic-free MCU guarantee.
       - name: install the esp toolchain for the xtensa proof
         uses: esp-rs/xtensa-toolchain@v1.7.0
+        # espup queries the GitHub API, which rate-limits runs without a token
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         with:
           buildtargets: esp32s3
           version: 1.97.0.0
