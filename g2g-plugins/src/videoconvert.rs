@@ -597,6 +597,7 @@ pub(crate) mod display {
     use alloc::boxed::Box;
     use g2g_core::{Caps, CapsSet, Colorimetry, Dim, G2gError, RawVideoFormat};
 
+    #[cfg(any(test, feature = "wgpu-sink", feature = "gl-render"))]
     pub(crate) const NV12_AND_RGBA: &[RawVideoFormat] =
         &[RawVideoFormat::Nv12, RawVideoFormat::Rgba8];
 

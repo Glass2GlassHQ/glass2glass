@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2356: `gl-render` builds on Windows and macOS, and the GL renderer compiles beside `smartstring`.
 - M2355: `httpsrc bytestream-format=mp4` names a whole MP4 file as `filesrc` does, so `httpsrc ! qtdemux` plays and seeks.
 - M2354: `flvdemux`, `oggdemux`, `tsdemux` and `mpegpsdemux` report their duration, the last three by reading the tail of the file first in a run that takes seeks.
 - M2353: `avidemux` streams a file chunk by chunk after reading its `idx1` through a byte seek, seeks from that index, and reports its duration.

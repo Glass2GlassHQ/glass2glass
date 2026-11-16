@@ -885,6 +885,9 @@ g2g-mcu = { workspace = true, default-features = false }
 # no_std mutex for the appsrc/appsink named-channel globals (the app<->element
 # bridge). Same crate the core's runtime channel uses.
 spin = { version = "0.9", default-features = false, features = ["mutex", "spin_mutex"] }
+# The GL ES wrapper the GL renderer (`gl-render`) draws with, in a host's GL
+# context on any OS.
+glow = { version = "0.17", optional = true }
 # zlib inflate for Matroska `ContentEncoding` blocks (M910). Pure Rust,
 # `forbid(unsafe_code)`, and no_std with `with-alloc` alone, so it fits the
 # baseline; default-features off keeps its `std` off.
@@ -1367,9 +1370,8 @@ smithay-client-toolkit = { version = "0.20", optional = true }
 # same backend through wayland-egl.
 wayland-backend = { version = "0.3", optional = true, features = ["client_system"] }
 # GL sinks (gl-sink, cuda-gl, cuda-kms). khronos-egl `dynamic` loads libEGL at runtime;
-# glow is the GL ES wrapper; wayland-egl turns a wl_surface into an EGL window.
+# wayland-egl turns a wl_surface into an EGL window.
 khronos-egl = { version = "6", optional = true, features = ["dynamic"] }
-glow = { version = "0.17", optional = true }
 wayland-egl = { version = "0.32", optional = true }
 # Linux audio output / capture backends. All link system libraries via
 # pkg-config and are Linux-only.

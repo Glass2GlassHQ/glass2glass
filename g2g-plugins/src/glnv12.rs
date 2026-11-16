@@ -4,7 +4,7 @@
 
 //! Shared GL ES render state for the EGL display sinks.
 //!
-//! Builds a GL ES 3 program plus the textures for one pixel layout ([`GlMode`])
+//! Builds a GL ES 3 program plus the textures for one pixel layout (`GlMode`)
 //! and a fullscreen quad, then per frame gets the pixels into those textures and
 //! draws. NV12 uses the Y (`R8`) + interleaved UV (`RG8`) pair and a convert
 //! shader carrying the caps colorimetry's weights; RGBA uses one `RGBA8` texture
@@ -14,8 +14,8 @@
 //! (`upload_system_and_draw`).
 //!
 //! The caller owns the EGL context and the *present* (Wayland `eglSwapBuffers`
-//! for [`crate::glwindow`], GBM lock + DRM page-flip for
-//! [`crate::cudakmssink`]); everything up to and including the `glDrawArrays` is
+//! for `glwindow`, GBM lock + DRM page-flip for
+//! `cudakmssink`); everything up to and including the `glDrawArrays` is
 //! identical and lives here.
 //!
 //! Compiled when any of the GL sink features is on (all pull `glow`).
@@ -183,7 +183,7 @@ impl GlState {
                 link_program(
                     &gl,
                     &(String::from(DESKTOP_VERTEX_PRELUDE) + VERTEX_SHADER),
-                    &(String::from(DESKTOP_FRAGMENT_PRELUDE) + &fragment),
+                    &(String::from(DESKTOP_FRAGMENT_PRELUDE) + fragment.as_str()),
                 )?
             };
             let pos_loc = gl.get_attrib_location(program, "a_pos").unwrap_or(0);
