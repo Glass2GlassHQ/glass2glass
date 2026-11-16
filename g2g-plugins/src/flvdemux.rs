@@ -688,6 +688,7 @@ pub struct FlvDemuxN {
     segment: SharedSegment,
     emitted: u64,
     seek: DemuxSeek<FlvUnit>,
+    duration_ns: Option<u64>,
 }
 
 impl FlvDemuxN {
@@ -706,10 +707,15 @@ impl FlvDemuxN {
             segment: SharedSegment::new(ports.len()),
             emitted: 0,
             seek: DemuxSeek::default(),
+            duration_ns: None,
         }
     }
 
     async fn route_units(&mut self, out: &mut dyn MultiOutputSink) -> Result<(), G2gError> {
+        if self.duration_ns.is_none() {
+            self.duration_ns = self.demux.metadata().and_then(on_metadata_duration_ns);
+            self.seek.set_duration(self.duration_ns);
+        }
         for emitter in &mut self.emitters {
             emitter.sync_configs(&self.demux);
         }
@@ -791,6 +797,10 @@ impl MultiOutputElement for FlvDemuxN {
 
     fn set_seek(&mut self, app: SeekController, upstream: SeekController) {
         self.seek.with(app, upstream);
+    }
+
+    fn query_duration(&self) -> Option<u64> {
+        self.duration_ns
     }
 
     fn process<'a>(
@@ -983,32 +993,65 @@ mod amf0 {
     pub(super) const LONG_STRING: u8 = 0x0C;
 }
 
-/// Parse an FLV `onMetaData` script body (AMF0) into a [`TagList`]. The body is
-/// the event-name string (`onMetaData`) followed by an ECMA array / object of
-/// properties; its string-valued entries become tags (numbers, booleans, nested
-/// objects are walked to stay aligned but not turned into tags). A malformed /
-/// truncated body yields whatever parsed before the error.
-fn parse_on_metadata(body: &[u8]) -> TagList {
-    let mut list = TagList::new();
+#[derive(Debug, Clone, PartialEq)]
+enum Amf0Value {
+    String(String),
+    Number(f64),
+    // a value walked past to stay aligned
+    Other,
+}
+
+/// The top-level properties of an FLV `onMetaData` script body (AMF0): the
+/// event-name string (`onMetaData`) followed by an ECMA array / object of
+/// properties. A malformed / truncated body yields whatever parsed before the
+/// error.
+fn on_metadata_properties(body: &[u8]) -> Vec<(String, Amf0Value)> {
+    let mut properties = Vec::new();
     let mut pos = 0usize;
     // The first value is the event name; bail unless it is "onMetaData".
-    if read_amf0_value(body, &mut pos, 0) != Some(Some(String::from("onMetaData"))) {
-        return list;
+    if !matches!(read_amf0_value(body, &mut pos, 0), Some(Amf0Value::String(name)) if name == "onMetaData")
+    {
+        return properties;
     }
     // The second value holds the properties: an ECMA array or an anonymous object.
     let Some(marker) = body.get(pos).copied() else {
-        return list;
+        return properties;
     };
     pos += 1;
     let _ = match marker {
         amf0::ECMA_ARRAY => {
             let _count = take_be_u32(body, &mut pos);
-            read_amf0_object(body, &mut pos, Some(&mut list), 0)
+            read_amf0_object(body, &mut pos, Some(&mut properties), 0)
         }
-        amf0::OBJECT => read_amf0_object(body, &mut pos, Some(&mut list), 0),
+        amf0::OBJECT => read_amf0_object(body, &mut pos, Some(&mut properties), 0),
         _ => Some(()),
     };
+    properties
+}
+
+// the string-valued properties
+fn parse_on_metadata(body: &[u8]) -> TagList {
+    let mut list = TagList::new();
+    for (key, value) in on_metadata_properties(body) {
+        if let Amf0Value::String(value) = value {
+            list.push(Tag::from_key_value(&key, &value));
+        }
+    }
     list
+}
+
+const NANOS_PER_SECOND: f64 = 1_000_000_000.0;
+
+// `duration` is in seconds, as gst's flvdemux and ffmpeg read it
+fn on_metadata_duration_ns(body: &[u8]) -> Option<u64> {
+    on_metadata_properties(body)
+        .into_iter()
+        .find_map(|(key, value)| match value {
+            Amf0Value::Number(seconds) if key == "duration" => Some(seconds),
+            _ => None,
+        })
+        .filter(|seconds| seconds.is_finite() && *seconds > 0.0)
+        .map(|seconds| (seconds * NANOS_PER_SECOND) as u64)
 }
 
 /// Cap AMF0 nesting so a crafted onMetaData (each level costs ~4 bytes, the body
@@ -1016,50 +1059,53 @@ fn parse_on_metadata(body: &[u8]) -> TagList {
 /// metadata is only a level or two deep.
 const MAX_AMF0_DEPTH: u32 = 32;
 
-/// Read an AMF0 value at `*pos`, advancing past it. Returns `Some(Some(s))` for a
-/// string value, `Some(None)` for any other (correctly skipped) value, or `None`
-/// on a parse error / unknown marker / excessive nesting.
-fn read_amf0_value(b: &[u8], pos: &mut usize, depth: u32) -> Option<Option<String>> {
+/// Read an AMF0 value at `*pos`, advancing past it. `None` on a parse error /
+/// unknown marker / excessive nesting.
+fn read_amf0_value(b: &[u8], pos: &mut usize, depth: u32) -> Option<Amf0Value> {
     if depth >= MAX_AMF0_DEPTH {
         return None;
     }
     let marker = *b.get(*pos)?;
     *pos += 1;
     match marker {
-        amf0::NUMBER => advance(b, pos, 8).map(|_| None),
-        amf0::BOOLEAN => advance(b, pos, 1).map(|_| None),
+        amf0::NUMBER => {
+            let bits = b.get(*pos..*pos + 8)?;
+            *pos += 8;
+            Some(Amf0Value::Number(f64::from_be_bytes(bits.try_into().ok()?)))
+        }
+        amf0::BOOLEAN => advance(b, pos, 1).map(|_| Amf0Value::Other),
         amf0::STRING => {
             let len = take_be_u16(b, pos)? as usize;
-            Some(Some(read_amf0_str(b, pos, len)?))
+            Some(Amf0Value::String(read_amf0_str(b, pos, len)?))
         }
-        amf0::OBJECT => read_amf0_object(b, pos, None, depth + 1).map(|_| None),
+        amf0::OBJECT => read_amf0_object(b, pos, None, depth + 1).map(|_| Amf0Value::Other),
         amf0::ECMA_ARRAY => {
             let _count = take_be_u32(b, pos)?;
-            read_amf0_object(b, pos, None, depth + 1).map(|_| None)
+            read_amf0_object(b, pos, None, depth + 1).map(|_| Amf0Value::Other)
         }
-        amf0::NULL | amf0::UNDEFINED => Some(None),
+        amf0::NULL | amf0::UNDEFINED => Some(Amf0Value::Other),
         amf0::STRICT_ARRAY => {
             let count = take_be_u32(b, pos)?;
             for _ in 0..count {
                 read_amf0_value(b, pos, depth + 1)?;
             }
-            Some(None)
+            Some(Amf0Value::Other)
         }
-        amf0::DATE => advance(b, pos, 10).map(|_| None), // f64 + s16 timezone
+        amf0::DATE => advance(b, pos, 10).map(|_| Amf0Value::Other), // f64 + s16 timezone
         amf0::LONG_STRING => {
             let len = take_be_u32(b, pos)? as usize;
-            advance(b, pos, len).map(|_| None)
+            advance(b, pos, len).map(|_| Amf0Value::Other)
         }
         _ => None,
     }
 }
 
-/// Read AMF0 `(key, value)` property pairs until the object-end marker. When
-/// `collect` is set, each string-valued property is added as a [`Tag`].
+/// Read AMF0 `(key, value)` property pairs until the object-end marker, adding
+/// each to `collect` when it is set.
 fn read_amf0_object(
     b: &[u8],
     pos: &mut usize,
-    mut collect: Option<&mut TagList>,
+    mut collect: Option<&mut Vec<(String, Amf0Value)>>,
     depth: u32,
 ) -> Option<()> {
     if depth >= MAX_AMF0_DEPTH {
@@ -1078,8 +1124,8 @@ fn read_amf0_object(
         }
         let key = read_amf0_str(b, pos, key_len)?;
         let value = read_amf0_value(b, pos, depth + 1)?;
-        if let (Some(list), Some(s)) = (collect.as_deref_mut(), value) {
-            list.push(Tag::from_key_value(&key, &s));
+        if let Some(properties) = collect.as_deref_mut() {
+            properties.push((key, value));
         }
     }
 }

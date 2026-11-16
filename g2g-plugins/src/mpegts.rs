@@ -1806,6 +1806,39 @@ pub(crate) fn sniff_packet_stride(header: &[u8]) -> Option<usize> {
     })
 }
 
+// the latest PES pts in a stretch of transport stream that may start mid-packet, such as the tail of a file
+pub(crate) fn latest_pts_90khz(ts: &[u8]) -> Option<u64> {
+    let (first_sync, stride) = (0..ts.len().min(DVB_ASI_PACKET_STRIDE)).find_map(|at| {
+        let packet_start = &ts[at..];
+        if packet_start[0] != SYNC_BYTE {
+            return None;
+        }
+        PACKET_STRIDES
+            .into_iter()
+            .find(|&stride| confirmed_syncs(packet_start, stride) == Some(STRIDE_LOCK_PACKETS))
+            .map(|stride| (at, stride))
+    })?;
+    ts[first_sync..]
+        .chunks(stride)
+        .filter_map(|packet| packet.first_chunk::<TS_PACKET_LEN>())
+        .filter_map(pes_start_pts)
+        .max()
+}
+
+fn pes_start_pts(packet: &[u8; TS_PACKET_LEN]) -> Option<u64> {
+    let pusi = packet[1] & 0x40 != 0;
+    let afc = (packet[3] >> 4) & 0x03;
+    if packet[0] != SYNC_BYTE || !pusi || afc & 0x01 == 0 {
+        return None;
+    }
+    let payload_at = if afc & 0x02 != 0 {
+        5 + usize::from(packet[4])
+    } else {
+        4
+    };
+    parse_pes_header(packet.get(payload_at..)?).0
+}
+
 fn confirmed_syncs(packet_start: &[u8], stride: usize) -> Option<usize> {
     let mut confirmed = 0;
     for following in 1..=STRIDE_LOCK_PACKETS {

@@ -88,7 +88,6 @@ pub(crate) fn scan_page(buf: &[u8]) -> PageScan {
     }
 }
 
-#[cfg(feature = "icecast")]
 const NO_PACKET_ENDS_GRANULE: u64 = u64::MAX;
 
 // Ogg audio mappings end their header packets on pages of granule position zero, ahead of the first audio page
@@ -921,6 +920,34 @@ pub(crate) fn detect(packet: &[u8]) -> OggStreamInfo {
             pre_skip: 0,
         }
     }
+}
+
+// each logical stream's last granule position in a stretch of Ogg that may start mid-page, such as the tail of a file
+pub(crate) fn last_granules(ogg: &[u8]) -> Vec<(u32, u64)> {
+    let mut granules: Vec<(u32, u64)> = Vec::new();
+    let mut at = 0usize;
+    while let PageScan::Page { start, len, .. } = scan_page(&ogg[at..]) {
+        let page = &ogg[at + start..at + start + len];
+        // a capture pattern inside packet data fails the checksum
+        let mut zeroed = Vec::from(page);
+        zeroed[22..26].fill(0);
+        let stored = u32::from_le_bytes([page[22], page[23], page[24], page[25]]);
+        if page_crc(&zeroed) != stored {
+            at += start + 1;
+            continue;
+        }
+        at += start + len;
+        let serial = u32::from_le_bytes([page[14], page[15], page[16], page[17]]);
+        let granule = u64::from_le_bytes(page[6..14].try_into().expect("a whole page header"));
+        if granule == NO_PACKET_ENDS_GRANULE {
+            continue;
+        }
+        match granules.iter_mut().find(|(known, _)| *known == serial) {
+            Some((_, last)) => *last = granule,
+            None => granules.push((serial, granule)),
+        }
+    }
+    granules
 }
 
 /// The Ogg page checksum of `page`, whose CRC field must already be zeroed.

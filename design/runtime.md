@@ -936,8 +936,14 @@ no element cooperation. Duration is the source's answer:
 stays unknown, polled by the source arm before producing, and `Mp4Src` reports it
 from the `mdhd` box. A demuxer learns the length from the stream, so the demux arm
 polls `MultiOutputElement::query_duration()` before each packet and publishes each
-new value: `Mp4DemuxN` reads the `mvhd` box and `MkvDemuxN` the Segment `Info`
-`Duration`. A first duration also posts `BusMessage::DurationChanged` as a
+new value: `Mp4DemuxN` reads the `mvhd` box, `MkvDemuxN` the Segment `Info`
+`Duration`, `FlvDemuxN` the `onMetaData` `duration`, and `AviDemuxN` the
+longest stream's `strh` length. Ogg, TS and PS store no duration, so in a run
+that parks its source `OggDemuxN`, `TsDemuxN` and `PsDemuxN` first read the last
+250,000 bytes through a byte seek, as ffmpeg does, then seek back to byte 0
+(`demuxseek::TailRead`). Ogg's duration is the longest audio stream's last
+granule, TS and PS take the latest PES pts in the tail less the stream start.
+A first duration also posts `BusMessage::DurationChanged` as a
 push notification. `run_graph_with_progress` wires the handle in, and the handle is
 plain atomics behind an `Arc`, so reading it from the app thread while the pipeline
 runs needs no lock.

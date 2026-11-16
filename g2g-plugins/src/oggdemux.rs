@@ -73,10 +73,10 @@ use g2g_core::{
     StreamCollection, StreamType, TagList, VideoCodec,
 };
 
-use crate::demuxseek::{Admitted, DemuxSeek};
+use crate::demuxseek::{Admitted, DemuxSeek, TailRead};
 use crate::ogg::{
-    parse_theora_identification, parse_vp8_stream_info, theora_keyframe, OggCodec, OggDemuxer,
-    OggLogicalStream,
+    last_granules, parse_theora_identification, parse_vp8_stream_info, theora_keyframe, OggCodec,
+    OggDemuxer, OggLogicalStream,
 };
 use crate::opusparse::packet_samples as opus_packet_samples;
 use crate::typefind::framerate_within_placeholder;
@@ -1469,6 +1469,31 @@ pub struct OggDemuxN {
     held_page_ns: Vec<Option<u64>>,
     seek: DemuxSeek<(Vec<u8>, FrameTiming)>,
     guess: OggSeekGuess,
+    tail: TailRead,
+    // each logical stream's last granule, read from the tail of the file
+    last_granules: Vec<(u32, u64)>,
+    duration_ns: Option<u64>,
+}
+
+// the end of the longest audio stream, from its last granule, as gst's oggdemux and ffmpeg read it
+fn audio_duration_ns(demux: &OggDemuxer, last_granules: &[(u32, u64)]) -> Option<u64> {
+    demux
+        .streams()
+        .iter()
+        .filter_map(|stream| {
+            let info = stream.info().filter(|info| !is_video_codec(info.codec))?;
+            let (_, granule) = last_granules
+                .iter()
+                .find(|(serial, _)| *serial == stream.serial())?;
+            match info.codec {
+                OggCodec::Opus => Some(opus_samples_to_ns(
+                    granule.saturating_sub(u64::from(info.pre_skip)),
+                )),
+                _ if info.sample_rate > 0 => Some(samples_to_ns(*granule, info.sample_rate)),
+                _ => None,
+            }
+        })
+        .max()
 }
 
 // twice ffmpeg's default page duration
@@ -1495,6 +1520,9 @@ impl OggDemuxN {
             emitted: 0,
             held_page_ns,
             seek: DemuxSeek::default(),
+            tail: TailRead::default(),
+            last_granules: Vec::new(),
+            duration_ns: None,
             guess: OggSeekGuess::default(),
         }
     }
@@ -1652,6 +1680,10 @@ impl MultiOutputElement for OggDemuxN {
         self.seek.with(app, upstream);
     }
 
+    fn query_duration(&self) -> Option<u64> {
+        self.duration_ns
+    }
+
     fn process<'a>(
         &'a mut self,
         packet: PipelinePacket,
@@ -1659,7 +1691,9 @@ impl MultiOutputElement for OggDemuxN {
     ) -> Self::ProcessFuture<'a> {
         Box::pin(async move {
             self.seek.hold_at_segment_end().await;
-            self.poll_seek();
+            if !self.tail.in_flight() {
+                self.poll_seek();
+            }
             let ended = matches!(packet, PipelinePacket::Eos);
             match packet {
                 PipelinePacket::DataFrame(frame) => {
@@ -1669,9 +1703,17 @@ impl MultiOutputElement for OggDemuxN {
                     let slice = frame
                         .domain
                         .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
+                    if self.tail.takes_bytes(&self.seek, slice) {
+                        return Ok(());
+                    }
                     self.guess.note_read(slice.len());
                     self.demux.push_data(slice);
+                    if self.duration_ns.is_none() {
+                        self.duration_ns = audio_duration_ns(&self.demux, &self.last_granules);
+                        self.seek.set_duration(self.duration_ns);
+                    }
                 }
+                PipelinePacket::Flush if self.tail.takes_flush() => return Ok(()),
                 PipelinePacket::Flush => {
                     let ours = self.seek.dropping_input();
                     let forward = self.seek.on_flush();
@@ -1696,9 +1738,13 @@ impl MultiOutputElement for OggDemuxN {
                 }
                 // Emit any final packets; the runner forwards EOS to every port.
                 PipelinePacket::Eos => {
+                    if let Some(tail) = self.tail.take_tail(&self.seek) {
+                        self.last_granules = last_granules(&tail);
+                        return Ok(());
+                    }
                     if self
                         .seek
-                        .eos_before_flush(self.seek.dropping_input())
+                        .eos_before_flush(self.seek.dropping_input() || self.tail.in_flight())
                         .await?
                     {
                         return Ok(());

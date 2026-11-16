@@ -49,7 +49,8 @@ The plan is [remote.md](remote.md).
 
 ## Embeddable player (`g2g-player`)
 
-- Duration from the TS, PS, Ogg and FLV demuxers.
+- Duration of an Ogg file with no audio stream (Theora or VP8 granules), and
+  of an FLV file without `onMetaData`, from its last tag.
 - Track selection and the `track-list` property.
 - guikit's controls: `keep-open` and `eof-reached`, `loadfile` `start=` and
   `pause=`, relative seek, frame-step and back-step, `edl://` timelines,

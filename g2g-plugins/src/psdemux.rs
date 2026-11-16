@@ -46,10 +46,10 @@ use g2g_core::{
     Segment, Stream, StreamCollection, StreamType, SubPictureFormat, VideoCodec,
 };
 
-use crate::demuxseek::{DemuxSeek, SharedSegment};
+use crate::demuxseek::{DemuxSeek, SharedSegment, TailRead};
 use crate::mpeg2video::Mpeg2TimestampSynth;
 pub use crate::mpeg2video::{parse_sequence_header, SequenceHeader};
-use crate::mpegts::{decode_timestamp, parse_pes_header};
+use crate::mpegts::{decode_timestamp, parse_pes_header, ticks_90khz_to_ns};
 use crate::video_pts_synth::{backfill_leading_pts_90khz, LeadingUnits};
 use crate::vobsub::MAX_SPU_BYTES;
 
@@ -745,54 +745,9 @@ impl PsDemuxer {
     /// Handle the whole packs and packets in `buf`, returning how many leading
     /// bytes are done with.
     fn parse_packets(&mut self, buf: &[u8]) -> usize {
-        let mut at = 0usize;
-        loop {
-            // Resync: skip everything before the next start code prefix, keeping
-            // the last two bytes in case a prefix straddles the chunk boundary.
-            let Some(pos) = find_start_code(&buf[at..]) else {
-                return at.max(buf.len().saturating_sub(2));
-            };
-            at += pos;
-            let rest = &buf[at..];
-            let Some(&id) = rest.get(3) else {
-                return at;
-            };
-            match id {
-                PS_PACK => match pack_header_len(rest) {
-                    // Not enough bytes yet to know the pack header's length.
-                    Some(None) => return at,
-                    Some(Some(len)) => {
-                        self.pack_seen = true;
-                        at += len;
-                    }
-                    // Neither an MPEG-1 nor an MPEG-2 pack: skip the start code.
-                    None => at += 4,
-                },
-                PS_END => at += 4,
-                // Every other PS start code is length prefixed.
-                _ => {
-                    let Some(len) = rest.get(4..6) else {
-                        return at;
-                    };
-                    let len = u16::from_be_bytes([len[0], len[1]]) as usize;
-                    // A program stream always declares a packet length; a zero
-                    // one would leave the packet unbounded, so treat it as a bad
-                    // header and resync.
-                    if len == 0 {
-                        at += 4;
-                        continue;
-                    }
-                    let total = 6 + len;
-                    if rest.len() < total {
-                        return at;
-                    }
-                    if matches!(id, PS_PRIVATE_1 | 0xC0..=0xEF) {
-                        self.handle_pes(id, &rest[..total]);
-                    }
-                    at += total;
-                }
-            }
-        }
+        let walked = walk_packets(buf, |stream_id, packet| self.handle_pes(stream_id, packet));
+        self.pack_seen |= walked.pack_seen;
+        walked.done
     }
 
     fn handle_pes(&mut self, stream_id: u8, packet: &[u8]) {
@@ -1005,6 +960,83 @@ impl PsDemuxer {
             data: pending.data,
         });
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PacketWalk {
+    // the leading bytes the walk is done with
+    done: usize,
+    pack_seen: bool,
+}
+
+/// Walk the whole packs and packets in `buf`, handing each PES packet of a
+/// media stream to `on_pes` with its stream id.
+fn walk_packets(buf: &[u8], mut on_pes: impl FnMut(u8, &[u8])) -> PacketWalk {
+    let mut at = 0usize;
+    let mut pack_seen = false;
+    let done = loop {
+        // Resync: skip everything before the next start code prefix, keeping
+        // the last two bytes in case a prefix straddles the chunk boundary.
+        let Some(pos) = find_start_code(&buf[at..]) else {
+            break at.max(buf.len().saturating_sub(2));
+        };
+        at += pos;
+        let rest = &buf[at..];
+        let Some(&id) = rest.get(3) else {
+            break at;
+        };
+        match id {
+            PS_PACK => match pack_header_len(rest) {
+                // Not enough bytes yet to know the pack header's length.
+                Some(None) => break at,
+                Some(Some(len)) => {
+                    pack_seen = true;
+                    at += len;
+                }
+                // Neither an MPEG-1 nor an MPEG-2 pack: skip the start code.
+                None => at += 4,
+            },
+            PS_END => at += 4,
+            // Every other PS start code is length prefixed.
+            _ => {
+                let Some(len) = rest.get(4..6) else {
+                    break at;
+                };
+                let len = u16::from_be_bytes([len[0], len[1]]) as usize;
+                // A program stream always declares a packet length; a zero
+                // one would leave the packet unbounded, so treat it as a bad
+                // header and resync.
+                if len == 0 {
+                    at += 4;
+                    continue;
+                }
+                let total = 6 + len;
+                if rest.len() < total {
+                    break at;
+                }
+                if matches!(id, PS_PRIVATE_1 | 0xC0..=0xEF) {
+                    on_pes(id, &rest[..total]);
+                }
+                at += total;
+            }
+        }
+    };
+    PacketWalk { done, pack_seen }
+}
+
+// the latest PES pts in a stretch of program stream that may start mid-packet, read from its first pack on
+pub(crate) fn latest_pts_90khz(ps: &[u8]) -> Option<u64> {
+    let first_pack = (0..ps.len()).find(|&at| {
+        ps[at..].starts_with(&[0x00, 0x00, 0x01, PS_PACK])
+            && matches!(pack_header_len(&ps[at..]), Some(Some(_)))
+    })?;
+    let mut latest = None;
+    walk_packets(&ps[first_pack..], |_, packet| {
+        if let (Some(pts), _, _) = ps_pes_payload(packet) {
+            latest = latest.max(Some(pts));
+        }
+    });
+    latest
 }
 
 /// Offset of the next `00 00 01` start code prefix in `buf`.
@@ -1737,6 +1769,7 @@ pub struct PsDemuxN {
     seek: DemuxSeek<PsUnit>,
     // the last pts out, which times a unit its PES left unstamped
     last_presented_ns: u64,
+    tail: TailRead,
 }
 
 impl PsDemuxN {
@@ -1766,6 +1799,7 @@ impl PsDemuxN {
             held_picture_ns: 0,
             seek: DemuxSeek::default(),
             last_presented_ns: 0,
+            tail: TailRead::default(),
         }
     }
 
@@ -2045,6 +2079,10 @@ impl MultiOutputElement for PsDemuxN {
         self.seek.with(app, upstream);
     }
 
+    fn query_duration(&self) -> Option<u64> {
+        self.seek.duration_ns()
+    }
+
     fn process<'a>(
         &'a mut self,
         packet: PipelinePacket,
@@ -2052,7 +2090,9 @@ impl MultiOutputElement for PsDemuxN {
     ) -> Self::ProcessFuture<'a> {
         Box::pin(async move {
             self.seek.hold_at_segment_end().await;
-            self.seek.poll_request();
+            if !self.tail.in_flight() {
+                self.seek.poll_request();
+            }
             match packet {
                 PipelinePacket::DataFrame(frame) => {
                     if self.seek.dropping_input() {
@@ -2061,6 +2101,9 @@ impl MultiOutputElement for PsDemuxN {
                     let slice = frame
                         .domain
                         .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
+                    if self.tail.takes_bytes(&self.seek, slice) {
+                        return Ok(());
+                    }
                     self.demux.push_data(slice);
                     if self.bus.is_some() {
                         self.post_stream_collection();
@@ -2069,6 +2112,9 @@ impl MultiOutputElement for PsDemuxN {
                     self.route_units(false, out).await?;
                 }
                 PipelinePacket::Flush => {
+                    if self.tail.takes_flush() {
+                        return Ok(());
+                    }
                     let forward = self.seek.on_flush();
                     self.demux = PsDemuxer::new();
                     self.held_until_first_stamp = HeldUntilFirstStamp::default();
@@ -2086,9 +2132,14 @@ impl MultiOutputElement for PsDemuxN {
                     }
                 }
                 PipelinePacket::Eos => {
+                    if let Some(tail) = self.tail.take_tail(&self.seek) {
+                        self.seek
+                            .set_stream_end_ns(latest_pts_90khz(&tail).map(ticks_90khz_to_ns));
+                        return Ok(());
+                    }
                     if self
                         .seek
-                        .eos_before_flush(self.seek.dropping_input())
+                        .eos_before_flush(self.seek.dropping_input() || self.tail.in_flight())
                         .await?
                     {
                         return Ok(());

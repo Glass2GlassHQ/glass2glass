@@ -284,6 +284,8 @@ pub(crate) struct DemuxSeek<U> {
     sent_segment: Segment,
     position_ns: Option<u64>,
     duration_ns: Option<u64>,
+    // the latest pts in the stream, read from its tail, which with the stream start gives the duration
+    stream_end_ns: Option<u64>,
 }
 
 impl<U> Default for DemuxSeek<U> {
@@ -304,6 +306,7 @@ impl<U> Default for DemuxSeek<U> {
             sent_segment: Segment::new(),
             position_ns: None,
             duration_ns: None,
+            stream_end_ns: None,
         }
     }
 }
@@ -320,6 +323,15 @@ impl<U> DemuxSeek<U> {
 
     pub(crate) fn set_duration(&mut self, duration_ns: Option<u64>) {
         self.duration_ns = duration_ns;
+    }
+
+    pub(crate) fn set_stream_end_ns(&mut self, stream_end_ns: Option<u64>) {
+        self.stream_end_ns = stream_end_ns;
+    }
+
+    pub(crate) fn duration_ns(&self) -> Option<u64> {
+        self.duration_ns
+            .or_else(|| Some(self.stream_end_ns?.saturating_sub(self.stream_start_ns?)))
     }
 
     /// Poll for a pending time seek, re-scanning from the file start
@@ -374,7 +386,7 @@ impl<U> DemuxSeek<U> {
     }
 
     pub(crate) fn take_app_seek(&mut self) -> Option<Seek> {
-        let duration_ns = self.duration_ns;
+        let duration_ns = self.duration_ns();
         let seek = self
             .app
             .as_ref()?
@@ -850,6 +862,75 @@ impl<U> DemuxSeek<U> {
             core::mem::take(&mut discard.kept),
             Some(unit),
         )
+    }
+}
+
+// ffmpeg reads this much from the end of a file first for its timestamps
+const TAIL_READ_LEN: u64 = 250_000;
+
+// the last bytes of a stream, read through a byte seek before playback starts, for a duration the container stores nowhere
+#[derive(Debug, Default)]
+pub(crate) enum TailRead {
+    #[default]
+    Unstarted,
+    // the seek to the tail is in flight, input before its Flush is dropped
+    Seeking,
+    Reading(Vec<u8>),
+    // the seek back to byte 0 is in flight
+    Returning,
+    Done,
+}
+
+impl TailRead {
+    // true when the bytes belong to the tail read, so the demuxer does not parse them
+    pub(crate) fn takes_bytes<U>(&mut self, seek: &DemuxSeek<U>, bytes: &[u8]) -> bool {
+        match self {
+            Self::Unstarted => {
+                let Some(stream_len) = seek.upstream_len().filter(|_| seek.takes_seeks_after_end())
+                else {
+                    *self = Self::Done;
+                    return false;
+                };
+                seek.seek_upstream(stream_len.saturating_sub(TAIL_READ_LEN));
+                *self = Self::Seeking;
+                true
+            }
+            Self::Seeking | Self::Returning => true,
+            Self::Reading(tail) => {
+                tail.extend_from_slice(bytes);
+                true
+            }
+            Self::Done => false,
+        }
+    }
+
+    // true for the Flush that answers one of this read's seeks
+    pub(crate) fn takes_flush(&mut self) -> bool {
+        match self {
+            Self::Seeking => *self = Self::Reading(Vec::new()),
+            Self::Returning => *self = Self::Done,
+            Self::Unstarted | Self::Reading(_) | Self::Done => return false,
+        }
+        true
+    }
+
+    // the tail, at the Eos that ends its read, once the source is asked to seek back to byte 0
+    pub(crate) fn take_tail<U>(&mut self, seek: &DemuxSeek<U>) -> Option<Vec<u8>> {
+        match core::mem::take(self) {
+            Self::Reading(tail) => {
+                seek.seek_upstream(0);
+                *self = Self::Returning;
+                Some(tail)
+            }
+            other => {
+                *self = other;
+                None
+            }
+        }
+    }
+
+    pub(crate) fn in_flight(&self) -> bool {
+        matches!(self, Self::Seeking | Self::Reading(_) | Self::Returning)
     }
 }
 

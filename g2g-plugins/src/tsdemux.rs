@@ -43,11 +43,11 @@ use g2g_core::{
     Stream, StreamCollection, StreamType, SubPictureFormat, Tag, TagList, VideoCodec,
 };
 
-use crate::demuxseek::DemuxSeek;
+use crate::demuxseek::{DemuxSeek, TailRead};
 use crate::mpegts::{
-    ticks_90khz_to_ns, unwrap_metadata_au_cells, EitSlot, EsUnit, TsDemuxer, TsPacketSplitter,
-    STREAM_TYPE_AAC, STREAM_TYPE_AAC_LATM, STREAM_TYPE_AC3, STREAM_TYPE_H264, STREAM_TYPE_H265,
-    STREAM_TYPE_JPEG_XS, STREAM_TYPE_METADATA_PES, STREAM_TYPE_MPEG1_AUDIO,
+    latest_pts_90khz, ticks_90khz_to_ns, unwrap_metadata_au_cells, EitSlot, EsUnit, TsDemuxer,
+    TsPacketSplitter, STREAM_TYPE_AAC, STREAM_TYPE_AAC_LATM, STREAM_TYPE_AC3, STREAM_TYPE_H264,
+    STREAM_TYPE_H265, STREAM_TYPE_JPEG_XS, STREAM_TYPE_METADATA_PES, STREAM_TYPE_MPEG1_AUDIO,
     STREAM_TYPE_MPEG1_VIDEO, STREAM_TYPE_MPEG2_AUDIO, STREAM_TYPE_MPEG2_VIDEO, STREAM_TYPE_MPEG4P2,
     STREAM_TYPE_PRIVATE_PES, STREAM_TYPE_SCTE35, TAG_KEY_EVENT_DURATION, TAG_KEY_EVENT_NAME,
     TAG_KEY_EVENT_START, TAG_KEY_EVENT_TEXT, TAG_KEY_NEXT_EVENT_DURATION, TAG_KEY_NEXT_EVENT_NAME,
@@ -975,6 +975,7 @@ pub struct TsDemuxN {
     last_stamp: Option<UnitStamp>,
     // gst's tsdemux holds units until the program shows a timestamp
     unstamped_ahead_of_first_stamp: LeadingUnits<EsUnit>,
+    tail: TailRead,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1085,6 +1086,7 @@ impl TsDemuxN {
             splice_port_pts_ns: None,
             last_stamp: None,
             unstamped_ahead_of_first_stamp: LeadingUnits::default(),
+            tail: TailRead::default(),
             bus: None,
             collection_posted: false,
             tags: TagPoster::default(),
@@ -1693,7 +1695,9 @@ impl MultiOutputElement for TsDemuxN {
             // M362: a pending app seek triggers an upstream byte-seek; until its
             // `Flush` returns, drop input so no stale pre-seek units are emitted.
             self.seek.hold_at_segment_end().await;
-            self.seek.poll_request();
+            if !self.tail.in_flight() {
+                self.seek.poll_request();
+            }
             match packet {
                 PipelinePacket::DataFrame(frame) => {
                     self.withheld_flush = false;
@@ -1703,6 +1707,9 @@ impl MultiOutputElement for TsDemuxN {
                     let slice = frame
                         .domain
                         .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
+                    if self.tail.takes_bytes(&self.seek, slice) {
+                        return Ok(());
+                    }
                     self.packets.push(slice, &mut self.demux);
                     if self.bus.is_some() {
                         self.post_stream_collection();
@@ -1719,6 +1726,9 @@ impl MultiOutputElement for TsDemuxN {
                 // parser, then re-sync from the re-read stream. Broadcast it to
                 // every branch.
                 PipelinePacket::Flush => {
+                    if self.tail.takes_flush() {
+                        return Ok(());
+                    }
                     let seeking = self.seek.dropping_input();
                     if seeking {
                         self.timeline.seek();
@@ -1765,9 +1775,14 @@ impl MultiOutputElement for TsDemuxN {
                 }
                 PipelinePacket::Eos => {
                     self.withheld_flush = false;
+                    if let Some(tail) = self.tail.take_tail(&self.seek) {
+                        self.seek
+                            .set_stream_end_ns(latest_pts_90khz(&tail).map(ticks_90khz_to_ns));
+                        return Ok(());
+                    }
                     if self
                         .seek
-                        .eos_before_flush(self.seek.dropping_input())
+                        .eos_before_flush(self.seek.dropping_input() || self.tail.in_flight())
                         .await?
                     {
                         return Ok(());
@@ -1808,6 +1823,10 @@ impl MultiOutputElement for TsDemuxN {
 
     fn set_seek(&mut self, app: SeekController, upstream: SeekController) {
         self.seek.with(app, upstream);
+    }
+
+    fn query_duration(&self) -> Option<u64> {
+        self.seek.duration_ns()
     }
 
     fn metadata(&self) -> ElementMetadata {
