@@ -136,15 +136,15 @@ libraries installed.
     ARM and RISC-V disassembly).
   - Boot the heap-free pipeline on Espressif's QEMU fork (`-machine esp32s3`),
     as `tools/qemu-check.sh` does for Cortex-M.
-  - OV2640 camera source on esp-hal's `lcd_cam` camera driver, with the
-    sensor's I2C register setup ported from Espressif's `esp32-camera`. Then
-    96x96 MobileNet v1 person detection through `ImageResize`, `Int8Quantize`
-    and MicroFlow, with per-frame time measured.
-  - Detectors MicroFlow cannot run (MobileNet v2, FOMO): LiteRT for
-    Microcontrollers through `CTensorModel`, with Espressif's ESP-NN kernels
-    if they build outside ESP-IDF.
+  - Run a detector larger than person_detect (MobileNet v2, FOMO) through
+    TFLite Micro and ESP-NN.
+  - Send the camera's RTP from its own task, so Wi-Fi send waits stop
+    stretching the person graph past 64 ms per frame.
   - Stream the microphone over Wi-Fi to a host graph ending in
     `whispertranscribe`.
+- **Pure-Rust MCU inference backend.** Portable int8 kernels matching TFLite
+  Micro's reference kernels, plus `asm!` fast paths for the ESP32-S3's vector
+  instructions, bit-exact with ESP-NN, so a model runs without the C runtime.
 - **QNX (safety-certified RTOS, automotive/medical).** Tier 1 (needs the free
   QNX SDP 8.0): the `std` transports; the one dependency question is `tokio`
   on QNX 8. Tier 2 (needs an SoC + partner): QNX Screen display sink + vendor

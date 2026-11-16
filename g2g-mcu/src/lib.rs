@@ -68,7 +68,7 @@ pub use pcm::{PcmConvert, PcmSink, PcmWriter};
 pub use quantize::{Int8Quantize, PixelMapping};
 pub use resample::{Resampler, SampleRate};
 pub use resize::{ImageResize, ImageSize};
-pub use rtp::{PacketSender, RtpSink};
+pub use rtp::{PacketSender, RawVideoRtpSend, RtpSink};
 pub use rtprecv::{PacketReceiver, RtpSrc};
 pub use sht3x::{Sht3xSrc, SHT3X_ADDR_DEFAULT, SHT3X_READING_BYTES};
 pub use spidisplay::SpiDisplaySink;

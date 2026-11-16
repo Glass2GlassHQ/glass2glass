@@ -612,10 +612,8 @@ pub mod st2038combiner;
 #[cfg(feature = "metadata")]
 pub mod st2038extractor;
 
-// ST 2110-20 uncompressed video over RTP (M599, RFC 4175): sans-IO packetizer /
-// depacketizer slicing a frame into SRD line runs, RGBA 8-bit + YCbCr-4:2:2 8/10-bit.
-// no_std+alloc.
-pub mod st2110video;
+#[cfg(test)]
+mod st2110video;
 
 // ST 2110-22 JPEG XS over RTP (M604, RFC 9134): sans-IO packetizer / depacketizer
 // slicing a JPEG XS codestream into codestream-mode packets, RTP timestamps from

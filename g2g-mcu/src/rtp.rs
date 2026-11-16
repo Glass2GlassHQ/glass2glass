@@ -13,19 +13,21 @@
 //! Zephyr `sendmsg`, smoltcp), which is also where the host validation plugs
 //! a real socket to face ffmpeg as the receiving peer.
 //!
-//! One frame is one packet on purpose: a deterministic MCU chain sizes its
-//! frames to the MTU by construction (20 ms of G.711 at 8 kHz is 160 bytes),
-//! so an oversized payload is a configuration bug surfaced as
-//! [`G2gError::CapsMismatch`], not silently fragmented. Formats that need
-//! fragmentation rules (H.264 FU-A) have format-specific packetizers on the
-//! std side (`g2g-plugins::rtppay`); byte-preserving audio payloads (G.711,
-//! ADPCM, L16) need none.
+//! One frame is one packet on purpose for [`RtpSink`]: a deterministic MCU chain
+//! sizes its audio frames to the MTU by construction (20 ms of G.711 at 8 kHz is
+//! 160 bytes), so an oversized payload is a configuration bug surfaced as
+//! [`G2gError::CapsMismatch`], not silently fragmented. Raw video is the
+//! exception: [`RawVideoRtpSend`] slices each frame into RFC 4175 packets with
+//! the heap-free [`St2110VideoPacketizer`]. Other formats that need
+//! fragmentation rules (H.264 FU-A) have packetizers on the std side
+//! (`g2g-plugins::rtppay`).
 
 use g2g_core::error::G2gError;
 use g2g_core::frame::Frame;
 use g2g_core::rtp::{RtpHeader, RTP_HEADER_LEN};
+use g2g_core::st2110video::{Layout, Sampling, St2110VideoPacketizer};
 use g2g_core::time::TaiNs;
-use g2g_core::{MediaClock, StaticSink};
+use g2g_core::{MediaClock, StaticSink, StaticTransform};
 
 /// One RTP packet handed to the board's network stack as header + payload,
 /// split so a scatter-gather send (an lwIP `pbuf` chain, a `sendmsg` iovec)
@@ -150,6 +152,78 @@ impl<S> core::fmt::Debug for RtpSink<S> {
             .field("payload_type", &self.payload_type)
             .field("ssrc", &self.ssrc)
             .field("sequence", &self.sequence)
+            .finish_non_exhaustive()
+    }
+}
+
+pub struct RawVideoRtpSend<S, const PACKET_BYTES: usize> {
+    sender: S,
+    packetizer: St2110VideoPacketizer,
+    width: usize,
+    height: usize,
+    packet: [u8; PACKET_BYTES],
+}
+
+impl<S: PacketSender, const PACKET_BYTES: usize> RawVideoRtpSend<S, PACKET_BYTES> {
+    pub fn new(
+        sender: S,
+        sampling: Sampling,
+        width: usize,
+        height: usize,
+        payload_type: u8,
+        ssrc: u32,
+    ) -> Option<Self> {
+        Layout::new(sampling, width, height)?;
+        let packetizer = St2110VideoPacketizer::new(payload_type, ssrc, sampling, PACKET_BYTES);
+        if packetizer.max_packet() > PACKET_BYTES {
+            return None;
+        }
+        Some(Self {
+            sender,
+            packetizer,
+            width,
+            height,
+            packet: [0; PACKET_BYTES],
+        })
+    }
+
+    pub fn free(self) -> S {
+        self.sender
+    }
+}
+
+impl<S: PacketSender, const PACKET_BYTES: usize> StaticTransform
+    for RawVideoRtpSend<S, PACKET_BYTES>
+{
+    async fn process(&mut self, input: Frame) -> Result<Option<Frame>, G2gError> {
+        let Some(pixels) = input.domain.as_system_slice() else {
+            return Err(G2gError::UnsupportedDomain);
+        };
+        let mut packets = self
+            .packetizer
+            .frame_packets(
+                pixels,
+                self.width,
+                self.height,
+                input.timing.pts_ns,
+                &mut self.packet,
+            )
+            .ok_or(G2gError::CapsMismatch)?;
+        while let Some(packet) = packets.next_packet() {
+            let (header, payload) = packet
+                .split_first_chunk::<RTP_HEADER_LEN>()
+                .ok_or(G2gError::CapsMismatch)?;
+            self.sender.send(header, payload).await?;
+        }
+        Ok(Some(input))
+    }
+}
+
+impl<S, const PACKET_BYTES: usize> core::fmt::Debug for RawVideoRtpSend<S, PACKET_BYTES> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("RawVideoRtpSend")
+            .field("width", &self.width)
+            .field("height", &self.height)
             .finish_non_exhaustive()
     }
 }

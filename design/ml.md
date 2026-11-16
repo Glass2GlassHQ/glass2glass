@@ -356,9 +356,9 @@ The test fixture `g2g-ml/tests/fixtures/affine_2x_plus_1.pte` is an exported
 ### Microcontrollers
 
 A heap-free int8 model runs on a microcontroller through `g2g-mcu`'s
-`TensorInference`, with MicroFlow compiling a `.tflite` into Rust at build
-time, and `MicroFrontend`, `LogMelSpectrogram`, `ImageResize` and `Int8Quantize` as the
-preprocessing. The design and its host, ONNX Runtime and Cortex-M checks are in
+`TensorInference`, with a C runtime such as TFLite Micro behind `CTensorModel`,
+and `MicroFrontend`, `LogMelSpectrogram`, `ImageResize` and `Int8Quantize` as the
+preprocessing. The design and its host, Cortex-M and ESP32-S3 checks are in
 [embedded.md](embedded.md#tinyml-inference).
 
 ### whisper.cpp and llama.cpp

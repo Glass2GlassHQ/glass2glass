@@ -392,7 +392,7 @@ mod tests {
 
     #[test]
     fn reconstructs_a_frame_through_the_real_20_depacketizer() {
-        use crate::st2110video::{Sampling, St2110VideoDepacketizer, St2110VideoPacketizer};
+        use g2g_core::st2110video::{Sampling, St2110VideoDepacketizer, St2110VideoPacketizer};
         use g2g_core::RawVideoFormat;
 
         // Packetize an 8x4 RGBA frame into many small packets, then split them across

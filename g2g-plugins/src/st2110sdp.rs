@@ -23,7 +23,7 @@ use alloc::string::{String, ToString};
 
 use crate::sdp::{scan_sections, SdpSection};
 use crate::st2110audio::SampleDepth;
-use crate::st2110video::Sampling;
+use g2g_core::st2110video::Sampling;
 
 /// The essence a stream carries, with the parameters its SDP media / `rtpmap` /
 /// `fmtp` lines describe.
@@ -75,7 +75,7 @@ pub struct St2110Sdp {
 fn sampling_sdp(s: Sampling) -> (&'static str, u8) {
     match s {
         Sampling::Rgba8 => ("RGBA", 8),
-        Sampling::YCbCr422_8 => ("YCbCr-4:2:2", 8),
+        Sampling::YCbCr422_8 | Sampling::Gray8 => ("YCbCr-4:2:2", 8),
         Sampling::YCbCr422_10 => ("YCbCr-4:2:2", 10),
     }
 }

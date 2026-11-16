@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
 //! ST 2110-20 uncompressed video network elements: a sink and source that
-//! put the sans-IO `st2110video` core (RFC 4175) on the wire over UDP, with RTP
+//! put the sans-IO `g2g_core::st2110video` core (RFC 4175) on the wire over UDP, with RTP
 //! timestamps from the PTP media clock.
 //!
 //! [`St2110VideoSink`] takes packed raw-video `DataFrame`s (RGBA 8-bit or YUYV
@@ -46,8 +46,8 @@ use crate::filesink::io_err;
 use crate::st2110dup::spawn_rtp_receiver;
 use crate::st2110pacing::{PacedSender, Pacer, PacingProfile};
 use crate::st2110sdp::{St2110Essence, St2110Sdp};
-use crate::st2110video::{Sampling, St2110VideoDepacketizer, St2110VideoPacketizer};
 use g2g_core::caps_parse::parse_raw_format;
+use g2g_core::st2110video::{Sampling, St2110VideoDepacketizer, St2110VideoPacketizer};
 
 /// The frame period from a `Caps::RawVideo` framerate, or 0 if not fixed (do
 /// not pace).

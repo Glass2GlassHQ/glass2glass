@@ -524,16 +524,15 @@ no-heap targets (MISRA, certification processes).
   for targets without 64-bit atomics.
 - **TinyML inference.** `TensorInference` runs a model on each `Caps::Tensor`
   frame through a `TensorModel` backend seam, output into a static ring slot.
-  The `microflow` feature compiles a `.tflite` into Rust at build time with
-  [MicroFlow](https://github.com/matteocarnelos/microflow-rs), so the model
-  needs no allocator and no arena. `MicroFrontend` (the TFLite Micro audio
-  frontend, bit-exact with TensorFlow's), `LogMelSpectrogram`, `ImageResize` and
-  `Int8Quantize` are the heap-free audio and vision front ends. A keyword graph
-  (spoken clip -> `MicroFrontend` -> int8 -> the TFLite Micro `micro_speech` model)
-  gives the same features and scores on the host and on emulated Cortex-M4,
-  detects spoken yes and no live on a XIAO ESP32S3 Sense's microphone,
-  scores equal to the TFLite interpreter's and within 5 int8 steps of ONNX
-  Runtime on the model's ONNX twin.
+  A C runtime links in through `CTensorModel`. On the ESP32-S3 that is TFLite
+  Micro with Espressif's ESP-NN kernels, built outside ESP-IDF. `MicroFrontend`
+  (the TFLite Micro audio frontend, bit-exact with TensorFlow's),
+  `LogMelSpectrogram`, `ImageResize` and `Int8Quantize` are the heap-free audio
+  and vision front ends. A keyword graph (spoken clip -> `MicroFrontend` -> int8
+  features) gives the same features on the host and on emulated Cortex-M4. On a
+  XIAO ESP32S3 Sense the micro_speech model detects spoken yes and no live from
+  the microphone, and person_detect runs on the OV3660 camera while the frames
+  stream over WiFi as RFC 4175 RTP to a host window.
 - **Reference deterministic-audio graph.** `capture -> convert -> resample ->
   mix -> encode -> RTP` as one static heap-free pipeline, fully fixed-point,
   so its RTP wire bytes are bit-exact on every target. Pinned by a host test

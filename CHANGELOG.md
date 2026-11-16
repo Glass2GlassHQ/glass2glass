@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2339: `RawVideoRtpSend` sends RFC 4175 video from a heap-free MCU graph, and the ESP32-S3 streams its camera over Wi-Fi to a host window.
 - M2338: `Ov3660` camera driver, and the ESP32-S3 runs live person detection on it with TFLite Micro and ESP-NN.
 - M2337: MicroFlow is removed, the ESP32-S3 runs TFLite Micro models outside ESP-IDF, and `Int8Quantize` gains `PixelMapping::Int8Range`.
 - M2336: `MicroFrontend`, the TFLite Micro audio frontend bit-exact with TensorFlow's, so the ESP32-S3 keyword graph detects spoken yes and no.

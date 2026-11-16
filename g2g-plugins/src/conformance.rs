@@ -31,7 +31,7 @@ use g2g_core::conformance::{
 use g2g_core::RawVideoFormat;
 
 use crate::st2110dup::SeamlessDedup;
-use crate::st2110video::{Sampling, St2110VideoDepacketizer, St2110VideoPacketizer};
+use g2g_core::st2110video::{Sampling, St2110VideoDepacketizer, St2110VideoPacketizer};
 
 /// FNV-1a 64: a dependency-free stable digest for a committed golden. Used by the
 /// decoder-regression batteries to pin decoded pixels / samples to a value in the

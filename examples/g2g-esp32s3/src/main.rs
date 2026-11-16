@@ -5,32 +5,30 @@
 #![no_std]
 #![no_main]
 
-use core::cell::Cell;
+mod camera;
+mod keyword;
+mod network;
+mod person;
+mod tflm;
+
+use core::mem::MaybeUninit;
+use core::pin::pin;
 
 use esp_backtrace as _;
 use esp_hal::clock::CpuClock;
-use esp_hal::dma::DmaRxStreamBuf;
-use esp_hal::dma_rx_stream_buffer;
-use esp_hal::i2s::master::{I2s, I2sRxDmaTransfer, PdmConfig, PdmRxConfig, PdmSlotMode};
-use esp_hal::time::{Instant, Rate};
-use esp_hal::Blocking;
+use esp_hal::psram::{Psram, PsramConfig};
+use esp_hal::time::Instant;
 use esp_println::println;
 use g2g_core::error::{G2gError, HardwareError};
-use g2g_mcu::FrameGrabber;
-use noalloc_pipeline::keyword::{run_keyword_graph, CLIP_BYTES, KEYWORDS, LABELS};
-use static_cell::StaticCell;
+use g2g_mcu::CTensorModel;
+use noalloc_pipeline::keyword::CLIP_BYTES;
 
 // espflash refuses images without the esp-idf application descriptor.
 esp_bootloader_esp_idf::esp_app_desc!();
 
-const SAMPLE_RATE_HZ: u32 = 16_000;
-const SAMPLE_BYTES: usize = 2;
-const STRIDE_MILLISECONDS: usize = 500;
-const STRIDE_BYTES: usize = SAMPLE_RATE_HZ as usize * STRIDE_MILLISECONDS / 1000 * SAMPLE_BYTES;
-const STRIDE_NS: u64 = STRIDE_MILLISECONDS as u64 * 1_000_000;
-// esp-hal DMA descriptors carry at most 4095 bytes.
-const DMA_CHUNK_BYTES: usize = 4000;
-const DMA_BYTES: usize = CLIP_BYTES;
+pub(crate) fn peripheral() -> G2gError {
+    G2gError::Hardware(HardwareError::Peripheral)
+}
 
 fn report(name: &str, run: impl FnOnce() -> u64, expected: u64) -> bool {
     let start = Instant::now();
@@ -42,104 +40,46 @@ fn report(name: &str, run: impl FnOnce() -> u64, expected: u64) -> bool {
     matches
 }
 
-// Each capture slides a one-second window forward by STRIDE_BYTES of new audio.
-struct MicWindow<'d, 'a> {
-    transfer: I2sRxDmaTransfer<'d, Blocking, DmaRxStreamBuf>,
-    window: &'static mut [u8; CLIP_BYTES],
-    filled: bool,
-    peak: &'a Cell<i16>,
+struct PsramBuffers {
+    speech_arena: &'static mut [MaybeUninit<u8>],
+    person_arena: &'static mut [MaybeUninit<u8>],
+    microphone_window: &'static mut [u8; CLIP_BYTES],
+    camera_frame: &'static mut [u8; person::IMAGE_BYTES],
 }
 
-impl MicWindow<'_, '_> {
-    fn read_exact(&mut self, from: usize) -> Result<(), G2gError> {
-        let mut at = from;
-        while at < CLIP_BYTES {
-            // esp-hal stops the DMA when every descriptor is full and unread.
-            if self.transfer.is_done() {
-                return Err(G2gError::Hardware(HardwareError::Peripheral));
-            }
-            at += self.transfer.pop(&mut self.window[at..]);
-        }
-        Ok(())
-    }
-}
-
-impl FrameGrabber for MicWindow<'_, '_> {
-    async fn capture(&mut self, buf: &mut [u8]) -> Result<usize, G2gError> {
-        if self.filled {
-            self.window.copy_within(STRIDE_BYTES.., 0);
-            self.read_exact(CLIP_BYTES - STRIDE_BYTES)?;
-        } else {
-            self.read_exact(0)?;
-            self.filled = true;
-        }
-        let Some(slot) = buf.get_mut(..CLIP_BYTES) else {
-            return Err(G2gError::CapsMismatch);
-        };
-        slot.copy_from_slice(self.window.as_slice());
-        let peak = self
-            .window
-            .chunks_exact(SAMPLE_BYTES)
-            .map(|sample| i16::from_le_bytes([sample[0], sample[1]]).saturating_abs())
-            .max()
-            .unwrap_or(0);
-        self.peak.set(peak);
-        Ok(CLIP_BYTES)
-    }
-}
-
-fn print_scores(scores: [f32; KEYWORDS], peak: i16) {
-    let mut best = 0;
-    for index in 1..KEYWORDS {
-        if scores[index] > scores[best] {
-            best = index;
-        }
-    }
-    println!(
-        "{:<8} silence {:.2} unknown {:.2} yes {:.2} no {:.2} peak {peak}",
-        LABELS[best], scores[0], scores[1], scores[2], scores[3]
+fn psram_buffers(psram: &Psram) -> PsramBuffers {
+    let (start, bytes) = psram.raw_parts();
+    assert!(
+        bytes >= keyword::ARENA_BYTES + person::ARENA_BYTES + CLIP_BYTES + person::IMAGE_BYTES,
+        "PSRAM holds {bytes} bytes"
     );
-}
-
-// without LTO, the keyword graph inlined into main overflows the 287 KB main stack.
-#[inline(never)]
-fn listen(peripherals: esp_hal::peripherals::Peripherals) {
-    static WINDOW: StaticCell<[u8; CLIP_BYTES]> = StaticCell::new();
-    let pdm = PdmConfig::rx_only(PdmRxConfig::new_pcm_default(
-        Rate::from_hz(SAMPLE_RATE_HZ),
-        PdmSlotMode::Mono,
-    ));
-    let i2s = I2s::new_pdm(peripherals.I2S0, peripherals.DMA_CH0, pdm).expect("i2s pdm config");
-    // XIAO ESP32S3 Sense: the PDM microphone clock is GPIO42 and its data is GPIO41.
-    let i2s_rx = i2s
-        .i2s_rx
-        .with_clk(peripherals.GPIO42)
-        .with_din(peripherals.GPIO41)
-        .build();
-    let transfer = i2s_rx
-        .read(dma_rx_stream_buffer!(DMA_BYTES, DMA_CHUNK_BYTES))
-        .map_err(|(error, _, _)| error)
-        .expect("i2s dma start");
-
-    let peak = Cell::new(0);
-    let microphone = MicWindow {
-        transfer,
-        window: WINDOW.init([0; CLIP_BYTES]),
-        filled: false,
-        peak: &peak,
+    // SAFETY: Psram maps `bytes` bytes at `start` for the life of the program, and only this function hands them out.
+    let memory = unsafe { core::slice::from_raw_parts_mut(start.cast::<MaybeUninit<u8>>(), bytes) };
+    let (speech_arena, rest) = memory.split_at_mut(keyword::ARENA_BYTES);
+    let (person_arena, rest) = rest.split_at_mut(person::ARENA_BYTES);
+    let (window, rest) = rest.split_at_mut(CLIP_BYTES);
+    let frame = &mut rest[..person::IMAGE_BYTES];
+    for byte in window.iter_mut().chain(frame.iter_mut()) {
+        byte.write(0);
+    }
+    // SAFETY: every byte of both buffers was just written.
+    let (microphone_window, camera_frame) = unsafe {
+        (
+            &mut *window.as_mut_ptr().cast::<[u8; CLIP_BYTES]>(),
+            &mut *frame.as_mut_ptr().cast::<[u8; person::IMAGE_BYTES]>(),
+        )
     };
-    println!("listening: say yes or no");
-    let result = g2g_core::drive_ready(run_keyword_graph(microphone, None, STRIDE_NS, |scores| {
-        print_scores(scores, peak.get())
-    }));
-    println!("keyword graph stopped: {result:?}");
+    PsramBuffers {
+        speech_arena,
+        person_arena,
+        microphone_window,
+        camera_frame,
+    }
 }
 
-#[esp_hal::main]
-fn main() -> ! {
-    let peripherals = esp_hal::init(esp_hal::Config::default().with_cpu_clock(CpuClock::max()));
-    println!("g2g on esp32s3");
-
+// without LTO, rustc gives main one stack frame for everything inlined into it
+#[inline(never)]
+fn run_checks(speech: &mut CTensorModel, person_model: &mut CTensorModel) -> bool {
     let display = report(
         "display",
         noalloc_pipeline::run,
@@ -150,18 +90,96 @@ fn main() -> ! {
         noalloc_pipeline::audio::run_audio,
         noalloc_pipeline::audio::AUDIO_EXPECTED_CHECKSUM,
     );
-    let keyword = report(
-        "keyword",
-        || noalloc_pipeline::keyword::run_keyword().map_or(0, |run| run.digest()),
-        noalloc_pipeline::keyword::EXPECTED_RUN.digest(),
+    let features = report(
+        "keyword features",
+        || noalloc_pipeline::keyword::run_keyword().unwrap_or(0),
+        noalloc_pipeline::keyword::EXPECTED_FEATURES_DIGEST,
     );
-    let verdict = if display && audio && keyword {
+    let speech_scores = keyword::check_model(speech);
+    let person_scores = person::check_samples(person_model);
+    display && audio && features && speech_scores && person_scores
+}
+
+#[inline(never)]
+fn run_live(
+    speech: &mut CTensorModel,
+    person_model: &mut CTensorModel,
+    microphone: keyword::Microphone,
+    camera: camera::CameraGrabber,
+    network: network::Network,
+) {
+    let network::Network {
+        mut controller,
+        stack,
+        mut runner,
+    } = network;
+    let networking = pin!(runner.run());
+    let listening = pin!(keyword::listen(speech, microphone));
+    let watching = pin!(async {
+        network::connect(&mut controller, stack).await?;
+        person::watch(person_model, camera, network::udp_sender(stack)?).await
+    });
+    let graphs = embassy_futures::join::join(listening, watching);
+    let embassy_futures::select::Either::Second((keyword_stopped, person_stopped)) =
+        embassy_futures::block_on(embassy_futures::select::select(networking, graphs));
+    println!(
+        "keyword graph stopped: {keyword_stopped:?}, person graph stopped: {person_stopped:?}"
+    );
+}
+
+#[esp_hal::main]
+fn main() -> ! {
+    let peripherals = esp_hal::init(esp_hal::Config::default().with_cpu_clock(CpuClock::max()));
+    println!("g2g on esp32s3");
+
+    let psram = Psram::new(peripherals.PSRAM, PsramConfig::default());
+    let buffers = psram_buffers(&psram);
+    let mut speech = keyword::load_model(buffers.speech_arena).expect("speech model");
+    let mut person_model = person::load_model(buffers.person_arena).expect("person_detect model");
+    let network = network::start(
+        peripherals.WIFI,
+        peripherals.TIMG0,
+        peripherals.FROM_CPU_INTR0,
+    )
+    .expect("wifi");
+    let verdict = if run_checks(&mut speech, &mut person_model) {
         "PASS"
     } else {
         "FAIL"
     };
     println!("{verdict}");
 
-    listen(peripherals);
+    let pins = camera::CameraPins {
+        xclk: peripherals.GPIO10,
+        sda: peripherals.GPIO40,
+        scl: peripherals.GPIO39,
+        d0: peripherals.GPIO15,
+        d1: peripherals.GPIO17,
+        d2: peripherals.GPIO18,
+        d3: peripherals.GPIO16,
+        d4: peripherals.GPIO14,
+        d5: peripherals.GPIO12,
+        d6: peripherals.GPIO11,
+        d7: peripherals.GPIO48,
+        vsync: peripherals.GPIO38,
+        href: peripherals.GPIO47,
+        pclk: peripherals.GPIO13,
+    };
+    let camera = camera::open(
+        peripherals.LCD_CAM,
+        peripherals.DMA_CH1,
+        peripherals.I2C0,
+        pins,
+        buffers.camera_frame,
+    )
+    .expect("OV3660 camera");
+    let microphone = keyword::Microphone {
+        i2s0: peripherals.I2S0,
+        dma: peripherals.DMA_CH0,
+        clock: peripherals.GPIO42,
+        data: peripherals.GPIO41,
+        window: buffers.microphone_window,
+    };
+    run_live(&mut speech, &mut person_model, microphone, camera, network);
     loop {}
 }

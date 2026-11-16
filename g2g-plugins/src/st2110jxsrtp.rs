@@ -48,8 +48,8 @@ use crate::st2110dup::spawn_rtp_receiver;
 use crate::st2110jxs::{St2110JxsDepacketizer, St2110JxsPacketizer};
 use crate::st2110pacing::{PacedSender, Pacer, PacingProfile};
 use crate::st2110sdp::{St2110Essence, St2110Sdp};
-use crate::st2110video::Sampling;
 use g2g_core::caps_parse::parse_raw_format;
+use g2g_core::st2110video::Sampling;
 
 /// The frame period from a `Caps::CompressedVideo` framerate, or 0 if not fixed
 /// (do not pace).

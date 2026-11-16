@@ -19,6 +19,16 @@ esp-println = { version = "0.18.0", default-features = false, features = ["esp32
 esp-backtrace = { version = "0.20.0", features = ["esp32s3", "panic-handler", "println"] }
 esp-bootloader-esp-idf = { version = "0.6.0", features = ["esp32s3"] }
 static_cell = "2"
+esp-radio = { version = "1.0.0-beta.1", features = ["esp32s3", "wifi", "esp-alloc"] }
+esp-rtos = { version = "0.4.0", features = ["esp32s3", "esp-radio", "esp-alloc", "embassy"] }
+esp-alloc = { version = "0.11.0", features = ["esp32s3"] }
+embassy-net = { version = "0.9.1", features = ["udp", "dhcpv4", "medium-ethernet", "proto-ipv4"] }
+# embassy-time-queue-utils' default queue panics on wakers not made by embassy-executor
+embassy-time-queue-utils = { version = "0.3.2", features = ["generic-queue-16"] }
+embassy-futures = "0.1.2"
+
+[build-dependencies]
+cc = "1.11.2"
 
 [profile.release]
 opt-level = "s"
@@ -27,3 +37,7 @@ lto = false
 codegen-units = 1
 panic = "abort"
 debug = true
+
+# esp-radio: the radio blobs need opt-level 2 or 3 to connect
+[profile.release.package.esp-radio]
+opt-level = 3

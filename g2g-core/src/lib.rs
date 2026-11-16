@@ -63,6 +63,7 @@ pub mod query;
 // RTP packetizer (MCU packet sink + the std packetizers in g2g-plugins).
 pub mod rtp;
 pub mod segment;
+pub mod st2110video;
 pub mod state;
 // Static (heap-free) element model (M624, Phase 2 of the alloc-optional core):
 // generic `async fn`-in-trait source/transform/sink + const-arity runners that
