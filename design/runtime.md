@@ -552,8 +552,7 @@ the last pts out (`demuxseek::segment_after_seek`, which `Mp4Src` shares).
 A seek's `Set` stop goes into the `Segment` at the target, and the first unit past
 it byte-seeks the source to its published length, so the source flushes and sends
 `Eos` and the demuxer ends through its usual `Eos` path. A source with no length
-reads on and the demuxer drops its units. `AviDemuxN` serves seeks from the
-buffered file, so it drops the samples after the last one presenting by the stop.
+reads on and the demuxer drops its units.
 A SEGMENT seek's stop posts segment-done instead, and the demuxer waits at the top
 of its next `process` for the app's loop seek, which holds the source behind its
 input. A stop past the last unit posts segment-done at the source's `Eos`. A
@@ -578,9 +577,9 @@ running time carries on over timestamps that jump. The source's `Segment` rides
 the prebuffer window with the bytes it precedes. `tsdemux` keeps a `Segment` that
 follows an upstream `Flush` or arrives once its stream is open, instead of opening
 its own, while the runner's opening `Segment` it still replaces.
-`attach_seek` skips a time source that feeds a buffering element (`avidemux` behind
-`hlssrc`), since that element holds the whole stream and serves the seek. `qtdemux`
-seeks only by byte-seeking a byte source, so behind `hlssrc` the seek goes to the
+`attach_seek` skips a time source that feeds an element whose `seek_route` is
+`Buffered`, since that element holds the whole stream and serves the seek. `qtdemux`
+and `avidemux` seek only by byte-seeking a byte source, so behind `hlssrc` the seek goes to the
 source. A pipeline
 with several seekable elements, such as the separate audio and subtitle renditions of
 an HLS playlist, each its own `HlsSrc`, seeks them all, as a gst pipeline seek reaches
@@ -656,8 +655,7 @@ as well as flushing ones.
 An application seeks a pipeline built from a launch string through
 `runtime::attach_seek(graph, seek)`. A source reports `seek_format()`, `Time` for
 `Mp4Src` and `Bytes` for `FileSrc`. A transform or a multi-output demux reports
-`seek_route()`: `Buffered` when it serves a time seek from the whole stream it holds
-(`Mp4Demux`, `Mp4DemuxN`, `AviDemuxN`),
+`seek_route()`: `Buffered` when it serves a time seek from the whole stream it holds,
 `UpstreamBytes` when it byte-seeks the source that feeds it (the byte-stream
 demuxers, and the audio parsers `flacparse`, `mpegaudioparse`, `aacparse` and `ac3parse`,
 which rescan a bare file from its start and restart their sample count there), and
@@ -702,9 +700,7 @@ a demuxer or `Mp4Src` sends has `time` set to its start minus the stream start, 
 sink arm's `Segment::to_stream_time` publishes a position that a seek takes back to the
 same frame, as GStreamer's `matroskademux` does. `Segment::time` is signed, so a
 `tsdemux` segment opening at the first DTS reads 0 at the first PTS. A seek
-past the end gives no frames, which g2g-launch reports as an error. `AviDemuxN`
-holds the whole file, so a seek that arrives once its samples have gone out sends
-`Flush` and the samples again from the target.
+past the end gives no frames, which g2g-launch reports as an error.
 
 ### Seeks after the end of the stream
 
@@ -723,8 +719,7 @@ set before any arm starts. `Mp4Src`, `FileSrc` and `HttpSrc` push `Eos` at the e
 park on `wait_event`: a seek pushes `Flush` and plays on, `shutdown` returns. A
 byte-stream demuxer receives nothing while its source is parked, so after its `Eos` it
 pushes the `Eos` itself and waits on the app controller inside `process`, then takes
-the seek, which wakes the parked `FileSrc`. `AviDemuxN` waits the same way after its
-drain. Every transform, sink, tee and demux arm from the seekable node down hands its
+the seek, which wakes the parked `FileSrc`. Every transform, sink, tee and demux arm from the seekable node down hands its
 element the `Eos` and keeps reading, so a later `Flush` resets the chain, and still
 ends when its input closes. `shutdown` on the app controller also shuts down the byte
 source's controller, so the parked source returns and the chain ends through closed
@@ -733,8 +728,8 @@ links as before. An arm in that part of the graph that ends early, on an error o
 open.
 
 The run ends the stream by counting. Every flushing seek taken from the app
-controller counts, and the element that took it always pushes a `Flush` downstream,
-`AviDemuxN` included for a seek it serves before its first sample. Each arm counts the
+controller counts, and the element that took it always pushes a `Flush` downstream.
+Each arm counts the
 `Flush` packets it has received, and an `Eos` that reaches an arm with fewer than the
 seeks taken is stale: the source sent it before the `Flush` of a seek already taken,
 so the arm drops it, and a decoder never drains frames the `Flush` would discard. A
@@ -785,11 +780,11 @@ Every demuxer carries it, the single-output `fmp4demux`, `mkvdemux`, `flvdemux` 
 from its own last keyframe at or before the target, so an audio port restarts at
 its last packet before the target while the video port restarts at its keyframe,
 and the first port to reach the target releases the seek's `Segment` that every
-port then opens with. `AviDemuxN` holds the whole file and emits it at EOS,
-so it takes the seek through `DemuxSeek::with_held_stream`
-(`ElementSeekRoute::Buffered`): a seek pending while the file goes out stops the
-emission, and `replay_held_stream` flushes every port and emits the file again
-through the same per-port keyframe selection. `Mp4DemuxN` byte-seeks its
+port then opens with. When `AviDemuxN` streams a file read with its `idx1`,
+the seek lands on the earliest of the forwarded streams' last keyframes at or
+before the target, an audio stream's last chunk, and each stream's timing goes on
+from the sample count the index gives at that byte. Otherwise it re-reads the
+file from byte 0. `Mp4DemuxN` byte-seeks its
 source. When it streams a progressive file from its sample tables, the seek
 lands on the earliest of the forwarded tracks' last keyframes at or before the
 target, read from the index, and the parse carries on from that byte. Otherwise

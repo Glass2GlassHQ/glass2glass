@@ -59,6 +59,7 @@ const AVIH_FOURCC: FourCc = *b"avih";
 const STRH_FOURCC: FourCc = *b"strh";
 const STRF_FOURCC: FourCc = *b"strf";
 const IDX1_FOURCC: FourCc = *b"idx1";
+const JUNK_FOURCC: FourCc = *b"JUNK";
 
 /// `strh` `fccType` values: a video and an audio stream.
 const STREAM_TYPE_VIDEO: FourCc = *b"vids";
@@ -75,6 +76,7 @@ const STRH_HANDLER: usize = 4;
 const STRH_SCALE: usize = 20;
 const STRH_RATE: usize = 24;
 const STRH_START: usize = 28;
+const STRH_LENGTH: usize = 32;
 const STRH_SAMPLE_SIZE: usize = 44;
 /// The fields of `strh` this reads run to `dwSampleSize`.
 const STRH_MIN_LEN: usize = STRH_SAMPLE_SIZE + 4;
@@ -102,6 +104,7 @@ const WAVEFORMAT_EX_LEN: usize = WAVEFORMAT_EXTRA_SIZE + 2;
 const IDX1_ENTRY_LEN: usize = 16;
 const IDX1_ENTRY_FLAGS: usize = 4;
 const IDX1_ENTRY_OFFSET: usize = 8;
+const IDX1_ENTRY_LEN_AT: usize = 12;
 /// `AVIIF_KEYFRAME`: the indexed chunk opens a decodable point.
 const AVIIF_KEYFRAME: u32 = 0x10;
 
@@ -172,11 +175,25 @@ pub(crate) struct AviStream {
     pub rate: u32,
     /// `dwStart`: the stream's first sample sits this many samples in.
     pub start: u32,
+    /// `dwLength`: the stream's sample count.
+    pub length: u32,
     /// `dwSampleSize`: bytes per sample, `0` when one chunk is one sample.
     pub sample_size: u32,
     /// The `strf` bytes past its fixed header: H.264 extradata for a video
     /// stream, the AAC `AudioSpecificConfig` for an audio one.
     pub codec_config: Vec<u8>,
+}
+
+impl AviFile {
+    // the end of the longest stream g2g carries, from each `strh` length
+    pub(crate) fn duration_ns(&self) -> Option<u64> {
+        self.streams
+            .iter()
+            .filter(|stream| !matches!(stream.kind, AviStreamKind::Unsupported { .. }))
+            .filter(|stream| stream.length > 0)
+            .map(|stream| stream.timing(u64::from(stream.length), 0).0)
+            .max()
+    }
 }
 
 impl AviStream {
@@ -323,6 +340,7 @@ fn parse_strl(data: &[u8], range: core::ops::Range<usize>) -> Option<AviStream> 
         scale: read_u32(strh, STRH_SCALE)?,
         rate: read_u32(strh, STRH_RATE)?,
         start: read_u32(strh, STRH_START)?,
+        length: read_u32(strh, STRH_LENGTH)?,
         // a video chunk is one frame whatever `dwSampleSize` says, as gst and ffmpeg read it
         sample_size: if stream_type == STREAM_TYPE_VIDEO {
             0
@@ -511,9 +529,15 @@ fn collect_data_chunks(
     }
 }
 
-// libavcodec also decodes what remains of a cut long-tail video chunk, as ffmpeg does
 fn push_cut_chunk(chunk: Chunk, streams: &[AviStream], out: &mut Vec<AviChunk>) {
-    let tagged_video = chunk_stream_number(chunk.id)
+    if keeps_cut_chunk(&chunk.id, streams) {
+        push_data_chunk(chunk, streams.len(), out);
+    }
+}
+
+// libavcodec also decodes what remains of a cut long-tail video chunk, as ffmpeg does
+pub(crate) fn keeps_cut_chunk(id: &FourCc, streams: &[AviStream]) -> bool {
+    chunk_stream_number(*id)
         .and_then(|stream| streams.get(stream))
         .is_some_and(|stream| {
             matches!(
@@ -523,26 +547,44 @@ fn push_cut_chunk(chunk: Chunk, streams: &[AviStream], out: &mut Vec<AviChunk>) 
                     ..
                 }
             )
-        });
-    if tagged_video {
-        push_data_chunk(chunk, streams.len(), out);
-    }
+        })
 }
 
 fn push_data_chunk(chunk: Chunk, stream_count: usize, out: &mut Vec<AviChunk>) {
-    let Some(stream) = chunk_stream_number(chunk.id) else {
-        return;
-    };
-    if stream >= stream_count {
-        return;
-    }
+    out.extend(data_chunk(chunk, stream_count));
+}
+
+pub(crate) fn data_chunk(chunk: Chunk, stream_count: usize) -> Option<AviChunk> {
+    let stream = chunk_stream_number(chunk.id).filter(|stream| *stream < stream_count)?;
     let palette_change = chunk.id[2..] == *b"pc" && chunk.body.len() <= PALETTE_CHANGE_MAX_LEN;
-    out.push(AviChunk {
+    Some(AviChunk {
         stream,
         body: chunk.body,
         keyframe: false,
         palette_change,
-    });
+    })
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Idx1Entry {
+    id: FourCc,
+    keyframe: bool,
+    offset: u32,
+    len: u32,
+}
+
+fn idx1_entries(idx1: &[u8]) -> impl Iterator<Item = Idx1Entry> + '_ {
+    idx1.as_chunks::<IDX1_ENTRY_LEN>()
+        .0
+        .iter()
+        .map(|entry| Idx1Entry {
+            id: read_fourcc(entry, 0).expect("an idx1 entry starts with its chunk id"),
+            keyframe: read_u32(entry, IDX1_ENTRY_FLAGS).expect("an idx1 entry has its flags")
+                & AVIIF_KEYFRAME
+                != 0,
+            offset: read_u32(entry, IDX1_ENTRY_OFFSET).expect("an idx1 entry has its offset"),
+            len: read_u32(entry, IDX1_ENTRY_LEN_AT).expect("an idx1 entry has its length"),
+        })
 }
 
 /// Apply the `idx1` keyframe flags to the collected chunks. `idx1` offsets are
@@ -551,41 +593,133 @@ fn push_data_chunk(chunk: Chunk, stream_count: usize, out: &mut Vec<AviChunk>) {
 /// chunk this walk already found. An entry that matches nothing is ignored, so
 /// a stale or truncated index costs keyframe flags rather than the parse.
 fn apply_idx1(data: &[u8], idx1: &[u8], movi_form_offset: usize, chunks_out: &mut [AviChunk]) {
-    let entries = idx1.len() / IDX1_ENTRY_LEN;
-    let body_of = |header: usize| header.checked_add(CHUNK_HEADER_LEN);
-    let base = |entry: usize| -> Option<usize> {
-        let offset = read_u32(idx1, entry * IDX1_ENTRY_LEN + IDX1_ENTRY_OFFSET)? as usize;
-        let relative = body_of(movi_form_offset.checked_add(offset)?)?;
-        if chunk_starting_at(chunks_out, relative).is_some() {
-            return Some(movi_form_offset);
-        }
-        let absolute = body_of(offset)?;
-        chunk_starting_at(chunks_out, absolute).map(|_| 0)
+    let body_of = |base: usize, entry: &Idx1Entry| {
+        base.checked_add(entry.offset as usize)?
+            .checked_add(CHUNK_HEADER_LEN)
     };
-    let Some(base) = (0..entries).find_map(base) else {
+    let lands_on_a_chunk = |base: usize, entry: &Idx1Entry| {
+        body_of(base, entry).is_some_and(|body| chunk_starting_at(chunks_out, body).is_some())
+    };
+    let Some(base) = idx1_entries(idx1).find_map(|entry| {
+        [movi_form_offset, 0]
+            .into_iter()
+            .find(|base| lands_on_a_chunk(*base, &entry))
+    }) else {
         return;
     };
-    for entry in 0..entries {
-        let at = entry * IDX1_ENTRY_LEN;
-        let (Some(flags), Some(offset)) = (
-            read_u32(idx1, at + IDX1_ENTRY_FLAGS),
-            read_u32(idx1, at + IDX1_ENTRY_OFFSET),
-        ) else {
-            continue;
-        };
-        if flags & AVIIF_KEYFRAME == 0 {
-            continue;
-        }
-        let Some(body) = base
-            .checked_add(offset as usize)
-            .and_then(body_of)
+    for entry in idx1_entries(idx1).filter(|entry| entry.keyframe) {
+        let Some(index) = body_of(base, &entry)
             .filter(|start| *start < data.len())
+            .and_then(|body| chunk_starting_at(chunks_out, body))
         else {
             continue;
         };
-        if let Some(index) = chunk_starting_at(chunks_out, body) {
-            chunks_out[index].keyframe = true;
+        chunks_out[index].keyframe = true;
+    }
+}
+
+// the idx1 entries placed in the file and on their stream's timeline, for a file read as it arrives
+#[derive(Debug, Default)]
+pub(crate) struct AviIndex {
+    pub chunks: Vec<IndexedChunk>,
+    // by stream, the sample position past the last indexed chunk
+    pub end_positions: Vec<u64>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct IndexedChunk {
+    pub header_at: u64,
+    pub stream: usize,
+    // the stream's sample position at this chunk, where its timing restarts when a seek lands here
+    pub position: u64,
+    pub pts_ns: u64,
+    pub keyframe: bool,
+    // a keyframe, or an audio chunk, which every decoder can start from
+    pub resync_point: bool,
+}
+
+impl AviIndex {
+    // `None` when no entry lands on the chunk header at `first_chunk_at` under either base, a stale index
+    pub(crate) fn read(
+        idx1: &[u8],
+        movi_form_offset: u64,
+        first_chunk_at: u64,
+        streams: &[AviStream],
+    ) -> Option<Self> {
+        let base = [movi_form_offset, 0].into_iter().find(|base| {
+            idx1_entries(idx1).any(|entry| base + u64::from(entry.offset) == first_chunk_at)
+        })?;
+        let mut positions = alloc::vec![0u64; streams.len()];
+        let chunks = idx1_entries(idx1)
+            .filter(|entry| entry.id[2..] != *b"pc")
+            .filter_map(|entry| {
+                let stream_number = chunk_stream_number(entry.id).filter(|s| *s < streams.len())?;
+                let stream = &streams[stream_number];
+                let audio = matches!(stream.kind, AviStreamKind::Audio { .. });
+                // an empty video chunk is a dropped frame that takes its time slot, an empty audio chunk takes none
+                let samples = match entry.len {
+                    0 if audio => return None,
+                    0 => 1,
+                    len => stream.samples_in(len as usize),
+                };
+                let position = positions[stream_number];
+                positions[stream_number] += samples;
+                Some(IndexedChunk {
+                    header_at: base + u64::from(entry.offset),
+                    stream: stream_number,
+                    position,
+                    pts_ns: stream.timing(position, 0).0,
+                    keyframe: entry.keyframe,
+                    resync_point: entry.keyframe || audio,
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut chunks = chunks;
+        // stable, so the chunks of a stream keep their order
+        chunks.sort_by_key(|chunk| chunk.header_at);
+        Some(Self {
+            chunks,
+            end_positions: positions,
+        })
+    }
+
+    pub(crate) fn chunk_at(&self, header_at: u64) -> Option<&IndexedChunk> {
+        self.chunks
+            .binary_search_by_key(&header_at, |chunk| chunk.header_at)
+            .ok()
+            .map(|at| &self.chunks[at])
+    }
+
+    // the earliest of the streams' last resync chunks at or before the target, so every port decodes from it
+    pub(crate) fn landing(&self, streams: &[usize], target_ns: u64) -> Option<u64> {
+        streams
+            .iter()
+            .filter_map(|stream| {
+                let chunks = || self.chunks.iter().filter(|chunk| chunk.stream == *stream);
+                chunks()
+                    .filter(|chunk| chunk.resync_point && chunk.pts_ns <= target_ns)
+                    .max_by_key(|chunk| chunk.pts_ns)
+                    .or_else(|| chunks().next())
+                    .map(|chunk| chunk.header_at)
+            })
+            .min()
+    }
+
+    // by stream, the sample position at its first chunk at or past `landing`
+    pub(crate) fn positions_at(&self, landing: u64) -> Vec<u64> {
+        let mut positions = alloc::vec![None; self.end_positions.len()];
+        for chunk in self
+            .chunks
+            .iter()
+            .filter(|chunk| chunk.header_at >= landing)
+        {
+            positions[chunk.stream].get_or_insert(chunk.position);
         }
+        positions
+            .into_iter()
+            .zip(&self.end_positions)
+            .map(|(position, end)| position.unwrap_or(*end))
+            .collect()
     }
 }
 
@@ -664,19 +798,172 @@ pub(crate) fn parse(data: &[u8]) -> Result<AviFile, G2gError> {
             &mut file.chunks,
         );
     } else {
-        // With no index, only an all-intra codec can promise every chunk is a
-        // decodable point; an inter-coded stream keeps its flags clear.
         for chunk in file.chunks.iter_mut() {
-            chunk.keyframe = matches!(
-                file.streams[chunk.stream].kind,
-                AviStreamKind::Video {
-                    codec: VideoCodec::Mjpeg,
-                    ..
-                } | AviStreamKind::RawVideo { .. }
-            );
+            chunk.keyframe = intra_only(&file.streams[chunk.stream]);
         }
     }
     Ok(file)
+}
+
+// with no index, only an all-intra codec can promise every chunk is a decodable point
+pub(crate) fn intra_only(stream: &AviStream) -> bool {
+    matches!(
+        stream.kind,
+        AviStreamKind::Video {
+            codec: VideoCodec::Mjpeg,
+            ..
+        } | AviStreamKind::RawVideo { .. }
+    )
+}
+
+// a file's streams and tags, and where its first `movi` list lies, read before its chunks arrive
+#[derive(Debug)]
+pub(crate) struct AviHead {
+    pub file: AviFile,
+    // the offset of the `movi` form type, which `idx1` offsets count from
+    pub movi_form_offset: u64,
+    // past the list's padding, where an `idx1` follows
+    pub movi_end: u64,
+}
+
+impl AviHead {
+    pub(crate) fn first_chunk_at(&self) -> u64 {
+        self.movi_form_offset + FOURCC_LEN as u64
+    }
+}
+
+#[derive(Debug)]
+pub(crate) enum Idx1Read<'a> {
+    Found(&'a [u8]),
+    Absent,
+    Wait,
+}
+
+// the `idx1` that follows `movi`, `data` starting where the list ends, past any `JUNK` padding
+pub(crate) fn read_idx1(data: &[u8], stream_ended: bool) -> Idx1Read<'_> {
+    let mut walk = chunks_to_cut(data, 0..data.len());
+    while let Some(chunk) = walk.next() {
+        let whole = !walk.overran();
+        match chunk.id {
+            IDX1_FOURCC if whole || stream_ended => return Idx1Read::Found(chunk.body(data)),
+            IDX1_FOURCC | JUNK_FOURCC if !whole => break,
+            JUNK_FOURCC => {}
+            _ => return Idx1Read::Absent,
+        }
+    }
+    if stream_ended {
+        Idx1Read::Absent
+    } else {
+        Idx1Read::Wait
+    }
+}
+
+// one step of reading a file's chunks in file order as its bytes arrive
+#[derive(Debug)]
+pub(crate) enum ChunkStep {
+    // a data chunk whose body is in, its range relative to the buffer
+    Data {
+        chunk: AviChunk,
+        header_at: u64,
+        next: u64,
+    },
+    // into a `movi`, `rec ` or `AVIX` list, or past a chunk that carries no stream's data
+    Skip {
+        next: u64,
+    },
+    // the next header or body has not arrived
+    Wait,
+}
+
+// `buf` holds the file from byte `buf_at`, and the next chunk header is at `next`, at or past `buf_at`
+pub(crate) fn next_chunk_step(
+    buf: &[u8],
+    buf_at: u64,
+    next: u64,
+    streams: &[AviStream],
+    stream_ended: bool,
+) -> ChunkStep {
+    let Some(at) = next
+        .checked_sub(buf_at)
+        .and_then(|at| usize::try_from(at).ok())
+    else {
+        return ChunkStep::Wait;
+    };
+    let (Some(id), Some(size)) = (read_fourcc(buf, at), read_u32(buf, at + FOURCC_LEN)) else {
+        return ChunkStep::Wait;
+    };
+    let body_start = at + CHUNK_HEADER_LEN;
+    let past_chunk = next + CHUNK_HEADER_LEN as u64 + u64::from(size) + u64::from(size % 2);
+    if id == LIST_FOURCC || id == RIFF_FOURCC {
+        return match read_fourcc(buf, body_start) {
+            Some(MOVI_FOURCC | REC_FOURCC | AVIX_FOURCC) => ChunkStep::Skip {
+                next: next + RIFF_HEADER_LEN as u64,
+            },
+            Some(_) => ChunkStep::Skip { next: past_chunk },
+            None => ChunkStep::Wait,
+        };
+    }
+    let body_end = body_start.saturating_add(size as usize);
+    let cut = body_end > buf.len();
+    if cut && !(stream_ended && keeps_cut_chunk(&id, streams)) {
+        return match chunk_stream_number(id).filter(|stream| *stream < streams.len()) {
+            Some(_) => ChunkStep::Wait,
+            None => ChunkStep::Skip { next: past_chunk },
+        };
+    }
+    let body = body_start..body_end.min(buf.len());
+    match data_chunk(Chunk { id, body }, streams.len()) {
+        Some(chunk) => ChunkStep::Data {
+            chunk,
+            header_at: next,
+            next: past_chunk,
+        },
+        None => ChunkStep::Skip { next: past_chunk },
+    }
+}
+
+// `Ok(None)` until the `hdrl` and the `movi` list header are in
+pub(crate) fn parse_head(data: &[u8]) -> Result<Option<AviHead>, G2gError> {
+    if data.len() < RIFF_HEADER_LEN {
+        return Ok(None);
+    }
+    if read_fourcc(data, 0) != Some(RIFF_FOURCC)
+        || read_fourcc(data, CHUNK_HEADER_LEN) != Some(AVI_FOURCC)
+    {
+        return Err(G2gError::CapsMismatch);
+    }
+    let mut file = AviFile::default();
+    let mut walk = chunks_to_cut(data, RIFF_HEADER_LEN..data.len());
+    while let Some(chunk) = walk.next() {
+        let whole = !walk.overran();
+        match chunk.list_form(data) {
+            Some(MOVI_FOURCC) => {
+                if file.streams.is_empty() {
+                    return Err(G2gError::CapsMismatch);
+                }
+                let header_at = chunk.body.start - CHUNK_HEADER_LEN;
+                let declared =
+                    read_u32(data, header_at + FOURCC_LEN).ok_or(G2gError::CapsMismatch)?;
+                let movi_end = (chunk.body.start as u64)
+                    .checked_add(u64::from(declared) + u64::from(declared % 2))
+                    .ok_or(G2gError::CapsMismatch)?;
+                return Ok(Some(AviHead {
+                    file,
+                    movi_form_offset: chunk.body.start as u64,
+                    movi_end,
+                }));
+            }
+            Some(HDRL_FOURCC) if whole && file.streams.is_empty() => {
+                parse_hdrl(data, chunk.list_body(), &mut file)?;
+            }
+            Some(INFO_FOURCC) if whole && file.tags.is_empty() => {
+                file.tags = parse_info(data, chunk.list_body());
+            }
+            _ if !whole => return Ok(None),
+            _ => {}
+        }
+    }
+    Ok(None)
 }
 
 // the streams alone, from a file prefix that may end anywhere past `hdrl`
@@ -728,6 +1015,7 @@ fn parse_hdrl(
                     scale: 1,
                     rate: 1,
                     start: 0,
+                    length: 0,
                     sample_size: 0,
                     codec_config: Vec::new(),
                 }));

@@ -1180,6 +1180,17 @@ its frame. A fragmented file that also keeps samples in its `moov` (ffmpeg's
 `frag_keyframe` without `empty_moov`) is read whole at EOS: the sample-table run
 and the fragments after it, in decode order.
 
+`AviDemuxN` (`avidemux` with named pads) reads the `hdrl` and the header of the
+first `movi` list as they arrive. In a run that parks the source at the end of
+the stream, it seeks the source to the end of `movi` to read the `idx1` there,
+and back to the first chunk, then sends each chunk as its bytes arrive
+(`avi::next_chunk_step`), walking into `rec ` lists and `AVIX` continuations. The
+`idx1` offsets count from the `movi` form type or from the file start, whichever
+puts an entry on the first chunk read. Without an `idx1` only MJPEG and
+uncompressed chunks are keyframes, as in the whole-file parse. In any other run
+the file is held whole and parsed at EOS. Its duration is the end of the longest
+stream by its `strh` `dwLength`.
+
 A `moof` can hold one `traf` per track, as ffmpeg and mediamtx write by
 default. A `trun` with a `data_offset` reads its samples at that offset from its
 `traf`'s base: the `tfhd` base-data-offset, else the `moof` for the first `traf`

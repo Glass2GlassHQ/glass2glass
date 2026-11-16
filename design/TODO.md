@@ -49,9 +49,7 @@ The plan is [remote.md](remote.md).
 
 ## Embeddable player (`g2g-player`)
 
-- `AviDemuxN` reads a progressive file by byte offset instead of holding it
-  whole until EOS, so playback starts before the file is read.
-- Duration from the TS, PS, Ogg, FLV and AVI demuxers.
+- Duration from the TS, PS, Ogg and FLV demuxers.
 - Track selection and the `track-list` property.
 - guikit's controls: `keep-open` and `eof-reached`, `loadfile` `start=` and
   `pause=`, relative seek, frame-step and back-step, `edl://` timelines,

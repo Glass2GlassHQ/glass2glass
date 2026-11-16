@@ -43,7 +43,10 @@ use crate::aacparse::{adts_from_asc, is_raw_aac_config};
 use crate::annexb::{
     is_annex_b, length_prefixed_to_annexb, parse_avcc, prepend_param_sets, LatestParameterSets,
 };
-use crate::avi::{palette_change, parse, parse_streams, AviFile, AviStream, AviStreamKind};
+use crate::avi::{
+    intra_only, next_chunk_step, palette_change, parse, parse_head, parse_streams, read_idx1,
+    AviChunk, AviFile, AviHead, AviIndex, AviStream, AviStreamKind, ChunkStep, Idx1Read,
+};
 use crate::codectag::{
     audio_from_stream_name, audio_stream_name, video_from_stream_name, video_stream_name,
 };
@@ -425,90 +428,124 @@ fn lead_config(stream: &AviStream) -> Option<&[u8]> {
     }
 }
 
-/// Walk a parsed file's chunks of the `selected` streams into emittable frames,
-/// reconstructing each stream's timing from its `strh`. AVI stores chunks in
-/// decode order with no presentation timestamp, so dts equals pts and a stream
-/// with B-frames is reordered by the decoder downstream. A raw AAC stream's
-/// config, or a tagged codec's header, goes out as a frame of its own ahead of
-/// its first chunk.
+// per-stream state that turns a file's chunks into frames, across the chunks of one read of the file
+#[derive(Debug)]
+struct ChunkEmitter {
+    positions: Vec<u64>,
+    // a stream's lead config goes out ahead of its first chunk, and again after a flush
+    first: Vec<bool>,
+    palette_changes: Vec<Vec<(u8, [u8; 3])>>,
+    h264_configs: Vec<H264Config>,
+    parameter_sets: Vec<LatestParameterSets>,
+}
+
+impl ChunkEmitter {
+    fn new(streams: &[AviStream]) -> Self {
+        let h264_configs: Vec<H264Config> = streams.iter().map(h264_config).collect();
+        let parameter_sets = h264_configs
+            .iter()
+            .map(|config| {
+                let mut latest = LatestParameterSets::default();
+                let config_sets = prepend_param_sets(&[], &config.param_sets, VideoCodec::H264);
+                latest.refresh(VideoCodec::H264, &config_sets);
+                latest
+            })
+            .collect();
+        Self {
+            positions: alloc::vec![0; streams.len()],
+            first: alloc::vec![true; streams.len()],
+            palette_changes: alloc::vec![Vec::new(); streams.len()],
+            h264_configs,
+            parameter_sets,
+        }
+    }
+
+    // a decoder restarted by a flush takes the lead config again, and each stream's timing goes on from `positions`
+    fn restart_at(&mut self, positions: Vec<u64>) {
+        self.positions = positions;
+        self.first.fill(true);
+    }
+
+    /// One chunk's frames, reconstructing its stream's timing from the `strh`.
+    /// AVI stores chunks in decode order with no presentation timestamp, so dts
+    /// equals pts and a stream with B-frames is reordered by the decoder
+    /// downstream. A raw AAC stream's config, or a tagged codec's header, goes
+    /// out as a frame of its own ahead of its first chunk.
+    fn emit(
+        &mut self,
+        streams: &[AviStream],
+        chunk: &AviChunk,
+        bytes: &[u8],
+    ) -> core::iter::Chain<core::option::IntoIter<Emitted>, core::option::IntoIter<Emitted>> {
+        let stream = &streams[chunk.stream];
+        if chunk.palette_change {
+            self.palette_changes[chunk.stream].extend(palette_change(bytes));
+            return None.into_iter().chain(None);
+        }
+        if bytes.is_empty() {
+            // an empty video chunk is a dropped frame, which still takes its time slot
+            if !matches!(stream.kind, AviStreamKind::Audio { .. }) {
+                self.positions[chunk.stream] += 1;
+            }
+            return None.into_iter().chain(None);
+        }
+        let samples = stream.samples_in(bytes.len());
+        let (pts_ns, duration_ns) = stream.timing(self.positions[chunk.stream], samples);
+        self.positions[chunk.stream] += samples;
+        let payload = deframe(
+            stream,
+            &self.h264_configs[chunk.stream],
+            &mut self.parameter_sets[chunk.stream],
+            bytes,
+            chunk.keyframe,
+        );
+        let timing = FrameTiming {
+            pts_ns,
+            dts_ns: pts_ns,
+            duration_ns,
+            capture_ns: pts_ns,
+            keyframe: chunk.keyframe,
+            ..FrameTiming::default()
+        };
+        let lead_config = lead_config(stream)
+            .filter(|_| self.first[chunk.stream])
+            .map(|config| Emitted {
+                stream: chunk.stream,
+                data: Vec::from(config),
+                timing: FrameTiming::default(),
+                meta: FrameMetaSet::new(),
+                config: true,
+            });
+        self.first[chunk.stream] = false;
+        let meta = palette_meta(core::mem::take(&mut self.palette_changes[chunk.stream]));
+        lead_config.into_iter().chain(payload.map(|data| Emitted {
+            stream: chunk.stream,
+            data,
+            timing,
+            meta,
+            config: false,
+        }))
+    }
+}
+
+/// Walk a parsed file's chunks of the `selected` streams into emittable frames.
 fn emittable<'a>(
     data: &'a [u8],
     file: &'a AviFile,
     selected: &'a [usize],
 ) -> impl Iterator<Item = Emitted> + 'a {
-    let mut positions = alloc::vec![0u64; file.streams.len()];
-    let mut first = alloc::vec![true; file.streams.len()];
-    let mut palette_changes: Vec<Vec<(u8, [u8; 3])>> = alloc::vec![Vec::new(); file.streams.len()];
-    let h264_configs: Vec<H264Config> = file.streams.iter().map(h264_config).collect();
-    let mut parameter_sets: Vec<LatestParameterSets> = h264_configs
-        .iter()
-        .map(|config| {
-            let mut latest = LatestParameterSets::default();
-            let config_sets = prepend_param_sets(&[], &config.param_sets, VideoCodec::H264);
-            latest.refresh(VideoCodec::H264, &config_sets);
-            latest
-        })
-        .collect();
+    let mut emitter = ChunkEmitter::new(&file.streams);
     file.chunks
         .iter()
-        .filter(move |chunk| {
-            selected.contains(&chunk.stream)
-                && !matches!(
-                    file.streams[chunk.stream].kind,
-                    AviStreamKind::Unsupported { .. }
-                )
-        })
+        .filter(move |chunk| forwards(&file.streams, selected, chunk.stream))
         .flat_map(move |chunk| {
-            let stream = &file.streams[chunk.stream];
             let bytes = data.get(chunk.body.clone()).unwrap_or_default();
-            if chunk.palette_change {
-                palette_changes[chunk.stream].extend(palette_change(bytes));
-                return None.into_iter().chain(None);
-            }
-            if bytes.is_empty() {
-                // an empty video chunk is a dropped frame, which still takes its time slot
-                if !matches!(stream.kind, AviStreamKind::Audio { .. }) {
-                    positions[chunk.stream] += 1;
-                }
-                return None.into_iter().chain(None);
-            }
-            let samples = stream.samples_in(bytes.len());
-            let (pts_ns, duration_ns) = stream.timing(positions[chunk.stream], samples);
-            positions[chunk.stream] += samples;
-            let payload = deframe(
-                stream,
-                &h264_configs[chunk.stream],
-                &mut parameter_sets[chunk.stream],
-                bytes,
-                chunk.keyframe,
-            );
-            let timing = FrameTiming {
-                pts_ns,
-                dts_ns: pts_ns,
-                duration_ns,
-                capture_ns: pts_ns,
-                keyframe: chunk.keyframe,
-                ..FrameTiming::default()
-            };
-            let lead_config = lead_config(stream)
-                .filter(|_| first[chunk.stream])
-                .map(|config| Emitted {
-                    stream: chunk.stream,
-                    data: Vec::from(config),
-                    timing: FrameTiming::default(),
-                    meta: FrameMetaSet::new(),
-                    config: true,
-                });
-            first[chunk.stream] = false;
-            let meta = palette_meta(core::mem::take(&mut palette_changes[chunk.stream]));
-            lead_config.into_iter().chain(payload.map(|data| Emitted {
-                stream: chunk.stream,
-                data,
-                timing,
-                meta,
-                config: false,
-            }))
+            emitter.emit(&file.streams, chunk, bytes)
         })
+}
+
+fn forwards(streams: &[AviStream], selected: &[usize], stream: usize) -> bool {
+    selected.contains(&stream) && !matches!(streams[stream].kind, AviStreamKind::Unsupported { .. })
 }
 
 fn frame_of(data: Vec<u8>, timing: FrameTiming, sequence: u64) -> Frame {
@@ -804,17 +841,45 @@ impl PadTemplates for AviDemux {
 
 /// Multi-output AVI demuxer: one byte stream in, one elementary stream per
 /// output port (`avidemux name=d  d.video_0 ! ...  d.audio_0 ! ...`).
+///
+/// In a run that parks its source at the end of the stream, the demuxer reads
+/// the `hdrl`, seeks the source past `movi` to the `idx1` there, and back, then
+/// sends each chunk as it arrives, with the `idx1` keyframe flags and seek
+/// landings. Otherwise it holds the file whole and parses it at `Eos`.
 #[derive(Debug)]
 pub struct AviDemuxN {
-    buffer: Vec<u8>,
+    // the file from byte `buf_at` on
+    buf: Vec<u8>,
+    buf_at: u64,
     /// Port `i` forwards `ports[i]`, an AVI stream number.
     ports: Vec<usize>,
     /// Port `i`'s startup caps, from the probe that built the fan-out.
     port_caps: Vec<Caps>,
     bus: Option<BusHandle>,
-    drained: bool,
     emitted: u64,
     seek: DemuxSeek<Emitted>,
+    read: AviRead,
+    head: Option<AviHead>,
+    emitter: Option<ChunkEmitter>,
+    // the idx1 body, until the first chunk read places its offsets
+    idx1: Option<Vec<u8>>,
+    index: Option<AviIndex>,
+    // the byte a seek this demuxer asked its byte source for lands on, input before that seek's Flush is dropped
+    own_seek_landing: Option<u64>,
+    indexed_seek_landing: Option<u64>,
+    duration_ns: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AviRead {
+    // until the hdrl and the movi list header arrive
+    Head,
+    // the source was seeked past movi to read the idx1 that follows it
+    Index,
+    // each chunk goes out as it arrives, the next chunk header at `next`
+    Chunks { next: u64 },
+    // the file is held whole and parsed at Eos
+    Whole,
 }
 
 impl AviDemuxN {
@@ -826,13 +891,21 @@ impl AviDemuxN {
             "AviDemuxN needs at least one output port"
         );
         Self {
-            buffer: Vec::new(),
+            buf: Vec::new(),
+            buf_at: 0,
             port_caps: ports.iter().map(|p| p.caps.clone()).collect(),
             ports: ports.iter().map(|p| p.stream).collect(),
             bus: None,
-            drained: false,
             emitted: 0,
             seek: DemuxSeek::default(),
+            read: AviRead::Head,
+            head: None,
+            emitter: None,
+            idx1: None,
+            index: None,
+            own_seek_landing: None,
+            indexed_seek_landing: None,
+            duration_ns: None,
         }
     }
 
@@ -852,16 +925,42 @@ impl AviDemuxN {
         self.emitted
     }
 
-    /// Parse the buffered file at `Eos` and route every chunk to its port, each
-    /// port's concrete `CapsChanged` first.
-    async fn drain(&mut self, out: &mut dyn MultiOutputSink) -> Result<(), G2gError> {
-        if self.drained {
-            return Ok(());
+    fn poll_seek(&mut self) {
+        if self.own_seek_landing.is_some() || self.read == AviRead::Index {
+            return;
         }
-        self.drained = true;
-        let file = parse(&self.buffer)?;
+        let Some(index) = self
+            .index
+            .as_ref()
+            .filter(|_| matches!(self.read, AviRead::Chunks { .. }))
+        else {
+            self.seek.poll_request();
+            return;
+        };
+        let ports = &self.ports;
+        let mut landing = None;
+        let taken = self.seek.poll_request_indexed(|target_ns| {
+            landing = index.landing(ports, target_ns);
+            landing
+        });
+        if taken {
+            self.indexed_seek_landing = landing;
+        }
+    }
+
+    fn seek_byte_source(&mut self, offset: u64) {
+        self.seek.seek_upstream(offset);
+        self.own_seek_landing = Some(offset);
+    }
+
+    // the file's streams and tags on the bus, its duration, and each port's concrete caps
+    async fn announce(
+        &mut self,
+        file: &AviFile,
+        out: &mut dyn MultiOutputSink,
+    ) -> Result<(), G2gError> {
         if let Some(bus) = &self.bus {
-            if let Some(collection) = stream_collection(&file) {
+            if let Some(collection) = stream_collection(file) {
                 bus.try_post(BusMessage::StreamCollection(collection));
             }
             if !file.tags.is_empty() {
@@ -871,6 +970,8 @@ impl AviDemuxN {
                 });
             }
         }
+        self.duration_ns = file.duration_ns();
+        self.seek.set_duration(self.duration_ns);
         for (port, stream) in self.ports.iter().enumerate() {
             let caps = file
                 .streams
@@ -879,38 +980,213 @@ impl AviDemuxN {
                 .ok_or(G2gError::CapsMismatch)?;
             out.push_to(port, PipelinePacket::CapsChanged(caps)).await?;
         }
-        for emitted in emittable(&self.buffer, &file, &self.ports) {
+        Ok(())
+    }
+
+    // a file streams when the run parks its source, which can then seek to the idx1 past movi and back
+    fn first_read(&mut self, head: &AviHead) -> AviRead {
+        let Some(stream_len) = self
+            .seek
+            .upstream_len()
+            .filter(|_| self.seek.takes_seeks_after_end())
+        else {
+            return AviRead::Whole;
+        };
+        if head.movi_end < stream_len {
+            self.seek_byte_source(head.movi_end);
+            return AviRead::Index;
+        }
+        AviRead::Chunks {
+            next: head.first_chunk_at(),
+        }
+    }
+
+    async fn advance(
+        &mut self,
+        stream_ended: bool,
+        out: &mut dyn MultiOutputSink,
+    ) -> Result<(), G2gError> {
+        if self.read == AviRead::Head {
+            let Some(head) = parse_head(&self.buf)? else {
+                return Ok(());
+            };
+            self.announce(&head.file, out).await?;
+            self.read = self.first_read(&head);
+            self.emitter = Some(ChunkEmitter::new(&head.file.streams));
+            self.head = Some(head);
+            if self.own_seek_landing.is_some() {
+                return Ok(());
+            }
+        }
+        match self.read {
+            AviRead::Head | AviRead::Whole => Ok(()),
+            AviRead::Index => {
+                self.read_index(stream_ended);
+                Ok(())
+            }
+            AviRead::Chunks { next } => self.emit_chunks(next, stream_ended, out).await,
+        }
+    }
+
+    fn read_index(&mut self, stream_ended: bool) {
+        let idx1 = match read_idx1(&self.buf, stream_ended) {
+            Idx1Read::Wait => return,
+            Idx1Read::Found(idx1) => Some(Vec::from(idx1)),
+            Idx1Read::Absent => None,
+        };
+        self.idx1 = idx1;
+        let first_chunk_at = self
+            .head
+            .as_ref()
+            .expect("the index is read after the head")
+            .first_chunk_at();
+        self.read = AviRead::Chunks {
+            next: first_chunk_at,
+        };
+        self.seek_byte_source(first_chunk_at);
+    }
+
+    // the idx1 flag, placed once the first chunk read shows which base its offsets count from
+    fn keyframe_at(&mut self, header_at: u64, stream: &AviStream) -> bool {
+        let head = self.head.as_ref().expect("chunks are read after the head");
+        if let Some(idx1) = self.idx1.take() {
+            self.index =
+                AviIndex::read(&idx1, head.movi_form_offset, header_at, &head.file.streams);
+        }
+        match &self.index {
+            Some(index) => index
+                .chunk_at(header_at)
+                .is_some_and(|chunk| chunk.keyframe),
+            None => intra_only(stream),
+        }
+    }
+
+    async fn emit_chunks(
+        &mut self,
+        mut next: u64,
+        stream_ended: bool,
+        out: &mut dyn MultiOutputSink,
+    ) -> Result<(), G2gError> {
+        // the seek is taken at the next packet, and the chunks after it come from where it lands
+        while !(self.seek.app_seek_pending() && !self.seek.is_seeking()) {
+            let passed = usize::try_from(next.saturating_sub(self.buf_at))
+                .unwrap_or(usize::MAX)
+                .min(self.buf.len());
+            self.buf.drain(..passed);
+            self.buf_at += passed as u64;
+            let head = self.head.as_ref().expect("chunks are read after the head");
+            let streams = &head.file.streams;
+            let (mut chunk, header_at) =
+                match next_chunk_step(&self.buf, self.buf_at, next, streams, stream_ended) {
+                    ChunkStep::Wait => break,
+                    ChunkStep::Skip { next: after } => {
+                        next = after;
+                        continue;
+                    }
+                    ChunkStep::Data {
+                        chunk,
+                        header_at,
+                        next: after,
+                    } => {
+                        next = after;
+                        (chunk, header_at)
+                    }
+                };
+            if !forwards(streams, &self.ports, chunk.stream) {
+                continue;
+            }
+            let stream = streams[chunk.stream].clone();
+            chunk.keyframe = self.keyframe_at(header_at, &stream);
+            let head = self.head.as_ref().expect("chunks are read after the head");
+            let emitted: Vec<Emitted> = self
+                .emitter
+                .as_mut()
+                .expect("the emitter is made with the head")
+                .emit(&head.file.streams, &chunk, &self.buf[chunk.body.clone()])
+                .collect();
+            let audio = matches!(stream.kind, AviStreamKind::Audio { .. });
+            for emitted in emitted {
+                self.send(emitted, audio, out).await?;
+            }
+        }
+        self.read = AviRead::Chunks { next };
+        Ok(())
+    }
+
+    // the whole file, parsed at Eos, when the run cannot seek its source to the idx1
+    async fn emit_whole(&mut self, out: &mut dyn MultiOutputSink) -> Result<(), G2gError> {
+        let file = parse(&self.buf)?;
+        if self.head.is_none() {
+            self.announce(&file, out).await?;
+        }
+        let ports = self.ports.clone();
+        for emitted in emittable(&self.buf, &file, &ports).collect::<Vec<_>>() {
             if self.seek.app_seek_pending() {
                 return Ok(());
             }
-            let Some(port) = self.ports.iter().position(|s| *s == emitted.stream) else {
-                continue;
-            };
-            let admitted = if emitted.config {
-                Admitted::emit(emitted)
-            } else {
-                let pts_ns = emitted.timing.pts_ns;
-                self.seek.note_track_unit(emitted.stream as u64, pts_ns);
-                let audio = matches!(
-                    file.streams[emitted.stream].kind,
-                    AviStreamKind::Audio { .. }
-                );
-                let resync_point = emitted.timing.keyframe || audio;
-                self.seek.admit(port, pts_ns, resync_point, emitted)
-            };
-            if let Some(seek_segment) = admitted.segment {
-                for port in 0..self.ports.len() {
-                    out.push_to(port, PipelinePacket::Segment(seek_segment))
-                        .await?;
-                }
-            }
-            for emitted in admitted {
-                let frame = emitted.into_frame(self.emitted);
-                self.emitted += 1;
-                out.push_to(port, PipelinePacket::DataFrame(frame)).await?;
-            }
+            let audio = matches!(
+                file.streams[emitted.stream].kind,
+                AviStreamKind::Audio { .. }
+            );
+            self.send(emitted, audio, out).await?;
         }
         Ok(())
+    }
+
+    async fn send(
+        &mut self,
+        emitted: Emitted,
+        audio: bool,
+        out: &mut dyn MultiOutputSink,
+    ) -> Result<(), G2gError> {
+        let Some(port) = self.ports.iter().position(|s| *s == emitted.stream) else {
+            return Ok(());
+        };
+        let admitted = if emitted.config {
+            Admitted::emit(emitted)
+        } else {
+            let pts_ns = emitted.timing.pts_ns;
+            self.seek.note_track_unit(emitted.stream as u64, pts_ns);
+            let resync_point = emitted.timing.keyframe || audio;
+            self.seek.admit(port, pts_ns, resync_point, emitted)
+        };
+        if let Some(seek_segment) = admitted.segment {
+            for port in 0..self.ports.len() {
+                out.push_to(port, PipelinePacket::Segment(seek_segment))
+                    .await?;
+            }
+        }
+        for emitted in admitted {
+            let frame = emitted.into_frame(self.emitted);
+            self.emitted += 1;
+            out.push_to(port, PipelinePacket::DataFrame(frame)).await?;
+        }
+        Ok(())
+    }
+
+    // the read after a seek's flush: on from an index landing, or the file again from its start
+    fn restart_read(&mut self, indexed_landing: Option<u64>) {
+        self.buf.clear();
+        match (indexed_landing, self.read, &self.index) {
+            (Some(landing), AviRead::Chunks { .. }, Some(index)) => {
+                self.buf_at = landing;
+                self.read = AviRead::Chunks { next: landing };
+                if let Some(emitter) = self.emitter.as_mut() {
+                    emitter.restart_at(index.positions_at(landing));
+                }
+            }
+            _ => {
+                self.buf_at = 0;
+                if let (AviRead::Chunks { .. }, Some(head)) = (self.read, &self.head) {
+                    self.read = AviRead::Chunks {
+                        next: head.first_chunk_at(),
+                    };
+                }
+                if let Some(emitter) = self.emitter.as_mut() {
+                    emitter.restart_at(alloc::vec![0; emitter.positions.len()]);
+                }
+            }
+        }
     }
 }
 
@@ -939,11 +1215,15 @@ impl MultiOutputElement for AviDemuxN {
     }
 
     fn seek_route(&self) -> Option<ElementSeekRoute> {
-        Some(ElementSeekRoute::Buffered)
+        Some(ElementSeekRoute::UpstreamBytes)
     }
 
-    fn set_buffered_seek(&mut self, app: SeekController) {
-        self.seek.with_held_stream(app);
+    fn set_seek(&mut self, app: SeekController, upstream: SeekController) {
+        self.seek.with(app, upstream);
+    }
+
+    fn query_duration(&self) -> Option<u64> {
+        self.duration_ns
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -964,34 +1244,55 @@ impl MultiOutputElement for AviDemuxN {
         out: &'a mut dyn MultiOutputSink,
     ) -> Self::ProcessFuture<'a> {
         Box::pin(async move {
+            self.seek.hold_at_segment_end().await;
+            self.poll_seek();
             match packet {
                 PipelinePacket::DataFrame(frame) => {
+                    if self.seek.dropping_input() || self.own_seek_landing.is_some() {
+                        return Ok(());
+                    }
                     let slice = frame
                         .domain
                         .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
-                    self.buffer.extend_from_slice(slice);
+                    self.buf.extend_from_slice(slice);
+                    self.advance(false, out).await?;
                 }
                 PipelinePacket::Eos => {
-                    let mut replayed = false;
-                    loop {
-                        self.drain(out).await?;
-                        let port_count = self.ports.len();
-                        if !self
-                            .seek
-                            .replay_held_stream(replayed, port_count, out)
-                            .await?
-                        {
-                            break;
-                        }
-                        replayed = true;
-                        self.drained = false;
+                    let awaiting_flush =
+                        self.seek.dropping_input() || self.own_seek_landing.is_some();
+                    if self.seek.eos_before_flush(awaiting_flush).await? {
+                        return Ok(());
                     }
+                    if !self.seek.dropping_input() {
+                        self.advance(true, out).await?;
+                        if self.own_seek_landing.is_some() {
+                            return Ok(());
+                        }
+                        if matches!(self.read, AviRead::Head | AviRead::Whole) {
+                            self.emit_whole(out).await?;
+                        }
+                    }
+                    self.seek
+                        .end_ports_and_wait_for_seek(self.ports.len(), out)
+                        .await?;
+                    self.poll_seek();
                 }
                 PipelinePacket::Flush => {
-                    self.buffer.clear();
-                    self.drained = false;
-                    for port in 0..self.ports.len() {
-                        out.push_to(port, PipelinePacket::Flush).await?;
+                    if let Some(landing) = self.own_seek_landing.take() {
+                        self.buf.clear();
+                        self.buf_at = landing;
+                        return Ok(());
+                    }
+                    let indexed_landing = self
+                        .indexed_seek_landing
+                        .take()
+                        .filter(|_| self.seek.dropping_input() && self.seek.keeps_state());
+                    let forward = self.seek.on_flush();
+                    self.restart_read(indexed_landing);
+                    if forward {
+                        for port in 0..self.ports.len() {
+                            out.push_to(port, PipelinePacket::Flush).await?;
+                        }
                     }
                 }
                 PipelinePacket::Segment(segment) => {
@@ -1000,7 +1301,7 @@ impl MultiOutputElement for AviDemuxN {
                     }
                 }
                 // The input's byte-stream caps are consumed: each port declares
-                // its own, announced in `drain`.
+                // its own, announced with the head.
                 PipelinePacket::CapsChanged(_) => {}
                 _ => {}
             }
@@ -1220,6 +1521,7 @@ mod tests {
                 scale: 1,
                 rate: 25,
                 start: 0,
+                length: 0,
                 sample_size: 0,
                 codec_config: Vec::new(),
             }],
@@ -1275,6 +1577,7 @@ mod tests {
                 scale: 1,
                 rate: 25,
                 start: 0,
+                length: 0,
                 sample_size: 0,
                 codec_config: Vec::new(),
             }],
@@ -1328,6 +1631,7 @@ mod tests {
                 scale: 1,
                 rate: 25,
                 start: 0,
+                length: 0,
                 sample_size: 0,
                 codec_config: avcc_record(&[&sps, &pps]),
             }],
@@ -1378,6 +1682,7 @@ mod tests {
                 scale: 512,
                 rate: 48_000,
                 start: 0,
+                length: 0,
                 sample_size: 0,
                 codec_config: eld_config.clone(),
             }],

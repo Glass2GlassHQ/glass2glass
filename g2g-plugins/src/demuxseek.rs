@@ -283,8 +283,6 @@ pub(crate) struct DemuxSeek<U> {
     // the last segment out, the runner's opening one until this sends its own, and the latest pts out under it
     sent_segment: Segment,
     position_ns: Option<u64>,
-    // the demuxer holds the whole stream and replays it for a seek, with no byte source to reposition
-    holds_stream: bool,
     duration_ns: Option<u64>,
 }
 
@@ -305,7 +303,6 @@ impl<U> Default for DemuxSeek<U> {
             segment_mode: false,
             sent_segment: Segment::new(),
             position_ns: None,
-            holds_stream: false,
             duration_ns: None,
         }
     }
@@ -321,12 +318,6 @@ impl<U> DemuxSeek<U> {
         self.poll_request();
     }
 
-    pub(crate) fn with_held_stream(&mut self, app: SeekController) {
-        self.app = Some(app);
-        self.holds_stream = true;
-    }
-
-    #[cfg(feature = "std")]
     pub(crate) fn set_duration(&mut self, duration_ns: Option<u64>) {
         self.duration_ns = duration_ns;
     }
@@ -349,9 +340,7 @@ impl<U> DemuxSeek<U> {
         resolve: impl FnOnce(u64) -> Option<u64>,
     ) -> bool {
         let stream_ended = matches!(self.phase, Phase::PastStop { .. } | Phase::SegmentDone);
-        if (self.phase != Phase::Idle && !stream_ended)
-            || !(self.holds_stream || self.upstream.is_some())
-        {
+        if (self.phase != Phase::Idle && !stream_ended) || self.upstream.is_none() {
             return false;
         }
         let Some(seek) = self.take_app_seek() else {
@@ -575,39 +564,6 @@ impl<U> DemuxSeek<U> {
 
     pub(crate) fn app_seek_pending(&self) -> bool {
         self.app.as_ref().is_some_and(SeekController::has_pending)
-    }
-
-    pub(crate) async fn replay_held_stream(
-        &mut self,
-        replayed: bool,
-        port_count: usize,
-        out: &mut dyn MultiOutputSink,
-    ) -> Result<bool, G2gError> {
-        self.hold_at_segment_end().await;
-        let mut ports_ended = false;
-        let parks = self.phase != Phase::SegmentDone && self.takes_seeks_after_end();
-        if parks && !self.app_seek_pending() {
-            for port in 0..port_count {
-                out.push_to(port, PipelinePacket::Eos).await?;
-            }
-            ports_ended = true;
-            self.wait_for_seek_or_shutdown().await;
-        }
-        if !self.poll_request() {
-            // the runner sends no Eos for an element that took a seek while handling its Eos
-            if replayed && !ports_ended {
-                for port in 0..port_count {
-                    out.push_to(port, PipelinePacket::Eos).await?;
-                }
-            }
-            return Ok(false);
-        }
-        if self.on_flush() {
-            for port in 0..port_count {
-                out.push_to(port, PipelinePacket::Flush).await?;
-            }
-        }
-        Ok(true)
     }
 
     // the run keeps the source parked after the end of the stream, so a seek can still restart it
