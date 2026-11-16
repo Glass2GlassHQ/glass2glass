@@ -123,7 +123,7 @@ use g2g_core::{
     ClockSync, Colorimetry, ConfigureOutcome, ElementMetadata, G2gError, HardwareError, OutputSink,
     PadTemplate, PadTemplates, PipelineClock, PipelinePacket, PixelAspect, PresentationPacer,
     PropError, PropKind, PropValue, PropertySpec, RawVideoFormat, MAX_LATENESS_PROPERTY,
-    QOS_INTERVAL_PROPERTY,
+    QOS_INTERVAL_PROPERTY, SYNC_PROPERTY,
 };
 
 /// Worker-thread message. `Frame` carries the pre-converted XRGB8888
@@ -681,6 +681,7 @@ impl AsyncElement for WaylandSink {
             FORCE_ASPECT_RATIO_PROPERTY,
             MAX_LATENESS_PROPERTY,
             QOS_INTERVAL_PROPERTY,
+            SYNC_PROPERTY,
         ];
         PROPS
     }

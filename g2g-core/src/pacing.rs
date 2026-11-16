@@ -55,12 +55,20 @@ pub const QOS_INTERVAL_PROPERTY: PropertySpec = PropertySpec::new(
     "periodic QoS report interval in nanoseconds, 0 to report drops only",
 );
 
-/// The QoS knobs a synchronizing sink exposes, so a `gst-launch` line can tune
-/// the late-drop bound and the report cadence. The whole table for a sink with
-/// no properties of its own; one that has others lists the two consts alongside
-/// them. Handled by [`PresentationPacer::set_property`] /
+pub const SYNC_PROPERTY: PropertySpec = PropertySpec::new(
+    "sync",
+    PropKind::Bool,
+    "hold each frame until its timestamp on the clock; false presents on arrival and never drops late frames",
+)
+.with_default("true");
+
+/// The pacing knobs a synchronizing sink exposes, so a `gst-launch` line can
+/// turn clock sync off and tune the late-drop bound and the report cadence. The
+/// whole table for a sink with no properties of its own; one that has others
+/// lists the three consts alongside them. Handled by [`PresentationPacer::set_property`] /
 /// [`get_property`](PresentationPacer::get_property).
-pub const PACING_PROPERTIES: &[PropertySpec] = &[MAX_LATENESS_PROPERTY, QOS_INTERVAL_PROPERTY];
+pub const PACING_PROPERTIES: &[PropertySpec] =
+    &[SYNC_PROPERTY, MAX_LATENESS_PROPERTY, QOS_INTERVAL_PROPERTY];
 
 /// A clock reading or running time as a signed nanosecond count, so anchor
 /// arithmetic can go below zero. Saturates rather than wrapping: a PTS past
@@ -78,6 +86,7 @@ pub struct PresentationPacer {
     /// each frame is held until its running-time deadline on the clock. `None`
     /// (no clock elected) keeps the pre-sync "present ASAP" behaviour.
     clock_sync: Option<ClockSync>,
+    present_on_arrival: bool,
     /// Active playback segment, from `PipelinePacket::Segment`, used to map a
     /// frame's PTS to running time (correct across a seek). `None` before any
     /// segment arrives, where PTS is the running time directly.
@@ -246,7 +255,7 @@ impl PresentationPacer {
         self.last_deadline_ns = None;
         // A frame with no presentation time is due on arrival: never late, so
         // never a QoS drop.
-        if pts_ns == FrameTiming::PTS_NONE {
+        if pts_ns == FrameTiming::PTS_NONE || self.present_on_arrival {
             return Pace::Now;
         }
         let Some(sync) = self.clock_sync.as_ref() else {
@@ -332,6 +341,10 @@ impl PresentationPacer {
         self.qos.set_bus(bus);
     }
 
+    pub fn set_sync(&mut self, sync: bool) {
+        self.present_on_arrival = !sync;
+    }
+
     /// Drop a frame past its deadline by more than `ns`. `0` drops any late
     /// frame; the default (`u64::MAX`) never drops, presenting every frame
     /// however late.
@@ -370,6 +383,12 @@ impl PresentationPacer {
     pub fn set_property(&mut self, name: &str, value: &PropValue) -> Option<Result<(), PropError>> {
         let ns = || value.as_uint().ok_or(PropError::Type);
         match name {
+            "sync" => Some(
+                value
+                    .as_bool()
+                    .ok_or(PropError::Type)
+                    .map(|sync| self.set_sync(sync)),
+            ),
             "max-lateness" => Some(ns().map(|n| self.set_max_lateness_ns(n))),
             "qos-interval" => Some(ns().map(|n| self.set_report_interval_ns(n))),
             _ => None,
@@ -380,6 +399,7 @@ impl PresentationPacer {
     /// property.
     pub fn get_property(&self, name: &str) -> Option<PropValue> {
         match name {
+            "sync" => Some(PropValue::Bool(!self.present_on_arrival)),
             "max-lateness" => Some(PropValue::Uint(self.max_lateness_ns())),
             "qos-interval" => Some(PropValue::Uint(self.report_interval_ns())),
             _ => None,
@@ -515,6 +535,23 @@ mod tests {
         // Once the clock reaches the deadline, no wait.
         clock.store(66_000_000, Ordering::Relaxed);
         assert_eq!(p.judge(66_000_000, 2), Pace::Now);
+    }
+
+    #[test]
+    fn sync_false_presents_early_and_late_frames_on_arrival() {
+        let (clock, sync) = manual();
+        let mut p = PresentationPacer::new();
+        p.set_clock_sync(sync);
+        p.set_max_lateness_ns(0);
+        p.set_property("sync", &PropValue::Bool(false))
+            .expect("a pacing property")
+            .expect("takes a bool");
+        assert_eq!(p.get_property("sync"), Some(PropValue::Bool(false)));
+        assert_eq!(p.judge(0, 0), Pace::Now);
+        assert_eq!(p.judge(33_000_000, 1), Pace::Now, "early, not held");
+        clock.store(1_000_000_000, Ordering::Relaxed);
+        assert_eq!(p.judge(66_000_000, 2), Pace::Now, "late, not dropped");
+        assert_eq!(p.late_dropped(), 0);
     }
 
     #[test]

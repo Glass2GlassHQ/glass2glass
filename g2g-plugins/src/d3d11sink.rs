@@ -74,7 +74,7 @@ use g2g_core::{
     ClockSync, ConfigureOutcome, ElementMetadata, G2gError, HardwareError, MemoryDomain,
     OutputSink, PadTemplate, PadTemplates, PipelineClock, PipelinePacket, PresentationPacer,
     PropError, PropKind, PropValue, PropertySpec, RawVideoFormat, MAX_LATENESS_PROPERTY,
-    QOS_INTERVAL_PROPERTY,
+    QOS_INTERVAL_PROPERTY, SYNC_PROPERTY,
 };
 
 use crate::clock::wait_to_present;
@@ -288,6 +288,7 @@ impl AsyncElement for D3D11Sink {
             PropertySpec::new("title", PropKind::Str, "window title").with_default("glass2glass"),
             MAX_LATENESS_PROPERTY,
             QOS_INTERVAL_PROPERTY,
+            SYNC_PROPERTY,
         ];
         PROPS
     }

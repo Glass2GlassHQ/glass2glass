@@ -78,6 +78,7 @@ use g2g_core::{
     ClockPriority, ClockSync, Colorimetry, ConfigureOutcome, Dim, Frame, G2gError, HardwareError,
     MemoryDomain, OutputSink, PipelineClock, PipelinePacket, PresentationPacer, PropError,
     PropValue, PropertySpec, Rate, RawVideoFormat, MAX_LATENESS_PROPERTY, QOS_INTERVAL_PROPERTY,
+    SYNC_PROPERTY,
 };
 
 use crate::clock::wait_to_present;
@@ -305,6 +306,7 @@ impl AsyncElement for CudaGlSink {
         const PROPS: &[PropertySpec] = &[
             MAX_LATENESS_PROPERTY,
             QOS_INTERVAL_PROPERTY,
+            SYNC_PROPERTY,
             CUDA_DEVICE_ID_PROP,
         ];
         PROPS

@@ -81,6 +81,7 @@ use g2g_core::{
     ClockSync, ConfigureOutcome, ElementMetadata, Frame, G2gError, HardwareError, OutputSink,
     PadTemplate, PadTemplates, PipelineClock, PipelinePacket, PixelAspect, PresentationPacer,
     PropError, PropKind, PropValue, PropertySpec, MAX_LATENESS_PROPERTY, QOS_INTERVAL_PROPERTY,
+    SYNC_PROPERTY,
 };
 
 /// Worker thread name, also the prefix on the worker's error lines.
@@ -128,7 +129,6 @@ pub struct WgpuPresentSink {
     height: u32,
     pixel_aspect: PixelAspect,
     force_aspect_ratio: bool,
-    sync: bool,
     present_mode: wgpu::PresentMode,
     frames_presented: Arc<AtomicU64>,
     window_closed: Arc<AtomicBool>,
@@ -185,7 +185,6 @@ impl WgpuPresentSink {
             height: 0,
             pixel_aspect: PixelAspect::Any,
             force_aspect_ratio: true,
-            sync: true,
             present_mode: wgpu::PresentMode::Fifo,
             frames_presented: Arc::new(AtomicU64::new(0)),
             window_closed: Arc::default(),
@@ -242,7 +241,7 @@ impl WgpuPresentSink {
     }
 
     pub fn with_sync(mut self, sync: bool) -> Self {
-        self.sync = sync;
+        self.pacer.set_sync(sync);
         self
     }
 
@@ -545,17 +544,12 @@ impl AsyncElement for WgpuPresentSink {
             )
             .with_default("0"),
             FORCE_ASPECT_RATIO_PROPERTY,
-            PropertySpec::new(
-                "sync",
-                PropKind::Bool,
-                "present each frame at its timestamp on the pipeline clock",
-            )
-            .with_default("true"),
             PropertySpec::new("present-mode", PropKind::Str, "wgpu surface present mode")
                 .with_default(FIFO_PRESENT_MODE)
                 .with_enum_values("fifo | mailbox"),
             MAX_LATENESS_PROPERTY,
             QOS_INTERVAL_PROPERTY,
+            SYNC_PROPERTY,
         ];
         PROPS
     }
@@ -587,10 +581,6 @@ impl AsyncElement for WgpuPresentSink {
                 self.force_aspect_ratio = value.as_bool().ok_or(PropError::Type)?;
                 Ok(())
             }
-            "sync" => {
-                self.sync = value.as_bool().ok_or(PropError::Type)?;
-                Ok(())
-            }
             "present-mode" => {
                 self.present_mode = match value.as_str().ok_or(PropError::Type)? {
                     FIFO_PRESENT_MODE => wgpu::PresentMode::Fifo,
@@ -615,7 +605,6 @@ impl AsyncElement for WgpuPresentSink {
             "window-width" => Some(PropValue::Uint(self.window_width as u64)),
             "window-height" => Some(PropValue::Uint(self.window_height as u64)),
             FORCE_ASPECT_RATIO_NAME => Some(PropValue::Bool(self.force_aspect_ratio)),
-            "sync" => Some(PropValue::Bool(self.sync)),
             "present-mode" => Some(PropValue::Str(
                 alloc::format!("{:?}", self.present_mode).to_lowercase(),
             )),
@@ -666,9 +655,7 @@ impl AsyncElement for WgpuPresentSink {
                     // bound) or outside the segment. Unpaced without a clock:
                     // present as fast as the compositor allows.
                     let presented = self.frames_presented.load(Ordering::Relaxed);
-                    if self.sync
-                        && !wait_to_present(self.pacer.judge(timing.pts_ns, presented)).await
-                    {
+                    if !wait_to_present(self.pacer.judge(timing.pts_ns, presented)).await {
                         return Ok(());
                     }
                     let tx = self.cmd_tx.as_ref().ok_or(G2gError::NotConfigured)?;

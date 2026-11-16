@@ -249,7 +249,11 @@ presented late, so the sink catches up instead of accumulating lag, posting a
 `BusMessage::Qos` with running time, jitter and cumulative processed and dropped
 counts per drop. Every video display sink starts from
 `PresentationPacer::for_video_sink`, whose bound is 20 ms, GStreamer's
-`GstVideoSink` default. `SyncSink` and `clocksync` keep the never-drop default.
+`GstVideoSink` default. `SyncSink` and `clocksync` keep the never-drop default. The
+pacer's `sync` property, on every sink that paces through it and on
+`fpsdisplaysink`, which passes it to its child as gst's does, turns all of this
+off: with `sync=false` each frame presents on arrival, never held and never
+dropped late.
 
 `SyncSink` is the same sink without a display, so clock slaving is CI-testable with
 no hardware. It paces through the shared `PresentationPacer` and adopts the elected

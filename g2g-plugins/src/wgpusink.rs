@@ -39,7 +39,7 @@ use g2g_core::{
     AsyncElement, BusHandle, Caps, CapsConstraint, CapsSet, ClockSync, Colorimetry,
     ConfigureOutcome, G2gError, MemoryDomain, OutputSink, PipelinePacket, PixelAspect,
     PresentationPacer, PropError, PropValue, PropertySpec, RawVideoFormat, MAX_LATENESS_PROPERTY,
-    QOS_INTERVAL_PROPERTY,
+    QOS_INTERVAL_PROPERTY, SYNC_PROPERTY,
 };
 
 use crate::clock::wait_to_present;
@@ -1105,6 +1105,7 @@ impl AsyncElement for WgpuSink {
         &[
             MAX_LATENESS_PROPERTY,
             QOS_INTERVAL_PROPERTY,
+            SYNC_PROPERTY,
             FORCE_ASPECT_RATIO_PROPERTY,
         ]
     }

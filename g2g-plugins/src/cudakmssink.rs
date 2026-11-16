@@ -81,7 +81,7 @@ use g2g_core::{
     ClockPriority, ClockSync, Colorimetry, ConfigureOutcome, Dim, Frame, G2gError, HardwareError,
     MemoryDomain, OutputSink, PipelineClock, PipelinePacket, PresentationPacer, PropError,
     PropKind, PropValue, PropertySpec, Rate, RawVideoFormat, MAX_LATENESS_PROPERTY,
-    QOS_INTERVAL_PROPERTY,
+    QOS_INTERVAL_PROPERTY, SYNC_PROPERTY,
 };
 
 use crate::clock::wait_to_present;
@@ -367,6 +367,7 @@ impl AsyncElement for CudaKmsSink {
             .with_default("/dev/dri/card0"),
             MAX_LATENESS_PROPERTY,
             QOS_INTERVAL_PROPERTY,
+            SYNC_PROPERTY,
         ];
         PROPS
     }

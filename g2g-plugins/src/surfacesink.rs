@@ -18,7 +18,7 @@ use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ClockSync, ConfigureOutcome, Dim, G2gError,
     HardwareError, Interlace, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
     PresentationPacer, PropError, PropKind, PropValue, PropertySpec, Rate, RawVideoFormat,
-    MAX_LATENESS_PROPERTY, QOS_INTERVAL_PROPERTY,
+    MAX_LATENESS_PROPERTY, QOS_INTERVAL_PROPERTY, SYNC_PROPERTY,
 };
 use ndk::hardware_buffer_format::HardwareBufferFormat;
 use ndk::native_window::NativeWindow;
@@ -335,4 +335,5 @@ static SURFACESINK_PROPS: &[PropertySpec] = &[
     ),
     MAX_LATENESS_PROPERTY,
     QOS_INTERVAL_PROPERTY,
+    SYNC_PROPERTY,
 ];

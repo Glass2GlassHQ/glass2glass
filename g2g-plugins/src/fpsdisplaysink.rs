@@ -35,7 +35,7 @@ use g2g_core::metrics::monotonic_ns;
 use g2g_core::{
     g2g_debug, AsyncElement, BusHandle, BusMessage, Caps, CapsConstraint, ClockSync,
     ConfigureOutcome, ElementMetadata, G2gError, OutputSink, PipelinePacket, PresentationStats,
-    PropError, PropKind, PropValue, PropertySpec,
+    PropError, PropKind, PropValue, PropertySpec, SYNC_PROPERTY,
 };
 
 use crate::registry::default_registry;
@@ -79,6 +79,7 @@ pub struct FpsDisplaySink {
     child: BoxedSink,
     update_interval_ms: i64,
     silent: bool,
+    sync: bool,
     bus: Option<BusHandle>,
     frames_rendered: u64,
     frames_dropped: u64,
@@ -119,6 +120,7 @@ impl FpsDisplaySink {
             child: make_child(DEFAULT_VIDEO_SINK).expect("the fakesink fallback is always built"),
             update_interval_ms: DEFAULT_UPDATE_INTERVAL_MS,
             silent: false,
+            sync: true,
             bus: None,
             frames_rendered: 0,
             frames_dropped: 0,
@@ -153,7 +155,11 @@ impl FpsDisplaySink {
         if name == OWN_LAUNCH_NAME {
             return Err(PropError::Value);
         }
-        self.child = make_child(name).ok_or(PropError::Value)?;
+        let mut child = make_child(name).ok_or(PropError::Value)?;
+        if !self.sync {
+            child.set_property("sync", PropValue::Bool(false))?;
+        }
+        self.child = child;
         self.video_sink = name.to_string();
         Ok(())
     }
@@ -375,6 +381,13 @@ impl AsyncElement for FpsDisplaySink {
                 self.silent = value.as_bool().ok_or(PropError::Type)?;
                 Ok(())
             }
+            // gst fpsdisplaysink passes sync on to its video-sink
+            "sync" => {
+                let sync = value.as_bool().ok_or(PropError::Type)?;
+                self.child.set_property("sync", PropValue::Bool(sync))?;
+                self.sync = sync;
+                Ok(())
+            }
             "frames-rendered" | "frames-dropped" | "max-fps" | "min-fps" | "last-message" => {
                 Err(PropError::ReadOnly)
             }
@@ -387,6 +400,7 @@ impl AsyncElement for FpsDisplaySink {
             "video-sink" => Some(PropValue::Str(self.video_sink.clone())),
             "fps-update-interval" => Some(PropValue::Int(self.update_interval_ms)),
             "silent" => Some(PropValue::Bool(self.silent)),
+            "sync" => Some(PropValue::Bool(self.sync)),
             "frames-rendered" => Some(PropValue::Uint(self.frames_rendered)),
             "frames-dropped" => Some(PropValue::Uint(self.frames_dropped)),
             "max-fps" => Some(PropValue::Double(self.max_fps)),
@@ -430,6 +444,7 @@ static FPSDISPLAYSINK_PROPS: &[PropertySpec] = &[
         "stop keeping the report in last-message",
     )
     .with_default("false"),
+    SYNC_PROPERTY,
     PropertySpec::new("frames-rendered", PropKind::Uint, "buffers rendered so far")
         .with_default("0")
         .read_only(),

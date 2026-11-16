@@ -72,7 +72,7 @@ use g2g_core::{
     ClockSync, Colorimetry, ConfigureOutcome, Dim, ElementMetadata, Frame, G2gError, HardwareError,
     OutputSink, PadTemplate, PadTemplates, PipelineClock, PipelinePacket, PresentationPacer,
     PropError, PropKind, PropValue, PropertySpec, Rate, RawVideoFormat, MAX_LATENESS_PROPERTY,
-    QOS_INTERVAL_PROPERTY,
+    QOS_INTERVAL_PROPERTY, SYNC_PROPERTY,
 };
 
 /// Worker thread name, also the prefix on the worker's error lines.
@@ -315,6 +315,7 @@ impl AsyncElement for GlSink {
                 .with_default("io.glass2glass.GlSink"),
             MAX_LATENESS_PROPERTY,
             QOS_INTERVAL_PROPERTY,
+            SYNC_PROPERTY,
         ];
         PROPS
     }

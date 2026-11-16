@@ -306,7 +306,7 @@ pub use frame_identity::{FrameIdentityStats, FrameIdentityTracker};
 #[cfg(feature = "runtime")]
 pub use pacing::{
     Pace, PresentationPacer, MAX_LATENESS_PROPERTY, PACING_PROPERTIES, QOS_INTERVAL_PROPERTY,
-    UPSTREAM_QOS_INTERVAL_NS, VIDEO_SINK_MAX_LATENESS_NS,
+    SYNC_PROPERTY, UPSTREAM_QOS_INTERVAL_NS, VIDEO_SINK_MAX_LATENESS_NS,
 };
 
 #[cfg(feature = "runtime")]
