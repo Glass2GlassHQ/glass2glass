@@ -55,7 +55,7 @@ use crate::gpu::{
     nv12_plane_views, packed_nv12_extent, read_texture_plane, texture_holds_picture,
     texture_layout, texture_of, GpuContext, WgpuTextureLayout,
 };
-use crate::videoconvert::display::{display_sink_caps, DisplayInput};
+use crate::videoconvert::display::{display_sink_caps, DisplayInput, NV12_AND_RGBA};
 use crate::yuvmatrix::YuvToRgbWeights;
 
 /// Fullscreen-triangle vertex stage, shared by both fragment stages below. The
@@ -494,19 +494,17 @@ impl SourceLayout {
     }
 }
 
-const NATIVE_FORMATS: &[RawVideoFormat] = &[RawVideoFormat::Nv12, RawVideoFormat::Rgba8];
-
 /// The sink's accepted layouts: NV12 and RGBA as they are, and every other
 /// format `videoconvert` reads, at any geometry. Shared with the windowed
 /// present sink, which drives this renderer.
-pub(crate) fn accepted_caps() -> CapsSet {
-    display_sink_caps(NATIVE_FORMATS)
+pub fn accepted_caps() -> CapsSet {
+    display_sink_caps(NV12_AND_RGBA)
 }
 
 /// The source layout the negotiated caps settle on, rejecting anything the blit
 /// pipelines cannot read.
 fn source_layout(absolute_caps: &Caps) -> Result<SourceLayout, G2gError> {
-    let input = DisplayInput::from_caps(absolute_caps, NATIVE_FORMATS)?;
+    let input = DisplayInput::from_caps(absolute_caps, NV12_AND_RGBA)?;
     let layout = match input.presented {
         RawVideoFormat::Nv12 => WgpuTextureLayout::PackedNv12,
         RawVideoFormat::Rgba8 => WgpuTextureLayout::Rgba,
@@ -578,6 +576,32 @@ enum Target {
 /// ```
 pub struct WgpuSink {
     ctx: GpuContext,
+    renderer: VideoRenderer,
+    target: Target,
+    presented: u64,
+    /// PTS pacing + QoS late-drop: idle until the runner hands over a clock, and
+    /// the default lateness bound is 20 ms.
+    pacer: PresentationPacer,
+}
+
+impl core::fmt::Debug for WgpuSink {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let kind = match &self.target {
+            Target::Offscreen { width, height, .. } => ("offscreen", *width, *height),
+            Target::Surface { config, .. } => ("surface", config.width, config.height),
+        };
+        f.debug_struct("WgpuSink")
+            .field("target", &kind.0)
+            .field("width", &kind.1)
+            .field("height", &kind.2)
+            .field("configured", &self.renderer.source.is_some())
+            .field("presented", &self.presented)
+            .finish()
+    }
+}
+
+pub struct VideoRenderer {
+    ctx: GpuContext,
     /// One blit pipeline per source layout; which one runs is decided per frame
     /// from the texture, so a sink fed RGBA and NV12 in turn needs no rebuild.
     rgba_blit: BlitPipeline,
@@ -592,76 +616,27 @@ pub struct WgpuSink {
     /// Format of whatever the blits render into, needed to rebuild a pipeline.
     target_format: wgpu::TextureFormat,
     resources: BlitResources,
-    target: Target,
     /// Pixel format + geometry negotiated for the incoming frames, which a
     /// system-memory frame needs to be uploaded (a GPU frame carries its own).
     source: Option<SourceLayout>,
     /// Texture the system-memory upload path writes into, allocated on the first
     /// such frame and reused.
     upload: Option<wgpu::Texture>,
-    configured: bool,
-    presented: u64,
-    /// PTS pacing + QoS late-drop: idle until the runner hands over a clock, and
-    /// the default lateness bound is 20 ms.
-    pacer: PresentationPacer,
     pixel_aspect: PixelAspect,
     force_aspect_ratio: bool,
 }
 
-impl core::fmt::Debug for WgpuSink {
+impl core::fmt::Debug for VideoRenderer {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        let kind = match &self.target {
-            Target::Offscreen { width, height, .. } => ("offscreen", *width, *height),
-            Target::Surface { config, .. } => ("surface", config.width, config.height),
-        };
-        f.debug_struct("WgpuSink")
-            .field("target", &kind.0)
-            .field("width", &kind.1)
-            .field("height", &kind.2)
-            .field("configured", &self.configured)
-            .field("presented", &self.presented)
-            .finish()
+        f.debug_struct("VideoRenderer")
+            .field("target_format", &self.target_format)
+            .field("configured", &self.source.is_some())
+            .finish_non_exhaustive()
     }
 }
 
-impl WgpuSink {
-    /// Format the offscreen target is allocated in (and read back as).
-    pub const OFFSCREEN_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
-
-    /// A sink that presents into an internal `width` x `height` texture (read it
-    /// back with [`read_target`](Self::read_target)). The render-to-texture path.
-    pub fn offscreen(ctx: GpuContext, width: u32, height: u32) -> Self {
-        let texture = offscreen_texture(&ctx, width, height);
-        Self::build(
-            ctx,
-            Self::OFFSCREEN_FORMAT,
-            Target::Offscreen {
-                texture,
-                width,
-                height,
-            },
-        )
-    }
-
-    /// A sink that presents to a caller-built, already-`configure`d surface (an
-    /// on-screen window). The application owns the window + event loop and the
-    /// surface's lifetime, and forwards window resizes through
-    /// [`resize`](Self::resize).
-    pub fn with_surface(
-        ctx: GpuContext,
-        surface: wgpu::Surface<'static>,
-        mut config: wgpu::SurfaceConfiguration,
-    ) -> Self {
-        let supported = surface.get_capabilities(&ctx.adapter).formats;
-        let format = presentable_format(config.format, &supported);
-        if format != config.format {
-            config.format = format;
-            surface.configure(&ctx.device, &config);
-        }
-        Self::build(ctx, format, Target::Surface { surface, config })
-    }
-
-    fn build(ctx: GpuContext, target_format: wgpu::TextureFormat, target: Target) -> Self {
+impl VideoRenderer {
+    pub fn new(ctx: GpuContext, target_format: wgpu::TextureFormat) -> Self {
         let device = &ctx.device;
         let resources = BlitResources::new(device);
         Self {
@@ -687,15 +662,15 @@ impl WgpuSink {
             target_format,
             ctx,
             resources,
-            target,
             source: None,
             upload: None,
-            configured: false,
-            presented: 0,
-            pacer: PresentationPacer::for_video_sink(),
             pixel_aspect: PixelAspect::Any,
             force_aspect_ratio: true,
         }
+    }
+
+    pub fn target_format(&self) -> wgpu::TextureFormat {
+        self.target_format
     }
 
     /// Rebuild both NV12 blits for a new colorimetry. The weights are compiled
@@ -719,67 +694,53 @@ impl WgpuSink {
         self.nv12_colorimetry = colorimetry;
     }
 
-    /// Count of frames presented.
-    pub fn presented_count(&self) -> u64 {
-        self.presented
-    }
-
-    /// Current target size: the surface's swapchain size, or the offscreen
-    /// texture's.
-    pub fn target_size(&self) -> (u32, u32) {
-        match &self.target {
-            Target::Offscreen { width, height, .. } => (*width, *height),
-            Target::Surface { config, .. } => (config.width, config.height),
-        }
-    }
-
-    /// Follow the window to a new size: reconfigure the surface's swapchain (or
-    /// reallocate the offscreen texture) to `width` x `height`. The application
-    /// owns the window, so it calls this from its resize event.
-    ///
-    /// The incoming frame keeps its negotiated geometry: the blit scales it to
-    /// fill the target, at the new size as it did at the old one.
-    ///
-    /// A size that already matches, or a zero dimension (a minimised or
-    /// not-yet-mapped window), is ignored, so calling this on every resize event
-    /// is fine.
-    pub fn resize(&mut self, width: u32, height: u32) {
-        if (width, height) == self.target_size() || width == 0 || height == 0 {
-            return;
-        }
-        match &mut self.target {
-            Target::Offscreen {
-                texture,
-                width: target_width,
-                height: target_height,
-            } => {
-                *texture = offscreen_texture(&self.ctx, width, height);
-                *target_width = width;
-                *target_height = height;
-            }
-            Target::Surface { surface, config } => {
-                config.width = width;
-                config.height = height;
-                surface.configure(&self.ctx.device, config);
-            }
-        }
-    }
-
     /// Stretch the picture to fill the target (`false`) instead of letterboxing
     /// it at its display aspect (`true`, the default).
-    pub fn with_force_aspect_ratio(mut self, force_aspect_ratio: bool) -> Self {
+    pub fn set_force_aspect_ratio(&mut self, force_aspect_ratio: bool) {
         self.force_aspect_ratio = force_aspect_ratio;
-        self
+    }
+
+    pub fn force_aspect_ratio(&self) -> bool {
+        self.force_aspect_ratio
+    }
+
+    pub fn configure(&mut self, absolute_caps: &Caps) -> Result<(), G2gError> {
+        let source = source_layout(absolute_caps)?;
+        // A geometry or format change invalidates the upload texture allocated
+        // for the old one.
+        if self.source.map(|s| (s.layout, s.width, s.height))
+            != Some((source.layout, source.width, source.height))
+        {
+            self.upload = None;
+        }
+        if let Caps::RawVideo {
+            colorimetry,
+            pixel_aspect,
+            ..
+        } = absolute_caps
+        {
+            self.set_nv12_colorimetry(*colorimetry);
+            self.pixel_aspect = *pixel_aspect;
+        }
+        self.resources
+            .write_picture_size(&self.ctx.queue, source.width, source.height);
+        self.source = Some(source);
+        Ok(())
     }
 
     #[cfg(all(
         any(target_os = "linux", target_os = "windows"),
         feature = "wgpu-present"
     ))]
-    pub(crate) fn picture_point(&self, target_x: f64, target_y: f64) -> Option<(u32, u32)> {
+    pub(crate) fn picture_point(
+        &self,
+        target_size: (u32, u32),
+        target_x: f64,
+        target_y: f64,
+    ) -> Option<(u32, u32)> {
         let source = self.source?;
         picture_point_in(
-            self.viewport(),
+            self.viewport(target_size),
             source.width,
             source.height,
             target_x,
@@ -787,8 +748,7 @@ impl WgpuSink {
         )
     }
 
-    fn viewport(&self) -> ViewportRectangle {
-        let (target_width, target_height) = self.target_size();
+    fn viewport(&self, (target_width, target_height): (u32, u32)) -> ViewportRectangle {
         match (self.force_aspect_ratio, self.source) {
             (true, Some(source)) => letterbox(
                 source.width,
@@ -801,39 +761,13 @@ impl WgpuSink {
         }
     }
 
-    /// QoS late-drop bound: once PTS pacing is engaged, a frame past its
-    /// deadline by more than `ns` is dropped instead of presented late, so the
-    /// sink catches up. The default is 20 ms, `u64::MAX` never drops.
-    pub fn with_max_lateness_ns(mut self, ns: u64) -> Self {
-        self.pacer.set_max_lateness_ns(ns);
-        self
-    }
-
-    /// Post a running-stats `Qos` report every `ns` of clock time while frames
-    /// present, on top of the per-drop reports. `0` (the default) reports only
-    /// drops.
-    pub fn with_qos_interval_ns(mut self, ns: u64) -> Self {
-        self.pacer.set_report_interval_ns(ns);
-        self
-    }
-
-    /// Attach the pipeline bus so QoS reports reach the application.
-    pub fn with_bus(mut self, bus: BusHandle) -> Self {
-        self.pacer.set_bus(bus);
-        self
-    }
-
-    /// Frames dropped by QoS late-drop (past their deadline beyond the bound).
-    pub fn late_dropped(&self) -> u64 {
-        self.pacer.late_dropped()
-    }
-
-    /// Present one frame's pixels: a `WgpuTexture`-domain frame is blitted from
-    /// the producer's own texture, a system-memory frame is uploaded to the
-    /// sink's own texture first. The path [`process`](AsyncElement::process) and
-    /// the windowed present sink share, past pacing.
-    pub fn present_frame(&mut self, domain: &MemoryDomain) -> Result<(), G2gError> {
-        match domain {
+    pub fn draw(
+        &mut self,
+        domain: &MemoryDomain,
+        view: &wgpu::TextureView,
+        target_size: (u32, u32),
+    ) -> Result<(), G2gError> {
+        let (texture, layout) = match domain {
             MemoryDomain::WgpuTexture(owned) => {
                 // A frame from a different GPU producer (foreign keep-alive type,
                 // or a format no blit here samples) is not presentable.
@@ -845,26 +779,49 @@ impl WgpuSink {
                         return Err(G2gError::CapsMismatch);
                     }
                 }
-                // The texture belongs to the frame; the blit only reads it, but
-                // `present` needs `&mut self`, so clone the handle (cheap: wgpu
-                // handles are reference-counted).
-                let texture = texture.clone();
-                self.present(&texture, layout)
+                (texture.clone(), layout)
             }
             _ => {
                 let slice = domain
                     .as_system_slice()
                     .ok_or(G2gError::UnsupportedDomain)?;
-                self.upload_system(slice)
+                self.upload_system(slice)?
             }
-        }
+        };
+        let blit = match layout {
+            WgpuTextureLayout::Rgba => &self.rgba_blit,
+            WgpuTextureLayout::PackedNv12 => &self.nv12_blit,
+            WgpuTextureLayout::MultiplanarNv12 => &self.nv12_planes_blit,
+        };
+        let mut encoder = self
+            .ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("wgpu-sink"),
+            });
+        blit.encode(
+            &self.ctx.device,
+            &mut encoder,
+            &texture,
+            layout,
+            &self.resources,
+            BlitTarget {
+                view,
+                viewport: self.viewport(target_size),
+            },
+        );
+        self.ctx.queue.submit([encoder.finish()]);
+        Ok(())
     }
 
-    /// Upload a tightly packed system-memory frame into the sink's own texture in
-    /// the negotiated layout, then blit it. Each plane is written as its own
-    /// region, stacked top to bottom, since an odd-width NV12 frame has luma and
-    /// chroma rows of different lengths.
-    fn upload_system(&mut self, bytes: &[u8]) -> Result<(), G2gError> {
+    /// Upload a tightly packed system-memory frame into the renderer's own
+    /// texture in the negotiated layout. Each plane is written as its own region,
+    /// stacked top to bottom, since an odd-width NV12 frame has luma and chroma
+    /// rows of different lengths.
+    fn upload_system(
+        &mut self,
+        bytes: &[u8],
+    ) -> Result<(wgpu::Texture, WgpuTextureLayout), G2gError> {
         let source = self.source.ok_or(G2gError::NotConfigured)?;
         let converted = source.input.convert_frame(bytes)?;
         let bytes = converted.as_deref().unwrap_or(bytes);
@@ -940,19 +897,151 @@ impl WgpuSink {
             );
             plane_top += rows;
         }
-        self.present(&texture, source.layout)
+        Ok((texture, source.layout))
+    }
+}
+
+impl WgpuSink {
+    /// Format the offscreen target is allocated in (and read back as).
+    pub const OFFSCREEN_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+
+    /// A sink that presents into an internal `width` x `height` texture (read it
+    /// back with [`read_target`](Self::read_target)). The render-to-texture path.
+    pub fn offscreen(ctx: GpuContext, width: u32, height: u32) -> Self {
+        let texture = offscreen_texture(&ctx, width, height);
+        Self::build(
+            ctx,
+            Self::OFFSCREEN_FORMAT,
+            Target::Offscreen {
+                texture,
+                width,
+                height,
+            },
+        )
     }
 
-    /// Blit `src` onto the target with the pipeline for its `layout`. For a
-    /// surface target, acquires and presents the swapchain image; for offscreen,
-    /// renders into the owned texture.
-    fn present(&mut self, src: &wgpu::Texture, layout: WgpuTextureLayout) -> Result<(), G2gError> {
-        let blit = match layout {
-            WgpuTextureLayout::Rgba => &self.rgba_blit,
-            WgpuTextureLayout::PackedNv12 => &self.nv12_blit,
-            WgpuTextureLayout::MultiplanarNv12 => &self.nv12_planes_blit,
-        };
+    /// A sink that presents to a caller-built, already-`configure`d surface (an
+    /// on-screen window). The application owns the window + event loop and the
+    /// surface's lifetime, and forwards window resizes through
+    /// [`resize`](Self::resize).
+    pub fn with_surface(
+        ctx: GpuContext,
+        surface: wgpu::Surface<'static>,
+        mut config: wgpu::SurfaceConfiguration,
+    ) -> Self {
+        let supported = surface.get_capabilities(&ctx.adapter).formats;
+        let format = presentable_format(config.format, &supported);
+        if format != config.format {
+            config.format = format;
+            surface.configure(&ctx.device, &config);
+        }
+        Self::build(ctx, format, Target::Surface { surface, config })
+    }
 
+    fn build(ctx: GpuContext, target_format: wgpu::TextureFormat, target: Target) -> Self {
+        Self {
+            renderer: VideoRenderer::new(ctx.clone(), target_format),
+            ctx,
+            target,
+            presented: 0,
+            pacer: PresentationPacer::for_video_sink(),
+        }
+    }
+
+    /// Count of frames presented.
+    pub fn presented_count(&self) -> u64 {
+        self.presented
+    }
+
+    /// Current target size: the surface's swapchain size, or the offscreen
+    /// texture's.
+    pub fn target_size(&self) -> (u32, u32) {
+        match &self.target {
+            Target::Offscreen { width, height, .. } => (*width, *height),
+            Target::Surface { config, .. } => (config.width, config.height),
+        }
+    }
+
+    /// Follow the window to a new size: reconfigure the surface's swapchain (or
+    /// reallocate the offscreen texture) to `width` x `height`. The application
+    /// owns the window, so it calls this from its resize event.
+    ///
+    /// The incoming frame keeps its negotiated geometry: the blit scales it to
+    /// fill the target, at the new size as it did at the old one.
+    ///
+    /// A size that already matches, or a zero dimension (a minimised or
+    /// not-yet-mapped window), is ignored, so calling this on every resize event
+    /// is fine.
+    pub fn resize(&mut self, width: u32, height: u32) {
+        if (width, height) == self.target_size() || width == 0 || height == 0 {
+            return;
+        }
+        match &mut self.target {
+            Target::Offscreen {
+                texture,
+                width: target_width,
+                height: target_height,
+            } => {
+                *texture = offscreen_texture(&self.ctx, width, height);
+                *target_width = width;
+                *target_height = height;
+            }
+            Target::Surface { surface, config } => {
+                config.width = width;
+                config.height = height;
+                surface.configure(&self.ctx.device, config);
+            }
+        }
+    }
+
+    /// Stretch the picture to fill the target (`false`) instead of letterboxing
+    /// it at its display aspect (`true`, the default).
+    pub fn with_force_aspect_ratio(mut self, force_aspect_ratio: bool) -> Self {
+        self.renderer.set_force_aspect_ratio(force_aspect_ratio);
+        self
+    }
+
+    #[cfg(all(
+        any(target_os = "linux", target_os = "windows"),
+        feature = "wgpu-present"
+    ))]
+    pub(crate) fn picture_point(&self, target_x: f64, target_y: f64) -> Option<(u32, u32)> {
+        self.renderer
+            .picture_point(self.target_size(), target_x, target_y)
+    }
+
+    /// QoS late-drop bound: once PTS pacing is engaged, a frame past its
+    /// deadline by more than `ns` is dropped instead of presented late, so the
+    /// sink catches up. The default is 20 ms, `u64::MAX` never drops.
+    pub fn with_max_lateness_ns(mut self, ns: u64) -> Self {
+        self.pacer.set_max_lateness_ns(ns);
+        self
+    }
+
+    /// Post a running-stats `Qos` report every `ns` of clock time while frames
+    /// present, on top of the per-drop reports. `0` (the default) reports only
+    /// drops.
+    pub fn with_qos_interval_ns(mut self, ns: u64) -> Self {
+        self.pacer.set_report_interval_ns(ns);
+        self
+    }
+
+    /// Attach the pipeline bus so QoS reports reach the application.
+    pub fn with_bus(mut self, bus: BusHandle) -> Self {
+        self.pacer.set_bus(bus);
+        self
+    }
+
+    /// Frames dropped by QoS late-drop (past their deadline beyond the bound).
+    pub fn late_dropped(&self) -> u64 {
+        self.pacer.late_dropped()
+    }
+
+    /// Present one frame's pixels onto the target. For a surface target,
+    /// acquires and presents the swapchain image; for offscreen, renders into the
+    /// owned texture. The path [`process`](AsyncElement::process) and the
+    /// windowed present sink share, past pacing.
+    pub fn present_frame(&mut self, domain: &MemoryDomain) -> Result<(), G2gError> {
         // Acquire the destination view. For a surface, hold the SurfaceTexture
         // until after submit so it can be presented.
         let surface_frame = match &self.target {
@@ -981,26 +1070,8 @@ impl WgpuSink {
                 .create_view(&wgpu::TextureViewDescriptor::default()),
             (Target::Surface { .. }, None) => unreachable!("returned above on no frame"),
         };
-
-        let viewport = self.viewport();
-        let mut encoder = self
-            .ctx
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("wgpu-sink"),
-            });
-        blit.encode(
-            &self.ctx.device,
-            &mut encoder,
-            src,
-            layout,
-            &self.resources,
-            BlitTarget {
-                view: &dst_view,
-                viewport,
-            },
-        );
-        self.ctx.queue.submit([encoder.finish()]);
+        let target_size = self.target_size();
+        self.renderer.draw(domain, &dst_view, target_size)?;
         if let Some(frame) = surface_frame {
             self.ctx.queue.present(frame);
         }
@@ -1057,27 +1128,7 @@ impl AsyncElement for WgpuSink {
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        let source = source_layout(absolute_caps)?;
-        // A geometry or format change invalidates the upload texture allocated
-        // for the old one.
-        if self.source.map(|s| (s.layout, s.width, s.height))
-            != Some((source.layout, source.width, source.height))
-        {
-            self.upload = None;
-        }
-        if let Caps::RawVideo {
-            colorimetry,
-            pixel_aspect,
-            ..
-        } = absolute_caps
-        {
-            self.set_nv12_colorimetry(*colorimetry);
-            self.pixel_aspect = *pixel_aspect;
-        }
-        self.resources
-            .write_picture_size(&self.ctx.queue, source.width, source.height);
-        self.source = Some(source);
-        self.configured = true;
+        self.renderer.configure(absolute_caps)?;
         Ok(ConfigureOutcome::Accepted)
     }
 
@@ -1113,7 +1164,8 @@ impl AsyncElement for WgpuSink {
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
         match name {
             FORCE_ASPECT_RATIO_NAME => {
-                self.force_aspect_ratio = value.as_bool().ok_or(PropError::Type)?;
+                self.renderer
+                    .set_force_aspect_ratio(value.as_bool().ok_or(PropError::Type)?);
                 Ok(())
             }
             _ => self
@@ -1125,7 +1177,7 @@ impl AsyncElement for WgpuSink {
 
     fn get_property(&self, name: &str) -> Option<PropValue> {
         match name {
-            FORCE_ASPECT_RATIO_NAME => Some(PropValue::Bool(self.force_aspect_ratio)),
+            FORCE_ASPECT_RATIO_NAME => Some(PropValue::Bool(self.renderer.force_aspect_ratio())),
             _ => self.pacer.get_property(name),
         }
     }
@@ -1136,7 +1188,7 @@ impl AsyncElement for WgpuSink {
         _out: &'a mut dyn OutputSink,
     ) -> Self::ProcessFuture<'a> {
         Box::pin(async move {
-            if !self.configured {
+            if self.renderer.source.is_none() {
                 return Err(G2gError::NotConfigured);
             }
             match packet {

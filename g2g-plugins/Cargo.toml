@@ -479,13 +479,13 @@ nvdec = ["cuda"]
 # copy + NV12->RGB fragment shader) on a Wayland EGL surface, removing the
 # PCIe round-trip and CPU colour convert. Pulls khronos-egl (EGL), glow (GL
 # ES), wayland-egl (wl_egl_window), and SCTK (windowing). Linux + NVIDIA only.
-cuda-gl = ["cuda", "dep:khronos-egl", "dep:glow", "dep:wayland-egl", "dep:smithay-client-toolkit"]
+cuda-gl = ["cuda", "gl-render", "dep:khronos-egl", "dep:wayland-egl", "dep:smithay-client-toolkit"]
 # CUDA-GL display sink on DRM/KMS (`CudaKmsSink`, M255): the tty / no-compositor
 # counterpart of cuda-gl. Same CUDA-GL interop + NV12->RGB shader, but EGL on a
 # GBM surface presented via DRM page-flips (no Wayland). Pulls khronos-egl, glow,
 # gbm (surface, no drm-support so it stays on our drm), drm, drm-ffi + drm-fourcc.
 # Requires DRM master (tty / DRM lease). Linux + NVIDIA only.
-cuda-kms = ["cuda", "dep:khronos-egl", "dep:glow", "dep:gbm", "dep:drm", "dep:drm-ffi", "dep:drm-fourcc"]
+cuda-kms = ["cuda", "gl-render", "dep:khronos-egl", "dep:gbm", "dep:drm", "dep:drm-ffi", "dep:drm-fourcc"]
 # CUDA<->wgpu zero-copy interop (M220, the GPU keep-on-GPU pillar). `CudaToWgpu`
 # imports a Vulkan external-memory image into CUDA, copies the NVDEC NV12 planes
 # device->device into it, and hands it downstream as MemoryDomain::WgpuTexture
@@ -545,7 +545,10 @@ wayland-sink = ["std", "dep:smithay-client-toolkit"]
 # convert on the GPU. No CUDA anywhere in its path, so it runs on any Mesa /
 # proprietary EGL driver. Same GL/EGL deps as cuda-gl minus the CUDA stack:
 # khronos-egl, glow, wayland-egl, SCTK. Linux-only, implies std.
-gl-sink = ["std", "dep:khronos-egl", "dep:glow", "dep:wayland-egl", "dep:smithay-client-toolkit"]
+gl-sink = ["std", "gl-render", "dep:khronos-egl", "dep:wayland-egl", "dep:smithay-client-toolkit"]
+# The GL renderer the GL sinks share (`glnv12::GlState`), usable on its own in a
+# host's GL context on any OS. Pulls only glow.
+gl-render = ["std", "dep:glow"]
 # Browser / WebAssembly target (design/README.md §6.3). Wasm-gated elements: WasmClock
 # (performance.now + setTimeout sleep), WebSocketSrc ingest, and a spawn_local
 # browser entry. Pulls wasm-bindgen/js-sys/web-sys/wasm-bindgen-futures

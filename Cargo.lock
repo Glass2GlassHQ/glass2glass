@@ -4544,6 +4544,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "g2g-player"
+version = "0.21.0"
+dependencies = [
+ "g2g-core",
+ "g2g-plugins",
+ "pollster",
+ "tokio",
+ "wgpu",
+]
+
+[[package]]
 name = "g2g-plugin"
 version = "0.21.0"
 dependencies = [
@@ -8166,6 +8177,12 @@ dependencies = [
  "rustix 1.1.4",
  "windows-sys 0.61.2",
 ]
+
+[[package]]
+name = "pollster"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2f3a9f18d041e6d0e102a0a46750538147e5e8992d3b4873aaafee2520b00ce3"
 
 [[package]]
 name = "poly1305"

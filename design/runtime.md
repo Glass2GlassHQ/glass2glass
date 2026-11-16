@@ -653,8 +653,9 @@ as well as flushing ones.
 
 An application seeks a pipeline built from a launch string through
 `runtime::attach_seek(graph, seek)`. A source reports `seek_format()`, `Time` for
-`Mp4Src` and `Bytes` for `FileSrc`. A transform reports `seek_route()`: `Buffered`
-when it serves a time seek from the whole stream it holds (`Mp4Demux`),
+`Mp4Src` and `Bytes` for `FileSrc`. A transform or a multi-output demux reports
+`seek_route()`: `Buffered` when it serves a time seek from the whole stream it holds
+(`Mp4Demux`, a one-port `Mp4DemuxN`),
 `UpstreamBytes` when it byte-seeks the source that feeds it (the byte-stream
 demuxers, and the audio parsers `flacparse`, `mpegaudioparse`, `aacparse` and `ac3parse`,
 which rescan a bare file from its start and restart their sample count there), and
@@ -909,10 +910,32 @@ exactly as a GStreamer sink answers from its segment plus last buffer, so it nee
 no element cooperation. Duration is the source's answer:
 `SourceLoop::query_duration() -> Option<u64>`, defaulting to `None` so a live source
 stays unknown, polled by the source arm before producing, and `Mp4Src` reports it
-from the `mdhd` box. A first duration also posts `BusMessage::DurationChanged` as a
+from the `mdhd` box. A demuxer learns the length from the stream, so the demux arm
+polls `MultiOutputElement::query_duration()` before each packet and publishes each
+new value: `Mp4DemuxN` reads the `mvhd` box and `MkvDemuxN` the Segment `Info`
+`Duration`. A first duration also posts `BusMessage::DurationChanged` as a
 push notification. `run_graph_with_progress` wires the handle in, and the handle is
 plain atomics behind an `Arc`, so reading it from the app thread while the pipeline
 runs needs no lock.
+
+## Embeddable player
+
+`g2g-player` is a libmpv-style library over `playbin` and `parse_launch`. `Player`
+loads a URI or a launch line and runs it on a `g2g-player` thread under a
+`StateController`. It reports through one event queue (`wait_event`, a wakeup
+callback) and the `pause`, `time-pos` and `duration` properties, read from
+`PipelineProgress` every 50 ms and posted to observers on change.
+
+The host draws the frame due now into its own target, as with libmpv's render API.
+A URI load builds `playbin uri=... video-sink=playervideosink`, and a launch line
+must contain `playervideosink`. After `parse_launch` the sink node is found by its
+metadata and replaced with one holding the player's frame slot, since a
+`LaunchFactory` is a plain function pointer. `playervideosink` paces frames with
+`PresentationPacer` against a `MonotonicClock` it provides, puts each due frame in
+the slot and calls the host's update callback. `GlRenderContext::render` draws it
+into a `GlTarget` framebuffer through `g2g-plugins`' `GlVideoRenderer` (feature
+`gl-render`, the NV12 and RGBA shaders `glsink` uses), and `WgpuRenderContext`
+into a wgpu texture through `wgpusink`'s `VideoRenderer`.
 
 ## Language bindings
 

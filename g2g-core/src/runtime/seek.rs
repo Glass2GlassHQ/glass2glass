@@ -602,29 +602,25 @@ fn upstream_node<N>(graph: &Graph<N>, node: NodeId) -> Option<NodeId> {
 }
 
 #[cfg(feature = "std")]
-fn byte_relay(graph: &Graph<GraphNodeRef<'_>>, node: NodeId) -> bool {
-    matches!(
-        graph.element(node),
-        Some(GraphNodeRef::Element(element)) if element.seek_route() == Some(ElementSeekRoute::ByteRelay)
-    )
+fn element_seek_route(graph: &Graph<GraphNodeRef<'_>>, node: NodeId) -> Option<ElementSeekRoute> {
+    match graph.element(node)? {
+        GraphNodeRef::Element(element) => element.seek_route(),
+        GraphNodeRef::Demux(demux) => demux.seek_route(),
+        _ => None,
+    }
 }
 
 #[cfg(feature = "std")]
 fn seekable_node(graph: &Graph<GraphNodeRef<'_>>, node: NodeId) -> Option<SeekableNode> {
-    match graph.element(node)? {
-        GraphNodeRef::Source(source) if source.seek_format() == Some(SeekFormat::Time) => {
-            Some(SeekableNode::TimeSource(node))
-        }
-        GraphNodeRef::Element(element)
-            if element.seek_route() == Some(ElementSeekRoute::Buffered) =>
-        {
-            Some(SeekableNode::BufferedElement(node))
-        }
-        GraphNodeRef::Element(element)
-            if element.seek_route() == Some(ElementSeekRoute::UpstreamBytes) =>
-        {
+    if let GraphNodeRef::Source(source) = graph.element(node)? {
+        return (source.seek_format() == Some(SeekFormat::Time))
+            .then_some(SeekableNode::TimeSource(node));
+    }
+    match element_seek_route(graph, node)? {
+        ElementSeekRoute::Buffered => Some(SeekableNode::BufferedElement(node)),
+        ElementSeekRoute::UpstreamBytes => {
             let mut byte_source = upstream_node(graph, node)?;
-            while byte_relay(graph, byte_source) {
+            while element_seek_route(graph, byte_source) == Some(ElementSeekRoute::ByteRelay) {
                 byte_source = upstream_node(graph, byte_source)?;
             }
             match graph.element(byte_source)? {
@@ -637,7 +633,7 @@ fn seekable_node(graph: &Graph<GraphNodeRef<'_>>, node: NodeId) -> Option<Seekab
                 _ => None,
             }
         }
-        _ => None,
+        ElementSeekRoute::ByteRelay => None,
     }
 }
 
@@ -735,9 +731,11 @@ fn give_controllers(graph: &mut Graph<GraphNode>, targets: &SeekTargets, app: &S
 fn give_controller(graph: &mut Graph<GraphNode>, target: SeekableNode, app: &SeekController) {
     match target {
         SeekableNode::TimeSource(node) => source_mut(graph, node).set_seek(app.clone()),
-        SeekableNode::BufferedElement(node) => {
-            element_mut(graph, node).set_buffered_seek(app.clone())
-        }
+        SeekableNode::BufferedElement(node) => match graph.element_mut(node) {
+            Some(GraphNodeRef::Element(element)) => element.set_buffered_seek(app.clone()),
+            Some(GraphNodeRef::Demux(demux)) => demux.set_buffered_seek(app.clone()),
+            _ => unreachable!("seekable_node found an element or a demux here"),
+        },
         SeekableNode::Demuxer {
             demuxer,
             byte_source,
@@ -750,7 +748,11 @@ fn give_controller(graph: &mut Graph<GraphNode>, target: SeekableNode, app: &See
                 element_mut(graph, node).set_byte_relay(upstream.clone());
                 relay = upstream_node(graph, node);
             }
-            element_mut(graph, demuxer).set_seek(app.clone(), upstream);
+            match graph.element_mut(demuxer) {
+                Some(GraphNodeRef::Element(element)) => element.set_seek(app.clone(), upstream),
+                Some(GraphNodeRef::Demux(demux)) => demux.set_seek(app.clone(), upstream),
+                _ => unreachable!("seekable_node found an element or a demux here"),
+            }
         }
     }
 }

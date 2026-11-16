@@ -2077,13 +2077,15 @@ pub mod nvdec;
 #[cfg(all(target_os = "linux", feature = "jpegxs"))]
 pub mod svtjpegxs;
 
-// Shared GL ES render state for the EGL display sinks (program + textures +
-// per-frame upload + draw); the platform present stays in each sink.
-#[cfg(all(
-    target_os = "linux",
-    any(feature = "cuda-gl", feature = "cuda-kms", feature = "gl-sink")
-))]
-pub(crate) mod glnv12;
+// Shared GL render state for the EGL display sinks and for a host's own GL
+// context (program + textures + per-frame upload + draw); the present stays with
+// the caller.
+#[cfg(feature = "gl-render")]
+pub mod glnv12;
+
+// An offscreen EGL context for the GL renderer tests, no display server needed.
+#[cfg(all(test, target_os = "linux", feature = "gl-sink"))]
+mod headlessgl;
 
 // Shared Wayland window + present loop for the sinks that own their window on a
 // worker thread; each supplies only the renderer that draws one frame.

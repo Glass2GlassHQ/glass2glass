@@ -412,6 +412,23 @@ pub trait DynMultiOutputElement: ElementBound {
     fn metadata(&self) -> ElementMetadata {
         ElementMetadata::default()
     }
+
+    fn query_duration(&self) -> Option<u64> {
+        None
+    }
+
+    fn seek_route(&self) -> Option<crate::runtime::ElementSeekRoute> {
+        None
+    }
+
+    fn set_seek(
+        &mut self,
+        _app: crate::runtime::SeekController,
+        _upstream: crate::runtime::SeekController,
+    ) {
+    }
+
+    fn set_buffered_seek(&mut self, _app: crate::runtime::SeekController) {}
 }
 
 impl<T: MultiOutputElement> DynMultiOutputElement for T {
@@ -484,6 +501,26 @@ impl<T: MultiOutputElement> DynMultiOutputElement for T {
 
     fn metadata(&self) -> ElementMetadata {
         MultiOutputElement::metadata(self)
+    }
+
+    fn query_duration(&self) -> Option<u64> {
+        MultiOutputElement::query_duration(self)
+    }
+
+    fn seek_route(&self) -> Option<crate::runtime::ElementSeekRoute> {
+        MultiOutputElement::seek_route(self)
+    }
+
+    fn set_seek(
+        &mut self,
+        app: crate::runtime::SeekController,
+        upstream: crate::runtime::SeekController,
+    ) {
+        MultiOutputElement::set_seek(self, app, upstream)
+    }
+
+    fn set_buffered_seek(&mut self, app: crate::runtime::SeekController) {
+        MultiOutputElement::set_buffered_seek(self, app)
     }
 }
 
@@ -575,6 +612,26 @@ impl MultiOutputElement for DemuxRef<'_> {
     fn metadata(&self) -> ElementMetadata {
         self.0.metadata()
     }
+
+    fn query_duration(&self) -> Option<u64> {
+        self.0.query_duration()
+    }
+
+    fn seek_route(&self) -> Option<crate::runtime::ElementSeekRoute> {
+        self.0.seek_route()
+    }
+
+    fn set_seek(
+        &mut self,
+        app: crate::runtime::SeekController,
+        upstream: crate::runtime::SeekController,
+    ) {
+        self.0.set_seek(app, upstream)
+    }
+
+    fn set_buffered_seek(&mut self, app: crate::runtime::SeekController) {
+        self.0.set_buffered_seek(app)
+    }
 }
 
 /// Forwarding impl so a borrowed `&mut dyn DynMultiOutputElement` can be boxed
@@ -654,6 +711,26 @@ impl<'b> DynMultiOutputElement for &'b mut (dyn DynMultiOutputElement + 'b) {
 
     fn metadata(&self) -> ElementMetadata {
         (**self).metadata()
+    }
+
+    fn query_duration(&self) -> Option<u64> {
+        (**self).query_duration()
+    }
+
+    fn seek_route(&self) -> Option<crate::runtime::ElementSeekRoute> {
+        (**self).seek_route()
+    }
+
+    fn set_seek(
+        &mut self,
+        app: crate::runtime::SeekController,
+        upstream: crate::runtime::SeekController,
+    ) {
+        (**self).set_seek(app, upstream)
+    }
+
+    fn set_buffered_seek(&mut self, app: crate::runtime::SeekController) {
+        (**self).set_buffered_seek(app)
     }
 }
 
@@ -2668,6 +2745,8 @@ fn plan_arms<'a>(
                     probe: probes[index].clone(),
                     latency: LatencyFold::publisher(latency_fold, node),
                     flush_count,
+                    bus: bus.cloned(),
+                    progress: progress.cloned(),
                 },
             },
             // Under `AllowBranchDrop` the broadcast tolerates a branch that has
@@ -4768,6 +4847,19 @@ impl<S: MultiOutputSink + ?Sized> MultiOutputSink for SourceFrameSpans<'_, S> {
     }
 }
 
+fn publish_duration(
+    progress: Option<&PipelineProgress>,
+    bus: Option<&BusHandle>,
+    duration_ns: u64,
+) {
+    let changed = progress
+        .map(|p| p.publish_duration(duration_ns))
+        .unwrap_or(true);
+    if let (true, Some(bus)) = (changed, bus) {
+        bus.try_post(BusMessage::DurationChanged { duration_ns });
+    }
+}
+
 pub(crate) async fn run_source(
     src: &mut dyn DynSourceLoop,
     io: SourceArmIo,
@@ -4792,15 +4884,7 @@ pub(crate) async fn run_source(
     // change on the bus. Polled once here; a source that discovers its length
     // mid-stream is a follow-up (it would publish through the handle directly).
     if let Some(duration_ns) = src.query_duration() {
-        let changed = progress
-            .as_ref()
-            .map(|p| p.publish_duration(duration_ns))
-            .unwrap_or(true);
-        if changed {
-            if let Some(b) = &bus {
-                b.try_post(BusMessage::DurationChanged { duration_ns });
-            }
-        }
+        publish_duration(progress.as_ref(), bus.as_ref(), duration_ns);
     }
     let mut adapter = SenderSink::new(out_tx);
     adapter.log_pushes_as(log_name);
@@ -5598,6 +5682,8 @@ pub struct DemuxArmIo {
     pub(crate) probe: Probe,
     pub(crate) latency: LatencyPublisher,
     pub(crate) flush_count: Option<ArmFlushCount>,
+    pub(crate) bus: Option<BusHandle>,
+    pub(crate) progress: Option<PipelineProgress>,
 }
 
 /// The demux arm: drain the single input edge and let the routing element
@@ -5620,7 +5706,10 @@ pub(crate) async fn demux_arm<E: MultiOutputElement>(
         probe,
         mut latency,
         mut flush_count,
+        bus,
+        progress,
     } = io;
+    let mut published_duration_ns = None;
     let branch_count = out_txs.len();
     let mut senders: Vec<SenderSink> = out_txs.into_iter().map(SenderSink::new).collect();
     // A branch sink's QoS report walks on past the demux onto its input link
@@ -5631,6 +5720,12 @@ pub(crate) async fn demux_arm<E: MultiOutputElement>(
     let mut multi = MultiSenderSink::new(senders);
     multi.set_push_wait_probe(probe.clone());
     loop {
+        // demuxers learn the length only after parsing stream bytes
+        let duration_ns = demux.query_duration();
+        if let Some(ns) = duration_ns.filter(|_| duration_ns != published_duration_ns) {
+            publish_duration(progress.as_ref(), bus.as_ref(), ns);
+            published_duration_ns = duration_ns;
+        }
         let packet = in_rx.recv().await;
         if let (Some(probe), Some(packet)) = (&probe, &packet) {
             log_received(probe.log_name(), packet);

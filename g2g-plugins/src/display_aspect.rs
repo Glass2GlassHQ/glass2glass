@@ -52,7 +52,7 @@ pub(crate) fn display_aspect(
     )
 }
 
-#[cfg(any(feature = "wgpu-sink", feature = "wayland-sink"))]
+#[cfg(any(feature = "wgpu-sink", feature = "wayland-sink", feature = "gl-render"))]
 fn saturate(value: u128) -> u32 {
     u32::try_from(value).unwrap_or(u32::MAX)
 }
@@ -99,10 +99,7 @@ pub(crate) fn scaled_pixel_aspect(
     }
 }
 
-#[cfg(any(
-    feature = "wgpu-sink",
-    all(target_os = "linux", any(feature = "cuda-gl", feature = "gl-sink"))
-))]
+#[cfg(any(feature = "wgpu-sink", feature = "gl-render"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ViewportRectangle {
     pub x: u32,
@@ -111,10 +108,7 @@ pub(crate) struct ViewportRectangle {
     pub height: u32,
 }
 
-#[cfg(any(
-    feature = "wgpu-sink",
-    all(target_os = "linux", any(feature = "cuda-gl", feature = "gl-sink"))
-))]
+#[cfg(any(feature = "wgpu-sink", feature = "gl-render"))]
 impl ViewportRectangle {
     pub(crate) fn whole(width: u32, height: u32) -> Self {
         Self {
@@ -151,7 +145,7 @@ pub(crate) fn picture_point_in(
 }
 
 // the largest rectangle with the picture's display aspect, centred in the target
-#[cfg(feature = "wgpu-sink")]
+#[cfg(any(feature = "wgpu-sink", feature = "gl-render"))]
 pub(crate) fn letterbox(
     width: u32,
     height: u32,

@@ -843,7 +843,11 @@ pub trait MultiOutputElement: ElementBound {
         ElementMetadata::default()
     }
 
-    // the graph runner seeks no demux node, only an element wrapping a one-output demux
+    fn query_duration(&self) -> Option<u64> {
+        None
+    }
+
+    // how this demux serves a time seek, `None` when it cannot
     fn seek_route(&self) -> Option<crate::runtime::ElementSeekRoute> {
         None
     }

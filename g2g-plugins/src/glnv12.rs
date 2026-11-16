@@ -27,8 +27,10 @@ use alloc::string::{String, ToString};
 
 use glow::HasContext;
 
-use g2g_core::{Colorimetry, G2gError};
+use g2g_core::{Colorimetry, G2gError, MemoryDomain, RawVideoFormat};
 
+use crate::display_aspect::{letterbox, ViewportRectangle};
+use crate::videoconvert::display::{display_sink_caps, DisplayInput, NV12_AND_RGBA};
 use crate::yuvmatrix::YuvToRgbWeights;
 
 #[cfg(any(feature = "cuda-gl", feature = "cuda-kms"))]
@@ -41,11 +43,24 @@ use g2g_core::memory::OwnedCudaBuffer;
 pub(crate) const VERTEX_SHADER: &str = "\
 attribute vec2 a_pos;
 attribute vec2 a_uv;
+uniform float u_flip_y;
 varying vec2 v_uv;
 void main() {
     v_uv = a_uv;
-    gl_Position = vec4(a_pos, 0.0, 1.0);
+    gl_Position = vec4(a_pos.x, a_pos.y * u_flip_y, 0.0, 1.0);
 }
+";
+
+// desktop GL 3.2 core has no GLSL ES 1.00, these map its keywords onto GLSL 1.50
+const DESKTOP_VERTEX_PRELUDE: &str = "#version 150
+#define attribute in
+#define varying out
+";
+const DESKTOP_FRAGMENT_PRELUDE: &str = "#version 150
+#define varying in
+#define texture2D texture
+out vec4 g2g_frag_color;
+#define gl_FragColor g2g_frag_color
 ";
 
 /// GLSL ES 1.00 fragment shader: sample the NV12 luma (`R8`) and interleaved
@@ -84,7 +99,6 @@ void main() {{
 
 /// GLSL ES 1.00 fragment shader for the already-RGBA path: straight texture
 /// fetch, no convert.
-#[cfg(feature = "gl-sink")]
 pub(crate) const FRAGMENT_SHADER_RGBA: &str = "\
 precision mediump float;
 varying vec2 v_uv;
@@ -100,7 +114,6 @@ void main() {
 pub(crate) enum GlMode {
     Nv12,
     /// Only the system-memory sink negotiates RGBA; the CUDA sinks are NV12-only.
-    #[cfg(feature = "gl-sink")]
     Rgba,
 }
 
@@ -113,7 +126,6 @@ enum Textures {
         y_loc: Option<glow::UniformLocation>,
         uv_loc: Option<glow::UniformLocation>,
     },
-    #[cfg(feature = "gl-sink")]
     Rgba {
         tex: glow::Texture,
         loc: Option<glow::UniformLocation>,
@@ -129,8 +141,11 @@ pub(crate) struct GlState {
     /// Vertex attribute locations, queried once at link.
     pos_loc: u32,
     uv_loc: u32,
+    flip_y_loc: Option<glow::UniformLocation>,
     textures: Textures,
     vbo: glow::Buffer,
+    // core profile contexts draw nothing without a bound vertex array
+    vertex_array: glow::VertexArray,
     width: u32,
     height: u32,
     /// Registered on the first frame, when `OwnedCudaBuffer::context` is known.
@@ -160,12 +175,21 @@ impl GlState {
         unsafe {
             let fragment = match mode {
                 GlMode::Nv12 => fragment_shader_nv12(colorimetry),
-                #[cfg(feature = "gl-sink")]
                 GlMode::Rgba => String::from(FRAGMENT_SHADER_RGBA),
             };
-            let program = link_program(&gl, VERTEX_SHADER, &fragment)?;
+            let program = if gl.version().is_embedded {
+                link_program(&gl, VERTEX_SHADER, &fragment)?
+            } else {
+                link_program(
+                    &gl,
+                    &(String::from(DESKTOP_VERTEX_PRELUDE) + VERTEX_SHADER),
+                    &(String::from(DESKTOP_FRAGMENT_PRELUDE) + &fragment),
+                )?
+            };
             let pos_loc = gl.get_attrib_location(program, "a_pos").unwrap_or(0);
             let uv_loc = gl.get_attrib_location(program, "a_uv").unwrap_or(1);
+            let flip_y_loc = gl.get_uniform_location(program, "u_flip_y");
+            let vertex_array = gl.create_vertex_array().map_err(|e| e.to_string())?;
 
             // Fullscreen quad: two triangles, interleaved (x, y, u, v). Flip V so
             // the top row of the frame maps to the top of the window.
@@ -193,7 +217,6 @@ impl GlState {
                         uv_loc: gl.get_uniform_location(program, "uv_tex"),
                     }
                 }
-                #[cfg(feature = "gl-sink")]
                 GlMode::Rgba => Textures::Rgba {
                     tex: make_texture(&gl, glow::RGBA8 as i32, glow::RGBA, width, height)?,
                     loc: gl.get_uniform_location(program, "rgba_tex"),
@@ -205,8 +228,10 @@ impl GlState {
                 program,
                 pos_loc,
                 uv_loc,
+                flip_y_loc,
                 textures,
                 vbo,
+                vertex_array,
                 width,
                 height,
                 #[cfg(any(feature = "cuda-gl", feature = "cuda-kms"))]
@@ -225,7 +250,6 @@ impl GlState {
     pub(crate) fn upload_and_draw(&mut self, buf: &OwnedCudaBuffer) -> Result<(), G2gError> {
         let (y_tex, uv_tex) = match &self.textures {
             Textures::Nv12 { y_tex, uv_tex, .. } => (*y_tex, *uv_tex),
-            #[cfg(feature = "gl-sink")]
             Textures::Rgba { .. } => return Err(G2gError::CapsMismatch),
         };
         // Lazily make the decoder's CUDA context current on this thread and
@@ -248,7 +272,7 @@ impl GlState {
         // SAFETY: textures registered, CUDA context current, planes valid.
         unsafe { self.interop.as_ref().unwrap().upload(buf)? };
 
-        self.draw();
+        self.draw(self.whole_frame(), UPRIGHT_ON_DEFAULT_FRAMEBUFFER);
         Ok(())
     }
 
@@ -258,6 +282,17 @@ impl GlState {
     /// plane, RGBA = `width * height * 4` bytes.
     #[cfg(feature = "gl-sink")]
     pub(crate) fn upload_system_and_draw(&mut self, bytes: &[u8]) -> Result<(), G2gError> {
+        self.upload_system(bytes)?;
+        self.draw(self.whole_frame(), UPRIGHT_ON_DEFAULT_FRAMEBUFFER);
+        Ok(())
+    }
+
+    #[cfg(any(feature = "gl-sink", feature = "cuda-gl", feature = "cuda-kms"))]
+    fn whole_frame(&self) -> ViewportRectangle {
+        ViewportRectangle::whole(self.width, self.height)
+    }
+
+    fn upload_system(&mut self, bytes: &[u8]) -> Result<(), G2gError> {
         let (w, h) = (self.width as usize, self.height as usize);
         // SAFETY: the GL context is current on this thread for the worker's life;
         // every slice passed below is bounds-checked against the texture extent
@@ -289,20 +324,24 @@ impl GlState {
                 }
             }
         }
-        self.draw();
         Ok(())
     }
 
-    /// Bind the program + textures and draw the fullscreen quad. The pixels must
-    /// already be in the textures.
-    fn draw(&mut self) {
+    fn draw(&mut self, viewport: ViewportRectangle, flip_y: bool) {
         // SAFETY: the GL context is current on this thread for the worker's life.
         unsafe {
             let gl = &self.gl;
-            gl.viewport(0, 0, self.width as i32, self.height as i32);
             gl.clear_color(0.0, 0.0, 0.0, 1.0);
             gl.clear(glow::COLOR_BUFFER_BIT);
+            gl.viewport(
+                viewport.x as i32,
+                viewport.y as i32,
+                viewport.width as i32,
+                viewport.height as i32,
+            );
             gl.use_program(Some(self.program));
+            gl.uniform_1_f32(self.flip_y_loc.as_ref(), if flip_y { 1.0 } else { -1.0 });
+            gl.bind_vertex_array(Some(self.vertex_array));
 
             match &self.textures {
                 Textures::Nv12 {
@@ -318,7 +357,6 @@ impl GlState {
                     gl.bind_texture(glow::TEXTURE_2D, Some(*uv_tex));
                     gl.uniform_1_i32(uv_loc.as_ref(), 1);
                 }
-                #[cfg(feature = "gl-sink")]
                 Textures::Rgba { tex, loc } => {
                     gl.active_texture(glow::TEXTURE0);
                     gl.bind_texture(glow::TEXTURE_2D, Some(*tex));
@@ -357,6 +395,131 @@ impl GlState {
     pub(crate) fn gl(&self) -> &glow::Context {
         &self.gl
     }
+
+    /// # Safety
+    /// The context the state was built in must be current.
+    unsafe fn destroy(self) {
+        // SAFETY: the caller guarantees the context these names belong to is current.
+        unsafe {
+            let gl = &self.gl;
+            gl.delete_program(self.program);
+            gl.delete_buffer(self.vbo);
+            gl.delete_vertex_array(self.vertex_array);
+            match self.textures {
+                Textures::Nv12 { y_tex, uv_tex, .. } => {
+                    gl.delete_texture(y_tex);
+                    gl.delete_texture(uv_tex);
+                }
+                Textures::Rgba { tex, .. } => gl.delete_texture(tex),
+            }
+        }
+    }
+}
+
+// the quad's texture coordinates put the frame's top row at the top of a window's framebuffer
+#[cfg(any(feature = "gl-sink", feature = "cuda-gl", feature = "cuda-kms"))]
+const UPRIGHT_ON_DEFAULT_FRAMEBUFFER: bool = true;
+
+pub fn accepted_caps() -> g2g_core::CapsSet {
+    display_sink_caps(NV12_AND_RGBA)
+}
+
+type GlLoader = alloc::boxed::Box<dyn Fn(&str) -> *const core::ffi::c_void>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GlTarget {
+    pub framebuffer: u32,
+    pub width: u32,
+    pub height: u32,
+    pub flip_y: bool,
+}
+
+pub struct GlVideoRenderer {
+    loader: GlLoader,
+    input: Option<DisplayInput>,
+    state: Option<(DisplayInput, GlState)>,
+}
+
+impl core::fmt::Debug for GlVideoRenderer {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("GlVideoRenderer")
+            .field("input", &self.input)
+            .finish_non_exhaustive()
+    }
+}
+
+impl GlVideoRenderer {
+    pub fn new(loader: impl Fn(&str) -> *const core::ffi::c_void + 'static) -> Self {
+        Self {
+            loader: alloc::boxed::Box::new(loader),
+            input: None,
+            state: None,
+        }
+    }
+
+    pub fn configure(&mut self, absolute_caps: &g2g_core::Caps) -> Result<(), G2gError> {
+        self.input = Some(DisplayInput::from_caps(absolute_caps, NV12_AND_RGBA)?);
+        Ok(())
+    }
+
+    /// # Safety
+    /// The GL context `loader` resolves entry points for must be current, with
+    /// `target.framebuffer` a framebuffer of it.
+    pub unsafe fn draw(&mut self, frame: &MemoryDomain, target: GlTarget) -> Result<(), G2gError> {
+        let input = self.input.ok_or(G2gError::NotConfigured)?;
+        let bytes = frame.as_system_slice().ok_or(G2gError::UnsupportedDomain)?;
+        let converted = input.convert_frame(bytes)?;
+        let bytes = converted.as_deref().unwrap_or(bytes);
+        if self.state.as_ref().map(|(built_for, _)| *built_for) != Some(input) {
+            // SAFETY: the caller guarantees the context is current.
+            unsafe { self.destroy_state() };
+            let mode = match input.presented {
+                RawVideoFormat::Nv12 => GlMode::Nv12,
+                _ => GlMode::Rgba,
+            };
+            // SAFETY: the caller guarantees the context `loader` resolves for is current.
+            let state = unsafe {
+                let gl = glow::Context::from_loader_function(|name| (self.loader)(name));
+                GlState::build(gl, input.width, input.height, mode, input.colorimetry)
+            }
+            .map_err(|_| G2gError::Hardware(g2g_core::HardwareError::Other))?;
+            self.state = Some((input, state));
+        }
+        let (_, state) = self.state.as_mut().expect("built above");
+        state.upload_system(bytes)?;
+        let viewport = letterbox(
+            input.width,
+            input.height,
+            input.pixel_aspect,
+            target.width,
+            target.height,
+        );
+        // SAFETY: the caller guarantees the framebuffer belongs to the current context.
+        unsafe {
+            state.gl.bind_framebuffer(
+                glow::FRAMEBUFFER,
+                core::num::NonZeroU32::new(target.framebuffer).map(glow::NativeFramebuffer),
+            );
+        }
+        state.draw(viewport, target.flip_y);
+        Ok(())
+    }
+
+    /// # Safety
+    /// The GL context `loader` resolves entry points for must be current.
+    unsafe fn destroy_state(&mut self) {
+        if let Some((_, state)) = self.state.take() {
+            // SAFETY: the caller guarantees the context is current.
+            unsafe { state.destroy() };
+        }
+    }
+
+    /// # Safety
+    /// The GL context `loader` resolves entry points for must be current.
+    pub unsafe fn destroy(mut self) {
+        // SAFETY: forwarded from the caller.
+        unsafe { self.destroy_state() };
+    }
 }
 
 /// `glTexSubImage2D` a tightly-packed plane over the whole texture.
@@ -364,7 +527,6 @@ impl GlState {
 /// # Safety
 /// A GL context must be current, `tex` must be a live `GL_TEXTURE_2D` allocated
 /// at `w` x `h` in `format`, and `pixels` must hold the whole extent.
-#[cfg(feature = "gl-sink")]
 unsafe fn sub_image(
     gl: &glow::Context,
     tex: glow::Texture,
@@ -525,5 +687,121 @@ mod tests {
             fragment_shader_nv12(Colorimetry::BT709),
             fragment_shader_nv12(Colorimetry::BT601)
         );
+    }
+}
+
+#[cfg(all(test, target_os = "linux", feature = "gl-sink"))]
+mod host_target_tests {
+    use super::*;
+    use crate::headlessgl::{headless_context, HeadlessApi};
+    use g2g_core::memory::SystemSlice;
+    use g2g_core::{Caps, Dim, Interlace, PixelAspect, Rate};
+
+    const RED: [u8; 4] = [255, 0, 0, 255];
+    const BLUE: [u8; 4] = [0, 0, 255, 255];
+    const BLACK: [u8; 4] = [0, 0, 0, 255];
+    const FRAME_WIDTH: u32 = 4;
+    const FRAME_HEIGHT: u32 = 2;
+    // the 2:1 frame letterboxes into the middle two rows unscaled, so no texel is filtered
+    const TARGET_SIDE: u32 = 4;
+
+    fn red_over_blue() -> MemoryDomain {
+        let pixels: alloc::vec::Vec<u8> = [RED; FRAME_WIDTH as usize]
+            .into_iter()
+            .chain([BLUE; FRAME_WIDTH as usize])
+            .flatten()
+            .collect();
+        MemoryDomain::System(SystemSlice::from_boxed(pixels.into_boxed_slice()))
+    }
+
+    fn rgba_caps() -> Caps {
+        Caps::RawVideo {
+            format: RawVideoFormat::Rgba8,
+            width: Dim::Fixed(FRAME_WIDTH),
+            height: Dim::Fixed(FRAME_HEIGHT),
+            framerate: Rate::Any,
+            interlace: Interlace::Any,
+            colorimetry: Colorimetry::UNKNOWN,
+            pixel_aspect: PixelAspect::Any,
+        }
+    }
+
+    // the first column of each row, bottom row first as glReadPixels returns them
+    fn draw_into_framebuffer(api: HeadlessApi, flip_y: bool) -> Option<alloc::vec::Vec<[u8; 4]>> {
+        let (_headless, gl) = headless_context(api).ok()?;
+        let egl = crate::egl_library::load().expect("loaded once already");
+        let mut renderer = GlVideoRenderer::new(move |name| match egl.get_proc_address(name) {
+            Some(entry) => entry as *const core::ffi::c_void,
+            None => core::ptr::null(),
+        });
+        renderer.configure(&rgba_caps()).unwrap();
+        // SAFETY: headless_context made its context current on this thread, the
+        // framebuffer and its texture are created in it and sized TARGET_SIDE square.
+        unsafe {
+            let color = gl.create_texture().unwrap();
+            gl.bind_texture(glow::TEXTURE_2D, Some(color));
+            gl.tex_image_2d(
+                glow::TEXTURE_2D,
+                0,
+                glow::RGBA8 as i32,
+                TARGET_SIDE as i32,
+                TARGET_SIDE as i32,
+                0,
+                glow::RGBA,
+                glow::UNSIGNED_BYTE,
+                glow::PixelUnpackData::Slice(None),
+            );
+            let framebuffer = gl.create_framebuffer().unwrap();
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(framebuffer));
+            gl.framebuffer_texture_2d(
+                glow::FRAMEBUFFER,
+                glow::COLOR_ATTACHMENT0,
+                glow::TEXTURE_2D,
+                Some(color),
+                0,
+            );
+            gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+            renderer
+                .draw(
+                    &red_over_blue(),
+                    GlTarget {
+                        framebuffer: framebuffer.0.get(),
+                        width: TARGET_SIDE,
+                        height: TARGET_SIDE,
+                        flip_y,
+                    },
+                )
+                .unwrap();
+            let mut pixels = alloc::vec![0u8; (TARGET_SIDE * TARGET_SIDE * 4) as usize];
+            gl.read_pixels(
+                0,
+                0,
+                TARGET_SIDE as i32,
+                TARGET_SIDE as i32,
+                glow::RGBA,
+                glow::UNSIGNED_BYTE,
+                glow::PixelPackData::Slice(Some(&mut pixels)),
+            );
+            renderer.destroy();
+            assert_eq!(gl.get_error(), glow::NO_ERROR, "{api:?}");
+            Some(
+                pixels
+                    .chunks((TARGET_SIDE * 4) as usize)
+                    .map(|row| row[..4].try_into().unwrap())
+                    .collect(),
+            )
+        }
+    }
+
+    #[test]
+    fn a_frame_lands_letterboxed_in_a_host_framebuffer_on_gles_and_desktop_core() {
+        for api in [HeadlessApi::GlEs3, HeadlessApi::DesktopCore32] {
+            let Some(upright) = draw_into_framebuffer(api, true) else {
+                continue;
+            };
+            assert_eq!(upright, [BLACK, BLUE, RED, BLACK], "{api:?} flip_y");
+            let unflipped = draw_into_framebuffer(api, false).unwrap();
+            assert_eq!(unflipped, [BLACK, RED, BLUE, BLACK], "{api:?} no flip_y");
+        }
     }
 }

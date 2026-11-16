@@ -738,6 +738,12 @@ pub(crate) fn clip_stored_pcm(
     )
 }
 
+pub(crate) fn movie_duration_ns(moov: &[u8]) -> Option<u64> {
+    // mvhd lays out its version, timescale and duration the way mdhd does
+    let mvhd = read_mdhd(find_box(moov, b"mvhd")?).ok()?;
+    (mvhd.duration != 0).then(|| ticks_to_ns(mvhd.duration, mvhd.timescale))
+}
+
 /// Parse every forwardable (`vide` / `soun` / timed-text) track out of a `moov`
 /// into a [`TrackHeader`]. The single-track [`parse_header`] reads only the first
 /// `trak`; this walks them all (what an A/V `.mp4` carries). Tracks with an

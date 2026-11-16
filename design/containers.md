@@ -1160,7 +1160,8 @@ the whole-file `ByteStream{Mp4}`, where an `Mp4DemuxN` with probed ports also
 reads the streaming `IsoBmff`. Either emits a fragmented file fragment by
 fragment and a progressive one at EOS. A one-port `Mp4DemuxN` serves a time seek
 from the whole file (`ElementSeekRoute::Buffered`), so a seek holds a fragmented
-file until EOS too. The ports share one presentation start, the earliest among
+file until EOS too. A seek taken while the samples go out stops the emission, and
+the file is emitted again from the target. The ports share one presentation start, the earliest among
 the forwarded tracks of a track's first pts past its edit-list start, learned
 from the first samples out and kept across a flush. A port's segment starts no
 earlier than its edit-list start plus that presentation start and counts stream

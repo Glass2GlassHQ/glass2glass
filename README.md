@@ -596,6 +596,7 @@ output byte-for-byte, checked in CI for both catalogs by
 | `g2g-python` | Hosts gst-python-ml elements in-process (embedded CPython via pyo3). | `std` |
 | `g2g-capi` | C ABI (cdylib / staticlib + `g2g.h`): pipelines, bus, appsrc / appsink from any language. | `std` |
 | `g2g-pyapi` | Python (pyo3) bindings: pipelines, bus, appsrc / appsink. | `std` |
+| `g2g-player` | Embeddable player in the style of libmpv: load a URI or launch line, play, pause, seek, observe properties, draw video into the host's OpenGL framebuffer or wgpu texture. | `std` |
 | `g2g-uniffi` | Kotlin and Swift bindings (UniFFI): pipelines, bus, appsrc / appsink, and Android display through `surfacesink`. | `std` |
 
 ## Build

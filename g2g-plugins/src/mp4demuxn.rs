@@ -49,7 +49,7 @@ use g2g_core::{
 use crate::demuxseek::{segment_from, with_stream_time};
 use crate::fmp4::{
     clip_stored_pcm, edit_track_samples, every_sample_ends_by, keyframe_index_for,
-    moov_holds_samples, parse_all_tracks, parse_chapters, parse_fragments_multi,
+    moov_holds_samples, movie_duration_ns, parse_all_tracks, parse_chapters, parse_fragments_multi,
     parse_progressive_multi, prepend_param_sets, starts_with_param_set, stream_start_ns,
     track_fragment_framerate_q16, track_framerate_q16, unsupported_pcm_layout, vorbis_headers,
     FragmentStarts, Sample, TrackHeader, TrackKind,
@@ -447,6 +447,7 @@ pub struct Mp4DemuxN {
     segment_sent: Vec<Segment>,
     // a seek holds a fragmented file whole too, since it is served from the whole file at Eos
     seek: Option<SeekController>,
+    duration_ns: Option<u64>,
 }
 
 // no real fragment runs this long
@@ -523,6 +524,7 @@ impl Mp4DemuxN {
             presentation_start_ns: None,
             port_first_presented_ns,
             seek: None,
+            duration_ns: None,
         }
     }
 
@@ -814,6 +816,7 @@ impl Mp4DemuxN {
                 return Ok(());
             };
             let fragmented = find_box(moov, b"mvex").is_some() && !moov_holds_samples(moov);
+            self.duration_ns = movie_duration_ns(moov);
             let tracks = parse_all_tracks(&self.buf)?;
             self.resolve_ports(&tracks)?;
             if self.bus.is_some() {
@@ -1060,16 +1063,18 @@ impl Mp4DemuxN {
             return Ok(());
         };
         loop {
-            match segment_end_ns {
-                Some(position_ns) => {
+            // a seek that arrived while the samples went out cut the span short
+            match (segment_end_ns, app.has_pending()) {
+                (_, true) => {}
+                (Some(position_ns), false) => {
                     app.notify_segment_done(position_ns);
                     app.wait_for_seek().await;
                 }
-                None if app.takes_seeks_after_end() => {
+                (None, false) if app.takes_seeks_after_end() => {
                     self.end_ports(out).await?;
                     app.wait_for_seek().await;
                 }
-                None => {}
+                (None, false) => {}
             }
             if !app.has_pending() {
                 // the runner forwards no Eos for an element that took seeks while handling it
@@ -1154,6 +1159,9 @@ impl Mp4DemuxN {
         out: &mut dyn MultiOutputSink,
     ) -> Result<(), G2gError> {
         for (track_id, sample) in samples {
+            if self.seek.as_ref().is_some_and(SeekController::has_pending) {
+                return Ok(());
+            }
             let Some(port) = self.port_of(track_id) else {
                 continue; // a track no port forwards
             };
@@ -1459,6 +1467,10 @@ impl MultiOutputElement for Mp4DemuxN {
 
     fn set_buffered_seek(&mut self, app: SeekController) {
         self.seek = Some(app);
+    }
+
+    fn query_duration(&self) -> Option<u64> {
+        self.duration_ns
     }
 
     fn metadata(&self) -> ElementMetadata {

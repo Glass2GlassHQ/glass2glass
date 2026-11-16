@@ -1934,6 +1934,10 @@ impl MultiOutputElement for MkvDemuxN {
             .map(|_| ConfigureOutcome::Accepted)
     }
 
+    fn query_duration(&self) -> Option<u64> {
+        self.demux.duration_ns()
+    }
+
     fn process<'a>(
         &'a mut self,
         packet: PipelinePacket,

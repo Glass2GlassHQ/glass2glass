@@ -586,6 +586,7 @@ pub(crate) fn converts_from(format: RawVideoFormat, w: u32, h: u32) -> bool {
 
 #[cfg(any(
     feature = "wgpu-sink",
+    feature = "gl-render",
     all(target_os = "macos", feature = "metal-sink"),
     all(target_os = "windows", feature = "d3d11-sink"),
     all(target_os = "linux", feature = "kms-sink"),
@@ -595,6 +596,9 @@ pub(crate) mod display {
     use super::{convert, frame_byte_size, FORMATS};
     use alloc::boxed::Box;
     use g2g_core::{Caps, CapsSet, Colorimetry, Dim, G2gError, RawVideoFormat};
+
+    pub(crate) const NV12_AND_RGBA: &[RawVideoFormat] =
+        &[RawVideoFormat::Nv12, RawVideoFormat::Rgba8];
 
     pub(crate) fn display_sink_caps(native: &[RawVideoFormat]) -> CapsSet {
         let converted = FORMATS
@@ -702,7 +706,6 @@ pub(crate) mod display {
         }
 
         const NV12_ONLY: &[RawVideoFormat] = &[RawVideoFormat::Nv12];
-        const NV12_AND_RGBA: &[RawVideoFormat] = &[RawVideoFormat::Nv12, RawVideoFormat::Rgba8];
 
         #[test]
         fn an_i420_frame_reaches_an_nv12_sink_with_its_chroma_interleaved() {
