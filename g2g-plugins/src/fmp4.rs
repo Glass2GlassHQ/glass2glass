@@ -2703,173 +2703,280 @@ fn parse_progressive_track(
     timescale: u32,
     framing: SampleFraming,
 ) -> Result<Vec<Sample>, G2gError> {
-    // stsz: per-sample sizes. A non-zero `default_size` means every sample is
-    // that size (no table); otherwise a `sample_count`-long table follows.
-    let stsz = find_box(stbl, b"stsz").ok_or(G2gError::CapsMismatch)?;
-    let default_size = be32(stsz, 4)?;
-    // stsz counts PCM samples here, many to a stored byte, so the per-sample walk below does not apply
-    #[cfg(feature = "ffmpeg-long-tail")]
-    if let SampleFraming::QuickTimeChunks(sound) = framing {
-        let stts = find_box(stbl, b"stts").ok_or(G2gError::CapsMismatch)?;
-        if be32(stts, 4)? == 1 && be32(stts, 12)? == 1 {
-            let chunks = chunk_sample_counts(stbl, &chunk_offsets(stbl)?)?;
-            return Ok(quicktime_chunk_samples(
-                data,
-                &chunks,
-                timescale,
-                sound,
-                default_size,
-            ));
+    ProgressiveTrackIndex::read(stbl, timescale, framing, data.len() as u64)?.unpack_all(data)
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct StoredSample {
+    pub(crate) offset: u64,
+    pub(crate) len: u64,
+    pub(crate) pts_ns: u64,
+    pub(crate) dts_ns: u64,
+    pub(crate) duration_ns: u64,
+    pub(crate) keyframe: bool,
+    // the stsz number of the first sample stored here, a PCM chunk stores several
+    first_sample: usize,
+    // a sample that switches to another sample description carries that description's parameter sets in-band
+    switched_description: Option<u32>,
+}
+
+impl StoredSample {
+    pub(crate) fn without_bytes(&self) -> Sample {
+        Sample {
+            annexb: Vec::new(),
+            pts_ns: self.pts_ns,
+            dts_ns: self.dts_ns,
+            duration_ns: self.duration_ns,
+            keyframe: self.keyframe,
+            start_discard_ns: 0,
+            end_discard_ns: 0,
         }
     }
-    // A sample needs at least one byte of media data, so no sample past the
-    // file size is ever read, whether the stsz lies or the file was cut short.
-    // Clamp before the per-sample allocations below (the default_size branch
-    // fills the Vec, committing physical pages).
-    let sample_count = (be32(stsz, 8)? as usize).min(data.len());
-    let sizes: Vec<u32> = if let SampleFraming::Pcm(pcm) = framing {
-        let frame_bytes = u32::try_from(pcm.frame_bytes).map_err(|_| G2gError::CapsMismatch)?;
-        alloc::vec![frame_bytes; sample_count]
-    } else if default_size != 0 {
-        alloc::vec![default_size; sample_count]
-    } else {
-        (0..sample_count)
-            .map(|i| be32(stsz, 12 + i * 4))
-            .collect::<Result<_, _>>()?
-    };
+}
 
-    // stts: decode durations, run-length encoded, expanded to one per sample.
-    let stts = find_box(stbl, b"stts").ok_or(G2gError::CapsMismatch)?;
-    let mut durations: Vec<u32> = Vec::with_capacity(sample_count);
-    for e in 0..be32(stts, 4)? as usize {
-        let cnt = be32(stts, 8 + e * 8)? as usize;
-        let delta = be32(stts, 12 + e * 8)?;
-        durations.resize(durations.len().saturating_add(cnt).min(sample_count), delta);
+#[derive(Debug)]
+pub(crate) struct ProgressiveTrackIndex {
+    framing: SampleFraming,
+    timescale: u32,
+    pub(crate) samples: Vec<StoredSample>,
+    description_param_sets: Vec<Option<EntryParamSets>>,
+    // stts (count, delta) runs, which give a PCM chunk cut short by the end of the file its duration
+    stts_runs: Vec<(u32, u32)>,
+}
+
+impl ProgressiveTrackIndex {
+    fn read(
+        stbl: &[u8],
+        timescale: u32,
+        framing: SampleFraming,
+        stream_len: u64,
+    ) -> Result<Self, G2gError> {
+        // stsz: per-sample sizes. A non-zero `default_size` means every sample is
+        // that size (no table); otherwise a `sample_count`-long table follows.
+        let stsz = find_box(stbl, b"stsz").ok_or(G2gError::CapsMismatch)?;
+        let default_size = be32(stsz, 4)?;
+        // stsz counts PCM samples here, many to a stored byte, so the per-sample walk below does not apply
+        #[cfg(feature = "ffmpeg-long-tail")]
+        if let SampleFraming::QuickTimeChunks(sound) = framing {
+            let stts = find_box(stbl, b"stts").ok_or(G2gError::CapsMismatch)?;
+            if be32(stts, 4)? == 1 && be32(stts, 12)? == 1 {
+                let chunks = chunk_sample_counts(stbl, &chunk_offsets(stbl)?)?;
+                return Ok(Self {
+                    framing,
+                    timescale,
+                    samples: quicktime_chunk_samples(&chunks, timescale, sound, default_size),
+                    description_param_sets: Vec::new(),
+                    stts_runs: Vec::new(),
+                });
+            }
+        }
+        // A sample needs at least one byte of media data, so no sample past the
+        // stream length is ever read, whether the stsz lies or the file was cut short.
+        // Clamp before the per-sample allocations below (the default_size branch
+        // fills the Vec, committing physical pages).
+        let sample_count =
+            (be32(stsz, 8)? as usize).min(usize::try_from(stream_len).unwrap_or(usize::MAX));
+        let sizes: Vec<u32> = if let SampleFraming::Pcm(pcm) = framing {
+            if pcm.frame_bytes == 0 {
+                return Err(G2gError::CapsMismatch);
+            }
+            let frame_bytes = u32::try_from(pcm.frame_bytes).map_err(|_| G2gError::CapsMismatch)?;
+            alloc::vec![frame_bytes; sample_count]
+        } else if default_size != 0 {
+            alloc::vec![default_size; sample_count]
+        } else {
+            (0..sample_count)
+                .map(|i| be32(stsz, 12 + i * 4))
+                .collect::<Result<_, _>>()?
+        };
+
+        // stts: decode durations, run-length encoded, expanded to one per sample.
+        let stts = find_box(stbl, b"stts").ok_or(G2gError::CapsMismatch)?;
+        let stts_runs = (0..be32(stts, 4)? as usize)
+            .map(|e| Ok((be32(stts, 8 + e * 8)?, be32(stts, 12 + e * 8)?)))
+            .collect::<Result<Vec<_>, G2gError>>()?;
+        let mut durations: Vec<u32> = Vec::with_capacity(sample_count);
+        for &(count, delta) in &stts_runs {
+            durations.resize(
+                durations
+                    .len()
+                    .saturating_add(count as usize)
+                    .min(sample_count),
+                delta,
+            );
+        }
+        durations.resize(sample_count, 0);
+
+        let media_duration: u64 = durations.iter().map(|&duration| u64::from(duration)).sum();
+        let ctts_offsets = composition_offsets(stbl, sample_count, media_duration)?;
+        let shift = composition_shift(stbl)?;
+
+        let chunk_offsets = chunk_offsets(stbl)?;
+
+        // stsc: how many samples sit in each chunk, run-length over chunk ranges.
+        // Resolve to a samples-per-chunk count for every chunk.
+        let stsc = find_box(stbl, b"stsc").ok_or(G2gError::CapsMismatch)?;
+        let stsc_n = be32(stsc, 4)? as usize;
+        if stsc_n == 0 {
+            return Err(G2gError::CapsMismatch);
+        }
+        let stsc_entry = |i: usize| -> Result<(u32, u32, u32), G2gError> {
+            Ok((
+                be32(stsc, 8 + i * 12)?,
+                be32(stsc, 12 + i * 12)?,
+                be32(stsc, 16 + i * 12)?,
+            ))
+        };
+        // Place each sample at its file offset: within a chunk samples are
+        // contiguous, so offset advances by the running sample size.
+        let mut sample_offsets: Vec<u64> = Vec::with_capacity(sample_count);
+        let mut sample_descriptions: Vec<u32> = Vec::with_capacity(sample_count);
+        // (file offset, sample count) of each chunk
+        let mut chunks: Vec<(u64, usize)> = Vec::with_capacity(chunk_offsets.len());
+        let mut si = 0usize;
+        // Chunks ascend, so the stsc cursor only moves forward.
+        let mut next_entry = 0usize;
+        let mut spc = 0u32;
+        let mut description = FIRST_SAMPLE_DESCRIPTION;
+        'chunks: for (ci, &chunk_off) in chunk_offsets.iter().enumerate() {
+            // The samples-per-chunk for this chunk is the last stsc entry whose
+            // (1-based) first_chunk does not exceed it.
+            let chunk_1based = (ci + 1) as u32;
+            while next_entry < stsc_n {
+                let (first_chunk, samples_per_chunk, sample_description) = stsc_entry(next_entry)?;
+                if first_chunk > chunk_1based {
+                    break;
+                }
+                spc = samples_per_chunk;
+                description = sample_description;
+                next_entry += 1;
+            }
+            let mut at = chunk_off;
+            chunks.push((chunk_off, 0));
+            for _ in 0..spc {
+                if si >= sample_count {
+                    break 'chunks;
+                }
+                sample_offsets.push(at);
+                sample_descriptions.push(description);
+                at = at.saturating_add(sizes[si] as u64);
+                si += 1;
+                if let Some((_, count)) = chunks.last_mut() {
+                    *count += 1;
+                }
+            }
+        }
+        if sample_offsets.len() != sample_count {
+            return Err(G2gError::CapsMismatch); // stsc/stco disagree with stsz
+        }
+        let mut index = Self {
+            framing,
+            timescale,
+            samples: Vec::new(),
+            description_param_sets: Vec::new(),
+            stts_runs,
+        };
+        if let SampleFraming::Pcm(pcm) = framing {
+            index.samples = pcm_chunk_samples(&chunks, &durations, timescale, pcm);
+            return Ok(index);
+        }
+
+        // stss: 1-based sync-sample numbers (ascending). Absent => every sample is a
+        // sync sample (e.g. all-intra). Used as the keyframe flag (seek snap points).
+        // Short-circuit on the first out-of-range entry (like stco/stsz) so a bogus
+        // count fails loud instead of spinning the full untrusted range.
+        let sync: Option<Vec<u32>> = match find_box(stbl, b"stss") {
+            Some(stss) => Some(
+                (0..be32(stss, 4)? as usize)
+                    .map(|i| be32(stss, 8 + i * 4))
+                    .collect::<Result<_, _>>()?,
+            ),
+            None => None,
+        };
+
+        // a sample description switch carries its own parameter sets, so they go in-band
+        if let SampleFraming::Video = framing {
+            index.description_param_sets = video_entry_param_sets(stbl)?;
+        }
+        let mut previous_description = FIRST_SAMPLE_DESCRIPTION;
+        index.samples = Vec::with_capacity(sample_count);
+        let mut dts: u64 = 0;
+        for i in 0..sample_count {
+            // a corrupt ctts the shift ignores can still reach below 0
+            let pts = dts.saturating_add_signed(ctts_offsets[i].saturating_add_unsigned(shift));
+            let keyframe = match &sync {
+                Some(list) => list.binary_search(&((i + 1) as u32)).is_ok(),
+                None => true,
+            };
+            let description = sample_descriptions[i];
+            let switched_description = (description != previous_description).then_some(description);
+            previous_description = description;
+            index.samples.push(StoredSample {
+                offset: sample_offsets[i],
+                len: u64::from(sizes[i]),
+                pts_ns: ticks_to_ns(pts, timescale),
+                dts_ns: ticks_to_ns(dts, timescale),
+                duration_ns: ticks_to_ns(durations[i] as u64, timescale),
+                keyframe,
+                first_sample: i,
+                switched_description,
+            });
+            dts = dts.saturating_add(durations[i] as u64);
+        }
+        Ok(index)
     }
-    durations.resize(sample_count, 0);
 
-    let media_duration: u64 = durations.iter().map(|&duration| u64::from(duration)).sum();
-    let ctts_offsets = composition_offsets(stbl, sample_count, media_duration)?;
-    let shift = composition_shift(stbl)?;
-
-    let chunk_offsets = chunk_offsets(stbl)?;
-
-    // stsc: how many samples sit in each chunk, run-length over chunk ranges.
-    // Resolve to a samples-per-chunk count for every chunk.
-    let stsc = find_box(stbl, b"stsc").ok_or(G2gError::CapsMismatch)?;
-    let stsc_n = be32(stsc, 4)? as usize;
-    if stsc_n == 0 {
-        return Err(G2gError::CapsMismatch);
-    }
-    let stsc_entry = |i: usize| -> Result<(u32, u32, u32), G2gError> {
-        Ok((
-            be32(stsc, 8 + i * 12)?,
-            be32(stsc, 12 + i * 12)?,
-            be32(stsc, 16 + i * 12)?,
-        ))
-    };
-    // Place each sample at its file offset: within a chunk samples are
-    // contiguous, so offset advances by the running sample size.
-    let mut sample_offsets: Vec<u64> = Vec::with_capacity(sample_count);
-    let mut sample_descriptions: Vec<u32> = Vec::with_capacity(sample_count);
-    // (file offset, sample count) of each chunk
-    let mut chunks: Vec<(u64, usize)> = Vec::with_capacity(chunk_offsets.len());
-    let mut si = 0usize;
-    // Chunks ascend, so the stsc cursor only moves forward.
-    let mut next_entry = 0usize;
-    let mut spc = 0u32;
-    let mut description = FIRST_SAMPLE_DESCRIPTION;
-    'chunks: for (ci, &chunk_off) in chunk_offsets.iter().enumerate() {
-        // The samples-per-chunk for this chunk is the last stsc entry whose
-        // (1-based) first_chunk does not exceed it.
-        let chunk_1based = (ci + 1) as u32;
-        while next_entry < stsc_n {
-            let (first_chunk, samples_per_chunk, sample_description) = stsc_entry(next_entry)?;
-            if first_chunk > chunk_1based {
+    // every sample `data` holds, in decode order: a truncated file ends the track at its last whole sample
+    fn unpack_all(&self, data: &[u8]) -> Result<Vec<Sample>, G2gError> {
+        let mut samples = Vec::with_capacity(self.samples.len());
+        for stored in &self.samples {
+            let bytes = usize::try_from(stored.offset)
+                .ok()
+                .and_then(|offset| data.get(offset..))
+                .unwrap_or_default();
+            let Some(sample) = self.unpack(stored, bytes)? else {
+                break;
+            };
+            samples.push(sample);
+            if (bytes.len() as u64) < stored.len {
                 break;
             }
-            spc = samples_per_chunk;
-            description = sample_description;
-            next_entry += 1;
         }
-        let mut at = chunk_off;
-        chunks.push((chunk_off, 0));
-        for _ in 0..spc {
-            if si >= sample_count {
-                break 'chunks;
-            }
-            sample_offsets.push(at);
-            sample_descriptions.push(description);
-            at = at.saturating_add(sizes[si] as u64);
-            si += 1;
-            if let Some((_, count)) = chunks.last_mut() {
-                *count += 1;
-            }
-        }
-    }
-    if sample_offsets.len() != sample_count {
-        return Err(G2gError::CapsMismatch); // stsc/stco disagree with stsz
-    }
-    if let SampleFraming::Pcm(pcm) = framing {
-        return Ok(pcm_chunk_samples(data, &chunks, &durations, timescale, pcm));
+        Ok(samples)
     }
 
-    // stss: 1-based sync-sample numbers (ascending). Absent => every sample is a
-    // sync sample (e.g. all-intra). Used as the keyframe flag (seek snap points).
-    // Short-circuit on the first out-of-range entry (like stco/stsz) so a bogus
-    // count fails loud instead of spinning the full untrusted range.
-    let sync: Option<Vec<u32>> = match find_box(stbl, b"stss") {
-        Some(stss) => Some(
-            (0..be32(stss, 4)? as usize)
-                .map(|i| be32(stss, 8 + i * 4))
-                .collect::<Result<_, _>>()?,
-        ),
-        None => None,
-    };
-
-    // a sample description switch carries its own parameter sets, so they go in-band
-    let description_param_sets = match framing {
-        SampleFraming::Video => video_entry_param_sets(stbl)?,
-        _ => Vec::new(),
-    };
-    let mut previous_description = FIRST_SAMPLE_DESCRIPTION;
-    let mut samples = Vec::with_capacity(sample_count);
-    let mut dts: u64 = 0;
-    for i in 0..sample_count {
-        let off = sample_offsets[i] as usize;
-        // `off` comes from an untrusted co64/stco chunk offset, so bound the end
-        // with checked arithmetic (a u64 offset near usize::MAX would otherwise
-        // overflow the `off + size` add and panic in debug).
-        let end = off
-            .checked_add(sizes[i] as usize)
+    // the sample from `bytes`, which start at its offset and may run past it or stop short of its end
+    pub(crate) fn unpack(
+        &self,
+        stored: &StoredSample,
+        bytes: &[u8],
+    ) -> Result<Option<Sample>, G2gError> {
+        if let SampleFraming::Pcm(pcm) = self.framing {
+            return Ok(self.unpack_pcm_frames(stored, pcm, bytes));
+        }
+        // `offset` comes from an untrusted co64/stco chunk offset
+        stored
+            .offset
+            .checked_add(stored.len)
             .ok_or(G2gError::CapsMismatch)?;
-        // a truncated file ends the track at its last whole sample, except that
-        // libavcodec also decodes what remains of a cut long-tail video sample
-        let (raw, cut) = match data.get(off..end) {
-            Some(raw) => (raw, false),
-            None => match data.get(off..) {
-                Some(rest) if !rest.is_empty() && matches!(framing, SampleFraming::TaggedVideo) => {
-                    (rest, true)
-                }
-                _ => break,
-            },
+        let whole = usize::try_from(stored.len)
+            .ok()
+            .and_then(|len| bytes.get(..len));
+        // libavcodec also decodes what remains of a long-tail video sample cut short by the end of the file
+        let cut = (!bytes.is_empty() && matches!(self.framing, SampleFraming::TaggedVideo))
+            .then_some(bytes);
+        let Some(raw) = whole.or(cut) else {
+            return Ok(None);
         };
-        // a corrupt ctts the shift ignores can still reach below 0
-        let pts = dts.saturating_add_signed(ctts_offsets[i].saturating_add_unsigned(shift));
-        let keyframe = match &sync {
-            Some(list) => list.binary_search(&((i + 1) as u32)).is_ok(),
-            None => true,
-        };
-        let annexb = match framing {
+        let annexb = match self.framing {
             SampleFraming::Video => {
                 let annexb = avcc_to_annexb(raw)?;
-                let description = sample_descriptions[i];
-                let switched = description != previous_description;
-                previous_description = description;
-                match description_param_sets.get(description.wrapping_sub(1) as usize) {
-                    Some(Some((codec, sets))) if switched => {
-                        prepend_param_sets(&annexb, sets, *codec)
-                    }
+                let switched_sets = stored.switched_description.and_then(|description| {
+                    self.description_param_sets
+                        .get(description.wrapping_sub(1) as usize)
+                });
+                match switched_sets {
+                    Some(Some((codec, sets))) => prepend_param_sets(&annexb, sets, *codec),
                     _ => annexb,
                 }
             }
@@ -2882,31 +2989,64 @@ fn parse_progressive_track(
             #[cfg(feature = "ffmpeg-long-tail")]
             SampleFraming::QuickTimeChunks(_) => raw.to_vec(),
         };
-        samples.push(Sample {
+        Ok(Some(Sample {
             annexb,
-            pts_ns: ticks_to_ns(pts, timescale),
-            dts_ns: ticks_to_ns(dts, timescale),
-            duration_ns: ticks_to_ns(durations[i] as u64, timescale),
-            keyframe,
-            start_discard_ns: 0,
-            end_discard_ns: 0,
-        });
-        if cut {
-            break;
-        }
-        dts = dts.saturating_add(durations[i] as u64);
+            ..stored.without_bytes()
+        }))
     }
-    Ok(samples)
+
+    // a chunk cut short by the end of a truncated file keeps its whole frames
+    fn unpack_pcm_frames(
+        &self,
+        stored: &StoredSample,
+        pcm: PcmFraming,
+        bytes: &[u8],
+    ) -> Option<Sample> {
+        let frames = (stored.len / pcm.frame_bytes as u64) as usize;
+        let whole_frames = frames.min(bytes.len() / pcm.frame_bytes);
+        if whole_frames == 0 {
+            return None;
+        }
+        let mut annexb = bytes[..whole_frames * pcm.frame_bytes].to_vec();
+        pcm.stored.to_graph(&mut annexb, pcm.format);
+        let duration_ns = if whole_frames == frames {
+            stored.duration_ns
+        } else {
+            let ticks = self.stts_ticks(stored.first_sample..stored.first_sample + whole_frames);
+            ticks_to_ns(ticks, self.timescale)
+        };
+        Some(Sample {
+            annexb,
+            duration_ns,
+            ..stored.without_bytes()
+        })
+    }
+
+    fn stts_ticks(&self, samples: Range<usize>) -> u64 {
+        let mut run_start = 0usize;
+        let mut ticks = 0u64;
+        for &(count, delta) in &self.stts_runs {
+            let run_end = run_start.saturating_add(count as usize);
+            let overlap = run_end
+                .min(samples.end)
+                .saturating_sub(run_start.max(samples.start));
+            ticks = ticks.saturating_add(overlap as u64 * u64::from(delta));
+            if run_end >= samples.end {
+                break;
+            }
+            run_start = run_end;
+        }
+        ticks
+    }
 }
 
-// one sample per chunk of PCM frames, cut at the last whole frame of a truncated file
+// one sample per chunk of PCM frames
 fn pcm_chunk_samples(
-    data: &[u8],
     chunks: &[(u64, usize)],
     durations: &[u32],
     timescale: u32,
     pcm: PcmFraming,
-) -> Vec<Sample> {
+) -> Vec<StoredSample> {
     let mut samples = Vec::with_capacity(chunks.len());
     let mut first_frame = 0usize;
     let mut dts: u64 = 0;
@@ -2914,32 +3054,20 @@ fn pcm_chunk_samples(
         if frames == 0 {
             continue;
         }
-        let stored = usize::try_from(offset)
-            .ok()
-            .and_then(|offset| data.get(offset..))
-            .unwrap_or_default();
-        let whole_frames = frames.min(stored.len() / pcm.frame_bytes);
-        if whole_frames == 0 {
-            break;
-        }
-        let mut bytes = stored[..whole_frames * pcm.frame_bytes].to_vec();
-        pcm.stored.to_graph(&mut bytes, pcm.format);
-        let duration: u64 = durations[first_frame..first_frame + whole_frames]
+        let duration: u64 = durations[first_frame..first_frame + frames]
             .iter()
             .map(|&ticks| u64::from(ticks))
             .sum();
-        samples.push(Sample {
-            annexb: bytes,
+        samples.push(StoredSample {
+            offset,
+            len: (frames as u64).saturating_mul(pcm.frame_bytes as u64),
             pts_ns: ticks_to_ns(dts, timescale),
             dts_ns: ticks_to_ns(dts, timescale),
             duration_ns: ticks_to_ns(duration, timescale),
             keyframe: true,
-            start_discard_ns: 0,
-            end_discard_ns: 0,
+            first_sample: first_frame,
+            switched_description: None,
         });
-        if whole_frames < frames {
-            break;
-        }
         first_frame += frames;
         dts = dts.saturating_add(duration);
     }
@@ -2985,39 +3113,36 @@ fn chunk_sample_counts(stbl: &[u8], offsets: &[u64]) -> Result<Vec<(u64, usize)>
 // whole frames of the sound description, or stsz's size per sample.
 #[cfg(feature = "ffmpeg-long-tail")]
 fn quicktime_chunk_samples(
-    data: &[u8],
     chunks: &[(u64, usize)],
     timescale: u32,
     sound: SoundDescription,
     sample_size: u32,
-) -> Vec<Sample> {
+) -> Vec<StoredSample> {
     let mut samples = Vec::with_capacity(chunks.len());
+    let mut first_sample = 0usize;
     let mut dts: u64 = 0;
     for &(offset, count) in chunks.iter().filter(|(_, count)| *count > 0) {
-        let count = count as u64;
         let len = if sound.samples_per_frame > 1 {
-            count / u64::from(sound.samples_per_frame) * u64::from(sound.bytes_per_frame)
+            count as u64 / u64::from(sound.samples_per_frame) * u64::from(sound.bytes_per_frame)
         } else {
-            count.saturating_mul(u64::from(sample_size))
+            (count as u64).saturating_mul(u64::from(sample_size))
         };
-        let bytes = usize::try_from(offset)
-            .ok()
-            .zip(usize::try_from(len).ok())
-            .and_then(|(start, len)| data.get(start..start.checked_add(len)?));
-        // a truncated file ends the track at its last whole chunk
-        let Some(bytes) = bytes.filter(|bytes| !bytes.is_empty()) else {
+        // a chunk too short for a whole frame ends the track
+        if len == 0 || offset.checked_add(len).is_none() {
             break;
-        };
-        samples.push(Sample {
-            annexb: bytes.to_vec(),
+        }
+        samples.push(StoredSample {
+            offset,
+            len,
             pts_ns: ticks_to_ns(dts, timescale),
             dts_ns: ticks_to_ns(dts, timescale),
-            duration_ns: ticks_to_ns(count, timescale),
+            duration_ns: ticks_to_ns(count as u64, timescale),
             keyframe: true,
-            start_discard_ns: 0,
-            end_discard_ns: 0,
+            first_sample,
+            switched_description: None,
         });
-        dts = dts.saturating_add(count);
+        first_sample += count;
+        dts = dts.saturating_add(count as u64);
     }
     samples
 }
@@ -3131,27 +3256,46 @@ pub(crate) fn parse_progressive_multi(
 ) -> Result<Vec<(u32, Sample)>, G2gError> {
     let moov = find_box(data, b"moov").ok_or(G2gError::CapsMismatch)?;
     let mut out = Vec::new();
+    for (track_id, index) in progressive_track_indexes(moov, tracks, data.len() as u64)? {
+        out.extend(
+            index
+                .unpack_all(data)?
+                .into_iter()
+                .map(|sample| (track_id, sample)),
+        );
+    }
+    // Stable, so each track keeps its own sample order.
+    out.sort_by_key(|(_, sample)| sample.dts_ns);
+    Ok(out)
+}
+
+// in `tracks` order, without the tracks the moov has no trak for
+pub(crate) fn progressive_track_indexes(
+    moov: &[u8],
+    tracks: &[TrackHeader],
+    stream_len: u64,
+) -> Result<Vec<(u32, ProgressiveTrackIndex)>, G2gError> {
+    let mut indexes = Vec::new();
     for track in tracks {
         let Some(trak) = find_trak_by_id(moov, track.track_id) else {
-            continue; // a track with no matching trak box
+            continue;
         };
         let mdia = find_box(trak, b"mdia").ok_or(G2gError::CapsMismatch)?;
         let stbl = find_path(mdia, &[b"minf", b"stbl"]).ok_or(G2gError::CapsMismatch)?;
         let framing = SampleFraming::of(&track.kind);
+        let mut index = ProgressiveTrackIndex::read(stbl, track.timescale, framing, stream_len)?;
         // an stss listing only some samples does not make an intra-only codec's other samples depend on them
         let every_sample_sync = match &track.kind {
             TrackKind::Video { codec, .. } => intra_only(*codec),
             TrackKind::RawVideo { .. } => true,
             _ => false,
         };
-        for mut s in parse_progressive_track(data, stbl, track.timescale, framing)? {
-            s.keyframe |= every_sample_sync;
-            out.push((track.track_id, s));
+        for stored in &mut index.samples {
+            stored.keyframe |= every_sample_sync;
         }
+        indexes.push((track.track_id, index));
     }
-    // Stable, so each track keeps its own sample order.
-    out.sort_by_key(|(_, sample)| sample.dts_ns);
-    Ok(out)
+    Ok(indexes)
 }
 
 /// Cap on the chapters a QuickTime chapter track yields. Its sample count is
@@ -5345,7 +5489,14 @@ mod tests {
         let stored_bytes = CHUNK_SAMPLES / 6 * 4;
         let data: Vec<u8> = (0..2 * stored_bytes as u8).collect();
         let chunks = [(0u64, CHUNK_SAMPLES), (stored_bytes as u64, CHUNK_SAMPLES)];
-        let samples = quicktime_chunk_samples(&data, &chunks, u32::from(SAMPLE_RATE), sound, 1);
+        let index = ProgressiveTrackIndex {
+            framing: SampleFraming::QuickTimeChunks(sound),
+            timescale: u32::from(SAMPLE_RATE),
+            samples: quicktime_chunk_samples(&chunks, u32::from(SAMPLE_RATE), sound, 1),
+            description_param_sets: Vec::new(),
+            stts_runs: Vec::new(),
+        };
+        let samples = index.unpack_all(&data).expect("the chunks unpack");
         assert_eq!(samples.len(), 2);
         assert_eq!(samples[1].annexb, data[stored_bytes..]);
         assert_eq!(

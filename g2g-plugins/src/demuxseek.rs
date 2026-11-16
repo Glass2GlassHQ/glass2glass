@@ -331,11 +331,6 @@ impl<U> DemuxSeek<U> {
         self.duration_ns = duration_ns;
     }
 
-    #[cfg(feature = "std")]
-    pub(crate) fn seekable(&self) -> bool {
-        self.app.is_some()
-    }
-
     /// Poll for a pending time seek, re-scanning from the file start
     /// (offset `0`): correct for any container without an index. A no-op without
     /// both controllers. (The default; [`poll_request_indexed`](Self::poll_request_indexed)

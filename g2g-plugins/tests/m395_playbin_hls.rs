@@ -359,13 +359,13 @@ fn fmp4_variant_fans_out_via_mp4demuxn() {
     assert_eq!(graph.edges().len(), 8);
 }
 
-// qtdemux holds the whole stream, so the seek goes to it and not to the HlsSrc feeding it
+// qtdemux seeks only by byte-seeking a byte source, so behind HlsSrc the seek goes to the HlsSrc
 #[test]
-fn qtdemux_behind_hlssrc_takes_the_seek() {
+fn an_fmp4_stream_behind_hlssrc_seeks_through_its_source() {
     let line = "hlssrc location=http://127.0.0.1:1/master.m3u8 ! qtdemux ! fakesink";
     let mut graph =
         g2g_core::runtime::parse_launch(&g2g_plugins::registry::default_registry(), line).unwrap();
-    attach_seek_controller(&mut graph).expect("qtdemux takes the seek");
+    attach_seek_controller(&mut graph).expect("the HlsSrc takes the seek");
 }
 
 #[test]

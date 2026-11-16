@@ -20,8 +20,9 @@
 //! `moov` is buffered, each complete `moof`+`mdat` is emitted and drained as it
 //! arrives, so a live / long stream flows segment by segment and the buffer stays
 //! bounded, rather than stalling until `Eos`. A *progressive* (non-fragmented)
-//! `moov`+`mdat` file has one big `mdat` its sample tables index, so it is
-//! accumulated whole and parsed at `Eos`.
+//! `moov`+`mdat` file has one big `mdat` its sample tables index, so each sample
+//! goes out once its bytes arrive when a seekable byte source gives the stream
+//! length, and the file is otherwise accumulated whole and parsed at `Eos`.
 //!
 //! Scope (v1): fragmented multi-track files (what [`Mp4MuxN`](crate::mp4muxn)
 //! writes and CMAF shares); clear (unencrypted) H.264 / H.265 video + AAC audio.
@@ -49,8 +50,9 @@ use crate::demuxseek::{with_stream_time, DemuxSeek};
 use crate::fmp4::{
     clip_stored_pcm, edit_track_samples, moov_holds_samples, movie_duration_ns, parse_all_tracks,
     parse_chapters, parse_fragments_multi, parse_progressive_multi, prepend_param_sets,
-    starts_with_param_set, track_fragment_framerate_q16, track_framerate_q16,
-    unsupported_pcm_layout, vorbis_headers, FragmentStarts, Sample, TrackHeader, TrackKind,
+    progressive_track_indexes, starts_with_param_set, track_fragment_framerate_q16,
+    track_framerate_q16, unsupported_pcm_layout, vorbis_headers, FragmentStarts,
+    ProgressiveTrackIndex, Sample, StoredSample, TrackHeader, TrackKind,
 };
 use crate::mp4box::{boxes_at, find_box, parse_ilst_tags};
 use crate::mp4demux::{StreamSelect, MP4DEMUX_PROPS};
@@ -384,9 +386,9 @@ pub struct Mp4DemuxN {
     /// The byte stream as it arrives. A *fragmented* (CMAF) file is parsed
     /// progressively: each complete `moof`+`mdat` is emitted and drained as it
     /// lands (so a live stream neither stalls until `Eos` nor grows unbounded). A
-    /// *progressive* (non-fragmented) `moov`+`mdat` file is accumulated whole and
-    /// parsed at `Eos` (its samples reference one big `mdat`, so nothing can emit
-    /// before the end).
+    /// *progressive* (non-fragmented) `moov`+`mdat` file streams by sample
+    /// offset when a seekable byte source gives its length, and is otherwise
+    /// accumulated whole and parsed at `Eos`.
     buf: Vec<u8>,
     /// The file's tracks, parsed once the `moov` is complete (shared by the
     /// progressive emit and the `Eos` whole-file parse).
@@ -443,13 +445,133 @@ pub struct Mp4DemuxN {
     presentation_start_ns: Option<u64>,
     port_first_presented_ns: Vec<Option<u64>>,
     segment_sent: Vec<Segment>,
-    // a seek holds a fragmented file whole too, since it is served from the whole file at Eos
     seek: DemuxSeek<Sample>,
     duration_ns: Option<u64>,
+    progressive: Option<ProgressiveStream>,
 }
 
 // no real fragment runs this long
 const MAX_HELD_FRAGMENT_NS: u64 = 30_000_000_000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ByteInput {
+    Open,
+    Ended,
+}
+
+fn track_by_id(tracks: &[TrackHeader], track_id: u32) -> &TrackHeader {
+    tracks
+        .iter()
+        .find(|track| track.track_id == track_id)
+        .expect("the index was read for these tracks")
+}
+
+fn presented_pts_ns(track: &TrackHeader, stored: &StoredSample) -> u64 {
+    track.edited_sample(stored.without_bytes()).pts_ns
+}
+
+#[derive(Debug)]
+struct ProgressiveStream {
+    // in moov order
+    indexes: Vec<(u32, ProgressiveTrackIndex)>,
+    // (track, sample) positions in `indexes`, in the decode order the samples go out in
+    order: Vec<(usize, usize)>,
+    // the lowest sample offset in `order[i..]`, the bytes before it are no longer needed
+    lowest_offset_from: Vec<u64>,
+    next: usize,
+    // the samples stored before the byte an indexed seek landed on are passed over
+    skip_below: u64,
+    // by track, a sample cut short by the end of the stream is its last
+    ended: Vec<bool>,
+    // by track, in the order of the tracks the index was read for
+    framerates_q16: Vec<Option<u32>>,
+    // the byte the seek in flight reads from
+    landing: Option<u64>,
+}
+
+impl ProgressiveStream {
+    fn new(data: &[u8], tracks: &[TrackHeader], stream_len: u64) -> Result<Self, G2gError> {
+        let moov = find_box(data, b"moov").ok_or(G2gError::CapsMismatch)?;
+        let indexes = progressive_track_indexes(moov, tracks, stream_len)?;
+        let stored = |(track, sample): (usize, usize)| &indexes[track].1.samples[sample];
+        let mut order: Vec<(usize, usize)> = indexes
+            .iter()
+            .enumerate()
+            .flat_map(|(track, (_, index))| {
+                (0..index.samples.len()).map(move |sample| (track, sample))
+            })
+            .collect();
+        // stable, so each track keeps its own sample order, as the whole-file parse does
+        order.sort_by_key(|&position| stored(position).dts_ns);
+        let mut lowest_offset_from = alloc::vec![u64::MAX; order.len() + 1];
+        for (at, &position) in order.iter().enumerate().rev() {
+            lowest_offset_from[at] = lowest_offset_from[at + 1].min(stored(position).offset);
+        }
+        Ok(Self {
+            ended: alloc::vec![false; indexes.len()],
+            framerates_q16: tracks
+                .iter()
+                .map(|track| track_framerate_q16(data, track))
+                .collect(),
+            indexes,
+            order,
+            lowest_offset_from,
+            next: 0,
+            skip_below: 0,
+            landing: None,
+        })
+    }
+
+    // each sample's track_ID and its pts on the timeline its track's edit list presents
+    fn presented_pts<'a>(
+        &'a self,
+        tracks: &'a [TrackHeader],
+    ) -> impl Iterator<Item = (u32, u64)> + Clone + 'a {
+        self.indexes.iter().flat_map(move |(track_id, index)| {
+            let track = track_by_id(tracks, *track_id);
+            index
+                .samples
+                .iter()
+                .map(move |stored| (*track_id, presented_pts_ns(track, stored)))
+        })
+    }
+
+    // the earliest of the forwarded tracks' last keyframes at or before the target, so every port can decode from it
+    fn landing_offset(
+        &self,
+        tracks: &[TrackHeader],
+        port_track_ids: &[Option<u32>],
+        target_ns: u64,
+    ) -> Option<u64> {
+        self.indexes
+            .iter()
+            .filter(|(track_id, _)| port_track_ids.contains(&Some(*track_id)))
+            .filter_map(|(track_id, index)| {
+                let track = track_by_id(tracks, *track_id);
+                let keyframe_before_target = index
+                    .samples
+                    .iter()
+                    .filter(|stored| stored.keyframe)
+                    .map(|stored| (presented_pts_ns(track, stored), stored.offset))
+                    .filter(|&(pts_ns, _)| pts_ns <= target_ns)
+                    .max_by_key(|&(pts_ns, _)| pts_ns)
+                    .map(|(_, offset)| offset);
+                keyframe_before_target.or_else(|| Some(index.samples.first()?.offset))
+            })
+            .min()
+    }
+
+    fn restart_at_landing(&mut self) -> u64 {
+        let landing = self
+            .landing
+            .take()
+            .expect("an indexed seek resolved where it lands");
+        self.next = 0;
+        self.skip_below = landing;
+        self.ended.fill(false);
+        landing
+    }
+}
 
 fn follow_composition_shifts(tracks: &mut [TrackHeader], fragment_starts: &FragmentStarts) {
     for track in tracks {
@@ -523,6 +645,7 @@ impl Mp4DemuxN {
             port_first_presented_ns,
             seek: DemuxSeek::default(),
             duration_ns: None,
+            progressive: None,
         }
     }
 
@@ -645,6 +768,22 @@ impl Mp4DemuxN {
         self.emitted
     }
 
+    fn poll_seek(&mut self) {
+        let (Some(stream), Some(tracks)) = (self.progressive.as_mut(), self.tracks.as_ref()) else {
+            self.seek.poll_request();
+            return;
+        };
+        let port_track_ids = &self.port_track_ids;
+        let mut landing = None;
+        let taken = self.seek.poll_request_indexed(|target_ns| {
+            landing = stream.landing_offset(tracks, port_track_ids, target_ns);
+            landing
+        });
+        if taken {
+            stream.landing = landing;
+        }
+    }
+
     /// The fan-out demuxer reads a whole MP4, so it accepts both the streaming
     /// `IsoBmff` form (HLS / DASH fragments) and the whole-file `Mp4` form (a
     /// `filesrc` progressive `.mp4`); the parse is the same either way.
@@ -689,9 +828,9 @@ impl Mp4DemuxN {
         Ok(())
     }
 
-    // every sample of a whole file goes out at Eos, and a seek holds a fragmented file whole
+    // a file that neither streams from its index nor arrives fragment by fragment goes out at Eos
     fn emits_at_eos(&self) -> bool {
-        self.fragmented != Some(true) || self.seek.seekable()
+        self.progressive.is_none() && self.fragmented != Some(true)
     }
 
     /// Announce the file's streams and metadata on the bus, once: the
@@ -806,7 +945,11 @@ impl Mp4DemuxN {
     /// instead of all at `Eos`. A no-op until the `moov` is complete; a no-op for a
     /// *progressive* (non-fragmented) file, whose one big `mdat` is parsed whole at
     /// `Eos` by [`parse_and_emit_whole`](Self::parse_and_emit_whole).
-    async fn advance(&mut self, out: &mut dyn MultiOutputSink) -> Result<(), G2gError> {
+    async fn advance(
+        &mut self,
+        input: ByteInput,
+        out: &mut dyn MultiOutputSink,
+    ) -> Result<(), G2gError> {
         // Until the `moov` is fully buffered we cannot tell fragmented from
         // progressive, so keep accumulating. A fragmented file carries `mvex`.
         if self.fragmented.is_none() {
@@ -814,6 +957,7 @@ impl Mp4DemuxN {
                 return Ok(());
             };
             let fragmented = find_box(moov, b"mvex").is_some() && !moov_holds_samples(moov);
+            let sample_tables_only = find_box(moov, b"mvex").is_none();
             self.duration_ns = movie_duration_ns(moov);
             self.seek.set_duration(self.duration_ns);
             let tracks = parse_all_tracks(&self.buf)?;
@@ -821,8 +965,31 @@ impl Mp4DemuxN {
             if self.bus.is_some() {
                 self.post_metadata(&tracks);
             }
+            // the sample count bound comes from the stream length, and replayed edits take samples out of file order
+            let streamed_len = self
+                .seek
+                .upstream_len()
+                .filter(|_| sample_tables_only)
+                .filter(|_| tracks.iter().all(|track| track.replayed_edits.is_empty()));
+            if let Some(stream_len) = streamed_len {
+                let stream = ProgressiveStream::new(&self.buf, &tracks, stream_len)?;
+                self.learn_presentation_start(&tracks, stream.presented_pts(&tracks));
+                self.progressive = Some(stream);
+            }
             self.fragmented = Some(fragmented);
             self.tracks = Some(tracks);
+        }
+        if let Some(mut stream) = self.progressive.take() {
+            let tracks = self
+                .tracks
+                .take()
+                .expect("tracks set with the progressive stream");
+            let emitted = self
+                .emit_progressive(&mut stream, &tracks, input, out)
+                .await;
+            self.tracks = Some(tracks);
+            self.progressive = Some(stream);
+            return emitted;
         }
         // Only a fragmented (CMAF) file emits progressively.
         if self.emits_at_eos() {
@@ -870,7 +1037,7 @@ impl Mp4DemuxN {
                     let samples = samples?;
                     self.learn_held_fragment(&samples);
                     let samples = edit_track_samples(&forwarded, samples);
-                    self.learn_presentation_start(&forwarded, &samples);
+                    self.learn_presentation_start(&forwarded, presented_pts(&samples));
                     for port in 0..self.announced.len() {
                         if self.announced[port]
                             && self.port_segment(port) != self.segment_sent[port]
@@ -958,16 +1125,20 @@ impl Mp4DemuxN {
         Ok(())
     }
 
-    fn learn_presentation_start(&mut self, tracks: &[TrackHeader], samples: &[(u32, Sample)]) {
+    fn learn_presentation_start(
+        &mut self,
+        tracks: &[TrackHeader],
+        samples_pts: impl Iterator<Item = (u32, u64)> + Clone,
+    ) {
         for track in tracks {
             let Some(port) = self.port_of(track.track_id) else {
                 continue;
             };
             // a track's first pts past its edit-list start, as ffmpeg's start_time
-            let fragment_first_ns = samples
-                .iter()
+            let fragment_first_ns = samples_pts
+                .clone()
                 .filter(|(track_id, _)| *track_id == track.track_id)
-                .map(|(_, sample)| sample.pts_ns)
+                .map(|(_, pts_ns)| pts_ns)
                 .min()
                 .map(|first_pts_ns| {
                     first_pts_ns.saturating_sub(track.presentation_segment().start)
@@ -1024,7 +1195,7 @@ impl Mp4DemuxN {
             samples.sort_by_key(|(_, sample)| sample.dts_ns);
         }
         let samples = edit_track_samples(&forwarded, samples);
-        self.learn_presentation_start(&forwarded, &samples);
+        self.learn_presentation_start(&forwarded, presented_pts(&samples));
         let framerates = forwarded
             .iter()
             .map(|track| track_framerate_q16(&self.buf, track))
@@ -1059,27 +1230,91 @@ impl Mp4DemuxN {
             if self.seek.app_seek_pending() {
                 return Ok(());
             }
-            let Some(port) = self.port_of(track_id) else {
-                continue; // a track no port forwards
-            };
-            self.seek
-                .note_track_unit(u64::from(track_id), sample.pts_ns);
-            let admitted = self
-                .seek
-                .admit(port, sample.pts_ns, sample.keyframe, sample);
-            if let Some(seek_segment) = admitted.segment {
-                self.upstream_segment = seek_segment;
-                for announced_port in 0..self.announced.len() {
-                    if self.announced[announced_port] {
-                        self.send_port_segment(announced_port, out).await?;
-                    }
+            self.admit_and_emit(tracks, framerates_q16, track_id, sample, out)
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn admit_and_emit(
+        &mut self,
+        tracks: &[TrackHeader],
+        framerates_q16: &[Option<u32>],
+        track_id: u32,
+        sample: Sample,
+        out: &mut dyn MultiOutputSink,
+    ) -> Result<(), G2gError> {
+        let Some(port) = self.port_of(track_id) else {
+            return Ok(()); // a track no port forwards
+        };
+        self.seek
+            .note_track_unit(u64::from(track_id), sample.pts_ns);
+        let admitted = self
+            .seek
+            .admit(port, sample.pts_ns, sample.keyframe, sample);
+        if let Some(seek_segment) = admitted.segment {
+            self.upstream_segment = seek_segment;
+            for announced_port in 0..self.announced.len() {
+                if self.announced[announced_port] {
+                    self.send_port_segment(announced_port, out).await?;
                 }
             }
-            for sample in admitted {
-                self.emit_sample(tracks, framerates_q16, port, track_id, sample, out)
-                    .await?;
-            }
         }
+        for sample in admitted {
+            self.emit_sample(tracks, framerates_q16, port, track_id, sample, out)
+                .await?;
+        }
+        Ok(())
+    }
+
+    // a sample goes out once all its bytes have arrived, or once no more can arrive
+    async fn emit_progressive(
+        &mut self,
+        stream: &mut ProgressiveStream,
+        tracks: &[TrackHeader],
+        input: ByteInput,
+        out: &mut dyn MultiOutputSink,
+    ) -> Result<(), G2gError> {
+        while let Some(&(track, position)) = stream.order.get(stream.next) {
+            // the seek is taken at the next packet, and the samples after it come from where it lands
+            if self.seek.app_seek_pending() && !self.seek.is_seeking() {
+                break;
+            }
+            let (track_id, index) = &stream.indexes[track];
+            let track_id = *track_id;
+            let stored = &index.samples[position];
+            if stream.ended[track] || stored.offset < stream.skip_below {
+                stream.next += 1;
+                continue;
+            }
+            let start = stored
+                .offset
+                .checked_sub(self.drained)
+                .expect("the bytes from the lowest offset still to go out are kept");
+            let available = usize::try_from(start)
+                .ok()
+                .and_then(|start| self.buf.get(start..))
+                .unwrap_or_default();
+            let complete = available.len() as u64 >= stored.len;
+            if !complete && input == ByteInput::Open {
+                break;
+            }
+            let sample = index.unpack(stored, available)?;
+            stream.ended[track] = !complete || sample.is_none();
+            stream.next += 1;
+            let Some(sample) = sample else {
+                continue;
+            };
+            let sample = track_by_id(tracks, track_id).edited_sample(sample);
+            self.admit_and_emit(tracks, &stream.framerates_q16, track_id, sample, out)
+                .await?;
+        }
+        let keep_from = stream.lowest_offset_from[stream.next].max(stream.skip_below);
+        let unneeded = keep_from
+            .saturating_sub(self.drained)
+            .min(self.buf.len() as u64) as usize;
+        self.buf.drain(..unneeded);
+        self.drained = self.drained.saturating_add(unneeded as u64);
         Ok(())
     }
 
@@ -1255,6 +1490,12 @@ impl Mp4DemuxN {
     }
 }
 
+fn presented_pts(samples: &[(u32, Sample)]) -> impl Iterator<Item = (u32, u64)> + Clone + '_ {
+    samples
+        .iter()
+        .map(|(track_id, sample)| (*track_id, sample.pts_ns))
+}
+
 /// The next complete top-level box at `buf[off..]`: its 4cc and total size (header
 /// plus payload), or `None` if fewer than the whole box is buffered yet, or the
 /// size field is malformed.
@@ -1317,10 +1558,16 @@ impl MultiOutputElement for Mp4DemuxN {
         out: &'a mut dyn MultiOutputSink,
     ) -> Self::ProcessFuture<'a> {
         Box::pin(async move {
+            self.seek.hold_at_segment_end().await;
+            self.poll_seek();
             match packet {
                 // Buffer the bytes, then emit any complete fragments that have
-                // landed (a fragmented file streams; a progressive one waits for Eos).
+                // landed (a fragmented file streams; a progressive one streams
+                // by sample offset or waits for Eos).
                 PipelinePacket::DataFrame(frame) => {
+                    if self.seek.dropping_input() {
+                        return Ok(());
+                    }
                     let slice = frame
                         .domain
                         .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
@@ -1328,44 +1575,51 @@ impl MultiOutputElement for Mp4DemuxN {
                     // Honor an app selection before emitting this batch, so a re-map
                     // takes effect for the fragments now (no-op until the moov parsed).
                     self.apply_stream_selection();
-                    self.advance(out).await?;
+                    self.advance(ByteInput::Open, out).await?;
                 }
                 // End of stream: flush any final fragment, then for a progressive
                 // (non-fragmented) file parse the whole buffer now; the runner
                 // broadcasts the merged Eos to every port after this.
                 PipelinePacket::Eos => {
-                    self.advance(out).await?;
-                    if !self.emits_at_eos() {
+                    let awaiting_flush = self.seek.dropping_input();
+                    if self.seek.eos_before_flush(awaiting_flush).await? {
                         return Ok(());
                     }
-                    let mut replayed = false;
-                    loop {
-                        self.parse_and_emit_whole(out).await?;
-                        let port_count = self.ports.len();
-                        if !self
-                            .seek
-                            .replay_held_stream(replayed, port_count, out)
-                            .await?
-                        {
-                            break;
+                    if !self.seek.dropping_input() {
+                        self.advance(ByteInput::Ended, out).await?;
+                        if self.emits_at_eos() {
+                            self.parse_and_emit_whole(out).await?;
                         }
-                        replayed = true;
-                        self.need_config.fill(true);
                     }
+                    self.seek
+                        .end_ports_and_wait_for_seek(self.ports.len(), out)
+                        .await?;
+                    self.poll_seek();
                 }
-                // A flush discards the buffer and the parse progress (a re-read
-                // restarts the file, so the layout and parameter-set debt reset).
+                // A flush discards the buffer. An indexed seek's flush keeps the
+                // parse and reads on from where it landed, any other restarts the
+                // file, so the layout resets.
                 PipelinePacket::Flush => {
+                    let landed = self.seek.dropping_input() && self.seek.keeps_state();
+                    let forward = self.seek.on_flush();
                     self.buf.clear();
-                    self.tracks = None;
-                    self.fragmented = None;
-                    self.fragment_starts = FragmentStarts::default();
-                    // The byte coordinate restarts with the re-read stream, the
-                    // same reset the key publisher does at this flush.
-                    self.drained = 0;
-                    for owed in self.need_config.iter_mut() {
-                        *owed = true;
+                    match self.progressive.as_mut().filter(|_| landed) {
+                        Some(stream) => self.drained = stream.restart_at_landing(),
+                        None => {
+                            self.progressive = None;
+                            self.tracks = None;
+                            self.fragmented = None;
+                            self.fragment_starts = FragmentStarts::default();
+                            // The byte coordinate restarts with the re-read stream, the
+                            // same reset the key publisher does at this flush.
+                            self.drained = 0;
+                        }
                     }
+                    if !forward {
+                        return Ok(());
+                    }
+                    // the decoders restart at the flush, so they need the codec config again
+                    self.need_config.fill(true);
                     for port in 0..self.ports.len() {
                         out.push_to(port, PipelinePacket::Flush).await?;
                     }
@@ -1386,7 +1640,7 @@ impl MultiOutputElement for Mp4DemuxN {
         })
     }
 
-    // progressive files never latch: they are held whole until Eos
+    // progressive files never latch, they stream by sample offset or are held whole until Eos
     fn latency(&self) -> LatencyReport {
         let held_ns = self
             .held_fragment_ns
@@ -1399,11 +1653,11 @@ impl MultiOutputElement for Mp4DemuxN {
     }
 
     fn seek_route(&self) -> Option<ElementSeekRoute> {
-        Some(ElementSeekRoute::Buffered)
+        Some(ElementSeekRoute::UpstreamBytes)
     }
 
-    fn set_buffered_seek(&mut self, app: SeekController) {
-        self.seek.with_held_stream(app);
+    fn set_seek(&mut self, app: SeekController, upstream: SeekController) {
+        self.seek.with(app, upstream);
     }
 
     fn query_duration(&self) -> Option<u64> {
