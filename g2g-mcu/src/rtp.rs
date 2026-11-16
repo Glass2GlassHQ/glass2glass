@@ -24,7 +24,7 @@
 
 use g2g_core::error::G2gError;
 use g2g_core::frame::Frame;
-use g2g_core::rtp::{RtpHeader, RTP_HEADER_LEN};
+use g2g_core::rtp::{RtpHeader, RtpHeaderExtension, RTP_HEADER_LEN};
 use g2g_core::st2110video::{Layout, Sampling, St2110VideoPacketizer};
 use g2g_core::time::TaiNs;
 use g2g_core::{MediaClock, StaticSink, StaticTransform};
@@ -161,6 +161,8 @@ pub struct RawVideoRtpSend<S, const PACKET_BYTES: usize> {
     packetizer: St2110VideoPacketizer,
     width: usize,
     height: usize,
+    picture_bytes: usize,
+    trailer_extension_id: Option<u8>,
     packet: [u8; PACKET_BYTES],
 }
 
@@ -173,7 +175,7 @@ impl<S: PacketSender, const PACKET_BYTES: usize> RawVideoRtpSend<S, PACKET_BYTES
         payload_type: u8,
         ssrc: u32,
     ) -> Option<Self> {
-        Layout::new(sampling, width, height)?;
+        let picture_bytes = Layout::new(sampling, width, height)?.frame_size();
         let packetizer = St2110VideoPacketizer::new(payload_type, ssrc, sampling, PACKET_BYTES);
         if packetizer.max_packet() > PACKET_BYTES {
             return None;
@@ -183,8 +185,15 @@ impl<S: PacketSender, const PACKET_BYTES: usize> RawVideoRtpSend<S, PACKET_BYTES
             packetizer,
             width,
             height,
+            picture_bytes,
+            trailer_extension_id: None,
             packet: [0; PACKET_BYTES],
         })
+    }
+
+    pub fn with_trailer_extension(mut self, id: u8) -> Self {
+        self.trailer_extension_id = Some(id);
+        self
     }
 
     pub fn free(self) -> S {
@@ -196,18 +205,26 @@ impl<S: PacketSender, const PACKET_BYTES: usize> StaticTransform
     for RawVideoRtpSend<S, PACKET_BYTES>
 {
     async fn process(&mut self, input: Frame) -> Result<Option<Frame>, G2gError> {
-        let Some(pixels) = input.domain.as_system_slice() else {
+        let Some(bytes) = input.domain.as_system_slice() else {
             return Err(G2gError::UnsupportedDomain);
         };
+        let (picture, trailer) = bytes
+            .split_at_checked(self.picture_bytes)
+            .ok_or(G2gError::CapsMismatch)?;
+        let trailer_extension = self
+            .trailer_extension_id
+            .filter(|_| !trailer.is_empty())
+            .map(|id| RtpHeaderExtension { id, data: trailer });
         let mut packets = self
             .packetizer
             .frame_packets(
-                pixels,
+                picture,
                 self.width,
                 self.height,
                 input.timing.pts_ns,
                 &mut self.packet,
             )
+            .and_then(|packets| packets.with_marker_extensions(trailer_extension.as_slice()))
             .ok_or(G2gError::CapsMismatch)?;
         while let Some(packet) = packets.next_packet() {
             let (header, payload) = packet

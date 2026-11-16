@@ -1494,6 +1494,19 @@ byte-to-bit boundary. RFC 4175 has no grayscale sampling, so a `Gray8`
 frame goes out as YCbCr-4:2:2 8-bit with both chroma samples at 128, and a
 `Gray8` receiver keeps the luma.
 
+A frame can carry a classification label. `g2g_core::rtp::ClassificationExtension`
+is a one-byte RFC 8285 header extension holding a confidence byte (0 to 255 for
+0.0 to 1.0) and a UTF-8 class name, so a name is at most 15 bytes.
+`FramePackets::with_marker_extensions` puts extensions on the frame's last
+packet and shrinks every packet's payload budget by their length, so the
+packets keep equal sizes. `RawVideoRtpSend::with_trailer_extension(id)` sends
+the bytes a source writes after the picture as that extension, since MCU frames
+carry no meta. `st2110videosrc classification-extension-id=<id>` (0, the
+default, ignores extensions) attaches each label as an `AnalyticsMeta`
+`Classification` to its frame, and `analyticsoverlay` and `vellooverlay` draw a
+classification with no `Classifies` relation as a caption at the frame's top
+left.
+
 ### SDP
 
 The source's geometry comes from properties, or from the stream's SDP. `st2110sdp`

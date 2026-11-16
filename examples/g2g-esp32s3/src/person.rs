@@ -12,6 +12,7 @@ use esp_hal::time::Instant;
 use esp_println::println;
 use g2g_core::error::G2gError;
 use g2g_core::frame::Frame;
+use g2g_core::rtp::ClassificationExtension;
 use g2g_core::st2110video::Sampling;
 use g2g_core::staticpool::StaticLendRing;
 use g2g_core::{
@@ -211,17 +212,78 @@ const CAMERA_FRAME_INTERVAL_NS: u64 = 64_000_000;
 
 const RTP_PAYLOAD_TYPE: u8 = 96;
 const RTP_SSRC: u32 = 0x6732_6732;
+const CLASSIFICATION_EXTENSION_ID: u8 = 1;
+// RFC 8285 one-byte header elements carry at most 16 bytes
+const LABEL_BYTES: usize = 16;
+pub const LABELLED_FRAME_BYTES: usize = IMAGE_BYTES + LABEL_BYTES;
+
+// a pictured frame waits for its label in one slot while the newest labelled frame waits for the sender in the other
+struct HandoffSlots {
+    frames: [&'static mut [u8; LABELLED_FRAME_BYTES]; 2],
+    pictured: Option<usize>,
+    labelled: Option<LabelledFrame>,
+}
+
+#[derive(Clone, Copy)]
+struct LabelledFrame {
+    slot: usize,
+    frame_bytes: usize,
+}
 
 pub struct FrameHandoff {
-    frame: Mutex<CriticalSectionRawMutex, &'static mut [u8; IMAGE_BYTES]>,
+    slots: Mutex<CriticalSectionRawMutex, HandoffSlots>,
     ready: Signal<CriticalSectionRawMutex, ()>,
 }
 
 impl FrameHandoff {
-    pub fn new(frame: &'static mut [u8; IMAGE_BYTES]) -> Self {
+    pub fn new(frames: [&'static mut [u8; LABELLED_FRAME_BYTES]; 2]) -> Self {
         Self {
-            frame: Mutex::new(frame),
+            slots: Mutex::new(HandoffSlots {
+                frames,
+                pictured: None,
+                labelled: None,
+            }),
             ready: Signal::new(),
+        }
+    }
+
+    async fn picture(&self, pixels: &[u8; IMAGE_BYTES]) {
+        let mut slots = self.slots.lock().await;
+        let slot = slots.labelled.map_or(0, |labelled| 1 - labelled.slot);
+        slots.frames[slot][..IMAGE_BYTES].copy_from_slice(pixels);
+        slots.pictured = Some(slot);
+    }
+
+    fn label(&self, classification: ClassificationExtension<'_>) {
+        let Ok(mut slots) = self.slots.try_lock() else {
+            return;
+        };
+        let Some(slot) = slots.pictured.take() else {
+            return;
+        };
+        let label_bytes = classification
+            .write(&mut slots.frames[slot][IMAGE_BYTES..])
+            .expect("class names fit a one-byte header element");
+        slots.labelled = Some(LabelledFrame {
+            slot,
+            frame_bytes: IMAGE_BYTES + label_bytes,
+        });
+        self.ready.signal(());
+    }
+
+    async fn take(&self, buf: &mut [u8]) -> Result<usize, G2gError> {
+        loop {
+            self.ready.wait().await;
+            let mut slots = self.slots.lock().await;
+            // a label that lands while the sender waits for the lock leaves the signal set with no frame behind it
+            let Some(labelled) = slots.labelled.take() else {
+                continue;
+            };
+            let frame = &slots.frames[labelled.slot][..labelled.frame_bytes];
+            buf.get_mut(..labelled.frame_bytes)
+                .ok_or(G2gError::CapsMismatch)?
+                .copy_from_slice(frame);
+            return Ok(labelled.frame_bytes);
         }
     }
 }
@@ -237,11 +299,7 @@ impl StaticTransform for HandOff<'_> {
             .as_system_slice()
             .and_then(|pixels| pixels.try_into().ok())
             .ok_or(G2gError::CapsMismatch)?;
-        // the sender holds the lock while it copies the previous frame out
-        if let Ok(mut slot) = self.handoff.frame.try_lock() {
-            slot.copy_from_slice(pixels);
-            self.handoff.ready.signal(());
-        }
+        self.handoff.picture(pixels).await;
         Ok(Some(input))
     }
 }
@@ -256,13 +314,21 @@ pub async fn watch(
         on_scores: |scores: [i8; CLASSES]| {
             let now = Instant::now();
             let probability = person_probability(scores);
-            let label = if probability > 0.5 {
-                "person"
+            let classification = if probability > 0.5 {
+                ClassificationExtension {
+                    confidence: probability,
+                    name: "person",
+                }
             } else {
-                "nobody"
+                ClassificationExtension {
+                    confidence: 1.0 - probability,
+                    name: "nobody",
+                }
             };
+            handoff.label(classification);
             println!(
-                "{label:<7} {probability:.2} {} ms",
+                "{:<7} {probability:.2} {} ms",
+                classification.name,
                 (now - last).as_millis()
             );
             last = now;
@@ -278,12 +344,7 @@ struct HandedFrames<'h> {
 
 impl FrameGrabber for HandedFrames<'_> {
     async fn capture(&mut self, buf: &mut [u8]) -> Result<usize, G2gError> {
-        self.handoff.ready.wait().await;
-        let slot = self.handoff.frame.lock().await;
-        buf.get_mut(..IMAGE_BYTES)
-            .ok_or(G2gError::CapsMismatch)?
-            .copy_from_slice(slot.as_slice());
-        Ok(IMAGE_BYTES)
+        self.handoff.take(buf).await
     }
 }
 
@@ -304,8 +365,9 @@ pub async fn stream(handoff: &FrameHandoff, sender: impl PacketSender) -> Result
         RTP_PAYLOAD_TYPE,
         RTP_SSRC,
     )
-    .ok_or(G2gError::CapsMismatch)?;
-    let ring: StaticLendRing<1, IMAGE_BYTES> = StaticLendRing::new();
+    .ok_or(G2gError::CapsMismatch)?
+    .with_trailer_extension(CLASSIFICATION_EXTENSION_ID);
+    let ring: StaticLendRing<1, LABELLED_FRAME_BYTES> = StaticLendRing::new();
     // SAFETY: the ring is a local of this function and outlives the graph run.
     let source =
         unsafe { GrabberSrc::with_ring(HandedFrames { handoff }, &ring, CAMERA_FRAME_INTERVAL_NS) };

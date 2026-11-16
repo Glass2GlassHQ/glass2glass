@@ -443,10 +443,12 @@ peak is 47 KB.
 
 The camera frames also go to the laptop. `G2G_WIFI_SSID`, `G2G_WIFI_PASSWORD`
 and `G2G_RTP_DESTINATION` are read at build time. The person graph's first stage
-copies each frame into a slot in PSRAM and passes it on to inference, dropping
-the copy while the sender still holds the previous frame. A second graph reads
-the slot through a `FrameGrabber` and sends each frame with `RawVideoRtpSend` as
-RFC 4175 RTP through embassy-net UDP on esp-radio. The 96x96 gray frame goes out
+copies each frame into one of two slots in PSRAM and passes it on to inference.
+The score sink writes the label ("person" or "nobody" and its confidence) after
+that frame's picture. A second graph takes the newest labelled frame through a
+`FrameGrabber` and sends it with `RawVideoRtpSend` as RFC 4175 RTP through
+embassy-net UDP on esp-radio, with the label as header extension id 1 (see
+"Uncompressed video" in [transports.md](transports.md)). The 96x96 gray frame goes out
 as YCbCr-4:2:2 with neutral chroma, 14 packets of at most 1400 bytes. A host
 shows it with `st2110videosrc format=gray8` or GStreamer's `rtpvrawdepay`. At
 -74 dBm the person graph takes a median of 71 ms per frame and 82 ms at the 90th
@@ -458,9 +460,15 @@ ready. Core 0 runs only the person graph. Core 1 runs the keyword graph, the
 sender graph and the embassy-net runner. A TFLite Micro call is one synchronous
 poll that holds its executor for 65 ms, so a runner on core 0 would move no
 packets to the Wi-Fi driver during inference. The Wi-Fi driver task itself stays
-on core 0, the core that started it. Core 1's 128 KB stack sits in PSRAM, and
-each task's future stays in the stack frame of the executor that never returns,
-so the boot checks and the live graphs reuse the same internal RAM. The camera
+on core 0, the core that started it. Core 1's 128 KB stack sits in PSRAM, but
+its task storage is on the internal heap, with a second 64 KB region for the
+keyword graph's 61 KB task. The ESP32-S3's atomic compare-and-set is not atomic
+on PSRAM (esp-hal issue 2027), and Wi-Fi and timer interrupts on core 0 wake core
+1's tasks. With the storage in PSRAM, a wake racing the executor left a task's
+run-queued flag set while it was off the queue, so the embassy-net runner was
+never polled again and the stream stopped after seconds to minutes. Core 0's
+person task stays in the frame of its executor, which never returns, on the
+internal main stack. The camera
 and microphone grabbers poll their DMA rings every 2 ms and 10 ms, because
 esp-hal has no async wait for either stream. ESP-NN keeps its conv, depthwise
 conv and softmax scratch pointers in C globals, so an async mutex lets only one

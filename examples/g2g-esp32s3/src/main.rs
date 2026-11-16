@@ -5,12 +5,15 @@
 #![no_std]
 #![no_main]
 
+extern crate alloc;
+
 mod camera;
 mod keyword;
 mod network;
 mod person;
 mod tflm;
 
+use alloc::boxed::Box;
 use core::mem::MaybeUninit;
 use core::ptr;
 
@@ -54,7 +57,7 @@ struct PsramBuffers {
     person_arena: &'static mut [MaybeUninit<u8>],
     microphone_window: &'static mut [u8; CLIP_BYTES],
     camera_frame: &'static mut [u8; person::IMAGE_BYTES],
-    handoff_frame: &'static mut [u8; person::IMAGE_BYTES],
+    handoff_frames: [&'static mut [u8; person::LABELLED_FRAME_BYTES]; 2],
 }
 
 fn psram_buffers(psram: &Psram) -> PsramBuffers {
@@ -65,7 +68,8 @@ fn psram_buffers(psram: &Psram) -> PsramBuffers {
                 + keyword::ARENA_BYTES
                 + person::ARENA_BYTES
                 + CLIP_BYTES
-                + 2 * person::IMAGE_BYTES,
+                + person::IMAGE_BYTES
+                + 2 * person::LABELLED_FRAME_BYTES,
         "PSRAM holds {bytes} bytes"
     );
     // SAFETY: Psram maps `bytes` bytes at `start` for the life of the program, and only this function hands them out.
@@ -82,20 +86,27 @@ fn psram_buffers(psram: &Psram) -> PsramBuffers {
     let (person_arena, rest) = rest.split_at_mut(person::ARENA_BYTES);
     let (window, rest) = rest.split_at_mut(CLIP_BYTES);
     let (frame, rest) = rest.split_at_mut(person::IMAGE_BYTES);
-    let handoff = &mut rest[..person::IMAGE_BYTES];
+    let (first_handoff, rest) = rest.split_at_mut(person::LABELLED_FRAME_BYTES);
+    let second_handoff = &mut rest[..person::LABELLED_FRAME_BYTES];
     for byte in window
         .iter_mut()
         .chain(frame.iter_mut())
-        .chain(handoff.iter_mut())
+        .chain(first_handoff.iter_mut())
+        .chain(second_handoff.iter_mut())
     {
         byte.write(0);
     }
-    // SAFETY: every byte of the three buffers was just written.
-    let (microphone_window, camera_frame, handoff_frame) = unsafe {
+    // SAFETY: every byte of the four buffers was just written.
+    let (microphone_window, camera_frame, first_handoff, second_handoff) = unsafe {
         (
             &mut *window.as_mut_ptr().cast::<[u8; CLIP_BYTES]>(),
             &mut *frame.as_mut_ptr().cast::<[u8; person::IMAGE_BYTES]>(),
-            &mut *handoff.as_mut_ptr().cast::<[u8; person::IMAGE_BYTES]>(),
+            &mut *first_handoff
+                .as_mut_ptr()
+                .cast::<[u8; person::LABELLED_FRAME_BYTES]>(),
+            &mut *second_handoff
+                .as_mut_ptr()
+                .cast::<[u8; person::LABELLED_FRAME_BYTES]>(),
         )
     };
     PsramBuffers {
@@ -104,7 +115,7 @@ fn psram_buffers(psram: &Psram) -> PsramBuffers {
         person_arena,
         microphone_window,
         camera_frame,
-        handoff_frame,
+        handoff_frames: [first_handoff, second_handoff],
     }
 }
 
@@ -138,17 +149,12 @@ fn run_second_core(
     handoff: &'static person::FrameHandoff,
 ) -> ! {
     let (stack, mut runner) = network::ip_stack();
-    let network_task = TaskStorage::new();
-    let stream_task = TaskStorage::new();
-    let listen_task = TaskStorage::new();
-    // SAFETY: Executor::run below never returns, so this frame outlives every task.
-    let (network_task, stream_task, listen_task) = unsafe {
-        (
-            &*ptr::from_ref(&network_task),
-            &*ptr::from_ref(&stream_task),
-            &*ptr::from_ref(&listen_task),
-        )
-    };
+    // embassy-executor task storage for the keyword graph is 61312 bytes
+    esp_alloc::heap_allocator!(size: 64 * 1024);
+    // esp32s3 compare-and-set is not atomic on PSRAM, and core 0 wakes these tasks
+    let network_task = &*Box::leak(Box::new(TaskStorage::new()));
+    let stream_task = &*Box::leak(Box::new(TaskStorage::new()));
+    let listen_task = &*Box::leak(Box::new(TaskStorage::new()));
     static SECOND_CORE_EXECUTOR: StaticCell<Executor> = StaticCell::new();
     SECOND_CORE_EXECUTOR.init(Executor::new()).run(|spawner| {
         let networking = network_task.spawn(|| async move { runner.run().await });
@@ -248,7 +254,7 @@ fn main() -> ! {
     static HANDOFF: StaticCell<person::FrameHandoff> = StaticCell::new();
     let speech = SPEECH.init(speech);
     let handoff: &'static person::FrameHandoff =
-        HANDOFF.init(person::FrameHandoff::new(buffers.handoff_frame));
+        HANDOFF.init(person::FrameHandoff::new(buffers.handoff_frames));
     esp_rtos::start_second_core(
         peripherals.CPU_CTRL,
         peripherals.FROM_CPU_INTR1,

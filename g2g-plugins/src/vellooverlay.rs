@@ -50,6 +50,7 @@ use g2g_core::{
 use crate::analyticsoverlay::{
     caption_bar_origin, contrast_ink, palette_rgb, AnalyticsShapes, CaptionParts, PaintedMask,
     MASK_ALPHA_DEFAULT, ROI_DASH_PX, SHOW_LABEL_PROPERTY, SHOW_SCORE_PROPERTY, SHOW_TRACK_PROPERTY,
+    WHOLE_FRAME,
 };
 use crate::gpu::{gpu_err, GpuContext, WgpuTextureKeepAlive};
 use crate::textshape::{FontId, TextShaper};
@@ -400,11 +401,24 @@ impl VelloAnalyticsOverlay {
             };
             let label = painted.detection.label;
             scene.stroke(&stroke, Affine::IDENTITY, palette_color(label), None, &rect);
-            if let Some(text) = self.caption.text(painted, shapes.class_name(label)) {
+            let caption = self.caption.text(
+                shapes.class_name(label),
+                painted.track_id,
+                painted.detection.confidence,
+            );
+            if let Some(text) = caption {
                 let bar_color = crate::analyticsoverlay::palette_color(label);
                 self.caption_fonts
                     .draw(&mut scene, rect, &text, bar_color, (w, h));
             }
+        }
+        let whole_frame = pixel_rect(WHOLE_FRAME, w, h);
+        if let (Some((text, label)), Some(rect)) =
+            (shapes.frame_caption(&self.caption), whole_frame)
+        {
+            let bar_color = crate::analyticsoverlay::palette_color(label);
+            self.caption_fonts
+                .draw(&mut scene, rect, &text, bar_color, (w, h));
         }
         let dashed = Stroke::new(thickness).with_dashes(0.0, [ROI_DASH_PX as f64; 2]);
         for roi in &shapes.rois {

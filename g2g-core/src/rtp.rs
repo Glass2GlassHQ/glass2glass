@@ -380,6 +380,36 @@ impl CaptureTimeExtensionIds {
     }
 }
 
+const CLASSIFICATION_CONFIDENCE_STEPS: f32 = u8::MAX as f32;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ClassificationExtension<'a> {
+    pub confidence: f32,
+    pub name: &'a str,
+}
+
+impl<'a> ClassificationExtension<'a> {
+    pub fn parse(data: &'a [u8]) -> Option<Self> {
+        let (&confidence, name) = data.split_first()?;
+        if name.is_empty() {
+            return None;
+        }
+        Some(Self {
+            confidence: f32::from(confidence) / CLASSIFICATION_CONFIDENCE_STEPS,
+            name: core::str::from_utf8(name).ok()?,
+        })
+    }
+
+    pub fn write(&self, out: &mut [u8]) -> Option<usize> {
+        let len = self.name.len().checked_add(1)?;
+        let (confidence, name) = out.get_mut(..len)?.split_first_mut()?;
+        // float to integer casts saturate at 0 and 255
+        *confidence = (self.confidence * CLASSIFICATION_CONFIDENCE_STEPS + 0.5) as u8;
+        name.copy_from_slice(self.name.as_bytes());
+        Some(len)
+    }
+}
+
 // starts one wrap up to leave room for packets reordered before the first
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RtpSequenceExtender {
@@ -843,5 +873,26 @@ mod tests {
             "no elements is the plain header"
         );
         assert_eq!(out[0], 0x80, "and leaves the X bit clear");
+    }
+
+    #[test]
+    fn classification_extension_round_trips_a_name_and_confidence() {
+        let mut data = [0u8; 16];
+        let written = ClassificationExtension {
+            confidence: 0.8,
+            name: "person",
+        }
+        .write(&mut data)
+        .unwrap();
+        let parsed = ClassificationExtension::parse(&data[..written]).unwrap();
+        assert_eq!(parsed.name, "person");
+        assert!((parsed.confidence - 0.8).abs() < 1.0 / CLASSIFICATION_CONFIDENCE_STEPS);
+    }
+
+    #[test]
+    fn classification_extension_rejects_a_missing_or_invalid_name() {
+        assert_eq!(ClassificationExtension::parse(&[]), None);
+        assert_eq!(ClassificationExtension::parse(&[200]), None);
+        assert_eq!(ClassificationExtension::parse(&[200, 0xff, 0xfe]), None);
     }
 }

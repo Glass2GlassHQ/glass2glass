@@ -14,7 +14,8 @@
 //! detection box with its class name, tracking id and confidence. A node stores
 //! a `u32` label id, so the name comes from the meta's shared `class_names`
 //! table; a producer that publishes none leaves `show-label` with nothing to
-//! draw.
+//! draw. A classification with no `Classifies` relation labels the whole frame,
+//! and the same properties caption it at the frame's top left.
 //!
 //! `show-trail` draws where each tracked object has been, as a polyline through
 //! the bottom edge of its recent boxes that fades out towards the oldest point.
@@ -46,9 +47,9 @@ use alloc::vec::Vec;
 
 use g2g_core::{
     AnalyticsMeta, AnalyticsNode, AsyncElement, BBox, Caps, CapsConstraint, CapsSet,
-    ConfigureOutcome, Dim, ElementMetadata, G2gError, MemoryDomain, ObjectDetection, OutputSink,
-    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, RawVideoFormat, RelationKind,
-    Roi, Segmentation,
+    Classification, ConfigureOutcome, Dim, ElementMetadata, G2gError, MemoryDomain,
+    ObjectDetection, OutputSink, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
+    RawVideoFormat, RelationKind, Roi, Segmentation,
 };
 
 use crate::bitmapfont::{glyph, GLYPH_ADVANCE, GLYPH_HEIGHT};
@@ -150,6 +151,7 @@ pub(crate) struct AnalyticsShapes {
     pub detections: Vec<PaintedDetection>,
     pub masks: Vec<PaintedMask>,
     pub rois: Vec<PaintedRoi>,
+    pub frame_classifications: Vec<Classification>,
     /// The meta's class-name table, carried so a caption can name a label
     /// without the shapes borrowing the meta.
     pub class_names: Option<alloc::sync::Arc<[alloc::boxed::Box<str>]>>,
@@ -170,6 +172,14 @@ impl AnalyticsShapes {
                     detection: *detection,
                     track_id: meta.tracking_id(index),
                 }),
+                AnalyticsNode::Classification(classification)
+                    if !meta
+                        .relations
+                        .iter()
+                        .any(|r| r.to == index && r.kind == RelationKind::Classifies) =>
+                {
+                    shapes.frame_classifications.push(*classification)
+                }
                 AnalyticsNode::Segmentation(segmentation) => {
                     let palette_index = shapes.masks.len() as u32;
                     slot_of_node[index] = Some(palette_index);
@@ -201,7 +211,20 @@ impl AnalyticsShapes {
     }
 
     pub(crate) fn is_empty(&self) -> bool {
-        self.detections.is_empty() && self.masks.is_empty() && self.rois.is_empty()
+        self.detections.is_empty()
+            && self.masks.is_empty()
+            && self.rois.is_empty()
+            && self.frame_classifications.is_empty()
+    }
+
+    pub(crate) fn frame_caption(&self, parts: &CaptionParts) -> Option<(String, u32)> {
+        let first = self.frame_classifications.first()?;
+        let captions: Vec<String> = self
+            .frame_classifications
+            .iter()
+            .filter_map(|c| parts.text(self.class_name(c.label), None, c.confidence))
+            .collect();
+        (!captions.is_empty()).then(|| (captions.join(" "), first.label))
     }
 
     pub(crate) fn class_name(&self, label: u32) -> Option<&str> {
@@ -218,9 +241,14 @@ pub(crate) struct CaptionParts {
 }
 
 impl CaptionParts {
-    /// The caption for one detection, or `None` when no part is enabled (or a
-    /// tracking id was asked for and the producer wired none).
-    pub(crate) fn text(&self, painted: &PaintedDetection, name: Option<&str>) -> Option<String> {
+    /// The caption for one detection or classification, or `None` when no part
+    /// is enabled (or a tracking id was asked for and the producer wired none).
+    pub(crate) fn text(
+        &self,
+        name: Option<&str>,
+        track_id: Option<u64>,
+        confidence: f32,
+    ) -> Option<String> {
         let mut caption = String::new();
         let mut add = |part: &str| {
             if !caption.is_empty() {
@@ -231,11 +259,11 @@ impl CaptionParts {
         if let Some(name) = name.filter(|_| self.label) {
             add(name);
         }
-        if let Some(id) = painted.track_id.filter(|_| self.track) {
+        if let Some(id) = track_id.filter(|_| self.track) {
             add(&format!("ID:{id}"));
         }
         if self.score {
-            add(&score_text(&painted.detection));
+            add(&score_text(confidence));
         }
         (!caption.is_empty()).then_some(caption)
     }
@@ -244,14 +272,14 @@ impl CaptionParts {
 pub(crate) const SHOW_LABEL_PROPERTY: PropertySpec = PropertySpec::new(
     "show-label",
     PropKind::Bool,
-    "draw each detection's class name above its box",
+    "draw each detection's class name above its box, and a frame classification's at the top left",
 )
 .with_default("false");
 
 pub(crate) const SHOW_SCORE_PROPERTY: PropertySpec = PropertySpec::new(
     "show-score",
     PropKind::Bool,
-    "draw each detection's confidence above its box",
+    "draw each detection's confidence above its box, and a frame classification's at the top left",
 )
 .with_default("false");
 
@@ -261,6 +289,13 @@ pub(crate) const SHOW_TRACK_PROPERTY: PropertySpec = PropertySpec::new(
     "draw each detection's tracking id above its box",
 )
 .with_default("false");
+
+pub(crate) const WHOLE_FRAME: BBox = BBox {
+    x: 0.0,
+    y: 0.0,
+    w: 1.0,
+    h: 1.0,
+};
 
 pub(crate) fn caption_bar_origin(
     (x0, y0): (i32, i32),
@@ -382,9 +417,15 @@ impl AnalyticsOverlay {
             let color = palette_color(painted.detection.label);
             self.outline(buf, painted.detection.bbox, color, false);
             let name = shapes.class_name(painted.detection.label);
-            if let Some(text) = self.caption.text(painted, name) {
+            let caption = self
+                .caption
+                .text(name, painted.track_id, painted.detection.confidence);
+            if let Some(text) = caption {
                 self.draw_caption(buf, painted.detection.bbox, &text, color);
             }
+        }
+        if let Some((text, label)) = shapes.frame_caption(&self.caption) {
+            self.draw_caption(buf, WHOLE_FRAME, &text, palette_color(label));
         }
         for roi in &shapes.rois {
             self.outline(buf, roi.roi.bbox, palette_color(roi.palette_index), true);
@@ -618,8 +659,8 @@ fn vspan(buf: &mut [u8], w: i32, h: i32, y0: i32, y1: i32, x: i32, paint: SpanPa
 /// A detection's confidence as a fixed two-decimal string (`0.92`). Built from
 /// integer parts: the `no_std` baseline has no float formatting to lean on, and
 /// `+ 0.5` rounds without `f32::round`.
-fn score_text(detection: &ObjectDetection) -> String {
-    let hundredths = (detection.confidence.clamp(0.0, 1.0) * 100.0 + 0.5) as u32;
+fn score_text(confidence: f32) -> String {
+    let hundredths = (confidence.clamp(0.0, 1.0) * 100.0 + 0.5) as u32;
     format!("{}.{:02}", hundredths / 100, hundredths % 100)
 }
 
@@ -938,22 +979,10 @@ mod tests {
 
     #[test]
     fn score_text_is_two_decimals() {
-        let text = |confidence| {
-            score_text(&ObjectDetection {
-                bbox: BBox {
-                    x: 0.0,
-                    y: 0.0,
-                    w: 1.0,
-                    h: 1.0,
-                },
-                label: 0,
-                confidence,
-            })
-        };
-        assert_eq!(text(0.923), "0.92");
-        assert_eq!(text(0.5), "0.50");
-        assert_eq!(text(1.0), "1.00");
-        assert_eq!(text(0.0), "0.00");
+        assert_eq!(score_text(0.923), "0.92");
+        assert_eq!(score_text(0.5), "0.50");
+        assert_eq!(score_text(1.0), "1.00");
+        assert_eq!(score_text(0.0), "0.00");
     }
 
     #[test]
@@ -976,12 +1005,18 @@ mod tests {
     fn captions_are_off_until_asked_for() {
         let shapes = detection_shapes(&[det(0.25, 0.25, 0.5, 0.5, 0)]);
         let painted = &shapes.detections[0];
-        assert_eq!(overlay(64, 64, 1).caption.text(painted, None), None);
         assert_eq!(
             overlay(64, 64, 1)
-                .with_score(true)
                 .caption
-                .text(painted, None),
+                .text(None, painted.track_id, painted.detection.confidence),
+            None
+        );
+        assert_eq!(
+            overlay(64, 64, 1).with_score(true).caption.text(
+                None,
+                painted.track_id,
+                painted.detection.confidence
+            ),
             Some(String::from("0.90"))
         );
     }
@@ -996,10 +1031,11 @@ mod tests {
         let painted = &shapes.detections[0];
 
         assert_eq!(
-            overlay(64, 64, 1)
-                .with_track(true)
-                .caption
-                .text(painted, None),
+            overlay(64, 64, 1).with_track(true).caption.text(
+                None,
+                painted.track_id,
+                painted.detection.confidence
+            ),
             Some(String::from("ID:4"))
         );
         assert_eq!(
@@ -1007,7 +1043,7 @@ mod tests {
                 .with_track(true)
                 .with_score(true)
                 .caption
-                .text(painted, None),
+                .text(None, painted.track_id, painted.detection.confidence),
             Some(String::from("ID:4 0.90"))
         );
     }
@@ -1048,6 +1084,44 @@ mod tests {
             [0, 0, 0, 255],
             "caption drawn inside the top edge"
         );
+    }
+
+    #[test]
+    fn frame_classification_draws_a_caption_in_the_top_left_corner() {
+        let mut meta = AnalyticsMeta::new();
+        meta.set_class_names(["person"]);
+        meta.push(AnalyticsNode::Classification(Classification {
+            label: 0,
+            confidence: 0.9,
+        }));
+        let shapes = AnalyticsShapes::collect(&meta);
+        let black = [0, 0, 0, 255];
+
+        let mut plain = solid(64, 64, black);
+        overlay(64, 64, 1).render(&mut plain, &shapes);
+        assert_eq!(px(&plain, 64, 0, 0), black, "captions are off by default");
+
+        let captioned = overlay(64, 64, 1).with_label(true).with_score(true);
+        assert_eq!(
+            shapes.frame_caption(&captioned.caption),
+            Some((String::from("person 0.90"), 0))
+        );
+        let mut buf = solid(64, 64, black);
+        captioned.render(&mut buf, &shapes);
+        assert_eq!(px(&buf, 64, 0, 0), palette_color(0));
+    }
+
+    #[test]
+    fn a_classification_of_a_detection_gets_no_frame_caption() {
+        let mut meta = AnalyticsMeta::new();
+        let detection = meta.add_detection(det(0.25, 0.25, 0.5, 0.5, 0));
+        let classification = meta.push(AnalyticsNode::Classification(Classification {
+            label: 0,
+            confidence: 0.9,
+        }));
+        meta.relate(detection, classification, RelationKind::Classifies);
+        let shapes = AnalyticsShapes::collect(&meta);
+        assert!(shapes.frame_classifications.is_empty());
     }
 
     #[test]

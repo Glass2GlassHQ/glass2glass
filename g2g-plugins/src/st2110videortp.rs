@@ -21,6 +21,7 @@
 //! stays cooperative and ends cleanly on a gap.
 
 use core::future::{ready, Future, Ready};
+use core::num::NonZeroU8;
 use core::pin::Pin;
 
 use alloc::boxed::Box;
@@ -32,7 +33,9 @@ use std::net::UdpSocket;
 use g2g_core::caps::{framerate_q16_from_fraction, framerate_q16_period_ns};
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
+use g2g_core::meta::{AnalyticsMeta, AnalyticsNode, Classification};
 use g2g_core::query::LatencyReport;
+use g2g_core::rtp::{ClassificationExtension, RtpHeader};
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ClockSync, ConfigureOutcome, Dim, ElementMetadata,
@@ -382,6 +385,7 @@ pub struct St2110VideoSrc {
     height: usize,
     framerate_fps: u32,
     idle_timeout_ns: u64,
+    classification_extension_id: Option<NonZeroU8>,
     socket: Option<UdpSocket>,
     /// ST 2110-7 seamless protection: when set, a second ("blue") path is bound and
     /// the two streams are merged by RTP sequence number (see [`RedundantRtpReceiver`]).
@@ -443,6 +447,7 @@ impl St2110VideoSrc {
             height: 720,
             framerate_fps: 60,
             idle_timeout_ns: 0,
+            classification_extension_id: None,
             socket: None,
             redundant: false,
             redundant_address: String::from("0.0.0.0"),
@@ -511,6 +516,16 @@ impl St2110VideoSrc {
             pixel_aspect: g2g_core::PixelAspect::Any,
         })
     }
+}
+
+fn classification_meta(classification: ClassificationExtension<'_>) -> AnalyticsMeta {
+    let mut meta = AnalyticsMeta::new();
+    meta.set_class_names([classification.name]);
+    meta.push(AnalyticsNode::Classification(Classification {
+        label: 0,
+        confidence: classification.confidence,
+    }));
+    meta
 }
 
 impl SourceLoop for St2110VideoSrc {
@@ -610,6 +625,12 @@ impl SourceLoop for St2110VideoSrc {
                 self.idle_timeout_ns = value.as_uint().ok_or(PropError::Type)?;
                 Ok(())
             }
+            "classification-extension-id" => {
+                let id = value.as_uint().ok_or(PropError::Type)?;
+                self.classification_extension_id =
+                    NonZeroU8::new(u8::try_from(id).map_err(|_| PropError::Value)?);
+                Ok(())
+            }
             _ => Err(PropError::Unknown),
         }
     }
@@ -626,6 +647,10 @@ impl SourceLoop for St2110VideoSrc {
             "redundant-address" => Some(PropValue::Str(self.redundant_address.clone())),
             "redundant-port" => Some(PropValue::Uint(u64::from(self.redundant_port))),
             "idle-timeout" => Some(PropValue::Uint(self.idle_timeout_ns)),
+            "classification-extension-id" => Some(PropValue::Uint(
+                self.classification_extension_id
+                    .map_or(0, |id| u64::from(id.get())),
+            )),
             _ => None,
         }
     }
@@ -644,19 +669,28 @@ impl SourceLoop for St2110VideoSrc {
                 let redundant_socket = self.socket2.as_ref().ok_or(G2gError::NotConfigured)?;
                 paths.push(redundant_socket.try_clone().map_err(io_err)?);
             }
+            let classification_extension_id = self.classification_extension_id;
             let mut frames = spawn_rtp_receiver(paths, self.idle_timeout_ns, move |datagram| {
-                depack.depacketize(datagram)
+                let vframe = depack.depacketize(datagram)?;
+                let classification = classification_extension_id
+                    .and_then(|id| RtpHeader::find_extension(datagram, id.get()))
+                    .and_then(ClassificationExtension::parse)
+                    .map(classification_meta);
+                Some((vframe, classification))
             })
             .map_err(io_err)?;
-            while let Some(vframe) = frames.recv().await {
-                let vframe = vframe.map_err(io_err)?;
-                let frame = build_frame(
+            while let Some(received) = frames.recv().await {
+                let (vframe, classification) = received.map_err(io_err)?;
+                let mut frame = build_frame(
                     vframe.bytes,
                     vframe.rtp_timestamp,
                     &clock,
                     &mut timeline,
                     count,
                 );
+                if let Some(meta) = classification {
+                    frame.meta.attach(meta);
+                }
                 out.push(PipelinePacket::DataFrame(frame)).await?;
                 count += 1;
             }
@@ -690,6 +724,13 @@ static ST2110_VIDEO_SRC_PROPS: &[PropertySpec] = &[
         .with_default("0.0.0.0"),
     PropertySpec::new("redundant-port", PropKind::Uint, "Blue-path UDP port").with_default("5009"),
     IDLE_TIMEOUT_PROPERTY,
+    PropertySpec::new(
+        "classification-extension-id",
+        PropKind::Uint,
+        "RFC 8285 id carrying a frame's classification as a confidence byte and a class name (0 = off)",
+    )
+    .with_default("0")
+    .with_range("0", "255"),
 ];
 
 impl PadTemplates for St2110VideoSrc {
@@ -709,6 +750,7 @@ mod tests {
     #[derive(Default)]
     struct Capture {
         frames: Vec<Vec<u8>>,
+        metas: Vec<g2g_core::meta::FrameMetaSet>,
         eos: bool,
     }
     impl OutputSink for Capture {
@@ -724,6 +766,7 @@ mod tests {
                         if let Some(s) = f.domain.as_system_slice() {
                             self.frames.push(s.to_vec());
                         }
+                        self.metas.push(f.meta);
                     }
                     PipelinePacket::Eos => self.eos = true,
                     _ => {}
@@ -799,6 +842,75 @@ mod tests {
             cap.frames[0], input,
             "RGBA frame survives sink -> UDP -> src"
         );
+    }
+
+    #[test]
+    fn classification_extension_becomes_frame_analytics_meta() {
+        const EXTENSION_ID: u8 = 2;
+        const SIDE: usize = 8;
+        let caps = Caps::RawVideo {
+            format: RawVideoFormat::Gray8,
+            width: Dim::Fixed(SIDE as u32),
+            height: Dim::Fixed(SIDE as u32),
+            framerate: Rate::Fixed(10 << 16),
+            interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            pixel_aspect: g2g_core::PixelAspect::Any,
+        };
+        let mut src = St2110VideoSrc::new();
+        src.set_property("address", PropValue::Str("127.0.0.1".into()))
+            .unwrap();
+        src.set_property("port", PropValue::Uint(0)).unwrap();
+        src.set_property("format", PropValue::Str("gray8".into()))
+            .unwrap();
+        src.set_property("width", PropValue::Uint(SIDE as u64))
+            .unwrap();
+        src.set_property("height", PropValue::Uint(SIDE as u64))
+            .unwrap();
+        src.set_property("idle-timeout", PropValue::Uint(300_000_000))
+            .unwrap();
+        src.set_property(
+            "classification-extension-id",
+            PropValue::Uint(u64::from(EXTENSION_ID)),
+        )
+        .unwrap();
+        src.configure_pipeline(&caps).expect("src binds");
+        let port = src.local_port().expect("bound port");
+
+        let mut label = [0u8; 16];
+        let label_len = ClassificationExtension {
+            confidence: 0.9,
+            name: "person",
+        }
+        .write(&mut label)
+        .unwrap();
+        let extensions = [g2g_core::rtp::RtpHeaderExtension {
+            id: EXTENSION_ID,
+            data: &label[..label_len],
+        }];
+        let picture = alloc::vec![77u8; SIDE * SIDE];
+        let mut packetizer = St2110VideoPacketizer::new(96, 1, Sampling::Gray8, 1400);
+        let mut scratch = alloc::vec![0u8; packetizer.max_packet()];
+        let mut packets = packetizer
+            .frame_packets(&picture, SIDE, SIDE, 0, &mut scratch)
+            .unwrap()
+            .with_marker_extensions(&extensions)
+            .unwrap();
+        let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+        while let Some(packet) = packets.next_packet() {
+            socket.send_to(packet, ("127.0.0.1", port)).unwrap();
+        }
+
+        let mut cap = Capture::default();
+        block_on(src.run(&mut cap)).expect("src runs");
+        let meta = cap.metas[0]
+            .get::<AnalyticsMeta>()
+            .expect("the frame carries the classification");
+        let Some(AnalyticsNode::Classification(classification)) = meta.nodes.first() else {
+            panic!("expected a classification node, got {:?}", meta.nodes);
+        };
+        assert_eq!(meta.class_name(classification.label), Some("person"));
+        assert!((classification.confidence - 0.9).abs() < 0.01);
     }
 
     #[test]

@@ -42,7 +42,7 @@
 #[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 
-use crate::rtp::{RtpHeader, RTP_HEADER_LEN};
+use crate::rtp::{RtpHeader, RtpHeaderExtension, RTP_HEADER_LEN};
 use crate::{MediaClock, RawVideoFormat, TaiNs};
 
 /// RFC 4175 payload header before the SRD list: the Extended Sequence Number.
@@ -355,6 +355,8 @@ impl St2110VideoPacketizer {
             layout,
             cursor,
             rtp_timestamp,
+            marker_extensions: &[],
+            marker_header_len: RTP_HEADER_LEN,
             scratch,
         })
     }
@@ -377,7 +379,13 @@ impl St2110VideoPacketizer {
     }
 
     // RFC 4175 carries the high 16 sequence bits after the RTP header
-    fn write_headers(&self, pkt: &mut [u8], rtp_ts: u32, marker: bool) {
+    fn write_headers(
+        &self,
+        pkt: &mut [u8],
+        rtp_ts: u32,
+        marker: bool,
+        extensions: &[RtpHeaderExtension<'_>],
+    ) -> usize {
         let header = RtpHeader {
             payload_type: self.payload_type,
             marker,
@@ -385,9 +393,12 @@ impl St2110VideoPacketizer {
             timestamp: rtp_ts,
             ssrc: self.ssrc,
         };
-        pkt[..RTP_HEADER_LEN].copy_from_slice(&header.to_bytes());
-        pkt[RTP_HEADER_LEN..RTP_HEADER_LEN + EXT_SEQ_LEN]
+        let header_len = header
+            .write_with_extensions(extensions, pkt)
+            .expect("with_marker_extensions accepts only extensions that fit the packet");
+        pkt[header_len..header_len + EXT_SEQ_LEN]
             .copy_from_slice(&((self.sequence >> 16) as u16).to_be_bytes());
+        header_len
     }
 }
 
@@ -399,9 +410,30 @@ pub struct FramePackets<'a> {
     cursor: RunCursor,
     rtp_timestamp: u32,
     scratch: &'a mut [u8],
+    marker_extensions: &'a [RtpHeaderExtension<'a>],
+    marker_header_len: usize,
 }
 
-impl FramePackets<'_> {
+impl<'a> FramePackets<'a> {
+    pub fn with_marker_extensions(
+        mut self,
+        extensions: &'a [RtpHeaderExtension<'a>],
+    ) -> Option<Self> {
+        let marker_header_len = RtpHeader::extended_header_len(extensions)?;
+        let opg = self.packetizer.sampling.octets_per_group();
+        let smallest_payload = EXT_SEQ_LEN + SRD_HEADER_LEN + opg;
+        // RTP padding counts its own length in one byte
+        let largest_padding = marker_header_len - RTP_HEADER_LEN + SRD_HEADER_LEN + opg;
+        if marker_header_len + smallest_payload > self.packetizer.max_packet
+            || largest_padding > usize::from(u8::MAX)
+        {
+            return None;
+        }
+        self.marker_extensions = extensions;
+        self.marker_header_len = marker_header_len;
+        Some(self)
+    }
+
     pub fn next_packet(&mut self) -> Option<&[u8]> {
         let height = self.cursor.height;
         if self.cursor.line >= height {
@@ -411,28 +443,33 @@ impl FramePackets<'_> {
         let opg = sampling.octets_per_group();
         let ppg = sampling.pixels_per_group();
         let max_packet = self.packetizer.max_packet;
-        let payload_budget = max_packet - RTP_HEADER_LEN - EXT_SEQ_LEN;
+        let payload_budget = max_packet - self.marker_header_len - EXT_SEQ_LEN;
         // a dry run sizes the packet, so SRDs and pgroups go straight into it
         let mut sizing = self.cursor.packet_runs(payload_budget);
         let (run_count, data_len) = sizing.by_ref().fold((0, 0), |(count, len), run| {
             (count + 1, len + run.take * opg)
         });
         let marker = sizing.cursor.line >= height;
-        let headers_end = RTP_HEADER_LEN + EXT_SEQ_LEN + run_count * SRD_HEADER_LEN;
+        let (header_len, extensions) = if marker {
+            (self.marker_header_len, self.marker_extensions)
+        } else {
+            (RTP_HEADER_LEN, &[][..])
+        };
+        let headers_end = header_len + EXT_SEQ_LEN + run_count * SRD_HEADER_LEN;
         let data_end = headers_end + data_len;
         // equal sizes let the sender batch a frame into one UDP GSO write
         let length = if marker { data_end } else { max_packet };
         let packet = &mut self.scratch[..length];
         self.packetizer
-            .write_headers(packet, self.rtp_timestamp, marker);
+            .write_headers(packet, self.rtp_timestamp, marker, extensions);
         if length > data_end {
             let padding = &mut packet[data_end..];
             padding.fill(0);
             packet[0] |= RTP_PADDING_BIT;
             packet[length - 1] = u8::try_from(length - data_end)
-                .expect("a packet stops short by less than one SRD and pgroup");
+                .expect("with_marker_extensions keeps the padding under 256 bytes");
         }
-        let mut header_at = RTP_HEADER_LEN + EXT_SEQ_LEN;
+        let mut header_at = header_len + EXT_SEQ_LEN;
         let mut data_at = headers_end;
         for (index, run) in self.cursor.packet_runs(payload_budget).enumerate() {
             let continues = index + 1 < run_count;
@@ -915,6 +952,59 @@ mod tests {
         assert!(tx.frame_packets(&frame, w, h, 0, &mut short).is_none());
         let mut fits = alloc::vec![0u8; tx.max_packet()];
         assert!(tx.frame_packets(&frame, w, h, 0, &mut fits).is_some());
+    }
+
+    #[test]
+    fn marker_extensions_ride_only_the_last_packet_of_a_frame() {
+        const EXTENSION_ID: u8 = 3;
+        const MAX_PACKET: usize = 100;
+        let (w, h) = (8usize, 4usize);
+        let frame = ramp(w * 4 * h);
+        let label = [200, b'p', b'e', b'r', b's', b'o', b'n'];
+        let extensions = [RtpHeaderExtension {
+            id: EXTENSION_ID,
+            data: &label,
+        }];
+        let mut tx = St2110VideoPacketizer::new(96, 1, Sampling::Rgba8, MAX_PACKET);
+        let mut scratch = alloc::vec![0u8; tx.max_packet()];
+        let mut packets = tx
+            .frame_packets(&frame, w, h, 0, &mut scratch)
+            .unwrap()
+            .with_marker_extensions(&extensions)
+            .unwrap();
+        let mut sent = Vec::new();
+        while let Some(packet) = packets.next_packet() {
+            sent.push(packet.to_vec());
+        }
+        let (last, earlier) = sent.split_last().unwrap();
+        assert!(!earlier.is_empty(), "the frame spans several packets");
+        assert_eq!(
+            RtpHeader::find_extension(last, EXTENSION_ID),
+            Some(&label[..])
+        );
+        for packet in earlier {
+            assert_eq!(packet.len(), MAX_PACKET);
+            assert_eq!(RtpHeader::find_extension(packet, EXTENSION_ID), None);
+        }
+        assert!(last.len() <= MAX_PACKET);
+        let mut rx = St2110VideoDepacketizer::new(RawVideoFormat::Rgba8, w, h).unwrap();
+        let received = sent.iter().find_map(|packet| rx.depacketize(packet));
+        assert_eq!(received.unwrap().bytes, frame);
+    }
+
+    #[test]
+    fn refuses_marker_extensions_that_leave_no_room_for_pixels() {
+        let (w, h) = (8usize, 4usize);
+        let frame = ramp(w * 4 * h);
+        let large = [0u8; 200];
+        let extensions = [RtpHeaderExtension {
+            id: 3,
+            data: &large,
+        }];
+        let mut tx = St2110VideoPacketizer::new(96, 1, Sampling::Rgba8, 100);
+        let mut scratch = alloc::vec![0u8; tx.max_packet()];
+        let packets = tx.frame_packets(&frame, w, h, 0, &mut scratch).unwrap();
+        assert!(packets.with_marker_extensions(&extensions).is_none());
     }
 
     #[test]

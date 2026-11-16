@@ -70,10 +70,11 @@ leans "no" at 0.4 to 0.75.
 
 ## Watch the camera
 
-With g2g (`g2g-plugins` built with `std,wayland-sink,st2110`):
+With g2g (`g2g-plugins` built with `std,wayland-sink,st2110,analytics`), which
+captions each frame with the board's person label:
 
 ```bash
-g2g-launch st2110videosrc port=5004 format=gray8 width=96 height=96 ! videoconvert ! videoscale ! video/x-raw,width=480,height=480 ! fpsdisplaysink video-sink=autovideosink sync=false
+g2g-launch st2110videosrc port=5004 format=gray8 width=96 height=96 classification-extension-id=1 ! videoconvert ! videoscale ! video/x-raw,format=RGBA,width=480,height=480 ! analyticsoverlay show-label=true show-score=true ! fpsdisplaysink video-sink=autovideosink sync=false
 ```
 
 With GStreamer:
@@ -82,7 +83,7 @@ With GStreamer:
 gst-launch-1.0 udpsrc port=5004 caps="application/x-rtp,media=video,clock-rate=90000,encoding-name=RAW,sampling=YCbCr-4:2:2,depth=(string)8,width=(string)96,height=(string)96,colorimetry=(string)BT601-5,payload=96" ! rtpvrawdepay ! videoconvert ! videoscale ! video/x-raw,width=480,height=480 ! autovideosink sync=false
 ```
 
-The board sends 7 to 9 frames per second at -74 dBm. A weaker signal sends
+The board sends about 13 frames per second. A weaker signal sends
 fewer, with longer gaps.
 
 ## Notes

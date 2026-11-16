@@ -5,7 +5,7 @@
 mod util;
 
 use g2g_core::error::G2gError;
-use g2g_core::rtp::RTP_HEADER_LEN;
+use g2g_core::rtp::{RtpHeader, RTP_HEADER_LEN};
 use g2g_core::st2110video::{Sampling, St2110VideoDepacketizer};
 use g2g_core::staticpool::StaticLendRing;
 use g2g_core::{RawVideoFormat, StaticTransform};
@@ -65,6 +65,43 @@ fn a_gray_frame_reaches_a_422_receiver_and_passes_through() {
         .iter()
         .filter_map(|packet| receiver.depacketize(packet))
         .last()
+        .expect("the marker packet completes the frame")
+        .bytes;
+    let luma: Vec<u8> = yuyv.iter().step_by(2).copied().collect();
+    assert_eq!(luma, image);
+}
+
+#[test]
+fn frame_bytes_past_the_picture_go_out_as_the_marker_packet_extension() {
+    const EXTENSION_ID: u8 = 1;
+    const LABEL: &[u8] = &[230, b'p', b'e', b'r', b's', b'o', b'n'];
+    const FRAME_BYTES: usize = IMAGE_BYTES + LABEL.len();
+    let image: Vec<u8> = (0..IMAGE_BYTES).map(|i| (i * 5 + 1) as u8).collect();
+    let labelled = [image.as_slice(), LABEL].concat();
+    let ring: StaticLendRing<1, FRAME_BYTES> = StaticLendRing::new();
+    let mut send = RawVideoRtpSend::<_, PACKET_BYTES>::new(
+        Collect::default(),
+        Sampling::Gray8,
+        SIDE,
+        SIDE,
+        PAYLOAD_TYPE,
+        SSRC,
+    )
+    .expect("96x96 has a 4:2:2 layout")
+    .with_trailer_extension(EXTENSION_ID);
+
+    drop(block_on(send.process(frame_of(&ring, &labelled, 0, 0))).expect("sends"));
+
+    let packets = send.free().packets;
+    let (last, earlier) = packets.split_last().unwrap();
+    assert_eq!(RtpHeader::find_extension(last, EXTENSION_ID), Some(LABEL));
+    assert!(earlier
+        .iter()
+        .all(|packet| RtpHeader::find_extension(packet, EXTENSION_ID).is_none()));
+    let mut receiver = St2110VideoDepacketizer::new(RawVideoFormat::Yuyv, SIDE, SIDE).unwrap();
+    let yuyv = packets
+        .iter()
+        .find_map(|packet| receiver.depacketize(packet))
         .expect("the marker packet completes the frame")
         .bytes;
     let luma: Vec<u8> = yuyv.iter().step_by(2).copied().collect();
