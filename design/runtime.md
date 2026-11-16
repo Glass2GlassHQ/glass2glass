@@ -719,7 +719,7 @@ byte-stream demuxer that took such a seek and gets the source's `Eos` instead of
 `Flush`, so a seek after the end appends to their file.
 
 In a run that takes seeks after the end, the controller's `takes_seeks_after_end()` is
-set before any arm starts. `Mp4Src` and `FileSrc` push `Eos` at the end of the file and
+set before any arm starts. `Mp4Src`, `FileSrc` and `HttpSrc` push `Eos` at the end of the file and
 park on `wait_event`: a seek pushes `Flush` and plays on, `shutdown` returns. A
 byte-stream demuxer receives nothing while its source is parked, so after its `Eos` it
 pushes the `Eos` itself and waits on the app controller inside `process`, then takes

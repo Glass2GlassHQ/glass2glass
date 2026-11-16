@@ -188,7 +188,7 @@ g2g-launch [OPTIONS] --script <file.rhai>         # Rhai graph-building script";
 
 const SEEK_HELP: &str = "\n\
 --seek <seconds>: one flushing seek to that stream time before the first frame, then run to the end.\n  \
-An MP4 file under uridecodebin, or a demuxer after filesrc (qtdemux, tsdemux, matroskademux,\n  \
+An MP4 file under uridecodebin, or a demuxer after filesrc or httpsrc (qtdemux, tsdemux, matroskademux,\n  \
 flvdemux, oggdemux, fmp4demux, also when decodebin plugs it), restarts at the keyframe at or before\n  \
 the target and the decoder drops the frames before it, so the first decoded frame is the first one\n  \
 at or after the target (ffmpeg -ss). A target past the end fails the run.\n\

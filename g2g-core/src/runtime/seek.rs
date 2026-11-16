@@ -555,7 +555,7 @@ impl core::fmt::Display for AttachSeekError {
             Self::NothingSeekable => write!(
                 f,
                 "nothing in the pipeline can seek: a seek needs an MP4 file source \
-                 (uridecodebin uri=file://...mp4), qtdemux, or a demuxer fed by a filesrc directly or through id3demux"
+                 (uridecodebin uri=file://...mp4), qtdemux, or a demuxer fed by a filesrc or httpsrc directly or through id3demux"
             ),
         }
     }

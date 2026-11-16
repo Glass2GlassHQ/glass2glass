@@ -5,7 +5,8 @@
 //! HTTP(S) byte-stream source (HttpSrc, `http-src` feature): the souphttpsrc
 //! analog and the network sibling of [`FileSrc`](crate::filesrc). It issues one
 //! GET and streams the response body downstream as `DataFrame` chunks under the
-//! declared caps, then `Eos`. This is the fetch layer under HLS/DASH (each media
+//! declared caps, then `Eos`. A byte seek from the demuxer after it pushes
+//! `Flush` and fetches the rest with a `Range` request. This is the fetch layer under HLS/DASH (each media
 //! segment is one GET), and feeds the byte-stream demuxers
 //! (`tsdemux` / `matroskademux` / ...) the same way `FileSrc` does.
 //!
@@ -39,14 +40,19 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
+use g2g_core::log::{short_type_name, Target};
 use g2g_core::memory::SystemSlice;
-use g2g_core::runtime::SourceLoop;
+use g2g_core::runtime::{
+    eos_then_wait_for_seek, flushing_only, SeekController, SeekFormat, SourceLoop,
+};
 use g2g_core::{
-    BusHandle, BusMessage, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
-    ElementMetadata, FrameTiming, G2gError, HardwareError, HttpTransportFailure, MemoryDomain,
-    OutputSink, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
+    g2g_error, BusHandle, BusMessage, ByteStreamEncoding, Caps, CapsConstraint, CapsSet,
+    ConfigureOutcome, ElementMetadata, FrameTiming, G2gError, HardwareError, HttpTransportFailure,
+    MemoryDomain, OutputSink, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
 };
 use reqwest::cookie::Jar;
+use reqwest::header::{CONTENT_RANGE, RANGE};
+use reqwest::StatusCode;
 
 use crate::httperror::http_err;
 
@@ -103,6 +109,23 @@ pub struct HttpSrc {
     cookies: String,
     bus: Option<BusHandle>,
     configured: bool,
+    seek: Option<SeekController>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BodyEnd {
+    Complete,
+    // a seek is waiting, so the rest of the body is not read
+    Sought,
+}
+
+// the whole resource's length: Content-Length of a full answer, or the total a Content-Range names
+fn resource_len(response: &reqwest::Response) -> Option<u64> {
+    if response.status() != StatusCode::PARTIAL_CONTENT {
+        return response.content_length();
+    }
+    let content_range = response.headers().get(CONTENT_RANGE)?.to_str().ok()?;
+    content_range.rsplit_once('/')?.1.trim().parse().ok()
 }
 
 impl HttpSrc {
@@ -117,6 +140,7 @@ impl HttpSrc {
             cookies: String::new(),
             bus: None,
             configured: false,
+            seek: None,
         }
     }
 
@@ -132,6 +156,140 @@ impl HttpSrc {
     pub fn with_bus(mut self, bus: BusHandle) -> Self {
         self.bus = Some(bus);
         self
+    }
+
+    fn seek_pending(&self) -> bool {
+        self.seek.as_ref().is_some_and(SeekController::has_pending)
+    }
+
+    // the body from byte `start` on, none when `start` is at or past the end
+    async fn request_from(
+        &self,
+        client: &reqwest::Client,
+        start: u64,
+        resource_len: Option<u64>,
+    ) -> Result<Option<reqwest::Response>, G2gError> {
+        if resource_len.is_some_and(|len| start >= len) {
+            return Ok(None);
+        }
+        let mut request = client.get(&self.url);
+        if start > 0 {
+            request = request.header(RANGE, format!("bytes={start}-"));
+        }
+        let response = request.send().await.map_err(http_err)?;
+        if response.status() == StatusCode::RANGE_NOT_SATISFIABLE {
+            return Ok(None);
+        }
+        let response = response.error_for_status().map_err(http_err)?;
+        if start > 0 && response.status() != StatusCode::PARTIAL_CONTENT {
+            g2g_error!(
+                Target::category(short_type_name::<Self>()),
+                "{} answers a Range request with the whole resource, so it cannot seek",
+                self.url
+            );
+            return Err(G2gError::SeekRefused);
+        }
+        Ok(Some(response))
+    }
+
+    async fn stream_body(
+        &self,
+        mut response: reqwest::Response,
+        out: &mut dyn OutputSink,
+        sequence: &mut u64,
+    ) -> Result<BodyEnd, G2gError> {
+        if self.prebuffer_bytes == 0 {
+            // Plain streaming: each chunk straight through.
+            loop {
+                if self.seek_pending() {
+                    return Ok(BodyEnd::Sought);
+                }
+                let Some(bytes) = response.chunk().await.map_err(http_err)? else {
+                    return Ok(BodyEnd::Complete);
+                };
+                if !bytes.is_empty() {
+                    Self::push_chunk(out, bytes.to_vec(), sequence).await?;
+                }
+            }
+        }
+
+        // Prebuffered mode. The window is bounded: it never grows past the
+        // target (plus one in-flight chunk), so a fast network cannot
+        // balloon memory; a slow consumer backpressures via `out.push`.
+        let target = self.prebuffer_bytes;
+        let mut window: VecDeque<Vec<u8>> = VecDeque::new();
+        let mut buffered = 0usize;
+        let mut ended = false;
+        let mut last_bucket: Option<u8> = None;
+        // Post on quartile-band transitions only (like the runner's sink
+        // report), so a fill is a handful of messages, not one per chunk.
+        let post = |bus: &Option<BusHandle>, pct: u8, last: &mut Option<u8>| {
+            if let Some(b) = bus {
+                let bucket = (pct / 25).min(4);
+                if *last != Some(bucket) {
+                    *last = Some(bucket);
+                    b.try_post(BusMessage::Buffering {
+                        percent: pct,
+                        element: None,
+                    });
+                }
+            }
+        };
+        let percent = |buffered: usize| ((buffered * 100 / target) as u8).min(100);
+
+        loop {
+            // Buffering phase: fill the window to the target, reporting the
+            // level as it rises. Entered at start and after an underrun.
+            post(&self.bus, percent(buffered), &mut last_bucket);
+            while buffered < target && !ended {
+                if self.seek_pending() {
+                    return Ok(BodyEnd::Sought);
+                }
+                match response.chunk().await.map_err(http_err)? {
+                    Some(b) => {
+                        if !b.is_empty() {
+                            buffered += b.len();
+                            window.push_back(b.to_vec());
+                            post(&self.bus, percent(buffered), &mut last_bucket);
+                        }
+                    }
+                    None => ended = true,
+                }
+            }
+            // The stream ending early also completes buffering: there is
+            // nothing left to wait for, so the application resumes.
+            post(&self.bus, 100, &mut last_bucket);
+
+            // Drain phase: push the window down while topping it up with
+            // whatever the network has ready now (never waiting, never past
+            // the target).
+            while let Some(chunk) = window.pop_front() {
+                if self.seek_pending() {
+                    return Ok(BodyEnd::Sought);
+                }
+                buffered -= chunk.len();
+                Self::push_chunk(out, chunk, sequence).await?;
+                while !ended && buffered < target {
+                    match tokio::time::timeout(Duration::ZERO, response.chunk()).await {
+                        Ok(r) => match r.map_err(http_err)? {
+                            Some(b) => {
+                                if !b.is_empty() {
+                                    buffered += b.len();
+                                    window.push_back(b.to_vec());
+                                }
+                            }
+                            None => ended = true,
+                        },
+                        Err(_) => break, // nothing immediately ready
+                    }
+                }
+            }
+            if ended {
+                return Ok(BodyEnd::Complete);
+            }
+            // Window drained with the stream still live: underrun. Loop
+            // back into the buffering phase to refill before resuming.
+        }
     }
 
     /// Push one body chunk downstream as a `DataFrame`.
@@ -183,109 +341,48 @@ impl SourceLoop for HttpSrc {
         Ok(ConfigureOutcome::Accepted)
     }
 
+    fn seek_format(&self) -> Option<SeekFormat> {
+        Some(SeekFormat::Bytes)
+    }
+
+    fn set_seek(&mut self, controller: SeekController) {
+        self.seek = Some(controller);
+    }
+
     fn run<'a>(&'a mut self, out: &'a mut dyn OutputSink) -> Self::RunFuture<'a> {
         Box::pin(async move {
             if !self.configured {
                 return Err(G2gError::NotConfigured);
             }
-            let mut response = reqwest::Client::builder()
+            let client = reqwest::Client::builder()
                 .cookie_provider(cookie_jar(&self.url, &self.cookies)?)
                 .build()
-                .map_err(http_err)?
-                .get(&self.url)
-                .send()
-                .await
-                .map_err(http_err)?
-                .error_for_status()
                 .map_err(http_err)?;
-
             let mut sequence = 0u64;
-            if self.prebuffer_bytes == 0 {
-                // Plain streaming: each chunk straight through.
-                while let Some(bytes) = response.chunk().await.map_err(http_err)? {
-                    if bytes.is_empty() {
+            let mut start = 0u64;
+            let mut known_len = None;
+            loop {
+                if let Some(seek) = self.seek.as_ref().and_then(|c| c.take_seek(flushing_only)) {
+                    out.push(PipelinePacket::Flush).await?;
+                    start = seek.start;
+                }
+                if let Some(response) = self.request_from(&client, start, known_len).await? {
+                    known_len = known_len.or(resource_len(&response));
+                    if let (Some(controller), Some(len)) = (&self.seek, known_len) {
+                        controller.set_stream_len(len);
+                    }
+                    if self.stream_body(response, out, &mut sequence).await? == BodyEnd::Sought {
                         continue;
                     }
-                    Self::push_chunk(out, bytes.to_vec(), &mut sequence).await?;
                 }
-                out.push(PipelinePacket::Eos).await?;
-                return Ok(sequence);
+                // a seek that arrived as the body ended repositions before the stream ends
+                if self.seek_pending() {
+                    continue;
+                }
+                if !eos_then_wait_for_seek(self.seek.as_ref(), out).await? {
+                    return Ok(sequence);
+                }
             }
-
-            // Prebuffered mode. The window is bounded: it never grows past the
-            // target (plus one in-flight chunk), so a fast network cannot
-            // balloon memory; a slow consumer backpressures via `out.push`.
-            let target = self.prebuffer_bytes;
-            let mut window: VecDeque<Vec<u8>> = VecDeque::new();
-            let mut buffered = 0usize;
-            let mut ended = false;
-            let mut last_bucket: Option<u8> = None;
-            // Post on quartile-band transitions only (like the runner's sink
-            // report), so a fill is a handful of messages, not one per chunk.
-            let post = |bus: &Option<BusHandle>, pct: u8, last: &mut Option<u8>| {
-                if let Some(b) = bus {
-                    let bucket = (pct / 25).min(4);
-                    if *last != Some(bucket) {
-                        *last = Some(bucket);
-                        b.try_post(BusMessage::Buffering {
-                            percent: pct,
-                            element: None,
-                        });
-                    }
-                }
-            };
-            let percent = |buffered: usize| ((buffered * 100 / target) as u8).min(100);
-
-            loop {
-                // Buffering phase: fill the window to the target, reporting the
-                // level as it rises. Entered at start and after an underrun.
-                post(&self.bus, percent(buffered), &mut last_bucket);
-                while buffered < target && !ended {
-                    match response.chunk().await.map_err(http_err)? {
-                        Some(b) => {
-                            if !b.is_empty() {
-                                buffered += b.len();
-                                window.push_back(b.to_vec());
-                                post(&self.bus, percent(buffered), &mut last_bucket);
-                            }
-                        }
-                        None => ended = true,
-                    }
-                }
-                // The stream ending early also completes buffering: there is
-                // nothing left to wait for, so the application resumes.
-                post(&self.bus, 100, &mut last_bucket);
-
-                // Drain phase: push the window down while topping it up with
-                // whatever the network has ready now (never waiting, never past
-                // the target).
-                while let Some(chunk) = window.pop_front() {
-                    buffered -= chunk.len();
-                    Self::push_chunk(out, chunk, &mut sequence).await?;
-                    while !ended && buffered < target {
-                        match tokio::time::timeout(Duration::ZERO, response.chunk()).await {
-                            Ok(r) => match r.map_err(http_err)? {
-                                Some(b) => {
-                                    if !b.is_empty() {
-                                        buffered += b.len();
-                                        window.push_back(b.to_vec());
-                                    }
-                                }
-                                None => ended = true,
-                            },
-                            Err(_) => break, // nothing immediately ready
-                        }
-                    }
-                }
-                if ended {
-                    break;
-                }
-                // Window drained with the stream still live: underrun. Loop
-                // back into the buffering phase to refill before resuming.
-            }
-
-            out.push(PipelinePacket::Eos).await?;
-            Ok(sequence)
         })
     }
 

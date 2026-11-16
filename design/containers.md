@@ -1645,6 +1645,15 @@ application can pause until `100` and show a buffering indicator on a stall. The
 window never grows past the target, and `0`, the default, streams straight
 through.
 
+`HttpSrc` takes byte seeks as `FileSrc` does, as souphttpsrc does: before each
+chunk it checks for a seek, drops the rest of the body, pushes `Flush` and
+fetches from the target byte with `Range: bytes=N-`. It publishes the resource
+length from `Content-Length`, or from the total in a 206 answer's
+`Content-Range`, and a seek at or past that length ends the stream without a
+request. A server that answers a ranged request with the whole resource fails
+the run with `SeekRefused`, as souphttpsrc errors when the server does not
+accept `Range`.
+
 `httpsrc`, `hlssrc` and `dashsrc` take `cookies`, a Cookie header value. Its
 pairs go into a reqwest cookie jar for the location's host with `Path=/`, and the
 jar also keeps the servers' `Set-Cookie` answers, so a session cookie set on a
