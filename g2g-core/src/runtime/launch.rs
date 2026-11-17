@@ -2545,9 +2545,9 @@ const FALLBACK_AUDIO_DUMMY: (&str, &str, &str) = ("audiotestsrc", "wave", "silen
 const FALLBACK_VIDEO_SINK: &str = "autovideosink";
 const FALLBACK_AUDIO_SINK: &str = "autoaudiosink";
 
-/// Between a raw-audio switch output and its sink: the sink fixes one PCM format
-/// at configure, and these absorb the stream's real channels and rate.
-const FALLBACK_AUDIO_TAIL: &[&str] = &["audioconvert", "audioresample"];
+/// Between raw audio and an audio sink: the sink fixes one PCM format at
+/// configure, and these absorb the stream's real channels and rate.
+const AUDIO_SINK_TAIL: &[&str] = &["audioconvert", "audioresample"];
 
 /// What one stream kind's branch of a fanned-out `fallbacksrc` is made of: the
 /// suffix its switch is named with, the generator its dummy fallback uses, the
@@ -2576,7 +2576,7 @@ fn fallback_kind(stream_type: StreamType) -> Option<FallbackKind> {
         StreamType::Audio => Some(FallbackKind {
             suffix: FALLBACK_AUDIO_SUFFIX,
             dummy: FALLBACK_AUDIO_DUMMY,
-            tail: FALLBACK_AUDIO_TAIL,
+            tail: AUDIO_SINK_TAIL,
             sink: FALLBACK_AUDIO_SINK,
             raw: is_raw_audio,
         }),
@@ -2937,6 +2937,21 @@ fn expand_fallbacksrc(
     Ok((main, fallback))
 }
 
+fn decodes_only_to_audio(registry: &Registry, caps: &Caps, avoided: &[&str]) -> bool {
+    let reaches = |target: &dyn Fn(&Caps) -> bool| {
+        registry
+            .autoplug_names_avoiding(
+                caps,
+                target,
+                DECODEBIN_MAX_DEPTH,
+                MemoryDomainKind::System,
+                avoided,
+            )
+            .is_some()
+    };
+    !reaches(&is_raw_video) && reaches(&is_raw_audio)
+}
+
 /// Expand every `uridecodebin` / `playbin` / `fallbacksrc` (a source position
 /// element) into the `uri=` scheme handler's source plus the auto-plugged decode
 /// chain, as pre-built nodes spliced straight into the chain. `playbin`
@@ -3030,14 +3045,15 @@ fn expand_uri_sources(
                 continue;
             }
             let caps = built.caps;
+            let plays_audio = is_playbin && decodes_only_to_audio(registry, &caps, avoided);
             // `playbin` names its own sink, a bare `uridecodebin` is followed by
             // one: either way the consumer's declared input memory picks the
             // decoder (M1018), as it does after a `decodebin`.
-            let sink = is_playbin.then(|| {
-                prop(&spec, "video-sink")
-                    .unwrap_or(PlaybinSinks::AUTO.video)
-                    .to_string()
+            let sink = is_playbin.then(|| match plays_audio {
+                true => prop(&spec, "audio-sink").unwrap_or(PlaybinSinks::AUTO.audio),
+                false => prop(&spec, "video-sink").unwrap_or(PlaybinSinks::AUTO.video),
             });
+            let sink = sink.map(str::to_string);
             let consumer = match (&sink, items.peek()) {
                 (Some(sink), _) => Some(sink.as_str()),
                 (None, Some((_, Item::Element(consumer)))) => Some(consumer.name.as_str()),
@@ -3078,6 +3094,18 @@ fn expand_uri_sources(
                 }
             }
             if let Some(sink) = sink {
+                let tail = match plays_audio {
+                    true => AUDIO_SINK_TAIL,
+                    false => &[],
+                };
+                for name in tail {
+                    new_chain.push(Item::Element(ElementSpec {
+                        name: name.to_string(),
+                        props: Vec::new(),
+                        instance: None,
+                        log_category: None,
+                    }));
+                }
                 if needs_convert {
                     new_chain.push(Item::Element(ElementSpec {
                         name: "videoconvert".to_string(),

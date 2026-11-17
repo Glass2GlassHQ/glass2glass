@@ -980,8 +980,9 @@ as before.
   leaves the pad unlinked. A session source still sets that track up, as gst's
   `rtspsrc` does.
 
-- **playbin (multi-stream front door)** (`std`). Beyond the
-  single-stream expansion, g2g's `playbin` can split a container into *all* its
+- **playbin (multi-stream front door)** (`std`). The single-stream expansion
+  ends in `video-sink`, or in `audioconvert ! audioresample ! audio-sink` when
+  the stream decodes to raw audio and not to raw video. Beyond that, g2g's `playbin` can split a container into *all* its
   streams and decode each to its own sink, built on the stream-collection model:
   a demuxer announces every track as a `BusMessage::StreamCollection` (for
   `MkvDemux`/`MkvDemuxN` and `TsDemux`/`Mp4Src`), the app selects among them
