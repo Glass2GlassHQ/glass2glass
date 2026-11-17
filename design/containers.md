@@ -1505,6 +1505,50 @@ payload fails with `CapsMismatch`, and so does a frame past 16 MiB. At end of
 stream a cut video payload is emitted with the bytes that arrived, and a cut
 header drops the unfinished frame, both as ffmpeg does.
 
+## MXF
+
+`MxfDemuxN` (`mxfdemux`) on `Caps::ByteStream{Mxf}` has one port per essence
+track. `playbin`, `decodebin name=d` and a named `mxfdemux` reach it through the
+uridecodebin hooks, which read the tracks from the header partition in the
+file's first 4 MiB. The tracks are those of the source packages the essence
+container data links to, or of every source package with a descriptor when
+there is none: timeline tracks with a non-zero track number, each matched to the
+sub-descriptor whose `LinkedTrackID` names it. Byte 13 of the descriptor's
+essence container label gives the codec: MPEG ES (H.264 when the picture coding
+label is one of the AVC profiles, MPEG-2 otherwise), D-10, AVC, JPEG 2000, VC-3
+(`DnxHd`), ProRes (the variant from the picture coding label) and PCM (16, 24 or
+32-bit from `QuantizationBits`). The picture size is the display size, falling
+back to the stored size, which is padded to whole macroblocks, and doubled for
+separate or mixed fields. The source clips of the material package are not
+applied, so a file plays its whole essence.
+
+When the run parks its source, the demuxer reads the last 250 kB through a byte
+seek (`TailRead`), walks the partitions the random index pack lists in that
+range for their index segments, then reads from byte 0 and sends each essence
+KLV as it arrives. Without a parked source the file is held whole and read once
+for its index at `Eos`. Index stream offsets map to file bytes as ffmpeg's
+`mxf_absolute_bodysid_offset` does: from the partition with the largest
+`BodyOffset` at or below the offset, counted from its first essence key, or from
+just past that key and length for clip-wrapped and OP-Atom essence.
+
+Pictures go out in stored order, with the stored position as the dts. The pts
+comes from the index: the temporal offset of display position `n` names the
+stored position that shows there. Every timestamp, sound included, is shifted by
+the largest stored-minus-display distance, so pts never falls below dts. ffmpeg's
+MXF muxer writes no temporal offsets for H.264, so its B-frames play out of
+order in ffmpeg as well. A picture is a keyframe when its index entry has the
+random access flag or its bitstream starts a GOP, which covers MPEG-2 open-GOP
+I-frames. A clip-wrapped picture track, as Avid OP-Atom writes, is cut at the
+index offset of each next edit unit. Sound goes out in pieces of at most 1/25 s.
+
+A seek lands on the keyframe of the target's display position, through its
+temporal and key frame offsets, when the index and the partition holding it are
+known, and otherwise reads again from byte 0. Clip-wrapped sound alone lands on
+the target's sample. Encrypted essence fails the read.
+
+`VideoCodec::Jpeg2000` is a JPEG 2000 codestream per frame, GStreamer's
+`image/x-jpc`, decoded by `ffmpegdec` through libavcodec's `JPEG2000` codec id.
+
 ## MPEG-1 and MPEG-2 video
 
 `VideoCodec::Mpeg2` covers MPEG-1 and MPEG-2 video as one codec, libavcodec's

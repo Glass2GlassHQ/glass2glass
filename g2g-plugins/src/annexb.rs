@@ -190,6 +190,7 @@ pub(crate) fn intra_only(codec: VideoCodec) -> bool {
             | VideoCodec::JpegXs
             | VideoCodec::ProRes { .. }
             | VideoCodec::DnxHd
+            | VideoCodec::Jpeg2000
     )
 }
 

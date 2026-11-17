@@ -27,7 +27,7 @@ const CONTAINER_MEDIA_TYPES = new Set([
   "audio/x-au", "video/x-msvideo", "application/x-yuv4mpeg",
   "multipart/x-mixed-replace", "application/octet-stream", "application/x-rtp",
   "application/x-srtp", "application/x-rtcp", "application/x-srtcp",
-  "application/x-dtls", "video/x-iv8",
+  "application/x-dtls", "video/x-iv8", "application/mxf",
 ]);
 const TEXT_MEDIA_TYPES = new Set([
   "text/x-raw", "application/x-subtitle", "application/x-subtitle-vtt",

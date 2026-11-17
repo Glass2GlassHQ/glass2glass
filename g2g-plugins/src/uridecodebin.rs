@@ -1089,6 +1089,103 @@ pub fn ps_decodebin_select(
     ps_select(location, every_stream).map(|(demux, caps)| (demux, uncropped_ports(caps)))
 }
 
+#[cfg(feature = "std")]
+struct MxfProbe {
+    path: alloc::string::String,
+    infos: Vec<crate::mxfdemux::MxfTrackInfo>,
+}
+
+// None for a non-file:// uri, an unreadable file, or one whose header partition names no track g2g forwards
+#[cfg(feature = "std")]
+fn mxf_probe(uri: &str) -> Option<MxfProbe> {
+    let (path, prefix) = open_file_prefix(uri)?;
+    let infos = crate::mxfdemux::forwardable_tracks(&prefix);
+    (!infos.is_empty()).then_some(MxfProbe { path, infos })
+}
+
+#[cfg(feature = "std")]
+impl MxfProbe {
+    const ENCODING: ByteStreamEncoding = ByteStreamEncoding::Mxf;
+
+    fn av(&self) -> Vec<UriFanoutPort> {
+        self.infos
+            .iter()
+            .map(|info| uncropped_port(info.caps.clone(), info.video))
+            .collect()
+    }
+
+    fn demux(&self) -> Box<dyn DynMultiOutputElement> {
+        Box::new(crate::mxfdemux::MxfDemuxN::new(self.infos.clone()))
+    }
+}
+
+#[cfg(feature = "std")]
+pub fn mxf_playbin(
+    reg: &Registry,
+    sinks: &PlaybinSinks<'_>,
+    uri: &str,
+) -> Result<Option<Graph<GraphNode>>, ParseError> {
+    let Some(probe) = mxf_probe(uri) else {
+        return Ok(None);
+    };
+    build_av_fanout(
+        reg,
+        sinks,
+        byte_source(&probe.path, MxfProbe::ENCODING),
+        probe.demux(),
+        &probe.av(),
+    )
+    .map(Some)
+}
+
+#[cfg(feature = "std")]
+pub fn mxf_uri_fanout(_reg: &Registry, uri: &str) -> Result<Option<UriFanout>, ParseError> {
+    Ok(mxf_probe(uri)
+        .map(|probe| file_fanout(&probe.path, MxfProbe::ENCODING, probe.demux(), &probe.av())))
+}
+
+#[cfg(feature = "std")]
+fn mxf_select(
+    location: &str,
+    select: impl FnOnce(&[PadKind]) -> Option<Vec<usize>>,
+) -> Option<(Box<dyn DynMultiOutputElement>, Vec<Caps>)> {
+    let prefix = read_prefix(location)?;
+    let infos = crate::mxfdemux::forwardable_tracks(&prefix);
+    let kinds: Vec<PadKind> = infos
+        .iter()
+        .map(|info| match info.video {
+            true => PadKind::Video,
+            false => PadKind::Audio,
+        })
+        .collect();
+    let selected = select(&kinds)?;
+    let ports: Vec<_> = selected.iter().map(|&i| infos[i].clone()).collect();
+    let caps = ports.iter().map(|port| port.caps.clone()).collect();
+    Some((Box::new(crate::mxfdemux::MxfDemuxN::new(ports)), caps))
+}
+
+#[cfg(feature = "std")]
+pub fn mxf_demux_select(
+    name: &str,
+    location: &str,
+    pads: &[PadRequest],
+) -> Option<Box<dyn DynMultiOutputElement>> {
+    (name == "mxfdemux")
+        .then(|| mxf_select(location, |kinds| resolve_pads(kinds, pads)).map(|(d, _)| d))
+        .flatten()
+}
+
+#[cfg(feature = "std")]
+pub fn mxf_decodebin_select(
+    location: &str,
+    caps: &Caps,
+) -> Option<(Box<dyn DynMultiOutputElement>, Vec<UriFanoutPort>)> {
+    if !is_container(caps, &[ByteStreamEncoding::Mxf]) {
+        return None;
+    }
+    mxf_select(location, every_stream).map(|(demux, caps)| (demux, uncropped_ports(caps)))
+}
+
 /// Bare-`decodebin` primary-stream hook for MPEG program streams: the
 /// program stream sibling of [`ts_primary_stream`]. An audio-only `.mpg` through
 /// `filesrc ! decodebin` selects the demux's audio stream instead of failing on

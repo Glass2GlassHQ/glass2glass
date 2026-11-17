@@ -262,6 +262,7 @@ fn video_codec_to_u8(c: VideoCodec) -> u8 {
         } => 23,
         VideoCodec::DnxHd => 24,
         VideoCodec::Tagged(_) => VIDEO_CODEC_TAGGED,
+        VideoCodec::Jpeg2000 => 26,
     }
 }
 
@@ -355,6 +356,7 @@ fn video_codec_from_u8(v: u8) -> Result<VideoCodec, WireError> {
             variant: ProResVariant::FourFourFourFourXq,
         },
         24 => VideoCodec::DnxHd,
+        26 => VideoCodec::Jpeg2000,
         _ => return Err(WireError::BadTag),
     })
 }
@@ -508,6 +510,7 @@ fn bytestream_to_u8(e: ByteStreamEncoding) -> u8 {
         ByteStreamEncoding::Srtcp => 16,
         ByteStreamEncoding::Dtls => 17,
         ByteStreamEncoding::Iv8 => 20,
+        ByteStreamEncoding::Mxf => 21,
     }
 }
 fn bytestream_from_u8(v: u8) -> Result<ByteStreamEncoding, WireError> {
@@ -533,6 +536,7 @@ fn bytestream_from_u8(v: u8) -> Result<ByteStreamEncoding, WireError> {
         16 => ByteStreamEncoding::Srtcp,
         17 => ByteStreamEncoding::Dtls,
         20 => ByteStreamEncoding::Iv8,
+        21 => ByteStreamEncoding::Mxf,
         _ => return Err(WireError::BadTag),
     })
 }
@@ -1724,6 +1728,7 @@ mod tests {
             VideoCodec::Vp6Plain,
             VideoCodec::Theora,
             VideoCodec::DnxHd,
+            VideoCodec::Jpeg2000,
             VideoCodec::Tagged(CodecTag {
                 namespace: TagNamespace::Riff,
                 tag: u32::from_le_bytes(*b"cvid"),
@@ -1784,6 +1789,7 @@ mod tests {
             ByteStreamEncoding::Aiff,
             ByteStreamEncoding::Au,
             ByteStreamEncoding::Iv8,
+            ByteStreamEncoding::Mxf,
         ] {
             assert_eq!(bytestream_from_u8(bytestream_to_u8(encoding)), Ok(encoding));
         }

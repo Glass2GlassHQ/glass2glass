@@ -444,6 +444,9 @@ pub fn sniff(header: &[u8]) -> Option<ByteStreamEncoding> {
     if header.starts_with(&PS_PACK_MAGIC) {
         return Some(ByteStreamEncoding::MpegPs);
     }
+    if crate::mxf::opens_header_partition(header) {
+        return Some(ByteStreamEncoding::Mxf);
+    }
     if crate::wavparse::opens_wave_file(header) {
         return Some(ByteStreamEncoding::Wav);
     }

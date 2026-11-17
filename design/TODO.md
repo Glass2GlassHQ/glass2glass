@@ -54,7 +54,11 @@ The plan is [remote.md](remote.md).
 - Track selection and the `track-list` property.
 - `edl://` timelines: play the audio of the picture stream's files when the
   timeline has no sound stream, as mpv does.
-- An MXF demuxer, for the package EDLs guikit sends.
+- Read the index segments of every partition the MXF random index pack lists
+  before playback, so a seek in a long MXF file with a body partition every
+  10 s, as ffmpeg writes, lands by index instead of reading from byte 0.
+- A single-output `mxfdemux`, so `filesrc ! decodebin` and `g2g-discover` open
+  an MXF file, and D-10 AES3 sound (SMPTE ST 331).
 - Take GPU frames in `playervideosink` once decoders open on the host's device.
 - An option that hands PCM to the host.
 - A versioned C ABI (`g2g_player.h`), wrapped in the C#, C++, Kotlin and
@@ -487,7 +491,7 @@ unless it says otherwise.
   `gdkpixbufdec`, `rsvgdec`, `flxdec`, `vmncdec`,
   `bayer2rgb` / `rgb2bayer`, `codecalpha` (`alphacombine`, `codecalphademux`,
   `vp8alphadecodebin`), `jp2kdecimator`.
-- **Containers:** `mxfdemux` / `mxfmux`, `asfdemux` / `asfmux` / `asfparse`,
+- **Containers:** `mxfmux`, `asfdemux` / `asfmux` / `asfparse`,
   `rmdemux` / `rademux`, `mpegpsmux`, `mplex`, `atscmux`, `tsparse`,
   `matroskaparse`, `oggparse` / `ogmaudioparse` / `ogmvideoparse` /
   `ogmtextparse` / `oggaviparse`, `3gppmux` / `ismlmux` / `mj2mux` (mp4mux

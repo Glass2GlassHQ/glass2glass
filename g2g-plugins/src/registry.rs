@@ -1956,12 +1956,14 @@ fn register_uri_handlers(reg: &mut Registry) {
     reg.register_playbin(crate::uridecodebin::ts_playbin);
     reg.register_playbin(crate::uridecodebin::mp4_playbin);
     reg.register_playbin(crate::uridecodebin::ps_playbin);
+    reg.register_playbin(crate::uridecodebin::mxf_playbin);
     // The open-ported siblings (M1168): a lone `fallbacksrc uri=file://x` carries
     // every port the same probe finds, each through its own `fallbackswitch`.
     reg.register_uri_fanout(crate::uridecodebin::mkv_uri_fanout);
     reg.register_uri_fanout(crate::uridecodebin::ts_uri_fanout);
     reg.register_uri_fanout(crate::uridecodebin::mp4_uri_fanout);
     reg.register_uri_fanout(crate::uridecodebin::ps_uri_fanout);
+    reg.register_uri_fanout(crate::uridecodebin::mxf_uri_fanout);
     // Ogg last: it is the only all-audio container here, so it claims a URI the
     // A/V hooks above declined (M1171).
     reg.register_uri_fanout(crate::uridecodebin::ogg_uri_fanout);
@@ -1980,6 +1982,7 @@ fn register_uri_handlers(reg: &mut Registry) {
     reg.register_demux_select(crate::uridecodebin::ogg_demux_select);
     reg.register_demux_select(crate::uridecodebin::ps_demux_select);
     reg.register_demux_select(crate::uridecodebin::avi_demux_select);
+    reg.register_demux_select(crate::uridecodebin::mxf_demux_select);
     reg.register_demux_select(crate::uridecodebin::flv_demux_select);
     // `decodebin` fan-out (M482): `filesrc location=x ! decodebin name=d  d.video_0
     // ! ...  d.audio_0 ! ...` probes the file, builds the multi-output demuxer, and
@@ -1989,6 +1992,7 @@ fn register_uri_handlers(reg: &mut Registry) {
     reg.register_decodebin_select(crate::uridecodebin::mp4_decodebin_select);
     reg.register_decodebin_select(crate::uridecodebin::ps_decodebin_select);
     reg.register_decodebin_select(crate::uridecodebin::avi_decodebin_select);
+    reg.register_decodebin_select(crate::uridecodebin::mxf_decodebin_select);
     reg.register_decodebin_select(crate::uridecodebin::ogg_decodebin_select);
     reg.register_decodebin_select(crate::uridecodebin::flv_decodebin_select);
     // Bare `filesrc location=X ! decodebin` primary-stream selection (M746): an

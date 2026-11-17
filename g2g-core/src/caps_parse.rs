@@ -445,6 +445,7 @@ impl CapsSet {
                 Some(CapsSet::from_alternatives(alternatives))
             }
             "video/x-dnxhd" => compressed_set(VideoCodec::DnxHd),
+            "image/x-jpc" => compressed_set(VideoCodec::Jpeg2000),
             "image/x-jxsc" => compressed_set(VideoCodec::JpegXs),
             "audio/x-speex" => audio_set(&[AudioFormat::Speex]),
             "audio/x-opus" => audio_set(&[AudioFormat::Opus]),
@@ -516,6 +517,7 @@ impl CapsSet {
             "application/x-srtcp" => bytestream(ByteStreamEncoding::Srtcp),
             "application/x-dtls" => bytestream(ByteStreamEncoding::Dtls),
             "video/x-iv8" => bytestream(ByteStreamEncoding::Iv8),
+            "application/mxf" => bytestream(ByteStreamEncoding::Mxf),
             "subpicture/x-dvd" => Some(CapsSet::one(Caps::SubPicture {
                 format: SubPictureFormat::VobSub,
             })),
@@ -1041,6 +1043,7 @@ mod tests {
             ("audio/x-aiff", ByteStreamEncoding::Aiff),
             ("audio/x-au", ByteStreamEncoding::Au),
             ("video/x-iv8", ByteStreamEncoding::Iv8),
+            ("application/mxf", ByteStreamEncoding::Mxf),
         ] {
             let caps = Caps::ByteStream { encoding };
             assert_eq!(caps.to_gst_string(), media_type);

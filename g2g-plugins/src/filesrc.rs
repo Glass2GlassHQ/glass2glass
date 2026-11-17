@@ -519,6 +519,7 @@ pub(crate) fn caps_from_extension(path: &std::path::Path) -> Option<Caps> {
         "mp4" | "m4a" | "mov" | "qt" => ByteStreamEncoding::Mp4,
         "ivf" => ByteStreamEncoding::Ivf,
         "mpg" | "mpeg" | "vob" => ByteStreamEncoding::MpegPs,
+        "mxf" => ByteStreamEncoding::Mxf,
         "y4m" => ByteStreamEncoding::Y4m,
         "aiff" | "aif" | "aifc" => ByteStreamEncoding::Aiff,
         "au" | "snd" => ByteStreamEncoding::Au,
@@ -603,6 +604,7 @@ pub(crate) fn encoding_from_str(s: &str) -> Option<ByteStreamEncoding> {
         "isobmff" | "cmaf" | "fmp4" => Some(ByteStreamEncoding::IsoBmff),
         "ivf" => Some(ByteStreamEncoding::Ivf),
         "iv8" => Some(ByteStreamEncoding::Iv8),
+        "mxf" => Some(ByteStreamEncoding::Mxf),
         "mpegps" | "ps" | "mpg" | "vob" => Some(ByteStreamEncoding::MpegPs),
         "wav" => Some(ByteStreamEncoding::Wav),
         "aiff" | "aif" | "aifc" => Some(ByteStreamEncoding::Aiff),
@@ -641,6 +643,7 @@ pub(crate) fn encoding_to_str(encoding: ByteStreamEncoding) -> &'static str {
         ByteStreamEncoding::Srtcp => "srtcp",
         ByteStreamEncoding::Dtls => "dtls",
         ByteStreamEncoding::Iv8 => "iv8",
+        ByteStreamEncoding::Mxf => "mxf",
         ByteStreamEncoding::Raw => "raw",
         // Only encodings produced by `encoding_from_str` / sniffing are stored,
         // so any future `ByteStreamEncoding` variant cannot reach here.

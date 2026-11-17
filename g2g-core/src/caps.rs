@@ -771,6 +771,7 @@ pub(crate) fn codec_gst_media_type(c: VideoCodec) -> String {
         VideoCodec::Theora => "video/x-theora",
         VideoCodec::ProRes { .. } => "video/x-prores",
         VideoCodec::DnxHd => "video/x-dnxhd",
+        VideoCodec::Jpeg2000 => "image/x-jpc",
         // GStreamer keeps VC-1 under the Windows Media Video type, told apart
         // by `wmvversion=3, format=WVC1`; the fields do not survive here, so the
         // codec split stays in the caps.
@@ -888,6 +889,7 @@ fn bytestream_gst_media_type(e: ByteStreamEncoding) -> &'static str {
         ByteStreamEncoding::Srtcp => "application/x-srtcp",
         ByteStreamEncoding::Dtls => "application/x-dtls",
         ByteStreamEncoding::Iv8 => "video/x-iv8",
+        ByteStreamEncoding::Mxf => "application/mxf",
     }
 }
 
@@ -2251,6 +2253,8 @@ pub enum VideoCodec {
     DnxHd,
     // a codec no variant above names, known only by its container's tag
     Tagged(CodecTag),
+    // one JPEG 2000 codestream per frame, as MXF and DCPs carry it
+    Jpeg2000,
 }
 
 // The tag a container stores for a codec, in the namespace that gives it meaning.
@@ -2412,6 +2416,8 @@ pub enum ByteStreamEncoding {
     Dtls,
     // IndigoVision 8000 video: 16-byte packet headers around MPEG-4 Part 2 frames
     Iv8,
+    // SMPTE ST 377 Material eXchange Format, KLV packets in partitions
+    Mxf,
 }
 
 /// Format of a [`Caps::Text`] stream. Generalizes "subtitles": a `Text` link

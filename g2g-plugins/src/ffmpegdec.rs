@@ -2141,7 +2141,7 @@ impl AsyncElement for FfmpegVideoDec {
 /// negotiation failure; the runtime mid-stream check refuses
 /// `CapsMismatch` before it ever reaches here.
 /// The compressed codecs this element can open via libavcodec.
-const SUPPORTED_CODECS: [VideoCodec; 19] = [
+const SUPPORTED_CODECS: [VideoCodec; 20] = [
     VideoCodec::H264,
     VideoCodec::H265,
     VideoCodec::Vp8,
@@ -2157,6 +2157,7 @@ const SUPPORTED_CODECS: [VideoCodec; 19] = [
     VideoCodec::Vp6Plain,
     VideoCodec::Theora,
     VideoCodec::DnxHd,
+    VideoCodec::Jpeg2000,
     VideoCodec::ProRes {
         variant: ProResVariant::Proxy,
     },
@@ -2441,6 +2442,7 @@ fn codec_id(codec: VideoCodec) -> Id {
         VideoCodec::Theora => Id::THEORA,
         VideoCodec::ProRes { .. } => Id::PRORES,
         VideoCodec::DnxHd => Id::DNXHD,
+        VideoCodec::Jpeg2000 => Id::JPEG2000,
         _ => unreachable!("ffmpegdec negotiates only known VideoCodec variants"),
     }
 }

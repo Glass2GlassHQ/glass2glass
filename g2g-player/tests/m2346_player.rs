@@ -802,3 +802,45 @@ fn container_fps_is_the_video_frame_rate() {
         PropertyChange::ContainerFps(None)
     );
 }
+
+#[test]
+fn an_mxf_file_reports_its_size_rate_and_duration() {
+    const MXF_CLIP: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../g2g-plugins/tests/fixtures/mxf_h264.mxf"
+    );
+    // ten frames, see tools/mxf-fixtures.sh
+    const MXF_FRAMES: u32 = 10;
+    let player = Player::new();
+    player
+        .load(
+            Media::Uri(&format!("file://{MXF_CLIP}")),
+            LoadOptions {
+                start: None,
+                pause: Some(true),
+            },
+        )
+        .unwrap();
+    wait_until(|| {
+        matches!(
+            player.property(Property::ContainerFps),
+            PropertyChange::ContainerFps(Some(_))
+        )
+    });
+    assert_eq!(
+        player.property(Property::ContainerFps),
+        PropertyChange::ContainerFps(Some(f64::from(CLIP_FRAMES_PER_SECOND)))
+    );
+    assert_eq!(
+        player.property(Property::VideoParams),
+        PropertyChange::VideoParams(Some(VideoSize {
+            width: CLIP_WIDTH,
+            height: CLIP_HEIGHT,
+        }))
+    );
+    assert_eq!(
+        player.property(Property::Duration),
+        PropertyChange::Duration(Some(CLIP_FRAME_PERIOD * MXF_FRAMES))
+    );
+    player.stop();
+}

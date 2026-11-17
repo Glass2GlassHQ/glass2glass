@@ -781,10 +781,14 @@ mod waveformat;
 mod codectag;
 // AVI container parsing / writing (M1071), behind `avidemux` and `avimux`.
 mod avi;
+// MXF container parsing, behind `mxfdemux`.
+mod mxf;
 // The uncompressed video layouts the AVI, Matroska and QuickTime demuxers read.
 mod uncompressedvideo;
 // AVI demuxer elements (M1071): one `ByteStream{Avi}` in, its streams out.
 pub mod avidemux;
+// MXF demuxer: one `ByteStream{Mxf}` in, a port per essence track out.
+pub mod mxfdemux;
 // AVI muxer elements (M1071): one video plus an optional audio stream in, a
 // `ByteStream{Avi}` out.
 pub mod avimux;
