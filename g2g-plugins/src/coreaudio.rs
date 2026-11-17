@@ -37,8 +37,8 @@ use std::time::{Duration, Instant};
 use objc2_audio_toolbox::{
     kAudioQueueProperty_CurrentDevice, AudioQueueAllocateBuffer, AudioQueueBufferRef,
     AudioQueueDispose, AudioQueueEnqueueBuffer, AudioQueueFlush, AudioQueueGetCurrentTime,
-    AudioQueueNewInput, AudioQueueNewOutput, AudioQueueRef, AudioQueueSetProperty, AudioQueueStart,
-    AudioQueueStop,
+    AudioQueueNewInput, AudioQueueNewOutput, AudioQueuePause, AudioQueueRef, AudioQueueSetProperty,
+    AudioQueueStart, AudioQueueStop,
 };
 use objc2_core_audio_types::{
     kAudioFormatFlagIsFloat, kAudioFormatFlagIsPacked, kAudioFormatFlagIsSignedInteger,
@@ -47,7 +47,6 @@ use objc2_core_audio_types::{
 };
 use objc2_core_foundation::CFString;
 
-use g2g_core::frame::Frame;
 use g2g_core::query::LatencyReport;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
@@ -60,7 +59,10 @@ use g2g_core::{
 use crate::audiocapture::{
     capture_queue, run_capture, CaptureLoopSettings, CaptureReceiver, CaptureSender,
 };
-use crate::audioworker::WorkerLink;
+use crate::audiooutput::{
+    DeviceCmd, DeviceStep, OutputDevice, PausableDevice, PcmGeometry, PlayEnd, PlayoutGate,
+    PlayoutLink,
+};
 use g2g_core::pcm_caps_any_rate_and_channels;
 
 use alloc::boxed::Box;
@@ -170,6 +172,10 @@ struct SinkState {
     shared: Box<SinkShared>,
     started: bool,
     sample_rate: u32,
+    frame_bytes: usize,
+    enqueued_frames: u64,
+    paused_sample_time: u64,
+    sample_time_at_pause: Option<u64>,
 }
 
 // SAFETY: configure hands the state to the render thread, the only caller of
@@ -201,7 +207,8 @@ impl SinkState {
     /// Queue a whole PCM payload, chunking through the buffer pool and blocking
     /// on the queue's pace when all buffers are in flight. Returns the frames
     /// queued.
-    fn write_all(&mut self, pcm: &[u8], frame_bytes: usize) -> Result<u64, G2gError> {
+    fn write_all(&mut self, pcm: &[u8]) -> Result<u64, G2gError> {
+        let frame_bytes = self.frame_bytes;
         let mut frames = 0u64;
         let mut off = 0usize;
         while pcm.len() - off >= frame_bytes {
@@ -232,6 +239,7 @@ impl SinkState {
             }
             off += n;
             frames += (n / frame_bytes) as u64;
+            self.enqueued_frames += (n / frame_bytes) as u64;
             if !self.started {
                 // Start only once data is queued (an empty queue underruns).
                 // SAFETY: live queue; null start time = now.
@@ -243,6 +251,45 @@ impl SinkState {
             }
         }
         Ok(frames)
+    }
+
+    fn sample_time(&self) -> Option<u64> {
+        if !self.started {
+            return None;
+        }
+        // AudioQueue sample time counts device frames from the queue's start, underruns included
+        // SAFETY: an all-zero AudioTimeStamp is a valid plain C struct with no flags set.
+        let mut stamp: AudioTimeStamp = unsafe { core::mem::zeroed() };
+        // SAFETY: the queue is live and owned by this thread, `stamp` is a valid out slot, and
+        // the timeline and discontinuity pointers may be null.
+        let status = unsafe {
+            AudioQueueGetCurrentTime(self.queue, ptr::null_mut(), &mut stamp, ptr::null_mut())
+        };
+        let sample_time_valid = stamp.mFlags.contains(AudioTimeStampFlags::SampleTimeValid);
+        if status != 0 || !sample_time_valid || stamp.mSampleTime <= 0.0 {
+            return None;
+        }
+        Some(stamp.mSampleTime as u64)
+    }
+
+    fn played_frames(&self) -> Option<u64> {
+        let sample_time = self.sample_time()?;
+        Some(sample_time.saturating_sub(self.paused_sample_time))
+    }
+
+    fn discard_queued(&mut self) -> Result<(), G2gError> {
+        if !self.started {
+            return Ok(());
+        }
+        // AudioQueueStop returns every queued buffer through the callback before it returns
+        // SAFETY: live queue owned by this thread.
+        if unsafe { AudioQueueStop(self.queue, true) } != 0 {
+            return Err(hw());
+        }
+        self.started = false;
+        self.enqueued_frames = 0;
+        self.paused_sample_time = 0;
+        Ok(())
     }
 
     // every buffer back on the free list means everything queued has played
@@ -268,59 +315,95 @@ impl SinkState {
     }
 }
 
-#[derive(Debug)]
-enum SinkCommand {
-    Samples(Frame),
-    Shutdown,
+// AudioQueuePause keeps the queued buffers, and AudioQueueStart plays on from them
+impl PausableDevice for SinkState {
+    fn pause(&mut self) -> Result<(), G2gError> {
+        if !self.started {
+            return Ok(());
+        }
+        self.sample_time_at_pause = self.sample_time();
+        // SAFETY: live queue owned by this thread.
+        match unsafe { AudioQueuePause(self.queue) } {
+            0 => Ok(()),
+            _ => Err(hw()),
+        }
+    }
+
+    fn resume(&mut self) -> Result<(), G2gError> {
+        if !self.started {
+            return Ok(());
+        }
+        // AudioQueue sample time may keep counting while paused
+        if let (Some(at_pause), Some(now)) = (self.sample_time_at_pause.take(), self.sample_time())
+        {
+            self.paused_sample_time += now.saturating_sub(at_pause);
+        }
+        // SAFETY: live queue; null start time = now.
+        match unsafe { AudioQueueStart(self.queue, ptr::null()) } {
+            0 => Ok(()),
+            _ => Err(hw()),
+        }
+    }
+
+    fn still_playing_after_pause_ns(&self) -> Result<u64, G2gError> {
+        Ok(0)
+    }
+
+    fn delay_ns(&self) -> Result<u64, G2gError> {
+        let played = self.played_frames().unwrap_or(0);
+        let unplayed = self.enqueued_frames.saturating_sub(played);
+        Ok(crate::audioconvert::samples_to_ns(
+            unplayed,
+            self.sample_rate,
+        ))
+    }
 }
 
-fn render_worker(
+fn play(
     mut state: SinkState,
-    commands: Receiver<SinkCommand>,
-    frame_bytes: usize,
-    rendered: Arc<AtomicU64>,
+    rx: &Receiver<DeviceCmd>,
+    gate: &mut PlayoutGate,
+    geometry: PcmGeometry,
+    rendered: &AtomicU64,
     clock: &DriftClock,
-) {
-    let mut clock_offset = DeviceClockOffset::default();
+    clock_offset: &mut DeviceClockOffset,
+) -> PlayEnd {
     loop {
-        let frame = match commands.recv() {
-            Ok(SinkCommand::Samples(frame)) => frame,
-            Ok(SinkCommand::Shutdown) => {
+        match gate.recv(rx) {
+            Ok(None) => {}
+            Ok(Some(DeviceStep::Samples(frame))) => {
+                let pcm = frame.domain.as_system_slice().unwrap_or_default();
+                let played = gate.play_in_slices(rx, pcm, geometry, &mut state, |state, slice| {
+                    let frames = state.write_all(slice)?;
+                    rendered.fetch_add(frames, Ordering::Relaxed);
+                    discipline_clock(state, clock, clock_offset);
+                    Ok(())
+                });
+                if let Err(error) = played {
+                    return PlayEnd::Failed(error);
+                }
+            }
+            Ok(Some(DeviceStep::Flush)) => {
+                if let Err(error) = state.discard_queued() {
+                    return PlayEnd::Failed(error);
+                }
+            }
+            Ok(Some(DeviceStep::SwitchDevice(device))) => return PlayEnd::SwitchDevice(device),
+            Ok(Some(DeviceStep::Shutdown)) => {
                 let _ = state.wait_for_playout();
-                return;
+                return PlayEnd::Shutdown;
             }
             // the element aborted: stop without playing out
-            Err(_) => return,
-        };
-        let pcm = frame.domain.as_system_slice().unwrap_or_default();
-        match state.write_all(pcm, frame_bytes) {
-            Ok(frames) => {
-                rendered.fetch_add(frames, Ordering::Relaxed);
-            }
-            Err(_) => return,
+            Err(_) => return PlayEnd::Shutdown,
         }
-        discipline_clock(&state, clock, &mut clock_offset);
     }
 }
 
 fn discipline_clock(state: &SinkState, clock: &DriftClock, clock_offset: &mut DeviceClockOffset) {
-    if !state.started {
-        return;
-    }
     let local_ns = clock.reference_now();
-    // SAFETY: an all-zero AudioTimeStamp is a valid plain C struct with no flags set.
-    let mut stamp: AudioTimeStamp = unsafe { core::mem::zeroed() };
-    // SAFETY: the queue is live and owned by this thread, `stamp` is a valid out slot, and
-    // the timeline and discontinuity pointers may be null.
-    let status = unsafe {
-        AudioQueueGetCurrentTime(state.queue, ptr::null_mut(), &mut stamp, ptr::null_mut())
-    };
-    let sample_time_valid = stamp.mFlags.contains(AudioTimeStampFlags::SampleTimeValid);
-    if status != 0 || !sample_time_valid || stamp.mSampleTime <= 0.0 {
+    let Some(played) = state.played_frames() else {
         return;
-    }
-    // AudioQueue sample time counts device frames from the queue's start, underruns included
-    let played = stamp.mSampleTime as u64;
+    };
     let master_ns = crate::audioskew::played_master_ns(
         clock,
         clock_offset,
@@ -361,6 +444,7 @@ static RENDER_PROPS: &[PropertySpec] = &[
     crate::audioskew::PROVIDE_CLOCK_PROPERTY,
     crate::audioskew::SLAVE_METHOD_PROPERTY,
     crate::audioskew::DRIFT_TOLERANCE_PROPERTY,
+    crate::audiooutput::CONTINUE_ON_ERROR_PROPERTY,
 ];
 
 /// `CoreAudioSrc`'s settable properties. `device` matches gst `osxaudiosrc` (a
@@ -425,13 +509,11 @@ unsafe fn bind_device(queue: AudioQueueRef, uid: &str) -> Result<(), G2gError> {
 #[derive(Debug)]
 pub struct CoreAudioSink {
     /// Core Audio device UID to render on; empty takes the system default.
-    device: String,
+    output: OutputDevice,
     /// Bounded, non-blocking link to the render thread that owns the queue
     /// (see [`crate::audioworker`]).
-    link: Option<WorkerLink<SinkCommand>>,
-    format: AudioFormat,
-    channels: u8,
-    sample_rate: u32,
+    link: PlayoutLink,
+    caps: Option<Caps>,
     rendered: Arc<AtomicU64>,
     playout: crate::audioskew::PlayoutClock,
 }
@@ -445,11 +527,9 @@ impl Default for CoreAudioSink {
 impl CoreAudioSink {
     pub fn new() -> Self {
         Self {
-            device: String::new(),
-            link: None,
-            format: AudioFormat::PcmS16Le,
-            channels: 2,
-            sample_rate: 48_000,
+            output: OutputDevice::new("device", ""),
+            link: PlayoutLink::new(hw()),
+            caps: None,
             rendered: Arc::new(AtomicU64::new(0)),
             playout: crate::audioskew::PlayoutClock::default(),
         }
@@ -459,14 +539,14 @@ impl CoreAudioSink {
     /// the persistent id) instead of the system default. Also settable as the
     /// `device` property.
     pub fn with_device(mut self, uid: impl Into<String>) -> Self {
-        self.device = uid.into();
+        self.output = OutputDevice::new("device", uid);
         self
     }
 
     /// Whether the default output device opens (tests probe with this and
     /// report the denial otherwise, like the Android permission probes).
     pub fn device_available() -> bool {
-        Self::new().open().is_ok()
+        open_queue(AudioFormat::PcmS16Le, 2, 48_000, "").is_ok()
     }
 
     /// Count of PCM frames handed to the device. Useful in tests.
@@ -477,70 +557,65 @@ impl CoreAudioSink {
     pub fn clock(&self) -> Arc<DriftClock> {
         self.playout.clock()
     }
-
-    fn open(&self) -> Result<SinkState, G2gError> {
-        let mut desc = asbd(self.format, self.channels, self.sample_rate).ok_or_else(hw)?;
-        let mut shared = Box::new(SinkShared::default());
-        let mut queue: AudioQueueRef = ptr::null_mut();
-        // SAFETY: `desc` and the out slot outlive the call; the refcon points at
-        // the boxed shared state, which the returned `SinkState` keeps alive for
-        // the queue's whole life. A null run loop uses the queue's own thread.
-        let st = unsafe {
-            AudioQueueNewOutput(
-                NonNull::from(&mut desc),
-                Some(sink_callback),
-                shared.as_mut() as *mut SinkShared as *mut c_void,
-                None,
-                None,
-                0,
-                NonNull::from(&mut queue),
-            )
-        };
-        if st != 0 || queue.is_null() {
-            return Err(hw());
-        }
-        // SAFETY: the queue is live and not started yet.
-        if let Err(e) = unsafe { bind_device(queue, &self.device) } {
-            // SAFETY: dispose the queue we just made before bailing.
-            unsafe { AudioQueueDispose(queue, true) };
-            return Err(e);
-        }
-        // Pre-allocate the buffer pool; every buffer starts on the free list.
-        {
-            let mut free = shared.free.lock().unwrap();
-            for _ in 0..SINK_BUFFERS {
-                let mut buf: AudioQueueBufferRef = ptr::null_mut();
-                // SAFETY: live queue; valid out slot.
-                let st =
-                    unsafe { AudioQueueAllocateBuffer(queue, BUF_BYTES, NonNull::from(&mut buf)) };
-                if st != 0 || buf.is_null() {
-                    // SAFETY: dispose the half-built queue (buffers go with it).
-                    unsafe { AudioQueueDispose(queue, true) };
-                    return Err(hw());
-                }
-                free.push(BufPtr(buf));
-            }
-        }
-        Ok(SinkState {
-            queue,
-            shared,
-            started: false,
-            sample_rate: self.sample_rate,
-        })
-    }
-
-    fn shutdown(&mut self) {
-        if let Some(link) = self.link.as_mut() {
-            link.abort();
-        }
-        self.link = None;
-    }
 }
 
-impl Drop for CoreAudioSink {
-    fn drop(&mut self) {
-        self.shutdown();
+fn open_queue(
+    format: AudioFormat,
+    channels: u8,
+    sample_rate: u32,
+    uid: &str,
+) -> Result<SinkState, G2gError> {
+    let mut desc = asbd(format, channels, sample_rate).ok_or_else(hw)?;
+    let mut shared = Box::new(SinkShared::default());
+    let mut queue: AudioQueueRef = ptr::null_mut();
+    // SAFETY: `desc` and the out slot outlive the call; the refcon points at
+    // the boxed shared state, which the returned `SinkState` keeps alive for
+    // the queue's whole life. A null run loop uses the queue's own thread.
+    let st = unsafe {
+        AudioQueueNewOutput(
+            NonNull::from(&mut desc),
+            Some(sink_callback),
+            shared.as_mut() as *mut SinkShared as *mut c_void,
+            None,
+            None,
+            0,
+            NonNull::from(&mut queue),
+        )
+    };
+    if st != 0 || queue.is_null() {
+        return Err(hw());
     }
+    // SAFETY: the queue is live and not started yet.
+    if let Err(e) = unsafe { bind_device(queue, uid) } {
+        // SAFETY: dispose the queue we just made before bailing.
+        unsafe { AudioQueueDispose(queue, true) };
+        return Err(e);
+    }
+    // Pre-allocate the buffer pool; every buffer starts on the free list.
+    {
+        let mut free = shared.free.lock().unwrap();
+        for _ in 0..SINK_BUFFERS {
+            let mut buf: AudioQueueBufferRef = ptr::null_mut();
+            // SAFETY: live queue; valid out slot.
+            let st = unsafe { AudioQueueAllocateBuffer(queue, BUF_BYTES, NonNull::from(&mut buf)) };
+            if st != 0 || buf.is_null() {
+                // SAFETY: dispose the half-built queue (buffers go with it).
+                unsafe { AudioQueueDispose(queue, true) };
+                return Err(hw());
+            }
+            free.push(BufPtr(buf));
+        }
+    }
+    Ok(SinkState {
+        queue,
+        shared,
+        started: false,
+        sample_rate,
+        frame_bytes: desc.mBytesPerFrame as usize,
+        enqueued_frames: 0,
+        paused_sample_time: 0,
+        sample_time_at_pause: None,
+    })
 }
 
 impl AsyncElement for CoreAudioSink {
@@ -566,24 +641,41 @@ impl AsyncElement for CoreAudioSink {
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         let (format, channels, sample_rate) = pcm_params(absolute_caps)?;
-        let unchanged =
-            (format, channels, sample_rate) == (self.format, self.channels, self.sample_rate);
-        if unchanged && self.link.as_ref().is_some_and(|l| l.is_running()) {
+        if self.link.is_running() && self.caps.as_ref() == Some(absolute_caps) {
             return Ok(ConfigureOutcome::Accepted);
         }
-        self.shutdown();
-        self.format = format;
-        self.channels = channels;
-        self.sample_rate = sample_rate;
         self.playout.configure(absolute_caps)?;
-        let state = self.open()?;
+        let geometry = PcmGeometry::of(absolute_caps)?;
         let frame_bytes =
-            format.bytes_per_sample().ok_or(G2gError::CapsMismatch)? * usize::from(channels);
+            format.bytes_per_sample().ok_or(G2gError::CapsMismatch)? as u64 * u64::from(channels);
+        let fallback = self.output.fallback(
+            frame_bytes * u64::from(sample_rate),
+            Arc::clone(&self.rendered),
+            frame_bytes,
+            |frame| frame.domain.as_system_slice().map(<[u8]>::len),
+        );
         let rendered = Arc::clone(&self.rendered);
         let clock = self.playout.clock();
-        self.link = Some(WorkerLink::spawn("g2g-coreaudiosink", move |commands| {
-            render_worker(state, commands, frame_bytes, rendered, &clock)
-        })?);
+        let mut clock_offset = DeviceClockOffset::default();
+        self.link.open(
+            "g2g-coreaudiosink",
+            absolute_caps,
+            &mut self.output,
+            fallback,
+            move |uid| open_queue(format, channels, sample_rate, uid),
+            move |state, rx, gate| {
+                play(
+                    state,
+                    rx,
+                    gate,
+                    geometry,
+                    &rendered,
+                    &clock,
+                    &mut clock_offset,
+                )
+            },
+        )?;
+        self.caps = Some(absolute_caps.clone());
         Ok(ConfigureOutcome::Accepted)
     }
 
@@ -601,7 +693,12 @@ impl AsyncElement for CoreAudioSink {
     }
 
     fn set_clock_sync(&mut self, sync: ClockSync) {
+        self.link.set_clock_sync(sync.clone());
         self.playout.set_clock_sync(sync);
+    }
+
+    fn set_bus(&mut self, bus: g2g_core::bus::BusHandle) {
+        self.output.set_bus(bus);
     }
 
     fn properties(&self) -> &'static [PropertySpec] {
@@ -612,23 +709,15 @@ impl AsyncElement for CoreAudioSink {
         if let Some(result) = self.playout.set_property(name, &value) {
             return result;
         }
-        match name {
-            "device" => {
-                self.device = value.as_str().ok_or(PropError::Type)?.to_string();
-                Ok(())
-            }
-            _ => Err(PropError::Unknown),
-        }
+        self.output
+            .set_property(name, &value, self.link.is_running())
+            .unwrap_or(Err(PropError::Unknown))
     }
 
     fn get_property(&self, name: &str) -> Option<PropValue> {
-        if let Some(value) = self.playout.get_property(name) {
-            return Some(value);
-        }
-        match name {
-            "device" => Some(PropValue::Str(self.device.clone())),
-            _ => None,
-        }
+        self.playout
+            .get_property(name)
+            .or_else(|| self.output.get_property(name))
     }
 
     fn process<'a>(
@@ -642,25 +731,20 @@ impl AsyncElement for CoreAudioSink {
                     let element = g2g_core::log::short_type_name::<Self>();
                     frame.domain.require_system_slice(element)?;
                     let frame = self.playout.correct_frame(frame, element)?;
-                    let link = self.link.as_ref().ok_or(G2gError::NotConfigured)?;
-                    // a full queue is the device's back-pressure and yields
-                    link.send(SinkCommand::Samples(frame), hw()).await?;
+                    self.link.send(frame, &mut self.output).await
                 }
-                PipelinePacket::Eos => {
-                    // waits for playout while yielding, so other arms keep running
-                    let link = self.link.as_mut().ok_or(G2gError::NotConfigured)?;
-                    link.finish(SinkCommand::Shutdown, hw()).await?;
-                    self.link = None;
+                PipelinePacket::Flush => self.link.flush().await,
+                PipelinePacket::Segment(segment) => {
+                    self.link.set_segment(segment);
+                    Ok(())
                 }
+                PipelinePacket::Eos => self.link.finish().await,
                 // PCM caps are fixed at configure; a mid-stream change would need
-                // a queue rebuild (not in v1). Control packets are consumed.
-                PipelinePacket::CapsChanged(_)
-                | PipelinePacket::Flush
-                | PipelinePacket::Segment(_) => {}
+                // a queue rebuild (not in v1).
+                PipelinePacket::CapsChanged(_) => Ok(()),
                 // future PipelinePacket variants: no-op (terminal sink).
-                _ => {}
+                _ => Ok(()),
             }
-            Ok(())
         })
     }
 }

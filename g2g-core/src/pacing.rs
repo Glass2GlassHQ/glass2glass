@@ -192,7 +192,11 @@ impl PresentationPacer {
     pub fn flush(&mut self) {
         self.anchor_ns = None;
         self.anchor_pre_play = false;
-        self.seek_reanchor = true;
+        // gstreamer's flushing seek in Paused restarts running time at the next play edge's base time
+        self.seek_reanchor = !self
+            .clock_sync
+            .as_ref()
+            .is_some_and(ClockSync::awaits_play_edge);
     }
 
     /// Running time for a frame PTS, mapped through the active segment (the PTS
@@ -723,6 +727,30 @@ mod tests {
         p.flush();
         assert_eq!(anchor_of(&mut p, &sync, 200), 7_800);
         assert!(!p.seek_reanchor, "seek re-anchor consumed");
+    }
+
+    #[test]
+    fn a_flush_after_a_repreroll_anchors_on_the_next_play_edge() {
+        const PLAY_EDGE_NS: u64 = 5_000;
+        const ARRIVAL_NS: u64 = 9_000;
+        const RUNNING_TIME_NS: u64 = 100;
+        let clock = Arc::new(AtomicU64::new(1_000));
+        let anchor = PlayAnchor::new();
+        let sync =
+            ClockSync::with_play_anchor(Arc::new(ManualClock(clock.clone())), 0, anchor.clone());
+        let mut p = PresentationPacer::new();
+        p.set_clock_sync(sync.clone());
+
+        anchor.clear();
+        p.flush();
+        anchor.stamp(PLAY_EDGE_NS);
+        clock.store(ARRIVAL_NS, Ordering::Relaxed);
+
+        assert_eq!(
+            anchor_of(&mut p, &sync, RUNNING_TIME_NS),
+            PLAY_EDGE_NS as i64,
+            "a buffer arriving after the play edge anchors on its arrival"
+        );
     }
 
     #[test]

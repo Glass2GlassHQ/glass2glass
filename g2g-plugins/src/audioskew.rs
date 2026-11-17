@@ -170,15 +170,6 @@ impl SkewSlaver {
         Some(bytes[dropped as usize * shape.frame_len..].to_vec())
     }
 
-    #[cfg(any(
-        all(
-            target_os = "linux",
-            any(feature = "alsa-sink", feature = "pulse-sink")
-        ),
-        all(target_os = "windows", feature = "wasapi-sink"),
-        all(target_os = "macos", feature = "coreaudio"),
-        all(target_os = "android", feature = "aaudio")
-    ))]
     fn correct_frame(
         &mut self,
         frame: g2g_core::frame::Frame,
@@ -277,21 +268,6 @@ impl PlayoutClock {
         self.skew.set_master(sync.clock);
     }
 
-    #[cfg(all(target_os = "linux", feature = "pipewire"))]
-    pub(crate) fn correct(&mut self, bytes: &[u8]) -> Option<Vec<u8>> {
-        self.skew.measure(&self.clock);
-        self.skew.correct(bytes)
-    }
-
-    #[cfg(any(
-        all(
-            target_os = "linux",
-            any(feature = "alsa-sink", feature = "pulse-sink")
-        ),
-        all(target_os = "windows", feature = "wasapi-sink"),
-        all(target_os = "macos", feature = "coreaudio"),
-        all(target_os = "android", feature = "aaudio")
-    ))]
     pub(crate) fn correct_frame(
         &mut self,
         frame: g2g_core::frame::Frame,

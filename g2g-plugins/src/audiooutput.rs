@@ -7,16 +7,10 @@ use alloc::string::String;
 use g2g_core::bus::{BusHandle, BusMessage};
 use g2g_core::{G2gError, PropError, PropKind, PropValue, PropertySpec};
 
-#[cfg(any(
-    all(
-        target_os = "linux",
-        any(feature = "alsa-sink", feature = "pulse-sink")
-    ),
-    all(target_os = "windows", feature = "wasapi-sink")
-))]
+#[cfg(not(target_os = "windows"))]
+pub(crate) use device_worker::PcmGeometry;
 pub(crate) use device_worker::{
-    run_device_worker, DeviceCmd, DeviceStep, PcmGeometry, PendingFlushes, PlayEnd, PlayoutGate,
-    PlayoutStart,
+    DeviceCmd, DeviceStep, PausableDevice, PlayEnd, PlayoutGate, PlayoutLink,
 };
 
 pub(crate) const CONTINUE_ON_ERROR_PROPERTY: PropertySpec = PropertySpec::new(
@@ -97,16 +91,6 @@ impl OutputDevice {
     pub(crate) fn take_switch(&mut self) -> Option<String> {
         core::mem::take(&mut self.switch_pending).then(|| self.name.clone())
     }
-
-    #[cfg(all(target_os = "linux", feature = "pipewire"))]
-    pub(crate) fn continue_on_error(&self) -> bool {
-        self.continue_on_error
-    }
-
-    #[cfg(all(target_os = "linux", feature = "pipewire"))]
-    pub(crate) fn report(&self, error: G2gError) {
-        report_on(self.bus.as_ref(), error);
-    }
 }
 
 fn report_on(bus: Option<&BusHandle>, error: G2gError) {
@@ -115,16 +99,10 @@ fn report_on(bus: Option<&BusHandle>, error: G2gError) {
     }
 }
 
-#[cfg(any(
-    all(
-        target_os = "linux",
-        any(feature = "alsa-sink", feature = "pulse-sink")
-    ),
-    all(target_os = "windows", feature = "wasapi-sink")
-))]
 mod device_worker {
+    use std::collections::VecDeque;
     use std::sync::atomic::{AtomicU64, Ordering};
-    use std::sync::mpsc::{Receiver, SyncSender};
+    use std::sync::mpsc::{self, Receiver, RecvError, RecvTimeoutError, SyncSender};
     use std::sync::Arc;
     use std::thread;
     use std::time::{Duration, Instant};
@@ -135,10 +113,10 @@ mod device_worker {
     use g2g_core::bus::BusHandle;
     use g2g_core::frame::Frame;
     use g2g_core::memory::{MemoryDomain, SystemSlice};
-    use g2g_core::{Caps, ClockSync, G2gError, PipelineClock, PresentationPacer, Segment};
+    use g2g_core::{AudioFormat, Caps, ClockSync, G2gError, PresentationPacer, Segment};
 
     use super::{report_on, OutputDevice};
-    use crate::audioconvert::{ns_to_samples, samples_to_ns};
+    use crate::audioconvert::{ns_to_samples, samples_to_ns, silence_byte};
     use crate::audioworker::WorkerLink;
 
     pub(crate) enum DeviceCmd {
@@ -159,14 +137,27 @@ mod device_worker {
 
     pub(crate) struct StartAt {
         deadline_ns: u64,
-        clock: Arc<dyn PipelineClock + Send + Sync>,
+        paused_total_ns: u64,
+        sync: ClockSync,
         geometry: PcmGeometry,
+    }
+
+    impl StartAt {
+        // a pause before the start moves the start back by its length
+        fn deadline_after_pauses_ns(&self) -> u64 {
+            self.deadline_ns
+                + self
+                    .sync
+                    .paused_total_ns()
+                    .saturating_sub(self.paused_total_ns)
+        }
     }
 
     #[derive(Debug, Clone, Copy)]
     pub(crate) struct PcmGeometry {
         bytes_per_frame: usize,
         rate: u32,
+        silence: u8,
     }
 
     impl PcmGeometry {
@@ -180,16 +171,66 @@ mod device_worker {
             else {
                 return Err(G2gError::CapsMismatch);
             };
+            Self::new(*format, u32::from(*channels), *sample_rate)
+        }
+
+        pub(crate) fn new(format: AudioFormat, channels: u32, rate: u32) -> Result<Self, G2gError> {
             let bytes_per_sample = format.bytes_per_sample().ok_or(G2gError::CapsMismatch)?;
+            let bytes_per_frame = bytes_per_sample * channels as usize;
+            if bytes_per_frame == 0 || rate == 0 {
+                return Err(G2gError::CapsMismatch);
+            }
             Ok(Self {
-                bytes_per_frame: bytes_per_sample * usize::from(*channels),
-                rate: *sample_rate,
+                bytes_per_frame,
+                rate,
+                silence: silence_byte(format),
             })
         }
 
-        fn duration_ns(self, frame: &Frame) -> u64 {
-            let bytes = frame.domain.as_system_slice().map_or(0, <[u8]>::len);
+        #[cfg(target_os = "android")]
+        pub(crate) fn bytes_per_frame(self) -> usize {
+            self.bytes_per_frame
+        }
+
+        pub(crate) fn bytes_to_ns(self, bytes: usize) -> u64 {
             samples_to_ns((bytes / self.bytes_per_frame) as u64, self.rate)
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        fn pause_check_slices<'a>(self, bytes: &'a [u8]) -> core::slice::Chunks<'a, u8> {
+            let frames = (self.rate / PAUSE_CHECKS_PER_SECOND).max(1) as usize;
+            bytes.chunks(frames * self.bytes_per_frame)
+        }
+
+        fn duration_ns(self, frame: &Frame) -> u64 {
+            self.bytes_to_ns(frame.domain.as_system_slice().map_or(0, <[u8]>::len))
+        }
+
+        fn clip_to_start(self, frame: Frame, start_ns: u64) -> Option<Frame> {
+            let before_start_ns = start_ns.saturating_sub(frame.timing.pts_ns);
+            if before_start_ns == 0 {
+                return Some(frame);
+            }
+            let mut rest = self.trim_front(frame, before_start_ns)?;
+            // gstreamer's audio clipping stamps the first kept sample at the segment start, a part sample before it rounds away
+            rest.timing.pts_ns = start_ns;
+            Some(rest)
+        }
+
+        fn prepend_silence(self, frame: Frame, ns: u64) -> Option<Frame> {
+            let samples = ns_to_samples(ns, self.rate);
+            let bytes = frame.domain.as_system_slice()?;
+            let mut padded = alloc::vec![self.silence; samples as usize * self.bytes_per_frame];
+            padded.extend_from_slice(bytes);
+            let mut timing = frame.timing;
+            timing.pts_ns = timing
+                .pts_ns
+                .saturating_sub(samples_to_ns(samples, self.rate));
+            Some(Frame {
+                domain: MemoryDomain::System(SystemSlice::from_boxed(padded.into_boxed_slice())),
+                timing,
+                ..frame
+            })
         }
 
         fn trim_front(self, frame: Frame, ns: u64) -> Option<Frame> {
@@ -214,6 +255,10 @@ mod device_worker {
             })
         }
     }
+
+    // a pause stops the device within one slice, however long the buffers upstream are
+    #[cfg(not(target_os = "windows"))]
+    const PAUSE_CHECKS_PER_SECOND: u32 = 50;
 
     #[derive(Debug, Default)]
     pub(crate) struct PlayoutStart {
@@ -278,13 +323,12 @@ mod device_worker {
             if sync.awaits_play_edge() {
                 return Vec::new();
             }
-            let clock = Arc::clone(&sync.clock);
+            let sync = sync.clone();
             // samples before the segment start are not played, as gstreamer's audio sink clips them
             let segment_start = self.pacer.segment().map_or(0, |segment| segment.start);
-            while let Some(first) = self.held.first() {
-                let before_start = segment_start.saturating_sub(first.timing.pts_ns);
+            while !self.held.is_empty() {
                 let first = self.held.remove(0);
-                if let Some(rest) = geometry.trim_front(first, before_start) {
+                if let Some(rest) = geometry.clip_to_start(first, segment_start) {
                     self.held.insert(0, rest);
                     break;
                 }
@@ -300,7 +344,8 @@ mod device_worker {
             let mut cmds = Vec::with_capacity(held.len() + 1);
             cmds.push(DeviceCmd::StartAt(StartAt {
                 deadline_ns,
-                clock,
+                paused_total_ns: sync.paused_total_ns(),
+                sync,
                 geometry,
             }));
             cmds.extend(held);
@@ -327,14 +372,162 @@ mod device_worker {
         }
     }
 
-    const FLUSH_CHECK_DURING_START_WAIT: Duration = Duration::from_millis(10);
+    const DEVICE_OPEN_TIMEOUT: Duration = Duration::from_secs(5);
+
+    struct RunningWorker {
+        link: WorkerLink<DeviceCmd>,
+        geometry: PcmGeometry,
+    }
+
+    pub(crate) struct PlayoutLink {
+        worker: Option<RunningWorker>,
+        pending_flushes: PendingFlushes,
+        start: PlayoutStart,
+        worker_error: G2gError,
+    }
+
+    impl core::fmt::Debug for PlayoutLink {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            f.debug_struct("PlayoutLink")
+                .field("running", &self.is_running())
+                .finish_non_exhaustive()
+        }
+    }
+
+    impl PlayoutLink {
+        pub(crate) fn new(worker_error: G2gError) -> Self {
+            Self {
+                worker: None,
+                pending_flushes: PendingFlushes::default(),
+                start: PlayoutStart::default(),
+                worker_error,
+            }
+        }
+
+        pub(crate) fn is_running(&self) -> bool {
+            self.worker
+                .as_ref()
+                .is_some_and(|worker| worker.link.is_running())
+        }
+
+        pub(crate) fn set_clock_sync(&mut self, sync: ClockSync) {
+            self.start.set_clock_sync(sync);
+        }
+
+        pub(crate) fn set_segment(&mut self, segment: Segment) {
+            self.start.set_segment(segment);
+        }
+
+        pub(crate) fn open<Device>(
+            &mut self,
+            thread_name: &str,
+            caps: &Caps,
+            output: &mut OutputDevice,
+            fallback: DeviceFallback,
+            open: impl FnMut(&str) -> Result<Device, G2gError> + Send + 'static,
+            play: impl FnMut(Device, &Receiver<DeviceCmd>, &mut PlayoutGate) -> PlayEnd + Send + 'static,
+        ) -> Result<(), G2gError> {
+            self.abort();
+            let geometry = PcmGeometry::of(caps)?;
+            let (ready_tx, ready_rx) = mpsc::sync_channel(1);
+            let device = String::from(output.name());
+            self.pending_flushes = PendingFlushes::default();
+            let pending_flushes = self.pending_flushes.clone();
+            let link = WorkerLink::spawn(thread_name, move |rx| {
+                run_device_worker(device, rx, pending_flushes, fallback, ready_tx, open, play);
+            })?;
+            // a host with no audio device fails here instead of dropping audio
+            match ready_rx.recv_timeout(DEVICE_OPEN_TIMEOUT) {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => return Err(error),
+                Err(_) => return Err(self.worker_error.clone()),
+            }
+            output.opened();
+            self.worker = Some(RunningWorker { link, geometry });
+            Ok(())
+        }
+
+        pub(crate) async fn send(
+            &mut self,
+            frame: Frame,
+            output: &mut OutputDevice,
+        ) -> Result<(), G2gError> {
+            let worker = self.worker.as_ref().ok_or(G2gError::NotConfigured)?;
+            if let Some(device) = output.take_switch() {
+                let switch = DeviceCmd::SwitchDevice(device);
+                worker.link.send(switch, self.worker_error.clone()).await?;
+            }
+            let error = self.worker_error.clone();
+            self.start
+                .send(&worker.link, frame, worker.geometry, error)
+                .await
+        }
+
+        pub(crate) async fn flush(&mut self) -> Result<(), G2gError> {
+            let worker = self.worker.as_ref().ok_or(G2gError::NotConfigured)?;
+            let error = self.worker_error.clone();
+            self.start
+                .flush(&worker.link, &self.pending_flushes, error)
+                .await
+        }
+
+        pub(crate) async fn finish(&mut self) -> Result<(), G2gError> {
+            let Some(mut worker) = self.worker.take() else {
+                return Ok(());
+            };
+            let error = self.worker_error.clone();
+            self.start.send_held(&worker.link, error.clone()).await?;
+            worker.link.finish(DeviceCmd::Shutdown, error).await
+        }
+
+        pub(crate) fn abort(&mut self) {
+            self.worker = None;
+        }
+    }
+
+    const COMMAND_CHECK_INTERVAL: Duration = Duration::from_millis(10);
 
     // thread::sleep wakes up to a scheduler tick late
     const START_LATENESS_KEPT_NS: u64 = 5_000_000;
 
+    // pipewire-alsa's delay jumps by a quantum and stalls for a few milliseconds after an unpause
+    const RESYNC_SETTLE_NS: u64 = 100_000_000;
+    // alsa delay readings through pipewire jitter by about nine milliseconds
+    const RESYNC_TOLERANCE_NS: i128 = 10_000_000;
+
+    pub(crate) trait PausableDevice {
+        fn pause(&mut self) -> Result<(), G2gError>;
+        fn resume(&mut self) -> Result<(), G2gError>;
+        fn still_playing_after_pause_ns(&self) -> Result<u64, G2gError>;
+        fn delay_ns(&self) -> Result<u64, G2gError>;
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    struct Timeline {
+        // clock time minus pts of audio that plays on time
+        offset_ns: i128,
+        paused_total_ns: u64,
+        geometry: PcmGeometry,
+    }
+
+    impl Timeline {
+        fn offset_now_ns(&self, sync: &ClockSync) -> i128 {
+            self.offset_ns + i128::from(sync.paused_total_ns().saturating_sub(self.paused_total_ns))
+        }
+    }
+
     pub(crate) struct PlayoutGate {
         pending_flushes: PendingFlushes,
         start: Option<StartAt>,
+        sync: Option<ClockSync>,
+        timeline: Option<Timeline>,
+        handed_out_end_pts_ns: u64,
+        resync_at_ns: Option<u64>,
+        // positive drops that much audio from the next buffer, negative plays that much silence first
+        correction_ns: i128,
+        // commands received while waiting on a start or a pause, played back in order
+        backlog: VecDeque<DeviceCmd>,
+        disconnected: bool,
     }
 
     impl PlayoutGate {
@@ -342,10 +535,144 @@ mod device_worker {
             Self {
                 pending_flushes,
                 start: None,
+                sync: None,
+                timeline: None,
+                handed_out_end_pts_ns: 0,
+                resync_at_ns: None,
+                correction_ns: 0,
+                backlog: VecDeque::new(),
+                disconnected: false,
             }
         }
 
-        pub(crate) fn admit(&mut self, cmd: DeviceCmd) -> Option<DeviceStep> {
+        pub(crate) fn recv(
+            &mut self,
+            rx: &Receiver<DeviceCmd>,
+        ) -> Result<Option<DeviceStep>, RecvError> {
+            if self.disconnected {
+                return Err(RecvError);
+            }
+            let cmd = match self.backlog.pop_front() {
+                Some(cmd) => cmd,
+                None => rx.recv()?,
+            };
+            Ok(self.admit(cmd, rx))
+        }
+
+        #[cfg(all(target_os = "windows", feature = "wasapi-sink"))]
+        pub(crate) fn recv_timeout(
+            &mut self,
+            rx: &Receiver<DeviceCmd>,
+            timeout: Duration,
+        ) -> Result<Option<DeviceStep>, RecvTimeoutError> {
+            if self.disconnected {
+                return Err(RecvTimeoutError::Disconnected);
+            }
+            let cmd = match self.backlog.pop_front() {
+                Some(cmd) => cmd,
+                None => rx.recv_timeout(timeout)?,
+            };
+            Ok(self.admit(cmd, rx))
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        pub(crate) fn play_in_slices<Device: PausableDevice>(
+            &mut self,
+            rx: &Receiver<DeviceCmd>,
+            pcm: &[u8],
+            geometry: PcmGeometry,
+            device: &mut Device,
+            mut write: impl FnMut(&mut Device, &[u8]) -> Result<(), G2gError>,
+        ) -> Result<(), G2gError> {
+            let mut unwritten = pcm.len();
+            for slice in geometry.pause_check_slices(pcm) {
+                self.pause_or_resync(rx, device, geometry.bytes_to_ns(unwritten))?;
+                if self.discards_queued_audio() {
+                    break;
+                }
+                write(device, slice)?;
+                unwritten -= slice.len();
+            }
+            Ok(())
+        }
+
+        // returns whether the device was paused
+        pub(crate) fn pause_or_resync(
+            &mut self,
+            rx: &Receiver<DeviceCmd>,
+            device: &mut impl PausableDevice,
+            unwritten_ns: u64,
+        ) -> Result<bool, G2gError> {
+            let Some(sync) = self.sync.clone() else {
+                return Ok(false);
+            };
+            if self.discards_queued_audio() {
+                return Ok(false);
+            }
+            if sync.is_playing() {
+                self.resync(&sync, device, unwritten_ns)?;
+                return Ok(false);
+            }
+            let paused_total_ns = sync.paused_total_ns();
+            device.pause()?;
+            let stopped_at_ns = sync.now_ns() + device.still_playing_after_pause_ns()?;
+            while !sync.is_playing() && !self.discards_queued_audio() {
+                self.wait_for_command(rx, COMMAND_CHECK_INTERVAL);
+            }
+            // the audio played after the pipeline paused is made up by staying stopped that much longer
+            let resume_at_ns =
+                stopped_at_ns + sync.paused_total_ns().saturating_sub(paused_total_ns);
+            while !self.discards_queued_audio() {
+                let now_ns = sync.now_ns();
+                if now_ns >= resume_at_ns {
+                    break;
+                }
+                let wait = Duration::from_nanos(resume_at_ns - now_ns);
+                self.wait_for_command(rx, wait.min(COMMAND_CHECK_INTERVAL));
+            }
+            device.resume()?;
+            self.resync_at_ns = Some(sync.now_ns() + RESYNC_SETTLE_NS);
+            Ok(true)
+        }
+
+        fn resync(
+            &mut self,
+            sync: &ClockSync,
+            device: &impl PausableDevice,
+            unwritten_ns: u64,
+        ) -> Result<(), G2gError> {
+            let (Some(resync_at_ns), Some(timeline)) = (self.resync_at_ns, self.timeline) else {
+                return Ok(());
+            };
+            let now_ns = sync.now_ns();
+            if now_ns < resync_at_ns {
+                return Ok(());
+            }
+            self.resync_at_ns = None;
+            let not_yet_played_ns = unwritten_ns + device.delay_ns()?;
+            let playing_pts_ns =
+                i128::from(self.handed_out_end_pts_ns) - i128::from(not_yet_played_ns);
+            let late_ns = i128::from(now_ns) - playing_pts_ns - timeline.offset_now_ns(sync);
+            if late_ns.abs() > RESYNC_TOLERANCE_NS {
+                self.correction_ns = late_ns;
+            }
+            Ok(())
+        }
+
+        // a pending flush or a closed queue means the rest of the buffer being played must not play
+        pub(crate) fn discards_queued_audio(&self) -> bool {
+            self.pending_flushes.pending() || self.disconnected
+        }
+
+        fn wait_for_command(&mut self, rx: &Receiver<DeviceCmd>, timeout: Duration) {
+            match rx.recv_timeout(timeout) {
+                Ok(cmd) => self.backlog.push_back(cmd),
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => self.disconnected = true,
+            }
+        }
+
+        fn admit(&mut self, cmd: DeviceCmd, rx: &Receiver<DeviceCmd>) -> Option<DeviceStep> {
             match cmd {
                 // samples queued ahead of a flush belong to the position before a seek
                 DeviceCmd::Samples(_) | DeviceCmd::StartAt(_) if self.pending_flushes.pending() => {
@@ -354,39 +681,59 @@ mod device_worker {
                 DeviceCmd::Flush => {
                     self.pending_flushes.0.fetch_sub(1, Ordering::AcqRel);
                     self.start = None;
+                    self.timeline = None;
+                    self.resync_at_ns = None;
+                    self.correction_ns = 0;
                     Some(DeviceStep::Flush)
                 }
                 DeviceCmd::StartAt(start) => {
+                    self.sync = Some(start.sync.clone());
                     self.start = Some(start);
                     None
                 }
-                DeviceCmd::Samples(frame) => self.start_playing(frame).map(DeviceStep::Samples),
+                DeviceCmd::Samples(frame) => {
+                    let frame = self.start_playing(frame, rx)?;
+                    let frame = self.correct(frame)?;
+                    if let Some(timeline) = self.timeline {
+                        self.handed_out_end_pts_ns =
+                            frame.timing.pts_ns + timeline.geometry.duration_ns(&frame);
+                    }
+                    Some(DeviceStep::Samples(frame))
+                }
                 DeviceCmd::SwitchDevice(device) => Some(DeviceStep::SwitchDevice(device)),
                 DeviceCmd::Shutdown => Some(DeviceStep::Shutdown),
             }
         }
 
-        fn start_playing(&mut self, frame: Frame) -> Option<Frame> {
+        fn start_playing(&mut self, frame: Frame, rx: &Receiver<DeviceCmd>) -> Option<Frame> {
             let Some(start) = self.start.take() else {
                 return Some(frame);
             };
             loop {
-                let now = start.clock.now_ns();
-                if now >= start.deadline_ns {
-                    break;
-                }
-                if self.pending_flushes.pending() {
+                if self.discards_queued_audio() {
                     return None;
                 }
-                thread::sleep(
-                    Duration::from_nanos(start.deadline_ns - now)
-                        .min(FLUSH_CHECK_DURING_START_WAIT),
-                );
+                let now_ns = start.sync.now_ns();
+                let left =
+                    Duration::from_nanos(start.deadline_after_pauses_ns().saturating_sub(now_ns));
+                if left.is_zero() && start.sync.is_playing() {
+                    break;
+                }
+                let wait = match left.is_zero() {
+                    true => COMMAND_CHECK_INTERVAL,
+                    false => left.min(COMMAND_CHECK_INTERVAL),
+                };
+                self.wait_for_command(rx, wait);
             }
-            if self.pending_flushes.pending() {
-                return None;
-            }
-            let late_ns = start.clock.now_ns().saturating_sub(start.deadline_ns);
+            let deadline_ns = start.deadline_after_pauses_ns();
+            let now_ns = start.sync.now_ns();
+            self.timeline = Some(Timeline {
+                offset_ns: i128::from(start.deadline_ns) - i128::from(frame.timing.pts_ns),
+                paused_total_ns: start.paused_total_ns,
+                geometry: start.geometry,
+            });
+            self.resync_at_ns = Some(now_ns + RESYNC_SETTLE_NS);
+            let late_ns = now_ns.saturating_sub(deadline_ns);
             if late_ns < START_LATENESS_KEPT_NS {
                 return Some(frame);
             }
@@ -400,6 +747,46 @@ mod device_worker {
                 });
             }
             trimmed
+        }
+
+        fn correct(&mut self, frame: Frame) -> Option<Frame> {
+            let Some(timeline) = self.timeline else {
+                return Some(frame);
+            };
+            let correction_ns = self.correction_ns;
+            if correction_ns < 0 {
+                self.correction_ns = 0;
+                return timeline
+                    .geometry
+                    .prepend_silence(frame, correction_ns.unsigned_abs() as u64);
+            }
+            let duration_ns = timeline.geometry.duration_ns(&frame);
+            let trimmed = timeline.geometry.trim_front(frame, correction_ns as u64);
+            self.correction_ns = match trimmed {
+                Some(_) => 0,
+                None => correction_ns - i128::from(duration_ns),
+            };
+            trimmed
+        }
+    }
+
+    struct NoDevice;
+
+    impl PausableDevice for NoDevice {
+        fn pause(&mut self) -> Result<(), G2gError> {
+            Ok(())
+        }
+
+        fn resume(&mut self) -> Result<(), G2gError> {
+            Ok(())
+        }
+
+        fn still_playing_after_pause_ns(&self) -> Result<u64, G2gError> {
+            Ok(0)
+        }
+
+        fn delay_ns(&self) -> Result<u64, G2gError> {
+            Ok(0)
         }
     }
 
@@ -494,11 +881,24 @@ mod device_worker {
         let mut first_sample_at: Option<Instant> = None;
         let mut consumed_bytes = 0u64;
         loop {
-            match rx.recv().map(|cmd| gate.admit(cmd)) {
+            match gate.recv(rx) {
                 Ok(None | Some(DeviceStep::Flush)) => {}
                 Ok(Some(DeviceStep::Samples(frame))) => {
-                    let started = *first_sample_at.get_or_insert_with(Instant::now);
                     let bytes = (fallback.payload_len)(&frame)? as u64;
+                    let unconsumed_ns = (u128::from(bytes) * 1_000_000_000
+                        / u128::from(fallback.bytes_per_second))
+                        as u64;
+                    if gate
+                        .pause_or_resync(rx, &mut NoDevice, unconsumed_ns)
+                        .ok()?
+                    {
+                        first_sample_at = None;
+                        consumed_bytes = 0;
+                    }
+                    if gate.discards_queued_audio() {
+                        continue;
+                    }
+                    let started = *first_sample_at.get_or_insert_with(Instant::now);
                     consumed_bytes += bytes;
                     fallback
                         .rendered
@@ -517,17 +917,9 @@ mod device_worker {
     }
 }
 
-#[cfg(all(
-    test,
-    any(
-        all(
-            target_os = "linux",
-            any(feature = "alsa-sink", feature = "pulse-sink")
-        ),
-        all(target_os = "windows", feature = "wasapi-sink")
-    )
-))]
+#[cfg(test)]
 mod tests {
+    use super::device_worker::*;
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::mpsc::{sync_channel, Receiver};
@@ -581,7 +973,7 @@ mod tests {
                     false => Ok(String::from(device)),
                 },
                 |device, rx, gate| loop {
-                    match rx.recv().map(|cmd| gate.admit(cmd)) {
+                    match gate.recv(rx) {
                         Ok(None | Some(DeviceStep::Flush)) => {}
                         Ok(Some(DeviceStep::Samples(_))) => {
                             played.lock().unwrap().push(device.clone())
@@ -653,7 +1045,7 @@ mod tests {
                     Ok(String::from(device))
                 },
                 |_, rx, gate| loop {
-                    let event = match rx.recv().map(|cmd| gate.admit(cmd)) {
+                    let event = match gate.recv(rx) {
                         Ok(None) => continue,
                         Ok(Some(DeviceStep::Samples(frame))) => DeviceEvent::Samples {
                             pts_ns: frame.timing.pts_ns,
@@ -797,6 +1189,47 @@ mod tests {
     }
 
     #[test]
+    fn a_buffer_starting_part_of_a_sample_before_the_segment_waits_for_its_deadline() {
+        // a seek target between two samples at 48 kHz
+        const SEGMENT_START_NS: u64 = 1_000_010_000;
+        const BUFFER_BYTES: usize = 4_800;
+        let clock: Arc<dyn g2g_core::PipelineClock + Send + Sync> =
+            Arc::new(g2g_core::MonotonicClock);
+        let anchor = g2g_core::clock::PlayAnchor::new();
+        let mut start = PlayoutStart::default();
+        start.set_clock_sync(g2g_core::ClockSync::with_play_anchor(
+            Arc::clone(&clock),
+            0,
+            anchor.clone(),
+        ));
+        start.set_segment(g2g_core::Segment::for_flush_seek(
+            &g2g_core::Seek::flush_to(SEGMENT_START_NS),
+            None,
+        ));
+        let (open_tx, open_rx) = sync_channel::<()>(1);
+        open_tx.send(()).unwrap();
+        let (mut link, log) = spawn_recording_worker(PendingFlushes::default(), open_rx);
+        let one_sample_ns = buffer_ns(STEREO_S16_BYTES_PER_FRAME);
+        let frame = pcm_frame(SEGMENT_START_NS - one_sample_ns / 2, BUFFER_BYTES);
+        g2g_core::runtime::block_on(async {
+            start.send(&link, frame, stereo_s16(), err()).await.unwrap();
+            anchor.stamp(clock.now_ns());
+            let next = pcm_frame(SEGMENT_START_NS + buffer_ns(BUFFER_BYTES), BUFFER_BYTES);
+            start.send(&link, next, stereo_s16(), err()).await.unwrap();
+            link.finish(DeviceCmd::Shutdown, err()).await.unwrap();
+        });
+
+        assert_eq!(
+            events(&log)[0],
+            DeviceEvent::Samples {
+                pts_ns: SEGMENT_START_NS,
+                len: BUFFER_BYTES
+            },
+            "the buffer played without a deadline"
+        );
+    }
+
+    #[test]
     fn samples_past_their_start_are_dropped_from_the_front() {
         const BASE_NS: u64 = 1_000_000_000;
         const LATE_NS: u64 = 10_000_000;
@@ -830,6 +1263,224 @@ mod tests {
                 pts_ns: LATE_NS,
                 len: BUFFER_BYTES - late_bytes
             }]
+        );
+    }
+
+    #[derive(Debug, PartialEq)]
+    enum PauseEvent {
+        Samples { pts_ns: u64, len: usize },
+        Pause,
+        Resume { at_ns: u64 },
+    }
+
+    // the device boundary: logs pauses, resumes and buffers, and reports the amounts the test sets
+    struct RecordingDevice {
+        log: Arc<Mutex<Vec<PauseEvent>>>,
+        clock: crate::testutil::ManualClock,
+        left_to_play_ns: u64,
+        delay_ns: Arc<AtomicU64>,
+    }
+
+    impl PausableDevice for RecordingDevice {
+        fn pause(&mut self) -> Result<(), G2gError> {
+            self.log.lock().unwrap().push(PauseEvent::Pause);
+            Ok(())
+        }
+
+        fn resume(&mut self) -> Result<(), G2gError> {
+            let at_ns = g2g_core::PipelineClock::now_ns(&self.clock);
+            self.log.lock().unwrap().push(PauseEvent::Resume { at_ns });
+            Ok(())
+        }
+
+        fn still_playing_after_pause_ns(&self) -> Result<u64, G2gError> {
+            Ok(self.left_to_play_ns)
+        }
+
+        fn delay_ns(&self) -> Result<u64, G2gError> {
+            Ok(self.delay_ns.load(Ordering::SeqCst))
+        }
+    }
+
+    fn spawn_pausing_worker(mut device: RecordingDevice) -> WorkerLink<DeviceCmd> {
+        let output = OutputDevice::new("device", "first");
+        let fallback = output.fallback(BYTES_PER_SECOND, Arc::new(AtomicU64::new(0)), 1, |frame| {
+            frame.domain.as_system_slice().map(<[u8]>::len)
+        });
+        let (ready_tx, _ready_rx) = sync_channel(1);
+        WorkerLink::spawn("test-audio", move |rx| {
+            run_device_worker(
+                String::from("first"),
+                rx,
+                PendingFlushes::default(),
+                fallback,
+                ready_tx,
+                |_| Ok(()),
+                |(), rx, gate| loop {
+                    match gate.recv(rx) {
+                        Ok(Some(DeviceStep::Samples(frame))) => {
+                            gate.pause_or_resync(rx, &mut device, 0).unwrap();
+                            let pts_ns = frame.timing.pts_ns;
+                            let len = frame.domain.as_system_slice().unwrap().len();
+                            let event = PauseEvent::Samples { pts_ns, len };
+                            device.log.lock().unwrap().push(event);
+                        }
+                        Ok(None | Some(DeviceStep::Flush)) => {}
+                        Ok(Some(DeviceStep::SwitchDevice(next))) => {
+                            return PlayEnd::SwitchDevice(next)
+                        }
+                        Ok(Some(DeviceStep::Shutdown)) | Err(_) => return PlayEnd::Shutdown,
+                    }
+                },
+            );
+        })
+        .unwrap()
+    }
+
+    fn playing_start(
+        manual: &crate::testutil::ManualClock,
+        anchor: &g2g_core::clock::PlayAnchor,
+    ) -> PlayoutStart {
+        let mut start = PlayoutStart::default();
+        start.set_clock_sync(g2g_core::ClockSync::with_play_anchor(
+            Arc::new(crate::testutil::ManualClock(Arc::clone(&manual.0))),
+            0,
+            anchor.clone(),
+        ));
+        start.set_segment(g2g_core::Segment::new());
+        start
+    }
+
+    fn wait_for(log: &Mutex<Vec<PauseEvent>>, len: usize) {
+        let started = Instant::now();
+        while log.lock().unwrap().len() < len {
+            assert!(started.elapsed() < Duration::from_secs(5), "{log:?}");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    fn buffer_ns(bytes: usize) -> u64 {
+        crate::audioconvert::samples_to_ns(
+            (bytes / STEREO_S16_BYTES_PER_FRAME) as u64,
+            STEREO_S16_RATE,
+        )
+    }
+
+    #[test]
+    fn a_pause_stops_the_device_until_play_plus_the_audio_it_played_past_the_pause() {
+        const BASE_NS: u64 = 1_000_000_000;
+        const PAUSED_AT_NS: u64 = BASE_NS + 100_000_000;
+        const PAUSE_NS: u64 = 2_000_000_000;
+        const LEFT_TO_PLAY_NS: u64 = 30_000_000;
+        const BUFFER_BYTES: usize = 4_800;
+        let manual = crate::testutil::ManualClock::default();
+        manual.set(BASE_NS);
+        let anchor = g2g_core::clock::PlayAnchor::new();
+        anchor.stamp(BASE_NS);
+        let mut start = playing_start(&manual, &anchor);
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let mut link = spawn_pausing_worker(RecordingDevice {
+            log: Arc::clone(&log),
+            clock: crate::testutil::ManualClock(Arc::clone(&manual.0)),
+            left_to_play_ns: LEFT_TO_PLAY_NS,
+            delay_ns: Arc::default(),
+        });
+        let geometry = stereo_s16();
+        let next_pts = buffer_ns(BUFFER_BYTES);
+        g2g_core::runtime::block_on(async {
+            let first = pcm_frame(0, BUFFER_BYTES);
+            start.send(&link, first, geometry, err()).await.unwrap();
+            wait_for(&log, 1);
+
+            manual.set(PAUSED_AT_NS);
+            anchor.pause(PAUSED_AT_NS);
+            let next = pcm_frame(next_pts, BUFFER_BYTES);
+            start.send(&link, next, geometry, err()).await.unwrap();
+            wait_for(&log, 2);
+
+            let played_at_ns = PAUSED_AT_NS + PAUSE_NS;
+            manual.set(played_at_ns);
+            anchor.resume(played_at_ns);
+            std::thread::sleep(Duration::from_millis(50));
+            assert_eq!(
+                log.lock().unwrap().len(),
+                2,
+                "resumed before the audio played past the pause was made up"
+            );
+            manual.set(played_at_ns + LEFT_TO_PLAY_NS);
+            link.finish(DeviceCmd::Shutdown, err()).await.unwrap();
+        });
+
+        assert_eq!(
+            *log.lock().unwrap(),
+            [
+                PauseEvent::Samples {
+                    pts_ns: 0,
+                    len: BUFFER_BYTES
+                },
+                PauseEvent::Pause,
+                PauseEvent::Resume {
+                    at_ns: PAUSED_AT_NS + PAUSE_NS + LEFT_TO_PLAY_NS
+                },
+                PauseEvent::Samples {
+                    pts_ns: next_pts,
+                    len: BUFFER_BYTES
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn audio_measured_late_against_the_clock_is_dropped_from_the_next_buffer() {
+        const BASE_NS: u64 = 1_000_000_000;
+        const BUFFER_BYTES: usize = 96_000;
+        const LATE_NS: u64 = 30_000_000;
+        const MEASURED_AFTER_NS: u64 = 150_000_000;
+        let manual = crate::testutil::ManualClock::default();
+        manual.set(BASE_NS);
+        let anchor = g2g_core::clock::PlayAnchor::new();
+        anchor.stamp(BASE_NS);
+        let mut start = playing_start(&manual, &anchor);
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let delay_ns = Arc::new(AtomicU64::new(0));
+        let mut link = spawn_pausing_worker(RecordingDevice {
+            log: Arc::clone(&log),
+            clock: crate::testutil::ManualClock(Arc::clone(&manual.0)),
+            left_to_play_ns: 0,
+            delay_ns: Arc::clone(&delay_ns),
+        });
+        let geometry = stereo_s16();
+        let buffer = buffer_ns(BUFFER_BYTES);
+        g2g_core::runtime::block_on(async {
+            start
+                .send(&link, pcm_frame(0, BUFFER_BYTES), geometry, err())
+                .await
+                .unwrap();
+            wait_for(&log, 1);
+
+            // two buffers handed out, and the device still has to play everything after the late position
+            manual.set(BASE_NS + MEASURED_AFTER_NS);
+            let playing_pts = MEASURED_AFTER_NS - LATE_NS;
+            delay_ns.store(2 * buffer - playing_pts, Ordering::SeqCst);
+            start
+                .send(&link, pcm_frame(buffer, BUFFER_BYTES), geometry, err())
+                .await
+                .unwrap();
+            start
+                .send(&link, pcm_frame(2 * buffer, BUFFER_BYTES), geometry, err())
+                .await
+                .unwrap();
+            link.finish(DeviceCmd::Shutdown, err()).await.unwrap();
+        });
+
+        let late_bytes = crate::audioconvert::ns_to_samples(LATE_NS, STEREO_S16_RATE) as usize
+            * STEREO_S16_BYTES_PER_FRAME;
+        assert_eq!(
+            log.lock().unwrap()[2],
+            PauseEvent::Samples {
+                pts_ns: 2 * buffer + LATE_NS,
+                len: BUFFER_BYTES - late_bytes
+            }
         );
     }
 

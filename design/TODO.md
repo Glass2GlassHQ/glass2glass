@@ -58,7 +58,7 @@ The plan is [remote.md](remote.md).
 - guikit's controls: `sub-add` slots, and the `audio-params` channel layout
   the level meter labels its channels with.
 - Take GPU frames in `playervideosink` once decoders open on the host's device.
-- Audio clock driving A/V sync, and an option that hands PCM to the host.
+- An option that hands PCM to the host.
 - A versioned C ABI (`g2g_player.h`), wrapped in the C#, C++, Kotlin and
   Python bindings.
 - Bevy / wgpu, Qt, Flutter and Android hosts, with one texture export per

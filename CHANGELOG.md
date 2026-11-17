@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2383: every audio sink pauses with the pipeline, resyncs after a start, and shares one device worker.
 - M2382: audio sinks start at their deadline, and `g2g-player` prerolls every sink before playing and on each seek.
 - M2381: audio sinks drop queued audio on a flush, and the audio clock keeps running through a pause or seek.
 - M2380: `fmp4demux` position counts from the first frame, as its seek targets do.

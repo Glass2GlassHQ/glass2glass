@@ -25,6 +25,8 @@ crate::shared_library::shared_library! {
     fn snd_pcm_drop = "snd_pcm_drop"(pcm: *mut c_void) -> c_int;
     #[cfg(feature = "alsa-sink")]
     fn snd_pcm_drain = "snd_pcm_drain"(pcm: *mut c_void) -> c_int;
+    #[cfg(feature = "alsa-sink")]
+    fn snd_pcm_pause = "snd_pcm_pause"(pcm: *mut c_void, enable: c_int) -> c_int;
     fn snd_pcm_recover = "snd_pcm_recover"(pcm: *mut c_void, error: c_int, silent: c_int) -> c_int;
     fn snd_pcm_delay = "snd_pcm_delay"(pcm: *mut c_void, delay: *mut c_long) -> c_int;
     #[cfg(feature = "alsa-sink")]
@@ -172,6 +174,12 @@ impl Pcm {
     pub(crate) fn drain(&self) -> Result<(), i32> {
         // SAFETY: the handle is open.
         check(unsafe { snd_pcm_drain(self.0) })
+    }
+
+    #[cfg(feature = "alsa-sink")]
+    pub(crate) fn pause(&self, paused: bool) -> Result<(), i32> {
+        // SAFETY: the handle is open.
+        check(unsafe { snd_pcm_pause(self.0, c_int::from(paused)) })
     }
 
     pub(crate) fn recover(&self, error: i32) -> Result<(), i32> {

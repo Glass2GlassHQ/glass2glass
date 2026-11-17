@@ -36,10 +36,8 @@ use core::future::Future;
 use core::pin::Pin;
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc::Receiver;
 use std::sync::Arc;
-
-use std::time::Duration;
 
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -58,8 +56,8 @@ use g2g_core::{
 };
 
 use crate::audiooutput::{
-    DeviceCmd, DeviceStep, OutputDevice, PcmGeometry, PendingFlushes, PlayEnd, PlayoutGate,
-    PlayoutStart,
+    DeviceCmd, DeviceStep, OutputDevice, PausableDevice, PcmGeometry, PlayEnd, PlayoutGate,
+    PlayoutLink,
 };
 use crate::pulsepcm::{pulse_map, pulse_spec, FORMATS};
 use g2g_core::pcm_caps_any_rate_and_channels;
@@ -103,9 +101,7 @@ pub struct PulseSink {
     /// Bounded, non-blocking link to the device thread. The executor is
     /// cooperative, so neither the hand-off nor the end-of-stream drain may
     /// block it (see [`crate::audioworker`]).
-    link: Option<crate::audioworker::WorkerLink<DeviceCmd>>,
-    pending_flushes: PendingFlushes,
-    start: PlayoutStart,
+    link: PlayoutLink,
     caps: Option<Caps>,
     bytes_written: Arc<AtomicU64>,
     playout: crate::audioskew::PlayoutClock,
@@ -139,9 +135,7 @@ impl PulseSink {
         Self {
             app_name: name.into(),
             output: OutputDevice::new("device", ""),
-            link: None,
-            pending_flushes: PendingFlushes::default(),
-            start: PlayoutStart::default(),
+            link: PlayoutLink::new(G2gError::Hardware(HardwareError::PulseAudio(-1))),
             caps: None,
             bytes_written: Arc::new(AtomicU64::new(0)),
             playout: crate::audioskew::PlayoutClock::default(),
@@ -158,22 +152,6 @@ impl PulseSink {
     /// has observed the server.
     pub fn clock(&self) -> Arc<DriftClock> {
         self.playout.clock()
-    }
-
-    /// Tear down without waiting for playout (reconfigure / drop). The
-    /// end-of-stream drain that *does* wait is `WorkerLink::finish`, awaited
-    /// from `process(Eos)` so it never blocks the executor.
-    fn shutdown(&mut self) {
-        if let Some(link) = self.link.as_mut() {
-            link.abort();
-        }
-        self.link = None;
-    }
-}
-
-impl Drop for PulseSink {
-    fn drop(&mut self) {
-        self.shutdown();
     }
 }
 
@@ -203,17 +181,12 @@ impl AsyncElement for PulseSink {
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         let spec = pulse_spec(absolute_caps)?;
 
-        if self.link.as_ref().is_some_and(|l| l.is_running()) {
-            if self.caps.as_ref() == Some(absolute_caps) {
-                return Ok(ConfigureOutcome::Accepted);
-            }
-            self.shutdown();
+        if self.link.is_running() && self.caps.as_ref() == Some(absolute_caps) {
+            return Ok(ConfigureOutcome::Accepted);
         }
 
-        let (ready_tx, ready_rx) = mpsc::sync_channel::<Result<(), G2gError>>(1);
         let written = Arc::clone(&self.bytes_written);
         let app_name = self.app_name.clone();
-        let device = String::from(self.output.name());
         // disciplined even when not offered, skew slaving reads it
         let clock = self.playout.clock();
         self.playout.configure(absolute_caps)?;
@@ -228,34 +201,17 @@ impl AsyncElement for PulseSink {
             },
         );
 
-        self.pending_flushes = PendingFlushes::default();
-        let pending_flushes = self.pending_flushes.clone();
-        let link = crate::audioworker::WorkerLink::spawn("g2g-pulsesink", move |rx| {
-            let mut clock_offset = DeviceClockOffset::default();
-            crate::audiooutput::run_device_worker(
-                device,
-                rx,
-                pending_flushes,
-                fallback,
-                ready_tx,
-                |device| open_stream(&app_name, device, &spec),
-                |simple, rx, gate| {
-                    play(simple, &spec, rx, gate, &written, &clock, &mut clock_offset)
-                },
-            );
-        })?;
-
-        // The worker reports whether the server connection opened; a host with
-        // no PulseAudio server fails loud here rather than dropping audio.
-        match ready_rx.recv_timeout(Duration::from_secs(5)) {
-            Ok(Ok(())) => {}
-            // `link`'s Drop reaps the worker, so a failed open needs no join.
-            Ok(Err(error)) => return Err(error),
-            Err(_) => return Err(G2gError::Hardware(HardwareError::PulseAudio(-1))),
-        }
-
-        self.output.opened();
-        self.link = Some(link);
+        let mut clock_offset = DeviceClockOffset::default();
+        self.link.open(
+            "g2g-pulsesink",
+            absolute_caps,
+            &mut self.output,
+            fallback,
+            move |device| open_stream(&app_name, device, &spec),
+            move |simple, rx, gate| {
+                play(simple, &spec, rx, gate, &written, &clock, &mut clock_offset)
+            },
+        )?;
         self.caps = Some(absolute_caps.clone());
         Ok(ConfigureOutcome::Accepted)
     }
@@ -268,7 +224,7 @@ impl AsyncElement for PulseSink {
     }
 
     fn set_clock_sync(&mut self, sync: ClockSync) {
-        self.start.set_clock_sync(sync.clone());
+        self.link.set_clock_sync(sync.clone());
         self.playout.set_clock_sync(sync);
     }
 
@@ -311,7 +267,10 @@ impl AsyncElement for PulseSink {
         if let Some(result) = self.playout.set_property(name, &value) {
             return result;
         }
-        if let Some(result) = self.output.set_property(name, &value, self.link.is_some()) {
+        if let Some(result) = self
+            .output
+            .set_property(name, &value, self.link.is_running())
+        {
             return result;
         }
         match name {
@@ -346,25 +305,7 @@ impl AsyncElement for PulseSink {
                 PipelinePacket::DataFrame(frame) => {
                     crate::dmabufmap::require_readable_domain(&frame, ELEMENT_NAME)?;
                     let frame = self.playout.correct_frame(frame, ELEMENT_NAME)?;
-                    let link = self.link.as_ref().ok_or(G2gError::NotConfigured)?;
-                    if let Some(device) = self.output.take_switch() {
-                        link.send(
-                            DeviceCmd::SwitchDevice(device),
-                            G2gError::Hardware(HardwareError::PulseAudio(-1)),
-                        )
-                        .await?;
-                    }
-                    let caps = self.caps.as_ref().ok_or(G2gError::NotConfigured)?;
-                    // Awaited, not blocking: a full queue is the device's
-                    // back-pressure and yields to the executor.
-                    self.start
-                        .send(
-                            link,
-                            frame,
-                            PcmGeometry::of(caps)?,
-                            G2gError::Hardware(HardwareError::PulseAudio(-1)),
-                        )
-                        .await
+                    self.link.send(frame, &mut self.output).await
                 }
                 // A mid-stream format change can't be honoured on an open
                 // stream; only a caps identical to the configured one passes.
@@ -372,37 +313,12 @@ impl AsyncElement for PulseSink {
                     pulse_spec(&c)?;
                     Ok(())
                 }
-                PipelinePacket::Flush => {
-                    let link = self.link.as_ref().ok_or(G2gError::NotConfigured)?;
-                    self.start
-                        .flush(
-                            link,
-                            &self.pending_flushes,
-                            G2gError::Hardware(HardwareError::PulseAudio(-1)),
-                        )
-                        .await
-                }
+                PipelinePacket::Flush => self.link.flush().await,
                 PipelinePacket::Segment(segment) => {
-                    self.start.set_segment(segment);
+                    self.link.set_segment(segment);
                     Ok(())
                 }
-                PipelinePacket::Eos => {
-                    // Wait for the queued audio to actually play out, yielding
-                    // throughout: a blocking join here stalled every other arm
-                    // in the pipeline for the length of the sound.
-                    if let Some(link) = self.link.as_mut() {
-                        self.start
-                            .send_held(link, G2gError::Hardware(HardwareError::PulseAudio(-1)))
-                            .await?;
-                        link.finish(
-                            DeviceCmd::Shutdown,
-                            G2gError::Hardware(HardwareError::PulseAudio(-1)),
-                        )
-                        .await?;
-                    }
-                    self.link = None;
-                    Ok(())
-                }
+                PipelinePacket::Eos => self.link.finish().await,
                 // future PipelinePacket variants: no-op (terminal sink).
                 _ => Ok(()),
             }
@@ -449,22 +365,42 @@ fn play(
     clock: &DriftClock,
     clock_offset: &mut DeviceClockOffset,
 ) -> PlayEnd {
+    let Some((format, _)) = FORMATS.iter().find(|(_, pulse)| *pulse == spec.format) else {
+        return PlayEnd::Failed(G2gError::CapsMismatch);
+    };
+    let geometry = match PcmGeometry::new(*format, u32::from(spec.channels), spec.rate) {
+        Ok(geometry) => geometry,
+        Err(error) => return PlayEnd::Failed(error),
+    };
+    let mut device = PulsePause { simple: &simple };
     let end = loop {
-        match rx.recv().map(|cmd| gate.admit(cmd)) {
+        match gate.recv(rx) {
             Ok(None) => {}
             Ok(Some(DeviceStep::Samples(frame))) => {
                 let payload = match crate::dmabufmap::frame_bytes(&frame, ELEMENT_NAME) {
                     Ok(payload) => payload,
                     Err(error) => break PlayEnd::Failed(error),
                 };
-                let bytes = payload.as_slice();
-                if let Err(e) = simple.write(bytes) {
-                    return PlayEnd::Failed(G2gError::Hardware(HardwareError::PulseAudio(e.0)));
+                let played = gate.play_in_slices(
+                    rx,
+                    payload.as_slice(),
+                    geometry,
+                    &mut device,
+                    |device, slice| {
+                        device
+                            .simple
+                            .write(slice)
+                            .map_err(|e| G2gError::Hardware(HardwareError::PulseAudio(e.0)))?;
+                        written.fetch_add(slice.len() as u64, Ordering::Relaxed);
+                        // After the blocking write returns (at ~the device rate), feed
+                        // the drift clock one playout observation.
+                        discipline_clock(device.simple, spec, written, clock, clock_offset);
+                        Ok(())
+                    },
+                );
+                if let Err(error) = played {
+                    return PlayEnd::Failed(error);
                 }
-                written.fetch_add(bytes.len() as u64, Ordering::Relaxed);
-                // After the blocking write returns (at ~the device rate), feed
-                // the drift clock one playout observation.
-                discipline_clock(&simple, spec, written, clock, clock_offset);
             }
             Ok(Some(DeviceStep::Flush)) => {
                 if let Err(e) = simple.flush() {
@@ -478,6 +414,33 @@ fn play(
     // Play out whatever is still buffered, then stop.
     let _ = simple.drain();
     end
+}
+
+struct PulsePause<'a> {
+    simple: &'a Simple,
+}
+
+// libpulse's simple api has no cork, so a paused stream plays out its buffer and underruns
+impl PausableDevice for PulsePause<'_> {
+    fn pause(&mut self) -> Result<(), G2gError> {
+        Ok(())
+    }
+
+    fn resume(&mut self) -> Result<(), G2gError> {
+        Ok(())
+    }
+
+    fn still_playing_after_pause_ns(&self) -> Result<u64, G2gError> {
+        self.delay_ns()
+    }
+
+    fn delay_ns(&self) -> Result<u64, G2gError> {
+        let latency = self
+            .simple
+            .get_latency()
+            .map_err(|e| G2gError::Hardware(HardwareError::PulseAudio(e.0)))?;
+        Ok(latency.0.saturating_mul(1_000))
+    }
 }
 
 /// Feed the drift clock one `(monotonic_now, played_ns)` observation. Bytes

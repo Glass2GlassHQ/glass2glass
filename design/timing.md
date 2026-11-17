@@ -130,18 +130,35 @@ queue's sample time from `AudioQueueGetCurrentTime`, and AAudio the stream's
 `frames_read`. `PlayoutClock` (`audioskew.rs`) holds each of these sinks' clock,
 the `provide-clock` flag and the skew slaving below.
 
-On a `Flush` the ALSA, PulseAudio and WASAPI sinks skip the samples still queued
-for their device thread (`PendingFlushes`, `audiooutput.rs`) and drop what the
-device buffered, so a seek does not first play out the audio from before it.
+Every audio render sink (ALSA, PulseAudio, PipeWire, WASAPI, Core Audio, AAudio)
+hands its samples to a device thread through `PlayoutLink` (`audiooutput.rs`),
+and that thread runs `run_device_worker`, which owns the start gate, the flush,
+the pause and the resync below as well as device switching and continue-on-error.
+PipeWire's device thread fills a 200 ms byte queue that the realtime callback
+drains.
 
-These sinks also start each stream at its deadline, as GStreamer's audio base sink
+On a `Flush` the sinks skip the samples still queued for their device thread
+(`PendingFlushes`) and drop what the device buffered, so a seek does not first
+play out the audio from before it.
+
+The sinks also start each stream at its deadline, as GStreamer's audio base sink
 does. `PlayoutStart` holds a preroll buffer while the play anchor is armed but
 unstamped, then sends the first buffer's deadline on the elected clock, base time
 plus running time plus path latency, as a `StartAt` ahead of the samples. The
 device thread's `PlayoutGate` sleeps until it, and drops the leading samples of a
-start more than 5 ms late. Samples before the segment start are clipped first. After
-a start the stream plays at the device rate, so audio and video presented against
-the same base time stay together after a start, a seek or a pause.
+start more than 5 ms late. Samples before the segment start are clipped first, and
+the first kept sample is stamped at the segment start, as GStreamer's audio
+clipping does, so a seek target between two samples still gets a deadline.
+
+While the pipeline is out of `Playing` the device thread pauses the device:
+`snd_pcm_pause`, `IAudioClient::Stop`, `AudioQueuePause`, AAudio
+`request_pause`, or silence from the PipeWire callback. PulseAudio's simple API
+has no cork, so it plays out its buffer and underruns. Writes go out in 20 ms
+slices so a pause lands within one slice. The device resumes at play time plus
+the audio it played past the pause. 100 ms after each start or resume the gate
+compares the playing position (samples handed out minus the device delay)
+against the start timeline and drops audio or plays silence when it is more than
+10 ms off, since pipewire-alsa loses 5 to 20 ms on an unpause.
 
 Device counters start near zero, while a `DriftClock` passes its reference, the
 process's monotonic time, through until the first observation, and the pipeline

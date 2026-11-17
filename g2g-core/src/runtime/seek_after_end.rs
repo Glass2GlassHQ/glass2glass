@@ -55,8 +55,8 @@ impl SinkEndReport {
     }
 
     pub(crate) fn awaits_seek_flush(&self) -> bool {
-        // what reaches the sink before the latest flushing seek's Flush belongs to the old position
-        self.run.sinks[self.slot].lock().flushes < self.run.controller.flushing_seeks_taken()
+        // what reaches the sink before the latest flushing seek's Flush belongs to the old position, even before the source takes that seek
+        self.run.sinks[self.slot].lock().flushes < self.run.controller.flushing_seeks_requested()
     }
 
     pub(crate) fn ended(&self) {
@@ -239,5 +239,34 @@ pub(crate) fn shut_down_when_done<'f>(
             result
         }),
         None => arm,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Seek;
+
+    #[test]
+    fn buffers_are_stale_from_the_seek_request_until_its_flush() {
+        let controller = SeekController::new();
+        let report = SinkEndReport {
+            run: Arc::new(SeekableRun {
+                controller: controller.clone(),
+                sinks: Vec::from([Mutex::new(SinkStreamEnd::default())]),
+            }),
+            slot: 0,
+        };
+        assert!(!report.awaits_seek_flush());
+
+        controller.seek(Seek::flush_to(1_000));
+        assert!(
+            report.awaits_seek_flush(),
+            "a buffer reaching the sink before the source takes the seek is from the old position"
+        );
+        controller.take_seek(Ok);
+        assert!(report.awaits_seek_flush());
+        report.flushed();
+        assert!(!report.awaits_seek_flush());
     }
 }

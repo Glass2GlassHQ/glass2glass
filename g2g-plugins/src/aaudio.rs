@@ -33,7 +33,6 @@ use ndk::audio::{
     AudioSharingMode, AudioStream, AudioStreamBuilder, AudioStreamState,
 };
 
-use g2g_core::frame::Frame;
 use g2g_core::query::LatencyReport;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
@@ -48,7 +47,10 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::audiocapture::{capture_queue, run_capture, CaptureLoopSettings, CaptureSender};
-use crate::audioworker::WorkerLink;
+use crate::audiooutput::{
+    DeviceCmd, DeviceStep, OutputDevice, PausableDevice, PcmGeometry, PlayEnd, PlayoutGate,
+    PlayoutLink,
+};
 use g2g_core::pcm_caps_any_rate_and_channels;
 
 /// Read / write timeout per AAudio call: 1 second in nanoseconds. Long enough to
@@ -133,12 +135,12 @@ fn pcm_params(caps: &Caps) -> Result<(AudioFormat, u8, u32), G2gError> {
 /// let sink = AAudioSink::new();
 /// ```
 pub struct AAudioSink {
+    /// AAudio device id to render on; empty takes the default output.
+    output: OutputDevice,
     /// Bounded, non-blocking link to the thread that owns the stream and makes
     /// the blocking writes (see [`crate::audioworker`]).
-    link: Option<WorkerLink<SinkCommand>>,
-    format: AudioFormat,
-    channels: u8,
-    sample_rate: u32,
+    link: PlayoutLink,
+    caps: Option<Caps>,
     rendered: Arc<AtomicU64>,
     playout: crate::audioskew::PlayoutClock,
 }
@@ -146,9 +148,8 @@ pub struct AAudioSink {
 impl core::fmt::Debug for AAudioSink {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("AAudioSink")
-            .field("format", &self.format)
-            .field("channels", &self.channels)
-            .field("sample_rate", &self.sample_rate)
+            .field("output", &self.output)
+            .field("caps", &self.caps)
             .field("rendered", &self.rendered())
             .finish_non_exhaustive()
     }
@@ -160,43 +161,48 @@ impl Default for AAudioSink {
     }
 }
 
-enum SinkCommand {
-    Samples(Frame),
-    Shutdown,
-}
-
 impl AAudioSink {
     pub fn new() -> Self {
         Self {
-            link: None,
-            format: AudioFormat::PcmS16Le,
-            channels: 2,
-            sample_rate: 48_000,
+            output: OutputDevice::new("device", ""),
+            link: PlayoutLink::new(audio_err(())),
+            caps: None,
             rendered: Arc::new(AtomicU64::new(0)),
             playout: crate::audioskew::PlayoutClock::default(),
         }
+    }
+
+    /// Render on the device with this AAudio id instead of the default output.
+    /// Also settable as the `device` property.
+    pub fn with_device(mut self, id: impl Into<String>) -> Self {
+        self.output = OutputDevice::new("device", id);
+        self
     }
 
     /// Count of PCM frames written to the device. Useful in tests.
     pub fn rendered(&self) -> u64 {
         self.rendered.load(Ordering::Relaxed)
     }
+}
 
-    fn shutdown(&mut self) {
-        if let Some(link) = self.link.as_mut() {
-            link.abort();
-        }
-        self.link = None;
+fn open_stream(
+    format: AudioFormat,
+    channels: u8,
+    sample_rate: u32,
+    device: &str,
+) -> Result<AudioStream, G2gError> {
+    let fmt = ndk_format(format).ok_or(G2gError::CapsMismatch)?;
+    let mut builder = AudioStreamBuilder::new()
+        .map_err(audio_err)?
+        .direction(AudioDirection::Output)
+        .format(fmt)
+        .channel_count(channels as i32)
+        .sample_rate(sample_rate as i32);
+    if !device.is_empty() {
+        let id = device.parse().map_err(|_| G2gError::DeviceNotFound)?;
+        builder = builder.device_id(id);
     }
-
-    fn open(&self) -> Result<AudioStream, G2gError> {
-        let fmt = ndk_format(self.format).ok_or(G2gError::CapsMismatch)?;
-        let stream = AudioStreamBuilder::new()
-            .map_err(audio_err)?
-            .direction(AudioDirection::Output)
-            .format(fmt)
-            .channel_count(self.channels as i32)
-            .sample_rate(self.sample_rate as i32)
+    let stream = builder
             // PerformanceMode::None (not LowLatency): low-latency opens an MMAP
             // stream that is callback-driven, on which a blocking `write` with a
             // timeout fails. This element drives the stream synchronously with
@@ -206,15 +212,8 @@ impl AAudioSink {
             .sharing_mode(AudioSharingMode::Shared)
             .open_stream()
             .map_err(audio_err)?;
-        stream.request_start().map_err(audio_err)?;
-        Ok(stream)
-    }
-}
-
-impl Drop for AAudioSink {
-    fn drop(&mut self) {
-        self.shutdown();
-    }
+    stream.request_start().map_err(audio_err)?;
+    Ok(stream)
 }
 
 /// Write a whole PCM buffer, looping over partial writes until every frame is
@@ -249,32 +248,100 @@ fn write_all(
     Ok(())
 }
 
-fn render_worker(
-    stream: DeviceThreadStream,
-    commands: Receiver<SinkCommand>,
-    frame_bytes: usize,
-    rendered: Arc<AtomicU64>,
+fn wait_while(stream: &AudioStream, transient: AudioStreamState) -> Result<(), G2gError> {
+    // aaudio streams leave a transient state such as pausing or flushing on their own
+    let mut state = stream.state();
+    while state == transient {
+        state = stream
+            .wait_for_state_change(transient, IO_TIMEOUT_NS)
+            .map_err(audio_err)?;
+    }
+    Ok(())
+}
+
+fn discard_queued(stream: &AudioStream) -> Result<(), G2gError> {
+    // aaudio flushes only a paused stream
+    stream.request_pause().map_err(audio_err)?;
+    wait_while(stream, AudioStreamState::Pausing)?;
+    stream.request_flush().map_err(audio_err)?;
+    wait_while(stream, AudioStreamState::Flushing)?;
+    stream.request_start().map_err(audio_err)
+}
+
+struct AAudioPause<'a> {
+    stream: &'a AudioStream,
+    rate: u32,
+}
+
+impl PausableDevice for AAudioPause<'_> {
+    fn pause(&mut self) -> Result<(), G2gError> {
+        self.stream.request_pause().map_err(audio_err)?;
+        wait_while(self.stream, AudioStreamState::Pausing)
+    }
+
+    fn resume(&mut self) -> Result<(), G2gError> {
+        self.stream.request_start().map_err(audio_err)
+    }
+
+    fn still_playing_after_pause_ns(&self) -> Result<u64, G2gError> {
+        Ok(0)
+    }
+
+    fn delay_ns(&self) -> Result<u64, G2gError> {
+        // aaudio frames_read on an output stream counts the frames the device consumed
+        let unplayed = self.stream.frames_written() - self.stream.frames_read();
+        let unplayed = u64::try_from(unplayed).unwrap_or(0);
+        Ok(crate::audioconvert::samples_to_ns(unplayed, self.rate))
+    }
+}
+
+fn play(
+    stream: AudioStream,
+    rx: &Receiver<DeviceCmd>,
+    gate: &mut PlayoutGate,
+    geometry: PcmGeometry,
+    rendered: &AtomicU64,
     clock: &DriftClock,
-) {
-    let stream = stream.0;
-    let mut clock_offset = DeviceClockOffset::default();
+    clock_offset: &mut DeviceClockOffset,
+) -> PlayEnd {
+    let Ok(rate) = u32::try_from(stream.sample_rate()) else {
+        return PlayEnd::Failed(G2gError::CapsMismatch);
+    };
+    let frame_bytes = geometry.bytes_per_frame();
+    let mut device = AAudioPause {
+        stream: &stream,
+        rate,
+    };
     loop {
-        let frame = match commands.recv() {
-            Ok(SinkCommand::Samples(frame)) => frame,
-            Ok(SinkCommand::Shutdown) => {
+        match gate.recv(rx) {
+            Ok(None) => {}
+            Ok(Some(DeviceStep::Samples(frame))) => {
+                let pcm = frame.domain.as_system_slice().unwrap_or_default();
+                let played =
+                    gate.play_in_slices(rx, pcm, geometry, &mut device, |device, slice| {
+                        write_all(device.stream, slice, frame_bytes, rendered)?;
+                        discipline_clock(device.stream, clock, clock_offset);
+                        Ok(())
+                    });
+                if let Err(error) = played {
+                    return PlayEnd::Failed(error);
+                }
+            }
+            Ok(Some(DeviceStep::Flush)) => {
+                if let Err(error) = discard_queued(&stream) {
+                    return PlayEnd::Failed(error);
+                }
+            }
+            Ok(Some(DeviceStep::SwitchDevice(device))) => return PlayEnd::SwitchDevice(device),
+            Ok(Some(DeviceStep::Shutdown)) => {
                 // stops once what is buffered has played
                 let _ = stream.request_stop();
                 let _ = stream.wait_for_state_change(AudioStreamState::Stopping, IO_TIMEOUT_NS);
-                return;
+                return PlayEnd::Shutdown;
             }
             // the element aborted: close without playing out
-            Err(_) => return,
-        };
-        let pcm = frame.domain.as_system_slice().unwrap_or_default();
-        if write_all(&stream, pcm, frame_bytes, &rendered).is_err() {
-            return;
+            Err(_) => return PlayEnd::Shutdown,
         }
-        discipline_clock(&stream, clock, &mut clock_offset);
     }
 }
 
@@ -320,24 +387,41 @@ impl AsyncElement for AAudioSink {
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         let (format, channels, sample_rate) = pcm_params(absolute_caps)?;
-        let unchanged =
-            (format, channels, sample_rate) == (self.format, self.channels, self.sample_rate);
-        if unchanged && self.link.as_ref().is_some_and(|l| l.is_running()) {
+        if self.link.is_running() && self.caps.as_ref() == Some(absolute_caps) {
             return Ok(ConfigureOutcome::Accepted);
         }
-        self.shutdown();
-        self.format = format;
-        self.channels = channels;
-        self.sample_rate = sample_rate;
         self.playout.configure(absolute_caps)?;
-        let stream = DeviceThreadStream(self.open()?);
+        let geometry = PcmGeometry::of(absolute_caps)?;
         let frame_bytes =
-            format.bytes_per_sample().ok_or(G2gError::CapsMismatch)? * usize::from(channels);
+            format.bytes_per_sample().ok_or(G2gError::CapsMismatch)? as u64 * u64::from(channels);
+        let fallback = self.output.fallback(
+            frame_bytes * u64::from(sample_rate),
+            Arc::clone(&self.rendered),
+            frame_bytes,
+            |frame| frame.domain.as_system_slice().map(<[u8]>::len),
+        );
         let rendered = Arc::clone(&self.rendered);
         let clock = self.playout.clock();
-        self.link = Some(WorkerLink::spawn("g2g-aaudiosink", move |commands| {
-            render_worker(stream, commands, frame_bytes, rendered, &clock)
-        })?);
+        let mut clock_offset = DeviceClockOffset::default();
+        self.link.open(
+            "g2g-aaudiosink",
+            absolute_caps,
+            &mut self.output,
+            fallback,
+            move |device| open_stream(format, channels, sample_rate, device),
+            move |stream, rx, gate| {
+                play(
+                    stream,
+                    rx,
+                    gate,
+                    geometry,
+                    &rendered,
+                    &clock,
+                    &mut clock_offset,
+                )
+            },
+        )?;
+        self.caps = Some(absolute_caps.clone());
         Ok(ConfigureOutcome::Accepted)
     }
 
@@ -346,26 +430,43 @@ impl AsyncElement for AAudioSink {
     }
 
     fn set_clock_sync(&mut self, sync: ClockSync) {
+        self.link.set_clock_sync(sync.clone());
         self.playout.set_clock_sync(sync);
+    }
+
+    fn set_bus(&mut self, bus: g2g_core::bus::BusHandle) {
+        self.output.set_bus(bus);
     }
 
     fn properties(&self) -> &'static [PropertySpec] {
         const PROPS: &[PropertySpec] = &[
+            PropertySpec::new(
+                "device",
+                PropKind::Str,
+                "AAudio device id to render on (empty = default output)",
+            )
+            .with_default(""),
             crate::audioskew::PROVIDE_CLOCK_PROPERTY,
             crate::audioskew::SLAVE_METHOD_PROPERTY,
             crate::audioskew::DRIFT_TOLERANCE_PROPERTY,
+            crate::audiooutput::CONTINUE_ON_ERROR_PROPERTY,
         ];
         PROPS
     }
 
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
-        self.playout
-            .set_property(name, &value)
+        if let Some(result) = self.playout.set_property(name, &value) {
+            return result;
+        }
+        self.output
+            .set_property(name, &value, self.link.is_running())
             .unwrap_or(Err(PropError::Unknown))
     }
 
     fn get_property(&self, name: &str) -> Option<PropValue> {
-        self.playout.get_property(name)
+        self.playout
+            .get_property(name)
+            .or_else(|| self.output.get_property(name))
     }
 
     fn process<'a>(
@@ -379,26 +480,20 @@ impl AsyncElement for AAudioSink {
                     let element = g2g_core::log::short_type_name::<Self>();
                     frame.domain.require_system_slice(element)?;
                     let frame = self.playout.correct_frame(frame, element)?;
-                    let link = self.link.as_ref().ok_or(G2gError::NotConfigured)?;
-                    // a full queue is the device's back-pressure and yields
-                    link.send(SinkCommand::Samples(frame), audio_err(()))
-                        .await?;
+                    self.link.send(frame, &mut self.output).await
                 }
-                PipelinePacket::Eos => {
-                    // waits for playout while yielding, so other arms keep running
-                    let link = self.link.as_mut().ok_or(G2gError::NotConfigured)?;
-                    link.finish(SinkCommand::Shutdown, audio_err(())).await?;
-                    self.link = None;
+                PipelinePacket::Flush => self.link.flush().await,
+                PipelinePacket::Segment(segment) => {
+                    self.link.set_segment(segment);
+                    Ok(())
                 }
+                PipelinePacket::Eos => self.link.finish().await,
                 // PCM caps are fixed at configure; a mid-stream change would need a
-                // stream rebuild (not in v1). Control packets are consumed.
-                PipelinePacket::CapsChanged(_)
-                | PipelinePacket::Flush
-                | PipelinePacket::Segment(_) => {}
+                // stream rebuild (not in v1).
+                PipelinePacket::CapsChanged(_) => Ok(()),
                 // future PipelinePacket variants: no-op (terminal sink).
-                _ => {}
+                _ => Ok(()),
             }
-            Ok(())
         })
     }
 }

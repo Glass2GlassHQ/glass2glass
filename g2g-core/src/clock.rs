@@ -274,6 +274,10 @@ impl PlayAnchor {
     pub fn paused_total_ns(&self) -> u64 {
         self.inner.paused_total_ns.load(Ordering::Acquire)
     }
+
+    pub fn is_paused(&self) -> bool {
+        self.inner.paused_at_ns.load(Ordering::Acquire) != Self::UNSET
+    }
 }
 
 /// The pipeline's elected clock plus its base time, handed to a sink so it can
@@ -399,6 +403,12 @@ impl ClockSync {
 
     pub fn awaits_play_edge(&self) -> bool {
         self.play_anchor.as_ref().is_some_and(|a| a.get().is_none())
+    }
+
+    pub fn is_playing(&self) -> bool {
+        self.play_anchor
+            .as_ref()
+            .is_none_or(|a| a.get().is_some() && !a.is_paused())
     }
 }
 

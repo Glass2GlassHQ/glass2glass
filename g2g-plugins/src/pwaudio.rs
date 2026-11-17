@@ -141,6 +141,15 @@ pub(crate) fn stream_time(stream: &pipewire::stream::Stream) -> Option<pipewire:
     (res == 0).then_some(time)
 }
 
+pub(crate) fn ticks_to_ns(ticks: u64, rate: pipewire::spa::sys::spa_fraction) -> Option<u64> {
+    // pw_time rates are seconds per tick, 1/48000 for a 48 kHz graph
+    if rate.denom == 0 {
+        return None;
+    }
+    let ns = u128::from(ticks) * u128::from(rate.num) * 1_000_000_000 / u128::from(rate.denom);
+    u64::try_from(ns).ok()
+}
+
 /// The reference-clock instant `time` was sampled at, `None` when the report
 /// carries no sample time. Same liveness rule as [`stream_time`].
 pub(crate) fn reference_ns_at_sample(

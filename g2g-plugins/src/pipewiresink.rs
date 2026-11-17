@@ -16,28 +16,27 @@
 //!
 //! ## Threading
 //!
-//! PipeWire is a callback-driven main loop pinned to one thread, so (like the
-//! WASAPI / ALSA sinks) the whole loop runs on a dedicated worker spun up at
-//! `configure_pipeline`. The element keeps only `Send` handles: a shared PCM
-//! byte queue the realtime `process` callback drains, and a `pw::channel`
-//! sender that asks the loop to quit on teardown.
+//! PipeWire is a callback-driven main loop pinned to one thread, so the loop
+//! runs on its own thread with a realtime `process` callback that drains a
+//! shared PCM byte queue. A device worker, the same one the ALSA / Pulse /
+//! WASAPI sinks use, fills that queue: it holds the first buffer until its
+//! start time, stops filling while the pipeline is paused, and drops queued
+//! audio on a flush.
 //!
-//! ## Pacing (leaky)
+//! ## Pacing
 //!
-//! Unlike ALSA's blocking `writei`, PipeWire's `process` callback pulls data on
-//! its own clock and never blocks the producer, so this sink cannot backpressure
-//! the graph. The shared queue is therefore bounded to ~1 s of audio and drops
-//! the oldest bytes past that (the [`LinkPolicy::DropOldest`] analog for an
-//! external clock). For a live source the queue stays near-empty; only a source
-//! that runs faster than real time (e.g. unbounded `AudioTestSrc`) hits the cap.
+//! The byte queue holds 200 ms, like `AlsaSink`'s ring, and the device worker
+//! waits for room, so the graph's pull rate back-pressures the pipeline. While
+//! the pipeline is paused the callback plays silence and leaves the queue as it
+//! is.
 
 use core::future::Future;
 use core::pin::Pin;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use std::collections::VecDeque;
-use std::sync::mpsc::sync_channel;
-use std::sync::{Arc, Mutex};
+use std::sync::mpsc::{sync_channel, Receiver};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -54,9 +53,14 @@ use g2g_core::{
     PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
 };
 
-use crate::audiooutput::OutputDevice;
-use crate::pwaudio::{format_pod_bytes, frame_bytes, pw_params, FORMATS};
+use crate::audiooutput::{
+    DeviceCmd, DeviceStep, OutputDevice, PausableDevice, PcmGeometry, PlayEnd, PlayoutGate,
+    PlayoutLink,
+};
+use crate::pwaudio::{format_pod_bytes, frame_bytes, pw_params, ticks_to_ns, FORMATS};
 use g2g_core::pcm_caps_any_rate_and_channels;
+
+const ELEMENT_NAME: &str = "PipeWireSink";
 
 /// How often the clock-discipline trace prints, out of the once-per-quantum
 /// stream of observations.
@@ -67,42 +71,29 @@ enum Ctrl {
     Terminate,
 }
 
-// bounds the EOS wait so a stalled endpoint can't hang the pipeline
-const EOS_DRAIN_LIMIT: Duration = Duration::from_secs(2);
+// bounds the waits on the graph so a stalled stream can't hang the pipeline
+const STALLED_STREAM_LIMIT: Duration = Duration::from_secs(2);
 
-// PCM bytes from the element to the realtime callback, oldest dropped past capacity
+const QUEUED_AUDIO_NS: u64 = 200_000_000;
+
+const ROOM_POLL_INTERVAL: Duration = Duration::from_millis(5);
+
+fn pipewire_err() -> G2gError {
+    G2gError::Hardware(HardwareError::PipeWire(-1))
+}
+
 #[derive(Debug, Default)]
-struct LeakyPcmQueue {
-    bytes: VecDeque<u8>,
-    capacity_bytes: usize,
+struct StreamShared {
+    queue: Mutex<VecDeque<u8>>,
+    paused: AtomicBool,
+    graph_delay_ns: AtomicU64,
 }
 
-impl LeakyPcmQueue {
-    fn reset(&mut self, capacity_bytes: usize) {
-        self.bytes.clear();
-        self.bytes.reserve(capacity_bytes);
-        self.capacity_bytes = capacity_bytes;
-    }
-
-    fn push(&mut self, payload: &[u8]) {
-        let kept = &payload[payload.len().saturating_sub(self.capacity_bytes)..];
-        let excess = (self.bytes.len() + kept.len()).saturating_sub(self.capacity_bytes);
-        self.bytes.drain(..excess);
-        self.bytes.extend(kept);
-    }
-
-    fn pop_into(&mut self, out: &mut [u8]) -> usize {
-        let count = self.bytes.len().min(out.len());
-        let (front, back) = self.bytes.as_slices();
-        let from_front = front.len().min(count);
-        out[..from_front].copy_from_slice(&front[..from_front]);
-        out[from_front..count].copy_from_slice(&back[..count - from_front]);
-        self.bytes.drain(..count);
-        count
+impl StreamShared {
+    fn queue(&self) -> Result<MutexGuard<'_, VecDeque<u8>>, G2gError> {
+        self.queue.lock().map_err(|_| pipewire_err())
     }
 }
-
-type SharedQueue = Arc<Mutex<LeakyPcmQueue>>;
 
 /// # Example
 ///
@@ -115,21 +106,19 @@ pub struct PipeWireSink {
     /// Node to play to (`node.name` or object serial); empty = the default sink
     /// the session manager picks.
     output: OutputDevice,
-    ctrl_tx: Option<pw::channel::Sender<Ctrl>>,
-    worker: Option<JoinHandle<()>>,
-    queue: SharedQueue,
+    link: PlayoutLink,
     caps: Option<Caps>,
     bytes_queued: Arc<AtomicU64>,
     playout: crate::audioskew::PlayoutClock,
 }
 
 /// What the loop thread needs to open the playback stream.
+#[derive(Clone)]
 struct StreamCfg {
     format: spa::param::audio::AudioFormat,
     channels: u32,
     rate: u32,
     stride: usize,
-    target: String,
     /// The process callback disciplines it from the stream time.
     clock: Arc<DriftClock>,
 }
@@ -154,9 +143,7 @@ impl PipeWireSink {
     pub fn new() -> Self {
         Self {
             output: OutputDevice::new("target-object", ""),
-            ctrl_tx: None,
-            worker: None,
-            queue: Arc::new(Mutex::new(LeakyPcmQueue::default())),
+            link: PlayoutLink::new(pipewire_err()),
             caps: None,
             bytes_queued: Arc::new(AtomicU64::new(0)),
             playout: crate::audioskew::PlayoutClock::default(),
@@ -176,88 +163,9 @@ impl PipeWireSink {
         self.playout.clock()
     }
 
-    /// Total PCM bytes accepted from the pipeline (before any leaky drop).
+    /// Total PCM bytes handed to the stream's queue.
     pub fn bytes_queued(&self) -> u64 {
         self.bytes_queued.load(Ordering::Relaxed)
-    }
-
-    fn stop_stream(&mut self) {
-        if let Some(tx) = self.ctrl_tx.take() {
-            let _ = tx.send(Ctrl::Terminate);
-        }
-        if let Some(join) = self.worker.take() {
-            let _ = join.join();
-        }
-    }
-
-    fn shutdown(&mut self) {
-        self.stop_stream();
-        if let Ok(mut q) = self.queue.lock() {
-            q.bytes.clear();
-        }
-    }
-
-    fn start_stream(&mut self, caps: &Caps) -> Result<(), G2gError> {
-        let (format, channels, rate) = pw_params(caps)?;
-        let (ctrl_tx, ctrl_rx) = pw::channel::channel::<Ctrl>();
-        let (ready_tx, ready_rx) = sync_channel::<Result<(), i32>>(1);
-        let cfg = StreamCfg {
-            format,
-            channels,
-            rate,
-            stride: frame_bytes(format, channels),
-            target: String::from(self.output.name()),
-            // disciplined even when not offered, skew slaving reads it
-            clock: self.playout.clock(),
-        };
-        let queue = Arc::clone(&self.queue);
-        let join = thread::Builder::new()
-            .name(String::from("g2g-pipewiresink"))
-            .spawn(move || {
-                worker_main(cfg, queue, ctrl_rx, ready_tx);
-            })
-            .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
-
-        let code = match ready_rx.recv_timeout(Duration::from_secs(5)) {
-            Ok(Ok(())) => {
-                self.ctrl_tx = Some(ctrl_tx);
-                self.worker = Some(join);
-                return Ok(());
-            }
-            Ok(Err(code)) => code,
-            Err(_) => -1,
-        };
-        let _ = join.join();
-        let error = G2gError::Hardware(HardwareError::PipeWire(code));
-        if !self.output.continue_on_error() {
-            return Err(error);
-        }
-        self.output.report(error);
-        Ok(())
-    }
-
-    /// Wait for the worker to play out the queued PCM before teardown, so EOS
-    /// does not drop up to a second of buffered tail. Yields to the executor
-    /// between checks so the other arms keep running while it drains.
-    async fn drain_queue(&self) {
-        let deadline = Instant::now() + EOS_DRAIN_LIMIT;
-        while Instant::now() < deadline {
-            let drained = self
-                .queue
-                .lock()
-                .map(|q| q.bytes.is_empty())
-                .unwrap_or(true);
-            if drained {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    }
-}
-
-impl Drop for PipeWireSink {
-    fn drop(&mut self) {
-        self.shutdown();
     }
 }
 
@@ -285,21 +193,49 @@ impl AsyncElement for PipeWireSink {
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         let (format, channels, rate) = pw_params(absolute_caps)?;
-
-        if self.caps.is_some() {
-            if self.caps.as_ref() == Some(absolute_caps) {
-                return Ok(ConfigureOutcome::Accepted);
-            }
-            self.shutdown();
+        if self.link.is_running() && self.caps.as_ref() == Some(absolute_caps) {
+            return Ok(ConfigureOutcome::Accepted);
         }
 
-        if let Ok(mut q) = self.queue.lock() {
-            // ~1 s of audio
-            q.reset(frame_bytes(format, channels) * rate as usize);
-        }
         self.playout.configure(absolute_caps)?;
-        self.start_stream(absolute_caps)?;
-        self.output.opened();
+        let stride = frame_bytes(format, channels);
+        let cfg = StreamCfg {
+            format,
+            channels,
+            rate,
+            stride,
+            // disciplined even when not offered, skew slaving reads it
+            clock: self.playout.clock(),
+        };
+        let geometry = PcmGeometry::of(absolute_caps)?;
+        let queue_capacity =
+            crate::audioconvert::ns_to_samples(QUEUED_AUDIO_NS, rate) as usize * stride;
+        let fallback = self.output.fallback(
+            (stride * rate as usize) as u64,
+            Arc::clone(&self.bytes_queued),
+            1,
+            |frame| {
+                crate::dmabufmap::frame_bytes(frame, ELEMENT_NAME)
+                    .ok()
+                    .map(|bytes| bytes.as_slice().len())
+            },
+        );
+        let bytes_queued = Arc::clone(&self.bytes_queued);
+        self.link.open(
+            "g2g-pipewiresink",
+            absolute_caps,
+            &mut self.output,
+            fallback,
+            move |target| PwStream::open(&cfg, target),
+            move |stream, rx, gate| {
+                let queue = QueuedStream {
+                    shared: &stream.shared,
+                    geometry,
+                    capacity: queue_capacity,
+                };
+                play(queue, rx, gate, &bytes_queued)
+            },
+        )?;
         self.caps = Some(absolute_caps.clone());
         Ok(ConfigureOutcome::Accepted)
     }
@@ -312,6 +248,7 @@ impl AsyncElement for PipeWireSink {
     }
 
     fn set_clock_sync(&mut self, sync: ClockSync) {
+        self.link.set_clock_sync(sync.clone());
         self.playout.set_clock_sync(sync);
     }
 
@@ -349,7 +286,7 @@ impl AsyncElement for PipeWireSink {
             return result;
         }
         self.output
-            .set_property(name, &value, self.caps.is_some())
+            .set_property(name, &value, self.link.is_running())
             .unwrap_or(Err(PropError::Unknown))
     }
 
@@ -368,24 +305,9 @@ impl AsyncElement for PipeWireSink {
         Box::pin(async move {
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let payload = crate::dmabufmap::frame_bytes(
-                        &frame,
-                        g2g_core::log::short_type_name::<Self>(),
-                    )?;
-                    let caps = self.caps.clone().ok_or(G2gError::NotConfigured)?;
-                    if self.output.take_switch().is_some() {
-                        self.stop_stream();
-                        self.start_stream(&caps)?;
-                    }
-                    let corrected = self.playout.correct(payload.as_slice());
-                    let bytes = corrected.as_deref().unwrap_or(payload.as_slice());
-                    self.queue
-                        .lock()
-                        .map_err(|_| G2gError::Hardware(HardwareError::PipeWire(-1)))?
-                        .push(bytes);
-                    self.bytes_queued
-                        .fetch_add(bytes.len() as u64, Ordering::Relaxed);
-                    Ok(())
+                    crate::dmabufmap::require_readable_domain(&frame, ELEMENT_NAME)?;
+                    let frame = self.playout.correct_frame(frame, ELEMENT_NAME)?;
+                    self.link.send(frame, &mut self.output).await
                 }
                 // A mid-stream format change can't be honoured on an open stream;
                 // only a caps identical to the configured one passes.
@@ -393,15 +315,12 @@ impl AsyncElement for PipeWireSink {
                     pw_params(&c)?;
                     Ok(())
                 }
-                PipelinePacket::Flush | PipelinePacket::Segment(_) => Ok(()),
-                PipelinePacket::Eos => {
-                    if self.worker.is_some() {
-                        self.drain_queue().await;
-                    }
-                    self.shutdown();
-                    self.caps = None;
+                PipelinePacket::Flush => self.link.flush().await,
+                PipelinePacket::Segment(segment) => {
+                    self.link.set_segment(segment);
                     Ok(())
                 }
+                PipelinePacket::Eos => self.link.finish().await,
                 // future PipelinePacket variants: no-op (terminal sink).
                 _ => Ok(()),
             }
@@ -420,29 +339,157 @@ impl PadTemplates for PipeWireSink {
 }
 
 // =================================================================
-// Worker thread: the PipeWire main loop
+// Device worker: fills the queue the realtime callback drains
 // =================================================================
 
-fn worker_main(
-    cfg: StreamCfg,
-    queue: SharedQueue,
-    ctrl_rx: pw::channel::Receiver<Ctrl>,
-    ready: std::sync::mpsc::SyncSender<Result<(), i32>>,
-) {
-    match build_and_run(&cfg, queue, ctrl_rx, &ready) {
-        Ok(()) => {}
-        Err(code) => {
-            // If setup failed before `ready` was sent, report it; if it was
-            // already sent (loop ran then exited), this send simply no-ops on a
-            // closed channel.
-            let _ = ready.send(Err(code));
+struct QueuedStream<'a> {
+    shared: &'a StreamShared,
+    geometry: PcmGeometry,
+    capacity: usize,
+}
+
+impl QueuedStream<'_> {
+    fn push(&self, pcm: &[u8]) -> Result<(), G2gError> {
+        let deadline = Instant::now() + STALLED_STREAM_LIMIT;
+        loop {
+            let mut queue = self.shared.queue()?;
+            if queue.len() + pcm.len() <= self.capacity.max(pcm.len()) {
+                queue.extend(pcm);
+                return Ok(());
+            }
+            drop(queue);
+            if Instant::now() >= deadline {
+                return Err(pipewire_err());
+            }
+            thread::sleep(ROOM_POLL_INTERVAL);
+        }
+    }
+
+    fn wait_until_played(&self) -> Result<(), G2gError> {
+        let deadline = Instant::now() + STALLED_STREAM_LIMIT;
+        while !self.shared.queue()?.is_empty() && Instant::now() < deadline {
+            thread::sleep(ROOM_POLL_INTERVAL);
+        }
+        Ok(())
+    }
+}
+
+impl PausableDevice for QueuedStream<'_> {
+    fn pause(&mut self) -> Result<(), G2gError> {
+        self.shared.paused.store(true, Ordering::Release);
+        Ok(())
+    }
+
+    fn resume(&mut self) -> Result<(), G2gError> {
+        self.shared.paused.store(false, Ordering::Release);
+        Ok(())
+    }
+
+    fn still_playing_after_pause_ns(&self) -> Result<u64, G2gError> {
+        Ok(self.shared.graph_delay_ns.load(Ordering::Acquire))
+    }
+
+    fn delay_ns(&self) -> Result<u64, G2gError> {
+        let queued_ns = self.geometry.bytes_to_ns(self.shared.queue()?.len());
+        Ok(queued_ns + self.shared.graph_delay_ns.load(Ordering::Acquire))
+    }
+}
+
+fn play(
+    mut queue: QueuedStream<'_>,
+    rx: &Receiver<DeviceCmd>,
+    gate: &mut PlayoutGate,
+    bytes_queued: &AtomicU64,
+) -> PlayEnd {
+    let geometry = queue.geometry;
+    loop {
+        let result = match gate.recv(rx) {
+            Ok(None) => Ok(()),
+            Ok(Some(DeviceStep::Samples(frame))) => {
+                crate::dmabufmap::frame_bytes(&frame, ELEMENT_NAME).and_then(|payload| {
+                    let pcm = payload.as_slice();
+                    gate.play_in_slices(rx, pcm, geometry, &mut queue, |queue, slice| {
+                        queue.push(slice)?;
+                        bytes_queued.fetch_add(slice.len() as u64, Ordering::Relaxed);
+                        Ok(())
+                    })
+                })
+            }
+            Ok(Some(DeviceStep::Flush)) => queue.shared.queue().map(|mut queue| queue.clear()),
+            Ok(Some(DeviceStep::SwitchDevice(device))) => return PlayEnd::SwitchDevice(device),
+            Ok(Some(DeviceStep::Shutdown)) => {
+                return match queue.wait_until_played() {
+                    Ok(()) => PlayEnd::Shutdown,
+                    Err(error) => PlayEnd::Failed(error),
+                };
+            }
+            // the element aborted: stop without playing out
+            Err(_) => return PlayEnd::Shutdown,
+        };
+        if let Err(error) = result {
+            return PlayEnd::Failed(error);
+        }
+    }
+}
+
+// =================================================================
+// Loop thread: the PipeWire main loop
+// =================================================================
+
+struct PwStream {
+    ctrl_tx: pw::channel::Sender<Ctrl>,
+    loop_thread: Option<JoinHandle<()>>,
+    shared: Arc<StreamShared>,
+}
+
+impl PwStream {
+    fn open(cfg: &StreamCfg, target: &str) -> Result<Self, G2gError> {
+        let (ctrl_tx, ctrl_rx) = pw::channel::channel::<Ctrl>();
+        let (ready_tx, ready_rx) = sync_channel::<Result<(), i32>>(1);
+        let shared = Arc::new(StreamShared::default());
+        let loop_shared = Arc::clone(&shared);
+        let cfg = cfg.clone();
+        let target = String::from(target);
+        let join = thread::Builder::new()
+            .name(String::from("g2g-pipewireloop"))
+            .spawn(move || {
+                if let Err(code) = build_and_run(&cfg, &target, loop_shared, ctrl_rx, &ready_tx) {
+                    // a send after the loop already reported ready lands on a closed channel
+                    let _ = ready_tx.send(Err(code));
+                }
+            })
+            .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
+
+        let code = match ready_rx.recv_timeout(STALLED_STREAM_LIMIT) {
+            Ok(Ok(())) => {
+                return Ok(Self {
+                    ctrl_tx,
+                    loop_thread: Some(join),
+                    shared,
+                })
+            }
+            Ok(Err(code)) => code,
+            Err(_) => -1,
+        };
+        let _ = ctrl_tx.send(Ctrl::Terminate);
+        let _ = join.join();
+        Err(G2gError::Hardware(HardwareError::PipeWire(code)))
+    }
+}
+
+impl Drop for PwStream {
+    fn drop(&mut self) {
+        let _ = self.ctrl_tx.send(Ctrl::Terminate);
+        if let Some(join) = self.loop_thread.take() {
+            let _ = join.join();
         }
     }
 }
 
 fn build_and_run(
     cfg: &StreamCfg,
-    queue: SharedQueue,
+    target: &str,
+    shared: Arc<StreamShared>,
     ctrl_rx: pw::channel::Receiver<Ctrl>,
     ready: &std::sync::mpsc::SyncSender<Result<(), i32>>,
 ) -> Result<(), i32> {
@@ -457,14 +504,13 @@ fn build_and_run(
         *pw::keys::MEDIA_ROLE => "Music",
         *pw::keys::MEDIA_CATEGORY => "Playback",
     };
-    if !cfg.target.is_empty() {
+    if !target.is_empty() {
         // spelled out because pipewire-rs gates its TARGET_OBJECT constant
         // behind a crate feature this build does not enable
-        props.insert("target.object", cfg.target.as_str());
+        props.insert("target.object", target);
     }
     let stream = pw::stream::StreamBox::new(&core, "g2g-pipewiresink", props).map_err(|_| -1)?;
 
-    let q = Arc::clone(&queue);
     let drift = cfg.clock.clone();
     let mut last_clock_log_ns = 0u64;
     // pipewire ticks restart from zero with each stream
@@ -472,7 +518,19 @@ fn build_and_run(
     let _listener = stream
         .add_local_listener_with_user_data(())
         .process(move |stream, ()| {
-            discipline_clock(stream, &drift, &mut clock_offset, &mut last_clock_log_ns);
+            if let Some(time) = crate::pwaudio::stream_time(stream) {
+                let delay_ticks = u64::try_from(time.delay).unwrap_or(0);
+                if let Some(delay_ns) = ticks_to_ns(delay_ticks, time.rate) {
+                    shared.graph_delay_ns.store(delay_ns, Ordering::Release);
+                }
+                discipline_clock(
+                    stream,
+                    &time,
+                    &drift,
+                    &mut clock_offset,
+                    &mut last_clock_log_ns,
+                );
+            }
             let Some(mut buffer) = stream.dequeue_buffer() else {
                 return;
             };
@@ -488,12 +546,17 @@ fn build_and_run(
             let data = &mut datas[0];
             let size = if let Some(slice) = data.data() {
                 // Fill whole-frame-aligned capacity from the queue; pad the
-                // remainder with silence so an underrun is quiet, not garbage.
+                // remainder with silence so an underrun or a pause is quiet, not garbage.
                 let cap = (slice.len().min(requested_bytes) / stride) * stride;
-                let filled = q
-                    .lock()
-                    .map(|mut q| q.pop_into(&mut slice[..cap]))
-                    .unwrap_or(0);
+                let mut filled = 0;
+                if !shared.paused.load(Ordering::Acquire) {
+                    if let Ok(mut queue) = shared.queue.lock() {
+                        filled = queue.len().min(cap);
+                        for (out, byte) in slice[..filled].iter_mut().zip(queue.drain(..filled)) {
+                            *out = byte;
+                        }
+                    }
+                }
                 slice[filled..cap].fill(0);
                 cap
             } else {
@@ -528,7 +591,7 @@ fn build_and_run(
         }
     });
 
-    // Setup succeeded; unblock configure_pipeline, then run the loop.
+    // Setup succeeded; unblock the device worker, then run the loop.
     let _ = ready.send(Ok(()));
     mainloop.run();
     Ok(())
@@ -538,7 +601,7 @@ fn build_and_run(
 /// the stream's own time report. `pw_time.ticks` is the graph driver's
 /// monotonic sample counter, which advances at the device's real rate, so it
 /// is the master timeline the pipeline slaves to. It is independent of our
-/// leaky byte queue, so producer-side drops never skew it; the constant graph
+/// byte queue, so pauses and flushes never skew it; the constant graph
 /// delay to the speaker lands in the affine offset the fit absorbs. The local
 /// time is the report's own sample instant (`pw_time.now`), so a callback that
 /// runs late does not shift the pair.
@@ -548,23 +611,22 @@ fn build_and_run(
 /// the caller's stamp of the last line.
 fn discipline_clock(
     stream: &pw::stream::Stream,
+    time: &pw::sys::pw_time,
     clock: &DriftClock,
     clock_offset: &mut DeviceClockOffset,
     last_log_ns: &mut u64,
 ) {
-    let Some(time) = crate::pwaudio::stream_time(stream) else {
-        return;
-    };
-    let Some(local_ns) = crate::pwaudio::reference_ns_at_sample(stream, clock, &time) else {
+    let Some(local_ns) = crate::pwaudio::reference_ns_at_sample(stream, clock, time) else {
         return;
     };
     // A not-yet-running stream (ticks still zero) or a report with no rate
     // yields no usable position; skip rather than feed a bogus sample.
-    if time.ticks == 0 || time.rate.denom == 0 {
+    if time.ticks == 0 {
         return;
     }
-    let graph_ns = (u128::from(time.ticks) * u128::from(time.rate.num) * 1_000_000_000
-        / u128::from(time.rate.denom)) as u64;
+    let Some(graph_ns) = ticks_to_ns(time.ticks, time.rate) else {
+        return;
+    };
     let master_ns = clock_offset.master_ns(clock, local_ns, graph_ns);
     let outcome = clock.observe(local_ns, master_ns);
     if local_ns.saturating_sub(*last_log_ns) < CLOCK_LOG_INTERVAL_NS {
@@ -642,27 +704,6 @@ mod tests {
                 spec.name
             );
         }
-    }
-
-    #[test]
-    fn leaky_queue_keeps_the_newest_bytes_in_order() {
-        let capacity = 6;
-        let mut queue = LeakyPcmQueue::default();
-        queue.reset(capacity);
-        queue.push(&[1, 2, 3, 4]);
-        queue.push(&[5, 6, 7, 8]);
-        let mut out = [0u8; 3];
-        assert_eq!(queue.pop_into(&mut out), out.len());
-        assert_eq!(out, [3, 4, 5]);
-        // wraps the ring, so the next read spans both halves
-        queue.push(&[9, 10, 11]);
-        let mut out = [0u8; 8];
-        assert_eq!(queue.pop_into(&mut out), capacity);
-        assert_eq!(out[..capacity], [6, 7, 8, 9, 10, 11]);
-        queue.push(&[20, 21, 22, 23, 24, 25, 26, 27]);
-        let mut out = [0u8; 8];
-        assert_eq!(queue.pop_into(&mut out), capacity);
-        assert_eq!(out[..capacity], [22, 23, 24, 25, 26, 27]);
     }
 
     #[test]

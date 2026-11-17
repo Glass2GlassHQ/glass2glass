@@ -6,7 +6,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use g2g_core::caps::framerate_q16_period_ns;
 use g2g_core::clock::MonotonicClock;
@@ -15,8 +15,8 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::{DomainSet, MemoryDomainKind, SystemSlice};
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, ClockCandidate, ClockPriority, ClockSync, ConfigureOutcome,
-    ElementMetadata, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
-    PresentationPacer, PropError, PropValue, PropertySpec, Rate, PACING_PROPERTIES,
+    ElementMetadata, G2gError, MemoryDomain, OutputSink, Pace, PadTemplate, PadTemplates,
+    PipelinePacket, PresentationPacer, PropError, PropValue, PropertySpec, Rate, PACING_PROPERTIES,
 };
 use g2g_plugins::clock::wait_to_present;
 use g2g_plugins::glnv12::{accepted_caps, convert_for_display, DisplayFrame};
@@ -204,15 +204,23 @@ impl AsyncElement for PlayerVideoSink {
                 PipelinePacket::DataFrame(mut frame) => {
                     let caps = self.caps.as_ref().ok_or(G2gError::NotConfigured)?;
                     let paced = self.pacer.judge(frame.timing.pts_ns, self.presented);
-                    if !wait_to_present(paced).await {
+                    if paced == Pace::Drop {
                         return Ok(());
                     }
+                    let converting = Instant::now();
                     // the render contexts run on the host's UI thread, so they only upload
                     let bytes = frame.domain.require_system_slice(PLAYER_VIDEO_SINK)?;
                     let DisplayFrame { caps, converted } = convert_for_display(caps, bytes)?;
                     if let Some(converted) = converted {
                         frame.domain = MemoryDomain::System(SystemSlice::from_boxed(converted));
                     }
+                    // a 4K conversion takes tens of milliseconds, which run before the deadline instead of after it
+                    let converted_ns = converting.elapsed().as_nanos() as u64;
+                    let paced = match paced {
+                        Pace::Wait(ns) => Pace::Wait(ns.saturating_sub(converted_ns)),
+                        other => other,
+                    };
+                    wait_to_present(paced).await;
                     self.presented += 1;
                     self.shared.frames.put(DueFrame { caps, frame });
                     if self.awaiting_frame_after_flush {
