@@ -938,7 +938,12 @@ as before.
   ISO-BMFF file becomes a self-demuxing `Mp4Src`, probed through `Mp4Src` for the
   first video track's caps and whether it has a clean aperture, anything else the sniff
   recognises a `FileSrc` declaring those caps, so an elementary stream or a
-  non-MP4 container reaches the decode chain its content needs. When nothing
+  non-MP4 container reaches the decode chain its content needs. When a
+  primary-stream hook lists the streams of a local container, `build_uridecodebin`
+  plugs the hook's single-stream demuxer for the first stream that reaches
+  `target`, and the `uridecodebin` launch macro expands to `filesrc location=X !
+  decodebin`. A demuxer's pad template lists raw video, so a search from the
+  container caps alone ends at the demuxer with no decoder. When nothing
   matches at the first byte, the sniff scans the header for an ADTS, AC-3,
   MPEG audio or MPEG-PS stream that starts later (a file cut mid-frame, or
   padded after its ID3v2 tag). An audio stream found there needs five frame

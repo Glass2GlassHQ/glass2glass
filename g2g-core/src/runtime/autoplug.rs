@@ -2107,6 +2107,21 @@ mod factory {
                 .find_map(|hook| hook(location, caps))
         }
 
+        // a demuxer's pad template lists raw video, so only the hook's stream list says which decoder a file needs
+        pub(crate) fn source_container_streams(
+            &self,
+            source: &dyn DynSourceLoop,
+            caps: &Caps,
+        ) -> Option<(String, ContainerStreams)> {
+            let Some(PropValue::Str(location)) = source.get_property("location") else {
+                return None;
+            };
+            let streams = self
+                .container_streams(&location, caps)
+                .filter(|listed| !listed.streams.is_empty())?;
+            Some((location, streams))
+        }
+
         /// Set the parser injector consulted by [`decodebin`](Self::decodebin) and
         /// [`decodebin_preferring`](Self::decodebin_preferring): before a
         /// decode chain is spliced, `provider(input)` may name a registered parser
@@ -3431,15 +3446,40 @@ mod factory {
             target: &dyn Fn(&Caps) -> bool,
             max_depth: usize,
         ) -> Result<Graph<GraphNode>, UriError> {
-            let port = UriFanoutPort {
-                stream_type: crate::stream::StreamType::of(&source.caps),
-                caps: source.caps,
-                has_clean_aperture: source.has_clean_aperture,
-            };
+            let primary = self
+                .source_container_streams(source.source.as_ref(), &source.caps)
+                .and_then(|(_, listed)| {
+                    listed
+                        .streams
+                        .into_iter()
+                        .find(|stream| self.autoplug(&stream.caps, target, max_depth).is_some())
+                });
             let mut graph: Graph<GraphNode> = Graph::new();
             let src = graph.add_source(GraphNodeRef::Source(source.source));
             let snk = graph.add_sink(GraphNodeRef::element(sink));
-            self.decodebin_port(&mut graph, src, snk, &port, target, max_depth)?;
+            let (from, port) = match primary {
+                Some(stream) => {
+                    let demux = crate::runtime::build_element(self, stream.demux, &stream.props)
+                        .map_err(|_| DecodebinError::NoChain)?;
+                    let demux = graph.add_transform(GraphNodeRef::Element(demux));
+                    graph.link(src, demux).map_err(DecodebinError::from)?;
+                    let port = UriFanoutPort {
+                        stream_type: StreamType::of(&stream.caps),
+                        caps: stream.caps,
+                        has_clean_aperture: stream.has_clean_aperture,
+                    };
+                    (PadId::from(demux), port)
+                }
+                None => {
+                    let port = UriFanoutPort {
+                        stream_type: StreamType::of(&source.caps),
+                        caps: source.caps,
+                        has_clean_aperture: source.has_clean_aperture,
+                    };
+                    (PadId::from(src), port)
+                }
+            };
+            self.decodebin_port(&mut graph, from, snk, &port, target, max_depth)?;
             Ok(graph)
         }
 

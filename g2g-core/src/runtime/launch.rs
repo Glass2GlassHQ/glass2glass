@@ -2998,6 +2998,24 @@ fn expand_uri_sources(
             let built = registry
                 .build_uri_source(uri)
                 .map_err(|e: UriError| ParseError::Uri(alloc::format!("{uri}: {e:?}")))?;
+            let local_container = registry
+                .source_container_streams(built.source.as_ref(), &built.caps)
+                .filter(|_| !is_playbin);
+            if let Some((location, _)) = local_container {
+                new_chain.push(Item::Element(ElementSpec {
+                    name: "filesrc".to_string(),
+                    props: alloc::vec![("location".to_string(), location)],
+                    instance: None,
+                    log_category: None,
+                }));
+                new_chain.push(Item::Element(ElementSpec {
+                    name: "decodebin".to_string(),
+                    props: Vec::new(),
+                    instance: spec.instance.clone(),
+                    log_category: None,
+                }));
+                continue;
+            }
             let caps = built.caps;
             // `playbin` names its own sink, a bare `uridecodebin` is followed by
             // one: either way the consumer's declared input memory picks the
