@@ -12,14 +12,14 @@ use g2g_core::caps::framerate_q16_period_ns;
 use g2g_core::clock::MonotonicClock;
 use g2g_core::element::{PresentationStats, QosMessage};
 use g2g_core::frame::Frame;
-use g2g_core::memory::{DomainSet, MemoryDomainKind};
+use g2g_core::memory::{DomainSet, MemoryDomainKind, SystemSlice};
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, ClockCandidate, ClockPriority, ClockSync, ConfigureOutcome,
-    ElementMetadata, G2gError, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
+    ElementMetadata, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
     PresentationPacer, PropError, PropValue, PropertySpec, Rate, PACING_PROPERTIES,
 };
 use g2g_plugins::clock::wait_to_present;
-use g2g_plugins::glnv12::accepted_caps;
+use g2g_plugins::glnv12::{accepted_caps, convert_for_display, DisplayFrame};
 
 use crate::picture_filters::video_size_of;
 use crate::{Event, Shared};
@@ -93,6 +93,7 @@ pub(crate) struct PlayerVideoSink {
     caps: Option<Caps>,
     presented: u64,
     pacer: PresentationPacer,
+    awaiting_frame_after_flush: bool,
 }
 
 impl PlayerVideoSink {
@@ -102,6 +103,7 @@ impl PlayerVideoSink {
             caps: None,
             presented: 0,
             pacer: PresentationPacer::for_video_sink(),
+            awaiting_frame_after_flush: false,
         }
     }
 
@@ -199,18 +201,33 @@ impl AsyncElement for PlayerVideoSink {
     ) -> Self::ProcessFuture<'a> {
         Box::pin(async move {
             match packet {
-                PipelinePacket::DataFrame(frame) => {
-                    let caps = self.caps.clone().ok_or(G2gError::NotConfigured)?;
+                PipelinePacket::DataFrame(mut frame) => {
+                    let caps = self.caps.as_ref().ok_or(G2gError::NotConfigured)?;
                     let paced = self.pacer.judge(frame.timing.pts_ns, self.presented);
                     if !wait_to_present(paced).await {
                         return Ok(());
                     }
+                    // the render contexts run on the host's UI thread, so they only upload
+                    let bytes = frame.domain.require_system_slice(PLAYER_VIDEO_SINK)?;
+                    let DisplayFrame { caps, converted } = convert_for_display(caps, bytes)?;
+                    if let Some(converted) = converted {
+                        frame.domain = MemoryDomain::System(SystemSlice::from_boxed(converted));
+                    }
                     self.presented += 1;
                     self.shared.frames.put(DueFrame { caps, frame });
+                    if self.awaiting_frame_after_flush {
+                        self.awaiting_frame_after_flush = false;
+                        self.shared.seek_landed();
+                    }
                 }
                 PipelinePacket::CapsChanged(caps) => self.adopt_caps(caps),
                 PipelinePacket::Segment(segment) => self.pacer.set_segment(segment),
-                PipelinePacket::Flush => self.pacer.flush(),
+                PipelinePacket::Flush => {
+                    self.pacer.flush();
+                    if self.shared.take_seek_flush() {
+                        self.awaiting_frame_after_flush = true;
+                    }
+                }
                 _ => {}
             }
             Ok(())

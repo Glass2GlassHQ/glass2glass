@@ -522,6 +522,43 @@ pub fn accepted_caps() -> g2g_core::CapsSet {
     display_sink_caps(NV12_AND_RGBA)
 }
 
+#[derive(Debug)]
+pub struct DisplayFrame {
+    pub caps: g2g_core::Caps,
+    // None when the frame already arrived in a format the renderers draw
+    pub converted: Option<alloc::boxed::Box<[u8]>>,
+}
+
+pub fn convert_for_display(caps: &g2g_core::Caps, bytes: &[u8]) -> Result<DisplayFrame, G2gError> {
+    let input = DisplayInput::from_caps(caps, NV12_AND_RGBA)?;
+    let converted = input.convert_frame(bytes)?;
+    let g2g_core::Caps::RawVideo {
+        width,
+        height,
+        framerate,
+        interlace,
+        colorimetry,
+        pixel_aspect,
+        ..
+    } = caps.clone()
+    else {
+        unreachable!("DisplayInput takes raw video caps only");
+    };
+    let presented = g2g_core::Caps::RawVideo {
+        format: input.presented,
+        width,
+        height,
+        framerate,
+        interlace,
+        colorimetry,
+        pixel_aspect,
+    };
+    Ok(DisplayFrame {
+        caps: presented,
+        converted,
+    })
+}
+
 type GlLoader = alloc::boxed::Box<dyn Fn(&str) -> *const core::ffi::c_void>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

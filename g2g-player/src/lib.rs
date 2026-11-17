@@ -243,6 +243,10 @@ pub(crate) struct Shared {
     video_out_params: Mutex<Option<VideoSize>>,
     osd_dimensions: Mutex<Option<OsdDimensions>>,
     audio_levels: Mutex<Option<AudioLevels>>,
+    // what time-pos shows from a seek request until its first frame is presented, as mpv's does
+    seek_target: Mutex<Option<Duration>>,
+    // set by a seek request, taken by the flush that seek sends through playervideosink
+    seek_flush_pending: AtomicBool,
     overlay: Mutex<Vec<OverlayRectangle>>,
     // the last value reported for each observed property
     observed: Mutex<Vec<PropertyChange>>,
@@ -306,10 +310,26 @@ impl Shared {
         *self.audio_levels.lock().expect("audio levels lock") = levels;
     }
 
+    fn time_pos(&self, progress: Option<&PipelineProgress>) -> Option<Duration> {
+        let seek_target = *self.seek_target.lock().expect("seek target lock");
+        seek_target.or_else(|| {
+            progress
+                .and_then(PipelineProgress::position)
+                .map(Duration::from_nanos)
+        })
+    }
+
+    pub(crate) fn seek_landed(&self) {
+        *self.seek_target.lock().expect("seek target lock") = None;
+        self.seek_flush_pending.store(false, Ordering::SeqCst);
+    }
+
+    pub(crate) fn take_seek_flush(&self) -> bool {
+        self.seek_flush_pending.swap(false, Ordering::SeqCst)
+    }
+
     fn report_progress(&self, progress: &PipelineProgress) {
-        self.report(PropertyChange::TimePos(
-            progress.position().map(Duration::from_nanos),
-        ));
+        self.report(PropertyChange::TimePos(self.time_pos(Some(progress))));
         self.report(PropertyChange::Duration(
             progress.duration().map(Duration::from_nanos),
         ));
@@ -420,6 +440,7 @@ impl Player {
         } else {
             PipelineState::Playing
         });
+        self.shared.seek_landed();
         let progress = PipelineProgress::new();
         let (seeks, seek_requests) = tokio::sync::mpsc::unbounded_channel();
         let stopping = Arc::new(AtomicBool::new(false));
@@ -434,6 +455,7 @@ impl Player {
             picture_filters: self.picture_filters.subscribe(),
             decoded,
             level_meter_window: has_level_meter.then_some(level_meter_window),
+            has_video_sink: !video_sinks.is_empty(),
         };
         let thread = std::thread::Builder::new()
             .name("g2g-player".into())
@@ -465,6 +487,7 @@ impl Player {
             .thread
             .join()
             .expect("the playback thread catches its own errors");
+        self.shared.seek_landed();
         self.shared.set_video_params(None);
         self.shared.set_video_out_params(None);
         self.shared.set_audio_levels(None);
@@ -485,40 +508,51 @@ impl Player {
     }
 
     pub fn seek(&self, position: Duration) -> Result<(), SeekError> {
+        self.seek_showing(position, position)
+    }
+
+    fn seek_showing(&self, target: Duration, shown: Duration) -> Result<(), SeekError> {
         let playback = self.playback.lock().expect("playback lock");
         let playback = playback.as_ref().ok_or(SeekError::NoMedia)?;
         if playback.seek.is_none() {
             return Err(SeekError::NotSeekable);
         }
+        *self.shared.seek_target.lock().expect("seek target lock") = Some(shown);
+        self.shared.seek_flush_pending.store(true, Ordering::SeqCst);
         // the playback thread is gone once the file ended, nothing is loaded then
-        playback
-            .seeks
-            .send(position)
-            .map_err(|_| SeekError::NoMedia)
+        playback.seeks.send(target).map_err(|_| {
+            self.shared.seek_landed();
+            SeekError::NoMedia
+        })
     }
 
     fn seek_from_position(
         &self,
-        target: impl FnOnce(Duration) -> Duration,
+        target_and_shown: impl FnOnce(Duration) -> (Duration, Duration),
     ) -> Result<(), SeekError> {
         let position = {
             let playback = self.playback.lock().expect("playback lock");
             let playback = playback.as_ref().ok_or(SeekError::NoMedia)?;
-            playback
-                .progress
-                .position()
-                .map(Duration::from_nanos)
+            self.shared
+                .time_pos(Some(&playback.progress))
                 .ok_or(SeekError::NoPosition)?
         };
-        self.seek(target(position))
+        let (target, shown) = target_and_shown(position);
+        self.seek_showing(target, shown)
     }
 
     pub fn seek_forward(&self, offset: Duration) -> Result<(), SeekError> {
-        self.seek_from_position(|position| position.saturating_add(offset))
+        self.seek_from_position(|position| {
+            let target = position.saturating_add(offset);
+            (target, target)
+        })
     }
 
     pub fn seek_backward(&self, offset: Duration) -> Result<(), SeekError> {
-        self.seek_from_position(|position| position.saturating_sub(offset))
+        self.seek_from_position(|position| {
+            let target = position.saturating_sub(offset);
+            (target, target)
+        })
     }
 
     fn frame_period(&self) -> Result<Duration, SeekError> {
@@ -533,13 +567,23 @@ impl Player {
         let period = self.frame_period()?;
         self.pause();
         // seeks land on the first frame at or after the target
-        self.seek_from_position(|position| position.saturating_add(period / 2))
+        self.seek_from_position(|position| {
+            (
+                position.saturating_add(period / 2),
+                position.saturating_add(period),
+            )
+        })
     }
 
     pub fn frame_back_step(&self) -> Result<(), SeekError> {
         let period = self.frame_period()?;
         self.pause();
-        self.seek_from_position(|position| position.saturating_sub(period + period / 2))
+        self.seek_from_position(|position| {
+            (
+                position.saturating_sub(period + period / 2),
+                position.saturating_sub(period),
+            )
+        })
     }
 
     pub fn property(&self, property: Property) -> PropertyChange {
@@ -547,11 +591,7 @@ impl Player {
         let progress = playback.as_ref().map(|playback| &playback.progress);
         match property {
             Property::Pause => PropertyChange::Pause(self.shared.paused.load(Ordering::SeqCst)),
-            Property::TimePos => PropertyChange::TimePos(
-                progress
-                    .and_then(PipelineProgress::position)
-                    .map(Duration::from_nanos),
-            ),
+            Property::TimePos => PropertyChange::TimePos(self.shared.time_pos(progress)),
             Property::Duration => PropertyChange::Duration(
                 progress
                     .and_then(PipelineProgress::duration)
@@ -697,6 +737,7 @@ struct PlaybackRun {
     decoded: tokio::sync::watch::Receiver<Option<VideoSize>>,
     // None when the graph has no audio sink to meter
     level_meter_window: Option<tokio::sync::watch::Receiver<Option<Duration>>>,
+    has_video_sink: bool,
 }
 
 async fn install_picture_filters(
@@ -755,6 +796,7 @@ impl PlaybackRun {
             mut picture_filters,
             mut decoded,
             mut level_meter_window,
+            has_video_sink,
         } = self;
         let registry = default_registry();
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -842,6 +884,10 @@ impl PlaybackRun {
                         pending_seek = None;
                         if outcome == SeekOutcome::Served {
                             shared.events.push(Event::PlaybackRestart);
+                        }
+                        // playervideosink ends the seek's time-pos with its first frame, nothing does without one
+                        if !has_video_sink || outcome != SeekOutcome::Served {
+                            shared.seek_landed();
                         }
                     }
                     _ = poll.tick() => {

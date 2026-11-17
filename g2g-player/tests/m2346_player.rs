@@ -263,6 +263,18 @@ fn relative_seeks_and_frame_steps_land_on_their_frames_paused() {
     );
 }
 
+#[test]
+fn time_pos_shows_a_seek_target_before_its_frame_lands() {
+    let player = Player::new();
+    let start = load_paused_at_start(&player);
+    let target = start + RELATIVE_SEEK;
+    player.seek(target).unwrap();
+    assert_eq!(
+        player.property(Property::TimePos),
+        PropertyChange::TimePos(Some(target))
+    );
+}
+
 // ffprobe: pcm_s16le, 8000 Hz, 2 channels, 1 s
 const SOUND: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),

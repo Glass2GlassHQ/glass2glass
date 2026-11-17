@@ -1043,8 +1043,12 @@ A URI load builds `playbin uri=... video-sink=playervideosink`, and a launch lin
 must contain `playervideosink`. After `parse_launch` the sink node is found by its
 metadata and replaced with one holding the player's frame slot, since a
 `LaunchFactory` is a plain function pointer. `playervideosink` paces frames with
-`PresentationPacer` against a `MonotonicClock` it provides, puts each due frame in
-the slot and calls the host's update callback. `GlRenderContext::render` draws it
+`PresentationPacer` against a `MonotonicClock` it provides, converts each due frame
+to NV12 or RGBA (`glnv12::convert_for_display`) on the pipeline thread, puts it in
+the slot and calls the host's update callback. The render contexts run on the host's
+UI thread, so they only upload. `time-pos` shows a seek's target from the request
+until `playervideosink` presents the first frame after that seek's flush, as mpv's
+does, and a frame step shows the frame it lands on. `GlRenderContext::render` draws it
 into a `GlTarget` framebuffer through `g2g-plugins`' `GlVideoRenderer` (feature
 `gl-render`, the NV12 and RGBA shaders `glsink` uses), and `WgpuRenderContext`
 into a wgpu texture through `wgpusink`'s `VideoRenderer`. `wants_redraw` is true
