@@ -33,7 +33,7 @@ use g2g_core::{
     PropertySpec,
 };
 
-use crate::metasink::{caps_dimensions, frame_record};
+use crate::metasink::{caps_dimensions, frame_record, DETECTIONS_KEY, PTS_KEY};
 use crate::mqtt::{
     broker_property_table, qos_from_level, qos_level, BrokerSettings, DEFAULT_QOS,
     DEFAULT_QOS_TEXT, QOS_MAX_TEXT, RECONNECT_DELAY,
@@ -293,6 +293,14 @@ impl AsyncElement for MqttSink {
                     else {
                         return Ok(());
                     };
+                    let says_only_its_time = record.iter().all(|(key, value)| {
+                        key == PTS_KEY
+                            || (key == DETECTIONS_KEY
+                                && value.as_array().is_some_and(Vec::is_empty))
+                    });
+                    if says_only_its_time {
+                        return Ok(());
+                    }
                     let payload = serde_json::to_vec(&record)
                         .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
                     self.publish(payload);

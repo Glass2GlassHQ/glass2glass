@@ -801,14 +801,14 @@ fn fixture_records() -> Vec<serde_json::Value> {
         serde_json::json!({
             "pts": 0.0,
             "detections": [
-                { "label": "person", "x": 80, "y": 120, "w": 40, "h": 60, "score": 0.875 }
+                { "label": "person", "x": 80, "y": 120, "w": 40, "h": 60, "score": 0.875, "track_id": null }
             ],
         }),
         // the second frame of a 30 fps videotestsrc, inside metareplay's window
         serde_json::json!({
             "pts": 1.0 / 30.0,
             "detections": [
-                { "label": "car", "x": 160, "y": 60, "w": 80, "h": 120, "score": 0.5 }
+                { "label": "car", "x": 160, "y": 60, "w": 80, "h": 120, "score": 0.5, "track_id": null }
             ],
             "alert": { "rule": "person-in-zone" },
         }),
@@ -835,13 +835,15 @@ fn reads_the_records_a_metasink_posts() {
     write_fixture(&fixture);
     let _ = std::fs::remove_file(&written);
     let expected = fixture_records();
+    let frame_count = 5;
 
     let mut session = LiveSession::spawn();
     let started = session.call(
         "start_pipeline",
         serde_json::json!({
             "pipeline": format!(
-                "videotestsrc num-buffers=5 ! metareplay location=\"{}\" ! metasink location=\"{}\"",
+                "videotestsrc num-buffers={} ! metareplay location=\"{}\" ! metasink location=\"{}\"",
+                frame_count,
                 fixture.display(),
                 written.display(),
             ),
@@ -855,7 +857,7 @@ fn reads_the_records_a_metasink_posts() {
     );
     assert_eq!(waited["ok"], true, "{waited}");
     let records = waited["records"].as_array().unwrap();
-    assert_eq!(records.len(), expected.len(), "{waited}");
+    assert!(records.len() >= expected.len(), "{waited}");
     assert_eq!(
         records[0]["detections"], expected[0]["detections"],
         "the boxes come back in the pixels the fixture named: {waited}"
@@ -886,14 +888,14 @@ fn reads_the_records_a_metasink_posts() {
 
     let latest = session.call("latest_metadata", serde_json::json!({}));
     let latest = latest["records"].as_array().unwrap();
-    assert_eq!(latest.len(), expected.len());
+    assert_eq!(latest.len(), frame_count);
     assert_eq!(latest[0]["pts"], 0.0, "oldest first");
     assert!(latest[1]["pts"].as_f64().unwrap() > 0.0);
 
     let lines = std::fs::read_to_string(&written).expect("the sink wrote its file");
     assert_eq!(
         lines.lines().count(),
-        expected.len(),
+        frame_count,
         "the bus carried what the file holds"
     );
     let _ = std::fs::remove_file(&fixture);

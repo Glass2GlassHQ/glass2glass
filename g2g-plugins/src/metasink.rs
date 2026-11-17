@@ -16,14 +16,13 @@
 //! - `text`: the frame's bytes as UTF-8, for a `Caps::Text` input. Nothing else
 //!   is written for text.
 //! - `detections`: one object per [`ObjectDetection`] with the class name (the
-//!   label id as a decimal string without a name table), the box in pixels, and
-//!   the confidence.
+//!   label id as a decimal string without a name table), the box in pixels, the
+//!   confidence, and the `track_id` of its tracking node (`null` when untracked).
+//!   An empty array on a frame with none, so every frame has a line and a reader
+//!   counts frames by line, as with the Python element.
 //! - one key per [`BlobMeta`] blob whose payload is JSON, under the blob's
 //!   canonical header. An embedding's f32 bytes are not JSON, so they are
 //!   skipped.
-//!
-//! A record holding nothing but `pts` is not written: a pooled frame carrying an
-//! emptied relation meta would otherwise write a line per frame saying nothing.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -39,10 +38,10 @@ use serde_json::{Map, Value};
 
 use g2g_core::log::{io_err, path_io_err, short_type_name, LogName, LogSource};
 use g2g_core::{
-    AnalyticsMeta, AsyncElement, BlobMeta, BusHandle, BusMessage, Caps, CapsConstraint,
-    ConfigureOutcome, Dim, ElementMetadata, Frame, G2gError, HardwareError, ObjectDetection,
-    OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue,
-    PropertySpec,
+    AnalyticsMeta, AnalyticsNode, AsyncElement, BlobMeta, BusHandle, BusMessage, Caps,
+    CapsConstraint, ConfigureOutcome, Dim, ElementMetadata, Frame, G2gError, HardwareError,
+    ObjectDetection, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
+    PropValue, PropertySpec,
 };
 
 /// The record key holding the frame time in seconds.
@@ -58,6 +57,7 @@ pub(crate) const Y_KEY: &str = "y";
 pub(crate) const WIDTH_KEY: &str = "w";
 pub(crate) const HEIGHT_KEY: &str = "h";
 pub(crate) const SCORE_KEY: &str = "score";
+pub(crate) const TRACK_ID_KEY: &str = "track_id";
 
 /// The keys a record carries that are not a blob, so everything else in it is
 /// one (the `metareplay` split).
@@ -83,11 +83,12 @@ pub(crate) fn caps_dimensions(caps: &Caps) -> Option<(u32, u32)> {
 }
 
 /// One detection as the record writes it: the class name (or the label id in
-/// decimal where the producer published no name table) and the box in pixels of
-/// a `width` x `height` frame.
-pub(crate) fn detection_json(
+/// decimal where the producer published no name table), the box in pixels of
+/// a `width` x `height` frame, the confidence and the track id.
+fn detection_json(
     detection: &ObjectDetection,
     class_name: Option<&str>,
+    track_id: Option<u64>,
     width: u32,
     height: u32,
 ) -> Value {
@@ -111,12 +112,32 @@ pub(crate) fn detection_json(
         SCORE_KEY.to_string(),
         Value::from(f64::from(detection.confidence)),
     );
+    object.insert(TRACK_ID_KEY.to_string(), track_id.into());
     Value::Object(object)
+}
+
+pub(crate) fn detection_records(analytics: &AnalyticsMeta, width: u32, height: u32) -> Vec<Value> {
+    analytics
+        .nodes
+        .iter()
+        .enumerate()
+        .filter_map(|(index, node)| match node {
+            AnalyticsNode::Detection(detection) => Some(detection_json(
+                detection,
+                analytics.class_name(detection.label),
+                analytics.tracking_id(index),
+                width,
+                height,
+            )),
+            _ => None,
+        })
+        .collect()
 }
 
 /// The record for one frame: its time, then its text (a `Caps::Text` input) or
 /// its detections in pixels of a `width` x `height` frame and its JSON blobs.
-/// `None` when it holds nothing but a time. `mqttsink` publishes the same record.
+/// `None` for a text frame outside host memory. `mqttsink` publishes the same
+/// record.
 pub(crate) fn frame_record(
     frame: &Frame,
     text_input: bool,
@@ -138,22 +159,12 @@ pub(crate) fn frame_record(
         );
         return Some(record);
     }
-    if let Some(analytics) = frame.meta.get::<AnalyticsMeta>() {
-        let detections: Vec<Value> = analytics
-            .detections()
-            .map(|detection| {
-                detection_json(
-                    detection,
-                    analytics.class_name(detection.label),
-                    width,
-                    height,
-                )
-            })
-            .collect();
-        if !detections.is_empty() {
-            record.insert(DETECTIONS_KEY.to_string(), Value::Array(detections));
-        }
-    }
+    let detections = frame
+        .meta
+        .get::<AnalyticsMeta>()
+        .map(|analytics| detection_records(analytics, width, height))
+        .unwrap_or_default();
+    record.insert(DETECTIONS_KEY.to_string(), Value::Array(detections));
     if let Some(blobs) = frame.meta.get::<BlobMeta>() {
         for blob in blobs.iter() {
             if let Ok(value) = serde_json::from_slice::<Value>(&blob.payload) {
@@ -161,7 +172,7 @@ pub(crate) fn frame_record(
             }
         }
     }
-    (record.len() > 1).then_some(record)
+    Some(record)
 }
 
 /// Writes the analytics metadata, blobs and text of each frame as one JSON line.
@@ -218,13 +229,12 @@ impl MetaSink {
         self
     }
 
-    /// Records written so far. A frame whose record said nothing but its time
-    /// does not count.
+    /// Records written so far.
     pub fn records_written(&self) -> u64 {
         self.records_written
     }
 
-    /// The record for one frame, or `None` when it holds nothing but a time.
+    /// The record for one frame, or `None` for a text frame outside host memory.
     fn record_for(&self, frame: &Frame) -> Option<Map<String, Value>> {
         frame_record(frame, self.text_input, self.width, self.height)
     }

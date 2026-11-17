@@ -34,7 +34,7 @@ use g2g_core::{
 };
 
 use crate::metasink::{
-    caps_dimensions, detection_json, HEIGHT_KEY, LABEL_KEY, NS_PER_SECOND, SCORE_KEY, WIDTH_KEY,
+    caps_dimensions, detection_records, HEIGHT_KEY, LABEL_KEY, NS_PER_SECOND, SCORE_KEY, WIDTH_KEY,
     X_KEY, Y_KEY,
 };
 
@@ -367,19 +367,7 @@ impl AsyncElement for AnalyticsAlert {
                     let detections: Vec<Value> = frame
                         .meta
                         .get::<AnalyticsMeta>()
-                        .map(|analytics| {
-                            analytics
-                                .detections()
-                                .map(|detection| {
-                                    detection_json(
-                                        detection,
-                                        analytics.class_name(detection.label),
-                                        self.width,
-                                        self.height,
-                                    )
-                                })
-                                .collect()
-                        })
+                        .map(|analytics| detection_records(analytics, self.width, self.height))
                         .unwrap_or_default();
                     let alerts = if detections.is_empty() || self.rules.is_empty() {
                         Vec::new()

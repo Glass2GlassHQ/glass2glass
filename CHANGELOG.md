@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2394: `metasink` writes each detection's `track_id` and a line for every frame.
 - M2393: `mxfdemux` reads MPEG-2, H.264, ProRes, DNxHD, JPEG 2000 and PCM tracks, and `ffmpegdec` decodes JPEG 2000.
 - M2392: `g2g-player` reports `container-fps`, the video frame rate.
 - M2391: `fakeaudiosink` plays an audio-only file in real time on a host with no audio device.

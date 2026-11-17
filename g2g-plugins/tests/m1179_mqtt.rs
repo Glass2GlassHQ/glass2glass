@@ -142,10 +142,12 @@ fn expected_records() -> Vec<Value> {
                 "w": pixels(w, FRAME_WIDTH),
                 "h": pixels(h, FRAME_HEIGHT),
                 "score": f64::from(score),
+                "track_id": null,
             }],
         }),
         json!({
             "pts": BLOB_PTS_NS as f64 / NS_PER_SECOND,
+            "detections": [],
             BLOB_HEADER: serde_json::from_slice::<Value>(BLOB_PAYLOAD).expect("the blob is JSON"),
         }),
     ]
