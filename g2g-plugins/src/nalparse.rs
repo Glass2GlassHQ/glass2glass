@@ -589,6 +589,8 @@ impl<C: NalCodec> AsyncElement for NalParse<C> {
                     // so caps re-emit after the seek.
                     self.framer.clear();
                     self.caps.forget();
+                    // keyframes stamped 0 read as unstamped and otherwise take the next pts of the pre-seek stream
+                    self.stream_pts = Default::default();
                     self.leading_rasl.restart();
                     self.last_segment = None;
                     #[cfg(feature = "metadata")]

@@ -457,6 +457,8 @@ impl<C: StartCodeCodec> AsyncElement for StartCodeParse<C> {
                     // than splice pre-seek bytes onto the post-seek stream.
                     self.framer.clear();
                     self.caps.forget();
+                    // keyframes stamped 0 read as unstamped and otherwise take the next pts of the pre-seek stream
+                    self.stream_pts = Default::default();
                     #[cfg(feature = "metadata")]
                     {
                         self.input_stamps = crate::inputstamp::PendingInputStamps::default();

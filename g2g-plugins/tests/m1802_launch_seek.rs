@@ -198,8 +198,8 @@ fn seek_at_resume_frame(
 fn seek_during_playback_resumes_at_the_target() {
     let pipeline = mp4_pipeline();
     let unseeked = checksum_lines(&launch(&[], &pipeline));
-    // forward past the frames in flight, and backward
-    for (position_milliseconds, target_milliseconds) in [(200, 2_000), (2_000, 400)] {
+    // forward past the frames in flight, backward, and back into the first GOP, whose keyframe is stamped 0
+    for (position_milliseconds, target_milliseconds) in [(200, 2_000), (2_000, 400), (2_000, 0)] {
         seek_at_resume_frame(
             &pipeline,
             &unseeked,

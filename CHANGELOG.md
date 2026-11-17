@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2359: `h264parse`, `h265parse` and the start-code parsers no longer stamp the frames one frame late after a seek back to the start of the stream.
 - M2358: `g2g-player` loads a file at a start position and in a given pause state, as mpv's `loadfile` `start=` and `pause=` do.
 - M2357: `g2g-player` stays open at the end of a seekable file, paused on the last frame with `eof-reached` set, and a paused seek after the end prerolls its target frame.
 - M2356: `gl-render` builds on Windows and macOS, and the GL renderer compiles beside `smartstring`.

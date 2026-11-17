@@ -1548,7 +1548,8 @@ left unstamped (0 from a byte source, or none) with the synthesis `TsDemux` uses
 decode order plus the declared frame period, the picture order count for a
 reordering H.264 or H.265 stream, `temporal_reference` for MPEG-2. The first such
 unit opens the timeline at 0 and an IDR restarts it one period after the latest
-picture. A stream with no declared rate leaves later units unset (`PTS_NONE`),
+picture. A `Flush` starts the synthesis over, so after a seek to the start the
+keyframe stamped 0 opens the timeline at 0 again. A stream with no declared rate leaves later units unset (`PTS_NONE`),
 as gst's `h264parse` and `h265parse` do, and decoders pass that through.
 A PES or container stamp names the first access unit whose picture start code
 lies in its packet, so leading headers or a delimiter carried over from the
