@@ -237,6 +237,63 @@ fn moved_from(player: &Player, before: Duration) -> Duration {
     time_pos(player)
 }
 
+// time-pos leaves an off-grid target once the seek's frame is shown
+const PAUSED_SEEKS: [Duration; 2] = [Duration::from_millis(1_610), Duration::from_millis(1_210)];
+const PLAYING_SEEKS: [Duration; 2] = [Duration::from_millis(410), Duration::from_millis(210)];
+const PLAY_WINDOW: Duration = Duration::from_millis(600);
+
+fn seek_lands(player: &Player, target: Duration, frames_past_target: u32) -> Duration {
+    player.seek(target).unwrap();
+    let landed = moved_from(player, target);
+    // time-pos is the frame the sink last took, which while playing can be the one after the frame shown
+    assert!(
+        landed >= target && landed < target + CLIP_FRAME_PERIOD * frames_past_target,
+        "a seek to {target:?} showed {landed:?}"
+    );
+    landed
+}
+
+fn plays_on(player: &Player) {
+    let before = time_pos(player);
+    std::thread::sleep(PLAY_WINDOW);
+    let played = time_pos(player).saturating_sub(before);
+    assert!(
+        played >= PLAY_WINDOW / 2,
+        "time-pos moved {played:?} in {PLAY_WINDOW:?} of playing"
+    );
+}
+
+#[test]
+fn seeks_between_pauses_and_plays_land_and_play_on() {
+    let player = Player::new();
+    player
+        .load(
+            Media::Uri(&format!("file://{CLIP}")),
+            LoadOptions::default(),
+        )
+        .unwrap();
+    wait_until(|| {
+        matches!(
+            player.property(Property::TimePos),
+            PropertyChange::TimePos(Some(position)) if position >= PLAYED_BEFORE_PAUSE
+        )
+    });
+    for (paused_target, playing_target) in PAUSED_SEEKS.into_iter().zip(PLAYING_SEEKS) {
+        player.pause();
+        let landed = seek_lands(&player, paused_target, 1);
+        std::thread::sleep(SETTLE);
+        assert_eq!(
+            time_pos(&player),
+            landed,
+            "time-pos moved after a paused seek"
+        );
+        player.play();
+        plays_on(&player);
+        seek_lands(&player, playing_target, 2);
+        plays_on(&player);
+    }
+}
+
 #[test]
 fn relative_seeks_and_frame_steps_land_on_their_frames_paused() {
     let player = Player::new();

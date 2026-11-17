@@ -57,7 +57,10 @@ use g2g_core::{
     PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
 };
 
-use crate::audiooutput::{DeviceCmd, OutputDevice, PendingFlushes, PlayEnd};
+use crate::audiooutput::{
+    DeviceCmd, DeviceStep, OutputDevice, PcmGeometry, PendingFlushes, PlayEnd, PlayoutGate,
+    PlayoutStart,
+};
 use crate::pulsepcm::{pulse_map, pulse_spec, FORMATS};
 use g2g_core::pcm_caps_any_rate_and_channels;
 
@@ -102,6 +105,7 @@ pub struct PulseSink {
     /// block it (see [`crate::audioworker`]).
     link: Option<crate::audioworker::WorkerLink<DeviceCmd>>,
     pending_flushes: PendingFlushes,
+    start: PlayoutStart,
     caps: Option<Caps>,
     bytes_written: Arc<AtomicU64>,
     playout: crate::audioskew::PlayoutClock,
@@ -137,6 +141,7 @@ impl PulseSink {
             output: OutputDevice::new("device", ""),
             link: None,
             pending_flushes: PendingFlushes::default(),
+            start: PlayoutStart::default(),
             caps: None,
             bytes_written: Arc::new(AtomicU64::new(0)),
             playout: crate::audioskew::PlayoutClock::default(),
@@ -234,16 +239,8 @@ impl AsyncElement for PulseSink {
                 fallback,
                 ready_tx,
                 |device| open_stream(&app_name, device, &spec),
-                |simple, rx, pending_flushes| {
-                    play(
-                        simple,
-                        &spec,
-                        rx,
-                        pending_flushes,
-                        &written,
-                        &clock,
-                        &mut clock_offset,
-                    )
+                |simple, rx, gate| {
+                    play(simple, &spec, rx, gate, &written, &clock, &mut clock_offset)
                 },
             );
         })?;
@@ -271,6 +268,7 @@ impl AsyncElement for PulseSink {
     }
 
     fn set_clock_sync(&mut self, sync: ClockSync) {
+        self.start.set_clock_sync(sync.clone());
         self.playout.set_clock_sync(sync);
     }
 
@@ -356,14 +354,17 @@ impl AsyncElement for PulseSink {
                         )
                         .await?;
                     }
+                    let caps = self.caps.as_ref().ok_or(G2gError::NotConfigured)?;
                     // Awaited, not blocking: a full queue is the device's
                     // back-pressure and yields to the executor.
-                    link.send(
-                        DeviceCmd::Samples(frame),
-                        G2gError::Hardware(HardwareError::PulseAudio(-1)),
-                    )
-                    .await?;
-                    Ok(())
+                    self.start
+                        .send(
+                            link,
+                            frame,
+                            PcmGeometry::of(caps)?,
+                            G2gError::Hardware(HardwareError::PulseAudio(-1)),
+                        )
+                        .await
                 }
                 // A mid-stream format change can't be honoured on an open
                 // stream; only a caps identical to the configured one passes.
@@ -373,16 +374,26 @@ impl AsyncElement for PulseSink {
                 }
                 PipelinePacket::Flush => {
                     let link = self.link.as_ref().ok_or(G2gError::NotConfigured)?;
-                    self.pending_flushes
-                        .send(link, G2gError::Hardware(HardwareError::PulseAudio(-1)))
+                    self.start
+                        .flush(
+                            link,
+                            &self.pending_flushes,
+                            G2gError::Hardware(HardwareError::PulseAudio(-1)),
+                        )
                         .await
                 }
-                PipelinePacket::Segment(_) => Ok(()),
+                PipelinePacket::Segment(segment) => {
+                    self.start.set_segment(segment);
+                    Ok(())
+                }
                 PipelinePacket::Eos => {
                     // Wait for the queued audio to actually play out, yielding
                     // throughout: a blocking join here stalled every other arm
                     // in the pipeline for the length of the sound.
                     if let Some(link) = self.link.as_mut() {
+                        self.start
+                            .send_held(link, G2gError::Hardware(HardwareError::PulseAudio(-1)))
+                            .await?;
                         link.finish(
                             DeviceCmd::Shutdown,
                             G2gError::Hardware(HardwareError::PulseAudio(-1)),
@@ -433,15 +444,15 @@ fn play(
     simple: Simple,
     spec: &Spec,
     rx: &Receiver<DeviceCmd>,
-    pending_flushes: &PendingFlushes,
+    gate: &mut PlayoutGate,
     written: &AtomicU64,
     clock: &DriftClock,
     clock_offset: &mut DeviceClockOffset,
 ) -> PlayEnd {
     let end = loop {
-        match rx.recv().map(|cmd| pending_flushes.admit(cmd)) {
+        match rx.recv().map(|cmd| gate.admit(cmd)) {
             Ok(None) => {}
-            Ok(Some(DeviceCmd::Samples(frame))) => {
+            Ok(Some(DeviceStep::Samples(frame))) => {
                 let payload = match crate::dmabufmap::frame_bytes(&frame, ELEMENT_NAME) {
                     Ok(payload) => payload,
                     Err(error) => break PlayEnd::Failed(error),
@@ -455,13 +466,13 @@ fn play(
                 // the drift clock one playout observation.
                 discipline_clock(&simple, spec, written, clock, clock_offset);
             }
-            Ok(Some(DeviceCmd::Flush)) => {
+            Ok(Some(DeviceStep::Flush)) => {
                 if let Err(e) = simple.flush() {
                     return PlayEnd::Failed(G2gError::Hardware(HardwareError::PulseAudio(e.0)));
                 }
             }
-            Ok(Some(DeviceCmd::SwitchDevice(device))) => break PlayEnd::SwitchDevice(device),
-            Ok(Some(DeviceCmd::Shutdown)) | Err(_) => break PlayEnd::Shutdown,
+            Ok(Some(DeviceStep::SwitchDevice(device))) => break PlayEnd::SwitchDevice(device),
+            Ok(Some(DeviceStep::Shutdown)) | Err(_) => break PlayEnd::Shutdown,
         }
     };
     // Play out whatever is still buffered, then stop.

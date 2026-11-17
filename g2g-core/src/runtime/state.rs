@@ -309,6 +309,10 @@ impl StateController {
         if self.state() == PipelineState::Playing {
             return;
         }
+        // gstreamer's flushing seek restarts running time at zero
+        if let Some((_, anchor)) = &*self.inner.play_anchor.lock() {
+            anchor.clear();
+        }
         self.inner.preroll_gen.fetch_add(1, Ordering::AcqRel);
         self.inner.prerolled.store(false, Ordering::Release);
         self.inner.pending_preroll.store(
@@ -840,6 +844,30 @@ mod tests {
 
         assert_eq!(anchor.get(), Some(1_000));
         assert_eq!(anchor.paused_total_ns(), 4_000);
+    }
+
+    #[test]
+    fn a_paused_seek_restarts_the_base_time_at_the_next_play() {
+        use crate::clock::PipelineClock;
+        struct Settable(Arc<core::sync::atomic::AtomicU64>);
+        impl PipelineClock for Settable {
+            fn now_ns(&self) -> u64 {
+                self.0.load(Ordering::SeqCst)
+            }
+        }
+        let now = Arc::new(core::sync::atomic::AtomicU64::new(1_000));
+        let sc = StateController::new(PipelineState::Paused);
+        let anchor = sc.arm_play_anchor(Arc::new(Settable(now.clone())));
+
+        sc.set_state(PipelineState::Playing);
+        now.store(3_000, Ordering::SeqCst);
+        sc.set_state(PipelineState::Paused);
+        sc.request_repreroll();
+        now.store(7_000, Ordering::SeqCst);
+        sc.set_state(PipelineState::Playing);
+
+        assert_eq!(anchor.get(), Some(7_000));
+        assert_eq!(anchor.paused_total_ns(), 0);
     }
 
     #[test]

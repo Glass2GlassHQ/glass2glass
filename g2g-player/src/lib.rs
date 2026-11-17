@@ -272,11 +272,11 @@ impl Shared {
     fn set_paused(&self, paused: bool, state: Option<&StateController>) {
         self.paused.store(paused, Ordering::SeqCst);
         if let Some(state) = state {
-            state.set_state(if paused {
-                PipelineState::Paused
-            } else {
-                PipelineState::Playing
-            });
+            if paused {
+                state.set_state(PipelineState::Paused);
+            } else if state.is_prerolled() {
+                state.set_state(PipelineState::Playing);
+            }
         }
         self.report(PropertyChange::Pause(paused));
     }
@@ -435,11 +435,8 @@ impl Player {
         if let Some(pause) = options.pause {
             self.shared.set_paused(pause, None);
         }
-        let state = StateController::new(if self.shared.paused.load(Ordering::SeqCst) {
-            PipelineState::Paused
-        } else {
-            PipelineState::Playing
-        });
+        // audio and video start together only once every sink has prerolled
+        let state = StateController::new(PipelineState::Paused);
         self.shared.seek_landed();
         let progress = PipelineProgress::new();
         let (seeks, seek_requests) = tokio::sync::mpsc::unbounded_channel();
@@ -873,9 +870,9 @@ impl PlaybackRun {
                     }
                     Some(position) = seek_requests.recv() => {
                         let controller = seek.as_ref().expect("seek() refuses media that cannot seek");
-                        if state.state() == PipelineState::Paused {
-                            state.request_repreroll();
-                        }
+                        // gstreamer's flushing seek prerolls every sink again before playing on
+                        state.set_state(PipelineState::Paused);
+                        state.request_repreroll();
                         pending_seek = Some(controller.seek(Seek::flush_to(nanoseconds(position))));
                         shared.set_eof_reached(false);
                         shared.events.push(Event::Seek);
@@ -888,6 +885,11 @@ impl PlaybackRun {
                         // playervideosink ends the seek's time-pos with its first frame, nothing does without one
                         if !has_video_sink || outcome != SeekOutcome::Served {
                             shared.seek_landed();
+                        }
+                    }
+                    () = state.await_prerolled(), if state.state() == PipelineState::Paused && !shared.paused.load(Ordering::SeqCst) => {
+                        if !shared.paused.load(Ordering::SeqCst) {
+                            state.set_state(PipelineState::Playing);
                         }
                     }
                     _ = poll.tick() => {

@@ -756,7 +756,9 @@ preroll generation, and `flow_gate` takes the arm's generation and reopens for a
 stale one, so each sink arm re-prerolls. The arm drains the stale pre-seek frames,
 discarding rather than presenting, until the `Flush`, then prerolls the post-flush
 target and re-fires `AsyncDone`, so scrubbing a paused pipeline updates the shown
-frame. A sink that took its `Eos` while playing waits on its link
+frame. It also clears the play anchor, since a flushing seek restarts running time
+at zero, so the next `Playing` stamps a new base time as GStreamer's does after a
+flush. A sink that took its `Eos` while playing waits on its link
 rather than in `flow_gate`, so the seek's `Flush` can reach it before it reads the
 new generation. A `Flush` therefore also takes a newer generation, and the next
 frame is the preroll.
@@ -970,6 +972,13 @@ position goes to `attach_seek`, which queues the seek before the run starts, so 
 first frame shown is the first at or after it. On media that cannot seek, a start
 position fails the load with `LoadError::StartNotSeekable`. `pause` sets the paused
 state the run starts in, and it stays set for later loads.
+
+The run starts in `Paused` and moves to `Playing` once every sink has prerolled, so
+the base time is stamped only when audio and video both hold their first buffer. A
+seek, playing or paused, goes back to `Paused` and calls `request_repreroll` before
+it is issued, GStreamer's lost-state on a flushing seek, and the run returns to
+`Playing` once the sinks preroll the target. `play` during a preroll leaves the
+transition to the run.
 
 `seek_forward` and `seek_backward` seek from `time-pos`, and a seek back stops at
 0. `frame_step` and `frame_back_step` pause and seek half a frame forward, or one

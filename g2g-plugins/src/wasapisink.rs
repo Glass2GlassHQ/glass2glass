@@ -54,7 +54,10 @@ use g2g_core::{
 };
 
 use crate::audio::{linear_pcm_caps, pcm_params};
-use crate::audiooutput::{DeviceCmd, OutputDevice, PendingFlushes, PlayEnd};
+use crate::audiooutput::{
+    DeviceCmd, DeviceStep, OutputDevice, PcmGeometry, PendingFlushes, PlayEnd, PlayoutGate,
+    PlayoutStart,
+};
 use crate::audioworker::WorkerLink;
 use crate::wasapipcm::{audio_err, open_endpoint};
 
@@ -94,6 +97,7 @@ pub struct WasapiSink {
     /// [`crate::audioworker`]).
     link: Option<WorkerLink<DeviceCmd>>,
     pending_flushes: PendingFlushes,
+    start: PlayoutStart,
     caps: Option<Caps>,
     frames_rendered: Arc<AtomicU64>,
     playout: crate::audioskew::PlayoutClock,
@@ -124,6 +128,7 @@ impl WasapiSink {
             output: OutputDevice::new("device", ""),
             link: None,
             pending_flushes: PendingFlushes::default(),
+            start: PlayoutStart::default(),
             caps: None,
             frames_rendered: Arc::new(AtomicU64::new(0)),
             playout: crate::audioskew::PlayoutClock::default(),
@@ -232,16 +237,7 @@ impl AsyncElement for WasapiSink {
                 fallback,
                 ready_tx,
                 |device| open(device, &format),
-                |render, rx, pending_flushes| {
-                    play(
-                        render,
-                        rx,
-                        pending_flushes,
-                        &rendered,
-                        &clock,
-                        &mut clock_offset,
-                    )
-                },
+                |render, rx, gate| play(render, rx, gate, &rendered, &clock, &mut clock_offset),
             );
         })?;
 
@@ -279,6 +275,7 @@ impl AsyncElement for WasapiSink {
     }
 
     fn set_clock_sync(&mut self, sync: ClockSync) {
+        self.start.set_clock_sync(sync.clone());
         self.playout.set_clock_sync(sync);
     }
 
@@ -316,8 +313,11 @@ impl AsyncElement for WasapiSink {
                         link.send(DeviceCmd::SwitchDevice(device), worker_gone())
                             .await?;
                     }
+                    let caps = self.caps.as_ref().ok_or(G2gError::NotConfigured)?;
                     // a full queue is the endpoint's back-pressure and yields
-                    link.send(DeviceCmd::Samples(frame), worker_gone()).await
+                    self.start
+                        .send(link, frame, PcmGeometry::of(caps)?, worker_gone())
+                        .await
                 }
                 // A mid-stream format change can't be honoured on an open
                 // endpoint; only a caps identical to the configured one passes.
@@ -327,12 +327,18 @@ impl AsyncElement for WasapiSink {
                 }
                 PipelinePacket::Flush => {
                     let link = self.link.as_ref().ok_or(G2gError::NotConfigured)?;
-                    self.pending_flushes.send(link, worker_gone()).await
+                    self.start
+                        .flush(link, &self.pending_flushes, worker_gone())
+                        .await
                 }
-                PipelinePacket::Segment(_) => Ok(()),
+                PipelinePacket::Segment(segment) => {
+                    self.start.set_segment(segment);
+                    Ok(())
+                }
                 PipelinePacket::Eos => {
                     // waits for playout while yielding, so other arms keep running
                     if let Some(link) = self.link.as_mut() {
+                        self.start.send_held(link, worker_gone()).await?;
                         link.finish(DeviceCmd::Shutdown, worker_gone()).await?;
                     }
                     self.link = None;
@@ -384,12 +390,12 @@ fn open(device: &str, format: &WAVEFORMATEX) -> Result<RenderState, G2gError> {
 fn play(
     render: RenderState,
     rx: &Receiver<DeviceCmd>,
-    pending_flushes: &PendingFlushes,
+    gate: &mut PlayoutGate,
     rendered: &AtomicU64,
     clock: &DriftClock,
     clock_offset: &mut DeviceClockOffset,
 ) -> PlayEnd {
-    let end = match run_render_loop(&render, rx, pending_flushes, rendered, clock, clock_offset) {
+    let end = match run_render_loop(&render, rx, gate, rendered, clock, clock_offset) {
         Ok(Some(device)) => PlayEnd::SwitchDevice(device),
         Ok(None) => PlayEnd::Shutdown,
         Err(error) => PlayEnd::Failed(error),
@@ -463,7 +469,7 @@ unsafe fn open_render(device: &str, format: &WAVEFORMATEX) -> Result<RenderState
 fn run_render_loop(
     state: &RenderState,
     rx: &Receiver<DeviceCmd>,
-    pending_flushes: &PendingFlushes,
+    gate: &mut PlayoutGate,
     rendered: &AtomicU64,
     clock: &DriftClock,
     clock_offset: &mut DeviceClockOffset,
@@ -476,19 +482,17 @@ fn run_render_loop(
     let mut drain_deadline: Option<Instant> = None;
 
     let mut take =
-        |cmd: DeviceCmd, queue: &mut VecDeque<u8>, closing: &mut bool| match pending_flushes
-            .admit(cmd)
-        {
+        |cmd: DeviceCmd, queue: &mut VecDeque<u8>, closing: &mut bool| match gate.admit(cmd) {
             None => {}
-            Some(DeviceCmd::Samples(frame)) => {
+            Some(DeviceStep::Samples(frame)) => {
                 queue.extend(frame.domain.as_system_slice().unwrap_or_default());
             }
-            Some(DeviceCmd::Flush) => queue.clear(),
-            Some(DeviceCmd::SwitchDevice(device)) => {
+            Some(DeviceStep::Flush) => queue.clear(),
+            Some(DeviceStep::SwitchDevice(device)) => {
                 switch_to = Some(device);
                 *closing = true;
             }
-            Some(DeviceCmd::Shutdown) => *closing = true,
+            Some(DeviceStep::Shutdown) => *closing = true,
         };
     loop {
         if !closing && queue.len() < queue_limit {

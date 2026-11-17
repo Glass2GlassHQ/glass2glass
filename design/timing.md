@@ -134,6 +134,15 @@ On a `Flush` the ALSA, PulseAudio and WASAPI sinks skip the samples still queued
 for their device thread (`PendingFlushes`, `audiooutput.rs`) and drop what the
 device buffered, so a seek does not first play out the audio from before it.
 
+These sinks also start each stream at its deadline, as GStreamer's audio base sink
+does. `PlayoutStart` holds a preroll buffer while the play anchor is armed but
+unstamped, then sends the first buffer's deadline on the elected clock, base time
+plus running time plus path latency, as a `StartAt` ahead of the samples. The
+device thread's `PlayoutGate` sleeps until it, and drops the leading samples of a
+start more than 5 ms late. Samples before the segment start are clipped first. After
+a start the stream plays at the device rate, so audio and video presented against
+the same base time stay together after a start, a seek or a pause.
+
 Device counters start near zero, while a `DriftClock` passes its reference, the
 process's monotonic time, through until the first observation, and the pipeline
 base time is read in that window. `DeviceClockOffset` adds the difference between

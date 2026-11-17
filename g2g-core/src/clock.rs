@@ -396,6 +396,10 @@ impl ClockSync {
     pub fn play_anchored(&self) -> bool {
         self.play_anchor.as_ref().is_some_and(|a| a.get().is_some())
     }
+
+    pub fn awaits_play_edge(&self) -> bool {
+        self.play_anchor.as_ref().is_some_and(|a| a.get().is_none())
+    }
 }
 
 /// Where a live source's own timeline sits on the elected clock. A capture

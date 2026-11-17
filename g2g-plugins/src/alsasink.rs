@@ -51,7 +51,10 @@ use g2g_core::{
 };
 
 use crate::alsapcm::{alsa_params, device_permutation, permute, PcmConfig, FORMATS};
-use crate::audiooutput::{DeviceCmd, OutputDevice, PendingFlushes, PlayEnd};
+use crate::audiooutput::{
+    DeviceCmd, DeviceStep, OutputDevice, PcmGeometry, PendingFlushes, PlayEnd, PlayoutGate,
+    PlayoutStart,
+};
 use g2g_core::pcm_caps_any_rate_and_channels;
 
 fn alsa_err(code: i32) -> G2gError {
@@ -76,6 +79,7 @@ pub struct AlsaSink {
     /// block it (see [`crate::audioworker`]).
     link: Option<crate::audioworker::WorkerLink<DeviceCmd>>,
     pending_flushes: PendingFlushes,
+    start: PlayoutStart,
     caps: Option<Caps>,
     frames_rendered: Arc<AtomicU64>,
     playout: crate::audioskew::PlayoutClock,
@@ -112,6 +116,7 @@ impl AlsaSink {
             output: OutputDevice::new("device", device),
             link: None,
             pending_flushes: PendingFlushes::default(),
+            start: PlayoutStart::default(),
             caps: None,
             frames_rendered: Arc::new(AtomicU64::new(0)),
             playout: crate::audioskew::PlayoutClock::default(),
@@ -213,17 +218,7 @@ impl AsyncElement for AlsaSink {
                 fallback,
                 ready_tx,
                 |device| open_pcm(device, cfg).map_err(alsa_err),
-                |pcm, rx, pending_flushes| {
-                    play(
-                        pcm,
-                        cfg,
-                        rx,
-                        pending_flushes,
-                        &rendered,
-                        &clock,
-                        &mut clock_offset,
-                    )
-                },
+                |pcm, rx, gate| play(pcm, cfg, rx, gate, &rendered, &clock, &mut clock_offset),
             );
         })?;
 
@@ -250,6 +245,7 @@ impl AsyncElement for AlsaSink {
     }
 
     fn set_clock_sync(&mut self, sync: ClockSync) {
+        self.start.set_clock_sync(sync.clone());
         self.playout.set_clock_sync(sync);
     }
 
@@ -316,14 +312,17 @@ impl AsyncElement for AlsaSink {
                         )
                         .await?;
                     }
+                    let caps = self.caps.as_ref().ok_or(G2gError::NotConfigured)?;
                     // Awaited, not blocking: a full queue is the device's
                     // back-pressure and yields to the executor.
-                    link.send(
-                        DeviceCmd::Samples(frame),
-                        G2gError::Hardware(HardwareError::Alsa(-1)),
-                    )
-                    .await?;
-                    Ok(())
+                    self.start
+                        .send(
+                            link,
+                            frame,
+                            PcmGeometry::of(caps)?,
+                            G2gError::Hardware(HardwareError::Alsa(-1)),
+                        )
+                        .await
                 }
                 // A mid-stream format change can't be honoured on an open
                 // device; only a caps identical to the configured one passes.
@@ -333,16 +332,26 @@ impl AsyncElement for AlsaSink {
                 }
                 PipelinePacket::Flush => {
                     let link = self.link.as_ref().ok_or(G2gError::NotConfigured)?;
-                    self.pending_flushes
-                        .send(link, G2gError::Hardware(HardwareError::Alsa(-1)))
+                    self.start
+                        .flush(
+                            link,
+                            &self.pending_flushes,
+                            G2gError::Hardware(HardwareError::Alsa(-1)),
+                        )
                         .await
                 }
-                PipelinePacket::Segment(_) => Ok(()),
+                PipelinePacket::Segment(segment) => {
+                    self.start.set_segment(segment);
+                    Ok(())
+                }
                 PipelinePacket::Eos => {
                     // Wait for the queued audio to actually play out, yielding
                     // throughout: a blocking join here stalled every other arm
                     // in the pipeline for the length of the sound.
                     if let Some(link) = self.link.as_mut() {
+                        self.start
+                            .send_held(link, G2gError::Hardware(HardwareError::Alsa(-1)))
+                            .await?;
                         link.finish(
                             DeviceCmd::Shutdown,
                             G2gError::Hardware(HardwareError::Alsa(-1)),
@@ -377,7 +386,7 @@ fn play(
     pcm: Pcm,
     cfg: PcmConfig,
     rx: &Receiver<DeviceCmd>,
-    pending_flushes: &PendingFlushes,
+    gate: &mut PlayoutGate,
     rendered: &AtomicU64,
     clock: &DriftClock,
     clock_offset: &mut DeviceClockOffset,
@@ -385,9 +394,9 @@ fn play(
     let perm = device_permutation(&pcm, cfg.channels);
     let mut permuted = Vec::new();
     let end = loop {
-        match rx.recv().map(|cmd| pending_flushes.admit(cmd)) {
+        match rx.recv().map(|cmd| gate.admit(cmd)) {
             Ok(None) => {}
-            Ok(Some(DeviceCmd::Samples(frame))) => {
+            Ok(Some(DeviceStep::Samples(frame))) => {
                 let bytes = match crate::dmabufmap::frame_bytes(&frame, ELEMENT_NAME) {
                     Ok(bytes) => bytes,
                     Err(error) => break PlayEnd::Failed(error),
@@ -407,13 +416,13 @@ fn play(
                 // the drift clock one playout observation.
                 discipline_clock(&pcm, cfg.rate, rendered, clock, clock_offset);
             }
-            Ok(Some(DeviceCmd::Flush)) => {
+            Ok(Some(DeviceStep::Flush)) => {
                 if let Err(error) = pcm.drop_pending().and_then(|()| pcm.prepare()) {
                     return PlayEnd::Failed(alsa_err(error));
                 }
             }
-            Ok(Some(DeviceCmd::SwitchDevice(device))) => break PlayEnd::SwitchDevice(device),
-            Ok(Some(DeviceCmd::Shutdown)) | Err(_) => break PlayEnd::Shutdown,
+            Ok(Some(DeviceStep::SwitchDevice(device))) => break PlayEnd::SwitchDevice(device),
+            Ok(Some(DeviceStep::Shutdown)) | Err(_) => break PlayEnd::Shutdown,
         }
     };
     // Play out whatever is still buffered, then stop.
