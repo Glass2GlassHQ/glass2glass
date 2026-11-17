@@ -402,18 +402,11 @@ fn write_48k_sound() -> std::path::PathBuf {
     path
 }
 
-#[test]
-fn time_pos_follows_the_sound_played_not_the_sound_queued() {
-    let sound = write_48k_sound();
-    let uri = format!(
-        "edl://{CLIP},0,{length};!new_stream;!no_clip;{},0,{length}",
-        sound.display(),
-        length = SOUND_LENGTH.as_secs_f64()
-    );
+fn plays_no_further_than_the_time_since_loading(uri: &str) {
     let player = Player::new();
     let loaded = Instant::now();
     player
-        .load(Media::Uri(&uri), LoadOptions::default())
+        .load(Media::Uri(uri), LoadOptions::default())
         .unwrap();
     while loaded.elapsed() < POSITION_WATCH {
         if let PropertyChange::TimePos(Some(position)) = player.property(Property::TimePos) {
@@ -427,6 +420,23 @@ fn time_pos_follows_the_sound_played_not_the_sound_queued() {
     }
     assert!(time_pos(&player) > Duration::ZERO);
     player.stop();
+}
+
+#[test]
+fn time_pos_follows_the_sound_played_not_the_sound_queued() {
+    let sound = write_48k_sound();
+    let uri = format!(
+        "edl://{CLIP},0,{length};!new_stream;!no_clip;{},0,{length}",
+        sound.display(),
+        length = SOUND_LENGTH.as_secs_f64()
+    );
+    plays_no_further_than_the_time_since_loading(&uri);
+}
+
+#[test]
+fn time_pos_follows_a_sound_file_played_alone() {
+    let sound = write_48k_sound();
+    plays_no_further_than_the_time_since_loading(&format!("file://{}", sound.display()));
 }
 
 // the clip denoised, shrunk to half size and centred on black: dcpwizard's filters

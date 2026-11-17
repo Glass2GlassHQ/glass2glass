@@ -941,8 +941,9 @@ queues ahead of what it has played takes its `SinkPosition` through
 sink answers from its ring buffer: the audio device sinks publish the end of the
 audio handed to the device minus what it has not yet played, once a clock is
 elected, and `fakeaudiosink` holds each buffer until its time on the elected clock
-and publishes it then. `fakeaudiosink` offers no clock, so with nothing else
-elected it consumes as fast as it is fed. Each sink arm writes its own `SinkPosition`, and `position()`
+and publishes it then. `fakeaudiosink` waits on tokio's timer, so it offers a
+clock only to a pipeline running on tokio, and under g2g's `block_on` with nothing
+else elected it consumes as fast as it is fed. Each sink arm writes its own `SinkPosition`, and `position()`
 answers the furthest sink, as a GStreamer bin answers a position query with the
 largest of its sinks. A sink forgets its position on a `Flush`, and while every sink
 is between a flush and its next buffer the last published value stands. A sink

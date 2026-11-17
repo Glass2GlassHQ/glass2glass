@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2391: `fakeaudiosink` plays an audio-only file in real time on a host with no audio device.
 - M2390: an audio sink plays again after a seek past the end of the stream.
 - M2389: an audio sink stops playing out when the pipeline stops while paused.
 - M2388: audio sinks report the position they have played, not the position they have queued.

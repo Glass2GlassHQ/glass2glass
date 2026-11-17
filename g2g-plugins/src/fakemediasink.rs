@@ -30,7 +30,7 @@ use g2g_core::{
 #[cfg(feature = "std")]
 use g2g_core::progress::SinkPosition;
 #[cfg(feature = "std")]
-use g2g_core::{ClockSync, PresentationPacer};
+use g2g_core::{ClockCandidate, ClockPriority, ClockSync, MonotonicClock, PresentationPacer};
 
 use crate::audioconvert::RAW_AUDIO_FORMATS;
 use crate::fakesink::FakeSink;
@@ -113,6 +113,17 @@ impl CountingFake {
     #[cfg(not(feature = "std"))]
     fn paced() -> Self {
         Self::new()
+    }
+
+    #[cfg(feature = "std")]
+    fn provide_clock(&self) -> Option<ClockCandidate> {
+        self.playout.as_ref()?;
+        // the wait for each buffer is on tokio's timer, which a pipeline run by g2g's block_on lacks
+        tokio::runtime::Handle::try_current().ok()?;
+        Some(ClockCandidate::new(
+            ClockPriority::Provider,
+            alloc::sync::Arc::new(MonotonicClock),
+        ))
     }
 
     #[cfg(feature = "std")]
@@ -296,6 +307,11 @@ macro_rules! fake_media_sink {
                     self.fake.play(&packet).await;
                     AsyncElement::process(&mut self.fake.inner, packet, out).await
                 })
+            }
+
+            #[cfg(feature = "std")]
+            fn provide_clock(&self) -> Option<ClockCandidate> {
+                self.fake.provide_clock()
             }
 
             #[cfg(feature = "std")]
