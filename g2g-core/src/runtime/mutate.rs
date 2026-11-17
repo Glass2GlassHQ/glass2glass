@@ -38,6 +38,7 @@ use crate::error::G2gError;
 use crate::graph::NodeId;
 use crate::link::LinkPolicy;
 use crate::log::ElementLogName;
+use crate::progress::PipelineProgress;
 use crate::property::PropValue;
 use crate::runtime::channel::{
     advertise_orientation, bounded, link, LinkReceiver, LinkSender, ProducerEndpoint, Receiver,
@@ -51,7 +52,6 @@ use crate::runtime::graph_runner::{
 use crate::runtime::instrument::{ElementProbe, VisitRecorder};
 use crate::runtime::join::{select2, Either};
 use crate::runtime::mutation_error::{MutationError, MutationKind};
-use crate::runtime::progress::PipelineProgress;
 use crate::runtime::property_mailbox::{PropertyMailbox, PropertyRequest};
 use crate::runtime::run_end::RunEndRequest;
 use crate::runtime::runner::re_solve_downstream_dyn_sink;

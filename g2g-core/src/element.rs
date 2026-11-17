@@ -14,6 +14,7 @@ use crate::format_element::{CapsConstraint, CapsPreferences};
 use crate::frame::PipelinePacket;
 use crate::memory::{DomainSet, GpuDevice, MemoryDomainKind};
 use crate::meta::OrientationSet;
+use crate::progress::SinkPosition;
 use crate::property::{ElementMetadata, PropError, PropValue, PropertySpec};
 use crate::query::{AllocationParams, LatencyReport};
 
@@ -344,6 +345,10 @@ pub trait AsyncElement: ElementBound {
     /// elected. Default: ignore (present as fast as backpressure allows, the
     /// pre-sync behaviour). See [`ClockSync`].
     fn set_clock_sync(&mut self, _sync: ClockSync) {}
+
+    fn adopt_position(&mut self, position: SinkPosition) -> Option<SinkPosition> {
+        Some(position)
+    }
 
     /// Take any QoS signal this element wants to send upstream, consuming it. A
     /// synchronising sink that dropped a late frame, or presented one with its
@@ -738,6 +743,10 @@ pub trait DynAsyncElement: ElementBound {
     /// receives the elected clock + base time. Defaults to ignore.
     fn set_clock_sync(&mut self, _sync: ClockSync) {}
 
+    fn adopt_position(&mut self, position: SinkPosition) -> Option<SinkPosition> {
+        Some(position)
+    }
+
     /// Dyn-safe mirror of [`AsyncElement::take_qos`], so an erased sink can send
     /// a QoS signal upstream. Defaults to nothing.
     fn take_qos(&mut self) -> Option<QosMessage> {
@@ -997,6 +1006,10 @@ impl<T: AsyncElement> DynAsyncElement for T {
         AsyncElement::set_clock_sync(self, sync)
     }
 
+    fn adopt_position(&mut self, position: SinkPosition) -> Option<SinkPosition> {
+        AsyncElement::adopt_position(self, position)
+    }
+
     fn take_qos(&mut self) -> Option<QosMessage> {
         AsyncElement::take_qos(self)
     }
@@ -1231,6 +1244,10 @@ impl<'b> DynAsyncElement for &'b mut (dyn DynAsyncElement + 'b) {
 
     fn set_clock_sync(&mut self, sync: ClockSync) {
         (**self).set_clock_sync(sync)
+    }
+
+    fn adopt_position(&mut self, position: SinkPosition) -> Option<SinkPosition> {
+        (**self).adopt_position(position)
     }
 
     fn take_qos(&mut self) -> Option<QosMessage> {

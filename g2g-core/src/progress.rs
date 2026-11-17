@@ -11,9 +11,11 @@
 //! or demuxer answers duration. g2g composes paths statically and pushes
 //! forward, so rather than a query object travelling upstream, the runner
 //! *publishes* into a shared handle the application holds. The sink arm publishes
-//! the stream-time position of each buffer it consumes; the source arm publishes
-//! the duration its source reports ([`SourceLoop::query_duration`]). The app
-//! polls [`position`](PipelineProgress::position) /
+//! the stream-time position of each buffer it consumes, unless the sink adopts
+//! its [`SinkPosition`] to publish what it has played; the source arm publishes
+//! the duration its source reports
+//! ([`SourceLoop::query_duration`](crate::runtime::SourceLoop::query_duration)).
+//! The app polls [`position`](PipelineProgress::position) /
 //! [`duration`](PipelineProgress::duration) between draws (a seek bar, a progress
 //! readout). This mirrors the [`SeekController`](crate::runtime::SeekController)
 //! handle (the app holds it, the source reads it), inverted: here the runner
@@ -24,6 +26,8 @@ use alloc::vec::Vec;
 use core::sync::atomic::Ordering;
 
 use portable_atomic::AtomicU64;
+
+use crate::segment::Segment;
 use spin::Mutex;
 
 /// Sentinel for an unknown position: `0` is a valid position (stream start), so
@@ -55,6 +59,14 @@ impl SinkPosition {
         self.progress
             .latest_position_ns
             .store(ns, Ordering::Relaxed);
+    }
+
+    pub fn set_at_pts(&self, segment: Option<&Segment>, pts_ns: u64) {
+        // a pts outside its segment, or before any segment, stands for its own stream time
+        let stream_ns = segment
+            .and_then(|segment| segment.to_stream_time(pts_ns))
+            .unwrap_or(pts_ns);
+        self.set(stream_ns);
     }
 
     pub fn forget(&self) {

@@ -16,12 +16,12 @@ use crate::clock::{DynAsyncClock, PipelineClock};
 use crate::copyplan::CopyPolicy;
 use crate::error::G2gError;
 use crate::graph::Graph;
+use crate::progress::PipelineProgress;
 use crate::runtime::channel::Receiver;
 use crate::runtime::graph_runner::{run_graph_inner, GraphNodeRef, MUTATION_QUEUE_DEPTH};
 #[cfg(feature = "multi-thread")]
 use crate::runtime::graph_runner::{run_graph_threaded_inner, GraphSpawner};
 use crate::runtime::mutate::{mutation_channel, GraphMutator, MutationRequest};
-use crate::runtime::progress::PipelineProgress;
 use crate::runtime::runner::{LinkCapacity, RunStats};
 use crate::runtime::state::StateController;
 use crate::runtime::{FlightRecorder, Observer, SeekController, VisitRecorder};

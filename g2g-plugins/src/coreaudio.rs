@@ -697,6 +697,13 @@ impl AsyncElement for CoreAudioSink {
         self.playout.set_clock_sync(sync);
     }
 
+    fn adopt_position(
+        &mut self,
+        position: g2g_core::progress::SinkPosition,
+    ) -> Option<g2g_core::progress::SinkPosition> {
+        self.link.adopt_position(position)
+    }
+
     fn set_bus(&mut self, bus: g2g_core::bus::BusHandle) {
         self.output.set_bus(bus);
     }

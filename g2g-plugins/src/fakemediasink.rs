@@ -27,6 +27,11 @@ use g2g_core::{
     PropKind, PropValue, PropertySpec, Rate,
 };
 
+#[cfg(feature = "std")]
+use g2g_core::progress::SinkPosition;
+#[cfg(feature = "std")]
+use g2g_core::{ClockSync, PresentationPacer};
+
 use crate::audioconvert::RAW_AUDIO_FORMATS;
 use crate::fakesink::FakeSink;
 
@@ -76,6 +81,16 @@ struct CountingFake {
     silent: bool,
     last_message: String,
     log_name: LogName,
+    #[cfg(feature = "std")]
+    playout: Option<FakePlayout>,
+}
+
+// gst's fakeaudiosink holds each buffer until its time, as the device it stands in for does
+#[cfg(feature = "std")]
+#[derive(Debug, Default)]
+struct FakePlayout {
+    pacer: PresentationPacer,
+    position: Option<SinkPosition>,
 }
 
 impl CountingFake {
@@ -84,6 +99,62 @@ impl CountingFake {
         Self {
             silent: true,
             ..Self::default()
+        }
+    }
+
+    #[cfg(feature = "std")]
+    fn paced() -> Self {
+        Self {
+            playout: Some(FakePlayout::default()),
+            ..Self::new()
+        }
+    }
+
+    #[cfg(not(feature = "std"))]
+    fn paced() -> Self {
+        Self::new()
+    }
+
+    #[cfg(feature = "std")]
+    fn set_clock_sync(&mut self, sync: ClockSync) {
+        if let Some(playout) = &mut self.playout {
+            playout.pacer.set_clock_sync(sync);
+        }
+    }
+
+    #[cfg(feature = "std")]
+    fn adopt_position(&mut self, position: SinkPosition) -> Option<SinkPosition> {
+        match &mut self.playout {
+            Some(playout) if playout.pacer.is_paced() => {
+                playout.position = Some(position);
+                None
+            }
+            _ => Some(position),
+        }
+    }
+
+    #[cfg(feature = "std")]
+    async fn play(&mut self, packet: &PipelinePacket) {
+        let received = self.inner.received();
+        let Some(playout) = &mut self.playout else {
+            return;
+        };
+        match packet {
+            PipelinePacket::Segment(segment) => playout.pacer.set_segment(*segment),
+            PipelinePacket::Flush => {
+                playout.pacer.flush();
+                if let Some(position) = &playout.position {
+                    position.forget();
+                }
+            }
+            PipelinePacket::DataFrame(frame) => {
+                let pts_ns = frame.timing.pts_ns;
+                crate::clock::wait_to_present(playout.pacer.judge(pts_ns, received)).await;
+                if let Some(position) = &playout.position {
+                    position.set_at_pts(playout.pacer.segment().as_ref(), pts_ns);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -150,7 +221,7 @@ static FAKE_MEDIA_PROPS: &[PropertySpec] = &[
 /// Both sinks do the same thing with a packet, differing only in what they
 /// accept, so the element bodies are this one macro.
 macro_rules! fake_media_sink {
-    ($name:ident, $accepts:path, $caps:path, $classification:expr, $description:expr) => {
+    ($name:ident, $fake:path, $accepts:path, $caps:path, $classification:expr, $description:expr) => {
         impl Default for $name {
             fn default() -> Self {
                 Self::new()
@@ -159,9 +230,7 @@ macro_rules! fake_media_sink {
 
         impl $name {
             pub fn new() -> Self {
-                Self {
-                    fake: CountingFake::new(),
-                }
+                Self { fake: $fake() }
             }
 
             /// Buffers received so far.
@@ -223,8 +292,20 @@ macro_rules! fake_media_sink {
             ) -> Self::ProcessFuture<'a> {
                 Box::pin(async move {
                     self.fake.note(&packet);
+                    #[cfg(feature = "std")]
+                    self.fake.play(&packet).await;
                     AsyncElement::process(&mut self.fake.inner, packet, out).await
                 })
+            }
+
+            #[cfg(feature = "std")]
+            fn set_clock_sync(&mut self, sync: ClockSync) {
+                self.fake.set_clock_sync(sync)
+            }
+
+            #[cfg(feature = "std")]
+            fn adopt_position(&mut self, position: SinkPosition) -> Option<SinkPosition> {
+                self.fake.adopt_position(position)
             }
 
             fn properties(&self) -> &'static [PropertySpec] {
@@ -290,6 +371,7 @@ fn is_raw_audio(caps: &Caps) -> bool {
 
 fake_media_sink!(
     FakeVideoSink,
+    CountingFake::new,
     is_raw_video,
     raw_video_caps,
     "Sink/Video",
@@ -297,6 +379,7 @@ fake_media_sink!(
 );
 fake_media_sink!(
     FakeAudioSink,
+    CountingFake::paced,
     is_raw_audio,
     raw_audio_caps,
     "Sink/Audio",

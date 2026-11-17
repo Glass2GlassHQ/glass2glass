@@ -232,6 +232,13 @@ impl AsyncElement for WasapiSink {
         self.playout.set_clock_sync(sync);
     }
 
+    fn adopt_position(
+        &mut self,
+        position: g2g_core::progress::SinkPosition,
+    ) -> Option<g2g_core::progress::SinkPosition> {
+        self.link.adopt_position(position)
+    }
+
     fn properties(&self) -> &'static [PropertySpec] {
         WASAPISINK_PROPS
     }
@@ -428,6 +435,7 @@ fn run_render_loop(
     loop {
         let queued_frames = (queue.len() / state.block_align) as u64;
         let queued_ns = crate::audioconvert::samples_to_ns(queued_frames, state.rate);
+        gate.publish_played_position(&WasapiPause { state }, queued_ns)?;
         gate.pause_or_resync(rx, &mut WasapiPause { state }, queued_ns)?;
         if !closing && queue.len() < queue_limit {
             match gate.recv_timeout(rx, TOPUP_INTERVAL) {

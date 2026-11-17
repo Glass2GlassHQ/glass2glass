@@ -78,6 +78,7 @@ use crate::graph::{FanOutPolicy, Graph, NodeId, NodeKind, ValidatedGraph};
 use crate::log::ElementLogName;
 use crate::memory::{DomainSet, GpuDevice, MemoryDomainKind};
 use crate::meta::MetaRequests;
+use crate::progress::PipelineProgress;
 use crate::property::{ElementMetadata, PropError, PropValue, PropertySpec};
 use crate::query::{with_meta_demand, AllocationParams, LatencyReport};
 use crate::runtime::channel::{
@@ -97,7 +98,6 @@ use crate::runtime::mutate::{
     LiveEdge, LiveNode, LiveTopology, MutationRequest, MutationService, MutationSpawn, PadAdd,
 };
 use crate::runtime::packet_log::log_received;
-use crate::runtime::progress::PipelineProgress;
 use crate::runtime::property_mailbox::{drain_properties, PropertyMailbox};
 use crate::runtime::run_end::RunEndRequest;
 use crate::runtime::runner::{
@@ -5360,7 +5360,10 @@ async fn sink_arm_loop<E: AsyncElement>(elem: &mut E, io: SinkArmIo) -> Result<u
     let mut last_buffer_bucket: Option<u8> = None;
     // M203: the segment in force, so a buffer's PTS maps to stream-time position.
     let mut current_segment: Option<Segment> = None;
-    let sink_position = progress.as_ref().map(PipelineProgress::sink_position);
+    let sink_position = progress
+        .as_ref()
+        .map(PipelineProgress::sink_position)
+        .and_then(|position| elem.adopt_position(position));
     // M360 re-preroll: generation this arm last prerolled at, and whether it is
     // draining stale pre-seek frames (paused flushing seek) until the `Flush`.
     let mut preroll_gen = state.as_ref().map_or(0, |sc| sc.preroll_generation());
@@ -5541,12 +5544,7 @@ async fn sink_arm_loop<E: AsyncElement>(elem: &mut E, io: SinkArmIo) -> Result<u
                     PipelinePacket::Segment(seg) => current_segment = Some(*seg),
                     PipelinePacket::DataFrame(frame) => {
                         if let Some(position) = &sink_position {
-                            let pts = frame.timing.pts_ns;
-                            let pos = current_segment
-                                .as_ref()
-                                .and_then(|s| s.to_stream_time(pts))
-                                .unwrap_or(pts);
-                            position.set(pos);
+                            position.set_at_pts(current_segment.as_ref(), frame.timing.pts_ns);
                         }
                     }
                     _ => {}

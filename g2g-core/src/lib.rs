@@ -155,6 +155,9 @@ pub mod fanout;
 #[cfg(feature = "runtime")]
 pub mod controller;
 
+#[cfg(feature = "alloc")]
+pub mod progress;
+
 #[cfg(feature = "runtime")]
 pub mod runtime;
 

@@ -935,8 +935,14 @@ pending seek and the source reads it, and here the runner writes and the app rea
 
 Position is published by the DAG runner's sink arm, mapping each consumed buffer's
 PTS through the active segment to stream time, the sink being the position authority
-exactly as a GStreamer sink answers from its segment plus last buffer, so it needs
-no element cooperation. Each sink arm writes its own `SinkPosition`, and `position()`
+exactly as a GStreamer sink answers from its segment plus last buffer. A sink that
+queues ahead of what it has played takes its `SinkPosition` through
+`adopt_position` and publishes the sample playing now instead, as a GStreamer audio
+sink answers from its ring buffer: the audio device sinks publish the end of the
+audio handed to the device minus what it has not yet played, once a clock is
+elected, and `fakeaudiosink` holds each buffer until its time on the elected clock
+and publishes it then. `fakeaudiosink` offers no clock, so with nothing else
+elected it consumes as fast as it is fed. Each sink arm writes its own `SinkPosition`, and `position()`
 answers the furthest sink, as a GStreamer bin answers a position query with the
 largest of its sinks. A sink forgets its position on a `Flush`, and while every sink
 is between a flush and its next buffer the last published value stands. A sink

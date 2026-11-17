@@ -12,6 +12,7 @@ use g2g_player::{
     OverlayRectangle, Player, Property, PropertyChange, SubtitleSlot, VideoSize, WgpuRenderContext,
 };
 use g2g_plugins::gpu::{read_texture_plane, whole_texture, GpuContext};
+use g2g_plugins::launched::LaunchedPipeline;
 
 const CLIP: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -377,6 +378,55 @@ fn an_edl_timeline_plays_its_cuts_and_its_sound_stream() {
     wait_until(|| time_pos(&player) >= FIRST_CUT_LENGTH);
     player.stop();
     events.wait_for(&Event::EndFile(EndFile::Stop));
+}
+
+const SOUND_LENGTH: Duration = Duration::from_secs(1);
+// audiotestsrc emits ten millisecond buffers
+const TEST_TONE_BUFFER: Duration = Duration::from_millis(10);
+const POSITION_WATCH: Duration = Duration::from_millis(600);
+// the video sink sets its position as a frame arrives, before holding it until its time
+const POSITION_LEAD: Duration = CLIP_FRAME_PERIOD.saturating_mul(2);
+
+fn write_48k_sound() -> std::path::PathBuf {
+    // wavparse reads a 48 kHz file in buffers of about a third of a second, which a sink queues ahead of playout
+    let path = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("m2346_48k.wav");
+    let buffers = SOUND_LENGTH.as_millis() / TEST_TONE_BUFFER.as_millis();
+    let line = format!(
+        "audiotestsrc wave=silence samplerate=48000 channels=2 num-buffers={buffers} ! wavenc ! filesink location={}",
+        path.display()
+    );
+    LaunchedPipeline::launch(&line, "m2346-sound")
+        .unwrap()
+        .wait()
+        .unwrap();
+    path
+}
+
+#[test]
+fn time_pos_follows_the_sound_played_not_the_sound_queued() {
+    let sound = write_48k_sound();
+    let uri = format!(
+        "edl://{CLIP},0,{length};!new_stream;!no_clip;{},0,{length}",
+        sound.display(),
+        length = SOUND_LENGTH.as_secs_f64()
+    );
+    let player = Player::new();
+    let loaded = Instant::now();
+    player
+        .load(Media::Uri(&uri), LoadOptions::default())
+        .unwrap();
+    while loaded.elapsed() < POSITION_WATCH {
+        if let PropertyChange::TimePos(Some(position)) = player.property(Property::TimePos) {
+            assert!(
+                position <= loaded.elapsed() + POSITION_LEAD,
+                "time-pos {position:?} {:?} after the load",
+                loaded.elapsed()
+            );
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(time_pos(&player) > Duration::ZERO);
+    player.stop();
 }
 
 // the clip denoised, shrunk to half size and centred on black: dcpwizard's filters

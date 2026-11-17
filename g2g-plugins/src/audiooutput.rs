@@ -103,7 +103,7 @@ mod device_worker {
     use std::collections::VecDeque;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::mpsc::{self, Receiver, RecvError, RecvTimeoutError, SyncSender};
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
     use std::thread;
     use std::time::{Duration, Instant};
 
@@ -113,6 +113,7 @@ mod device_worker {
     use g2g_core::bus::BusHandle;
     use g2g_core::frame::Frame;
     use g2g_core::memory::{MemoryDomain, SystemSlice};
+    use g2g_core::progress::SinkPosition;
     use g2g_core::{AudioFormat, Caps, ClockSync, G2gError, PresentationPacer, Segment};
 
     use super::{report_on, OutputDevice};
@@ -139,6 +140,7 @@ mod device_worker {
         deadline_ns: u64,
         paused_total_ns: u64,
         sync: ClockSync,
+        segment: Option<Segment>,
         geometry: PcmGeometry,
     }
 
@@ -346,6 +348,7 @@ mod device_worker {
                 deadline_ns,
                 paused_total_ns: sync.paused_total_ns(),
                 sync,
+                segment: self.pacer.segment(),
                 geometry,
             }));
             cmds.extend(held);
@@ -355,6 +358,28 @@ mod device_worker {
         fn take_held(&mut self) -> Vec<DeviceCmd> {
             self.started = true;
             self.held.drain(..).map(DeviceCmd::Samples).collect()
+        }
+    }
+
+    // the stream time of the sample the device plays now, once the sink has adopted the pipeline's position handle
+    #[derive(Debug, Clone, Default)]
+    pub(crate) struct PlayedPosition(Arc<Mutex<Option<SinkPosition>>>);
+
+    impl PlayedPosition {
+        fn adopt(&self, position: SinkPosition) {
+            *self.0.lock().expect("played position lock") = Some(position);
+        }
+
+        fn set_at_pts(&self, segment: Option<&Segment>, pts_ns: u64) {
+            if let Some(position) = &*self.0.lock().expect("played position lock") {
+                position.set_at_pts(segment, pts_ns);
+            }
+        }
+
+        fn forget(&self) {
+            if let Some(position) = &*self.0.lock().expect("played position lock") {
+                position.forget();
+            }
         }
     }
 
@@ -382,6 +407,7 @@ mod device_worker {
     pub(crate) struct PlayoutLink {
         worker: Option<RunningWorker>,
         pending_flushes: PendingFlushes,
+        played_position: PlayedPosition,
         start: PlayoutStart,
         worker_error: G2gError,
     }
@@ -399,6 +425,7 @@ mod device_worker {
             Self {
                 worker: None,
                 pending_flushes: PendingFlushes::default(),
+                played_position: PlayedPosition::default(),
                 start: PlayoutStart::default(),
                 worker_error,
             }
@@ -418,6 +445,15 @@ mod device_worker {
             self.start.set_segment(segment);
         }
 
+        // without a clock the worker never learns when a sample plays
+        pub(crate) fn adopt_position(&mut self, position: SinkPosition) -> Option<SinkPosition> {
+            if !self.start.pacer.is_paced() {
+                return Some(position);
+            }
+            self.played_position.adopt(position);
+            None
+        }
+
         pub(crate) fn open<Device>(
             &mut self,
             thread_name: &str,
@@ -432,9 +468,9 @@ mod device_worker {
             let (ready_tx, ready_rx) = mpsc::sync_channel(1);
             let device = String::from(output.name());
             self.pending_flushes = PendingFlushes::default();
-            let pending_flushes = self.pending_flushes.clone();
+            let gate = PlayoutGate::new(self.pending_flushes.clone(), self.played_position.clone());
             let link = WorkerLink::spawn(thread_name, move |rx| {
-                run_device_worker(device, rx, pending_flushes, fallback, ready_tx, open, play);
+                run_device_worker(device, rx, gate, fallback, ready_tx, open, play);
             })?;
             // a host with no audio device fails here instead of dropping audio
             match ready_rx.recv_timeout(DEVICE_OPEN_TIMEOUT) {
@@ -465,6 +501,7 @@ mod device_worker {
 
         pub(crate) async fn flush(&mut self) -> Result<(), G2gError> {
             let worker = self.worker.as_ref().ok_or(G2gError::NotConfigured)?;
+            self.played_position.forget();
             let error = self.worker_error.clone();
             self.start
                 .flush(&worker.link, &self.pending_flushes, error)
@@ -507,6 +544,7 @@ mod device_worker {
         // clock time minus pts of audio that plays on time
         offset_ns: i128,
         paused_total_ns: u64,
+        segment: Option<Segment>,
         geometry: PcmGeometry,
     }
 
@@ -518,6 +556,7 @@ mod device_worker {
 
     pub(crate) struct PlayoutGate {
         pending_flushes: PendingFlushes,
+        played_position: PlayedPosition,
         start: Option<StartAt>,
         sync: Option<ClockSync>,
         timeline: Option<Timeline>,
@@ -531,9 +570,13 @@ mod device_worker {
     }
 
     impl PlayoutGate {
-        fn new(pending_flushes: PendingFlushes) -> Self {
+        pub(crate) fn new(
+            pending_flushes: PendingFlushes,
+            played_position: PlayedPosition,
+        ) -> Self {
             Self {
                 pending_flushes,
+                played_position,
                 start: None,
                 sync: None,
                 timeline: None,
@@ -586,7 +629,9 @@ mod device_worker {
         ) -> Result<(), G2gError> {
             let mut unwritten = pcm.len();
             for slice in geometry.pause_check_slices(pcm) {
-                self.pause_or_resync(rx, device, geometry.bytes_to_ns(unwritten))?;
+                let unwritten_ns = geometry.bytes_to_ns(unwritten);
+                self.publish_played_position(device, unwritten_ns)?;
+                self.pause_or_resync(rx, device, unwritten_ns)?;
                 if self.discards_queued_audio() {
                     break;
                 }
@@ -649,13 +694,40 @@ mod device_worker {
                 return Ok(());
             }
             self.resync_at_ns = None;
-            let not_yet_played_ns = unwritten_ns + device.delay_ns()?;
-            let playing_pts_ns =
-                i128::from(self.handed_out_end_pts_ns) - i128::from(not_yet_played_ns);
+            let playing_pts_ns = self.playing_pts_ns(device, unwritten_ns)?;
             let late_ns = i128::from(now_ns) - playing_pts_ns - timeline.offset_now_ns(sync);
             if late_ns.abs() > RESYNC_TOLERANCE_NS {
                 self.correction_ns = late_ns;
             }
+            Ok(())
+        }
+
+        fn playing_pts_ns(
+            &self,
+            device: &impl PausableDevice,
+            unwritten_ns: u64,
+        ) -> Result<i128, G2gError> {
+            let not_yet_played_ns = unwritten_ns + device.delay_ns()?;
+            Ok(i128::from(self.handed_out_end_pts_ns) - i128::from(not_yet_played_ns))
+        }
+
+        pub(crate) fn publish_played_position(
+            &self,
+            device: &impl PausableDevice,
+            unwritten_ns: u64,
+        ) -> Result<(), G2gError> {
+            let Some(timeline) = self.timeline else {
+                return Ok(());
+            };
+            if self.discards_queued_audio() {
+                return Ok(());
+            }
+            let Ok(playing_pts_ns) = u64::try_from(self.playing_pts_ns(device, unwritten_ns)?)
+            else {
+                return Ok(());
+            };
+            self.played_position
+                .set_at_pts(timeline.segment.as_ref(), playing_pts_ns);
             Ok(())
         }
 
@@ -730,6 +802,7 @@ mod device_worker {
             self.timeline = Some(Timeline {
                 offset_ns: i128::from(start.deadline_ns) - i128::from(frame.timing.pts_ns),
                 paused_total_ns: start.paused_total_ns,
+                segment: start.segment,
                 geometry: start.geometry,
             });
             self.resync_at_ns = Some(now_ns + RESYNC_SETTLE_NS);
@@ -829,13 +902,12 @@ mod device_worker {
     pub(crate) fn run_device_worker<Device>(
         first_device: String,
         rx: Receiver<DeviceCmd>,
-        pending_flushes: PendingFlushes,
+        mut gate: PlayoutGate,
         fallback: DeviceFallback,
         ready: SyncSender<Result<(), G2gError>>,
         mut open: impl FnMut(&str) -> Result<Device, G2gError>,
         mut play: impl FnMut(Device, &Receiver<DeviceCmd>, &mut PlayoutGate) -> PlayEnd,
     ) {
-        let mut gate = PlayoutGate::new(pending_flushes);
         let mut ready = Some(ready);
         let mut device = first_device;
         loop {
@@ -888,6 +960,8 @@ mod device_worker {
                     let unconsumed_ns = (u128::from(bytes) * 1_000_000_000
                         / u128::from(fallback.bytes_per_second))
                         as u64;
+                    gate.publish_played_position(&NoDevice, unconsumed_ns)
+                        .ok()?;
                     if gate
                         .pause_or_resync(rx, &mut NoDevice, unconsumed_ns)
                         .ok()?
@@ -965,7 +1039,7 @@ mod tests {
             run_device_worker(
                 first,
                 rx,
-                PendingFlushes::default(),
+                PlayoutGate::new(PendingFlushes::default(), PlayedPosition::default()),
                 fallback,
                 ready_tx,
                 |device| match device.starts_with("missing") {
@@ -1037,7 +1111,7 @@ mod tests {
             run_device_worker(
                 String::from("first"),
                 rx,
-                pending_flushes,
+                PlayoutGate::new(pending_flushes, PlayedPosition::default()),
                 fallback,
                 ready_tx,
                 |device| {
@@ -1076,14 +1150,17 @@ mod tests {
     const STEREO_S16_RATE: u32 = 48_000;
     const STEREO_S16_BYTES_PER_FRAME: usize = 4;
 
-    fn stereo_s16() -> PcmGeometry {
-        PcmGeometry::of(&g2g_core::Caps::Audio {
+    fn stereo_s16_caps() -> g2g_core::Caps {
+        g2g_core::Caps::Audio {
             format: g2g_core::AudioFormat::PcmS16Le,
             channels: 2,
             sample_rate: STEREO_S16_RATE,
             channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
-        })
-        .unwrap()
+        }
+    }
+
+    fn stereo_s16() -> PcmGeometry {
+        PcmGeometry::of(&stereo_s16_caps()).unwrap()
     }
 
     fn err() -> G2gError {
@@ -1312,7 +1389,7 @@ mod tests {
             run_device_worker(
                 String::from("first"),
                 rx,
-                PendingFlushes::default(),
+                PlayoutGate::new(PendingFlushes::default(), PlayedPosition::default()),
                 fallback,
                 ready_tx,
                 |_| Ok(()),
@@ -1482,6 +1559,91 @@ mod tests {
                 len: BUFFER_BYTES - late_bytes
             }
         );
+    }
+
+    // the device boundary: reports a fixed amount still to play and plays nothing
+    struct DelayedDevice {
+        delay_ns: u64,
+    }
+
+    impl PausableDevice for DelayedDevice {
+        fn pause(&mut self) -> Result<(), G2gError> {
+            Ok(())
+        }
+
+        fn resume(&mut self) -> Result<(), G2gError> {
+            Ok(())
+        }
+
+        fn still_playing_after_pause_ns(&self) -> Result<u64, G2gError> {
+            Ok(0)
+        }
+
+        fn delay_ns(&self) -> Result<u64, G2gError> {
+            Ok(self.delay_ns)
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn an_adopted_position_is_the_sample_the_device_plays_now() {
+        const BASE_NS: u64 = 1_000_000_000;
+        // ten milliseconds, inside one of the slices a pause is checked between
+        const BUFFER_BYTES: usize = 1_920;
+        const DEVICE_DELAY_NS: u64 = 4_000_000;
+        let manual = crate::testutil::ManualClock::default();
+        manual.set(BASE_NS);
+        let anchor = g2g_core::clock::PlayAnchor::new();
+        anchor.stamp(BASE_NS);
+        let mut link = PlayoutLink::new(err());
+        link.set_clock_sync(g2g_core::ClockSync::with_play_anchor(
+            Arc::new(crate::testutil::ManualClock(Arc::clone(&manual.0))),
+            0,
+            anchor.clone(),
+        ));
+        link.set_segment(g2g_core::Segment::new());
+        let progress = g2g_core::progress::PipelineProgress::new();
+        assert!(link.adopt_position(progress.sink_position()).is_none());
+        let mut output = OutputDevice::new("device", "first");
+        let fallback = output.fallback(BYTES_PER_SECOND, Arc::default(), 1, |frame| {
+            frame.domain.as_system_slice().map(<[u8]>::len)
+        });
+        let geometry = stereo_s16();
+        link.open(
+            "test-audio",
+            &stereo_s16_caps(),
+            &mut output,
+            fallback,
+            |_| {
+                Ok(DelayedDevice {
+                    delay_ns: DEVICE_DELAY_NS,
+                })
+            },
+            move |mut device, rx, gate| loop {
+                match gate.recv(rx) {
+                    Ok(Some(DeviceStep::Samples(frame))) => {
+                        let pcm = frame.domain.as_system_slice().unwrap().to_vec();
+                        gate.play_in_slices(rx, &pcm, geometry, &mut device, |_, _| Ok(()))
+                            .unwrap();
+                    }
+                    Ok(None | Some(DeviceStep::Flush)) => {}
+                    Ok(Some(DeviceStep::SwitchDevice(next))) => return PlayEnd::SwitchDevice(next),
+                    Ok(Some(DeviceStep::Shutdown)) | Err(_) => return PlayEnd::Shutdown,
+                }
+            },
+        )
+        .unwrap();
+        let buffer = buffer_ns(BUFFER_BYTES);
+        g2g_core::runtime::block_on(async {
+            for pts_ns in [0, buffer] {
+                let frame = pcm_frame(pts_ns, BUFFER_BYTES);
+                link.send(frame, &mut output).await.unwrap();
+            }
+            link.finish().await.unwrap();
+        });
+
+        // before the second buffer is written, the device holds the delay and the second buffer is still to come
+        assert_eq!(progress.position(), Some(buffer - DEVICE_DELAY_NS));
     }
 
     #[test]

@@ -23,7 +23,6 @@ mod flight_recorder;
 mod instrument;
 mod join;
 mod passthrough;
-mod progress;
 mod runner;
 mod seek;
 pub mod solver;
@@ -77,6 +76,7 @@ mod observe;
 #[cfg(feature = "std")]
 mod unblock;
 
+pub use crate::progress::{PipelineProgress, SinkPosition};
 pub use autoplug::{
     find_chain, find_chain_preferring, find_chain_with, is_raw_audio, is_raw_video, Acceleration,
     CapabilityDescriptor, ChainLink, DomainTransferCost, ElementDesc, EncoderChoice,
@@ -94,7 +94,6 @@ pub use instrument::{
     VisitRecorder,
 };
 pub use join::{join_all, select2, Either, Join2, JoinAll, Select2};
-pub use progress::{PipelineProgress, SinkPosition};
 pub use runner::{LatencyProfile, LinkCapacity, RunStats, SourceLoop};
 #[cfg(feature = "std")]
 pub use seek::{attach_seek, attach_seek_controller, AttachSeekError};
