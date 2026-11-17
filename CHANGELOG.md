@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2387: `autoaudiosink` passes over an ALSA device that does not open.
 - M2386: a single-stream `playbin` plays an audio-only file on its audio sink.
 - M2385: `g2g-player` draws subtitle files in a bottom and a top slot, at display size.
 - M2384: `g2g-player` reports `audio-params`, the decoded rate and speaker layout.

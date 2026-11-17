@@ -60,6 +60,7 @@ fn alsa_err(code: i32) -> G2gError {
 }
 
 const ELEMENT_NAME: &str = "AlsaSink";
+const DEFAULT_DEVICE: &str = "default";
 
 /// # Example
 ///
@@ -103,7 +104,7 @@ impl Default for AlsaSink {
 impl AlsaSink {
     /// Render to the ALSA `default` device.
     pub fn new() -> Self {
-        Self::with_device("default")
+        Self::with_device(DEFAULT_DEVICE)
     }
 
     /// Render to a named ALSA PCM device (e.g. `hw:0,0`, `plughw:1`).
@@ -225,7 +226,7 @@ impl AsyncElement for AlsaSink {
                 PropKind::Str,
                 "ALSA PCM device (e.g. default, hw:0,0, plughw:1)",
             )
-            .with_default("default"),
+            .with_default(DEFAULT_DEVICE),
             crate::audioskew::PROVIDE_CLOCK_PROPERTY,
             crate::audioskew::SLAVE_METHOD_PROPERTY,
             crate::audioskew::DRIFT_TOLERANCE_PROPERTY,
@@ -433,6 +434,16 @@ fn discipline_clock(
 
 /// Open and configure the PCM device for blocking interleaved playback.
 /// Returns the ALSA errno on failure.
+pub(crate) fn default_device_opens() -> Result<(), String> {
+    crate::alsa_ffi::library_installed()?;
+    // gst's autoaudiosink skips a sink whose device fails to open
+    Pcm::open(DEFAULT_DEVICE, Direction::Playback, true)
+        .map(drop)
+        .map_err(|code| {
+            alloc::format!("the {DEFAULT_DEVICE} playback device does not open: error {code}")
+        })
+}
+
 fn open_pcm(device: &str, cfg: PcmConfig) -> Result<Pcm, i32> {
     let pcm = Pcm::open(device, Direction::Playback, false)?;
     {

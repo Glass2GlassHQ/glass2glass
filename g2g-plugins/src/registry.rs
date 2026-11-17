@@ -4189,7 +4189,7 @@ fn register_feature_gated(reg: &mut Registry) {
     #[cfg(all(target_os = "linux", feature = "alsa-sink"))]
     reg.register_launch(
         LaunchFactory::of::<AlsaSink>("alsasink", || Box::new(AlsaSink::new()))
-            .with_usable(crate::alsa_ffi::library_installed)
+            .with_usable(crate::alsasink::default_device_opens)
             .with_experimental(),
     );
     #[cfg(all(target_os = "linux", feature = "pulse-sink"))]
