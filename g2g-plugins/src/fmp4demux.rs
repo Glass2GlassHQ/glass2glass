@@ -324,6 +324,10 @@ impl Fmp4Demux {
                             out.push(PipelinePacket::Segment(seg)).await?;
                         }
                         for s in admitted {
+                            let opening = self.seek.opening_segment(s.pts_ns);
+                            if let Some(seg) = self.seek.lowered_segment(s.pts_ns).or(opening) {
+                                out.push(PipelinePacket::Segment(seg)).await?;
+                            }
                             let mut annexb = s.annexb;
                             if self.need_param_sets && !starts_with_param_set(&annexb, codec) {
                                 annexb = prepend_param_sets(&annexb, &param_sets, codec);
