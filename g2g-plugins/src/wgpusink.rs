@@ -51,6 +51,7 @@ use crate::display_aspect::picture_point_in;
 use crate::display_aspect::{
     letterbox, ViewportRectangle, FORCE_ASPECT_RATIO_NAME, FORCE_ASPECT_RATIO_PROPERTY,
 };
+use crate::filled_rectangles::{rectangle_vertices, FilledRectangle};
 use crate::gpu::{
     nv12_plane_views, packed_nv12_extent, read_texture_plane, texture_holds_picture,
     texture_layout, texture_of, GpuContext, WgpuTextureLayout,
@@ -624,6 +625,68 @@ pub struct VideoRenderer {
     upload: Option<wgpu::Texture>,
     pixel_aspect: PixelAspect,
     force_aspect_ratio: bool,
+    overlay_pipeline: wgpu::RenderPipeline,
+}
+
+const OVERLAY_SHADER: &str = "
+struct Shaded {
+    @builtin(position) position: vec4<f32>,
+    @location(0) color: vec4<f32>,
+};
+
+@vertex
+fn vs(@location(0) position: vec2<f32>, @location(1) color: vec4<f32>) -> Shaded {
+    var out: Shaded;
+    out.position = vec4<f32>(position, 0.0, 1.0);
+    out.color = color;
+    return out;
+}
+
+@fragment
+fn fs(shaded: Shaded) -> @location(0) vec4<f32> {
+    return shaded.color;
+}
+";
+
+fn overlay_pipeline(
+    device: &wgpu::Device,
+    target_format: wgpu::TextureFormat,
+) -> wgpu::RenderPipeline {
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("wgpu-sink-overlay"),
+        source: wgpu::ShaderSource::Wgsl(OVERLAY_SHADER.into()),
+    });
+    let stride = (crate::filled_rectangles::FLOATS_PER_VERTEX * size_of::<f32>()) as u64;
+    let attributes = wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x4];
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("wgpu-sink-overlay"),
+        layout: None,
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("vs"),
+            compilation_options: Default::default(),
+            buffers: &[Some(wgpu::VertexBufferLayout {
+                array_stride: stride,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: &attributes,
+            })],
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fs"),
+            compilation_options: Default::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: target_format,
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        multiview_mask: None,
+        cache: None,
+    })
 }
 
 impl core::fmt::Debug for VideoRenderer {
@@ -639,6 +702,7 @@ impl VideoRenderer {
     pub fn new(ctx: GpuContext, target_format: wgpu::TextureFormat) -> Self {
         let device = &ctx.device;
         let resources = BlitResources::new(device);
+        let overlay_pipeline = overlay_pipeline(device, target_format);
         Self {
             rgba_blit: BlitPipeline::build(
                 device,
@@ -666,6 +730,7 @@ impl VideoRenderer {
             upload: None,
             pixel_aspect: PixelAspect::Any,
             force_aspect_ratio: true,
+            overlay_pipeline,
         }
     }
 
@@ -810,6 +875,57 @@ impl VideoRenderer {
         );
         self.ctx.queue.submit([encoder.finish()]);
         Ok(viewport)
+    }
+
+    pub fn draw_rectangles(
+        &self,
+        rectangles: &[FilledRectangle],
+        view: &wgpu::TextureView,
+        target_size: (u32, u32),
+    ) {
+        let vertices = rectangle_vertices(rectangles, target_size);
+        if vertices.is_empty() {
+            return;
+        }
+        let device = &self.ctx.device;
+        let bytes: Vec<u8> = vertices
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect();
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("wgpu-sink-overlay"),
+            size: bytes.len() as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        self.ctx.queue.write_buffer(&buffer, 0, &bytes);
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("wgpu-sink-overlay"),
+        });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("wgpu-sink-overlay"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.overlay_pipeline);
+            pass.set_vertex_buffer(0, buffer.slice(..));
+            let vertex_count =
+                (vertices.len() / crate::filled_rectangles::FLOATS_PER_VERTEX) as u32;
+            pass.draw(0..vertex_count, 0..1);
+        }
+        self.ctx.queue.submit([encoder.finish()]);
     }
 
     /// Upload a tightly packed system-memory frame into the renderer's own

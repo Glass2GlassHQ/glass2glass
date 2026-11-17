@@ -7,8 +7,9 @@ use std::sync::Arc;
 
 use g2g_core::{Caps, G2gError};
 use g2g_plugins::glnv12::{GlTarget, GlVideoRenderer};
-use g2g_plugins::ViewportRectangle;
+use g2g_plugins::{FilledRectangle, ViewportRectangle};
 
+use crate::picture_filters::video_size_of;
 use crate::videosink::DueFrame;
 use crate::{OsdDimensions, Player, Shared};
 
@@ -29,7 +30,7 @@ impl FrameFeed {
     }
 
     fn latest(&mut self) -> Option<(&DueFrame, Option<&Caps>)> {
-        if let Some(frame) = self.shared.frames.take() {
+        if let Some(frame) = self.shared.frames.take_for_render() {
             self.current = Some(frame);
         }
         let current = self.current.as_ref()?;
@@ -38,6 +39,30 @@ impl FrameFeed {
         }
         self.configured_caps = Some(current.caps.clone());
         Some((current, Some(&current.caps)))
+    }
+
+    fn overlay_in_target(&self, picture: ViewportRectangle) -> Vec<FilledRectangle> {
+        let overlay = self.shared.overlay.lock().expect("overlay lock");
+        if overlay.is_empty() {
+            return Vec::new();
+        }
+        let drawn = self.current.as_ref().expect("a frame was drawn");
+        let size = video_size_of(&drawn.caps).expect("playervideosink caps have a fixed size");
+        let scale_x = picture.width as f32 / size.width as f32;
+        let scale_y = picture.height as f32 / size.height as f32;
+        overlay
+            .iter()
+            .map(|rectangle| {
+                let [red, green, blue] = rectangle.colour;
+                FilledRectangle {
+                    x: picture.x as f32 + rectangle.x as f32 * scale_x,
+                    y: picture.y as f32 + rectangle.y as f32 * scale_y,
+                    width: rectangle.width as f32 * scale_x,
+                    height: rectangle.height as f32 * scale_y,
+                    rgba: [red, green, blue, rectangle.alpha],
+                }
+            })
+            .collect()
     }
 
     fn report_drawn(&self, picture: ViewportRectangle, (width, height): (u32, u32)) {
@@ -81,6 +106,11 @@ impl GlRenderContext {
         }
         // SAFETY: forwarded from the caller.
         let picture = unsafe { self.renderer.draw(&frame.frame.domain, target) }?;
+        let overlay = self.feed.overlay_in_target(picture);
+        if !overlay.is_empty() {
+            // SAFETY: forwarded from the caller.
+            unsafe { self.renderer.draw_rectangles(&overlay, target) }?;
+        }
         self.feed
             .report_drawn(picture, (target.width, target.height));
         Ok(())
@@ -142,6 +172,7 @@ mod wgpu_target {
             let view = target.create_view(&wgpu::TextureViewDescriptor::default());
             let target_size = (target.width(), target.height());
             let picture = renderer.draw(&frame.frame.domain, &view, target_size)?;
+            renderer.draw_rectangles(&self.feed.overlay_in_target(picture), &view, target_size);
             self.feed.report_drawn(picture, target_size);
             Ok(())
         }

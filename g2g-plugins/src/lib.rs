@@ -429,6 +429,10 @@ pub mod videoanalyse;
 mod display_aspect;
 #[cfg(any(feature = "wgpu-sink", feature = "gl-render"))]
 pub use display_aspect::ViewportRectangle;
+#[cfg(any(feature = "wgpu-sink", feature = "gl-render"))]
+mod filled_rectangles;
+#[cfg(any(feature = "wgpu-sink", feature = "gl-render"))]
+pub use filled_rectangles::FilledRectangle;
 pub mod scenechange;
 pub mod videoflip;
 // Shared negotiation and frame loop behind the CPU video-effect transforms.

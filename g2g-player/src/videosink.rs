@@ -4,6 +4,7 @@
 
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -43,6 +44,7 @@ type UpdateCallback = Arc<dyn Fn() + Send + Sync>;
 #[derive(Default)]
 pub(crate) struct FrameSlot {
     due: Mutex<Option<DueFrame>>,
+    redraw_requested: AtomicBool,
     update: Mutex<Option<UpdateCallback>>,
 }
 
@@ -53,20 +55,31 @@ impl std::fmt::Debug for FrameSlot {
 }
 
 impl FrameSlot {
-    fn put(&self, frame: DueFrame) {
-        *self.due.lock().expect("frame slot lock") = Some(frame);
+    fn notify_host(&self) {
         let update = self.update.lock().expect("update callback lock").clone();
         if let Some(update) = update {
             update();
         }
     }
 
-    pub(crate) fn take(&self) -> Option<DueFrame> {
+    fn put(&self, frame: DueFrame) {
+        *self.due.lock().expect("frame slot lock") = Some(frame);
+        self.notify_host();
+    }
+
+    pub(crate) fn request_redraw(&self) {
+        self.redraw_requested.store(true, Ordering::SeqCst);
+        self.notify_host();
+    }
+
+    pub(crate) fn take_for_render(&self) -> Option<DueFrame> {
+        self.redraw_requested.store(false, Ordering::SeqCst);
         self.due.lock().expect("frame slot lock").take()
     }
 
-    pub(crate) fn has_frame(&self) -> bool {
-        self.due.lock().expect("frame slot lock").is_some()
+    pub(crate) fn wants_redraw(&self) -> bool {
+        self.redraw_requested.load(Ordering::SeqCst)
+            || self.due.lock().expect("frame slot lock").is_some()
     }
 
     pub(crate) fn set_update_callback(&self, update: Option<UpdateCallback>) {

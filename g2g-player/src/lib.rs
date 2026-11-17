@@ -70,6 +70,18 @@ pub struct VideoSize {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OverlayRectangle {
+    // pixels of the picture after the video filters
+    pub x: i64,
+    pub y: i64,
+    pub width: i64,
+    pub height: i64,
+    pub colour: [u8; 3],
+    // straight, not premultiplied
+    pub alpha: u8,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OsdDimensions {
     pub width: u32,
     pub height: u32,
@@ -231,6 +243,7 @@ pub(crate) struct Shared {
     video_out_params: Mutex<Option<VideoSize>>,
     osd_dimensions: Mutex<Option<OsdDimensions>>,
     audio_levels: Mutex<Option<AudioLevels>>,
+    overlay: Mutex<Vec<OverlayRectangle>>,
     // the last value reported for each observed property
     observed: Mutex<Vec<PropertyChange>>,
 }
@@ -592,8 +605,13 @@ impl Player {
             .set_update_callback(Some(Arc::new(update)));
     }
 
-    pub fn has_new_frame(&self) -> bool {
-        self.shared.frames.has_frame()
+    pub fn wants_redraw(&self) -> bool {
+        self.shared.frames.wants_redraw()
+    }
+
+    pub fn set_overlay(&self, rectangles: Vec<OverlayRectangle>) {
+        *self.shared.overlay.lock().expect("overlay lock") = rectangles;
+        self.shared.frames.request_redraw();
     }
 
     pub fn set_video_filters(&self, filters: &[&str]) -> Result<(), VideoFilterError> {

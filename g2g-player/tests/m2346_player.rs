@@ -8,8 +8,8 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use g2g_player::{
-    EndFile, Event, LoadOptions, Media, OsdDimensions, Player, Property, PropertyChange, VideoSize,
-    WgpuRenderContext,
+    EndFile, Event, LoadOptions, Media, OsdDimensions, OverlayRectangle, Player, Property,
+    PropertyChange, VideoSize, WgpuRenderContext,
 };
 use g2g_plugins::gpu::{read_texture_plane, whole_texture, GpuContext};
 
@@ -76,12 +76,12 @@ fn wait_until(mut condition: impl FnMut() -> bool) {
     }
 }
 
-fn rgba_target(context: &GpuContext) -> wgpu::Texture {
+fn rgba_target(context: &GpuContext, (width, height): (u32, u32)) -> wgpu::Texture {
     context.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("m2346-target"),
         size: wgpu::Extent3d {
-            width: CLIP_WIDTH,
-            height: CLIP_HEIGHT,
+            width,
+            height,
             depth_or_array_layers: 1,
         },
         mip_level_count: 1,
@@ -104,7 +104,7 @@ fn rendered_pixels(
         &context.queue,
         target,
         wgpu::TextureAspect::All,
-        whole_texture(CLIP_WIDTH, CLIP_HEIGHT),
+        whole_texture(target.width(), target.height()),
         RGBA_BYTES_PER_PIXEL,
     )
     .unwrap()
@@ -137,7 +137,7 @@ fn a_clip_renders_pauses_seeks_and_stays_open_at_the_end() {
     events.wait_for(&Event::FileLoaded);
     frames.recv_timeout(EVENT_TIMEOUT).expect("a decoded frame");
 
-    let target = rgba_target(&context);
+    let target = rgba_target(&context, (CLIP_WIDTH, CLIP_HEIGHT));
     let pixels = rendered_pixels(&mut render, &context, &target);
     assert!(
         pixels.chunks(4).any(|pixel| pixel[..3] != [0, 0, 0]),
@@ -352,7 +352,7 @@ fn video_filters_shrink_the_picture_onto_a_black_pad() {
     };
     let player = Player::new();
     let mut render = WgpuRenderContext::new(&player, context.clone());
-    let target = rgba_target(&context);
+    let target = rgba_target(&context, (CLIP_WIDTH, CLIP_HEIGHT));
     player.set_video_filters(&HALF_SIZE_ON_BLACK).unwrap();
     player
         .load(
@@ -367,7 +367,7 @@ fn video_filters_shrink_the_picture_onto_a_black_pad() {
                 Instant::now() < deadline,
                 "no frame with padded={padded} within {EVENT_TIMEOUT:?}"
             );
-            if !player.has_new_frame() {
+            if !player.wants_redraw() {
                 std::thread::sleep(Duration::from_millis(10));
                 continue;
             }
@@ -394,7 +394,7 @@ fn video_params_osd_dimensions_and_the_filtered_size_are_reported() {
     };
     let player = Player::new();
     let mut render = WgpuRenderContext::new(&player, context.clone());
-    let target = rgba_target(&context);
+    let target = rgba_target(&context, (CLIP_WIDTH, CLIP_HEIGHT));
     player.set_video_filters(&[WIDENING_PAD]).unwrap();
     player
         .load(
@@ -418,7 +418,7 @@ fn video_params_osd_dimensions_and_the_filtered_size_are_reported() {
         PropertyChange::VideoParams(Some(decoded))
     );
     wait_until(|| {
-        if player.has_new_frame() {
+        if player.wants_redraw() {
             rendered_pixels(&mut render, &context, &target);
         }
         let PropertyChange::OsdDimensions(Some(osd)) = player.property(Property::OsdDimensions)
@@ -445,6 +445,59 @@ fn video_params_osd_dimensions_and_the_filtered_size_are_reported() {
         player.property(Property::VideoParams),
         PropertyChange::VideoParams(None)
     );
+}
+
+// twice the clip's width, so the clip is drawn at its own size between two bars
+const WIDE_TARGET: (u32, u32) = (2 * CLIP_WIDTH, CLIP_HEIGHT);
+const PILLAR_WIDTH: u32 = (WIDE_TARGET.0 - CLIP_WIDTH) / 2;
+const OVERLAY_RED: [u8; 3] = [255, 0, 0];
+const MARKED_AREA: OverlayRectangle = OverlayRectangle {
+    x: 8,
+    y: 12,
+    width: 16,
+    height: 12,
+    colour: OVERLAY_RED,
+    alpha: u8::MAX,
+};
+
+fn rgb_at(pixels: &[u8], target_width: u32, x: u32, y: u32) -> [u8; 3] {
+    let at = ((y * target_width + x) * RGBA_BYTES_PER_PIXEL) as usize;
+    [pixels[at], pixels[at + 1], pixels[at + 2]]
+}
+
+#[test]
+fn an_overlay_lands_on_its_picture_pixels_and_redraws_a_paused_frame() {
+    let Ok(context) = pollster::block_on(GpuContext::headless()) else {
+        return;
+    };
+    let player = Player::new();
+    let mut render = WgpuRenderContext::new(&player, context.clone());
+    let target = rgba_target(&context, WIDE_TARGET);
+    load_paused_at_start(&player);
+    wait_until(|| player.wants_redraw());
+    let plain = rendered_pixels(&mut render, &context, &target);
+    assert!(!player.wants_redraw());
+    let inside = (
+        PILLAR_WIDTH + (MARKED_AREA.x + MARKED_AREA.width / 2) as u32,
+        (MARKED_AREA.y + MARKED_AREA.height / 2) as u32,
+    );
+    let left_of_it = (PILLAR_WIDTH + MARKED_AREA.x as u32 - 1, inside.1);
+    let above_it = (inside.0, MARKED_AREA.y as u32 - 1);
+    let colour = |pixels: &[u8], (x, y): (u32, u32)| rgb_at(pixels, WIDE_TARGET.0, x, y);
+    assert_ne!(colour(&plain, inside), OVERLAY_RED);
+
+    player.set_overlay(vec![MARKED_AREA]);
+    assert!(player.wants_redraw());
+    let marked = rendered_pixels(&mut render, &context, &target);
+    assert_eq!(colour(&marked, inside), OVERLAY_RED);
+    assert_eq!(colour(&marked, left_of_it), colour(&plain, left_of_it));
+    assert_eq!(colour(&marked, above_it), colour(&plain, above_it));
+
+    player.set_overlay(Vec::new());
+    assert!(player.wants_redraw());
+    let cleared = rendered_pixels(&mut render, &context, &target);
+    assert_eq!(colour(&cleared, inside), colour(&plain, inside));
+    player.stop();
 }
 
 const METER_WINDOW: Duration = Duration::from_millis(300);

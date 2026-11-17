@@ -1041,7 +1041,15 @@ metadata and replaced with one holding the player's frame slot, since a
 the slot and calls the host's update callback. `GlRenderContext::render` draws it
 into a `GlTarget` framebuffer through `g2g-plugins`' `GlVideoRenderer` (feature
 `gl-render`, the NV12 and RGBA shaders `glsink` uses), and `WgpuRenderContext`
-into a wgpu texture through `wgpusink`'s `VideoRenderer`.
+into a wgpu texture through `wgpusink`'s `VideoRenderer`. `wants_redraw` is true
+while a due frame waits in the slot or a redraw was requested, the same
+condition as libmpv's `MPV_RENDER_UPDATE_FRAME`, and a render clears it.
+
+`set_overlay` takes filled rectangles in pixels of the picture after the
+filters, the rectangles guikit's grok player composes. The render contexts draw
+them over the frame, mapped through the rectangle the picture was letterboxed
+into, with `draw_rectangles` on the same renderers. Setting them requests a
+redraw and calls the update callback, so a paused frame shows the change.
 
 ## Language bindings
 

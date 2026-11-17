@@ -30,6 +30,7 @@ use glow::HasContext;
 use g2g_core::{Colorimetry, G2gError, MemoryDomain, RawVideoFormat};
 
 use crate::display_aspect::{letterbox, ViewportRectangle};
+use crate::filled_rectangles::{rectangle_vertices, FilledRectangle};
 use crate::videoconvert::display::{display_sink_caps, DisplayInput, NV12_AND_RGBA};
 use crate::yuvmatrix::YuvToRgbWeights;
 
@@ -97,6 +98,25 @@ void main() {{
     )
 }
 
+const OVERLAY_VERTEX_SHADER: &str = "\
+attribute vec2 a_pos;
+attribute vec4 a_color;
+uniform float u_flip_y;
+varying vec4 v_color;
+void main() {
+    v_color = a_color;
+    gl_Position = vec4(a_pos.x, a_pos.y * u_flip_y, 0.0, 1.0);
+}
+";
+
+const OVERLAY_FRAGMENT_SHADER: &str = "\
+precision mediump float;
+varying vec4 v_color;
+void main() {
+    gl_FragColor = v_color;
+}
+";
+
 /// GLSL ES 1.00 fragment shader for the already-RGBA path: straight texture
 /// fetch, no convert.
 pub(crate) const FRAGMENT_SHADER_RGBA: &str = "\
@@ -146,6 +166,7 @@ pub(crate) struct GlState {
     vbo: glow::Buffer,
     // core profile contexts draw nothing without a bound vertex array
     vertex_array: glow::VertexArray,
+    overlay: OverlayProgram,
     width: u32,
     height: u32,
     /// Registered on the first frame, when `OwnedCudaBuffer::context` is known.
@@ -154,6 +175,35 @@ pub(crate) struct GlState {
     /// True once the decoder's CUDA context has been pushed current here.
     #[cfg(any(feature = "cuda-gl", feature = "cuda-kms"))]
     cuda_current: bool,
+}
+
+#[derive(Debug)]
+struct OverlayProgram {
+    program: glow::Program,
+    vbo: glow::Buffer,
+    pos_loc: u32,
+    color_loc: u32,
+    flip_y_loc: Option<glow::UniformLocation>,
+}
+
+/// # Safety
+/// A GL context must be current.
+unsafe fn link_for(
+    gl: &glow::Context,
+    vertex_src: &str,
+    fragment_src: &str,
+) -> Result<glow::Program, alloc::boxed::Box<dyn std::error::Error>> {
+    // SAFETY: the caller guarantees a current GL context.
+    unsafe {
+        if gl.version().is_embedded {
+            return link_program(gl, vertex_src, fragment_src);
+        }
+        link_program(
+            gl,
+            &(String::from(DESKTOP_VERTEX_PRELUDE) + vertex_src),
+            &(String::from(DESKTOP_FRAGMENT_PRELUDE) + fragment_src),
+        )
+    }
 }
 
 impl GlState {
@@ -177,14 +227,18 @@ impl GlState {
                 GlMode::Nv12 => fragment_shader_nv12(colorimetry),
                 GlMode::Rgba => String::from(FRAGMENT_SHADER_RGBA),
             };
-            let program = if gl.version().is_embedded {
-                link_program(&gl, VERTEX_SHADER, &fragment)?
-            } else {
-                link_program(
-                    &gl,
-                    &(String::from(DESKTOP_VERTEX_PRELUDE) + VERTEX_SHADER),
-                    &(String::from(DESKTOP_FRAGMENT_PRELUDE) + fragment.as_str()),
-                )?
+            let program = link_for(&gl, VERTEX_SHADER, &fragment)?;
+            let overlay_program = link_for(&gl, OVERLAY_VERTEX_SHADER, OVERLAY_FRAGMENT_SHADER)?;
+            let overlay = OverlayProgram {
+                program: overlay_program,
+                vbo: gl.create_buffer().map_err(|e| e.to_string())?,
+                pos_loc: gl
+                    .get_attrib_location(overlay_program, "a_pos")
+                    .unwrap_or(0),
+                color_loc: gl
+                    .get_attrib_location(overlay_program, "a_color")
+                    .unwrap_or(1),
+                flip_y_loc: gl.get_uniform_location(overlay_program, "u_flip_y"),
             };
             let pos_loc = gl.get_attrib_location(program, "a_pos").unwrap_or(0);
             let uv_loc = gl.get_attrib_location(program, "a_uv").unwrap_or(1);
@@ -232,6 +286,7 @@ impl GlState {
                 textures,
                 vbo,
                 vertex_array,
+                overlay,
                 width,
                 height,
                 #[cfg(any(feature = "cuda-gl", feature = "cuda-kms"))]
@@ -384,6 +439,47 @@ impl GlState {
         }
     }
 
+    fn draw_rectangles(&mut self, vertices: &[f32], (width, height): (u32, u32), flip_y: bool) {
+        let overlay = &self.overlay;
+        let stride = (crate::filled_rectangles::FLOATS_PER_VERTEX * size_of::<f32>()) as i32;
+        let vertex_count = (vertices.len() / crate::filled_rectangles::FLOATS_PER_VERTEX) as i32;
+        // SAFETY: the GL context is current on this thread for the worker's life.
+        unsafe {
+            let gl = &self.gl;
+            gl.viewport(0, 0, width as i32, height as i32);
+            gl.use_program(Some(overlay.program));
+            gl.uniform_1_f32(overlay.flip_y_loc.as_ref(), if flip_y { 1.0 } else { -1.0 });
+            gl.bind_vertex_array(Some(self.vertex_array));
+            gl.bind_buffer(glow::ARRAY_BUFFER, Some(overlay.vbo));
+            gl.buffer_data_u8_slice(
+                glow::ARRAY_BUFFER,
+                bytemuck_cast(vertices),
+                glow::STREAM_DRAW,
+            );
+            gl.enable_vertex_attrib_array(overlay.pos_loc);
+            gl.vertex_attrib_pointer_f32(overlay.pos_loc, 2, glow::FLOAT, false, stride, 0);
+            gl.enable_vertex_attrib_array(overlay.color_loc);
+            gl.vertex_attrib_pointer_f32(
+                overlay.color_loc,
+                4,
+                glow::FLOAT,
+                false,
+                stride,
+                2 * size_of::<f32>() as i32,
+            );
+            gl.enable(glow::BLEND);
+            gl.blend_func_separate(
+                glow::SRC_ALPHA,
+                glow::ONE_MINUS_SRC_ALPHA,
+                glow::ONE,
+                glow::ONE_MINUS_SRC_ALPHA,
+            );
+            gl.draw_arrays(glow::TRIANGLES, 0, vertex_count);
+            gl.disable(glow::BLEND);
+            gl.disable_vertex_attrib_array(overlay.color_loc);
+        }
+    }
+
     #[cfg(any(feature = "cuda-gl", feature = "gl-sink"))]
     pub(crate) fn size(&self) -> (u32, u32) {
         (self.width, self.height)
@@ -404,6 +500,8 @@ impl GlState {
             let gl = &self.gl;
             gl.delete_program(self.program);
             gl.delete_buffer(self.vbo);
+            gl.delete_program(self.overlay.program);
+            gl.delete_buffer(self.overlay.vbo);
             gl.delete_vertex_array(self.vertex_array);
             match self.textures {
                 Textures::Nv12 { y_tex, uv_tex, .. } => {
@@ -507,6 +605,27 @@ impl GlVideoRenderer {
         }
         state.draw(viewport, target.flip_y);
         Ok(viewport)
+    }
+
+    /// # Safety
+    /// The GL context `loader` resolves entry points for must be current, with
+    /// `target.framebuffer` a framebuffer of it.
+    pub unsafe fn draw_rectangles(
+        &mut self,
+        rectangles: &[FilledRectangle],
+        target: GlTarget,
+    ) -> Result<(), G2gError> {
+        let (_, state) = self.state.as_mut().ok_or(G2gError::NotConfigured)?;
+        let vertices = rectangle_vertices(rectangles, (target.width, target.height));
+        // SAFETY: the caller guarantees the framebuffer belongs to the current context.
+        unsafe {
+            state.gl.bind_framebuffer(
+                glow::FRAMEBUFFER,
+                core::num::NonZeroU32::new(target.framebuffer).map(glow::NativeFramebuffer),
+            );
+        }
+        state.draw_rectangles(&vertices, (target.width, target.height), target.flip_y);
+        Ok(())
     }
 
     /// # Safety
@@ -731,7 +850,14 @@ mod host_target_tests {
     }
 
     // the first column of each row, bottom row first as glReadPixels returns them
-    fn draw_into_framebuffer(api: HeadlessApi, flip_y: bool) -> Option<alloc::vec::Vec<[u8; 4]>> {
+    fn draw_into_framebuffer(
+        api: HeadlessApi,
+        flip_y: bool,
+        overlay: &[FilledRectangle],
+    ) -> Option<alloc::vec::Vec<[u8; 4]>> {
+        let _egl = crate::EGL_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let (_headless, gl) = headless_context(api).ok()?;
         let egl = crate::egl_library::load().expect("loaded once already");
         let mut renderer = GlVideoRenderer::new(move |name| match egl.get_proc_address(name) {
@@ -765,17 +891,14 @@ mod host_target_tests {
                 0,
             );
             gl.bind_framebuffer(glow::FRAMEBUFFER, None);
-            renderer
-                .draw(
-                    &red_over_blue(),
-                    GlTarget {
-                        framebuffer: framebuffer.0.get(),
-                        width: TARGET_SIDE,
-                        height: TARGET_SIDE,
-                        flip_y,
-                    },
-                )
-                .unwrap();
+            let target = GlTarget {
+                framebuffer: framebuffer.0.get(),
+                width: TARGET_SIDE,
+                height: TARGET_SIDE,
+                flip_y,
+            };
+            renderer.draw(&red_over_blue(), target).unwrap();
+            renderer.draw_rectangles(overlay, target).unwrap();
             let mut pixels = alloc::vec![0u8; (TARGET_SIDE * TARGET_SIDE * 4) as usize];
             gl.read_pixels(
                 0,
@@ -800,12 +923,34 @@ mod host_target_tests {
     #[test]
     fn a_frame_lands_letterboxed_in_a_host_framebuffer_on_gles_and_desktop_core() {
         for api in [HeadlessApi::GlEs3, HeadlessApi::DesktopCore32] {
-            let Some(upright) = draw_into_framebuffer(api, true) else {
+            let Some(upright) = draw_into_framebuffer(api, true, &[]) else {
                 continue;
             };
             assert_eq!(upright, [BLACK, BLUE, RED, BLACK], "{api:?} flip_y");
-            let unflipped = draw_into_framebuffer(api, false).unwrap();
+            let unflipped = draw_into_framebuffer(api, false, &[]).unwrap();
             assert_eq!(unflipped, [BLACK, RED, BLUE, BLACK], "{api:?} no flip_y");
+        }
+    }
+
+    const GREEN: [u8; 4] = [0, 255, 0, 255];
+
+    #[test]
+    fn rectangles_land_on_the_frame_rows_they_name_in_both_orientations() {
+        // the frame's top row is the target's second row from the top
+        let over_the_red_row = [FilledRectangle {
+            x: 0.0,
+            y: 1.0,
+            width: TARGET_SIDE as f32,
+            height: 1.0,
+            rgba: GREEN,
+        }];
+        for api in [HeadlessApi::GlEs3, HeadlessApi::DesktopCore32] {
+            let Some(upright) = draw_into_framebuffer(api, true, &over_the_red_row) else {
+                continue;
+            };
+            assert_eq!(upright, [BLACK, BLUE, GREEN, BLACK], "{api:?} flip_y");
+            let unflipped = draw_into_framebuffer(api, false, &over_the_red_row).unwrap();
+            assert_eq!(unflipped, [BLACK, GREEN, BLUE, BLACK], "{api:?} no flip_y");
         }
     }
 }
