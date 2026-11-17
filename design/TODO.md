@@ -57,8 +57,7 @@ The plan is [remote.md](remote.md).
 - Read the index segments of every partition the MXF random index pack lists
   before playback, so a seek in a long MXF file with a body partition every
   10 s, as ffmpeg writes, lands by index instead of reading from byte 0.
-- A single-output `mxfdemux`, so `filesrc ! decodebin` and `g2g-discover` open
-  an MXF file, and D-10 AES3 sound (SMPTE ST 331).
+- D-10 AES3 sound in MXF (SMPTE ST 331).
 - Take GPU frames in `playervideosink` once decoders open on the host's device.
 - An option that hands PCM to the host.
 - A versioned C ABI (`g2g_player.h`), wrapped in the C#, C++, Kotlin and

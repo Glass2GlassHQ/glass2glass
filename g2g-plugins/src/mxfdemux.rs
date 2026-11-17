@@ -8,6 +8,7 @@ use core::pin::Pin;
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::format;
+use alloc::string::String;
 use alloc::vec::Vec;
 
 use g2g_core::caps::framerate_q16_from_fraction;
@@ -16,16 +17,22 @@ use g2g_core::log::Target;
 use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::runtime::{ElementSeekRoute, SeekController};
 use g2g_core::{
-    BusHandle, BusMessage, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
-    Dim, G2gError, MultiOutputElement, MultiOutputSink, Rate, Stream, StreamCollection, StreamType,
+    pcm_from_gst_format, pcm_gst_format, AudioFormat, BusHandle, BusMessage, ByteStreamEncoding,
+    Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError,
+    MultiOutputElement, MultiOutputSink, PadTemplate, PadTemplates, ProResVariant, PropError,
+    PropKind, PropValue, PropertySpec, Rate, Stream, StreamCollection, StreamType, VideoCodec,
 };
 
+use crate::avidemux::pcm_alternatives;
 use crate::demuxseek::{DemuxSeek, TailRead};
+use crate::mkvdemux::{prores_stream_from_str, prores_stream_str};
 use crate::mxf::{
     header_partition_metadata, index_segment, key_kind, partition_pack, random_index_pack,
     random_index_pack_len, read_klv, whole_klv, Essence, EssenceTrack, IndexEntry, IndexSegment,
-    KeyKind, Klv, KlvError, PartitionPack, Rational,
+    KeyKind, Klv, KlvError, PartitionPack, Rational, QUANTIZATION_FORMATS,
 };
+use crate::oneport::OnePortElement;
+use crate::typefind::container_video_caps;
 
 fn input_caps() -> Caps {
     Caps::ByteStream {
@@ -70,6 +77,105 @@ fn is_video(track: &EssenceTrack) -> bool {
     matches!(track.essence, Essence::Video { .. })
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MxfStream {
+    Video(VideoCodec),
+    Pcm(AudioFormat),
+}
+
+const DEFAULT_STREAM: MxfStream = MxfStream::Video(VideoCodec::H264);
+
+// the `stream=` names of the picture codecs besides prores, which goes by its profile
+const VIDEO_STREAM_NAMES: [(&str, VideoCodec); 4] = [
+    ("h264", VideoCodec::H264),
+    ("mpeg2", VideoCodec::Mpeg2),
+    ("jpeg2000", VideoCodec::Jpeg2000),
+    ("dnxhd", VideoCodec::DnxHd),
+];
+
+impl MxfStream {
+    fn of(track: &EssenceTrack) -> Self {
+        match track.essence {
+            Essence::Video { codec, .. } => MxfStream::Video(codec),
+            Essence::Pcm { format, .. } => MxfStream::Pcm(format),
+        }
+    }
+
+    fn all() -> impl Iterator<Item = MxfStream> {
+        VIDEO_STREAM_NAMES
+            .into_iter()
+            .map(|(_, codec)| codec)
+            .chain(
+                ProResVariant::ALL
+                    .into_iter()
+                    .map(|variant| VideoCodec::ProRes { variant }),
+            )
+            .map(MxfStream::Video)
+            .chain(
+                QUANTIZATION_FORMATS
+                    .into_iter()
+                    .map(|(_, format)| MxfStream::Pcm(format)),
+            )
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            MxfStream::Video(VideoCodec::ProRes { variant }) => prores_stream_str(variant),
+            MxfStream::Video(codec) => VIDEO_STREAM_NAMES
+                .into_iter()
+                .find_map(|(name, known)| (known == codec).then_some(name))
+                .expect("the mxf header parser maps only the codecs VIDEO_STREAM_NAMES lists"),
+            MxfStream::Pcm(format) => pcm_gst_format(format).expect("mxf sound is pcm"),
+        }
+    }
+
+    fn from_name(name: &str) -> Option<Self> {
+        let codec = VIDEO_STREAM_NAMES
+            .into_iter()
+            .find_map(|(known, codec)| (known == name).then_some(codec))
+            .or_else(|| prores_stream_from_str(name).map(|variant| VideoCodec::ProRes { variant }));
+        if let Some(codec) = codec {
+            return Some(MxfStream::Video(codec));
+        }
+        let format = pcm_from_gst_format(name)?;
+        QUANTIZATION_FORMATS
+            .into_iter()
+            .any(|(_, known)| known == format)
+            .then_some(MxfStream::Pcm(format))
+    }
+
+    fn placeholder_caps(self) -> Vec<Caps> {
+        match self {
+            MxfStream::Video(codec) => Vec::from([container_video_caps(codec)]),
+            // a lone rate and channel wildcard cannot fixate
+            MxfStream::Pcm(format) => pcm_alternatives(format),
+        }
+    }
+
+    fn first_placeholder_caps(self) -> Caps {
+        self.placeholder_caps()
+            .into_iter()
+            .next()
+            .expect("every stream has a placeholder")
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TrackSelection {
+    stream: MxfStream,
+    // None takes the first track of the stream
+    track_number: Option<u32>,
+}
+
+impl TrackSelection {
+    fn picks(self, track: &EssenceTrack) -> bool {
+        MxfStream::of(track) == self.stream
+            && self
+                .track_number
+                .is_none_or(|number| number == track.track_number)
+    }
+}
+
 // the tracks of an mxf file prefix the demuxer forwards, in file order
 pub fn forwardable_tracks(prefix: &[u8]) -> Vec<MxfTrackInfo> {
     let Some(metadata) = header_partition_metadata(prefix) else {
@@ -91,6 +197,16 @@ pub struct MxfTrackInfo {
     track: EssenceTrack,
     pub caps: Caps,
     pub video: bool,
+}
+
+impl MxfTrackInfo {
+    pub fn stream_name(&self) -> &'static str {
+        MxfStream::of(&self.track).name()
+    }
+
+    pub fn track_number(&self) -> u32 {
+        self.track.track_number
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -355,6 +471,8 @@ pub struct MxfDemuxN {
     own_seek_landing: Option<u64>,
     indexed_seek_landing: Option<Landing>,
     duration_ns: Option<u64>,
+    // the one port's track, found once the header is read
+    selection: Option<TrackSelection>,
 }
 
 impl MxfDemuxN {
@@ -363,12 +481,34 @@ impl MxfDemuxN {
             !ports.is_empty(),
             "MxfDemuxN needs at least one output port"
         );
+        let port_caps = ports.iter().map(|port| port.caps.clone()).collect();
+        let tracks = ports.into_iter().map(|port| port.track).collect();
+        Self::with_ports(port_caps, tracks, None)
+    }
+
+    fn selecting(stream: MxfStream) -> Self {
+        let selection = TrackSelection {
+            stream,
+            track_number: None,
+        };
+        Self::with_ports(
+            Vec::from([stream.first_placeholder_caps()]),
+            Vec::new(),
+            Some(selection),
+        )
+    }
+
+    fn with_ports(
+        port_caps: Vec<Caps>,
+        tracks: Vec<EssenceTrack>,
+        selection: Option<TrackSelection>,
+    ) -> Self {
         Self {
             buf: Vec::new(),
             buf_at: 0,
-            port_caps: ports.iter().map(|port| port.caps.clone()).collect(),
-            positions: alloc::vec![0; ports.len()],
-            tracks: ports.into_iter().map(|port| port.track).collect(),
+            positions: alloc::vec![0; port_caps.len()],
+            port_caps,
+            tracks,
             bus: None,
             emitted: 0,
             seek: DemuxSeek::default(),
@@ -382,6 +522,7 @@ impl MxfDemuxN {
             own_seek_landing: None,
             indexed_seek_landing: None,
             duration_ns: None,
+            selection,
         }
     }
 
@@ -408,7 +549,30 @@ impl MxfDemuxN {
             .unwrap_or(0)
     }
 
-    async fn announce(&mut self, out: &mut dyn MultiOutputSink) -> Result<(), G2gError> {
+    async fn announce(
+        &mut self,
+        header_tracks: &[EssenceTrack],
+        out: &mut dyn MultiOutputSink,
+    ) -> Result<(), G2gError> {
+        if let Some(selection) = self.selection {
+            let track = header_tracks
+                .iter()
+                .find(|track| selection.picks(track))
+                .ok_or_else(|| {
+                    malformed(&format!(
+                        "mxf: no {} track with track-number {}",
+                        selection.stream.name(),
+                        selection.track_number.unwrap_or(0)
+                    ))
+                })?;
+            self.tracks = Vec::from([*track]);
+        }
+        self.duration_ns = self
+            .tracks
+            .iter()
+            .filter_map(|track| track.edit_rate.units_to_ns(track.duration?))
+            .max();
+        self.seek.set_duration(self.duration_ns);
         if let Some(bus) = &self.bus {
             let streams = self
                 .tracks
@@ -428,13 +592,11 @@ impl MxfDemuxN {
             bus.try_post(BusMessage::StreamCollection(StreamCollection::new(
                 "mxf-0", streams,
             )));
+            // the runner queries a multi-output demux for its duration, never a one-port element
+            if let (Some(duration_ns), Some(_)) = (self.duration_ns, self.selection) {
+                bus.try_post(BusMessage::DurationChanged { duration_ns });
+            }
         }
-        self.duration_ns = self
-            .tracks
-            .iter()
-            .filter_map(|track| track.edit_rate.units_to_ns(track.duration?))
-            .max();
-        self.seek.set_duration(self.duration_ns);
         for (port, track) in self.tracks.iter().enumerate() {
             out.push_to(port, PipelinePacket::CapsChanged(track_caps(track)))
                 .await?;
@@ -473,13 +635,13 @@ impl MxfDemuxN {
         out: &mut dyn MultiOutputSink,
     ) -> Result<(), G2gError> {
         if self.read == MxfRead::Head {
-            if header_partition_metadata(&self.buf).is_none() {
+            let Some(metadata) = header_partition_metadata(&self.buf) else {
                 if self.buf.len() > MAX_HEADER_BYTES {
                     return Err(malformed("mxf header metadata too large"));
                 }
                 return Ok(());
-            }
-            self.announce(out).await?;
+            };
+            self.announce(&metadata.tracks, out).await?;
             let seekable = self.seek.upstream_len().is_some() && self.seek.takes_seeks_after_end();
             self.read = match seekable {
                 true => MxfRead::Tail,
@@ -783,7 +945,7 @@ impl MxfDemuxN {
         self.seek.note_track_unit(port as u64, pts_ns);
         let admitted = self.seek.admit(port, pts_ns, resync_point, unit);
         if let Some(seek_segment) = admitted.segment {
-            for port in 0..self.tracks.len() {
+            for port in 0..self.port_caps.len() {
                 out.push_to(port, PipelinePacket::Segment(seek_segment))
                     .await?;
             }
@@ -855,10 +1017,9 @@ impl MxfDemuxN {
     // the file held whole when its source cannot seek, read once for its index then sent
     async fn emit_whole(&mut self, out: &mut dyn MultiOutputSink) -> Result<(), G2gError> {
         if self.read == MxfRead::Head {
-            if header_partition_metadata(&self.buf).is_none() {
-                return Err(malformed("mxf: no header partition metadata"));
-            }
-            self.announce(out).await?;
+            let metadata = header_partition_metadata(&self.buf)
+                .ok_or_else(|| malformed("mxf: no header partition metadata"))?;
+            self.announce(&metadata.tracks, out).await?;
         }
         let whole = core::mem::take(&mut self.buf);
         self.observe(&whole, 0);
@@ -892,6 +1053,67 @@ impl MultiOutputElement for MxfDemuxN {
 
     fn port_output_caps(&self, port: usize) -> Option<Caps> {
         self.port_caps.get(port).cloned()
+    }
+
+    fn port_caps_constraint(&self, port: usize) -> Option<CapsConstraint<'_>> {
+        let Some(selection) = self.selection else {
+            return self
+                .port_output_caps(port)
+                .map(|caps| CapsConstraint::Produces(CapsSet::one(caps)));
+        };
+        (port == 0).then(|| {
+            CapsConstraint::Produces(CapsSet::from_alternatives(
+                selection.stream.placeholder_caps(),
+            ))
+        })
+    }
+
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::new(
+            "MXF demuxer",
+            "Codec/Demuxer",
+            "Demuxes an MXF file into the essence tracks its ports select",
+            crate::AARON_BOXER,
+        )
+    }
+
+    fn properties(&self) -> &'static [PropertySpec] {
+        match self.selection {
+            Some(_) => ONE_PORT_PROPS,
+            None => &[],
+        }
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        let Some(selection) = &mut self.selection else {
+            return Err(PropError::Unknown);
+        };
+        match name {
+            "stream" => {
+                let name = value.as_str().ok_or(PropError::Type)?;
+                selection.stream = MxfStream::from_name(name).ok_or(PropError::Value)?;
+                self.port_caps[0] = selection.stream.first_placeholder_caps();
+                Ok(())
+            }
+            "track-number" => {
+                let number = value.as_uint().ok_or(PropError::Type)?;
+                let number = u32::try_from(number).map_err(|_| PropError::Value)?;
+                selection.track_number = (number != 0).then_some(number);
+                Ok(())
+            }
+            _ => Err(PropError::Unknown),
+        }
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        let selection = self.selection?;
+        match name {
+            "stream" => Some(PropValue::Str(String::from(selection.stream.name()))),
+            "track-number" => Some(PropValue::Uint(u64::from(
+                selection.track_number.unwrap_or(0),
+            ))),
+            _ => None,
+        }
     }
 
     fn seek_route(&self) -> Option<ElementSeekRoute> {
@@ -952,7 +1174,7 @@ impl MultiOutputElement for MxfDemuxN {
                         }
                     }
                     self.seek
-                        .end_ports_and_wait_for_seek(self.tracks.len(), out)
+                        .end_ports_and_wait_for_seek(self.port_caps.len(), out)
                         .await?;
                     self.poll_seek();
                 }
@@ -975,13 +1197,13 @@ impl MultiOutputElement for MxfDemuxN {
                     let forward = self.seek.on_flush();
                     self.restart_read(landing);
                     if forward {
-                        for port in 0..self.tracks.len() {
+                        for port in 0..self.port_caps.len() {
                             out.push_to(port, PipelinePacket::Flush).await?;
                         }
                     }
                 }
                 PipelinePacket::Segment(segment) => {
-                    for port in 0..self.tracks.len() {
+                    for port in 0..self.port_caps.len() {
                         out.push_to(port, PipelinePacket::Segment(segment)).await?;
                     }
                 }
@@ -989,5 +1211,48 @@ impl MultiOutputElement for MxfDemuxN {
             }
             Ok(())
         })
+    }
+}
+
+static ONE_PORT_PROPS: &[PropertySpec] = &[
+    PropertySpec::new(
+        "stream",
+        PropKind::Str,
+        "essence to emit: h264 | mpeg2 | jpeg2000 | dnxhd | prores-proxy | prores-lt | prores-standard | prores-hq | prores-4444 | prores-4444xq | S16LE | S24LE | S32LE",
+    )
+    .with_default("h264"),
+    PropertySpec::new(
+        "track-number",
+        PropKind::Uint,
+        "MXF track number of the track to emit among those carrying `stream` (0 = the first of them)",
+    )
+    .with_default("0"),
+];
+
+pub type MxfDemux = OnePortElement<MxfDemuxN>;
+
+impl Default for MxfDemux {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl MxfDemux {
+    pub fn new() -> Self {
+        Self::wrap(MxfDemuxN::selecting(DEFAULT_STREAM), "MxfDemux")
+    }
+}
+
+impl PadTemplates for MxfDemux {
+    fn pad_templates() -> Vec<PadTemplate> {
+        let source = CapsSet::from_alternatives(
+            MxfStream::all()
+                .flat_map(MxfStream::placeholder_caps)
+                .collect(),
+        );
+        Vec::from([
+            PadTemplate::sink(CapsSet::one(input_caps())),
+            PadTemplate::source(source),
+        ])
     }
 }

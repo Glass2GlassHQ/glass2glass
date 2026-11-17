@@ -849,7 +849,25 @@ SRC:
   image/jpeg,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]</pre></div><div class="seg"><span class="seg-l">Properties</span><div class="props"><div class="prop"><code class="pn">boundary</code> <span class="pt">String</span> <span class="pf">read / write</span><div class="pb">boundary separating the parts (empty = read it from the stream)</div><div class="pfacts">default: <code></code></div></div></div></div></article><article class="el-card" data-search="multipartmux multipart muxer codec/muxer wraps jpeg frames in a multipart/x-mixed-replace stream boundary" id="el-multipartmux"><div class="el-head"><h3><a href="#el-multipartmux">multipartmux</a></h3><span class="badge role-el">element</span></div><div class="classification">Codec/Muxer</div><p class="desc">Wraps JPEG frames in a multipart/x-mixed-replace stream</p><div class="seg"><span class="seg-l">Pads</span><pre>SINK:
   image/jpeg,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]
 SRC:
-  multipart/x-mixed-replace</pre></div><div class="seg"><span class="seg-l">Properties</span><div class="props"><div class="prop"><code class="pn">boundary</code> <span class="pt">String</span> <span class="pf">read / write</span><div class="pb">boundary separating the parts</div><div class="pfacts">default: <code>ThisRandomString</code></div></div></div></div></article><article class="el-card" data-search="oggdemux ogg demuxer codec/demuxer demuxes an ogg bitstream into its logical streams stream" id="el-oggdemux"><div class="el-head"><h3><a href="#el-oggdemux">oggdemux</a></h3><span class="badge role-el">element</span></div><div class="classification">Codec/Demuxer</div><p class="desc">Demuxes an Ogg bitstream into its logical streams</p><div class="seg"><span class="seg-l">Pads</span><pre>SINK:
+  multipart/x-mixed-replace</pre></div><div class="seg"><span class="seg-l">Properties</span><div class="props"><div class="prop"><code class="pn">boundary</code> <span class="pt">String</span> <span class="pf">read / write</span><div class="pb">boundary separating the parts</div><div class="pfacts">default: <code>ThisRandomString</code></div></div></div></div></article><article class="el-card" data-search="mxfdemux mxf demuxer codec/demuxer demuxes an mxf file into the essence tracks its ports select stream track-number" id="el-mxfdemux"><div class="el-head"><h3><a href="#el-mxfdemux">mxfdemux</a></h3><span class="badge role-el">element</span></div><div class="classification">Codec/Demuxer</div><p class="desc">Demuxes an MXF file into the essence tracks its ports select</p><div class="seg"><span class="seg-l">Pads</span><pre>SINK:
+  application/mxf
+SRC:
+  video/x-h264,width=[16,65535],height=[16,65535],framerate=[1/1,240/1],alignment=au
+  video/mpeg,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]
+  image/x-jpc,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]
+  video/x-dnxhd,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]
+  video/x-prores,variant=proxy,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]
+  video/x-prores,variant=lt,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]
+  video/x-prores,variant=standard,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]
+  video/x-prores,variant=hq,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]
+  video/x-prores,variant=4444,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]
+  video/x-prores,variant=4444xq,width=[16,65535],height=[16,65535],framerate=[1/1,240/1]
+  audio/x-raw,format=S16LE,channels=2,rate=48000
+  audio/x-raw,format=S16LE
+  audio/x-raw,format=S24LE,channels=2,rate=48000
+  audio/x-raw,format=S24LE
+  audio/x-raw,format=S32LE,channels=2,rate=48000
+  audio/x-raw,format=S32LE</pre></div><div class="seg"><span class="seg-l">Properties</span><div class="props"><div class="prop"><code class="pn">stream</code> <span class="pt">String</span> <span class="pf">read / write</span><div class="pb">essence to emit: h264 | mpeg2 | jpeg2000 | dnxhd | prores-proxy | prores-lt | prores-standard | prores-hq | prores-4444 | prores-4444xq | S16LE | S24LE | S32LE</div><div class="pfacts">default: <code>h264</code></div></div><div class="prop"><code class="pn">track-number</code> <span class="pt">Unsigned Integer</span> <span class="pf">read / write</span><div class="pb">MXF track number of the track to emit among those carrying `stream` (0 = the first of them)</div><div class="pfacts">default: <code>0</code></div></div></div></div></article><article class="el-card" data-search="oggdemux ogg demuxer codec/demuxer demuxes an ogg bitstream into its logical streams stream" id="el-oggdemux"><div class="el-head"><h3><a href="#el-oggdemux">oggdemux</a></h3><span class="badge role-el">element</span></div><div class="classification">Codec/Demuxer</div><p class="desc">Demuxes an Ogg bitstream into its logical streams</p><div class="seg"><span class="seg-l">Pads</span><pre>SINK:
   application/ogg
 SRC:
   audio/x-opus

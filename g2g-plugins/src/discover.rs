@@ -28,7 +28,8 @@ use core::pin::Pin;
 
 use g2g_core::element::DynAsyncElement;
 use g2g_core::runtime::{
-    apply_props, run_graph_with_progress, DynSourceLoop, GraphNodeRef, PipelineProgress, Registry,
+    apply_props, run_graph_with_progress, DynMultiOutputElement, DynSourceLoop, GraphNodeRef,
+    PipelineProgress, Registry,
 };
 use g2g_core::stream::StreamType;
 use g2g_core::{
@@ -161,6 +162,14 @@ fn demux_name_for(caps: &Caps) -> Option<&'static str> {
     }
 }
 
+enum ProbeDemux {
+    Single(Box<dyn DynAsyncElement>),
+    Fanout {
+        element: Box<dyn DynMultiOutputElement>,
+        outputs: usize,
+    },
+}
+
 /// Terminal of the probe graph. Accepts whatever the demuxer emits, keeps the
 /// caps it was configured with (refined by any `CapsChanged`), and ends the run
 /// at the first payload frame: the header is parsed by then, so reading further
@@ -243,7 +252,6 @@ pub async fn discover(reg: &Registry, uri: &str) -> Result<Discovery, DiscoverEr
 
     let (bus, bus_handle) = Bus::new(PROBE_BUS_CAPACITY);
     let progress = PipelineProgress::new();
-    let mut sink = ProbeSink::default();
 
     // `Mp4Src` is the one source that answers a duration query (from the movie
     // header) and it demuxes the file itself, so the MP4 probe plugs no demuxer.
@@ -256,7 +264,18 @@ pub async fn discover(reg: &Registry, uri: &str) -> Result<Discovery, DiscoverEr
 
     // A bare elementary stream (`.264`, `.aac`, a PNG) needs no demuxer: the
     // sniff already named the codec, so the file source alone is the probe.
-    let mut demux = if matches!(sniffed, Caps::ByteStream { .. }) && !self_demuxing {
+    let demux = if is_mxf(&sniffed) {
+        let prefix = crate::uridecodebin::read_prefix(&path)
+            .ok_or_else(|| DiscoverError::Io(format!("{path}: cannot read the MXF header")))?;
+        let tracks = crate::mxfdemux::forwardable_tracks(&prefix);
+        if tracks.is_empty() {
+            return Err(DiscoverError::NoParser(container));
+        }
+        Some(ProbeDemux::Fanout {
+            outputs: tracks.len(),
+            element: Box::new(crate::mxfdemux::MxfDemuxN::new(tracks)),
+        })
+    } else if matches!(sniffed, Caps::ByteStream { .. }) && !self_demuxing {
         let name = demux_name.ok_or_else(|| DiscoverError::NoParser(container.clone()))?;
         let mut element = demux_with_bus(name, bus_handle.clone())
             .ok_or_else(|| DiscoverError::NoParser(container.clone()))?;
@@ -265,21 +284,36 @@ pub async fn discover(reg: &Registry, uri: &str) -> Result<Discovery, DiscoverEr
                 DiscoverError::Probe(format!("{name} rejected its stream selection: {e}"))
             })?;
         }
-        Some(element)
+        Some(ProbeDemux::Single(element))
     } else {
         None
     };
 
+    let sink_count = match &demux {
+        Some(ProbeDemux::Fanout { outputs, .. }) => *outputs,
+        Some(ProbeDemux::Single(_)) | None => 1,
+    };
+    let mut sinks: Vec<ProbeSink> = (0..sink_count).map(|_| ProbeSink::default()).collect();
     let mut graph: Graph<GraphNodeRef<'_>> = Graph::new();
     let source_node = graph.add_source(GraphNodeRef::Source(source));
-    let sink_node = graph.add_sink(GraphNodeRef::element_ref(&mut sink));
-    match &mut demux {
-        Some(element) => {
-            let demux_node = graph.add_transform(GraphNodeRef::element_ref(&mut **element));
-            link(&mut graph, source_node, demux_node)?;
-            link(&mut graph, demux_node, sink_node)?;
+    let sink_nodes: Vec<g2g_core::NodeId> = sinks
+        .iter_mut()
+        .map(|sink| graph.add_sink(GraphNodeRef::element_ref(sink)))
+        .collect();
+    match demux {
+        Some(ProbeDemux::Fanout { element, outputs }) => {
+            let demux = graph.add_demux(GraphNodeRef::Demux(element), outputs as u8);
+            link(&mut graph, source_node, demux.input())?;
+            for (port, sink_node) in sink_nodes.iter().enumerate() {
+                link(&mut graph, demux.out(port as u8), *sink_node)?;
+            }
         }
-        None => link(&mut graph, source_node, sink_node)?,
+        Some(ProbeDemux::Single(element)) => {
+            let demux_node = graph.add_transform(GraphNodeRef::Element(element));
+            link(&mut graph, source_node, demux_node)?;
+            link(&mut graph, demux_node, sink_nodes[0])?;
+        }
+        None => link(&mut graph, source_node, sink_nodes[0])?,
     }
 
     let clock = WallClock::new();
@@ -298,7 +332,7 @@ pub async fn discover(reg: &Registry, uri: &str) -> Result<Discovery, DiscoverEr
         // No demuxer announced a collection (a single-stream container like WAV,
         // or a bare elementary stream). The caps the probe negotiated describe
         // that one stream.
-        if let Some(caps) = sink.caps.take() {
+        if let Some(caps) = sinks[0].caps.take() {
             info.streams.push(DiscoveredStream {
                 id: LONE_STREAM_ID.to_string(),
                 stream_type: StreamType::of(&caps),
@@ -327,10 +361,19 @@ fn is_mp4(caps: &Caps) -> bool {
     )
 }
 
+fn is_mxf(caps: &Caps) -> bool {
+    matches!(
+        caps,
+        Caps::ByteStream {
+            encoding: g2g_core::ByteStreamEncoding::Mxf,
+        }
+    )
+}
+
 fn link(
     graph: &mut Graph<GraphNodeRef<'_>>,
-    from: g2g_core::NodeId,
-    to: g2g_core::NodeId,
+    from: impl Into<g2g_core::graph::PadId>,
+    to: impl Into<g2g_core::graph::PadId>,
 ) -> Result<(), DiscoverError> {
     graph
         .link(from, to)

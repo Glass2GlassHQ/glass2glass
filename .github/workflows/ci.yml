@@ -403,7 +403,7 @@ jobs:
           cargo test -p g2g-plugins --locked --features v4l2,alsa-src,wgpu-sink
           --test m939_device_providers --test m944_device_id_controls
       - name: test g2g-player
-        run: cargo test -p g2g-player --locked --features wgpu,openh264
+        run: cargo test -p g2g-player --locked --features wgpu,openh264,ffmpeg
       # downloadbuffer acceptance (M861): a moov-at-end MP4 pushed over local
       # HTTP spills to disk and demuxes identically to a direct file read.
       - name: test g2g-plugins (downloadbuffer)

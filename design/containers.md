@@ -1522,6 +1522,17 @@ back to the stored size, which is padded to whole macroblocks, and doubled for
 separate or mixed fields. The source clips of the material package are not
 applied, so a file plays its whole essence.
 
+`MxfDemux` is `MxfDemuxN` with one port, the element a bare `decodebin`,
+`uridecodebin` and `edlsrc` build by name. `g2g-discover` plugs `MxfDemuxN`
+with a port per track instead, so it lists every track. `MxfDemux`'s `stream`
+property names the essence (`h264`, `jpeg2000`, a ProRes profile, `S24LE`, ...)
+and `track-number` picks one track among several of that essence. The port
+negotiates placeholder caps for the stream and takes its track from the header
+metadata once it has read it, failing the run when no track matches. The
+`mxf_primary_stream` hook pins both properties for each track it reads from the
+file's first 4 MiB, video first. Since a one-port element is never queried for
+its duration, `MxfDemux` posts `DurationChanged` on the bus itself.
+
 When the run parks its source, the demuxer reads the last 250 kB through a byte
 seek (`TailRead`), walks the partitions the random index pack lists in that
 range for their index segments, then reads from byte 0 and sends each essence

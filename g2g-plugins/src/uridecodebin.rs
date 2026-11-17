@@ -1190,6 +1190,36 @@ pub fn mxf_decodebin_select(
     mxf_select(location, every_stream).map(|(demux, caps)| (demux, uncropped_ports(caps)))
 }
 
+#[cfg(feature = "std")]
+pub fn mxf_primary_stream(location: &str, caps: &Caps) -> Option<ContainerStreams> {
+    if !is_container(caps, &[ByteStreamEncoding::Mxf]) {
+        return None;
+    }
+    let prefix = read_prefix(location)?;
+    let mut infos = crate::mxfdemux::forwardable_tracks(&prefix);
+    if infos.is_empty() {
+        return None;
+    }
+    infos.sort_by_key(|info| !info.video);
+    let streams = infos
+        .into_iter()
+        .map(|info| PrimaryStream {
+            demux: "mxfdemux",
+            props: pinned_stream_selection(
+                info.stream_name(),
+                "track-number",
+                info.track_number().into(),
+            ),
+            caps: info.caps,
+            has_clean_aperture: false,
+        })
+        .collect();
+    Some(ContainerStreams {
+        streams,
+        unsupported: Vec::new(),
+    })
+}
+
 /// Bare-`decodebin` primary-stream hook for MPEG program streams: the
 /// program stream sibling of [`ts_primary_stream`]. An audio-only `.mpg` through
 /// `filesrc ! decodebin` selects the demux's audio stream instead of failing on
@@ -1918,7 +1948,7 @@ pub fn mp4_uri_fanout(_reg: &Registry, uri: &str) -> Result<Option<UriFanout>, P
 /// Read up to the probe limit from a plain file path (the demux hook receives a
 /// `filesrc location=`, a bare path, not a `file://` URI).
 #[cfg(feature = "std")]
-fn read_prefix(path: &str) -> Option<Vec<u8>> {
+pub(crate) fn read_prefix(path: &str) -> Option<Vec<u8>> {
     use std::io::Read;
     let mut prefix = Vec::new();
     let f = std::fs::File::open(path).ok()?;

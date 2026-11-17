@@ -11,7 +11,7 @@ use g2g_plugins::checksumsink::checksum_line;
 #[path = "common/g2g_launch.rs"]
 mod g2g_launch;
 
-use g2g_launch::{checksum_lines, launch};
+use g2g_launch::{checksum_lines, launch, written_bytes};
 
 // ffmpeg -f lavfi -i testsrc=size=64x48:rate=25:duration=3 -c:v libx264 -g 10 -keyint_min 10 -sc_threshold 0 -bf 0
 const MP4_FIXTURE: &str = concat!(
@@ -169,17 +169,6 @@ const AUDIO_CUTS: [Cut; 3] = [
         length_ns: None,
     },
 ];
-
-fn written_bytes(pipeline: &str, file_name: &str) -> Vec<u8> {
-    let path = format!("{}/{file_name}", env!("CARGO_TARGET_TMPDIR"));
-    let output = launch(&[], &format!("{pipeline} ! filesink location={path}"));
-    assert!(
-        output.status.success(),
-        "{pipeline} fails: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    std::fs::read(&path).unwrap_or_else(|error| panic!("cannot read {path}: {error}"))
-}
 
 #[test]
 fn the_audio_stream_after_new_stream_plays_each_cut_back_to_back() {

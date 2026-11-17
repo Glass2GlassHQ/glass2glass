@@ -1355,6 +1355,10 @@ pub fn default_registry() -> Registry {
     reg.register_launch(LaunchFactory::of::<MkvDemux>("matroskademux", || {
         Box::new(MkvDemux::new())
     }));
+    reg.register_launch(LaunchFactory::of::<crate::mxfdemux::MxfDemux>(
+        "mxfdemux",
+        || Box::new(crate::mxfdemux::MxfDemux::new()),
+    ));
     reg.register_launch(LaunchFactory::of::<IvfDemux>("ivfdemux", || {
         Box::new(IvfDemux::new())
     }));
@@ -2015,6 +2019,7 @@ fn register_uri_handlers(reg: &mut Registry) {
     reg.register_primary_stream(crate::uridecodebin::ps_primary_stream);
     reg.register_primary_stream(crate::uridecodebin::avi_primary_stream);
     reg.register_primary_stream(crate::uridecodebin::flv_primary_stream);
+    reg.register_primary_stream(crate::uridecodebin::mxf_primary_stream);
     // hls:// fan-out (M395): probe the master playlist, fan its variant's muxed TS
     // streams out; the hls_handler is the single-stream fallback it declines to.
     #[cfg(feature = "hls")]
@@ -2194,6 +2199,10 @@ fn register_autoplug_candidates(reg: &mut Registry) {
     reg.register(ElementFactory::of::<MkvDemux>("matroskademux", |_| {
         Box::new(MkvDemux::new())
     }));
+    reg.register(ElementFactory::of::<crate::mxfdemux::MxfDemux>(
+        "mxfdemux",
+        |_| Box::new(crate::mxfdemux::MxfDemux::new()),
+    ));
     reg.register(ElementFactory::of::<IvfDemux>("ivfdemux", |_| {
         Box::new(IvfDemux::new())
     }));

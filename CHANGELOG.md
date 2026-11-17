@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2398: a single-output `mxfdemux`, so bare `decodebin`, `edl://` timelines and `g2g-discover` open MXF files.
 - M2397: `g2g-player` reports `container-fps` from the stream's caps, never the 1 fps negotiation placeholder.
 - M2396: a non-live path adds no latency to presentation deadlines, so seeks play on without a decoder's held pictures.
 - M2395: `g2g-player` plays DCP and IMF JPEG 2000 pictures, and an MXF file holding program stream bytes plays as MXF.

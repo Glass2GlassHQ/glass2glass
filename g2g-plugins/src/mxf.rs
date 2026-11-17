@@ -584,16 +584,21 @@ fn essence(descriptor: &LocalSet) -> Option<Essence> {
 const SEPARATE_FIELDS: u8 = 1;
 const MIXED_FIELDS: u8 = 3;
 
+// the sample format of each quantization bit depth a sound descriptor can state
+pub(crate) const QUANTIZATION_FORMATS: [(u32, AudioFormat); 3] = [
+    (16, AudioFormat::PcmS16Le),
+    (24, AudioFormat::PcmS24Le),
+    (32, AudioFormat::PcmS32Le),
+];
+
 fn pcm(descriptor: &LocalSet) -> Option<Essence> {
     if !SOUND_DESCRIPTORS.contains(&descriptor.kind) {
         return None;
     }
-    let format = match descriptor.u32(QUANTIZATION_BITS_TAG)? {
-        16 => AudioFormat::PcmS16Le,
-        24 => AudioFormat::PcmS24Le,
-        32 => AudioFormat::PcmS32Le,
-        _ => return None,
-    };
+    let bits = descriptor.u32(QUANTIZATION_BITS_TAG)?;
+    let (_, format) = QUANTIZATION_FORMATS
+        .into_iter()
+        .find(|(depth, _)| *depth == bits)?;
     let channels = descriptor.u32(CHANNEL_COUNT_TAG)?;
     if channels == 0 || channels > MAX_CHANNELS {
         return None;
