@@ -974,6 +974,12 @@ pub mod splitmuxsink;
 // Split-muxer source: the parts a splitmuxsink wrote played back as one stream.
 #[cfg(feature = "std")]
 pub mod splitmuxsrc;
+// mpv's `edl://` timeline URI, parsed into per-stream segment lists.
+#[cfg(feature = "std")]
+pub mod edl;
+// Plays an mpv `edl://` timeline: each segment decodes in a child graph on its own thread.
+#[cfg(feature = "std")]
+pub mod edlsrc;
 // HLS packager: cuts a muxed byte stream into segment files plus a rolling
 // m3u8 media playlist (M896).
 #[cfg(feature = "std")]

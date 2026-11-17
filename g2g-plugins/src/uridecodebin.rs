@@ -307,7 +307,7 @@ const PLAYBIN_PROBE_BYTES: u64 = 4 * 1024 * 1024;
 
 /// Per-port decode-chain search depth, matching the `decodebin` / `playbin` macro.
 #[cfg(feature = "std")]
-const PLAYBIN_MAX_DEPTH: usize = 6;
+pub(crate) const PLAYBIN_MAX_DEPTH: usize = 6;
 
 #[cfg(feature = "std")]
 use alloc::string::{String, ToString};

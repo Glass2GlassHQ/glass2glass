@@ -772,6 +772,11 @@ pub fn default_registry() -> Registry {
         crate::typefind::elementary_video_caps(g2g_core::VideoCodec::H264),
         || Box::new(crate::splitmuxsrc::SplitMuxSrc::new("")),
     ));
+    reg.register_source(SourceFactory::new(
+        "edlsrc",
+        crate::videofx::any_geometry(g2g_core::RawVideoFormat::Nv12),
+        || Box::new(crate::edlsrc::EdlSrc::new()),
+    ));
     // `data:` URI source (M1088): the payload inside the URI, typed by sniffing
     // it. The declared caps are a placeholder, replaced once the URI is read.
     reg.register_source(SourceFactory::new(

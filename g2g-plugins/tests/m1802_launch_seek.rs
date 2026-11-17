@@ -4,13 +4,17 @@
 
 #![cfg(feature = "ffmpeg")]
 
-use std::process::{Command, Output};
+use std::process::Output;
 
 use g2g_core::runtime::{parse_launch, run_graph_with_progress, PipelineProgress};
 use g2g_core::PipelineClock;
 use g2g_plugins::checksumsink::checksum_line;
 use g2g_plugins::registry::default_registry;
 
+use g2g_launch::{checksum_lines, launch};
+
+#[path = "common/g2g_launch.rs"]
+mod g2g_launch;
 #[cfg(feature = "hls")]
 #[path = "common/http_routes.rs"]
 mod http_routes;
@@ -90,33 +94,12 @@ fn seek_seconds(milliseconds: u64) -> String {
     format!("{}", milliseconds as f64 / 1_000.0)
 }
 
-fn launch(options: &[&str], pipeline: &str) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_g2g-launch"))
-        .arg("-q")
-        .args(options)
-        .args(pipeline.split_whitespace())
-        .output()
-        .expect("g2g-launch starts")
-}
-
 fn launch_with_seek(seconds: &str, pipeline: &str) -> Output {
     launch(&["--seek", seconds], pipeline)
 }
 
 fn first_frame_at(milliseconds: u64) -> u64 {
     (milliseconds * NANOS_PER_MILLISECOND).div_ceil(FRAME_PERIOD_NS)
-}
-
-fn checksum_lines(output: &Output) -> Vec<String> {
-    assert!(
-        output.status.success(),
-        "g2g-launch fails: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .map(str::to_string)
-        .collect()
 }
 
 fn assert_starts_at_the_frame_after_the_seek(lines: &[String], first_pts_ns: u64) {

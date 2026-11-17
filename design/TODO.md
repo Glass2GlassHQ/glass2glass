@@ -52,9 +52,11 @@ The plan is [remote.md](remote.md).
 - Duration of an Ogg file with no audio stream (Theora or VP8 granules), and
   of an FLV file without `onMetaData`, from its last tag.
 - Track selection and the `track-list` property.
-- guikit's controls: `edl://` timelines, `lavfi` video filters, an `astats`
-  level meter, ASS `osd-overlay`, `sub-add` slots, `osd-dimensions` and
-  `video-params`.
+- `edl://` timelines: the sound stream after `!new_stream` as a second `edlsrc`
+  that outputs audio, and `Media::Uri("edl://...")` in the player.
+- An MXF demuxer, for the package EDLs guikit sends.
+- guikit's controls: `lavfi` video filters, an `astats` level meter, ASS
+  `osd-overlay`, `sub-add` slots, `osd-dimensions` and `video-params`.
 - Take GPU frames in `playervideosink` once decoders open on the host's device.
 - Audio clock driving A/V sync, and an option that hands PCM to the host.
 - A versioned C ABI (`g2g_player.h`), wrapped in the C#, C++, Kotlin and
