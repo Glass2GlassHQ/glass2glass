@@ -697,7 +697,9 @@ H.264 level's DPB bound, and stamps each frame it releases with the smallest
 presentation time still pending. Every track's timestamps move later by that
 depth times `DefaultDuration`, so the first decode time is not below zero.
 Stream time and seek targets count from the stream start, so neither moves, and
-the Cues lookup subtracts the shift. `finish` releases the held frames at the
+the Cues lookup subtracts the shift. The reported duration counts from the stream start
+too: the Segment `Duration` plus the shift, less the first frame's time, so a
+file whose first frame is not at zero reports the span its seeks cover. `finish` releases the held frames at the
 end of the stream. A remux into `mp4mux`, `flvmux` or `mpegtsmux` then writes
 real decode times, where gst's `matroskademux` leaves them unset.
 

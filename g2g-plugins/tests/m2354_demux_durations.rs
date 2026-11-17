@@ -9,6 +9,7 @@ use std::time::Duration;
 use g2g_core::runtime::{attach_seek, attach_seek_controller, parse_launch, RunBuilder};
 use g2g_core::{Bus, BusMessage, Seek};
 use g2g_plugins::clock::WallClock;
+use g2g_plugins::discover::discover;
 use g2g_plugins::registry::default_registry;
 
 // the fixtures of m2347, 2 s of 25 fps video and 48 kHz audio, with the durations
@@ -29,10 +30,11 @@ const LINK_CAPACITY: usize = 4;
 const BUS_CAPACITY: usize = 4096;
 const RUN_TIMEOUT: Duration = Duration::from_secs(10);
 
-async fn reported_duration_ns(fixture: &str, demux: &str) -> Option<u64> {
+const AUDIO_AND_VIDEO_BRANCHES: &str = "name=d d.video_0 ! fakesink  d.audio_0 ! fakesink";
+
+async fn reported_duration_ns(fixture: &str, demux: &str, branches: &str) -> Option<u64> {
     let line = format!(
-        "filesrc location={}/tests/fixtures/{fixture} blocksize={CHUNK_LEN} ! {demux} name=d \
-         d.video_0 ! fakesink  d.audio_0 ! fakesink",
+        "filesrc location={}/tests/fixtures/{fixture} blocksize={CHUNK_LEN} ! {demux} {branches}",
         env!("CARGO_MANIFEST_DIR")
     );
     let mut graph = parse_launch(&default_registry(), &line)
@@ -60,12 +62,49 @@ async fn reported_duration_ns(fixture: &str, demux: &str) -> Option<u64> {
 #[tokio::test]
 async fn every_demuxer_reports_the_duration_ffprobe_reads() {
     for (fixture, demux, ffprobe_ns) in FIXTURES {
-        let duration_ns = reported_duration_ns(fixture, demux)
+        let duration_ns = reported_duration_ns(fixture, demux, AUDIO_AND_VIDEO_BRANCHES)
             .await
             .unwrap_or_else(|| panic!("{fixture}: no duration"));
         assert!(
             duration_ns.abs_diff(ffprobe_ns) <= FRAME_PERIOD_NS,
             "{fixture}: {duration_ns} ns, ffprobe reads {ffprobe_ns} ns"
+        );
+    }
+}
+
+// ffprobe -show_entries format=start_time,duration: the first is 0.4 s and 3.4 s, the second 0.36 s and 0.64 s
+const LATE_START_MKV_FIXTURES: [(&str, u64, u64); 2] = [
+    (
+        "h264_64x48_25fps_gop10_bframes_offset.mkv",
+        400_000_000,
+        3_400_000_000,
+    ),
+    (
+        "h264_64x48_25fps_leading_bframes.mkv",
+        360_000_000,
+        640_000_000,
+    ),
+];
+
+#[tokio::test]
+async fn a_late_starting_matroska_file_reports_its_duration_from_the_first_frame() {
+    for (fixture, start_ns, ffprobe_ns) in LATE_START_MKV_FIXTURES {
+        let expected_ns = Some(ffprobe_ns - start_ns);
+        assert_eq!(
+            reported_duration_ns(fixture, "matroskademux", "name=d d.video_0 ! fakesink").await,
+            expected_ns,
+            "{fixture} through matroskademux name=d"
+        );
+        let uri = format!(
+            "file://{}/tests/fixtures/{fixture}",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let discovery = discover(&default_registry(), &uri)
+            .await
+            .unwrap_or_else(|error| panic!("{fixture}: {error:?}"));
+        assert_eq!(
+            discovery.duration_ns, expected_ns,
+            "{fixture} through discover"
         );
     }
 }

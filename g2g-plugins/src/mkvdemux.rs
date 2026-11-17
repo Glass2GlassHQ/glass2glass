@@ -530,7 +530,6 @@ impl MkvDemux {
     fn post_tags(&mut self) {
         self.metadata.post(&self.demux, self.bus.as_ref());
         self.metadata.post_chapters(&self.demux, self.bus.as_ref());
-        self.metadata.post_duration(&self.demux, self.bus.as_ref());
     }
 
     /// Announce every elementary stream the container declares as a
@@ -724,6 +723,11 @@ impl MkvDemux {
                 continue; // a stream other than the selected one
             }
             self.seek.lower_seek_stream_start(f.pts_ns);
+            self.metadata.post_duration(
+                &self.demux,
+                self.seek.stream_start_ns(),
+                self.bus.as_ref(),
+            );
             // M362 seek: hold frames from the keyframe at/before the target (the
             // Matroska block keyframe flag) until the target, then a segment and them.
             let admitted = self.seek.admit(0, f.pts_ns, f.keyframe, f);
@@ -1375,8 +1379,12 @@ struct MetadataPoster {
     track_posted: usize,
     /// Chapters already posted, so a second call re-posts nothing.
     chapters_posted: usize,
-    /// Set once the Segment `Info` duration has been announced.
-    duration_posted: bool,
+    posted_duration_ns: Option<u64>,
+}
+
+// a seek counts from the stream's first frame, the segment's end from timestamp 0
+fn stream_time_duration(demux: &MatroskaDemuxer, stream_start_ns: Option<u64>) -> Option<u64> {
+    Some(demux.presented_end_ns()?.saturating_sub(stream_start_ns?))
 }
 
 impl MetadataPoster {
@@ -1426,18 +1434,23 @@ impl MetadataPoster {
         }
     }
 
-    /// Post the Segment `Info` `Duration` once, as a
-    /// [`BusMessage::DurationChanged`], so an application knows the file's
-    /// length without waiting for it to play out. A Matroska stream is demuxed,
-    /// not sourced, so the runner's `query_duration` path never sees it.
-    fn post_duration(&mut self, demux: &MatroskaDemuxer, bus: Option<&BusHandle>) {
-        if self.duration_posted {
-            return;
-        }
-        let Some(duration_ns) = demux.duration_ns() else {
+    /// Post the Segment `Info` `Duration`, measured from the stream's first
+    /// frame, as a [`BusMessage::DurationChanged`], so an application knows the
+    /// file's length without waiting for it to play out. A Matroska stream is
+    /// demuxed, not sourced, so the runner's `query_duration` path never sees it.
+    fn post_duration(
+        &mut self,
+        demux: &MatroskaDemuxer,
+        stream_start_ns: Option<u64>,
+        bus: Option<&BusHandle>,
+    ) {
+        let Some(duration_ns) = stream_time_duration(demux, stream_start_ns) else {
             return;
         };
-        self.duration_posted = true;
+        if self.posted_duration_ns == Some(duration_ns) {
+            return;
+        }
+        self.posted_duration_ns = Some(duration_ns);
         if let Some(bus) = bus {
             bus.try_post(BusMessage::DurationChanged { duration_ns });
         }
@@ -1818,6 +1831,11 @@ impl MkvDemuxN {
     async fn route_frames(&mut self, out: &mut dyn MultiOutputSink) -> Result<(), G2gError> {
         for f in self.demux.take_frames() {
             self.seek.note_track_unit(f.track, f.pts_ns);
+            self.metadata.post_duration(
+                &self.demux,
+                self.seek.stream_start_ns(),
+                self.bus.as_ref(),
+            );
             let Some(port) = self.port_for_track(f.codec, f.track) else {
                 continue; // a track no selected port carries
             };
@@ -1918,7 +1936,6 @@ impl MkvDemuxN {
     fn post_tags(&mut self) {
         self.metadata.post(&self.demux, self.bus.as_ref());
         self.metadata.post_chapters(&self.demux, self.bus.as_ref());
-        self.metadata.post_duration(&self.demux, self.bus.as_ref());
     }
 }
 
@@ -1964,7 +1981,7 @@ impl MultiOutputElement for MkvDemuxN {
     }
 
     fn query_duration(&self) -> Option<u64> {
-        self.demux.duration_ns()
+        stream_time_duration(&self.demux, self.seek.stream_start_ns())
     }
 
     fn seek_route(&self) -> Option<ElementSeekRoute> {

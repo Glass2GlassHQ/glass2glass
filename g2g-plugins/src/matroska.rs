@@ -1173,6 +1173,11 @@ impl MatroskaDemuxer {
         self.duration_ns
     }
 
+    // the end of the segment on the axis of the frames' pts, which `complete` moves later by the reorder shift
+    pub fn presented_end_ns(&self) -> Option<u64> {
+        Some(self.duration_ns?.saturating_add(self.reorder_shift_ns))
+    }
+
     /// The `CodecPrivate` decoder-init bytes for a track number, if the track
     /// carried a non-empty one (FLAC's native `fLaC` STREAMINFO header).
     pub fn codec_private(&self, track: u64) -> Option<&[u8]> {
