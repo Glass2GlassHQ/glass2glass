@@ -7,9 +7,10 @@ use std::sync::Arc;
 
 use g2g_core::{Caps, G2gError};
 use g2g_plugins::glnv12::{GlTarget, GlVideoRenderer};
+use g2g_plugins::ViewportRectangle;
 
 use crate::videosink::DueFrame;
-use crate::{Player, Shared};
+use crate::{OsdDimensions, Player, Shared};
 
 #[derive(Debug)]
 struct FrameFeed {
@@ -37,6 +38,17 @@ impl FrameFeed {
         }
         self.configured_caps = Some(current.caps.clone());
         Some((current, Some(&current.caps)))
+    }
+
+    fn report_drawn(&self, picture: ViewportRectangle, (width, height): (u32, u32)) {
+        self.shared.set_osd_dimensions(OsdDimensions {
+            width,
+            height,
+            margin_left: picture.x,
+            margin_top: picture.y,
+            margin_right: width - picture.x - picture.width,
+            margin_bottom: height - picture.y - picture.height,
+        });
     }
 }
 
@@ -68,7 +80,10 @@ impl GlRenderContext {
             self.renderer.configure(caps)?;
         }
         // SAFETY: forwarded from the caller.
-        unsafe { self.renderer.draw(&frame.frame.domain, target) }
+        let picture = unsafe { self.renderer.draw(&frame.frame.domain, target) }?;
+        self.feed
+            .report_drawn(picture, (target.width, target.height));
+        Ok(())
     }
 
     /// # Safety
@@ -125,11 +140,10 @@ mod wgpu_target {
                 renderer.configure(caps)?;
             }
             let view = target.create_view(&wgpu::TextureViewDescriptor::default());
-            renderer.draw(
-                &frame.frame.domain,
-                &view,
-                (target.width(), target.height()),
-            )
+            let target_size = (target.width(), target.height());
+            let picture = renderer.draw(&frame.frame.domain, &view, target_size)?;
+            self.feed.report_drawn(picture, target_size);
+            Ok(())
         }
     }
 }

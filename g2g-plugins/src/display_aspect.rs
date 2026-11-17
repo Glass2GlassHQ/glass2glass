@@ -101,7 +101,7 @@ pub(crate) fn scaled_pixel_aspect(
 
 #[cfg(any(feature = "wgpu-sink", feature = "gl-render"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct ViewportRectangle {
+pub struct ViewportRectangle {
     pub x: u32,
     pub y: u32,
     pub width: u32,

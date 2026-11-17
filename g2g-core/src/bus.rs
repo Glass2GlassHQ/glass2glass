@@ -276,6 +276,14 @@ pub enum BusMessage {
         element: alloc::string::String,
         timeout_ns: u64,
     },
+    // gst level's element message: each channel's peak and RMS in dB over one interval, -inf for silence
+    Level {
+        element: alloc::string::String,
+        // the pts of the interval's first sample
+        pts_ns: u64,
+        peak_db: alloc::vec::Vec<f64>,
+        rms_db: alloc::vec::Vec<f64>,
+    },
 }
 
 /// What a restarting source is doing, gst `fallbacksrc`'s `status`.

@@ -90,6 +90,31 @@ pub struct VideoScale {
     configured: bool,
     last_caps: Option<Caps>,
     emitted: u64,
+    method: ScaleMethod,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ScaleMethod {
+    #[default]
+    Bilinear,
+    Lanczos,
+}
+
+impl ScaleMethod {
+    fn parse(name: &str) -> Option<ScaleMethod> {
+        match name {
+            "bilinear" => Some(ScaleMethod::Bilinear),
+            "lanczos" => Some(ScaleMethod::Lanczos),
+            _ => None,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            ScaleMethod::Bilinear => "bilinear",
+            ScaleMethod::Lanczos => "lanczos",
+        }
+    }
 }
 
 impl VideoScale {
@@ -104,6 +129,7 @@ impl VideoScale {
             configured: false,
             last_caps: None,
             emitted: 0,
+            method: ScaleMethod::Bilinear,
         }
     }
 
@@ -297,6 +323,7 @@ impl AsyncElement for VideoScale {
                     let scaled = scale(
                         src,
                         format,
+                        self.method,
                         in_w as usize,
                         in_h as usize,
                         out_w as usize,
@@ -390,6 +417,11 @@ impl AsyncElement for VideoScale {
                 self.target_h = value.as_uint().ok_or(PropError::Type)? as u32;
                 Ok(())
             }
+            "method" => {
+                let name = value.as_str().ok_or(PropError::Type)?;
+                self.method = ScaleMethod::parse(name).ok_or(PropError::Value)?;
+                Ok(())
+            }
             _ => Err(PropError::Unknown),
         }
     }
@@ -398,6 +430,7 @@ impl AsyncElement for VideoScale {
         match name {
             "width" => Some(PropValue::Uint(self.target_w as u64)),
             "height" => Some(PropValue::Uint(self.target_h as u64)),
+            "method" => Some(PropValue::Str(self.method.name().into())),
             _ => None,
         }
     }
@@ -407,6 +440,9 @@ impl AsyncElement for VideoScale {
 static VIDEOSCALE_PROPS: &[PropertySpec] = &[
     PropertySpec::new("width", PropKind::Uint, "output width in pixels"),
     PropertySpec::new("height", PropKind::Uint, "output height in pixels"),
+    PropertySpec::new("method", PropKind::Str, "resampling filter")
+        .with_enum_values("bilinear | lanczos")
+        .with_default("bilinear"),
 ];
 
 impl PadTemplates for VideoScale {
@@ -518,6 +554,7 @@ fn resample_plane(
 pub fn scale(
     src: &[u8],
     format: RawVideoFormat,
+    method: ScaleMethod,
     in_w: usize,
     in_h: usize,
     out_w: usize,
@@ -526,24 +563,40 @@ pub fn scale(
     if in_w == out_w && in_h == out_h {
         return src[..frame_byte_size(format, in_w as u32, in_h as u32)].into();
     }
-    let luma_cols = axis_samples(in_w, out_w, 0);
-    let luma_rows = axis_samples(in_h, out_h, 0);
+    let max_sample = (1u32 << format.bit_depth()) - 1;
+    let plane =
+        |data: &[u8], src_w: usize, (shift_x, shift_y): (u32, u32), channels: usize| match method {
+            ScaleMethod::Bilinear => {
+                let cols = axis_samples(in_w, out_w, shift_x);
+                let rows = axis_samples(in_h, out_h, shift_y);
+                match format.bytes_per_sample() {
+                    2 => resample_plane16(data, src_w, &cols, &rows),
+                    _ => resample_plane(data, src_w, &cols, &rows, channels),
+                }
+            }
+            ScaleMethod::Lanczos => lanczos_plane(
+                data,
+                src_w,
+                &lanczos_axis(in_w, out_w, shift_x),
+                &lanczos_axis(in_h, out_h, shift_y),
+                channels,
+                format.bytes_per_sample(),
+                max_sample,
+            ),
+        };
     match format {
         RawVideoFormat::Rgba8 | RawVideoFormat::Bgra8 => {
-            resample_plane(src, in_w, &luma_cols, &luma_rows, 4).into_boxed_slice()
+            plane(src, in_w, (0, 0), 4).into_boxed_slice()
         }
-        RawVideoFormat::Rgb8 => {
-            resample_plane(src, in_w, &luma_cols, &luma_rows, 3).into_boxed_slice()
-        }
+        RawVideoFormat::Rgb8 => plane(src, in_w, (0, 0), 3).into_boxed_slice(),
         RawVideoFormat::Nv12 => {
             let luma_in = in_w * in_h;
             let (chroma_w, chroma_h) = chroma_420_size(in_w, in_h);
-            let mut out = resample_plane(&src[..luma_in], in_w, &luma_cols, &luma_rows, 1);
-            let chroma = resample_plane(
+            let mut out = plane(&src[..luma_in], in_w, (0, 0), 1);
+            let chroma = plane(
                 &src[luma_in..luma_in + chroma_w * chroma_h * 2],
                 chroma_w,
-                &axis_samples(in_w, out_w, 1),
-                &axis_samples(in_h, out_h, 1),
+                (1, 1),
                 2,
             );
             out.extend_from_slice(&chroma);
@@ -556,31 +609,132 @@ pub fn scale(
         // as little-endian `u16` (byte-wise bilerp would blend the high and low byte
         // of a sample independently and corrupt it).
         f => {
-            let (hs, vs) = f.chroma_shift().expect("planar format");
+            let chroma_shift = f.chroma_shift().expect("planar format");
             let bps = f.bytes_per_sample();
             let planes = planar_planes(f, in_w, in_h);
-            let resample = |plane: &[u8], src_w, cols: &[_], rows: &[_]| {
-                if bps == 2 {
-                    resample_plane16(plane, src_w, cols, rows)
-                } else {
-                    resample_plane(plane, src_w, cols, rows, 1)
-                }
-            };
-            let chroma_cols = axis_samples(in_w, out_w, hs);
-            let chroma_rows = axis_samples(in_h, out_h, vs);
-            let mut out = resample(&src[..planes[1].0], in_w, &luma_cols, &luma_rows);
+            let mut out = plane(&src[..planes[1].0], in_w, (0, 0), 1);
             for (off, pw, ph) in [planes[1], planes[2]] {
-                let plane = resample(
-                    &src[off..off + pw * ph * bps],
-                    pw,
-                    &chroma_cols,
-                    &chroma_rows,
-                );
-                out.extend_from_slice(&plane);
+                out.extend_from_slice(&plane(&src[off..off + pw * ph * bps], pw, chroma_shift, 1));
             }
             out.into_boxed_slice()
         }
     }
+}
+
+// ffmpeg's swscale lanczos and gst videoscale's default both use three lobes
+const LANCZOS_LOBES: f64 = 3.0;
+const LANCZOS_WEIGHT_BITS: u32 = 14;
+
+#[derive(Debug)]
+struct LanczosAxis {
+    taps: usize,
+    // per output sample, the source index of its first tap, which can lie outside the plane
+    first: Vec<isize>,
+    weights: Vec<i32>,
+    src_n: usize,
+}
+
+fn lanczos(x: f64) -> f64 {
+    if x.abs() >= LANCZOS_LOBES {
+        return 0.0;
+    }
+    crate::mathf::sinc(x) * crate::mathf::sinc(x / LANCZOS_LOBES)
+}
+
+// a downscale widens the kernel by the scale factor so it low-passes to the output's Nyquist
+fn lanczos_axis(in_luma: usize, out_luma: usize, shift: u32) -> LanczosAxis {
+    let src_n = in_luma.div_ceil(1 << shift);
+    let dst_n = out_luma.div_ceil(1 << shift);
+    let ratio = in_luma as f64 / out_luma as f64;
+    let stretch = ratio.max(1.0);
+    let radius = LANCZOS_LOBES * stretch;
+    let taps = 2 * crate::mathf::round_to_i64(radius + 0.5) as usize;
+    let unity = 1i32 << LANCZOS_WEIGHT_BITS;
+    let mut first = Vec::with_capacity(dst_n);
+    let mut weights = Vec::with_capacity(dst_n * taps);
+    for out in 0..dst_n {
+        let center = (out as f64 + 0.5) * ratio - 0.5;
+        let start = crate::mathf::round_to_i64(center - radius + 0.5) as isize;
+        let raw: Vec<f64> = (0..taps)
+            .map(|tap| lanczos((start as f64 + tap as f64 - center) / stretch))
+            .collect();
+        let sum: f64 = raw.iter().sum();
+        let mut fixed: Vec<i32> = raw
+            .iter()
+            .map(|weight| crate::mathf::round_to_i64(weight / sum * f64::from(unity)) as i32)
+            .collect();
+        let peak = (0..taps).max_by_key(|&tap| fixed[tap]).expect("taps > 0");
+        fixed[peak] += unity - fixed.iter().sum::<i32>();
+        first.push(start);
+        weights.extend(fixed);
+    }
+    LanczosAxis {
+        taps,
+        first,
+        weights,
+        src_n,
+    }
+}
+
+// separable: rows first into a full-precision buffer, then columns, clamped since the lobes overshoot
+fn lanczos_plane(
+    src: &[u8],
+    src_w: usize,
+    cols: &LanczosAxis,
+    rows: &LanczosAxis,
+    channels: usize,
+    bytes_per_sample: usize,
+    max_sample: u32,
+) -> Vec<u8> {
+    let read = |index: usize| -> i64 {
+        match bytes_per_sample {
+            2 => i64::from(u16::from_le_bytes([src[index * 2], src[index * 2 + 1]])),
+            _ => i64::from(src[index]),
+        }
+    };
+    let clamp_index = |index: isize, n: usize| index.clamp(0, n as isize - 1) as usize;
+    let dst_w = cols.first.len();
+    let dst_h = rows.first.len();
+    let mut horizontal = vec![0i64; rows.src_n * dst_w * channels];
+    for y in 0..rows.src_n {
+        for (ox, &start) in cols.first.iter().enumerate() {
+            let weights = &cols.weights[ox * cols.taps..(ox + 1) * cols.taps];
+            for ch in 0..channels {
+                let sum: i64 = weights
+                    .iter()
+                    .enumerate()
+                    .map(|(tap, &weight)| {
+                        let x = clamp_index(start + tap as isize, cols.src_n);
+                        i64::from(weight) * read((y * src_w + x) * channels + ch)
+                    })
+                    .sum();
+                horizontal[(y * dst_w + ox) * channels + ch] = sum;
+            }
+        }
+    }
+    let round = 1i64 << (2 * LANCZOS_WEIGHT_BITS - 1);
+    let mut dst = vec![0u8; dst_w * dst_h * channels * bytes_per_sample];
+    for (oy, &start) in rows.first.iter().enumerate() {
+        let weights = &rows.weights[oy * rows.taps..(oy + 1) * rows.taps];
+        for ox in 0..dst_w * channels {
+            let sum: i64 = weights
+                .iter()
+                .enumerate()
+                .map(|(tap, &weight)| {
+                    let y = clamp_index(start + tap as isize, rows.src_n);
+                    i64::from(weight) * horizontal[y * dst_w * channels + ox]
+                })
+                .sum();
+            let value =
+                ((sum + round) >> (2 * LANCZOS_WEIGHT_BITS)).clamp(0, i64::from(max_sample));
+            let at = oy * dst_w * channels + ox;
+            match bytes_per_sample {
+                2 => dst[at * 2..at * 2 + 2].copy_from_slice(&(value as u16).to_le_bytes()),
+                _ => dst[at] = value as u8,
+            }
+        }
+    }
+    dst
 }
 
 /// Bilinear blend of four `u16` neighbours with Q16 weights, rounded to nearest;
@@ -673,7 +827,15 @@ mod tests {
         let (w, h) = (4usize, 4usize);
         let n = w * h + 2 * (w / 2) * (h / 2);
         let src: Vec<u8> = (0..n as u16).flat_map(|s| s.to_le_bytes()).collect();
-        let out = scale(&src, RawVideoFormat::I420p10, w, h, 2, 2);
+        let out = scale(
+            &src,
+            RawVideoFormat::I420p10,
+            ScaleMethod::Bilinear,
+            w,
+            h,
+            2,
+            2,
+        );
         // tight 2x2 I420 = 4 luma + 2x(1x1) chroma = 6 samples, 2 bytes each.
         assert_eq!(out.len(), 6 * 2);
     }
@@ -681,7 +843,15 @@ mod tests {
     #[test]
     fn identity_scale_is_exact_copy() {
         let src: Vec<u8> = (0..64u32 * 48 * 4).map(|i| (i & 0xFF) as u8).collect();
-        let out = scale(&src, RawVideoFormat::Rgba8, 64, 48, 64, 48);
+        let out = scale(
+            &src,
+            RawVideoFormat::Rgba8,
+            ScaleMethod::Bilinear,
+            64,
+            48,
+            64,
+            48,
+        );
         assert_eq!(&out[..], &src[..]);
     }
 
@@ -689,17 +859,44 @@ mod tests {
     fn output_byte_sizes_match_format() {
         let rgba: Vec<u8> = vec![0; 8 * 8 * 4];
         assert_eq!(
-            scale(&rgba, RawVideoFormat::Rgba8, 8, 8, 4, 4).len(),
+            scale(
+                &rgba,
+                RawVideoFormat::Rgba8,
+                ScaleMethod::Bilinear,
+                8,
+                8,
+                4,
+                4
+            )
+            .len(),
             4 * 4 * 4
         );
         let nv12: Vec<u8> = vec![0; 8 * 8 * 3 / 2];
         assert_eq!(
-            scale(&nv12, RawVideoFormat::Nv12, 8, 8, 4, 4).len(),
+            scale(
+                &nv12,
+                RawVideoFormat::Nv12,
+                ScaleMethod::Bilinear,
+                8,
+                8,
+                4,
+                4
+            )
+            .len(),
             4 * 4 * 3 / 2
         );
         let i420: Vec<u8> = vec![0; 8 * 8 * 3 / 2];
         assert_eq!(
-            scale(&i420, RawVideoFormat::I420, 8, 8, 4, 4).len(),
+            scale(
+                &i420,
+                RawVideoFormat::I420,
+                ScaleMethod::Bilinear,
+                8,
+                8,
+                4,
+                4
+            )
+            .len(),
             4 * 4 * 3 / 2
         );
     }
@@ -709,7 +906,15 @@ mod tests {
         // 2x2 NV12: 4 luma + one UV pair. Upscale to 4x4: luma fills 16
         // bytes, chroma becomes 2x2 with the single (u,v) replicated.
         let nv12 = [10u8, 20, 30, 40, 70, 200];
-        let out = scale(&nv12, RawVideoFormat::Nv12, 2, 2, 4, 4);
+        let out = scale(
+            &nv12,
+            RawVideoFormat::Nv12,
+            ScaleMethod::Bilinear,
+            2,
+            2,
+            4,
+            4,
+        );
         assert_eq!(out.len(), 4 * 4 + 2 * 2 * 2);
         // the lone chroma sample replicates across the 2x2 upscaled chroma.
         for pair in out[16..].as_chunks::<2>().0 {
@@ -830,7 +1035,15 @@ mod tests {
                 src[u_offset + row * chroma_w + column] = (SLOPE * centre) as u8;
             }
         }
-        let out = scale(&src, RawVideoFormat::I420, in_w, h, out_w, h);
+        let out = scale(
+            &src,
+            RawVideoFormat::I420,
+            ScaleMethod::Bilinear,
+            in_w,
+            h,
+            out_w,
+            h,
+        );
         let [_, (out_u_offset, out_chroma_w, _), _] = planar_planes(RawVideoFormat::I420, out_w, h);
         let last_input_centre = (2 * chroma_w - 1) as f64;
         for column in 0..out_w.div_ceil(2) {
@@ -865,8 +1078,24 @@ mod tests {
                 src[p + 3] = 255;
             }
         }
-        let down = scale(&src, RawVideoFormat::Rgba8, w, h, w / 2, h / 2);
-        let up = scale(&down, RawVideoFormat::Rgba8, w / 2, h / 2, w, h);
+        let down = scale(
+            &src,
+            RawVideoFormat::Rgba8,
+            ScaleMethod::Bilinear,
+            w,
+            h,
+            w / 2,
+            h / 2,
+        );
+        let up = scale(
+            &down,
+            RawVideoFormat::Rgba8,
+            ScaleMethod::Bilinear,
+            w / 2,
+            h / 2,
+            w,
+            h,
+        );
         let mse: f64 = src
             .iter()
             .zip(up.iter())
@@ -877,5 +1106,83 @@ mod tests {
             .sum::<f64>()
             / (src.len() as f64);
         assert!(mse < 65.0, "round-trip MSE {mse} too high (PSNR < 30 dB)");
+    }
+
+    // every luma row alternates 0 and 255, detail at the input's Nyquist that a 4x downscale cannot carry
+    fn stripes_i420(w: usize, h: usize) -> Vec<u8> {
+        let mut frame: Vec<u8> = (0..w * h)
+            .map(|i| if i % 2 == 0 { 0 } else { 255 })
+            .collect();
+        let (chroma_w, chroma_h) = chroma_420_size(w, h);
+        frame.resize(w * h + 2 * chroma_w * chroma_h, 128);
+        frame
+    }
+
+    // the output columns whose kernel stays inside the picture, the edge ones read the clamped edge sample
+    fn largest_interior_swing_from_grey(luma: &[u8], width: usize, edge_columns: usize) -> u8 {
+        const MID_GREY: u8 = 128;
+        luma.chunks(width)
+            .flat_map(|row| &row[edge_columns..width - edge_columns])
+            .map(|&sample| sample.abs_diff(MID_GREY))
+            .max()
+            .expect("an interior column")
+    }
+
+    #[test]
+    fn a_lanczos_downscale_filters_out_detail_above_the_output_nyquist() {
+        const ALIAS_TOLERANCE: u8 = 2;
+        // 3.2x puts bilinear's two taps at uneven weights, a whole ratio averages each stripe pair to grey
+        let (in_w, in_h, out_w, out_h) = (64, 8, 20, 2);
+        // a downscale kernel spans as many output columns each side as it has lobes
+        let edge_columns = LANCZOS_LOBES as usize;
+        let src = stripes_i420(in_w, in_h);
+        let swing = |method| {
+            let out = scale(&src, RawVideoFormat::I420, method, in_w, in_h, out_w, out_h);
+            largest_interior_swing_from_grey(&out[..out_w * out_h], out_w, edge_columns)
+        };
+        assert!(
+            swing(ScaleMethod::Lanczos) <= ALIAS_TOLERANCE,
+            "lanczos leaves stripes {} levels from grey",
+            swing(ScaleMethod::Lanczos)
+        );
+        assert!(
+            swing(ScaleMethod::Bilinear) > ALIAS_TOLERANCE,
+            "the stripes do not alias under bilinear, so they test nothing"
+        );
+    }
+
+    #[test]
+    fn lanczos_keeps_a_flat_picture_flat() {
+        const LEVEL: u8 = 77;
+        const LEVEL_10_BIT: u16 = 700;
+        let flat_rgba = vec![LEVEL; 12 * 10 * 4];
+        for (out_w, out_h) in [(5, 3), (31, 23)] {
+            let out = scale(
+                &flat_rgba,
+                RawVideoFormat::Rgba8,
+                ScaleMethod::Lanczos,
+                12,
+                10,
+                out_w,
+                out_h,
+            );
+            assert!(out.iter().all(|&sample| sample == LEVEL), "{out_w}x{out_h}");
+        }
+        let flat_10_bit: Vec<u8> =
+            core::iter::repeat_n(LEVEL_10_BIT.to_le_bytes(), 12 * 10 * 3 / 2)
+                .flatten()
+                .collect();
+        let out = scale(
+            &flat_10_bit,
+            RawVideoFormat::I420p10,
+            ScaleMethod::Lanczos,
+            12,
+            10,
+            30,
+            26,
+        );
+        assert!(out
+            .chunks(2)
+            .all(|sample| u16::from_le_bytes([sample[0], sample[1]]) == LEVEL_10_BIT));
     }
 }

@@ -4,36 +4,50 @@
 
 use std::collections::VecDeque;
 use std::fmt;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use g2g_core::graph::Graph;
+use g2g_core::g2g_error;
+use g2g_core::graph::{Graph, NodeId};
+use g2g_core::log::Target;
 use g2g_core::runtime::{
-    attach_seek, attach_seek_controller, launch_quote, parse_launch, GraphNode, GraphNodeRef,
-    LaunchFactory, ParseError, PipelineProgress, Registry, RunBuilder, SeekController, SeekOutcome,
-    SeekTicket, StateController,
+    attach_seek, attach_seek_controller, launch_quote, parse_chain, parse_launch, GraphMutator,
+    GraphNode, GraphNodeRef, LaunchFactory, ParseError, PipelineProgress, Registry, RunBuilder,
+    SeekController, SeekOutcome, SeekTicket, StateController,
 };
 use g2g_core::segment::Seek;
 use g2g_core::state::PipelineState;
+use g2g_core::{Bus, BusMessage};
 use g2g_plugins::clock::WallClock;
 use g2g_plugins::edl::{parse_edl_uri, EdlError};
 use g2g_plugins::launched::RunFailure;
 use g2g_plugins::registry::default_registry;
 
+mod level_meter;
+mod picture_filters;
 mod render;
 mod videosink;
 
 pub use g2g_plugins::glnv12::GlTarget;
+pub use level_meter::AudioLevels;
+pub use picture_filters::VideoFilterError;
 pub use render::GlRenderContext;
 #[cfg(feature = "wgpu")]
 pub use render::WgpuRenderContext;
 
+use level_meter::{apply_level_meter, insert_level_meter, LEVEL_METER};
+use picture_filters::{
+    launch_chain, parse_filters, PictureFilter, VideoParamsProbe, VIDEO_PARAMS_PROBE,
+};
 use videosink::{FrameSlot, PlayerVideoSink, PLAYER_VIDEO_SINK, PLAYER_VIDEO_SINK_METADATA};
 
 // matches g2g-launch, low latency without starving the source
 const LINK_CAPACITY: usize = 4;
+const PLAYER_BUS_CAPACITY: usize = 256;
 const PROPERTY_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 #[derive(Debug, Clone, Copy)]
@@ -50,11 +64,32 @@ pub struct LoadOptions {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VideoSize {
+    pub width: u32,
+    pub height: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OsdDimensions {
+    pub width: u32,
+    pub height: u32,
+    pub margin_left: u32,
+    pub margin_top: u32,
+    pub margin_right: u32,
+    pub margin_bottom: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Property {
     Pause,
     TimePos,
     Duration,
     EofReached,
+    // the decoder's picture size
+    VideoParams,
+    // the picture size after the video filters
+    VideoOutParams,
+    OsdDimensions,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,6 +98,9 @@ pub enum PropertyChange {
     TimePos(Option<Duration>),
     Duration(Option<Duration>),
     EofReached(bool),
+    VideoParams(Option<VideoSize>),
+    VideoOutParams(Option<VideoSize>),
+    OsdDimensions(Option<OsdDimensions>),
 }
 
 impl PropertyChange {
@@ -72,6 +110,9 @@ impl PropertyChange {
             PropertyChange::TimePos(_) => Property::TimePos,
             PropertyChange::Duration(_) => Property::Duration,
             PropertyChange::EofReached(_) => Property::EofReached,
+            PropertyChange::VideoParams(_) => Property::VideoParams,
+            PropertyChange::VideoOutParams(_) => Property::VideoOutParams,
+            PropertyChange::OsdDimensions(_) => Property::OsdDimensions,
         }
     }
 }
@@ -186,6 +227,10 @@ pub(crate) struct Shared {
     paused: AtomicBool,
     eof_reached: AtomicBool,
     frame_period: Mutex<Option<Duration>>,
+    video_params: Mutex<Option<VideoSize>>,
+    video_out_params: Mutex<Option<VideoSize>>,
+    osd_dimensions: Mutex<Option<OsdDimensions>>,
+    audio_levels: Mutex<Option<AudioLevels>>,
     // the last value reported for each observed property
     observed: Mutex<Vec<PropertyChange>>,
 }
@@ -229,6 +274,25 @@ impl Shared {
         self.set_eof_reached(true);
     }
 
+    pub(crate) fn set_video_params(&self, size: Option<VideoSize>) {
+        *self.video_params.lock().expect("video params lock") = size;
+        self.report(PropertyChange::VideoParams(size));
+    }
+
+    pub(crate) fn set_video_out_params(&self, size: Option<VideoSize>) {
+        *self.video_out_params.lock().expect("video out params lock") = size;
+        self.report(PropertyChange::VideoOutParams(size));
+    }
+
+    pub(crate) fn set_osd_dimensions(&self, dimensions: OsdDimensions) {
+        *self.osd_dimensions.lock().expect("osd dimensions lock") = Some(dimensions);
+        self.report(PropertyChange::OsdDimensions(Some(dimensions)));
+    }
+
+    fn set_audio_levels(&self, levels: Option<AudioLevels>) {
+        *self.audio_levels.lock().expect("audio levels lock") = levels;
+    }
+
     fn report_progress(&self, progress: &PipelineProgress) {
         self.report(PropertyChange::TimePos(
             progress.position().map(Duration::from_nanos),
@@ -254,6 +318,9 @@ pub struct Player {
     registry: Registry,
     shared: Arc<Shared>,
     playback: Mutex<Option<Playback>>,
+    // mpv keeps its vf chain across loads
+    picture_filters: tokio::sync::watch::Sender<Vec<PictureFilter>>,
+    level_meter_window: tokio::sync::watch::Sender<Option<Duration>>,
 }
 
 impl Default for Player {
@@ -291,6 +358,8 @@ impl Player {
             registry,
             shared: Arc::default(),
             playback: Mutex::new(None),
+            picture_filters: tokio::sync::watch::Sender::new(Vec::new()),
+            level_meter_window: tokio::sync::watch::Sender::new(None),
         }
     }
 
@@ -306,9 +375,16 @@ impl Player {
         };
         let mut graph = parse_launch(&self.registry, &line).map_err(LoadError::Parse)?;
         let video_sinks = connect_video_sinks(&mut graph, &self.shared);
-        if video_sinks == 0 && matches!(media, Media::LaunchLine(_)) {
+        if video_sinks.is_empty() && matches!(media, Media::LaunchLine(_)) {
             return Err(LoadError::NoVideoSink);
         }
+        let (decoded_size, decoded) = tokio::sync::watch::channel(None);
+        if let Some(&first_sink) = video_sinks.first() {
+            insert_video_params_probe(&mut graph, first_sink, &self.shared, decoded_size);
+        }
+        let mut level_meter_window = self.level_meter_window.subscribe();
+        let has_level_meter =
+            insert_level_meter(&mut graph, *level_meter_window.borrow_and_update());
         let seek = match options.start {
             // a source that cannot seek still plays, seek() refuses it
             None => attach_seek_controller(&mut graph).ok(),
@@ -342,6 +418,9 @@ impl Player {
             seek_requests,
             stopping: stopping.clone(),
             shared: self.shared.clone(),
+            picture_filters: self.picture_filters.subscribe(),
+            decoded,
+            level_meter_window: has_level_meter.then_some(level_meter_window),
         };
         let thread = std::thread::Builder::new()
             .name("g2g-player".into())
@@ -373,6 +452,9 @@ impl Player {
             .thread
             .join()
             .expect("the playback thread catches its own errors");
+        self.shared.set_video_params(None);
+        self.shared.set_video_out_params(None);
+        self.shared.set_audio_levels(None);
     }
 
     pub fn pause(&self) {
@@ -465,6 +547,23 @@ impl Player {
             Property::EofReached => {
                 PropertyChange::EofReached(self.shared.eof_reached.load(Ordering::SeqCst))
             }
+            Property::VideoParams => PropertyChange::VideoParams(
+                *self.shared.video_params.lock().expect("video params lock"),
+            ),
+            Property::VideoOutParams => PropertyChange::VideoOutParams(
+                *self
+                    .shared
+                    .video_out_params
+                    .lock()
+                    .expect("video out params lock"),
+            ),
+            Property::OsdDimensions => PropertyChange::OsdDimensions(
+                *self
+                    .shared
+                    .osd_dimensions
+                    .lock()
+                    .expect("osd dimensions lock"),
+            ),
         }
     }
 
@@ -497,6 +596,23 @@ impl Player {
         self.shared.frames.has_frame()
     }
 
+    pub fn set_video_filters(&self, filters: &[&str]) -> Result<(), VideoFilterError> {
+        self.picture_filters.send_replace(parse_filters(filters)?);
+        Ok(())
+    }
+
+    pub fn set_level_meter(&self, window: Option<Duration>) {
+        self.level_meter_window.send_replace(window);
+    }
+
+    pub fn audio_levels(&self) -> Option<AudioLevels> {
+        self.shared
+            .audio_levels
+            .lock()
+            .expect("audio levels lock")
+            .clone()
+    }
+
     pub fn set_wakeup_callback(&self, wakeup: impl Fn() + Send + Sync + 'static) {
         *self
             .shared
@@ -513,8 +629,8 @@ impl Drop for Player {
     }
 }
 
-fn connect_video_sinks(graph: &mut Graph<GraphNode>, shared: &Arc<Shared>) -> usize {
-    let mut connected = 0;
+fn connect_video_sinks(graph: &mut Graph<GraphNode>, shared: &Arc<Shared>) -> Vec<NodeId> {
+    let mut connected = Vec::new();
     for index in 0..graph.node_count() {
         let node = g2g_core::graph::NodeId(index as u32);
         let Some(element) = graph.element_mut(node) else {
@@ -527,10 +643,28 @@ fn connect_video_sinks(graph: &mut Graph<GraphNode>, shared: &Arc<Shared>) -> us
         if is_player_sink {
             // parse_launch builds each sink from a factory that cannot reach this player
             *element = GraphNodeRef::Element(Box::new(PlayerVideoSink::new(shared.clone())));
-            connected += 1;
+            connected.push(node);
         }
     }
     connected
+}
+
+fn insert_video_params_probe(
+    graph: &mut Graph<GraphNode>,
+    sink: NodeId,
+    shared: &Arc<Shared>,
+    decoded_size: tokio::sync::watch::Sender<Option<VideoSize>>,
+) {
+    let into_sink = graph
+        .edges()
+        .iter()
+        .position(|edge| edge.dst.node == sink)
+        .expect("parse_launch links every sink");
+    let probe = graph.insert_on_edge(
+        into_sink,
+        GraphNodeRef::element(VideoParamsProbe::new(shared.clone(), decoded_size)),
+    );
+    graph.set_node_name(probe, VIDEO_PARAMS_PROBE.to_string());
 }
 
 struct PlaybackRun {
@@ -541,6 +675,53 @@ struct PlaybackRun {
     seek_requests: tokio::sync::mpsc::UnboundedReceiver<Duration>,
     stopping: Arc<AtomicBool>,
     shared: Arc<Shared>,
+    picture_filters: tokio::sync::watch::Receiver<Vec<PictureFilter>>,
+    decoded: tokio::sync::watch::Receiver<Option<VideoSize>>,
+    // None when the graph has no audio sink to meter
+    level_meter_window: Option<tokio::sync::watch::Receiver<Option<Duration>>>,
+}
+
+async fn install_picture_filters(
+    mutator: &GraphMutator<'_>,
+    registry: &Registry,
+    installed: Vec<String>,
+    filters: Vec<PictureFilter>,
+    decoded: Option<VideoSize>,
+) -> Vec<String> {
+    let target = Target::category("g2g-player");
+    let mut remaining = installed;
+    // GraphMutator::remove refuses an element whose removal hands the sink caps it does not accept
+    while let Some(name) = remaining.pop() {
+        if let Err(error) = mutator.remove(&name).await {
+            g2g_error!(target, "cannot remove picture filter {name}: {error:?}");
+            remaining.push(name);
+            return remaining;
+        }
+    }
+    let Some(decoded) = decoded.filter(|_| !filters.is_empty()) else {
+        return Vec::new();
+    };
+    let elements = launch_chain(&filters, decoded).and_then(|chain| {
+        parse_chain(registry, &chain)
+            .map_err(|error| VideoFilterError::Malformed(error.to_string()))
+    });
+    let elements = match elements {
+        Ok(elements) => elements,
+        Err(error) => {
+            g2g_error!(target, "{error}");
+            return Vec::new();
+        }
+    };
+    match mutator
+        .insert_chain_after(VIDEO_PARAMS_PROBE, elements)
+        .await
+    {
+        Ok(names) => names,
+        Err(error) => {
+            g2g_error!(target, "cannot insert the picture filters: {error:?}");
+            Vec::new()
+        }
+    }
 }
 
 impl PlaybackRun {
@@ -553,25 +734,83 @@ impl PlaybackRun {
             mut seek_requests,
             stopping,
             shared,
+            mut picture_filters,
+            mut decoded,
+            mut level_meter_window,
         } = self;
+        let registry = default_registry();
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_time()
             .build()
             .expect("build tokio runtime");
         let outcome = runtime.block_on(async {
             let clock = WallClock::new();
-            let mut builder =
-                RunBuilder::new(graph, &clock, LINK_CAPACITY).with_state(&state).with_progress(&progress);
+            let (bus, bus_handle) = Bus::new(PLAYER_BUS_CAPACITY);
+            let mut builder = RunBuilder::new(graph, &clock, LINK_CAPACITY)
+                .with_state(&state)
+                .with_progress(&progress)
+                .with_bus(&bus_handle);
             if let Some(seek) = &seek {
                 builder = builder.with_seek_controller(seek);
             }
-            let run = builder.run();
+            let (mutator, run) = builder.run_mutable();
+            let mutator = mutator.with_converters(g2g_plugins::registry::converters());
             tokio::pin!(run);
             let mut poll = tokio::time::interval(PROPERTY_POLL_INTERVAL);
             let mut pending_seek: Option<SeekTicket> = None;
+            let mut installed_filters: Vec<String> = Vec::new();
+            let mut pending_filters: Option<Pin<Box<dyn Future<Output = Vec<String>> + '_>>> = None;
+            picture_filters.mark_changed();
+            let mut filters_changed = false;
+            let mut pending_level_meter: Option<Pin<Box<dyn Future<Output = ()> + '_>>> = None;
+            let mut level_meter_changed = false;
             loop {
+                if level_meter_changed && pending_level_meter.is_none() {
+                    level_meter_changed = false;
+                    let window = *level_meter_window
+                        .as_mut()
+                        .expect("set only with a meter")
+                        .borrow_and_update();
+                    if window.is_none() {
+                        shared.set_audio_levels(None);
+                    }
+                    pending_level_meter = Some(Box::pin(apply_level_meter(&mutator, window)));
+                }
+                if filters_changed && pending_filters.is_none() {
+                    filters_changed = false;
+                    pending_filters = Some(Box::pin(install_picture_filters(
+                        &mutator,
+                        &registry,
+                        core::mem::take(&mut installed_filters),
+                        picture_filters.borrow_and_update().clone(),
+                        *decoded.borrow_and_update(),
+                    )));
+                }
                 tokio::select! {
                     outcome = &mut run => break outcome,
+                    Ok(()) = async { level_meter_window.as_mut().expect("guarded by is_some").changed().await }, if level_meter_window.is_some() => {
+                        level_meter_changed = true;
+                    }
+                    () = async { pending_level_meter.as_mut().expect("guarded by is_some").await }, if pending_level_meter.is_some() => {
+                        pending_level_meter = None;
+                    }
+                    Some(message) = bus.recv() => {
+                        if let BusMessage::Level { element, peak_db, rms_db, .. } = message {
+                            // readings posted before the meter was switched off still arrive after it
+                            let metering = level_meter_window
+                                .as_ref()
+                                .is_some_and(|window| window.borrow().is_some());
+                            if element == LEVEL_METER && metering {
+                                shared.set_audio_levels(Some(AudioLevels { peak_db, rms_db }));
+                            }
+                        }
+                    }
+                    Ok(()) = picture_filters.changed() => filters_changed = true,
+                    Ok(()) = decoded.changed() => filters_changed = true,
+                    installed = async { pending_filters.as_mut().expect("guarded by is_some").await }, if pending_filters.is_some() => {
+                        installed_filters = installed;
+                        pending_filters = None;
+                    }
                     Some(position) = seek_requests.recv() => {
                         let controller = seek.as_ref().expect("seek() refuses media that cannot seek");
                         if state.state() == PipelineState::Paused {

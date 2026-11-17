@@ -21,7 +21,7 @@ use crate::audiofx::double_in_range;
 use crate::mathf::{exp, round_to_i64};
 use crate::pixel::{even_dims_required, frame_byte_size};
 use crate::videocrop::crop;
-use crate::videoscale::{scale, FORMATS};
+use crate::videoscale::{scale, ScaleMethod, FORMATS};
 
 const NS_PER_SECOND: f64 = 1e9;
 const NS_PER_MILLISECOND: u64 = 1_000_000;
@@ -440,6 +440,7 @@ impl AsyncElement for TrackCrop {
                     let scaled = scale(
                         &cropped,
                         input.format,
+                        ScaleMethod::Bilinear,
                         input.crop_width as usize,
                         input.crop_height as usize,
                         self.output_width as usize,

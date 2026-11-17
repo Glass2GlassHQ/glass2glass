@@ -8,7 +8,8 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use g2g_player::{
-    EndFile, Event, LoadOptions, Media, Player, Property, PropertyChange, WgpuRenderContext,
+    EndFile, Event, LoadOptions, Media, OsdDimensions, Player, Property, PropertyChange, VideoSize,
+    WgpuRenderContext,
 };
 use g2g_plugins::gpu::{read_texture_plane, whole_texture, GpuContext};
 
@@ -75,6 +76,40 @@ fn wait_until(mut condition: impl FnMut() -> bool) {
     }
 }
 
+fn rgba_target(context: &GpuContext) -> wgpu::Texture {
+    context.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("m2346-target"),
+        size: wgpu::Extent3d {
+            width: CLIP_WIDTH,
+            height: CLIP_HEIGHT,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    })
+}
+
+fn rendered_pixels(
+    render: &mut WgpuRenderContext,
+    context: &GpuContext,
+    target: &wgpu::Texture,
+) -> Vec<u8> {
+    render.render(target).unwrap();
+    read_texture_plane(
+        &context.device,
+        &context.queue,
+        target,
+        wgpu::TextureAspect::All,
+        whole_texture(CLIP_WIDTH, CLIP_HEIGHT),
+        RGBA_BYTES_PER_PIXEL,
+    )
+    .unwrap()
+}
+
 #[test]
 fn a_clip_renders_pauses_seeks_and_stays_open_at_the_end() {
     let Ok(context) = pollster::block_on(GpuContext::headless()) else {
@@ -102,30 +137,8 @@ fn a_clip_renders_pauses_seeks_and_stays_open_at_the_end() {
     events.wait_for(&Event::FileLoaded);
     frames.recv_timeout(EVENT_TIMEOUT).expect("a decoded frame");
 
-    let target = context.device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("m2346-target"),
-        size: wgpu::Extent3d {
-            width: CLIP_WIDTH,
-            height: CLIP_HEIGHT,
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Rgba8Unorm,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-        view_formats: &[],
-    });
-    render.render(&target).unwrap();
-    let pixels = read_texture_plane(
-        &context.device,
-        &context.queue,
-        &target,
-        wgpu::TextureAspect::All,
-        whole_texture(CLIP_WIDTH, CLIP_HEIGHT),
-        RGBA_BYTES_PER_PIXEL,
-    )
-    .unwrap();
+    let target = rgba_target(&context);
+    let pixels = rendered_pixels(&mut render, &context, &target);
     assert!(
         pixels.chunks(4).any(|pixel| pixel[..3] != [0, 0, 0]),
         "the rendered target is still black"
@@ -295,4 +308,174 @@ fn an_edl_timeline_plays_its_cuts_and_its_sound_stream() {
     wait_until(|| time_pos(&player) >= FIRST_CUT_LENGTH);
     player.stop();
     events.wait_for(&Event::EndFile(EndFile::Stop));
+}
+
+// the clip denoised, shrunk to half size and centred on black: dcpwizard's filters
+const HALF_SIZE_ON_BLACK: [&str; 3] = [
+    "hqdn3d",
+    "scale=w=32:h=24:flags=lanczos",
+    "pad=w=64:h=48:x=16:y=12:color=black",
+];
+
+const PICTURE_LEFT: u32 = 16;
+const PICTURE_TOP: u32 = 12;
+const PICTURE_WIDTH: u32 = 32;
+const PICTURE_HEIGHT: u32 = 24;
+// the render samples linearly, so the pixels next to the picture's edge blend it with the pad
+const EDGE_BLEND: u32 = 1;
+const DARK_LEVEL: u8 = 8;
+
+fn is_dark(pixels: &[u8], x: u32, y: u32) -> bool {
+    let at = ((y * CLIP_WIDTH + x) * RGBA_BYTES_PER_PIXEL) as usize;
+    pixels[at..at + 3].iter().all(|&level| level < DARK_LEVEL)
+}
+
+fn in_pad(x: u32, y: u32) -> bool {
+    let outside = |position: u32, start: u32, length: u32| {
+        position + EDGE_BLEND < start || position >= start + length + EDGE_BLEND
+    };
+    outside(x, PICTURE_LEFT, PICTURE_WIDTH) || outside(y, PICTURE_TOP, PICTURE_HEIGHT)
+}
+
+fn shows_the_picture_on_a_black_pad(pixels: &[u8]) -> bool {
+    let pad_is_black = (0..CLIP_HEIGHT)
+        .flat_map(|y| (0..CLIP_WIDTH).map(move |x| (x, y)))
+        .filter(|&(x, y)| in_pad(x, y))
+        .all(|(x, y)| is_dark(pixels, x, y));
+    pad_is_black && !is_dark(pixels, CLIP_WIDTH / 2, CLIP_HEIGHT / 2)
+}
+
+#[test]
+fn video_filters_shrink_the_picture_onto_a_black_pad() {
+    let Ok(context) = pollster::block_on(GpuContext::headless()) else {
+        return;
+    };
+    let player = Player::new();
+    let mut render = WgpuRenderContext::new(&player, context.clone());
+    let target = rgba_target(&context);
+    player.set_video_filters(&HALF_SIZE_ON_BLACK).unwrap();
+    player
+        .load(
+            Media::Uri(&format!("file://{CLIP}")),
+            LoadOptions::default(),
+        )
+        .unwrap();
+    let mut wait_for_frame = |padded: bool| {
+        let deadline = Instant::now() + EVENT_TIMEOUT;
+        loop {
+            assert!(
+                Instant::now() < deadline,
+                "no frame with padded={padded} within {EVENT_TIMEOUT:?}"
+            );
+            if !player.has_new_frame() {
+                std::thread::sleep(Duration::from_millis(10));
+                continue;
+            }
+            let pixels = rendered_pixels(&mut render, &context, &target);
+            if shows_the_picture_on_a_black_pad(&pixels) == padded {
+                return;
+            }
+        }
+    };
+    wait_for_frame(true);
+    player.set_video_filters(&[]).unwrap();
+    wait_for_frame(false);
+    player.stop();
+}
+
+// the clip padded to 2:1, which a 4:3 target letterboxes
+const PADDED_WIDTH: u32 = 96;
+const WIDENING_PAD: &str = "pad=w=96:h=48:x=16:y=0:color=black";
+
+#[test]
+fn video_params_osd_dimensions_and_the_filtered_size_are_reported() {
+    let Ok(context) = pollster::block_on(GpuContext::headless()) else {
+        return;
+    };
+    let player = Player::new();
+    let mut render = WgpuRenderContext::new(&player, context.clone());
+    let target = rgba_target(&context);
+    player.set_video_filters(&[WIDENING_PAD]).unwrap();
+    player
+        .load(
+            Media::Uri(&format!("file://{CLIP}")),
+            LoadOptions::default(),
+        )
+        .unwrap();
+    let decoded = VideoSize {
+        width: CLIP_WIDTH,
+        height: CLIP_HEIGHT,
+    };
+    let padded = VideoSize {
+        width: PADDED_WIDTH,
+        height: CLIP_HEIGHT,
+    };
+    wait_until(|| {
+        player.property(Property::VideoOutParams) == PropertyChange::VideoOutParams(Some(padded))
+    });
+    assert_eq!(
+        player.property(Property::VideoParams),
+        PropertyChange::VideoParams(Some(decoded))
+    );
+    wait_until(|| {
+        if player.has_new_frame() {
+            rendered_pixels(&mut render, &context, &target);
+        }
+        let PropertyChange::OsdDimensions(Some(osd)) = player.property(Property::OsdDimensions)
+        else {
+            return false;
+        };
+        osd.margin_top > 0
+    });
+    let picture_height = CLIP_WIDTH * CLIP_HEIGHT / PADDED_WIDTH;
+    let bar = (CLIP_HEIGHT - picture_height) / 2;
+    assert_eq!(
+        player.property(Property::OsdDimensions),
+        PropertyChange::OsdDimensions(Some(OsdDimensions {
+            width: CLIP_WIDTH,
+            height: CLIP_HEIGHT,
+            margin_left: 0,
+            margin_top: bar,
+            margin_right: 0,
+            margin_bottom: bar,
+        }))
+    );
+    player.stop();
+    assert_eq!(
+        player.property(Property::VideoParams),
+        PropertyChange::VideoParams(None)
+    );
+}
+
+const METER_WINDOW: Duration = Duration::from_millis(300);
+const DB_TOLERANCE: f64 = 0.01;
+
+#[test]
+fn the_level_meter_reads_the_decoded_audio_in_db() {
+    // audiotestsrc's square wave swings between plus and minus half of i16 full scale
+    let half_scale = f64::from(i16::MAX / 2) / f64::from(i16::MAX as i32 + 1);
+    let expected_db = 20.0 * half_scale.log10();
+    let player = Player::new();
+    player.set_level_meter(Some(METER_WINDOW));
+    player
+        .load(
+            Media::LaunchLine(
+                "videotestsrc ! playervideosink \
+                 audiotestsrc wave=square channels=2 ! audioconvert ! audioresample ! autoaudiosink",
+            ),
+            LoadOptions::default(),
+        )
+        .unwrap();
+    wait_until(|| player.audio_levels().is_some());
+    let levels = player.audio_levels().expect("a reading");
+    assert_eq!(levels.peak_db.len(), 2);
+    for level_db in levels.peak_db.iter().chain(&levels.rms_db) {
+        assert!(
+            (level_db - expected_db).abs() < DB_TOLERANCE,
+            "{level_db} dB, a half-scale square wave reads {expected_db} dB"
+        );
+    }
+    player.set_level_meter(None);
+    wait_until(|| player.audio_levels().is_none());
+    player.stop();
 }

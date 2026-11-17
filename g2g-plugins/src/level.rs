@@ -2,29 +2,22 @@
 //
 // SPDX-License-Identifier: MPL-2.0
 
-//! Audio level meter (`level`). A passthrough that measures per-channel peak
-//! and RMS of each S16LE buffer and exposes them via getters, the g2g analog of
-//! GStreamer's `level` element (which posts the same values on the bus). Values
-//! are linear (0..1, normalized to full scale); an application converts to dB if
-//! it wants (dB needs a `log`, which the `no_std` baseline avoids). CPU-only
-//! `no_std`.
-//!
-//! `post-messages` gates measurement: when false the meter is inert (getters
-//! return empty) and the buffer is forwarded untouched.
-
 use core::future::Future;
 use core::pin::Pin;
 
 use alloc::boxed::Box;
+use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
 
-use crate::pcm_passthrough;
+use crate::audiofx::{passthrough_constraint, PcmScratch};
 
+use g2g_core::log::{short_type_name, LogName};
+use g2g_core::time::ns_to_ticks;
 use g2g_core::{
-    AsyncElement, AudioFormat, Caps, CapsConstraint, ConfigureOutcome, ElementMetadata, G2gError,
-    OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue,
-    PropertySpec,
+    AsyncElement, AudioFormat, BusHandle, BusMessage, Caps, CapsConstraint, ConfigureOutcome,
+    ElementMetadata, G2gError, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError,
+    PropKind, PropValue, PropertySpec,
 };
 
 /// # Example
@@ -33,15 +26,38 @@ use g2g_core::{
 /// use g2g_plugins::level::Level;
 ///
 /// let level = Level::new();
-/// assert!(level.last_peak().is_empty());
 /// ```
 #[derive(Debug)]
 pub struct Level {
     post_messages: bool,
+    interval_ns: u64,
+    format: AudioFormat,
     channels: usize,
+    sample_rate: u32,
+    scratch: PcmScratch,
+    interval: IntervalSums,
+    bus: Option<BusHandle>,
+    log_name: LogName,
+}
+
+// per channel, over the samples of the interval so far
+#[derive(Debug, Default)]
+struct IntervalSums {
     peak: Vec<f64>,
-    rms: Vec<f64>,
-    configured: bool,
+    sum_of_squares: Vec<f64>,
+    samples: u64,
+    first_pts_ns: Option<u64>,
+}
+
+impl IntervalSums {
+    fn new(channels: usize) -> Self {
+        IntervalSums {
+            peak: vec![0.0; channels],
+            sum_of_squares: vec![0.0; channels],
+            samples: 0,
+            first_pts_ns: None,
+        }
+    }
 }
 
 impl Default for Level {
@@ -50,64 +66,97 @@ impl Default for Level {
     }
 }
 
-const FULL_SCALE: f64 = 32768.0;
+// gst level's default interval
+const DEFAULT_INTERVAL_NS: u64 = 100_000_000;
+
+fn decibels(power: f64) -> f64 {
+    if power <= 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    // 10 * log10(x) = 10 * log10(2) * log2(x)
+    10.0 * core::f64::consts::LOG10_2 * crate::mathf::log2(power)
+}
 
 impl Level {
     pub fn new() -> Self {
         Self {
             post_messages: true,
+            interval_ns: DEFAULT_INTERVAL_NS,
+            format: AudioFormat::PcmS16Le,
             channels: 0,
-            peak: Vec::new(),
-            rms: Vec::new(),
-            configured: false,
+            sample_rate: 0,
+            scratch: PcmScratch::default(),
+            interval: IntervalSums::default(),
+            bus: None,
+            log_name: LogName::new(),
         }
     }
 
-    /// Per-channel peak of the last measured buffer, linear 0..1.
-    pub fn last_peak(&self) -> &[f64] {
-        &self.peak
-    }
-
-    /// Per-channel RMS of the last measured buffer, linear 0..1.
-    pub fn last_rms(&self) -> &[f64] {
-        &self.rms
-    }
-
-    fn accept_input(&self, caps: &Caps) -> Result<usize, G2gError> {
-        match caps {
-            Caps::Audio {
-                format: AudioFormat::PcmS16Le,
-                channels,
-                ..
-            } if *channels > 0 => Ok(*channels as usize),
-            _ => Err(G2gError::CapsMismatch),
+    fn accept_input(&mut self, caps: &Caps) -> Result<(), G2gError> {
+        let Caps::Audio {
+            format,
+            channels,
+            sample_rate,
+            ..
+        } = caps
+        else {
+            return Err(G2gError::CapsMismatch);
+        };
+        if *channels == 0 || *sample_rate == 0 {
+            return Err(G2gError::CapsMismatch);
         }
+        self.format = *format;
+        self.channels = usize::from(*channels);
+        self.sample_rate = *sample_rate;
+        self.interval = IntervalSums::new(self.channels);
+        Ok(())
     }
 
-    fn measure(&mut self, src: &[u8]) {
-        let ch = self.channels.max(1);
-        let mut peak = vec![0.0f64; ch];
-        let mut sumsq = vec![0.0f64; ch];
-        let mut counts = vec![0u64; ch];
-        for (i, s) in src.as_chunks::<2>().0.iter().enumerate() {
-            let c = i % ch;
-            let v = (i16::from_le_bytes([s[0], s[1]]) as f64) / FULL_SCALE;
-            let a = v.abs();
-            if a > peak[c] {
-                peak[c] = a;
+    fn interval_length(&self) -> u64 {
+        ns_to_ticks(self.interval_ns, self.sample_rate).max(1)
+    }
+
+    fn completed_intervals(&mut self, bytes: &[u8], pts_ns: u64) -> Vec<(u64, Vec<f64>, Vec<f64>)> {
+        let (channels, sample_rate) = (self.channels, self.sample_rate);
+        let interval_length = self.interval_length();
+        let samples = self.scratch.decode(bytes, self.format);
+        let interval = &mut self.interval;
+        let mut readings = Vec::new();
+        for (index, frame) in samples.chunks_exact(channels).enumerate() {
+            let at_ns =
+                pts_ns.saturating_add(g2g_core::time::ticks_to_ns(index as u64, sample_rate));
+            interval.first_pts_ns.get_or_insert(at_ns);
+            for (channel, &sample) in frame.iter().enumerate() {
+                let value = f64::from(sample);
+                interval.peak[channel] = interval.peak[channel].max(value.abs());
+                interval.sum_of_squares[channel] += value * value;
             }
-            sumsq[c] += v * v;
-            counts[c] += 1;
+            interval.samples += 1;
+            if interval.samples == interval_length {
+                let count = interval.samples as f64;
+                let peak_db = interval
+                    .peak
+                    .iter()
+                    .map(|peak| decibels(peak * peak))
+                    .collect();
+                let rms_db = interval
+                    .sum_of_squares
+                    .iter()
+                    .map(|sum| decibels(sum / count))
+                    .collect();
+                let first_pts_ns = interval.first_pts_ns.expect("set by its first sample");
+                readings.push((first_pts_ns, peak_db, rms_db));
+                *interval = IntervalSums::new(channels);
+            }
         }
-        for c in 0..ch {
-            sumsq[c] = if counts[c] > 0 {
-                crate::mathf::sqrt(sumsq[c] / counts[c] as f64)
-            } else {
-                0.0
-            };
-        }
-        self.peak = peak;
-        self.rms = sumsq;
+        readings
+    }
+
+    fn element_name(&self) -> String {
+        self.log_name
+            .instance()
+            .unwrap_or_else(|| short_type_name::<Self>())
+            .to_string()
     }
 }
 
@@ -118,19 +167,24 @@ impl AsyncElement for Level {
         Self: 'a;
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
-        self.accept_input(upstream_caps)?;
         Ok(upstream_caps.clone())
     }
 
-    /// Pure passthrough: the meter never changes the stream.
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
-        CapsConstraint::Identity(pcm_passthrough::s16_caps())
+        passthrough_constraint(None)
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        self.channels = self.accept_input(absolute_caps)?;
-        self.configured = true;
+        self.accept_input(absolute_caps)?;
         Ok(ConfigureOutcome::Accepted)
+    }
+
+    fn set_bus(&mut self, bus: BusHandle) {
+        self.bus = Some(bus);
+    }
+
+    fn set_instance_name(&mut self, name: String) {
+        self.log_name.set_instance(name);
     }
 
     fn process<'a>(
@@ -141,16 +195,31 @@ impl AsyncElement for Level {
         Box::pin(async move {
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    if self.post_messages {
-                        if let Some(slice) = frame.domain.as_system_slice() {
-                            self.measure(slice);
+                    if self.post_messages && self.bus.is_some() {
+                        let bytes = frame
+                            .domain
+                            .require_system_slice(short_type_name::<Self>())?;
+                        let readings = self.completed_intervals(bytes, frame.timing.pts_ns);
+                        let element = self.element_name();
+                        let bus = self.bus.as_ref().expect("checked above");
+                        for (pts_ns, peak_db, rms_db) in readings {
+                            bus.try_post(BusMessage::Level {
+                                element: element.clone(),
+                                pts_ns,
+                                peak_db,
+                                rms_db,
+                            });
                         }
                     }
                     out.push(PipelinePacket::DataFrame(frame)).await?;
                 }
-                PipelinePacket::CapsChanged(c) => {
-                    self.channels = self.accept_input(&c)?;
-                    out.push(PipelinePacket::CapsChanged(c)).await?;
+                PipelinePacket::CapsChanged(caps) => {
+                    self.accept_input(&caps)?;
+                    out.push(PipelinePacket::CapsChanged(caps)).await?;
+                }
+                PipelinePacket::Flush => {
+                    self.interval = IntervalSums::new(self.channels);
+                    out.push(PipelinePacket::Flush).await?;
                 }
                 // The runner emits the final Eos after process(Eos) returns
                 // (the transform contract), so do not forward it here.
@@ -171,7 +240,7 @@ impl AsyncElement for Level {
         ElementMetadata::new(
             "Level",
             "Filter/Analyzer/Audio",
-            "Measures audio peak / RMS levels",
+            "Posts each channel's peak and RMS level in dB on the bus once per interval",
             crate::AARON_BOXER,
         )
     }
@@ -179,6 +248,14 @@ impl AsyncElement for Level {
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
         match name {
             "post-messages" => self.post_messages = value.as_bool().ok_or(PropError::Type)?,
+            "interval" => {
+                let interval_ns = value.as_uint().ok_or(PropError::Type)?;
+                if interval_ns == 0 {
+                    return Err(PropError::Value);
+                }
+                self.interval_ns = interval_ns;
+                self.interval = IntervalSums::new(self.channels);
+            }
             _ => return Err(PropError::Unknown),
         }
         Ok(())
@@ -187,71 +264,94 @@ impl AsyncElement for Level {
     fn get_property(&self, name: &str) -> Option<PropValue> {
         match name {
             "post-messages" => Some(PropValue::Bool(self.post_messages)),
+            "interval" => Some(PropValue::Uint(self.interval_ns)),
             _ => None,
         }
     }
 }
 
-static LEVEL_PROPS: &[PropertySpec] = &[PropertySpec::new(
-    "post-messages",
-    PropKind::Bool,
-    "measure and expose levels when true",
-)];
+static LEVEL_PROPS: &[PropertySpec] = &[
+    PropertySpec::new(
+        "post-messages",
+        PropKind::Bool,
+        "post a level message on the bus for each interval",
+    )
+    .with_default("true"),
+    PropertySpec::new(
+        "interval",
+        PropKind::Uint,
+        "nanoseconds of audio each level message measures",
+    )
+    .with_default("100000000"),
+];
 
 impl PadTemplates for Level {
     fn pad_templates() -> Vec<PadTemplate> {
-        pcm_passthrough::pad_templates(pcm_passthrough::s16_caps())
+        crate::audiofx::pad_templates(None)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use g2g_core::{Bus, ChannelLayout};
 
-    fn pack(samples: &[i16]) -> Vec<u8> {
-        let mut v = vec![0u8; samples.len() * 2];
-        for (i, s) in samples.iter().enumerate() {
-            v[i * 2..i * 2 + 2].copy_from_slice(&s.to_le_bytes());
-        }
-        v
+    const RATE: u32 = 8_000;
+    // a tenth of a second at RATE
+    const INTERVAL_SAMPLES: usize = 800;
+
+    fn stereo_s16(left: i16, right: i16, frames: usize) -> Vec<u8> {
+        (0..frames)
+            .flat_map(|_| left.to_le_bytes().into_iter().chain(right.to_le_bytes()))
+            .collect()
     }
 
-    #[test]
-    fn silence_measures_zero() {
-        let mut l = Level::new();
-        l.channels = 1;
-        l.measure(&pack(&[0, 0, 0, 0]));
-        assert_eq!(l.last_peak(), &[0.0]);
-        assert_eq!(l.last_rms(), &[0.0]);
-    }
-
-    #[test]
-    fn full_scale_measures_one() {
-        let mut l = Level::new();
-        l.channels = 1;
-        l.measure(&pack(&[i16::MAX, i16::MIN]));
-        // peak ~1.0, rms ~1.0 (both samples at full magnitude).
-        assert!((l.last_peak()[0] - 1.0).abs() < 0.001);
-        assert!((l.last_rms()[0] - 1.0).abs() < 0.001);
-    }
-
-    #[test]
-    fn stereo_measures_per_channel() {
-        let mut l = Level::new();
-        l.channels = 2;
-        // left = 16384 (half scale), right = 0.
-        l.measure(&pack(&[16384, 0, 16384, 0]));
-        assert!((l.last_peak()[0] - 0.5).abs() < 0.001);
-        assert_eq!(l.last_peak()[1], 0.0);
-        assert!((l.last_rms()[0] - 0.5).abs() < 0.001);
-        assert_eq!(l.last_rms()[1], 0.0);
-    }
-
-    #[test]
-    fn post_messages_false_leaves_measurements_empty() {
-        let mut l = Level::new();
-        l.set_property("post-messages", PropValue::Bool(false))
+    fn configured_level() -> (Level, Bus) {
+        let (bus, handle) = Bus::new(16);
+        let mut level = Level::new();
+        level.set_bus(handle);
+        level
+            .configure_pipeline(&Caps::Audio {
+                format: AudioFormat::PcmS16Le,
+                channels: 2,
+                sample_rate: RATE,
+                channel_layout: ChannelLayout::UNSPECIFIED,
+            })
             .unwrap();
-        assert!(!l.post_messages);
+        (level, bus)
+    }
+
+    #[test]
+    fn one_interval_reads_half_scale_as_minus_six_db_and_silence_as_minus_infinity() {
+        let (mut level, _bus) = configured_level();
+        let half_scale = i16::MAX / 2 + 1;
+        let readings = level.completed_intervals(&stereo_s16(half_scale, 0, INTERVAL_SAMPLES), 0);
+        let [(pts_ns, peak_db, rms_db)] = readings.as_slice() else {
+            panic!("one interval gives one reading, got {}", readings.len());
+        };
+        assert_eq!(*pts_ns, 0);
+        let half_scale_db = decibels(0.25);
+        assert!((half_scale_db + 6.02).abs() < 0.01, "{half_scale_db}");
+        assert!((peak_db[0] - half_scale_db).abs() < 1e-9);
+        assert!((rms_db[0] - half_scale_db).abs() < 1e-9);
+        assert_eq!(peak_db[1], f64::NEG_INFINITY);
+        assert_eq!(rms_db[1], f64::NEG_INFINITY);
+    }
+
+    #[test]
+    fn an_interval_spans_buffers_and_starts_at_its_first_sample() {
+        let (mut level, _bus) = configured_level();
+        let half = INTERVAL_SAMPLES / 2;
+        let half_ns = g2g_core::time::ticks_to_ns(half as u64, RATE);
+        assert!(level
+            .completed_intervals(&stereo_s16(1000, 1000, half), 0)
+            .is_empty());
+        let readings =
+            level.completed_intervals(&stereo_s16(1000, 1000, INTERVAL_SAMPLES), half_ns);
+        let pts: Vec<u64> = readings.iter().map(|(pts_ns, _, _)| *pts_ns).collect();
+        assert_eq!(pts, [0]);
+        let readings =
+            level.completed_intervals(&stereo_s16(1000, 1000, half), 2 * half_ns + half_ns);
+        assert_eq!(readings[0].0, 2 * half_ns);
     }
 }

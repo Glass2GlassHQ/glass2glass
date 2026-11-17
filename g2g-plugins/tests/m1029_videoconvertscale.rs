@@ -164,7 +164,15 @@ fn the_format_property_names_the_output_format() {
 fn the_fused_pass_matches_scaling_then_converting() {
     let source = rgba_gradient(8, 8);
     let two_step = g2g_plugins::videoconvert::convert(
-        &g2g_plugins::videoscale::scale(&source, RawVideoFormat::Rgba8, 8, 8, 4, 4),
+        &g2g_plugins::videoscale::scale(
+            &source,
+            RawVideoFormat::Rgba8,
+            g2g_plugins::videoscale::ScaleMethod::Bilinear,
+            8,
+            8,
+            4,
+            4,
+        ),
         RawVideoFormat::Rgba8,
         RawVideoFormat::Rgb8,
         4,

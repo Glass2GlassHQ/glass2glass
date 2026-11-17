@@ -120,15 +120,6 @@ fn blackman_nuttall(t: f64) -> f64 {
         - A3 * crate::mathf::cos(3.0 * turn)
 }
 
-/// Normalized sinc, `sin(pi x) / (pi x)`, with the removable singularity filled.
-fn sinc(x: f64) -> f64 {
-    if x == 0.0 {
-        return 1.0;
-    }
-    let arg = core::f64::consts::PI * x;
-    crate::mathf::sin(arg) / arg
-}
-
 /// An oversampled windowed-sinc interpolation table: one kernel per fractional
 /// read position in [`SINC_PHASE_STEPS`] steps, each row normalized to unity
 /// DC gain so a constant signal survives the resampler untouched.
@@ -161,7 +152,9 @@ impl SincTable {
                 let x = (k as f64 - (half as f64 - 1.0)) - frac;
                 // the window spans [-half, half] in the same units.
                 weights.push(
-                    (sinc(cutoff * x) * blackman_nuttall((x + half as f64) / taps as f64)) as f32,
+                    (crate::mathf::sinc(cutoff * x)
+                        * blackman_nuttall((x + half as f64) / taps as f64))
+                        as f32,
                 );
             }
             let sum: f32 = weights[row..].iter().sum();

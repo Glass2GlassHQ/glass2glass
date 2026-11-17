@@ -427,6 +427,8 @@ pub mod videodiff;
 pub mod videoanalyse;
 // `scenechange`: SAD-based shot-change detector.
 mod display_aspect;
+#[cfg(any(feature = "wgpu-sink", feature = "gl-render"))]
+pub use display_aspect::ViewportRectangle;
 pub mod scenechange;
 pub mod videoflip;
 // Shared negotiation and frame loop behind the CPU video-effect transforms.
@@ -1554,6 +1556,9 @@ pub mod pngenc;
 // WebP stills via the pure-Rust image-webp crate (no system deps).
 #[cfg(feature = "webp")]
 pub mod webpdec;
+
+#[cfg(feature = "hqdn3d")]
+pub mod hqdn3d;
 
 // Byte-stream framing and header geometry for the still-image formats.
 mod stillframe;

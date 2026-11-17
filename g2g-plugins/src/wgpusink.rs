@@ -766,7 +766,7 @@ impl VideoRenderer {
         domain: &MemoryDomain,
         view: &wgpu::TextureView,
         target_size: (u32, u32),
-    ) -> Result<(), G2gError> {
+    ) -> Result<ViewportRectangle, G2gError> {
         let (texture, layout) = match domain {
             MemoryDomain::WgpuTexture(owned) => {
                 // A frame from a different GPU producer (foreign keep-alive type,
@@ -799,19 +799,17 @@ impl VideoRenderer {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("wgpu-sink"),
             });
+        let viewport = self.viewport(target_size);
         blit.encode(
             &self.ctx.device,
             &mut encoder,
             &texture,
             layout,
             &self.resources,
-            BlitTarget {
-                view,
-                viewport: self.viewport(target_size),
-            },
+            BlitTarget { view, viewport },
         );
         self.ctx.queue.submit([encoder.finish()]);
-        Ok(())
+        Ok(viewport)
     }
 
     /// Upload a tightly packed system-memory frame into the renderer's own

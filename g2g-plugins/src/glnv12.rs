@@ -465,7 +465,11 @@ impl GlVideoRenderer {
     /// # Safety
     /// The GL context `loader` resolves entry points for must be current, with
     /// `target.framebuffer` a framebuffer of it.
-    pub unsafe fn draw(&mut self, frame: &MemoryDomain, target: GlTarget) -> Result<(), G2gError> {
+    pub unsafe fn draw(
+        &mut self,
+        frame: &MemoryDomain,
+        target: GlTarget,
+    ) -> Result<ViewportRectangle, G2gError> {
         let input = self.input.ok_or(G2gError::NotConfigured)?;
         let bytes = frame.as_system_slice().ok_or(G2gError::UnsupportedDomain)?;
         let converted = input.convert_frame(bytes)?;
@@ -502,7 +506,7 @@ impl GlVideoRenderer {
             );
         }
         state.draw(viewport, target.flip_y);
-        Ok(())
+        Ok(viewport)
     }
 
     /// # Safety

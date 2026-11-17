@@ -154,6 +154,15 @@ pub(crate) fn round_to_i64(v: f64) -> i64 {
     }
 }
 
+/// Normalized sinc, `sin(pi x) / (pi x)`, with the removable singularity filled.
+pub(crate) fn sinc(x: f64) -> f64 {
+    if x == 0.0 {
+        return 1.0;
+    }
+    let arg = core::f64::consts::PI * x;
+    sin(arg) / arg
+}
+
 /// sin(x) in radians. The angle is first reduced by whole turns, which costs the
 /// low bits of very large arguments, then evaluated by its Taylor series.
 pub(crate) fn sin(x: f64) -> f64 {

@@ -20,6 +20,7 @@ use g2g_core::{
 use g2g_plugins::clock::wait_to_present;
 use g2g_plugins::glnv12::accepted_caps;
 
+use crate::picture_filters::video_size_of;
 use crate::{Event, Shared};
 
 pub(crate) const PLAYER_VIDEO_SINK: &str = "playervideosink";
@@ -100,6 +101,7 @@ impl PlayerVideoSink {
                 _ => None,
             };
             *self.shared.frame_period.lock().expect("frame period lock") = frame_period;
+            self.shared.set_video_out_params(video_size_of(&caps));
             self.caps = Some(caps);
             self.shared.events.push(Event::VideoReconfig);
         }

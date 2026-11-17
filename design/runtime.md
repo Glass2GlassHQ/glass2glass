@@ -1003,6 +1003,35 @@ container reports a duration (MPEG-TS does not).
 when the timeline has a second stream, a second `edlsrc stream=1 media=audio` into
 `autoaudiosink`. The audio of the picture stream's own files is not played.
 
+`set_video_filters` takes the ffmpeg filter strings guikit passes to mpv's `vf add
+@label:lavfi=[...]`: `yadif`, `hqdn3d` with no options, `crop`, `transpose`,
+`hflip`, `vflip`, `scale` with `flags=lanczos` or `bilinear`, and `pad` with
+`color=black` or `black@0`. Anything else is refused when it is set. A `playervideoparams` probe sits in front of the
+first `playervideosink` and reports the decoded picture size. The run translates
+the filters into `deinterlace`, `hqdn3d`, `videocrop`, `videoflip`, `videoscale`
+and `videobox` for that size, and splices them in after the probe with a
+`GraphMutator`. It does this again whenever the filters or the decoded size change,
+removing the old chain from its last element to its first. The filters stay set
+across loads, as mpv's do.
+
+`hqdn3d` is the element over the clean-room `hqdn3d` crate, with ffmpeg's four
+strengths as properties and its defaults. It filters 8-bit I420, Y42B and Y444,
+so the player converts to I420 in front of it. Its output is within a level or
+two of ffmpeg's `hqdn3d`, not bit-exact, because ffmpeg quantizes the blend curve
+into a table.
+
+The probe also sets `video-params`, the decoded size, and `playervideosink` sets
+`video-out-params`, the size after the filters. Both clear on `stop`. A render
+context sets `osd-dimensions` from the rectangle the renderer letterboxed the
+picture into: the target's size and the bars on each side of the picture.
+
+A `level` named `playerlevelmeter` sits above the converters in front of the first
+audio sink, so it reads the decoded channels before playbin mixes them to stereo.
+`set_level_meter` turns its `post-messages` on with the window as its `interval`,
+or off, through the `GraphMutator`. The run reads its `BusMessage::Level` off the
+run's bus into `audio_levels`, and only while the meter is on, since readings
+posted before it was switched off still arrive after.
+
 The host draws the frame due now into its own target, as with libmpv's render API.
 A URI load builds `playbin uri=... video-sink=playervideosink`, and a launch line
 must contain `playervideosink`. After `parse_launch` the sink node is found by its

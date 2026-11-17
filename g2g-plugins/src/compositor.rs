@@ -1805,6 +1805,7 @@ mod tests {
         let scaled = crate::videoscale::scale(
             &source,
             RawVideoFormat::Rgba8,
+            crate::videoscale::ScaleMethod::Bilinear,
             SOURCE.0,
             SOURCE.1,
             SCALED.0,

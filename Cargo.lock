@@ -4600,6 +4600,7 @@ dependencies = [
  "getrandom 0.2.17",
  "glow",
  "hmac 0.12.1",
+ "hqdn3d",
  "image-webp",
  "jpeg-encoder",
  "js-sys",
@@ -5292,6 +5293,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cc627f471c528ff0c4a49e1d5e60450c8f6461dd6d10ba9dcd3a61d3dff7728d"
 dependencies = [
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "hqdn3d"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0ddabd2b17d19fbebafccd3d2680ca31a9e54b4a1bdc9a24f68d5a89102d4299"
+dependencies = [
+ "rayon",
 ]
 
 [[package]]

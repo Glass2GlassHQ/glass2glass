@@ -3019,6 +3019,7 @@ pub static FEATURE_GATED_ELEMENTS: &[FeatureGatedElement] = &{
         "pngdec" => "png";
         "pngenc" => "png";
         "webpdec" => "webp";
+        "hqdn3d" => "hqdn3d";
         "dav1ddec" => "dav1d";
         "rav1ddec" => "rav1d";
         "vulkanvideodec" => "vulkan-video";
@@ -3320,6 +3321,10 @@ fn register_feature_gated(reg: &mut Registry) {
     #[cfg(feature = "webp")]
     reg.register_launch(LaunchFactory::of::<WebPDec>("webpdec", || {
         Box::new(WebPDec::new())
+    }));
+    #[cfg(feature = "hqdn3d")]
+    reg.register_launch(LaunchFactory::of::<crate::hqdn3d::Hqdn3d>("hqdn3d", || {
+        Box::new(crate::hqdn3d::Hqdn3d::new())
     }));
 
     // Network sources / sinks.

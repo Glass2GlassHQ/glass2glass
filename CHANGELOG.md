@@ -6,6 +6,12 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2375: `hqdn3d` denoises 8-bit planar YUV, and `g2g-player` applies the ffmpeg `hqdn3d` filter string.
+- M2374: `g2g-player` meters the decoded audio, `set_level_meter` and `audio_levels`.
+- M2373: `level` posts each channel's peak and RMS in dB on the bus once per `interval`, from S16 or F32 audio.
+- M2372: `g2g-player` reports `video-params`, `video-out-params` and `osd-dimensions`.
+- M2371: `g2g-player` applies ffmpeg `vf` filter strings (`crop`, `scale`, `pad`, `transpose`, `hflip`, `vflip`, `yadif`) to the picture while it plays.
+- M2370: `videoscale` scales with lanczos, as `method=lanczos`.
 - M2369: `edlsrc` plays the audio stream of an `edl://` timeline, and `g2g-player` loads `edl://` URIs with their sound stream.
 - M2368: `wavparse` seeks, landing on the sample at the target.
 - M2367: a named demuxer (`tsdemux name=d d.video_0 ! ...`) posts its streams and tags to the bus, and `matroskademux name=d` posts its duration once.

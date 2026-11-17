@@ -29,7 +29,7 @@ linux-full = [
     "remote", "remote-ws", "webtransport", "moqt",
     "http-src", "hls", "dash",
     "ffmpeg", "ffmpeg-long-tail", "v4l2",
-    "opus", "vorbis", "aac-decode", "mpeg-audio-decode", "openh264", "webrtcdsp", "vpx", "av1-encode", "mjpeg", "mjpeg-encode", "png", "webp",
+    "opus", "vorbis", "aac-decode", "mpeg-audio-decode", "openh264", "webrtcdsp", "vpx", "av1-encode", "mjpeg", "mjpeg-encode", "png", "webp", "hqdn3d",
     "alsa-sink", "alsa-src", "pulse-sink", "pulse-src", "pipewire", "portal", "decklink",
     "wayland-sink", "gl-sink", "kms-sink", "wgpu-sink", "wgpu-present", "vello-overlay", "analytics",
     "analytics-json", "mqtt", "embedding-index",
@@ -44,7 +44,7 @@ release-binary = [
     "remote", "remote-ws", "webtransport", "moqt",
     "http-src", "hls", "dash",
     "vorbis", "aac-decode", "mpeg-audio-decode", "opus", "webrtcdsp", "av1-encode", "rav1d", "mjpeg",
-    "mjpeg-encode", "png", "webp", "wgpu-sink", "vello-overlay", "analytics", "analytics-json", "mqtt", "embedding-index",
+    "mjpeg-encode", "png", "webp", "hqdn3d", "wgpu-sink", "vello-overlay", "analytics", "analytics-json", "mqtt", "embedding-index",
     "declarative-yaml", "script-rhai", "observe", "mcp", "tui",
     "matroska-compression", "matroska-decrypt",
 ]
@@ -759,6 +759,9 @@ png = ["std", "dep:png"]
 # analog. There is no encoder: image-webp does VP8L lossless only, with none of
 # webpenc's quality / speed / preset knobs. No system deps; implies std.
 webp = ["std", "dep:image-webp"]
+# hqdn3d spatial and temporal denoiser over 8-bit planar YUV, via the pure-Rust
+# hqdn3d crate.
+hqdn3d = ["std", "dep:hqdn3d"]
 # libjpeg-turbo / mozjpeg backend for MjpegDec + MjpegEnc, selected at runtime by
 # `decoder=mozjpeg` / `encoder=mozjpeg` (the pure-Rust crates stay the default, so
 # the feature alone changes no behavior). NOT pure Rust: `mozjpeg-sys` builds the
@@ -961,6 +964,8 @@ png = { version = "0.18", optional = true }
 # trivial pure-Rust deps (byteorder-lite, quick-error). MSRV 1.80.1. No system
 # dependency.
 image-webp = { version = "0.2", optional = true }
+# Clean-room hqdn3d denoiser (hqdn3d feature), MPL-2.0. Pulls rayon.
+hqdn3d = { version = "0.1", optional = true }
 # libopus bindings (opus feature) for OpusEnc / OpusDec. There is no mature
 # pure-Rust Opus codec. `bundled` (the default) builds the libopus source the
 # crate ships with cmake and links it statically.

@@ -55,8 +55,8 @@ The plan is [remote.md](remote.md).
 - `edl://` timelines: play the audio of the picture stream's files when the
   timeline has no sound stream, as mpv does.
 - An MXF demuxer, for the package EDLs guikit sends.
-- guikit's controls: `lavfi` video filters, an `astats` level meter, ASS
-  `osd-overlay`, `sub-add` slots, `osd-dimensions` and `video-params`.
+- guikit's controls: ASS `osd-overlay`, `sub-add` slots, and the
+  `audio-params` channel layout the level meter labels its channels with.
 - Take GPU frames in `playervideosink` once decoders open on the host's device.
 - Audio clock driving A/V sync, and an option that hands PCM to the host.
 - A versioned C ABI (`g2g_player.h`), wrapped in the C#, C++, Kotlin and
