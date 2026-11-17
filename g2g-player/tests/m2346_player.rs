@@ -7,7 +7,9 @@
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use g2g_player::{EndFile, Event, Media, Player, Property, PropertyChange, WgpuRenderContext};
+use g2g_player::{
+    EndFile, Event, LoadOptions, Media, Player, Property, PropertyChange, WgpuRenderContext,
+};
 use g2g_plugins::gpu::{read_texture_plane, whole_texture, GpuContext};
 
 const CLIP: &str = concat!(
@@ -17,10 +19,13 @@ const CLIP: &str = concat!(
 const CLIP_WIDTH: u32 = 64;
 const CLIP_HEIGHT: u32 = 48;
 const CLIP_FRAMES_PER_SECOND: u32 = 25;
-// time-pos at the end is the last frame's start, one frame before the duration
-const END_POSITION_TOLERANCE: Duration = Duration::from_secs(2)
+const CLIP_FRAME_PERIOD: Duration = Duration::from_secs(1)
     .checked_div(CLIP_FRAMES_PER_SECOND)
     .unwrap();
+// time-pos at the end is the last frame's start, one frame before the duration
+const END_POSITION_TOLERANCE: Duration = CLIP_FRAME_PERIOD.saturating_mul(2);
+// between two keyframes of the clip's ten-frame GOP
+const START: Duration = Duration::from_secs(1);
 const PLAYED_BEFORE_PAUSE: Duration = Duration::from_millis(400);
 const RGBA_BYTES_PER_PIXEL: u32 = 4;
 const EVENT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -87,7 +92,12 @@ fn a_clip_renders_pauses_seeks_and_stays_open_at_the_end() {
         seen: Vec::new(),
     };
 
-    player.load(Media::Uri(&format!("file://{CLIP}"))).unwrap();
+    player
+        .load(
+            Media::Uri(&format!("file://{CLIP}")),
+            LoadOptions::default(),
+        )
+        .unwrap();
     events.wait_for(&Event::FileLoaded);
     frames.recv_timeout(EVENT_TIMEOUT).expect("a decoded frame");
 
@@ -167,4 +177,39 @@ fn a_clip_renders_pauses_seeks_and_stays_open_at_the_end() {
 
     player.stop();
     events.wait_for(&Event::EndFile(EndFile::Stop));
+}
+
+#[test]
+fn a_clip_loads_paused_at_its_start_position() {
+    let player = Player::new();
+    player
+        .load(
+            Media::Uri(&format!("file://{CLIP}")),
+            LoadOptions {
+                start: Some(START),
+                pause: Some(true),
+            },
+        )
+        .unwrap();
+    wait_until(|| {
+        matches!(
+            player.property(Property::TimePos),
+            PropertyChange::TimePos(Some(_))
+        )
+    });
+    let prerolled_at = time_pos(&player);
+    assert!(
+        prerolled_at >= START && prerolled_at < START + CLIP_FRAME_PERIOD,
+        "the first frame shown is at {prerolled_at:?}, the load started at {START:?}"
+    );
+    std::thread::sleep(PAUSE_LENGTH);
+    assert_eq!(
+        time_pos(&player),
+        prerolled_at,
+        "time-pos moved after a paused load"
+    );
+    assert_eq!(
+        player.property(Property::Pause),
+        PropertyChange::Pause(true)
+    );
 }

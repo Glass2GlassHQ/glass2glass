@@ -11,8 +11,8 @@ use std::time::Duration;
 
 use g2g_core::graph::Graph;
 use g2g_core::runtime::{
-    attach_seek_controller, parse_launch, GraphNode, GraphNodeRef, LaunchFactory, ParseError,
-    PipelineProgress, Registry, RunBuilder, SeekController, SeekOutcome, SeekTicket,
+    attach_seek, attach_seek_controller, parse_launch, GraphNode, GraphNodeRef, LaunchFactory,
+    ParseError, PipelineProgress, Registry, RunBuilder, SeekController, SeekOutcome, SeekTicket,
     StateController,
 };
 use g2g_core::segment::Seek;
@@ -39,6 +39,13 @@ const PROPERTY_POLL_INTERVAL: Duration = Duration::from_millis(50);
 pub enum Media<'a> {
     Uri(&'a str),
     LaunchLine(&'a str),
+}
+
+// mpv's per-file options of the same names, a pause of None keeps the current state
+#[derive(Debug, Clone, Copy, Default)]
+pub struct LoadOptions {
+    pub start: Option<Duration>,
+    pub pause: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,6 +96,7 @@ pub enum Event {
 pub enum LoadError {
     Parse(ParseError),
     NoVideoSink,
+    StartNotSeekable,
     Spawn(std::io::Error),
 }
 
@@ -98,6 +106,9 @@ impl fmt::Display for LoadError {
             LoadError::Parse(error) => write!(f, "parse error: {error}"),
             LoadError::NoVideoSink => {
                 write!(f, "the launch line has no {PLAYER_VIDEO_SINK} element")
+            }
+            LoadError::StartNotSeekable => {
+                f.write_str("a start position was given, but the media cannot seek")
             }
             LoadError::Spawn(error) => write!(f, "failed to spawn the playback thread: {error}"),
         }
@@ -243,6 +254,10 @@ impl Default for Player {
     }
 }
 
+fn nanoseconds(position: Duration) -> u64 {
+    u64::try_from(position.as_nanos()).unwrap_or(u64::MAX)
+}
+
 impl Player {
     pub fn new() -> Self {
         let mut registry = default_registry();
@@ -257,7 +272,7 @@ impl Player {
         }
     }
 
-    pub fn load(&self, media: Media<'_>) -> Result<(), LoadError> {
+    pub fn load(&self, media: Media<'_>, options: LoadOptions) -> Result<(), LoadError> {
         self.stop();
         let line = match media {
             Media::Uri(uri) => format!("playbin uri=\"{uri}\" video-sink={PLAYER_VIDEO_SINK}"),
@@ -268,12 +283,22 @@ impl Player {
         if video_sinks == 0 && matches!(media, Media::LaunchLine(_)) {
             return Err(LoadError::NoVideoSink);
         }
-        // a source that cannot seek still plays, seek() refuses it
-        let seek = attach_seek_controller(&mut graph).ok();
+        let seek = match options.start {
+            // a source that cannot seek still plays, seek() refuses it
+            None => attach_seek_controller(&mut graph).ok(),
+            Some(start) => {
+                let (seek, _ticket) = attach_seek(&mut graph, Seek::flush_to(nanoseconds(start)))
+                    .map_err(|_| LoadError::StartNotSeekable)?;
+                Some(seek)
+            }
+        };
         if let Some(seek) = &seek {
             seek.keep_run_open();
         }
         self.shared.set_eof_reached(false);
+        if let Some(pause) = options.pause {
+            self.shared.set_paused(pause, None);
+        }
         let state = StateController::new(if self.shared.paused.load(Ordering::SeqCst) {
             PipelineState::Paused
         } else {
@@ -480,8 +505,7 @@ impl PlaybackRun {
                         if state.state() == PipelineState::Paused {
                             state.request_repreroll();
                         }
-                        let nanos = u64::try_from(position.as_nanos()).unwrap_or(u64::MAX);
-                        pending_seek = Some(controller.seek(Seek::flush_to(nanos)));
+                        pending_seek = Some(controller.seek(Seek::flush_to(nanoseconds(position))));
                         shared.set_eof_reached(false);
                         shared.events.push(Event::Seek);
                     }

@@ -959,6 +959,12 @@ loads a URI or a launch line and runs it on a `g2g-player` thread under a
 callback) and the `pause`, `time-pos`, `duration` and `eof-reached` properties,
 read from `PipelineProgress` every 50 ms and posted to observers on change.
 
+`load` takes `LoadOptions`, mpv's `start=` and `pause=` per-file options. A start
+position goes to `attach_seek`, which queues the seek before the run starts, so the
+first frame shown is the first at or after it. On media that cannot seek, a start
+position fails the load with `LoadError::StartNotSeekable`. `pause` sets the paused
+state the run starts in, and it stays set for later loads.
+
 The end of the file behaves as mpv's `keep-open`. When the source can seek, `load`
 holds the run open with `keep_run_open`. Once `stream_ended()` is true the player
 pauses on the last frame and sets `eof-reached`, which a seek or the next `load`
