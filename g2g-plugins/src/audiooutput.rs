@@ -1623,10 +1623,12 @@ mod tests {
     }
 
     // the device boundary: reports a fixed amount still to play and plays nothing
+    #[cfg(not(target_os = "windows"))]
     struct DelayedDevice {
         delay_ns: u64,
     }
 
+    #[cfg(not(target_os = "windows"))]
     impl PausableDevice for DelayedDevice {
         fn pause(&mut self) -> Result<(), G2gError> {
             Ok(())

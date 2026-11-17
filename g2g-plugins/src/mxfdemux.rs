@@ -435,9 +435,9 @@ impl MxfDemuxN {
             .filter_map(|track| track.edit_rate.units_to_ns(track.duration?))
             .max();
         self.seek.set_duration(self.duration_ns);
-        for port in 0..self.tracks.len() {
-            let caps = track_caps(&self.tracks[port]);
-            out.push_to(port, PipelinePacket::CapsChanged(caps)).await?;
+        for (port, track) in self.tracks.iter().enumerate() {
+            out.push_to(port, PipelinePacket::CapsChanged(track_caps(track)))
+                .await?;
         }
         Ok(())
     }
