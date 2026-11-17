@@ -20,9 +20,11 @@
 //! writes and the app reads.
 
 use alloc::sync::Arc;
+use alloc::vec::Vec;
 use core::sync::atomic::Ordering;
 
 use portable_atomic::AtomicU64;
+use spin::Mutex;
 
 /// Sentinel for an unknown position: `0` is a valid position (stream start), so
 /// position uses the maximum value to mean "not known yet".
@@ -34,8 +36,35 @@ const DURATION_UNKNOWN: u64 = 0;
 
 #[derive(Debug)]
 struct ProgressInner {
-    position_ns: AtomicU64,
+    sink_positions_ns: Mutex<Vec<Arc<AtomicU64>>>,
+    // what any sink published last, the answer while every sink is between a flush and its next buffer
+    latest_position_ns: AtomicU64,
     duration_ns: AtomicU64,
+}
+
+#[derive(Debug, Clone)]
+pub struct SinkPosition {
+    position_ns: Arc<AtomicU64>,
+    progress: Arc<ProgressInner>,
+}
+
+impl SinkPosition {
+    pub fn set(&self, ns: u64) {
+        let ns = known_position(ns);
+        self.position_ns.store(ns, Ordering::Relaxed);
+        self.progress
+            .latest_position_ns
+            .store(ns, Ordering::Relaxed);
+    }
+
+    pub fn forget(&self) {
+        self.position_ns.store(POSITION_UNKNOWN, Ordering::Relaxed);
+    }
+}
+
+fn known_position(ns: u64) -> u64 {
+    // the absurd ~584-year maximum is the "unknown" sentinel, so a real position stops just below it
+    ns.min(POSITION_UNKNOWN - 1)
 }
 
 /// A cloneable handle to a running pipeline's progress. The application
@@ -59,7 +88,8 @@ impl PipelineProgress {
     pub fn new() -> Self {
         Self {
             inner: Arc::new(ProgressInner {
-                position_ns: AtomicU64::new(POSITION_UNKNOWN),
+                sink_positions_ns: Mutex::new(Vec::new()),
+                latest_position_ns: AtomicU64::new(POSITION_UNKNOWN),
                 duration_ns: AtomicU64::new(DURATION_UNKNOWN),
             }),
         }
@@ -68,9 +98,26 @@ impl PipelineProgress {
     /// Application side: the current playback position in nanoseconds (stream
     /// time), or `None` before the first buffer reaches a sink.
     pub fn position(&self) -> Option<u64> {
-        match self.inner.position_ns.load(Ordering::Relaxed) {
-            POSITION_UNKNOWN => None,
-            ns => Some(ns),
+        // gstreamer's bin answers a position query with the furthest of its sinks
+        let sinks = self.inner.sink_positions_ns.lock();
+        let furthest = sinks
+            .iter()
+            .map(|slot| slot.load(Ordering::Relaxed))
+            .filter(|&ns| ns != POSITION_UNKNOWN)
+            .max();
+        let latest = self.inner.latest_position_ns.load(Ordering::Relaxed);
+        furthest.or((latest != POSITION_UNKNOWN).then_some(latest))
+    }
+
+    pub fn sink_position(&self) -> SinkPosition {
+        let position_ns = Arc::new(AtomicU64::new(POSITION_UNKNOWN));
+        self.inner
+            .sink_positions_ns
+            .lock()
+            .push(Arc::clone(&position_ns));
+        SinkPosition {
+            position_ns,
+            progress: Arc::clone(&self.inner),
         }
     }
 
@@ -81,21 +128,6 @@ impl PipelineProgress {
             DURATION_UNKNOWN => None,
             ns => Some(ns),
         }
-    }
-
-    /// Runner side: publish the latest position (the stream time of the buffer
-    /// just consumed at a sink). Latest-writer-wins, matching GStreamer
-    /// answering position from the sink's most recent buffer; a seek that
-    /// rewinds simply publishes a smaller value next.
-    pub fn set_position(&self, ns: u64) {
-        // A real position never collides with the "unknown" sentinel; clamp the
-        // (absurd, ~584-year) maximum so the sentinel stays meaningful.
-        let ns = if ns == POSITION_UNKNOWN {
-            POSITION_UNKNOWN - 1
-        } else {
-            ns
-        };
-        self.inner.position_ns.store(ns, Ordering::Relaxed);
     }
 
     /// Runner side: report a source's duration. Takes the maximum across
@@ -124,18 +156,50 @@ mod tests {
     }
 
     #[test]
-    fn position_is_latest_writer() {
+    fn a_sink_rewinds_by_publishing_a_smaller_value() {
         let p = PipelineProgress::new();
-        p.set_position(0);
+        let sink = p.sink_position();
+        assert_eq!(
+            p.position(),
+            None,
+            "a sink with no buffer yet knows no position"
+        );
+        sink.set(0);
         assert_eq!(
             p.position(),
             Some(0),
             "zero is a valid position, not unknown"
         );
-        p.set_position(5_000);
+        sink.set(5_000);
         assert_eq!(p.position(), Some(5_000));
-        // A rewind (seek) just publishes a smaller value.
-        p.set_position(1_000);
+        sink.set(1_000);
+        assert_eq!(p.position(), Some(1_000));
+    }
+
+    #[test]
+    fn position_is_the_furthest_sink_whichever_wrote_last() {
+        let p = PipelineProgress::new();
+        let audio = p.sink_position();
+        let video = p.sink_position();
+        audio.set(5_000);
+        video.set(4_000);
+        assert_eq!(p.position(), Some(5_000));
+        video.set(6_000);
+        audio.set(5_500);
+        assert_eq!(p.position(), Some(6_000));
+    }
+
+    #[test]
+    fn a_seek_back_lands_once_the_flushed_sinks_publish_again() {
+        let p = PipelineProgress::new();
+        let audio = p.sink_position();
+        let video = p.sink_position();
+        audio.set(9_000);
+        video.set(8_000);
+        audio.forget();
+        video.forget();
+        assert_eq!(p.position(), Some(8_000), "the last published value holds");
+        video.set(1_000);
         assert_eq!(p.position(), Some(1_000));
     }
 
@@ -162,7 +226,7 @@ mod tests {
     fn clones_share_state() {
         let app = PipelineProgress::new();
         let runner = app.clone();
-        runner.set_position(7_777);
+        runner.sink_position().set(7_777);
         runner.publish_duration(99_999);
         assert_eq!(app.position(), Some(7_777));
         assert_eq!(app.duration(), Some(99_999));

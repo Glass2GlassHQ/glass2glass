@@ -54,7 +54,8 @@ impl SinkEndReport {
         sink.at_eos = false;
     }
 
-    pub(crate) fn eos_is_stale(&self) -> bool {
+    pub(crate) fn awaits_seek_flush(&self) -> bool {
+        // what reaches the sink before the latest flushing seek's Flush belongs to the old position
         self.run.sinks[self.slot].lock().flushes < self.run.controller.flushing_seeks_taken()
     }
 

@@ -5360,6 +5360,7 @@ async fn sink_arm_loop<E: AsyncElement>(elem: &mut E, io: SinkArmIo) -> Result<u
     let mut last_buffer_bucket: Option<u8> = None;
     // M203: the segment in force, so a buffer's PTS maps to stream-time position.
     let mut current_segment: Option<Segment> = None;
+    let sink_position = progress.as_ref().map(PipelineProgress::sink_position);
     // M360 re-preroll: generation this arm last prerolled at, and whether it is
     // draining stale pre-seek frames (paused flushing seek) until the `Flush`.
     let mut preroll_gen = state.as_ref().map_or(0, |sc| sc.preroll_generation());
@@ -5427,8 +5428,18 @@ async fn sink_arm_loop<E: AsyncElement>(elem: &mut E, io: SinkArmIo) -> Result<u
                 in_rx.pop_transit_ns();
                 continue;
             }
+            Some(PipelinePacket::DataFrame(_))
+                if stream_end
+                    .as_ref()
+                    .is_some_and(SinkEndReport::awaits_seek_flush) =>
+            {
+                in_rx.pop_transit_ns();
+                continue;
+            }
             Some(PipelinePacket::Eos)
-                if stream_end.as_ref().is_some_and(SinkEndReport::eos_is_stale) => {}
+                if stream_end
+                    .as_ref()
+                    .is_some_and(SinkEndReport::awaits_seek_flush) => {}
             Some(PipelinePacket::Eos) => {
                 match elem.process(PipelinePacket::Eos, &mut null).await {
                     Err(G2gError::WindowClosed) => return Ok(consumed),
@@ -5503,6 +5514,9 @@ async fn sink_arm_loop<E: AsyncElement>(elem: &mut E, io: SinkArmIo) -> Result<u
             // DataFrame becomes the new visible preroll.
             Some(PipelinePacket::Flush) => {
                 flushing = false;
+                if let Some(position) = &sink_position {
+                    position.forget();
+                }
                 // a sink waiting for packets takes the Flush before the paused gate sees the new generation
                 if let Some(sc) = &state {
                     let gen = sc.preroll_generation();
@@ -5526,13 +5540,13 @@ async fn sink_arm_loop<E: AsyncElement>(elem: &mut E, io: SinkArmIo) -> Result<u
                 match &packet {
                     PipelinePacket::Segment(seg) => current_segment = Some(*seg),
                     PipelinePacket::DataFrame(frame) => {
-                        if let Some(p) = &progress {
+                        if let Some(position) = &sink_position {
                             let pts = frame.timing.pts_ns;
                             let pos = current_segment
                                 .as_ref()
                                 .and_then(|s| s.to_stream_time(pts))
                                 .unwrap_or(pts);
-                            p.set_position(pos);
+                            position.set(pos);
                         }
                     }
                     _ => {}

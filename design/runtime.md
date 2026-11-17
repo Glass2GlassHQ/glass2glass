@@ -934,7 +934,13 @@ pending seek and the source reads it, and here the runner writes and the app rea
 Position is published by the DAG runner's sink arm, mapping each consumed buffer's
 PTS through the active segment to stream time, the sink being the position authority
 exactly as a GStreamer sink answers from its segment plus last buffer, so it needs
-no element cooperation. Duration is the source's answer:
+no element cooperation. Each sink arm writes its own `SinkPosition`, and `position()`
+answers the furthest sink, as a GStreamer bin answers a position query with the
+largest of its sinks. A sink forgets its position on a `Flush`, and while every sink
+is between a flush and its next buffer the last published value stands. A sink
+downstream of a seekable source drops data frames that arrive before the latest
+flushing seek's `Flush`, so a seek while playing does not first present what was
+already queued. Duration is the source's answer:
 `SourceLoop::query_duration() -> Option<u64>`, defaulting to `None` so a live source
 stays unknown, polled by the source arm before producing, and `Mp4Src` reports it
 from the `mdhd` box. A demuxer learns the length from the stream, so the demux arm
