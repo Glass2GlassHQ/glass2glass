@@ -553,7 +553,7 @@ impl UnixFdSink {
     fn encode_frame(&mut self, frame: Frame) -> Result<(NewBuffer, SentMemory, RawFd), G2gError> {
         let caps = self.caps.as_ref().ok_or(G2gError::NotConfigured)?;
         let clock = clock_or_monotonic(&mut self.clock);
-        let (base_time, latency) = (clock.base_time(), clock.path_latency_min_ns());
+        let (base_time, latency) = (clock.base_time(), clock.deadline_latency_ns());
         let offset = monotonic_offset(clock.now_ns());
         let wire_time = |running| to_wire_time(running, base_time, latency, offset);
         let delta_unit = !frame.timing.keyframe && matches!(caps, Caps::CompressedVideo { .. });

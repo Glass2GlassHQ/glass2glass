@@ -194,7 +194,7 @@ impl SharedOutput {
                 signed(sync.now_ns()) + signed(PREROLL_NS) - signed(running_time)
             })
         };
-        let deadline = anchor + signed(running_time) + signed(sync.path_latency_min_ns());
+        let deadline = anchor + signed(running_time) + signed(sync.deadline_latency_ns());
         Ok(Some(unsigned(deadline)))
     }
 

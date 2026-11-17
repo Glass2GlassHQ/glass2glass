@@ -364,8 +364,8 @@ fn conversion_target(requested: OutputFormat, source: Pixel) -> Option<Pixel> {
 /// whole pictures across the threads, which is far faster on single-slice
 /// content but makes libavcodec hold `thread_count - 1` pictures before
 /// releasing the first: auto-sized to a 16-core machine that is 0.6 seconds at
-/// 25 fps. [`FfmpegVideoDec::latency`] reports that delay so a paced sink
-/// buffers for it rather than dropping late frames.
+/// 25 fps. [`FfmpegVideoDec::latency`] reports that delay, which a paced sink
+/// on a live path adds to its deadlines.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ThreadType {
     /// Let the element choose, from the liveness the runner hands down
@@ -523,8 +523,7 @@ pub struct FfmpegVideoDec {
     live: bool,
     /// Pictures the opened decoder holds back before releasing the first, read
     /// off `AVCodecContext.delay` after open. Nonzero only under frame
-    /// threading; folded into [`latency`](Self::latency) so a paced sink
-    /// anchors on it.
+    /// threading; folded into [`latency`](Self::latency).
     thread_delay_frames: u32,
     /// Most recent input caps, from
     /// `PipelinePacket::CapsChanged` or from a mid-stream
@@ -1627,9 +1626,8 @@ impl AsyncElement for FfmpegVideoDec {
     }
 
     /// The pictures frame threading and output reordering hold back, as time on
-    /// the negotiated framerate. A paced sink that knows about them waits; one
-    /// that does not would call every frame late and drop it. Zero until the
-    /// decoder has opened.
+    /// the negotiated framerate, which a paced sink on a live path waits out.
+    /// Zero until the decoder has opened.
     fn latency(&self) -> LatencyReport {
         let reorder_frames = self.decoder.as_ref().map_or(0, |decoder| {
             // SAFETY: an opened `AVCodecContext`; libavcodec raises `has_b_frames`

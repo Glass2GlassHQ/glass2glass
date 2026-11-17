@@ -247,7 +247,7 @@ impl PresentationPacer {
         let deadline =
             Self::presentation_anchor(sync, rt, anchor_ns, anchor_pre_play, seek_reanchor)
                 .saturating_add(as_signed(rt))
-                .saturating_add(as_signed(sync.path_latency_min_ns()))
+                .saturating_add(as_signed(sync.deadline_latency_ns()))
                 .saturating_add(as_signed(sync.paused_total_ns()));
         // A deadline below the clock's zero is simply already due.
         deadline.max(0) as u64
@@ -528,6 +528,17 @@ mod tests {
         p.set_clock_sync(sync);
         // rt 0 is due at base + declared min latency, not at base.
         assert_eq!(p.judge(0, 0), Pace::Wait(50_000_000));
+    }
+
+    #[test]
+    fn a_non_live_path_adds_no_latency() {
+        let t = Arc::new(AtomicU64::new(0));
+        let sync = ClockSync::new(Arc::new(ManualClock(t.clone())), 0)
+            .with_path_latency(crate::query::LatencyReport::buffered(600_000_000, None));
+        let mut p = PresentationPacer::new();
+        p.set_clock_sync(sync);
+        assert_eq!(p.judge(0, 0), Pace::Now);
+        assert_eq!(p.judge(40_000_000, 1), Pace::Wait(40_000_000));
     }
 
     #[test]

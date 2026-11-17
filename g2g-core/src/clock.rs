@@ -362,10 +362,17 @@ impl ClockSync {
         self.path_live
     }
 
-    /// The path's aggregated minimum latency, added to every presentation
-    /// deadline so a live sink buffers just enough to never run dry.
+    /// The path's aggregated minimum latency.
     pub fn path_latency_min_ns(&self) -> u64 {
         self.path_latency_min_ns.load(Ordering::Relaxed)
+    }
+
+    pub fn deadline_latency_ns(&self) -> u64 {
+        // gstreamer configures latency only on a live pipeline
+        if !self.path_live {
+            return 0;
+        }
+        self.path_latency_min_ns()
     }
 
     pub fn set_path_latency_min_ns(&self, min_ns: u64) {

@@ -332,6 +332,11 @@ first-frame anchor as the run's standing latency. First-frame anchoring remains 
 non-live behaviour, where frames arrive at read speed and an absolute anchor would
 defeat pacing entirely.
 
+A non-live path adds no latency to its deadlines: `ClockSync::deadline_latency_ns`
+is zero there, as GStreamer configures latency only on a live pipeline. The sinks
+preroll before `Playing` instead, so the pictures a frame-threaded `ffmpegdec`
+holds back delay the first frame after a load or seek once, not every deadline.
+
 The DAG runner folds every node that carries an element: sources, transforms, sinks,
 fan-ins and demuxes. A fan-in contributes `MultiInputElement::latency()` the way a
 transform contributes its own, so a `fallbackswitch` declares its stall slack there.
