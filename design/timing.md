@@ -139,7 +139,9 @@ drains.
 
 On a `Flush` the sinks skip the samples still queued for their device thread
 (`PendingFlushes`) and drop what the device buffered, so a seek does not first
-play out the audio from before it.
+play out the audio from before it. At `Eos` a sink waits for its device thread to
+play out and close the device. The link keeps what opened it, so a seek after the
+end of the stream opens the device again on the next samples.
 
 The sinks also start each stream at its deadline, as GStreamer's audio base sink
 does. `PlayoutStart` holds a preroll buffer while the play anchor is armed but

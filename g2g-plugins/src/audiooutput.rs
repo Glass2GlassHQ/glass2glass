@@ -107,6 +107,7 @@ mod device_worker {
     use std::thread;
     use std::time::{Duration, Instant};
 
+    use alloc::boxed::Box;
     use alloc::string::String;
     use alloc::vec::Vec;
 
@@ -297,10 +298,14 @@ mod device_worker {
             pending_flushes: &PendingFlushes,
             err: G2gError,
         ) -> Result<(), G2gError> {
+            self.reset();
+            pending_flushes.send(link, err).await
+        }
+
+        fn reset(&mut self) {
             self.pacer.flush();
             self.started = false;
             self.held.clear();
-            pending_flushes.send(link, err).await
         }
 
         pub(crate) async fn send_held(
@@ -404,8 +409,24 @@ mod device_worker {
         geometry: PcmGeometry,
     }
 
+    type SpawnWorker = Box<
+        dyn FnMut(
+                String,
+                PlayoutGate,
+                SyncSender<Result<(), G2gError>>,
+            ) -> Result<WorkerLink<DeviceCmd>, G2gError>
+            + Send,
+    >;
+
+    struct WorkerSpawn {
+        geometry: PcmGeometry,
+        spawn: SpawnWorker,
+    }
+
     pub(crate) struct PlayoutLink {
         worker: Option<RunningWorker>,
+        // what opens the device again for a seek after the end of the stream shut it
+        worker_spawn: Option<WorkerSpawn>,
         pending_flushes: PendingFlushes,
         played_position: PlayedPosition,
         start: PlayoutStart,
@@ -424,6 +445,7 @@ mod device_worker {
         pub(crate) fn new(worker_error: G2gError) -> Self {
             Self {
                 worker: None,
+                worker_spawn: None,
                 pending_flushes: PendingFlushes::default(),
                 played_position: PlayedPosition::default(),
                 start: PlayoutStart::default(),
@@ -454,24 +476,45 @@ mod device_worker {
             None
         }
 
-        pub(crate) fn open<Device>(
+        pub(crate) fn open<Device, Open, Play>(
             &mut self,
             thread_name: &str,
             caps: &Caps,
             output: &mut OutputDevice,
             fallback: DeviceFallback,
-            open: impl FnMut(&str) -> Result<Device, G2gError> + Send + 'static,
-            play: impl FnMut(Device, &Receiver<DeviceCmd>, &mut PlayoutGate) -> PlayEnd + Send + 'static,
-        ) -> Result<(), G2gError> {
+            open: Open,
+            play: Play,
+        ) -> Result<(), G2gError>
+        where
+            Open: FnMut(&str) -> Result<Device, G2gError> + Clone + Send + 'static,
+            Play: FnMut(Device, &Receiver<DeviceCmd>, &mut PlayoutGate) -> PlayEnd
+                + Clone
+                + Send
+                + 'static,
+        {
             self.abort();
             let geometry = PcmGeometry::of(caps)?;
-            let (ready_tx, ready_rx) = mpsc::sync_channel(1);
-            let device = String::from(output.name());
+            let thread_name = String::from(thread_name);
+            let spawn = move |device: String, gate: PlayoutGate, ready: SyncSender<_>| {
+                let (fallback, open, play) = (fallback.clone(), open.clone(), play.clone());
+                WorkerLink::spawn(&thread_name, move |rx| {
+                    run_device_worker(device, rx, gate, fallback, ready, open, play);
+                })
+            };
+            self.worker_spawn = Some(WorkerSpawn {
+                geometry,
+                spawn: Box::new(spawn),
+            });
+            self.start_worker(output)
+        }
+
+        fn start_worker(&mut self, output: &mut OutputDevice) -> Result<(), G2gError> {
             self.pending_flushes = PendingFlushes::default();
             let gate = PlayoutGate::new(self.pending_flushes.clone(), self.played_position.clone());
-            let link = WorkerLink::spawn(thread_name, move |rx| {
-                run_device_worker(device, rx, gate, fallback, ready_tx, open, play);
-            })?;
+            let worker_spawn = self.worker_spawn.as_mut().ok_or(G2gError::NotConfigured)?;
+            let (ready_tx, ready_rx) = mpsc::sync_channel(1);
+            let link = (worker_spawn.spawn)(String::from(output.name()), gate, ready_tx)?;
+            let geometry = worker_spawn.geometry;
             // a host with no audio device fails here instead of dropping audio
             match ready_rx.recv_timeout(DEVICE_OPEN_TIMEOUT) {
                 Ok(Ok(())) => {}
@@ -488,7 +531,10 @@ mod device_worker {
             frame: Frame,
             output: &mut OutputDevice,
         ) -> Result<(), G2gError> {
-            let worker = self.worker.as_ref().ok_or(G2gError::NotConfigured)?;
+            if self.worker.is_none() {
+                self.start_worker(output)?;
+            }
+            let worker = self.worker.as_ref().expect("started above");
             if let Some(device) = output.take_switch() {
                 let switch = DeviceCmd::SwitchDevice(device);
                 worker.link.send(switch, self.worker_error.clone()).await?;
@@ -500,8 +546,12 @@ mod device_worker {
         }
 
         pub(crate) async fn flush(&mut self) -> Result<(), G2gError> {
-            let worker = self.worker.as_ref().ok_or(G2gError::NotConfigured)?;
             self.played_position.forget();
+            let Some(worker) = self.worker.as_ref() else {
+                self.worker_spawn.as_ref().ok_or(G2gError::NotConfigured)?;
+                self.start.reset();
+                return Ok(());
+            };
             let error = self.worker_error.clone();
             self.start
                 .flush(&worker.link, &self.pending_flushes, error)
@@ -1655,6 +1705,56 @@ mod tests {
 
         // before the second buffer is written, the device holds the delay and the second buffer is still to come
         assert_eq!(progress.position(), Some(buffer - DEVICE_DELAY_NS));
+    }
+
+    #[test]
+    fn a_flush_after_the_end_of_the_stream_plays_on_a_device_opened_again() {
+        const BUFFER_BYTES: usize = 1_920;
+        let opens = Arc::new(AtomicU64::new(0));
+        let played = Arc::new(Mutex::new(Vec::new()));
+        let mut link = PlayoutLink::new(err());
+        let mut output = OutputDevice::new("device", "first");
+        let fallback = output.fallback(BYTES_PER_SECOND, Arc::default(), 1, |frame| {
+            frame.domain.as_system_slice().map(<[u8]>::len)
+        });
+        let opened = Arc::clone(&opens);
+        let log = Arc::clone(&played);
+        link.open(
+            "test-audio",
+            &stereo_s16_caps(),
+            &mut output,
+            fallback,
+            move |_| {
+                opened.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+            move |(), rx, gate| loop {
+                match gate.recv(rx) {
+                    Ok(Some(DeviceStep::Samples(frame))) => {
+                        log.lock().unwrap().push(frame.timing.pts_ns)
+                    }
+                    Ok(None | Some(DeviceStep::Flush)) => {}
+                    Ok(Some(DeviceStep::SwitchDevice(next))) => return PlayEnd::SwitchDevice(next),
+                    Ok(Some(DeviceStep::Shutdown)) | Err(_) => return PlayEnd::Shutdown,
+                }
+            },
+        )
+        .unwrap();
+        let seek_target = buffer_ns(BUFFER_BYTES);
+        g2g_core::runtime::block_on(async {
+            link.send(pcm_frame(0, BUFFER_BYTES), &mut output)
+                .await
+                .unwrap();
+            link.finish().await.unwrap();
+            link.flush().await.unwrap();
+            link.send(pcm_frame(seek_target, BUFFER_BYTES), &mut output)
+                .await
+                .unwrap();
+            link.finish().await.unwrap();
+        });
+
+        assert_eq!(*played.lock().unwrap(), [0, seek_target]);
+        assert_eq!(opens.load(Ordering::SeqCst), 2);
     }
 
     #[test]
