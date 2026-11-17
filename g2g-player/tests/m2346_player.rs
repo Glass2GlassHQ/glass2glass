@@ -8,8 +8,8 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use g2g_player::{
-    EndFile, Event, LoadOptions, Media, OsdDimensions, OverlayRectangle, Player, Property,
-    PropertyChange, VideoSize, WgpuRenderContext,
+    AudioParams, ChannelLayout, EndFile, Event, LoadOptions, Media, OsdDimensions,
+    OverlayRectangle, Player, Property, PropertyChange, VideoSize, WgpuRenderContext,
 };
 use g2g_plugins::gpu::{read_texture_plane, whole_texture, GpuContext};
 
@@ -600,4 +600,40 @@ fn the_level_meter_reads_the_decoded_audio_in_db() {
     player.set_level_meter(None);
     wait_until(|| player.audio_levels().is_none());
     player.stop();
+}
+
+#[test]
+fn audio_params_name_the_decoded_channels() {
+    const SAMPLE_RATE: u32 = 44_100;
+    const CHANNELS: u8 = 6;
+    let player = Player::new();
+    player.observe(Property::AudioParams);
+    player
+        .load(
+            Media::LaunchLine(&format!(
+                "videotestsrc ! playervideosink \
+                 audiotestsrc samplerate={SAMPLE_RATE} channels={CHANNELS} ! audioconvert ! audioresample ! autoaudiosink"
+            )),
+            LoadOptions::default(),
+        )
+        .unwrap();
+    wait_until(|| {
+        matches!(
+            player.property(Property::AudioParams),
+            PropertyChange::AudioParams(Some(_))
+        )
+    });
+    assert_eq!(
+        player.property(Property::AudioParams),
+        PropertyChange::AudioParams(Some(AudioParams {
+            sample_rate: SAMPLE_RATE,
+            channel_count: CHANNELS,
+            channel_layout: ChannelLayout::SURROUND_5_1,
+        }))
+    );
+    player.stop();
+    assert_eq!(
+        player.property(Property::AudioParams),
+        PropertyChange::AudioParams(None)
+    );
 }

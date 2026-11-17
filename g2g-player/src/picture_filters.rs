@@ -3,18 +3,10 @@
 // SPDX-License-Identifier: MPL-2.0
 
 use std::fmt;
-use std::future::Future;
-use std::pin::Pin;
 
-use g2g_core::{
-    AsyncElement, Caps, ConfigureOutcome, Dim, ElementMetadata, G2gError, OutputSink,
-    PipelinePacket,
-};
-use tokio::sync::watch;
+use g2g_core::{Caps, Dim};
 
-use std::sync::Arc;
-
-use crate::{Shared, VideoSize};
+use crate::VideoSize;
 
 pub(crate) const VIDEO_PARAMS_PROBE: &str = "playervideoparams";
 
@@ -353,71 +345,6 @@ pub(crate) fn video_size_of(caps: &Caps) -> Option<VideoSize> {
             height: *height,
         }),
         _ => None,
-    }
-}
-
-#[derive(Debug)]
-pub(crate) struct VideoParamsProbe {
-    shared: Arc<Shared>,
-    decoded_size: watch::Sender<Option<VideoSize>>,
-}
-
-impl VideoParamsProbe {
-    pub(crate) fn new(shared: Arc<Shared>, decoded_size: watch::Sender<Option<VideoSize>>) -> Self {
-        VideoParamsProbe {
-            shared,
-            decoded_size,
-        }
-    }
-
-    fn report(&self, caps: &Caps) {
-        if let Some(size) = video_size_of(caps) {
-            self.shared.set_video_params(Some(size));
-            self.decoded_size.send_if_modified(|last| {
-                let changed = *last != Some(size);
-                *last = Some(size);
-                changed
-            });
-        }
-    }
-}
-
-impl AsyncElement for VideoParamsProbe {
-    type ProcessFuture<'a>
-        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
-    where
-        Self: 'a;
-
-    fn metadata(&self) -> ElementMetadata {
-        ElementMetadata::new(
-            "Player video params probe",
-            "Filter/Video",
-            "Reports the decoded picture size to the g2g-player run",
-            "Aaron Boxer <boxerab@protonmail.com>",
-        )
-    }
-
-    fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
-        Ok(upstream_caps.clone())
-    }
-
-    fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        self.report(absolute_caps);
-        Ok(ConfigureOutcome::Accepted)
-    }
-
-    fn process<'a>(
-        &'a mut self,
-        packet: PipelinePacket,
-        out: &'a mut dyn OutputSink,
-    ) -> Self::ProcessFuture<'a> {
-        Box::pin(async move {
-            if let PipelinePacket::CapsChanged(caps) = &packet {
-                self.report(caps);
-            }
-            out.push(packet).await?;
-            Ok(())
-        })
     }
 }
 

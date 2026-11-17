@@ -27,11 +27,13 @@ use g2g_plugins::edl::{parse_edl_uri, EdlError};
 use g2g_plugins::launched::RunFailure;
 use g2g_plugins::registry::default_registry;
 
+mod caps_probe;
 mod level_meter;
 mod picture_filters;
 mod render;
 mod videosink;
 
+pub use g2g_core::{ChannelLayout, ChannelPosition};
 pub use g2g_plugins::glnv12::GlTarget;
 pub use level_meter::AudioLevels;
 pub use picture_filters::VideoFilterError;
@@ -39,9 +41,10 @@ pub use render::GlRenderContext;
 #[cfg(feature = "wgpu")]
 pub use render::WgpuRenderContext;
 
+use caps_probe::CapsProbe;
 use level_meter::{apply_level_meter, insert_level_meter, LEVEL_METER};
 use picture_filters::{
-    launch_chain, parse_filters, PictureFilter, VideoParamsProbe, VIDEO_PARAMS_PROBE,
+    launch_chain, parse_filters, video_size_of, PictureFilter, VIDEO_PARAMS_PROBE,
 };
 use videosink::{FrameSlot, PlayerVideoSink, PLAYER_VIDEO_SINK, PLAYER_VIDEO_SINK_METADATA};
 
@@ -67,6 +70,14 @@ pub struct LoadOptions {
 pub struct VideoSize {
     pub width: u32,
     pub height: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AudioParams {
+    pub sample_rate: u32,
+    pub channel_count: u8,
+    // unspecified when the stream names no speakers and the count has no conventional layout
+    pub channel_layout: ChannelLayout,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,6 +113,8 @@ pub enum Property {
     // the picture size after the video filters
     VideoOutParams,
     OsdDimensions,
+    // the decoded audio, before it is converted for the device
+    AudioParams,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -113,6 +126,7 @@ pub enum PropertyChange {
     VideoParams(Option<VideoSize>),
     VideoOutParams(Option<VideoSize>),
     OsdDimensions(Option<OsdDimensions>),
+    AudioParams(Option<AudioParams>),
 }
 
 impl PropertyChange {
@@ -125,6 +139,7 @@ impl PropertyChange {
             PropertyChange::VideoParams(_) => Property::VideoParams,
             PropertyChange::VideoOutParams(_) => Property::VideoOutParams,
             PropertyChange::OsdDimensions(_) => Property::OsdDimensions,
+            PropertyChange::AudioParams(_) => Property::AudioParams,
         }
     }
 }
@@ -242,6 +257,7 @@ pub(crate) struct Shared {
     video_params: Mutex<Option<VideoSize>>,
     video_out_params: Mutex<Option<VideoSize>>,
     osd_dimensions: Mutex<Option<OsdDimensions>>,
+    audio_params: Mutex<Option<AudioParams>>,
     audio_levels: Mutex<Option<AudioLevels>>,
     // what time-pos shows from a seek request until its first frame is presented, as mpv's does
     seek_target: Mutex<Option<Duration>>,
@@ -304,6 +320,11 @@ impl Shared {
     pub(crate) fn set_osd_dimensions(&self, dimensions: OsdDimensions) {
         *self.osd_dimensions.lock().expect("osd dimensions lock") = Some(dimensions);
         self.report(PropertyChange::OsdDimensions(Some(dimensions)));
+    }
+
+    pub(crate) fn set_audio_params(&self, params: Option<AudioParams>) {
+        *self.audio_params.lock().expect("audio params lock") = params;
+        self.report(PropertyChange::AudioParams(params));
     }
 
     fn set_audio_levels(&self, levels: Option<AudioLevels>) {
@@ -416,8 +437,11 @@ impl Player {
             insert_video_params_probe(&mut graph, first_sink, &self.shared, decoded_size);
         }
         let mut level_meter_window = self.level_meter_window.subscribe();
-        let has_level_meter =
-            insert_level_meter(&mut graph, *level_meter_window.borrow_and_update());
+        let has_level_meter = insert_level_meter(
+            &mut graph,
+            *level_meter_window.borrow_and_update(),
+            &self.shared,
+        );
         let seek = match options.start {
             // a source that cannot seek still plays, seek() refuses it
             None => attach_seek_controller(&mut graph).ok(),
@@ -487,6 +511,7 @@ impl Player {
         self.shared.seek_landed();
         self.shared.set_video_params(None);
         self.shared.set_video_out_params(None);
+        self.shared.set_audio_params(None);
         self.shared.set_audio_levels(None);
     }
 
@@ -614,6 +639,9 @@ impl Player {
                     .lock()
                     .expect("osd dimensions lock"),
             ),
+            Property::AudioParams => PropertyChange::AudioParams(
+                *self.shared.audio_params.lock().expect("audio params lock"),
+            ),
         }
     }
 
@@ -715,10 +743,27 @@ fn insert_video_params_probe(
         .iter()
         .position(|edge| edge.dst.node == sink)
         .expect("parse_launch links every sink");
-    let probe = graph.insert_on_edge(
-        into_sink,
-        GraphNodeRef::element(VideoParamsProbe::new(shared.clone(), decoded_size)),
+    let shared = shared.clone();
+    let probe = CapsProbe::new(
+        g2g_core::ElementMetadata::new(
+            "Player video params probe",
+            "Filter/Video",
+            "Reports the decoded picture size to the g2g-player run",
+            "Aaron Boxer <boxerab@protonmail.com>",
+        ),
+        move |caps| {
+            let Some(size) = video_size_of(caps) else {
+                return;
+            };
+            shared.set_video_params(Some(size));
+            decoded_size.send_if_modified(|last| {
+                let changed = *last != Some(size);
+                *last = Some(size);
+                changed
+            });
+        },
     );
+    let probe = graph.insert_on_edge(into_sink, GraphNodeRef::element(probe));
     graph.set_node_name(probe, VIDEO_PARAMS_PROBE.to_string());
 }
 

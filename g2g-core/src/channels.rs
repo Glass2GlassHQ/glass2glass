@@ -74,6 +74,22 @@ impl ChannelPosition {
         }
     }
 
+    pub const fn ffmpeg_name(self) -> &'static str {
+        match self {
+            ChannelPosition::Fl => "FL",
+            ChannelPosition::Fr => "FR",
+            ChannelPosition::Fc => "FC",
+            ChannelPosition::Lfe => "LFE",
+            ChannelPosition::Bl => "BL",
+            ChannelPosition::Br => "BR",
+            ChannelPosition::Flc => "FLC",
+            ChannelPosition::Frc => "FRC",
+            ChannelPosition::Bc => "BC",
+            ChannelPosition::Sl => "SL",
+            ChannelPosition::Sr => "SR",
+        }
+    }
+
     const fn from_gst_bit(bit: u32) -> Option<Self> {
         use ChannelPosition::*;
         Some(match bit {

@@ -1045,7 +1045,10 @@ audio sink, so it reads the decoded channels before playbin mixes them to stereo
 `set_level_meter` turns its `post-messages` on with the window as its `interval`,
 or off, through the `GraphMutator`. The run reads its `BusMessage::Level` off the
 run's bus into `audio_levels`, and only while the meter is on, since readings
-posted before it was switched off still arrive after.
+posted before it was switched off still arrive after. A probe in front of the meter
+sets `audio-params` from the decoded caps: the rate, the channel count and the
+speaker layout, the conventional layout for the count when the stream names none.
+The video and audio probes are one `CapsProbe` element with a callback.
 
 The host draws the frame due now into its own target, as with libmpv's render API.
 A URI load builds `playbin uri=... video-sink=playervideosink`, and a launch line
