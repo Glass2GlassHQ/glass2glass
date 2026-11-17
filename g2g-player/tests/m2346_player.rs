@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use g2g_player::{
     AudioParams, ChannelLayout, EndFile, Event, LoadOptions, Media, OsdDimensions,
-    OverlayRectangle, Player, Property, PropertyChange, VideoSize, WgpuRenderContext,
+    OverlayRectangle, Player, Property, PropertyChange, SubtitleSlot, VideoSize, WgpuRenderContext,
 };
 use g2g_plugins::gpu::{read_texture_plane, whole_texture, GpuContext};
 
@@ -566,6 +566,82 @@ fn an_overlay_lands_on_its_picture_pixels_and_redraws_a_paused_frame() {
     assert!(player.wants_redraw());
     let cleared = rendered_pixels(&mut render, &context, &target);
     assert_eq!(colour(&cleared, inside), colour(&plain, inside));
+    player.stop();
+}
+
+// SRT times of a cue over the frame at START and of one that ends a frame period before it
+const CUE_OVER_START: &str = "1\n00:00:00,800 --> 00:00:01,200\nSUBTITLE\n";
+const CUE_BEFORE_START: &str = "1\n00:00:00,000 --> 00:00:00,960\nSUBTITLE\n";
+
+fn subtitle_file(name: &str, cues: &str) -> std::path::PathBuf {
+    let path = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(name);
+    std::fs::write(&path, cues).unwrap();
+    path
+}
+
+// a 48 pixel high picture has no room for a line of text in one half
+const SUBTITLE_TARGET: (u32, u32) = (4 * CLIP_WIDTH, 4 * CLIP_HEIGHT);
+
+fn rows(pixels: &[u8], rows: std::ops::Range<u32>) -> &[u8] {
+    let row_bytes = (SUBTITLE_TARGET.0 * RGBA_BYTES_PER_PIXEL) as usize;
+    &pixels[rows.start as usize * row_bytes..rows.end as usize * row_bytes]
+}
+
+#[test]
+fn subtitles_draw_in_their_slot_only_while_a_cue_covers_the_frame() {
+    let Ok(context) = pollster::block_on(GpuContext::headless()) else {
+        return;
+    };
+    let over_start = subtitle_file("m2385_over_start.srt", CUE_OVER_START);
+    let before_start = subtitle_file("m2385_before_start.srt", CUE_BEFORE_START);
+    let player = Player::new();
+    let mut render = WgpuRenderContext::new(&player, context.clone());
+    let target = rgba_target(&context, SUBTITLE_TARGET);
+    load_paused_at_start(&player);
+    wait_until(|| player.wants_redraw());
+    let plain = rendered_pixels(&mut render, &context, &target);
+    let top = 0..SUBTITLE_TARGET.1 / 2;
+    let bottom = SUBTITLE_TARGET.1 / 2..SUBTITLE_TARGET.1;
+    let mut redrawn = |player: &Player| {
+        assert!(player.wants_redraw());
+        rendered_pixels(&mut render, &context, &target)
+    };
+
+    player
+        .set_subtitle_file(SubtitleSlot::Subtitle, Some(&over_start))
+        .unwrap();
+    let subtitled = redrawn(&player);
+    assert_ne!(
+        rows(&subtitled, bottom.clone()),
+        rows(&plain, bottom.clone())
+    );
+    assert_eq!(rows(&subtitled, top.clone()), rows(&plain, top.clone()));
+
+    player.set_subtitle_visibility(SubtitleSlot::Subtitle, false);
+    assert_eq!(redrawn(&player), plain);
+    player.set_subtitle_visibility(SubtitleSlot::Subtitle, true);
+    player
+        .set_subtitle_file(SubtitleSlot::Subtitle, None)
+        .unwrap();
+    player
+        .set_subtitle_file(SubtitleSlot::Caption, Some(&over_start))
+        .unwrap();
+    let captioned = redrawn(&player);
+    assert_ne!(rows(&captioned, top.clone()), rows(&plain, top));
+    assert_eq!(rows(&captioned, bottom.clone()), rows(&plain, bottom));
+
+    player
+        .set_subtitle_file(SubtitleSlot::Caption, Some(&before_start))
+        .unwrap();
+    assert_eq!(redrawn(&player), plain);
+
+    player
+        .set_subtitle_file(SubtitleSlot::Caption, Some(&over_start))
+        .unwrap();
+    player.stop();
+    load_paused_at_start(&player);
+    wait_until(|| player.wants_redraw());
+    assert_eq!(rendered_pixels(&mut render, &context, &target), plain);
     player.stop();
 }
 

@@ -20,7 +20,7 @@ alsa = ["g2g-plugins/alsa-sink"]
 
 [dependencies]
 g2g-core = { workspace = true, features = ["std", "runtime", "multi-thread"] }
-g2g-plugins = { workspace = true, features = ["std", "multi-thread", "gl-render", "hqdn3d"] }
+g2g-plugins = { workspace = true, features = ["std", "multi-thread", "gl-render", "hqdn3d", "text-shaping"] }
 tokio = { version = "1", features = ["rt", "time", "sync", "macros"] }
 wgpu = { version = "30", optional = true }
 

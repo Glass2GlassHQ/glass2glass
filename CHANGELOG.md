@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2385: `g2g-player` draws subtitle files in a bottom and a top slot, at display size.
 - M2384: `g2g-player` reports `audio-params`, the decoded rate and speaker layout.
 - M2383: every audio sink pauses with the pipeline, resyncs after a start, and shares one device worker.
 - M2382: audio sinks start at their deadline, and `g2g-player` prerolls every sink before playing and on each seek.

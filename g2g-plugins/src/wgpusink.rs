@@ -56,6 +56,7 @@ use crate::gpu::{
     nv12_plane_views, packed_nv12_extent, read_texture_plane, texture_holds_picture,
     texture_layout, texture_of, GpuContext, WgpuTextureLayout,
 };
+use crate::overlay_image::OverlayImage;
 use crate::videoconvert::display::{display_sink_caps, DisplayInput, NV12_AND_RGBA};
 use crate::yuvmatrix::YuvToRgbWeights;
 
@@ -249,11 +250,36 @@ fn blit_bindings(layout: WgpuTextureLayout) -> BlitBindings {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BlitCompositing {
+    // the rest of the view outside the viewport is cleared to black
+    ReplaceTarget,
+    // premultiplied alpha drawn over what the view holds
+    OverTarget,
+}
+
+impl BlitCompositing {
+    fn blend(self) -> Option<wgpu::BlendState> {
+        match self {
+            BlitCompositing::ReplaceTarget => None,
+            BlitCompositing::OverTarget => Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+        }
+    }
+
+    fn load(self) -> wgpu::LoadOp<wgpu::Color> {
+        match self {
+            BlitCompositing::ReplaceTarget => wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+            BlitCompositing::OverTarget => wgpu::LoadOp::Load,
+        }
+    }
+}
+
 /// A blit pipeline plus the bind group layout its fragment stage expects.
 #[derive(Debug)]
 pub(crate) struct BlitPipeline {
     pipeline: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
+    compositing: BlitCompositing,
 }
 
 impl BlitPipeline {
@@ -265,6 +291,7 @@ impl BlitPipeline {
         target_format: wgpu::TextureFormat,
         layout: WgpuTextureLayout,
         fragment_stage: &str,
+        compositing: BlitCompositing,
     ) -> Self {
         let source = alloc::string::String::from(VERTEX_STAGE) + fragment_stage;
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -329,7 +356,7 @@ impl BlitPipeline {
                 compilation_options: Default::default(),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: target_format,
-                    blend: None,
+                    blend: compositing.blend(),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
             }),
@@ -342,6 +369,7 @@ impl BlitPipeline {
         Self {
             pipeline,
             bind_group_layout,
+            compositing,
         }
     }
 
@@ -397,7 +425,7 @@ impl BlitPipeline {
                 view,
                 resolve_target: None,
                 ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    load: self.compositing.load(),
                     store: wgpu::StoreOp::Store,
                 },
                 depth_slice: None,
@@ -421,7 +449,6 @@ impl BlitPipeline {
     }
 }
 
-// the rest of the view outside the viewport is cleared to black
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct BlitTarget<'a> {
     pub view: &'a wgpu::TextureView,
@@ -626,6 +653,14 @@ pub struct VideoRenderer {
     pixel_aspect: PixelAspect,
     force_aspect_ratio: bool,
     overlay_pipeline: wgpu::RenderPipeline,
+    image_blit: BlitPipeline,
+    image_upload: Option<UploadedImage>,
+}
+
+#[derive(Debug)]
+struct UploadedImage {
+    texture: wgpu::Texture,
+    generation: u64,
 }
 
 const OVERLAY_SHADER: &str = "
@@ -703,24 +738,34 @@ impl VideoRenderer {
         let device = &ctx.device;
         let resources = BlitResources::new(device);
         let overlay_pipeline = overlay_pipeline(device, target_format);
+        let image_blit = BlitPipeline::build(
+            device,
+            target_format,
+            WgpuTextureLayout::Rgba,
+            FRAGMENT_RGBA,
+            BlitCompositing::OverTarget,
+        );
         Self {
             rgba_blit: BlitPipeline::build(
                 device,
                 target_format,
                 WgpuTextureLayout::Rgba,
                 FRAGMENT_RGBA,
+                BlitCompositing::ReplaceTarget,
             ),
             nv12_blit: BlitPipeline::build(
                 device,
                 target_format,
                 WgpuTextureLayout::PackedNv12,
                 &fragment_nv12(Colorimetry::UNKNOWN, FRAGMENT_PACKED_NV12),
+                BlitCompositing::ReplaceTarget,
             ),
             nv12_planes_blit: BlitPipeline::build(
                 device,
                 target_format,
                 WgpuTextureLayout::MultiplanarNv12,
                 &fragment_nv12(Colorimetry::UNKNOWN, FRAGMENT_MULTIPLANAR_NV12),
+                BlitCompositing::ReplaceTarget,
             ),
             nv12_colorimetry: Colorimetry::UNKNOWN,
             target_format,
@@ -731,6 +776,8 @@ impl VideoRenderer {
             pixel_aspect: PixelAspect::Any,
             force_aspect_ratio: true,
             overlay_pipeline,
+            image_blit,
+            image_upload: None,
         }
     }
 
@@ -749,12 +796,14 @@ impl VideoRenderer {
             self.target_format,
             WgpuTextureLayout::PackedNv12,
             &fragment_nv12(colorimetry, FRAGMENT_PACKED_NV12),
+            BlitCompositing::ReplaceTarget,
         );
         self.nv12_planes_blit = BlitPipeline::build(
             &self.ctx.device,
             self.target_format,
             WgpuTextureLayout::MultiplanarNv12,
             &fragment_nv12(colorimetry, FRAGMENT_MULTIPLANAR_NV12),
+            BlitCompositing::ReplaceTarget,
         );
         self.nv12_colorimetry = colorimetry;
     }
@@ -926,6 +975,75 @@ impl VideoRenderer {
             pass.draw(0..vertex_count, 0..1);
         }
         self.ctx.queue.submit([encoder.finish()]);
+    }
+
+    pub fn draw_image(
+        &mut self,
+        image: &OverlayImage,
+        view: &wgpu::TextureView,
+    ) -> Result<(), G2gError> {
+        let row_bytes = image.width.checked_mul(4).ok_or(G2gError::CapsMismatch)?;
+        if (image.rgba.len() as u64) < u64::from(row_bytes) * u64::from(image.height) {
+            return Err(G2gError::CapsMismatch);
+        }
+        let size = wgpu::Extent3d {
+            width: image.width,
+            height: image.height,
+            depth_or_array_layers: 1,
+        };
+        let current = self
+            .image_upload
+            .as_ref()
+            .filter(|uploaded| uploaded.texture.size() == size);
+        if current.is_none_or(|uploaded| uploaded.generation != image.generation) {
+            let texture = match current {
+                Some(uploaded) => uploaded.texture.clone(),
+                None => self.ctx.device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("wgpu-sink-image"),
+                    size,
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::Rgba8Unorm,
+                    usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
+                }),
+            };
+            self.ctx.queue.write_texture(
+                texture.as_image_copy(),
+                &image.rgba,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(row_bytes),
+                    rows_per_image: Some(image.height),
+                },
+                size,
+            );
+            self.image_upload = Some(UploadedImage {
+                texture,
+                generation: image.generation,
+            });
+        }
+        let texture = &self.image_upload.as_ref().expect("uploaded above").texture;
+        let mut encoder = self
+            .ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("wgpu-sink-image"),
+            });
+        self.image_blit.encode(
+            &self.ctx.device,
+            &mut encoder,
+            texture,
+            WgpuTextureLayout::Rgba,
+            &self.resources,
+            BlitTarget {
+                view,
+                viewport: image.placement,
+            },
+        );
+        self.ctx.queue.submit([encoder.finish()]);
+        Ok(())
     }
 
     /// Upload a tightly packed system-memory frame into the renderer's own

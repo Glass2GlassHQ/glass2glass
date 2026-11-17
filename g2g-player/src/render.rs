@@ -7,9 +7,10 @@ use std::sync::Arc;
 
 use g2g_core::{Caps, G2gError};
 use g2g_plugins::glnv12::{GlTarget, GlVideoRenderer};
-use g2g_plugins::{FilledRectangle, ViewportRectangle};
+use g2g_plugins::{FilledRectangle, OverlayImage, ViewportRectangle};
 
 use crate::picture_filters::video_size_of;
+use crate::subtitles::ShowingCues;
 use crate::videosink::DueFrame;
 use crate::{OsdDimensions, Player, Shared};
 
@@ -18,6 +19,14 @@ struct FrameFeed {
     shared: Arc<Shared>,
     current: Option<DueFrame>,
     configured_caps: Option<Caps>,
+    subtitle_image: Option<SubtitleImage>,
+    subtitle_images_drawn: u64,
+}
+
+#[derive(Debug)]
+struct SubtitleImage {
+    showing: ShowingCues,
+    image: OverlayImage,
 }
 
 impl FrameFeed {
@@ -26,6 +35,8 @@ impl FrameFeed {
             shared: player.shared.clone(),
             current: None,
             configured_caps: None,
+            subtitle_image: None,
+            subtitle_images_drawn: 0,
         }
     }
 
@@ -63,6 +74,40 @@ impl FrameFeed {
                 }
             })
             .collect()
+    }
+
+    fn subtitles_in_target(&mut self, picture: ViewportRectangle) -> Option<&OverlayImage> {
+        let pts_ns = self.current.as_ref()?.frame.timing.pts_ns;
+        let mut subtitles = self.shared.subtitles.lock().expect("subtitles lock");
+        let showing = subtitles.showing_at(pts_ns);
+        let size = (picture.width, picture.height);
+        if showing.is_empty() || picture.width == 0 || picture.height == 0 {
+            self.subtitle_image = None;
+            return None;
+        }
+        let cached = self.subtitle_image.take().filter(|cached| {
+            cached.showing == showing && (cached.image.width, cached.image.height) == size
+        });
+        let mut drawn = match cached {
+            Some(cached) => cached,
+            None => {
+                let mut rgba = vec![0; picture.width as usize * picture.height as usize * 4];
+                subtitles.render(&mut rgba, size, pts_ns);
+                self.subtitle_images_drawn += 1;
+                SubtitleImage {
+                    showing,
+                    image: OverlayImage {
+                        placement: picture,
+                        width: picture.width,
+                        height: picture.height,
+                        rgba: rgba.into(),
+                        generation: self.subtitle_images_drawn,
+                    },
+                }
+            }
+        };
+        drawn.image.placement = picture;
+        Some(&self.subtitle_image.insert(drawn).image)
     }
 
     fn report_drawn(&self, picture: ViewportRectangle, (width, height): (u32, u32)) {
@@ -110,6 +155,10 @@ impl GlRenderContext {
         if !overlay.is_empty() {
             // SAFETY: forwarded from the caller.
             unsafe { self.renderer.draw_rectangles(&overlay, target) }?;
+        }
+        if let Some(subtitles) = self.feed.subtitles_in_target(picture) {
+            // SAFETY: forwarded from the caller.
+            unsafe { self.renderer.draw_image(subtitles, target) }?;
         }
         self.feed
             .report_drawn(picture, (target.width, target.height));
@@ -173,6 +222,9 @@ mod wgpu_target {
             let target_size = (target.width(), target.height());
             let picture = renderer.draw(&frame.frame.domain, &view, target_size)?;
             renderer.draw_rectangles(&self.feed.overlay_in_target(picture), &view, target_size);
+            if let Some(subtitles) = self.feed.subtitles_in_target(picture) {
+                renderer.draw_image(subtitles, &view)?;
+            }
             self.feed.report_drawn(picture, target_size);
             Ok(())
         }

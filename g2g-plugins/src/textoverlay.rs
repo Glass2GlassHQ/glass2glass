@@ -876,6 +876,21 @@ impl TextOverlay {
         self.cues.iter().filter(|c| c.covers(t_ns)).collect()
     }
 
+    pub fn showing_at(&self, t_ns: u64) -> Vec<usize> {
+        let covering = self.cues.iter().enumerate();
+        covering
+            .filter(|(_, cue)| cue.covers(t_ns))
+            .map(|(index, _)| index)
+            .collect()
+    }
+
+    // rgba is a premultiplied canvas of width by height, top row first
+    pub fn render_onto(&mut self, rgba: &mut [u8], (width, height): (u32, u32), t_ns: u64) {
+        self.width = width;
+        self.height = height;
+        self.render_cues(rgba, t_ns);
+    }
+
     /// Whether any cue covers `t_ns`: a frame with none needs no render pass
     /// (and no font discovery).
     pub(crate) fn has_cue_at(&self, t_ns: u64) -> bool {
@@ -1994,18 +2009,7 @@ impl TextOverlay {
     /// the content. `std`-only: file I/O needs the OS.
     #[cfg(feature = "std")]
     fn load_location(&mut self, path: &str) -> Result<(), PropError> {
-        let data = std::fs::read_to_string(path).map_err(|_| PropError::Value)?;
-        self.cues = if path.ends_with(".vtt") {
-            parse_webvtt(&data)
-        } else if path.ends_with(".srt") {
-            parse_srt(&data)
-        } else if path.ends_with(".ass") || path.ends_with(".ssa") {
-            parse_ssa(&data)
-        } else if path.ends_with(".ttml") || path.ends_with(".dfxp") {
-            parse_ttml(&data)
-        } else {
-            parse_auto(&data)
-        };
+        self.cues = read_cue_file(path).map_err(|_| PropError::Value)?;
         self.location = Some(path.into());
         Ok(())
     }
@@ -2057,6 +2061,23 @@ impl TextOverlay {
     fn set_font_axes(&mut self, _spec: &str) -> Result<(), PropError> {
         Err(PropError::Value)
     }
+}
+
+#[cfg(feature = "std")]
+pub fn read_cue_file(path: &str) -> std::io::Result<Vec<Cue>> {
+    let data = std::fs::read_to_string(path)?;
+    let cues = if path.ends_with(".vtt") {
+        parse_webvtt(&data)
+    } else if path.ends_with(".srt") {
+        parse_srt(&data)
+    } else if path.ends_with(".ass") || path.ends_with(".ssa") {
+        parse_ssa(&data)
+    } else if path.ends_with(".ttml") || path.ends_with(".dfxp") {
+        parse_ttml(&data)
+    } else {
+        parse_auto(&data)
+    };
+    Ok(cues)
 }
 
 /// Parse a `tag=value` comma list of variable-font axes (`wght=700,wdth=87.5`).

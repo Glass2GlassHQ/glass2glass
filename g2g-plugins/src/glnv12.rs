@@ -31,6 +31,7 @@ use g2g_core::{Colorimetry, G2gError, MemoryDomain, RawVideoFormat};
 
 use crate::display_aspect::{letterbox, ViewportRectangle};
 use crate::filled_rectangles::{rectangle_vertices, FilledRectangle};
+use crate::overlay_image::OverlayImage;
 use crate::videoconvert::display::{display_sink_caps, DisplayInput, NV12_AND_RGBA};
 use crate::yuvmatrix::YuvToRgbWeights;
 
@@ -167,6 +168,7 @@ pub(crate) struct GlState {
     // core profile contexts draw nothing without a bound vertex array
     vertex_array: glow::VertexArray,
     overlay: OverlayProgram,
+    image: ImageLayer,
     width: u32,
     height: u32,
     /// Registered on the first frame, when `OwnedCudaBuffer::context` is known.
@@ -175,6 +177,30 @@ pub(crate) struct GlState {
     /// True once the decoder's CUDA context has been pushed current here.
     #[cfg(any(feature = "cuda-gl", feature = "cuda-kms"))]
     cuda_current: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct QuadProgram<'a> {
+    pos_loc: u32,
+    uv_loc: u32,
+    flip_y_loc: Option<&'a glow::UniformLocation>,
+}
+
+#[derive(Debug)]
+struct ImageLayer {
+    program: glow::Program,
+    pos_loc: u32,
+    uv_loc: u32,
+    flip_y_loc: Option<glow::UniformLocation>,
+    tex_loc: Option<glow::UniformLocation>,
+    uploaded: Option<UploadedImage>,
+}
+
+#[derive(Debug)]
+struct UploadedImage {
+    texture: glow::Texture,
+    size: (u32, u32),
+    generation: u64,
 }
 
 #[derive(Debug)]
@@ -240,6 +266,15 @@ impl GlState {
                     .unwrap_or(1),
                 flip_y_loc: gl.get_uniform_location(overlay_program, "u_flip_y"),
             };
+            let image_program = link_for(&gl, VERTEX_SHADER, FRAGMENT_SHADER_RGBA)?;
+            let image = ImageLayer {
+                program: image_program,
+                pos_loc: gl.get_attrib_location(image_program, "a_pos").unwrap_or(0),
+                uv_loc: gl.get_attrib_location(image_program, "a_uv").unwrap_or(1),
+                flip_y_loc: gl.get_uniform_location(image_program, "u_flip_y"),
+                tex_loc: gl.get_uniform_location(image_program, "rgba_tex"),
+                uploaded: None,
+            };
             let pos_loc = gl.get_attrib_location(program, "a_pos").unwrap_or(0);
             let uv_loc = gl.get_attrib_location(program, "a_uv").unwrap_or(1);
             let flip_y_loc = gl.get_uniform_location(program, "u_flip_y");
@@ -287,6 +322,7 @@ impl GlState {
                 vbo,
                 vertex_array,
                 overlay,
+                image,
                 width,
                 height,
                 #[cfg(any(feature = "cuda-gl", feature = "cuda-kms"))]
@@ -388,15 +424,7 @@ impl GlState {
             let gl = &self.gl;
             gl.clear_color(0.0, 0.0, 0.0, 1.0);
             gl.clear(glow::COLOR_BUFFER_BIT);
-            gl.viewport(
-                viewport.x as i32,
-                viewport.y as i32,
-                viewport.width as i32,
-                viewport.height as i32,
-            );
             gl.use_program(Some(self.program));
-            gl.uniform_1_f32(self.flip_y_loc.as_ref(), if flip_y { 1.0 } else { -1.0 });
-            gl.bind_vertex_array(Some(self.vertex_array));
 
             match &self.textures {
                 Textures::Nv12 {
@@ -418,25 +446,104 @@ impl GlState {
                     gl.uniform_1_i32(loc.as_ref(), 0);
                 }
             }
+            let quad = QuadProgram {
+                pos_loc: self.pos_loc,
+                uv_loc: self.uv_loc,
+                flip_y_loc: self.flip_y_loc.as_ref(),
+            };
+            self.draw_quad(quad, viewport, flip_y);
+        }
+    }
 
+    /// # Safety
+    /// The GL context must be current, with the quad's program in use and its textures bound.
+    unsafe fn draw_quad(&self, quad: QuadProgram<'_>, viewport: ViewportRectangle, flip_y: bool) {
+        // SAFETY: forwarded from the caller.
+        unsafe {
+            let gl = &self.gl;
+            gl.viewport(
+                viewport.x as i32,
+                viewport.y as i32,
+                viewport.width as i32,
+                viewport.height as i32,
+            );
+            gl.uniform_1_f32(quad.flip_y_loc, if flip_y { 1.0 } else { -1.0 });
+            gl.bind_vertex_array(Some(self.vertex_array));
             gl.bind_buffer(glow::ARRAY_BUFFER, Some(self.vbo));
-            let pos = self.pos_loc;
-            let uv = self.uv_loc;
             let stride = 4 * size_of::<f32>() as i32;
-            gl.enable_vertex_attrib_array(pos);
-            gl.vertex_attrib_pointer_f32(pos, 2, glow::FLOAT, false, stride, 0);
-            gl.enable_vertex_attrib_array(uv);
+            gl.enable_vertex_attrib_array(quad.pos_loc);
+            gl.vertex_attrib_pointer_f32(quad.pos_loc, 2, glow::FLOAT, false, stride, 0);
+            gl.enable_vertex_attrib_array(quad.uv_loc);
             gl.vertex_attrib_pointer_f32(
-                uv,
+                quad.uv_loc,
                 2,
                 glow::FLOAT,
                 false,
                 stride,
                 2 * size_of::<f32>() as i32,
             );
-
             gl.draw_arrays(glow::TRIANGLES, 0, 6);
         }
+    }
+
+    fn draw_image(&mut self, image: &OverlayImage, flip_y: bool) -> Result<(), G2gError> {
+        let (width, height) = (image.width as usize, image.height as usize);
+        if image.rgba.len() < width.saturating_mul(height).saturating_mul(4) {
+            return Err(G2gError::CapsMismatch);
+        }
+        let stale = self
+            .image
+            .uploaded
+            .as_ref()
+            .is_none_or(|uploaded| uploaded.generation != image.generation);
+        // SAFETY: the GL context is current on this thread, and the pixels cover the texture extent checked above.
+        unsafe {
+            let gl = &self.gl;
+            if stale {
+                let resized = self
+                    .image
+                    .uploaded
+                    .as_ref()
+                    .is_none_or(|uploaded| uploaded.size != (image.width, image.height));
+                if resized {
+                    if let Some(old) = self.image.uploaded.take() {
+                        gl.delete_texture(old.texture);
+                    }
+                    let texture = make_texture(
+                        gl,
+                        glow::RGBA8 as i32,
+                        glow::RGBA,
+                        image.width,
+                        image.height,
+                    )
+                    .map_err(|_| G2gError::Hardware(g2g_core::HardwareError::Other))?;
+                    self.image.uploaded = Some(UploadedImage {
+                        texture,
+                        size: (image.width, image.height),
+                        generation: image.generation,
+                    });
+                }
+                let uploaded = self.image.uploaded.as_mut().expect("allocated above");
+                uploaded.generation = image.generation;
+                gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
+                sub_image(gl, uploaded.texture, glow::RGBA, width, height, &image.rgba);
+            }
+            let uploaded = self.image.uploaded.as_ref().expect("uploaded above");
+            gl.use_program(Some(self.image.program));
+            gl.active_texture(glow::TEXTURE0);
+            gl.bind_texture(glow::TEXTURE_2D, Some(uploaded.texture));
+            gl.uniform_1_i32(self.image.tex_loc.as_ref(), 0);
+            gl.enable(glow::BLEND);
+            gl.blend_func(glow::ONE, glow::ONE_MINUS_SRC_ALPHA);
+            let quad = QuadProgram {
+                pos_loc: self.image.pos_loc,
+                uv_loc: self.image.uv_loc,
+                flip_y_loc: self.image.flip_y_loc.as_ref(),
+            };
+            self.draw_quad(quad, image.placement, flip_y);
+            gl.disable(glow::BLEND);
+        }
+        Ok(())
     }
 
     fn draw_rectangles(&mut self, vertices: &[f32], (width, height): (u32, u32), flip_y: bool) {
@@ -502,6 +609,10 @@ impl GlState {
             gl.delete_buffer(self.vbo);
             gl.delete_program(self.overlay.program);
             gl.delete_buffer(self.overlay.vbo);
+            gl.delete_program(self.image.program);
+            if let Some(uploaded) = self.image.uploaded {
+                gl.delete_texture(uploaded.texture);
+            }
             gl.delete_vertex_array(self.vertex_array);
             match self.textures {
                 Textures::Nv12 { y_tex, uv_tex, .. } => {
@@ -663,6 +774,25 @@ impl GlVideoRenderer {
         }
         state.draw_rectangles(&vertices, (target.width, target.height), target.flip_y);
         Ok(())
+    }
+
+    /// # Safety
+    /// The GL context `loader` resolves entry points for must be current, with
+    /// `target.framebuffer` a framebuffer of it.
+    pub unsafe fn draw_image(
+        &mut self,
+        image: &OverlayImage,
+        target: GlTarget,
+    ) -> Result<(), G2gError> {
+        let (_, state) = self.state.as_mut().ok_or(G2gError::NotConfigured)?;
+        // SAFETY: the caller guarantees the framebuffer belongs to the current context.
+        unsafe {
+            state.gl.bind_framebuffer(
+                glow::FRAMEBUFFER,
+                core::num::NonZeroU32::new(target.framebuffer).map(glow::NativeFramebuffer),
+            );
+        }
+        state.draw_image(image, target.flip_y)
     }
 
     /// # Safety

@@ -1073,6 +1073,15 @@ them over the frame, mapped through the rectangle the picture was letterboxed
 into, with `draw_rectangles` on the same renderers. Setting them requests a
 redraw and calls the update callback, so a paused frame shows the change.
 
+`set_subtitle_file` loads an SRT, WebVTT, SSA or TTML file into the `Subtitle`
+slot at the bottom or the `Caption` slot at the top, mpv's `sid` and
+`secondary-sid`. SSA styling is dropped. The render contexts draw the cues that
+cover the shown frame's pts with `textoverlay`'s renderer onto an RGBA canvas
+the size of the letterboxed picture, then draw it with `draw_image`, as mpv
+draws libass output at display size. The canvas is drawn again only when the
+cues shown, a slot's file or visibility, or the picture size change. `stop`
+drops the files, as a load drops mpv's `sub-add` tracks, and visibility persists.
+
 ## Language bindings
 
 The C ABI (`g2g-capi`), the Python bindings (`g2g-pyapi`) and the Kotlin and Swift

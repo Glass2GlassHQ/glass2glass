@@ -31,6 +31,7 @@ mod caps_probe;
 mod level_meter;
 mod picture_filters;
 mod render;
+mod subtitles;
 mod videosink;
 
 pub use g2g_core::{ChannelLayout, ChannelPosition};
@@ -40,12 +41,14 @@ pub use picture_filters::VideoFilterError;
 pub use render::GlRenderContext;
 #[cfg(feature = "wgpu")]
 pub use render::WgpuRenderContext;
+pub use subtitles::SubtitleSlot;
 
 use caps_probe::CapsProbe;
 use level_meter::{apply_level_meter, insert_level_meter, LEVEL_METER};
 use picture_filters::{
     launch_chain, parse_filters, video_size_of, PictureFilter, VIDEO_PARAMS_PROBE,
 };
+use subtitles::Subtitles;
 use videosink::{FrameSlot, PlayerVideoSink, PLAYER_VIDEO_SINK, PLAYER_VIDEO_SINK_METADATA};
 
 // matches g2g-launch, low latency without starving the source
@@ -264,6 +267,7 @@ pub(crate) struct Shared {
     // set by a seek request, taken by the flush that seek sends through playervideosink
     seek_flush_pending: AtomicBool,
     overlay: Mutex<Vec<OverlayRectangle>>,
+    subtitles: Mutex<Subtitles>,
     // the last value reported for each observed property
     observed: Mutex<Vec<PropertyChange>>,
 }
@@ -513,6 +517,13 @@ impl Player {
         self.shared.set_video_out_params(None);
         self.shared.set_audio_params(None);
         self.shared.set_audio_levels(None);
+        // mpv drops the tracks of sub-add on every load
+        self.shared
+            .subtitles
+            .lock()
+            .expect("subtitles lock")
+            .drop_files();
+        self.shared.frames.request_redraw();
     }
 
     pub fn pause(&self) {
@@ -676,6 +687,25 @@ impl Player {
 
     pub fn set_overlay(&self, rectangles: Vec<OverlayRectangle>) {
         *self.shared.overlay.lock().expect("overlay lock") = rectangles;
+        self.shared.frames.request_redraw();
+    }
+
+    pub fn set_subtitle_file(
+        &self,
+        slot: SubtitleSlot,
+        path: Option<&std::path::Path>,
+    ) -> std::io::Result<()> {
+        let mut subtitles = self.shared.subtitles.lock().expect("subtitles lock");
+        subtitles.load(slot, path)?;
+        drop(subtitles);
+        self.shared.frames.request_redraw();
+        Ok(())
+    }
+
+    pub fn set_subtitle_visibility(&self, slot: SubtitleSlot, visible: bool) {
+        let mut subtitles = self.shared.subtitles.lock().expect("subtitles lock");
+        subtitles.set_visible(slot, visible);
+        drop(subtitles);
         self.shared.frames.request_redraw();
     }
 

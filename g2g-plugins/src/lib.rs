@@ -433,6 +433,10 @@ pub use display_aspect::ViewportRectangle;
 mod filled_rectangles;
 #[cfg(any(feature = "wgpu-sink", feature = "gl-render"))]
 pub use filled_rectangles::FilledRectangle;
+#[cfg(any(feature = "wgpu-sink", feature = "gl-render"))]
+mod overlay_image;
+#[cfg(any(feature = "wgpu-sink", feature = "gl-render"))]
+pub use overlay_image::OverlayImage;
 pub mod scenechange;
 pub mod videoflip;
 // Shared negotiation and frame loop behind the CPU video-effect transforms.
