@@ -567,6 +567,8 @@ mod device_worker {
         // commands received while waiting on a start or a pause, played back in order
         backlog: VecDeque<DeviceCmd>,
         disconnected: bool,
+        // the pipeline went below Paused, so nothing still queued plays
+        stopped: bool,
     }
 
     impl PlayoutGate {
@@ -585,6 +587,7 @@ mod device_worker {
                 correction_ns: 0,
                 backlog: VecDeque::new(),
                 disconnected: false,
+                stopped: false,
             }
         }
 
@@ -662,6 +665,11 @@ mod device_worker {
             device.pause()?;
             let stopped_at_ns = sync.now_ns() + device.still_playing_after_pause_ns()?;
             while !sync.is_playing() && !self.discards_queued_audio() {
+                // the state controller clears the play anchor on a change to Ready or Null
+                if sync.awaits_play_edge() {
+                    self.stopped = true;
+                    return Ok(true);
+                }
                 self.wait_for_command(rx, COMMAND_CHECK_INTERVAL);
             }
             // the audio played after the pipeline paused is made up by staying stopped that much longer
@@ -731,9 +739,9 @@ mod device_worker {
             Ok(())
         }
 
-        // a pending flush or a closed queue means the rest of the buffer being played must not play
+        // a pending flush, a closed queue or a stopped pipeline means the rest of the buffer being played must not play
         pub(crate) fn discards_queued_audio(&self) -> bool {
-            self.pending_flushes.pending() || self.disconnected
+            self.pending_flushes.pending() || self.disconnected || self.stopped
         }
 
         fn wait_for_command(&mut self, rx: &Receiver<DeviceCmd>, timeout: Duration) {
@@ -782,6 +790,9 @@ mod device_worker {
                 return Some(frame);
             };
             loop {
+                if start.sync.awaits_play_edge() {
+                    self.stopped = true;
+                }
                 if self.discards_queued_audio() {
                     return None;
                 }
@@ -1644,6 +1655,54 @@ mod tests {
 
         // before the second buffer is written, the device holds the delay and the second buffer is still to come
         assert_eq!(progress.position(), Some(buffer - DEVICE_DELAY_NS));
+    }
+
+    #[test]
+    fn a_pipeline_stopped_while_paused_ends_playout() {
+        const BASE_NS: u64 = 1_000_000_000;
+        const PAUSED_AT_NS: u64 = BASE_NS + 100_000_000;
+        const BUFFER_BYTES: usize = 4_800;
+        const FINISH_TIMEOUT: Duration = Duration::from_secs(5);
+        let manual = crate::testutil::ManualClock::default();
+        manual.set(BASE_NS);
+        let anchor = g2g_core::clock::PlayAnchor::new();
+        anchor.stamp(BASE_NS);
+        let mut start = playing_start(&manual, &anchor);
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let mut link = spawn_pausing_worker(RecordingDevice {
+            log: Arc::clone(&log),
+            clock: crate::testutil::ManualClock(Arc::clone(&manual.0)),
+            left_to_play_ns: 0,
+            delay_ns: Arc::default(),
+        });
+        let geometry = stereo_s16();
+        g2g_core::runtime::block_on(async {
+            start
+                .send(&link, pcm_frame(0, BUFFER_BYTES), geometry, err())
+                .await
+                .unwrap();
+            wait_for(&log, 1);
+            manual.set(PAUSED_AT_NS);
+            anchor.pause(PAUSED_AT_NS);
+            let next = pcm_frame(buffer_ns(BUFFER_BYTES), BUFFER_BYTES);
+            start.send(&link, next, geometry, err()).await.unwrap();
+            wait_for(&log, 2);
+        });
+        anchor.clear();
+        let (finished_tx, finished_rx) = sync_channel(1);
+        std::thread::spawn(move || {
+            g2g_core::runtime::block_on(link.finish(DeviceCmd::Shutdown, err())).unwrap();
+            finished_tx.send(()).unwrap();
+        });
+
+        finished_rx
+            .recv_timeout(FINISH_TIMEOUT)
+            .expect("playout ended once the pipeline stopped");
+        assert!(!log
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|event| matches!(event, PauseEvent::Resume { .. })));
     }
 
     #[test]

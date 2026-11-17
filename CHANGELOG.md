@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2389: an audio sink stops playing out when the pipeline stops while paused.
 - M2388: audio sinks report the position they have played, not the position they have queued.
 - M2387: `autoaudiosink` passes over an ALSA device that does not open.
 - M2386: a single-stream `playbin` plays an audio-only file on its audio sink.
