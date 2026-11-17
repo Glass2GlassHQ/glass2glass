@@ -198,6 +198,10 @@ impl<E: MultiOutputElement> AsyncElement for OnePortElement<E> {
         self.element.set_instance_name(name);
     }
 
+    fn set_bus(&mut self, bus: g2g_core::bus::BusHandle) {
+        self.element.set_bus(bus);
+    }
+
     fn set_log_category(&mut self, category: String) {
         self.element.set_log_category(category);
     }

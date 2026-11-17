@@ -1567,6 +1567,10 @@ fn next_box(buf: &[u8], off: usize) -> Option<([u8; 4], usize)> {
 }
 
 impl MultiOutputElement for Mp4DemuxN {
+    fn set_bus(&mut self, bus: BusHandle) {
+        self.bus = Some(bus);
+    }
+
     type ProcessFuture<'a>
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where

@@ -1655,6 +1655,10 @@ fn first_pid_carrying(demux: &TsDemuxer, stream: TsStream) -> Option<u16> {
 }
 
 impl MultiOutputElement for TsDemuxN {
+    fn set_bus(&mut self, bus: BusHandle) {
+        self.bus = Some(bus);
+    }
+
     type ProcessFuture<'a>
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where

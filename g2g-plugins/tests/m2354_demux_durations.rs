@@ -138,8 +138,14 @@ async fn posts_streams_or_tags(fixture: &str, demux: &str) -> bool {
 }
 
 // the single-stream demuxers that post a stream list or tags for their FIXTURES file
-const POSTING_SINGLE_STREAM_DEMUXERS: [&str; 4] =
-    ["flvdemux", "mpegpsdemux", "avidemux", "matroskademux"];
+const POSTING_SINGLE_STREAM_DEMUXERS: [&str; 6] = [
+    "flvdemux",
+    "tsdemux",
+    "mpegpsdemux",
+    "avidemux",
+    "matroskademux",
+    "qtdemux",
+];
 
 #[tokio::test]
 async fn a_single_stream_demuxer_in_a_launch_line_posts_to_the_bus() {

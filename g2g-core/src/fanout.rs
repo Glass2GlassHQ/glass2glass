@@ -811,6 +811,9 @@ pub trait MultiOutputElement: ElementBound {
     /// See [`set_instance_name`](Self::set_instance_name).
     fn set_log_category(&mut self, _category: alloc::string::String) {}
 
+    // the run's bus, which `OnePortElement` hands on from `AsyncElement::set_bus`
+    fn set_bus(&mut self, _bus: crate::bus::BusHandle) {}
+
     /// Runtime properties this demux exposes, mirroring
     /// [`AsyncElement::properties`]. Default:
     /// none. A demux overrides this (with `set_property` / `get_property`) to be
