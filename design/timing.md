@@ -130,12 +130,19 @@ queue's sample time from `AudioQueueGetCurrentTime`, and AAudio the stream's
 `frames_read`. `PlayoutClock` (`audioskew.rs`) holds each of these sinks' clock,
 the `provide-clock` flag and the skew slaving below.
 
+On a `Flush` the ALSA, PulseAudio and WASAPI sinks skip the samples still queued
+for their device thread (`PendingFlushes`, `audiooutput.rs`) and drop what the
+device buffered, so a seek does not first play out the audio from before it.
+
 Device counters start near zero, while a `DriftClock` passes its reference, the
 process's monotonic time, through until the first observation, and the pipeline
 base time is read in that window. `DeviceClockOffset` adds the difference between
 the clock's projection and the counter at the first observation to every later
 reading, so the clock continues from the time it already gave instead of jumping
-back by the process age. Every audio sink, `AlsaSrc` and the DeckLink output feed
+back by the process age. A counter that falls more than `STALL_NS` (100 ms)
+behind the projection stopped playing, through a pause, a flush or an underrun,
+and takes a fresh offset there, so the clock keeps running at its fitted rate
+through the gap as the pause accounting in `ClockSync` expects. Every audio sink, `AlsaSrc` and the DeckLink output feed
 their counters through it. A new PipeWire stream after a
 target switch takes a fresh offset against the clock the previous stream disciplined.
 The PTP and PCR servos feed absolute master time and do not use it.

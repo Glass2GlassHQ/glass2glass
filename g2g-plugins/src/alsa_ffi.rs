@@ -22,7 +22,6 @@ crate::shared_library::shared_library! {
     fn snd_pcm_prepare = "snd_pcm_prepare"(pcm: *mut c_void) -> c_int;
     #[cfg(feature = "alsa-src")]
     fn snd_pcm_start = "snd_pcm_start"(pcm: *mut c_void) -> c_int;
-    #[cfg(feature = "alsa-src")]
     fn snd_pcm_drop = "snd_pcm_drop"(pcm: *mut c_void) -> c_int;
     #[cfg(feature = "alsa-sink")]
     fn snd_pcm_drain = "snd_pcm_drain"(pcm: *mut c_void) -> c_int;
@@ -164,7 +163,6 @@ impl Pcm {
         check(unsafe { snd_pcm_start(self.0) })
     }
 
-    #[cfg(feature = "alsa-src")]
     pub(crate) fn drop_pending(&self) -> Result<(), i32> {
         // SAFETY: the handle is open.
         check(unsafe { snd_pcm_drop(self.0) })

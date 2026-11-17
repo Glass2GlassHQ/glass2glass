@@ -840,12 +840,20 @@ pub struct DeviceClockOffset {
 
 #[cfg(feature = "runtime")]
 impl DeviceClockOffset {
+    // pauses and seek gaps run hundreds of milliseconds, delay readings jitter by a few
+    pub const STALL_NS: u64 = 100_000_000;
+
     pub fn master_ns(&mut self, clock: &DriftClock, local_ns: u64, device_ns: u64) -> u64 {
-        // device counters start near zero, while the clock already reads the process age before its first observation
-        let offset_ns = *self
-            .offset_ns
-            .get_or_insert_with(|| i128::from(clock.project_ns(local_ns)) - i128::from(device_ns));
-        u64::try_from(i128::from(device_ns) + offset_ns).unwrap_or(0)
+        let device_ns = i128::from(device_ns);
+        let anchored_ns = i128::from(clock.project_ns(local_ns)) - device_ns;
+        let offset_ns = match self.offset_ns {
+            // a device that stopped playing falls behind the clock, which keeps running through a pause or a flush
+            Some(offset_ns) if anchored_ns - offset_ns <= i128::from(Self::STALL_NS) => offset_ns,
+            // device counters start near zero, while the clock already reads the process age before its first observation
+            _ => anchored_ns,
+        };
+        self.offset_ns = Some(offset_ns);
+        u64::try_from(device_ns + offset_ns).unwrap_or(0)
     }
 }
 
@@ -1114,6 +1122,41 @@ mod drift_tests {
         let local = drift.reference_now();
         let master = offset.master_ns(&drift, local, DEVICE_FIRST_NS + STEP_NS);
         assert_eq!(master, before_first_observation + STEP_NS);
+    }
+
+    #[test]
+    fn a_device_that_stopped_playing_resumes_where_the_clock_has_run_to() {
+        const PROCESS_AGE_NS: u64 = 12_000_000_000;
+        const STEP_NS: u64 = 10_000_000;
+        const PAUSE_NS: u64 = 2_000_000_000;
+        let tick = Arc::new(Tick::default());
+        let drift = DriftClock::new(tick.clone());
+        let mut offset = DeviceClockOffset::default();
+        let mut device_ns = 0;
+        for step in 0..DriftClock::MIN_SAMPLES_TO_GATE as u64 {
+            tick.set(PROCESS_AGE_NS + step * STEP_NS);
+            device_ns = step * STEP_NS;
+            let local = drift.reference_now();
+            drift.observe(local, offset.master_ns(&drift, local, device_ns));
+        }
+
+        // the device position stands still for the pause while the reference runs on
+        tick.set(PROCESS_AGE_NS + device_ns + PAUSE_NS);
+        let local = drift.reference_now();
+        let projected = drift.now_ns();
+        let master = offset.master_ns(&drift, local, device_ns + STEP_NS);
+        assert_eq!(
+            master, projected,
+            "the clock neither jumps back nor waits out the pause"
+        );
+        assert_eq!(drift.observe(local, master), DriftObservation::Folded);
+
+        // a lag within the stall bound is drift for the fit to weigh, not a pause
+        let lag_ns = DeviceClockOffset::STALL_NS / 2;
+        tick.set(PROCESS_AGE_NS + device_ns + PAUSE_NS + STEP_NS + lag_ns);
+        let local = drift.reference_now();
+        let master = offset.master_ns(&drift, local, device_ns + 2 * STEP_NS);
+        assert_eq!(master + lag_ns, drift.now_ns());
     }
 
     /// Master running 0.1% fast (1.001x) relative to the reference, plus a

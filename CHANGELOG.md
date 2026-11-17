@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2381: audio sinks drop queued audio on a flush, and the audio clock keeps running through a pause or seek.
 - M2380: `fmp4demux` position counts from the first frame, as its seek targets do.
 - M2379: `g2g-player` converts frames off the UI thread and shows a seek's target in `time-pos`.
 - M2378: position is the furthest sink, and a seek while playing drops the frames queued before it.

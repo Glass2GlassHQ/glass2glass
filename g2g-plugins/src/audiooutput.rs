@@ -14,7 +14,7 @@ use g2g_core::{G2gError, PropError, PropKind, PropValue, PropertySpec};
     ),
     all(target_os = "windows", feature = "wasapi-sink")
 ))]
-pub(crate) use device_worker::{run_device_worker, DeviceCmd, PlayEnd};
+pub(crate) use device_worker::{run_device_worker, DeviceCmd, PendingFlushes, PlayEnd};
 
 pub(crate) const CONTINUE_ON_ERROR_PROPERTY: PropertySpec = PropertySpec::new(
     "continue-on-error",
@@ -133,11 +133,41 @@ mod device_worker {
     use g2g_core::G2gError;
 
     use super::{report_on, OutputDevice};
+    use crate::audioworker::WorkerLink;
 
     pub(crate) enum DeviceCmd {
         Samples(Frame),
+        // the device drops what it buffered, and nothing queued before this plays
+        Flush,
         SwitchDevice(String),
         Shutdown,
+    }
+
+    // flushes the sink has sent that the worker has not reached yet
+    #[derive(Debug, Clone, Default)]
+    pub(crate) struct PendingFlushes(Arc<AtomicU64>);
+
+    impl PendingFlushes {
+        pub(crate) async fn send(
+            &self,
+            link: &WorkerLink<DeviceCmd>,
+            err: G2gError,
+        ) -> Result<(), G2gError> {
+            self.0.fetch_add(1, Ordering::AcqRel);
+            link.send(DeviceCmd::Flush, err).await
+        }
+
+        // samples queued ahead of a flush belong to the position before a seek
+        pub(crate) fn admit(&self, cmd: DeviceCmd) -> Option<DeviceCmd> {
+            match cmd {
+                DeviceCmd::Samples(_) if self.0.load(Ordering::Acquire) > 0 => None,
+                DeviceCmd::Flush => {
+                    self.0.fetch_sub(1, Ordering::AcqRel);
+                    Some(DeviceCmd::Flush)
+                }
+                cmd => Some(cmd),
+            }
+        }
     }
 
     pub(crate) enum PlayEnd {
@@ -179,10 +209,11 @@ mod device_worker {
     pub(crate) fn run_device_worker<Device>(
         first_device: String,
         rx: Receiver<DeviceCmd>,
+        pending_flushes: PendingFlushes,
         fallback: DeviceFallback,
         ready: SyncSender<Result<(), G2gError>>,
         mut open: impl FnMut(&str) -> Result<Device, G2gError>,
-        mut play: impl FnMut(Device, &Receiver<DeviceCmd>) -> PlayEnd,
+        mut play: impl FnMut(Device, &Receiver<DeviceCmd>, &PendingFlushes) -> PlayEnd,
     ) {
         let mut ready = Some(ready);
         let mut device = first_device;
@@ -192,7 +223,7 @@ mod device_worker {
                     if let Some(ready) = ready.take() {
                         let _ = ready.send(Ok(()));
                     }
-                    play(opened, &rx)
+                    play(opened, &rx, &pending_flushes)
                 }
                 Err(error) => PlayEnd::Failed(error),
             };
@@ -214,19 +245,24 @@ mod device_worker {
             if let Some(ready) = ready.take() {
                 let _ = ready.send(Ok(()));
             }
-            match play_without_device(&rx, &fallback) {
+            match play_without_device(&rx, &pending_flushes, &fallback) {
                 Some(next) => device = next,
                 None => return,
             }
         }
     }
 
-    fn play_without_device(rx: &Receiver<DeviceCmd>, fallback: &DeviceFallback) -> Option<String> {
+    fn play_without_device(
+        rx: &Receiver<DeviceCmd>,
+        pending_flushes: &PendingFlushes,
+        fallback: &DeviceFallback,
+    ) -> Option<String> {
         let mut first_sample_at: Option<Instant> = None;
         let mut consumed_bytes = 0u64;
         loop {
-            match rx.recv() {
-                Ok(DeviceCmd::Samples(frame)) => {
+            match rx.recv().map(|cmd| pending_flushes.admit(cmd)) {
+                Ok(None | Some(DeviceCmd::Flush)) => {}
+                Ok(Some(DeviceCmd::Samples(frame))) => {
                     let started = *first_sample_at.get_or_insert_with(Instant::now);
                     let bytes = (fallback.payload_len)(&frame)? as u64;
                     consumed_bytes += bytes;
@@ -240,8 +276,8 @@ mod device_worker {
                         thread::sleep(wait);
                     }
                 }
-                Ok(DeviceCmd::SwitchDevice(next)) => return Some(next),
-                Ok(DeviceCmd::Shutdown) | Err(_) => return None,
+                Ok(Some(DeviceCmd::SwitchDevice(next))) => return Some(next),
+                Ok(Some(DeviceCmd::Shutdown)) | Err(_) => return None,
             }
         }
     }
@@ -264,6 +300,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
+    use crate::audioworker::WorkerLink;
     use alloc::vec::Vec;
     use g2g_core::bus::Bus;
     use g2g_core::frame::Frame;
@@ -302,17 +339,23 @@ mod tests {
             run_device_worker(
                 first,
                 rx,
+                PendingFlushes::default(),
                 fallback,
                 ready_tx,
                 |device| match device.starts_with("missing") {
                     true => Err(G2gError::Hardware(g2g_core::HardwareError::Alsa(-2))),
                     false => Ok(String::from(device)),
                 },
-                |device, rx| loop {
-                    match rx.recv() {
-                        Ok(DeviceCmd::Samples(_)) => played.lock().unwrap().push(device.clone()),
-                        Ok(DeviceCmd::SwitchDevice(next)) => return PlayEnd::SwitchDevice(next),
-                        Ok(DeviceCmd::Shutdown) | Err(_) => return PlayEnd::Shutdown,
+                |device, rx, pending_flushes| loop {
+                    match rx.recv().map(|cmd| pending_flushes.admit(cmd)) {
+                        Ok(None | Some(DeviceCmd::Flush)) => {}
+                        Ok(Some(DeviceCmd::Samples(_))) => {
+                            played.lock().unwrap().push(device.clone())
+                        }
+                        Ok(Some(DeviceCmd::SwitchDevice(next))) => {
+                            return PlayEnd::SwitchDevice(next)
+                        }
+                        Ok(Some(DeviceCmd::Shutdown)) | Err(_) => return PlayEnd::Shutdown,
                     }
                 },
             );
@@ -343,6 +386,62 @@ mod tests {
         worker.join().unwrap();
 
         assert_eq!(*played.lock().unwrap(), ["first", "second"]);
+    }
+
+    #[test]
+    fn samples_queued_before_a_flush_never_play() {
+        const BEFORE_FLUSH: usize = 4;
+        const AFTER_FLUSH: usize = 8;
+        let output = OutputDevice::new("device", "first");
+        let fallback = output.fallback(BYTES_PER_SECOND, Arc::new(AtomicU64::new(0)), 1, |frame| {
+            frame.domain.as_system_slice().map(<[u8]>::len)
+        });
+        let pending_flushes = PendingFlushes::default();
+        let worker_flushes = pending_flushes.clone();
+        let played = Arc::new(Mutex::new(Vec::new()));
+        let device_played = Arc::clone(&played);
+        let (ready_tx, _ready_rx) = sync_channel(1);
+        // the device opens only once the samples and the flush are queued behind it
+        let (open_tx, open_rx) = sync_channel::<()>(1);
+        let mut link = WorkerLink::spawn("test-audio", move |rx| {
+            run_device_worker(
+                String::from("first"),
+                rx,
+                worker_flushes,
+                fallback,
+                ready_tx,
+                |device| {
+                    open_rx.recv().unwrap();
+                    Ok(String::from(device))
+                },
+                |_, rx, pending_flushes| loop {
+                    match rx.recv().map(|cmd| pending_flushes.admit(cmd)) {
+                        Ok(None) => {}
+                        Ok(Some(DeviceCmd::Samples(frame))) => device_played
+                            .lock()
+                            .unwrap()
+                            .push(frame.domain.as_system_slice().unwrap().len()),
+                        Ok(Some(DeviceCmd::Flush)) => device_played.lock().unwrap().push(0),
+                        Ok(Some(DeviceCmd::SwitchDevice(next))) => {
+                            return PlayEnd::SwitchDevice(next)
+                        }
+                        Ok(Some(DeviceCmd::Shutdown)) | Err(_) => return PlayEnd::Shutdown,
+                    }
+                },
+            );
+        })
+        .unwrap();
+        let err = || G2gError::Hardware(g2g_core::HardwareError::Alsa(-1));
+        g2g_core::runtime::block_on(async {
+            link.send(samples(BEFORE_FLUSH), err()).await.unwrap();
+            link.send(samples(BEFORE_FLUSH), err()).await.unwrap();
+            pending_flushes.send(&link, err()).await.unwrap();
+            link.send(samples(AFTER_FLUSH), err()).await.unwrap();
+            open_tx.send(()).unwrap();
+            link.finish(DeviceCmd::Shutdown, err()).await.unwrap();
+        });
+
+        assert_eq!(*played.lock().unwrap(), [0, AFTER_FLUSH]);
     }
 
     #[test]

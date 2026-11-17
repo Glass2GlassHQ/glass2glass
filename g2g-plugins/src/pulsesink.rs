@@ -57,7 +57,7 @@ use g2g_core::{
     PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
 };
 
-use crate::audiooutput::{DeviceCmd, OutputDevice, PlayEnd};
+use crate::audiooutput::{DeviceCmd, OutputDevice, PendingFlushes, PlayEnd};
 use crate::pulsepcm::{pulse_map, pulse_spec, FORMATS};
 use g2g_core::pcm_caps_any_rate_and_channels;
 
@@ -101,6 +101,7 @@ pub struct PulseSink {
     /// cooperative, so neither the hand-off nor the end-of-stream drain may
     /// block it (see [`crate::audioworker`]).
     link: Option<crate::audioworker::WorkerLink<DeviceCmd>>,
+    pending_flushes: PendingFlushes,
     caps: Option<Caps>,
     bytes_written: Arc<AtomicU64>,
     playout: crate::audioskew::PlayoutClock,
@@ -135,6 +136,7 @@ impl PulseSink {
             app_name: name.into(),
             output: OutputDevice::new("device", ""),
             link: None,
+            pending_flushes: PendingFlushes::default(),
             caps: None,
             bytes_written: Arc::new(AtomicU64::new(0)),
             playout: crate::audioskew::PlayoutClock::default(),
@@ -221,15 +223,28 @@ impl AsyncElement for PulseSink {
             },
         );
 
+        self.pending_flushes = PendingFlushes::default();
+        let pending_flushes = self.pending_flushes.clone();
         let link = crate::audioworker::WorkerLink::spawn("g2g-pulsesink", move |rx| {
             let mut clock_offset = DeviceClockOffset::default();
             crate::audiooutput::run_device_worker(
                 device,
                 rx,
+                pending_flushes,
                 fallback,
                 ready_tx,
                 |device| open_stream(&app_name, device, &spec),
-                |simple, rx| play(simple, &spec, rx, &written, &clock, &mut clock_offset),
+                |simple, rx, pending_flushes| {
+                    play(
+                        simple,
+                        &spec,
+                        rx,
+                        pending_flushes,
+                        &written,
+                        &clock,
+                        &mut clock_offset,
+                    )
+                },
             );
         })?;
 
@@ -356,7 +371,13 @@ impl AsyncElement for PulseSink {
                     pulse_spec(&c)?;
                     Ok(())
                 }
-                PipelinePacket::Flush | PipelinePacket::Segment(_) => Ok(()),
+                PipelinePacket::Flush => {
+                    let link = self.link.as_ref().ok_or(G2gError::NotConfigured)?;
+                    self.pending_flushes
+                        .send(link, G2gError::Hardware(HardwareError::PulseAudio(-1)))
+                        .await
+                }
+                PipelinePacket::Segment(_) => Ok(()),
                 PipelinePacket::Eos => {
                     // Wait for the queued audio to actually play out, yielding
                     // throughout: a blocking join here stalled every other arm
@@ -412,13 +433,15 @@ fn play(
     simple: Simple,
     spec: &Spec,
     rx: &Receiver<DeviceCmd>,
+    pending_flushes: &PendingFlushes,
     written: &AtomicU64,
     clock: &DriftClock,
     clock_offset: &mut DeviceClockOffset,
 ) -> PlayEnd {
     let end = loop {
-        match rx.recv() {
-            Ok(DeviceCmd::Samples(frame)) => {
+        match rx.recv().map(|cmd| pending_flushes.admit(cmd)) {
+            Ok(None) => {}
+            Ok(Some(DeviceCmd::Samples(frame))) => {
                 let payload = match crate::dmabufmap::frame_bytes(&frame, ELEMENT_NAME) {
                     Ok(payload) => payload,
                     Err(error) => break PlayEnd::Failed(error),
@@ -432,8 +455,13 @@ fn play(
                 // the drift clock one playout observation.
                 discipline_clock(&simple, spec, written, clock, clock_offset);
             }
-            Ok(DeviceCmd::SwitchDevice(device)) => break PlayEnd::SwitchDevice(device),
-            Ok(DeviceCmd::Shutdown) | Err(_) => break PlayEnd::Shutdown,
+            Ok(Some(DeviceCmd::Flush)) => {
+                if let Err(e) = simple.flush() {
+                    return PlayEnd::Failed(G2gError::Hardware(HardwareError::PulseAudio(e.0)));
+                }
+            }
+            Ok(Some(DeviceCmd::SwitchDevice(device))) => break PlayEnd::SwitchDevice(device),
+            Ok(Some(DeviceCmd::Shutdown)) | Err(_) => break PlayEnd::Shutdown,
         }
     };
     // Play out whatever is still buffered, then stop.
