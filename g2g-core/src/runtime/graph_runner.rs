@@ -389,6 +389,9 @@ pub trait DynMultiOutputElement: ElementBound {
     /// Dyn-safe mirror of [`MultiOutputElement::set_log_category`].
     fn set_log_category(&mut self, _category: alloc::string::String) {}
 
+    /// Dyn-safe mirror of [`MultiOutputElement::set_bus`].
+    fn set_bus(&mut self, _bus: BusHandle) {}
+
     /// Consume this element into its graph-runner demux arm, the
     /// fan-out analog of
     /// [`DynAsyncElement::drive_transform_arm`](crate::element::DynAsyncElement::drive_transform_arm).
@@ -486,6 +489,10 @@ impl<T: MultiOutputElement> DynMultiOutputElement for T {
 
     fn set_log_category(&mut self, category: alloc::string::String) {
         MultiOutputElement::set_log_category(self, category)
+    }
+
+    fn set_bus(&mut self, bus: BusHandle) {
+        MultiOutputElement::set_bus(self, bus)
     }
 
     fn drive_demux_arm<'s>(self: Box<Self>, io: DemuxArmIo) -> BoxFuture<'s, Result<u64, G2gError>>
@@ -605,6 +612,10 @@ impl MultiOutputElement for DemuxRef<'_> {
         self.0.set_log_category(category)
     }
 
+    fn set_bus(&mut self, bus: BusHandle) {
+        self.0.set_bus(bus)
+    }
+
     fn latency(&self) -> LatencyReport {
         self.0.latency()
     }
@@ -696,6 +707,10 @@ impl<'b> DynMultiOutputElement for &'b mut (dyn DynMultiOutputElement + 'b) {
 
     fn set_log_category(&mut self, category: alloc::string::String) {
         (**self).set_log_category(category)
+    }
+
+    fn set_bus(&mut self, bus: BusHandle) {
+        (**self).set_bus(bus)
     }
 
     fn drive_demux_arm<'s>(self: Box<Self>, io: DemuxArmIo) -> BoxFuture<'s, Result<u64, G2gError>>
@@ -1887,12 +1902,13 @@ async fn prepare_graph<'a>(
             }
             // M1164: a source reports out of band about itself, a fanned-out
             // session included (M1170); a transform or sink posts what it
-            // observes (a metasink's records).
+            // observes (a metasink's records), a demux its streams and tags.
             if let Some(bus) = bus {
                 match vg.element_mut(node) {
                     Some(GraphNodeRef::Source(src)) => src.set_bus(bus.clone()),
                     Some(GraphNodeRef::FanoutSource(src)) => src.set_bus(bus.clone()),
                     Some(GraphNodeRef::Element(elem)) => elem.set_bus(bus.clone()),
+                    Some(GraphNodeRef::Demux(demux)) => demux.set_bus(bus.clone()),
                     _ => {}
                 }
             }

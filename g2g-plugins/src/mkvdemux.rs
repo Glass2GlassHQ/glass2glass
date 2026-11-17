@@ -1835,11 +1835,6 @@ impl MkvDemuxN {
     async fn route_frames(&mut self, out: &mut dyn MultiOutputSink) -> Result<(), G2gError> {
         for f in self.demux.take_frames() {
             self.seek.note_track_unit(f.track, f.pts_ns);
-            self.metadata.post_duration(
-                &self.demux,
-                self.seek.stream_start_ns(),
-                self.bus.as_ref(),
-            );
             let Some(port) = self.port_for_track(f.codec, f.track) else {
                 continue; // a track no selected port carries
             };
@@ -1944,6 +1939,10 @@ impl MkvDemuxN {
 }
 
 impl MultiOutputElement for MkvDemuxN {
+    fn set_bus(&mut self, bus: BusHandle) {
+        self.bus = Some(bus);
+    }
+
     type ProcessFuture<'a>
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where

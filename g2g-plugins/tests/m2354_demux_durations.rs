@@ -6,8 +6,10 @@
 
 use std::time::Duration;
 
-use g2g_core::runtime::{attach_seek, attach_seek_controller, parse_launch, RunBuilder};
-use g2g_core::{Bus, BusMessage, Seek};
+use g2g_core::runtime::{
+    attach_seek, attach_seek_controller, parse_launch, GraphNode, RunBuilder, SeekController,
+};
+use g2g_core::{Bus, BusMessage, Graph, Seek};
 use g2g_plugins::clock::WallClock;
 use g2g_plugins::discover::discover;
 use g2g_plugins::registry::default_registry;
@@ -32,31 +34,48 @@ const RUN_TIMEOUT: Duration = Duration::from_secs(10);
 
 const AUDIO_AND_VIDEO_BRANCHES: &str = "name=d d.video_0 ! fakesink  d.audio_0 ! fakesink";
 
-async fn reported_duration_ns(fixture: &str, demux: &str, branches: &str) -> Option<u64> {
+fn launch_graph(fixture: &str, demux: &str, branches: &str) -> Graph<GraphNode> {
     let line = format!(
         "filesrc location={}/tests/fixtures/{fixture} blocksize={CHUNK_LEN} ! {demux} {branches}",
         env!("CARGO_MANIFEST_DIR")
     );
-    let mut graph = parse_launch(&default_registry(), &line)
-        .unwrap_or_else(|error| panic!("{fixture}: the line does not build: {error}"));
-    let app = attach_seek_controller(&mut graph).expect("the demuxer takes seeks");
+    parse_launch(&default_registry(), &line)
+        .unwrap_or_else(|error| panic!("{fixture}: the line does not build: {error}"))
+}
+
+async fn run_to_bus(
+    graph: Graph<GraphNode>,
+    seek_controller: Option<&SeekController>,
+) -> Vec<BusMessage> {
     let (bus, handle) = Bus::new(BUS_CAPACITY);
     let clock = WallClock::new();
-    let run = RunBuilder::new(graph, &clock, LINK_CAPACITY)
-        .with_bus(&handle)
-        .with_seek_controller(&app)
-        .run();
-    tokio::time::timeout(RUN_TIMEOUT, run)
+    let mut builder = RunBuilder::new(graph, &clock, LINK_CAPACITY).with_bus(&handle);
+    if let Some(app) = seek_controller {
+        builder = builder.with_seek_controller(app);
+    }
+    tokio::time::timeout(RUN_TIMEOUT, builder.run())
         .await
         .expect("the run ends")
         .expect("the pipeline runs");
-    let mut duration_ns = None;
-    while let Some(message) = bus.try_recv() {
-        if let BusMessage::DurationChanged { duration_ns: ns } = message {
-            duration_ns = Some(ns);
-        }
-    }
-    duration_ns
+    std::iter::from_fn(|| bus.try_recv()).collect()
+}
+
+fn durations(messages: &[BusMessage]) -> Vec<u64> {
+    messages
+        .iter()
+        .filter_map(|message| match message {
+            BusMessage::DurationChanged { duration_ns } => Some(*duration_ns),
+            _ => None,
+        })
+        .collect()
+}
+
+async fn reported_duration_ns(fixture: &str, demux: &str, branches: &str) -> Option<u64> {
+    let mut graph = launch_graph(fixture, demux, branches);
+    let app = attach_seek_controller(&mut graph).expect("the demuxer takes seeks");
+    durations(&run_to_bus(graph, Some(&app)).await)
+        .last()
+        .copied()
 }
 
 #[tokio::test]
@@ -109,36 +128,17 @@ async fn a_late_starting_matroska_file_reports_its_duration_from_the_first_frame
     }
 }
 
-async fn posts_streams_or_tags(fixture: &str, demux: &str) -> bool {
-    let line = format!(
-        "filesrc location={}/tests/fixtures/{fixture} blocksize={CHUNK_LEN} ! {demux} ! fakesink",
-        env!("CARGO_MANIFEST_DIR")
-    );
-    let graph = parse_launch(&default_registry(), &line)
-        .unwrap_or_else(|error| panic!("{fixture}: the line does not build: {error}"));
-    let (bus, handle) = Bus::new(BUS_CAPACITY);
-    let clock = WallClock::new();
-    tokio::time::timeout(
-        RUN_TIMEOUT,
-        RunBuilder::new(graph, &clock, LINK_CAPACITY)
-            .with_bus(&handle)
-            .run(),
-    )
-    .await
-    .expect("the run ends")
-    .expect("the pipeline runs");
-    let mut posted = false;
-    while let Some(message) = bus.try_recv() {
-        posted |= matches!(
+fn posts_streams_or_tags(messages: &[BusMessage]) -> bool {
+    messages.iter().any(|message| {
+        matches!(
             message,
             BusMessage::StreamCollection(_) | BusMessage::Tag { .. }
-        );
-    }
-    posted
+        )
+    })
 }
 
-// the single-stream demuxers that post a stream list or tags for their FIXTURES file
-const POSTING_SINGLE_STREAM_DEMUXERS: [&str; 6] = [
+// the demuxers that post a stream list or tags for their FIXTURES file
+const POSTING_DEMUXERS: [&str; 6] = [
     "flvdemux",
     "tsdemux",
     "mpegpsdemux",
@@ -150,12 +150,37 @@ const POSTING_SINGLE_STREAM_DEMUXERS: [&str; 6] = [
 #[tokio::test]
 async fn a_single_stream_demuxer_in_a_launch_line_posts_to_the_bus() {
     for (fixture, demux, _) in FIXTURES {
-        if POSTING_SINGLE_STREAM_DEMUXERS.contains(&demux) {
+        if POSTING_DEMUXERS.contains(&demux) {
             assert!(
-                posts_streams_or_tags(fixture, demux).await,
+                posts_streams_or_tags(
+                    &run_to_bus(launch_graph(fixture, demux, "! fakesink"), None).await
+                ),
                 "{fixture}: {demux} ! fakesink posts nothing"
             );
         }
+    }
+}
+
+// FlvDemuxN takes no bus
+const UNPOSTING_NAMED_DEMUXERS: [&str; 1] = ["flvdemux"];
+
+#[tokio::test]
+async fn a_named_demuxer_posts_to_the_bus_and_each_duration_once() {
+    for (fixture, demux, _) in FIXTURES {
+        if !POSTING_DEMUXERS.contains(&demux) || UNPOSTING_NAMED_DEMUXERS.contains(&demux) {
+            continue;
+        }
+        let messages =
+            run_to_bus(launch_graph(fixture, demux, AUDIO_AND_VIDEO_BRANCHES), None).await;
+        assert!(
+            posts_streams_or_tags(&messages),
+            "{fixture}: {demux} name=d posts nothing"
+        );
+        let durations = durations(&messages);
+        assert!(
+            durations.windows(2).all(|pair| pair[0] != pair[1]),
+            "{fixture}: {demux} name=d posts a duration twice: {durations:?}"
+        );
     }
 }
 
@@ -168,37 +193,28 @@ async fn checksums(
     reads_tail: bool,
     first_seek: Option<Seek>,
 ) -> Vec<(String, u64, String)> {
-    let line = format!(
-        "filesrc location={}/tests/fixtures/{fixture} blocksize={CHUNK_LEN} ! {demux} name=d \
-         d.video_0 ! checksumsink name=video  d.audio_0 ! checksumsink name=audio",
-        env!("CARGO_MANIFEST_DIR")
+    let mut graph = launch_graph(
+        fixture,
+        demux,
+        "name=d d.video_0 ! checksumsink name=video  d.audio_0 ! checksumsink name=audio",
     );
-    let mut graph = parse_launch(&default_registry(), &line).expect("the line builds");
     let app = match first_seek {
         Some(seek) => Some(attach_seek(&mut graph, seek).expect("the demuxer seeks").0),
         None => reads_tail.then(|| attach_seek_controller(&mut graph).expect("the demuxer seeks")),
     };
-    let (bus, handle) = Bus::new(BUS_CAPACITY);
-    let clock = WallClock::new();
-    let mut builder = RunBuilder::new(graph, &clock, LINK_CAPACITY).with_bus(&handle);
-    if let Some(app) = app.as_ref().filter(|_| reads_tail) {
-        builder = builder.with_seek_controller(app);
-    }
-    tokio::time::timeout(RUN_TIMEOUT, builder.run())
+    let tail_reader = app.as_ref().filter(|_| reads_tail);
+    let mut lines: Vec<_> = run_to_bus(graph, tail_reader)
         .await
-        .expect("the run ends")
-        .expect("the pipeline runs");
-    let mut lines = Vec::new();
-    while let Some(message) = bus.try_recv() {
-        if let BusMessage::Checksum {
-            element,
-            pts_ns,
-            digest,
-        } = message
-        {
-            lines.push((element, pts_ns, digest));
-        }
-    }
+        .into_iter()
+        .filter_map(|message| match message {
+            BusMessage::Checksum {
+                element,
+                pts_ns,
+                digest,
+            } => Some((element, pts_ns, digest)),
+            _ => None,
+        })
+        .collect();
     lines.sort();
     lines
 }

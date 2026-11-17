@@ -1195,6 +1195,10 @@ impl AviDemuxN {
 }
 
 impl MultiOutputElement for AviDemuxN {
+    fn set_bus(&mut self, bus: BusHandle) {
+        self.bus = Some(bus);
+    }
+
     type ProcessFuture<'a>
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where

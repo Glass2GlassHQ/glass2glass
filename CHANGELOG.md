@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2367: a named demuxer (`tsdemux name=d d.video_0 ! ...`) posts its streams and tags to the bus, and `matroskademux name=d` posts its duration once.
 - M2366: `tsdemux` and `qtdemux` post their streams and tags to the bus in a launch line.
 - M2365: `matroskademux`, `avidemux`, `mpegpsdemux`, `flvdemux` and `oggdemux` post their streams and tags to the bus in a launch line.
 - M2364: an `edlsrc` segment with no length plays to the end of its file, as mpv's does.
