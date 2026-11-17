@@ -387,9 +387,9 @@ const POSITION_WATCH: Duration = Duration::from_millis(600);
 // the video sink sets its position as a frame arrives, before holding it until its time
 const POSITION_LEAD: Duration = CLIP_FRAME_PERIOD.saturating_mul(2);
 
-fn write_48k_sound() -> std::path::PathBuf {
+fn write_48k_sound(file_name: &str) -> std::path::PathBuf {
     // wavparse reads a 48 kHz file in buffers of about a third of a second, which a sink queues ahead of playout
-    let path = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("m2346_48k.wav");
+    let path = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(file_name);
     let buffers = SOUND_LENGTH.as_millis() / TEST_TONE_BUFFER.as_millis();
     let line = format!(
         "audiotestsrc wave=silence samplerate=48000 channels=2 num-buffers={buffers} ! wavenc ! filesink location={}",
@@ -424,7 +424,7 @@ fn plays_no_further_than_the_time_since_loading(uri: &str) {
 
 #[test]
 fn time_pos_follows_the_sound_played_not_the_sound_queued() {
-    let sound = write_48k_sound();
+    let sound = write_48k_sound("m2346_48k_beside_the_clip.wav");
     let uri = format!(
         "edl://{CLIP},0,{length};!new_stream;!no_clip;{},0,{length}",
         sound.display(),
@@ -435,7 +435,7 @@ fn time_pos_follows_the_sound_played_not_the_sound_queued() {
 
 #[test]
 fn time_pos_follows_a_sound_file_played_alone() {
-    let sound = write_48k_sound();
+    let sound = write_48k_sound("m2346_48k_alone.wav");
     plays_no_further_than_the_time_since_loading(&format!("file://{}", sound.display()));
 }
 
@@ -777,6 +777,7 @@ fn audio_params_name_the_decoded_channels() {
 #[test]
 fn container_fps_is_the_video_frame_rate() {
     let player = Player::new();
+    player.observe(Property::ContainerFps);
     player
         .load(
             Media::Uri(&format!("file://{CLIP}")),
@@ -786,16 +787,19 @@ fn container_fps_is_the_video_frame_rate() {
             },
         )
         .unwrap();
-    wait_until(|| {
-        matches!(
-            player.property(Property::ContainerFps),
-            PropertyChange::ContainerFps(Some(_))
-        )
-    });
-    assert_eq!(
-        player.property(Property::ContainerFps),
-        PropertyChange::ContainerFps(Some(f64::from(CLIP_FRAMES_PER_SECOND)))
-    );
+    let deadline = Instant::now() + EVENT_TIMEOUT;
+    let first_reported = loop {
+        assert!(
+            Instant::now() < deadline,
+            "no frame rate within {EVENT_TIMEOUT:?}"
+        );
+        if let Some(Event::PropertyChange(PropertyChange::ContainerFps(Some(fps)))) =
+            player.wait_event(deadline - Instant::now())
+        {
+            break fps;
+        }
+    };
+    assert_eq!(first_reported, f64::from(CLIP_FRAMES_PER_SECOND));
     player.stop();
     assert_eq!(
         player.property(Property::ContainerFps),

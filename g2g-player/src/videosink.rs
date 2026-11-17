@@ -93,6 +93,7 @@ pub(crate) struct PlayerVideoSink {
     presented: u64,
     pacer: PresentationPacer,
     awaiting_frame_after_flush: bool,
+    caps_reported: bool,
 }
 
 impl PlayerVideoSink {
@@ -103,19 +104,14 @@ impl PlayerVideoSink {
             presented: 0,
             pacer: PresentationPacer::for_video_sink(),
             awaiting_frame_after_flush: false,
+            caps_reported: false,
         }
     }
 
     fn adopt_caps(&mut self, caps: Caps) {
         if self.caps.as_ref() != Some(&caps) {
-            let framerate_q16 = match caps.framerate() {
-                Rate::Fixed(framerate_q16) if framerate_q16 > 0 => Some(framerate_q16),
-                _ => None,
-            };
-            self.shared.set_framerate_q16(framerate_q16);
-            self.shared.set_video_out_params(video_size_of(&caps));
             self.caps = Some(caps);
-            self.shared.events.push(Event::VideoReconfig);
+            self.caps_reported = false;
         }
     }
 }
@@ -200,6 +196,17 @@ impl AsyncElement for PlayerVideoSink {
             match packet {
                 PipelinePacket::DataFrame(mut frame) => {
                     let caps = self.caps.as_ref().ok_or(G2gError::NotConfigured)?;
+                    // demuxers replace the placeholder caps negotiation fixed before their first frame
+                    if !self.caps_reported {
+                        let framerate_q16 = match caps.framerate() {
+                            Rate::Fixed(framerate_q16) if framerate_q16 > 0 => Some(framerate_q16),
+                            _ => None,
+                        };
+                        self.shared.set_framerate_q16(framerate_q16);
+                        self.shared.set_video_out_params(video_size_of(caps));
+                        self.shared.events.push(Event::VideoReconfig);
+                        self.caps_reported = true;
+                    }
                     let paced = self.pacer.judge(frame.timing.pts_ns, self.presented);
                     if paced == Pace::Drop {
                         return Ok(());
