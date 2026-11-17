@@ -773,3 +773,32 @@ fn audio_params_name_the_decoded_channels() {
         PropertyChange::AudioParams(None)
     );
 }
+
+#[test]
+fn container_fps_is_the_video_frame_rate() {
+    let player = Player::new();
+    player
+        .load(
+            Media::Uri(&format!("file://{CLIP}")),
+            LoadOptions {
+                start: None,
+                pause: Some(true),
+            },
+        )
+        .unwrap();
+    wait_until(|| {
+        matches!(
+            player.property(Property::ContainerFps),
+            PropertyChange::ContainerFps(Some(_))
+        )
+    });
+    assert_eq!(
+        player.property(Property::ContainerFps),
+        PropertyChange::ContainerFps(Some(f64::from(CLIP_FRAMES_PER_SECOND)))
+    );
+    player.stop();
+    assert_eq!(
+        player.property(Property::ContainerFps),
+        PropertyChange::ContainerFps(None)
+    );
+}

@@ -1043,7 +1043,8 @@ two of ffmpeg's `hqdn3d`, not bit-exact, because ffmpeg quantizes the blend curv
 into a table.
 
 The probe also sets `video-params`, the decoded size, and `playervideosink` sets
-`video-out-params`, the size after the filters. Both clear on `stop`. A render
+`video-out-params`, the size after the filters, and `container-fps`, the frame
+rate of its fixed-rate caps. All three clear on `stop`. A render
 context sets `osd-dimensions` from the rectangle the renderer letterboxed the
 picture into: the target's size and the bars on each side of the picture.
 

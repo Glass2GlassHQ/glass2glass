@@ -11,6 +11,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
+use g2g_core::caps::{framerate_q16_period_ns, framerate_q16_to_fraction};
 use g2g_core::g2g_error;
 use g2g_core::graph::{Graph, NodeId};
 use g2g_core::log::Target;
@@ -118,9 +119,11 @@ pub enum Property {
     OsdDimensions,
     // the decoded audio, before it is converted for the device
     AudioParams,
+    // frames per second of the video stream
+    ContainerFps,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum PropertyChange {
     Pause(bool),
     TimePos(Option<Duration>),
@@ -130,6 +133,7 @@ pub enum PropertyChange {
     VideoOutParams(Option<VideoSize>),
     OsdDimensions(Option<OsdDimensions>),
     AudioParams(Option<AudioParams>),
+    ContainerFps(Option<f64>),
 }
 
 impl PropertyChange {
@@ -143,6 +147,7 @@ impl PropertyChange {
             PropertyChange::VideoOutParams(_) => Property::VideoOutParams,
             PropertyChange::OsdDimensions(_) => Property::OsdDimensions,
             PropertyChange::AudioParams(_) => Property::AudioParams,
+            PropertyChange::ContainerFps(_) => Property::ContainerFps,
         }
     }
 }
@@ -154,7 +159,7 @@ pub enum EndFile {
     Error(String),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Event {
     FileLoaded,
     EndFile(EndFile),
@@ -250,13 +255,18 @@ impl EventQueue {
     }
 }
 
+fn fps_of(framerate_q16: u32) -> f64 {
+    let (numerator, denominator) = framerate_q16_to_fraction(framerate_q16);
+    f64::from(numerator) / f64::from(denominator)
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct Shared {
     events: EventQueue,
     frames: FrameSlot,
     paused: AtomicBool,
     eof_reached: AtomicBool,
-    frame_period: Mutex<Option<Duration>>,
+    framerate_q16: Mutex<Option<u32>>,
     video_params: Mutex<Option<VideoSize>>,
     video_out_params: Mutex<Option<VideoSize>>,
     osd_dimensions: Mutex<Option<OsdDimensions>>,
@@ -314,6 +324,11 @@ impl Shared {
     pub(crate) fn set_video_params(&self, size: Option<VideoSize>) {
         *self.video_params.lock().expect("video params lock") = size;
         self.report(PropertyChange::VideoParams(size));
+    }
+
+    pub(crate) fn set_framerate_q16(&self, framerate_q16: Option<u32>) {
+        *self.framerate_q16.lock().expect("frame rate lock") = framerate_q16;
+        self.report(PropertyChange::ContainerFps(framerate_q16.map(fps_of)));
     }
 
     pub(crate) fn set_video_out_params(&self, size: Option<VideoSize>) {
@@ -459,7 +474,7 @@ impl Player {
             seek.keep_run_open();
         }
         self.shared.set_eof_reached(false);
-        *self.shared.frame_period.lock().expect("frame period lock") = None;
+        self.shared.set_framerate_q16(None);
         if let Some(pause) = options.pause {
             self.shared.set_paused(pause, None);
         }
@@ -515,6 +530,7 @@ impl Player {
         self.shared.seek_landed();
         self.shared.set_video_params(None);
         self.shared.set_video_out_params(None);
+        self.shared.set_framerate_q16(None);
         self.shared.set_audio_params(None);
         self.shared.set_audio_levels(None);
         // mpv drops the tracks of sub-add on every load
@@ -589,11 +605,15 @@ impl Player {
     }
 
     fn frame_period(&self) -> Result<Duration, SeekError> {
-        self.shared
-            .frame_period
+        let framerate_q16 = self
+            .shared
+            .framerate_q16
             .lock()
-            .expect("frame period lock")
-            .ok_or(SeekError::UnknownFrameRate)
+            .expect("frame rate lock")
+            .ok_or(SeekError::UnknownFrameRate)?;
+        let period =
+            framerate_q16_period_ns(framerate_q16).expect("stored frame rates are never zero");
+        Ok(Duration::from_nanos(period))
     }
 
     pub fn frame_step(&self) -> Result<(), SeekError> {
@@ -652,6 +672,13 @@ impl Player {
             ),
             Property::AudioParams => PropertyChange::AudioParams(
                 *self.shared.audio_params.lock().expect("audio params lock"),
+            ),
+            Property::ContainerFps => PropertyChange::ContainerFps(
+                self.shared
+                    .framerate_q16
+                    .lock()
+                    .expect("frame rate lock")
+                    .map(fps_of),
             ),
         }
     }
