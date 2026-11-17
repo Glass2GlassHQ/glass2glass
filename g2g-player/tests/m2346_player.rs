@@ -803,6 +803,39 @@ fn container_fps_is_the_video_frame_rate() {
     );
 }
 
+#[cfg(feature = "ffmpeg")]
+#[test]
+fn a_jpeg_2000_picture_with_no_matching_raw_format_plays() {
+    // 48-bit rgb, which g2g has no raw format for, see tools/mxf-fixtures.sh
+    const MXF_CLIP: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../g2g-plugins/tests/fixtures/mxf_jpeg2000_rgb48.mxf"
+    );
+    let player = Player::new();
+    player.observe(Property::EofReached);
+    let mut events = EventLog {
+        player: &player,
+        seen: Vec::new(),
+    };
+    player
+        .load(
+            Media::Uri(&format!("file://{MXF_CLIP}")),
+            LoadOptions {
+                start: None,
+                pause: Some(false),
+            },
+        )
+        .unwrap();
+    events.wait_for(&Event::PropertyChange(PropertyChange::EofReached(true)));
+    assert_eq!(
+        player.property(Property::VideoParams),
+        PropertyChange::VideoParams(Some(VideoSize {
+            width: CLIP_WIDTH,
+            height: CLIP_HEIGHT,
+        }))
+    );
+}
+
 #[test]
 fn an_mxf_file_reports_its_size_rate_and_duration() {
     const MXF_CLIP: &str = concat!(

@@ -356,6 +356,7 @@ async fn decodebin_decodes_every_picture_essence() {
         "mxf_h264.mxf",
         "mxf_prores.mxf",
         "mxf_jpeg2000.mxf",
+        "mxf_jpeg2000_rgb24.mxf",
         "mxf_dnxhr.mxf",
         "mxf_mpeg2_pcm.mxf",
     ] {
@@ -365,4 +366,24 @@ async fn decodebin_decodes_every_picture_essence() {
         );
         assert_eq!(checksum_count(&line).await, FRAMES, "{name}");
     }
+}
+
+#[test]
+fn an_mxf_holding_program_stream_bytes_plays_as_mxf() {
+    // a dcp's jpeg 2000 essence can hold the byte runs a program stream starts with
+    let mut file = fixture("mxf_jpeg2000.mxf");
+    file.extend(fixture("av_mpeg2_mp2.mpg"));
+    let path = format!(
+        "{}/mxf_holding_program_stream.mxf",
+        env!("CARGO_TARGET_TMPDIR")
+    );
+    std::fs::write(&path, file).expect("the test file writes");
+    let uri = format!("file://{path}");
+    let registry = default_registry();
+    let program_stream = g2g_plugins::uridecodebin::ps_uri_fanout(&registry, &uri)
+        .expect("the program stream probe runs");
+    let mxf =
+        g2g_plugins::uridecodebin::mxf_uri_fanout(&registry, &uri).expect("the mxf probe runs");
+    assert!(program_stream.is_none());
+    assert!(mxf.is_some());
 }

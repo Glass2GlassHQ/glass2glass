@@ -2505,8 +2505,8 @@ fn derive_output_caps(input: &Caps, out: OutputFormat) -> CapsSet {
                         mk(RawVideoFormat::A420),
                         mk(RawVideoFormat::A444p12),
                     ];
-                    // a tagged codec's RGB and palettized pictures convert to packed RGB
-                    if matches!(codec, VideoCodec::Tagged(_)) {
+                    // jpeg 2000 and tagged codecs' RGB and palettized pictures convert to packed RGB
+                    if matches!(codec, VideoCodec::Tagged(_) | VideoCodec::Jpeg2000) {
                         formats.extend([mk(RawVideoFormat::Rgba8), mk(RawVideoFormat::Rgb8)]);
                     }
                     CapsSet::from_alternatives(formats)

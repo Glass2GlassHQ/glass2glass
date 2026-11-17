@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2395: `g2g-player` plays DCP and IMF JPEG 2000 pictures, and an MXF file holding program stream bytes plays as MXF.
 - M2394: `metasink` writes each detection's `track_id` and a line for every frame.
 - M2393: `mxfdemux` reads MPEG-2, H.264, ProRes, DNxHD, JPEG 2000 and PCM tracks, and `ffmpegdec` decodes JPEG 2000.
 - M2392: `g2g-player` reports `container-fps`, the video frame rate.

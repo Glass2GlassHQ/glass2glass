@@ -36,6 +36,8 @@ video() {
 video h264 64x48 -c:v libx264 -g 5 -bf 0 -pix_fmt yuv420p
 video prores 64x48 -c:v prores_ks -profile:v 0
 video jpeg2000 64x48 -c:v jpeg2000 -q:v 20
+video jpeg2000_rgb24 64x48 -c:v jpeg2000 -q:v 20 -pix_fmt rgb24
+video jpeg2000_rgb48 64x48 -c:v jpeg2000 -q:v 20 -pix_fmt rgb48le
 # dnxhr takes nothing smaller than 256x120
 video dnxhr 256x120 -c:v dnxhd -profile:v dnxhr_lb -pix_fmt yuv422p
 

@@ -772,6 +772,10 @@ struct PsProbe {
 #[cfg(feature = "std")]
 fn ps_probe(uri: &str) -> Option<PsProbe> {
     let (path, prefix) = open_file_prefix(uri)?;
+    // psdemux resyncs on pack start codes that occur inside other containers' payloads
+    if crate::typefind::sniff(&prefix).is_some_and(|encoding| encoding != PsProbe::ENCODING) {
+        return None;
+    }
     let header = probe_ps(&prefix);
     let infos = crate::psdemux::forwardable_streams(&header);
     if infos.is_empty() {
