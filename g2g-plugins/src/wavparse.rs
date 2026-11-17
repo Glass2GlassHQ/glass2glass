@@ -29,6 +29,7 @@ use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
+use g2g_core::runtime::{ElementSeekRoute, SeekController};
 use g2g_core::{
     pcm_formats, AsyncElement, AudioFormat, BusHandle, BusMessage, ByteStreamEncoding, Caps,
     CapsConstraint, CapsSet, ChannelLayout, ConfigureOutcome, ElementMetadata, FrameTiming,
@@ -37,6 +38,8 @@ use g2g_core::{
 };
 
 use crate::codectag::{audio_from_stream_name, audio_stream_name};
+use crate::compressed_audio_passthrough::push_admitted;
+use crate::demuxseek::DemuxSeek;
 use crate::id3::{parse_id3v2, MAX_ID3V2_TAG_PARSED};
 use crate::riff::{
     chunks, padded_len, parse_info, read_fourcc, read_u16, read_u32, read_u64, FourCc,
@@ -301,6 +304,14 @@ pub struct WavParse {
     // bytes of the `data` chunk pushed so far, which time the next buffer
     data_offset: u64,
     emitted: u64,
+    // bytes taken from upstream, the file offset of the end of `buf`
+    received: u64,
+    // the file offset and length of the `data` chunk's samples, once its header is read
+    data_start: u64,
+    data_len: Option<usize>,
+    seek: DemuxSeek<Frame>,
+    // the file offset the seek in flight lands on
+    seek_landing: Option<u64>,
 }
 
 impl WavParse {
@@ -388,6 +399,11 @@ impl WavParse {
             if !self.in_data {
                 return Ok(());
             }
+            self.poll_seek();
+            if self.seek.dropping_input() {
+                self.buf.clear();
+                return Ok(());
+            }
             let format = self.format.ok_or(G2gError::CapsMismatch)?;
             // Coded payloads have no fixed frame width, a tagged codec decodes whole blocks.
             let frame_len = match format.format {
@@ -419,7 +435,13 @@ impl WavParse {
             let start = self.data_offset;
             self.data_offset = start.saturating_add(whole_frames as u64);
             let timing = data_timing(start, self.data_offset, format.byte_rate);
-            self.push_frame(samples, timing, out).await?;
+            let frame = self.next_frame(samples, timing);
+            // a buffer of samples holds the seek target when it ends after it
+            let admitted_at_ns = match self.seek.is_seeking() {
+                true => timing.pts_ns.saturating_add(timing.duration_ns),
+                false => timing.pts_ns,
+            };
+            push_admitted(self.seek.admit_with_preroll(admitted_at_ns, 0, frame), out).await?;
         }
     }
 
@@ -482,10 +504,13 @@ impl WavParse {
                 self.post_duration(size, format);
                 // gst wavparse reads a zero-length data chunk to the end of the file
                 self.data_remaining = (size != UNKNOWN_DATA_LEN && size != 0).then_some(size);
+                self.data_len = self.data_remaining;
+                self.data_start = self.received - self.buf.len() as u64;
                 out.push(PipelinePacket::CapsChanged(format.caps())).await?;
                 if matches!(format.format, AudioFormat::Tagged(_)) {
                     let header = core::mem::take(&mut self.tagged_header);
-                    self.push_frame(header, FrameTiming::default(), out).await?;
+                    let frame = self.next_frame(header, FrameTiming::default());
+                    out.push(PipelinePacket::DataFrame(frame)).await?;
                 }
                 self.in_data = true;
                 break;
@@ -542,20 +567,62 @@ impl WavParse {
         Ok(())
     }
 
-    async fn push_frame(
-        &mut self,
-        bytes: Vec<u8>,
-        timing: FrameTiming,
-        out: &mut dyn OutputSink,
-    ) -> Result<(), G2gError> {
+    fn next_frame(&mut self, bytes: Vec<u8>, timing: FrameTiming) -> Frame {
         let frame = Frame::new(
             MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
             timing,
             self.emitted,
         );
         self.emitted += 1;
-        out.push(PipelinePacket::DataFrame(frame)).await?;
-        Ok(())
+        frame
+    }
+
+    // samples start at pts 0, so a seek lands at the whole sample frame at or before its target
+    fn poll_seek(&mut self) {
+        self.seek.note_stream_start(0);
+        let (format, data_start, data_len) = (self.format, self.data_start, self.data_len);
+        let mut landing = None;
+        self.seek.poll_request_indexed(|target_ns| {
+            let format = format?;
+            let frame_len = sample_frame_len(format.format, format.channels)? as u64;
+            let data_bytes =
+                u128::from(target_ns) * u128::from(format.byte_rate) / u128::from(NANOS_PER_SECOND);
+            let mut offset = u64::try_from(data_bytes).ok()?;
+            if let Some(data_len) = data_len {
+                offset = offset.min(data_len as u64);
+            }
+            offset -= offset % frame_len;
+            let file_offset = data_start.checked_add(offset)?;
+            landing = Some(file_offset);
+            Some(file_offset)
+        });
+        if landing.is_some() {
+            self.seek_landing = landing;
+        }
+    }
+
+    fn restart(&mut self) {
+        *self = WavParse {
+            configured: self.configured,
+            stream_format: self.stream_format,
+            bus: self.bus.take(),
+            emitted: self.emitted,
+            seek: core::mem::take(&mut self.seek),
+            ..WavParse::default()
+        };
+    }
+
+    // the bytes after the flush of a seek that resolved its offset start at that sample frame
+    fn resume_at(&mut self, file_offset: u64) {
+        let data_offset = file_offset - self.data_start;
+        self.data_offset = data_offset;
+        self.data_remaining = self
+            .data_len
+            .map(|data_len| data_len - data_offset as usize);
+        self.received = file_offset;
+        self.in_data = true;
+        self.data_done = false;
+        self.chunk_bytes_to_skip = 0;
     }
 }
 
@@ -597,6 +664,14 @@ impl AsyncElement for WavParse {
 
     fn set_bus(&mut self, bus: BusHandle) {
         self.bus = Some(bus);
+    }
+
+    fn seek_route(&self) -> Option<ElementSeekRoute> {
+        Some(ElementSeekRoute::UpstreamBytes)
+    }
+
+    fn set_seek(&mut self, app: SeekController, upstream: SeekController) {
+        self.seek.with(app, upstream);
     }
 
     fn metadata(&self) -> ElementMetadata {
@@ -702,19 +777,46 @@ impl AsyncElement for WavParse {
             if !self.configured {
                 return Err(G2gError::NotConfigured);
             }
+            self.seek.hold_at_segment_end().await;
             match packet {
                 PipelinePacket::DataFrame(frame) => {
+                    if self.seek.dropping_input() {
+                        return Ok(());
+                    }
                     let slice = frame
                         .domain
                         .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
                     self.buf.extend_from_slice(slice);
+                    self.received += slice.len() as u64;
                     self.drain(out).await?;
                 }
                 PipelinePacket::Eos => {
+                    if self
+                        .seek
+                        .eos_before_flush(self.seek.dropping_input())
+                        .await?
+                    {
+                        return Ok(());
+                    }
                     self.drain(out).await?;
                     // gst wavparse fails a file that ends before its `data` chunk
                     if !self.in_data && !self.data_done {
                         return Err(G2gError::CapsMismatch);
+                    }
+                    self.seek.end_and_wait_for_seek(out).await?;
+                }
+                PipelinePacket::Flush => {
+                    let seeking = self.seek.dropping_input();
+                    let keeps_state = self.seek.keeps_state();
+                    let forward = self.seek.on_flush();
+                    self.buf.clear();
+                    match (seeking, keeps_state, self.seek_landing.take()) {
+                        (true, true, Some(file_offset)) => self.resume_at(file_offset),
+                        (true, _, _) => self.restart(),
+                        (false, _, _) => {}
+                    }
+                    if forward {
+                        out.push(PipelinePacket::Flush).await?;
                     }
                 }
                 // The byte stream carries no sample format; the concrete caps
@@ -723,13 +825,7 @@ impl AsyncElement for WavParse {
                 // every byte stream opens with a Segment, so one after a RIFF header starts the next file, as `concat` sends
                 PipelinePacket::Segment(segment) => {
                     if self.riff_seen {
-                        *self = WavParse {
-                            configured: self.configured,
-                            stream_format: self.stream_format,
-                            bus: self.bus.take(),
-                            emitted: self.emitted,
-                            ..WavParse::default()
-                        };
+                        self.restart();
                     }
                     out.push(PipelinePacket::Segment(segment)).await?;
                 }

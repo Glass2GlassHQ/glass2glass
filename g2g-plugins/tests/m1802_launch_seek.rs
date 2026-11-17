@@ -6,6 +6,7 @@
 
 use std::process::Output;
 
+use g2g_core::log::ClockTime;
 use g2g_core::runtime::{parse_launch, run_graph_with_progress, PipelineProgress};
 use g2g_core::PipelineClock;
 use g2g_plugins::checksumsink::checksum_line;
@@ -548,5 +549,32 @@ fn seek_without_a_seekable_element_fails() {
         String::from_utf8_lossy(&output.stderr).contains("nothing in the pipeline can seek"),
         "{}",
         String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+// ffprobe: pcm_s16le, 8000 Hz, 2 channels, 1 s, a 44 byte header
+const WAV_FIXTURE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/sine_8k_stereo_s16le.wav"
+);
+// 10000 bytes into the samples, which no 1000 byte read of the file starts at
+const WAV_SEEK_TARGET_NS: u64 = 312_500_000;
+
+#[test]
+fn a_wav_seek_during_playback_lands_on_the_sample_at_the_target() {
+    let pipeline =
+        format!("filesrc location={WAV_FIXTURE} blocksize=1000 ! wavparse ! checksumsink hash=md5");
+    let target_prefix = format!("{} ", ClockTime(WAV_SEEK_TARGET_NS));
+    let starts_at_the_target = |line: &String| line.starts_with(&target_prefix);
+    let unseeked = checksum_lines(&launch(&[], &pipeline));
+    assert!(!unseeked.iter().any(starts_at_the_target));
+    let seek_at = format!(
+        "0.1:{}",
+        WAV_SEEK_TARGET_NS as f64 / NANOS_PER_SECOND as f64
+    );
+    let seeked = checksum_lines(&launch(&["--seek-at", &seek_at], &pipeline));
+    assert!(
+        seeked.iter().any(starts_at_the_target),
+        "--seek-at {seek_at}: no buffer starts at the target: {seeked:?}"
     );
 }
