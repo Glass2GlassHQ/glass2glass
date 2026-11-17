@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2365: `matroskademux`, `avidemux`, `mpegpsdemux`, `flvdemux` and `oggdemux` post their streams and tags to the bus in a launch line.
 - M2364: an `edlsrc` segment with no length plays to the end of its file, as mpv's does.
 - M2363: `matroskademux` reports the duration from the stream's first frame, so a file that starts after zero reports the span its seeks cover.
 - M2362: `uridecodebin` and `build_uridecodebin` decode a Matroska file instead of passing its compressed stream through.

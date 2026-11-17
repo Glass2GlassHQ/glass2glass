@@ -109,6 +109,50 @@ async fn a_late_starting_matroska_file_reports_its_duration_from_the_first_frame
     }
 }
 
+async fn posts_streams_or_tags(fixture: &str, demux: &str) -> bool {
+    let line = format!(
+        "filesrc location={}/tests/fixtures/{fixture} blocksize={CHUNK_LEN} ! {demux} ! fakesink",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let graph = parse_launch(&default_registry(), &line)
+        .unwrap_or_else(|error| panic!("{fixture}: the line does not build: {error}"));
+    let (bus, handle) = Bus::new(BUS_CAPACITY);
+    let clock = WallClock::new();
+    tokio::time::timeout(
+        RUN_TIMEOUT,
+        RunBuilder::new(graph, &clock, LINK_CAPACITY)
+            .with_bus(&handle)
+            .run(),
+    )
+    .await
+    .expect("the run ends")
+    .expect("the pipeline runs");
+    let mut posted = false;
+    while let Some(message) = bus.try_recv() {
+        posted |= matches!(
+            message,
+            BusMessage::StreamCollection(_) | BusMessage::Tag { .. }
+        );
+    }
+    posted
+}
+
+// the single-stream demuxers that post a stream list or tags for their FIXTURES file
+const POSTING_SINGLE_STREAM_DEMUXERS: [&str; 4] =
+    ["flvdemux", "mpegpsdemux", "avidemux", "matroskademux"];
+
+#[tokio::test]
+async fn a_single_stream_demuxer_in_a_launch_line_posts_to_the_bus() {
+    for (fixture, demux, _) in FIXTURES {
+        if POSTING_SINGLE_STREAM_DEMUXERS.contains(&demux) {
+            assert!(
+                posts_streams_or_tags(fixture, demux).await,
+                "{fixture}: {demux} ! fakesink posts nothing"
+            );
+        }
+    }
+}
+
 // between the keyframes at 0.8 s and 1.2 s of video time
 const TARGET_NS: u64 = 1_020_000_000;
 

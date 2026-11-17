@@ -796,6 +796,10 @@ impl MkvDemux {
 }
 
 impl AsyncElement for MkvDemux {
+    fn set_bus(&mut self, bus: BusHandle) {
+        self.bus = Some(bus);
+    }
+
     fn seek_route(&self) -> Option<ElementSeekRoute> {
         Some(ElementSeekRoute::UpstreamBytes)
     }

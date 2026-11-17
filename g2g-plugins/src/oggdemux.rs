@@ -1161,6 +1161,10 @@ fn in_band_headers(codec: OggCodec, stream: &OggLogicalStream) -> Vec<Vec<u8>> {
 }
 
 impl AsyncElement for OggDemux {
+    fn set_bus(&mut self, bus: BusHandle) {
+        self.bus = Some(bus);
+    }
+
     fn seek_route(&self) -> Option<ElementSeekRoute> {
         Some(ElementSeekRoute::UpstreamBytes)
     }

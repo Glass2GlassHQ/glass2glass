@@ -1453,6 +1453,10 @@ fn config_frame(blob: Vec<u8>, pts_ns: u64, seq: u64) -> Frame {
 }
 
 impl AsyncElement for PsDemux {
+    fn set_bus(&mut self, bus: BusHandle) {
+        self.bus = Some(bus);
+    }
+
     type ProcessFuture<'a>
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
