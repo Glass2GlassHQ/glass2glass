@@ -10,7 +10,8 @@ use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
 
-use crate::audiofx::{passthrough_constraint, PcmScratch};
+use crate::audioconvert::RAW_AUDIO_FORMATS;
+use crate::audiofx::{passthrough_caps, PcmScratch};
 
 use g2g_core::log::{short_type_name, LogName};
 use g2g_core::time::ns_to_ticks;
@@ -171,7 +172,7 @@ impl AsyncElement for Level {
     }
 
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
-        passthrough_constraint(None)
+        CapsConstraint::Identity(passthrough_caps(&RAW_AUDIO_FORMATS, None))
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -287,7 +288,7 @@ static LEVEL_PROPS: &[PropertySpec] = &[
 
 impl PadTemplates for Level {
     fn pad_templates() -> Vec<PadTemplate> {
-        crate::audiofx::pad_templates(None)
+        crate::pcm_passthrough::pad_templates(passthrough_caps(&RAW_AUDIO_FORMATS, None))
     }
 }
 

@@ -915,6 +915,7 @@ fn convert_strided(
         (P010, Nv12) | (Nv12, P010) => rescale_semi_planar(src, from, to, w, h, &mut hub.depth),
         // A420 is an I420 frame with the alpha plane appended.
         (A420, I420) => src[..frame_byte_size(I420, w as u32, h as u32)].into(),
+        (f, Nv12 | I420) if f.is_planar_yuv() => planar_to_yuv420(src, f, to, w, h, &mut hub.depth),
         // Any conversion involving a high-bit-depth / 4:2:2 / 4:4:4 format (the
         // pairs above are the fast 8-bit paths) goes through the general hub:
         // unpack to 4:4:4 YUV at a working depth, then repack to the target.
@@ -1021,6 +1022,71 @@ fn rescale_semi_planar(
     let mut dst = vec![0u8; samples * writer.bytes_per_sample];
     for index in 0..samples {
         writer.write(&mut dst, index, depth.get(reader.read(src, index)));
+    }
+    dst.into_boxed_slice()
+}
+
+fn planar_to_yuv420(
+    src: &[u8],
+    from: RawVideoFormat,
+    to: RawVideoFormat,
+    w: usize,
+    h: usize,
+    depth: &mut DepthTable,
+) -> Box<[u8]> {
+    // the hub's arithmetic, reading chroma where it lies instead of through three full-size planes
+    depth.set(from.bit_depth(), 8);
+    let two_bytes = from.bytes_per_sample() == 2;
+    let read = |offset: usize, index: usize| -> i32 {
+        match two_bytes {
+            true => i32::from(u16::from_le_bytes([
+                src[offset + index * 2],
+                src[offset + index * 2 + 1],
+            ])),
+            false => i32::from(src[offset + index]),
+        }
+    };
+    let (source_horizontal_shift, source_vertical_shift) =
+        from.chroma_shift().expect("planar format");
+    let [(luma_offset, _, _), (u_offset, source_chroma_width, _), (v_offset, _, _)] =
+        planar_planes(from, w, h);
+    let (cw, ch) = chroma_420_size(w, h);
+    let n = w * h;
+    let mut dst = vec![0u8; frame_byte_size(to, w as u32, h as u32)];
+    let luma = &mut dst[..n];
+    match two_bytes {
+        true => {
+            let (samples, _) = src[luma_offset..luma_offset + 2 * n].as_chunks::<2>();
+            for (out, sample) in luma.iter_mut().zip(samples) {
+                *out = depth.get(i32::from(u16::from_le_bytes(*sample))) as u8;
+            }
+        }
+        false => {
+            for (out, &sample) in luma.iter_mut().zip(&src[luma_offset..luma_offset + n]) {
+                *out = depth.get(i32::from(sample)) as u8;
+            }
+        }
+    }
+    let interleaved = to == RawVideoFormat::Nv12;
+    for cy in 0..ch {
+        let rows = 2 * cy..(2 * cy + 2).min(h);
+        for cx in 0..cw {
+            let columns = 2 * cx..(2 * cx + 2).min(w);
+            let (mut sum_u, mut sum_v) = (0i32, 0i32);
+            for row in rows.clone() {
+                let source_row = (row >> source_vertical_shift) * source_chroma_width;
+                for column in columns.clone() {
+                    let source_index = source_row + (column >> source_horizontal_shift);
+                    sum_u += read(u_offset, source_index);
+                    sum_v += read(v_offset, source_index);
+                }
+            }
+            let count = (rows.len() * columns.len()) as i32;
+            let average_u = depth.get((sum_u + count / 2) / count) as u8;
+            let average_v = depth.get((sum_v + count / 2) / count) as u8;
+            let (u_at, v_at) = chroma_420_offsets(n, cw * ch, cy * cw + cx, interleaved);
+            (dst[u_at], dst[v_at]) = (average_u, average_v);
+        }
     }
     dst.into_boxed_slice()
 }
@@ -1874,6 +1940,32 @@ mod tests {
 
     // BT.601 integer rounding only
     const ROUND_TRIP_TOLERANCE: i32 = 4;
+
+    #[test]
+    fn planar_yuv_to_nv12_and_i420_matches_the_hub() {
+        let planar = g2g_core::caps::ALL_RAW_VIDEO_FORMATS
+            .iter()
+            .copied()
+            .filter(|format| format.is_planar_yuv());
+        for from in planar {
+            for to in [RawVideoFormat::Nv12, RawVideoFormat::I420] {
+                for (w, h) in GEOMETRIES {
+                    if from == to {
+                        continue;
+                    }
+                    let src: Vec<u8> = (0..frame_byte_size(from, w, h))
+                        .map(|index| (index * 37 + 11) as u8)
+                        .collect();
+                    let (w, h) = (w as usize, h as usize);
+                    let matrix = YuvRgbMatrix::new(Colorimetry::UNKNOWN);
+                    let hub =
+                        convert_via_hub(&src, from, to, w, h, &matrix, &mut HubScratch::default());
+                    let direct = convert(&src, from, to, w, h, Colorimetry::UNKNOWN);
+                    assert_eq!(direct, hub, "{from:?} -> {to:?} {w}x{h}");
+                }
+            }
+        }
+    }
 
     #[test]
     fn subsampled_targets_accept_odd_dims() {

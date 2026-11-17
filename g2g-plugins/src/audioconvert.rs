@@ -1204,6 +1204,14 @@ fn decode_with<const N: usize>(dst: &mut Vec<f32>, src: &[u8], to_float: impl Fn
     dst.extend(src.as_chunks::<N>().0.iter().map(|b| to_float(*b)));
 }
 
+pub(crate) const RAW_AUDIO_FORMATS: [AudioFormat; 5] = [
+    AudioFormat::PcmS16Le,
+    AudioFormat::PcmF32Le,
+    AudioFormat::PcmS24Le,
+    AudioFormat::PcmS32Le,
+    AudioFormat::PcmU8,
+];
+
 /// Decode an interleaved PCM buffer to f32 samples in [-1, 1), replacing
 /// `dst`'s contents.
 pub(crate) fn decode_into(dst: &mut Vec<f32>, src: &[u8], format: AudioFormat) {

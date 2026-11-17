@@ -58,22 +58,22 @@ pub(crate) fn accept_audio(
 
 /// Output caps equal input caps: the filters change samples, not shape.
 pub(crate) fn passthrough_constraint(required_channels: Option<u8>) -> CapsConstraint<'static> {
-    CapsConstraint::Identity(passthrough_caps(required_channels))
+    CapsConstraint::Identity(passthrough_caps(&AUDIOFX_FORMATS, required_channels))
 }
 
 /// Sink and source templates over [`AUDIOFX_FORMATS`].
 pub(crate) fn pad_templates(required_channels: Option<u8>) -> Vec<PadTemplate> {
-    pcm_passthrough::pad_templates(passthrough_caps(required_channels))
+    pcm_passthrough::pad_templates(passthrough_caps(&AUDIOFX_FORMATS, required_channels))
 }
 
-fn passthrough_caps(required_channels: Option<u8>) -> CapsSet {
+pub(crate) fn passthrough_caps(formats: &[AudioFormat], required_channels: Option<u8>) -> CapsSet {
     let pcm = |format| Caps::Audio {
         format,
         channels: required_channels.unwrap_or(ANY_CHANNELS),
         sample_rate: ANY_SAMPLE_RATE,
         channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
     };
-    CapsSet::from_alternatives(AUDIOFX_FORMATS.map(pcm).to_vec())
+    CapsSet::from_alternatives(formats.iter().copied().map(pcm).collect())
 }
 
 // f32 and encoded buffers an element reuses across frames instead of allocating per frame

@@ -22,22 +22,13 @@ use alloc::{format, vec};
 
 use g2g_core::log::{short_type_name, LogName, LogSource};
 use g2g_core::{
-    g2g_debug, AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim,
-    ElementMetadata, G2gError, Interlace, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
-    PropError, PropKind, PropValue, PropertySpec, Rate,
+    g2g_debug, AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata,
+    G2gError, Interlace, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError,
+    PropKind, PropValue, PropertySpec, Rate,
 };
 
+use crate::audioconvert::RAW_AUDIO_FORMATS;
 use crate::fakesink::FakeSink;
-
-/// The PCM formats a `fakeaudiosink` pad advertises. `Caps::Audio` also carries
-/// the encoded formats, which is exactly what this sink refuses.
-const RAW_AUDIO_FORMATS: [AudioFormat; 5] = [
-    AudioFormat::PcmS16Le,
-    AudioFormat::PcmF32Le,
-    AudioFormat::PcmS24Le,
-    AudioFormat::PcmS32Le,
-    AudioFormat::PcmU8,
-];
 
 /// The channel count and rate an audio template leaves open (`Caps::Audio`'s own
 /// wildcards).

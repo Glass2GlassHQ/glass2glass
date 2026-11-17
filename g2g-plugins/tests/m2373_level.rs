@@ -16,16 +16,14 @@ const LINK_CAPACITY: usize = 4;
 const RUN_TIMEOUT: Duration = Duration::from_secs(10);
 const DB_TOLERANCE: f64 = 0.01;
 
-#[tokio::test]
-async fn level_posts_the_peak_and_rms_of_each_interval_in_db() {
-    // audiotestsrc's square wave swings between plus and minus half of i16 full scale
+// audiotestsrc's square wave swings between plus and minus half of i16 full scale
+fn half_scale_square_wave_db() -> f64 {
     let half_scale = f64::from(i16::MAX / 2) / f64::from(i16::MAX as i32 + 1);
-    let expected_db = 20.0 * half_scale.log10();
-    let graph = parse_launch(
-        &default_registry(),
-        "audiotestsrc wave=square num-buffers=10 ! level name=meter interval=50000000 ! fakesink",
-    )
-    .expect("the line builds");
+    20.0 * half_scale.log10()
+}
+
+async fn meter_readings(line: &str) -> Vec<(String, Vec<f64>, Vec<f64>)> {
+    let graph = parse_launch(&default_registry(), line).expect("the line builds");
     let (bus, handle) = Bus::new(BUS_CAPACITY);
     tokio::time::timeout(
         RUN_TIMEOUT,
@@ -36,7 +34,7 @@ async fn level_posts_the_peak_and_rms_of_each_interval_in_db() {
     .await
     .expect("the run ends")
     .expect("the pipeline runs");
-    let readings: Vec<(String, Vec<f64>, Vec<f64>)> = std::iter::from_fn(|| bus.try_recv())
+    std::iter::from_fn(|| bus.try_recv())
         .filter_map(|message| match message {
             BusMessage::Level {
                 element,
@@ -46,7 +44,10 @@ async fn level_posts_the_peak_and_rms_of_each_interval_in_db() {
             } => Some((element, peak_db, rms_db)),
             _ => None,
         })
-        .collect();
+        .collect()
+}
+
+fn assert_every_reading_is(readings: Vec<(String, Vec<f64>, Vec<f64>)>, expected_db: f64) {
     assert!(!readings.is_empty(), "level posted nothing");
     for (element, peak_db, rms_db) in readings {
         assert_eq!(element, "meter");
@@ -57,4 +58,23 @@ async fn level_posts_the_peak_and_rms_of_each_interval_in_db() {
             );
         }
     }
+}
+
+#[tokio::test]
+async fn level_posts_the_peak_and_rms_of_each_interval_in_db() {
+    let readings = meter_readings(
+        "audiotestsrc wave=square num-buffers=10 ! level name=meter interval=50000000 ! fakesink",
+    )
+    .await;
+    assert_every_reading_is(readings, half_scale_square_wave_db());
+}
+
+#[tokio::test]
+async fn level_reads_24_bit_audio() {
+    let readings = meter_readings(
+        "audiotestsrc wave=square num-buffers=10 ! audioconvert ! audio/x-raw,format=S24LE \
+         ! level name=meter interval=50000000 ! fakesink",
+    )
+    .await;
+    assert_every_reading_is(readings, half_scale_square_wave_db());
 }

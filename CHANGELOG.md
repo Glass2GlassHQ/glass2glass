@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2377: `level` reads every raw PCM format, and `videoconvert` converts planar YUV straight to NV12 and I420.
 - M2376: `g2g-player` draws overlay rectangles over the picture, and redraws a paused frame when they change.
 - M2375: `hqdn3d` denoises 8-bit planar YUV, and `g2g-player` applies the ffmpeg `hqdn3d` filter string.
 - M2374: `g2g-player` meters the decoded audio, `set_level_meter` and `audio_levels`.
