@@ -121,6 +121,8 @@ impl std::error::Error for LoadError {}
 pub enum SeekError {
     NoMedia,
     NotSeekable,
+    NoPosition,
+    UnknownFrameRate,
 }
 
 impl fmt::Display for SeekError {
@@ -128,6 +130,8 @@ impl fmt::Display for SeekError {
         match self {
             SeekError::NoMedia => f.write_str("nothing is loaded"),
             SeekError::NotSeekable => f.write_str("the loaded media cannot seek"),
+            SeekError::NoPosition => f.write_str("no frame has been shown yet"),
+            SeekError::UnknownFrameRate => f.write_str("the video has no fixed frame rate"),
         }
     }
 }
@@ -178,6 +182,7 @@ pub(crate) struct Shared {
     frames: FrameSlot,
     paused: AtomicBool,
     eof_reached: AtomicBool,
+    frame_period: Mutex<Option<Duration>>,
     // the last value reported for each observed property
     observed: Mutex<Vec<PropertyChange>>,
 }
@@ -296,6 +301,7 @@ impl Player {
             seek.keep_run_open();
         }
         self.shared.set_eof_reached(false);
+        *self.shared.frame_period.lock().expect("frame period lock") = None;
         if let Some(pause) = options.pause {
             self.shared.set_paused(pause, None);
         }
@@ -373,6 +379,51 @@ impl Player {
             .seeks
             .send(position)
             .map_err(|_| SeekError::NoMedia)
+    }
+
+    fn seek_from_position(
+        &self,
+        target: impl FnOnce(Duration) -> Duration,
+    ) -> Result<(), SeekError> {
+        let position = {
+            let playback = self.playback.lock().expect("playback lock");
+            let playback = playback.as_ref().ok_or(SeekError::NoMedia)?;
+            playback
+                .progress
+                .position()
+                .map(Duration::from_nanos)
+                .ok_or(SeekError::NoPosition)?
+        };
+        self.seek(target(position))
+    }
+
+    pub fn seek_forward(&self, offset: Duration) -> Result<(), SeekError> {
+        self.seek_from_position(|position| position.saturating_add(offset))
+    }
+
+    pub fn seek_backward(&self, offset: Duration) -> Result<(), SeekError> {
+        self.seek_from_position(|position| position.saturating_sub(offset))
+    }
+
+    fn frame_period(&self) -> Result<Duration, SeekError> {
+        self.shared
+            .frame_period
+            .lock()
+            .expect("frame period lock")
+            .ok_or(SeekError::UnknownFrameRate)
+    }
+
+    pub fn frame_step(&self) -> Result<(), SeekError> {
+        let period = self.frame_period()?;
+        self.pause();
+        // seeks land on the first frame at or after the target
+        self.seek_from_position(|position| position.saturating_add(period / 2))
+    }
+
+    pub fn frame_back_step(&self) -> Result<(), SeekError> {
+        let period = self.frame_period()?;
+        self.pause();
+        self.seek_from_position(|position| position.saturating_sub(period + period / 2))
     }
 
     pub fn property(&self, property: Property) -> PropertyChange {

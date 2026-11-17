@@ -5,7 +5,9 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
+use g2g_core::caps::framerate_q16_period_ns;
 use g2g_core::clock::MonotonicClock;
 use g2g_core::element::{PresentationStats, QosMessage};
 use g2g_core::frame::Frame;
@@ -13,7 +15,7 @@ use g2g_core::memory::{DomainSet, MemoryDomainKind};
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, ClockCandidate, ClockPriority, ClockSync, ConfigureOutcome,
     ElementMetadata, G2gError, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
-    PresentationPacer, PropError, PropValue, PropertySpec, PACING_PROPERTIES,
+    PresentationPacer, PropError, PropValue, PropertySpec, Rate, PACING_PROPERTIES,
 };
 use g2g_plugins::clock::wait_to_present;
 use g2g_plugins::glnv12::accepted_caps;
@@ -91,6 +93,13 @@ impl PlayerVideoSink {
 
     fn adopt_caps(&mut self, caps: Caps) {
         if self.caps.as_ref() != Some(&caps) {
+            let frame_period = match caps.framerate() {
+                Rate::Fixed(framerate_q16) => {
+                    framerate_q16_period_ns(framerate_q16).map(Duration::from_nanos)
+                }
+                _ => None,
+            };
+            *self.shared.frame_period.lock().expect("frame period lock") = frame_period;
             self.caps = Some(caps);
             self.shared.events.push(Event::VideoReconfig);
         }

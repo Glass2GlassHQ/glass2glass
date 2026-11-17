@@ -965,6 +965,14 @@ first frame shown is the first at or after it. On media that cannot seek, a star
 position fails the load with `LoadError::StartNotSeekable`. `pause` sets the paused
 state the run starts in, and it stays set for later loads.
 
+`seek_forward` and `seek_backward` seek from `time-pos`, and a seek back stops at
+0. `frame_step` and `frame_back_step` pause and seek half a frame forward, or one
+and a half frames back, from `time-pos`. A seek lands on the first frame at or after
+its target, so for constant frame rate video that is the next or the previous
+frame. The frame period comes from the framerate in the caps `playervideosink`
+receives, and a step on video with no fixed framerate fails with
+`SeekError::UnknownFrameRate`.
+
 The end of the file behaves as mpv's `keep-open`. When the source can seek, `load`
 holds the run open with `keep_run_open`. Once `stream_ended()` is true the player
 pauses on the last frame and sets `eof-reached`, which a seek or the next `load`

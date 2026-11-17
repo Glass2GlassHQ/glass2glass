@@ -26,6 +26,7 @@ const CLIP_FRAME_PERIOD: Duration = Duration::from_secs(1)
 const END_POSITION_TOLERANCE: Duration = CLIP_FRAME_PERIOD.saturating_mul(2);
 // between two keyframes of the clip's ten-frame GOP
 const START: Duration = Duration::from_secs(1);
+const RELATIVE_SEEK: Duration = Duration::from_millis(400);
 const PLAYED_BEFORE_PAUSE: Duration = Duration::from_millis(400);
 const RGBA_BYTES_PER_PIXEL: u32 = 4;
 const EVENT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -182,6 +183,24 @@ fn a_clip_renders_pauses_seeks_and_stays_open_at_the_end() {
 #[test]
 fn a_clip_loads_paused_at_its_start_position() {
     let player = Player::new();
+    let prerolled_at = load_paused_at_start(&player);
+    assert!(
+        prerolled_at >= START && prerolled_at < START + CLIP_FRAME_PERIOD,
+        "the first frame shown is at {prerolled_at:?}, the load started at {START:?}"
+    );
+    std::thread::sleep(PAUSE_LENGTH);
+    assert_eq!(
+        time_pos(&player),
+        prerolled_at,
+        "time-pos moved after a paused load"
+    );
+    assert_eq!(
+        player.property(Property::Pause),
+        PropertyChange::Pause(true)
+    );
+}
+
+fn load_paused_at_start(player: &Player) -> Duration {
     player
         .load(
             Media::Uri(&format!("file://{CLIP}")),
@@ -197,16 +216,33 @@ fn a_clip_loads_paused_at_its_start_position() {
             PropertyChange::TimePos(Some(_))
         )
     });
-    let prerolled_at = time_pos(&player);
-    assert!(
-        prerolled_at >= START && prerolled_at < START + CLIP_FRAME_PERIOD,
-        "the first frame shown is at {prerolled_at:?}, the load started at {START:?}"
-    );
-    std::thread::sleep(PAUSE_LENGTH);
+    time_pos(player)
+}
+
+fn moved_from(player: &Player, before: Duration) -> Duration {
+    wait_until(|| time_pos(player) != before);
+    time_pos(player)
+}
+
+#[test]
+fn relative_seeks_and_frame_steps_land_on_their_frames_paused() {
+    let player = Player::new();
+    let start = load_paused_at_start(&player);
+
+    player.frame_step().unwrap();
+    let stepped = moved_from(&player, start);
+    assert_eq!(stepped, start + CLIP_FRAME_PERIOD, "frame step");
+    player.frame_back_step().unwrap();
+    assert_eq!(moved_from(&player, stepped), start, "frame back step");
+
+    player.seek_forward(RELATIVE_SEEK).unwrap();
+    let forward = moved_from(&player, start);
+    assert_eq!(forward, start + RELATIVE_SEEK, "relative seek forward");
+    player.seek_backward(START + RELATIVE_SEEK + START).unwrap();
     assert_eq!(
-        time_pos(&player),
-        prerolled_at,
-        "time-pos moved after a paused load"
+        moved_from(&player, forward),
+        Duration::ZERO,
+        "relative seek back past the start"
     );
     assert_eq!(
         player.property(Property::Pause),
