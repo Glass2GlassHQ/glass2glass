@@ -249,3 +249,50 @@ fn relative_seeks_and_frame_steps_land_on_their_frames_paused() {
         PropertyChange::Pause(true)
     );
 }
+
+// ffprobe: pcm_s16le, 8000 Hz, 2 channels, 1 s
+const SOUND: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../g2g-plugins/tests/fixtures/sine_8k_stereo_s16le.wav"
+);
+const FIRST_CUT_LENGTH: Duration = Duration::from_millis(400);
+const SECOND_CUT_LENGTH: Duration = Duration::from_millis(200);
+
+#[test]
+fn an_edl_timeline_plays_its_cuts_and_its_sound_stream() {
+    let timeline_length = FIRST_CUT_LENGTH + SECOND_CUT_LENGTH;
+    let uri = format!(
+        "edl://{CLIP},{},{};{CLIP},0,{};!new_stream;!no_clip;{SOUND},0,{}",
+        START.as_secs_f64(),
+        FIRST_CUT_LENGTH.as_secs_f64(),
+        SECOND_CUT_LENGTH.as_secs_f64(),
+        timeline_length.as_secs_f64()
+    );
+    let player = Player::new();
+    player.observe(Property::EofReached);
+    let (frame_arrived, frames) = mpsc::channel();
+    player.set_update_callback(move || {
+        let _ = frame_arrived.send(());
+    });
+    let mut events = EventLog {
+        player: &player,
+        seen: Vec::new(),
+    };
+
+    player
+        .load(Media::Uri(&uri), LoadOptions::default())
+        .unwrap();
+    events.wait_for(&Event::FileLoaded);
+    frames.recv_timeout(EVENT_TIMEOUT).expect("a decoded frame");
+    events.wait_for(&Event::PropertyChange(PropertyChange::EofReached(true)));
+    assert_eq!(
+        player.property(Property::Duration),
+        PropertyChange::Duration(Some(timeline_length))
+    );
+
+    player.seek(FIRST_CUT_LENGTH).unwrap();
+    events.wait_for(&Event::PlaybackRestart);
+    wait_until(|| time_pos(&player) >= FIRST_CUT_LENGTH);
+    player.stop();
+    events.wait_for(&Event::EndFile(EndFile::Stop));
+}

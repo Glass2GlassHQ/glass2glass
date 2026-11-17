@@ -208,7 +208,8 @@ pub use autoplug::{
 
 #[cfg(feature = "std")]
 pub use launch::{
-    apply_props, build_element, build_source, fallback_factory, has_live_source, parse_chain,
+    apply_props, build_element, build_source, fallback_factory, has_live_source, launch_quote,
+    parse_chain,
     parse_element, parse_launch, parse_launch_avoiding, parse_source, set_property_text,
     ParseError, PropTarget, FALLBACK_AUDIO_SUFFIX, FALLBACK_FALLBACK_SOURCE_SUFFIX,
     FALLBACK_MAIN_SOURCE_SUFFIX, FALLBACK_SWITCH_NAME, FALLBACK_VIDEO_SUFFIX,

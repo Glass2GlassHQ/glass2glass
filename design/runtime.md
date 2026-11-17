@@ -980,20 +980,28 @@ clears. `stop` calls `shutdown` on the seek controller, since a run held open en
 only then. A run that ends by itself (a source that cannot seek, or a muxer in the
 graph) also pauses and sets `eof-reached`, then posts `EndFile::Eof`.
 
-`edlsrc uri="edl://..."` plays an mpv EDL timeline (`g2g_plugins::edl` parses the
-URI). Each segment decodes in a child graph built by `build_uridecodebin` on its own
-thread, with a sink that accepts only NV12, and arrives as NV12 in system memory. The
-child is seeked to the segment start before it runs, and it sends each frame with its
-stream time over a bounded channel. A frame's timeline pts is the segment's start on
-the timeline plus its stream time past the segment start. A segment ends at the first
-frame within 1 ms of its end, since Matroska and millisecond-timescale MP4 store frame
-times rounded to whole milliseconds. Segment starts get the same 1 ms allowance. The
-next segment's child starts when the current one does, so a cut does not wait for a
-decoder to open. A flushing seek restarts the children at the target's segment, and
-`query_duration` is the sum of the lengths. A segment with no length plays to
-the end of its file: its length is the duration `discover` reports less its start,
-read when caps are first queried. `edlsrc` plays one stream, and a segment without
-a length needs a file whose container reports a duration (MPEG-TS does not).
+`edlsrc uri="edl://..."` plays one stream of an mpv EDL timeline (`g2g_plugins::edl`
+parses the URI). `stream` picks the stream, counting each `!new_stream`, and
+`media` picks what is decoded from its files: `video`, delivered as NV12 in system
+memory, or `audio`, delivered as the raw PCM the decoder outputs. Each segment
+decodes in a child graph built by `build_uridecodebin` on its own thread. A video
+child ends in a `videoconvert` to NV12, since openh264 decodes to I420. The child is
+seeked to the segment start before it runs, and it sends each frame with its stream
+time over a bounded channel. A frame's timeline pts is the segment's start on the
+timeline plus its stream time past the segment start. A video segment ends at the
+first frame within 1 ms of its end, since Matroska and millisecond-timescale MP4
+store frame times rounded to whole milliseconds. Segment starts get the same 1 ms
+allowance. An audio segment is cut to the sample at both edges. The next segment's
+child starts when the current one does, so a cut does not wait for a decoder to
+open. A flushing seek restarts the children at the target's segment, and
+`query_duration` is the sum of the lengths. A segment with no length plays to the
+end of its file: its length is the duration `discover` reports less its start,
+read when caps are first queried. A segment without a length needs a file whose
+container reports a duration (MPEG-TS does not).
+
+`Media::Uri("edl://...")` loads `edlsrc` into `playervideosink` for stream 0 and,
+when the timeline has a second stream, a second `edlsrc stream=1 media=audio` into
+`autoaudiosink`. The audio of the picture stream's own files is not played.
 
 The host draws the frame due now into its own target, as with libmpv's render API.
 A URI load builds `playbin uri=... video-sink=playervideosink`, and a launch line

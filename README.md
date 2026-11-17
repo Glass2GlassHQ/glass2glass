@@ -739,7 +739,7 @@ switch device while playing and take `continue-on-error`.
 | `vobsubsrc` | a DVD subtitle `.idx` / `.sub` sidecar pair |
 | `splitmuxsink` | segmented recording, `muxer=mp4\|matroska\|mpegts` |
 | `splitmuxsrc` | plays a `splitmuxsink` recording's parts as one stream |
-| `edlsrc uri="edl://..."` | plays the video of an mpv EDL timeline, its segments decoded back to back as one stream |
+| `edlsrc uri="edl://..." stream=0 media=video` | plays the video or audio of one stream of an mpv EDL timeline, its segments decoded back to back |
 | `togglerecord` | starts and stops several streams together on the main stream's keyframes: one element per stream joined by `group=`, `main=true` on the one that decides |
 | `hlssink` | HLS packaging, segment files plus an `.m3u8` playlist, fed by `mpegtsmux` or `mp4mux`. `single-media-file` writes one file addressed by byte range. With the `http-server` feature, `http-port` also serves them over HTTP |
 | `fallbackswitch` | forwards the highest-priority input still delivering, input 0 being primary |

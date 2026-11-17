@@ -68,9 +68,9 @@ use base64::Engine as _;
 use g2g_core::log::{LogLevel, LogValue, RingSink, SinkId};
 use g2g_core::property::PropValue;
 use g2g_core::runtime::{
-    build_element, parse_chain, parse_launch, parse_source, run_graph_observed_mutable, select2,
-    set_property_text, Either, GraphMutator, LinkInterceptor, Observer, ProbeAction, Registry,
-    RunStats,
+    build_element, launch_quote, parse_chain, parse_launch, parse_source,
+    run_graph_observed_mutable, select2, set_property_text, Either, GraphMutator, LinkInterceptor,
+    Observer, ProbeAction, Registry, RunStats,
 };
 #[cfg(feature = "mcp")]
 use g2g_core::runtime::{NodeRole, TelemetrySnapshot};
@@ -2014,21 +2014,6 @@ fn property_json(value: &PropValue) -> Value {
         // a fraction, a flag set, or a kind added since: its launch-line text
         other => json!(other.to_string()),
     }
-}
-
-/// A path as a launch-line property value. The parser resolves `\` escapes and
-/// quoted regions, so a path with spaces survives.
-fn launch_quote(path: &str) -> String {
-    let mut quoted = String::with_capacity(path.len() + 2);
-    quoted.push('"');
-    for character in path.chars() {
-        if character == '"' || character == '\\' {
-            quoted.push('\\');
-        }
-        quoted.push(character);
-    }
-    quoted.push('"');
-    quoted
 }
 
 fn seconds_to_ns(seconds: f64) -> u64 {

@@ -11,13 +11,14 @@ use std::time::Duration;
 
 use g2g_core::graph::Graph;
 use g2g_core::runtime::{
-    attach_seek, attach_seek_controller, parse_launch, GraphNode, GraphNodeRef, LaunchFactory,
-    ParseError, PipelineProgress, Registry, RunBuilder, SeekController, SeekOutcome, SeekTicket,
-    StateController,
+    attach_seek, attach_seek_controller, launch_quote, parse_launch, GraphNode, GraphNodeRef,
+    LaunchFactory, ParseError, PipelineProgress, Registry, RunBuilder, SeekController, SeekOutcome,
+    SeekTicket, StateController,
 };
 use g2g_core::segment::Seek;
 use g2g_core::state::PipelineState;
 use g2g_plugins::clock::WallClock;
+use g2g_plugins::edl::{parse_edl_uri, EdlError};
 use g2g_plugins::launched::RunFailure;
 use g2g_plugins::registry::default_registry;
 
@@ -95,6 +96,7 @@ pub enum Event {
 #[derive(Debug)]
 pub enum LoadError {
     Parse(ParseError),
+    Edl(EdlError),
     NoVideoSink,
     StartNotSeekable,
     Spawn(std::io::Error),
@@ -104,6 +106,7 @@ impl fmt::Display for LoadError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             LoadError::Parse(error) => write!(f, "parse error: {error}"),
+            LoadError::Edl(error) => write!(f, "edl:// timeline: {error}"),
             LoadError::NoVideoSink => {
                 write!(f, "the launch line has no {PLAYER_VIDEO_SINK} element")
             }
@@ -263,6 +266,20 @@ fn nanoseconds(position: Duration) -> u64 {
     u64::try_from(position.as_nanos()).unwrap_or(u64::MAX)
 }
 
+fn edl_launch_line(uri: &str) -> Result<String, LoadError> {
+    // guikit's timelines carry their sound file in the stream after the first !new_stream
+    const SOUND_STREAM: usize = 1;
+    let edl = parse_edl_uri(uri).map_err(LoadError::Edl)?;
+    let quoted = launch_quote(uri);
+    let mut line = format!("edlsrc uri={quoted} ! {PLAYER_VIDEO_SINK}");
+    if edl.streams.len() > SOUND_STREAM {
+        line.push_str(&format!(
+            "  edlsrc uri={quoted} stream={SOUND_STREAM} media=audio ! audioconvert ! audioresample ! autoaudiosink"
+        ));
+    }
+    Ok(line)
+}
+
 impl Player {
     pub fn new() -> Self {
         let mut registry = default_registry();
@@ -280,7 +297,11 @@ impl Player {
     pub fn load(&self, media: Media<'_>, options: LoadOptions) -> Result<(), LoadError> {
         self.stop();
         let line = match media {
-            Media::Uri(uri) => format!("playbin uri=\"{uri}\" video-sink={PLAYER_VIDEO_SINK}"),
+            Media::Uri(uri) if uri.starts_with("edl://") => edl_launch_line(uri)?,
+            Media::Uri(uri) => format!(
+                "playbin uri={} video-sink={PLAYER_VIDEO_SINK}",
+                launch_quote(uri)
+            ),
             Media::LaunchLine(line) => line.to_string(),
         };
         let mut graph = parse_launch(&self.registry, &line).map_err(LoadError::Parse)?;

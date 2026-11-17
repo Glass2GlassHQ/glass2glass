@@ -52,8 +52,8 @@ The plan is [remote.md](remote.md).
 - Duration of an Ogg file with no audio stream (Theora or VP8 granules), and
   of an FLV file without `onMetaData`, from its last tag.
 - Track selection and the `track-list` property.
-- `edl://` timelines: the sound stream after `!new_stream` as a second `edlsrc`
-  that outputs audio, and `Media::Uri("edl://...")` in the player.
+- `edl://` timelines: play the audio of the picture stream's files when the
+  timeline has no sound stream, as mpv does.
 - An MXF demuxer, for the package EDLs guikit sends.
 - guikit's controls: `lavfi` video filters, an `astats` level meter, ASS
   `osd-overlay`, `sub-add` slots, `osd-dimensions` and `video-params`.

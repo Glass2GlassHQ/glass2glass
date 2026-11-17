@@ -12,26 +12,39 @@ use alloc::vec::Vec;
 
 use g2g_core::log::{short_type_name, ClockTime, Target};
 use g2g_core::runtime::{
-    attach_seek, bounded, eos_then_wait_for_seek, flushing_only, run_graph, Receiver, Registry,
-    SeekController, SeekFormat, Sender, SourceLoop,
+    attach_seek, bounded, eos_then_wait_for_seek, flushing_only, is_raw_audio, is_raw_video,
+    run_graph, GraphNodeRef, Receiver, Registry, SeekController, SeekFormat, Sender, SourceLoop,
 };
 use g2g_core::{
     g2g_error, AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata,
-    Frame, G2gError, OutputSink, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
-    RawVideoFormat, Seek, Segment,
+    Frame, G2gError, MemoryDomain, NodeKind, OutputSink, PipelinePacket, PropError, PropKind,
+    PropValue, PropertySpec, RawVideoFormat, Seek, Segment, SystemSlice,
 };
 
 use crate::clock::WallClock;
 use crate::discover::discover;
-use crate::edl::{parse_edl_uri, EdlSegment};
+use crate::edl::{parse_edl_uri, EdlSegment, EdlStream};
+use crate::pcmclip::clip_pcm_to_segment;
 use crate::uridecodebin::PLAYBIN_MAX_DEPTH;
+use crate::videoconvert::VideoConvert;
 use crate::videofx::any_geometry;
 
-static EDLSRC_PROPS: &[PropertySpec] = &[PropertySpec::new(
-    "uri",
-    PropKind::Str,
-    "edl:// timeline in mpv's EDL syntax, with one stream",
-)];
+static EDLSRC_PROPS: &[PropertySpec] = &[
+    PropertySpec::new("uri", PropKind::Str, "edl:// timeline in mpv's EDL syntax"),
+    PropertySpec::new(
+        "stream",
+        PropKind::Uint,
+        "index of the timeline's stream to play, each !new_stream starts the next",
+    )
+    .with_default("0"),
+    PropertySpec::new(
+        "media",
+        PropKind::Str,
+        "what to decode from the stream's files, NV12 video or raw audio",
+    )
+    .with_enum_values("video | audio")
+    .with_default("video"),
+];
 
 // matroska and millisecond-timescale mp4 store frame times rounded to whole milliseconds
 const CUT_TOLERANCE_NS: u64 = 1_000_000;
@@ -50,15 +63,44 @@ impl TimelineSegment {
     }
 }
 
-fn single_stream(uri: &str) -> Result<Vec<EdlSegment>, String> {
-    let mut edl = parse_edl_uri(uri).map_err(|error| error.to_string())?;
-    if edl.streams.len() != 1 {
-        return Err(format!(
-            "the timeline has {} streams, edlsrc plays one",
-            edl.streams.len()
-        ));
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum EdlMedia {
+    #[default]
+    Video,
+    Audio,
+}
+
+impl EdlMedia {
+    fn parse(name: &str) -> Option<EdlMedia> {
+        match name {
+            "video" => Some(EdlMedia::Video),
+            "audio" => Some(EdlMedia::Audio),
+            _ => None,
+        }
     }
-    Ok(edl.streams.remove(0).segments)
+
+    fn name(self) -> &'static str {
+        match self {
+            EdlMedia::Video => "video",
+            EdlMedia::Audio => "audio",
+        }
+    }
+
+    fn is_decoded(self, caps: &Caps) -> bool {
+        match self {
+            EdlMedia::Video => is_raw_video(caps),
+            EdlMedia::Audio => is_raw_audio(caps),
+        }
+    }
+
+    fn sink_constraint(self) -> CapsConstraint<'static> {
+        match self {
+            EdlMedia::Video => {
+                CapsConstraint::Accepts(CapsSet::one(any_geometry(RawVideoFormat::Nv12)))
+            }
+            EdlMedia::Audio => CapsConstraint::AcceptsAny,
+        }
+    }
 }
 
 // mpv plays a segment with no length to the end of its file
@@ -110,12 +152,9 @@ enum SegmentMessage {
     Failed(G2gError),
 }
 
-fn decoded_caps() -> Caps {
-    any_geometry(RawVideoFormat::Nv12)
-}
-
 #[derive(Debug)]
 struct SegmentSink {
+    media: EdlMedia,
     messages: Sender<SegmentMessage>,
     segment: Segment,
     caps: Option<Caps>,
@@ -128,6 +167,21 @@ impl SegmentSink {
             .send(message)
             .await
             .map_err(|_| G2gError::Shutdown)
+    }
+
+    fn stream_time_ns(&self, pts_ns: u64) -> Option<u64> {
+        match self.media {
+            EdlMedia::Video => self
+                .segment
+                .presents(pts_ns)
+                .then(|| self.segment.to_stream_time(pts_ns))
+                .flatten(),
+            // audio buffers straddle the seek target and edlsrc trims them to the timeline segment
+            EdlMedia::Audio => u64::try_from(
+                i128::from(self.segment.time) + i128::from(pts_ns) - i128::from(self.segment.start),
+            )
+            .ok(),
+        }
     }
 }
 
@@ -142,7 +196,7 @@ impl AsyncElement for SegmentSink {
     }
 
     fn caps_constraint_as_sink(&self) -> CapsConstraint<'_> {
-        CapsConstraint::Accepts(CapsSet::one(decoded_caps()))
+        self.media.sink_constraint()
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -158,13 +212,7 @@ impl AsyncElement for SegmentSink {
         Box::pin(async move {
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let pts_ns = frame.timing.pts_ns;
-                    let Some(stream_time_ns) = self
-                        .segment
-                        .presents(pts_ns)
-                        .then(|| self.segment.to_stream_time(pts_ns))
-                        .flatten()
-                    else {
+                    let Some(stream_time_ns) = self.stream_time_ns(frame.timing.pts_ns) else {
                         return Ok(());
                     };
                     let caps = self.caps.clone().ok_or(G2gError::NotConfigured)?;
@@ -195,37 +243,42 @@ impl AsyncElement for SegmentSink {
 
 async fn decode_segment(
     file: &str,
+    media: EdlMedia,
     from_ns: u64,
     messages: Sender<SegmentMessage>,
 ) -> Result<(), G2gError> {
     const SEGMENT_LINK_CAPACITY: usize = 2;
     let target = Target::category(short_type_name::<EdlSrc>());
     let sink = SegmentSink {
+        media,
         messages,
         segment: Segment::new(),
         caps: None,
         sent_caps: None,
     };
-    let is_decoded = |caps: &Caps| {
-        matches!(
-            caps,
-            Caps::RawVideo {
-                format: RawVideoFormat::Nv12,
-                ..
-            }
-        )
-    };
     let mut graph = crate::registry::default_registry()
         .build_uridecodebin(
             &format!("file://{file}"),
             sink,
-            &is_decoded,
+            &|caps: &Caps| media.is_decoded(caps),
             PLAYBIN_MAX_DEPTH,
         )
         .map_err(|error| {
             g2g_error!(target, "cannot decode {file}: {error:?}");
             G2gError::NotConfigured
         })?;
+    if media == EdlMedia::Video {
+        // openh264 decodes to I420, and build_uridecodebin plugs no converter after its decoder
+        let into_sink = graph
+            .edges()
+            .iter()
+            .position(|edge| graph.node_kind(edge.dst.node) == Some(NodeKind::Sink))
+            .expect("build_uridecodebin links its sink");
+        graph.insert_on_edge(
+            into_sink,
+            GraphNodeRef::element(VideoConvert::new(RawVideoFormat::Nv12)),
+        );
+    }
     let (_controller, _ticket) =
         attach_seek(&mut graph, Seek::flush_to(from_ns)).map_err(|error| {
             g2g_error!(target, "cannot seek in {file}: {error:?}");
@@ -246,6 +299,7 @@ impl SegmentPlayback {
         timeline: &[TimelineSegment],
         timeline_index: usize,
         offset_ns: u64,
+        media: EdlMedia,
     ) -> Result<SegmentPlayback, G2gError> {
         const DECODED_AHEAD_FRAMES: usize = 4;
         let segment = &timeline[timeline_index];
@@ -272,7 +326,7 @@ impl SegmentPlayback {
                     }
                 };
                 runtime.block_on(async {
-                    if let Err(error) = decode_segment(&file, from_ns, sender).await {
+                    if let Err(error) = decode_segment(&file, media, from_ns, sender).await {
                         let _ = report.send(SegmentMessage::Failed(error)).await;
                     }
                 });
@@ -285,10 +339,52 @@ impl SegmentPlayback {
     }
 }
 
+fn clip_audio_to_segment(
+    frame_at_stream_time: Frame,
+    segment: &TimelineSegment,
+    caps: &Caps,
+) -> Result<Option<Frame>, G2gError> {
+    let Caps::Audio {
+        format,
+        channels,
+        sample_rate,
+        ..
+    } = caps
+    else {
+        return Err(G2gError::CapsMismatch);
+    };
+    let sample_bytes = format.bytes_per_sample().ok_or(G2gError::CapsMismatch)?;
+    let edges = Segment {
+        start: segment.start_ns,
+        stop: Some(segment.end_ns()),
+        ..Segment::new()
+    };
+    let pcm = frame_at_stream_time
+        .domain
+        .require_system_bytes(short_type_name::<EdlSrc>())?
+        .into_owned();
+    let clipped = clip_pcm_to_segment(
+        &edges,
+        frame_at_stream_time.timing,
+        pcm,
+        sample_bytes * usize::from(*channels),
+        *sample_rate,
+    )?;
+    Ok(clipped.map(|(timing, pcm)| {
+        Frame::new(
+            MemoryDomain::System(SystemSlice::from_boxed(pcm.into_boxed_slice())),
+            timing,
+            frame_at_stream_time.sequence,
+        )
+    }))
+}
+
 #[derive(Debug, Default)]
 pub struct EdlSrc {
     uri: String,
-    segments: Vec<EdlSegment>,
+    streams: Vec<EdlStream>,
+    stream_index: usize,
+    media: EdlMedia,
     timeline: Vec<TimelineSegment>,
     current: Option<SegmentPlayback>,
     next: Option<SegmentPlayback>,
@@ -320,14 +416,24 @@ impl EdlSrc {
             return Ok(());
         };
         let offset_ns = timeline_ns - self.timeline[index].timeline_start_ns;
-        self.current = Some(SegmentPlayback::start(&self.timeline, index, offset_ns)?);
+        self.current = Some(SegmentPlayback::start(
+            &self.timeline,
+            index,
+            offset_ns,
+            self.media,
+        )?);
         self.start_next(index)
     }
 
     fn start_next(&mut self, current_index: usize) -> Result<(), G2gError> {
         let next_index = current_index + 1;
         if next_index < self.timeline.len() {
-            self.next = Some(SegmentPlayback::start(&self.timeline, next_index, 0)?);
+            self.next = Some(SegmentPlayback::start(
+                &self.timeline,
+                next_index,
+                0,
+                self.media,
+            )?);
         }
         Ok(())
     }
@@ -342,11 +448,21 @@ impl EdlSrc {
 
     async fn first_caps(&mut self) -> Result<Caps, G2gError> {
         let target = Target::category(short_type_name::<Self>());
-        if self.segments.is_empty() {
+        if self.streams.is_empty() {
             g2g_error!(target, "edlsrc has no uri");
             return Err(G2gError::NotConfigured);
         }
-        self.timeline = timeline(&self.segments).await.map_err(|reason| {
+        let Some(stream) = self.streams.get(self.stream_index) else {
+            g2g_error!(
+                target,
+                "{} has {} streams, there is no stream {}",
+                self.uri,
+                self.streams.len(),
+                self.stream_index
+            );
+            return Err(G2gError::NotConfigured);
+        };
+        self.timeline = timeline(&stream.segments).await.map_err(|reason| {
             g2g_error!(target, "cannot play {}: {reason}", self.uri);
             G2gError::NotConfigured
         })?;
@@ -445,13 +561,25 @@ impl SourceLoop for EdlSrc {
                         mut frame,
                         stream_time_ns,
                     }) => {
-                        if stream_time_ns.saturating_add(CUT_TOLERANCE_NS) >= segment.end_ns() {
+                        let cut_tolerance_ns = match self.media {
+                            EdlMedia::Video => CUT_TOLERANCE_NS,
+                            EdlMedia::Audio => 0,
+                        };
+                        if stream_time_ns.saturating_add(cut_tolerance_ns) >= segment.end_ns() {
                             self.advance()?;
                             continue;
                         }
+                        frame.timing.pts_ns = stream_time_ns;
+                        if self.media == EdlMedia::Audio {
+                            let caps = self.caps.as_ref().ok_or(G2gError::NotConfigured)?;
+                            let Some(clipped) = clip_audio_to_segment(frame, segment, caps)? else {
+                                continue;
+                            };
+                            frame = clipped;
+                        }
                         let pts_ns = segment
                             .timeline_start_ns
-                            .saturating_add(stream_time_ns.saturating_sub(segment.start_ns));
+                            .saturating_add(frame.timing.pts_ns.saturating_sub(segment.start_ns));
                         frame.timing.pts_ns = pts_ns;
                         frame.timing.dts_ns = pts_ns;
                         frame.sequence = sequence;
@@ -480,8 +608,8 @@ impl SourceLoop for EdlSrc {
     fn metadata(&self) -> ElementMetadata {
         ElementMetadata::new(
             "EDL timeline source",
-            "Source/Video",
-            "Plays the segments of an mpv edl:// timeline back to back as one video stream",
+            "Source/Video/Audio",
+            "Plays the segments of one stream of an mpv edl:// timeline back to back",
             crate::AARON_BOXER,
         )
     }
@@ -490,27 +618,39 @@ impl SourceLoop for EdlSrc {
         match name {
             "uri" => {
                 let uri = value.as_str().ok_or(PropError::Type)?;
-                self.segments = single_stream(uri).map_err(|reason| {
-                    g2g_error!(
-                        Target::category(short_type_name::<Self>()),
-                        "cannot play {uri}: {reason}"
-                    );
-                    PropError::Value
-                })?;
+                self.streams = parse_edl_uri(uri)
+                    .map_err(|error| {
+                        g2g_error!(
+                            Target::category(short_type_name::<Self>()),
+                            "cannot play {uri}: {error}"
+                        );
+                        PropError::Value
+                    })?
+                    .streams;
                 self.uri = uri.to_string();
-                self.timeline.clear();
-                self.caps = None;
-                self.current = None;
-                self.next = None;
+            }
+            "stream" => {
+                let index = value.as_uint().ok_or(PropError::Type)?;
+                self.stream_index = usize::try_from(index).map_err(|_| PropError::Value)?;
+            }
+            "media" => {
+                let media = value.as_str().ok_or(PropError::Type)?;
+                self.media = EdlMedia::parse(media).ok_or(PropError::Value)?;
             }
             _ => return Err(PropError::Unknown),
         }
+        self.timeline.clear();
+        self.caps = None;
+        self.current = None;
+        self.next = None;
         Ok(())
     }
 
     fn get_property(&self, name: &str) -> Option<PropValue> {
         match name {
             "uri" => Some(PropValue::Str(self.uri.clone())),
+            "stream" => Some(PropValue::Uint(self.stream_index as u64)),
+            "media" => Some(PropValue::Str(self.media.name().to_string())),
             _ => None,
         }
     }

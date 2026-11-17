@@ -655,6 +655,19 @@ fn unquote_value(v: &str) -> String {
     out
 }
 
+pub fn launch_quote(value: &str) -> String {
+    let mut quoted = String::with_capacity(value.len() + 2);
+    quoted.push('"');
+    for character in value.chars() {
+        if character == '"' || character == '\\' {
+            quoted.push('\\');
+        }
+        quoted.push(character);
+    }
+    quoted.push('"');
+    quoted
+}
+
 /// Split a pipeline string into tokens, honoring quoted property values and
 /// `#` comments. Outside quotes, whitespace separates tokens and `!` is a
 /// standalone token; inside a `"..."` or `'...'` region both are literal, so a

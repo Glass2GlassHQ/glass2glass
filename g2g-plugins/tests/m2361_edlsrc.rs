@@ -5,6 +5,7 @@
 #![cfg(feature = "ffmpeg")]
 
 use g2g_core::log::ClockTime;
+use g2g_core::time::ns_to_ticks;
 use g2g_plugins::checksumsink::checksum_line;
 
 #[path = "common/g2g_launch.rs"]
@@ -60,8 +61,8 @@ fn seconds(nanoseconds: u64) -> String {
     format!("{}", nanoseconds as f64 / NANOS_PER_SECOND)
 }
 
-fn edl_pipeline() -> String {
-    let segments: Vec<String> = CUTS
+fn edl_segments(cuts: &[Cut]) -> String {
+    let segments: Vec<String> = cuts
         .iter()
         .map(|cut| match cut.length_ns {
             Some(length_ns) => format!(
@@ -73,9 +74,13 @@ fn edl_pipeline() -> String {
             None => format!("{},{}", cut.file, seconds(cut.start_ns)),
         })
         .collect();
+    segments.join(";")
+}
+
+fn edl_pipeline() -> String {
     format!(
         "edlsrc uri=\"edl://{}\" ! checksumsink hash=md5",
-        segments.join(";")
+        edl_segments(&CUTS)
     )
 }
 
@@ -136,4 +141,72 @@ fn a_seek_into_the_second_cut_resumes_at_its_source_frame() {
         "seek to {}",
         ClockTime(target_ns)
     );
+}
+
+// ffprobe: pcm_s16le, 8000 Hz, 2 channels, 1 s
+const WAV_FIXTURE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/sine_8k_stereo_s16le.wav"
+);
+const WAV_SAMPLE_RATE: u32 = 8_000;
+const WAV_SAMPLE_FRAME_BYTES: usize = 4;
+
+const AUDIO_CUTS: [Cut; 3] = [
+    Cut {
+        file: WAV_FIXTURE,
+        start_ns: 250_000_000,
+        length_ns: Some(300_000_000),
+    },
+    Cut {
+        file: WAV_FIXTURE,
+        start_ns: 0,
+        length_ns: Some(125_000_000),
+    },
+    // plays to the end of the file
+    Cut {
+        file: WAV_FIXTURE,
+        start_ns: 750_000_000,
+        length_ns: None,
+    },
+];
+
+fn written_bytes(pipeline: &str, file_name: &str) -> Vec<u8> {
+    let path = format!("{}/{file_name}", env!("CARGO_TARGET_TMPDIR"));
+    let output = launch(&[], &format!("{pipeline} ! filesink location={path}"));
+    assert!(
+        output.status.success(),
+        "{pipeline} fails: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    std::fs::read(&path).unwrap_or_else(|error| panic!("cannot read {path}: {error}"))
+}
+
+#[test]
+fn the_audio_stream_after_new_stream_plays_each_cut_back_to_back() {
+    let pcm = written_bytes(
+        &format!("filesrc location={WAV_FIXTURE} ! wavparse"),
+        "m2361_wav.pcm",
+    );
+    let byte_offset = |ns: u64| ns_to_ticks(ns, WAV_SAMPLE_RATE) as usize * WAV_SAMPLE_FRAME_BYTES;
+    let expected: Vec<u8> = AUDIO_CUTS
+        .iter()
+        .flat_map(|cut| {
+            let first = byte_offset(cut.start_ns);
+            let end = cut
+                .length_ns
+                .map_or(pcm.len(), |length_ns| byte_offset(cut.start_ns + length_ns));
+            pcm[first..end].iter().copied()
+        })
+        .collect();
+    let uri = format!(
+        "edl://{};!new_stream;!no_clip;{}",
+        edl_segments(&CUTS),
+        edl_segments(&AUDIO_CUTS)
+    );
+    let played = written_bytes(
+        &format!("edlsrc uri=\"{uri}\" stream=1 media=audio"),
+        "m2361_edl_audio.pcm",
+    );
+    assert_eq!(played.len(), expected.len(), "{uri}");
+    assert!(played == expected, "{uri}: the samples differ");
 }
