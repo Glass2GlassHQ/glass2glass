@@ -849,6 +849,31 @@ fn video_params_first_reports_the_decoded_size() {
     }
 }
 
+#[test]
+fn an_flv_file_plays() {
+    const FLV_CLIP: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../g2g-plugins/tests/fixtures/h264_64x48_25fps_gop10_bframes_offset.flv"
+    );
+    let player = Player::new();
+    player
+        .load(
+            Media::Uri(&format!("file://{FLV_CLIP}")),
+            LoadOptions {
+                start: None,
+                pause: Some(true),
+            },
+        )
+        .unwrap();
+    wait_until(|| {
+        player.property(Property::VideoParams)
+            == PropertyChange::VideoParams(Some(VideoSize {
+                width: CLIP_WIDTH,
+                height: CLIP_HEIGHT,
+            }))
+    });
+}
+
 #[cfg(feature = "ffmpeg")]
 #[test]
 fn a_jpeg_2000_picture_with_no_matching_raw_format_plays() {

@@ -58,6 +58,8 @@ The plan is [remote.md](remote.md).
   before playback, so a seek in a long MXF file with a body partition every
   10 s, as ffmpeg writes, lands by index instead of reading from byte 0.
 - D-10 AES3 sound in MXF (SMPTE ST 331).
+- A `playbin` hook for AVI. Through `avi_select` the player's
+  `avi_h264_mp3.avi` reports its sound but never presents a picture.
 - Take GPU frames in `playervideosink` once decoders open on the host's device.
 - An option that hands PCM to the host.
 - A versioned C ABI (`g2g_player.h`), wrapped in the C#, C++, Kotlin and

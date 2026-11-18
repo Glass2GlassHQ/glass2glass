@@ -1149,6 +1149,32 @@ pub fn mxf_uri_fanout(_reg: &Registry, uri: &str) -> Result<Option<UriFanout>, P
 }
 
 #[cfg(feature = "std")]
+pub fn flv_playbin(
+    reg: &Registry,
+    sinks: &PlaybinSinks<'_>,
+    uri: &str,
+) -> Result<Option<Graph<GraphNode>>, ParseError> {
+    let Some((path, prefix)) = open_file_prefix(uri) else {
+        return Ok(None);
+    };
+    let sniffed = crate::typefind::sniff_caps(&prefix);
+    if !sniffed.is_some_and(|caps| is_container(&caps, &[ByteStreamEncoding::Flv])) {
+        return Ok(None);
+    }
+    let Some((demux, caps)) = flv_select(&path, every_stream) else {
+        return Ok(None);
+    };
+    build_av_fanout(
+        reg,
+        sinks,
+        byte_source(&path, ByteStreamEncoding::Flv),
+        demux,
+        &uncropped_ports(caps),
+    )
+    .map(Some)
+}
+
+#[cfg(feature = "std")]
 fn mxf_select(
     location: &str,
     select: impl FnOnce(&[PadKind]) -> Option<Vec<usize>>,
