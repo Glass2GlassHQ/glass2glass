@@ -187,6 +187,36 @@ output from the input's `original`, so `decodebin` plugs it, and
 element's properties applied: a capsfilter's caps, or the output a
 `DerivedOutput` element derives from its own predecessor.
 
+## GStreamer Data Protocol
+
+`Caps::Gdp { original }` is a GDP 1.0 byte stream (`application/x-gdp`)
+carrying a stream of `original` caps, printed as `original-caps=(caps)[...]`
+like the compressed caps. GStreamer's own `application/x-gdp` caps keep the
+stream's header packets in `streamheader` instead, and g2g ignores that field.
+`gdppay` writes one packet per buffer: a 62-byte header (version 1.0, payload
+type and length, PTS, duration, offsets, buffer flags, DTS, then two CRC-16
+fields over polynomial 0x1021) and the payload. A stream opens with a
+stream-start event, the caps as GStreamer's caps string, and a segment event,
+in the order GStreamer writes them, and a caps change writes a new caps
+packet. A keyframe has no `DELTA_UNIT` flag, an unknown duration is
+`GST_CLOCK_TIME_NONE`, and `crc-header` (default on) and `crc-payload` (default
+off) match GStreamer's properties. Segments with a negative `time` cannot be
+written, since GStreamer's segment times are unsigned.
+
+`gdpdepay` reads the packets across input buffers, checks the CRCs a header
+sets, and rejects payloads over 256 MiB and a partial packet at end-of-stream.
+Caps packets set the output caps, time-format segment events become
+`PipelinePacket::Segment`, and other events are skipped. `ts-offset` shifts the
+timestamps, stopping at zero as GStreamer's does. Negotiation needs the payload
+caps before the first packet is read, so `typefind::sniff_caps` reads them from
+the first caps packet in a file's head, and `filesrc location=x.gdp ! gdpdepay`
+negotiates without a filter. Other sources need a filter that states
+`original-caps`. `CapsSet::from_gst_string` strips GStreamer's `(type)` casts,
+so caps strings that `gst_caps_to_string` wrote parse, and
+`Caps::to_gst_string` adds `layout=interleaved` to raw audio, which GStreamer
+requires. `tools/gdp-gst-check.sh` checks both directions against the local
+GStreamer.
+
 ## The solver
 
 `solver::solve_linear` runs arc consistency on a chain: forward sweep

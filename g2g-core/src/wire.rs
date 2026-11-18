@@ -938,19 +938,44 @@ fn put_caps(w: &mut Writer, c: &Caps) {
                 LosslessCompression::Deflate => 1,
                 LosslessCompression::Brotli => 2,
             });
-            match original {
-                Some(original) => {
-                    w.u8(1);
-                    put_caps(w, original);
-                }
-                None => w.u8(0),
-            }
+            put_original_caps(w, original.as_deref());
+        }
+        Caps::Gdp { original } => {
+            w.u8(GDP_TAG);
+            put_original_caps(w, original.as_deref());
         }
     }
 }
 
+fn put_original_caps(w: &mut Writer, original: Option<&Caps>) {
+    match original {
+        Some(original) => {
+            w.u8(1);
+            put_caps(w, original);
+        }
+        None => w.u8(0),
+    }
+}
+
+fn get_original_caps(r: &mut Reader) -> Result<Option<Box<Caps>>, WireError> {
+    Ok(match r.u8()? {
+        0 => None,
+        // a crafted message alternating batches and wrapped caps would recurse without bound
+        1 if matches!(
+            r.buf.get(r.pos),
+            Some(&(BATCH_TAG | LOSSLESSLY_COMPRESSED_TAG | GDP_TAG))
+        ) =>
+        {
+            return Err(WireError::BadTag)
+        }
+        1 => Some(Box::new(get_caps(r)?)),
+        _ => return Err(WireError::BadTag),
+    })
+}
+
 const BATCH_TAG: u8 = 10;
 const LOSSLESSLY_COMPRESSED_TAG: u8 = 13;
+const GDP_TAG: u8 = 14;
 
 fn get_caps(r: &mut Reader) -> Result<Caps, WireError> {
     Ok(match r.u8()? {
@@ -1035,24 +1060,14 @@ fn get_caps(r: &mut Reader) -> Result<Caps, WireError> {
                 2 => LosslessCompression::Brotli,
                 _ => return Err(WireError::BadTag),
             };
-            let original = match r.u8()? {
-                0 => None,
-                // a crafted message alternating batches and compressed caps would recurse without bound
-                1 if matches!(
-                    r.buf.get(r.pos),
-                    Some(&(BATCH_TAG | LOSSLESSLY_COMPRESSED_TAG))
-                ) =>
-                {
-                    return Err(WireError::BadTag)
-                }
-                1 => Some(Box::new(get_caps(r)?)),
-                _ => return Err(WireError::BadTag),
-            };
             Caps::LosslesslyCompressed {
                 compression,
-                original,
+                original: get_original_caps(r)?,
             }
         }
+        GDP_TAG => Caps::Gdp {
+            original: get_original_caps(r)?,
+        },
         _ => return Err(WireError::BadTag),
     })
 }
@@ -1974,6 +1989,10 @@ mod tests {
                 compression: LosslessCompression::Brotli,
                 original: Some(Box::new(Caps::Id3)),
             },
+            Caps::Gdp {
+                original: Some(Box::new(Caps::Klv)),
+            },
+            Caps::Gdp { original: None },
         ];
         for caps in cases {
             let p = PipelinePacket::CapsChanged(caps.clone());

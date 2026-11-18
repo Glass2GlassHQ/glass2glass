@@ -997,6 +997,16 @@ pub fn default_registry() -> Registry {
             build_decompress,
         ));
     }
+    reg.register_launch(LaunchFactory::new(
+        "gdppay",
+        crate::gdp::pay_pad_templates(),
+        || Box::new(crate::gdp::GdpPay::new()),
+    ));
+    reg.register_launch(LaunchFactory::new(
+        "gdpdepay",
+        crate::gdp::depay_pad_templates(),
+        || Box::new(crate::gdp::GdpDepay::new()),
+    ));
     reg.register_launch(LaunchFactory::of::<VideoBox>("videobox", || {
         Box::new(VideoBox::new())
     }));

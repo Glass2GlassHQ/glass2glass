@@ -45,6 +45,7 @@ use crate::demuxseek::DemuxSeek;
 use crate::flactag::{metadata_blocks, FLAC_MARKER};
 use crate::frame_clock::FrameClock;
 use crate::id3::LeadingId3v2;
+use crate::mpegcrc::crc16_update;
 use crate::vorbiscomment::{
     parse_comment_body, parse_flac_picture, FLAC_COMMENT_BLOCK_TYPE, FLAC_PICTURE_BLOCK_TYPE,
 };
@@ -366,21 +367,12 @@ fn crc8(data: &[u8]) -> u8 {
     crc
 }
 
-// CRC-16 (polynomial 0x8005, init 0), the FLAC frame footer checksum
-fn crc16(data: &[u8]) -> u16 {
-    data.iter().fold(0, |crc, &b| crc16_update(crc, b))
-}
+// the FLAC frame footer checksum starts from zero
+const FLAC_CRC16_POLYNOMIAL: u16 = 0x8005;
 
-fn crc16_update(crc: u16, byte: u8) -> u16 {
-    let mut crc = crc ^ (u16::from(byte) << 8);
-    for _ in 0..8 {
-        crc = if crc & 0x8000 != 0 {
-            (crc << 1) ^ 0x8005
-        } else {
-            crc << 1
-        };
-    }
-    crc
+fn crc16(data: &[u8]) -> u16 {
+    data.iter()
+        .fold(0, |crc, &b| crc16_update(FLAC_CRC16_POLYNOMIAL, crc, b))
 }
 
 /// Parse and validate a FLAC frame header at the start of `data`: the 14-bit
@@ -500,7 +492,7 @@ fn frame_end(data: &[u8]) -> Option<FrameEnd> {
             Some(None) if crc_before == 0 => corrupt_successor_seen = true,
             _ => {}
         }
-        crc_before = crc16_update(crc_before, data[at]);
+        crc_before = crc16_update(FLAC_CRC16_POLYNOMIAL, crc_before, data[at]);
         at += 1;
     }
     None

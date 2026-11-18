@@ -501,7 +501,7 @@ unless it says otherwise.
   `rmdemux` / `rademux`, `mpegpsmux`, `mplex`, `atscmux`, `tsparse`,
   `matroskaparse`, `oggparse` / `ogmaudioparse` / `ogmvideoparse` /
   `ogmtextparse` / `oggaviparse`, `3gppmux` / `ismlmux` / `mj2mux` (mp4mux
-  brands), `qtmoovrecover`, `avisubtitle`, `gdppay` / `gdpdepay`, `pcapparse` /
+  brands), `qtmoovrecover`, `avisubtitle`, `pcapparse` /
   `irtspparse`, `bz2enc` / `bz2dec`, `midiparse`.
 - **Subtitles / captions:** `ttmlparse` / `ttmlrender`, `assrender`,
   `textrender`, `dvbsubenc`, `dvdsubparse`, `cea608mux` / `cc708overlay`,

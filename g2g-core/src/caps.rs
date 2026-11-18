@@ -179,7 +179,14 @@ pub enum Caps {
         compression: LosslessCompression,
         original: Option<Box<Caps>>,
     },
+    // a GStreamer Data Protocol stream carrying a stream of `original` caps, `None` while those are not stated
+    #[cfg(feature = "alloc")]
+    Gdp {
+        original: Option<Box<Caps>>,
+    },
 }
+
+pub(crate) const GDP_MEDIA_TYPE: &str = "application/x-gdp";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum LosslessCompression {
@@ -227,7 +234,7 @@ impl Caps {
             | Caps::ClosedCaption { .. }
             | Caps::SubPicture { .. } => false,
             #[cfg(feature = "alloc")]
-            Caps::Batch { .. } | Caps::LosslesslyCompressed { .. } => false,
+            Caps::Batch { .. } | Caps::LosslesslyCompressed { .. } | Caps::Gdp { .. } => false,
         }
     }
 
@@ -394,11 +401,11 @@ impl Caps {
                 },
             ) if a == b => Ok(Caps::LosslesslyCompressed {
                 compression: *a,
-                original: match (original_a, original_b) {
-                    (Some(a), Some(b)) => Some(Box::new(a.intersect(b)?)),
-                    (Some(known), None) | (None, Some(known)) => Some(known.clone()),
-                    (None, None) => None,
-                },
+                original: intersect_original(original_a, original_b)?,
+            }),
+            #[cfg(feature = "alloc")]
+            (Caps::Gdp { original: a }, Caps::Gdp { original: b }) => Ok(Caps::Gdp {
+                original: intersect_original(a, b)?,
             }),
             _ => Err(G2gError::CapsMismatch),
         }
@@ -412,7 +419,7 @@ impl Caps {
             return streams.iter().all(Caps::is_fixed);
         }
         #[cfg(feature = "alloc")]
-        if let Caps::LosslesslyCompressed { original, .. } = self {
+        if let Caps::LosslesslyCompressed { original, .. } | Caps::Gdp { original } = self {
             return original.as_deref().is_some_and(Caps::is_fixed);
         }
         if let Caps::Audio {
@@ -546,7 +553,15 @@ impl Caps {
                 original: Some(Box::new(original.fixate()?)),
             }),
             #[cfg(feature = "alloc")]
-            Caps::LosslesslyCompressed { original: None, .. } => Err(G2gError::CapsMismatch),
+            Caps::Gdp {
+                original: Some(original),
+            } => Ok(Caps::Gdp {
+                original: Some(Box::new(original.fixate()?)),
+            }),
+            #[cfg(feature = "alloc")]
+            Caps::LosslesslyCompressed { original: None, .. } | Caps::Gdp { original: None } => {
+                Err(G2gError::CapsMismatch)
+            }
         }
     }
 
@@ -606,7 +621,7 @@ impl Caps {
             | Caps::SubPicture { .. } => None,
             Caps::Tensor { .. } => None,
             #[cfg(feature = "alloc")]
-            Caps::Batch { .. } | Caps::LosslesslyCompressed { .. } => None,
+            Caps::Batch { .. } | Caps::LosslesslyCompressed { .. } | Caps::Gdp { .. } => None,
         }
     }
 
@@ -688,6 +703,10 @@ impl Caps {
                 if let Some(f) = fmt {
                     s.push_str(&format!(",format={f}"));
                 }
+                // gst refuses raw audio caps without a layout
+                if is_pcm(*format) {
+                    s.push_str(",layout=interleaved");
+                }
                 if *channels != 0 {
                     s.push_str(&format!(",channels={channels}"));
                 }
@@ -736,18 +755,34 @@ impl Caps {
             Caps::LosslesslyCompressed {
                 compression,
                 original,
-            } => {
-                let mut s = String::from(compression.gst_media_type());
-                if let Some(original) = original {
-                    s.push_str(&format!(
-                        ",original-caps=(caps)[{}]",
-                        original.to_gst_string()
-                    ));
-                }
-                s
-            }
+            } => with_original_caps(compression.gst_media_type(), original.as_deref()),
+            Caps::Gdp { original } => with_original_caps(GDP_MEDIA_TYPE, original.as_deref()),
         }
     }
+}
+
+#[cfg(feature = "alloc")]
+fn intersect_original(
+    a: &Option<Box<Caps>>,
+    b: &Option<Box<Caps>>,
+) -> Result<Option<Box<Caps>>, G2gError> {
+    Ok(match (a, b) {
+        (Some(a), Some(b)) => Some(Box::new(a.intersect(b)?)),
+        (Some(known), None) | (None, Some(known)) => Some(known.clone()),
+        (None, None) => None,
+    })
+}
+
+#[cfg(feature = "alloc")]
+fn with_original_caps(media_type: &str, original: Option<&Caps>) -> String {
+    let mut s = String::from(media_type);
+    if let Some(original) = original {
+        s.push_str(&format!(
+            ",original-caps=(caps)[{}]",
+            original.to_gst_string()
+        ));
+    }
+    s
 }
 
 /// How many combinations of its streams' alternatives a set of

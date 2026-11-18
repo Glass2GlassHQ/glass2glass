@@ -11,7 +11,6 @@
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
-use crate::caps::ALL_BAYER_FORMATS;
 use crate::caps::{
     batch_alternatives, framerate_q16_from_fraction, pcm_from_gst_format, AspectRatio, AudioFormat,
     BitstreamAlignment, ByteStreamEncoding, Caps, CapsSet, CodecTag, Colorimetry, Dim, Interlace,
@@ -20,6 +19,7 @@ use crate::caps::{
     MOV_UNKNOWN_SUBTYPE_PREFIX, PCM_FORMATS, RIFF_AUDIO_TAG_FIELD, RIFF_UNKNOWN_SUBTYPE,
     RIFF_VIDEO_TAG_FIELD,
 };
+use crate::caps::{ALL_BAYER_FORMATS, GDP_MEDIA_TYPE};
 use crate::channels::ChannelLayout;
 
 /// The raw pixel formats a format-less `video/x-raw` expands to. Order is
@@ -50,6 +50,8 @@ enum FieldVal<'a> {
     One(&'a str),
     Range(&'a str, &'a str),
     List(Vec<&'a str>),
+    // the caps string inside a `(caps)[...]` value
+    Caps(&'a str),
 }
 
 /// Split on top-level commas only, so the commas inside a `[..]` range, a
@@ -77,8 +79,31 @@ pub(crate) fn split_top_commas(s: &str) -> Vec<&str> {
     out
 }
 
+fn split_type_cast(value: &str) -> (Option<&str>, &str) {
+    // gst_caps_to_string writes every value behind its type, as in `width=(int)64`
+    let cast = value
+        .strip_prefix('(')
+        .and_then(|rest| rest.split_once(')'))
+        .filter(|(type_name, _)| {
+            !type_name.is_empty()
+                && type_name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_')
+        });
+    match cast {
+        Some((type_name, rest)) => (Some(type_name), rest.trim_start()),
+        None => (None, value),
+    }
+}
+
 fn parse_field_val(v: &str) -> FieldVal<'_> {
-    let v = v.trim();
+    let (type_name, v) = split_type_cast(v.trim());
+    if let (Some("caps" | "GstCaps"), Some(inner)) = (
+        type_name,
+        v.strip_prefix('[').and_then(|s| s.strip_suffix(']')),
+    ) {
+        return FieldVal::Caps(inner);
+    }
     if let Some(inner) = v.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
         let p = split_top_commas(inner);
         // gst ranges are `[min,max]`; a third `step` element is ignored.
@@ -115,6 +140,7 @@ fn expand_dim(fv: Option<&FieldVal>) -> Option<Vec<Dim>> {
             .iter()
             .map(|x| x.parse::<u32>().ok().map(Dim::Fixed))
             .collect::<Option<Vec<_>>>()?,
+        Some(FieldVal::Caps(_)) => return None,
     })
 }
 
@@ -132,6 +158,7 @@ fn expand_rate(fv: Option<&FieldVal>) -> Option<Vec<Rate>> {
             .iter()
             .map(|x| parse_rate(x))
             .collect::<Option<Vec<_>>>()?,
+        Some(FieldVal::Caps(_)) => return None,
     })
 }
 
@@ -143,7 +170,7 @@ fn expand_st2038_alignment(fv: Option<&FieldVal>) -> Option<Vec<St2038Alignment>
             .iter()
             .map(|x| St2038Alignment::from_gst_name(x))
             .collect::<Option<Vec<_>>>()?,
-        Some(FieldVal::Range(..)) => return None,
+        Some(FieldVal::Range(..) | FieldVal::Caps(_)) => return None,
     })
 }
 
@@ -155,7 +182,7 @@ fn expand_raw_format(fv: Option<&FieldVal>) -> Option<Vec<RawVideoFormat>> {
             .iter()
             .map(|x| parse_raw_format(x))
             .collect::<Option<Vec<_>>>()?,
-        Some(FieldVal::Range(..)) => return None, // a format range is meaningless
+        Some(FieldVal::Range(..) | FieldVal::Caps(_)) => return None, // a format range is meaningless
     })
 }
 
@@ -167,7 +194,7 @@ fn expand_text_format(fv: Option<&FieldVal>) -> Option<Vec<TextFormat>> {
             .iter()
             .map(|x| parse_text_format(x))
             .collect::<Option<Vec<_>>>()?,
-        Some(FieldVal::Range(..)) => return None,
+        Some(FieldVal::Range(..) | FieldVal::Caps(_)) => return None,
     })
 }
 
@@ -179,7 +206,7 @@ fn expand_audio_format(fv: Option<&FieldVal>) -> Option<Vec<AudioFormat>> {
             .iter()
             .map(|x| parse_audio_format(x))
             .collect::<Option<Vec<_>>>()?,
-        Some(FieldVal::Range(..)) => return None,
+        Some(FieldVal::Range(..) | FieldVal::Caps(_)) => return None,
     })
 }
 
@@ -234,7 +261,6 @@ fn expand_channel_mask(fv: Option<&FieldVal>) -> Option<ChannelLayout> {
         };
     };
     let v = s.trim();
-    let v = v.strip_prefix("(bitmask)").unwrap_or(v).trim();
     let mask = match v.strip_prefix("0x").or_else(|| v.strip_prefix("0X")) {
         Some(hex) => u64::from_str_radix(hex, 16).ok()?,
         None => v.parse::<u64>().ok()?,
@@ -252,7 +278,7 @@ fn expand_u8(fv: Option<&FieldVal>, default: u8) -> Option<Vec<u8>> {
             .iter()
             .map(|x| x.parse::<u8>().ok())
             .collect::<Option<Vec<_>>>()?,
-        Some(FieldVal::Range(..)) => return None,
+        Some(FieldVal::Range(..) | FieldVal::Caps(_)) => return None,
     })
 }
 
@@ -264,7 +290,7 @@ fn expand_u32(fv: Option<&FieldVal>, default: u32) -> Option<Vec<u32>> {
             .iter()
             .map(|x| x.parse::<u32>().ok())
             .collect::<Option<Vec<_>>>()?,
-        Some(FieldVal::Range(..)) => return None,
+        Some(FieldVal::Range(..) | FieldVal::Caps(_)) => return None,
     })
 }
 
@@ -358,6 +384,14 @@ impl CapsSet {
             .find(|compression| compression.gst_media_type() == media)
         {
             return losslessly_compressed_set(compression, fv("original-caps"));
+        }
+        if media == GDP_MEDIA_TYPE {
+            return Some(CapsSet::from_alternatives(
+                original_caps_alternatives(fv("original-caps"))?
+                    .into_iter()
+                    .map(|original| Caps::Gdp { original })
+                    .collect(),
+            ));
         }
 
         if let Some(tagged) = tagged_codec(media, &fields) {
@@ -454,7 +488,7 @@ impl CapsSet {
                         .iter()
                         .map(|name| ProResVariant::from_gst_name(name))
                         .collect::<Option<Vec<_>>>()?,
-                    Some(FieldVal::Range(..)) => return None,
+                    Some(FieldVal::Range(..) | FieldVal::Caps(_)) => return None,
                 };
                 let mut alternatives = Vec::new();
                 for variant in variants {
@@ -555,25 +589,24 @@ impl CapsSet {
     }
 }
 
-// gst prints a caps-typed field as `(caps)[...]`
+fn original_caps_alternatives(original: Option<&FieldVal>) -> Option<Vec<Option<Box<Caps>>>> {
+    Some(match original {
+        None => Vec::from([None]),
+        Some(FieldVal::Caps(inner)) => CapsSet::from_gst_string(inner)?
+            .alternatives()
+            .iter()
+            .map(|caps| Some(Box::new(caps.clone())))
+            .collect(),
+        Some(_) => return None,
+    })
+}
+
 fn losslessly_compressed_set(
     compression: LosslessCompression,
     original: Option<&FieldVal>,
 ) -> Option<CapsSet> {
-    let originals = match original {
-        None => Vec::from([None]),
-        Some(FieldVal::One(text)) => {
-            let inner = text.strip_prefix("(caps)[")?.strip_suffix(']')?;
-            CapsSet::from_gst_string(inner)?
-                .alternatives()
-                .iter()
-                .map(|caps| Some(Box::new(caps.clone())))
-                .collect()
-        }
-        Some(_) => return None,
-    };
     Some(CapsSet::from_alternatives(
-        originals
+        original_caps_alternatives(original)?
             .into_iter()
             .map(|original| Caps::LosslesslyCompressed {
                 compression,
@@ -920,6 +953,51 @@ mod tests {
                 compression: LosslessCompression::Zlib,
                 original: None,
             }]))
+        );
+    }
+
+    #[test]
+    fn gst_typed_caps_strings_parse_like_untyped_ones() {
+        let typed = "video/x-raw, format=(string)NV12, width=(int)64, height=(int)48, framerate=(fraction)30/1, multiview-mode=(string)mono, pixel-aspect-ratio=(fraction)1/1, interlace-mode=(string)progressive";
+        let untyped = "video/x-raw,format=NV12,width=64,height=48,framerate=30/1,pixel-aspect-ratio=1/1,interlace-mode=progressive";
+        assert_eq!(
+            CapsSet::from_gst_string(typed),
+            CapsSet::from_gst_string(untyped)
+        );
+        assert!(CapsSet::from_gst_string(typed).is_some());
+        assert_eq!(
+            CapsSet::from_gst_string(
+                "video/x-raw, format=(string){ NV12, I420 }, width=(int)[ 1, 64 ]"
+            )
+            .map(|set| set.alternatives().len()),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn gdp_caps_round_trip_with_their_original_caps() {
+        let text = "application/x-gdp,original-caps=(caps)[audio/x-raw,format=S16LE,channels=2,rate=48000]";
+        let set = CapsSet::from_gst_string(text).expect("parses");
+        let [Caps::Gdp {
+            original: Some(original),
+        }] = set.alternatives()
+        else {
+            panic!("one gdp caps, got {:?}", set.alternatives());
+        };
+        assert!(matches!(
+            **original,
+            Caps::Audio {
+                format: AudioFormat::PcmS16Le,
+                channels: 2,
+                sample_rate: 48000,
+                ..
+            }
+        ));
+        let printed = set.alternatives()[0].to_gst_string();
+        assert_eq!(CapsSet::from_gst_string(&printed), Some(set));
+        assert_eq!(
+            CapsSet::from_gst_string("application/x-gdp").map(|set| set.alternatives().to_vec()),
+            Some(Vec::from([Caps::Gdp { original: None }]))
         );
     }
 

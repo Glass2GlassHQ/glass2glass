@@ -39,6 +39,18 @@ pub fn crc32_mpeg2(init: u32, data: &[u8]) -> u32 {
     })
 }
 
+pub fn crc16_update(polynomial: u16, crc: u16, byte: u8) -> u16 {
+    let mut crc = crc ^ (u16::from(byte) << 8);
+    for _ in 0..8 {
+        crc = if crc & 0x8000 != 0 {
+            (crc << 1) ^ polynomial
+        } else {
+            crc << 1
+        };
+    }
+    crc
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

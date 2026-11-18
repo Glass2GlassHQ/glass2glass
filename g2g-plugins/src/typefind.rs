@@ -124,6 +124,12 @@ pub(crate) fn read_sniff_window(file: &mut std::fs::File) -> std::io::Result<Vec
 /// at least a few hundred bytes so MPEG-TS can be confirmed across packet
 /// boundaries (a lone `0x47` is too weak to trust).
 pub fn sniff_caps(header: &[u8]) -> Option<Caps> {
+    // GDP timestamps hold byte runs other sniffs take for start codes
+    if let Some(original) = crate::gdp::sniff_original_caps(header) {
+        return Some(Caps::Gdp {
+            original: Some(Box::new(original)),
+        });
+    }
     if let Some(encoding) = sniff(header) {
         return Some(Caps::ByteStream { encoding });
     }

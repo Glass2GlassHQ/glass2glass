@@ -410,6 +410,8 @@ pub mod chromahold;
 pub mod clockoverlay;
 pub mod coloreffects;
 pub mod losslesscompress;
+// GStreamer Data Protocol payloading, wire-compatible with gst's gdppay and gdpdepay
+pub mod gdp;
 // `colorspace`: converts the colorimetry (matrix / range / transfer /
 // primaries) of raw video, keeping the pixel format.
 pub mod colorspace;
@@ -806,7 +808,7 @@ pub mod demuxstream;
 pub mod mpegts;
 // JPEG XS codestream headers and the MPEG-TS JXS_video_descriptor
 mod jpegxs;
-// The CRC-32 the MPEG-2 PSI sections and Ogg pages carry.
+// The CRCs MPEG-2 PSI sections, Ogg pages, FLAC frames and GDP headers carry.
 pub mod mpegcrc;
 // MPEG-TS demuxer element (no_std): Caps::ByteStream{MpegTs} -> H.264, wrapping
 // the mpegts parser.
