@@ -311,7 +311,7 @@ impl StateController {
         }
         // gstreamer's flushing seek restarts running time at zero
         if let Some((_, anchor)) = &*self.inner.play_anchor.lock() {
-            anchor.clear();
+            anchor.restart();
         }
         self.inner.preroll_gen.fetch_add(1, Ordering::AcqRel);
         self.inner.prerolled.store(false, Ordering::Release);

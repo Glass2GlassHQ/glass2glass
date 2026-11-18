@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
 use core::future::Future;
-use core::sync::atomic::Ordering;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use alloc::sync::Arc;
 
@@ -207,6 +207,7 @@ struct PlayAnchorTimes {
     base_time_ns: AtomicU64,
     paused_at_ns: AtomicU64,
     paused_total_ns: AtomicU64,
+    stopped: AtomicBool,
 }
 
 impl Default for PlayAnchor {
@@ -225,6 +226,7 @@ impl PlayAnchor {
                 base_time_ns: AtomicU64::new(Self::UNSET),
                 paused_at_ns: AtomicU64::new(Self::UNSET),
                 paused_total_ns: AtomicU64::new(0),
+                stopped: AtomicBool::new(false),
             }),
         }
     }
@@ -235,11 +237,22 @@ impl PlayAnchor {
         self.inner
             .base_time_ns
             .store(base_time_ns, Ordering::Release);
+        self.inner.stopped.store(false, Ordering::Release);
     }
 
     /// Clear the anchor (a transition down to `Ready`/`Null`), so the next
     /// `Playing` re-stamps rather than reusing a stale epoch.
     pub fn clear(&self) {
+        self.forget_times();
+        self.inner.stopped.store(true, Ordering::Release);
+    }
+
+    pub fn restart(&self) {
+        self.forget_times();
+        self.inner.stopped.store(false, Ordering::Release);
+    }
+
+    fn forget_times(&self) {
         self.inner
             .base_time_ns
             .store(Self::UNSET, Ordering::Release);
@@ -247,6 +260,10 @@ impl PlayAnchor {
             .paused_at_ns
             .store(Self::UNSET, Ordering::Release);
         self.inner.paused_total_ns.store(0, Ordering::Release);
+    }
+
+    pub fn is_stopped(&self) -> bool {
+        self.inner.stopped.load(Ordering::Acquire)
     }
 
     /// The stamped base time, or `None` until `Playing` stamps it.
@@ -410,6 +427,12 @@ impl ClockSync {
 
     pub fn awaits_play_edge(&self) -> bool {
         self.play_anchor.as_ref().is_some_and(|a| a.get().is_none())
+    }
+
+    pub fn is_stopped(&self) -> bool {
+        self.play_anchor
+            .as_ref()
+            .is_some_and(PlayAnchor::is_stopped)
     }
 
     pub fn is_playing(&self) -> bool {
