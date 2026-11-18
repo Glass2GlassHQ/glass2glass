@@ -958,6 +958,18 @@ impl GlVideoRenderer {
     }
 }
 
+const CLIENT_STORAGE_EXTENSION: &str = "GL_APPLE_client_storage";
+const UNPACK_CLIENT_STORAGE_APPLE: u32 = 0x85B2;
+
+unsafe fn turn_off_client_storage(gl: &glow::Context) {
+    if !gl.supported_extensions().contains(CLIENT_STORAGE_EXTENSION) {
+        return;
+    }
+    // glTexImage2D rejects null pixels while client storage is on, and postkit's grok presenter leaves it on
+    // SAFETY: the caller guarantees a current GL context.
+    unsafe { gl.pixel_store_i32(UNPACK_CLIENT_STORAGE_APPLE, 0) };
+}
+
 /// `glTexSubImage2D` a tightly-packed plane over the whole texture.
 ///
 /// # Safety
@@ -974,6 +986,7 @@ unsafe fn sub_image(
 ) {
     // SAFETY: the caller guarantees the context, the texture and the extent.
     unsafe {
+        turn_off_client_storage(gl);
         gl.bind_texture(glow::TEXTURE_2D, Some(tex));
         gl.tex_sub_image_2d(
             glow::TEXTURE_2D,
@@ -1005,6 +1018,7 @@ unsafe fn make_texture(
 ) -> Result<glow::Texture, alloc::boxed::Box<dyn std::error::Error>> {
     // SAFETY: the caller guarantees a current GL context.
     unsafe {
+        turn_off_client_storage(gl);
         let tex = gl.create_texture().map_err(|e| e.to_string())?;
         gl.bind_texture(glow::TEXTURE_2D, Some(tex));
         gl.tex_parameter_i32(

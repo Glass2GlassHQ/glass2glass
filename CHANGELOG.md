@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2411: the GL video renderer turns off Apple client storage a host left on, so its textures allocate on macOS.
 - M2410: `wasapisink` drops queued audio when the pipeline stops instead of waiting for it to play.
 - M2409: `g2g-player` takes `wasapi` and `coreaudio` features for sound on Windows and macOS.
 - M2408: `g2g-player`'s GL and wgpu renderers dither the picture to the target's depth.
