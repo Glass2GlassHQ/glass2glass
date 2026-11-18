@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2404: Matroska `V_FFV1` tracks decode, and a tagged Matroska video track fans out as video.
 - M2403: `g2g-player` can discard its sound, as mpv's `ao=null`, and its `ffmpeg` feature decodes MJPEG.
 - M2402: `playbin` sound branches hold 2 s, so B-frame video with sound shows its first picture.
 - M2401: `playbin` fans out every container a `decodebin_select` hook opens, AVI included.

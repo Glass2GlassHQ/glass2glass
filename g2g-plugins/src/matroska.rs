@@ -1928,6 +1928,13 @@ fn parse_track_entry(body: &[u8], content_key: ContentKeyLookup<'_>) -> Option<P
             .unwrap_or(MkvCodec::Other),
         codec => codec,
     };
+    // matroskadec hands a `V_FFV1` CodecPrivate over as the extradata, which on the tagged path follows a BITMAPINFOHEADER
+    let codec_private = match codec {
+        MkvCodec::TaggedVideo(_) if without_nul_padding(codec_id) == FFV1_CODEC_ID.as_bytes() => {
+            crate::avi::bitmap_info_header(FFV1_FOURCC, width, height, &codec_private)
+        }
+        _ => codec_private,
+    };
     let opus_block_shift = match codec {
         MkvCodec::Opus => OpusBlockShift::new(number, &codec_private, codec_delay_ns),
         _ => None,
@@ -2015,6 +2022,8 @@ fn pcm_codec(codec_id: &[u8], bit_depth: u64) -> Option<MkvCodec> {
 const VFW_CODEC_ID: &str = "V_MS/VFW/FOURCC";
 const ACM_CODEC_ID: &str = "A_MS/ACM";
 const QUICKTIME_CODEC_ID: &str = "V_QUICKTIME";
+const FFV1_CODEC_ID: &str = "V_FFV1";
+const FFV1_FOURCC: [u8; 4] = *b"FFV1";
 
 // AAC is left out, a WAVEFORMATEX carries no AudioSpecificConfig to decode it with
 fn acm_codec(codec_id: &[u8], codec_private: &[u8]) -> Option<MkvCodec> {
@@ -2132,6 +2141,9 @@ fn tagged_codec(codec_id: &[u8], codec_private: &[u8]) -> Option<MkvCodec> {
                 TagNamespace::Riff,
                 &codec_private[BITMAPINFO_COMPRESSION],
             )))
+        }
+        id if id == FFV1_CODEC_ID.as_bytes() => {
+            Some(MkvCodec::TaggedVideo(tag(TagNamespace::Riff, &FFV1_FOURCC)))
         }
         id if id == ACM_CODEC_ID.as_bytes() && codec_private.len() >= WAVEFORMAT_LEN => Some(
             MkvCodec::TaggedAudio(tag(TagNamespace::Riff, &codec_private[WAVEFORMAT_TAG])),

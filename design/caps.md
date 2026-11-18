@@ -888,8 +888,10 @@ demuxers, `matroskademux` and `wavparse` forward a stream they would otherwise d
 container stores in one of libavformat's namespaces, `Riff` (an AVI
 BITMAPINFOHEADER `biCompression` or WAVEFORMATEX `wFormatTag`, and Matroska's
 `V_MS/VFW/FOURCC` / `A_MS/ACM`) or `Mov` (a QuickTime sample entry fourcc, and
-Matroska's `V_QUICKTIME`). The container header the decoder needs leads the
-stream in band as a frame of its own, the convention FLAC's `fLaC` and raw AAC's
+Matroska's `V_QUICKTIME`). Matroska's `V_FFV1` rides the `Riff` namespace as
+`FFV1`, its `CodecPrivate` extradata behind a BITMAPINFOHEADER built from the
+track's size, so an FFV1 track in AVI and in Matroska carries the same caps.
+The container header the decoder needs leads the stream in band as a frame of its own, the convention FLAC's `fLaC` and raw AAC's
 AudioSpecificConfig already use: the whole `strf` BITMAPINFOHEADER or
 WAVEFORMATEX, the WAV `fmt ` chunk, the whole sample entry, or the Matroska
 `CodecPrivate`. `wavparse` emits MP3 (0x55) and AC-3 (0x2000) as coded caps for

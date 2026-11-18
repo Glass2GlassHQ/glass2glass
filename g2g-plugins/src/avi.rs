@@ -1279,24 +1279,14 @@ impl AviWriter {
     /// One stream's `strf`: a `BITMAPINFOHEADER` for video, a `WAVEFORMATEX`
     /// for audio.
     fn strf(&self, stream: usize) -> Result<Vec<u8>, G2gError> {
-        let mut out = Vec::new();
-        match &self.streams[stream] {
+        Ok(match &self.streams[stream] {
             AviWriteStream::Video {
                 codec,
                 width,
                 height,
             } => {
                 let fourcc = video_fourcc(*codec).ok_or(G2gError::CapsMismatch)?;
-                out.extend_from_slice(&(BITMAPINFO_LEN as u32).to_le_bytes());
-                out.extend_from_slice(&width.to_le_bytes());
-                out.extend_from_slice(&height.to_le_bytes());
-                out.extend_from_slice(&BITMAPINFO_PLANES.to_le_bytes());
-                out.extend_from_slice(&BITMAPINFO_BIT_COUNT.to_le_bytes());
-                out.extend_from_slice(&fourcc);
-                out.extend_from_slice(&(width * height * 3).to_le_bytes()); // biSizeImage
-                for _ in 0..4 {
-                    out.extend_from_slice(&0u32.to_le_bytes()); // resolution + palette
-                }
+                bitmap_info_header(fourcc, *width, *height, &[])
             }
             AviWriteStream::Audio {
                 format,
@@ -1327,10 +1317,9 @@ impl AviWriter {
                     bits,
                 };
                 // AVI always writes the `cbSize` field, as ffmpeg does.
-                out = wave_format.to_bytes(Some(&[]));
+                wave_format.to_bytes(Some(&[]))
             }
-        }
-        Ok(out)
+        })
     }
 
     /// A compressed audio stream's `nAvgBytesPerSec`, from what it wrote over
@@ -1348,6 +1337,31 @@ impl AviWriter {
         }
         (bytes as u64 * NANOS_PER_SECOND / span_ns) as usize
     }
+}
+
+pub(crate) fn bitmap_info_header(
+    fourcc: FourCc,
+    width: u32,
+    height: u32,
+    extradata: &[u8],
+) -> Vec<u8> {
+    const BITMAPINFO_BYTES_PER_PIXEL: u32 = 3;
+    let declared_len = u32::try_from(BITMAPINFO_LEN + extradata.len()).unwrap_or(u32::MAX);
+    let image_len = width
+        .saturating_mul(height)
+        .saturating_mul(BITMAPINFO_BYTES_PER_PIXEL);
+    let mut header = Vec::with_capacity(BITMAPINFO_LEN + extradata.len());
+    header.extend_from_slice(&declared_len.to_le_bytes());
+    header.extend_from_slice(&width.to_le_bytes());
+    header.extend_from_slice(&height.to_le_bytes());
+    header.extend_from_slice(&BITMAPINFO_PLANES.to_le_bytes());
+    header.extend_from_slice(&BITMAPINFO_BIT_COUNT.to_le_bytes());
+    header.extend_from_slice(&fourcc);
+    header.extend_from_slice(&image_len.to_le_bytes());
+    // resolution and palette counts
+    header.extend_from_slice(&[0; 16]);
+    header.extend_from_slice(extradata);
+    header
 }
 
 /// `AVIF_HASINDEX`: the file ends with an `idx1`, which this always writes.

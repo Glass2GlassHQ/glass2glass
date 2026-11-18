@@ -23,6 +23,8 @@ const GSM_WAV: &str = "tagged_gsm_ms.wav";
 const SCREENPRESSO_CUT_AVI: &str = "tagged_screenpresso_cut.avi";
 // two 32x16 frames of HuffYUV 4:2:2 in AVI, beside ffmpeg's yuv422p decode
 const HUFFYUV_422_AVI: &str = "tagged_huffyuv_422.avi";
+// two 32x16 frames of FFV1 version 3 in Matroska, whose CodecPrivate is libavcodec's extradata, beside ffmpeg's decode
+const FFV1_V3_MKV: &str = "tagged_ffv1_v3.mkv";
 // fate-suite's three-channel 48 kHz XMA2 in WAV
 const XMA2_WAV: &str = "xma2_multistream_tail.xma";
 // four mono 8 kHz MS ADPCM streams of 256-byte blocks, interleaved one block per channel
@@ -109,6 +111,12 @@ async fn a_tagged_4_2_2_codec_decodes_behind_a_converter() {
     for (frame, expected_frame) in decoded.chunks(i420_frame).zip(reference.chunks(y42b_frame)) {
         assert_eq!(frame[..luma], expected_frame[..luma]);
     }
+}
+
+#[tokio::test]
+async fn an_ffv1_matroska_track_decodes_with_its_codec_private() {
+    let decoded = decode(&fixture(FFV1_V3_MKV), "video/x-raw,format=I420", "ffv1").await;
+    assert_eq!(decoded, expected(&format!("{FFV1_V3_MKV}.i420")));
 }
 
 #[tokio::test]

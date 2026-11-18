@@ -1187,20 +1187,6 @@ pub fn forwardable_streams(demux: &MatroskaDemuxer) -> Vec<MkvStreamInfo> {
             if is_subtitle(stream) {
                 return None;
             }
-            let video = matches!(
-                stream,
-                MkvStream::H264
-                    | MkvStream::H265
-                    | MkvStream::Vp8
-                    | MkvStream::Vp9
-                    | MkvStream::Av1
-                    | MkvStream::Mjpeg
-                    | MkvStream::Mpeg2
-                    | MkvStream::Mpeg4Part2
-                    | MkvStream::RawVideo(_)
-                    | MkvStream::Theora
-                    | MkvStream::ProRes(_)
-            );
             // Fill the concrete channel count from the track header for an audio
             // stream: `output_caps` is the generic per-stream placeholder (channels
             // 0), but an Opus decoder must be created with the real channel count
@@ -1233,8 +1219,8 @@ pub fn forwardable_streams(demux: &MatroskaDemuxer) -> Vec<MkvStreamInfo> {
             };
             Some(MkvStreamInfo {
                 stream,
+                video: StreamType::of(&caps) == StreamType::Video,
                 caps,
-                video,
                 track_number: t.number,
             })
         })
