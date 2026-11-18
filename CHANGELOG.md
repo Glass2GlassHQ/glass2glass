@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2410: `wasapisink` drops queued audio when the pipeline stops instead of waiting for it to play.
 - M2409: `g2g-player` takes `wasapi` and `coreaudio` features for sound on Windows and macOS.
 - M2408: `g2g-player`'s GL and wgpu renderers dither the picture to the target's depth.
 - M2407: `g2g-player` reports mpv's dropped and delayed frame counts, filter fps and demuxer cache duration.

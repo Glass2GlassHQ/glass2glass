@@ -437,6 +437,13 @@ fn run_render_loop(
         let queued_ns = crate::audioconvert::samples_to_ns(queued_frames, state.rate);
         gate.publish_played_position(&WasapiPause { state }, queued_ns)?;
         gate.pause_or_resync(rx, &mut WasapiPause { state }, queued_ns)?;
+        // the gate pauses the endpoint on a stop, so queued audio there never drains
+        if gate.discards_queued_audio() {
+            queue.clear();
+            if closing {
+                break;
+            }
+        }
         if !closing && queue.len() < queue_limit {
             match gate.recv_timeout(rx, TOPUP_INTERVAL) {
                 Ok(step) => take(step, &mut queue, &mut closing),
