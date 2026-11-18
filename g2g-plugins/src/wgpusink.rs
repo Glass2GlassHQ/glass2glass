@@ -57,7 +57,7 @@ use crate::gpu::{
     texture_layout, texture_of, GpuContext, WgpuTextureLayout,
 };
 use crate::overlay_image::OverlayImage;
-use crate::videoconvert::display::{display_sink_caps, DisplayInput, NV12_AND_RGBA};
+use crate::videoconvert::display::{display_sink_caps, DisplayInput};
 use crate::yuvmatrix::{dither_step, YuvToRgbWeights, DITHER_NOISE_SCALE, DITHER_NOISE_WEIGHTS};
 
 /// Fullscreen-triangle vertex stage, shared by both fragment stages below. The
@@ -151,6 +151,41 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
 }
 "#;
 
+fn fragment_stacked_planar(format: RawVideoFormat) -> alloc::string::String {
+    // planar 10 and 12 bit frames upload as one R16Uint texture: the luma plane, then the U and V planes stacked under it
+    let (horizontal_shift, vertical_shift) = format
+        .chroma_shift()
+        .expect("only planar YUV formats upload stacked");
+    // the YCbCr weights take 8-bit codes over 255, and these formats keep each code in the low bits
+    let code_scale = (255u32 << (format.bit_depth() - 8)) as f32;
+    alloc::format!(
+        r#"
+@group(0) @binding(0) var planes_tex: texture_2d<u32>;
+@group(0) @binding(1) var<uniform> picture_size: vec2<u32>;
+
+fn plane_value(x: u32, y: u32) -> f32 {{
+    return f32(textureLoad(planes_tex, vec2<u32>(x, y), 0).r) / {code_scale:?};
+}}
+
+@fragment
+fn fs(in: VsOut) -> @location(0) vec4<f32> {{
+    let x = min(u32(in.uv.x * f32(picture_size.x)), picture_size.x - 1u);
+    let y = min(u32(in.uv.y * f32(picture_size.y)), picture_size.y - 1u);
+    let chroma_rows = (picture_size.y + {vertical_round}u) >> {vertical_shift}u;
+    let chroma_x = x >> {horizontal_shift}u;
+    let u_row = picture_size.y + (y >> {vertical_shift}u);
+    return ycbcr_to_rgb(
+        in.pos.xy,
+        plane_value(x, y),
+        plane_value(chroma_x, u_row),
+        plane_value(chroma_x, u_row + chroma_rows),
+    );
+}}
+"#,
+        vertical_round = (1u32 << vertical_shift) - 1,
+    )
+}
+
 /// One NV12 fragment stage: the YCbCr -> RGB step for `colorimetry` (the same
 /// weights the GL sink's shader gets) followed by `plane_fetch`, the per-layout
 /// stage above that reads the planes. All three sample values are normalized,
@@ -236,23 +271,37 @@ impl BlitBindings {
 
 const PICTURE_SIZE_BYTES: u64 = 8;
 
-fn blit_bindings(layout: WgpuTextureLayout) -> BlitBindings {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BlitLayout {
+    Gpu(WgpuTextureLayout),
+    StackedPlanar16,
+}
+
+impl From<WgpuTextureLayout> for BlitLayout {
+    fn from(layout: WgpuTextureLayout) -> Self {
+        BlitLayout::Gpu(layout)
+    }
+}
+
+fn blit_bindings(layout: BlitLayout) -> BlitBindings {
     match layout {
-        WgpuTextureLayout::Rgba => BlitBindings {
+        BlitLayout::Gpu(WgpuTextureLayout::Rgba) => BlitBindings {
             planes: 1,
             sample_type: wgpu::TextureSampleType::Float { filterable: true },
             sampler: true,
             picture_size: false,
         },
-        WgpuTextureLayout::PackedNv12 => BlitBindings {
-            planes: 1,
-            sample_type: wgpu::TextureSampleType::Uint,
-            sampler: false,
-            picture_size: true,
-        },
+        BlitLayout::Gpu(WgpuTextureLayout::PackedNv12) | BlitLayout::StackedPlanar16 => {
+            BlitBindings {
+                planes: 1,
+                sample_type: wgpu::TextureSampleType::Uint,
+                sampler: false,
+                picture_size: true,
+            }
+        }
         // The plane views are float textures, but both NV12 stages fetch texels,
         // so neither binds a sampler.
-        WgpuTextureLayout::MultiplanarNv12 => BlitBindings {
+        BlitLayout::Gpu(WgpuTextureLayout::MultiplanarNv12) => BlitBindings {
             planes: 2,
             sample_type: wgpu::TextureSampleType::Float { filterable: true },
             sampler: false,
@@ -300,7 +349,7 @@ impl BlitPipeline {
     pub(crate) fn build(
         device: &wgpu::Device,
         target_format: wgpu::TextureFormat,
-        layout: WgpuTextureLayout,
+        layout: BlitLayout,
         fragment_stage: &str,
         compositing: BlitCompositing,
     ) -> Self {
@@ -391,7 +440,7 @@ impl BlitPipeline {
         device: &wgpu::Device,
         encoder: &mut wgpu::CommandEncoder,
         src: &wgpu::Texture,
-        layout: WgpuTextureLayout,
+        layout: BlitLayout,
         resources: &BlitResources,
         target: BlitTarget<'_>,
     ) {
@@ -400,8 +449,9 @@ impl BlitPipeline {
         // A two-plane NV12 texture cannot be bound whole, only through its two
         // plane views.
         let views: Vec<wgpu::TextureView> = match layout {
-            WgpuTextureLayout::MultiplanarNv12 => Vec::from(nv12_plane_views(src)),
-            WgpuTextureLayout::Rgba | WgpuTextureLayout::PackedNv12 => {
+            BlitLayout::Gpu(WgpuTextureLayout::MultiplanarNv12) => Vec::from(nv12_plane_views(src)),
+            BlitLayout::Gpu(WgpuTextureLayout::Rgba | WgpuTextureLayout::PackedNv12)
+            | BlitLayout::StackedPlanar16 => {
                 Vec::from([src.create_view(&wgpu::TextureViewDescriptor::default())])
             }
         };
@@ -504,23 +554,39 @@ impl BlitResources {
 #[derive(Debug, Clone, Copy)]
 struct SourceLayout {
     input: DisplayInput,
-    layout: WgpuTextureLayout,
+    layout: BlitLayout,
     width: u32,
     height: u32,
 }
 
 impl SourceLayout {
+    fn stacked_planar_rows(&self) -> Result<u32, G2gError> {
+        let format = self.input.presented;
+        let chroma_rows = format
+            .plane_rows(1, self.height)
+            .ok_or(G2gError::CapsMismatch)?;
+        Ok(self.height + 2 * chroma_rows)
+    }
+
     /// Texture format + size a system-memory frame of this layout uploads into.
     fn upload_texture(&self) -> Result<(wgpu::TextureFormat, wgpu::Extent3d), G2gError> {
         let (format, (width, height)) = match self.layout {
-            WgpuTextureLayout::Rgba => (wgpu::TextureFormat::Rgba8Unorm, (self.width, self.height)),
-            WgpuTextureLayout::PackedNv12 => (
+            BlitLayout::Gpu(WgpuTextureLayout::Rgba) => {
+                (wgpu::TextureFormat::Rgba8Unorm, (self.width, self.height))
+            }
+            BlitLayout::Gpu(WgpuTextureLayout::PackedNv12) => (
                 wgpu::TextureFormat::R8Uint,
                 packed_nv12_extent(self.width, self.height),
             ),
             // NV12 caps negotiate the packed layout, so a two-plane frame only
             // ever arrives as a GPU texture, never as bytes to upload.
-            WgpuTextureLayout::MultiplanarNv12 => return Err(G2gError::UnsupportedDomain),
+            BlitLayout::Gpu(WgpuTextureLayout::MultiplanarNv12) => {
+                return Err(G2gError::UnsupportedDomain)
+            }
+            BlitLayout::StackedPlanar16 => (
+                wgpu::TextureFormat::R16Uint,
+                (self.width, self.stacked_planar_rows()?),
+            ),
         };
         Ok((
             format,
@@ -536,18 +602,29 @@ impl SourceLayout {
 /// The sink's accepted layouts: NV12 and RGBA as they are, and every other
 /// format `videoconvert` reads, at any geometry. Shared with the windowed
 /// present sink, which drives this renderer.
+const WGPU_NATIVE_FORMATS: &[RawVideoFormat] = &[
+    RawVideoFormat::Nv12,
+    RawVideoFormat::Rgba8,
+    RawVideoFormat::I420p10,
+    RawVideoFormat::I422p10,
+    RawVideoFormat::I444p10,
+    RawVideoFormat::I420p12,
+    RawVideoFormat::I422p12,
+    RawVideoFormat::I444p12,
+];
+
 pub fn accepted_caps() -> CapsSet {
-    display_sink_caps(NV12_AND_RGBA)
+    display_sink_caps(WGPU_NATIVE_FORMATS)
 }
 
 /// The source layout the negotiated caps settle on, rejecting anything the blit
 /// pipelines cannot read.
 fn source_layout(absolute_caps: &Caps) -> Result<SourceLayout, G2gError> {
-    let input = DisplayInput::from_caps(absolute_caps, NV12_AND_RGBA)?;
+    let input = DisplayInput::from_caps(absolute_caps, WGPU_NATIVE_FORMATS)?;
     let layout = match input.presented {
-        RawVideoFormat::Nv12 => WgpuTextureLayout::PackedNv12,
-        RawVideoFormat::Rgba8 => WgpuTextureLayout::Rgba,
-        _ => return Err(G2gError::CapsMismatch),
+        RawVideoFormat::Nv12 => WgpuTextureLayout::PackedNv12.into(),
+        RawVideoFormat::Rgba8 => WgpuTextureLayout::Rgba.into(),
+        _ => BlitLayout::StackedPlanar16,
     };
     if input.width == 0 || input.height == 0 {
         return Err(G2gError::CapsMismatch);
@@ -649,6 +726,7 @@ pub struct VideoRenderer {
     /// frame. Same caps as `nv12_blit`, different bindings, so which one runs is
     /// decided per frame from the texture.
     nv12_planes_blit: BlitPipeline,
+    stacked_planar_blit: Option<StackedPlanarBlit>,
     /// Colorimetry both NV12 pipelines' shaders were built with, so a mid-stream
     /// refinement rebuilds them.
     nv12_colorimetry: Colorimetry,
@@ -667,6 +745,13 @@ pub struct VideoRenderer {
     overlay_pipeline: wgpu::RenderPipeline,
     image_blit: BlitPipeline,
     image_upload: Option<UploadedImage>,
+}
+
+#[derive(Debug)]
+struct StackedPlanarBlit {
+    format: RawVideoFormat,
+    colorimetry: Colorimetry,
+    pipeline: BlitPipeline,
 }
 
 #[derive(Debug)]
@@ -759,7 +844,7 @@ impl VideoRenderer {
         let image_blit = BlitPipeline::build(
             device,
             target_format,
-            WgpuTextureLayout::Rgba,
+            WgpuTextureLayout::Rgba.into(),
             FRAGMENT_RGBA,
             BlitCompositing::OverTarget,
         );
@@ -767,24 +852,25 @@ impl VideoRenderer {
             rgba_blit: BlitPipeline::build(
                 device,
                 target_format,
-                WgpuTextureLayout::Rgba,
+                WgpuTextureLayout::Rgba.into(),
                 FRAGMENT_RGBA,
                 BlitCompositing::ReplaceTarget,
             ),
             nv12_blit: BlitPipeline::build(
                 device,
                 target_format,
-                WgpuTextureLayout::PackedNv12,
+                WgpuTextureLayout::PackedNv12.into(),
                 &fragment_nv12(Colorimetry::UNKNOWN, FRAGMENT_PACKED_NV12, dither_step),
                 BlitCompositing::ReplaceTarget,
             ),
             nv12_planes_blit: BlitPipeline::build(
                 device,
                 target_format,
-                WgpuTextureLayout::MultiplanarNv12,
+                WgpuTextureLayout::MultiplanarNv12.into(),
                 &fragment_nv12(Colorimetry::UNKNOWN, FRAGMENT_MULTIPLANAR_NV12, dither_step),
                 BlitCompositing::ReplaceTarget,
             ),
+            stacked_planar_blit: None,
             nv12_colorimetry: Colorimetry::UNKNOWN,
             target_format,
             dither_step,
@@ -813,18 +899,44 @@ impl VideoRenderer {
         self.nv12_blit = BlitPipeline::build(
             &self.ctx.device,
             self.target_format,
-            WgpuTextureLayout::PackedNv12,
+            WgpuTextureLayout::PackedNv12.into(),
             &fragment_nv12(colorimetry, FRAGMENT_PACKED_NV12, self.dither_step),
             BlitCompositing::ReplaceTarget,
         );
         self.nv12_planes_blit = BlitPipeline::build(
             &self.ctx.device,
             self.target_format,
-            WgpuTextureLayout::MultiplanarNv12,
+            WgpuTextureLayout::MultiplanarNv12.into(),
             &fragment_nv12(colorimetry, FRAGMENT_MULTIPLANAR_NV12, self.dither_step),
             BlitCompositing::ReplaceTarget,
         );
         self.nv12_colorimetry = colorimetry;
+    }
+
+    fn build_stacked_planar_blit(&mut self, format: RawVideoFormat, colorimetry: Colorimetry) {
+        let built = self
+            .stacked_planar_blit
+            .as_ref()
+            .is_some_and(|blit| (blit.format, blit.colorimetry) == (format, colorimetry));
+        if built {
+            return;
+        }
+        let pipeline = BlitPipeline::build(
+            &self.ctx.device,
+            self.target_format,
+            BlitLayout::StackedPlanar16,
+            &fragment_nv12(
+                colorimetry,
+                &fragment_stacked_planar(format),
+                self.dither_step,
+            ),
+            BlitCompositing::ReplaceTarget,
+        );
+        self.stacked_planar_blit = Some(StackedPlanarBlit {
+            format,
+            colorimetry,
+            pipeline,
+        });
     }
 
     /// Stretch the picture to fill the target (`false`) instead of letterboxing
@@ -838,7 +950,14 @@ impl VideoRenderer {
     }
 
     pub fn configure(&mut self, absolute_caps: &Caps) -> Result<(), G2gError> {
-        let source = source_layout(absolute_caps)?;
+        let mut source = source_layout(absolute_caps)?;
+        // wgpu downlevel devices allow 2D textures only 2048 texels tall
+        if source.layout == BlitLayout::StackedPlanar16
+            && source.stacked_planar_rows()? > self.ctx.device.limits().max_texture_dimension_2d
+        {
+            source.input = source.input.presented_as(RawVideoFormat::Nv12);
+            source.layout = WgpuTextureLayout::PackedNv12.into();
+        }
         // A geometry or format change invalidates the upload texture allocated
         // for the old one.
         if self.source.map(|s| (s.layout, s.width, s.height))
@@ -853,6 +972,9 @@ impl VideoRenderer {
         } = absolute_caps
         {
             self.set_nv12_colorimetry(*colorimetry);
+            if source.layout == BlitLayout::StackedPlanar16 {
+                self.build_stacked_planar_blit(source.input.presented, *colorimetry);
+            }
             self.pixel_aspect = *pixel_aspect;
         }
         self.resources
@@ -912,7 +1034,7 @@ impl VideoRenderer {
                         return Err(G2gError::CapsMismatch);
                     }
                 }
-                (texture.clone(), layout)
+                (texture.clone(), layout.into())
             }
             _ => {
                 let slice = domain
@@ -922,9 +1044,16 @@ impl VideoRenderer {
             }
         };
         let blit = match layout {
-            WgpuTextureLayout::Rgba => &self.rgba_blit,
-            WgpuTextureLayout::PackedNv12 => &self.nv12_blit,
-            WgpuTextureLayout::MultiplanarNv12 => &self.nv12_planes_blit,
+            BlitLayout::Gpu(WgpuTextureLayout::Rgba) => &self.rgba_blit,
+            BlitLayout::Gpu(WgpuTextureLayout::PackedNv12) => &self.nv12_blit,
+            BlitLayout::Gpu(WgpuTextureLayout::MultiplanarNv12) => &self.nv12_planes_blit,
+            BlitLayout::StackedPlanar16 => {
+                &self
+                    .stacked_planar_blit
+                    .as_ref()
+                    .ok_or(G2gError::NotConfigured)?
+                    .pipeline
+            }
         };
         let mut encoder = self
             .ctx
@@ -1080,7 +1209,7 @@ impl VideoRenderer {
             &self.ctx.device,
             &mut encoder,
             texture,
-            WgpuTextureLayout::Rgba,
+            WgpuTextureLayout::Rgba.into(),
             &self.resources,
             BlitTarget {
                 view,
@@ -1095,10 +1224,7 @@ impl VideoRenderer {
     /// texture in the negotiated layout. Each plane is written as its own region,
     /// stacked top to bottom, since an odd-width NV12 frame has luma and chroma
     /// rows of different lengths.
-    fn upload_system(
-        &mut self,
-        bytes: &[u8],
-    ) -> Result<(wgpu::Texture, WgpuTextureLayout), G2gError> {
+    fn upload_system(&mut self, bytes: &[u8]) -> Result<(wgpu::Texture, BlitLayout), G2gError> {
         let source = self.source.ok_or(G2gError::NotConfigured)?;
         let converted = source.input.convert_frame(bytes)?;
         let bytes = converted.as_deref().unwrap_or(bytes);
@@ -1929,6 +2055,63 @@ mod tests {
             rendered[0], rendered[1],
             "BT.709 caps must render differently from the untagged default"
         );
+    }
+
+    #[tokio::test]
+    async fn planar_deep_yuv_draws_like_its_eight_bit_codes() {
+        let _gpu = crate::GPU_TEST_LOCK.lock().await;
+        let Some(ctx) = shared_ctx().await else {
+            std::eprintln!("no wgpu adapter; skipping the planar deep YUV test");
+            return;
+        };
+        let (w, h) = (8u32, 8u32);
+        let (cb, cr) = (90u8, 200u8);
+        let luma = &nv12_luma_ramp(w, h, cb, cr)[..(w * h) as usize];
+        let colorimetry = g2g_core::Colorimetry::BT709;
+        let matrix = crate::yuvmatrix::YuvRgbMatrix::new(colorimetry);
+        for format in [
+            g2g_core::RawVideoFormat::I420p10,
+            g2g_core::RawVideoFormat::I422p10,
+            g2g_core::RawVideoFormat::I444p12,
+        ] {
+            let shift = format.bit_depth() - 8;
+            let [_, (_, chroma_width, chroma_height), _] =
+                crate::pixel::planar_planes(format, w as usize, h as usize);
+            let chroma_samples = chroma_width * chroma_height;
+            let bytes: Vec<u8> = luma
+                .iter()
+                .copied()
+                .chain(core::iter::repeat_n(cb, chroma_samples))
+                .chain(core::iter::repeat_n(cr, chroma_samples))
+                .flat_map(|code| (u16::from(code) << shift).to_le_bytes())
+                .collect();
+            let mut planar_caps = caps(format, w, h);
+            if let Caps::RawVideo { colorimetry: c, .. } = &mut planar_caps {
+                *c = colorimetry;
+            }
+            let mut sink = WgpuSink::offscreen(ctx.clone(), w, h);
+            sink.configure_pipeline(&planar_caps).unwrap();
+            sink.process(
+                PipelinePacket::DataFrame(system_frame(bytes)),
+                &mut NullSink,
+            )
+            .await
+            .unwrap();
+            let out = sink.read_target().unwrap();
+
+            let mut max_delta = 0i32;
+            for (pixel, &code) in luma.iter().enumerate() {
+                let want = matrix.yuv_to_rgb(code as i32, cb as i32, cr as i32);
+                for (channel, reference) in [want.0, want.1, want.2].into_iter().enumerate() {
+                    let got = out[pixel * 4 + channel] as i32;
+                    max_delta = max_delta.max((got - reference).abs());
+                }
+            }
+            assert!(
+                max_delta <= 2,
+                "GPU {format:?} convert is off the CPU reference by {max_delta}"
+            );
+        }
     }
 
     // converts to 97.81 at 8 bits, which rounding alone draws as 98 everywhere

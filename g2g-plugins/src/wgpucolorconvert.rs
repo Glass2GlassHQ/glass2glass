@@ -98,14 +98,14 @@ impl ConvertGpu {
             packed: BlitPipeline::build(
                 device,
                 OUTPUT_FORMAT,
-                WgpuTextureLayout::PackedNv12,
+                WgpuTextureLayout::PackedNv12.into(),
                 &fragment_nv12(colorimetry, FRAGMENT_PACKED_NV12, dither_step(None)),
                 BlitCompositing::ReplaceTarget,
             ),
             planes: BlitPipeline::build(
                 device,
                 OUTPUT_FORMAT,
-                WgpuTextureLayout::MultiplanarNv12,
+                WgpuTextureLayout::MultiplanarNv12.into(),
                 &fragment_nv12(colorimetry, FRAGMENT_MULTIPLANAR_NV12, dither_step(None)),
                 BlitCompositing::ReplaceTarget,
             ),
@@ -192,7 +192,7 @@ impl WgpuColorConvert {
             device,
             &mut encoder,
             texture,
-            layout,
+            layout.into(),
             &gpu.resources,
             BlitTarget {
                 view: &view,

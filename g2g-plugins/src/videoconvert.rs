@@ -597,10 +597,6 @@ pub(crate) mod display {
     use alloc::boxed::Box;
     use g2g_core::{Caps, CapsSet, Colorimetry, Dim, G2gError, RawVideoFormat};
 
-    #[cfg(any(test, feature = "wgpu-sink"))]
-    pub(crate) const NV12_AND_RGBA: &[RawVideoFormat] =
-        &[RawVideoFormat::Nv12, RawVideoFormat::Rgba8];
-
     pub(crate) fn display_sink_caps(native: &[RawVideoFormat]) -> CapsSet {
         let converted = FORMATS
             .iter()
@@ -673,7 +669,7 @@ pub(crate) mod display {
             })
         }
 
-        #[cfg(feature = "gl-render")]
+        #[cfg(any(feature = "gl-render", feature = "wgpu-sink"))]
         pub(crate) fn presented_as(self, presented: RawVideoFormat) -> Self {
             Self { presented, ..self }
         }
@@ -744,6 +740,7 @@ pub(crate) mod display {
             assert_eq!(presented(NV12_ONLY), RawVideoFormat::Nv12);
         }
 
+        const NV12_AND_RGBA: &[RawVideoFormat] = &[RawVideoFormat::Nv12, RawVideoFormat::Rgba8];
         const NV12_RGBA_AND_P010: &[RawVideoFormat] = &[
             RawVideoFormat::Nv12,
             RawVideoFormat::Rgba8,
