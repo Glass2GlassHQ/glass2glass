@@ -1395,7 +1395,8 @@ fn expand_decodebin(
                     let bin = autoplug_bin(&spec.name).expect("the arm matched an auto-plug bin");
                     let indexes = decodebin_stream_indexes(&spec)?;
                     let (pred, props) = upstream.as_ref().ok_or(ParseError::DecodebinNoUpstream)?;
-                    let caps = resolve_upstream_caps(registry, pred, props)?;
+                    let caps =
+                        resolve_decodebin_input(registry, pred, props, before_upstream.as_ref())?;
                     // M1018: the element right after the `decodebin` decides what
                     // memory the decoder should decode into, so a GPU-resident
                     // consumer gets a decoder that decodes into its domain rather
@@ -2431,6 +2432,33 @@ fn muxer_spec(
 /// parse time, so `decodebin` picks the demuxer from the real content even
 /// when the file extension is wrong, and content it does not recognize fails the
 /// parse.
+fn resolve_decodebin_input(
+    registry: &Registry,
+    name: &str,
+    props: &[(String, String)],
+    before: Option<&(String, Vec<(String, String)>)>,
+) -> Result<Caps, ParseError> {
+    // properties re-type an element's output, which its pad template cannot show
+    if let Some(mut element) = registry.make_element(name) {
+        apply_props(&mut element, name, props)?;
+        let stated = match element.caps_constraint_as_transform() {
+            CapsConstraint::Identity(set) => set.alternatives().first().cloned(),
+            CapsConstraint::DerivedOutput(derive) => match before {
+                Some((before_name, before_props)) => {
+                    let input = resolve_upstream_caps(registry, before_name, before_props)?;
+                    derive(&input).alternatives().first().cloned()
+                }
+                None => None,
+            },
+            _ => None,
+        };
+        if let Some(caps) = stated {
+            return Ok(caps);
+        }
+    }
+    resolve_upstream_caps(registry, name, props)
+}
+
 fn resolve_upstream_caps(
     registry: &Registry,
     name: &str,

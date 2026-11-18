@@ -34,7 +34,7 @@
 
 use alloc::vec::Vec;
 
-use crate::caps::{Caps, CapsSet};
+use crate::caps::{Caps, CapsSet, RawVideoFormat};
 use crate::memory::MemoryDomainKind;
 use crate::pad_template::{pad_link, PadCaps, PadDirection, PadTemplate};
 use crate::runtime::solver::NegotiationFailure;
@@ -175,6 +175,8 @@ pub struct ElementDesc {
     pub capabilities: CapabilityDescriptor,
     // a limit the template cannot state, like a hardware minimum size
     pub accepts_input: Option<fn(&Caps) -> bool>,
+    // output caps that depend on the input caps, which a fixed source template cannot state
+    pub derive_output: Option<fn(&Caps) -> CapsSet>,
 }
 
 impl ElementDesc {
@@ -187,6 +189,7 @@ impl ElementDesc {
             templates,
             capabilities: CapabilityDescriptor::default(),
             accepts_input: None,
+            derive_output: None,
         }
     }
 
@@ -249,6 +252,10 @@ impl ElementDesc {
             Ok(_) | Err(NegotiationFailure::Unfixable { .. })
                 if self.accepts_input.is_none_or(|accepts| accepts(input)) =>
             {
+                if let Some(derive) = self.derive_output {
+                    let derived = derive(input);
+                    return (!derived.is_empty()).then_some(derived);
+                }
                 match &source.caps {
                     PadCaps::Fixed(set) => Some(set.clone()),
                     // A wildcard source pad produces nothing concrete to advance on.
@@ -261,9 +268,10 @@ impl ElementDesc {
 }
 
 /// Shape predicate: the caps are raw (decoded) video. The canonical
-/// `decodebin` target, "walk from this input down to raw video."
+/// `decodebin` target, "walk from this input down to raw video." Bayer sensor
+/// samples are not decoded yet, since they still need a demosaic.
 pub fn is_raw_video(caps: &Caps) -> bool {
-    matches!(caps, Caps::RawVideo { .. })
+    matches!(caps, Caps::RawVideo { format, .. } if !matches!(format, RawVideoFormat::Bayer(_)))
 }
 
 /// Shape predicate: the caps are raw (decoded) PCM audio. The audio half of the
@@ -795,6 +803,11 @@ mod factory {
 
         pub fn accepting_input(mut self, accepts: fn(&Caps) -> bool) -> Self {
             self.desc.accepts_input = Some(accepts);
+            self
+        }
+
+        pub fn deriving_output(mut self, derive: fn(&Caps) -> CapsSet) -> Self {
+            self.desc.derive_output = Some(derive);
             self
         }
 

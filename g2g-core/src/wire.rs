@@ -42,15 +42,16 @@
 //! stream (a mixed-feature deployment degrades to no metadata, never to
 //! corruption).
 
+use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::caps::{
     AspectRatio, AudioFormat, ByteStreamEncoding, Caps, ClosedCaptionFormat, CodecTag,
-    ColorPrimaries, ColorRange, Colorimetry, Dim, Interlace, MatrixCoefficients, PixelAspect,
-    ProResVariant, Rate, RawVideoFormat, St2038Alignment, SubPictureFormat, TagNamespace,
-    TensorDType, TensorLayout, TensorShape, TextFormat, TransferCharacteristics, VideoCodec,
-    ALL_BAYER_FORMATS,
+    ColorPrimaries, ColorRange, Colorimetry, Dim, Interlace, LosslessCompression,
+    MatrixCoefficients, PixelAspect, ProResVariant, Rate, RawVideoFormat, St2038Alignment,
+    SubPictureFormat, TagNamespace, TensorDType, TensorLayout, TensorShape, TextFormat,
+    TransferCharacteristics, VideoCodec, ALL_BAYER_FORMATS,
 };
 use crate::channels::ChannelLayout;
 use crate::frame::{Frame, FrameTiming, PipelinePacket};
@@ -921,14 +922,34 @@ fn put_caps(w: &mut Writer, c: &Caps) {
         }
         Caps::Id3 => w.u8(12),
         Caps::Batch { streams } => {
-            w.u8(10);
+            w.u8(BATCH_TAG);
             w.u32(streams.len() as u32);
             for stream in streams {
                 put_caps(w, stream);
             }
         }
+        Caps::LosslesslyCompressed {
+            compression,
+            original,
+        } => {
+            w.u8(LOSSLESSLY_COMPRESSED_TAG);
+            w.u8(match compression {
+                LosslessCompression::Zlib => 0,
+                LosslessCompression::Deflate => 1,
+            });
+            match original {
+                Some(original) => {
+                    w.u8(1);
+                    put_caps(w, original);
+                }
+                None => w.u8(0),
+            }
+        }
     }
 }
+
+const BATCH_TAG: u8 = 10;
+const LOSSLESSLY_COMPRESSED_TAG: u8 = 13;
 
 fn get_caps(r: &mut Reader) -> Result<Caps, WireError> {
     Ok(match r.u8()? {
@@ -989,12 +1010,12 @@ fn get_caps(r: &mut Reader) -> Result<Caps, WireError> {
             format: subpicture_format_from_u8(r.u8()?)?,
         },
         9 => Caps::OnvifMetadata,
-        10 => {
+        BATCH_TAG => {
             let count = r.u32()?;
             let mut streams = Vec::new();
             for _ in 0..count {
                 // a crafted message nesting batches would recurse without bound
-                if r.buf.get(r.pos) == Some(&10) {
+                if r.buf.get(r.pos) == Some(&BATCH_TAG) {
                     return Err(WireError::BadTag);
                 }
                 streams.push(get_caps(r)?);
@@ -1006,6 +1027,30 @@ fn get_caps(r: &mut Reader) -> Result<Caps, WireError> {
             framerate: get_rate(r)?,
         },
         12 => Caps::Id3,
+        LOSSLESSLY_COMPRESSED_TAG => {
+            let compression = match r.u8()? {
+                0 => LosslessCompression::Zlib,
+                1 => LosslessCompression::Deflate,
+                _ => return Err(WireError::BadTag),
+            };
+            let original = match r.u8()? {
+                0 => None,
+                // a crafted message alternating batches and compressed caps would recurse without bound
+                1 if matches!(
+                    r.buf.get(r.pos),
+                    Some(&(BATCH_TAG | LOSSLESSLY_COMPRESSED_TAG))
+                ) =>
+                {
+                    return Err(WireError::BadTag)
+                }
+                1 => Some(Box::new(get_caps(r)?)),
+                _ => return Err(WireError::BadTag),
+            };
+            Caps::LosslesslyCompressed {
+                compression,
+                original,
+            }
+        }
         _ => return Err(WireError::BadTag),
     })
 }
@@ -1914,6 +1959,14 @@ mod tests {
             },
             Caps::Batch {
                 streams: Vec::new(),
+            },
+            Caps::LosslesslyCompressed {
+                compression: LosslessCompression::Deflate,
+                original: Some(Box::new(Caps::Klv)),
+            },
+            Caps::LosslesslyCompressed {
+                compression: LosslessCompression::Zlib,
+                original: None,
             },
         ];
         for caps in cases {

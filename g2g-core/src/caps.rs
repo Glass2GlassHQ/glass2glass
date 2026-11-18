@@ -3,6 +3,8 @@
 // SPDX-License-Identifier: MPL-2.0
 
 #[cfg(feature = "alloc")]
+use alloc::boxed::Box;
+#[cfg(feature = "alloc")]
 use alloc::format;
 #[cfg(feature = "alloc")]
 use alloc::string::String;
@@ -171,6 +173,30 @@ pub enum Caps {
         framerate: Rate,
     },
     Id3,
+    // a general-purpose lossless compression of a stream, `original` is `None` while the inner caps are not stated
+    #[cfg(feature = "alloc")]
+    LosslesslyCompressed {
+        compression: LosslessCompression,
+        original: Option<Box<Caps>>,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum LosslessCompression {
+    Zlib,
+    Deflate,
+}
+
+impl LosslessCompression {
+    pub const ALL: [LosslessCompression; 2] =
+        [LosslessCompression::Zlib, LosslessCompression::Deflate];
+
+    pub const fn gst_media_type(self) -> &'static str {
+        match self {
+            LosslessCompression::Zlib => "application/x-zlib-compressed",
+            LosslessCompression::Deflate => "application/x-deflate-compressed",
+        }
+    }
 }
 
 impl Caps {
@@ -196,7 +222,7 @@ impl Caps {
             | Caps::ClosedCaption { .. }
             | Caps::SubPicture { .. } => false,
             #[cfg(feature = "alloc")]
-            Caps::Batch { .. } => false,
+            Caps::Batch { .. } | Caps::LosslesslyCompressed { .. } => false,
         }
     }
 
@@ -351,6 +377,24 @@ impl Caps {
                         .collect::<Result<_, _>>()?,
                 })
             }
+            #[cfg(feature = "alloc")]
+            (
+                Caps::LosslesslyCompressed {
+                    compression: a,
+                    original: original_a,
+                },
+                Caps::LosslesslyCompressed {
+                    compression: b,
+                    original: original_b,
+                },
+            ) if a == b => Ok(Caps::LosslesslyCompressed {
+                compression: *a,
+                original: match (original_a, original_b) {
+                    (Some(a), Some(b)) => Some(Box::new(a.intersect(b)?)),
+                    (Some(known), None) | (None, Some(known)) => Some(known.clone()),
+                    (None, None) => None,
+                },
+            }),
             _ => Err(G2gError::CapsMismatch),
         }
     }
@@ -361,6 +405,10 @@ impl Caps {
         #[cfg(feature = "alloc")]
         if let Caps::Batch { streams } = self {
             return streams.iter().all(Caps::is_fixed);
+        }
+        #[cfg(feature = "alloc")]
+        if let Caps::LosslesslyCompressed { original, .. } = self {
+            return original.as_deref().is_some_and(Caps::is_fixed);
         }
         if let Caps::Audio {
             format,
@@ -484,6 +532,16 @@ impl Caps {
             Caps::Batch { streams } => Ok(Caps::Batch {
                 streams: streams.iter().map(Caps::fixate).collect::<Result<_, _>>()?,
             }),
+            #[cfg(feature = "alloc")]
+            Caps::LosslesslyCompressed {
+                compression,
+                original: Some(original),
+            } => Ok(Caps::LosslesslyCompressed {
+                compression: *compression,
+                original: Some(Box::new(original.fixate()?)),
+            }),
+            #[cfg(feature = "alloc")]
+            Caps::LosslesslyCompressed { original: None, .. } => Err(G2gError::CapsMismatch),
         }
     }
 
@@ -543,7 +601,7 @@ impl Caps {
             | Caps::SubPicture { .. } => None,
             Caps::Tensor { .. } => None,
             #[cfg(feature = "alloc")]
-            Caps::Batch { .. } => None,
+            Caps::Batch { .. } | Caps::LosslesslyCompressed { .. } => None,
         }
     }
 
@@ -668,6 +726,19 @@ impl Caps {
                     s.push('"');
                 }
                 s.push('>');
+                s
+            }
+            Caps::LosslesslyCompressed {
+                compression,
+                original,
+            } => {
+                let mut s = String::from(compression.gst_media_type());
+                if let Some(original) = original {
+                    s.push_str(&format!(
+                        ",original-caps=(caps)[{}]",
+                        original.to_gst_string()
+                    ));
+                }
                 s
             }
         }

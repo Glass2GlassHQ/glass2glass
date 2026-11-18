@@ -488,6 +488,11 @@ unless it says otherwise.
   `gdkpixbufdec`, `rsvgdec`, `flxdec`, `vmncdec`,
   `codecalpha` (`alphacombine`, `codecalphademux`,
   `vp8alphadecodebin`), `jp2kdecimator`.
+- **Lossless compression:** compress and decompress frames on a worker pool so
+  4K capture keeps up (one core compresses 4K NV12 at level 6 in about 180 ms);
+  move Matroska `ContentEncoding` inflate from `miniz_oxide` to `zlib-rs` so one
+  zlib implementation remains; let `filesrc` emit a stream a capsfilter types
+  with any caps, for a compressed file read without a container.
 - **Bayer:** Bayer formats from `libcamerasrc`, and `v4l2src` Bayer capture
   when the driver row stride is under the width rounded up to four pixels.
 - **Containers:** `mxfmux`, `asfdemux` / `asfmux` / `asfparse`,
@@ -539,7 +544,7 @@ unless it says otherwise.
   `clockselect`, `compare`, `cpureport`, `navseek`, `pushfilesrc`,
   `flitetestsrc` / `festival`, `ssdobjectdetector`.
 - **gst-plugins-rs:** `gifenc` / `gifdec`, `gopbuffer`, `textwrap`,
-  `jsongstenc` / `jsongstparse`, `gstregex`, `zlibcompress` / `zlibdecompress`,
+  `jsongstenc` / `jsongstparse`, `gstregex`,
   `colordetect`, `videocompare`, `uriplaylistbin`, `ndisrc` / `ndisink`,
   `originalbuffersave` / `originalbufferrestore`.
 

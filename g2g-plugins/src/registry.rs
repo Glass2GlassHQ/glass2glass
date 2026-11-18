@@ -33,7 +33,10 @@ use g2g_core::runtime::{
     ConverterFactory, ElementFactory, EncoderChoice, GraphMutator, LaunchFactory, MuxerFactory,
     Registry, SourceFactory,
 };
-use g2g_core::{AudioFormat, ByteStreamEncoding, Caps, Dim, Rate, RawVideoFormat, StreamType};
+use g2g_core::{
+    AudioFormat, ByteStreamEncoding, Caps, Dim, LosslessCompression, Rate, RawVideoFormat,
+    StreamType,
+};
 
 use crate::aacparse::AacParse;
 use crate::ac3parse::Ac3Parse;
@@ -71,6 +74,7 @@ use crate::id3demux::Id3Demux;
 use crate::identity::IdentityTransform;
 use crate::iv8demux::Iv8Demux;
 use crate::ivfdemux::IvfDemux;
+use crate::losslesscompress::{LosslessCompress, LosslessDecompress};
 use crate::mkvdemux::MkvDemux;
 use crate::mpeg4videoparse::Mpeg4VideoParse;
 use crate::mpegaudioparse::MpegAudioParse;
@@ -957,6 +961,35 @@ pub fn default_registry() -> Registry {
         "rgb2bayer",
         || Box::new(crate::bayer::Rgb2Bayer::new()),
     ));
+    type Build = fn() -> Box<dyn DynAsyncElement>;
+    let lossless: [(&str, &str, LosslessCompression, Build, Build); 2] = [
+        (
+            "zlibcompress",
+            "zlibdecompress",
+            LosslessCompression::Zlib,
+            || Box::new(LosslessCompress::new(LosslessCompression::Zlib)),
+            || Box::new(LosslessDecompress::new(LosslessCompression::Zlib)),
+        ),
+        (
+            "deflatecompress",
+            "deflatedecompress",
+            LosslessCompression::Deflate,
+            || Box::new(LosslessCompress::new(LosslessCompression::Deflate)),
+            || Box::new(LosslessDecompress::new(LosslessCompression::Deflate)),
+        ),
+    ];
+    for (compress, decompress, compression, build_compress, build_decompress) in lossless {
+        reg.register_launch(LaunchFactory::new(
+            compress,
+            crate::losslesscompress::compress_pad_templates(compression),
+            build_compress,
+        ));
+        reg.register_launch(LaunchFactory::new(
+            decompress,
+            crate::losslesscompress::decompress_pad_templates(compression),
+            build_decompress,
+        ));
+    }
     reg.register_launch(LaunchFactory::of::<VideoBox>("videobox", || {
         Box::new(VideoBox::new())
     }));
@@ -2155,6 +2188,26 @@ fn register_autoplug_candidates(reg: &mut Registry) {
     reg.register_transfer_cost(CUDADOWNLOAD_COST);
     #[cfg(feature = "wgpu-sink")]
     reg.register_transfer_cost(WGPUDOWNLOAD_COST);
+    reg.register(
+        ElementFactory::new(
+            "zlibdecompress",
+            crate::losslesscompress::decompress_pad_templates(LosslessCompression::Zlib),
+            |_| Box::new(LosslessDecompress::new(LosslessCompression::Zlib)),
+        )
+        .deriving_output(crate::losslesscompress::zlib_decompressed_caps),
+    );
+    reg.register(
+        ElementFactory::new(
+            "deflatedecompress",
+            crate::losslesscompress::decompress_pad_templates(LosslessCompression::Deflate),
+            |_| Box::new(LosslessDecompress::new(LosslessCompression::Deflate)),
+        )
+        .deriving_output(crate::losslesscompress::deflate_decompressed_caps),
+    );
+    reg.register(ElementFactory::of::<crate::bayer::Bayer2Rgb>(
+        "bayer2rgb",
+        |_| Box::new(crate::bayer::Bayer2Rgb::new()),
+    ));
     // Parsers (baseline): elementary-stream framing, no external deps.
     reg.register(ElementFactory::of::<H264Parse>("h264parse", |_| {
         Box::new(H264Parse::new())

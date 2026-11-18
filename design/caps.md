@@ -157,6 +157,30 @@ system-memory Bayer, uploads the plane as a storage buffer and writes an
 configure, or takes the one a producer already published, and publishes it so a
 display sink presents the texture without a copy.
 
+## Lossless compression
+
+`Caps::LosslesslyCompressed { compression, original }` is a stream that a
+general-purpose lossless compressor wrapped buffer by buffer.
+`LosslessCompression` is zlib (`application/x-zlib-compressed`) or raw deflate
+(`application/x-deflate-compressed`). `original` holds the caps the stream had
+before compression, printed as GStreamer's `original-caps=(caps)[...]`, and is
+`None` in a template or a filter that leaves it open. Wire messages reject
+compressed caps nested directly in compressed caps or in a batch, so a crafted
+message cannot recurse.
+
+`zlibcompress` / `deflatecompress` (`zlib-rs`, `level` 0 to 9, default 6) write
+each input buffer as one complete stream. `zlibdecompress` / `deflatedecompress`
+keep one inflate state across input buffers, so a stream may span buffers and
+one buffer may end a stream and start the next. A raw video original fixes the
+decompressed size exactly, and any other original caps it at 256 MiB, so a
+crafted stream fails instead of exhausting memory. A partial stream at
+end-of-stream is an error. The decompressor's autoplug descriptor derives its
+output from the input's `original`, so `decodebin` plugs it, and
+`is_raw_video` excludes Bayer, so `decodebin` plugs `bayer2rgb` after it.
+`decodebin` takes its input caps from the element before it with that
+element's properties applied: a capsfilter's caps, or the output a
+`DerivedOutput` element derives from its own predecessor.
+
 ## The solver
 
 `solver::solve_linear` runs arc consistency on a chain: forward sweep

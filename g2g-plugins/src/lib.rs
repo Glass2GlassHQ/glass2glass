@@ -409,6 +409,7 @@ pub mod chromahold;
 #[cfg(feature = "std")]
 pub mod clockoverlay;
 pub mod coloreffects;
+pub mod losslesscompress;
 // `colorspace`: converts the colorimetry (matrix / range / transfer /
 // primaries) of raw video, keeping the pixel format.
 pub mod colorspace;

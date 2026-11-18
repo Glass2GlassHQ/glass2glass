@@ -8,14 +8,15 @@
 //! depend on `g2g-plugins` can still turn a caps property string into a
 //! [`CapsSet`].
 
+use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use crate::caps::ALL_BAYER_FORMATS;
 use crate::caps::{
     batch_alternatives, framerate_q16_from_fraction, pcm_from_gst_format, AspectRatio, AudioFormat,
     BitstreamAlignment, ByteStreamEncoding, Caps, CapsSet, CodecTag, Colorimetry, Dim, Interlace,
-    PixelAspect, ProResVariant, Rate, RawVideoFormat, St2038Alignment, SubPictureFormat,
-    TagNamespace, TextFormat, VideoCodec, ANY_CHANNELS, ANY_SAMPLE_RATE,
+    LosslessCompression, PixelAspect, ProResVariant, Rate, RawVideoFormat, St2038Alignment,
+    SubPictureFormat, TagNamespace, TextFormat, VideoCodec, ANY_CHANNELS, ANY_SAMPLE_RATE,
     MOV_UNKNOWN_SUBTYPE_PREFIX, PCM_FORMATS, RIFF_AUDIO_TAG_FIELD, RIFF_UNKNOWN_SUBTYPE,
     RIFF_VIDEO_TAG_FIELD,
 };
@@ -352,6 +353,13 @@ impl CapsSet {
 
         let text_set = |format| Some(CapsSet::one(Caps::Text { format }));
 
+        if let Some(compression) = LosslessCompression::ALL
+            .into_iter()
+            .find(|compression| compression.gst_media_type() == media)
+        {
+            return losslessly_compressed_set(compression, fv("original-caps"));
+        }
+
         if let Some(tagged) = tagged_codec(media, &fields) {
             return match tagged {
                 TaggedCodec::Video(tag) => compressed_set(VideoCodec::Tagged(tag)),
@@ -545,6 +553,34 @@ impl CapsSet {
             _ => None,
         }
     }
+}
+
+// gst prints a caps-typed field as `(caps)[...]`
+fn losslessly_compressed_set(
+    compression: LosslessCompression,
+    original: Option<&FieldVal>,
+) -> Option<CapsSet> {
+    let originals = match original {
+        None => Vec::from([None]),
+        Some(FieldVal::One(text)) => {
+            let inner = text.strip_prefix("(caps)[")?.strip_suffix(']')?;
+            CapsSet::from_gst_string(inner)?
+                .alternatives()
+                .iter()
+                .map(|caps| Some(Box::new(caps.clone())))
+                .collect()
+        }
+        Some(_) => return None,
+    };
+    Some(CapsSet::from_alternatives(
+        originals
+            .into_iter()
+            .map(|original| Caps::LosslesslyCompressed {
+                compression,
+                original,
+            })
+            .collect(),
+    ))
 }
 
 enum TaggedCodec {
@@ -851,6 +887,39 @@ mod tests {
         assert_eq!(
             any_bayer.alternatives().len(),
             crate::caps::ALL_BAYER_FORMATS.len()
+        );
+    }
+
+    #[test]
+    fn losslessly_compressed_caps_round_trip_with_their_original_caps() {
+        let text = "application/x-deflate-compressed,original-caps=(caps)[video/x-raw,format=NV12,width=64,height=48]";
+        let set = CapsSet::from_gst_string(text).expect("parses");
+        let [Caps::LosslesslyCompressed {
+            compression: LosslessCompression::Deflate,
+            original: Some(original),
+        }] = set.alternatives()
+        else {
+            panic!("one deflate caps, got {:?}", set.alternatives());
+        };
+        assert!(matches!(
+            **original,
+            Caps::RawVideo {
+                format: RawVideoFormat::Nv12,
+                width: Dim::Fixed(64),
+                height: Dim::Fixed(48),
+                ..
+            }
+        ));
+        let printed = set.alternatives()[0].to_gst_string();
+        assert!(printed.starts_with("application/x-deflate-compressed,original-caps=(caps)[video/x-raw,format=NV12,width=64,height=48"));
+        assert_eq!(CapsSet::from_gst_string(&printed), Some(set));
+        assert_eq!(
+            CapsSet::from_gst_string("application/x-zlib-compressed")
+                .map(|set| set.alternatives().to_vec()),
+            Some(Vec::from([Caps::LosslesslyCompressed {
+                compression: LosslessCompression::Zlib,
+                original: None,
+            }]))
         );
     }
 
