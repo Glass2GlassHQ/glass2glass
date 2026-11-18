@@ -24,7 +24,8 @@ use g2g_core::time::ticks_to_ns;
 
 use g2g_core::{
     g2g_warn, AspectRatio, AudioFormat, Chapter, ClosedCaptionFormat, FrameTiming, G2gError,
-    PixelAspect, ProResVariant, RawVideoFormat, Segment, Tag, TagList, TextFormat, VideoCodec,
+    LosslessCompression, PixelAspect, ProResVariant, RawVideoFormat, Segment, Tag, TagList,
+    TextFormat, VideoCodec,
 };
 
 use crate::aiff::audio_from_comm;
@@ -44,7 +45,9 @@ use crate::mp4box::{
 use crate::opusparse::{opus_head_from_dops, parse_opus_head};
 use crate::pcmclip::clip_pcm_to_segment;
 use crate::pcmendian::convert_wire_layout;
-use crate::uncompressedvideo::{copy_raw_video_frame, quicktime_raw_video, RawVideoStorage};
+use crate::uncompressedvideo::{
+    aligned_rows_are_tight, copy_raw_video_frame, quicktime_raw_video, RawVideoStorage,
+};
 
 #[derive(Debug)]
 pub(crate) struct Header {
@@ -361,6 +364,8 @@ pub(crate) enum TrackKind {
         height: u32,
         pixel_aspect: PixelAspect,
         storage: RawVideoStorage,
+        // samples a lossless compressor wrapped, which pass through for a decompressor to restore
+        compression: Option<LosslessCompression>,
     },
     Audio {
         format: AudioFormat,
@@ -1216,13 +1221,20 @@ fn parse_video_entry(
         }
     } else if let Some(av01) = find_box(entries, b"av01") {
         (VideoCodec::Av1, parse_av1c_config(av01)?, None)
+    } else if let Some((fourcc, entry)) =
+        boxes(entries).find(|(fourcc, _)| matches!(*fourcc, b"uncv" | b"resv"))
+    {
+        return match uncv_track(fourcc, entry)? {
+            Some(kind) => Ok(Some((kind, None))),
+            None => Ok(unread_video_entry(entries, width, height)),
+        };
     } else if let Some(codec) = boxes(entries).find_map(|(fourcc, _)| mezzanine_codec(*fourcc)) {
         (codec, Vec::new(), None)
     } else if let Some((format, entry)) = boxes(entries).find_map(|(fourcc, entry)| {
         Some((crate::uncompressedvideo::raw_video_format(*fourcc)?, entry))
     }) {
         return Ok(Some((
-            raw_video_track(format, RawVideoStorage::Tight, entry)?,
+            raw_video_track(format, RawVideoStorage::Tight, None, entry)?,
             None,
         )));
     } else if let Some((format, storage, entry)) = find_box(entries, b"raw ").and_then(|entry| {
@@ -1230,7 +1242,7 @@ fn parse_video_entry(
         let (format, storage) = quicktime_raw_video(u16::from_be_bytes([depth[0], depth[1]]))?;
         Some((format, storage, entry))
     }) {
-        return Ok(Some((raw_video_track(format, storage, entry)?, None)));
+        return Ok(Some((raw_video_track(format, storage, None, entry)?, None)));
     } else if visual_sample_entry(entries) {
         // A well-formed VisualSampleEntry naming a codec we do not read: decline
         // so the rest of the file still demuxes.
@@ -1295,11 +1307,30 @@ const VISUAL_SAMPLE_ENTRY_HEIGHT_AT: usize = 26;
 // past the resolutions, frame count and 32-byte compressor name
 const VISUAL_SAMPLE_ENTRY_DEPTH_AT: usize = 74;
 
-fn raw_video_track(
-    format: RawVideoFormat,
-    storage: RawVideoStorage,
-    entry: &[u8],
-) -> Result<TrackKind, G2gError> {
+fn uncv_track(fourcc: &[u8; 4], entry: &[u8]) -> Result<Option<TrackKind>, G2gError> {
+    let children = entry
+        .get(VISUAL_SAMPLE_ENTRY_CHILDREN_AT..)
+        .ok_or(G2gError::CapsMismatch)?;
+    let Some(frames) = crate::uncv::parse_sample_entry(fourcc, children)? else {
+        return Ok(None);
+    };
+    let (width, height) = entry_dimensions(entry)?;
+    let tight = aligned_rows_are_tight(frames.format, width, height, frames.row_align)
+        .ok_or(G2gError::CapsMismatch)?;
+    let storage = match tight {
+        true => RawVideoStorage::Tight,
+        false => RawVideoStorage::AlignedRows {
+            row_align: frames.row_align,
+        },
+    };
+    // compressed padded rows can only be repacked after a decompressor restores them
+    if frames.compression.is_some() && !tight {
+        return Ok(None);
+    }
+    raw_video_track(frames.format, storage, frames.compression, entry).map(Some)
+}
+
+fn entry_dimensions(entry: &[u8]) -> Result<(u32, u32), G2gError> {
     let dimension = |at: usize| -> Result<u32, G2gError> {
         let bytes = entry.get(at..at + 2).ok_or(G2gError::CapsMismatch)?;
         match u16::from_be_bytes([bytes[0], bytes[1]]) {
@@ -1307,12 +1338,26 @@ fn raw_video_track(
             pixels => Ok(u32::from(pixels)),
         }
     };
+    Ok((
+        dimension(VISUAL_SAMPLE_ENTRY_WIDTH_AT)?,
+        dimension(VISUAL_SAMPLE_ENTRY_HEIGHT_AT)?,
+    ))
+}
+
+fn raw_video_track(
+    format: RawVideoFormat,
+    storage: RawVideoStorage,
+    compression: Option<LosslessCompression>,
+    entry: &[u8],
+) -> Result<TrackKind, G2gError> {
+    let (width, height) = entry_dimensions(entry)?;
     Ok(TrackKind::RawVideo {
         format,
-        width: dimension(VISUAL_SAMPLE_ENTRY_WIDTH_AT)?,
-        height: dimension(VISUAL_SAMPLE_ENTRY_HEIGHT_AT)?,
+        width,
+        height,
         pixel_aspect: pixel_aspect(entry),
         storage,
+        compression,
     })
 }
 
@@ -2437,6 +2482,10 @@ pub(crate) fn parse_fragments_multi(
                 (annexb, keyframe)
             }
             TrackKind::RawVideo {
+                compression: Some(_),
+                ..
+            } => (bytes.into_owned(), true),
+            TrackKind::RawVideo {
                 format,
                 width,
                 height,
@@ -2636,7 +2685,11 @@ impl SampleFraming {
                 codec: VideoCodec::Tagged(_),
                 ..
             } => SampleFraming::TaggedVideo,
-            TrackKind::Video { .. } => SampleFraming::PassThrough,
+            TrackKind::Video { .. }
+            | TrackKind::RawVideo {
+                compression: Some(_),
+                ..
+            } => SampleFraming::PassThrough,
             TrackKind::RawVideo {
                 format,
                 width,

@@ -1017,6 +1017,7 @@ pub mod mp4audiosink;
 pub mod mp4audiosrc;
 #[cfg(feature = "std")]
 mod mp4box;
+// ISO/IEC 23001-17 uncompressed video sample entries for the MP4 muxer and demuxer
 #[cfg(feature = "std")]
 pub mod mp4demuxn;
 #[cfg(feature = "std")]
@@ -1027,6 +1028,8 @@ pub mod mp4src;
 pub mod subtitlesrc;
 #[cfg(feature = "std")]
 pub mod syncsink;
+#[cfg(feature = "std")]
+mod uncv;
 #[cfg(feature = "std")]
 pub mod wavsink;
 

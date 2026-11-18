@@ -563,7 +563,10 @@ mod tests {
     #[cfg(feature = "std")]
     #[test]
     fn every_fan_in_container_muxer_names_the_caps_it_refuses() {
-        let raw = nv12(16, 16);
+        let mut raw = nv12(16, 16);
+        if let Caps::RawVideo { format, .. } = &mut raw {
+            *format = RawVideoFormat::RgbaF16;
+        }
         let expected = alloc::vec![alloc::format!("cannot carry {}", raw.to_gst_string())];
         assert_eq!(
             refusal_lines(crate::mp4muxn::Mp4MuxN::new(2), &raw),

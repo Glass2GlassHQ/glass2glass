@@ -2570,8 +2570,15 @@ pub fn mp4_primary_stream(location: &str, caps: &Caps) -> Option<ContainerStream
                 Caps::CompressedVideo { codec, .. } => {
                     crate::mp4demux::mp4_video_stream_str(codec)?
                 }
-                Caps::RawVideo { format, .. } => {
-                    String::from(crate::uncompressedvideo::raw_video_stream_str(format)?)
+                Caps::RawVideo { format, .. } => crate::mp4demux::mp4_raw_stream_str(format, None),
+                Caps::LosslesslyCompressed {
+                    compression,
+                    original: Some(ref original),
+                } => {
+                    let Caps::RawVideo { format, .. } = **original else {
+                        return None;
+                    };
+                    crate::mp4demux::mp4_raw_stream_str(format, Some(compression))
                 }
                 Caps::Audio { format, .. } => crate::mp4demux::mp4_audio_stream_str(format)?,
                 _ => return None,

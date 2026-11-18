@@ -159,10 +159,9 @@ async fn mp4mux_roundtrips_through_fmp4demux() {
 
 #[test]
 fn rejects_non_h26x_caps() {
-    // The muxer carries compressed streams only; raw video is refused at configure
-    // (the coverage the removed Mp4Sink test held).
+    // raw video with no ISO/IEC 23001-17 layout is refused at configure
     let raw = Caps::RawVideo {
-        format: g2g_core::RawVideoFormat::Rgba8,
+        format: g2g_core::RawVideoFormat::RgbaF16,
         width: Dim::Fixed(64),
         height: Dim::Fixed(48),
         framerate: Rate::Fixed(30 << 16),
@@ -172,7 +171,7 @@ fn rejects_non_h26x_caps() {
     };
     assert!(
         Mp4MuxN::new(1).configure_pipeline(0, &raw).is_err(),
-        "raw video is not a muxable codec"
+        "half-float RGBA has no uncv layout"
     );
     assert!(
         Mp4MuxN::new(1)

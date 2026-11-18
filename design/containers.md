@@ -127,6 +127,27 @@ demuxer selects such a stream as `stream=raw-i420`, `raw-yuy2`, `raw-uyvy` or
 size. A stored frame longer than its rows, v210's padded ones included, is cut
 to them, which is how libavcodec reads it, and a shorter one is dropped.
 
+`mp4mux` writes raw video, Bayer and raw video a lossless compressor wrapped as
+ISO/IEC 23001-17 sample entries (`uncv.rs`): `uncv` with `cmpd` and a version 0
+`uncC`, plus `cpat` for Bayer, and for compressed caps a `resv` entry whose
+`rinf` holds `frma` `uncv`, `schm` `gcmp` and a `cmpC` naming `zlib`, `defl` or
+`brot`, with `gcmm` and `iso6` added to the `ftyp`. One table holds the layouts
+GStreamer's `isomp4mux` writes for RGB, BGR, RGBA, ARGB, BGRA, BGRx, GRAY8,
+I420, Y42B, Y444, NV12, YUY2, UYVY, RGBP, BGRP and r210, and both sides read it.
+Subsampled formats need even sizes. Samples are the graph's frames as they are,
+so `row_align_size` is 0 except for Bayer rows padded to four pixels and
+pixel-interleaved rows, which state their byte stride: GStreamer's qtdemux reads
+a zero there as rows of the components alone, missing BGRx's fourth byte.
+`qtdemux` reads `row_align_size` as libheif does, each plane's rows padded to a
+multiple of it, which matches GStreamer's files wherever only one plane is
+padded, and repacks padded rows to tight frames. A compressed track passes its
+samples through as `Caps::LosslesslyCompressed` for `decodebin` to plug the
+decompressor, so one with padded rows is declined. Tracks are selected as
+`stream=raw-<format>` by GStreamer format name, or `zlib-raw-<format>`,
+`deflate-raw-<format>` and `brotli-raw-<format>` when compressed.
+`tools/uncv-fixtures.sh` writes GStreamer reference files and
+`tools/uncv-gst-check.sh` reads `mp4mux` output back through GStreamer's qtdemux.
+
 ## Plain-text files
 
 `filesrc` types a `.txt` or `.text` file as `Caps::Text { Utf8 }`, and

@@ -23,9 +23,10 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use g2g_core::caps::ALL_RAW_VIDEO_FORMATS;
 use g2g_core::{
-    AudioFormat, ByteStreamEncoding, Caps, CapsSet, PadTemplate, PadTemplates, ProResVariant,
-    PropKind, PropertySpec, RawVideoFormat, VideoCodec,
+    AudioFormat, ByteStreamEncoding, Caps, CapsSet, LosslessCompression, PadTemplate, PadTemplates,
+    ProResVariant, PropKind, PropertySpec, RawVideoFormat, VideoCodec,
 };
 
 use crate::avidemux::{is_pcm, pcm_alternatives};
@@ -37,9 +38,7 @@ use crate::mkvdemux::{prores_stream_from_str, prores_stream_str};
 use crate::mp4demuxn::Mp4DemuxN;
 use crate::oneport::OnePortElement;
 use crate::typefind::container_video_caps;
-use crate::uncompressedvideo::{
-    raw_video_formats, raw_video_placeholder_caps, raw_video_stream_from_str, raw_video_stream_str,
-};
+use crate::uncompressedvideo::{raw_video_formats, raw_video_placeholder_caps};
 
 /// Which track the single-output demux emits: the video track (the
 /// default, so `filesrc ! qtdemux ! ...` is unchanged), the video track with its
@@ -51,7 +50,10 @@ use crate::uncompressedvideo::{
 pub(crate) enum StreamSelect {
     Video,
     VideoNamed(VideoCodec),
-    RawVideo(RawVideoFormat),
+    RawVideo {
+        format: RawVideoFormat,
+        compression: Option<LosslessCompression>,
+    },
     Audio(AudioFormat),
 }
 
@@ -63,7 +65,7 @@ impl StreamSelect {
         audio_from_stream_name(AUDIO_STREAM_NAMES, name)
             .map(Self::Audio)
             .or_else(|| mp4_video_stream_from_str(name).map(Self::VideoNamed))
-            .or_else(|| raw_video_stream_from_str(name).map(Self::RawVideo))
+            .or_else(|| raw_stream_from_str(name))
     }
 
     pub(crate) fn name(self) -> String {
@@ -73,7 +75,10 @@ impl StreamSelect {
             Self::VideoNamed(codec) => {
                 mp4_video_stream_str(codec).unwrap_or_else(|| String::from("video"))
             }
-            Self::RawVideo(format) => String::from(raw_video_stream_str(format).unwrap_or("video")),
+            Self::RawVideo {
+                format,
+                compression,
+            } => mp4_raw_stream_str(format, compression),
             Self::Audio(format) => {
                 mp4_audio_stream_str(format).unwrap_or_else(|| String::from("aac"))
             }
@@ -84,7 +89,17 @@ impl StreamSelect {
         match (self, kind) {
             (Self::Video, TrackKind::Video { .. }) => true,
             (Self::VideoNamed(named), TrackKind::Video { codec, .. }) => named == *codec,
-            (Self::RawVideo(selected), TrackKind::RawVideo { format, .. }) => selected == *format,
+            (
+                Self::RawVideo {
+                    format: selected,
+                    compression: selected_compression,
+                },
+                TrackKind::RawVideo {
+                    format,
+                    compression,
+                    ..
+                },
+            ) => selected == *format && selected_compression == *compression,
             (Self::Audio(selected), TrackKind::Audio { format, .. }) => selected == *format,
             _ => false,
         }
@@ -104,7 +119,19 @@ impl StreamSelect {
                     .collect(),
             ),
             Self::VideoNamed(codec) => CapsSet::one(container_video_caps(codec)),
-            Self::RawVideo(format) => CapsSet::one(raw_video_placeholder_caps(format)),
+            Self::RawVideo {
+                format,
+                compression,
+            } => {
+                let raw = raw_video_placeholder_caps(format);
+                CapsSet::one(match compression {
+                    Some(compression) => Caps::LosslesslyCompressed {
+                        compression,
+                        original: Some(alloc::boxed::Box::new(raw)),
+                    },
+                    None => raw,
+                })
+            }
             Self::Audio(format) => CapsSet::from_alternatives(audio_nego_caps(format)),
         }
     }
@@ -168,6 +195,45 @@ pub(crate) fn stream_for_consumer(accepted: &CapsSet) -> Option<String> {
     .map(StreamSelect::name)
 }
 
+fn compression_stream_prefix(compression: LosslessCompression) -> &'static str {
+    match compression {
+        LosslessCompression::Zlib => "zlib",
+        LosslessCompression::Deflate => "deflate",
+        LosslessCompression::Brotli => "brotli",
+    }
+}
+
+pub(crate) fn mp4_raw_stream_str(
+    format: RawVideoFormat,
+    compression: Option<LosslessCompression>,
+) -> String {
+    let raw = alloc::format!("raw-{}", format.gst_name().to_ascii_lowercase());
+    match compression {
+        Some(compression) => alloc::format!("{}-{raw}", compression_stream_prefix(compression)),
+        None => raw,
+    }
+}
+
+fn raw_stream_from_str(name: &str) -> Option<StreamSelect> {
+    let compressed = LosslessCompression::ALL
+        .into_iter()
+        .find_map(|compression| {
+            let raw = name
+                .strip_prefix(compression_stream_prefix(compression))?
+                .strip_prefix('-')?;
+            Some((Some(compression), raw))
+        });
+    let (compression, raw) = compressed.unwrap_or((None, name));
+    let gst_name = raw.strip_prefix("raw-")?;
+    let format = ALL_RAW_VIDEO_FORMATS
+        .iter()
+        .find(|format| format.gst_name().eq_ignore_ascii_case(gst_name))?;
+    Some(StreamSelect::RawVideo {
+        format: *format,
+        compression,
+    })
+}
+
 pub(crate) fn mp4_audio_stream_str(format: AudioFormat) -> Option<String> {
     audio_stream_name(AUDIO_STREAM_NAMES, format)
 }
@@ -228,7 +294,7 @@ pub(crate) static MP4DEMUX_PROPS: &[PropertySpec] = &[
     PropertySpec::new(
         "stream",
         PropKind::Str,
-        "track to emit: video (the default) | h264 | h265 | av1 | mpeg4part2 | mpeg2 | vp8 | mjpeg | dnxhd | prores-proxy | prores-lt | prores-standard | prores-hq | prores-4444 | prores-4444xq (the video track by codec) | raw-i420 | raw-yuy2 | raw-uyvy | raw-v210 (the uncompressed video track by layout) | aac | opus | mp3 | pcm-u8 | pcm-s16le | pcm-s24le | pcm-s32le | pcm-f32le | alaw | mulaw | vorbis (the audio track by format) | video-mov-<fourcc> | audio-mov-<fourcc> (a codec known only by its sample entry, with ffmpeg-long-tail)",
+        "track to emit: video (the default) | h264 | h265 | av1 | mpeg4part2 | mpeg2 | vp8 | mjpeg | dnxhd | prores-proxy | prores-lt | prores-standard | prores-hq | prores-4444 | prores-4444xq (the video track by codec) | raw-<format> (the uncompressed video track by GStreamer format name: raw-i420, raw-rggb, ...) | zlib-raw-<format> | deflate-raw-<format> | brotli-raw-<format> (one a lossless compressor wrapped) | aac | opus | mp3 | pcm-u8 | pcm-s16le | pcm-s24le | pcm-s32le | pcm-f32le | alaw | mulaw | vorbis (the audio track by format) | video-mov-<fourcc> | audio-mov-<fourcc> (a codec known only by its sample entry, with ffmpeg-long-tail)",
     ),
     PropertySpec::new(
         "track-id",
@@ -253,6 +319,13 @@ impl PadTemplates for Mp4Demux {
             ProResVariant::ALL.map(|variant| container_video_caps(VideoCodec::ProRes { variant })),
         );
         source.extend(raw_video_formats().map(raw_video_placeholder_caps));
+        source.extend(crate::uncv::formats().map(raw_video_placeholder_caps));
+        source.extend(
+            LosslessCompression::ALL.map(|compression| Caps::LosslesslyCompressed {
+                compression,
+                original: None,
+            }),
+        );
         for (_, format) in AUDIO_STREAM_NAMES {
             source.extend(audio_nego_caps(*format));
         }

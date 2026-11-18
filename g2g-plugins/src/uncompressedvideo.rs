@@ -69,6 +69,11 @@ pub(crate) enum RawVideoStorage {
     Yv12,
     // planar rows padded to four bytes per plane when the frame is exactly that size, as GStreamer's avimux writes them, else tight
     AviPlaneRows,
+    // ISO/IEC 23001-17 rows, each plane's rows padded to a multiple of `row_align` bytes, none when it is zero
+    #[cfg(feature = "std")]
+    AlignedRows {
+        row_align: u32,
+    },
 }
 
 const AVI_ROW_ALIGN: usize = 4;
@@ -136,78 +141,140 @@ pub(crate) fn copy_raw_video_frame(
                 true => aligned,
                 false => row,
             };
-            copy_rows(stored, row, stride, rows, bottom_up)
+            copy_rows(stored, row, row, stride, rows, bottom_up)
         }
         #[cfg(feature = "std")]
         RawVideoStorage::QuickTimeRows => {
             let stride = stored.len().checked_div(rows)?;
-            copy_rows(stored, row_bytes(format, columns), stride, rows, false)
+            let row = row_bytes(format, columns);
+            copy_rows(stored, row, row, stride, rows, false)
         }
         RawVideoStorage::AviPlaneRows => {
-            let planes = avi_aligned_planes(format, columns, rows)?;
-            let aligned_len = planes.iter().try_fold(0usize, |len, plane| {
-                len.checked_add(plane.stride.checked_mul(plane.rows)?)
-            })?;
-            if stored.len() != aligned_len {
+            let planes = aligned_planes(format, columns, rows, AVI_ROW_ALIGN)?;
+            if stored.len() != stored_planes_len(&planes)? {
                 return copy_raw_video_frame(format, RawVideoStorage::Tight, width, height, stored);
             }
-            let mut frame = Vec::with_capacity(frame_byte_size(format, width, height));
-            let mut offset = 0;
-            for plane in planes {
-                let end = offset + plane.stride * plane.rows;
-                let plane_rows = copy_rows(
-                    &stored[offset..end],
-                    plane.row,
-                    plane.stride,
-                    plane.rows,
-                    false,
-                )?;
-                frame.extend_from_slice(&plane_rows);
-                offset = end;
+            copy_planes(format, width, height, &planes, stored)
+        }
+        #[cfg(feature = "std")]
+        RawVideoStorage::AlignedRows { row_align } => {
+            let planes = aligned_planes(format, columns, rows, usize::try_from(row_align).ok()?)?;
+            if stored.len() < stored_planes_len(&planes)? {
+                return None;
             }
-            Some(frame)
+            copy_planes(format, width, height, &planes, stored)
         }
     }
 }
 
 #[derive(Debug, Clone, Copy)]
 struct AlignedPlane {
-    row: usize,
+    pixel_bytes: usize,
+    frame_row: usize,
     stride: usize,
     rows: usize,
 }
 
-fn avi_aligned_planes(
+fn aligned_planes(
     format: RawVideoFormat,
     columns: usize,
     rows: usize,
+    align: usize,
 ) -> Option<Vec<AlignedPlane>> {
     (0..format.plane_count())
         .map(|plane| {
             let (_, row, rows) = tight_plane(format, plane, columns, rows)?;
-            let stride = row.checked_next_multiple_of(AVI_ROW_ALIGN)?;
-            Some(AlignedPlane { row, stride, rows })
+            let pixel_bytes = match format {
+                // GStreamer pads Bayer rows to four pixels, which containers need not store
+                RawVideoFormat::Bayer(_) => columns.checked_mul(format.pixel_stride()?)?,
+                _ => row,
+            };
+            let stride = match align {
+                0 => pixel_bytes,
+                align => pixel_bytes.checked_next_multiple_of(align)?,
+            };
+            Some(AlignedPlane {
+                pixel_bytes,
+                frame_row: row,
+                stride,
+                rows,
+            })
         })
         .collect()
 }
 
-// `rows` rows of `row` bytes, read `stride` bytes apart, the bottom one first when `bottom_up`
+fn stored_planes_len(planes: &[AlignedPlane]) -> Option<usize> {
+    planes.iter().try_fold(0usize, |len, plane| {
+        len.checked_add(plane.stride.checked_mul(plane.rows)?)
+    })
+}
+
+#[cfg(feature = "std")]
+pub(crate) fn aligned_rows_are_tight(
+    format: RawVideoFormat,
+    width: u32,
+    height: u32,
+    row_align: u32,
+) -> Option<bool> {
+    let planes = aligned_planes(
+        format,
+        width as usize,
+        height as usize,
+        usize::try_from(row_align).ok()?,
+    )?;
+    Some(planes.iter().all(|plane| plane.stride == plane.frame_row))
+}
+
+fn copy_planes(
+    format: RawVideoFormat,
+    width: u32,
+    height: u32,
+    planes: &[AlignedPlane],
+    stored: &[u8],
+) -> Option<Vec<u8>> {
+    let mut frame = Vec::with_capacity(frame_byte_size(format, width, height));
+    let mut offset = 0;
+    for plane in planes {
+        let end = offset + plane.stride * plane.rows;
+        let plane_rows = copy_rows(
+            &stored[offset..end],
+            plane.pixel_bytes,
+            plane.frame_row,
+            plane.stride,
+            plane.rows,
+            false,
+        )?;
+        frame.extend_from_slice(&plane_rows);
+        offset = end;
+    }
+    Some(frame)
+}
+
+// `rows` rows of `pixel_bytes` bytes, read `stride` bytes apart and zero-padded to `frame_row` bytes, the bottom one first when `bottom_up`
 fn copy_rows(
     stored: &[u8],
-    row: usize,
+    pixel_bytes: usize,
+    frame_row: usize,
     stride: usize,
     rows: usize,
     bottom_up: bool,
 ) -> Option<Vec<u8>> {
-    let last_row_end = stride.checked_mul(rows.checked_sub(1)?)?.checked_add(row)?;
-    if row == 0 || stride < row || last_row_end > stored.len() {
+    let last_row_end = stride
+        .checked_mul(rows.checked_sub(1)?)?
+        .checked_add(pixel_bytes)?;
+    if pixel_bytes == 0
+        || stride < pixel_bytes
+        || frame_row < pixel_bytes
+        || last_row_end > stored.len()
+    {
         return None;
     }
-    let mut frame = Vec::with_capacity(row * rows);
+    let mut frame = Vec::with_capacity(frame_row * rows);
     for index in 0..rows {
-        let stored_row = if bottom_up { rows - 1 - index } else { index };
-        let start = stored_row * stride;
-        frame.extend_from_slice(&stored[start..start + row]);
+        let source_row = if bottom_up { rows - 1 - index } else { index };
+        let start = source_row * stride;
+        frame.extend_from_slice(&stored[start..start + pixel_bytes]);
+        frame.resize(frame.len() + frame_row - pixel_bytes, 0);
     }
     Some(frame)
 }

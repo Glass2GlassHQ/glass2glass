@@ -62,9 +62,9 @@ use crate::fmp4mux::{
 use crate::livemux::{wall_clock_ns, LiveMuxDeadline, LIVE_MUX_LATENCY_PROPERTY};
 use crate::mp4audiosink::{esds, AAC_OBJECT_TYPE, AUDIO_STREAM_TYPE, VISUAL_STREAM_TYPE};
 use crate::mp4box::{
-    audio_sample_entry, ftyp, ftyp_cmaf, full_box, mp4_box, orientation_matrix,
-    packed_mdhd_language, prft, put_box_header, styp_cmaf, udta_with_tags, BOX_HEADER_LEN,
-    ISO_AUDIO_SAMPLE_SIZE, MATRIX, UNDETERMINED_MDHD_LANGUAGE,
+    audio_sample_entry, ftyp, ftyp_cmaf, ftyp_generic_compression, full_box, mp4_box,
+    orientation_matrix, packed_mdhd_language, prft, put_box_header, styp_cmaf, udta_with_tags,
+    BOX_HEADER_LEN, ISO_AUDIO_SAMPLE_SIZE, MATRIX, UNDETERMINED_MDHD_LANGUAGE,
 };
 use crate::mpeg4videoparse::Mpeg4VideoCodec;
 use crate::mux::{
@@ -77,6 +77,7 @@ use crate::opusparse::{
 };
 use crate::rtcp;
 use crate::startcodeparse::StartCodeCodec;
+use crate::uncv::{self, UncvSampleEntry};
 
 /// Video tracks use a 90 kHz media timescale; audio tracks use the sample rate.
 pub(crate) const VIDEO_TIMESCALE: u32 = 90_000;
@@ -110,6 +111,10 @@ enum PadKind {
     /// frame, which goes into a `tx3g` (3GPP timed text, ffmpeg's `mov_text`)
     /// sample.
     Text,
+    // raw video frames, or raw frames a lossless compressor wrapped, stored whole as ISO/IEC 23001-17 samples
+    Uncompressed {
+        frame_ns: u64,
+    },
 }
 
 /// A track's `moov` init data, captured from its first access unit.
@@ -135,12 +140,18 @@ pub(crate) enum TrackInit {
     },
     /// A subtitle track needs nothing from the stream, so it is ready at configure.
     Text,
+    Uncompressed {
+        geometry: VideoGeometry,
+        entry: UncvSampleEntry,
+    },
 }
 
 impl TrackInit {
     fn timescale(&self) -> u32 {
         match self {
-            TrackInit::Video { .. } | TrackInit::ClosedCaption { .. } => VIDEO_TIMESCALE,
+            TrackInit::Video { .. }
+            | TrackInit::ClosedCaption { .. }
+            | TrackInit::Uncompressed { .. } => VIDEO_TIMESCALE,
             TrackInit::Audio { rate, .. } => *rate,
             TrackInit::Text => TEXT_TIMESCALE,
         }
@@ -303,6 +314,13 @@ struct PendingFragment {
     /// Producer wall clock (NTP) sampled at the fragment's first sample, written
     /// in its `prft`.
     ntp: u64,
+}
+
+fn frame_period_ns(framerate: &Rate) -> u64 {
+    match framerate {
+        Rate::Fixed(q16) => framerate_q16_period_ns(*q16).unwrap_or(DEFAULT_VIDEO_DURATION_NS),
+        _ => DEFAULT_VIDEO_DURATION_NS,
+    }
 }
 
 impl Mp4MuxN {
@@ -477,12 +495,7 @@ impl Mp4MuxN {
                 ..
             } => Some(PadKind::Video {
                 codec: *c,
-                frame_ns: match framerate {
-                    Rate::Fixed(q16) => {
-                        framerate_q16_period_ns(*q16).unwrap_or(DEFAULT_VIDEO_DURATION_NS)
-                    }
-                    _ => DEFAULT_VIDEO_DURATION_NS,
-                },
+                frame_ns: frame_period_ns(framerate),
             }),
             Caps::Audio {
                 format:
@@ -512,7 +525,15 @@ impl Mp4MuxN {
             Caps::Text {
                 format: TextFormat::Utf8,
             } => Some(PadKind::Text),
-            _ => None,
+            caps => {
+                uncv::sample_entry(caps)?;
+                let Caps::RawVideo { framerate, .. } = uncv::original_caps(caps) else {
+                    return None;
+                };
+                Some(PadKind::Uncompressed {
+                    frame_ns: frame_period_ns(framerate),
+                })
+            }
         }
     }
 
@@ -753,8 +774,8 @@ impl Mp4MuxN {
             Some(PadKind::ClosedCaption(format)) => {
                 self.inits[input] = Some(TrackInit::ClosedCaption { format });
             }
-            // A text track's init was fixed at configure; nothing rides the cues.
-            Some(PadKind::Text) | None => {}
+            // A text or uncompressed track's init was fixed at configure, nothing rides the samples.
+            Some(PadKind::Text) | Some(PadKind::Uncompressed { .. }) | None => {}
         }
         Ok(())
     }
@@ -816,7 +837,9 @@ impl Mp4MuxN {
                 samples * 1_000_000_000 / rate.max(1) as u64
             }
             Some(PadKind::Audio { rate, .. }) => 1024 * 1_000_000_000 / rate.max(1) as u64,
-            Some(PadKind::Video { frame_ns, .. }) => frame_ns,
+            Some(PadKind::Video { frame_ns, .. }) | Some(PadKind::Uncompressed { frame_ns }) => {
+                frame_ns
+            }
             _ => DEFAULT_VIDEO_DURATION_NS,
         };
         // `ctts` version 0 cannot say a DTS past the PTS, so such a sample decodes when it presents
@@ -1013,7 +1036,7 @@ impl Mp4MuxN {
         let track_id = (input + 1) as u32;
         let mut bytes = Vec::new();
         if !self.header_written {
-            bytes.extend_from_slice(&if self.cmaf { ftyp_cmaf() } else { ftyp() });
+            bytes.extend_from_slice(&self.file_type());
             let starts = self.media_starts();
             bytes.extend_from_slice(&av_moov(&self.inits, None, &self.moov_metadata(), &starts));
             self.header_written = true;
@@ -1064,6 +1087,17 @@ impl Mp4MuxN {
         Ok(())
     }
 
+    fn file_type(&self) -> Vec<u8> {
+        let generic_compression = self.inits.iter().flatten().any(
+            |init| matches!(init, TrackInit::Uncompressed { entry, .. } if entry.is_compressed()),
+        );
+        match (self.cmaf, generic_compression) {
+            (true, _) => ftyp_cmaf(),
+            (false, true) => ftyp_generic_compression(),
+            (false, false) => ftyp(),
+        }
+    }
+
     /// Progressive mode's finalize: write `ftyp` + one `mdat` holding
     /// every buffered sample + a `moov` whose sample tables index them, and emit
     /// the whole file as one frame. With `faststart` the `moov` goes
@@ -1074,7 +1108,7 @@ impl Mp4MuxN {
             return Ok(());
         }
         let samples = core::mem::take(&mut self.samples);
-        let head = ftyp();
+        let head = self.file_type();
 
         // The mdat payload is the samples in the order they were released, so
         // each sample's offset inside the mdat is known once its header size is.
@@ -1238,7 +1272,7 @@ impl MultiInputElement for Mp4MuxN {
         }
         let kind = Self::pad_kind_for(absolute_caps)
             .ok_or_else(|| refused_input(short_type_name::<Self>(), absolute_caps))?;
-        if let Some(geometry) = VideoGeometry::from_caps(absolute_caps) {
+        if let Some(geometry) = VideoGeometry::from_caps(uncv::original_caps(absolute_caps)) {
             self.geometry[input] = geometry;
         }
         // A text track's `trak` needs nothing from the stream, so it is ready now:
@@ -1246,6 +1280,12 @@ impl MultiInputElement for Mp4MuxN {
         // every track) would hold the A/V until then.
         if matches!(kind, PadKind::Text) {
             self.inits[input] = Some(TrackInit::Text);
+        }
+        if let PadKind::Uncompressed { .. } = kind {
+            self.inits[input] = Some(TrackInit::Uncompressed {
+                geometry: self.geometry[input],
+                entry: uncv::sample_entry(absolute_caps).expect("pad_kind_for built this entry"),
+            });
         }
         self.kinds[input] = Some(kind);
         Ok(ConfigureOutcome::Accepted)
@@ -1776,6 +1816,14 @@ fn trak_media(init: &TrackInit) -> TrakMedia {
                 is_video: true,
             }
         }
+        TrackInit::Uncompressed { geometry, entry } => TrakMedia {
+            handler: b"vide",
+            media_header: full_box(b"vmhd", 0, 1, &[0u8; 8]),
+            sample_entry: visual_sample_entry(&entry.fourcc, geometry, &entry.boxes),
+            timescale: VIDEO_TIMESCALE,
+            presentation_size: presentation_size(geometry),
+            is_video: true,
+        },
         TrackInit::ClosedCaption { format } => TrakMedia {
             handler: b"clcp",
             media_header: caption_media_header(),

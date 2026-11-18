@@ -181,6 +181,11 @@ pub(crate) fn ftyp() -> Vec<u8> {
     brand_box(b"ftyp", b"iso5", 512, &[b"iso5", b"isom"])
 }
 
+pub(crate) fn ftyp_generic_compression() -> Vec<u8> {
+    // gcmm marks ISO/IEC 23001-17 generically compressed samples, which GStreamer pairs with iso6
+    brand_box(b"ftyp", b"iso5", 512, &[b"iso5", b"isom", b"gcmm", b"iso6"])
+}
+
 /// The `ftyp` of a CMAF track file. `cmfc` is CMAF's structural brand: one
 /// media track, `mvex`/`trex`, a `tfdt` in every `traf`, `default-base-is-moof`,
 /// and every fragment starting at a stream access point. The stricter `cmf2` is

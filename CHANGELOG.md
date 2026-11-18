@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2421: `mp4mux` and `qtdemux` carry raw, Bayer and losslessly compressed video as ISO/IEC 23001-17 `uncv`.
 - M2420: `brotlicompress` / `brotlidecompress` losslessly compress any stream with brotli.
 - M2419: `zlibcompress` / `zlibdecompress` and `deflatecompress` / `deflatedecompress` losslessly compress any stream, and `decodebin` plugs the decompressor.
 - M2418: `wgpubayer2rgb` demosaics Bayer into an RGBA wgpu texture on the GPU.

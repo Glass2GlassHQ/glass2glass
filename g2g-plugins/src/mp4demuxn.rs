@@ -133,17 +133,25 @@ fn nego_caps(kind: &TrackKind) -> (Caps, bool) {
             width,
             height,
             pixel_aspect,
+            compression,
             ..
-        } => (
-            crate::uncompressedvideo::raw_video_caps(
+        } => {
+            let raw = crate::uncompressedvideo::raw_video_caps(
                 *format,
                 Dim::Fixed(*width),
                 Dim::Fixed(*height),
                 crate::typefind::PLACEHOLDER_FRAMERATE,
                 *pixel_aspect,
-            ),
-            true,
-        ),
+            );
+            let caps = match compression {
+                Some(compression) => Caps::LosslesslyCompressed {
+                    compression: *compression,
+                    original: Some(alloc::boxed::Box::new(raw)),
+                },
+                None => raw,
+            };
+            (caps, true)
+        }
         // PCM negotiates its real layout, as `AviDemux` does, since a lone wildcard cannot fixate
         TrackKind::Audio { format, .. } if is_pcm(*format) => (real_caps(kind), false),
         TrackKind::Audio { format, .. } => (
@@ -1475,6 +1483,7 @@ impl Mp4DemuxN {
                 format,
                 width,
                 height,
+                compression: None,
                 ..
             }) => {
                 let Some(pixels) = raw_video_frame_bytes(*format, *width, *height, data.len())
@@ -1487,7 +1496,13 @@ impl Mp4DemuxN {
             // Text cues and caption cc_data arrive already de-framed by the
             // sample parse (the tx3g length prefix stripped, the caption atoms
             // unwrapped); forward the payload as is.
-            Some(TrackKind::Text { .. }) | Some(TrackKind::ClosedCaption { .. }) | None => {}
+            Some(TrackKind::Text { .. })
+            | Some(TrackKind::ClosedCaption { .. })
+            | Some(TrackKind::RawVideo {
+                compression: Some(_),
+                ..
+            })
+            | None => {}
         }
         self.need_config[port] = false;
 
@@ -1783,8 +1798,17 @@ impl MultiOutputElement for Mp4DemuxN {
 
 // the rate the sample durations give, which the negotiation span stood in for
 fn with_framerate(mut caps: Caps, rate: Rate) -> Caps {
-    if let Caps::CompressedVideo { framerate, .. } | Caps::RawVideo { framerate, .. } = &mut caps {
-        *framerate = rate;
+    match &mut caps {
+        Caps::CompressedVideo { framerate, .. } | Caps::RawVideo { framerate, .. } => {
+            *framerate = rate;
+        }
+        Caps::LosslesslyCompressed {
+            original: Some(original),
+            ..
+        } => {
+            **original = with_framerate((**original).clone(), rate);
+        }
+        _ => {}
     }
     caps
 }
