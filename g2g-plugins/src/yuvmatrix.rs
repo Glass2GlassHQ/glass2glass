@@ -61,6 +61,18 @@ fn sample_swing(conversion: YuvConversion) -> SampleSwing {
     }
 }
 
+// interleaved gradient noise (Jimenez 2014), a 0..1 threshold per pixel whose neighbours differ like blue noise
+#[cfg(any(feature = "gl-render", feature = "wgpu-sink"))]
+pub(crate) const DITHER_NOISE_SCALE: f32 = 52.982_918;
+#[cfg(any(feature = "gl-render", feature = "wgpu-sink"))]
+pub(crate) const DITHER_NOISE_WEIGHTS: [f32; 2] = [0.067_110_56, 0.005_837_15];
+
+// one code of a target channel holding this many bits, in normalized units, zero for no dither
+#[cfg(any(feature = "gl-render", feature = "wgpu-sink"))]
+pub(crate) fn dither_step(bits_per_channel: Option<u32>) -> f32 {
+    bits_per_channel.map_or(0.0, |bits| 1.0 / ((1u64 << bits) - 1) as f32)
+}
+
 /// YUV -> RGB weights in normalized (0..1 sample) units, what a fragment shader
 /// multiplies its sampled luma and chroma by.
 #[derive(Clone, Copy, Debug, PartialEq)]

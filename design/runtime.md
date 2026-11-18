@@ -1090,7 +1090,12 @@ into a `GlTarget` framebuffer through `g2g-plugins`' `GlVideoRenderer` (feature
 into a wgpu texture through `wgpusink`'s `VideoRenderer`. `GlVideoRenderer` uploads
 P010 to `R16` / `RG16` textures, so a 10-bit picture keeps its depth in a 10-bit
 framebuffer, as mpv's 10-bit render does. A GLES context without
-`GL_EXT_texture_norm16`, and the wgpu renderer, draw it as NV12. `wants_redraw` is true
+`GL_EXT_texture_norm16`, and the wgpu renderer, draw it as NV12. Both renderers dither
+the YCbCr conversion to the target's depth with interleaved gradient noise, as
+mpv dithers to `dither-depth`: `GlTarget::bits_per_channel` is the host's depth,
+mpv's `MPV_RENDER_PARAM_DEPTH`, and `WgpuRenderContext` takes 8 or 10 bits from a
+unorm target format and leaves sRGB and float targets undithered. `glsink`,
+`wgpusink` and `wgpucolorconvert` do not dither, as gst's `glimagesink` does not. `wants_redraw` is true
 while a due frame waits in the slot or a redraw was requested, the same
 condition as libmpv's `MPV_RENDER_UPDATE_FRAME`, and a render clears it.
 

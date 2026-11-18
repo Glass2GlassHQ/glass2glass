@@ -185,6 +185,15 @@ mod wgpu_target {
     use super::FrameFeed;
     use crate::Player;
 
+    fn dither_bits(format: wgpu::TextureFormat) -> Option<u32> {
+        match format {
+            wgpu::TextureFormat::Rgba8Unorm | wgpu::TextureFormat::Bgra8Unorm => Some(8),
+            wgpu::TextureFormat::Rgb10a2Unorm => Some(10),
+            // srgb targets encode the shader's output afterwards, and float targets have no fixed step
+            _ => None,
+        }
+    }
+
     #[derive(Debug)]
     pub struct WgpuRenderContext {
         feed: FrameFeed,
@@ -208,7 +217,11 @@ mod wgpu_target {
                 .as_ref()
                 .is_none_or(|renderer| renderer.target_format() != format)
             {
-                self.renderer = Some(VideoRenderer::new(self.context.clone(), format));
+                self.renderer = Some(VideoRenderer::new(
+                    self.context.clone(),
+                    format,
+                    dither_bits(format),
+                ));
                 self.feed.configured_caps = None;
             }
             let renderer = self.renderer.as_mut().expect("built above");

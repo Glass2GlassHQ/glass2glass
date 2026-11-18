@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2408: `g2g-player`'s GL and wgpu renderers dither the picture to the target's depth.
 - M2407: `g2g-player` reports mpv's dropped and delayed frame counts, filter fps and demuxer cache duration.
 - M2406: `ffmpegdec` takes gst-libav's `lowres`, and `g2g-player` sets it and reports the demuxed picture size.
 - M2405: `g2g-player`'s GL renderer draws 10-bit video at 10 bits, and the GL and wgpu shaders centre chroma on 128.

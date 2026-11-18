@@ -58,7 +58,7 @@ use crate::gpu::{
 };
 use crate::overlay_image::OverlayImage;
 use crate::videoconvert::display::{display_sink_caps, DisplayInput, NV12_AND_RGBA};
-use crate::yuvmatrix::YuvToRgbWeights;
+use crate::yuvmatrix::{dither_step, YuvToRgbWeights, DITHER_NOISE_SCALE, DITHER_NOISE_WEIGHTS};
 
 /// Fullscreen-triangle vertex stage, shared by both fragment stages below. The
 /// UV flips Y so a top-left-origin source (Vello / video) lands top-left on the
@@ -114,6 +114,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     let chroma_x = (x / 2u) * 2u;
     let chroma_y = picture_size.y + y / 2u;
     return ycbcr_to_rgb(
+        in.pos.xy,
         plane_value(x, y),
         plane_value(chroma_x, chroma_y),
         plane_value(chroma_x + 1u, chroma_y),
@@ -142,6 +143,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     let y = min(u32(in.uv.y * f32(picture_size.y)), picture_size.y - 1u);
     let chroma = textureLoad(chroma_plane, vec2<u32>(x / 2u, y / 2u), 0);
     return ycbcr_to_rgb(
+        in.pos.xy,
         textureLoad(luma_plane, vec2<u32>(x, y), 0).r,
         chroma.r,
         chroma.g,
@@ -153,20 +155,25 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
 /// weights the GL sink's shader gets) followed by `plane_fetch`, the per-layout
 /// stage above that reads the planes. All three sample values are normalized,
 /// with chroma still centred on the neutral 128 / 255.
-pub(crate) fn fragment_nv12(colorimetry: Colorimetry, plane_fetch: &str) -> alloc::string::String {
+pub(crate) fn fragment_nv12(
+    colorimetry: Colorimetry,
+    plane_fetch: &str,
+    dither_step: f32,
+) -> alloc::string::String {
     let w = YuvToRgbWeights::new(colorimetry);
     alloc::format!(
         r#"
-fn ycbcr_to_rgb(luma_value: f32, cb_value: f32, cr_value: f32) -> vec4<f32> {{
+fn ycbcr_to_rgb(pixel: vec2<f32>, luma_value: f32, cb_value: f32, cr_value: f32) -> vec4<f32> {{
     let luma = {luma_gain:?} * (luma_value - {luma_floor:?});
     let cb = cb_value - {chroma_neutral:?};
     let cr = cr_value - {chroma_neutral:?};
-    return vec4<f32>(
+    let rgb = vec3<f32>(
         luma + ({red_from_cr:?}) * cr,
         luma + ({green_from_cb:?}) * cb + ({green_from_cr:?}) * cr,
         luma + ({blue_from_cb:?}) * cb,
-        1.0,
     );
+    let noise = fract({noise_scale:?} * fract(dot(pixel, vec2<f32>({noise_x:?}, {noise_y:?}))));
+    return vec4<f32>(rgb + (noise - 0.5) * {dither_step:?}, 1.0);
 }}
 {plane_fetch}
 "#,
@@ -177,6 +184,9 @@ fn ycbcr_to_rgb(luma_value: f32, cb_value: f32, cr_value: f32) -> vec4<f32> {{
         green_from_cb = w.green_from_cb,
         green_from_cr = w.green_from_cr,
         blue_from_cb = w.blue_from_cb,
+        noise_scale = DITHER_NOISE_SCALE,
+        noise_x = DITHER_NOISE_WEIGHTS[0],
+        noise_y = DITHER_NOISE_WEIGHTS[1],
     )
 }
 
@@ -644,6 +654,7 @@ pub struct VideoRenderer {
     nv12_colorimetry: Colorimetry,
     /// Format of whatever the blits render into, needed to rebuild a pipeline.
     target_format: wgpu::TextureFormat,
+    dither_step: f32,
     resources: BlitResources,
     /// Pixel format + geometry negotiated for the incoming frames, which a
     /// system-memory frame needs to be uploaded (a GPU frame carries its own).
@@ -735,7 +746,13 @@ impl core::fmt::Debug for VideoRenderer {
 }
 
 impl VideoRenderer {
-    pub fn new(ctx: GpuContext, target_format: wgpu::TextureFormat) -> Self {
+    // dither_bits is the target's depth to dither the YCbCr conversion to, mpv's dither-depth
+    pub fn new(
+        ctx: GpuContext,
+        target_format: wgpu::TextureFormat,
+        dither_bits: Option<u32>,
+    ) -> Self {
+        let dither_step = dither_step(dither_bits);
         let device = &ctx.device;
         let resources = BlitResources::new(device);
         let overlay_pipeline = overlay_pipeline(device, target_format);
@@ -758,18 +775,19 @@ impl VideoRenderer {
                 device,
                 target_format,
                 WgpuTextureLayout::PackedNv12,
-                &fragment_nv12(Colorimetry::UNKNOWN, FRAGMENT_PACKED_NV12),
+                &fragment_nv12(Colorimetry::UNKNOWN, FRAGMENT_PACKED_NV12, dither_step),
                 BlitCompositing::ReplaceTarget,
             ),
             nv12_planes_blit: BlitPipeline::build(
                 device,
                 target_format,
                 WgpuTextureLayout::MultiplanarNv12,
-                &fragment_nv12(Colorimetry::UNKNOWN, FRAGMENT_MULTIPLANAR_NV12),
+                &fragment_nv12(Colorimetry::UNKNOWN, FRAGMENT_MULTIPLANAR_NV12, dither_step),
                 BlitCompositing::ReplaceTarget,
             ),
             nv12_colorimetry: Colorimetry::UNKNOWN,
             target_format,
+            dither_step,
             ctx,
             resources,
             source: None,
@@ -796,14 +814,14 @@ impl VideoRenderer {
             &self.ctx.device,
             self.target_format,
             WgpuTextureLayout::PackedNv12,
-            &fragment_nv12(colorimetry, FRAGMENT_PACKED_NV12),
+            &fragment_nv12(colorimetry, FRAGMENT_PACKED_NV12, self.dither_step),
             BlitCompositing::ReplaceTarget,
         );
         self.nv12_planes_blit = BlitPipeline::build(
             &self.ctx.device,
             self.target_format,
             WgpuTextureLayout::MultiplanarNv12,
-            &fragment_nv12(colorimetry, FRAGMENT_MULTIPLANAR_NV12),
+            &fragment_nv12(colorimetry, FRAGMENT_MULTIPLANAR_NV12, self.dither_step),
             BlitCompositing::ReplaceTarget,
         );
         self.nv12_colorimetry = colorimetry;
@@ -1173,7 +1191,7 @@ impl WgpuSink {
 
     fn build(ctx: GpuContext, target_format: wgpu::TextureFormat, target: Target) -> Self {
         Self {
-            renderer: VideoRenderer::new(ctx.clone(), target_format),
+            renderer: VideoRenderer::new(ctx.clone(), target_format, None),
             ctx,
             target,
             presented: 0,
@@ -1884,6 +1902,61 @@ mod tests {
         assert_ne!(
             rendered[0], rendered[1],
             "BT.709 caps must render differently from the untagged default"
+        );
+    }
+
+    // converts to 97.81 at 8 bits, which rounding alone draws as 98 everywhere
+    const LUMA_BETWEEN_CODES: u8 = 100;
+    const NEUTRAL_CHROMA: u8 = 128;
+    const DITHERED_SIDE: u32 = 64;
+    // rounding alone misses the exact value by 0.19 codes here
+    const DITHERED_MEAN_TOLERANCE: f64 = 0.1;
+    const EIGHT_BITS: u32 = 8;
+
+    #[tokio::test]
+    async fn a_dithered_renderer_averages_to_the_exact_converted_value() {
+        let _gpu = crate::GPU_TEST_LOCK.lock().await;
+        let Some(ctx) = shared_ctx().await else {
+            std::eprintln!("no wgpu adapter; skipping the dither test");
+            return;
+        };
+        let side = DITHERED_SIDE;
+        let mut renderer =
+            VideoRenderer::new(ctx.clone(), WgpuSink::OFFSCREEN_FORMAT, Some(EIGHT_BITS));
+        renderer
+            .configure(&caps(g2g_core::RawVideoFormat::Nv12, side, side))
+            .unwrap();
+        let pixels = (side * side) as usize;
+        let mut bytes = alloc::vec![LUMA_BETWEEN_CODES; pixels];
+        bytes.extend(core::iter::repeat_n(NEUTRAL_CHROMA, pixels / 2));
+        let frame = MemoryDomain::System(g2g_core::memory::SystemSlice::from_boxed(
+            bytes.into_boxed_slice(),
+        ));
+        let texture = offscreen_texture(&ctx, side, side);
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        renderer.draw(&frame, &view, (side, side)).unwrap();
+        let out = read_texture_plane(
+            &ctx.device,
+            &ctx.queue,
+            &texture,
+            wgpu::TextureAspect::All,
+            crate::gpu::whole_texture(side, side),
+            RGBA_BYTES_PER_PIXEL,
+        )
+        .unwrap();
+
+        let reds = out
+            .chunks(RGBA_BYTES_PER_PIXEL as usize)
+            .map(|pixel| f64::from(pixel[0]));
+        let mean = reds.sum::<f64>() / pixels as f64;
+        let weights = YuvToRgbWeights::new(Colorimetry::UNKNOWN);
+        let code_max = f64::from(u8::MAX);
+        let exact = f64::from(weights.luma_gain)
+            * (f64::from(LUMA_BETWEEN_CODES) / code_max - f64::from(weights.luma_floor))
+            * code_max;
+        assert!(
+            (mean - exact).abs() < DITHERED_MEAN_TOLERANCE,
+            "mean red {mean:.3}, exact {exact:.3}"
         );
     }
 

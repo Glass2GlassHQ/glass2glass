@@ -33,7 +33,7 @@ use crate::display_aspect::{letterbox, ViewportRectangle};
 use crate::filled_rectangles::{rectangle_vertices, FilledRectangle};
 use crate::overlay_image::OverlayImage;
 use crate::videoconvert::display::{display_sink_caps, DisplayInput, NV12_RGBA_AND_P010};
-use crate::yuvmatrix::YuvToRgbWeights;
+use crate::yuvmatrix::{dither_step, YuvToRgbWeights, DITHER_NOISE_SCALE, DITHER_NOISE_WEIGHTS};
 
 #[cfg(any(feature = "cuda-gl", feature = "cuda-kms"))]
 use crate::cuda::{make_context_current, CudaGlInterop};
@@ -86,6 +86,7 @@ precision {precision} float;
 varying vec2 v_uv;
 uniform sampler2D y_tex;
 uniform sampler2D uv_tex;
+uniform float u_dither_step;
 void main() {{
     float y = texture2D(y_tex, v_uv).r * {sample_scale:?};
     vec2  c = texture2D(uv_tex, v_uv).rg * {sample_scale:?};
@@ -95,7 +96,8 @@ void main() {{
     float r = y + ({red_from_cr:?}) * cr;
     float g = y + ({green_from_cb:?}) * cb + ({green_from_cr:?}) * cr;
     float b = y + ({blue_from_cb:?}) * cb;
-    gl_FragColor = vec4(r, g, b, 1.0);
+    highp float noise = fract({noise_scale:?} * fract(dot(gl_FragCoord.xy, vec2({noise_x:?}, {noise_y:?}))));
+    gl_FragColor = vec4(vec3(r, g, b) + (noise - 0.5) * u_dither_step, 1.0);
 }}
 ",
         luma_gain = w.luma_gain,
@@ -105,6 +107,9 @@ void main() {{
         green_from_cb = w.green_from_cb,
         green_from_cr = w.green_from_cr,
         blue_from_cb = w.blue_from_cb,
+        noise_scale = DITHER_NOISE_SCALE,
+        noise_x = DITHER_NOISE_WEIGHTS[0],
+        noise_y = DITHER_NOISE_WEIGHTS[1],
     )
 }
 
@@ -208,6 +213,7 @@ pub(crate) struct GlState {
     pos_loc: u32,
     uv_loc: u32,
     flip_y_loc: Option<glow::UniformLocation>,
+    dither_step_loc: Option<glow::UniformLocation>,
     textures: Textures,
     vbo: glow::Buffer,
     // core profile contexts draw nothing without a bound vertex array
@@ -323,6 +329,7 @@ impl GlState {
             let pos_loc = gl.get_attrib_location(program, "a_pos").unwrap_or(0);
             let uv_loc = gl.get_attrib_location(program, "a_uv").unwrap_or(1);
             let flip_y_loc = gl.get_uniform_location(program, "u_flip_y");
+            let dither_step_loc = gl.get_uniform_location(program, "u_dither_step");
             let vertex_array = gl.create_vertex_array().map_err(|e| e.to_string())?;
 
             // Fullscreen quad: two triangles, interleaved (x, y, u, v). Flip V so
@@ -384,6 +391,7 @@ impl GlState {
                 pos_loc,
                 uv_loc,
                 flip_y_loc,
+                dither_step_loc,
                 textures,
                 vbo,
                 vertex_array,
@@ -429,7 +437,11 @@ impl GlState {
         // SAFETY: textures registered, CUDA context current, planes valid.
         unsafe { self.interop.as_ref().unwrap().upload(buf)? };
 
-        self.draw(self.whole_frame(), UPRIGHT_ON_DEFAULT_FRAMEBUFFER);
+        self.draw(
+            self.whole_frame(),
+            UPRIGHT_ON_DEFAULT_FRAMEBUFFER,
+            dither_step(None),
+        );
         Ok(())
     }
 
@@ -440,7 +452,11 @@ impl GlState {
     #[cfg(feature = "gl-sink")]
     pub(crate) fn upload_system_and_draw(&mut self, bytes: &[u8]) -> Result<(), G2gError> {
         self.upload_system(bytes)?;
-        self.draw(self.whole_frame(), UPRIGHT_ON_DEFAULT_FRAMEBUFFER);
+        self.draw(
+            self.whole_frame(),
+            UPRIGHT_ON_DEFAULT_FRAMEBUFFER,
+            dither_step(None),
+        );
         Ok(())
     }
 
@@ -506,13 +522,14 @@ impl GlState {
         Ok(())
     }
 
-    fn draw(&mut self, viewport: ViewportRectangle, flip_y: bool) {
+    fn draw(&mut self, viewport: ViewportRectangle, flip_y: bool, dither_step: f32) {
         // SAFETY: the GL context is current on this thread for the worker's life.
         unsafe {
             let gl = &self.gl;
             gl.clear_color(0.0, 0.0, 0.0, 1.0);
             gl.clear(glow::COLOR_BUFFER_BIT);
             gl.use_program(Some(self.program));
+            gl.uniform_1_f32(self.dither_step_loc.as_ref(), dither_step);
 
             match &self.textures {
                 Textures::SemiPlanar {
@@ -776,6 +793,8 @@ pub struct GlTarget {
     pub width: u32,
     pub height: u32,
     pub flip_y: bool,
+    // mpv's MPV_RENDER_PARAM_DEPTH, the bits each colour channel of the framebuffer holds
+    pub bits_per_channel: u32,
 }
 
 pub struct GlVideoRenderer {
@@ -874,7 +893,11 @@ impl GlVideoRenderer {
                 core::num::NonZeroU32::new(target.framebuffer).map(glow::NativeFramebuffer),
             );
         }
-        state.draw(viewport, target.flip_y);
+        state.draw(
+            viewport,
+            target.flip_y,
+            dither_step(Some(target.bits_per_channel)),
+        );
         Ok(viewport)
     }
 
@@ -1191,6 +1214,7 @@ mod host_target_tests {
                 width: TARGET_SIDE,
                 height: TARGET_SIDE,
                 flip_y,
+                bits_per_channel: EIGHT_BITS,
             };
             renderer.draw(&red_over_blue(), target).unwrap();
             renderer.draw_rectangles(overlay, target).unwrap();
@@ -1229,7 +1253,7 @@ mod host_target_tests {
 
     const GREEN: [u8; 4] = [0, 255, 0, 255];
 
-    // ten-bit luma codes one apart, which an 8-bit path draws as runs of equal values
+    // ten-bit luma codes one apart, which an 8-bit path draws up to two codes off
     const P010_LUMA_CODES: [u16; 8] = [400, 401, 402, 403, 404, 405, 406, 407];
     const P010_NEUTRAL_CHROMA: u16 = 512;
     // P010 stores each 10-bit code in the top bits of its 16-bit word
@@ -1238,11 +1262,13 @@ mod host_target_tests {
     const TEN_BIT_BLACK: f64 = 64.0;
     const TEN_BIT_LUMA_SPAN: f64 = 876.0;
     const TEN_BIT_MAX: u32 = 1023;
+    const TEN_BITS: u32 = 10;
+    const EIGHT_BITS: u32 = 8;
 
-    fn p010_luma_ramp() -> (Caps, MemoryDomain) {
-        let width = P010_LUMA_CODES.len();
-        let rows = FRAME_HEIGHT as usize;
-        let luma = P010_LUMA_CODES.iter().copied().cycle().take(width * rows);
+    fn p010_frame(luma_row: &[u16], rows: u32) -> (Caps, MemoryDomain) {
+        let width = luma_row.len();
+        let rows = rows as usize;
+        let luma = luma_row.iter().copied().cycle().take(width * rows);
         let chroma = core::iter::repeat_n(P010_NEUTRAL_CHROMA, width * rows / 2);
         let bytes: alloc::vec::Vec<u8> = luma
             .chain(chroma)
@@ -1251,7 +1277,7 @@ mod host_target_tests {
         let caps = Caps::RawVideo {
             format: RawVideoFormat::P010,
             width: Dim::Fixed(width as u32),
-            height: Dim::Fixed(FRAME_HEIGHT),
+            height: Dim::Fixed(rows as u32),
             framerate: Rate::Any,
             interlace: Interlace::Any,
             colorimetry: Colorimetry::UNKNOWN,
@@ -1261,36 +1287,47 @@ mod host_target_tests {
         (caps, frame)
     }
 
-    #[test]
-    fn a_ten_bit_frame_keeps_its_depth_in_a_ten_bit_framebuffer() {
+    #[derive(Clone, Copy)]
+    struct TextureTarget {
+        internal_format: u32,
+        format: u32,
+        sample_type: u32,
+        bytes_per_pixel: u32,
+        bits_per_channel: u32,
+    }
+
+    // the target's pixels, read back in its own format, or None without a desktop GL context
+    fn draw_p010_into_texture(
+        luma_row: &[u16],
+        rows: u32,
+        texture: TextureTarget,
+    ) -> Option<alloc::vec::Vec<u8>> {
         let _egl = crate::EGL_TEST_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let Ok((_headless, gl)) = headless_context(HeadlessApi::DesktopCore32) else {
-            return;
-        };
+        let (_headless, gl) = headless_context(HeadlessApi::DesktopCore32).ok()?;
         let egl = crate::egl_library::load().expect("loaded once already");
         let mut renderer = GlVideoRenderer::new(move |name| match egl.get_proc_address(name) {
             Some(entry) => entry as *const core::ffi::c_void,
             None => core::ptr::null(),
         });
-        let (caps, frame) = p010_luma_ramp();
+        let (caps, frame) = p010_frame(luma_row, rows);
         renderer.configure(&caps).unwrap();
-        let width = P010_LUMA_CODES.len() as u32;
+        let width = luma_row.len() as u32;
         // SAFETY: headless_context made its context current on this thread, and the
         // framebuffer and its texture are created in it at the frame's size.
-        let pixels = unsafe {
+        unsafe {
             let color = gl.create_texture().unwrap();
             gl.bind_texture(glow::TEXTURE_2D, Some(color));
             gl.tex_image_2d(
                 glow::TEXTURE_2D,
                 0,
-                glow::RGB10_A2 as i32,
+                texture.internal_format as i32,
                 width as i32,
-                FRAME_HEIGHT as i32,
+                rows as i32,
                 0,
-                glow::RGBA,
-                glow::UNSIGNED_INT_2_10_10_10_REV,
+                texture.format,
+                texture.sample_type,
                 glow::PixelUnpackData::Slice(None),
             );
             let framebuffer = gl.create_framebuffer().unwrap();
@@ -1305,24 +1342,45 @@ mod host_target_tests {
             let target = GlTarget {
                 framebuffer: framebuffer.0.get(),
                 width,
-                height: FRAME_HEIGHT,
+                height: rows,
                 flip_y: true,
+                bits_per_channel: texture.bits_per_channel,
             };
             renderer.draw(&frame, target).unwrap();
             gl.bind_framebuffer(glow::FRAMEBUFFER, Some(framebuffer));
-            let mut packed = alloc::vec![0u8; (width * FRAME_HEIGHT * 4) as usize];
+            let mut pixels = alloc::vec![0u8; (width * rows * texture.bytes_per_pixel) as usize];
             gl.read_pixels(
                 0,
                 0,
                 width as i32,
-                FRAME_HEIGHT as i32,
-                glow::RGBA,
-                glow::UNSIGNED_INT_2_10_10_10_REV,
-                glow::PixelPackData::Slice(Some(&mut packed)),
+                rows as i32,
+                texture.format,
+                texture.sample_type,
+                glow::PixelPackData::Slice(Some(&mut pixels)),
             );
             renderer.destroy();
             assert_eq!(gl.get_error(), glow::NO_ERROR);
-            packed
+            Some(pixels)
+        }
+    }
+
+    // a 10-bit luma code in the converted output, BT.601 limited range scaled to max_code
+    fn converted_luma(luma: u16, max_code: u32) -> f64 {
+        (f64::from(luma) - TEN_BIT_BLACK) / TEN_BIT_LUMA_SPAN * f64::from(max_code)
+    }
+
+    #[test]
+    fn a_ten_bit_frame_keeps_its_depth_in_a_ten_bit_framebuffer() {
+        let ten_bit_target = TextureTarget {
+            internal_format: glow::RGB10_A2,
+            format: glow::RGBA,
+            sample_type: glow::UNSIGNED_INT_2_10_10_10_REV,
+            bytes_per_pixel: 4,
+            bits_per_channel: TEN_BITS,
+        };
+        let Some(pixels) = draw_p010_into_texture(&P010_LUMA_CODES, FRAME_HEIGHT, ten_bit_target)
+        else {
+            return;
         };
         let red_codes: alloc::vec::Vec<u32> = pixels
             .chunks(4)
@@ -1330,16 +1388,44 @@ mod host_target_tests {
             .map(|pixel| u32::from_le_bytes(pixel.try_into().unwrap()) & TEN_BIT_MAX)
             .collect();
         for (column, (&luma, &red)) in P010_LUMA_CODES.iter().zip(&red_codes).enumerate() {
-            let expected =
-                (f64::from(luma) - TEN_BIT_BLACK) / TEN_BIT_LUMA_SPAN * f64::from(TEN_BIT_MAX);
+            let expected = converted_luma(luma, TEN_BIT_MAX);
             assert!(
                 (f64::from(red) - expected).abs() <= 1.0,
                 "column {column}: red {red}, expected {expected:.1} in {red_codes:?}"
             );
         }
+    }
+
+    // converts to 97.52 at 8 bits, which rounding alone draws as 98 everywhere
+    const BETWEEN_EIGHT_BIT_CODES: u16 = 399;
+    const DITHERED_SIDE: usize = 64;
+    // rounding alone misses the exact value by up to half a code
+    const DITHERED_MEAN_TOLERANCE: f64 = 0.1;
+    const EIGHT_BIT_MAX: u32 = 255;
+
+    #[test]
+    fn a_ten_bit_frame_dithers_to_an_eight_bit_framebuffer() {
+        let eight_bit_target = TextureTarget {
+            internal_format: glow::RGBA8,
+            format: glow::RGBA,
+            sample_type: glow::UNSIGNED_BYTE,
+            bytes_per_pixel: 4,
+            bits_per_channel: EIGHT_BITS,
+        };
+        let Some(pixels) = draw_p010_into_texture(
+            &[BETWEEN_EIGHT_BIT_CODES; DITHERED_SIDE],
+            DITHERED_SIDE as u32,
+            eight_bit_target,
+        ) else {
+            return;
+        };
+        let reds: alloc::vec::Vec<f64> =
+            pixels.chunks(4).map(|pixel| f64::from(pixel[0])).collect();
+        let mean = reds.iter().sum::<f64>() / reds.len() as f64;
+        let exact = converted_luma(BETWEEN_EIGHT_BIT_CODES, EIGHT_BIT_MAX);
         assert!(
-            red_codes.windows(2).all(|pair| pair[0] < pair[1]),
-            "neighbouring 10-bit codes drew equal: {red_codes:?}"
+            (mean - exact).abs() < DITHERED_MEAN_TOLERANCE,
+            "mean red {mean:.3}, exact {exact:.3}"
         );
     }
 

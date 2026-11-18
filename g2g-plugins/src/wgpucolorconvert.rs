@@ -39,6 +39,7 @@ use crate::wgpusink::{
     fragment_nv12, BlitCompositing, BlitPipeline, BlitResources, BlitTarget,
     FRAGMENT_MULTIPLANAR_NV12, FRAGMENT_PACKED_NV12,
 };
+use crate::yuvmatrix::dither_step;
 
 const OUTPUT_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
@@ -98,14 +99,14 @@ impl ConvertGpu {
                 device,
                 OUTPUT_FORMAT,
                 WgpuTextureLayout::PackedNv12,
-                &fragment_nv12(colorimetry, FRAGMENT_PACKED_NV12),
+                &fragment_nv12(colorimetry, FRAGMENT_PACKED_NV12, dither_step(None)),
                 BlitCompositing::ReplaceTarget,
             ),
             planes: BlitPipeline::build(
                 device,
                 OUTPUT_FORMAT,
                 WgpuTextureLayout::MultiplanarNv12,
-                &fragment_nv12(colorimetry, FRAGMENT_MULTIPLANAR_NV12),
+                &fragment_nv12(colorimetry, FRAGMENT_MULTIPLANAR_NV12, dither_step(None)),
                 BlitCompositing::ReplaceTarget,
             ),
             resources: BlitResources::new(device),
