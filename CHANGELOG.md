@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M2416: raw video carries Bayer sensor formats as `video/x-bayer`, captured by `v4l2src` and framed by `rawvideoparse`.
 - M2415: the wgpu video renderer draws planar 10 and 12 bit YUV on the GPU instead of converting it to NV12 on the CPU.
 - M2414: the GL video renderer draws planar 10 and 12 bit YUV on the GPU instead of converting it to P010 on the CPU.
 - M2413: player render contexts clear the target to black until the first frame arrives.

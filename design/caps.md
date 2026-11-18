@@ -124,6 +124,18 @@ pub enum Caps {
 so a raw-only sink simply cannot match compressed caps, and the impossibility
 becomes a type-level error rather than a runtime `not-negotiated`.
 
+## Bayer video
+
+`RawVideoFormat::Bayer(BayerFormat)` is one plane of colour filter array
+samples. `BayerPattern` names the colours of the top-left 2x2 block, and
+`BayerSampleFormat` is 8 bits, or 10 to 16 bits in the low bits of a little- or
+big-endian 16-bit word. The gst caps string is `video/x-bayer,format=rggb12le`,
+and the parser rejects a Bayer name under `video/x-raw` and a non-Bayer name
+under `video/x-bayer`. A `video/x-bayer` with no `format` expands to all 36
+formats. `v4l2src` carries the unpacked V4L2 Bayer fourccs (`BA81` to `RG16`)
+and advertises them after MJPEG. `rawvideoparse` frames a Bayer dump by its gst
+format name.
+
 ## The solver
 
 `solver::solve_linear` runs arc consistency on a chain: forward sweep

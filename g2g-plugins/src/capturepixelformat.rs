@@ -8,7 +8,7 @@
 //! formats vs libcamera's DRM-based ones) but agree on what a format means once
 //! it is on a link.
 
-use g2g_core::{Caps, Dim, Interlace, Rate, RawVideoFormat, VideoCodec};
+use g2g_core::{BayerFormat, Caps, Dim, Interlace, Rate, RawVideoFormat, VideoCodec};
 
 /// One output format a capture source can negotiate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,6 +24,7 @@ pub enum CapturePixelFormat {
     /// frame rates over USB that uncompressed raw cannot; `MjpegDec` decodes it
     /// downstream.
     Mjpeg,
+    Bayer(BayerFormat),
 }
 
 impl CapturePixelFormat {
@@ -80,6 +81,7 @@ impl CapturePixelFormat {
             CapturePixelFormat::Yuyv => Some(RawVideoFormat::Yuyv),
             CapturePixelFormat::I420 => Some(RawVideoFormat::I420),
             CapturePixelFormat::Mjpeg => None,
+            CapturePixelFormat::Bayer(bayer) => Some(RawVideoFormat::Bayer(bayer)),
         }
     }
 
@@ -92,6 +94,7 @@ impl CapturePixelFormat {
                 RawVideoFormat::Nv12 => Some(CapturePixelFormat::Nv12),
                 RawVideoFormat::Yuyv => Some(CapturePixelFormat::Yuyv),
                 RawVideoFormat::I420 => Some(CapturePixelFormat::I420),
+                RawVideoFormat::Bayer(bayer) => Some(CapturePixelFormat::Bayer(*bayer)),
                 _ => None,
             },
             Caps::CompressedVideo {
@@ -140,6 +143,10 @@ mod tests {
             CapturePixelFormat::Yuyv,
             CapturePixelFormat::I420,
             CapturePixelFormat::Mjpeg,
+            CapturePixelFormat::Bayer(BayerFormat {
+                pattern: g2g_core::BayerPattern::Grbg,
+                sample: g2g_core::BayerSampleFormat::Bits10Le,
+            }),
         ] {
             let caps = format.caps(1280, 720, 30);
             assert_eq!(CapturePixelFormat::from_caps(&caps), Some(format));

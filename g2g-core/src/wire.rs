@@ -50,6 +50,7 @@ use crate::caps::{
     ColorPrimaries, ColorRange, Colorimetry, Dim, Interlace, MatrixCoefficients, PixelAspect,
     ProResVariant, Rate, RawVideoFormat, St2038Alignment, SubPictureFormat, TagNamespace,
     TensorDType, TensorLayout, TensorShape, TextFormat, TransferCharacteristics, VideoCodec,
+    ALL_BAYER_FORMATS,
 };
 use crate::channels::ChannelLayout;
 use crate::frame::{Frame, FrameTiming, PipelinePacket};
@@ -361,6 +362,8 @@ fn video_codec_from_u8(v: u8) -> Result<VideoCodec, WireError> {
     })
 }
 
+const FIRST_BAYER_WIRE_CODE: u8 = 64;
+
 /// Map a [`RawVideoFormat`] to its stable wire byte. Public so out-of-crate
 /// transports (e.g. the local DMABUF socket) reuse the one canonical numbering
 /// instead of duplicating it.
@@ -399,6 +402,13 @@ pub fn raw_format_to_u8(f: RawVideoFormat) -> u8 {
         RawVideoFormat::RgbF32 => 30,
         RawVideoFormat::RgbpF16 => 31,
         RawVideoFormat::RgbpF32 => 32,
+        RawVideoFormat::Bayer(bayer) => {
+            let index = ALL_BAYER_FORMATS
+                .iter()
+                .position(|known| *known == bayer)
+                .expect("ALL_BAYER_FORMATS lists every Bayer format");
+            FIRST_BAYER_WIRE_CODE + index as u8
+        }
     }
 }
 /// Inverse of [`raw_format_to_u8`]; errors on an unknown byte (never trust the
@@ -438,6 +448,11 @@ pub fn raw_format_from_u8(v: u8) -> Result<RawVideoFormat, WireError> {
         30 => RawVideoFormat::RgbF32,
         31 => RawVideoFormat::RgbpF16,
         32 => RawVideoFormat::RgbpF32,
+        code @ FIRST_BAYER_WIRE_CODE.. => RawVideoFormat::Bayer(
+            *ALL_BAYER_FORMATS
+                .get(usize::from(code - FIRST_BAYER_WIRE_CODE))
+                .ok_or(WireError::BadTag)?,
+        ),
         _ => return Err(WireError::BadTag),
     })
 }
@@ -1702,6 +1717,29 @@ mod tests {
     fn roundtrip(p: &PipelinePacket) -> PipelinePacket {
         let bytes = encode_packet(p).expect("encode");
         decode_packet(&bytes).expect("decode")
+    }
+
+    #[test]
+    fn every_raw_format_round_trips_through_a_distinct_wire_code() {
+        let mut codes = Vec::new();
+        for &format in crate::caps::ALL_RAW_VIDEO_FORMATS {
+            let code = raw_format_to_u8(format);
+            assert_eq!(
+                raw_format_from_u8(code),
+                Ok(format),
+                "{}",
+                format.gst_name()
+            );
+            codes.push(code);
+        }
+        codes.sort_unstable();
+        codes.dedup();
+        assert_eq!(codes.len(), crate::caps::ALL_RAW_VIDEO_FORMATS.len());
+        let past_the_last_bayer_code = FIRST_BAYER_WIRE_CODE + ALL_BAYER_FORMATS.len() as u8;
+        assert_eq!(
+            raw_format_from_u8(past_the_last_bayer_code),
+            Err(WireError::BadTag)
+        );
     }
 
     #[test]

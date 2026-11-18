@@ -27,8 +27,9 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::runtime::{parse_launch, run_graph};
 use g2g_core::{
-    AsyncElement, AudioFormat, ByteStreamEncoding, Caps, Dim, FrameTiming, Interlace,
-    PipelineClock, PipelinePacket, PropValue, Rate, RawVideoFormat,
+    AsyncElement, AudioFormat, BayerFormat, BayerPattern, BayerSampleFormat, ByteStreamEncoding,
+    Caps, Dim, FrameTiming, Interlace, PipelineClock, PipelinePacket, PropValue, Rate,
+    RawVideoFormat,
 };
 use g2g_plugins::rawaudioparse::RawAudioParse;
 use g2g_plugins::rawvideoparse::RawVideoParse;
@@ -320,6 +321,36 @@ async fn a_yuv_file_plays_through_a_launch_line() {
     let written = run_to_file(&line, &output).await;
     std::fs::remove_file(&input).ok();
     assert_eq!(written, dump, "the pixels reach the sink unchanged");
+}
+
+#[tokio::test]
+async fn a_bayer_dump_frames_at_two_bytes_per_sample() {
+    let (width, height, frames) = (6u32, 4u32, 3usize);
+    let bayer = RawVideoFormat::Bayer(BayerFormat {
+        pattern: BayerPattern::Rggb,
+        sample: BayerSampleFormat::Bits12Le,
+    });
+    let mut parser = RawVideoParse::new()
+        .with_geometry(width, height)
+        .with_framerate(30, 1);
+    parser
+        .set_property("format", PropValue::Str("rggb12le".into()))
+        .expect("gst's Bayer format name");
+    parser
+        .configure_pipeline(&Caps::ByteStream {
+            encoding: ByteStreamEncoding::Raw,
+        })
+        .expect("a raw byte stream");
+    let frame_len = (width * height * 2) as usize;
+    let dump: Vec<u8> = (0..frame_len * frames).map(|index| index as u8).collect();
+    let out = drive(&mut parser, &dump).await;
+
+    let expected: Vec<Vec<u8>> = dump.chunks(frame_len).map(<[u8]>::to_vec).collect();
+    assert_eq!(out.payloads(), expected);
+    let [Caps::RawVideo { format, .. }] = out.caps()[..] else {
+        panic!("one raw caps, got {:?}", out.caps());
+    };
+    assert_eq!(format, bayer);
 }
 
 /// gst's older and bin names for the framers resolve to them. Each is

@@ -10,6 +10,7 @@
 
 use alloc::vec::Vec;
 
+use crate::caps::ALL_BAYER_FORMATS;
 use crate::caps::{
     batch_alternatives, framerate_q16_from_fraction, pcm_from_gst_format, AspectRatio, AudioFormat,
     BitstreamAlignment, ByteStreamEncoding, Caps, CapsSet, CodecTag, Colorimetry, Dim, Interlace,
@@ -359,9 +360,19 @@ impl CapsSet {
         }
 
         match media {
-            "video/x-raw" => {
-                let (formats, widths, heights, rates) = (
-                    expand_raw_format(fv("format"))?,
+            "video/x-raw" | "video/x-bayer" => {
+                let bayer_media = media == "video/x-bayer";
+                let formats = match fv("format") {
+                    None if bayer_media => ALL_BAYER_FORMATS.map(RawVideoFormat::Bayer).to_vec(),
+                    format => expand_raw_format(format)?,
+                };
+                if formats
+                    .iter()
+                    .any(|format| matches!(format, RawVideoFormat::Bayer(_)) != bayer_media)
+                {
+                    return None;
+                }
+                let (widths, heights, rates) = (
                     expand_dim(fv("width"))?,
                     expand_dim(fv("height"))?,
                     expand_rate(fv("framerate"))?,
@@ -650,7 +661,11 @@ pub fn parse_raw_format(s: &str) -> Option<RawVideoFormat> {
         "rgb_f32le" => RawVideoFormat::RgbF32,
         "rgbp_f16le" => RawVideoFormat::RgbpF16,
         "rgbp_f32le" => RawVideoFormat::RgbpF32,
-        _ => return None,
+        name => RawVideoFormat::Bayer(
+            *ALL_BAYER_FORMATS
+                .iter()
+                .find(|bayer| bayer.gst_name() == name)?,
+        ),
     })
 }
 
@@ -806,6 +821,35 @@ mod tests {
         assert_eq!(
             CapsSet::from_gst_string("audio/x-raw,format=S16LE,rate=44100,"),
             Some(plain)
+        );
+    }
+
+    #[test]
+    fn bayer_caps_round_trip_as_video_x_bayer() {
+        let bayer = RawVideoFormat::Bayer(crate::BayerFormat {
+            pattern: crate::BayerPattern::Rggb,
+            sample: crate::BayerSampleFormat::Bits12Le,
+        });
+        let text = "video/x-bayer,format=rggb12le,width=640,height=480";
+        let set = CapsSet::from_gst_string(text).expect("parses");
+        let [caps] = set.alternatives() else {
+            panic!("one alternative, got {:?}", set.alternatives());
+        };
+        assert!(matches!(caps, Caps::RawVideo { format, .. } if *format == bayer));
+        assert!(caps
+            .to_gst_string()
+            .starts_with("video/x-bayer,format=rggb12le,width=640,height=480"));
+    }
+
+    #[test]
+    fn bayer_and_raw_formats_stay_under_their_own_media_type() {
+        assert!(CapsSet::from_gst_string("video/x-raw,format=rggb").is_none());
+        assert!(CapsSet::from_gst_string("video/x-bayer,format=NV12").is_none());
+        let any_bayer =
+            CapsSet::from_gst_string("video/x-bayer,width=64,height=64").expect("parses");
+        assert_eq!(
+            any_bayer.alternatives().len(),
+            crate::caps::ALL_BAYER_FORMATS.len()
         );
     }
 

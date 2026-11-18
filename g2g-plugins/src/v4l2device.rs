@@ -556,11 +556,19 @@ mod tests {
             described(b"GREY"),
             described(b"YUYV"),
             described(b"BA81"),
+            described(b"pBAA"),
         ]);
         let carried = carried_formats(&advertised);
         assert_eq!(
             carried.iter().map(|(_, f)| *f).collect::<Vec<_>>(),
-            Vec::from([CapturePixelFormat::Yuyv, CapturePixelFormat::Mjpeg])
+            Vec::from([
+                CapturePixelFormat::Yuyv,
+                CapturePixelFormat::Mjpeg,
+                CapturePixelFormat::Bayer(g2g_core::BayerFormat {
+                    pattern: g2g_core::BayerPattern::Bggr,
+                    sample: g2g_core::BayerSampleFormat::Bits8,
+                }),
+            ])
         );
         // a node offering nothing carriable describes no caps at all.
         assert!(carried_formats(&Vec::from([described(b"GREY")])).is_empty());

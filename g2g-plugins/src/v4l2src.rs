@@ -39,10 +39,10 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::{OwnedDmaBuf, SystemSlice};
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
-    Caps, CapsConstraint, CapsSet, CaptureAnchor, ClockSync, ConfigureOutcome, Dim,
-    ElementMetadata, FrameTiming, G2gError, HardwareError, HostAllocator, LatencyReport,
-    MemoryDomain, MemoryDomainKind, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
-    PropError, PropKind, PropValue, PropertySpec, Rate,
+    BayerFormat, BayerPattern, BayerSampleFormat, Caps, CapsConstraint, CapsSet, CaptureAnchor,
+    ClockSync, ConfigureOutcome, Dim, ElementMetadata, FrameTiming, G2gError, HardwareError,
+    HostAllocator, LatencyReport, MemoryDomain, MemoryDomainKind, OutputSink, PadTemplate,
+    PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate,
 };
 
 use crate::capturepixelformat::CapturePixelFormat;
@@ -90,16 +90,89 @@ const DMABUF_INFLIGHT: usize = BUFFER_COUNT as usize - 2;
 /// so a release is picked up promptly.
 const DMABUF_RELEASE_POLL: core::time::Duration = core::time::Duration::from_millis(1);
 
+const fn bayer(pattern: BayerPattern, sample: BayerSampleFormat) -> CapturePixelFormat {
+    CapturePixelFormat::Bayer(BayerFormat { pattern, sample })
+}
+
 /// The V4L2 fourccs this element carries, in the order they are advertised.
 /// Packed YUYV leads: it is the near-universal UVC raw output, and a chain that
-/// pins nothing takes the first alternative. MJPEG comes last because it needs
-/// a decoder downstream. A device format missing from this table is skipped,
+/// pins nothing takes the first alternative. MJPEG and then the Bayer formats
+/// come last because they need a decoder or `bayer2rgb` downstream. A device format missing from this table is skipped,
 /// since there is no `Caps` to carry it on.
-pub(crate) const FOURCCS: [(&[u8; 4], CapturePixelFormat); 4] = [
+pub(crate) const FOURCCS: [(&[u8; 4], CapturePixelFormat); 24] = [
     (b"YUYV", CapturePixelFormat::Yuyv),
     (b"NV12", CapturePixelFormat::Nv12),
     (b"YU12", CapturePixelFormat::I420),
     (b"MJPG", CapturePixelFormat::Mjpeg),
+    // V4L2 stores the 10- to 16-bit Bayer samples little-endian in 16-bit words
+    (b"BA81", bayer(BayerPattern::Bggr, BayerSampleFormat::Bits8)),
+    (b"GBRG", bayer(BayerPattern::Gbrg, BayerSampleFormat::Bits8)),
+    (b"GRBG", bayer(BayerPattern::Grbg, BayerSampleFormat::Bits8)),
+    (b"RGGB", bayer(BayerPattern::Rggb, BayerSampleFormat::Bits8)),
+    (
+        b"BG10",
+        bayer(BayerPattern::Bggr, BayerSampleFormat::Bits10Le),
+    ),
+    (
+        b"GB10",
+        bayer(BayerPattern::Gbrg, BayerSampleFormat::Bits10Le),
+    ),
+    (
+        b"BA10",
+        bayer(BayerPattern::Grbg, BayerSampleFormat::Bits10Le),
+    ),
+    (
+        b"RG10",
+        bayer(BayerPattern::Rggb, BayerSampleFormat::Bits10Le),
+    ),
+    (
+        b"BG12",
+        bayer(BayerPattern::Bggr, BayerSampleFormat::Bits12Le),
+    ),
+    (
+        b"GB12",
+        bayer(BayerPattern::Gbrg, BayerSampleFormat::Bits12Le),
+    ),
+    (
+        b"BA12",
+        bayer(BayerPattern::Grbg, BayerSampleFormat::Bits12Le),
+    ),
+    (
+        b"RG12",
+        bayer(BayerPattern::Rggb, BayerSampleFormat::Bits12Le),
+    ),
+    (
+        b"BG14",
+        bayer(BayerPattern::Bggr, BayerSampleFormat::Bits14Le),
+    ),
+    (
+        b"GB14",
+        bayer(BayerPattern::Gbrg, BayerSampleFormat::Bits14Le),
+    ),
+    (
+        b"GR14",
+        bayer(BayerPattern::Grbg, BayerSampleFormat::Bits14Le),
+    ),
+    (
+        b"RG14",
+        bayer(BayerPattern::Rggb, BayerSampleFormat::Bits14Le),
+    ),
+    (
+        b"BYR2",
+        bayer(BayerPattern::Bggr, BayerSampleFormat::Bits16Le),
+    ),
+    (
+        b"GB16",
+        bayer(BayerPattern::Gbrg, BayerSampleFormat::Bits16Le),
+    ),
+    (
+        b"GR16",
+        bayer(BayerPattern::Grbg, BayerSampleFormat::Bits16Le),
+    ),
+    (
+        b"RG16",
+        bayer(BayerPattern::Rggb, BayerSampleFormat::Bits16Le),
+    ),
 ];
 
 /// The format a V4L2 fourcc carries, `None` for one no `Caps` covers.
@@ -1224,7 +1297,7 @@ impl V4l2Src {
 
         if self.modes.is_empty() {
             // Either the device refused every format, or it offers nothing this
-            // element can carry (a greyscale or bayer-only sensor, say).
+            // element can carry (a greyscale-only sensor, say).
             return Err(refusal.unwrap_or(G2gError::CapsMismatch));
         }
         Ok(&self.modes)
@@ -2312,12 +2385,20 @@ mod tests {
     }
 
     #[test]
-    fn yuyv_leads_the_advertised_formats_and_mjpeg_trails() {
+    fn yuyv_leads_the_advertised_formats_and_mjpeg_then_bayer_trail() {
         // A chain that pins nothing takes the first alternative, so raw YUYV
-        // must stay the default and MJPEG (needs a decoder) must come last.
+        // must stay the default, and MJPEG (needs a decoder) and Bayer (needs
+        // bayer2rgb) must come after every format a sink shows directly.
         let order: Vec<CapturePixelFormat> = FOURCCS.iter().map(|(_, f)| *f).collect();
         assert_eq!(order.first(), Some(&CapturePixelFormat::Yuyv));
-        assert_eq!(order.last(), Some(&CapturePixelFormat::Mjpeg));
+        let mjpeg = order
+            .iter()
+            .position(|format| *format == CapturePixelFormat::Mjpeg)
+            .expect("MJPEG is advertised");
+        for (index, format) in order.iter().enumerate() {
+            let bayer = matches!(format, CapturePixelFormat::Bayer(_));
+            assert_eq!(bayer, index > mjpeg, "{format:?} at {index}");
+        }
         // the fourcc table is the only place a code is written, and no code
         // may appear twice (one format would shadow the other).
         for (i, (code, _)) in FOURCCS.iter().enumerate() {
