@@ -597,9 +597,16 @@ pub(crate) mod display {
     use alloc::boxed::Box;
     use g2g_core::{Caps, CapsSet, Colorimetry, Dim, G2gError, RawVideoFormat};
 
-    #[cfg(any(test, feature = "wgpu-sink", feature = "gl-render"))]
+    #[cfg(any(test, feature = "wgpu-sink"))]
     pub(crate) const NV12_AND_RGBA: &[RawVideoFormat] =
         &[RawVideoFormat::Nv12, RawVideoFormat::Rgba8];
+
+    #[cfg(any(test, feature = "gl-render"))]
+    pub(crate) const NV12_RGBA_AND_P010: &[RawVideoFormat] = &[
+        RawVideoFormat::Nv12,
+        RawVideoFormat::Rgba8,
+        RawVideoFormat::P010,
+    ];
 
     pub(crate) fn display_sink_caps(native: &[RawVideoFormat]) -> CapsSet {
         let converted = FORMATS
@@ -633,6 +640,9 @@ pub(crate) mod display {
         );
         if rgb_input && native.contains(&Rgba8) {
             return Some(Rgba8);
+        }
+        if format.bit_depth() > Nv12.bit_depth() && native.contains(&P010) {
+            return Some(P010);
         }
         native.first().copied()
     }
@@ -668,6 +678,11 @@ pub(crate) mod display {
                 pixel_aspect: *pixel_aspect,
                 negotiated: *format,
             })
+        }
+
+        #[cfg(feature = "gl-render")]
+        pub(crate) fn presented_as(self, presented: RawVideoFormat) -> Self {
+            Self { presented, ..self }
         }
 
         // `None` when the frame is already in the presented format
@@ -734,6 +749,23 @@ pub(crate) mod display {
             let presented = |native| DisplayInput::from_caps(&bgr, native).unwrap().presented;
             assert_eq!(presented(NV12_AND_RGBA), RawVideoFormat::Rgba8);
             assert_eq!(presented(NV12_ONLY), RawVideoFormat::Nv12);
+        }
+
+        #[test]
+        fn deep_yuv_keeps_its_depth_only_where_the_sink_takes_p010() {
+            let presented = |format, native| {
+                DisplayInput::from_caps(&fixed(format, 4, 2), native)
+                    .unwrap()
+                    .presented
+            };
+            for deep in [RawVideoFormat::I422p10, RawVideoFormat::I444p12] {
+                assert_eq!(presented(deep, NV12_RGBA_AND_P010), RawVideoFormat::P010);
+                assert_eq!(presented(deep, NV12_AND_RGBA), RawVideoFormat::Nv12);
+            }
+            assert_eq!(
+                presented(RawVideoFormat::I420, NV12_RGBA_AND_P010),
+                RawVideoFormat::Nv12
+            );
         }
 
         #[test]

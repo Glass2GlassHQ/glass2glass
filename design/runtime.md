@@ -1066,14 +1066,18 @@ must contain `playervideosink`. After `parse_launch` the sink node is found by i
 metadata and replaced with one holding the player's frame slot, since a
 `LaunchFactory` is a plain function pointer. `playervideosink` paces frames with
 `PresentationPacer` against a `MonotonicClock` it provides, converts each due frame
-to NV12 or RGBA (`glnv12::convert_for_display`) on the pipeline thread, puts it in
+to NV12 or RGBA, or a YUV frame deeper than 8 bits to P010
+(`glnv12::convert_for_display`), on the pipeline thread, puts it in
 the slot and calls the host's update callback. The render contexts run on the host's
 UI thread, so they only upload. `time-pos` shows a seek's target from the request
 until `playervideosink` presents the first frame after that seek's flush, as mpv's
 does, and a frame step shows the frame it lands on. `GlRenderContext::render` draws it
 into a `GlTarget` framebuffer through `g2g-plugins`' `GlVideoRenderer` (feature
 `gl-render`, the NV12 and RGBA shaders `glsink` uses), and `WgpuRenderContext`
-into a wgpu texture through `wgpusink`'s `VideoRenderer`. `wants_redraw` is true
+into a wgpu texture through `wgpusink`'s `VideoRenderer`. `GlVideoRenderer` uploads
+P010 to `R16` / `RG16` textures, so a 10-bit picture keeps its depth in a 10-bit
+framebuffer, as mpv's 10-bit render does. A GLES context without
+`GL_EXT_texture_norm16`, and the wgpu renderer, draw it as NV12. `wants_redraw` is true
 while a due frame waits in the slot or a redraw was requested, the same
 condition as libmpv's `MPV_RENDER_UPDATE_FRAME`, and a render clears it.
 

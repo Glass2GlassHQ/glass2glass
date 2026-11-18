@@ -152,15 +152,15 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
 /// One NV12 fragment stage: the YCbCr -> RGB step for `colorimetry` (the same
 /// weights the GL sink's shader gets) followed by `plane_fetch`, the per-layout
 /// stage above that reads the planes. All three sample values are normalized,
-/// with chroma still centred on the neutral 0.5.
+/// with chroma still centred on the neutral 128 / 255.
 pub(crate) fn fragment_nv12(colorimetry: Colorimetry, plane_fetch: &str) -> alloc::string::String {
     let w = YuvToRgbWeights::new(colorimetry);
     alloc::format!(
         r#"
 fn ycbcr_to_rgb(luma_value: f32, cb_value: f32, cr_value: f32) -> vec4<f32> {{
     let luma = {luma_gain:?} * (luma_value - {luma_floor:?});
-    let cb = cb_value - 0.5;
-    let cr = cr_value - 0.5;
+    let cb = cb_value - {chroma_neutral:?};
+    let cr = cr_value - {chroma_neutral:?};
     return vec4<f32>(
         luma + ({red_from_cr:?}) * cr,
         luma + ({green_from_cb:?}) * cb + ({green_from_cr:?}) * cr,
@@ -172,6 +172,7 @@ fn ycbcr_to_rgb(luma_value: f32, cb_value: f32, cr_value: f32) -> vec4<f32> {{
 "#,
         luma_gain = w.luma_gain,
         luma_floor = w.luma_floor,
+        chroma_neutral = w.chroma_neutral,
         red_from_cr = w.red_from_cr,
         green_from_cb = w.green_from_cb,
         green_from_cr = w.green_from_cr,

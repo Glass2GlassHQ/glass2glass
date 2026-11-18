@@ -68,6 +68,8 @@ pub struct YuvToRgbWeights {
     /// Luma is `luma_gain * (y - luma_floor)`.
     pub luma_gain: f32,
     pub luma_floor: f32,
+    // the normalized sample a chroma value carrying no colour takes
+    pub chroma_neutral: f32,
     pub red_from_cr: f32,
     pub green_from_cb: f32,
     pub green_from_cr: f32,
@@ -86,6 +88,7 @@ impl YuvToRgbWeights {
         Self {
             luma_gain: SAMPLE_SPAN / swing.luma_span,
             luma_floor: swing.luma_floor as f32 / SAMPLE_SPAN,
+            chroma_neutral: CHROMA_NEUTRAL as f32 / SAMPLE_SPAN,
             red_from_cr,
             green_from_cb: -blue_from_cb * kb / kg,
             green_from_cr: -red_from_cr * kr / kg,

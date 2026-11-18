@@ -32,7 +32,7 @@ use g2g_core::{Colorimetry, G2gError, MemoryDomain, RawVideoFormat};
 use crate::display_aspect::{letterbox, ViewportRectangle};
 use crate::filled_rectangles::{rectangle_vertices, FilledRectangle};
 use crate::overlay_image::OverlayImage;
-use crate::videoconvert::display::{display_sink_caps, DisplayInput, NV12_AND_RGBA};
+use crate::videoconvert::display::{display_sink_caps, DisplayInput, NV12_RGBA_AND_P010};
 use crate::yuvmatrix::YuvToRgbWeights;
 
 #[cfg(any(feature = "cuda-gl", feature = "cuda-kms"))]
@@ -65,25 +65,33 @@ out vec4 g2g_frag_color;
 #define gl_FragColor g2g_frag_color
 ";
 
-/// GLSL ES 1.00 fragment shader: sample the NV12 luma (`R8`) and interleaved
-/// chroma (`RG8`) textures and convert YCbCr -> RGB with `colorimetry`'s matrix
-/// and range. The sampler pair is verbatim from DESIGN-C3-cuda.md Appendix A;
-/// the weights are compiled in, so a mid-stream colorimetry change rebuilds the
-/// program.
-pub(crate) fn fragment_shader_nv12(colorimetry: Colorimetry) -> String {
+/// GLSL ES 1.00 fragment shader: sample the luma (`R8`, or `R16` for P010) and
+/// interleaved chroma (`RG8` / `RG16`) textures and convert YCbCr -> RGB with
+/// `colorimetry`'s matrix and range. The sampler pair is verbatim from
+/// DESIGN-C3-cuda.md Appendix A; the weights are compiled in, so a mid-stream
+/// colorimetry change rebuilds the program.
+pub(crate) fn fragment_shader_semi_planar(
+    colorimetry: Colorimetry,
+    format: RawVideoFormat,
+) -> String {
+    // P010 keeps each 10-bit code in the top bits of a 16-bit word, so it samples as code * 64 / 65535, not the code / 255 the weights take
+    let (precision, sample_scale) = match format {
+        RawVideoFormat::P010 => ("highp", 65535.0f32 / 65280.0),
+        _ => ("mediump", 1.0f32),
+    };
     let w = YuvToRgbWeights::new(colorimetry);
     format!(
         "\
-precision mediump float;
+precision {precision} float;
 varying vec2 v_uv;
 uniform sampler2D y_tex;
 uniform sampler2D uv_tex;
 void main() {{
-    float y = texture2D(y_tex, v_uv).r;
-    vec2  c = texture2D(uv_tex, v_uv).rg;
+    float y = texture2D(y_tex, v_uv).r * {sample_scale:?};
+    vec2  c = texture2D(uv_tex, v_uv).rg * {sample_scale:?};
     y = {luma_gain:?} * (y - {luma_floor:?});
-    float cb = c.x - 0.5;
-    float cr = c.y - 0.5;
+    float cb = c.x - {chroma_neutral:?};
+    float cr = c.y - {chroma_neutral:?};
     float r = y + ({red_from_cr:?}) * cr;
     float g = y + ({green_from_cb:?}) * cb + ({green_from_cr:?}) * cr;
     float b = y + ({blue_from_cb:?}) * cb;
@@ -92,6 +100,7 @@ void main() {{
 ",
         luma_gain = w.luma_gain,
         luma_floor = w.luma_floor,
+        chroma_neutral = w.chroma_neutral,
         red_from_cr = w.red_from_cr,
         green_from_cb = w.green_from_cb,
         green_from_cr = w.green_from_cr,
@@ -134,6 +143,7 @@ void main() {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum GlMode {
     Nv12,
+    P010,
     /// Only the system-memory sink negotiates RGBA; the CUDA sinks are NV12-only.
     Rgba,
 }
@@ -141,16 +151,51 @@ pub(crate) enum GlMode {
 /// The textures of one [`GlMode`], with the sampler uniform locations queried
 /// once at link rather than every frame.
 enum Textures {
-    Nv12 {
+    SemiPlanar {
         y_tex: glow::Texture,
         uv_tex: glow::Texture,
         y_loc: Option<glow::UniformLocation>,
         uv_loc: Option<glow::UniformLocation>,
+        planes: SemiPlanarPlanes,
     },
     Rgba {
         tex: glow::Texture,
         loc: Option<glow::UniformLocation>,
     },
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SemiPlanarPlanes {
+    format: RawVideoFormat,
+    luma_internal: u32,
+    chroma_internal: u32,
+    sample_type: u32,
+}
+
+impl SemiPlanarPlanes {
+    fn of(mode: GlMode) -> Option<Self> {
+        let (format, luma_internal, chroma_internal, sample_type) = match mode {
+            GlMode::Nv12 => (
+                RawVideoFormat::Nv12,
+                glow::R8,
+                glow::RG8,
+                glow::UNSIGNED_BYTE,
+            ),
+            GlMode::P010 => (
+                RawVideoFormat::P010,
+                glow::R16,
+                glow::RG16,
+                glow::UNSIGNED_SHORT,
+            ),
+            GlMode::Rgba => return None,
+        };
+        Some(Self {
+            format,
+            luma_internal,
+            chroma_internal,
+            sample_type,
+        })
+    }
 }
 
 /// GL render state, built once the EGL context is current. Holds the program,
@@ -249,9 +294,9 @@ impl GlState {
     ) -> Result<GlState, alloc::boxed::Box<dyn std::error::Error>> {
         // SAFETY: the caller guarantees a current GL ES 3 context.
         unsafe {
-            let fragment = match mode {
-                GlMode::Nv12 => fragment_shader_nv12(colorimetry),
-                GlMode::Rgba => String::from(FRAGMENT_SHADER_RGBA),
+            let fragment = match SemiPlanarPlanes::of(mode) {
+                Some(planes) => fragment_shader_semi_planar(colorimetry, planes.format),
+                None => String::from(FRAGMENT_SHADER_RGBA),
             };
             let program = link_for(&gl, VERTEX_SHADER, &fragment)?;
             let overlay_program = link_for(&gl, OVERLAY_VERTEX_SHADER, OVERLAY_FRAGMENT_SHADER)?;
@@ -295,19 +340,40 @@ impl GlState {
             gl.bind_buffer(glow::ARRAY_BUFFER, Some(vbo));
             gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, bytemuck_cast(&verts), glow::STATIC_DRAW);
 
-            let textures = match mode {
-                GlMode::Nv12 => {
+            let textures = match SemiPlanarPlanes::of(mode) {
+                Some(planes) => {
                     let cw = width.div_ceil(2);
                     let ch = height.div_ceil(2);
-                    Textures::Nv12 {
-                        y_tex: make_texture(&gl, glow::R8 as i32, glow::RED, width, height)?,
-                        uv_tex: make_texture(&gl, glow::RG8 as i32, glow::RG, cw, ch)?,
+                    let SemiPlanarPlanes {
+                        luma_internal,
+                        chroma_internal,
+                        sample_type,
+                        ..
+                    } = planes;
+                    Textures::SemiPlanar {
+                        y_tex: make_texture(
+                            &gl,
+                            luma_internal,
+                            glow::RED,
+                            sample_type,
+                            width,
+                            height,
+                        )?,
+                        uv_tex: make_texture(&gl, chroma_internal, glow::RG, sample_type, cw, ch)?,
                         y_loc: gl.get_uniform_location(program, "y_tex"),
                         uv_loc: gl.get_uniform_location(program, "uv_tex"),
+                        planes,
                     }
                 }
-                GlMode::Rgba => Textures::Rgba {
-                    tex: make_texture(&gl, glow::RGBA8 as i32, glow::RGBA, width, height)?,
+                None => Textures::Rgba {
+                    tex: make_texture(
+                        &gl,
+                        glow::RGBA8,
+                        glow::RGBA,
+                        glow::UNSIGNED_BYTE,
+                        width,
+                        height,
+                    )?,
                     loc: gl.get_uniform_location(program, "rgba_tex"),
                 },
             };
@@ -340,7 +406,7 @@ impl GlState {
     #[cfg(any(feature = "cuda-gl", feature = "cuda-kms"))]
     pub(crate) fn upload_and_draw(&mut self, buf: &OwnedCudaBuffer) -> Result<(), G2gError> {
         let (y_tex, uv_tex) = match &self.textures {
-            Textures::Nv12 { y_tex, uv_tex, .. } => (*y_tex, *uv_tex),
+            Textures::SemiPlanar { y_tex, uv_tex, .. } => (*y_tex, *uv_tex),
             Textures::Rgba { .. } => return Err(G2gError::CapsMismatch),
         };
         // Lazily make the decoder's CUDA context current on this thread and
@@ -394,24 +460,46 @@ impl GlState {
             // mis-stride an R8 / RG8 plane whose row length is not a multiple of 4.
             gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
             match &self.textures {
-                Textures::Nv12 { y_tex, uv_tex, .. } => {
-                    let nv12 = g2g_core::RawVideoFormat::Nv12;
-                    let (uv_at, _, _) =
-                        crate::pixel::tight_plane(nv12, 1, w, h).ok_or(G2gError::CapsMismatch)?;
-                    let frame_bytes = crate::pixel::frame_byte_size(nv12, self.width, self.height);
+                Textures::SemiPlanar {
+                    y_tex,
+                    uv_tex,
+                    planes,
+                    ..
+                } => {
+                    let (uv_at, _, _) = crate::pixel::tight_plane(planes.format, 1, w, h)
+                        .ok_or(G2gError::CapsMismatch)?;
+                    let frame_bytes =
+                        crate::pixel::frame_byte_size(planes.format, self.width, self.height);
                     if bytes.len() < frame_bytes {
                         return Err(G2gError::CapsMismatch);
                     }
                     let (cw, ch) = crate::pixel::chroma_420_size(w, h);
-                    sub_image(gl, *y_tex, glow::RED, w, h, &bytes[..uv_at]);
-                    sub_image(gl, *uv_tex, glow::RG, cw, ch, &bytes[uv_at..frame_bytes]);
+                    let sample = planes.sample_type;
+                    sub_image(gl, *y_tex, glow::RED, sample, w, h, &bytes[..uv_at]);
+                    sub_image(
+                        gl,
+                        *uv_tex,
+                        glow::RG,
+                        sample,
+                        cw,
+                        ch,
+                        &bytes[uv_at..frame_bytes],
+                    );
                 }
                 Textures::Rgba { tex, .. } => {
                     let size = w.saturating_mul(h).saturating_mul(4);
                     if bytes.len() < size {
                         return Err(G2gError::CapsMismatch);
                     }
-                    sub_image(gl, *tex, glow::RGBA, w, h, &bytes[..size]);
+                    sub_image(
+                        gl,
+                        *tex,
+                        glow::RGBA,
+                        glow::UNSIGNED_BYTE,
+                        w,
+                        h,
+                        &bytes[..size],
+                    );
                 }
             }
         }
@@ -427,11 +515,12 @@ impl GlState {
             gl.use_program(Some(self.program));
 
             match &self.textures {
-                Textures::Nv12 {
+                Textures::SemiPlanar {
                     y_tex,
                     uv_tex,
                     y_loc,
                     uv_loc,
+                    ..
                 } => {
                     gl.active_texture(glow::TEXTURE0);
                     gl.bind_texture(glow::TEXTURE_2D, Some(*y_tex));
@@ -511,8 +600,9 @@ impl GlState {
                     }
                     let texture = make_texture(
                         gl,
-                        glow::RGBA8 as i32,
+                        glow::RGBA8,
                         glow::RGBA,
+                        glow::UNSIGNED_BYTE,
                         image.width,
                         image.height,
                     )
@@ -526,7 +616,15 @@ impl GlState {
                 let uploaded = self.image.uploaded.as_mut().expect("allocated above");
                 uploaded.generation = image.generation;
                 gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
-                sub_image(gl, uploaded.texture, glow::RGBA, width, height, &image.rgba);
+                sub_image(
+                    gl,
+                    uploaded.texture,
+                    glow::RGBA,
+                    glow::UNSIGNED_BYTE,
+                    width,
+                    height,
+                    &image.rgba,
+                );
             }
             let uploaded = self.image.uploaded.as_ref().expect("uploaded above");
             gl.use_program(Some(self.image.program));
@@ -615,7 +713,7 @@ impl GlState {
             }
             gl.delete_vertex_array(self.vertex_array);
             match self.textures {
-                Textures::Nv12 { y_tex, uv_tex, .. } => {
+                Textures::SemiPlanar { y_tex, uv_tex, .. } => {
                     gl.delete_texture(y_tex);
                     gl.delete_texture(uv_tex);
                 }
@@ -630,7 +728,7 @@ impl GlState {
 const UPRIGHT_ON_DEFAULT_FRAMEBUFFER: bool = true;
 
 pub fn accepted_caps() -> g2g_core::CapsSet {
-    display_sink_caps(NV12_AND_RGBA)
+    display_sink_caps(NV12_RGBA_AND_P010)
 }
 
 #[derive(Debug)]
@@ -641,7 +739,7 @@ pub struct DisplayFrame {
 }
 
 pub fn convert_for_display(caps: &g2g_core::Caps, bytes: &[u8]) -> Result<DisplayFrame, G2gError> {
-    let input = DisplayInput::from_caps(caps, NV12_AND_RGBA)?;
+    let input = DisplayInput::from_caps(caps, NV12_RGBA_AND_P010)?;
     let converted = input.convert_frame(bytes)?;
     let g2g_core::Caps::RawVideo {
         width,
@@ -683,7 +781,20 @@ pub struct GlTarget {
 pub struct GlVideoRenderer {
     loader: GlLoader,
     input: Option<DisplayInput>,
-    state: Option<(DisplayInput, GlState)>,
+    state: Option<BuiltState>,
+}
+
+struct BuiltState {
+    configured: DisplayInput,
+    drawn: DisplayInput,
+    gl: GlState,
+}
+
+// GLES 3 has no 16-bit normalized textures without this extension
+const NORM16_EXTENSION: &str = "GL_EXT_texture_norm16";
+
+fn has_16_bit_textures(gl: &glow::Context) -> bool {
+    !gl.version().is_embedded || gl.supported_extensions().contains(NORM16_EXTENSION)
 }
 
 impl core::fmt::Debug for GlVideoRenderer {
@@ -704,7 +815,7 @@ impl GlVideoRenderer {
     }
 
     pub fn configure(&mut self, absolute_caps: &g2g_core::Caps) -> Result<(), G2gError> {
-        self.input = Some(DisplayInput::from_caps(absolute_caps, NV12_AND_RGBA)?);
+        self.input = Some(DisplayInput::from_caps(absolute_caps, NV12_RGBA_AND_P010)?);
         Ok(())
     }
 
@@ -718,24 +829,36 @@ impl GlVideoRenderer {
     ) -> Result<ViewportRectangle, G2gError> {
         let input = self.input.ok_or(G2gError::NotConfigured)?;
         let bytes = frame.as_system_slice().ok_or(G2gError::UnsupportedDomain)?;
-        let converted = input.convert_frame(bytes)?;
-        let bytes = converted.as_deref().unwrap_or(bytes);
-        if self.state.as_ref().map(|(built_for, _)| *built_for) != Some(input) {
+        if self.state.as_ref().map(|built| built.configured) != Some(input) {
             // SAFETY: the caller guarantees the context is current.
             unsafe { self.destroy_state() };
-            let mode = match input.presented {
+            // SAFETY: the caller guarantees the context `loader` resolves for is current.
+            let gl = unsafe { glow::Context::from_loader_function(|name| (self.loader)(name)) };
+            let drawn = match input.presented {
+                RawVideoFormat::P010 if !has_16_bit_textures(&gl) => {
+                    input.presented_as(RawVideoFormat::Nv12)
+                }
+                _ => input,
+            };
+            let mode = match drawn.presented {
                 RawVideoFormat::Nv12 => GlMode::Nv12,
+                RawVideoFormat::P010 => GlMode::P010,
                 _ => GlMode::Rgba,
             };
             // SAFETY: the caller guarantees the context `loader` resolves for is current.
-            let state = unsafe {
-                let gl = glow::Context::from_loader_function(|name| (self.loader)(name));
-                GlState::build(gl, input.width, input.height, mode, input.colorimetry)
-            }
-            .map_err(|_| G2gError::Hardware(g2g_core::HardwareError::Other))?;
-            self.state = Some((input, state));
+            let state =
+                unsafe { GlState::build(gl, input.width, input.height, mode, input.colorimetry) }
+                    .map_err(|_| G2gError::Hardware(g2g_core::HardwareError::Other))?;
+            self.state = Some(BuiltState {
+                configured: input,
+                drawn,
+                gl: state,
+            });
         }
-        let (_, state) = self.state.as_mut().expect("built above");
+        let built = self.state.as_mut().expect("built above");
+        let converted = built.drawn.convert_frame(bytes)?;
+        let bytes = converted.as_deref().unwrap_or(bytes);
+        let state = &mut built.gl;
         state.upload_system(bytes)?;
         let viewport = letterbox(
             input.width,
@@ -763,7 +886,7 @@ impl GlVideoRenderer {
         rectangles: &[FilledRectangle],
         target: GlTarget,
     ) -> Result<(), G2gError> {
-        let (_, state) = self.state.as_mut().ok_or(G2gError::NotConfigured)?;
+        let state = &mut self.state.as_mut().ok_or(G2gError::NotConfigured)?.gl;
         let vertices = rectangle_vertices(rectangles, (target.width, target.height));
         // SAFETY: the caller guarantees the framebuffer belongs to the current context.
         unsafe {
@@ -784,7 +907,7 @@ impl GlVideoRenderer {
         image: &OverlayImage,
         target: GlTarget,
     ) -> Result<(), G2gError> {
-        let (_, state) = self.state.as_mut().ok_or(G2gError::NotConfigured)?;
+        let state = &mut self.state.as_mut().ok_or(G2gError::NotConfigured)?.gl;
         // SAFETY: the caller guarantees the framebuffer belongs to the current context.
         unsafe {
             state.gl.bind_framebuffer(
@@ -798,7 +921,7 @@ impl GlVideoRenderer {
     /// # Safety
     /// The GL context `loader` resolves entry points for must be current.
     unsafe fn destroy_state(&mut self) {
-        if let Some((_, state)) = self.state.take() {
+        if let Some(BuiltState { gl: state, .. }) = self.state.take() {
             // SAFETY: the caller guarantees the context is current.
             unsafe { state.destroy() };
         }
@@ -821,6 +944,7 @@ unsafe fn sub_image(
     gl: &glow::Context,
     tex: glow::Texture,
     format: u32,
+    sample_type: u32,
     w: usize,
     h: usize,
     pixels: &[u8],
@@ -836,7 +960,7 @@ unsafe fn sub_image(
             w as i32,
             h as i32,
             format,
-            glow::UNSIGNED_BYTE,
+            sample_type,
             glow::PixelUnpackData::Slice(Some(pixels)),
         );
     }
@@ -850,8 +974,9 @@ unsafe fn sub_image(
 /// A GL context must be current.
 unsafe fn make_texture(
     gl: &glow::Context,
-    internal_format: i32,
+    internal_format: u32,
     format: u32,
+    sample_type: u32,
     w: u32,
     h: u32,
 ) -> Result<glow::Texture, alloc::boxed::Box<dyn std::error::Error>> {
@@ -885,12 +1010,12 @@ unsafe fn make_texture(
         gl.tex_image_2d(
             glow::TEXTURE_2D,
             0,
-            internal_format,
+            internal_format as i32,
             w as i32,
             h as i32,
             0,
             format,
-            glow::UNSIGNED_BYTE,
+            sample_type,
             glow::PixelUnpackData::Slice(None),
         );
         Ok(tex)
@@ -953,7 +1078,7 @@ mod tests {
     fn shaders_declare_the_nv12_sampler_pair() {
         // Lock the Appendix A contract the CUDA upload side relies on: a
         // full-res luma sampler and a half-res interleaved chroma sampler.
-        let shader = fragment_shader_nv12(Colorimetry::UNKNOWN);
+        let shader = fragment_shader_semi_planar(Colorimetry::UNKNOWN, RawVideoFormat::Nv12);
         assert!(shader.contains("uniform sampler2D y_tex"));
         assert!(shader.contains("uniform sampler2D uv_tex"));
         // Vertex shader feeds the fragment shader's texcoord varying.
@@ -966,16 +1091,19 @@ mod tests {
     /// what a full-range stream's zero luma floor would print as.
     #[test]
     fn full_range_weights_stay_float_literals() {
-        let shader = fragment_shader_nv12(Colorimetry {
-            range: g2g_core::ColorRange::Full,
-            ..Colorimetry::BT709
-        });
+        let shader = fragment_shader_semi_planar(
+            Colorimetry {
+                range: g2g_core::ColorRange::Full,
+                ..Colorimetry::BT709
+            },
+            RawVideoFormat::Nv12,
+        );
         assert!(shader.contains("(y - 0.0)"), "{shader}");
         assert!(shader.contains("y = 1.0 *"), "{shader}");
         // At the same range, the matrix still reaches the shader.
         assert_ne!(
-            fragment_shader_nv12(Colorimetry::BT709),
-            fragment_shader_nv12(Colorimetry::BT601)
+            fragment_shader_semi_planar(Colorimetry::BT709, RawVideoFormat::Nv12),
+            fragment_shader_semi_planar(Colorimetry::BT601, RawVideoFormat::Nv12)
         );
     }
 }
@@ -1100,6 +1228,120 @@ mod host_target_tests {
     }
 
     const GREEN: [u8; 4] = [0, 255, 0, 255];
+
+    // ten-bit luma codes one apart, which an 8-bit path draws as runs of equal values
+    const P010_LUMA_CODES: [u16; 8] = [400, 401, 402, 403, 404, 405, 406, 407];
+    const P010_NEUTRAL_CHROMA: u16 = 512;
+    // P010 stores each 10-bit code in the top bits of its 16-bit word
+    const P010_SHIFT: u32 = 6;
+    // BT.601 limited range at 10 bits, what untagged caps convert with
+    const TEN_BIT_BLACK: f64 = 64.0;
+    const TEN_BIT_LUMA_SPAN: f64 = 876.0;
+    const TEN_BIT_MAX: u32 = 1023;
+
+    fn p010_luma_ramp() -> (Caps, MemoryDomain) {
+        let width = P010_LUMA_CODES.len();
+        let rows = FRAME_HEIGHT as usize;
+        let luma = P010_LUMA_CODES.iter().copied().cycle().take(width * rows);
+        let chroma = core::iter::repeat_n(P010_NEUTRAL_CHROMA, width * rows / 2);
+        let bytes: alloc::vec::Vec<u8> = luma
+            .chain(chroma)
+            .flat_map(|code| (code << P010_SHIFT).to_le_bytes())
+            .collect();
+        let caps = Caps::RawVideo {
+            format: RawVideoFormat::P010,
+            width: Dim::Fixed(width as u32),
+            height: Dim::Fixed(FRAME_HEIGHT),
+            framerate: Rate::Any,
+            interlace: Interlace::Any,
+            colorimetry: Colorimetry::UNKNOWN,
+            pixel_aspect: PixelAspect::Any,
+        };
+        let frame = MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice()));
+        (caps, frame)
+    }
+
+    #[test]
+    fn a_ten_bit_frame_keeps_its_depth_in_a_ten_bit_framebuffer() {
+        let _egl = crate::EGL_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Ok((_headless, gl)) = headless_context(HeadlessApi::DesktopCore32) else {
+            return;
+        };
+        let egl = crate::egl_library::load().expect("loaded once already");
+        let mut renderer = GlVideoRenderer::new(move |name| match egl.get_proc_address(name) {
+            Some(entry) => entry as *const core::ffi::c_void,
+            None => core::ptr::null(),
+        });
+        let (caps, frame) = p010_luma_ramp();
+        renderer.configure(&caps).unwrap();
+        let width = P010_LUMA_CODES.len() as u32;
+        // SAFETY: headless_context made its context current on this thread, and the
+        // framebuffer and its texture are created in it at the frame's size.
+        let pixels = unsafe {
+            let color = gl.create_texture().unwrap();
+            gl.bind_texture(glow::TEXTURE_2D, Some(color));
+            gl.tex_image_2d(
+                glow::TEXTURE_2D,
+                0,
+                glow::RGB10_A2 as i32,
+                width as i32,
+                FRAME_HEIGHT as i32,
+                0,
+                glow::RGBA,
+                glow::UNSIGNED_INT_2_10_10_10_REV,
+                glow::PixelUnpackData::Slice(None),
+            );
+            let framebuffer = gl.create_framebuffer().unwrap();
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(framebuffer));
+            gl.framebuffer_texture_2d(
+                glow::FRAMEBUFFER,
+                glow::COLOR_ATTACHMENT0,
+                glow::TEXTURE_2D,
+                Some(color),
+                0,
+            );
+            let target = GlTarget {
+                framebuffer: framebuffer.0.get(),
+                width,
+                height: FRAME_HEIGHT,
+                flip_y: true,
+            };
+            renderer.draw(&frame, target).unwrap();
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(framebuffer));
+            let mut packed = alloc::vec![0u8; (width * FRAME_HEIGHT * 4) as usize];
+            gl.read_pixels(
+                0,
+                0,
+                width as i32,
+                FRAME_HEIGHT as i32,
+                glow::RGBA,
+                glow::UNSIGNED_INT_2_10_10_10_REV,
+                glow::PixelPackData::Slice(Some(&mut packed)),
+            );
+            renderer.destroy();
+            assert_eq!(gl.get_error(), glow::NO_ERROR);
+            packed
+        };
+        let red_codes: alloc::vec::Vec<u32> = pixels
+            .chunks(4)
+            .take(P010_LUMA_CODES.len())
+            .map(|pixel| u32::from_le_bytes(pixel.try_into().unwrap()) & TEN_BIT_MAX)
+            .collect();
+        for (column, (&luma, &red)) in P010_LUMA_CODES.iter().zip(&red_codes).enumerate() {
+            let expected =
+                (f64::from(luma) - TEN_BIT_BLACK) / TEN_BIT_LUMA_SPAN * f64::from(TEN_BIT_MAX);
+            assert!(
+                (f64::from(red) - expected).abs() <= 1.0,
+                "column {column}: red {red}, expected {expected:.1} in {red_codes:?}"
+            );
+        }
+        assert!(
+            red_codes.windows(2).all(|pair| pair[0] < pair[1]),
+            "neighbouring 10-bit codes drew equal: {red_codes:?}"
+        );
+    }
 
     #[test]
     fn rectangles_land_on_the_frame_rows_they_name_in_both_orientations() {

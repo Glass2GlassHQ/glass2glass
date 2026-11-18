@@ -767,10 +767,9 @@ mod tests {
 
     /// The milestone's correctness check: one synthetic NV12 frame through the
     /// real GL program must match the CPU reference of the same colorimetry
-    /// within a per-channel LSB or two. Two, not zero, because the shader centres
-    /// chroma on 0.5 while the integer reference centres it on 128/255, a
-    /// systematic ~1 LSB (worst on blue, whose chroma coefficient is 2.017) on
-    /// top of float-vs-fixed-point rounding.
+    /// within a per-channel LSB or two. Two, not zero, because the reference
+    /// rounds through 8-bit fixed-point coefficients where the shader works in
+    /// floats.
     ///
     /// BT.709 runs alongside the untagged (BT.601 limited) default, and the two
     /// renders must differ: a shader that ignored the caps would pass the
